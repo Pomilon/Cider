@@ -1,0 +1,17 @@
+# Build artifacts
+build/
+out
+out.asm
+out.o
+ciderc
+ciderc_debug
+
+# C++ IDEs
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# OS files
+.DS_Store
+Thumbs.db

@@ -1,0 +1,54 @@
+// Sovereign Heap Allocator
+var heap_start: *void = nilPtr;
+var heap_top: *void = nilPtr;
+var heap_limit: *void = nilPtr;
+
+export func init_heap() -> void {
+    if (heap_start != nilPtr) return;
+
+    // Request 1MB initially
+    var size: int = 1048576; // 1024 * 1024
+    var addr: *void = nilPtr;
+    
+    asm {
+        "mov rax, 9"
+        "xor rdi, rdi"
+        "mov rsi, {size}"
+        "mov rdx, 3" // PROT_READ|PROT_WRITE
+        "mov r10, 34" // MAP_PRIVATE|MAP_ANONYMOUS
+        "mov r8, -1"
+        "xor r9, r9"
+        "syscall"
+        "mov {addr}, rax"
+    }
+    
+    heap_start = addr;
+    heap_top = addr;
+    heap_limit = addr + size;
+}
+
+export func malloc(size: int) -> *void {
+    if (heap_start == nilPtr) {
+        init_heap();
+    }
+    
+    var s: int = size;
+    // Align to 8 bytes
+    if (s % 8 != 0) {
+        s = s + (8 - (s % 8));
+    }
+    
+    var next_top: *void = heap_top + s;
+    if (next_top as int > heap_limit as int) {
+        // Out of memory (bump allocator simple version)
+        return nilPtr;
+    }
+    
+    var ptr: *void = heap_top;
+    heap_top = next_top;
+    return ptr;
+}
+
+export func free(ptr: *void) -> void {
+    // Simple bump allocator doesn't support free
+}
