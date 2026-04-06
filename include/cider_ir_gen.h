@@ -334,15 +334,20 @@ namespace Cider {
                 type = lastExprType_;
                 
                 if (expr.getOperator() == "~") {
-                    IRValue dest = IRValue::Register(nextTemp(), IRType::I32);
+                    IRType irType = (type.pointerLevel > 0) ? IRType::PTR : mapType(type.name);
+                    IRValue dest = IRValue::Register(nextTemp(), irType);
                     currentBlock_->addInstruction({IROp::BIT_NOT, dest, {operand}});
                     lastValue_ = dest;
-                    type = {"int", 0};
                 } else if (expr.getOperator() == "!") {
                     IRValue dest = IRValue::Register(nextTemp(), IRType::BOOL);
                     currentBlock_->addInstruction({IROp::BIT_XOR, dest, {operand, IRValue::Constant(1, IRType::BOOL)}});
                     lastValue_ = dest;
                     type = {"bool", 0};
+                } else if (expr.getOperator() == "-") {
+                    IRType irType = (type.pointerLevel > 0) ? IRType::PTR : mapType(type.name);
+                    IRValue dest = IRValue::Register(nextTemp(), irType);
+                    currentBlock_->addInstruction({IROp::SUB, dest, {IRValue::Constant(0, irType), operand}});
+                    lastValue_ = dest;
                 } else {
                     lastValue_ = operand;
                 }
