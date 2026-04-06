@@ -17,6 +17,27 @@ namespace Cider {
             visitedPrograms_.clear();
             globalValues_.clear();
             program.accept(*this);
+
+            // Populate V-Tables in module
+            // We need to find all StructSymbols that are classes
+            // This is a bit inefficient but works for now: we can't easily iterate all symbols in SymbolTable
+            // So we'll have ClassDeclStmt visitor register them or search the global scope.
+            // Let's assume they are in the global scope.
+            auto globalScope = symbolTable_.getCurrentScope();
+            while (globalScope->getParent()) globalScope = globalScope->getParent();
+            
+            // We need a way to get all symbols. Let's add a getter to Scope or SymbolTable if needed.
+            // For now, let's just use ClassDeclStmt to register them into a list in IRGenerator.
+            for (const auto& className : classNames_) {
+                auto sym = symbolTable_.resolve(className);
+                if (sym && sym->kind == SymbolKind::CLASS) {
+                    auto classSym = std::static_pointer_cast<StructSymbol>(sym);
+                    if (!classSym->vtable.empty()) {
+                        module_.addVTable(className, classSym->vtable);
+                    }
+                }
+            }
+
             return std::move(module_);
         }
 
@@ -65,7 +86,12 @@ namespace Cider {
         }
 
         void visit(FunctionDeclStmt& stmt) override {
-            currentFunction_ = std::make_unique<FunctionIR>(stmt.getName(), IRType::I32); 
+            std::string funcName = stmt.getName();
+            if (!currentClassName_.empty()) {
+                funcName = currentClassName_ + "_" + funcName;
+            }
+
+            currentFunction_ = std::make_unique<FunctionIR>(funcName, IRType::I32); 
             currentBlock_ = std::make_unique<BasicBlock>("entry");
             
             variableValues_.clear();
@@ -77,6 +103,19 @@ namespace Cider {
             deferStack_.push_back({}); // Function scope level
 
             symbolTable_.enterScope();
+
+            // Handle 'this' pointer for methods
+            if (!currentClassName_.empty()) {
+                std::string paramName = "this";
+                IRType paramIRType = IRType::PTR;
+                currentFunction_->addParam("arg_this");
+                IRValue paramReg = IRValue::Register("arg_this", paramIRType);
+                IRValue addr = IRValue::Register(nextTemp(), IRType::PTR);
+                currentBlock_->addInstruction({IROp::ALLOCA, addr, {IRValue::Constant(8, IRType::I32)}});
+                currentBlock_->addInstruction({IROp::STORE, std::nullopt, {addr, paramReg, IRValue::Constant(0, IRType::I32)}});
+                variableValues_[paramName] = addr;
+            }
+
             for (auto& param : stmt.getParams()) {
                 auto sym = std::make_shared<Symbol>();
                 sym->kind = SymbolKind::VARIABLE;
@@ -89,7 +128,7 @@ namespace Cider {
                 currentFunction_->addParam(paramRegName);
                 IRValue paramReg = IRValue::Register(paramRegName, paramIRType);
                 IRValue addr = IRValue::Register(nextTemp(), IRType::PTR);
-                currentBlock_->addInstruction({IROp::ALLOCA, addr, {IRValue::Label(sym->type.name)}});
+                currentBlock_->addInstruction({IROp::ALLOCA, addr, {IRValue::Constant(getTypeSize(sym->type), IRType::I32)}});
                 currentBlock_->addInstruction({IROp::STORE, std::nullopt, {addr, paramReg, IRValue::Constant(0, IRType::I32)}});
                 variableValues_[param.first] = addr;
             }
@@ -127,8 +166,35 @@ namespace Cider {
         void visit(CallExpr& expr) override {
             auto calleeExpr = expr.getCallee();
             std::string funcName = "";
+            bool isVirtual = false;
+            int vtableIndex = -1;
+            IRValue objPtr = IRValue::Constant(0, IRType::PTR);
+
             if (auto id = dynamic_cast<IdentifierExpr*>(calleeExpr)) {
                 funcName = id->getName();
+            } else if (auto mem = dynamic_cast<MemberAccessExpr*>(calleeExpr)) {
+                // Method call: obj.method() or obj->method()
+                bool wasAddress = isAddress_;
+                isAddress_ = false;
+                mem->getObject()->accept(*this);
+                objPtr = lastValue_;
+                isAddress_ = wasAddress;
+
+                TypeInfo objType = lastExprType_;
+                if (objType.pointerLevel > 0) objType.pointerLevel--;
+                
+                auto sym = symbolTable_.resolve(objType.name);
+                if (sym && (sym->kind == SymbolKind::CLASS || sym->kind == SymbolKind::STRUCT)) {
+                    auto classSym = std::static_pointer_cast<StructSymbol>(sym);
+                    for (const auto& m : classSym->methods) {
+                        if (m.name == mem->getMember()) {
+                            funcName = m.mangledName;
+                            isVirtual = m.isVirtual || m.isOverride;
+                            vtableIndex = m.vtableIndex;
+                            break;
+                        }
+                    }
+                }
             }
 
             if (!funcName.empty()) {
@@ -149,11 +215,21 @@ namespace Cider {
                 IRValue dest = IRValue::Register(nextTemp(), retIRType);
                 
                 IRInstruction callInstr;
-                callInstr.op = IROp::CALL;
-                callInstr.dest = dest;
-                callInstr.args.push_back(IRValue::Label(funcName));
-                for (auto& a : args) callInstr.args.push_back(a);
+                if (isVirtual && vtableIndex != -1) {
+                    callInstr.op = IROp::VIRTUAL_CALL;
+                    callInstr.args.push_back(objPtr);
+                    callInstr.args.push_back(IRValue::Constant(vtableIndex, IRType::I32));
+                    for (auto& a : args) callInstr.args.push_back(a);
+                } else {
+                    callInstr.op = IROp::CALL;
+                    callInstr.args.push_back(IRValue::Label(funcName));
+                    if (objPtr.kind != IRValue::CONSTANT || objPtr.constValue != 0) {
+                        callInstr.args.push_back(objPtr);
+                    }
+                    for (auto& a : args) callInstr.args.push_back(a);
+                }
                 
+                callInstr.dest = dest;
                 currentBlock_->addInstruction(callInstr);
                 lastValue_ = dest;
             }
@@ -198,7 +274,7 @@ namespace Cider {
 
         void visit(StructLiteralExpr& expr) override {
             IRValue dest = IRValue::Register(nextTemp(), IRType::PTR);
-            currentBlock_->addInstruction({IROp::ALLOCA, dest, {IRValue::Label(expr.getStructName())}});
+            currentBlock_->addInstruction({IROp::ALLOCA, dest, {IRValue::Constant(getTypeSize({expr.getStructName(), 0}), IRType::I32)}});
             
             auto sym = symbolTable_.resolve(expr.getStructName());
             if (sym && (sym->kind == SymbolKind::STRUCT || sym->kind == SymbolKind::CLASS)) {
@@ -294,7 +370,7 @@ namespace Cider {
             }
 
             IRValue addr = IRValue::Register(nextTemp(), IRType::PTR);
-            currentBlock_->addInstruction({IROp::ALLOCA, addr, {IRValue::Label(sym->type.name)}});
+            currentBlock_->addInstruction({IROp::ALLOCA, addr, {IRValue::Constant(getTypeSize(sym->type), IRType::I32)}});
             variableValues_[stmt.getName()] = addr;
 
             if (stmt.getInitializer()) {
@@ -310,16 +386,22 @@ namespace Cider {
 
         int getTypeSize(TypeInfo type) {
             if (type.pointerLevel > 0) return 8;
-            if (type.name == "u8" || type.name == "i8" || type.name == "char" || type.name == "byte") return 1;
+            if (type.isArray) {
+                TypeInfo elemType = type;
+                elemType.isArray = false;
+                elemType.arraySize = 0;
+                return type.arraySize * getTypeSize(elemType);
+            }
+            if (type.name == "u8" || type.name == "i8" || type.name == "char" || type.name == "byte" || type.name == "void") return 1;
             if (type.name == "u16" || type.name == "i16") return 2;
-            if (type.name == "u32" || type.name == "i32" || type.name == "int" || type.name == "float") return 4;
-            if (type.name == "u64" || type.name == "i64" || type.name == "double") return 8;
-            
+            if (type.name == "u32" || type.name == "i32" || type.name == "int" || type.name == "float" || type.name == "bool") return 4;
+            if (type.name == "u64" || type.name == "i64") return 8;
+
             auto sym = symbolTable_.resolve(type.name);
             if (sym && (sym->kind == SymbolKind::STRUCT || sym->kind == SymbolKind::CLASS)) {
                 return std::static_pointer_cast<StructSymbol>(sym)->totalSize;
             }
-            return 8;
+            return 8; // Default
         }
 
         void visit(BinaryExpr& expr) override {
@@ -671,6 +753,17 @@ namespace Cider {
             call.args.push_back(IRValue::Label("malloc"));
             call.args.push_back(IRValue::Constant(size, IRType::I32));
             currentBlock_->addInstruction(call);
+
+            // Initialize vptr if class is virtual
+            auto sym = symbolTable_.resolve(type.name);
+            if (sym && sym->kind == SymbolKind::CLASS) {
+                auto classSym = std::static_pointer_cast<StructSymbol>(sym);
+                if (!classSym->vtable.empty()) {
+                    IRValue vptrVal = IRValue::Label("vtable_" + type.name);
+                    currentBlock_->addInstruction({IROp::STORE, std::nullopt, {dest, vptrVal, IRValue::Constant(0, IRType::I32)}});
+                }
+            }
+
             lastValue_ = dest;
             TypeInfo resType = type; resType.pointerLevel++; lastExprType_ = resType;
         }
@@ -717,7 +810,25 @@ namespace Cider {
         }
         void visit(GroupingExpr& expr) override { expr.getExpression()->accept(*this); }
         void visit(SizeofExpr& expr) override { lastValue_ = IRValue::Constant(8, IRType::I32); }
-        void visit(CastExpr& expr) override { expr.getExpression()->accept(*this); }
+        void visit(CastExpr& expr) override {
+            expr.getExpression()->accept(*this);
+            TypeInfo targetType = TypeInfo::fromAST(expr.getTargetType());
+            IRType irType = (targetType.pointerLevel > 0) ? IRType::PTR : mapType(targetType.name);
+            
+            IRValue dest = IRValue::Register(nextTemp(), irType);
+            
+            // Explicitly truncate if casting to a smaller type
+            if (irType == IRType::I8 || irType == IRType::U8) {
+                currentBlock_->addInstruction({IROp::BIT_AND, dest, {lastValue_, IRValue::Constant(0xFF, IRType::I32)}});
+            } else if (irType == IRType::I16 || irType == IRType::U16) {
+                currentBlock_->addInstruction({IROp::BIT_AND, dest, {lastValue_, IRValue::Constant(0xFFFF, IRType::I32)}});
+            } else {
+                currentBlock_->addInstruction({IROp::MOV, dest, {lastValue_}});
+            }
+            
+            lastValue_ = dest;
+            lastExprType_ = targetType;
+        }
         void visit(MatchStmt& stmt) override {
             stmt.getExpression()->accept(*this);
             IRValue matchVal = lastValue_;
@@ -750,9 +861,13 @@ namespace Cider {
         }
         void visit(ExpressionStmt& stmt) override { stmt.getExpression()->accept(*this); }
         void visit(ClassDeclStmt& stmt) override {
+            classNames_.push_back(stmt.getName());
+            std::string oldClass = currentClassName_;
+            currentClassName_ = stmt.getName();
             for (auto& member : stmt.getMembers()) {
                 if (dynamic_cast<FunctionDeclStmt*>(member.get())) member->accept(*this);
             }
+            currentClassName_ = oldClass;
         }
         void visit(ExportStmt& stmt) override { stmt.getStmt()->accept(*this); }
         void visit(ThisExpr&) override {}
@@ -777,11 +892,13 @@ namespace Cider {
         SymbolTable& symbolTable_;
         std::unique_ptr<FunctionIR> currentFunction_;
         std::unique_ptr<BasicBlock> currentBlock_;
+        std::string currentClassName_;
         IRValue lastValue_ = IRValue::Constant(0, IRType::I32);
         TypeInfo lastExprType_;
         bool isAddress_ = false;
         std::map<std::string, IRValue> variableValues_;
         std::map<std::string, IRValue> globalValues_;
+        std::vector<std::string> classNames_;
         std::set<Program*> visitedPrograms_;
         std::vector<std::string> breakLabels_;
         std::vector<std::string> continueLabels_;

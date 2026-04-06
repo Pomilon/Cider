@@ -45,6 +45,24 @@ namespace Cider {
             if (isInteger(t1.name) && isInteger(t2.name) && t1.pointerLevel == 0 && t2.pointerLevel == 0) return true;
             if (t2.name == "void" && t2.pointerLevel > 0 && t1.pointerLevel > 0) return true;
 
+            // Pointer covariance for classes
+            if (t1.pointerLevel > 0 && t2.pointerLevel > 0 && t1.pointerLevel == t2.pointerLevel) {
+                auto sym2 = symbolTable_.resolve(t2.name);
+                if (sym2 && sym2->kind == SymbolKind::CLASS) {
+                    auto classSym2 = std::static_pointer_cast<StructSymbol>(sym2);
+                    std::string parent = classSym2->parentName;
+                    while (!parent.empty()) {
+                        if (parent == t1.name) return true;
+                        auto parentSym = symbolTable_.resolve(parent);
+                        if (parentSym && parentSym->kind == SymbolKind::CLASS) {
+                            parent = std::static_pointer_cast<StructSymbol>(parentSym)->parentName;
+                        } else {
+                            break;
+                        }
+                    }
+                }
+            }
+
             return false;
         }
 
@@ -314,31 +332,56 @@ namespace Cider {
         void visit(ArrayTypeAST&) override {}
 
         void visit(CallExpr& expr) override {
-            expr.getCallee()->accept(*this);
-            TypeInfo calleeType = lastExprType_;
-            auto sym = symbolTable_.resolve(calleeType.name);
-            if (!sym || sym->kind != SymbolKind::FUNCTION) {
+            auto callee = expr.getCallee();
+            std::shared_ptr<FunctionSymbol> funcSym = nullptr;
+
+            if (auto id = dynamic_cast<IdentifierExpr*>(callee)) {
+                auto sym = symbolTable_.resolve(id->getName());
+                if (sym && sym->kind == SymbolKind::FUNCTION) {
+                    funcSym = std::static_pointer_cast<FunctionSymbol>(sym);
+                }
+            } else if (auto mem = dynamic_cast<MemberAccessExpr*>(callee)) {
+                mem->getObject()->accept(*this);
+                TypeInfo objType = lastExprType_;
+                if (objType.pointerLevel > 0) objType.pointerLevel--;
+
+                auto sym = symbolTable_.resolve(objType.name);
+                if (sym && (sym->kind == SymbolKind::CLASS || sym->kind == SymbolKind::STRUCT)) {
+                    auto classSym = std::static_pointer_cast<StructSymbol>(sym);
+                    for (const auto& m : classSym->methods) {
+                        if (m.name == mem->getMember()) {
+                            // Found the method
+                            funcSym = std::make_shared<FunctionSymbol>();
+                            funcSym->name = m.name;
+                            funcSym->parameterTypes = m.parameterTypes;
+                            funcSym->returnType = m.returnType;
+                            break;
+                        }
+                    }
+                }
+            }
+
+            if (!funcSym) {
                 error("Expression is not a function", expr.getLine());
                 lastExprType_ = {"error", 0};
                 return;
             }
-            auto funcSym = std::static_pointer_cast<FunctionSymbol>(sym);
+
             if (expr.getArgs().size() != funcSym->parameterTypes.size()) {
-                error("Function '" + sym->name + "' expects " + std::to_string(funcSym->parameterTypes.size()) + 
+                error("Function '" + funcSym->name + "' expects " + std::to_string(funcSym->parameterTypes.size()) +
                       " arguments, got " + std::to_string(expr.getArgs().size()), expr.getLine());
             } else {
                 for (size_t i = 0; i < expr.getArgs().size(); ++i) {
                     expr.getArgs()[i]->accept(*this);
                     if (!areTypesCompatible(funcSym->parameterTypes[i], lastExprType_)) {
-                        error("Argument " + std::to_string(i+1) + " to '" + sym->name + 
-                              "' type mismatch. Expected " + funcSym->parameterTypes[i].toString() + 
+                        error("Argument " + std::to_string(i+1) + " to '" + funcSym->name +
+                              "' type mismatch. Expected " + funcSym->parameterTypes[i].toString() +
                               ", got " + lastExprType_.toString(), expr.getLine());
                     }
                 }
             }
             lastExprType_ = funcSym->returnType;
         }
-
         void visit(FunctionDeclStmt& stmt) override {
             symbolTable_.enterScope();
             for (auto& param : stmt.getParams()) {

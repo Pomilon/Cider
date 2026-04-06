@@ -66,7 +66,7 @@ namespace Cider {
             }
             std::sort(unhandled.begin(), unhandled.end());
             
-            std::vector<std::string> freeIntRegs = {"rbx", "r12", "r13", "r14", "r15"};
+            std::vector<std::string> freeIntRegs = {"rbx", "r12", "r13", "r14", "r15", "r9", "r8", "rsi", "rdi", "rdx", "rcx"};
             std::vector<std::string> freeFloatRegs = {"xmm8", "xmm9", "xmm10", "xmm11", "xmm12", "xmm13", "xmm14", "xmm15"};
             
             std::vector<LiveInterval> active;

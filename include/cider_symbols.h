@@ -74,12 +74,16 @@ namespace Cider {
         };
         struct Method {
             std::string name;
+            std::string mangledName;
             std::vector<TypeInfo> parameterTypes;
             TypeInfo returnType;
-            int vtableIndex;
+            int vtableIndex = -1;
+            bool isVirtual = false;
+            bool isOverride = false;
         };
         std::vector<Field> fields;
         std::vector<Method> methods;
+        std::vector<std::string> vtable; // List of mangled function names
         std::string parentName; // For inheritance
         int totalSize = 0;
     };

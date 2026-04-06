@@ -49,7 +49,7 @@ namespace Cider {
         MEMCPY,
         PUSH, POP,
         BR, COND_BR,
-        CALL, RET,
+        CALL, VIRTUAL_CALL, RET,
         PHI, ASM
     };
 
@@ -118,15 +118,22 @@ namespace Cider {
             globalVars_.push_back({name, type, init});
         }
         const std::vector<GlobalVar>& getGlobalVars() const { return globalVars_; }
-        
+
+        void addVTable(const std::string& className, std::vector<std::string> methods) {
+            vtables_[className] = methods;
+        }
+        const std::map<std::string, std::vector<std::string>>& getVTables() const {
+            return vtables_;
+        }
+
         void print() const;
 
-    private:
+        private:
         std::vector<std::unique_ptr<FunctionIR>> functions_;
         std::vector<std::string> globalAsm_;
         std::vector<GlobalVar> globalVars_;
-    };
-
+        std::map<std::string, std::vector<std::string>> vtables_;
+        };
 } // namespace Cider
 
 #endif

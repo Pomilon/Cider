@@ -766,6 +766,34 @@ namespace Cider
             error("Expected 'func' after 'async'.");
             return nullptr;
         }
+        case TokenType::VIRTUAL:
+        {
+            nextToken();
+            bool isAsync = false;
+            if (currentToken_.type == TokenType::ASYNC) {
+                isAsync = true;
+                nextToken();
+            }
+            if (currentToken_.type == TokenType::FUNCTION || currentToken_.type == TokenType::FUNC) {
+                return parseFunctionDeclaration(isAsync, true, false);
+            }
+            error("Expected 'func' after 'virtual'.");
+            return nullptr;
+        }
+        case TokenType::OVERRIDE:
+        {
+            nextToken();
+            bool isAsync = false;
+            if (currentToken_.type == TokenType::ASYNC) {
+                isAsync = true;
+                nextToken();
+            }
+            if (currentToken_.type == TokenType::FUNCTION || currentToken_.type == TokenType::FUNC) {
+                return parseFunctionDeclaration(isAsync, false, true);
+            }
+            error("Expected 'func' after 'override'.");
+            return nullptr;
+        }
         case TokenType::FUNCTION:
         case TokenType::FUNC:
             return parseFunctionDeclaration();
@@ -1333,7 +1361,7 @@ namespace Cider
         }
     }
 
-    std::unique_ptr<Statement> Parser::parseFunctionDeclaration(bool isAsync)
+    std::unique_ptr<Statement> Parser::parseFunctionDeclaration(bool isAsync, bool isVirtual, bool isOverride)
     {
         int line = currentToken_.line;
         int col = currentToken_.column;
@@ -1416,7 +1444,7 @@ namespace Cider
         }
         nextToken();
 
-        return std::make_unique<FunctionDeclStmt>(funcName, std::move(params), std::move(body), std::move(returnType), line, col, isAsync);
+        return std::make_unique<FunctionDeclStmt>(funcName, std::move(params), std::move(body), std::move(returnType), line, col, isAsync, isVirtual, isOverride);
     }
 
     std::unique_ptr<Statement> Parser::parseStructDeclaration() {
@@ -1671,7 +1699,44 @@ namespace Cider
             {
                 members.push_back(parseFunctionDeclaration());
             }
-            else if (currentToken_.type == TokenType::VAR || currentToken_.type == TokenType::CONST)
+            else if (currentToken_.type == TokenType::ASYNC)
+            {
+                nextToken();
+                if (currentToken_.type == TokenType::FUNCTION || currentToken_.type == TokenType::FUNC) {
+                    members.push_back(parseFunctionDeclaration(true));
+                } else {
+                    error("Expected 'func' after 'async'.");
+                }
+            }
+            else if (currentToken_.type == TokenType::VIRTUAL)
+            {
+                nextToken();
+                bool isAsync = false;
+                if (currentToken_.type == TokenType::ASYNC) {
+                    isAsync = true;
+                    nextToken();
+                }
+                if (currentToken_.type == TokenType::FUNCTION || currentToken_.type == TokenType::FUNC) {
+                    members.push_back(parseFunctionDeclaration(isAsync, true, false));
+                } else {
+                    error("Expected 'func' after 'virtual'.");
+                }
+            }
+            else if (currentToken_.type == TokenType::OVERRIDE)
+            {
+                nextToken();
+                bool isAsync = false;
+                if (currentToken_.type == TokenType::ASYNC) {
+                    isAsync = true;
+                    nextToken();
+                }
+                if (currentToken_.type == TokenType::FUNCTION || currentToken_.type == TokenType::FUNC) {
+                    members.push_back(parseFunctionDeclaration(isAsync, false, true));
+                } else {
+                    error("Expected 'func' after 'override'.");
+                }
+            }
+            else if (currentToken_.type == TokenType::VAR)
             {
                 members.push_back(parseVarDeclarationStatement());
             }

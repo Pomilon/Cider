@@ -659,13 +659,15 @@ namespace Cider
     public:
         using Parameter = std::pair<std::string, std::unique_ptr<TypeAST>>;
         FunctionDeclStmt(const std::string &name, std::vector<Parameter> params,
-                         std::vector<std::unique_ptr<Statement>> body, std::unique_ptr<TypeAST> returnType, int line, int col, bool isAsync = false)
-            : Statement(FUNCTION_DECL_STMT, line, col), name_(name), params_(std::move(params)), body_(std::move(body)), returnType_(std::move(returnType)), isAsync_(isAsync) {}
+                         std::vector<std::unique_ptr<Statement>> body, std::unique_ptr<TypeAST> returnType, int line, int col, bool isAsync = false, bool isVirtual = false, bool isOverride = false)
+            : Statement(FUNCTION_DECL_STMT, line, col), name_(name), params_(std::move(params)), body_(std::move(body)), returnType_(std::move(returnType)), isAsync_(isAsync), isVirtual_(isVirtual), isOverride_(isOverride) {}
         const std::string &getName() const { return name_; }
         const std::vector<Parameter> &getParams() const { return params_; }
         const std::vector<std::unique_ptr<Statement>> &getBody() const { return body_; }
         TypeAST *getReturnType() const { return returnType_.get(); }
         bool isAsync() const { return isAsync_; }
+        bool isVirtual() const { return isVirtual_; }
+        bool isOverride() const { return isOverride_; }
         void accept(ASTVisitor &visitor) override;
     private:
         std::string name_;
@@ -673,6 +675,8 @@ namespace Cider
         std::vector<std::unique_ptr<Statement>> body_;
         std::unique_ptr<TypeAST> returnType_;
         bool isAsync_;
+        bool isVirtual_;
+        bool isOverride_;
     };
 
     class StructDeclStmt : public Statement

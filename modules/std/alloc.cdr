@@ -25,6 +25,10 @@ export func init_heap() -> void {
     heap_start = addr;
     heap_top = addr;
     heap_limit = addr + size;
+
+    // Debug: verify heap init
+    // from std.io import print, printInt; // Already in scope if we are in std.alloc? No.
+    // We'll just rely on the test script for now.
 }
 
 export func malloc(size: int) -> *void {
@@ -39,7 +43,7 @@ export func malloc(size: int) -> *void {
     }
     
     var next_top: *void = heap_top + s;
-    if (next_top as int > heap_limit as int) {
+    if (next_top > heap_limit) {
         // Out of memory (bump allocator simple version)
         return nilPtr;
     }

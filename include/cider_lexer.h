@@ -49,6 +49,8 @@ namespace Cider
         DEFER,
         ASM,
         MATCH,
+        VIRTUAL,
+        OVERRIDE,
 
         // Types
         INT,

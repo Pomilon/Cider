@@ -281,14 +281,37 @@ namespace Cider {
             sym->parentName = stmt.getParentName();
 
             int currentOffset = 0;
-            // Inherit from parent if it exists (Foundation: Layout Engine)
+            bool hasVTable = false;
+
+            // Inherit from parent if it exists
             if (!sym->parentName.empty()) {
                 auto parent = symbolTable_.resolve(sym->parentName);
                 if (parent && parent->kind == SymbolKind::CLASS) {
                     auto parentStruct = std::static_pointer_cast<StructSymbol>(parent);
                     sym->fields = parentStruct->fields;
                     sym->methods = parentStruct->methods;
+                    sym->vtable = parentStruct->vtable;
                     currentOffset = parentStruct->totalSize;
+                    if (!sym->vtable.empty()) hasVTable = true;
+                }
+            }
+
+            // First pass: identify if this class introduces new virtual methods
+            for (auto& member : stmt.getMembers()) {
+                if (auto method = dynamic_cast<FunctionDeclStmt*>(member.get())) {
+                    if (method->isVirtual() || method->isOverride()) {
+                        hasVTable = true;
+                    }
+                }
+            }
+
+            // If this is the root of a virtual hierarchy, reserve space for vptr
+            if (hasVTable && sym->vtable.empty()) {
+                if (currentOffset == 0) {
+                    currentOffset = 8; // Size of vptr
+                } else {
+                    for (auto& f : sym->fields) f.offset += 8;
+                    currentOffset += 8;
                 }
             }
 
@@ -303,14 +326,49 @@ namespace Cider {
                 } else if (auto method = dynamic_cast<FunctionDeclStmt*>(member.get())) {
                     StructSymbol::Method m;
                     m.name = method->getName();
-                    for (auto& p : method->getParams()) {
-                        m.parameterTypes.push_back(TypeInfo::fromAST(p.second.get()));
-                    }
+                    m.mangledName = sym->name + "_" + m.name;
                     m.returnType = TypeInfo::fromAST(method->getReturnType());
-                    m.vtableIndex = sym->methods.size();
-                    sym->methods.push_back(m);
+                    m.isVirtual = method->isVirtual();
+                    m.isOverride = method->isOverride();
+                    
+                    for (auto& param : method->getParams()) {
+                        m.parameterTypes.push_back(TypeInfo::fromAST(param.second.get()));
+                    }
+
+                    if (m.isOverride) {
+                        bool found = false;
+                        for (size_t i = 0; i < sym->vtable.size(); ++i) {
+                            if (sym->methods[i].name == m.name) {
+                                sym->vtable[i] = m.mangledName;
+                                m.vtableIndex = (int)i;
+                                found = true;
+                                break;
+                            }
+                        }
+                        for (auto& em : sym->methods) {
+                            if (em.name == m.name) {
+                                em = m;
+                                break;
+                            }
+                        }
+                    } else if (m.isVirtual) {
+                        m.vtableIndex = (int)sym->vtable.size();
+                        sym->vtable.push_back(m.mangledName);
+                        sym->methods.push_back(m);
+                    } else {
+                        sym->methods.push_back(m);
+                    }
+
+                    auto funcSym = std::make_shared<FunctionSymbol>();
+                    funcSym->kind = SymbolKind::FUNCTION;
+                    funcSym->name = m.mangledName;
+                    funcSym->returnType = m.returnType;
+                    funcSym->parameterTypes = m.parameterTypes;
+                    funcSym->parameterTypes.insert(funcSym->parameterTypes.begin(), {sym->name, 1});
+                    symbolTable_.define(funcSym);
                 }
             }
+            if (currentOffset == 0) currentOffset = 8;
             sym->totalSize = currentOffset;
             symbolTable_.define(sym);
         }

@@ -82,7 +82,7 @@ namespace Cider
         std::unique_ptr<Statement> parseAsmStatement();
         std::unique_ptr<Statement> parseMatchStatement();
         std::unique_ptr<Statement> parseExpressionStatement();
-        std::unique_ptr<Statement> parseFunctionDeclaration(bool isAsync = false);
+        std::unique_ptr<Statement> parseFunctionDeclaration(bool isAsync = false, bool isVirtual = false, bool isOverride = false);
         std::unique_ptr<Statement> parseStructDeclaration();
         std::unique_ptr<Statement> parseEnumDeclaration();
         std::unique_ptr<Statement> parseTypeAliasStatement();
