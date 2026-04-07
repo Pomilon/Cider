@@ -91,9 +91,19 @@ namespace Cider {
                 funcName = currentClassName_ + "_" + funcName;
             }
 
-            currentFunction_ = std::make_unique<FunctionIR>(funcName, IRType::I32); 
+            // Save state for nested generation
+            auto prevFunction = std::move(currentFunction_);
+            auto prevBlock = std::move(currentBlock_);
+            auto prevVariableValues = variableValues_;
+            int prevTempCount = tempCount_;
+            int prevLabelCount = labelCount_;
+            auto prevBreakLabels = breakLabels_;
+            auto prevContinueLabels = continueLabels_;
+            auto prevDeferStack = deferStack_;
+
+            currentFunction_ = std::make_unique<FunctionIR>(funcName, mapType(TypeInfo::fromAST(stmt.getReturnType()).name));
             currentBlock_ = std::make_unique<BasicBlock>("entry");
-            
+
             variableValues_.clear();
             tempCount_ = 0;
             labelCount_ = 0;
@@ -108,14 +118,22 @@ namespace Cider {
             if (!currentClassName_.empty()) {
                 std::string paramName = "this";
                 IRType paramIRType = IRType::PTR;
-                currentFunction_->addParam("arg_this");
-                IRValue paramReg = IRValue::Register("arg_this", paramIRType);
+                currentFunction_->addParam(paramName);
+                
+                auto thisSym = std::make_shared<Symbol>();
+                thisSym->kind = SymbolKind::VARIABLE;
+                thisSym->name = "this";
+                thisSym->type.name = currentClassName_;
+                thisSym->type.pointerLevel = 1;
+                thisSym->type.isUserDefined = true;
+                symbolTable_.define(thisSym);
+
+                IRValue paramReg = IRValue::Register(paramName, paramIRType);
                 IRValue addr = IRValue::Register(nextTemp(), IRType::PTR);
                 currentBlock_->addInstruction({IROp::ALLOCA, addr, {IRValue::Constant(8, IRType::I32)}});
                 currentBlock_->addInstruction({IROp::STORE, std::nullopt, {addr, paramReg, IRValue::Constant(0, IRType::I32)}});
                 variableValues_[paramName] = addr;
             }
-
             for (auto& param : stmt.getParams()) {
                 auto sym = std::make_shared<Symbol>();
                 sym->kind = SymbolKind::VARIABLE;
@@ -131,6 +149,7 @@ namespace Cider {
                 currentBlock_->addInstruction({IROp::ALLOCA, addr, {IRValue::Constant(getTypeSize(sym->type), IRType::I32)}});
                 currentBlock_->addInstruction({IROp::STORE, std::nullopt, {addr, paramReg, IRValue::Constant(0, IRType::I32)}});
                 variableValues_[param.first] = addr;
+                variableValues_[paramRegName] = addr; // Support both for lookup convenience
             }
             for (auto& s : stmt.getBody()) {
                 s->accept(*this);
@@ -148,6 +167,16 @@ namespace Cider {
             module_.addFunction(std::move(currentFunction_));
             symbolTable_.exitScope();
             deferStack_.pop_back();
+
+            // Restore state
+            currentFunction_ = std::move(prevFunction);
+            currentBlock_ = std::move(prevBlock);
+            variableValues_ = prevVariableValues;
+            tempCount_ = prevTempCount;
+            labelCount_ = prevLabelCount;
+            breakLabels_ = prevBreakLabels;
+            continueLabels_ = prevContinueLabels;
+            deferStack_ = prevDeferStack;
         }
 
         void visit(ReturnStmt& stmt) override {
@@ -258,6 +287,7 @@ namespace Cider {
                         } else {
                             IRType fieldIRType = (field.type.pointerLevel > 0) ? IRType::PTR : mapType(field.type.name);
                             IRValue dest = IRValue::Register(nextTemp(), fieldIRType);
+                            // Correct LOAD: LOAD dest, [addr + 0]
                             currentBlock_->addInstruction({IROp::LOAD, dest, {addr, IRValue::Constant(0, IRType::I32)}});
                             lastValue_ = dest;
                         }
@@ -451,8 +481,8 @@ namespace Cider {
             else if (sOp == ">") op = IROp::CMP_GT;
             else if (sOp == "<=") op = IROp::CMP_LE;
             else if (sOp == ">=") op = IROp::CMP_GE;
-            else if (sOp == "&") op = IROp::BIT_AND;
-            else if (sOp == "|") op = IROp::BIT_OR;
+            else if (sOp == "&" || sOp == "&&") op = IROp::BIT_AND;
+            else if (sOp == "|" || sOp == "||") op = IROp::BIT_OR;
             else if (sOp == "^") op = IROp::BIT_XOR;
             else if (sOp == "<<") op = IROp::LSHIFT;
             else if (sOp == ">>") op = IROp::RSHIFT;
@@ -481,11 +511,14 @@ namespace Cider {
             auto sym = symbolTable_.resolve(expr.getName());
             if (sym) {
                 lastExprType_ = sym->type;
-                if (!lastExprType_.isUserDefined && lastExprType_.pointerLevel == 0) {
+                // Only treat as user-defined (struct/class) if it's NOT a pointer
+                if (lastExprType_.pointerLevel == 0) {
                     auto typeSym = symbolTable_.resolve(lastExprType_.name);
                     if (typeSym && (typeSym->kind == SymbolKind::STRUCT || typeSym->kind == SymbolKind::CLASS)) {
                         lastExprType_.isUserDefined = true;
                     }
+                } else {
+                    lastExprType_.isUserDefined = false;
                 }
             }
 
@@ -660,24 +693,30 @@ namespace Cider {
 
                 std::string code = stmt.getCode();
                 std::set<std::string> mentionedVars;
-                for (const auto& [name, _] : variableValues_) {
-                    if (code.find("{" + name + "}") != std::string::npos || 
-                        code.find("{*" + name + "}") != std::string::npos) {
-                        mentionedVars.insert(name);
-                    }
-                }
-                for (const auto& [name, _] : globalValues_) {
-                    if (code.find("{" + name + "}") != std::string::npos || 
-                        code.find("{*" + name + "}") != std::string::npos) {
-                        mentionedVars.insert(name);
+                size_t pos = 0;
+                while ((pos = code.find("{", pos)) != std::string::npos) {
+                    size_t end = code.find("}", pos);
+                    if (end != std::string::npos) {
+                        std::string var = code.substr(pos + 1, end - pos - 1);
+                        if (!var.empty() && var[0] == '*') var = var.substr(1);
+                        if (!var.empty()) mentionedVars.insert(var);
+                        pos = end + 1;
+                    } else {
+                        pos++;
                     }
                 }
 
+                bool prevIsAddress = isAddress_;
+                isAddress_ = false;
                 for (const auto& name : mentionedVars) {
-                    IdentifierExpr ident(name, 0, 0);
-                    ident.accept(*this);
-                    instr.asmMap[name] = lastValue_;
+                    auto sym = symbolTable_.resolve(name);
+                    if (sym) {
+                        IdentifierExpr ident(name, 0, 0);
+                        ident.accept(*this);
+                        instr.asmMap[name] = lastValue_;
+                    }
                 }
+                isAddress_ = prevIsAddress;
 
                 currentBlock_->addInstruction(instr);
 
@@ -875,7 +914,19 @@ namespace Cider {
             currentClassName_ = oldClass;
         }
         void visit(ExportStmt& stmt) override { stmt.getStmt()->accept(*this); }
-        void visit(ThisExpr&) override {}
+        void visit(ThisExpr& expr) override {
+            if (variableValues_.count("this")) {
+                IRValue addr = variableValues_["this"];
+                IRValue dest = IRValue::Register(nextTemp(), IRType::PTR);
+                currentBlock_->addInstruction({IROp::LOAD, dest, {addr, IRValue::Constant(0, IRType::I32)}});
+                lastValue_ = dest;
+                lastExprType_ = {currentClassName_, 1};
+                lastExprType_.isUserDefined = true;
+            } else {
+                // Handle error or default
+                lastValue_ = IRValue::Constant(0, IRType::PTR);
+            }
+        }
         void visit(ListExpr&) override {}
         void visit(TableExpr&) override {}
         void visit(SliceExpr&) override {}

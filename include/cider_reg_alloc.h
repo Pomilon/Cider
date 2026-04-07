@@ -13,20 +13,22 @@ namespace Cider {
 
     struct LiveInterval {
         std::string varName;
-        int start = 0;
-        int end = 0;
-        bool isFloat = false;
-        
+        int start;
+        int end;
+        bool isFloat;
+
         bool operator<(const LiveInterval& other) const {
             return start < other.start;
         }
     };
 
-    struct AllocationResult {
+    struct RegisterAllocation {
         bool isSpilled;
-        std::string reg; 
-        int stackOffset; 
+        std::string reg;
+        int stackOffset;
     };
+
+    typedef RegisterAllocation AllocationResult;
 
     class RegisterAllocator {
     public:
@@ -35,6 +37,7 @@ namespace Cider {
             std::map<std::string, LiveInterval> intervals;
             int index = 0;
             
+            // Build intervals
             for (auto& block : func.getBlocks()) {
                 for (auto& instr : block->getInstructions()) {
                     if (instr.dest && instr.dest->kind == IRValue::REGISTER) {
@@ -45,71 +48,64 @@ namespace Cider {
                             updateInterval(intervals, arg.name, index, arg.type);
                         }
                     }
-                    for (auto& [name, val] : instr.asmMap) {
-                        if (val.kind == IRValue::REGISTER) {
-                            updateInterval(intervals, val.name, index, val.type);
+                    for (auto& pair : instr.asmMap) {
+                        if (pair.second.kind == IRValue::REGISTER) {
+                            updateInterval(intervals, pair.second.name, index, pair.second.type);
                         }
                     }
                     index++;
                 }
             }
 
-            // Conservatively extend all intervals to the end of the function
-            // to ensure registers aren't reused across loop back-edges.
-            for (auto& [name, interval] : intervals) {
-                interval.end = index;
+            // Conservatively extend intervals to end of function for safety with loops
+            for (auto& pair : intervals) {
+                pair.second.end = index + 1;
             }
-            
+
             std::vector<LiveInterval> unhandled;
-            for (auto& [name, interval] : intervals) {
-                unhandled.push_back(interval);
+            for (auto& pair : intervals) {
+                unhandled.push_back(pair.second);
             }
             std::sort(unhandled.begin(), unhandled.end());
-            
-            std::vector<std::string> freeIntRegs = {"rbx", "r12", "r13", "r14", "r15", "r9", "r8", "rsi", "rdi", "rdx", "rcx"};
+
+            std::vector<std::string> freeIntRegs = {"rbx", "r12", "r13", "r14", "r15"};
             std::vector<std::string> freeFloatRegs = {"xmm8", "xmm9", "xmm10", "xmm11", "xmm12", "xmm13", "xmm14", "xmm15"};
             
             std::vector<LiveInterval> active;
             int currentStackOffset = 0;
-            
+
             for (auto& interval : unhandled) {
                 // Expire old intervals
                 for (auto it = active.begin(); it != active.end(); ) {
-                    if (it->end >= interval.start) {
+                    if (it->end < interval.start) {
+                        auto& res = allocation[it->varName];
+                        if (!res.isSpilled) {
+                            if (it->isFloat) freeFloatRegs.push_back(res.reg);
+                            else freeIntRegs.push_back(res.reg);
+                        }
+                        it = active.erase(it);
+                    } else {
                         ++it;
-                        continue;
                     }
-                    auto alloc = allocation[it->varName];
-                    if (!alloc.isSpilled) {
-                        if (it->isFloat) freeFloatRegs.push_back(alloc.reg);
-                        else freeIntRegs.push_back(alloc.reg);
-                    }
-                    it = active.erase(it);
                 }
-                
+
                 auto& freeRegs = interval.isFloat ? freeFloatRegs : freeIntRegs;
-                
                 if (freeRegs.empty()) {
                     // Spill
                     currentStackOffset += 8;
                     allocation[interval.varName] = {true, "", -currentStackOffset};
                 } else {
-                    // Allocate register
                     std::string reg = freeRegs.back();
                     freeRegs.pop_back();
                     allocation[interval.varName] = {false, reg, 0};
                     active.push_back(interval);
                 }
             }
-            
+
             finalStackSize = currentStackOffset;
-            if (finalStackSize % 16 != 0) {
-                finalStackSize += 16 - (finalStackSize % 16);
-            }
-            
             return allocation;
         }
-        
+
     private:
         void updateInterval(std::map<std::string, LiveInterval>& intervals, const std::string& name, int index, IRType type) {
             if (intervals.find(name) == intervals.end()) {

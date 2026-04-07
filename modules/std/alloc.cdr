@@ -4,18 +4,17 @@ var heap_top: *void = nilPtr;
 var heap_limit: *void = nilPtr;
 
 export func init_heap() -> void {
-    if (heap_start != nilPtr) return;
+    if (heap_start != 0 as *void) return;
 
-    // Request 1MB initially
-    var size: int = 1048576; // 1024 * 1024
-    var addr: *void = nilPtr;
+    var size: int = 1048576; 
+    var addr: *void = 0 as *void;
     
     asm {
         "mov rax, 9"
         "xor rdi, rdi"
         "mov rsi, {size}"
-        "mov rdx, 3" // PROT_READ|PROT_WRITE
-        "mov r10, 34" // MAP_PRIVATE|MAP_ANONYMOUS
+        "mov rdx, 3"
+        "mov r10, 34"
         "mov r8, -1"
         "xor r9, r9"
         "syscall"
@@ -25,10 +24,6 @@ export func init_heap() -> void {
     heap_start = addr;
     heap_top = addr;
     heap_limit = addr + size;
-
-    // Debug: verify heap init
-    // from std.io import print, printInt; // Already in scope if we are in std.alloc? No.
-    // We'll just rely on the test script for now.
 }
 
 export func malloc(size: int) -> *void {
@@ -37,14 +32,12 @@ export func malloc(size: int) -> *void {
     }
     
     var s: int = size;
-    // Align to 8 bytes
     if (s % 8 != 0) {
         s = s + (8 - (s % 8));
     }
     
     var next_top: *void = heap_top + s;
     if (next_top > heap_limit) {
-        // Out of memory (bump allocator simple version)
         return nilPtr;
     }
     
