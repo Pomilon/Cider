@@ -419,13 +419,22 @@ namespace Cider
                 break;
             case '&':
                 advance();
-                token = makeToken(TokenType::AMPERSAND, "&");
+                if (peek() == '&') {
+                    advance();
+                    token = makeToken(TokenType::AND, "&&");
+                } else {
+                    token = makeToken(TokenType::AMPERSAND, "&");
+                }
                 break;
             case '|':
                 advance();
-                token = makeToken(TokenType::BIT_OR, "|");
-                break;
-            case '~':
+                if (peek() == '|') {
+                    advance();
+                    token = makeToken(TokenType::OR, "||");
+                } else {
+                    token = makeToken(TokenType::BIT_OR, "|");
+                }
+                break;            case '~':
                 advance();
                 token = makeToken(TokenType::BIT_NOT, "~");
                 break;

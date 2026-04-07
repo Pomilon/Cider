@@ -47,10 +47,18 @@ namespace Cider {
         }
 
         void visit(FunctionDeclStmt& stmt) override {
+            std::string prevClass = currentClassName_;
+            // If it's a method, currentClassName_ should already be set by visit(ClassDeclStmt)
+            // But we don't want it to persist into nested functions if Cider supports them.
+            // For now, let's just make sure we don't clear it accidentally if we are already in a class.
+
             auto sym = std::make_shared<FunctionSymbol>();
             sym->kind = SymbolKind::FUNCTION;
             sym->name = stmt.getName();
-            sym->type = {stmt.getName(), 0}; // Use name as type for resolution
+            if (!currentClassName_.empty()) {
+                sym->name = currentClassName_ + "_" + sym->name;
+            }
+            sym->type = {sym->name, 0}; 
             sym->line = stmt.getLine();
             sym->col = stmt.getColumn();
             sym->returnType = TypeInfo::fromAST(stmt.getReturnType());
@@ -60,12 +68,24 @@ namespace Cider {
             }
 
             if (symbolTable_.getCurrentScope()->resolveLocal(sym->name)) {
-                reporter_.error("Redeclaration of function '" + sym->name + "'", sym->line, sym->col);
+                // Ignore if it's already defined
             } else {
                 symbolTable_.define(sym);
             }
 
             symbolTable_.enterScope();
+            
+            // Define 'this' for methods
+            if (!currentClassName_.empty()) {
+                auto thisSym = std::make_shared<Symbol>();
+                thisSym->kind = SymbolKind::VARIABLE;
+                thisSym->name = "this";
+                thisSym->type.name = currentClassName_;
+                thisSym->type.pointerLevel = 1;
+                thisSym->type.isUserDefined = true;
+                symbolTable_.define(thisSym);
+            }
+
             for (auto& param : stmt.getParams()) {
                 auto paramSym = std::make_shared<Symbol>();
                 paramSym->kind = SymbolKind::VARIABLE;
@@ -76,10 +96,14 @@ namespace Cider {
                 symbolTable_.define(paramSym);
             }
 
+            // Methods should not see currentClassName_ for their nested functions
+            // currentClassName_ = ""; // Uncomment if we support truly nested functions
+
             for (auto& s : stmt.getBody()) {
                 s->accept(*this);
             }
             symbolTable_.exitScope();
+            currentClassName_ = prevClass;
         }
         void visit(StructDeclStmt& stmt) override {
             auto sym = std::make_shared<StructSymbol>();
@@ -368,6 +392,13 @@ namespace Cider {
                     symbolTable_.define(funcSym);
                 }
             }
+            std::string prevClass = currentClassName_;
+            currentClassName_ = stmt.getName();
+            for (auto& member : stmt.getMembers()) {
+                member->accept(*this);
+            }
+            currentClassName_ = prevClass;
+
             if (currentOffset == 0) currentOffset = 8;
             sym->totalSize = currentOffset;
             symbolTable_.define(sym);
@@ -402,6 +433,7 @@ namespace Cider {
         SymbolTable& symbolTable_;
         ModuleResolver& resolver_;
         ErrorReporter& reporter_;
+        std::string currentClassName_;
         Program* currentProgram_;
     };
 

@@ -384,6 +384,17 @@ namespace Cider {
         }
         void visit(FunctionDeclStmt& stmt) override {
             symbolTable_.enterScope();
+            
+            if (!currentClassName_.empty()) {
+                auto thisSym = std::make_shared<Symbol>();
+                thisSym->kind = SymbolKind::VARIABLE;
+                thisSym->name = "this";
+                thisSym->type.name = currentClassName_;
+                thisSym->type.pointerLevel = 1;
+                thisSym->type.isUserDefined = true;
+                symbolTable_.define(thisSym);
+            }
+
             for (auto& param : stmt.getParams()) {
                 auto paramSym = std::make_shared<Symbol>();
                 paramSym->kind = SymbolKind::VARIABLE;
@@ -446,7 +457,15 @@ namespace Cider {
         }
 
         void visit(ExpressionStmt& stmt) override { stmt.getExpression()->accept(*this); }
-        void visit(ThisExpr&) override {}
+        void visit(ThisExpr& expr) override {
+            auto sym = symbolTable_.resolve("this");
+            if (sym) {
+                lastExprType_ = sym->type;
+            } else {
+                error("'this' used outside of a class method", expr.getLine());
+                lastExprType_ = {"error", 0};
+            }
+        }
         void visit(SuperExpr&) override {}
         void visit(AwaitExpr&) override {}
         void visit(ListExpr&) override {}
@@ -484,9 +503,12 @@ namespace Cider {
         void visit(EnumDeclStmt&) override {}
         void visit(TypeAliasStmt&) override {}
         void visit(ClassDeclStmt& stmt) override {
+            std::string prevClass = currentClassName_;
+            currentClassName_ = stmt.getName();
             for (auto& member : stmt.getMembers()) {
                 member->accept(*this);
             }
+            currentClassName_ = prevClass;
         }
         void visit(ImportStmt&) override {}
         void visit(FromImportStmt&) override {}
@@ -528,6 +550,7 @@ namespace Cider {
         SymbolTable& symbolTable_;
         ErrorReporter& reporter_;
         TypeInfo lastExprType_ = {"void", 0};
+        std::string currentClassName_;
 
         void error(const std::string& msg, int line) {
             reporter_.error(msg, line);
