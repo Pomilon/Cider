@@ -59,6 +59,7 @@ namespace Cider {
         int line;
         int col;
         bool isConst = false;
+        double constValue = 0; // For const variables and enum variant values
         
         // For variables: stack offset or global address (set during codegen)
         int memoryOffset = 0;

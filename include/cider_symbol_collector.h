@@ -142,6 +142,7 @@ namespace Cider {
             auto sym = std::make_shared<Symbol>();
             sym->kind = SymbolKind::ENUM;
             sym->name = stmt.getName();
+            sym->type = {"int", 0};
             sym->line = stmt.getLine();
             sym->col = stmt.getColumn();
 
@@ -149,6 +150,22 @@ namespace Cider {
                 reporter_.error("Redeclaration of enum '" + sym->name + "'", sym->line, sym->col);
             } else {
                 symbolTable_.define(sym);
+            }
+
+            for (size_t i = 0; i < stmt.getVariants().size(); i++) {
+                auto variant = std::make_shared<Symbol>();
+                variant->kind = SymbolKind::VARIABLE;
+                variant->name = stmt.getVariants()[i];
+                variant->type = {"int", 0};
+                variant->line = stmt.getLine();
+                variant->col = stmt.getColumn();
+                variant->isConst = true;
+                variant->constValue = (double)i;
+                if (symbolTable_.getCurrentScope()->resolveLocal(variant->name)) {
+                    reporter_.error("Redeclaration of variant '" + variant->name + "'", variant->line, variant->col);
+                } else {
+                    symbolTable_.define(variant);
+                }
             }
         }
 

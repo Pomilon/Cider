@@ -606,6 +606,12 @@ namespace Cider {
                 }
             }
 
+            if (sym && sym->isConst) {
+                IRType irType = (sym->type.pointerLevel > 0) ? IRType::PTR : mapType(sym->type.name);
+                lastValue_ = IRValue::Constant(sym->constValue, irType);
+                return;
+            }
+
             if (isAddress_) {
                 if (variableValues_.count(expr.getName())) {
                     lastValue_ = variableValues_[expr.getName()];
