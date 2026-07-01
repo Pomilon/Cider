@@ -639,9 +639,8 @@ namespace Cider {
         }
 
         void visit(AssignStmt& stmt) override {
-            stmt.getValue()->accept(*this);
-            IRValue val = lastValue_;
-            
+            std::string compoundOp = stmt.getOp();
+
             IRValue addr = IRValue::Constant(0, IRType::PTR);
             if (auto ident = dynamic_cast<IdentifierExpr*>(stmt.getTarget())) {
                 addr = variableValues_.count(ident->getName()) ? variableValues_[ident->getName()] : globalValues_[ident->getName()];
@@ -658,13 +657,48 @@ namespace Cider {
                 addr = getAddress(stmt.getTarget());
             }
 
-            if (lastExprType_.isArray || lastExprType_.isUserDefined || getTypeSize(lastExprType_) > 8) {
-                currentBlock_->addInstruction({IROp::MEMCPY, std::nullopt, {addr, val, IRValue::Constant(getTypeSize(lastExprType_), IRType::I32)}});
-            } else {
-                if (addr.kind == IRValue::LABEL) {
-                    currentBlock_->addInstruction({IROp::STORE, std::nullopt, {addr, val}});
+            if (compoundOp.empty()) {
+                stmt.getValue()->accept(*this);
+                IRValue val = lastValue_;
+
+                if (lastExprType_.isArray || lastExprType_.isUserDefined || getTypeSize(lastExprType_) > 8) {
+                    currentBlock_->addInstruction({IROp::MEMCPY, std::nullopt, {addr, val, IRValue::Constant(getTypeSize(lastExprType_), IRType::I32)}});
                 } else {
-                    currentBlock_->addInstruction({IROp::STORE, std::nullopt, {addr, val, IRValue::Constant(0, IRType::I32)}});
+                    if (addr.kind == IRValue::LABEL) {
+                        currentBlock_->addInstruction({IROp::STORE, std::nullopt, {addr, val}});
+                    } else {
+                        currentBlock_->addInstruction({IROp::STORE, std::nullopt, {addr, val, IRValue::Constant(0, IRType::I32)}});
+                    }
+                }
+            } else {
+                IRValue current = IRValue::Register(nextTemp(), IRType::I32);
+                if (addr.kind == IRValue::LABEL) {
+                    currentBlock_->addInstruction({IROp::LOAD, current, {addr}});
+                } else {
+                    currentBlock_->addInstruction({IROp::LOAD, current, {addr, IRValue::Constant(0, IRType::I32)}});
+                }
+
+                stmt.getValue()->accept(*this);
+                IRValue rhs = lastValue_;
+
+                IROp irOp;
+                if (compoundOp == "+") irOp = IROp::ADD;
+                else if (compoundOp == "-") irOp = IROp::SUB;
+                else if (compoundOp == "*") irOp = IROp::MUL;
+                else if (compoundOp == "/") irOp = IROp::DIV;
+                else if (compoundOp == "%") irOp = IROp::MOD;
+                else if (compoundOp == "&") irOp = IROp::BIT_AND;
+                else if (compoundOp == "|") irOp = IROp::BIT_OR;
+                else if (compoundOp == "^") irOp = IROp::BIT_XOR;
+                else return;
+
+                IRValue result = IRValue::Register(nextTemp(), IRType::I32);
+                currentBlock_->addInstruction({irOp, result, {current, rhs}});
+
+                if (addr.kind == IRValue::LABEL) {
+                    currentBlock_->addInstruction({IROp::STORE, std::nullopt, {addr, result}});
+                } else {
+                    currentBlock_->addInstruction({IROp::STORE, std::nullopt, {addr, result, IRValue::Constant(0, IRType::I32)}});
                 }
             }
         }

@@ -415,7 +415,10 @@ namespace Cider
                 break;
             case '&':
                 advance();
-                if (peek() == '&') {
+                if (peek() == '=') {
+                    advance();
+                    token = makeToken(TokenType::AMPERSAND_ASSIGN, "&=");
+                } else if (peek() == '&') {
                     advance();
                     token = makeToken(TokenType::AND, "&&");
                 } else {
@@ -424,7 +427,10 @@ namespace Cider
                 break;
             case '|':
                 advance();
-                if (peek() == '|') {
+                if (peek() == '=') {
+                    advance();
+                    token = makeToken(TokenType::BIT_OR_ASSIGN, "|=");
+                } else if (peek() == '|') {
                     advance();
                     token = makeToken(TokenType::OR, "||");
                 } else {
@@ -436,7 +442,12 @@ namespace Cider
                 break;
             case '^':
                 advance();
-                token = makeToken(TokenType::BIT_XOR, "^");
+                if (peek() == '=') {
+                    advance();
+                    token = makeToken(TokenType::BIT_XOR_ASSIGN, "^=");
+                } else {
+                    token = makeToken(TokenType::BIT_XOR, "^");
+                }
                 break;
             case '%':
                 advance();

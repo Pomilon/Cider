@@ -964,6 +964,9 @@ namespace Cider
             case TokenType::MULT_ASSIGN: binaryOp = "*"; break;
             case TokenType::DIV_ASSIGN: binaryOp = "/"; break;
             case TokenType::MOD_ASSIGN: binaryOp = "%"; break;
+            case TokenType::AMPERSAND_ASSIGN: binaryOp = "&"; break;
+            case TokenType::BIT_OR_ASSIGN: binaryOp = "|"; break;
+            case TokenType::BIT_XOR_ASSIGN: binaryOp = "^"; break;
             default: break;
         }
         return std::make_unique<AssignStmt>(std::move(target), std::move(value), line, col, binaryOp);
@@ -1357,7 +1360,8 @@ namespace Cider
         if (currentToken_.type == TokenType::ASSIGN || 
             currentToken_.type == TokenType::PLUS_ASSIGN || currentToken_.type == TokenType::MINUS_ASSIGN ||
             currentToken_.type == TokenType::MULT_ASSIGN || currentToken_.type == TokenType::DIV_ASSIGN ||
-            currentToken_.type == TokenType::MOD_ASSIGN)
+            currentToken_.type == TokenType::MOD_ASSIGN || currentToken_.type == TokenType::AMPERSAND_ASSIGN ||
+            currentToken_.type == TokenType::BIT_OR_ASSIGN || currentToken_.type == TokenType::BIT_XOR_ASSIGN)
         {
             return parseAssignmentStatement(std::move(expr));
         }
