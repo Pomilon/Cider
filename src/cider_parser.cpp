@@ -794,6 +794,15 @@ namespace Cider
             error("Expected 'func' after 'override'.");
             return nullptr;
         }
+        case TokenType::EXTERN:
+        {
+            nextToken();
+            if (currentToken_.type == TokenType::FUNCTION || currentToken_.type == TokenType::FUNC) {
+                return parseFunctionDeclaration(false, false, false, true);
+            }
+            error("Expected 'func' after 'extern'.");
+            return nullptr;
+        }
         case TokenType::FUNCTION:
         case TokenType::FUNC:
             return parseFunctionDeclaration();
@@ -1366,7 +1375,7 @@ namespace Cider
         }
     }
 
-    std::unique_ptr<Statement> Parser::parseFunctionDeclaration(bool isAsync, bool isVirtual, bool isOverride)
+    std::unique_ptr<Statement> Parser::parseFunctionDeclaration(bool isAsync, bool isVirtual, bool isOverride, bool isExtern)
     {
         int line = currentToken_.line;
         int col = currentToken_.column;
@@ -1433,23 +1442,33 @@ namespace Cider
             returnType = std::make_unique<TypeAST>("void", 0, line, col);
         }
 
-        if (currentToken_.type != TokenType::LBRACE)
-        {
-            error("Expected '{' for function body.");
-            return nullptr;
+        std::vector<std::unique_ptr<Statement>> body;
+        if (isExtern) {
+            if (currentToken_.type != TokenType::SEMICOLON)
+            {
+                error("Expected ';' after extern function declaration.");
+                return nullptr;
+            }
+            nextToken();
+        } else {
+            if (currentToken_.type != TokenType::LBRACE)
+            {
+                error("Expected '{' for function body.");
+                return nullptr;
+            }
+            nextToken(); // Consume '{'
+
+            body = parseBlockStatement();
+
+            if (currentToken_.type != TokenType::RBRACE)
+            {
+                error("Expected '}' after function body.");
+                return nullptr;
+            }
+            nextToken();
         }
-        nextToken(); // Consume '{'
 
-        std::vector<std::unique_ptr<Statement>> body = parseBlockStatement();
-
-        if (currentToken_.type != TokenType::RBRACE)
-        {
-            error("Expected '}' after function body.");
-            return nullptr;
-        }
-        nextToken();
-
-        return std::make_unique<FunctionDeclStmt>(funcName, std::move(params), std::move(body), std::move(returnType), line, col, isAsync, isVirtual, isOverride);
+        return std::make_unique<FunctionDeclStmt>(funcName, std::move(params), std::move(body), std::move(returnType), line, col, isAsync, isVirtual, isOverride, isExtern);
     }
 
     std::unique_ptr<Statement> Parser::parseStructDeclaration() {

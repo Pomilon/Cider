@@ -624,6 +624,9 @@ namespace Cider {
             out << "\nsection .data\n";
             for (const auto& line : dataSection) out << "    " << line << "\n";
             out << "\nsection .text\n    extern malloc\n    extern _setjmp\n    extern longjmp\n";
+            for (const auto& extFunc : module.getExternFunctions()) {
+                out << "    extern " << extFunc << "\n";
+            }
             for (const auto& line : textSection) out << line << "\n";
             return true;
         }

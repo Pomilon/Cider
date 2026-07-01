@@ -20,12 +20,14 @@ namespace Cider {
         bool isUserDefined = false; // Struct or Enum
         bool isArray = false;
         int arraySize = 0;
+        bool isVolatile = false;
         
         static TypeInfo fromAST(TypeAST* ast);
         
         bool operator==(const TypeInfo& other) const {
             return name == other.name && pointerLevel == other.pointerLevel && 
-                   isArray == other.isArray && arraySize == other.arraySize;
+                   isArray == other.isArray && arraySize == other.arraySize &&
+                   isVolatile == other.isVolatile;
         }
         
         bool operator!=(const TypeInfo& other) const {
@@ -34,6 +36,7 @@ namespace Cider {
 
         std::string toString() const {
             std::string res = "";
+            if (isVolatile) res += "volatile ";
             for (int i = 0; i < pointerLevel; ++i) res += "*";
             if (isArray) {
                 res += "[" + name + "; " + std::to_string(arraySize) + "]";
@@ -64,6 +67,7 @@ namespace Cider {
     struct FunctionSymbol : public Symbol {
         std::vector<TypeInfo> parameterTypes;
         TypeInfo returnType;
+        bool isExtern = false;
     };
 
     struct StructSymbol : public Symbol {

@@ -91,6 +91,11 @@ namespace Cider {
                 funcName = currentClassName_ + "_" + funcName;
             }
 
+            if (stmt.isExtern()) {
+                module_.addExternFunction(funcName);
+                return;
+            }
+
             // Save state for nested generation
             auto prevFunction = std::move(currentFunction_);
             auto prevBlock = std::move(currentBlock_);

@@ -126,6 +126,13 @@ namespace Cider {
             return vtables_;
         }
 
+        void addExternFunction(const std::string& name) {
+            externFunctions_.push_back(name);
+        }
+        const std::vector<std::string>& getExternFunctions() const {
+            return externFunctions_;
+        }
+
         void print() const;
 
         private:
@@ -133,6 +140,7 @@ namespace Cider {
         std::vector<std::string> globalAsm_;
         std::vector<GlobalVar> globalVars_;
         std::map<std::string, std::vector<std::string>> vtables_;
+        std::vector<std::string> externFunctions_;
         };
 } // namespace Cider
 

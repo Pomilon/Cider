@@ -407,7 +407,9 @@ namespace Cider {
                 paramSym->type = TypeInfo::fromAST(param.second.get());
                 symbolTable_.define(paramSym);
             }
-            for (auto& s : stmt.getBody()) s->accept(*this);
+            if (!stmt.isExtern()) {
+                for (auto& s : stmt.getBody()) s->accept(*this);
+            }
             symbolTable_.exitScope();
         }
 

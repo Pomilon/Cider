@@ -15,8 +15,8 @@ namespace Cider {
 
     class SymbolCollector : public ASTVisitor {
     public:
-        SymbolCollector(SymbolTable& symbolTable, ModuleResolver& resolver, ErrorReporter& reporter) 
-            : symbolTable_(symbolTable), resolver_(resolver), reporter_(reporter), currentProgram_(nullptr) {}
+        SymbolCollector(SymbolTable& symbolTable, ModuleResolver& resolver, ErrorReporter& reporter, const std::string& originPath = "")
+            : symbolTable_(symbolTable), resolver_(resolver), reporter_(reporter), currentProgram_(nullptr), originPath_(originPath) {}
 
         void collect(Program& program) {
             currentProgram_ = &program;
@@ -62,6 +62,7 @@ namespace Cider {
             sym->line = stmt.getLine();
             sym->col = stmt.getColumn();
             sym->returnType = TypeInfo::fromAST(stmt.getReturnType());
+            sym->isExtern = stmt.isExtern();
 
             for (auto& param : stmt.getParams()) {
                 sym->parameterTypes.push_back(TypeInfo::fromAST(param.second.get()));
@@ -99,8 +100,10 @@ namespace Cider {
             // Methods should not see currentClassName_ for their nested functions
             // currentClassName_ = ""; // Uncomment if we support truly nested functions
 
-            for (auto& s : stmt.getBody()) {
-                s->accept(*this);
+            if (!stmt.isExtern()) {
+                for (auto& s : stmt.getBody()) {
+                    s->accept(*this);
+                }
             }
             symbolTable_.exitScope();
             currentClassName_ = prevClass;
@@ -208,7 +211,7 @@ namespace Cider {
         }
 
         void visit(ImportStmt& stmt) override {
-            auto result = resolver_.resolve(stmt.getModuleName());
+            auto result = resolver_.resolve(stmt.getModuleName(), originPath_);
             if (result.type == ModuleType::NOT_FOUND) {
                 reporter_.error("Could not resolve module '" + stmt.getModuleName() + "'", stmt.getLine(), stmt.getColumn());
                 return;
@@ -219,7 +222,7 @@ namespace Cider {
             std::stringstream buffer;
             buffer << file.rdbuf();
             
-            Lexer lexer(buffer.str());
+            Lexer lexer(buffer.str(), reporter_);
             Parser parser(lexer, reporter_);
             auto importedAst = parser.parseProgram();
             
@@ -404,7 +407,7 @@ namespace Cider {
             symbolTable_.define(sym);
         }
         void visit(FromImportStmt& stmt) override {
-            auto result = resolver_.resolve(stmt.getModuleName());
+            auto result = resolver_.resolve(stmt.getModuleName(), originPath_);
             if (result.type == ModuleType::NOT_FOUND) {
                 reporter_.error("Could not resolve module '" + stmt.getModuleName() + "'", stmt.getLine(), stmt.getColumn());
                 return;
@@ -415,7 +418,7 @@ namespace Cider {
             std::stringstream buffer;
             buffer << file.rdbuf();
             
-            Lexer lexer(buffer.str());
+            Lexer lexer(buffer.str(), reporter_);
             Parser parser(lexer, reporter_);
             auto importedAst = parser.parseProgram();
             
@@ -435,6 +438,7 @@ namespace Cider {
         ErrorReporter& reporter_;
         std::string currentClassName_;
         Program* currentProgram_;
+        std::string originPath_;
     };
 
 } // namespace Cider

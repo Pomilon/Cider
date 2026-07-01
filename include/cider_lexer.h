@@ -30,6 +30,7 @@ namespace Cider
         CLASS,
         STRUCT,  // Added 'struct'
         ENUM,    // Added 'enum'
+        EXTERN,  // Added 'extern'
         EXTENDS,
         NEW,
         DELETE,
