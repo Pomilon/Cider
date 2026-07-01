@@ -573,14 +573,27 @@ namespace Cider {
                                 for (const auto& reg : toSave) addText("    push " + reg);
                                 
                                 if (instr.op == IROp::CALL) {
-                                    // Move parameters to ABI registers
-                                    for (size_t i = 1; i < instr.args.size() && (i - 1) < argRegs.size(); ++i) {
-                                        addText("    push " + getOperand(instr.args[i]));
+                                    if (instr.args[0].kind == IRValue::LABEL) {
+                                        // Direct call: call label
+                                        for (size_t i = 1; i < instr.args.size() && (i - 1) < argRegs.size(); ++i) {
+                                            addText("    push " + getOperand(instr.args[i]));
+                                        }
+                                        for (int i = std::min((int)instr.args.size() - 1, 6) - 1; i >= 0; --i) {
+                                            addText("    pop " + argRegs[i]);
+                                        }
+                                        addText("    call " + a1);
+                                    } else {
+                                        // Indirect call: save target in r11 (not an arg reg), set up args, call r11
+                                        std::string target = getOperand(instr.args[0]);
+                                        addText("    mov r11, " + target);
+                                        for (size_t i = 1; i < instr.args.size() && (i - 1) < argRegs.size(); ++i) {
+                                            addText("    push " + getOperand(instr.args[i]));
+                                        }
+                                        for (int i = std::min((int)instr.args.size() - 1, 6) - 1; i >= 0; --i) {
+                                            addText("    pop " + argRegs[i]);
+                                        }
+                                        addText("    call r11");
                                     }
-                                    for (int i = std::min((int)instr.args.size() - 1, 6) - 1; i >= 0; --i) {
-                                        addText("    pop " + argRegs[i]);
-                                    }
-                                    addText("    call " + a1);
                                 } else {
                                     // VIRTUAL_CALL: args[0] = objPtr, args[1] = vtableIndex, args[2...] = params
                                     std::string objPtr = getOperand(instr.args[0]);

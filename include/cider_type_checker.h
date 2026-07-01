@@ -229,7 +229,11 @@ namespace Cider {
                 error("Undefined identifier '" + expr.getName() + "'", expr.getLine());
                 lastExprType_ = {"error", 0};
             } else {
-                lastExprType_ = sym->type;
+                if (sym->kind == SymbolKind::FUNCTION) {
+                    lastExprType_ = {"void", 1};
+                } else {
+                    lastExprType_ = sym->type;
+                }
             }
         }
 
@@ -367,8 +371,12 @@ namespace Cider {
             }
 
             if (!funcSym) {
-                error("Expression is not a function", expr.getLine());
-                lastExprType_ = {"error", 0};
+                // Function pointer call: accept callee and args generically
+                callee->accept(*this);
+                for (auto& arg : expr.getArgs()) {
+                    arg->accept(*this);
+                }
+                lastExprType_ = {"int", 0};
                 return;
             }
 

@@ -205,7 +205,10 @@ namespace Cider {
             IRValue objPtr = IRValue::Constant(0, IRType::PTR);
 
             if (auto id = dynamic_cast<IdentifierExpr*>(calleeExpr)) {
-                funcName = id->getName();
+                auto sym = symbolTable_.resolve(id->getName());
+                if (sym && sym->kind == SymbolKind::FUNCTION) {
+                    funcName = id->getName();
+                }
             } else if (auto mem = dynamic_cast<MemberAccessExpr*>(calleeExpr)) {
                 // Method call: obj.method() or obj->method()
                 bool wasAddress = isAddress_;
@@ -266,6 +269,29 @@ namespace Cider {
                 callInstr.dest = dest;
                 currentBlock_->addInstruction(callInstr);
                 lastValue_ = dest;
+            } else {
+                // Function pointer call: callee is an expression (variable, deref, etc.)
+                bool wasAddress = isAddress_;
+                isAddress_ = false;
+                calleeExpr->accept(*this);
+                isAddress_ = wasAddress;
+                IRValue fnPtr = lastValue_;
+
+                std::vector<IRValue> args;
+                for (auto& arg : expr.getArgs()) {
+                    arg->accept(*this);
+                    args.push_back(lastValue_);
+                }
+
+                IRValue dest = IRValue::Register(nextTemp(), IRType::I32);
+                IRInstruction callInstr;
+                callInstr.op = IROp::CALL;
+                callInstr.args.push_back(fnPtr);
+                for (auto& a : args) callInstr.args.push_back(a);
+                callInstr.dest = dest;
+                currentBlock_->addInstruction(callInstr);
+                lastValue_ = dest;
+                lastExprType_ = {"int", 0};
             }
         }
 
@@ -609,6 +635,12 @@ namespace Cider {
             if (sym && sym->isConst) {
                 IRType irType = (sym->type.pointerLevel > 0) ? IRType::PTR : mapType(sym->type.name);
                 lastValue_ = IRValue::Constant(sym->constValue, irType);
+                return;
+            }
+
+            if (sym && sym->kind == SymbolKind::FUNCTION) {
+                lastValue_ = IRValue::Label(sym->name);
+                lastExprType_ = {"void", 1};
                 return;
             }
 
