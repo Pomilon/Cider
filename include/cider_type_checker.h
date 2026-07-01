@@ -551,8 +551,27 @@ namespace Cider {
         }
         void visit(BreakStmt&) override {}
         void visit(ContinueStmt&) override {}
-        void visit(ThrowStmt&) override {}
-        void visit(TryCatchStmt&) override {}
+        void visit(ThrowStmt& stmt) override {
+            stmt.getValue()->accept(*this);
+        }
+        void visit(TryCatchStmt& stmt) override {
+            symbolTable_.enterScope();
+            for (auto& s : stmt.getTryBlock()) {
+                s->accept(*this);
+            }
+            symbolTable_.exitScope();
+            
+            symbolTable_.enterScope();
+            auto catchVarSym = std::make_shared<Symbol>();
+            catchVarSym->kind = SymbolKind::VARIABLE;
+            catchVarSym->name = stmt.getCatchVar();
+            catchVarSym->type = {"int", 0};
+            symbolTable_.define(catchVarSym);
+            for (auto& s : stmt.getCatchBlock()) {
+                s->accept(*this);
+            }
+            symbolTable_.exitScope();
+        }
         void visit(DeferStmt& stmt) override {
             stmt.getDeferredStmt()->accept(*this);
         }

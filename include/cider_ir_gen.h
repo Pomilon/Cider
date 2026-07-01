@@ -16,6 +16,7 @@ namespace Cider {
         ModuleIR generate(Program& program) {
             visitedPrograms_.clear();
             globalValues_.clear();
+            exceptionGlobalsEnsured_ = false;
             program.accept(*this);
 
             // Populate V-Tables in module
@@ -919,8 +920,88 @@ namespace Cider {
             deferStack_.back().push_back(stmt.getDeferredStmt());
         }
         void visit(ForEachStmt&) override {}
-        void visit(ThrowStmt&) override {}
-        void visit(TryCatchStmt&) override {}
+        void visit(ThrowStmt& stmt) override {
+            if (currentFunction_) {
+                stmt.getValue()->accept(*this);
+                IRValue thrownVal = lastValue_;
+
+                ensureExceptionGlobals();
+
+                IRValue excValAddr = IRValue::Label("_exception_value");
+                currentBlock_->addInstruction({IROp::STORE, std::nullopt, {excValAddr, thrownVal}});
+
+                IRInstruction call;
+                call.op = IROp::CALL;
+                call.dest = std::nullopt;
+                call.args.push_back(IRValue::Label("longjmp"));
+                call.args.push_back(IRValue::Label("_exception_jmp_buf"));
+                call.args.push_back(IRValue::Constant(1, IRType::I32));
+                currentBlock_->addInstruction(call);
+
+                startBlock(nextLabel("dead"));
+            }
+        }
+        void visit(TryCatchStmt& stmt) override {
+            if (currentFunction_) {
+                ensureExceptionGlobals();
+
+                IRValue setjmpDest = IRValue::Register(nextTemp(), IRType::I32);
+                IRInstruction setjmpCall;
+                setjmpCall.op = IROp::CALL;
+                setjmpCall.dest = setjmpDest;
+                setjmpCall.args.push_back(IRValue::Label("_setjmp"));
+                setjmpCall.args.push_back(IRValue::Label("_exception_jmp_buf"));
+                currentBlock_->addInstruction(setjmpCall);
+
+                std::string tryBlockName = nextLabel("try_body");
+                std::string catchBlockName = nextLabel("catch_body");
+                std::string endName = nextLabel("try_end");
+
+                currentBlock_->addInstruction({IROp::COND_BR, std::nullopt, {setjmpDest, IRValue::Label(catchBlockName), IRValue::Label(tryBlockName)}});
+
+                startBlock(tryBlockName);
+                symbolTable_.enterScope();
+                for (auto& s : stmt.getTryBlock()) {
+                    s->accept(*this);
+                }
+                if (currentBlock_ && (currentBlock_->getInstructions().empty() ||
+                    (currentBlock_->getInstructions().back().op != IROp::BR &&
+                     currentBlock_->getInstructions().back().op != IROp::RET))) {
+                    currentBlock_->addInstruction({IROp::BR, std::nullopt, {IRValue::Label(endName)}});
+                }
+                symbolTable_.exitScope();
+
+                startBlock(catchBlockName);
+                symbolTable_.enterScope();
+
+                IRValue catchAddr = IRValue::Register(nextTemp(), IRType::PTR);
+                currentBlock_->addInstruction({IROp::ALLOCA, catchAddr, {IRValue::Constant(8, IRType::I32)}});
+                variableValues_[stmt.getCatchVar()] = catchAddr;
+
+                IRValue excVal = IRValue::Register(nextTemp(), IRType::I32);
+                currentBlock_->addInstruction({IROp::LOAD, excVal, {IRValue::Label("_exception_value")}});
+                currentBlock_->addInstruction({IROp::STORE, std::nullopt, {catchAddr, excVal, IRValue::Constant(0, IRType::I32)}});
+
+                for (auto& s : stmt.getCatchBlock()) {
+                    s->accept(*this);
+                }
+                if (currentBlock_ && (currentBlock_->getInstructions().empty() ||
+                    (currentBlock_->getInstructions().back().op != IROp::BR &&
+                     currentBlock_->getInstructions().back().op != IROp::RET))) {
+                    currentBlock_->addInstruction({IROp::BR, std::nullopt, {IRValue::Label(endName)}});
+                }
+                symbolTable_.exitScope();
+
+                startBlock(endName);
+            } else {
+                symbolTable_.enterScope();
+                for (auto& s : stmt.getTryBlock()) s->accept(*this);
+                symbolTable_.exitScope();
+                symbolTable_.enterScope();
+                for (auto& s : stmt.getCatchBlock()) s->accept(*this);
+                symbolTable_.exitScope();
+            }
+        }
 
         void visit(StringExpr& expr) override {
             IRValue strVal;
@@ -1136,6 +1217,16 @@ namespace Cider {
         void visit(FromImportStmt&) override {}
         void visit(ExportExpressionStmt&) override {}
 
+        void ensureExceptionGlobals() {
+            if (!exceptionGlobalsEnsured_) {
+                exceptionGlobalsEnsured_ = true;
+                module_.addGlobalAsm("global _exception_jmp_buf");
+                module_.addGlobalAsm("_exception_jmp_buf: resq 25");
+                module_.addGlobalAsm("global _exception_value");
+                module_.addGlobalAsm("_exception_value: resq 1");
+            }
+        }
+
     private:
         ModuleIR module_;
         SymbolTable& symbolTable_;
@@ -1152,6 +1243,7 @@ namespace Cider {
         std::vector<std::string> breakLabels_;
         std::vector<std::string> continueLabels_;
         std::vector<std::vector<Statement*>> deferStack_;
+        bool exceptionGlobalsEnsured_ = false;
         int tempCount_ = 0;
         int labelCount_ = 0;
         std::string nextTemp() { return "v" + std::to_string(tempCount_++); }
