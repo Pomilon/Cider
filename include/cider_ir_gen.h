@@ -443,12 +443,68 @@ namespace Cider {
             expr.getLeft()->accept(*this);
             IRValue left = lastValue_;
             TypeInfo leftType = lastExprType_;
+
+            std::string sOp = expr.getOperator();
+
+            if (sOp == "&&") {
+                IRValue condReg = lastValue_;
+                std::string scTrueName = nextLabel("sc_true");
+                std::string scFalseName = nextLabel("sc_false");
+                std::string scMergeName = nextLabel("sc_merge");
+                currentBlock_->addInstruction({IROp::COND_BR, std::nullopt, {condReg, IRValue::Label(scTrueName), IRValue::Label(scFalseName)}});
+                startBlock(scTrueName);
+                expr.getRight()->accept(*this);
+                IRValue rightVal = lastValue_;
+                TypeInfo rightType = lastExprType_;
+                currentBlock_->addInstruction({IROp::BR, std::nullopt, {IRValue::Label(scMergeName)}});
+                startBlock(scFalseName);
+                IRValue falseVal = IRValue::Constant(0, IRType::BOOL);
+                currentBlock_->addInstruction({IROp::BR, std::nullopt, {IRValue::Label(scMergeName)}});
+                startBlock(scMergeName);
+                IRValue phiDest = IRValue::Register(nextTemp(), IRType::BOOL);
+                IRInstruction phiInstr;
+                phiInstr.op = IROp::PHI;
+                phiInstr.dest = phiDest;
+                phiInstr.phiArgs[scTrueName] = rightVal;
+                phiInstr.phiArgs[scFalseName] = falseVal;
+                currentBlock_->addInstruction(phiInstr);
+                lastValue_ = phiDest;
+                lastExprType_ = rightType.pointerLevel > 0 ? rightType : TypeInfo{"bool", 0};
+                return;
+            }
+
+            if (sOp == "||") {
+                IRValue condReg = lastValue_;
+                std::string scTrueName = nextLabel("sc_true");
+                std::string scFalseName = nextLabel("sc_false");
+                std::string scMergeName = nextLabel("sc_merge");
+                currentBlock_->addInstruction({IROp::COND_BR, std::nullopt, {condReg, IRValue::Label(scTrueName), IRValue::Label(scFalseName)}});
+                startBlock(scTrueName);
+                IRValue trueVal = IRValue::Constant(1, IRType::BOOL);
+                currentBlock_->addInstruction({IROp::BR, std::nullopt, {IRValue::Label(scMergeName)}});
+                startBlock(scFalseName);
+                expr.getRight()->accept(*this);
+                IRValue rightVal = lastValue_;
+                TypeInfo rightType = lastExprType_;
+                currentBlock_->addInstruction({IROp::BR, std::nullopt, {IRValue::Label(scMergeName)}});
+                startBlock(scMergeName);
+                IRValue phiDest = IRValue::Register(nextTemp(), IRType::BOOL);
+                IRInstruction phiInstr;
+                phiInstr.op = IROp::PHI;
+                phiInstr.dest = phiDest;
+                phiInstr.phiArgs[scTrueName] = trueVal;
+                phiInstr.phiArgs[scFalseName] = rightVal;
+                currentBlock_->addInstruction(phiInstr);
+                lastValue_ = phiDest;
+                lastExprType_ = rightType.pointerLevel > 0 ? rightType : TypeInfo{"bool", 0};
+                return;
+            }
+
             expr.getRight()->accept(*this);
             IRValue right = lastValue_;
             TypeInfo rightType = lastExprType_;
 
             IROp op;
-            std::string sOp = expr.getOperator();
             
             if (leftType.pointerLevel > 0 && (sOp == "+" || sOp == "-")) {
                 TypeInfo baseType = leftType;
@@ -481,8 +537,8 @@ namespace Cider {
             else if (sOp == ">") op = IROp::CMP_GT;
             else if (sOp == "<=") op = IROp::CMP_LE;
             else if (sOp == ">=") op = IROp::CMP_GE;
-            else if (sOp == "&" || sOp == "&&") op = IROp::BIT_AND;
-            else if (sOp == "|" || sOp == "||") op = IROp::BIT_OR;
+            else if (sOp == "&") op = IROp::BIT_AND;
+            else if (sOp == "|") op = IROp::BIT_OR;
             else if (sOp == "^") op = IROp::BIT_XOR;
             else if (sOp == "<<") op = IROp::LSHIFT;
             else if (sOp == ">>") op = IROp::RSHIFT;
@@ -853,7 +909,11 @@ namespace Cider {
             }
         }
         void visit(GroupingExpr& expr) override { expr.getExpression()->accept(*this); }
-        void visit(SizeofExpr& expr) override { lastValue_ = IRValue::Constant(8, IRType::I32); }
+        void visit(SizeofExpr& expr) override {
+            TypeInfo targetType = TypeInfo::fromAST(expr.getTargetType());
+            int size = getTypeSize(targetType);
+            lastValue_ = IRValue::Constant(size, IRType::I32);
+        }
         void visit(CastExpr& expr) override {
             expr.getExpression()->accept(*this);
             TypeInfo targetType = TypeInfo::fromAST(expr.getTargetType());
