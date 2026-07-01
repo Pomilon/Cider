@@ -358,6 +358,29 @@ namespace Cider {
                     lastValue_ = dest;
                 }
                 if (type.pointerLevel > 0) type.pointerLevel--;
+            } else if (expr.getOperator() == "++" || expr.getOperator() == "--") {
+                isAddress_ = true;
+                expr.getOperand()->accept(*this);
+                IRValue addr = lastValue_;
+                isAddress_ = false;
+                TypeInfo operandType = lastExprType_;
+
+                IRType irType = (operandType.pointerLevel > 0) ? IRType::PTR : mapType(operandType.name);
+                IRValue current = IRValue::Register(nextTemp(), irType);
+                currentBlock_->addInstruction({IROp::LOAD, current, {addr, IRValue::Constant(0, IRType::I32)}});
+
+                IRValue one = IRValue::Constant(1, irType);
+                IRValue result = IRValue::Register(nextTemp(), irType);
+                currentBlock_->addInstruction({expr.getOperator() == "++" ? IROp::ADD : IROp::SUB, result, {current, one}});
+
+                if (addr.kind == IRValue::LABEL) {
+                    currentBlock_->addInstruction({IROp::STORE, std::nullopt, {addr, result}});
+                } else {
+                    currentBlock_->addInstruction({IROp::STORE, std::nullopt, {addr, result, IRValue::Constant(0, IRType::I32)}});
+                }
+
+                type = operandType;
+                lastValue_ = result;
             } else {
                 expr.getOperand()->accept(*this);
                 IRValue operand = lastValue_;

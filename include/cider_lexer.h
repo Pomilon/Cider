@@ -4,6 +4,7 @@
 #include <string>
 #include <vector>
 #include <map>
+#include "cider_errors.h"
 
 namespace Cider
 {
@@ -51,6 +52,7 @@ namespace Cider
         MATCH,
         VIRTUAL,
         OVERRIDE,
+        VOLATILE,
 
         // Types
         INT,
@@ -65,6 +67,8 @@ namespace Cider
         // Operators
         PLUS,
         MINUS,
+        INCREMENT,  // ++
+        DECREMENT,  // --
         MULTIPLY,
         DIVIDE,
         MODULO,
@@ -131,12 +135,13 @@ namespace Cider
     class Lexer
     {
     public:
-        Lexer(const std::string &source);
+        Lexer(const std::string &source, ErrorReporter &reporter);
         Token getNextToken();
         char peek(); 
 
     private:
         std::string source;
+        ErrorReporter &reporter_;
         size_t currentPos;
         int currentLine;
         int currentCol;

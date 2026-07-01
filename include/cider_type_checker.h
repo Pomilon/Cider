@@ -211,6 +211,11 @@ namespace Cider {
                     error("Cannot apply '-' to pointer type " + operandType.toString(), expr.getLine());
                 }
                 lastExprType_ = operandType;
+            } else if (expr.getOperator() == "++" || expr.getOperator() == "--") {
+                if (operandType.pointerLevel > 0) {
+                    error("Cannot " + expr.getOperator() + " a pointer type", expr.getLine());
+                }
+                lastExprType_ = operandType;
             }
         }
 

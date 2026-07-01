@@ -1,4 +1,4 @@
-#include "../include/cider_lexer.h"
+#include "cider_lexer.h"
 #include <iostream>
 #include <map>
 
@@ -12,7 +12,7 @@ namespace Cider
     {
         static const std::map<TokenType, std::string> tokenTypeNames = {
             {TokenType::FUNCTION, "FUNCTION"}, {TokenType::FUNC, "FUNC"}, {TokenType::IF, "IF"}, {TokenType::ELSE, "ELSE"}, {TokenType::WHILE, "WHILE"}, {TokenType::FOR, "FOR"}, {TokenType::RETURN, "RETURN"}, {TokenType::TRUE, "TRUE"}, {TokenType::FALSE, "FALSE"}, {TokenType::NIL, "NIL"}, {TokenType::NIL_PTR, "NIL_PTR"}, {TokenType::IMPORT, "IMPORT"}, {TokenType::FROM, "FROM"}, {TokenType::EXPORT, "EXPORT"}, {TokenType::VAR, "VAR"}, {TokenType::CLASS, "CLASS"}, {TokenType::STRUCT, "STRUCT"}, {TokenType::ENUM, "ENUM"}, {TokenType::EXTENDS, "EXTENDS"}, {TokenType::NEW, "NEW"}, {TokenType::THIS, "THIS"}, {TokenType::STRICT, "STRICT"},
-            {TokenType::BREAK, "BREAK"}, {TokenType::CONTINUE, "CONTINUE"}, {TokenType::TRY, "TRY"}, {TokenType::CATCH, "CATCH"}, {TokenType::THROW, "THROW"}, {TokenType::SUPER, "SUPER"}, {TokenType::AS, "AS"}, {TokenType::SIZEOF, "SIZEOF"}, {TokenType::CONST, "CONST"}, {TokenType::TYPE, "TYPE"}, {TokenType::DEFER, "DEFER"}, {TokenType::ASM, "ASM"}, {TokenType::MATCH, "MATCH"}, {TokenType::DELETE, "DELETE"}, {TokenType::VIRTUAL, "VIRTUAL"}, {TokenType::OVERRIDE, "OVERRIDE"},
+            {TokenType::BREAK, "BREAK"}, {TokenType::CONTINUE, "CONTINUE"}, {TokenType::TRY, "TRY"}, {TokenType::CATCH, "CATCH"}, {TokenType::THROW, "THROW"}, {TokenType::SUPER, "SUPER"}, {TokenType::AS, "AS"}, {TokenType::SIZEOF, "SIZEOF"}, {TokenType::CONST, "CONST"}, {TokenType::TYPE, "TYPE"}, {TokenType::DEFER, "DEFER"}, {TokenType::ASM, "ASM"}, {TokenType::MATCH, "MATCH"}, {TokenType::DELETE, "DELETE"},             {TokenType::VIRTUAL, "VIRTUAL"}, {TokenType::OVERRIDE, "OVERRIDE"}, {TokenType::VOLATILE, "VOLATILE"},
 
             {TokenType::INT, "INT"},
             {TokenType::FLOAT, "FLOAT"},
@@ -90,8 +90,8 @@ namespace Cider
         return "Type: " + Token::toString(type) + ", Value: '" + value + "', Line: " + std::to_string(line) + ", Col: " + std::to_string(column);
     }
 
-    Lexer::Lexer(const std::string &source)
-        : source(source), currentPos(0), currentLine(1), currentCol(1) {}
+    Lexer::Lexer(const std::string &source, ErrorReporter &reporter)
+        : source(source), reporter_(reporter), currentPos(0), currentLine(1), currentCol(1) {}
 
     char Lexer::peek()
     {
@@ -181,7 +181,7 @@ namespace Cider
         static const std::map<std::string, TokenType> keywords = {
             {"function", TokenType::FUNCTION}, {"func", TokenType::FUNC}, {"if", TokenType::IF}, {"else", TokenType::ELSE}, {"while", TokenType::WHILE}, {"for", TokenType::FOR}, {"return", TokenType::RETURN}, {"true", TokenType::TRUE}, {"false", TokenType::FALSE}, {"nil", TokenType::NIL}, {"nilPtr", TokenType::NIL_PTR}, {"import", TokenType::IMPORT}, {"from", TokenType::FROM}, {"export", TokenType::EXPORT}, {"var", TokenType::VAR}, {"class", TokenType::CLASS}, {"struct", TokenType::STRUCT}, {"enum", TokenType::ENUM}, {"extends", TokenType::EXTENDS}, {"new", TokenType::NEW}, {"delete", TokenType::DELETE}, {"this", TokenType::THIS},
             {"break", TokenType::BREAK}, {"continue", TokenType::CONTINUE}, {"try", TokenType::TRY}, {"catch", TokenType::CATCH}, {"throw", TokenType::THROW}, {"super", TokenType::SUPER},
-            {"async", TokenType::ASYNC}, {"await", TokenType::AWAIT}, {"as", TokenType::AS}, {"sizeof", TokenType::SIZEOF}, {"const", TokenType::CONST}, {"type", TokenType::TYPE}, {"defer", TokenType::DEFER}, {"asm", TokenType::ASM}, {"match", TokenType::MATCH}, {"virtual", TokenType::VIRTUAL}, {"override", TokenType::OVERRIDE},
+            {"async", TokenType::ASYNC}, {"await", TokenType::AWAIT}, {"as", TokenType::AS}, {"sizeof", TokenType::SIZEOF}, {"const", TokenType::CONST}, {"type", TokenType::TYPE}, {"defer", TokenType::DEFER}, {"asm", TokenType::ASM}, {"match", TokenType::MATCH},             {"virtual", TokenType::VIRTUAL}, {"override", TokenType::OVERRIDE}, {"volatile", TokenType::VOLATILE},
             {"strict", TokenType::STRICT}, {"and", TokenType::AND},
             {"or", TokenType::OR},
             {"not", TokenType::NOT},
@@ -249,7 +249,8 @@ namespace Cider
         {
             if (peek() == '\n')
             {
-                throw std::runtime_error("Unterminated string literal (newline encountered)");
+                reporter_.error("Unterminated string literal (newline encountered)", currentLine, currentCol);
+                return makeToken(TokenType::UNKNOWN, "");
             }
 
             if (peek() == '\\')
@@ -289,7 +290,8 @@ namespace Cider
 
         if (peek() == '\0')
         {
-            throw std::runtime_error("Unterminated string literal (EOF)");
+            reporter_.error("Unterminated string literal (EOF)", currentLine, currentCol);
+            return makeToken(TokenType::UNKNOWN, "");
         }
 
         advance();
@@ -301,7 +303,8 @@ namespace Cider
         advance(); // Skip opening quote
         if (peek() == '\0')
         {
-            throw std::runtime_error("Unterminated character literal (EOF)");
+            reporter_.error("Unterminated character literal (EOF)", currentLine, currentCol);
+            return makeToken(TokenType::UNKNOWN, "");
         }
 
         std::string raw_value;
@@ -339,7 +342,8 @@ namespace Cider
 
         if (peek() != '\'')
         {
-            throw std::runtime_error("Unterminated character literal, expected '");
+            reporter_.error("Unterminated character literal, expected '", currentLine, currentCol);
+            return makeToken(TokenType::UNKNOWN, "");
         }
         advance(); // Skip closing quote
 
@@ -373,32 +377,21 @@ namespace Cider
         else if (c == '"')
         {
             advance();
-            try
-            {
-                token = readString();
-            }
-            catch (const std::runtime_error &e)
-            {
-                token = makeToken(TokenType::UNKNOWN, e.what());
-            }
+            token = readString();
         }
         else if (c == '\'')
         {
-            try
-            {
-                token = readCharLiteral();
-            }
-            catch (const std::runtime_error &e)
-            {
-                token = makeToken(TokenType::UNKNOWN, e.what());
-            }
+            token = readCharLiteral();
         }
         else
             switch (c)
             {
             case '+':
                 advance();
-                if (peek() == '=') {
+                if (peek() == '+') {
+                    advance();
+                    token = makeToken(TokenType::INCREMENT, "++");
+                } else if (peek() == '=') {
                     advance();
                     token = makeToken(TokenType::PLUS_ASSIGN, "+=");
                 } else {
@@ -407,7 +400,10 @@ namespace Cider
                 break;
             case '-':
                 advance();
-                if (peek() == '=') {
+                if (peek() == '-') {
+                    advance();
+                    token = makeToken(TokenType::DECREMENT, "--");
+                } else if (peek() == '=') {
                     advance();
                     token = makeToken(TokenType::MINUS_ASSIGN, "-=");
                 } else if (peek() == '>') {

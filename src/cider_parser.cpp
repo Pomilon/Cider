@@ -1,4 +1,4 @@
-#include "../include/cider_parser.h"
+#include "cider_parser.h"
 #include <iostream>
 #include <map>
 
@@ -353,7 +353,7 @@ namespace Cider
     {
         int line = currentToken_.line;
         int col = currentToken_.column;
-        if (currentToken_.type == TokenType::MINUS || currentToken_.type == TokenType::NOT || currentToken_.type == TokenType::MULTIPLY || currentToken_.type == TokenType::AMPERSAND || currentToken_.type == TokenType::BIT_NOT)
+        if (currentToken_.type == TokenType::INCREMENT || currentToken_.type == TokenType::DECREMENT || currentToken_.type == TokenType::MINUS || currentToken_.type == TokenType::NOT || currentToken_.type == TokenType::MULTIPLY || currentToken_.type == TokenType::AMPERSAND || currentToken_.type == TokenType::BIT_NOT)
         {
             std::string op = currentToken_.value;
             nextToken();
@@ -826,26 +826,31 @@ namespace Cider
     std::unique_ptr<TypeAST> Parser::parseType() {
         int line = currentToken_.line;
         int col = currentToken_.column;
+        bool isVolatile = false;
+
+        if (currentToken_.type == TokenType::VOLATILE) {
+            isVolatile = true;
+            nextToken();
+        }
 
         if (currentToken_.type == TokenType::LBRACKET) {
-            nextToken(); // Consume '['
+            nextToken();
             auto baseType = parseType();
             if (currentToken_.type != TokenType::SEMICOLON) {
                 error("Expected ';' after base type in array declaration.");
                 return nullptr;
             }
-            nextToken(); // Consume ';'
+            nextToken();
             if (currentToken_.type != TokenType::NUMBER) {
                 error("Expected array size.");
                 return nullptr;
             }
             int size = std::stoi(currentToken_.value);
-            nextToken(); // Consume size
+            nextToken();
             if (currentToken_.type != TokenType::RBRACKET) {
                 error("Expected ']' after array size.");
                 return nullptr;
             }
-            // currentToken is ']'
             nextToken();
             return std::make_unique<ArrayTypeAST>(std::move(baseType), size, line, col);
         }
@@ -873,7 +878,7 @@ namespace Cider
                 pointerLevel++;
                 nextToken();
             }
-            return std::make_unique<TypeAST>(typeName, pointerLevel, line, col);
+            return std::make_unique<TypeAST>(typeName, pointerLevel, line, col, isVolatile);
         }
         error("Expected type name.");
         return nullptr;
