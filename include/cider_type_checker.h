@@ -493,7 +493,20 @@ namespace Cider {
             }
         }
         void visit(SliceExpr&) override {}
-        void visit(TernaryExpr&) override {}
+        void visit(TernaryExpr& expr) override {
+            expr.getCondition()->accept(*this);
+            if (resolveType(lastExprType_).name != "bool" || lastExprType_.pointerLevel > 0) {
+                error("Ternary condition must be a boolean, got " + lastExprType_.toString(), expr.getLine());
+            }
+            expr.getThenExpr()->accept(*this);
+            TypeInfo thenType = lastExprType_;
+            expr.getElseExpr()->accept(*this);
+            if (!areTypesCompatible(thenType, lastExprType_)) {
+                error("Ternary branches must have compatible types, got " + thenType.toString() +
+                      " and " + lastExprType_.toString(), expr.getLine());
+            }
+            lastExprType_ = thenType;
+        }
         void visit(GroupingExpr& expr) override {
             expr.getExpression()->accept(*this);
         }

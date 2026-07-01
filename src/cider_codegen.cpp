@@ -589,6 +589,18 @@ namespace Cider {
                                 if (instr.dest && !d.empty() && d != "none") addText("    mov " + getSizedReg(d, instr.dest->type) + ", " + getSizedReg("rax", instr.dest->type));
                                 break;
                             }
+                            case IROp::PUSH: {
+                                if (instr.args[0].kind == IRValue::CONSTANT) {
+                                    addText("    push " + std::to_string((long long)instr.args[0].constValue));
+                                } else {
+                                    addText("    push " + a1);
+                                }
+                                break;
+                            }
+                            case IROp::POP: {
+                                addText("    pop " + d);
+                                break;
+                            }
                             case IROp::RET: {
                                 if (instr.args.size() > 0) {
                                     IRType t = instr.args[0].type;

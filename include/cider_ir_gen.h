@@ -990,7 +990,40 @@ namespace Cider {
         void visit(ListExpr&) override {}
         void visit(TableExpr&) override {}
         void visit(SliceExpr&) override {}
-        void visit(TernaryExpr&) override {}
+        void visit(TernaryExpr& expr) override {
+            expr.getCondition()->accept(*this);
+            IRValue cond = lastValue_;
+
+            std::string thenName = nextLabel("tern_then");
+            std::string elseName = nextLabel("tern_else");
+            std::string mergeName = nextLabel("tern_end");
+
+            currentBlock_->addInstruction({IROp::COND_BR, std::nullopt, {cond, IRValue::Label(thenName), IRValue::Label(elseName)}});
+
+            startBlock(thenName);
+            expr.getThenExpr()->accept(*this);
+            IRValue thenVal = lastValue_;
+            TypeInfo thenType = lastExprType_;
+            currentBlock_->addInstruction({IROp::BR, std::nullopt, {IRValue::Label(mergeName)}});
+
+            startBlock(elseName);
+            expr.getElseExpr()->accept(*this);
+            IRValue elseVal = lastValue_;
+            TypeInfo elseType = lastExprType_;
+            currentBlock_->addInstruction({IROp::BR, std::nullopt, {IRValue::Label(mergeName)}});
+
+            startBlock(mergeName);
+            IRType phiType = thenType.pointerLevel > 0 ? IRType::PTR : mapType(thenType.name);
+            IRValue phiDest = IRValue::Register(nextTemp(), phiType);
+            IRInstruction phiInstr;
+            phiInstr.op = IROp::PHI;
+            phiInstr.dest = phiDest;
+            phiInstr.phiArgs[thenName] = thenVal;
+            phiInstr.phiArgs[elseName] = elseVal;
+            currentBlock_->addInstruction(phiInstr);
+            lastValue_ = phiDest;
+            lastExprType_ = thenType;
+        }
         void visit(FunctionExpr&) override {}
         void visit(SuperExpr&) override {}
         void visit(AwaitExpr&) override {}
