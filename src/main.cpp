@@ -18,14 +18,20 @@
 
 int main(int argc, char** argv) {
     if (argc < 2) {
-        std::cerr << "Usage: ciderc <source_file.cdr> [-o output.asm]\n";
+        std::cerr << "Usage: ciderc <source_file.cdr> [-o output.asm] [-v]\n";
         return 1;
     }
 
     std::string sourceFile = argv[1];
     std::string outputFile = "out.asm";
-    if (argc >= 4 && std::string(argv[2]) == "-o") {
-        outputFile = argv[3];
+    bool verbose = false;
+    for (int i = 2; i < argc; ++i) {
+        std::string arg = argv[i];
+        if (arg == "-o" && i + 1 < argc) {
+            outputFile = argv[++i];
+        } else if (arg == "-v" || arg == "--verbose") {
+            verbose = true;
+        }
     }
 
     std::ifstream file(sourceFile);
@@ -41,7 +47,7 @@ int main(int argc, char** argv) {
     Cider::ErrorReporter reporter;
 
     // 1. Lexical Analysis
-    Cider::Lexer lexer(source);
+    Cider::Lexer lexer(source, reporter);
     
     // 2. Parsing
     Cider::Parser parser(lexer, reporter);
@@ -57,7 +63,7 @@ int main(int argc, char** argv) {
     // 3. Semantic Analysis (Phase 1: Symbol Collection)
     Cider::ModuleResolver resolver;
     Cider::SymbolTable symbolTable;
-    Cider::SymbolCollector collector(symbolTable, resolver, reporter);
+    Cider::SymbolCollector collector(symbolTable, resolver, reporter, sourceFile);
     collector.collect(*ast);
     
     if (reporter.hasErrors()) {
@@ -90,7 +96,7 @@ int main(int argc, char** argv) {
     Cider::SSADeconstructor deconstructor;
     deconstructor.process(irModule);
     std::cout << "Successfully deconstructed SSA IR.\n";
-    irModule.print();
+    if (verbose) irModule.print();
     
     // Phase 10: Register Allocation
     Cider::RegisterAllocator regAlloc;

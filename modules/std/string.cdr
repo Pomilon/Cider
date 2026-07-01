@@ -1,0 +1,68 @@
+export func strlen(s: char*) -> int {
+    var len: int = 0;
+    while (*s != 0 as char) {
+        len = len + 1;
+        s = s + 1;
+    }
+    return len;
+}
+
+export func strcmp(a: char*, b: char*) -> int {
+    while (*a != 0 as char && *b != 0 as char && *a == *b) {
+        a = a + 1;
+        b = b + 1;
+    }
+    return (*a as int) - (*b as int);
+}
+
+export func strcpy(dst: char*, src: char*) -> char* {
+    var i: int = 0;
+    while (true) {
+        dst[i] = src[i];
+        if (src[i] == 0 as char) break;
+        i = i + 1;
+    }
+    return dst;
+}
+
+export func strcat(dst: char*, src: char*) -> char* {
+    var d: char* = dst;
+    while (*d != 0 as char) d = d + 1;
+    var s: char* = src;
+    while (*s != 0 as char) {
+        *d = *s;
+        d = d + 1;
+        s = s + 1;
+    }
+    *d = 0 as char;
+    return dst;
+}
+
+export func strchr(s: char*, c: char) -> char* {
+    while (*s != 0 as char) {
+        if (*s == c) return s;
+        s = s + 1;
+    }
+    return nilPtr;
+}
+
+export func memset(ptr: *void, val: u8, num: int) -> *void {
+    var p: u8* = ptr as u8*;
+    var i: int = 0;
+    while (i < num) {
+        p[i] = val;
+        i = i + 1;
+    }
+    return ptr;
+}
+
+export func memcpy(dst: *void, src: *void, num: int) -> *void {
+    var d: u8* = dst as u8*;
+    var s: u8* = src as u8*;
+    var i: int = 0;
+    while (i < num) {
+        d[i] = s[i];
+        i = i + 1;
+    }
+    return dst;
+}

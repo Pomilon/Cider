@@ -14,7 +14,11 @@ namespace Cider {
             return info;
         }
         
-        return {ast->getName(), ast->getPointerLevel()};
+        TypeInfo info;
+        info.name = ast->getName();
+        info.pointerLevel = ast->getPointerLevel();
+        info.isVolatile = ast->isVolatile();
+        return info;
     }
 
     SymbolTable::SymbolTable() {

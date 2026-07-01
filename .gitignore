@@ -5,6 +5,35 @@ out.asm
 out.o
 ciderc
 ciderc_debug
+test/args
+test/arrays
+test/bitwise
+test/bst
+test/complex_stress
+test/compound_bitwise
+test/deep_inheritance
+test/enum
+test/extern
+test/factorial
+test/fibonacci
+test/fn_ptr
+test/foundations_test
+test/fs_test
+test/heap_stress
+test/incdec
+test/linked_list
+test/logical_ops
+test/nested_loops
+test/nolibc_hello
+test/recursion_stress
+test/register_stress
+test/sovereign_alloc
+test/sovereign_stability
+test/stdlib_test
+test/ternary
+test/test_types
+test/trycatch
+test/virtual_methods
 
 # C++ IDEs
 .vscode/

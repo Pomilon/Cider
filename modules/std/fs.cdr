@@ -1,0 +1,96 @@
+// File I/O operations via Linux syscalls
+
+export const O_RDONLY: int = 0;
+export const O_WRONLY: int = 1;
+export const O_RDWR: int = 2;
+export const O_CREAT: int = 64;
+export const O_TRUNC: int = 512;
+export const O_APPEND: int = 1024;
+
+export func open(filename: string, flags: int, mode: int) -> int {
+    var fname: char* = filename as char*;
+    var fl: int = flags;
+    var md: int = mode;
+    var ret: int;
+    asm {
+        "mov rax, 2\n"
+        "mov rdi, {fname}\n"
+        "mov rsi, {fl}\n"
+        "mov rdx, {md}\n"
+        "syscall\n"
+        "mov {ret}, rax\n"
+    }
+    return ret;
+}
+
+export func read(fd: int, buf: *void, count: int) -> int {
+    var f: int = fd;
+    var b: *void = buf;
+    var cnt: int = count;
+    var ret: int;
+    asm {
+        "mov rax, 0\n"
+        "mov rdi, {f}\n"
+        "mov rsi, {b}\n"
+        "mov rdx, {cnt}\n"
+        "syscall\n"
+        "mov {ret}, rax\n"
+    }
+    return ret;
+}
+
+export func write(fd: int, buf: *void, count: int) -> int {
+    var f: int = fd;
+    var b: *void = buf;
+    var cnt: int = count;
+    var ret: int;
+    asm {
+        "mov rax, 1\n"
+        "mov rdi, {f}\n"
+        "mov rsi, {b}\n"
+        "mov rdx, {cnt}\n"
+        "syscall\n"
+        "mov {ret}, rax\n"
+    }
+    return ret;
+}
+
+export func close(fd: int) -> int {
+    var f: int = fd;
+    var ret: int;
+    asm {
+        "mov rax, 3\n"
+        "mov rdi, {f}\n"
+        "syscall\n"
+        "mov {ret}, rax\n"
+    }
+    return ret;
+}
+
+export func lseek(fd: int, offset: int, whence: int) -> int {
+    var f: int = fd;
+    var off: int = offset;
+    var wh: int = whence;
+    var ret: int;
+    asm {
+        "mov rax, 8\n"
+        "mov rdi, {f}\n"
+        "mov rsi, {off}\n"
+        "mov rdx, {wh}\n"
+        "syscall\n"
+        "mov {ret}, rax\n"
+    }
+    return ret;
+}
+
+export func unlink(pathname: string) -> int {
+    var pname: char* = pathname as char*;
+    var ret: int;
+    asm {
+        "mov rax, 87\n"
+        "mov rdi, {pname}\n"
+        "syscall\n"
+        "mov {ret}, rax\n"
+    }
+    return ret;
+}
