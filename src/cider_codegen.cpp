@@ -630,13 +630,27 @@ namespace Cider {
                             case IROp::PUSH: {
                                 if (instr.args[0].kind == IRValue::CONSTANT) {
                                     addText("    push " + std::to_string((long long)instr.args[0].constValue));
+                                } else if (isMem(a1)) {
+                                    IRType t = instr.args[0].type;
+                                    if (t == IRType::I32 || t == IRType::U32) {
+                                        addText("    movsxd rax, " + getSizedReg(a1, IRType::I32));
+                                        addText("    push rax");
+                                    } else {
+                                        addText("    mov rax, " + getSizedReg(a1, t));
+                                        addText("    push rax");
+                                    }
                                 } else {
                                     addText("    push " + a1);
                                 }
                                 break;
                             }
                             case IROp::POP: {
-                                addText("    pop " + d);
+                                if (isMem(d)) {
+                                    addText("    pop rax");
+                                    addText("    mov qword " + d + ", rax");
+                                } else {
+                                    addText("    pop " + d);
+                                }
                                 break;
                             }
                             case IROp::RET: {
