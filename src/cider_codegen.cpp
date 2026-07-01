@@ -223,21 +223,46 @@ namespace Cider {
                         const auto& params = func->getParams();
                         int numParams = std::min((int)params.size(), 6);
                         
-                        // Push parameters to stack to avoid clobbering each other
-                        for (int i = 0; i < numParams; ++i) {
-                            addText("    push " + argRegs[i]);
-                        }
-                        
-                        // Pop into their allocated locations in reverse order
-                        for (int i = numParams - 1; i >= 0; --i) {
-                            addText("    pop r11");
-                            if (alloc.count(params[i])) {
-                                auto& a = alloc.at(params[i]);
-                                if (a.isSpilled) {
-                                    int offset = spillBase + (-a.stackOffset);
-                                    addText("    mov qword [rbp - " + std::to_string(offset) + "], r11");
+                        if (fName == "_start") {
+                            // _start is called by the kernel, not by a call instruction.
+                            // The kernel passes argc on the stack at [rsp] and the argv array
+                            // starts at [rsp+8]. After our prologue, these are at [rbp+8] and
+                            // [rbp+16] respectively.
+                            for (int i = 0; i < numParams; ++i) {
+                                if (i == 0) {
+                                    addText("    mov r11, [rbp + 8]");
+                                } else if (i == 1) {
+                                    addText("    lea r11, [rbp + 16]");
                                 } else {
-                                    addText("    mov " + a.reg + ", r11");
+                                    addText("    xor r11, r11");
+                                }
+                                if (alloc.count(params[i])) {
+                                    auto& a = alloc.at(params[i]);
+                                    if (a.isSpilled) {
+                                        int offset = spillBase + (-a.stackOffset);
+                                        addText("    mov qword [rbp - " + std::to_string(offset) + "], r11");
+                                    } else {
+                                        addText("    mov " + a.reg + ", r11");
+                                    }
+                                }
+                            }
+                        } else {
+                            // Push parameters to stack to avoid clobbering each other
+                            for (int i = 0; i < numParams; ++i) {
+                                addText("    push " + argRegs[i]);
+                            }
+                            
+                            // Pop into their allocated locations in reverse order
+                            for (int i = numParams - 1; i >= 0; --i) {
+                                addText("    pop r11");
+                                if (alloc.count(params[i])) {
+                                    auto& a = alloc.at(params[i]);
+                                    if (a.isSpilled) {
+                                        int offset = spillBase + (-a.stackOffset);
+                                        addText("    mov qword [rbp - " + std::to_string(offset) + "], r11");
+                                    } else {
+                                        addText("    mov " + a.reg + ", r11");
+                                    }
                                 }
                             }
                         }
