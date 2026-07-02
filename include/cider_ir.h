@@ -109,6 +109,9 @@ namespace Cider {
         void addGlobalAsm(const std::string& code) { globalAsm_.push_back(code); }
         const std::vector<std::string>& getGlobalAsm() const { return globalAsm_; }
 
+        void addStringData(const std::string& line) { stringData_.push_back(line); }
+        const std::vector<std::string>& getStringData() const { return stringData_; }
+
         struct GlobalVar {
             std::string name;
             IRType type;
@@ -138,6 +141,7 @@ namespace Cider {
         private:
         std::vector<std::unique_ptr<FunctionIR>> functions_;
         std::vector<std::string> globalAsm_;
+        std::vector<std::string> stringData_;
         std::vector<GlobalVar> globalVars_;
         std::map<std::string, std::vector<std::string>> vtables_;
         std::vector<std::string> externFunctions_;

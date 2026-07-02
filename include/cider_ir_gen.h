@@ -592,6 +592,26 @@ namespace Cider {
             symbolTable_.define(sym);
 
             if (!currentFunction_) {
+                if (auto strInit = dynamic_cast<StringExpr*>(stmt.getInitializer())) {
+                    std::string strLabel = "_gs" + std::to_string(globalStrCount_++);
+                    std::string strData = strInit->getValue();
+                    std::string dataLine = strLabel + ": db ";
+                    for (size_t ci = 0; ci < strData.size(); ++ci) {
+                        if (ci > 0) dataLine += ", ";
+                        char c = strData[ci];
+                        if (c == '\n') dataLine += "10";
+                        else if (c == '\t') dataLine += "9";
+                        else if (c == '\\') dataLine += "'\\\\'";
+                        else if (c == '"') dataLine += "'\\\"'";
+                        else if (c >= 32 && c < 127) dataLine += "'" + std::string(1, c) + "'";
+                        else dataLine += std::to_string((unsigned char)c);
+                    }
+                    dataLine += ", 0";
+                    module_.addStringData(dataLine);
+                    module_.addStringData(stmt.getName() + ": dq " + strLabel);
+                    globalValues_[stmt.getName()] = IRValue::Label(stmt.getName());
+                    return;
+                }
                 double initVal = 0;
                 if (stmt.getInitializer()) {
                     if (auto num = dynamic_cast<NumberExpr*>(stmt.getInitializer())) {
@@ -1427,6 +1447,8 @@ namespace Cider {
                 elemType.arraySize = 0;
             } else if (elemType.pointerLevel > 0) {
                 elemType.pointerLevel--;
+            } else if (elemType.name == "string") {
+                elemType.name = "char";
             }
 
             int elemSize = getTypeSize(elemType);
@@ -1676,6 +1698,7 @@ namespace Cider {
         std::vector<std::vector<DestructorInfo>> destructorStack_;
         bool exceptionGlobalsEnsured_ = false;
         int tempCount_ = 0;
+        int globalStrCount_ = 0;
         int labelCount_ = 0;
         std::string nextTemp() { return "v" + std::to_string(tempCount_++); }
         std::string nextLabel(const std::string& prefix) { 

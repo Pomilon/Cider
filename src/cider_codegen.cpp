@@ -521,18 +521,39 @@ namespace Cider {
                             case IROp::LOAD: {
                                 std::string ptr = a1;
                                 IRType t = (instr.dest ? instr.dest->type : IRType::I32);
-                                std::string sizePrefix = "qword ";
-                                if (t == IRType::I8 || t == IRType::U8) sizePrefix = "byte ";
-                                else if (t == IRType::I16 || t == IRType::U16) sizePrefix = "word ";
-                                else if (t == IRType::I32 || t == IRType::U32) sizePrefix = "dword ";
-                                else if (t == IRType::I64 || t == IRType::U64 || t == IRType::PTR) sizePrefix = "qword ";
-                                std::string srcReg = getSizedReg("rax", t);
                                 std::string addrReg = "r10";
                                 if (isMem(ptr)) addText("    mov r10, " + ptr); else addrReg = ptr;
-                                if (instr.args.size() > 1 && instr.args[1].kind == IRValue::CONSTANT) addText("    mov " + srcReg + ", " + sizePrefix + "[" + addrReg + " + " + std::to_string((int)instr.args[1].constValue) + "]");
-                                else if (instr.args[0].kind == IRValue::LABEL) addText("    mov " + srcReg + ", " + sizePrefix + "[rel " + instr.args[0].name + "]");
-                                else addText("    mov " + srcReg + ", " + sizePrefix + "[" + addrReg + "]");
-                                addText("    mov " + getSizedReg(d, t) + ", " + srcReg);
+                                if (t == IRType::I8 || t == IRType::U8) {
+                                    std::string op = (t == IRType::I8) ? "movsx" : "movzx";
+                                    if (instr.args.size() > 1 && instr.args[1].kind == IRValue::CONSTANT)
+                                        addText("    " + op + " eax, byte [" + addrReg + " + " + std::to_string((int)instr.args[1].constValue) + "]");
+                                    else if (instr.args[0].kind == IRValue::LABEL)
+                                        addText("    " + op + " eax, byte [rel " + instr.args[0].name + "]");
+                                    else
+                                        addText("    " + op + " eax, byte [" + addrReg + "]");
+                                    addText("    mov " + getSizedReg(d, t) + ", al");
+                                } else if (t == IRType::I16 || t == IRType::U16) {
+                                    std::string op = (t == IRType::I16) ? "movsx" : "movzx";
+                                    if (instr.args.size() > 1 && instr.args[1].kind == IRValue::CONSTANT)
+                                        addText("    " + op + " eax, word [" + addrReg + " + " + std::to_string((int)instr.args[1].constValue) + "]");
+                                    else if (instr.args[0].kind == IRValue::LABEL)
+                                        addText("    " + op + " eax, word [rel " + instr.args[0].name + "]");
+                                    else
+                                        addText("    " + op + " eax, word [" + addrReg + "]");
+                                    addText("    mov " + getSizedReg(d, t) + ", ax");
+                                } else {
+                                    std::string sizePrefix = "qword ";
+                                    if (t == IRType::I32 || t == IRType::U32) sizePrefix = "dword ";
+                                    else if (t == IRType::I64 || t == IRType::U64 || t == IRType::PTR) sizePrefix = "qword ";
+                                    std::string srcReg = getSizedReg("rax", t);
+                                    if (instr.args.size() > 1 && instr.args[1].kind == IRValue::CONSTANT)
+                                        addText("    mov " + srcReg + ", " + sizePrefix + "[" + addrReg + " + " + std::to_string((int)instr.args[1].constValue) + "]");
+                                    else if (instr.args[0].kind == IRValue::LABEL)
+                                        addText("    mov " + srcReg + ", " + sizePrefix + "[rel " + instr.args[0].name + "]");
+                                    else
+                                        addText("    mov " + srcReg + ", " + sizePrefix + "[" + addrReg + "]");
+                                    addText("    mov " + getSizedReg(d, t) + ", " + srcReg);
+                                }
                                 break;
                             }
                             case IROp::STORE: {
@@ -715,6 +736,7 @@ namespace Cider {
             for (const auto& line : globalAsmSection) out << "    " << line << "\n";
             out << "\nsection .data\n";
             for (const auto& line : dataSection) out << "    " << line << "\n";
+            for (const auto& line : module.getStringData()) out << "    " << line << "\n";
             out << "\nsection .text\n    extern malloc\n    extern _setjmp\n    extern longjmp\n";
             for (const auto& extFunc : module.getExternFunctions()) {
                 out << "    extern " << extFunc << "\n";

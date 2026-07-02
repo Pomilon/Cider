@@ -569,9 +569,10 @@ namespace Cider {
                 lastExprType_ = objType;
                 lastExprType_.isArray = false;
                 lastExprType_.arraySize = 0;
-            } else if (objType.pointerLevel > 0) {
+            } else if (objType.pointerLevel > 0 || objType.name == "string") {
                 lastExprType_ = objType;
-                lastExprType_.pointerLevel--;
+                if (objType.pointerLevel > 0) lastExprType_.pointerLevel--;
+                else lastExprType_ = {"char", 0};
             } else {
                 error("Cannot index non-array and non-pointer type " + objType.toString(), expr.getLine());
                 lastExprType_ = {"error", 0};
