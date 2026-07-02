@@ -1,0 +1,81 @@
+from std.io import puts, exit;
+from std.fs import open, read, close, lseek, O_RDONLY;
+
+func _start(argc: int, argv: **char) {
+    var hexChars: string = "0123456789abcdef";
+    var hexp: *char = hexChars as *char;
+    if (argc < 2) {
+        puts("hexdump: missing filename\n");
+        exit(1);
+    }
+    var fd: int = open(argv[1] as string, O_RDONLY, 0);
+    if (fd < 0) {
+        puts("hexdump: cannot open: ");
+        puts(argv[1] as string);
+        puts("\n");
+        exit(1);
+    }
+    var buf: [char; 4096];
+    var offset: int = 0;
+    while (true) {
+        var nread: int = read(fd, buf as *void, 4096);
+        if (nread <= 0) { break; }
+        var bufpos: int = 0;
+        while (bufpos < nread) {
+            var remain: int = nread - bufpos;
+            var lineBytes: int = 16;
+            if (remain < 16) { lineBytes = remain; }
+            var out: [char; 80];
+            var pos: int = 0;
+            var off: int = offset;
+            var j: int = 7;
+            while (j >= 0) {
+                out[j] = hexp[off - (off / 16) * 16];
+                off = off / 16;
+                j = j - 1;
+            }
+            pos = 8;
+            out[pos] = ' ';
+            pos = pos + 1;
+            out[pos] = ' ';
+            pos = pos + 1;
+            var i: int = 0;
+            while (i < 16) {
+                if (i < lineBytes) {
+                    var val: int = buf[bufpos + i] as int;
+                    out[pos] = hexp[val / 16];
+                    pos = pos + 1;
+                    out[pos] = hexp[val - (val / 16) * 16];
+                    pos = pos + 1;
+                } else {
+                    out[pos] = ' ';
+                    pos = pos + 1;
+                    out[pos] = ' ';
+                    pos = pos + 1;
+                }
+                if (i == 7) { out[pos] = ' '; pos = pos + 1; }
+                i = i + 1;
+            }
+            out[pos] = ' ';
+            pos = pos + 1;
+            out[pos] = '|';
+            pos = pos + 1;
+            i = 0;
+            while (i < lineBytes) {
+                var c: int = buf[bufpos + i] as int;
+                if (c >= 32) {
+                    if (c < 127) { out[pos] = c; } else { out[pos] = '.'; }
+                } else { out[pos] = '.'; }
+                pos = pos + 1;
+                i = i + 1;
+            }
+            out[pos] = '|';
+            pos = pos + 1;
+            out[pos] = 0;
+            puts(out as string);
+            offset = offset + 16;
+            bufpos = bufpos + 16;
+        }
+    }
+    close(fd);
+}
