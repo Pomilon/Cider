@@ -18,6 +18,7 @@ namespace Cider {
             std::vector<std::string> globalAsmSection;
             std::vector<std::string> textSection;
             int strCount = 0;
+            std::set<std::string> generatedFunctions_;
 
             auto addBss = [&](const std::string& line) { bssSection.push_back(line); };
             auto addData = [&](const std::string& line) { dataSection.push_back(line); };
@@ -98,6 +99,9 @@ namespace Cider {
             std::vector<std::string> argRegs = {"rdi", "rsi", "rdx", "rcx", "r8", "r9"};
 
             for (auto& func : module.getFunctions()) {
+                if (generatedFunctions_.count(func->getName())) continue;
+                generatedFunctions_.insert(func->getName());
+
                 int regAllocStackSize = 0;
                 auto alloc = regAlloc.allocate(*func, regAllocStackSize);
                 
@@ -135,7 +139,7 @@ namespace Cider {
                 }
                 
                 int spillBase = currentAllocaOffset;
-                int totalStack = spillBase + regAllocStackSize;
+                int totalStack = spillBase + regAllocStackSize + 8; // +8 to protect locals from call pushes
                 
                 if (totalStack % 16 != 0) {
                     totalStack += 16 - (totalStack % 16);
@@ -468,8 +472,9 @@ namespace Cider {
                                     addText("    mov rax, " + a1);
                                     addText("    cmp rax, 0");
                                 } else if (isMem(a1)) {
-                                    addText("    mov rax, " + a1);
-                                    addText("    cmp rax, 0");
+                                    IRType ct = instr.args[0].type;
+                                    addText("    mov " + getSizedReg("rax", ct) + ", " + getSizedReg(a1, ct));
+                                    addText("    cmp " + getSizedReg("rax", ct) + ", 0");
                                 } else {
                                     addText("    cmp " + a1 + ", 0");
                                 }
@@ -543,9 +548,9 @@ namespace Cider {
                                     addText("    mov " + getSizedReg(d, t) + ", ax");
                                 } else {
                                     std::string sizePrefix = "qword ";
-                                    if (t == IRType::I32 || t == IRType::U32) sizePrefix = "dword ";
-                                    else if (t == IRType::I64 || t == IRType::U64 || t == IRType::PTR) sizePrefix = "qword ";
-                                    std::string srcReg = getSizedReg("rax", t);
+                                if (t == IRType::I32 || t == IRType::U32 || t == IRType::BOOL) sizePrefix = "dword ";
+                                else if (t == IRType::I64 || t == IRType::U64 || t == IRType::PTR) sizePrefix = "qword ";
+                                std::string srcReg = getSizedReg("rax", t);
                                     if (instr.args.size() > 1 && instr.args[1].kind == IRValue::CONSTANT)
                                         addText("    mov " + srcReg + ", " + sizePrefix + "[" + addrReg + " + " + std::to_string((int)instr.args[1].constValue) + "]");
                                     else if (instr.args[0].kind == IRValue::LABEL)

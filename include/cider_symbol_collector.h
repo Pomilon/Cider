@@ -25,6 +25,11 @@ namespace Cider {
             for (auto& stmt : program.getStatements()) {
                 visitStmtForTemplateCalls(stmt.get());
             }
+            for (auto& imported : program.getImportedAsts()) {
+                for (auto& stmt : imported->getStatements()) {
+                    visitStmtForTemplateCalls(stmt.get());
+                }
+            }
         }
 
         const std::map<std::string, std::shared_ptr<TemplateSymbol>>& getTemplateTable() const {
@@ -355,7 +360,6 @@ namespace Cider {
                 reporter_.error("Could not resolve module '" + stmt.getModuleName() + "'", stmt.getLine(), stmt.getColumn());
                 return;
             }
-
             std::ifstream file(result.path);
             if (!file) return;
             std::stringstream buffer;
@@ -634,6 +638,30 @@ namespace Cider {
                     return tmplArgs[i];
                 }
             }
+            // Recursively substitute within template type arguments like Result<T,E>
+            size_t pos = name.find('<');
+            if (pos != std::string::npos) {
+                std::string baseName = name.substr(0, pos);
+                std::string argsStr = name.substr(pos + 1, name.size() - pos - 2);
+                std::vector<std::string> args;
+                size_t start = 0;
+                while (start < argsStr.size()) {
+                    size_t comma = argsStr.find(',', start);
+                    if (comma == std::string::npos) {
+                        args.push_back(argsStr.substr(start));
+                        break;
+                    }
+                    args.push_back(argsStr.substr(start, comma - start));
+                    start = comma + 1;
+                }
+                std::string result = baseName + "<";
+                for (size_t i = 0; i < args.size(); i++) {
+                    if (i > 0) result += ",";
+                    result += substituteTypeName(args[i], tmplParams, tmplArgs);
+                }
+                result += ">";
+                return result;
+            }
             return name;
         }
 
@@ -648,12 +676,25 @@ namespace Cider {
 
             // Find the original StructDeclStmt in the program
             StructDeclStmt* tmplStruct = nullptr;
-            for (auto& s : currentProgram_->getStatements()) {
-                if (auto sd = dynamic_cast<StructDeclStmt*>(s.get())) {
-                    if (sd->getName() == baseName) {
-                        tmplStruct = sd;
-                        break;
+            auto findStruct = [&](const std::vector<std::unique_ptr<Statement>>& stmts) -> StructDeclStmt* {
+                for (auto& s : stmts) {
+                    Statement* inner = s.get();
+                    if (auto es = dynamic_cast<ExportStmt*>(inner)) {
+                        inner = es->getStmt();
                     }
+                    if (auto sd = dynamic_cast<StructDeclStmt*>(inner)) {
+                        if (sd->getName() == baseName) {
+                            return sd;
+                        }
+                    }
+                }
+                return nullptr;
+            };
+            tmplStruct = findStruct(currentProgram_->getStatements());
+            if (!tmplStruct) {
+                for (auto& imported : currentProgram_->getImportedAsts()) {
+                    tmplStruct = findStruct(imported->getStatements());
+                    if (tmplStruct) break;
                 }
             }
             if (!tmplStruct) return;
@@ -831,6 +872,28 @@ namespace Cider {
                     }
                     return std::make_unique<BlockStmt>(std::move(clonedStmts), bs->getLine(), bs->getColumn());
                 }
+                case ASTNode::ASSIGN_STMT: {
+                    auto as = dynamic_cast<AssignStmt*>(stmt);
+                    return std::make_unique<AssignStmt>(
+                        cloneExprWithSubst(as->getTarget(), tmplParams, tmplArgs),
+                        cloneExprWithSubst(as->getValue(), tmplParams, tmplArgs),
+                        as->getLine(), as->getColumn(), as->getOp());
+                }
+                case ASTNode::IF_STMT: {
+                    auto is = dynamic_cast<IfStmt*>(stmt);
+                    std::vector<std::unique_ptr<Statement>> clonedThen;
+                    for (auto& s : is->getThenBranch()) {
+                        clonedThen.push_back(cloneStmtWithSubst(s.get(), tmplParams, tmplArgs));
+                    }
+                    std::vector<std::unique_ptr<Statement>> clonedElse;
+                    for (auto& s : is->getElseBranch()) {
+                        clonedElse.push_back(cloneStmtWithSubst(s.get(), tmplParams, tmplArgs));
+                    }
+                    return std::make_unique<IfStmt>(
+                        cloneExprWithSubst(is->getCondition(), tmplParams, tmplArgs),
+                        std::move(clonedThen), std::move(clonedElse),
+                        is->getLine(), is->getColumn());
+                }
                 default:
                     return nullptr;
             }
@@ -899,6 +962,14 @@ namespace Cider {
                         std::move(clonedArgs),
                         ce->getLine(), ce->getColumn());
                 }
+                case ASTNode::MEMBER_ACCESS_EXPR: {
+                    auto ma = dynamic_cast<MemberAccessExpr*>(expr);
+                    return std::make_unique<MemberAccessExpr>(
+                        cloneExprWithSubst(ma->getObject(), tmplParams, tmplArgs),
+                        ma->getMember(),
+                        ma->getLine(), ma->getColumn(),
+                        ma->isArrow());
+                }
                 default:
                     return nullptr;
             }
@@ -919,10 +990,14 @@ namespace Cider {
         void instantiateFunctionTemplate(const std::string& mangledName) {
             auto parsed = parseMangledTemplateName(mangledName);
             auto it = templateTable_.find(parsed.first);
-            if (it == templateTable_.end()) return;
+            if (it == templateTable_.end()) {
+                return;
+            }
 
             // Check if already instantiated (use asm-safe name to avoid conflicts)
-            if (symbolTable_.resolve(mangledName)) return;
+            if (symbolTable_.resolve(mangledName)) {
+                return;
+            }
 
             auto tmplSym = it->second;
             if (parsed.second.size() != tmplSym->typeParams.size()) {
@@ -934,12 +1009,25 @@ namespace Cider {
 
             // Find the original FunctionDeclStmt in the program
             FunctionDeclStmt* tmplFunc = nullptr;
-            for (auto& s : currentProgram_->getStatements()) {
-                if (auto fd = dynamic_cast<FunctionDeclStmt*>(s.get())) {
-                    if (fd->getName() == parsed.first && fd->hasTemplateParams()) {
-                        tmplFunc = fd;
-                        break;
+            auto findTemplateFunc = [&](const std::vector<std::unique_ptr<Statement>>& stmts) -> FunctionDeclStmt* {
+                for (auto& s : stmts) {
+                    Statement* inner = s.get();
+                    if (auto es = dynamic_cast<ExportStmt*>(inner)) {
+                        inner = es->getStmt();
                     }
+                    if (auto fd = dynamic_cast<FunctionDeclStmt*>(inner)) {
+                        if (fd->getName() == parsed.first && fd->hasTemplateParams()) {
+                            return fd;
+                        }
+                    }
+                }
+                return nullptr;
+            };
+            tmplFunc = findTemplateFunc(currentProgram_->getStatements());
+            if (!tmplFunc) {
+                for (auto& imported : currentProgram_->getImportedAsts()) {
+                    tmplFunc = findTemplateFunc(imported->getStatements());
+                    if (tmplFunc) break;
                 }
             }
             if (!tmplFunc) return;
@@ -964,7 +1052,6 @@ namespace Cider {
             }
 
             symbolTable_.define(funcSym);
-
             // Clone the full function with type substitution and add to program
             std::vector<FunctionDeclStmt::Parameter> clonedParams;
             for (auto& param : tmplFunc->getParams()) {

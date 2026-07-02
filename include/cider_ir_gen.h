@@ -129,7 +129,7 @@ namespace Cider {
             if (name == "i64") return IRType::I64;
             if (name == "u64") return IRType::U64;
             if (name == "float") return IRType::F32;
-            if (name == "bool") return IRType::BOOL;
+            if (name == "bool") return IRType::I32;
             if (name == "void") return IRType::VOID;
             return IRType::PTR;
         }
@@ -270,6 +270,21 @@ namespace Cider {
             if (stmt.getValue()) {
                 stmt.getValue()->accept(*this);
                 IRValue val = lastValue_;
+
+                // Copy struct return values to local stack to avoid dangling pointers
+                TypeInfo retType = lastExprType_;
+                if (retType.pointerLevel == 0) {
+                    int structSize = getTypeSize(retType);
+                    auto typeSym = symbolTable_.resolve(retType.name);
+                    if (typeSym && (typeSym->kind == SymbolKind::STRUCT || typeSym->kind == SymbolKind::CLASS)) {
+                        IRValue localPtr = IRValue::Register(nextTemp(), IRType::PTR);
+                        currentBlock_->addInstruction({IROp::ALLOCA, localPtr, {IRValue::Constant(structSize, IRType::I32)}});
+                        currentBlock_->addInstruction({IROp::MEMCPY, std::nullopt, {localPtr, val, IRValue::Constant(structSize, IRType::I32)}});
+                        val = localPtr;
+                        lastExprType_.isUserDefined = true;
+                    }
+                }
+
                 emitDefers();
                 emitDestructors();
                 currentBlock_->addInstruction({IROp::RET, std::nullopt, {val}});
@@ -287,12 +302,14 @@ namespace Cider {
             bool isVirtual = false;
             int vtableIndex = -1;
             IRValue objPtr = IRValue::Constant(0, IRType::PTR);
+            std::shared_ptr<FunctionSymbol> resolvedFuncSym = nullptr;
 
             if (auto id = dynamic_cast<IdentifierExpr*>(calleeExpr)) {
                 std::string lookupName = id->getName();
                 auto sym = symbolTable_.resolve(lookupName);
                 if (sym && sym->kind == SymbolKind::FUNCTION) {
                     funcName = sanitizeAsmName(lookupName);
+                    resolvedFuncSym = std::static_pointer_cast<FunctionSymbol>(sym);
                 }
             } else if (auto mem = dynamic_cast<MemberAccessExpr*>(calleeExpr)) {
                 // Method call: obj.method() or obj->method()
@@ -374,7 +391,12 @@ namespace Cider {
                     args.push_back(lastValue_);
                 }
                 
-                auto sym = symbolTable_.resolve(funcName);
+                auto sym = resolvedFuncSym;
+                if (!sym) {
+                    auto rawSym = symbolTable_.resolve(funcName);
+                    if (rawSym && rawSym->kind == SymbolKind::FUNCTION)
+                        sym = std::static_pointer_cast<FunctionSymbol>(rawSym);
+                }
                 IRType retIRType = IRType::I32;
                 if (sym && sym->kind == SymbolKind::FUNCTION) {
                     auto funcSym = std::static_pointer_cast<FunctionSymbol>(sym);

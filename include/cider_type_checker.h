@@ -460,6 +460,10 @@ namespace Cider {
             lastExprType_ = funcSym->returnType;
         }
         void visit(FunctionDeclStmt& stmt) override {
+            // Skip template function bodies (uninstantiated)
+            if (stmt.hasTemplateParams()) return;
+
+
             symbolTable_.enterScope();
             
             if (!currentClassName_.empty()) {

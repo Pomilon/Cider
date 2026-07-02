@@ -73,8 +73,16 @@ int main(int argc, char** argv) {
     std::cout << "Successfully collected symbols.\n";
     
     // 3.5 Semantic Analysis (Phase 2: Type Checking)
-    Cider::TypeChecker typeChecker(symbolTable, reporter);
-    typeChecker.check(*ast);
+
+    {
+        Cider::TypeChecker typeChecker(symbolTable, reporter);
+        typeChecker.check(*ast);
+    }
+    
+    if (reporter.hasErrors()) {
+        std::cerr << "Compilation failed during type checking.\n";
+        return 1;
+    }
     
     if (reporter.hasErrors()) {
         std::cerr << "Compilation failed during type checking.\n";
