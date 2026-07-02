@@ -58,10 +58,10 @@ namespace Cider {
                             if (sm.parameterTypes.size() != im.parameterTypes.size()) continue;
                             bool paramsMatch = true;
                             for (size_t pi = 0; pi < sm.parameterTypes.size(); ++pi) {
-                                if (sm.parameterTypes[pi].name != im.parameterTypes[pi].name) { paramsMatch = false; break; }
+                                if (!(sm.parameterTypes[pi] == im.parameterTypes[pi])) { paramsMatch = false; break; }
                             }
                             if (!paramsMatch) continue;
-                            if (sm.returnType.name != im.returnType.name) continue;
+                            if (!(sm.returnType == im.returnType)) continue;
                             found = true;
                             break;
                         }
