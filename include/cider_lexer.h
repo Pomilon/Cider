@@ -101,6 +101,7 @@ namespace Cider
         BIT_OR,
         BIT_XOR,
         BIT_NOT,
+        TILDE,
         LSHIFT,
         RSHIFT,
 

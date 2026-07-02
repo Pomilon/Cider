@@ -38,12 +38,14 @@ namespace Cider
     {
         nextToken();
         nextToken();
+        nextToken();
     }
 
     void Parser::nextToken()
     {
         currentToken_ = peekToken_;
-        peekToken_ = lexer_.getNextToken();
+        peekToken_ = peekToken2_;
+        peekToken2_ = lexer_.getNextToken();
     }
 
     bool Parser::expect(TokenType type)
@@ -182,6 +184,34 @@ namespace Cider
         {
             std::string val = currentToken_.value;
             nextToken();
+
+            // Check for template arguments: funcName<Type1,Type2>
+            if (currentToken_.type == TokenType::LT &&
+                isTypeToken(peekToken_.type) &&
+                (peekToken2_.type == TokenType::GT || peekToken2_.type == TokenType::COMMA)) {
+                nextToken(); // consume <
+                val += "<";
+                while (true) {
+                    if (!isTypeToken(currentToken_.type)) {
+                        error("Expected type in template argument.");
+                        return nullptr;
+                    }
+                    val += currentToken_.value;
+                    nextToken();
+                    if (currentToken_.type == TokenType::COMMA) {
+                        val += ",";
+                        nextToken();
+                    } else if (currentToken_.type == TokenType::GT) {
+                        val += ">";
+                        nextToken(); // consume >
+                        break;
+                    } else {
+                        error("Expected ',' or '>' in template arguments.");
+                        return nullptr;
+                    }
+                }
+            }
+
             return std::make_unique<IdentifierExpr>(val, line, col);
         }
         case TokenType::THIS:
@@ -353,7 +383,7 @@ namespace Cider
     {
         int line = currentToken_.line;
         int col = currentToken_.column;
-        if (currentToken_.type == TokenType::INCREMENT || currentToken_.type == TokenType::DECREMENT || currentToken_.type == TokenType::MINUS || currentToken_.type == TokenType::NOT || currentToken_.type == TokenType::MULTIPLY || currentToken_.type == TokenType::AMPERSAND || currentToken_.type == TokenType::BIT_NOT)
+        if (currentToken_.type == TokenType::INCREMENT || currentToken_.type == TokenType::DECREMENT || currentToken_.type == TokenType::MINUS || currentToken_.type == TokenType::NOT || currentToken_.type == TokenType::MULTIPLY || currentToken_.type == TokenType::AMPERSAND || currentToken_.type == TokenType::BIT_NOT || currentToken_.type == TokenType::TILDE)
         {
             std::string op = currentToken_.value;
             nextToken();
@@ -887,6 +917,32 @@ namespace Cider
             currentToken_.type == TokenType::CHAR_TYPE || currentToken_.type == TokenType::BYTE_TYPE) {
             std::string typeName = currentToken_.value;
             nextToken();
+
+            // Check for template type arguments: Vec<int> or Vec<int, float>
+            if (currentToken_.type == TokenType::LT) {
+                nextToken(); // consume <
+                typeName += "<";
+                while (true) {
+                    if (!isTypeToken(currentToken_.type)) {
+                        error("Expected type in template argument.");
+                        return nullptr;
+                    }
+                    typeName += currentToken_.value;
+                    nextToken();
+                    if (currentToken_.type == TokenType::COMMA) {
+                        typeName += ",";
+                        nextToken();
+                    } else if (currentToken_.type == TokenType::GT) {
+                        typeName += ">";
+                        nextToken(); // consume >
+                        break;
+                    } else {
+                        error("Expected ',' or '>' in template arguments.");
+                        return nullptr;
+                    }
+                }
+            }
+
             while (currentToken_.type == TokenType::MULTIPLY) {
                 pointerLevel++;
                 nextToken();
@@ -895,6 +951,42 @@ namespace Cider
         }
         error("Expected type name.");
         return nullptr;
+    }
+
+    bool Parser::isTypeToken(TokenType type) const {
+        return type == TokenType::IDENTIFIER ||
+               type == TokenType::INT || type == TokenType::FLOAT ||
+               type == TokenType::BOOL_TYPE || type == TokenType::STRING_TYPE ||
+               type == TokenType::VOID ||
+               type == TokenType::U8 || type == TokenType::I8 ||
+               type == TokenType::U16 || type == TokenType::I16 ||
+               type == TokenType::U32 || type == TokenType::I32 ||
+               type == TokenType::U64 || type == TokenType::I64 ||
+               type == TokenType::CHAR_TYPE || type == TokenType::BYTE_TYPE;
+    }
+
+    std::vector<std::string> Parser::parseTemplateParams() {
+        std::vector<std::string> params;
+        if (currentToken_.type != TokenType::LT) return params;
+        nextToken(); // consume <
+        while (true) {
+            if (currentToken_.type != TokenType::IDENTIFIER) {
+                error("Expected template parameter name.");
+                return params;
+            }
+            params.push_back(currentToken_.value);
+            nextToken();
+            if (currentToken_.type == TokenType::COMMA) {
+                nextToken();
+            } else if (currentToken_.type == TokenType::GT) {
+                nextToken(); // consume >
+                break;
+            } else {
+                error("Expected ',' or '>' in template parameter list.");
+                return params;
+            }
+        }
+        return params;
     }
 
     std::unique_ptr<Statement> Parser::parseVarDeclarationStatement()
@@ -1387,15 +1479,37 @@ namespace Cider
     {
         int line = currentToken_.line;
         int col = currentToken_.column;
+        bool isDestructor = false;
+        std::string funcName;
         nextToken(); // Consume function/func
 
-        if (currentToken_.type != TokenType::IDENTIFIER)
+        if (currentToken_.type == TokenType::TILDE)
         {
-            error("Expected function name.");
-            return nullptr;
+            isDestructor = true;
+            nextToken(); // Consume ~
+            if (currentToken_.type != TokenType::IDENTIFIER)
+            {
+                error("Expected class name after '~' in destructor.");
+                return nullptr;
+            }
+            funcName = "~" + currentToken_.value;
+            nextToken();
         }
-        std::string funcName = currentToken_.value;
-        nextToken();
+        else
+        {
+            if (currentToken_.type != TokenType::IDENTIFIER)
+            {
+                error("Expected function name.");
+                return nullptr;
+            }
+            funcName = currentToken_.value;
+            nextToken();
+        }
+
+        std::vector<std::string> templateParams;
+        if (currentToken_.type == TokenType::LT) {
+            templateParams = parseTemplateParams();
+        }
 
         if (currentToken_.type != TokenType::LPAREN)
         {
@@ -1476,7 +1590,7 @@ namespace Cider
             nextToken();
         }
 
-        return std::make_unique<FunctionDeclStmt>(funcName, std::move(params), std::move(body), std::move(returnType), line, col, isAsync, isVirtual, isOverride, isExtern);
+        return std::make_unique<FunctionDeclStmt>(funcName, std::move(params), std::move(body), std::move(returnType), line, col, isAsync, isVirtual, isOverride, isExtern, isDestructor, std::move(templateParams));
     }
 
     std::unique_ptr<Statement> Parser::parseStructDeclaration(bool isUnion) {
@@ -1490,6 +1604,11 @@ namespace Cider
         }
         std::string structName = currentToken_.value;
         nextToken();
+
+        std::vector<std::string> templateParams;
+        if (currentToken_.type == TokenType::LT) {
+            templateParams = parseTemplateParams();
+        }
 
         if (currentToken_.type != TokenType::LBRACE) {
             error("Expected '{' for struct body.");
@@ -1527,7 +1646,7 @@ namespace Cider
         }
         nextToken();
 
-        return std::make_unique<StructDeclStmt>(structName, std::move(fields), line, col, isUnion);
+        return std::make_unique<StructDeclStmt>(structName, std::move(fields), line, col, isUnion, std::move(templateParams));
     }
 
     std::unique_ptr<Statement> Parser::parseEnumDeclaration() {
@@ -1587,7 +1706,6 @@ namespace Cider
         nextToken(); // Consume '='
 
         auto targetType = parseType();
-        nextToken(); // Move past type
 
         if (currentToken_.type != TokenType::SEMICOLON) {
             error("Expected ';' after type alias.");

@@ -21,6 +21,14 @@ namespace Cider {
         void collect(Program& program) {
             currentProgram_ = &program;
             program.accept(*this);
+            // Post-processing: scan for function template call instantiations
+            for (auto& stmt : program.getStatements()) {
+                visitStmtForTemplateCalls(stmt.get());
+            }
+        }
+
+        const std::map<std::string, std::shared_ptr<TemplateSymbol>>& getTemplateTable() const {
+            return templateTable_;
         }
 
         // Visitor methods
@@ -70,10 +78,15 @@ namespace Cider {
         }
 
         void visit(VarDeclStmt& stmt) override {
+            auto typeInfo = TypeInfo::fromAST(stmt.getTypeAST());
+            // Check for struct template instantiation (e.g., Vec<int>)
+            if (!typeInfo.isArray && typeInfo.pointerLevel == 0) {
+                checkAndInstantiateStructTemplate(typeInfo.name);
+            }
             auto sym = std::make_shared<Symbol>();
             sym->kind = SymbolKind::VARIABLE;
             sym->name = stmt.getName();
-            sym->type = TypeInfo::fromAST(stmt.getTypeAST());
+            sym->type = typeInfo;
             sym->line = stmt.getLine();
             sym->col = stmt.getColumn();
             sym->isConst = stmt.isConst();
@@ -86,6 +99,18 @@ namespace Cider {
         }
 
         void visit(FunctionDeclStmt& stmt) override {
+            // Check for template function declaration
+            if (stmt.hasTemplateParams()) {
+                auto tmplSym = std::make_shared<TemplateSymbol>();
+                tmplSym->kind = SymbolKind::TEMPLATE;
+                tmplSym->name = stmt.getName();
+                tmplSym->typeParams = stmt.getTemplateParams();
+                // We can't clone the AST here easily, so we'll store a reference
+                // by re-inserting the instantiation logic lazily
+                templateTable_[stmt.getName()] = tmplSym;
+                return;
+            }
+
             std::string prevClass = currentClassName_;
             // If it's a method, currentClassName_ should already be set by visit(ClassDeclStmt)
             // But we don't want it to persist into nested functions if Cider supports them.
@@ -104,7 +129,14 @@ namespace Cider {
             sym->isExtern = stmt.isExtern();
 
             for (auto& param : stmt.getParams()) {
-                sym->parameterTypes.push_back(TypeInfo::fromAST(param.second.get()));
+                TypeInfo paramType = TypeInfo::fromAST(param.second.get());
+                if (!paramType.isInterface && paramType.pointerLevel == 0) {
+                    auto typeSym = symbolTable_.resolve(paramType.name);
+                    if (typeSym && typeSym->kind == SymbolKind::INTERFACE) {
+                        paramType.isInterface = true;
+                    }
+                }
+                sym->parameterTypes.push_back(paramType);
             }
 
             if (symbolTable_.getCurrentScope()->resolveLocal(sym->name)) {
@@ -148,6 +180,16 @@ namespace Cider {
             currentClassName_ = prevClass;
         }
         void visit(StructDeclStmt& stmt) override {
+            // Check for template struct declaration
+            if (stmt.hasTemplateParams()) {
+                auto tmplSym = std::make_shared<TemplateSymbol>();
+                tmplSym->kind = SymbolKind::TEMPLATE;
+                tmplSym->name = stmt.getName();
+                tmplSym->typeParams = stmt.getTemplateParams();
+                templateTable_[stmt.getName()] = tmplSym;
+                return;
+            }
+
             auto sym = std::make_shared<StructSymbol>();
             sym->kind = SymbolKind::STRUCT;
             sym->name = stmt.getName();
@@ -189,6 +231,7 @@ namespace Cider {
             } else {
                 symbolTable_.define(sym);
             }
+            structClassNames_.push_back(stmt.getName());
         }
 
         void visit(InterfaceDeclStmt& stmt) override {
@@ -447,6 +490,16 @@ namespace Cider {
                     currentOffset += getFieldSize(f.type);
                     sym->fields.push_back(f);
                 } else if (auto method = dynamic_cast<FunctionDeclStmt*>(member.get())) {
+                    if (method->isDestructor()) {
+                        sym->destructorName = sym->name + "_" + method->getName();
+                        auto funcSym = std::make_shared<FunctionSymbol>();
+                        funcSym->kind = SymbolKind::FUNCTION;
+                        funcSym->name = sym->destructorName;
+                        funcSym->returnType = {"void", 0};
+                        funcSym->parameterTypes = {{sym->name, 1}};
+                        symbolTable_.define(funcSym);
+                        continue;
+                    }
                     StructSymbol::Method m;
                     m.name = method->getName();
                     m.mangledName = sym->name + "_" + m.name;
@@ -553,6 +606,431 @@ namespace Cider {
             return 8;
         }
 
+        // Template instantiation helpers
+        static std::pair<std::string, std::vector<std::string>> parseMangledTemplateName(const std::string& mangled) {
+            size_t pos = mangled.find('<');
+            if (pos == std::string::npos) return {mangled, {}};
+            std::string baseName = mangled.substr(0, pos);
+            std::string argsStr = mangled.substr(pos + 1, mangled.size() - pos - 2);
+            std::vector<std::string> args;
+            size_t start = 0;
+            while (start < argsStr.size()) {
+                size_t comma = argsStr.find(',', start);
+                if (comma == std::string::npos) {
+                    args.push_back(argsStr.substr(start));
+                    break;
+                }
+                args.push_back(argsStr.substr(start, comma - start));
+                start = comma + 1;
+            }
+            return {baseName, args};
+        }
+
+        static std::string substituteTypeName(const std::string& name,
+                                              const std::vector<std::string>& tmplParams,
+                                              const std::vector<std::string>& tmplArgs) {
+            for (size_t i = 0; i < tmplParams.size(); i++) {
+                if (name == tmplParams[i]) {
+                    return tmplArgs[i];
+                }
+            }
+            return name;
+        }
+
+        void checkAndInstantiateStructTemplate(const std::string& typeName) {
+            size_t pos = typeName.find('<');
+            if (pos == std::string::npos) return;
+            std::string baseName = typeName.substr(0, pos);
+            auto it = templateTable_.find(baseName);
+            if (it == templateTable_.end()) return;
+            auto tmplSym = it->second;
+            if (tmplSym->kind != SymbolKind::TEMPLATE) return;
+
+            // Find the original StructDeclStmt in the program
+            StructDeclStmt* tmplStruct = nullptr;
+            for (auto& s : currentProgram_->getStatements()) {
+                if (auto sd = dynamic_cast<StructDeclStmt*>(s.get())) {
+                    if (sd->getName() == baseName) {
+                        tmplStruct = sd;
+                        break;
+                    }
+                }
+            }
+            if (!tmplStruct) return;
+
+            auto parsed = parseMangledTemplateName(typeName);
+            if (parsed.second.size() != tmplSym->typeParams.size()) {
+                reporter_.error("Template '" + baseName + "' expects " +
+                    std::to_string(tmplSym->typeParams.size()) + " type arguments, got " +
+                    std::to_string(parsed.second.size()), 0, 0);
+                return;
+            }
+
+            auto structSym = std::make_shared<StructSymbol>();
+            structSym->kind = SymbolKind::STRUCT;
+            structSym->name = typeName;
+            structSym->line = 0;
+            structSym->col = 0;
+
+            int currentOffset = 0;
+            for (auto& field : tmplStruct->getFields()) {
+                StructSymbol::Field f;
+                f.name = field.first;
+                f.type = TypeInfo::fromAST(field.second.get());
+                f.type.name = substituteTypeName(f.type.name, tmplSym->typeParams, parsed.second);
+                f.offset = currentOffset;
+                int size = getFieldSize(f.type);
+                currentOffset += size;
+                structSym->fields.push_back(f);
+            }
+            structSym->totalSize = currentOffset;
+
+            // Define in the global scope so it's visible to all phases
+            auto globalScope = symbolTable_.getCurrentScope();
+            while (globalScope->getParent()) globalScope = globalScope->getParent();
+            if (!globalScope->resolveLocal(typeName)) {
+                globalScope->define(structSym);
+                structClassNames_.push_back(typeName);
+            }
+        }
+
+        void visitStmtForTemplateCalls(Statement* stmt) {
+            if (!stmt) return;
+            switch (stmt->getType()) {
+                case ASTNode::FUNCTION_DECL_STMT:
+                    if (auto fd = dynamic_cast<FunctionDeclStmt*>(stmt)) {
+                        for (auto& s : fd->getBody()) visitStmtForTemplateCalls(s.get());
+                    }
+                    break;
+                case ASTNode::EXPRESSION_STMT:
+                    if (auto es = dynamic_cast<ExpressionStmt*>(stmt))
+                        visitExprForTemplateCalls(es->getExpression());
+                    break;
+                case ASTNode::RETURN_STMT:
+                    if (auto rs = dynamic_cast<ReturnStmt*>(stmt)) {
+                        if (rs->getValue()) visitExprForTemplateCalls(rs->getValue());
+                    }
+                    break;
+                case ASTNode::VAR_DECL_STMT:
+                    if (auto vs = dynamic_cast<VarDeclStmt*>(stmt)) {
+                        if (vs->getInitializer()) visitExprForTemplateCalls(vs->getInitializer());
+                    }
+                    break;
+                case ASTNode::ASSIGN_STMT:
+                    if (auto as = dynamic_cast<AssignStmt*>(stmt)) {
+                        visitExprForTemplateCalls(as->getTarget());
+                        visitExprForTemplateCalls(as->getValue());
+                    }
+                    break;
+                case ASTNode::IF_STMT:
+                    if (auto is = dynamic_cast<IfStmt*>(stmt)) {
+                        visitExprForTemplateCalls(is->getCondition());
+                        for (auto& s : is->getThenBranch()) visitStmtForTemplateCalls(s.get());
+                        for (auto& s : is->getElseBranch()) visitStmtForTemplateCalls(s.get());
+                    }
+                    break;
+                case ASTNode::WHILE_STMT:
+                    if (auto ws = dynamic_cast<WhileStmt*>(stmt)) {
+                        visitExprForTemplateCalls(ws->getCondition());
+                        for (auto& s : ws->getBody()) visitStmtForTemplateCalls(s.get());
+                    }
+                    break;
+                case ASTNode::BLOCK_STMT:
+                    if (auto bs = dynamic_cast<BlockStmt*>(stmt)) {
+                        for (auto& s : bs->getStatements()) visitStmtForTemplateCalls(s.get());
+                    }
+                    break;
+                default:
+                    break;
+            }
+        }
+
+        void visitExprForTemplateCalls(Expression* expr) {
+            if (!expr) return;
+            if (auto id = dynamic_cast<IdentifierExpr*>(expr)) {
+                const std::string& name = id->getName();
+                size_t pos = name.find('<');
+                if (pos != std::string::npos) {
+                    auto parsed = parseMangledTemplateName(name);
+                    auto it = templateTable_.find(parsed.first);
+                    if (it != templateTable_.end()) {
+                        instantiateFunctionTemplate(name);
+                    }
+                }
+            } else if (auto call = dynamic_cast<CallExpr*>(expr)) {
+                visitExprForTemplateCalls(call->getCallee());
+                for (auto& arg : call->getArgs()) {
+                    visitExprForTemplateCalls(arg.get());
+                }
+            } else if (auto bin = dynamic_cast<BinaryExpr*>(expr)) {
+                visitExprForTemplateCalls(bin->getLeft());
+                visitExprForTemplateCalls(bin->getRight());
+            } else if (auto unary = dynamic_cast<UnaryExpr*>(expr)) {
+                visitExprForTemplateCalls(unary->getOperand());
+            } else if (auto ternary = dynamic_cast<TernaryExpr*>(expr)) {
+                visitExprForTemplateCalls(ternary->getCondition());
+                visitExprForTemplateCalls(ternary->getThenExpr());
+                visitExprForTemplateCalls(ternary->getElseExpr());
+            } else if (auto grouping = dynamic_cast<GroupingExpr*>(expr)) {
+                visitExprForTemplateCalls(grouping->getExpression());
+            } else if (auto member = dynamic_cast<MemberAccessExpr*>(expr)) {
+                visitExprForTemplateCalls(member->getObject());
+            } else if (auto index = dynamic_cast<IndexExpr*>(expr)) {
+                visitExprForTemplateCalls(index->getObject());
+                visitExprForTemplateCalls(index->getIndex());
+            } else if (auto destructorCall = dynamic_cast<CallExpr*>(expr)) {
+                (void)destructorCall;
+            }
+        }
+
+        std::unique_ptr<TypeAST> cloneTypeWithSubst(TypeAST* type,
+                                                     const std::vector<std::string>& tmplParams,
+                                                     const std::vector<std::string>& tmplArgs) {
+            if (!type) return nullptr;
+            if (auto arr = dynamic_cast<ArrayTypeAST*>(type)) {
+                return std::make_unique<ArrayTypeAST>(
+                    cloneTypeWithSubst(arr->getBaseType(), tmplParams, tmplArgs),
+                    arr->getSize(), arr->getLine(), arr->getColumn()
+                );
+            }
+            std::string name = substituteTypeName(type->getName(), tmplParams, tmplArgs);
+            return std::make_unique<TypeAST>(name, type->getPointerLevel(), type->getLine(), type->getColumn(), type->isVolatile());
+        }
+
+        std::unique_ptr<Statement> cloneStmtWithSubst(Statement* stmt,
+                                                       const std::vector<std::string>& tmplParams,
+                                                       const std::vector<std::string>& tmplArgs) {
+            if (!stmt) return nullptr;
+            switch (stmt->getType()) {
+                case ASTNode::VAR_DECL_STMT: {
+                    auto vs = dynamic_cast<VarDeclStmt*>(stmt);
+                    auto clonedInit = vs->getInitializer()
+                        ? cloneExprWithSubst(vs->getInitializer(), tmplParams, tmplArgs) : nullptr;
+                    return std::make_unique<VarDeclStmt>(vs->getName(),
+                        std::move(clonedInit),
+                        cloneTypeWithSubst(vs->getTypeAST(), tmplParams, tmplArgs),
+                        vs->getLine(), vs->getColumn(), vs->isConst());
+                }
+                case ASTNode::RETURN_STMT: {
+                    auto rs = dynamic_cast<ReturnStmt*>(stmt);
+                    auto clonedVal = rs->getValue()
+                        ? cloneExprWithSubst(rs->getValue(), tmplParams, tmplArgs) : nullptr;
+                    return std::make_unique<ReturnStmt>(std::move(clonedVal), rs->getLine(), rs->getColumn());
+                }
+                case ASTNode::EXPRESSION_STMT: {
+                    auto es = dynamic_cast<ExpressionStmt*>(stmt);
+                    return std::make_unique<ExpressionStmt>(
+                        cloneExprWithSubst(es->getExpression(), tmplParams, tmplArgs),
+                        es->getLine(), es->getColumn());
+                }
+                case ASTNode::BLOCK_STMT: {
+                    auto bs = dynamic_cast<BlockStmt*>(stmt);
+                    std::vector<std::unique_ptr<Statement>> clonedStmts;
+                    for (auto& s : bs->getStatements()) {
+                        clonedStmts.push_back(cloneStmtWithSubst(s.get(), tmplParams, tmplArgs));
+                    }
+                    return std::make_unique<BlockStmt>(std::move(clonedStmts), bs->getLine(), bs->getColumn());
+                }
+                default:
+                    return nullptr;
+            }
+        }
+
+        std::unique_ptr<Expression> cloneExprWithSubst(Expression* expr,
+                                                        const std::vector<std::string>& tmplParams,
+                                                        const std::vector<std::string>& tmplArgs) {
+            if (!expr) return nullptr;
+            switch (expr->getType()) {
+                case ASTNode::IDENTIFIER_EXPR:
+                    return std::make_unique<IdentifierExpr>(
+                        dynamic_cast<IdentifierExpr*>(expr)->getName(),
+                        expr->getLine(), expr->getColumn());
+                case ASTNode::NUMBER_EXPR:
+                    return std::make_unique<NumberExpr>(
+                        dynamic_cast<NumberExpr*>(expr)->getValue(),
+                        expr->getLine(), expr->getColumn());
+                case ASTNode::BOOLEAN_EXPR:
+                    return std::make_unique<BooleanExpr>(
+                        dynamic_cast<BooleanExpr*>(expr)->getValue(),
+                        expr->getLine(), expr->getColumn());
+                case ASTNode::STRING_EXPR:
+                    return std::make_unique<StringExpr>(
+                        dynamic_cast<StringExpr*>(expr)->getValue(),
+                        expr->getLine(), expr->getColumn());
+                case ASTNode::CHAR_EXPR:
+                    return std::make_unique<CharExpr>(
+                        dynamic_cast<CharExpr*>(expr)->getValue(),
+                        expr->getLine(), expr->getColumn());
+                case ASTNode::BINARY_EXPR: {
+                    auto be = dynamic_cast<BinaryExpr*>(expr);
+                    return std::make_unique<BinaryExpr>(
+                        cloneExprWithSubst(be->getLeft(), tmplParams, tmplArgs),
+                        be->getOperator(),
+                        cloneExprWithSubst(be->getRight(), tmplParams, tmplArgs),
+                        be->getLine(), be->getColumn());
+                }
+                case ASTNode::UNARY_EXPR: {
+                    auto ue = dynamic_cast<UnaryExpr*>(expr);
+                    return std::make_unique<UnaryExpr>(
+                        ue->getOperator(),
+                        cloneExprWithSubst(ue->getOperand(), tmplParams, tmplArgs),
+                        ue->getLine(), ue->getColumn());
+                }
+                case ASTNode::TERNARY_EXPR: {
+                    auto te = dynamic_cast<TernaryExpr*>(expr);
+                    return std::make_unique<TernaryExpr>(
+                        cloneExprWithSubst(te->getCondition(), tmplParams, tmplArgs),
+                        cloneExprWithSubst(te->getThenExpr(), tmplParams, tmplArgs),
+                        cloneExprWithSubst(te->getElseExpr(), tmplParams, tmplArgs),
+                        te->getLine(), te->getColumn());
+                }
+                case ASTNode::GROUPING_EXPR:
+                    return std::make_unique<GroupingExpr>(
+                        cloneExprWithSubst(dynamic_cast<GroupingExpr*>(expr)->getExpression(), tmplParams, tmplArgs),
+                        expr->getLine(), expr->getColumn());
+                case ASTNode::CALL_EXPR: {
+                    auto ce = dynamic_cast<CallExpr*>(expr);
+                    std::vector<std::unique_ptr<Expression>> clonedArgs;
+                    for (auto& arg : ce->getArgs()) {
+                        clonedArgs.push_back(cloneExprWithSubst(arg.get(), tmplParams, tmplArgs));
+                    }
+                    return std::make_unique<CallExpr>(
+                        cloneExprWithSubst(ce->getCallee(), tmplParams, tmplArgs),
+                        std::move(clonedArgs),
+                        ce->getLine(), ce->getColumn());
+                }
+                default:
+                    return nullptr;
+            }
+        }
+
+        // Sanitize names for use as assembly labels
+        static std::string mangleForAsm(const std::string& name) {
+            std::string result;
+            for (char c : name) {
+                if (c == '<') result += "_l_";
+                else if (c == '>') result += "_g_";
+                else if (c == ',') result += "_c_";
+                else result += c;
+            }
+            return result;
+        }
+
+        void instantiateFunctionTemplate(const std::string& mangledName) {
+            auto parsed = parseMangledTemplateName(mangledName);
+            auto it = templateTable_.find(parsed.first);
+            if (it == templateTable_.end()) return;
+
+            // Check if already instantiated (use asm-safe name to avoid conflicts)
+            if (symbolTable_.resolve(mangledName)) return;
+
+            auto tmplSym = it->second;
+            if (parsed.second.size() != tmplSym->typeParams.size()) {
+                reporter_.error("Template '" + parsed.first + "' expects " +
+                    std::to_string(tmplSym->typeParams.size()) + " type arguments, got " +
+                    std::to_string(parsed.second.size()), 0, 0);
+                return;
+            }
+
+            // Find the original FunctionDeclStmt in the program
+            FunctionDeclStmt* tmplFunc = nullptr;
+            for (auto& s : currentProgram_->getStatements()) {
+                if (auto fd = dynamic_cast<FunctionDeclStmt*>(s.get())) {
+                    if (fd->getName() == parsed.first && fd->hasTemplateParams()) {
+                        tmplFunc = fd;
+                        break;
+                    }
+                }
+            }
+            if (!tmplFunc) return;
+
+            // Build concrete function symbol
+            auto funcSym = std::make_shared<FunctionSymbol>();
+            funcSym->kind = SymbolKind::FUNCTION;
+            funcSym->name = mangledName;
+            funcSym->type = {mangledName, 0};
+            funcSym->line = tmplFunc->getLine();
+            funcSym->col = tmplFunc->getColumn();
+
+            auto substType = [&](TypeAST* typeAST) -> TypeInfo {
+                TypeInfo info = TypeInfo::fromAST(typeAST);
+                info.name = substituteTypeName(info.name, tmplSym->typeParams, parsed.second);
+                return info;
+            };
+
+            funcSym->returnType = substType(tmplFunc->getReturnType());
+            for (auto& param : tmplFunc->getParams()) {
+                funcSym->parameterTypes.push_back(substType(param.second.get()));
+            }
+
+            symbolTable_.define(funcSym);
+
+            // Clone the full function with type substitution and add to program
+            std::vector<FunctionDeclStmt::Parameter> clonedParams;
+            for (auto& param : tmplFunc->getParams()) {
+                clonedParams.push_back({param.first,
+                    cloneTypeWithSubst(param.second.get(), tmplSym->typeParams, parsed.second)});
+            }
+
+            auto clonedReturnType = cloneTypeWithSubst(tmplFunc->getReturnType(), tmplSym->typeParams, parsed.second);
+
+            std::vector<std::unique_ptr<Statement>> clonedBody;
+            for (auto& s : tmplFunc->getBody()) {
+                auto cloned = cloneStmtWithSubst(s.get(), tmplSym->typeParams, parsed.second);
+                if (cloned) clonedBody.push_back(std::move(cloned));
+            }
+
+            auto clonedFunc = std::make_unique<FunctionDeclStmt>(
+                mangledName, std::move(clonedParams), std::move(clonedBody),
+                std::move(clonedReturnType),
+                tmplFunc->getLine(), tmplFunc->getColumn());
+
+            FunctionDeclStmt* rawPtr = clonedFunc.get();
+
+            // Process the cloned function through SymbolCollector
+            visit(*rawPtr);
+
+            // Add to program for IR generator
+            currentProgram_->addStatement(std::move(clonedFunc));
+        }
+
+        void visitBodyStmtWithSubst(Statement* stmt,
+                                    const std::vector<std::string>& tmplParams,
+                                    const std::vector<std::string>& tmplArgs) {
+            if (!stmt) return;
+            if (auto vs = dynamic_cast<VarDeclStmt*>(stmt)) {
+                auto sym = std::make_shared<Symbol>();
+                sym->kind = SymbolKind::VARIABLE;
+                sym->name = vs->getName();
+                sym->type = TypeInfo::fromAST(vs->getTypeAST());
+                sym->type.name = substituteTypeName(sym->type.name, tmplParams, tmplArgs);
+                sym->line = vs->getLine();
+                sym->col = vs->getColumn();
+                if (!symbolTable_.getCurrentScope()->resolveLocal(sym->name)) {
+                    symbolTable_.define(sym);
+                }
+            } else if (auto bs = dynamic_cast<BlockStmt*>(stmt)) {
+                symbolTable_.enterScope();
+                for (auto& s : bs->getStatements()) {
+                    visitBodyStmtWithSubst(s.get(), tmplParams, tmplArgs);
+                }
+                symbolTable_.exitScope();
+            } else if (auto is = dynamic_cast<IfStmt*>(stmt)) {
+                symbolTable_.enterScope();
+                for (auto& s : is->getThenBranch()) visitBodyStmtWithSubst(s.get(), tmplParams, tmplArgs);
+                symbolTable_.exitScope();
+                if (!is->getElseBranch().empty()) {
+                    symbolTable_.enterScope();
+                    for (auto& s : is->getElseBranch()) visitBodyStmtWithSubst(s.get(), tmplParams, tmplArgs);
+                    symbolTable_.exitScope();
+                }
+            } else if (auto ws = dynamic_cast<WhileStmt*>(stmt)) {
+                symbolTable_.enterScope();
+                for (auto& s : ws->getBody()) visitBodyStmtWithSubst(s.get(), tmplParams, tmplArgs);
+                symbolTable_.exitScope();
+            }
+        }
+
     private:
         SymbolTable& symbolTable_;
         ModuleResolver& resolver_;
@@ -563,6 +1041,7 @@ namespace Cider {
         std::vector<std::string> interfaceNames_;
         std::vector<std::string> structClassNames_;
         std::map<std::string, std::vector<std::string>> interfaceImpls_;
+        std::map<std::string, std::shared_ptr<TemplateSymbol>> templateTable_;
     };
 
 } // namespace Cider

@@ -42,6 +42,7 @@ namespace Cider
         ErrorReporter &reporter_;
         Token currentToken_;
         Token peekToken_;
+        Token peekToken2_;
 
         void nextToken();
         bool expect(TokenType type);
@@ -94,6 +95,9 @@ namespace Cider
 
         std::unique_ptr<TypeAST> parseType();
         std::vector<std::unique_ptr<Statement>> parseBlockStatement();
+        std::vector<std::string> parseTemplateParams();
+
+        bool isTypeToken(TokenType type) const;
     };
 
 }

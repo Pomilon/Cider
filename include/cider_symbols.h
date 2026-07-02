@@ -10,6 +10,7 @@
 namespace Cider {
 
     class TypeAST;
+    class Statement;
 
     /**
      * Internal representation of a Cider type.
@@ -22,13 +23,15 @@ namespace Cider {
         int arraySize = 0;
         bool isVolatile = false;
         bool isInterface = false;
+        bool isSlice = false;
         
         static TypeInfo fromAST(TypeAST* ast);
         
         bool operator==(const TypeInfo& other) const {
             return name == other.name && pointerLevel == other.pointerLevel && 
                    isArray == other.isArray && arraySize == other.arraySize &&
-                   isVolatile == other.isVolatile && isInterface == other.isInterface;
+                   isVolatile == other.isVolatile && isInterface == other.isInterface &&
+                   isSlice == other.isSlice;
         }
         
         bool operator!=(const TypeInfo& other) const {
@@ -51,7 +54,7 @@ namespace Cider {
     /**
      * Base class for all symbols (Variables, Functions, Types).
      */
-    enum class SymbolKind { VARIABLE, FUNCTION, STRUCT, ENUM, CLASS, INTERFACE };
+    enum class SymbolKind { VARIABLE, FUNCTION, STRUCT, ENUM, CLASS, INTERFACE, TEMPLATE };
 
     struct Symbol {
         SymbolKind kind;
@@ -91,11 +94,17 @@ namespace Cider {
         std::vector<Method> methods;
         std::vector<std::string> vtable; // List of mangled function names
         std::string parentName; // For inheritance
+        std::string destructorName; // Mangled name of destructor, empty if none
         int totalSize = 0;
     };
 
     struct InterfaceSymbol : public Symbol {
         std::vector<StructSymbol::Method> methods;
+    };
+
+    struct TemplateSymbol : public Symbol {
+        std::unique_ptr<Statement> ast;  // FunctionDeclStmt or StructDeclStmt
+        std::vector<std::string> typeParams;
     };
 
     /**

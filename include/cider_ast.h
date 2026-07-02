@@ -96,6 +96,7 @@ namespace Cider
             : ASTNode(TYPE_AST, line, col), name_(name), pointerLevel_(pointerLevel), isVolatile_(isVolatile) {}
         
         const std::string &getName() const { return name_; }
+        void setName(const std::string &name) { name_ = name; }
         int getPointerLevel() const { return pointerLevel_; }
         bool isVolatile() const { return isVolatile_; }
         
@@ -662,8 +663,8 @@ namespace Cider
     public:
         using Parameter = std::pair<std::string, std::unique_ptr<TypeAST>>;
         FunctionDeclStmt(const std::string &name, std::vector<Parameter> params,
-                         std::vector<std::unique_ptr<Statement>> body, std::unique_ptr<TypeAST> returnType, int line, int col, bool isAsync = false, bool isVirtual = false, bool isOverride = false, bool isExtern = false)
-            : Statement(FUNCTION_DECL_STMT, line, col), name_(name), params_(std::move(params)), body_(std::move(body)), returnType_(std::move(returnType)), isAsync_(isAsync), isVirtual_(isVirtual), isOverride_(isOverride), isExtern_(isExtern) {}
+                         std::vector<std::unique_ptr<Statement>> body, std::unique_ptr<TypeAST> returnType, int line, int col, bool isAsync = false, bool isVirtual = false, bool isOverride = false, bool isExtern = false, bool isDestructor = false, std::vector<std::string> templateParams = {})
+            : Statement(FUNCTION_DECL_STMT, line, col), name_(name), params_(std::move(params)), body_(std::move(body)), returnType_(std::move(returnType)), isAsync_(isAsync), isVirtual_(isVirtual), isOverride_(isOverride), isExtern_(isExtern), isDestructor_(isDestructor), templateParams_(std::move(templateParams)) {}
         const std::string &getName() const { return name_; }
         const std::vector<Parameter> &getParams() const { return params_; }
         const std::vector<std::unique_ptr<Statement>> &getBody() const { return body_; }
@@ -672,6 +673,9 @@ namespace Cider
         bool isVirtual() const { return isVirtual_; }
         bool isOverride() const { return isOverride_; }
         bool isExtern() const { return isExtern_; }
+        bool isDestructor() const { return isDestructor_; }
+        const std::vector<std::string>& getTemplateParams() const { return templateParams_; }
+        bool hasTemplateParams() const { return !templateParams_.empty(); }
         void accept(ASTVisitor &visitor) override;
     private:
         std::string name_;
@@ -682,22 +686,27 @@ namespace Cider
         bool isVirtual_;
         bool isOverride_;
         bool isExtern_ = false;
+        bool isDestructor_ = false;
+        std::vector<std::string> templateParams_;
     };
 
     class StructDeclStmt : public Statement
     {
     public:
         using Field = std::pair<std::string, std::unique_ptr<TypeAST>>;
-        StructDeclStmt(const std::string &name, std::vector<Field> fields, int line, int col, bool isUnion = false)
-            : Statement(STRUCT_DECL_STMT, line, col), name_(name), fields_(std::move(fields)), isUnion_(isUnion) {}
+        StructDeclStmt(const std::string &name, std::vector<Field> fields, int line, int col, bool isUnion = false, std::vector<std::string> templateParams = {})
+            : Statement(STRUCT_DECL_STMT, line, col), name_(name), fields_(std::move(fields)), isUnion_(isUnion), templateParams_(std::move(templateParams)) {}
         const std::string &getName() const { return name_; }
         const std::vector<Field> &getFields() const { return fields_; }
         bool isUnion() const { return isUnion_; }
+        const std::vector<std::string>& getTemplateParams() const { return templateParams_; }
+        bool hasTemplateParams() const { return !templateParams_.empty(); }
         void accept(ASTVisitor &visitor) override;
     private:
         std::string name_;
         std::vector<Field> fields_;
         bool isUnion_;
+        std::vector<std::string> templateParams_;
     };
 
     class EnumDeclStmt : public Statement

@@ -52,6 +52,7 @@ namespace Cider
             {TokenType::ARROW, "ARROW"}, {TokenType::FAT_ARROW, "FAT_ARROW"}, {TokenType::BIT_OR, "BIT_OR"},
             {TokenType::BIT_XOR, "BIT_XOR"},
             {TokenType::BIT_NOT, "BIT_NOT"},
+            {TokenType::TILDE, "TILDE"},
             {TokenType::LSHIFT, "LSHIFT"},
             {TokenType::RSHIFT, "RSHIFT"},
 
@@ -438,7 +439,7 @@ namespace Cider
                 }
                 break;            case '~':
                 advance();
-                token = makeToken(TokenType::BIT_NOT, "~");
+                token = makeToken(TokenType::TILDE, "~");
                 break;
             case '^':
                 advance();

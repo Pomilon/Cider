@@ -477,6 +477,12 @@ namespace Cider {
                 paramSym->kind = SymbolKind::VARIABLE;
                 paramSym->name = param.first;
                 paramSym->type = TypeInfo::fromAST(param.second.get());
+                if (!paramSym->type.isInterface && paramSym->type.pointerLevel == 0) {
+                    auto typeSym = symbolTable_.resolve(paramSym->type.name);
+                    if (typeSym && typeSym->kind == SymbolKind::INTERFACE) {
+                        paramSym->type.isInterface = true;
+                    }
+                }
                 symbolTable_.define(paramSym);
             }
             if (!stmt.isExtern()) {
@@ -571,7 +577,20 @@ namespace Cider {
                 lastExprType_ = {"error", 0};
             }
         }
-        void visit(SliceExpr&) override {}
+        void visit(SliceExpr& expr) override {
+            expr.getObject()->accept(*this);
+            TypeInfo objType = lastExprType_;
+
+            if (objType.isArray) {
+                lastExprType_ = objType;
+                lastExprType_.isArray = false;
+                lastExprType_.isSlice = true;
+                lastExprType_.arraySize = 0;
+            } else {
+                error("Cannot slice non-array type " + objType.toString(), expr.getLine());
+                lastExprType_ = {"error", 0};
+            }
+        }
         void visit(TernaryExpr& expr) override {
             expr.getCondition()->accept(*this);
             if (resolveType(lastExprType_).name != "bool" || lastExprType_.pointerLevel > 0) {
@@ -607,7 +626,37 @@ namespace Cider {
         void visit(ExportStmt& stmt) override { stmt.getStmt()->accept(*this); }
         void visit(ExportExpressionStmt&) override {}
         void visit(InterfaceDeclStmt&) override {}
-        void visit(ForEachStmt&) override {}
+        void visit(ForEachStmt& stmt) override {
+            stmt.getIterable()->accept(*this);
+            TypeInfo iterableType = lastExprType_;
+
+            TypeInfo elemType;
+            if (iterableType.isArray) {
+                elemType = iterableType;
+                elemType.isArray = false;
+                elemType.arraySize = 0;
+            } else if (iterableType.isSlice) {
+                elemType = iterableType;
+                elemType.isSlice = false;
+            } else {
+                error("For-in iterable must be an array or slice, got " + iterableType.toString(), stmt.getLine());
+                return;
+            }
+
+            symbolTable_.enterScope();
+            auto sym = std::make_shared<Symbol>();
+            sym->kind = SymbolKind::VARIABLE;
+            sym->name = stmt.getVarName();
+            sym->type = elemType;
+            sym->line = stmt.getLine();
+            sym->col = stmt.getColumn();
+            symbolTable_.define(sym);
+
+            for (auto& s : stmt.getBody()) {
+                s->accept(*this);
+            }
+            symbolTable_.exitScope();
+        }
         void visit(DeleteStmt& stmt) override {
             stmt.getTarget()->accept(*this);
             if (lastExprType_.pointerLevel == 0 && lastExprType_.name != "wildcard") {

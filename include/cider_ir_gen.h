@@ -92,11 +92,29 @@ namespace Cider {
             currentBlock_ = std::make_unique<BasicBlock>(name);
         }
 
+        struct DestructorInfo {
+            std::string mangledName;
+            IRValue varAddr;
+        };
+
         void emitDefers() {
             // Emit all defers in reverse order of scopes, and reverse order within scope
             for (auto it = deferStack_.rbegin(); it != deferStack_.rend(); ++it) {
                 for (auto s_it = it->rbegin(); s_it != it->rend(); ++s_it) {
                     (*s_it)->accept(*this);
+                }
+            }
+        }
+
+        void emitDestructors() {
+            for (auto it = destructorStack_.rbegin(); it != destructorStack_.rend(); ++it) {
+                for (auto d_it = it->rbegin(); d_it != it->rend(); ++d_it) {
+                    IRInstruction call;
+                    call.op = IROp::CALL;
+                    call.dest = std::nullopt;
+                    call.args.push_back(IRValue::Label(d_it->mangledName));
+                    call.args.push_back(d_it->varAddr);
+                    currentBlock_->addInstruction(call);
                 }
             }
         }
@@ -129,8 +147,22 @@ namespace Cider {
             }
         }
 
+        static std::string sanitizeAsmName(const std::string& name) {
+            std::string result;
+            for (char c : name) {
+                if (c == '<') result += "_l_";
+                else if (c == '>') result += "_g_";
+                else if (c == ',') result += "_c_";
+                else result += c;
+            }
+            return result;
+        }
+
         void visit(FunctionDeclStmt& stmt) override {
-            std::string funcName = stmt.getName();
+            // Skip template function declarations (uninstantiated)
+            if (stmt.hasTemplateParams()) return;
+
+            std::string funcName = sanitizeAsmName(stmt.getName());
             if (!currentClassName_.empty()) {
                 funcName = currentClassName_ + "_" + funcName;
             }
@@ -149,6 +181,7 @@ namespace Cider {
             auto prevBreakLabels = breakLabels_;
             auto prevContinueLabels = continueLabels_;
             auto prevDeferStack = deferStack_;
+            auto prevDestructorStack = destructorStack_;
 
             currentFunction_ = std::make_unique<FunctionIR>(funcName, mapType(TypeInfo::fromAST(stmt.getReturnType()).name));
             currentBlock_ = std::make_unique<BasicBlock>("entry");
@@ -159,7 +192,9 @@ namespace Cider {
             breakLabels_.clear();
             continueLabels_.clear();
             deferStack_.clear();
+            destructorStack_.clear();
             deferStack_.push_back({}); // Function scope level
+            destructorStack_.push_back({});
 
             symbolTable_.enterScope();
 
@@ -206,6 +241,7 @@ namespace Cider {
             
             if (currentBlock_ && (currentBlock_->getInstructions().empty() || currentBlock_->getInstructions().back().op != IROp::RET)) {
                 emitDefers();
+                emitDestructors();
                 currentBlock_->addInstruction({IROp::RET, std::nullopt, {}});
             }
 
@@ -216,6 +252,7 @@ namespace Cider {
             module_.addFunction(std::move(currentFunction_));
             symbolTable_.exitScope();
             deferStack_.pop_back();
+            destructorStack_.pop_back();
 
             // Restore state
             currentFunction_ = std::move(prevFunction);
@@ -226,6 +263,7 @@ namespace Cider {
             breakLabels_ = prevBreakLabels;
             continueLabels_ = prevContinueLabels;
             deferStack_ = prevDeferStack;
+            destructorStack_ = prevDestructorStack;
         }
 
         void visit(ReturnStmt& stmt) override {
@@ -233,9 +271,11 @@ namespace Cider {
                 stmt.getValue()->accept(*this);
                 IRValue val = lastValue_;
                 emitDefers();
+                emitDestructors();
                 currentBlock_->addInstruction({IROp::RET, std::nullopt, {val}});
             } else {
                 emitDefers();
+                emitDestructors();
                 currentBlock_->addInstruction({IROp::RET, std::nullopt, {}});
             }
             startBlock(nextLabel("dead"));
@@ -249,9 +289,10 @@ namespace Cider {
             IRValue objPtr = IRValue::Constant(0, IRType::PTR);
 
             if (auto id = dynamic_cast<IdentifierExpr*>(calleeExpr)) {
-                auto sym = symbolTable_.resolve(id->getName());
+                std::string lookupName = id->getName();
+                auto sym = symbolTable_.resolve(lookupName);
                 if (sym && sym->kind == SymbolKind::FUNCTION) {
-                    funcName = id->getName();
+                    funcName = sanitizeAsmName(lookupName);
                 }
             } else if (auto mem = dynamic_cast<MemberAccessExpr*>(calleeExpr)) {
                 // Method call: obj.method() or obj->method()
@@ -564,6 +605,19 @@ namespace Cider {
             currentBlock_->addInstruction({IROp::ALLOCA, addr, {IRValue::Constant(getTypeSize(sym->type), IRType::I32)}});
             variableValues_[stmt.getName()] = addr;
 
+            // Check if this type has a destructor
+            TypeInfo varType = sym->type;
+            if (varType.pointerLevel == 0 && !varType.isArray) {
+                auto typeSym = symbolTable_.resolve(varType.name);
+                if (typeSym && typeSym->kind == SymbolKind::CLASS) {
+                    auto classSym = std::static_pointer_cast<StructSymbol>(typeSym);
+                    if (!classSym->destructorName.empty()) {
+                        destructorStack_.back().push_back({classSym->destructorName, addr});
+                    }
+                }
+            }
+
+
             if (stmt.getInitializer()) {
                 // Handle interface variable initialization: assign concrete type to interface
                 bool isInterfaceInit = false;
@@ -762,11 +816,10 @@ namespace Cider {
             auto sym = symbolTable_.resolve(expr.getName());
             if (sym) {
                 lastExprType_ = sym->type;
-                // Only treat as user-defined (struct/class) if it's NOT a pointer
                 if (lastExprType_.pointerLevel == 0) {
                     auto typeSym = symbolTable_.resolve(lastExprType_.name);
                     if (typeSym && (typeSym->kind == SymbolKind::STRUCT || typeSym->kind == SymbolKind::CLASS)) {
-                        lastExprType_.isUserDefined = true;
+                        lastExprType_.isUserDefined = typeSym->type.name.empty();
                     }
                 } else {
                     lastExprType_.isUserDefined = false;
@@ -926,14 +979,24 @@ namespace Cider {
             continueLabels_.push_back(headerName);
             breakLabels_.push_back(exitName);
             deferStack_.push_back({});
+            destructorStack_.push_back({});
             symbolTable_.enterScope();
 
             startBlock(bodyName);
             for (auto& s : stmt.getBody()) s->accept(*this);
             if (currentBlock_ && (currentBlock_->getInstructions().empty() || (currentBlock_->getInstructions().back().op != IROp::BR && currentBlock_->getInstructions().back().op != IROp::RET))) {
+                for (auto it = destructorStack_.back().rbegin(); it != destructorStack_.back().rend(); ++it) {
+                    IRInstruction call;
+                    call.op = IROp::CALL;
+                    call.dest = std::nullopt;
+                    call.args.push_back(IRValue::Label(it->mangledName));
+                    call.args.push_back(it->varAddr);
+                    currentBlock_->addInstruction(call);
+                }
                 currentBlock_->addInstruction({IROp::BR, std::nullopt, {IRValue::Label(headerName)}});
             }
             symbolTable_.exitScope();
+            destructorStack_.pop_back();
             deferStack_.pop_back();
             continueLabels_.pop_back();
             breakLabels_.pop_back();
@@ -963,10 +1026,19 @@ namespace Cider {
             continueLabels_.push_back(incName);
             breakLabels_.push_back(exitName);
             deferStack_.push_back({});
+            destructorStack_.push_back({});
 
             startBlock(bodyName);
             for (auto& s : stmt.getBody()) s->accept(*this);
             if (currentBlock_ && (currentBlock_->getInstructions().empty() || (currentBlock_->getInstructions().back().op != IROp::BR && currentBlock_->getInstructions().back().op != IROp::RET))) {
+                for (auto it = destructorStack_.back().rbegin(); it != destructorStack_.back().rend(); ++it) {
+                    IRInstruction call;
+                    call.op = IROp::CALL;
+                    call.dest = std::nullopt;
+                    call.args.push_back(IRValue::Label(it->mangledName));
+                    call.args.push_back(it->varAddr);
+                    currentBlock_->addInstruction(call);
+                }
                 currentBlock_->addInstruction({IROp::BR, std::nullopt, {IRValue::Label(incName)}});
             }
 
@@ -974,6 +1046,7 @@ namespace Cider {
             if (stmt.getIncrement()) stmt.getIncrement()->accept(*this);
             currentBlock_->addInstruction({IROp::BR, std::nullopt, {IRValue::Label(headerName)}});
 
+            destructorStack_.pop_back();
             deferStack_.pop_back();
             continueLabels_.pop_back();
             breakLabels_.pop_back();
@@ -1045,6 +1118,7 @@ namespace Cider {
         void visit(BreakStmt&) override {
             if (!breakLabels_.empty()) {
                 emitDefers();
+                emitDestructors();
                 currentBlock_->addInstruction({IROp::BR, std::nullopt, {IRValue::Label(breakLabels_.back())}});
                 startBlock(nextLabel("dead"));
             }
@@ -1052,6 +1126,7 @@ namespace Cider {
         void visit(ContinueStmt&) override {
             if (!continueLabels_.empty()) {
                 emitDefers();
+                emitDestructors();
                 currentBlock_->addInstruction({IROp::BR, std::nullopt, {IRValue::Label(continueLabels_.back())}});
                 startBlock(nextLabel("dead"));
             }
@@ -1059,7 +1134,124 @@ namespace Cider {
         void visit(DeferStmt& stmt) override {
             deferStack_.back().push_back(stmt.getDeferredStmt());
         }
-        void visit(ForEachStmt&) override {}
+        void visit(ForEachStmt& stmt) override {
+            if (!currentFunction_) return;
+
+            bool wasAddress = isAddress_;
+            isAddress_ = false;
+            stmt.getIterable()->accept(*this);
+            IRValue iterable = lastValue_;
+            TypeInfo iterableType = lastExprType_;
+            isAddress_ = wasAddress;
+
+            TypeInfo elemType = iterableType;
+            if (elemType.isArray) {
+                elemType.isArray = false;
+                elemType.arraySize = 0;
+            }
+            if (elemType.isSlice) {
+                elemType.isSlice = false;
+            }
+
+            symbolTable_.enterScope();
+            {
+                auto loopVarSym = std::make_shared<Symbol>();
+                loopVarSym->kind = SymbolKind::VARIABLE;
+                loopVarSym->name = stmt.getVarName();
+                loopVarSym->type = elemType;
+                symbolTable_.define(loopVarSym);
+            }
+            deferStack_.push_back({});
+            destructorStack_.push_back({});
+
+            std::string headerName = nextLabel("foreach_header");
+            std::string bodyName = nextLabel("foreach_body");
+            std::string incName = nextLabel("foreach_inc");
+            std::string exitName = nextLabel("foreach_exit");
+
+            IRValue iAddr = IRValue::Register(nextTemp(), IRType::PTR);
+            currentBlock_->addInstruction({IROp::ALLOCA, iAddr, {IRValue::Constant(4, IRType::I32)}});
+            currentBlock_->addInstruction({IROp::STORE, std::nullopt, {iAddr, IRValue::Constant(0, IRType::I32), IRValue::Constant(0, IRType::I32)}});
+
+            currentBlock_->addInstruction({IROp::BR, std::nullopt, {IRValue::Label(headerName)}});
+
+            startBlock(headerName);
+            IRValue iVal = IRValue::Register(nextTemp(), IRType::I32);
+            currentBlock_->addInstruction({IROp::LOAD, iVal, {iAddr, IRValue::Constant(0, IRType::I32)}});
+
+            IRValue limit;
+            if (iterableType.isArray) {
+                limit = IRValue::Constant(iterableType.arraySize, IRType::I32);
+            } else {
+                limit = IRValue::Register(nextTemp(), IRType::I32);
+                currentBlock_->addInstruction({IROp::LOAD, limit, {iterable, IRValue::Constant(8, IRType::I32)}});
+            }
+
+            IRValue cond = IRValue::Register(nextTemp(), IRType::BOOL);
+            currentBlock_->addInstruction({IROp::CMP_LT, cond, {iVal, limit}});
+            currentBlock_->addInstruction({IROp::COND_BR, std::nullopt, {cond, IRValue::Label(bodyName), IRValue::Label(exitName)}});
+
+            continueLabels_.push_back(incName);
+            breakLabels_.push_back(exitName);
+
+            startBlock(bodyName);
+            iVal = IRValue::Register(nextTemp(), IRType::I32);
+            currentBlock_->addInstruction({IROp::LOAD, iVal, {iAddr, IRValue::Constant(0, IRType::I32)}});
+
+            int elemSize = getTypeSize(elemType);
+            IRValue scaledIdx = IRValue::Register(nextTemp(), IRType::I32);
+            currentBlock_->addInstruction({IROp::MUL, scaledIdx, {iVal, IRValue::Constant(elemSize, IRType::I32)}});
+
+            IRValue basePtr;
+            if (iterableType.isArray) {
+                basePtr = iterable;
+            } else {
+                basePtr = IRValue::Register(nextTemp(), IRType::PTR);
+                currentBlock_->addInstruction({IROp::LOAD, basePtr, {iterable, IRValue::Constant(0, IRType::I32)}});
+            }
+
+            IRValue elemAddr = IRValue::Register(nextTemp(), IRType::PTR);
+            currentBlock_->addInstruction({IROp::ADD, elemAddr, {basePtr, scaledIdx}});
+
+            IRValue varAddr = IRValue::Register(nextTemp(), IRType::PTR);
+            currentBlock_->addInstruction({IROp::ALLOCA, varAddr, {IRValue::Constant(getTypeSize(elemType), IRType::I32)}});
+            variableValues_[stmt.getVarName()] = varAddr;
+
+            if (getTypeSize(elemType) > 8 || elemType.isUserDefined || elemType.pointerLevel > 0) {
+                currentBlock_->addInstruction({IROp::MEMCPY, std::nullopt, {varAddr, elemAddr, IRValue::Constant(getTypeSize(elemType), IRType::I32)}});
+            } else {
+                IRType irType = (elemType.pointerLevel > 0) ? IRType::PTR : mapType(elemType.name);
+                IRValue elemVal = IRValue::Register(nextTemp(), irType);
+                currentBlock_->addInstruction({IROp::LOAD, elemVal, {elemAddr, IRValue::Constant(0, IRType::I32)}});
+                currentBlock_->addInstruction({IROp::STORE, std::nullopt, {varAddr, elemVal, IRValue::Constant(0, IRType::I32)}});
+            }
+
+            for (auto& s : stmt.getBody()) {
+                s->accept(*this);
+            }
+
+            if (currentBlock_ && (currentBlock_->getInstructions().empty() ||
+                (currentBlock_->getInstructions().back().op != IROp::BR && currentBlock_->getInstructions().back().op != IROp::RET))) {
+                currentBlock_->addInstruction({IROp::BR, std::nullopt, {IRValue::Label(incName)}});
+            }
+
+            startBlock(incName);
+            iVal = IRValue::Register(nextTemp(), IRType::I32);
+            currentBlock_->addInstruction({IROp::LOAD, iVal, {iAddr, IRValue::Constant(0, IRType::I32)}});
+            IRValue one = IRValue::Constant(1, IRType::I32);
+            IRValue newI = IRValue::Register(nextTemp(), IRType::I32);
+            currentBlock_->addInstruction({IROp::ADD, newI, {iVal, one}});
+            currentBlock_->addInstruction({IROp::STORE, std::nullopt, {iAddr, newI, IRValue::Constant(0, IRType::I32)}});
+            currentBlock_->addInstruction({IROp::BR, std::nullopt, {IRValue::Label(headerName)}});
+
+            destructorStack_.pop_back();
+            deferStack_.pop_back();
+            continueLabels_.pop_back();
+            breakLabels_.pop_back();
+            symbolTable_.exitScope();
+
+            startBlock(exitName);
+        }
         void visit(ThrowStmt& stmt) override {
             if (currentFunction_) {
                 stmt.getValue()->accept(*this);
@@ -1191,6 +1383,24 @@ namespace Cider {
         void visit(DeleteStmt& stmt) override {
             stmt.getTarget()->accept(*this);
             IRValue ptr = lastValue_;
+            // Check if the deleted object's type has a destructor
+            TypeInfo deletedType = lastExprType_;
+            if (deletedType.pointerLevel > 0) {
+                TypeInfo baseType = deletedType;
+                baseType.pointerLevel--;
+                auto sym = symbolTable_.resolve(baseType.name);
+                if (sym && sym->kind == SymbolKind::CLASS) {
+                    auto classSym = std::static_pointer_cast<StructSymbol>(sym);
+                    if (!classSym->destructorName.empty()) {
+                        IRInstruction dtorCall;
+                        dtorCall.op = IROp::CALL;
+                        dtorCall.dest = std::nullopt;
+                        dtorCall.args.push_back(IRValue::Label(classSym->destructorName));
+                        dtorCall.args.push_back(ptr);
+                        currentBlock_->addInstruction(dtorCall);
+                    }
+                }
+            }
             IRInstruction call;
             call.op = IROp::CALL;
             call.dest = std::nullopt;
@@ -1210,8 +1420,12 @@ namespace Cider {
             isAddress_ = wasAddress;
 
             TypeInfo elemType = baseType;
-            if (elemType.pointerLevel > 0) elemType.pointerLevel--;
-            else if (elemType.isArray) elemType.isArray = false;
+            if (elemType.isArray) {
+                elemType.isArray = false;
+                elemType.arraySize = 0;
+            } else if (elemType.pointerLevel > 0) {
+                elemType.pointerLevel--;
+            }
 
             int elemSize = getTypeSize(elemType);
             IRValue scaledIdx = IRValue::Register(nextTemp(), IRType::I32);
@@ -1223,7 +1437,7 @@ namespace Cider {
             bool elemIsStruct = false;
             auto elemTypeSym = symbolTable_.resolve(elemType.name);
             if (elemTypeSym && (elemTypeSym->kind == SymbolKind::STRUCT || elemTypeSym->kind == SymbolKind::CLASS)) {
-                elemIsStruct = true;
+                elemIsStruct = elemTypeSym->type.name.empty();
             }
             if (isAddress_ || elemIsStruct) {
                 lastValue_ = addr;
@@ -1284,8 +1498,18 @@ namespace Cider {
         void visit(BlockStmt& stmt) override {
             symbolTable_.enterScope();
             deferStack_.push_back({});
+            destructorStack_.push_back({});
             for (auto& s : stmt.getStatements()) s->accept(*this);
             for (auto it = deferStack_.back().rbegin(); it != deferStack_.back().rend(); ++it) (*it)->accept(*this);
+            for (auto it = destructorStack_.back().rbegin(); it != destructorStack_.back().rend(); ++it) {
+                IRInstruction call;
+                call.op = IROp::CALL;
+                call.dest = std::nullopt;
+                call.args.push_back(IRValue::Label(it->mangledName));
+                call.args.push_back(it->varAddr);
+                currentBlock_->addInstruction(call);
+            }
+            destructorStack_.pop_back();
             deferStack_.pop_back();
             symbolTable_.exitScope();
         }
@@ -1315,7 +1539,57 @@ namespace Cider {
         }
         void visit(ListExpr&) override {}
         void visit(TableExpr&) override {}
-        void visit(SliceExpr&) override {}
+        void visit(SliceExpr& expr) override {
+            if (!currentFunction_) return;
+
+            bool wasAddress = isAddress_;
+            isAddress_ = false;
+            expr.getObject()->accept(*this);
+            IRValue base = lastValue_;
+            TypeInfo baseType = lastExprType_;
+
+            IRValue start;
+            if (expr.getStart()) {
+                expr.getStart()->accept(*this);
+                start = lastValue_;
+            } else {
+                start = IRValue::Constant(0, IRType::I32);
+            }
+
+            IRValue end;
+            if (expr.getEnd()) {
+                expr.getEnd()->accept(*this);
+                end = lastValue_;
+            } else {
+                end = IRValue::Constant(baseType.arraySize, IRType::I32);
+            }
+            isAddress_ = wasAddress;
+
+            TypeInfo elemType = baseType;
+            if (elemType.isArray) {
+                elemType.isArray = false;
+                elemType.arraySize = 0;
+            }
+            int elemSize = getTypeSize(elemType);
+
+            IRValue scaledStart = IRValue::Register(nextTemp(), IRType::I32);
+            currentBlock_->addInstruction({IROp::MUL, scaledStart, {start, IRValue::Constant(elemSize, IRType::I32)}});
+            IRValue ptr = IRValue::Register(nextTemp(), IRType::PTR);
+            currentBlock_->addInstruction({IROp::ADD, ptr, {base, scaledStart}});
+
+            IRValue len = IRValue::Register(nextTemp(), IRType::I32);
+            currentBlock_->addInstruction({IROp::SUB, len, {end, start}});
+
+            IRValue sliceAddr = IRValue::Register(nextTemp(), IRType::PTR);
+            currentBlock_->addInstruction({IROp::ALLOCA, sliceAddr, {IRValue::Constant(16, IRType::I32)}});
+
+            currentBlock_->addInstruction({IROp::STORE, std::nullopt, {sliceAddr, ptr, IRValue::Constant(0, IRType::I32)}});
+            currentBlock_->addInstruction({IROp::STORE, std::nullopt, {sliceAddr, len, IRValue::Constant(8, IRType::I32)}});
+
+            lastValue_ = sliceAddr;
+            lastExprType_ = elemType;
+            lastExprType_.isSlice = true;
+        }
         void visit(TernaryExpr& expr) override {
             expr.getCondition()->accept(*this);
             IRValue cond = lastValue_;
@@ -1359,7 +1633,9 @@ namespace Cider {
         void visit(TypeAST&) override {}
         void visit(StructDeclStmt& stmt) override { structNames_.push_back(stmt.getName()); lastExprType_ = {stmt.getName(), 0}; }
         void visit(EnumDeclStmt&) override {}
-        void visit(TypeAliasStmt&) override {}
+        void visit(TypeAliasStmt&) override {
+            // Type aliases are resolved at the type level; no runtime code generated
+        }
         void visit(ImportStmt&) override {}
         void visit(FromImportStmt&) override {}
         void visit(ExportExpressionStmt&) override {}
@@ -1393,6 +1669,7 @@ namespace Cider {
         std::vector<std::string> breakLabels_;
         std::vector<std::string> continueLabels_;
         std::vector<std::vector<Statement*>> deferStack_;
+        std::vector<std::vector<DestructorInfo>> destructorStack_;
         bool exceptionGlobalsEnsured_ = false;
         int tempCount_ = 0;
         int labelCount_ = 0;

@@ -247,7 +247,7 @@ namespace Cider {
                                 }
                             }
                         } else {
-                            // Push parameters to stack to avoid clobbering each other
+                            // Push register parameters to stack to avoid clobbering each other
                             for (int i = 0; i < numParams; ++i) {
                                 addText("    push " + argRegs[i]);
                             }
@@ -255,6 +255,19 @@ namespace Cider {
                             // Pop into their allocated locations in reverse order
                             for (int i = numParams - 1; i >= 0; --i) {
                                 addText("    pop r11");
+                                if (alloc.count(params[i])) {
+                                    auto& a = alloc.at(params[i]);
+                                    if (a.isSpilled) {
+                                        int offset = spillBase + (-a.stackOffset);
+                                        addText("    mov qword [rbp - " + std::to_string(offset) + "], r11");
+                                    } else {
+                                        addText("    mov " + a.reg + ", r11");
+                                    }
+                                }
+                            }
+                            // Load stack parameters (args 7+) from [rbp+16], [rbp+24], ...
+                            for (int i = 6; i < (int)params.size(); ++i) {
+                                addText("    mov r11, [rbp + " + std::to_string(8 + (i - 6 + 1) * 8) + "]");
                                 if (alloc.count(params[i])) {
                                     auto& a = alloc.at(params[i]);
                                     if (a.isSpilled) {
@@ -534,7 +547,7 @@ namespace Cider {
                                 std::string srcReg = getSizedReg("rax", t);
                                 if (instr.args[0].kind == IRValue::LABEL) {
                                     if (instr.args[1].kind == IRValue::LABEL) { addText("    lea rax, [rel " + val + "]"); addText("    mov qword [rel " + instr.args[0].name + "], rax"); }
-                                    else { addText("    mov rax, " + val); addText("    mov qword [rel " + instr.args[0].name + "], rax"); }
+                                    else { addText("    mov " + getSizedReg("rax", t) + ", " + getSizedReg(val, t)); addText("    mov " + sizePrefix + "[rel " + instr.args[0].name + "], " + getSizedReg("rax", t)); }
                                 } else {
                                     std::string addrReg = "r11";
                                     if (isMem(ptr)) {
@@ -574,25 +587,41 @@ namespace Cider {
                                 
                                 if (instr.op == IROp::CALL) {
                                     if (instr.args[0].kind == IRValue::LABEL) {
-                                        // Direct call: call label
-                                        for (size_t i = 1; i < instr.args.size() && (i - 1) < argRegs.size(); ++i) {
+                                        // Push extra stack args (args 7+) in reverse order
+                                        size_t numArgs = instr.args.size() - 1;
+                                        for (size_t i = numArgs; i > 6; --i) {
                                             addText("    push " + getOperand(instr.args[i]));
                                         }
-                                        for (int i = std::min((int)instr.args.size() - 1, 6) - 1; i >= 0; --i) {
+                                        // Push first 6 args, pop into registers
+                                        for (size_t i = 1; i <= numArgs && i <= 6; ++i) {
+                                            addText("    push " + getOperand(instr.args[i]));
+                                        }
+                                        for (int i = std::min((int)numArgs, 6) - 1; i >= 0; --i) {
                                             addText("    pop " + argRegs[i]);
                                         }
                                         addText("    call " + a1);
+                                        // Clean up stack args
+                                        if (numArgs > 6) {
+                                            addText("    add rsp, " + std::to_string((numArgs - 6) * 8));
+                                        }
                                     } else {
                                         // Indirect call: save target in r11 (not an arg reg), set up args, call r11
                                         std::string target = getOperand(instr.args[0]);
                                         addText("    mov r11, " + target);
-                                        for (size_t i = 1; i < instr.args.size() && (i - 1) < argRegs.size(); ++i) {
+                                        size_t numArgs = instr.args.size() - 1;
+                                        for (size_t i = numArgs; i > 6; --i) {
                                             addText("    push " + getOperand(instr.args[i]));
                                         }
-                                        for (int i = std::min((int)instr.args.size() - 1, 6) - 1; i >= 0; --i) {
+                                        for (size_t i = 1; i <= numArgs && i <= 6; ++i) {
+                                            addText("    push " + getOperand(instr.args[i]));
+                                        }
+                                        for (int i = std::min((int)numArgs, 6) - 1; i >= 0; --i) {
                                             addText("    pop " + argRegs[i]);
                                         }
                                         addText("    call r11");
+                                        if (numArgs > 6) {
+                                            addText("    add rsp, " + std::to_string((numArgs - 6) * 8));
+                                        }
                                     }
                                 } else {
                                     // VIRTUAL_CALL: args[0] = objPtr, args[1] = vtableIndex, args[2...] = params
@@ -650,6 +679,17 @@ namespace Cider {
                                     addText("    mov qword " + d + ", rax");
                                 } else {
                                     addText("    pop " + d);
+                                }
+                                break;
+                            }
+                            case IROp::MEMCPY: {
+                                {
+                                    std::string a3 = (instr.args.size() > 2 ? getOperand(instr.args[2]) : "0");
+                                    addText("    mov rdi, " + a1);
+                                    addText("    mov rsi, " + a2);
+                                    addText("    mov rcx, " + a3);
+                                    addText("    cld");
+                                    addText("    rep movsb");
                                 }
                                 break;
                             }
