@@ -1,14 +1,20 @@
-// Sovereign Heap Allocator
-var heap_start: *void = nilPtr;
-var heap_top: *void = nilPtr;
-var heap_limit: *void = nilPtr;
+// Cider Free-List Allocator
+// Block layout:
+//   offset 0: size (u64) - total block size inc 16-byte header
+//   offset 8: next (free) / magic (allocated)
+//   offset 16: user data
+
+var free_list: *void = nilPtr;
+var ARENA_SIZE: int = 1048576;
+var HEADER_SIZE: int = 16;
+var MIN_BLOCK_SIZE: int = 24;
+var MAGIC_VAL: u64 = 3254775790;
 
 export func init_heap() -> void {
-    if (heap_start != 0 as *void) return;
+}
 
-    var size: int = 1048576; 
+func mmap_arena(size: int) -> *void {
     var addr: *void = 0 as *void;
-    
     asm {
         "mov rax, 9"
         "xor rdi, rdi"
@@ -20,32 +26,194 @@ export func init_heap() -> void {
         "syscall"
         "mov {addr}, rax"
     }
-    
-    heap_start = addr;
-    heap_top = addr;
-    heap_limit = addr + size;
+    return addr;
 }
 
 export func malloc(size: int) -> *void {
-    if (heap_start == nilPtr) {
-        init_heap();
-    }
-    
     var s: int = size;
     if (s % 8 != 0) {
         s = s + (8 - (s % 8));
     }
-    
-    var next_top: *void = heap_top + s;
-    if (next_top > heap_limit) {
-        return nilPtr;
+
+    var needed: int = HEADER_SIZE + s;
+    if (needed < MIN_BLOCK_SIZE) {
+        needed = MIN_BLOCK_SIZE;
     }
-    
-    var ptr: *void = heap_top;
-    heap_top = next_top;
-    return ptr;
+    var needed_u64: u64 = needed as u64;
+
+    var prev: *void = nilPtr;
+    var curr: *void = free_list;
+
+    while (curr != nilPtr) {
+        var size_ptr: *u64 = curr as *u64;
+        var block_size: u64 = *size_ptr;
+
+        if (block_size >= needed_u64) {
+            var remaining: u64 = block_size - needed_u64;
+
+            if (remaining >= MIN_BLOCK_SIZE as u64) {
+                *size_ptr = needed_u64;
+
+                var new_free: *void = curr + needed;
+                var new_size_ptr: *u64 = new_free as *u64;
+                *new_size_ptr = remaining;
+
+                var curr_next_ptr: **void = (curr + 8) as **void;
+                var new_next_ptr: **void = (new_free + 8) as **void;
+                *new_next_ptr = *curr_next_ptr;
+
+                if (prev != nilPtr) {
+                    var prev_next_ptr: **void = (prev + 8) as **void;
+                    *prev_next_ptr = new_free;
+                } else {
+                    free_list = new_free;
+                }
+            } else {
+                if (prev != nilPtr) {
+                    var curr_next_ptr: **void = (curr + 8) as **void;
+                    var prev_next_ptr: **void = (prev + 8) as **void;
+                    *prev_next_ptr = *curr_next_ptr;
+                } else {
+                    var curr_next_ptr: **void = (curr + 8) as **void;
+                    free_list = *curr_next_ptr;
+                }
+            }
+
+            var magic_ptr: *u64 = (curr + 8) as *u64;
+            *magic_ptr = MAGIC_VAL;
+
+            return curr + HEADER_SIZE;
+        }
+
+        prev = curr;
+        var next_ptr: **void = (curr + 8) as **void;
+        curr = *next_ptr;
+    }
+
+    // No free block found — mmap arena and add to free list
+    var arena: *void = mmap_arena(ARENA_SIZE);
+    if (arena == 0 as *void) return nilPtr;
+
+    var arena_size_ptr: *u64 = arena as *u64;
+    *arena_size_ptr = ARENA_SIZE as u64;
+    var arena_next_ptr: **void = (arena + 8) as **void;
+    *arena_next_ptr = free_list;
+    free_list = arena;
+
+    // Retry once (arena is at head of free list)
+    prev = nilPtr;
+    curr = free_list;
+
+    while (curr != nilPtr) {
+        var size_ptr: *u64 = curr as *u64;
+        var block_size: u64 = *size_ptr;
+
+        if (block_size >= needed_u64) {
+            var remaining: u64 = block_size - needed_u64;
+
+            if (remaining >= MIN_BLOCK_SIZE as u64) {
+                *size_ptr = needed_u64;
+
+                var new_free: *void = curr + needed;
+                var new_size_ptr: *u64 = new_free as *u64;
+                *new_size_ptr = remaining;
+
+                var curr_next_ptr: **void = (curr + 8) as **void;
+                var new_next_ptr: **void = (new_free + 8) as **void;
+                *new_next_ptr = *curr_next_ptr;
+
+                if (prev != nilPtr) {
+                    var prev_next_ptr: **void = (prev + 8) as **void;
+                    *prev_next_ptr = new_free;
+                } else {
+                    free_list = new_free;
+                }
+            } else {
+                if (prev != nilPtr) {
+                    var curr_next_ptr: **void = (curr + 8) as **void;
+                    var prev_next_ptr: **void = (prev + 8) as **void;
+                    *prev_next_ptr = *curr_next_ptr;
+                } else {
+                    var curr_next_ptr: **void = (curr + 8) as **void;
+                    free_list = *curr_next_ptr;
+                }
+            }
+
+            var magic_ptr: *u64 = (curr + 8) as *u64;
+            *magic_ptr = MAGIC_VAL;
+
+            return curr + HEADER_SIZE;
+        }
+
+        prev = curr;
+        var next_ptr: **void = (curr + 8) as **void;
+        curr = *next_ptr;
+    }
+
+    return nilPtr;
 }
 
 export func free(ptr: *void) -> void {
-    // Simple bump allocator doesn't support free
+    if (ptr == nilPtr) return;
+
+    var block: *void = ptr - HEADER_SIZE;
+    var magic_ptr: *u64 = (block + 8) as *u64;
+    var magic: u64 = *magic_ptr;
+
+    if (magic != MAGIC_VAL) return;
+
+    var size_ptr: *u64 = block as *u64;
+    var block_size: u64 = *size_ptr;
+
+    *magic_ptr = 0 as u64;
+
+    // Find insertion point in free list (sorted by address)
+    var prev: *void = nilPtr;
+    var curr: *void = free_list;
+
+    while (curr != nilPtr && curr < block) {
+        prev = curr;
+        var next_ptr: **void = (curr + 8) as **void;
+        curr = *next_ptr;
+    }
+
+    // Set block's next pointer
+    var block_next_ptr: **void = (block + 8) as **void;
+    *block_next_ptr = curr;
+
+    // Coalesce with next
+    var block_end: *void = block + block_size;
+    if (curr != nilPtr && block_end == curr) {
+        var curr_size_ptr: *u64 = curr as *u64;
+        var curr_size: u64 = *curr_size_ptr;
+        var curr_next_ptr: **void = (curr + 8) as **void;
+        var curr_next: *void = *curr_next_ptr;
+
+        block_size = block_size + curr_size;
+        *size_ptr = block_size;
+        *block_next_ptr = curr_next;
+    }
+
+    // Link block into free list
+    if (prev != nilPtr) {
+        var prev_next_ptr: **void = (prev + 8) as **void;
+        *prev_next_ptr = block;
+    } else {
+        free_list = block;
+    }
+
+    // Coalesce with previous
+    if (prev != nilPtr) {
+        var prev_size_ptr: *u64 = prev as *u64;
+        var prev_size: u64 = *prev_size_ptr;
+        var prev_end: *void = prev + prev_size;
+
+        if (prev_end == block) {
+            var new_block_next: *void = *block_next_ptr;
+            var new_size: u64 = prev_size + block_size;
+            *prev_size_ptr = new_size;
+            var prev_next_ptr: **void = (prev + 8) as **void;
+            *prev_next_ptr = new_block_next;
+        }
+    }
 }
