@@ -87,6 +87,7 @@ namespace Cider
         std::unique_ptr<Statement> parseEnumDeclaration();
         std::unique_ptr<Statement> parseTypeAliasStatement();
         std::unique_ptr<Statement> parseClassDeclaration();
+        std::unique_ptr<Statement> parseInterfaceDeclaration();
         std::unique_ptr<Statement> parseImportStatement();
         std::unique_ptr<Statement> parseFromImportStatement();
         std::unique_ptr<Statement> parseExportStatement();

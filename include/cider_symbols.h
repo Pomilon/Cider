@@ -21,13 +21,14 @@ namespace Cider {
         bool isArray = false;
         int arraySize = 0;
         bool isVolatile = false;
+        bool isInterface = false;
         
         static TypeInfo fromAST(TypeAST* ast);
         
         bool operator==(const TypeInfo& other) const {
             return name == other.name && pointerLevel == other.pointerLevel && 
                    isArray == other.isArray && arraySize == other.arraySize &&
-                   isVolatile == other.isVolatile;
+                   isVolatile == other.isVolatile && isInterface == other.isInterface;
         }
         
         bool operator!=(const TypeInfo& other) const {
@@ -50,7 +51,7 @@ namespace Cider {
     /**
      * Base class for all symbols (Variables, Functions, Types).
      */
-    enum class SymbolKind { VARIABLE, FUNCTION, STRUCT, ENUM, CLASS };
+    enum class SymbolKind { VARIABLE, FUNCTION, STRUCT, ENUM, CLASS, INTERFACE };
 
     struct Symbol {
         SymbolKind kind;
@@ -91,6 +92,10 @@ namespace Cider {
         std::vector<std::string> vtable; // List of mangled function names
         std::string parentName; // For inheritance
         int totalSize = 0;
+    };
+
+    struct InterfaceSymbol : public Symbol {
+        std::vector<StructSymbol::Method> methods;
     };
 
     /**

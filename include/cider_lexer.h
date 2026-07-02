@@ -55,6 +55,7 @@ namespace Cider
         VIRTUAL,
         OVERRIDE,
         VOLATILE,
+        INTERFACE,
 
         // Types
         INT,

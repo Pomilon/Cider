@@ -20,21 +20,64 @@ namespace Cider {
             program.accept(*this);
 
             // Populate V-Tables in module
-            // We need to find all StructSymbols that are classes
-            // This is a bit inefficient but works for now: we can't easily iterate all symbols in SymbolTable
-            // So we'll have ClassDeclStmt visitor register them or search the global scope.
-            // Let's assume they are in the global scope.
             auto globalScope = symbolTable_.getCurrentScope();
             while (globalScope->getParent()) globalScope = globalScope->getParent();
             
-            // We need a way to get all symbols. Let's add a getter to Scope or SymbolTable if needed.
-            // For now, let's just use ClassDeclStmt to register them into a list in IRGenerator.
             for (const auto& className : classNames_) {
                 auto sym = symbolTable_.resolve(className);
                 if (sym && sym->kind == SymbolKind::CLASS) {
                     auto classSym = std::static_pointer_cast<StructSymbol>(sym);
                     if (!classSym->vtable.empty()) {
                         module_.addVTable(className, classSym->vtable);
+                    }
+                }
+            }
+
+            // Generate interface vtables: for each interface-struct pair
+            for (const auto& ifaceName : interfaceNames_) {
+                auto ifaceSym = symbolTable_.resolve(ifaceName);
+                if (!ifaceSym || ifaceSym->kind != SymbolKind::INTERFACE) continue;
+                auto iface = std::static_pointer_cast<InterfaceSymbol>(ifaceSym);
+                // Check all classes/structs that might implement this interface
+                std::vector<std::string> allStructClasses = classNames_;
+                for (const auto& sn : structNames_) {
+                    bool found = false;
+                    for (const auto& cn : classNames_) { if (cn == sn) { found = true; break; } }
+                    if (!found) allStructClasses.push_back(sn);
+                }
+                for (const auto& scName : allStructClasses) {
+                    auto scSym = symbolTable_.resolve(scName);
+                    if (!scSym) continue;
+                    if (scSym->kind != SymbolKind::STRUCT && scSym->kind != SymbolKind::CLASS) continue;
+                    auto ss = std::static_pointer_cast<StructSymbol>(scSym);
+                    bool satisfies = true;
+                    for (auto& im : iface->methods) {
+                        bool found = false;
+                        for (auto& sm : ss->methods) {
+                            if (sm.name != im.name) continue;
+                            if (sm.parameterTypes.size() != im.parameterTypes.size()) continue;
+                            bool paramsMatch = true;
+                            for (size_t pi = 0; pi < sm.parameterTypes.size(); ++pi) {
+                                if (sm.parameterTypes[pi].name != im.parameterTypes[pi].name) { paramsMatch = false; break; }
+                            }
+                            if (!paramsMatch) continue;
+                            if (sm.returnType.name != im.returnType.name) continue;
+                            found = true;
+                            break;
+                        }
+                        if (!found) { satisfies = false; break; }
+                    }
+                    if (satisfies && !iface->methods.empty()) {
+                        std::vector<std::string> vtableMethods;
+                        for (auto& im : iface->methods) {
+                            for (auto& sm : ss->methods) {
+                                if (sm.name == im.name) {
+                                    vtableMethods.push_back(sm.mangledName);
+                                    break;
+                                }
+                            }
+                        }
+                        module_.addVTable(ifaceName + "_" + scName, vtableMethods);
                     }
                 }
             }
@@ -220,7 +263,55 @@ namespace Cider {
 
                 TypeInfo objType = lastExprType_;
                 if (objType.pointerLevel > 0) objType.pointerLevel--;
-                
+
+                // Check if object is an interface type -> interface method call
+                if (objType.isInterface) {
+                    auto ifaceSym = symbolTable_.resolve(objType.name);
+                    if (ifaceSym && ifaceSym->kind == SymbolKind::INTERFACE) {
+                        auto iface = std::static_pointer_cast<InterfaceSymbol>(ifaceSym);
+                        int methodIdx = 0;
+                        bool found = false;
+                        for (auto& m : iface->methods) {
+                            if (m.name == mem->getMember()) {
+                                found = true;
+                                // objPtr points to the fat pointer (address of interface variable)
+                                // Load data_ptr from [objPtr + 0]
+                                IRValue dataPtrReg = IRValue::Register(nextTemp(), IRType::PTR);
+                                currentBlock_->addInstruction({IROp::LOAD, dataPtrReg, {objPtr, IRValue::Constant(0, IRType::I32)}});
+                                // Load vtable_ptr from [objPtr + 8]
+                                IRValue vtablePtrReg = IRValue::Register(nextTemp(), IRType::PTR);
+                                currentBlock_->addInstruction({IROp::LOAD, vtablePtrReg, {objPtr, IRValue::Constant(8, IRType::I32)}});
+                                // Load method address from vtable[methodIdx]
+                                IRValue methodAddrReg = IRValue::Register(nextTemp(), IRType::PTR);
+                                currentBlock_->addInstruction({IROp::LOAD, methodAddrReg, {vtablePtrReg, IRValue::Constant(methodIdx * 8, IRType::I32)}});
+                                // CALL through method address with data_ptr as 'this'
+                                std::vector<IRValue> args;
+                                args.push_back(methodAddrReg);
+                                args.push_back(dataPtrReg);
+                                for (auto& arg : expr.getArgs()) {
+                                    arg->accept(*this);
+                                    args.push_back(lastValue_);
+                                }
+                                IRType retIRType = (m.returnType.pointerLevel > 0) ? IRType::PTR : mapType(m.returnType.name);
+                                IRValue dest = IRValue::Register(nextTemp(), retIRType);
+                                IRInstruction callInstr;
+                                callInstr.op = IROp::CALL;
+                                callInstr.dest = dest;
+                                callInstr.args = std::move(args);
+                                currentBlock_->addInstruction(callInstr);
+                                lastValue_ = dest;
+                                lastExprType_ = m.returnType;
+                                return;
+                            }
+                            methodIdx++;
+                        }
+                        if (!found) {
+                            funcName = mem->getMember();
+                        }
+                        return;
+                    }
+                }
+
                 auto sym = symbolTable_.resolve(objType.name);
                 if (sym && (sym->kind == SymbolKind::CLASS || sym->kind == SymbolKind::STRUCT)) {
                     auto classSym = std::static_pointer_cast<StructSymbol>(sym);
@@ -314,12 +405,16 @@ namespace Cider {
                         IRValue addr = IRValue::Register(nextTemp(), IRType::PTR);
                         currentBlock_->addInstruction({IROp::ADD, addr, {obj, IRValue::Constant(field.offset, IRType::I32)}});
                         
-                        if (isAddress_) {
+                        bool fieldIsStruct = false;
+                        auto fieldTypeSym = symbolTable_.resolve(field.type.name);
+                        if (fieldTypeSym && (fieldTypeSym->kind == SymbolKind::STRUCT || fieldTypeSym->kind == SymbolKind::CLASS)) {
+                            fieldIsStruct = true;
+                        }
+                        if (isAddress_ || fieldIsStruct) {
                             lastValue_ = addr;
                         } else {
                             IRType fieldIRType = (field.type.pointerLevel > 0) ? IRType::PTR : mapType(field.type.name);
                             IRValue dest = IRValue::Register(nextTemp(), fieldIRType);
-                            // Correct LOAD: LOAD dest, [addr + 0]
                             currentBlock_->addInstruction({IROp::LOAD, dest, {addr, IRValue::Constant(0, IRType::I32)}});
                             lastValue_ = dest;
                         }
@@ -445,6 +540,12 @@ namespace Cider {
             sym->kind = SymbolKind::VARIABLE;
             sym->name = stmt.getName();
             sym->type = TypeInfo::fromAST(stmt.getTypeAST());
+            if (!sym->type.isInterface && sym->type.pointerLevel == 0) {
+                auto typeSym = symbolTable_.resolve(sym->type.name);
+                if (typeSym && typeSym->kind == SymbolKind::INTERFACE) {
+                    sym->type.isInterface = true;
+                }
+            }
             symbolTable_.define(sym);
 
             if (!currentFunction_) {
@@ -464,12 +565,38 @@ namespace Cider {
             variableValues_[stmt.getName()] = addr;
 
             if (stmt.getInitializer()) {
-                stmt.getInitializer()->accept(*this);
-                IRValue val = lastValue_;
-                if (sym->type.isArray || sym->type.isUserDefined || getTypeSize(sym->type) > 8) {
-                    currentBlock_->addInstruction({IROp::MEMCPY, std::nullopt, {addr, val, IRValue::Constant(getTypeSize(sym->type), IRType::I32)}});
-                } else {
-                    currentBlock_->addInstruction({IROp::STORE, std::nullopt, {addr, val, IRValue::Constant(0, IRType::I32)}});
+                // Handle interface variable initialization: assign concrete type to interface
+                bool isInterfaceInit = false;
+                TypeInfo initTypeInfo;
+                if (sym->type.isInterface) {
+                    stmt.getInitializer()->accept(*this);
+                    initTypeInfo = lastExprType_;
+                    IRValue srcAddr = lastValue_;
+                    // Store data pointer at [addr + 0]
+                    currentBlock_->addInstruction({IROp::STORE, std::nullopt, {addr, srcAddr, IRValue::Constant(0, IRType::I32)}});
+                    // Compute [addr + 8] in a separate register to avoid corrupting addr
+                    IRValue addr8 = IRValue::Register(nextTemp(), IRType::PTR);
+                    currentBlock_->addInstruction({IROp::ADD, addr8, {addr, IRValue::Constant(8, IRType::I32)}});
+                    // Store vtable pointer at [addr + 8]
+                    std::string concreteTypeName = initTypeInfo.name;
+                    if (initTypeInfo.pointerLevel > 0) {
+                        TypeInfo base = initTypeInfo;
+                        base.pointerLevel--;
+                        concreteTypeName = base.name;
+                    }
+                    std::string vtableLabel = "vtable_" + sym->type.name + "_" + concreteTypeName;
+                    currentBlock_->addInstruction({IROp::STORE, std::nullopt, {addr8, IRValue::Label(vtableLabel), IRValue::Constant(0, IRType::I32)}});
+                    lastExprType_ = sym->type;
+                    isInterfaceInit = true;
+                }
+                if (!isInterfaceInit) {
+                    stmt.getInitializer()->accept(*this);
+                    IRValue val = lastValue_;
+                    if (sym->type.isArray || sym->type.isUserDefined || getTypeSize(sym->type) > 8) {
+                        currentBlock_->addInstruction({IROp::MEMCPY, std::nullopt, {addr, val, IRValue::Constant(getTypeSize(sym->type), IRType::I32)}});
+                    } else {
+                        currentBlock_->addInstruction({IROp::STORE, std::nullopt, {addr, val, IRValue::Constant(0, IRType::I32)}});
+                    }
                 }
             }
         }
@@ -487,10 +614,12 @@ namespace Cider {
             if (type.name == "u32" || type.name == "i32" || type.name == "int" || type.name == "float" || type.name == "bool") return 4;
             if (type.name == "u64" || type.name == "i64") return 8;
 
+            if (type.isInterface) return 16;
             auto sym = symbolTable_.resolve(type.name);
             if (sym && (sym->kind == SymbolKind::STRUCT || sym->kind == SymbolKind::CLASS)) {
                 return std::static_pointer_cast<StructSymbol>(sym)->totalSize;
             }
+            if (sym && sym->kind == SymbolKind::INTERFACE) return 16;
             return 8; // Default
         }
 
@@ -512,16 +641,18 @@ namespace Cider {
                 IRValue rightVal = lastValue_;
                 TypeInfo rightType = lastExprType_;
                 currentBlock_->addInstruction({IROp::BR, std::nullopt, {IRValue::Label(scMergeName)}});
+                std::string trueEndName = currentBlock_->getName();
                 startBlock(scFalseName);
                 IRValue falseVal = IRValue::Constant(0, IRType::BOOL);
                 currentBlock_->addInstruction({IROp::BR, std::nullopt, {IRValue::Label(scMergeName)}});
+                std::string falseEndName = currentBlock_->getName();
                 startBlock(scMergeName);
                 IRValue phiDest = IRValue::Register(nextTemp(), IRType::BOOL);
                 IRInstruction phiInstr;
                 phiInstr.op = IROp::PHI;
                 phiInstr.dest = phiDest;
-                phiInstr.phiArgs[scTrueName] = rightVal;
-                phiInstr.phiArgs[scFalseName] = falseVal;
+                phiInstr.phiArgs[trueEndName] = rightVal;
+                phiInstr.phiArgs[falseEndName] = falseVal;
                 currentBlock_->addInstruction(phiInstr);
                 lastValue_ = phiDest;
                 lastExprType_ = rightType.pointerLevel > 0 ? rightType : TypeInfo{"bool", 0};
@@ -537,18 +668,20 @@ namespace Cider {
                 startBlock(scTrueName);
                 IRValue trueVal = IRValue::Constant(1, IRType::BOOL);
                 currentBlock_->addInstruction({IROp::BR, std::nullopt, {IRValue::Label(scMergeName)}});
+                std::string trueEndName = currentBlock_->getName();
                 startBlock(scFalseName);
                 expr.getRight()->accept(*this);
                 IRValue rightVal = lastValue_;
                 TypeInfo rightType = lastExprType_;
                 currentBlock_->addInstruction({IROp::BR, std::nullopt, {IRValue::Label(scMergeName)}});
+                std::string falseEndName = currentBlock_->getName();
                 startBlock(scMergeName);
                 IRValue phiDest = IRValue::Register(nextTemp(), IRType::BOOL);
                 IRInstruction phiInstr;
                 phiInstr.op = IROp::PHI;
                 phiInstr.dest = phiDest;
-                phiInstr.phiArgs[scTrueName] = trueVal;
-                phiInstr.phiArgs[scFalseName] = rightVal;
+                phiInstr.phiArgs[trueEndName] = trueVal;
+                phiInstr.phiArgs[falseEndName] = rightVal;
                 currentBlock_->addInstruction(phiInstr);
                 lastValue_ = phiDest;
                 lastExprType_ = rightType.pointerLevel > 0 ? rightType : TypeInfo{"bool", 0};
@@ -605,7 +738,14 @@ namespace Cider {
         }
 
         void visit(NumberExpr& expr) override {
-            lastValue_ = IRValue::Constant(expr.getValue(), IRType::I32);
+            double val = expr.getValue();
+            IRType irType;
+            if (val == (long long)val) {
+                irType = IRType::I32;
+            } else {
+                irType = IRType::F32;
+            }
+            lastValue_ = IRValue::Constant(val, irType);
         }
 
         void visit(CharExpr& expr) override {
@@ -652,7 +792,7 @@ namespace Cider {
                 }
             }
 
-            if (lastExprType_.isArray || lastExprType_.isUserDefined) {
+            if (lastExprType_.isArray || lastExprType_.isUserDefined || lastExprType_.isInterface) {
                 lastValue_ = getAddress(&expr);
                 return;
             }
@@ -1080,7 +1220,12 @@ namespace Cider {
             currentBlock_->addInstruction({IROp::ADD, addr, {obj, scaledIdx}});
             
             lastExprType_ = elemType;
-            if (isAddress_) {
+            bool elemIsStruct = false;
+            auto elemTypeSym = symbolTable_.resolve(elemType.name);
+            if (elemTypeSym && (elemTypeSym->kind == SymbolKind::STRUCT || elemTypeSym->kind == SymbolKind::CLASS)) {
+                elemIsStruct = true;
+            }
+            if (isAddress_ || elemIsStruct) {
                 lastValue_ = addr;
             } else {
                 IRType irType = (elemType.pointerLevel > 0) ? IRType::PTR : mapType(elemType.name);
@@ -1186,12 +1331,14 @@ namespace Cider {
             IRValue thenVal = lastValue_;
             TypeInfo thenType = lastExprType_;
             currentBlock_->addInstruction({IROp::BR, std::nullopt, {IRValue::Label(mergeName)}});
+            std::string thenEndName = currentBlock_->getName();
 
             startBlock(elseName);
             expr.getElseExpr()->accept(*this);
             IRValue elseVal = lastValue_;
             TypeInfo elseType = lastExprType_;
             currentBlock_->addInstruction({IROp::BR, std::nullopt, {IRValue::Label(mergeName)}});
+            std::string elseEndName = currentBlock_->getName();
 
             startBlock(mergeName);
             IRType phiType = thenType.pointerLevel > 0 ? IRType::PTR : mapType(thenType.name);
@@ -1199,8 +1346,8 @@ namespace Cider {
             IRInstruction phiInstr;
             phiInstr.op = IROp::PHI;
             phiInstr.dest = phiDest;
-            phiInstr.phiArgs[thenName] = thenVal;
-            phiInstr.phiArgs[elseName] = elseVal;
+            phiInstr.phiArgs[thenEndName] = thenVal;
+            phiInstr.phiArgs[elseEndName] = elseVal;
             currentBlock_->addInstruction(phiInstr);
             lastValue_ = phiDest;
             lastExprType_ = thenType;
@@ -1210,12 +1357,13 @@ namespace Cider {
         void visit(AwaitExpr&) override {}
         void visit(ArrayTypeAST&) override {}
         void visit(TypeAST&) override {}
-        void visit(StructDeclStmt&) override {}
+        void visit(StructDeclStmt& stmt) override { structNames_.push_back(stmt.getName()); lastExprType_ = {stmt.getName(), 0}; }
         void visit(EnumDeclStmt&) override {}
         void visit(TypeAliasStmt&) override {}
         void visit(ImportStmt&) override {}
         void visit(FromImportStmt&) override {}
         void visit(ExportExpressionStmt&) override {}
+        void visit(InterfaceDeclStmt& stmt) override { interfaceNames_.push_back(stmt.getName()); }
 
         void ensureExceptionGlobals() {
             if (!exceptionGlobalsEnsured_) {
@@ -1239,6 +1387,8 @@ namespace Cider {
         std::map<std::string, IRValue> variableValues_;
         std::map<std::string, IRValue> globalValues_;
         std::vector<std::string> classNames_;
+        std::vector<std::string> interfaceNames_;
+        std::vector<std::string> structNames_;
         std::set<Program*> visitedPrograms_;
         std::vector<std::string> breakLabels_;
         std::vector<std::string> continueLabels_;

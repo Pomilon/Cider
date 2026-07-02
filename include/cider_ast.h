@@ -70,6 +70,7 @@ namespace Cider
             FROM_IMPORT_STMT,
             EXPORT_STMT,
             EXPORT_EXPRESSION_STMT,
+            INTERFACE_DECL_STMT,
             TYPE_AST
         };
 
@@ -785,6 +786,31 @@ namespace Cider
         std::unique_ptr<Expression> expr_;
     };
 
+    struct InterfaceMethod {
+        std::string name;
+        std::vector<std::pair<std::string, std::unique_ptr<TypeAST>>> params;
+        std::unique_ptr<TypeAST> returnType;
+        int line;
+        int col;
+        InterfaceMethod(const std::string& name,
+                        std::vector<std::pair<std::string, std::unique_ptr<TypeAST>>> params,
+                        std::unique_ptr<TypeAST> returnType, int line, int col)
+            : name(name), params(std::move(params)), returnType(std::move(returnType)), line(line), col(col) {}
+    };
+
+    class InterfaceDeclStmt : public Statement {
+    public:
+        InterfaceDeclStmt(const std::string &name, std::vector<InterfaceMethod> methods,
+                          int line, int col)
+            : Statement(INTERFACE_DECL_STMT, line, col), name_(name), methods_(std::move(methods)) {}
+        const std::string &getName() const { return name_; }
+        const std::vector<InterfaceMethod> &getMethods() const { return methods_; }
+        void accept(ASTVisitor &visitor) override;
+    private:
+        std::string name_;
+        std::vector<InterfaceMethod> methods_;
+    };
+
     class Program : public ASTNode
     {
     public:
@@ -858,6 +884,7 @@ namespace Cider
         virtual void visit(FromImportStmt &stmt) = 0;
         virtual void visit(ExportStmt &stmt) = 0;
         virtual void visit(ExportExpressionStmt &stmt) = 0;
+        virtual void visit(InterfaceDeclStmt &stmt) = 0;
         virtual void visit(Program &program) = 0;
     };
 
@@ -913,8 +940,9 @@ namespace Cider
     inline void ImportStmt::accept(ASTVisitor &visitor) { visitor.visit(*this); }
     inline void FromImportStmt::accept(ASTVisitor &visitor) { visitor.visit(*this); }
     inline void ExportStmt::accept(ASTVisitor &visitor) { visitor.visit(*this); }
-    inline void ExportExpressionStmt::accept(ASTVisitor &visitor) { visitor.visit(*this); }
-    inline void Program::accept(ASTVisitor &visitor) { visitor.visit(*this); }
+inline void ExportExpressionStmt::accept(ASTVisitor &visitor) { visitor.visit(*this); }
+inline void InterfaceDeclStmt::accept(ASTVisitor &visitor) { visitor.visit(*this); }
+inline void Program::accept(ASTVisitor &visitor) { visitor.visit(*this); }
 
 }
 

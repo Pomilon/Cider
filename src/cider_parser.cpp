@@ -810,6 +810,8 @@ namespace Cider
             return parseFunctionDeclaration();
         case TokenType::CLASS:
             return parseClassDeclaration();
+        case TokenType::INTERFACE:
+            return parseInterfaceDeclaration();
         case TokenType::IMPORT:
             return parseImportStatement();
         case TokenType::FROM:
@@ -2033,6 +2035,53 @@ namespace Cider
             else nextToken();
         }
         return statements;
+    }
+
+    std::unique_ptr<Statement> Parser::parseInterfaceDeclaration() {
+        nextToken(); // consume 'interface'
+        int line = currentToken_.line;
+        int col = currentToken_.column;
+        if (currentToken_.type != TokenType::IDENTIFIER) { error("Expected interface name."); return nullptr; }
+        std::string name = currentToken_.value;
+        nextToken();
+        if (currentToken_.type != TokenType::LBRACE) { error("Expected '{' after interface name."); return nullptr; }
+        nextToken();
+        std::vector<InterfaceMethod> methods;
+        while (currentToken_.type != TokenType::RBRACE && currentToken_.type != TokenType::END_OF_FILE) {
+            bool isFunc = currentToken_.type == TokenType::FUNCTION || currentToken_.type == TokenType::FUNC;
+            if (!isFunc) { error("Expected method declaration."); return nullptr; }
+            nextToken();
+            int mLine = currentToken_.line;
+            int mCol = currentToken_.column;
+            if (currentToken_.type != TokenType::IDENTIFIER) { error("Expected method name."); return nullptr; }
+            std::string mName = currentToken_.value;
+            nextToken();
+            if (currentToken_.type != TokenType::LPAREN) { error("Expected '('."); return nullptr; }
+            nextToken();
+            std::vector<std::pair<std::string, std::unique_ptr<TypeAST>>> params;
+            while (currentToken_.type != TokenType::RPAREN) {
+                if (currentToken_.type != TokenType::IDENTIFIER) { error("Expected param name."); return nullptr; }
+                std::string pName = currentToken_.value;
+                nextToken();
+                if (currentToken_.type != TokenType::COLON) { error("Expected ':'."); return nullptr; }
+                nextToken();
+                auto pType = parseType();
+                params.push_back({pName, std::move(pType)});
+                if (currentToken_.type == TokenType::COMMA) nextToken();
+            }
+            nextToken(); // ')'
+            std::unique_ptr<TypeAST> retType = std::make_unique<TypeAST>("void", 0, mLine, mCol);
+            if (currentToken_.type == TokenType::ARROW) {
+                nextToken();
+                retType = parseType();
+            }
+            if (currentToken_.type != TokenType::SEMICOLON) { error("Expected ';'."); return nullptr; }
+            nextToken();
+            methods.push_back(InterfaceMethod(mName, std::move(params), std::move(retType), mLine, mCol));
+        }
+        if (currentToken_.type != TokenType::RBRACE) { error("Expected '}'."); return nullptr; }
+        nextToken();
+        return std::make_unique<InterfaceDeclStmt>(name, std::move(methods), line, col);
     }
 
 } // namespace Cider

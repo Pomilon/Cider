@@ -145,6 +145,7 @@ namespace Cider {
         void visit(FromImportStmt&) override {}
         void visit(ExportStmt& stmt) override { stmt.getStmt()->accept(*this); }
         void visit(ExportExpressionStmt&) override {}
+        void visit(InterfaceDeclStmt&) override {}
 
     private:
         std::unique_ptr<Expression> lastFoldedExpr_ = nullptr;

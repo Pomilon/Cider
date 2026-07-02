@@ -28,6 +28,45 @@ namespace Cider {
             for (auto& stmt : program.getStatements()) {
                 stmt->accept(*this);
             }
+            // Post-processing: check which structs/classes implement which interfaces
+            for (auto& ifaceName : interfaceNames_) {
+                auto ifaceSym = symbolTable_.resolve(ifaceName);
+                if (!ifaceSym || ifaceSym->kind != SymbolKind::INTERFACE) continue;
+                auto iface = std::static_pointer_cast<InterfaceSymbol>(ifaceSym);
+                for (auto& structName : structClassNames_) {
+                    auto structSym = symbolTable_.resolve(structName);
+                    if (!structSym) continue;
+                    if (structSym->kind != SymbolKind::STRUCT && structSym->kind != SymbolKind::CLASS) continue;
+                    auto ss = std::static_pointer_cast<StructSymbol>(structSym);
+                    bool satisfies = true;
+                    for (auto& im : iface->methods) {
+                        bool found = false;
+                        for (auto& sm : ss->methods) {
+                            if (sm.name != im.name) continue;
+                            if (sm.parameterTypes.size() != im.parameterTypes.size()) continue;
+                            bool paramsMatch = true;
+                            for (size_t pi = 0; pi < sm.parameterTypes.size(); ++pi) {
+                                if (sm.parameterTypes[pi].name != im.parameterTypes[pi].name) {
+                                    paramsMatch = false;
+                                    break;
+                                }
+                            }
+                            if (!paramsMatch) continue;
+                            if (sm.returnType.name != im.returnType.name) continue;
+                            found = true;
+                            break;
+                        }
+                        if (!found) { satisfies = false; break; }
+                    }
+                    if (satisfies && !iface->methods.empty()) {
+                        interfaceImpls_[ifaceName].push_back(structName);
+                    }
+                }
+            }
+        }
+
+        const std::map<std::string, std::vector<std::string>>& getInterfaceImpls() const {
+            return interfaceImpls_;
         }
 
         void visit(VarDeclStmt& stmt) override {
@@ -150,6 +189,32 @@ namespace Cider {
             } else {
                 symbolTable_.define(sym);
             }
+        }
+
+        void visit(InterfaceDeclStmt& stmt) override {
+            auto sym = std::make_shared<InterfaceSymbol>();
+            sym->kind = SymbolKind::INTERFACE;
+            sym->name = stmt.getName();
+            sym->type = {stmt.getName(), 0};
+            sym->type.isInterface = true;
+            sym->line = stmt.getLine();
+            sym->col = stmt.getColumn();
+            for (auto& m : stmt.getMethods()) {
+                StructSymbol::Method method;
+                method.name = m.name;
+                method.mangledName = m.name;
+                method.returnType = TypeInfo::fromAST(m.returnType.get());
+                for (auto& p : m.params) {
+                    method.parameterTypes.push_back(TypeInfo::fromAST(p.second.get()));
+                }
+                sym->methods.push_back(method);
+            }
+            if (symbolTable_.getCurrentScope()->resolveLocal(sym->name)) {
+                reporter_.error("Redeclaration of type '" + sym->name + "'", sym->line, sym->col);
+            } else {
+                symbolTable_.define(sym);
+            }
+            structClassNames_.push_back(stmt.getName());
         }
 
         void visit(EnumDeclStmt& stmt) override {
@@ -436,6 +501,7 @@ namespace Cider {
             if (currentOffset == 0) currentOffset = 8;
             sym->totalSize = currentOffset;
             symbolTable_.define(sym);
+            structClassNames_.push_back(stmt.getName());
         }
         void visit(FromImportStmt& stmt) override {
             auto result = resolver_.resolve(stmt.getModuleName(), originPath_);
@@ -463,8 +529,13 @@ namespace Cider {
         void visit(ExportStmt& stmt) override { stmt.getStmt()->accept(*this); }
         void visit(ExportExpressionStmt&) override {}
 
+        void addStructClassName(const std::string& name) {
+            structClassNames_.push_back(name);
+        }
+
         int getFieldSize(const TypeInfo& type) {
             if (type.pointerLevel > 0) return 8;
+            if (type.isInterface) return 16;
             if (type.isArray) {
                 TypeInfo elemType = type;
                 elemType.isArray = false;
@@ -489,6 +560,9 @@ namespace Cider {
         std::string currentClassName_;
         Program* currentProgram_;
         std::string originPath_;
+        std::vector<std::string> interfaceNames_;
+        std::vector<std::string> structClassNames_;
+        std::map<std::string, std::vector<std::string>> interfaceImpls_;
     };
 
 } // namespace Cider

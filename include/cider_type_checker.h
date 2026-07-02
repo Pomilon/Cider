@@ -82,7 +82,8 @@ namespace Cider {
                     type != ASTNode::IMPORT_STMT &&
                     type != ASTNode::FROM_IMPORT_STMT &&
                     type != ASTNode::EXPORT_STMT &&
-                    type != ASTNode::ASM_STMT) {
+                    type != ASTNode::ASM_STMT &&
+                    type != ASTNode::INTERFACE_DECL_STMT) {
                     error("Executable statements are not allowed at the global scope", stmt->getLine());
                 }
                 stmt->accept(*this);
@@ -101,12 +102,53 @@ namespace Cider {
 
         void visit(VarDeclStmt& stmt) override {
             TypeInfo declaredType = TypeInfo::fromAST(stmt.getTypeAST());
-            
+            // Resolve interface type
+            if (!declaredType.isInterface && declaredType.pointerLevel == 0) {
+                auto typeSym = symbolTable_.resolve(declaredType.name);
+                if (typeSym && typeSym->kind == SymbolKind::INTERFACE) {
+                    declaredType.isInterface = true;
+                }
+            }
+
             if (stmt.getInitializer()) {
                 stmt.getInitializer()->accept(*this);
                 TypeInfo initType = lastExprType_;
                 
-                if (!areTypesCompatible(declaredType, initType)) {
+                if (declaredType.isInterface) {
+                    auto ifaceSym = symbolTable_.resolve(declaredType.name);
+                    if (ifaceSym && ifaceSym->kind == SymbolKind::INTERFACE) {
+                        auto iface = std::static_pointer_cast<InterfaceSymbol>(ifaceSym);
+                        TypeInfo concreteType = initType;
+                        if (concreteType.pointerLevel > 0) concreteType.pointerLevel--;
+                        auto concreteSym = symbolTable_.resolve(concreteType.name);
+                        if (!concreteSym || (concreteSym->kind != SymbolKind::STRUCT && concreteSym->kind != SymbolKind::CLASS)) {
+                            error("Cannot assign non-struct/class type to interface '" + declaredType.name + "'", stmt.getLine());
+                        } else {
+                            auto ss = std::static_pointer_cast<StructSymbol>(concreteSym);
+                            for (auto& im : iface->methods) {
+                                bool found = false;
+                                for (auto& sm : ss->methods) {
+                                    if (sm.name != im.name) continue;
+                                    if (sm.parameterTypes.size() != im.parameterTypes.size()) continue;
+                                    bool paramsMatch = true;
+                                    for (size_t pi = 0; pi < sm.parameterTypes.size(); ++pi) {
+                                        if (sm.parameterTypes[pi].name != im.parameterTypes[pi].name) {
+                                            paramsMatch = false; break;
+                                        }
+                                    }
+                                    if (!paramsMatch) continue;
+                                    if (sm.returnType.name != im.returnType.name) continue;
+                                    found = true;
+                                    break;
+                                }
+                                if (!found) {
+                                    error("Type '" + concreteType.name + "' does not implement interface '" +
+                                          declaredType.name + "': missing method '" + im.name + "'", stmt.getLine());
+                                }
+                            }
+                        }
+                    }
+                } else if (!areTypesCompatible(declaredType, initType)) {
                     error("Type mismatch in declaration of '" + stmt.getName() + 
                           "'. Expected " + declaredType.toString() + ", got " + initType.toString(), 
                           stmt.getLine());
@@ -233,6 +275,13 @@ namespace Cider {
                     lastExprType_ = {"void", 1};
                 } else {
                     lastExprType_ = sym->type;
+                    // Resolve interface type
+                    if (!lastExprType_.isInterface && lastExprType_.pointerLevel == 0) {
+                        auto typeSym = symbolTable_.resolve(lastExprType_.name);
+                        if (typeSym && typeSym->kind == SymbolKind::INTERFACE) {
+                            lastExprType_.isInterface = true;
+                        }
+                    }
                 }
             }
         }
@@ -269,7 +318,22 @@ namespace Cider {
                 }
                 objType.pointerLevel--;
             }
-            
+
+            // Check if object type is an interface
+            auto ifaceSym = symbolTable_.resolve(objType.name);
+            if (ifaceSym && ifaceSym->kind == SymbolKind::INTERFACE) {
+                auto iface = std::static_pointer_cast<InterfaceSymbol>(ifaceSym);
+                for (const auto& method : iface->methods) {
+                    if (method.name == expr.getMember()) {
+                        lastExprType_ = method.returnType;
+                        return;
+                    }
+                }
+                error("Method '" + expr.getMember() + "' not found in interface " + objType.name, expr.getLine());
+                lastExprType_ = {"error", 0};
+                return;
+            }
+
             auto sym = symbolTable_.resolve(objType.name);
             if (!sym || (sym->kind != SymbolKind::STRUCT && sym->kind != SymbolKind::CLASS)) {
                 error("Type " + objType.toString() + " is not a struct or class", expr.getLine());
@@ -542,6 +606,7 @@ namespace Cider {
         void visit(FromImportStmt&) override {}
         void visit(ExportStmt& stmt) override { stmt.getStmt()->accept(*this); }
         void visit(ExportExpressionStmt&) override {}
+        void visit(InterfaceDeclStmt&) override {}
         void visit(ForEachStmt&) override {}
         void visit(DeleteStmt& stmt) override {
             stmt.getTarget()->accept(*this);
