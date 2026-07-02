@@ -5,14 +5,17 @@ section .data
     str0: db 10, 0
     str1: db `0`, 0
     str2: db `-`, 0
-    str3: db `0123456789abcdef`, 0
-    str4: db `hexdump: missing filename`, 10, 0
-    str5: db `hexdump: cannot open`, 10, 0
+    str3: db `hexdump: missing filename`, 10, 0
+    str4: db `:`, 10, 0
+    str5: db `hexdump: cannot open: `, 0
+    str6: db 10, 0
     O_WRONLY: dd 1
     O_RDWR: dd 2
     O_CREAT: dd 64
     O_TRUNC: dd 512
     O_APPEND: dd 1024
+    _gs0: db '0', '1', '2', '3', '4', '5', '6', '7', '8', '9', 'a', 'b', 'c', 'd', 'e', 'f', 0
+    HEX: dq _gs0
 
 section .text
     extern malloc
@@ -1252,6 +1255,882 @@ unlink:
     pop rbx
     pop rbp
     ret
+dump_file:
+    push rbp
+    mov rbp, rsp
+    push rbx
+    push r12
+    push r13
+    push r14
+    push r15
+    sub rsp, 5536
+.entry:
+    push rdi
+    pop r11
+    mov r14, r11
+    lea r10, [rbp - 56]
+    mov r15, r10
+    add r15, 0
+    mov eax, r14d
+    mov dword [r15], eax
+    lea r10, [rbp - 4152]
+    mov r13, r10
+    lea r10, [rbp - 4160]
+    mov r12, r10
+    add r12, 0
+    mov eax, 0
+    mov dword [r12], eax
+    jmp .dump_file_while_header0
+.dump_file_while_header0:
+    mov rax, 1
+    cmp rax, 0
+    jne .dump_file_while_body1
+    jmp .dump_file_while_exit2
+.dump_file_while_body1:
+    lea r10, [rbp - 4168]
+    mov rbx, r10
+    mov eax, dword [r15 + 0]
+    mov dword [rbp - 4328], eax
+    mov qword [rbp - 4336], r13
+    push [rbp - 4328]
+    push [rbp - 4336]
+    push 4096
+    pop rdx
+    pop rsi
+    pop rdi
+    call read
+    mov dword [rbp - 4344], eax
+    add rbx, 0
+    mov eax, dword [rbp - 4344]
+    mov dword [rbx], eax
+    mov eax, dword [rbx + 0]
+    mov dword [rbp - 4352], eax
+    mov eax, dword [rbp - 4352]
+    mov r11d, 0
+    cmp eax, r11d
+    setle al
+    movzx rax, al
+    mov [rbp - 4360], rax
+    mov rax, [rbp - 4360]
+    cmp rax, 0
+    jne .dump_file_then3
+    jmp .dump_file_else4
+.dump_file_then3:
+    jmp .dump_file_while_exit2
+.dump_file_dead6:
+    jmp .dump_file_ifcont5
+.dump_file_else4:
+    jmp .dump_file_ifcont5
+.dump_file_ifcont5:
+    lea r10, [rbp - 4176]
+    mov qword [rbp - 4368], r10
+    mov r11, [rbp - 4368]
+    add r11, 0
+    mov eax, 0
+    mov dword [r11], eax
+    jmp .dump_file_while_header7
+.dump_file_while_header7:
+    mov r10, [rbp - 4368]
+    mov eax, dword [r10 + 0]
+    mov dword [rbp - 4376], eax
+    mov eax, dword [rbx + 0]
+    mov dword [rbp - 4384], eax
+    mov eax, dword [rbp - 4376]
+    mov r11d, dword [rbp - 4384]
+    cmp eax, r11d
+    setl al
+    movzx rax, al
+    mov [rbp - 4392], rax
+    mov rax, [rbp - 4392]
+    cmp rax, 0
+    jne .dump_file_while_body8
+    jmp .dump_file_while_exit9
+.dump_file_while_body8:
+    lea r10, [rbp - 4184]
+    mov qword [rbp - 4400], r10
+    mov eax, dword [rbx + 0]
+    mov dword [rbp - 4408], eax
+    mov r10, [rbp - 4368]
+    mov eax, dword [r10 + 0]
+    mov dword [rbp - 4416], eax
+    mov eax, dword [rbp - 4408]
+    mov r11d, dword [rbp - 4416]
+    sub eax, r11d
+    mov dword [rbp - 4424], eax
+    mov r11, [rbp - 4400]
+    add r11, 0
+    mov eax, dword [rbp - 4424]
+    mov dword [r11], eax
+    lea r10, [rbp - 4192]
+    mov qword [rbp - 4432], r10
+    mov r11, [rbp - 4432]
+    add r11, 0
+    mov eax, 16
+    mov dword [r11], eax
+    mov r10, [rbp - 4400]
+    mov eax, dword [r10 + 0]
+    mov dword [rbp - 4440], eax
+    mov eax, dword [rbp - 4440]
+    mov r11d, 16
+    cmp eax, r11d
+    setl al
+    movzx rax, al
+    mov [rbp - 4448], rax
+    mov rax, [rbp - 4448]
+    cmp rax, 0
+    jne .dump_file_then10
+    jmp .dump_file_else11
+.dump_file_then10:
+    mov r10, [rbp - 4400]
+    mov eax, dword [r10 + 0]
+    mov dword [rbp - 4456], eax
+    mov r11, [rbp - 4432]
+    add r11, 0
+    mov eax, dword [rbp - 4456]
+    mov dword [r11], eax
+    jmp .dump_file_ifcont12
+.dump_file_else11:
+    jmp .dump_file_ifcont12
+.dump_file_ifcont12:
+    lea r10, [rbp - 4272]
+    mov qword [rbp - 4464], r10
+    lea r10, [rbp - 4280]
+    mov qword [rbp - 4472], r10
+    mov r11, [rbp - 4472]
+    add r11, 0
+    mov eax, 0
+    mov dword [r11], eax
+    lea r10, [rbp - 4288]
+    mov qword [rbp - 4480], r10
+    mov eax, dword [r12 + 0]
+    mov dword [rbp - 4488], eax
+    mov r11, [rbp - 4480]
+    add r11, 0
+    mov eax, dword [rbp - 4488]
+    mov dword [r11], eax
+    lea r10, [rbp - 4296]
+    mov qword [rbp - 4496], r10
+    mov r11, [rbp - 4496]
+    add r11, 0
+    mov eax, 7
+    mov dword [r11], eax
+    jmp .dump_file_while_header13
+.dump_file_while_header13:
+    mov r10, [rbp - 4496]
+    mov eax, dword [r10 + 0]
+    mov dword [rbp - 4504], eax
+    mov eax, dword [rbp - 4504]
+    mov r11d, 0
+    cmp eax, r11d
+    setge al
+    movzx rax, al
+    mov [rbp - 4512], rax
+    mov rax, [rbp - 4512]
+    cmp rax, 0
+    jne .dump_file_while_body14
+    jmp .dump_file_while_exit15
+.dump_file_while_body14:
+    mov r10, [rbp - 4496]
+    mov eax, dword [r10 + 0]
+    mov dword [rbp - 4520], eax
+    mov r11d, 1
+    mov eax, dword [rbp - 4520]
+    imul eax, r11d
+    mov dword [rbp - 4528], eax
+    mov rax, qword [rbp - 4464]
+    movsxd r11, dword [rbp - 4528]
+    add rax, r11
+    mov qword [rbp - 4536], rax
+    mov rax, qword [rel HEX]
+    mov qword [rbp - 4544], rax
+    mov r10, [rbp - 4480]
+    mov eax, dword [r10 + 0]
+    mov dword [rbp - 4552], eax
+    mov r10, [rbp - 4480]
+    mov eax, dword [r10 + 0]
+    mov dword [rbp - 4560], eax
+    mov r11d, 16
+    mov eax, dword [rbp - 4560]
+    cdq
+    idiv r11d
+    mov dword [rbp - 4568], eax
+    mov r11d, 16
+    mov eax, dword [rbp - 4568]
+    imul eax, r11d
+    mov dword [rbp - 4576], eax
+    mov eax, dword [rbp - 4552]
+    mov r11d, dword [rbp - 4576]
+    sub eax, r11d
+    mov dword [rbp - 4584], eax
+    mov r11d, 1
+    mov eax, dword [rbp - 4584]
+    imul eax, r11d
+    mov dword [rbp - 4592], eax
+    mov rax, qword [rbp - 4544]
+    movsxd r11, dword [rbp - 4592]
+    add rax, r11
+    mov qword [rbp - 4600], rax
+    mov r10, [rbp - 4600]
+    movzx eax, byte [r10 + 0]
+    mov byte [rbp - 4608], al
+    mov r11, [rbp - 4536]
+    add r11, 0
+    mov al, byte [rbp - 4608]
+    mov byte [r11], al
+    mov r10, [rbp - 4480]
+    mov eax, dword [r10 + 0]
+    mov dword [rbp - 4616], eax
+    mov r11d, 16
+    mov eax, dword [rbp - 4616]
+    cdq
+    idiv r11d
+    mov dword [rbp - 4624], eax
+    mov r11, [rbp - 4480]
+    add r11, 0
+    mov eax, dword [rbp - 4624]
+    mov dword [r11], eax
+    mov r10, [rbp - 4496]
+    mov eax, dword [r10 + 0]
+    mov dword [rbp - 4632], eax
+    mov eax, dword [rbp - 4632]
+    mov r11d, 1
+    sub eax, r11d
+    mov dword [rbp - 4640], eax
+    mov r11, [rbp - 4496]
+    add r11, 0
+    mov eax, dword [rbp - 4640]
+    mov dword [r11], eax
+    jmp .dump_file_while_header13
+.dump_file_while_exit15:
+    mov r11, [rbp - 4472]
+    add r11, 0
+    mov eax, 8
+    mov dword [r11], eax
+    mov r10, [rbp - 4472]
+    mov eax, dword [r10 + 0]
+    mov dword [rbp - 4648], eax
+    mov r11d, 1
+    mov eax, dword [rbp - 4648]
+    imul eax, r11d
+    mov dword [rbp - 4656], eax
+    mov rax, qword [rbp - 4464]
+    movsxd r11, dword [rbp - 4656]
+    add rax, r11
+    mov qword [rbp - 4664], rax
+    mov r11, [rbp - 4664]
+    add r11, 0
+    mov al, 32
+    mov byte [r11], al
+    mov r10, [rbp - 4472]
+    mov eax, dword [r10 + 0]
+    mov dword [rbp - 4672], eax
+    mov eax, dword [rbp - 4672]
+    mov r11d, 1
+    add eax, r11d
+    mov dword [rbp - 4680], eax
+    mov r11, [rbp - 4472]
+    add r11, 0
+    mov eax, dword [rbp - 4680]
+    mov dword [r11], eax
+    mov r10, [rbp - 4472]
+    mov eax, dword [r10 + 0]
+    mov dword [rbp - 4688], eax
+    mov r11d, 1
+    mov eax, dword [rbp - 4688]
+    imul eax, r11d
+    mov dword [rbp - 4696], eax
+    mov rax, qword [rbp - 4464]
+    movsxd r11, dword [rbp - 4696]
+    add rax, r11
+    mov qword [rbp - 4704], rax
+    mov r11, [rbp - 4704]
+    add r11, 0
+    mov al, 32
+    mov byte [r11], al
+    mov r10, [rbp - 4472]
+    mov eax, dword [r10 + 0]
+    mov dword [rbp - 4712], eax
+    mov eax, dword [rbp - 4712]
+    mov r11d, 1
+    add eax, r11d
+    mov dword [rbp - 4720], eax
+    mov r11, [rbp - 4472]
+    add r11, 0
+    mov eax, dword [rbp - 4720]
+    mov dword [r11], eax
+    lea r10, [rbp - 4304]
+    mov qword [rbp - 4728], r10
+    mov r11, [rbp - 4728]
+    add r11, 0
+    mov eax, 0
+    mov dword [r11], eax
+    jmp .dump_file_while_header16
+.dump_file_while_header16:
+    mov r10, [rbp - 4728]
+    mov eax, dword [r10 + 0]
+    mov dword [rbp - 4736], eax
+    mov eax, dword [rbp - 4736]
+    mov r11d, 16
+    cmp eax, r11d
+    setl al
+    movzx rax, al
+    mov [rbp - 4744], rax
+    mov rax, [rbp - 4744]
+    cmp rax, 0
+    jne .dump_file_while_body17
+    jmp .dump_file_while_exit18
+.dump_file_while_body17:
+    mov r10, [rbp - 4728]
+    mov eax, dword [r10 + 0]
+    mov dword [rbp - 4752], eax
+    mov r10, [rbp - 4432]
+    mov eax, dword [r10 + 0]
+    mov dword [rbp - 4760], eax
+    mov eax, dword [rbp - 4752]
+    mov r11d, dword [rbp - 4760]
+    cmp eax, r11d
+    setl al
+    movzx rax, al
+    mov [rbp - 4768], rax
+    mov rax, [rbp - 4768]
+    cmp rax, 0
+    jne .dump_file_then19
+    jmp .dump_file_else20
+.dump_file_then19:
+    lea r10, [rbp - 4312]
+    mov qword [rbp - 4776], r10
+    mov r10, [rbp - 4368]
+    mov eax, dword [r10 + 0]
+    mov dword [rbp - 4784], eax
+    mov r10, [rbp - 4728]
+    mov eax, dword [r10 + 0]
+    mov dword [rbp - 4792], eax
+    mov eax, dword [rbp - 4784]
+    mov r11d, dword [rbp - 4792]
+    add eax, r11d
+    mov dword [rbp - 4800], eax
+    mov r11d, 1
+    mov eax, dword [rbp - 4800]
+    imul eax, r11d
+    mov dword [rbp - 4808], eax
+    mov rax, r13
+    movsxd r11, dword [rbp - 4808]
+    add rax, r11
+    mov qword [rbp - 4816], rax
+    mov r10, [rbp - 4816]
+    movzx eax, byte [r10 + 0]
+    mov byte [rbp - 4824], al
+    mov r11, [rbp - 4776]
+    add r11, 0
+    mov al, byte [rbp - 4824]
+    mov byte [r11], al
+    mov r10, [rbp - 4472]
+    mov eax, dword [r10 + 0]
+    mov dword [rbp - 4832], eax
+    mov r11d, 1
+    mov eax, dword [rbp - 4832]
+    imul eax, r11d
+    mov dword [rbp - 4840], eax
+    mov rax, qword [rbp - 4464]
+    movsxd r11, dword [rbp - 4840]
+    add rax, r11
+    mov qword [rbp - 4848], rax
+    mov rax, qword [rel HEX]
+    mov qword [rbp - 4856], rax
+    mov r10, [rbp - 4776]
+    mov eax, dword [r10 + 0]
+    mov dword [rbp - 4864], eax
+    mov r11d, 16
+    mov eax, dword [rbp - 4864]
+    cdq
+    idiv r11d
+    mov dword [rbp - 4872], eax
+    mov r11d, 1
+    mov eax, dword [rbp - 4872]
+    imul eax, r11d
+    mov dword [rbp - 4880], eax
+    mov rax, qword [rbp - 4856]
+    movsxd r11, dword [rbp - 4880]
+    add rax, r11
+    mov qword [rbp - 4888], rax
+    mov r10, [rbp - 4888]
+    movzx eax, byte [r10 + 0]
+    mov byte [rbp - 4896], al
+    mov r11, [rbp - 4848]
+    add r11, 0
+    mov al, byte [rbp - 4896]
+    mov byte [r11], al
+    mov r10, [rbp - 4472]
+    mov eax, dword [r10 + 0]
+    mov dword [rbp - 4904], eax
+    mov eax, dword [rbp - 4904]
+    mov r11d, 1
+    add eax, r11d
+    mov dword [rbp - 4912], eax
+    mov r11, [rbp - 4472]
+    add r11, 0
+    mov eax, dword [rbp - 4912]
+    mov dword [r11], eax
+    mov r10, [rbp - 4472]
+    mov eax, dword [r10 + 0]
+    mov dword [rbp - 4920], eax
+    mov r11d, 1
+    mov eax, dword [rbp - 4920]
+    imul eax, r11d
+    mov dword [rbp - 4928], eax
+    mov rax, qword [rbp - 4464]
+    movsxd r11, dword [rbp - 4928]
+    add rax, r11
+    mov qword [rbp - 4936], rax
+    mov rax, qword [rel HEX]
+    mov qword [rbp - 4944], rax
+    mov r10, [rbp - 4776]
+    mov eax, dword [r10 + 0]
+    mov dword [rbp - 4952], eax
+    mov r10, [rbp - 4776]
+    mov eax, dword [r10 + 0]
+    mov dword [rbp - 4960], eax
+    mov r11d, 16
+    mov eax, dword [rbp - 4960]
+    cdq
+    idiv r11d
+    mov dword [rbp - 4968], eax
+    mov r11d, 16
+    mov eax, dword [rbp - 4968]
+    imul eax, r11d
+    mov dword [rbp - 4976], eax
+    mov eax, dword [rbp - 4952]
+    mov r11d, dword [rbp - 4976]
+    sub eax, r11d
+    mov dword [rbp - 4984], eax
+    mov r11d, 1
+    mov eax, dword [rbp - 4984]
+    imul eax, r11d
+    mov dword [rbp - 4992], eax
+    mov rax, qword [rbp - 4944]
+    movsxd r11, dword [rbp - 4992]
+    add rax, r11
+    mov qword [rbp - 5000], rax
+    mov r10, [rbp - 5000]
+    movzx eax, byte [r10 + 0]
+    mov byte [rbp - 5008], al
+    mov r11, [rbp - 4936]
+    add r11, 0
+    mov al, byte [rbp - 5008]
+    mov byte [r11], al
+    mov r10, [rbp - 4472]
+    mov eax, dword [r10 + 0]
+    mov dword [rbp - 5016], eax
+    mov eax, dword [rbp - 5016]
+    mov r11d, 1
+    add eax, r11d
+    mov dword [rbp - 5024], eax
+    mov r11, [rbp - 4472]
+    add r11, 0
+    mov eax, dword [rbp - 5024]
+    mov dword [r11], eax
+    jmp .dump_file_ifcont21
+.dump_file_else20:
+    mov r10, [rbp - 4472]
+    mov eax, dword [r10 + 0]
+    mov dword [rbp - 5032], eax
+    mov r11d, 1
+    mov eax, dword [rbp - 5032]
+    imul eax, r11d
+    mov dword [rbp - 5040], eax
+    mov rax, qword [rbp - 4464]
+    movsxd r11, dword [rbp - 5040]
+    add rax, r11
+    mov qword [rbp - 5048], rax
+    mov r11, [rbp - 5048]
+    add r11, 0
+    mov al, 32
+    mov byte [r11], al
+    mov r10, [rbp - 4472]
+    mov eax, dword [r10 + 0]
+    mov dword [rbp - 5056], eax
+    mov eax, dword [rbp - 5056]
+    mov r11d, 1
+    add eax, r11d
+    mov dword [rbp - 5064], eax
+    mov r11, [rbp - 4472]
+    add r11, 0
+    mov eax, dword [rbp - 5064]
+    mov dword [r11], eax
+    mov r10, [rbp - 4472]
+    mov eax, dword [r10 + 0]
+    mov dword [rbp - 5072], eax
+    mov r11d, 1
+    mov eax, dword [rbp - 5072]
+    imul eax, r11d
+    mov dword [rbp - 5080], eax
+    mov rax, qword [rbp - 4464]
+    movsxd r11, dword [rbp - 5080]
+    add rax, r11
+    mov qword [rbp - 5088], rax
+    mov r11, [rbp - 5088]
+    add r11, 0
+    mov al, 32
+    mov byte [r11], al
+    mov r10, [rbp - 4472]
+    mov eax, dword [r10 + 0]
+    mov dword [rbp - 5096], eax
+    mov eax, dword [rbp - 5096]
+    mov r11d, 1
+    add eax, r11d
+    mov dword [rbp - 5104], eax
+    mov r11, [rbp - 4472]
+    add r11, 0
+    mov eax, dword [rbp - 5104]
+    mov dword [r11], eax
+    jmp .dump_file_ifcont21
+.dump_file_ifcont21:
+    mov r10, [rbp - 4728]
+    mov eax, dword [r10 + 0]
+    mov dword [rbp - 5112], eax
+    mov eax, dword [rbp - 5112]
+    mov r11d, 7
+    cmp eax, r11d
+    sete al
+    movzx rax, al
+    mov [rbp - 5120], rax
+    mov rax, [rbp - 5120]
+    cmp rax, 0
+    jne .dump_file_then22
+    jmp .dump_file_else23
+.dump_file_then22:
+    mov r10, [rbp - 4472]
+    mov eax, dword [r10 + 0]
+    mov dword [rbp - 5128], eax
+    mov r11d, 1
+    mov eax, dword [rbp - 5128]
+    imul eax, r11d
+    mov dword [rbp - 5136], eax
+    mov rax, qword [rbp - 4464]
+    movsxd r11, dword [rbp - 5136]
+    add rax, r11
+    mov qword [rbp - 5144], rax
+    mov r11, [rbp - 5144]
+    add r11, 0
+    mov al, 32
+    mov byte [r11], al
+    mov r10, [rbp - 4472]
+    mov eax, dword [r10 + 0]
+    mov dword [rbp - 5152], eax
+    mov eax, dword [rbp - 5152]
+    mov r11d, 1
+    add eax, r11d
+    mov dword [rbp - 5160], eax
+    mov r11, [rbp - 4472]
+    add r11, 0
+    mov eax, dword [rbp - 5160]
+    mov dword [r11], eax
+    jmp .dump_file_ifcont24
+.dump_file_else23:
+    jmp .dump_file_ifcont24
+.dump_file_ifcont24:
+    mov r10, [rbp - 4728]
+    mov eax, dword [r10 + 0]
+    mov dword [rbp - 5168], eax
+    mov eax, dword [rbp - 5168]
+    mov r11d, 1
+    add eax, r11d
+    mov dword [rbp - 5176], eax
+    mov r11, [rbp - 4728]
+    add r11, 0
+    mov eax, dword [rbp - 5176]
+    mov dword [r11], eax
+    jmp .dump_file_while_header16
+.dump_file_while_exit18:
+    mov r10, [rbp - 4472]
+    mov eax, dword [r10 + 0]
+    mov dword [rbp - 5184], eax
+    mov r11d, 1
+    mov eax, dword [rbp - 5184]
+    imul eax, r11d
+    mov dword [rbp - 5192], eax
+    mov rax, qword [rbp - 4464]
+    movsxd r11, dword [rbp - 5192]
+    add rax, r11
+    mov qword [rbp - 5200], rax
+    mov r11, [rbp - 5200]
+    add r11, 0
+    mov al, 32
+    mov byte [r11], al
+    mov r10, [rbp - 4472]
+    mov eax, dword [r10 + 0]
+    mov dword [rbp - 5208], eax
+    mov eax, dword [rbp - 5208]
+    mov r11d, 1
+    add eax, r11d
+    mov dword [rbp - 5216], eax
+    mov r11, [rbp - 4472]
+    add r11, 0
+    mov eax, dword [rbp - 5216]
+    mov dword [r11], eax
+    mov r10, [rbp - 4472]
+    mov eax, dword [r10 + 0]
+    mov dword [rbp - 5224], eax
+    mov r11d, 1
+    mov eax, dword [rbp - 5224]
+    imul eax, r11d
+    mov dword [rbp - 5232], eax
+    mov rax, qword [rbp - 4464]
+    movsxd r11, dword [rbp - 5232]
+    add rax, r11
+    mov qword [rbp - 5240], rax
+    mov r11, [rbp - 5240]
+    add r11, 0
+    mov al, 124
+    mov byte [r11], al
+    mov r10, [rbp - 4472]
+    mov eax, dword [r10 + 0]
+    mov dword [rbp - 5248], eax
+    mov eax, dword [rbp - 5248]
+    mov r11d, 1
+    add eax, r11d
+    mov dword [rbp - 5256], eax
+    mov r11, [rbp - 4472]
+    add r11, 0
+    mov eax, dword [rbp - 5256]
+    mov dword [r11], eax
+    mov r11, [rbp - 4728]
+    add r11, 0
+    mov eax, 0
+    mov dword [r11], eax
+    jmp .dump_file_while_header25
+.dump_file_while_header25:
+    mov r10, [rbp - 4728]
+    mov eax, dword [r10 + 0]
+    mov dword [rbp - 5264], eax
+    mov r10, [rbp - 4432]
+    mov eax, dword [r10 + 0]
+    mov dword [rbp - 5272], eax
+    mov eax, dword [rbp - 5264]
+    mov r11d, dword [rbp - 5272]
+    cmp eax, r11d
+    setl al
+    movzx rax, al
+    mov [rbp - 5280], rax
+    mov rax, [rbp - 5280]
+    cmp rax, 0
+    jne .dump_file_while_body26
+    jmp .dump_file_while_exit27
+.dump_file_while_body26:
+    lea r10, [rbp - 4320]
+    mov qword [rbp - 5288], r10
+    mov r10, [rbp - 4368]
+    mov eax, dword [r10 + 0]
+    mov dword [rbp - 5296], eax
+    mov r10, [rbp - 4728]
+    mov eax, dword [r10 + 0]
+    mov dword [rbp - 5304], eax
+    mov eax, dword [rbp - 5296]
+    mov r11d, dword [rbp - 5304]
+    add eax, r11d
+    mov dword [rbp - 5312], eax
+    mov r11d, 1
+    mov eax, dword [rbp - 5312]
+    imul eax, r11d
+    mov dword [rbp - 5320], eax
+    mov rax, r13
+    movsxd r11, dword [rbp - 5320]
+    add rax, r11
+    mov qword [rbp - 5328], rax
+    mov r10, [rbp - 5328]
+    movzx eax, byte [r10 + 0]
+    mov byte [rbp - 5336], al
+    mov r11, [rbp - 5288]
+    add r11, 0
+    mov al, byte [rbp - 5336]
+    mov byte [r11], al
+    mov r10, [rbp - 5288]
+    mov eax, dword [r10 + 0]
+    mov dword [rbp - 5344], eax
+    mov eax, dword [rbp - 5344]
+    mov r11d, 32
+    cmp eax, r11d
+    setge al
+    movzx rax, al
+    mov [rbp - 5352], rax
+    mov rax, [rbp - 5352]
+    cmp rax, 0
+    jne .dump_file_sc_true28
+    jmp .dump_file_sc_false29
+.dump_file_sc_true28:
+    mov r10, [rbp - 5288]
+    mov eax, dword [r10 + 0]
+    mov dword [rbp - 5360], eax
+    mov eax, dword [rbp - 5360]
+    mov r11d, 127
+    cmp eax, r11d
+    setl al
+    movzx rax, al
+    mov [rbp - 5368], rax
+    movsxd rax, dword [rbp - 5368]
+    push rax
+    pop rax
+    mov qword [rbp - 5376], rax
+    jmp .dump_file_sc_merge30
+.dump_file_sc_false29:
+    push 0
+    pop rax
+    mov qword [rbp - 5376], rax
+    jmp .dump_file_sc_merge30
+.dump_file_sc_merge30:
+    mov rax, [rbp - 5376]
+    cmp rax, 0
+    jne .dump_file_then31
+    jmp .dump_file_else32
+.dump_file_then31:
+    mov r10, [rbp - 4472]
+    mov eax, dword [r10 + 0]
+    mov dword [rbp - 5384], eax
+    mov r11d, 1
+    mov eax, dword [rbp - 5384]
+    imul eax, r11d
+    mov dword [rbp - 5392], eax
+    mov rax, qword [rbp - 4464]
+    movsxd r11, dword [rbp - 5392]
+    add rax, r11
+    mov qword [rbp - 5400], rax
+    mov r10, [rbp - 5288]
+    mov eax, dword [r10 + 0]
+    mov dword [rbp - 5408], eax
+    mov r11, [rbp - 5400]
+    add r11, 0
+    mov eax, dword [rbp - 5408]
+    mov dword [r11], eax
+    jmp .dump_file_ifcont33
+.dump_file_else32:
+    mov r10, [rbp - 4472]
+    mov eax, dword [r10 + 0]
+    mov dword [rbp - 5416], eax
+    mov r11d, 1
+    mov eax, dword [rbp - 5416]
+    imul eax, r11d
+    mov dword [rbp - 5424], eax
+    mov rax, qword [rbp - 4464]
+    movsxd r11, dword [rbp - 5424]
+    add rax, r11
+    mov qword [rbp - 5432], rax
+    mov r11, [rbp - 5432]
+    add r11, 0
+    mov al, 46
+    mov byte [r11], al
+    jmp .dump_file_ifcont33
+.dump_file_ifcont33:
+    mov r10, [rbp - 4472]
+    mov eax, dword [r10 + 0]
+    mov dword [rbp - 5440], eax
+    mov eax, dword [rbp - 5440]
+    mov r11d, 1
+    add eax, r11d
+    mov dword [rbp - 5448], eax
+    mov r11, [rbp - 4472]
+    add r11, 0
+    mov eax, dword [rbp - 5448]
+    mov dword [r11], eax
+    mov r10, [rbp - 4728]
+    mov eax, dword [r10 + 0]
+    mov dword [rbp - 5456], eax
+    mov eax, dword [rbp - 5456]
+    mov r11d, 1
+    add eax, r11d
+    mov dword [rbp - 5464], eax
+    mov r11, [rbp - 4728]
+    add r11, 0
+    mov eax, dword [rbp - 5464]
+    mov dword [r11], eax
+    jmp .dump_file_while_header25
+.dump_file_while_exit27:
+    mov r10, [rbp - 4472]
+    mov eax, dword [r10 + 0]
+    mov dword [rbp - 5472], eax
+    mov r11d, 1
+    mov eax, dword [rbp - 5472]
+    imul eax, r11d
+    mov dword [rbp - 5480], eax
+    mov rax, qword [rbp - 4464]
+    movsxd r11, dword [rbp - 5480]
+    add rax, r11
+    mov qword [rbp - 5488], rax
+    mov r11, [rbp - 5488]
+    add r11, 0
+    mov al, 124
+    mov byte [r11], al
+    mov r10, [rbp - 4472]
+    mov eax, dword [r10 + 0]
+    mov dword [rbp - 5496], eax
+    mov eax, dword [rbp - 5496]
+    mov r11d, 1
+    add eax, r11d
+    mov dword [rbp - 5504], eax
+    mov r11, [rbp - 4472]
+    add r11, 0
+    mov eax, dword [rbp - 5504]
+    mov dword [r11], eax
+    mov r10, [rbp - 4472]
+    mov eax, dword [r10 + 0]
+    mov dword [rbp - 5512], eax
+    mov r11d, 1
+    mov eax, dword [rbp - 5512]
+    imul eax, r11d
+    mov dword [rbp - 5520], eax
+    mov rax, qword [rbp - 4464]
+    movsxd r11, dword [rbp - 5520]
+    add rax, r11
+    mov qword [rbp - 5528], rax
+    mov r11, [rbp - 5528]
+    add r11, 0
+    mov eax, 0
+    mov dword [r11], eax
+    mov rax, qword [rbp - 4464]
+    mov qword [rbp - 5536], rax
+    push [rbp - 5536]
+    pop rdi
+    call puts
+    mov qword [rbp - 5544], rax
+    mov eax, dword [r12 + 0]
+    mov dword [rbp - 5552], eax
+    mov eax, dword [rbp - 5552]
+    mov r11d, 16
+    add eax, r11d
+    mov dword [rbp - 5560], eax
+    add r12, 0
+    mov eax, dword [rbp - 5560]
+    mov dword [r12], eax
+    mov r10, [rbp - 4368]
+    mov eax, dword [r10 + 0]
+    mov dword [rbp - 5568], eax
+    mov eax, dword [rbp - 5568]
+    mov r11d, 16
+    add eax, r11d
+    mov dword [rbp - 5576], eax
+    mov r11, [rbp - 4368]
+    add r11, 0
+    mov eax, dword [rbp - 5576]
+    mov dword [r11], eax
+    jmp .dump_file_while_header7
+.dump_file_while_exit9:
+    jmp .dump_file_while_header0
+.dump_file_while_exit2:
+    lea rsp, [rbp - 40]
+    pop r15
+    pop r14
+    pop r13
+    pop r12
+    pop rbx
+    pop rbp
+    ret
+    lea rsp, [rbp - 40]
+    pop r15
+    pop r14
+    pop r13
+    pop r12
+    pop rbx
+    pop rbp
+    ret
 global _start
 _start:
     push rbp
@@ -1261,7 +2140,7 @@ _start:
     push r13
     push r14
     push r15
-    sub rsp, 5776
+    sub rsp, 384
 .entry:
     mov r11, [rbp + 8]
     mov r14, r11
@@ -1277,973 +2156,211 @@ _start:
     add r13, 0
     mov rax, r12
     mov qword [r13], rax
-    lea r10, [rbp - 72]
-    mov rbx, r10
-    add rbx, 0
-    lea rax, [rel str3]
-    mov qword [rbx], rax
-    lea r10, [rbp - 80]
-    mov qword [rbp - 4360], r10
-    mov rax, qword [rbx + 0]
-    mov qword [rbp - 4368], rax
-    mov rax, qword [rbp - 4368]
-    mov qword [rbp - 4376], rax
-    mov r11, [rbp - 4360]
-    add r11, 0
-    mov rax, qword [rbp - 4376]
-    mov qword [r11], rax
     mov eax, dword [r15 + 0]
-    mov dword [rbp - 4384], eax
-    mov eax, dword [rbp - 4384]
+    mov ebx, eax
+    mov eax, ebx
     mov r11d, 2
     cmp eax, r11d
     setl al
     movzx rax, al
-    mov [rbp - 4392], rax
-    mov rax, [rbp - 4392]
+    mov [rbp - 88], rax
+    mov rax, [rbp - 88]
     cmp rax, 0
     jne ._start_then0
     jmp ._start_else1
 ._start_then0:
-    push str4
+    push str3
     pop rdi
     call puts
-    mov qword [rbp - 4400], rax
+    mov qword [rbp - 96], rax
     push 1
     pop rdi
     call exit
-    mov qword [rbp - 4408], rax
+    mov qword [rbp - 104], rax
     jmp ._start_ifcont2
 ._start_else1:
     jmp ._start_ifcont2
 ._start_ifcont2:
-    lea r10, [rbp - 88]
-    mov qword [rbp - 4416], r10
-    mov rax, qword [r13 + 0]
-    mov qword [rbp - 4424], rax
-    mov r11d, 8
+    lea r10, [rbp - 72]
+    mov qword [rbp - 112], r10
+    mov r11, [rbp - 112]
+    add r11, 0
     mov eax, 1
+    mov dword [r11], eax
+    jmp ._start_while_header3
+._start_while_header3:
+    mov r10, [rbp - 112]
+    mov eax, dword [r10 + 0]
+    mov dword [rbp - 120], eax
+    mov eax, dword [r15 + 0]
+    mov dword [rbp - 128], eax
+    mov eax, dword [rbp - 120]
+    mov r11d, dword [rbp - 128]
+    cmp eax, r11d
+    setl al
+    movzx rax, al
+    mov [rbp - 136], rax
+    mov rax, [rbp - 136]
+    cmp rax, 0
+    jne ._start_while_body4
+    jmp ._start_while_exit5
+._start_while_body4:
+    mov eax, dword [r15 + 0]
+    mov dword [rbp - 144], eax
+    mov eax, dword [rbp - 144]
+    mov r11d, 2
+    cmp eax, r11d
+    setg al
+    movzx rax, al
+    mov [rbp - 152], rax
+    mov rax, [rbp - 152]
+    cmp rax, 0
+    jne ._start_then6
+    jmp ._start_else7
+._start_then6:
+    mov rax, qword [r13 + 0]
+    mov qword [rbp - 160], rax
+    mov r10, [rbp - 112]
+    mov eax, dword [r10 + 0]
+    mov dword [rbp - 168], eax
+    mov r11d, 8
+    mov eax, dword [rbp - 168]
     imul eax, r11d
-    mov dword [rbp - 4432], eax
-    mov rax, qword [rbp - 4424]
-    movsxd r11, dword [rbp - 4432]
+    mov dword [rbp - 176], eax
+    mov rax, qword [rbp - 160]
+    movsxd r11, dword [rbp - 176]
     add rax, r11
-    mov qword [rbp - 4440], rax
-    mov r10, [rbp - 4440]
+    mov qword [rbp - 184], rax
+    mov r10, [rbp - 184]
     mov rax, qword [r10 + 0]
-    mov qword [rbp - 4448], rax
-    mov rax, qword [rbp - 4448]
-    mov qword [rbp - 4456], rax
+    mov qword [rbp - 192], rax
+    mov rax, qword [rbp - 192]
+    mov qword [rbp - 200], rax
+    push [rbp - 200]
+    pop rdi
+    call puts
+    mov qword [rbp - 208], rax
+    push str4
+    pop rdi
+    call puts
+    mov qword [rbp - 216], rax
+    jmp ._start_ifcont8
+._start_else7:
+    jmp ._start_ifcont8
+._start_ifcont8:
+    lea r10, [rbp - 80]
+    mov qword [rbp - 224], r10
+    mov rax, qword [r13 + 0]
+    mov qword [rbp - 232], rax
+    mov r10, [rbp - 112]
+    mov eax, dword [r10 + 0]
+    mov dword [rbp - 240], eax
+    mov r11d, 8
+    mov eax, dword [rbp - 240]
+    imul eax, r11d
+    mov dword [rbp - 248], eax
+    mov rax, qword [rbp - 232]
+    movsxd r11, dword [rbp - 248]
+    add rax, r11
+    mov qword [rbp - 256], rax
+    mov r10, [rbp - 256]
+    mov rax, qword [r10 + 0]
+    mov qword [rbp - 264], rax
+    mov rax, qword [rbp - 264]
+    mov qword [rbp - 272], rax
     mov eax, dword [rel O_RDONLY]
-    mov dword [rbp - 4464], eax
-    push [rbp - 4456]
-    push [rbp - 4464]
+    mov dword [rbp - 280], eax
+    push [rbp - 272]
+    push [rbp - 280]
     push 0
     pop rdx
     pop rsi
     pop rdi
     call open
-    mov dword [rbp - 4472], eax
-    mov r11, [rbp - 4416]
+    mov dword [rbp - 288], eax
+    mov r11, [rbp - 224]
     add r11, 0
-    mov eax, dword [rbp - 4472]
+    mov eax, dword [rbp - 288]
     mov dword [r11], eax
-    mov r10, [rbp - 4416]
+    mov r10, [rbp - 224]
     mov eax, dword [r10 + 0]
-    mov dword [rbp - 4480], eax
-    mov eax, dword [rbp - 4480]
+    mov dword [rbp - 296], eax
+    mov eax, dword [rbp - 296]
     mov r11d, 0
     cmp eax, r11d
     setl al
     movzx rax, al
-    mov [rbp - 4488], rax
-    mov rax, [rbp - 4488]
-    cmp rax, 0
-    jne ._start_then3
-    jmp ._start_else4
-._start_then3:
-    push str5
-    pop rdi
-    call puts
-    mov qword [rbp - 4496], rax
-    push 1
-    pop rdi
-    call exit
-    mov qword [rbp - 4504], rax
-    jmp ._start_ifcont5
-._start_else4:
-    jmp ._start_ifcont5
-._start_ifcont5:
-    lea r10, [rbp - 4184]
-    mov qword [rbp - 4512], r10
-    lea r10, [rbp - 4192]
-    mov qword [rbp - 4520], r10
-    mov r11, [rbp - 4520]
-    add r11, 0
-    mov eax, 0
-    mov dword [r11], eax
-    jmp ._start_while_header6
-._start_while_header6:
-    mov rax, 1
-    cmp rax, 0
-    jne ._start_while_body7
-    jmp ._start_while_exit8
-._start_while_body7:
-    lea r10, [rbp - 4200]
-    mov qword [rbp - 4528], r10
-    mov r10, [rbp - 4416]
-    mov eax, dword [r10 + 0]
-    mov dword [rbp - 4536], eax
-    mov rax, qword [rbp - 4512]
-    mov qword [rbp - 4544], rax
-    push [rbp - 4536]
-    push [rbp - 4544]
-    push 4096
-    pop rdx
-    pop rsi
-    pop rdi
-    call read
-    mov dword [rbp - 4552], eax
-    mov r11, [rbp - 4528]
-    add r11, 0
-    mov eax, dword [rbp - 4552]
-    mov dword [r11], eax
-    mov r10, [rbp - 4528]
-    mov eax, dword [r10 + 0]
-    mov dword [rbp - 4560], eax
-    mov eax, dword [rbp - 4560]
-    mov r11d, 0
-    cmp eax, r11d
-    setle al
-    movzx rax, al
-    mov [rbp - 4568], rax
-    mov rax, [rbp - 4568]
+    mov [rbp - 304], rax
+    mov rax, [rbp - 304]
     cmp rax, 0
     jne ._start_then9
     jmp ._start_else10
 ._start_then9:
-    jmp ._start_while_exit8
-._start_dead12:
+    push str5
+    pop rdi
+    call puts
+    mov qword [rbp - 312], rax
+    mov rax, qword [r13 + 0]
+    mov qword [rbp - 320], rax
+    mov r10, [rbp - 112]
+    mov eax, dword [r10 + 0]
+    mov dword [rbp - 328], eax
+    mov r11d, 8
+    mov eax, dword [rbp - 328]
+    imul eax, r11d
+    mov dword [rbp - 336], eax
+    mov rax, qword [rbp - 320]
+    movsxd r11, dword [rbp - 336]
+    add rax, r11
+    mov qword [rbp - 344], rax
+    mov r10, [rbp - 344]
+    mov rax, qword [r10 + 0]
+    mov qword [rbp - 352], rax
+    mov rax, qword [rbp - 352]
+    mov qword [rbp - 360], rax
+    push [rbp - 360]
+    pop rdi
+    call puts
+    mov qword [rbp - 368], rax
+    push str6
+    pop rdi
+    call puts
+    mov qword [rbp - 376], rax
+    push 1
+    pop rdi
+    call exit
+    mov qword [rbp - 384], rax
     jmp ._start_ifcont11
 ._start_else10:
     jmp ._start_ifcont11
 ._start_ifcont11:
-    lea r10, [rbp - 4208]
-    mov qword [rbp - 4576], r10
-    mov r11, [rbp - 4576]
-    add r11, 0
-    mov eax, 0
-    mov dword [r11], eax
-    jmp ._start_while_header13
-._start_while_header13:
-    mov r10, [rbp - 4576]
+    mov r10, [rbp - 224]
     mov eax, dword [r10 + 0]
-    mov dword [rbp - 4584], eax
-    mov r10, [rbp - 4528]
-    mov eax, dword [r10 + 0]
-    mov dword [rbp - 4592], eax
-    mov eax, dword [rbp - 4584]
-    mov r11d, dword [rbp - 4592]
-    cmp eax, r11d
-    setl al
-    movzx rax, al
-    mov [rbp - 4600], rax
-    mov rax, [rbp - 4600]
-    cmp rax, 0
-    jne ._start_while_body14
-    jmp ._start_while_exit15
-._start_while_body14:
-    lea r10, [rbp - 4216]
-    mov qword [rbp - 4608], r10
-    mov r10, [rbp - 4528]
-    mov eax, dword [r10 + 0]
-    mov dword [rbp - 4616], eax
-    mov r10, [rbp - 4576]
-    mov eax, dword [r10 + 0]
-    mov dword [rbp - 4624], eax
-    mov eax, dword [rbp - 4616]
-    mov r11d, dword [rbp - 4624]
-    sub eax, r11d
-    mov dword [rbp - 4632], eax
-    mov r11, [rbp - 4608]
-    add r11, 0
-    mov eax, dword [rbp - 4632]
-    mov dword [r11], eax
-    lea r10, [rbp - 4224]
-    mov qword [rbp - 4640], r10
-    mov r11, [rbp - 4640]
-    add r11, 0
-    mov eax, 16
-    mov dword [r11], eax
-    mov r10, [rbp - 4608]
-    mov eax, dword [r10 + 0]
-    mov dword [rbp - 4648], eax
-    mov eax, dword [rbp - 4648]
-    mov r11d, 16
-    cmp eax, r11d
-    setl al
-    movzx rax, al
-    mov [rbp - 4656], rax
-    mov rax, [rbp - 4656]
-    cmp rax, 0
-    jne ._start_then16
-    jmp ._start_else17
-._start_then16:
-    mov r10, [rbp - 4608]
-    mov eax, dword [r10 + 0]
-    mov dword [rbp - 4664], eax
-    mov r11, [rbp - 4640]
-    add r11, 0
-    mov eax, dword [rbp - 4664]
-    mov dword [r11], eax
-    jmp ._start_ifcont18
-._start_else17:
-    jmp ._start_ifcont18
-._start_ifcont18:
-    lea r10, [rbp - 4304]
-    mov qword [rbp - 4672], r10
-    lea r10, [rbp - 4312]
-    mov qword [rbp - 4680], r10
-    mov r11, [rbp - 4680]
-    add r11, 0
-    mov eax, 0
-    mov dword [r11], eax
-    lea r10, [rbp - 4320]
-    mov qword [rbp - 4688], r10
-    mov r10, [rbp - 4520]
-    mov eax, dword [r10 + 0]
-    mov dword [rbp - 4696], eax
-    mov r11, [rbp - 4688]
-    add r11, 0
-    mov eax, dword [rbp - 4696]
-    mov dword [r11], eax
-    lea r10, [rbp - 4328]
-    mov qword [rbp - 4704], r10
-    mov r11, [rbp - 4704]
-    add r11, 0
-    mov eax, 7
-    mov dword [r11], eax
-    jmp ._start_while_header19
-._start_while_header19:
-    mov r10, [rbp - 4704]
-    mov eax, dword [r10 + 0]
-    mov dword [rbp - 4712], eax
-    mov eax, dword [rbp - 4712]
-    mov r11d, 0
-    cmp eax, r11d
-    setge al
-    movzx rax, al
-    mov [rbp - 4720], rax
-    mov rax, [rbp - 4720]
-    cmp rax, 0
-    jne ._start_while_body20
-    jmp ._start_while_exit21
-._start_while_body20:
-    mov r10, [rbp - 4704]
-    mov eax, dword [r10 + 0]
-    mov dword [rbp - 4728], eax
-    mov r11d, 1
-    mov eax, dword [rbp - 4728]
-    imul eax, r11d
-    mov dword [rbp - 4736], eax
-    mov rax, qword [rbp - 4672]
-    movsxd r11, dword [rbp - 4736]
-    add rax, r11
-    mov qword [rbp - 4744], rax
-    mov r10, [rbp - 4360]
-    mov rax, qword [r10 + 0]
-    mov qword [rbp - 4752], rax
-    mov r10, [rbp - 4688]
-    mov eax, dword [r10 + 0]
-    mov dword [rbp - 4760], eax
-    mov r10, [rbp - 4688]
-    mov eax, dword [r10 + 0]
-    mov dword [rbp - 4768], eax
-    mov r11d, 16
-    mov eax, dword [rbp - 4768]
-    cdq
-    idiv r11d
-    mov dword [rbp - 4776], eax
-    mov r11d, 16
-    mov eax, dword [rbp - 4776]
-    imul eax, r11d
-    mov dword [rbp - 4784], eax
-    mov eax, dword [rbp - 4760]
-    mov r11d, dword [rbp - 4784]
-    sub eax, r11d
-    mov dword [rbp - 4792], eax
-    mov r11d, 1
-    mov eax, dword [rbp - 4792]
-    imul eax, r11d
-    mov dword [rbp - 4800], eax
-    mov rax, qword [rbp - 4752]
-    movsxd r11, dword [rbp - 4800]
-    add rax, r11
-    mov qword [rbp - 4808], rax
-    mov r10, [rbp - 4808]
-    movzx eax, byte [r10 + 0]
-    mov byte [rbp - 4816], al
-    mov r11, [rbp - 4744]
-    add r11, 0
-    mov al, byte [rbp - 4816]
-    mov byte [r11], al
-    mov r10, [rbp - 4688]
-    mov eax, dword [r10 + 0]
-    mov dword [rbp - 4824], eax
-    mov r11d, 16
-    mov eax, dword [rbp - 4824]
-    cdq
-    idiv r11d
-    mov dword [rbp - 4832], eax
-    mov r11, [rbp - 4688]
-    add r11, 0
-    mov eax, dword [rbp - 4832]
-    mov dword [r11], eax
-    mov r10, [rbp - 4704]
-    mov eax, dword [r10 + 0]
-    mov dword [rbp - 4840], eax
-    mov eax, dword [rbp - 4840]
-    mov r11d, 1
-    sub eax, r11d
-    mov dword [rbp - 4848], eax
-    mov r11, [rbp - 4704]
-    add r11, 0
-    mov eax, dword [rbp - 4848]
-    mov dword [r11], eax
-    jmp ._start_while_header19
-._start_while_exit21:
-    mov r11, [rbp - 4680]
-    add r11, 0
-    mov eax, 8
-    mov dword [r11], eax
-    mov r10, [rbp - 4680]
-    mov eax, dword [r10 + 0]
-    mov dword [rbp - 4856], eax
-    mov r11d, 1
-    mov eax, dword [rbp - 4856]
-    imul eax, r11d
-    mov dword [rbp - 4864], eax
-    mov rax, qword [rbp - 4672]
-    movsxd r11, dword [rbp - 4864]
-    add rax, r11
-    mov qword [rbp - 4872], rax
-    mov r11, [rbp - 4872]
-    add r11, 0
-    mov al, 32
-    mov byte [r11], al
-    mov r10, [rbp - 4680]
-    mov eax, dword [r10 + 0]
-    mov dword [rbp - 4880], eax
-    mov eax, dword [rbp - 4880]
-    mov r11d, 1
-    add eax, r11d
-    mov dword [rbp - 4888], eax
-    mov r11, [rbp - 4680]
-    add r11, 0
-    mov eax, dword [rbp - 4888]
-    mov dword [r11], eax
-    mov r10, [rbp - 4680]
-    mov eax, dword [r10 + 0]
-    mov dword [rbp - 4896], eax
-    mov r11d, 1
-    mov eax, dword [rbp - 4896]
-    imul eax, r11d
-    mov dword [rbp - 4904], eax
-    mov rax, qword [rbp - 4672]
-    movsxd r11, dword [rbp - 4904]
-    add rax, r11
-    mov qword [rbp - 4912], rax
-    mov r11, [rbp - 4912]
-    add r11, 0
-    mov al, 32
-    mov byte [r11], al
-    mov r10, [rbp - 4680]
-    mov eax, dword [r10 + 0]
-    mov dword [rbp - 4920], eax
-    mov eax, dword [rbp - 4920]
-    mov r11d, 1
-    add eax, r11d
-    mov dword [rbp - 4928], eax
-    mov r11, [rbp - 4680]
-    add r11, 0
-    mov eax, dword [rbp - 4928]
-    mov dword [r11], eax
-    lea r10, [rbp - 4336]
-    mov qword [rbp - 4936], r10
-    mov r11, [rbp - 4936]
-    add r11, 0
-    mov eax, 0
-    mov dword [r11], eax
-    jmp ._start_while_header22
-._start_while_header22:
-    mov r10, [rbp - 4936]
-    mov eax, dword [r10 + 0]
-    mov dword [rbp - 4944], eax
-    mov eax, dword [rbp - 4944]
-    mov r11d, 16
-    cmp eax, r11d
-    setl al
-    movzx rax, al
-    mov [rbp - 4952], rax
-    mov rax, [rbp - 4952]
-    cmp rax, 0
-    jne ._start_while_body23
-    jmp ._start_while_exit24
-._start_while_body23:
-    mov r10, [rbp - 4936]
-    mov eax, dword [r10 + 0]
-    mov dword [rbp - 4960], eax
-    mov r10, [rbp - 4640]
-    mov eax, dword [r10 + 0]
-    mov dword [rbp - 4968], eax
-    mov eax, dword [rbp - 4960]
-    mov r11d, dword [rbp - 4968]
-    cmp eax, r11d
-    setl al
-    movzx rax, al
-    mov [rbp - 4976], rax
-    mov rax, [rbp - 4976]
-    cmp rax, 0
-    jne ._start_then25
-    jmp ._start_else26
-._start_then25:
-    lea r10, [rbp - 4344]
-    mov qword [rbp - 4984], r10
-    mov r10, [rbp - 4576]
-    mov eax, dword [r10 + 0]
-    mov dword [rbp - 4992], eax
-    mov r10, [rbp - 4936]
-    mov eax, dword [r10 + 0]
-    mov dword [rbp - 5000], eax
-    mov eax, dword [rbp - 4992]
-    mov r11d, dword [rbp - 5000]
-    add eax, r11d
-    mov dword [rbp - 5008], eax
-    mov r11d, 1
-    mov eax, dword [rbp - 5008]
-    imul eax, r11d
-    mov dword [rbp - 5016], eax
-    mov rax, qword [rbp - 4512]
-    movsxd r11, dword [rbp - 5016]
-    add rax, r11
-    mov qword [rbp - 5024], rax
-    mov r10, [rbp - 5024]
-    movzx eax, byte [r10 + 0]
-    mov byte [rbp - 5032], al
-    mov r11, [rbp - 4984]
-    add r11, 0
-    mov al, byte [rbp - 5032]
-    mov byte [r11], al
-    mov r10, [rbp - 4680]
-    mov eax, dword [r10 + 0]
-    mov dword [rbp - 5040], eax
-    mov r11d, 1
-    mov eax, dword [rbp - 5040]
-    imul eax, r11d
-    mov dword [rbp - 5048], eax
-    mov rax, qword [rbp - 4672]
-    movsxd r11, dword [rbp - 5048]
-    add rax, r11
-    mov qword [rbp - 5056], rax
-    mov r10, [rbp - 4360]
-    mov rax, qword [r10 + 0]
-    mov qword [rbp - 5064], rax
-    mov r10, [rbp - 4984]
-    mov eax, dword [r10 + 0]
-    mov dword [rbp - 5072], eax
-    mov r11d, 16
-    mov eax, dword [rbp - 5072]
-    cdq
-    idiv r11d
-    mov dword [rbp - 5080], eax
-    mov r11d, 1
-    mov eax, dword [rbp - 5080]
-    imul eax, r11d
-    mov dword [rbp - 5088], eax
-    mov rax, qword [rbp - 5064]
-    movsxd r11, dword [rbp - 5088]
-    add rax, r11
-    mov qword [rbp - 5096], rax
-    mov r10, [rbp - 5096]
-    movzx eax, byte [r10 + 0]
-    mov byte [rbp - 5104], al
-    mov r11, [rbp - 5056]
-    add r11, 0
-    mov al, byte [rbp - 5104]
-    mov byte [r11], al
-    mov r10, [rbp - 4680]
-    mov eax, dword [r10 + 0]
-    mov dword [rbp - 5112], eax
-    mov eax, dword [rbp - 5112]
-    mov r11d, 1
-    add eax, r11d
-    mov dword [rbp - 5120], eax
-    mov r11, [rbp - 4680]
-    add r11, 0
-    mov eax, dword [rbp - 5120]
-    mov dword [r11], eax
-    mov r10, [rbp - 4680]
-    mov eax, dword [r10 + 0]
-    mov dword [rbp - 5128], eax
-    mov r11d, 1
-    mov eax, dword [rbp - 5128]
-    imul eax, r11d
-    mov dword [rbp - 5136], eax
-    mov rax, qword [rbp - 4672]
-    movsxd r11, dword [rbp - 5136]
-    add rax, r11
-    mov qword [rbp - 5144], rax
-    mov r10, [rbp - 4360]
-    mov rax, qword [r10 + 0]
-    mov qword [rbp - 5152], rax
-    mov r10, [rbp - 4984]
-    mov eax, dword [r10 + 0]
-    mov dword [rbp - 5160], eax
-    mov r10, [rbp - 4984]
-    mov eax, dword [r10 + 0]
-    mov dword [rbp - 5168], eax
-    mov r11d, 16
-    mov eax, dword [rbp - 5168]
-    cdq
-    idiv r11d
-    mov dword [rbp - 5176], eax
-    mov r11d, 16
-    mov eax, dword [rbp - 5176]
-    imul eax, r11d
-    mov dword [rbp - 5184], eax
-    mov eax, dword [rbp - 5160]
-    mov r11d, dword [rbp - 5184]
-    sub eax, r11d
-    mov dword [rbp - 5192], eax
-    mov r11d, 1
-    mov eax, dword [rbp - 5192]
-    imul eax, r11d
-    mov dword [rbp - 5200], eax
-    mov rax, qword [rbp - 5152]
-    movsxd r11, dword [rbp - 5200]
-    add rax, r11
-    mov qword [rbp - 5208], rax
-    mov r10, [rbp - 5208]
-    movzx eax, byte [r10 + 0]
-    mov byte [rbp - 5216], al
-    mov r11, [rbp - 5144]
-    add r11, 0
-    mov al, byte [rbp - 5216]
-    mov byte [r11], al
-    mov r10, [rbp - 4680]
-    mov eax, dword [r10 + 0]
-    mov dword [rbp - 5224], eax
-    mov eax, dword [rbp - 5224]
-    mov r11d, 1
-    add eax, r11d
-    mov dword [rbp - 5232], eax
-    mov r11, [rbp - 4680]
-    add r11, 0
-    mov eax, dword [rbp - 5232]
-    mov dword [r11], eax
-    jmp ._start_ifcont27
-._start_else26:
-    mov r10, [rbp - 4680]
-    mov eax, dword [r10 + 0]
-    mov dword [rbp - 5240], eax
-    mov r11d, 1
-    mov eax, dword [rbp - 5240]
-    imul eax, r11d
-    mov dword [rbp - 5248], eax
-    mov rax, qword [rbp - 4672]
-    movsxd r11, dword [rbp - 5248]
-    add rax, r11
-    mov qword [rbp - 5256], rax
-    mov r11, [rbp - 5256]
-    add r11, 0
-    mov al, 32
-    mov byte [r11], al
-    mov r10, [rbp - 4680]
-    mov eax, dword [r10 + 0]
-    mov dword [rbp - 5264], eax
-    mov eax, dword [rbp - 5264]
-    mov r11d, 1
-    add eax, r11d
-    mov dword [rbp - 5272], eax
-    mov r11, [rbp - 4680]
-    add r11, 0
-    mov eax, dword [rbp - 5272]
-    mov dword [r11], eax
-    mov r10, [rbp - 4680]
-    mov eax, dword [r10 + 0]
-    mov dword [rbp - 5280], eax
-    mov r11d, 1
-    mov eax, dword [rbp - 5280]
-    imul eax, r11d
-    mov dword [rbp - 5288], eax
-    mov rax, qword [rbp - 4672]
-    movsxd r11, dword [rbp - 5288]
-    add rax, r11
-    mov qword [rbp - 5296], rax
-    mov r11, [rbp - 5296]
-    add r11, 0
-    mov al, 32
-    mov byte [r11], al
-    mov r10, [rbp - 4680]
-    mov eax, dword [r10 + 0]
-    mov dword [rbp - 5304], eax
-    mov eax, dword [rbp - 5304]
-    mov r11d, 1
-    add eax, r11d
-    mov dword [rbp - 5312], eax
-    mov r11, [rbp - 4680]
-    add r11, 0
-    mov eax, dword [rbp - 5312]
-    mov dword [r11], eax
-    jmp ._start_ifcont27
-._start_ifcont27:
-    mov r10, [rbp - 4936]
-    mov eax, dword [r10 + 0]
-    mov dword [rbp - 5320], eax
-    mov eax, dword [rbp - 5320]
-    mov r11d, 7
-    cmp eax, r11d
-    sete al
-    movzx rax, al
-    mov [rbp - 5328], rax
-    mov rax, [rbp - 5328]
-    cmp rax, 0
-    jne ._start_then28
-    jmp ._start_else29
-._start_then28:
-    mov r10, [rbp - 4680]
-    mov eax, dword [r10 + 0]
-    mov dword [rbp - 5336], eax
-    mov r11d, 1
-    mov eax, dword [rbp - 5336]
-    imul eax, r11d
-    mov dword [rbp - 5344], eax
-    mov rax, qword [rbp - 4672]
-    movsxd r11, dword [rbp - 5344]
-    add rax, r11
-    mov qword [rbp - 5352], rax
-    mov r11, [rbp - 5352]
-    add r11, 0
-    mov al, 32
-    mov byte [r11], al
-    mov r10, [rbp - 4680]
-    mov eax, dword [r10 + 0]
-    mov dword [rbp - 5360], eax
-    mov eax, dword [rbp - 5360]
-    mov r11d, 1
-    add eax, r11d
-    mov dword [rbp - 5368], eax
-    mov r11, [rbp - 4680]
-    add r11, 0
-    mov eax, dword [rbp - 5368]
-    mov dword [r11], eax
-    jmp ._start_ifcont30
-._start_else29:
-    jmp ._start_ifcont30
-._start_ifcont30:
-    mov r10, [rbp - 4936]
-    mov eax, dword [r10 + 0]
-    mov dword [rbp - 5376], eax
-    mov eax, dword [rbp - 5376]
-    mov r11d, 1
-    add eax, r11d
-    mov dword [rbp - 5384], eax
-    mov r11, [rbp - 4936]
-    add r11, 0
-    mov eax, dword [rbp - 5384]
-    mov dword [r11], eax
-    jmp ._start_while_header22
-._start_while_exit24:
-    mov r10, [rbp - 4680]
-    mov eax, dword [r10 + 0]
-    mov dword [rbp - 5392], eax
-    mov r11d, 1
-    mov eax, dword [rbp - 5392]
-    imul eax, r11d
-    mov dword [rbp - 5400], eax
-    mov rax, qword [rbp - 4672]
-    movsxd r11, dword [rbp - 5400]
-    add rax, r11
-    mov qword [rbp - 5408], rax
-    mov r11, [rbp - 5408]
-    add r11, 0
-    mov al, 32
-    mov byte [r11], al
-    mov r10, [rbp - 4680]
-    mov eax, dword [r10 + 0]
-    mov dword [rbp - 5416], eax
-    mov eax, dword [rbp - 5416]
-    mov r11d, 1
-    add eax, r11d
-    mov dword [rbp - 5424], eax
-    mov r11, [rbp - 4680]
-    add r11, 0
-    mov eax, dword [rbp - 5424]
-    mov dword [r11], eax
-    mov r10, [rbp - 4680]
-    mov eax, dword [r10 + 0]
-    mov dword [rbp - 5432], eax
-    mov r11d, 1
-    mov eax, dword [rbp - 5432]
-    imul eax, r11d
-    mov dword [rbp - 5440], eax
-    mov rax, qword [rbp - 4672]
-    movsxd r11, dword [rbp - 5440]
-    add rax, r11
-    mov qword [rbp - 5448], rax
-    mov r11, [rbp - 5448]
-    add r11, 0
-    mov al, 124
-    mov byte [r11], al
-    mov r10, [rbp - 4680]
-    mov eax, dword [r10 + 0]
-    mov dword [rbp - 5456], eax
-    mov eax, dword [rbp - 5456]
-    mov r11d, 1
-    add eax, r11d
-    mov dword [rbp - 5464], eax
-    mov r11, [rbp - 4680]
-    add r11, 0
-    mov eax, dword [rbp - 5464]
-    mov dword [r11], eax
-    mov r11, [rbp - 4936]
-    add r11, 0
-    mov eax, 0
-    mov dword [r11], eax
-    jmp ._start_while_header31
-._start_while_header31:
-    mov r10, [rbp - 4936]
-    mov eax, dword [r10 + 0]
-    mov dword [rbp - 5472], eax
-    mov r10, [rbp - 4640]
-    mov eax, dword [r10 + 0]
-    mov dword [rbp - 5480], eax
-    mov eax, dword [rbp - 5472]
-    mov r11d, dword [rbp - 5480]
-    cmp eax, r11d
-    setl al
-    movzx rax, al
-    mov [rbp - 5488], rax
-    mov rax, [rbp - 5488]
-    cmp rax, 0
-    jne ._start_while_body32
-    jmp ._start_while_exit33
-._start_while_body32:
-    lea r10, [rbp - 4352]
-    mov qword [rbp - 5496], r10
-    mov r10, [rbp - 4576]
-    mov eax, dword [r10 + 0]
-    mov dword [rbp - 5504], eax
-    mov r10, [rbp - 4936]
-    mov eax, dword [r10 + 0]
-    mov dword [rbp - 5512], eax
-    mov eax, dword [rbp - 5504]
-    mov r11d, dword [rbp - 5512]
-    add eax, r11d
-    mov dword [rbp - 5520], eax
-    mov r11d, 1
-    mov eax, dword [rbp - 5520]
-    imul eax, r11d
-    mov dword [rbp - 5528], eax
-    mov rax, qword [rbp - 4512]
-    movsxd r11, dword [rbp - 5528]
-    add rax, r11
-    mov qword [rbp - 5536], rax
-    mov r10, [rbp - 5536]
-    movzx eax, byte [r10 + 0]
-    mov byte [rbp - 5544], al
-    mov r11, [rbp - 5496]
-    add r11, 0
-    mov al, byte [rbp - 5544]
-    mov byte [r11], al
-    mov r10, [rbp - 5496]
-    mov eax, dword [r10 + 0]
-    mov dword [rbp - 5552], eax
-    mov eax, dword [rbp - 5552]
-    mov r11d, 32
-    cmp eax, r11d
-    setge al
-    movzx rax, al
-    mov [rbp - 5560], rax
-    mov rax, [rbp - 5560]
-    cmp rax, 0
-    jne ._start_then34
-    jmp ._start_else35
-._start_then34:
-    mov r10, [rbp - 5496]
-    mov eax, dword [r10 + 0]
-    mov dword [rbp - 5568], eax
-    mov eax, dword [rbp - 5568]
-    mov r11d, 127
-    cmp eax, r11d
-    setl al
-    movzx rax, al
-    mov [rbp - 5576], rax
-    mov rax, [rbp - 5576]
-    cmp rax, 0
-    jne ._start_then37
-    jmp ._start_else38
-._start_then37:
-    mov r10, [rbp - 4680]
-    mov eax, dword [r10 + 0]
-    mov dword [rbp - 5584], eax
-    mov r11d, 1
-    mov eax, dword [rbp - 5584]
-    imul eax, r11d
-    mov dword [rbp - 5592], eax
-    mov rax, qword [rbp - 4672]
-    movsxd r11, dword [rbp - 5592]
-    add rax, r11
-    mov qword [rbp - 5600], rax
-    mov r10, [rbp - 5496]
-    mov eax, dword [r10 + 0]
-    mov dword [rbp - 5608], eax
-    mov r11, [rbp - 5600]
-    add r11, 0
-    mov eax, dword [rbp - 5608]
-    mov dword [r11], eax
-    jmp ._start_ifcont39
-._start_else38:
-    mov r10, [rbp - 4680]
-    mov eax, dword [r10 + 0]
-    mov dword [rbp - 5616], eax
-    mov r11d, 1
-    mov eax, dword [rbp - 5616]
-    imul eax, r11d
-    mov dword [rbp - 5624], eax
-    mov rax, qword [rbp - 4672]
-    movsxd r11, dword [rbp - 5624]
-    add rax, r11
-    mov qword [rbp - 5632], rax
-    mov r11, [rbp - 5632]
-    add r11, 0
-    mov al, 46
-    mov byte [r11], al
-    jmp ._start_ifcont39
-._start_ifcont39:
-    jmp ._start_ifcont36
-._start_else35:
-    mov r10, [rbp - 4680]
-    mov eax, dword [r10 + 0]
-    mov dword [rbp - 5640], eax
-    mov r11d, 1
-    mov eax, dword [rbp - 5640]
-    imul eax, r11d
-    mov dword [rbp - 5648], eax
-    mov rax, qword [rbp - 4672]
-    movsxd r11, dword [rbp - 5648]
-    add rax, r11
-    mov qword [rbp - 5656], rax
-    mov r11, [rbp - 5656]
-    add r11, 0
-    mov al, 46
-    mov byte [r11], al
-    jmp ._start_ifcont36
-._start_ifcont36:
-    mov r10, [rbp - 4680]
-    mov eax, dword [r10 + 0]
-    mov dword [rbp - 5664], eax
-    mov eax, dword [rbp - 5664]
-    mov r11d, 1
-    add eax, r11d
-    mov dword [rbp - 5672], eax
-    mov r11, [rbp - 4680]
-    add r11, 0
-    mov eax, dword [rbp - 5672]
-    mov dword [r11], eax
-    mov r10, [rbp - 4936]
-    mov eax, dword [r10 + 0]
-    mov dword [rbp - 5680], eax
-    mov eax, dword [rbp - 5680]
-    mov r11d, 1
-    add eax, r11d
-    mov dword [rbp - 5688], eax
-    mov r11, [rbp - 4936]
-    add r11, 0
-    mov eax, dword [rbp - 5688]
-    mov dword [r11], eax
-    jmp ._start_while_header31
-._start_while_exit33:
-    mov r10, [rbp - 4680]
-    mov eax, dword [r10 + 0]
-    mov dword [rbp - 5696], eax
-    mov r11d, 1
-    mov eax, dword [rbp - 5696]
-    imul eax, r11d
-    mov dword [rbp - 5704], eax
-    mov rax, qword [rbp - 4672]
-    movsxd r11, dword [rbp - 5704]
-    add rax, r11
-    mov qword [rbp - 5712], rax
-    mov r11, [rbp - 5712]
-    add r11, 0
-    mov al, 124
-    mov byte [r11], al
-    mov r10, [rbp - 4680]
-    mov eax, dword [r10 + 0]
-    mov dword [rbp - 5720], eax
-    mov eax, dword [rbp - 5720]
-    mov r11d, 1
-    add eax, r11d
-    mov dword [rbp - 5728], eax
-    mov r11, [rbp - 4680]
-    add r11, 0
-    mov eax, dword [rbp - 5728]
-    mov dword [r11], eax
-    mov r10, [rbp - 4680]
-    mov eax, dword [r10 + 0]
-    mov dword [rbp - 5736], eax
-    mov r11d, 1
-    mov eax, dword [rbp - 5736]
-    imul eax, r11d
-    mov dword [rbp - 5744], eax
-    mov rax, qword [rbp - 4672]
-    movsxd r11, dword [rbp - 5744]
-    add rax, r11
-    mov qword [rbp - 5752], rax
-    mov r11, [rbp - 5752]
-    add r11, 0
-    mov eax, 0
-    mov dword [r11], eax
-    mov rax, qword [rbp - 4672]
-    mov qword [rbp - 5760], rax
-    push [rbp - 5760]
+    mov dword [rbp - 392], eax
+    push [rbp - 392]
     pop rdi
-    call puts
-    mov qword [rbp - 5768], rax
-    mov r10, [rbp - 4520]
+    call dump_file
+    mov qword [rbp - 400], rax
+    mov r10, [rbp - 224]
     mov eax, dword [r10 + 0]
-    mov dword [rbp - 5776], eax
-    mov eax, dword [rbp - 5776]
-    mov r11d, 16
-    add eax, r11d
-    mov dword [rbp - 5784], eax
-    mov r11, [rbp - 4520]
-    add r11, 0
-    mov eax, dword [rbp - 5784]
-    mov dword [r11], eax
-    mov r10, [rbp - 4576]
-    mov eax, dword [r10 + 0]
-    mov dword [rbp - 5792], eax
-    mov eax, dword [rbp - 5792]
-    mov r11d, 16
-    add eax, r11d
-    mov dword [rbp - 5800], eax
-    mov r11, [rbp - 4576]
-    add r11, 0
-    mov eax, dword [rbp - 5800]
-    mov dword [r11], eax
-    jmp ._start_while_header13
-._start_while_exit15:
-    jmp ._start_while_header6
-._start_while_exit8:
-    mov r10, [rbp - 4416]
-    mov eax, dword [r10 + 0]
-    mov dword [rbp - 5808], eax
-    push [rbp - 5808]
+    mov dword [rbp - 408], eax
+    push [rbp - 408]
     pop rdi
     call close
-    mov dword [rbp - 5816], eax
+    mov dword [rbp - 416], eax
+    mov r10, [rbp - 112]
+    mov eax, dword [r10 + 0]
+    mov dword [rbp - 424], eax
+    mov eax, dword [rbp - 424]
+    mov r11d, 1
+    add eax, r11d
+    mov dword [rbp - 432], eax
+    mov r11, [rbp - 112]
+    add r11, 0
+    mov eax, dword [rbp - 432]
+    mov dword [r11], eax
+    jmp ._start_while_header3
+._start_while_exit5:
     mov rax, 60
     xor rdi, rdi
     syscall

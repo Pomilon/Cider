@@ -1,12 +1,15 @@
+// hexdump — display file contents in hexadecimal + ASCII
+// Usage: hexdump <file> [file...]
+//
+// Output format (per line):
+//   <8-digit offset>  <16 hex bytes>  |<16 ASCII chars>|
+
 from std.io import puts, exit;
 from std.fs import open, read, close, O_RDONLY;
 
-func _start(argc: int, argv: **char) {
-    var hexChars: string = "0123456789abcdef";
-    var hexp: *char = hexChars as *char;
-    if (argc < 2) { puts("hexdump: missing filename\n"); exit(1); }
-    var fd: int = open(argv[1] as string, O_RDONLY, 0);
-    if (fd < 0) { puts("hexdump: cannot open\n"); exit(1); }
+var HEX: string = "0123456789abcdef";
+
+func dump_file(fd: int) {
     var buf: [char; 4096];
     var offset: int = 0;
     while (true) {
@@ -19,23 +22,26 @@ func _start(argc: int, argv: **char) {
             if (remain < 16) { lineBytes = remain; }
             var out: [char; 80];
             var pos: int = 0;
-            var tmp_off: int = offset;
+            // Format offset (8 hex digits)
+            var tmp: int = offset;
             var j: int = 7;
             while (j >= 0) {
-                out[j] = hexp[tmp_off - (tmp_off / 16) * 16];
-                tmp_off = tmp_off / 16;
+                out[j] = HEX[tmp - (tmp / 16) * 16];
+                tmp = tmp / 16;
                 j = j - 1;
             }
             pos = 8;
+            // Separator
             out[pos] = ' '; pos = pos + 1;
             out[pos] = ' '; pos = pos + 1;
+            // Hex bytes (16 per line, space after byte 7)
             var i: int = 0;
             while (i < 16) {
                 if (i < lineBytes) {
                     var val: int = buf[bufpos + i];
-                    out[pos] = hexp[val / 16];
+                    out[pos] = HEX[val / 16];
                     pos = pos + 1;
-                    out[pos] = hexp[val - (val / 16) * 16];
+                    out[pos] = HEX[val - (val / 16) * 16];
                     pos = pos + 1;
                 } else {
                     out[pos] = ' '; pos = pos + 1;
@@ -44,14 +50,14 @@ func _start(argc: int, argv: **char) {
                 if (i == 7) { out[pos] = ' '; pos = pos + 1; }
                 i = i + 1;
             }
+            // ASCII column
             out[pos] = ' '; pos = pos + 1;
             out[pos] = '|'; pos = pos + 1;
             i = 0;
             while (i < lineBytes) {
                 var c: int = buf[bufpos + i];
-                if (c >= 32) {
-                    if (c < 127) { out[pos] = c; } else { out[pos] = '.'; }
-                } else { out[pos] = '.'; }
+                if (c >= 32 && c < 127) { out[pos] = c; }
+                else { out[pos] = '.'; }
                 pos = pos + 1;
                 i = i + 1;
             }
@@ -62,6 +68,26 @@ func _start(argc: int, argv: **char) {
             bufpos = bufpos + 16;
         }
     }
-    close(fd);
+}
+
+func _start(argc: int, argv: **char) {
+    if (argc < 2) { puts("hexdump: missing filename\n"); exit(1); }
+    var i: int = 1;
+    while (i < argc) {
+        if (argc > 2) {
+            puts(argv[i] as string);
+            puts(":\n");
+        }
+        var fd: int = open(argv[i] as string, O_RDONLY, 0);
+        if (fd < 0) {
+            puts("hexdump: cannot open: ");
+            puts(argv[i] as string);
+            puts("\n");
+            exit(1);
+        }
+        dump_file(fd);
+        close(fd);
+        i = i + 1;
+    }
     asm { "mov rax, 60" "xor rdi, rdi" "syscall" }
 }
