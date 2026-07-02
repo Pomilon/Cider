@@ -446,10 +446,12 @@ namespace Cider {
                         IRValue addr = IRValue::Register(nextTemp(), IRType::PTR);
                         currentBlock_->addInstruction({IROp::ADD, addr, {obj, IRValue::Constant(field.offset, IRType::I32)}});
                         
-                        bool fieldIsStruct = false;
-                        auto fieldTypeSym = symbolTable_.resolve(field.type.name);
-                        if (fieldTypeSym && (fieldTypeSym->kind == SymbolKind::STRUCT || fieldTypeSym->kind == SymbolKind::CLASS)) {
-                            fieldIsStruct = true;
+                        bool fieldIsStruct = (field.type.pointerLevel == 0);
+                        if (fieldIsStruct) {
+                            auto fieldTypeSym = symbolTable_.resolve(field.type.name);
+                            if (!fieldTypeSym || (fieldTypeSym->kind != SymbolKind::STRUCT && fieldTypeSym->kind != SymbolKind::CLASS)) {
+                                fieldIsStruct = false;
+                            }
                         }
                         if (isAddress_ || fieldIsStruct) {
                             lastValue_ = addr;
@@ -1434,10 +1436,12 @@ namespace Cider {
             currentBlock_->addInstruction({IROp::ADD, addr, {obj, scaledIdx}});
             
             lastExprType_ = elemType;
-            bool elemIsStruct = false;
-            auto elemTypeSym = symbolTable_.resolve(elemType.name);
-            if (elemTypeSym && (elemTypeSym->kind == SymbolKind::STRUCT || elemTypeSym->kind == SymbolKind::CLASS)) {
-                elemIsStruct = elemTypeSym->type.name.empty();
+            bool elemIsStruct = (elemType.pointerLevel == 0);
+            if (elemIsStruct) {
+                auto elemTypeSym = symbolTable_.resolve(elemType.name);
+                if (!elemTypeSym || (elemTypeSym->kind != SymbolKind::STRUCT && elemTypeSym->kind != SymbolKind::CLASS)) {
+                    elemIsStruct = false;
+                }
             }
             if (isAddress_ || elemIsStruct) {
                 lastValue_ = addr;
