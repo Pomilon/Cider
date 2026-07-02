@@ -29,6 +29,7 @@ namespace Cider
         VAR,
         CLASS,
         STRUCT,  // Added 'struct'
+        UNION,   // Added 'union'
         ENUM,    // Added 'enum'
         EXTERN,  // Added 'extern'
         EXTENDS,

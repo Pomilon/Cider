@@ -687,14 +687,16 @@ namespace Cider
     {
     public:
         using Field = std::pair<std::string, std::unique_ptr<TypeAST>>;
-        StructDeclStmt(const std::string &name, std::vector<Field> fields, int line, int col)
-            : Statement(STRUCT_DECL_STMT, line, col), name_(name), fields_(std::move(fields)) {}
+        StructDeclStmt(const std::string &name, std::vector<Field> fields, int line, int col, bool isUnion = false)
+            : Statement(STRUCT_DECL_STMT, line, col), name_(name), fields_(std::move(fields)), isUnion_(isUnion) {}
         const std::string &getName() const { return name_; }
         const std::vector<Field> &getFields() const { return fields_; }
+        bool isUnion() const { return isUnion_; }
         void accept(ASTVisitor &visitor) override;
     private:
         std::string name_;
         std::vector<Field> fields_;
+        bool isUnion_;
     };
 
     class EnumDeclStmt : public Statement

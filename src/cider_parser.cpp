@@ -755,6 +755,8 @@ namespace Cider
             return parseMatchStatement();
         case TokenType::STRUCT:
             return parseStructDeclaration();
+        case TokenType::UNION:
+            return parseStructDeclaration(true);
         case TokenType::ENUM:
             return parseEnumDeclaration();
         case TokenType::ASYNC:
@@ -1475,7 +1477,7 @@ namespace Cider
         return std::make_unique<FunctionDeclStmt>(funcName, std::move(params), std::move(body), std::move(returnType), line, col, isAsync, isVirtual, isOverride, isExtern);
     }
 
-    std::unique_ptr<Statement> Parser::parseStructDeclaration() {
+    std::unique_ptr<Statement> Parser::parseStructDeclaration(bool isUnion) {
         int line = currentToken_.line;
         int col = currentToken_.column;
         nextToken(); // struct
@@ -1523,7 +1525,7 @@ namespace Cider
         }
         nextToken();
 
-        return std::make_unique<StructDeclStmt>(structName, std::move(fields), line, col);
+        return std::make_unique<StructDeclStmt>(structName, std::move(fields), line, col, isUnion);
     }
 
     std::unique_ptr<Statement> Parser::parseEnumDeclaration() {
@@ -1936,6 +1938,8 @@ namespace Cider
             stmt = parseFunctionDeclaration();
         else if (currentToken_.type == TokenType::STRUCT)
             stmt = parseStructDeclaration();
+        else if (currentToken_.type == TokenType::UNION)
+            stmt = parseStructDeclaration(true);
         else if (currentToken_.type == TokenType::ENUM)
             stmt = parseEnumDeclaration();
         else if (currentToken_.type == TokenType::CLASS)

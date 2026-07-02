@@ -115,21 +115,35 @@ namespace Cider {
             sym->line = stmt.getLine();
             sym->col = stmt.getColumn();
 
-            int currentOffset = 0;
-            for (auto& field : stmt.getFields()) {
-                StructSymbol::Field f;
-                f.name = field.first;
-                f.type = TypeInfo::fromAST(field.second.get());
-                f.offset = currentOffset;
+            if (stmt.isUnion()) {
+                int maxSize = 0;
+                for (auto& field : stmt.getFields()) {
+                    StructSymbol::Field f;
+                    f.name = field.first;
+                    f.type = TypeInfo::fromAST(field.second.get());
+                    f.offset = 0;
 
-                // Foundation: Calculate size (simplified to 8-byte alignment for now)
-                int size = 8; 
-                if (f.type.isArray) size = 8 * f.type.arraySize;
+                    int size = getFieldSize(f.type);
+                    if (size > maxSize) maxSize = size;
 
-                currentOffset += size;
-                sym->fields.push_back(f);
+                    sym->fields.push_back(f);
+                }
+                sym->totalSize = maxSize;
+            } else {
+                int currentOffset = 0;
+                for (auto& field : stmt.getFields()) {
+                    StructSymbol::Field f;
+                    f.name = field.first;
+                    f.type = TypeInfo::fromAST(field.second.get());
+                    f.offset = currentOffset;
+
+                    int size = getFieldSize(f.type);
+
+                    currentOffset += size;
+                    sym->fields.push_back(f);
+                }
+                sym->totalSize = currentOffset;
             }
-            sym->totalSize = currentOffset;
 
             if (symbolTable_.getCurrentScope()->resolveLocal(sym->name)) {
                 reporter_.error("Redeclaration of type '" + sym->name + "'", sym->line, sym->col);
@@ -365,7 +379,7 @@ namespace Cider {
                     f.name = field->getName();
                     f.type = TypeInfo::fromAST(field->getTypeAST());
                     f.offset = currentOffset;
-                    currentOffset += 8; // Simplified alignment
+                    currentOffset += getFieldSize(f.type);
                     sym->fields.push_back(f);
                 } else if (auto method = dynamic_cast<FunctionDeclStmt*>(member.get())) {
                     StructSymbol::Method m;
@@ -448,6 +462,25 @@ namespace Cider {
         }
         void visit(ExportStmt& stmt) override { stmt.getStmt()->accept(*this); }
         void visit(ExportExpressionStmt&) override {}
+
+        int getFieldSize(const TypeInfo& type) {
+            if (type.pointerLevel > 0) return 8;
+            if (type.isArray) {
+                TypeInfo elemType = type;
+                elemType.isArray = false;
+                elemType.arraySize = 0;
+                return type.arraySize * getFieldSize(elemType);
+            }
+            if (type.name == "u8" || type.name == "i8" || type.name == "char" || type.name == "byte" || type.name == "void") return 1;
+            if (type.name == "u16" || type.name == "i16") return 2;
+            if (type.name == "u32" || type.name == "i32" || type.name == "int" || type.name == "float" || type.name == "bool") return 4;
+            if (type.name == "u64" || type.name == "i64") return 8;
+            auto sym = symbolTable_.resolve(type.name);
+            if (sym && (sym->kind == SymbolKind::STRUCT || sym->kind == SymbolKind::CLASS)) {
+                return std::static_pointer_cast<StructSymbol>(sym)->totalSize;
+            }
+            return 8;
+        }
 
     private:
         SymbolTable& symbolTable_;
