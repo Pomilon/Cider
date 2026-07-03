@@ -88,7 +88,20 @@ namespace Cider {
         void visit(NewExpr&) override {}
         void visit(ThisExpr&) override {}
         void visit(UnaryExpr& expr) override {
-            auto operand = expr.getOperand(); // Can't take operand easily yet, skip for now
+            auto operand = expr.takeOperand();
+            auto folded = foldExpression(std::move(operand));
+            if (auto num = dynamic_cast<NumberExpr*>(folded.get())) {
+                double v = num->getValue();
+                std::string op = expr.getOperator();
+                if (op == "-") {
+                    lastFoldedExpr_ = std::make_unique<NumberExpr>(-v, expr.getLine(), expr.getColumn());
+                    return;
+                } else if (op == "!") {
+                    lastFoldedExpr_ = std::make_unique<NumberExpr>(v == 0 ? 1.0 : 0.0, expr.getLine(), expr.getColumn());
+                    return;
+                }
+            }
+            expr.setOperand(std::move(folded));
         }
         void visit(CallExpr&) override {}
         void visit(MemberAccessExpr&) override {}
@@ -96,18 +109,31 @@ namespace Cider {
         void visit(TableExpr&) override {}
         void visit(IndexExpr&) override {}
         void visit(SliceExpr&) override {}
-        void visit(TernaryExpr&) override {}
-        void visit(GroupingExpr& expr) override {
-            expr.getExpression()->accept(*this);
-            if (lastFoldedExpr_) {
-                // Should replace inner expr? For now just propagate lastFoldedExpr
+        void visit(TernaryExpr& expr) override {
+            auto cond = expr.takeCondition();
+            auto folded = foldExpression(std::move(cond));
+            if (auto num = dynamic_cast<NumberExpr*>(folded.get())) {
+                if (num->getValue() != 0) {
+                    lastFoldedExpr_ = expr.takeThenExpr();
+                } else {
+                    lastFoldedExpr_ = expr.takeElseExpr();
+                }
+                if (lastFoldedExpr_) lastFoldedExpr_ = foldExpression(std::move(lastFoldedExpr_));
+                return;
             }
+            expr.setCondition(std::move(folded));
+        }
+        void visit(GroupingExpr& expr) override {
+            auto inner = expr.takeExpression();
+            lastFoldedExpr_ = foldExpression(std::move(inner));
         }
         void visit(FunctionExpr&) override {}
         void visit(SuperExpr&) override {}
         void visit(AwaitExpr&) override {}
         void visit(StructLiteralExpr&) override {}
-        void visit(SizeofExpr&) override {}
+        void visit(SizeofExpr& expr) override {
+            // Will be handled in IR generation. For now just leave it.
+        }
         void visit(CastExpr&) override {}
         void visit(ArrayTypeAST&) override {}
         void visit(TypeAST&) override {}
@@ -132,7 +158,8 @@ namespace Cider {
         void visit(BlockStmt&) override {}
         void visit(ReturnStmt&) override {}
         void visit(ExpressionStmt& stmt) override {
-            // Need a way to take expression from ExpressionStmt
+            auto expr = stmt.takeExpression();
+            stmt.setExpression(foldExpression(std::move(expr)));
         }
         void visit(FunctionDeclStmt& stmt) override {
             for (auto& s : stmt.getBody()) s->accept(*this);

@@ -238,6 +238,8 @@ namespace Cider
             : Expression(UNARY_EXPR, line, col), op_(op), operand_(std::move(operand)) {}
         const std::string &getOperator() const { return op_; }
         Expression *getOperand() const { return operand_.get(); }
+        std::unique_ptr<Expression> takeOperand() { return std::move(operand_); }
+        void setOperand(std::unique_ptr<Expression> operand) { operand_ = std::move(operand); }
         void accept(ASTVisitor &visitor) override;
     private:
         std::string op_;
@@ -331,6 +333,10 @@ namespace Cider
         Expression *getCondition() const { return condition_.get(); }
         Expression *getThenExpr() const { return thenExpr_.get(); }
         Expression *getElseExpr() const { return elseExpr_.get(); }
+        std::unique_ptr<Expression> takeCondition() { return std::move(condition_); }
+        std::unique_ptr<Expression> takeThenExpr() { return std::move(thenExpr_); }
+        std::unique_ptr<Expression> takeElseExpr() { return std::move(elseExpr_); }
+        void setCondition(std::unique_ptr<Expression> expr) { condition_ = std::move(expr); }
         void accept(ASTVisitor &visitor) override;
     private:
         std::unique_ptr<Expression> condition_;
@@ -344,6 +350,7 @@ namespace Cider
         GroupingExpr(std::unique_ptr<Expression> expression, int line, int col)
             : Expression(GROUPING_EXPR, line, col), expression_(std::move(expression)) {}
         Expression *getExpression() const { return expression_.get(); }
+        std::unique_ptr<Expression> takeExpression() { return std::move(expression_); }
         void accept(ASTVisitor &visitor) override;
     private:
         std::unique_ptr<Expression> expression_;
@@ -653,6 +660,8 @@ namespace Cider
         explicit ExpressionStmt(std::unique_ptr<Expression> expr, int line, int col)
             : Statement(EXPRESSION_STMT, line, col), expr_(std::move(expr)) {}
         Expression *getExpression() const { return expr_.get(); }
+        std::unique_ptr<Expression> takeExpression() { return std::move(expr_); }
+        void setExpression(std::unique_ptr<Expression> expr) { expr_ = std::move(expr); }
         void accept(ASTVisitor &visitor) override;
     private:
         std::unique_ptr<Expression> expr_;

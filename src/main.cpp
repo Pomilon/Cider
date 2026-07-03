@@ -15,6 +15,7 @@
 #include "cider_errors.h"
 #include "cider_ssa_deconstructor.h"
 #include "cider_reg_alloc.h"
+#include "cider_optimizer.h"
 
 int main(int argc, char** argv) {
     if (argc < 2) {
@@ -105,6 +106,12 @@ int main(int argc, char** argv) {
     deconstructor.process(irModule);
     std::cout << "Successfully deconstructed SSA IR.\n";
     if (verbose) irModule.print();
+    
+    // Optimization passes
+    for (auto& func : irModule.getFunctions()) {
+        Cider::Optimizer::dce(*func);
+    }
+    std::cout << "Optimization passes complete.\n";
     
     // Phase 10: Register Allocation
     Cider::RegisterAllocator regAlloc;
