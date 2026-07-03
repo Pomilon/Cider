@@ -139,9 +139,8 @@ namespace Cider {
     template <typename CostModel = HybridCycleCostModel>
     class Inliner {
     public:
-        bool run(ModuleIR& module) {
-            module_ = &module;
-            graph_.build(module);
+    bool run(ModuleIR& module) {
+        graph_.build(module);
             functionMap_.clear();
             remainingSites_.clear();
             for (auto& func : module.getFunctions()) {
@@ -164,7 +163,6 @@ namespace Cider {
         }
 
     private:
-        ModuleIR* module_ = nullptr;
         CallGraph graph_;
         CostModel costModel_;
         int siteCounter_ = 0;
@@ -278,7 +276,7 @@ namespace Cider {
                     {
                         std::map<std::string, IRValue> remappedPhi;
                         for (const auto& kv : cloned.phiArgs) {
-                            std::string newBlock = blockRename[kv.first];
+                            std::string newBlock = blockRename.at(kv.first);
                             remappedPhi[newBlock] = remapValue(kv.second);
                         }
                         cloned.phiArgs = std::move(remappedPhi);
