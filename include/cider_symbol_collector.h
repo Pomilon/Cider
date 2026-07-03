@@ -8,6 +8,7 @@
 #include "cider_parser.h"
 #include "cider_errors.h"
 #include <iostream>
+#include <set>
 #include <fstream>
 #include <sstream>
 
@@ -356,26 +357,7 @@ namespace Cider {
         }
 
         void visit(ImportStmt& stmt) override {
-            auto result = resolver_.resolve(stmt.getModuleName(), originPath_);
-            if (result.type == ModuleType::NOT_FOUND) {
-                reporter_.error("Could not resolve module '" + stmt.getModuleName() + "'", stmt.getLine(), stmt.getColumn());
-                return;
-            }
-            std::ifstream file(result.path);
-            if (!file) return;
-            std::stringstream buffer;
-            buffer << file.rdbuf();
-            
-            Lexer lexer(buffer.str(), reporter_);
-            Parser parser(lexer, reporter_);
-            auto importedAst = parser.parseProgram();
-            
-            if (importedAst) {
-                importedAst->accept(*this);
-                if (currentProgram_) {
-                    currentProgram_->addImportedAst(std::move(importedAst));
-                }
-            }
+            importModule(stmt.getModuleName(), stmt.getLine(), stmt.getColumn());
         }
 
         // Stubs
@@ -562,27 +544,7 @@ namespace Cider {
             structClassNames_.push_back(stmt.getName());
         }
         void visit(FromImportStmt& stmt) override {
-            auto result = resolver_.resolve(stmt.getModuleName(), originPath_);
-            if (result.type == ModuleType::NOT_FOUND) {
-                reporter_.error("Could not resolve module '" + stmt.getModuleName() + "'", stmt.getLine(), stmt.getColumn());
-                return;
-            }
-
-            std::ifstream file(result.path);
-            if (!file) return;
-            std::stringstream buffer;
-            buffer << file.rdbuf();
-            
-            Lexer lexer(buffer.str(), reporter_);
-            Parser parser(lexer, reporter_);
-            auto importedAst = parser.parseProgram();
-            
-            if (importedAst) {
-                importedAst->accept(*this);
-                if (currentProgram_) {
-                    currentProgram_->addImportedAst(std::move(importedAst));
-                }
-            }
+            importModule(stmt.getModuleName(), stmt.getLine(), stmt.getColumn());
         }
         void visit(ExportStmt& stmt) override { stmt.getStmt()->accept(*this); }
         void visit(ExportExpressionStmt&) override {}
@@ -1159,6 +1121,44 @@ namespace Cider {
             }
         }
 
+        void importModule(const std::string& moduleName, int line, int col) {
+            // Check if already imported by name
+            if (importedModuleNames_.count(moduleName)) return;
+
+            auto result = resolver_.resolve(moduleName, originPath_);
+            if (result.type == ModuleType::NOT_FOUND) {
+                reporter_.error("Could not resolve module '" + moduleName + "'", line, col);
+                return;
+            }
+
+            // Cycle detection
+            if (importingPaths_.count(result.path)) {
+                reporter_.error("Circular import detected for module '" + moduleName + "'", line, col);
+                return;
+            }
+
+            importedModuleNames_.insert(moduleName);
+            importingPaths_.insert(result.path);
+
+            std::ifstream file(result.path);
+            if (!file) { importingPaths_.erase(result.path); return; }
+            std::stringstream buffer;
+            buffer << file.rdbuf();
+
+            Lexer lexer(buffer.str(), reporter_);
+            Parser parser(lexer, reporter_);
+            auto importedAst = parser.parseProgram();
+
+            if (importedAst) {
+                importedAst->accept(*this);
+                if (currentProgram_) {
+                    currentProgram_->addImportedAst(std::move(importedAst));
+                }
+            }
+
+            importingPaths_.erase(result.path);
+        }
+
     private:
         SymbolTable& symbolTable_;
         ModuleResolver& resolver_;
@@ -1170,6 +1170,8 @@ namespace Cider {
         std::vector<std::string> structClassNames_;
         std::map<std::string, std::vector<std::string>> interfaceImpls_;
         std::map<std::string, std::shared_ptr<TemplateSymbol>> templateTable_;
+        std::set<std::string> importedModuleNames_;
+        std::set<std::string> importingPaths_;
     };
 
 } // namespace Cider
