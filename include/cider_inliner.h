@@ -108,6 +108,42 @@ namespace Cider {
         }
     };
 
+    struct HybridCycleCostModel {
+        static constexpr int CALL_OVERHEAD = 5;  // cycles saved per eliminated call site
+        static constexpr int BLOAT_CAP = 40;     // hard instruction cap regardless of cycle math
+
+        bool shouldInline(const FunctionIR& callee, int nSites, const CallGraph& graph) const {
+            if (graph.containsIndirectCall(callee.getName())) return false;
+
+            static const std::map<IROp, int> latency = {
+                {IROp::MOV, 1}, {IROp::ADD, 1}, {IROp::SUB, 1},
+                {IROp::BIT_AND, 1}, {IROp::BIT_OR, 1}, {IROp::BIT_XOR, 1}, {IROp::BIT_NOT, 1},
+                {IROp::LSHIFT, 1}, {IROp::RSHIFT, 1}, {IROp::BR, 1}, {IROp::RET, 1},
+                {IROp::ALLOCA, 1}, {IROp::PUSH, 1}, {IROp::POP, 1},
+                {IROp::CMP_EQ, 1}, {IROp::CMP_NE, 1}, {IROp::CMP_LT, 1},
+                {IROp::CMP_GT, 1}, {IROp::CMP_LE, 1}, {IROp::CMP_GE, 1},
+                {IROp::LOAD, 4}, {IROp::STORE, 4}, {IROp::MEMCPY, 4},
+                {IROp::MUL, 3}, {IROp::DIV, 20}, {IROp::MOD, 20},
+                {IROp::CALL, 20}, {IROp::VIRTUAL_CALL, 20}, {IROp::COND_BR, 2},
+                {IROp::CVT_ITOF, 3}, {IROp::CVT_FTOI, 3}, {IROp::ASM, 10},
+                {IROp::PHI, 0}
+            };
+
+            int bodyInstrs = 0;
+            int bodyCost = 0;
+            for (const auto& block : callee.getBlocks()) {
+                for (const auto& instr : block->getInstructions()) {
+                    bodyInstrs++;
+                    auto it = latency.find(instr.op);
+                    bodyCost += (it != latency.end()) ? it->second : 4;
+                }
+            }
+
+            if (bodyInstrs > BLOAT_CAP) return false;
+            return (CALL_OVERHEAD * nSites) >= bodyCost;
+        }
+    };
+
 } // namespace Cider
 
 #endif
