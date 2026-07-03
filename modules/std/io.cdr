@@ -114,7 +114,7 @@ export func read_all() -> string {
 export func exit(code: int) -> void {
     asm {
         "mov rax, 60\n"
-        "mov rdi, {code}\n"
+        "mov edi, {code}\n"
         "syscall\n"
     }
     // Fallback if syscall fails (should not happen for exit)

@@ -131,6 +131,15 @@ namespace Cider {
             if (name == "float") return IRType::F32;
             if (name == "bool") return IRType::I32;
             if (name == "void") return IRType::VOID;
+            // Resolve type aliases through symbol table
+            auto typeSym = symbolTable_.resolve(name);
+            if (typeSym && typeSym->type.pointerLevel == 0 && !typeSym->type.name.empty()) {
+                std::string targetName = typeSym->type.name;
+                if (targetName != name) {
+                    IRType resolved = mapType(targetName);
+                    if (resolved != IRType::PTR) return resolved;
+                }
+            }
             return IRType::PTR;
         }
 

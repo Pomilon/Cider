@@ -629,7 +629,8 @@ namespace Cider {
                                 
                                 // REPLACE placeholders like {s}, {len}, {code} literally
                                 for (auto& pair : instr.asmMap) {
-                                    std::string replacement = getOperand(pair.second);
+                                    std::string raw = getOperand(pair.second);
+                                    std::string replacement = getSizedReg(raw, pair.second.type);
                                     size_t pos = 0;
                                     std::string search = "{" + pair.first + "}";
                                     while ((pos = code.find(search, pos)) != std::string::npos) {
@@ -890,7 +891,12 @@ namespace Cider {
                             case IROp::RET: {
                                 if (instr.args.size() > 0) {
                                     IRType t = instr.args[0].type;
-                                    addText("    mov " + getSizedReg("rax", t) + ", " + getSizedReg(a1, t));
+                                    if (t == IRType::F32)
+                                        addText("    movss xmm0, " + a1);
+                                    else if (t == IRType::F64)
+                                        addText("    movsd xmm0, " + a1);
+                                    else
+                                        addText("    mov " + getSizedReg("rax", t) + ", " + getSizedReg(a1, t));
                                 }
                                 genEpilogue();
                                 break;

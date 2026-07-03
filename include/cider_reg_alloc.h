@@ -36,8 +36,8 @@ namespace Cider {
             std::map<std::string, AllocationResult> allocation;
             std::map<std::string, LiveInterval> intervals;
             int index = 0;
-            
-            // Build intervals
+
+            // First pass: build initial live intervals
             for (auto& block : func.getBlocks()) {
                 for (auto& instr : block->getInstructions()) {
                     if (instr.dest && instr.dest->kind == IRValue::REGISTER) {
@@ -57,9 +57,33 @@ namespace Cider {
                 }
             }
 
-            // Conservatively extend intervals to end of function for safety with loops
-            for (auto& pair : intervals) {
-                pair.second.end = index + 1;
+            // Second pass: detect back-edges (loops) and extend intervals across them
+            index = 0;
+            std::map<std::string, int> labelToIndex;
+            for (auto& block : func.getBlocks()) {
+                labelToIndex[block->getName()] = index;
+                index += (int)block->getInstructions().size();
+            }
+            index = 0;
+            for (auto& block : func.getBlocks()) {
+                for (auto& instr : block->getInstructions()) {
+                    if (instr.op == IROp::BR || instr.op == IROp::COND_BR) {
+                        for (auto& arg : instr.args) {
+                            if (arg.kind == IRValue::LABEL) {
+                                auto it = labelToIndex.find(arg.name);
+                                if (it != labelToIndex.end() && it->second < index) {
+                                    // Backward branch: extend intervals live across loop boundary
+                                    for (auto& pair : intervals) {
+                                        if (pair.second.start < index && pair.second.end >= it->second) {
+                                            pair.second.end = index + 1;
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    index++;
+                }
             }
 
             std::vector<LiveInterval> unhandled;
@@ -68,9 +92,10 @@ namespace Cider {
             }
             std::sort(unhandled.begin(), unhandled.end());
 
+            // Callee-saved registers only (preserved across calls, avoids ASM sizing issues)
             std::vector<std::string> freeIntRegs = {"rbx", "r12", "r13", "r14", "r15"};
             std::vector<std::string> freeFloatRegs = {"xmm8", "xmm9", "xmm10", "xmm11", "xmm12", "xmm13", "xmm14", "xmm15"};
-            
+
             std::vector<LiveInterval> active;
             int currentStackOffset = 0;
 
@@ -91,7 +116,6 @@ namespace Cider {
 
                 auto& freeRegs = interval.isFloat ? freeFloatRegs : freeIntRegs;
                 if (freeRegs.empty()) {
-                    // Spill
                     currentStackOffset += 8;
                     allocation[interval.varName] = {true, "", -currentStackOffset};
                 } else {

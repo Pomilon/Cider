@@ -18,7 +18,7 @@ func mmap_arena(size: int) -> *void {
     asm {
         "mov rax, 9"
         "xor rdi, rdi"
-        "mov rsi, {size}"
+        "mov esi, {size}"
         "mov rdx, 3"
         "mov r10, 34"
         "mov r8, -1"
