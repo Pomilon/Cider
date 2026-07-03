@@ -18,7 +18,6 @@ namespace Cider {
         void build(const ModuleIR& module) {
             edges_.clear();
             sccId_.clear();
-            callCounts_.clear();
             containsIndirectCall_.clear();
 
             for (const auto& func : module.getFunctions()) {
@@ -29,7 +28,6 @@ namespace Cider {
                         if ((instr.op == IROp::CALL || instr.op == IROp::VIRTUAL_CALL) && !instr.args.empty()) {
                             if (instr.args[0].kind == IRValue::LABEL) {
                                 edges_[name].push_back(instr.args[0].name);
-                                callCounts_[instr.args[0].name]++;
                             } else {
                                 containsIndirectCall_.insert(name);
                             }
@@ -46,11 +44,6 @@ namespace Cider {
             return ia != sccId_.end() && ib != sccId_.end() && ia->second == ib->second;
         }
 
-        int callSites(const std::string& callee) const {
-            auto it = callCounts_.find(callee);
-            return it != callCounts_.end() ? it->second : 0;
-        }
-
         bool containsIndirectCall(const std::string& func) const {
             return containsIndirectCall_.find(func) != containsIndirectCall_.end();
         }
@@ -58,7 +51,6 @@ namespace Cider {
     private:
         std::map<std::string, std::vector<std::string>> edges_;
         std::map<std::string, int> sccId_;
-        std::map<std::string, int> callCounts_;
         std::set<std::string> containsIndirectCall_;
 
         void tarjan() {
@@ -147,8 +139,6 @@ namespace Cider {
     template <typename CostModel = HybridCycleCostModel>
     class Inliner {
     public:
-        static constexpr int MAX_DEPTH = 2;
-
         bool run(ModuleIR& module) {
             module_ = &module;
             graph_.build(module);

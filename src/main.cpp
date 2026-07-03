@@ -119,11 +119,6 @@ int main(int argc, char** argv) {
         std::cerr << "Compilation failed during type checking.\n";
         return 1;
     }
-    
-    if (reporter.hasErrors()) {
-        std::cerr << "Compilation failed during type checking.\n";
-        return 1;
-    }
     std::cout << "Successfully type checked.\n";
     
     // 3.7 Semantic Analysis (Phase 4: Constant Folding)
