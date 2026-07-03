@@ -316,7 +316,7 @@ namespace Cider {
         for (size_t i = 0; i < loops_.size(); ++i) {
             for (size_t j = 0; j < loops_.size(); ++j) {
                 if (i == j) continue;
-                if (loops_[i].blocks.size() < loops_[j].blocks.size()
+                if (loops_[i].blocks.size() > loops_[j].blocks.size()
                     && loops_[i].blocks.find(loops_[j].header) != loops_[i].blocks.end()) {
                     loops_[i].children.push_back(&loops_[j]);
                 }
