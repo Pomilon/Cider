@@ -122,8 +122,9 @@ namespace Cider {
                 if (generatedFunctions_.count(func->getName())) continue;
                 generatedFunctions_.insert(func->getName());
 
-                // Skip functions not belonging to the target source file
-                if (!sourceFile.empty() && func->getSourcePath() != sourceFile) {
+                // Skip functions not belonging to the target source file (separate compilation mode)
+                if (!sourceFile.empty() && func->getSourcePath() != sourceFile &&
+                    func->getSourcePath() != "") {
                     addGlobalAsm("extern " + func->getName());
                     continue;
                 }
@@ -133,6 +134,9 @@ namespace Cider {
                 
                 std::string fName = func->getName();
                 if (fName == "_start" || fName == "main") {
+                    addText("global " + fName);
+                }
+                if (!sourceFile.empty()) {
                     addText("global " + fName);
                 }
                 

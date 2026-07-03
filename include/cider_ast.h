@@ -838,11 +838,15 @@ namespace Cider
         void accept(ASTVisitor &visitor) override;
         bool isStrict = false;
         
+        void setSourcePath(const std::string& p) { sourcePath_ = p; }
+        const std::string& getSourcePath() const { return sourcePath_; }
+        
         void addImportedAst(std::unique_ptr<Program> ast) { importedAsts_.push_back(std::move(ast)); }
         const std::vector<std::unique_ptr<Program>>& getImportedAsts() const { return importedAsts_; }
     private:
         std::vector<std::unique_ptr<Statement>> statements_;
         std::vector<std::unique_ptr<Program>> importedAsts_;
+        std::string sourcePath_;
     };
 
     class ASTVisitor

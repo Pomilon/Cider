@@ -13,15 +13,39 @@ namespace Cider {
     class MetaWriter {
     public:
         static bool write(const std::string& path, const std::string& moduleName,
-                          SymbolTable& syms) {
+                          Program* program) {
             std::ofstream out(path);
             if (!out) return false;
             out << "module " << moduleName << "\n";
-            // Scan the entire scope for exported symbols
-            // Since we can't easily iterate all symbols, we write a minimal header
-            // The full implementation will need scope iteration
+            writeExports(out, program->getStatements());
+            for (auto& imported : program->getImportedAsts()) {
+                writeExports(out, imported->getStatements());
+            }
             out.close();
             return true;
+        }
+
+    private:
+        static void writeExports(std::ofstream& out,
+                                 const std::vector<std::unique_ptr<Statement>>& stmts) {
+            for (auto& s : stmts) {
+                if (auto es = dynamic_cast<ExportStmt*>(s.get())) {
+                    if (auto fd = dynamic_cast<FunctionDeclStmt*>(es->getStmt())) {
+                        out << "export func " << fd->getName() << "(";
+                        auto& params = fd->getParams();
+                        for (size_t i = 0; i < params.size(); i++) {
+                            if (i > 0) out << ", ";
+                            out << TypeInfo::fromAST(params[i].second.get()).toString();
+                        }
+                        out << ") -> ";
+                        if (fd->getReturnType())
+                            out << TypeInfo::fromAST(fd->getReturnType()).toString();
+                        else
+                            out << "void";
+                        out << "\n";
+                    }
+                }
+            }
         }
     };
 
@@ -47,15 +71,16 @@ namespace Cider {
                     funcSym->kind = SymbolKind::FUNCTION;
                     funcSym->name = funcName;
                     funcSym->returnType = parseTypeString(retType);
-                    std::stringstream ps(params);
-                    std::string param;
-                    while (std::getline(ps, param, ',')) {
-                        if (param.empty()) continue;
-                        size_t colon = param.find(':');
-                        if (colon != std::string::npos) {
-                            std::string t = param.substr(colon + 1);
-                            while (!t.empty() && t[0] == ' ') t = t.substr(1);
-                            funcSym->parameterTypes.push_back(parseTypeString(t));
+                    if (!params.empty()) {
+                        std::stringstream ps(params);
+                        std::string param;
+                        while (std::getline(ps, param, ',')) {
+                            size_t colon = param.find(':');
+                            if (colon != std::string::npos) {
+                                std::string t = param.substr(colon + 1);
+                                while (!t.empty() && t[0] == ' ') t = t.substr(1);
+                                funcSym->parameterTypes.push_back(parseTypeString(t));
+                            }
                         }
                     }
                     syms.define(funcSym);

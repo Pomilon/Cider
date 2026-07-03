@@ -63,6 +63,7 @@ namespace Cider {
         int line;
         int col;
         bool isConst = false;
+        bool isExported = false;
         double constValue = 0; // For const variables and enum variant values
         
         // For variables: stack offset or global address (set during codegen)
@@ -129,6 +130,16 @@ namespace Cider {
             return nullptr;
         }
 
+        std::vector<std::shared_ptr<Symbol>> getAllSymbols() const {
+            std::vector<std::shared_ptr<Symbol>> result;
+            for (auto& [name, sym] : symbols_) result.push_back(sym);
+            if (parent_) {
+                auto parent_syms = parent_->getAllSymbols();
+                result.insert(result.end(), parent_syms.begin(), parent_syms.end());
+            }
+            return result;
+        }
+
         Scope* getParent() const { return parent_; }
 
     private:
@@ -148,6 +159,17 @@ namespace Cider {
         
         void define(std::shared_ptr<Symbol> symbol);
         std::shared_ptr<Symbol> resolve(const std::string& name);
+        std::vector<std::shared_ptr<Symbol>> getAllSymbols() {
+            Scope* root = currentScope_;
+            while (root && root->getParent()) root = root->getParent();
+            return root ? root->getAllSymbols() : std::vector<std::shared_ptr<Symbol>>();
+        }
+        
+        Scope* getRootScope() {
+            Scope* root = currentScope_;
+            while (root && root->getParent()) root = root->getParent();
+            return root;
+        }
         
         Scope* getCurrentScope() const { return currentScope_; }
 

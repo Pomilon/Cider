@@ -68,6 +68,7 @@ int main(int argc, char** argv) {
         std::cerr << "Compilation failed during parsing.\n";
         return 1;
     }
+    ast->setSourcePath(sourceFile);
 
     std::cout << "Successfully parsed " << sourceFile << " into Cider AST.\n";
     
@@ -140,7 +141,9 @@ int main(int argc, char** argv) {
     
     // 4. Code Generation (Direct to Native Assembly)
     Cider::CodeGenerator codegen("x86_64-linux");
-    if (!codegen.generate(irModule, outputFile, sourceFile)) {
+    // In separate compilation mode, filter codegen to only emit this module's functions
+    std::string codegenFilter = moduleMode ? sourceFile : "";
+    if (!codegen.generate(irModule, outputFile, codegenFilter)) {
         std::cerr << "Code generation failed.\n";
         return 1;
     }
@@ -152,11 +155,7 @@ int main(int argc, char** argv) {
         if (metaName.size() > 4 && metaName.substr(metaName.size()-4) == ".cdr")
             metaName = metaName.substr(0, metaName.size()-4);
         std::string metaPath = cacheDir + "/" + metaName + ".cider-meta";
-        std::ofstream metaOut(metaPath);
-        if (metaOut) {
-            metaOut << "module " << metaName << "\n";
-            metaOut.close();
-        }
+        Cider::MetaWriter::write(metaPath, metaName, ast.get());
     }
 
     std::cout << "Compilation complete. Assembly written to " << outputFile << "\n";

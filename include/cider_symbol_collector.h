@@ -137,6 +137,7 @@ namespace Cider {
             sym->col = stmt.getColumn();
             sym->returnType = TypeInfo::fromAST(stmt.getReturnType());
             sym->isExtern = stmt.isExtern();
+            sym->isExported = inExport_;
 
             for (auto& param : stmt.getParams()) {
                 TypeInfo paramType = TypeInfo::fromAST(param.second.get());
@@ -553,7 +554,11 @@ namespace Cider {
         void visit(FromImportStmt& stmt) override {
             importModule(stmt.getModuleName(), stmt.getLine(), stmt.getColumn());
         }
-        void visit(ExportStmt& stmt) override { stmt.getStmt()->accept(*this); }
+        void visit(ExportStmt& stmt) override {
+            inExport_ = true;
+            stmt.getStmt()->accept(*this);
+            inExport_ = false;
+        }
         void visit(ExportExpressionStmt&) override {}
 
         void addStructClassName(const std::string& name) {
@@ -1170,6 +1175,7 @@ namespace Cider {
             auto importedAst = parser.parseProgram();
 
             if (importedAst) {
+                importedAst->setSourcePath(result.path);
                 importedAst->accept(*this);
                 if (currentProgram_) {
                     currentProgram_->addImportedAst(std::move(importedAst));
@@ -1191,6 +1197,7 @@ namespace Cider {
         std::map<std::string, std::vector<std::string>> interfaceImpls_;
         std::map<std::string, std::shared_ptr<TemplateSymbol>> templateTable_;
         std::string cacheDir_;
+        bool inExport_ = false;
         std::set<std::string> importedModuleNames_;
         std::set<std::string> importingPaths_;
     };

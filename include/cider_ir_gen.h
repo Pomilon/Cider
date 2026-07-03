@@ -149,12 +149,19 @@ namespace Cider {
             if (visitedPrograms_.count(&program)) return;
             visitedPrograms_.insert(&program);
 
+            std::string prevPath = currentSourcePath_;
+            if (!program.getSourcePath().empty()) {
+                currentSourcePath_ = program.getSourcePath();
+            }
+
             for (auto& imported : program.getImportedAsts()) {
                 imported->accept(*this);
             }
             for (auto& stmt : program.getStatements()) {
                 stmt->accept(*this);
             }
+
+            currentSourcePath_ = prevPath;
         }
 
         static std::string sanitizeAsmName(const std::string& name) {
