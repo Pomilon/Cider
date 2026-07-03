@@ -34,6 +34,17 @@ test/ternary
 test/test_types
 test/trycatch
 test/virtual_methods
+test/inline_basic
+test/inline_multi_block
+test/inline_recursion_direct
+test/inline_recursion_mutual
+test/inline_string_literal
+test/inline_stress
+test/licm_inline
+test/licm_nested
+test/licm_non_invariant
+test/licm_simple
+test/licm_stress
 
 # C++ IDEs
 .vscode/
