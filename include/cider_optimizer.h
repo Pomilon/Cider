@@ -33,7 +33,9 @@ namespace Cider {
                                 if (it->op != IROp::STORE && it->op != IROp::CALL &&
                                     it->op != IROp::VIRTUAL_CALL && it->op != IROp::BR &&
                                     it->op != IROp::COND_BR && it->op != IROp::RET &&
-                                    it->op != IROp::ASM && it->op != IROp::ALLOCA) {
+                                    it->op != IROp::ASM && it->op != IROp::ALLOCA &&
+                                    it->op != IROp::MOV && it->op != IROp::LOAD &&
+                                    it->op != IROp::PUSH && it->op != IROp::POP) {
                                     it = insts.erase(it);
                                     changed = true;
                                     continue;

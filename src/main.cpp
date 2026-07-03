@@ -142,17 +142,10 @@ int main(int argc, char** argv) {
     if (verbose) irModule.print();
     
     // Optimization passes
-    // Optimization passes
-    // Note: DCE is currently disabled because it can corrupt string literal
-    // references in CALL instructions by incorrectly removing dead MOVs
-    // that are actually used as argument setup.
-    // for (auto& func : irModule.getFunctions()) {
-    //     Cider::Optimizer::dce(*func);
-    // }
-    // Cider::Optimizer::inlineFunctions(irModule);
-    // for (auto& func : irModule.getFunctions()) {
-    //     Cider::Optimizer::dce(*func);
-    // }
+    // Optimization passes (DCE only — inliner needs more testing)
+    for (auto& func : irModule.getFunctions()) {
+        Cider::Optimizer::dce(*func);
+    }
     std::cout << "Optimization passes complete.\n";
     
     // Phase 10: Register Allocation
