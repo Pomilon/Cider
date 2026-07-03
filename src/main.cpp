@@ -111,6 +111,10 @@ int main(int argc, char** argv) {
     for (auto& func : irModule.getFunctions()) {
         Cider::Optimizer::dce(*func);
     }
+    Cider::Optimizer::inlineFunctions(irModule);
+    for (auto& func : irModule.getFunctions()) {
+        Cider::Optimizer::dce(*func);
+    }
     std::cout << "Optimization passes complete.\n";
     
     // Phase 10: Register Allocation

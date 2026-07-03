@@ -75,6 +75,7 @@ namespace Cider {
         void prependInstruction(IRInstruction instr) { instructions_.insert(instructions_.begin(), instr); }
         
         const std::string& getName() const { return name_; }
+        void setName(const std::string& n) { name_ = n; }
         std::vector<IRInstruction>& getInstructions() { return instructions_; }
         const std::vector<IRInstruction>& getInstructions() const { return instructions_; }
 

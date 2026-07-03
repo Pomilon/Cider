@@ -4,41 +4,32 @@
 #include "cider_ir.h"
 #include <set>
 #include <map>
+#include <vector>
 
 namespace Cider {
 
     class Optimizer {
     public:
-        // Dead Code Elimination: remove instructions whose results are never used
         static void dce(FunctionIR& func) {
             bool changed = true;
             while (changed) {
                 changed = false;
                 std::set<std::string> used;
-
-                // Collect all used register names
                 for (auto& block : func.getBlocks()) {
                     for (auto& instr : block->getInstructions()) {
                         for (auto& arg : instr.args) {
-                            if (arg.kind == IRValue::REGISTER) {
-                                used.insert(arg.name);
-                            }
+                            if (arg.kind == IRValue::REGISTER) used.insert(arg.name);
                         }
                         for (auto& [phiBlock, val] : instr.phiArgs) {
-                            if (val.kind == IRValue::REGISTER) {
-                                used.insert(val.name);
-                            }
+                            if (val.kind == IRValue::REGISTER) used.insert(val.name);
                         }
                     }
                 }
-
-                // Remove unused instructions
                 for (auto& block : func.getBlocks()) {
                     auto& insts = block->getInstructions();
                     for (auto it = insts.begin(); it != insts.end(); ) {
                         if (it->dest && it->dest->kind == IRValue::REGISTER) {
                             if (used.find(it->dest->name) == used.end()) {
-                                // Don't remove stores, calls, branches, returns, or asm
                                 if (it->op != IROp::STORE && it->op != IROp::CALL &&
                                     it->op != IROp::VIRTUAL_CALL && it->op != IROp::BR &&
                                     it->op != IROp::COND_BR && it->op != IROp::RET &&
@@ -55,9 +46,7 @@ namespace Cider {
             }
         }
 
-        // Simple inlining: inline functions called only once with small bodies
         static bool inlineFunctions(ModuleIR& module) {
-            // Count call sites per function
             std::map<std::string, int> callCounts;
             for (auto& func : module.getFunctions()) {
                 for (auto& block : func->getBlocks()) {
@@ -71,44 +60,148 @@ namespace Cider {
                 }
             }
 
-            bool inlined = false;
-            // For each function called at most once with small body
+            bool anyInlined = false;
             for (auto& [name, count] : callCounts) {
                 if (count != 1) continue;
-                if (name.find("__anon_") == 0) continue; // Skip anonymous functions
+                if (name.find("__anon_") == 0) continue;
 
-                // Find the function
                 FunctionIR* callee = nullptr;
-                for (auto& f : module.getFunctions()) {
-                    if (f->getName() == name) { callee = f.get(); break; }
+                int calleeIdx = -1;
+                for (size_t i = 0; i < module.getFunctions().size(); i++) {
+                    if (module.getFunctions()[i]->getName() == name) {
+                        callee = module.getFunctions()[i].get();
+                        calleeIdx = (int)i;
+                        break;
+                    }
                 }
                 if (!callee) continue;
 
-                // Only inline tiny functions (1-3 instructions in body, no branches)
                 int bodySize = 0;
+                int blockCount = (int)callee->getBlocks().size();
                 for (auto& block : callee->getBlocks()) {
                     bodySize += (int)block->getInstructions().size();
+                    for (auto& ci : block->getInstructions()) {
+                        if (ci.op == IROp::BR || ci.op == IROp::COND_BR) blockCount = 99;
+                    }
                 }
-                if (bodySize > 5 || callee->getBlocks().size() > 2) continue;
+                if (bodySize > 8 || blockCount > 1) continue;
 
-                // Find the single call site
                 for (auto& caller : module.getFunctions()) {
+                    if (caller.get() == callee) continue;
+
+                    // Build block rename map (avoid label conflicts)
+                    std::map<std::string, std::string> blockRename;
+                    for (auto& cb : callee->getBlocks()) {
+                        blockRename[cb->getName()] = name + "_" + cb->getName();
+                    }
+
                     for (auto& block : caller->getBlocks()) {
                         auto& insts = block->getInstructions();
                         for (auto it = insts.begin(); it != insts.end(); ++it) {
                             if (it->op == IROp::CALL && it->args.size() > 0 &&
                                 it->args[0].kind == IRValue::LABEL && it->args[0].name == name) {
-                                // TODO: Full inlining requires renaming SSA variables,
-                                // parameter substitution, and return value rewriting.
-                                // For now, mark as inline candidate.
-                                (void)it;
-                                break;
+
+                                std::string prefix = name + "_";
+                                std::map<std::string, std::string> renameMap;
+
+                                // Build rename map for callee registers and block labels
+                                for (auto& cb : callee->getBlocks()) {
+                                    for (auto& ci : cb->getInstructions()) {
+                                        if (ci.dest && ci.dest->kind == IRValue::REGISTER) {
+                                            if (renameMap.find(ci.dest->name) == renameMap.end()) {
+                                                renameMap[ci.dest->name] = prefix + ci.dest->name;
+                                            }
+                                        }
+                                        for (auto& arg : ci.args) {
+                                            if (arg.kind == IRValue::REGISTER && renameMap.find(arg.name) == renameMap.end()) {
+                                                renameMap[arg.name] = prefix + arg.name;
+                                            }
+                                            // Rename block labels in branches
+                                            if (arg.kind == IRValue::LABEL) {
+                                                auto br = blockRename.find(arg.name);
+                                                if (br != blockRename.end()) arg.name = br->second;
+                                            }
+                                        }
+                                    }
+                                }
+
+                                // Rename actual basic block objects
+                                for (auto& cb : callee->getBlocks()) {
+                                    auto br = blockRename.find(cb->getName());
+                                    if (br != blockRename.end()) cb->setName(br->second);
+                                }
+
+                                // Map callee parameters to caller's argument values
+                                const auto& calleeParams = callee->getParams();
+                                for (size_t pi = 0; pi < calleeParams.size() && pi + 1 < it->args.size(); pi++) {
+                                    renameMap[calleeParams[pi]] = it->args[pi + 1].name;
+                                }
+
+                                // Clone callee blocks with renamed registers
+                                std::vector<IRInstruction> inlinedInsts;
+                                std::string retDest;
+
+                                for (auto& cb : callee->getBlocks()) {
+                                    for (auto& ci : cb->getInstructions()) {
+                                        IRInstruction cloned = ci;
+                                        if (cloned.dest && cloned.dest->kind == IRValue::REGISTER) {
+                                            auto rn = renameMap.find(cloned.dest->name);
+                                            if (rn != renameMap.end()) cloned.dest->name = rn->second;
+                                        }
+                                        for (auto& arg : cloned.args) {
+                                            if (arg.kind == IRValue::REGISTER) {
+                                                auto rn = renameMap.find(arg.name);
+                                                if (rn != renameMap.end()) arg.name = rn->second;
+                                            }
+                                            if (arg.kind == IRValue::LABEL) {
+                                                auto br = blockRename.find(arg.name);
+                                                if (br != blockRename.end()) arg.name = br->second;
+                                            }
+                                        }
+                                        for (auto& [phiBlock, val] : cloned.phiArgs) {
+                                            if (val.kind == IRValue::REGISTER) {
+                                                auto rn = renameMap.find(val.name);
+                                                if (rn != renameMap.end()) val.name = rn->second;
+                                            }
+                                        }
+                                        if (cloned.op == IROp::RET && cloned.args.size() > 0) {
+                                            if (cloned.args[0].kind == IRValue::REGISTER) {
+                                                retDest = cloned.args[0].name;
+                                            }
+                                        }
+                                        inlinedInsts.push_back(std::move(cloned));
+                                    }
+                                }
+
+                                auto callDest = it->dest;
+                                it = insts.erase(it);
+
+                                for (auto& ci : inlinedInsts) {
+                                    if (ci.op == IROp::RET) {
+                                        if (callDest && !retDest.empty()) {
+                                            IRInstruction mov;
+                                            mov.op = IROp::MOV;
+                                            mov.dest = *callDest;
+                                            mov.args.push_back(IRValue::Register(retDest, callDest->type));
+                                            it = insts.insert(it, std::move(mov));
+                                            ++it;
+                                        }
+                                    } else {
+                                        it = insts.insert(it, std::move(ci));
+                                        ++it;
+                                    }
+                                }
+
+                                anyInlined = true;
+                                goto next_func;
                             }
                         }
                     }
                 }
+                next_func:;
             }
-            return inlined;
+
+            return anyInlined;
         }
     };
 
