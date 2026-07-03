@@ -172,7 +172,7 @@ namespace Cider {
                     semi[w] = semi[u];
                 }
             }
-            bucket[vertex[semi[w]]].push_back(w);
+            bucket[semi[w]].push_back(w);
 
             int p = parent[w];
             if (p == -1) continue;
@@ -191,7 +191,7 @@ namespace Cider {
 
         for (int i = 1; i < dfsCount; ++i) {
             int w = vertex[i];
-            if (idomIdx[w] != vertex[semi[w]]) {
+            if (idomIdx[w] != semi[w]) {
                 idomIdx[w] = idomIdx[idomIdx[w]];
             }
         }

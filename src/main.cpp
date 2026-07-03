@@ -17,6 +17,7 @@
 #include "cider_reg_alloc.h"
 #include "cider_optimizer.h"
 #include "cider_inliner.h"
+#include "cider_licm.h"
 #include "cider_meta.h"
 #include <sys/stat.h>
 
@@ -130,6 +131,11 @@ int main(int argc, char** argv) {
     Cider::IRGenerator irGen(symbolTable, sourceFile);
     Cider::ModuleIR irModule = irGen.generate(*ast);
     std::cout << "Successfully generated SSA IR.\n";
+    
+    // SSA LICM (before SSA deconstruction)
+    Cider::SSALicmPass ssa_licm;
+    ssa_licm.run(irModule);
+    std::cout << "SSA LICM complete.\n";
     
     // 3.95 Semantic Analysis (Phase 9: SSA Deconstruction)
     Cider::SSADeconstructor deconstructor;
