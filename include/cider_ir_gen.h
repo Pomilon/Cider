@@ -690,6 +690,20 @@ namespace Cider {
                 if (!isInterfaceInit) {
                     stmt.getInitializer()->accept(*this);
                     IRValue val = lastValue_;
+                    if (sym->type.pointerLevel == 0) {
+                        IRType declType = mapType(sym->type.name);
+                        if ((val.type == IRType::I32 || val.type == IRType::I64) &&
+                            (declType == IRType::F32 || declType == IRType::F64)) {
+                            IRValue converted = IRValue::Register(nextTemp(), declType);
+                            currentBlock_->addInstruction({IROp::CVT_ITOF, converted, {val}});
+                            val = converted;
+                        } else if ((val.type == IRType::F32 || val.type == IRType::F64) &&
+                                   (declType == IRType::I32 || declType == IRType::I64)) {
+                            IRValue converted = IRValue::Register(nextTemp(), declType);
+                            currentBlock_->addInstruction({IROp::CVT_FTOI, converted, {val}});
+                            val = converted;
+                        }
+                    }
                     if (sym->type.isArray || sym->type.isUserDefined || getTypeSize(sym->type) > 8) {
                         currentBlock_->addInstruction({IROp::MEMCPY, std::nullopt, {addr, val, IRValue::Constant(getTypeSize(sym->type), IRType::I32)}});
                     } else {
@@ -812,6 +826,19 @@ namespace Cider {
                 }
             }
 
+            // Implicit int-to-float conversion for mixed operands
+            if ((left.type == IRType::F32 || left.type == IRType::F64) &&
+                (right.type == IRType::I32 || right.type == IRType::I64)) {
+                IRValue converted = IRValue::Register(nextTemp(), left.type);
+                currentBlock_->addInstruction({IROp::CVT_ITOF, converted, {right}});
+                right = converted;
+            } else if ((right.type == IRType::F32 || right.type == IRType::F64) &&
+                       (left.type == IRType::I32 || left.type == IRType::I64)) {
+                IRValue converted = IRValue::Register(nextTemp(), right.type);
+                currentBlock_->addInstruction({IROp::CVT_ITOF, converted, {left}});
+                left = converted;
+            }
+
             if (sOp == "+") op = IROp::ADD;
             else if (sOp == "-") op = IROp::SUB;
             else if (sOp == "*") op = IROp::MUL;
@@ -831,6 +858,9 @@ namespace Cider {
             else return;
 
             IRValue dest = IRValue::Register(nextTemp(), left.type);
+            if (op >= IROp::CMP_EQ && op <= IROp::CMP_GE) {
+                dest.type = IRType::I32;
+            }
             currentBlock_->addInstruction({op, dest, {left, right}});
             lastValue_ = dest;
         }
@@ -1508,9 +1538,16 @@ namespace Cider {
             IRType irType = (targetType.pointerLevel > 0) ? IRType::PTR : mapType(targetType.name);
             
             IRValue dest = IRValue::Register(nextTemp(), irType);
-            
-            // Explicitly truncate if casting to a smaller type
-            if (irType == IRType::I8 || irType == IRType::U8) {
+
+            IRType srcType = lastValue_.type;
+            // Detect int↔float conversions
+            if ((srcType == IRType::F32 || srcType == IRType::F64) &&
+                (irType == IRType::I32 || irType == IRType::I64)) {
+                currentBlock_->addInstruction({IROp::CVT_FTOI, dest, {lastValue_}});
+            } else if ((srcType == IRType::I32 || srcType == IRType::I64) &&
+                       (irType == IRType::F32 || irType == IRType::F64)) {
+                currentBlock_->addInstruction({IROp::CVT_ITOF, dest, {lastValue_}});
+            } else if (irType == IRType::I8 || irType == IRType::U8) {
                 currentBlock_->addInstruction({IROp::BIT_AND, dest, {lastValue_, IRValue::Constant(0xFF, IRType::I32)}});
             } else if (irType == IRType::I16 || irType == IRType::U16) {
                 currentBlock_->addInstruction({IROp::BIT_AND, dest, {lastValue_, IRValue::Constant(0xFFFF, IRType::I32)}});

@@ -52,6 +52,21 @@ namespace Cider {
                 return op.find("[") != std::string::npos;
             };
 
+            std::map<double, std::string> floatConsts;
+            int floatConstCount = 0;
+
+            auto getFloatConst = [&](double val, IRType t) -> std::string {
+                auto it = floatConsts.find(val);
+                if (it != floatConsts.end()) return it->second;
+                std::string label = "fc" + std::to_string(floatConstCount++);
+                floatConsts[val] = label;
+                if (t == IRType::F32)
+                    addData(label + ": dd " + std::to_string(val));
+                else
+                    addData(label + ": dq " + std::to_string(val));
+                return label;
+            };
+
             RegisterAllocator regAlloc;
             
             for (auto& func : module.getFunctions()) {
@@ -152,7 +167,7 @@ namespace Cider {
 
                 auto getOperand = [&](const IRValue& val) -> std::string {
                     if (val.kind == IRValue::CONSTANT) {
-                        if (val.type == IRType::F32 || val.type == IRType::F64) return std::to_string(val.constValue);
+                        if (val.type == IRType::F32 || val.type == IRType::F64) return "[rel " + getFloatConst(val.constValue, val.type) + "]";
                         return std::to_string((long long)val.constValue);
                     } else if (val.kind == IRValue::LABEL) {
                         return val.name;
@@ -171,6 +186,7 @@ namespace Cider {
 
                 auto getSizedReg = [](const std::string& reg, IRType t) -> std::string {
                     if (reg == "none") return reg;
+                    if (reg.size() >= 3 && reg[0] == 'x' && reg[1] == 'm' && reg[2] == 'm') return reg;
                     if (reg.find("[") != std::string::npos) {
                         std::string prefix = "qword ";
                         if (t == IRType::I8 || t == IRType::U8) prefix = "byte ";
@@ -291,6 +307,40 @@ namespace Cider {
                         std::string a2 = (instr.args.size() > 1 ? getOperand(instr.args[1]) : "");
 
                         switch (instr.op) {
+                            case IROp::CVT_ITOF: {
+                                IRType t = (instr.dest ? instr.dest->type : IRType::F32);
+                                addText("    mov eax, " + getSizedReg(a1, IRType::I32));
+                                if (t == IRType::F32)
+                                    addText("    cvtsi2ss xmm0, eax");
+                                else
+                                    addText("    cvtsi2sd xmm0, eax");
+                                addText("    movss " + d + ", xmm0");
+                                break;
+                            }
+                            case IROp::CVT_FTOI: {
+                                IRType t = (instr.dest ? instr.dest->type : IRType::I32);
+                                IRType srcType = (instr.args.size() > 0 ? instr.args[0].type : IRType::F32);
+                                std::string dstReg = getSizedReg(d, t);
+                                if (isMem(dstReg)) {
+                                    if (srcType == IRType::F64) {
+                                        addText("    movsd xmm0, " + a1);
+                                        addText("    cvttsd2si eax, xmm0");
+                                    } else {
+                                        addText("    movss xmm0, " + a1);
+                                        addText("    cvttss2si eax, xmm0");
+                                    }
+                                    addText("    mov " + dstReg + ", eax");
+                                } else {
+                                    if (srcType == IRType::F64) {
+                                        addText("    movsd xmm0, " + a1);
+                                        addText("    cvttsd2si " + dstReg + ", xmm0");
+                                    } else {
+                                        addText("    movss xmm0, " + a1);
+                                        addText("    cvttss2si " + dstReg + ", xmm0");
+                                    }
+                                }
+                                break;
+                            }
                             case IROp::MOV: {
                                 if (d != a1) {
                                     IRType t = (instr.dest ? instr.dest->type : IRType::I32);
@@ -322,11 +372,20 @@ namespace Cider {
                             }
                             case IROp::ADD:
                             case IROp::SUB: {
-                                std::string opName = (instr.op == IROp::ADD ? "add" : "sub");
                                 IRType t = (instr.dest ? instr.dest->type : IRType::I32);
+                                if (t == IRType::F32) {
+                                    std::string op = (instr.op == IROp::ADD ? "addss" : "subss");
+                                    addText("    movss xmm0, " + a1);
+                                    addText("    " + op + " xmm0, " + a2);
+                                    addText("    movss " + d + ", xmm0");
+                                } else if (t == IRType::F64) {
+                                    std::string op = (instr.op == IROp::ADD ? "addsd" : "subsd");
+                                    addText("    movsd xmm0, " + a1);
+                                    addText("    " + op + " xmm0, " + a2);
+                                    addText("    movsd " + d + ", xmm0");
+                                } else {
+                                std::string opName = (instr.op == IROp::ADD ? "add" : "sub");
                                 bool is64 = (t == IRType::I64 || t == IRType::U64 || t == IRType::PTR);
-
-                                // Load LHS into rax with sign-extension if needed
                                 IRType t1 = (instr.args.size() > 0 ? instr.args[0].type : IRType::I32);
                                 if (is64 && (t1 == IRType::I32 || t1 == IRType::U32)) {
                                     if (isMem(a1)) addText("    movsxd rax, dword " + a1);
@@ -334,8 +393,6 @@ namespace Cider {
                                 } else {
                                     addText("    mov " + getSizedReg("rax", t) + ", " + getSizedReg(a1, t));
                                 }
-
-                                // Load RHS into r11 with sign-extension if needed
                                 IRType t2 = (instr.args.size() > 1 ? instr.args[1].type : IRType::I32);
                                 if (is64 && (t2 == IRType::I32 || t2 == IRType::U32)) {
                                     if (isMem(a2)) addText("    movsxd r11, dword " + a2);
@@ -344,13 +401,22 @@ namespace Cider {
                                 } else {
                                     addText("    mov " + getSizedReg("r11", t) + ", " + getSizedReg(a2, t));
                                 }
-
                                 addText("    " + opName + " " + getSizedReg("rax", t) + ", " + getSizedReg("r11", t));
                                 addText("    mov " + getSizedReg(d, t) + ", " + getSizedReg("rax", t));
+                                }
                                 break;
                             }
                             case IROp::MUL: {
                                 IRType t = (instr.dest ? instr.dest->type : IRType::I32);
+                                if (t == IRType::F32) {
+                                    addText("    movss xmm0, " + a1);
+                                    addText("    mulss xmm0, " + a2);
+                                    addText("    movss " + d + ", xmm0");
+                                } else if (t == IRType::F64) {
+                                    addText("    movsd xmm0, " + a1);
+                                    addText("    mulsd xmm0, " + a2);
+                                    addText("    movsd " + d + ", xmm0");
+                                } else {
                                 bool is64 = (t == IRType::I64 || t == IRType::U64 || t == IRType::PTR);
                                 std::string destReg = is64 ? "rax" : "eax";
                                 std::string tempReg = is64 ? "r11" : "r11d";
@@ -363,10 +429,23 @@ namespace Cider {
                                     addText("    imul " + destReg + ", " + getSizedReg(a2, t));
                                 }
                                 addText("    mov " + getSizedReg(d, t) + ", " + destReg);
+                                }
                                 break;
                             }
                             case IROp::DIV:
                             case IROp::MOD: {
+                                IRType t = (instr.dest ? instr.dest->type : IRType::I32);
+                                if (t == IRType::F32) {
+                                    addText("    movss xmm0, " + a1);
+                                    addText("    divss xmm0, " + a2);
+                                    addText("    movss " + d + ", xmm0");
+                                    break;
+                                } else if (t == IRType::F64) {
+                                    addText("    movsd xmm0, " + a1);
+                                    addText("    divsd xmm0, " + a2);
+                                    addText("    movsd " + d + ", xmm0");
+                                    break;
+                                }
                                 std::vector<std::string> clobbered = {"rax", "rdx"};
                                 std::vector<std::string> toSave;
                                 for (const auto& reg : clobbered) {
@@ -378,7 +457,7 @@ namespace Cider {
                                     }
                                 }
                                 for (const auto& reg : toSave) addText("    push " + reg);
-                                IRType t = (instr.dest ? instr.dest->type : IRType::I32);
+                                t = (instr.dest ? instr.dest->type : IRType::I32);
                                 bool is64 = (t == IRType::I64 || t == IRType::U64 || t == IRType::PTR);
                                 if (is64) {
                                     addText("    mov r11, " + getSizedReg(a2, t));
@@ -440,6 +519,55 @@ namespace Cider {
                             case IROp::CMP_LE:
                             case IROp::CMP_GE: {
                                 IRType t = instr.args[0].type;
+                                if (t == IRType::F32) {
+                                    std::string setcc;
+                                    switch (instr.op) {
+                                        case IROp::CMP_EQ: setcc = "sete";  break;
+                                        case IROp::CMP_NE: setcc = "setne"; break;
+                                        case IROp::CMP_LT: setcc = "setb";  break;
+                                        case IROp::CMP_LE: setcc = "setbe"; break;
+                                        case IROp::CMP_GT: setcc = "seta";  break;
+                                        case IROp::CMP_GE: setcc = "setae"; break;
+                                        default: setcc = "sete";
+                                    }
+                                    if (isMem(a1)) {
+                                        addText("    movss xmm0, " + a1);
+                                        addText("    ucomiss xmm0, " + a2);
+                                    } else if (isMem(a2)) {
+                                        addText("    movss xmm0, " + a2);
+                                        addText("    ucomiss " + a1 + ", xmm0");
+                                    } else {
+                                        addText("    ucomiss " + a1 + ", " + a2);
+                                    }
+                                    addText("    " + setcc + " al");
+                                    addText("    movzx eax, al");
+                                    addText("    mov " + d + ", rax");
+                                    break;
+                                } else if (t == IRType::F64) {
+                                    std::string setcc;
+                                    switch (instr.op) {
+                                        case IROp::CMP_EQ: setcc = "sete";  break;
+                                        case IROp::CMP_NE: setcc = "setne"; break;
+                                        case IROp::CMP_LT: setcc = "setb";  break;
+                                        case IROp::CMP_LE: setcc = "setbe"; break;
+                                        case IROp::CMP_GT: setcc = "seta";  break;
+                                        case IROp::CMP_GE: setcc = "setae"; break;
+                                        default: setcc = "sete";
+                                    }
+                                    if (isMem(a1)) {
+                                        addText("    movsd xmm0, " + a1);
+                                        addText("    ucomisd xmm0, " + a2);
+                                    } else if (isMem(a2)) {
+                                        addText("    movsd xmm0, " + a2);
+                                        addText("    ucomisd " + a1 + ", xmm0");
+                                    } else {
+                                        addText("    ucomisd " + a1 + ", " + a2);
+                                    }
+                                    addText("    " + setcc + " al");
+                                    addText("    movzx eax, al");
+                                    addText("    mov " + d + ", rax");
+                                    break;
+                                }
                                 IRType t2 = instr.args[1].type;
                                 bool is64 = (t == IRType::I64 || t == IRType::U64 || t == IRType::PTR || t2 == IRType::I64 || t2 == IRType::U64 || t2 == IRType::PTR);
 
@@ -528,7 +656,23 @@ namespace Cider {
                                 IRType t = (instr.dest ? instr.dest->type : IRType::I32);
                                 std::string addrReg = "r10";
                                 if (isMem(ptr)) addText("    mov r10, " + ptr); else addrReg = ptr;
-                                if (t == IRType::I8 || t == IRType::U8) {
+                                if (t == IRType::F32) {
+                                    if (instr.args.size() > 1 && instr.args[1].kind == IRValue::CONSTANT)
+                                        addText("    movss xmm0, dword [" + addrReg + " + " + std::to_string((int)instr.args[1].constValue) + "]");
+                                    else if (instr.args[0].kind == IRValue::LABEL)
+                                        addText("    movss xmm0, dword [rel " + instr.args[0].name + "]");
+                                    else
+                                        addText("    movss xmm0, dword [" + addrReg + "]");
+                                    addText("    movss " + d + ", xmm0");
+                                } else if (t == IRType::F64) {
+                                    if (instr.args.size() > 1 && instr.args[1].kind == IRValue::CONSTANT)
+                                        addText("    movsd xmm0, qword [" + addrReg + " + " + std::to_string((int)instr.args[1].constValue) + "]");
+                                    else if (instr.args[0].kind == IRValue::LABEL)
+                                        addText("    movsd xmm0, qword [rel " + instr.args[0].name + "]");
+                                    else
+                                        addText("    movsd xmm0, qword [" + addrReg + "]");
+                                    addText("    movsd " + d + ", xmm0");
+                                } else if (t == IRType::I8 || t == IRType::U8) {
                                     std::string op = (t == IRType::I8) ? "movsx" : "movzx";
                                     if (instr.args.size() > 1 && instr.args[1].kind == IRValue::CONSTANT)
                                         addText("    " + op + " eax, byte [" + addrReg + " + " + std::to_string((int)instr.args[1].constValue) + "]");
@@ -565,6 +709,21 @@ namespace Cider {
                                 std::string ptr = a1; std::string val = a2;
                                 IRType t = (instr.args.size() > 1 ? instr.args[1].type : IRType::I32);
                                 if (instr.args[1].kind == IRValue::LABEL) t = IRType::PTR;
+                                if (t == IRType::F32) {
+                                    std::string addrReg = "r11";
+                                    if (isMem(ptr)) addText("    mov r11, " + ptr); else addrReg = ptr;
+                                    if (instr.args.size() > 2) addText("    add " + addrReg + ", " + getOperand(instr.args[2]));
+                                    if (isMem(val)) addText("    movss xmm0, " + val);
+                                    addText("    movss dword [" + addrReg + "], " + (isMem(val) ? "xmm0" : val));
+                                    break;
+                                } else if (t == IRType::F64) {
+                                    std::string addrReg = "r11";
+                                    if (isMem(ptr)) addText("    mov r11, " + ptr); else addrReg = ptr;
+                                    if (instr.args.size() > 2) addText("    add " + addrReg + ", " + getOperand(instr.args[2]));
+                                    if (isMem(val)) addText("    movsd xmm0, " + val);
+                                    addText("    movsd qword [" + addrReg + "], " + (isMem(val) ? "xmm0" : val));
+                                    break;
+                                } else {
                                 std::string sizePrefix = "qword ";
                                 if (t == IRType::I8 || t == IRType::U8) sizePrefix = "byte ";
                                 else if (t == IRType::I16 || t == IRType::U16) sizePrefix = "word ";
@@ -593,6 +752,7 @@ namespace Cider {
                                         }
                                     }
                                     addText("    mov " + sizePrefix + "[" + addrReg + "], " + getSizedReg("rax", t));
+                                }
                                 }
                                 break;
                             }
@@ -679,7 +839,15 @@ namespace Cider {
                                 }
                                 for (auto it = toSave.rbegin(); it != toSave.rend(); ++it) addText("    pop " + *it);
                                 if (padding > 0) addText("    add rsp, " + std::to_string(padding));
-                                if (instr.dest && !d.empty() && d != "none") addText("    mov " + getSizedReg(d, instr.dest->type) + ", " + getSizedReg("rax", instr.dest->type));
+                                if (instr.dest && !d.empty() && d != "none") {
+                                    IRType retType = instr.dest->type;
+                                    if (retType == IRType::F32)
+                                        addText("    movss " + d + ", xmm0");
+                                    else if (retType == IRType::F64)
+                                        addText("    movsd " + d + ", xmm0");
+                                    else
+                                        addText("    mov " + getSizedReg(d, retType) + ", " + getSizedReg("rax", retType));
+                                }
                                 break;
                             }
                             case IROp::PUSH: {

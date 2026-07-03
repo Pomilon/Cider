@@ -36,6 +36,8 @@ namespace Cider {
             case IROp::CALL: ss << "call "; break;
             case IROp::VIRTUAL_CALL: ss << "vcall "; break;
             case IROp::RET: ss << "ret "; break;            case IROp::PHI: ss << "phi "; break;
+            case IROp::CVT_ITOF: ss << "cvt_itof "; break;
+            case IROp::CVT_FTOI: ss << "cvt_ftoi "; break;
             case IROp::ASM: ss << "asm "; break;
         }
 

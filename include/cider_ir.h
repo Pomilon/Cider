@@ -50,6 +50,7 @@ namespace Cider {
         PUSH, POP,
         BR, COND_BR,
         CALL, VIRTUAL_CALL, RET,
+        CVT_ITOF, CVT_FTOI,
         PHI, ASM
     };
 
