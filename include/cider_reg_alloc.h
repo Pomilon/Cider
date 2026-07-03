@@ -34,65 +34,162 @@ namespace Cider {
     public:
         std::map<std::string, AllocationResult> allocate(FunctionIR& func, int& finalStackSize) {
             std::map<std::string, AllocationResult> allocation;
-            std::map<std::string, LiveInterval> intervals;
-            int index = 0;
 
-            // First pass: build initial live intervals
-            for (auto& block : func.getBlocks()) {
-                for (auto& instr : block->getInstructions()) {
-                    if (instr.dest && instr.dest->kind == IRValue::REGISTER) {
-                        updateInterval(intervals, instr.dest->name, index, instr.dest->type);
+            int numBlocks = (int)func.getBlocks().size();
+            if (numBlocks == 0) {
+                finalStackSize = 0;
+                return allocation;
+            }
+
+            // Map block name to index
+            std::map<std::string, int> blockIndex;
+            for (int i = 0; i < numBlocks; i++) {
+                blockIndex[func.getBlocks()[i]->getName()] = i;
+            }
+
+            // Build successor lists
+            std::vector<std::vector<int>> successors(numBlocks);
+            for (int b = 0; b < numBlocks; b++) {
+                auto& instrs = func.getBlocks()[b]->getInstructions();
+                for (auto& instr : instrs) {
+                    if (instr.op == IROp::BR) {
+                        if (!instr.args.empty() && instr.args[0].kind == IRValue::LABEL) {
+                            auto it = blockIndex.find(instr.args[0].name);
+                            if (it != blockIndex.end()) {
+                                successors[b].push_back(it->second);
+                            }
+                        }
+                    } else if (instr.op == IROp::COND_BR) {
+                        if (instr.args.size() > 1 && instr.args[1].kind == IRValue::LABEL) {
+                            auto it = blockIndex.find(instr.args[1].name);
+                            if (it != blockIndex.end()) {
+                                successors[b].push_back(it->second);
+                            }
+                        }
+                        if (instr.args.size() > 2 && instr.args[2].kind == IRValue::LABEL) {
+                            auto it = blockIndex.find(instr.args[2].name);
+                            if (it != blockIndex.end()) {
+                                successors[b].push_back(it->second);
+                            }
+                        }
                     }
+                }
+            }
+
+            // Track register types
+            std::map<std::string, bool> isFloat;
+
+            // Compute USE[b] and DEF[b]
+            std::vector<std::set<std::string>> USE(numBlocks);
+            std::vector<std::set<std::string>> DEF(numBlocks);
+
+            for (int b = 0; b < numBlocks; b++) {
+                std::set<std::string> definedInBlock;
+                auto& instrs = func.getBlocks()[b]->getInstructions();
+                for (auto& instr : instrs) {
                     for (auto& arg : instr.args) {
                         if (arg.kind == IRValue::REGISTER) {
-                            updateInterval(intervals, arg.name, index, arg.type);
+                            if (definedInBlock.find(arg.name) == definedInBlock.end()) {
+                                USE[b].insert(arg.name);
+                            }
+                            isFloat[arg.name] = (arg.type == IRType::F32 || arg.type == IRType::F64);
                         }
                     }
                     for (auto& pair : instr.asmMap) {
                         if (pair.second.kind == IRValue::REGISTER) {
-                            updateInterval(intervals, pair.second.name, index, pair.second.type);
-                        }
-                    }
-                    index++;
-                }
-            }
-
-            // Second pass: detect back-edges (loops) and extend intervals across them
-            index = 0;
-            std::map<std::string, int> labelToIndex;
-            for (auto& block : func.getBlocks()) {
-                labelToIndex[block->getName()] = index;
-                index += (int)block->getInstructions().size();
-            }
-            index = 0;
-            for (auto& block : func.getBlocks()) {
-                for (auto& instr : block->getInstructions()) {
-                    if (instr.op == IROp::BR || instr.op == IROp::COND_BR) {
-                        for (auto& arg : instr.args) {
-                            if (arg.kind == IRValue::LABEL) {
-                                auto it = labelToIndex.find(arg.name);
-                                if (it != labelToIndex.end() && it->second < index) {
-                                    // Backward branch: extend intervals live across loop boundary
-                                    for (auto& pair : intervals) {
-                                        if (pair.second.start < index && pair.second.end >= it->second) {
-                                            pair.second.end = index + 1;
-                                        }
-                                    }
-                                }
+                            if (definedInBlock.find(pair.second.name) == definedInBlock.end()) {
+                                USE[b].insert(pair.second.name);
                             }
+                            isFloat[pair.second.name] = (pair.second.type == IRType::F32 || pair.second.type == IRType::F64);
                         }
                     }
-                    index++;
+                    for (auto& [phiBlock, val] : instr.phiArgs) {
+                        if (val.kind == IRValue::REGISTER) {
+                            if (definedInBlock.find(val.name) == definedInBlock.end()) {
+                                USE[b].insert(val.name);
+                            }
+                            isFloat[val.name] = (val.type == IRType::F32 || val.type == IRType::F64);
+                        }
+                    }
+                    if (instr.dest && instr.dest->kind == IRValue::REGISTER) {
+                        DEF[b].insert(instr.dest->name);
+                        definedInBlock.insert(instr.dest->name);
+                        isFloat[instr.dest->name] = (instr.dest->type == IRType::F32 || instr.dest->type == IRType::F64);
+                    }
                 }
             }
 
+            // Solve data-flow equations
+            std::vector<std::set<std::string>> LIVE_IN(numBlocks);
+            std::vector<std::set<std::string>> LIVE_OUT(numBlocks);
+
+            for (int b = 0; b < numBlocks; b++) {
+                LIVE_IN[b] = USE[b];
+            }
+
+            bool changed = true;
+            while (changed) {
+                changed = false;
+                for (int b = 0; b < numBlocks; b++) {
+                    std::set<std::string> newOut;
+                    for (int s : successors[b]) {
+                        newOut.insert(LIVE_IN[s].begin(), LIVE_IN[s].end());
+                    }
+                    if (newOut != LIVE_OUT[b]) {
+                        changed = true;
+                        LIVE_OUT[b] = newOut;
+                    }
+
+                    std::set<std::string> newIn = USE[b];
+                    for (auto& v : LIVE_OUT[b]) {
+                        if (DEF[b].find(v) == DEF[b].end()) {
+                            newIn.insert(v);
+                        }
+                    }
+                    if (newIn != LIVE_IN[b]) {
+                        changed = true;
+                        LIVE_IN[b] = newIn;
+                    }
+                }
+            }
+
+            // Build intervals from liveness
+            std::map<std::string, std::set<int>> blocksForReg;
+            for (int b = 0; b < numBlocks; b++) {
+                for (auto& v : USE[b]) blocksForReg[v].insert(b);
+                for (auto& v : DEF[b]) blocksForReg[v].insert(b);
+                for (auto& v : LIVE_IN[b]) blocksForReg[v].insert(b);
+                for (auto& v : LIVE_OUT[b]) blocksForReg[v].insert(b);
+            }
+
+            std::map<std::string, LiveInterval> intervals;
+            for (auto& pair : blocksForReg) {
+                int firstBlock = *pair.second.begin();
+                int lastBlock = *pair.second.rbegin();
+                intervals[pair.first] = {pair.first, firstBlock, lastBlock, isFloat[pair.first]};
+            }
+
+            // Extend LOAD address register intervals
+            for (int b = 0; b < numBlocks; b++) {
+                auto& instrs = func.getBlocks()[b]->getInstructions();
+                for (auto& instr : instrs) {
+                    if (instr.op == IROp::LOAD && !instr.args.empty() && instr.args[0].kind == IRValue::REGISTER) {
+                        std::string addrReg = instr.args[0].name;
+                        auto it = intervals.find(addrReg);
+                        if (it != intervals.end()) {
+                            it->second.end = std::max(it->second.end, std::min(b + 1, numBlocks - 1));
+                        }
+                    }
+                }
+            }
+
+            // Linear scan using block indices
             std::vector<LiveInterval> unhandled;
             for (auto& pair : intervals) {
                 unhandled.push_back(pair.second);
             }
             std::sort(unhandled.begin(), unhandled.end());
 
-            // Callee-saved registers only (preserved across calls, avoids ASM sizing issues)
             std::vector<std::string> freeIntRegs = {"rbx", "r12", "r13", "r14", "r15"};
             std::vector<std::string> freeFloatRegs = {"xmm8", "xmm9", "xmm10", "xmm11", "xmm12", "xmm13", "xmm14", "xmm15"};
 
@@ -100,7 +197,6 @@ namespace Cider {
             int currentStackOffset = 0;
 
             for (auto& interval : unhandled) {
-                // Expire old intervals
                 for (auto it = active.begin(); it != active.end(); ) {
                     if (it->end < interval.start) {
                         auto& res = allocation[it->varName];
@@ -128,15 +224,6 @@ namespace Cider {
 
             finalStackSize = currentStackOffset;
             return allocation;
-        }
-
-    private:
-        void updateInterval(std::map<std::string, LiveInterval>& intervals, const std::string& name, int index, IRType type) {
-            if (intervals.find(name) == intervals.end()) {
-                intervals[name] = {name, index, index, type == IRType::F32 || type == IRType::F64};
-            } else {
-                intervals[name].end = index;
-            }
         }
     };
 
