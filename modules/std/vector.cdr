@@ -1,0 +1,120 @@
+from std.alloc import malloc, free;
+from std.string import memcpy;
+
+export struct Vec<T> {
+    var data: *T;
+    var len: int;
+    var cap: int;
+}
+
+const INITIAL_CAP: int = 8;
+
+export func new_vec<T>() -> Vec<T> {
+    var v: Vec<T>;
+    v.data = nilPtr;
+    v.len = 0;
+    v.cap = 0;
+    return v;
+}
+
+func grow<T>(v: *Vec<T>) -> void {
+    var new_cap: int = v.cap * 2;
+    if (new_cap < INITIAL_CAP) {
+        new_cap = INITIAL_CAP;
+    }
+    var elem_size: int = sizeof(T);
+    var new_data: *T = malloc(new_cap * elem_size) as *T;
+    if (v.data != nilPtr) {
+        memcpy(new_data as *void, v.data as *void, v.len * elem_size);
+        free(v.data as *void);
+    }
+    v.data = new_data;
+    v.cap = new_cap;
+}
+
+export func push<T>(v: *Vec<T>, val: T) -> void {
+    if (v.len >= v.cap) {
+        grow<T>(v);
+    }
+    v.data[v.len] = val;
+    v.len = v.len + 1;
+}
+
+export func pop<T>(v: *Vec<T>) -> T {
+    if (v.len <= 0) {
+        var zero: T;
+        return zero;
+    }
+    v.len = v.len - 1;
+    return v.data[v.len];
+}
+
+export func get<T>(v: *Vec<T>, i: int) -> *T {
+    if (i < 0 || i >= v.len) {
+        return nilPtr;
+    }
+    return &v.data[i];
+}
+
+export func len_vec<T>(v: *Vec<T>) -> int {
+    return v.len;
+}
+
+export func cap_vec<T>(v: *Vec<T>) -> int {
+    return v.cap;
+}
+
+export func reserve<T>(v: *Vec<T>, n: int) -> void {
+    if (n > v.cap) {
+        var elem_size: int = sizeof(T);
+        var new_data: *T = malloc(n * elem_size) as *T;
+        if (v.data != nilPtr) {
+            memcpy(new_data as *void, v.data as *void, v.len * elem_size);
+            free(v.data as *void);
+        }
+        v.data = new_data;
+        v.cap = n;
+    }
+}
+
+export func insert<T>(v: *Vec<T>, i: int, val: T) -> void {
+    if (i < 0 || i > v.len) return;
+    if (v.len >= v.cap) {
+        grow<T>(v);
+    }
+    var j: int = v.len;
+    while (j > i) {
+        v.data[j] = v.data[j - 1];
+        j = j - 1;
+    }
+    v.data[i] = val;
+    v.len = v.len + 1;
+}
+
+export func remove<T>(v: *Vec<T>, i: int) -> T {
+    if (i < 0 || i >= v.len) {
+        var zero: T;
+        return zero;
+    }
+    var val: T = v.data[i];
+    var j: int = i;
+    while (j < v.len - 1) {
+        v.data[j] = v.data[j + 1];
+        j = j + 1;
+    }
+    v.len = v.len - 1;
+    return val;
+}
+
+export func clear<T>(v: *Vec<T>) -> void {
+    v.len = 0;
+}
+
+export func free_vec<T>(v: *Vec<T>) -> void {
+    if (v.data != nilPtr) {
+        free(v.data as *void);
+        v.data = nilPtr;
+    }
+    v.len = 0;
+    v.cap = 0;
+}

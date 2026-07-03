@@ -22,12 +22,13 @@ namespace Cider {
             currentProgram_ = &program;
             program.accept(*this);
             // Post-processing: scan for function template call instantiations
-            for (auto& stmt : program.getStatements()) {
-                visitStmtForTemplateCalls(stmt.get());
+            // Use index-based loop to avoid iterator invalidation from addStatement
+            for (size_t si = 0; si < program.getStatements().size(); si++) {
+                visitStmtForTemplateCalls(program.getStatements()[si].get());
             }
             for (auto& imported : program.getImportedAsts()) {
-                for (auto& stmt : imported->getStatements()) {
-                    visitStmtForTemplateCalls(stmt.get());
+                for (size_t si = 0; si < imported->getStatements().size(); si++) {
+                    visitStmtForTemplateCalls(imported->getStatements()[si].get());
                 }
             }
         }
@@ -894,6 +895,17 @@ namespace Cider {
                         std::move(clonedThen), std::move(clonedElse),
                         is->getLine(), is->getColumn());
                 }
+                case ASTNode::WHILE_STMT: {
+                    auto ws = dynamic_cast<WhileStmt*>(stmt);
+                    std::vector<std::unique_ptr<Statement>> clonedBody;
+                    for (auto& s : ws->getBody()) {
+                        clonedBody.push_back(cloneStmtWithSubst(s.get(), tmplParams, tmplArgs));
+                    }
+                    return std::make_unique<WhileStmt>(
+                        cloneExprWithSubst(ws->getCondition(), tmplParams, tmplArgs),
+                        std::move(clonedBody),
+                        ws->getLine(), ws->getColumn());
+                }
                 default:
                     return nullptr;
             }
@@ -906,7 +918,7 @@ namespace Cider {
             switch (expr->getType()) {
                 case ASTNode::IDENTIFIER_EXPR:
                     return std::make_unique<IdentifierExpr>(
-                        dynamic_cast<IdentifierExpr*>(expr)->getName(),
+                        substituteTypeName(dynamic_cast<IdentifierExpr*>(expr)->getName(), tmplParams, tmplArgs),
                         expr->getLine(), expr->getColumn());
                 case ASTNode::NUMBER_EXPR:
                     return std::make_unique<NumberExpr>(
@@ -969,6 +981,32 @@ namespace Cider {
                         ma->getMember(),
                         ma->getLine(), ma->getColumn(),
                         ma->isArrow());
+                }
+                case ASTNode::NIL_EXPR:
+                    return std::make_unique<NilExpr>(expr->getLine(), expr->getColumn());
+                case ASTNode::NIL_PTR_EXPR:
+                    return std::make_unique<NilPtrExpr>(expr->getLine(), expr->getColumn());
+                case ASTNode::THIS_EXPR:
+                    return std::make_unique<ThisExpr>(expr->getLine(), expr->getColumn());
+                case ASTNode::SIZEOF_EXPR: {
+                    auto se = dynamic_cast<SizeofExpr*>(expr);
+                    return std::make_unique<SizeofExpr>(
+                        cloneTypeWithSubst(se->getTargetType(), tmplParams, tmplArgs),
+                        se->getLine(), se->getColumn());
+                }
+                case ASTNode::CAST_EXPR: {
+                    auto ce = dynamic_cast<CastExpr*>(expr);
+                    return std::make_unique<CastExpr>(
+                        cloneExprWithSubst(ce->getExpression(), tmplParams, tmplArgs),
+                        cloneTypeWithSubst(ce->getTargetType(), tmplParams, tmplArgs),
+                        ce->getLine(), ce->getColumn());
+                }
+                case ASTNode::INDEX_EXPR: {
+                    auto ie = dynamic_cast<IndexExpr*>(expr);
+                    return std::make_unique<IndexExpr>(
+                        cloneExprWithSubst(ie->getObject(), tmplParams, tmplArgs),
+                        cloneExprWithSubst(ie->getIndex(), tmplParams, tmplArgs),
+                        ie->getLine(), ie->getColumn());
                 }
                 default:
                     return nullptr;
@@ -1076,6 +1114,9 @@ namespace Cider {
 
             // Process the cloned function through SymbolCollector
             visit(*rawPtr);
+
+            // Recursively process template calls in the cloned body
+            visitStmtForTemplateCalls(rawPtr);
 
             // Add to program for IR generator
             currentProgram_->addStatement(std::move(clonedFunc));

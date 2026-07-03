@@ -1919,7 +1919,8 @@ namespace Cider
             nextToken();
         }
 
-        if (currentToken_.type != TokenType::IDENTIFIER)
+        if (currentToken_.type != TokenType::IDENTIFIER &&
+            !isTypeToken(currentToken_.type))
         {
             error("Expected module name.");
             return nullptr;
@@ -1931,7 +1932,8 @@ namespace Cider
         {
             moduleName += ".";
             nextToken();
-            if (currentToken_.type != TokenType::IDENTIFIER)
+            if (currentToken_.type != TokenType::IDENTIFIER &&
+                !isTypeToken(currentToken_.type))
             {
                 error("Expected identifier after '.' in module name.");
                 return nullptr;
@@ -1962,7 +1964,8 @@ namespace Cider
             nextToken();
         }
 
-        if (currentToken_.type != TokenType::IDENTIFIER)
+        if (currentToken_.type != TokenType::IDENTIFIER &&
+            !isTypeToken(currentToken_.type))
         {
             error("Expected module name.");
             return nullptr;
@@ -1974,7 +1977,8 @@ namespace Cider
         {
             moduleName += ".";
             nextToken();
-            if (currentToken_.type != TokenType::IDENTIFIER)
+            if (currentToken_.type != TokenType::IDENTIFIER &&
+                !isTypeToken(currentToken_.type))
             {
                 error("Expected identifier after '.' in module name.");
                 return nullptr;
