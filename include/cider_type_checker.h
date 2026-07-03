@@ -203,7 +203,10 @@ namespace Cider {
             bool isPtrMath = (leftType.pointerLevel > 0 && isInteger(rightType.name)) ||
                              (rightType.pointerLevel > 0 && isInteger(leftType.name) && op == "+");
 
-            if (!areTypesCompatible(leftType, rightType) && !isPtrMath) {
+            bool isMixedNumeric = (isInteger(leftType.name) && rightType.name == "float") ||
+                                  (leftType.name == "float" && isInteger(rightType.name));
+
+            if (!areTypesCompatible(leftType, rightType) && !isPtrMath && !isMixedNumeric) {
                 error("Type mismatch in binary expression '" + expr.getOperator() + 
                       "'. " + leftType.toString() + " vs " + rightType.toString(), expr.getLine());
             }
@@ -212,6 +215,8 @@ namespace Cider {
                 lastExprType_ = {"bool", 0};
             } else if (isPtrMath) {
                 lastExprType_ = (leftType.pointerLevel > 0) ? leftType : rightType;
+            } else if (isMixedNumeric) {
+                lastExprType_ = {"float", 0};
             } else if (op == "|" || op == "&" || op == "^" || op == "<<" || op == ">>") {
                 TypeInfo resolved = resolveType(leftType);
                 if ((resolved.name != "int" && resolved.name.find('u') != 0 && resolved.name.find('i') != 0) || resolved.pointerLevel > 0) {

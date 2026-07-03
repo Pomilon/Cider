@@ -56,6 +56,79 @@ export func memset(ptr: *void, val: u8, num: int) -> *void {
     return ptr;
 }
 
+export func to_upper(s: char*) -> char* {
+    var p: char* = s;
+    while (*p != 0 as char) {
+        if (*p >= 97 && *p <= 122) { // 'a' to 'z'
+            *p = (*p - 32);
+        }
+        p = p + 1;
+    }
+    return s;
+}
+
+export func to_lower(s: char*) -> char* {
+    var p: char* = s;
+    while (*p != 0 as char) {
+        if (*p >= 65 && *p <= 90) { // 'A' to 'Z'
+            *p = (*p + 32);
+        }
+        p = p + 1;
+    }
+    return s;
+}
+
+export func trim(s: char*) -> char* {
+    var start: char* = s;
+    while (*start == 32 as char || *start == 9 as char || *start == 10 as char || *start == 13 as char) {
+        start = start + 1;
+    }
+    var end: char* = start;
+    while (*end != 0 as char) end = end + 1;
+    end = end - 1;
+    while (end >= start && (*end == 32 as char || *end == 9 as char || *end == 10 as char || *end == 13 as char)) {
+        *end = 0 as char;
+        end = end - 1;
+    }
+    return start;
+}
+
+export func parse_int(s: char*) -> int {
+    var p: char* = s;
+    var sign: int = 1;
+    var result: int = 0;
+    if (*p == 45 as char) { sign = -1; p = p + 1; } // '-'
+    else if (*p == 43 as char) { p = p + 1; } // '+'
+    while (*p >= 48 as char && *p <= 57 as char) { // '0' to '9'
+        result = result * 10 + (*p as int - 48);
+        p = p + 1;
+    }
+    return result * sign;
+}
+
+export func parse_float(s: char*) -> float {
+    var p: char* = s;
+    var sign: float = 1.0;
+    if (*p == 45 as char) { sign = -1.0; p = p + 1; }
+    else if (*p == 43 as char) { p = p + 1; }
+    var int_part: int = 0;
+    while (*p >= 48 as char && *p <= 57 as char) {
+        int_part = int_part * 10 + (*p as int - 48);
+        p = p + 1;
+    }
+    var frac_part: float = 0.0;
+    var divisor: float = 10.0;
+    if (*p == 46 as char) { // '.'
+        p = p + 1;
+        while (*p >= 48 as char && *p <= 57 as char) {
+            frac_part = frac_part + (*p as int - 48) / divisor;
+            divisor = divisor * 10.0;
+            p = p + 1;
+        }
+    }
+    return (int_part as float + frac_part) * sign;
+}
+
 export func memcpy(dst: *void, src: *void, num: int) -> *void {
     var d: u8* = dst as u8*;
     var s: u8* = src as u8*;

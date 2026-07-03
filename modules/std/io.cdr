@@ -63,6 +63,54 @@ export func printInt(n: int) -> void {
     }
 }
 
+export func read_stdin(buf: *void, count: int) -> int {
+    var result: int = 0;
+    asm {
+        "mov rax, 0\n"
+        "mov rdi, 0\n"
+        "mov rsi, {buf}\n"
+        "movsxd rdx, {count}\n"
+        "syscall\n"
+        "mov {result}, rax\n"
+    }
+    return result;
+}
+
+export func read_line() -> string {
+    var buf: [char; 4096];
+    var n: int = read_stdin(buf as *void, 4096);
+    if (n <= 0) { return ""; }
+    var i: int = 0;
+    while (i < n) {
+        if (buf[i] == 10 as char) {
+            buf[i] = 0 as char;
+            return buf as string;
+        }
+        i = i + 1;
+    }
+    if (n < 4096) {
+        buf[n] = 0 as char;
+    }
+    return buf as string;
+}
+
+export func read_all() -> string {
+    var buf: [char; 4096];
+    var total: int = 0;
+    while (total < 4096) {
+        var ptr: *void = (buf as *void) + total;
+        var n: int = read_stdin(ptr, 4096 - total);
+        if (n <= 0) break;
+        total = total + n;
+    }
+    if (total < 4096) {
+        buf[total] = 0 as char;
+    } else {
+        buf[4095] = 0 as char;
+    }
+    return buf as string;
+}
+
 export func exit(code: int) -> void {
     asm {
         "mov rax, 60\n"

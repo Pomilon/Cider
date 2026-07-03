@@ -75,7 +75,11 @@ namespace Cider {
                         for (auto& arg : instr.args) {
                             if (arg.kind == IRValue::CONSTANT && arg.type == IRType::PTR && arg.name.front() == '"') {
                                 std::string label = "str" + std::to_string(strCount++);
-                                addData(label + ": db " + sanitizeString(arg.name) + ", 0");
+                                std::string sanitized = sanitizeString(arg.name);
+                                if (sanitized.empty())
+                                    addData(label + ": db 0");
+                                else
+                                    addData(label + ": db " + sanitized + ", 0");
                                 arg.name = label;
                                 arg.kind = IRValue::LABEL;
                             }
