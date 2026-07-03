@@ -110,6 +110,31 @@ namespace Cider
             {
                 program->addStatement(std::move(stmt));
             }
+            else if (reporter_.hasErrors())
+            {
+                // Error recovery: skip to next sync token
+                while (currentToken_.type != TokenType::END_OF_FILE &&
+                       currentToken_.type != TokenType::SEMICOLON &&
+                       currentToken_.type != TokenType::RBRACE &&
+                       currentToken_.type != TokenType::FUNCTION &&
+                       currentToken_.type != TokenType::FUNC &&
+                       currentToken_.type != TokenType::VAR &&
+                       currentToken_.type != TokenType::IF &&
+                       currentToken_.type != TokenType::WHILE &&
+                       currentToken_.type != TokenType::FOR &&
+                       currentToken_.type != TokenType::RETURN &&
+                       currentToken_.type != TokenType::CLASS &&
+                       currentToken_.type != TokenType::STRUCT &&
+                       currentToken_.type != TokenType::ENUM &&
+                       currentToken_.type != TokenType::IMPORT &&
+                       currentToken_.type != TokenType::FROM &&
+                       currentToken_.type != TokenType::EXPORT &&
+                       currentToken_.type != TokenType::INTERFACE) {
+                    nextToken();
+                }
+                if (currentToken_.type == TokenType::SEMICOLON) nextToken();
+                if (currentToken_.type == TokenType::RBRACE) break;
+            }
             else
             {
                 nextToken();
