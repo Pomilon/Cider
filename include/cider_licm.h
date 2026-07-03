@@ -92,7 +92,7 @@ bool SSALicmPass::hoistLoop(FunctionIR& func, const Loop& loop, const std::strin
                 if (instr.op == IROp::STORE || instr.op == IROp::CALL ||
                     instr.op == IROp::VIRTUAL_CALL || instr.op == IROp::RET ||
                     instr.op == IROp::COND_BR || instr.op == IROp::BR ||
-                    instr.op == IROp::ASM || instr.op == IROp::LOAD ||
+                    instr.op == IROp::ASM ||
                     instr.op == IROp::PHI) continue;
 
                 bool allInvariant = true;
@@ -239,7 +239,7 @@ bool PostLicmPass::hoistLoop(FunctionIR& func, const Loop& loop, const std::stri
                 if (instr.op == IROp::STORE || instr.op == IROp::CALL ||
                     instr.op == IROp::VIRTUAL_CALL || instr.op == IROp::RET ||
                     instr.op == IROp::COND_BR || instr.op == IROp::BR ||
-                    instr.op == IROp::ASM || instr.op == IROp::LOAD ||
+                    instr.op == IROp::ASM ||
                     instr.op == IROp::PHI || instr.op == IROp::PUSH ||
                     instr.op == IROp::POP) continue;
 
