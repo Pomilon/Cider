@@ -32,8 +32,7 @@ export func print(msg: string) -> void {
 
 export func puts(msg: string) -> void {
     print(msg);
-    var nl: string = "\n";
-    print(nl);
+    print("\n");
 }
 
 export func printInt(n: int) -> void {

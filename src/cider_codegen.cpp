@@ -199,6 +199,15 @@ namespace Cider {
                     }
                 };
 
+                auto pushArg = [&](const IRValue& arg) {
+                    if (arg.kind == IRValue::LABEL) {
+                        addText("    mov rax, " + arg.name);
+                        addText("    push rax");
+                    } else {
+                        addText("    push " + getOperand(arg));
+                    }
+                };
+
                 auto getSizedReg = [](const std::string& reg, IRType t) -> std::string {
                     if (reg == "none") return reg;
                     if (reg.size() >= 3 && reg[0] == 'x' && reg[1] == 'm' && reg[2] == 'm') return reg;
@@ -788,11 +797,11 @@ namespace Cider {
                                         // Push extra stack args (args 7+) in reverse order
                                         size_t numArgs = instr.args.size() - 1;
                                         for (size_t i = numArgs; i > 6; --i) {
-                                            addText("    push " + getOperand(instr.args[i]));
+                                            pushArg(instr.args[i]);
                                         }
                                         // Push first 6 args, pop into registers
                                         for (size_t i = 1; i <= numArgs && i <= 6; ++i) {
-                                            addText("    push " + getOperand(instr.args[i]));
+                                            pushArg(instr.args[i]);
                                         }
                                         for (int i = std::min((int)numArgs, 6) - 1; i >= 0; --i) {
                                             addText("    pop " + argRegs[i]);
@@ -808,10 +817,10 @@ namespace Cider {
                                         addText("    mov r11, " + target);
                                         size_t numArgs = instr.args.size() - 1;
                                         for (size_t i = numArgs; i > 6; --i) {
-                                            addText("    push " + getOperand(instr.args[i]));
+                                            pushArg(instr.args[i]);
                                         }
                                         for (size_t i = 1; i <= numArgs && i <= 6; ++i) {
-                                            addText("    push " + getOperand(instr.args[i]));
+                                            pushArg(instr.args[i]);
                                         }
                                         for (int i = std::min((int)numArgs, 6) - 1; i >= 0; --i) {
                                             addText("    pop " + argRegs[i]);
