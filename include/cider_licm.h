@@ -77,15 +77,17 @@ bool SSALicmPass::hoistLoop(FunctionIR& func, const Loop& loop, const std::strin
     }
 
     std::vector<const IRInstruction*> invariantInstrs;
-    std::set<const IRInstruction*> invariantSet;
+    std::set<std::pair<std::string, size_t>> invariantInsts;
     bool changed = true;
 
     while (changed) {
         changed = false;
         for (const auto& b : func.getBlocks()) {
             if (loopBlocks.find(b->getName()) == loopBlocks.end()) continue;
-            for (const auto& instr : b->getInstructions()) {
-                if (invariantSet.find(&instr) != invariantSet.end()) continue;
+            const auto& instrs = b->getInstructions();
+            for (size_t ii = 0; ii < instrs.size(); ++ii) {
+                const auto& instr = instrs[ii];
+                if (invariantInsts.find({b->getName(), ii}) != invariantInsts.end()) continue;
 
                 if (instr.op == IROp::STORE || instr.op == IROp::CALL ||
                     instr.op == IROp::VIRTUAL_CALL || instr.op == IROp::RET ||
@@ -110,7 +112,7 @@ bool SSALicmPass::hoistLoop(FunctionIR& func, const Loop& loop, const std::strin
                 }
 
                 if (allInvariant) {
-                    invariantSet.insert(&instr);
+                    invariantInsts.insert({b->getName(), ii});
                     invariantInstrs.push_back(&instr);
                     if (instr.dest && instr.dest->kind == IRValue::REGISTER) {
                         invariantRegs.insert(instr.dest->name);
@@ -140,13 +142,14 @@ bool SSALicmPass::hoistLoop(FunctionIR& func, const Loop& loop, const std::strin
     for (auto& b : func.getBlocks()) {
         if (loopBlocks.find(b->getName()) == loopBlocks.end()) continue;
         auto& instrs = b->getInstructions();
-        auto it = instrs.begin();
-        while (it != instrs.end()) {
-            if (invariantSet.find(&(*it)) != invariantSet.end()) {
-                it = instrs.erase(it);
-            } else {
-                ++it;
+        std::vector<size_t> toRemove;
+        for (size_t ii = 0; ii < instrs.size(); ++ii) {
+            if (invariantInsts.find({b->getName(), ii}) != invariantInsts.end()) {
+                toRemove.push_back(ii);
             }
+        }
+        for (auto ri = toRemove.rbegin(); ri != toRemove.rend(); ++ri) {
+            instrs.erase(instrs.begin() + *ri);
         }
     }
 
@@ -220,15 +223,17 @@ bool PostLicmPass::hoistLoop(FunctionIR& func, const Loop& loop, const std::stri
     }
 
     std::vector<const IRInstruction*> invariantInstrs;
-    std::set<const IRInstruction*> invariantSet;
+    std::set<std::pair<std::string, size_t>> invariantInsts;
     bool changed = true;
 
     while (changed) {
         changed = false;
         for (const auto& b : func.getBlocks()) {
             if (loopBlocks.find(b->getName()) == loopBlocks.end()) continue;
-            for (const auto& instr : b->getInstructions()) {
-                if (invariantSet.find(&instr) != invariantSet.end()) continue;
+            const auto& instrs = b->getInstructions();
+            for (size_t ii = 0; ii < instrs.size(); ++ii) {
+                const auto& instr = instrs[ii];
+                if (invariantInsts.find({b->getName(), ii}) != invariantInsts.end()) continue;
 
                 // Post-deconstruction: exclude same ops as SSA mode plus PUSH, POP.
                 if (instr.op == IROp::STORE || instr.op == IROp::CALL ||
@@ -255,7 +260,7 @@ bool PostLicmPass::hoistLoop(FunctionIR& func, const Loop& loop, const std::stri
                 }
 
                 if (allInvariant) {
-                    invariantSet.insert(&instr);
+                    invariantInsts.insert({b->getName(), ii});
                     invariantInstrs.push_back(&instr);
                     if (instr.dest && instr.dest->kind == IRValue::REGISTER) {
                         invariantRegs.insert(instr.dest->name);
@@ -288,13 +293,14 @@ bool PostLicmPass::hoistLoop(FunctionIR& func, const Loop& loop, const std::stri
     for (auto& b : func.getBlocks()) {
         if (loopBlocks.find(b->getName()) == loopBlocks.end()) continue;
         auto& instrs = b->getInstructions();
-        auto it = instrs.begin();
-        while (it != instrs.end()) {
-            if (invariantSet.find(&(*it)) != invariantSet.end()) {
-                it = instrs.erase(it);
-            } else {
-                ++it;
+        std::vector<size_t> toRemove;
+        for (size_t ii = 0; ii < instrs.size(); ++ii) {
+            if (invariantInsts.find({b->getName(), ii}) != invariantInsts.end()) {
+                toRemove.push_back(ii);
             }
+        }
+        for (auto ri = toRemove.rbegin(); ri != toRemove.rend(); ++ri) {
+            instrs.erase(instrs.begin() + *ri);
         }
     }
 
