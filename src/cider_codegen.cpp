@@ -715,17 +715,17 @@ namespace Cider {
                                 if (instr.args[1].kind == IRValue::LABEL) t = IRType::PTR;
                                 if (t == IRType::F32) {
                                     std::string addrReg = "r11";
-                                    if (isMem(ptr)) addText("    mov r11, " + ptr); else addrReg = ptr;
-                                    if (instr.args.size() > 2) addText("    add " + addrReg + ", " + getOperand(instr.args[2]));
+                                    addText("    mov r11, " + ptr);
+                                    if (instr.args.size() > 2) addText("    add r11, " + getOperand(instr.args[2]));
                                     if (isMem(val)) addText("    movss xmm0, " + val);
-                                    addText("    movss dword [" + addrReg + "], " + (isMem(val) ? "xmm0" : val));
+                                    addText("    movss dword [r11], " + (isMem(val) ? "xmm0" : val));
                                     break;
                                 } else if (t == IRType::F64) {
                                     std::string addrReg = "r11";
-                                    if (isMem(ptr)) addText("    mov r11, " + ptr); else addrReg = ptr;
-                                    if (instr.args.size() > 2) addText("    add " + addrReg + ", " + getOperand(instr.args[2]));
+                                    addText("    mov r11, " + ptr);
+                                    if (instr.args.size() > 2) addText("    add r11, " + getOperand(instr.args[2]));
                                     if (isMem(val)) addText("    movsd xmm0, " + val);
-                                    addText("    movsd qword [" + addrReg + "], " + (isMem(val) ? "xmm0" : val));
+                                    addText("    movsd qword [r11], " + (isMem(val) ? "xmm0" : val));
                                     break;
                                 } else {
                                 std::string sizePrefix = "qword ";
@@ -739,12 +739,8 @@ namespace Cider {
                                     else { addText("    mov " + getSizedReg("rax", t) + ", " + getSizedReg(val, t)); addText("    mov " + sizePrefix + "[rel " + instr.args[0].name + "], " + getSizedReg("rax", t)); }
                                 } else {
                                     std::string addrReg = "r11";
-                                    if (isMem(ptr)) {
-                                        addText("    mov r11, " + ptr);
-                                    } else {
-                                        addrReg = ptr;
-                                    }
-                                    if (instr.args.size() > 2) addText("    add " + addrReg + ", " + getOperand(instr.args[2]));
+                                    addText("    mov r11, " + ptr);
+                                    if (instr.args.size() > 2) addText("    add r11, " + getOperand(instr.args[2]));
                                     
                                     if (instr.args[1].kind == IRValue::LABEL) {
                                         addText("    lea rax, [rel " + val + "]");

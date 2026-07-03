@@ -562,7 +562,27 @@ namespace Cider {
         }
         void visit(SuperExpr&) override {}
         void visit(AwaitExpr&) override {}
-        void visit(ListExpr&) override {}
+        void visit(ListExpr& expr) override {
+            auto& elements = expr.getElements();
+            if (elements.empty()) {
+                lastExprType_ = {"void", 1};
+                return;
+            }
+            elements[0]->accept(*this);
+            TypeInfo elemType = lastExprType_;
+            for (size_t i = 1; i < elements.size(); i++) {
+                elements[i]->accept(*this);
+                if (lastExprType_.name != elemType.name ||
+                    lastExprType_.pointerLevel != elemType.pointerLevel) {
+                    error("List element type mismatch: expected " +
+                        elemType.toString() + ", got " + lastExprType_.toString(), expr.getLine());
+                    lastExprType_ = {"error", 0};
+                    return;
+                }
+            }
+            lastExprType_ = elemType;
+            lastExprType_.pointerLevel++;
+        }
         void visit(TableExpr&) override {}
         void visit(IndexExpr& expr) override {
             expr.getObject()->accept(*this);

@@ -374,7 +374,9 @@ namespace Cider {
         void visit(UnaryExpr&) override {}
         void visit(CallExpr&) override {}
         void visit(MemberAccessExpr&) override {}
-        void visit(ListExpr&) override {}
+        void visit(ListExpr& expr) override {
+            for (auto& e : expr.getElements()) e->accept(*this);
+        }
         void visit(TableExpr&) override {}
         void visit(IndexExpr&) override {}
         void visit(SliceExpr&) override {}

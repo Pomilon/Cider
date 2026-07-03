@@ -1622,7 +1622,49 @@ namespace Cider {
                 lastValue_ = IRValue::Constant(0, IRType::PTR);
             }
         }
-        void visit(ListExpr&) override {}
+        void visit(ListExpr& expr) override {
+            if (!currentFunction_) return;
+
+            auto& elements = expr.getElements();
+            if (elements.empty()) {
+                lastValue_ = IRValue::Constant(0, IRType::PTR);
+                lastExprType_ = {"void", 1};
+                return;
+            }
+
+            // Determine element type from first element
+            elements[0]->accept(*this);
+            IRValue firstVal = lastValue_;
+            TypeInfo elemType = lastExprType_;
+            IRType elemIRType = (elemType.pointerLevel > 0) ? IRType::PTR : mapType(elemType.name);
+            int elemSize = getTypeSize(elemType);
+
+            // Allocate stack space for all elements
+            int totalSize = elemSize * (int)elements.size();
+            IRValue addr = IRValue::Register(nextTemp(), IRType::PTR);
+            currentBlock_->addInstruction({IROp::ALLOCA, addr, {IRValue::Constant(totalSize, IRType::I32)}});
+
+            // Store first element
+            currentBlock_->addInstruction({IROp::STORE, std::nullopt, {addr, firstVal, IRValue::Constant(0, IRType::I32)}});
+
+            // Store remaining elements
+            for (size_t i = 1; i < elements.size(); i++) {
+                elements[i]->accept(*this);
+                if (lastExprType_.name != elemType.name ||
+                    lastExprType_.pointerLevel != elemType.pointerLevel) {
+                    lastValue_ = IRValue::Constant(0, IRType::PTR);
+                    lastExprType_ = {"error", 0};
+                    return;
+                }
+                IRValue offset = IRValue::Constant(i * elemSize, IRType::I32);
+                currentBlock_->addInstruction({IROp::STORE, std::nullopt, {addr, lastValue_, offset}});
+            }
+
+            lastValue_ = addr;
+            lastExprType_ = elemType;
+            lastExprType_.pointerLevel++;
+        }
+
         void visit(TableExpr&) override {}
         void visit(SliceExpr& expr) override {
             if (!currentFunction_) return;
