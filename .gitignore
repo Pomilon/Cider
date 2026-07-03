@@ -44,3 +44,6 @@ test/virtual_methods
 # OS files
 .DS_Store
 Thumbs.db
+
+# Worktrees
+.worktrees/
