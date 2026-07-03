@@ -296,13 +296,17 @@ namespace Cider {
         for (const auto& [from, toSet] : successors) {
             for (const std::string& to : toSet) {
                 if (dt.dominates(to, from)) {
-                    if (headerToIdx_.find(to) != headerToIdx_.end()) continue;
-
-                    Loop loop;
-                    loop.header = to;
-                    loop.blocks = findBody(to, from, func, dt);
-                    headerToIdx_[to] = loops_.size();
-                    loops_.push_back(std::move(loop));
+                    auto it = headerToIdx_.find(to);
+                    if (it != headerToIdx_.end()) {
+                        auto additional = findBody(to, from, func, dt);
+                        loops_[it->second].blocks.insert(additional.begin(), additional.end());
+                    } else {
+                        Loop loop;
+                        loop.header = to;
+                        loop.blocks = findBody(to, from, func, dt);
+                        headerToIdx_[to] = loops_.size();
+                        loops_.push_back(std::move(loop));
+                    }
                 }
             }
         }
@@ -320,6 +324,19 @@ namespace Cider {
                     && loops_[i].blocks.find(loops_[j].header) != loops_[i].blocks.end()) {
                     loops_[i].children.push_back(&loops_[j]);
                 }
+            }
+        }
+        for (auto& loop : loops_) {
+            for (auto it = loop.children.begin(); it != loop.children.end(); ) {
+                bool isTransitive = false;
+                for (auto* other : loop.children) {
+                    if (other != *it && other->blocks.find((*it)->header) != other->blocks.end()) {
+                        isTransitive = true;
+                        break;
+                    }
+                }
+                if (isTransitive) it = loop.children.erase(it);
+                else ++it;
             }
         }
     }
@@ -404,13 +421,48 @@ namespace Cider {
 
         if (outsidePreds.empty()) return "";
 
+        auto& blocks = func.getBlocks();
+
+        struct PHIMerge {
+            std::map<std::string, IRValue> entries;
+            std::string tempReg;
+            IRType valType;
+        };
+        std::vector<PHIMerge> merges;
+        for (auto& b : func.getBlocks()) {
+            if (b->getName() != loop.header) continue;
+            for (auto& instr : b->getInstructions()) {
+                if (instr.op == IROp::PHI) {
+                    PHIMerge merge;
+                    for (const auto& [pred, val] : instr.phiArgs) {
+                        if (loop.blocks.find(pred) == loop.blocks.end()) {
+                            merge.entries[pred] = val;
+                        }
+                    }
+                    if (!merge.entries.empty()) {
+                        merge.valType = merge.entries.begin()->second.type;
+                        static int phiCounter = 0;
+                        merge.tempReg = "phi_merge_" + loop.header + "_" + std::to_string(phiCounter++);
+                        merges.push_back(std::move(merge));
+                    }
+                }
+            }
+            break;
+        }
+
         auto preheader = std::make_unique<BasicBlock>(preheaderName);
+        for (auto& merge : merges) {
+            IRInstruction phi;
+            phi.op = IROp::PHI;
+            phi.dest = IRValue::Register(merge.tempReg, merge.valType);
+            phi.phiArgs = merge.entries;
+            preheader->addInstruction(phi);
+        }
         IRInstruction br;
         br.op = IROp::BR;
         br.args.push_back(IRValue::Label(loop.header));
         preheader->addInstruction(br);
 
-        auto& blocks = func.getBlocks();
         auto headerIt = std::find_if(blocks.begin(), blocks.end(),
             [&](const auto& b) { return b->getName() == loop.header; });
         blocks.insert(headerIt, std::move(preheader));
@@ -433,23 +485,16 @@ namespace Cider {
             }
         }
 
-        auto it = std::find_if(blocks.begin(), blocks.end(),
+        headerIt = std::find_if(blocks.begin(), blocks.end(),
             [&](const auto& b) { return b->getName() == loop.header; });
-        for (auto& instr : (*it)->getInstructions()) {
-            if (instr.op == IROp::PHI) {
-                std::set<std::string> outsideSeen;
-                for (const auto& [pred, val] : instr.phiArgs) {
-                    if (loop.blocks.find(pred) == loop.blocks.end()) {
-                        outsideSeen.insert(pred);
-                    }
+        size_t mergeIdx = 0;
+        for (auto& instr : (*headerIt)->getInstructions()) {
+            if (instr.op == IROp::PHI && mergeIdx < merges.size()) {
+                for (const auto& [pred, _] : merges[mergeIdx].entries) {
+                    instr.phiArgs.erase(pred);
                 }
-                if (!outsideSeen.empty()) {
-                    IRValue combined = instr.phiArgs.begin()->second;
-                    for (const auto& pred : outsideSeen) {
-                        instr.phiArgs.erase(pred);
-                    }
-                    instr.phiArgs[preheaderName] = combined;
-                }
+                instr.phiArgs[preheaderName] = IRValue::Register(merges[mergeIdx].tempReg, merges[mergeIdx].valType);
+                ++mergeIdx;
             }
         }
 
