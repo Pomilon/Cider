@@ -1,0 +1,39 @@
+struct Timespec {
+    var sec: i64;
+    var nsec: i64;
+}
+
+export func sleep_ms(ms: int) -> void {
+    var ts: Timespec;
+    ts.sec = (ms / 1000) as i64;
+    ts.nsec = ((ms % 1000) * 1000000) as i64;
+    var rem: Timespec;
+    asm {
+        "mov rax, 35\n"
+        "lea rdi, {ts}\n"
+        "lea rsi, {rem}\n"
+        "syscall\n"
+    }
+}
+
+export func timestamp_ms() -> u64 {
+    var ts: Timespec;
+    asm {
+        "mov rax, 228\n"
+        "mov rdi, 1\n"    // CLOCK_MONOTONIC
+        "lea rsi, {ts}\n"
+        "syscall\n"
+    }
+    return (ts.sec as u64) * 1000 + (ts.nsec as u64) / 1000000;
+}
+
+export func timestamp_us() -> u64 {
+    var ts: Timespec;
+    asm {
+        "mov rax, 228\n"
+        "mov rdi, 1\n"    // CLOCK_MONOTONIC
+        "lea rsi, {ts}\n"
+        "syscall\n"
+    }
+    return (ts.sec as u64) * 1000000 + (ts.nsec as u64) / 1000;
+}
