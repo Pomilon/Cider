@@ -71,7 +71,7 @@ export func read_stdin(buf: *void, count: int) -> int {
         "mov rsi, {buf}\n"
         "movsxd rdx, {count}\n"
         "syscall\n"
-        "mov {result}, rax\n"
+        "mov {result}, eax\n"
     }
     return result;
 }
