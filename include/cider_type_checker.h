@@ -560,7 +560,40 @@ namespace Cider {
                 lastExprType_ = {"error", 0};
             }
         }
-        void visit(SuperExpr&) override {}
+        void visit(SuperExpr& expr) override {
+            if (currentClassName_.empty()) {
+                error("'super' can only be used inside a class", expr.getLine());
+                lastExprType_ = {"error", 0};
+                return;
+            }
+            auto classSym = symbolTable_.resolve(currentClassName_);
+            if (!classSym || classSym->kind != SymbolKind::CLASS) {
+                error("Current class '" + currentClassName_ + "' not found", expr.getLine());
+                lastExprType_ = {"error", 0};
+                return;
+            }
+            auto cs = std::static_pointer_cast<StructSymbol>(classSym);
+            if (cs->parentName.empty()) {
+                error("Class '" + currentClassName_ + "' has no parent class", expr.getLine());
+                lastExprType_ = {"error", 0};
+                return;
+            }
+            auto parentSym = symbolTable_.resolve(cs->parentName);
+            if (!parentSym || (parentSym->kind != SymbolKind::CLASS && parentSym->kind != SymbolKind::STRUCT)) {
+                error("Parent class '" + cs->parentName + "' not found", expr.getLine());
+                lastExprType_ = {"error", 0};
+                return;
+            }
+            auto ps = std::static_pointer_cast<StructSymbol>(parentSym);
+            for (auto& m : ps->methods) {
+                if (m.name == expr.getMember()) {
+                    lastExprType_ = m.returnType;
+                    return;
+                }
+            }
+            error("Method '" + expr.getMember() + "' not found in parent class '" + cs->parentName + "'", expr.getLine());
+            lastExprType_ = {"error", 0};
+        }
         void visit(AwaitExpr&) override {}
         void visit(ListExpr& expr) override {
             auto& elements = expr.getElements();
