@@ -211,6 +211,251 @@ namespace Cider {
         }
     }
 
+    // --- Loop detection ---
+
+    struct Loop {
+        std::string header;
+        std::set<std::string> blocks;
+        std::vector<Loop*> children;
+        std::vector<std::string> exits;
+        int depth = 0;
+    };
+
+    class NaturalLoopFinder {
+    public:
+        void build(const FunctionIR& func, const DominatorTree& dt);
+
+        const std::vector<Loop>& getLoops() const { return loops_; }
+        const Loop* loopForHeader(const std::string& header) const;
+
+        static std::string insertPreheader(FunctionIR& func, const Loop& loop,
+                                           const DominatorTree& dt);
+
+    private:
+        std::vector<Loop> loops_;
+        std::map<std::string, int> headerToIdx_;
+
+        std::set<std::string> findBody(const std::string& header,
+                                       const std::string& latch,
+                                       const FunctionIR& func,
+                                       const DominatorTree& dt) const;
+        void buildNesting();
+        void computeExits(const FunctionIR& func);
+        void computeDepths();
+    };
+
+    // --- NaturalLoopFinder implementation ---
+
+    std::set<std::string> NaturalLoopFinder::findBody(
+            const std::string& header, const std::string& latch,
+            const FunctionIR& func, const DominatorTree& dt) const {
+        std::set<std::string> body;
+        body.insert(header);
+        std::vector<std::string> worklist;
+        worklist.push_back(latch);
+        while (!worklist.empty()) {
+            std::string v = worklist.back();
+            worklist.pop_back();
+            if (body.find(v) != body.end()) continue;
+            body.insert(v);
+            for (const auto& b : func.getBlocks()) {
+                const auto& instrs = b->getInstructions();
+                if (instrs.empty()) continue;
+                const auto& term = instrs.back();
+                if (term.op == IROp::BR && !term.args.empty() && term.args[0].kind == IRValue::LABEL
+                    && term.args[0].name == v) {
+                    worklist.push_back(b->getName());
+                } else if (term.op == IROp::COND_BR && term.args.size() >= 3) {
+                    if (term.args[1].kind == IRValue::LABEL && term.args[1].name == v)
+                        worklist.push_back(b->getName());
+                    if (term.args[2].kind == IRValue::LABEL && term.args[2].name == v)
+                        worklist.push_back(b->getName());
+                }
+            }
+        }
+        return body;
+    }
+
+    void NaturalLoopFinder::build(const FunctionIR& func, const DominatorTree& dt) {
+        loops_.clear();
+        headerToIdx_.clear();
+
+        std::map<std::string, std::set<std::string>> successors;
+        for (const auto& b : func.getBlocks()) {
+            const auto& instrs = b->getInstructions();
+            if (instrs.empty()) continue;
+            const auto& term = instrs.back();
+            if (term.op == IROp::BR && !term.args.empty() && term.args[0].kind == IRValue::LABEL) {
+                successors[b->getName()].insert(term.args[0].name);
+            } else if (term.op == IROp::COND_BR && term.args.size() >= 3) {
+                if (term.args[1].kind == IRValue::LABEL) successors[b->getName()].insert(term.args[1].name);
+                if (term.args[2].kind == IRValue::LABEL) successors[b->getName()].insert(term.args[2].name);
+            }
+        }
+
+        for (const auto& [from, toSet] : successors) {
+            for (const std::string& to : toSet) {
+                if (dt.dominates(to, from)) {
+                    if (headerToIdx_.find(to) != headerToIdx_.end()) continue;
+
+                    Loop loop;
+                    loop.header = to;
+                    loop.blocks = findBody(to, from, func, dt);
+                    headerToIdx_[to] = loops_.size();
+                    loops_.push_back(std::move(loop));
+                }
+            }
+        }
+
+        buildNesting();
+        computeExits(func);
+        computeDepths();
+    }
+
+    void NaturalLoopFinder::buildNesting() {
+        for (size_t i = 0; i < loops_.size(); ++i) {
+            for (size_t j = 0; j < loops_.size(); ++j) {
+                if (i == j) continue;
+                if (loops_[i].blocks.size() < loops_[j].blocks.size()
+                    && loops_[i].blocks.find(loops_[j].header) != loops_[i].blocks.end()) {
+                    loops_[i].children.push_back(&loops_[j]);
+                }
+            }
+        }
+    }
+
+    void NaturalLoopFinder::computeExits(const FunctionIR& func) {
+        for (auto& loop : loops_) {
+            loop.exits.clear();
+            for (const auto& b : func.getBlocks()) {
+                if (loop.blocks.find(b->getName()) == loop.blocks.end()) continue;
+                const auto& instrs = b->getInstructions();
+                if (instrs.empty()) continue;
+                const auto& term = instrs.back();
+                auto addExitIfOutside = [&](const std::string& target) {
+                    if (loop.blocks.find(target) == loop.blocks.end()) {
+                        loop.exits.push_back(target);
+                    }
+                };
+                if (term.op == IROp::BR && term.args[0].kind == IRValue::LABEL) {
+                    addExitIfOutside(term.args[0].name);
+                } else if (term.op == IROp::COND_BR && term.args.size() >= 3) {
+                    if (term.args[1].kind == IRValue::LABEL) addExitIfOutside(term.args[1].name);
+                    if (term.args[2].kind == IRValue::LABEL) addExitIfOutside(term.args[2].name);
+                }
+            }
+        }
+    }
+
+    void NaturalLoopFinder::computeDepths() {
+        for (auto& loop : loops_) loop.depth = 0;
+
+        std::set<Loop*> isChild;
+        for (auto& l : loops_) {
+            for (auto* child : l.children) {
+                isChild.insert(child);
+            }
+        }
+
+        std::function<void(Loop&, int)> setDepth;
+        setDepth = [&](Loop& l, int d) {
+            l.depth = d;
+            for (auto* child : l.children) {
+                setDepth(*child, d + 1);
+            }
+        };
+
+        for (auto& l : loops_) {
+            if (isChild.find(&l) == isChild.end()) {
+                setDepth(l, 0);
+            }
+        }
+    }
+
+    const Loop* NaturalLoopFinder::loopForHeader(const std::string& header) const {
+        auto it = headerToIdx_.find(header);
+        if (it != headerToIdx_.end()) return &loops_[it->second];
+        return nullptr;
+    }
+
+    std::string NaturalLoopFinder::insertPreheader(FunctionIR& func, const Loop& loop,
+                                                    const DominatorTree& dt) {
+        std::string preheaderName = loop.header + "_preheader";
+
+        std::vector<std::string> outsidePreds;
+        for (const auto& b : func.getBlocks()) {
+            if (b->getName() == loop.header) continue;
+            const auto& instrs = b->getInstructions();
+            if (instrs.empty()) continue;
+            const auto& term = instrs.back();
+            auto targetsHeader = [&](const IRInstruction& t) -> bool {
+                if (t.op == IROp::BR && !t.args.empty() && t.args[0].kind == IRValue::LABEL
+                    && t.args[0].name == loop.header) return true;
+                if (t.op == IROp::COND_BR && t.args.size() >= 3) {
+                    if (t.args[1].kind == IRValue::LABEL && t.args[1].name == loop.header) return true;
+                    if (t.args[2].kind == IRValue::LABEL && t.args[2].name == loop.header) return true;
+                }
+                return false;
+            };
+            if (targetsHeader(term) && loop.blocks.find(b->getName()) == loop.blocks.end()) {
+                outsidePreds.push_back(b->getName());
+            }
+        }
+
+        if (outsidePreds.empty()) return "";
+
+        auto preheader = std::make_unique<BasicBlock>(preheaderName);
+        IRInstruction br;
+        br.op = IROp::BR;
+        br.args.push_back(IRValue::Label(loop.header));
+        preheader->addInstruction(br);
+
+        auto& blocks = func.getBlocks();
+        auto headerIt = std::find_if(blocks.begin(), blocks.end(),
+            [&](const auto& b) { return b->getName() == loop.header; });
+        blocks.insert(headerIt, std::move(preheader));
+
+        for (auto& b : func.getBlocks()) {
+            if (std::find(outsidePreds.begin(), outsidePreds.end(), b->getName()) == outsidePreds.end())
+                continue;
+            for (auto& instr : b->getInstructions()) {
+                auto retarget = [&](IRValue& arg) {
+                    if (arg.kind == IRValue::LABEL && arg.name == loop.header) {
+                        arg.name = preheaderName;
+                    }
+                };
+                if (instr.op == IROp::BR && !instr.args.empty()) {
+                    retarget(instr.args[0]);
+                } else if (instr.op == IROp::COND_BR && instr.args.size() >= 3) {
+                    retarget(instr.args[1]);
+                    retarget(instr.args[2]);
+                }
+            }
+        }
+
+        auto it = std::find_if(blocks.begin(), blocks.end(),
+            [&](const auto& b) { return b->getName() == loop.header; });
+        for (auto& instr : (*it)->getInstructions()) {
+            if (instr.op == IROp::PHI) {
+                std::set<std::string> outsideSeen;
+                for (const auto& [pred, val] : instr.phiArgs) {
+                    if (loop.blocks.find(pred) == loop.blocks.end()) {
+                        outsideSeen.insert(pred);
+                    }
+                }
+                if (!outsideSeen.empty()) {
+                    IRValue combined = instr.phiArgs.begin()->second;
+                    for (const auto& pred : outsideSeen) {
+                        instr.phiArgs.erase(pred);
+                    }
+                    instr.phiArgs[preheaderName] = combined;
+                }
+            }
+        }
+
+        return preheaderName;
+    }
+
 } // namespace Cider
 
 #endif
