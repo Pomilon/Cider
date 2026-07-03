@@ -17,6 +17,7 @@
 #include "cider_reg_alloc.h"
 #include "cider_optimizer.h"
 #include "cider_meta.h"
+#include <sys/stat.h>
 
 int main(int argc, char** argv) {
     if (argc < 2) {
@@ -54,6 +55,28 @@ int main(int argc, char** argv) {
     std::stringstream buffer;
     buffer << file.rdbuf();
     std::string source = buffer.str();
+
+    // Check cache for hash match (file mtime + size based)
+    if (!cacheDir.empty()) {
+        struct stat srcStat;
+        std::string hashName = sourceFile;
+        for (auto& c : hashName) if (c == '/') c = '.';
+        std::string hashPath = cacheDir + "/" + hashName + ".hash";
+
+        if (stat(sourceFile.c_str(), &srcStat) == 0) {
+            std::string currentHash = std::to_string(srcStat.st_size) + "-" + std::to_string(srcStat.st_mtime);
+            std::ifstream hashFileIn(hashPath);
+            std::string cachedHash;
+            if (hashFileIn) std::getline(hashFileIn, cachedHash);
+            if (cachedHash == currentHash) {
+                std::cout << "Cache hit for " << sourceFile << " — skipping compilation.\n";
+                return 0;
+            }
+            // Update hash file for next time
+            std::ofstream hashFileOut(hashPath);
+            if (hashFileOut) hashFileOut << currentHash << "\n";
+        }
+    }
 
     Cider::ErrorReporter reporter;
 
