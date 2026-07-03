@@ -1795,7 +1795,81 @@ namespace Cider {
             lastValue_ = phiDest;
             lastExprType_ = thenType;
         }
-        void visit(FunctionExpr&) override {}
+        void visit(FunctionExpr& expr) override {
+            if (!currentFunction_) return;
+
+            // Generate a unique hidden function name
+            std::string funcName = "__anon_" + std::to_string(anonFuncCount_++);
+
+            // Save and restore state for the nested function
+            auto prevFunction = std::move(currentFunction_);
+            auto prevBlock = std::move(currentBlock_);
+            auto prevVariableValues = variableValues_;
+            int prevTempCount = tempCount_;
+            int prevLabelCount = labelCount_;
+            auto prevBreakLabels = breakLabels_;
+            auto prevContinueLabels = continueLabels_;
+            auto prevDeferStack = deferStack_;
+            auto prevDestructorStack = destructorStack_;
+
+            IRType returnType = IRType::I32;
+            currentFunction_ = std::make_unique<FunctionIR>(funcName, returnType);
+            currentBlock_ = std::make_unique<BasicBlock>("entry");
+
+            variableValues_.clear();
+            tempCount_ = 0;
+            labelCount_ = 0;
+            breakLabels_.clear();
+            continueLabels_.clear();
+            deferStack_.clear();
+            destructorStack_.clear();
+            deferStack_.push_back({});
+            destructorStack_.push_back({});
+
+            // Add parameters with inferred type (int for now)
+            for (auto& paramName : expr.getParams()) {
+                std::string paramReg = "arg_" + paramName;
+                currentFunction_->addParam(paramReg);
+                IRValue paramRegVal = IRValue::Register(paramReg, IRType::I32);
+                IRValue addr = IRValue::Register(nextTemp(), IRType::PTR);
+                currentBlock_->addInstruction({IROp::ALLOCA, addr, {IRValue::Constant(4, IRType::I32)}});
+                currentBlock_->addInstruction({IROp::STORE, std::nullopt, {addr, paramRegVal, IRValue::Constant(0, IRType::I32)}});
+                variableValues_[paramName] = addr;
+                variableValues_[paramReg] = addr;
+            }
+
+            // Add return for empty body
+            if (expr.getBody().empty()) {
+                currentBlock_->addInstruction({IROp::RET, std::nullopt, {}});
+            } else {
+                for (auto& stmt : expr.getBody()) {
+                    stmt->accept(*this);
+                }
+                if (currentBlock_ && (currentBlock_->getInstructions().empty() || currentBlock_->getInstructions().back().op != IROp::RET)) {
+                    currentBlock_->addInstruction({IROp::RET, std::nullopt, {}});
+                }
+            }
+
+            if (currentBlock_) {
+                currentFunction_->addBlock(std::move(currentBlock_));
+            }
+            module_.addFunction(std::move(currentFunction_));
+
+            // Restore state
+            currentFunction_ = std::move(prevFunction);
+            currentBlock_ = std::move(prevBlock);
+            variableValues_ = prevVariableValues;
+            tempCount_ = prevTempCount;
+            labelCount_ = prevLabelCount;
+            breakLabels_ = prevBreakLabels;
+            continueLabels_ = prevContinueLabels;
+            deferStack_ = prevDeferStack;
+            destructorStack_ = prevDestructorStack;
+
+            // Return function pointer (label)
+            lastValue_ = IRValue::Label(funcName);
+            lastExprType_ = {"void", 1}; // function pointer type
+        }
         void visit(SuperExpr&) override {}
         void visit(AwaitExpr&) override {}
         void visit(ArrayTypeAST&) override {}
@@ -1843,6 +1917,7 @@ namespace Cider {
         int tempCount_ = 0;
         int globalStrCount_ = 0;
         int labelCount_ = 0;
+        int anonFuncCount_ = 0;
         std::string nextTemp() { return "v" + std::to_string(tempCount_++); }
         std::string nextLabel(const std::string& prefix) { 
             return (currentFunction_ ? currentFunction_->getName() + "_" : "") + prefix + std::to_string(labelCount_++); 
