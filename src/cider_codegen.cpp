@@ -12,7 +12,8 @@ namespace Cider {
 
     class X86_64_Linux_Backend : public TargetBackend {
     public:
-        bool generate(ModuleIR& module, const std::string& outputPath) override {
+        bool generate(ModuleIR& module, const std::string& outputPath,
+                      const std::string& sourceFile = "") override {
             std::vector<std::string> bssSection;
             std::vector<std::string> dataSection;
             std::vector<std::string> globalAsmSection;
@@ -120,6 +121,12 @@ namespace Cider {
             for (auto& func : module.getFunctions()) {
                 if (generatedFunctions_.count(func->getName())) continue;
                 generatedFunctions_.insert(func->getName());
+
+                // Skip functions not belonging to the target source file
+                if (!sourceFile.empty() && func->getSourcePath() != sourceFile) {
+                    addGlobalAsm("extern " + func->getName());
+                    continue;
+                }
 
                 int regAllocStackSize = 0;
                 auto alloc = regAlloc.allocate(*func, regAllocStackSize);
@@ -929,9 +936,10 @@ namespace Cider {
         backend = std::make_unique<X86_64_Linux_Backend>();
     }
 
-    bool CodeGenerator::generate(ModuleIR& module, const std::string& outputPath) {
+    bool CodeGenerator::generate(ModuleIR& module, const std::string& outputPath,
+                                  const std::string& sourceFile) {
         if (!backend) return false;
-        return backend->generate(module, outputPath);
+        return backend->generate(module, outputPath, sourceFile);
     }
 
 } // namespace Cider

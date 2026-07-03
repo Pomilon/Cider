@@ -12,7 +12,8 @@ namespace Cider {
     public:
         virtual ~TargetBackend() = default;
         
-        virtual bool generate(ModuleIR& module, const std::string& outputPath) = 0;
+        virtual bool generate(ModuleIR& module, const std::string& outputPath,
+                              const std::string& sourceFile = "") = 0;
 
     protected:
         void addText(const std::string& line) { textSection.push_back(line); }
@@ -27,7 +28,8 @@ namespace Cider {
     class CodeGenerator {
     public:
         CodeGenerator(const std::string& targetStr);
-        bool generate(ModuleIR& module, const std::string& outputPath);
+        bool generate(ModuleIR& module, const std::string& outputPath,
+                      const std::string& sourceFile = "");
 
     private:
         std::unique_ptr<TargetBackend> backend;

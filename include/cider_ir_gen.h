@@ -11,7 +11,8 @@ namespace Cider {
 
     class IRGenerator : public ASTVisitor {
     public:
-        IRGenerator(SymbolTable& syms) : symbolTable_(syms) {}
+        IRGenerator(SymbolTable& syms, const std::string& sourcePath = "")
+            : symbolTable_(syms), currentSourcePath_(sourcePath) {}
 
         ModuleIR generate(Program& program) {
             visitedPrograms_.clear();
@@ -193,6 +194,7 @@ namespace Cider {
             auto prevDestructorStack = destructorStack_;
 
             currentFunction_ = std::make_unique<FunctionIR>(funcName, mapType(TypeInfo::fromAST(stmt.getReturnType()).name));
+            currentFunction_->setSourcePath(currentSourcePath_);
             currentBlock_ = std::make_unique<BasicBlock>("entry");
 
             variableValues_.clear();
@@ -1823,6 +1825,7 @@ namespace Cider {
 
             IRType returnType = IRType::I32;
             currentFunction_ = std::make_unique<FunctionIR>(funcName, returnType);
+            currentFunction_->setSourcePath(currentSourcePath_);
             currentBlock_ = std::make_unique<BasicBlock>("entry");
 
             variableValues_.clear();
@@ -1943,6 +1946,7 @@ namespace Cider {
         std::unique_ptr<FunctionIR> currentFunction_;
         std::unique_ptr<BasicBlock> currentBlock_;
         std::string currentClassName_;
+        std::string currentSourcePath_;
         IRValue lastValue_ = IRValue::Constant(0, IRType::I32);
         TypeInfo lastExprType_;
         bool isAddress_ = false;

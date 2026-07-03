@@ -11,8 +11,8 @@ namespace Cider {
 
     class TypeChecker : public ASTVisitor {
     public:
-        TypeChecker(SymbolTable& symbolTable, ErrorReporter& reporter) 
-            : symbolTable_(symbolTable), reporter_(reporter) {}
+        TypeChecker(SymbolTable& symbolTable, ErrorReporter& reporter, bool moduleMode = false) 
+            : symbolTable_(symbolTable), reporter_(reporter), moduleMode_(moduleMode) {}
 
         void check(Program& program) {
             program.accept(*this);
@@ -95,7 +95,7 @@ namespace Cider {
             bool hasMain = mainSym && mainSym->kind == SymbolKind::FUNCTION;
             bool hasStart = startSym && startSym->kind == SymbolKind::FUNCTION;
 
-            if (!hasMain && !hasStart) {
+            if (!moduleMode_ && !hasMain && !hasStart) {
                 reporter_.error("Missing entry point: 'main' or '_start' function is required.", 1, 1);
             }
         }
@@ -798,6 +798,7 @@ namespace Cider {
         ErrorReporter& reporter_;
         TypeInfo lastExprType_ = {"void", 0};
         std::string currentClassName_;
+        bool moduleMode_ = false;
 
         void error(const std::string& msg, int line) {
             reporter_.error(msg, line);

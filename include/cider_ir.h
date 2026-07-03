@@ -92,6 +92,8 @@ namespace Cider {
         void addBlock(std::unique_ptr<BasicBlock> block) { blocks_.push_back(std::move(block)); }
         void addParam(const std::string& paramName) { params_.push_back(paramName); }
         const std::string& getName() const { return name_; }
+        void setSourcePath(const std::string& p) { sourcePath_ = p; }
+        const std::string& getSourcePath() const { return sourcePath_; }
         std::vector<std::unique_ptr<BasicBlock>>& getBlocks() { return blocks_; }
         const std::vector<std::unique_ptr<BasicBlock>>& getBlocks() const { return blocks_; }
         const std::vector<std::string>& getParams() const { return params_; }
@@ -101,6 +103,7 @@ namespace Cider {
         IRType returnType_;
         std::vector<std::unique_ptr<BasicBlock>> blocks_;
         std::vector<std::string> params_;
+        std::string sourcePath_;
     };
     class ModuleIR {
     public:

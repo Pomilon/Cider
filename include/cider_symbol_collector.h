@@ -11,13 +11,16 @@
 #include <set>
 #include <fstream>
 #include <sstream>
+#include "cider_meta.h"
 
 namespace Cider {
 
     class SymbolCollector : public ASTVisitor {
     public:
-        SymbolCollector(SymbolTable& symbolTable, ModuleResolver& resolver, ErrorReporter& reporter, const std::string& originPath = "")
-            : symbolTable_(symbolTable), resolver_(resolver), reporter_(reporter), currentProgram_(nullptr), originPath_(originPath) {}
+        SymbolCollector(SymbolTable& symbolTable, ModuleResolver& resolver, ErrorReporter& reporter,
+                        const std::string& originPath = "", const std::string& cacheDir = "")
+            : symbolTable_(symbolTable), resolver_(resolver), reporter_(reporter), currentProgram_(nullptr),
+              originPath_(originPath), cacheDir_(cacheDir) {}
 
         void collect(Program& program) {
             currentProgram_ = &program;
@@ -1135,6 +1138,19 @@ namespace Cider {
                 return;
             }
 
+            // Check cache for meta file
+            if (!cacheDir_.empty()) {
+                std::string metaName = moduleName;
+                for (auto& c : metaName) if (c == '.') c = '/';
+                std::string metaPath = cacheDir_ + "/" + metaName + ".cider-meta";
+                std::ifstream metaFile(metaPath);
+                if (metaFile) {
+                    importedModuleNames_.insert(moduleName);
+                    MetaReader::read(metaPath, symbolTable_);
+                    return;
+                }
+            }
+
             // Cycle detection
             if (importingPaths_.count(result.path)) {
                 reporter_.error("Circular import detected for module '" + moduleName + "'", line, col);
@@ -1174,6 +1190,7 @@ namespace Cider {
         std::vector<std::string> structClassNames_;
         std::map<std::string, std::vector<std::string>> interfaceImpls_;
         std::map<std::string, std::shared_ptr<TemplateSymbol>> templateTable_;
+        std::string cacheDir_;
         std::set<std::string> importedModuleNames_;
         std::set<std::string> importingPaths_;
     };

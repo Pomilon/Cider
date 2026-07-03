@@ -16,6 +16,7 @@
 #include "cider_ssa_deconstructor.h"
 #include "cider_reg_alloc.h"
 #include "cider_optimizer.h"
+#include "cider_meta.h"
 
 int main(int argc, char** argv) {
     if (argc < 2) {
@@ -26,12 +27,21 @@ int main(int argc, char** argv) {
     std::string sourceFile = argv[1];
     std::string outputFile = "out.asm";
     bool verbose = false;
+    std::string cacheDir = "";
+    bool emitMeta = false;
+    bool moduleMode = false;
     for (int i = 2; i < argc; ++i) {
         std::string arg = argv[i];
         if (arg == "-o" && i + 1 < argc) {
             outputFile = argv[++i];
         } else if (arg == "-v" || arg == "--verbose") {
             verbose = true;
+        } else if (arg == "--cache" && i + 1 < argc) {
+            cacheDir = argv[++i];
+        } else if (arg == "--emit-meta") {
+            emitMeta = true;
+        } else if (arg == "--module") {
+            moduleMode = true;
         }
     }
 
@@ -64,7 +74,7 @@ int main(int argc, char** argv) {
     // 3. Semantic Analysis (Phase 1: Symbol Collection)
     Cider::ModuleResolver resolver;
     Cider::SymbolTable symbolTable;
-    Cider::SymbolCollector collector(symbolTable, resolver, reporter, sourceFile);
+    Cider::SymbolCollector collector(symbolTable, resolver, reporter, sourceFile, cacheDir);
     collector.collect(*ast);
     
     if (reporter.hasErrors()) {
@@ -76,7 +86,7 @@ int main(int argc, char** argv) {
     // 3.5 Semantic Analysis (Phase 2: Type Checking)
 
     {
-        Cider::TypeChecker typeChecker(symbolTable, reporter);
+        Cider::TypeChecker typeChecker(symbolTable, reporter, moduleMode);
         typeChecker.check(*ast);
     }
     
@@ -97,7 +107,7 @@ int main(int argc, char** argv) {
     std::cout << "Successfully folded constants.\n";
     
     // 3.9 Semantic Analysis (Phase 6: SSA IR Generation)
-    Cider::IRGenerator irGen(symbolTable);
+    Cider::IRGenerator irGen(symbolTable, sourceFile);
     Cider::ModuleIR irModule = irGen.generate(*ast);
     std::cout << "Successfully generated SSA IR.\n";
     
@@ -130,9 +140,23 @@ int main(int argc, char** argv) {
     
     // 4. Code Generation (Direct to Native Assembly)
     Cider::CodeGenerator codegen("x86_64-linux");
-    if (!codegen.generate(irModule, outputFile)) {
+    if (!codegen.generate(irModule, outputFile, sourceFile)) {
         std::cerr << "Code generation failed.\n";
         return 1;
+    }
+
+    // 4.5 Emit meta file if requested
+    if (emitMeta && !cacheDir.empty()) {
+        std::string metaName = sourceFile;
+        for (auto& c : metaName) if (c == '/') c = '.';
+        if (metaName.size() > 4 && metaName.substr(metaName.size()-4) == ".cdr")
+            metaName = metaName.substr(0, metaName.size()-4);
+        std::string metaPath = cacheDir + "/" + metaName + ".cider-meta";
+        std::ofstream metaOut(metaPath);
+        if (metaOut) {
+            metaOut << "module " << metaName << "\n";
+            metaOut.close();
+        }
     }
 
     std::cout << "Compilation complete. Assembly written to " << outputFile << "\n";
