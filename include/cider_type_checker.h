@@ -583,7 +583,30 @@ namespace Cider {
             lastExprType_ = elemType;
             lastExprType_.pointerLevel++;
         }
-        void visit(TableExpr&) override {}
+        void visit(TableExpr& expr) override {
+            auto& entries = expr.getEntries();
+            if (entries.empty()) {
+                lastExprType_ = {"void", 1};
+                return;
+            }
+            entries[0].first->accept(*this);
+            TypeInfo keyType = lastExprType_;
+            entries[0].second->accept(*this);
+            TypeInfo valType = lastExprType_;
+            for (size_t i = 1; i < entries.size(); i++) {
+                entries[i].first->accept(*this);
+                if (lastExprType_.name != keyType.name || lastExprType_.pointerLevel != keyType.pointerLevel) {
+                    error("Table key type mismatch at entry " + std::to_string(i), expr.getLine());
+                    lastExprType_ = {"error", 0}; return;
+                }
+                entries[i].second->accept(*this);
+                if (lastExprType_.name != valType.name || lastExprType_.pointerLevel != valType.pointerLevel) {
+                    error("Table value type mismatch at entry " + std::to_string(i), expr.getLine());
+                    lastExprType_ = {"error", 0}; return;
+                }
+            }
+            lastExprType_ = {"void", 1}; // pointer to KV pairs
+        }
         void visit(IndexExpr& expr) override {
             expr.getObject()->accept(*this);
             TypeInfo objType = lastExprType_;

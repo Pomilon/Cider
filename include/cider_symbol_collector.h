@@ -377,7 +377,9 @@ namespace Cider {
         void visit(ListExpr& expr) override {
             for (auto& e : expr.getElements()) e->accept(*this);
         }
-        void visit(TableExpr&) override {}
+        void visit(TableExpr& expr) override {
+            for (auto& e : expr.getEntries()) { e.first->accept(*this); e.second->accept(*this); }
+        }
         void visit(IndexExpr&) override {}
         void visit(SliceExpr&) override {}
         void visit(TernaryExpr&) override {}

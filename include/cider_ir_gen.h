@@ -1665,7 +1665,49 @@ namespace Cider {
             lastExprType_.pointerLevel++;
         }
 
-        void visit(TableExpr&) override {}
+        void visit(TableExpr& expr) override {
+            if (!currentFunction_) return;
+
+            auto& entries = expr.getEntries();
+            if (entries.empty()) {
+                lastValue_ = IRValue::Constant(0, IRType::PTR);
+                lastExprType_ = {"void", 1};
+                return;
+            }
+
+            // Determine key/value types and sizes from first entry
+            entries[0].first->accept(*this);
+            IRValue firstKey = lastValue_;
+            TypeInfo keyType = lastExprType_;
+            int keySize = getTypeSize(keyType);
+
+            entries[0].second->accept(*this);
+            IRValue firstVal = lastValue_;
+            TypeInfo valType = lastExprType_;
+            int valSize = getTypeSize(valType);
+
+            int entrySize = keySize + valSize;
+            int totalSize = entrySize * (int)entries.size();
+            IRValue addr = IRValue::Register(nextTemp(), IRType::PTR);
+            currentBlock_->addInstruction({IROp::ALLOCA, addr, {IRValue::Constant(totalSize, IRType::I32)}});
+
+            // Store first entry
+            currentBlock_->addInstruction({IROp::STORE, std::nullopt, {addr, firstKey, IRValue::Constant(0, IRType::I32)}});
+            currentBlock_->addInstruction({IROp::STORE, std::nullopt, {addr, firstVal, IRValue::Constant(keySize, IRType::I32)}});
+
+            // Store remaining entries
+            for (size_t i = 1; i < entries.size(); i++) {
+                entries[i].first->accept(*this);
+                int kvOffset = i * entrySize;
+                currentBlock_->addInstruction({IROp::STORE, std::nullopt, {addr, lastValue_, IRValue::Constant(kvOffset, IRType::I32)}});
+                entries[i].second->accept(*this);
+                currentBlock_->addInstruction({IROp::STORE, std::nullopt, {addr, lastValue_, IRValue::Constant(kvOffset + keySize, IRType::I32)}});
+            }
+
+
+            lastValue_ = addr;
+            lastExprType_ = {"void", 1};
+        }
         void visit(SliceExpr& expr) override {
             if (!currentFunction_) return;
 
