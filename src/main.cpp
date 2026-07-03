@@ -145,12 +145,15 @@ int main(int argc, char** argv) {
     
     // Optimization passes: DCE + inlining fixpoint
     Cider::Inliner inliner;
+    Cider::PostLicmPass post_licm;
     constexpr int kMaxOptPasses = 10;
     for (int pass = 0; pass < kMaxOptPasses; ++pass) {
         for (auto& func : irModule.getFunctions()) {
             Cider::Optimizer::dce(*func);
         }
-        if (!inliner.run(irModule)) break;
+        bool inlined = inliner.run(irModule);
+        bool licmed = post_licm.run(irModule);
+        if (!inlined && !licmed) break;
     }
     std::cout << "Optimization passes complete.\n";
     

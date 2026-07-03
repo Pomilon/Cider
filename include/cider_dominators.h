@@ -399,6 +399,10 @@ namespace Cider {
                                                     const DominatorTree& dt) {
         std::string preheaderName = loop.header + "_preheader";
 
+        for (const auto& b : func.getBlocks()) {
+            if (b->getName() == preheaderName) return preheaderName;
+        }
+
         std::vector<std::string> outsidePreds;
         for (const auto& b : func.getBlocks()) {
             if (b->getName() == loop.header) continue;
