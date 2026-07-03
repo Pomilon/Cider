@@ -16,6 +16,7 @@
 #include "cider_ssa_deconstructor.h"
 #include "cider_reg_alloc.h"
 #include "cider_optimizer.h"
+#include "cider_inliner.h"
 #include "cider_meta.h"
 #include <sys/stat.h>
 
@@ -141,10 +142,14 @@ int main(int argc, char** argv) {
     std::cout << "Successfully deconstructed SSA IR.\n";
     if (verbose) irModule.print();
     
-    // Optimization passes
-    // Optimization passes (DCE only — inliner needs more testing)
-    for (auto& func : irModule.getFunctions()) {
-        Cider::Optimizer::dce(*func);
+    // Optimization passes: DCE + inlining fixpoint
+    Cider::Inliner inliner;
+    constexpr int kMaxOptPasses = 10;
+    for (int pass = 0; pass < kMaxOptPasses; ++pass) {
+        for (auto& func : irModule.getFunctions()) {
+            Cider::Optimizer::dce(*func);
+        }
+        if (!inliner.run(irModule)) break;
     }
     std::cout << "Optimization passes complete.\n";
     
