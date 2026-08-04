@@ -92,28 +92,8 @@ bool SSALicmPass::hoistLoop(FunctionIR& func, const Loop& loop, const std::strin
                 if (instr.op == IROp::STORE || instr.op == IROp::CALL ||
                     instr.op == IROp::VIRTUAL_CALL || instr.op == IROp::RET ||
                     instr.op == IROp::COND_BR || instr.op == IROp::BR ||
-                    instr.op == IROp::ASM ||
+                    instr.op == IROp::ASM || instr.op == IROp::LOAD ||
                     instr.op == IROp::PHI) continue;
-
-                // Hoist LOAD from alloca only if no STORE to that alloca in loop.
-                if (instr.op == IROp::LOAD && !instr.args.empty() && instr.args[0].kind == IRValue::REGISTER) {
-                    bool skip = false;
-                    // Find the alloca register for the LOAD's address.
-                    std::string addrReg = instr.args[0].name;
-                    // Check if any STORE in loop body uses the same address register.
-                    for (const auto& lb : func.getBlocks()) {
-                        if (loopBlocks.find(lb->getName()) == loopBlocks.end()) continue;
-                        for (const auto& li : lb->getInstructions()) {
-                            if (li.op == IROp::STORE && li.args.size() >= 1 &&
-                                li.args[0].kind == IRValue::REGISTER && li.args[0].name == addrReg) {
-                                skip = true;
-                                break;
-                            }
-                        }
-                        if (skip) break;
-                    }
-                    if (skip) continue;
-                }
 
                 bool allInvariant = true;
                 for (const auto& arg : instr.args) {
@@ -259,27 +239,9 @@ bool PostLicmPass::hoistLoop(FunctionIR& func, const Loop& loop, const std::stri
                 if (instr.op == IROp::STORE || instr.op == IROp::CALL ||
                     instr.op == IROp::VIRTUAL_CALL || instr.op == IROp::RET ||
                     instr.op == IROp::COND_BR || instr.op == IROp::BR ||
-                    instr.op == IROp::ASM ||
+                    instr.op == IROp::ASM || instr.op == IROp::LOAD ||
                     instr.op == IROp::PHI || instr.op == IROp::PUSH ||
                     instr.op == IROp::POP) continue;
-
-                // Hoist LOAD from alloca only if no STORE to that alloca in loop.
-                if (instr.op == IROp::LOAD && !instr.args.empty() && instr.args[0].kind == IRValue::REGISTER) {
-                    bool skip = false;
-                    std::string addrReg = instr.args[0].name;
-                    for (const auto& lb : func.getBlocks()) {
-                        if (loopBlocks.find(lb->getName()) == loopBlocks.end()) continue;
-                        for (const auto& li : lb->getInstructions()) {
-                            if (li.op == IROp::STORE && li.args.size() >= 1 &&
-                                li.args[0].kind == IRValue::REGISTER && li.args[0].name == addrReg) {
-                                skip = true;
-                                break;
-                            }
-                        }
-                        if (skip) break;
-                    }
-                    if (skip) continue;
-                }
 
                 bool allInvariant = true;
                 for (const auto& arg : instr.args) {
