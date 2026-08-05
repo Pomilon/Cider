@@ -205,6 +205,7 @@ namespace Cider {
             currentBlock_ = std::make_unique<BasicBlock>("entry");
 
             variableValues_.clear();
+            paramNames_.clear();
             tempCount_ = 0;
             labelCount_ = 0;
             breakLabels_.clear();
@@ -235,6 +236,7 @@ namespace Cider {
                 currentBlock_->addInstruction({IROp::ALLOCA, addr, {IRValue::Constant(8, IRType::I32)}});
                 currentBlock_->addInstruction({IROp::STORE, std::nullopt, {addr, paramReg, IRValue::Constant(0, IRType::I32)}});
                 variableValues_[paramName] = addr;
+                paramNames_.insert(paramName);
             }
             for (auto& param : stmt.getParams()) {
                 auto sym = std::make_shared<Symbol>();
@@ -252,6 +254,7 @@ namespace Cider {
                 currentBlock_->addInstruction({IROp::STORE, std::nullopt, {addr, paramReg, IRValue::Constant(0, IRType::I32)}});
                 variableValues_[param.first] = addr;
                 variableValues_[paramRegName] = addr; // Support both for lookup convenience
+                paramNames_.insert(param.first);
             }
             for (auto& s : stmt.getBody()) {
                 s->accept(*this);
@@ -943,11 +946,16 @@ namespace Cider {
             }
 
             if (variableValues_.count(expr.getName())) {
+                if (paramNames_.count(expr.getName())) {
+                    IRType irType = (lastExprType_.pointerLevel > 0) ? IRType::PTR : mapType(lastExprType_.name);
+                    lastValue_ = IRValue::Register("arg_" + expr.getName(), irType);
+                } else {
                 IRValue addr = variableValues_[expr.getName()];
                 IRType irType = (lastExprType_.pointerLevel > 0) ? IRType::PTR : mapType(lastExprType_.name);
                 IRValue dest = IRValue::Register(nextTemp(), irType);
                 currentBlock_->addInstruction({IROp::LOAD, dest, {addr, IRValue::Constant(0, IRType::I32)}});
                 lastValue_ = dest;
+                }
             } else if (globalValues_.count(expr.getName())) {
                 lastValue_ = globalValues_[expr.getName()];
                 if (!isAddress_) {
@@ -968,6 +976,9 @@ namespace Cider {
             IRValue addr = IRValue::Constant(0, IRType::PTR);
             if (auto ident = dynamic_cast<IdentifierExpr*>(stmt.getTarget())) {
                 addr = variableValues_.count(ident->getName()) ? variableValues_[ident->getName()] : globalValues_[ident->getName()];
+                // Param read-through must stop once the param is assigned:
+                // subsequent reads go through memory (the alloca holds the new value).
+                paramNames_.erase(ident->getName());
             } else if (auto mem = dynamic_cast<MemberAccessExpr*>(stmt.getTarget())) {
                 addr = getAddress(mem);
             } else if (auto idx = dynamic_cast<IndexExpr*>(stmt.getTarget())) {
@@ -1958,6 +1969,7 @@ namespace Cider {
         TypeInfo lastExprType_;
         bool isAddress_ = false;
         std::map<std::string, IRValue> variableValues_;
+        std::set<std::string> paramNames_;
         std::map<std::string, IRValue> globalValues_;
         std::vector<std::string> classNames_;
         std::vector<std::string> interfaceNames_;
