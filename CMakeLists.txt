@@ -13,6 +13,11 @@ add_executable(ciderc ${SOURCES})
 # Testing
 enable_testing()
 
+# GVN pass unit test (synthetic IR — Cider source cannot express
+# register-operand redundancy because all variable reads are LOADs)
+add_executable(gvn_pass_test test/gvn_pass_test.cpp)
+add_test(NAME gvn_pass_test COMMAND gvn_pass_test)
+
 # Discover test .cdr files and add test targets
 file(GLOB CDR_TESTS "test/*.cdr")
 foreach(CDR_FILE ${CDR_TESTS})
