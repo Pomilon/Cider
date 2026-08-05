@@ -755,9 +755,31 @@ namespace Cider {
                                 else if (t == IRType::I32 || t == IRType::U32) sizePrefix = "dword ";
                                 else if (t == IRType::I64 || t == IRType::U64 || t == IRType::PTR) sizePrefix = "qword ";
                                 std::string srcReg = getSizedReg("rax", t);
+                                // Locals are allocated as 8-byte slots and always loaded
+                                // with 64-bit loads. If we store a narrow integer with a
+                                // sized store (e.g. mov dword), the upper bytes keep stale
+                                // stack garbage and the later 64-bit load reads garbage.
+                                // So: extend narrow integer values to 64 bits, then store qword.
+                                bool isNarrowInt = (t == IRType::I8 || t == IRType::U8 ||
+                                                    t == IRType::I16 || t == IRType::U16 ||
+                                                    t == IRType::I32 || t == IRType::U32 ||
+                                                    t == IRType::BOOL);
                                 if (instr.args[0].kind == IRValue::LABEL) {
                                     if (instr.args[1].kind == IRValue::LABEL) { addText("    lea rax, [rel " + val + "]"); addText("    mov qword [rel " + instr.args[0].name + "], rax"); }
-                                    else { addText("    mov " + getSizedReg("rax", t) + ", " + getSizedReg(val, t)); addText("    mov " + sizePrefix + "[rel " + instr.args[0].name + "], " + getSizedReg("rax", t)); }
+                                    else {
+                                        addText("    mov " + getSizedReg("rax", t) + ", " + getSizedReg(val, t));
+                                        if (isNarrowInt) {
+                                            if (t == IRType::I8) addText("    movsx rax, al");
+                                            else if (t == IRType::U8 || t == IRType::BOOL) addText("    movzx rax, al");
+                                            else if (t == IRType::I16) addText("    movsx rax, ax");
+                                            else if (t == IRType::U16) addText("    movzx rax, ax");
+                                            else if (t == IRType::I32) addText("    movsxd rax, eax");
+                                            else addText("    mov rax, rax"); // U32 already zero-extended by mov eax
+                                            addText("    mov qword [rel " + instr.args[0].name + "], rax");
+                                        } else {
+                                            addText("    mov " + sizePrefix + "[rel " + instr.args[0].name + "], " + getSizedReg("rax", t));
+                                        }
+                                    }
                                 } else {
                                     std::string addrReg = "r11";
                                     addText("    mov r11, " + ptr);
@@ -765,14 +787,25 @@ namespace Cider {
                                     
                                     if (instr.args[1].kind == IRValue::LABEL) {
                                         addText("    lea rax, [rel " + val + "]");
+                                        addText("    mov qword [" + addrReg + "], rax");
                                     } else {
                                         if (isMem(getSizedReg(val, t))) {
                                             addText("    mov " + getSizedReg("rax", t) + ", " + getSizedReg(val, t));
                                         } else {
                                             addText("    mov " + getSizedReg("rax", t) + ", " + getSizedReg(val, t));
                                         }
+                                        if (isNarrowInt) {
+                                            if (t == IRType::I8) addText("    movsx rax, al");
+                                            else if (t == IRType::U8 || t == IRType::BOOL) addText("    movzx rax, al");
+                                            else if (t == IRType::I16) addText("    movsx rax, ax");
+                                            else if (t == IRType::U16) addText("    movzx rax, ax");
+                                            else if (t == IRType::I32) addText("    movsxd rax, eax");
+                                            // U32: mov eax already zero-extends rax
+                                            addText("    mov qword [" + addrReg + "], rax");
+                                        } else {
+                                            addText("    mov " + sizePrefix + "[" + addrReg + "], " + getSizedReg("rax", t));
+                                        }
                                     }
-                                    addText("    mov " + sizePrefix + "[" + addrReg + "], " + getSizedReg("rax", t));
                                 }
                                 }
                                 break;

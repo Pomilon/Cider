@@ -10,6 +10,43 @@
 
 namespace Cider {
 
+// A LOAD is loop-invariant only if the memory it reads is not modified inside
+// the loop. Cider stores locals in allocas, so the LOAD's address register is
+// typically an alloca address. We only hoist LOADs whose address is an ALLOCA
+// and where no STORE in the loop body writes to that same alloca.
+static bool isLoadInvariant(const IRInstruction& instr, const FunctionIR& func,
+                            const std::set<std::string>& loopBlocks) {
+    if (instr.op != IROp::LOAD || instr.args.empty() || instr.args[0].kind != IRValue::REGISTER)
+        return false;
+
+    // Trace the address register back to its defining instruction.
+    std::string reg = instr.args[0].name;
+    const IRInstruction* def = nullptr;
+    for (const auto& b : func.getBlocks()) {
+        for (const auto& si : b->getInstructions()) {
+            if (si.dest && si.dest->kind == IRValue::REGISTER && si.dest->name == reg) {
+                def = &si;
+                break;
+            }
+        }
+        if (def) break;
+    }
+    if (!def) return false;
+    if (def->op != IROp::ALLOCA) return false;  // non-alloca address: conservative
+
+    // Check that no STORE in the loop body writes to this alloca.
+    for (const auto& lb : func.getBlocks()) {
+        if (loopBlocks.find(lb->getName()) == loopBlocks.end()) continue;
+        for (const auto& li : lb->getInstructions()) {
+            if (li.op == IROp::STORE && li.args.size() >= 1 &&
+                li.args[0].kind == IRValue::REGISTER && li.args[0].name == reg) {
+                return false;
+            }
+        }
+    }
+    return true;
+}
+
 class SSALicmPass {
 public:
     bool run(ModuleIR& module);
@@ -92,8 +129,11 @@ bool SSALicmPass::hoistLoop(FunctionIR& func, const Loop& loop, const std::strin
                 if (instr.op == IROp::STORE || instr.op == IROp::CALL ||
                     instr.op == IROp::VIRTUAL_CALL || instr.op == IROp::RET ||
                     instr.op == IROp::COND_BR || instr.op == IROp::BR ||
-                    instr.op == IROp::ASM || instr.op == IROp::LOAD ||
+                    instr.op == IROp::ASM ||
                     instr.op == IROp::PHI) continue;
+
+                // For LOAD: require the memory read to be truly loop-invariant.
+                if (instr.op == IROp::LOAD && !isLoadInvariant(instr, func, loopBlocks)) continue;
 
                 bool allInvariant = true;
                 for (const auto& arg : instr.args) {
@@ -239,9 +279,12 @@ bool PostLicmPass::hoistLoop(FunctionIR& func, const Loop& loop, const std::stri
                 if (instr.op == IROp::STORE || instr.op == IROp::CALL ||
                     instr.op == IROp::VIRTUAL_CALL || instr.op == IROp::RET ||
                     instr.op == IROp::COND_BR || instr.op == IROp::BR ||
-                    instr.op == IROp::ASM || instr.op == IROp::LOAD ||
+                    instr.op == IROp::ASM ||
                     instr.op == IROp::PHI || instr.op == IROp::PUSH ||
                     instr.op == IROp::POP) continue;
+
+                // For LOAD: require the memory read to be truly loop-invariant.
+                if (instr.op == IROp::LOAD && !isLoadInvariant(instr, func, loopBlocks)) continue;
 
                 bool allInvariant = true;
                 for (const auto& arg : instr.args) {
