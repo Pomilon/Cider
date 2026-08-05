@@ -938,6 +938,10 @@ namespace Cider {
                     lastValue_ = variableValues_[expr.getName()];
                     return;
                 }
+                if (globalValues_.count(expr.getName())) {
+                    lastValue_ = globalValues_[expr.getName()];
+                    return;
+                }
             }
 
             if (lastExprType_.isArray || lastExprType_.isUserDefined || lastExprType_.isInterface) {
