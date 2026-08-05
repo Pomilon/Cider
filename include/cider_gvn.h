@@ -26,6 +26,7 @@ private:
     std::map<std::string, std::string> valueNumbers_;  // reg name → value number string
     std::map<std::string, std::string> vnToReg_;       // value number string → canonical reg
     std::map<std::string, std::string> defBlock_;      // reg name → defining block name
+    std::map<std::string, IRType> regTypes_;           // reg name → IR type
     int uniqueCounter_ = 0;
 
     static std::string opToString(IROp op) {
@@ -71,9 +72,28 @@ private:
         }
     }
 
+    static std::string typeToString(IRType t) {
+        switch (t) {
+            case IRType::I8: return "I8";
+            case IRType::U8: return "U8";
+            case IRType::I16: return "I16";
+            case IRType::U16: return "U16";
+            case IRType::I32: return "I32";
+            case IRType::U32: return "U32";
+            case IRType::I64: return "I64";
+            case IRType::U64: return "U64";
+            case IRType::F32: return "F32";
+            case IRType::F64: return "F64";
+            case IRType::BOOL: return "BOOL";
+            case IRType::PTR: return "PTR";
+            case IRType::VOID: return "VOID";
+        }
+        return "UNKNOWN";
+    }
+
     std::string vnOfOperand(const IRValue& v) {
         if (v.kind == IRValue::CONSTANT) {
-            return "const_" + std::to_string(v.constValue);
+            return "const_" + typeToString(v.type) + "_" + std::to_string(v.constValue);
         }
         if (v.kind == IRValue::LABEL) {
             return "label_" + v.name;
@@ -134,9 +154,12 @@ private:
                 auto it = vnToReg_.find(vn);
                 if (it != vnToReg_.end() && it->second != instr.dest->name) {
                     std::string canonical = it->second;
+                    // PHI dedup uses the same dominance rule: identical phiArgs (keyed by
+                    // predecessor name) yield equal values on every edge, and the dominance
+                    // check guarantees the canonical definition is available here.
                     auto db = defBlock_.find(canonical);
                     bool dominant = (db != defBlock_.end()) && dt_.dominates(db->second, blockName);
-                    if (dominant) {
+                    if (dominant && regTypes_.count(canonical) && regTypes_[canonical] == instr.dest->type) {
                         IRValue canonicalVal = IRValue::Register(canonical, instr.dest->type);
                         instr.op = IROp::MOV;
                         instr.args.clear();
@@ -151,6 +174,7 @@ private:
                 vnToReg_[vn] = instr.dest->name;
                 valueNumbers_[instr.dest->name] = vn;
                 defBlock_[instr.dest->name] = blockName;
+                regTypes_[instr.dest->name] = instr.dest->type;
             }
 
             for (auto& b : func.getBlocks()) {
