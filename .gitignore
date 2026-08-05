@@ -79,3 +79,6 @@ Thumbs.db
 
 # Superpowers workflow docs — strictly local, not pushed to remote
 docs/superpowers/
+
+# CTest logs
+Testing/
