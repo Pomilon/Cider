@@ -204,6 +204,17 @@ namespace Cider {
                     if (arg.kind == IRValue::LABEL) {
                         addText("    mov rax, " + arg.name);
                         addText("    push rax");
+                    } else if (arg.kind == IRValue::REGISTER && arg.type == IRType::I32 &&
+                               isMem(getOperand(arg))) {
+                        // A spilled I32 arg's slot only has 4 valid bytes; the
+                        // upper 4 hold stale stack data. Pushing the raw slot
+                        // would pass a garbage 64-bit value (e.g. 0x7fff00000005).
+                        addText("    movsxd rax, dword " + getOperand(arg));
+                        addText("    push rax");
+                    } else if (arg.kind == IRValue::REGISTER && arg.type == IRType::U32 &&
+                               isMem(getOperand(arg))) {
+                        addText("    mov eax, dword " + getOperand(arg));
+                        addText("    push rax");
                     } else {
                         addText("    push " + getOperand(arg));
                     }
@@ -275,13 +286,33 @@ namespace Cider {
                     [&](const std::string& reg) -> bool {
                     std::set<std::string> seen;
                     std::string cur = reg;
+                    long long totalOffset = 0;
                     while (!cur.empty() && !seen.count(cur)) {
                         seen.insert(cur);
                         auto it = regDefs.find(cur);
                         if (it == regDefs.end()) return false;
                         const IRInstruction* def = it->second;
-                        if (def->op == IROp::ALLOCA) return true;
-                        if (def->op == IROp::ADD || def->op == IROp::MOV) {
+                        if (def->op == IROp::ALLOCA) {
+                            // The qword+extend narrow store is only safe for a
+                            // plain local variable's own 8-byte slot: offset 0
+                            // AND alloca size 8. Struct fields / array elements
+                            // (offset > 0, or any store into a larger alloca)
+                            // are 4-byte packed — a qword store there would
+                            // clobber the neighbor.
+                            double allocSize = def->args.empty() ? 0.0 : def->args[0].constValue;
+                            return totalOffset == 0 && allocSize == 8.0;
+                        }
+                        if (def->op == IROp::ADD) {
+                            if (!def->args.empty() && def->args[0].kind == IRValue::REGISTER) {
+                                if (def->args.size() > 1 && def->args[1].kind == IRValue::CONSTANT) {
+                                    totalOffset += (long long)def->args[1].constValue;
+                                }
+                                cur = def->args[0].name;
+                                continue;
+                            }
+                            return false;
+                        }
+                        if (def->op == IROp::MOV) {
                             if (!def->args.empty() && def->args[0].kind == IRValue::REGISTER) {
                                 cur = def->args[0].name;
                                 continue;
@@ -428,7 +459,16 @@ namespace Cider {
                                             // 32-to-64 bit sign extension if needed
                                             if (t == IRType::I64 || t == IRType::U64 || t == IRType::PTR) {
                                                 if (instr.args[0].kind != IRValue::CONSTANT && (instr.args[0].type == IRType::I32 || instr.args[0].type == IRType::U32)) {
-                                                    if (isMem(a1)) {
+                                                    if (isMem(d)) {
+                                                        // movsxd cannot write to memory — route through rax
+                                                        // whenever the destination is spilled.
+                                                        if (isMem(a1)) {
+                                                            addText("    movsxd rax, dword " + a1);
+                                                        } else {
+                                                            addText("    movsxd rax, " + getSizedReg(a1, IRType::I32));
+                                                        }
+                                                        addText("    mov " + getSizedReg(d, t) + ", rax");
+                                                    } else if (isMem(a1)) {
                                                         // Spilled I32 source: read dword and sign-extend so the
                                                         // upper 32 bits of the qword load don't carry stack garbage.
                                                         addText("    movsxd " + getSizedReg(d, t) + ", dword " + a1);

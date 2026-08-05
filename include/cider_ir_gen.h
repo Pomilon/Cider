@@ -500,7 +500,11 @@ namespace Cider {
                                 fieldIsStruct = false;
                             }
                         }
-                        if (isAddress_ || fieldIsStruct) {
+                        // Array-typed fields are address-like (like locals):
+                        // indexing them must operate on the array's location,
+                        // not on a loaded copy of its first element.
+                        bool fieldIsArray = field.type.isArray;
+                        if (isAddress_ || fieldIsStruct || fieldIsArray) {
                             lastValue_ = addr;
                         } else {
                             IRType fieldIRType = (field.type.pointerLevel > 0) ? IRType::PTR : mapType(field.type.name);
@@ -888,6 +892,7 @@ namespace Cider {
             }
             currentBlock_->addInstruction({op, dest, {left, right}});
             lastValue_ = dest;
+            lastExprType_ = (op >= IROp::CMP_EQ && op <= IROp::CMP_GE) ? TypeInfo{"bool", 0} : leftType;
         }
 
         void visit(NumberExpr& expr) override {
@@ -895,14 +900,17 @@ namespace Cider {
             IRType irType;
             if (val == (long long)val) {
                 irType = IRType::I32;
+                lastExprType_ = {"int", 0};
             } else {
                 irType = IRType::F32;
+                lastExprType_ = {"float", 0};
             }
             lastValue_ = IRValue::Constant(val, irType);
         }
 
         void visit(CharExpr& expr) override {
             lastValue_ = IRValue::Constant(expr.getValue(), IRType::U8);
+            lastExprType_ = {"char", 0};
         }
 
         void visit(IdentifierExpr& expr) override {

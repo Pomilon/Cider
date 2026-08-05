@@ -168,7 +168,7 @@ int main(int argc, char** argv) {
         if (!inlined && !licmed) break;
     }
     std::cout << "Optimization passes complete.\n";
-    
+
     // Phase 10: Register Allocation
     Cider::RegisterAllocator regAlloc;
     for (auto& func : irModule.getFunctions()) {

@@ -31,6 +31,8 @@ func mmap_arena(size: int) -> *void {
 
 export func malloc(size: int) -> *void {
     var s: int = size;
+    if (s < 0) return nilPtr;
+    if (s > 1073741824) return nilPtr;
     if (s % 8 != 0) {
         s = s + (8 - (s % 8));
     }
@@ -88,6 +90,19 @@ export func malloc(size: int) -> *void {
         prev = curr;
         var next_ptr: **void = (curr + 8) as **void;
         curr = *next_ptr;
+    }
+
+    // No free block found — if the request is bigger than one arena,
+    // mmap a dedicated arena of exactly this size (no split).
+    var needed_u64b: u64 = needed as u64;
+    if (needed_u64b > ARENA_SIZE as u64) {
+        var big_arena: *void = mmap_arena(needed);
+        if (big_arena == 0 as *void) return nilPtr;
+        var big_size_ptr: *u64 = big_arena as *u64;
+        *big_size_ptr = needed_u64b;
+        var big_magic_ptr: *u64 = (big_arena + 8) as *u64;
+        *big_magic_ptr = MAGIC_VAL;
+        return big_arena + HEADER_SIZE;
     }
 
     // No free block found — mmap arena and add to free list

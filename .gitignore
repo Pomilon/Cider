@@ -45,6 +45,22 @@ test/licm_nested
 test/licm_non_invariant
 test/licm_simple
 test/licm_stress
+test/ea_basic
+test/ea_escape_global
+test/ea_escape_return
+test/ea_helper_delete
+test/ea_indirect
+test/ea_memcpy
+test/ea_memcpy_global
+test/ea_multi
+test/ea_ptr_arith
+test/ea_summary_escape
+test/ea_summary_safe
+test/gvn_cross_block
+test/gvn_float_mov
+test/gvn_phi
+test/gvn_side_effects
+test/gvn_simple
 
 # C++ IDEs
 .vscode/
