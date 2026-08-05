@@ -58,3 +58,8 @@ Thumbs.db
 
 # Worktrees
 .worktrees/
+# Tool-specific special directories (.cortexkit, etc.)
+.co*
+
+# Superpowers workflow docs — strictly local, not pushed to remote
+docs/superpowers/
