@@ -268,9 +268,10 @@ private:
             }
         }
 
-        // Remove free sites (descending index order per block).
+        // Remove free sites (dedup first, then descending index order per block).
+        std::set<std::pair<BasicBlock*, size_t>> uniqueSites(toRemove.begin(), toRemove.end());
         std::map<BasicBlock*, std::vector<size_t>> byBlock;
-        for (auto& [block, idx] : toRemove) byBlock[block].push_back(idx);
+        for (auto& [block, idx] : uniqueSites) byBlock[block].push_back(idx);
         for (auto& [block, idxs] : byBlock) {
             std::sort(idxs.begin(), idxs.end(), std::greater<size_t>());
             auto& instrs = block->getInstructions();
