@@ -368,7 +368,20 @@ namespace Cider {
                             case IROp::MOV: {
                                 if (d != a1) {
                                     IRType t = (instr.dest ? instr.dest->type : IRType::I32);
-                                    if (instr.args[0].kind == IRValue::LABEL) {
+                                    if (t == IRType::F32 || t == IRType::F64) {
+                                        std::string mv = (t == IRType::F32) ? "movss" : "movsd";
+                                        std::string sz = (t == IRType::F32) ? "dword " : "qword ";
+                                        if (isMem(d)) {
+                                            if (isMem(a1)) {
+                                                addText("    " + mv + " xmm0, " + sz + a1);
+                                                addText("    " + mv + " " + sz + d + ", xmm0");
+                                            } else {
+                                                addText("    " + mv + " " + sz + d + ", " + a1);
+                                            }
+                                        } else {
+                                            addText("    " + mv + " " + d + ", " + (isMem(a1) ? sz + a1 : a1));
+                                        }
+                                    } else if (instr.args[0].kind == IRValue::LABEL) {
                                         addText("    lea rax, [rel " + a1 + "]");
                                         addText("    mov " + getSizedReg(d, t) + ", " + getSizedReg("rax", t));
                                     } else if (isMem(d) && isMem(a1)) {
