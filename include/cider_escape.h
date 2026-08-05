@@ -31,6 +31,7 @@ private:
     std::set<std::string> values_;                      // regs holding the tracked pointer
     std::set<std::string> locals_;                      // alloca slots holding the tracked pointer
     std::vector<std::pair<BasicBlock*, size_t>> freeSites_;  // (block, instr index) of call free
+    bool recordFreeSites_ = false;
 
     // --- helpers ---
 
@@ -150,6 +151,16 @@ private:
                             }
                         }
                     }
+                    if (instr.op == IROp::MEMCPY && instr.args.size() >= 2 &&
+                        instr.args[0].kind == IRValue::REGISTER && instr.args[1].kind == IRValue::REGISTER) {
+                        std::string srcBase = baseOf(instr.args[1].name);
+                        std::string dstBase = baseOf(instr.args[0].name);
+                        if (!srcBase.empty() && locals_.count(srcBase) &&
+                            !dstBase.empty() && isLocalAlloca(dstBase) && !locals_.count(dstBase)) {
+                            locals_.insert(dstBase);
+                            changed = true;
+                        }
+                    }
                 }
             }
         }
@@ -206,8 +217,11 @@ private:
                             }
                             if (!tracked) continue;
                             if (isFreeCall(instr)) {
-                                freeSites_.push_back({block.get(), ii});  // record for removal
-                                continue;
+                                if (recordFreeSites_) {
+                                    freeSites_.push_back({block.get(), ii});  // record for removal
+                                    continue;
+                                }
+                                return true;  // summary mode: param passed to free escapes
                             }
                             if (calleeParamEscapes(instr, i - 1)) return true;
                         }
@@ -231,6 +245,7 @@ private:
                 const auto& params = func->getParams();
                 std::set<int> newEsc;
                 for (int i = 0; i < (int)params.size(); ++i) {
+                    recordFreeSites_ = false;
                     if (valueEscapes(*func, params[i])) newEsc.insert(i);
                 }
                 if (newEsc != escapingParams_[func->getName()]) {
@@ -256,6 +271,7 @@ private:
                 if (instr.args.size() < 2 || instr.args[1].kind != IRValue::CONSTANT) continue;
 
                 std::string allocReg = instr.dest->name;
+                recordFreeSites_ = true;
                 if (valueEscapes(func, allocReg)) continue;  // stays on heap
 
                 // Stack-eligible: malloc → ALLOCA.
