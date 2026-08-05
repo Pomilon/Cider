@@ -5,6 +5,7 @@
 #include <sstream>
 #include <iomanip>
 #include <algorithm>
+#include <functional>
 #include <map>
 #include <set>
 
@@ -257,6 +258,38 @@ namespace Cider {
                     }
                     addText("    pop rbp");
                     addText("    ret");
+                };
+
+                // Map every register to its defining instruction so we can tell
+                // whether a STORE's address is an 8-byte local slot (alloca-based)
+                // or a native-width heap/array element.
+                std::map<std::string, const IRInstruction*> regDefs;
+                for (auto& db : func->getBlocks()) {
+                    for (auto& di : db->getInstructions()) {
+                        if (di.dest && di.dest->kind == IRValue::REGISTER) {
+                            regDefs[di.dest->name] = &di;
+                        }
+                    }
+                }
+                std::function<bool(const std::string&)> isAllocaBased =
+                    [&](const std::string& reg) -> bool {
+                    std::set<std::string> seen;
+                    std::string cur = reg;
+                    while (!cur.empty() && !seen.count(cur)) {
+                        seen.insert(cur);
+                        auto it = regDefs.find(cur);
+                        if (it == regDefs.end()) return false;
+                        const IRInstruction* def = it->second;
+                        if (def->op == IROp::ALLOCA) return true;
+                        if (def->op == IROp::ADD || def->op == IROp::MOV) {
+                            if (!def->args.empty() && def->args[0].kind == IRValue::REGISTER) {
+                                cur = def->args[0].name;
+                                continue;
+                            }
+                        }
+                        return false;
+                    }
+                    return false;
                 };
 
                 bool firstBlock = true;
@@ -816,13 +849,24 @@ namespace Cider {
                                             addText("    mov " + getSizedReg("rax", t) + ", " + getSizedReg(val, t));
                                         }
                                         if (isNarrowInt) {
-                                            if (t == IRType::I8) addText("    movsx rax, al");
-                                            else if (t == IRType::U8 || t == IRType::BOOL) addText("    movzx rax, al");
-                                            else if (t == IRType::I16) addText("    movsx rax, ax");
-                                            else if (t == IRType::U16) addText("    movzx rax, ax");
-                                            else if (t == IRType::I32) addText("    movsxd rax, eax");
-                                            // U32: mov eax already zero-extends rax
-                                            addText("    mov qword [" + addrReg + "], rax");
+                                            // 8-byte local slots (alloca-based) must be stored
+                                            // full-width so later 64-bit reads don't pick up
+                                            // stack garbage in the upper bytes. Heap/array
+                                            // elements keep their native width — a qword store
+                                            // into a 4-byte-element array clobbers the neighbor.
+                                            bool slotDest = (instr.args[0].kind == IRValue::REGISTER) &&
+                                                            isAllocaBased(instr.args[0].name);
+                                            if (slotDest) {
+                                                if (t == IRType::I8) addText("    movsx rax, al");
+                                                else if (t == IRType::U8 || t == IRType::BOOL) addText("    movzx rax, al");
+                                                else if (t == IRType::I16) addText("    movsx rax, ax");
+                                                else if (t == IRType::U16) addText("    movzx rax, ax");
+                                                else if (t == IRType::I32) addText("    movsxd rax, eax");
+                                                // U32: mov eax already zero-extends rax
+                                                addText("    mov qword [" + addrReg + "], rax");
+                                            } else {
+                                                addText("    mov " + sizePrefix + "[" + addrReg + "], " + getSizedReg("rax", t));
+                                            }
                                         } else {
                                             addText("    mov " + sizePrefix + "[" + addrReg + "], " + getSizedReg("rax", t));
                                         }
