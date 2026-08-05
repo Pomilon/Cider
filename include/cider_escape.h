@@ -275,9 +275,14 @@ private:
                 if (valueEscapes(func, allocReg)) continue;  // stays on heap
 
                 // Stack-eligible: malloc → ALLOCA.
+                // Pad the size: the backend emits a 64-bit store for every
+                // field, so a 4-byte int field at the tail of an N-byte object
+                // writes [N-4, N+4) — 4 bytes past the object. Heap chunks
+                // tolerate this (allocator slack); packed stack slots don't,
+                // and the overrun would clobber the adjacent local slot.
                 int size = (int)instr.args[1].constValue;
                 instr.op = IROp::ALLOCA;
-                instr.args = {IRValue::Constant(size, IRType::I32)};
+                instr.args = {IRValue::Constant(size + 8, IRType::I32)};
 
                 // Record the matching free sites for removal.
                 for (auto& site : freeSites_) toRemove.push_back(site);

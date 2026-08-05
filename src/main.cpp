@@ -19,6 +19,7 @@
 #include "cider_inliner.h"
 #include "cider_licm.h"
 #include "cider_gvn.h"
+#include "cider_escape.h"
 #include "cider_meta.h"
 #include <sys/stat.h>
 
@@ -142,6 +143,11 @@ int main(int argc, char** argv) {
     Cider::GvnPass gvn;
     gvn.run(irModule);
     std::cout << "GVN complete.\n";
+
+    // Escape analysis (before SSA deconstruction)
+    Cider::EscapeAnalysis escape_analysis;
+    escape_analysis.run(irModule);
+    std::cout << "Escape analysis complete.\n";
 
     // 3.95 Semantic Analysis (Phase 9: SSA Deconstruction)
     Cider::SSADeconstructor deconstructor;
