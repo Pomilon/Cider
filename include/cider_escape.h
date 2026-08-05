@@ -207,7 +207,8 @@ private:
                     }
                     case IROp::CALL:
                     case IROp::VIRTUAL_CALL: {
-                        for (size_t i = 1; i < instr.args.size(); ++i) {
+                        size_t startIdx = (instr.op == IROp::VIRTUAL_CALL) ? 0 : 1;
+                        for (size_t i = startIdx; i < instr.args.size(); ++i) {
                             if (instr.args[i].kind != IRValue::REGISTER) continue;
                             const std::string& arg = instr.args[i].name;
                             bool tracked = values_.count(arg);
