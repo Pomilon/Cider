@@ -256,6 +256,10 @@ namespace Cider {
                 variableValues_[paramRegName] = addr; // Support both for lookup convenience
                 paramNames_.insert(param.first);
             }
+            // Pre-pass: params assigned anywhere in the body must not read-through.
+            assignedParams_.clear();
+            for (auto& s : stmt.getBody()) collectAssignedParams(s.get());
+
             for (auto& s : stmt.getBody()) {
                 s->accept(*this);
             }
@@ -950,7 +954,7 @@ namespace Cider {
             }
 
             if (variableValues_.count(expr.getName())) {
-                if (paramNames_.count(expr.getName())) {
+                if (paramNames_.count(expr.getName()) && !assignedParams_.count(expr.getName())) {
                     IRType irType = (lastExprType_.pointerLevel > 0) ? IRType::PTR : mapType(lastExprType_.name);
                     lastValue_ = IRValue::Register("arg_" + expr.getName(), irType);
                 } else {
@@ -971,6 +975,42 @@ namespace Cider {
             } else {
                 lastValue_ = IRValue::Register(expr.getName(), IRType::I32);
                 lastExprType_ = {"int", 0};
+            }
+        }
+
+        // Pre-pass: collect every parameter that is assigned ANYWHERE in the
+        // function body. Read-through (param as register) is only sound when
+        // the param is never written — otherwise a read in an earlier block
+        // (e.g. a loop header generated before the assignment) would keep
+        // reading the stale original register.
+        void collectAssignedParams(Statement* stmt) {
+            if (!stmt) return;
+            if (auto assign = dynamic_cast<AssignStmt*>(stmt)) {
+                if (auto ident = dynamic_cast<IdentifierExpr*>(assign->getTarget())) {
+                    assignedParams_.insert(ident->getName());
+                }
+            } else if (auto iff = dynamic_cast<IfStmt*>(stmt)) {
+                for (auto& s : iff->getThenBranch()) collectAssignedParams(s.get());
+                for (auto& s : iff->getElseBranch()) collectAssignedParams(s.get());
+            } else if (auto wh = dynamic_cast<WhileStmt*>(stmt)) {
+                for (auto& s : wh->getBody()) collectAssignedParams(s.get());
+            } else if (auto blk = dynamic_cast<BlockStmt*>(stmt)) {
+                for (auto& s : blk->getStatements()) collectAssignedParams(s.get());
+            } else if (auto fr = dynamic_cast<ForStmt*>(stmt)) {
+                collectAssignedParams(fr->getInitializer());
+                collectAssignedParams(fr->getIncrement());
+                for (auto& s : fr->getBody()) collectAssignedParams(s.get());
+            } else if (auto fe = dynamic_cast<ForEachStmt*>(stmt)) {
+                for (auto& s : fe->getBody()) collectAssignedParams(s.get());
+            } else if (auto tc = dynamic_cast<TryCatchStmt*>(stmt)) {
+                for (auto& s : tc->getTryBlock()) collectAssignedParams(s.get());
+                for (auto& s : tc->getCatchBlock()) collectAssignedParams(s.get());
+            } else if (auto df = dynamic_cast<DeferStmt*>(stmt)) {
+                collectAssignedParams(df->getDeferredStmt());
+            } else if (auto ms = dynamic_cast<MatchStmt*>(stmt)) {
+                for (auto& arm : ms->getArms()) collectAssignedParams(arm.body.get());
+            } else if (auto ex = dynamic_cast<ExportStmt*>(stmt)) {
+                collectAssignedParams(ex->getStmt());
             }
         }
 
@@ -1974,6 +2014,7 @@ namespace Cider {
         bool isAddress_ = false;
         std::map<std::string, IRValue> variableValues_;
         std::set<std::string> paramNames_;
+        std::set<std::string> assignedParams_;
         std::map<std::string, IRValue> globalValues_;
         std::vector<std::string> classNames_;
         std::vector<std::string> interfaceNames_;
