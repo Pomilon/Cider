@@ -394,8 +394,14 @@ namespace Cider {
                                         } else {
                                             // 32-to-64 bit sign extension if needed
                                             if (t == IRType::I64 || t == IRType::U64 || t == IRType::PTR) {
-                                                if (instr.args[0].kind != IRValue::CONSTANT && !isMem(a1) && (instr.args[0].type == IRType::I32 || instr.args[0].type == IRType::U32)) {
-                                                    addText("    movsxd " + getSizedReg(d, t) + ", " + getSizedReg(a1, IRType::I32));
+                                                if (instr.args[0].kind != IRValue::CONSTANT && (instr.args[0].type == IRType::I32 || instr.args[0].type == IRType::U32)) {
+                                                    if (isMem(a1)) {
+                                                        // Spilled I32 source: read dword and sign-extend so the
+                                                        // upper 32 bits of the qword load don't carry stack garbage.
+                                                        addText("    movsxd " + getSizedReg(d, t) + ", dword " + a1);
+                                                    } else {
+                                                        addText("    movsxd " + getSizedReg(d, t) + ", " + getSizedReg(a1, IRType::I32));
+                                                    }
                                                 } else {
                                                     addText("    mov " + getSizedReg(d, t) + ", " + getSizedReg(a1, t));
                                                 }
@@ -426,6 +432,7 @@ namespace Cider {
                                 IRType t1 = (instr.args.size() > 0 ? instr.args[0].type : IRType::I32);
                                 if (is64 && (t1 == IRType::I32 || t1 == IRType::U32)) {
                                     if (isMem(a1)) addText("    movsxd rax, dword " + a1);
+                                    else if (instr.args[0].kind == IRValue::CONSTANT) addText("    mov rax, " + a1);
                                     else addText("    movsxd rax, " + getSizedReg(a1, IRType::I32));
                                 } else {
                                     addText("    mov " + getSizedReg("rax", t) + ", " + getSizedReg(a1, t));
@@ -610,6 +617,7 @@ namespace Cider {
 
                                 if (is64 && (t == IRType::I32 || t == IRType::U32)) {
                                     if (isMem(a1)) addText("    movsxd rax, dword " + a1);
+                                    else if (instr.args[0].kind == IRValue::CONSTANT) addText("    mov rax, " + a1);
                                     else addText("    movsxd rax, " + getSizedReg(a1, IRType::I32));
                                 } else {
                                     addText("    mov " + getSizedReg("rax", is64 ? IRType::I64 : t) + ", " + getSizedReg(a1, t));

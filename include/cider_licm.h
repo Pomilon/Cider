@@ -326,10 +326,13 @@ bool PostLicmPass::hoistLoop(FunctionIR& func, const Loop& loop, const std::stri
     if (!preheaderBlock) return false;
 
     auto& preInstrs = preheaderBlock->getInstructions();
-    auto insertPos = preInstrs.end();
-    if (!preInstrs.empty()) insertPos = preInstrs.end() - 1;
 
+    // Recompute the insert position each iteration: inserting invalidates
+    // iterators at/after the insertion point, and a stale iterator would
+    // both be UB and scramble the hoisted order (dependents before their
+    // operands). Inserting before the terminator preserves worklist order.
     for (const auto* instr : invariantInstrs) {
+        auto insertPos = preInstrs.empty() ? preInstrs.end() : preInstrs.end() - 1;
         preInstrs.insert(insertPos, *instr);
     }
 
