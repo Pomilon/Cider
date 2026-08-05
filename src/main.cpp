@@ -18,6 +18,7 @@
 #include "cider_optimizer.h"
 #include "cider_inliner.h"
 #include "cider_licm.h"
+#include "cider_gvn.h"
 #include "cider_meta.h"
 #include <sys/stat.h>
 
@@ -136,7 +137,12 @@ int main(int argc, char** argv) {
     Cider::SSALicmPass ssa_licm;
     ssa_licm.run(irModule);
     std::cout << "SSA LICM complete.\n";
-    
+
+    // GVN (before SSA deconstruction)
+    Cider::GvnPass gvn;
+    gvn.run(irModule);
+    std::cout << "GVN complete.\n";
+
     // 3.95 Semantic Analysis (Phase 9: SSA Deconstruction)
     Cider::SSADeconstructor deconstructor;
     deconstructor.process(irModule);
