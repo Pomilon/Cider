@@ -117,7 +117,7 @@ private:
                         const std::string& dst = instr.dest->name;
                         if (values_.count(dst)) continue;
                         if (instr.op == IROp::MOV || instr.op == IROp::CVT_ITOF ||
-                            instr.op == IROp::CVT_FTOI) {
+                            instr.op == IROp::CVT_FTOI || instr.op == IROp::ADD) {
                             if (!instr.args.empty() && instr.args[0].kind == IRValue::REGISTER &&
                                 values_.count(instr.args[0].name)) {
                                 values_.insert(dst);
