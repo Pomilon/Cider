@@ -152,11 +152,16 @@ private:
                         }
                     }
                     if (instr.op == IROp::MEMCPY && instr.args.size() >= 2 &&
-                        instr.args[0].kind == IRValue::REGISTER && instr.args[1].kind == IRValue::REGISTER) {
+                        instr.args[1].kind == IRValue::REGISTER) {
                         std::string srcBase = baseOf(instr.args[1].name);
-                        std::string dstBase = baseOf(instr.args[0].name);
-                        if (!srcBase.empty() && locals_.count(srcBase) &&
-                            !dstBase.empty() && isLocalAlloca(dstBase) && !locals_.count(dstBase)) {
+                        std::string dstBase =
+                            (instr.args[0].kind == IRValue::REGISTER) ? baseOf(instr.args[0].name) : "";
+                        bool srcTainted = !srcBase.empty() && locals_.count(srcBase);
+                        bool dstLocal = !dstBase.empty() && isLocalAlloca(dstBase);
+                        if (srcTainted && !dstLocal) {
+                            return true;  // tainted struct copied into global/heap object → escape
+                        }
+                        if (srcTainted && dstLocal && !locals_.count(dstBase)) {
                             locals_.insert(dstBase);
                             changed = true;
                         }
