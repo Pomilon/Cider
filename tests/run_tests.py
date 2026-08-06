@@ -78,10 +78,33 @@ def discover():
             setattr(TestPrograms, f"test_{name}", make_test(name))
 
 
+def test_fixtures(self):
+    fixtures = os.path.join(REPO, "tests", "fixtures")
+    for name in sorted(os.listdir(fixtures)):
+        if not name.endswith(".cdr"):
+            continue
+        base = name[:-4]
+        src = os.path.join(fixtures, name)
+        if os.path.exists(os.path.join(fixtures, base + ".expected")):
+            with open(os.path.join(fixtures, base + ".expected")) as f:
+                expected = f.read()
+            r = run_cider(["parse", src])
+            self.assertEqual(r.returncode, 0, f"{name}: parse exit")
+            self.assertEqual(r.stdout, expected, f"{name}: dump mismatch")
+        elif os.path.exists(os.path.join(fixtures, base + ".errors")):
+            with open(os.path.join(fixtures, base + ".errors")) as f:
+                expected_errors = [l.strip() for l in f if l.strip()]
+            r = run_cider(["parse", src])
+            self.assertEqual(r.returncode, 1, f"{name}: expected failure")
+            for sub in expected_errors:
+                self.assertIn(sub, r.stderr, f"{name}: missing diagnostic {sub}")
+
+
 class TestPrograms(unittest.TestCase):
     pass
 
 
+setattr(TestPrograms, "test_fixtures", test_fixtures)
 discover()
 
 if __name__ == "__main__":
