@@ -94,7 +94,8 @@ def test_fixtures(self):
         elif os.path.exists(os.path.join(fixtures, base + ".errors")):
             with open(os.path.join(fixtures, base + ".errors")) as f:
                 expected_errors = [l.strip() for l in f if l.strip()]
-            r = run_cider(["parse", src])
+            cmd = "check" if base.startswith("check_") else "parse"
+            r = run_cider([cmd, src])
             self.assertEqual(r.returncode, 1, f"{name}: expected failure")
             for sub in expected_errors:
                 self.assertIn(sub, r.stderr, f"{name}: missing diagnostic {sub}")

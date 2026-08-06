@@ -10,10 +10,13 @@
 #include "ir_text.h"
 #include "lexer.h"
 #include "parser.h"
+#include "symbol_collector.h"
+#include "symbols.h"
+#include "type_checker.h"
 #include "vm.h"
 
 struct CliOptions {
-    std::string command;      // "run" | "compile" | "parse"
+    std::string command;      // "run" | "compile" | "parse" | "check"
     bool noOpt = false;
     std::string inputFile;
     std::string outputFile;   // compile only
@@ -23,7 +26,7 @@ struct CliOptions {
 bool parseCli(int argc, char** argv, CliOptions& out) {
     if (argc < 2) return false;
     std::string cmd = argv[1];
-    if (cmd != "run" && cmd != "compile" && cmd != "parse") return false;
+    if (cmd != "run" && cmd != "compile" && cmd != "parse" && cmd != "check") return false;
     out.command = cmd;
     for (int i = 2; i < argc; ++i) {
         std::string a = argv[i];
@@ -60,10 +63,10 @@ int main(int argc, char** argv) {
     }
     CliOptions opts;
     if (!parseCli(argc, argv, opts)) {
-        std::fprintf(stderr, "usage: cider <run|compile|parse> [--no-opt] [-o out.asm] <file>\n");
+        std::fprintf(stderr, "usage: cider <run|compile|parse|check> [--no-opt] [-o out.asm] <file>\n");
         return 2;
     }
-    if (opts.command == "parse") {
+    if (opts.command == "parse" || opts.command == "check") {
         try {
             std::string text = readFile(opts.inputFile);
             cider::ErrorReporter rep;
@@ -75,6 +78,21 @@ int main(int argc, char** argv) {
                     std::fprintf(stderr, "%s:%d:%d: %s\n", opts.inputFile.c_str(),
                                  d.line, d.col, d.message.c_str());
                 return 1;
+            }
+            if (opts.command == "check") {
+                cider::SymbolTable table;
+                cider::SymbolCollector collector(table, rep);
+                collector.collect(*prog);
+                rep.clear();
+                cider::TypeChecker checker(table, rep);
+                checker.check(*prog);
+                if (rep.hasErrors()) {
+                    for (const auto& d : rep.errors())
+                        std::fprintf(stderr, "%s:%d:%d: %s\n", opts.inputFile.c_str(),
+                                     d.line, d.col, d.message.c_str());
+                    return 1;
+                }
+                return 0;
             }
             std::printf("%s\n", cider::dump(*prog).c_str());
             return 0;
