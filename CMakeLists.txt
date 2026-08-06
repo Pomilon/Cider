@@ -9,7 +9,7 @@ endif()
 
 enable_testing()
 
-add_executable(cider src/main.cpp src/lexer.cpp src/parser.cpp src/symbols.cpp src/module_resolver.cpp)
+add_executable(cider src/main.cpp src/lexer.cpp src/parser.cpp src/symbols.cpp src/module_resolver.cpp src/ir.cpp)
 target_include_directories(cider PRIVATE src)
 
 add_executable(ir_test tests/unit/ir_test.cpp src/ir.cpp)

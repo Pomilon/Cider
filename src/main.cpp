@@ -6,6 +6,7 @@
 
 #include "ast.h"
 #include "errors.h"
+#include "ir_gen.h"
 #include "lexer.h"
 #include "module_resolver.h"
 #include "parser.h"
@@ -95,8 +96,11 @@ int main(int argc, char** argv) {
         if (opts.command == "check") {
             return 0;
         }
-        std::fprintf(stderr, "build: IR generation arrives in Phase 4 task 2\n");
-        return 1;
+        // build: generate IR and print the module dump.
+        cider::IRGenerator gen(table, opts.inputFile);
+        auto module = gen.generate(*prog);
+        module.print();
+        return 0;
     } catch (const std::exception& e) {
         std::fprintf(stderr, "%s: %s\n", opts.inputFile.c_str(), e.what());
         return 1;

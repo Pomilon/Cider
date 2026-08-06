@@ -94,8 +94,9 @@ def test_fixtures(self):
         if os.path.exists(os.path.join(fixtures, base + ".expected")):
             with open(os.path.join(fixtures, base + ".expected")) as f:
                 expected = f.read()
-            r = run_cider(["parse", src])
-            self.assertEqual(r.returncode, 0, f"{name}: parse exit")
+            cmd = "build" if base.startswith("ir_") else "parse"
+            r = run_cider([cmd, src])
+            self.assertEqual(r.returncode, 0, f"{name}: {cmd} exit")
             self.assertEqual(r.stdout, expected, f"{name}: dump mismatch")
         elif os.path.exists(os.path.join(fixtures, base + ".errors")):
             with open(os.path.join(fixtures, base + ".errors")) as f:
