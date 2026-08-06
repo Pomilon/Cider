@@ -64,6 +64,10 @@ struct IRInstruction {
     // For ASM substitution: maps placeholder name to IRValue
     std::map<std::string, IRValue> asmMap;
 
+    IRInstruction() = default;
+    IRInstruction(IROp o, std::optional<IRValue> d, std::vector<IRValue> a)
+        : op(o), dest(std::move(d)), args(std::move(a)) {}
+
     std::string toString() const;
 };
 
