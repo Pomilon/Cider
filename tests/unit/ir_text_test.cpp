@@ -59,6 +59,19 @@ int run() {
         threw = true;
     }
     CHECK(threw);
+    // Round-trip: parse -> print -> parse -> print must be stable.
+    const std::string src =
+        "func main:\n"
+        "  %0 = const 1\n"
+        "  %1 = str \"Hello, world!\\n\"\n"
+        "  write %0, %1, 14\n"
+        "  exit 0\n";
+    cider::Program a = cider::parseIR(src);
+    std::string printed = cider::printIR(a);
+    cider::Program b = cider::parseIR(printed);
+    CHECK(cider::printIR(b) == printed);
+    CHECK(printed.find("  %0 = const 1\n") != std::string::npos);
+    CHECK(printed.find("  write %0, %1, 14\n") != std::string::npos);
     return 0;
 }
 

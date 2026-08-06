@@ -133,4 +133,56 @@ Program parseIR(const std::string& text) {
     return prog;
 }
 
+namespace {
+
+std::string escape(const std::string& s) {
+    std::string out;
+    for (char c : s) {
+        switch (c) {
+            case '\n': out += "\\n"; break;
+            case '\t': out += "\\t"; break;
+            case '\\': out += "\\\\"; break;
+            case '"':  out += "\\\""; break;
+            default:   out += c;
+        }
+    }
+    return out;
+}
+
+std::string operandText(const Operand& o) {
+    return o.isReg ? o.reg : std::to_string(o.imm);
+}
+
+}  // namespace
+
+std::string printIR(const Program& prog) {
+    std::ostringstream os;
+    for (const auto& fn : prog.functions) {
+        os << "func " << fn.name << ":\n";
+        for (const auto& in : fn.instrs) {
+            os << "  ";
+            if (!in.dest.empty()) os << in.dest << " = ";
+            os << opName(in.op);
+            switch (in.op) {
+                case Op::CONST:
+                    os << " " << operandText(in.args[0]);
+                    break;
+                case Op::STR:
+                    os << " \"" << escape(prog.strings[static_cast<size_t>(in.args[0].imm)]) << "\"";
+                    break;
+                case Op::WRITE:
+                    os << " " << operandText(in.args[0])
+                       << ", " << operandText(in.args[1])
+                       << ", " << operandText(in.args[2]);
+                    break;
+                case Op::EXIT:
+                    os << " " << operandText(in.args[0]);
+                    break;
+            }
+            os << "\n";
+        }
+    }
+    return os.str();
+}
+
 }  // namespace cider
