@@ -1,21 +1,28 @@
 #pragma once
 
+#include <fstream>
 #include <map>
 #include <memory>
 #include <set>
+#include <sstream>
 #include <string>
 #include <vector>
 
 #include "ast.h"
 #include "errors.h"
+#include "lexer.h"
+#include "module_resolver.h"
+#include "parser.h"
 #include "symbols.h"
 
 namespace cider {
 
 class SymbolCollector : public ASTVisitor {
 public:
-    SymbolCollector(SymbolTable& symbolTable, ErrorReporter& reporter)
-        : symbolTable_(symbolTable), reporter_(reporter), currentProgram_(nullptr) {}
+    SymbolCollector(SymbolTable& symbolTable, ErrorReporter& reporter,
+                    ModuleResolver& resolver, const std::string& originPath = "")
+        : symbolTable_(symbolTable), resolver_(resolver), reporter_(reporter),
+          currentProgram_(nullptr), originPath_(originPath) {}
 
     void collect(AstProgram& program) {
         currentProgram_ = &program;
@@ -338,9 +345,7 @@ public:
     }
 
     void visit(ImportStmt& stmt) override {
-        // Module resolution arrives in Phase 4; imports are collected
-        // as statements and skipped here for now.
-        (void)stmt;
+        importModule(stmt.getModuleName(), stmt.getLine(), stmt.getColumn());
     }
 
     // Stubs
@@ -534,7 +539,7 @@ public:
     }
 
     void visit(FromImportStmt& stmt) override {
-        (void)stmt;
+        importModule(stmt.getModuleName(), stmt.getLine(), stmt.getColumn());
     }
 
     void visit(ExportStmt& stmt) override {
@@ -569,16 +574,62 @@ public:
         return 8;
     }
 
+    void importModule(const std::string& moduleName, int line, int col) {
+        // Check if already imported by name
+        if (importedModuleNames_.count(moduleName)) return;
+
+        auto result = resolver_.resolve(moduleName, originPath_);
+        if (result.type == ModuleType::NOT_FOUND) {
+            reporter_.error("Could not resolve module '" + moduleName + "'", line, col);
+            return;
+        }
+
+        // Cycle detection
+        if (importingPaths_.count(result.path)) {
+            reporter_.error("Circular import detected for module '" + moduleName + "'", line, col);
+            return;
+        }
+
+        importedModuleNames_.insert(moduleName);
+        importingPaths_.insert(result.path);
+
+        std::ifstream file(result.path);
+        if (!file) {
+            importingPaths_.erase(result.path);
+            return;
+        }
+        std::stringstream buffer;
+        buffer << file.rdbuf();
+
+        Lexer lexer(buffer.str(), reporter_);
+        Parser parser(lexer, reporter_);
+        auto importedAst = parser.parseProgram();
+
+        if (importedAst) {
+            importedAst->setSourcePath(result.path);
+            importedAst->accept(*this);
+            if (currentProgram_) {
+                currentProgram_->addImportedAst(std::move(importedAst));
+            }
+        }
+
+        importingPaths_.erase(result.path);
+    }
+
 private:
     SymbolTable& symbolTable_;
+    ModuleResolver& resolver_;
     ErrorReporter& reporter_;
     std::string currentClassName_;
     AstProgram* currentProgram_;
+    std::string originPath_;
     std::vector<std::string> interfaceNames_;
     std::vector<std::string> structClassNames_;
     std::map<std::string, std::vector<std::string>> interfaceImpls_;
     std::map<std::string, std::shared_ptr<TemplateSymbol>> templateTable_;
     bool inExport_ = false;
+    std::set<std::string> importedModuleNames_;
+    std::set<std::string> importingPaths_;
 };
 
 }  // namespace cider

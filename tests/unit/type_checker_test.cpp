@@ -4,6 +4,7 @@
 #include <vector>
 
 #include "lexer.h"
+#include "module_resolver.h"
 #include "parser.h"
 #include "symbol_collector.h"
 #include "symbols.h"
@@ -18,7 +19,8 @@ std::vector<std::string> checkSrc(const std::string& src) {
     cider::Parser parser(lex, rep);
     auto prog = parser.parseProgram();
     cider::SymbolTable table;
-    cider::SymbolCollector collector(table, rep);
+    cider::ModuleResolver resolver;
+    cider::SymbolCollector collector(table, rep, resolver);
     collector.collect(*prog);
     rep.clear();
     cider::TypeChecker checker(table, rep);

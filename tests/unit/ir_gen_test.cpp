@@ -6,6 +6,7 @@
 
 #include "ir_gen.h"
 #include "lexer.h"
+#include "module_resolver.h"
 #include "parser.h"
 #include "symbol_collector.h"
 #include "symbols.h"
@@ -19,7 +20,8 @@ std::string genSrc(const std::string& src, std::vector<std::string>* errors = nu
     cider::Parser parser(lex, rep);
     auto prog = parser.parseProgram();
     cider::SymbolTable table;
-    cider::SymbolCollector collector(table, rep);
+    cider::ModuleResolver resolver;
+    cider::SymbolCollector collector(table, rep, resolver);
     collector.collect(*prog);
     if (errors) {
         for (auto& e : rep.errors()) errors->push_back(e.message);

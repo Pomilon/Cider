@@ -4,6 +4,7 @@
 #include <vector>
 
 #include "lexer.h"
+#include "module_resolver.h"
 #include "parser.h"
 #include "symbol_collector.h"
 #include "symbols.h"
@@ -23,7 +24,8 @@ Result collectSrc(const std::string& src) {
     cider::Lexer lex(src, rep);
     cider::Parser parser(lex, rep);
     auto prog = parser.parseProgram();
-    cider::SymbolCollector collector(*r.table, rep);
+    cider::ModuleResolver resolver;
+    cider::SymbolCollector collector(*r.table, rep, resolver);
     collector.collect(*prog);
     for (auto& e : rep.errors()) r.errors.push_back(e.message);
     return r;

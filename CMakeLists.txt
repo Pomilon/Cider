@@ -9,14 +9,14 @@ endif()
 
 enable_testing()
 
-add_executable(cider src/main.cpp src/lexer.cpp src/parser.cpp src/symbols.cpp)
+add_executable(cider src/main.cpp src/lexer.cpp src/parser.cpp src/symbols.cpp src/module_resolver.cpp)
 target_include_directories(cider PRIVATE src)
 
 add_executable(ir_test tests/unit/ir_test.cpp src/ir.cpp)
 target_include_directories(ir_test PRIVATE src)
 add_test(NAME ir_test COMMAND ir_test)
 
-add_executable(ir_gen_test tests/unit/ir_gen_test.cpp src/ir.cpp src/lexer.cpp src/parser.cpp src/symbols.cpp)
+add_executable(ir_gen_test tests/unit/ir_gen_test.cpp src/ir.cpp src/lexer.cpp src/parser.cpp src/symbols.cpp src/module_resolver.cpp)
 target_include_directories(ir_gen_test PRIVATE src)
 add_test(NAME ir_gen_test COMMAND ir_gen_test)
 
@@ -56,10 +56,14 @@ add_executable(symbols_test tests/unit/symbols_test.cpp src/symbols.cpp)
 target_include_directories(symbols_test PRIVATE src)
 add_test(NAME symbols_test COMMAND symbols_test)
 
-add_executable(symbol_collector_test tests/unit/symbol_collector_test.cpp src/symbols.cpp src/parser.cpp src/lexer.cpp)
+add_executable(symbol_collector_test tests/unit/symbol_collector_test.cpp src/symbols.cpp src/parser.cpp src/lexer.cpp src/module_resolver.cpp)
 target_include_directories(symbol_collector_test PRIVATE src)
 add_test(NAME symbol_collector_test COMMAND symbol_collector_test)
 
-add_executable(type_checker_test tests/unit/type_checker_test.cpp src/symbols.cpp src/parser.cpp src/lexer.cpp)
+add_executable(type_checker_test tests/unit/type_checker_test.cpp src/symbols.cpp src/parser.cpp src/lexer.cpp src/module_resolver.cpp)
 target_include_directories(type_checker_test PRIVATE src)
 add_test(NAME type_checker_test COMMAND type_checker_test)
+
+add_executable(module_resolver_test tests/unit/module_resolver_test.cpp src/module_resolver.cpp src/symbols.cpp src/parser.cpp src/lexer.cpp)
+target_include_directories(module_resolver_test PRIVATE src)
+add_test(NAME module_resolver_test COMMAND module_resolver_test)

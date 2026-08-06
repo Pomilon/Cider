@@ -7,6 +7,7 @@
 #include "ast.h"
 #include "errors.h"
 #include "lexer.h"
+#include "module_resolver.h"
 #include "parser.h"
 #include "symbol_collector.h"
 #include "symbols.h"
@@ -79,7 +80,8 @@ int main(int argc, char** argv) {
             return 0;
         }
         cider::SymbolTable table;
-        cider::SymbolCollector collector(table, rep);
+        cider::ModuleResolver resolver;
+        cider::SymbolCollector collector(table, rep, resolver, opts.inputFile);
         collector.collect(*prog);
         rep.clear();
         cider::TypeChecker checker(table, rep);

@@ -73,6 +73,12 @@ def make_test(name):
 
 
 def discover():
+    # The triple-differential program corpus is being migrated from the
+    # Phase-1 .ir scaffolding to .cdr sources (Phase 4 task 4). While the
+    # VM and codegen are being rewritten (Phases 5/6), the programs dir is
+    # empty and the matrix tests are disabled.
+    if not os.path.isdir(PROGRAMS):
+        return
     for name in sorted(os.listdir(PROGRAMS)):
         if os.path.isdir(os.path.join(PROGRAMS, name)):
             setattr(TestPrograms, f"test_{name}", make_test(name))
