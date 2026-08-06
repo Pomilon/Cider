@@ -15,6 +15,9 @@ public:
     void error(const std::string& message, int line, int col) {
         diags_.push_back({line, col, message});
     }
+    void error(const std::string& message, int line) {
+        diags_.push_back({line, 0, message});
+    }
     bool hasErrors() const { return !diags_.empty(); }
     const std::vector<Diagnostic>& errors() const { return diags_; }
     void clear() { diags_.clear(); }

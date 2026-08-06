@@ -64,3 +64,7 @@ add_test(NAME symbols_test COMMAND symbols_test)
 add_executable(symbol_collector_test tests/unit/symbol_collector_test.cpp src/symbols.cpp src/parser.cpp src/lexer.cpp)
 target_include_directories(symbol_collector_test PRIVATE src)
 add_test(NAME symbol_collector_test COMMAND symbol_collector_test)
+
+add_executable(type_checker_test tests/unit/type_checker_test.cpp src/symbols.cpp src/parser.cpp src/lexer.cpp)
+target_include_directories(type_checker_test PRIVATE src)
+add_test(NAME type_checker_test COMMAND type_checker_test)
