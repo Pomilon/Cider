@@ -28,6 +28,10 @@ add_executable(parser_expr_test tests/unit/parser_expr_test.cpp src/parser.cpp s
 target_include_directories(parser_expr_test PRIVATE src)
 add_test(NAME parser_expr_test COMMAND parser_expr_test)
 
+add_executable(parser_stmt_test tests/unit/parser_stmt_test.cpp src/parser.cpp src/lexer.cpp)
+target_include_directories(parser_stmt_test PRIVATE src)
+add_test(NAME parser_stmt_test COMMAND parser_stmt_test)
+
 add_executable(ir_text_test tests/unit/ir_text_test.cpp src/ir_text.cpp)
 target_include_directories(ir_text_test PRIVATE src)
 add_test(NAME ir_text_test COMMAND ir_text_test)

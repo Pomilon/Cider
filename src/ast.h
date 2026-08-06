@@ -1110,14 +1110,12 @@ inline void FunctionDeclStmt::dump(std::string& out, int depth) const {
         returnType_->dump(out, depth);
         out += ")";
     }
-    if (!body_.empty()) {
-        out += " (body";
-        for (const auto& s : body_) {
-            out += " ";
-            s->dump(out, depth);
-        }
-        out += ")";
+    out += " (body";
+    for (const auto& s : body_) {
+        out += " ";
+        s->dump(out, depth);
     }
+    out += ")";
     out += ")";
 }
 
