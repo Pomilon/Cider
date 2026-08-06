@@ -12,3 +12,7 @@ add_executable(cider src/main.cpp)
 add_executable(ir_test tests/unit/ir_test.cpp)
 target_include_directories(ir_test PRIVATE src)
 add_test(NAME ir_test COMMAND ir_test)
+
+add_executable(ir_text_test tests/unit/ir_text_test.cpp src/ir_text.cpp)
+target_include_directories(ir_text_test PRIVATE src)
+add_test(NAME ir_text_test COMMAND ir_text_test)
