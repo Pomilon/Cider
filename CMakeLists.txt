@@ -16,3 +16,7 @@ add_test(NAME ir_test COMMAND ir_test)
 add_executable(ir_text_test tests/unit/ir_text_test.cpp src/ir_text.cpp)
 target_include_directories(ir_text_test PRIVATE src)
 add_test(NAME ir_text_test COMMAND ir_text_test)
+
+add_executable(vm_test tests/unit/vm_test.cpp src/vm.cpp src/ir_text.cpp)
+target_include_directories(vm_test PRIVATE src)
+add_test(NAME vm_test COMMAND vm_test)
