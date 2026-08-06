@@ -78,8 +78,8 @@ Parser::Precedence Parser::getPrecedence(TokenType type) {
     return LOWEST;
 }
 
-std::unique_ptr<Program> Parser::parseProgram() {
-    auto program = std::make_unique<Program>();
+std::unique_ptr<AstProgram> Parser::parseProgram() {
+    auto program = std::make_unique<AstProgram>();
 
     if (currentToken_.type == TokenType::STRICT) {
         nextToken();

@@ -9,7 +9,7 @@ endif()
 
 enable_testing()
 
-add_executable(cider src/main.cpp src/ir_text.cpp src/vm.cpp src/codegen.cpp)
+add_executable(cider src/main.cpp src/ir_text.cpp src/vm.cpp src/codegen.cpp src/lexer.cpp src/parser.cpp)
 target_include_directories(cider PRIVATE src)
 
 add_executable(ir_test tests/unit/ir_test.cpp)
@@ -48,3 +48,7 @@ find_package(Python3 COMPONENTS Interpreter)
 if(Python3_FOUND)
     add_test(NAME harness COMMAND ${Python3_EXECUTABLE} ${CMAKE_SOURCE_DIR}/tests/run_tests.py)
 endif()
+
+add_executable(parser_recovery_test tests/unit/parser_recovery_test.cpp src/parser.cpp src/lexer.cpp)
+target_include_directories(parser_recovery_test PRIVATE src)
+add_test(NAME parser_recovery_test COMMAND parser_recovery_test)

@@ -4,12 +4,16 @@
 #include <stdexcept>
 #include <string>
 
+#include "ast.h"
 #include "codegen.h"
+#include "errors.h"
 #include "ir_text.h"
+#include "lexer.h"
+#include "parser.h"
 #include "vm.h"
 
 struct CliOptions {
-    std::string command;      // "run" | "compile"
+    std::string command;      // "run" | "compile" | "parse"
     bool noOpt = false;
     std::string inputFile;
     std::string outputFile;   // compile only
@@ -19,7 +23,7 @@ struct CliOptions {
 bool parseCli(int argc, char** argv, CliOptions& out) {
     if (argc < 2) return false;
     std::string cmd = argv[1];
-    if (cmd != "run" && cmd != "compile") return false;
+    if (cmd != "run" && cmd != "compile" && cmd != "parse") return false;
     out.command = cmd;
     for (int i = 2; i < argc; ++i) {
         std::string a = argv[i];
@@ -56,8 +60,28 @@ int main(int argc, char** argv) {
     }
     CliOptions opts;
     if (!parseCli(argc, argv, opts)) {
-        std::fprintf(stderr, "usage: cider <run|compile> [--no-opt] [-o out.asm] <file.ir>\n");
+        std::fprintf(stderr, "usage: cider <run|compile|parse> [--no-opt] [-o out.asm] <file>\n");
         return 2;
+    }
+    if (opts.command == "parse") {
+        try {
+            std::string text = readFile(opts.inputFile);
+            cider::ErrorReporter rep;
+            cider::Lexer lex(text, rep);
+            cider::Parser parser(lex, rep);
+            auto prog = parser.parseProgram();
+            if (rep.hasErrors()) {
+                for (const auto& d : rep.errors())
+                    std::fprintf(stderr, "%s:%d:%d: %s\n", opts.inputFile.c_str(),
+                                 d.line, d.col, d.message.c_str());
+                return 1;
+            }
+            std::printf("%s\n", cider::dump(*prog).c_str());
+            return 0;
+        } catch (const std::exception& e) {
+            std::fprintf(stderr, "%s: %s\n", opts.inputFile.c_str(), e.what());
+            return 1;
+        }
     }
     if (opts.command == "run") {
         try {

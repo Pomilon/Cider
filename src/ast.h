@@ -895,20 +895,20 @@ private:
     std::vector<InterfaceMethod> methods_;
 };
 
-class Program : public ASTNode {
+class AstProgram : public ASTNode {
 public:
-    Program() : ASTNode(PROGRAM, 1, 1) {}
+    AstProgram() : ASTNode(PROGRAM, 1, 1) {}
     void addStatement(std::unique_ptr<Statement> stmt) { statements_.push_back(std::move(stmt)); }
     const std::vector<std::unique_ptr<Statement>>& getStatements() const { return statements_; }
     bool isStrict = false;
     void setSourcePath(const std::string& p) { sourcePath_ = p; }
     const std::string& getSourcePath() const { return sourcePath_; }
-    void addImportedAst(std::unique_ptr<Program> ast) { importedAsts_.push_back(std::move(ast)); }
-    const std::vector<std::unique_ptr<Program>>& getImportedAsts() const { return importedAsts_; }
+    void addImportedAst(std::unique_ptr<AstProgram> ast) { importedAsts_.push_back(std::move(ast)); }
+    const std::vector<std::unique_ptr<AstProgram>>& getImportedAsts() const { return importedAsts_; }
     void dump(std::string& out, int depth) const override;
 private:
     std::vector<std::unique_ptr<Statement>> statements_;
-    std::vector<std::unique_ptr<Program>> importedAsts_;
+    std::vector<std::unique_ptr<AstProgram>> importedAsts_;
     std::string sourcePath_;
 };
 
@@ -1199,7 +1199,7 @@ inline void InterfaceDeclStmt::dump(std::string& out, int depth) const {
     out += ")";
 }
 
-inline void Program::dump(std::string& out, int depth) const {
+inline void AstProgram::dump(std::string& out, int depth) const {
     out += "(Program";
     if (isStrict) out += " strict";
     for (const auto& s : statements_) {
@@ -1209,7 +1209,7 @@ inline void Program::dump(std::string& out, int depth) const {
     out += "\n)";
 }
 
-inline std::string dump(const Program& prog) {
+inline std::string dump(const AstProgram& prog) {
     std::string out;
     prog.dump(out, 0);
     return out;

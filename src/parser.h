@@ -12,7 +12,7 @@ namespace cider {
 class Parser {
 public:
     explicit Parser(Lexer& lexer, ErrorReporter& reporter);
-    std::unique_ptr<Program> parseProgram();
+    std::unique_ptr<AstProgram> parseProgram();
 
     enum Precedence {
         LOWEST,
