@@ -1,5 +1,0 @@
-func main:
-  %0 = const 2
-  %1 = str "oops\n"
-  write %0, %1, 5
-  exit 3

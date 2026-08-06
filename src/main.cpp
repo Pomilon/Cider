@@ -5,28 +5,25 @@
 #include <string>
 
 #include "ast.h"
-#include "codegen.h"
 #include "errors.h"
-#include "ir_text.h"
 #include "lexer.h"
 #include "parser.h"
 #include "symbol_collector.h"
 #include "symbols.h"
 #include "type_checker.h"
-#include "vm.h"
 
 struct CliOptions {
-    std::string command;      // "run" | "compile" | "parse" | "check"
+    std::string command;      // "parse" | "check" | "build"
     bool noOpt = false;
     std::string inputFile;
-    std::string outputFile;   // compile only
+    std::string outputFile;
 };
 
 // Returns false + prints usage to stderr on bad arguments.
 bool parseCli(int argc, char** argv, CliOptions& out) {
     if (argc < 2) return false;
     std::string cmd = argv[1];
-    if (cmd != "run" && cmd != "compile" && cmd != "parse" && cmd != "check") return false;
+    if (cmd != "parse" && cmd != "check" && cmd != "build") return false;
     out.command = cmd;
     for (int i = 2; i < argc; ++i) {
         std::string a = argv[i];
@@ -44,7 +41,6 @@ bool parseCli(int argc, char** argv, CliOptions& out) {
         }
     }
     if (out.inputFile.empty()) return false;
-    if (out.command == "compile" && out.outputFile.empty()) return false;
     return true;
 }
 
@@ -63,79 +59,41 @@ int main(int argc, char** argv) {
     }
     CliOptions opts;
     if (!parseCli(argc, argv, opts)) {
-        std::fprintf(stderr, "usage: cider <run|compile|parse|check> [--no-opt] [-o out.asm] <file>\n");
+        std::fprintf(stderr, "usage: cider <parse|check|build> [--no-opt] [-o out.asm] <file>\n");
         return 2;
-    }
-    if (opts.command == "parse" || opts.command == "check") {
-        try {
-            std::string text = readFile(opts.inputFile);
-            cider::ErrorReporter rep;
-            cider::Lexer lex(text, rep);
-            cider::Parser parser(lex, rep);
-            auto prog = parser.parseProgram();
-            if (rep.hasErrors()) {
-                for (const auto& d : rep.errors())
-                    std::fprintf(stderr, "%s:%d:%d: %s\n", opts.inputFile.c_str(),
-                                 d.line, d.col, d.message.c_str());
-                return 1;
-            }
-            if (opts.command == "check") {
-                cider::SymbolTable table;
-                cider::SymbolCollector collector(table, rep);
-                collector.collect(*prog);
-                rep.clear();
-                cider::TypeChecker checker(table, rep);
-                checker.check(*prog);
-                if (rep.hasErrors()) {
-                    for (const auto& d : rep.errors())
-                        std::fprintf(stderr, "%s:%d:%d: %s\n", opts.inputFile.c_str(),
-                                     d.line, d.col, d.message.c_str());
-                    return 1;
-                }
-                return 0;
-            }
-            std::printf("%s\n", cider::dump(*prog).c_str());
-            return 0;
-        } catch (const std::exception& e) {
-            std::fprintf(stderr, "%s: %s\n", opts.inputFile.c_str(), e.what());
-            return 1;
-        }
-    }
-    if (opts.command == "run") {
-        try {
-            std::string text = readFile(opts.inputFile);
-            cider::Program prog = cider::parseIR(text);
-            cider::VMResult r = cider::runVM(prog);
-            std::fwrite(r.stdoutText.data(), 1, r.stdoutText.size(), stdout);
-            std::fwrite(r.stderrText.data(), 1, r.stderrText.size(), stderr);
-            return r.exitCode;
-        } catch (const cider::ParseError& e) {
-            std::fprintf(stderr, "%s:%d: %s\n", opts.inputFile.c_str(), e.line, e.message.c_str());
-            return 1;
-        } catch (const cider::VMError& e) {
-            std::fprintf(stderr, "%s: %s\n", opts.inputFile.c_str(), e.message.c_str());
-            return 1;
-        } catch (const std::exception& e) {
-            std::fprintf(stderr, "%s: %s\n", opts.inputFile.c_str(), e.what());
-            return 1;
-        }
     }
     try {
         std::string text = readFile(opts.inputFile);
-        cider::Program prog = cider::parseIR(text);
-        std::string asmText = cider::generateAsm(prog);
-        std::ofstream out(opts.outputFile);
-        if (!out) {
-            std::fprintf(stderr, "cannot write %s\n", opts.outputFile.c_str());
+        cider::ErrorReporter rep;
+        cider::Lexer lex(text, rep);
+        cider::Parser parser(lex, rep);
+        auto prog = parser.parseProgram();
+        if (rep.hasErrors()) {
+            for (const auto& d : rep.errors())
+                std::fprintf(stderr, "%s:%d:%d: %s\n", opts.inputFile.c_str(),
+                             d.line, d.col, d.message.c_str());
             return 1;
         }
-        out << asmText;
-        return 0;
-    } catch (const cider::ParseError& e) {
-        std::fprintf(stderr, "%s:%d: %s\n", opts.inputFile.c_str(), e.line, e.message.c_str());
-        return 1;
-    } catch (const cider::CodegenError& e) {
-        std::fprintf(stderr, "%s: %s\n", opts.inputFile.c_str(), e.message.c_str());
+        if (opts.command == "parse") {
+            std::printf("%s\n", cider::dump(*prog).c_str());
+            return 0;
+        }
+        cider::SymbolTable table;
+        cider::SymbolCollector collector(table, rep);
+        collector.collect(*prog);
+        rep.clear();
+        cider::TypeChecker checker(table, rep);
+        checker.check(*prog);
+        if (rep.hasErrors()) {
+            for (const auto& d : rep.errors())
+                std::fprintf(stderr, "%s:%d:%d: %s\n", opts.inputFile.c_str(),
+                             d.line, d.col, d.message.c_str());
+            return 1;
+        }
+        if (opts.command == "check") {
+            return 0;
+        }
+        std::fprintf(stderr, "build: IR generation arrives in Phase 4 task 2\n");
         return 1;
     } catch (const std::exception& e) {
         std::fprintf(stderr, "%s: %s\n", opts.inputFile.c_str(), e.what());
