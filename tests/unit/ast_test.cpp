@@ -8,7 +8,7 @@
     std::fprintf(stderr, "FAIL %s:%d: %s\n", __FILE__, __LINE__, #cond); return 1; } } while (0)
 
 int run() {
-    cider::Program prog;
+    cider::AstProgram prog;
     std::vector<cider::FunctionDeclStmt::Parameter> params;
     params.emplace_back("a", std::make_unique<cider::TypeAST>("int", 0, 1, 1));
     auto fn = std::make_unique<cider::FunctionDeclStmt>(
