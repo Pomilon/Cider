@@ -20,3 +20,7 @@ add_test(NAME ir_text_test COMMAND ir_text_test)
 add_executable(vm_test tests/unit/vm_test.cpp src/vm.cpp src/ir_text.cpp)
 target_include_directories(vm_test PRIVATE src)
 add_test(NAME vm_test COMMAND vm_test)
+
+add_executable(codegen_test tests/unit/codegen_test.cpp src/codegen.cpp src/ir_text.cpp)
+target_include_directories(codegen_test PRIVATE src)
+add_test(NAME codegen_test COMMAND codegen_test)
