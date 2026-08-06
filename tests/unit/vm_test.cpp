@@ -43,6 +43,20 @@ int run() {
     try { cider::runVM(cider::parseIR("func other:\n  exit 0\n")); }
     catch (const cider::VMError&) { threw = true; }
     CHECK(threw);
+
+    // Runaway program must fail fast, never spin (see spec §9).
+    std::string big;
+    big += "func main:\n";
+    for (int i = 0; i < 1000001; ++i) {
+        big += "  %0 = const " + std::to_string(i) + "\n";
+    }
+    big += "  exit 0\n";
+    threw = false;
+    try { cider::runVM(cider::parseIR(big)); } catch (const cider::VMError& e) {
+        threw = true;
+        CHECK(std::string(e.message).find("step limit") != std::string::npos);
+    }
+    CHECK(threw);
     return 0;
 }
 
