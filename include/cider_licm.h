@@ -56,7 +56,8 @@ private:
     NaturalLoopFinder loopFinder_;
 
     bool runOnFunction(FunctionIR& func);
-    bool hoistLoop(FunctionIR& func, const Loop& loop, const std::string& preheader);
+    bool hoistLoop(FunctionIR& func, const Loop& loop, const std::string& preheader,
+                   const DominatorTree& dt);
 };
 
 bool SSALicmPass::run(ModuleIR& module) {
@@ -94,18 +95,24 @@ bool SSALicmPass::runOnFunction(FunctionIR& func) {
         loopFinder_.build(func, dt_);
         const Loop* updatedLoop = loopFinder_.loopForHeader(hdr);
         if (!updatedLoop) continue;
-        if (hoistLoop(func, *updatedLoop, phName)) changed = true;
+        if (hoistLoop(func, *updatedLoop, phName, dt_)) changed = true;
     }
     return changed;
 }
 
-bool SSALicmPass::hoistLoop(FunctionIR& func, const Loop& loop, const std::string& preheader) {
+bool SSALicmPass::hoistLoop(FunctionIR& func, const Loop& loop, const std::string& preheader,
+                            const DominatorTree& dt) {
     std::set<std::string> loopBlocks = loop.blocks;
 
     std::set<std::string> invariantRegs;
     for (const auto& b : func.getBlocks()) {
         if (loopBlocks.find(b->getName()) != loopBlocks.end()) continue;
-        if (b->getName() == preheader) continue;
+        // A register is only loop-invariant if its def is executed on every
+        // path reaching the loop, i.e. its block dominates the preheader.
+        // Defs in blocks after the loop (or on sibling paths) are NOT valid
+        // operands while the loop runs — hoisting a use of one reads a
+        // not-yet-defined (garbage) register.
+        if (!dt.dominates(b->getName(), preheader)) continue;
         for (const auto& instr : b->getInstructions()) {
             if (instr.dest && instr.dest->kind == IRValue::REGISTER) {
                 invariantRegs.insert(instr.dest->name);
@@ -205,7 +212,8 @@ private:
     NaturalLoopFinder loopFinder_;
 
     bool runOnFunction(FunctionIR& func);
-    bool hoistLoop(FunctionIR& func, const Loop& loop, const std::string& preheader);
+    bool hoistLoop(FunctionIR& func, const Loop& loop, const std::string& preheader,
+                   const DominatorTree& dt);
 };
 
 bool PostLicmPass::run(ModuleIR& module) {
@@ -243,18 +251,21 @@ bool PostLicmPass::runOnFunction(FunctionIR& func) {
         loopFinder_.build(func, dt_);
         const Loop* updatedLoop = loopFinder_.loopForHeader(hdr);
         if (!updatedLoop) continue;
-        if (hoistLoop(func, *updatedLoop, phName)) changed = true;
+        if (hoistLoop(func, *updatedLoop, phName, dt_)) changed = true;
     }
     return changed;
 }
 
-bool PostLicmPass::hoistLoop(FunctionIR& func, const Loop& loop, const std::string& preheader) {
+bool PostLicmPass::hoistLoop(FunctionIR& func, const Loop& loop, const std::string& preheader,
+                             const DominatorTree& dt) {
     std::set<std::string> loopBlocks = loop.blocks;
 
     std::set<std::string> invariantRegs;
     for (const auto& b : func.getBlocks()) {
         if (loopBlocks.find(b->getName()) != loopBlocks.end()) continue;
-        if (b->getName() == preheader) continue;
+        // See SSALicmPass::hoistLoop: an operand is invariant only if its def
+        // block dominates the preheader (executed on every path to the loop).
+        if (!dt.dominates(b->getName(), preheader)) continue;
         for (const auto& instr : b->getInstructions()) {
             if (instr.dest && instr.dest->kind == IRValue::REGISTER) {
                 invariantRegs.insert(instr.dest->name);

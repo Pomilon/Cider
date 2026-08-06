@@ -669,7 +669,7 @@ namespace Cider {
                         initVal = num->getValue();
                     }
                 }
-                module_.addGlobalVar(stmt.getName(), (sym->type.pointerLevel > 0) ? IRType::PTR : mapType(sym->type.name), initVal);
+                module_.addGlobalVar(stmt.getName(), (sym->type.pointerLevel > 0) ? IRType::PTR : mapType(sym->type.name), initVal, sym->type.isArray ? sym->type.arraySize : 0);
                 globalValues_[stmt.getName()] = IRValue::Label(stmt.getName());
                 return;
             }

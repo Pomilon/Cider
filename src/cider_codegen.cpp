@@ -101,10 +101,11 @@ namespace Cider {
                 else if (var.type == IRType::I16 || var.type == IRType::U16) { sizeDir = "dw"; resDir = "resw"; }
                 else if (var.type == IRType::I32 || var.type == IRType::U32) { sizeDir = "dd"; resDir = "resd"; }
 
+                int count = var.arraySize > 0 ? var.arraySize : 1;
                 if (var.initialValue != 0) {
                     addData(var.name + ": " + sizeDir + " " + std::to_string((long long)var.initialValue));
                 } else {
-                    addBss(var.name + ": " + resDir + " 1");
+                    addBss(var.name + ": " + resDir + " " + std::to_string(count));
                 }
             }
 
