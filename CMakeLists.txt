@@ -56,3 +56,7 @@ add_test(NAME parser_recovery_test COMMAND parser_recovery_test)
 add_executable(ast_visitor_test tests/unit/ast_visitor_test.cpp)
 target_include_directories(ast_visitor_test PRIVATE src)
 add_test(NAME ast_visitor_test COMMAND ast_visitor_test)
+
+add_executable(symbols_test tests/unit/symbols_test.cpp src/symbols.cpp)
+target_include_directories(symbols_test PRIVATE src)
+add_test(NAME symbols_test COMMAND symbols_test)
