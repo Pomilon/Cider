@@ -8,3 +8,7 @@ if(NOT MSVC)
 endif()
 
 add_executable(cider src/main.cpp)
+
+add_executable(ir_test tests/unit/ir_test.cpp)
+target_include_directories(ir_test PRIVATE src)
+add_test(NAME ir_test COMMAND ir_test)
