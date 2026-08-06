@@ -7,6 +7,8 @@ if(NOT MSVC)
     add_compile_options(-Wall -Wextra -Werror)
 endif()
 
+enable_testing()
+
 add_executable(cider src/main.cpp src/ir_text.cpp src/vm.cpp src/codegen.cpp)
 target_include_directories(cider PRIVATE src)
 
@@ -25,3 +27,8 @@ add_test(NAME vm_test COMMAND vm_test)
 add_executable(codegen_test tests/unit/codegen_test.cpp src/codegen.cpp src/ir_text.cpp)
 target_include_directories(codegen_test PRIVATE src)
 add_test(NAME codegen_test COMMAND codegen_test)
+
+find_package(Python3 COMPONENTS Interpreter)
+if(Python3_FOUND)
+    add_test(NAME harness COMMAND ${Python3_EXECUTABLE} ${CMAKE_SOURCE_DIR}/tests/run_tests.py)
+endif()
