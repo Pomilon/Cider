@@ -78,6 +78,25 @@ int main(int argc, char** argv) {
             return 1;
         }
     }
-    std::fprintf(stderr, "compile: not implemented yet\n");
-    return 1;
+    try {
+        std::string text = readFile(opts.inputFile);
+        cider::Program prog = cider::parseIR(text);
+        std::string asmText = cider::generateAsm(prog);
+        std::ofstream out(opts.outputFile);
+        if (!out) {
+            std::fprintf(stderr, "cannot write %s\n", opts.outputFile.c_str());
+            return 1;
+        }
+        out << asmText;
+        return 0;
+    } catch (const cider::ParseError& e) {
+        std::fprintf(stderr, "%s:%d: %s\n", opts.inputFile.c_str(), e.line, e.message.c_str());
+        return 1;
+    } catch (const cider::CodegenError& e) {
+        std::fprintf(stderr, "%s: %s\n", opts.inputFile.c_str(), e.message.c_str());
+        return 1;
+    } catch (const std::exception& e) {
+        std::fprintf(stderr, "%s: %s\n", opts.inputFile.c_str(), e.what());
+        return 1;
+    }
 }
