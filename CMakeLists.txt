@@ -7,7 +7,8 @@ if(NOT MSVC)
     add_compile_options(-Wall -Wextra -Werror)
 endif()
 
-add_executable(cider src/main.cpp)
+add_executable(cider src/main.cpp src/ir_text.cpp src/vm.cpp src/codegen.cpp)
+target_include_directories(cider PRIVATE src)
 
 add_executable(ir_test tests/unit/ir_test.cpp)
 target_include_directories(ir_test PRIVATE src)

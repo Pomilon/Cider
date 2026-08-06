@@ -1,0 +1,5 @@
+func main:
+  %0 = const 1
+  %1 = str "Hello, world!\n"
+  write %0, %1, 14
+  exit 0

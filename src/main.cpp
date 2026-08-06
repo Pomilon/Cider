@@ -1,5 +1,12 @@
 #include <cstdio>
+#include <fstream>
+#include <sstream>
+#include <stdexcept>
 #include <string>
+
+#include "codegen.h"
+#include "ir_text.h"
+#include "vm.h"
 
 struct CliOptions {
     std::string command;      // "run" | "compile"
@@ -34,6 +41,14 @@ bool parseCli(int argc, char** argv, CliOptions& out) {
     return true;
 }
 
+std::string readFile(const std::string& path) {
+    std::ifstream in(path, std::ios::binary);
+    if (!in) throw std::runtime_error("cannot open file: " + path);
+    std::ostringstream ss;
+    ss << in.rdbuf();
+    return ss.str();
+}
+
 int main(int argc, char** argv) {
     if (argc == 2 && std::string(argv[1]) == "--version") {
         std::printf("cider 0.2.0\n");
@@ -45,8 +60,23 @@ int main(int argc, char** argv) {
         return 2;
     }
     if (opts.command == "run") {
-        std::fprintf(stderr, "run: not implemented yet\n");
-        return 1;
+        try {
+            std::string text = readFile(opts.inputFile);
+            cider::Program prog = cider::parseIR(text);
+            cider::VMResult r = cider::runVM(prog);
+            std::fwrite(r.stdoutText.data(), 1, r.stdoutText.size(), stdout);
+            std::fwrite(r.stderrText.data(), 1, r.stderrText.size(), stderr);
+            return r.exitCode;
+        } catch (const cider::ParseError& e) {
+            std::fprintf(stderr, "%s:%d: %s\n", opts.inputFile.c_str(), e.line, e.message.c_str());
+            return 1;
+        } catch (const cider::VMError& e) {
+            std::fprintf(stderr, "%s: %s\n", opts.inputFile.c_str(), e.message.c_str());
+            return 1;
+        } catch (const std::exception& e) {
+            std::fprintf(stderr, "%s: %s\n", opts.inputFile.c_str(), e.what());
+            return 1;
+        }
     }
     std::fprintf(stderr, "compile: not implemented yet\n");
     return 1;
