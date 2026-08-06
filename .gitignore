@@ -1,5 +1,6 @@
 # Build artifacts
 build/
+Testing/
 out
 out.asm
 out.o
