@@ -20,6 +20,10 @@ add_executable(ir_gen_test tests/unit/ir_gen_test.cpp src/ir.cpp src/lexer.cpp s
 target_include_directories(ir_gen_test PRIVATE src)
 add_test(NAME ir_gen_test COMMAND ir_gen_test)
 
+add_executable(vm_test tests/unit/vm_test.cpp src/vm.cpp)
+target_include_directories(vm_test PRIVATE src)
+add_test(NAME vm_test COMMAND vm_test)
+
 add_executable(ast_test tests/unit/ast_test.cpp)
 target_include_directories(ast_test PRIVATE src)
 add_test(NAME ast_test COMMAND ast_test)
