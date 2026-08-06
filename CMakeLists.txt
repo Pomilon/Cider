@@ -60,3 +60,7 @@ add_test(NAME ast_visitor_test COMMAND ast_visitor_test)
 add_executable(symbols_test tests/unit/symbols_test.cpp src/symbols.cpp)
 target_include_directories(symbols_test PRIVATE src)
 add_test(NAME symbols_test COMMAND symbols_test)
+
+add_executable(symbol_collector_test tests/unit/symbol_collector_test.cpp src/symbols.cpp src/parser.cpp src/lexer.cpp)
+target_include_directories(symbol_collector_test PRIVATE src)
+add_test(NAME symbol_collector_test COMMAND symbol_collector_test)
