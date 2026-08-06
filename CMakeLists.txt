@@ -52,3 +52,7 @@ endif()
 add_executable(parser_recovery_test tests/unit/parser_recovery_test.cpp src/parser.cpp src/lexer.cpp)
 target_include_directories(parser_recovery_test PRIVATE src)
 add_test(NAME parser_recovery_test COMMAND parser_recovery_test)
+
+add_executable(ast_visitor_test tests/unit/ast_visitor_test.cpp)
+target_include_directories(ast_visitor_test PRIVATE src)
+add_test(NAME ast_visitor_test COMMAND ast_visitor_test)

@@ -8,6 +8,7 @@
 
 namespace cider {
 
+class ASTVisitor;
 class TypeAST;
 
 // ---------------------------------------------------------------- nodes
@@ -38,6 +39,7 @@ public:
     int getColumn() const { return col_; }
 
     virtual void dump(std::string& out, int depth) const = 0;
+    virtual void accept(ASTVisitor& visitor);
 
 private:
     NodeType type_;
@@ -912,6 +914,68 @@ private:
     std::string sourcePath_;
 };
 
+// ---------------------------------------------------------------- visitor
+
+class ASTVisitor {
+public:
+    virtual ~ASTVisitor() = default;
+    virtual void visit(NumberExpr&) {}
+    virtual void visit(StringExpr&) {}
+    virtual void visit(CharExpr&) {}
+    virtual void visit(IdentifierExpr&) {}
+    virtual void visit(BooleanExpr&) {}
+    virtual void visit(NilExpr&) {}
+    virtual void visit(NilPtrExpr&) {}
+    virtual void visit(NewExpr&) {}
+    virtual void visit(ThisExpr&) {}
+    virtual void visit(BinaryExpr&) {}
+    virtual void visit(UnaryExpr&) {}
+    virtual void visit(CallExpr&) {}
+    virtual void visit(MemberAccessExpr&) {}
+    virtual void visit(ListExpr&) {}
+    virtual void visit(TableExpr&) {}
+    virtual void visit(IndexExpr&) {}
+    virtual void visit(SliceExpr&) {}
+    virtual void visit(TernaryExpr&) {}
+    virtual void visit(GroupingExpr&) {}
+    virtual void visit(FunctionExpr&) {}
+    virtual void visit(SuperExpr&) {}
+    virtual void visit(AwaitExpr&) {}
+    virtual void visit(StructLiteralExpr&) {}
+    virtual void visit(SizeofExpr&) {}
+    virtual void visit(CastExpr&) {}
+    virtual void visit(ArrayTypeAST&) {}
+    virtual void visit(TypeAST&) {}
+    virtual void visit(VarDeclStmt&) {}
+    virtual void visit(AssignStmt&) {}
+    virtual void visit(IfStmt&) {}
+    virtual void visit(WhileStmt&) {}
+    virtual void visit(ForStmt&) {}
+    virtual void visit(ForEachStmt&) {}
+    virtual void visit(DeleteStmt&) {}
+    virtual void visit(BreakStmt&) {}
+    virtual void visit(ContinueStmt&) {}
+    virtual void visit(ThrowStmt&) {}
+    virtual void visit(TryCatchStmt&) {}
+    virtual void visit(DeferStmt&) {}
+    virtual void visit(AsmStmt&) {}
+    virtual void visit(MatchStmt&) {}
+    virtual void visit(BlockStmt&) {}
+    virtual void visit(ReturnStmt&) {}
+    virtual void visit(ExpressionStmt&) {}
+    virtual void visit(FunctionDeclStmt&) {}
+    virtual void visit(StructDeclStmt&) {}
+    virtual void visit(EnumDeclStmt&) {}
+    virtual void visit(TypeAliasStmt&) {}
+    virtual void visit(ClassDeclStmt&) {}
+    virtual void visit(ImportStmt&) {}
+    virtual void visit(FromImportStmt&) {}
+    virtual void visit(ExportStmt&) {}
+    virtual void visit(ExportExpressionStmt&) {}
+    virtual void visit(InterfaceDeclStmt&) {}
+    virtual void visit(AstProgram&) {}
+};
+
 // ---------------------------------------------------------------- dump impls
 
 inline void FunctionExpr::dump(std::string& out, int depth) const {
@@ -1213,6 +1277,66 @@ inline std::string dump(const AstProgram& prog) {
     std::string out;
     prog.dump(out, 0);
     return out;
+}
+
+// ---------------------------------------------------------------- accept impls
+
+inline void ASTNode::accept(ASTVisitor& v) {
+    if (auto* n = dynamic_cast<NumberExpr*>(this)) { v.visit(*n); return; }
+    if (auto* n = dynamic_cast<StringExpr*>(this)) { v.visit(*n); return; }
+    if (auto* n = dynamic_cast<CharExpr*>(this)) { v.visit(*n); return; }
+    if (auto* n = dynamic_cast<BooleanExpr*>(this)) { v.visit(*n); return; }
+    if (auto* n = dynamic_cast<NilExpr*>(this)) { v.visit(*n); return; }
+    if (auto* n = dynamic_cast<NilPtrExpr*>(this)) { v.visit(*n); return; }
+    if (auto* n = dynamic_cast<NewExpr*>(this)) { v.visit(*n); return; }
+    if (auto* n = dynamic_cast<IdentifierExpr*>(this)) { v.visit(*n); return; }
+    if (auto* n = dynamic_cast<ThisExpr*>(this)) { v.visit(*n); return; }
+    if (auto* n = dynamic_cast<SuperExpr*>(this)) { v.visit(*n); return; }
+    if (auto* n = dynamic_cast<BinaryExpr*>(this)) { v.visit(*n); return; }
+    if (auto* n = dynamic_cast<UnaryExpr*>(this)) { v.visit(*n); return; }
+    if (auto* n = dynamic_cast<CallExpr*>(this)) { v.visit(*n); return; }
+    if (auto* n = dynamic_cast<MemberAccessExpr*>(this)) { v.visit(*n); return; }
+    if (auto* n = dynamic_cast<ListExpr*>(this)) { v.visit(*n); return; }
+    if (auto* n = dynamic_cast<TableExpr*>(this)) { v.visit(*n); return; }
+    if (auto* n = dynamic_cast<IndexExpr*>(this)) { v.visit(*n); return; }
+    if (auto* n = dynamic_cast<SliceExpr*>(this)) { v.visit(*n); return; }
+    if (auto* n = dynamic_cast<TernaryExpr*>(this)) { v.visit(*n); return; }
+    if (auto* n = dynamic_cast<GroupingExpr*>(this)) { v.visit(*n); return; }
+    if (auto* n = dynamic_cast<FunctionExpr*>(this)) { v.visit(*n); return; }
+    if (auto* n = dynamic_cast<AwaitExpr*>(this)) { v.visit(*n); return; }
+    if (auto* n = dynamic_cast<StructLiteralExpr*>(this)) { v.visit(*n); return; }
+    if (auto* n = dynamic_cast<SizeofExpr*>(this)) { v.visit(*n); return; }
+    if (auto* n = dynamic_cast<CastExpr*>(this)) { v.visit(*n); return; }
+    if (auto* n = dynamic_cast<ArrayTypeAST*>(this)) { v.visit(*n); return; }
+    if (auto* n = dynamic_cast<TypeAST*>(this)) { v.visit(*n); return; }
+    if (auto* n = dynamic_cast<VarDeclStmt*>(this)) { v.visit(*n); return; }
+    if (auto* n = dynamic_cast<AssignStmt*>(this)) { v.visit(*n); return; }
+    if (auto* n = dynamic_cast<IfStmt*>(this)) { v.visit(*n); return; }
+    if (auto* n = dynamic_cast<WhileStmt*>(this)) { v.visit(*n); return; }
+    if (auto* n = dynamic_cast<ForStmt*>(this)) { v.visit(*n); return; }
+    if (auto* n = dynamic_cast<ForEachStmt*>(this)) { v.visit(*n); return; }
+    if (auto* n = dynamic_cast<DeleteStmt*>(this)) { v.visit(*n); return; }
+    if (auto* n = dynamic_cast<BlockStmt*>(this)) { v.visit(*n); return; }
+    if (auto* n = dynamic_cast<BreakStmt*>(this)) { v.visit(*n); return; }
+    if (auto* n = dynamic_cast<ContinueStmt*>(this)) { v.visit(*n); return; }
+    if (auto* n = dynamic_cast<ThrowStmt*>(this)) { v.visit(*n); return; }
+    if (auto* n = dynamic_cast<TryCatchStmt*>(this)) { v.visit(*n); return; }
+    if (auto* n = dynamic_cast<DeferStmt*>(this)) { v.visit(*n); return; }
+    if (auto* n = dynamic_cast<AsmStmt*>(this)) { v.visit(*n); return; }
+    if (auto* n = dynamic_cast<MatchStmt*>(this)) { v.visit(*n); return; }
+    if (auto* n = dynamic_cast<ReturnStmt*>(this)) { v.visit(*n); return; }
+    if (auto* n = dynamic_cast<ExpressionStmt*>(this)) { v.visit(*n); return; }
+    if (auto* n = dynamic_cast<FunctionDeclStmt*>(this)) { v.visit(*n); return; }
+    if (auto* n = dynamic_cast<StructDeclStmt*>(this)) { v.visit(*n); return; }
+    if (auto* n = dynamic_cast<EnumDeclStmt*>(this)) { v.visit(*n); return; }
+    if (auto* n = dynamic_cast<TypeAliasStmt*>(this)) { v.visit(*n); return; }
+    if (auto* n = dynamic_cast<ClassDeclStmt*>(this)) { v.visit(*n); return; }
+    if (auto* n = dynamic_cast<ImportStmt*>(this)) { v.visit(*n); return; }
+    if (auto* n = dynamic_cast<FromImportStmt*>(this)) { v.visit(*n); return; }
+    if (auto* n = dynamic_cast<ExportStmt*>(this)) { v.visit(*n); return; }
+    if (auto* n = dynamic_cast<ExportExpressionStmt*>(this)) { v.visit(*n); return; }
+    if (auto* n = dynamic_cast<InterfaceDeclStmt*>(this)) { v.visit(*n); return; }
+    if (auto* n = dynamic_cast<AstProgram*>(this)) { v.visit(*n); return; }
 }
 
 }  // namespace cider
