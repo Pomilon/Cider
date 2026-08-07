@@ -1,0 +1,11 @@
+func _start() {
+  var l: *int = [1, 2, 3];
+  if (l[0] + l[1] + l[2] != 6) { asm { "mov rax, 60" } asm { "mov rdi, 1" } asm { "syscall" } }
+  var n: int = 2;
+  match (n) {
+    1 => { asm { "mov rax, 60" } asm { "mov rdi, 2" } asm { "syscall" } }
+    2 => { break; }
+    default => { asm { "mov rax, 60" } asm { "mov rdi, 3" } asm { "syscall" } }
+  }
+  asm { "mov rax, 60" } asm { "mov rdi, 0" } asm { "syscall" }
+}

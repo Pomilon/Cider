@@ -2432,11 +2432,19 @@ public:
         for (auto& arm : stmt.getArms()) {
             std::string armName = nextLabel("arm");
             std::string nextCheckName = nextLabel("next_check");
-            arm.pattern->accept(*this);
-            IRValue patternVal = lastValue_;
-            IRValue cond = IRValue::Register(nextTemp(), IRType::BOOL);
-            currentBlock_->addInstruction({IROp::CMP_EQ, cond, {matchVal, patternVal}});
-            currentBlock_->addInstruction({IROp::COND_BR, std::nullopt, {cond, IRValue::Label(armName), IRValue::Label(nextCheckName)}});
+            bool isDefault = false;
+            if (auto pid = dynamic_cast<IdentifierExpr*>(arm.pattern.get())) {
+                isDefault = (pid->getName() == "default");
+            }
+            if (isDefault) {
+                currentBlock_->addInstruction({IROp::BR, std::nullopt, {IRValue::Label(armName)}});
+            } else {
+                arm.pattern->accept(*this);
+                IRValue patternVal = lastValue_;
+                IRValue cond = IRValue::Register(nextTemp(), IRType::BOOL);
+                currentBlock_->addInstruction({IROp::CMP_EQ, cond, {matchVal, patternVal}});
+                currentBlock_->addInstruction({IROp::COND_BR, std::nullopt, {cond, IRValue::Label(armName), IRValue::Label(nextCheckName)}});
+            }
             startBlock(armName);
             arm.body->accept(*this);
             if (currentBlock_ && (currentBlock_->getInstructions().empty() || currentBlock_->getInstructions().back().op != IROp::BR)) {

@@ -896,11 +896,18 @@ public:
         TypeInfo matchType = lastExprType_;
 
         for (auto& arm : stmt.getArms()) {
-            arm.pattern->accept(*this);
-            if (!areTypesCompatible(matchType, lastExprType_)) {
-                error("Match pattern type mismatch. Expected " + matchType.toString() +
-                          ", got " + lastExprType_.toString(),
-                      arm.pattern->getLine());
+            // The `default` arm matches everything.
+            bool isDefault = false;
+            if (auto pid = dynamic_cast<IdentifierExpr*>(arm.pattern.get())) {
+                isDefault = (pid->getName() == "default");
+            }
+            if (!isDefault) {
+                arm.pattern->accept(*this);
+                if (!areTypesCompatible(matchType, lastExprType_)) {
+                    error("Match pattern type mismatch. Expected " + matchType.toString() +
+                              ", got " + lastExprType_.toString(),
+                          arm.pattern->getLine());
+                }
             }
 
             symbolTable_.enterScope();
