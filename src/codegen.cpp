@@ -242,7 +242,7 @@ bool CodeGenerator::generate(ModuleIR& module, const std::string& outputPath,
                 std::string prefix = "qword ";
                 if (t == IRType::I8 || t == IRType::U8) prefix = "byte ";
                 else if (t == IRType::I16 || t == IRType::U16) prefix = "word ";
-                else if (t == IRType::I32 || t == IRType::U32) prefix = "dword ";
+                else if (t == IRType::I32 || t == IRType::U32 || t == IRType::BOOL) prefix = "dword ";
                 else if (t == IRType::I64 || t == IRType::U64 || t == IRType::PTR) prefix = "qword ";
                 return prefix + reg;
             }
@@ -268,7 +268,7 @@ bool CodeGenerator::generate(ModuleIR& module, const std::string& outputPath,
             int idx = 3;
             if (t == IRType::I8 || t == IRType::U8) idx = 0;
             else if (t == IRType::I16 || t == IRType::U16) idx = 1;
-            else if (t == IRType::I32 || t == IRType::U32) idx = 2;
+            else if (t == IRType::I32 || t == IRType::U32 || t == IRType::BOOL) idx = 2;
             else if (t == IRType::I64 || t == IRType::U64 || t == IRType::PTR) idx = 3;
             return regMap[reg][idx];
         };
@@ -322,6 +322,12 @@ bool CodeGenerator::generate(ModuleIR& module, const std::string& outputPath,
                     if (!def->args.empty() && def->args[0].kind == IRValue::REGISTER) {
                         if (def->args.size() > 1 && def->args[1].kind == IRValue::CONSTANT) {
                             totalOffset += (long long)def->args[1].constValue;
+                        } else {
+                            // A variable index (scaled array access): the
+                            // address is an array element, not the slot
+                            // itself — a qword narrow store would clobber
+                            // the neighbor.
+                            return false;
                         }
                         cur = def->args[0].name;
                         continue;
@@ -885,7 +891,7 @@ bool CodeGenerator::generate(ModuleIR& module, const std::string& outputPath,
                         std::string sizePrefix = "qword ";
                         if (t == IRType::I8 || t == IRType::U8) sizePrefix = "byte ";
                         else if (t == IRType::I16 || t == IRType::U16) sizePrefix = "word ";
-                        else if (t == IRType::I32 || t == IRType::U32) sizePrefix = "dword ";
+                        else if (t == IRType::I32 || t == IRType::U32 || t == IRType::BOOL) sizePrefix = "dword ";
                         else if (t == IRType::I64 || t == IRType::U64 || t == IRType::PTR) sizePrefix = "qword ";
                         std::string srcReg = getSizedReg("rax", t);
                         // Locals are allocated as 8-byte slots and always loaded
@@ -935,7 +941,7 @@ bool CodeGenerator::generate(ModuleIR& module, const std::string& outputPath,
                                     // into a 4-byte-element array clobbers the neighbor.
                                     bool slotDest = (instr.args[0].kind == IRValue::REGISTER) &&
                                                     isAllocaBased(instr.args[0].name);
-                                    if (slotDest) {
+                                        if (slotDest) {
                                         if (t == IRType::I8) addText("    movsx rax, al");
                                         else if (t == IRType::U8 || t == IRType::BOOL) addText("    movzx rax, al");
                                         else if (t == IRType::I16) addText("    movsx rax, ax");

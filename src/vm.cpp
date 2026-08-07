@@ -189,7 +189,11 @@ VMResult VM::run(const ModuleIR& module, const std::string& runFunction) {
             if (instr.args.size() > 2 && instr.args[2].kind != IRValue::LABEL) {
                 offset = resolveValue(instr.args[2]).i;
             }
-            IRType type = val.isFloat ? IRType::F64 : IRType::I64;
+            // The store width comes from the VALUE's IR type: bools and
+            // 32-bit ints are 4 bytes — an 8-byte store would clobber the
+            // neighbor in a packed array. (Global cells are 8 bytes.)
+            IRType type = instr.args[1].type;
+            if (type == IRType::BOOL) type = IRType::I32;
             if (instr.args[0].kind == IRValue::LABEL) type = IRType::I64;  // global cells are 8 bytes
             store(addr.i + offset, val, type);
             break;
@@ -568,7 +572,8 @@ VM::RegVal VM::load(int64_t addr, IRType type) {
         break;
     }
     case IRType::I32:
-    case IRType::U32: {
+    case IRType::U32:
+    case IRType::BOOL: {
         int32_t v = 0;
         if (addr + 4 <= (int64_t)heap_.size()) std::memcpy(&v, heap_.data() + addr, 4);
         d.i = v;
@@ -618,7 +623,8 @@ void VM::store(int64_t addr, const RegVal& val, IRType type, int64_t offset) {
         break;
     }
     case IRType::I32:
-    case IRType::U32: {
+    case IRType::U32:
+    case IRType::BOOL: {
         int32_t v = (int32_t)val.i;
         std::memcpy(heap_.data() + addr, &v, 4);
         break;
