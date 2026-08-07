@@ -304,6 +304,7 @@ VMResult VM::run(const ModuleIR& module, const std::string& runFunction) {
             if (frames_.empty()) {
                 // The entry function returned: its value is the exit code.
                 result_.exitCode = (int)retReg_.i;
+                result_.stdoutText += putcharBuf_;
             } else {
                 // Restore the caller's registers from the callee's snapshot
                 // (the callee frame holds the caller's registers), then
@@ -754,12 +755,15 @@ void VM::doCall(const IRValue& target, const std::vector<IRValue>& args) {
         if (target.name == "exit") {
             RegVal v = args.empty() ? RegVal{} : resolveValue(args[0]);
             result_.exitCode = (int)v.i;
+            result_.stdoutText += putcharBuf_;
             frames_.clear();
             return;
         }
         if (target.name == "putchar") {
+            // The libc putchar buffers stdout; the flush happens at exit,
+            // so putchar output lands after all direct write syscalls.
             RegVal v = args.empty() ? RegVal{} : resolveValue(args[0]);
-            result_.stdoutText += (char)(unsigned char)v.i;
+            putcharBuf_ += (char)(unsigned char)v.i;
             retReg_ = v;
             return;
         }

@@ -44,7 +44,7 @@ def run_native(cdr):
         if l.returncode != 0:
             return ("err", "link", l.stderr.strip()[:200])
         r = subprocess.run([exe], capture_output=True, text=True, timeout=180)
-        return r.returncode, r.stdout[:200], r.stderr[:200]
+        return r.returncode, r.stdout, r.stderr
 
 
 def main():
@@ -72,9 +72,13 @@ def main():
         if native[0] == "err":
             statuses.append(f"native-{native[1]}-error: {native[2][:120]}")
         if not statuses:
-            # matrix agreement
+            # matrix agreement: exit codes AND byte-identical output
             if vm_opt[0] != vm_noopt[0] or vm_opt[0] != native[0]:
                 statuses.append("MATRIX-MISMATCH")
+            elif vm_opt[1] != vm_noopt[1] or vm_opt[1] != native[1]:
+                statuses.append("OUTPUT-DIFF")
+            elif vm_opt[2] != vm_noopt[2] or vm_opt[2] != native[2]:
+                statuses.append("STDERR-DIFF")
         results.append((name, statuses))
         status = "OK " if not statuses else "FAIL"
         print(f"{status} {name}: {', '.join(statuses) if statuses else 'exit ' + str(vm_opt[0])}")

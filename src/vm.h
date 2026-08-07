@@ -57,6 +57,7 @@ private:
     };
     std::vector<FreeBlock> freeList_;
 
+    std::string putcharBuf_;  // buffered putchar output (flushed at exit)
     std::map<std::string, RegVal> regs_;
     std::vector<Frame> frames_;
     std::map<int64_t, JumpState> jumpStates_;  // jmp_buf address -> saved state
