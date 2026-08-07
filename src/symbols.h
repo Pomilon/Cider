@@ -66,6 +66,7 @@ struct FunctionSymbol : public Symbol {
     std::vector<TypeInfo> parameterTypes;
     TypeInfo returnType;
     bool isExtern = false;
+    bool isAsync = false;
 };
 
 struct StructSymbol : public Symbol {

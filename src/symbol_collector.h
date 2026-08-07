@@ -161,6 +161,7 @@ public:
         sym->col = stmt.getColumn();
         sym->returnType = TypeInfo::fromAST(stmt.getReturnType());
         sym->isExtern = stmt.isExtern();
+        sym->isAsync = stmt.isAsync();
         sym->isExported = inExport_;
 
         for (auto& param : stmt.getParams()) {

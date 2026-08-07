@@ -623,7 +623,23 @@ public:
         lastExprType_ = {"error", 0};
     }
 
-    void visit(AwaitExpr&) override {}
+    void visit(AwaitExpr& expr) override {
+        // await expr — the awaited expression is usually a call to an async
+        // function. Check it; the result type is the awaited value's type.
+        expr.getValue()->accept(*this);
+        // The awaited call must resolve to an async function.
+        if (auto call = dynamic_cast<CallExpr*>(expr.getValue())) {
+            if (auto id = dynamic_cast<IdentifierExpr*>(call->getCallee())) {
+                auto sym = symbolTable_.resolve(id->getName());
+                if (sym && sym->kind == SymbolKind::FUNCTION) {
+                    auto fs = std::static_pointer_cast<FunctionSymbol>(sym);
+                    if (!fs->isAsync) {
+                        error("Can only await async functions, '" + id->getName() + "' is not async.", expr.getLine());
+                    }
+                }
+            }
+        }
+    }
 
     void visit(ListExpr& expr) override {
         auto& elements = expr.getElements();

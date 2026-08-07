@@ -1,0 +1,15 @@
+async func fetch(n: int) -> int {
+  return n * 2;
+}
+
+async func process() -> int {
+  var a: int = await fetch(21);
+  var b: int = await fetch(3);
+  return a + b;
+}
+
+func _start() {
+  var r: int = await process();
+  if (r != 48) { asm { "mov rax, 60" } asm { "mov rdi, 1" } asm { "syscall" } }
+  asm { "mov rax, 60" } asm { "mov rdi, 0" } asm { "syscall" }
+}

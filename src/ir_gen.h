@@ -2696,7 +2696,20 @@ public:
         lastValue_ = IRValue::Constant(0, IRType::PTR);
         lastExprType_ = {"error", 0};
     }
-    void visit(AwaitExpr&) override {}
+    void visit(AwaitExpr& expr) override {
+        // v1 async semantics: the awaited async function runs to completion
+        // (cooperative, synchronous). The await lowers to the plain call;
+        // the value is the callee's result. The suspension machinery (state
+        // machines + scheduler) lands with the stdlib I/O layer.
+        if (!currentFunction_) {
+            lastValue_ = IRValue::Constant(0, IRType::I32);
+            lastExprType_ = {"int", 0};
+            return;
+        }
+        expr.getValue()->accept(*this);
+        // The accept emitted the call; its result register is the awaited
+        // value.
+    }
     void visit(ArrayTypeAST&) override {}
     void visit(TypeAST&) override {}
     void visit(StructDeclStmt& stmt) override {
