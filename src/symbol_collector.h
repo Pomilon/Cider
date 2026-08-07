@@ -248,9 +248,10 @@ public:
             int maxSize = 0;
             for (auto& field : stmt.getFields()) {
                 StructSymbol::Field f;
-                f.name = field.first;
-                f.type = TypeInfo::fromAST(field.second.get());
+                f.name = field.name;
+                f.type = TypeInfo::fromAST(field.type.get());
                 f.offset = 0;
+                f.bits = field.bits;
 
                 int size = getFieldSize(f.type);
                 if (size > maxSize) maxSize = size;
@@ -260,18 +261,37 @@ public:
             sym->totalSize = maxSize;
         } else {
             int currentOffset = 0;
+            int bitPos = 0;  // bit position within the current word
             for (auto& field : stmt.getFields()) {
                 StructSymbol::Field f;
-                f.name = field.first;
-                f.type = TypeInfo::fromAST(field.second.get());
-                f.offset = currentOffset;
+                f.name = field.name;
+                f.type = TypeInfo::fromAST(field.type.get());
+                f.bits = field.bits;
 
-                int size = getFieldSize(f.type);
-
-                currentOffset += size;
+                if (field.bits > 0) {
+                    // Bitfield: pack into the current 32-bit word if it
+                    // fits, else start a new word.
+                    if (bitPos + field.bits > 32) {
+                        currentOffset += 4;
+                        bitPos = 0;
+                    }
+                    f.offset = currentOffset;
+                    f.bitOffset = bitPos;
+                    f.bitWidth = field.bits;
+                    bitPos += field.bits;
+                } else {
+                    // Regular field: close any partially used bitfield word,
+                    // then align to its size.
+                    if (bitPos > 0) {
+                        currentOffset += 4;
+                        bitPos = 0;
+                    }
+                    f.offset = currentOffset;
+                    currentOffset += getFieldSize(f.type);
+                }
                 sym->fields.push_back(f);
             }
-            sym->totalSize = currentOffset;
+            sym->totalSize = currentOffset + (bitPos > 0 ? 4 : 0);
         }
 
         if (symbolTable_.getCurrentScope()->resolveLocal(sym->name)) {
@@ -767,17 +787,33 @@ public:
         structSym->col = 0;
 
         int currentOffset = 0;
+        int bitPos = 0;
         for (auto& field : tmplStruct->getFields()) {
             StructSymbol::Field f;
-            f.name = field.first;
-            f.type = TypeInfo::fromAST(field.second.get());
+            f.name = field.name;
+            f.type = TypeInfo::fromAST(field.type.get());
             f.type.name = substituteTypeName(f.type.name, tmplSym->typeParams, parsed.second);
-            f.offset = currentOffset;
-            int size = getFieldSize(f.type);
-            currentOffset += size;
+            f.bits = field.bits;
+            if (field.bits > 0) {
+                if (bitPos + field.bits > 32) {
+                    currentOffset += 4;
+                    bitPos = 0;
+                }
+                f.offset = currentOffset;
+                f.bitOffset = bitPos;
+                f.bitWidth = field.bits;
+                bitPos += field.bits;
+            } else {
+                if (bitPos > 0) {
+                    currentOffset += 4;
+                    bitPos = 0;
+                }
+                f.offset = currentOffset;
+                currentOffset += getFieldSize(f.type);
+            }
             structSym->fields.push_back(f);
         }
-        structSym->totalSize = currentOffset;
+        structSym->totalSize = currentOffset + (bitPos > 0 ? 4 : 0);
 
         auto globalScope = symbolTable_.getCurrentScope();
         while (globalScope->getParent()) globalScope = globalScope->getParent();

@@ -1527,7 +1527,22 @@ std::unique_ptr<Statement> Parser::parseStructDeclaration(bool isUnion) {
             }
             nextToken();
             auto fieldType = parseType();
-            fields.push_back({fieldName, std::move(fieldType)});
+            int fieldBits = 0;
+            if (currentToken_.type == TokenType::COLON) {
+                // Bitfield: var a: int:3;
+                nextToken();
+                if (currentToken_.type != TokenType::NUMBER) {
+                    error("Expected bit width after ':'.");
+                    return nullptr;
+                }
+                fieldBits = (int)std::strtod(currentToken_.value.c_str(), nullptr);
+                nextToken();
+            }
+            StructDeclStmt::Field fld;
+            fld.name = fieldName;
+            fld.type = std::move(fieldType);
+            fld.bits = fieldBits;
+            fields.push_back(std::move(fld));
             nextToken();  // Move past type
             if (currentToken_.type == TokenType::SEMICOLON) nextToken();
         } else {

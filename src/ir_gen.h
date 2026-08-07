@@ -525,7 +525,11 @@ public:
                     // indexing them must operate on the array's location,
                     // not on a loaded copy of its first element.
                     bool fieldIsArray = field.type.isArray;
-                    if (isAddress_ || fieldIsStruct || fieldIsArray) {
+                    if (field.bitWidth > 0 && !isAddress_) {
+                        bool isSigned = (field.type.name == "int" || field.type.name == "i8" ||
+                                         field.type.name == "i16" || field.type.name == "i32");
+                        lastValue_ = emitBitfieldLoad(addr, field.bitOffset, field.bitWidth, isSigned);
+                    } else if (isAddress_ || fieldIsStruct || fieldIsArray) {
                         lastValue_ = addr;
                     } else {
                         IRType fieldIRType = (field.type.pointerLevel > 0) ? IRType::PTR : mapType(field.type.name);
@@ -1053,6 +1057,89 @@ public:
         }
     }
 
+    // --- bitfield access lowering ---
+
+    // Resolve an expression's declared type WITHOUT generating code (no
+    // temp counters, no instructions) — for the bitfield lookup helpers.
+    TypeInfo inferExprType(Expression* expr) {
+        if (auto id = dynamic_cast<IdentifierExpr*>(expr)) {
+            auto sym = symbolTable_.resolve(id->getName());
+            if (sym) return sym->type;
+        } else if (auto mem = dynamic_cast<MemberAccessExpr*>(expr)) {
+            TypeInfo objType = inferExprType(mem->getObject());
+            if (objType.pointerLevel > 0) objType.pointerLevel--;
+            auto sym = symbolTable_.resolve(objType.name);
+            if (sym && (sym->kind == SymbolKind::STRUCT || sym->kind == SymbolKind::CLASS)) {
+                auto ss = std::static_pointer_cast<StructSymbol>(sym);
+                for (const auto& f : ss->fields) {
+                    if (f.name == mem->getMember()) return f.type;
+                }
+            }
+        } else if (auto un = dynamic_cast<UnaryExpr*>(expr)) {
+            if (un->getOperator() == "*") {
+                TypeInfo t = inferExprType(un->getOperand());
+                if (t.pointerLevel > 0) t.pointerLevel--;
+                return t;
+            }
+        } else if (auto group = dynamic_cast<GroupingExpr*>(expr)) {
+            return inferExprType(group->getExpression());
+        }
+        return TypeInfo{};
+    }
+
+    bool getMemberBitfield(MemberAccessExpr* mem, int& bitOffset, int& bitWidth) {
+        if (!mem) return false;
+        // Resolve the object's type WITHOUT generating code: the accept()
+        // would advance the temp counters and emit duplicate instructions.
+        TypeInfo objType = inferExprType(mem->getObject());
+        if (objType.pointerLevel > 0) objType.pointerLevel--;
+        auto sym = symbolTable_.resolve(objType.name);
+        if (!sym || (sym->kind != SymbolKind::STRUCT && sym->kind != SymbolKind::CLASS)) return false;
+        auto structSym = std::static_pointer_cast<StructSymbol>(sym);
+        for (const auto& field : structSym->fields) {
+            if (field.name == mem->getMember() && field.bitWidth > 0) {
+                bitOffset = field.bitOffset;
+                bitWidth = field.bitWidth;
+                return true;
+            }
+        }
+        return false;
+    }
+
+    static int64_t bitfieldMask(int width) { return (1LL << width) - 1; }
+
+    IRValue emitBitfieldLoad(IRValue addr, int bitOffset, int bitWidth, bool isSigned) {
+        IRValue word = IRValue::Register(nextTemp(), IRType::I32);
+        currentBlock_->addInstruction({IROp::LOAD, word, {addr, IRValue::Constant(0, IRType::I32)}});
+        IRValue shifted = IRValue::Register(nextTemp(), IRType::I32);
+        currentBlock_->addInstruction({IROp::RSHIFT, shifted, {word, IRValue::Constant(bitOffset, IRType::I32)}});
+        IRValue masked = IRValue::Register(nextTemp(), IRType::I32);
+        currentBlock_->addInstruction({IROp::BIT_AND, masked, {shifted, IRValue::Constant(bitfieldMask(bitWidth), IRType::I32)}});
+        if (isSigned && bitWidth < 32) {
+            IRValue sign = IRValue::Register(nextTemp(), IRType::I32);
+            currentBlock_->addInstruction({IROp::LSHIFT, sign, {masked, IRValue::Constant(32 - bitWidth, IRType::I32)}});
+            IRValue value = IRValue::Register(nextTemp(), IRType::I32);
+            currentBlock_->addInstruction({IROp::RSHIFT, value, {sign, IRValue::Constant(32 - bitWidth, IRType::I32)}});
+            return value;
+        }
+        return masked;
+    }
+
+    void emitBitfieldStore(IRValue addr, IRValue val, int bitOffset, int bitWidth) {
+        IRValue word = IRValue::Register(nextTemp(), IRType::I32);
+        currentBlock_->addInstruction({IROp::LOAD, word, {addr, IRValue::Constant(0, IRType::I32)}});
+        IRValue vm = IRValue::Register(nextTemp(), IRType::I32);
+        currentBlock_->addInstruction({IROp::BIT_AND, vm, {val, IRValue::Constant(bitfieldMask(bitWidth), IRType::I32)}});
+        IRValue shifted = IRValue::Register(nextTemp(), IRType::I32);
+        currentBlock_->addInstruction({IROp::LSHIFT, shifted, {vm, IRValue::Constant(bitOffset, IRType::I32)}});
+        IRValue cleared = IRValue::Register(nextTemp(), IRType::I32);
+        int64_t clearMask = ~(bitfieldMask(bitWidth) << bitOffset);
+        currentBlock_->addInstruction({IROp::BIT_AND, cleared, {word, IRValue::Constant(clearMask, IRType::I32)}});
+        IRValue nw = IRValue::Register(nextTemp(), IRType::I32);
+        currentBlock_->addInstruction({IROp::BIT_OR, nw, {cleared, shifted}});
+        currentBlock_->addInstruction({IROp::STORE, std::nullopt, {addr, nw, IRValue::Constant(0, IRType::I32)}});
+    }
+
     void visit(AssignStmt& stmt) override {
         std::string compoundOp = stmt.getOp();
 
@@ -1079,6 +1166,15 @@ public:
             stmt.getValue()->accept(*this);
             IRValue val = lastValue_;
 
+            // Bitfield targets use the read-modify-write sequence.
+            if (auto mem = dynamic_cast<MemberAccessExpr*>(stmt.getTarget())) {
+                int bitOffset = 0, bitWidth = 0;
+                if (getMemberBitfield(mem, bitOffset, bitWidth)) {
+                    emitBitfieldStore(addr, val, bitOffset, bitWidth);
+                    return;
+                }
+            }
+
             if (lastExprType_.isArray || lastExprType_.isUserDefined || getTypeSize(lastExprType_) > 8) {
                 currentBlock_->addInstruction({IROp::MEMCPY, std::nullopt, {addr, val, IRValue::Constant(getTypeSize(lastExprType_), IRType::I32)}});
             } else {
@@ -1089,11 +1185,21 @@ public:
                 }
             }
         } else {
-            IRValue current = IRValue::Register(nextTemp(), IRType::I32);
-            if (addr.kind == IRValue::LABEL) {
-                currentBlock_->addInstruction({IROp::LOAD, current, {addr}});
+            bool isBitfield = false;
+            int bitOffset = 0, bitWidth = 0;
+            if (auto mem = dynamic_cast<MemberAccessExpr*>(stmt.getTarget())) {
+                isBitfield = getMemberBitfield(mem, bitOffset, bitWidth);
+            }
+            IRValue current;
+            if (isBitfield) {
+                current = emitBitfieldLoad(addr, bitOffset, bitWidth, true);
             } else {
-                currentBlock_->addInstruction({IROp::LOAD, current, {addr, IRValue::Constant(0, IRType::I32)}});
+                current = IRValue::Register(nextTemp(), IRType::I32);
+                if (addr.kind == IRValue::LABEL) {
+                    currentBlock_->addInstruction({IROp::LOAD, current, {addr}});
+                } else {
+                    currentBlock_->addInstruction({IROp::LOAD, current, {addr, IRValue::Constant(0, IRType::I32)}});
+                }
             }
 
             stmt.getValue()->accept(*this);
@@ -1113,6 +1219,10 @@ public:
             IRValue result = IRValue::Register(nextTemp(), IRType::I32);
             currentBlock_->addInstruction({irOp, result, {current, rhs}});
 
+            if (isBitfield) {
+                emitBitfieldStore(addr, result, bitOffset, bitWidth);
+                return;
+            }
             if (addr.kind == IRValue::LABEL) {
                 currentBlock_->addInstruction({IROp::STORE, std::nullopt, {addr, result}});
             } else {

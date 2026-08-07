@@ -802,7 +802,11 @@ private:
 
 class StructDeclStmt : public Statement {
 public:
-    using Field = std::pair<std::string, std::unique_ptr<TypeAST>>;
+    struct Field {
+        std::string name;
+        std::unique_ptr<TypeAST> type;
+        int bits = 0;  // bitfield width (0 = regular field)
+    };
     StructDeclStmt(const std::string& name, std::vector<Field> fields, int line, int col,
                    bool isUnion = false, std::vector<std::string> templateParams = {})
         : Statement(STRUCT_DECL_STMT, line, col), name_(name), fields_(std::move(fields)), isUnion_(isUnion), templateParams_(std::move(templateParams)) {}
@@ -1225,8 +1229,9 @@ inline void StructDeclStmt::dump(std::string& out, int depth) const {
         out += ">";
     }
     for (const auto& f : fields_) {
-        out += " (" + f.first + " ";
-        f.second->dump(out, depth);
+        out += " (" + f.name + " ";
+        f.type->dump(out, depth);
+        if (f.bits > 0) out += ":" + std::to_string(f.bits);
         out += ")";
     }
     out += ")";

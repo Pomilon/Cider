@@ -72,7 +72,10 @@ struct StructSymbol : public Symbol {
     struct Field {
         std::string name;
         TypeInfo type;
-        int offset;
+        int offset = 0;
+        int bits = 0;      // declared bitfield width (0 = regular field)
+        int bitOffset = 0; // bit position within the containing word
+        int bitWidth = 0;  // effective width in the layout
     };
     struct Method {
         std::string name;

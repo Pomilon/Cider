@@ -194,8 +194,8 @@ VMResult VM::run(const ModuleIR& module, const std::string& runFunction) {
             RegVal ptr = resolveValue(instr.args[0]);
             if (debug_) fprintf(stderr, "VM load [%lld]\n", (long long)ptr.i);
             int64_t offset = 0;
-            if (debug_ && (ptr.i == 8248)) fprintf(stderr, "  CURLOAD=%lld\n", (long long)load(ptr.i, IRType::I32).i);
-            if (debug_ && (ptr.i == 8248)) fprintf(stderr, "  CURLOAD=%lld\n", (long long)load(ptr.i, IRType::I32).i);
+
+
             if (instr.args.size() > 1 && instr.args[1].kind != IRValue::LABEL) {
                 offset = resolveValue(instr.args[1]).i;
             }
@@ -209,7 +209,7 @@ VMResult VM::run(const ModuleIR& module, const std::string& runFunction) {
             RegVal addr = resolveValue(instr.args[0]);
             RegVal val = resolveValue(instr.args[1]);
             if (debug_) fprintf(stderr, "VM store [%lld] = %lld\n", (long long)addr.i, (long long)val.i);
-            if (debug_ && instr.args.size() > 0 && instr.args[1].kind == IRValue::REGISTER && instr.args[1].name == "v10") fprintf(stderr, "  LOOPVAR store\n");
+
             int64_t offset = 0;
             if (instr.args.size() > 2 && instr.args[2].kind != IRValue::LABEL) {
                 offset = resolveValue(instr.args[2]).i;
@@ -257,7 +257,6 @@ VMResult VM::run(const ModuleIR& module, const std::string& runFunction) {
             RegVal dst = resolveValue(instr.args[0]);
             RegVal src = resolveValue(instr.args[1]);
             RegVal len = resolveValue(instr.args[2]);
-            if (debug_) fprintf(stderr, "VM memcpy %lld <- %lld len %lld\n", (long long)dst.i, (long long)src.i, (long long)len.i);
             int64_t d = dst.i, s = src.i, n = len.i;
             if (d + n > (int64_t)heap_.size()) heap_.resize(d + n);
             for (int64_t k = 0; k < n; ++k) {
@@ -299,9 +298,6 @@ VMResult VM::run(const ModuleIR& module, const std::string& runFunction) {
         }
         case IROp::CALL: {
             size_t before = frames_.size();
-            if (debug_ && instr.args.size() > 1 && instr.args[0].kind == IRValue::LABEL &&
-                instr.args[0].name == "printInt")
-                fprintf(stderr, "printInt arg: reg=%s\n", instr.args[1].name.c_str());
             doCall(instr.args[0], std::vector<IRValue>(instr.args.begin() + 1, instr.args.end()));
             if (instr.dest) {
                 if (frames_.size() == before) {
@@ -326,9 +322,6 @@ VMResult VM::run(const ModuleIR& module, const std::string& runFunction) {
         }
         case IROp::RET: {
             retReg_ = instr.args.empty() ? RegVal{} : resolveValue(instr.args[0]);
-            if (debug_ && !frames_.empty() && frames_.back().fn &&
-                frames_.back().fn->getName() == "Counter_next")
-                fprintf(stderr, "NEXT ret p=%lld\n", (long long)retReg_.i);
             Frame callee = std::move(frames_.back());
             if (callee.localBase != 0) free(callee.localBase);
             frames_.pop_back();
