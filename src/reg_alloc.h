@@ -153,13 +153,14 @@ public:
             }
         }
 
-        // Build intervals from liveness
+        // Build intervals from liveness: a value is live exactly in the
+        // blocks where it is used or defined. (LIVE_IN/LIVE_OUT blocks are
+        // intentionally not included — they only stretch intervals beyond
+        // their true range and cause unnecessary spills.)
         std::map<std::string, std::set<int>> blocksForReg;
         for (int b = 0; b < numBlocks; b++) {
             for (auto& v : USE[b]) blocksForReg[v].insert(b);
             for (auto& v : DEF[b]) blocksForReg[v].insert(b);
-            for (auto& v : LIVE_IN[b]) blocksForReg[v].insert(b);
-            for (auto& v : LIVE_OUT[b]) blocksForReg[v].insert(b);
         }
 
         std::map<std::string, LiveInterval> intervals;
@@ -195,6 +196,8 @@ public:
 
         std::vector<LiveInterval> active;
         int currentStackOffset = 0;
+        // Reusable spill slots: negative offsets, deepest first.
+        std::vector<int> freeSpillSlots;
 
         for (auto& interval : unhandled) {
             for (auto it = active.begin(); it != active.end();) {
@@ -203,6 +206,8 @@ public:
                     if (!res.isSpilled) {
                         if (it->isFloat) freeFloatRegs.push_back(res.reg);
                         else freeIntRegs.push_back(res.reg);
+                    } else {
+                        freeSpillSlots.push_back(res.stackOffset);
                     }
                     it = active.erase(it);
                 } else {
@@ -212,8 +217,19 @@ public:
 
             auto& freeRegs = interval.isFloat ? freeFloatRegs : freeIntRegs;
             if (freeRegs.empty()) {
-                currentStackOffset += 8;
-                allocation[interval.varName] = {true, "", -currentStackOffset};
+                if (!freeSpillSlots.empty()) {
+                    // Reuse the deepest free slot (most negative offset).
+                    std::sort(freeSpillSlots.begin(), freeSpillSlots.end());
+                    int slot = freeSpillSlots.front();
+                    freeSpillSlots.erase(freeSpillSlots.begin());
+                    allocation[interval.varName] = {true, "", slot};
+                } else {
+                    currentStackOffset += 8;
+                    allocation[interval.varName] = {true, "", -currentStackOffset};
+                }
+                // Track spilled intervals too: their slots return to the pool
+                // when the interval expires.
+                active.push_back(interval);
             } else {
                 std::string reg = freeRegs.back();
                 freeRegs.pop_back();

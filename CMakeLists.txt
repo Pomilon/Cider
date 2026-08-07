@@ -83,3 +83,7 @@ add_test(NAME codegen_test COMMAND codegen_test)
 add_executable(pass_test tests/unit/pass_test.cpp src/ir.cpp src/lexer.cpp src/parser.cpp src/symbols.cpp src/module_resolver.cpp)
 target_include_directories(pass_test PRIVATE src)
 add_test(NAME pass_test COMMAND pass_test)
+
+add_executable(reg_alloc_test tests/unit/reg_alloc_test.cpp src/ir.cpp)
+target_include_directories(reg_alloc_test PRIVATE src)
+add_test(NAME reg_alloc_test COMMAND reg_alloc_test)
