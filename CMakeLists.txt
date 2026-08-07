@@ -9,7 +9,7 @@ endif()
 
 enable_testing()
 
-add_executable(cider src/main.cpp src/lexer.cpp src/parser.cpp src/symbols.cpp src/module_resolver.cpp src/ir.cpp)
+add_executable(cider src/main.cpp src/lexer.cpp src/parser.cpp src/symbols.cpp src/module_resolver.cpp src/ir.cpp src/vm.cpp)
 target_include_directories(cider PRIVATE src)
 
 add_executable(ir_test tests/unit/ir_test.cpp src/ir.cpp)
@@ -71,3 +71,7 @@ add_test(NAME type_checker_test COMMAND type_checker_test)
 add_executable(module_resolver_test tests/unit/module_resolver_test.cpp src/module_resolver.cpp src/symbols.cpp src/parser.cpp src/lexer.cpp)
 target_include_directories(module_resolver_test PRIVATE src)
 add_test(NAME module_resolver_test COMMAND module_resolver_test)
+
+add_executable(vm_asm_test tests/unit/vm_asm_test.cpp src/vm.cpp)
+target_include_directories(vm_asm_test PRIVATE src)
+add_test(NAME vm_asm_test COMMAND vm_asm_test)

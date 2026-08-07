@@ -1,0 +1,12 @@
+var msg: string = "oops\n";
+
+func main() -> void {
+  asm { "mov rax, 1" }
+  asm { "mov rdi, 2" }
+  asm { "mov rsi, {msg}" }
+  asm { "mov rdx, 5" }
+  asm { "syscall" }
+  asm { "mov rax, 60" }
+  asm { "mov rdi, 3" }
+  asm { "syscall" }
+}

@@ -13,9 +13,10 @@
 #include "symbol_collector.h"
 #include "symbols.h"
 #include "type_checker.h"
+#include "vm.h"
 
 struct CliOptions {
-    std::string command;      // "parse" | "check" | "build"
+    std::string command;      // "parse" | "check" | "build" | "run"
     bool noOpt = false;
     std::string inputFile;
     std::string outputFile;
@@ -25,7 +26,7 @@ struct CliOptions {
 bool parseCli(int argc, char** argv, CliOptions& out) {
     if (argc < 2) return false;
     std::string cmd = argv[1];
-    if (cmd != "parse" && cmd != "check" && cmd != "build") return false;
+    if (cmd != "parse" && cmd != "check" && cmd != "build" && cmd != "run") return false;
     out.command = cmd;
     for (int i = 2; i < argc; ++i) {
         std::string a = argv[i];
@@ -61,7 +62,7 @@ int main(int argc, char** argv) {
     }
     CliOptions opts;
     if (!parseCli(argc, argv, opts)) {
-        std::fprintf(stderr, "usage: cider <parse|check|build> [--no-opt] [-o out.asm] <file>\n");
+        std::fprintf(stderr, "usage: cider <parse|check|build|run> [--no-opt] [-o out.asm] <file>\n");
         return 2;
     }
     try {
@@ -95,6 +96,15 @@ int main(int argc, char** argv) {
         }
         if (opts.command == "check") {
             return 0;
+        }
+        if (opts.command == "run") {
+            cider::IRGenerator gen(table, opts.inputFile);
+            auto module = gen.generate(*prog);
+            cider::VM vm;
+            cider::VMResult r = vm.run(module);
+            std::fwrite(r.stdoutText.data(), 1, r.stdoutText.size(), stdout);
+            std::fwrite(r.stderrText.data(), 1, r.stderrText.size(), stderr);
+            return r.exitCode;
         }
         // build: generate IR and print the module dump.
         cider::IRGenerator gen(table, opts.inputFile);

@@ -27,6 +27,11 @@ VMResult VM::run(const ModuleIR& module, const std::string& runFunction) {
 
     materializeLabels();
 
+    asmRax_ = 0;
+    asmRdi_ = 0;
+    asmRsi_ = 0;
+    asmRdx_ = 0;
+
     const FunctionIR* entry = nullptr;
     for (const auto& fn : module_->getFunctions()) {
         if (fn->getName() == runFunction_) {
@@ -343,15 +348,13 @@ void VM::materializeLabels() {
         materializeVTable(label);
     }
     // Pre-materialize every string in stringData (the ir-gen emits global
-    // string labels there).
+    // string labels there). Two passes: db lines first, then dq aliases.
     for (const auto& line : module_->getStringData()) {
-        // format: "<label>: db <bytes>, 0"  or "<label>: dq <otherlabel>"
         size_t colon = line.find(':');
         if (colon == std::string::npos) continue;
         std::string label = line.substr(0, colon);
         std::string body = line.substr(colon + 1);
-        size_t db = body.find("db");
-        if (db == std::string::npos) continue;
+        if (body.find("db") == std::string::npos) continue;
         if (stringOffsets_.count(label)) continue;
         // Decode the db byte list.
         std::vector<uint8_t> bytes;
@@ -362,7 +365,7 @@ void VM::materializeLabels() {
             if (pos >= body.size()) break;
             int64_t val = 0;
             if (body[pos] == '\'') {
-                // char literal
+                // char literal: [quote][char][quote]
                 char c = body[pos + 1];
                 if (c == '\\' && pos + 2 < body.size()) {
                     char e = body[pos + 2];
@@ -370,9 +373,9 @@ void VM::materializeLabels() {
                     else if (e == 't') c = '\t';
                     else if (e == '\\') c = '\\';
                     else if (e == '"') c = '"';
-                    pos += 3;
+                    pos += 4;  // quote + backslash + char + quote
                 } else {
-                    pos += 2;
+                    pos += 3;  // quote + char + quote
                 }
                 val = (unsigned char)c;
             } else {
@@ -386,6 +389,30 @@ void VM::materializeLabels() {
         if (off + (int64_t)bytes.size() > (int64_t)heap_.size()) heap_.resize(off + (int64_t)bytes.size());
         std::memcpy(heap_.data() + off, bytes.data(), bytes.size());
         stringOffsets_[label] = off;
+    }
+    for (const auto& line : module_->getStringData()) {
+        // "<label>: dq <otherlabel>" — a global variable cell holding a
+        // pointer to the materialized string.
+        size_t colon = line.find(':');
+        if (colon == std::string::npos) continue;
+        std::string label = line.substr(0, colon);
+        if (stringOffsets_.count(label)) continue;
+        std::string body = line.substr(colon + 1);
+        size_t dq = body.find("dq");
+        if (dq == std::string::npos) continue;
+        size_t b = body.find_first_not_of(" \t", dq + 2);
+        size_t e = body.find_last_not_of(" \t");
+        if (b == std::string::npos || e == std::string::npos) continue;
+        std::string target = body.substr(b, e - b + 1);
+        auto it = stringOffsets_.find(target);
+        if (it != stringOffsets_.end()) {
+            // Allocate an 8-byte cell holding the target's offset.
+            int64_t cell = malloc(8);
+            if (cell + 8 > (int64_t)heap_.size()) heap_.resize(cell + 8);
+            int64_t ptrVal = it->second;
+            std::memcpy(heap_.data() + cell, &ptrVal, 8);
+            stringOffsets_[label] = cell;
+        }
     }
 }
 
@@ -632,7 +659,10 @@ void VM::execAsm(const IRInstruction& instr) {
         return d;
     };
 
-    int64_t rax = 0, rdi = 0, rsi = 0, rdx = 0;
+    int64_t& rax = asmRax_;
+    int64_t& rdi = asmRdi_;
+    int64_t& rsi = asmRsi_;
+    int64_t& rdx = asmRdx_;
     bool wrote = false;
     bool exited = false;
 
