@@ -135,7 +135,9 @@ int main(int argc, char** argv) {
             cider::SSADeconstructor decon;
             decon.process(module);
             cider::CodeGenerator cg;
-            if (!cg.generate(module, opts.outputFile, opts.inputFile)) {
+            // Whole-program compilation: every function (including module
+            // functions) is emitted into the binary.
+            if (!cg.generate(module, opts.outputFile)) {
                 std::fprintf(stderr, "cannot write %s\n", opts.outputFile.c_str());
                 return 1;
             }

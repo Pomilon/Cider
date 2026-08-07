@@ -36,7 +36,14 @@ def run_native(ir_path):
                        capture_output=True, text=True)
         subprocess.run(["nasm", "-O0", "-f", "elf64", asm, "-o", obj], check=True,
                        capture_output=True, text=True)
-        subprocess.run(["ld", obj, "-o", exe], check=True, capture_output=True, text=True)
+        # _start binaries link bare; main binaries need -e main (the first
+        # emitted function is not necessarily the entry point).
+        nm = subprocess.run(["nm", obj], capture_output=True, text=True).stdout
+        if "_start" in nm:
+            subprocess.run(["ld", obj, "-o", exe], check=True, capture_output=True, text=True)
+        else:
+            subprocess.run(["ld", obj, "-o", exe, "-e", "main"], check=True,
+                           capture_output=True, text=True)
         r = subprocess.run([exe], capture_output=True, text=True, timeout=60)
         return RunResult(r.returncode, r.stdout, r.stderr)
 

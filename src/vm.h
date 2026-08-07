@@ -55,6 +55,7 @@ private:
     const ModuleIR* module_ = nullptr;
     std::map<std::string, int64_t> functionIds_;   // label -> id (id = index into functions)
     std::map<std::string, int64_t> stringOffsets_; // materialized string constant -> heap offset
+    std::map<std::string, int64_t> globalVarOffsets_; // global variable -> heap cell offset
     std::map<std::string, int64_t> vtableOffsets_; // vtable label -> heap offset
     std::string runFunction_;
     VMResult result_;
@@ -74,6 +75,7 @@ private:
     // Asm register file: persists across ASM instructions (the ir-gen
     // splits one asm block into several instructions).
     int64_t asmRax_ = 0, asmRdi_ = 0, asmRsi_ = 0, asmRdx_ = 0;
+    int64_t asmR8_ = 0, asmR9_ = 0, asmR10_ = 0;
 
     RegVal load(int64_t addr, IRType type);
     void store(int64_t addr, const RegVal& val, IRType type, int64_t offset = 0);

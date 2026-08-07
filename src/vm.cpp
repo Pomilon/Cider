@@ -31,6 +31,9 @@ VMResult VM::run(const ModuleIR& module, const std::string& runFunction) {
     asmRdi_ = 0;
     asmRsi_ = 0;
     asmRdx_ = 0;
+    asmR8_ = 0;
+    asmR9_ = 0;
+    asmR10_ = 0;
 
     const FunctionIR* entry = nullptr;
     for (const auto& fn : module_->getFunctions()) {
@@ -165,6 +168,7 @@ VMResult VM::run(const ModuleIR& module, const std::string& runFunction) {
                 offset = resolveValue(instr.args[1]).i;
             }
             IRType type = instr.dest ? instr.dest->type : IRType::I64;
+            if (instr.args[0].kind == IRValue::LABEL) type = IRType::I64;  // global cells are 8 bytes
             RegVal d = load(ptr.i + offset, type);
             if (instr.dest) regs_[instr.dest->name] = d;
             break;
@@ -177,6 +181,7 @@ VMResult VM::run(const ModuleIR& module, const std::string& runFunction) {
                 offset = resolveValue(instr.args[2]).i;
             }
             IRType type = val.isFloat ? IRType::F64 : IRType::I64;
+            if (instr.args[0].kind == IRValue::LABEL) type = IRType::I64;  // global cells are 8 bytes
             store(addr.i + offset, val, type);
             break;
         }
@@ -340,6 +345,12 @@ VM::RegVal VM::resolveValue(const IRValue& v) {
             d.i = sit->second;
             return d;
         }
+        auto git = globalVarOffsets_.find(v.name);
+        if (git != globalVarOffsets_.end()) {
+            RegVal d;
+            d.i = git->second;
+            return d;
+        }
         auto vit = vtableOffsets_.find(v.name);
         if (vit != vtableOffsets_.end()) {
             RegVal d;
@@ -361,6 +372,15 @@ void VM::materializeLabels() {
     for (const auto& [label, methods] : module_->getVTables()) {
         materializeVTable(label);
     }
+    // Global variables: an 8-byte cell per global, holding its initial value.
+    for (const auto& var : module_->getGlobalVars()) {
+        int64_t cell = malloc(8);
+        if (cell + 8 > (int64_t)heap_.size()) heap_.resize(cell + 8);
+        int64_t v = (int64_t)var.initialValue;
+        std::memcpy(heap_.data() + cell, &v, 8);
+        globalVarOffsets_[var.name] = cell;
+    }
+
     // Pre-materialize every string in stringData (the ir-gen emits global
     // string labels there). Two passes: db lines first, then dq aliases.
     for (const auto& line : module_->getStringData()) {
@@ -664,7 +684,22 @@ void VM::execAsm(const IRInstruction& instr) {
     }
     std::string code = instr.args[0].name;
 
+    int64_t& rax = asmRax_;
+    int64_t& rdi = asmRdi_;
+    int64_t& rsi = asmRsi_;
+    int64_t& rdx = asmRdx_;
+    int64_t& r8 = asmR8_;
+    int64_t& r9 = asmR9_;
+    int64_t& r10 = asmR10_;
+
     auto regVal = [&](const std::string& name) -> RegVal {
+        if (name == "rax") { RegVal d; d.i = rax; return d; }
+        if (name == "rdi") { RegVal d; d.i = rdi; return d; }
+        if (name == "rsi") { RegVal d; d.i = rsi; return d; }
+        if (name == "rdx") { RegVal d; d.i = rdx; return d; }
+        if (name == "r8") { RegVal d; d.i = r8; return d; }
+        if (name == "r9") { RegVal d; d.i = r9; return d; }
+        if (name == "r10") { RegVal d; d.i = r10; return d; }
         if (!name.empty() && name[0] == '{') {
             std::string var = name.substr(1, name.size() - 2);
             auto it = instr.asmMap.find(var);
@@ -681,10 +716,6 @@ void VM::execAsm(const IRInstruction& instr) {
         return d;
     };
 
-    int64_t& rax = asmRax_;
-    int64_t& rdi = asmRdi_;
-    int64_t& rsi = asmRsi_;
-    int64_t& rdx = asmRdx_;
     bool wrote = false;
     bool exited = false;
 
@@ -707,13 +738,30 @@ void VM::execAsm(const IRInstruction& instr) {
             std::string dst = a;
             if (dst.size() > 1 && dst.back() == ',') dst.pop_back();
             RegVal v = regVal(b2);
-            if (dst == "rax") rax = v.i;
-            else if (dst == "rdi") rdi = v.i;
-            else if (dst == "rsi") rsi = v.i;
-            else if (dst == "rdx") rdx = v.i;
-            else if (dst == "edi") rdi = (int32_t)v.i;
-            else if (dst == "eax") rax = (int32_t)v.i;
-            else throw VMError{"unsupported asm: " + line};
+            int64_t val = v.i;
+            if (dst == "rax") rax = val;
+            else if (dst == "rdi") rdi = val;
+            else if (dst == "rsi") rsi = val;
+            else if (dst == "rdx") rdx = val;
+            else if (dst == "r10") r10 = val;
+            else if (dst == "r8") r8 = val;
+            else if (dst == "r9") r9 = val;
+            else if (dst == "edi") rdi = (int32_t)val;
+            else if (dst == "esi") rsi = (int32_t)val;
+            else if (dst == "eax") rax = (int32_t)val;
+            else if (dst == "r8d") r8 = (int32_t)val;
+            else if (dst == "r9d") r9 = (int32_t)val;
+            else if (dst == "r10d") r10 = (int32_t)val;
+            else if (!dst.empty() && dst[0] == '{') {
+                // Placeholder destination: write the value into the var's register.
+                std::string var = dst.substr(1, dst.size() - 2);
+                auto it = instr.asmMap.find(var);
+                if (it == instr.asmMap.end() || it->second.kind != IRValue::REGISTER)
+                    throw VMError{"unsupported asm: " + line};
+                RegVal d;
+                d.i = val;
+                regs_[it->second.name] = d;
+            } else throw VMError{"unsupported asm: " + line};
         } else if (mnem == "movsxd") {
             if (b2.empty()) throw VMError{"unsupported asm: " + line};
             std::string dst = a;
@@ -724,6 +772,28 @@ void VM::execAsm(const IRInstruction& instr) {
             else if (dst == "rdi") rdi = (int32_t)v.i;
             else if (dst == "rsi") rsi = (int32_t)v.i;
             else throw VMError{"unsupported asm: " + line};
+        } else if (mnem == "xor") {
+            if (b2.empty()) throw VMError{"unsupported asm: " + line};
+            std::string dst = a;
+            if (dst.size() > 1 && dst.back() == ',') dst.pop_back();
+            RegVal v = regVal(b2);
+            int64_t x = 0;
+            if (dst == "rdi") x = rdi;
+            else if (dst == "rax") x = rax;
+            else if (dst == "rsi") x = rsi;
+            else if (dst == "rdx") x = rdx;
+            else if (dst == "r8") x = r8;
+            else if (dst == "r9") x = r9;
+            else if (dst == "r10") x = r10;
+            else throw VMError{"unsupported asm: " + line};
+            int64_t y = x ^ v.i;
+            if (dst == "rdi") rdi = y;
+            else if (dst == "rax") rax = y;
+            else if (dst == "rsi") rsi = y;
+            else if (dst == "rdx") rdx = y;
+            else if (dst == "r8") r8 = y;
+            else if (dst == "r9") r9 = y;
+            else if (dst == "r10") r10 = y;
         } else if (mnem == "syscall") {
             if (rax == 1) {
                 // write(fd=rdi, buf=rsi, len=rdx)
@@ -741,8 +811,9 @@ void VM::execAsm(const IRInstruction& instr) {
                 result_.exitCode = (int)rdi;
                 exited = true;
             } else if (rax == 9) {
-                // mmap(len=rsi) -> fresh region
+                // mmap(len=rsi) -> fresh region, returned in rax
                 rdi = malloc(rsi);
+                rax = rdi;
             } else {
                 throw VMError{"unsupported asm syscall: rax=" + std::to_string(rax)};
             }
