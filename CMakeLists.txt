@@ -79,3 +79,7 @@ add_test(NAME vm_asm_test COMMAND vm_asm_test)
 add_executable(codegen_test tests/unit/codegen_test.cpp src/codegen.cpp src/ir.cpp src/lexer.cpp src/parser.cpp src/symbols.cpp src/module_resolver.cpp)
 target_include_directories(codegen_test PRIVATE src)
 add_test(NAME codegen_test COMMAND codegen_test)
+
+add_executable(pass_test tests/unit/pass_test.cpp src/ir.cpp src/lexer.cpp src/parser.cpp src/symbols.cpp src/module_resolver.cpp)
+target_include_directories(pass_test PRIVATE src)
+add_test(NAME pass_test COMMAND pass_test)
