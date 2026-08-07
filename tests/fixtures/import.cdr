@@ -1,0 +1,4 @@
+import std.io;
+from std.vector import Vec;
+from std.map import Map, Set;
+export func f() -> void { }

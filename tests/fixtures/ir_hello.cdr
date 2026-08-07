@@ -1,0 +1,4 @@
+func main() -> void {
+  var x: int = 1;
+  x = x + 1;
+}

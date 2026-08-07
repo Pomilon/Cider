@@ -1,0 +1,11 @@
+type MyInt = int;
+
+func _start() -> void {
+    var x: MyInt = 42;
+
+    asm {
+        "mov rax, 60"
+        "mov edi, {x}"
+        "syscall"
+    }
+}

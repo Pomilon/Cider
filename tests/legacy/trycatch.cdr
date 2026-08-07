@@ -1,0 +1,26 @@
+func main() -> int {
+    var x: int = 0;
+    
+    try {
+        x = 42;
+    } catch (e) {
+        return 1;
+    }
+    
+    if (x != 42) {
+        return 1;
+    }
+    
+    try {
+        throw 99;
+        return 1;
+    } catch (e) {
+        if (e == 99) {
+            // PASS
+        } else {
+            return 1;
+        }
+    }
+
+    return 0;
+}

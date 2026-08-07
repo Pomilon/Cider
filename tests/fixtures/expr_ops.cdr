@@ -1,0 +1,6 @@
+func f() {
+  var s: Point = Point{x: 1, y: 2};
+  var l: int = [1, 2, 3];
+  var t: int = {"k": 1};
+  var a: int = xs[1:3];
+}

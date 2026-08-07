@@ -1,0 +1,18 @@
+from std.io import puts, exit;
+
+func _start() -> void {
+    var x: int = 5;   // 0101
+    x &= 3;           // 0101 & 0011 = 0001
+    if (x != 1) { puts("FAIL: &="); exit(1); }
+    
+    x = 2;            // 0010
+    x |= 5;           // 0010 | 0101 = 0111
+    if (x != 7) { puts("FAIL: |="); exit(1); }
+    
+    x = 5;            // 0101
+    x ^= 3;           // 0101 ^ 0011 = 0110
+    if (x != 6) { puts("FAIL: ^="); exit(1); }
+    
+    puts("PASS: compound_bitwise");
+    exit(0);
+}

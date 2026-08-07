@@ -4,7 +4,8 @@ from std.alloc import malloc, free;
 
 func _start() {
     var N: int = 2000000;
-    var sieve: *bool = malloc(N) as *bool;
+    // Cider's bool is 4 bytes (unlike C's 1): N bools need N*4 bytes.
+    var sieve: *bool = malloc(N * 4) as *bool;
     var i: int = 0;
     while (i < N) {
         sieve[i] = true;

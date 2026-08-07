@@ -1,0 +1,18 @@
+func count(n: u64) -> u64 {
+    if (n == 0) {
+        return 0;
+    }
+    return count(n - 1) + 1;
+}
+
+func _start() {
+    var x: u64 = count(5);
+    if (x == 5) {
+        asm { "mov rax, 60" }
+        asm { "mov rdi, 0" }
+        asm { "syscall" }
+    }
+    asm { "mov rax, 60" }
+    asm { "mov rdi, 1" }
+    asm { "syscall" }
+}

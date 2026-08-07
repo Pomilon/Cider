@@ -1,0 +1,1 @@
+{"stdout": "x = 42, hello world, ok = true, bang!\nliteral {brace} and 43\ncss { color: #333; } stays literal\n", "stderr": "", "exit": 0}

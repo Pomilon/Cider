@@ -1,0 +1,5 @@
+func f() {
+  defer close(f);
+  try { g(); } catch (e) { h(e); }
+  throw err;
+}

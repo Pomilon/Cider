@@ -1,19 +1,56 @@
-// Cider Free-List Allocator
+// Cider Free-List Allocator — hardened (v2)
 // Block layout:
 //   offset 0: size (u64) - total block size inc 16-byte header
 //   offset 8: next (free) / magic (allocated)
 //   offset 16: user data
+//
+// Hardening (design spec §9):
+//   - hard arena caps: MAX_ARENAS, MAX_TOTAL_BYTES (fail fast, never grow unbounded)
+//   - corruption canaries on every freed block; malloc verifies before reuse
+//   - fail-fast diagnostics: one line on stderr + a distinct exit code (70-79)
+//   - free-list walk cycle guard: a walk that visits too many blocks dies
+//     instead of looping (the 98GB incident's root cause)
 
 var free_list: *void = nilPtr;
 var ARENA_SIZE: int = 1048576;
 var HEADER_SIZE: int = 16;
 var MIN_BLOCK_SIZE: int = 24;
 var MAGIC_VAL: u64 = 3254775790;
+var CANARY_VAL: u64 = 18446744073709551606 as u64;  // 0xFFFFFFFFFFFFFFF6
+var MAX_ARENAS: int = 1024;
+var MAX_TOTAL_BYTES: int = 1073741824;  // 1 GiB (fits int32; 2 GiB overflows the 32-bit int type)
+var MAX_WALK_BLOCKS: int = 1000000;
+var arena_count: int = 0;
+var total_bytes: int = 0;
+
+var fail_msg: string = "allocator: fatal error\n";
+
+func fail_fast(code: int) -> void {
+    var s: char* = fail_msg as char*;
+    asm {
+        "mov rax, 1"
+        "mov rdi, 2"
+        "mov rsi, {s}"
+        "mov rdx, 24"
+        "syscall"
+    }
+    asm {
+        "mov rax, 60"
+        "mov edi, {code}"
+        "syscall"
+    }
+}
 
 export func init_heap() -> void {
 }
 
 func mmap_arena(size: int) -> *void {
+    if (arena_count >= MAX_ARENAS) {
+        fail_fast(70);
+    }
+    if (total_bytes + size > MAX_TOTAL_BYTES) {
+        fail_fast(71);
+    }
     var addr: *void = 0 as *void;
     asm {
         "mov rax, 9"
@@ -26,6 +63,8 @@ func mmap_arena(size: int) -> *void {
         "syscall"
         "mov {addr}, rax"
     }
+    arena_count = arena_count + 1;
+    total_bytes = total_bytes + size;
     return addr;
 }
 
@@ -45,8 +84,23 @@ export func malloc(size: int) -> *void {
 
     var prev: *void = nilPtr;
     var curr: *void = free_list;
+    var walked: int = 0;
 
     while (curr != nilPtr) {
+        walked = walked + 1;
+        if (walked > MAX_WALK_BLOCKS) {
+            fail_fast(72);
+        }
+
+        // Canary check: a freed block must still carry the canary. If a
+        // write clobbered a freed block, the free list is corrupt — die
+        // here instead of handing out a torn block.
+        var canary_ptr: *u64 = (curr + 16) as *u64;
+        var canary: u64 = *canary_ptr;
+        if (canary != CANARY_VAL) {
+            fail_fast(73);
+        }
+
         var size_ptr: *u64 = curr as *u64;
         var block_size: u64 = *size_ptr;
 
@@ -59,6 +113,8 @@ export func malloc(size: int) -> *void {
                 var new_free: *void = curr + needed;
                 var new_size_ptr: *u64 = new_free as *u64;
                 *new_size_ptr = remaining;
+                var new_canary_ptr: *u64 = (new_free + 16) as *u64;
+                *new_canary_ptr = CANARY_VAL;
 
                 var curr_next_ptr: **void = (curr + 8) as **void;
                 var new_next_ptr: **void = (new_free + 8) as **void;
@@ -111,6 +167,8 @@ export func malloc(size: int) -> *void {
 
     var arena_size_ptr: *u64 = arena as *u64;
     *arena_size_ptr = ARENA_SIZE as u64;
+    var arena_canary_ptr: *u64 = (arena + 16) as *u64;
+    *arena_canary_ptr = CANARY_VAL;
     var arena_next_ptr: **void = (arena + 8) as **void;
     *arena_next_ptr = free_list;
     free_list = arena;
@@ -118,8 +176,20 @@ export func malloc(size: int) -> *void {
     // Retry once (arena is at head of free list)
     prev = nilPtr;
     curr = free_list;
+    walked = 0;
 
     while (curr != nilPtr) {
+        walked = walked + 1;
+        if (walked > MAX_WALK_BLOCKS) {
+            fail_fast(72);
+        }
+
+        var canary_ptr: *u64 = (curr + 16) as *u64;
+        var canary: u64 = *canary_ptr;
+        if (canary != CANARY_VAL) {
+            fail_fast(73);
+        }
+
         var size_ptr: *u64 = curr as *u64;
         var block_size: u64 = *size_ptr;
 
@@ -132,6 +202,8 @@ export func malloc(size: int) -> *void {
                 var new_free: *void = curr + needed;
                 var new_size_ptr: *u64 = new_free as *u64;
                 *new_size_ptr = remaining;
+                var new_canary_ptr: *u64 = (new_free + 16) as *u64;
+                *new_canary_ptr = CANARY_VAL;
 
                 var curr_next_ptr: **void = (curr + 8) as **void;
                 var new_next_ptr: **void = (new_free + 8) as **void;
@@ -175,7 +247,9 @@ export func free(ptr: *void) -> void {
     var magic_ptr: *u64 = (block + 8) as *u64;
     var magic: u64 = *magic_ptr;
 
-    if (magic != MAGIC_VAL) return;
+    if (magic != MAGIC_VAL) {
+        fail_fast(74);
+    }
 
     var size_ptr: *u64 = block as *u64;
     var block_size: u64 = *size_ptr;
@@ -185,8 +259,13 @@ export func free(ptr: *void) -> void {
     // Find insertion point in free list (sorted by address)
     var prev: *void = nilPtr;
     var curr: *void = free_list;
+    var walked: int = 0;
 
     while (curr != nilPtr && curr < block) {
+        walked = walked + 1;
+        if (walked > MAX_WALK_BLOCKS) {
+            fail_fast(72);
+        }
         prev = curr;
         var next_ptr: **void = (curr + 8) as **void;
         curr = *next_ptr;
@@ -231,4 +310,8 @@ export func free(ptr: *void) -> void {
             *prev_next_ptr = new_block_next;
         }
     }
+
+    // Stamp the canary on the freed block.
+    var canary_ptr: *u64 = (block + 16) as *u64;
+    *canary_ptr = CANARY_VAL;
 }

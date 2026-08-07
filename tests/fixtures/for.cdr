@@ -1,0 +1,4 @@
+func f() {
+  for (var i: int = 0; i < n; i = i + 1) { break; }
+  for (var x in items) { continue; }
+}

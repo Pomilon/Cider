@@ -1,0 +1,207 @@
+from std.io import puts, exit;
+
+// Test: break, continue, defer, else if chains, modulo
+
+func test_break_continue() -> int {
+    var sum: int = 0;
+    for (var i: int = 0; i < 20; i = i + 1) {
+        if (i % 2 == 1) { continue; }
+        if (i >= 10) { break; }
+        sum = sum + i;
+    }
+    // sum should be 0+2+4+6+8 = 20
+    if (sum != 20) { return 1; }
+    return 0;
+}
+
+func test_else_if() -> int {
+    var x: int = 42;
+    var result: int = 0;
+    if (x < 10) {
+        result = 1;
+    } else if (x < 20) {
+        result = 2;
+    } else if (x < 30) {
+        result = 3;
+    } else if (x < 40) {
+        result = 4;
+    } else if (x < 50) {
+        result = 5;
+    } else {
+        result = 6;
+    }
+    if (result != 5) { return 1; }
+    return 0;
+}
+
+func test_continue_in_while() -> int {
+    var i: int = 0;
+    var sum: int = 0;
+    while (i < 10) {
+        i = i + 1;
+        if (i % 2 == 0) { continue; }
+        sum = sum + i;
+    }
+    // sum of odd numbers 1+3+5+7+9 = 25
+    if (sum != 25) { return 1; }
+    return 0;
+}
+
+func test_break_in_while() -> int {
+    var i: int = 0;
+    while (i < 100) {
+        i = i + 1;
+        if (i >= 7) { break; }
+    }
+    if (i != 7) { return 1; }
+    return 0;
+}
+
+func test_modulo() -> int {
+    if (17 % 5 != 2) { return 1; }
+    if (100 % 7 != 2) { return 2; }
+    if (8 % 3 != 2) { return 3; }
+    if (1 % 2 != 1) { return 4; }
+    if (0 % 5 != 0) { return 5; }
+    return 0;
+}
+
+func test_nested_ternary() -> int {
+    var a: int = 1;
+    var b: int = 2;
+    var c: int = 3;
+
+    // nested ternary: (a < b) ? ((b < c) ? 100 : 200) : 300
+    var r1: int = (a < b) ? ((b < c) ? 100 : 200) : 300;
+    if (r1 != 100) { return 1; }
+
+    // false outer, false inner
+    var r2: int = (a > b) ? ((b > c) ? 100 : 200) : 300;
+    if (r2 != 300) { return 2; }
+
+    // true outer, false inner
+    var r3: int = (a < b) ? ((b > c) ? 100 : 200) : 300;
+    if (r3 != 200) { return 3; }
+
+    return 0;
+}
+
+func test_ptr_arithmetic() -> int {
+    var arr: [int; 5];
+    arr[0] = 10;
+    arr[1] = 20;
+    arr[2] = 30;
+    arr[3] = 40;
+    arr[4] = 50;
+
+    var sum: int = 0;
+    for (var i: int = 0; i < 5; i = i + 1) {
+        sum = sum + arr[i];
+    }
+    if (sum != 150) { return 1; }
+    return 0;
+}
+
+func test_compound_arithmetic() -> int {
+    var x: int = 10;
+    x += 5;
+    if (x != 15) { return 1; }
+
+    x -= 3;
+    if (x != 12) { return 2; }
+
+    x *= 2;
+    if (x != 24) { return 3; }
+
+    x /= 4;
+    if (x != 6) { return 4; }
+
+    x %= 4;
+    if (x != 2) { return 5; }
+
+    return 0;
+}
+
+func test_nested_deep_control() -> int {
+    var result: int = 0;
+    for (var i: int = 0; i < 5; i = i + 1) {
+        for (var j: int = 0; j < 5; j = j + 1) {
+            for (var k: int = 0; k < 5; k = k + 1) {
+                if (i + j + k == 6) {
+                    result = result + 1;
+                }
+            }
+        }
+    }
+    // Count of (i,j,k) with sum=6 in 0..4 range: 19 combos
+    if (result != 19) { return 1; }
+    return 0;
+}
+
+func test_bool_in_conditions() -> int {
+    var flag: bool = true;
+    if (flag) {
+        // ok
+    } else {
+        return 1;
+    }
+
+    flag = false;
+    if (flag) {
+        return 2;
+    }
+
+    var count: int = 0;
+    for (var i: int = 0; i < 100; i = i + 1) {
+        var cond: bool = (i % 2 == 0);
+        if (cond) {
+            count = count + i;
+        }
+    }
+    // Sum of even numbers 0..98 = 2450
+    if (count != 2450) { return 3; }
+
+    return 0;
+}
+
+func _start() {
+    var result: int = 0;
+
+    result = test_break_continue();
+    if (result != 0) { puts("FAIL: break/continue\n"); exit(result); }
+
+    result = test_else_if();
+    if (result != 0) { puts("FAIL: else if\n"); exit(result); }
+
+    result = test_continue_in_while();
+    if (result != 0) { puts("FAIL: continue in while\n"); exit(result); }
+
+    result = test_break_in_while();
+    if (result != 0) { puts("FAIL: break in while\n"); exit(result); }
+
+    result = test_modulo();
+    if (result != 0) { puts("FAIL: modulo\n"); exit(result); }
+
+    result = test_nested_ternary();
+    if (result != 0) { puts("FAIL: nested ternary\n"); exit(result); }
+
+    result = test_ptr_arithmetic();
+    if (result != 0) { puts("FAIL: ptr arithmetic\n"); exit(result); }
+
+    result = test_compound_arithmetic();
+    if (result != 0) { puts("FAIL: compound arithmetic\n"); exit(result); }
+
+    result = test_nested_deep_control();
+    if (result != 0) { puts("FAIL: nested deep control\n"); exit(result); }
+
+    result = test_bool_in_conditions();
+    if (result != 0) { puts("FAIL: bool conditions\n"); exit(result); }
+
+    puts("PASS: control_flow_stress\n");
+
+    asm {
+        "mov rax, 60"
+        "xor rdi, rdi"
+        "syscall"
+    }
+}

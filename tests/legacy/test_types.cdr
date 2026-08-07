@@ -1,0 +1,13 @@
+from std.io import puts;
+
+func main() -> int {
+    var c: char = 'A';
+    var b: byte = 65; // 'A'
+    var isSame: bool = c == b;
+
+    if (isSame) {
+        puts("Char and Byte are equivalent integers");
+    }
+
+    return c;
+}

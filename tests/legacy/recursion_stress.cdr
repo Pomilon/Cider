@@ -1,0 +1,29 @@
+from std.io import print, printInt, exit;
+
+func ack(m: int, n: int) -> int {
+    if (m == 0) {
+        return n + 1;
+    }
+    if (n == 0) {
+        return ack(m - 1, 1);
+    }
+    return ack(m - 1, ack(m, n - 1));
+}
+
+func _start() -> void {
+    print("Testing Ackermann(3, 3)...\n");
+    // Expected: 61
+    var result: int = ack(3, 3);
+    
+    print("Result: ");
+    printInt(result);
+    print("\n");
+    
+    if (result == 61) {
+        print("Ackermann Success!\n");
+        exit(0);
+    } else {
+        print("Ackermann Failure!\n");
+        exit(1);
+    }
+}

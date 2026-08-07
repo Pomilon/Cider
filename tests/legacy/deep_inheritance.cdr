@@ -1,0 +1,23 @@
+class A {
+    var a: int;
+}
+class B extends A {
+    var b: int;
+}
+class C extends B {
+    var c: int;
+}
+class D extends C {
+    var d: int;
+}
+
+func main() -> int {
+    var obj: *D = new D;
+    obj->a = 1;
+    obj->b = 2;
+    obj->c = 4;
+    obj->d = 8;
+    
+    var sum: int = obj->a + obj->b + obj->c + obj->d;
+    return sum; // 1 + 2 + 4 + 8 = 15
+}

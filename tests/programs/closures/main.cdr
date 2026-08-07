@@ -1,0 +1,13 @@
+func makeAdder(base: int) -> func(int) -> int {
+  return func(x: int) -> int { return x + base; };
+}
+
+func _start() {
+  var add10: func(int) -> int = makeAdder(10);
+  var r1: int = add10(5);
+  var add100: func(int) -> int = makeAdder(100);
+  var r2: int = add100(5);
+  if (r1 != 15) { asm { "mov rax, 60" } asm { "mov rdi, 1" } asm { "syscall" } }
+  if (r2 != 105) { asm { "mov rax, 60" } asm { "mov rdi, 2" } asm { "syscall" } }
+  asm { "mov rax, 60" } asm { "mov rdi, 0" } asm { "syscall" }
+}

@@ -1,0 +1,11 @@
+from std.io import puts, exit;
+
+func pass_it(s: string) -> string {
+    return s;
+}
+
+func _start() {
+    var msg: string = pass_it("hello from inline\n");
+    puts(msg);
+    exit(0);
+}

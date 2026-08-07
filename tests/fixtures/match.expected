@@ -1,0 +1,3 @@
+(Program
+  (FunctionDecl f (returns void) (body (Asm "mov rax, 60") (Match (Ident x) (arm (Number 1) (ExprStmt (Call (Ident a)))) (arm (Ident _) (ExprStmt (Call (Ident b)))))))
+)
