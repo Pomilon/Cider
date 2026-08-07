@@ -2,6 +2,7 @@
 
 #include <cstring>
 #include <sstream>
+#include <unistd.h>
 
 namespace cider {
 
@@ -34,6 +35,7 @@ VMResult VM::run(const ModuleIR& module, const std::string& runFunction) {
     asmR8_ = 0;
     asmR9_ = 0;
     asmR10_ = 0;
+    asmR11_ = 0;
 
     const FunctionIR* entry = nullptr;
     for (const auto& fn : module_->getFunctions()) {
@@ -709,15 +711,17 @@ void VM::execAsm(const IRInstruction& instr) {
     int64_t& r8 = asmR8_;
     int64_t& r9 = asmR9_;
     int64_t& r10 = asmR10_;
+    int64_t& r11 = asmR11_;
 
     auto regVal = [&](const std::string& name) -> RegVal {
-        if (name == "rax") { RegVal d; d.i = rax; return d; }
-        if (name == "rdi") { RegVal d; d.i = rdi; return d; }
-        if (name == "rsi") { RegVal d; d.i = rsi; return d; }
-        if (name == "rdx") { RegVal d; d.i = rdx; return d; }
+        if (name == "rax" || name == "eax") { RegVal d; d.i = (name == "eax") ? (int32_t)rax : rax; return d; }
+        if (name == "rdi" || name == "edi") { RegVal d; d.i = (name == "edi") ? (int32_t)rdi : rdi; return d; }
+        if (name == "rsi" || name == "esi") { RegVal d; d.i = (name == "esi") ? (int32_t)rsi : rsi; return d; }
+        if (name == "rdx" || name == "edx") { RegVal d; d.i = (name == "edx") ? (int32_t)rdx : rdx; return d; }
         if (name == "r8") { RegVal d; d.i = r8; return d; }
         if (name == "r9") { RegVal d; d.i = r9; return d; }
         if (name == "r10") { RegVal d; d.i = r10; return d; }
+        if (name == "r11") { RegVal d; d.i = r11; return d; }
         if (!name.empty() && name[0] == '{') {
             std::string var = name.substr(1, name.size() - 2);
             auto it = instr.asmMap.find(var);
@@ -766,10 +770,12 @@ void VM::execAsm(const IRInstruction& instr) {
             else if (dst == "r9") r9 = val;
             else if (dst == "edi") rdi = (int32_t)val;
             else if (dst == "esi") rsi = (int32_t)val;
+            else if (dst == "edx") rdx = (int32_t)val;
             else if (dst == "eax") rax = (int32_t)val;
             else if (dst == "r8d") r8 = (int32_t)val;
             else if (dst == "r9d") r9 = (int32_t)val;
             else if (dst == "r10d") r10 = (int32_t)val;
+            else if (dst == "r11d") r11 = (int32_t)val;
             else if (!dst.empty() && dst[0] == '{') {
                 // Placeholder destination: write the value into the var's register.
                 std::string var = dst.substr(1, dst.size() - 2);
@@ -832,6 +838,18 @@ void VM::execAsm(const IRInstruction& instr) {
                 // mmap(len=rsi) -> fresh region, returned in rax
                 rdi = malloc(rsi);
                 rax = rdi;
+            } else if (rax == 0) {
+                // read(fd=rdi, buf=rsi, len=rdx) — read the real stdin into
+                // the VM heap (the harness feeds input via stdin).
+                int64_t len = rdx;
+                int64_t got = 0;
+                if (rdi == 0) {
+                    int64_t room = (rsi + len <= (int64_t)heap_.size()) ? len : (int64_t)heap_.size() - rsi;
+                    if (room > 0) {
+                        got = (int64_t)::read(0, heap_.data() + rsi, (size_t)room);
+                    }
+                }
+                rax = got;
             } else {
                 throw VMError{"unsupported asm syscall: rax=" + std::to_string(rax)};
             }

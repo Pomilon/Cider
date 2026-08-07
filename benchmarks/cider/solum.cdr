@@ -1135,8 +1135,6 @@ func _start() {
     var doc: *PtrList = parse_doc(input);
     var b: *StrBuf = sb_new();
     render_nodes(b, doc);
-    from std.alloc import flog_dump;
-    flog_dump();
 
     sb_char(b, '\n' as char);  // match the CLI's trailing newline
     var out: char* = sb_cstr(b);

@@ -22,12 +22,13 @@ PROGRAMS = os.path.join(REPO, "tests", "programs")
 RunResult = namedtuple("RunResult", "returncode stdout stderr")
 
 
-def run_cider(args):
-    r = subprocess.run([CIDER] + args, capture_output=True, text=True, timeout=60)
+def run_cider(args, stdin_data=None):
+    r = subprocess.run([CIDER] + args, input=stdin_data, capture_output=True,
+                       text=True, timeout=180)
     return RunResult(r.returncode, r.stdout, r.stderr)
 
 
-def run_native(ir_path):
+def run_native(ir_path, stdin_data=None):
     with tempfile.TemporaryDirectory() as tmp:
         asm = os.path.join(tmp, "prog.asm")
         obj = os.path.join(tmp, "prog.o")
@@ -46,7 +47,8 @@ def run_native(ir_path):
         else:
             subprocess.run(["gcc", obj, "-o", exe, "-no-pie"], check=True,
                            capture_output=True, text=True)
-        r = subprocess.run([exe], capture_output=True, text=True, timeout=60)
+        r = subprocess.run([exe], input=stdin_data, capture_output=True,
+                           text=True, timeout=180)
         return RunResult(r.returncode, r.stdout, r.stderr)
 
 
@@ -59,10 +61,15 @@ def make_test(name):
     def test(self):
         cdr = os.path.join(PROGRAMS, name, "main.cdr")
         exp = load_expected(name)
+        inp = None
+        in_path = os.path.join(PROGRAMS, name, "input.txt")
+        if os.path.exists(in_path):
+            with open(in_path) as f:
+                inp = f.read()
 
-        r1 = run_cider(["run", "--no-opt", cdr])
-        r2 = run_cider(["run", cdr])
-        r3 = run_native(cdr)
+        r1 = run_cider(["run", "--no-opt", cdr], inp)
+        r2 = run_cider(["run", cdr], inp)
+        r3 = run_native(cdr, inp)
 
         paths = [("vm-unopt", r1), ("vm-opt", r2), ("native", r3)]
         for label, r in paths:

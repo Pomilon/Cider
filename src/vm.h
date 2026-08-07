@@ -75,7 +75,7 @@ private:
     // Asm register file: persists across ASM instructions (the ir-gen
     // splits one asm block into several instructions).
     int64_t asmRax_ = 0, asmRdi_ = 0, asmRsi_ = 0, asmRdx_ = 0;
-    int64_t asmR8_ = 0, asmR9_ = 0, asmR10_ = 0;
+    int64_t asmR8_ = 0, asmR9_ = 0, asmR10_ = 0, asmR11_ = 0;
 
     RegVal load(int64_t addr, IRType type);
     void store(int64_t addr, const RegVal& val, IRType type, int64_t offset = 0);

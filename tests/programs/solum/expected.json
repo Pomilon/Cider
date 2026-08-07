@@ -1,0 +1,1 @@
+{"stdout": "<h1>1. Chapter 1</h1><br/>An intro with <strong>bold<em>text</em></strong> and <s>deleted</s>.<br/><br/><ul><li>first bullet</li><li>second bullet</li></ul><br/>&gt;## Subsection<br/><br/><code>inline code</code> and <a href=\"https://x.com\">a link</a>.<br/>\n", "stderr": "", "exit": 0}

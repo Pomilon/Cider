@@ -1059,11 +1059,11 @@ bool CodeGenerator::generate(ModuleIR& module, const std::string& outputPath,
                         addText("    push " + std::to_string((long long)instr.args[0].constValue));
                     } else if (isMem(a1)) {
                         IRType t = instr.args[0].type;
-                        if (t == IRType::I32 || t == IRType::U32) {
+                        if (t == IRType::I32 || t == IRType::U32 || t == IRType::BOOL) {
                             addText("    movsxd rax, " + getSizedReg(a1, IRType::I32));
                             addText("    push rax");
                         } else {
-                            addText("    mov rax, " + getSizedReg(a1, t));
+                            addText("    mov " + getSizedReg("rax", t) + ", " + getSizedReg(a1, t));
                             addText("    push rax");
                         }
                     } else {
