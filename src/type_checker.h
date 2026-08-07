@@ -44,10 +44,12 @@ public:
 
         if (t1.name == "float" && isInteger(t2.name) && t1.pointerLevel == 0 && t2.pointerLevel == 0) return true;
         if (isInteger(t1.name) && isInteger(t2.name) && t1.pointerLevel == 0 && t2.pointerLevel == 0) return true;
-        // C-style conversion: any T* is assignable to void* (and to **void
-        // for the allocator's free-list cells). The reference required the
-        // exact void* — the sieve benchmark's free(*bool) was rejected.
-        if (t1.name == "void" && t1.pointerLevel >= 1 && t2.pointerLevel >= t1.pointerLevel) return true;
+        // C-style conversions: any T* <-> void* (both directions, any
+        // pointer depth). The reference only allowed T* -> void*, which
+        // rejected nilPtr initializations (*void -> T*) and the sieve
+        // benchmark's free(*bool).
+        if ((t1.name == "void" && t1.pointerLevel >= 1 && t2.pointerLevel >= t1.pointerLevel) ||
+            (t2.name == "void" && t2.pointerLevel >= 1 && t1.pointerLevel >= t2.pointerLevel)) return true;
 
         // Pointer covariance for classes
         if (t1.pointerLevel > 0 && t2.pointerLevel > 0 && t1.pointerLevel == t2.pointerLevel) {
