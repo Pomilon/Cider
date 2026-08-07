@@ -843,7 +843,11 @@ bool CodeGenerator::generate(ModuleIR& module, const std::string& outputPath,
                             addText("    " + op + " eax, byte [rel " + instr.args[0].name + "]");
                         else
                             addText("    " + op + " eax, byte [" + addrReg + "]");
-                        addText("    mov " + getSizedReg(d, t) + ", al");
+                        // Move the full zero/sign-extended 32-bit value: a
+                        // `mov bl, al` would leave the destination register's
+                        // upper 56 bits stale, corrupting every later
+                        // comparison of this value (e.g. strcmp).
+                        addText("    mov " + getSizedReg(d, IRType::I32) + ", eax");
                     } else if (t == IRType::I16 || t == IRType::U16) {
                         std::string op = (t == IRType::I16) ? "movsx" : "movzx";
                         if (instr.args.size() > 1 && instr.args[1].kind == IRValue::CONSTANT)
@@ -852,7 +856,8 @@ bool CodeGenerator::generate(ModuleIR& module, const std::string& outputPath,
                             addText("    " + op + " eax, word [rel " + instr.args[0].name + "]");
                         else
                             addText("    " + op + " eax, word [" + addrReg + "]");
-                        addText("    mov " + getSizedReg(d, t) + ", ax");
+                        // Full 32-bit move: zeroes the register's upper half.
+                        addText("    mov " + getSizedReg(d, IRType::I32) + ", eax");
                     } else {
                         std::string sizePrefix = "qword ";
                         if (t == IRType::I32 || t == IRType::U32 || t == IRType::BOOL) sizePrefix = "dword ";
