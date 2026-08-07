@@ -958,7 +958,9 @@ std::vector<std::string> Parser::parseTemplateParams() {
     if (currentToken_.type != TokenType::LT) return params;
     nextToken();  // consume <
     while (true) {
-        if (currentToken_.type != TokenType::IDENTIFIER) {
+        // Type tokens (int, bool, user types as identifiers) are allowed:
+        // explicit specializations write func max<int>(...).
+        if (currentToken_.type != TokenType::IDENTIFIER && !isTypeToken(currentToken_.type)) {
             error("Expected template parameter name.");
             return params;
         }

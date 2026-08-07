@@ -113,14 +113,38 @@ public:
         }
     }
 
+    static bool isKnownTypeName(const std::string& n) {
+        static const std::set<std::string> builtins = {
+            "int", "bool", "char", "byte", "float", "string", "void",
+            "i8", "i16", "i32", "i64", "u8", "u16", "u32", "u64", "f32", "f64"};
+        if (builtins.count(n)) return true;
+        return n.find('<') != std::string::npos;  // Vec<int> is a concrete type
+    }
+
     void visit(FunctionDeclStmt& stmt) override {
-        // Check for template function declaration
+        // Check for template function declaration. If every parameter is a
+        // concrete type (int, user struct, Vec<int>, ...), this is an
+        // explicit specialization, keyed by its mangled name.
         if (stmt.hasTemplateParams()) {
             auto tmplSym = std::make_shared<TemplateSymbol>();
             tmplSym->kind = SymbolKind::TEMPLATE;
             tmplSym->name = stmt.getName();
             tmplSym->typeParams = stmt.getTemplateParams();
-            templateTable_[stmt.getName()] = tmplSym;
+            bool specialization = true;
+            for (const auto& p : stmt.getTemplateParams()) {
+                if (!isKnownTypeName(p)) { specialization = false; break; }
+            }
+            if (specialization) {
+                std::string key = stmt.getName() + "<";
+                for (size_t i = 0; i < stmt.getTemplateParams().size(); ++i) {
+                    if (i > 0) key += ",";
+                    key += stmt.getTemplateParams()[i];
+                }
+                key += ">";
+                templateTable_[key] = tmplSym;
+            } else {
+                templateTable_[stmt.getName()] = tmplSym;
+            }
             return;
         }
 
@@ -189,13 +213,28 @@ public:
     }
 
     void visit(StructDeclStmt& stmt) override {
-        // Check for template struct declaration
+        // Check for template struct declaration (explicit specializations
+        // are keyed by their mangled name, like function templates).
         if (stmt.hasTemplateParams()) {
             auto tmplSym = std::make_shared<TemplateSymbol>();
             tmplSym->kind = SymbolKind::TEMPLATE;
             tmplSym->name = stmt.getName();
             tmplSym->typeParams = stmt.getTemplateParams();
-            templateTable_[stmt.getName()] = tmplSym;
+            bool specialization = true;
+            for (const auto& p : stmt.getTemplateParams()) {
+                if (!isKnownTypeName(p)) { specialization = false; break; }
+            }
+            if (specialization) {
+                std::string key = stmt.getName() + "<";
+                for (size_t i = 0; i < stmt.getTemplateParams().size(); ++i) {
+                    if (i > 0) key += ",";
+                    key += stmt.getTemplateParams()[i];
+                }
+                key += ">";
+                templateTable_[key] = tmplSym;
+            } else {
+                templateTable_[stmt.getName()] = tmplSym;
+            }
             return;
         }
 
@@ -799,6 +838,60 @@ public:
         }
     }
 
+    // Minimal type inference for template argument deduction: returns the
+    // concrete type name of a literal/simple argument expression.
+    std::string inferArgType(Expression* arg) {
+        if (!arg) return "";
+        if (dynamic_cast<NumberExpr*>(arg)) return "int";
+        if (dynamic_cast<StringExpr*>(arg) || dynamic_cast<InterpolatedStringExpr*>(arg)) return "string";
+        if (dynamic_cast<BooleanExpr*>(arg)) return "bool";
+        if (dynamic_cast<CharExpr*>(arg)) return "char";
+        if (auto id = dynamic_cast<IdentifierExpr*>(arg)) {
+            auto sym = symbolTable_.resolve(id->getName());
+            if (sym) return sym->type.name;
+        }
+        if (auto cast = dynamic_cast<CastExpr*>(arg)) {
+            if (cast->getTargetType()) return cast->getTargetType()->getName();
+        }
+        if (auto un = dynamic_cast<UnaryExpr*>(arg)) {
+            return inferArgType(un->getOperand());
+        }
+        return "";
+    }
+
+    void deduceAndInstantiate(Expression* callee, const std::vector<std::unique_ptr<Expression>>& args) {
+        auto id = dynamic_cast<IdentifierExpr*>(callee);
+        if (!id) return;
+        const std::string& nm = id->getName();
+        if (nm.find('<') != std::string::npos) return;  // already explicit
+        auto it = templateTable_.find(nm);
+        if (it == templateTable_.end()) return;
+        // Only primary templates (params are generic names) deduce.
+        bool primary = true;
+        for (const auto& p : it->second->typeParams) {
+            if (isKnownTypeName(p)) { primary = false; break; }
+        }
+        if (!primary) return;
+        // Single type parameter: it is unified with the first argument's
+        // type (max<T>(a: T, b: T)). Multiple params map in order
+        // (pair<T,U> <- args 0,1).
+        const auto& typeParams = it->second->typeParams;
+        std::string mangled = nm + "<";
+        for (size_t i = 0; i < typeParams.size(); ++i) {
+            size_t argIdx = (typeParams.size() == 1) ? 0 : i;
+            if (argIdx >= args.size()) return;
+            std::string t = inferArgType(args[argIdx].get());
+            if (t.empty()) return;  // cannot deduce — leave it
+            if (i > 0) mangled += ",";
+            mangled += t;
+        }
+        mangled += ">";
+        instantiateFunctionTemplate(mangled);
+        // Rewrite the call site to the mangled name so the type checker and
+        // ir-gen resolve it as a plain function.
+        id->setName(mangled);
+    }
+
     void visitExprForTemplateCalls(Expression* expr) {
         if (!expr) return;
         if (auto id = dynamic_cast<IdentifierExpr*>(expr)) {
@@ -812,6 +905,7 @@ public:
                 }
             }
         } else if (auto call = dynamic_cast<CallExpr*>(expr)) {
+            deduceAndInstantiate(call->getCallee(), call->getArgs());
             visitExprForTemplateCalls(call->getCallee());
             for (auto& arg : call->getArgs()) visitExprForTemplateCalls(arg.get());
         } else if (auto bin = dynamic_cast<BinaryExpr*>(expr)) {
@@ -1014,7 +1108,10 @@ public:
 
     void instantiateFunctionTemplate(const std::string& mangledName) {
         auto parsed = parseMangledTemplateName(mangledName);
-        auto it = templateTable_.find(parsed.first);
+        // An explicit specialization (keyed by the mangled name) wins over
+        // the primary template.
+        auto exact = templateTable_.find(mangledName);
+        auto it = (exact != templateTable_.end()) ? exact : templateTable_.find(parsed.first);
         if (it == templateTable_.end()) return;
 
         // Already instantiated (asm-safe mangled name avoids conflicts).
@@ -1029,12 +1126,20 @@ public:
         }
 
         FunctionDeclStmt* tmplFunc = nullptr;
+        bool isExact = (exact != templateTable_.end());
         auto findTemplateFunc = [&](const std::vector<std::unique_ptr<Statement>>& stmts) -> FunctionDeclStmt* {
             for (auto& s : stmts) {
                 Statement* inner = s.get();
                 if (auto es = dynamic_cast<ExportStmt*>(inner)) inner = es->getStmt();
                 if (auto fd = dynamic_cast<FunctionDeclStmt*>(inner)) {
-                    if (fd->getName() == parsed.first && fd->hasTemplateParams()) return fd;
+                    if (fd->getName() != parsed.first || !fd->hasTemplateParams()) continue;
+                    if (isExact) {
+                        // Explicit specialization: the template parameter
+                        // list must match the requested concrete args.
+                        if (fd->getTemplateParams() == parsed.second) return fd;
+                    } else {
+                        return fd;  // the primary template
+                    }
                 }
             }
             return nullptr;

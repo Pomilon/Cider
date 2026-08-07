@@ -211,6 +211,7 @@ class IdentifierExpr : public Expression {
 public:
     explicit IdentifierExpr(const std::string& name, int line, int col) : Expression(IDENTIFIER_EXPR, line, col), name_(name) {}
     const std::string& getName() const { return name_; }
+    void setName(const std::string& n) { name_ = n; }
     void dump(std::string& out, int /*depth*/) const override {
         out += "(Ident " + name_ + ")";
     }
