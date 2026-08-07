@@ -6,10 +6,15 @@
 
 #include "ast.h"
 #include "codegen.h"
+#include "constant_folder.h"
 #include "errors.h"
+#include "gvn.h"
+#include "inliner.h"
 #include "ir_gen.h"
 #include "lexer.h"
+#include "licm.h"
 #include "module_resolver.h"
+#include "optimizer.h"
 #include "parser.h"
 #include "ssa_deconstructor.h"
 #include "symbol_collector.h"
@@ -58,6 +63,27 @@ std::string readFile(const std::string& path) {
     return ss.str();
 }
 
+// The optimization pipeline (main's fixpoint):
+//   SSA LICM -> GVN (pre-decon), then per round: DCE, inline, post-LICM (<=10).
+void optimizeModule(cider::ModuleIR& module) {
+    cider::SSALicmPass ssaLicm;
+    ssaLicm.run(module);
+    cider::GvnPass gvn;
+    gvn.run(module);
+
+    cider::Inliner<> inliner;
+    cider::PostLicmPass postLicm;
+    constexpr int kMaxOptPasses = 10;
+    for (int pass = 0; pass < kMaxOptPasses; ++pass) {
+        for (auto& func : module.getFunctions()) {
+            cider::Optimizer::dce(*func);
+        }
+        bool inlined = inliner.run(module);
+        bool licmed = postLicm.run(module);
+        if (!inlined && !licmed) break;
+    }
+}
+
 int main(int argc, char** argv) {
     if (argc == 2 && std::string(argv[1]) == "--version") {
         std::printf("cider 0.2.0\n");
@@ -103,6 +129,9 @@ int main(int argc, char** argv) {
         if (opts.command == "compile") {
             cider::IRGenerator gen(table, opts.inputFile);
             auto module = gen.generate(*prog);
+            if (!opts.noOpt) {
+                optimizeModule(module);
+            }
             cider::SSADeconstructor decon;
             decon.process(module);
             cider::CodeGenerator cg;
@@ -115,6 +144,9 @@ int main(int argc, char** argv) {
         if (opts.command == "run") {
             cider::IRGenerator gen(table, opts.inputFile);
             auto module = gen.generate(*prog);
+            if (!opts.noOpt) {
+                optimizeModule(module);
+            }
             cider::VM vm;
             cider::VMResult r = vm.run(module);
             std::fwrite(r.stdoutText.data(), 1, r.stdoutText.size(), stdout);
