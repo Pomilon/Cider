@@ -61,7 +61,7 @@ private:
     VMResult result_;
     int64_t steps_ = 0;
 
-    static constexpr int64_t kStepLimit = 10000000;
+    static constexpr int64_t kStepLimit = 1000000000;  // fail-fast guard, not a work cap
     static constexpr int64_t kHeaderSize = 16;
 
     RegVal resolveValue(const IRValue& v);

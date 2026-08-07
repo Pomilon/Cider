@@ -42,6 +42,15 @@ VMResult VM::run(const ModuleIR& module, const std::string& runFunction) {
             break;
         }
     }
+    if (!entry && runFunction_ == "main") {
+        // Programs written for the bare-metal path use _start.
+        for (const auto& fn : module_->getFunctions()) {
+            if (fn->getName() == "_start") {
+                entry = fn.get();
+                break;
+            }
+        }
+    }
     if (!entry) throw VMError{"no function named '" + runFunction + "'"};
 
     frames_.push_back(Frame{entry, 0, 0, "", "", {}});
@@ -647,11 +656,14 @@ void VM::doCall(const IRValue& target, const std::vector<IRValue>& args) {
     std::vector<RegVal> resolvedArgs;
     resolvedArgs.reserve(args.size());
     for (const auto& a : args) resolvedArgs.push_back(resolveValue(a));
+    // The snapshot must stay a pure copy of the caller's registers; the
+    // argument bindings go into the ACTIVE register file so the callee's
+    // arg_* registers never pollute the caller's snapshot.
     Frame calleeFrame{fn, 0, 0, "", "", std::move(regs_)};
-    for (size_t i = 0; i < fn->getParams().size() && i < resolvedArgs.size(); ++i) {
-        calleeFrame.savedRegs[fn->getParams()[i]] = resolvedArgs[i];
-    }
     regs_ = calleeFrame.savedRegs;
+    for (size_t i = 0; i < fn->getParams().size() && i < resolvedArgs.size(); ++i) {
+        regs_[fn->getParams()[i]] = resolvedArgs[i];
+    }
     frames_.push_back(std::move(calleeFrame));
 }
 
@@ -666,15 +678,15 @@ void VM::doVirtualCall(const IRValue& obj, int64_t vtableIndex, const std::vecto
     resolvedArgs.reserve(args.size());
     for (const auto& a : args) resolvedArgs.push_back(resolveValue(a));
     Frame calleeFrame{fn, 0, 0, "", "", std::move(regs_)};
+    regs_ = calleeFrame.savedRegs;
     size_t pi = 0;
     if (!fn->getParams().empty() && fn->getParams()[0] == "this") {
-        calleeFrame.savedRegs["this"] = objPtr;
+        regs_["this"] = objPtr;
         pi = 1;
     }
     for (size_t i = 0; i + pi < fn->getParams().size() && i < resolvedArgs.size(); ++i) {
-        calleeFrame.savedRegs[fn->getParams()[i + pi]] = resolvedArgs[i];
+        regs_[fn->getParams()[i + pi]] = resolvedArgs[i];
     }
-    regs_ = calleeFrame.savedRegs;
     frames_.push_back(std::move(calleeFrame));
 }
 

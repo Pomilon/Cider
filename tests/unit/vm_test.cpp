@@ -155,12 +155,13 @@ int run() {
     cider::VM vm5;
     CHECK(vm5.run(mod5).exitCode == 99);
 
-    // Step cap: a 10M+ instruction straight-line program fails fast.
+    // Step cap: an infinite loop fails fast instead of hanging.
     auto fn6 = makeFn("main", cider::IRType::VOID);
     auto b6 = std::make_unique<cider::BasicBlock>("entry");
-    for (int i = 0; i < 10000001; ++i) {
-        b6->addInstruction(opInstr(cider::IROp::MOV, "t", {cider::IRValue::Constant(0, cider::IRType::I32)}));
-    }
+    cider::IRInstruction loop;
+    loop.op = cider::IROp::BR;
+    loop.args = {cider::IRValue::Label("entry")};
+    b6->addInstruction(loop);
     fn6->addBlock(std::move(b6));
     cider::ModuleIR mod6;
     mod6.addFunction(std::move(fn6));
