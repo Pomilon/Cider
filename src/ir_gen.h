@@ -313,14 +313,18 @@ public:
             stmt.getValue()->accept(*this);
             IRValue val = lastValue_;
 
-            // Copy struct return values to local stack to avoid dangling pointers
+            // Copy struct return values to a heap buffer so the returned
+            // pointer outlives this frame (a stack-local would dangle once
+            // the caller starts allocating). The escape analysis converts
+            // the malloc back to a stack slot when the result never leaves
+            // the caller.
             TypeInfo retType = lastExprType_;
             if (retType.pointerLevel == 0) {
                 int structSize = getTypeSize(retType);
                 auto typeSym = symbolTable_.resolve(retType.name);
                 if (typeSym && (typeSym->kind == SymbolKind::STRUCT || typeSym->kind == SymbolKind::CLASS)) {
                     IRValue localPtr = IRValue::Register(nextTemp(), IRType::PTR);
-                    currentBlock_->addInstruction({IROp::ALLOCA, localPtr, {IRValue::Constant(structSize, IRType::I32)}});
+                    currentBlock_->addInstruction({IROp::CALL, localPtr, {IRValue::Label("malloc"), IRValue::Constant(structSize, IRType::I32)}});
                     currentBlock_->addInstruction({IROp::MEMCPY, std::nullopt, {localPtr, val, IRValue::Constant(structSize, IRType::I32)}});
                     val = localPtr;
                     lastExprType_.isUserDefined = true;
@@ -749,7 +753,18 @@ public:
                         val = converted;
                     }
                 }
-                if (sym->type.isArray || sym->type.isUserDefined || getTypeSize(sym->type) > 8) {
+                bool isStructType = false;
+                if (sym->type.pointerLevel == 0 && !sym->type.isArray) {
+                    // A real struct/class symbol carries its own name as its
+                    // type; type aliases (kind STRUCT but target-typed) are
+                    // excluded so `type MyInt = int` never memcpys.
+                    auto ts = symbolTable_.resolve(sym->type.name);
+                    if (ts && (ts->kind == SymbolKind::STRUCT || ts->kind == SymbolKind::CLASS) &&
+                        ts->type.name == ts->name) {
+                        isStructType = true;
+                    }
+                }
+                if (sym->type.isArray || sym->type.isUserDefined || isStructType || getTypeSize(sym->type) > 8) {
                     currentBlock_->addInstruction({IROp::MEMCPY, std::nullopt, {addr, val, IRValue::Constant(getTypeSize(sym->type), IRType::I32)}});
                 } else {
                     currentBlock_->addInstruction({IROp::STORE, std::nullopt, {addr, val, IRValue::Constant(0, IRType::I32)}});
@@ -1325,6 +1340,28 @@ public:
             elemType.isSlice = false;
         }
 
+        if (!iterableType.isArray && !iterableType.isSlice) {
+            // Custom iterator protocol: the element type comes from next()'s
+            // return pointee, not the iterable's own type.
+            auto typeSym0 = symbolTable_.resolve(iterableType.name);
+            if (typeSym0 && (typeSym0->kind == SymbolKind::STRUCT || typeSym0->kind == SymbolKind::CLASS)) {
+                auto ss0 = std::static_pointer_cast<StructSymbol>(typeSym0);
+                for (const auto& m : ss0->methods) {
+                    if (m.name == "next" && m.returnType.pointerLevel >= 1) {
+                        elemType = m.returnType;
+                        elemType.pointerLevel--;
+                        if (elemType.pointerLevel == 0 && !elemType.isArray) {
+                            auto ts2 = symbolTable_.resolve(elemType.name);
+                            if (!ts2 || (ts2->kind != SymbolKind::STRUCT && ts2->kind != SymbolKind::CLASS)) {
+                                elemType.isUserDefined = false;
+                            }
+                        }
+                        break;
+                    }
+                }
+            }
+        }
+
         symbolTable_.enterScope();
         {
             auto loopVarSym = std::make_shared<Symbol>();
@@ -1335,6 +1372,66 @@ public:
         }
         deferStack_.push_back({});
         destructorStack_.push_back({});
+
+        if (!iterableType.isArray && !iterableType.isSlice) {
+            // Custom iterator protocol: it = obj.iter();
+            // loop: p = it.next(); if (p == nilPtr) break; x = *p; body.
+            std::string typeName = iterableType.name;
+            std::string iterFn = sanitizeAsmName(typeName + "_iter");
+            std::string nextFn = sanitizeAsmName(typeName + "_next");
+            std::string headerName = nextLabel("citer_header");
+            std::string bodyName = nextLabel("citer_body");
+            std::string exitName = nextLabel("citer_exit");
+
+            IRValue itAddr = IRValue::Register(nextTemp(), IRType::PTR);
+            currentBlock_->addInstruction({IROp::ALLOCA, itAddr, {IRValue::Constant(8, IRType::I32)}});
+            IRValue itReg = IRValue::Register(nextTemp(), IRType::PTR);
+            currentBlock_->addInstruction({IROp::CALL, itReg, {IRValue::Label(iterFn), iterable}});
+            currentBlock_->addInstruction({IROp::STORE, std::nullopt, {itAddr, itReg, IRValue::Constant(0, IRType::I32)}});
+            currentBlock_->addInstruction({IROp::BR, std::nullopt, {IRValue::Label(headerName)}});
+
+            startBlock(headerName);
+            IRValue itv = IRValue::Register(nextTemp(), IRType::PTR);
+            currentBlock_->addInstruction({IROp::LOAD, itv, {itAddr, IRValue::Constant(0, IRType::I32)}});
+            IRValue p = IRValue::Register(nextTemp(), IRType::PTR);
+            currentBlock_->addInstruction({IROp::CALL, p, {IRValue::Label(nextFn), itv}});
+            IRValue isNil = IRValue::Register(nextTemp(), IRType::BOOL);
+            currentBlock_->addInstruction({IROp::CMP_EQ, isNil, {p, IRValue::Constant(0, IRType::I32)}});
+            currentBlock_->addInstruction({IROp::COND_BR, std::nullopt, {isNil, IRValue::Label(exitName), IRValue::Label(bodyName)}});
+
+            continueLabels_.push_back(headerName);
+            breakLabels_.push_back(exitName);
+
+            startBlock(bodyName);
+            IRValue varAddr = IRValue::Register(nextTemp(), IRType::PTR);
+            currentBlock_->addInstruction({IROp::ALLOCA, varAddr, {IRValue::Constant(getTypeSize(elemType), IRType::I32)}});
+            variableValues_[stmt.getVarName()] = varAddr;
+            if (getTypeSize(elemType) > 8 || elemType.isUserDefined || elemType.pointerLevel > 0) {
+                currentBlock_->addInstruction({IROp::MEMCPY, std::nullopt, {varAddr, p, IRValue::Constant(getTypeSize(elemType), IRType::I32)}});
+            } else {
+                IRType irType = (elemType.pointerLevel > 0) ? IRType::PTR : mapType(elemType.name);
+                IRValue elemVal = IRValue::Register(nextTemp(), irType);
+                currentBlock_->addInstruction({IROp::LOAD, elemVal, {p, IRValue::Constant(0, IRType::I32)}});
+                currentBlock_->addInstruction({IROp::STORE, std::nullopt, {varAddr, elemVal, IRValue::Constant(0, IRType::I32)}});
+            }
+
+            for (auto& s : stmt.getBody()) {
+                s->accept(*this);
+            }
+            if (currentBlock_ && (currentBlock_->getInstructions().empty() ||
+                                  (currentBlock_->getInstructions().back().op != IROp::BR &&
+                                   currentBlock_->getInstructions().back().op != IROp::RET))) {
+                currentBlock_->addInstruction({IROp::BR, std::nullopt, {IRValue::Label(headerName)}});
+            }
+
+            startBlock(exitName);
+            destructorStack_.pop_back();
+            deferStack_.pop_back();
+            continueLabels_.pop_back();
+            breakLabels_.pop_back();
+            symbolTable_.exitScope();
+            return;
+        }
 
         std::string headerName = nextLabel("foreach_header");
         std::string bodyName = nextLabel("foreach_body");

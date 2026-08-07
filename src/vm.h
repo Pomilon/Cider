@@ -38,6 +38,9 @@ private:
         std::string prevBlock;
         std::string pendingDest;  // register to receive the return value
         std::map<std::string, RegVal> savedRegs;  // caller's registers (restored on RET)
+        int64_t localBase = 0;    // frame-local region for ALLOCAs (bump)
+        size_t localSize = 0;
+        size_t localUsed = 0;
     };
 
     // State captured by _setjmp for longjmp to restore.

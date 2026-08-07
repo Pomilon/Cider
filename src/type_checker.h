@@ -767,8 +767,40 @@ public:
         } else if (iterableType.isSlice) {
             elemType = iterableType;
             elemType.isSlice = false;
+        } else if (iterableType.pointerLevel == 0 &&
+                   (symbolTable_.resolve(iterableType.name) &&
+                    (symbolTable_.resolve(iterableType.name)->kind == SymbolKind::STRUCT ||
+                     symbolTable_.resolve(iterableType.name)->kind == SymbolKind::CLASS))) {
+            // Custom iterator protocol: iter() -> It, next(self: It) -> *T.
+            auto sym = symbolTable_.resolve(iterableType.name);
+            auto ss = std::static_pointer_cast<StructSymbol>(sym);
+            const StructSymbol::Method* iterM = nullptr;
+            const StructSymbol::Method* nextM = nullptr;
+            for (const auto& m : ss->methods) {
+                if (m.name == "iter") iterM = &m;
+                else if (m.name == "next") nextM = &m;
+            }
+            if (!iterM || !nextM) {
+                error("For-in over '" + iterableType.name + "' requires iter() and next() methods.", stmt.getLine());
+                return;
+            }
+            if (nextM->returnType.pointerLevel < 1) {
+                error("Iterator's next() must return a pointer, got " + nextM->returnType.toString(), stmt.getLine());
+                return;
+            }
+            elemType = nextM->returnType;
+            elemType.pointerLevel--;
+            // The pointee's user-defined flag must reflect reality: an int
+            // iterator element is not a struct (the flag would route the
+            // loop variable through getAddress instead of a value load).
+            if (elemType.pointerLevel == 0 && !elemType.isArray) {
+                auto ts = symbolTable_.resolve(elemType.name);
+                if (!ts || (ts->kind != SymbolKind::STRUCT && ts->kind != SymbolKind::CLASS)) {
+                    elemType.isUserDefined = false;
+                }
+            }
         } else {
-            error("For-in iterable must be an array or slice, got " + iterableType.toString(), stmt.getLine());
+            error("For-in iterable must be an array, slice, or a type with iter()/next(), got " + iterableType.toString(), stmt.getLine());
             return;
         }
 
