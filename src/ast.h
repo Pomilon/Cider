@@ -20,6 +20,7 @@ public:
         NUMBER_EXPR, STRING_EXPR, CHAR_EXPR, BOOLEAN_EXPR, NEW_EXPR, NIL_EXPR,
         NIL_PTR_EXPR, IDENTIFIER_EXPR, BINARY_EXPR, UNARY_EXPR, CALL_EXPR,
         MEMBER_ACCESS_EXPR, LIST_EXPR, TABLE_EXPR, INDEX_EXPR, SLICE_EXPR,
+        INTERPOLATED_STRING_EXPR,
         TERNARY_EXPR, GROUPING_EXPR, THIS_EXPR, SUPER_EXPR, FUNCTION_EXPR,
         AWAIT_EXPR, STRUCT_LITERAL_EXPR, SIZEOF_EXPR, CAST_EXPR, ARRAY_TYPE,
         VAR_DECL_STMT, ASSIGN_STMT, IF_STMT, WHILE_STMT, FOR_STMT,
@@ -465,6 +466,33 @@ public:
     }
 private:
     std::unique_ptr<Expression> value_;
+};
+
+class InterpolatedStringExpr : public Expression {
+public:
+    struct Part {
+        bool isExpr = false;          // false: raw text, true: expression
+        std::string text;             // raw text part
+        std::unique_ptr<Expression> expr;  // expression part
+    };
+    InterpolatedStringExpr(std::vector<Part> parts, int line, int col)
+        : Expression(INTERPOLATED_STRING_EXPR, line, col), parts_(std::move(parts)) {}
+    const std::vector<Part>& getParts() const { return parts_; }
+    void dump(std::string& out, int depth) const override {
+        out += "(Interpolated ";
+        for (const auto& p : parts_) {
+            if (p.isExpr) {
+                out += "{";
+                if (p.expr) p.expr->dump(out, depth);
+                out += "}";
+            } else {
+                detail::dumpString(out, p.text);
+            }
+        }
+        out += ")";
+    }
+private:
+    std::vector<Part> parts_;
 };
 
 class StructLiteralExpr : public Expression {
@@ -921,6 +949,7 @@ public:
     virtual ~ASTVisitor() = default;
     virtual void visit(NumberExpr&) {}
     virtual void visit(StringExpr&) {}
+    virtual void visit(InterpolatedStringExpr&) {}
     virtual void visit(CharExpr&) {}
     virtual void visit(IdentifierExpr&) {}
     virtual void visit(BooleanExpr&) {}
@@ -1284,6 +1313,7 @@ inline std::string dump(const AstProgram& prog) {
 inline void ASTNode::accept(ASTVisitor& v) {
     if (auto* n = dynamic_cast<NumberExpr*>(this)) { v.visit(*n); return; }
     if (auto* n = dynamic_cast<StringExpr*>(this)) { v.visit(*n); return; }
+    if (auto* n = dynamic_cast<InterpolatedStringExpr*>(this)) { v.visit(*n); return; }
     if (auto* n = dynamic_cast<CharExpr*>(this)) { v.visit(*n); return; }
     if (auto* n = dynamic_cast<BooleanExpr*>(this)) { v.visit(*n); return; }
     if (auto* n = dynamic_cast<NilExpr*>(this)) { v.visit(*n); return; }

@@ -234,8 +234,96 @@ std::unique_ptr<Expression> Parser::parsePrimaryExpression() {
     }
     case TokenType::STRING: {
         std::string val = currentToken_.value;
+        int line = currentToken_.line;
+        int col = currentToken_.column;
         nextToken();
-        return std::make_unique<StringExpr>(val, line, col);
+        // String interpolation: "x = {y}" — scan for unescaped braces.
+        // {{ and }} produce literal braces; {expr} is parsed by re-lexing
+        // the segment text with a fresh parser.
+        std::vector<InterpolatedStringExpr::Part> parts;
+        bool interpolated = false;
+        auto collapseEscaped = [](const std::string& raw) {
+            std::string out;
+            out.reserve(raw.size());
+            for (size_t k = 0; k < raw.size(); ++k) {
+                if (raw[k] == '{' && k + 1 < raw.size() && raw[k + 1] == '{') {
+                    out += '{';
+                    k++;
+                } else if (raw[k] == '}' && k + 1 < raw.size() && raw[k + 1] == '}') {
+                    out += '}';
+                    k++;
+                } else {
+                    out += raw[k];
+                }
+            }
+            return out;
+        };
+        size_t i = 0;
+        size_t partStart = 0;
+        while (i < val.size()) {
+            if (val[i] == '{') {
+                if (i + 1 < val.size() && val[i + 1] == '{') {
+                    i += 2;
+                    continue;  // literal { — kept in the raw text
+                }
+                // A brace followed by whitespace is a literal brace (CSS,
+                // JSON, code snippets in strings) — never interpolation.
+                if (i + 1 < val.size() &&
+                    (val[i + 1] == ' ' || val[i + 1] == '\t' || val[i + 1] == '\n')) {
+                    i++;
+                    continue;
+                }
+                size_t exprStart = i + 1;
+                size_t depth = 1;
+                size_t j = exprStart;
+                bool closed = false;
+                while (j < val.size()) {
+                    if (val[j] == '{') depth++;
+                    else if (val[j] == '}') {
+                        depth--;
+                        if (depth == 0) { closed = true; break; }
+                    }
+                    j++;
+                }
+                if (!closed) {
+                    error("Unclosed '{' in interpolated string.");
+                    return nullptr;
+                }
+                std::string seg = val.substr(exprStart, j - exprStart);
+                // Parse the segment as a full expression with a fresh parser.
+                // If it fails, the whole {..} is literal text (backwards
+                // compatible with pre-interpolation strings).
+                ErrorReporter subRep;
+                Lexer subLex(seg, subRep);
+                Parser subParser(subLex, subRep);
+                auto expr = subParser.parseExpression();
+                if (!expr || subRep.hasErrors() ||
+                    subLex.getNextToken().type != TokenType::END_OF_FILE) {
+                    i = j + 1;  // keep the whole segment as literal text
+                    continue;
+                }
+                if (i > partStart) {
+                    parts.push_back({false, collapseEscaped(val.substr(partStart, i - partStart)), nullptr});
+                }
+                parts.push_back({true, "", std::move(expr)});
+                interpolated = true;
+                i = j + 1;
+                partStart = i;
+            } else if (val[i] == '}') {
+                if (i + 1 < val.size() && val[i + 1] == '}') {
+                    i += 2;
+                    continue;  // literal } — collapsed in the raw text
+                }
+                i++;  // lone } is literal text (backwards compatible)
+            } else {
+                i++;
+            }
+        }
+        if (!interpolated) {
+            return std::make_unique<StringExpr>(val, line, col);
+        }
+        if (partStart < val.size()) parts.push_back({false, collapseEscaped(val.substr(partStart)), nullptr});
+        return std::make_unique<InterpolatedStringExpr>(std::move(parts), line, col);
     }
     case TokenType::CHAR_LITERAL: {
         char val = currentToken_.value[0];

@@ -23,6 +23,7 @@ public:
         visitedPrograms_.clear();
         globalValues_.clear();
         exceptionGlobalsEnsured_ = false;
+        interpHelpersEnsured_ = false;
         program.accept(*this);
 
         // Populate V-Tables in module
@@ -1517,6 +1518,326 @@ public:
         lastValue_ = strVal;
         lastExprType_ = {"string", 0};
     }
+
+    // --- string interpolation lowering ---
+
+    static int decodedStringLength(const std::string& raw) {
+        int n = 0;
+        for (size_t i = 0; i < raw.size(); ++i) {
+            if (raw[i] == '\\' && i + 1 < raw.size()) {
+                i++;  // escape sequence counts as one byte
+            }
+            n++;
+        }
+        return n;
+    }
+
+    IRValue emitCall(const std::string& callee, std::vector<IRValue> args) {
+        IRValue dest = IRValue::Register(nextTemp(), IRType::PTR);
+        IRInstruction call;
+        call.op = IROp::CALL;
+        call.dest = dest;
+        call.args.push_back(IRValue::Label(callee));
+        for (auto& a : args) call.args.push_back(a);
+        currentBlock_->addInstruction(call);
+        return dest;
+    }
+
+    IRValue emitAdd(IRValue a, IRValue b) {
+        IRValue dest = IRValue::Register(nextTemp(), IRType::I32);
+        currentBlock_->addInstruction({IROp::ADD, dest, {a, b}});
+        return dest;
+    }
+
+    void ensureInterpolationHelpers() {
+        if (interpHelpersEnsured_) return;
+        interpHelpersEnsured_ = true;
+
+        // _strlen(s: char*) -> int
+        {
+            auto fn = std::make_unique<FunctionIR>("_strlen", IRType::I32);
+            fn->addParam("arg_s");
+            auto entry = std::make_unique<BasicBlock>("entry");
+            auto loop = std::make_unique<BasicBlock>("loop");
+            auto body = std::make_unique<BasicBlock>("body");
+            auto exit = std::make_unique<BasicBlock>("exit");
+            IRValue s = IRValue::Register(nextTemp(), IRType::PTR);
+            entry->addInstruction({IROp::ALLOCA, s, {IRValue::Constant(8, IRType::I32)}});
+            entry->addInstruction({IROp::STORE, std::nullopt, {s, IRValue::Register("arg_s", IRType::PTR), IRValue::Constant(0, IRType::I32)}});
+            IRValue i = IRValue::Register(nextTemp(), IRType::I32);
+            entry->addInstruction({IROp::ALLOCA, i, {IRValue::Constant(4, IRType::I32)}});
+            entry->addInstruction({IROp::STORE, std::nullopt, {i, IRValue::Constant(0, IRType::I32), IRValue::Constant(0, IRType::I32)}});
+            entry->addInstruction({IROp::BR, std::nullopt, {IRValue::Label("loop")}});
+            IRValue p = IRValue::Register(nextTemp(), IRType::PTR);
+            loop->addInstruction({IROp::LOAD, p, {s, IRValue::Constant(0, IRType::I32)}});
+            IRValue off = IRValue::Register(nextTemp(), IRType::I32);
+            loop->addInstruction({IROp::LOAD, off, {i, IRValue::Constant(0, IRType::I32)}});
+            IRValue addr = IRValue::Register(nextTemp(), IRType::PTR);
+            loop->addInstruction({IROp::ADD, addr, {p, off}});
+            IRValue ch = IRValue::Register(nextTemp(), IRType::U8);
+            loop->addInstruction({IROp::LOAD, ch, {addr, IRValue::Constant(0, IRType::I32)}});
+            IRValue cond = IRValue::Register(nextTemp(), IRType::BOOL);
+            loop->addInstruction({IROp::CMP_NE, cond, {ch, IRValue::Constant(0, IRType::I32)}});
+            loop->addInstruction({IROp::COND_BR, std::nullopt, {cond, IRValue::Label("body"), IRValue::Label("exit")}});
+            IRValue i2 = IRValue::Register(nextTemp(), IRType::I32);
+            body->addInstruction({IROp::LOAD, i2, {i, IRValue::Constant(0, IRType::I32)}});
+            IRValue i3 = IRValue::Register(nextTemp(), IRType::I32);
+            body->addInstruction({IROp::ADD, i3, {i2, IRValue::Constant(1, IRType::I32)}});
+            body->addInstruction({IROp::STORE, std::nullopt, {i, i3, IRValue::Constant(0, IRType::I32)}});
+            body->addInstruction({IROp::BR, std::nullopt, {IRValue::Label("loop")}});
+            IRValue i4 = IRValue::Register(nextTemp(), IRType::I32);
+            exit->addInstruction({IROp::LOAD, i4, {i, IRValue::Constant(0, IRType::I32)}});
+            exit->addInstruction({IROp::RET, std::nullopt, {i4}});
+            fn->addBlock(std::move(entry));
+            fn->addBlock(std::move(loop));
+            fn->addBlock(std::move(body));
+            fn->addBlock(std::move(exit));
+            module_.addFunction(std::move(fn));
+        }
+
+        // _str_from_int(n: int) -> char*
+        {
+            auto fn = std::make_unique<FunctionIR>("_str_from_int", IRType::PTR);
+            fn->addParam("arg_n");
+            auto entry = std::make_unique<BasicBlock>("entry");
+            auto neg = std::make_unique<BasicBlock>("neg");
+            auto cont0 = std::make_unique<BasicBlock>("cont0");
+            auto negchar = std::make_unique<BasicBlock>("negchar");
+            auto cont1 = std::make_unique<BasicBlock>("cont1");
+            auto loop = std::make_unique<BasicBlock>("loop");
+            auto revhdr = std::make_unique<BasicBlock>("revhdr");
+            auto revloop = std::make_unique<BasicBlock>("revloop");
+            auto done = std::make_unique<BasicBlock>("done");
+            IRValue n = IRValue::Register(nextTemp(), IRType::I32);
+            entry->addInstruction({IROp::ALLOCA, n, {IRValue::Constant(4, IRType::I32)}});
+            entry->addInstruction({IROp::STORE, std::nullopt, {n, IRValue::Register("arg_n", IRType::I32), IRValue::Constant(0, IRType::I32)}});
+            IRValue idx = IRValue::Register(nextTemp(), IRType::I32);
+            entry->addInstruction({IROp::ALLOCA, idx, {IRValue::Constant(4, IRType::I32)}});
+            entry->addInstruction({IROp::STORE, std::nullopt, {idx, IRValue::Constant(0, IRType::I32), IRValue::Constant(0, IRType::I32)}});
+            IRValue negf = IRValue::Register(nextTemp(), IRType::I32);
+            entry->addInstruction({IROp::ALLOCA, negf, {IRValue::Constant(4, IRType::I32)}});
+            entry->addInstruction({IROp::STORE, std::nullopt, {negf, IRValue::Constant(0, IRType::I32), IRValue::Constant(0, IRType::I32)}});
+            IRValue nv = IRValue::Register(nextTemp(), IRType::I32);
+            entry->addInstruction({IROp::LOAD, nv, {n, IRValue::Constant(0, IRType::I32)}});
+            IRValue lt = IRValue::Register(nextTemp(), IRType::BOOL);
+            entry->addInstruction({IROp::CMP_LT, lt, {nv, IRValue::Constant(0, IRType::I32)}});
+            entry->addInstruction({IROp::COND_BR, std::nullopt, {lt, IRValue::Label("neg"), IRValue::Label("cont0")}});
+            IRValue nv2 = IRValue::Register(nextTemp(), IRType::I32);
+            neg->addInstruction({IROp::LOAD, nv2, {n, IRValue::Constant(0, IRType::I32)}});
+            IRValue negv = IRValue::Register(nextTemp(), IRType::I32);
+            neg->addInstruction({IROp::SUB, negv, {IRValue::Constant(0, IRType::I32), nv2}});
+            neg->addInstruction({IROp::STORE, std::nullopt, {n, negv, IRValue::Constant(0, IRType::I32)}});
+            neg->addInstruction({IROp::STORE, std::nullopt, {negf, IRValue::Constant(1, IRType::I32), IRValue::Constant(0, IRType::I32)}});
+            neg->addInstruction({IROp::BR, std::nullopt, {IRValue::Label("cont0")}});
+            IRValue nf = IRValue::Register(nextTemp(), IRType::I32);
+            cont0->addInstruction({IROp::LOAD, nf, {negf, IRValue::Constant(0, IRType::I32)}});
+            IRValue isneg = IRValue::Register(nextTemp(), IRType::BOOL);
+            cont0->addInstruction({IROp::CMP_EQ, isneg, {nf, IRValue::Constant(1, IRType::I32)}});
+            IRValue buf = IRValue::Register(nextTemp(), IRType::PTR);
+            cont0->addInstruction({IROp::CALL, buf, {IRValue::Label("malloc"), IRValue::Constant(16, IRType::I32)}});
+            cont0->addInstruction({IROp::COND_BR, std::nullopt, {isneg, IRValue::Label("negchar"), IRValue::Label("cont1")}});
+            negchar->addInstruction({IROp::STORE, std::nullopt, {buf, IRValue::Constant(45, IRType::I32), IRValue::Constant(0, IRType::I32)}});
+            negchar->addInstruction({IROp::STORE, std::nullopt, {idx, IRValue::Constant(1, IRType::I32), IRValue::Constant(0, IRType::I32)}});
+            negchar->addInstruction({IROp::BR, std::nullopt, {IRValue::Label("loop")}});
+            cont1->addInstruction({IROp::BR, std::nullopt, {IRValue::Label("loop")}});
+            IRValue cur = IRValue::Register(nextTemp(), IRType::I32);
+            loop->addInstruction({IROp::LOAD, cur, {n, IRValue::Constant(0, IRType::I32)}});
+            IRValue dig = IRValue::Register(nextTemp(), IRType::I32);
+            loop->addInstruction({IROp::MOD, dig, {cur, IRValue::Constant(10, IRType::I32)}});
+            IRValue chv = IRValue::Register(nextTemp(), IRType::I32);
+            loop->addInstruction({IROp::ADD, chv, {dig, IRValue::Constant(48, IRType::I32)}});
+            IRValue ii = IRValue::Register(nextTemp(), IRType::I32);
+            loop->addInstruction({IROp::LOAD, ii, {idx, IRValue::Constant(0, IRType::I32)}});
+            IRValue dest = IRValue::Register(nextTemp(), IRType::PTR);
+            loop->addInstruction({IROp::ADD, dest, {buf, ii}});
+            loop->addInstruction({IROp::STORE, std::nullopt, {dest, chv, IRValue::Constant(0, IRType::I32)}});
+            IRValue cur2 = IRValue::Register(nextTemp(), IRType::I32);
+            loop->addInstruction({IROp::LOAD, cur2, {n, IRValue::Constant(0, IRType::I32)}});
+            IRValue quot = IRValue::Register(nextTemp(), IRType::I32);
+            loop->addInstruction({IROp::DIV, quot, {cur2, IRValue::Constant(10, IRType::I32)}});
+            loop->addInstruction({IROp::STORE, std::nullopt, {n, quot, IRValue::Constant(0, IRType::I32)}});
+            IRValue ii2 = IRValue::Register(nextTemp(), IRType::I32);
+            loop->addInstruction({IROp::LOAD, ii2, {idx, IRValue::Constant(0, IRType::I32)}});
+            IRValue ii3 = IRValue::Register(nextTemp(), IRType::I32);
+            loop->addInstruction({IROp::ADD, ii3, {ii2, IRValue::Constant(1, IRType::I32)}});
+            loop->addInstruction({IROp::STORE, std::nullopt, {idx, ii3, IRValue::Constant(0, IRType::I32)}});
+            IRValue cur3 = IRValue::Register(nextTemp(), IRType::I32);
+            loop->addInstruction({IROp::LOAD, cur3, {n, IRValue::Constant(0, IRType::I32)}});
+            IRValue gt = IRValue::Register(nextTemp(), IRType::BOOL);
+            loop->addInstruction({IROp::CMP_GT, gt, {cur3, IRValue::Constant(0, IRType::I32)}});
+            loop->addInstruction({IROp::COND_BR, std::nullopt, {gt, IRValue::Label("loop"), IRValue::Label("revhdr")}});
+            IRValue lo = IRValue::Register(nextTemp(), IRType::I32);
+            revhdr->addInstruction({IROp::ALLOCA, lo, {IRValue::Constant(4, IRType::I32)}});
+            IRValue nf2 = IRValue::Register(nextTemp(), IRType::I32);
+            revhdr->addInstruction({IROp::LOAD, nf2, {negf, IRValue::Constant(0, IRType::I32)}});
+            revhdr->addInstruction({IROp::STORE, std::nullopt, {lo, nf2, IRValue::Constant(0, IRType::I32)}});
+            IRValue hi = IRValue::Register(nextTemp(), IRType::I32);
+            revhdr->addInstruction({IROp::ALLOCA, hi, {IRValue::Constant(4, IRType::I32)}});
+            IRValue ii4 = IRValue::Register(nextTemp(), IRType::I32);
+            revhdr->addInstruction({IROp::LOAD, ii4, {idx, IRValue::Constant(0, IRType::I32)}});
+            IRValue hi1 = IRValue::Register(nextTemp(), IRType::I32);
+            revhdr->addInstruction({IROp::SUB, hi1, {ii4, IRValue::Constant(1, IRType::I32)}});
+            revhdr->addInstruction({IROp::STORE, std::nullopt, {hi, hi1, IRValue::Constant(0, IRType::I32)}});
+            IRValue lov = IRValue::Register(nextTemp(), IRType::I32);
+            revhdr->addInstruction({IROp::LOAD, lov, {lo, IRValue::Constant(0, IRType::I32)}});
+            IRValue hiv = IRValue::Register(nextTemp(), IRType::I32);
+            revhdr->addInstruction({IROp::LOAD, hiv, {hi, IRValue::Constant(0, IRType::I32)}});
+            IRValue revc = IRValue::Register(nextTemp(), IRType::BOOL);
+            revhdr->addInstruction({IROp::CMP_LT, revc, {lov, hiv}});
+            revhdr->addInstruction({IROp::COND_BR, std::nullopt, {revc, IRValue::Label("revloop"), IRValue::Label("done")}});
+            IRValue lov2 = IRValue::Register(nextTemp(), IRType::I32);
+            revloop->addInstruction({IROp::LOAD, lov2, {lo, IRValue::Constant(0, IRType::I32)}});
+            IRValue pLo = IRValue::Register(nextTemp(), IRType::PTR);
+            revloop->addInstruction({IROp::ADD, pLo, {buf, lov2}});
+            IRValue tmp = IRValue::Register(nextTemp(), IRType::I32);
+            revloop->addInstruction({IROp::LOAD, tmp, {pLo, IRValue::Constant(0, IRType::I32)}});
+            IRValue hiv2 = IRValue::Register(nextTemp(), IRType::I32);
+            revloop->addInstruction({IROp::LOAD, hiv2, {hi, IRValue::Constant(0, IRType::I32)}});
+            IRValue pHi = IRValue::Register(nextTemp(), IRType::PTR);
+            revloop->addInstruction({IROp::ADD, pHi, {buf, hiv2}});
+            IRValue hiCh = IRValue::Register(nextTemp(), IRType::I32);
+            revloop->addInstruction({IROp::LOAD, hiCh, {pHi, IRValue::Constant(0, IRType::I32)}});
+            revloop->addInstruction({IROp::STORE, std::nullopt, {pLo, hiCh, IRValue::Constant(0, IRType::I32)}});
+            revloop->addInstruction({IROp::STORE, std::nullopt, {pHi, tmp, IRValue::Constant(0, IRType::I32)}});
+            IRValue lov3 = IRValue::Register(nextTemp(), IRType::I32);
+            revloop->addInstruction({IROp::LOAD, lov3, {lo, IRValue::Constant(0, IRType::I32)}});
+            IRValue lo1 = IRValue::Register(nextTemp(), IRType::I32);
+            revloop->addInstruction({IROp::ADD, lo1, {lov3, IRValue::Constant(1, IRType::I32)}});
+            revloop->addInstruction({IROp::STORE, std::nullopt, {lo, lo1, IRValue::Constant(0, IRType::I32)}});
+            IRValue hiv3 = IRValue::Register(nextTemp(), IRType::I32);
+            revloop->addInstruction({IROp::LOAD, hiv3, {hi, IRValue::Constant(0, IRType::I32)}});
+            IRValue hi2 = IRValue::Register(nextTemp(), IRType::I32);
+            revloop->addInstruction({IROp::SUB, hi2, {hiv3, IRValue::Constant(1, IRType::I32)}});
+            revloop->addInstruction({IROp::STORE, std::nullopt, {hi, hi2, IRValue::Constant(0, IRType::I32)}});
+            IRValue lov4 = IRValue::Register(nextTemp(), IRType::I32);
+            revloop->addInstruction({IROp::LOAD, lov4, {lo, IRValue::Constant(0, IRType::I32)}});
+            IRValue hiv4 = IRValue::Register(nextTemp(), IRType::I32);
+            revloop->addInstruction({IROp::LOAD, hiv4, {hi, IRValue::Constant(0, IRType::I32)}});
+            IRValue revc2 = IRValue::Register(nextTemp(), IRType::BOOL);
+            revloop->addInstruction({IROp::CMP_LT, revc2, {lov4, hiv4}});
+            revloop->addInstruction({IROp::COND_BR, std::nullopt, {revc2, IRValue::Label("revloop"), IRValue::Label("done")}});
+            IRValue ii5 = IRValue::Register(nextTemp(), IRType::I32);
+            done->addInstruction({IROp::LOAD, ii5, {idx, IRValue::Constant(0, IRType::I32)}});
+            IRValue endp = IRValue::Register(nextTemp(), IRType::PTR);
+            done->addInstruction({IROp::ADD, endp, {buf, ii5}});
+            done->addInstruction({IROp::STORE, std::nullopt, {endp, IRValue::Constant(0, IRType::I32), IRValue::Constant(0, IRType::I32)}});
+            done->addInstruction({IROp::RET, std::nullopt, {buf}});
+            fn->addBlock(std::move(entry));
+            fn->addBlock(std::move(neg));
+            fn->addBlock(std::move(cont0));
+            fn->addBlock(std::move(negchar));
+            fn->addBlock(std::move(cont1));
+            fn->addBlock(std::move(loop));
+            fn->addBlock(std::move(revhdr));
+            fn->addBlock(std::move(revloop));
+            fn->addBlock(std::move(done));
+            module_.addFunction(std::move(fn));
+        }
+
+        // _str_from_bool(v: bool) -> char*  — returns the "true"/"false" constants
+        {
+            auto fn = std::make_unique<FunctionIR>("_str_from_bool", IRType::PTR);
+            fn->addParam("arg_v");
+            auto entry = std::make_unique<BasicBlock>("entry");
+            auto t = std::make_unique<BasicBlock>("t");
+            auto f = std::make_unique<BasicBlock>("f");
+            IRValue v = IRValue::Register(nextTemp(), IRType::I32);
+            entry->addInstruction({IROp::ALLOCA, v, {IRValue::Constant(4, IRType::I32)}});
+            entry->addInstruction({IROp::STORE, std::nullopt, {v, IRValue::Register("arg_v", IRType::I32), IRValue::Constant(0, IRType::I32)}});
+            IRValue vv = IRValue::Register(nextTemp(), IRType::I32);
+            entry->addInstruction({IROp::LOAD, vv, {v, IRValue::Constant(0, IRType::I32)}});
+            IRValue cond = IRValue::Register(nextTemp(), IRType::BOOL);
+            entry->addInstruction({IROp::CMP_EQ, cond, {vv, IRValue::Constant(1, IRType::I32)}});
+            entry->addInstruction({IROp::COND_BR, std::nullopt, {cond, IRValue::Label("t"), IRValue::Label("f")}});
+            IRValue strT;
+            strT.kind = IRValue::CONSTANT;
+            strT.name = "\"true\"";
+            strT.type = IRType::PTR;
+            t->addInstruction({IROp::RET, std::nullopt, {strT}});
+            IRValue strF;
+            strF.kind = IRValue::CONSTANT;
+            strF.name = "\"false\"";
+            strF.type = IRType::PTR;
+            f->addInstruction({IROp::RET, std::nullopt, {strF}});
+            fn->addBlock(std::move(entry));
+            fn->addBlock(std::move(t));
+            fn->addBlock(std::move(f));
+            module_.addFunction(std::move(fn));
+        }
+
+        // _str_from_char(c: char) -> char* — a 2-byte string
+        {
+            auto fn = std::make_unique<FunctionIR>("_str_from_char", IRType::PTR);
+            fn->addParam("arg_c");
+            auto entry = std::make_unique<BasicBlock>("entry");
+            IRValue c = IRValue::Register(nextTemp(), IRType::I32);
+            entry->addInstruction({IROp::ALLOCA, c, {IRValue::Constant(4, IRType::I32)}});
+            entry->addInstruction({IROp::STORE, std::nullopt, {c, IRValue::Register("arg_c", IRType::I32), IRValue::Constant(0, IRType::I32)}});
+            IRValue buf = IRValue::Register(nextTemp(), IRType::PTR);
+            entry->addInstruction({IROp::CALL, buf, {IRValue::Label("malloc"), IRValue::Constant(2, IRType::I32)}});
+            IRValue cv = IRValue::Register(nextTemp(), IRType::I32);
+            entry->addInstruction({IROp::LOAD, cv, {c, IRValue::Constant(0, IRType::I32)}});
+            entry->addInstruction({IROp::STORE, std::nullopt, {buf, cv, IRValue::Constant(0, IRType::I32)}});
+            entry->addInstruction({IROp::STORE, std::nullopt, {buf, IRValue::Constant(0, IRType::I32), IRValue::Constant(1, IRType::I32)}});
+            entry->addInstruction({IROp::RET, std::nullopt, {buf}});
+            fn->addBlock(std::move(entry));
+            module_.addFunction(std::move(fn));
+        }
+    }
+
+    void visit(InterpolatedStringExpr& expr) override {
+        ensureInterpolationHelpers();
+        std::vector<IRValue> partVals;
+        std::vector<IRValue> partLens;
+        int constTotal = 0;
+        for (const auto& part : expr.getParts()) {
+            if (!part.isExpr) {
+                int len = decodedStringLength(part.text);
+                constTotal += len;
+                IRValue strVal;
+                strVal.kind = IRValue::CONSTANT;
+                strVal.name = "\"" + part.text + "\"";
+                strVal.type = IRType::PTR;
+                partVals.push_back(strVal);
+                partLens.push_back(IRValue::Constant(len, IRType::I32));
+            } else {
+                part.expr->accept(*this);
+                IRValue val = lastValue_;
+                IRValue s;
+                const std::string& t = lastExprType_.name;
+                if (t == "string") {
+                    s = val;
+                } else if (t == "int") {
+                    s = emitCall("_str_from_int", {val});
+                } else if (t == "bool") {
+                    s = emitCall("_str_from_bool", {val});
+                } else {  // char
+                    s = emitCall("_str_from_char", {val});
+                }
+                partVals.push_back(s);
+                partLens.push_back(emitCall("_strlen", {s}));
+            }
+        }
+        // buf = malloc(constTotal + runtime lens)
+        IRValue total = IRValue::Constant(constTotal, IRType::I32);
+        for (const auto& len : partLens) {
+            if (len.kind != IRValue::CONSTANT) total = emitAdd(total, len);
+        }
+        IRValue buf = emitCall("malloc", {total});
+        // Fill: memcpy(buf + off, part, len); off += len.
+        IRValue off = IRValue::Constant(0, IRType::I32);
+        for (size_t i = 0; i < partVals.size(); ++i) {
+            IRValue dst = IRValue::Register(nextTemp(), IRType::PTR);
+            currentBlock_->addInstruction({IROp::ADD, dst, {buf, off}});
+            currentBlock_->addInstruction({IROp::MEMCPY, std::nullopt, {dst, partVals[i], partLens[i]}});
+            off = emitAdd(off, partLens[i]);
+        }
+        IRValue endp = IRValue::Register(nextTemp(), IRType::PTR);
+        currentBlock_->addInstruction({IROp::ADD, endp, {buf, total}});
+        currentBlock_->addInstruction({IROp::STORE, std::nullopt, {endp, IRValue::Constant(0, IRType::I32), IRValue::Constant(0, IRType::I32)}});
+        lastValue_ = buf;
+        lastExprType_ = {"string", 0};
+    }
     void visit(BooleanExpr& expr) override {
         lastValue_ = IRValue::Constant(expr.getValue() ? 1 : 0, IRType::BOOL);
         lastExprType_ = {"bool", 0};
@@ -2054,6 +2375,7 @@ private:
     std::vector<std::vector<Statement*>> deferStack_;
     std::vector<std::vector<DestructorInfo>> destructorStack_;
     bool exceptionGlobalsEnsured_ = false;
+    bool interpHelpersEnsured_ = false;
     int tempCount_ = 0;
     int globalStrCount_ = 0;
     int labelCount_ = 0;

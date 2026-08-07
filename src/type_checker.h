@@ -308,6 +308,21 @@ public:
 
     void visit(CharExpr&) override { lastExprType_ = {"char", 0}; }
     void visit(StringExpr&) override { lastExprType_ = {"string", 0}; }
+
+    void visit(InterpolatedStringExpr& expr) override {
+        for (const auto& part : expr.getParts()) {
+            if (!part.isExpr) continue;
+            part.expr->accept(*this);
+            const std::string& t = lastExprType_.name;
+            if (t == "int" || t == "bool" || t == "string" || t == "char") continue;
+            if (t == "float") {
+                error("Interpolation of float is not supported yet; cast to int first.", expr.getLine());
+            } else {
+                error("Interpolation requires int, bool, char or string, got " + t, expr.getLine());
+            }
+        }
+        lastExprType_ = {"string", 0};
+    }
     void visit(BooleanExpr&) override { lastExprType_ = {"bool", 0}; }
     void visit(NilExpr&) override { lastExprType_ = {"nil", 0}; }
     void visit(NilPtrExpr&) override { lastExprType_ = {"void", 1}; }
