@@ -22,6 +22,7 @@ struct VMResult {
 class VM {
 public:
     VMResult run(const ModuleIR& module, const std::string& runFunction = "main");
+    bool debug_ = false;
 
     struct RegVal {
         bool isFloat = false;

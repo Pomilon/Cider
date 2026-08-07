@@ -9,6 +9,7 @@
 #include "codegen.h"
 #include "constant_folder.h"
 #include "errors.h"
+#include "escape.h"
 #include "gvn.h"
 #include "inliner.h"
 #include "ir_gen.h"
@@ -83,6 +84,11 @@ void optimizeModule(cider::ModuleIR& module) {
         bool licmed = postLicm.run(module);
         if (!inlined && !licmed) break;
     }
+
+    // Escape analysis: non-escaping mallocs become stack slots and their
+    // frees are removed. Runs after the fixpoint, before the deconstruction.
+    cider::EscapeAnalysis escape;
+    escape.run(module);
 }
 
 // Print a diagnostic with the source line and a caret under the column.

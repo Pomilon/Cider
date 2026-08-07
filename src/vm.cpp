@@ -192,7 +192,9 @@ VMResult VM::run(const ModuleIR& module, const std::string& runFunction) {
         }
         case IROp::LOAD: {
             RegVal ptr = resolveValue(instr.args[0]);
+            if (debug_) fprintf(stderr, "VM load [%lld]\n", (long long)ptr.i);
             int64_t offset = 0;
+            if (debug_) { IRType tt = instr.dest ? instr.dest->type : IRType::I64; fprintf(stderr, "  (type %d)\n", (int)tt); }
             if (instr.args.size() > 1 && instr.args[1].kind != IRValue::LABEL) {
                 offset = resolveValue(instr.args[1]).i;
             }
@@ -205,6 +207,7 @@ VMResult VM::run(const ModuleIR& module, const std::string& runFunction) {
         case IROp::STORE: {
             RegVal addr = resolveValue(instr.args[0]);
             RegVal val = resolveValue(instr.args[1]);
+            if (debug_) fprintf(stderr, "VM store [%lld] = %lld\n", (long long)addr.i, (long long)val.i);
             int64_t offset = 0;
             if (instr.args.size() > 2 && instr.args[2].kind != IRValue::LABEL) {
                 offset = resolveValue(instr.args[2]).i;

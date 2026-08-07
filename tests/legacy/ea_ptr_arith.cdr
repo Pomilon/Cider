@@ -14,7 +14,9 @@ func _start() {
     q.x = 10;
     var r: *Point = take(q);
     delete q;
-    if (q.x == 10) {
+    // Canary signature of the free (see ea_helper_delete): a stack-converted
+    // object would hit fail_fast(74) in the allocator instead.
+    if (q.x != 10) {
         asm { "mov rax, 60" }
         asm { "mov rdi, 42" }
         asm { "syscall" }
