@@ -36,6 +36,7 @@ private:
         size_t instrIdx = 0;
         std::string prevBlock;
         std::string pendingDest;  // register to receive the return value
+        std::map<std::string, RegVal> savedRegs;  // caller's registers (restored on RET)
     };
 
     // Heap: byte vector; pointers are offsets.

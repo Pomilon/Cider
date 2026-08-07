@@ -41,7 +41,7 @@ VMResult VM::run(const ModuleIR& module, const std::string& runFunction) {
     }
     if (!entry) throw VMError{"no function named '" + runFunction + "'"};
 
-    frames_.push_back(Frame{entry, 0, 0, "", ""});
+    frames_.push_back(Frame{entry, 0, 0, "", "", {}});
 
     // Parameters arrive in arg_* registers (the ir-gen names them).
     while (!frames_.empty()) {
@@ -252,13 +252,20 @@ VMResult VM::run(const ModuleIR& module, const std::string& runFunction) {
         }
         case IROp::RET: {
             retReg_ = instr.args.empty() ? RegVal{} : resolveValue(instr.args[0]);
+            Frame callee = std::move(frames_.back());
             frames_.pop_back();
             if (frames_.empty()) {
                 // The entry function returned: its value is the exit code.
                 result_.exitCode = (int)retReg_.i;
-            } else if (!frames_.back().pendingDest.empty()) {
-                regs_[frames_.back().pendingDest] = retReg_;
-                frames_.back().pendingDest.clear();
+            } else {
+                // Restore the caller's registers from the callee's snapshot
+                // (the callee frame holds the caller's registers), then
+                // deliver the return value to the caller's pending dest.
+                regs_ = std::move(callee.savedRegs);
+                if (!frames_.back().pendingDest.empty()) {
+                    regs_[frames_.back().pendingDest] = retReg_;
+                    frames_.back().pendingDest.clear();
+                }
             }
             break;
         }
@@ -310,7 +317,14 @@ VM::RegVal VM::resolveValue(const IRValue& v) {
     }
     case IRValue::REGISTER: {
         auto it = regs_.find(v.name);
-        if (it == regs_.end()) throw VMError{"read of unset register %" + v.name};
+        if (it == regs_.end()) {
+            std::string loc = frames_.empty() ? std::string("?") : frames_.back().fn->getName();
+            const auto& fb = frames_.back();
+            if (fb.blockIdx < fb.fn->getBlocks().size() && fb.instrIdx > 0) {
+                loc += " @" + fb.fn->getBlocks()[fb.blockIdx]->getName() + ":" + std::to_string(fb.instrIdx - 1);
+            }
+            throw VMError{"read of unset register %" + v.name + " in " + loc};
+        }
         return it->second;
     }
     case IRValue::LABEL: {
@@ -430,9 +444,12 @@ int64_t VM::materializeString(const std::string& name) {
         }
         content += c;
     }
-    int64_t off = malloc((int64_t)content.size());
-    if (off + (int64_t)content.size() > (int64_t)heap_.size()) heap_.resize(off + (int64_t)content.size());
+    // Materialize the string bytes plus a NUL terminator (strlen etc. rely
+    // on it; the codegen's db lines also end with 0).
+    int64_t off = malloc((int64_t)content.size() + 1);
+    if (off + (int64_t)content.size() + 1 > (int64_t)heap_.size()) heap_.resize(off + (int64_t)content.size() + 1);
     std::memcpy(heap_.data() + off, content.data(), content.size());
+    heap_[(size_t)(off + content.size())] = 0;
     stringOffsets_[name] = off;
     return off;
 }
@@ -602,18 +619,20 @@ void VM::doCall(const IRValue& target, const std::vector<IRValue>& args) {
     if (fid < 0 || fid >= (int64_t)module_->getFunctions().size()) throw VMError{"call: bad function id"};
     const FunctionIR* fn = module_->getFunctions()[(size_t)fid].get();
 
-    // Bind arguments to the callee's arg_* registers.
-    std::map<std::string, RegVal> saved = regs_;
-    for (size_t i = 0; i < fn->getParams().size() && i < args.size(); ++i) {
-        RegVal v = resolveValue(args[i]);
-        if (v.isFloat) {
-            saved["arg_" + fn->getParams()[i]] = v;
-        } else {
-            saved["arg_" + fn->getParams()[i]] = v;
-        }
+    // Bind arguments to the callee's parameter registers. The ir-gen names
+    // params "arg_<name>" and the callee body reads those exact registers,
+    // so the param name IS the register name. The caller's registers are
+    // snapshotted on the callee's frame and restored when it returns.
+    // Note: resolve the arguments BEFORE moving regs_ (the move empties it).
+    std::vector<RegVal> resolvedArgs;
+    resolvedArgs.reserve(args.size());
+    for (const auto& a : args) resolvedArgs.push_back(resolveValue(a));
+    Frame calleeFrame{fn, 0, 0, "", "", std::move(regs_)};
+    for (size_t i = 0; i < fn->getParams().size() && i < resolvedArgs.size(); ++i) {
+        calleeFrame.savedRegs[fn->getParams()[i]] = resolvedArgs[i];
     }
-    regs_ = std::move(saved);
-    frames_.push_back(Frame{fn, 0, 0, "", ""});
+    regs_ = calleeFrame.savedRegs;
+    frames_.push_back(std::move(calleeFrame));
 }
 
 void VM::doVirtualCall(const IRValue& obj, int64_t vtableIndex, const std::vector<IRValue>& args) {
@@ -623,17 +642,20 @@ void VM::doVirtualCall(const IRValue& obj, int64_t vtableIndex, const std::vecto
     if (fid < 0 || fid >= (int64_t)module_->getFunctions().size()) throw VMError{"vcall: bad function id"};
     const FunctionIR* fn = module_->getFunctions()[(size_t)fid].get();
 
-    std::map<std::string, RegVal> saved = regs_;
+    std::vector<RegVal> resolvedArgs;
+    resolvedArgs.reserve(args.size());
+    for (const auto& a : args) resolvedArgs.push_back(resolveValue(a));
+    Frame calleeFrame{fn, 0, 0, "", "", std::move(regs_)};
     size_t pi = 0;
     if (!fn->getParams().empty() && fn->getParams()[0] == "this") {
-        saved["arg_this"] = objPtr;
+        calleeFrame.savedRegs["this"] = objPtr;
         pi = 1;
     }
-    for (size_t i = 0; i + pi < fn->getParams().size() && i < args.size(); ++i) {
-        saved["arg_" + fn->getParams()[i + pi]] = resolveValue(args[i]);
+    for (size_t i = 0; i + pi < fn->getParams().size() && i < resolvedArgs.size(); ++i) {
+        calleeFrame.savedRegs[fn->getParams()[i + pi]] = resolvedArgs[i];
     }
-    regs_ = std::move(saved);
-    frames_.push_back(Frame{fn, 0, 0, "", ""});
+    regs_ = calleeFrame.savedRegs;
+    frames_.push_back(std::move(calleeFrame));
 }
 
 void VM::execAsm(const IRInstruction& instr) {
@@ -691,6 +713,16 @@ void VM::execAsm(const IRInstruction& instr) {
             else if (dst == "rdx") rdx = v.i;
             else if (dst == "edi") rdi = (int32_t)v.i;
             else if (dst == "eax") rax = (int32_t)v.i;
+            else throw VMError{"unsupported asm: " + line};
+        } else if (mnem == "movsxd") {
+            if (b2.empty()) throw VMError{"unsupported asm: " + line};
+            std::string dst = a;
+            if (dst.size() > 1 && dst.back() == ',') dst.pop_back();
+            RegVal v = regVal(b2);
+            if (dst == "rdx") rdx = (int32_t)v.i;
+            else if (dst == "rax") rax = (int32_t)v.i;
+            else if (dst == "rdi") rdi = (int32_t)v.i;
+            else if (dst == "rsi") rsi = (int32_t)v.i;
             else throw VMError{"unsupported asm: " + line};
         } else if (mnem == "syscall") {
             if (rax == 1) {

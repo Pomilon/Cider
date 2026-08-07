@@ -96,7 +96,7 @@ int run() {
 
     // Calls: main calls helper(21) which returns x*2.
     auto helper = makeFn("helper", cider::IRType::I32);
-    helper->addParam("x");
+    helper->addParam("arg_x");
     auto hb = std::make_unique<cider::BasicBlock>("entry");
     cider::IRInstruction mul;
     mul.op = cider::IROp::MUL;
