@@ -75,3 +75,7 @@ add_test(NAME module_resolver_test COMMAND module_resolver_test)
 add_executable(vm_asm_test tests/unit/vm_asm_test.cpp src/vm.cpp)
 target_include_directories(vm_asm_test PRIVATE src)
 add_test(NAME vm_asm_test COMMAND vm_asm_test)
+
+add_executable(codegen_test tests/unit/codegen_test.cpp src/codegen.cpp src/ir.cpp src/lexer.cpp src/parser.cpp src/symbols.cpp src/module_resolver.cpp)
+target_include_directories(codegen_test PRIVATE src)
+add_test(NAME codegen_test COMMAND codegen_test)

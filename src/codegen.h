@@ -1,14 +1,20 @@
 #pragma once
 
+#include <memory>
 #include <string>
+
 #include "ir.h"
 
 namespace cider {
 
-struct CodegenError {
-    std::string message;
-};
+class CodeGenerator {
+public:
+    explicit CodeGenerator(const std::string& targetStr = "x86_64-linux");
+    bool generate(ModuleIR& module, const std::string& outputPath,
+                  const std::string& sourceFile = "");
 
-std::string generateAsm(const Program& prog);
+private:
+    std::string target_;
+};
 
 }  // namespace cider
