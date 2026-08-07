@@ -5,18 +5,20 @@
 #include <string>
 
 #include "ast.h"
+#include "codegen.h"
 #include "errors.h"
 #include "ir_gen.h"
 #include "lexer.h"
 #include "module_resolver.h"
 #include "parser.h"
+#include "ssa_deconstructor.h"
 #include "symbol_collector.h"
 #include "symbols.h"
 #include "type_checker.h"
 #include "vm.h"
 
 struct CliOptions {
-    std::string command;      // "parse" | "check" | "build" | "run"
+    std::string command;      // "parse" | "check" | "build" | "run" | "compile"
     bool noOpt = false;
     std::string inputFile;
     std::string outputFile;
@@ -26,7 +28,7 @@ struct CliOptions {
 bool parseCli(int argc, char** argv, CliOptions& out) {
     if (argc < 2) return false;
     std::string cmd = argv[1];
-    if (cmd != "parse" && cmd != "check" && cmd != "build" && cmd != "run") return false;
+    if (cmd != "parse" && cmd != "check" && cmd != "build" && cmd != "run" && cmd != "compile") return false;
     out.command = cmd;
     for (int i = 2; i < argc; ++i) {
         std::string a = argv[i];
@@ -44,6 +46,7 @@ bool parseCli(int argc, char** argv, CliOptions& out) {
         }
     }
     if (out.inputFile.empty()) return false;
+    if (out.command == "compile" && out.outputFile.empty()) return false;
     return true;
 }
 
@@ -62,7 +65,7 @@ int main(int argc, char** argv) {
     }
     CliOptions opts;
     if (!parseCli(argc, argv, opts)) {
-        std::fprintf(stderr, "usage: cider <parse|check|build|run> [--no-opt] [-o out.asm] <file>\n");
+        std::fprintf(stderr, "usage: cider <parse|check|build|run|compile> [--no-opt] [-o out.asm] <file>\n");
         return 2;
     }
     try {
@@ -95,6 +98,18 @@ int main(int argc, char** argv) {
             return 1;
         }
         if (opts.command == "check") {
+            return 0;
+        }
+        if (opts.command == "compile") {
+            cider::IRGenerator gen(table, opts.inputFile);
+            auto module = gen.generate(*prog);
+            cider::SSADeconstructor decon;
+            decon.process(module);
+            cider::CodeGenerator cg;
+            if (!cg.generate(module, opts.outputFile, opts.inputFile)) {
+                std::fprintf(stderr, "cannot write %s\n", opts.outputFile.c_str());
+                return 1;
+            }
             return 0;
         }
         if (opts.command == "run") {

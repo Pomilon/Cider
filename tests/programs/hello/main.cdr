@@ -1,12 +1,6 @@
 var msg: string = "Hello, world!\n";
 
 func main() -> void {
-  asm { "mov rax, 1" }
-  asm { "mov rdi, 1" }
-  asm { "mov rsi, {msg}" }
-  asm { "mov rdx, 14" }
-  asm { "syscall" }
-  asm { "mov rax, 60" }
-  asm { "mov rdi, 0" }
-  asm { "syscall" }
+  asm { "mov rax, 1" "mov rdi, 1" "mov rsi, {msg}" "mov rdx, 14" "syscall" }
+  asm { "mov rax, 60" "mov rdi, 0" "syscall" }
 }

@@ -48,24 +48,26 @@ def load_expected(name):
 
 def make_test(name):
     def test(self):
-        ir = os.path.join(PROGRAMS, name, "main.cdr")
+        cdr = os.path.join(PROGRAMS, name, "main.cdr")
         exp = load_expected(name)
 
-        r1 = run_cider(["run", "--no-opt", ir])
-        r2 = run_cider(["run", ir])
+        r1 = run_cider(["run", "--no-opt", cdr])
+        r2 = run_cider(["run", cdr])
+        r3 = run_native(cdr)
 
-        paths = [("vm-unopt", r1), ("vm-opt", r2)]
+        paths = [("vm-unopt", r1), ("vm-opt", r2), ("native", r3)]
         for label, r in paths:
             self.assertEqual(r.returncode, exp["exit"], f"{label}: exit")
             self.assertEqual(r.stdout, exp["stdout"], f"{label}: stdout")
             self.assertEqual(r.stderr, exp["stderr"], f"{label}: stderr")
 
-        # Matrix agreement: all paths identical.
-        ra = dict(paths)["vm-unopt"]
-        rb = dict(paths)["vm-opt"]
-        self.assertEqual((ra.returncode, ra.stdout, ra.stderr),
-                         (rb.returncode, rb.stdout, rb.stderr),
-                         "vm-unopt != vm-opt")
+        # Matrix agreement: all three paths identical.
+        for a, b in [("vm-unopt", "vm-opt"), ("vm-unopt", "native"), ("vm-opt", "native")]:
+            ra = dict(paths)[a]
+            rb = dict(paths)[b]
+            self.assertEqual((ra.returncode, ra.stdout, ra.stderr),
+                             (rb.returncode, rb.stdout, rb.stderr),
+                             f"{a} != {b}")
 
     return test
 
