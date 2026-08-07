@@ -1,0 +1,25 @@
+from std.alloc import malloc, free;
+
+class Point {
+    var x: int;
+}
+
+// destroy frees its param — the param summary MUST be escaping,
+// so the caller's new stays on the heap.
+func destroy(p: *Point) -> void {
+    delete p;
+}
+
+func _start() {
+    var q: *Point = new Point;
+    q.x = 42;
+    destroy(q);
+    if (q.x == 42) {
+        asm { "mov rax, 60" }
+        asm { "mov rdi, 42" }
+        asm { "syscall" }
+    }
+    asm { "mov rax, 60" }
+    asm { "mov rdi, 1" }
+    asm { "syscall" }
+}

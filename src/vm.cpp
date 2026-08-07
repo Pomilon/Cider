@@ -2,6 +2,7 @@
 
 #include <cstring>
 #include <sstream>
+#include <fcntl.h>
 #include <unistd.h>
 
 namespace cider {
@@ -18,6 +19,7 @@ VMResult VM::run(const ModuleIR& module, const std::string& runFunction) {
     result_ = VMResult{};
     regs_.clear();
     frames_.clear();
+    jumpStates_.clear();
     freeList_.clear();
     stringOffsets_.clear();
     vtableOffsets_.clear();
@@ -56,6 +58,22 @@ VMResult VM::run(const ModuleIR& module, const std::string& runFunction) {
     if (!entry) throw VMError{"no function named '" + runFunction + "'"};
 
     frames_.push_back(Frame{entry, 0, 0, "", "", {}});
+
+    // The kernel-style entry (argc, argv) gets minimal values: the program
+    // name counts, so argc is 1 (matching the native binary).
+    if (entry->getName() == "_start") {
+        const auto& params = entry->getParams();
+        if (!params.empty() && params[0] == "arg_argc") {
+            RegVal v;
+            v.i = 1;
+            regs_["arg_argc"] = v;
+        }
+        if (params.size() > 1 && params[1] == "arg_argv") {
+            RegVal v;
+            v.i = 0;
+            regs_["arg_argv"] = v;
+        }
+    }
 
     // Parameters arrive in arg_* registers (the ir-gen names them).
     while (!frames_.empty()) {
@@ -256,9 +274,18 @@ VMResult VM::run(const ModuleIR& module, const std::string& runFunction) {
             break;
         }
         case IROp::CALL: {
+            size_t before = frames_.size();
             doCall(instr.args[0], std::vector<IRValue>(instr.args.begin() + 1, instr.args.end()));
-            if (instr.dest && frames_.size() >= 2) {
-                frames_[frames_.size() - 2].pendingDest = instr.dest->name;
+            if (instr.dest) {
+                if (frames_.size() == before) {
+                    // Builtin: the callee returned without pushing a frame.
+                    regs_[instr.dest->name] = retReg_;
+                    // Also record the pending dest so a longjmp can
+                    // re-deliver the setjmp's result.
+                    frames_.back().pendingDest = instr.dest->name;
+                } else if (frames_.size() >= 2) {
+                    frames_[frames_.size() - 2].pendingDest = instr.dest->name;
+                }
             }
             break;
         }
@@ -387,6 +414,61 @@ void VM::materializeLabels() {
     for (const auto& [label, methods] : module_->getVTables()) {
         materializeVTable(label);
     }
+    // Exception globals from globalAsm ("label: resq N" / "resd N"): an
+    // 8-byte cell per label so setjmp/longjmp code can address them.
+    // "label: db ..." lines (raw data blocks) are materialized like string
+    // data, with the label mapping to the bytes themselves.
+    for (const auto& code : module_->getGlobalAsm()) {
+        std::istringstream gass(code);
+        std::string line;
+        while (std::getline(gass, line)) {
+            size_t colon = line.find(':');
+            if (colon == std::string::npos) continue;
+            std::string label = line.substr(0, colon);
+            std::string body = line.substr(colon + 1);
+            if (body.find("resq") != std::string::npos || body.find("resd") != std::string::npos) {
+                int64_t cell = malloc(8);
+                if (cell + 8 > (int64_t)heap_.size()) heap_.resize(cell + 8);
+                globalVarOffsets_[label] = cell;
+            } else if (body.find("db") != std::string::npos && stringOffsets_.count(label) == 0) {
+                // Decode the db byte list ('H', 'e', ... or 10, 0, ...).
+                std::vector<uint8_t> bytes;
+                size_t pos = body.find("db") + 2;
+                while (pos < body.size()) {
+                    while (pos < body.size() && (body[pos] == ' ' || body[pos] == ',')) pos++;
+                    if (pos >= body.size()) break;
+                    if (body[pos] == '\'') {
+                        // Multi-char literal: 'Hello, world!' -> one byte per char.
+                        pos++;
+                        while (pos < body.size() && body[pos] != '\'') {
+                            char c = body[pos];
+                            if (c == '\\' && pos + 1 < body.size()) {
+                                char e = body[pos + 1];
+                                if (e == 'n') c = '\n';
+                                else if (e == 't') c = '\t';
+                                else if (e == '\\') c = '\\';
+                                else if (e == '"') c = '"';
+                                pos++;
+                            }
+                            bytes.push_back((uint8_t)c);
+                            pos++;
+                        }
+                        if (pos < body.size()) pos++;  // closing quote
+                    } else {
+                        char* end = nullptr;
+                        bytes.push_back((uint8_t)std::strtoll(body.c_str() + pos, &end, 10));
+                        if (end == body.c_str() + pos) break;  // no digits: stop
+                        pos = (size_t)(end - body.c_str());
+                    }
+                }
+                int64_t off = malloc((int64_t)bytes.size());
+                if (off + (int64_t)bytes.size() > (int64_t)heap_.size()) heap_.resize(off + (int64_t)bytes.size());
+                std::memcpy(heap_.data() + off, bytes.data(), bytes.size());
+                stringOffsets_[label] = off;
+            }
+        }
+    }
+
     // Global variables: an 8-byte cell per global, holding its initial value.
     for (const auto& var : module_->getGlobalVars()) {
         int64_t cell = malloc(8);
@@ -500,7 +582,10 @@ int64_t VM::materializeVTable(const std::string& label) {
         int64_t fid = fit != functionIds_.end() ? fit->second : -1;
         std::memcpy(heap_.data() + off + k * 8, &fid, 8);
     }
-    vtableOffsets_[label] = off;
+    // The ir-gen references the vtable as "vtable_<name>" (NewExpr stores
+    // `vtable_` + the class name); the module's vtable map is keyed by the
+    // bare name.
+    vtableOffsets_["vtable_" + label] = off;
     return off;
 }
 
@@ -647,9 +732,75 @@ void VM::store(int64_t addr, const RegVal& val, IRType type, int64_t offset) {
 void VM::doCall(const IRValue& target, const std::vector<IRValue>& args) {
     int64_t fid;
     if (target.kind == IRValue::LABEL) {
+        // A module-defined function wins over the builtins (e.g. the
+        // imported std.alloc malloc); builtins only serve the externs.
+        auto defined = functionIds_.find(target.name);
+        if (defined != functionIds_.end()) {
+            fid = defined->second;
+        } else {
+        // VM builtins: extern runtime functions the VM provides directly.
+        if (target.name == "malloc") {
+            RegVal v = args.empty() ? RegVal{} : resolveValue(args[0]);
+            RegVal d;
+            d.i = malloc(v.i);
+            retReg_ = d;
+            return;
+        }
+        if (target.name == "free") {
+            RegVal v = args.empty() ? RegVal{} : resolveValue(args[0]);
+            free(v.i);
+            return;
+        }
+        if (target.name == "exit") {
+            RegVal v = args.empty() ? RegVal{} : resolveValue(args[0]);
+            result_.exitCode = (int)v.i;
+            frames_.clear();
+            return;
+        }
+        if (target.name == "putchar") {
+            RegVal v = args.empty() ? RegVal{} : resolveValue(args[0]);
+            result_.stdoutText += (char)(unsigned char)v.i;
+            retReg_ = v;
+            return;
+        }
+        if (target.name == "_setjmp") {
+            // Save the current execution state keyed by the jmp_buf address;
+            // longjmp restores it. Returns 0 the first time.
+            RegVal buf = args.empty() ? RegVal{} : resolveValue(args[0]);
+            JumpState st;
+            st.frameIndex = (int)frames_.size() - 1;
+            const Frame& f = frames_.back();
+            st.blockIdx = (int)f.blockIdx;
+            st.instrIdx = (int)f.instrIdx;
+            st.regs = regs_;
+            jumpStates_[buf.i] = std::move(st);
+            retReg_ = RegVal{};
+            return;
+        }
+        if (target.name == "longjmp") {
+            RegVal buf = args.empty() ? RegVal{} : resolveValue(args[0]);
+            RegVal val = args.size() > 1 ? resolveValue(args[1]) : RegVal{};
+            auto it = jumpStates_.find(buf.i);
+            if (it == jumpStates_.end()) throw VMError{"longjmp: no matching setjmp"};
+            const JumpState& st = it->second;
+            if (st.frameIndex < 0 || st.frameIndex >= (int)frames_.size())
+                throw VMError{"longjmp: frame gone"};
+            frames_.resize((size_t)st.frameIndex + 1);
+            Frame& f = frames_[(size_t)st.frameIndex];
+            f.blockIdx = (size_t)st.blockIdx;
+            f.instrIdx = (size_t)st.instrIdx;
+            regs_ = st.regs;
+            // Deliver the longjmp value as the setjmp call's result.
+            if (!f.pendingDest.empty()) {
+                regs_[f.pendingDest] = val;
+                f.pendingDest.clear();
+            }
+            return;
+        }
         auto it = functionIds_.find(target.name);
         if (it == functionIds_.end()) throw VMError{"call to unknown function " + target.name};
         fid = it->second;
+        }
     } else {
         fid = resolveValue(target).i;
     }
@@ -786,6 +937,23 @@ void VM::execAsm(const IRInstruction& instr) {
                 d.i = val;
                 regs_[it->second.name] = d;
             } else throw VMError{"unsupported asm: " + line};
+        } else if (mnem == "lea") {
+            // lea <reg>, [rel <label>] — the codegen's label placeholder
+            // form. The operand contains a space, so reparse the raw line.
+            size_t ob = line.find('[');
+            size_t oe = line.find(']', ob);
+            if (ob == std::string::npos || oe == std::string::npos ||
+                line.substr(ob, 5) != "[rel ")
+                throw VMError{"unsupported asm: " + line};
+            std::string label = line.substr(ob + 5, oe - ob - 5);
+            std::string dst = a;
+            if (dst.size() > 1 && dst.back() == ',') dst.pop_back();
+            int64_t val = resolveValue(IRValue::Label(label)).i;
+            if (dst == "rsi") rsi = val;
+            else if (dst == "rdi") rdi = val;
+            else if (dst == "rdx") rdx = val;
+            else if (dst == "rax") rax = val;
+            else throw VMError{"unsupported asm: " + line};
         } else if (mnem == "movsxd") {
             if (b2.empty()) throw VMError{"unsupported asm: " + line};
             std::string dst = a;
@@ -829,7 +997,14 @@ void VM::execAsm(const IRInstruction& instr) {
                 }
                 if (fd == 1) result_.stdoutText += bytes;
                 else if (fd == 2) result_.stderrText += bytes;
-                else throw VMError{"asm: unsupported fd " + std::to_string(fd)};
+                else {
+                    // Real file descriptor (opened via the open syscall).
+                    if (rsi + len <= (int64_t)heap_.size()) {
+                        rax = (int64_t)::write((int)fd, heap_.data() + rsi, (size_t)len);
+                    } else {
+                        rax = -1;
+                    }
+                }
                 wrote = true;
             } else if (rax == 60) {
                 result_.exitCode = (int)rdi;
@@ -839,19 +1014,41 @@ void VM::execAsm(const IRInstruction& instr) {
                 rdi = malloc(rsi);
                 rax = rdi;
             } else if (rax == 0) {
-                // read(fd=rdi, buf=rsi, len=rdx) — read the real stdin into
-                // the VM heap (the harness feeds input via stdin).
+                // read(fd=rdi, buf=rsi, len=rdx) — stdin (0) reads the real
+                // stdin into the VM heap; any other fd is a real file.
                 int64_t len = rdx;
                 int64_t got = 0;
-                if (rdi == 0) {
-                    int64_t room = (rsi + len <= (int64_t)heap_.size()) ? len : (int64_t)heap_.size() - rsi;
-                    if (room > 0) {
-                        got = (int64_t)::read(0, heap_.data() + rsi, (size_t)room);
-                    }
+                int64_t room = (rsi + len <= (int64_t)heap_.size()) ? len : (int64_t)heap_.size() - rsi;
+                if (room > 0) {
+                    got = (int64_t)::read((int)rdi, heap_.data() + rsi, (size_t)room);
                 }
                 rax = got;
             } else {
-                throw VMError{"unsupported asm syscall: rax=" + std::to_string(rax)};
+                // General passthrough for the remaining syscalls (open,
+                // close, unlink, lseek, ...): run the real syscall with the
+                // heap-relative pointers mapped to real memory.
+                auto ptrOf = [&](int64_t v) -> void* {
+                    if (v > 0 && v + 8 <= (int64_t)heap_.size()) return heap_.data() + v;
+                    return nullptr;
+                };
+                int64_t result = 0;
+                switch (rax) {
+                case 2:  // open(path, flags, mode)
+                    result = (int64_t)::open((const char*)ptrOf(rdi), (int)rsi, (int)rdx);
+                    break;
+                case 3:  // close(fd)
+                    result = (int64_t)::close((int)rdi);
+                    break;
+                case 8:  // lseek(fd, offset, whence)
+                    result = (int64_t)::lseek((int)rdi, rsi, (int)rdx);
+                    break;
+                case 87:  // unlink(path)
+                    result = (int64_t)::unlink((const char*)ptrOf(rdi));
+                    break;
+                default:
+                    throw VMError{"unsupported asm syscall: rax=" + std::to_string(rax)};
+                }
+                rax = result;
             }
         } else {
             throw VMError{"unsupported asm: " + line};

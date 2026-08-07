@@ -1,0 +1,47 @@
+func add1(x: u64) -> u64 { return x + 1; }
+func mul2(x: u64) -> u64 { return x * 2; }
+func sub1(x: u64) -> u64 { return x - 1; }
+func shl1(x: u64) -> u64 { return x << 1; }
+func shr1(x: u64) -> u64 { return x >> 1; }
+func add2(x: u64) -> u64 { return x + 2; }
+func triple(x: u64) -> u64 { return x * 3; }
+
+func chain(x: u64) -> u64 {
+    var a: u64 = add1(x);
+    var b: u64 = mul2(a);
+    var c: u64 = sub1(b);
+    var d: u64 = shl1(c);
+    var e: u64 = add2(d);
+    var f: u64 = triple(e);
+    var g: u64 = shr1(f);
+    return g;
+}
+
+func heavy(n: u64) -> u64 {
+    var x: u64 = n;
+    if (x == 0) {
+        return 0;
+    }
+    var d: u64 = 1000 / x;
+    return d + x;
+}
+
+func multi(n: u64) -> u64 {
+    if (n == 0) { return 42; }
+    return n;
+}
+
+func _start() {
+    var r1: u64 = chain(5);
+    if (r1 != 36) { asm { "mov rax, 60" } asm { "mov rdi, 1" } asm { "syscall" } }
+
+    var r2: u64 = heavy(10);
+    if (r2 != 110) { asm { "mov rax, 60" } asm { "mov rdi, 2" } asm { "syscall" } }
+
+    var r3: u64 = multi(0);
+    if (r3 != 42) { asm { "mov rax, 60" } asm { "mov rdi, 3" } asm { "syscall" } }
+
+    asm { "mov rax, 60" }
+    asm { "mov rdi, 0" }
+    asm { "syscall" }
+}

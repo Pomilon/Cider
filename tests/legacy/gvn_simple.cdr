@@ -1,0 +1,22 @@
+func compute(t: u64) -> u64 {
+    // Both x and y compute t + 1 on the SAME register t (a parameter,
+    // not memory), so the second add is redundant and GVN rewrites it.
+    var x: u64 = t + 1;
+    var y: u64 = t + 1;
+    if (x == 8 && y == 8) {
+        return 42;
+    }
+    return 1;
+}
+
+func _start() {
+    var r: u64 = compute(7);
+    if (r == 42) {
+        asm { "mov rax, 60" }
+        asm { "mov rdi, 42" }
+        asm { "syscall" }
+    }
+    asm { "mov rax, 60" }
+    asm { "mov rdi, 1" }
+    asm { "syscall" }
+}

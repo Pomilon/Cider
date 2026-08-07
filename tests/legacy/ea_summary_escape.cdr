@@ -1,0 +1,28 @@
+from std.alloc import malloc, free;
+
+class Point {
+    var x: int;
+}
+
+var stored: *Point;
+
+// keep stores p into a global — its param summary must be escaping.
+func keep(p: *Point) -> void {
+    stored = p;
+}
+
+func _start() {
+    var q: *Point = new Point;
+    keep(q);        // q escapes via keep's escaping param
+    q.x = 42;
+    var r: int = stored.x;
+    delete q;
+    if (r == 42) {
+        asm { "mov rax, 60" }
+        asm { "mov rdi, 42" }
+        asm { "syscall" }
+    }
+    asm { "mov rax, 60" }
+    asm { "mov rdi, 1" }
+    asm { "syscall" }
+}

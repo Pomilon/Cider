@@ -1,0 +1,25 @@
+func is_even(n: int) -> int {
+    if (n == 0) {
+        return 1;
+    }
+    return is_odd(n - 1);
+}
+
+func is_odd(n: int) -> int {
+    if (n == 0) {
+        return 0;
+    }
+    return is_even(n - 1);
+}
+
+func _start() {
+    var r: int = is_even(10);
+    if (r == 1) {
+        asm { "mov rax, 60" }
+        asm { "mov rdi, 0" }
+        asm { "syscall" }
+    }
+    asm { "mov rax, 60" }
+    asm { "mov rdi, 1" }
+    asm { "syscall" }
+}

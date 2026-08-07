@@ -39,6 +39,14 @@ private:
         std::map<std::string, RegVal> savedRegs;  // caller's registers (restored on RET)
     };
 
+    // State captured by _setjmp for longjmp to restore.
+    struct JumpState {
+        int frameIndex = 0;
+        int blockIdx = 0;
+        int instrIdx = 0;
+        std::map<std::string, RegVal> regs;
+    };
+
     // Heap: byte vector; pointers are offsets.
     std::vector<uint8_t> heap_;
 
@@ -51,6 +59,7 @@ private:
 
     std::map<std::string, RegVal> regs_;
     std::vector<Frame> frames_;
+    std::map<int64_t, JumpState> jumpStates_;  // jmp_buf address -> saved state
     RegVal retReg_;
     const ModuleIR* module_ = nullptr;
     std::map<std::string, int64_t> functionIds_;   // label -> id (id = index into functions)

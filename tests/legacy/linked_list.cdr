@@ -1,0 +1,57 @@
+from std.io import print, printInt, puts;
+from std.alloc import malloc;
+
+class Node {
+    var value: int;
+    var next: *Node;
+}
+
+class LinkedList {
+    var head: *Node;
+
+    func append(val: int) -> void {
+        var newNode: *Node = malloc(16) as *Node;
+        newNode->value = val;
+        newNode->next = nilPtr;
+
+        if (this.head == nilPtr) {
+            this.head = newNode;
+            return;
+        }
+
+        var curr: *Node = this.head;
+        while (curr->next != nilPtr) {
+            curr = curr->next;
+        }
+        curr->next = newNode;
+    }
+
+    func printList() -> void {
+        var curr: *Node = this.head;
+        while (curr != nilPtr) {
+            printInt(curr->value);
+            print(" -> ");
+            curr = curr->next;
+        }
+        puts("NULL");
+    }
+}
+
+func _start() -> void {
+    puts("Testing Linked List...");
+    var list: *LinkedList = malloc(8) as *LinkedList;
+    list->head = nilPtr;
+
+    list->append(10);
+    list->append(20);
+    list->append(30);
+    list->append(40);
+
+    list->printList();
+    
+    asm {
+        "mov rax, 60\n"
+        "xor rdi, rdi\n"
+        "syscall\n"
+    }
+}

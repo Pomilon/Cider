@@ -1,0 +1,41 @@
+// Template tests
+// 1. Generic identity function
+func identity<T>(x: T) -> T {
+    return x;
+}
+
+// 2. Generic max function
+func max<T>(a: T, b: T) -> T {
+    return a > b ? a : b;
+}
+
+// 3. Generic Vec struct
+struct Vec<T> {
+    var data: *T;
+    var len: int;
+    var cap: int;
+}
+
+// 4. Generic identity with different types
+func testIdentity() -> int {
+    var a: int = identity<int>(42);
+    return a;
+}
+
+func main() -> int {
+    var x: int = 5;
+    var y: int = 10;
+
+    // Test max<int>
+    var result: int = max<int>(x, y);
+    
+    // Test Vec<int>
+    var v: Vec<int>;
+    var data: int = 0;
+
+    // Test that max works
+    if (result == 10) {
+        return 0;
+    }
+    return 1;
+}

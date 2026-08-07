@@ -1,0 +1,19 @@
+class Base {
+    var x: int;
+}
+
+class Derived extends Base {
+    var y: int;
+}
+
+func main() -> int {
+    // Test 1: Dynamic Allocation
+    var obj: *Derived = new Derived;
+    
+    // Test 2: Dynamic Member Offsets (Inheritance)
+    obj->x = 10;
+    obj->y = 20;
+    
+    var sum: int = obj->x + obj->y;
+    return sum; // Should be 30
+}

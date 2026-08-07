@@ -174,10 +174,15 @@ int main(int argc, char** argv) {
                 optimizeModule(module);
             }
             cider::VM vm;
-            cider::VMResult r = vm.run(module);
-            std::fwrite(r.stdoutText.data(), 1, r.stdoutText.size(), stdout);
-            std::fwrite(r.stderrText.data(), 1, r.stderrText.size(), stderr);
-            return r.exitCode;
+            try {
+                cider::VMResult r = vm.run(module);
+                std::fwrite(r.stdoutText.data(), 1, r.stdoutText.size(), stdout);
+                std::fwrite(r.stderrText.data(), 1, r.stderrText.size(), stderr);
+                return r.exitCode;
+            } catch (const cider::VMError& e) {
+                std::fprintf(stderr, "vm error: %s\n", e.message.c_str());
+                return 2;
+            }
         }
         // build: generate IR and print the module dump.
         cider::IRGenerator gen(table, opts.inputFile);

@@ -1,0 +1,25 @@
+func compute(t: u64) -> u64 {
+    // w = t + 1 computed in the entry block of this function (dominates the if-blocks).
+    var w: u64 = t + 1;
+    var r: u64 = 0;
+    if (w > 4) {
+        // x = t + 1 is redundant with w — entry dominates this block, and t is a register.
+        var x: u64 = t + 1;
+        r = x;
+    } else {
+        r = w;
+    }
+    return r;
+}
+
+func _start() {
+    var r: u64 = compute(7);
+    if (r == 8) {
+        asm { "mov rax, 60" }
+        asm { "mov rdi, 42" }
+        asm { "syscall" }
+    }
+    asm { "mov rax, 60" }
+    asm { "mov rdi, 1" }
+    asm { "syscall" }
+}

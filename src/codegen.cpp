@@ -1126,7 +1126,7 @@ bool CodeGenerator::generate(ModuleIR& module, const std::string& outputPath,
     out << "\nsection .data\n";
     for (const auto& line : dataSection) out << "    " << line << "\n";
     for (const auto& line : module.getStringData()) out << "    " << line << "\n";
-    out << "\nsection .text\n    extern malloc\n    extern _setjmp\n    extern longjmp\n";
+    out << "\nsection .text\n    extern malloc\n    extern free\n    extern _setjmp\n    extern longjmp\n";
     for (const auto& extFunc : module.getExternFunctions()) {
         out << "    extern " << extFunc << "\n";
     }

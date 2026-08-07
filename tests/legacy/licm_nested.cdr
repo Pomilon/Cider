@@ -1,0 +1,22 @@
+func _start() {
+    var total: u64 = 0;
+    var i: u64 = 0;
+    while (i < 10) {
+        var j: u64 = 0;
+        var base: u64 = 7;
+        while (j < 10) {
+            var product: u64 = base * j;
+            total = total + product;
+            j = j + 1;
+        }
+        i = i + 1;
+    }
+    if (total == 3150) {
+        asm { "mov rax, 60" }
+        asm { "mov rdi, 42" }
+        asm { "syscall" }
+    }
+    asm { "mov rax, 60" }
+    asm { "mov rdi, 1" }
+    asm { "syscall" }
+}
