@@ -16,6 +16,8 @@ namespace cider {
 // conservative (unknown functions and indirect calls escape).
 class EscapeAnalysis {
 public:
+    static constexpr int kMaxStackAllocSize = 1024 * 1024;  // 1 MiB cap
+
     void run(ModuleIR& module) {
         for (auto& func : module.getFunctions()) {
             escapingParams_[func->getName()] = {};
@@ -203,15 +205,34 @@ private:
                     case IROp::CMP_EQ:
                     case IROp::CMP_NE: {
                         // Pointer identity is observable: comparing a tracked
-                        // pointer (e.g. against another allocation, or a
-                        // freed-and-reallocated block's address) can only be
-                        // answered by the real heap — stack slots would
-                        // change the result (no reuse, distinct addresses).
-                        for (const auto& arg : instr.args) {
+                        // pointer against ANOTHER pointer (a freed-and-
+                        // reallocated block's address, a second allocation)
+                        // can only be answered by the real heap — stack slots
+                        // would change the result (no reuse, distinct
+                        // addresses). Null checks (vs a constant) are safe.
+                        for (size_t ai = 0; ai < instr.args.size(); ++ai) {
+                            const auto& arg = instr.args[ai];
                             if (arg.kind != IRValue::REGISTER) continue;
-                            if (values_.count(arg.name)) return true;
-                            std::string b = baseOf(arg.name);
-                            if (!b.empty() && locals_.count(b)) return true;
+                            bool tracked = values_.count(arg.name);
+                            if (!tracked) {
+                                std::string b = baseOf(arg.name);
+                                tracked = !b.empty() && locals_.count(b);
+                            }
+                            if (!tracked) continue;
+                            bool otherIsPointer = false;
+                            for (size_t aj = 0; aj < instr.args.size(); ++aj) {
+                                if (aj == ai) continue;
+                                const auto& other = instr.args[aj];
+                                if (other.kind == IRValue::REGISTER) {
+                                    otherIsPointer = true;
+                                    break;
+                                }
+                                if (other.kind == IRValue::LABEL) {
+                                    otherIsPointer = true;
+                                    break;
+                                }
+                            }
+                            if (otherIsPointer) return true;
                         }
                         break;
                     }
@@ -286,7 +307,10 @@ private:
                 // writes [N-4, N+4) — 4 bytes past the object. Heap chunks
                 // tolerate this (allocator slack); packed stack slots don't,
                 // and the overrun would clobber the adjacent local slot.
+                // Large allocations stay on the heap: a multi-megabyte frame
+                // risks the stack guard and gains nothing.
                 int size = (int)instr.args[1].constValue;
+                if (size > kMaxStackAllocSize) continue;
                 instr.op = IROp::ALLOCA;
                 instr.args = {IRValue::Constant(size + 8, IRType::I32)};
 
