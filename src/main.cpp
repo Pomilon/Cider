@@ -85,6 +85,32 @@ void optimizeModule(cider::ModuleIR& module) {
     }
 }
 
+// Print a diagnostic with the source line and a caret under the column.
+// Prefixes distinguish the compiler stage (the error-code scheme).
+void printDiagnostics(const std::string& text, const std::string& path,
+                      const std::vector<cider::Diagnostic>& diags, const char* stage) {
+    for (const auto& d : diags) {
+        std::fprintf(stderr, "%s:%d:%d: %s error: %s\n", path.c_str(),
+                     d.line, d.col, stage, d.message.c_str());
+        // Extract the offending source line and draw the caret.
+        size_t start = 0;
+        int line = 1;
+        while (line < d.line) {
+            start = text.find('\n', start);
+            if (start == std::string::npos) break;
+            start++;
+            line++;
+        }
+        size_t end = text.find('\n', start);
+        std::string srcLine = text.substr(start, end == std::string::npos ? std::string::npos : end - start);
+        if (!srcLine.empty()) {
+            std::fprintf(stderr, "  %s\n", srcLine.c_str());
+            std::string caret(static_cast<size_t>(d.col > 0 ? d.col - 1 : 0), ' ');
+            std::fprintf(stderr, "  %s^\n", caret.c_str());
+        }
+    }
+}
+
 int main(int argc, char** argv) {
     if (argc == 2 && std::string(argv[1]) == "--version") {
         std::printf("cider 0.2.0\n");
@@ -102,9 +128,7 @@ int main(int argc, char** argv) {
         cider::Parser parser(lex, rep);
         auto prog = parser.parseProgram();
         if (rep.hasErrors()) {
-            for (const auto& d : rep.errors())
-                std::fprintf(stderr, "%s:%d:%d: %s\n", opts.inputFile.c_str(),
-                             d.line, d.col, d.message.c_str());
+            printDiagnostics(text, opts.inputFile, rep.errors(), "parse");
             return 1;
         }
         if (opts.command == "parse") {
@@ -119,9 +143,7 @@ int main(int argc, char** argv) {
         cider::TypeChecker checker(table, rep);
         checker.check(*prog);
         if (rep.hasErrors()) {
-            for (const auto& d : rep.errors())
-                std::fprintf(stderr, "%s:%d:%d: %s\n", opts.inputFile.c_str(),
-                             d.line, d.col, d.message.c_str());
+            printDiagnostics(text, opts.inputFile, rep.errors(), "type");
             return 1;
         }
         if (opts.command == "check") {
