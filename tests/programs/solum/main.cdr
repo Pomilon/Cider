@@ -280,8 +280,9 @@ func marker_type(sym: char*) -> int {
     if (sym[0] == '=' as char && sym[1] == '=' as char) { return 3; }
     if (sym[0] == '%' as char && sym[1] == '%' as char) { return 4; }
     if (sym[0] == '~' as char && sym[1] == '~' as char) { return 5; }
-    if (sym[0] == ',' as char && sym[1] == ',' as char) { return 6; }
-    if (sym[0] == '^' as char && sym[1] == '^' as char) { return 7; }
+    // NOTE: ,,subscript,, and ^^superscript^^ are NOT markers — the C++
+    // reference renders them as literal text (no sub/sup support), and
+    // byte-identical parity with the reference is the acceptance test.
     return 0;
 }
 
@@ -691,27 +692,6 @@ func parse_doc(input: char*) -> *PtrList {
         }
         var trimmed: char* = str_trim(currentLine);
         var tn: int = strlen(trimmed);
-        if (li >= 12 && li <= 20) {
-            print("ADDR[");
-            printInt(li);
-            print("]=");
-            printInt(currentLine as int);
-            print("\n");
-            print("RAW[");
-            printInt(li);
-            print("]='");
-            print(currentLine as string);
-            print("' len=");
-            printInt(strlen(currentLine));
-            print("\n");
-            print("TRIMMED[");
-            printInt(li);
-            print("] tn=");
-            printInt(tn);
-            print(" str=[");
-            print(trimmed as string);
-            print("]\n");
-        }
 
         if (tn == 0) {
             pl_push(doc, make_node(NT_BLANK) as *void);
@@ -1134,9 +1114,21 @@ func _start() {
     var input: char* = read_all_big();
     var doc: *PtrList = parse_doc(input);
     var b: *StrBuf = sb_new();
-    render_nodes(b, doc);
 
-    sb_char(b, '\n' as char);  // match the CLI's trailing newline
+    // Wrap the rendered fragment in the same HTML document the C++
+    // reference CLI emits (src/main.cpp).
+    sb_str(b, "<!DOCTYPE html>\n<html>\n<head>\n<meta charset=\"UTF-8\">\n<title>SOLUM Render</title>\n<style>body { font-family: sans-serif; padding: 40px; line-height: 1.6; max-width: 800px; margin: auto; color: #333; }\n" as char*);
+sb_str(b, "h1, h2, h3 { color: #222; }\n" as char*);
+sb_str(b, "table { border-collapse: collapse; margin-bottom: 1em; width: 100%; }\n" as char*);
+sb_str(b, "th, td { border: 1px solid #ddd; padding: 12px; text-align: left; }\n" as char*);
+sb_str(b, "th { background-color: #f8f8f8; }\n" as char*);
+sb_str(b, "pre { background: #f4f4f4; padding: 15px; border-radius: 5px; overflow-x: auto; border: 1px solid #ddd; }\n" as char*);
+sb_str(b, "code { background: #eee; padding: 2px 4px; border-radius: 3px; font-family: monospace; }\n" as char*);
+sb_str(b, "ul, ol { margin-bottom: 1em; }\n" as char*);
+sb_str(b, "li { margin-bottom: 0.5em; }</style>\n" as char*);
+sb_str(b, "</head>\n<body>\n" as char*);
+    render_nodes(b, doc);
+sb_str(b, "\n</body>\n</html>" as char*);
     var out: char* = sb_cstr(b);
     var outlen: int = b.slen;
 
