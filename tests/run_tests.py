@@ -43,7 +43,10 @@ def run_native(ir_path, stdin_data=None):
         # stdlib's malloc/free definitions in the object shadow libc's.
         nm = subprocess.run(["nm", obj], capture_output=True, text=True).stdout
         if "_start" in nm:
-            subprocess.run(["ld", obj, "-o", exe], check=True, capture_output=True, text=True)
+            # -nostartfiles: the program's own _start is the entry, but libc
+            # is linked so extern malloc/putchar resolve.
+            subprocess.run(["gcc", "-nostartfiles", obj, "-o", exe, "-no-pie"],
+                           check=True, capture_output=True, text=True)
         else:
             subprocess.run(["gcc", obj, "-o", exe, "-no-pie"], check=True,
                            capture_output=True, text=True)
