@@ -734,7 +734,24 @@ public:
         expr.getExpression()->accept(*this);
     }
 
-    void visit(FunctionExpr&) override {}
+    void visit(FunctionExpr& expr) override {
+        // Closure literal: check the body in a fresh scope with the params,
+        // then type it as a function pointer. Captured identifiers resolve
+        // in the enclosing scopes (they are read at the closure site).
+        symbolTable_.enterScope();
+        for (const auto& p : expr.getParams()) {
+            auto sym = std::make_shared<Symbol>();
+            sym->kind = SymbolKind::VARIABLE;
+            sym->name = p.first;
+            if (p.second) sym->type = TypeInfo::fromAST(p.second.get());
+            symbolTable_.define(sym);
+        }
+        for (auto& s : expr.getBody()) {
+            s->accept(*this);
+        }
+        symbolTable_.exitScope();
+        lastExprType_ = {"func", 1};
+    }
     void visit(TypeAST&) override {}
     void visit(StructDeclStmt&) override {}
     void visit(EnumDeclStmt&) override {}

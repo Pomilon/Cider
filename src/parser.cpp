@@ -623,15 +623,21 @@ std::unique_ptr<Expression> Parser::parseFunctionExpression(bool isAsync) {
     }
     nextToken();
 
-    std::vector<std::string> params;
+    std::vector<FunctionExpr::Parameter> params;
     if (currentToken_.type != TokenType::RPAREN) {
         while (true) {
             if (currentToken_.type != TokenType::IDENTIFIER) {
                 error("Expected parameter name.");
                 return nullptr;
             }
-            params.push_back(currentToken_.value);
+            std::string paramName = currentToken_.value;
             nextToken();
+            std::unique_ptr<TypeAST> paramType;
+            if (currentToken_.type == TokenType::COLON) {
+                nextToken();
+                paramType = parseType();
+            }
+            params.push_back({paramName, std::move(paramType)});
 
             if (currentToken_.type == TokenType::COMMA) {
                 nextToken();
@@ -647,6 +653,12 @@ std::unique_ptr<Expression> Parser::parseFunctionExpression(bool isAsync) {
     }
     nextToken();
 
+    std::unique_ptr<TypeAST> returnType;
+    if (currentToken_.type == TokenType::ARROW) {
+        nextToken();
+        returnType = parseType();
+    }
+
     if (currentToken_.type != TokenType::LBRACE) {
         error("Expected '{' for function body.");
         return nullptr;
@@ -661,7 +673,8 @@ std::unique_ptr<Expression> Parser::parseFunctionExpression(bool isAsync) {
     }
     nextToken();
 
-    return std::make_unique<FunctionExpr>(funcName, std::move(params), std::move(body), line, col, isAsync);
+    return std::make_unique<FunctionExpr>(funcName, std::move(params), std::move(body),
+                                          std::move(returnType), line, col, isAsync);
 }
 
 std::unique_ptr<Expression> Parser::parseListLiteral() {
@@ -890,6 +903,41 @@ std::unique_ptr<TypeAST> Parser::parseType() {
     while (currentToken_.type == TokenType::MULTIPLY) {
         pointerLevel++;
         nextToken();
+    }
+
+    // Function type: func(int) -> int — the parameters and return type are
+    // parsed and discarded (the type carries only the func marker; the
+    // closure's own literal carries the full signature).
+    if (currentToken_.type == TokenType::FUNCTION || currentToken_.type == TokenType::FUNC) {
+        std::string typeName = currentToken_.value;
+        nextToken();
+        if (currentToken_.type == TokenType::LPAREN) {
+            int depth = 1;
+            nextToken();
+            while (depth > 0 && currentToken_.type != TokenType::END_OF_FILE) {
+                if (currentToken_.type == TokenType::LPAREN) depth++;
+                else if (currentToken_.type == TokenType::RPAREN) depth--;
+                nextToken();
+            }
+        }
+        if (currentToken_.type == TokenType::ARROW) {
+            nextToken();
+            // consume the return type's tokens
+            int depth = 0;
+            while (currentToken_.type != TokenType::END_OF_FILE) {
+                if (currentToken_.type == TokenType::LBRACE || currentToken_.type == TokenType::SEMICOLON ||
+                    currentToken_.type == TokenType::COMMA || currentToken_.type == TokenType::RPAREN ||
+                    currentToken_.type == TokenType::RBRACE || currentToken_.type == TokenType::EQ ||
+                    currentToken_.type == TokenType::ASSIGN) {
+                    break;
+                }
+                if (currentToken_.type == TokenType::LT || currentToken_.type == TokenType::LPAREN) depth++;
+                else if (currentToken_.type == TokenType::GT || currentToken_.type == TokenType::RPAREN) depth--;
+                if (depth < 0) break;
+                nextToken();
+            }
+        }
+        return std::make_unique<TypeAST>(typeName, pointerLevel + 1, line, col, isVolatile);
     }
 
     if (currentToken_.type == TokenType::IDENTIFIER ||

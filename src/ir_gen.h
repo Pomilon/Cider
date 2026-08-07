@@ -9,6 +9,7 @@
 
 #include "ast.h"
 #include "errors.h"
+#include <algorithm>
 #include "ir.h"
 #include "symbols.h"
 
@@ -471,12 +472,13 @@ public:
             currentBlock_->addInstruction(callInstr);
             lastValue_ = dest;
         } else {
-            // Function pointer call: callee is an expression (variable, deref, etc.)
+            // Function pointer / closure call: callee is an expression.
             bool wasAddress = isAddress_;
             isAddress_ = false;
             calleeExpr->accept(*this);
             isAddress_ = wasAddress;
             IRValue fnPtr = lastValue_;
+            TypeInfo calleeType = lastExprType_;
 
             std::vector<IRValue> args;
             for (auto& arg : expr.getArgs()) {
@@ -484,16 +486,252 @@ public:
                 args.push_back(lastValue_);
             }
 
-            IRValue dest = IRValue::Register(nextTemp(), IRType::I32);
-            IRInstruction callInstr;
-            callInstr.op = IROp::CALL;
-            callInstr.args.push_back(fnPtr);
-            for (auto& a : args) callInstr.args.push_back(a);
-            callInstr.dest = dest;
-            currentBlock_->addInstruction(callInstr);
-            lastValue_ = dest;
-            lastExprType_ = {"int", 0};
+            if (calleeType.name == "func" && calleeType.pointerLevel >= 1) {
+                // Closure call: the value is a closure object {fnptr,
+                // captures...} — load the fnptr and pass the object first.
+                IRValue obj = fnPtr;
+                fnPtr = IRValue::Register(nextTemp(), IRType::PTR);
+                currentBlock_->addInstruction({IROp::LOAD, fnPtr, {obj, IRValue::Constant(0, IRType::I32)}});
+                IRValue dest = IRValue::Register(nextTemp(), IRType::I32);
+                IRInstruction callInstr;
+                callInstr.op = IROp::CALL;
+                callInstr.args.push_back(fnPtr);
+                callInstr.args.push_back(obj);
+                for (auto& a : args) callInstr.args.push_back(a);
+                callInstr.dest = dest;
+                currentBlock_->addInstruction(callInstr);
+                lastValue_ = dest;
+                lastExprType_ = {"int", 0};
+            } else {
+                IRValue dest = IRValue::Register(nextTemp(), IRType::I32);
+                IRInstruction callInstr;
+                callInstr.op = IROp::CALL;
+                callInstr.args.push_back(fnPtr);
+                for (auto& a : args) callInstr.args.push_back(a);
+                callInstr.dest = dest;
+                currentBlock_->addInstruction(callInstr);
+                lastValue_ = dest;
+                lastExprType_ = {"int", 0};
+            }
         }
+    }
+
+    // --- closures ---
+
+    void collectCapturesExpr(Expression* e, const std::set<std::string>& params,
+                             std::vector<std::string>& out) {
+        if (!e) return;
+        if (auto id = dynamic_cast<IdentifierExpr*>(e)) {
+            const std::string& n = id->getName();
+            if (!params.count(n) && variableValues_.count(n) &&
+                std::find(out.begin(), out.end(), n) == out.end()) {
+                out.push_back(n);
+            }
+        } else if (auto call = dynamic_cast<CallExpr*>(e)) {
+            collectCapturesExpr(call->getCallee(), params, out);
+            for (auto& a : call->getArgs()) collectCapturesExpr(a.get(), params, out);
+        } else if (auto bin = dynamic_cast<BinaryExpr*>(e)) {
+            collectCapturesExpr(bin->getLeft(), params, out);
+            collectCapturesExpr(bin->getRight(), params, out);
+        } else if (auto un = dynamic_cast<UnaryExpr*>(e)) {
+            collectCapturesExpr(un->getOperand(), params, out);
+        } else if (auto tern = dynamic_cast<TernaryExpr*>(e)) {
+            collectCapturesExpr(tern->getCondition(), params, out);
+            collectCapturesExpr(tern->getThenExpr(), params, out);
+            collectCapturesExpr(tern->getElseExpr(), params, out);
+        } else if (auto group = dynamic_cast<GroupingExpr*>(e)) {
+            collectCapturesExpr(group->getExpression(), params, out);
+        } else if (auto mem = dynamic_cast<MemberAccessExpr*>(e)) {
+            collectCapturesExpr(mem->getObject(), params, out);
+        } else if (auto idx = dynamic_cast<IndexExpr*>(e)) {
+            collectCapturesExpr(idx->getObject(), params, out);
+            collectCapturesExpr(idx->getIndex(), params, out);
+        } else if (auto cast = dynamic_cast<CastExpr*>(e)) {
+            collectCapturesExpr(cast->getExpression(), params, out);
+        } else if (auto interp = dynamic_cast<InterpolatedStringExpr*>(e)) {
+            for (const auto& p : interp->getParts()) {
+                if (p.isExpr) collectCapturesExpr(p.expr.get(), params, out);
+            }
+        }
+    }
+
+    void collectCapturesStmt(Statement* s, const std::set<std::string>& params,
+                             std::vector<std::string>& out) {
+        if (!s) return;
+        switch (s->getType()) {
+            case ASTNode::EXPRESSION_STMT:
+                collectCapturesExpr(dynamic_cast<ExpressionStmt*>(s)->getExpression(), params, out);
+                break;
+            case ASTNode::RETURN_STMT: {
+                auto rs = dynamic_cast<ReturnStmt*>(s);
+                if (rs->getValue()) collectCapturesExpr(rs->getValue(), params, out);
+                break;
+            }
+            case ASTNode::VAR_DECL_STMT: {
+                auto vs = dynamic_cast<VarDeclStmt*>(s);
+                if (vs->getInitializer()) collectCapturesExpr(vs->getInitializer(), params, out);
+                break;
+            }
+            case ASTNode::ASSIGN_STMT: {
+                auto as = dynamic_cast<AssignStmt*>(s);
+                collectCapturesExpr(as->getTarget(), params, out);
+                collectCapturesExpr(as->getValue(), params, out);
+                break;
+            }
+            case ASTNode::IF_STMT: {
+                auto is = dynamic_cast<IfStmt*>(s);
+                collectCapturesExpr(is->getCondition(), params, out);
+                for (auto& b : is->getThenBranch()) collectCapturesStmt(b.get(), params, out);
+                for (auto& b : is->getElseBranch()) collectCapturesStmt(b.get(), params, out);
+                break;
+            }
+            case ASTNode::WHILE_STMT: {
+                auto ws = dynamic_cast<WhileStmt*>(s);
+                collectCapturesExpr(ws->getCondition(), params, out);
+                for (auto& b : ws->getBody()) collectCapturesStmt(b.get(), params, out);
+                break;
+            }
+            case ASTNode::BLOCK_STMT:
+                for (auto& b : dynamic_cast<BlockStmt*>(s)->getStatements()) {
+                    collectCapturesStmt(b.get(), params, out);
+                }
+                break;
+            case ASTNode::FOR_STMT: {
+                auto fs = dynamic_cast<ForStmt*>(s);
+                if (fs->getInitializer()) collectCapturesStmt(fs->getInitializer(), params, out);
+                if (fs->getCondition()) collectCapturesExpr(fs->getCondition(), params, out);
+                if (fs->getIncrement()) collectCapturesStmt(fs->getIncrement(), params, out);
+                for (auto& b : fs->getBody()) collectCapturesStmt(b.get(), params, out);
+                break;
+            }
+            case ASTNode::FOR_EACH_STMT: {
+                auto fe = dynamic_cast<ForEachStmt*>(s);
+                collectCapturesExpr(fe->getIterable(), params, out);
+                for (auto& b : fe->getBody()) collectCapturesStmt(b.get(), params, out);
+                break;
+            }
+            default:
+                break;
+        }
+    }
+
+    void visit(FunctionExpr& expr) override {
+        if (!currentFunction_) {
+            lastValue_ = IRValue::Constant(0, IRType::PTR);
+            lastExprType_ = {"func", 1};
+            return;
+        }
+
+        std::set<std::string> paramNames;
+        for (auto& p : expr.getParams()) paramNames.insert(p.first);
+        std::vector<std::string> captures;
+        for (auto& s : expr.getBody()) collectCapturesStmt(s.get(), paramNames, captures);
+
+        std::string funcName = "_closure_" + std::to_string(closureCount_++);
+        TypeInfo retType = expr.getReturnType() ? TypeInfo::fromAST(expr.getReturnType()) : TypeInfo{"int", 0};
+        IRType retIR = (retType.pointerLevel > 0) ? IRType::PTR : mapType(retType.name);
+
+        // Synthesize the closure function: the hidden first parameter is the
+        // closure object; captures are read as its fields.
+        auto prevFunction = std::move(currentFunction_);
+        auto prevBlock = std::move(currentBlock_);
+        auto prevVariableValues = variableValues_;
+        int prevTempCount = tempCount_;
+        int prevLabelCount = labelCount_;
+        auto prevBreakLabels = breakLabels_;
+        auto prevContinueLabels = continueLabels_;
+        auto prevDeferStack = deferStack_;
+        auto prevDestructorStack = destructorStack_;
+
+        currentFunction_ = std::make_unique<FunctionIR>(funcName, retIR);
+        currentFunction_->setSourcePath(currentSourcePath_);
+        currentBlock_ = std::make_unique<BasicBlock>("entry");
+        variableValues_.clear();
+        paramNames_.clear();
+        tempCount_ = 0;
+        labelCount_ = 0;
+        breakLabels_.clear();
+        continueLabels_.clear();
+        deferStack_.clear();
+        destructorStack_.clear();
+        deferStack_.push_back({});
+        destructorStack_.push_back({});
+
+        symbolTable_.enterScope();
+        // Hidden closure parameter.
+        currentFunction_->addParam("arg__closure");
+        {
+            auto sym = std::make_shared<Symbol>();
+            sym->kind = SymbolKind::VARIABLE;
+            sym->name = "this";
+            sym->type = {"void", 1};
+            symbolTable_.define(sym);
+            IRValue paramReg = IRValue::Register("arg__closure", IRType::PTR);
+            IRValue addr = IRValue::Register(nextTemp(), IRType::PTR);
+            currentBlock_->addInstruction({IROp::ALLOCA, addr, {IRValue::Constant(8, IRType::I32)}});
+            currentBlock_->addInstruction({IROp::STORE, std::nullopt, {addr, paramReg, IRValue::Constant(0, IRType::I32)}});
+            variableValues_["__closure"] = addr;
+            paramNames_.insert("arg__closure");
+        }
+        // Captured variables are addressed as closure-object fields.
+        for (size_t ci = 0; ci < captures.size(); ++ci) {
+            IRValue obj = IRValue::Register(nextTemp(), IRType::PTR);
+            currentBlock_->addInstruction({IROp::LOAD, obj, {variableValues_["__closure"], IRValue::Constant(0, IRType::I32)}});
+            IRValue field = IRValue::Register(nextTemp(), IRType::PTR);
+            currentBlock_->addInstruction({IROp::ADD, field, {obj, IRValue::Constant(8 + 8 * (int)ci, IRType::I32)}});
+            variableValues_[captures[ci]] = field;
+        }
+        // Typed parameters.
+        for (auto& p : expr.getParams()) {
+            TypeInfo pt = p.second ? TypeInfo::fromAST(p.second.get()) : TypeInfo{"int", 0};
+            std::string paramName = "arg_" + p.first;
+            currentFunction_->addParam(paramName);
+            auto sym = std::make_shared<Symbol>();
+            sym->kind = SymbolKind::VARIABLE;
+            sym->name = p.first;
+            sym->type = pt;
+            symbolTable_.define(sym);
+            IRType paramIRType = (pt.pointerLevel > 0) ? IRType::PTR : mapType(pt.name);
+            IRValue paramReg = IRValue::Register(paramName, paramIRType);
+            IRValue addr = IRValue::Register(nextTemp(), IRType::PTR);
+            currentBlock_->addInstruction({IROp::ALLOCA, addr, {IRValue::Constant(8, IRType::I32)}});
+            currentBlock_->addInstruction({IROp::STORE, std::nullopt, {addr, paramReg, IRValue::Constant(0, IRType::I32)}});
+            variableValues_[p.first] = addr;
+            paramNames_.insert(paramName);
+        }
+        for (auto& s : expr.getBody()) {
+            s->accept(*this);
+        }
+        symbolTable_.exitScope();
+
+        currentFunction_->addBlock(std::move(currentBlock_));
+        module_.addFunction(std::move(currentFunction_));
+        currentFunction_ = std::move(prevFunction);
+        currentBlock_ = std::move(prevBlock);
+        variableValues_ = std::move(prevVariableValues);
+        tempCount_ = prevTempCount;
+        labelCount_ = prevLabelCount;
+        breakLabels_ = std::move(prevBreakLabels);
+        continueLabels_ = std::move(prevContinueLabels);
+        deferStack_ = std::move(prevDeferStack);
+        destructorStack_ = std::move(prevDestructorStack);
+
+        // Closure object: { fnptr, cap_0, ... } — the escape analysis turns
+        // the malloc into a stack slot when the closure never leaves.
+        int objSize = 8 + 8 * (int)captures.size();
+        IRValue obj = IRValue::Register(nextTemp(), IRType::PTR);
+        currentBlock_->addInstruction({IROp::CALL, obj, {IRValue::Label("malloc"), IRValue::Constant(objSize, IRType::I32)}});
+        currentBlock_->addInstruction({IROp::STORE, std::nullopt, {obj, IRValue::Label(funcName), IRValue::Constant(0, IRType::I32)}});
+        for (size_t ci = 0; ci < captures.size(); ++ci) {
+            IdentifierExpr ident(captures[ci], 0, 0);
+            ident.accept(*this);
+            IRValue capVal = lastValue_;
+            IRValue capSlot = IRValue::Register(nextTemp(), IRType::PTR);
+            currentBlock_->addInstruction({IROp::ADD, capSlot, {obj, IRValue::Constant(8 + 8 * (int)ci, IRType::I32)}});
+            currentBlock_->addInstruction({IROp::STORE, std::nullopt, {capSlot, capVal, IRValue::Constant(0, IRType::I32)}});
+        }
+        lastValue_ = obj;
+        lastExprType_ = {"func", 1};
     }
 
     void visit(MemberAccessExpr& expr) override {
@@ -2422,82 +2660,7 @@ public:
         lastValue_ = phiDest;
         lastExprType_ = thenType;
     }
-    void visit(FunctionExpr& expr) override {
-        if (!currentFunction_) return;
 
-        // Generate a unique hidden function name
-        std::string funcName = "__anon_" + std::to_string(anonFuncCount_++);
-
-        // Save and restore state for the nested function
-        auto prevFunction = std::move(currentFunction_);
-        auto prevBlock = std::move(currentBlock_);
-        auto prevVariableValues = variableValues_;
-        int prevTempCount = tempCount_;
-        int prevLabelCount = labelCount_;
-        auto prevBreakLabels = breakLabels_;
-        auto prevContinueLabels = continueLabels_;
-        auto prevDeferStack = deferStack_;
-        auto prevDestructorStack = destructorStack_;
-
-        IRType returnType = IRType::I32;
-        currentFunction_ = std::make_unique<FunctionIR>(funcName, returnType);
-        currentFunction_->setSourcePath(currentSourcePath_);
-        currentBlock_ = std::make_unique<BasicBlock>("entry");
-
-        variableValues_.clear();
-        tempCount_ = 0;
-        labelCount_ = 0;
-        breakLabels_.clear();
-        continueLabels_.clear();
-        deferStack_.clear();
-        destructorStack_.clear();
-        deferStack_.push_back({});
-        destructorStack_.push_back({});
-
-        // Add parameters with inferred type (int for now)
-        for (auto& paramName : expr.getParams()) {
-            std::string paramReg = "arg_" + paramName;
-            currentFunction_->addParam(paramReg);
-            IRValue paramRegVal = IRValue::Register(paramReg, IRType::I32);
-            IRValue addr = IRValue::Register(nextTemp(), IRType::PTR);
-            currentBlock_->addInstruction({IROp::ALLOCA, addr, {IRValue::Constant(4, IRType::I32)}});
-            currentBlock_->addInstruction({IROp::STORE, std::nullopt, {addr, paramRegVal, IRValue::Constant(0, IRType::I32)}});
-            variableValues_[paramName] = addr;
-            variableValues_[paramReg] = addr;
-        }
-
-        // Add return for empty body
-        if (expr.getBody().empty()) {
-            currentBlock_->addInstruction({IROp::RET, std::nullopt, {}});
-        } else {
-            for (auto& stmt : expr.getBody()) {
-                stmt->accept(*this);
-            }
-            if (currentBlock_ && (currentBlock_->getInstructions().empty() || currentBlock_->getInstructions().back().op != IROp::RET)) {
-                currentBlock_->addInstruction({IROp::RET, std::nullopt, {}});
-            }
-        }
-
-        if (currentBlock_) {
-            currentFunction_->addBlock(std::move(currentBlock_));
-        }
-        module_.addFunction(std::move(currentFunction_));
-
-        // Restore state
-        currentFunction_ = std::move(prevFunction);
-        currentBlock_ = std::move(prevBlock);
-        variableValues_ = prevVariableValues;
-        tempCount_ = prevTempCount;
-        labelCount_ = prevLabelCount;
-        breakLabels_ = prevBreakLabels;
-        continueLabels_ = prevContinueLabels;
-        deferStack_ = prevDeferStack;
-        destructorStack_ = prevDestructorStack;
-
-        // Return function pointer (label)
-        lastValue_ = IRValue::Label(funcName);
-        lastExprType_ = {"void", 1};  // function pointer type
-    }
     void visit(SuperExpr& expr) override {
         if (currentClassName_.empty() || !currentFunction_) {
             lastValue_ = IRValue::Constant(0, IRType::PTR);
@@ -2587,6 +2750,7 @@ private:
     int globalStrCount_ = 0;
     int labelCount_ = 0;
     int anonFuncCount_ = 0;
+    int closureCount_ = 0;
     std::string nextTemp() { return "v" + std::to_string(tempCount_++); }
     std::string nextLabel(const std::string& prefix) {
         return (currentFunction_ ? currentFunction_->getName() + "_" : "") + prefix + std::to_string(labelCount_++);

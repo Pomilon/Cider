@@ -440,20 +440,46 @@ private:
 
 class FunctionExpr : public Expression {
 public:
-    FunctionExpr(const std::string& name, std::vector<std::string> params,
-                 std::vector<std::unique_ptr<Statement>> body, int line, int col, bool isAsync = false)
-        : Expression(FUNCTION_EXPR, line, col), name_(name), params_(std::move(params)), body_(std::move(body)), isAsync_(isAsync) {}
+    using Parameter = std::pair<std::string, std::unique_ptr<TypeAST>>;
+    FunctionExpr(const std::string& name, std::vector<Parameter> params,
+                 std::vector<std::unique_ptr<Statement>> body, std::unique_ptr<TypeAST> returnType,
+                 int line, int col, bool isAsync = false)
+        : Expression(FUNCTION_EXPR, line, col), name_(name), params_(std::move(params)),
+          body_(std::move(body)), returnType_(std::move(returnType)), isAsync_(isAsync) {}
     const std::string& getName() const { return name_; }
-    const std::vector<std::string>& getParams() const { return params_; }
+    const std::vector<Parameter>& getParams() const { return params_; }
     const std::vector<std::unique_ptr<Statement>>& getBody() const { return body_; }
+    TypeAST* getReturnType() const { return returnType_.get(); }
     bool isAsync() const { return isAsync_; }
     void dump(std::string& out, int depth) const override;
 private:
     std::string name_;
-    std::vector<std::string> params_;
+    std::vector<Parameter> params_;
     std::vector<std::unique_ptr<Statement>> body_;
+    std::unique_ptr<TypeAST> returnType_;
     bool isAsync_;
 };
+
+
+inline void FunctionExpr::dump(std::string& out, int depth) const {
+    out += "(FuncExpr";
+    if (!name_.empty()) out += " " + name_;
+    out += " (params";
+    for (const auto& p : params_) {
+        out += " (" + p.first + " ";
+        if (p.second) p.second->dump(out, depth);
+        else out += "?";
+        out += ")";
+    }
+    out += ")";
+    if (returnType_) {
+        out += " -> ";
+        returnType_->dump(out, depth);
+    }
+    out += " (body";
+    for (const auto& s : body_) s->dump(out, depth + 1);
+    out += "))";
+}
 
 class AwaitExpr : public Expression {
 public:
@@ -1012,23 +1038,6 @@ public:
 
 // ---------------------------------------------------------------- dump impls
 
-inline void FunctionExpr::dump(std::string& out, int depth) const {
-    out += "(FunctionExpr " + name_;
-    if (!params_.empty()) {
-        out += " (params";
-        for (const auto& p : params_) out += " " + p;
-        out += ")";
-    }
-    if (!body_.empty()) {
-        out += " (body";
-        for (const auto& s : body_) {
-            out += " ";
-            s->dump(out, depth);
-        }
-        out += ")";
-    }
-    out += ")";
-}
 
 inline void VarDeclStmt::dump(std::string& out, int depth) const {
     out += isConst_ ? "(ConstDecl " : "(VarDecl ";
