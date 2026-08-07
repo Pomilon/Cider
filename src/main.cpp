@@ -1,4 +1,5 @@
 #include <cstdio>
+#include <cstdlib>
 #include <fstream>
 #include <sstream>
 #include <stdexcept>
@@ -134,6 +135,7 @@ int main(int argc, char** argv) {
             }
             cider::SSADeconstructor decon;
             decon.process(module);
+            if (std::getenv("CIDER_DEBUG_IR")) module.print();
             cider::CodeGenerator cg;
             // Whole-program compilation: every function (including module
             // functions) is emitted into the binary.

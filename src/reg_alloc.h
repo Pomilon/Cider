@@ -153,14 +153,32 @@ public:
             }
         }
 
-        // Build intervals from liveness: a value is live exactly in the
-        // blocks where it is used or defined. (LIVE_IN/LIVE_OUT blocks are
-        // intentionally not included — they only stretch intervals beyond
-        // their true range and cause unnecessary spills.)
+        // Build intervals from liveness. USE/DEF alone is NOT enough: a value
+        // used in a loop header is re-used on every back edge, so it is live
+        // across the whole loop body even though its USE/DEF blocks only span
+        // [preheader, header]. Without extending those intervals the linear
+        // scan hands the value's register (or spill slot) to a body value,
+        // clobbering the loop-carried operand. LIVE_IN/LIVE_OUT can't be
+        // added wholesale — they also mark values that merely flow through a
+        // block boundary, which would stretch intervals into blocks where
+        // the value is not used (unnecessary spills). So only extend along
+        // back edges: every value live into a back-edge target (loop header)
+        // must keep its register through all blocks of the loop body.
         std::map<std::string, std::set<int>> blocksForReg;
         for (int b = 0; b < numBlocks; b++) {
             for (auto& v : USE[b]) blocksForReg[v].insert(b);
             for (auto& v : DEF[b]) blocksForReg[v].insert(b);
+        }
+        for (int src = 0; src < numBlocks; src++) {
+            for (int tgt : successors[src]) {
+                if (tgt < src) {  // back edge: src -> tgt
+                    for (int t = tgt; t <= src; ++t) {
+                        for (auto& v : LIVE_IN[tgt]) {
+                            blocksForReg[v].insert(t);
+                        }
+                    }
+                }
+            }
         }
 
         std::map<std::string, LiveInterval> intervals;

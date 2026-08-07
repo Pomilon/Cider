@@ -1,6 +1,7 @@
 #include "codegen.h"
 
 #include <algorithm>
+#include <cstdlib>
 #include <fstream>
 #include <functional>
 #include <iomanip>
@@ -136,6 +137,17 @@ bool CodeGenerator::generate(ModuleIR& module, const std::string& outputPath,
         int regAllocStackSize = 0;
         auto alloc = regAlloc.allocate(*func, regAllocStackSize);
 
+        if (std::getenv("CIDER_DEBUG_ALLOC")) {
+            std::fprintf(stderr, "=== allocation for %s (stackSize=%d) ===\n",
+                         func->getName().c_str(), regAllocStackSize);
+            for (auto& [v, res] : alloc) {
+                if (res.isSpilled)
+                    std::fprintf(stderr, "  %s -> spill -%d\n", v.c_str(), -res.stackOffset);
+                else
+                    std::fprintf(stderr, "  %s -> %s\n", v.c_str(), res.reg.c_str());
+            }
+        }
+
         std::string fName = func->getName();
         if (fName == "_start" || fName == "main") {
             addText("global " + fName);
@@ -261,7 +273,8 @@ bool CodeGenerator::generate(ModuleIR& module, const std::string& outputPath,
             return regMap[reg][idx];
         };
 
-        auto genEpilogue = [&]() {
+        auto genEpilogue = [&](bool zeroVoid = false) {
+            if (zeroVoid) addText("    xor eax, eax");
             if (calleeSaved.size() > 0) {
                 addText("    lea rsp, [rbp - " + std::to_string(calleeSaved.size() * 8) + "]");
                 for (auto it = calleeSaved.rbegin(); it != calleeSaved.rend(); ++it) {
@@ -452,8 +465,29 @@ bool CodeGenerator::generate(ModuleIR& module, const std::string& outputPath,
                             addText("    lea rax, [rel " + a1 + "]");
                             addText("    mov " + getSizedReg(d, t) + ", " + getSizedReg("rax", t));
                         } else if (isMem(d) && isMem(a1)) {
-                            addText("    mov " + getSizedReg("rax", t) + ", " + getSizedReg(a1, t));
-                            addText("    mov " + getSizedReg(d, t) + ", " + getSizedReg("rax", t));
+                            // A spilled narrow integer's slot only has
+                            // `t`-sized valid bytes; a raw 64-bit copy would
+                            // drag stale stack garbage into the upper bits of
+                            // a wider destination. Sign/zero-extend through
+                            // rax instead (mirrors the register-to-register
+                            // path below).
+                            IRType srcT = (instr.args.size() > 0 ? instr.args[0].type : t);
+                            if ((t == IRType::I64 || t == IRType::U64 || t == IRType::PTR) &&
+                                instr.args[0].kind != IRValue::CONSTANT &&
+                                (srcT == IRType::I8 || srcT == IRType::U8 ||
+                                 srcT == IRType::I16 || srcT == IRType::U16 ||
+                                 srcT == IRType::I32 || srcT == IRType::U32)) {
+                                if (srcT == IRType::I8) addText("    movsx rax, byte " + a1);
+                                else if (srcT == IRType::U8) addText("    movzx rax, byte " + a1);
+                                else if (srcT == IRType::I16) addText("    movsx rax, word " + a1);
+                                else if (srcT == IRType::U16) addText("    movzx rax, word " + a1);
+                                else if (srcT == IRType::I32) addText("    movsxd rax, dword " + a1);
+                                else addText("    mov eax, dword " + a1);
+                                addText("    mov " + getSizedReg(d, t) + ", rax");
+                            } else {
+                                addText("    mov " + getSizedReg("rax", t) + ", " + getSizedReg(a1, t));
+                                addText("    mov " + getSizedReg(d, t) + ", " + getSizedReg("rax", t));
+                            }
                         } else {
                             if (instr.args[0].kind == IRValue::CONSTANT && instr.args[0].constValue > 0xFFFFFFFF) {
                                 addText("    mov rax, " + a1);
@@ -1058,15 +1092,19 @@ bool CodeGenerator::generate(ModuleIR& module, const std::string& outputPath,
                             addText("    movsd xmm0, " + a1);
                         else
                             addText("    mov " + getSizedReg("rax", t) + ", " + getSizedReg(a1, t));
+                        genEpilogue();
+                    } else {
+                        // Void return: leave a well-defined 0 in eax so the
+                        // CRT uses it as the exit status of a void main.
+                        genEpilogue(true);
                     }
-                    genEpilogue();
                     break;
                 }
                 default: break;
                 }
             }
         }
-        genEpilogue();
+        genEpilogue(func->getReturnType() == IRType::VOID);
     }
 
     std::ofstream out(outputPath, std::ios::trunc);

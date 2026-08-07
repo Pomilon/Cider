@@ -1,6 +1,7 @@
 #include "module_resolver.h"
 
 #include <sys/stat.h>
+#include <unistd.h>
 
 #include <cstring>
 #include <fstream>
@@ -19,6 +20,19 @@ static std::string dirName(const std::string& path) {
     std::string copy = path;
     char* result = dirname(&copy[0]);
     return result ? std::string(result) : ".";
+}
+
+// Directory of the running cider binary (via /proc/self/exe), so the
+// stdlib can be found even when the working directory is not the project
+// root (e.g. ctest running from build/).
+static std::string binaryDir() {
+    char buf[4096];
+    ssize_t n = readlink("/proc/self/exe", buf, sizeof(buf) - 1);
+    if (n <= 0) return "";
+    buf[n] = '\0';
+    std::string exe(buf);
+    size_t slash = exe.find_last_of('/');
+    return (slash == std::string::npos) ? "" : exe.substr(0, slash + 1);
 }
 
 ModuleResolver::ModuleResolver() {
@@ -59,6 +73,13 @@ ResolutionResult ModuleResolver::resolve(const std::string& logicalPath, const s
     }
     paths.emplace_back("./modules/");
     paths.emplace_back("./Cider/modules/");
+    // Binary-relative fallback: build/cider -> <repo>/modules. Kept after
+    // the CWD-relative paths so existing invocations behave identically.
+    static const std::string binDir = binaryDir();
+    if (!binDir.empty()) {
+        paths.push_back(binDir + "../modules/");
+        paths.push_back(binDir + "../../modules/");
+    }
 
     for (const auto& basePath : paths) {
         std::string fileCandidate = basePath + pathSegment + ".cdr";
