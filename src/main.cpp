@@ -29,6 +29,7 @@ struct CliOptions {
     bool noOpt = false;
     std::string inputFile;
     std::string outputFile;
+    std::string target = "native";  // "native" | "pomeos"
 };
 
 // Returns false + prints usage to stderr on bad arguments.
@@ -41,6 +42,9 @@ bool parseCli(int argc, char** argv, CliOptions& out) {
         std::string a = argv[i];
         if (a == "--no-opt") {
             out.noOpt = true;
+        } else if (a == "--target") {
+            if (i + 1 >= argc) return false;
+            out.target = argv[++i];
         } else if (a == "-o") {
             if (i + 1 >= argc) return false;
             out.outputFile = argv[++i];
@@ -164,7 +168,7 @@ int main(int argc, char** argv) {
             cider::SSADeconstructor decon;
             decon.process(module);
             if (std::getenv("CIDER_DEBUG_IR")) module.print();
-            cider::CodeGenerator cg;
+            cider::CodeGenerator cg(opts.target);
             // Whole-program compilation: every function (including module
             // functions) is emitted into the binary.
             if (!cg.generate(module, opts.outputFile)) {

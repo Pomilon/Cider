@@ -1131,6 +1131,96 @@ bool CodeGenerator::generate(ModuleIR& module, const std::string& outputPath,
         out << "    extern " << extFunc << "\n";
     }
     for (const auto& line : textSection) out << line << "\n";
+
+    if (target_ == "pomeos") {
+        // Flush and close the initial emission first: its destructor would
+        // otherwise re-flush the raw text over the processed result below.
+        out.flush();
+        out.close();
+        // The PomeOS backend:
+        // 1. Swap the Linux syscall numbers for PomeOS's (the asm blocks
+        //    emit `mov rax, <linux>` + `syscall`; only the mov immediately
+        //    preceding a syscall is rewritten).
+        // 2. Replace the _setjmp/_longjmp externs with self-contained
+        //    definitions so the output assembles standalone with pasm.
+        std::string final;
+        std::ifstream in(outputPath);
+        final.assign(std::istreambuf_iterator<char>(in), std::istreambuf_iterator<char>());
+        in.close();
+
+        static const std::map<int, int> kSyscallSwap = {
+            {0, 12}, {1, 13}, {2, 10}, {3, 11}, {8, 34},  // read/write/open/close/lseek
+            {9, 48}, {12, 9}, {39, 36}, {57, 33}, {60, 2}, {61, 14},  // mmap/sbrk/getpid/fork/exit/waitpid
+        };
+        std::istringstream ss(final);
+        std::vector<std::string> lines;
+        std::string line;
+        while (std::getline(ss, line)) lines.push_back(line);
+        for (size_t i = 0; i < lines.size(); ++i) {
+            if (lines[i].find("syscall") == std::string::npos) continue;
+            // nearest preceding `mov rax, N` / `mov eax, N`
+            for (size_t j = i; j > 0 && i - j < 8; --j) {
+                std::string t = lines[j - 1];
+                size_t pos = t.find("mov ");
+                if (pos == std::string::npos) continue;
+                std::string rest = t.substr(pos + 4);
+                if (rest.rfind("rax,", 0) != 0 && rest.rfind("eax,", 0) != 0) continue;
+                size_t numPos = rest.find_first_of("0123456789");
+                if (numPos == std::string::npos) continue;
+                size_t end = numPos;
+                while (end < rest.size() && isdigit((unsigned char)rest[end])) end++;
+                int n = std::atoi(rest.substr(numPos, end - numPos).c_str());
+                auto it = kSyscallSwap.find(n);
+                if (it != kSyscallSwap.end()) {
+                    lines[j - 1] = t.substr(0, pos + 4 + (rest[4] == 'a' ? 4 : 4)) + " " +
+                                   std::to_string(it->second);
+                }
+                break;
+            }
+        }
+        // Replace the externs with the runtime definitions.
+        std::string result;
+        for (const auto& l : lines) {
+            if (l.find("extern _setjmp") != std::string::npos ||
+                l.find("extern longjmp") != std::string::npos) {
+                continue;
+            }
+            result += l + "\n";
+        }
+        result += R"(
+; PomeOS runtime: _setjmp/longjmp (jmp_buf = 8 qwords)
+global _setjmp
+global longjmp
+_setjmp:
+    mov [rdi + 0], rbx
+    mov [rdi + 8], rbp
+    mov [rdi + 16], r12
+    mov [rdi + 24], r13
+    mov [rdi + 32], r14
+    mov [rdi + 40], r15
+    mov [rdi + 48], rsp
+    mov rax, [rsp]
+    mov [rdi + 56], rax
+    xor eax, eax
+    ret
+longjmp:
+    mov rbx, [rdi + 0]
+    mov rbp, [rdi + 8]
+    mov r12, [rdi + 16]
+    mov r13, [rdi + 24]
+    mov r14, [rdi + 32]
+    mov r15, [rdi + 40]
+    mov rsp, [rdi + 48]
+    mov rax, rsi
+    test eax, eax
+    jnz .done
+    mov eax, 1
+.done:
+    jmp qword [rdi + 56]
+)";
+        std::ofstream out2(outputPath, std::ios::trunc);
+        out2 << result;
+    }
     return true;
 }
 
