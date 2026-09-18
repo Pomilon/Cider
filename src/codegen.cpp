@@ -1,6 +1,7 @@
 #include "codegen.h"
 
 #include <algorithm>
+#include <cstdint>
 #include <cstdlib>
 #include <fstream>
 #include <functional>
@@ -97,13 +98,29 @@ bool CodeGenerator::generate(ModuleIR& module, const std::string& outputPath,
         addGlobalAsm(c);
     }
 
+    // Format an integer immediate for NASM (Issue #18): 32-bit values with
+    // bit 31 set (e.g. 2147483648) warn as decimal — "signed dword exceeds
+    // bounds" — but assemble cleanly as hex. Narrow/64-bit values are
+    // unaffected (small decimals stay decimal).
+    auto fmtImm = [](int64_t v, IRType t) -> std::string {
+        if (t == IRType::I32 || t == IRType::U32 || t == IRType::BOOL) {
+            uint64_t u = (uint64_t)v & 0xFFFFFFFFULL;
+            if (u > (uint64_t)INT32_MAX) {
+                std::ostringstream hs;
+                hs << "0x" << std::hex << std::uppercase << u;
+                return hs.str();
+            }
+        }
+        return std::to_string(v);
+    };
+
     for (const auto& var : module.getGlobalVars()) {
         if (var.initialValue != 0) {
             std::string sizeDir = "dq";
             if (var.type == IRType::I8 || var.type == IRType::U8) sizeDir = "db";
             else if (var.type == IRType::I16 || var.type == IRType::U16) sizeDir = "dw";
             else if (var.type == IRType::I32 || var.type == IRType::U32) sizeDir = "dd";
-            addData(var.name + ": " + sizeDir + " " + std::to_string((long long)var.initialValue));
+            addData(var.name + ": " + sizeDir + " " + fmtImm((int64_t)var.initialValue, var.type));
         } else {
             if (var.totalBytes > 0) {
                 addBss(var.name + ": resb " + std::to_string(var.totalBytes));
@@ -205,7 +222,7 @@ bool CodeGenerator::generate(ModuleIR& module, const std::string& outputPath,
         auto getOperand = [&](const IRValue& val) -> std::string {
             if (val.kind == IRValue::CONSTANT) {
                 if (val.type == IRType::F32 || val.type == IRType::F64) return "[rel " + getFloatConst(val.constValue, val.type) + "]";
-                return std::to_string(val.intValue);
+                return fmtImm(val.intValue, val.type);
             } else if (val.kind == IRValue::LABEL) {
                 return val.name;
             } else {
@@ -1241,7 +1258,7 @@ bool CodeGenerator::generate(ModuleIR& module, const std::string& outputPath,
                 }
                 case IROp::PUSH: {
                     if (instr.args[0].kind == IRValue::CONSTANT) {
-                        addText("    push " + std::to_string((long long)instr.args[0].intValue));
+                        addText("    push " + fmtImm(instr.args[0].intValue, instr.args[0].type));
                     } else if (isMem(a1)) {
                         IRType t = instr.args[0].type;
                         if (t == IRType::I32 || t == IRType::U32 || t == IRType::BOOL) {
@@ -1300,6 +1317,9 @@ bool CodeGenerator::generate(ModuleIR& module, const std::string& outputPath,
 
     std::ofstream out(outputPath, std::ios::trunc);
     if (!out) return false;
+    // 64-bit relative addressing is the standard for ELF output (Issue #18):
+    // without this NASM warns that implicit absolute is deprecated.
+    out << "default rel\n";
     out << "section .bss\n";
     for (const auto& line : bssSection) out << "    " << line << "\n";
     for (const auto& line : globalAsmSection) out << "    " << line << "\n";
