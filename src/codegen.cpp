@@ -98,17 +98,23 @@ bool CodeGenerator::generate(ModuleIR& module, const std::string& outputPath,
     }
 
     for (const auto& var : module.getGlobalVars()) {
-        std::string sizeDir = "dq";
-        std::string resDir = "resq";
-        if (var.type == IRType::I8 || var.type == IRType::U8) { sizeDir = "db"; resDir = "resb"; }
-        else if (var.type == IRType::I16 || var.type == IRType::U16) { sizeDir = "dw"; resDir = "resw"; }
-        else if (var.type == IRType::I32 || var.type == IRType::U32) { sizeDir = "dd"; resDir = "resd"; }
-
-        int count = var.arraySize > 0 ? var.arraySize : 1;
         if (var.initialValue != 0) {
+            std::string sizeDir = "dq";
+            if (var.type == IRType::I8 || var.type == IRType::U8) sizeDir = "db";
+            else if (var.type == IRType::I16 || var.type == IRType::U16) sizeDir = "dw";
+            else if (var.type == IRType::I32 || var.type == IRType::U32) sizeDir = "dd";
             addData(var.name + ": " + sizeDir + " " + std::to_string((long long)var.initialValue));
         } else {
-            addBss(var.name + ": " + resDir + " " + std::to_string(count));
+            if (var.totalBytes > 0) {
+                addBss(var.name + ": resb " + std::to_string(var.totalBytes));
+            } else {
+                std::string resDir = "resq";
+                if (var.type == IRType::I8 || var.type == IRType::U8) resDir = "resb";
+                else if (var.type == IRType::I16 || var.type == IRType::U16) resDir = "resw";
+                else if (var.type == IRType::I32 || var.type == IRType::U32) resDir = "resd";
+                int count = var.arraySize > 0 ? var.arraySize : 1;
+                addBss(var.name + ": " + resDir + " " + std::to_string(count));
+            }
         }
     }
 
@@ -174,7 +180,7 @@ bool CodeGenerator::generate(ModuleIR& module, const std::string& outputPath,
                 if (instr.op == IROp::ALLOCA) {
                     std::string varName = instr.dest->name;
                     if (localOffsets.find(varName) == localOffsets.end()) {
-                        int size = (int)instr.args[0].constValue;
+                        int size = (int)instr.args[0].intValue;
                         if (size < 8) size = 8;
                         if (size % 8 != 0) size += 8 - (size % 8);
                         localOffsets[varName] = currentAllocaOffset + size;
@@ -199,7 +205,7 @@ bool CodeGenerator::generate(ModuleIR& module, const std::string& outputPath,
         auto getOperand = [&](const IRValue& val) -> std::string {
             if (val.kind == IRValue::CONSTANT) {
                 if (val.type == IRType::F32 || val.type == IRType::F64) return "[rel " + getFloatConst(val.constValue, val.type) + "]";
-                return std::to_string((long long)val.constValue);
+                return std::to_string(val.intValue);
             } else if (val.kind == IRValue::LABEL) {
                 return val.name;
             } else {
@@ -315,13 +321,13 @@ bool CodeGenerator::generate(ModuleIR& module, const std::string& outputPath,
                     // (offset > 0, or any store into a larger alloca)
                     // are 4-byte packed — a qword store there would
                     // clobber the neighbor.
-                    double allocSize = def->args.empty() ? 0.0 : def->args[0].constValue;
+                    double allocSize = def->args.empty() ? 0.0 : (double)def->args[0].intValue;
                     return totalOffset == 0 && allocSize == 8.0;
                 }
                 if (def->op == IROp::ADD) {
                     if (!def->args.empty() && def->args[0].kind == IRValue::REGISTER) {
                         if (def->args.size() > 1 && def->args[1].kind == IRValue::CONSTANT) {
-                            totalOffset += (long long)def->args[1].constValue;
+                            totalOffset += (long long)def->args[1].intValue;
                         } else {
                             // A variable index (scaled array access): the
                             // address is an array element, not the slot
@@ -472,36 +478,83 @@ bool CodeGenerator::generate(ModuleIR& module, const std::string& outputPath,
                             addText("    mov " + getSizedReg(d, t) + ", " + getSizedReg("rax", t));
                         } else if (isMem(d) && isMem(a1)) {
                             // A spilled narrow integer's slot only has
-                            // `t`-sized valid bytes; a raw 64-bit copy would
-                            // drag stale stack garbage into the upper bits of
-                            // a wider destination. Sign/zero-extend through
-                            // rax instead (mirrors the register-to-register
-                            // path below).
+                            // `src`-sized valid bytes; a raw copy sized by the
+                            // destination would drag stale stack garbage into
+                            // the upper bits. Sign/zero-extend through
+                            // rax/eax instead.
                             IRType srcT = (instr.args.size() > 0 ? instr.args[0].type : t);
-                            if ((t == IRType::I64 || t == IRType::U64 || t == IRType::PTR) &&
-                                instr.args[0].kind != IRValue::CONSTANT &&
-                                (srcT == IRType::I8 || srcT == IRType::U8 ||
-                                 srcT == IRType::I16 || srcT == IRType::U16 ||
-                                 srcT == IRType::I32 || srcT == IRType::U32)) {
-                                if (srcT == IRType::I8) addText("    movsx rax, byte " + a1);
-                                else if (srcT == IRType::U8) addText("    movzx rax, byte " + a1);
-                                else if (srcT == IRType::I16) addText("    movsx rax, word " + a1);
-                                else if (srcT == IRType::U16) addText("    movzx rax, word " + a1);
-                                else if (srcT == IRType::I32) addText("    movsxd rax, dword " + a1);
-                                else addText("    mov eax, dword " + a1);
-                                addText("    mov " + getSizedReg(d, t) + ", rax");
+                            auto bitWidth = [](IRType x) -> int {
+                                if (x == IRType::I8 || x == IRType::U8) return 8;
+                                if (x == IRType::I16 || x == IRType::U16) return 16;
+                                if (x == IRType::I32 || x == IRType::U32 || x == IRType::BOOL) return 32;
+                                return 64;
+                            };
+                            bool widening = (instr.args[0].kind != IRValue::CONSTANT &&
+                                             srcT != t && bitWidth(t) > bitWidth(srcT) &&
+                                             (srcT == IRType::I8 || srcT == IRType::U8 ||
+                                              srcT == IRType::I16 || srcT == IRType::U16 ||
+                                              srcT == IRType::I32 || srcT == IRType::U32 ||
+                                              srcT == IRType::BOOL));
+                            if (widening) {
+                                bool dest64 = (t == IRType::I64 || t == IRType::U64 || t == IRType::PTR);
+                                bool dest32 = (t == IRType::I32 || t == IRType::U32 || t == IRType::BOOL);
+                                if (dest64) {
+                                    if (srcT == IRType::I8) addText("    movsx rax, byte " + a1);
+                                    else if (srcT == IRType::U8 || srcT == IRType::BOOL) addText("    movzx rax, byte " + a1);
+                                    else if (srcT == IRType::I16) addText("    movsx rax, word " + a1);
+                                    else if (srcT == IRType::U16) addText("    movzx rax, word " + a1);
+                                    else if (srcT == IRType::I32) addText("    movsxd rax, dword " + a1);
+                                    else addText("    mov eax, dword " + a1);
+                                    addText("    mov " + getSizedReg(d, t) + ", rax");
+                                } else if (dest32) {
+                                    if (srcT == IRType::I8) addText("    movsx eax, byte " + a1);
+                                    else if (srcT == IRType::U8 || srcT == IRType::BOOL) addText("    movzx eax, byte " + a1);
+                                    else if (srcT == IRType::I16) addText("    movsx eax, word " + a1);
+                                    else if (srcT == IRType::U16) addText("    movzx eax, word " + a1);
+                                    else addText("    mov eax, dword " + a1);
+                                    addText("    mov " + getSizedReg(d, t) + ", eax");
+                                } else {
+                                    addText("    mov " + getSizedReg("rax", t) + ", " + getSizedReg(a1, t));
+                                    addText("    mov " + getSizedReg(d, t) + ", " + getSizedReg("rax", t));
+                                }
                             } else {
                                 addText("    mov " + getSizedReg("rax", t) + ", " + getSizedReg(a1, t));
                                 addText("    mov " + getSizedReg(d, t) + ", " + getSizedReg("rax", t));
                             }
                         } else {
-                            if (instr.args[0].kind == IRValue::CONSTANT && instr.args[0].constValue > 0xFFFFFFFF) {
+                            uint64_t cval = (uint64_t)instr.args[0].intValue;
+                            bool largeConst = (instr.args[0].kind == IRValue::CONSTANT &&
+                                               (t == IRType::I64 || t == IRType::U64 || t == IRType::PTR) &&
+                                               cval > (uint64_t)0xFFFFFFFFULL);
+                            if (largeConst) {
+                                // Full 64-bit immediate: movabs via rax.
                                 addText("    mov rax, " + a1);
                                 addText("    mov " + getSizedReg(d, t) + ", " + getSizedReg("rax", t));
                             } else {
-                                // 32-to-64 bit sign extension if needed
+                                // 32-to-64 bit extension: signed (I32) sign-extends
+                                // via movsxd; unsigned (U32) zero-extends via
+                                // a 32-bit mov (writing eax clears upper rax).
+                                // Narrow (8/16-bit) sources zero/sign-extend
+                                // via movzx/movsx (a raw 64-bit mov would copy
+                                // stale upper register/stack bytes).
                                 if (t == IRType::I64 || t == IRType::U64 || t == IRType::PTR) {
-                                    if (instr.args[0].kind != IRValue::CONSTANT && (instr.args[0].type == IRType::I32 || instr.args[0].type == IRType::U32)) {
+                                    IRType srcT = (instr.args.size() > 0 ? instr.args[0].type : t);
+                                    bool srcIsConst = (instr.args.size() > 0 && instr.args[0].kind == IRValue::CONSTANT);
+                                    if (!srcIsConst &&
+                                        (srcT == IRType::I8 || srcT == IRType::U8 || srcT == IRType::BOOL ||
+                                         srcT == IRType::I16 || srcT == IRType::U16)) {
+                                        std::string ext = (srcT == IRType::I8 || srcT == IRType::I16) ? "movsx" : "movzx";
+                                        std::string srcOp = isMem(a1)
+                                            ? ((srcT == IRType::I8 || srcT == IRType::U8 || srcT == IRType::BOOL)
+                                               ? ("byte " + a1) : ("word " + a1))
+                                            : getSizedReg(a1, srcT);
+                                        if (isMem(d)) {
+                                            addText("    " + ext + " rax, " + srcOp);
+                                            addText("    mov " + getSizedReg(d, t) + ", rax");
+                                        } else {
+                                            addText("    " + ext + " " + getSizedReg(d, t) + ", " + srcOp);
+                                        }
+                                    } else if (!srcIsConst && srcT == IRType::I32) {
                                         if (isMem(d)) {
                                             // movsxd cannot write to memory — route through rax
                                             // whenever the destination is spilled.
@@ -517,6 +570,48 @@ bool CodeGenerator::generate(ModuleIR& module, const std::string& outputPath,
                                             addText("    movsxd " + getSizedReg(d, t) + ", dword " + a1);
                                         } else {
                                             addText("    movsxd " + getSizedReg(d, t) + ", " + getSizedReg(a1, IRType::I32));
+                                        }
+                                    } else if (srcT == IRType::U32) {
+                                        // Zero-extension: 32-bit mov clears upper bits.
+                                        if (isMem(d) && isMem(a1)) {
+                                            addText("    mov eax, dword " + a1);
+                                            addText("    mov " + getSizedReg(d, t) + ", rax");
+                                        } else if (isMem(d)) {
+                                            if (srcIsConst) {
+                                                addText("    mov eax, " + a1);
+                                            } else if (isMem(a1)) {
+                                                addText("    mov eax, dword " + a1);
+                                            } else {
+                                                addText("    mov eax, " + getSizedReg(a1, IRType::U32));
+                                            }
+                                            addText("    mov " + getSizedReg(d, t) + ", rax");
+                                        } else if (isMem(a1) && !srcIsConst) {
+                                            addText("    mov " + getSizedReg(d, IRType::U32) + ", dword " + a1);
+                                        } else if (srcIsConst) {
+                                            // mov <dest32>, imm zero-extends the full reg.
+                                            addText("    mov " + getSizedReg(d, IRType::U32) + ", " + a1);
+                                        } else {
+                                            addText("    mov " + getSizedReg(d, IRType::U32) + ", " + getSizedReg(a1, IRType::U32));
+                                        }
+                                    } else {
+                                        addText("    mov " + getSizedReg(d, t) + ", " + getSizedReg(a1, t));
+                                    }
+                                } else if (t == IRType::I32 || t == IRType::U32 || t == IRType::BOOL) {
+                                    IRType srcT2 = (instr.args.size() > 0 ? instr.args[0].type : t);
+                                    bool srcConst2 = (instr.args.size() > 0 && instr.args[0].kind == IRValue::CONSTANT);
+                                    if (!srcConst2 &&
+                                        (srcT2 == IRType::I8 || srcT2 == IRType::U8 || srcT2 == IRType::BOOL ||
+                                         srcT2 == IRType::I16 || srcT2 == IRType::U16)) {
+                                        std::string ext = (srcT2 == IRType::I8 || srcT2 == IRType::I16) ? "movsx" : "movzx";
+                                        std::string srcOp = isMem(a1)
+                                            ? ((srcT2 == IRType::I8 || srcT2 == IRType::U8 || srcT2 == IRType::BOOL)
+                                               ? ("byte " + a1) : ("word " + a1))
+                                            : getSizedReg(a1, srcT2);
+                                        if (isMem(d)) {
+                                            addText("    " + ext + " eax, " + srcOp);
+                                            addText("    mov " + getSizedReg(d, t) + ", eax");
+                                        } else {
+                                            addText("    " + ext + " " + getSizedReg(d, t) + ", " + srcOp);
                                         }
                                     } else {
                                         addText("    mov " + getSizedReg(d, t) + ", " + getSizedReg(a1, t));
@@ -578,17 +673,62 @@ bool CodeGenerator::generate(ModuleIR& module, const std::string& outputPath,
                         addText("    movsd " + d + ", xmm0");
                     } else {
                         bool is64 = (t == IRType::I64 || t == IRType::U64 || t == IRType::PTR);
+                        bool isNarrow = (t == IRType::I8 || t == IRType::U8 ||
+                                         t == IRType::I16 || t == IRType::U16 ||
+                                         t == IRType::BOOL);
+                        // Narrow integers compute in 32 bits, then truncate.
+                        IRType compT = isNarrow ? IRType::I32 : t;
                         std::string destReg = is64 ? "rax" : "eax";
                         std::string tempReg = is64 ? "r11" : "r11d";
+                        auto loadOperand = [&](const std::string& opStr, const IRValue& v,
+                                               const std::string& targetReg) {
+                            IRType vt = v.type;
+                            bool mem = isMem(opStr);
+                            if (vt == IRType::I8 && (mem || !mem)) {
+                                // movsx works for both mem byte and reg byte (bl).
+                                std::string src = mem ? ("byte " + opStr) : getSizedReg(opStr, vt);
+                                addText("    movsx " + targetReg + ", " + src);
+                            } else if ((vt == IRType::U8 || vt == IRType::BOOL)) {
+                                std::string src = mem ? ("byte " + opStr) : getSizedReg(opStr, vt);
+                                addText("    movzx " + targetReg + ", " + src);
+                            } else if (vt == IRType::I16) {
+                                std::string src = mem ? ("word " + opStr) : getSizedReg(opStr, vt);
+                                addText("    movsx " + targetReg + ", " + src);
+                            } else if (vt == IRType::U16) {
+                                std::string src = mem ? ("word " + opStr) : getSizedReg(opStr, vt);
+                                addText("    movzx " + targetReg + ", " + src);
+                            } else {
+                                addText("    mov " + targetReg + ", " + getSizedReg(opStr, compT));
+                            }
+                        };
                         if (instr.args[1].kind == IRValue::CONSTANT) {
                             addText("    mov " + tempReg + ", " + a2);
-                            addText("    mov " + destReg + ", " + getSizedReg(a1, t));
+                            loadOperand(a1, instr.args[0], destReg);
                             addText("    imul " + destReg + ", " + tempReg);
                         } else {
-                            addText("    mov " + destReg + ", " + getSizedReg(a1, t));
-                            addText("    imul " + destReg + ", " + getSizedReg(a2, t));
+                            loadOperand(a1, instr.args[0], destReg);
+                            // Second operand: narrow (reg or mem) needs zx/sx.
+                            IRType vt2 = instr.args[1].type;
+                            if (vt2 == IRType::I8 || vt2 == IRType::U8 || vt2 == IRType::BOOL ||
+                                vt2 == IRType::I16 || vt2 == IRType::U16) {
+                                loadOperand(a2, instr.args[1], tempReg);
+                                addText("    imul " + destReg + ", " + tempReg);
+                            } else {
+                                addText("    mov " + tempReg + ", " + getSizedReg(a2, compT));
+                                addText("    imul " + destReg + ", " + tempReg);
+                            }
                         }
-                        addText("    mov " + getSizedReg(d, t) + ", " + destReg);
+                        if (isNarrow) {
+                            if (t == IRType::I8 || t == IRType::U8 || t == IRType::BOOL) {
+                                if (isMem(d)) addText("    mov byte " + d + ", al");
+                                else addText("    mov " + getSizedReg(d, t) + ", al");
+                            } else {
+                                if (isMem(d)) addText("    mov word " + d + ", ax");
+                                else addText("    mov " + getSizedReg(d, t) + ", ax");
+                            }
+                        } else {
+                            addText("    mov " + getSizedReg(d, t) + ", " + destReg);
+                        }
                     }
                     break;
                 }
@@ -620,12 +760,52 @@ bool CodeGenerator::generate(ModuleIR& module, const std::string& outputPath,
                     for (const auto& reg : toSave) addText("    push " + reg);
                     t = (instr.dest ? instr.dest->type : IRType::I32);
                     bool is64 = (t == IRType::I64 || t == IRType::U64 || t == IRType::PTR);
+                    bool isNarrowDiv = (t == IRType::I8 || t == IRType::U8 ||
+                                        t == IRType::I16 || t == IRType::U16 ||
+                                        t == IRType::BOOL);
+                    auto loadDivOp = [&](const std::string& opStr, const IRValue& v,
+                                         const std::string& target32) {
+                        IRType vt = v.type;
+                        bool mem = isMem(opStr);
+                        if (vt == IRType::I8) {
+                            addText("    movsx " + target32 + ", " + (mem ? ("byte " + opStr) : getSizedReg(opStr, vt)));
+                        } else if (vt == IRType::U8 || vt == IRType::BOOL) {
+                            addText("    movzx " + target32 + ", " + (mem ? ("byte " + opStr) : getSizedReg(opStr, vt)));
+                        } else if (vt == IRType::I16) {
+                            addText("    movsx " + target32 + ", " + (mem ? ("word " + opStr) : getSizedReg(opStr, vt)));
+                        } else if (vt == IRType::U16) {
+                            addText("    movzx " + target32 + ", " + (mem ? ("word " + opStr) : getSizedReg(opStr, vt)));
+                        } else {
+                            addText("    mov " + target32 + ", " + getSizedReg(opStr, IRType::I32));
+                        }
+                    };
                     if (is64) {
                         addText("    mov r11, " + getSizedReg(a2, t));
                         addText("    mov rax, " + getSizedReg(a1, t));
                         addText("    cqo");
                         addText("    idiv r11");
                         addText("    mov " + getSizedReg(d, t) + ", " + (instr.op == IROp::DIV ? "rax" : "rdx"));
+                    } else if (isNarrowDiv) {
+                        // Widen to 32 bits, divide, then truncate to narrow.
+                        loadDivOp(a2, instr.args[1], "r11d");
+                        loadDivOp(a1, instr.args[0], "eax");
+                        addText("    cdq");
+                        addText("    idiv r11d");
+                        std::string res32 = (instr.op == IROp::DIV ? "eax" : "edx");
+                        if (t == IRType::I8 || t == IRType::U8 || t == IRType::BOOL) {
+                            if (isMem(d)) {
+                                addText("    mov byte " + d + ", " + std::string(instr.op == IROp::DIV ? "al" : "dl"));
+                            } else {
+                                addText("    mov " + getSizedReg(d, t) + ", " + std::string(instr.op == IROp::DIV ? "al" : "dl"));
+                            }
+                        } else {
+                            if (isMem(d)) {
+                                addText("    mov word " + d + ", " + std::string(instr.op == IROp::DIV ? "ax" : "dx"));
+                            } else {
+                                addText("    mov " + getSizedReg(d, t) + ", " + std::string(instr.op == IROp::DIV ? "ax" : "dx"));
+                            }
+                        }
+                        (void)res32;
                     } else {
                         addText("    mov r11d, " + getSizedReg(a2, t));
                         addText("    mov eax, " + getSizedReg(a1, t));
@@ -821,7 +1001,7 @@ bool CodeGenerator::generate(ModuleIR& module, const std::string& outputPath,
                     if (isMem(ptr)) addText("    mov r10, " + ptr); else addrReg = ptr;
                     if (t == IRType::F32) {
                         if (instr.args.size() > 1 && instr.args[1].kind == IRValue::CONSTANT)
-                            addText("    movss xmm0, dword [" + addrReg + " + " + std::to_string((int)instr.args[1].constValue) + "]");
+                            addText("    movss xmm0, dword [" + addrReg + " + " + std::to_string((int)instr.args[1].intValue) + "]");
                         else if (instr.args[0].kind == IRValue::LABEL)
                             addText("    movss xmm0, dword [rel " + instr.args[0].name + "]");
                         else
@@ -829,7 +1009,7 @@ bool CodeGenerator::generate(ModuleIR& module, const std::string& outputPath,
                         addText("    movss " + d + ", xmm0");
                     } else if (t == IRType::F64) {
                         if (instr.args.size() > 1 && instr.args[1].kind == IRValue::CONSTANT)
-                            addText("    movsd xmm0, qword [" + addrReg + " + " + std::to_string((int)instr.args[1].constValue) + "]");
+                            addText("    movsd xmm0, qword [" + addrReg + " + " + std::to_string((int)instr.args[1].intValue) + "]");
                         else if (instr.args[0].kind == IRValue::LABEL)
                             addText("    movsd xmm0, qword [rel " + instr.args[0].name + "]");
                         else
@@ -838,7 +1018,7 @@ bool CodeGenerator::generate(ModuleIR& module, const std::string& outputPath,
                     } else if (t == IRType::I8 || t == IRType::U8) {
                         std::string op = (t == IRType::I8) ? "movsx" : "movzx";
                         if (instr.args.size() > 1 && instr.args[1].kind == IRValue::CONSTANT)
-                            addText("    " + op + " eax, byte [" + addrReg + " + " + std::to_string((int)instr.args[1].constValue) + "]");
+                            addText("    " + op + " eax, byte [" + addrReg + " + " + std::to_string((int)instr.args[1].intValue) + "]");
                         else if (instr.args[0].kind == IRValue::LABEL)
                             addText("    " + op + " eax, byte [rel " + instr.args[0].name + "]");
                         else
@@ -851,7 +1031,7 @@ bool CodeGenerator::generate(ModuleIR& module, const std::string& outputPath,
                     } else if (t == IRType::I16 || t == IRType::U16) {
                         std::string op = (t == IRType::I16) ? "movsx" : "movzx";
                         if (instr.args.size() > 1 && instr.args[1].kind == IRValue::CONSTANT)
-                            addText("    " + op + " eax, word [" + addrReg + " + " + std::to_string((int)instr.args[1].constValue) + "]");
+                            addText("    " + op + " eax, word [" + addrReg + " + " + std::to_string((int)instr.args[1].intValue) + "]");
                         else if (instr.args[0].kind == IRValue::LABEL)
                             addText("    " + op + " eax, word [rel " + instr.args[0].name + "]");
                         else
@@ -864,7 +1044,7 @@ bool CodeGenerator::generate(ModuleIR& module, const std::string& outputPath,
                         else if (t == IRType::I64 || t == IRType::U64 || t == IRType::PTR) sizePrefix = "qword ";
                         std::string srcReg = getSizedReg("rax", t);
                         if (instr.args.size() > 1 && instr.args[1].kind == IRValue::CONSTANT)
-                            addText("    mov " + srcReg + ", " + sizePrefix + "[" + addrReg + " + " + std::to_string((int)instr.args[1].constValue) + "]");
+                            addText("    mov " + srcReg + ", " + sizePrefix + "[" + addrReg + " + " + std::to_string((int)instr.args[1].intValue) + "]");
                         else if (instr.args[0].kind == IRValue::LABEL)
                             addText("    mov " + srcReg + ", " + sizePrefix + "[rel " + instr.args[0].name + "]");
                         else
@@ -1021,7 +1201,7 @@ bool CodeGenerator::generate(ModuleIR& module, const std::string& outputPath,
                     } else {
                         // VIRTUAL_CALL: args[0] = objPtr, args[1] = vtableIndex, args[2...] = params
                         std::string objPtr = getOperand(instr.args[0]);
-                        int vtableIndex = (int)instr.args[1].constValue;
+                        int vtableIndex = (int)instr.args[1].intValue;
 
                         // Load vtable and method FIRST
                         if (isMem(objPtr)) {
@@ -1061,7 +1241,7 @@ bool CodeGenerator::generate(ModuleIR& module, const std::string& outputPath,
                 }
                 case IROp::PUSH: {
                     if (instr.args[0].kind == IRValue::CONSTANT) {
-                        addText("    push " + std::to_string((long long)instr.args[0].constValue));
+                        addText("    push " + std::to_string((long long)instr.args[0].intValue));
                     } else if (isMem(a1)) {
                         IRType t = instr.args[0].type;
                         if (t == IRType::I32 || t == IRType::U32 || t == IRType::BOOL) {
