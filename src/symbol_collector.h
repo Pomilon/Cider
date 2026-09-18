@@ -745,6 +745,11 @@ public:
         std::stringstream buffer;
         buffer << file.rdbuf();
 
+        // Attribute nested diagnostics to the imported file (Issue #16):
+        // the shared reporter otherwise stamps them with the main file.
+        // Covers both the nested parse and the symbol collection below.
+        std::string prevFile = reporter_.getFile();
+        reporter_.setFile(result.path);
         Lexer lexer(buffer.str(), reporter_);
         Parser parser(lexer, reporter_);
         auto importedAst = parser.parseProgram();
@@ -756,6 +761,7 @@ public:
                 currentProgram_->addImportedAst(std::move(importedAst));
             }
         }
+        reporter_.setFile(prevFile);
 
         importingPaths_.erase(result.path);
     }

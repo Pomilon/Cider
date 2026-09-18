@@ -1,6 +1,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include <fstream>
+#include <map>
 #include <sstream>
 #include <stdexcept>
 #include <string>
@@ -97,22 +98,38 @@ void optimizeModule(cider::ModuleIR& module) {
 
 // Print a diagnostic with the source line and a caret under the column.
 // Prefixes distinguish the compiler stage (the error-code scheme).
+// Each diagnostic carries its own filename (Issue #16): errors in imported
+// modules show that module's path and source line, not the main file's.
 void printDiagnostics(const std::string& text, const std::string& path,
                       const std::vector<cider::Diagnostic>& diags, const char* stage) {
+    std::map<std::string, std::string> fileTexts;
+    auto textFor = [&](const std::string& file) -> const std::string& {
+        if (file.empty() || file == path) return text;
+        auto it = fileTexts.find(file);
+        if (it != fileTexts.end()) return it->second;
+        try {
+            fileTexts[file] = readFile(file);
+        } catch (...) {
+            fileTexts[file] = text;
+        }
+        return fileTexts[file];
+    };
     for (const auto& d : diags) {
-        std::fprintf(stderr, "%s:%d:%d: %s error: %s\n", path.c_str(),
+        const std::string& file = d.filename.empty() ? path : d.filename;
+        std::fprintf(stderr, "%s:%d:%d: %s error: %s\n", file.c_str(),
                      d.line, d.col, stage, d.message.c_str());
         // Extract the offending source line and draw the caret.
+        const std::string& src = textFor(file);
         size_t start = 0;
         int line = 1;
         while (line < d.line) {
-            start = text.find('\n', start);
+            start = src.find('\n', start);
             if (start == std::string::npos) break;
             start++;
             line++;
         }
-        size_t end = text.find('\n', start);
-        std::string srcLine = text.substr(start, end == std::string::npos ? std::string::npos : end - start);
+        size_t end = src.find('\n', start);
+        std::string srcLine = src.substr(start, end == std::string::npos ? std::string::npos : end - start);
         if (!srcLine.empty()) {
             std::fprintf(stderr, "  %s\n", srcLine.c_str());
             std::string caret(static_cast<size_t>(d.col > 0 ? d.col - 1 : 0), ' ');
@@ -134,6 +151,7 @@ int main(int argc, char** argv) {
     try {
         std::string text = readFile(opts.inputFile);
         cider::ErrorReporter rep;
+        rep.setFile(opts.inputFile);
         cider::Lexer lex(text, rep);
         cider::Parser parser(lex, rep);
         auto prog = parser.parseProgram();

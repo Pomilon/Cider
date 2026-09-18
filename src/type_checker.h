@@ -85,6 +85,10 @@ public:
 
     // Visitor methods
     void visit(AstProgram& program) override {
+        // Attribute diagnostics to the program's own file when known
+        // (Issue #16): imported ASTs carry their module path.
+        std::string prevFile = reporter_.getFile();
+        if (!program.getSourcePath().empty()) reporter_.setFile(program.getSourcePath());
         for (auto& stmt : program.getStatements()) {
             auto type = stmt->getType();
             if (type != ASTNode::VAR_DECL_STMT &&
@@ -112,6 +116,7 @@ public:
         if (!moduleMode_ && !hasMain && !hasStart) {
             reporter_.error("Missing entry point: 'main' or '_start' function is required.", 1, 1);
         }
+        reporter_.setFile(prevFile);
     }
 
     void visit(VarDeclStmt& stmt) override {
