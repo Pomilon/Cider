@@ -149,6 +149,10 @@ int main(int argc, char** argv) {
         cider::ModuleResolver resolver;
         cider::SymbolCollector collector(table, rep, resolver, opts.inputFile);
         collector.collect(*prog);
+        if (rep.hasErrors()) {
+            printDiagnostics(text, opts.inputFile, rep.errors(), "symbol");
+            return 1;
+        }
         rep.clear();
         cider::TypeChecker checker(table, rep);
         checker.check(*prog);
