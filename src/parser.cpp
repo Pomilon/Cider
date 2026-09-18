@@ -1,10 +1,126 @@
 #include "parser.h"
 
 #include <map>
+#include <stdexcept>
 
 namespace cider {
 
 namespace {
+
+// True if a token can begin an expression (used to disambiguate a trailing
+// '*' in a cast target type: `y as u64 * p` must keep `*` as multiply, while
+// `msg as char*` (followed by ';'/')'/`,`) keeps it as a pointer).
+static bool canStartExpression(TokenType t) {
+    switch (t) {
+    case TokenType::IDENTIFIER:
+    case TokenType::NUMBER:
+    case TokenType::STRING:
+    case TokenType::CHAR_LITERAL:
+    case TokenType::TRUE:
+    case TokenType::FALSE:
+    case TokenType::NIL:
+    case TokenType::NIL_PTR:
+    case TokenType::THIS:
+    case TokenType::SUPER:
+    case TokenType::NEW:
+    case TokenType::LPAREN:
+    case TokenType::LBRACKET:
+    case TokenType::LBRACE:
+    case TokenType::FUNCTION:
+    case TokenType::FUNC:
+    case TokenType::ASYNC:
+    case TokenType::AWAIT:
+    case TokenType::SIZEOF:
+    case TokenType::INCREMENT:
+    case TokenType::DECREMENT:
+    case TokenType::MINUS:
+    case TokenType::NOT:
+    case TokenType::MULTIPLY:
+    case TokenType::AMPERSAND:
+    case TokenType::BIT_NOT:
+    case TokenType::TILDE:
+        return true;
+    default:
+        return false;
+    }
+}
+
+// Parse a NUMBER token text (decimal, 0x hex, 0b binary, 0o octal, float
+// with '.'/'e', all allowing '_' separators) into a NumberExpr.
+std::unique_ptr<NumberExpr> makeNumberExpr(const std::string& text, int line, int col,
+                                           std::string* errOut = nullptr) {
+    std::string s;
+    s.reserve(text.size());
+    for (char c : text) {
+        if (c != '_') s += c;
+    }
+    try {
+        if (s.size() > 2 && s[0] == '0' && (s[1] == 'x' || s[1] == 'X')) {
+            if (s.size() == 2) throw std::invalid_argument("empty hex literal");
+            uint64_t v = std::stoull(s.substr(2), nullptr, 16);
+            return std::make_unique<NumberExpr>(v, line, col);
+        }
+        if (s.size() > 2 && s[0] == '0' && (s[1] == 'b' || s[1] == 'B')) {
+            if (s.size() == 2) throw std::invalid_argument("empty binary literal");
+            uint64_t v = 0;
+            for (size_t i = 2; i < s.size(); ++i) {
+                if (s[i] != '0' && s[i] != '1') throw std::invalid_argument("bad binary digit");
+                v = (v << 1) | (uint64_t)(s[i] - '0');
+            }
+            return std::make_unique<NumberExpr>(v, line, col);
+        }
+        if (s.size() > 2 && s[0] == '0' && (s[1] == 'o' || s[1] == 'O')) {
+            if (s.size() == 2) throw std::invalid_argument("empty octal literal");
+            uint64_t v = std::stoull(s.substr(2), nullptr, 8);
+            return std::make_unique<NumberExpr>(v, line, col);
+        }
+        bool isFloat = (s.find('.') != std::string::npos ||
+                        s.find('e') != std::string::npos ||
+                        s.find('E') != std::string::npos);
+        if (isFloat) {
+            double v = std::stod(s);
+            return std::make_unique<NumberExpr>(v, line, col);
+        }
+        uint64_t v = std::stoull(s, nullptr, 10);
+        return std::make_unique<NumberExpr>(v, line, col);
+    } catch (const std::exception& e) {
+        if (errOut) *errOut = e.what();
+        return nullptr;
+    }
+}
+
+// Parse any integer literal token (decimal/hex/binary/octal, '_' allowed)
+// for contexts requiring an int (array sizes, bit widths).
+bool parseIntToken(const std::string& text, uint64_t& out) {
+    std::string s;
+    s.reserve(text.size());
+    for (char c : text) {
+        if (c != '_') s += c;
+    }
+    try {
+        if (s.size() > 2 && s[0] == '0' && (s[1] == 'x' || s[1] == 'X')) {
+            out = std::stoull(s.substr(2), nullptr, 16);
+            return true;
+        }
+        if (s.size() > 2 && s[0] == '0' && (s[1] == 'b' || s[1] == 'B')) {
+            uint64_t v = 0;
+            for (size_t i = 2; i < s.size(); ++i) {
+                if (s[i] != '0' && s[i] != '1') return false;
+                v = (v << 1) | (uint64_t)(s[i] - '0');
+            }
+            out = v;
+            return true;
+        }
+        if (s.size() > 2 && s[0] == '0' && (s[1] == 'o' || s[1] == 'O')) {
+            out = std::stoull(s.substr(2), nullptr, 8);
+            return true;
+        }
+        out = std::stoull(s, nullptr, 10);
+        return true;
+    } catch (...) {
+        return false;
+    }
+}
 
 std::map<TokenType, Parser::Precedence> precedences = {
     {TokenType::EQ, Parser::EQUALS},
@@ -24,7 +140,9 @@ std::map<TokenType, Parser::Precedence> precedences = {
     {TokenType::DIVIDE, Parser::PRODUCT},
     {TokenType::MODULO, Parser::PRODUCT},
     {TokenType::CARET, Parser::EXPONENT},
-    {TokenType::AS, Parser::SUM},
+    {TokenType::AS, Parser::PREFIX},
+    {TokenType::INCREMENT, Parser::CALL},
+    {TokenType::DECREMENT, Parser::CALL},
     {TokenType::DOT, Parser::MEMBER_ACCESS},
     {TokenType::ARROW, Parser::MEMBER_ACCESS},
     {TokenType::LBRACKET, Parser::MEMBER_ACCESS},
@@ -145,6 +263,13 @@ std::unique_ptr<Expression> Parser::parseExpression(Precedence precedence, bool 
 
         if (currentToken_.type == TokenType::LPAREN) {
             leftExpr = parseCallExpression(std::move(leftExpr));
+        } else if (currentToken_.type == TokenType::INCREMENT ||
+                   currentToken_.type == TokenType::DECREMENT) {
+            int line = currentToken_.line;
+            int col = currentToken_.column;
+            std::string op = currentToken_.value;
+            nextToken();
+            leftExpr = std::make_unique<UnaryExpr>(op, std::move(leftExpr), line, col, true);
         } else if (currentToken_.type == TokenType::DOT) {
             leftExpr = parseMemberAccessExpression(std::move(leftExpr));
         } else if (currentToken_.type == TokenType::ARROW) {
@@ -223,14 +348,14 @@ std::unique_ptr<Expression> Parser::parsePrimaryExpression() {
         return std::make_unique<SuperExpr>(member, line, col);
     }
     case TokenType::NUMBER: {
-        try {
-            double val = std::stod(currentToken_.value);
-            nextToken();
-            return std::make_unique<NumberExpr>(val, line, col);
-        } catch (const std::exception&) {
-            error("Invalid number literal: " + currentToken_.value);
+        std::string raw = currentToken_.value;
+        auto node = makeNumberExpr(raw, line, col);
+        if (!node) {
+            error("Invalid number literal: " + raw);
             return nullptr;
         }
+        nextToken();
+        return node;
     }
     case TokenType::STRING: {
         std::string val = currentToken_.value;
@@ -566,7 +691,7 @@ std::unique_ptr<Expression> Parser::parseCastExpression(std::unique_ptr<Expressi
     int line = currentToken_.line;
     int col = currentToken_.column;
     nextToken();  // Consume 'as'
-    auto targetType = parseType();
+    auto targetType = parseType(true);
     return std::make_unique<CastExpr>(std::move(expr), std::move(targetType), line, col);
 }
 
@@ -720,7 +845,12 @@ std::unique_ptr<Expression> Parser::parseTableLiteral() {
                 if (currentToken_.type == TokenType::STRING) {
                     key = std::make_unique<StringExpr>(currentToken_.value, currentToken_.line, currentToken_.column);
                 } else if (currentToken_.type == TokenType::NUMBER) {
-                    key = std::make_unique<NumberExpr>(std::stod(currentToken_.value), currentToken_.line, currentToken_.column);
+                    auto numNode = makeNumberExpr(currentToken_.value, currentToken_.line, currentToken_.column);
+                    if (!numNode) {
+                        error("Invalid number literal: " + currentToken_.value);
+                        return nullptr;
+                    }
+                    key = std::move(numNode);
                 } else {
                     key = std::make_unique<StringExpr>(currentToken_.value, currentToken_.line, currentToken_.column);
                 }
@@ -867,7 +997,7 @@ std::unique_ptr<Statement> Parser::parseStatement() {
     }
 }
 
-std::unique_ptr<TypeAST> Parser::parseType() {
+std::unique_ptr<TypeAST> Parser::parseType(bool castContext) {
     int line = currentToken_.line;
     int col = currentToken_.column;
     bool isVolatile = false;
@@ -879,7 +1009,7 @@ std::unique_ptr<TypeAST> Parser::parseType() {
 
     if (currentToken_.type == TokenType::LBRACKET) {
         nextToken();
-        auto baseType = parseType();
+        auto baseType = parseType(castContext);
         if (currentToken_.type != TokenType::SEMICOLON) {
             error("Expected ';' after base type in array declaration.");
             return nullptr;
@@ -889,7 +1019,12 @@ std::unique_ptr<TypeAST> Parser::parseType() {
             error("Expected array size.");
             return nullptr;
         }
-        int size = std::stoi(currentToken_.value);
+        uint64_t sz64 = 0;
+        if (!parseIntToken(currentToken_.value, sz64)) {
+            error("Invalid array size: " + currentToken_.value);
+            return nullptr;
+        }
+        int size = (int)sz64;
         nextToken();
         if (currentToken_.type != TokenType::RBRACKET) {
             error("Expected ']' after array size.");
@@ -979,9 +1114,28 @@ std::unique_ptr<TypeAST> Parser::parseType() {
             }
         }
 
-        while (currentToken_.type == TokenType::MULTIPLY) {
-            pointerLevel++;
-            nextToken();
+        // Trailing '*'s: in declarations they are always pointers (greedy).
+        // In cast targets (`y as u64 * p`) the last '*' may be a binary
+        // multiply — leave it unconsumed when the token after it can start
+        // an expression (the multiply RHS). `msg as char*` (star followed by
+        // ';'/')'/`,`) stays a pointer.
+        if (castContext) {
+            while (currentToken_.type == TokenType::MULTIPLY) {
+                if (peekToken_.type == TokenType::MULTIPLY) {
+                    pointerLevel++;
+                    nextToken();
+                } else if (canStartExpression(peekToken_.type)) {
+                    break;
+                } else {
+                    pointerLevel++;
+                    nextToken();
+                }
+            }
+        } else {
+            while (currentToken_.type == TokenType::MULTIPLY) {
+                pointerLevel++;
+                nextToken();
+            }
         }
         return std::make_unique<TypeAST>(typeName, pointerLevel, line, col, isVolatile);
     }
@@ -1583,7 +1737,12 @@ std::unique_ptr<Statement> Parser::parseStructDeclaration(bool isUnion) {
                     error("Expected bit width after ':'.");
                     return nullptr;
                 }
-                fieldBits = (int)std::strtod(currentToken_.value.c_str(), nullptr);
+                uint64_t bw = 0;
+                if (!parseIntToken(currentToken_.value, bw)) {
+                    error("Invalid bit width: " + currentToken_.value);
+                    return nullptr;
+                }
+                fieldBits = (int)bw;
                 nextToken();
             }
             StructDeclStmt::Field fld;

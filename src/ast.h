@@ -1,5 +1,6 @@
 #pragma once
 
+#include <cstdint>
 #include <map>
 #include <memory>
 #include <string>
@@ -133,15 +134,29 @@ private:
 
 class NumberExpr : public Expression {
 public:
-    explicit NumberExpr(double value, int line, int col) : Expression(NUMBER_EXPR, line, col), value_(value) {}
-    double getValue() const { return value_; }
+    explicit NumberExpr(double value, int line, int col)
+        : Expression(NUMBER_EXPR, line, col), isFloat_(true), floatValue_(value), uintValue_((uint64_t)(int64_t)value) {}
+    explicit NumberExpr(uint64_t value, int line, int col)
+        : Expression(NUMBER_EXPR, line, col), isFloat_(false), floatValue_((double)value), uintValue_(value) {}
+    explicit NumberExpr(int64_t value, int line, int col)
+        : Expression(NUMBER_EXPR, line, col), isFloat_(false), floatValue_((double)value), uintValue_((uint64_t)value) {}
+    explicit NumberExpr(int value, int line, int col)
+        : Expression(NUMBER_EXPR, line, col), isFloat_(false), floatValue_((double)value), uintValue_((uint64_t)(int64_t)value) {}
+    double getValue() const { return isFloat_ ? floatValue_ : (double)uintValue_; }
+    bool isFloat() const { return isFloat_; }
+    uint64_t getUIntValue() const { return uintValue_; }
+    int64_t getIntValue() const { return (int64_t)uintValue_; }
+    double getFloatValue() const { return floatValue_; }
     void dump(std::string& out, int /*depth*/) const override {
         out += "(Number ";
-        detail::dumpNumber(out, value_);
+        if (isFloat_) detail::dumpNumber(out, floatValue_);
+        else out += std::to_string(uintValue_);
         out += ")";
     }
 private:
-    double value_;
+    bool isFloat_ = false;
+    double floatValue_ = 0;
+    uint64_t uintValue_ = 0;
 };
 
 class StringExpr : public Expression {
@@ -262,20 +277,22 @@ private:
 
 class UnaryExpr : public Expression {
 public:
-    UnaryExpr(const std::string& op, std::unique_ptr<Expression> operand, int line, int col)
-        : Expression(UNARY_EXPR, line, col), op_(op), operand_(std::move(operand)) {}
+    UnaryExpr(const std::string& op, std::unique_ptr<Expression> operand, int line, int col, bool isPostfix = false)
+        : Expression(UNARY_EXPR, line, col), op_(op), operand_(std::move(operand)), isPostfix_(isPostfix) {}
     const std::string& getOperator() const { return op_; }
     Expression* getOperand() const { return operand_.get(); }
     std::unique_ptr<Expression> takeOperand() { return std::move(operand_); }
     void setOperand(std::unique_ptr<Expression> operand) { operand_ = std::move(operand); }
+    bool isPostfix() const { return isPostfix_; }
     void dump(std::string& out, int depth) const override {
-        out += "(Unary " + op_ + " ";
+        out += isPostfix_ ? "(Postfix " + op_ + " " : "(Unary " + op_ + " ";
         operand_->dump(out, depth);
         out += ")";
     }
 private:
     std::string op_;
     std::unique_ptr<Expression> operand_;
+    bool isPostfix_ = false;
 };
 
 class CallExpr : public Expression {

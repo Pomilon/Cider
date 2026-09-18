@@ -91,7 +91,7 @@ private:
     std::unique_ptr<Statement> parseFromImportStatement();
     std::unique_ptr<Statement> parseExportStatement();
 
-    std::unique_ptr<TypeAST> parseType();
+    std::unique_ptr<TypeAST> parseType(bool castContext = false);
     std::vector<std::unique_ptr<Statement>> parseBlockStatement();
     std::vector<std::string> parseTemplateParams();
 

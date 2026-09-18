@@ -53,16 +53,27 @@ public:
         auto rightNum = dynamic_cast<NumberExpr*>(foldedRight.get());
 
         if (leftNum && rightNum) {
-            double l = leftNum->getValue();
-            double r = rightNum->getValue();
             std::string op = expr.getOperator();
-
             std::unique_ptr<NumberExpr> res = nullptr;
-            if (op == "+") res = std::make_unique<NumberExpr>(l + r, expr.getLine(), expr.getColumn());
-            else if (op == "-") res = std::make_unique<NumberExpr>(l - r, expr.getLine(), expr.getColumn());
-            else if (op == "*") res = std::make_unique<NumberExpr>(l * r, expr.getLine(), expr.getColumn());
-            else if (op == "/") {
-                if (r != 0) res = std::make_unique<NumberExpr>(l / r, expr.getLine(), expr.getColumn());
+            bool bothInt = !leftNum->isFloat() && !rightNum->isFloat();
+            if (bothInt) {
+                uint64_t l = leftNum->getUIntValue();
+                uint64_t r = rightNum->getUIntValue();
+                if (op == "+") res = std::make_unique<NumberExpr>(l + r, expr.getLine(), expr.getColumn());
+                else if (op == "-") res = std::make_unique<NumberExpr>(l - r, expr.getLine(), expr.getColumn());
+                else if (op == "*") res = std::make_unique<NumberExpr>(l * r, expr.getLine(), expr.getColumn());
+                else if (op == "/") {
+                    if (r != 0) res = std::make_unique<NumberExpr>(l / r, expr.getLine(), expr.getColumn());
+                }
+            } else {
+                double l = leftNum->getValue();
+                double r = rightNum->getValue();
+                if (op == "+") res = std::make_unique<NumberExpr>(l + r, expr.getLine(), expr.getColumn());
+                else if (op == "-") res = std::make_unique<NumberExpr>(l - r, expr.getLine(), expr.getColumn());
+                else if (op == "*") res = std::make_unique<NumberExpr>(l * r, expr.getLine(), expr.getColumn());
+                else if (op == "/") {
+                    if (r != 0) res = std::make_unique<NumberExpr>(l / r, expr.getLine(), expr.getColumn());
+                }
             }
 
             if (res) {
@@ -90,12 +101,18 @@ public:
         auto operand = expr.takeOperand();
         auto folded = foldExpression(std::move(operand));
         if (auto num = dynamic_cast<NumberExpr*>(folded.get())) {
-            double v = num->getValue();
             std::string op = expr.getOperator();
             if (op == "-") {
-                lastFoldedExpr_ = std::make_unique<NumberExpr>(-v, expr.getLine(), expr.getColumn());
+                if (num->isFloat()) {
+                    lastFoldedExpr_ = std::make_unique<NumberExpr>(-num->getFloatValue(), expr.getLine(), expr.getColumn());
+                } else {
+                    // Negate as signed 64-bit, preserving bit pattern.
+                    int64_t v = num->getIntValue();
+                    lastFoldedExpr_ = std::make_unique<NumberExpr>((int64_t)(-v), expr.getLine(), expr.getColumn());
+                }
                 return;
             } else if (op == "!") {
+                double v = num->getValue();
                 lastFoldedExpr_ = std::make_unique<NumberExpr>(v == 0 ? 1.0 : 0.0, expr.getLine(), expr.getColumn());
                 return;
             }
