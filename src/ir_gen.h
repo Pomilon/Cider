@@ -162,6 +162,23 @@ public:
         return IRType::PTR;
     }
 
+    // True for struct/class by-value returns (and params decaying likewise).
+    // These use the hidden-sret-pointer convention so freestanding targets
+    // never need a heap `malloc` for `return someStruct;`.
+    bool isStructValueType(const TypeInfo& t) {
+        if (t.pointerLevel > 0) return false;
+        if (t.isArray || t.isInterface || t.isSlice) return false;
+        auto sym = symbolTable_.resolve(t.name);
+        if (!sym) return false;
+        if (sym->kind != SymbolKind::STRUCT && sym->kind != SymbolKind::CLASS) return false;
+        if (sym->type.name != sym->name && !sym->type.name.empty()) {
+            auto target = symbolTable_.resolve(sym->type.name);
+            if (!target || (target->kind != SymbolKind::STRUCT && target->kind != SymbolKind::CLASS))
+                return false;
+        }
+        return true;
+    }
+
     // Visitor methods
     void visit(AstProgram& program) override {
         if (visitedPrograms_.count(&program)) return;
@@ -217,8 +234,18 @@ public:
         auto prevContinueLabels = continueLabels_;
         auto prevDeferStack = deferStack_;
         auto prevDestructorStack = destructorStack_;
+        bool prevIsSret = currentIsSret_;
+        TypeInfo prevReturnType = currentReturnType_;
 
-        currentFunction_ = std::make_unique<FunctionIR>(funcName, mapType(TypeInfo::fromAST(stmt.getReturnType()).name));
+        TypeInfo funcRetType = TypeInfo::fromAST(stmt.getReturnType());
+        // Virtual methods stay on the legacy malloc path so VIRTUAL_CALL
+        // callers (which don't pass sret) keep matching the callee.
+        bool isVirtMethod = stmt.isVirtual() || stmt.isOverride();
+        bool funcIsSret = isStructValueType(funcRetType) && !isVirtMethod;
+        currentIsSret_ = funcIsSret;
+        currentReturnType_ = funcRetType;
+        IRType funcRetIR = funcIsSret ? IRType::VOID : mapType(funcRetType.name);
+        currentFunction_ = std::make_unique<FunctionIR>(funcName, funcRetIR);
         currentFunction_->setSourcePath(currentSourcePath_);
         currentBlock_ = std::make_unique<BasicBlock>("entry");
 
@@ -234,6 +261,24 @@ public:
         destructorStack_.push_back({});
 
         symbolTable_.enterScope();
+
+        // Hidden sret pointer for struct-by-value returns (SysV: rdi).
+        // The caller allocates the result slot and passes its address first;
+        // `return <struct>` memcpys into it instead of malloc'ing.
+        if (funcIsSret) {
+            currentFunction_->addParam("__sret");
+            auto sretSym = std::make_shared<Symbol>();
+            sretSym->kind = SymbolKind::VARIABLE;
+            sretSym->name = "__sret";
+            sretSym->type = {"void", 1};
+            symbolTable_.define(sretSym);
+            IRValue paramReg = IRValue::Register("__sret", IRType::PTR);
+            IRValue addr = IRValue::Register(nextTemp(), IRType::PTR);
+            currentBlock_->addInstruction({IROp::ALLOCA, addr, {IRValue::Constant(8, IRType::I32)}});
+            currentBlock_->addInstruction({IROp::STORE, std::nullopt, {addr, paramReg, IRValue::Constant(0, IRType::I32)}});
+            variableValues_["__sret"] = addr;
+            paramNames_.insert("__sret");
+        }
 
         // Handle 'this' pointer for methods
         if (!currentClassName_.empty()) {
@@ -307,19 +352,37 @@ public:
         continueLabels_ = prevContinueLabels;
         deferStack_ = prevDeferStack;
         destructorStack_ = prevDestructorStack;
+        currentIsSret_ = prevIsSret;
+        currentReturnType_ = prevReturnType;
     }
 
     void visit(ReturnStmt& stmt) override {
         if (stmt.getValue()) {
             stmt.getValue()->accept(*this);
             IRValue val = lastValue_;
-
-            // Copy struct return values to a heap buffer so the returned
-            // pointer outlives this frame (a stack-local would dangle once
-            // the caller starts allocating). The escape analysis converts
-            // the malloc back to a stack slot when the result never leaves
-            // the caller.
             TypeInfo retType = lastExprType_;
+
+            // Struct-by-value return via hidden sret pointer: no malloc,
+            // freestanding-safe. The caller-provided slot outlives the frame.
+            if (currentIsSret_ && isStructValueType(currentReturnType_)) {
+                int structSize = getTypeSize(currentReturnType_);
+                IRValue sretAddr = variableValues_.count("__sret")
+                    ? variableValues_["__sret"]
+                    : IRValue::Register("__sret", IRType::PTR);
+                IRValue sretPtr = IRValue::Register(nextTemp(), IRType::PTR);
+                currentBlock_->addInstruction({IROp::LOAD, sretPtr, {sretAddr, IRValue::Constant(0, IRType::I32)}});
+                currentBlock_->addInstruction({IROp::MEMCPY, std::nullopt, {sretPtr, val, IRValue::Constant(structSize, IRType::I32)}});
+                lastExprType_ = currentReturnType_;
+                emitDefers();
+                emitDestructors();
+                currentBlock_->addInstruction({IROp::RET, std::nullopt, {}});
+                startBlock(nextLabel("dead"));
+                return;
+            }
+
+            // Legacy heap path for struct values returned from non-sret
+            // contexts (should not occur for declared struct returns, which
+            // are always sret; kept for robustness).
             if (retType.pointerLevel == 0) {
                 int structSize = getTypeSize(retType);
                 auto typeSym = symbolTable_.resolve(retType.name);
@@ -444,11 +507,39 @@ public:
                 if (rawSym && rawSym->kind == SymbolKind::FUNCTION)
                     sym = std::static_pointer_cast<FunctionSymbol>(rawSym);
             }
+            TypeInfo calleeRet = {"int", 0};
+            if (sym && sym->kind == SymbolKind::FUNCTION) {
+                auto funcSym = std::static_pointer_cast<FunctionSymbol>(sym);
+                calleeRet = funcSym->returnType;
+                lastExprType_ = calleeRet;
+            }
+            bool calleeIsSret = isStructValueType(calleeRet);
+            // Virtual callees are never sret (they stay on the malloc path);
+            // direct CALLs here are free functions / non-virtual methods.
+            if (calleeIsSret && !(isVirtual && vtableIndex != -1)) {
+                int retSize = getTypeSize(calleeRet);
+                IRValue retBuf = IRValue::Register(nextTemp(), IRType::PTR);
+                currentBlock_->addInstruction({IROp::ALLOCA, retBuf, {IRValue::Constant(retSize, IRType::I32)}});
+                IRInstruction callInstr;
+                callInstr.op = IROp::CALL;
+                callInstr.dest = std::nullopt;
+                callInstr.args.push_back(IRValue::Label(funcName));
+                callInstr.args.push_back(retBuf);
+                bool hasObj = (objPtr.kind != IRValue::CONSTANT || objPtr.intValue != 0);
+                if (hasObj) {
+                    callInstr.args.push_back(objPtr);
+                }
+                for (auto& a : args) callInstr.args.push_back(a);
+                currentBlock_->addInstruction(callInstr);
+                lastValue_ = retBuf;
+                lastExprType_ = calleeRet;
+                lastExprType_.isUserDefined = true;
+                return;
+            }
             IRType retIRType = IRType::I32;
             if (sym && sym->kind == SymbolKind::FUNCTION) {
                 auto funcSym = std::static_pointer_cast<FunctionSymbol>(sym);
                 retIRType = (funcSym->returnType.pointerLevel > 0) ? IRType::PTR : mapType(funcSym->returnType.name);
-                lastExprType_ = funcSym->returnType;
             }
 
             IRValue dest = IRValue::Register(nextTemp(), retIRType);
@@ -462,7 +553,7 @@ public:
             } else {
                 callInstr.op = IROp::CALL;
                 callInstr.args.push_back(IRValue::Label(funcName));
-                if (objPtr.kind != IRValue::CONSTANT || objPtr.constValue != 0) {
+                if (objPtr.kind != IRValue::CONSTANT || objPtr.intValue != 0) {
                     callInstr.args.push_back(objPtr);
                 }
                 for (auto& a : args) callInstr.args.push_back(a);
@@ -642,6 +733,12 @@ public:
         auto prevContinueLabels = continueLabels_;
         auto prevDeferStack = deferStack_;
         auto prevDestructorStack = destructorStack_;
+        bool prevIsSret = currentIsSret_;
+        TypeInfo prevReturnType = currentReturnType_;
+        // Closures are invoked via function pointers (non-sret convention),
+        // so struct returns inside use the legacy heap path.
+        currentIsSret_ = false;
+        currentReturnType_ = retType;
 
         currentFunction_ = std::make_unique<FunctionIR>(funcName, retIR);
         currentFunction_->setSourcePath(currentSourcePath_);
@@ -715,6 +812,8 @@ public:
         continueLabels_ = std::move(prevContinueLabels);
         deferStack_ = std::move(prevDeferStack);
         destructorStack_ = std::move(prevDestructorStack);
+        currentIsSret_ = prevIsSret;
+        currentReturnType_ = prevReturnType;
 
         // Closure object: { fnptr, cap_0, ... } — the escape analysis turns
         // the malloc into a stack slot when the closure never leaves.
@@ -798,12 +897,15 @@ public:
                 IRValue val = lastValue_;
 
                 int offset = 0;
+                TypeInfo fieldType;
                 for (const auto& f : structSym->fields) {
                     if (f.name == fieldInit.first) {
                         offset = f.offset;
+                        fieldType = f.type;
                         break;
                     }
                 }
+                val = truncateIntToType(val, fieldType);
                 currentBlock_->addInstruction({IROp::STORE, std::nullopt, {dest, val, IRValue::Constant(offset, IRType::I32)}});
             }
         }
@@ -829,6 +931,7 @@ public:
             isAddress_ = false;
             type = lastExprType_;
             type.pointerLevel++;
+            lastExprType_ = type;
         } else if (expr.getOperator() == "*") {
             expr.getOperand()->accept(*this);
             IRValue operand = lastValue_;
@@ -836,13 +939,30 @@ public:
             if (isAddress_) {
                 lastValue_ = operand;
             } else {
+                // Dereferencing a pointer-to-struct/array yields the object
+                // itself, whose address is already `operand`. Emitting a LOAD
+                // here would read the first 8 bytes as a pointer and break
+                // `var q: T = *p;` (Issue #12). Only scalar/pointer pointee
+                // types go through LOAD.
+                TypeInfo pointee = type;
+                if (pointee.pointerLevel > 0) pointee.pointerLevel--;
+                bool pointeeIsAggregate = (pointee.pointerLevel == 0) &&
+                    (pointee.isArray || isStructValueType(pointee));
+                if (pointeeIsAggregate) {
+                    lastValue_ = operand;
+                    type = pointee;
+                    lastExprType_ = type;
+                    return;
+                }
                 IRType derefType = (type.pointerLevel > 1) ? IRType::PTR : mapType(type.name);
                 IRValue dest = IRValue::Register(nextTemp(), derefType);
                 currentBlock_->addInstruction({IROp::LOAD, dest, {operand, IRValue::Constant(0, IRType::I32)}});
                 lastValue_ = dest;
             }
             if (type.pointerLevel > 0) type.pointerLevel--;
+            lastExprType_ = type;
         } else if (expr.getOperator() == "++" || expr.getOperator() == "--") {
+            bool isPostfix = expr.isPostfix();
             isAddress_ = true;
             expr.getOperand()->accept(*this);
             IRValue addr = lastValue_;
@@ -864,7 +984,8 @@ public:
             }
 
             type = operandType;
-            lastValue_ = result;
+            // Postfix yields the original value; prefix yields the new value.
+            lastValue_ = isPostfix ? current : result;
         } else {
             expr.getOperand()->accept(*this);
             IRValue operand = lastValue_;
@@ -932,7 +1053,8 @@ public:
                     initVal = num->getValue();
                 }
             }
-            module_.addGlobalVar(stmt.getName(), (sym->type.pointerLevel > 0) ? IRType::PTR : mapType(sym->type.name), initVal, sym->type.isArray ? sym->type.arraySize : 0);
+            int totalBytes = getTypeSize(sym->type);
+            module_.addGlobalVar(stmt.getName(), (sym->type.pointerLevel > 0) ? IRType::PTR : mapType(sym->type.name), initVal, sym->type.isArray ? sym->type.arraySize : 0, totalBytes);
             globalValues_[stmt.getName()] = IRValue::Label(stmt.getName());
             return;
         }
@@ -995,18 +1117,10 @@ public:
                         val = converted;
                     }
                 }
-                bool isStructType = false;
-                if (sym->type.pointerLevel == 0 && !sym->type.isArray) {
-                    // A real struct/class symbol carries its own name as its
-                    // type; type aliases (kind STRUCT but target-typed) are
-                    // excluded so `type MyInt = int` never memcpys.
-                    auto ts = symbolTable_.resolve(sym->type.name);
-                    if (ts && (ts->kind == SymbolKind::STRUCT || ts->kind == SymbolKind::CLASS) &&
-                        ts->type.name == ts->name) {
-                        isStructType = true;
-                    }
-                }
-                if (sym->type.isArray || sym->type.isUserDefined || isStructType || getTypeSize(sym->type) > 8) {
+                bool isStructType = isStructValueType(sym->type);
+                bool initIsStruct = (lastExprType_.pointerLevel == 0) && (isStructValueType(lastExprType_) || lastExprType_.isUserDefined ||
+                                    lastExprType_.isArray || getTypeSize(lastExprType_) > 8);
+                if (sym->type.pointerLevel == 0 && (sym->type.isArray || sym->type.isUserDefined || isStructType || getTypeSize(sym->type) > 8 || initIsStruct)) {
                     currentBlock_->addInstruction({IROp::MEMCPY, std::nullopt, {addr, val, IRValue::Constant(getTypeSize(sym->type), IRType::I32)}});
                 } else {
                     currentBlock_->addInstruction({IROp::STORE, std::nullopt, {addr, val, IRValue::Constant(0, IRType::I32)}});
@@ -1169,16 +1283,30 @@ public:
     }
 
     void visit(NumberExpr& expr) override {
-        double val = expr.getValue();
-        IRType irType;
-        if (val == (long long)val) {
-            irType = IRType::I32;
-            lastExprType_ = {"int", 0};
-        } else {
-            irType = IRType::F32;
+        if (expr.isFloat()) {
+            double val = expr.getFloatValue();
             lastExprType_ = {"float", 0};
+            lastValue_ = IRValue::Constant(val, IRType::F32);
+        } else {
+            uint64_t v = expr.getUIntValue();
+            // Select the narrowest type that holds the literal: small values
+            // stay I32 ("int") for backward compatibility; values with bit 31
+            // set become U32 (zero-extended, never sign-extended); larger
+            // values become U64/I64 so 64-bit addresses survive.
+            if (v <= (uint64_t)INT32_MAX) {
+                lastExprType_ = {"int", 0};
+                lastValue_ = IRValue::Constant((int64_t)v, IRType::I32);
+            } else if (v <= (uint64_t)UINT32_MAX) {
+                lastExprType_ = {"u32", 0};
+                lastValue_ = IRValue::Constant(v, IRType::U32);
+            } else if (v <= (uint64_t)INT64_MAX) {
+                lastExprType_ = {"u64", 0};
+                lastValue_ = IRValue::Constant((int64_t)v, IRType::I64);
+            } else {
+                lastExprType_ = {"u64", 0};
+                lastValue_ = IRValue::Constant(v, IRType::U64);
+            }
         }
-        lastValue_ = IRValue::Constant(val, irType);
     }
 
     void visit(CharExpr& expr) override {
@@ -1346,6 +1474,67 @@ public:
 
     static int64_t bitfieldMask(int width) { return (1LL << width) - 1; }
 
+    bool getMemberFieldType(MemberAccessExpr* mem, TypeInfo& out) {
+        if (!mem) return false;
+        TypeInfo objType = inferExprType(mem->getObject());
+        if (objType.pointerLevel > 0) objType.pointerLevel--;
+        auto sym = symbolTable_.resolve(objType.name);
+        if (!sym || (sym->kind != SymbolKind::STRUCT && sym->kind != SymbolKind::CLASS)) return false;
+        auto ss = std::static_pointer_cast<StructSymbol>(sym);
+        for (const auto& f : ss->fields) {
+            if (f.name == mem->getMember()) {
+                out = f.type;
+                return true;
+            }
+        }
+        return false;
+    }
+
+    // Convert an integer IR value to a field/element type so the subsequent
+    // STORE uses the field width (never clobbers neighbors, never leaves
+    // upper garbage): narrow (`dt.month = 9` -> `mov byte`) via masking,
+    // widen (`d.PhysicalStart = 0x80000000` U32 -> U64 -> `mov qword`)
+    // via MOV (codegen zero/sign-extends).
+    IRValue truncateIntToType(IRValue val, const TypeInfo& target) {
+        IRType tgtIR = (target.pointerLevel > 0) ? IRType::PTR : mapType(target.name);
+        bool tgtNarrow = (tgtIR == IRType::I8 || tgtIR == IRType::U8 ||
+                          tgtIR == IRType::I16 || tgtIR == IRType::U16);
+        bool tgtWide32 = (tgtIR == IRType::I32 || tgtIR == IRType::U32 || tgtIR == IRType::BOOL);
+        bool tgtWide64 = (tgtIR == IRType::I64 || tgtIR == IRType::U64 || tgtIR == IRType::PTR);
+        bool valIsInt = (val.type == IRType::I8 || val.type == IRType::U8 || val.type == IRType::BOOL ||
+                         val.type == IRType::I16 || val.type == IRType::U16 ||
+                         val.type == IRType::I32 || val.type == IRType::U32 ||
+                         val.type == IRType::I64 || val.type == IRType::U64 || val.type == IRType::PTR);
+        if (!valIsInt) return val;
+        if (val.type == tgtIR) return val;
+        if (tgtNarrow) {
+            if (val.kind == IRValue::CONSTANT) {
+                uint64_t mask = (tgtIR == IRType::I8 || tgtIR == IRType::U8) ? 0xFFULL : 0xFFFFULL;
+                uint64_t v = (uint64_t)val.intValue & mask;
+                return IRValue::Constant(v, tgtIR);
+            }
+            IRValue dest = IRValue::Register(nextTemp(), tgtIR);
+            uint64_t mask = (tgtIR == IRType::I8 || tgtIR == IRType::U8) ? 0xFFULL : 0xFFFFULL;
+            currentBlock_->addInstruction({IROp::BIT_AND, dest, {val, IRValue::Constant((int64_t)mask, IRType::I32)}});
+            return dest;
+        }
+        auto width = [](IRType x) -> int {
+            if (x == IRType::I8 || x == IRType::U8 || x == IRType::BOOL) return 1;
+            if (x == IRType::I16 || x == IRType::U16) return 2;
+            if (x == IRType::I32 || x == IRType::U32) return 4;
+            return 8;
+        };
+        if ((tgtWide32 || tgtWide64) && width(val.type) < width(tgtIR)) {
+            if (val.kind == IRValue::CONSTANT) {
+                return IRValue::Constant((uint64_t)val.intValue, tgtIR);
+            }
+            IRValue dest = IRValue::Register(nextTemp(), tgtIR);
+            currentBlock_->addInstruction({IROp::MOV, dest, {val}});
+            return dest;
+        }
+        return val;
+    }
+
     IRValue emitBitfieldLoad(IRValue addr, int bitOffset, int bitWidth, bool isSigned) {
         IRValue word = IRValue::Register(nextTemp(), IRType::I32);
         currentBlock_->addInstruction({IROp::LOAD, word, {addr, IRValue::Constant(0, IRType::I32)}});
@@ -1411,9 +1600,27 @@ public:
                     emitBitfieldStore(addr, val, bitOffset, bitWidth);
                     return;
                 }
+                TypeInfo fieldType;
+                if (getMemberFieldType(mem, fieldType)) {
+                    val = truncateIntToType(val, fieldType);
+                    lastExprType_ = fieldType;
+                }
+            } else if (auto idx = dynamic_cast<IndexExpr*>(stmt.getTarget())) {
+                TypeInfo baseType = inferExprType(idx->getObject());
+                TypeInfo elemType = baseType;
+                if (elemType.isArray) {
+                    elemType.isArray = false;
+                    elemType.arraySize = 0;
+                } else if (elemType.pointerLevel > 0) {
+                    elemType.pointerLevel--;
+                } else if (elemType.name == "string") {
+                    elemType.name = "char";
+                }
+                val = truncateIntToType(val, elemType);
+                lastExprType_ = elemType;
             }
 
-            if (lastExprType_.isArray || lastExprType_.isUserDefined || getTypeSize(lastExprType_) > 8) {
+            if (lastExprType_.pointerLevel == 0 && (lastExprType_.isArray || lastExprType_.isUserDefined || getTypeSize(lastExprType_) > 8)) {
                 currentBlock_->addInstruction({IROp::MEMCPY, std::nullopt, {addr, val, IRValue::Constant(getTypeSize(lastExprType_), IRType::I32)}});
             } else {
                 if (addr.kind == IRValue::LABEL) {
@@ -1732,15 +1939,48 @@ public:
             std::string exitName = nextLabel("citer_exit");
 
             IRValue itAddr = IRValue::Register(nextTemp(), IRType::PTR);
-            currentBlock_->addInstruction({IROp::ALLOCA, itAddr, {IRValue::Constant(8, IRType::I32)}});
-            IRValue itReg = IRValue::Register(nextTemp(), IRType::PTR);
-            currentBlock_->addInstruction({IROp::CALL, itReg, {IRValue::Label(iterFn), iterable}});
-            currentBlock_->addInstruction({IROp::STORE, std::nullopt, {itAddr, itReg, IRValue::Constant(0, IRType::I32)}});
+            // `iter()` returns the iterator struct by value (sret). Allocate
+            // a full struct slot (not a hardcoded 8-byte pointer slot) and
+            // pass it as the hidden first argument.
+            bool iterIsSret = false;
+            int iterStructSize = 8;
+            {
+                auto iterSym = symbolTable_.resolve(iterFn);
+                if (iterSym && iterSym->kind == SymbolKind::FUNCTION) {
+                    auto fnSym = std::static_pointer_cast<FunctionSymbol>(iterSym);
+                    if (isStructValueType(fnSym->returnType)) {
+                        iterIsSret = true;
+                        iterStructSize = getTypeSize(fnSym->returnType);
+                    }
+                } else {
+                    // Unresolved (e.g. template instantiation ordering):
+                    // fall back to struct-size heuristic via the iterable type.
+                    // `iter()` by protocol returns a struct; use its size.
+                    iterStructSize = getTypeSize(iterableType);
+                    if (iterStructSize > 0) iterIsSret = true;
+                }
+            }
+            IRValue itBuf;
+            if (iterIsSret) {
+                itBuf = IRValue::Register(nextTemp(), IRType::PTR);
+                currentBlock_->addInstruction({IROp::ALLOCA, itBuf, {IRValue::Constant(iterStructSize, IRType::I32)}});
+                currentBlock_->addInstruction({IROp::CALL, std::nullopt, {IRValue::Label(iterFn), itBuf, iterable}});
+                itAddr = itBuf;
+            } else {
+                currentBlock_->addInstruction({IROp::ALLOCA, itAddr, {IRValue::Constant(8, IRType::I32)}});
+                IRValue itReg = IRValue::Register(nextTemp(), IRType::PTR);
+                currentBlock_->addInstruction({IROp::CALL, itReg, {IRValue::Label(iterFn), iterable}});
+                currentBlock_->addInstruction({IROp::STORE, std::nullopt, {itAddr, itReg, IRValue::Constant(0, IRType::I32)}});
+            }
             currentBlock_->addInstruction({IROp::BR, std::nullopt, {IRValue::Label(headerName)}});
 
             startBlock(headerName);
             IRValue itv = IRValue::Register(nextTemp(), IRType::PTR);
-            currentBlock_->addInstruction({IROp::LOAD, itv, {itAddr, IRValue::Constant(0, IRType::I32)}});
+            if (iterIsSret) {
+                itv = itAddr;
+            } else {
+                currentBlock_->addInstruction({IROp::LOAD, itv, {itAddr, IRValue::Constant(0, IRType::I32)}});
+            }
             IRValue p = IRValue::Register(nextTemp(), IRType::PTR);
             currentBlock_->addInstruction({IROp::CALL, p, {IRValue::Label(nextFn), itv}});
             IRValue isNil = IRValue::Register(nextTemp(), IRType::BOOL);
@@ -1754,7 +1994,10 @@ public:
             IRValue varAddr = IRValue::Register(nextTemp(), IRType::PTR);
             currentBlock_->addInstruction({IROp::ALLOCA, varAddr, {IRValue::Constant(getTypeSize(elemType), IRType::I32)}});
             variableValues_[stmt.getVarName()] = varAddr;
-            if (getTypeSize(elemType) > 8 || elemType.isUserDefined || elemType.pointerLevel > 0) {
+            // Struct copies only for by-value aggregates (Issue #13): pointers
+            // must go through LOAD+STORE, never MEMCPY.
+            if (elemType.pointerLevel == 0 &&
+                (elemType.isArray || isStructValueType(elemType) || getTypeSize(elemType) > 8)) {
                 currentBlock_->addInstruction({IROp::MEMCPY, std::nullopt, {varAddr, p, IRValue::Constant(getTypeSize(elemType), IRType::I32)}});
             } else {
                 IRType irType = (elemType.pointerLevel > 0) ? IRType::PTR : mapType(elemType.name);
@@ -1834,7 +2077,9 @@ public:
         currentBlock_->addInstruction({IROp::ALLOCA, varAddr, {IRValue::Constant(getTypeSize(elemType), IRType::I32)}});
         variableValues_[stmt.getVarName()] = varAddr;
 
-        if (getTypeSize(elemType) > 8 || elemType.isUserDefined || elemType.pointerLevel > 0) {
+        // Same aggregate-only rule as the iterator path (Issue #13).
+        if (elemType.pointerLevel == 0 &&
+            (elemType.isArray || isStructValueType(elemType) || getTypeSize(elemType) > 8)) {
             currentBlock_->addInstruction({IROp::MEMCPY, std::nullopt, {varAddr, elemAddr, IRValue::Constant(getTypeSize(elemType), IRType::I32)}});
         } else {
             IRType irType = (elemType.pointerLevel > 0) ? IRType::PTR : mapType(elemType.name);
@@ -1960,6 +2205,7 @@ public:
         strVal.name = "\"" + expr.getValue() + "\"";
         strVal.type = IRType::PTR;
         strVal.constValue = 0;
+        strVal.intValue = 0;
         lastValue_ = strVal;
         lastExprType_ = {"string", 0};
     }
@@ -2767,6 +3013,8 @@ private:
     std::vector<std::vector<DestructorInfo>> destructorStack_;
     bool exceptionGlobalsEnsured_ = false;
     bool interpHelpersEnsured_ = false;
+    bool currentIsSret_ = false;
+    TypeInfo currentReturnType_ = {"void", 0};
     int tempCount_ = 0;
     int globalStrCount_ = 0;
     int labelCount_ = 0;

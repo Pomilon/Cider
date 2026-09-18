@@ -1,5 +1,6 @@
 #pragma once
 
+#include <cstdint>
 #include <iostream>
 #include <map>
 #include <memory>
@@ -18,21 +19,61 @@ struct IRValue {
     std::string name;
     IRType type;
     double constValue = 0;
+    int64_t intValue = 0;
 
     static IRValue Register(const std::string& n, IRType t) {
-        return {REGISTER, n, t, 0};
+        IRValue v;
+        v.kind = REGISTER;
+        v.name = n;
+        v.type = t;
+        return v;
     }
     static IRValue Constant(double val, IRType t) {
-        return {CONSTANT, std::to_string(val), t, val};
+        IRValue v;
+        v.kind = CONSTANT;
+        v.name = std::to_string(val);
+        v.type = t;
+        v.constValue = val;
+        v.intValue = (int64_t)val;
+        return v;
+    }
+    static IRValue Constant(int64_t val, IRType t) {
+        IRValue v;
+        v.kind = CONSTANT;
+        v.name = std::to_string(val);
+        v.type = t;
+        v.constValue = (double)val;
+        v.intValue = val;
+        return v;
+    }
+    static IRValue Constant(uint64_t val, IRType t) {
+        IRValue v;
+        v.kind = CONSTANT;
+        v.name = std::to_string(val);
+        v.type = t;
+        v.constValue = (double)val;
+        v.intValue = (int64_t)val;
+        return v;
+    }
+    static IRValue Constant(int val, IRType t) {
+        return Constant((int64_t)val, t);
     }
     static IRValue Label(const std::string& n) {
-        return {LABEL, n, IRType::VOID, 0};
+        IRValue v;
+        v.kind = LABEL;
+        v.name = n;
+        v.type = IRType::VOID;
+        return v;
     }
+
+    int64_t intConst() const { return intValue; }
+    uint64_t uintConst() const { return (uint64_t)intValue; }
 
     std::string toString() const {
         if (kind == CONSTANT) {
             if (!name.empty() && type == IRType::PTR) return name;
-            return std::to_string(constValue);
+            if (type == IRType::F32 || type == IRType::F64) return std::to_string(constValue);
+            return std::to_string(intValue);
         }
         if (kind == LABEL) return name;
         return "%" + name;
@@ -127,9 +168,10 @@ public:
         IRType type;
         double initialValue;
         int arraySize = 0;
+        int totalBytes = 0;
     };
-    void addGlobalVar(const std::string& name, IRType type, double init = 0, int arraySize = 0) {
-        globalVars_.push_back({name, type, init, arraySize});
+    void addGlobalVar(const std::string& name, IRType type, double init = 0, int arraySize = 0, int totalBytes = 0) {
+        globalVars_.push_back({name, type, init, arraySize, totalBytes});
     }
     const std::vector<GlobalVar>& getGlobalVars() const { return globalVars_; }
 
