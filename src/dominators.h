@@ -251,6 +251,24 @@ private:
 std::set<std::string> NaturalLoopFinder::findBody(
     const std::string& header, const std::string& latch,
     const FunctionIR& func, const DominatorTree& /*dt*/) const {
+    // Build predecessor map once (Issue #15): the old code scanned every
+    // block for every worklist item — O(N^2) per back edge. With the map,
+    // each edge is visited once.
+    std::map<std::string, std::vector<std::string>> preds;
+    for (const auto& b : func.getBlocks()) {
+        const auto& instrs = b->getInstructions();
+        if (instrs.empty()) continue;
+        const auto& term = instrs.back();
+        auto addPred = [&](const std::string& target) {
+            preds[target].push_back(b->getName());
+        };
+        if (term.op == IROp::BR && !term.args.empty() && term.args[0].kind == IRValue::LABEL) {
+            addPred(term.args[0].name);
+        } else if (term.op == IROp::COND_BR && term.args.size() >= 3) {
+            if (term.args[1].kind == IRValue::LABEL) addPred(term.args[1].name);
+            if (term.args[2].kind == IRValue::LABEL) addPred(term.args[2].name);
+        }
+    }
     std::set<std::string> body;
     body.insert(header);
     std::vector<std::string> worklist;
@@ -260,19 +278,10 @@ std::set<std::string> NaturalLoopFinder::findBody(
         worklist.pop_back();
         if (body.find(v) != body.end()) continue;
         body.insert(v);
-        for (const auto& b : func.getBlocks()) {
-            const auto& instrs = b->getInstructions();
-            if (instrs.empty()) continue;
-            const auto& term = instrs.back();
-            if (term.op == IROp::BR && !term.args.empty() && term.args[0].kind == IRValue::LABEL
-                && term.args[0].name == v) {
-                worklist.push_back(b->getName());
-            } else if (term.op == IROp::COND_BR && term.args.size() >= 3) {
-                if (term.args[1].kind == IRValue::LABEL && term.args[1].name == v)
-                    worklist.push_back(b->getName());
-                if (term.args[2].kind == IRValue::LABEL && term.args[2].name == v)
-                    worklist.push_back(b->getName());
-            }
+        auto it = preds.find(v);
+        if (it == preds.end()) continue;
+        for (const auto& p : it->second) {
+            if (body.find(p) == body.end()) worklist.push_back(p);
         }
     }
     return body;

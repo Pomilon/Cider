@@ -309,7 +309,7 @@ private:
                 // and the overrun would clobber the adjacent local slot.
                 // Large allocations stay on the heap: a multi-megabyte frame
                 // risks the stack guard and gains nothing.
-                int size = (int)instr.args[1].constValue;
+                int size = (int)instr.args[1].intValue;
                 if (size > kMaxStackAllocSize) continue;
                 instr.op = IROp::ALLOCA;
                 instr.args = {IRValue::Constant(size + 8, IRType::I32)};

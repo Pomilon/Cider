@@ -226,6 +226,11 @@ private:
                         regRename[arg.name] = prefix + arg.name;
                     }
                 }
+                for (const auto& kv : ci.phiArgs) {
+                    if (kv.second.kind == IRValue::REGISTER && paramMap.find(kv.second.name) == paramMap.end()) {
+                        regRename[kv.second.name] = prefix + kv.second.name;
+                    }
+                }
                 for (const auto& kv : ci.asmMap) {
                     if (kv.second.kind == IRValue::REGISTER && paramMap.find(kv.second.name) == paramMap.end()) {
                         regRename[kv.second.name] = prefix + kv.second.name;

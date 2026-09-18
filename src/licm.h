@@ -14,36 +14,47 @@ namespace cider {
 // the loop. Cider stores locals in allocas, so the LOAD's address register is
 // typically an alloca address. We only hoist LOADs whose address is an ALLOCA
 // and where no STORE in the loop body writes to that same alloca.
-static bool isLoadInvariant(const IRInstruction& instr, const FunctionIR& func,
-                            const std::set<std::string>& loopBlocks) {
-    if (instr.op != IROp::LOAD || instr.args.empty() || instr.args[0].kind != IRValue::REGISTER)
-        return false;
-
-    // Trace the address register back to its defining instruction.
-    std::string reg = instr.args[0].name;
-    const IRInstruction* def = nullptr;
+//
+// Issue #15: the old version scanned the whole function for the def and the
+// whole loop for STOREs on EVERY LOAD (quadratic). Callers now build the
+// def map + loop STORE set once per hoistLoop and reuse them here (O(1)).
+struct LicmCaches {
+    std::map<std::string, const IRInstruction*> defMap;
+    std::set<std::string> multiDef;
+    std::set<std::string> loopStores;
+};
+static LicmCaches buildLicmCaches(const FunctionIR& func,
+                                  const std::set<std::string>& loopBlocks) {
+    LicmCaches c;
     for (const auto& b : func.getBlocks()) {
         for (const auto& si : b->getInstructions()) {
-            if (si.dest && si.dest->kind == IRValue::REGISTER && si.dest->name == reg) {
-                def = &si;
-                break;
+            if (si.dest && si.dest->kind == IRValue::REGISTER) {
+                auto it = c.defMap.find(si.dest->name);
+                if (it == c.defMap.end()) {
+                    c.defMap[si.dest->name] = &si;
+                } else {
+                    c.multiDef.insert(si.dest->name);
+                }
             }
-        }
-        if (def) break;
-    }
-    if (!def) return false;
-    if (def->op != IROp::ALLOCA) return false;  // non-alloca address: conservative
-
-    // Check that no STORE in the loop body writes to this alloca.
-    for (const auto& lb : func.getBlocks()) {
-        if (loopBlocks.find(lb->getName()) == loopBlocks.end()) continue;
-        for (const auto& li : lb->getInstructions()) {
-            if (li.op == IROp::STORE && li.args.size() >= 1 &&
-                li.args[0].kind == IRValue::REGISTER && li.args[0].name == reg) {
-                return false;
+            if (loopBlocks.find(b->getName()) != loopBlocks.end() &&
+                si.op == IROp::STORE && !si.args.empty() &&
+                si.args[0].kind == IRValue::REGISTER) {
+                c.loopStores.insert(si.args[0].name);
             }
         }
     }
+    return c;
+}
+static bool isLoadInvariantCached(const IRInstruction& instr,
+                                 const LicmCaches& c) {
+    if (instr.op != IROp::LOAD || instr.args.empty() || instr.args[0].kind != IRValue::REGISTER)
+        return false;
+    const std::string& reg = instr.args[0].name;
+    if (c.multiDef.count(reg)) return false;
+    auto it = c.defMap.find(reg);
+    if (it == c.defMap.end()) return false;
+    if (it->second->op != IROp::ALLOCA) return false;  // non-alloca: conservative
+    if (c.loopStores.count(reg)) return false;
     return true;
 }
 
@@ -83,16 +94,31 @@ bool SSALicmPass::runOnFunction(FunctionIR& func) {
                   return la->depth > lb->depth;
               });
 
-    bool changed = false;
+    // Issue #15: batch preheader insertion. The old code rebuilt the
+    // Lengauer-Tarjan dominator tree + loop forest after EVERY loop
+    // (O(L*(N+E))), hanging on kernel-size functions. Preheaders don't need
+    // up-to-date DT (insertPreheader ignores it), so insert all first, then
+    // rebuild once and hoist.
+    std::map<std::string, std::string> preheaders;
+    // Snapshot loop bodies: insertion mutates func blocks, which would
+    // invalidate live Loop* pointers.
+    std::map<std::string, Loop> loopSnap;
     for (const std::string& hdr : headers) {
-        const Loop* loop = loopFinder_.loopForHeader(hdr);
-        if (!loop) continue;
+        const Loop* l = loopFinder_.loopForHeader(hdr);
+        if (l) loopSnap[hdr] = *l;
+    }
+    for (const std::string& hdr : headers) {
+        auto it = loopSnap.find(hdr);
+        if (it == loopSnap.end()) continue;
+        std::string phName = NaturalLoopFinder::insertPreheader(func, it->second, dt_);
+        if (!phName.empty()) preheaders[hdr] = phName;
+    }
+    if (preheaders.empty()) return false;
 
-        std::string phName = NaturalLoopFinder::insertPreheader(func, *loop, dt_);
-        if (phName.empty()) continue;
-
-        dt_.build(func);
-        loopFinder_.build(func, dt_);
+    dt_.build(func);
+    loopFinder_.build(func, dt_);
+    bool changed = false;
+    for (const auto& [hdr, phName] : preheaders) {
         const Loop* updatedLoop = loopFinder_.loopForHeader(hdr);
         if (!updatedLoop) continue;
         if (hoistLoop(func, *updatedLoop, phName, dt_)) changed = true;
@@ -103,6 +129,8 @@ bool SSALicmPass::runOnFunction(FunctionIR& func) {
 bool SSALicmPass::hoistLoop(FunctionIR& func, const Loop& loop, const std::string& preheader,
                             const DominatorTree& dt) {
     std::set<std::string> loopBlocks = loop.blocks;
+    // Cached def/store info (Issue #15): one scan per loop, not per LOAD.
+    LicmCaches licmCache = buildLicmCaches(func, loopBlocks);
 
     std::set<std::string> invariantRegs;
     for (const auto& b : func.getBlocks()) {
@@ -140,7 +168,7 @@ bool SSALicmPass::hoistLoop(FunctionIR& func, const Loop& loop, const std::strin
                     instr.op == IROp::PHI) continue;
 
                 // For LOAD: require the memory read to be truly loop-invariant.
-                if (instr.op == IROp::LOAD && !isLoadInvariant(instr, func, loopBlocks)) continue;
+                if (instr.op == IROp::LOAD && !isLoadInvariantCached(instr, licmCache)) continue;
 
                 bool allInvariant = true;
                 for (const auto& arg : instr.args) {
@@ -239,16 +267,25 @@ bool PostLicmPass::runOnFunction(FunctionIR& func) {
                   return la->depth > lb->depth;
               });
 
-    bool changed = false;
+    // Same batching as SSA mode (Issue #15): one DT+loop rebuild total.
+    std::map<std::string, std::string> preheaders;
+    std::map<std::string, Loop> loopSnap;
     for (const std::string& hdr : headers) {
-        const Loop* loop = loopFinder_.loopForHeader(hdr);
-        if (!loop) continue;
+        const Loop* l = loopFinder_.loopForHeader(hdr);
+        if (l) loopSnap[hdr] = *l;
+    }
+    for (const std::string& hdr : headers) {
+        auto it = loopSnap.find(hdr);
+        if (it == loopSnap.end()) continue;
+        std::string phName = NaturalLoopFinder::insertPreheader(func, it->second, dt_);
+        if (!phName.empty()) preheaders[hdr] = phName;
+    }
+    if (preheaders.empty()) return false;
 
-        std::string phName = NaturalLoopFinder::insertPreheader(func, *loop, dt_);
-        if (phName.empty()) continue;
-
-        dt_.build(func);
-        loopFinder_.build(func, dt_);
+    dt_.build(func);
+    loopFinder_.build(func, dt_);
+    bool changed = false;
+    for (const auto& [hdr, phName] : preheaders) {
         const Loop* updatedLoop = loopFinder_.loopForHeader(hdr);
         if (!updatedLoop) continue;
         if (hoistLoop(func, *updatedLoop, phName, dt_)) changed = true;
@@ -259,6 +296,8 @@ bool PostLicmPass::runOnFunction(FunctionIR& func) {
 bool PostLicmPass::hoistLoop(FunctionIR& func, const Loop& loop, const std::string& preheader,
                              const DominatorTree& dt) {
     std::set<std::string> loopBlocks = loop.blocks;
+    // Cached def/store info (Issue #15): one scan per loop, not per LOAD.
+    LicmCaches licmCache = buildLicmCaches(func, loopBlocks);
 
     std::set<std::string> invariantRegs;
     for (const auto& b : func.getBlocks()) {
@@ -295,7 +334,7 @@ bool PostLicmPass::hoistLoop(FunctionIR& func, const Loop& loop, const std::stri
                     instr.op == IROp::POP) continue;
 
                 // For LOAD: require the memory read to be truly loop-invariant.
-                if (instr.op == IROp::LOAD && !isLoadInvariant(instr, func, loopBlocks)) continue;
+                if (instr.op == IROp::LOAD && !isLoadInvariantCached(instr, licmCache)) continue;
 
                 bool allInvariant = true;
                 for (const auto& arg : instr.args) {

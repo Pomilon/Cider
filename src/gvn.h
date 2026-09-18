@@ -93,7 +93,7 @@ private:
 
     std::string vnOfOperand(const IRValue& v) {
         if (v.kind == IRValue::CONSTANT) {
-            // String literals are PTR constants with constValue=0 and their
+            // String literals are PTR constants with intValue=0 and their
             // content in name (e.g. "\"Hello\""). They must be numbered by
             // content — two different literals are different values, and
             // sharing a VN would let GVN replace one literal with a MOV of
@@ -101,7 +101,9 @@ private:
             if (v.type == IRType::PTR && v.name.size() >= 2 && v.name.front() == '"') {
                 return "const_str_" + v.name;
             }
-            return "const_" + typeToString(v.type) + "_" + std::to_string(v.constValue);
+            if (v.type == IRType::F32 || v.type == IRType::F64)
+                return "const_" + typeToString(v.type) + "_" + std::to_string(v.constValue);
+            return "const_" + typeToString(v.type) + "_" + std::to_string(v.intValue);
         }
         if (v.kind == IRValue::LABEL) {
             return "label_" + v.name;

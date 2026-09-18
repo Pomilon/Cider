@@ -214,8 +214,17 @@ public:
 
         std::vector<LiveInterval> active;
         int currentStackOffset = 0;
-        // Reusable spill slots: negative offsets, deepest first.
-        std::vector<int> freeSpillSlots;
+        // NOTE (Issue #10): spill slots are never reused. Reusing a slot
+        // whose interval expired in block-index order is unsafe once the
+        // inliner stitches callee loop bodies into the caller CFG: a caller
+        // value live across an inlined call (e.g. across `serial_print`'s
+        // loop) can share a block-range with an inlined body temp without
+        // overlapping it, yet the two are simultaneously live at runtime
+        // (the caller's value in r14/r15 survives the whole inlined loop).
+        // The back-edge extension above covers loop headers, but inlined
+        // regions introduce non-loop control joins where block-range
+        // liveness still under-approximates. Fresh slots cost a few bytes
+        // of stack and are always correct.
 
         for (auto& interval : unhandled) {
             for (auto it = active.begin(); it != active.end();) {
@@ -224,8 +233,6 @@ public:
                     if (!res.isSpilled) {
                         if (it->isFloat) freeFloatRegs.push_back(res.reg);
                         else freeIntRegs.push_back(res.reg);
-                    } else {
-                        freeSpillSlots.push_back(res.stackOffset);
                     }
                     it = active.erase(it);
                 } else {
@@ -235,18 +242,10 @@ public:
 
             auto& freeRegs = interval.isFloat ? freeFloatRegs : freeIntRegs;
             if (freeRegs.empty()) {
-                if (!freeSpillSlots.empty()) {
-                    // Reuse the deepest free slot (most negative offset).
-                    std::sort(freeSpillSlots.begin(), freeSpillSlots.end());
-                    int slot = freeSpillSlots.front();
-                    freeSpillSlots.erase(freeSpillSlots.begin());
-                    allocation[interval.varName] = {true, "", slot};
-                } else {
-                    currentStackOffset += 8;
-                    allocation[interval.varName] = {true, "", -currentStackOffset};
-                }
-                // Track spilled intervals too: their slots return to the pool
-                // when the interval expires.
+                currentStackOffset += 8;
+                allocation[interval.varName] = {true, "", -currentStackOffset};
+                // Track spilled intervals so their registers (none) stay
+                // consistent; slots themselves are never recycled.
                 active.push_back(interval);
             } else {
                 std::string reg = freeRegs.back();
