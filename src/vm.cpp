@@ -374,7 +374,7 @@ VM::RegVal VM::resolveValue(const IRValue& v) {
                 return d;
             }
             RegVal d;
-            d.i = (int64_t)v.constValue;
+            d.i = v.intValue;
             return d;
         }
         if (v.type == IRType::F32 || v.type == IRType::F64) {
@@ -384,7 +384,7 @@ VM::RegVal VM::resolveValue(const IRValue& v) {
             return d;
         }
         RegVal d;
-        d.i = (int64_t)v.constValue;
+        d.i = v.intValue;
         return d;
     }
     case IRValue::REGISTER: {
@@ -494,10 +494,16 @@ void VM::materializeLabels() {
         }
     }
 
-    // Global variables: an 8-byte cell per global, holding its initial value.
+    // Global variables: allocate the full object size (Issue #11). A global
+    // `[IDTEntry; 256]` needs 4096 bytes, a `TSSEntry` 104 bytes — not a
+    // single 8-byte cell. The native backend emits `resb <totalBytes>`; the
+    // VM must mirror that so indexed stores stay inside the object.
     for (const auto& var : module_->getGlobalVars()) {
-        int64_t cell = malloc(8);
-        if (cell + 8 > (int64_t)heap_.size()) heap_.resize(cell + 8);
+        int64_t size = var.totalBytes > 0 ? (int64_t)var.totalBytes : 8;
+        if (size < 8) size = 8;
+        int64_t cell = malloc(size);
+        if (cell + size > (int64_t)heap_.size()) heap_.resize(cell + size);
+        std::memset(heap_.data() + cell, 0, (size_t)size);
         int64_t v = (int64_t)var.initialValue;
         std::memcpy(heap_.data() + cell, &v, 8);
         globalVarOffsets_[var.name] = cell;
