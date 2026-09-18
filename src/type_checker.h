@@ -51,6 +51,17 @@ public:
         if ((t1.name == "void" && t1.pointerLevel >= 1 && t2.pointerLevel >= t1.pointerLevel) ||
             (t2.name == "void" && t2.pointerLevel >= 1 && t1.pointerLevel >= t2.pointerLevel)) return true;
 
+        // String literals decay to byte pointers (C `char*`): `foo("hi")`
+        // where `foo(p: char*)`, `var p: char* = "hi"`, etc. Also covers
+        // `u8*`/`i8*`/`byte*` (framebuffer, serial) and `void*`.
+        auto isBytePtr = [](const TypeInfo& t) {
+            return t.pointerLevel >= 1 &&
+                   (t.name == "char" || t.name == "u8" || t.name == "i8" ||
+                    t.name == "byte" || t.name == "void");
+        };
+        if (t1.name == "string" && t1.pointerLevel == 0 && isBytePtr(t2)) return true;
+        if (t2.name == "string" && t2.pointerLevel == 0 && isBytePtr(t1)) return true;
+
         // Pointer covariance for classes
         if (t1.pointerLevel > 0 && t2.pointerLevel > 0 && t1.pointerLevel == t2.pointerLevel) {
             auto sym2 = symbolTable_.resolve(t2.name);
@@ -298,11 +309,10 @@ public:
     }
 
     void visit(NumberExpr& expr) override {
-        double val = expr.getValue();
-        if (val == (long long)val) {
-            lastExprType_ = {"int", 0};
-        } else {
+        if (expr.isFloat()) {
             lastExprType_ = {"float", 0};
+        } else {
+            lastExprType_ = {"int", 0};
         }
     }
 

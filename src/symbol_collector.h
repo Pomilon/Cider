@@ -247,6 +247,7 @@ public:
 
         if (stmt.isUnion()) {
             int maxSize = 0;
+            int maxAlign = 1;
             for (auto& field : stmt.getFields()) {
                 StructSymbol::Field f;
                 f.name = field.name;
@@ -256,12 +257,15 @@ public:
 
                 int size = getFieldSize(f.type);
                 if (size > maxSize) maxSize = size;
+                int a = (field.bits > 0) ? 4 : getFieldAlignment(f.type);
+                if (a > maxAlign) maxAlign = a;
 
                 sym->fields.push_back(f);
             }
-            sym->totalSize = maxSize;
+            sym->totalSize = alignUp(maxSize, maxAlign);
         } else {
             int currentOffset = 0;
+            int maxAlign = 1;
             int bitPos = 0;  // bit position within the current word
             for (auto& field : stmt.getFields()) {
                 StructSymbol::Field f;
@@ -270,8 +274,12 @@ public:
                 f.bits = field.bits;
 
                 if (field.bits > 0) {
-                    // Bitfield: pack into the current 32-bit word if it
-                    // fits, else start a new word.
+                    // Bitfield: align the containing word to 4, then pack
+                    // into the current 32-bit word if it fits.
+                    if (bitPos == 0) {
+                        currentOffset = alignUp(currentOffset, 4);
+                        if (4 > maxAlign) maxAlign = 4;
+                    }
                     if (bitPos + field.bits > 32) {
                         currentOffset += 4;
                         bitPos = 0;
@@ -282,17 +290,21 @@ public:
                     bitPos += field.bits;
                 } else {
                     // Regular field: close any partially used bitfield word,
-                    // then align to its size.
+                    // then align to its natural alignment.
                     if (bitPos > 0) {
                         currentOffset += 4;
                         bitPos = 0;
                     }
+                    int a = getFieldAlignment(f.type);
+                    currentOffset = alignUp(currentOffset, a);
+                    if (a > maxAlign) maxAlign = a;
                     f.offset = currentOffset;
                     currentOffset += getFieldSize(f.type);
                 }
                 sym->fields.push_back(f);
             }
-            sym->totalSize = currentOffset + (bitPos > 0 ? 4 : 0);
+            if (bitPos > 0) currentOffset += 4;
+            sym->totalSize = alignUp(currentOffset, maxAlign);
         }
 
         if (symbolTable_.getCurrentScope()->resolveLocal(sym->name)) {
@@ -529,6 +541,11 @@ public:
         }
 
         // If this is the root of a virtual hierarchy, reserve space for vptr
+        int classMaxAlign = 1;
+        for (auto& f : sym->fields) {
+            int a = getFieldAlignment(f.type);
+            if (a > classMaxAlign) classMaxAlign = a;
+        }
         if (hasVTable && sym->vtable.empty()) {
             if (currentOffset == 0) {
                 currentOffset = 8;  // Size of vptr
@@ -536,6 +553,7 @@ public:
                 for (auto& f : sym->fields) f.offset += 8;
                 currentOffset += 8;
             }
+            if (8 > classMaxAlign) classMaxAlign = 8;
         }
 
         for (auto& member : stmt.getMembers()) {
@@ -543,6 +561,9 @@ public:
                 StructSymbol::Field f;
                 f.name = field->getName();
                 f.type = TypeInfo::fromAST(field->getTypeAST());
+                int a = getFieldAlignment(f.type);
+                currentOffset = alignUp(currentOffset, a);
+                if (a > classMaxAlign) classMaxAlign = a;
                 f.offset = currentOffset;
                 currentOffset += getFieldSize(f.type);
                 sym->fields.push_back(f);
@@ -606,8 +627,11 @@ public:
         }
         currentClassName_ = prevClass;
 
-        if (currentOffset == 0) currentOffset = 8;
-        sym->totalSize = currentOffset;
+        if (currentOffset == 0) {
+            currentOffset = 8;
+            if (8 > classMaxAlign) classMaxAlign = 8;
+        }
+        sym->totalSize = alignUp(currentOffset, classMaxAlign);
         symbolTable_.define(sym);
         structClassNames_.push_back(stmt.getName());
     }
@@ -646,6 +670,52 @@ public:
             return std::static_pointer_cast<StructSymbol>(sym)->totalSize;
         }
         return 8;
+    }
+
+    int getFieldAlignment(const TypeInfo& type, std::set<std::string>* visiting = nullptr) {
+        if (type.pointerLevel > 0) return 8;
+        if (type.isInterface) return 8;
+        if (type.isArray) {
+            TypeInfo elemType = type;
+            elemType.isArray = false;
+            elemType.arraySize = 0;
+            return getFieldAlignment(elemType, visiting);
+        }
+        if (type.name == "u8" || type.name == "i8" || type.name == "char" || type.name == "byte" || type.name == "void") return 1;
+        if (type.name == "u16" || type.name == "i16") return 2;
+        if (type.name == "u32" || type.name == "i32" || type.name == "int" || type.name == "float" || type.name == "bool") return 4;
+        if (type.name == "u64" || type.name == "i64") return 8;
+        bool ownSet = false;
+        if (!visiting) {
+            visiting = new std::set<std::string>();
+            ownSet = true;
+        }
+        int result = 8;
+        if (visiting->count(type.name)) {
+            result = 8;
+        } else {
+            visiting->insert(type.name);
+            auto sym = symbolTable_.resolve(type.name);
+            if (sym && (sym->kind == SymbolKind::STRUCT || sym->kind == SymbolKind::CLASS)) {
+                auto ss = std::static_pointer_cast<StructSymbol>(sym);
+                int maxA = 1;
+                for (auto& f : ss->fields) {
+                    int a = getFieldAlignment(f.type, visiting);
+                    if (a > maxA) maxA = a;
+                }
+                result = maxA;
+            } else {
+                result = 8;
+            }
+            visiting->erase(type.name);
+        }
+        if (ownSet) delete visiting;
+        return result;
+    }
+
+    static int alignUp(int offset, int align) {
+        if (align <= 1) return offset;
+        return (offset + align - 1) & ~(align - 1);
     }
 
     void importModule(const std::string& moduleName, int line, int col) {
@@ -788,6 +858,7 @@ public:
         structSym->col = 0;
 
         int currentOffset = 0;
+        int maxAlign = 1;
         int bitPos = 0;
         for (auto& field : tmplStruct->getFields()) {
             StructSymbol::Field f;
@@ -796,6 +867,10 @@ public:
             f.type.name = substituteTypeName(f.type.name, tmplSym->typeParams, parsed.second);
             f.bits = field.bits;
             if (field.bits > 0) {
+                if (bitPos == 0) {
+                    currentOffset = alignUp(currentOffset, 4);
+                    if (4 > maxAlign) maxAlign = 4;
+                }
                 if (bitPos + field.bits > 32) {
                     currentOffset += 4;
                     bitPos = 0;
@@ -809,12 +884,16 @@ public:
                     currentOffset += 4;
                     bitPos = 0;
                 }
+                int a = getFieldAlignment(f.type);
+                currentOffset = alignUp(currentOffset, a);
+                if (a > maxAlign) maxAlign = a;
                 f.offset = currentOffset;
                 currentOffset += getFieldSize(f.type);
             }
             structSym->fields.push_back(f);
         }
-        structSym->totalSize = currentOffset + (bitPos > 0 ? 4 : 0);
+        if (bitPos > 0) currentOffset += 4;
+        structSym->totalSize = alignUp(currentOffset, maxAlign);
 
         auto globalScope = symbolTable_.getCurrentScope();
         while (globalScope->getParent()) globalScope = globalScope->getParent();
@@ -1057,9 +1136,12 @@ public:
                 return std::make_unique<IdentifierExpr>(
                     substituteTypeName(dynamic_cast<IdentifierExpr*>(expr)->getName(), tmplParams, tmplArgs),
                     expr->getLine(), expr->getColumn());
-            case ASTNode::NUMBER_EXPR:
-                return std::make_unique<NumberExpr>(
-                    dynamic_cast<NumberExpr*>(expr)->getValue(), expr->getLine(), expr->getColumn());
+            case ASTNode::NUMBER_EXPR: {
+                auto num = dynamic_cast<NumberExpr*>(expr);
+                if (num->isFloat())
+                    return std::make_unique<NumberExpr>(num->getFloatValue(), expr->getLine(), expr->getColumn());
+                return std::make_unique<NumberExpr>(num->getUIntValue(), expr->getLine(), expr->getColumn());
+            }
             case ASTNode::BOOLEAN_EXPR:
                 return std::make_unique<BooleanExpr>(
                     dynamic_cast<BooleanExpr*>(expr)->getValue(), expr->getLine(), expr->getColumn());
@@ -1082,7 +1164,7 @@ public:
                 return std::make_unique<UnaryExpr>(
                     ue->getOperator(),
                     cloneExprWithSubst(ue->getOperand(), tmplParams, tmplArgs),
-                    ue->getLine(), ue->getColumn());
+                    ue->getLine(), ue->getColumn(), ue->isPostfix());
             }
             case ASTNode::TERNARY_EXPR: {
                 auto te = dynamic_cast<TernaryExpr*>(expr);
