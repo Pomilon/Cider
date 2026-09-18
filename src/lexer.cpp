@@ -138,24 +138,71 @@ Token Lexer::readIdentifier() {
 
 Token Lexer::readNumber() {
     size_t start = currentPos;
-    while (currentPos < source.length() && std::isdigit(static_cast<unsigned char>(peek()))) {
+    // Hex (0x...), binary (0b...), octal (0o...) prefixes. Underscores are
+    // allowed as visual separators (0xFF_FF, 1_000_000) and preserved in the
+    // token text; the parser strips them during conversion.
+    if (peek() == '0' && currentPos + 1 < source.length()) {
+        char nxt = source[currentPos + 1];
+        if (nxt == 'x' || nxt == 'X') {
+            advance();
+            advance();
+            while (currentPos < source.length() &&
+                   (std::isxdigit(static_cast<unsigned char>(peek())) || peek() == '_')) {
+                advance();
+            }
+            std::string value = source.substr(start, currentPos - start);
+            return makeToken(TokenType::NUMBER, value);
+        }
+        if (nxt == 'b' || nxt == 'B') {
+            advance();
+            advance();
+            while (currentPos < source.length() &&
+                   (peek() == '0' || peek() == '1' || peek() == '_')) {
+                advance();
+            }
+            std::string value = source.substr(start, currentPos - start);
+            return makeToken(TokenType::NUMBER, value);
+        }
+        if (nxt == 'o' || nxt == 'O') {
+            advance();
+            advance();
+            while (currentPos < source.length() &&
+                   ((peek() >= '0' && peek() <= '7') || peek() == '_')) {
+                advance();
+            }
+            std::string value = source.substr(start, currentPos - start);
+            return makeToken(TokenType::NUMBER, value);
+        }
+    }
+    while (currentPos < source.length() &&
+           (std::isdigit(static_cast<unsigned char>(peek())) || peek() == '_')) {
         advance();
     }
     if (peek() == '.' && (currentPos + 1 < source.length() && std::isdigit(static_cast<unsigned char>(source[currentPos + 1])))) {
         advance();
-        while (currentPos < source.length() && std::isdigit(static_cast<unsigned char>(peek()))) {
+        while (currentPos < source.length() &&
+               (std::isdigit(static_cast<unsigned char>(peek())) || peek() == '_')) {
             advance();
         }
     }
     if (currentPos < source.length() && (peek() == 'e' || peek() == 'E')) {
+        size_t save = currentPos;
         advance();
         if (currentPos < source.length() && (peek() == '+' || peek() == '-')) {
             advance();
         }
-        if (currentPos < source.length() && std::isdigit(static_cast<unsigned char>(peek()))) {
-            while (currentPos < source.length() && std::isdigit(static_cast<unsigned char>(peek()))) {
-                advance();
-            }
+        bool anyDigit = false;
+        size_t digitsStart = currentPos;
+        while (currentPos < source.length() &&
+               (std::isdigit(static_cast<unsigned char>(peek())) || peek() == '_')) {
+            if (std::isdigit(static_cast<unsigned char>(peek()))) anyDigit = true;
+            advance();
+        }
+        if (!anyDigit) {
+            // Not a valid exponent (e.g. hex-adjacent ident); rewind to before 'e'.
+            currentPos = save;
+        } else {
+            (void)digitsStart;
         }
     }
     std::string value = source.substr(start, currentPos - start);
