@@ -39,16 +39,17 @@ std::shared_ptr<cider::Symbol> findSym(cider::SymbolTable& table, const std::str
 }
 
 int run() {
-    // Struct layout is dense (no padding): int (4) + char* (8) = 12.
+    // Struct layout uses natural alignment (C ABI): int (4, align 4) at 0,
+    // pad 4, char* (8, align 8) at 8, total 16.
     Result r1 = collectSrc("struct Point {\n  var x: int;\n  var y: char*;\n}\n");
     CHECK(r1.errors.empty());
     auto point = findSym(*r1.table, "Point");
     CHECK(point != nullptr);
     auto ps = std::static_pointer_cast<cider::StructSymbol>(point);
-    CHECK(ps->totalSize == 12);
+    CHECK(ps->totalSize == 16);
     CHECK(ps->fields.size() == 2);
     CHECK(ps->fields[0].offset == 0);
-    CHECK(ps->fields[1].offset == 4);
+    CHECK(ps->fields[1].offset == 8);
 
     // Single int field: 4 bytes.
     Result r2 = collectSrc("struct Small {\n  var a: int;\n}\n");

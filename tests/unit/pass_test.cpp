@@ -134,7 +134,7 @@ int testConstFold() {
     // var x: int = 2 + 3 * 4;  -> folded at the AST level before ir-gen.
     auto r = genModule("func main() -> void {\n  var x: int = 2 + 3 * 4;\n}\n");
     std::string d = r.print();
-    CHECK(d.find("store %v0, 14.000000") != std::string::npos);
+    CHECK(d.find("store %v0, 14") != std::string::npos);
     return 0;
 }
 

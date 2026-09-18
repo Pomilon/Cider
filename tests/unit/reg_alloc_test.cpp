@@ -48,8 +48,9 @@ int run() {
     CHECK(!result.at("b").isSpilled);
 
     // Two waves of 14 simultaneously-live values each (each makeUse adds a
-    // source AND a dest): wave 1 spills 9, wave 2 reuses the 9 freed slots
-    // -> the stack stays at 72 instead of growing to 144.
+    // source AND a dest): wave 1 spills 9, wave 2 spills 9 more. Spill slots
+    // are never reused (Issue #10: reuse across inlined loop bodies caused
+    // corruption), so the stack grows to 144 (18 slots).
     auto fn2 = std::make_unique<cider::FunctionIR>("g", cider::IRType::VOID);
     auto e2 = std::make_unique<cider::BasicBlock>("entry");
     // wave 1: v0..v6 + w0..w6 all live together in entry
@@ -71,12 +72,12 @@ int run() {
     cider::RegisterAllocator alloc2;
     int stackSize2 = 0;
     auto result2 = alloc2.allocate(*fn2, stackSize2);
-    CHECK(stackSize2 == 72);  // 9 spill slots, reused across the waves
+    CHECK(stackSize2 == 144);  // 18 spill slots, never reused (Issue #10)
     int spills = 0;
     for (const auto& [name, res] : result2) {
         if (res.isSpilled) spills++;
     }
-    CHECK(spills == 18);  // 9 per wave, sharing the same 9 slots
+    CHECK(spills == 18);  // 9 per wave, each with a fresh slot
     return 0;
 }
 

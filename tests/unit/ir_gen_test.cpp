@@ -40,7 +40,7 @@ int run() {
     std::string d = genSrc("func f(a: int) -> int {\n  return a + 1;\n}\n");
     CHECK(d.find("define f() {") != std::string::npos);
     CHECK(d.find("entry:") != std::string::npos);
-    CHECK(d.find("%v0 = alloca 4.000000") != std::string::npos);
+    CHECK(d.find("%v0 = alloca 4") != std::string::npos);
     CHECK(d.find("add") != std::string::npos);
     CHECK(d.find("ret %v") != std::string::npos);
 

@@ -11,7 +11,7 @@ int run() {
     auto r = cider::IRValue::Register("0", cider::IRType::I32);
     CHECK(r.toString() == "%0" && r.type == cider::IRType::I32);
     auto c = cider::IRValue::Constant(5, cider::IRType::I32);
-    CHECK(c.toString() == "5.000000" && c.constValue == 5);
+    CHECK(c.toString() == "5" && c.constValue == 5 && c.intValue == 5);
     auto l = cider::IRValue::Label("entry");
     CHECK(l.toString() == "entry" && l.type == cider::IRType::VOID);
 
@@ -20,7 +20,7 @@ int run() {
     add.op = cider::IROp::ADD;
     add.dest = cider::IRValue::Register("1", cider::IRType::I32);
     add.args = {cider::IRValue::Constant(1, cider::IRType::I32), r};
-    CHECK(add.toString() == "%1 = add 1.000000, %0");
+    CHECK(add.toString() == "%1 = add 1, %0");
 
     // PHI with phiArgs.
     cider::IRInstruction phi;
@@ -28,14 +28,14 @@ int run() {
     phi.dest = cider::IRValue::Register("2", cider::IRType::I32);
     phi.phiArgs["then"] = cider::IRValue::Constant(1, cider::IRType::I32);
     phi.phiArgs["else"] = cider::IRValue::Constant(2, cider::IRType::I32);
-    CHECK(phi.toString() == "%2 = phi [2.000000, else], [1.000000, then]");
+    CHECK(phi.toString() == "%2 = phi [2, else], [1, then]");
 
     // ASM with asmMap.
     cider::IRInstruction asmInstr;
     asmInstr.op = cider::IROp::ASM;
     asmInstr.args = {cider::IRValue::Constant(1, cider::IRType::I32)};
     asmInstr.asmMap["{code}"] = cider::IRValue::Register("3", cider::IRType::I32);
-    CHECK(asmInstr.toString() == "asm 1.000000");
+    CHECK(asmInstr.toString() == "asm 1");
 
     // Blocks + function assembly.
     auto block = std::make_unique<cider::BasicBlock>("entry");
