@@ -1123,6 +1123,20 @@ public:
                 if (sym->type.pointerLevel == 0 && (sym->type.isArray || sym->type.isUserDefined || isStructType || getTypeSize(sym->type) > 8 || initIsStruct)) {
                     currentBlock_->addInstruction({IROp::MEMCPY, std::nullopt, {addr, val, IRValue::Constant(getTypeSize(sym->type), IRType::I32)}});
                 } else {
+                    // Store at the declared width (same rule as fields and
+                    // elements): a narrow initializer in a wide local slot
+                    // (all slots are 8 bytes) leaves stale upper bytes that
+                    // a later wide load reads as garbage — e.g. a limiting
+                    // `var big: i64 = 0 - 5` compared against another i64.
+                    if (sym->type.pointerLevel == 0 && !sym->type.isArray) {
+                        IRType declIR = mapType(sym->type.name);
+                        bool declIsInt = (declIR == IRType::I8 || declIR == IRType::U8 ||
+                                          declIR == IRType::I16 || declIR == IRType::U16 ||
+                                          declIR == IRType::I32 || declIR == IRType::U32 ||
+                                          declIR == IRType::BOOL ||
+                                          declIR == IRType::I64 || declIR == IRType::U64);
+                        if (declIsInt) val = truncateIntToType(val, sym->type);
+                    }
                     currentBlock_->addInstruction({IROp::STORE, std::nullopt, {addr, val, IRValue::Constant(0, IRType::I32)}});
                 }
             }
@@ -1618,6 +1632,22 @@ public:
                 }
                 val = truncateIntToType(val, elemType);
                 lastExprType_ = elemType;
+            } else if (auto ident = dynamic_cast<IdentifierExpr*>(stmt.getTarget())) {
+                // Plain variable stores use the declared width (same rule as
+                // fields and elements above): a narrow value in a wide local
+                // slot leaves stale upper bytes for later wide loads.
+                auto sym = symbolTable_.resolve(ident->getName());
+                if (sym && sym->type.pointerLevel == 0 && !sym->type.isArray &&
+                    !sym->type.isUserDefined && !isStructValueType(sym->type) &&
+                    !sym->type.isInterface && !sym->type.isSlice) {
+                    IRType declIR = mapType(sym->type.name);
+                    bool declIsInt = (declIR == IRType::I8 || declIR == IRType::U8 ||
+                                      declIR == IRType::I16 || declIR == IRType::U16 ||
+                                      declIR == IRType::I32 || declIR == IRType::U32 ||
+                                      declIR == IRType::BOOL ||
+                                      declIR == IRType::I64 || declIR == IRType::U64);
+                    if (declIsInt) val = truncateIntToType(val, sym->type);
+                }
             }
 
             if (lastExprType_.pointerLevel == 0 && (lastExprType_.isArray || lastExprType_.isUserDefined || getTypeSize(lastExprType_) > 8)) {

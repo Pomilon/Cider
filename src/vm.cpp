@@ -690,9 +690,16 @@ VM::RegVal VM::load(int64_t addr, IRType type) {
         break;
     }
     case IRType::I32:
-    case IRType::U32:
     case IRType::BOOL: {
         int32_t v = 0;
+        if (addr + 4 <= (int64_t)heap_.size()) std::memcpy(&v, heap_.data() + addr, 4);
+        d.i = v;
+        break;
+    }
+    case IRType::U32: {
+        // Unsigned 32-bit loads zero-extend (native `mov eax, dword`),
+        // so u32 values above INT32_MAX compare equal to the same u64.
+        uint32_t v = 0;
         if (addr + 4 <= (int64_t)heap_.size()) std::memcpy(&v, heap_.data() + addr, 4);
         d.i = v;
         break;
