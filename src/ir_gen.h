@@ -1455,6 +1455,21 @@ public:
                     if (f.name == mem->getMember()) return f.type;
                 }
             }
+        } else if (auto idx = dynamic_cast<IndexExpr*>(expr)) {
+            // Array/pointer element type (Issue #22): without this,
+            // chained indexing like g_tasks[0].name[i] resolved to an
+            // empty type, so the store path "widened" the char value to
+            // a pointer width and emitted mov qword over the neighbors.
+            TypeInfo baseType = inferExprType(idx->getObject());
+            if (baseType.isArray) {
+                baseType.isArray = false;
+                baseType.arraySize = 0;
+            } else if (baseType.pointerLevel > 0) {
+                baseType.pointerLevel--;
+            } else if (baseType.name == "string") {
+                baseType.name = "char";
+            }
+            return baseType;
         } else if (auto un = dynamic_cast<UnaryExpr*>(expr)) {
             if (un->getOperator() == "*") {
                 TypeInfo t = inferExprType(un->getOperand());
@@ -1840,6 +1855,11 @@ public:
                 if (end != std::string::npos) {
                     std::string var = code.substr(pos + 1, end - pos - 1);
                     if (!var.empty() && var[0] == '*') var = var.substr(1);
+                    // Width suffix for codegen (Issue #24): {fd:q} still
+                    // refers to variable fd; the suffix only re-sizes the
+                    // substituted register.
+                    size_t colon = var.find(':');
+                    if (colon != std::string::npos) var = var.substr(0, colon);
                     if (!var.empty()) mentionedVars.insert(var);
                     pos = end + 1;
                 } else {
