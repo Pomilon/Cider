@@ -144,6 +144,16 @@ bool CodeGenerator::generate(ModuleIR& module, const std::string& outputPath,
         addData(line);
     }
 
+    // Declared width of every global (Issue #20): BSS reserves the exact
+    // byte size (resb N), so a store must use the global's own width. The
+    // STORE instruction's value type can be wider (e.g. an int value stored
+    // to a bool global), and sizing by the value emits `mov qword [rel g]`
+    // which zeroes the neighbor's bytes.
+    std::map<std::string, IRType> globalTypes;
+    for (const auto& var : module.getGlobalVars()) {
+        globalTypes[var.name] = var.type;
+    }
+
     std::vector<std::string> argRegs = {"rdi", "rsi", "rdx", "rcx", "r8", "r9"};
 
     for (auto& func : module.getFunctions()) {
@@ -929,23 +939,54 @@ bool CodeGenerator::generate(ModuleIR& module, const std::string& outputPath,
                     IRType t2 = instr.args[1].type;
                     bool is64 = (t == IRType::I64 || t == IRType::U64 || t == IRType::PTR || t2 == IRType::I64 || t2 == IRType::U64 || t2 == IRType::PTR);
 
-                    if (is64 && (t == IRType::I32 || t == IRType::U32)) {
-                        if (isMem(a1)) addText("    movsxd rax, dword " + a1);
-                        else if (instr.args[0].kind == IRValue::CONSTANT) addText("    mov rax, " + a1);
-                        else addText("    movsxd rax, " + getSizedReg(a1, IRType::I32));
-                    } else {
-                        addText("    mov " + getSizedReg("rax", is64 ? IRType::I64 : t) + ", " + getSizedReg(a1, t));
-                    }
+                    // Widen one comparison operand into rax/r11 (Issue #21):
+                    // x86 has no `mov rax, r16`, so a 16/8-bit source must
+                    // be extended with movzx (unsigned) / movsx (signed).
+                    // Both sides are widened to the same width (64-bit when
+                    // either side is 64-bit, else 32-bit) so `cmp` always
+                    // sees matching operands. U32 uses a 32-bit mov (which
+                    // zero-extends); only I32 sign-extends via movsxd.
+                    auto widenCmpOp = [&](const std::string& dst, const IRValue& arg, const std::string& a, bool to64) {
+                        IRType srcT = arg.type;
+                        if (arg.kind == IRValue::LABEL) {
+                            addText("    lea " + dst + ", [rel " + arg.name + "]");
+                            return;
+                        }
+                        if (arg.kind == IRValue::CONSTANT) {
+                            if (to64) addText("    mov " + dst + ", " + a);
+                            else addText("    mov " + getSizedReg(dst, IRType::I32) + ", " + a);
+                            return;
+                        }
+                        std::string srcOp;
+                        if (isMem(a)) {
+                            if (srcT == IRType::I8 || srcT == IRType::U8 || srcT == IRType::BOOL) srcOp = "byte " + a;
+                            else if (srcT == IRType::I16 || srcT == IRType::U16) srcOp = "word " + a;
+                            else if (srcT == IRType::I32 || srcT == IRType::U32) srcOp = "dword " + a;
+                            else srcOp = (to64 ? "qword " + a : "dword " + a);
+                        } else {
+                            srcOp = getSizedReg(a, srcT);
+                        }
+                        if (to64) {
+                            if (srcT == IRType::I8) addText("    movsx " + dst + ", " + srcOp);
+                            else if (srcT == IRType::U8 || srcT == IRType::BOOL) addText("    movzx " + dst + ", " + srcOp);
+                            else if (srcT == IRType::I16) addText("    movsx " + dst + ", " + srcOp);
+                            else if (srcT == IRType::U16) addText("    movzx " + dst + ", " + srcOp);
+                            else if (srcT == IRType::I32) addText("    movsxd " + dst + ", " + srcOp);
+                            else if (srcT == IRType::U32) addText("    mov " + getSizedReg(dst, IRType::I32) + ", " + srcOp);
+                            else addText("    mov " + dst + ", " + srcOp);
+                        } else {
+                            std::string dst32 = getSizedReg(dst, IRType::I32);
+                            if (srcT == IRType::I8) addText("    movsx " + dst32 + ", " + srcOp);
+                            else if (srcT == IRType::U8 || srcT == IRType::BOOL) addText("    movzx " + dst32 + ", " + srcOp);
+                            else if (srcT == IRType::I16) addText("    movsx " + dst32 + ", " + srcOp);
+                            else if (srcT == IRType::U16) addText("    movzx " + dst32 + ", " + srcOp);
+                            else addText("    mov " + dst32 + ", " + srcOp);
+                        }
+                    };
+                    widenCmpOp("rax", instr.args[0], a1, is64);
+                    widenCmpOp("r11", instr.args[1], a2, is64);
 
-                    if (is64 && (t2 == IRType::I32 || t2 == IRType::U32)) {
-                        if (isMem(a2)) addText("    movsxd r11, dword " + a2);
-                        else if (instr.args[1].kind == IRValue::CONSTANT) addText("    mov r11, " + a2);
-                        else addText("    movsxd r11, " + getSizedReg(a2, IRType::I32));
-                    } else {
-                        addText("    mov " + getSizedReg("r11", is64 ? IRType::I64 : t2) + ", " + getSizedReg(a2, t2));
-                    }
-
-                    addText("    cmp " + getSizedReg("rax", is64 ? IRType::I64 : t) + ", " + getSizedReg("r11", is64 ? IRType::I64 : t));
+                    addText("    cmp " + getSizedReg("rax", is64 ? IRType::I64 : IRType::I32) + ", " + getSizedReg("r11", is64 ? IRType::I64 : IRType::I32));
                     bool isUnsigned = (t == IRType::U8 || t == IRType::U16 || t == IRType::U32 || t == IRType::U64 || t == IRType::PTR);
                     std::string setop = (instr.op == IROp::CMP_EQ ? "sete" : (instr.op == IROp::CMP_NE ? "setne" : (instr.op == IROp::CMP_LT ? (isUnsigned ? "setb" : "setl") : (instr.op == IROp::CMP_GT ? (isUnsigned ? "seta" : "setg") : (instr.op == IROp::CMP_LE ? (isUnsigned ? "setbe" : "setle") : (isUnsigned ? "setae" : "setge"))))));
                     addText("    " + setop + " al");
@@ -1106,20 +1147,28 @@ bool CodeGenerator::generate(ModuleIR& module, const std::string& outputPath,
                                             t == IRType::I32 || t == IRType::U32 ||
                                             t == IRType::BOOL);
                         if (instr.args[0].kind == IRValue::LABEL) {
-                            if (instr.args[1].kind == IRValue::LABEL) { addText("    lea rax, [rel " + val + "]"); addText("    mov qword [rel " + instr.args[0].name + "], rax"); }
-                            else {
-                                addText("    mov " + getSizedReg("rax", t) + ", " + getSizedReg(val, t));
-                                if (isNarrowInt) {
-                                    if (t == IRType::I8) addText("    movsx rax, al");
-                                    else if (t == IRType::U8 || t == IRType::BOOL) addText("    movzx rax, al");
-                                    else if (t == IRType::I16) addText("    movsx rax, ax");
-                                    else if (t == IRType::U16) addText("    movzx rax, ax");
-                                    else if (t == IRType::I32) addText("    movsxd rax, eax");
-                                    else addText("    mov rax, rax");  // U32 already zero-extended by mov eax
-                                    addText("    mov qword [rel " + instr.args[0].name + "], rax");
-                                } else {
-                                    addText("    mov " + sizePrefix + "[rel " + instr.args[0].name + "], " + getSizedReg("rax", t));
-                                }
+                            // Issue #20: globals occupy exactly their declared
+                            // bytes in .bss/.data (resb N), unlike 8-byte
+                            // local slots. Size the store by the global's
+                            // declared type: a qword store to a u8/u16/u32
+                            // global overwrites the following symbol.
+                            // LOAD already reads globals with the matching
+                            // narrow width (movzx/mov dword), so no
+                            // extend-to-qword is needed here.
+                            IRType st = t;
+                            auto git = globalTypes.find(instr.args[0].name);
+                            if (git != globalTypes.end()) st = git->second;
+                            std::string stPrefix = "qword ";
+                            if (st == IRType::I8 || st == IRType::U8) stPrefix = "byte ";
+                            else if (st == IRType::I16 || st == IRType::U16) stPrefix = "word ";
+                            else if (st == IRType::I32 || st == IRType::U32 || st == IRType::BOOL) stPrefix = "dword ";
+                            else if (st == IRType::I64 || st == IRType::U64 || st == IRType::PTR) stPrefix = "qword ";
+                            if (instr.args[1].kind == IRValue::LABEL) {
+                                addText("    lea rax, [rel " + val + "]");
+                                addText("    mov " + stPrefix + "[rel " + instr.args[0].name + "], " + getSizedReg("rax", st));
+                            } else {
+                                addText("    mov " + getSizedReg("rax", st) + ", " + getSizedReg(val, st));
+                                addText("    mov " + stPrefix + "[rel " + instr.args[0].name + "], " + getSizedReg("rax", st));
                             }
                         } else {
                             std::string addrReg = "r11";
