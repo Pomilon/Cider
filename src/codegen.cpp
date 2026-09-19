@@ -567,12 +567,17 @@ bool CodeGenerator::generate(ModuleIR& module, const std::string& outputPath,
                                 if (t == IRType::I64 || t == IRType::U64 || t == IRType::PTR) {
                                     IRType srcT = (instr.args.size() > 0 ? instr.args[0].type : t);
                                     bool srcIsConst = (instr.args.size() > 0 && instr.args[0].kind == IRValue::CONSTANT);
+                                    // NB: BOOL lives in 32-bit regs (xor r14d, 1
+                                    // zero-extends), so it widens like U32 via a
+                                    // plain 32-bit mov — never movzx (Issue #23:
+                                    // `movzx r32, r32` is invalid; movzx needs
+                                    // a byte/word source).
                                     if (!srcIsConst &&
-                                        (srcT == IRType::I8 || srcT == IRType::U8 || srcT == IRType::BOOL ||
+                                        (srcT == IRType::I8 || srcT == IRType::U8 ||
                                          srcT == IRType::I16 || srcT == IRType::U16)) {
                                         std::string ext = (srcT == IRType::I8 || srcT == IRType::I16) ? "movsx" : "movzx";
                                         std::string srcOp = isMem(a1)
-                                            ? ((srcT == IRType::I8 || srcT == IRType::U8 || srcT == IRType::BOOL)
+                                            ? ((srcT == IRType::I8 || srcT == IRType::U8)
                                                ? ("byte " + a1) : ("word " + a1))
                                             : getSizedReg(a1, srcT);
                                         if (isMem(d)) {
@@ -598,7 +603,7 @@ bool CodeGenerator::generate(ModuleIR& module, const std::string& outputPath,
                                         } else {
                                             addText("    movsxd " + getSizedReg(d, t) + ", " + getSizedReg(a1, IRType::I32));
                                         }
-                                    } else if (srcT == IRType::U32) {
+                                    } else if (srcT == IRType::U32 || srcT == IRType::BOOL) {
                                         // Zero-extension: 32-bit mov clears upper bits.
                                         if (isMem(d) && isMem(a1)) {
                                             addText("    mov eax, dword " + a1);
@@ -626,12 +631,14 @@ bool CodeGenerator::generate(ModuleIR& module, const std::string& outputPath,
                                 } else if (t == IRType::I32 || t == IRType::U32 || t == IRType::BOOL) {
                                     IRType srcT2 = (instr.args.size() > 0 ? instr.args[0].type : t);
                                     bool srcConst2 = (instr.args.size() > 0 && instr.args[0].kind == IRValue::CONSTANT);
+                                    // BOOL sources are already full 32-bit regs:
+                                    // a plain mov suffices (Issue #23).
                                     if (!srcConst2 &&
-                                        (srcT2 == IRType::I8 || srcT2 == IRType::U8 || srcT2 == IRType::BOOL ||
+                                        (srcT2 == IRType::I8 || srcT2 == IRType::U8 ||
                                          srcT2 == IRType::I16 || srcT2 == IRType::U16)) {
                                         std::string ext = (srcT2 == IRType::I8 || srcT2 == IRType::I16) ? "movsx" : "movzx";
                                         std::string srcOp = isMem(a1)
-                                            ? ((srcT2 == IRType::I8 || srcT2 == IRType::U8 || srcT2 == IRType::BOOL)
+                                            ? ((srcT2 == IRType::I8 || srcT2 == IRType::U8)
                                                ? ("byte " + a1) : ("word " + a1))
                                             : getSizedReg(a1, srcT2);
                                         if (isMem(d)) {
@@ -1023,11 +1030,38 @@ bool CodeGenerator::generate(ModuleIR& module, const std::string& outputPath,
                     if (toSaveAsm.size() % 2 != 0) addText("    sub rsp, 8");
                     for (const auto& reg : toSaveAsm) addText("    push " + reg);
 
-                    // REPLACE placeholders like {s}, {len}, {code} literally
+                    // REPLACE placeholders like {s}, {len}, {code} literally.
+                    // A width suffix re-sizes a REGISTER operand to the width
+                    // the template instruction needs (Issue #24): {fd:q} is
+                    // the 64-bit name (r15), {fd:d} 32-bit (r15d), {fd:w}
+                    // 16-bit, {fd:b} 8-bit. Plain {fd} keeps the declared
+                    // width. Suffixed forms are replaced first: {fd} is a
+                    // prefix of {fd:q} and would otherwise match inside it.
                     for (auto& pair : instr.asmMap) {
                         std::string raw = getOperand(pair.second);
-                        std::string replacement = getSizedReg(raw, pair.second.type);
+                        auto sizedAs = [&](char spec) -> std::string {
+                            IRType t = pair.second.type;
+                            if (spec == 'q' || spec == 'Q') t = IRType::U64;
+                            else if (spec == 'd' || spec == 'D') t = IRType::U32;
+                            else if (spec == 'w' || spec == 'W') t = IRType::U16;
+                            else if (spec == 'b' || spec == 'B') t = IRType::U8;
+                            return getSizedReg(raw, t);
+                        };
+                        std::string key = "{" + pair.first + ":";
                         size_t pos = 0;
+                        while ((pos = code.find(key, pos)) != std::string::npos) {
+                            size_t end = code.find('}', pos);
+                            if (end == std::string::npos) break;
+                            std::string spec = code.substr(pos + key.size(), end - (pos + key.size()));
+                            char c = spec.empty() ? '\0' : spec[0];
+                            std::string rep = (c == 'q' || c == 'Q' || c == 'd' || c == 'D' ||
+                                               c == 'w' || c == 'W' || c == 'b' || c == 'B')
+                                              ? sizedAs(c) : getSizedReg(raw, pair.second.type);
+                            code.replace(pos, end - pos + 1, rep);
+                            pos += rep.length();
+                        }
+                        std::string replacement = getSizedReg(raw, pair.second.type);
+                        pos = 0;
                         std::string search = "{" + pair.first + "}";
                         while ((pos = code.find(search, pos)) != std::string::npos) {
                             code.replace(pos, search.length(), replacement);
