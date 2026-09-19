@@ -75,10 +75,11 @@ private:
         return true;
     }
 
-    // Blank out the import statements starting at the given 1-based lines.
+    // Delete the import statements starting at the given 1-based lines.
     // An import only contains a module path and identifiers, so the first
     // ';' at or after the start line always terminates it (even when the
-    // statement spans lines). Everything else is copied verbatim.
+    // statement spans lines). Everything else is copied verbatim, so no
+    // blank gaps are left behind.
     static std::string stripImports(const std::string& text, const std::vector<int>& lines) {
         std::vector<std::string> split;
         {
@@ -86,15 +87,17 @@ private:
             std::string line;
             while (std::getline(ss, line)) split.push_back(line);
         }
+        std::set<size_t> drop;
         for (int start : lines) {
             for (size_t i = (start >= 1 ? (size_t)(start - 1) : 0); i < split.size(); ++i) {
-                bool done = split[i].find(';') != std::string::npos;
-                split[i].clear();
-                if (done) break;
+                drop.insert(i);
+                if (split[i].find(';') != std::string::npos) break;
             }
         }
         std::ostringstream out;
-        for (const auto& line : split) out << line << "\n";
+        for (size_t i = 0; i < split.size(); ++i) {
+            if (!drop.count(i)) out << split[i] << "\n";
+        }
         return out.str();
     }
 
