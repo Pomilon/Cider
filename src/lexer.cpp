@@ -227,6 +227,8 @@ Token Lexer::readString() {
             case 'n': raw_value += '\n'; break;
             case 't': raw_value += '\t'; break;
             case 'r': raw_value += '\r'; break;
+            case 'b': raw_value += '\b'; break;
+            case '0': raw_value += '\0'; break;
             default:
                 raw_value += '\\';
                 raw_value += escapedChar;
@@ -263,6 +265,8 @@ Token Lexer::readCharLiteral() {
         case 'n': raw_value = "\n"; break;
         case 't': raw_value = "\t"; break;
         case 'r': raw_value = "\r"; break;
+        case 'b': raw_value = "\b"; break;
+        case '0': raw_value = std::string("\0", 1); break;
         case '\\': raw_value = "\\"; break;
         case '\'': raw_value = "'"; break;
         default: raw_value = escapedChar; break;

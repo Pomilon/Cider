@@ -43,6 +43,8 @@ bool CodeGenerator::generate(ModuleIR& module, const std::string& outputPath,
             if (c == '\n') ss << "`, 10, `";
             else if (c == '\r') ss << "`, 13, `";
             else if (c == '\t') ss << "`, 9, `";
+            else if (c == '\b') ss << "`, 8, `";
+            else if (c == '\0') ss << "`, 0, `";
             else ss << c;
         }
         ss << "`";
