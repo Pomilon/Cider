@@ -7,6 +7,7 @@
 #include <string>
 
 #include "ast.h"
+#include "bundler.h"
 #include "codegen.h"
 #include "constant_folder.h"
 #include "errors.h"
@@ -26,7 +27,7 @@
 #include "vm.h"
 
 struct CliOptions {
-    std::string command;      // "parse" | "check" | "build" | "run" | "compile"
+    std::string command;      // "parse" | "check" | "build" | "run" | "compile" | "bundle"
     bool noOpt = false;
     std::string inputFile;
     std::string outputFile;
@@ -37,7 +38,7 @@ struct CliOptions {
 bool parseCli(int argc, char** argv, CliOptions& out) {
     if (argc < 2) return false;
     std::string cmd = argv[1];
-    if (cmd != "parse" && cmd != "check" && cmd != "build" && cmd != "run" && cmd != "compile") return false;
+    if (cmd != "parse" && cmd != "check" && cmd != "build" && cmd != "run" && cmd != "compile" && cmd != "bundle") return false;
     out.command = cmd;
     for (int i = 2; i < argc; ++i) {
         std::string a = argv[i];
@@ -145,8 +146,29 @@ int main(int argc, char** argv) {
     }
     CliOptions opts;
     if (!parseCli(argc, argv, opts)) {
-        std::fprintf(stderr, "usage: cider <parse|check|build|run|compile> [--no-opt] [-o out.asm] <file>\n");
+        std::fprintf(stderr, "usage: cider <parse|check|build|run|compile|bundle> [--no-opt] [-o out.asm] <file>\n");
         return 2;
+    }
+    // bundle is self-contained (see bundler.h): it runs before — and
+    // outside — the normal parse/collect/check pipeline.
+    if (opts.command == "bundle") {
+        cider::Bundler bundler;
+        cider::BundleResult r = bundler.bundle(opts.inputFile);
+        if (!r.ok) {
+            std::fprintf(stderr, "bundle error: %s\n", r.error.c_str());
+            return 1;
+        }
+        if (!opts.outputFile.empty()) {
+            std::ofstream out(opts.outputFile, std::ios::binary | std::ios::trunc);
+            if (!out) {
+                std::fprintf(stderr, "cannot write %s\n", opts.outputFile.c_str());
+                return 1;
+            }
+            out << r.output;
+        } else {
+            std::fwrite(r.output.data(), 1, r.output.size(), stdout);
+        }
+        return 0;
     }
     try {
         std::string text = readFile(opts.inputFile);

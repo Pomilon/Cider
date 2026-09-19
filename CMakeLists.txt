@@ -56,6 +56,10 @@ add_executable(ast_visitor_test tests/unit/ast_visitor_test.cpp)
 target_include_directories(ast_visitor_test PRIVATE src)
 add_test(NAME ast_visitor_test COMMAND ast_visitor_test)
 
+add_executable(bundle_test tests/unit/bundle_test.cpp src/parser.cpp src/lexer.cpp src/module_resolver.cpp)
+target_include_directories(bundle_test PRIVATE src)
+add_test(NAME bundle_test COMMAND bundle_test)
+
 add_executable(symbols_test tests/unit/symbols_test.cpp src/symbols.cpp)
 target_include_directories(symbols_test PRIVATE src)
 add_test(NAME symbols_test COMMAND symbols_test)
