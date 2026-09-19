@@ -1,0 +1,21 @@
+from std.alloc import malloc, free;
+
+func main() -> int {
+  var a: u16 = 100;
+  var b: u64 = 100;
+  if (a != b) { return 1; }
+  if (b != a) { return 2; }
+  var c: u16 = 200;
+  if (c == b) { return 3; }
+  if (b == c) { return 4; }
+  var p: *u16 = malloc(32) as *u16;
+  if (p == nilPtr) { return 5; }
+  *p = 300;
+  var last_idx: u64 = 300;
+  if (*p != last_idx) { return 6; }
+  if (last_idx != *p) { return 7; }
+  last_idx = 301;
+  if (*p == last_idx) { return 8; }
+  free(p as *void);
+  return 0;
+}
