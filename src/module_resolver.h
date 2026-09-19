@@ -8,8 +8,8 @@ namespace cider {
 
 enum class ModuleType {
     NOT_FOUND,
-    CIDER_SOURCE_FILE,   // .cdr
-    CIDER_PACKAGE_DIR,   // directory with __init__.cdr
+    CIDER_SOURCE_FILE,   // .cid
+    CIDER_PACKAGE_DIR,   // directory with __init__.cid
 };
 
 struct ResolutionResult {

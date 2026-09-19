@@ -62,7 +62,7 @@ def load_expected(name):
 
 def make_test(name):
     def test(self):
-        cdr = os.path.join(PROGRAMS, name, "main.cdr")
+        src = os.path.join(PROGRAMS, name, "main.cid")
         exp = load_expected(name)
         inp = None
         in_path = os.path.join(PROGRAMS, name, "input.txt")
@@ -70,9 +70,9 @@ def make_test(name):
             with open(in_path) as f:
                 inp = f.read()
 
-        r1 = run_cider(["run", "--no-opt", cdr], inp)
-        r2 = run_cider(["run", cdr], inp)
-        r3 = run_native(cdr, inp)
+        r1 = run_cider(["run", "--no-opt", src], inp)
+        r2 = run_cider(["run", src], inp)
+        r3 = run_native(src, inp)
 
         paths = [("vm-unopt", r1), ("vm-opt", r2), ("native", r3)]
         for label, r in paths:
@@ -104,7 +104,7 @@ def discover():
 def test_fixtures(self):
     fixtures = os.path.join(REPO, "tests", "fixtures")
     for name in sorted(os.listdir(fixtures)):
-        if not name.endswith(".cdr"):
+        if not name.endswith(".cid"):
             continue
         base = name[:-4]
         src = os.path.join(fixtures, name)

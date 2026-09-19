@@ -1,7 +1,7 @@
 #!/bin/bash
 set -euo pipefail
 BIN=${1:?usage: parse_cli_test.sh <cider-binary>}
-SRC=$(mktemp --suffix=.cdr)
+SRC=$(mktemp --suffix=.cid)
 trap 'rm -f "$SRC"' EXIT
 printf 'func f() -> int {\n  return 1 + 2;\n}\n' > "$SRC"
 OUT=$("$BIN" parse "$SRC")

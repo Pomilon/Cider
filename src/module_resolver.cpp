@@ -82,12 +82,12 @@ ResolutionResult ModuleResolver::resolve(const std::string& logicalPath, const s
     }
 
     for (const auto& basePath : paths) {
-        std::string fileCandidate = basePath + pathSegment + ".cdr";
+        std::string fileCandidate = basePath + pathSegment + ".cid";
         if (fileExists(fileCandidate)) {
             return {ModuleType::CIDER_SOURCE_FILE, fileCandidate, moduleName};
         }
 
-        std::string initCandidate = basePath + pathSegment + "/__init__.cdr";
+        std::string initCandidate = basePath + pathSegment + "/__init__.cid";
         if (fileExists(initCandidate)) {
             return {ModuleType::CIDER_PACKAGE_DIR, basePath + pathSegment, moduleName};
         }

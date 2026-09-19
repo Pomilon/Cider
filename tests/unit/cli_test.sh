@@ -10,7 +10,7 @@ set +e
 set -e
 echo "cli_test: OK"
 
-SRC=$(mktemp --suffix=.cdr)
+SRC=$(mktemp --suffix=.cid)
 trap 'rm -f "$SRC"' EXIT
 printf 'func main() -> void { }\n' > "$SRC"
 "$BIN" check "$SRC" || { echo "check clean failed"; exit 1; }

@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Run the main-branch legacy test corpus through the v2 compiler.
 
-For each tests/legacy/<name>.cdr:
+For each tests/legacy/<name>.cid:
   - VM:        cider run (optimized) and cider run --no-opt
   - Native:    cider compile -> nasm -> ld (or gcc for main-less binaries)
 Every path must exit with the code in tests/legacy/<name>.exit.
@@ -22,12 +22,12 @@ def run_cider(args, timeout=180):
     return r.returncode, r.stdout, r.stderr
 
 
-def run_native(cdr):
+def run_native(src):
     with tempfile.TemporaryDirectory() as tmp:
         asm = os.path.join(tmp, "prog.asm")
         obj = os.path.join(tmp, "prog.o")
         exe = os.path.join(tmp, "prog")
-        c = subprocess.run([CIDER, "compile", cdr, "-o", asm], capture_output=True, text=True)
+        c = subprocess.run([CIDER, "compile", src, "-o", asm], capture_output=True, text=True)
         if c.returncode != 0:
             return ("err", "compile", c.stderr.strip()[:200])
         a = subprocess.run(["nasm", "-O0", "-f", "elf64", asm, "-o", obj], capture_output=True, text=True)
@@ -48,16 +48,16 @@ def run_native(cdr):
 
 
 def main():
-    names = sorted(f[:-4] for f in os.listdir(LEGACY) if f.endswith(".cdr"))
+    names = sorted(f[:-4] for f in os.listdir(LEGACY) if f.endswith(".cid"))
     results = []
     for name in names:
-        cdr = os.path.join(LEGACY, name + ".cdr")
+        src = os.path.join(LEGACY, name + ".cid")
         exp_path = os.path.join(LEGACY, name + ".exit")
         expected = int(open(exp_path).read().strip()) if os.path.exists(exp_path) else None
 
-        vm_opt = run_cider(["run", cdr])
-        vm_noopt = run_cider(["run", "--no-opt", cdr])
-        native = run_native(cdr)
+        vm_opt = run_cider(["run", src])
+        vm_noopt = run_cider(["run", "--no-opt", src])
+        native = run_native(src)
 
         statuses = []
         if vm_opt[0] == 124 or vm_noopt[0] == 124:
