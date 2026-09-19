@@ -916,6 +916,10 @@ void VM::execAsm(const IRInstruction& instr) {
         if (name == "r11") { RegVal d; d.i = r11; return d; }
         if (!name.empty() && name[0] == '{') {
             std::string var = name.substr(1, name.size() - 2);
+            // Width suffix (Issue #24) is a codegen-only concern: the VM
+            // holds full int64 values, so {fd:q} resolves like {fd}.
+            size_t colon = var.find(':');
+            if (colon != std::string::npos) var = var.substr(0, colon);
             auto it = instr.asmMap.find(var);
             if (it == instr.asmMap.end()) throw VMError{"asm: unknown placeholder {" + var + "}"};
             return resolveValue(it->second);
@@ -971,6 +975,8 @@ void VM::execAsm(const IRInstruction& instr) {
             else if (!dst.empty() && dst[0] == '{') {
                 // Placeholder destination: write the value into the var's register.
                 std::string var = dst.substr(1, dst.size() - 2);
+                size_t colon = var.find(':');
+                if (colon != std::string::npos) var = var.substr(0, colon);
                 auto it = instr.asmMap.find(var);
                 if (it == instr.asmMap.end() || it->second.kind != IRValue::REGISTER)
                     throw VMError{"unsupported asm: " + line};
