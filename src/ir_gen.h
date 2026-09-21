@@ -1054,10 +1054,18 @@ public:
                 globalValues_[stmt.getName()] = IRValue::Label(stmt.getName());
                 return;
             }
-            double initVal = 0;
+            int64_t initVal = 0;
             if (stmt.getInitializer()) {
                 if (auto num = dynamic_cast<NumberExpr*>(stmt.getInitializer())) {
-                    initVal = num->getValue();
+                    initVal = (int64_t)num->getUIntValue();
+                } else {
+                    // Constant expressions (CID-014): fold `1 << 4`,
+                    // `0x10|0x20`, `~0x10`, ... so they land in .data
+                    // instead of silently reading 0 from .bss.
+                    uint64_t folded = 0;
+                    if (tryEvalConstU64(stmt.getInitializer(), folded)) {
+                        initVal = (int64_t)folded;
+                    }
                 }
             }
             int totalBytes = getTypeSize(sym->type);
@@ -1531,6 +1539,75 @@ public:
     // upper garbage): narrow (`dt.month = 9` -> `mov byte`) via masking,
     // widen (`d.PhysicalStart = 0x80000000` U32 -> U64 -> `mov qword`)
     // via MOV (codegen zero/sign-extends).
+    // Evaluate an integer constant expression for global initializers
+    // (CID-014): `1 << 4`, `0x10|0x20`, `~0x10`, `(1<<4)`, casts of
+    // constants, etc. Only folds what is exactly representable (integers,
+    // chars, groups, unary -/~, int binary ops with no div-by-zero and
+    // shifts < 64). Anything else (floats, identifiers, calls) returns
+    // false and the global keeps the old BSS-zero behavior.
+    bool tryEvalConstU64(Expression* expr, uint64_t& out) {
+        if (!expr) return false;
+        if (auto num = dynamic_cast<NumberExpr*>(expr)) {
+            if (num->isFloat()) return false;
+            out = num->getUIntValue();
+            return true;
+        }
+        if (auto ch = dynamic_cast<CharExpr*>(expr)) {
+            out = (uint64_t)(unsigned char)ch->getValue();
+            return true;
+        }
+        if (auto grp = dynamic_cast<GroupingExpr*>(expr)) {
+            return tryEvalConstU64(grp->getExpression(), out);
+        }
+        if (auto un = dynamic_cast<UnaryExpr*>(expr)) {
+            uint64_t v = 0;
+            if (!tryEvalConstU64(un->getOperand(), v)) return false;
+            if (un->getOperator() == "-") { out = 0 - v; return true; }
+            if (un->getOperator() == "~") { out = ~v; return true; }
+            return false;
+        }
+        if (auto cast = dynamic_cast<CastExpr*>(expr)) {
+            uint64_t v = 0;
+            if (!tryEvalConstU64(cast->getExpression(), v)) return false;
+            TypeInfo target = TypeInfo::fromAST(cast->getTargetType());
+            if (target.pointerLevel > 0) return false;
+            IRType irType = mapType(target.name);
+            if (irType == IRType::I8 || irType == IRType::U8) v &= 0xFFULL;
+            else if (irType == IRType::I16 || irType == IRType::U16) v &= 0xFFFFULL;
+            else if (irType == IRType::I32 || irType == IRType::U32 || irType == IRType::BOOL) v &= 0xFFFFFFFFULL;
+            else if (irType != IRType::I64 && irType != IRType::U64 && irType != IRType::PTR) return false;
+            out = v;
+            return true;
+        }
+        if (auto bin = dynamic_cast<BinaryExpr*>(expr)) {
+            uint64_t l = 0, r = 0;
+            if (!tryEvalConstU64(bin->getLeft(), l)) return false;
+            if (!tryEvalConstU64(bin->getRight(), r)) return false;
+            const std::string& op = bin->getOperator();
+            if (op == "+") out = l + r;
+            else if (op == "-") out = l - r;
+            else if (op == "*") out = l * r;
+            else if (op == "/") {
+                if (r == 0) return false;
+                out = l / r;
+            } else if (op == "%") {
+                if (r == 0) return false;
+                out = l % r;
+            } else if (op == "<<") {
+                if (r >= 64) return false;
+                out = l << r;
+            } else if (op == ">>") {
+                if (r >= 64) return false;
+                out = l >> r;
+            } else if (op == "&") out = l & r;
+            else if (op == "|") out = l | r;
+            else if (op == "^") out = l ^ r;
+            else return false;
+            return true;
+        }
+        return false;
+    }
+
     IRValue truncateIntToType(IRValue val, const TypeInfo& target) {
         IRType tgtIR = (target.pointerLevel > 0) ? IRType::PTR : mapType(target.name);
         bool tgtNarrow = (tgtIR == IRType::I8 || tgtIR == IRType::U8 ||

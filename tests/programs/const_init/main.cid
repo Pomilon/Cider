@@ -1,0 +1,22 @@
+var A: u32 = 1 << 4;
+var B: u32 = 0x10 | 0x20;
+var C: u32 = 0x10 & 0x30;
+var D: u32 = 0x10 ^ 0x20;
+var E: u32 = ~0x10 & 0xFF;
+var F: u64 = 1 << 40;
+var G: u64 = (1 << 4) + 2 * 3;
+var H: u32 = 100 / 4;
+var I: u32 = 100 % 7;
+
+func main() -> int {
+  if (A != 16) { return 1; }
+  if (B != 48) { return 2; }
+  if (C != 16) { return 3; }
+  if (D != 48) { return 4; }
+  if (E != 239) { return 5; }
+  if (F != 1099511627776) { return 6; }
+  if (G != 22) { return 7; }
+  if (H != 25) { return 8; }
+  if (I != 2) { return 9; }
+  return 0;
+}

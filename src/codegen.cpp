@@ -122,7 +122,7 @@ bool CodeGenerator::generate(ModuleIR& module, const std::string& outputPath,
             if (var.type == IRType::I8 || var.type == IRType::U8) sizeDir = "db";
             else if (var.type == IRType::I16 || var.type == IRType::U16) sizeDir = "dw";
             else if (var.type == IRType::I32 || var.type == IRType::U32) sizeDir = "dd";
-            addData(var.name + ": " + sizeDir + " " + fmtImm((int64_t)var.initialValue, var.type));
+            addData(var.name + ": " + sizeDir + " " + fmtImm(var.initialValue, var.type));
         } else {
             if (var.totalBytes > 0) {
                 addBss(var.name + ": resb " + std::to_string(var.totalBytes));

@@ -166,11 +166,11 @@ public:
     struct GlobalVar {
         std::string name;
         IRType type;
-        double initialValue;
+        int64_t initialValue;
         int arraySize = 0;
         int totalBytes = 0;
     };
-    void addGlobalVar(const std::string& name, IRType type, double init = 0, int arraySize = 0, int totalBytes = 0) {
+    void addGlobalVar(const std::string& name, IRType type, int64_t init = 0, int arraySize = 0, int totalBytes = 0) {
         globalVars_.push_back({name, type, init, arraySize, totalBytes});
     }
     const std::vector<GlobalVar>& getGlobalVars() const { return globalVars_; }
