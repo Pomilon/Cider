@@ -1,0 +1,5 @@
+(Program
+  (ExternDecl g_ext u64)
+  (FunctionDecl ext_fn extern (returns int) (body))
+  (FunctionDecl main (returns int) (body (Return (Number 0))))
+)

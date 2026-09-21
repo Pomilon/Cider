@@ -964,7 +964,10 @@ std::unique_ptr<Statement> Parser::parseStatement() {
         if (currentToken_.type == TokenType::FUNCTION || currentToken_.type == TokenType::FUNC) {
             return parseFunctionDeclaration(false, false, false, true);
         }
-        error("Expected 'func' after 'extern'.");
+        if (currentToken_.type == TokenType::VAR) {
+            return parseVarDeclarationStatement(true);
+        }
+        error("Expected 'func' or 'var' after 'extern'.");
         return nullptr;
     }
     case TokenType::FUNCTION:
@@ -1181,7 +1184,7 @@ std::vector<std::string> Parser::parseTemplateParams() {
     return params;
 }
 
-std::unique_ptr<Statement> Parser::parseVarDeclarationStatement() {
+std::unique_ptr<Statement> Parser::parseVarDeclarationStatement(bool isExtern) {
     int line = currentToken_.line;
     int col = currentToken_.column;
     bool isConst = (currentToken_.type == TokenType::CONST);
@@ -1205,6 +1208,10 @@ std::unique_ptr<Statement> Parser::parseVarDeclarationStatement() {
 
     std::unique_ptr<Expression> initializer = nullptr;
     if (currentToken_.type == TokenType::ASSIGN) {
+        if (isExtern) {
+            error("Extern variables cannot have initializers.");
+            return nullptr;
+        }
         nextToken();  // Consume '='
         initializer = parseExpression();
     } else if (isConst) {
@@ -1218,7 +1225,7 @@ std::unique_ptr<Statement> Parser::parseVarDeclarationStatement() {
     }
     nextToken();  // Consume ';'
 
-    return std::make_unique<VarDeclStmt>(varName, std::move(initializer), std::move(type), line, col, isConst);
+    return std::make_unique<VarDeclStmt>(varName, std::move(initializer), std::move(type), line, col, isConst, isExtern);
 }
 
 std::unique_ptr<Statement> Parser::parseAssignmentStatement(std::unique_ptr<Expression> target) {

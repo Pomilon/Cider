@@ -57,6 +57,7 @@ struct Symbol {
     int col;
     bool isConst = false;
     bool isExported = false;
+    bool isExtern = false;  // linker-provided (extern var / extern func)
     double constValue = 0;  // For const variables and enum variant values
 
     int memoryOffset = 0;  // stack offset or global address (set during codegen)
@@ -65,7 +66,6 @@ struct Symbol {
 struct FunctionSymbol : public Symbol {
     std::vector<TypeInfo> parameterTypes;
     TypeInfo returnType;
-    bool isExtern = false;
     bool isAsync = false;
 };
 

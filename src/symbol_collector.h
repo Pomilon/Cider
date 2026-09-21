@@ -105,6 +105,7 @@ public:
         sym->line = stmt.getLine();
         sym->col = stmt.getColumn();
         sym->isConst = stmt.isConst();
+        sym->isExtern = stmt.isExtern();
 
         if (symbolTable_.getCurrentScope()->resolveLocal(sym->name)) {
             reporter_.error("Redeclaration of variable '" + sym->name + "'", sym->line, sym->col);

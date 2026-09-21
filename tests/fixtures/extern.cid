@@ -1,0 +1,6 @@
+extern var g_ext: u64;
+extern func ext_fn() -> int;
+
+func main() -> int {
+  return 0;
+}

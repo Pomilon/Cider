@@ -1033,6 +1033,16 @@ public:
         }
         symbolTable_.define(sym);
 
+        if (stmt.isExtern()) {
+            // Linker-provided symbol (CID-001): no storage emitted, just an
+            // extern directive; uses address it like a global. The VM has no
+            // linker, so running such programs fails there with a clear
+            // unresolved-label error.
+            module_.addExternFunction(stmt.getName());
+            globalValues_[stmt.getName()] = IRValue::Label(stmt.getName());
+            return;
+        }
+
         if (!currentFunction_) {
             if (auto strInit = dynamic_cast<StringExpr*>(stmt.getInitializer())) {
                 std::string strLabel = "_gs" + std::to_string(globalStrCount_++);

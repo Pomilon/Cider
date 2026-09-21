@@ -596,20 +596,22 @@ private:
 
 class VarDeclStmt : public Statement {
 public:
-    VarDeclStmt(const std::string& name, std::unique_ptr<Expression> initializer, std::unique_ptr<TypeAST> type, int line, int col, bool isConst = false)
-        : Statement(VAR_DECL_STMT, line, col), name_(name), initializer_(std::move(initializer)), type_(std::move(type)), isConst_(isConst) {}
+    VarDeclStmt(const std::string& name, std::unique_ptr<Expression> initializer, std::unique_ptr<TypeAST> type, int line, int col, bool isConst = false, bool isExtern = false)
+        : Statement(VAR_DECL_STMT, line, col), name_(name), initializer_(std::move(initializer)), type_(std::move(type)), isConst_(isConst), isExtern_(isExtern) {}
     const std::string& getName() const { return name_; }
     Expression* getInitializer() const { return initializer_.get(); }
     void setInitializer(std::unique_ptr<Expression> initializer) { initializer_ = std::move(initializer); }
     std::unique_ptr<Expression> takeInitializer() { return std::move(initializer_); }
     TypeAST* getTypeAST() const { return type_.get(); }
     bool isConst() const { return isConst_; }
+    bool isExtern() const { return isExtern_; }
     void dump(std::string& out, int depth) const override;
 private:
     std::string name_;
     std::unique_ptr<Expression> initializer_;
     std::unique_ptr<TypeAST> type_;
     bool isConst_;
+    bool isExtern_ = false;
 };
 
 class AssignStmt : public Statement {
@@ -1057,7 +1059,7 @@ public:
 
 
 inline void VarDeclStmt::dump(std::string& out, int depth) const {
-    out += isConst_ ? "(ConstDecl " : "(VarDecl ";
+    out += isExtern_ ? "(ExternDecl " : (isConst_ ? "(ConstDecl " : "(VarDecl ");
     out += name_ + " ";
     if (type_) type_->dump(out, depth);
     if (initializer_) {

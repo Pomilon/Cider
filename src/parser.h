@@ -66,7 +66,7 @@ private:
     Precedence getPrecedence(TokenType type);
 
     std::unique_ptr<Statement> parseStatement();
-    std::unique_ptr<Statement> parseVarDeclarationStatement();
+    std::unique_ptr<Statement> parseVarDeclarationStatement(bool isExtern = false);
     std::unique_ptr<Statement> parseAssignmentStatement(std::unique_ptr<Expression> target);
     std::unique_ptr<Statement> parseIfStatement();
     std::unique_ptr<Statement> parseWhileStatement();
