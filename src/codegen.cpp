@@ -227,7 +227,10 @@ bool CodeGenerator::generate(ModuleIR& module, const std::string& outputPath,
         }
 
         int extraStack = totalStack - savedRegsSize;
+        int prologueFixupIndex = -1;
+        int maxSlotOffset = 0;
         if (extraStack > 0) {
+            prologueFixupIndex = (int)textSection.size();
             addText("    sub rsp, " + std::to_string(extraStack));
         }
 
@@ -242,6 +245,7 @@ bool CodeGenerator::generate(ModuleIR& module, const std::string& outputPath,
                     const auto& a = alloc.at(val.name);
                     if (a.isSpilled) {
                         int offset = spillBase + (-a.stackOffset);
+                        if (offset > maxSlotOffset) maxSlotOffset = offset;
                         return "[rbp - " + std::to_string(offset) + "]";
                     }
                     return a.reg;
@@ -1398,6 +1402,24 @@ bool CodeGenerator::generate(ModuleIR& module, const std::string& outputPath,
             }
         }
         genEpilogue(func->getReturnType() == IRType::VOID);
+
+        // Fix up the prologue frame size now that the whole body is emitted.
+        // Frame-overrun fix (Cider port CID-009): a spilled value can be
+        // addressed at an offset deeper than spillBase + regAllocStackSize
+        // (IR temporaries with no allocator entry), so size the frame by the
+        // deepest slot actually referenced. Compared against the FULL frame
+        // (extraStack + pushed regs): comparing against extraStack alone
+        // over-grows every spilling function by up to 48 bytes.
+        if (prologueFixupIndex >= 0) {
+            int frameSize = extraStack + savedRegsSize;
+            int needed = maxSlotOffset + 8;
+            if (needed > frameSize) {
+                // savedRegsSize is 16-aligned, so the sub stays aligned.
+                int paddedTotal = ((needed + 15) / 16) * 16;
+                textSection[(size_t)prologueFixupIndex] =
+                    "    sub rsp, " + std::to_string(paddedTotal - savedRegsSize);
+            }
+        }
     }
 
     std::ofstream out(outputPath, std::ios::trunc);
