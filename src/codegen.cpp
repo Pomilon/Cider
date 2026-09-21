@@ -275,6 +275,20 @@ bool CodeGenerator::generate(ModuleIR& module, const std::string& outputPath,
                        isMem(getOperand(arg))) {
                 addText("    mov eax, dword " + getOperand(arg));
                 addText("    push rax");
+            } else if (arg.kind == IRValue::CONSTANT &&
+                       arg.type != IRType::F32 && arg.type != IRType::F64 &&
+                       ((int64_t)arg.intValue > (int64_t)INT32_MAX ||
+                        (int64_t)arg.intValue < (int64_t)INT32_MIN)) {
+                // x86-64 push takes imm32 only (CID-018): `push 0xFFAAAAAA`
+                // warns and sign-extends. Materialize out-of-range
+                // immediates first: 32-bit values via eax (zero-extends),
+                // wider ones via movabs.
+                if ((uint64_t)arg.intValue <= 0xFFFFFFFFULL) {
+                    addText("    mov eax, " + getOperand(arg));
+                } else {
+                    addText("    mov rax, " + getOperand(arg));
+                }
+                addText("    push rax");
             } else {
                 addText("    push " + getOperand(arg));
             }
@@ -1386,7 +1400,18 @@ bool CodeGenerator::generate(ModuleIR& module, const std::string& outputPath,
                     break;
                 }
                 case IROp::PUSH: {
-                    if (instr.args[0].kind == IRValue::CONSTANT) {
+                    if (instr.args[0].kind == IRValue::CONSTANT &&
+                        instr.args[0].type != IRType::F32 && instr.args[0].type != IRType::F64 &&
+                        ((int64_t)instr.args[0].intValue > (int64_t)INT32_MAX ||
+                         (int64_t)instr.args[0].intValue < (int64_t)INT32_MIN)) {
+                        // Same imm32-only push rule as call args (CID-018).
+                        if ((uint64_t)instr.args[0].intValue <= 0xFFFFFFFFULL) {
+                            addText("    mov eax, " + fmtImm(instr.args[0].intValue, instr.args[0].type));
+                        } else {
+                            addText("    mov rax, " + fmtImm(instr.args[0].intValue, instr.args[0].type));
+                        }
+                        addText("    push rax");
+                    } else if (instr.args[0].kind == IRValue::CONSTANT) {
                         addText("    push " + fmtImm(instr.args[0].intValue, instr.args[0].type));
                     } else if (isMem(a1)) {
                         IRType t = instr.args[0].type;
