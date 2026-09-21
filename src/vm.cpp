@@ -129,6 +129,18 @@ VMResult VM::run(const ModuleIR& module, const std::string& runFunction) {
                 }
             } else {
                 int64_t x = a.i, y = b.i;
+                // Shift counts mask to 6 bits (x86 semantics; also avoids
+                // C++ UB for counts >= 64). Right shift is arithmetic for
+                // signed values, logical for unsigned (the value's type).
+                uint64_t ux = (uint64_t)x;
+                unsigned n = (unsigned)(y & 63);
+                bool srcUnsigned = false;
+                if (instr.op == IROp::RSHIFT && instr.args.size() > 0) {
+                    IRType srcT = instr.args[0].type;
+                    srcUnsigned = (srcT == IRType::U8 || srcT == IRType::U16 ||
+                                   srcT == IRType::U32 || srcT == IRType::U64 ||
+                                   srcT == IRType::PTR || srcT == IRType::BOOL);
+                }
                 switch (instr.op) {
                 case IROp::ADD: d.i = x + y; break;
                 case IROp::SUB: d.i = x - y; break;
@@ -138,8 +150,8 @@ VMResult VM::run(const ModuleIR& module, const std::string& runFunction) {
                 case IROp::BIT_AND: d.i = x & y; break;
                 case IROp::BIT_OR: d.i = x | y; break;
                 case IROp::BIT_XOR: d.i = x ^ y; break;
-                case IROp::LSHIFT: d.i = x << y; break;
-                case IROp::RSHIFT: d.i = x >> y; break;
+                case IROp::LSHIFT: d.i = (int64_t)(ux << n); break;
+                case IROp::RSHIFT: d.i = srcUnsigned ? (int64_t)(ux >> n) : (x >> n); break;
                 default: break;
                 }
             }

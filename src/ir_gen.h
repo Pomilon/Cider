@@ -1656,9 +1656,14 @@ public:
         IRValue masked = IRValue::Register(nextTemp(), IRType::I32);
         currentBlock_->addInstruction({IROp::BIT_AND, masked, {shifted, IRValue::Constant(bitfieldMask(bitWidth), IRType::I32)}});
         if (isSigned && bitWidth < 32) {
-            IRValue sign = IRValue::Register(nextTemp(), IRType::I32);
+            // Round-trip the field bits through the top of the word. These
+            // temps are U32 (not I32) deliberately: the shifts are bit
+            // manipulation, and a signed 32-bit RSHIFT (sar) would sign-fill
+            // and corrupt values like 5-in-3-bits that must read back
+            // unchanged. Genuine signed arithmetic keeps I32 and sar.
+            IRValue sign = IRValue::Register(nextTemp(), IRType::U32);
             currentBlock_->addInstruction({IROp::LSHIFT, sign, {masked, IRValue::Constant(32 - bitWidth, IRType::I32)}});
-            IRValue value = IRValue::Register(nextTemp(), IRType::I32);
+            IRValue value = IRValue::Register(nextTemp(), IRType::U32);
             currentBlock_->addInstruction({IROp::RSHIFT, value, {sign, IRValue::Constant(32 - bitWidth, IRType::I32)}});
             return value;
         }

@@ -875,7 +875,14 @@ bool CodeGenerator::generate(ModuleIR& module, const std::string& outputPath,
                 case IROp::BIT_XOR:
                 case IROp::LSHIFT:
                 case IROp::RSHIFT: {
+                    // Signed right shift is arithmetic (sar), unsigned is
+                    // logical (shr): `u64 >> 32` must zero-fill, `i64 >> 2`
+                    // must sign-fill. The value's own type decides.
                     std::string opName = (instr.op == IROp::BIT_AND ? "and" : (instr.op == IROp::BIT_OR ? "or" : (instr.op == IROp::BIT_XOR ? "xor" : (instr.op == IROp::LSHIFT ? "shl" : "shr"))));
+                    if (instr.op == IROp::RSHIFT && instr.args.size() > 0) {
+                        IRType srcT = instr.args[0].type;
+                        if (srcT == IRType::I8 || srcT == IRType::I16 || srcT == IRType::I32 || srcT == IRType::I64) opName = "sar";
+                    }
                     IRType t = (instr.dest ? instr.dest->type : IRType::I32);
                     if (d != a1) {
                         if (isMem(d) && isMem(a1)) {

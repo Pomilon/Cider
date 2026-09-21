@@ -1,0 +1,18 @@
+var TOP: u64 = 0xFFFFFFFFFFFFFFFF;
+var HIGH: u64 = 0xFFFF800000000000;
+var MAXI: u64 = 0x7FFFFFFFFFFFFFFF;
+
+func main() -> int {
+  if (TOP != 0xFFFFFFFFFFFFFFFF) { return 1; }
+  if (HIGH != 0xFFFF800000000000) { return 2; }
+  if (MAXI != 0x7FFFFFFFFFFFFFFF) { return 3; }
+  var u: u64 = 0xFFFF800000000000;
+  if ((u >> 32) != 0xFFFF8000) { return 4; }
+  var s: i64 = 0 - 8;
+  if ((s >> 2) != (0 - 2)) { return 5; }
+  var all: u64 = 0xFFFFFFFFFFFFFFFF;
+  if ((all >> 63) != 1) { return 6; }
+  var neg: i64 = 0 - 1;
+  if ((neg >> 63) != (0 - 1)) { return 7; }
+  return 0;
+}
