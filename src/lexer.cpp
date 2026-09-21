@@ -229,6 +229,30 @@ Token Lexer::readString() {
             case 'r': raw_value += '\r'; break;
             case 'b': raw_value += '\b'; break;
             case '0': raw_value += '\0'; break;
+            case 'x': {
+                // CID-030: \xNN hex escape (one or two hex digits).
+                advance(); // consume 'x'
+                int value = 0;
+                int digits = 0;
+                while (digits < 2) {
+                    char h = peek();
+                    int d = -1;
+                    if (h >= '0' && h <= '9') d = h - '0';
+                    else if (h >= 'a' && h <= 'f') d = h - 'a' + 10;
+                    else if (h >= 'A' && h <= 'F') d = h - 'A' + 10;
+                    if (d < 0) break;
+                    value = value * 16 + d;
+                    digits++;
+                    advance();
+                }
+                if (digits == 0) {
+                    reporter_.error("\\x escape requires at least one hex digit", currentLine, currentCol);
+                    raw_value += 'x';
+                } else {
+                    raw_value += static_cast<char>(value);
+                }
+                continue; // digits (and 'x') already consumed
+            }
             default:
                 raw_value += '\\';
                 raw_value += escapedChar;
@@ -258,6 +282,7 @@ Token Lexer::readCharLiteral() {
     }
 
     std::string raw_value;
+    bool escapeConsumedDigits = false;
     if (peek() == '\\') {
         advance();
         char escapedChar = peek();
@@ -269,12 +294,37 @@ Token Lexer::readCharLiteral() {
         case '0': raw_value = std::string("\0", 1); break;
         case '\\': raw_value = "\\"; break;
         case '\'': raw_value = "'"; break;
+        case 'x': {
+            // CID-030: \xNN hex escape (one or two hex digits).
+            advance(); // consume 'x'
+            int value = 0;
+            int digits = 0;
+            while (digits < 2) {
+                char h = peek();
+                int d = -1;
+                if (h >= '0' && h <= '9') d = h - '0';
+                else if (h >= 'a' && h <= 'f') d = h - 'a' + 10;
+                else if (h >= 'A' && h <= 'F') d = h - 'A' + 10;
+                if (d < 0) break;
+                value = value * 16 + d;
+                digits++;
+                advance();
+            }
+            if (digits == 0) {
+                reporter_.error("\\x escape requires at least one hex digit", currentLine, currentCol);
+                raw_value = "x";
+            } else {
+                raw_value = std::string(1, static_cast<char>(value));
+            }
+            escapeConsumedDigits = true;
+            break;
+        }
         default: raw_value = escapedChar; break;
         }
     } else {
         raw_value = peek();
     }
-    advance();
+    if (!escapeConsumedDigits) advance();
 
     if (peek() != '\'') {
         reporter_.error("Unterminated character literal, expected '", currentLine, currentCol);
