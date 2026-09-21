@@ -1,0 +1,23 @@
+func use(x: float) -> float {
+  var a: float = x + 1.0;
+  var b: float = a + 2.0;
+  var c: float = b + 3.0;
+  var d: float = c + 4.0;
+  var e: float = d + 5.0;
+  var f: float = e + 6.0;
+  var g: float = f + 7.0;
+  var h: float = g + 8.0;
+  return h;
+}
+
+func calc(sx: float, sy: float) -> int {
+  var r0: float = use(1.0);
+  var t: int = (r0 as int) + (sx as int) + (sy as int);
+  return t;
+}
+
+func main() -> int {
+  var r: int = calc(2.0, 4.0);
+  if (r != 43) { return 1; }
+  return 0;
+}

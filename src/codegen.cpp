@@ -1396,13 +1396,34 @@ bool CodeGenerator::generate(ModuleIR& module, const std::string& outputPath,
                     for (const auto& reg : callerSaved) {
                         for (const auto& [var, res] : alloc) { if (!res.isSpilled && res.reg == reg) { if (instr.dest && instr.dest->name == var && reg == "rax") continue; toSave.push_back(reg); break; } }
                     }
+                    // XMM registers are all caller-saved (CID-027): a
+                    // callee freely uses xmm8-xmm15 as scratch, so any
+                    // float value held in an XMM reg across the call must
+                    // be spilled here. The dest's own reg is skipped (the
+                    // return value arrives in it).
+                    std::string destReg;
+                    if (instr.dest && alloc.count(instr.dest->name) && !alloc.at(instr.dest->name).isSpilled) {
+                        destReg = alloc.at(instr.dest->name).reg;
+                    }
+                    std::vector<std::string> toSaveXmm;
+                    for (const auto& [var, res] : alloc) {
+                        if (!res.isSpilled && res.reg.rfind("xmm", 0) == 0 && res.reg != destReg) {
+                            if (std::find(toSaveXmm.begin(), toSaveXmm.end(), res.reg) == toSaveXmm.end()) {
+                                toSaveXmm.push_back(res.reg);
+                            }
+                        }
+                    }
 
-                    // displacement = 8(rbp) + 40(callee) + extraStack + toSave*8
-                    int displacement = savedRegsSize + extraStack + (toSave.size() * 8);
+                    // displacement = 8(rbp) + 40(callee) + extraStack + toSave*8 + xmmSaves*8
+                    int displacement = savedRegsSize + extraStack + ((int)toSave.size() + (int)toSaveXmm.size()) * 8;
                     int padding = (displacement % 16 != 0) ? 8 : 0;
 
                     if (padding > 0) addText("    sub rsp, " + std::to_string(padding));
                     for (const auto& reg : toSave) addText("    push " + reg);
+                    for (const auto& reg : toSaveXmm) {
+                        addText("    sub rsp, 8");
+                        addText("    movq [rsp], " + reg);
+                    }
 
                     if (instr.op == IROp::CALL) {
                         if (instr.args[0].kind == IRValue::LABEL) {
@@ -1470,14 +1491,18 @@ bool CodeGenerator::generate(ModuleIR& module, const std::string& outputPath,
 
                         addText("    call r11");
                     }
+                    for (auto it = toSaveXmm.rbegin(); it != toSaveXmm.rend(); ++it) {
+                        addText("    movq " + *it + ", [rsp]");
+                        addText("    add rsp, 8");
+                    }
                     for (auto it = toSave.rbegin(); it != toSave.rend(); ++it) addText("    pop " + *it);
                     if (padding > 0) addText("    add rsp, " + std::to_string(padding));
                     if (instr.dest && !d.empty() && d != "none") {
                         IRType retType = instr.dest->type;
                         if (retType == IRType::F32)
-                            addText("    movss " + d + ", xmm0");
+                            addText("    movss " + (isMem(d) ? "dword " + d : d) + ", xmm0");
                         else if (retType == IRType::F64)
-                            addText("    movsd " + d + ", xmm0");
+                            addText("    movsd " + (isMem(d) ? "qword " + d : d) + ", xmm0");
                         else
                             addText("    mov " + getSizedReg(d, retType) + ", " + getSizedReg("rax", retType));
                     }
