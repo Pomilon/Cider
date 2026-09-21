@@ -1182,11 +1182,19 @@ public:
                 IRValue val = lastValue_;
                 if (sym->type.pointerLevel == 0) {
                     IRType declType = mapType(sym->type.name);
+                    // Narrow/unsigned/bool float targets had no conversion
+                    // at all (CID-025); I32/I64 keep the direct path below.
+                    bool declNeedsFloatHelp = (declType == IRType::I8 || declType == IRType::U8 ||
+                                               declType == IRType::I16 || declType == IRType::U16 ||
+                                               declType == IRType::U32 || declType == IRType::U64 ||
+                                               declType == IRType::BOOL);
                     if ((val.type == IRType::I32 || val.type == IRType::I64) &&
                         (declType == IRType::F32 || declType == IRType::F64)) {
                         IRValue converted = IRValue::Register(nextTemp(), declType);
                         currentBlock_->addInstruction({IROp::CVT_ITOF, converted, {val}});
                         val = converted;
+                    } else if ((val.type == IRType::F32 || val.type == IRType::F64) && declNeedsFloatHelp) {
+                        val = convertFloatToInt(val, sym->type);
                     } else if ((val.type == IRType::F32 || val.type == IRType::F64) &&
                                (declType == IRType::I32 || declType == IRType::I64)) {
                         IRValue converted = IRValue::Register(nextTemp(), declType);
@@ -1668,6 +1676,20 @@ public:
             return true;
         }
         return false;
+    }
+
+    // Float-to-integer cast for any integer target (CID-025): convert
+    // with full 64-bit precision, then narrow to the target width, so
+    // every cast lowers to cvttss2si/cvttsd2si. (Out-of-int64-range
+    // values are C-UB, same as the signed-32 path before.)
+    IRValue convertFloatToInt(IRValue val, const TypeInfo& targetType) {
+        IRType tgtIR = (targetType.pointerLevel > 0) ? IRType::PTR : mapType(targetType.name);
+        IRValue wide = IRValue::Register(nextTemp(), IRType::I64);
+        currentBlock_->addInstruction({IROp::CVT_FTOI, wide, {val}});
+        if (tgtIR == IRType::I64) return wide;
+        IRValue typed = IRValue::Register(nextTemp(), tgtIR);
+        currentBlock_->addInstruction({IROp::MOV, typed, {wide}});
+        return truncateIntToType(typed, targetType);
     }
 
     IRValue truncateIntToType(IRValue val, const TypeInfo& target) {
@@ -2854,22 +2876,33 @@ public:
         IRValue dest = IRValue::Register(nextTemp(), irType);
 
         IRType srcType = lastValue_.type;
-        // Detect int<->float conversions
-        if ((srcType == IRType::F32 || srcType == IRType::F64) &&
-            (irType == IRType::I32 || irType == IRType::I64)) {
-            currentBlock_->addInstruction({IROp::CVT_FTOI, dest, {lastValue_}});
-        } else if ((srcType == IRType::I32 || srcType == IRType::I64) &&
-                   (irType == IRType::F32 || irType == IRType::F64)) {
-            currentBlock_->addInstruction({IROp::CVT_ITOF, dest, {lastValue_}});
-        } else if (irType == IRType::I8 || irType == IRType::U8) {
-            currentBlock_->addInstruction({IROp::BIT_AND, dest, {lastValue_, IRValue::Constant(0xFF, IRType::I32)}});
-        } else if (irType == IRType::I16 || irType == IRType::U16) {
-            currentBlock_->addInstruction({IROp::BIT_AND, dest, {lastValue_, IRValue::Constant(0xFFFF, IRType::I32)}});
+        // Detect int<->float conversions. Narrow/unsigned/bool float
+        // targets had no conversion at all (CID-025): convert with
+        // 64-bit precision first, then narrow. I32/I64 keep the direct
+        // path below.
+        bool tgtNeedsFloatHelp = (irType == IRType::I8 || irType == IRType::U8 ||
+                                  irType == IRType::I16 || irType == IRType::U16 ||
+                                  irType == IRType::U32 || irType == IRType::U64 ||
+                                  irType == IRType::BOOL);
+        if ((srcType == IRType::F32 || srcType == IRType::F64) && tgtNeedsFloatHelp) {
+            lastValue_ = convertFloatToInt(lastValue_, targetType);
         } else {
-            currentBlock_->addInstruction({IROp::MOV, dest, {lastValue_}});
+            if ((srcType == IRType::F32 || srcType == IRType::F64) &&
+                (irType == IRType::I32 || irType == IRType::I64)) {
+                currentBlock_->addInstruction({IROp::CVT_FTOI, dest, {lastValue_}});
+            } else if ((srcType == IRType::I32 || srcType == IRType::I64) &&
+                       (irType == IRType::F32 || irType == IRType::F64)) {
+                currentBlock_->addInstruction({IROp::CVT_ITOF, dest, {lastValue_}});
+            } else if (irType == IRType::I8 || irType == IRType::U8) {
+                currentBlock_->addInstruction({IROp::BIT_AND, dest, {lastValue_, IRValue::Constant(0xFF, IRType::I32)}});
+            } else if (irType == IRType::I16 || irType == IRType::U16) {
+                currentBlock_->addInstruction({IROp::BIT_AND, dest, {lastValue_, IRValue::Constant(0xFFFF, IRType::I32)}});
+            } else {
+                currentBlock_->addInstruction({IROp::MOV, dest, {lastValue_}});
+            }
+            lastValue_ = dest;
         }
 
-        lastValue_ = dest;
         lastExprType_ = targetType;
     }
     void visit(MatchStmt& stmt) override {

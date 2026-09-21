@@ -507,12 +507,19 @@ bool CodeGenerator::generate(ModuleIR& module, const std::string& outputPath,
                     if (isMem(dstReg)) {
                         if (srcType == IRType::F64) {
                             addText("    movsd xmm0, " + a1);
-                            addText("    cvttsd2si eax, xmm0");
                         } else {
                             addText("    movss xmm0, " + a1);
-                            addText("    cvttss2si eax, xmm0");
                         }
-                        addText("    mov " + dstReg + ", eax");
+                        // Convert at the destination width (CID-025): a
+                        // 32-bit convert cannot feed a 64-bit slot, and a
+                        // bare `mov <narrow-mem>, eax` would not assemble.
+                        if (t == IRType::I64 || t == IRType::U64 || t == IRType::PTR) {
+                            addText(srcType == IRType::F64 ? "    cvttsd2si rax, xmm0" : "    cvttss2si rax, xmm0");
+                            addText("    mov " + dstReg + ", rax");
+                        } else {
+                            addText(srcType == IRType::F64 ? "    cvttsd2si eax, xmm0" : "    cvttss2si eax, xmm0");
+                            addText("    mov " + dstReg + ", " + getSizedReg("rax", t));
+                        }
                     } else {
                         if (srcType == IRType::F64) {
                             addText("    movsd xmm0, " + a1);
