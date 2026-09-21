@@ -314,7 +314,14 @@ public:
             IRValue paramReg = IRValue::Register(paramRegName, paramIRType);
             IRValue addr = IRValue::Register(nextTemp(), IRType::PTR);
             currentBlock_->addInstruction({IROp::ALLOCA, addr, {IRValue::Constant(getTypeSize(sym->type), IRType::I32)}});
-            currentBlock_->addInstruction({IROp::STORE, std::nullopt, {addr, paramReg, IRValue::Constant(0, IRType::I32)}});
+            if (sym->type.pointerLevel == 0 && !sym->type.isArray && isStructValueType(sym->type)) {
+                // Struct-by-value params arrive as a caller pointer
+                // (CID-022): copy the pointee into the local slot instead
+                // of storing the pointer value as the first field.
+                currentBlock_->addInstruction({IROp::MEMCPY, std::nullopt, {addr, paramReg, IRValue::Constant(getTypeSize(sym->type), IRType::I32)}});
+            } else {
+                currentBlock_->addInstruction({IROp::STORE, std::nullopt, {addr, paramReg, IRValue::Constant(0, IRType::I32)}});
+            }
             variableValues_[param.first] = addr;
             variableValues_[paramRegName] = addr;  // Support both for lookup convenience
             paramNames_.insert(param.first);

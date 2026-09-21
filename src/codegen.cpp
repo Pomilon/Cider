@@ -875,7 +875,26 @@ bool CodeGenerator::generate(ModuleIR& module, const std::string& outputPath,
                         if (instr.args[1].kind == IRValue::CONSTANT) addText("    " + opName + " " + getSizedReg(d, t) + ", " + a2);
                         else { addText("    mov rcx, " + a2); addText("    " + opName + " " + getSizedReg(d, t) + ", cl"); }
                     } else {
-                        if (isMem(d) && isMem(a2)) {
+                        // A 64-bit logic op with a constant that does not fit
+                        // a sign-extended imm32 (CID-008): `and r64, mask`
+                        // warns and TRUNCATES (imm32 sign-extended), so move
+                        // the full mask with movabs first. r10/r11 are
+                        // scratch (never allocator-held).
+                        bool wideMask = false;
+                        if ((t == IRType::I64 || t == IRType::U64 || t == IRType::PTR) &&
+                            instr.args[1].kind == IRValue::CONSTANT) {
+                            int64_t mv = (int64_t)instr.args[1].intValue;
+                            wideMask = (mv > (int64_t)INT32_MAX || mv < (int64_t)INT32_MIN);
+                        }
+                        if (wideMask) {
+                            // a2 is a wide immediate (never memory), so a
+                            // single op against the scratch register works
+                            // for both register and memory destinations.
+                            std::string dstOp = getSizedReg(d, t);
+                            std::string scratch = (dstOp == "r11") ? "r10" : "r11";
+                            addText("    movabs " + scratch + ", " + a2);
+                            addText("    " + opName + " " + dstOp + ", " + scratch);
+                        } else if (isMem(d) && isMem(a2)) {
                             addText("    mov " + getSizedReg("rax", t) + ", " + getSizedReg(a2, t));
                             addText("    " + opName + " " + getSizedReg(d, t) + ", " + getSizedReg("rax", t));
                         } else addText("    " + opName + " " + getSizedReg(d, t) + ", " + getSizedReg(a2, t));

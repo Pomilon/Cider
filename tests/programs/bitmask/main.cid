@@ -1,0 +1,11 @@
+func mask(e: u64) -> u64 {
+  return e & 0xFFFFFFC0000000;
+}
+
+func main() -> int {
+  if (mask(0xFFFFFFFFFFFFFFFF) != 0xFFFFFFC0000000) { return 1; }
+  if (mask(0x000000003FFFFFFF) != 0) { return 2; }
+  var s: u64 = 0xFFFFFFFFFFFFFFFF ^ 0xFF;
+  if (s != 0xFFFFFFFFFFFFFF00) { return 3; }
+  return 0;
+}
