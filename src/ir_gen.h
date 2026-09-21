@@ -1857,7 +1857,33 @@ public:
             if (isBitfield) {
                 current = emitBitfieldLoad(addr, bitOffset, bitWidth, true);
             } else {
-                current = IRValue::Register(nextTemp(), IRType::I32);
+                // Compound assignment computes at the target's width
+                // (CID-028): hardcoding I32 truncated u64 loop counters
+                // (temp /= 10) to 32 bits.
+                IRType targetIR = IRType::I32;
+                if (auto ident = dynamic_cast<IdentifierExpr*>(stmt.getTarget())) {
+                    if (auto sym = symbolTable_.resolve(ident->getName())) {
+                        targetIR = (sym->type.pointerLevel > 0) ? IRType::PTR : mapType(sym->type.name);
+                    }
+                } else if (auto mem = dynamic_cast<MemberAccessExpr*>(stmt.getTarget())) {
+                    TypeInfo fieldType;
+                    if (!getMemberBitfield(mem, bitOffset, bitWidth) && getMemberFieldType(mem, fieldType)) {
+                        targetIR = (fieldType.pointerLevel > 0) ? IRType::PTR : mapType(fieldType.name);
+                    }
+                } else if (auto idx = dynamic_cast<IndexExpr*>(stmt.getTarget())) {
+                    TypeInfo baseType = inferExprType(idx->getObject());
+                    TypeInfo elemType = baseType;
+                    if (elemType.isArray) {
+                        elemType.isArray = false;
+                        elemType.arraySize = 0;
+                    } else if (elemType.pointerLevel > 0) {
+                        elemType.pointerLevel--;
+                    } else if (elemType.name == "string") {
+                        elemType.name = "char";
+                    }
+                    targetIR = (elemType.pointerLevel > 0) ? IRType::PTR : mapType(elemType.name);
+                }
+                current = IRValue::Register(nextTemp(), targetIR);
                 if (addr.kind == IRValue::LABEL) {
                     currentBlock_->addInstruction({IROp::LOAD, current, {addr}});
                 } else {
@@ -1879,7 +1905,7 @@ public:
             else if (compoundOp == "^") irOp = IROp::BIT_XOR;
             else return;
 
-            IRValue result = IRValue::Register(nextTemp(), IRType::I32);
+            IRValue result = IRValue::Register(nextTemp(), current.type);
             currentBlock_->addInstruction({irOp, result, {current, rhs}});
 
             if (isBitfield) {

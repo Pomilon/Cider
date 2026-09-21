@@ -1,0 +1,22 @@
+func main() -> int {
+  var v: u64 = 3962574618;
+  var digits: [u8; 24];
+  var pos: int = 0;
+  var temp: u64 = v;
+  while (temp > 0) {
+    digits[pos] = (('0' as u8) + ((temp % 10) as u8)) as char;
+    pos++;
+    temp /= 10;
+  }
+  if (pos != 10) { return 1; }
+  if (digits[0] != 56) { return 2; }
+  if (digits[9] != 51) { return 3; }
+  var big: u64 = 18446744073709551615;
+  if (big / 10 != 1844674407370955161) { return 4; }
+  if (big % 10 != 5) { return 5; }
+  var s: i64 = 0 - 7;
+  if (s / 2 != -3) { return 6; }
+  var u: u32 = 4000000000;
+  if (u / 3 != 1333333333) { return 7; }
+  return 0;
+}

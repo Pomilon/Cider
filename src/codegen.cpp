@@ -861,17 +861,58 @@ bool CodeGenerator::generate(ModuleIR& module, const std::string& outputPath,
                         }
                     };
                     if (is64) {
-                        addText("    mov r11, " + getSizedReg(a2, t));
-                        addText("    mov rax, " + getSizedReg(a1, t));
-                        addText("    cqo");
-                        addText("    idiv r11");
+                        // Widen each operand to 64 bits with the correct
+                        // extension (CID-028): a bare `mov rax, <r32/u16>`
+                        // is invalid or reads garbage upper bits.
+                        auto widenDiv64 = [&](const std::string& dst, const IRValue& arg, const std::string& a) {
+                            IRType srcT = arg.type;
+                            if (arg.kind == IRValue::CONSTANT) {
+                                addText("    mov " + dst + ", " + a);
+                                return;
+                            }
+                            std::string srcOp;
+                            if (isMem(a)) {
+                                if (srcT == IRType::I8) srcOp = "byte " + a;
+                                else if (srcT == IRType::U8 || srcT == IRType::BOOL) srcOp = "byte " + a;
+                                else if (srcT == IRType::I16) srcOp = "word " + a;
+                                else if (srcT == IRType::U16) srcOp = "word " + a;
+                                else if (srcT == IRType::I32 || srcT == IRType::U32) srcOp = "dword " + a;
+                                else srcOp = "qword " + a;
+                            } else {
+                                srcOp = getSizedReg(a, srcT);
+                            }
+                            if (srcT == IRType::I8) addText("    movsx " + dst + ", " + srcOp);
+                            else if (srcT == IRType::U8 || srcT == IRType::BOOL) addText("    movzx " + dst + ", " + srcOp);
+                            else if (srcT == IRType::I16) addText("    movsx " + dst + ", " + srcOp);
+                            else if (srcT == IRType::U16) addText("    movzx " + dst + ", " + srcOp);
+                            else if (srcT == IRType::I32) addText("    movsxd " + dst + ", " + srcOp);
+                            else if (srcT == IRType::U32) addText("    mov " + getSizedReg(dst, IRType::I32) + ", " + srcOp);
+                            else addText("    mov " + dst + ", " + srcOp);
+                        };
+                        widenDiv64("r11", instr.args[1], a2);
+                        widenDiv64("rax", instr.args[0], a1);
+                        // Unsigned divides zero-extend the dividend
+                        // (CID-028): cqo/idiv sign-fills and miscomputes
+                        // u64 values >= 2^63.
+                        if (t == IRType::U64 || t == IRType::PTR) {
+                            addText("    xor edx, edx");
+                            addText("    div r11");
+                        } else {
+                            addText("    cqo");
+                            addText("    idiv r11");
+                        }
                         addText("    mov " + getSizedReg(d, t) + ", " + (instr.op == IROp::DIV ? "rax" : "rdx"));
                     } else if (isNarrowDiv) {
                         // Widen to 32 bits, divide, then truncate to narrow.
                         loadDivOp(a2, instr.args[1], "r11d");
                         loadDivOp(a1, instr.args[0], "eax");
-                        addText("    cdq");
-                        addText("    idiv r11d");
+                        if (t == IRType::U8 || t == IRType::U16 || t == IRType::BOOL) {
+                            addText("    xor edx, edx");
+                            addText("    div r11d");
+                        } else {
+                            addText("    cdq");
+                            addText("    idiv r11d");
+                        }
                         std::string res32 = (instr.op == IROp::DIV ? "eax" : "edx");
                         if (t == IRType::I8 || t == IRType::U8 || t == IRType::BOOL) {
                             if (isMem(d)) {
@@ -888,10 +929,40 @@ bool CodeGenerator::generate(ModuleIR& module, const std::string& outputPath,
                         }
                         (void)res32;
                     } else {
-                        addText("    mov r11d, " + getSizedReg(a2, t));
-                        addText("    mov eax, " + getSizedReg(a1, t));
-                        addText("    cdq");
-                        addText("    idiv r11d");
+                        // Widen narrow operands by their own type (a bare
+                        // 32-bit mov would read garbage upper bits), then
+                        // divide with the destination's signedness.
+                        auto widenDiv32 = [&](const std::string& dst32, const IRValue& arg, const std::string& a) {
+                            IRType srcT = arg.type;
+                            if (arg.kind == IRValue::CONSTANT) {
+                                addText("    mov " + dst32 + ", " + a);
+                                return;
+                            }
+                            std::string srcOp;
+                            if (isMem(a)) {
+                                if (srcT == IRType::I8) srcOp = "byte " + a;
+                                else if (srcT == IRType::U8 || srcT == IRType::BOOL) srcOp = "byte " + a;
+                                else if (srcT == IRType::I16) srcOp = "word " + a;
+                                else if (srcT == IRType::U16) srcOp = "word " + a;
+                                else srcOp = "dword " + a;
+                            } else {
+                                srcOp = getSizedReg(a, srcT);
+                            }
+                            if (srcT == IRType::I8) addText("    movsx " + dst32 + ", " + srcOp);
+                            else if (srcT == IRType::U8 || srcT == IRType::BOOL) addText("    movzx " + dst32 + ", " + srcOp);
+                            else if (srcT == IRType::I16) addText("    movsx " + dst32 + ", " + srcOp);
+                            else if (srcT == IRType::U16) addText("    movzx " + dst32 + ", " + srcOp);
+                            else addText("    mov " + dst32 + ", " + srcOp);
+                        };
+                        widenDiv32("r11d", instr.args[1], a2);
+                        widenDiv32("eax", instr.args[0], a1);
+                        if (t == IRType::U32 || t == IRType::BOOL) {
+                            addText("    xor edx, edx");
+                            addText("    div r11d");
+                        } else {
+                            addText("    cdq");
+                            addText("    idiv r11d");
+                        }
                         addText("    mov " + getSizedReg(d, t) + ", " + (instr.op == IROp::DIV ? "eax" : "edx"));
                     }
                     for (auto it = toSave.rbegin(); it != toSave.rend(); ++it) addText("    pop " + *it);

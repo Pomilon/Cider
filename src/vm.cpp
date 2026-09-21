@@ -132,21 +132,31 @@ VMResult VM::run(const ModuleIR& module, const std::string& runFunction) {
                 // Shift counts mask to 6 bits (x86 semantics; also avoids
                 // C++ UB for counts >= 64). Right shift is arithmetic for
                 // signed values, logical for unsigned (the value's type).
+                // Division follows C usual conversions: unsigned if the
+                // destination or either operand is unsigned (CID-028).
                 uint64_t ux = (uint64_t)x;
+                uint64_t uy = (uint64_t)y;
                 unsigned n = (unsigned)(y & 63);
+                auto isUnsignedInt = [](IRType t) {
+                    return t == IRType::U8 || t == IRType::U16 || t == IRType::U32 ||
+                           t == IRType::U64 || t == IRType::PTR || t == IRType::BOOL;
+                };
                 bool srcUnsigned = false;
                 if (instr.op == IROp::RSHIFT && instr.args.size() > 0) {
-                    IRType srcT = instr.args[0].type;
-                    srcUnsigned = (srcT == IRType::U8 || srcT == IRType::U16 ||
-                                   srcT == IRType::U32 || srcT == IRType::U64 ||
-                                   srcT == IRType::PTR || srcT == IRType::BOOL);
+                    srcUnsigned = isUnsignedInt(instr.args[0].type);
+                }
+                bool divUnsigned = false;
+                if (instr.op == IROp::DIV || instr.op == IROp::MOD) {
+                    divUnsigned = (instr.dest && isUnsignedInt(instr.dest->type)) ||
+                                  (instr.args.size() > 0 && isUnsignedInt(instr.args[0].type)) ||
+                                  (instr.args.size() > 1 && isUnsignedInt(instr.args[1].type));
                 }
                 switch (instr.op) {
                 case IROp::ADD: d.i = x + y; break;
                 case IROp::SUB: d.i = x - y; break;
                 case IROp::MUL: d.i = x * y; break;
-                case IROp::DIV: d.i = y != 0 ? x / y : 0; break;
-                case IROp::MOD: d.i = y != 0 ? x % y : 0; break;
+                case IROp::DIV: d.i = (y != 0) ? (divUnsigned ? (int64_t)(ux / uy) : x / y) : 0; break;
+                case IROp::MOD: d.i = (y != 0) ? (divUnsigned ? (int64_t)(ux % uy) : x % y) : 0; break;
                 case IROp::BIT_AND: d.i = x & y; break;
                 case IROp::BIT_OR: d.i = x | y; break;
                 case IROp::BIT_XOR: d.i = x ^ y; break;
