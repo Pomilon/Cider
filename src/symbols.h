@@ -161,6 +161,14 @@ public:
 
     Scope* getCurrentScope() const { return currentScope_; }
 
+    // Nesting depth of the current scope (root/global scope is 0). Used to
+    // tell global variable declarations from function-local ones.
+    int scopeDepth() const {
+        int depth = 0;
+        for (Scope* s = currentScope_; s && s->getParent(); s = s->getParent()) ++depth;
+        return depth;
+    }
+
 private:
     std::vector<std::unique_ptr<Scope>> scopes_;
     Scope* currentScope_;

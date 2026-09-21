@@ -119,6 +119,67 @@ public:
         reporter_.setFile(prevFile);
     }
 
+    // Shape check for compile-time integer constants (CID-007). Paired
+    // with IRGenerator::tryEvalConstU64, which evaluates the same shapes;
+    // anything rejected here would otherwise silently zero-initialise.
+    static bool isConstIntExpr(Expression* expr) {
+        if (!expr) return false;
+        if (auto num = dynamic_cast<NumberExpr*>(expr)) return !num->isFloat();
+        if (dynamic_cast<CharExpr*>(expr)) return true;
+        if (auto grp = dynamic_cast<GroupingExpr*>(expr)) return isConstIntExpr(grp->getExpression());
+        if (auto un = dynamic_cast<UnaryExpr*>(expr)) {
+            return (un->getOperator() == "-" || un->getOperator() == "~") &&
+                   isConstIntExpr(un->getOperand());
+        }
+        if (auto bin = dynamic_cast<BinaryExpr*>(expr)) {
+            const std::string& op = bin->getOperator();
+            bool supported = (op == "+" || op == "-" || op == "*" || op == "/" || op == "%" ||
+                              op == "<<" || op == ">>" || op == "&" || op == "|" || op == "^");
+            return supported && isConstIntExpr(bin->getLeft()) && isConstIntExpr(bin->getRight());
+        }
+        if (auto cast = dynamic_cast<CastExpr*>(expr)) return isConstIntExpr(cast->getExpression());
+        return false;
+    }
+
+    // Fixed-size array from a list literal (CID-007): `var t: [u8; 4] =
+    // [10, 20, 30, 40]`. Checks element count and per-element types.
+    // Globals have no runtime initialiser, so their elements must be
+    // constant (a clear error otherwise, never silent BSS-zero). Only
+    // called for fixed-size array declarations; pointer-from-list (`var
+    // l: *int = [...]`) keeps the legacy path.
+    void checkFixedArrayInit(VarDeclStmt& stmt, const TypeInfo& declaredType) {
+        auto* list = static_cast<ListExpr*>(stmt.getInitializer());
+        auto& elems = list->getElements();
+        if ((int)elems.size() != declaredType.arraySize) {
+            error("Array initializer size mismatch in declaration of '" + stmt.getName() +
+                      "': expected " + std::to_string(declaredType.arraySize) +
+                      ", got " + std::to_string(elems.size()), stmt.getLine());
+            return;
+        }
+        TypeInfo elemDecl = declaredType;
+        elemDecl.isArray = false;
+        elemDecl.arraySize = 0;
+        for (auto& e : elems) {
+            e->accept(*this);
+            if (!areTypesCompatible(elemDecl, lastExprType_)) {
+                error("Array element type mismatch in declaration of '" + stmt.getName() +
+                          "': expected " + elemDecl.toString() + ", got " + lastExprType_.toString(),
+                      stmt.getLine());
+                return;
+            }
+        }
+        if (symbolTable_.scopeDepth() == 0) {
+            for (auto& e : elems) {
+                if (!isConstIntExpr(e.get())) {
+                    error("Global array initializer in declaration of '" + stmt.getName() +
+                              "' must use constant expressions", stmt.getLine());
+                    return;
+                }
+            }
+        }
+        lastExprType_ = declaredType;
+    }
+
     void visit(VarDeclStmt& stmt) override {
         TypeInfo declaredType = TypeInfo::fromAST(stmt.getTypeAST());
         // Resolve interface type
@@ -130,10 +191,14 @@ public:
         }
 
         if (stmt.getInitializer()) {
-            stmt.getInitializer()->accept(*this);
-            TypeInfo initType = lastExprType_;
+            if (dynamic_cast<ListExpr*>(stmt.getInitializer()) && declaredType.isArray &&
+                declaredType.pointerLevel == 0 && declaredType.arraySize > 0) {
+                checkFixedArrayInit(stmt, declaredType);
+            } else {
+                stmt.getInitializer()->accept(*this);
+                TypeInfo initType = lastExprType_;
 
-            if (declaredType.isInterface) {
+                if (declaredType.isInterface) {
                 auto ifaceSym = symbolTable_.resolve(declaredType.name);
                 if (ifaceSym && ifaceSym->kind == SymbolKind::INTERFACE) {
                     auto iface = std::static_pointer_cast<InterfaceSymbol>(ifaceSym);
@@ -172,6 +237,7 @@ public:
                 error("Type mismatch in declaration of '" + stmt.getName() +
                           "'. Expected " + declaredType.toString() + ", got " + initType.toString(),
                       stmt.getLine());
+                }
             }
         }
 

@@ -1058,6 +1058,34 @@ public:
                 globalValues_[stmt.getName()] = IRValue::Label(stmt.getName());
                 return;
             }
+            // Fixed-size array from a list literal (CID-007): with all
+            // elements constant (guaranteed by the type checker for
+            // globals), emit the bytes directly into .data. Otherwise fall
+            // through to the legacy BSS path below.
+            if (sym->type.isArray && sym->type.pointerLevel == 0 && sym->type.arraySize > 0) {
+                if (auto list = dynamic_cast<ListExpr*>(stmt.getInitializer())) {
+                    auto& elems = list->getElements();
+                    TypeInfo elemType = sym->type;
+                    elemType.isArray = false;
+                    elemType.arraySize = 0;
+                    int elemSize = getTypeSize(elemType);
+                    std::string dataLine = stmt.getName() + ": db ";
+                    bool allConst = ((int)elems.size() == sym->type.arraySize);
+                    for (size_t ei = 0; allConst && ei < elems.size(); ei++) {
+                        uint64_t v = 0;
+                        if (!tryEvalConstU64(elems[ei].get(), v)) { allConst = false; break; }
+                        for (int b = 0; b < elemSize; b++) {
+                            if (ei > 0 || b > 0) dataLine += ", ";
+                            dataLine += std::to_string((v >> (8 * b)) & 0xFFULL);
+                        }
+                    }
+                    if (allConst) {
+                        module_.addStringData(dataLine);
+                        globalValues_[stmt.getName()] = IRValue::Label(stmt.getName());
+                        return;
+                    }
+                }
+            }
             int64_t initVal = 0;
             if (stmt.getInitializer()) {
                 if (auto num = dynamic_cast<NumberExpr*>(stmt.getInitializer())) {
@@ -1120,6 +1148,26 @@ public:
                 isInterfaceInit = true;
             }
             if (!isInterfaceInit) {
+                // Fixed-size array from a list literal (CID-007): store
+                // each element at its own offset with the element width
+                // (a MEMCPY of the literal temp would copy I32-wide
+                // elements into narrow slots).
+                if (sym->type.isArray && sym->type.pointerLevel == 0 && sym->type.arraySize > 0) {
+                    if (auto list = dynamic_cast<ListExpr*>(stmt.getInitializer())) {
+                        auto& elems = list->getElements();
+                        TypeInfo elemType = sym->type;
+                        elemType.isArray = false;
+                        elemType.arraySize = 0;
+                        int elemSize = getTypeSize(elemType);
+                        for (size_t ei = 0; ei < elems.size(); ei++) {
+                            elems[ei]->accept(*this);
+                            IRValue eval = truncateIntToType(lastValue_, elemType);
+                            currentBlock_->addInstruction({IROp::STORE, std::nullopt, {addr, eval, IRValue::Constant((int64_t)(ei * (size_t)elemSize), IRType::I32)}});
+                        }
+                        lastExprType_ = sym->type;
+                        return;
+                    }
+                }
                 stmt.getInitializer()->accept(*this);
                 IRValue val = lastValue_;
                 if (sym->type.pointerLevel == 0) {
