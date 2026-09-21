@@ -151,16 +151,32 @@ VMResult VM::run(const ModuleIR& module, const std::string& runFunction) {
                                   (instr.args.size() > 0 && isUnsignedInt(instr.args[0].type)) ||
                                   (instr.args.size() > 1 && isUnsignedInt(instr.args[1].type));
                 }
+                // CID-016: integer ALU results wrap at the destination width
+                // (native uses 32-bit registers for int). Without narrowing
+                // the VM accumulates full 64-bit sums, so an overflowing i32
+                // add chain followed by % disagrees with native idiv.
+                auto narrowInt = [](int64_t v, IRType t) -> int64_t {
+                    switch (t) {
+                    case IRType::I8: return (int64_t)(int8_t)v;
+                    case IRType::U8: return (int64_t)(uint8_t)v;
+                    case IRType::I16: return (int64_t)(int16_t)v;
+                    case IRType::U16: return (int64_t)(uint16_t)v;
+                    case IRType::I32: return (int64_t)(int32_t)v;
+                    case IRType::U32: return (int64_t)(uint32_t)v;
+                    default: return v;  // 64-bit types, PTR, BOOL unaffected
+                    }
+                };
+                IRType dt = instr.dest ? instr.dest->type : IRType::I64;
                 switch (instr.op) {
-                case IROp::ADD: d.i = x + y; break;
-                case IROp::SUB: d.i = x - y; break;
-                case IROp::MUL: d.i = x * y; break;
+                case IROp::ADD: d.i = narrowInt((int64_t)(ux + uy), dt); break;
+                case IROp::SUB: d.i = narrowInt((int64_t)(ux - uy), dt); break;
+                case IROp::MUL: d.i = narrowInt((int64_t)(ux * uy), dt); break;
                 case IROp::DIV: d.i = (y != 0) ? (divUnsigned ? (int64_t)(ux / uy) : x / y) : 0; break;
                 case IROp::MOD: d.i = (y != 0) ? (divUnsigned ? (int64_t)(ux % uy) : x % y) : 0; break;
                 case IROp::BIT_AND: d.i = x & y; break;
                 case IROp::BIT_OR: d.i = x | y; break;
                 case IROp::BIT_XOR: d.i = x ^ y; break;
-                case IROp::LSHIFT: d.i = (int64_t)(ux << n); break;
+                case IROp::LSHIFT: d.i = narrowInt((int64_t)(ux << n), dt); break;
                 case IROp::RSHIFT: d.i = srcUnsigned ? (int64_t)(ux >> n) : (x >> n); break;
                 default: break;
                 }

@@ -1,0 +1,10 @@
+func main() -> int {
+  var a: int = 2000000000;
+  var b: int = 2000000000;
+  var c: int = 2000000000;
+  var d: int = 2000000000;
+  var e: int = 2000000000;
+  var f: int = 2000000000;
+  var g: int = 2000000000;
+  return (a + b + c + d + e + f + g) % 251;
+}
