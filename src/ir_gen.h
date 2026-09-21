@@ -1043,8 +1043,12 @@ public:
                     char c = strData[ci];
                     if (c == '\n') dataLine += "10";
                     else if (c == '\t') dataLine += "9";
-                    else if (c == '\\') dataLine += "'\\\\'";
-                    else if (c == '"') dataLine += "'\\\"'";
+                    // Single-quoted NASM strings process no escapes:
+                    // '\\' would emit two bytes and a bare apostrophe
+                    // parses as empty plus an unterminated tail (CID-024).
+                    // Numerics are read identically by NASM and the VM decoder.
+                    else if (c == '\\') dataLine += "92";
+                    else if (c == '\'') dataLine += "39";
                     else if (c >= 32 && c < 127) dataLine += "'" + std::string(1, c) + "'";
                     else dataLine += std::to_string((unsigned char)c);
                 }

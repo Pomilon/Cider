@@ -45,6 +45,12 @@ bool CodeGenerator::generate(ModuleIR& module, const std::string& outputPath,
             else if (c == '\t') ss << "`, 9, `";
             else if (c == '\b') ss << "`, 8, `";
             else if (c == '\0') ss << "`, 0, `";
+            // NASM processes C-style escapes inside backquotes (CID-023):
+            // a runtime backslash must be doubled, and a backquote cannot
+            // appear at all, so it becomes numeric 96. (A runtime `"` is
+            // safe inside backquotes.)
+            else if (c == '\\') ss << "\\\\";
+            else if (c == '`') ss << "`, 96, `";
             else ss << c;
         }
         ss << "`";
