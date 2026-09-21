@@ -6,6 +6,7 @@
 #include <set>
 #include <string>
 #include <vector>
+#include <cstring>
 
 #include "ast.h"
 #include "errors.h"
@@ -1097,9 +1098,29 @@ public:
                 }
             }
             int64_t initVal = 0;
+            bool initIsFloat = false;
+            IRType declaredIR = (sym->type.pointerLevel > 0) ? IRType::PTR : mapType(sym->type.name);
             if (stmt.getInitializer()) {
                 if (auto num = dynamic_cast<NumberExpr*>(stmt.getInitializer())) {
-                    initVal = (int64_t)num->getUIntValue();
+                    if (num->isFloat() && (declaredIR == IRType::F32 || declaredIR == IRType::F64)) {
+                        // Float global (CID-029): keep the IEEE-754 bits.
+                        // getUIntValue() truncates `10.0` to 10, which
+                        // codegen then emitted as `dq 10` (a denormal).
+                        double fv = num->getFloatValue();
+                        uint64_t bits = 0;
+                        if (declaredIR == IRType::F32) {
+                            float f = (float)fv;
+                            uint32_t b32 = 0;
+                            std::memcpy(&b32, &f, sizeof(b32));
+                            bits = b32;
+                        } else {
+                            std::memcpy(&bits, &fv, sizeof(bits));
+                        }
+                        initVal = (int64_t)bits;
+                        initIsFloat = true;
+                    } else {
+                        initVal = (int64_t)num->getUIntValue();
+                    }
                 } else {
                     // Constant expressions (CID-014): fold `1 << 4`,
                     // `0x10|0x20`, `~0x10`, ... so they land in .data
@@ -1111,7 +1132,7 @@ public:
                 }
             }
             int totalBytes = getTypeSize(sym->type);
-            module_.addGlobalVar(stmt.getName(), (sym->type.pointerLevel > 0) ? IRType::PTR : mapType(sym->type.name), initVal, sym->type.isArray ? sym->type.arraySize : 0, totalBytes);
+            module_.addGlobalVar(stmt.getName(), (sym->type.pointerLevel > 0) ? IRType::PTR : mapType(sym->type.name), initVal, sym->type.isArray ? sym->type.arraySize : 0, totalBytes, initIsFloat);
             globalValues_[stmt.getName()] = IRValue::Label(stmt.getName());
             return;
         }

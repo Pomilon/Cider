@@ -123,7 +123,20 @@ bool CodeGenerator::generate(ModuleIR& module, const std::string& outputPath,
     };
 
     for (const auto& var : module.getGlobalVars()) {
-        if (var.initialValue != 0) {
+        if (var.initialIsFloat) {
+            // Float initializer (CID-029): emit the exact IEEE-754 bit
+            // pattern as hex. A decimal `dq 10` is an integer 10, not
+            // the float 10.0.
+            std::ostringstream hs;
+            hs << "0x" << std::hex << std::uppercase;
+            if (var.type == IRType::F32) {
+                hs << (uint32_t)(var.initialValue & 0xFFFFFFFFLL);
+                addData(var.name + ": dd " + hs.str());
+            } else {
+                hs << (uint64_t)var.initialValue;
+                addData(var.name + ": dq " + hs.str());
+            }
+        } else if (var.initialValue != 0) {
             std::string sizeDir = "dq";
             if (var.type == IRType::I8 || var.type == IRType::U8) sizeDir = "db";
             else if (var.type == IRType::I16 || var.type == IRType::U16) sizeDir = "dw";

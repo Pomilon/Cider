@@ -82,6 +82,40 @@ int run() {
         "}\n");
     CHECK(asmProg.find("mov rdi, rbx") != std::string::npos ||
           asmProg.find("mov rdi,") != std::string::npos);
+
+    // CID-029: float global initializers keep IEEE-754 bits (10.0 is
+    // 0x41200000, not integer `dq 10`), and float->int casts lower to
+    // cvttss2si (never a bare `mov dword [mem], xmm`).
+    std::string fglob = genAsm(
+        "var g_adv: float = 10.0;\n"
+        "func main() -> int {\n"
+        "  var scale: float = 4.0 * 0.5;\n"
+        "  return (g_adv as float * scale) as int;\n"
+        "}\n");
+    CHECK(fglob.find("g_adv: dd 0x41200000") != std::string::npos);
+    CHECK(fglob.find("cvttss2si") != std::string::npos);
+    // No bare GP<->XMM mov: every xmm mention must be movss/movsd/movq/
+    // cvt*/mulss/addss/etc or a valid xmm-to-xmm movss.
+    {
+        std::istringstream lines(fglob);
+        std::string ln;
+        while (std::getline(lines, ln)) {
+            if (ln.find("xmm") == std::string::npos) continue;
+            bool ok = (ln.find("movss") != std::string::npos ||
+                       ln.find("movsd") != std::string::npos ||
+                       ln.find("movq") != std::string::npos ||
+                       ln.find("cvtt") != std::string::npos ||
+                       ln.find("cvtsi") != std::string::npos ||
+                       ln.find("mulss") != std::string::npos ||
+                       ln.find("addss") != std::string::npos ||
+                       ln.find("subss") != std::string::npos ||
+                       ln.find("divss") != std::string::npos ||
+                       ln.find("ucomiss") != std::string::npos ||
+                       ln.find("xorps") != std::string::npos ||
+                       ln.find("movaps") != std::string::npos);
+            CHECK(ok);
+        }
+    }
     return 0;
 }
 

@@ -169,9 +169,13 @@ public:
         int64_t initialValue;
         int arraySize = 0;
         int totalBytes = 0;
+        // Float initializer (CID-029): initialValue holds the IEEE-754
+        // bit pattern (u32 bits for F32, u64 bits for F64), not a
+        // truncated integer. A plain `10.0` used to land as `dq 10`.
+        bool initialIsFloat = false;
     };
-    void addGlobalVar(const std::string& name, IRType type, int64_t init = 0, int arraySize = 0, int totalBytes = 0) {
-        globalVars_.push_back({name, type, init, arraySize, totalBytes});
+    void addGlobalVar(const std::string& name, IRType type, int64_t init = 0, int arraySize = 0, int totalBytes = 0, bool isFloat = false) {
+        globalVars_.push_back({name, type, init, arraySize, totalBytes, isFloat});
     }
     const std::vector<GlobalVar>& getGlobalVars() const { return globalVars_; }
 

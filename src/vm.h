@@ -70,6 +70,10 @@ private:
     std::map<std::string, int64_t> functionIds_;   // label -> id (id = index into functions)
     std::map<std::string, int64_t> stringOffsets_; // materialized string constant -> heap offset
     std::map<std::string, int64_t> globalVarOffsets_; // global variable -> heap cell offset
+    // Declared type per global (CID-029): float globals hold IEEE-754
+    // bits in their cell, so LOADs must reinterpret (F32/F64), not
+    // read I64 and convert numerically.
+    std::map<std::string, IRType> globalVarTypes_; // global variable -> declared type
     std::map<std::string, int64_t> vtableOffsets_; // vtable label -> heap offset
     std::string runFunction_;
     VMResult result_;

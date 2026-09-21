@@ -223,6 +223,16 @@ VMResult VM::run(const ModuleIR& module, const std::string& runFunction) {
             }
             IRType type = instr.dest ? instr.dest->type : IRType::I64;
             if (instr.args[0].kind == IRValue::LABEL) type = IRType::I64;  // global cells are 8 bytes
+            if (instr.args[0].kind == IRValue::LABEL && offset == 0) {
+                // Float global (CID-029): the cell holds IEEE-754 bits,
+                // not a numeric integer. Reinterpret via the declared
+                // type; other types keep the legacy I64 cell read.
+                auto git = globalVarTypes_.find(instr.args[0].name);
+                if (git != globalVarTypes_.end() &&
+                    (git->second == IRType::F32 || git->second == IRType::F64)) {
+                    type = git->second;
+                }
+            }
             RegVal d = load(ptr.i + offset, type);
             if (instr.dest) regs_[instr.dest->name] = d;
             break;
@@ -529,6 +539,7 @@ void VM::materializeLabels() {
         int64_t v = (int64_t)var.initialValue;
         std::memcpy(heap_.data() + cell, &v, 8);
         globalVarOffsets_[var.name] = cell;
+        globalVarTypes_[var.name] = var.type;
     }
 
     // Pre-materialize every string in stringData (the ir-gen emits global
