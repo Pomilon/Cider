@@ -1,0 +1,15 @@
+func ident(v: float) -> float {
+  return v;
+}
+
+func addf(a: float, b: float) -> float {
+  return a + b;
+}
+
+func main() -> int {
+  var x: float = 2.5;
+  if (ident(x) != 2.5) { return 1; }
+  if (ident(1.5) != 1.5) { return 2; }
+  if (addf(x, 1.5) != 4.0) { return 3; }
+  return 0;
+}

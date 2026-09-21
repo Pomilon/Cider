@@ -258,6 +258,12 @@ bool CodeGenerator::generate(ModuleIR& module, const std::string& outputPath,
             if (arg.kind == IRValue::LABEL) {
                 addText("    mov rax, " + arg.name);
                 addText("    push rax");
+            } else if (getOperand(arg).rfind("xmm", 0) == 0) {
+                // Float args live in XMM regs (CID-004): `push xmm` is
+                // invalid, so spill 8 bytes manually. The full 64 bits
+                // round-trip; float ops only read the low 32.
+                addText("    sub rsp, 8");
+                addText("    movq [rsp], " + getOperand(arg));
             } else if (arg.kind == IRValue::REGISTER && arg.type == IRType::I32 &&
                        isMem(getOperand(arg))) {
                 // A spilled I32 arg's slot only has 4 valid bytes; the
@@ -410,6 +416,10 @@ bool CodeGenerator::generate(ModuleIR& module, const std::string& outputPath,
                             if (a.isSpilled) {
                                 int offset = spillBase + (-a.stackOffset);
                                 addText("    mov qword [rbp - " + std::to_string(offset) + "], r11");
+                            } else if (a.reg.rfind("xmm", 0) == 0) {
+                                // Float param in an XMM reg (CID-004): movq
+                                // moves the bits; float ops read low-32.
+                                addText("    movq " + a.reg + ", r11");
                             } else {
                                 addText("    mov " + a.reg + ", r11");
                             }
@@ -429,6 +439,8 @@ bool CodeGenerator::generate(ModuleIR& module, const std::string& outputPath,
                             if (a.isSpilled) {
                                 int offset = spillBase + (-a.stackOffset);
                                 addText("    mov qword [rbp - " + std::to_string(offset) + "], r11");
+                            } else if (a.reg.rfind("xmm", 0) == 0) {
+                                addText("    movq " + a.reg + ", r11");
                             } else {
                                 addText("    mov " + a.reg + ", r11");
                             }
@@ -442,6 +454,8 @@ bool CodeGenerator::generate(ModuleIR& module, const std::string& outputPath,
                             if (a.isSpilled) {
                                 int offset = spillBase + (-a.stackOffset);
                                 addText("    mov qword [rbp - " + std::to_string(offset) + "], r11");
+                            } else if (a.reg.rfind("xmm", 0) == 0) {
+                                addText("    movq " + a.reg + ", r11");
                             } else {
                                 addText("    mov " + a.reg + ", r11");
                             }
