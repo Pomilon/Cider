@@ -1,0 +1,7 @@
+func foo() -> int {
+  return 1;
+}
+from check_mod_ns_alias_clash_lib import foo;
+func main() -> int {
+  return foo();
+}

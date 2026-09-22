@@ -824,8 +824,24 @@ public:
                 continue;
             }
             if (importingScope->resolveLocal(name)) {
-                reporter_.error("Redeclaration of '" + name + "' (from module '" +
-                                stmt.getModuleName() + "')", stmt.getLine(), stmt.getColumn());
+                // CID-020/021 (spec §4): same-named aliases from two modules
+                // are a redeclaration error naming BOTH modules. The existing
+                // alias shares its target's symbol object, whose defining
+                // module was recorded at definition time (bindFromAliases
+                // never records, so chains keep the origin). Clashes with a
+                // local (no defining module) keep the single-module message;
+                // the diagnostic's file prefix cites the importing file.
+                auto existing = importingScope->resolveLocal(name);
+                std::string msg = "Redeclaration of '" + name + "'";
+                auto prov = symbolModules_.find(existing.get());
+                if (prov != symbolModules_.end() && !prov->second.empty() &&
+                    prov->second != stmt.getModuleName()) {
+                    msg += " (from modules '" + prov->second + "' and '" +
+                           stmt.getModuleName() + "')";
+                } else {
+                    msg += " (from module '" + stmt.getModuleName() + "')";
+                }
+                reporter_.error(msg, stmt.getLine(), stmt.getColumn());
                 continue;
             }
             importingScope->define(target);
