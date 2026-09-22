@@ -58,6 +58,23 @@ public:
     }
     // Imported AST root -> logical module name, for checker/ir_gen re-entry.
     const std::map<const AstProgram*, std::string>& getProgramModules() const { return programModules_; }
+    // Defined symbol object -> defining module's logical name ("" == main
+    // file). Recorded when a function/struct/class/interface is DEFINED in
+    // its owner's scope; `from`-aliases share the target object and must
+    // NOT record (spec §4). Lets ir_gen mangle by the true defining module
+    // even through chained aliases (b's alias of c's `h` still mangles as
+    // c's). Absent entries (unit tests without a collector, type aliases)
+    // fall back to the legacy scope-identity search.
+    const std::map<const Symbol*, std::string>& getSymbolModules() const { return symbolModules_; }
+
+    // CID-020/021: record the defining module for a newly defined symbol
+    // (getCurrentModule(), "" == main). First write wins: definitions
+    // always precede aliases of the same object, and bindFromAliases never
+    // records, so chained aliases keep the origin module's entry.
+    void recordDefiningModule(const std::shared_ptr<Symbol>& sym) {
+        if (!sym) return;
+        symbolModules_.emplace(sym.get(), getCurrentModule());
+    }
 
     // Visitor methods
     void visit(AstProgram& program) override {
@@ -196,6 +213,10 @@ public:
             // Ignore if it's already defined
         } else {
             symbolTable_.define(sym);
+            // CID-020/021: provenance for ir_gen mangling. (Class methods
+            // and destructors are pre-defined in visit(ClassDeclStmt) and
+            // skip here, so their provenance is recorded there.)
+            recordDefiningModule(sym);
         }
 
         symbolTable_.enterScope();
@@ -328,6 +349,7 @@ public:
             reporter_.error("Redeclaration of type '" + sym->name + "'", sym->line, sym->col);
         } else {
             symbolTable_.define(sym);
+            recordDefiningModule(sym);
         }
         structClassNames_.push_back(stmt.getName());
     }
@@ -354,6 +376,7 @@ public:
             reporter_.error("Redeclaration of type '" + sym->name + "'", sym->line, sym->col);
         } else {
             symbolTable_.define(sym);
+            recordDefiningModule(sym);
         }
         interfaceNames_.push_back(stmt.getName());
     }
@@ -593,6 +616,9 @@ public:
                     funcSym->returnType = {"void", 0};
                     funcSym->parameterTypes = {{sym->name, 1}};
                     symbolTable_.define(funcSym);
+                    // CID-020/021: the visit(ClassDeclStmt) member pass
+                    // below skips this re-definition, so record here.
+                    recordDefiningModule(funcSym);
                     continue;
                 }
                 StructSymbol::Method m;
@@ -635,6 +661,8 @@ public:
                 funcSym->parameterTypes = m.parameterTypes;
                 funcSym->parameterTypes.insert(funcSym->parameterTypes.begin(), {sym->name, 1});
                 symbolTable_.define(funcSym);
+                // CID-020/021: see the destructor site above.
+                recordDefiningModule(funcSym);
             }
         }
         std::string prevClass = currentClassName_;
@@ -650,6 +678,7 @@ public:
         }
         sym->totalSize = alignUp(currentOffset, classMaxAlign);
         symbolTable_.define(sym);
+        recordDefiningModule(sym);
         structClassNames_.push_back(stmt.getName());
     }
 
@@ -1430,6 +1459,20 @@ public:
         if (definingScope != rootScope && !rootScope->resolveLocal(mangledName)) {
             rootScope->define(funcSym);
         }
+        // CID-020/021: provenance for ir_gen mangling. The clone may be
+        // instantiated while collecting a different module (or main) than
+        // the template's owner, so the module stack is not authoritative:
+        // prefer the defining program's logical name, falling back to the
+        // module under collection (owner not yet registered while its own
+        // body instantiates its own template).
+        {
+            std::string defMod;
+            if (definingProg && definingProg != currentProgram_) {
+                auto pmit = programModules_.find(definingProg);
+                defMod = (pmit != programModules_.end()) ? pmit->second : getCurrentModule();
+            }
+            symbolModules_.emplace(funcSym.get(), defMod);
+        }
 
         // Clone the full function with type substitution and add to the
         // defining program (main or the template's module).
@@ -1476,6 +1519,8 @@ private:
     std::map<std::string, Scope*> moduleScopes_;  // resolved path -> module scope (spec §1)
     std::map<std::string, std::vector<std::shared_ptr<ModuleSymbol>>> ambiguousModules_;
     std::map<const AstProgram*, std::string> programModules_;  // imported AST -> logical name
+    // CID-020/021: defined symbol object -> defining module logical ("" == main).
+    std::map<const Symbol*, std::string> symbolModules_;
     std::vector<std::string> moduleStack_;  // current-module context; empty == main file
 };
 

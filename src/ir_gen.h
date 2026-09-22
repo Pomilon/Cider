@@ -33,6 +33,13 @@ public:
     void setProgramModules(const std::map<const AstProgram*, std::string>& programModules) {
         programModules_ = programModules;
     }
+    // CID-020/021: defined symbol -> defining module logical, from the
+    // collector (bind-time provenance; aliases share the target object, so
+    // chained aliases resolve to the origin module, not path-order luck).
+    // Empty by default: legacy scope-identity search behavior.
+    void setSymbolModules(const std::map<const Symbol*, std::string>& symbolModules) {
+        symbolModules_ = symbolModules;
+    }
 
     ModuleIR generate(AstProgram& program) {
         visitedPrograms_.clear();
@@ -300,7 +307,16 @@ public:
     }
 
     // Defining-module logical name for a resolved symbol ("": main).
+    // Bind-time provenance first: it survives chained from-aliases (the
+    // alias shares the target object, so identity search alone would pick
+    // whichever importing scope sorts first). Falls back to the
+    // scope-identity search (unit tests without a collector) and then the
+    // same-module rule.
     std::string definingModuleFor(const std::shared_ptr<Symbol>& sym, const std::string& name) {
+        if (sym) {
+            auto pit = symbolModules_.find(sym.get());
+            if (pit != symbolModules_.end()) return pit->second;
+        }
         Scope* ds = definingScopeFor(sym, name);
         if (ds) return logicalForScope(ds);
         return currentModule_;
@@ -321,8 +337,14 @@ public:
         if (root && root != preferred) order.push_back(root);
         for (Scope* s : order) {
             auto sym = s->resolveLocal(funcName);
-            if (sym && sym->kind == SymbolKind::FUNCTION)
-                return {std::static_pointer_cast<FunctionSymbol>(sym), logicalForScope(s)};
+            if (sym && sym->kind == SymbolKind::FUNCTION) {
+                auto fsym = std::static_pointer_cast<FunctionSymbol>(sym);
+                // Bind-time provenance first (see definingModuleFor):
+                // the name search may hit an importer's alias scope.
+                auto pit = symbolModules_.find(sym.get());
+                std::string mod = (pit != symbolModules_.end()) ? pit->second : logicalForScope(s);
+                return {fsym, mod};
+            }
         }
         return {nullptr, ""};
     }
@@ -358,7 +380,14 @@ public:
         auto target = ms ? ms->resolveLocal(mem->getMember()) : nullptr;
         if (!target || target->kind != SymbolKind::FUNCTION) return false;
         outSym = std::static_pointer_cast<FunctionSymbol>(target);
-        funcName = emitFunctionName(modSym->logicalName, sanitizeAsmName(mem->getMember()));
+        // Mangle by the member's DEFINING module, not the qualifier: the
+        // member may itself be a from-alias to another module's function
+        // (chained alias). Falls back to the qualifier when no provenance
+        // is recorded (unit tests without a collector).
+        std::string defMod = modSym->logicalName;
+        auto pit = symbolModules_.find(target.get());
+        if (pit != symbolModules_.end()) defMod = pit->second;
+        funcName = emitFunctionName(defMod, sanitizeAsmName(mem->getMember()));
         return true;
     }
 
@@ -3565,6 +3594,9 @@ private:
     std::map<std::string, Scope*> moduleScopes_;
     // CID-020/021: imported AST -> logical module name (from the collector).
     std::map<const AstProgram*, std::string> programModules_;
+    // CID-020/021: defined symbol -> defining module logical (bind-time
+    // provenance from the collector; "" == main).
+    std::map<const Symbol*, std::string> symbolModules_;
     // CID-020/021 (spec §2): logical name of the file being generated
     // ("" == main file, which keeps plain names).
     std::string currentModule_;
