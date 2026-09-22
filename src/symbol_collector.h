@@ -59,9 +59,9 @@ public:
     // Imported AST root -> logical module name, for checker/ir_gen re-entry.
     const std::map<const AstProgram*, std::string>& getProgramModules() const { return programModules_; }
     // Defined symbol object -> defining module's logical name ("" == main
-    // file). Recorded when a function/struct/class/interface is DEFINED in
-    // its owner's scope; `from`-aliases share the target object and must
-    // NOT record (spec §4). Lets ir_gen mangle by the true defining module
+    // file). Recorded when a function/variable/struct/class/interface is
+    // DEFINED in its owner's scope; `from`-aliases share the target object
+    // and must NOT record (spec §4). Lets ir_gen mangle by the true defining module
     // even through chained aliases (b's alias of c's `h` still mangles as
     // c's). Absent entries (unit tests without a collector, type aliases)
     // fall back to the legacy scope-identity search.
@@ -144,6 +144,11 @@ public:
             reporter_.error("Redeclaration of variable '" + sym->name + "'", sym->line, sym->col);
         } else {
             symbolTable_.define(sym);
+            // CID-020/021 (spec §5): globals mangle by defining module in
+            // ir_gen, so record provenance here too (same rule as
+            // functions). Locals record harmlessly: ir_gen only queries
+            // provenance for symbols outside variableValues_.
+            recordDefiningModule(sym);
         }
     }
 

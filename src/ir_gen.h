@@ -279,6 +279,26 @@ public:
         return sanitizeAsmName(mangleQualifiedName(defModule, bare));
     }
 
+    // CID-020/021 (spec §5): global IR names mangle by DEFINING module,
+    // same rule as functions (T6 probe G1: same-named globals in two
+    // modules shared one bare label and qualified reads emitted garbage).
+    // Main-file globals keep legacy bare names, which keeps import-free IR
+    // byte-identical; `extern` never reaches here (early return at the
+    // emission site, and references share the linker symbol).
+    static std::string emitGlobalName(const std::string& defModule, const std::string& bare) {
+        if (defModule.empty()) return bare;
+        return mangleQualifiedName(defModule, bare);
+    }
+
+    // Mangled global key for a resolved symbol: bind-time provenance first
+    // (from-aliases share the target object, so the origin module wins),
+    // then the scope-identity search, then the same-module rule — the same
+    // definingModuleFor chain as function calls.
+    std::string globalRefName(const std::shared_ptr<Symbol>& sym, const std::string& name) {
+        if (!sym) return name;
+        return emitGlobalName(definingModuleFor(sym, name), name);
+    }
+
     // Logical module name for a scope: "" for main/root/unknown (legacy).
     std::string logicalForScope(Scope* s) {
         if (!s) return "";
@@ -1043,6 +1063,52 @@ public:
     }
 
     void visit(MemberAccessExpr& expr) override {
+        // CID-020/021 (spec §3/§5): `m.gval` where m is a module qualifier
+        // reads the member in m's module scope (T6 probe G1/G3: this used to
+        // emit `load %m, gval` garbage). The member may itself be a
+        // from-alias into another module, so mangle by the member's
+        // DEFINING module — the same rule as tryModuleCall. Address-capable:
+        // qualified stores (`m.gval = v`) flow through getAddress and STORE
+        // to the label directly, mirroring the IdentifierExpr global paths.
+        if (auto base = dynamic_cast<IdentifierExpr*>(expr.getObject())) {
+            auto baseSym = symbolTable_.resolve(base->getName());
+            if (baseSym && baseSym->kind == SymbolKind::MODULE) {
+                auto modSym = std::static_pointer_cast<ModuleSymbol>(baseSym);
+                Scope* ms = modSym->scope;
+                auto target = ms ? ms->resolveLocal(expr.getMember()) : nullptr;
+                if (target && target->kind == SymbolKind::FUNCTION) {
+                    lastValue_ = IRValue::Label(emitFunctionName(
+                        definingModuleFor(target, expr.getMember()), target->name));
+                    lastExprType_ = {"void", 1};
+                    return;
+                }
+                if (target && target->kind == SymbolKind::VARIABLE) {
+                    std::string gname = emitGlobalName(
+                        definingModuleFor(target, expr.getMember()), target->name);
+                    lastExprType_ = target->type;
+                    if (lastExprType_.pointerLevel == 0) {
+                        auto typeSym = symbolTable_.resolve(lastExprType_.name);
+                        if (typeSym && (typeSym->kind == SymbolKind::STRUCT ||
+                                        typeSym->kind == SymbolKind::CLASS)) {
+                            lastExprType_.isUserDefined = typeSym->type.name.empty();
+                        }
+                    } else {
+                        lastExprType_.isUserDefined = false;
+                    }
+                    if (isAddress_ || lastExprType_.isArray || lastExprType_.isUserDefined ||
+                        lastExprType_.isInterface) {
+                        lastValue_ = IRValue::Label(gname);
+                        return;
+                    }
+                    IRType irType = (target->type.pointerLevel > 0) ? IRType::PTR
+                                                                   : mapType(target->type.name);
+                    IRValue dest = IRValue::Register(nextTemp(), irType);
+                    currentBlock_->addInstruction({IROp::LOAD, dest, {IRValue::Label(gname)}});
+                    lastValue_ = dest;
+                    return;
+                }
+            }
+        }
         bool wasAddress = isAddress_;
         isAddress_ = false;
         expr.getObject()->accept(*this);
@@ -1246,6 +1312,9 @@ public:
         }
 
         if (!currentFunction_) {
+            // CID-020/021 (spec §5): module-scope globals emit under the
+            // defining module's mangled name; main-file globals stay bare.
+            std::string gname = emitGlobalName(currentModule_, stmt.getName());
             if (auto strInit = dynamic_cast<StringExpr*>(stmt.getInitializer())) {
                 std::string strLabel = "_gs" + std::to_string(globalStrCount_++);
                 std::string strData = strInit->getValue();
@@ -1266,8 +1335,8 @@ public:
                 }
                 dataLine += ", 0";
                 module_.addStringData(dataLine);
-                module_.addStringData(stmt.getName() + ": dq " + strLabel);
-                globalValues_[stmt.getName()] = IRValue::Label(stmt.getName());
+                module_.addStringData(gname + ": dq " + strLabel);
+                globalValues_[gname] = IRValue::Label(gname);
                 return;
             }
             // Fixed-size array from a list literal (CID-007): with all
@@ -1281,7 +1350,7 @@ public:
                     elemType.isArray = false;
                     elemType.arraySize = 0;
                     int elemSize = getTypeSize(elemType);
-                    std::string dataLine = stmt.getName() + ": db ";
+                    std::string dataLine = gname + ": db ";
                     bool allConst = ((int)elems.size() == sym->type.arraySize);
                     for (size_t ei = 0; allConst && ei < elems.size(); ei++) {
                         uint64_t v = 0;
@@ -1293,7 +1362,7 @@ public:
                     }
                     if (allConst) {
                         module_.addStringData(dataLine);
-                        globalValues_[stmt.getName()] = IRValue::Label(stmt.getName());
+                        globalValues_[gname] = IRValue::Label(gname);
                         return;
                     }
                 }
@@ -1333,8 +1402,8 @@ public:
                 }
             }
             int totalBytes = getTypeSize(sym->type);
-            module_.addGlobalVar(stmt.getName(), (sym->type.pointerLevel > 0) ? IRType::PTR : mapType(sym->type.name), initVal, sym->type.isArray ? sym->type.arraySize : 0, totalBytes, initIsFloat);
-            globalValues_[stmt.getName()] = IRValue::Label(stmt.getName());
+            module_.addGlobalVar(gname, (sym->type.pointerLevel > 0) ? IRType::PTR : mapType(sym->type.name), initVal, sym->type.isArray ? sym->type.arraySize : 0, totalBytes, initIsFloat);
+            globalValues_[gname] = IRValue::Label(gname);
             return;
         }
 
@@ -1744,8 +1813,9 @@ public:
         // const reached here through a from-import alias) reads from storage:
         // the collector never evaluates const initializers into constValue,
         // so folding here would bake in 0. True immediates without storage
-        // (enum variants) still fold below.
-        if (sym && sym->isConst && !globalValues_.count(expr.getName())) {
+        // (enum variants) still fold below. The key mangles by defining
+        // module (spec §5), same as every global reference below.
+        if (sym && sym->isConst && !globalValues_.count(globalRefName(sym, expr.getName()))) {
             IRType irType = (sym->type.pointerLevel > 0) ? IRType::PTR : mapType(sym->type.name);
             lastValue_ = IRValue::Constant(sym->constValue, irType);
             return;
@@ -1764,8 +1834,11 @@ public:
                 lastValue_ = variableValues_[expr.getName()];
                 return;
             }
-            if (globalValues_.count(expr.getName())) {
-                lastValue_ = globalValues_[expr.getName()];
+            // CID-020/021 (spec §5): globals key by defining module, so a
+            // bare use (in-module or via from-alias) hits the mangled name.
+            std::string gkey = globalRefName(sym, expr.getName());
+            if (globalValues_.count(gkey)) {
+                lastValue_ = globalValues_[gkey];
                 return;
             }
         }
@@ -1786,8 +1859,8 @@ public:
                 currentBlock_->addInstruction({IROp::LOAD, dest, {addr, IRValue::Constant(0, IRType::I32)}});
                 lastValue_ = dest;
             }
-        } else if (globalValues_.count(expr.getName())) {
-            lastValue_ = globalValues_[expr.getName()];
+        } else if (globalValues_.count(globalRefName(sym, expr.getName()))) {
+            lastValue_ = globalValues_[globalRefName(sym, expr.getName())];
             if (!isAddress_) {
                 IRType irType = (lastExprType_.pointerLevel > 0) ? IRType::PTR : mapType(lastExprType_.name);
                 IRValue dest = IRValue::Register(nextTemp(), irType);
@@ -2088,7 +2161,10 @@ public:
 
         IRValue addr = IRValue::Constant(0, IRType::PTR);
         if (auto ident = dynamic_cast<IdentifierExpr*>(stmt.getTarget())) {
-            addr = variableValues_.count(ident->getName()) ? variableValues_[ident->getName()] : globalValues_[ident->getName()];
+            // CID-020/021 (spec §5): global stores key by defining module.
+            auto sym = symbolTable_.resolve(ident->getName());
+            addr = variableValues_.count(ident->getName()) ? variableValues_[ident->getName()]
+                                                           : globalValues_[globalRefName(sym, ident->getName())];
             // Param read-through must stop once the param is assigned:
             // subsequent reads go through memory (the alloca holds the new value).
             paramNames_.erase(ident->getName());
