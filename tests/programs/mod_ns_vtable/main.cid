@@ -1,0 +1,33 @@
+import va;
+import vb;
+from vb import Animal, make;
+
+// CID-020/021 (spec §6): vtables follow module-scope classes. Two modules
+// define a same-named virtual class; qualified `new`, virtual dispatch, and
+// field stores must all find each module's own vtable (mangled key) instead
+// of dying `unresolved label vtable_Animal`.
+func main() -> int {
+  var a: *va.Animal = va.make();
+  if (a->noise() != 11) { return 1; }
+  if (a->tag != 1) { return 2; }
+
+  var b: *vb.Animal = vb.make();
+  if (b->noise() != 22) { return 3; }
+  if (b->extra != 2) { return 4; }
+
+  // from-alias path: bare Animal is vb's, and so is make().
+  var c: *Animal = make();
+  if (c->noise() != 22) { return 5; }
+
+  // Qualified `new` of a virtual class + field store through it.
+  var d: *va.Animal = new va.Animal;
+  d->tag = 7;
+  if (d->noise() != 11) { return 6; }
+  if (d->tag != 7) { return 7; }
+
+  // Virtual dispatch through a second reference to the same object.
+  var e: *va.Animal = d;
+  if (e->noise() != 11) { return 8; }
+
+  return 0;
+}

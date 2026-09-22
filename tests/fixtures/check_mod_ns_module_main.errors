@@ -1,0 +1,2 @@
+Redeclaration of 'main' (defined in module 'mod_ns_module_main_lib.cid' and the main program 'check_mod_ns_module_main.cid')
+Redeclaration of '_start' (defined in module 'mod_ns_module_main_lib.cid' and the main program 'check_mod_ns_module_main.cid')
