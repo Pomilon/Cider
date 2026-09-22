@@ -319,7 +319,19 @@ public:
             // Rejected above (redeclaration-style): do not bind a second
             // `main`/`_start` entry symbol in the module scope.
         } else if (symbolTable_.getCurrentScope()->resolveLocal(sym->name)) {
-            // Ignore if it's already defined
+            // Legacy: duplicate local definitions are silently ignored
+            // (first wins). CID-020/021: a local definition after a
+            // FROM-IMPORT of the same name is a redeclaration error —
+            // mirrors the alias-after-local order checked in bindFromAliases
+            // (T5 covered only that direction; the stress fuzzer found this
+            // one). Only actual alias bindings count: template
+            // instantiations re-visit clones here and must stay silent.
+            auto alias = fromAliasBindings_.find({symbolTable_.getCurrentScope(), sym->name});
+            if (alias != fromAliasBindings_.end()) {
+                reporter_.error("Redeclaration of '" + sym->name + "' (from module '" +
+                                    alias->second + "')",
+                                stmt.getLine(), stmt.getColumn());
+            }
         } else {
             symbolTable_.define(sym);
             // CID-020/021: provenance for ir_gen mangling. (Class methods
@@ -995,6 +1007,7 @@ public:
                 continue;
             }
             importingScope->define(target);
+            fromAliasBindings_[{importingScope, name}] = stmt.getModuleName();
         }
     }
 
@@ -1766,6 +1779,13 @@ private:
     std::map<const AstProgram*, std::string> programModules_;  // imported AST -> logical name
     // CID-020/021: defined symbol object -> defining module logical ("" == main).
     std::map<const Symbol*, std::string> symbolModules_;
+    // From-alias bindings per scope (spec §4): (scope, name) -> source
+    // module. A local definition after a from-import of the same name is a
+    // redeclaration (bindFromAliases covers the opposite order). Keyed by
+    // scope+name rather than the symbol object: template instantiations
+    // define NEW symbols carrying the template module's provenance, so
+    // object provenance cannot distinguish an alias from an instantiation.
+    std::map<std::pair<const Scope*, std::string>, std::string> fromAliasBindings_;
     std::vector<std::string> moduleStack_;  // current-module context; empty == main file
     // Instantiations currently being built (recursion guard for
     // self-referential struct templates, e.g. `next: *L<T>`).
