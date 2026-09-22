@@ -810,10 +810,17 @@ public:
     // Bind `from m import a, b` aliases in the importing scope. Each alias
     // points at the SAME symbol object in the module's scope (spec §4), so
     // later phases resolve them exactly like the pre-namespace flattening.
+    // CID-020/021 (spec §2): strict resolveLocal in the module's own scope.
+    // A leaking resolve() would walk the module scope's parents (the
+    // importer chain) and silently bind an unrelated same-named symbol:
+    // `from c import h` where c is empty but c's importer defines h bound
+    // the importer's h and compiled clean (T6 probe B2). Chained aliases
+    // (b's alias of c's h) still resolve: the alias object is defined
+    // directly in b's scope.
     void bindFromAliases(FromImportStmt& stmt, Scope* modScope) {
         Scope* importingScope = symbolTable_.getCurrentScope();
         for (const auto& name : stmt.getSymbols()) {
-            auto target = modScope->resolve(name);
+            auto target = modScope->resolveLocal(name);
             if (!target) {
                 // Function/struct templates live in the template table, not
                 // in any scope; as with the legacy flattening, importing one
