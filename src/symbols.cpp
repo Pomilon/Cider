@@ -15,6 +15,9 @@ TypeInfo TypeInfo::fromAST(TypeAST* ast) {
 
     TypeInfo info;
     info.name = ast->getName();
+    // CID-003: `f32` is an alias spelling of `float`; normalize it so every
+    // downstream comparison and diagnostic uses the canonical name.
+    if (info.name == "f32") info.name = "float";
     info.pointerLevel = ast->getPointerLevel();
     info.isVolatile = ast->isVolatile();
     return info;

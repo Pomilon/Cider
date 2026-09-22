@@ -54,6 +54,21 @@ int run() {
     auto ok2 = checkSrc("func main() -> void { var x: float = 1; }\n");
     CHECK(ok2.empty());
 
+    // CID-003: f32 is an alias of float; f64 is a real type.
+    auto okF64 = checkSrc(
+        "func main() -> int {\n"
+        "  var a: f32 = 1.5;\n"
+        "  var b: f64 = 2.5;\n"
+        "  var c: f64 = 7;\n"
+        "  var d: float = b;\n"
+        "  var e: f64 = a + b;\n"
+        "  return 0;\n"
+        "}\n");
+    if (!okF64.empty()) {
+        std::fprintf(stderr, "FAIL f64 declarations: %s\n", okF64[0].c_str());
+        return 1;
+    }
+
     // Return values are typed but NOT checked against the function's
     // return type (parity with main — the IR phase enforces it).
     auto e3 = checkSrc("func f() -> int { return \"s\"; }\nfunc main() -> void { }\n");

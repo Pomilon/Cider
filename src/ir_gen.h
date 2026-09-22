@@ -174,7 +174,8 @@ public:
         if (name == "u32") return IRType::U32;
         if (name == "i64") return IRType::I64;
         if (name == "u64") return IRType::U64;
-        if (name == "float") return IRType::F32;
+        if (name == "float" || name == "f32") return IRType::F32;
+        if (name == "f64") return IRType::F64;
         if (name == "bool") return IRType::I32;
         if (name == "void") return IRType::VOID;
         // Resolve type aliases through symbol table
@@ -1673,8 +1674,8 @@ public:
         }
         if (type.name == "u8" || type.name == "i8" || type.name == "char" || type.name == "byte" || type.name == "void") return 1;
         if (type.name == "u16" || type.name == "i16") return 2;
-        if (type.name == "u32" || type.name == "i32" || type.name == "int" || type.name == "float" || type.name == "bool") return 4;
-        if (type.name == "u64" || type.name == "i64") return 8;
+        if (type.name == "u32" || type.name == "i32" || type.name == "int" || type.name == "float" || type.name == "f32" || type.name == "bool") return 4;
+        if (type.name == "u64" || type.name == "i64" || type.name == "f64") return 8;
 
         if (type.isInterface) return 16;
         auto sym = resolveNominalType(type.name);

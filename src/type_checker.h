@@ -227,8 +227,10 @@ public:
             return name == "int" || name == "u8" || name == "i8" || name == "u16" || name == "i16" ||
                    name == "u32" || name == "i32" || name == "u64" || name == "i64" || name == "char" || name == "byte";
         };
+        auto isFloatName = [](const std::string& n) { return n == "float" || n == "f64"; };
 
-        if (t1.name == "float" && isInteger(t2.name) && t1.pointerLevel == 0 && t2.pointerLevel == 0) return true;
+        if (isFloatName(t1.name) && isInteger(t2.name) && t1.pointerLevel == 0 && t2.pointerLevel == 0) return true;
+        if (isFloatName(t1.name) && isFloatName(t2.name) && t1.pointerLevel == 0 && t2.pointerLevel == 0) return true;
         if (isInteger(t1.name) && isInteger(t2.name) && t1.pointerLevel == 0 && t2.pointerLevel == 0) return true;
         // C-style conversions: any T* <-> void* (both directions, any
         // pointer depth). The reference only allowed T* -> void*, which
@@ -519,6 +521,7 @@ public:
             return name == "int" || name == "u8" || name == "i8" || name == "u16" || name == "i16" ||
                    name == "u32" || name == "i32" || name == "u64" || name == "i64" || name == "char" || name == "byte";
         };
+        auto isFloatName = [](const std::string& n) { return n == "float" || n == "f64"; };
 
         std::string op = expr.getOperator();
 
@@ -533,8 +536,9 @@ public:
         bool isStringMath = (leftIsString && isInteger(rightType.name) && (op == "+" || op == "-")) ||
                             (rightIsString && isInteger(leftType.name) && op == "+");
 
-        bool isMixedNumeric = (isInteger(leftType.name) && rightType.name == "float") ||
-                              (leftType.name == "float" && isInteger(rightType.name));
+        bool isMixedNumeric = (isInteger(leftType.name) && isFloatName(rightType.name)) ||
+                              (isFloatName(leftType.name) && isInteger(rightType.name)) ||
+                              (isFloatName(leftType.name) && isFloatName(rightType.name));
 
         if (!areTypesCompatible(leftType, rightType) && !isPtrMath && !isStringMath && !isMixedNumeric) {
             error("Type mismatch in binary expression '" + expr.getOperator() +
@@ -549,7 +553,8 @@ public:
         } else if (isPtrMath) {
             lastExprType_ = (leftType.pointerLevel > 0) ? leftType : rightType;
         } else if (isMixedNumeric) {
-            lastExprType_ = {"float", 0};
+            lastExprType_ = (leftType.name == "f64" || rightType.name == "f64")
+                                ? TypeInfo{"f64", 0} : TypeInfo{"float", 0};
         } else if (op == "|" || op == "&" || op == "^" || op == "<<" || op == ">>") {
             TypeInfo resolved = resolveType(leftType);
             if ((resolved.name != "int" && resolved.name.find('u') != 0 && resolved.name.find('i') != 0) || resolved.pointerLevel > 0) {
@@ -678,7 +683,7 @@ public:
             part.expr->accept(*this);
             const std::string& t = lastExprType_.name;
             if (t == "int" || t == "bool" || t == "string" || t == "char") continue;
-            if (t == "float") {
+            if (t == "float" || t == "f64") {
                 error("Interpolation of float is not supported yet; cast to int first.", expr.getLine());
             } else {
                 error("Interpolation requires int, bool, char or string, got " + t, expr.getLine());

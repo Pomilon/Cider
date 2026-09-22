@@ -865,8 +865,8 @@ public:
         }
         if (type.name == "u8" || type.name == "i8" || type.name == "char" || type.name == "byte" || type.name == "void") return 1;
         if (type.name == "u16" || type.name == "i16") return 2;
-        if (type.name == "u32" || type.name == "i32" || type.name == "int" || type.name == "float" || type.name == "bool") return 4;
-        if (type.name == "u64" || type.name == "i64") return 8;
+        if (type.name == "u32" || type.name == "i32" || type.name == "int" || type.name == "float" || type.name == "f32" || type.name == "bool") return 4;
+        if (type.name == "u64" || type.name == "i64" || type.name == "f64") return 8;
         auto sym = resolveNominalType(type.name);
         if (sym && (sym->kind == SymbolKind::STRUCT || sym->kind == SymbolKind::CLASS)) {
             return std::static_pointer_cast<StructSymbol>(sym)->totalSize;
@@ -885,8 +885,8 @@ public:
         }
         if (type.name == "u8" || type.name == "i8" || type.name == "char" || type.name == "byte" || type.name == "void") return 1;
         if (type.name == "u16" || type.name == "i16") return 2;
-        if (type.name == "u32" || type.name == "i32" || type.name == "int" || type.name == "float" || type.name == "bool") return 4;
-        if (type.name == "u64" || type.name == "i64") return 8;
+        if (type.name == "u32" || type.name == "i32" || type.name == "int" || type.name == "float" || type.name == "f32" || type.name == "bool") return 4;
+        if (type.name == "u64" || type.name == "i64" || type.name == "f64") return 8;
         bool ownSet = false;
         if (!visiting) {
             visiting = new std::set<std::string>();
