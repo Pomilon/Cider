@@ -8,20 +8,26 @@ export func sleep_ms(ms: int) -> void {
     ts.sec = (ms / 1000) as i64;
     ts.nsec = ((ms % 1000) * 1000000) as i64;
     var rem: Timespec;
+    // NOTE: `lea reg, {local}` is not supported by the VM/native emitters
+    // (the substitution renders a `qword [...]` memory operand), so take
+    // the addresses as pointer locals and mov those (T6 std sweep).
+    var tsp: *Timespec = &ts;
+    var remp: *Timespec = &rem;
     asm {
         "mov rax, 35\n"
-        "lea rdi, {ts}\n"
-        "lea rsi, {rem}\n"
+        "mov rdi, {tsp}\n"
+        "mov rsi, {remp}\n"
         "syscall\n"
     }
 }
 
 export func timestamp_ms() -> u64 {
     var ts: Timespec;
+    var tsp: *Timespec = &ts;
     asm {
         "mov rax, 228\n"
         "mov rdi, 1\n"    // CLOCK_MONOTONIC
-        "lea rsi, {ts}\n"
+        "mov rsi, {tsp}\n"
         "syscall\n"
     }
     return (ts.sec as u64) * 1000 + (ts.nsec as u64) / 1000000;
@@ -29,10 +35,11 @@ export func timestamp_ms() -> u64 {
 
 export func timestamp_us() -> u64 {
     var ts: Timespec;
+    var tsp: *Timespec = &ts;
     asm {
         "mov rax, 228\n"
         "mov rdi, 1\n"    // CLOCK_MONOTONIC
-        "lea rsi, {ts}\n"
+        "mov rsi, {tsp}\n"
         "syscall\n"
     }
     return (ts.sec as u64) * 1000000 + (ts.nsec as u64) / 1000;
