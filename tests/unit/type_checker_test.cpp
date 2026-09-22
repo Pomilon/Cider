@@ -69,6 +69,26 @@ int run() {
         return 1;
     }
 
+    // CID-003 review: bitwise operators reject float-family operands even
+    // though arithmetic promotes them.
+    auto eBit1 = checkSrc(
+        "func main() -> void { var a: float = 1.0; var b: float = 2.0; var c: float = a & b; }\n");
+    CHECK(hasError(eBit1, "Bitwise operator '&' requires integer operands"));
+    auto eBit2 = checkSrc(
+        "func main() -> void { var a: f64 = 1.0; var b: f64 = 2.0; var c: f64 = a | b; }\n");
+    CHECK(hasError(eBit2, "Bitwise operator '|' requires integer operands"));
+    auto eBit3 = checkSrc(
+        "func main() -> void { var a: f64 = 1.0; var b: f64 = 2.0; var c: f64 = a << b; }\n");
+    CHECK(hasError(eBit3, "Bitwise operator '<<' requires integer operands"));
+    auto eBit4 = checkSrc(
+        "func main() -> void { var a: int = 1; var b: f64 = 2.0; var c: int = a & b; }\n");
+    CHECK(hasError(eBit4, "Bitwise operator '&' requires integer operands"));
+
+    // Integer bitwise operations are unaffected.
+    auto okBit = checkSrc(
+        "func main() -> void { var a: int = 6; var b: int = 3; var c: int = a & b; var d: int = a << b; }\n");
+    CHECK(okBit.empty());
+
     // Return values are typed but NOT checked against the function's
     // return type (parity with main — the IR phase enforces it).
     auto e3 = checkSrc("func f() -> int { return \"s\"; }\nfunc main() -> void { }\n");

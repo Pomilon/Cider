@@ -546,6 +546,16 @@ public:
                   expr.getLine());
         }
 
+        // CID-003 review fix: bitwise operators have no float lowering, so
+        // reject float-family operands here — before the isMixedNumeric
+        // promotion branch below can silently validate them. Both operand
+        // positions are checked (`float & int`, `int & f64`, `f64 << f64`).
+        bool isBitwise = (op == "|" || op == "&" || op == "^" || op == "<<" || op == ">>");
+        if (isBitwise && ((isFloatName(leftType.name) && leftType.pointerLevel == 0) ||
+                          (isFloatName(rightType.name) && rightType.pointerLevel == 0))) {
+            error("Bitwise operator '" + op + "' requires integer operands", expr.getLine());
+        }
+
         if (op == "==" || op == "!=" || op == "<" || op == ">" || op == "<=" || op == ">=") {
             lastExprType_ = {"bool", 0};
         } else if (isStringMath) {
