@@ -35,6 +35,29 @@ std::string genSrc(const std::string& src, std::vector<std::string>* errors = nu
     return ss.str();
 }
 
+std::string genSrcWithProvenance(const std::string& src, const std::string& symName,
+                                   const std::string& mod) {
+    cider::ErrorReporter rep;
+    cider::Lexer lex(src, rep);
+    cider::Parser parser(lex, rep);
+    auto prog = parser.parseProgram();
+    cider::SymbolTable table;
+    cider::ModuleResolver resolver;
+    cider::SymbolCollector collector(table, rep, resolver);
+    collector.collect(*prog);
+    cider::IRGenerator gen(table);
+    // Fake a defining module for one symbol: with module provenance and no
+    // exemption these would all emit mod_<m>__ names.
+    auto sym = table.resolve(symName);
+    if (sym) gen.setSymbolModules({{sym.get(), mod}});
+    auto module = gen.generate(*prog);
+    std::ostringstream ss;
+    std::streambuf* old = std::cout.rdbuf(ss.rdbuf());
+    module.print();
+    std::cout.rdbuf(old);
+    return ss.str();
+}
+
 int run() {
     // Function with typed arithmetic.
     std::string d = genSrc("func f(a: int) -> int {\n  return a + 1;\n}\n");
@@ -85,6 +108,86 @@ int run() {
     CHECK(d.find("main_while_header") != std::string::npos);
     CHECK(d.find("main_while_body") != std::string::npos);
     CHECK(d.find("main_while_exit") != std::string::npos);
+
+    // CID-020/021 never-mangle exemptions (spec Review Focus), exercised
+    // through injected defining-module provenance: without the guards each
+    // of these would emit a mod_m__ name.
+
+    // `extern` references stay bare even with module provenance.
+    d = genSrcWithProvenance(
+        "extern func putchar(c: int) -> int;\n"
+        "func main() -> int {\n  return putchar(65);\n}\n",
+        "putchar", "m");
+    CHECK(d.find("call putchar") != std::string::npos);
+    CHECK(d.find("mod_m__putchar") == std::string::npos);
+
+    // `main` calls stay bare even with module provenance.
+    d = genSrcWithProvenance("func main() -> int {\n  return main();\n}\n", "main", "m");
+    CHECK(d.find("define main() {") != std::string::npos);
+    CHECK(d.find("call main") != std::string::npos);
+    CHECK(d.find("mod_m__main") == std::string::npos);
+
+    // `_start` calls stay bare even with module provenance.
+    d = genSrcWithProvenance(
+        "func _start() -> void { }\n"
+        "func main() -> int {\n  _start();\n  return 0;\n}\n",
+        "_start", "m");
+    CHECK(d.find("call _start") != std::string::npos);
+    CHECK(d.find("mod_m__") == std::string::npos);
+
+    // A global literally named `main` is referenced bare even with module
+    // provenance (definition and reference agree on the bare label). NOTE:
+    // this locks end-to-end shape only — ir_gen re-defines globals during
+    // generation, so injected provenance is shadowed here; the exemption
+    // itself is pinned by the direct emitGlobalName checks below.
+    d = genSrcWithProvenance(
+        "var main: int = 7;\n"
+        "func getmain() -> int {\n  return main;\n}\n",
+        "main", "m");
+    CHECK(d.find("load main") != std::string::npos);
+    CHECK(d.find("mod_m__main") == std::string::npos);
+
+    // Control: an ordinary function with module provenance still mangles at
+    // reference sites, so the exemptions above did not over-broaden.
+    d = genSrcWithProvenance(
+        "func helper() -> int {\n  return 1;\n}\n"
+        "func main() -> int {\n  return helper();\n}\n",
+        "helper", "m");
+    CHECK(d.find("call mod_m__helper") != std::string::npos);
+
+    // Direct helper checks (all public in ir_gen.h, no harness needed).
+    CHECK(cider::IRGenerator::isNeverMangled("main"));
+    CHECK(cider::IRGenerator::isNeverMangled("_start"));
+    CHECK(!cider::IRGenerator::isNeverMangled("helper"));
+    CHECK(!cider::IRGenerator::isNeverMangled("putchar"));
+    CHECK(!cider::IRGenerator::isNeverMangled(""));
+    CHECK(cider::IRGenerator::emitGlobalName("m", "main") == "main");
+    CHECK(cider::IRGenerator::emitGlobalName("m", "_start") == "_start");
+    CHECK(cider::IRGenerator::emitGlobalName("m", "g") == "mod_m__g");
+    CHECK(cider::IRGenerator::emitGlobalName("", "g") == "g");
+    CHECK(cider::IRGenerator::emitFunctionName("m", "main") == "main");
+    CHECK(cider::IRGenerator::emitFunctionName("m", "_start") == "_start");
+    CHECK(cider::IRGenerator::emitFunctionName("m", "f") == "mod_m__f");
+    {
+        // definingModuleFor: extern collapses to main-file (bare) even with
+        // module provenance; ordinary symbols keep the recorded module.
+        cider::SymbolTable table;
+        auto ext = std::make_shared<cider::FunctionSymbol>();
+        ext->kind = cider::SymbolKind::FUNCTION;
+        ext->name = "putchar";
+        ext->isExtern = true;
+        table.define(ext);
+        auto helper = std::make_shared<cider::FunctionSymbol>();
+        helper->kind = cider::SymbolKind::FUNCTION;
+        helper->name = "helper";
+        table.define(helper);
+        cider::IRGenerator gen(table);
+        gen.setSymbolModules({{ext.get(), "m"}, {helper.get(), "m"}});
+        CHECK(gen.definingModuleFor(ext, "putchar") == "");
+        CHECK(gen.definingModuleFor(helper, "helper") == "m");
+        std::shared_ptr<cider::Symbol> nullSym;
+        CHECK(gen.definingModuleFor(nullSym, "x") == "");
+    }
     return 0;
 }
 

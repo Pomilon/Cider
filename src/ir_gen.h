@@ -470,6 +470,9 @@ public:
         std::string defMod = modSym->logicalName;
         auto pit = symbolModules_.find(target.get());
         if (pit != symbolModules_.end()) defMod = pit->second;
+        // `extern` members are never mangled (spec Review Focus): they must
+        // match the linker-provided symbol (same rule as definingModuleFor).
+        if (target->isExtern) defMod = "";
         funcName = emitFunctionName(defMod, sanitizeAsmName(mem->getMember()));
         return true;
     }
