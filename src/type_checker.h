@@ -474,6 +474,8 @@ public:
             }
         }
 
+        if (inClassFieldDecl_) return;  // see visit(ClassDeclStmt)
+
         auto sym = std::make_shared<Symbol>();
         sym->kind = SymbolKind::VARIABLE;
         sym->name = stmt.getName();
@@ -604,7 +606,28 @@ public:
         }
         auto sym = resolveScoped(expr.getName());
         if (!sym) {
-            error("Undefined identifier '" + expr.getName() + "'", expr.getLine());
+            // Inside a method, a name matching one of the class's fields is
+            // almost always a missing `this.` — point at it instead of the
+            // generic undefined error.
+            std::string fieldOwner;
+            if (!currentClassName_.empty()) {
+                auto classSym = resolveScoped(currentClassName_);
+                if (classSym && classSym->kind == SymbolKind::CLASS) {
+                    auto classStruct = std::static_pointer_cast<StructSymbol>(classSym);
+                    for (const auto& field : classStruct->fields) {
+                        if (field.name == expr.getName()) {
+                            fieldOwner = currentClassName_;
+                            break;
+                        }
+                    }
+                }
+            }
+            if (!fieldOwner.empty()) {
+                error("Field '" + expr.getName() + "' of class '" + fieldOwner +
+                          "' must be accessed through 'this'", expr.getLine());
+            } else {
+                error("Undefined identifier '" + expr.getName() + "'", expr.getLine());
+            }
             lastExprType_ = {"error", 0};
         } else if (sym->kind == SymbolKind::MODULE) {
             // A bare module qualifier is not a value (spec §3). Values
@@ -1222,7 +1245,15 @@ public:
         std::string prevClass = currentClassName_;
         currentClassName_ = stmt.getName();
         for (auto& member : stmt.getMembers()) {
+            // Field declarations are validated but must not define symbols
+            // in the enclosing scope (pre-existing leak fix): fields live in
+            // the class's StructSymbol, so `var tag` in two classes — or in
+            // a class and at global scope — never collides, and a bare `tag`
+            // in a method cannot resolve to a phantom variable.
+            bool prevField = inClassFieldDecl_;
+            inClassFieldDecl_ = dynamic_cast<VarDeclStmt*>(member.get()) != nullptr;
             member->accept(*this);
+            inClassFieldDecl_ = prevField;
         }
         currentClassName_ = prevClass;
     }
@@ -1366,6 +1397,7 @@ private:
     ErrorReporter& reporter_;
     TypeInfo lastExprType_ = {"void", 0};
     std::string currentClassName_;
+    bool inClassFieldDecl_ = false;
     bool moduleMode_ = false;
 
     // CID-020/021 module context (see setters above).

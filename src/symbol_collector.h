@@ -210,6 +210,11 @@ public:
         // sweep: map.cid's `entries` field never instantiated, so every
         // member use failed to resolve).
         checkAndInstantiateStructTemplate(typeInfo.name);
+        // Class fields live in the ClassDeclStmt's StructSymbol (built from
+        // the member list directly): defining an enclosing-scope variable
+        // here leaked them (pre-existing: two classes could not share a
+        // field name, and bare field names became phantom variables).
+        if (inClassFieldDecl_) return;
         auto sym = std::make_shared<Symbol>();
         sym->kind = SymbolKind::VARIABLE;
         sym->name = stmt.getName();
@@ -775,7 +780,13 @@ public:
         std::string prevClass = currentClassName_;
         currentClassName_ = stmt.getName();
         for (auto& member : stmt.getMembers()) {
+            // Field declarations were already captured in sym->fields above;
+            // revisiting them here must not define variables in the enclosing
+            // scope (pre-existing leak: fields are not scope symbols).
+            bool prevField = inClassFieldDecl_;
+            inClassFieldDecl_ = dynamic_cast<VarDeclStmt*>(member.get()) != nullptr;
             member->accept(*this);
+            inClassFieldDecl_ = prevField;
         }
         currentClassName_ = prevClass;
 
@@ -1741,6 +1752,7 @@ private:
     ModuleResolver& resolver_;
     ErrorReporter& reporter_;
     std::string currentClassName_;
+    bool inClassFieldDecl_ = false;
     AstProgram* currentProgram_;
     std::string originPath_;
     std::vector<std::string> interfaceNames_;

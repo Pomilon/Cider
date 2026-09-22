@@ -1,0 +1,8 @@
+// A class field referenced without `this` must be a clear error, not a
+// silent register/global miscompile (pre-existing field-leak fix).
+class Alpha {
+  var tag: int;
+  func get() -> int { return tag; }
+}
+
+func main() -> int { return 0; }

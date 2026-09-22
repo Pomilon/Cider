@@ -1,0 +1,4 @@
+export class Thing {
+  var tag: int;
+  func get() -> int { return this.tag; }
+}
