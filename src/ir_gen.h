@@ -1271,6 +1271,68 @@ public:
         return 8;  // Default
     }
 
+    // C usual arithmetic conversions for mixed-width integer arithmetic
+    // (ADD/SUB/MUL/DIV/MOD): when one operand is 64-bit and the other is
+    // a narrower integer of a different type, the narrower side is
+    // converted to the 64-bit type — unsigned if either side is unsigned
+    // — and the operation computes at 64 bits. Without this, `1000 /
+    // u64var` typed the division by the I32 left operand, silently
+    // truncating the divisor (and codegen's 32-bit DIV path cannot even
+    // move a 64-bit source: `mov r11d, r64` is invalid NASM). Same-width
+    // mixes and 32-bit-and-under arithmetic are untouched.
+    // Returns the common type, or IRType::VOID when no conversion applies.
+    static IRType mixedIntCommon(IRType a, IRType b) {
+        auto is64 = [](IRType t) { return t == IRType::I64 || t == IRType::U64; };
+        auto isNarrowInt = [](IRType t) {
+            return t == IRType::I8 || t == IRType::U8 || t == IRType::I16 ||
+                   t == IRType::U16 || t == IRType::I32 || t == IRType::U32 ||
+                   t == IRType::BOOL;
+        };
+        auto isUnsigned = [](IRType t) {
+            return t == IRType::U8 || t == IRType::U16 || t == IRType::U32 ||
+                   t == IRType::U64 || t == IRType::BOOL;
+        };
+        if (a == b) return IRType::VOID;
+        if (!((is64(a) && (isNarrowInt(b) || is64(b))) ||
+              (is64(b) && (isNarrowInt(a) || is64(a))))) {
+            return IRType::VOID;
+        }
+        return (isUnsigned(a) || isUnsigned(b)) ? IRType::U64 : IRType::I64;
+    }
+
+    // Convert an integer operand to the common 64-bit type in place:
+    // constants fold (value-preserving extension), anything else goes
+    // through MOV (both backends extend correctly on widening moves).
+    void convertIntToCommon(IRValue& v, IRType common) {
+        if (v.type == common) return;
+        if (v.kind == IRValue::CONSTANT) {
+            uint64_t u;
+            bool srcSigned;
+            if (v.type == IRType::I64) {
+                u = (uint64_t)v.intValue;
+                srcSigned = true;
+            } else if (v.type == IRType::U64) {
+                u = (uint64_t)v.intValue;
+                srcSigned = false;
+            } else {
+                uint64_t mask = (v.type == IRType::I8 || v.type == IRType::U8) ? 0xFFULL :
+                                (v.type == IRType::I16 || v.type == IRType::U16) ? 0xFFFFULL : 0xFFFFFFFFULL;
+                u = (uint64_t)v.intValue & mask;
+                srcSigned = (v.type == IRType::I8 || v.type == IRType::I16 || v.type == IRType::I32);
+                if (srcSigned && (u & ((mask >> 1) + 1))) u |= ~mask;
+            }
+            if (common == IRType::U64) {
+                v = IRValue::Constant(u, common);
+            } else {
+                v = IRValue::Constant((int64_t)u, common);
+            }
+        } else {
+            IRValue conv = IRValue::Register(nextTemp(), common);
+            currentBlock_->addInstruction({IROp::MOV, conv, {v}});
+            v = conv;
+        }
+    }
+
     void visit(BinaryExpr& expr) override {
         expr.getLeft()->accept(*this);
         IRValue left = lastValue_;
@@ -1375,6 +1437,20 @@ public:
             left = converted;
         }
 
+        // Usual arithmetic conversions for mixed-width integer +,-,*,/,%
+        // (see mixedIntCommon): compute at 64 bits so narrow operands
+        // never truncate a 64-bit peer.
+        bool widenedInts = false;
+        if ((sOp == "+" || sOp == "-" || sOp == "*" || sOp == "/" || sOp == "%") &&
+            leftType.pointerLevel == 0 && rightType.pointerLevel == 0) {
+            IRType common = mixedIntCommon(left.type, right.type);
+            if (common != IRType::VOID) {
+                convertIntToCommon(left, common);
+                convertIntToCommon(right, common);
+                widenedInts = true;
+            }
+        }
+
         if (sOp == "+") op = IROp::ADD;
         else if (sOp == "-") op = IROp::SUB;
         else if (sOp == "*") op = IROp::MUL;
@@ -1399,7 +1475,11 @@ public:
         }
         currentBlock_->addInstruction({op, dest, {left, right}});
         lastValue_ = dest;
-        lastExprType_ = (op >= IROp::CMP_EQ && op <= IROp::CMP_GE) ? TypeInfo{"bool", 0} : leftType;
+        if (widenedInts) {
+            lastExprType_ = (left.type == IRType::U64) ? TypeInfo{"u64", 0} : TypeInfo{"i64", 0};
+        } else {
+            lastExprType_ = (op >= IROp::CMP_EQ && op <= IROp::CMP_GE) ? TypeInfo{"bool", 0} : leftType;
+        }
     }
 
     void visit(NumberExpr& expr) override {
@@ -1927,6 +2007,18 @@ public:
             else return;
 
             IRValue result = IRValue::Register(nextTemp(), current.type);
+            if (irOp == IROp::ADD || irOp == IROp::SUB || irOp == IROp::MUL ||
+                irOp == IROp::DIV || irOp == IROp::MOD) {
+                // Same usual-arithmetic-conversions rule as binary
+                // expressions: compute mixed-width updates at 64 bits;
+                // the STORE below narrows back to the LHS width.
+                IRType common = mixedIntCommon(current.type, rhs.type);
+                if (common != IRType::VOID) {
+                    convertIntToCommon(current, common);
+                    convertIntToCommon(rhs, common);
+                    result.type = common;
+                }
+            }
             currentBlock_->addInstruction({irOp, result, {current, rhs}});
 
             if (isBitfield) {
