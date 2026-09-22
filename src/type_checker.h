@@ -1,11 +1,13 @@
 #pragma once
 
+#include <map>
 #include <memory>
 #include <string>
 #include <vector>
 
 #include "ast.h"
 #include "errors.h"
+#include "module_scope.h"
 #include "symbols.h"
 
 namespace cider {
@@ -19,9 +21,97 @@ public:
         program.accept(*this);
     }
 
+    // CID-020/021 module context, wired from the collector (mirrors
+    // IRGenerator::setModuleScopes). Until set, the checker behaves exactly
+    // as before (all lookups are plain resolves in the root scope).
+    void setModuleScopes(const std::map<std::string, Scope*>& scopes) { moduleScopes_ = scopes; }
+    void setProgramModules(const std::map<const AstProgram*, std::string>& programModules) {
+        programModules_ = programModules;
+    }
+    void setAmbiguousModules(
+        const std::map<std::string, std::vector<std::shared_ptr<ModuleSymbol>>>& ambiguous) {
+        ambiguousModules_ = ambiguous;
+    }
+
+    // CID-020/021 §2: strict current-module-then-root lookup. The collector
+    // parents module scopes under the importer (nested enterScope), so a
+    // naive resolve() would leak importer symbols here; instead walk from
+    // the current scope up to (and including) the module scope, then fall
+    // back to the root scope only. With no module current this is exactly
+    // symbolTable_.resolve().
+    std::shared_ptr<Symbol> resolveScoped(const std::string& name) {
+        if (name.find("::") != std::string::npos) return resolveCanonical(name);
+        if (!currentModuleScope_) return symbolTable_.resolve(name);
+        bool underModule = false;
+        for (Scope* s = symbolTable_.getCurrentScope(); s; s = s->getParent()) {
+            if (s == currentModuleScope_) {
+                underModule = true;
+                break;
+            }
+        }
+        if (underModule) {
+            for (Scope* s = symbolTable_.getCurrentScope(); s; s = s->getParent()) {
+                if (auto sym = s->resolveLocal(name)) return sym;
+                if (s == currentModuleScope_) break;
+            }
+        }
+        Scope* root = symbolTable_.getRootScope();
+        return root ? root->resolveLocal(name) : nullptr;
+    }
+
+    // A canonical "logical::Name" (spec §1 identity) resolves its bare part
+    // in that module's scope.
+    std::shared_ptr<Symbol> resolveCanonical(const std::string& name) {
+        auto pos = name.find("::");
+        std::string logical = name.substr(0, pos);
+        std::string bare = name.substr(pos + 2);
+        for (const auto& [prog, mod] : programModules_) {
+            if (mod != logical || !prog) continue;
+            auto scIt = moduleScopes_.find(prog->getSourcePath());
+            if (scIt != moduleScopes_.end() && scIt->second) {
+                if (auto sym = scIt->second->resolveLocal(bare)) return sym;
+            }
+        }
+        return nullptr;
+    }
+
+    // CID-020/021 §1: struct/class/enum/interface identity is the full
+    // logical module path. Bare nominals compared while checking module M
+    // canonicalize to "M::Name" (T1 canonicalTypeName); the main file keeps
+    // legacy bare names. Primitives, template instantiations, dotted paths
+    // and unresolvable names are unaffected.
+    TypeInfo canonicalizeNominal(TypeInfo t) {
+        if (t.name.empty() || currentModule_.empty()) return t;
+        if (t.name.find("::") != std::string::npos) return t;  // already canonical
+        if (t.name.find('<') != std::string::npos) return t;   // template instantiation (T6)
+        if (t.name.find('.') != std::string::npos) return t;   // dotted path, not a bare nominal
+        auto sym = resolveScoped(t.name);
+        if (sym && (sym->kind == SymbolKind::STRUCT || sym->kind == SymbolKind::CLASS ||
+                    sym->kind == SymbolKind::ENUM || sym->kind == SymbolKind::INTERFACE)) {
+            t.name = canonicalTypeName(t.name, currentModule_);
+        }
+        return t;
+    }
+
+    // Spec §1: two imports sharing a last segment make the bare qualifier an
+    // ambiguity error listing both candidates, never a silent pick. Returns
+    // true when an error was emitted.
+    bool reportAmbiguousQualifier(const std::string& qualifier, int line) {
+        auto it = ambiguousModules_.find(qualifier);
+        if (it == ambiguousModules_.end() || it->second.size() < 2) return false;
+        std::string msg = "Ambiguous module qualifier '" + qualifier + "' (candidates:";
+        for (size_t i = 0; i < it->second.size(); ++i) {
+            if (i) msg += ",";
+            msg += " '" + it->second[i]->logicalName + "'";
+        }
+        msg += "; use a from-import)";
+        error(msg, line);
+        return true;
+    }
+
     TypeInfo resolveType(TypeInfo info) {
         if (info.pointerLevel > 0) return info;
-        auto sym = symbolTable_.resolve(info.name);
+        auto sym = resolveScoped(info.name);
         if (sym && sym->kind == SymbolKind::STRUCT && sym->type.name != info.name && !sym->type.name.empty()) {
             TypeInfo resolved = resolveType(sym->type);
             resolved.pointerLevel += info.pointerLevel;  // Should be 0 here
@@ -34,6 +124,10 @@ public:
         if (t1.name == "wildcard" || t2.name == "wildcard") return true;
         t1 = resolveType(t1);
         t2 = resolveType(t2);
+        // CID-020/021 §1: compare nominal type identities canonically, so
+        // same-named types in different modules differ.
+        t1 = canonicalizeNominal(t1);
+        t2 = canonicalizeNominal(t2);
 
         if (t1 == t2) return true;
 
@@ -64,13 +158,15 @@ public:
 
         // Pointer covariance for classes
         if (t1.pointerLevel > 0 && t2.pointerLevel > 0 && t1.pointerLevel == t2.pointerLevel) {
-            auto sym2 = symbolTable_.resolve(t2.name);
+            auto sym2 = resolveScoped(t2.name);
             if (sym2 && sym2->kind == SymbolKind::CLASS) {
                 auto classSym2 = std::static_pointer_cast<StructSymbol>(sym2);
                 std::string parent = classSym2->parentName;
                 while (!parent.empty()) {
-                    if (parent == t1.name) return true;
-                    auto parentSym = symbolTable_.resolve(parent);
+                    // Stored parent names are bare; compare canonically so
+                    // in-module hierarchies keep matching (spec §1).
+                    if (canonicalizeNominal({parent, 0}).name == t1.name) return true;
+                    auto parentSym = resolveScoped(parent);
                     if (parentSym && parentSym->kind == SymbolKind::CLASS) {
                         parent = std::static_pointer_cast<StructSymbol>(parentSym)->parentName;
                     } else {
@@ -89,6 +185,29 @@ public:
         // (Issue #16): imported ASTs carry their module path.
         std::string prevFile = reporter_.getFile();
         if (!program.getSourcePath().empty()) reporter_.setFile(program.getSourcePath());
+        checkTopLevelStatements(program);
+
+        auto mainSym = resolveScoped("main");
+        auto startSym = resolveScoped("_start");
+
+        bool hasMain = mainSym && mainSym->kind == SymbolKind::FUNCTION;
+        bool hasStart = startSym && startSym->kind == SymbolKind::FUNCTION;
+
+        if (!moduleMode_ && !hasMain && !hasStart) {
+            reporter_.error("Missing entry point: 'main' or '_start' function is required.", 1, 1);
+        }
+
+        // CID-020/021 (spec §6.4): check each imported module's body with
+        // that module as current, so unqualified names bind per-module and
+        // latent errors surface as file-attributed diagnostics at check
+        // time. The main/_start presence check above stays main-only.
+        for (auto& imported : program.getImportedAsts()) {
+            checkImportedProgram(*imported);
+        }
+        reporter_.setFile(prevFile);
+    }
+
+    void checkTopLevelStatements(AstProgram& program) {
         for (auto& stmt : program.getStatements()) {
             auto type = stmt->getType();
             if (type != ASTNode::VAR_DECL_STMT &&
@@ -106,16 +225,26 @@ public:
             }
             stmt->accept(*this);
         }
+    }
 
-        auto mainSym = symbolTable_.resolve("main");
-        auto startSym = symbolTable_.resolve("_start");
-
-        bool hasMain = mainSym && mainSym->kind == SymbolKind::FUNCTION;
-        bool hasStart = startSym && startSym->kind == SymbolKind::FUNCTION;
-
-        if (!moduleMode_ && !hasMain && !hasStart) {
-            reporter_.error("Missing entry point: 'main' or '_start' function is required.", 1, 1);
+    void checkImportedProgram(AstProgram& imported) {
+        std::string prevFile = reporter_.getFile();
+        if (!imported.getSourcePath().empty()) reporter_.setFile(imported.getSourcePath());
+        std::string prevModule = currentModule_;
+        Scope* prevModuleScope = currentModuleScope_;
+        Scope* prevScope = symbolTable_.getCurrentScope();
+        auto pmIt = programModules_.find(&imported);
+        currentModule_ = (pmIt != programModules_.end()) ? pmIt->second : std::string();
+        currentModuleScope_ = nullptr;
+        if (!imported.getSourcePath().empty()) {
+            auto scIt = moduleScopes_.find(imported.getSourcePath());
+            if (scIt != moduleScopes_.end()) currentModuleScope_ = scIt->second;
         }
+        if (currentModuleScope_) symbolTable_.setCurrentScope(currentModuleScope_);
+        checkTopLevelStatements(imported);
+        symbolTable_.setCurrentScope(prevScope);
+        currentModule_ = prevModule;
+        currentModuleScope_ = prevModuleScope;
         reporter_.setFile(prevFile);
     }
 
@@ -168,6 +297,8 @@ public:
                 return;
             }
         }
+        // CID-020/021 (spec §6): scopeDepth skips module scopes via the
+        // scope-kind flag, so a module-level array still counts as global.
         if (symbolTable_.scopeDepth() == 0) {
             for (auto& e : elems) {
                 if (!isConstIntExpr(e.get())) {
@@ -184,7 +315,7 @@ public:
         TypeInfo declaredType = TypeInfo::fromAST(stmt.getTypeAST());
         // Resolve interface type
         if (!declaredType.isInterface && declaredType.pointerLevel == 0) {
-            auto typeSym = symbolTable_.resolve(declaredType.name);
+            auto typeSym = resolveScoped(declaredType.name);
             if (typeSym && typeSym->kind == SymbolKind::INTERFACE) {
                 declaredType.isInterface = true;
             }
@@ -199,12 +330,12 @@ public:
                 TypeInfo initType = lastExprType_;
 
                 if (declaredType.isInterface) {
-                auto ifaceSym = symbolTable_.resolve(declaredType.name);
+                auto ifaceSym = resolveScoped(declaredType.name);
                 if (ifaceSym && ifaceSym->kind == SymbolKind::INTERFACE) {
                     auto iface = std::static_pointer_cast<InterfaceSymbol>(ifaceSym);
                     TypeInfo concreteType = initType;
                     if (concreteType.pointerLevel > 0) concreteType.pointerLevel--;
-                    auto concreteSym = symbolTable_.resolve(concreteType.name);
+                    auto concreteSym = resolveScoped(concreteType.name);
                     if (!concreteSym || (concreteSym->kind != SymbolKind::STRUCT && concreteSym->kind != SymbolKind::CLASS)) {
                         error("Cannot assign non-struct/class type to interface '" + declaredType.name + "'", stmt.getLine());
                     } else {
@@ -257,7 +388,7 @@ public:
 
         auto target = dynamic_cast<IdentifierExpr*>(stmt.getTarget());
         if (target) {
-            auto sym = symbolTable_.resolve(target->getName());
+            auto sym = resolveScoped(target->getName());
             if (sym && sym->isConst) {
                 error("Cannot assign to constant '" + target->getName() + "'", stmt.getLine());
             }
@@ -369,9 +500,17 @@ public:
             lastExprType_ = {"wildcard", 0};
             return;
         }
-        auto sym = symbolTable_.resolve(expr.getName());
+        auto sym = resolveScoped(expr.getName());
         if (!sym) {
             error("Undefined identifier '" + expr.getName() + "'", expr.getLine());
+            lastExprType_ = {"error", 0};
+        } else if (sym->kind == SymbolKind::MODULE) {
+            // A bare module qualifier is not a value (spec §3). Values
+            // shadow qualifiers via strict lookup, so reaching here means no
+            // shadowing value exists in scope.
+            if (!reportAmbiguousQualifier(expr.getName(), expr.getLine())) {
+                error("'" + expr.getName() + "' is a module, not a value", expr.getLine());
+            }
             lastExprType_ = {"error", 0};
         } else {
             if (sym->kind == SymbolKind::FUNCTION) {
@@ -380,7 +519,7 @@ public:
                 lastExprType_ = sym->type;
                 // Resolve interface type
                 if (!lastExprType_.isInterface && lastExprType_.pointerLevel == 0) {
-                    auto typeSym = symbolTable_.resolve(lastExprType_.name);
+                    auto typeSym = resolveScoped(lastExprType_.name);
                     if (typeSym && typeSym->kind == SymbolKind::INTERFACE) {
                         lastExprType_.isInterface = true;
                     }
@@ -425,6 +564,20 @@ public:
     }
 
     void visit(MemberAccessExpr& expr) override {
+        // CID-020/021 §3: `b.name` where b is a module qualifier resolves
+        // the member in that module's scope. Values shadow qualifiers
+        // (strict lookup finds the nearer value first), so a MODULE result
+        // here means no shadowing. Arrow access never qualifies.
+        if (!expr.isArrow()) {
+            if (auto base = dynamic_cast<IdentifierExpr*>(expr.getObject())) {
+                auto baseSym = resolveScoped(base->getName());
+                if (baseSym && baseSym->kind == SymbolKind::MODULE) {
+                    visitModuleMemberAccess(expr, base->getName(),
+                                            std::static_pointer_cast<ModuleSymbol>(baseSym));
+                    return;
+                }
+            }
+        }
         expr.getObject()->accept(*this);
         TypeInfo objType = lastExprType_;
 
@@ -438,7 +591,7 @@ public:
         }
 
         // Check if object type is an interface
-        auto ifaceSym = symbolTable_.resolve(objType.name);
+        auto ifaceSym = resolveScoped(objType.name);
         if (ifaceSym && ifaceSym->kind == SymbolKind::INTERFACE) {
             auto iface = std::static_pointer_cast<InterfaceSymbol>(ifaceSym);
             for (const auto& method : iface->methods) {
@@ -452,7 +605,7 @@ public:
             return;
         }
 
-        auto sym = symbolTable_.resolve(objType.name);
+        auto sym = resolveScoped(objType.name);
         if (!sym || (sym->kind != SymbolKind::STRUCT && sym->kind != SymbolKind::CLASS)) {
             error("Type " + objType.toString() + " is not a struct or class", expr.getLine());
             lastExprType_ = {"error", 0};
@@ -485,8 +638,36 @@ public:
         }
     }
 
+    // Resolve `qualifier.member` inside the qualifier's module scope (spec
+    // §3). Members are looked up locally: falling through to the module
+    // scope's parent would leak the importer's symbols (the T2 advisory).
+    void visitModuleMemberAccess(MemberAccessExpr& expr, const std::string& qualifier,
+                                 const std::shared_ptr<ModuleSymbol>& modSym) {
+        if (reportAmbiguousQualifier(qualifier, expr.getLine())) {
+            lastExprType_ = {"error", 0};
+            return;
+        }
+        Scope* modScope = modSym->scope;
+        std::shared_ptr<Symbol> mem = modScope ? modScope->resolveLocal(expr.getMember()) : nullptr;
+        if (!mem) {
+            error("module '" + qualifier + "' has no symbol '" + expr.getMember() + "'", expr.getLine());
+            lastExprType_ = {"error", 0};
+            return;
+        }
+        if (mem->kind == SymbolKind::FUNCTION) {
+            lastExprType_ = {"void", 1};
+            return;
+        }
+        if (mem->kind == SymbolKind::MODULE) {
+            error("'" + qualifier + "." + expr.getMember() + "' is a module, not a value", expr.getLine());
+            lastExprType_ = {"error", 0};
+            return;
+        }
+        lastExprType_ = mem->type;
+    }
+
     void visit(StructLiteralExpr& expr) override {
-        auto sym = symbolTable_.resolve(expr.getStructName());
+        auto sym = resolveScoped(expr.getStructName());
         if (!sym || sym->kind != SymbolKind::STRUCT) {
             error("Unknown struct type '" + expr.getStructName() + "'", expr.getLine());
             lastExprType_ = {"error", 0};
@@ -527,28 +708,63 @@ public:
     void visit(CallExpr& expr) override {
         auto callee = expr.getCallee();
         std::shared_ptr<FunctionSymbol> funcSym = nullptr;
+        std::string displayName;
 
         if (auto id = dynamic_cast<IdentifierExpr*>(callee)) {
-            auto sym = symbolTable_.resolve(id->getName());
+            auto sym = resolveScoped(id->getName());
             if (sym && sym->kind == SymbolKind::FUNCTION) {
                 funcSym = std::static_pointer_cast<FunctionSymbol>(sym);
             }
         } else if (auto mem = dynamic_cast<MemberAccessExpr*>(callee)) {
-            mem->getObject()->accept(*this);
-            TypeInfo objType = lastExprType_;
-            if (objType.pointerLevel > 0) objType.pointerLevel--;
+            // CID-020/021 §3: `b.fb(...)` calls the function in b's module
+            // scope (same-symbol lookup as bindFromAliases, spec §4).
+            if (!mem->isArrow()) {
+                if (auto base = dynamic_cast<IdentifierExpr*>(mem->getObject())) {
+                    auto baseSym = resolveScoped(base->getName());
+                    if (baseSym && baseSym->kind == SymbolKind::MODULE) {
+                        auto modSym = std::static_pointer_cast<ModuleSymbol>(baseSym);
+                        displayName = base->getName() + "." + mem->getMember();
+                        if (!reportAmbiguousQualifier(base->getName(), expr.getLine())) {
+                            Scope* modScope = modSym->scope;
+                            auto target =
+                                modScope ? modScope->resolveLocal(mem->getMember()) : nullptr;
+                            if (!target) {
+                                error("module '" + base->getName() + "' has no symbol '" +
+                                          mem->getMember() + "'",
+                                      expr.getLine());
+                            } else if (target->kind != SymbolKind::FUNCTION) {
+                                error("'" + displayName + "' is not a function", expr.getLine());
+                            } else {
+                                funcSym = std::static_pointer_cast<FunctionSymbol>(target);
+                            }
+                        }
+                        if (!funcSym) {
+                            for (auto& arg : expr.getArgs()) {
+                                arg->accept(*this);
+                            }
+                            lastExprType_ = {"int", 0};
+                            return;
+                        }
+                    }
+                }
+            }
+            if (!funcSym) {
+                mem->getObject()->accept(*this);
+                TypeInfo objType = lastExprType_;
+                if (objType.pointerLevel > 0) objType.pointerLevel--;
 
-            auto sym = symbolTable_.resolve(objType.name);
-            if (sym && (sym->kind == SymbolKind::CLASS || sym->kind == SymbolKind::STRUCT)) {
-                auto classSym = std::static_pointer_cast<StructSymbol>(sym);
-                for (const auto& m : classSym->methods) {
-                    if (m.name == mem->getMember()) {
-                        // Found the method
-                        funcSym = std::make_shared<FunctionSymbol>();
-                        funcSym->name = m.name;
-                        funcSym->parameterTypes = m.parameterTypes;
-                        funcSym->returnType = m.returnType;
-                        break;
+                auto sym = resolveScoped(objType.name);
+                if (sym && (sym->kind == SymbolKind::CLASS || sym->kind == SymbolKind::STRUCT)) {
+                    auto classSym = std::static_pointer_cast<StructSymbol>(sym);
+                    for (const auto& m : classSym->methods) {
+                        if (m.name == mem->getMember()) {
+                            // Found the method
+                            funcSym = std::make_shared<FunctionSymbol>();
+                            funcSym->name = m.name;
+                            funcSym->parameterTypes = m.parameterTypes;
+                            funcSym->returnType = m.returnType;
+                            break;
+                        }
                     }
                 }
             }
@@ -565,14 +781,16 @@ public:
         }
 
         if (expr.getArgs().size() != funcSym->parameterTypes.size()) {
-            error("Function '" + funcSym->name + "' expects " + std::to_string(funcSym->parameterTypes.size()) +
+            const std::string& label = displayName.empty() ? funcSym->name : displayName;
+            error("Function '" + label + "' expects " + std::to_string(funcSym->parameterTypes.size()) +
                       " arguments, got " + std::to_string(expr.getArgs().size()),
                   expr.getLine());
         } else {
             for (size_t i = 0; i < expr.getArgs().size(); ++i) {
                 expr.getArgs()[i]->accept(*this);
                 if (!areTypesCompatible(funcSym->parameterTypes[i], lastExprType_)) {
-                    error("Argument " + std::to_string(i + 1) + " to '" + funcSym->name +
+                    const std::string& label = displayName.empty() ? funcSym->name : displayName;
+                    error("Argument " + std::to_string(i + 1) + " to '" + label +
                               "' type mismatch. Expected " + funcSym->parameterTypes[i].toString() +
                               ", got " + lastExprType_.toString(),
                           expr.getLine());
@@ -604,7 +822,7 @@ public:
             paramSym->name = param.first;
             paramSym->type = TypeInfo::fromAST(param.second.get());
             if (!paramSym->type.isInterface && paramSym->type.pointerLevel == 0) {
-                auto typeSym = symbolTable_.resolve(paramSym->type.name);
+                auto typeSym = resolveScoped(paramSym->type.name);
                 if (typeSym && typeSym->kind == SymbolKind::INTERFACE) {
                     paramSym->type.isInterface = true;
                 }
@@ -670,7 +888,7 @@ public:
     void visit(ExpressionStmt& stmt) override { stmt.getExpression()->accept(*this); }
 
     void visit(ThisExpr& expr) override {
-        auto sym = symbolTable_.resolve("this");
+        auto sym = resolveScoped("this");
         if (sym) {
             lastExprType_ = sym->type;
         } else {
@@ -685,7 +903,7 @@ public:
             lastExprType_ = {"error", 0};
             return;
         }
-        auto classSym = symbolTable_.resolve(currentClassName_);
+        auto classSym = resolveScoped(currentClassName_);
         if (!classSym || classSym->kind != SymbolKind::CLASS) {
             error("Current class '" + currentClassName_ + "' not found", expr.getLine());
             lastExprType_ = {"error", 0};
@@ -697,7 +915,7 @@ public:
             lastExprType_ = {"error", 0};
             return;
         }
-        auto parentSym = symbolTable_.resolve(cs->parentName);
+        auto parentSym = resolveScoped(cs->parentName);
         if (!parentSym || (parentSym->kind != SymbolKind::CLASS && parentSym->kind != SymbolKind::STRUCT)) {
             error("Parent class '" + cs->parentName + "' not found", expr.getLine());
             lastExprType_ = {"error", 0};
@@ -721,7 +939,7 @@ public:
         // The awaited call must resolve to an async function.
         if (auto call = dynamic_cast<CallExpr*>(expr.getValue())) {
             if (auto id = dynamic_cast<IdentifierExpr*>(call->getCallee())) {
-                auto sym = symbolTable_.resolve(id->getName());
+                auto sym = resolveScoped(id->getName());
                 if (sym && sym->kind == SymbolKind::FUNCTION) {
                     auto fs = std::static_pointer_cast<FunctionSymbol>(sym);
                     if (!fs->isAsync) {
@@ -892,11 +1110,11 @@ public:
             elemType = iterableType;
             elemType.isSlice = false;
         } else if (iterableType.pointerLevel == 0 &&
-                   (symbolTable_.resolve(iterableType.name) &&
-                    (symbolTable_.resolve(iterableType.name)->kind == SymbolKind::STRUCT ||
-                     symbolTable_.resolve(iterableType.name)->kind == SymbolKind::CLASS))) {
+                   (resolveScoped(iterableType.name) &&
+                    (resolveScoped(iterableType.name)->kind == SymbolKind::STRUCT ||
+                     resolveScoped(iterableType.name)->kind == SymbolKind::CLASS))) {
             // Custom iterator protocol: iter() -> It, next(self: It) -> *T.
-            auto sym = symbolTable_.resolve(iterableType.name);
+            auto sym = resolveScoped(iterableType.name);
             auto ss = std::static_pointer_cast<StructSymbol>(sym);
             const StructSymbol::Method* iterM = nullptr;
             const StructSymbol::Method* nextM = nullptr;
@@ -918,7 +1136,7 @@ public:
             // iterator element is not a struct (the flag would route the
             // loop variable through getAddress instead of a value load).
             if (elemType.pointerLevel == 0 && !elemType.isArray) {
-                auto ts = symbolTable_.resolve(elemType.name);
+                auto ts = resolveScoped(elemType.name);
                 if (!ts || (ts->kind != SymbolKind::STRUCT && ts->kind != SymbolKind::CLASS)) {
                     elemType.isUserDefined = false;
                 }
@@ -1013,6 +1231,13 @@ private:
     TypeInfo lastExprType_ = {"void", 0};
     std::string currentClassName_;
     bool moduleMode_ = false;
+
+    // CID-020/021 module context (see setters above).
+    std::map<std::string, Scope*> moduleScopes_;  // resolved path -> module scope
+    std::map<const AstProgram*, std::string> programModules_;  // imported AST -> logical name
+    std::map<std::string, std::vector<std::shared_ptr<ModuleSymbol>>> ambiguousModules_;
+    std::string currentModule_;      // logical name of the file being checked ("" == main)
+    Scope* currentModuleScope_ = nullptr;
 
     void error(const std::string& msg, int line) {
         reporter_.error(msg, line);

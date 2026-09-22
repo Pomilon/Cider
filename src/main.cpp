@@ -195,6 +195,9 @@ int main(int argc, char** argv) {
         }
         rep.clear();
         cider::TypeChecker checker(table, rep);
+        checker.setModuleScopes(collector.getModuleScopes());
+        checker.setProgramModules(collector.getProgramModules());
+        checker.setAmbiguousModules(collector.getAmbiguousModules());
         checker.check(*prog);
         if (rep.hasErrors()) {
             printDiagnostics(text, opts.inputFile, rep.errors(), "type");

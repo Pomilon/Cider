@@ -139,9 +139,16 @@ public:
 
     Scope* getParent() const { return parent_; }
 
+    // CID-020/021 (spec §6): marks a scope that holds one imported module's
+    // symbols. Depth queries skip module scopes so "global scope" keeps its
+    // meaning for code checked inside a module.
+    bool isModuleScope() const { return isModule_; }
+    void markModuleScope() { isModule_ = true; }
+
 private:
     Scope* parent_;
     std::map<std::string, std::shared_ptr<Symbol>> symbols_;
+    bool isModule_ = false;
 };
 
 class SymbolTable {
@@ -150,6 +157,12 @@ public:
 
     void enterScope();
     void exitScope();
+
+    // CID-020/021: enter a scope flagged as a module scope (spec §6).
+    void enterModuleScope() {
+        enterScope();
+        currentScope_->markModuleScope();
+    }
 
     void define(std::shared_ptr<Symbol> symbol);
     std::shared_ptr<Symbol> resolve(const std::string& name);
@@ -173,11 +186,14 @@ public:
         if (scope) currentScope_ = scope;
     }
 
-    // Nesting depth of the current scope (root/global scope is 0). Used to
-    // tell global variable declarations from function-local ones.
+    // Nesting depth of the current scope (root/global scope is 0). Module
+    // scopes are skipped (spec §6 scope-kind flag): a module-level
+    // declaration still counts as global. Used to tell global variable
+    // declarations from function-local ones.
     int scopeDepth() const {
         int depth = 0;
-        for (Scope* s = currentScope_; s && s->getParent(); s = s->getParent()) ++depth;
+        for (Scope* s = currentScope_; s && s->getParent(); s = s->getParent())
+            if (!s->isModuleScope()) ++depth;
         return depth;
     }
 

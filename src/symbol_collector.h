@@ -858,10 +858,9 @@ public:
         Scope* modScope = nullptr;
         if (importedAst) {
             importedAst->setSourcePath(result.path);
-            symbolTable_.enterScope();
+            symbolTable_.enterModuleScope();
             modScope = symbolTable_.getCurrentScope();
             moduleScopes_[result.path] = modScope;
-            moduleLogicalNames_[result.path] = moduleName;
             moduleStack_.push_back(moduleName);
             importedAst->accept(*this);
             moduleStack_.pop_back();
@@ -1475,7 +1474,6 @@ private:
     std::set<std::string> importedModuleNames_;
     std::set<std::string> importingPaths_;
     std::map<std::string, Scope*> moduleScopes_;  // resolved path -> module scope (spec §1)
-    std::map<std::string, std::string> moduleLogicalNames_;  // resolved path -> first logical name
     std::map<std::string, std::vector<std::shared_ptr<ModuleSymbol>>> ambiguousModules_;
     std::map<const AstProgram*, std::string> programModules_;  // imported AST -> logical name
     std::vector<std::string> moduleStack_;  // current-module context; empty == main file

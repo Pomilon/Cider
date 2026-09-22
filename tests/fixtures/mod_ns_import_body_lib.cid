@@ -1,0 +1,6 @@
+export func lib_broken() -> int {
+  var x: int = "s";
+  return x;
+}
+
+var lib_bad_table: [u8; 4] = [lib_broken(), 20, 30, 40];
