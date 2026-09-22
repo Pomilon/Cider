@@ -198,6 +198,7 @@ int main(int argc, char** argv) {
         checker.setModuleScopes(collector.getModuleScopes());
         checker.setProgramModules(collector.getProgramModules());
         checker.setAmbiguousModules(collector.getAmbiguousModules());
+        checker.setSymbolModules(collector.getSymbolModules());
         checker.check(*prog);
         if (rep.hasErrors()) {
             printDiagnostics(text, opts.inputFile, rep.errors(), "type");

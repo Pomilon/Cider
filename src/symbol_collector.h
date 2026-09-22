@@ -467,6 +467,9 @@ public:
             reporter_.error("Redeclaration of enum '" + sym->name + "'", sym->line, sym->col);
         } else {
             symbolTable_.define(sym);
+            // CID-020/021: nominal identity covers enums (spec §1), so
+            // record provenance like every other nominal definition.
+            recordDefiningModule(sym);
         }
 
         for (size_t i = 0; i < stmt.getVariants().size(); i++) {
@@ -777,6 +780,27 @@ public:
         structClassNames_.push_back(name);
     }
 
+    // CID-020/021 (spec §3): resolve a nominal type name that may be
+    // dotted (`nsa.Event`, `a.util.Foo`). Bare names use the legacy scope
+    // walk (identical behavior); dotted names resolve the qualifier prefix
+    // as a module (full logical path or last-segment qualifier) and the
+    // member in that module's scope. Null when unresolvable.
+    std::shared_ptr<Symbol> resolveNominalType(const std::string& name) {
+        auto sym = symbolTable_.resolve(name);
+        if (sym) return sym;
+        auto dot = name.rfind('.');
+        if (dot == std::string::npos || dot == 0 || dot + 1 >= name.size()) return nullptr;
+        auto modSym = symbolTable_.resolve(name.substr(0, dot));
+        if (!modSym || modSym->kind != SymbolKind::MODULE) return nullptr;
+        auto ms = std::static_pointer_cast<ModuleSymbol>(modSym)->scope;
+        if (!ms) return nullptr;
+        auto mem = ms->resolveLocal(name.substr(dot + 1));
+        if (mem && (mem->kind == SymbolKind::STRUCT || mem->kind == SymbolKind::CLASS ||
+                    mem->kind == SymbolKind::ENUM || mem->kind == SymbolKind::INTERFACE))
+            return mem;
+        return nullptr;
+    }
+
     int getFieldSize(const TypeInfo& type) {
         if (type.pointerLevel > 0) return 8;
         if (type.isInterface) return 16;
@@ -790,7 +814,7 @@ public:
         if (type.name == "u16" || type.name == "i16") return 2;
         if (type.name == "u32" || type.name == "i32" || type.name == "int" || type.name == "float" || type.name == "bool") return 4;
         if (type.name == "u64" || type.name == "i64") return 8;
-        auto sym = symbolTable_.resolve(type.name);
+        auto sym = resolveNominalType(type.name);
         if (sym && (sym->kind == SymbolKind::STRUCT || sym->kind == SymbolKind::CLASS)) {
             return std::static_pointer_cast<StructSymbol>(sym)->totalSize;
         }
@@ -820,7 +844,7 @@ public:
             result = 8;
         } else {
             visiting->insert(type.name);
-            auto sym = symbolTable_.resolve(type.name);
+            auto sym = resolveNominalType(type.name);
             if (sym && (sym->kind == SymbolKind::STRUCT || sym->kind == SymbolKind::CLASS)) {
                 auto ss = std::static_pointer_cast<StructSymbol>(sym);
                 int maxA = 1;

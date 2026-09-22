@@ -32,6 +32,13 @@ public:
         const std::map<std::string, std::vector<std::shared_ptr<ModuleSymbol>>>& ambiguous) {
         ambiguousModules_ = ambiguous;
     }
+    // Bind-time defining-module provenance from the collector (mirrors
+    // IRGenerator::setSymbolModules): lets nominal identity resolve by the
+    // type's owner, not the file being checked. Unset (unit tests) falls
+    // back to the legacy current-module rule.
+    void setSymbolModules(const std::map<const Symbol*, std::string>& symbolModules) {
+        symbolModules_ = symbolModules;
+    }
 
     // CID-020/021 §2: strict current-module-then-root lookup. The collector
     // parents module scopes under the importer (nested enterScope), so a
@@ -75,20 +82,105 @@ public:
         return nullptr;
     }
 
-    // CID-020/021 §1: struct/class/enum/interface identity is the full
-    // logical module path. Bare nominals compared while checking module M
-    // canonicalize to "M::Name" (T1 canonicalTypeName); the main file keeps
-    // legacy bare names. Primitives, template instantiations, dotted paths
-    // and unresolvable names are unaffected.
-    TypeInfo canonicalizeNominal(TypeInfo t) {
-        if (t.name.empty() || currentModule_.empty()) return t;
-        if (t.name.find("::") != std::string::npos) return t;  // already canonical
-        if (t.name.find('<') != std::string::npos) return t;   // template instantiation (T6)
-        if (t.name.find('.') != std::string::npos) return t;   // dotted path, not a bare nominal
+    // CID-020/021 §1: struct/class/enum/interface identity is the
+    // DEFINING module's full logical path ("nsa::Event"); main-file types
+    // keep legacy bare names. Resolution is by symbol provenance
+    // (bind-time, alias-safe), not by the file being checked — so a value
+    // of type b.Event differs from a.Event in every scope. Primitives,
+    // template instantiations and unresolvable names are unaffected.
+    // Dotted names (`nsa.Event`, `a.util.Foo`) resolve their qualifier
+    // through the module registry (spec §3). `line` attributes qualifier
+    // errors; line < 0 leaves failing dotted names untouched so the outer
+    // comparison fails safely instead of accepting.
+    std::string definingModuleOf(const std::shared_ptr<Symbol>& sym) {
+        if (sym) {
+            auto it = symbolModules_.find(sym.get());
+            if (it != symbolModules_.end()) return it->second;
+        }
+        return currentModule_;
+    }
+
+    // Module scope for a logical name ("" == root scope). Null when unknown.
+    Scope* scopeForModule(const std::string& logical) {
+        if (logical.empty()) return symbolTable_.getRootScope();
+        for (const auto& [prog, mod] : programModules_) {
+            if (!prog || mod != logical) continue;
+            auto it = moduleScopes_.find(prog->getSourcePath());
+            if (it != moduleScopes_.end()) return it->second;
+        }
+        return nullptr;
+    }
+
+    bool isAmbiguousQualifier(const std::string& qualifier) {
+        auto it = ambiguousModules_.find(qualifier);
+        return it != ambiguousModules_.end() && it->second.size() >= 2;
+    }
+
+    // Canonicalize a dotted `qualifier.Name` (qualifier = last segment or
+    // full logical path) to `logical::Name`.
+    TypeInfo canonicalizeDotted(TypeInfo t, int line = -1) {
+        auto dot = t.name.rfind('.');
+        std::string prefix = t.name.substr(0, dot);
+        std::string bare = t.name.substr(dot + 1);
+        auto modSym = resolveScoped(prefix);
+        bool isModule = modSym && modSym->kind == SymbolKind::MODULE;
+        std::shared_ptr<Symbol> mem;
+        std::string logical;
+        if (isModule && !isAmbiguousQualifier(prefix)) {
+            auto ms = std::static_pointer_cast<ModuleSymbol>(modSym);
+            logical = ms->logicalName;
+            if (ms->scope) mem = ms->scope->resolveLocal(bare);
+        }
+        bool ok = isModule && mem &&
+                  (mem->kind == SymbolKind::STRUCT || mem->kind == SymbolKind::CLASS ||
+                   mem->kind == SymbolKind::ENUM || mem->kind == SymbolKind::INTERFACE);
+        if (!ok) {
+            if (line < 0) return t;
+            if (!reportAmbiguousQualifier(prefix, line)) {
+                if (isModule) {
+                    error("module '" + prefix + "' has no symbol '" + bare + "'", line);
+                } else if (modSym) {
+                    error("'" + prefix + "' is not a module", line);
+                } else {
+                    error("Undefined identifier '" + prefix + "'", line);
+                }
+            }
+            return t;
+        }
+        t.name = canonicalTypeName(bare, logical);
+        return t;
+    }
+
+    // Canonicalize a nominal in a NON-current module's context: strict
+    // module-scope-local lookup, then root (spec §2 order), never the
+    // caller's scope — so a callee signature means the same at every use
+    // site. Falls back to the untouched name when unresolvable.
+    TypeInfo canonicalizeInModule(TypeInfo t, const std::string& logical, int line = -1) {
+        if (t.name.empty() || t.name.find("::") != std::string::npos) return t;
+        if (t.name.find('<') != std::string::npos) return t;  // template instantiation (T6)
+        if (t.name.find('.') != std::string::npos) return canonicalizeDotted(t, line);
+        Scope* ms = scopeForModule(logical);
+        std::shared_ptr<Symbol> sym;
+        if (ms) sym = ms->resolveLocal(t.name);
+        if (!sym && ms && ms != symbolTable_.getRootScope()) {
+            Scope* root = symbolTable_.getRootScope();
+            if (root) sym = root->resolveLocal(t.name);
+        }
+        if (sym && (sym->kind == SymbolKind::STRUCT || sym->kind == SymbolKind::CLASS ||
+                    sym->kind == SymbolKind::ENUM || sym->kind == SymbolKind::INTERFACE)) {
+            t.name = canonicalTypeName(t.name, definingModuleOf(sym));
+        }
+        return t;
+    }
+
+    TypeInfo canonicalizeNominal(TypeInfo t, int line = -1) {
+        if (t.name.empty() || t.name.find("::") != std::string::npos) return t;  // already canonical
+        if (t.name.find('<') != std::string::npos) return t;                     // template instantiation (T6)
+        if (t.name.find('.') != std::string::npos) return canonicalizeDotted(t, line);
         auto sym = resolveScoped(t.name);
         if (sym && (sym->kind == SymbolKind::STRUCT || sym->kind == SymbolKind::CLASS ||
                     sym->kind == SymbolKind::ENUM || sym->kind == SymbolKind::INTERFACE)) {
-            t.name = canonicalTypeName(t.name, currentModule_);
+            t.name = canonicalTypeName(t.name, definingModuleOf(sym));
         }
         return t;
     }
@@ -313,6 +405,10 @@ public:
 
     void visit(VarDeclStmt& stmt) override {
         TypeInfo declaredType = TypeInfo::fromAST(stmt.getTypeAST());
+        // CID-020/021 §1: store the canonical nominal identity so later
+        // uses compare by defining module, not by the using file. Done
+        // before the interface check so dotted spellings resolve too.
+        declaredType = canonicalizeNominal(declaredType, stmt.getLine());
         // Resolve interface type
         if (!declaredType.isInterface && declaredType.pointerLevel == 0) {
             auto typeSym = resolveScoped(declaredType.name);
@@ -366,7 +462,8 @@ public:
                 }
             } else if (!areTypesCompatible(declaredType, initType)) {
                 error("Type mismatch in declaration of '" + stmt.getName() +
-                          "'. Expected " + declaredType.toString() + ", got " + initType.toString(),
+                          "'. Expected " + canonicalizeNominal(declaredType).toString() + ", got " +
+                          canonicalizeNominal(initType).toString(),
                       stmt.getLine());
                 }
             }
@@ -398,8 +495,8 @@ public:
         TypeInfo valueType = lastExprType_;
 
         if (!areTypesCompatible(targetType, valueType)) {
-            error("Type mismatch in assignment. Expected " + targetType.toString() +
-                      ", got " + valueType.toString(),
+            error("Type mismatch in assignment. Expected " + canonicalizeNominal(targetType).toString() +
+                      ", got " + canonicalizeNominal(valueType).toString(),
                   stmt.getLine());
         }
     }
@@ -517,6 +614,14 @@ public:
                 lastExprType_ = {"void", 1};
             } else {
                 lastExprType_ = sym->type;
+                // CID-020/021 §1: a symbol bound in another module (a
+                // module-scope variable read via from-alias) carries that
+                // module's bare nominals; re-root them in the owner's
+                // context so comparisons use canonical identity.
+                std::string ownerMod = definingModuleOf(sym);
+                if (ownerMod != currentModule_) {
+                    lastExprType_ = canonicalizeInModule(sym->type, ownerMod, expr.getLine());
+                }
                 // Resolve interface type
                 if (!lastExprType_.isInterface && lastExprType_.pointerLevel == 0) {
                     auto typeSym = resolveScoped(lastExprType_.name);
@@ -558,7 +663,7 @@ public:
     void visit(NilPtrExpr&) override { lastExprType_ = {"void", 1}; }
 
     void visit(NewExpr& expr) override {
-        TypeInfo type = TypeInfo::fromAST(expr.getNewType());
+        TypeInfo type = canonicalizeNominal(TypeInfo::fromAST(expr.getNewType()), expr.getLine());
         type.pointerLevel++;  // new T returns T*
         lastExprType_ = type;
     }
@@ -596,7 +701,8 @@ public:
             auto iface = std::static_pointer_cast<InterfaceSymbol>(ifaceSym);
             for (const auto& method : iface->methods) {
                 if (method.name == expr.getMember()) {
-                    lastExprType_ = method.returnType;
+                    lastExprType_ =
+                        canonicalizeInModule(method.returnType, definingModuleOf(ifaceSym), expr.getLine());
                     return;
                 }
             }
@@ -616,7 +722,9 @@ public:
         bool found = false;
         for (const auto& field : structSym->fields) {
             if (field.name == expr.getMember()) {
-                lastExprType_ = field.type;
+                // CID-020/021 §1: field nominals belong to the struct's
+                // owner module; canonicalize there, not at the use site.
+                lastExprType_ = canonicalizeInModule(field.type, definingModuleOf(sym), expr.getLine());
                 found = true;
                 break;
             }
@@ -625,7 +733,8 @@ public:
         if (!found) {
             for (const auto& method : structSym->methods) {
                 if (method.name == expr.getMember()) {
-                    lastExprType_ = method.returnType;
+                    lastExprType_ = canonicalizeInModule(method.returnType, definingModuleOf(sym),
+                                                         expr.getLine());
                     found = true;
                     break;
                 }
@@ -663,7 +772,7 @@ public:
             lastExprType_ = {"error", 0};
             return;
         }
-        lastExprType_ = mem->type;
+        lastExprType_ = canonicalizeInModule(mem->type, modSym->logicalName, expr.getLine());
     }
 
     void visit(StructLiteralExpr& expr) override {
@@ -675,15 +784,18 @@ public:
         }
 
         auto structSym = std::static_pointer_cast<StructSymbol>(sym);
+        std::string ownerMod = definingModuleOf(sym);
         for (auto& fieldInit : expr.getFields()) {
             bool fieldFound = false;
             for (const auto& fieldDef : structSym->fields) {
                 if (fieldDef.name == fieldInit.first) {
                     fieldFound = true;
                     fieldInit.second->accept(*this);
-                    if (!areTypesCompatible(fieldDef.type, lastExprType_)) {
+                    TypeInfo expT = canonicalizeInModule(fieldDef.type, ownerMod, expr.getLine());
+                    if (!areTypesCompatible(expT, lastExprType_)) {
                         error("Type mismatch for field '" + fieldDef.name +
-                                  "'. Expected " + fieldDef.type.toString() + ", got " + lastExprType_.toString(),
+                                  "'. Expected " + expT.toString() + ", got " +
+                                  canonicalizeNominal(lastExprType_).toString(),
                               expr.getLine());
                     }
                     break;
@@ -693,14 +805,14 @@ public:
                 error("Struct '" + expr.getStructName() + "' has no field '" + fieldInit.first + "'", expr.getLine());
             }
         }
-        lastExprType_ = {expr.getStructName(), 0};
+        lastExprType_ = canonicalizeNominal({expr.getStructName(), 0}, expr.getLine());
     }
 
     void visit(SizeofExpr& /*expr*/) override { lastExprType_ = {"int", 0}; }
 
     void visit(CastExpr& expr) override {
         expr.getExpression()->accept(*this);
-        lastExprType_ = TypeInfo::fromAST(expr.getTargetType());
+        lastExprType_ = canonicalizeNominal(TypeInfo::fromAST(expr.getTargetType()), expr.getLine());
     }
 
     void visit(ArrayTypeAST&) override {}
@@ -756,13 +868,21 @@ public:
                 auto sym = resolveScoped(objType.name);
                 if (sym && (sym->kind == SymbolKind::CLASS || sym->kind == SymbolKind::STRUCT)) {
                     auto classSym = std::static_pointer_cast<StructSymbol>(sym);
+                    // CID-020/021 §1: method signature nominals belong to
+                    // the class's owner module; canonicalize there so
+                    // cross-module method calls compare canonically.
+                    std::string ownerMod = definingModuleOf(sym);
                     for (const auto& m : classSym->methods) {
                         if (m.name == mem->getMember()) {
                             // Found the method
                             funcSym = std::make_shared<FunctionSymbol>();
                             funcSym->name = m.name;
-                            funcSym->parameterTypes = m.parameterTypes;
-                            funcSym->returnType = m.returnType;
+                            for (const auto& pt : m.parameterTypes) {
+                                funcSym->parameterTypes.push_back(
+                                    canonicalizeInModule(pt, ownerMod, expr.getLine()));
+                            }
+                            funcSym->returnType =
+                                canonicalizeInModule(m.returnType, ownerMod, expr.getLine());
                             break;
                         }
                     }
@@ -786,18 +906,24 @@ public:
                       " arguments, got " + std::to_string(expr.getArgs().size()),
                   expr.getLine());
         } else {
+            // CID-020/021 §1: parameter nominals belong to the callee's
+            // defining module; canonicalize there so b.Event passed where
+            // a.Event is expected is a type error, not a layout mix-up.
+            std::string defMod = definingModuleOf(funcSym);
             for (size_t i = 0; i < expr.getArgs().size(); ++i) {
                 expr.getArgs()[i]->accept(*this);
-                if (!areTypesCompatible(funcSym->parameterTypes[i], lastExprType_)) {
+                TypeInfo paramT =
+                    canonicalizeInModule(funcSym->parameterTypes[i], defMod, expr.getLine());
+                if (!areTypesCompatible(paramT, lastExprType_)) {
                     const std::string& label = displayName.empty() ? funcSym->name : displayName;
                     error("Argument " + std::to_string(i + 1) + " to '" + label +
-                              "' type mismatch. Expected " + funcSym->parameterTypes[i].toString() +
-                              ", got " + lastExprType_.toString(),
+                              "' type mismatch. Expected " + paramT.toString() + ", got " +
+                              canonicalizeNominal(lastExprType_).toString(),
                           expr.getLine());
                 }
             }
         }
-        lastExprType_ = funcSym->returnType;
+        lastExprType_ = canonicalizeInModule(funcSym->returnType, definingModuleOf(funcSym), expr.getLine());
     }
 
     void visit(FunctionDeclStmt& stmt) override {
@@ -821,6 +947,9 @@ public:
             paramSym->kind = SymbolKind::VARIABLE;
             paramSym->name = param.first;
             paramSym->type = TypeInfo::fromAST(param.second.get());
+            // CID-020/021 §1: store the canonical nominal identity (dotted
+            // spellings resolve here, with the diagnostic at this line).
+            paramSym->type = canonicalizeNominal(paramSym->type, stmt.getLine());
             if (!paramSym->type.isInterface && paramSym->type.pointerLevel == 0) {
                 auto typeSym = resolveScoped(paramSym->type.name);
                 if (typeSym && typeSym->kind == SymbolKind::INTERFACE) {
@@ -924,7 +1053,8 @@ public:
         auto ps = std::static_pointer_cast<StructSymbol>(parentSym);
         for (auto& m : ps->methods) {
             if (m.name == expr.getMember()) {
-                lastExprType_ = m.returnType;
+                lastExprType_ =
+                    canonicalizeInModule(m.returnType, definingModuleOf(parentSym), expr.getLine());
                 return;
             }
         }
@@ -1068,7 +1198,8 @@ public:
             auto sym = std::make_shared<Symbol>();
             sym->kind = SymbolKind::VARIABLE;
             sym->name = p.first;
-            if (p.second) sym->type = TypeInfo::fromAST(p.second.get());
+            if (p.second)
+                sym->type = canonicalizeNominal(TypeInfo::fromAST(p.second.get()), expr.getLine());
             symbolTable_.define(sym);
         }
         for (auto& s : expr.getBody()) {
@@ -1236,6 +1367,7 @@ private:
     std::map<std::string, Scope*> moduleScopes_;  // resolved path -> module scope
     std::map<const AstProgram*, std::string> programModules_;  // imported AST -> logical name
     std::map<std::string, std::vector<std::shared_ptr<ModuleSymbol>>> ambiguousModules_;
+    std::map<const Symbol*, std::string> symbolModules_;  // symbol identity -> defining module
     std::string currentModule_;      // logical name of the file being checked ("" == main)
     Scope* currentModuleScope_ = nullptr;
 
