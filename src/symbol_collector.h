@@ -194,10 +194,12 @@ public:
 
     void visit(VarDeclStmt& stmt) override {
         auto typeInfo = TypeInfo::fromAST(stmt.getTypeAST());
-        // Check for struct template instantiation (e.g., Vec<int>).
-        if (!typeInfo.isArray && typeInfo.pointerLevel == 0) {
-            checkAndInstantiateStructTemplate(typeInfo.name);
-        }
+        // Check for struct template instantiation (e.g., Vec<int>). The
+        // match is on the base nominal, so pointers and arrays to
+        // instantiations (e.g. `*Entry<K, V>`) instantiate too (T6 std
+        // sweep: map.cid's `entries` field never instantiated, so every
+        // member use failed to resolve).
+        checkAndInstantiateStructTemplate(typeInfo.name);
         auto sym = std::make_shared<Symbol>();
         sym->kind = SymbolKind::VARIABLE;
         sym->name = stmt.getName();
@@ -1116,6 +1118,12 @@ public:
         structSym->line = 0;
         structSym->col = 0;
 
+        // Recursive-instantiation guard: a field may name the very
+        // instantiation under construction (`next: *L<T>`) or a cycle of
+        // them. The outer call defines the symbol; the inner call just
+        // returns (the field type resolves once collection finishes).
+        if (!structTemplateActive_.insert(typeName).second) return;
+
         int currentOffset = 0;
         int maxAlign = 1;
         int bitPos = 0;
@@ -1124,6 +1132,10 @@ public:
             f.name = field.name;
             f.type = TypeInfo::fromAST(field.type.get());
             f.type.name = substituteTypeName(f.type.name, tmplSym->typeParams, parsed.second);
+            // Nested instantiations in field position (e.g. HashMap's
+            // `entries: *Entry<K, V>`): instantiate the substituted type so
+            // member access through it resolves (T6 std sweep).
+            checkAndInstantiateStructTemplate(f.type.name);
             f.bits = field.bits;
             if (field.bits > 0) {
                 if (bitPos == 0) {
@@ -1160,6 +1172,7 @@ public:
             globalScope->define(structSym);
             structClassNames_.push_back(typeName);
         }
+        structTemplateActive_.erase(typeName);
     }
 
     void visitStmtForTemplateCalls(Statement* stmt) {
@@ -1690,6 +1703,9 @@ private:
     // CID-020/021: defined symbol object -> defining module logical ("" == main).
     std::map<const Symbol*, std::string> symbolModules_;
     std::vector<std::string> moduleStack_;  // current-module context; empty == main file
+    // Instantiations currently being built (recursion guard for
+    // self-referential struct templates, e.g. `next: *L<T>`).
+    std::set<std::string> structTemplateActive_;
 };
 
 }  // namespace cider
