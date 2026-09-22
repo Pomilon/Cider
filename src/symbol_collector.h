@@ -143,6 +143,16 @@ public:
         symbolModules_.emplace(sym.get(), getCurrentModule());
     }
 
+    // Basename of a source path, for diagnostics that name two files
+    // (entry-point redeclaration): stable across invocation styles (the
+    // main path is absolute under the test harness, module paths are
+    // origin-relative), so fixtures can lock the message verbatim. The
+    // diagnostic's own file prefix still carries the full path.
+    static std::string fileNameOf(const std::string& path) {
+        auto slash = path.find_last_of('/');
+        return (slash == std::string::npos) ? path : path.substr(slash + 1);
+    }
+
     // Visitor methods
     void visit(AstProgram& program) override {
         for (auto& stmt : program.getStatements()) {
@@ -272,6 +282,23 @@ public:
         sym->isAsync = stmt.isAsync();
         sym->isExported = inExport_;
 
+        // CID-020/021 (spec §5 Review Focus): `main`/`_start` are never
+        // mangled, so a module-level definition would emit a second bare
+        // `define main` and silently hijack the program entry (the
+        // pre-namespace behavior was a redeclaration error). The exemption
+        // is only safe for the main module's own entry points and externs;
+        // a NON-main module defining one is a redeclaration-style error
+        // naming both files. (Methods cannot reach here: their symbol name
+        // is prefixed with the class name.)
+        bool moduleEntryConflict = !stmt.isExtern() && !getCurrentModule().empty() &&
+                                   (sym->name == "main" || sym->name == "_start");
+        if (moduleEntryConflict) {
+            reporter_.error("Redeclaration of '" + sym->name + "' (defined in module '" +
+                                fileNameOf(reporter_.getFile()) + "' and the main program '" +
+                                fileNameOf(originPath_) + "')",
+                            stmt.getLine(), stmt.getColumn());
+        }
+
         for (auto& param : stmt.getParams()) {
             TypeInfo paramType = TypeInfo::fromAST(param.second.get());
             if (!paramType.isInterface && paramType.pointerLevel == 0) {
@@ -283,7 +310,10 @@ public:
             sym->parameterTypes.push_back(paramType);
         }
 
-        if (symbolTable_.getCurrentScope()->resolveLocal(sym->name)) {
+        if (moduleEntryConflict) {
+            // Rejected above (redeclaration-style): do not bind a second
+            // `main`/`_start` entry symbol in the module scope.
+        } else if (symbolTable_.getCurrentScope()->resolveLocal(sym->name)) {
             // Ignore if it's already defined
         } else {
             symbolTable_.define(sym);
@@ -984,12 +1014,11 @@ public:
         if (scopeIt != moduleScopes_.end()) {
             // Diamond / repeat import: share the existing scope (defined
             // once), but still register this logical name for the importer.
-            importedModuleNames_.insert(moduleName);
+            // Dedup rides on the path-keyed moduleScopes_ above.
             registerModuleSymbol(importingScope, moduleName, scopeIt->second, line, col);
             return scopeIt->second;
         }
 
-        importedModuleNames_.insert(moduleName);
         importingPaths_.insert(result.path);
 
         std::ifstream file(result.path);
@@ -1719,7 +1748,6 @@ private:
     std::map<std::string, std::vector<std::string>> interfaceImpls_;
     std::map<std::string, std::shared_ptr<TemplateSymbol>> templateTable_;
     bool inExport_ = false;
-    std::set<std::string> importedModuleNames_;
     std::set<std::string> importingPaths_;
     std::map<std::string, Scope*> moduleScopes_;  // resolved path -> module scope (spec §1)
     std::map<std::string, std::vector<std::shared_ptr<ModuleSymbol>>> ambiguousModules_;
