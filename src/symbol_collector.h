@@ -1316,6 +1316,17 @@ public:
                                          type->isVolatile());
     }
 
+    // Clone one template-body statement into `out`, dropping uncloneable
+    // ones (the default case below already reported them). Pushing a null
+    // would segfault the later visit of the clone (T6 std sweep: `break`
+    // inside a template's while cloned to null and crashed collection).
+    void cloneInto(std::vector<std::unique_ptr<Statement>>& out, Statement* s,
+                   const std::vector<std::string>& tmplParams,
+                   const std::vector<std::string>& tmplArgs) {
+        if (!s) return;
+        if (auto c = cloneStmtWithSubst(s, tmplParams, tmplArgs)) out.push_back(std::move(c));
+    }
+
     std::unique_ptr<Statement> cloneStmtWithSubst(Statement* stmt,
                                                   const std::vector<std::string>& tmplParams,
                                                   const std::vector<std::string>& tmplArgs) {
@@ -1345,7 +1356,7 @@ public:
                 auto bs = dynamic_cast<BlockStmt*>(stmt);
                 std::vector<std::unique_ptr<Statement>> clonedStmts;
                 for (auto& s : bs->getStatements()) {
-                    clonedStmts.push_back(cloneStmtWithSubst(s.get(), tmplParams, tmplArgs));
+                    cloneInto(clonedStmts, s.get(), tmplParams, tmplArgs);
                 }
                 return std::make_unique<BlockStmt>(std::move(clonedStmts), bs->getLine(), bs->getColumn());
             }
@@ -1360,11 +1371,11 @@ public:
                 auto is = dynamic_cast<IfStmt*>(stmt);
                 std::vector<std::unique_ptr<Statement>> clonedThen;
                 for (auto& s : is->getThenBranch()) {
-                    clonedThen.push_back(cloneStmtWithSubst(s.get(), tmplParams, tmplArgs));
+                    cloneInto(clonedThen, s.get(), tmplParams, tmplArgs);
                 }
                 std::vector<std::unique_ptr<Statement>> clonedElse;
                 for (auto& s : is->getElseBranch()) {
-                    clonedElse.push_back(cloneStmtWithSubst(s.get(), tmplParams, tmplArgs));
+                    cloneInto(clonedElse, s.get(), tmplParams, tmplArgs);
                 }
                 return std::make_unique<IfStmt>(
                     cloneExprWithSubst(is->getCondition(), tmplParams, tmplArgs),
@@ -1375,13 +1386,35 @@ public:
                 auto ws = dynamic_cast<WhileStmt*>(stmt);
                 std::vector<std::unique_ptr<Statement>> clonedBody;
                 for (auto& s : ws->getBody()) {
-                    clonedBody.push_back(cloneStmtWithSubst(s.get(), tmplParams, tmplArgs));
+                    cloneInto(clonedBody, s.get(), tmplParams, tmplArgs);
                 }
                 return std::make_unique<WhileStmt>(
                     cloneExprWithSubst(ws->getCondition(), tmplParams, tmplArgs),
                     std::move(clonedBody), ws->getLine(), ws->getColumn());
             }
+            case ASTNode::FOR_STMT: {
+                auto fs = dynamic_cast<ForStmt*>(stmt);
+                std::vector<std::unique_ptr<Statement>> clonedBody;
+                for (auto& s : fs->getBody()) {
+                    cloneInto(clonedBody, s.get(), tmplParams, tmplArgs);
+                }
+                return std::make_unique<ForStmt>(
+                    cloneStmtWithSubst(fs->getInitializer(), tmplParams, tmplArgs),
+                    cloneExprWithSubst(fs->getCondition(), tmplParams, tmplArgs),
+                    cloneStmtWithSubst(fs->getIncrement(), tmplParams, tmplArgs),
+                    std::move(clonedBody), fs->getLine(), fs->getColumn());
+            }
+            case ASTNode::BREAK_STMT:
+                return std::make_unique<BreakStmt>(stmt->getLine(), stmt->getColumn());
+            case ASTNode::CONTINUE_STMT:
+                return std::make_unique<ContinueStmt>(stmt->getLine(), stmt->getColumn());
             default:
+                // Anything else (defer, match, asm, ...) cannot be cloned
+                // yet: say so loudly instead of silently dropping it (top
+                // level) or segfaulting on the null child (nested). The
+                // function-body clone loop already skips nulls the same way.
+                reporter_.error("Statement cannot be used inside a template body yet",
+                                stmt->getLine(), stmt->getColumn());
                 return nullptr;
         }
     }
