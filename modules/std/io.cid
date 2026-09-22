@@ -43,14 +43,20 @@ export func printInt(n: int) -> void {
     var val: int = n;
     if (val < 0) {
         print("-");
-        val = -val;
     }
-    
+
     var buf: [char; 32];
     var i: int = 0;
-    
-    while (val > 0) {
+
+    // Extract digits from the (possibly still negative) value: negating
+    // INT_MIN overflows back to itself, so only the single digit (which
+    // is in -9..9 and always safe to negate) is ever flipped. Division
+    // truncates toward zero, so the loop terminates for both signs.
+    while (val != 0) {
         var digit: int = val % 10;
+        if (digit < 0) {
+            digit = -digit;
+        }
         buf[i] = (digit + 48) as char;
         val = val / 10;
         i = i + 1;

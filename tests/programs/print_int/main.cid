@@ -1,0 +1,15 @@
+from std.io import printInt;
+from std.io import print;
+func main() -> int {
+  printInt(0 - 2147483647 - 1);
+  print("\n");
+  printInt(2147483647);
+  print("\n");
+  printInt(0);
+  print("\n");
+  printInt(-12345);
+  print("\n");
+  printInt(7);
+  print("\n");
+  return 0;
+}
