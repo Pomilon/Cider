@@ -12,6 +12,7 @@ namespace cider {
 
 class TypeAST;
 class Statement;
+class Scope;
 
 struct TypeInfo {
     std::string name;
@@ -47,7 +48,7 @@ struct TypeInfo {
     }
 };
 
-enum class SymbolKind { VARIABLE, FUNCTION, STRUCT, ENUM, CLASS, INTERFACE, TEMPLATE };
+enum class SymbolKind { VARIABLE, FUNCTION, STRUCT, ENUM, CLASS, INTERFACE, TEMPLATE, MODULE };
 
 struct Symbol {
     SymbolKind kind;
@@ -102,6 +103,11 @@ struct InterfaceSymbol : public Symbol {
 struct TemplateSymbol : public Symbol {
     std::unique_ptr<Statement> ast;  // FunctionDeclStmt or StructDeclStmt
     std::vector<std::string> typeParams;
+};
+
+struct ModuleSymbol : public Symbol {
+    std::string logicalName;  // full dotted path as imported, e.g. "a.util"
+    Scope* scope = nullptr;   // owned by the SymbolTable scope tree
 };
 
 class Scope {
