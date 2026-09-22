@@ -1,0 +1,9 @@
+import dc;
+
+export func bval() -> int {
+  return dc.val();
+}
+
+export func bbump() -> int {
+  return dc.bump();
+}

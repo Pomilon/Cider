@@ -1,0 +1,12 @@
+import a.util;
+import b.util;
+from a.util import Foo, amake, aget;
+from b.util import bmake, bget;
+
+func main() -> int {
+  var fa: Foo = amake();
+  if (aget(fa) != 10) { return 1; }
+  if (bget(bmake()) != 20) { return 2; }
+  if (aget(amake()) != 10) { return 3; }
+  return 0;
+}

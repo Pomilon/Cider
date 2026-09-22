@@ -1,0 +1,11 @@
+export struct Event {
+  var kind: int;
+  var extra: int;
+}
+
+export func make() -> Event {
+  var e: Event;
+  e.kind = 2;
+  e.extra = 20;
+  return e;
+}

@@ -1,0 +1,10 @@
+import da;
+import db;
+
+func main() -> int {
+  if (da.aval() != 42) { return 1; }
+  if (db.bval() != 42) { return 2; }
+  if (da.abump() != 1) { return 3; }
+  if (db.bbump() != 2) { return 4; }
+  return 0;
+}

@@ -1,0 +1,8 @@
+import mme_a;
+import mme_b;
+from mme_a import Event;
+
+func main() -> int {
+  var e: Event = mme_b.make();
+  return e.extra;
+}

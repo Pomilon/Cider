@@ -1,0 +1,10 @@
+export var hits: int = 0;
+
+export func bump() -> int {
+  hits = hits + 1;
+  return hits;
+}
+
+export func val() -> int {
+  return 42;
+}

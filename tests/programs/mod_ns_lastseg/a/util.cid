@@ -1,0 +1,13 @@
+export struct Foo {
+  var x: int;
+}
+
+export func amake() -> Foo {
+  var f: Foo;
+  f.x = 10;
+  return f;
+}
+
+export func aget(f: Foo) -> int {
+  return f.x;
+}
