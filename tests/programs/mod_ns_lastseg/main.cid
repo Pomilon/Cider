@@ -4,9 +4,12 @@ from a.util import Foo, amake, aget;
 from b.util import bmake, bget;
 
 func main() -> int {
-  var fa: Foo = amake();
+  var fa: a.util.Foo = amake();
   if (aget(fa) != 10) { return 1; }
-  if (bget(bmake()) != 20) { return 2; }
-  if (aget(amake()) != 10) { return 3; }
+  var fb: b.util.Foo = bmake();
+  if (bget(fb) != 20) { return 2; }
+  var fc: Foo = amake();
+  if (aget(fc) != 10) { return 3; }
+  if (bget(bmake()) != 20) { return 4; }
   return 0;
 }

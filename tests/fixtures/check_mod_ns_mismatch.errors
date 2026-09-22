@@ -1,1 +1,3 @@
-Member 'extra' not found in Event
+Type mismatch in declaration of 'e'. Expected mme_a::Event, got mme_b::Event
+Type mismatch in assignment. Expected mme_a::Event, got mme_b::Event
+Argument 1 to 'take' type mismatch. Expected mme_a::Event, got mme_b::Event

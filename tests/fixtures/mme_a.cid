@@ -7,3 +7,7 @@ export func make() -> Event {
   e.kind = 1;
   return e;
 }
+
+export func take(e: Event) -> int {
+  return e.kind;
+}

@@ -1,8 +1,9 @@
 import mme_a;
 import mme_b;
-from mme_a import Event;
+from mme_a import take;
 
 func main() -> int {
-  var e: Event = mme_b.make();
-  return e.extra;
+  var e: mme_a.Event = mme_b.make();
+  e = mme_b.make();
+  return take(mme_b.make());
 }

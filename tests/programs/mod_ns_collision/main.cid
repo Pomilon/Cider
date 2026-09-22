@@ -22,5 +22,9 @@ func main() -> int {
   var e: Event = Event{tag: 7};
   if (e.tag != 7) { return 4; }
   if (shadowed() != 9) { return 5; }
+  var ea: nsa.Event = nsa.make();
+  if (ea.kind != 1) { return 6; }
+  var eb: nsb.Event = nsb.make();
+  if (eb.kind + eb.extra != 22) { return 7; }
   return 0;
 }
