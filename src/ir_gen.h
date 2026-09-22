@@ -12,6 +12,7 @@
 #include "errors.h"
 #include <algorithm>
 #include "ir.h"
+#include "module_scope.h"
 #include "symbols.h"
 
 namespace cider {
@@ -26,6 +27,12 @@ public:
     // (spec §2). Empty by default: unit tests without a collector keep the
     // legacy always-root behavior.
     void setModuleScopes(const std::map<std::string, Scope*>& scopes) { moduleScopes_ = scopes; }
+    // CID-020/021: imported AST -> logical module name, from the collector
+    // (mirrors TypeChecker::setProgramModules). Lets emission mangle by the
+    // DEFINING module. Empty by default: legacy always-bare behavior.
+    void setProgramModules(const std::map<const AstProgram*, std::string>& programModules) {
+        programModules_ = programModules;
+    }
 
     ModuleIR generate(AstProgram& program) {
         visitedPrograms_.clear();
@@ -43,7 +50,16 @@ public:
             if (sym && sym->kind == SymbolKind::CLASS) {
                 auto classSym = std::static_pointer_cast<StructSymbol>(sym);
                 if (!classSym->vtable.empty()) {
-                    module_.addVTable(className, classSym->vtable);
+                    // CID-020/021 (spec §5/§6): vtable entries name method
+                    // definitions, so they mangle with them. Keys stay bare
+                    // (cross-module same-named classes are T6).
+                    Scope* classScope = definingScopeFor(classSym, className);
+                    std::vector<std::string> entries;
+                    for (const auto& e : classSym->vtable) {
+                        auto methodDef = resolveFunctionDef(e, classScope);
+                        entries.push_back(emitFunctionName(methodDef.second, e));
+                    }
+                    module_.addVTable(className, entries);
                 }
             }
         }
@@ -98,7 +114,12 @@ public:
                     for (auto& im : iface->methods) {
                         for (auto& sm : ss->methods) {
                             if (sm.name == im.name) {
-                                vtableMethods.push_back(sm.mangledName);
+                                // CID-020/021 (spec §5/§6): entries mangle
+                                // with the struct's defining module.
+                                auto methodDef = resolveFunctionDef(
+                                    sm.mangledName, definingScopeFor(ss, scName));
+                                vtableMethods.push_back(
+                                    emitFunctionName(methodDef.second, sm.mangledName));
                                 break;
                             }
                         }
@@ -192,9 +213,15 @@ public:
         visitedPrograms_.insert(&program);
 
         std::string prevPath = currentSourcePath_;
+        std::string prevModule = currentModule_;
         if (!program.getSourcePath().empty()) {
             currentSourcePath_ = program.getSourcePath();
         }
+        // CID-020/021 (spec §2): the logical module being generated ("" ==
+        // main file, which keeps plain names). Definitions emitted under this
+        // module mangle with it as the defining module (spec §5).
+        auto pmIt = programModules_.find(&program);
+        currentModule_ = (pmIt != programModules_.end()) ? pmIt->second : std::string();
 
         // CID-020 (spec §2): an imported AST generates with its own module
         // scope current, so intra-module references resolve; the main
@@ -215,6 +242,7 @@ public:
         }
 
         symbolTable_.setCurrentScope(prevScope);
+        currentModule_ = prevModule;
         currentSourcePath_ = prevPath;
     }
 
@@ -229,6 +257,111 @@ public:
         return result;
     }
 
+    // CID-020/021 (spec §5): IR name mangling by DEFINING module. `bare` is
+    // the legacy name (free function, or the `Class_method` composition for
+    // methods / destructors / vtable entries, so the qualifier always
+    // composes outside per spec §6). Main-file symbols and `main`/`_start`
+    // keep legacy names, which keeps import-free IR byte-identical;
+    // `extern` never reaches here (early return at each emission site).
+    static bool isNeverMangled(const std::string& bare) {
+        return bare == "main" || bare == "_start";
+    }
+
+    static std::string emitFunctionName(const std::string& defModule, const std::string& bare) {
+        if (defModule.empty() || isNeverMangled(bare)) return bare;
+        return sanitizeAsmName(mangleQualifiedName(defModule, bare));
+    }
+
+    // Logical module name for a scope: "" for main/root/unknown (legacy).
+    std::string logicalForScope(Scope* s) {
+        if (!s) return "";
+        if (s == symbolTable_.getRootScope()) return "";
+        for (const auto& [prog, logical] : programModules_) {
+            if (!prog) continue;
+            auto it = moduleScopes_.find(prog->getSourcePath());
+            if (it != moduleScopes_.end() && it->second == s) return logical;
+        }
+        return "";
+    }
+
+    // Scope that binds `name` to this exact symbol object. Module scopes
+    // win over root so `from`-aliases (same object as the definition, spec
+    // §4) and template clones attribute to the defining module. Null when
+    // the symbol has no scope home (locals); callers fall back to the
+    // same-module rule.
+    Scope* definingScopeFor(const std::shared_ptr<Symbol>& sym, const std::string& name) {
+        if (!sym) return nullptr;
+        for (const auto& [path, scope] : moduleScopes_) {
+            if (scope && scope->resolveLocal(name) == sym) return scope;
+        }
+        Scope* root = symbolTable_.getRootScope();
+        if (root && root->resolveLocal(name) == sym) return root;
+        return nullptr;
+    }
+
+    // Defining-module logical name for a resolved symbol ("": main).
+    std::string definingModuleFor(const std::shared_ptr<Symbol>& sym, const std::string& name) {
+        Scope* ds = definingScopeFor(sym, name);
+        if (ds) return logicalForScope(ds);
+        return currentModule_;
+    }
+
+    // (FunctionSymbol, defining module) for a collector-composed function
+    // name (`Class_method`, destructor, vtable entry): the preferred scope
+    // (the class's own scope for methods) first, then every module scope,
+    // then root. Null symbol when unresolvable (legacy fallback path).
+    std::pair<std::shared_ptr<FunctionSymbol>, std::string> resolveFunctionDef(
+        const std::string& funcName, Scope* preferred) {
+        std::vector<Scope*> order;
+        if (preferred) order.push_back(preferred);
+        for (const auto& [path, scope] : moduleScopes_) {
+            if (scope && scope != preferred) order.push_back(scope);
+        }
+        Scope* root = symbolTable_.getRootScope();
+        if (root && root != preferred) order.push_back(root);
+        for (Scope* s : order) {
+            auto sym = s->resolveLocal(funcName);
+            if (sym && sym->kind == SymbolKind::FUNCTION)
+                return {std::static_pointer_cast<FunctionSymbol>(sym), logicalForScope(s)};
+        }
+        return {nullptr, ""};
+    }
+
+    // Name for ir_gen-inserted runtime calls (`new`, `delete`, closures,
+    // the interpolation helpers): the visible malloc/free definition's
+    // mangled name, so the hardened std allocator — not the VM builtin /
+    // libc — serves programs that import it. Bare when nothing is in
+    // scope (legacy VM-builtin/libc fallback).
+    std::string runtimeHelperName(const std::string& bare) {
+        auto sym = symbolTable_.resolve(bare);
+        if (sym && sym->kind == SymbolKind::FUNCTION)
+            return emitFunctionName(definingModuleFor(sym, bare), bare);
+        return bare;
+    }
+
+    // CID-020 §3: `b.fb(...)` where b is a module qualifier. Mirrors the
+    // checker's CallExpr module path: resolve the member in the module's
+    // scope and call its mangled name directly. True when handled (the
+    // caller skips object evaluation and method lookup). An ambiguous
+    // qualifier resolves to the first-registered candidate here, but the
+    // checker reports it as an error first, so the driver never reaches
+    // this path for ambiguous programs.
+    bool tryModuleCall(MemberAccessExpr* mem, std::string& funcName,
+                       std::shared_ptr<FunctionSymbol>& outSym) {
+        if (mem->isArrow()) return false;
+        auto base = dynamic_cast<IdentifierExpr*>(mem->getObject());
+        if (!base) return false;
+        auto baseSym = symbolTable_.resolve(base->getName());
+        if (!baseSym || baseSym->kind != SymbolKind::MODULE) return false;
+        auto modSym = std::static_pointer_cast<ModuleSymbol>(baseSym);
+        Scope* ms = modSym->scope;
+        auto target = ms ? ms->resolveLocal(mem->getMember()) : nullptr;
+        if (!target || target->kind != SymbolKind::FUNCTION) return false;
+        outSym = std::static_pointer_cast<FunctionSymbol>(target);
+        funcName = emitFunctionName(modSym->logicalName, sanitizeAsmName(mem->getMember()));
+        return true;
+    }
+
     void visit(FunctionDeclStmt& stmt) override {
         // Skip template function declarations (uninstantiated)
         if (stmt.hasTemplateParams()) return;
@@ -239,9 +372,14 @@ public:
         }
 
         if (stmt.isExtern()) {
+            // `extern` names are never mangled (spec Review Focus): they
+            // must match the linker-provided symbol.
             module_.addExternFunction(funcName);
             return;
         }
+        // CID-020/021 (spec §5): non-main definitions are emitted under the
+        // defining module's mangled name (`main`/`_start` stay bare).
+        funcName = emitFunctionName(currentModule_, funcName);
 
         // Save state for nested generation
         auto prevFunction = std::move(currentFunction_);
@@ -414,7 +552,7 @@ public:
                 auto typeSym = symbolTable_.resolve(retType.name);
                 if (typeSym && (typeSym->kind == SymbolKind::STRUCT || typeSym->kind == SymbolKind::CLASS)) {
                     IRValue localPtr = IRValue::Register(nextTemp(), IRType::PTR);
-                    currentBlock_->addInstruction({IROp::CALL, localPtr, {IRValue::Label("malloc"), IRValue::Constant(structSize, IRType::I32)}});
+                    currentBlock_->addInstruction({IROp::CALL, localPtr, {IRValue::Label(runtimeHelperName("malloc")), IRValue::Constant(structSize, IRType::I32)}});
                     currentBlock_->addInstruction({IROp::MEMCPY, std::nullopt, {localPtr, val, IRValue::Constant(structSize, IRType::I32)}});
                     val = localPtr;
                     lastExprType_.isUserDefined = true;
@@ -444,10 +582,18 @@ public:
             std::string lookupName = id->getName();
             auto sym = symbolTable_.resolve(lookupName);
             if (sym && sym->kind == SymbolKind::FUNCTION) {
-                funcName = sanitizeAsmName(lookupName);
+                // CID-020/021 (spec §5): calls use the resolved symbol's
+                // mangled name, so same-module, from-alias, and template
+                // uses all match the definition.
+                funcName = emitFunctionName(definingModuleFor(sym, lookupName),
+                                            sanitizeAsmName(lookupName));
                 resolvedFuncSym = std::static_pointer_cast<FunctionSymbol>(sym);
             }
         } else if (auto mem = dynamic_cast<MemberAccessExpr*>(calleeExpr)) {
+            // CID-020/021 §3: `b.fb(...)` calls the function in b's module
+            // scope directly (checker already validated the qualifier and
+            // member). Skips object evaluation and method lookup.
+            if (!tryModuleCall(mem, funcName, resolvedFuncSym)) {
             // Method call: obj.method() or obj->method()
             bool wasAddress = isAddress_;
             isAddress_ = false;
@@ -509,15 +655,23 @@ public:
             auto sym = symbolTable_.resolve(objType.name);
             if (sym && (sym->kind == SymbolKind::CLASS || sym->kind == SymbolKind::STRUCT)) {
                 auto classSym = std::static_pointer_cast<StructSymbol>(sym);
+                // CID-020/021 (spec §5/§6): method calls use the defining
+                // module's composed name, matching the definition. The
+                // method's FunctionSymbol (for the return-type/sret logic
+                // below) is resolved in the defining scope.
+                Scope* classScope = definingScopeFor(classSym, classSym->name);
                 for (const auto& m : classSym->methods) {
                     if (m.name == mem->getMember()) {
-                        funcName = m.mangledName;
+                        auto methodDef = resolveFunctionDef(m.mangledName, classScope);
+                        funcName = emitFunctionName(methodDef.second, m.mangledName);
+                        if (methodDef.first) resolvedFuncSym = methodDef.first;
                         isVirtual = m.isVirtual || m.isOverride;
                         vtableIndex = m.vtableIndex;
                         break;
                     }
                 }
             }
+            }  // !tryModuleCall: ordinary method call
         }
 
         if (!funcName.empty()) {
@@ -845,7 +999,7 @@ public:
         // the malloc into a stack slot when the closure never leaves.
         int objSize = 8 + 8 * (int)captures.size();
         IRValue obj = IRValue::Register(nextTemp(), IRType::PTR);
-        currentBlock_->addInstruction({IROp::CALL, obj, {IRValue::Label("malloc"), IRValue::Constant(objSize, IRType::I32)}});
+        currentBlock_->addInstruction({IROp::CALL, obj, {IRValue::Label(runtimeHelperName("malloc")), IRValue::Constant(objSize, IRType::I32)}});
         currentBlock_->addInstruction({IROp::STORE, std::nullopt, {obj, IRValue::Label(funcName), IRValue::Constant(0, IRType::I32)}});
         for (size_t ci = 0; ci < captures.size(); ++ci) {
             IdentifierExpr ident(captures[ci], 0, 0);
@@ -1166,7 +1320,12 @@ public:
             if (typeSym && typeSym->kind == SymbolKind::CLASS) {
                 auto classSym = std::static_pointer_cast<StructSymbol>(typeSym);
                 if (!classSym->destructorName.empty()) {
-                    destructorStack_.back().push_back({classSym->destructorName, addr});
+                    // CID-020/021 (spec §5/§6): destructors mangle with the
+                    // class's defining module, matching the definition.
+                    auto dtorDef = resolveFunctionDef(classSym->destructorName,
+                                                      definingScopeFor(classSym, classSym->name));
+                    destructorStack_.back().push_back(
+                        {emitFunctionName(dtorDef.second, classSym->destructorName), addr});
                 }
             }
         }
@@ -1564,7 +1723,9 @@ public:
         }
 
         if (sym && sym->kind == SymbolKind::FUNCTION) {
-            lastValue_ = IRValue::Label(sym->name);
+            // CID-020/021 (spec §5): function values label the mangled
+            // definition name.
+            lastValue_ = IRValue::Label(emitFunctionName(definingModuleFor(sym, expr.getName()), sym->name));
             lastExprType_ = {"void", 1};
             return;
         }
@@ -2710,7 +2871,7 @@ public:
             IRValue isneg = IRValue::Register(nextTemp(), IRType::BOOL);
             cont0->addInstruction({IROp::CMP_EQ, isneg, {nf, IRValue::Constant(1, IRType::I32)}});
             IRValue buf = IRValue::Register(nextTemp(), IRType::PTR);
-            cont0->addInstruction({IROp::CALL, buf, {IRValue::Label("malloc"), IRValue::Constant(16, IRType::I32)}});
+            cont0->addInstruction({IROp::CALL, buf, {IRValue::Label(runtimeHelperName("malloc")), IRValue::Constant(16, IRType::I32)}});
             cont0->addInstruction({IROp::COND_BR, std::nullopt, {isneg, IRValue::Label("negchar"), IRValue::Label("cont1")}});
             negchar->addInstruction({IROp::STORE, std::nullopt, {buf, IRValue::Constant(45, IRType::I32), IRValue::Constant(0, IRType::I32)}});
             negchar->addInstruction({IROp::STORE, std::nullopt, {idx, IRValue::Constant(1, IRType::I32), IRValue::Constant(0, IRType::I32)}});
@@ -2850,7 +3011,7 @@ public:
             entry->addInstruction({IROp::ALLOCA, c, {IRValue::Constant(4, IRType::I32)}});
             entry->addInstruction({IROp::STORE, std::nullopt, {c, IRValue::Register("arg_c", IRType::I32), IRValue::Constant(0, IRType::I32)}});
             IRValue buf = IRValue::Register(nextTemp(), IRType::PTR);
-            entry->addInstruction({IROp::CALL, buf, {IRValue::Label("malloc"), IRValue::Constant(2, IRType::I32)}});
+            entry->addInstruction({IROp::CALL, buf, {IRValue::Label(runtimeHelperName("malloc")), IRValue::Constant(2, IRType::I32)}});
             IRValue cv = IRValue::Register(nextTemp(), IRType::I32);
             entry->addInstruction({IROp::LOAD, cv, {c, IRValue::Constant(0, IRType::I32)}});
             entry->addInstruction({IROp::STORE, std::nullopt, {buf, cv, IRValue::Constant(0, IRType::I32)}});
@@ -2899,7 +3060,7 @@ public:
         for (const auto& len : partLens) {
             if (len.kind != IRValue::CONSTANT) total = emitAdd(total, len);
         }
-        IRValue buf = emitCall("malloc", {total});
+        IRValue buf = emitCall(runtimeHelperName("malloc"), {total});
         // Fill: memcpy(buf + off, part, len); off += len.
         IRValue off = IRValue::Constant(0, IRType::I32);
         for (size_t i = 0; i < partVals.size(); ++i) {
@@ -2933,7 +3094,7 @@ public:
         IRInstruction call;
         call.op = IROp::CALL;
         call.dest = dest;
-        call.args.push_back(IRValue::Label("malloc"));
+        call.args.push_back(IRValue::Label(runtimeHelperName("malloc")));
         call.args.push_back(IRValue::Constant(size, IRType::I32));
         currentBlock_->addInstruction(call);
 
@@ -2967,7 +3128,12 @@ public:
                     IRInstruction dtorCall;
                     dtorCall.op = IROp::CALL;
                     dtorCall.dest = std::nullopt;
-                    dtorCall.args.push_back(IRValue::Label(classSym->destructorName));
+                    // CID-020/021 (spec §5/§6): see the destructor-stack
+                    // site; both must match the definition.
+                    auto dtorDef = resolveFunctionDef(classSym->destructorName,
+                                                      definingScopeFor(classSym, classSym->name));
+                    dtorCall.args.push_back(
+                        IRValue::Label(emitFunctionName(dtorDef.second, classSym->destructorName)));
                     dtorCall.args.push_back(ptr);
                     currentBlock_->addInstruction(dtorCall);
                 }
@@ -2976,7 +3142,7 @@ public:
         IRInstruction call;
         call.op = IROp::CALL;
         call.dest = std::nullopt;
-        call.args.push_back(IRValue::Label("free"));
+        call.args.push_back(IRValue::Label(runtimeHelperName("free")));
         call.args.push_back(ptr);
         currentBlock_->addInstruction(call);
     }
@@ -3338,7 +3504,10 @@ public:
         auto ps = std::static_pointer_cast<StructSymbol>(parentSym);
         for (auto& m : ps->methods) {
             if (m.name == expr.getMember()) {
-                lastValue_ = IRValue::Label(m.mangledName);
+                // CID-020/021 (spec §5/§6): super-call targets mangle like
+                // every other method reference.
+                auto methodDef = resolveFunctionDef(m.mangledName, definingScopeFor(ps, ps->name));
+                lastValue_ = IRValue::Label(emitFunctionName(methodDef.second, m.mangledName));
                 lastExprType_ = m.returnType;
                 return;
             }
@@ -3394,6 +3563,11 @@ private:
     std::string currentSourcePath_;
     // CID-020: resolved-path -> module scope registry (from the collector).
     std::map<std::string, Scope*> moduleScopes_;
+    // CID-020/021: imported AST -> logical module name (from the collector).
+    std::map<const AstProgram*, std::string> programModules_;
+    // CID-020/021 (spec §2): logical name of the file being generated
+    // ("" == main file, which keeps plain names).
+    std::string currentModule_;
     IRValue lastValue_ = IRValue::Constant(0, IRType::I32);
     TypeInfo lastExprType_;
     bool isAddress_ = false;

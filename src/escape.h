@@ -39,21 +39,39 @@ private:
     std::vector<std::pair<BasicBlock*, size_t>> freeSites_;  // (block, instr index) of call free
     bool recordFreeSites_ = false;
 
+    // CID-020/021 (spec §5): the allocator may live in a module, in which
+    // case its IR name is mangled (`mod_std__alloc__malloc`). Recognize the
+    // bare names plus any `mod_...__malloc` / `mod_...__free` spelling, so
+    // escape analysis keeps firing for imported allocators. A main-file
+    // function would have to deliberately mimic the `mod_` prefix with a
+    // `__` separator to collide (same rationale as module_scope.h: the
+    // `_u` escape keeps real manglings unambiguous, and neither "malloc"
+    // nor "free" contains an underscore).
+    static bool isHeapCall(const std::string& name, const char* base) {
+        if (name == base) return true;
+        const std::string prefix = "mod_";
+        const std::string suffix = std::string("__") + base;
+        if (name.size() <= prefix.size() + suffix.size()) return false;
+        if (name.compare(0, prefix.size(), prefix) != 0) return false;
+        if (name.compare(name.size() - suffix.size(), suffix.size(), suffix) != 0) return false;
+        return true;
+    }
+
     static bool isMallocCall(const IRInstruction& instr) {
         return instr.op == IROp::CALL && !instr.args.empty() &&
-               instr.args[0].kind == IRValue::LABEL && instr.args[0].name == "malloc";
+               instr.args[0].kind == IRValue::LABEL && isHeapCall(instr.args[0].name, "malloc");
     }
 
     static bool isFreeCall(const IRInstruction& instr) {
         return instr.op == IROp::CALL && !instr.args.empty() &&
-               instr.args[0].kind == IRValue::LABEL && instr.args[0].name == "free";
+               instr.args[0].kind == IRValue::LABEL && isHeapCall(instr.args[0].name, "free");
     }
 
     // Does the callee's param at 0-based position `paramIdx` escape?
     bool calleeParamEscapes(const IRInstruction& call, size_t paramIdx) {
         if (call.args.empty() || call.args[0].kind != IRValue::LABEL) return true;
         const std::string& callee = call.args[0].name;
-        if (callee == "free") return false;
+        if (isHeapCall(callee, "free")) return false;
         auto it = escapingParams_.find(callee);
         if (it == escapingParams_.end()) return true;
         return it->second.count((int)paramIdx) > 0;
