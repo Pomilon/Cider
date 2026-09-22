@@ -34,9 +34,15 @@ public:
             visitStmtForTemplateCalls(program.getStatements()[si].get());
         }
         for (auto& imported : program.getImportedAsts()) {
+            // CID-020/021 (spec §6): scan each module's body as that module
+            // so same-named templates instantiate the use-site module's own
+            // entry (findTemplate prefers the current module).
+            auto pmit = programModules_.find(imported.get());
+            if (pmit != programModules_.end()) moduleStack_.push_back(pmit->second);
             for (size_t si = 0; si < imported->getStatements().size(); si++) {
                 visitStmtForTemplateCalls(imported->getStatements()[si].get());
             }
+            if (pmit != programModules_.end()) moduleStack_.pop_back();
         }
     }
 
@@ -51,6 +57,67 @@ public:
     }
     // Module scopes keyed by RESOLVED FILE PATH (spec §1).
     const std::map<std::string, Scope*>& getModuleScopes() const { return moduleScopes_; }
+    // CID-020/021 (spec §6): template instantiation keys include the
+    // defining module (`a.Box<int>` vs `b.Box<int>`). The table key joins
+    // the defining module's logical name with the template (or explicit
+    // specialization) name; the main file ("") keeps legacy bare keys, so
+    // import-free programs behave exactly as before.
+    static std::string templateKey(const std::string& module, const std::string& name) {
+        return module.empty() ? name : module + "::" + name;
+    }
+    // Owner module + entry for a bare template name at the current use
+    // site: the current module first, then the main file, then any
+    // imported module (map order). The last leg preserves the legacy
+    // first-wins on-demand use of a module's template from the main file.
+    // {end, ""} when absent everywhere.
+    std::pair<std::map<std::string, std::shared_ptr<TemplateSymbol>>::iterator, std::string> findTemplate(
+        const std::string& baseName) {
+        std::string cur = getCurrentModule();
+        if (!cur.empty()) {
+            auto it = templateTable_.find(templateKey(cur, baseName));
+            if (it != templateTable_.end()) return {it, cur};
+        }
+        auto mainIt = templateTable_.find(baseName);
+        if (mainIt != templateTable_.end()) return {mainIt, std::string()};
+        std::string suffix = "::" + baseName;
+        for (auto it = templateTable_.begin(); it != templateTable_.end(); ++it) {
+            const std::string& key = it->first;
+            if (key.size() > suffix.size() &&
+                key.compare(key.size() - suffix.size(), suffix.size(), suffix) == 0)
+                return {it, key.substr(0, key.size() - suffix.size())};
+        }
+        return {templateTable_.end(), std::string()};
+    }
+    // Legacy bare-name presence across all owners (bindFromAliases
+    // template no-op: importing a template name never binds).
+    bool hasTemplateAnyModule(const std::string& baseName) {
+        if (templateTable_.count(baseName)) return true;
+        std::string suffix = "::" + baseName;
+        for (auto& [key, sym] : templateTable_) {
+            (void)sym;
+            if (key.size() > suffix.size() &&
+                key.compare(key.size() - suffix.size(), suffix.size(), suffix) == 0)
+                return true;
+        }
+        return false;
+    }
+    // Owning AST for a findTemplate owner module ("": the main program).
+    // Lets instantiation search the owner's template body first instead of
+    // whatever import order finds first. Null when the owner has no live
+    // AST here (callers fall back to the legacy program order).
+    AstProgram* astForTemplateOwner(const std::string& owner) {
+        if (owner.empty() || !currentProgram_) return currentProgram_;
+        for (auto& imported : currentProgram_->getImportedAsts()) {
+            auto pmit = programModules_.find(imported.get());
+            if (pmit != programModules_.end() && pmit->second == owner) return imported.get();
+        }
+        return nullptr;
+    }
+    // Owner module encoded in a templateTable_ key ("": bare legacy key).
+    static std::string ownerOfTemplateKey(const std::string& key) {
+        auto pos = key.find("::");
+        return (pos == std::string::npos) ? std::string() : key.substr(0, pos);
+    }
     // Qualifier -> competing MODULE candidates for the checker's
     // ambiguous-module error (spec §1). The scope keeps the first binding.
     const std::map<std::string, std::vector<std::shared_ptr<ModuleSymbol>>>& getAmbiguousModules() const {
@@ -180,9 +247,9 @@ public:
                     key += stmt.getTemplateParams()[i];
                 }
                 key += ">";
-                templateTable_[key] = tmplSym;
+                templateTable_[templateKey(getCurrentModule(), key)] = tmplSym;
             } else {
-                templateTable_[stmt.getName()] = tmplSym;
+                templateTable_[templateKey(getCurrentModule(), stmt.getName())] = tmplSym;
             }
             return;
         }
@@ -275,9 +342,9 @@ public:
                     key += stmt.getTemplateParams()[i];
                 }
                 key += ">";
-                templateTable_[key] = tmplSym;
+                templateTable_[templateKey(getCurrentModule(), key)] = tmplSym;
             } else {
-                templateTable_[stmt.getName()] = tmplSym;
+                templateTable_[templateKey(getCurrentModule(), stmt.getName())] = tmplSym;
             }
             return;
         }
@@ -830,7 +897,7 @@ public:
                 // Function/struct templates live in the template table, not
                 // in any scope; as with the legacy flattening, importing one
                 // is a no-op and use sites instantiate on demand.
-                if (templateTable_.count(name)) continue;
+                if (hasTemplateAnyModule(name)) continue;
                 reporter_.error("module '" + stmt.getModuleName() + "' has no symbol '" + name + "'",
                                 stmt.getLine(), stmt.getColumn());
                 continue;
@@ -994,9 +1061,16 @@ public:
         size_t pos = typeName.find('<');
         if (pos == std::string::npos) return;
         std::string baseName = typeName.substr(0, pos);
-        auto it = templateTable_.find(baseName);
-        if (it == templateTable_.end()) return;
-        auto tmplSym = it->second;
+        // CID-020/021 (spec §6): prefer the use-site module's template so
+        // same-named struct templates resolve to a consistent
+        // entry/body pair. The instantiation below stays shared in the
+        // root scope (first wins): nominal identity still conflates
+        // `Box<int>` across modules (T3 advisory, T7 follow-up), so
+        // per-module struct symbols would only trade a loud error for a
+        // silent layout mix-up.
+        auto found = findTemplate(baseName);
+        if (found.first == templateTable_.end()) return;
+        auto tmplSym = found.first->second;
         if (tmplSym->kind != SymbolKind::TEMPLATE) return;
 
         StructDeclStmt* tmplStruct = nullptr;
@@ -1010,9 +1084,14 @@ public:
             }
             return nullptr;
         };
-        tmplStruct = findStruct(currentProgram_->getStatements());
+        // Owner's body first, then the legacy program order (skipping the
+        // owner, already searched).
+        AstProgram* ownerAst = astForTemplateOwner(found.second);
+        if (ownerAst) tmplStruct = findStruct(ownerAst->getStatements());
+        if (!tmplStruct) tmplStruct = findStruct(currentProgram_->getStatements());
         if (!tmplStruct) {
             for (auto& imported : currentProgram_->getImportedAsts()) {
+                if (imported.get() == ownerAst) continue;
                 tmplStruct = findStruct(imported->getStatements());
                 if (tmplStruct) break;
             }
@@ -1156,18 +1235,18 @@ public:
         if (!id) return;
         const std::string& nm = id->getName();
         if (nm.find('<') != std::string::npos) return;  // already explicit
-        auto it = templateTable_.find(nm);
-        if (it == templateTable_.end()) return;
+        auto found = findTemplate(nm);
+        if (found.first == templateTable_.end()) return;
         // Only primary templates (params are generic names) deduce.
         bool primary = true;
-        for (const auto& p : it->second->typeParams) {
+        for (const auto& p : found.first->second->typeParams) {
             if (isKnownTypeName(p)) { primary = false; break; }
         }
         if (!primary) return;
         // Single type parameter: it is unified with the first argument's
         // type (max<T>(a: T, b: T)). Multiple params map in order
         // (pair<T,U> <- args 0,1).
-        const auto& typeParams = it->second->typeParams;
+        const auto& typeParams = found.first->second->typeParams;
         std::string mangled = nm + "<";
         for (size_t i = 0; i < typeParams.size(); ++i) {
             size_t argIdx = (typeParams.size() == 1) ? 0 : i;
@@ -1191,8 +1270,8 @@ public:
             size_t pos = name.find('<');
             if (pos != std::string::npos) {
                 auto parsed = parseMangledTemplateName(name);
-                auto it = templateTable_.find(parsed.first);
-                if (it != templateTable_.end()) {
+                auto found = findTemplate(parsed.first);
+                if (found.first != templateTable_.end()) {
                     instantiateFunctionTemplate(name);
                 }
             }
@@ -1403,14 +1482,20 @@ public:
 
     void instantiateFunctionTemplate(const std::string& mangledName) {
         auto parsed = parseMangledTemplateName(mangledName);
+        // CID-020/021 (spec §6): instantiation keys include the defining
+        // module. Prefer the use-site module's entry, then the main file,
+        // then any imported module (legacy first-wins on-demand use).
+        auto found = findTemplate(parsed.first);
         // An explicit specialization (keyed by the mangled name) wins over
-        // the primary template.
-        auto exact = templateTable_.find(mangledName);
-        auto it = (exact != templateTable_.end()) ? exact : templateTable_.find(parsed.first);
+        // the primary template: owner-scoped first, then the legacy bare
+        // key (main-file specializations).
+        auto exact = templateTable_.end();
+        if (!found.second.empty()) {
+            exact = templateTable_.find(templateKey(found.second, mangledName));
+        }
+        if (exact == templateTable_.end()) exact = templateTable_.find(mangledName);
+        auto it = (exact != templateTable_.end()) ? exact : found.first;
         if (it == templateTable_.end()) return;
-
-        // Already instantiated (asm-safe mangled name avoids conflicts).
-        if (symbolTable_.resolve(mangledName)) return;
 
         auto tmplSym = it->second;
         if (parsed.second.size() != tmplSym->typeParams.size()) {
@@ -1439,10 +1524,21 @@ public:
             }
             return nullptr;
         };
-        tmplFunc = findTemplateFunc(currentProgram_->getStatements());
+        tmplFunc = nullptr;
+        // Owner's body first (the table entry above already prefers the
+        // use-site module), then the legacy program order. Without this,
+        // import order decides whose body a same-named template
+        // instantiates (T6 probe T1: both modules got the first body).
         AstProgram* definingProg = currentProgram_;
+        AstProgram* ownerAst = astForTemplateOwner(isExact ? ownerOfTemplateKey(exact->first) : found.second);
+        if (ownerAst && ownerAst != currentProgram_) {
+            tmplFunc = findTemplateFunc(ownerAst->getStatements());
+            if (tmplFunc) definingProg = ownerAst;
+        }
+        if (!tmplFunc) tmplFunc = findTemplateFunc(currentProgram_->getStatements());
         if (!tmplFunc) {
             for (auto& imported : currentProgram_->getImportedAsts()) {
+                if (imported.get() == ownerAst) continue;
                 tmplFunc = findTemplateFunc(imported->getStatements());
                 if (tmplFunc) { definingProg = imported.get(); break; }
             }
@@ -1461,6 +1557,13 @@ public:
             auto scopeIt = moduleScopes_.find(definingProg->getSourcePath());
             if (scopeIt != moduleScopes_.end()) definingScope = scopeIt->second;
         }
+
+        // Already instantiated for THIS module (spec §6: keys include the
+        // defining module, so `a.t<int>` and `b.t<int>` coexist; the legacy
+        // global-resolve check collapsed them to whoever instantiated
+        // first). The guarded root dual-home below keeps single-owner
+        // cross-module uses resolving exactly like the legacy flat table.
+        if (definingScope && definingScope->resolveLocal(mangledName)) return;
 
         // Build the concrete function symbol.
         auto funcSym = std::make_shared<FunctionSymbol>();
