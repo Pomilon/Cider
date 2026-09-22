@@ -11,15 +11,15 @@ inline std::string qualifierForModule(const std::string& logical) {
 }
 
 // Escape underscores inside one path/name segment so the mangling below is
-// injective: every '_' becomes '___' (triple underscore). Underscores in
-// escaped output therefore always occur in runs whose length is a multiple
-// of 3, while the '.' separators below map to exactly '__'.
+// injective: every '_' becomes '_u'. Underscores in escaped output are
+// therefore always immediately followed by 'u', so escaped output never
+// contains '__' and '__' in a mangled name uniquely marks separators.
 inline std::string escapeModuleSegment(const std::string& segment) {
     std::string out;
     out.reserve(segment.size());
     for (char c : segment) {
         if (c == '_')
-            out += "___";
+            out += "_u";
         else
             out += c;
     }
@@ -32,9 +32,11 @@ inline std::string escapeModuleSegment(const std::string& segment) {
 // `_start` are exempt (handled by later tasks). The underscore escaping
 // keeps distinct (logical, name) pairs distinct: without it, module "a_b"
 // + "c" and module "a" + "b_c" would both mangle to "mod_a_b_c"; with it
-// they give "mod_a___b__c" vs "mod_a__b___c". A user identifier would have
-// to deliberately mimic the `mod_` prefix with `__` separators and `___`
-// runs to collide.
+// they give "mod_a_ub__c" vs "mod_a__b_uc". Since escaped segments never
+// contain '__', every '__' in the output is a separator (dot or
+// module/name boundary), so the mangled name decodes to exactly one
+// (logical, name) pair. A user identifier would have to deliberately
+// mimic the `mod_` prefix with `__` separators and `_u` runs to collide.
 inline std::string mangleQualifiedName(const std::string& logical, const std::string& name) {
     std::string out = "mod_";
     bool first = true;
