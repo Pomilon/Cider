@@ -1093,7 +1093,7 @@ public:
 
     void visit(ImportStmt&) override {}
     void visit(FromImportStmt&) override {}
-    void visit(ExportStmt& stmt) override { stmt.getStmt()->accept(*this); }
+    void visit(ExportStmt& stmt) override { if (auto inner = stmt.getStmt()) inner->accept(*this); }
     void visit(ExportExpressionStmt&) override {}
     void visit(InterfaceDeclStmt&) override {}
 

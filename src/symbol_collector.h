@@ -761,7 +761,11 @@ public:
 
     void visit(ExportStmt& stmt) override {
         inExport_ = true;
-        stmt.getStmt()->accept(*this);
+        // A failed inner parse (error recovery) leaves a null statement;
+        // the parse error is already reported — never segfault on it here
+        // (T6 std sweep: modules/std/map.cid's stale `[K, V]` syntax crashed
+        // collection of every importer instead of reporting the parse).
+        if (auto inner = stmt.getStmt()) inner->accept(*this);
         inExport_ = false;
     }
 

@@ -3396,7 +3396,7 @@ public:
         }
         currentClassName_ = oldClass;
     }
-    void visit(ExportStmt& stmt) override { stmt.getStmt()->accept(*this); }
+    void visit(ExportStmt& stmt) override { if (auto inner = stmt.getStmt()) inner->accept(*this); }
     void visit(ThisExpr& /*expr*/) override {
         if (variableValues_.count("this")) {
             IRValue addr = variableValues_["this"];
