@@ -43,44 +43,39 @@ public:
 
     ModuleIR generate(AstProgram& program) {
         visitedPrograms_.clear();
+        classSyms_.clear();
+        structSyms_.clear();
+        ifaceSyms_.clear();
         globalValues_.clear();
         exceptionGlobalsEnsured_ = false;
         interpHelpersEnsured_ = false;
         program.accept(*this);
 
-        // Populate V-Tables in module
-        auto globalScope = symbolTable_.getCurrentScope();
-        while (globalScope->getParent()) globalScope = globalScope->getParent();
-
-        for (const auto& className : classNames_) {
-            auto sym = symbolTable_.resolve(className);
-            if (sym && sym->kind == SymbolKind::CLASS) {
-                auto classSym = std::static_pointer_cast<StructSymbol>(sym);
-                if (!classSym->vtable.empty()) {
-                    // CID-020/021 (spec §5/§6): vtable entries name method
-                    // definitions, so they mangle with them. Keys stay bare
-                    // (cross-module same-named classes are T6).
-                    Scope* classScope = definingScopeFor(classSym, className);
-                    std::vector<std::string> entries;
-                    for (const auto& e : classSym->vtable) {
-                        auto methodDef = resolveFunctionDef(e, classScope);
-                        entries.push_back(emitFunctionName(methodDef.second, e));
-                    }
-                    module_.addVTable(className, entries);
-                }
+        // Populate V-Tables in module (CID-020/021 spec §6: module-scope
+        // classes resolve to their own objects and mangle keys by defining
+        // module, so qualified `new` and virtual dispatch find them;
+        // same-named classes in two modules mangle apart instead of
+        // colliding).
+        for (auto& classSym : classSyms_) {
+            if (!classSym || classSym->kind != SymbolKind::CLASS) continue;
+            if (classSym->vtable.empty()) continue;
+            Scope* classScope = definingScopeFor(classSym, classSym->name);
+            std::vector<std::string> entries;
+            for (const auto& e : classSym->vtable) {
+                auto methodDef = resolveFunctionDef(e, classScope);
+                entries.push_back(emitFunctionName(methodDef.second, e));
             }
+            module_.addVTable(vtableKeyForClass(classSym), entries);
         }
 
         // Generate interface vtables: for each interface-struct pair
-        for (const auto& ifaceName : interfaceNames_) {
-            auto ifaceSym = symbolTable_.resolve(ifaceName);
-            if (!ifaceSym || ifaceSym->kind != SymbolKind::INTERFACE) continue;
-            auto iface = std::static_pointer_cast<InterfaceSymbol>(ifaceSym);
+        for (auto& iface : ifaceSyms_) {
+            if (!iface) continue;
             // Check all classes/structs that might implement this interface
-            std::vector<std::string> allStructClasses = classNames_;
-            for (const auto& sn : structNames_) {
+            std::vector<std::shared_ptr<StructSymbol>> allStructClasses = classSyms_;
+            for (auto& sn : structSyms_) {
                 bool found = false;
-                for (const auto& cn : classNames_) {
+                for (auto& cn : classSyms_) {
                     if (cn == sn) {
                         found = true;
                         break;
@@ -88,11 +83,8 @@ public:
                 }
                 if (!found) allStructClasses.push_back(sn);
             }
-            for (const auto& scName : allStructClasses) {
-                auto scSym = symbolTable_.resolve(scName);
-                if (!scSym) continue;
-                if (scSym->kind != SymbolKind::STRUCT && scSym->kind != SymbolKind::CLASS) continue;
-                auto ss = std::static_pointer_cast<StructSymbol>(scSym);
+            for (auto& ss : allStructClasses) {
+                if (!ss) continue;
                 bool satisfies = true;
                 for (auto& im : iface->methods) {
                     bool found = false;
@@ -124,14 +116,14 @@ public:
                                 // CID-020/021 (spec §5/§6): entries mangle
                                 // with the struct's defining module.
                                 auto methodDef = resolveFunctionDef(
-                                    sm.mangledName, definingScopeFor(ss, scName));
+                                    sm.mangledName, definingScopeFor(ss, ss->name));
                                 vtableMethods.push_back(
                                     emitFunctionName(methodDef.second, sm.mangledName));
                                 break;
                             }
                         }
                     }
-                    module_.addVTable(ifaceName + "_" + scName, vtableMethods);
+                    module_.addVTable(vtableIfaceKey(iface, iface->name, ss, ss->name), vtableMethods);
                 }
             }
         }
@@ -430,6 +422,77 @@ public:
             }
         }
         return {nullptr, ""};
+    }
+
+    // CID-020/021 (spec §6): vtable-map key for a class/struct symbol —
+    // the bare legacy name for main-file types, defining-module mangling
+    // otherwise (same rule as method names, so keys stay injective and
+    // distinct from function labels). Every reference spells "vtable_"+key
+    // (NewExpr, interface stores, VM, native emitter).
+    std::string vtableKeyForClass(const std::shared_ptr<StructSymbol>& classSym) {
+        if (!classSym) return "";
+        return emitGlobalName(definingModuleFor(classSym, classSym->name), classSym->name);
+    }
+
+    // CID-020/021 (spec §6): vtable-map key joining an interface and its
+    // implementing type, each part mangled by its own defining module.
+    // Bare legacy "Iface_Class" when both are main-file.
+    std::string vtableIfaceKey(const std::shared_ptr<Symbol>& ifaceSym, const std::string& ifaceName,
+                               const std::shared_ptr<Symbol>& scSym, const std::string& scName) {
+        std::string im = ifaceSym ? definingModuleFor(ifaceSym, ifaceSym->name) : "";
+        std::string sm = scSym ? definingModuleFor(scSym, scSym->name) : "";
+        return emitGlobalName(im, ifaceName) + "_" + emitGlobalName(sm, scName);
+    }
+
+    // CID-020/021 (spec §6): bare nominal defined by exactly one module
+    // scope, for use sites where the defining module was lost (e.g. the
+    // callee-signature return type in `var s: Shape = *mod.mkbox()`).
+    // Null when absent or ambiguous: the caller keeps the legacy bare
+    // spelling, which fails loud rather than guessing a module.
+    std::shared_ptr<Symbol> resolveUniqueModuleNominal(const std::string& name) {
+        if (name.empty() || name.find('.') != std::string::npos ||
+            name.find("::") != std::string::npos) {
+            return nullptr;
+        }
+        std::shared_ptr<Symbol> found;
+        for (const auto& [path, scope] : moduleScopes_) {
+            if (!scope) continue;
+            auto mem = scope->resolveLocal(name);
+            if (!mem) continue;
+            if (found && found != mem) return nullptr;  // ambiguous: never guess
+            found = mem;
+        }
+        return found;
+    }
+
+    // CID-020/021 (spec §6): true when a bare name that does not resolve at
+    // the use site names exactly one module's struct/class, so a
+    // dereference of it is the aggregate itself (address), not a scalar
+    // LOAD. Covers `var s: Shape = *mod.mk()` where the callee-signature
+    // return nominal lost its defining module. Ambiguity keeps the legacy
+    // scalar path.
+    bool isUniqueModuleAggregate(const std::string& name) {
+        auto sym = resolveUniqueModuleNominal(name);
+        return sym && (sym->kind == SymbolKind::STRUCT || sym->kind == SymbolKind::CLASS);
+    }
+
+    // CID-020/021 (spec §6): "vtable_"+key for an interface variable's vptr
+    // store, matching generate()'s interface-vtable keys (vtableIfaceKey).
+    // Main-file parts resolve in root and keep the legacy "Iface_Class"
+    // spelling byte-identical; module parts mangle by defining module.
+    // Unresolvable parts keep the legacy bare spelling (same loud
+    // unresolved-label failure as before, never a silently wrong vtable).
+    std::string interfaceVtableLabel(const std::string& ifaceName, const std::string& concreteName) {
+        auto ifaceSym = resolveNominalType(ifaceName);
+        if (!ifaceSym || ifaceSym->kind != SymbolKind::INTERFACE) {
+            return "vtable_" + ifaceName + "_" + concreteName;
+        }
+        auto concSym = resolveNominalType(concreteName);
+        if (!concSym) concSym = resolveUniqueModuleNominal(concreteName);
+        if (!concSym || (concSym->kind != SymbolKind::STRUCT && concSym->kind != SymbolKind::CLASS)) {
+            return "vtable_" + ifaceName + "_" + concreteName;
+        }
+        return "vtable_" + vtableIfaceKey(ifaceSym, ifaceSym->name, concSym, concSym->name);
     }
 
     // Name for ir_gen-inserted runtime calls (`new`, `delete`, closures,
@@ -1294,7 +1357,8 @@ public:
                 TypeInfo pointee = type;
                 if (pointee.pointerLevel > 0) pointee.pointerLevel--;
                 bool pointeeIsAggregate = (pointee.pointerLevel == 0) &&
-                    (pointee.isArray || isStructValueType(pointee));
+                    (pointee.isArray || isStructValueType(pointee) ||
+                     isUniqueModuleAggregate(pointee.name));
                 if (pointeeIsAggregate) {
                     lastValue_ = operand;
                     type = pointee;
@@ -1520,7 +1584,10 @@ public:
                     base.pointerLevel--;
                     concreteTypeName = base.name;
                 }
-                std::string vtableLabel = "vtable_" + sym->type.name + "_" + concreteTypeName;
+                // CID-020/021 (spec §6): must match generate()'s interface
+                // vtable key — each part mangles by its own defining module
+                // (see interfaceVtableLabel).
+                std::string vtableLabel = interfaceVtableLabel(sym->type.name, concreteTypeName);
                 currentBlock_->addInstruction({IROp::STORE, std::nullopt, {addr8, IRValue::Label(vtableLabel), IRValue::Constant(0, IRType::I32)}});
                 lastExprType_ = sym->type;
                 isInterfaceInit = true;
@@ -3276,12 +3343,14 @@ public:
         call.args.push_back(IRValue::Constant(size, IRType::I32));
         currentBlock_->addInstruction(call);
 
-        // Initialize vptr if class is virtual
+        // Initialize vptr if class is virtual (CID-020/021 spec §6: the
+        // label mangles with the class's defining module, matching the
+        // vtable key emitted in generate()).
         auto sym = resolveNominalType(type.name);
         if (sym && sym->kind == SymbolKind::CLASS) {
             auto classSym = std::static_pointer_cast<StructSymbol>(sym);
             if (!classSym->vtable.empty()) {
-                IRValue vptrVal = IRValue::Label("vtable_" + type.name);
+                IRValue vptrVal = IRValue::Label("vtable_" + vtableKeyForClass(classSym));
                 currentBlock_->addInstruction({IROp::STORE, std::nullopt, {dest, vptrVal, IRValue::Constant(0, IRType::I32)}});
             }
         }
@@ -3299,7 +3368,10 @@ public:
         if (deletedType.pointerLevel > 0) {
             TypeInfo baseType = deletedType;
             baseType.pointerLevel--;
-            auto sym = symbolTable_.resolve(baseType.name);
+            // CID-020/021: module-aware so `delete` on a qualified-typed
+            // object finds a module class's destructor (bare fallback
+            // preserves legacy behavior where it resolved).
+            auto sym = resolveNominalType(baseType.name);
             if (sym && sym->kind == SymbolKind::CLASS) {
                 auto classSym = std::static_pointer_cast<StructSymbol>(sym);
                 if (!classSym->destructorName.empty()) {
@@ -3461,7 +3533,14 @@ public:
     }
     void visit(ExpressionStmt& stmt) override { stmt.getExpression()->accept(*this); }
     void visit(ClassDeclStmt& stmt) override {
-        classNames_.push_back(stmt.getName());
+        // CID-020/021 (spec §6): stash the resolved class object for vtable
+        // emission in generate(). Resolved in the current (own) scope, so a
+        // module class keeps its own object and same-named classes in two
+        // modules stay distinct entries that mangle apart. Skipped when
+        // unresolvable (the checker rejects such programs first).
+        auto csym = symbolTable_.resolve(stmt.getName());
+        if (csym && (csym->kind == SymbolKind::STRUCT || csym->kind == SymbolKind::CLASS))
+            classSyms_.push_back(std::static_pointer_cast<StructSymbol>(csym));
         std::string oldClass = currentClassName_;
         currentClassName_ = stmt.getName();
         for (auto& member : stmt.getMembers()) {
@@ -3710,7 +3789,11 @@ public:
     void visit(ArrayTypeAST&) override {}
     void visit(TypeAST&) override {}
     void visit(StructDeclStmt& stmt) override {
-        structNames_.push_back(stmt.getName());
+        // CID-020/021 (spec §6): stash the resolved struct object for the
+        // interface-vtable loop in generate(); see visit(ClassDeclStmt).
+        auto ssym = symbolTable_.resolve(stmt.getName());
+        if (ssym && (ssym->kind == SymbolKind::STRUCT || ssym->kind == SymbolKind::CLASS))
+            structSyms_.push_back(std::static_pointer_cast<StructSymbol>(ssym));
         lastExprType_ = {stmt.getName(), 0};
     }
     void visit(EnumDeclStmt&) override {}
@@ -3720,7 +3803,13 @@ public:
     void visit(ImportStmt&) override {}
     void visit(FromImportStmt&) override {}
     void visit(ExportExpressionStmt&) override {}
-    void visit(InterfaceDeclStmt& stmt) override { interfaceNames_.push_back(stmt.getName()); }
+    void visit(InterfaceDeclStmt& stmt) override {
+        // CID-020/021 (spec §6): stash the resolved interface object for
+        // the vtable loop in generate(); see visit(ClassDeclStmt).
+        auto isym = symbolTable_.resolve(stmt.getName());
+        if (isym && isym->kind == SymbolKind::INTERFACE)
+            ifaceSyms_.push_back(std::static_pointer_cast<InterfaceSymbol>(isym));
+    }
 
     void ensureExceptionGlobals() {
         if (!exceptionGlobalsEnsured_) {
@@ -3756,9 +3845,13 @@ private:
     std::set<std::string> paramNames_;
     std::set<std::string> assignedParams_;
     std::map<std::string, IRValue> globalValues_;
-    std::vector<std::string> classNames_;
-    std::vector<std::string> interfaceNames_;
-    std::vector<std::string> structNames_;
+    // CID-020/021 (spec §6): resolved class/struct/interface objects for
+    // vtable emission in generate(). Objects (not names) so module-scope
+    // types keep their identity; same-named types in two modules stay
+    // distinct entries. Cleared per generate() alongside visitedPrograms_.
+    std::vector<std::shared_ptr<StructSymbol>> classSyms_;
+    std::vector<std::shared_ptr<StructSymbol>> structSyms_;
+    std::vector<std::shared_ptr<InterfaceSymbol>> ifaceSyms_;
     std::set<AstProgram*> visitedPrograms_;
     std::vector<std::string> breakLabels_;
     std::vector<std::string> continueLabels_;
