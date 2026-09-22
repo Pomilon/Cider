@@ -1090,7 +1090,25 @@ std::unique_ptr<TypeAST> Parser::parseType(bool castContext) {
         currentToken_.type == TokenType::U64 || currentToken_.type == TokenType::I64 ||
         currentToken_.type == TokenType::CHAR_TYPE || currentToken_.type == TokenType::BYTE_TYPE) {
         std::string typeName = currentToken_.value;
+        bool isPlainIdent = (currentToken_.type == TokenType::IDENTIFIER);
         nextToken();
+
+        // CID-020/021 (spec §3): dotted names in type position
+        // (`var e: b.Event`, full paths like `a.util.Foo`). Only a leading
+        // identifier can qualify; primitives never take a dotted suffix.
+        // Runs before template arguments so `b.Box<int>` keeps working.
+        if (isPlainIdent) {
+            while (currentToken_.type == TokenType::DOT) {
+                nextToken();  // consume '.'
+                if (currentToken_.type != TokenType::IDENTIFIER) {
+                    error("Expected type name after '.' in qualified type.");
+                    return nullptr;
+                }
+                typeName += ".";
+                typeName += currentToken_.value;
+                nextToken();
+            }
+        }
 
         // Check for template type arguments: Vec<int> or Vec<int, float>
         if (currentToken_.type == TokenType::LT) {
