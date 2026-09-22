@@ -12,6 +12,7 @@
 #include "errors.h"
 #include "lexer.h"
 #include "module_resolver.h"
+#include "module_scope.h"
 #include "parser.h"
 #include "symbols.h"
 
@@ -42,6 +43,21 @@ public:
     const std::map<std::string, std::shared_ptr<TemplateSymbol>>& getTemplateTable() const {
         return templateTable_;
     }
+
+    // --- module-namespace context (CID-020/021) ---
+    // Logical name of the module currently being collected ("" == main file).
+    std::string getCurrentModule() const {
+        return moduleStack_.empty() ? std::string() : moduleStack_.back();
+    }
+    // Module scopes keyed by RESOLVED FILE PATH (spec §1).
+    const std::map<std::string, Scope*>& getModuleScopes() const { return moduleScopes_; }
+    // Qualifier -> competing MODULE candidates for the checker's
+    // ambiguous-module error (spec §1). The scope keeps the first binding.
+    const std::map<std::string, std::vector<std::shared_ptr<ModuleSymbol>>>& getAmbiguousModules() const {
+        return ambiguousModules_;
+    }
+    // Imported AST root -> logical module name, for checker/ir_gen re-entry.
+    const std::map<const AstProgram*, std::string>& getProgramModules() const { return programModules_; }
 
     // Visitor methods
     void visit(AstProgram& program) override {
@@ -638,7 +654,8 @@ public:
     }
 
     void visit(FromImportStmt& stmt) override {
-        importModule(stmt.getModuleName(), stmt.getLine(), stmt.getColumn());
+        Scope* modScope = importModule(stmt.getModuleName(), stmt.getLine(), stmt.getColumn());
+        if (modScope) bindFromAliases(stmt, modScope);
     }
 
     void visit(ExportStmt& stmt) override {
@@ -719,20 +736,103 @@ public:
         return (offset + align - 1) & ~(align - 1);
     }
 
-    void importModule(const std::string& moduleName, int line, int col) {
-        // Check if already imported by name
-        if (importedModuleNames_.count(moduleName)) return;
+    // Define the MODULE symbol for an imported module in the importing scope
+    // under both the full logical name and its last-segment qualifier (spec
+    // §1). A qualifier already bound to a DIFFERENT module is left in place
+    // and both candidates are recorded for the checker's ambiguous-module
+    // error — never silently overwritten, never an error here. A qualifier
+    // shadowed by a value keeps the value (spec §3: values shadow modules).
+    void registerModuleSymbol(Scope* importingScope, const std::string& logicalName,
+                              Scope* modScope, int line, int col) {
+        auto makeModule = [&](const std::string& name) {
+            auto sym = std::make_shared<ModuleSymbol>();
+            sym->kind = SymbolKind::MODULE;
+            sym->name = name;
+            sym->logicalName = logicalName;
+            sym->scope = modScope;
+            sym->line = line;
+            sym->col = col;
+            return sym;
+        };
+        // Full logical names contain dots, so they cannot collide with user
+        // symbols; only a same-name re-import can find one here.
+        if (!importingScope->resolveLocal(logicalName)) {
+            importingScope->define(makeModule(logicalName));
+        }
+        std::string qualifier = qualifierForModule(logicalName);
+        auto existing = importingScope->resolveLocal(qualifier);
+        if (!existing) {
+            importingScope->define(makeModule(qualifier));
+            return;
+        }
+        if (existing->kind != SymbolKind::MODULE) return;  // value shadows qualifier
+        auto existingMod = std::static_pointer_cast<ModuleSymbol>(existing);
+        if (existingMod->scope == modScope) return;  // same module re-imported
+        auto& candidates = ambiguousModules_[qualifier];
+        auto hasScope = [&](Scope* s) {
+            for (auto& c : candidates)
+                if (c->scope == s) return true;
+            return false;
+        };
+        if (!hasScope(existingMod->scope)) candidates.push_back(existingMod);
+        if (!hasScope(modScope)) candidates.push_back(makeModule(qualifier));
+    }
 
+    // Bind `from m import a, b` aliases in the importing scope. Each alias
+    // points at the SAME symbol object in the module's scope (spec §4), so
+    // later phases resolve them exactly like the pre-namespace flattening.
+    void bindFromAliases(FromImportStmt& stmt, Scope* modScope) {
+        Scope* importingScope = symbolTable_.getCurrentScope();
+        for (const auto& name : stmt.getSymbols()) {
+            auto target = modScope->resolve(name);
+            if (!target) {
+                // Function/struct templates live in the template table, not
+                // in any scope; as with the legacy flattening, importing one
+                // is a no-op and use sites instantiate on demand.
+                if (templateTable_.count(name)) continue;
+                reporter_.error("module '" + stmt.getModuleName() + "' has no symbol '" + name + "'",
+                                stmt.getLine(), stmt.getColumn());
+                continue;
+            }
+            if (importingScope->resolveLocal(name)) {
+                reporter_.error("Redeclaration of '" + name + "' (from module '" +
+                                stmt.getModuleName() + "')", stmt.getLine(), stmt.getColumn());
+                continue;
+            }
+            importingScope->define(target);
+        }
+    }
+
+    // Collect an imported module's symbols in its own child scope (spec §1).
+    // The scope registry is keyed by RESOLVED FILE PATH: two logical names
+    // resolving to one file share one scope and are defined once; diamonds
+    // reuse it. Returns the module scope, or nullptr when resolution or
+    // parsing failed. MODULE symbol registration in the importing scope
+    // happens for every import, including scope reuses.
+    Scope* importModule(const std::string& moduleName, int line, int col) {
         auto result = resolver_.resolve(moduleName, originPath_);
         if (result.type == ModuleType::NOT_FOUND) {
             reporter_.error("Could not resolve module '" + moduleName + "'", line, col);
-            return;
+            return nullptr;
         }
 
         // Cycle detection
         if (importingPaths_.count(result.path)) {
             reporter_.error("Circular import detected for module '" + moduleName + "'", line, col);
-            return;
+            return nullptr;
+        }
+
+        // The scope that issued this import: root for main-file imports, the
+        // importer's own module scope for nested ones.
+        Scope* importingScope = symbolTable_.getCurrentScope();
+
+        auto scopeIt = moduleScopes_.find(result.path);
+        if (scopeIt != moduleScopes_.end()) {
+            // Diamond / repeat import: share the existing scope (defined
+            // once), but still register this logical name for the importer.
+            importedModuleNames_.insert(moduleName);
+            registerModuleSymbol(importingScope, moduleName, scopeIt->second, line, col);
+            return scopeIt->second;
         }
 
         importedModuleNames_.insert(moduleName);
@@ -741,7 +841,7 @@ public:
         std::ifstream file(result.path);
         if (!file) {
             importingPaths_.erase(result.path);
-            return;
+            return nullptr;
         }
         std::stringstream buffer;
         buffer << file.rdbuf();
@@ -755,16 +855,29 @@ public:
         Parser parser(lexer, reporter_);
         auto importedAst = parser.parseProgram();
 
+        Scope* modScope = nullptr;
         if (importedAst) {
             importedAst->setSourcePath(result.path);
+            symbolTable_.enterScope();
+            modScope = symbolTable_.getCurrentScope();
+            moduleScopes_[result.path] = modScope;
+            moduleLogicalNames_[result.path] = moduleName;
+            moduleStack_.push_back(moduleName);
             importedAst->accept(*this);
+            moduleStack_.pop_back();
+            symbolTable_.exitScope();
             if (currentProgram_) {
+                programModules_[importedAst.get()] = moduleName;
                 currentProgram_->addImportedAst(std::move(importedAst));
             }
         }
         reporter_.setFile(prevFile);
 
         importingPaths_.erase(result.path);
+        if (!modScope) return nullptr;  // parse failed; errors already reported
+
+        registerModuleSymbol(importingScope, moduleName, modScope, line, col);
+        return modScope;
     }
 
     // --- template instantiation helpers ---
@@ -1271,13 +1384,27 @@ public:
             return nullptr;
         };
         tmplFunc = findTemplateFunc(currentProgram_->getStatements());
+        AstProgram* definingProg = currentProgram_;
         if (!tmplFunc) {
             for (auto& imported : currentProgram_->getImportedAsts()) {
                 tmplFunc = findTemplateFunc(imported->getStatements());
-                if (tmplFunc) break;
+                if (tmplFunc) { definingProg = imported.get(); break; }
             }
         }
         if (!tmplFunc) return;
+
+        // CID-020: a template from an imported module instantiates into that
+        // module's scope (its body resolves module-internal names) and the
+        // clone is appended to the module's AST. The same symbol object is
+        // also defined in the root scope so call sites anywhere keep
+        // resolving it exactly like the legacy flat table.
+        Scope* rootScope = symbolTable_.getRootScope();
+        Scope* definingScope = rootScope;
+        if (definingProg && definingProg != currentProgram_ &&
+            !definingProg->getSourcePath().empty()) {
+            auto scopeIt = moduleScopes_.find(definingProg->getSourcePath());
+            if (scopeIt != moduleScopes_.end()) definingScope = scopeIt->second;
+        }
 
         // Build the concrete function symbol.
         auto funcSym = std::make_shared<FunctionSymbol>();
@@ -1298,9 +1425,15 @@ public:
             funcSym->parameterTypes.push_back(substType(param.second.get()));
         }
 
+        Scope* prevScope = symbolTable_.getCurrentScope();
+        symbolTable_.setCurrentScope(definingScope);
         symbolTable_.define(funcSym);
+        if (definingScope != rootScope && !rootScope->resolveLocal(mangledName)) {
+            rootScope->define(funcSym);
+        }
 
-        // Clone the full function with type substitution and add to the program.
+        // Clone the full function with type substitution and add to the
+        // defining program (main or the template's module).
         std::vector<FunctionDeclStmt::Parameter> clonedParams;
         for (auto& param : tmplFunc->getParams()) {
             clonedParams.push_back({param.first,
@@ -1318,11 +1451,13 @@ public:
         FunctionDeclStmt* rawPtr = clonedFunc.get();
 
         // Process the cloned function through the collector (defines its
-        // params and body symbols), then scan its body for nested template
-        // calls, then append it for the IR generator.
+        // params and body symbols) in the defining scope, then scan its body
+        // for nested template calls, then append it to the defining program
+        // for the IR generator.
         visit(*rawPtr);
         visitStmtForTemplateCalls(rawPtr);
-        currentProgram_->addStatement(std::move(clonedFunc));
+        symbolTable_.setCurrentScope(prevScope);
+        definingProg->addStatement(std::move(clonedFunc));
     }
 
 private:
@@ -1339,6 +1474,11 @@ private:
     bool inExport_ = false;
     std::set<std::string> importedModuleNames_;
     std::set<std::string> importingPaths_;
+    std::map<std::string, Scope*> moduleScopes_;  // resolved path -> module scope (spec §1)
+    std::map<std::string, std::string> moduleLogicalNames_;  // resolved path -> first logical name
+    std::map<std::string, std::vector<std::shared_ptr<ModuleSymbol>>> ambiguousModules_;
+    std::map<const AstProgram*, std::string> programModules_;  // imported AST -> logical name
+    std::vector<std::string> moduleStack_;  // current-module context; empty == main file
 };
 
 }  // namespace cider

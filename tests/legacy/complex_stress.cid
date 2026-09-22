@@ -1,4 +1,4 @@
-from std.io import print, printInt;
+from std.io import print, printInt, exit;
 from std.alloc import malloc, free;
 
 class Calculator {

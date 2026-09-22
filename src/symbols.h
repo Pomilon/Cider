@@ -167,6 +167,12 @@ public:
 
     Scope* getCurrentScope() const { return currentScope_; }
 
+    // CID-020: enter an existing table-owned scope (a module scope from the
+    // collector registry). Callers must restore the previous scope.
+    void setCurrentScope(Scope* scope) {
+        if (scope) currentScope_ = scope;
+    }
+
     // Nesting depth of the current scope (root/global scope is 0). Used to
     // tell global variable declarations from function-local ones.
     int scopeDepth() const {

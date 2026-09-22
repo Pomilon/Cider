@@ -205,6 +205,7 @@ int main(int argc, char** argv) {
         }
         if (opts.command == "compile") {
             cider::IRGenerator gen(table, opts.inputFile);
+            gen.setModuleScopes(collector.getModuleScopes());
             auto module = gen.generate(*prog);
             if (!opts.noOpt) {
                 optimizeModule(module);
@@ -223,6 +224,7 @@ int main(int argc, char** argv) {
         }
         if (opts.command == "run") {
             cider::IRGenerator gen(table, opts.inputFile);
+            gen.setModuleScopes(collector.getModuleScopes());
             auto module = gen.generate(*prog);
             if (!opts.noOpt) {
                 optimizeModule(module);
@@ -240,6 +242,7 @@ int main(int argc, char** argv) {
         }
         // build: generate IR and print the module dump.
         cider::IRGenerator gen(table, opts.inputFile);
+        gen.setModuleScopes(collector.getModuleScopes());
         auto module = gen.generate(*prog);
         module.print();
         return 0;

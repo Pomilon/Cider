@@ -21,6 +21,12 @@ public:
     IRGenerator(SymbolTable& syms, const std::string& sourcePath = "")
         : symbolTable_(syms), currentSourcePath_(sourcePath) {}
 
+    // CID-020: module scopes keyed by resolved file path, from the
+    // collector. Lets each imported AST generate with its own scope current
+    // (spec §2). Empty by default: unit tests without a collector keep the
+    // legacy always-root behavior.
+    void setModuleScopes(const std::map<std::string, Scope*>& scopes) { moduleScopes_ = scopes; }
+
     ModuleIR generate(AstProgram& program) {
         visitedPrograms_.clear();
         globalValues_.clear();
@@ -190,6 +196,17 @@ public:
             currentSourcePath_ = program.getSourcePath();
         }
 
+        // CID-020 (spec §2): an imported AST generates with its own module
+        // scope current, so intra-module references resolve; the main
+        // program (empty source path) stays in the root scope.
+        Scope* prevScope = symbolTable_.getCurrentScope();
+        if (!program.getSourcePath().empty()) {
+            auto scopeIt = moduleScopes_.find(program.getSourcePath());
+            if (scopeIt != moduleScopes_.end()) {
+                symbolTable_.setCurrentScope(scopeIt->second);
+            }
+        }
+
         for (auto& imported : program.getImportedAsts()) {
             imported->accept(*this);
         }
@@ -197,6 +214,7 @@ public:
             stmt->accept(*this);
         }
 
+        symbolTable_.setCurrentScope(prevScope);
         currentSourcePath_ = prevPath;
     }
 
@@ -1534,7 +1552,12 @@ public:
             }
         }
 
-        if (sym && sym->isConst) {
+        // CID-020: a `const` that was emitted as a global (e.g. a module-level
+        // const reached here through a from-import alias) reads from storage:
+        // the collector never evaluates const initializers into constValue,
+        // so folding here would bake in 0. True immediates without storage
+        // (enum variants) still fold below.
+        if (sym && sym->isConst && !globalValues_.count(expr.getName())) {
             IRType irType = (sym->type.pointerLevel > 0) ? IRType::PTR : mapType(sym->type.name);
             lastValue_ = IRValue::Constant(sym->constValue, irType);
             return;
@@ -3369,6 +3392,8 @@ private:
     std::unique_ptr<BasicBlock> currentBlock_;
     std::string currentClassName_;
     std::string currentSourcePath_;
+    // CID-020: resolved-path -> module scope registry (from the collector).
+    std::map<std::string, Scope*> moduleScopes_;
     IRValue lastValue_ = IRValue::Constant(0, IRType::I32);
     TypeInfo lastExprType_;
     bool isAddress_ = false;
