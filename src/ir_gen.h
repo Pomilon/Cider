@@ -199,15 +199,20 @@ public:
 
     // True for struct/class by-value returns (and params decaying likewise).
     // These use the hidden-sret-pointer convention so freestanding targets
-    // never need a heap `malloc` for `return someStruct;`.
-    bool isStructValueType(const TypeInfo& t) {
+    // never need a heap `malloc` for `return someStruct;`. `defModule`
+    // scopes bare callee-signature nominals to the callee's defining module
+    // when they do not resolve at the use site (empty = legacy walk only,
+    // which is what every pre-existing call site passes).
+    bool isStructValueType(const TypeInfo& t, const std::string& defModule = "") {
         if (t.pointerLevel > 0) return false;
         if (t.isArray || t.isInterface || t.isSlice) return false;
-        auto sym = symbolTable_.resolve(t.name);
+        auto sym = resolveNominalType(t.name);
+        if (!sym && !defModule.empty()) sym = resolveCalleeNominal(t.name, defModule);
         if (!sym) return false;
         if (sym->kind != SymbolKind::STRUCT && sym->kind != SymbolKind::CLASS) return false;
         if (sym->type.name != sym->name && !sym->type.name.empty()) {
-            auto target = symbolTable_.resolve(sym->type.name);
+            auto target = resolveNominalType(sym->type.name);
+            if (!target && !defModule.empty()) target = resolveCalleeNominal(sym->type.name, defModule);
             if (!target || (target->kind != SymbolKind::STRUCT && target->kind != SymbolKind::CLASS))
                 return false;
         }
@@ -283,11 +288,28 @@ public:
     // same rule as functions (T6 probe G1: same-named globals in two
     // modules shared one bare label and qualified reads emitted garbage).
     // Main-file globals keep legacy bare names, which keeps import-free IR
-    // byte-identical; `extern` never reaches here (early return at the
-    // emission site, and references share the linker symbol).
+    // byte-identical. `main`/`_start` are never mangled (spec Review Focus);
+    // `extern` references resolve through definingModuleFor (bare) and never
+    // reach emission (early return at the emission site).
     static std::string emitGlobalName(const std::string& defModule, const std::string& bare) {
-        if (defModule.empty()) return bare;
+        if (defModule.empty() || isNeverMangled(bare)) return bare;
         return mangleQualifiedName(defModule, bare);
+    }
+
+    // Resolve a bare callee-signature nominal in the callee's defining
+    // module scope (signatures belong to the callee — a bare name that
+    // happens not to resolve at the call site still means the same type
+    // there). Callers try the legacy scope walk first; this is only the
+    // fallback. Null when unresolvable in both.
+    std::shared_ptr<Symbol> resolveCalleeNominal(const std::string& name, const std::string& defModule) {
+        if (defModule.empty()) return nullptr;
+        for (const auto& [path, scope] : moduleScopes_) {
+            if (scope && logicalForScope(scope) == defModule) {
+                auto mem = scope->resolveLocal(name);
+                if (mem) return mem;
+            }
+        }
+        return nullptr;
     }
 
     // Mangled global key for a resolved symbol: bind-time provenance first
@@ -326,6 +348,43 @@ public:
         return nullptr;
     }
 
+    // CID-020/021 (spec §3): resolve a nominal type name that may be dotted
+    // (`nsa.Event`, `a.util.Foo`) or canonical (`nsa::Event`). Bare names
+    // use the legacy scope walk (identical behavior); anything else
+    // resolves the qualifier prefix as a module (full logical path or
+    // last-segment qualifier) and looks the member up in that module's
+    // scope. Null when unresolvable (the checker rejects such programs
+    // first, so generation never depends on this path for them).
+    std::shared_ptr<Symbol> resolveNominalType(const std::string& name) {
+        auto sym = symbolTable_.resolve(name);
+        if (sym) return sym;
+        std::string qualifier, bare;
+        auto canonical = name.find("::");
+        if (canonical != std::string::npos) {
+            qualifier = name.substr(0, canonical);
+            bare = name.substr(canonical + 2);
+        } else {
+            auto dot = name.rfind('.');
+            if (dot == std::string::npos || dot == 0 || dot + 1 >= name.size()) return nullptr;
+            qualifier = name.substr(0, dot);
+            bare = name.substr(dot + 1);
+        }
+        if (canonical != std::string::npos) {
+            for (const auto& [path, scope] : moduleScopes_) {
+                if (scope && logicalForScope(scope) == qualifier) {
+                    auto mem = scope->resolveLocal(bare);
+                    if (mem) return mem;
+                }
+            }
+            return nullptr;
+        }
+        auto modSym = symbolTable_.resolve(qualifier);
+        if (!modSym || modSym->kind != SymbolKind::MODULE) return nullptr;
+        Scope* ms = std::static_pointer_cast<ModuleSymbol>(modSym)->scope;
+        if (!ms) return nullptr;
+        return ms->resolveLocal(bare);
+    }
+
     // Defining-module logical name for a resolved symbol ("": main).
     // Bind-time provenance first: it survives chained from-aliases (the
     // alias shares the target object, so identity search alone would pick
@@ -333,6 +392,10 @@ public:
     // scope-identity search (unit tests without a collector) and then the
     // same-module rule.
     std::string definingModuleFor(const std::shared_ptr<Symbol>& sym, const std::string& name) {
+        // `extern` symbols are never mangled (spec Review Focus): they must
+        // match the linker-provided symbol, so every reference site (calls,
+        // values, globals, runtime helpers) treats them as main-file names.
+        if (sym && sym->isExtern) return "";
         if (sym) {
             auto pit = symbolModules_.find(sym.get());
             if (pit != symbolModules_.end()) return pit->second;
@@ -598,7 +661,7 @@ public:
             // are always sret; kept for robustness).
             if (retType.pointerLevel == 0) {
                 int structSize = getTypeSize(retType);
-                auto typeSym = symbolTable_.resolve(retType.name);
+                auto typeSym = resolveNominalType(retType.name);
                 if (typeSym && (typeSym->kind == SymbolKind::STRUCT || typeSym->kind == SymbolKind::CLASS)) {
                     IRValue localPtr = IRValue::Register(nextTemp(), IRType::PTR);
                     currentBlock_->addInstruction({IROp::CALL, localPtr, {IRValue::Label(runtimeHelperName("malloc")), IRValue::Constant(structSize, IRType::I32)}});
@@ -701,7 +764,7 @@ public:
                 }
             }
 
-            auto sym = symbolTable_.resolve(objType.name);
+            auto sym = resolveNominalType(objType.name);
             if (sym && (sym->kind == SymbolKind::CLASS || sym->kind == SymbolKind::STRUCT)) {
                 auto classSym = std::static_pointer_cast<StructSymbol>(sym);
                 // CID-020/021 (spec §5/§6): method calls use the defining
@@ -737,16 +800,22 @@ public:
                     sym = std::static_pointer_cast<FunctionSymbol>(rawSym);
             }
             TypeInfo calleeRet = {"int", 0};
+            std::string calleeDefMod;
             if (sym && sym->kind == SymbolKind::FUNCTION) {
                 auto funcSym = std::static_pointer_cast<FunctionSymbol>(sym);
                 calleeRet = funcSym->returnType;
+                // CID-020/021: bare signature nominals belong to the callee;
+                // scope the sret/size queries to its defining module so a
+                // same-named type in the caller (or no visible type at all)
+                // cannot change the call convention.
+                calleeDefMod = definingModuleFor(sym, funcName);
                 lastExprType_ = calleeRet;
             }
-            bool calleeIsSret = isStructValueType(calleeRet);
+            bool calleeIsSret = isStructValueType(calleeRet, calleeDefMod);
             // Virtual callees are never sret (they stay on the malloc path);
             // direct CALLs here are free functions / non-virtual methods.
             if (calleeIsSret && !(isVirtual && vtableIndex != -1)) {
-                int retSize = getTypeSize(calleeRet);
+                int retSize = getTypeSize(calleeRet, calleeDefMod);
                 IRValue retBuf = IRValue::Register(nextTemp(), IRType::PTR);
                 currentBlock_->addInstruction({IROp::ALLOCA, retBuf, {IRValue::Constant(retSize, IRType::I32)}});
                 IRInstruction callInstr;
@@ -1087,7 +1156,7 @@ public:
                         definingModuleFor(target, expr.getMember()), target->name);
                     lastExprType_ = target->type;
                     if (lastExprType_.pointerLevel == 0) {
-                        auto typeSym = symbolTable_.resolve(lastExprType_.name);
+                        auto typeSym = resolveNominalType(lastExprType_.name);
                         if (typeSym && (typeSym->kind == SymbolKind::STRUCT ||
                                         typeSym->kind == SymbolKind::CLASS)) {
                             lastExprType_.isUserDefined = typeSym->type.name.empty();
@@ -1118,7 +1187,7 @@ public:
         TypeInfo objType = lastExprType_;
         if (objType.pointerLevel > 0) objType.pointerLevel--;
 
-        auto sym = symbolTable_.resolve(objType.name);
+        auto sym = resolveNominalType(objType.name);
         if (sym && (sym->kind == SymbolKind::STRUCT || sym->kind == SymbolKind::CLASS)) {
             auto structSym = std::static_pointer_cast<StructSymbol>(sym);
             for (const auto& field : structSym->fields) {
@@ -1128,7 +1197,7 @@ public:
 
                     bool fieldIsStruct = (field.type.pointerLevel == 0);
                     if (fieldIsStruct) {
-                        auto fieldTypeSym = symbolTable_.resolve(field.type.name);
+                        auto fieldTypeSym = resolveNominalType(field.type.name);
                         if (!fieldTypeSym || (fieldTypeSym->kind != SymbolKind::STRUCT && fieldTypeSym->kind != SymbolKind::CLASS)) {
                             fieldIsStruct = false;
                         }
@@ -1524,13 +1593,13 @@ public:
         }
     }
 
-    int getTypeSize(TypeInfo type) {
+    int getTypeSize(TypeInfo type, const std::string& defModule = "") {
         if (type.pointerLevel > 0) return 8;
         if (type.isArray) {
             TypeInfo elemType = type;
             elemType.isArray = false;
             elemType.arraySize = 0;
-            return type.arraySize * getTypeSize(elemType);
+            return type.arraySize * getTypeSize(elemType, defModule);
         }
         if (type.name == "u8" || type.name == "i8" || type.name == "char" || type.name == "byte" || type.name == "void") return 1;
         if (type.name == "u16" || type.name == "i16") return 2;
@@ -1538,7 +1607,8 @@ public:
         if (type.name == "u64" || type.name == "i64") return 8;
 
         if (type.isInterface) return 16;
-        auto sym = symbolTable_.resolve(type.name);
+        auto sym = resolveNominalType(type.name);
+        if (!sym && !defModule.empty()) sym = resolveCalleeNominal(type.name, defModule);
         if (sym && (sym->kind == SymbolKind::STRUCT || sym->kind == SymbolKind::CLASS)) {
             return std::static_pointer_cast<StructSymbol>(sym)->totalSize;
         }
@@ -1800,7 +1870,7 @@ public:
         if (sym) {
             lastExprType_ = sym->type;
             if (lastExprType_.pointerLevel == 0) {
-                auto typeSym = symbolTable_.resolve(lastExprType_.name);
+                auto typeSym = resolveNominalType(lastExprType_.name);
                 if (typeSym && (typeSym->kind == SymbolKind::STRUCT || typeSym->kind == SymbolKind::CLASS)) {
                     lastExprType_.isUserDefined = typeSym->type.name.empty();
                 }
@@ -1920,7 +1990,7 @@ public:
         } else if (auto mem = dynamic_cast<MemberAccessExpr*>(expr)) {
             TypeInfo objType = inferExprType(mem->getObject());
             if (objType.pointerLevel > 0) objType.pointerLevel--;
-            auto sym = symbolTable_.resolve(objType.name);
+            auto sym = resolveNominalType(objType.name);
             if (sym && (sym->kind == SymbolKind::STRUCT || sym->kind == SymbolKind::CLASS)) {
                 auto ss = std::static_pointer_cast<StructSymbol>(sym);
                 for (const auto& f : ss->fields) {
@@ -1960,7 +2030,7 @@ public:
         // would advance the temp counters and emit duplicate instructions.
         TypeInfo objType = inferExprType(mem->getObject());
         if (objType.pointerLevel > 0) objType.pointerLevel--;
-        auto sym = symbolTable_.resolve(objType.name);
+        auto sym = resolveNominalType(objType.name);
         if (!sym || (sym->kind != SymbolKind::STRUCT && sym->kind != SymbolKind::CLASS)) return false;
         auto structSym = std::static_pointer_cast<StructSymbol>(sym);
         for (const auto& field : structSym->fields) {
@@ -1979,7 +2049,7 @@ public:
         if (!mem) return false;
         TypeInfo objType = inferExprType(mem->getObject());
         if (objType.pointerLevel > 0) objType.pointerLevel--;
-        auto sym = symbolTable_.resolve(objType.name);
+        auto sym = resolveNominalType(objType.name);
         if (!sym || (sym->kind != SymbolKind::STRUCT && sym->kind != SymbolKind::CLASS)) return false;
         auto ss = std::static_pointer_cast<StructSymbol>(sym);
         for (const auto& f : ss->fields) {
@@ -3204,7 +3274,7 @@ public:
         currentBlock_->addInstruction(call);
 
         // Initialize vptr if class is virtual
-        auto sym = symbolTable_.resolve(type.name);
+        auto sym = resolveNominalType(type.name);
         if (sym && sym->kind == SymbolKind::CLASS) {
             auto classSym = std::static_pointer_cast<StructSymbol>(sym);
             if (!classSym->vtable.empty()) {
