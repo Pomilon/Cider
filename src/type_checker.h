@@ -257,7 +257,12 @@ public:
                 while (!parent.empty()) {
                     // Stored parent names are bare; compare canonically so
                     // in-module hierarchies keep matching (spec §1).
-                    if (canonicalizeNominal({parent, 0}).name == t1.name) return true;
+                    // Explicit construction (not `{parent, 0}`): robust
+                    // against TypeInfo field reordering.
+                    TypeInfo parentType;
+                    parentType.name = parent;
+                    parentType.pointerLevel = 0;
+                    if (canonicalizeNominal(parentType).name == t1.name) return true;
                     auto parentSym = resolveScoped(parent);
                     if (parentSym && parentSym->kind == SymbolKind::CLASS) {
                         parent = std::static_pointer_cast<StructSymbol>(parentSym)->parentName;
