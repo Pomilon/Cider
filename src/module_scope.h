@@ -14,6 +14,8 @@ inline std::string qualifierForModule(const std::string& logical) {
 // injective: every '_' becomes '_u'. Underscores in escaped output are
 // therefore always immediately followed by 'u', so escaped output never
 // contains '__' and '__' in a mangled name uniquely marks separators.
+// (Segments are non-empty and dot-free by construction: callers split the
+// logical path on '.' and the final name is an identifier.)
 inline std::string escapeModuleSegment(const std::string& segment) {
     std::string out;
     out.reserve(segment.size());
