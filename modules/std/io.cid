@@ -78,7 +78,10 @@ export func printInt(n: int) -> void {
 // time (multiply by 10, truncating cast), never rounded. Values whose
 // integer part does not fit in an int (|x| >= 2^31) are out of scope:
 // there the truncating cast is implementation-defined and VM and native
-// can disagree, so callers must stay in int range. This is not a full
+// can disagree, so callers must stay in int range. NaN and +/-Infinity
+// are likewise unspecified/best-effort: the sign test and truncating
+// casts have no meaningful result for them, and the printed digits may
+// differ per backend, so callers must filter them out. This is not a full
 // printf. `printFloat` widens to f64 and shares the formatter.
 export func printF64(x: f64) -> void {
     if (x < 0.0) {
