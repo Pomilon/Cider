@@ -1,0 +1,14 @@
+from std.io import printFloat, printF64, print, printInt;
+
+func main() -> int {
+  printF64(2.5); print("\n");
+  printF64(-1.25); print("\n");
+  printF64(0.0); print("\n");
+  printF64(10.0); print("\n");
+  printF64(16777217.0); print("\n");   // exact double, rounds in f32
+  var f: float = 16777217.0;           // implicit narrowing to 32 bits
+  printFloat(f); print("\n");
+  printFloat(1.5); print("\n");
+  printInt(7); print("\n");
+  return 0;
+}
