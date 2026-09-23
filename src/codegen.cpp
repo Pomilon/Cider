@@ -1150,17 +1150,40 @@ bool CodeGenerator::generate(ModuleIR& module, const std::string& outputPath,
                 case IROp::CMP_LE:
                 case IROp::CMP_GE: {
                     IRType t = instr.args[0].type;
-                    if (t == IRType::F32) {
-                        std::string setcc;
-                        switch (instr.op) {
-                        case IROp::CMP_EQ: setcc = "sete"; break;
-                        case IROp::CMP_NE: setcc = "setne"; break;
-                        case IROp::CMP_LT: setcc = "setb"; break;
-                        case IROp::CMP_LE: setcc = "setbe"; break;
-                        case IROp::CMP_GT: setcc = "seta"; break;
-                        case IROp::CMP_GE: setcc = "setae"; break;
-                        default: setcc = "sete";
+                    std::string setcc;
+                    switch (instr.op) {
+                    case IROp::CMP_EQ: setcc = "sete"; break;
+                    case IROp::CMP_NE: setcc = "setne"; break;
+                    case IROp::CMP_LT: setcc = "setb"; break;
+                    case IROp::CMP_LE: setcc = "setbe"; break;
+                    case IROp::CMP_GT: setcc = "seta"; break;
+                    case IROp::CMP_GE: setcc = "setae"; break;
+                    default: setcc = "sete";
+                    }
+                    // CID-003 follow-up (I5): ucomiss/ucomisd set PF for
+                    // unordered operands (NaN) together with ZF and CF, so a
+                    // bare setcc is IEEE-wrong for NaN: setne is false for
+                    // n != n, sete is true for n == n, and CF=1 makes
+                    // setb/setbe true for every ordered compare. Emit the
+                    // VM's (native C++) semantics instead: != is
+                    // (setne || setp), == is (sete && !setp), and <,<=,>,>=
+                    // are (setcc && !setp). r11 is codegen scratch.
+                    auto emitSetcc = [&](const std::string& op) {
+                        if (instr.op == IROp::CMP_NE) {
+                            addText("    setne al");
+                            addText("    setp r11b");
+                            addText("    or al, r11b");
+                        } else if (instr.op == IROp::CMP_EQ) {
+                            addText("    sete al");
+                            addText("    setnp r11b");
+                            addText("    and al, r11b");
+                        } else {
+                            addText("    " + op + " al");
+                            addText("    setnp r11b");
+                            addText("    and al, r11b");
                         }
+                    };
+                    if (t == IRType::F32) {
                         if (isMem(a1)) {
                             addText("    movss xmm0, " + a1);
                             addText("    ucomiss xmm0, " + a2);
@@ -1170,21 +1193,11 @@ bool CodeGenerator::generate(ModuleIR& module, const std::string& outputPath,
                         } else {
                             addText("    ucomiss " + a1 + ", " + a2);
                         }
-                        addText("    " + setcc + " al");
+                        emitSetcc(setcc);
                         addText("    movzx eax, al");
                         addText("    mov " + d + ", rax");
                         break;
                     } else if (t == IRType::F64) {
-                        std::string setcc;
-                        switch (instr.op) {
-                        case IROp::CMP_EQ: setcc = "sete"; break;
-                        case IROp::CMP_NE: setcc = "setne"; break;
-                        case IROp::CMP_LT: setcc = "setb"; break;
-                        case IROp::CMP_LE: setcc = "setbe"; break;
-                        case IROp::CMP_GT: setcc = "seta"; break;
-                        case IROp::CMP_GE: setcc = "setae"; break;
-                        default: setcc = "sete";
-                        }
                         if (isMem(a1)) {
                             addText("    movsd xmm0, " + a1);
                             addText("    ucomisd xmm0, " + a2);
@@ -1194,7 +1207,7 @@ bool CodeGenerator::generate(ModuleIR& module, const std::string& outputPath,
                         } else {
                             addText("    ucomisd " + a1 + ", " + a2);
                         }
-                        addText("    " + setcc + " al");
+                        emitSetcc(setcc);
                         addText("    movzx eax, al");
                         addText("    mov " + d + ", rax");
                         break;
