@@ -705,11 +705,11 @@ public:
             IRValue val = lastValue_;
             TypeInfo retType = lastExprType_;
 
-            // CID-003: the function's declared return type drives the float
-            // width (a returned literal keeps its parsed double; registers
-            // convert through the CVT ops). Pointers and non-float returns
-            // pass through.
-            val = convertFloatWidthToType(val, currentReturnType_);
+            // CID-003: the function's declared return type drives the
+            // returned representation (a returned literal keeps its parsed
+            // double; registers convert through the CVT ops; int returns
+            // convert too). Pointers and non-float returns pass through.
+            val = convertValueToType(val, currentReturnType_);
 
             // Struct-by-value return via hidden sret pointer: no malloc,
             // freestanding-safe. The caller-provided slot outlives the frame.
@@ -821,7 +821,7 @@ public:
                                 arg->accept(*this);
                                 IRValue av = lastValue_;
                                 if (argIdx < m.parameterTypes.size()) {
-                                    av = convertFloatWidthToType(av, m.parameterTypes[argIdx]);
+                                    av = convertValueToType(av, m.parameterTypes[argIdx]);
                                 }
                                 args.push_back(av);
                                 argIdx++;
@@ -903,7 +903,7 @@ public:
                     paramBase = 1;
                 }
                 for (size_t ai = 0; ai < args.size() && ai + paramBase < funcSym->parameterTypes.size(); ++ai) {
-                    args[ai] = convertFloatWidthToType(args[ai], funcSym->parameterTypes[ai + paramBase]);
+                    args[ai] = convertValueToType(args[ai], funcSym->parameterTypes[ai + paramBase]);
                 }
             }
             bool calleeIsSret = isStructValueType(calleeRet, calleeDefMod);
@@ -1344,7 +1344,10 @@ public:
                         break;
                     }
                 }
-                val = truncateIntToType(val, fieldType);
+                // CID-003: an aggregate literal's field stores at the
+                // declared width, exactly like a variable store (a literal
+                // f32 into an f64 field must not write 4 bytes).
+                val = convertValueToType(val, fieldType);
                 currentBlock_->addInstruction({IROp::STORE, std::nullopt, {dest, val, IRValue::Constant(offset, IRType::I32)}});
             }
         }
@@ -1635,7 +1638,10 @@ public:
                         int elemSize = getTypeSize(elemType);
                         for (size_t ei = 0; ei < elems.size(); ei++) {
                             elems[ei]->accept(*this);
-                            IRValue eval = truncateIntToType(lastValue_, elemType);
+                            // CID-003: elements store at the declared width
+                            // (an f32 literal in an f64 element must not
+                            // write 4 bytes; an int element converts).
+                            IRValue eval = convertValueToType(lastValue_, elemType);
                             currentBlock_->addInstruction({IROp::STORE, std::nullopt, {addr, eval, IRValue::Constant((int64_t)(ei * (size_t)elemSize), IRType::I32)}});
                         }
                         lastExprType_ = sym->type;
@@ -1801,14 +1807,38 @@ public:
         return converted;
     }
 
-    // CID-003: convert a float-family value to a declared type's width when
-    // that type is a float width. Non-float values and non-float targets
-    // (pointers, ints, structs) pass through untouched.
-    IRValue convertFloatWidthToType(IRValue val, const TypeInfo& target) {
-        if (val.type != IRType::F32 && val.type != IRType::F64) return val;
-        IRType targetIR = (target.pointerLevel > 0) ? IRType::PTR : mapType(target.name);
-        if (targetIR != IRType::F32 && targetIR != IRType::F64) return val;
-        return convertFloatWidth(val, targetIR);
+    // CID-003: apply a declared scalar type's conversions to a value at an
+    // initializer/argument/return/store site, mirroring the declaration
+    // path: int -> float via CVT_ITOF, float -> int via CVT_FTOI
+    // (narrow/unsigned/bool targets through convertFloatToInt), float
+    // widths through convertFloatWidth, integer narrowing through
+    // truncateIntToType. Pointers and aggregates pass through untouched.
+    IRValue convertValueToType(IRValue val, const TypeInfo& target) {
+        if (target.pointerLevel > 0) return val;
+        IRType targetIR = mapType(target.name);
+        bool valIsFloat = (val.type == IRType::F32 || val.type == IRType::F64);
+        bool valIsInt = (val.type == IRType::I32 || val.type == IRType::I64);
+        bool targetIsFloat = (targetIR == IRType::F32 || targetIR == IRType::F64);
+        bool targetIsInt = (targetIR == IRType::I8 || targetIR == IRType::U8 ||
+                            targetIR == IRType::I16 || targetIR == IRType::U16 ||
+                            targetIR == IRType::I32 || targetIR == IRType::U32 ||
+                            targetIR == IRType::I64 || targetIR == IRType::U64 ||
+                            targetIR == IRType::BOOL);
+        if (valIsFloat && targetIsFloat) return convertFloatWidth(val, targetIR);
+        if (valIsFloat && targetIsInt) {
+            if (targetIR == IRType::I32 || targetIR == IRType::I64) {
+                IRValue converted = IRValue::Register(nextTemp(), targetIR);
+                currentBlock_->addInstruction({IROp::CVT_FTOI, converted, {val}});
+                return converted;
+            }
+            return convertFloatToInt(val, target);
+        }
+        if (valIsInt && targetIsFloat) {
+            IRValue converted = IRValue::Register(nextTemp(), targetIR);
+            currentBlock_->addInstruction({IROp::CVT_ITOF, converted, {val}});
+            return converted;
+        }
+        return truncateIntToType(val, target);
     }
 
     void visit(BinaryExpr& expr) override {
@@ -2377,6 +2407,10 @@ public:
         std::string compoundOp = stmt.getOp();
 
         IRValue addr = IRValue::Constant(0, IRType::PTR);
+        // CID-003: for a `*p = v` target the pointee's declared type drives
+        // the stored width (see the plain-assignment path below).
+        TypeInfo derefPointeeType;
+        bool hasDerefTarget = false;
         if (auto ident = dynamic_cast<IdentifierExpr*>(stmt.getTarget())) {
             // CID-020/021 (spec §5): global stores key by defining module.
             auto sym = symbolTable_.resolve(ident->getName());
@@ -2393,6 +2427,12 @@ public:
             if (unary->getOperator() == "*") {
                 unary->getOperand()->accept(*this);
                 addr = lastValue_;
+                // CID-003: remember the pointee so the store uses the
+                // declared width (`*p = 2.5` through an f64* must write 8
+                // bytes, not 4).
+                derefPointeeType = lastExprType_;
+                if (derefPointeeType.pointerLevel > 0) derefPointeeType.pointerLevel--;
+                hasDerefTarget = true;
             }
         } else {
             addr = getAddress(stmt.getTarget());
@@ -2411,8 +2451,9 @@ public:
                 }
                 TypeInfo fieldType;
                 if (getMemberFieldType(mem, fieldType)) {
-                    val = truncateIntToType(val, fieldType);
-                    val = convertFloatWidthToType(val, fieldType);
+                    // CID-003: the field's declared type drives the stored
+                    // representation (int narrowing, int<->float, widths).
+                    val = convertValueToType(val, fieldType);
                     lastExprType_ = fieldType;
                 }
             } else if (auto idx = dynamic_cast<IndexExpr*>(stmt.getTarget())) {
@@ -2426,8 +2467,7 @@ public:
                 } else if (elemType.name == "string") {
                     elemType.name = "char";
                 }
-                val = truncateIntToType(val, elemType);
-                val = convertFloatWidthToType(val, elemType);
+                val = convertValueToType(val, elemType);
                 lastExprType_ = elemType;
             } else if (auto ident = dynamic_cast<IdentifierExpr*>(stmt.getTarget())) {
                 // Plain variable stores use the declared width (same rule as
@@ -2443,15 +2483,25 @@ public:
                                       declIR == IRType::I32 || declIR == IRType::U32 ||
                                       declIR == IRType::BOOL ||
                                       declIR == IRType::I64 || declIR == IRType::U64);
-                    if (declIsInt) {
-                        val = truncateIntToType(val, sym->type);
-                    } else if (declIR == IRType::F32 || declIR == IRType::F64) {
-                        // CID-003: the declared width drives the stored
-                        // width (`e = 2.5` into an f64 target must fold to
-                        // the exact F64 constant, not store 4 bytes).
-                        val = convertFloatWidthToType(val, sym->type);
+                    if (declIsInt || declIR == IRType::F32 || declIR == IRType::F64) {
+                        // CID-003: the declared type drives the stored
+                        // representation: integer narrowing, int<->float
+                        // (CVT_ITOF/CVT_FTOI) and float widths (`e = 2.5`
+                        // into an f64 target folds to the exact F64
+                        // constant; `e = 2` converts the int).
+                        val = convertValueToType(val, sym->type);
                     }
                 }
+            } else if (hasDerefTarget) {
+                // CID-003: `*p = v` stores at the pointee's declared width
+                // (`*p = 2.5` through an f64* must write 8 bytes, an
+                // integer pointee narrows, an int value converts).
+                val = convertValueToType(val, derefPointeeType);
+                bool pointeeScalar = (derefPointeeType.pointerLevel == 0 &&
+                                      !derefPointeeType.isArray && !derefPointeeType.isUserDefined &&
+                                      !isStructValueType(derefPointeeType) &&
+                                      !derefPointeeType.isInterface && !derefPointeeType.isSlice);
+                if (pointeeScalar) lastExprType_ = derefPointeeType;
             }
 
             if (lastExprType_.pointerLevel == 0 && (lastExprType_.isArray || lastExprType_.isUserDefined || getTypeSize(lastExprType_) > 8)) {
@@ -2498,6 +2548,9 @@ public:
                         elemType.name = "char";
                     }
                     targetIR = (elemType.pointerLevel > 0) ? IRType::PTR : mapType(elemType.name);
+                } else if (hasDerefTarget) {
+                    // CID-003: `*p += v` loads/stores at the pointee width.
+                    targetIR = (derefPointeeType.pointerLevel > 0) ? IRType::PTR : mapType(derefPointeeType.name);
                 }
                 current = IRValue::Register(nextTemp(), targetIR);
                 if (addr.kind == IRValue::LABEL) {
