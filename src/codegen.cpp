@@ -67,7 +67,13 @@ bool CodeGenerator::generate(ModuleIR& module, const std::string& outputPath,
         return op.find("[") != std::string::npos;
     };
 
-    std::map<std::pair<double, IRType>, std::string> floatConsts;
+    // CID-003 follow-up (M6): key the float-constant pool by exact IEEE-754
+    // bits, not by std::pair<double, IRType>. A double key compares with
+    // operator<, which treats -0.0 and +0.0 as equivalent in both
+    // directions, so a module holding both reused one label (and one sign).
+    // F32 keys use the (float) bit pattern zero-extended, keeping the
+    // fc32_N/fc64_N label scheme and hex payloads.
+    std::map<std::pair<uint64_t, IRType>, std::string> floatConsts;
     int floatConstCount = 0;
 
     auto getFloatConst = [&](double val, IRType t) -> std::string {
@@ -76,7 +82,16 @@ bool CodeGenerator::generate(ModuleIR& module, const std::string& outputPath,
         // folded `2.5 as f64` next to the F32 literal 2.5); a value-only
         // key would reuse the first width's label and the other use would
         // read the wrong number of bytes.
-        auto key = std::make_pair(val, t);
+        uint32_t f32Bits = 0;
+        uint64_t bits = 0;
+        if (t == IRType::F32) {
+            float f = (float)val;
+            std::memcpy(&f32Bits, &f, sizeof(f32Bits));
+            bits = (uint64_t)f32Bits;
+        } else {
+            std::memcpy(&bits, &val, sizeof(bits));
+        }
+        auto key = std::make_pair(bits, t);
         auto it = floatConsts.find(key);
         if (it != floatConsts.end()) return it->second;
         std::string label = (t == IRType::F32 ? "fc32_" : "fc64_") +
@@ -90,14 +105,9 @@ bool CodeGenerator::generate(ModuleIR& module, const std::string& outputPath,
         std::ostringstream hs;
         hs << "0x" << std::hex << std::uppercase;
         if (t == IRType::F32) {
-            float f = (float)val;
-            uint32_t bits = 0;
-            std::memcpy(&bits, &f, sizeof(bits));
-            hs << bits;
+            hs << f32Bits;
             addData(label + ": dd " + hs.str());
         } else {
-            uint64_t bits = 0;
-            std::memcpy(&bits, &val, sizeof(bits));
             hs << bits;
             addData(label + ": dq " + hs.str());
         }

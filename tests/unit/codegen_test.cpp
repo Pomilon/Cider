@@ -212,6 +212,40 @@ int run() {
         CHECK(asmText.find("cvtss2sd") != std::string::npos);            // f32 arm -> f64 merge
         CHECK(asmText.find("cvtsd2ss") != std::string::npos);            // f64 arm -> f32 merge
     }
+
+    // CID-003 follow-up (M6): the float-constant pool must key by exact
+    // IEEE-754 bits. std::pair<double, IRType> compares with operator<,
+    // which treats -0.0 and +0.0 as equivalent, so a module holding both
+    // shared one label and one sign. No Cider source reaches the pool with
+    // -0.0 today: unary minus lowers to `0.0 - x`, +0.0 - +0.0 is +0.0,
+    // and the AST ConstantFolder is not wired into any pipeline — so this
+    // pin constructs the IR directly.
+    {
+        cider::ModuleIR mod;
+        auto fn = std::make_unique<cider::FunctionIR>("main", cider::IRType::I32);
+        auto blk = std::make_unique<cider::BasicBlock>("entry");
+        blk->addInstruction({cider::IROp::MOV, cider::IRValue::Register("p64", cider::IRType::F64),
+                             {cider::IRValue::Constant(0.0, cider::IRType::F64)}});
+        blk->addInstruction({cider::IROp::MOV, cider::IRValue::Register("n64", cider::IRType::F64),
+                             {cider::IRValue::Constant(-0.0, cider::IRType::F64)}});
+        blk->addInstruction({cider::IROp::MOV, cider::IRValue::Register("p32", cider::IRType::F32),
+                             {cider::IRValue::Constant(0.0, cider::IRType::F32)}});
+        blk->addInstruction({cider::IROp::MOV, cider::IRValue::Register("n32", cider::IRType::F32),
+                             {cider::IRValue::Constant(-0.0, cider::IRType::F32)}});
+        fn->addBlock(std::move(blk));
+        mod.addFunction(std::move(fn));
+        std::string path = "<tmp>/codegen_negzero.asm";
+        cider::CodeGenerator cg;
+        CHECK(cg.generate(mod, path));
+        std::ifstream in(path);
+        std::ostringstream ss;
+        ss << in.rdbuf();
+        std::string asmText = ss.str();
+        CHECK(asmText.find("dq 0x0") != std::string::npos);              // +0.0 f64
+        CHECK(asmText.find("dq 0x8000000000000000") != std::string::npos);  // -0.0 f64
+        CHECK(asmText.find("dd 0x0") != std::string::npos);              // +0.0 f32
+        CHECK(asmText.find("dd 0x80000000") != std::string::npos);       // -0.0 f32
+    }
     return 0;
 }
 
