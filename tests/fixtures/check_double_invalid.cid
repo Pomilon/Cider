@@ -1,0 +1,4 @@
+func main() -> int {
+  var x: double = 1.5;
+  return 0;
+}
