@@ -450,19 +450,23 @@ VMResult VM::run(const ModuleIR& module, const std::string& runFunction) {
             // CID-003 follow-up (I2): convert by the source's declared
             // width/sign. RegVal.i is int64_t even for U64 (raw bits), so
             // u64 must convert unsigned; F32 destinations round once, like
-            // cvtsi2ss.
+            // cvtsi2ss. CID-003 follow-up (W5): a narrow source register
+            // may still hold raw low bits (an i8 cast lowers to AND, which
+            // does not sign-normalize), so extend by the source type first
+            // — native reads it with movsx/movzx.
             IRType srcT = (instr.args.size() > 0 ? instr.args[0].type : IRType::I32);
             IRType dstT = (instr.dest ? instr.dest->type : IRType::F32);
             RegVal src = resolveValue(instr.args[0]);
+            int64_t sv = extendIntByType(src.i, srcT);
             RegVal d;
             d.isFloat = true;
             if (dstT == IRType::F32) {
-                float f = (srcT == IRType::U64) ? (float)(uint64_t)src.i
-                                                : (float)src.i;
+                float f = (srcT == IRType::U64) ? (float)(uint64_t)sv
+                                                : (float)sv;
                 d.f = (double)f;
             } else {
-                d.f = (srcT == IRType::U64) ? (double)(uint64_t)src.i
-                                            : (double)src.i;
+                d.f = (srcT == IRType::U64) ? (double)(uint64_t)sv
+                                            : (double)sv;
             }
             if (instr.dest) regs_[instr.dest->name] = d;
             break;

@@ -174,6 +174,41 @@ int run() {
         CHECK(std::string(e.message).find("step limit") != std::string::npos);
     }
     CHECK(threw);
+
+    // CID-003 follow-up (W5): CVT_ITOF extends a narrow source by its
+    // declared type before converting. An i8 AND leaves 156 (0x9C) in the
+    // register; converting the raw bits unsigned gave 156.0 instead of
+    // -100.0 (native movsx reads -100).
+    {
+        auto fn7 = makeFn("main7", cider::IRType::I32);
+        auto b7 = std::make_unique<cider::BasicBlock>("entry");
+        cider::IRInstruction raw;
+        raw.op = cider::IROp::BIT_AND;
+        raw.dest = cider::IRValue::Register("raw8", cider::IRType::I8);
+        raw.args = {cider::IRValue::Constant(-100, cider::IRType::I32),
+                    cider::IRValue::Constant(255, cider::IRType::I8)};
+        b7->addInstruction(raw);
+        cider::IRInstruction cvt;
+        cvt.op = cider::IROp::CVT_ITOF;
+        cvt.dest = cider::IRValue::Register("d", cider::IRType::F64);
+        cvt.args = {cider::IRValue::Register("raw8", cider::IRType::I8)};
+        b7->addInstruction(cvt);
+        cider::IRInstruction cmp;
+        cmp.op = cider::IROp::CMP_EQ;
+        cmp.dest = cider::IRValue::Register("eq", cider::IRType::I32);
+        cmp.args = {cider::IRValue::Register("d", cider::IRType::F64),
+                    cider::IRValue::Constant(-100.0, cider::IRType::F64)};
+        b7->addInstruction(cmp);
+        cider::IRInstruction r7;
+        r7.op = cider::IROp::RET;
+        r7.args = {cider::IRValue::Register("eq", cider::IRType::I32)};
+        b7->addInstruction(r7);
+        fn7->addBlock(std::move(b7));
+        cider::ModuleIR mod7;
+        mod7.addFunction(std::move(fn7));
+        cider::VM vm7;
+        CHECK(vm7.run(mod7, "main7").exitCode == 1);
+    }
     return 0;
 }
 

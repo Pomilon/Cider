@@ -74,5 +74,23 @@ func main() -> int {
   if (take64(bigu) != 18446744073709551615.0) { return 21; }
   if (take64(big) != 5000000000.0) { return 22; }
   if (giveU64() != 18446744073709551615.0) { return 23; }
+
+  // CID-003 follow-up (W5): a cast to a narrow type leaves the raw low
+  // bits in the register (the `and` lowering does not sign-normalize), so
+  // int->float must extend by the declared narrow type before converting.
+  // The VM converted the raw bits unsigned: i8 156 read 156.0, not -100.0.
+  var cast8: f64 = (0 - 100) as i8;
+  if (cast8 != 0.0 - 100.0) { return 24; }
+  var cast16: f64 = (300 - 20000) as i16;
+  if (cast16 != 0.0 - 19700.0) { return 25; }
+  var castu8: f64 = (0 - 100) as u8;
+  if (castu8 != 156.0) { return 26; }
+  var castu16: f64 = (0 - 100) as u16;
+  if (castu16 != 65436.0) { return 27; }
+  // f32 destinations use the same source normalization.
+  var castf8: float = (0 - 100) as i8;
+  if (castf8 != 0.0 - 100.0) { return 28; }
+  var castf16: float = (0 - 100) as i16;
+  if (castf16 != 0.0 - 100.0) { return 29; }
   return 0;
 }
