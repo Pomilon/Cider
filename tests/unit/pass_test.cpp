@@ -167,6 +167,50 @@ int testGvn() {
     return 0;
 }
 
+int testGvnTypes() {
+    // CID-003 follow-up (W5): value numbers must include the result type.
+    // `x & 255` as i8 (raw 0x9C, widened with movsx to -100) and as u8
+    // (156) share operands but are different values; deduplicating them
+    // also collapsed their CVT_ITOF consumers, whose result depends on the
+    // source type, so the optimized VM/native disagreed with --no-opt.
+    auto fn = std::make_unique<cider::FunctionIR>("f", cider::IRType::I32);
+    auto block = std::make_unique<cider::BasicBlock>("entry");
+    auto andInstr = [](const std::string& dest, cider::IRType t) {
+        cider::IRInstruction in;
+        in.op = cider::IROp::BIT_AND;
+        in.dest = cider::IRValue::Register(dest, t);
+        in.args = {cider::IRValue::Register("x", cider::IRType::I32),
+                   cider::IRValue::Constant(255, cider::IRType::I32)};
+        return in;
+    };
+    auto cvtInstr = [](const std::string& dest, const std::string& src, cider::IRType srcT) {
+        cider::IRInstruction in;
+        in.op = cider::IROp::CVT_ITOF;
+        in.dest = cider::IRValue::Register(dest, cider::IRType::F64);
+        in.args = {cider::IRValue::Register(src, srcT)};
+        return in;
+    };
+    block->addInstruction(andInstr("a8", cider::IRType::I8));
+    block->addInstruction(cvtInstr("c1", "a8", cider::IRType::I8));
+    block->addInstruction(andInstr("b8", cider::IRType::U8));
+    block->addInstruction(cvtInstr("c2", "b8", cider::IRType::U8));
+    cider::IRInstruction ret;
+    ret.op = cider::IROp::RET;
+    ret.args = {cider::IRValue::Register("c2", cider::IRType::F64)};
+    block->addInstruction(ret);
+    fn->addBlock(std::move(block));
+    cider::ModuleIR mod;
+    mod.addFunction(std::move(fn));
+    cider::GvnPass gvn;
+    gvn.run(mod);
+    const auto& instrs = mod.getFunctions()[0]->getBlocks()[0]->getInstructions();
+    CHECK(instrs[0].op == cider::IROp::BIT_AND);  // i8 AND kept
+    CHECK(instrs[1].op == cider::IROp::CVT_ITOF); // i8 conversion kept
+    CHECK(instrs[2].op == cider::IROp::BIT_AND);  // u8 AND not merged
+    CHECK(instrs[3].op == cider::IROp::CVT_ITOF); // u8 conversion not merged
+    return 0;
+}
+
 int testLicm() {
     // while (i < 10) { j = 2 * 3; }  -> the mul hoists to the preheader.
     auto r = genModule(
@@ -206,6 +250,7 @@ int run() {
     CHECK(testDce() == 0);
     CHECK(testConstFold() == 0);
     CHECK(testGvn() == 0);
+    CHECK(testGvnTypes() == 0);
     CHECK(testLicm() == 0);
     CHECK(testInliner() == 0);
     return 0;

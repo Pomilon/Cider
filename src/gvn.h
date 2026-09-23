@@ -132,21 +132,33 @@ private:
         if (!isDedupable(instr.op)) {
             return opToString(instr.op) + "_" + std::to_string(uniqueCounter_++);
         }
+        // CID-003 follow-up (W5): the value number carries the instruction's
+        // result type and each register operand's use-site type. Two
+        // instructions can share an opcode and operand value numbers but
+        // produce different values: `x & 255` as i8 (raw 0x9C, widened with
+        // movsx to -100) and as u8 (156) are distinct, and CVT_ITOF reads
+        // its source type, so collapsing them (or their consumers) made the
+        // optimized VM/native disagree with --no-opt.
+        std::string selfType = instr.dest ? typeToString(instr.dest->type) : "VOID";
         if (instr.op == IROp::PHI) {
-            std::string vn = "PHI(";
+            std::string vn = "PHI:" + selfType + "(";
             bool first = true;
             for (const auto& [pred, val] : instr.phiArgs) {
                 if (!first) vn += ", ";
                 first = false;
                 vn += pred + ":" + vnOfOperand(val);
+                if (val.kind == IRValue::REGISTER) vn += "@" + typeToString(val.type);
             }
             vn += ")";
             return vn;
         }
-        std::string vn = opToString(instr.op) + "(";
+        std::string vn = opToString(instr.op) + ":" + selfType + "(";
         for (size_t i = 0; i < instr.args.size(); ++i) {
             if (i > 0) vn += ", ";
             vn += vnOfOperand(instr.args[i]);
+            if (instr.args[i].kind == IRValue::REGISTER) {
+                vn += "@" + typeToString(instr.args[i].type);
+            }
         }
         vn += ")";
         return vn;
