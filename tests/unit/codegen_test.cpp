@@ -144,6 +144,30 @@ int run() {
         CHECK(asmR.find("dd 0x3E99999A") != std::string::npos);          // float 0.3
         CHECK(asmR.find("dq 0x3FD3333333333333") != std::string::npos);  // double 0.3
     }
+
+    // CID-003 follow-up (I2): integer->float conversion is width/sign
+    // aware. The old path always read eax, truncating i64 sources and
+    // treating u32/u64 as signed.
+    {
+        std::string asmText = genAsm(
+            "func main() -> int {\n"
+            "  var big: i64 = 5000000000;\n"
+            "  var d: f64 = big;\n"
+            "  var u: u32 = 3000000000;\n"
+            "  var e: f64 = u;\n"
+            "  var q: u64 = 5000000000;\n"
+            "  var g: f64 = q;\n"
+            "  var s: i8 = 0 - 5;\n"
+            "  var h: f64 = s;\n"
+            "  return 0;\n"
+            "}");
+        CHECK(asmText.find("cvtsi2sd xmm0, rax") != std::string::npos);   // i64/u32 from rax
+        CHECK(asmText.find("cvtsi2sd xmm0, eax") == std::string::npos);  // never truncate
+        CHECK(asmText.find("movsx rax, ") != std::string::npos);         // i8 sign-extends
+        // u64 converts unsigned: the >= 2^63 path doubles the shifted value.
+        CHECK(asmText.find("addsd xmm0, xmm0") != std::string::npos);
+    }
+
     return 0;
 }
 

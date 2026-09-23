@@ -270,6 +270,43 @@ int run() {
         CHECK(sawExactF64Const);
         CHECK(!sawF32ToF64Cvt);
     }
+
+    // CID-003 follow-up (I2): every integer width/sign converts to float
+    // through CVT_ITOF (previously only I32/I64 did; u32/u64/narrow
+    // sources stored raw bits or truncated on native).
+    {
+        const std::string src =
+            "func main() -> int {\n"
+            "  var a: f64 = 3000000000;\n"        // u32 literal
+            "  var b: u64 = 5000000000;\n"
+            "  var c: f64 = b;\n"                  // u64 variable
+            "  var s: i8 = 0 - 5;\n"
+            "  var d: f64 = s;\n"                  // narrow signed
+            "  var e: f64 = 3000000000 as f64;\n"  // u32 cast
+            "  return 0;\n"
+            "}";
+        auto module = genModuleSrc(src);
+        bool sawU32 = false;
+        bool sawU64 = false;
+        bool sawI8 = false;
+        for (const auto& fn : module.getFunctions()) {
+            for (const auto& block : fn->getBlocks()) {
+                for (const auto& in : block->getInstructions()) {
+                    if (in.op != cider::IROp::CVT_ITOF || !in.dest ||
+                        in.dest->type != cider::IRType::F64 || in.args.size() != 1) {
+                        continue;
+                    }
+                    if (in.args[0].type == cider::IRType::U32) sawU32 = true;
+                    if (in.args[0].type == cider::IRType::U64) sawU64 = true;
+                    if (in.args[0].type == cider::IRType::I8) sawI8 = true;
+                }
+            }
+        }
+        CHECK(sawU32);
+        CHECK(sawU64);
+        CHECK(sawI8);
+    }
+
     return 0;
 }
 

@@ -271,6 +271,7 @@ bool CodeGenerator::generate(ModuleIR& module, const std::string& outputPath,
         int extraStack = totalStack - savedRegsSize;
         int prologueFixupIndex = -1;
         int maxSlotOffset = 0;
+        int cvtLabelCount = 0;  // NASM-local labels for u64 -> float (I2)
         if (extraStack > 0) {
             prologueFixupIndex = (int)textSection.size();
             addText("    sub rsp, " + std::to_string(extraStack));
@@ -528,11 +529,75 @@ bool CodeGenerator::generate(ModuleIR& module, const std::string& outputPath,
                 switch (instr.op) {
                 case IROp::CVT_ITOF: {
                     IRType t = (instr.dest ? instr.dest->type : IRType::F32);
-                    addText("    mov eax, " + getSizedReg(a1, IRType::I32));
-                    if (t == IRType::F32)
-                        addText("    cvtsi2ss xmm0, eax");
-                    else
-                        addText("    cvtsi2sd xmm0, eax");
+                    IRType srcT = (instr.args.size() > 0 ? instr.args[0].type
+                                                         : IRType::I32);
+                    std::string cvt = (t == IRType::F32) ? "cvtsi2ss" : "cvtsi2sd";
+                    // CID-003 follow-up (I2): load the source into rax with
+                    // its declared width and signedness. The old path read
+                    // eax only: i64 sources truncated to their low half and
+                    // u32/u64 sources converted as if signed.
+                    if (instr.args[0].kind == IRValue::CONSTANT) {
+                        uint64_t bits = (uint64_t)instr.args[0].intValue;
+                        if (srcT == IRType::U8 || srcT == IRType::U16 ||
+                            srcT == IRType::U32 || srcT == IRType::BOOL) {
+                            // 32-bit mov zero-extends into rax.
+                            addText("    mov eax, " + fmtImm((int64_t)bits, srcT));
+                        } else if (bits <= (uint64_t)INT32_MAX ||
+                                   (int64_t)bits >= (int64_t)INT32_MIN) {
+                            // mov r64, imm32 sign-extends.
+                            addText("    mov rax, " + std::to_string((int64_t)bits));
+                        } else {
+                            // Full 64-bit immediate; hex keeps the unsigned
+                            // bit pattern clear of NASM's signed-dword
+                            // bounds warning.
+                            std::ostringstream hs;
+                            hs << "0x" << std::hex << std::uppercase << bits;
+                            addText("    mov rax, " + hs.str());
+                        }
+                    } else {
+                        auto srcOp = [&](const char* size) -> std::string {
+                            return isMem(a1) ? std::string(size) + a1
+                                             : getSizedReg(a1, srcT);
+                        };
+                        if (srcT == IRType::I8) {
+                            addText("    movsx rax, " + srcOp("byte "));
+                        } else if (srcT == IRType::U8 || srcT == IRType::BOOL) {
+                            addText("    movzx rax, " + srcOp("byte "));
+                        } else if (srcT == IRType::I16) {
+                            addText("    movsx rax, " + srcOp("word "));
+                        } else if (srcT == IRType::U16) {
+                            addText("    movzx rax, " + srcOp("word "));
+                        } else if (srcT == IRType::I32) {
+                            addText("    movsxd rax, " + srcOp("dword "));
+                        } else if (srcT == IRType::U32) {
+                            addText("    mov eax, " + srcOp("dword "));
+                        } else {
+                            addText("    mov rax, " + srcOp("qword "));
+                        }
+                    }
+                    if (srcT == IRType::U64) {
+                        // Unsigned 64-bit conversion (CID-003 follow-up I2):
+                        // cvtsi2sd would read the high bit as a sign. For
+                        // values >= 2^63 convert (x >> 1) | (x & 1) and
+                        // double — correctly rounded, like the VM's
+                        // (double)(uint64_t) / (float)(uint64_t).
+                        std::string lbl = ".u64cvt" + std::to_string(cvtLabelCount++);
+                        addText("    test rax, rax");
+                        addText("    js " + lbl);
+                        addText("    " + cvt + " xmm0, rax");
+                        addText("    jmp " + lbl + "_done");
+                        addText(lbl + ":");
+                        addText("    mov r11, rax");
+                        addText("    shr r11, 1");
+                        addText("    and eax, 1");
+                        addText("    or r11, rax");
+                        addText("    " + cvt + " xmm0, r11");
+                        addText(t == IRType::F32 ? "    addss xmm0, xmm0"
+                                                 : "    addsd xmm0, xmm0");
+                        addText(lbl + "_done:");
+                    } else {
+                        addText("    " + cvt + " xmm0, rax");
+                    }
                     addText(t == IRType::F32 ? "    movss " + d + ", xmm0"
                                              : "    movsd " + d + ", xmm0");
                     break;

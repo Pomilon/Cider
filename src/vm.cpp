@@ -433,9 +433,23 @@ VMResult VM::run(const ModuleIR& module, const std::string& runFunction) {
             break;
         }
         case IROp::CVT_ITOF: {
+            // CID-003 follow-up (I2): convert by the source's declared
+            // width/sign. RegVal.i is int64_t even for U64 (raw bits), so
+            // u64 must convert unsigned; F32 destinations round once, like
+            // cvtsi2ss.
+            IRType srcT = (instr.args.size() > 0 ? instr.args[0].type : IRType::I32);
+            IRType dstT = (instr.dest ? instr.dest->type : IRType::F32);
+            RegVal src = resolveValue(instr.args[0]);
             RegVal d;
             d.isFloat = true;
-            d.f = (double)resolveValue(instr.args[0]).i;
+            if (dstT == IRType::F32) {
+                float f = (srcT == IRType::U64) ? (float)(uint64_t)src.i
+                                                : (float)src.i;
+                d.f = (double)f;
+            } else {
+                d.f = (srcT == IRType::U64) ? (double)(uint64_t)src.i
+                                            : (double)src.i;
+            }
             if (instr.dest) regs_[instr.dest->name] = d;
             break;
         }

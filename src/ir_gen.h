@@ -1658,11 +1658,11 @@ public:
                                                declType == IRType::I16 || declType == IRType::U16 ||
                                                declType == IRType::U32 || declType == IRType::U64 ||
                                                declType == IRType::BOOL);
-                    if ((val.type == IRType::I32 || val.type == IRType::I64) &&
+                    if (isIntIRType(val.type) &&
                         (declType == IRType::F32 || declType == IRType::F64)) {
-                        IRValue converted = IRValue::Register(nextTemp(), declType);
-                        currentBlock_->addInstruction({IROp::CVT_ITOF, converted, {val}});
-                        val = converted;
+                        // CID-003 follow-up (I2): every integer width/sign
+                        // converts, not just I32/I64.
+                        val = convertIntToFloat(val, declType);
                     } else if ((val.type == IRType::F32 || val.type == IRType::F64) && declNeedsFloatHelp) {
                         val = convertFloatToInt(val, sym->type);
                     } else if ((val.type == IRType::F32 || val.type == IRType::F64) &&
@@ -1790,10 +1790,23 @@ public:
         }
     }
 
+    // CID-003 follow-up (I2): every integer width and signedness is an
+    // int-to-float source. Declaration, cast, binary-expression,
+    // argument/return and compound-assignment sites used to gate on
+    // I32/I64 only, so u32/u64/narrow sources stored raw bits or were
+    // converted as the wrong width on native.
+    static bool isIntIRType(IRType t) {
+        return t == IRType::I8 || t == IRType::U8 || t == IRType::I16 ||
+               t == IRType::U16 || t == IRType::I32 || t == IRType::U32 ||
+               t == IRType::I64 || t == IRType::U64 || t == IRType::BOOL;
+    }
+
     // CID-003: convert a value to a float width, preserving constant
     // precision: a literal keeps its parsed double instead of detouring
     // through float (and a narrowing constant rounds once, at compile time).
-    IRValue convertFloatWidth(IRValue val, IRType target) {
+    // `blk` lets the ternary merge emit a conversion inside the arm's own
+    // block (the merge block does not dominate the PHI).
+    IRValue convertFloatWidth(IRValue val, IRType target, BasicBlock* blk = nullptr) {
         if (val.type == target) return val;
         if (val.kind == IRValue::CONSTANT) {
             return IRValue::Constant(target == IRType::F32 ? (double)(float)val.constValue
@@ -1801,9 +1814,20 @@ public:
                                      target);
         }
         IRValue converted = IRValue::Register(nextTemp(), target);
-        currentBlock_->addInstruction({target == IRType::F64 ? IROp::CVT_F32F64
-                                                             : IROp::CVT_F64F32,
-                                       converted, {val}});
+        (blk ? blk : currentBlock_.get())
+            ->addInstruction({target == IRType::F64 ? IROp::CVT_F32F64
+                                                    : IROp::CVT_F64F32,
+                              converted, {val}});
+        return converted;
+    }
+
+    // CID-003 follow-up (I2): integer -> float through CVT_ITOF. The
+    // operand's declared width/sign is what codegen and the VM convert by
+    // (i64 sign-extends, u32/u64 zero-extend, u64 is unsigned).
+    IRValue convertIntToFloat(IRValue val, IRType target, BasicBlock* blk = nullptr) {
+        IRValue converted = IRValue::Register(nextTemp(), target);
+        (blk ? blk : currentBlock_.get())
+            ->addInstruction({IROp::CVT_ITOF, converted, {val}});
         return converted;
     }
 
@@ -1817,7 +1841,7 @@ public:
         if (target.pointerLevel > 0) return val;
         IRType targetIR = mapType(target.name);
         bool valIsFloat = (val.type == IRType::F32 || val.type == IRType::F64);
-        bool valIsInt = (val.type == IRType::I32 || val.type == IRType::I64);
+        bool valIsInt = isIntIRType(val.type);
         bool targetIsFloat = (targetIR == IRType::F32 || targetIR == IRType::F64);
         bool targetIsInt = (targetIR == IRType::I8 || targetIR == IRType::U8 ||
                             targetIR == IRType::I16 || targetIR == IRType::U16 ||
@@ -1834,9 +1858,7 @@ public:
             return convertFloatToInt(val, target);
         }
         if (valIsInt && targetIsFloat) {
-            IRValue converted = IRValue::Register(nextTemp(), targetIR);
-            currentBlock_->addInstruction({IROp::CVT_ITOF, converted, {val}});
-            return converted;
+            return convertIntToFloat(val, targetIR);
         }
         return truncateIntToType(val, target);
     }
@@ -1932,17 +1954,14 @@ public:
             }
         }
 
-        // Implicit int-to-float conversion for mixed operands
+        // Implicit int-to-float conversion for mixed operands (CID-003
+        // follow-up I2: every integer width/sign, not just I32/I64).
         if ((left.type == IRType::F32 || left.type == IRType::F64) &&
-            (right.type == IRType::I32 || right.type == IRType::I64)) {
-            IRValue converted = IRValue::Register(nextTemp(), left.type);
-            currentBlock_->addInstruction({IROp::CVT_ITOF, converted, {right}});
-            right = converted;
+            isIntIRType(right.type)) {
+            right = convertIntToFloat(right, left.type);
         } else if ((right.type == IRType::F32 || right.type == IRType::F64) &&
-                   (left.type == IRType::I32 || left.type == IRType::I64)) {
-            IRValue converted = IRValue::Register(nextTemp(), right.type);
-            currentBlock_->addInstruction({IROp::CVT_ITOF, converted, {left}});
-            left = converted;
+                   isIntIRType(left.type)) {
+            left = convertIntToFloat(left, right.type);
         }
 
         // CID-003: mixed float widths compute at f64 (C usual conversions).
@@ -3644,8 +3663,10 @@ public:
             if ((srcType == IRType::F32 || srcType == IRType::F64) &&
                 (irType == IRType::I32 || irType == IRType::I64)) {
                 currentBlock_->addInstruction({IROp::CVT_FTOI, dest, {lastValue_}});
-            } else if ((srcType == IRType::I32 || srcType == IRType::I64) &&
+            } else if (isIntIRType(srcType) &&
                        (irType == IRType::F32 || irType == IRType::F64)) {
+                // CID-003 follow-up (I2): u32/u64/narrow sources convert too
+                // (a `3000000000 as f64` used to emit `movsd xmm, imm`).
                 currentBlock_->addInstruction({IROp::CVT_ITOF, dest, {lastValue_}});
             } else if ((srcType == IRType::F32 && irType == IRType::F64) ||
                        (srcType == IRType::F64 && irType == IRType::F32)) {
