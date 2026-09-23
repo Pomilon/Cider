@@ -556,6 +556,16 @@ public:
             error("Bitwise operator '" + op + "' requires integer operands", expr.getLine());
         }
 
+        // CID-003 follow-up (M4): `%` has no float lowering either — the VM
+        // threw `float op not supported` at runtime and codegen silently
+        // emitted `divsd`. Reject float-family operands before the
+        // isMixedNumeric promotion branch can validate them, like the
+        // bitwise operators above; both operand positions are checked.
+        if (op == "%" && ((isFloatName(leftType.name) && leftType.pointerLevel == 0) ||
+                          (isFloatName(rightType.name) && rightType.pointerLevel == 0))) {
+            error("Modulo operator '" + op + "' requires integer operands", expr.getLine());
+        }
+
         if (op == "==" || op == "!=" || op == "<" || op == ">" || op == "<=" || op == ">=") {
             lastExprType_ = {"bool", 0};
         } else if (isStringMath) {
