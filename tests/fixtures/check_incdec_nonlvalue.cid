@@ -1,0 +1,11 @@
+// CID-003 follow-up: ++/-- stores through its operand, so a non-lvalue
+// must be a compile-time error. `(--0.5)` parses as prefix `--` on the
+// literal 0.5; it used to type-check, then the VM aborted with heap
+// corruption ("free: corrupt block") and native segfaulted on the store
+// through a constant address.
+func main() -> int {
+  var a: f64 = (--0.5);
+  var b: int = 5++;
+  var c: int = ++(1 + 2);
+  return 0;
+}

@@ -647,6 +647,30 @@ public:
         }
     }
 
+    // ++/-- stores through its operand, so the operand must name storage:
+    // a variable, member, element, or dereference. Without this, a literal
+    // parses (`(--0.5)` is prefix `--` on 0.5) and reaches IRGen's address
+    // path, which stores through a constant address — the VM aborts with
+    // heap corruption and native segfaults. Constants are rejected too
+    // (not modifiable, mirroring visit(AssignStmt)). Members, elements and
+    // dereferences are accepted by shape; deeper cases (`foo().x++`) are
+    // pre-existing and unchanged.
+    bool isIncrementTarget(Expression* expr) {
+        if (!expr) return false;
+        if (auto grp = dynamic_cast<GroupingExpr*>(expr)) {
+            return isIncrementTarget(grp->getExpression());
+        }
+        if (auto id = dynamic_cast<IdentifierExpr*>(expr)) {
+            if (id->getName() == "_") return false;
+            auto sym = resolveScoped(id->getName());
+            return sym && sym->kind == SymbolKind::VARIABLE && !sym->isConst;
+        }
+        if (dynamic_cast<MemberAccessExpr*>(expr)) return true;
+        if (dynamic_cast<IndexExpr*>(expr)) return true;
+        if (auto un = dynamic_cast<UnaryExpr*>(expr)) return un->getOperator() == "*";
+        return false;
+    }
+
     void visit(UnaryExpr& expr) override {
         expr.getOperand()->accept(*this);
         TypeInfo operandType = lastExprType_;
@@ -680,6 +704,11 @@ public:
         } else if (expr.getOperator() == "++" || expr.getOperator() == "--") {
             if (operandType.pointerLevel > 0) {
                 error("Cannot " + expr.getOperator() + " a pointer type", expr.getLine());
+            }
+            if (!isIncrementTarget(expr.getOperand())) {
+                error("Operand of '" + expr.getOperator() +
+                          "' must be a variable, member, element, or dereference",
+                      expr.getLine());
             }
             lastExprType_ = operandType;
         }
