@@ -43,5 +43,24 @@ func main() -> int {
   var u: i32 = 0 - 1;
   if (!(t > u)) { return 18; }          // narrower unsigned, wider signed
   if (u >= t) { return 19; }
+
+  // CID-003 follow-up (W5): ordered comparisons across i64/u64 compare in
+  // the unsigned domain (ir_gen converts both operands to U64 before the
+  // CMP). The VM compared the extended values signed, so i64(-1) < u64(1)
+  // was true and u64(max) < 1 was true.
+  var dneg: i64 = 0 - 1;
+  var one64: u64 = 1;
+  if (dneg < one64) { return 20; }
+  if (dneg <= one64) { return 21; }
+  if (!(dneg >= one64)) { return 22; }
+  if (!(dneg > one64)) { return 23; }
+  var umax: u64 = 18446744073709551615;
+  if (umax < 1) { return 24; }
+  if (umax <= 1) { return 25; }
+  if (!(umax > 1)) { return 26; }
+  if (!(umax >= 1)) { return 27; }
+  var zero64: u64 = 0;
+  if (umax < zero64) { return 28; }
+  if (!(zero64 < umax)) { return 29; }
   return 0;
 }

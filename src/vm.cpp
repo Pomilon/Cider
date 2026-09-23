@@ -28,6 +28,37 @@ int64_t extendIntByType(int64_t v, IRType t) {
     }
 }
 
+// CID-003 follow-up (M5/W5): common comparison domain for mixed
+// signed/unsigned integer operands, mirroring IRGenerator::mixedCmpCommon.
+// Equal widths (or a wider unsigned operand) compare in the unsigned
+// domain; a wider signed operand keeps the compare signed. Same-signedness
+// pairs return VOID — the per-operand widening below is enough.
+IRType mixedCmpCommon(IRType a, IRType b) {
+    auto isUnsigned = [](IRType t) {
+        return t == IRType::U8 || t == IRType::U16 || t == IRType::U32 ||
+               t == IRType::U64;
+    };
+    auto widthOf = [](IRType t) -> int {
+        if (t == IRType::I8 || t == IRType::U8) return 8;
+        if (t == IRType::I16 || t == IRType::U16) return 16;
+        if (t == IRType::I32 || t == IRType::U32 || t == IRType::BOOL) return 32;
+        return 64;
+    };
+    if (a == b) return IRType::VOID;
+    bool au = isUnsigned(a), bu = isUnsigned(b);
+    if (au == bu) return IRType::VOID;
+    IRType u = au ? a : b;
+    IRType s = au ? b : a;
+    return (widthOf(u) >= widthOf(s)) ? u : s;
+}
+
+// Unsigned for comparison purposes: codegen selects setcc (setb/seta/...)
+// from the left operand's type, with PTR and BOOL counting as unsigned.
+bool isUnsignedCmpType(IRType t) {
+    return t == IRType::U8 || t == IRType::U16 || t == IRType::U32 ||
+           t == IRType::U64 || t == IRType::PTR || t == IRType::BOOL;
+}
+
 }  // namespace
 
 VMResult VM::run(const ModuleIR& module, const std::string& runFunction) {
@@ -246,16 +277,54 @@ VMResult VM::run(const ModuleIR& module, const std::string& runFunction) {
                 // CID-003 fix round 2: widen each operand by its own IR type
                 // first, exactly like codegen's widenCmpOp (movsx/movzx), so
                 // an unnormalized narrow register compares by value.
-                int64_t x = extendIntByType(a.i, instr.args[0].type);
-                int64_t y = extendIntByType(b.i, instr.args[1].type);
-                switch (instr.op) {
-                case IROp::CMP_EQ: r = x == y; break;
-                case IROp::CMP_NE: r = x != y; break;
-                case IROp::CMP_LT: r = x < y; break;
-                case IROp::CMP_GT: r = x > y; break;
-                case IROp::CMP_LE: r = x <= y; break;
-                case IROp::CMP_GE: r = x >= y; break;
-                default: break;
+                IRType ca = instr.args[0].type;
+                IRType cb = instr.args[1].type;
+                int64_t x = extendIntByType(a.i, ca);
+                int64_t y = extendIntByType(b.i, cb);
+                // CID-003 follow-up (W5): mixed signed/unsigned pairs and
+                // unsigned pairs compare in the unsigned domain, mirroring
+                // ir_gen's mixedCmpCommon (which converts both operands) and
+                // codegen's setcc selection. Comparing i64(-1) < u64(1)
+                // signed made the VM disagree with native.
+                IRType common = mixedCmpCommon(ca, cb);
+                bool uns;
+                if (common != IRType::VOID) {
+                    uns = isUnsignedCmpType(common) && common != IRType::PTR &&
+                          common != IRType::BOOL;
+                    if (uns) {
+                        // C cast semantics: wrap the extended value to the
+                        // common unsigned width before comparing.
+                        uint64_t mask = (common == IRType::U8) ? 0xFFULL
+                                      : (common == IRType::U16) ? 0xFFFFULL
+                                      : (common == IRType::U32) ? 0xFFFFFFFFULL
+                                                                : ~0ULL;
+                        x = (int64_t)((uint64_t)x & mask);
+                        y = (int64_t)((uint64_t)y & mask);
+                    }
+                } else {
+                    uns = isUnsignedCmpType(ca);
+                }
+                if (uns) {
+                    uint64_t ux = (uint64_t)x, uy = (uint64_t)y;
+                    switch (instr.op) {
+                    case IROp::CMP_EQ: r = ux == uy; break;
+                    case IROp::CMP_NE: r = ux != uy; break;
+                    case IROp::CMP_LT: r = ux < uy; break;
+                    case IROp::CMP_GT: r = ux > uy; break;
+                    case IROp::CMP_LE: r = ux <= uy; break;
+                    case IROp::CMP_GE: r = ux >= uy; break;
+                    default: break;
+                    }
+                } else {
+                    switch (instr.op) {
+                    case IROp::CMP_EQ: r = x == y; break;
+                    case IROp::CMP_NE: r = x != y; break;
+                    case IROp::CMP_LT: r = x < y; break;
+                    case IROp::CMP_GT: r = x > y; break;
+                    case IROp::CMP_LE: r = x <= y; break;
+                    case IROp::CMP_GE: r = x >= y; break;
+                    default: break;
+                    }
                 }
             }
             RegVal d;

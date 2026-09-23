@@ -209,6 +209,39 @@ int run() {
         cider::VM vm7;
         CHECK(vm7.run(mod7, "main7").exitCode == 1);
     }
+
+    // CID-003 follow-up (W5): a U64 comparison is unsigned. ir_gen converts
+    // i64/u64 pairs to U64 with a MOV before the CMP; the VM compared the
+    // extended values signed, so i64(-1) < u64(1) was true.
+    {
+        auto fn8 = makeFn("main8", cider::IRType::I32);
+        auto b8 = std::make_unique<cider::BasicBlock>("entry");
+        cider::IRInstruction movNeg;
+        movNeg.op = cider::IROp::MOV;
+        movNeg.dest = cider::IRValue::Register("a", cider::IRType::U64);
+        movNeg.args = {cider::IRValue::Constant(-1, cider::IRType::I64)};
+        b8->addInstruction(movNeg);
+        cider::IRInstruction movOne;
+        movOne.op = cider::IROp::MOV;
+        movOne.dest = cider::IRValue::Register("b", cider::IRType::U64);
+        movOne.args = {cider::IRValue::Constant(1, cider::IRType::U64)};
+        b8->addInstruction(movOne);
+        cider::IRInstruction lt;
+        lt.op = cider::IROp::CMP_LT;
+        lt.dest = cider::IRValue::Register("lt", cider::IRType::I32);
+        lt.args = {cider::IRValue::Register("a", cider::IRType::U64),
+                   cider::IRValue::Register("b", cider::IRType::U64)};
+        b8->addInstruction(lt);
+        cider::IRInstruction r8;
+        r8.op = cider::IROp::RET;
+        r8.args = {cider::IRValue::Register("lt", cider::IRType::I32)};
+        b8->addInstruction(r8);
+        fn8->addBlock(std::move(b8));
+        cider::ModuleIR mod8;
+        mod8.addFunction(std::move(fn8));
+        cider::VM vm8;
+        CHECK(vm8.run(mod8, "main8").exitCode == 0);
+    }
     return 0;
 }
 
