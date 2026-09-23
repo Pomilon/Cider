@@ -1,0 +1,4 @@
+func main() -> int {
+  var x: f128 = 1.5;
+  return 0;
+}

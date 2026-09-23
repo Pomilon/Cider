@@ -212,7 +212,6 @@ int run() {
         std::string ir = genSrc(src);
         CHECK(ir.find("add %") != std::string::npos);
         // the F32 operand is widened before the add
-        CHECK(ir.find("cvt") != std::string::npos || ir.find("%v") != std::string::npos);
         CHECK(ir.find("cvt_f32f64") != std::string::npos);
 
         // The checker's float<->f64 mutual compatibility cannot pin the
