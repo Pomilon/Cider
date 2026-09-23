@@ -2449,26 +2449,52 @@ public:
     // M3). Evaluates the same shapes as tryEvalConstU64 plus float
     // arithmetic, and mirrors the local-variable path so a global and an
     // equivalent local agree bit for bit: integer subexpressions keep
-    // integer semantics (`5 / 2` is 2), mixed int/float converts the
-    // integer to the float operand's width (CVT_ITOF), and mixed f32/f64
-    // computes at f64. A bare float literal keeps its parsed double until
-    // a width context rounds it, exactly like an IR F32 constant (see
-    // convertFloatWidth); `literal` tracks that. Returns false for
-    // non-constant shapes (identifiers, calls, ternary, sizeof, struct
-    // literals), which global scalars cannot materialize.
+    // integer semantics and wrap at their operand/expression type
+    // (`5 / 2` is 2; `(-3000000000)` is the u32 value 1294967296, not a
+    // 64-bit one), mixed int/float converts the integer to the float
+    // operand's width (CVT_ITOF), and mixed f32/f64 computes at f64. A
+    // bare float literal keeps its parsed double until a width context
+    // rounds it, exactly like an IR F32 constant (see convertFloatWidth);
+    // `literal` tracks that. Returns false for non-constant shapes
+    // (identifiers, calls, ternary, sizeof, struct literals), which global
+    // scalars cannot materialize.
     struct ConstEvalValue {
         bool isFloat = false;
         bool isF64 = false;       // float width: false == f32
         bool literal = false;     // float: parsed literal, not yet width-rounded
         bool isUnsigned = false;  // integer signedness
+        int intBits = 32;         // integer width for wrapping: 8/16/32/64
         double f = 0;
-        uint64_t u = 0;           // integer bits (two's complement)
+        uint64_t u = 0;           // canonical integer value (sign-extended if signed)
     };
 
     static double roundToF32(double v) { return (double)(float)v; }
 
+    static uint64_t intWidthMask(int bits) {
+        return (bits >= 64) ? ~0ULL : ((1ULL << bits) - 1);
+    }
+
+    // Canonicalize an integer to its declared width/sign the way the VM's
+    // narrowInt/extendIntByType round trip leaves a register: keep the low
+    // bits, sign-extend signed values. Every ConstEvalValue integer is kept
+    // canonical so intConstToDouble and the next operation see the same
+    // value a local register would hold.
+    static uint64_t canonicalInt(uint64_t v, int bits, bool isUnsigned) {
+        uint64_t mask = intWidthMask(bits);
+        uint64_t m = v & mask;
+        if (!isUnsigned && bits < 64 && (m & (1ULL << (bits - 1)))) m |= ~mask;
+        return m;
+    }
+
     static double intConstToDouble(const ConstEvalValue& v) {
         return v.isUnsigned ? (double)v.u : (double)(int64_t)v.u;
+    }
+
+    // CVT_ITOF to F32 rounds the integer once, directly to binary32 (not
+    // through a binary64 intermediate).
+    static double intConstToFloat32(const ConstEvalValue& v) {
+        return v.isUnsigned ? (double)(float)(uint64_t)v.u
+                            : (double)(float)(int64_t)v.u;
     }
 
     bool tryEvalConstValue(Expression* expr, ConstEvalValue& out) {
@@ -2482,17 +2508,30 @@ public:
             } else {
                 uint64_t v = num->getUIntValue();
                 // Same literal typing as visit(NumberExpr): > INT32_MAX
-                // becomes u32, > INT64_MAX becomes u64.
+                // becomes u32, > INT64_MAX becomes u64 (values up to
+                // INT64_MAX keep the signed I64 IR type).
                 out.isFloat = false;
-                out.isUnsigned = (v > (uint64_t)INT32_MAX && v <= (uint64_t)UINT32_MAX) ||
-                                 v > (uint64_t)INT64_MAX;
                 out.u = v;
+                if (v <= (uint64_t)INT32_MAX) {
+                    out.intBits = 32;
+                    out.isUnsigned = false;
+                } else if (v <= (uint64_t)UINT32_MAX) {
+                    out.intBits = 32;
+                    out.isUnsigned = true;
+                } else if (v <= (uint64_t)INT64_MAX) {
+                    out.intBits = 64;
+                    out.isUnsigned = false;
+                } else {
+                    out.intBits = 64;
+                    out.isUnsigned = true;
+                }
             }
             return true;
         }
         if (auto ch = dynamic_cast<CharExpr*>(expr)) {
             out.isFloat = false;
-            out.isUnsigned = false;
+            out.isUnsigned = true;  // IR type U8, like visit(CharExpr)
+            out.intBits = 8;
             out.u = (uint64_t)(unsigned char)ch->getValue();
             return true;
         }
@@ -2510,13 +2549,17 @@ public:
                     // the parsed double (see visit(UnaryExpr)).
                     out.f = -v.f;
                 } else {
-                    out.u = 0 - v.u;
+                    // Local `-x` lowers to `0 - x` at the operand's IR
+                    // type, so the subtraction wraps at that width: u32
+                    // negation of 3000000000 is 1294967296, not a 64-bit
+                    // value.
+                    out.u = canonicalInt(0 - v.u, v.intBits, v.isUnsigned);
                 }
                 return true;
             }
             if (un->getOperator() == "~" && !v.isFloat) {
                 out = v;
-                out.u = ~v.u;
+                out.u = canonicalInt(~v.u, v.intBits, v.isUnsigned);
                 return true;
             }
             if (un->getOperator() == "+") { out = v; return true; }
@@ -2548,8 +2591,7 @@ public:
                     }
                 } else {
                     out.isF64 = (irType == IRType::F64);
-                    out.f = intConstToDouble(v);
-                    if (!out.isF64) out.f = roundToF32(out.f);
+                    out.f = out.isF64 ? intConstToDouble(v) : intConstToFloat32(v);
                     out.literal = false;
                 }
                 return true;
@@ -2564,11 +2606,12 @@ public:
             int width = (irType == IRType::I8 || irType == IRType::U8) ? 8 :
                         (irType == IRType::I16 || irType == IRType::U16) ? 16 :
                         (irType == IRType::I32 || irType == IRType::U32) ? 32 : 64;
-            uint64_t mask = (width == 64) ? ~0ULL : ((1ULL << width) - 1);
+            bool tgtUnsigned = (irType == IRType::U8 || irType == IRType::U16 ||
+                                irType == IRType::U32 || irType == IRType::U64);
             out = ConstEvalValue{};
-            out.u = bits & mask;
-            out.isUnsigned = (irType == IRType::U8 || irType == IRType::U16 ||
-                              irType == IRType::U32 || irType == IRType::U64);
+            out.intBits = width;
+            out.isUnsigned = tgtUnsigned;
+            out.u = canonicalInt(bits, width, tgtUnsigned);
             return true;
         }
         if (auto bin = dynamic_cast<BinaryExpr*>(expr)) {
@@ -2583,8 +2626,9 @@ public:
                 // (CVT_ITOF); then a mixed f32/f64 pair computes at f64.
                 auto asDouble = [&](const ConstEvalValue& v) -> double {
                     if (!v.isFloat) {
-                        double d = intConstToDouble(v);
-                        return widthF64 ? d : roundToF32(d);
+                        // CVT_ITOF at the float operand's width, rounded once.
+                        return widthF64 ? intConstToDouble(v)
+                                        : intConstToFloat32(v);
                     }
                     if (widthF64) return v.f;  // widening keeps a literal's parsed double
                     return v.literal ? roundToF32(v.f) : v.f;
@@ -2601,33 +2645,49 @@ public:
                 out.f = widthF64 ? z : roundToF32(z);
                 return true;
             }
-            // Integer-only arithmetic. Unlike tryEvalConstU64 this keeps
-            // signed division/mod signed (the runtime path does), so
-            // `var g: f64 = -7 / 2` is -3.0 like the local form.
-            bool resUnsigned = l.isUnsigned || r.isUnsigned;
-            if (op == "+") out.u = l.u + r.u;
-            else if (op == "-") out.u = l.u - r.u;
-            else if (op == "*") out.u = l.u * r.u;
+            // Integer-only arithmetic, wrapped at the result's IR type
+            // exactly like the local path (visit(BinaryExpr) + the VM's
+            // narrowInt). +,-,*,/,% widen a mixed pair that involves a
+            // 64-bit operand to I64/U64 (mixedIntCommon); every other
+            // shape computes at the left operand's type. Unlike
+            // tryEvalConstU64 this keeps signed division/mod signed (the
+            // runtime path does), so `var g: f64 = -7 / 2` is -3.0 like
+            // the local form.
+            bool arith = (op == "+" || op == "-" || op == "*" ||
+                          op == "/" || op == "%");
+            bool widen64 = arith && (l.intBits == 64 || r.intBits == 64);
+            int destBits = widen64 ? 64 : l.intBits;
+            bool destUnsigned = widen64 ? (l.isUnsigned || r.isUnsigned)
+                                        : l.isUnsigned;
+            uint64_t lv = l.u, rv = r.u;  // canonical: extended by operand type
+            uint64_t raw = 0;
+            if (op == "+") raw = lv + rv;
+            else if (op == "-") raw = lv - rv;
+            else if (op == "*") raw = lv * rv;
             else if (op == "/" || op == "%") {
-                if (r.u == 0) return false;
-                if (resUnsigned) {
-                    out.u = (op == "/") ? l.u / r.u : l.u % r.u;
+                if (rv == 0) return false;
+                // The VM divides unsigned when the destination or either
+                // operand is unsigned (CID-028).
+                if (destUnsigned || l.isUnsigned || r.isUnsigned) {
+                    raw = (op == "/") ? lv / rv : lv % rv;
                 } else {
-                    int64_t a = (int64_t)l.u, b = (int64_t)r.u;
+                    int64_t a = (int64_t)lv, b = (int64_t)rv;
                     if (a == INT64_MIN && b == -1) return false;  // would trap
-                    out.u = (uint64_t)(op == "/" ? a / b : a % b);
+                    raw = (uint64_t)(op == "/" ? a / b : a % b);
                 }
             } else if (op == "<<" || op == ">>") {
-                if (r.u >= 64) return false;
-                if (op == "<<") out.u = l.u << r.u;
-                else out.u = l.isUnsigned ? (l.u >> r.u) : (uint64_t)((int64_t)l.u >> r.u);
-                resUnsigned = l.isUnsigned;
-            } else if (op == "&") out.u = l.u & r.u;
-            else if (op == "|") out.u = l.u | r.u;
-            else if (op == "^") out.u = l.u ^ r.u;
+                if (rv >= 64) return false;
+                if (op == "<<") raw = lv << rv;
+                else raw = l.isUnsigned ? (lv >> rv) : (uint64_t)((int64_t)lv >> rv);
+            } else if (op == "&") raw = lv & rv;
+            else if (op == "|") raw = lv | rv;
+            else if (op == "^") raw = lv ^ rv;
             else return false;
+            out = ConstEvalValue{};
             out.isFloat = false;
-            out.isUnsigned = resUnsigned;
+            out.intBits = destBits;
+            out.isUnsigned = destUnsigned;
+            out.u = canonicalInt(raw, destBits, destUnsigned);
             return true;
         }
         return false;
