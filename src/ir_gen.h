@@ -2595,6 +2595,14 @@ public:
             // a 4-byte F32 pool constant.
             IRType targetFloatWidth = current.type;
             bool widenedFloat = false;
+            // CID-003 follow-up (I3): an integer RHS converts to the target
+            // float width first — `d += 1` used to emit `addsd xmm0, 1`,
+            // which does not assemble. Runs before the mixed-width
+            // promotion so f64/f32 pairs keep their usual conversions.
+            if ((current.type == IRType::F32 || current.type == IRType::F64) &&
+                isIntIRType(rhs.type)) {
+                rhs = convertIntToFloat(rhs, current.type);
+            }
             if ((current.type == IRType::F32 && rhs.type == IRType::F64) ||
                 (current.type == IRType::F64 && rhs.type == IRType::F32)) {
                 IRValue& narrow = (current.type == IRType::F32) ? current : rhs;

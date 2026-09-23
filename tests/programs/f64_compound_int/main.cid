@@ -1,0 +1,47 @@
+// CID-003 follow-up (I3): compound assignment with an integer RHS converts
+// the RHS to the target's float width (`addsd xmm0, 1` did not assemble).
+func main() -> int {
+  var d: f64 = 1.0;
+  d += 1;
+  if (d != 2.0) { return 1; }
+  d *= 2;
+  if (d != 4.0) { return 2; }
+  d -= 3;
+  if (d != 1.0) { return 3; }
+  d /= 2;
+  if (d != 0.5) { return 4; }
+
+  var f: float = 1.5;
+  f += 1;
+  if (f != 2.5) { return 5; }
+  f *= 2;
+  if (f != 5.0) { return 6; }
+  f -= 2;
+  if (f != 3.0) { return 7; }
+  f /= 2;
+  if (f != 1.5) { return 8; }
+
+  // 64-bit and unsigned RHS widths.
+  var big: i64 = 5000000000;
+  var d2: f64 = 0.0;
+  d2 += big;
+  if (d2 != 5000000000.0) { return 9; }
+  var u: u32 = 3000000000;
+  d2 = 0.0;
+  d2 += u;
+  if (d2 != 3000000000.0) { return 10; }
+  var b: u8 = 200;
+  var d3: f64 = 0.0;
+  d3 += b;
+  if (d3 != 200.0) { return 11; }
+  var neg: i8 = 0 - 100;
+  var d4: f64 = 0.0;
+  d4 += neg;
+  if (d4 != 0.0 - 100.0) { return 12; }
+  var f2: float = 1.0;
+  var u2: u64 = 5000000000;
+  f2 += u2;
+  // 5000000001 is not representable in f32; the sum rounds once.
+  if (f2 != 5000000000.0) { return 13; }
+  return 0;
+}

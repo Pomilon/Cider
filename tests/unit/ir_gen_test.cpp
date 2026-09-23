@@ -307,6 +307,30 @@ int run() {
         CHECK(sawI8);
     }
 
+    // CID-003 follow-up (I3): an integer compound-assignment RHS converts
+    // to the target's float width before the arithmetic.
+    {
+        auto module = genModuleSrc(
+            "func main() -> int { var d: f64 = 1.0; d += 1; d *= 2; return 0; }");
+        bool addIsF64 = false;
+        bool mulIsF64 = false;
+        for (const auto& fn : module.getFunctions()) {
+            for (const auto& block : fn->getBlocks()) {
+                for (const auto& in : block->getInstructions()) {
+                    if ((in.op == cider::IROp::ADD || in.op == cider::IROp::MUL) &&
+                        in.dest && in.dest->type == cider::IRType::F64 &&
+                        in.args.size() == 2 && in.args[0].type == cider::IRType::F64 &&
+                        in.args[1].type == cider::IRType::F64) {
+                        if (in.op == cider::IROp::ADD) addIsF64 = true;
+                        if (in.op == cider::IROp::MUL) mulIsF64 = true;
+                    }
+                }
+            }
+        }
+        CHECK(addIsF64);
+        CHECK(mulIsF64);
+    }
+
     return 0;
 }
 

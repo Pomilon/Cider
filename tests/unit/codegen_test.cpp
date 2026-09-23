@@ -168,6 +168,27 @@ int run() {
         CHECK(asmText.find("addsd xmm0, xmm0") != std::string::npos);
     }
 
+    // CID-003 follow-up (I3): an integer RHS in a float compound
+    // assignment converts before the arithmetic (`addsd xmm0, 1` does not
+    // assemble).
+    {
+        std::string asmText = genAsm(
+            "func main() -> int {\n"
+            "  var d: f64 = 1.0;\n"
+            "  d += 1;\n"
+            "  d *= 2;\n"
+            "  var f: float = 1.5;\n"
+            "  f += 1;\n"
+            "  f *= 2;\n"
+            "  return 0;\n"
+            "}");
+        CHECK(asmText.find("addsd xmm0, 1") == std::string::npos);
+        CHECK(asmText.find("mulsd xmm0, 2") == std::string::npos);
+        CHECK(asmText.find("addss xmm0, 1") == std::string::npos);
+        CHECK(asmText.find("cvtsi2sd") != std::string::npos);
+        CHECK(asmText.find("cvtsi2ss") != std::string::npos);
+    }
+
     return 0;
 }
 
