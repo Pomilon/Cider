@@ -3488,6 +3488,18 @@ public:
                                   irType == IRType::BOOL);
         if ((srcType == IRType::F32 || srcType == IRType::F64) && tgtNeedsFloatHelp) {
             lastValue_ = convertFloatToInt(lastValue_, targetType);
+        } else if (lastValue_.kind == IRValue::CONSTANT &&
+                   ((srcType == IRType::F32 && irType == IRType::F64) ||
+                    (srcType == IRType::F64 && irType == IRType::F32))) {
+            // CID-003 review: a width cast of a literal is a compile-time
+            // conversion context. Folding keeps the parsed double for
+            // F32->F64 (`16777217.0 as f64` is not representable in f32,
+            // so the runtime cvtss2sd via the F32 constant pool truncated
+            // it on native) and rounds F64->F32 once through float.
+            lastValue_ = IRValue::Constant(irType == IRType::F32
+                                               ? (double)(float)lastValue_.constValue
+                                               : lastValue_.constValue,
+                                           irType);
         } else {
             if ((srcType == IRType::F32 || srcType == IRType::F64) &&
                 (irType == IRType::I32 || irType == IRType::I64)) {
