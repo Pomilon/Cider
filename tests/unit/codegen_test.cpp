@@ -116,6 +116,16 @@ int run() {
             CHECK(ok);
         }
     }
+
+    // CID-003: float width conversions. (CHECKSTR returns "" and is only
+    // usable in string-returning helpers; run() uses CHECK/.find like the
+    // rest of its assertions.)
+    {
+        std::string asmText = genAsm("func main() -> int { var a: f64 = 2.5; var b: float = a; return 0; }");
+        CHECK(asmText.find("cvtss2sd") != std::string::npos);   // literal f32 -> f64 widening
+        CHECK(asmText.find("cvtsd2ss") != std::string::npos);   // narrowing store into float
+        CHECK(asmText.find("movsd") != std::string::npos);      // f64 destinations use 8-byte moves
+    }
     return 0;
 }
 

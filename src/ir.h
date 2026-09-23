@@ -90,7 +90,7 @@ enum class IROp {
     PUSH, POP,
     BR, COND_BR,
     CALL, VIRTUAL_CALL, RET,
-    CVT_ITOF, CVT_FTOI,
+    CVT_ITOF, CVT_FTOI, CVT_F32F64, CVT_F64F32,
     PHI, ASM
 };
 

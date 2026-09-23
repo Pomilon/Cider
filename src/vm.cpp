@@ -402,6 +402,20 @@ VMResult VM::run(const ModuleIR& module, const std::string& runFunction) {
             if (instr.dest) regs_[instr.dest->name] = d;
             break;
         }
+        case IROp::CVT_F32F64: {
+            RegVal d;
+            d.isFloat = true;
+            d.f = regToFloat(resolveValue(instr.args[0]));
+            if (instr.dest) regs_[instr.dest->name] = d;
+            break;
+        }
+        case IROp::CVT_F64F32: {
+            RegVal d;
+            d.isFloat = true;
+            d.f = (double)(float)regToFloat(resolveValue(instr.args[0]));
+            if (instr.dest) regs_[instr.dest->name] = d;
+            break;
+        }
         case IROp::ASM: {
             execAsm(instr);
             break;

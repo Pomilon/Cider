@@ -35,6 +35,21 @@ std::string genSrc(const std::string& src, std::vector<std::string>* errors = nu
     return ss.str();
 }
 
+// Like genSrc, but hands back the module so tests can assert IR types
+// (the printed text does not show operand/result types).
+cider::ModuleIR genModuleSrc(const std::string& src) {
+    cider::ErrorReporter rep;
+    cider::Lexer lex(src, rep);
+    cider::Parser parser(lex, rep);
+    auto prog = parser.parseProgram();
+    cider::SymbolTable table;
+    cider::ModuleResolver resolver;
+    cider::SymbolCollector collector(table, rep, resolver);
+    collector.collect(*prog);
+    cider::IRGenerator gen(table);
+    return gen.generate(*prog);
+}
+
 std::string genSrcWithProvenance(const std::string& src, const std::string& symName,
                                    const std::string& mod) {
     cider::ErrorReporter rep;
@@ -187,6 +202,43 @@ int run() {
         CHECK(gen.definingModuleFor(helper, "helper") == "m");
         std::shared_ptr<cider::Symbol> nullSym;
         CHECK(gen.definingModuleFor(nullSym, "x") == "");
+    }
+
+    // CID-003: mixed f32/f64 operands promote to f64.
+    {
+        const std::string src =
+            "func main() -> int { var a: f64 = 2.5; var b: float = 1.5; var c: f64 = a + b; return 0; }";
+        std::string ir = genSrc(src);
+        CHECK(ir.find("add %") != std::string::npos);
+        // the F32 operand is widened before the add
+        CHECK(ir.find("cvt") != std::string::npos || ir.find("%v") != std::string::npos);
+        CHECK(ir.find("cvt_f32f64") != std::string::npos);
+
+        // The checker's float<->f64 mutual compatibility cannot pin the
+        // promotion result, and the text dump hides types, so also assert
+        // the emitted width conversion and the add's operand/result types
+        // directly (Task 1 deferred minor).
+        auto module = genModuleSrc(src);
+        bool sawWidenToF64 = false;
+        bool addIsF64 = false;
+        for (const auto& fn : module.getFunctions()) {
+            for (const auto& block : fn->getBlocks()) {
+                for (const auto& in : block->getInstructions()) {
+                    if (in.op == cider::IROp::CVT_F32F64 && in.dest &&
+                        in.dest->type == cider::IRType::F64) {
+                        sawWidenToF64 = true;
+                    }
+                    if (in.op == cider::IROp::ADD && in.dest &&
+                        in.dest->type == cider::IRType::F64 && in.args.size() == 2 &&
+                        in.args[0].type == cider::IRType::F64 &&
+                        in.args[1].type == cider::IRType::F64) {
+                        addIsF64 = true;
+                    }
+                }
+            }
+        }
+        CHECK(sawWidenToF64);
+        CHECK(addIsF64);
     }
     return 0;
 }

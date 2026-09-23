@@ -1,0 +1,20 @@
+import std.io;   // not needed; use plain returns
+func main() -> int {
+  var a: f64 = 2.5;
+  var b: f64 = 1.25;
+  if (a + b != 3.75) { return 1; }
+  if (a * b != 3.125) { return 2; }
+  if (a - b != 1.25) { return 3; }
+  if (a / b != 2.0) { return 4; }
+  if (!(a > b)) { return 5; }
+  var f: float = 1.5;
+  var m: f64 = a + f;        // mixed widths -> f64
+  if (m != 4.0) { return 6; }
+  var i: int = a as int;     // truncation
+  if (i != 2) { return 7; }
+  var back: f64 = i as f64;
+  if (back != 2.0) { return 8; }
+  var narrow: float = a;     // implicit narrowing
+  if (narrow != 2.5) { return 9; }
+  return 0;
+}

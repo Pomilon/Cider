@@ -1636,6 +1636,16 @@ public:
                         IRValue converted = IRValue::Register(nextTemp(), declType);
                         currentBlock_->addInstruction({IROp::CVT_FTOI, converted, {val}});
                         val = converted;
+                    } else if ((val.type == IRType::F32 && declType == IRType::F64) ||
+                               (val.type == IRType::F64 && declType == IRType::F32)) {
+                        // CID-003: the declared type drives the width, so
+                        // `var a: f64 = 2.5` widens its F32 literal and
+                        // `var b: float = aF64` narrows before the store.
+                        IRValue converted = IRValue::Register(nextTemp(), declType);
+                        currentBlock_->addInstruction({val.type == IRType::F32 ? IROp::CVT_F32F64
+                                                                               : IROp::CVT_F64F32,
+                                                       converted, {val}});
+                        val = converted;
                     }
                 }
                 bool isStructType = isStructValueType(sym->type);
@@ -1853,6 +1863,17 @@ public:
             left = converted;
         }
 
+        // CID-003: mixed float widths compute at f64 (C usual conversions).
+        bool widenedFloats = false;
+        if ((left.type == IRType::F32 && right.type == IRType::F64) ||
+            (left.type == IRType::F64 && right.type == IRType::F32)) {
+            IRValue& narrow = (left.type == IRType::F32) ? left : right;
+            IRValue converted = IRValue::Register(nextTemp(), IRType::F64);
+            currentBlock_->addInstruction({IROp::CVT_F32F64, converted, {narrow}});
+            narrow = converted;
+            widenedFloats = true;
+        }
+
         // Usual arithmetic conversions for mixed-width integer +,-,*,/,%
         // (see mixedIntCommon): compute at 64 bits so narrow operands
         // never truncate a 64-bit peer.
@@ -1893,6 +1914,8 @@ public:
         lastValue_ = dest;
         if (widenedInts) {
             lastExprType_ = (left.type == IRType::U64) ? TypeInfo{"u64", 0} : TypeInfo{"i64", 0};
+        } else if (widenedFloats) {
+            lastExprType_ = (op >= IROp::CMP_EQ && op <= IROp::CMP_GE) ? TypeInfo{"bool", 0} : TypeInfo{"f64", 0};
         } else {
             lastExprType_ = (op >= IROp::CMP_EQ && op <= IROp::CMP_GE) ? TypeInfo{"bool", 0} : leftType;
         }
@@ -3472,6 +3495,11 @@ public:
             } else if ((srcType == IRType::I32 || srcType == IRType::I64) &&
                        (irType == IRType::F32 || irType == IRType::F64)) {
                 currentBlock_->addInstruction({IROp::CVT_ITOF, dest, {lastValue_}});
+            } else if ((srcType == IRType::F32 && irType == IRType::F64) ||
+                       (srcType == IRType::F64 && irType == IRType::F32)) {
+                currentBlock_->addInstruction({srcType == IRType::F32 ? IROp::CVT_F32F64
+                                                                      : IROp::CVT_F64F32,
+                                               dest, {lastValue_}});
             } else if (irType == IRType::I8 || irType == IRType::U8) {
                 currentBlock_->addInstruction({IROp::BIT_AND, dest, {lastValue_, IRValue::Constant(0xFF, IRType::I32)}});
             } else if (irType == IRType::I16 || irType == IRType::U16) {

@@ -41,6 +41,8 @@ std::string IRInstruction::toString() const {
     case IROp::PHI: ss << "phi "; break;
     case IROp::CVT_ITOF: ss << "cvt_itof "; break;
     case IROp::CVT_FTOI: ss << "cvt_ftoi "; break;
+    case IROp::CVT_F32F64: ss << "cvt_f32f64 "; break;
+    case IROp::CVT_F64F32: ss << "cvt_f64f32 "; break;
     case IROp::ASM: ss << "asm "; break;
     }
 

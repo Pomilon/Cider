@@ -510,6 +510,17 @@ bool CodeGenerator::generate(ModuleIR& module, const std::string& outputPath,
                         addText("    cvtsi2ss xmm0, eax");
                     else
                         addText("    cvtsi2sd xmm0, eax");
+                    addText(t == IRType::F32 ? "    movss " + d + ", xmm0"
+                                             : "    movsd " + d + ", xmm0");
+                    break;
+                }
+                case IROp::CVT_F32F64: {
+                    addText("    cvtss2sd xmm0, " + a1);
+                    addText("    movsd " + d + ", xmm0");
+                    break;
+                }
+                case IROp::CVT_F64F32: {
+                    addText("    cvtsd2ss xmm0, " + a1);
                     addText("    movss " + d + ", xmm0");
                     break;
                 }
