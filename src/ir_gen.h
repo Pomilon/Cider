@@ -705,6 +705,12 @@ public:
             IRValue val = lastValue_;
             TypeInfo retType = lastExprType_;
 
+            // CID-003: the function's declared return type drives the float
+            // width (a returned literal keeps its parsed double; registers
+            // convert through the CVT ops). Pointers and non-float returns
+            // pass through.
+            val = convertFloatWidthToType(val, currentReturnType_);
+
             // Struct-by-value return via hidden sret pointer: no malloc,
             // freestanding-safe. The caller-provided slot outlives the frame.
             if (currentIsSret_ && isStructValueType(currentReturnType_)) {
@@ -807,9 +813,18 @@ public:
                             std::vector<IRValue> args;
                             args.push_back(methodAddrReg);
                             args.push_back(dataPtrReg);
+                            // CID-003: parameter widths drive argument
+                            // conversion here too (m.parameterTypes has no
+                            // hidden `this`, which is passed separately).
+                            size_t argIdx = 0;
                             for (auto& arg : expr.getArgs()) {
                                 arg->accept(*this);
-                                args.push_back(lastValue_);
+                                IRValue av = lastValue_;
+                                if (argIdx < m.parameterTypes.size()) {
+                                    av = convertFloatWidthToType(av, m.parameterTypes[argIdx]);
+                                }
+                                args.push_back(av);
+                                argIdx++;
                             }
                             IRType retIRType = (m.returnType.pointerLevel > 0) ? IRType::PTR : mapType(m.returnType.name);
                             IRValue dest = IRValue::Register(nextTemp(), retIRType);
@@ -877,6 +892,19 @@ public:
                 // cannot change the call convention.
                 calleeDefMod = definingModuleFor(sym, funcName);
                 lastExprType_ = calleeRet;
+                // CID-003: the parameter's declared width drives the
+                // conversion of float-family arguments (a literal in a
+                // float context keeps its parsed double). Method symbols
+                // carry `this` as parameter 0, so shift past it when an
+                // object is passed as the hidden first argument.
+                size_t paramBase = 0;
+                if ((objPtr.kind != IRValue::CONSTANT || objPtr.intValue != 0) &&
+                    !funcSym->parameterTypes.empty()) {
+                    paramBase = 1;
+                }
+                for (size_t ai = 0; ai < args.size() && ai + paramBase < funcSym->parameterTypes.size(); ++ai) {
+                    args[ai] = convertFloatWidthToType(args[ai], funcSym->parameterTypes[ai + paramBase]);
+                }
             }
             bool calleeIsSret = isStructValueType(calleeRet, calleeDefMod);
             // Virtual callees are never sret (they stay on the malloc path);
@@ -1639,13 +1667,10 @@ public:
                     } else if ((val.type == IRType::F32 && declType == IRType::F64) ||
                                (val.type == IRType::F64 && declType == IRType::F32)) {
                         // CID-003: the declared type drives the width, so
-                        // `var a: f64 = 2.5` widens its F32 literal and
-                        // `var b: float = aF64` narrows before the store.
-                        IRValue converted = IRValue::Register(nextTemp(), declType);
-                        currentBlock_->addInstruction({val.type == IRType::F32 ? IROp::CVT_F32F64
-                                                                               : IROp::CVT_F64F32,
-                                                       converted, {val}});
-                        val = converted;
+                        // `var a: f64 = 2.5` widens its F32 literal (as an
+                        // exact F64 constant) and `var b: float = aF64`
+                        // narrows before the store.
+                        val = convertFloatWidth(val, declType);
                     }
                 }
                 bool isStructType = isStructValueType(sym->type);
@@ -1759,6 +1784,33 @@ public:
         }
     }
 
+    // CID-003: convert a value to a float width, preserving constant
+    // precision: a literal keeps its parsed double instead of detouring
+    // through float (and a narrowing constant rounds once, at compile time).
+    IRValue convertFloatWidth(IRValue val, IRType target) {
+        if (val.type == target) return val;
+        if (val.kind == IRValue::CONSTANT) {
+            return IRValue::Constant(target == IRType::F32 ? (double)(float)val.constValue
+                                                           : val.constValue,
+                                     target);
+        }
+        IRValue converted = IRValue::Register(nextTemp(), target);
+        currentBlock_->addInstruction({target == IRType::F64 ? IROp::CVT_F32F64
+                                                             : IROp::CVT_F64F32,
+                                       converted, {val}});
+        return converted;
+    }
+
+    // CID-003: convert a float-family value to a declared type's width when
+    // that type is a float width. Non-float values and non-float targets
+    // (pointers, ints, structs) pass through untouched.
+    IRValue convertFloatWidthToType(IRValue val, const TypeInfo& target) {
+        if (val.type != IRType::F32 && val.type != IRType::F64) return val;
+        IRType targetIR = (target.pointerLevel > 0) ? IRType::PTR : mapType(target.name);
+        if (targetIR != IRType::F32 && targetIR != IRType::F64) return val;
+        return convertFloatWidth(val, targetIR);
+    }
+
     void visit(BinaryExpr& expr) override {
         expr.getLeft()->accept(*this);
         IRValue left = lastValue_;
@@ -1864,13 +1916,14 @@ public:
         }
 
         // CID-003: mixed float widths compute at f64 (C usual conversions).
+        // convertFloatWidth folds a constant operand to its exact F64 value:
+        // a literal in an f64 context must not detour through the F32
+        // constant pool, where 16777217.0 rounds to 16777216.0.
         bool widenedFloats = false;
         if ((left.type == IRType::F32 && right.type == IRType::F64) ||
             (left.type == IRType::F64 && right.type == IRType::F32)) {
             IRValue& narrow = (left.type == IRType::F32) ? left : right;
-            IRValue converted = IRValue::Register(nextTemp(), IRType::F64);
-            currentBlock_->addInstruction({IROp::CVT_F32F64, converted, {narrow}});
-            narrow = converted;
+            narrow = convertFloatWidth(narrow, IRType::F64);
             widenedFloats = true;
         }
 
@@ -2359,6 +2412,7 @@ public:
                 TypeInfo fieldType;
                 if (getMemberFieldType(mem, fieldType)) {
                     val = truncateIntToType(val, fieldType);
+                    val = convertFloatWidthToType(val, fieldType);
                     lastExprType_ = fieldType;
                 }
             } else if (auto idx = dynamic_cast<IndexExpr*>(stmt.getTarget())) {
@@ -2373,6 +2427,7 @@ public:
                     elemType.name = "char";
                 }
                 val = truncateIntToType(val, elemType);
+                val = convertFloatWidthToType(val, elemType);
                 lastExprType_ = elemType;
             } else if (auto ident = dynamic_cast<IdentifierExpr*>(stmt.getTarget())) {
                 // Plain variable stores use the declared width (same rule as
@@ -2388,7 +2443,14 @@ public:
                                       declIR == IRType::I32 || declIR == IRType::U32 ||
                                       declIR == IRType::BOOL ||
                                       declIR == IRType::I64 || declIR == IRType::U64);
-                    if (declIsInt) val = truncateIntToType(val, sym->type);
+                    if (declIsInt) {
+                        val = truncateIntToType(val, sym->type);
+                    } else if (declIR == IRType::F32 || declIR == IRType::F64) {
+                        // CID-003: the declared width drives the stored
+                        // width (`e = 2.5` into an f64 target must fold to
+                        // the exact F64 constant, not store 4 bytes).
+                        val = convertFloatWidthToType(val, sym->type);
+                    }
                 }
             }
 
@@ -2448,6 +2510,21 @@ public:
             stmt.getValue()->accept(*this);
             IRValue rhs = lastValue_;
 
+            // CID-003: mixed float widths in compound assignments use the
+            // same usual conversions as binary expressions — compute at f64
+            // so the arithmetic sees same-width operands — then narrow back
+            // to the target's width before the store. Without this the ADD
+            // ran at F64 with an F32 operand and codegen read 8 bytes from
+            // a 4-byte F32 pool constant.
+            IRType targetFloatWidth = current.type;
+            bool widenedFloat = false;
+            if ((current.type == IRType::F32 && rhs.type == IRType::F64) ||
+                (current.type == IRType::F64 && rhs.type == IRType::F32)) {
+                IRValue& narrow = (current.type == IRType::F32) ? current : rhs;
+                narrow = convertFloatWidth(narrow, IRType::F64);
+                widenedFloat = true;
+            }
+
             IROp irOp;
             if (compoundOp == "+") irOp = IROp::ADD;
             else if (compoundOp == "-") irOp = IROp::SUB;
@@ -2459,9 +2536,9 @@ public:
             else if (compoundOp == "^") irOp = IROp::BIT_XOR;
             else return;
 
-            IRValue result = IRValue::Register(nextTemp(), current.type);
-            if (irOp == IROp::ADD || irOp == IROp::SUB || irOp == IROp::MUL ||
-                irOp == IROp::DIV || irOp == IROp::MOD) {
+            IRValue result = IRValue::Register(nextTemp(), widenedFloat ? IRType::F64 : current.type);
+            if (!widenedFloat && (irOp == IROp::ADD || irOp == IROp::SUB || irOp == IROp::MUL ||
+                irOp == IROp::DIV || irOp == IROp::MOD)) {
                 // Same usual-arithmetic-conversions rule as binary
                 // expressions: compute mixed-width updates at 64 bits;
                 // the STORE below narrows back to the LHS width.
@@ -2477,6 +2554,11 @@ public:
             if (isBitfield) {
                 emitBitfieldStore(addr, result, bitOffset, bitWidth);
                 return;
+            }
+            if (widenedFloat && targetFloatWidth == IRType::F32) {
+                // The f64 computation rounds once on the way back into the
+                // f32 target slot.
+                result = convertFloatWidth(result, IRType::F32);
             }
             if (addr.kind == IRValue::LABEL) {
                 currentBlock_->addInstruction({IROp::STORE, std::nullopt, {addr, result}});

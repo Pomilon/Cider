@@ -240,6 +240,36 @@ int run() {
         CHECK(sawWidenToF64);
         CHECK(addIsF64);
     }
+
+    // CID-003: an f64 literal keeps its double value (no float round-trip).
+    {
+        std::string ir = genSrc("func main() -> int { var x: f64 = 16777217.0; return 0; }");
+        CHECK(ir.find("16777217") != std::string::npos);
+
+        // The dump shows the constant's parsed double even for the buggy F32
+        // path, so also pin the emitted IR: the declaration must produce an
+        // F64 constant directly, not cvt_f32f64 from an F32 constant (the
+        // F32 pool entry rounds 16777217 to 16777216 on native).
+        auto module = genModuleSrc(
+            "func main() -> int { var x: f64 = 16777217.0; return 0; }");
+        bool sawExactF64Const = false;
+        bool sawF32ToF64Cvt = false;
+        for (const auto& fn : module.getFunctions()) {
+            for (const auto& block : fn->getBlocks()) {
+                for (const auto& in : block->getInstructions()) {
+                    if (in.op == cider::IROp::CVT_F32F64) sawF32ToF64Cvt = true;
+                    for (const auto& a : in.args) {
+                        if (a.kind == cider::IRValue::CONSTANT &&
+                            a.type == cider::IRType::F64 && a.constValue == 16777217.0) {
+                            sawExactF64Const = true;
+                        }
+                    }
+                }
+            }
+        }
+        CHECK(sawExactF64Const);
+        CHECK(!sawF32ToF64Cvt);
+    }
     return 0;
 }
 

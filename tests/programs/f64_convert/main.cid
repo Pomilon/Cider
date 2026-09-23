@@ -1,0 +1,33 @@
+func take64(x: f64) -> f64 { return x * 2.0; }
+func take32(x: float) -> float { return x; }
+func give64() -> f64 { return 1.5; }
+func give32() -> float { return 3.5; }
+
+func main() -> int {
+  var a: f64 = take64(1.25);          // f32 literal arg -> f64 param
+  if (a != 2.5) { return 1; }
+  var b: float = take32(a);           // f64 arg -> f32 param (narrowing)
+  if (b != 2.5) { return 2; }
+  var c: f64 = give64();              // f64 return into f64 local
+  if (c != 1.5) { return 3; }
+  var d: f64 = give32();              // f32 return widened
+  if (d != 3.5) { return 4; }
+  var e: f64 = 0.0;
+  e = 2.5;                            // assignment literal -> f64
+  if (e != 2.5) { return 5; }
+  var f: f64 = 16777217.0;            // exact double, not representable in f32
+  if (f != 16777217.0) { return 6; }
+  // CID-003 review carry-over: F64 -> F32 narrowing of a non-representable
+  // double rounds once (16777217 -> 16777216), identically on all backends.
+  var big: f64 = 16777217.0;
+  var narrow: float = big;
+  if (narrow != 16777216.0) { return 7; }
+  // CID-003: mixed-width compound assignments promote to f64 and narrow
+  // back once for an f32 target.
+  e += 0.5;
+  if (e != 3.0) { return 8; }
+  var narrow2: float = 1.0;
+  narrow2 += big;                     // (f64)1.0 + 16777217.0 -> 16777218.0 -> f32
+  if (narrow2 != 16777218.0) { return 9; }
+  return 0;
+}
