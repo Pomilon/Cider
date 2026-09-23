@@ -2342,6 +2342,11 @@ public:
             if (val.kind == IRValue::CONSTANT) {
                 uint64_t mask = (tgtIR == IRType::I8 || tgtIR == IRType::U8) ? 0xFFULL : 0xFFFFULL;
                 uint64_t v = (uint64_t)val.intValue & mask;
+                // CID-003 fix round 2: signed narrow targets keep the sign,
+                // matching what native sign-extension produces for the same
+                // byte (no unsigned masking of negative i8/i16 constants).
+                if (tgtIR == IRType::I8) return IRValue::Constant((int64_t)(int8_t)v, tgtIR);
+                if (tgtIR == IRType::I16) return IRValue::Constant((int64_t)(int16_t)v, tgtIR);
                 return IRValue::Constant(v, tgtIR);
             }
             IRValue dest = IRValue::Register(nextTemp(), tgtIR);

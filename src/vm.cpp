@@ -11,6 +11,23 @@ namespace {
 
 double regToFloat(const VM::RegVal& v) { return v.isFloat ? v.f : (double)v.i; }
 
+// CID-003 fix round 2: extend an integer value to 64 bits by its IR type,
+// exactly as native widens narrow operands (movsx for I8/I16/I32, movzx for
+// U8/U16/U32). Narrow registers may hold their raw low bits (e.g. an i8 AND
+// leaves 0xFD); every widening use must normalize so the VM agrees with
+// codegen's movsx/movzx.
+int64_t extendIntByType(int64_t v, IRType t) {
+    switch (t) {
+    case IRType::I8: return (int64_t)(int8_t)v;
+    case IRType::U8: return (int64_t)(uint8_t)v;
+    case IRType::I16: return (int64_t)(int16_t)v;
+    case IRType::U16: return (int64_t)(uint16_t)v;
+    case IRType::I32: return (int64_t)(int32_t)v;
+    case IRType::U32: return (int64_t)(uint32_t)v;
+    default: return v;  // 64-bit types, PTR, BOOL unaffected
+    }
+}
+
 }  // namespace
 
 VMResult VM::run(const ModuleIR& module, const std::string& runFunction) {
@@ -212,7 +229,11 @@ VMResult VM::run(const ModuleIR& module, const std::string& runFunction) {
                 default: break;
                 }
             } else {
-                int64_t x = a.i, y = b.i;
+                // CID-003 fix round 2: widen each operand by its own IR type
+                // first, exactly like codegen's widenCmpOp (movsx/movzx), so
+                // an unnormalized narrow register compares by value.
+                int64_t x = extendIntByType(a.i, instr.args[0].type);
+                int64_t y = extendIntByType(b.i, instr.args[1].type);
                 switch (instr.op) {
                 case IROp::CMP_EQ: r = x == y; break;
                 case IROp::CMP_NE: r = x != y; break;
@@ -298,6 +319,13 @@ VMResult VM::run(const ModuleIR& module, const std::string& runFunction) {
         }
         case IROp::MOV: {
             RegVal d = resolveValue(instr.args[0]);
+            // CID-003 fix round 2: mirror codegen's MOV contract — extend by
+            // the SOURCE type (movsx for I8/I16/I32, movzx for U8/U16/U32)
+            // so a narrow signed value reads back negative, not as its raw
+            // unsigned bit pattern.
+            if (!d.isFloat && instr.args.size() > 0) {
+                d.i = extendIntByType(d.i, instr.args[0].type);
+            }
             if (instr.dest) regs_[instr.dest->name] = d;
             break;
         }
