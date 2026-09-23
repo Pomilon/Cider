@@ -288,7 +288,22 @@ VMResult VM::run(const ModuleIR& module, const std::string& runFunction) {
             // neighbor in a packed array. (Global cells are 8 bytes.)
             IRType type = instr.args[1].type;
             if (type == IRType::BOOL) type = IRType::I32;
-            if (instr.args[0].kind == IRValue::LABEL) type = IRType::I64;  // global cells are 8 bytes
+            if (instr.args[0].kind == IRValue::LABEL) {
+                type = IRType::I64;  // global cells are 8 bytes
+                if (offset == 0) {
+                    // Float global (CID-029): the cell holds IEEE-754 bits
+                    // of the declared width, so an F64 value must be stored
+                    // as its 8-byte pattern (and an F32 value as 4 bytes).
+                    // Forcing I64 wrote val.i, which is 0 for a float
+                    // constant (it carries only .f). Mirrors the LOAD
+                    // global-type lookup above.
+                    auto git = globalVarTypes_.find(instr.args[0].name);
+                    if (git != globalVarTypes_.end() &&
+                        (git->second == IRType::F32 || git->second == IRType::F64)) {
+                        type = git->second;
+                    }
+                }
+            }
             store(addr.i + offset, val, type);
             break;
         }
@@ -470,7 +485,12 @@ VM::RegVal VM::resolveValue(const IRValue& v) {
         if (v.type == IRType::F32 || v.type == IRType::F64) {
             RegVal d;
             d.isFloat = true;
-            d.f = v.constValue;
+            // CID-003: an F32 constant is single-precision. Native emission
+            // stores the rounded float bits, so round here too — otherwise
+            // `var x: float = 0.3; if (x != 0.3) return 1;` reads the
+            // rounded memory value against the unrounded literal and the VM
+            // disagrees with native.
+            d.f = (v.type == IRType::F32) ? (double)(float)v.constValue : v.constValue;
             return d;
         }
         RegVal d;

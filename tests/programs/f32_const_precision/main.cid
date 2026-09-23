@@ -1,0 +1,16 @@
+// CID-003: an F32 constant is single-precision on every backend. The VM
+// used to return the unrounded double literal while native emitted the
+// rounded float bits, so `var x: float = 0.3; if (x != 0.3)` was true on
+// the VM only (exit 1) and false natively.
+func main() -> int {
+  var x: float = 0.3;
+  if (x != 0.3) { return 1; }
+  var y: float = 0.1;
+  if (y != 0.1) { return 2; }
+  // The same literal at f64 width keeps its full double value, and the
+  // f32-rounded value must not compare equal to it.
+  var d: f64 = 0.3;
+  if (d != 0.3) { return 3; }
+  if ((x as f64) == d) { return 4; }
+  return 0;
+}
