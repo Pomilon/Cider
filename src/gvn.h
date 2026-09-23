@@ -1,5 +1,6 @@
 #pragma once
 
+#include <cstring>
 #include <functional>
 #include <map>
 #include <set>
@@ -101,8 +102,22 @@ private:
             if (v.type == IRType::PTR && v.name.size() >= 2 && v.name.front() == '"') {
                 return "const_str_" + v.name;
             }
-            if (v.type == IRType::F32 || v.type == IRType::F64)
-                return "const_" + typeToString(v.type) + "_" + std::to_string(v.constValue);
+            // Float constants are keyed by their exact IEEE-754 bits:
+            // std::to_string(double) renders fixed 6-decimal text, so tiny
+            // values (1e-7, 2e-7, 0.0) all collapsed to one value number and
+            // GVN deduplicated distinct constants. Bit keys also keep +0.0
+            // and -0.0 apart.
+            if (v.type == IRType::F32) {
+                float f = (float)v.constValue;
+                uint32_t bits = 0;
+                std::memcpy(&bits, &f, sizeof(bits));
+                return "const_F32_" + std::to_string(bits);
+            }
+            if (v.type == IRType::F64) {
+                uint64_t bits = 0;
+                std::memcpy(&bits, &v.constValue, sizeof(bits));
+                return "const_F64_" + std::to_string(bits);
+            }
             return "const_" + typeToString(v.type) + "_" + std::to_string(v.intValue);
         }
         if (v.kind == IRValue::LABEL) {
