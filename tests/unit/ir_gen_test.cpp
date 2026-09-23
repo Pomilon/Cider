@@ -445,6 +445,30 @@ int run() {
         }
         CHECK(sawB);
     }
+
+    // CID-003 follow-up (M5): a mixed signed/unsigned comparison converts
+    // both operands to one common unsigned type before the CMP.
+    {
+        auto module = genModuleSrc(
+            "func main() -> int {\n"
+            "  var a: i32 = 0 - 1;\n"
+            "  var b: u32 = 1;\n"
+            "  if (a < b) { return 1; }\n"
+            "  return 0;\n}\n");
+        bool sawCmp = false;
+        for (const auto& fn : module.getFunctions()) {
+            for (const auto& block : fn->getBlocks()) {
+                for (const auto& in : block->getInstructions()) {
+                    if (in.op != cider::IROp::CMP_LT) continue;
+                    sawCmp = true;
+                    CHECK(in.args.size() == 2);
+                    CHECK(in.args[0].type == cider::IRType::U32);
+                    CHECK(in.args[1].type == cider::IRType::U32);
+                }
+            }
+        }
+        CHECK(sawCmp);
+    }
     return 0;
 }
 

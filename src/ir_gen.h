@@ -1796,6 +1796,52 @@ public:
         return (isUnsigned(a) || isUnsigned(b)) ? IRType::U64 : IRType::I64;
     }
 
+    // CID-003 follow-up (M5): common comparison domain for mixed
+    // signed/unsigned integer operands. C usual conversions: equal widths
+    // (or a wider unsigned operand) compare in the unsigned domain — the
+    // signed side converts to the unsigned type, wrapping modulo 2^width;
+    // a wider signed operand represents every narrower unsigned value, so
+    // the unsigned side converts to it and the compare stays signed.
+    // Pairs with the same signedness return VOID: the existing per-operand
+    // widening in codegen/VM already compares them correctly. BOOL counts
+    // as signed 32-bit here, matching codegen's setcc selection.
+    static IRType mixedCmpCommon(IRType a, IRType b) {
+        auto isUnsigned = [](IRType t) {
+            return t == IRType::U8 || t == IRType::U16 || t == IRType::U32 ||
+                   t == IRType::U64;
+        };
+        auto widthOf = [](IRType t) -> int {
+            if (t == IRType::I8 || t == IRType::U8) return 8;
+            if (t == IRType::I16 || t == IRType::U16) return 16;
+            if (t == IRType::I32 || t == IRType::U32 || t == IRType::BOOL) return 32;
+            return 64;
+        };
+        if (a == b) return IRType::VOID;
+        bool au = isUnsigned(a), bu = isUnsigned(b);
+        if (au == bu) return IRType::VOID;
+        IRType u = au ? a : b;
+        IRType s = au ? b : a;
+        return (widthOf(u) >= widthOf(s)) ? u : s;
+    }
+
+    // Convert an integer operand to an unsigned comparison type, wrapping
+    // modulo 2^width(target) like a C cast to that unsigned type (a
+    // narrower signed source sign-extends first, then keeps the low bits).
+    // Constants fold; registers get a MOV whose declared type carries the
+    // width, which is what codegen/VM widen the compare by.
+    IRValue convertIntToUnsigned(IRValue v, IRType target) {
+        if (v.type == target) return v;
+        int width = (target == IRType::U8) ? 8 : (target == IRType::U16) ? 16
+                  : (target == IRType::U32) ? 32 : 64;
+        uint64_t mask = (width == 64) ? ~0ULL : ((1ULL << width) - 1);
+        if (v.kind == IRValue::CONSTANT) {
+            return IRValue::Constant((uint64_t)v.intValue & mask, target);
+        }
+        IRValue dest = IRValue::Register(nextTemp(), target);
+        currentBlock_->addInstruction({IROp::MOV, dest, {v}});
+        return dest;
+    }
+
     // Convert an integer operand to the common 64-bit type in place:
     // constants fold (value-preserving extension), anything else goes
     // through MOV (both backends extend correctly on widening moves).
@@ -2013,6 +2059,26 @@ public:
             IRValue& narrow = (left.type == IRType::F32) ? left : right;
             narrow = convertFloatWidth(narrow, IRType::F64);
             widenedFloats = true;
+        }
+
+        // CID-003 follow-up (M5): mixed signed/unsigned integer
+        // comparisons need a common domain (see mixedCmpCommon). Without
+        // it, codegen picked setcc from the left operand's type while the
+        // VM compared the per-operand-extended values signed, so
+        // `-1 < u32(1)` was true everywhere and `i32(-1) != u32(max)`
+        // disagreed between backends.
+        if ((sOp == "==" || sOp == "!=" || sOp == "<" || sOp == ">" ||
+             sOp == "<=" || sOp == ">=") &&
+            leftType.pointerLevel == 0 && rightType.pointerLevel == 0) {
+            IRType common = mixedCmpCommon(left.type, right.type);
+            if (common == IRType::U8 || common == IRType::U16 ||
+                common == IRType::U32 || common == IRType::U64) {
+                left = convertIntToUnsigned(left, common);
+                right = convertIntToUnsigned(right, common);
+            } else if (common != IRType::VOID) {
+                convertIntToCommon(left, common);
+                convertIntToCommon(right, common);
+            }
         }
 
         // Usual arithmetic conversions for mixed-width integer +,-,*,/,%
