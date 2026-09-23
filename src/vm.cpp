@@ -137,11 +137,25 @@ VMResult VM::run(const ModuleIR& module, const std::string& runFunction) {
             if (a.isFloat || b.isFloat) {
                 double x = regToFloat(a), y = regToFloat(b);
                 d.isFloat = true;
+                // CID-003 follow-up (M1): an F32 operation rounds its result
+                // through float, exactly like addss/subss/mulss/divss. The
+                // plain double computation kept the extra precision:
+                // `0.3f + 0.1f` stayed 0.30000001341104508 instead of
+                // rounding to 0.4f, so the VM disagreed with native. The
+                // result width is the destination's type (codegen selects
+                // its instruction the same way). Double rounding through
+                // binary64 is exact for binary32 +,-,*,/ (53 >= 2*24+2).
+                IRType dt = instr.dest ? instr.dest->type
+                                       : (instr.args.size() > 0 ? instr.args[0].type
+                                                                : IRType::F64);
+                auto roundResult = [&](double v) -> double {
+                    return (dt == IRType::F32) ? (double)(float)v : v;
+                };
                 switch (instr.op) {
-                case IROp::ADD: d.f = x + y; break;
-                case IROp::SUB: d.f = x - y; break;
-                case IROp::MUL: d.f = x * y; break;
-                case IROp::DIV: d.f = x / y; break;
+                case IROp::ADD: d.f = roundResult(x + y); break;
+                case IROp::SUB: d.f = roundResult(x - y); break;
+                case IROp::MUL: d.f = roundResult(x * y); break;
+                case IROp::DIV: d.f = roundResult(x / y); break;
                 default: throw VMError{"float op not supported"};
                 }
             } else {
