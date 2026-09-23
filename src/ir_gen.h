@@ -3921,18 +3921,47 @@ public:
         expr.getThenExpr()->accept(*this);
         IRValue thenVal = lastValue_;
         TypeInfo thenType = lastExprType_;
-        currentBlock_->addInstruction({IROp::BR, std::nullopt, {IRValue::Label(mergeName)}});
-        std::string thenEndName = currentBlock_->getName();
+        BasicBlock* thenBlock = currentBlock_.get();
 
         startBlock(elseName);
         expr.getElseExpr()->accept(*this);
         IRValue elseVal = lastValue_;
         TypeInfo elseType = lastExprType_;
-        currentBlock_->addInstruction({IROp::BR, std::nullopt, {IRValue::Label(mergeName)}});
-        std::string elseEndName = currentBlock_->getName();
+        BasicBlock* elseBlock = currentBlock_.get();
+
+        // CID-003 follow-up (I4): the PHI type is the common type of both
+        // arms, and each arm converts inside its own block (a conversion
+        // after the merge would not dominate the PHI). The type used to
+        // come from the then-arm only, so `c ? d : 1.5` merged an F32
+        // value into an F64 PHI (`pop xmm` on native). Float arms promote
+        // to f64 when either side is f64, matching binary expressions.
+        IRType thenIR = thenType.pointerLevel > 0 ? IRType::PTR : mapType(thenType.name);
+        IRType elseIR = elseType.pointerLevel > 0 ? IRType::PTR : mapType(elseType.name);
+        bool thenFloat = (thenIR == IRType::F32 || thenIR == IRType::F64);
+        bool elseFloat = (elseIR == IRType::F32 || elseIR == IRType::F64);
+        bool floatMerge = thenFloat || elseFloat;
+        IRType phiType = thenIR;
+        if (floatMerge) {
+            phiType = (thenIR == IRType::F64 || elseIR == IRType::F64)
+                          ? IRType::F64 : IRType::F32;
+            if (isIntIRType(thenIR)) {
+                thenVal = convertIntToFloat(thenVal, phiType, thenBlock);
+            } else if (thenIR != phiType) {
+                thenVal = convertFloatWidth(thenVal, phiType, thenBlock);
+            }
+            if (isIntIRType(elseIR)) {
+                elseVal = convertIntToFloat(elseVal, phiType, elseBlock);
+            } else if (elseIR != phiType) {
+                elseVal = convertFloatWidth(elseVal, phiType, elseBlock);
+            }
+        }
+
+        thenBlock->addInstruction({IROp::BR, std::nullopt, {IRValue::Label(mergeName)}});
+        std::string thenEndName = thenBlock->getName();
+        elseBlock->addInstruction({IROp::BR, std::nullopt, {IRValue::Label(mergeName)}});
+        std::string elseEndName = elseBlock->getName();
 
         startBlock(mergeName);
-        IRType phiType = thenType.pointerLevel > 0 ? IRType::PTR : mapType(thenType.name);
         IRValue phiDest = IRValue::Register(nextTemp(), phiType);
         IRInstruction phiInstr;
         phiInstr.op = IROp::PHI;
@@ -3941,7 +3970,9 @@ public:
         phiInstr.phiArgs[elseEndName] = elseVal;
         currentBlock_->addInstruction(phiInstr);
         lastValue_ = phiDest;
-        lastExprType_ = thenType;
+        lastExprType_ = floatMerge
+                            ? TypeInfo{phiType == IRType::F64 ? "f64" : "float", 0}
+                            : thenType;
     }
 
     void visit(SuperExpr& expr) override {

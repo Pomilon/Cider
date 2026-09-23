@@ -331,6 +331,41 @@ int run() {
         CHECK(mulIsF64);
     }
 
+    // CID-003 follow-up (I4): every float PHI arg has the PHI's common
+    // width, in both arm orders (the type used to come from the then-arm
+    // only, so `c ? d : 1.5` merged an F32 value into an F64 PHI).
+    {
+        const char* sources[] = {
+            "func main() -> int { var c: bool = true; var d: f64 = 2.5;"
+            " var e: f64 = c ? d : 1.5; return 0; }",
+            "func main() -> int { var c: bool = true; var d: f64 = 2.5;"
+            " var e: f64 = c ? 1.5 : d; return 0; }",
+            "func main() -> int { var c: bool = true; var a: float = 1.5;"
+            " var b: float = 2.5; var f: float = c ? a : b; return 0; }",
+        };
+        for (const char* src : sources) {
+            auto module = genModuleSrc(src);
+            bool sawFloatPhi = false;
+            bool allArgsMatch = true;
+            for (const auto& fn : module.getFunctions()) {
+                for (const auto& block : fn->getBlocks()) {
+                    for (const auto& in : block->getInstructions()) {
+                        if (in.op != cider::IROp::PHI || !in.dest) continue;
+                        if (in.dest->type != cider::IRType::F32 &&
+                            in.dest->type != cider::IRType::F64) {
+                            continue;
+                        }
+                        sawFloatPhi = true;
+                        for (const auto& [pred, val] : in.phiArgs) {
+                            if (val.type != in.dest->type) allArgsMatch = false;
+                        }
+                    }
+                }
+            }
+            CHECK(sawFloatPhi);
+            CHECK(allArgsMatch);
+        }
+    }
     return 0;
 }
 

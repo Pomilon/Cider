@@ -189,6 +189,29 @@ int run() {
         CHECK(asmText.find("cvtsi2ss") != std::string::npos);
     }
 
+    // CID-003 follow-up (I4): ternary merges move float values through GP
+    // registers (`push xmm`/`pop xmm` are not instructions) and convert
+    // mixed arm widths to the common float width.
+    {
+        std::string asmText = genAsm(
+            "func main() -> int {\n"
+            "  var c: bool = true;\n"
+            "  var a32: float = 1.25;\n"
+            "  var b32: float = 3.75;\n"
+            "  var f: float = c ? a32 : b32;\n"
+            "  var d: f64 = 2.5;\n"
+            "  var e: f64 = c ? d : a32;\n"
+            "  var g: f64 = c ? a32 : d;\n"
+            "  var h: float = c ? d : a32;\n"
+            "  return 0;\n"
+            "}");
+        CHECK(asmText.find("push xmm") == std::string::npos);
+        CHECK(asmText.find("pop xmm") == std::string::npos);
+        CHECK(asmText.find("movq rax, xmm") != std::string::npos);       // float push
+        CHECK(asmText.find("movq xmm") != std::string::npos);            // float pop
+        CHECK(asmText.find("cvtss2sd") != std::string::npos);            // f32 arm -> f64 merge
+        CHECK(asmText.find("cvtsd2ss") != std::string::npos);            // f64 arm -> f32 merge
+    }
     return 0;
 }
 

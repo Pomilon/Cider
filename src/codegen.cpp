@@ -1621,6 +1621,23 @@ bool CodeGenerator::generate(ModuleIR& module, const std::string& outputPath,
                     break;
                 }
                 case IROp::PUSH: {
+                    IRType pt = instr.args[0].type;
+                    if (pt == IRType::F32 || pt == IRType::F64) {
+                        // CID-003 follow-up (I4): `push xmm` is not an
+                        // instruction. Route the float bits through rax;
+                        // F32 pool entries/memory slots hold only 4 bytes,
+                        // so load exactly that width.
+                        std::string mv = (pt == IRType::F32) ? "movss" : "movsd";
+                        std::string sz = (pt == IRType::F32) ? "dword " : "qword ";
+                        if (isMem(a1)) {
+                            addText("    " + mv + " xmm0, " + sz + a1);
+                            addText("    movq rax, xmm0");
+                        } else {
+                            addText("    movq rax, " + a1);
+                        }
+                        addText("    push rax");
+                        break;
+                    }
                     if (instr.args[0].kind == IRValue::CONSTANT &&
                         instr.args[0].type != IRType::F32 && instr.args[0].type != IRType::F64 &&
                         ((int64_t)instr.args[0].intValue > (int64_t)INT32_MAX ||
@@ -1649,6 +1666,21 @@ bool CodeGenerator::generate(ModuleIR& module, const std::string& outputPath,
                     break;
                 }
                 case IROp::POP: {
+                    IRType pt = (instr.dest ? instr.dest->type : IRType::I32);
+                    if (pt == IRType::F32 || pt == IRType::F64) {
+                        // CID-003 follow-up (I4): `pop xmm` is not an
+                        // instruction; land the bits in rax and move them.
+                        std::string mv = (pt == IRType::F32) ? "movss" : "movsd";
+                        std::string sz = (pt == IRType::F32) ? "dword " : "qword ";
+                        addText("    pop rax");
+                        if (isMem(d)) {
+                            addText("    movq xmm0, rax");
+                            addText("    " + mv + " " + sz + d + ", xmm0");
+                        } else {
+                            addText("    movq " + d + ", rax");
+                        }
+                        break;
+                    }
                     if (isMem(d)) {
                         addText("    pop rax");
                         addText("    mov qword " + d + ", rax");
