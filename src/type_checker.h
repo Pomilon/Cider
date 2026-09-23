@@ -372,6 +372,31 @@ public:
         return false;
     }
 
+    // Shape check for compile-time constant float initializers (CID-003
+    // follow-up W5). Mirrors IRGenerator::tryEvalConstF64's accepted shapes;
+    // anything rejected here would otherwise silently BSS-zero a float
+    // global. Numeric literals of either kind are fine: integer literals
+    // and integer-only subexpressions fold exactly as they do locally.
+    static bool isConstFloatExpr(Expression* expr) {
+        if (!expr) return false;
+        if (dynamic_cast<NumberExpr*>(expr)) return true;
+        if (dynamic_cast<CharExpr*>(expr)) return true;
+        if (auto grp = dynamic_cast<GroupingExpr*>(expr)) return isConstFloatExpr(grp->getExpression());
+        if (auto un = dynamic_cast<UnaryExpr*>(expr)) {
+            return (un->getOperator() == "-" || un->getOperator() == "+" ||
+                    un->getOperator() == "~") &&
+                   isConstFloatExpr(un->getOperand());
+        }
+        if (auto cast = dynamic_cast<CastExpr*>(expr)) return isConstFloatExpr(cast->getExpression());
+        if (auto bin = dynamic_cast<BinaryExpr*>(expr)) {
+            const std::string& op = bin->getOperator();
+            bool supported = (op == "+" || op == "-" || op == "*" || op == "/" || op == "%" ||
+                              op == "<<" || op == ">>" || op == "&" || op == "|" || op == "^");
+            return supported && isConstFloatExpr(bin->getLeft()) && isConstFloatExpr(bin->getRight());
+        }
+        return false;
+    }
+
     // Fixed-size array from a list literal (CID-007): `var t: [u8; 4] =
     // [10, 20, 30, 40]`. Checks element count and per-element types.
     // Globals have no runtime initialiser, so their elements must be
@@ -480,6 +505,18 @@ public:
         }
 
         if (inClassFieldDecl_) return;  // see visit(ClassDeclStmt)
+
+        // CID-003 follow-up (W5): float-typed globals have no runtime
+        // initializer; a non-constant initializer silently reads 0.0 on
+        // every backend (the IR folds only constant shapes). Mirror the
+        // global-array rule. Module scopes count as global (scopeDepth 0).
+        if (stmt.getInitializer() && symbolTable_.scopeDepth() == 0 &&
+            declaredType.pointerLevel == 0 && !declaredType.isArray &&
+            isFloatName(declaredType.name) &&
+            !isConstFloatExpr(stmt.getInitializer())) {
+            error("Global float initializer in declaration of '" + stmt.getName() +
+                      "' must use constant expressions", stmt.getLine());
+        }
 
         auto sym = std::make_shared<Symbol>();
         sym->kind = SymbolKind::VARIABLE;

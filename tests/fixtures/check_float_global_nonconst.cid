@@ -1,0 +1,14 @@
+// CID-003 follow-up (W5): float-typed globals have no runtime initializer,
+// so a non-constant initializer would silently read 0.0 from .bss. They
+// must use constant expressions, like the global-array rule.
+var g0: int = 7;
+var g1: f64 = g0;
+
+func give() -> f64 { return 1.0; }
+var g2: float = give();
+
+var g3: f64 = 1.0 + 2.0;  // constant shape: still accepted
+
+func main() -> int {
+  return 0;
+}

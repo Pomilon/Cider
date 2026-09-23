@@ -130,6 +130,27 @@ int run() {
     auto e6 = checkSrc("func main() -> void { const C: int = 1; C = 2; }\n");
     CHECK(hasError(e6, "Cannot assign to constant 'C'"));
 
+    // CID-003 follow-up (W5): non-constant float global initializers have
+    // no runtime initializer and silently read 0.0 on every backend.
+    auto eFloatGlobal = checkSrc(
+        "var g0: int = 7;\nvar g: f64 = g0;\nfunc main() -> void { }\n");
+    CHECK(hasError(eFloatGlobal,
+                   "Global float initializer in declaration of 'g' must use constant expressions"));
+    auto eFloatGlobalCall = checkSrc(
+        "func give() -> f64 { return 1.0; }\nvar g: float = give();\nfunc main() -> void { }\n");
+    CHECK(hasError(eFloatGlobalCall,
+                   "Global float initializer in declaration of 'g' must use constant expressions"));
+    // Constant shapes and initializer-less globals still pass.
+    auto okFloatGlobals = checkSrc(
+        "var a: f64 = 5;\n"
+        "var b: f64 = 1.0 + 2.0;\n"
+        "var c: float = -0.1;\n"
+        "var d: f64 = 7 as f64;\n"
+        "var e: f64 = 5 / 2;\n"
+        "var f: f64;\n"
+        "func main() -> void { }\n");
+    CHECK(okFloatGlobals.empty());
+
     // Class pointer covariance.
     auto ok3 = checkSrc(
         "class Base { var a: int; }\n"
