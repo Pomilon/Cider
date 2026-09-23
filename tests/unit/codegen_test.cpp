@@ -129,6 +129,21 @@ int run() {
         CHECK(asmText.find("cvtsd2ss") != std::string::npos);   // f64 variable -> f32 narrowing
         CHECK(asmText.find("movsd") != std::string::npos);      // f64 destinations use 8-byte moves
     }
+
+    // CID-003: float constants emit exact IEEE-754 bit patterns as hex,
+    // never decimal text (std::to_string(double) cannot round-trip an f64
+    // literal). The 0.3 pair also pins uppercase hex output.
+    {
+        std::string asmD = genAsm("func main() -> int { var d: f64 = 2.5; return 0; }");
+        CHECK(asmD.find("dq 0x4004000000000000") != std::string::npos);  // double 2.5
+        CHECK(asmD.find("2.500000") == std::string::npos);               // no decimal pool text
+        std::string asmF = genAsm("func main() -> int { var f: float = 2.5; return 0; }");
+        CHECK(asmF.find("dd 0x40200000") != std::string::npos);          // float 2.5
+        std::string asmR = genAsm(
+            "func main() -> int { var f: float = 0.3; var d: f64 = 0.3; return 0; }");
+        CHECK(asmR.find("dd 0x3E99999A") != std::string::npos);          // float 0.3
+        CHECK(asmR.find("dq 0x3FD3333333333333") != std::string::npos);  // double 0.3
+    }
     return 0;
 }
 

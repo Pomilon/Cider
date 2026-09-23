@@ -3,6 +3,7 @@
 #include <algorithm>
 #include <cstdint>
 #include <cstdlib>
+#include <cstring>
 #include <fstream>
 #include <functional>
 #include <iomanip>
@@ -81,10 +82,25 @@ bool CodeGenerator::generate(ModuleIR& module, const std::string& outputPath,
         std::string label = (t == IRType::F32 ? "fc32_" : "fc64_") +
                             std::to_string(floatConstCount++);
         floatConsts[key] = label;
-        if (t == IRType::F32)
-            addData(label + ": dd " + std::to_string(val));
-        else
-            addData(label + ": dq " + std::to_string(val));
+        // CID-003: emit the exact IEEE-754 bit pattern as hex (uppercase,
+        // like the float-global initializer path). std::to_string(double)
+        // loses digits for doubles — it could never round-trip an f64
+        // literal — and fixed-precision decimal text is not exact for
+        // every value.
+        std::ostringstream hs;
+        hs << "0x" << std::hex << std::uppercase;
+        if (t == IRType::F32) {
+            float f = (float)val;
+            uint32_t bits = 0;
+            std::memcpy(&bits, &f, sizeof(bits));
+            hs << bits;
+            addData(label + ": dd " + hs.str());
+        } else {
+            uint64_t bits = 0;
+            std::memcpy(&bits, &val, sizeof(bits));
+            hs << bits;
+            addData(label + ": dq " + hs.str());
+        }
         return label;
     };
 
