@@ -1518,11 +1518,32 @@ public:
                     elemType.isArray = false;
                     elemType.arraySize = 0;
                     int elemSize = getTypeSize(elemType);
+                    IRType elemIR = mapType(elemType.name);
                     std::string dataLine = gname + ": db ";
                     bool allConst = ((int)elems.size() == sym->type.arraySize);
                     for (size_t ei = 0; allConst && ei < elems.size(); ei++) {
                         uint64_t v = 0;
-                        if (!tryEvalConstU64(elems[ei].get(), v)) { allConst = false; break; }
+                        if (elemIR == IRType::F32 || elemIR == IRType::F64) {
+                            // CID-003 follow-up (M3c): a float-typed element
+                            // converts its constant to the element width's
+                            // IEEE-754 bits. An integer element used to emit
+                            // its raw integer bits (a denormal when read as
+                            // f32/f64); float literal elements are rejected
+                            // by the checker before this point.
+                            double fv = 0;
+                            if (!tryEvalConstF64(elems[ei].get(), fv)) { allConst = false; break; }
+                            if (elemIR == IRType::F32) {
+                                float f = (float)fv;
+                                uint32_t b32 = 0;
+                                std::memcpy(&b32, &f, sizeof(b32));
+                                v = b32;
+                            } else {
+                                std::memcpy(&v, &fv, sizeof(v));
+                            }
+                        } else if (!tryEvalConstU64(elems[ei].get(), v)) {
+                            allConst = false;
+                            break;
+                        }
                         for (int b = 0; b < elemSize; b++) {
                             if (ei > 0 || b > 0) dataLine += ", ";
                             dataLine += std::to_string((v >> (8 * b)) & 0xFFULL);
@@ -1539,12 +1560,19 @@ public:
             bool initIsFloat = false;
             IRType declaredIR = (sym->type.pointerLevel > 0) ? IRType::PTR : mapType(sym->type.name);
             if (stmt.getInitializer()) {
-                if (auto num = dynamic_cast<NumberExpr*>(stmt.getInitializer())) {
-                    if (num->isFloat() && (declaredIR == IRType::F32 || declaredIR == IRType::F64)) {
-                        // Float global (CID-029): keep the IEEE-754 bits.
-                        // getUIntValue() truncates `10.0` to 10, which
-                        // codegen then emitted as `dq 10` (a denormal).
-                        double fv = num->getFloatValue();
+                if (declaredIR == IRType::F32 || declaredIR == IRType::F64) {
+                    // CID-003 follow-up (M3): float globals fold constant
+                    // expressions and integer literals like the local path
+                    // (`var g: f64 = 5`, `1.0 + 2.0`, `7 as f64`, mixed
+                    // widths) and store the declared width's IEEE-754 bits
+                    // (CID-029). Before this only a bare float literal
+                    // survived; every other shape silently read 0 from
+                    // .bss. Non-constant initializers (identifiers, calls,
+                    // struct literals) still BSS-zero — global scalars have
+                    // no runtime initializer, and no silent-zero-free fix
+                    // exists without a checker diagnostic.
+                    double fv = 0;
+                    if (tryEvalConstF64(stmt.getInitializer(), fv)) {
                         uint64_t bits = 0;
                         if (declaredIR == IRType::F32) {
                             float f = (float)fv;
@@ -1556,9 +1584,9 @@ public:
                         }
                         initVal = (int64_t)bits;
                         initIsFloat = true;
-                    } else {
-                        initVal = (int64_t)num->getUIntValue();
                     }
+                } else if (auto num = dynamic_cast<NumberExpr*>(stmt.getInitializer())) {
+                    initVal = (int64_t)num->getUIntValue();
                 } else {
                     // Constant expressions (CID-014): fold `1 << 4`,
                     // `0x10|0x20`, `~0x10`, ... so they land in .data
@@ -2329,6 +2357,204 @@ public:
             return true;
         }
         return false;
+    }
+
+    // Constant evaluation for global float initializers (CID-003 follow-up
+    // M3). Evaluates the same shapes as tryEvalConstU64 plus float
+    // arithmetic, and mirrors the local-variable path so a global and an
+    // equivalent local agree bit for bit: integer subexpressions keep
+    // integer semantics (`5 / 2` is 2), mixed int/float converts the
+    // integer to the float operand's width (CVT_ITOF), and mixed f32/f64
+    // computes at f64. A bare float literal keeps its parsed double until
+    // a width context rounds it, exactly like an IR F32 constant (see
+    // convertFloatWidth); `literal` tracks that. Returns false for
+    // non-constant shapes (identifiers, calls, ternary, sizeof, struct
+    // literals), which global scalars cannot materialize.
+    struct ConstEvalValue {
+        bool isFloat = false;
+        bool isF64 = false;       // float width: false == f32
+        bool literal = false;     // float: parsed literal, not yet width-rounded
+        bool isUnsigned = false;  // integer signedness
+        double f = 0;
+        uint64_t u = 0;           // integer bits (two's complement)
+    };
+
+    static double roundToF32(double v) { return (double)(float)v; }
+
+    static double intConstToDouble(const ConstEvalValue& v) {
+        return v.isUnsigned ? (double)v.u : (double)(int64_t)v.u;
+    }
+
+    bool tryEvalConstValue(Expression* expr, ConstEvalValue& out) {
+        if (!expr) return false;
+        if (auto num = dynamic_cast<NumberExpr*>(expr)) {
+            if (num->isFloat()) {
+                out.isFloat = true;
+                out.isF64 = false;
+                out.literal = true;
+                out.f = num->getFloatValue();
+            } else {
+                uint64_t v = num->getUIntValue();
+                // Same literal typing as visit(NumberExpr): > INT32_MAX
+                // becomes u32, > INT64_MAX becomes u64.
+                out.isFloat = false;
+                out.isUnsigned = (v > (uint64_t)INT32_MAX && v <= (uint64_t)UINT32_MAX) ||
+                                 v > (uint64_t)INT64_MAX;
+                out.u = v;
+            }
+            return true;
+        }
+        if (auto ch = dynamic_cast<CharExpr*>(expr)) {
+            out.isFloat = false;
+            out.isUnsigned = false;
+            out.u = (uint64_t)(unsigned char)ch->getValue();
+            return true;
+        }
+        if (auto grp = dynamic_cast<GroupingExpr*>(expr)) {
+            return tryEvalConstValue(grp->getExpression(), out);
+        }
+        if (auto un = dynamic_cast<UnaryExpr*>(expr)) {
+            ConstEvalValue v;
+            if (!tryEvalConstValue(un->getOperand(), v)) return false;
+            if (un->getOperator() == "-") {
+                out = v;
+                if (v.isFloat) {
+                    // CID-003 follow-up (M2): negation folds to a constant;
+                    // a literal stays literal so a widening context keeps
+                    // the parsed double (see visit(UnaryExpr)).
+                    out.f = -v.f;
+                } else {
+                    out.u = 0 - v.u;
+                }
+                return true;
+            }
+            if (un->getOperator() == "~" && !v.isFloat) {
+                out = v;
+                out.u = ~v.u;
+                return true;
+            }
+            if (un->getOperator() == "+") { out = v; return true; }
+            return false;
+        }
+        if (auto cast = dynamic_cast<CastExpr*>(expr)) {
+            ConstEvalValue v;
+            if (!tryEvalConstValue(cast->getExpression(), v)) return false;
+            TypeInfo target = TypeInfo::fromAST(cast->getTargetType());
+            if (target.pointerLevel > 0) return false;
+            IRType irType = mapType(target.name);
+            if (irType == IRType::F32 || irType == IRType::F64) {
+                out = v;
+                out.isFloat = true;
+                if (v.isFloat) {
+                    if (irType == IRType::F32) {
+                        // Any f32 cast rounds once: F64->F32 folds the
+                        // constant, same-width goes through MOV, and a
+                        // computed value is already rounded.
+                        out.f = roundToF32(v.f);
+                        out.isF64 = false;
+                        out.literal = false;
+                    } else {
+                        // Widening to f64 keeps a bare f32 literal's parsed
+                        // double (CastExpr folds it to an F64 constant); a
+                        // computed f32 register widens from its rounded value.
+                        out.isF64 = true;
+                        out.literal = v.literal;
+                    }
+                } else {
+                    out.isF64 = (irType == IRType::F64);
+                    out.f = intConstToDouble(v);
+                    if (!out.isF64) out.f = roundToF32(out.f);
+                    out.literal = false;
+                }
+                return true;
+            }
+            bool tgtInt = (irType == IRType::I8 || irType == IRType::U8 ||
+                           irType == IRType::I16 || irType == IRType::U16 ||
+                           irType == IRType::I32 || irType == IRType::U32 ||
+                           irType == IRType::I64 || irType == IRType::U64);
+            if (!tgtInt) return false;  // bool/pointer casts: not folded
+            uint64_t bits = v.isFloat ? (uint64_t)(int64_t)v.f  // CVT_FTOI truncates
+                                      : v.u;
+            int width = (irType == IRType::I8 || irType == IRType::U8) ? 8 :
+                        (irType == IRType::I16 || irType == IRType::U16) ? 16 :
+                        (irType == IRType::I32 || irType == IRType::U32) ? 32 : 64;
+            uint64_t mask = (width == 64) ? ~0ULL : ((1ULL << width) - 1);
+            out = ConstEvalValue{};
+            out.u = bits & mask;
+            out.isUnsigned = (irType == IRType::U8 || irType == IRType::U16 ||
+                              irType == IRType::U32 || irType == IRType::U64);
+            return true;
+        }
+        if (auto bin = dynamic_cast<BinaryExpr*>(expr)) {
+            ConstEvalValue l, r;
+            if (!tryEvalConstValue(bin->getLeft(), l)) return false;
+            if (!tryEvalConstValue(bin->getRight(), r)) return false;
+            const std::string& op = bin->getOperator();
+            if (l.isFloat || r.isFloat) {
+                if (op != "+" && op != "-" && op != "*" && op != "/") return false;
+                bool widthF64 = (l.isFloat && l.isF64) || (r.isFloat && r.isF64);
+                // An integer operand converts at the float operand's width
+                // (CVT_ITOF); then a mixed f32/f64 pair computes at f64.
+                auto asDouble = [&](const ConstEvalValue& v) -> double {
+                    if (!v.isFloat) {
+                        double d = intConstToDouble(v);
+                        return widthF64 ? d : roundToF32(d);
+                    }
+                    if (widthF64) return v.f;  // widening keeps a literal's parsed double
+                    return v.literal ? roundToF32(v.f) : v.f;
+                };
+                double x = asDouble(l), y = asDouble(r);
+                double z;
+                if (op == "+") z = x + y;
+                else if (op == "-") z = x - y;
+                else if (op == "*") z = x * y;
+                else z = x / y;
+                out = ConstEvalValue{};
+                out.isFloat = true;
+                out.isF64 = widthF64;
+                out.f = widthF64 ? z : roundToF32(z);
+                return true;
+            }
+            // Integer-only arithmetic. Unlike tryEvalConstU64 this keeps
+            // signed division/mod signed (the runtime path does), so
+            // `var g: f64 = -7 / 2` is -3.0 like the local form.
+            bool resUnsigned = l.isUnsigned || r.isUnsigned;
+            if (op == "+") out.u = l.u + r.u;
+            else if (op == "-") out.u = l.u - r.u;
+            else if (op == "*") out.u = l.u * r.u;
+            else if (op == "/" || op == "%") {
+                if (r.u == 0) return false;
+                if (resUnsigned) {
+                    out.u = (op == "/") ? l.u / r.u : l.u % r.u;
+                } else {
+                    int64_t a = (int64_t)l.u, b = (int64_t)r.u;
+                    if (a == INT64_MIN && b == -1) return false;  // would trap
+                    out.u = (uint64_t)(op == "/" ? a / b : a % b);
+                }
+            } else if (op == "<<" || op == ">>") {
+                if (r.u >= 64) return false;
+                if (op == "<<") out.u = l.u << r.u;
+                else out.u = l.isUnsigned ? (l.u >> r.u) : (uint64_t)((int64_t)l.u >> r.u);
+                resUnsigned = l.isUnsigned;
+            } else if (op == "&") out.u = l.u & r.u;
+            else if (op == "|") out.u = l.u | r.u;
+            else if (op == "^") out.u = l.u ^ r.u;
+            else return false;
+            out.isFloat = false;
+            out.isUnsigned = resUnsigned;
+            return true;
+        }
+        return false;
+    }
+
+    // Global float initializer entry point: the expression's own value,
+    // unconverted. The caller rounds to the declared width (f64 keeps a
+    // bare f32 literal's parsed double, matching convertFloatWidth).
+    bool tryEvalConstF64(Expression* expr, double& out) {
+        ConstEvalValue v;
+        if (!tryEvalConstValue(expr, v)) return false;
+        out = v.isFloat ? v.f : intConstToDouble(v);
+        return true;
     }
 
     // Float-to-integer cast for any integer target (CID-025): convert

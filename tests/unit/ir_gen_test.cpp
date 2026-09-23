@@ -1,4 +1,5 @@
 #include <cstdio>
+#include <cstring>
 #include <memory>
 #include <sstream>
 #include <string>
@@ -366,6 +367,67 @@ int run() {
             CHECK(allArgsMatch);
         }
     }
+
+    // CID-003 follow-up (M3): global float initializers fold integer
+    // literals and constant expressions into the declared width's
+    // IEEE-754 bits (initialIsFloat) instead of silently BSS-zeroing.
+    {
+        auto bitsOfF64 = [](double v) -> int64_t {
+            uint64_t bits = 0;
+            std::memcpy(&bits, &v, sizeof(bits));
+            return (int64_t)bits;
+        };
+        auto bitsOfF32 = [](double v) -> int64_t {
+            float f = (float)v;
+            uint32_t bits = 0;
+            std::memcpy(&bits, &f, sizeof(bits));
+            return (int64_t)bits;
+        };
+        auto module = genModuleSrc(
+            "var g: f64 = 5;\n"
+            "var h: f64 = 1.0 + 2.0;\n"
+            "var f: float = 7;\n"
+            "var a: [f64; 2] = [1, 2];\n"
+            "func main() -> int { return 0; }\n");
+        int found = 0;
+        for (const auto& var : module.getGlobalVars()) {
+            if (var.name == "g") {
+                CHECK(var.initialIsFloat);
+                CHECK(var.type == cider::IRType::F64);
+                CHECK(var.initialValue == bitsOfF64(5.0));
+                found++;
+            } else if (var.name == "h") {
+                CHECK(var.initialIsFloat);
+                CHECK(var.initialValue == bitsOfF64(3.0));
+                found++;
+            } else if (var.name == "f") {
+                CHECK(var.initialIsFloat);
+                CHECK(var.type == cider::IRType::F32);
+                CHECK(var.initialValue == bitsOfF32(7.0));
+                found++;
+            }
+        }
+        CHECK(found == 3);
+        // The global float array's byte list is the elements' exact f64 bit
+        // patterns (int elements used to emit raw int bits).
+        uint64_t vals[2] = {0, 0};
+        double f64vals[2] = {1.0, 2.0};
+        for (int k = 0; k < 2; k++) std::memcpy(&vals[k], &f64vals[k], 8);
+        std::ostringstream expect;
+        expect << "a: db ";
+        for (int k = 0; k < 2; k++) {
+            for (int b = 0; b < 8; b++) {
+                if (k > 0 || b > 0) expect << ", ";
+                expect << ((vals[k] >> (8 * b)) & 0xFFULL);
+            }
+        }
+        bool sawArr = false;
+        for (const auto& line : module.getStringData()) {
+            if (line == expect.str()) sawArr = true;
+        }
+        CHECK(sawArr);
+    }
+
     return 0;
 }
 
