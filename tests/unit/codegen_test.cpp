@@ -168,6 +168,37 @@ int run() {
         CHECK(asmText.find("addsd xmm0, xmm0") != std::string::npos);
     }
 
+    // CID-003 follow-up (W5): the constant CVT_ITOF immediate-range test
+    // `bits <= INT32_MAX || (int64_t)bits >= INT32_MIN` is true for nearly
+    // every 64-bit value, so out-of-range constants took the mov-imm32
+    // decimal branch instead of the full 64-bit hex form. (Both encode the
+    // same movabs; this pins the intended branch.)
+    {
+        cider::ModuleIR mod;
+        auto fn = std::make_unique<cider::FunctionIR>("main", cider::IRType::I32);
+        auto blk = std::make_unique<cider::BasicBlock>("entry");
+        blk->addInstruction({cider::IROp::CVT_ITOF,
+                             cider::IRValue::Register("big", cider::IRType::F64),
+                             {cider::IRValue::Constant((int64_t)5000000000LL, cider::IRType::I64)}});
+        blk->addInstruction({cider::IROp::CVT_ITOF,
+                             cider::IRValue::Register("neg", cider::IRType::F64),
+                             {cider::IRValue::Constant((int64_t)-100, cider::IRType::I64)}});
+        blk->addInstruction({cider::IROp::RET, std::nullopt,
+                             {cider::IRValue::Register("big", cider::IRType::F64)}});
+        fn->addBlock(std::move(blk));
+        mod.addFunction(std::move(fn));
+        std::string path = "<tmp>/codegen_cvtimm.asm";
+        cider::CodeGenerator cg;
+        CHECK(cg.generate(mod, path));
+        std::ifstream in(path);
+        std::ostringstream ss;
+        ss << in.rdbuf();
+        std::string asmText = ss.str();
+        CHECK(asmText.find("mov rax, 0x12A05F200") != std::string::npos);  // 5000000000
+        CHECK(asmText.find("mov rax, 5000000000") == std::string::npos);
+        CHECK(asmText.find("mov rax, -100") != std::string::npos);        // in-range stays decimal
+    }
+
     // CID-003 follow-up (I3): an integer RHS in a float compound
     // assignment converts before the arithmetic (`addsd xmm0, 1` does not
     // assemble).

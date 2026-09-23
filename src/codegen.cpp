@@ -552,8 +552,8 @@ bool CodeGenerator::generate(ModuleIR& module, const std::string& outputPath,
                             srcT == IRType::U32 || srcT == IRType::BOOL) {
                             // 32-bit mov zero-extends into rax.
                             addText("    mov eax, " + fmtImm((int64_t)bits, srcT));
-                        } else if (bits <= (uint64_t)INT32_MAX ||
-                                   (int64_t)bits >= (int64_t)INT32_MIN) {
+                        } else if ((int64_t)bits >= (int64_t)INT32_MIN &&
+                                   (int64_t)bits <= (int64_t)INT32_MAX) {
                             // mov r64, imm32 sign-extends.
                             addText("    mov rax, " + std::to_string((int64_t)bits));
                         } else {
