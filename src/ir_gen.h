@@ -1446,9 +1446,20 @@ public:
                 type = {"bool", 0};
             } else if (expr.getOperator() == "-") {
                 IRType irType = (type.pointerLevel > 0) ? IRType::PTR : mapType(type.name);
-                IRValue dest = IRValue::Register(nextTemp(), irType);
-                currentBlock_->addInstruction({IROp::SUB, dest, {IRValue::Constant(0, irType), operand}});
-                lastValue_ = dest;
+                if ((irType == IRType::F32 || irType == IRType::F64) &&
+                    operand.kind == IRValue::CONSTANT) {
+                    // CID-003 follow-up (M2): fold -literal to a negative
+                    // float constant. `0.0 - 0.1` ran at the literal's f32
+                    // width, so a later f64 context could only widen the
+                    // f32 result — `var b: f64 = -0.1` was not the nearest
+                    // double to -0.1. Keeping it a constant lets
+                    // convertFloatWidth carry the parsed double.
+                    lastValue_ = IRValue::Constant(-operand.constValue, irType);
+                } else {
+                    IRValue dest = IRValue::Register(nextTemp(), irType);
+                    currentBlock_->addInstruction({IROp::SUB, dest, {IRValue::Constant(0, irType), operand}});
+                    lastValue_ = dest;
+                }
             } else {
                 lastValue_ = operand;
             }

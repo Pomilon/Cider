@@ -428,6 +428,23 @@ int run() {
         CHECK(sawArr);
     }
 
+    // CID-003 follow-up (M2): -0.1 in an f64 global keeps the nearest
+    // double, not the f32 literal widened to f64.
+    {
+        auto module = genModuleSrc(
+            "var b: f64 = -0.1;\nfunc main() -> int { return 0; }\n");
+        bool sawB = false;
+        for (const auto& var : module.getGlobalVars()) {
+            if (var.name != "b") continue;
+            sawB = true;
+            CHECK(var.initialIsFloat);
+            uint64_t bits = 0;
+            double expected = -0.1;
+            std::memcpy(&bits, &expected, sizeof(bits));
+            CHECK(var.initialValue == (int64_t)bits);
+        }
+        CHECK(sawB);
+    }
     return 0;
 }
 
