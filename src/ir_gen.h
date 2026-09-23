@@ -1790,11 +1790,15 @@ public:
     }
 
     // CID-003 follow-up (M5): common comparison domain for mixed
-    // signed/unsigned integer operands. C usual conversions: equal widths
-    // (or a wider unsigned operand) compare in the unsigned domain — the
-    // signed side converts to the unsigned type, wrapping modulo 2^width;
-    // a wider signed operand represents every narrower unsigned value, so
-    // the unsigned side converts to it and the compare stays signed.
+    // signed/unsigned integer operands. Equal widths (or a wider unsigned
+    // operand) compare in the unsigned domain — the signed side converts
+    // to the unsigned type, wrapping modulo 2^width; a wider signed operand
+    // represents every narrower unsigned value, so the unsigned side
+    // converts to it and the compare stays signed. This matches C usual
+    // arithmetic conversions for 32/64-bit pairs, with one deliberate
+    // deviation (recorded in the f64 design decisions log): equal-width
+    // narrow pairs (i8/u8, i16/u16) also compare unsigned, where C integer
+    // promotion would compare them signed after promotion to int.
     // Pairs with the same signedness return VOID: the existing per-operand
     // widening in codegen/VM already compares them correctly. BOOL counts
     // as signed 32-bit here, matching codegen's setcc selection.
