@@ -89,6 +89,30 @@ int run() {
         "func main() -> void { var a: int = 6; var b: int = 3; var c: int = a & b; var d: int = a << b; }\n");
     CHECK(okBit.empty());
 
+    // CID-003 follow-up (W5): compound assignments with no float lowering
+    // are rejected like their binary forms; the checker used to accept them
+    // and codegen emitted divsd while the VM threw at runtime.
+    auto eModAssign = checkSrc(
+        "func main() -> void { var a: f64 = 5.0; a %= 2; }\n");
+    CHECK(hasError(eModAssign, "Modulo operator '%' requires integer operands"));
+    auto eModAssignRhs = checkSrc(
+        "func main() -> void { var a: int = 5; a %= 2.5; }\n");
+    CHECK(hasError(eModAssignRhs, "Modulo operator '%' requires integer operands"));
+    auto eAndAssign = checkSrc(
+        "func main() -> void { var a: float = 5.0; a &= 2; }\n");
+    CHECK(hasError(eAndAssign, "Bitwise operator '&' requires integer operands"));
+    auto eOrAssign = checkSrc(
+        "func main() -> void { var a: f64 = 5.0; a |= 2; }\n");
+    CHECK(hasError(eOrAssign, "Bitwise operator '|' requires integer operands"));
+    auto eXorAssign = checkSrc(
+        "func main() -> void { var a: float = 5.0; a ^= 2; }\n");
+    CHECK(hasError(eXorAssign, "Bitwise operator '^' requires integer operands"));
+    // Integer compound operations and float arithmetic compounds still work.
+    auto okCompound = checkSrc(
+        "func main() -> void { var i: int = 7; i %= 3; i &= 2; i |= 1; i ^= 4;\n"
+        "  var f: float = 1.0; f += 1; f *= 2; f -= 3; f /= 4; }\n");
+    CHECK(okCompound.empty());
+
     // Return values are typed but NOT checked against the function's
     // return type (parity with main — the IR phase enforces it).
     auto e3 = checkSrc("func f() -> int { return \"s\"; }\nfunc main() -> void { }\n");

@@ -1,0 +1,17 @@
+// CID-003 follow-up (W5): compound assignments have no float lowering for
+// `%=` and the bitwise operators, so they are rejected like their binary
+// forms instead of reaching codegen (silent divsd) or the VM (runtime
+// throw).
+func main() -> int {
+  var a: f64 = 5.0;
+  a %= 2;      // f64 target
+  var b: f64 = 6.0;
+  b &= 2;      // f64 target
+  var c: float = 3.0;
+  c |= 1;      // float target
+  var d: f64 = 4.0;
+  d ^= 2;      // f64 target
+  var e: int = 5;
+  e %= 2.5;    // float value
+  return 0;
+}

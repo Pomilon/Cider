@@ -511,6 +511,22 @@ public:
                       ", got " + canonicalizeNominal(valueType).toString(),
                   stmt.getLine());
         }
+
+        // CID-003 follow-up (W5): compound assignments mirror the binary
+        // operator rules — `%=` and the bitwise operators have no float
+        // lowering, so float-family operands are rejected here instead of
+        // reaching codegen (silent divsd) or the VM (runtime throw).
+        const std::string& op = stmt.getOp();
+        if (!op.empty()) {
+            bool targetFloat = isFloatName(targetType.name) && targetType.pointerLevel == 0;
+            bool valueFloat = isFloatName(valueType.name) && valueType.pointerLevel == 0;
+            if (op == "%" && (targetFloat || valueFloat)) {
+                error("Modulo operator '%' requires integer operands", stmt.getLine());
+            }
+            if ((op == "&" || op == "|" || op == "^") && (targetFloat || valueFloat)) {
+                error("Bitwise operator '" + op + "' requires integer operands", stmt.getLine());
+            }
+        }
     }
 
     void visit(BinaryExpr& expr) override {
