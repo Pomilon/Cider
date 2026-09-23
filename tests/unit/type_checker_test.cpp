@@ -151,6 +151,27 @@ int run() {
         "func main() -> void { }\n");
     CHECK(okFloatGlobals.empty());
 
+    // CID-003 follow-up (W6): type aliases resolve to their underlying
+    // float type before the check, so `type Real = f64` cannot bypass it.
+    auto eFloatGlobalAlias = checkSrc(
+        "type Real = f64;\n"
+        "func give() -> f64 { return 1.0; }\n"
+        "var g: Real = give();\n"
+        "func main() -> void { }\n");
+    CHECK(hasError(eFloatGlobalAlias,
+                   "Global float initializer in declaration of 'g' must use constant expressions"));
+    // Aliased constants stay legal, as do non-float and pointer aliases.
+    auto okFloatGlobalAlias = checkSrc(
+        "type Real = f64;\n"
+        "type Whole = int;\n"
+        "type RealPtr = f64*;\n"
+        "var a: Real = 2.5;\n"
+        "var b: Real = 5;\n"
+        "var c: Whole = 7;\n"
+        "var p: RealPtr = nilPtr;\n"
+        "func main() -> void { }\n");
+    CHECK(okFloatGlobalAlias.empty());
+
     // Class pointer covariance.
     auto ok3 = checkSrc(
         "class Base { var a: int; }\n"

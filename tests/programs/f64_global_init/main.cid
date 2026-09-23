@@ -21,6 +21,11 @@ var f_arr: [float; 2] = [3, 4];
 // `as float` is a runtime f32 round (MOV), so the global must match the
 // local and must NOT be the raw parsed double.
 var g_cast: f64 = 0.1 as float;
+// CID-003 follow-up (W6): an aliased float global resolves through the
+// symbol table; its constant initializer still folds into the f64 slot
+// exactly like a direct declaration.
+type Real = f64;
+var g_alias: Real = 2.5;
 
 from std.io import printF64, printFloat, print;
 
@@ -39,6 +44,7 @@ func main() -> int {
   var l_cast: f64 = 0.1 as float;
   if (g_cast != l_cast) { return 12; }
   if (g_cast == 0.1) { return 13; }
+  if (g_alias != 2.5) { return 14; }
   printF64(g_int); print("\n");
   printF64(g_expr); print("\n");
   printFloat(g_f32); print("\n");
@@ -46,5 +52,6 @@ func main() -> int {
   printF64(g_signeddiv); print("\n");
   printF64(g_arr[1]); print("\n");
   printFloat(f_arr[0]); print("\n");
+  printF64(g_alias); print("\n");
   return 0;
 }

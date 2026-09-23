@@ -9,6 +9,13 @@ var g2: float = give();
 
 var g3: f64 = 1.0 + 2.0;  // constant shape: still accepted
 
+// CID-003 follow-up (W6): a type alias to a float type must not bypass the
+// rule; ir_gen's mapType resolves the alias to F64, so the non-constant
+// initializer still silently reads 0.0. The constant alias form is legal.
+type Real = f64;
+var g4: Real = give();
+var g5: Real = 2.5;  // constant shape: still accepted
+
 func main() -> int {
   return 0;
 }

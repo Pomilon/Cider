@@ -506,16 +506,22 @@ public:
 
         if (inClassFieldDecl_) return;  // see visit(ClassDeclStmt)
 
-        // CID-003 follow-up (W5): float-typed globals have no runtime
+        // CID-003 follow-up (W5/W6): float-typed globals have no runtime
         // initializer; a non-constant initializer silently reads 0.0 on
         // every backend (the IR folds only constant shapes). Mirror the
         // global-array rule. Module scopes count as global (scopeDepth 0).
+        // Resolve the declared type through the symbol table first, as
+        // ir_gen's mapType does, so an alias (`type Real = f64`) cannot
+        // bypass the check and BSS-zero the slot.
         if (stmt.getInitializer() && symbolTable_.scopeDepth() == 0 &&
-            declaredType.pointerLevel == 0 && !declaredType.isArray &&
-            isFloatName(declaredType.name) &&
-            !isConstFloatExpr(stmt.getInitializer())) {
-            error("Global float initializer in declaration of '" + stmt.getName() +
-                      "' must use constant expressions", stmt.getLine());
+            declaredType.pointerLevel == 0 && !declaredType.isArray) {
+            TypeInfo resolvedType = resolveType(declaredType);
+            if (resolvedType.pointerLevel == 0 && !resolvedType.isArray &&
+                isFloatName(resolvedType.name) &&
+                !isConstFloatExpr(stmt.getInitializer())) {
+                error("Global float initializer in declaration of '" + stmt.getName() +
+                          "' must use constant expressions", stmt.getLine());
+            }
         }
 
         auto sym = std::make_shared<Symbol>();
