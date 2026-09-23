@@ -66,14 +66,21 @@ bool CodeGenerator::generate(ModuleIR& module, const std::string& outputPath,
         return op.find("[") != std::string::npos;
     };
 
-    std::map<double, std::string> floatConsts;
+    std::map<std::pair<double, IRType>, std::string> floatConsts;
     int floatConstCount = 0;
 
     auto getFloatConst = [&](double val, IRType t) -> std::string {
-        auto it = floatConsts.find(val);
+        // CID-003: keyed by width as well as value. F32 and F64 constants
+        // share a module and may hold the same numeric value (e.g. a
+        // folded `2.5 as f64` next to the F32 literal 2.5); a value-only
+        // key would reuse the first width's label and the other use would
+        // read the wrong number of bytes.
+        auto key = std::make_pair(val, t);
+        auto it = floatConsts.find(key);
         if (it != floatConsts.end()) return it->second;
-        std::string label = "fc" + std::to_string(floatConstCount++);
-        floatConsts[val] = label;
+        std::string label = (t == IRType::F32 ? "fc32_" : "fc64_") +
+                            std::to_string(floatConstCount++);
+        floatConsts[key] = label;
         if (t == IRType::F32)
             addData(label + ": dd " + std::to_string(val));
         else

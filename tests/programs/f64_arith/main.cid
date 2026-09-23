@@ -22,5 +22,16 @@ func main() -> int {
   var x: f64 = 16777217.0 as f64;
   var z: f64 = 16777216.0;
   if (x - z != 1.0) { return 10; }
+  // CID-003 review round 2: the constant pool must be width-aware. 2.5 is
+  // first requested as F64 (folded `as f64` cast) and must still read as
+  // F32; 3.5 is first requested as F32 and must still read as F64.
+  var b64: f64 = 2.5 as f64;
+  var b32: float = 2.5;
+  if (b64 != 2.5) { return 11; }
+  if (b32 != 2.5) { return 12; }
+  var c32: float = 3.5;
+  var c64: f64 = 3.5 as f64;
+  if (c32 != 3.5) { return 13; }
+  if (c64 != 3.5) { return 14; }
   return 0;
 }
