@@ -816,16 +816,11 @@ public:
                             // CID-003: parameter widths drive argument
                             // conversion here too (m.parameterTypes has no
                             // hidden `this`, which is passed separately).
-                            size_t argIdx = 0;
                             for (auto& arg : expr.getArgs()) {
                                 arg->accept(*this);
-                                IRValue av = lastValue_;
-                                if (argIdx < m.parameterTypes.size()) {
-                                    av = convertValueToType(av, m.parameterTypes[argIdx]);
-                                }
-                                args.push_back(av);
-                                argIdx++;
+                                args.push_back(lastValue_);
                             }
+                            convertCallArgs(args, 2, m.parameterTypes);
                             IRType retIRType = (m.returnType.pointerLevel > 0) ? IRType::PTR : mapType(m.returnType.name);
                             IRValue dest = IRValue::Register(nextTemp(), retIRType);
                             IRInstruction callInstr;
@@ -902,9 +897,7 @@ public:
                     !funcSym->parameterTypes.empty()) {
                     paramBase = 1;
                 }
-                for (size_t ai = 0; ai < args.size() && ai + paramBase < funcSym->parameterTypes.size(); ++ai) {
-                    args[ai] = convertValueToType(args[ai], funcSym->parameterTypes[ai + paramBase]);
-                }
+                convertCallArgs(args, 0, funcSym->parameterTypes, paramBase);
             }
             bool calleeIsSret = isStructValueType(calleeRet, calleeDefMod);
             // Virtual callees are never sret (they stay on the malloc path);
@@ -1946,6 +1939,18 @@ public:
             return convertIntToFloat(val, targetIR);
         }
         return truncateIntToType(val, target);
+    }
+
+    // CID-003: convert call arguments to the callee's declared parameter
+    // types. `argBase` skips leading call-construction entries (an
+    // interface call's method address and data pointer); `paramBase`
+    // skips a hidden leading parameter (a method's `this`).
+    void convertCallArgs(std::vector<IRValue>& args, size_t argBase,
+                         const std::vector<TypeInfo>& paramTypes,
+                         size_t paramBase = 0) {
+        for (size_t i = 0; argBase + i < args.size() && paramBase + i < paramTypes.size(); ++i) {
+            args[argBase + i] = convertValueToType(args[argBase + i], paramTypes[paramBase + i]);
+        }
     }
 
     void visit(BinaryExpr& expr) override {
