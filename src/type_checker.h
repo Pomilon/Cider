@@ -212,6 +212,10 @@ public:
         return info;
     }
 
+    // CID-003: the float-family spellings, shared by areTypesCompatible
+    // and visit(BinaryExpr) so the two copies cannot drift.
+    static bool isFloatName(const std::string& n) { return n == "float" || n == "f64"; }
+
     bool areTypesCompatible(TypeInfo t1, TypeInfo t2) {
         if (t1.name == "wildcard" || t2.name == "wildcard") return true;
         t1 = resolveType(t1);
@@ -227,7 +231,6 @@ public:
             return name == "int" || name == "u8" || name == "i8" || name == "u16" || name == "i16" ||
                    name == "u32" || name == "i32" || name == "u64" || name == "i64" || name == "char" || name == "byte";
         };
-        auto isFloatName = [](const std::string& n) { return n == "float" || n == "f64"; };
 
         if (isFloatName(t1.name) && isInteger(t2.name) && t1.pointerLevel == 0 && t2.pointerLevel == 0) return true;
         if (isFloatName(t1.name) && isFloatName(t2.name) && t1.pointerLevel == 0 && t2.pointerLevel == 0) return true;
@@ -521,7 +524,6 @@ public:
             return name == "int" || name == "u8" || name == "i8" || name == "u16" || name == "i16" ||
                    name == "u32" || name == "i32" || name == "u64" || name == "i64" || name == "char" || name == "byte";
         };
-        auto isFloatName = [](const std::string& n) { return n == "float" || n == "f64"; };
 
         std::string op = expr.getOperator();
 
