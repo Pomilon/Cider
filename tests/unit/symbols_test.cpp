@@ -47,6 +47,51 @@ int run() {
     cider::TypeInfo b{"int", 0};
     cider::TypeInfo c{"int", 1};
     CHECK(a == b && a != c);
+
+    // CID-006: fn(...) types carry their signature; equality is exact.
+    auto fnAst = std::make_unique<cider::TypeAST>("fn", 0, 1, 1);
+    std::vector<std::unique_ptr<cider::TypeAST>> fnParams;
+    fnParams.push_back(std::make_unique<cider::TypeAST>("int", 0, 1, 1));
+    fnParams.push_back(std::make_unique<cider::TypeAST>("int", 0, 1, 1));
+    fnAst->setFunctionSignature(std::move(fnParams),
+                                std::make_unique<cider::TypeAST>("int", 0, 1, 1));
+    CHECK(fnAst->isFunctionType());
+    CHECK(fnAst->getFnParamTypes().size() == 2);
+    CHECK(fnAst->getFnReturnType() != nullptr);
+
+    cider::TypeInfo f1 = cider::TypeInfo::fromAST(fnAst.get());
+    CHECK(f1.isFunctionPointer);
+    CHECK(f1.fnParamTypes && f1.fnParamTypes->size() == 2);
+    CHECK(f1.toString() == "fn(int, int) -> int");
+    CHECK((f1 != cider::TypeInfo{"int", 0}));
+    CHECK((f1 != cider::TypeInfo{"void", 1}));
+
+    cider::TypeInfo f1copy = f1;
+    CHECK(f1 == f1copy);
+
+    auto fnAst2 = std::make_unique<cider::TypeAST>("fn", 0, 1, 1);
+    std::vector<std::unique_ptr<cider::TypeAST>> fnParams2;
+    fnParams2.push_back(std::make_unique<cider::TypeAST>("int", 0, 1, 1));
+    fnAst2->setFunctionSignature(std::move(fnParams2),
+                                 std::make_unique<cider::TypeAST>("int", 0, 1, 1));
+    cider::TypeInfo f2 = cider::TypeInfo::fromAST(fnAst2.get());
+    CHECK(f1 != f2);
+    CHECK(f2.toString() == "fn(int) -> int");
+
+    // Array of function pointers keeps the element signature and the size.
+    auto fnBase = std::make_unique<cider::TypeAST>("fn", 0, 1, 1);
+    std::vector<std::unique_ptr<cider::TypeAST>> fnBaseParams;
+    fnBaseParams.push_back(std::make_unique<cider::TypeAST>("int", 0, 1, 1));
+    fnBase->setFunctionSignature(std::move(fnBaseParams),
+                                 std::make_unique<cider::TypeAST>("int", 0, 1, 1));
+    auto fnArr = std::make_unique<cider::ArrayTypeAST>(std::move(fnBase), 2, 1, 1);
+    cider::TypeInfo fa = cider::TypeInfo::fromAST(fnArr.get());
+    CHECK(fa.isArray && fa.isFunctionPointer && fa.arraySize == 2);
+    CHECK(fa.toString() == "[fn(int) -> int; 2]");
+
+    cider::TypeInfo fa3 = fa;
+    fa3.arraySize = 3;
+    CHECK(fa != fa3);
     return 0;
 }
 

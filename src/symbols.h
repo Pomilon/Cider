@@ -24,9 +24,30 @@ struct TypeInfo {
     bool isInterface = false;
     bool isSlice = false;
 
+    // CID-006: `fn(...) -> R`. When set, fnParamTypes/fnReturnType hold the
+    // signature and name is "fn". Arrays of function pointers keep
+    // isFunctionPointer on the array wrapper (fromAST copies the element
+    // fields) so indexing recovers the element signature.
+    bool isFunctionPointer = false;
+    std::shared_ptr<std::vector<TypeInfo>> fnParamTypes = nullptr;
+    std::shared_ptr<TypeInfo> fnReturnType = nullptr;
+
     static TypeInfo fromAST(TypeAST* ast);
 
+    // Exact signature equality (spec §2): same parameter count, same
+    // parameter types, same return type.
+    bool signatureEquals(const TypeInfo& other) const {
+        if (!isFunctionPointer || !other.isFunctionPointer) return false;
+        if (!fnParamTypes || !other.fnParamTypes || !fnReturnType || !other.fnReturnType) return false;
+        return *fnParamTypes == *other.fnParamTypes && *fnReturnType == *other.fnReturnType;
+    }
+
     bool operator==(const TypeInfo& other) const {
+        if (isFunctionPointer || other.isFunctionPointer) {
+            return isFunctionPointer == other.isFunctionPointer &&
+                   isArray == other.isArray && arraySize == other.arraySize &&
+                   signatureEquals(other);
+        }
         return name == other.name && pointerLevel == other.pointerLevel &&
                isArray == other.isArray && arraySize == other.arraySize &&
                isVolatile == other.isVolatile && isInterface == other.isInterface &&
@@ -35,12 +56,35 @@ struct TypeInfo {
 
     bool operator!=(const TypeInfo& other) const { return !(*this == other); }
 
+    // Canonical diagnostic spelling: `fn(int, int) -> int`.
+    std::string functionPointerToString() const {
+        std::string res = "fn(";
+        if (fnParamTypes) {
+            for (size_t i = 0; i < fnParamTypes->size(); ++i) {
+                if (i) res += ", ";
+                res += (*fnParamTypes)[i].toString();
+            }
+        }
+        res += ") -> ";
+        res += fnReturnType ? fnReturnType->toString() : "void";
+        return res;
+    }
+
     std::string toString() const {
         std::string res = "";
         if (isVolatile) res += "volatile ";
         for (int i = 0; i < pointerLevel; ++i) res += "*";
         if (isArray) {
-            res += "[" + name + "; " + std::to_string(arraySize) + "]";
+            if (isFunctionPointer) {
+                TypeInfo elem = *this;
+                elem.isArray = false;
+                elem.arraySize = 0;
+                res += "[" + elem.toString() + "; " + std::to_string(arraySize) + "]";
+            } else {
+                res += "[" + name + "; " + std::to_string(arraySize) + "]";
+            }
+        } else if (isFunctionPointer) {
+            res += functionPointerToString();
         } else {
             res += name;
         }

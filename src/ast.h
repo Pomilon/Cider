@@ -100,7 +100,28 @@ public:
     int getPointerLevel() const { return pointerLevel_; }
     bool isVolatile() const { return isVolatile_; }
 
+    // CID-006: `fn(T1, T2) -> R` in type position.
+    bool isFunctionType() const { return isFunctionType_; }
+    const std::vector<std::unique_ptr<TypeAST>>& getFnParamTypes() const { return fnParamTypes_; }
+    TypeAST* getFnReturnType() const { return fnReturnType_.get(); }
+    void setFunctionSignature(std::vector<std::unique_ptr<TypeAST>> params,
+                              std::unique_ptr<TypeAST> ret) {
+        isFunctionType_ = true;
+        fnParamTypes_ = std::move(params);
+        fnReturnType_ = std::move(ret);
+    }
+
     void dump(std::string& out, int /*depth*/) const override {
+        if (isFunctionType_) {
+            out += "fn(";
+            for (size_t i = 0; i < fnParamTypes_.size(); ++i) {
+                if (i) out += ", ";
+                fnParamTypes_[i]->dump(out, 0);
+            }
+            out += ") -> ";
+            if (fnReturnType_) fnReturnType_->dump(out, 0);
+            return;
+        }
         out += name_;
         out.append(static_cast<size_t>(pointerLevel_), '*');
     }
@@ -109,6 +130,9 @@ private:
     std::string name_;
     int pointerLevel_;
     bool isVolatile_;
+    bool isFunctionType_ = false;
+    std::vector<std::unique_ptr<TypeAST>> fnParamTypes_;
+    std::unique_ptr<TypeAST> fnReturnType_;
 };
 
 class ArrayTypeAST : public TypeAST {

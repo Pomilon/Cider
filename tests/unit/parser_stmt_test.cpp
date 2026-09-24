@@ -26,6 +26,27 @@ int run() {
     CHECK(!rep.hasErrors());
     CHECK(d.find("(ConstDecl C int = (Number 10))") != std::string::npos);
 
+    // CID-006: function-pointer type spelling.
+    rep.clear();
+    d = parseDump("var f: fn(int, int) -> int = add;\n", rep);
+    CHECK(!rep.hasErrors());
+    CHECK(d.find("(VarDecl f fn(int, int) -> int = (Ident add))") != std::string::npos);
+
+    rep.clear();
+    d = parseDump("func pick(cb: fn(int) -> void) -> fn(int) -> int { return cb; }\n", rep);
+    CHECK(!rep.hasErrors());
+    CHECK(d.find("(FunctionDecl pick (params (cb fn(int) -> void)) (returns fn(int) -> int) (body") != std::string::npos);
+
+    rep.clear();
+    d = parseDump("var t: [fn(int) -> int; 2] = [a, b];\n", rep);
+    CHECK(!rep.hasErrors());
+    CHECK(d.find("(VarDecl t fn(int) -> int[2]") != std::string::npos);
+
+    rep.clear();
+    d = parseDump("func f(p: fn(int) -> int) -> int { return p(1); }\n", rep);
+    CHECK(!rep.hasErrors());
+    CHECK(d.find("(FunctionDecl f (params (p fn(int) -> int)) (returns int)") != std::string::npos);
+
     // Assignment forms incl. compound.
     rep.clear();
     d = parseDump("func f() {\n  x += 2;\n  a.b[0] = foo();\n}\n", rep);

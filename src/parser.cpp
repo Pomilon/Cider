@@ -1000,6 +1000,41 @@ std::unique_ptr<Statement> Parser::parseStatement() {
     }
 }
 
+// CID-006: `fn(T1, T2, ...) -> R`. Called with the current token on '('
+// and `fn` already consumed. Parameters may be empty (`fn() -> R`); the
+// return type may be `void`.
+std::unique_ptr<TypeAST> Parser::parseFunctionPointerType(int line, int col, bool isVolatile) {
+    nextToken();  // consume '('
+    std::vector<std::unique_ptr<TypeAST>> params;
+    if (currentToken_.type != TokenType::RPAREN) {
+        while (true) {
+            auto param = parseType(false);
+            if (!param) return nullptr;
+            params.push_back(std::move(param));
+            if (currentToken_.type == TokenType::COMMA) {
+                nextToken();
+                continue;
+            }
+            break;
+        }
+    }
+    if (currentToken_.type != TokenType::RPAREN) {
+        error("Expected ')' after function-pointer parameter types.");
+        return nullptr;
+    }
+    nextToken();  // consume ')'
+    if (currentToken_.type != TokenType::ARROW) {
+        error("Expected '->' after 'fn(...)' parameter list.");
+        return nullptr;
+    }
+    nextToken();  // consume '->'
+    auto ret = parseType(false);
+    if (!ret) return nullptr;
+    auto node = std::make_unique<TypeAST>("fn", 0, line, col, isVolatile);
+    node->setFunctionSignature(std::move(params), std::move(ret));
+    return node;
+}
+
 std::unique_ptr<TypeAST> Parser::parseType(bool castContext) {
     int line = currentToken_.line;
     int col = currentToken_.column;
@@ -1092,6 +1127,13 @@ std::unique_ptr<TypeAST> Parser::parseType(bool castContext) {
         std::string typeName = currentToken_.value;
         bool isPlainIdent = (currentToken_.type == TokenType::IDENTIFIER);
         nextToken();
+
+        // CID-006: function-pointer spelling `fn(T1, T2) -> R`. `fn` is an
+        // ordinary identifier; recognize it only in type position and only
+        // when '(' follows immediately.
+        if (isPlainIdent && typeName == "fn" && currentToken_.type == TokenType::LPAREN) {
+            return parseFunctionPointerType(line, col, isVolatile);
+        }
 
         // CID-020/021 (spec §3): dotted names in type position
         // (`var e: b.Event`, full paths like `a.util.Foo`). Only a leading

@@ -92,6 +92,7 @@ private:
     std::unique_ptr<Statement> parseExportStatement();
 
     std::unique_ptr<TypeAST> parseType(bool castContext = false);
+    std::unique_ptr<TypeAST> parseFunctionPointerType(int line, int col, bool isVolatile);
     std::vector<std::unique_ptr<Statement>> parseBlockStatement();
     std::vector<std::string> parseTemplateParams();
 
