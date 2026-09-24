@@ -1,0 +1,10 @@
+define main() {
+entry:
+  %v0 = alloca 8
+  %v1 = load %v0, 0
+  store %v0, %v1, 0
+  ret 0
+main_dead0:
+  ret 
+}
+

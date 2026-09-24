@@ -736,6 +736,36 @@ int run() {
         CHECK(allocas == 3);
         CHECK(sized8 == 3);
     }
+
+    // CID-006 fix round 3: the mapType alias walk must terminate on cycles
+    // too. Assignments, same-typed copies and parameter uses of a cyclic
+    // alias used to recurse ~65k frames deep in mapType (compiler SIGSEGV)
+    // instead of falling back to the unknown-type PTR.
+    {
+        auto module = genModuleSrc(
+            "type A = B;\n"
+            "type B = A;\n"
+            "func use(v: B) -> int { return 0; }\n"
+            "func main() -> int {\n"
+            "  var x: B;\n"
+            "  x = x;\n"
+            "  var y: B = x;\n"
+            "  return use(y);\n"
+            "}\n");
+        int allocas8 = 0;
+        for (const auto& fn : module.getFunctions()) {
+            for (const auto& block : fn->getBlocks()) {
+                for (const auto& in : block->getInstructions()) {
+                    if (in.op == cider::IROp::ALLOCA && in.args.size() == 1 &&
+                        in.args[0].kind == cider::IRValue::CONSTANT &&
+                        in.args[0].intValue == 8) {
+                        allocas8++;
+                    }
+                }
+            }
+        }
+        CHECK(allocas8 == 3);  // x, y and the parameter slot
+    }
     return 0;
 }
 

@@ -165,7 +165,12 @@ public:
         }
     }
 
-    IRType mapType(const std::string& name) {
+    // CID-006 fix round 3: the alias walk is cycle-safe. `visiting` is a
+    // per-call visited set; a repeated spelling (the checker accepts cyclic
+    // aliases) falls back to PTR, the same result as an unknown name, so
+    // `type A = B; type B = A;` uses terminate instead of overflowing the
+    // stack. Acyclic spellings resolve exactly as before.
+    IRType mapTypeImpl(const std::string& name, std::set<std::string>& visiting) {
         if (name == "i8") return IRType::I8;
         if (name == "u8" || name == "byte" || name == "char") return IRType::U8;
         if (name == "i16") return IRType::I16;
@@ -179,15 +184,21 @@ public:
         if (name == "bool") return IRType::I32;
         if (name == "void") return IRType::VOID;
         // Resolve type aliases through symbol table
+        if (name.empty() || !visiting.insert(name).second) return IRType::PTR;
         auto typeSym = symbolTable_.resolve(name);
         if (typeSym && typeSym->type.pointerLevel == 0 && !typeSym->type.name.empty()) {
             std::string targetName = typeSym->type.name;
             if (targetName != name) {
-                IRType resolved = mapType(targetName);
+                IRType resolved = mapTypeImpl(targetName, visiting);
                 if (resolved != IRType::PTR) return resolved;
             }
         }
         return IRType::PTR;
+    }
+
+    IRType mapType(const std::string& name) {
+        std::set<std::string> visiting;
+        return mapTypeImpl(name, visiting);
     }
 
     // CID-006 (Task 2 F1 carry-over, fix round 2): resolve a type spelling

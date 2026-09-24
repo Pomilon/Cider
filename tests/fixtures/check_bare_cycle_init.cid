@@ -1,0 +1,9 @@
+// CID-006 fix round 3 (discriminating at d821750, where check crashed):
+// a cyclic alias with an initializer must reach the normal mismatch.
+type A = B;
+type B = A;
+
+func main() -> int {
+  var x: B = 5;
+  return 0;
+}

@@ -314,6 +314,21 @@ int run() {
         "  return 0;\n"
         "}\n");
     CHECK(hasError(cyclicAlias, "Type mismatch in declaration of 'x'"));
+
+    // CID-006 fix round 3: uses of a cyclic alias — assignment, same-typed
+    // copy and call parameter — must be accepted without recursion
+    // (checking these crashed before the round-2 visited set).
+    auto cyclicAliasUses = checkSrc(
+        "type A = B;\n"
+        "type B = A;\n"
+        "func use(v: B) -> int { return 0; }\n"
+        "func main() -> int {\n"
+        "  var x: B;\n"
+        "  x = x;\n"
+        "  var y: B = x;\n"
+        "  return use(y);\n"
+        "}\n");
+    CHECK(cyclicAliasUses.empty());
     return 0;
 }
 
