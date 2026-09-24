@@ -1,0 +1,2 @@
+Type mismatch in declaration of 'f'. Expected fn(int, int) -> int, got fn(int) -> int
+Type mismatch in declaration of 'g'. Expected fn(int) -> void, got fn(int, int) -> int

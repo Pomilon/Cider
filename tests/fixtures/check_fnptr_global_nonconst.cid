@@ -1,0 +1,5 @@
+func inc(a: int) -> int { return a + 1; }
+var local: fn(int) -> int = inc;
+var bad: fn(int) -> int = local;
+
+func main() -> int { return 0; }

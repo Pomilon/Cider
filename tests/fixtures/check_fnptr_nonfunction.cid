@@ -1,0 +1,5 @@
+func main() -> int {
+  var f: fn(int) -> int = 42;
+  var g: fn(int) -> int = "x";
+  return 0;
+}

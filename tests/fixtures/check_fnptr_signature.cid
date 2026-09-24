@@ -1,0 +1,8 @@
+func inc(a: int) -> int { return a + 1; }
+func add2(a: int, b: int) -> int { return a + b; }
+
+func main() -> int {
+  var f: fn(int, int) -> int = inc;
+  var g: fn(int) -> void = add2;
+  return 0;
+}

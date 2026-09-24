@@ -1,0 +1,1 @@
+Global function pointer initializer in declaration of 'bad' must be a function name or nilPtr
