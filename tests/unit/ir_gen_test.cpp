@@ -137,6 +137,20 @@ int run() {
     CHECK(d.find("call putchar") != std::string::npos);
     CHECK(d.find("mod_m__putchar") == std::string::npos);
 
+    // CID-006 F1: `extern var` is linker-provided DATA. ir_gen registers it
+    // via addExternVariable — not addExternFunction — so the VM never turns
+    // a variable read into a function VALUE.
+    {
+        cider::ModuleIR m = genModuleSrc(
+            "extern var errno: int;\n"
+            "extern func putchar(c: char) -> int;\n"
+            "func main() -> int {\n  return errno;\n}\n");
+        CHECK(m.getExternVariables().size() == 1);
+        CHECK(m.getExternVariables()[0] == "errno");
+        CHECK(m.getExternFunctions().size() == 1);
+        CHECK(m.getExternFunctions()[0] == "putchar");
+    }
+
     // `main` calls stay bare even with module provenance.
     d = genSrcWithProvenance("func main() -> int {\n  return main();\n}\n", "main", "m");
     CHECK(d.find("define main() {") != std::string::npos);

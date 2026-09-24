@@ -56,12 +56,17 @@ int run() {
     module.addStringData("str0: db 'hi', 0");
     module.addVTable("A", {"A_m"});
     module.addExternFunction("puts");
+    module.addExternVariable("errno");
     module.addGlobalAsm("global _start");
     CHECK(module.getFunctions().size() == 1);
     CHECK(module.getGlobalVars().size() == 2);
     CHECK(module.getGlobalVars()[1].arraySize == 100);
     CHECK(module.getVTables().at("A")[0] == "A_m");
     CHECK(module.getExternFunctions()[0] == "puts");
+    // CID-006 F1: extern variables are DATA symbols, kept out of the
+    // function list so the VM cannot treat a variable read as a function.
+    CHECK(module.getExternVariables()[0] == "errno");
+    CHECK(module.getExternFunctions().size() == 1);
     CHECK(module.getGlobalAsm()[0] == "global _start");
     return 0;
 }

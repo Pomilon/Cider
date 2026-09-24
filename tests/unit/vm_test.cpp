@@ -445,6 +445,251 @@ int run() {
         }
         CHECK(threw);
     }
+
+    // CID-006 F1: a linker-provided DATA symbol registered as an extern
+    // function (the shape ir_gen emitted for `extern var errno`) must never
+    // be turned into a function VALUE. Reading its value used to fabricate
+    // a negative "function id" and LOAD it with no negative-address guard,
+    // memcpy-ing from heap_.data()-1 (host UB, silent garbage exit code).
+    {
+        auto fn = makeFn("main", cider::IRType::I32);
+        auto e = std::make_unique<cider::BasicBlock>("entry");
+        e->addInstruction(opInstr(cider::IROp::ALLOCA, "v0",
+                                  {cider::IRValue::Constant(4, cider::IRType::I32)}));
+        cider::IRInstruction ld;
+        ld.op = cider::IROp::LOAD;
+        ld.dest = cider::IRValue::Register("v", cider::IRType::I32);
+        ld.args = {cider::IRValue::Label("errno")};
+        e->addInstruction(ld);
+        cider::IRInstruction ret;
+        ret.op = cider::IROp::RET;
+        ret.args = {cider::IRValue::Constant(0, cider::IRType::I32)};
+        e->addInstruction(ret);
+        fn->addBlock(std::move(e));
+
+        cider::ModuleIR mod;
+        mod.addExternFunction("errno");  // extern data symbol
+        mod.addFunction(std::move(fn));
+        cider::VM vm;
+        bool threw = false;
+        try {
+            vm.run(mod);
+        } catch (const cider::VMError& e) {
+            threw = true;
+            CHECK(e.message.find("negative address") != std::string::npos);
+        }
+        CHECK(threw);  // before the fix: no throw, silent OOB read
+    }
+
+    // CID-006 F1 (front-end shape): ir_gen now registers `extern var` via
+    // addExternVariable, so a value read cannot resolve to any function id
+    // and fails with the pre-CID-006 clean unresolved-label error.
+    {
+        auto fn = makeFn("main", cider::IRType::I32);
+        auto e = std::make_unique<cider::BasicBlock>("entry");
+        e->addInstruction(opInstr(cider::IROp::ALLOCA, "v0",
+                                  {cider::IRValue::Constant(4, cider::IRType::I32)}));
+        cider::IRInstruction ld;
+        ld.op = cider::IROp::LOAD;
+        ld.dest = cider::IRValue::Register("v", cider::IRType::I32);
+        ld.args = {cider::IRValue::Label("errno")};
+        e->addInstruction(ld);
+        cider::IRInstruction ret;
+        ret.op = cider::IROp::RET;
+        ret.args = {cider::IRValue::Constant(0, cider::IRType::I32)};
+        e->addInstruction(ret);
+        fn->addBlock(std::move(e));
+
+        cider::ModuleIR mod;
+        mod.addExternVariable("errno");
+        mod.addFunction(std::move(fn));
+        cider::VM vm;
+        bool threw = false;
+        try {
+            vm.run(mod);
+        } catch (const cider::VMError& e) {
+            threw = true;
+            CHECK(e.message.find("unresolved label errno") != std::string::npos);
+        }
+        CHECK(threw);
+        // The split must not leak the variable into the function list.
+        CHECK(mod.getExternFunctions().empty());
+    }
+
+    // CID-006 F3: the `<g>: dq <extern>` global-cell branch materializes the
+    // synthetic extern id (negative), which is non-nil and dispatchable.
+    {
+        auto fn = makeFn("main", cider::IRType::I32);
+        auto e = std::make_unique<cider::BasicBlock>("entry");
+        cider::IRInstruction ld;
+        ld.op = cider::IROp::LOAD;
+        ld.dest = cider::IRValue::Register("gfp", cider::IRType::PTR);
+        ld.args = {cider::IRValue::Label("gext"), cider::IRValue::Constant(0, cider::IRType::I32)};
+        e->addInstruction(ld);
+        cider::IRInstruction cmp;
+        cmp.op = cider::IROp::CMP_NE;
+        cmp.dest = cider::IRValue::Register("gne", cider::IRType::I32);
+        cmp.args = {cider::IRValue::Register("gfp", cider::IRType::PTR),
+                    cider::IRValue::Constant(0, cider::IRType::PTR)};
+        e->addInstruction(cmp);
+        cider::IRInstruction call;
+        call.op = cider::IROp::CALL;
+        call.dest = cider::IRValue::Register("gr", cider::IRType::I32);
+        call.args = {cider::IRValue::Register("gfp", cider::IRType::PTR),
+                     cider::IRValue::Constant(66, cider::IRType::I32)};
+        e->addInstruction(call);
+        cider::IRInstruction ret;
+        ret.op = cider::IROp::RET;
+        ret.args = {cider::IRValue::Register("gne", cider::IRType::I32)};
+        e->addInstruction(ret);
+        fn->addBlock(std::move(e));
+
+        cider::ModuleIR mod;
+        mod.addStringData("gext: dq putchar");
+        mod.addExternFunction("putchar");
+        mod.addFunction(std::move(fn));
+        cider::VM vm;
+        auto r = vm.run(mod);
+        CHECK(r.exitCode == 1);  // extern id != nilPtr
+        CHECK(r.stdoutText == "B");
+    }
+
+    // CID-006 F3: extern builtin values dispatch through indirect calls,
+    // including malloc/free (not just the already-covered putchar).
+    {
+        auto fn = makeFn("main", cider::IRType::I32);
+        auto e = std::make_unique<cider::BasicBlock>("entry");
+        // slot = malloc; call it with 16 -> ptr
+        e->addInstruction(opInstr(cider::IROp::ALLOCA, "m",
+                                  {cider::IRValue::Constant(8, cider::IRType::I32)}));
+        cider::IRInstruction stm;
+        stm.op = cider::IROp::STORE;
+        stm.args = {cider::IRValue::Register("m", cider::IRType::PTR),
+                    cider::IRValue::Label("malloc"),
+                    cider::IRValue::Constant(0, cider::IRType::I32)};
+        e->addInstruction(stm);
+        cider::IRInstruction ldm;
+        ldm.op = cider::IROp::LOAD;
+        ldm.dest = cider::IRValue::Register("mfp", cider::IRType::PTR);
+        ldm.args = {cider::IRValue::Register("m", cider::IRType::PTR),
+                    cider::IRValue::Constant(0, cider::IRType::I32)};
+        e->addInstruction(ldm);
+        cider::IRInstruction callm;
+        callm.op = cider::IROp::CALL;
+        callm.dest = cider::IRValue::Register("ptr", cider::IRType::PTR);
+        callm.args = {cider::IRValue::Register("mfp", cider::IRType::PTR),
+                      cider::IRValue::Constant(16, cider::IRType::I32)};
+        e->addInstruction(callm);
+        // call free value on that pointer
+        e->addInstruction(opInstr(cider::IROp::ALLOCA, "f",
+                                  {cider::IRValue::Constant(8, cider::IRType::I32)}));
+        cider::IRInstruction stf;
+        stf.op = cider::IROp::STORE;
+        stf.args = {cider::IRValue::Register("f", cider::IRType::PTR),
+                    cider::IRValue::Label("free"),
+                    cider::IRValue::Constant(0, cider::IRType::I32)};
+        e->addInstruction(stf);
+        cider::IRInstruction ldf;
+        ldf.op = cider::IROp::LOAD;
+        ldf.dest = cider::IRValue::Register("ffp", cider::IRType::PTR);
+        ldf.args = {cider::IRValue::Register("f", cider::IRType::PTR),
+                    cider::IRValue::Constant(0, cider::IRType::I32)};
+        e->addInstruction(ldf);
+        cider::IRInstruction callf;
+        callf.op = cider::IROp::CALL;
+        callf.args = {cider::IRValue::Register("ffp", cider::IRType::PTR),
+                      cider::IRValue::Register("ptr", cider::IRType::PTR)};
+        e->addInstruction(callf);
+        // return (ptr != 0)
+        cider::IRInstruction cmp;
+        cmp.op = cider::IROp::CMP_NE;
+        cmp.dest = cider::IRValue::Register("ne", cider::IRType::I32);
+        cmp.args = {cider::IRValue::Register("ptr", cider::IRType::PTR),
+                    cider::IRValue::Constant(0, cider::IRType::PTR)};
+        e->addInstruction(cmp);
+        cider::IRInstruction ret;
+        ret.op = cider::IROp::RET;
+        ret.args = {cider::IRValue::Register("ne", cider::IRType::I32)};
+        e->addInstruction(ret);
+        fn->addBlock(std::move(e));
+
+        cider::ModuleIR mod;
+        mod.addFunction(std::move(fn));
+        cider::VM vm;
+        CHECK(vm.run(mod).exitCode == 1);
+    }
+
+    // CID-006 F3: an unknown negative id is rejected as a bad function id
+    // (it must not be misread as an extern id).
+    {
+        auto fn = makeFn("main", cider::IRType::I32);
+        auto e = std::make_unique<cider::BasicBlock>("entry");
+        cider::IRInstruction call;
+        call.op = cider::IROp::CALL;
+        call.dest = cider::IRValue::Register("x", cider::IRType::I32);
+        call.args = {cider::IRValue::Constant(-42, cider::IRType::PTR)};
+        e->addInstruction(call);
+        cider::IRInstruction ret;
+        ret.op = cider::IROp::RET;
+        ret.args = {cider::IRValue::Constant(0, cider::IRType::I32)};
+        e->addInstruction(ret);
+        fn->addBlock(std::move(e));
+
+        cider::ModuleIR mod;
+        mod.addFunction(std::move(fn));
+        cider::VM vm;
+        bool threw = false;
+        try {
+            vm.run(mod);
+        } catch (const cider::VMError& err) {
+            threw = true;
+            CHECK(err.message.find("bad function id") != std::string::npos);
+        }
+        CHECK(threw);
+    }
+
+    // CID-006 F2: a valid non-builtin extern called through its value gets
+    // a name-bearing error instead of a bare `call: bad function id`.
+    {
+        auto fn = makeFn("main", cider::IRType::I32);
+        auto e = std::make_unique<cider::BasicBlock>("entry");
+        e->addInstruction(opInstr(cider::IROp::ALLOCA, "eseam",
+                                  {cider::IRValue::Constant(8, cider::IRType::I32)}));
+        cider::IRInstruction st;
+        st.op = cider::IROp::STORE;
+        st.args = {cider::IRValue::Register("eseam", cider::IRType::PTR),
+                   cider::IRValue::Label("ext_fn"),
+                   cider::IRValue::Constant(0, cider::IRType::I32)};
+        e->addInstruction(st);
+        cider::IRInstruction ld;
+        ld.op = cider::IROp::LOAD;
+        ld.dest = cider::IRValue::Register("efp2", cider::IRType::PTR);
+        ld.args = {cider::IRValue::Register("eseam", cider::IRType::PTR),
+                   cider::IRValue::Constant(0, cider::IRType::I32)};
+        e->addInstruction(ld);
+        cider::IRInstruction call;
+        call.op = cider::IROp::CALL;
+        call.args = {cider::IRValue::Register("efp2", cider::IRType::PTR)};
+        e->addInstruction(call);
+        cider::IRInstruction ret;
+        ret.op = cider::IROp::RET;
+        ret.args = {cider::IRValue::Constant(0, cider::IRType::I32)};
+        e->addInstruction(ret);
+        fn->addBlock(std::move(e));
+
+        cider::ModuleIR mod;
+        mod.addExternFunction("ext_fn");
+        mod.addFunction(std::move(fn));
+        cider::VM vm;
+        bool threw = false;
+        try {
+            vm.run(mod);
+        } catch (const cider::VMError& err) {
+            threw = true;
+            CHECK(err.message.find("ext_fn") != std::string::npos);
+        }
+        CHECK(threw);
+    }
     return 0;
 }
 

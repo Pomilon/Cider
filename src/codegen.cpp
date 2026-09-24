@@ -1778,6 +1778,11 @@ bool CodeGenerator::generate(ModuleIR& module, const std::string& outputPath,
     for (const auto& extFunc : module.getExternFunctions()) {
         out << "    extern " << extFunc << "\n";
     }
+    // CID-006 F1: extern variables are data symbols; they need the same
+    // `extern` directive as extern functions.
+    for (const auto& extVar : module.getExternVariables()) {
+        out << "    extern " << extVar << "\n";
+    }
     for (const auto& line : textSection) out << line << "\n";
 
     if (target_ == "pomeos") {

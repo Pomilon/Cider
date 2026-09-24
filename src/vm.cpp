@@ -892,6 +892,10 @@ void VM::free(int64_t offset) {
 }
 
 VM::RegVal VM::load(int64_t addr, IRType type) {
+    // CID-006 F1: a negative address must fail cleanly. resolveValue can
+    // hand out negative ids (extern value handles); memcpy-ing from
+    // heap_.data() + addr is host OOB. Mirrors store's guard.
+    if (addr < 0) throw VMError{"load: negative address"};
     RegVal d;
     switch (type) {
     case IRType::I8: {
@@ -1102,9 +1106,14 @@ void VM::doCall(const IRValue& target, const std::vector<IRValue>& args) {
         fid = resolveValue(target).i;
         if (fid < 0) {
             // CID-006: a value reference to an extern function carries a
-            // synthetic negative id; dispatch builtins by name.
+            // synthetic negative id; dispatch builtins by name. A valid
+            // non-builtin extern has no VM body — name it instead of
+            // reporting a bare bad id.
             auto nit = externValueNames_.find(fid);
-            if (nit != externValueNames_.end() && tryBuiltinCall(nit->second, args)) return;
+            if (nit != externValueNames_.end()) {
+                if (tryBuiltinCall(nit->second, args)) return;
+                throw VMError{"call: unresolved extern function " + nit->second};
+            }
             throw VMError{"call: bad function id"};
         }
     }

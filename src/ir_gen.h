@@ -1567,8 +1567,10 @@ public:
             // Linker-provided symbol (CID-001): no storage emitted, just an
             // extern directive; uses address it like a global. The VM has no
             // linker, so running such programs fails there with a clear
-            // unresolved-label error.
-            module_.addExternFunction(stmt.getName());
+            // unresolved-label error. CID-006 F1: variables are registered
+            // as extern DATA — treating them as extern functions made the VM
+            // fabricate a function VALUE and OOB-read the heap.
+            module_.addExternVariable(stmt.getName());
             globalValues_[stmt.getName()] = IRValue::Label(stmt.getName());
             return;
         }

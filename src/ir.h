@@ -193,6 +193,16 @@ public:
         return externFunctions_;
     }
 
+    // CID-006 F1: `extern var` symbols are linker-provided DATA, not
+    // functions. Keeping them out of externFunctions_ stops the VM from
+    // fabricating a function VALUE for a variable read.
+    void addExternVariable(const std::string& name) {
+        externVariables_.push_back(name);
+    }
+    const std::vector<std::string>& getExternVariables() const {
+        return externVariables_;
+    }
+
     void print() const;
 
 private:
@@ -202,6 +212,7 @@ private:
     std::vector<GlobalVar> globalVars_;
     std::map<std::string, std::vector<std::string>> vtables_;
     std::vector<std::string> externFunctions_;
+    std::vector<std::string> externVariables_;
 };
 
 }  // namespace cider
