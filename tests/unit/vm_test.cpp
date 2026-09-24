@@ -242,6 +242,209 @@ int run() {
         cider::VM vm8;
         CHECK(vm8.run(mod8, "main8").exitCode == 0);
     }
+
+    // CID-006: store a module function label in a local and call through
+    // the loaded value.
+    {
+        auto worker = makeFn("worker", cider::IRType::I32);
+        auto we = std::make_unique<cider::BasicBlock>("entry");
+        cider::IRInstruction wret;
+        wret.op = cider::IROp::RET;
+        wret.args = {cider::IRValue::Constant(7, cider::IRType::I32)};
+        we->addInstruction(wret);
+        worker->addBlock(std::move(we));
+
+        auto fn = makeFn("main", cider::IRType::I32);
+        auto e = std::make_unique<cider::BasicBlock>("entry");
+        e->addInstruction(opInstr(cider::IROp::ALLOCA, "slot",
+                                  {cider::IRValue::Constant(8, cider::IRType::I32)}));
+        cider::IRInstruction st;
+        st.op = cider::IROp::STORE;
+        st.args = {cider::IRValue::Register("slot", cider::IRType::PTR),
+                   cider::IRValue::Label("worker"),
+                   cider::IRValue::Constant(0, cider::IRType::I32)};
+        e->addInstruction(st);
+        cider::IRInstruction ld;
+        ld.op = cider::IROp::LOAD;
+        ld.dest = cider::IRValue::Register("fp", cider::IRType::PTR);
+        ld.args = {cider::IRValue::Register("slot", cider::IRType::PTR),
+                   cider::IRValue::Constant(0, cider::IRType::I32)};
+        e->addInstruction(ld);
+        cider::IRInstruction call;
+        call.op = cider::IROp::CALL;
+        call.dest = cider::IRValue::Register("r", cider::IRType::I32);
+        call.args = {cider::IRValue::Register("fp", cider::IRType::PTR)};
+        e->addInstruction(call);
+        cider::IRInstruction ret;
+        ret.op = cider::IROp::RET;
+        ret.args = {cider::IRValue::Register("r", cider::IRType::I32)};
+        e->addInstruction(ret);
+        fn->addBlock(std::move(e));
+
+        cider::ModuleIR mod;
+        mod.addFunction(std::move(worker));
+        mod.addFunction(std::move(fn));
+        cider::VM vm;
+        CHECK(vm.run(mod).exitCode == 7);
+    }
+
+    // CID-006: extern function value (putchar) called indirectly.
+    {
+        auto fn = makeFn("main", cider::IRType::I32);
+        auto e = std::make_unique<cider::BasicBlock>("entry");
+        e->addInstruction(opInstr(cider::IROp::ALLOCA, "eslot",
+                                  {cider::IRValue::Constant(8, cider::IRType::I32)}));
+        cider::IRInstruction st;
+        st.op = cider::IROp::STORE;
+        st.args = {cider::IRValue::Register("eslot", cider::IRType::PTR),
+                   cider::IRValue::Label("putchar"),
+                   cider::IRValue::Constant(0, cider::IRType::I32)};
+        e->addInstruction(st);
+        cider::IRInstruction ld;
+        ld.op = cider::IROp::LOAD;
+        ld.dest = cider::IRValue::Register("efp", cider::IRType::PTR);
+        ld.args = {cider::IRValue::Register("eslot", cider::IRType::PTR),
+                   cider::IRValue::Constant(0, cider::IRType::I32)};
+        e->addInstruction(ld);
+        cider::IRInstruction call;
+        call.op = cider::IROp::CALL;
+        call.dest = cider::IRValue::Register("er", cider::IRType::I32);
+        call.args = {cider::IRValue::Register("efp", cider::IRType::PTR),
+                     cider::IRValue::Constant(65, cider::IRType::I32)};
+        e->addInstruction(call);
+        cider::IRInstruction ret;
+        ret.op = cider::IROp::RET;
+        ret.args = {cider::IRValue::Constant(0, cider::IRType::I32)};
+        e->addInstruction(ret);
+        fn->addBlock(std::move(e));
+
+        cider::ModuleIR mod;
+        mod.addExternFunction("putchar");
+        mod.addFunction(std::move(fn));
+        cider::VM vm;
+        auto r = vm.run(mod);
+        CHECK(r.exitCode == 0);
+        CHECK(r.stdoutText == "A");
+    }
+
+    // CID-006: a global cell `<g>: dq <function>` materializes the id.
+    {
+        auto target = makeFn("worker2", cider::IRType::I32);
+        auto we = std::make_unique<cider::BasicBlock>("entry");
+        cider::IRInstruction wret;
+        wret.op = cider::IROp::RET;
+        wret.args = {cider::IRValue::Constant(9, cider::IRType::I32)};
+        we->addInstruction(wret);
+        target->addBlock(std::move(we));
+
+        auto fn = makeFn("main", cider::IRType::I32);
+        auto e = std::make_unique<cider::BasicBlock>("entry");
+        cider::IRInstruction ld;
+        ld.op = cider::IROp::LOAD;
+        ld.dest = cider::IRValue::Register("gfp", cider::IRType::PTR);
+        ld.args = {cider::IRValue::Label("g"), cider::IRValue::Constant(0, cider::IRType::I32)};
+        e->addInstruction(ld);
+        cider::IRInstruction call;
+        call.op = cider::IROp::CALL;
+        call.dest = cider::IRValue::Register("gr", cider::IRType::I32);
+        call.args = {cider::IRValue::Register("gfp", cider::IRType::PTR)};
+        e->addInstruction(call);
+        cider::IRInstruction ret;
+        ret.op = cider::IROp::RET;
+        ret.args = {cider::IRValue::Register("gr", cider::IRType::I32)};
+        e->addInstruction(ret);
+        fn->addBlock(std::move(e));
+
+        cider::ModuleIR mod;
+        mod.addStringData("g: dq worker2");
+        mod.addFunction(std::move(target));
+        mod.addFunction(std::move(fn));
+        cider::VM vm;
+        CHECK(vm.run(mod).exitCode == 9);
+    }
+
+    // CID-006 carry-over: module function ids are offset so id 0 is nilPtr.
+    // The module's FIRST function must not compare equal to nilPtr (the
+    // `if (cb != nilPtr)` guard idiom), and calling an actual nil value must
+    // not dispatch to functions[0].
+    {
+        auto first = makeFn("first", cider::IRType::I32);
+        auto fe = std::make_unique<cider::BasicBlock>("entry");
+        cider::IRInstruction fret;
+        fret.op = cider::IROp::RET;
+        fret.args = {cider::IRValue::Constant(11, cider::IRType::I32)};
+        fe->addInstruction(fret);
+        first->addBlock(std::move(fe));
+
+        auto fn = makeFn("main", cider::IRType::I32);
+        auto e = std::make_unique<cider::BasicBlock>("entry");
+        e->addInstruction(opInstr(cider::IROp::ALLOCA, "nslot",
+                                  {cider::IRValue::Constant(8, cider::IRType::I32)}));
+        cider::IRInstruction st;
+        st.op = cider::IROp::STORE;
+        st.args = {cider::IRValue::Register("nslot", cider::IRType::PTR),
+                   cider::IRValue::Label("first"),
+                   cider::IRValue::Constant(0, cider::IRType::I32)};
+        e->addInstruction(st);
+        cider::IRInstruction ld;
+        ld.op = cider::IROp::LOAD;
+        ld.dest = cider::IRValue::Register("nfp", cider::IRType::PTR);
+        ld.args = {cider::IRValue::Register("nslot", cider::IRType::PTR),
+                   cider::IRValue::Constant(0, cider::IRType::I32)};
+        e->addInstruction(ld);
+        cider::IRInstruction cmp;
+        cmp.op = cider::IROp::CMP_NE;
+        cmp.dest = cider::IRValue::Register("ne", cider::IRType::I32);
+        cmp.args = {cider::IRValue::Register("nfp", cider::IRType::PTR),
+                    cider::IRValue::Constant(0, cider::IRType::PTR)};
+        e->addInstruction(cmp);
+        cider::IRInstruction ret;
+        ret.op = cider::IROp::RET;
+        ret.args = {cider::IRValue::Register("ne", cider::IRType::I32)};
+        e->addInstruction(ret);
+        fn->addBlock(std::move(e));
+
+        cider::ModuleIR mod;
+        mod.addFunction(std::move(first));
+        mod.addFunction(std::move(fn));
+        cider::VM vm;
+        CHECK(vm.run(mod).exitCode == 1);
+    }
+    {
+        auto first = makeFn("first", cider::IRType::I32);
+        auto fe = std::make_unique<cider::BasicBlock>("entry");
+        cider::IRInstruction fret;
+        fret.op = cider::IROp::RET;
+        fret.args = {cider::IRValue::Constant(11, cider::IRType::I32)};
+        fe->addInstruction(fret);
+        first->addBlock(std::move(fe));
+
+        auto fn = makeFn("main", cider::IRType::I32);
+        auto e = std::make_unique<cider::BasicBlock>("entry");
+        cider::IRInstruction call;
+        call.op = cider::IROp::CALL;
+        call.dest = cider::IRValue::Register("x", cider::IRType::I32);
+        call.args = {cider::IRValue::Constant(0, cider::IRType::PTR)};
+        e->addInstruction(call);
+        cider::IRInstruction ret;
+        ret.op = cider::IROp::RET;
+        ret.args = {cider::IRValue::Constant(11, cider::IRType::I32)};
+        e->addInstruction(ret);
+        fn->addBlock(std::move(e));
+
+        cider::ModuleIR mod;
+        mod.addFunction(std::move(first));
+        mod.addFunction(std::move(fn));
+        cider::VM vm;
+        bool threw = false;
+        try {
+            vm.run(mod);
+        } catch (const cider::VMError& e) {
+            threw = true;
+            CHECK(std::string(e.message).find("nil") != std::string::npos);
+        }
+        CHECK(threw);
+    }
     return 0;
 }
 

@@ -1,5 +1,6 @@
 #include "vm.h"
 
+#include <algorithm>
 #include <cstring>
 #include <sstream>
 #include <fcntl.h>
@@ -635,6 +636,14 @@ VM::RegVal VM::resolveValue(const IRValue& v) {
             d.i = vit->second;
             return d;
         }
+        // CID-006: taking the value of a linker-provided extern (a
+        // callback such as putchar). The synthetic id round-trips through
+        // indirect calls; it is never a module function index.
+        if (isExternFunctionName(v.name)) {
+            RegVal d;
+            d.i = externValueId(v.name);
+            return d;
+        }
         throw VMError{"unresolved label " + v.name};
     }
     }
@@ -643,9 +652,13 @@ VM::RegVal VM::resolveValue(const IRValue& v) {
 
 void VM::materializeLabels() {
     functionIds_.clear();
+    externValueIds_.clear();
+    externValueNames_.clear();
     const auto& funcs = module_->getFunctions();
     for (size_t i = 0; i < funcs.size(); ++i) {
-        functionIds_[funcs[i]->getName()] = (int64_t)i;
+        // CID-006: function VALUES are 1-based so 0 can mean nilPtr; the
+        // dispatch sites convert back with (id - 1).
+        functionIds_[funcs[i]->getName()] = (int64_t)i + 1;
     }
     for (const auto& [label, methods] : module_->getVTables()) {
         materializeVTable(label);
@@ -779,12 +792,21 @@ void VM::materializeLabels() {
         if (b == std::string::npos || e == std::string::npos) continue;
         std::string target = body.substr(b, e - b + 1);
         auto it = stringOffsets_.find(target);
+        auto fit = functionIds_.find(target);
         if (it != stringOffsets_.end()) {
             // Allocate an 8-byte cell holding the target's offset.
             int64_t cell = malloc(8);
             if (cell + 8 > (int64_t)heap_.size()) heap_.resize(cell + 8);
             int64_t ptrVal = it->second;
             std::memcpy(heap_.data() + cell, &ptrVal, 8);
+            stringOffsets_[label] = cell;
+        } else if (fit != functionIds_.end() || isExternFunctionName(target)) {
+            // CID-006: a global function-pointer cell holds the function's
+            // id (module function) or the synthetic extern id.
+            int64_t cell = malloc(8);
+            if (cell + 8 > (int64_t)heap_.size()) heap_.resize(cell + 8);
+            int64_t fid = (fit != functionIds_.end()) ? fit->second : externValueId(target);
+            std::memcpy(heap_.data() + cell, &fid, 8);
             stringOffsets_[label] = cell;
         }
     }
@@ -822,6 +844,8 @@ int64_t VM::materializeVTable(const std::string& label) {
     if (off + n * 8 > (int64_t)heap_.size()) heap_.resize(off + n * 8);
     for (int64_t k = 0; k < n; ++k) {
         auto fit = functionIds_.find(it->second[(size_t)k]);
+        // CID-006: vtable slots hold function VALUE ids (1-based, 0 = nil);
+        // doVirtualCall converts back to an index.
         int64_t fid = fit != functionIds_.end() ? fit->second : -1;
         std::memcpy(heap_.data() + off + k * 8, &fid, 8);
     }
@@ -979,6 +1003,89 @@ void VM::store(int64_t addr, const RegVal& val, IRType type, int64_t offset) {
     }
 }
 
+namespace {
+const char* const kVMBuiltins[] = {"malloc", "free", "exit", "putchar", "_setjmp", "longjmp"};
+}  // namespace
+
+bool VM::isExternFunctionName(const std::string& name) const {
+    for (const char* b : kVMBuiltins) {
+        if (name == b) return true;
+    }
+    const auto& ext = module_->getExternFunctions();
+    return std::find(ext.begin(), ext.end(), name) != ext.end();
+}
+
+int64_t VM::externValueId(const std::string& name) {
+    auto it = externValueIds_.find(name);
+    if (it != externValueIds_.end()) return it->second;
+    int64_t id = -(int64_t)externValueIds_.size() - 1;
+    externValueIds_[name] = id;
+    externValueNames_[id] = name;
+    return id;
+}
+
+// Builtins the VM provides directly (no module body). Shared by direct
+// calls to unresolved labels and indirect calls carrying an extern id.
+bool VM::tryBuiltinCall(const std::string& name, const std::vector<IRValue>& args) {
+    if (name == "malloc") {
+        RegVal v = args.empty() ? RegVal{} : resolveValue(args[0]);
+        RegVal d;
+        d.i = malloc(v.i);
+        retReg_ = d;
+        return true;
+    }
+    if (name == "free") {
+        RegVal v = args.empty() ? RegVal{} : resolveValue(args[0]);
+        free(v.i);
+        return true;
+    }
+    if (name == "exit") {
+        RegVal v = args.empty() ? RegVal{} : resolveValue(args[0]);
+        result_.exitCode = (int)v.i;
+        result_.stdoutText += putcharBuf_;
+        frames_.clear();
+        return true;
+    }
+    if (name == "putchar") {
+        RegVal v = args.empty() ? RegVal{} : resolveValue(args[0]);
+        putcharBuf_ += (char)(unsigned char)v.i;
+        retReg_ = v;
+        return true;
+    }
+    if (name == "_setjmp") {
+        RegVal buf = args.empty() ? RegVal{} : resolveValue(args[0]);
+        JumpState st;
+        st.frameIndex = (int)frames_.size() - 1;
+        const Frame& f = frames_.back();
+        st.blockIdx = (int)f.blockIdx;
+        st.instrIdx = (int)f.instrIdx;
+        st.regs = regs_;
+        jumpStates_[buf.i] = std::move(st);
+        retReg_ = RegVal{};
+        return true;
+    }
+    if (name == "longjmp") {
+        RegVal buf = args.empty() ? RegVal{} : resolveValue(args[0]);
+        RegVal val = args.size() > 1 ? resolveValue(args[1]) : RegVal{};
+        auto it = jumpStates_.find(buf.i);
+        if (it == jumpStates_.end()) throw VMError{"longjmp: no matching setjmp"};
+        const JumpState& st = it->second;
+        if (st.frameIndex < 0 || st.frameIndex >= (int)frames_.size())
+            throw VMError{"longjmp: frame gone"};
+        frames_.resize((size_t)st.frameIndex + 1);
+        Frame& f = frames_[(size_t)st.frameIndex];
+        f.blockIdx = (size_t)st.blockIdx;
+        f.instrIdx = (size_t)st.instrIdx;
+        regs_ = st.regs;
+        if (!f.pendingDest.empty()) {
+            regs_[f.pendingDest] = val;
+            f.pendingDest.clear();
+        }
+        return true;
+    }
+    return false;
+}
+
 void VM::doCall(const IRValue& target, const std::vector<IRValue>& args) {
     int64_t fid;
     if (target.kind == IRValue::LABEL) {
@@ -988,77 +1095,24 @@ void VM::doCall(const IRValue& target, const std::vector<IRValue>& args) {
         if (defined != functionIds_.end()) {
             fid = defined->second;
         } else {
-        // VM builtins: extern runtime functions the VM provides directly.
-        if (target.name == "malloc") {
-            RegVal v = args.empty() ? RegVal{} : resolveValue(args[0]);
-            RegVal d;
-            d.i = malloc(v.i);
-            retReg_ = d;
-            return;
-        }
-        if (target.name == "free") {
-            RegVal v = args.empty() ? RegVal{} : resolveValue(args[0]);
-            free(v.i);
-            return;
-        }
-        if (target.name == "exit") {
-            RegVal v = args.empty() ? RegVal{} : resolveValue(args[0]);
-            result_.exitCode = (int)v.i;
-            result_.stdoutText += putcharBuf_;
-            frames_.clear();
-            return;
-        }
-        if (target.name == "putchar") {
-            // The libc putchar buffers stdout; the flush happens at exit,
-            // so putchar output lands after all direct write syscalls.
-            RegVal v = args.empty() ? RegVal{} : resolveValue(args[0]);
-            putcharBuf_ += (char)(unsigned char)v.i;
-            retReg_ = v;
-            return;
-        }
-        if (target.name == "_setjmp") {
-            // Save the current execution state keyed by the jmp_buf address;
-            // longjmp restores it. Returns 0 the first time.
-            RegVal buf = args.empty() ? RegVal{} : resolveValue(args[0]);
-            JumpState st;
-            st.frameIndex = (int)frames_.size() - 1;
-            const Frame& f = frames_.back();
-            st.blockIdx = (int)f.blockIdx;
-            st.instrIdx = (int)f.instrIdx;
-            st.regs = regs_;
-            jumpStates_[buf.i] = std::move(st);
-            retReg_ = RegVal{};
-            return;
-        }
-        if (target.name == "longjmp") {
-            RegVal buf = args.empty() ? RegVal{} : resolveValue(args[0]);
-            RegVal val = args.size() > 1 ? resolveValue(args[1]) : RegVal{};
-            auto it = jumpStates_.find(buf.i);
-            if (it == jumpStates_.end()) throw VMError{"longjmp: no matching setjmp"};
-            const JumpState& st = it->second;
-            if (st.frameIndex < 0 || st.frameIndex >= (int)frames_.size())
-                throw VMError{"longjmp: frame gone"};
-            frames_.resize((size_t)st.frameIndex + 1);
-            Frame& f = frames_[(size_t)st.frameIndex];
-            f.blockIdx = (size_t)st.blockIdx;
-            f.instrIdx = (size_t)st.instrIdx;
-            regs_ = st.regs;
-            // Deliver the longjmp value as the setjmp call's result.
-            if (!f.pendingDest.empty()) {
-                regs_[f.pendingDest] = val;
-                f.pendingDest.clear();
-            }
-            return;
-        }
-        auto it = functionIds_.find(target.name);
-        if (it == functionIds_.end()) throw VMError{"call to unknown function " + target.name};
-        fid = it->second;
+            if (tryBuiltinCall(target.name, args)) return;
+            throw VMError{"call to unknown function " + target.name};
         }
     } else {
         fid = resolveValue(target).i;
+        if (fid < 0) {
+            // CID-006: a value reference to an extern function carries a
+            // synthetic negative id; dispatch builtins by name.
+            auto nit = externValueNames_.find(fid);
+            if (nit != externValueNames_.end() && tryBuiltinCall(nit->second, args)) return;
+            throw VMError{"call: bad function id"};
+        }
     }
-    if (fid < 0 || fid >= (int64_t)module_->getFunctions().size()) throw VMError{"call: bad function id"};
-    const FunctionIR* fn = module_->getFunctions()[(size_t)fid].get();
+    // CID-006: module function values are 1-based so that 0 is nilPtr;
+    // convert back to the 0-based function index for dispatch.
+    if (fid == 0) throw VMError{"call: nil function pointer"};
+    if (fid < 0 || fid > (int64_t)module_->getFunctions().size()) throw VMError{"call: bad function id"};
+    const FunctionIR* fn = module_->getFunctions()[(size_t)(fid - 1)].get();
 
     // Bind arguments to the callee's parameter registers. The ir-gen names
     // params "arg_<name>" and the callee body reads those exact registers,
@@ -1083,8 +1137,9 @@ void VM::doVirtualCall(const IRValue& obj, int64_t vtableIndex, const std::vecto
     RegVal objPtr = resolveValue(obj);
     int64_t vptr = load(objPtr.i, IRType::I64).i;
     int64_t fid = load(vptr + vtableIndex * 8, IRType::I64).i;
-    if (fid < 0 || fid >= (int64_t)module_->getFunctions().size()) throw VMError{"vcall: bad function id"};
-    const FunctionIR* fn = module_->getFunctions()[(size_t)fid].get();
+    // CID-006: vtable slots hold 1-based function value ids (0 = nil).
+    if (fid < 1 || fid > (int64_t)module_->getFunctions().size()) throw VMError{"vcall: bad function id"};
+    const FunctionIR* fn = module_->getFunctions()[(size_t)(fid - 1)].get();
 
     std::vector<RegVal> resolvedArgs;
     resolvedArgs.reserve(args.size());

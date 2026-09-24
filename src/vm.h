@@ -67,7 +67,15 @@ private:
     std::map<int64_t, JumpState> jumpStates_;  // jmp_buf address -> saved state
     RegVal retReg_;
     const ModuleIR* module_ = nullptr;
-    std::map<std::string, int64_t> functionIds_;   // label -> id (id = index into functions)
+    // label -> function VALUE id. CID-006: value ids are 1-based (module
+    // index + 1) so that id 0 is reserved for nilPtr — otherwise the
+    // module's first function would compare equal to nilPtr.
+    std::map<std::string, int64_t> functionIds_;
+    // CID-006: linker-provided extern functions have no IR body. A value
+    // reference to one gets a stable negative id; indirect calls route
+    // back to the builtin table by name. Never a module function index.
+    std::map<std::string, int64_t> externValueIds_;   // name -> negative id
+    std::map<int64_t, std::string> externValueNames_; // negative id -> name
     std::map<std::string, int64_t> stringOffsets_; // materialized string constant -> heap offset
     std::map<std::string, int64_t> globalVarOffsets_; // global variable -> heap cell offset
     // Declared type per global (CID-029): float globals hold IEEE-754
@@ -86,6 +94,10 @@ private:
     void materializeLabels();
     int64_t materializeString(const std::string& name);
     int64_t materializeVTable(const std::string& label);
+
+    bool isExternFunctionName(const std::string& name) const;
+    int64_t externValueId(const std::string& name);
+    bool tryBuiltinCall(const std::string& name, const std::vector<IRValue>& args);
 
     int64_t malloc(int64_t size);
     void free(int64_t offset);
