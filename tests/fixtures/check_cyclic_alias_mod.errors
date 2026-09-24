@@ -1,0 +1,1 @@
+Type mismatch in declaration of 'x'. Expected cyclic_alias_mod_lib::B, got int

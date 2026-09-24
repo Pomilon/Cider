@@ -190,25 +190,34 @@ public:
         return IRType::PTR;
     }
 
-    // CID-006 (Task 2 F1 carry-over): resolve a type spelling through
-    // `type X = Y` aliases to a fixed point, mirroring type_checker::resolveType.
-    // The collector stores aliases as STRUCT-kind providers; a fn(...) target
-    // keeps its signature payload. Each hop resolves through the nominal
-    // lookup (dotted/canonical names) plus the callee defining-module
-    // fallback, so chains in callee signatures resolve too. `depth` guards
-    // the cyclic aliases the type checker does not reject.
-    TypeInfo resolveTypeAlias(TypeInfo t, const std::string& defModule = "", int depth = 0) {
+    // CID-006 (Task 2 F1 carry-over, fix round 2): resolve a type spelling
+    // through `type X = Y` aliases to a fixed point, mirroring
+    // type_checker::resolveType. The collector stores aliases as STRUCT-kind
+    // providers; a fn(...) target keeps its signature payload. Each hop
+    // resolves through the nominal lookup (dotted/canonical names) plus the
+    // callee defining-module fallback, so chains in callee signatures resolve
+    // too. `visiting` is a per-resolution visited set: the checker accepts
+    // cyclic aliases, and stopping at the repeated spelling keeps every
+    // caller terminating (getTypeSize re-resolves its result, so a cap that
+    // returned the other alias made the pair recurse without bound).
+    TypeInfo resolveTypeAliasImpl(TypeInfo t, const std::string& defModule,
+                                  std::set<std::string>& visiting) {
         if (t.pointerLevel > 0 || t.isFunctionPointer || t.isArray) return t;
-        if (depth > 64) return t;
+        if (t.name.empty() || !visiting.insert(t.name).second) return t;
         auto sym = resolveNominalType(t.name);
         if (!sym && !defModule.empty()) sym = resolveCalleeNominal(t.name, defModule);
         if (!sym || sym->kind != SymbolKind::STRUCT || sym->type.name == t.name ||
             sym->type.name.empty()) {
             return t;
         }
-        TypeInfo resolved = resolveTypeAlias(sym->type, defModule, depth + 1);
+        TypeInfo resolved = resolveTypeAliasImpl(sym->type, defModule, visiting);
         resolved.pointerLevel += t.pointerLevel;
         return resolved;
+    }
+
+    TypeInfo resolveTypeAlias(TypeInfo t, const std::string& defModule = "") {
+        std::set<std::string> visiting;
+        return resolveTypeAliasImpl(t, defModule, visiting);
     }
 
     // CID-006 (Task 2 F1 carry-over): the ir_gen half of the checker's
@@ -257,9 +266,10 @@ public:
         if (!sym && !defModule.empty()) sym = resolveCalleeNominal(resolved.name, defModule);
         if (!sym) return false;
         if (sym->kind != SymbolKind::STRUCT && sym->kind != SymbolKind::CLASS) return false;
-        // A STRUCT-kind symbol that still provides another name is an alias
-        // the fixed point could not walk (cycle): not a by-value nominal.
-        return sym->type.name.empty() || sym->type.name == sym->name;
+        // A STRUCT-kind symbol that still provides another name (alias
+        // provider, including a self-alias the fixed point stops on) is not
+        // a by-value nominal.
+        return sym->type.name.empty();
     }
 
     // Visitor methods
@@ -1860,9 +1870,9 @@ public:
         if (!sym && !defModule.empty()) sym = resolveCalleeNominal(type.name, defModule);
         if (sym && (sym->kind == SymbolKind::STRUCT || sym->kind == SymbolKind::CLASS)) {
             // Alias providers carry another name in type.name and are plain
-            // Symbols, never StructSymbols (cycle / depth guard): sizing one
+            // Symbols, never StructSymbols (cycle / self-alias): sizing one
             // would read unrelated memory.
-            if (!sym->type.name.empty() && sym->type.name != sym->name) return 8;
+            if (!sym->type.name.empty()) return 8;
             return std::static_pointer_cast<StructSymbol>(sym)->totalSize;
         }
         if (sym && sym->kind == SymbolKind::INTERFACE) return 16;

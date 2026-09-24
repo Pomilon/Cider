@@ -1,0 +1,2 @@
+type B = cyclic_alias_mod_lib.A;
+type A = cyclic_alias_mod_lib.B;

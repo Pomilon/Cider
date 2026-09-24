@@ -702,6 +702,40 @@ int run() {
         }
         CHECK(sawDq);
     }
+
+    // CID-006 fix round 2: checker-accepted cyclic aliases must terminate.
+    // The depth cap in resolveTypeAlias returned the other alias, so
+    // getTypeSize's re-resolution never converged (compiler stack overflow).
+    // A mutual cycle, a lasso into a cycle, and a self-alias must all
+    // compile to a deterministic 8-byte slot.
+    {
+        auto module = genModuleSrc(
+            "type A = B;\n"
+            "type B = A;\n"
+            "type C = A;\n"
+            "type Self = Self;\n"
+            "func main() -> int {\n"
+            "  var x: B;\n"
+            "  var y: C;\n"
+            "  var z: Self;\n"
+            "  return 0;\n"
+            "}\n");
+        int allocas = 0;
+        int sized8 = 0;
+        for (const auto& fn : module.getFunctions()) {
+            for (const auto& block : fn->getBlocks()) {
+                for (const auto& in : block->getInstructions()) {
+                    if (in.op == cider::IROp::ALLOCA && in.args.size() == 1 &&
+                        in.args[0].kind == cider::IRValue::CONSTANT) {
+                        allocas++;
+                        if (in.args[0].intValue == 8) sized8++;
+                    }
+                }
+            }
+        }
+        CHECK(allocas == 3);
+        CHECK(sized8 == 3);
+    }
     return 0;
 }
 

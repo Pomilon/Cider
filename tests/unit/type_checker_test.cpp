@@ -302,6 +302,18 @@ int run() {
         "func main() -> int { return 0; }\n");
     CHECK(hasError(fnAliasGlobalNonConst,
                    "Global function pointer initializer in declaration of 'bad' must be a function name or nilPtr"));
+
+    // CID-006 fix round 2: cyclic aliases must terminate in the checker too.
+    // Comparing an initializer through resolveType used to recurse forever
+    // (check exit 139 on `var x: B = 5`); it must reach the normal mismatch.
+    auto cyclicAlias = checkSrc(
+        "type A = B;\n"
+        "type B = A;\n"
+        "func main() -> int {\n"
+        "  var x: B = 5;\n"
+        "  return 0;\n"
+        "}\n");
+    CHECK(hasError(cyclicAlias, "Type mismatch in declaration of 'x'"));
     return 0;
 }
 

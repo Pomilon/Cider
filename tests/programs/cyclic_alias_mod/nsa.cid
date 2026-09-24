@@ -1,0 +1,2 @@
+type B = nsa.A;
+type A = nsa.B;

@@ -2,6 +2,7 @@
 
 #include <map>
 #include <memory>
+#include <set>
 #include <string>
 #include <vector>
 
@@ -251,10 +252,20 @@ public:
     }
 
     TypeInfo resolveType(TypeInfo info) {
+        std::set<std::string> visiting;
+        return resolveTypeImpl(info, visiting);
+    }
+
+    // CID-006 fix round 2: cycle-safe recursion (mirrors ir_gen's alias
+    // resolver). Aliases are checker-accepted even when cyclic; stopping at
+    // the repeated spelling keeps areTypesCompatible and every other caller
+    // terminating instead of overflowing the stack.
+    TypeInfo resolveTypeImpl(TypeInfo info, std::set<std::string>& visiting) {
         if (info.pointerLevel > 0 || info.isFunctionPointer) return info;
+        if (info.name.empty() || !visiting.insert(info.name).second) return info;
         auto sym = resolveScoped(info.name);
         if (sym && sym->kind == SymbolKind::STRUCT && sym->type.name != info.name && !sym->type.name.empty()) {
-            TypeInfo resolved = resolveType(sym->type);
+            TypeInfo resolved = resolveTypeImpl(sym->type, visiting);
             resolved.pointerLevel += info.pointerLevel;  // Should be 0 here
             return resolved;
         }
