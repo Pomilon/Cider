@@ -142,6 +142,30 @@ int run() {
     CHECK(fnalias.find("g: dq inc") != std::string::npos);
     CHECK(fnalias.find("g: resb") == std::string::npos);
 
+    // CID-006 fix round 1 (F1): the review repro's two-hop alias chain emits
+    // the same data cell and never a by-value copy of the label (the local
+    // copy used to lower to `rep movsb` from the value-as-address).
+    std::string fnchain = genAsm(
+        "type B = fn(int) -> int;\n"
+        "type A = B;\n"
+        "func inc(a: int) -> int { return a + 1; }\n"
+        "var g: A = inc;\n"
+        "func main() -> int {\n"
+        "  var f: fn(int) -> int = g;\n"
+        "  return f(10) + 42;\n"
+        "}\n");
+    CHECK(fnchain.find("g: dq inc") != std::string::npos);
+    CHECK(fnchain.find("rep movsb") == std::string::npos);
+
+    // CID-006 fix round 1 (F3 pin): an alias of `*void` initialized from a
+    // function name reaches the declAlias branch and emits the real cell.
+    std::string pvalias = genAsm(
+        "func add(a: int, b: int) -> int { return a + b; }\n"
+        "type PV = *void;\n"
+        "var g: PV = add;\n"
+        "func main() -> int { return 0; }\n");
+    CHECK(pvalias.find("g: dq add") != std::string::npos);
+
     // CID-003: float width conversions. (CHECKSTR returns "" and is only
     // usable in string-returning helpers; run() uses CHECK/.find like the
     // rest of its assertions.) Sources are variables so both conversions

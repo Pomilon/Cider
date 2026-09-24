@@ -191,17 +191,22 @@ public:
     }
 
     // CID-006 (Task 2 F1 carry-over): resolve a type spelling through
-    // `type X = Y` aliases, mirroring type_checker::resolveType. The
-    // collector stores aliases as STRUCT-kind providers; a fn(...) target
-    // keeps its signature payload.
-    TypeInfo resolveTypeAlias(TypeInfo t) {
+    // `type X = Y` aliases to a fixed point, mirroring type_checker::resolveType.
+    // The collector stores aliases as STRUCT-kind providers; a fn(...) target
+    // keeps its signature payload. Each hop resolves through the nominal
+    // lookup (dotted/canonical names) plus the callee defining-module
+    // fallback, so chains in callee signatures resolve too. `depth` guards
+    // the cyclic aliases the type checker does not reject.
+    TypeInfo resolveTypeAlias(TypeInfo t, const std::string& defModule = "", int depth = 0) {
         if (t.pointerLevel > 0 || t.isFunctionPointer || t.isArray) return t;
-        auto sym = symbolTable_.resolve(t.name);
+        if (depth > 64) return t;
+        auto sym = resolveNominalType(t.name);
+        if (!sym && !defModule.empty()) sym = resolveCalleeNominal(t.name, defModule);
         if (!sym || sym->kind != SymbolKind::STRUCT || sym->type.name == t.name ||
             sym->type.name.empty()) {
             return t;
         }
-        TypeInfo resolved = resolveTypeAlias(sym->type);
+        TypeInfo resolved = resolveTypeAlias(sym->type, defModule, depth + 1);
         resolved.pointerLevel += t.pointerLevel;
         return resolved;
     }
@@ -237,18 +242,24 @@ public:
     // which is what every pre-existing call site passes).
     bool isStructValueType(const TypeInfo& t, const std::string& defModule = "") {
         if (t.pointerLevel > 0) return false;
-        if (t.isArray || t.isInterface || t.isSlice) return false;
-        auto sym = resolveNominalType(t.name);
-        if (!sym && !defModule.empty()) sym = resolveCalleeNominal(t.name, defModule);
+        if (t.isArray || t.isInterface || t.isSlice || t.isFunctionPointer) return false;
+        // CID-006 fix round 1 (F1): resolve `type A = B` alias CHAINS to a
+        // fixed point before the STRUCT-kind test. One hop was not enough: a
+        // chain ending in a fn(...) target kept the STRUCT-kind alias symbol
+        // and classified the value as a by-value struct, so a local copy
+        // lowered to a MEMCPY from the value-as-address (native SIGSEGV).
+        TypeInfo resolved = resolveTypeAlias(t, defModule);
+        if (resolved.isFunctionPointer || resolved.pointerLevel > 0 || resolved.isArray ||
+            resolved.isInterface || resolved.isSlice) {
+            return false;
+        }
+        auto sym = resolveNominalType(resolved.name);
+        if (!sym && !defModule.empty()) sym = resolveCalleeNominal(resolved.name, defModule);
         if (!sym) return false;
         if (sym->kind != SymbolKind::STRUCT && sym->kind != SymbolKind::CLASS) return false;
-        if (sym->type.name != sym->name && !sym->type.name.empty()) {
-            auto target = resolveNominalType(sym->type.name);
-            if (!target && !defModule.empty()) target = resolveCalleeNominal(sym->type.name, defModule);
-            if (!target || (target->kind != SymbolKind::STRUCT && target->kind != SymbolKind::CLASS))
-                return false;
-        }
-        return true;
+        // A STRUCT-kind symbol that still provides another name is an alias
+        // the fixed point could not walk (cycle): not a by-value nominal.
+        return sym->type.name.empty() || sym->type.name == sym->name;
     }
 
     // Visitor methods
@@ -770,17 +781,15 @@ public:
 
             // Legacy heap path for struct values returned from non-sret
             // contexts (should not occur for declared struct returns, which
-            // are always sret; kept for robustness).
-            if (retType.pointerLevel == 0) {
+            // are always sret; kept for robustness). The struct test resolves
+            // alias chains, so a scalar alias is not copied as a struct.
+            if (retType.pointerLevel == 0 && isStructValueType(retType)) {
                 int structSize = getTypeSize(retType);
-                auto typeSym = resolveNominalType(retType.name);
-                if (typeSym && (typeSym->kind == SymbolKind::STRUCT || typeSym->kind == SymbolKind::CLASS)) {
-                    IRValue localPtr = IRValue::Register(nextTemp(), IRType::PTR);
-                    currentBlock_->addInstruction({IROp::CALL, localPtr, {IRValue::Label(runtimeHelperName("malloc")), IRValue::Constant(structSize, IRType::I32)}});
-                    currentBlock_->addInstruction({IROp::MEMCPY, std::nullopt, {localPtr, val, IRValue::Constant(structSize, IRType::I32)}});
-                    val = localPtr;
-                    lastExprType_.isUserDefined = true;
-                }
+                IRValue localPtr = IRValue::Register(nextTemp(), IRType::PTR);
+                currentBlock_->addInstruction({IROp::CALL, localPtr, {IRValue::Label(runtimeHelperName("malloc")), IRValue::Constant(structSize, IRType::I32)}});
+                currentBlock_->addInstruction({IROp::MEMCPY, std::nullopt, {localPtr, val, IRValue::Constant(structSize, IRType::I32)}});
+                val = localPtr;
+                lastExprType_.isUserDefined = true;
             }
 
             emitDefers();
@@ -1829,11 +1838,18 @@ public:
             return type.arraySize * getTypeSize(elemType, defModule);
         }
         // CID-006 (Task 2 F1 carry-over): a fn(...) value is a code pointer
-        // (8 bytes), including an alias spelling. Without the alias gate an
-        // alias symbol would reach the STRUCT-provider cast below, which
-        // reads a garbage totalSize off a plain Symbol.
+        // (8 bytes), including an alias spelling.
         if (type.isFunctionPointer) return 8;
-        if (resolveFunctionPointerAlias(type).isFunctionPointer) return 8;
+        // CID-006 fix round 1 (F1): resolve `type X = Y` chains to a fixed
+        // point before the nominal lookup. An unresolved alias spelling is a
+        // plain Symbol, so the StructSymbol cast below used to read a garbage
+        // totalSize off it (`resb 3` / `alloca 4` for alias chains).
+        TypeInfo resolved = resolveTypeAlias(type, defModule);
+        if (resolved.name != type.name || resolved.pointerLevel != type.pointerLevel ||
+            resolved.isArray != type.isArray || resolved.isFunctionPointer != type.isFunctionPointer ||
+            resolved.isInterface != type.isInterface || resolved.isSlice != type.isSlice) {
+            return getTypeSize(resolved, defModule);
+        }
         if (type.name == "u8" || type.name == "i8" || type.name == "char" || type.name == "byte" || type.name == "void") return 1;
         if (type.name == "u16" || type.name == "i16") return 2;
         if (type.name == "u32" || type.name == "i32" || type.name == "int" || type.name == "float" || type.name == "f32" || type.name == "bool") return 4;
@@ -1843,6 +1859,10 @@ public:
         auto sym = resolveNominalType(type.name);
         if (!sym && !defModule.empty()) sym = resolveCalleeNominal(type.name, defModule);
         if (sym && (sym->kind == SymbolKind::STRUCT || sym->kind == SymbolKind::CLASS)) {
+            // Alias providers carry another name in type.name and are plain
+            // Symbols, never StructSymbols (cycle / depth guard): sizing one
+            // would read unrelated memory.
+            if (!sym->type.name.empty() && sym->type.name != sym->name) return 8;
             return std::static_pointer_cast<StructSymbol>(sym)->totalSize;
         }
         if (sym && sym->kind == SymbolKind::INTERFACE) return 16;

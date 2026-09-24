@@ -596,6 +596,112 @@ int run() {
         CHECK(sawF32Call);
         CHECK(sawF32Arg);
     }
+
+    // CID-006 fix round 1 (F1): `type A = B` alias CHAINS must be resolved
+    // to a fixed point before the struct test. A two-hop chain ending in a
+    // fn(...) target kept the STRUCT-kind alias symbol, so the local copy of
+    // the value lowered to a MEMCPY from the value-as-address (native
+    // SIGSEGV). This is the review repro verbatim.
+    {
+        auto module = genModuleSrc(
+            "type B = fn(int) -> int;\n"
+            "type A = B;\n"
+            "func inc(a: int) -> int { return a + 1; }\n"
+            "var g: A = inc;\n"
+            "func main() -> int {\n"
+            "  var f: fn(int) -> int = g;\n"
+            "  return f(10) + 42;\n"
+            "}\n");
+        bool sawDq = false;
+        for (const auto& line : module.getStringData()) {
+            if (line.find("g: dq inc") != std::string::npos) sawDq = true;
+        }
+        CHECK(sawDq);
+        bool sawMemcpy = false;
+        bool sawFnSlot = false;
+        bool sawIntCall = false;
+        for (const auto& fn : module.getFunctions()) {
+            for (const auto& block : fn->getBlocks()) {
+                for (const auto& in : block->getInstructions()) {
+                    if (in.op == cider::IROp::MEMCPY) sawMemcpy = true;
+                    if (in.op == cider::IROp::ALLOCA && in.args.size() == 1 &&
+                        in.args[0].kind == cider::IRValue::CONSTANT &&
+                        in.args[0].intValue == 8 && in.dest &&
+                        in.dest->type == cider::IRType::PTR) {
+                        sawFnSlot = true;
+                    }
+                    if (in.op == cider::IROp::CALL && !in.args.empty() &&
+                        in.args[0].kind == cider::IRValue::REGISTER && in.dest &&
+                        in.dest->type == cider::IRType::I32) {
+                        sawIntCall = true;
+                    }
+                }
+            }
+        }
+        CHECK(!sawMemcpy);
+        CHECK(sawFnSlot);
+        CHECK(sawIntCall);
+    }
+
+    // CID-006 fix round 1 (F1): a non-fn two-hop alias chain behaves exactly
+    // like the direct spelling — no by-value MEMCPY, 4-byte slot, plain
+    // constant store. (The chain used to take the MEMCPY path and read a
+    // garbage size off the alias symbol.)
+    {
+        auto chain = genModuleSrc(
+            "type B = int;\n"
+            "type A = B;\n"
+            "func main() -> int {\n"
+            "  var x: A = 5;\n"
+            "  var y: int = 5;\n"
+            "  return x + y;\n"
+            "}\n");
+        auto direct = genModuleSrc(
+            "func main() -> int {\n"
+            "  var x: int = 5;\n"
+            "  var y: int = 5;\n"
+            "  return x + y;\n"
+            "}\n");
+        auto irShape = [](const cider::ModuleIR& m) {
+            std::string s;
+            for (const auto& fn : m.getFunctions()) {
+                s += fn->getName() + "{";
+                for (const auto& block : fn->getBlocks()) {
+                    s += block->getName() + ":";
+                    for (const auto& in : block->getInstructions()) {
+                        s += std::to_string((int)in.op) + "(";
+                        if (in.dest) {
+                            s += std::to_string((int)in.dest->kind) + "/" + in.dest->name + "/" +
+                                 std::to_string((int)in.dest->type) + ";";
+                        }
+                        for (const auto& a : in.args) {
+                            s += std::to_string((int)a.kind) + "/" + a.name + "/" +
+                                 std::to_string(a.intValue) + "/" + std::to_string((int)a.type) + ",";
+                        }
+                        s += ")|";
+                    }
+                }
+                s += "}";
+            }
+            return s;
+        };
+        CHECK(irShape(chain) == irShape(direct));
+    }
+
+    // CID-006 fix round 1 (F3 pin): an alias of `*void` initialized from a
+    // function name reaches the `declAlias` branch and emits the real cell.
+    {
+        auto module = genModuleSrc(
+            "func add(a: int, b: int) -> int { return a + b; }\n"
+            "type PV = *void;\n"
+            "var g: PV = add;\n"
+            "func main() -> int { return 0; }\n");
+        bool sawDq = false;
+        for (const auto& line : module.getStringData()) {
+            if (line.find("g: dq add") != std::string::npos) sawDq = true;
+        }
+        CHECK(sawDq);
+    }
     return 0;
 }
 
