@@ -209,6 +209,57 @@ int run() {
         "class C { func m() -> void { } }\n"
         "func main() -> void { var c: C* = nilPtr; var i: I = c; }\n");
     CHECK(ok4.empty());
+
+    // CID-006: fn(...) typing and checking.
+    auto fnOk = checkSrc(
+        "func add(a: int, b: int) -> int { return a + b; }\n"
+        "func main() -> int {\n"
+        "  var f: fn(int, int) -> int = add;\n"
+        "  var r: int = f(1, 2);\n"
+        "  var n: fn(int, int) -> int = nilPtr;\n"
+        "  var v: *void = add;\n"
+        "  var back: fn(int, int) -> int = v as fn(int, int) -> int;\n"
+        "  return r;\n"
+        "}\n");
+    CHECK(fnOk.empty());
+
+    auto fnSig = checkSrc(
+        "func inc(a: int) -> int { return a + 1; }\n"
+        "func main() -> int { var f: fn(int, int) -> int = inc; return 0; }\n");
+    CHECK(hasError(fnSig, "Type mismatch in declaration of 'f'. Expected fn(int, int) -> int, got fn(int) -> int"));
+
+    auto fnArity = checkSrc(
+        "func inc(a: int) -> int { return a + 1; }\n"
+        "func main() -> int { var f: fn(int) -> int = inc; var r: int = f(1, 2); return r; }\n");
+    CHECK(hasError(fnArity, "Function 'fn(int) -> int' expects 1 arguments, got 2"));
+
+    auto fnArg = checkSrc(
+        "func inc(a: int) -> int { return a + 1; }\n"
+        "func main() -> int { var f: fn(int) -> int = inc; var r: int = f(\"x\"); return r; }\n");
+    CHECK(hasError(fnArg, "Argument 1 to 'fn(int) -> int' type mismatch. Expected int, got string"));
+
+    auto fnNonFn = checkSrc(
+        "func main() -> int { var f: fn(int) -> int = 42; return 0; }\n");
+    CHECK(hasError(fnNonFn, "Type mismatch in declaration of 'f'. Expected fn(int) -> int, got int"));
+
+    auto fnAssign = checkSrc(
+        "func inc(a: int) -> int { return a + 1; }\n"
+        "func noret(a: int) -> void { }\n"
+        "func main() -> int { var f: fn(int) -> int = inc; f = noret; return 0; }\n");
+    CHECK(hasError(fnAssign, "Type mismatch in assignment. Expected fn(int) -> int, got fn(int) -> void"));
+
+    auto fnGlobalNonConst = checkSrc(
+        "func inc(a: int) -> int { return a + 1; }\n"
+        "var local: fn(int) -> int = inc;\n"
+        "var bad: fn(int) -> int = local;\n"
+        "func main() -> int { return 0; }\n");
+    CHECK(hasError(fnGlobalNonConst, "Global function pointer initializer in declaration of 'bad' must be a function name or nilPtr"));
+
+    auto fnStruct = checkSrc(
+        "struct P { var x: int; }\n"
+        "func take(p: P) -> int { return p.x; }\n"
+        "func main() -> int { var f: fn(P) -> int = take; var r: int = f(0); return r; }\n");
+    CHECK(hasError(fnStruct, "do not support struct/class by-value"));
     return 0;
 }
 

@@ -100,6 +100,23 @@ public:
         return currentModule_;
     }
 
+    // CID-006: the fn(...) type of a named function, with every nominal
+    // canonicalized in the function's defining module (same rule as call
+    // signatures, spec §5). `line` attributes dotted-name errors the same
+    // way the call-site signature canonicalization does.
+    TypeInfo functionPointerTypeOf(const std::shared_ptr<FunctionSymbol>& fsym, int line = -1) {
+        TypeInfo ft;
+        ft.name = "fn";
+        ft.isFunctionPointer = true;
+        ft.fnParamTypes = std::make_shared<std::vector<TypeInfo>>();
+        std::string defMod = definingModuleOf(fsym);
+        for (const auto& p : fsym->parameterTypes) {
+            ft.fnParamTypes->push_back(canonicalizeInModule(p, defMod, line));
+        }
+        ft.fnReturnType = std::make_shared<TypeInfo>(canonicalizeInModule(fsym->returnType, defMod, line));
+        return ft;
+    }
+
     // Module scope for a logical name ("" == root scope). Null when unknown.
     Scope* scopeForModule(const std::string& logical) {
         if (logical.empty()) return symbolTable_.getRootScope();
@@ -156,6 +173,22 @@ public:
     // caller's scope — so a callee signature means the same at every use
     // site. Falls back to the untouched name when unresolvable.
     TypeInfo canonicalizeInModule(TypeInfo t, const std::string& logical, int line = -1) {
+        // CID-006: signature nominals belong to the same context as the
+        // fn type itself.
+        if (t.isFunctionPointer) {
+            TypeInfo r = t;
+            if (t.fnParamTypes) {
+                r.fnParamTypes = std::make_shared<std::vector<TypeInfo>>();
+                for (const auto& p : *t.fnParamTypes) {
+                    r.fnParamTypes->push_back(canonicalizeInModule(p, logical, line));
+                }
+            }
+            if (t.fnReturnType) {
+                r.fnReturnType = std::make_shared<TypeInfo>(
+                    canonicalizeInModule(*t.fnReturnType, logical, line));
+            }
+            return r;
+        }
         if (t.name.empty() || t.name.find("::") != std::string::npos) return t;
         if (t.name.find('<') != std::string::npos) return t;  // template instantiation (T6)
         if (t.name.find('.') != std::string::npos) return canonicalizeDotted(t, line);
@@ -174,6 +207,22 @@ public:
     }
 
     TypeInfo canonicalizeNominal(TypeInfo t, int line = -1) {
+        // CID-006: signature nominals belong to the same context as the
+        // fn type itself.
+        if (t.isFunctionPointer) {
+            TypeInfo r = t;
+            if (t.fnParamTypes) {
+                r.fnParamTypes = std::make_shared<std::vector<TypeInfo>>();
+                for (const auto& p : *t.fnParamTypes) {
+                    r.fnParamTypes->push_back(canonicalizeNominal(p, line));
+                }
+            }
+            if (t.fnReturnType) {
+                r.fnReturnType = std::make_shared<TypeInfo>(
+                    canonicalizeNominal(*t.fnReturnType, line));
+            }
+            return r;
+        }
         if (t.name.empty() || t.name.find("::") != std::string::npos) return t;  // already canonical
         if (t.name.find('<') != std::string::npos) return t;                     // template instantiation (T6)
         if (t.name.find('.') != std::string::npos) return canonicalizeDotted(t, line);
@@ -202,7 +251,7 @@ public:
     }
 
     TypeInfo resolveType(TypeInfo info) {
-        if (info.pointerLevel > 0) return info;
+        if (info.pointerLevel > 0 || info.isFunctionPointer) return info;
         auto sym = resolveScoped(info.name);
         if (sym && sym->kind == SymbolKind::STRUCT && sym->type.name != info.name && !sym->type.name.empty()) {
             TypeInfo resolved = resolveType(sym->type);
@@ -226,6 +275,16 @@ public:
         t2 = canonicalizeNominal(t2);
 
         if (t1 == t2) return true;
+
+        // CID-006: two fn types match only via the exact signature test
+        // above. One fn + one *void (nilPtr, legacy untyped references)
+        // stays compatible both ways; fn arrays never decay to *void.
+        if (t1.isFunctionPointer || t2.isFunctionPointer) {
+            if (t1.isFunctionPointer && t2.isFunctionPointer) return false;
+            if (t1.isArray || t2.isArray) return false;
+            const TypeInfo& other = t1.isFunctionPointer ? t2 : t1;
+            return other.name == "void" && other.pointerLevel >= 1;
+        }
 
         auto isInteger = [](const std::string& name) {
             return name == "int" || name == "u8" || name == "i8" || name == "u16" || name == "i16" ||
@@ -397,6 +456,20 @@ public:
         return false;
     }
 
+    // CID-006: the only global fn initializers ir_gen can fold into a
+    // .data cell are `nilPtr` and an identifier naming a function
+    // (grouping allowed). Everything else would silently read 0.
+    bool isConstantFunctionPointerInit(Expression* expr) {
+        while (auto grp = dynamic_cast<GroupingExpr*>(expr)) expr = grp->getExpression();
+        if (!expr) return false;
+        if (dynamic_cast<NilPtrExpr*>(expr)) return true;
+        if (auto id = dynamic_cast<IdentifierExpr*>(expr)) {
+            auto sym = resolveScoped(id->getName());
+            return sym && sym->kind == SymbolKind::FUNCTION;
+        }
+        return false;
+    }
+
     // Fixed-size array from a list literal (CID-007): `var t: [u8; 4] =
     // [10, 20, 30, 40]`. Checks element count and per-element types.
     // Globals have no runtime initialiser, so their elements must be
@@ -522,6 +595,17 @@ public:
                 error("Global float initializer in declaration of '" + stmt.getName() +
                           "' must use constant expressions", stmt.getLine());
             }
+        }
+
+        // CID-006: global function pointers have no runtime initializer
+        // either. Named functions (a .data cell holding the label) and
+        // nilPtr (zero) are the only supported shapes.
+        if (stmt.getInitializer() && symbolTable_.scopeDepth() == 0 &&
+            declaredType.isFunctionPointer && !declaredType.isArray &&
+            !isConstantFunctionPointerInit(stmt.getInitializer())) {
+            error("Global function pointer initializer in declaration of '" + stmt.getName() +
+                      "' must be a function name or nilPtr",
+                  stmt.getLine());
         }
 
         auto sym = std::make_shared<Symbol>();
@@ -754,7 +838,11 @@ public:
             lastExprType_ = {"error", 0};
         } else {
             if (sym->kind == SymbolKind::FUNCTION) {
-                lastExprType_ = {"void", 1};
+                // CID-006: a bare function name is a value of its fn
+                // signature type; it stays assignable to *void through
+                // areTypesCompatible, so the legacy untyped idiom works.
+                lastExprType_ = functionPointerTypeOf(
+                    std::static_pointer_cast<FunctionSymbol>(sym), expr.getLine());
             } else {
                 lastExprType_ = sym->type;
                 // CID-020/021 §1: a symbol bound in another module (a
@@ -1034,8 +1122,50 @@ public:
         }
 
         if (!funcSym) {
-            // Function pointer call: accept callee and args generically
+            // Indirect call: a typed fn(...) value (CID-006) is checked
+            // against its signature; the legacy *void / closure fallback
+            // keeps accepting generically with an int result.
             callee->accept(*this);
+            if (lastExprType_.isFunctionPointer && !lastExprType_.isArray &&
+                lastExprType_.fnParamTypes && lastExprType_.fnReturnType) {
+                TypeInfo fnType = lastExprType_;
+                auto byValueAggregate = [&](const TypeInfo& t) {
+                    if (t.pointerLevel > 0 || t.isArray || t.isFunctionPointer) return false;
+                    std::string bare = t.name;
+                    auto pos = bare.rfind("::");
+                    if (pos != std::string::npos) bare = bare.substr(pos + 2);
+                    auto s = resolveScoped(bare);
+                    return s && (s->kind == SymbolKind::STRUCT || s->kind == SymbolKind::CLASS);
+                };
+                bool unsupportedAggregate = byValueAggregate(*fnType.fnReturnType);
+                for (const auto& pt : *fnType.fnParamTypes) {
+                    if (byValueAggregate(pt)) unsupportedAggregate = true;
+                }
+                if (unsupportedAggregate) {
+                    error("Calls through '" + fnType.toString() +
+                              "' values do not support struct/class by-value parameters or returns",
+                          expr.getLine());
+                } else if (expr.getArgs().size() != fnType.fnParamTypes->size()) {
+                    error("Function '" + fnType.toString() + "' expects " +
+                              std::to_string(fnType.fnParamTypes->size()) +
+                              " arguments, got " + std::to_string(expr.getArgs().size()),
+                          expr.getLine());
+                } else {
+                    for (size_t i = 0; i < expr.getArgs().size(); ++i) {
+                        expr.getArgs()[i]->accept(*this);
+                        TypeInfo paramT = (*fnType.fnParamTypes)[i];
+                        if (!areTypesCompatible(paramT, lastExprType_)) {
+                            error("Argument " + std::to_string(i + 1) + " to '" +
+                                      fnType.toString() + "' type mismatch. Expected " +
+                                      paramT.toString() + ", got " +
+                                      canonicalizeNominal(lastExprType_).toString(),
+                                  expr.getLine());
+                        }
+                    }
+                }
+                lastExprType_ = *fnType.fnReturnType;
+                return;
+            }
             for (auto& arg : expr.getArgs()) {
                 arg->accept(*this);
             }
