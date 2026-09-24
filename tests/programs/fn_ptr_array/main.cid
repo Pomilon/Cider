@@ -11,7 +11,12 @@ func main() -> int {
     i = i + 1;
   }
   if (acc != 12 + 8 + 20) { return 1; }
+  // Per-index identity: the sum alone is permutation-insensitive
+  // ([mul, sub, add] also sums to 40), so pin each element.
+  if (table[0](10, 2) != 12) { return 2; }
+  if (table[1](10, 2) != 8) { return 3; }
+  if (table[2](10, 2) != 20) { return 4; }
   table[1] = add;
-  if (table[1](1, 2) != 3) { return 2; }
+  if (table[1](1, 2) != 3) { return 5; }
   return 0;
 }

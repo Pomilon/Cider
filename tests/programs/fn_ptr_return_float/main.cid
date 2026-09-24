@@ -1,0 +1,29 @@
+// CID-006: the stored return type must be honored through the indirect
+// call. The result crosses as f32 (xmm0/VM value), so a hardcoded int
+// result would compare as 2.0's bit pattern (1073741824.0) and fail.
+func half(a: int) -> float {
+  return (a as float) * 0.5;
+}
+func double_it(a: int) -> float {
+  return (a as float) * 2.0;
+}
+
+func pick(which: int) -> fn(int) -> float {
+  if (which == 0) { return half; }
+  return double_it;
+}
+
+func main() -> int {
+  var f: fn(int) -> float = half;
+  var x: float = f(4);
+  if (x != 2.0) { return 1; }
+
+  var g: fn(int) -> float = pick(1);
+  var y: float = g(5);
+  if (y != 10.0) { return 2; }
+
+  var z: float = g(1);
+  if (z != 2.0) { return 3; }
+
+  return 0;
+}
