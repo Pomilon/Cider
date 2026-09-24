@@ -117,6 +117,31 @@ int run() {
         }
     }
 
+    // CID-006: global function pointer -> data cell with the code label.
+    std::string fnglob = genAsm(
+        "func add(a: int, b: int) -> int { return a + b; }\n"
+        "var g: fn(int, int) -> int = add;\n"
+        "func main() -> int { return g(1, 2); }\n");
+    CHECK(fnglob.find("g: dq add") != std::string::npos);
+
+    // CID-006 interop: the legacy `*void` global gets the real cell too
+    // (native used to read a constant zero).
+    std::string voidglob = genAsm(
+        "func add(a: int, b: int) -> int { return a + b; }\n"
+        "var v: *void = add;\n"
+        "func main() -> int { return 0; }\n");
+    CHECK(voidglob.find("v: dq add") != std::string::npos);
+
+    // CID-006 carry-over (Task 2 F1): an alias-spelled global fn emits the
+    // same data cell and never a BSS slot named after the alias.
+    std::string fnalias = genAsm(
+        "func inc(a: int) -> int { return a + 1; }\n"
+        "type Cb = fn(int) -> int;\n"
+        "var g: Cb = inc;\n"
+        "func main() -> int { return g(1); }\n");
+    CHECK(fnalias.find("g: dq inc") != std::string::npos);
+    CHECK(fnalias.find("g: resb") == std::string::npos);
+
     // CID-003: float width conversions. (CHECKSTR returns "" and is only
     // usable in string-returning helpers; run() uses CHECK/.find like the
     // rest of its assertions.) Sources are variables so both conversions

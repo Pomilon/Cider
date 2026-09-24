@@ -190,6 +190,45 @@ public:
         return IRType::PTR;
     }
 
+    // CID-006 (Task 2 F1 carry-over): resolve a type spelling through
+    // `type X = Y` aliases, mirroring type_checker::resolveType. The
+    // collector stores aliases as STRUCT-kind providers; a fn(...) target
+    // keeps its signature payload.
+    TypeInfo resolveTypeAlias(TypeInfo t) {
+        if (t.pointerLevel > 0 || t.isFunctionPointer || t.isArray) return t;
+        auto sym = symbolTable_.resolve(t.name);
+        if (!sym || sym->kind != SymbolKind::STRUCT || sym->type.name == t.name ||
+            sym->type.name.empty()) {
+            return t;
+        }
+        TypeInfo resolved = resolveTypeAlias(sym->type);
+        resolved.pointerLevel += t.pointerLevel;
+        return resolved;
+    }
+
+    // CID-006 (Task 2 F1 carry-over): the ir_gen half of the checker's
+    // resolveFunctionPointerAlias gate. Returns the resolved fn(...)
+    // signature when the spelling aliases one, else the original TypeInfo
+    // (non-fn aliases and arrays keep their declared spelling, so legacy
+    // paths are untouched). Every fn-specific gate must go through here:
+    // alias-typed symbols carry the alias NAME, not the signature.
+    TypeInfo resolveFunctionPointerAlias(TypeInfo t) {
+        if (t.isFunctionPointer || t.isArray) return t;
+        TypeInfo resolved = resolveTypeAlias(t);
+        return resolved.isFunctionPointer ? resolved : t;
+    }
+
+    // CID-006: the label a global function-pointer initializer folds to.
+    // Returns "" for nilPtr / no initializer (the cell stays zero).
+    std::string functionPointerInitTarget(Expression* init) {
+        while (auto grp = dynamic_cast<GroupingExpr*>(init)) init = grp->getExpression();
+        auto id = dynamic_cast<IdentifierExpr*>(init);
+        if (!id) return "";
+        auto sym = symbolTable_.resolve(id->getName());
+        if (!sym || sym->kind != SymbolKind::FUNCTION) return "";
+        return emitFunctionName(definingModuleFor(sym, id->getName()), sym->name);
+    }
+
     // True for struct/class by-value returns (and params decaying likewise).
     // These use the hidden-sret-pointer convention so freestanding targets
     // never need a heap `malloc` for `return someStruct;`. `defModule`
@@ -955,7 +994,11 @@ public:
             calleeExpr->accept(*this);
             isAddress_ = wasAddress;
             IRValue fnPtr = lastValue_;
-            TypeInfo calleeType = lastExprType_;
+            // CID-006 (Task 2 F1 carry-over): an alias spelling
+            // (`type Cb = fn(...) -> R`) carries the alias name in its
+            // TypeInfo, so resolve to the signature before either gate.
+            // Closures (`func`, object pointers) are unaffected.
+            TypeInfo calleeType = resolveFunctionPointerAlias(lastExprType_);
 
             std::vector<IRValue> args;
             for (auto& arg : expr.getArgs()) {
@@ -980,7 +1023,24 @@ public:
                 lastValue_ = dest;
                 lastExprType_ = {"int", 0};
             } else {
-                IRValue dest = IRValue::Register(nextTemp(), IRType::I32);
+                // CID-006: a call through a typed fn(...) value returns the
+                // stored return type and converts arguments through the
+                // stored parameter types. Untyped *void keeps the legacy
+                // assumed-int result.
+                TypeInfo retType{"int", 0};
+                if (calleeType.isFunctionPointer && !calleeType.isArray &&
+                    calleeType.fnReturnType) {
+                    retType = *calleeType.fnReturnType;
+                }
+                if (calleeType.isFunctionPointer && !calleeType.isArray &&
+                    calleeType.fnParamTypes) {
+                    convertCallArgs(args, 0, *calleeType.fnParamTypes);
+                }
+                IRType destIR = (retType.pointerLevel > 0 || retType.isFunctionPointer)
+                                    ? IRType::PTR
+                                    : mapType(retType.name);
+                if (destIR == IRType::VOID) destIR = IRType::I32;
+                IRValue dest = IRValue::Register(nextTemp(), destIR);
                 IRInstruction callInstr;
                 callInstr.op = IROp::CALL;
                 callInstr.args.push_back(fnPtr);
@@ -988,7 +1048,7 @@ public:
                 callInstr.dest = dest;
                 currentBlock_->addInstruction(callInstr);
                 lastValue_ = dest;
-                lastExprType_ = {"int", 0};
+                lastExprType_ = retType;
             }
         }
     }
@@ -1560,6 +1620,29 @@ public:
                     }
                 }
             }
+            // CID-006: a global function pointer becomes a .data cell holding
+            // the function label (native) or its id (VM dq pass). The same
+            // cell fixes the legacy `*void g = f;` global, which used to be a
+            // silent constant zero on native. nilPtr / uninitialized fn
+            // globals stay .bss-zero; the checker rejects every other shape.
+            // Task 2 F1 carry-over: alias spellings (`type Cb = ...`) carry
+            // the alias name in sym->type, so resolve first — otherwise an
+            // alias global falls through to the legacy slot sized by the
+            // alias name instead of getting the real cell.
+            TypeInfo fnDecl = resolveFunctionPointerAlias(sym->type);
+            TypeInfo declAlias = resolveTypeAlias(sym->type);
+            std::string fnTarget = functionPointerInitTarget(stmt.getInitializer());
+            if (!fnTarget.empty() &&
+                (fnDecl.isFunctionPointer || declAlias.pointerLevel > 0)) {
+                module_.addStringData(gname + ": dq " + fnTarget);
+                globalValues_[gname] = IRValue::Label(gname);
+                return;
+            }
+            if (fnDecl.isFunctionPointer && !fnDecl.isArray) {
+                module_.addGlobalVar(gname, IRType::PTR, 0, 0, 8, false);
+                globalValues_[gname] = IRValue::Label(gname);
+                return;
+            }
             int64_t initVal = 0;
             bool initIsFloat = false;
             IRType declaredIR = (sym->type.pointerLevel > 0) ? IRType::PTR : mapType(sym->type.name);
@@ -1745,6 +1828,12 @@ public:
             elemType.arraySize = 0;
             return type.arraySize * getTypeSize(elemType, defModule);
         }
+        // CID-006 (Task 2 F1 carry-over): a fn(...) value is a code pointer
+        // (8 bytes), including an alias spelling. Without the alias gate an
+        // alias symbol would reach the STRUCT-provider cast below, which
+        // reads a garbage totalSize off a plain Symbol.
+        if (type.isFunctionPointer) return 8;
+        if (resolveFunctionPointerAlias(type).isFunctionPointer) return 8;
         if (type.name == "u8" || type.name == "i8" || type.name == "char" || type.name == "byte" || type.name == "void") return 1;
         if (type.name == "u16" || type.name == "i16") return 2;
         if (type.name == "u32" || type.name == "i32" || type.name == "int" || type.name == "float" || type.name == "f32" || type.name == "bool") return 4;
@@ -2203,9 +2292,16 @@ public:
 
         if (sym && sym->kind == SymbolKind::FUNCTION) {
             // CID-020/021 (spec §5): function values label the mangled
-            // definition name.
+            // definition name. CID-006: the value's type is the fn
+            // signature (labels and mangling are unchanged).
             lastValue_ = IRValue::Label(emitFunctionName(definingModuleFor(sym, expr.getName()), sym->name));
-            lastExprType_ = {"void", 1};
+            auto fsym = std::static_pointer_cast<FunctionSymbol>(sym);
+            TypeInfo ft;
+            ft.name = "fn";
+            ft.isFunctionPointer = true;
+            ft.fnParamTypes = std::make_shared<std::vector<TypeInfo>>(fsym->parameterTypes);
+            ft.fnReturnType = std::make_shared<TypeInfo>(fsym->returnType);
+            lastExprType_ = ft;
             return;
         }
 

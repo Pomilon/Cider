@@ -468,6 +468,134 @@ int run() {
         }
         CHECK(sawCmp);
     }
+
+    // CID-006: calls through fn values use the stored return type.
+    {
+        auto module = genModuleSrc(
+            "func add(a: int, b: int) -> int { return a + b; }\n"
+            "func fadd(a: int, b: int) -> float { return 1.0; }\n"
+            "func main() -> int {\n"
+            "  var f: fn(int, int) -> int = add;\n"
+            "  var r: int = f(1, 2);\n"
+            "  var g: fn(int, int) -> float = fadd;\n"
+            "  var s: float = g(1, 2);\n"
+            "  return r;\n"
+            "}\n");
+        bool sawLabelStore = false;
+        bool sawIntCall = false;
+        bool sawFloatCall = false;
+        for (const auto& fn : module.getFunctions()) {
+            for (const auto& block : fn->getBlocks()) {
+                for (const auto& in : block->getInstructions()) {
+                    if (in.op == cider::IROp::STORE && in.args.size() > 1 &&
+                        in.args[1].kind == cider::IRValue::LABEL && in.args[1].name == "add") {
+                        sawLabelStore = true;
+                    }
+                    if (in.op == cider::IROp::CALL && !in.args.empty() &&
+                        in.args[0].kind == cider::IRValue::REGISTER && in.dest) {
+                        if (in.dest->type == cider::IRType::I32) sawIntCall = true;
+                        if (in.dest->type == cider::IRType::F32) sawFloatCall = true;
+                    }
+                }
+            }
+        }
+        CHECK(sawLabelStore);
+        CHECK(sawIntCall);
+        CHECK(sawFloatCall);
+    }
+
+    // CID-006: a global fn initialized from a named function becomes a
+    // .data cell holding the function label.
+    {
+        auto module = genModuleSrc(
+            "func add(a: int, b: int) -> int { return a + b; }\n"
+            "var g: fn(int, int) -> int = add;\n"
+            "func main() -> int { return g(1, 2); }\n");
+        bool sawDq = false;
+        for (const auto& line : module.getStringData()) {
+            if (line.find("g: dq add") != std::string::npos) sawDq = true;
+        }
+        CHECK(sawDq);
+    }
+
+    // CID-006 interop: the legacy `*void g = f` global gets the same cell
+    // (was a silent constant zero on native).
+    {
+        auto module = genModuleSrc(
+            "func add(a: int, b: int) -> int { return a + b; }\n"
+            "var g: *void = add;\n"
+            "func main() -> int { return 0; }\n");
+        bool sawDq = false;
+        for (const auto& line : module.getStringData()) {
+            if (line.find("g: dq add") != std::string::npos) sawDq = true;
+        }
+        CHECK(sawDq);
+    }
+
+    // CID-006 carry-over (Task 2 F1): alias-spelled fn globals get the same
+    // .data cell (they used to fall through to a BSS slot sized by the
+    // alias name), and an alias-spelled nilPtr global gets the 8-byte zero
+    // cell.
+    {
+        auto module = genModuleSrc(
+            "func inc(a: int) -> int { return a + 1; }\n"
+            "type Cb = fn(int) -> int;\n"
+            "var g: Cb = inc;\n"
+            "var h: Cb = nilPtr;\n"
+            "func main() -> int { return 0; }\n");
+        bool sawDq = false;
+        for (const auto& line : module.getStringData()) {
+            if (line.find("g: dq inc") != std::string::npos) sawDq = true;
+        }
+        CHECK(sawDq);
+        bool sawH = false;
+        for (const auto& var : module.getGlobalVars()) {
+            if (var.name != "h") continue;
+            sawH = true;
+            CHECK(var.type == cider::IRType::PTR);
+            CHECK(var.totalBytes == 8);
+            CHECK(var.initialValue == 0);
+        }
+        CHECK(sawH);
+    }
+
+    // CID-006 carry-over (Task 2 F1): calls through alias-spelled fn values
+    // type the result from the stored signature and convert arguments
+    // through the stored parameter types; an alias-spelled local sizes its
+    // slot at 8 bytes (the alias name used to reach the struct-size path).
+    {
+        auto module = genModuleSrc(
+            "func idf(a: float) -> float { return a; }\n"
+            "type Cb = fn(float) -> float;\n"
+            "func main() -> int {\n"
+            "  var f: Cb = idf;\n"
+            "  var s: float = f(2);\n"
+            "  return 0;\n"
+            "}\n");
+        bool sawFnSlot = false;
+        bool sawF32Call = false;
+        bool sawF32Arg = false;
+        for (const auto& fn : module.getFunctions()) {
+            for (const auto& block : fn->getBlocks()) {
+                for (const auto& in : block->getInstructions()) {
+                    if (in.op == cider::IROp::ALLOCA && in.args.size() == 1 &&
+                        in.args[0].kind == cider::IRValue::CONSTANT &&
+                        in.args[0].intValue == 8 && in.dest &&
+                        in.dest->type == cider::IRType::PTR) {
+                        sawFnSlot = true;
+                    }
+                    if (in.op == cider::IROp::CALL && in.dest &&
+                        in.dest->type == cider::IRType::F32 && in.args.size() == 2) {
+                        sawF32Call = true;
+                        if (in.args[1].type == cider::IRType::F32) sawF32Arg = true;
+                    }
+                }
+            }
+        }
+        CHECK(sawFnSlot);
+        CHECK(sawF32Call);
+        CHECK(sawF32Arg);
+    }
     return 0;
 }
 
