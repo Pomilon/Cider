@@ -261,6 +261,20 @@ public:
         return info;
     }
 
+    // CID-006 fix (F1): `type Cb = fn(int) -> int;` stores the ALIAS NAME in
+    // every symbol typed with it, so every fn-specific rule must resolve the
+    // alias first or it silently misses alias-typed values (indirect calls,
+    // global initializers). Non-fn aliases keep their declared spelling so
+    // diagnostics are unchanged; arrays are left untouched because
+    // resolveType would drop the isArray/arraySize wrapper. Task 3's ir_gen
+    // gate must apply the same resolution to `sym->type` before testing
+    // isFunctionPointer (ir_gen::mapType already walks the alias chain).
+    TypeInfo resolveFunctionPointerAlias(TypeInfo t) {
+        if (t.isFunctionPointer || t.isArray) return t;
+        TypeInfo resolved = resolveType(t);
+        return resolved.isFunctionPointer ? resolved : t;
+    }
+
     // CID-003: the float-family spellings, shared by areTypesCompatible
     // and visit(BinaryExpr) so the two copies cannot drift.
     static bool isFloatName(const std::string& n) { return n == "float" || n == "f64"; }
@@ -599,9 +613,12 @@ public:
 
         // CID-006: global function pointers have no runtime initializer
         // either. Named functions (a .data cell holding the label) and
-        // nilPtr (zero) are the only supported shapes.
+        // nilPtr (zero) are the only supported shapes. CID-006 fix (F1):
+        // resolve `type Cb = fn(...)` aliases so an alias spelling cannot
+        // bypass the rule and silently BSS-zero the slot.
+        TypeInfo resolvedFnDecl = resolveFunctionPointerAlias(declaredType);
         if (stmt.getInitializer() && symbolTable_.scopeDepth() == 0 &&
-            declaredType.isFunctionPointer && !declaredType.isArray &&
+            resolvedFnDecl.isFunctionPointer && !resolvedFnDecl.isArray &&
             !isConstantFunctionPointerInit(stmt.getInitializer())) {
             error("Global function pointer initializer in declaration of '" + stmt.getName() +
                       "' must be a function name or nilPtr",
@@ -853,6 +870,9 @@ public:
                 if (ownerMod != currentModule_) {
                     lastExprType_ = canonicalizeInModule(sym->type, ownerMod, expr.getLine());
                 }
+                // CID-006 fix (F1): an alias-typed value must present its
+                // underlying fn signature to the call/global rules.
+                lastExprType_ = resolveFunctionPointerAlias(lastExprType_);
                 // Resolve interface type
                 if (!lastExprType_.isInterface && lastExprType_.pointerLevel == 0) {
                     auto typeSym = resolveScoped(lastExprType_.name);
@@ -1126,15 +1146,26 @@ public:
             // against its signature; the legacy *void / closure fallback
             // keeps accepting generically with an int result.
             callee->accept(*this);
+            // CID-006 fix (F1): resolve `type Cb = fn(...)` aliases first,
+            // or alias-typed callees silently take the generic fallback.
+            lastExprType_ = resolveFunctionPointerAlias(lastExprType_);
             if (lastExprType_.isFunctionPointer && !lastExprType_.isArray &&
                 lastExprType_.fnParamTypes && lastExprType_.fnReturnType) {
                 TypeInfo fnType = lastExprType_;
                 auto byValueAggregate = [&](const TypeInfo& t) {
                     if (t.pointerLevel > 0 || t.isArray || t.isFunctionPointer) return false;
-                    std::string bare = t.name;
-                    auto pos = bare.rfind("::");
-                    if (pos != std::string::npos) bare = bare.substr(pos + 2);
-                    auto s = resolveScoped(bare);
+                    // CID-006 fix (F2): a canonical `mod::P` nominal carries
+                    // its defining module, so resolve it there
+                    // (resolveCanonical); the scope-chain resolveScoped(bare)
+                    // cannot see sibling module scopes and let cross-module
+                    // by-value aggregates slip past this rejection.
+                    std::shared_ptr<Symbol> s;
+                    if (t.name.find("::") != std::string::npos) {
+                        s = resolveCanonical(t.name);
+                        if (!s) return true;  // unresolvable qualified nominal: stay conservative
+                    } else {
+                        s = resolveScoped(t.name);
+                    }
                     return s && (s->kind == SymbolKind::STRUCT || s->kind == SymbolKind::CLASS);
                 };
                 bool unsupportedAggregate = byValueAggregate(*fnType.fnReturnType);

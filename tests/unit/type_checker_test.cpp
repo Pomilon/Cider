@@ -260,6 +260,48 @@ int run() {
         "func take(p: P) -> int { return p.x; }\n"
         "func main() -> int { var f: fn(P) -> int = take; var r: int = f(0); return r; }\n");
     CHECK(hasError(fnStruct, "do not support struct/class by-value"));
+
+    // CID-006 fix (F1): aliases of fn(...) types must reach the same checks
+    // as the spelled-out type — valid use, indirect-call arity/argument
+    // checks, params, and the global-constant rule.
+    auto fnAliasOk = checkSrc(
+        "type Cb = fn(int) -> int;\n"
+        "func inc(a: int) -> int { return a + 1; }\n"
+        "var g: Cb = inc;\n"
+        "func main() -> int {\n"
+        "  var f: Cb = inc;\n"
+        "  var r: int = f(1);\n"
+        "  var n: Cb = nilPtr;\n"
+        "  return r;\n"
+        "}\n");
+    CHECK(fnAliasOk.empty());
+
+    auto fnAliasArity = checkSrc(
+        "type Cb = fn(int) -> int;\n"
+        "func inc(a: int) -> int { return a + 1; }\n"
+        "func main() -> int { var f: Cb = inc; var r: int = f(1, 2); return r; }\n");
+    CHECK(hasError(fnAliasArity, "Function 'fn(int) -> int' expects 1 arguments, got 2"));
+
+    auto fnAliasArg = checkSrc(
+        "type Cb = fn(int) -> int;\n"
+        "func inc(a: int) -> int { return a + 1; }\n"
+        "func main() -> int { var f: Cb = inc; var r: int = f(\"x\"); return r; }\n");
+    CHECK(hasError(fnAliasArg, "Argument 1 to 'fn(int) -> int' type mismatch. Expected int, got string"));
+
+    auto fnAliasParam = checkSrc(
+        "type Cb = fn(int) -> int;\n"
+        "func apply(cb: Cb) -> int { return cb(1, 2); }\n"
+        "func main() -> int { return 0; }\n");
+    CHECK(hasError(fnAliasParam, "Function 'fn(int) -> int' expects 1 arguments, got 2"));
+
+    auto fnAliasGlobalNonConst = checkSrc(
+        "type Cb = fn(int) -> int;\n"
+        "func inc(a: int) -> int { return a + 1; }\n"
+        "var local: Cb = inc;\n"
+        "var bad: Cb = local;\n"
+        "func main() -> int { return 0; }\n");
+    CHECK(hasError(fnAliasGlobalNonConst,
+                   "Global function pointer initializer in declaration of 'bad' must be a function name or nilPtr"));
     return 0;
 }
 

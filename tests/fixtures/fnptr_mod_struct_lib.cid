@@ -1,0 +1,3 @@
+struct P { var x: int; }
+func make() -> P { return P { x: 1 }; }
+func take(p: P) -> int { return p.x; }
