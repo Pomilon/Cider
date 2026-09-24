@@ -46,6 +46,10 @@ public:
 
         // Map block name to index. Duplicate names make edges ambiguous;
         // treat the function as malformed (conservative fallback below).
+        // The first occurrence wins where baseline kept the last one: that
+        // choice only decides which target a malformed edge records, and
+        // duplicate names already force the conservative path, so no safe
+        // register/slot decision depends on it.
         std::map<std::string, int> blockIndex;
         bool duplicateBlockName = false;
         for (int i = 0; i < numBlocks; i++) {

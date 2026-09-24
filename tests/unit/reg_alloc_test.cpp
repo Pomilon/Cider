@@ -326,6 +326,58 @@ int run() {
     CHECK(sum8.offsets.size() == 3);  // no reuse anywhere
     CHECK(stackSize8 == 24);
 
+    // ---- PHI edge use from the PHI's own block (CID-019). ----
+    // x is defined earlier in h1, the block that holds the PHI, so it is
+    // not an upward-exposed use of h1 (USE[h1] does not see it). The PHI
+    // reads x only when control enters h1 from the latch d2: the operand
+    // lives on edge d2 -> h1 and loops back into its own defining block.
+    // Only the per-edge PHI use keeps x live-out of d2/live-in d2, i.e.
+    // live from h1 through d2. w is defined in d2 and would otherwise
+    // recycle x's slot: with the edge use, x is live through d2 and w
+    // needs its own slot — 4 slots, 32 bytes, x and w at distinct
+    // offsets. Without the edge use (or with the edge keyed to the wrong
+    // block), x dies in h1 and w takes its slot — 3 slots, 24 bytes, the
+    // same offset. c plus f0..f4 exhaust the five int registers in h0,
+    // so x, p and w always spill; which one of c/f0..f4 spills depends
+    // on tie order in the linear scan and does not affect either check.
+    auto fn9 = std::make_unique<FunctionIR>("phi_edge_use", IRType::VOID);
+    auto h0 = std::make_unique<BasicBlock>("h0");
+    for (int i = 0; i < 5; ++i) h0->addInstruction(makeDef("f" + std::to_string(i)));
+    h0->addInstruction(makeDef("c"));  // loop condition
+    h0->addInstruction(makeBr("h1"));
+    auto h1 = std::make_unique<BasicBlock>("h1");
+    h1->addInstruction(makeDef("x"));  // defined before the PHI, same block
+    {
+        IRInstruction phi;
+        phi.op = IROp::PHI;
+        phi.dest = IRValue::Register("p", IRType::I32);
+        phi.phiArgs["h0"] = IRValue::Constant(0, IRType::I32);
+        phi.phiArgs["d2"] = IRValue::Register("x", IRType::I32);
+        h1->addInstruction(phi);
+    }
+    h1->addInstruction(makeUse("p"));
+    h1->addInstruction(makeBr("d2"));
+    auto d2 = std::make_unique<BasicBlock>("d2");
+    d2->addInstruction(makeDef("w"));
+    d2->addInstruction(makeCondBr("c", "h1", "end"));  // back edge d2 -> h1
+    auto end = std::make_unique<BasicBlock>("end");
+    for (int i = 0; i < 5; ++i) end->addInstruction(makeUse("f" + std::to_string(i)));
+    end->addInstruction(makeUse("p"));
+    end->addInstruction(makeRet());
+    fn9->addBlock(std::move(h0));
+    fn9->addBlock(std::move(h1));
+    fn9->addBlock(std::move(d2));
+    fn9->addBlock(std::move(end));
+
+    cider::RegisterAllocator alloc9;
+    int stackSize9 = 0;
+    auto result9 = alloc9.allocate(*fn9, stackSize9);
+    SpillSummary sum9 = summarize(result9);
+    CHECK(sum9.byName.count("x") == 1);  // x spills (f0..f4 hold the registers)
+    CHECK(sum9.byName.count("w") == 1);  // w spills too
+    CHECK(sum9.byName["x"] != sum9.byName["w"]);  // edge keeps x live -> no sharing
+    CHECK(stackSize9 == 32);  // x stays live through d2; four distinct slots
+
     return 0;
 }
 
