@@ -916,6 +916,108 @@ int run() {
         auto cm = symOf("C_m");
         CHECK(cm && cm->abi == cider::Abi::SysV);
     }
+
+    // CID-005 T3: every CallExpr lowering records its calling convention.
+    // A direct call carries the callee FunctionSymbol's ABI (`Default` when
+    // unmarked; codegen resolves that from the target or from the pinned
+    // definition). An indirect call through a typed fn value carries the
+    // type's ABI (`Ms` iff `isMsAbi`). The `msabi` spellings are Task 4's,
+    // so the Ms cases flip the symbol/type flags directly here.
+    {
+        cider::ErrorReporter rep;
+        cider::Lexer lex(
+            "func f(x: int) -> int { return x; }\n"
+            "var gp: fn(int) -> int = f;\n"
+            "func main() -> int { return f(2) + gp(3); }\n",
+            rep);
+        cider::Parser parser(lex, rep);
+        auto prog = parser.parseProgram();
+        cider::SymbolTable table;
+        cider::ModuleResolver resolver;
+        cider::SymbolCollector collector(table, rep, resolver);
+        collector.collect(*prog);
+        auto fsym = std::static_pointer_cast<cider::FunctionSymbol>(table.resolve("f"));
+        CHECK(fsym != nullptr);
+        fsym->abi = cider::Abi::Ms;
+        // Mark the `gp` declaration's fn type Ms at the AST so the symbol
+        // IR gen builds for the global carries the flag.
+        for (const auto& stmt : prog->getStatements()) {
+            auto vd = dynamic_cast<cider::VarDeclStmt*>(stmt.get());
+            if (vd && vd->getName() == "gp" && vd->getTypeAST()) {
+                vd->getTypeAST()->setAbi(cider::Abi::Ms);
+            }
+        }
+        cider::IRGenerator gen(table);
+        auto module = gen.generate(*prog);
+        bool sawMsDirect = false, sawMsIndirect = false;
+        for (const auto& fn : module.getFunctions()) {
+            for (const auto& block : fn->getBlocks()) {
+                for (const auto& in : block->getInstructions()) {
+                    if (in.op != cider::IROp::CALL) continue;
+                    if (in.args[0].kind == cider::IRValue::LABEL) {
+                        if (in.callAbi == cider::Abi::Ms) sawMsDirect = true;
+                    } else if (in.callAbi == cider::Abi::Ms) {
+                        sawMsIndirect = true;
+                    }
+                }
+            }
+        }
+        CHECK(sawMsDirect);
+        CHECK(sawMsIndirect);
+    }
+
+    // CID-005 T3: unmarked direct calls carry Default (resolved by codegen);
+    // indirect calls through plain fn values, closures, interface dispatch
+    // and virtual dispatch carry SysV, matching the definitions T1 pinned.
+    {
+        auto module = genModuleSrc(
+            "interface I { func m() -> int; }\n"
+            "class C {\n"
+            "  virtual func v() -> int { return 1; }\n"
+            "  func m() -> int { return 2; }\n"
+            "}\n"
+            "func id(x: int) -> int { return x; }\n"
+            "func makeClosure() -> func(int) -> int {\n"
+            "  return func(x: int) -> int { return x; };\n"
+            "}\n"
+            "func callVirt(c: C) -> int { return c.v(); }\n"
+            "func callIface() -> int {\n"
+            "  var c: C;\n"
+            "  var i: I = c;\n"
+            "  return i.m();\n"
+            "}\n"
+            "func main() -> int {\n"
+            "  var p: fn(int) -> int = id;\n"
+            "  var q: func(int) -> int = makeClosure();\n"
+            "  return id(5) + p(3) + q(4);\n"
+            "}\n");
+        bool sawDefaultDirect = false, sawSysvIndirect = false;
+        bool sawVirtual = false, sawIface = false;
+        for (const auto& fn : module.getFunctions()) {
+            for (const auto& block : fn->getBlocks()) {
+                for (const auto& in : block->getInstructions()) {
+                    if (in.op == cider::IROp::VIRTUAL_CALL) {
+                        sawVirtual = true;
+                        CHECK(in.callAbi == cider::Abi::SysV);
+                        continue;
+                    }
+                    if (in.op != cider::IROp::CALL) continue;
+                    if (in.args[0].kind == cider::IRValue::LABEL) {
+                        sawDefaultDirect = true;
+                        CHECK(in.callAbi == cider::Abi::Default);
+                    } else {
+                        sawSysvIndirect = true;
+                        CHECK(in.callAbi == cider::Abi::SysV);
+                        if (fn->getName() == "callIface") sawIface = true;
+                    }
+                }
+            }
+        }
+        CHECK(sawDefaultDirect);
+        CHECK(sawSysvIndirect);
+        CHECK(sawVirtual);
+        CHECK(sawIface);
+    }
     return 0;
 }
 

@@ -922,6 +922,9 @@ public:
                             IRValue dest = IRValue::Register(nextTemp(), retIRType);
                             IRInstruction callInstr;
                             callInstr.op = IROp::CALL;
+                            // CID-005: interface dispatch is SysV (the
+                            // implementations are pinned SysV by generate()).
+                            callInstr.callAbi = Abi::SysV;
                             callInstr.dest = dest;
                             callInstr.args = std::move(args);
                             currentBlock_->addInstruction(callInstr);
@@ -996,6 +999,15 @@ public:
                 }
                 convertCallArgs(args, 0, funcSym->parameterTypes, paramBase);
             }
+            // CID-005: direct calls carry the callee FunctionSymbol's ABI
+            // (`Default` when unmarked; codegen resolves that from the target
+            // or from the definition's pinned ABI).
+            Abi calleeAbi = Abi::Default;
+            if (resolvedFuncSym) {
+                calleeAbi = resolvedFuncSym->abi;
+            } else if (sym && sym->kind == SymbolKind::FUNCTION) {
+                calleeAbi = std::static_pointer_cast<FunctionSymbol>(sym)->abi;
+            }
             bool calleeIsSret = isStructValueType(calleeRet, calleeDefMod);
             // Virtual callees are never sret (they stay on the malloc path);
             // direct CALLs here are free functions / non-virtual methods.
@@ -1005,6 +1017,7 @@ public:
                 currentBlock_->addInstruction({IROp::ALLOCA, retBuf, {IRValue::Constant(retSize, IRType::I32)}});
                 IRInstruction callInstr;
                 callInstr.op = IROp::CALL;
+                callInstr.callAbi = calleeAbi;
                 callInstr.dest = std::nullopt;
                 callInstr.args.push_back(IRValue::Label(funcName));
                 callInstr.args.push_back(retBuf);
@@ -1030,11 +1043,15 @@ public:
             IRInstruction callInstr;
             if (isVirtual && vtableIndex != -1) {
                 callInstr.op = IROp::VIRTUAL_CALL;
+                // CID-005: MS-ABI virtual dispatch is out of scope; the
+                // virtual/override definitions are pinned SysV.
+                callInstr.callAbi = Abi::SysV;
                 callInstr.args.push_back(objPtr);
                 callInstr.args.push_back(IRValue::Constant(vtableIndex, IRType::I32));
                 for (auto& a : args) callInstr.args.push_back(a);
             } else {
                 callInstr.op = IROp::CALL;
+                callInstr.callAbi = calleeAbi;
                 callInstr.args.push_back(IRValue::Label(funcName));
                 if (objPtr.kind != IRValue::CONSTANT || objPtr.intValue != 0) {
                     callInstr.args.push_back(objPtr);
@@ -1073,6 +1090,9 @@ public:
                 IRValue dest = IRValue::Register(nextTemp(), IRType::I32);
                 IRInstruction callInstr;
                 callInstr.op = IROp::CALL;
+                // CID-005: closure definitions are pinned SysV (T1 fix
+                // round 1), so their call sites are too.
+                callInstr.callAbi = Abi::SysV;
                 callInstr.args.push_back(fnPtr);
                 callInstr.args.push_back(obj);
                 for (auto& a : args) callInstr.args.push_back(a);
@@ -1101,6 +1121,15 @@ public:
                 IRValue dest = IRValue::Register(nextTemp(), destIR);
                 IRInstruction callInstr;
                 callInstr.op = IROp::CALL;
+                // CID-005: the fn type carries the convention: `msabi fn`
+                // values call MS, plain `fn` values SysV. A label callee
+                // (e.g. `super.method()`, whose SuperExpr yields a method
+                // label) is a direct call to a known definition, so leave it
+                // Default for codegen to resolve from that definition.
+                callInstr.callAbi =
+                    calleeType.isMsAbi
+                        ? Abi::Ms
+                        : (fnPtr.kind == IRValue::LABEL ? Abi::Default : Abi::SysV);
                 callInstr.args.push_back(fnPtr);
                 for (auto& a : args) callInstr.args.push_back(a);
                 callInstr.dest = dest;

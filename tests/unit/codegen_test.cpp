@@ -1,5 +1,6 @@
 #include <cstdio>
 #include <fstream>
+#include <functional>
 #include <memory>
 #include <sstream>
 #include <string>
@@ -57,6 +58,35 @@ std::string genAsmTarget(const std::string& src, const std::string& target) {
     decon.process(module);
 
     std::string path = "<tmp>/codegen_target_out.asm";
+    cider::CodeGenerator cg(target);
+    CHECKSTR(cg.generate(module, path));
+    std::ifstream in(path);
+    std::ostringstream ss;
+    ss << in.rdbuf();
+    return ss.str();
+}
+
+// Like genAsmTarget, but lets the test patch the module's IR before codegen.
+// T3 uses it to exercise the MS-ABI indirect-call path: an indirect call
+// through an `msabi fn` value needs that value type, and the `msabi`/`sysvabi`
+// parser spelling is Task 4's.
+std::string genAsmTargetPatched(const std::string& src, const std::string& target,
+                                const std::function<void(cider::ModuleIR&)>& patch) {
+    cider::ErrorReporter rep;
+    cider::Lexer lex(src, rep);
+    cider::Parser parser(lex, rep);
+    auto prog = parser.parseProgram();
+    cider::SymbolTable table;
+    cider::ModuleResolver resolver;
+    cider::SymbolCollector collector(table, rep, resolver);
+    collector.collect(*prog);
+    cider::IRGenerator gen(table);
+    auto module = gen.generate(*prog);
+    cider::SSADeconstructor decon;
+    decon.process(module);
+    patch(module);
+
+    std::string path = "<tmp>/codegen_target_patched_out.asm";
     cider::CodeGenerator cg(target);
     CHECKSTR(cg.generate(module, path));
     std::ifstream in(path);
@@ -329,6 +359,243 @@ int run() {
     CHECK(msVirt.find("push rdi") != std::string::npos);
     CHECK(msVirt.find(", rcx\n") == std::string::npos);
     CHECK(msVirt.find(", rdx\n") == std::string::npos);
+
+    // CID-005 T3 (carry-over): RSP is 16-byte aligned at every call
+    // (design §2). Cider's body sits at rsp ≡ 8 mod 16, so a call with an
+    // even number of stack words needs an 8-byte pad while an odd number
+    // is self-aligning: `one(1)` (no stack words) gets the pad,
+    // `seven(...)` (one stack word) does not.
+    std::string alignMix = genAsm(
+        "func one(a: int) -> int { return a; }\n"
+        "func seven(a: int, b: int, c: int, d: int, e: int, f: int, g: int) -> int { return a + g; }\n"
+        "func main() -> int { return one(1) + seven(1, 2, 3, 4, 5, 6, 7); }\n");
+    {
+        size_t mainPos = alignMix.find("global main");
+        CHECK(mainPos != std::string::npos);
+        std::string mainAsm = alignMix.substr(mainPos);
+        size_t pads = 0;
+        for (size_t p = mainAsm.find("sub rsp, 8"); p != std::string::npos;
+             p = mainAsm.find("sub rsp, 8", p + 1)) {
+            pads++;
+        }
+        CHECK(pads == 1);
+        CHECK(mainAsm.find("call one") != std::string::npos);
+        CHECK(mainAsm.find("call seven") != std::string::npos);
+        CHECK(mainAsm.find("push 7") != std::string::npos);  // one stack word
+    }
+    // The SysV `_start` kernel entry has no return address (rbp ≡ 8 mod 16),
+    // so its pad is the mirror image: an odd stack word needs the pad there.
+    std::string startAsm = genAsm(
+        "func seven(a: int, b: int, c: int, d: int, e: int, f: int, g: int) -> int { return a + g; }\n"
+        "func _start() -> void { seven(1, 2, 3, 4, 5, 6, 7); }\n");
+    {
+        size_t s = startAsm.find("_start:");
+        CHECK(s != std::string::npos);
+        std::string body = startAsm.substr(s);  // _start is the last function
+        CHECK(body.find("push 7") != std::string::npos);
+        size_t pads = 0;
+        for (size_t p = body.find("sub rsp, 8"); p != std::string::npos;
+             p = body.find("sub rsp, 8", p + 1)) {
+            pads++;
+        }
+        CHECK(pads == 1);
+    }
+
+    // CID-005 T3: MS-ABI calls. The caller reserves 32 bytes of shadow
+    // space and keeps RSP 16-byte aligned at the call; the body sits at
+    // rsp ≡ 8 mod 16, so the no-stack-arg case adds an 8-byte pad
+    // (32 + 8 = 40). Arguments ride the positional Win64 slots.
+    std::string msCall = genAsmTarget(
+        "func add(a: int, b: int) -> int { return a + b; }\n"
+        "func main() -> int { return add(1, 2); }\n",
+        "uefi");
+    CHECK(msCall.find("sub rsp, 40") != std::string::npos);
+    CHECK(msCall.find("add rsp, 40") != std::string::npos);
+    CHECK(msCall.find("mov rcx, 1") != std::string::npos);
+    CHECK(msCall.find("mov rdx, 2") != std::string::npos);
+    CHECK(msCall.find("call add") != std::string::npos);
+    // The same call must not take the SysV register shuffle. (The MS
+    // definition's own prologue/epilogue push/pop rdi, so slice the call
+    // sequence: pad-sub through pad-add.)
+    {
+        size_t seqStart = msCall.find("sub rsp, 40");
+        size_t seqEnd = msCall.find("add rsp, 40", seqStart);
+        CHECK(seqStart != std::string::npos && seqEnd != std::string::npos);
+        std::string seq = msCall.substr(seqStart, seqEnd - seqStart);
+        CHECK(seq.find("push 1") == std::string::npos);
+        CHECK(seq.find("pop rdi") == std::string::npos);
+    }
+
+    // Float args ride xmm0-3, not the GP path.
+    std::string msFloat = genAsmTarget(
+        "func fadd(a: float, b: f64) -> f64 { return b; }\n"
+        "func main() -> int { return fadd(1.5, 2.5) as int; }\n",
+        "uefi");
+    CHECK(msFloat.find("movss xmm0,") != std::string::npos);
+    CHECK(msFloat.find("movsd xmm1,") != std::string::npos);
+
+    // Stack args go to [rsp + 32 + 8k] above the shadow space; the slots
+    // are positional, so e (arg 4) is [rsp + 32] and f (arg 5) is
+    // [rsp + 40]. rcx/rdx/r8/r9 take args 0-3.
+    std::string msCallStack = genAsmTarget(
+        "func six(a: int, b: int, c: int, d: int, e: int, f: int) -> int { return e + f; }\n"
+        "func main() -> int { return six(1, 2, 3, 4, 5, 6); }\n",
+        "uefi");
+    CHECK(msCallStack.find("mov r8, 3") != std::string::npos);
+    CHECK(msCallStack.find("mov r9, 4") != std::string::npos);
+    CHECK(msCallStack.find("[rsp + 32]") != std::string::npos);
+    CHECK(msCallStack.find("[rsp + 40]") != std::string::npos);
+
+    // A single stack word (odd count) is self-aligning: 32 + 8 = 40 and no
+    // extra pad, with the argument at [rsp + 32].
+    std::string msCallStackOdd = genAsmTarget(
+        "func five(a: int, b: int, c: int, d: int, e: int) -> int { return e; }\n"
+        "func main() -> int { return five(1, 2, 3, 4, 5); }\n",
+        "uefi");
+    CHECK(msCallStackOdd.find("sub rsp, 40") != std::string::npos);
+    CHECK(msCallStackOdd.find("[rsp + 32]") != std::string::npos);
+    CHECK(msCallStackOdd.find("[rsp + 40]") == std::string::npos);
+
+    // A float stack argument must not clobber an earlier float argument
+    // register: the stack store moves bits through rax, not xmm0 (which
+    // already holds arg 0). a-d ride xmm0-3; e (arg 4) goes to [rsp + 32].
+    std::string msFloatStack = genAsmTarget(
+        "func mix(a: float, b: float, c: float, d: float, e: float) -> float {\n"
+        "  return a + b + c + d + e;\n"
+        "}\n"
+        "func main() -> int {\n"
+        "  var a: float = 1.0;\n"
+        "  var b: float = 2.0;\n"
+        "  var c: float = 3.0;\n"
+        "  var d: float = 4.0;\n"
+        "  var e: float = 5.0;\n"
+        "  return mix(a, b, c, d, e) as int;\n"
+        "}\n",
+        "uefi");
+    {
+        size_t mainPos = msFloatStack.find("global main");
+        CHECK(mainPos != std::string::npos);
+        std::string mainAsm = msFloatStack.substr(mainPos);
+        size_t seqStart = mainAsm.find("sub rsp, 40");
+        size_t call = mainAsm.find("call mix");
+        CHECK(seqStart != std::string::npos && call != std::string::npos &&
+              seqStart < call);
+        std::string seq = mainAsm.substr(seqStart, call - seqStart);
+        CHECK(seq.find("movss xmm0, ") != std::string::npos);
+        CHECK(seq.find("movss xmm1, ") != std::string::npos);
+        CHECK(seq.find("movss xmm2, ") != std::string::npos);
+        CHECK(seq.find("movss xmm3, ") != std::string::npos);
+        CHECK(seq.find("[rsp + 32]") != std::string::npos);
+        CHECK(seq.find("movq rax, xmm") != std::string::npos);
+        size_t xmm0Count = 0;
+        for (size_t p = seq.find("movss xmm0, "); p != std::string::npos;
+             p = seq.find("movss xmm0, ", p + 1)) {
+            xmm0Count++;
+        }
+        CHECK(xmm0Count == 1);  // the arg-0 load only
+    }
+
+    // Indirect through an msabi fn value uses r11 and the same frame. The
+    // `msabi fn` spelling lands in T4, so patch the CALL's callAbi here to
+    // exercise T3's codegen path.
+    std::string msInd = genAsmTargetPatched(
+        "func twice(x: int) -> int { return x * 2; }\n"
+        "func main() -> int {\n"
+        "  var p: fn(int) -> int = twice;\n"
+        "  return p(21);\n"
+        "}\n",
+        "uefi",
+        [](cider::ModuleIR& m) {
+            for (auto& fn : m.getFunctions()) {
+                for (auto& b : fn->getBlocks()) {
+                    for (auto& in : b->getInstructions()) {
+                        if (in.op == cider::IROp::CALL && !in.args.empty() &&
+                            in.args[0].kind != cider::IRValue::LABEL) {
+                            in.callAbi = cider::Abi::Ms;
+                        }
+                    }
+                }
+            }
+        });
+    CHECK(msInd.find("call r11") != std::string::npos);
+    CHECK(msInd.find("mov rcx, 21") != std::string::npos);
+    CHECK(msInd.find("sub rsp, 40") != std::string::npos);
+
+    // __sret: the hidden result pointer is positional argument 0 (RCX); the
+    // user argument follows in RDX. A cursor that skipped the hidden
+    // pointer would put x in RCX.
+    std::string msSret = genAsmTarget(
+        "struct S { var a: int; var b: int; }\n"
+        "func mk(x: int) -> S { var s: S; s.a = x; s.b = 2; return s; }\n"
+        "func main() -> int { var s: S = mk(1); return s.a; }\n",
+        "uefi");
+    {
+        size_t mainPos = msSret.find("global main");
+        CHECK(mainPos != std::string::npos);
+        std::string mainAsm = msSret.substr(mainPos);
+        size_t call = mainAsm.find("call mk");
+        CHECK(call != std::string::npos);
+        size_t rcx = mainAsm.find("mov rcx, ");
+        size_t rdx = mainAsm.find("mov rdx, 1");
+        CHECK(rcx != std::string::npos && rcx < call);
+        CHECK(rdx != std::string::npos && rdx < call);
+        CHECK(mainAsm.find("mov rcx, 1") == std::string::npos);
+    }
+
+    // Interface implementations are pinned SysV after accept; a direct call
+    // to one is lowered during accept (symbol ABI still Default), so it must
+    // resolve the callee FunctionIR (SysV) instead of the target descriptor
+    // (MS) — otherwise it marshals MS against a SysV prologue.
+    std::string msIface = genAsmTarget(
+        "interface I { func m() -> int; }\n"
+        "class C { func m() -> int { return 7; } }\n"
+        "func callDirect(c: *C) -> int { return c.m(); }\n"
+        "func main() -> int { return 0; }\n",
+        "uefi");
+    {
+        size_t start = msIface.find("callDirect:");
+        size_t end = msIface.find("global main");
+        CHECK(start != std::string::npos && end != std::string::npos && start < end);
+        std::string cd = msIface.substr(start, end - start);
+        CHECK(cd.find("call C_m") != std::string::npos);
+        CHECK(cd.find("pop rdi") != std::string::npos);      // SysV arg 0
+        CHECK(cd.find("mov rcx, ") == std::string::npos);    // not MS arg 0
+        // The pinned definition keeps the SysV prologue (no MS rdi/rsi save).
+        size_t def = msIface.find("C_m:");
+        size_t entry = msIface.find(".entry:", def);
+        CHECK(def != std::string::npos && entry != std::string::npos);
+        CHECK(msIface.substr(def, entry - def).find("push rdi") == std::string::npos);
+    }
+
+    // super.method() on a plain (non-virtual) parent method: the definition
+    // is Default -> MS under uefi, so the super call must use the resolved
+    // callee ABI (MS), not the SysV typed-indirect default. A virtual parent
+    // method is pinned SysV and keeps the SysV call.
+    std::string msSuper = genAsmTarget(
+        "class Base {\n"
+        "  func plain(x: int) -> int { return x + 1; }\n"
+        "  virtual func virt(x: int) -> int { return x + 2; }\n"
+        "}\n"
+        "class Derived extends Base {\n"
+        "  override func virt(x: int) -> int { return x + 3; }\n"
+        "  func test(x: int) -> int { return super.plain(x) + super.virt(x); }\n"
+        "}\n"
+        "func main() -> int { return 0; }\n",
+        "uefi");
+    {
+        size_t start = msSuper.find("Derived_test:");
+        size_t end = msSuper.find("global main");
+        CHECK(start != std::string::npos && end != std::string::npos && start < end);
+        std::string t = msSuper.substr(start, end - start);
+        size_t plain = t.find("call Base_plain");
+        size_t virt = t.find("call Base_virt");
+        CHECK(plain != std::string::npos);
+        CHECK(virt != std::string::npos);
+        size_t rcx = t.find("rcx, ");       // MS marshaling for `plain`
+        CHECK(rcx != std::string::npos && rcx < plain);
+        size_t rdi = t.find("pop rdi");     // SysV marshaling for `virt`
+        CHECK(rdi != std::string::npos && rdi > plain && rdi < virt);
+    }
 
     // CID-003: float width conversions. (CHECKSTR returns "" and is only
     // usable in string-returning helpers; run() uses CHECK/.find like the

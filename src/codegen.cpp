@@ -468,6 +468,122 @@ bool CodeGenerator::generate(ModuleIR& module, const std::string& outputPath,
             return regMap[reg][idx];
         };
 
+        // CID-005: lower an MS-ABI (Win64) call. Argument slots are
+        // positional: argument N (0-based, N < 4) uses the Nth slot of its
+        // class (int/pointer -> rcx/rdx/r8/r9, float/f64 -> xmm0-3);
+        // arguments 4+ go on the stack in source order at [rsp + 32 + 8k]
+        // above the 32-byte shadow space. `pad` keeps RSP 16-byte aligned at
+        // the call (design §2). The caller drops the caller-saved XMM spills
+        // for MS callees: Win64 makes XMM6-15 callee-saved and the T2
+        // prologue saves exactly the ones a definition uses.
+        auto emitMsCall = [&](const IRInstruction& instr, const IRValue& target,
+                              bool indirect, int pad) {
+            size_t numArgs = instr.args.size() - 1;
+            int stackArgs = std::max(0, (int)numArgs - 4);
+            int reserve = msDesc.shadowSpace + stackArgs * 8 + pad;
+            addText("    sub rsp, " + std::to_string(reserve));
+            // Indirect target first: a spilled slot must be read before the
+            // arg-register moves (which never touch r11).
+            if (indirect) addText("    mov r11, " + getOperand(target));
+            auto isFloatArg = [](const IRValue& v) {
+                return v.type == IRType::F32 || v.type == IRType::F64;
+            };
+            auto loadIntArg = [&](const IRValue& arg, const std::string& dst) {
+                std::string op = getOperand(arg);
+                std::string d32 = getSizedReg(dst, IRType::I32);
+                if (arg.kind == IRValue::LABEL) {
+                    addText("    lea " + dst + ", [rel " + arg.name + "]");
+                } else if (arg.kind == IRValue::CONSTANT) {
+                    uint64_t c = (uint64_t)arg.intValue;
+                    if ((int64_t)c >= (int64_t)INT32_MIN && (int64_t)c <= (int64_t)INT32_MAX)
+                        addText("    mov " + dst + ", " + op);
+                    else if (c <= 0xFFFFFFFFULL)
+                        addText("    mov " + d32 + ", " + op);
+                    else
+                        addText("    mov " + dst + ", " + op);
+                } else if (isMem(op)) {
+                    if (arg.type == IRType::I32) addText("    movsxd " + dst + ", dword " + op);
+                    else if (arg.type == IRType::U32 || arg.type == IRType::BOOL) addText("    mov " + d32 + ", dword " + op);
+                    else if (arg.type == IRType::I8) addText("    movsx " + dst + ", byte " + op);
+                    else if (arg.type == IRType::U8) addText("    movzx " + dst + ", byte " + op);
+                    else if (arg.type == IRType::I16) addText("    movsx " + dst + ", word " + op);
+                    else if (arg.type == IRType::U16) addText("    movzx " + dst + ", word " + op);
+                    else addText("    mov " + dst + ", " + op);
+                } else if (arg.type == IRType::I32) {
+                    addText("    movsxd " + dst + ", " + getSizedReg(op, IRType::I32));
+                } else if (arg.type == IRType::U32 || arg.type == IRType::BOOL) {
+                    addText("    mov " + d32 + ", " + getSizedReg(op, IRType::U32));
+                } else if (arg.type == IRType::I8) {
+                    addText("    movsx " + dst + ", " + getSizedReg(op, IRType::I8));
+                } else if (arg.type == IRType::U8) {
+                    addText("    movzx " + dst + ", " + getSizedReg(op, IRType::U8));
+                } else if (arg.type == IRType::I16) {
+                    addText("    movsx " + dst + ", " + getSizedReg(op, IRType::I16));
+                } else if (arg.type == IRType::U16) {
+                    addText("    movzx " + dst + ", " + getSizedReg(op, IRType::U16));
+                } else {
+                    addText("    mov " + dst + ", " + getSizedReg(op, arg.type));
+                }
+            };
+            auto loadFloatArg = [&](const IRValue& arg, const std::string& xmm) {
+                std::string op = getOperand(arg);
+                bool f32 = (arg.type == IRType::F32);
+                std::string mv = f32 ? "movss" : "movsd";
+                std::string sz = f32 ? "dword " : "qword ";
+                if (arg.kind == IRValue::CONSTANT || isMem(op))
+                    addText("    " + mv + " " + xmm + ", " + sz + op);
+                else
+                    addText("    " + mv + " " + xmm + ", " + op);
+            };
+            auto storeStackArg = [&](const IRValue& arg, int slot) {
+                std::string dst = "[rsp + " + std::to_string(msDesc.shadowSpace + slot * 8) + "]";
+                if (isFloatArg(arg)) {
+                    // Move the bits through rax, never through xmm0-3: those
+                    // may already hold earlier float arguments (the stack
+                    // args are processed last), and an xmm0 scratch would
+                    // overwrite them.
+                    std::string op = getOperand(arg);
+                    bool f32 = (arg.type == IRType::F32);
+                    if (arg.kind == IRValue::CONSTANT || isMem(op)) {
+                        if (f32) addText("    mov eax, dword " + op);
+                        else addText("    mov rax, qword " + op);
+                    } else {
+                        addText("    movq rax, " + op);
+                    }
+                } else {
+                    loadIntArg(arg, "rax");
+                }
+                addText("    mov " + dst + ", rax");
+            };
+            int slotCursor = 0, stackCursor = 0;
+            for (size_t i = 1; i <= numArgs; ++i) {
+                const IRValue& arg = instr.args[i];
+                // Win64 slots are positional: argument (i-1) uses the
+                // (i-1)-th slot of its class; args 4+ stack.
+                if (slotCursor < 4) {
+                    if (isFloatArg(arg)) loadFloatArg(arg, msDesc.floatArgRegs[slotCursor]);
+                    else loadIntArg(arg, msDesc.intArgRegs[slotCursor]);
+                    slotCursor++;
+                } else {
+                    storeStackArg(arg, stackCursor++);
+                }
+            }
+            if (indirect) addText("    call r11");
+            else addText("    call " + getOperand(target));
+            addText("    add rsp, " + std::to_string(reserve));
+            if (instr.dest && !getOperand(*instr.dest).empty() &&
+                getOperand(*instr.dest) != "none") {
+                std::string d = getOperand(*instr.dest);
+                IRType retType = instr.dest->type;
+                if (retType == IRType::F32)
+                    addText("    movss " + (isMem(d) ? "dword " + d : d) + ", xmm0");
+                else if (retType == IRType::F64)
+                    addText("    movsd " + (isMem(d) ? "qword " + d : d) + ", xmm0");
+                else
+                    addText("    mov " + getSizedReg(d, retType) + ", " + getSizedReg("rax", retType));
+            }
+        };
+
         auto genEpilogue = [&](bool zeroVoid = false) {
             if (zeroVoid) addText("    xor eax, eax");
             if (!calleeSaved.empty() || !xmmSaved.empty()) {
@@ -1665,35 +1781,97 @@ bool CodeGenerator::generate(ModuleIR& module, const std::string& outputPath,
                 }
                 case IROp::CALL:
                 case IROp::VIRTUAL_CALL: {
+                    // CID-005: resolve the calling convention. Explicit
+                    // Ms/SysV wins; Default follows the target descriptor,
+                    // except that a direct call to a definition pinned after
+                    // accept (interface implementations, T1 fix round 1)
+                    // resolves from the callee FunctionIR so the call matches
+                    // the emitted definition.
+                    Abi resolvedCallAbi = instr.callAbi;
+                    if (resolvedCallAbi == Abi::Default && !instr.args.empty() &&
+                        instr.args[0].kind == IRValue::LABEL) {
+                        for (const auto& calleeFn : module.getFunctions()) {
+                            if (calleeFn->getName() == instr.args[0].name &&
+                                calleeFn->getAbi() != Abi::Default) {
+                                resolvedCallAbi = calleeFn->getAbi();
+                                break;
+                            }
+                        }
+                    }
+                    if (resolvedCallAbi == Abi::Default) {
+                        resolvedCallAbi = targetAbiFor(target_);
+                    }
+                    const bool msCall = (resolvedCallAbi == Abi::Ms &&
+                                         instr.op == IROp::CALL &&
+                                         !instr.args.empty());
+
+                    // RSP must be 16-byte aligned at every call (design §2).
+                    // The body's rsp is `rbp - totalStack + 8`; rbp is
+                    // 16-aligned for a function entered by `call` (entry rsp
+                    // ≡ 8) and 8 mod 16 for the SysV `_start` kernel entry
+                    // (no return address). Under uefi `_start` is a normal
+                    // function called by `call` (design §1), so only the
+                    // native/pomeos kernel entry takes the bias. `callPad`
+                    // is the 0/8 adjustment that closes the gap for the
+                    // words still on the stack at the call.
+                    const bool kernelEntry =
+                        (fName == "_start" && !defMs && target_ != "uefi");
+                    const int frameBias = kernelEntry ? 8 : 0;
+                    auto callPad = [&](int stackWords) {
+                        return (frameBias + 8 - (stackWords % 2) * 8) % 16;
+                    };
+
                     std::vector<std::string> callerSaved = {"rax", "rcx", "rdx", "rsi", "rdi", "r8", "r9", "r10", "r11"};
                     std::vector<std::string> toSave;
                     for (const auto& reg : callerSaved) {
                         for (const auto& [var, res] : alloc) { if (!res.isSpilled && res.reg == reg) { if (instr.dest && instr.dest->name == var && reg == "rax") continue; toSave.push_back(reg); break; } }
                     }
-                    // XMM registers are all caller-saved (CID-027): a
-                    // callee freely uses xmm8-xmm15 as scratch, so any
-                    // float value held in an XMM reg across the call must
-                    // be spilled here. The dest's own reg is skipped (the
-                    // return value arrives in it).
                     std::string destReg;
                     if (instr.dest && alloc.count(instr.dest->name) && !alloc.at(instr.dest->name).isSpilled) {
                         destReg = alloc.at(instr.dest->name).reg;
                     }
                     std::vector<std::string> toSaveXmm;
-                    for (const auto& [var, res] : alloc) {
-                        if (!res.isSpilled && res.reg.rfind("xmm", 0) == 0 && res.reg != destReg) {
-                            if (std::find(toSaveXmm.begin(), toSaveXmm.end(), res.reg) == toSaveXmm.end()) {
-                                toSaveXmm.push_back(res.reg);
+                    if (!msCall) {
+                        // XMM registers are caller-saved for SysV callees
+                        // (CID-027): a callee freely uses xmm8-xmm15 as
+                        // scratch, so any float value held in an XMM reg
+                        // across the call must be spilled here. MS callees
+                        // preserve XMM6-15 (T2 saves exactly the ones a
+                        // definition uses, full width), so an MS call needs
+                        // no caller-side spill. The dest's own reg is skipped
+                        // (the return value arrives in it).
+                        for (const auto& [var, res] : alloc) {
+                            if (!res.isSpilled && res.reg.rfind("xmm", 0) == 0 && res.reg != destReg) {
+                                if (std::find(toSaveXmm.begin(), toSaveXmm.end(), res.reg) == toSaveXmm.end()) {
+                                    toSaveXmm.push_back(res.reg);
+                                }
                             }
                         }
                     }
 
-                    // displacement = savedRegsSize (rbp + callee area:
-                    // 40 GP bytes SysV / 56 GP bytes MS, plus 16 per
-                    // saved MS XMM slot) + extraStack + toSave*8 +
-                    // xmmSaves*8
-                    int displacement = savedRegsSize + extraStack + ((int)toSave.size() + (int)toSaveXmm.size()) * 8;
-                    int padding = (displacement % 16 != 0) ? 8 : 0;
+                    if (msCall) {
+                        int msStackArgs = 0;
+                        if (!instr.args.empty()) {
+                            size_t numArgs = instr.args.size() - 1;
+                            msStackArgs = std::max(0, (int)numArgs - 4);
+                        }
+                        emitMsCall(instr, instr.args[0],
+                                   instr.args[0].kind != IRValue::LABEL,
+                                   callPad(msStackArgs));
+                        break;
+                    }
+
+                    // SysV path: native/pomeos, and SysV-pinned callees under
+                    // uefi. The pad accounts for the words that stay on the
+                    // stack (callee-saved spills + SysV stack args) so rsp is
+                    // 16-byte aligned at the call.
+                    int stackArgs = 0;
+                    if (instr.op == IROp::CALL && !instr.args.empty()) {
+                        size_t numArgs = instr.args.size() - 1;
+                        if (numArgs > 6) stackArgs = (int)numArgs - 6;
+                    }
+                    int padding = callPad((int)toSave.size() +
+                                          (int)toSaveXmm.size() + stackArgs);
 
                     if (padding > 0) addText("    sub rsp, " + std::to_string(padding));
                     for (const auto& reg : toSave) addText("    push " + reg);
