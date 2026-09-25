@@ -194,6 +194,63 @@ int run() {
         "func main() -> int { return 0; }\n");
     CHECK(pvalias.find("g: dq add") != std::string::npos);
 
+    // CID-005: `--target uefi` definitions use MS-ABI param registers.
+    std::string msDef = genAsmTarget(
+        "func add(a: int, b: int) -> int { return a + b; }\n"
+        "func mix(x: int, f: float, p: *u8, g: f64) -> int { return x + p[0]; }\n"
+        "func main() -> int { return add(1, 2); }\n",
+        "uefi");
+    CHECK(msDef.find("global main") != std::string::npos);
+    // Definition side reads *from* the MS argument registers (`mov rcx, ...`
+    // as a destination is the MS call-site form, owned by Task 3). Class
+    // cursors are independent per design §2: x -> rcx, f -> xmm0,
+    // p -> rdx, g -> xmm1.
+    CHECK(msDef.find(", rcx\n") != std::string::npos);   // int param 1
+    CHECK(msDef.find(", rdx\n") != std::string::npos);   // int param 2 (pointer class)
+    CHECK(msDef.find("movq xmm") != std::string::npos);  // float params from xmm0/1
+    CHECK(msDef.find(", xmm1") != std::string::npos);    // 4th param g comes from xmm1
+    CHECK(msDef.find("mov rbx, rdi") == std::string::npos);  // no SysV rdi spill-in
+    // Stack overflow args start at [rbp + 48] (5th int); the SysV stack-arg
+    // base [rbp + 16] must not appear in the function at all.
+    std::string msStack = genAsmTarget(
+        "func six(a: int, b: int, c: int, d: int, e: int, f: int) -> int { return a + b + c + d + e + f; }\n"
+        "func main() -> int { return six(1, 2, 3, 4, 5, 6); }\n",
+        "uefi");
+    CHECK(msStack.find("[rbp + 48]") != std::string::npos);
+    CHECK(msStack.find("[rbp + 56]") != std::string::npos);
+    CHECK(msStack.find("[rbp + 16]") == std::string::npos);
+    // Callee-saved XMM8-15: a live float value forces the save/restore pair.
+    // (bump uses four float values; the MS prologue renumbers the used part
+    // of the allocator's xmm15-down pool to a dense xmm8.. run.)
+    std::string msXmm = genAsmTarget(
+        "func bump(f: float) -> float { var x: float = f; x = x + 1.0; return x; }\n"
+        "func main() -> int { return 0; }\n",
+        "uefi");
+    CHECK(msXmm.find("movq [rsp], xmm8") != std::string::npos);
+    CHECK(msXmm.find("movq xmm8, [rsp]") != std::string::npos);
+    // The restore reads the slot the prologue saved: the frame must be
+    // rewound to the xmm saves (5 GP + 4 xmm = 72 bytes) first.
+    {
+        size_t rewind = msXmm.find("lea rsp, [rbp - 72]");
+        size_t restore = msXmm.find("movq xmm8, [rsp]");
+        CHECK(rewind != std::string::npos);
+        CHECK(restore != std::string::npos);
+        CHECK(rewind < restore);
+    }
+    // An integer-only MS definition never saves an XMM register.
+    CHECK(msStack.find("movq [rsp], xmm") == std::string::npos);
+    // CID-005 carry-over: virtual/override definitions are pinned SysV in
+    // the IR, so they keep the SysV rdi/rsi marshaling under --target uefi.
+    std::string msVirt = genAsmTarget(
+        "class Base {\n"
+        "  virtual func f(x: int) -> int { return x + 1; }\n"
+        "}\n"
+        "func main() -> int { return 0; }\n",
+        "uefi");
+    CHECK(msVirt.find("push rdi") != std::string::npos);
+    CHECK(msVirt.find(", rcx\n") == std::string::npos);
+    CHECK(msVirt.find(", rdx\n") == std::string::npos);
+
     // CID-003: float width conversions. (CHECKSTR returns "" and is only
     // usable in string-returning helpers; run() uses CHECK/.find like the
     // rest of its assertions.) Sources are variables so both conversions

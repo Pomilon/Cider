@@ -214,6 +214,31 @@ bool CodeGenerator::generate(ModuleIR& module, const std::string& outputPath,
 
     std::vector<std::string> argRegs = {"rdi", "rsi", "rdx", "rcx", "r8", "r9"};
 
+    // CID-005: ABI descriptors. `desc` is the target's default convention
+    // (`native`/`pomeos` -> SysV, `uefi` -> MS); `msDesc` is the MS
+    // convention for explicit `msabi` definitions under any target.
+    struct AbiDesc {
+        bool ms = false;
+        std::vector<std::string> intArgRegs = {"rdi", "rsi", "rdx", "rcx", "r8", "r9"};
+        std::vector<std::string> floatArgRegs;   // MS: xmm0-3; SysV path unused
+        int shadowSpace = 0;                     // MS: 32
+        int stackArgBase = 16;                   // callee [rbp + stackArgBase + 8k]
+        bool saveXmm = false;                    // MS: preserve xmm8-15
+    };
+    auto abiDescFor = [](const std::string& t) -> AbiDesc {
+        AbiDesc d;
+        if (targetAbiFor(t) == Abi::Ms) {
+            d.ms = true;
+            d.intArgRegs = {"rcx", "rdx", "r8", "r9"};
+            d.floatArgRegs = {"xmm0", "xmm1", "xmm2", "xmm3"};
+            d.shadowSpace = 32;
+            d.stackArgBase = 48;
+            d.saveXmm = true;
+        }
+        return d;
+    };
+    const AbiDesc desc = abiDescFor(target_);
+
     for (auto& func : module.getFunctions()) {
         if (generatedFunctions_.count(func->getName())) continue;
         generatedFunctions_.insert(func->getName());
@@ -247,16 +272,57 @@ bool CodeGenerator::generate(ModuleIR& module, const std::string& outputPath,
             addText("global " + fName);
         }
 
+        // CID-005: resolve the definition's ABI from the FunctionIR.
+        // `Default` follows the target descriptor (uefi -> MS); explicit
+        // `msabi` is MS on any target. Pinned-SysV definitions
+        // (virtual/override/interface/closure, see ir_gen) arrive as
+        // Abi::SysV and stay SysV under `--target uefi`.
+        const AbiDesc msDesc = abiDescFor("uefi");  // explicit msabi works on any target
+        bool defMs = (func->getAbi() == Abi::Default && desc.ms) ||
+                     (func->getAbi() == Abi::Ms);
+        std::vector<std::string> calleeSaved = {"rbx", "r12", "r13", "r14", "r15"};
+        std::vector<std::string> xmmSaved;
+        if (defMs) {
+            // MS-ABI XMM8-15 are callee-saved. The allocator hands the float
+            // pool out top-down (xmm15 first), so renumber the used part to
+            // a dense xmm8.. run: the epilogue then saves exactly those used
+            // (bijective rename, so disjoint intervals stay disjoint).
+            std::vector<std::string> xmmPool;
+            for (int i = 8; i <= 15; ++i) xmmPool.push_back("xmm" + std::to_string(i));
+            std::map<std::string, std::string> xmmRenumber;
+            size_t nextXmm = 8;
+            for (const auto& xr : xmmPool) {
+                for (const auto& [var, res] : alloc) {
+                    (void)var;
+                    if (!res.isSpilled && res.reg == xr) {
+                        xmmRenumber[xr] = "xmm" + std::to_string(nextXmm++);
+                        break;
+                    }
+                }
+            }
+            for (auto& [var, res] : alloc) {
+                (void)var;
+                if (res.isSpilled) continue;
+                auto it = xmmRenumber.find(res.reg);
+                if (it != xmmRenumber.end()) res.reg = it->second;
+            }
+            for (const auto& xr : xmmPool) {
+                for (const auto& [var, res] : alloc) {
+                    (void)var;
+                    if (!res.isSpilled && res.reg == xr) { xmmSaved.push_back(xr); break; }
+                }
+            }
+        }
+
         addText(fName + ":");
         addText("    push rbp");
         addText("    mov rbp, rsp");
-
-        std::vector<std::string> calleeSaved = {"rbx", "r12", "r13", "r14", "r15"};
-        for (const auto& reg : calleeSaved) {
-            addText("    push " + reg);
+        for (const auto& reg : calleeSaved) addText("    push " + reg);
+        for (const auto& reg : xmmSaved) {
+            addText("    sub rsp, 8");
+            addText("    movq [rsp], " + reg);
         }
-
-        int savedRegsSize = 8 + (calleeSaved.size() * 8);  // rbp + 5 regs = 48 bytes
+        int savedRegsSize = 8 + (int)(calleeSaved.size() + xmmSaved.size()) * 8;
 
         std::map<std::string, int> localOffsets;
         int currentAllocaOffset = savedRegsSize;
@@ -391,8 +457,17 @@ bool CodeGenerator::generate(ModuleIR& module, const std::string& outputPath,
 
         auto genEpilogue = [&](bool zeroVoid = false) {
             if (zeroVoid) addText("    xor eax, eax");
-            if (calleeSaved.size() > 0) {
-                addText("    lea rsp, [rbp - " + std::to_string(calleeSaved.size() * 8) + "]");
+            if (!calleeSaved.empty() || !xmmSaved.empty()) {
+                // Rewind over the frame sub to the saved-register area. Any
+                // MS-ABI XMM saves sit just below the callee-saved GP
+                // pushes, so they must be restored (in reverse) before the
+                // pops; without the rewind [rsp] would point into the frame.
+                addText("    lea rsp, [rbp - " +
+                        std::to_string((calleeSaved.size() + xmmSaved.size()) * 8) + "]");
+                for (auto it = xmmSaved.rbegin(); it != xmmSaved.rend(); ++it) {
+                    addText("    movq " + *it + ", [rsp]");
+                    addText("    add rsp, 8");
+                }
                 for (auto it = calleeSaved.rbegin(); it != calleeSaved.rend(); ++it) {
                     addText("    pop " + *it);
                 }
@@ -469,7 +544,7 @@ bool CodeGenerator::generate(ModuleIR& module, const std::string& outputPath,
                 const auto& params = func->getParams();
                 int numParams = std::min((int)params.size(), 6);
 
-                if (fName == "_start") {
+                if (fName == "_start" && !defMs) {
                     // _start is called by the kernel, not by a call instruction.
                     // The kernel passes argc on the stack at [rsp] and the argv array
                     // starts at [rsp+8]. After our prologue, these are at [rbp+8] and
@@ -494,6 +569,56 @@ bool CodeGenerator::generate(ModuleIR& module, const std::string& outputPath,
                             } else {
                                 addText("    mov " + a.reg + ", r11");
                             }
+                        }
+                    }
+                } else if (defMs) {
+                    // CID-005: MS-ABI parameter marshaling. Integer/pointer
+                    // and float classes have independent cursors: rcx, rdx,
+                    // r8, r9 / xmm0-3; overflow args arrive at
+                    // [rbp + 48 + 8k] (32-byte shadow space above them).
+                    // NOTE: independent cursors are design §2's model. The
+                    // documented Win64 rule is positional (argument N uses
+                    // the Nth RCX/XMM slot pair); the two differ for mixed
+                    // int/float signatures. See the task-2 report.
+                    int intReg = 0, floatReg = 0, stackSlot = 0;
+                    const auto& ptypes = func->getParamTypes();
+                    for (size_t pi = 0; pi < params.size(); ++pi) {
+                        IRType pt = (pi < ptypes.size()) ? ptypes[pi] : IRType::I32;
+                        bool isFloat = (pt == IRType::F32 || pt == IRType::F64);
+                        std::string src;
+                        bool onStack = false;
+                        if (isFloat) {
+                            if (floatReg < (int)msDesc.floatArgRegs.size())
+                                src = msDesc.floatArgRegs[floatReg++];
+                            else onStack = true;
+                        } else {
+                            if (intReg < (int)msDesc.intArgRegs.size())
+                                src = msDesc.intArgRegs[intReg++];
+                            else onStack = true;
+                        }
+                        if (onStack) {
+                            src = "[rbp + " + std::to_string(msDesc.stackArgBase + 8 * stackSlot++) + "]";
+                        }
+                        if (!alloc.count(params[pi])) continue;
+                        const auto& a = alloc.at(params[pi]);
+                        if (a.isSpilled) {
+                            int offset = spillBase + (-a.stackOffset);
+                            if (onStack) {
+                                // A spilled destination needs a register
+                                // hop; `mov mem, mem` does not exist. r11
+                                // is not an MS argument register, so it is
+                                // safe scratch before the body.
+                                addText("    mov r11, " + src);
+                                src = "r11";
+                            }
+                            if (src.rfind("xmm", 0) == 0)
+                                addText("    movq [rbp - " + std::to_string(offset) + "], " + src);
+                            else
+                                addText("    mov qword [rbp - " + std::to_string(offset) + "], " + src);
+                        } else if (a.reg.rfind("xmm", 0) == 0) {
+                            addText("    movq " + a.reg + ", " + src);
+                        } else {
+                            addText("    mov " + a.reg + ", " + src);
                         }
                     }
                 } else {
