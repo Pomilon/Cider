@@ -1,0 +1,1 @@
+Type mismatch in declaration of 'b'. Expected msabi fn(int) -> int, got fn(int) -> int

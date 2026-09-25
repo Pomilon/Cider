@@ -41,6 +41,10 @@ public:
         symbolModules_ = symbolModules;
     }
 
+    // CID-005: `--target uefi` types unmarked function identifiers as
+    // MS-ABI fn values (mirrors the checker's functionPointerTypeOf).
+    void setDefaultAbiMs(bool v) { defaultAbiMs_ = v; }
+
     ModuleIR generate(AstProgram& program) {
         visitedPrograms_.clear();
         classSyms_.clear();
@@ -2407,6 +2411,7 @@ public:
             TypeInfo ft;
             ft.name = "fn";
             ft.isFunctionPointer = true;
+            ft.isMsAbi = (fsym->abi == Abi::Ms) || (fsym->abi == Abi::Default && defaultAbiMs_);
             ft.fnParamTypes = std::make_shared<std::vector<TypeInfo>>(fsym->parameterTypes);
             ft.fnReturnType = std::make_shared<TypeInfo>(fsym->returnType);
             lastExprType_ = ft;
@@ -4677,6 +4682,7 @@ private:
     bool exceptionGlobalsEnsured_ = false;
     bool interpHelpersEnsured_ = false;
     bool currentIsSret_ = false;
+    bool defaultAbiMs_ = false;  // CID-005: --target uefi function-value typing
     TypeInfo currentReturnType_ = {"void", 0};
     int tempCount_ = 0;
     int globalStrCount_ = 0;

@@ -889,6 +889,30 @@ std::unique_ptr<Expression> Parser::parseTableLiteral() {
 }
 
 std::unique_ptr<Statement> Parser::parseStatement() {
+    // CID-005: contextual ABI modifiers. `msabi`/`sysvabi` stay ordinary
+    // identifiers; they are modifiers only immediately before func/extern
+    // func (and before `fn` in type position, see parseType).
+    if (currentToken_.type == TokenType::IDENTIFIER &&
+        (currentToken_.value == "msabi" || currentToken_.value == "sysvabi")) {
+        bool wantsFunc = (peekToken_.type == TokenType::FUNC ||
+                          peekToken_.type == TokenType::FUNCTION ||
+                          peekToken_.type == TokenType::EXTERN ||
+                          peekToken_.type == TokenType::ASYNC);
+        if (wantsFunc) {
+            Abi abi = (currentToken_.value == "msabi") ? Abi::Ms : Abi::SysV;
+            nextToken();  // consume the modifier
+            bool isExtern = false, isAsync = false;
+            if (currentToken_.type == TokenType::EXTERN) { isExtern = true; nextToken(); }
+            if (currentToken_.type == TokenType::ASYNC) { isAsync = true; nextToken(); }
+            if (currentToken_.type == TokenType::FUNC || currentToken_.type == TokenType::FUNCTION) {
+                auto fn = parseFunctionDeclaration(isAsync, false, false, isExtern);
+                if (auto* fd = dynamic_cast<FunctionDeclStmt*>(fn.get())) fd->setAbi(abi);
+                return fn;
+            }
+            error("Expected 'func' after ABI modifier.");
+            return nullptr;
+        }
+    }
     switch (currentToken_.type) {
     case TokenType::VAR:
     case TokenType::CONST:
@@ -1002,8 +1026,9 @@ std::unique_ptr<Statement> Parser::parseStatement() {
 
 // CID-006: `fn(T1, T2, ...) -> R`. Called with the current token on '('
 // and `fn` already consumed. Parameters may be empty (`fn() -> R`); the
-// return type may be `void`.
-std::unique_ptr<TypeAST> Parser::parseFunctionPointerType(int line, int col, bool isVolatile) {
+// return type may be `void`. CID-005: `abi` is the explicit `msabi`/
+// `sysvabi` prefix (Default for a plain `fn`).
+std::unique_ptr<TypeAST> Parser::parseFunctionPointerType(int line, int col, bool isVolatile, Abi abi) {
     nextToken();  // consume '('
     std::vector<std::unique_ptr<TypeAST>> params;
     if (currentToken_.type != TokenType::RPAREN) {
@@ -1032,6 +1057,7 @@ std::unique_ptr<TypeAST> Parser::parseFunctionPointerType(int line, int col, boo
     if (!ret) return nullptr;
     auto node = std::make_unique<TypeAST>("fn", 0, line, col, isVolatile);
     node->setFunctionSignature(std::move(params), std::move(ret));
+    node->setAbi(abi);
     return node;
 }
 
@@ -1043,6 +1069,15 @@ std::unique_ptr<TypeAST> Parser::parseType(bool castContext) {
     if (currentToken_.type == TokenType::VOLATILE) {
         isVolatile = true;
         nextToken();
+    }
+
+    // CID-005: `msabi fn(...) -> R` / `sysvabi fn(...) -> R`.
+    Abi typeAbi = Abi::Default;
+    if (currentToken_.type == TokenType::IDENTIFIER &&
+        (currentToken_.value == "msabi" || currentToken_.value == "sysvabi") &&
+        peekToken_.type == TokenType::IDENTIFIER && peekToken_.value == "fn") {
+        typeAbi = (currentToken_.value == "msabi") ? Abi::Ms : Abi::SysV;
+        nextToken();  // consume the modifier; 'fn' is next
     }
 
     if (currentToken_.type == TokenType::LBRACKET) {
@@ -1132,7 +1167,7 @@ std::unique_ptr<TypeAST> Parser::parseType(bool castContext) {
         // ordinary identifier; recognize it only in type position and only
         // when '(' follows immediately.
         if (isPlainIdent && typeName == "fn" && currentToken_.type == TokenType::LPAREN) {
-            return parseFunctionPointerType(line, col, isVolatile);
+            return parseFunctionPointerType(line, col, isVolatile, typeAbi);
         }
 
         // CID-020/021 (spec §3): dotted names in type position

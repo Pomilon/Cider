@@ -47,6 +47,33 @@ int run() {
     CHECK(!rep.hasErrors());
     CHECK(d.find("(FunctionDecl f (params (p fn(int) -> int)) (returns int)") != std::string::npos);
 
+    // CID-005: ABI modifiers on definitions and fn types.
+    rep.clear();
+    d = parseDump("msabi func efi_main(image: EFI_HANDLE, st: *EFI_SYSTEM_TABLE) -> u64 { return 0; }\n", rep);
+    CHECK(!rep.hasErrors());
+    CHECK(d.find("(FunctionDecl efi_main msabi (params") != std::string::npos);
+
+    rep.clear();
+    d = parseDump("msabi extern func puts(s: *u16) -> u64;\n", rep);
+    CHECK(!rep.hasErrors());
+    CHECK(d.find("(FunctionDecl puts msabi extern (params") != std::string::npos);
+
+    rep.clear();
+    d = parseDump("func f(p: msabi fn(int, float) -> u64) -> int { return 0; }\n", rep);
+    CHECK(!rep.hasErrors());
+    CHECK(d.find("(p msabi fn(int, float) -> u64)") != std::string::npos);
+
+    rep.clear();
+    d = parseDump("func f(p: sysvabi fn(int) -> void) -> int { return 0; }\n", rep);
+    CHECK(!rep.hasErrors());
+    CHECK(d.find("(p sysvabi fn(int) -> void)") != std::string::npos);
+
+    rep.clear();
+    d = parseDump("var t: [msabi fn(int) -> int; 2] = [a, b];\n", rep);
+    CHECK(!rep.hasErrors());
+    CHECK(d.find("msabi fn(int) -> int[2]") != std::string::npos);
+    CHECK(d.find("msabi fn(int) -> int[2]") != std::string::npos);
+
     // Assignment forms incl. compound.
     rep.clear();
     d = parseDump("func f() {\n  x += 2;\n  a.b[0] = foo();\n}\n", rep);

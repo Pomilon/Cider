@@ -25,6 +25,17 @@ int run() {
     CHECK(!rep.hasErrors());
     CHECK(d.find("(Cast (Group (Binary + (Number 48) (Ident v))) -> char)") != std::string::npos);
 
+    // CID-005: ABI modifiers in cast targets.
+    rep.clear();
+    d = parseDump("func f(p: *void) -> void {\n  var g: msabi fn(int) -> int = p as msabi fn(int) -> int;\n}\n", rep);
+    CHECK(!rep.hasErrors());
+    CHECK(d.find("(Cast (Ident p) -> msabi fn(int) -> int)") != std::string::npos);
+
+    rep.clear();
+    d = parseDump("func f(p: *void) -> void {\n  var g: sysvabi fn(int) -> void = p as sysvabi fn(int) -> void;\n}\n", rep);
+    CHECK(!rep.hasErrors());
+    CHECK(d.find("(Cast (Ident p) -> sysvabi fn(int) -> void)") != std::string::npos);
+
     // Ternary, member access, index, call.
     rep.clear();
     d = parseDump(

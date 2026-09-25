@@ -67,6 +67,15 @@ int run() {
     CHECK(abiType.getAbi() == cider::Abi::Ms);
     cider::TypeAST defaultType("int", 0, 1, 1);
     CHECK(defaultType.getAbi() == cider::Abi::Default);
+
+    // CID-005: an explicit ABI renders in the fn dump.
+    std::vector<std::unique_ptr<cider::TypeAST>> abiParams;
+    abiParams.push_back(std::make_unique<cider::TypeAST>("int", 0, 1, 1));
+    abiType.setFunctionSignature(std::move(abiParams),
+                                 std::make_unique<cider::TypeAST>("u64", 0, 1, 1));
+    std::string abiDump;
+    abiType.dump(abiDump, 0);
+    CHECK(abiDump.find("msabi fn(") != std::string::npos);
     return 0;
 }
 

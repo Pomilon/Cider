@@ -1,0 +1,6 @@
+func inc(a: int) -> int { return a + 1; }
+func main() -> int {
+  var a: fn(int) -> int = inc;
+  var b: msabi fn(int) -> int = a;
+  return 0;
+}

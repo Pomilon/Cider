@@ -118,6 +118,8 @@ public:
 
     void dump(std::string& out, int /*depth*/) const override {
         if (isFunctionType_) {
+            if (abi_ == Abi::Ms) out += "msabi ";
+            else if (abi_ == Abi::SysV) out += "sysvabi ";
             out += "fn(";
             for (size_t i = 0; i < fnParamTypes_.size(); ++i) {
                 if (i) out += ", ";

@@ -41,6 +41,13 @@ public:
         symbolModules_ = symbolModules;
     }
 
+    // CID-005: target ABI defaults. `--target uefi` sets defaultAbiMs, which
+    // types unmarked functions as MS-ABI in fn-value position; plain `fn`
+    // type spellings stay SysV (spec §3). uefiEntryAllowed permits
+    // `efi_main` in place of main/_start.
+    void setDefaultAbiMs(bool v) { defaultAbiMs_ = v; }
+    void setUefiEntryAllowed(bool v) { uefiEntryAllowed_ = v; }
+
     // CID-020/021 §2: strict current-module-then-root lookup. The collector
     // parents module scopes under the importer (nested enterScope), so a
     // naive resolve() would leak importer symbols here; instead walk from
@@ -109,6 +116,7 @@ public:
         TypeInfo ft;
         ft.name = "fn";
         ft.isFunctionPointer = true;
+        ft.isMsAbi = (fsym->abi == Abi::Ms) || (fsym->abi == Abi::Default && defaultAbiMs_);
         ft.fnParamTypes = std::make_shared<std::vector<TypeInfo>>();
         std::string defMod = definingModuleOf(fsym);
         for (const auto& p : fsym->parameterTypes) {
@@ -379,7 +387,9 @@ public:
         bool hasMain = mainSym && mainSym->kind == SymbolKind::FUNCTION;
         bool hasStart = startSym && startSym->kind == SymbolKind::FUNCTION;
 
-        if (!moduleMode_ && !hasMain && !hasStart) {
+        auto uefiSym = resolveScoped("efi_main");
+        bool hasUefiEntry = uefiEntryAllowed_ && uefiSym && uefiSym->kind == SymbolKind::FUNCTION;
+        if (!moduleMode_ && !hasMain && !hasStart && !hasUefiEntry) {
             reporter_.error("Missing entry point: 'main' or '_start' function is required.", 1, 1);
         }
 
@@ -1694,6 +1704,10 @@ private:
     std::map<const Symbol*, std::string> symbolModules_;  // symbol identity -> defining module
     std::string currentModule_;      // logical name of the file being checked ("" == main)
     Scope* currentModuleScope_ = nullptr;
+
+    // CID-005 target flags (see setters above).
+    bool defaultAbiMs_ = false;
+    bool uefiEntryAllowed_ = false;
 
     void error(const std::string& msg, int line) {
         reporter_.error(msg, line);

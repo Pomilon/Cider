@@ -30,6 +30,31 @@ std::vector<std::string> checkSrc(const std::string& src) {
     return out;
 }
 
+// CID-005: same pipeline as checkSrc plus the target-driven checker flags
+// (`--target uefi` wires both from main.cpp).
+std::vector<std::string> checkSrcOpts(const std::string& src, bool defaultAbiMs, bool allowUefiEntry) {
+    cider::ErrorReporter rep;
+    cider::Lexer lex(src, rep);
+    cider::Parser parser(lex, rep);
+    auto prog = parser.parseProgram();
+    cider::SymbolTable table;
+    cider::ModuleResolver resolver;
+    cider::SymbolCollector collector(table, rep, resolver);
+    collector.collect(*prog);
+    rep.clear();
+    cider::TypeChecker checker(table, rep);
+    checker.setDefaultAbiMs(defaultAbiMs);
+    checker.setUefiEntryAllowed(allowUefiEntry);
+    checker.check(*prog);
+    std::vector<std::string> out;
+    for (auto& e : rep.errors()) out.push_back(e.message);
+    return out;
+}
+
+std::vector<std::string> checkWithDefaultAbiMs(const std::string& src) {
+    return checkSrcOpts(src, /*defaultAbiMs=*/true, /*allowUefiEntry=*/false);
+}
+
 bool hasError(const std::vector<std::string>& errors, const std::string& sub) {
     for (auto& e : errors) {
         if (e.find(sub) != std::string::npos) return true;
@@ -329,6 +354,39 @@ int run() {
         "  return use(y);\n"
         "}\n");
     CHECK(cyclicAliasUses.empty());
+
+    // CID-005: ABI identity and target-default typing.
+    auto abiMismatch = checkSrc(
+        "func inc(a: int) -> int { return a + 1; }\n"
+        "func main() -> int {\n"
+        "  var a: fn(int) -> int = inc;\n"
+        "  var b: msabi fn(int) -> int = a;\n"
+        "  return 0;\n"
+        "}\n");
+    CHECK(hasError(abiMismatch, "Type mismatch in declaration of 'b'. Expected msabi fn(int) -> int, got fn(int) -> int"));
+
+    auto abiOk = checkSrc(
+        "msabi func inc(a: int) -> int { return a + 1; }\n"
+        "func main() -> int {\n"
+        "  var f: msabi fn(int) -> int = inc;\n"
+        "  return f(1);\n"
+        "}\n");
+    CHECK(abiOk.empty());
+
+    auto abiDefaultUefi = checkWithDefaultAbiMs(
+        "func inc(a: int) -> int { return a + 1; }\n"
+        "func main() -> int { var f: msabi fn(int) -> int = inc; return f(1); }\n");
+    CHECK(abiDefaultUefi.empty());
+
+    // CID-005: `--target uefi` allows `efi_main` instead of main/_start.
+    auto uefiEntry = checkSrcOpts(
+        "msabi func efi_main(image: *void, st: *void) -> u64 { return 0; }\n",
+        /*defaultAbiMs=*/true, /*allowUefiEntry=*/true);
+    CHECK(uefiEntry.empty());
+    auto uefiEntryMissing = checkSrcOpts(
+        "msabi func helper() -> u64 { return 0; }\n",
+        /*defaultAbiMs=*/true, /*allowUefiEntry=*/true);
+    CHECK(hasError(uefiEntryMissing, "Missing entry point"));
     return 0;
 }
 

@@ -200,6 +200,11 @@ int main(int argc, char** argv) {
         checker.setProgramModules(collector.getProgramModules());
         checker.setAmbiguousModules(collector.getAmbiguousModules());
         checker.setSymbolModules(collector.getSymbolModules());
+        // CID-005: the uefi target types unmarked functions MS-ABI and
+        // allows `efi_main` as the entry point (check and compile alike).
+        const bool defaultAbiMs = (opts.target == "uefi");
+        checker.setDefaultAbiMs(defaultAbiMs);
+        checker.setUefiEntryAllowed(defaultAbiMs);
         checker.check(*prog);
         if (rep.hasErrors()) {
             printDiagnostics(text, opts.inputFile, rep.errors(), "type");
@@ -213,6 +218,7 @@ int main(int argc, char** argv) {
             gen.setModuleScopes(collector.getModuleScopes());
             gen.setProgramModules(collector.getProgramModules());
             gen.setSymbolModules(collector.getSymbolModules());
+            gen.setDefaultAbiMs(defaultAbiMs);
             auto module = gen.generate(*prog);
             if (!opts.noOpt) {
                 optimizeModule(module);
@@ -234,6 +240,7 @@ int main(int argc, char** argv) {
             gen.setModuleScopes(collector.getModuleScopes());
             gen.setProgramModules(collector.getProgramModules());
             gen.setSymbolModules(collector.getSymbolModules());
+            gen.setDefaultAbiMs(defaultAbiMs);
             auto module = gen.generate(*prog);
             if (!opts.noOpt) {
                 optimizeModule(module);
@@ -254,6 +261,7 @@ int main(int argc, char** argv) {
         gen.setModuleScopes(collector.getModuleScopes());
         gen.setProgramModules(collector.getProgramModules());
         gen.setSymbolModules(collector.getSymbolModules());
+        gen.setDefaultAbiMs(defaultAbiMs);
         auto module = gen.generate(*prog);
         module.print();
         return 0;
