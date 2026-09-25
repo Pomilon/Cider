@@ -572,29 +572,24 @@ bool CodeGenerator::generate(ModuleIR& module, const std::string& outputPath,
                         }
                     }
                 } else if (defMs) {
-                    // CID-005: MS-ABI parameter marshaling. Integer/pointer
-                    // and float classes have independent cursors: rcx, rdx,
-                    // r8, r9 / xmm0-3; overflow args arrive at
-                    // [rbp + 48 + 8k] (32-byte shadow space above them).
-                    // NOTE: independent cursors are design §2's model. The
-                    // documented Win64 rule is positional (argument N uses
-                    // the Nth RCX/XMM slot pair); the two differ for mixed
-                    // int/float signatures. See the task-2 report.
-                    int intReg = 0, floatReg = 0, stackSlot = 0;
+                    // CID-005: MS-ABI parameter marshaling. Win64 assigns
+                    // argument slots positionally: argument N (0-based, N < 4)
+                    // uses the Nth slot of its class (int/pointer ->
+                    // rcx/rdx/r8/r9, float/f64 -> xmm0-3); arguments 4+ arrive
+                    // on the stack in source order at [rbp + 48 + 8k]
+                    // (32-byte shadow space above them).
+                    int stackSlot = 0;
                     const auto& ptypes = func->getParamTypes();
                     for (size_t pi = 0; pi < params.size(); ++pi) {
                         IRType pt = (pi < ptypes.size()) ? ptypes[pi] : IRType::I32;
                         bool isFloat = (pt == IRType::F32 || pt == IRType::F64);
                         std::string src;
                         bool onStack = false;
-                        if (isFloat) {
-                            if (floatReg < (int)msDesc.floatArgRegs.size())
-                                src = msDesc.floatArgRegs[floatReg++];
-                            else onStack = true;
+                        if (pi < msDesc.intArgRegs.size()) {
+                            src = isFloat ? msDesc.floatArgRegs[pi]
+                                          : msDesc.intArgRegs[pi];
                         } else {
-                            if (intReg < (int)msDesc.intArgRegs.size())
-                                src = msDesc.intArgRegs[intReg++];
-                            else onStack = true;
+                            onStack = true;
                         }
                         if (onStack) {
                             src = "[rbp + " + std::to_string(msDesc.stackArgBase + 8 * stackSlot++) + "]";

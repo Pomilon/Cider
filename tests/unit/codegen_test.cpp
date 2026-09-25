@@ -202,14 +202,39 @@ int run() {
         "uefi");
     CHECK(msDef.find("global main") != std::string::npos);
     // Definition side reads *from* the MS argument registers (`mov rcx, ...`
-    // as a destination is the MS call-site form, owned by Task 3). Class
-    // cursors are independent per design §2: x -> rcx, f -> xmm0,
-    // p -> rdx, g -> xmm1.
-    CHECK(msDef.find(", rcx\n") != std::string::npos);   // int param 1
-    CHECK(msDef.find(", rdx\n") != std::string::npos);   // int param 2 (pointer class)
-    CHECK(msDef.find("movq xmm") != std::string::npos);  // float params from xmm0/1
-    CHECK(msDef.find(", xmm1") != std::string::npos);    // 4th param g comes from xmm1
+    // as a destination is the MS call-site form, owned by Task 3). Win64
+    // slots are positional per design §2: argument N uses the Nth slot of
+    // its class, so x -> rcx (slot 0), f -> xmm1 (slot 1), p -> r8 (slot 2),
+    // g -> xmm3 (slot 3).
+    CHECK(msDef.find(", rcx\n") != std::string::npos);   // arg 0 int -> rcx
+    CHECK(msDef.find(", xmm1") != std::string::npos);    // arg 1 float -> xmm1
+    CHECK(msDef.find(", r8\n") != std::string::npos);    // arg 2 pointer -> r8
+    CHECK(msDef.find(", xmm3") != std::string::npos);    // arg 3 f64 -> xmm3
+    CHECK(msDef.find("movq xmm") != std::string::npos);  // float params read via movq
     CHECK(msDef.find("mov rbx, rdi") == std::string::npos);  // no SysV rdi spill-in
+    // CID-005 fix round 1: positional mixed signature. `pos(float, int,
+    // float, int)` -> XMM0, RDX, XMM2, R9 (the per-class cursor model would
+    // give XMM0, RCX, XMM1, RDX); the independent int/float cursors must not
+    // be read.
+    std::string msPos = genAsmTarget(
+        "func pos(a: float, b: int, c: float, d: int) -> int { return b + d; }\n"
+        "func main() -> int { return 0; }\n",
+        "uefi");
+    CHECK(msPos.find(", xmm0\n") != std::string::npos);  // arg 0 float -> xmm0
+    CHECK(msPos.find(", rdx\n") != std::string::npos);   // arg 1 int -> rdx
+    CHECK(msPos.find(", xmm2\n") != std::string::npos);  // arg 2 float -> xmm2
+    CHECK(msPos.find(", r9\n") != std::string::npos);    // arg 3 int -> r9
+    CHECK(msPos.find(", rcx\n") == std::string::npos);   // no independent int cursor
+    CHECK(msPos.find(", xmm1\n") == std::string::npos);  // no independent float cursor
+    // Positional slots beyond 3 go on the stack in source order: e (float,
+    // position 4) at [rbp + 48], f (int, position 5) at [rbp + 56]. The
+    // per-class cursor model would have put them in xmm2/r8 instead.
+    std::string msPosStack = genAsmTarget(
+        "func pos6(a: float, b: int, c: float, d: int, e: float, f: int) -> int { return b + d + f; }\n"
+        "func main() -> int { return 0; }\n",
+        "uefi");
+    CHECK(msPosStack.find("[rbp + 48]") != std::string::npos);
+    CHECK(msPosStack.find("[rbp + 56]") != std::string::npos);
     // Stack overflow args start at [rbp + 48] (5th int); the SysV stack-arg
     // base [rbp + 16] must not appear in the function at all.
     std::string msStack = genAsmTarget(
