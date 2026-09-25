@@ -1781,14 +1781,16 @@ bool CodeGenerator::generate(ModuleIR& module, const std::string& outputPath,
                 }
                 case IROp::CALL:
                 case IROp::VIRTUAL_CALL: {
-                    // CID-005: resolve the calling convention. Explicit
-                    // Ms/SysV wins; Default follows the target descriptor,
-                    // except that a direct call to a definition pinned after
-                    // accept (interface implementations, T1 fix round 1)
-                    // resolves from the callee FunctionIR so the call matches
-                    // the emitted definition.
+                    // CID-005: resolve the calling convention. The callee
+                    // definition wins for direct calls: a post-accept pin
+                    // (interface implementations, T1 fix round 1) or a
+                    // mismatching callee marker must decide the emitted
+                    // convention, or the call marshals MS against a SysV
+                    // prologue (carry-over 1). Default follows the target
+                    // descriptor only when neither the instruction nor the
+                    // callee brings an explicit ABI.
                     Abi resolvedCallAbi = instr.callAbi;
-                    if (resolvedCallAbi == Abi::Default && !instr.args.empty() &&
+                    if (!instr.args.empty() &&
                         instr.args[0].kind == IRValue::LABEL) {
                         for (const auto& calleeFn : module.getFunctions()) {
                             if (calleeFn->getName() == instr.args[0].name &&

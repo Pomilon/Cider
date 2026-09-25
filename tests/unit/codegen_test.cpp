@@ -67,9 +67,10 @@ std::string genAsmTarget(const std::string& src, const std::string& target) {
 }
 
 // Like genAsmTarget, but lets the test patch the module's IR before codegen.
-// T3 uses it to exercise the MS-ABI indirect-call path: an indirect call
-// through an `msabi fn` value needs that value type, and the `msabi`/`sysvabi`
-// parser spelling is Task 4's.
+// CID-005 review carry-over 1 uses it to put an explicit Ms `callAbi` on a
+// direct call to an interface-dispatched (post-accept SysV-pinned) method:
+// class-body `msabi` modifiers do not parse yet, so the mismatching symbol
+// state is simulated at the IR level.
 std::string genAsmTargetPatched(const std::string& src, const std::string& target,
                                 const std::function<void(cider::ModuleIR&)>& patch) {
     cider::ErrorReporter rep;
@@ -495,28 +496,14 @@ int run() {
         CHECK(xmm0Count == 1);  // the arg-0 load only
     }
 
-    // Indirect through an msabi fn value uses r11 and the same frame. The
-    // `msabi fn` spelling lands in T4, so patch the CALL's callAbi here to
-    // exercise T3's codegen path.
-    std::string msInd = genAsmTargetPatched(
-        "func twice(x: int) -> int { return x * 2; }\n"
+    // Indirect through an msabi fn value uses r11 and the same frame.
+    std::string msInd = genAsmTarget(
+        "msabi func twice(x: int) -> int { return x * 2; }\n"
         "func main() -> int {\n"
-        "  var p: fn(int) -> int = twice;\n"
+        "  var p: msabi fn(int) -> int = twice;\n"
         "  return p(21);\n"
         "}\n",
-        "uefi",
-        [](cider::ModuleIR& m) {
-            for (auto& fn : m.getFunctions()) {
-                for (auto& b : fn->getBlocks()) {
-                    for (auto& in : b->getInstructions()) {
-                        if (in.op == cider::IROp::CALL && !in.args.empty() &&
-                            in.args[0].kind != cider::IRValue::LABEL) {
-                            in.callAbi = cider::Abi::Ms;
-                        }
-                    }
-                }
-            }
-        });
+        "uefi");
     CHECK(msInd.find("call r11") != std::string::npos);
     CHECK(msInd.find("mov rcx, 21") != std::string::npos);
     CHECK(msInd.find("sub rsp, 40") != std::string::npos);
@@ -565,6 +552,41 @@ int run() {
         size_t entry = msIface.find(".entry:", def);
         CHECK(def != std::string::npos && entry != std::string::npos);
         CHECK(msIface.substr(def, entry - def).find("push rdi") == std::string::npos);
+    }
+
+    // CID-005 review carry-over: an explicit Ms `callAbi` on a direct call
+    // must not beat the callee definition's pinned ABI. Interface
+    // implementations are pinned SysV after accept; an `msabi` marker on
+    // such a method would leave Ms on its symbol (class-body modifiers are
+    // not yet parseable, so patch the CALL to simulate it). The call must
+    // still marshal SysV against the pinned definition.
+    std::string msIfaceExplicit = genAsmTargetPatched(
+        "interface I { func m() -> int; }\n"
+        "class C { func m() -> int { return 7; } }\n"
+        "func callDirect(c: *C) -> int { return c.m(); }\n"
+        "func main() -> int { return 0; }\n",
+        "uefi",
+        [](cider::ModuleIR& m) {
+            for (auto& fn : m.getFunctions()) {
+                for (auto& b : fn->getBlocks()) {
+                    for (auto& in : b->getInstructions()) {
+                        if (in.op == cider::IROp::CALL && !in.args.empty() &&
+                            in.args[0].kind == cider::IRValue::LABEL &&
+                            in.args[0].name.find("C_m") != std::string::npos) {
+                            in.callAbi = cider::Abi::Ms;
+                        }
+                    }
+                }
+            }
+        });
+    {
+        size_t start = msIfaceExplicit.find("callDirect:");
+        size_t end = msIfaceExplicit.find("global main");
+        CHECK(start != std::string::npos && end != std::string::npos && start < end);
+        std::string cd = msIfaceExplicit.substr(start, end - start);
+        CHECK(cd.find("call C_m") != std::string::npos);
+        CHECK(cd.find("pop rdi") != std::string::npos);    // SysV arg 0 wins
+        CHECK(cd.find("mov rcx, ") == std::string::npos);  // not MS arg 0
     }
 
     // super.method() on a plain (non-virtual) parent method: the definition
