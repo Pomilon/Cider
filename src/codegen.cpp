@@ -16,6 +16,10 @@
 
 namespace cider {
 
+Abi targetAbiFor(const std::string& targetStr) {
+    return targetStr == "uefi" ? Abi::Ms : Abi::SysV;
+}
+
 CodeGenerator::CodeGenerator(const std::string& targetStr) : target_(targetStr) {}
 
 bool CodeGenerator::generate(ModuleIR& module, const std::string& outputPath,

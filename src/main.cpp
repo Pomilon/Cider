@@ -31,7 +31,7 @@ struct CliOptions {
     bool noOpt = false;
     std::string inputFile;
     std::string outputFile;
-    std::string target = "native";  // "native" | "pomeos"
+    std::string target = "native";  // "native" | "pomeos" | "uefi"
 };
 
 // Returns false + prints usage to stderr on bad arguments.
@@ -59,6 +59,7 @@ bool parseCli(int argc, char** argv, CliOptions& out) {
         }
     }
     if (out.inputFile.empty()) return false;
+    if (out.target != "native" && out.target != "pomeos" && out.target != "uefi") return false;
     if (out.command == "compile" && out.outputFile.empty()) return false;
     return true;
 }
@@ -146,7 +147,7 @@ int main(int argc, char** argv) {
     }
     CliOptions opts;
     if (!parseCli(argc, argv, opts)) {
-        std::fprintf(stderr, "usage: cider <parse|check|build|run|compile|bundle> [--no-opt] [-o out.asm] <file>\n");
+        std::fprintf(stderr, "usage: cider <parse|check|build|run|compile|bundle> [--no-opt] [--target native|pomeos|uefi] [-o out.asm] <file>\n");
         return 2;
     }
     // bundle is self-contained (see bundler.h): it runs before — and

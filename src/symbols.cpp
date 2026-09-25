@@ -25,6 +25,7 @@ TypeInfo TypeInfo::fromAST(TypeAST* ast) {
     // the element signature.
     if (ast->isFunctionType()) {
         info.isFunctionPointer = true;
+        info.isMsAbi = (ast->getAbi() == Abi::Ms);
         info.fnParamTypes = std::make_shared<std::vector<TypeInfo>>();
         for (const auto& p : ast->getFnParamTypes()) {
             info.fnParamTypes->push_back(fromAST(p.get()));

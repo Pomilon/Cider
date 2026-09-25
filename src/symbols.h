@@ -29,6 +29,9 @@ struct TypeInfo {
     // isFunctionPointer on the array wrapper (fromAST copies the element
     // fields) so indexing recovers the element signature.
     bool isFunctionPointer = false;
+    // CID-005: an `msabi fn(...)` type. `fn` stays SysV; arrays copy the
+    // element's ABI through TypeInfo::fromAST.
+    bool isMsAbi = false;
     std::shared_ptr<std::vector<TypeInfo>> fnParamTypes = nullptr;
     std::shared_ptr<TypeInfo> fnReturnType = nullptr;
 
@@ -39,6 +42,7 @@ struct TypeInfo {
     bool signatureEquals(const TypeInfo& other) const {
         if (!isFunctionPointer || !other.isFunctionPointer) return false;
         if (!fnParamTypes || !other.fnParamTypes || !fnReturnType || !other.fnReturnType) return false;
+        if (isMsAbi != other.isMsAbi) return false;
         return *fnParamTypes == *other.fnParamTypes && *fnReturnType == *other.fnReturnType;
     }
 
@@ -46,6 +50,7 @@ struct TypeInfo {
         if (isFunctionPointer || other.isFunctionPointer) {
             return isFunctionPointer == other.isFunctionPointer &&
                    isArray == other.isArray && arraySize == other.arraySize &&
+                   isMsAbi == other.isMsAbi &&
                    signatureEquals(other);
         }
         return name == other.name && pointerLevel == other.pointerLevel &&
@@ -58,7 +63,7 @@ struct TypeInfo {
 
     // Canonical diagnostic spelling: `fn(int, int) -> int`.
     std::string functionPointerToString() const {
-        std::string res = "fn(";
+        std::string res = isMsAbi ? "msabi fn(" : "fn(";
         if (fnParamTypes) {
             for (size_t i = 0; i < fnParamTypes->size(); ++i) {
                 if (i) res += ", ";
@@ -112,6 +117,7 @@ struct FunctionSymbol : public Symbol {
     std::vector<TypeInfo> parameterTypes;
     TypeInfo returnType;
     bool isAsync = false;
+    Abi abi = Abi::Default;
 };
 
 struct StructSymbol : public Symbol {

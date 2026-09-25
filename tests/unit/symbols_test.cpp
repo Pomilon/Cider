@@ -92,6 +92,16 @@ int run() {
     cider::TypeInfo fa3 = fa;
     fa3.arraySize = 3;
     CHECK(fa != fa3);
+
+    // CID-005: ABI is part of fn type identity; Default == SysV.
+    cider::TypeInfo abl;
+    abl.name = "fn"; abl.isFunctionPointer = true;
+    abl.fnParamTypes = std::make_shared<std::vector<cider::TypeInfo>>();
+    abl.fnReturnType = std::make_shared<cider::TypeInfo>(cider::TypeInfo{"u64", 0});
+    cider::TypeInfo ablMs = abl; ablMs.isMsAbi = true;
+    CHECK(abl != ablMs);
+    CHECK(abl.toString() == "fn() -> u64");
+    CHECK(ablMs.toString() == "msabi fn() -> u64");
     return 0;
 }
 

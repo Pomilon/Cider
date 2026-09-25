@@ -8,6 +8,8 @@
 #include <string>
 #include <vector>
 
+#include "abi.h"
+
 namespace cider {
 
 enum class IRType {
@@ -98,6 +100,10 @@ struct IRInstruction {
     IROp op;
     std::optional<IRValue> dest;
     std::vector<IRValue> args;
+    // CID-005: calling convention of a CALL. Default resolves to the
+    // target descriptor in codegen; indirect calls through typed fn
+    // values always set a concrete Ms/SysV.
+    Abi callAbi = Abi::Default;
 
     // For PHI nodes: maps basic block name to value
     std::map<std::string, IRValue> phiArgs;
@@ -134,7 +140,10 @@ public:
         : name_(name), returnType_(returnType) {}
 
     void addBlock(std::unique_ptr<BasicBlock> block) { blocks_.push_back(std::move(block)); }
-    void addParam(const std::string& paramName) { params_.push_back(paramName); }
+    void addParam(const std::string& paramName, IRType type = IRType::I32) {
+        params_.push_back(paramName);
+        paramTypes_.push_back(type);
+    }
     const std::string& getName() const { return name_; }
     void setSourcePath(const std::string& p) { sourcePath_ = p; }
     const std::string& getSourcePath() const { return sourcePath_; }
@@ -142,12 +151,17 @@ public:
     const std::vector<std::unique_ptr<BasicBlock>>& getBlocks() const { return blocks_; }
     const std::vector<std::string>& getParams() const { return params_; }
     IRType getReturnType() const { return returnType_; }
+    Abi getAbi() const { return abi_; }
+    void setAbi(Abi a) { abi_ = a; }
+    const std::vector<IRType>& getParamTypes() const { return paramTypes_; }
 
 private:
     std::string name_;
     IRType returnType_;
     std::vector<std::unique_ptr<BasicBlock>> blocks_;
     std::vector<std::string> params_;
+    std::vector<IRType> paramTypes_;
+    Abi abi_ = Abi::Default;
     std::string sourcePath_;
 };
 

@@ -59,6 +59,14 @@ int run() {
     std::string sd;
     str->dump(sd, 0);
     CHECK(sd == "(String \"a\\nb\\\"c\\\\\")");
+
+    // CID-005: TypeAST carries an ABI, Default by default.
+    cider::TypeAST abiType("fn", 0, 1, 1);
+    CHECK(abiType.getAbi() == cider::Abi::Default);
+    abiType.setAbi(cider::Abi::Ms);
+    CHECK(abiType.getAbi() == cider::Abi::Ms);
+    cider::TypeAST defaultType("int", 0, 1, 1);
+    CHECK(defaultType.getAbi() == cider::Abi::Default);
     return 0;
 }
 

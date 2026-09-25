@@ -7,6 +7,8 @@
 #include <utility>
 #include <vector>
 
+#include "abi.h"
+
 namespace cider {
 
 class ASTVisitor;
@@ -92,13 +94,16 @@ public:
 
 class TypeAST : public ASTNode {
 public:
-    TypeAST(const std::string& name, int pointerLevel, int line, int col, bool isVolatile = false)
-        : ASTNode(TYPE_AST, line, col), name_(name), pointerLevel_(pointerLevel), isVolatile_(isVolatile) {}
+    TypeAST(const std::string& name, int pointerLevel, int line, int col,
+            bool isVolatile = false, Abi abi = Abi::Default)
+        : ASTNode(TYPE_AST, line, col), name_(name), pointerLevel_(pointerLevel), isVolatile_(isVolatile), abi_(abi) {}
 
     const std::string& getName() const { return name_; }
     void setName(const std::string& name) { name_ = name; }
     int getPointerLevel() const { return pointerLevel_; }
     bool isVolatile() const { return isVolatile_; }
+    Abi getAbi() const { return abi_; }
+    void setAbi(Abi a) { abi_ = a; }
 
     // CID-006: `fn(T1, T2) -> R` in type position.
     bool isFunctionType() const { return isFunctionType_; }
@@ -130,6 +135,7 @@ private:
     std::string name_;
     int pointerLevel_;
     bool isVolatile_;
+    Abi abi_ = Abi::Default;
     bool isFunctionType_ = false;
     std::vector<std::unique_ptr<TypeAST>> fnParamTypes_;
     std::unique_ptr<TypeAST> fnReturnType_;
@@ -138,7 +144,8 @@ private:
 class ArrayTypeAST : public TypeAST {
 public:
     ArrayTypeAST(std::unique_ptr<TypeAST> baseType, int size, int line, int col)
-        : TypeAST(baseType->getName() + "[" + std::to_string(size) + "]", baseType->getPointerLevel(), line, col),
+        : TypeAST(baseType->getName() + "[" + std::to_string(size) + "]",
+                  baseType->getPointerLevel(), line, col, false, baseType->getAbi()),
           baseType_(std::move(baseType)), size_(size) {}
 
     TypeAST* getBaseType() const { return baseType_.get(); }
@@ -840,10 +847,10 @@ public:
     FunctionDeclStmt(const std::string& name, std::vector<Parameter> params,
                      std::vector<std::unique_ptr<Statement>> body, std::unique_ptr<TypeAST> returnType, int line, int col,
                      bool isAsync = false, bool isVirtual = false, bool isOverride = false, bool isExtern = false,
-                     bool isDestructor = false, std::vector<std::string> templateParams = {})
+                     bool isDestructor = false, std::vector<std::string> templateParams = {}, Abi abi = Abi::Default)
         : Statement(FUNCTION_DECL_STMT, line, col), name_(name), params_(std::move(params)), body_(std::move(body)),
           returnType_(std::move(returnType)), isAsync_(isAsync), isVirtual_(isVirtual), isOverride_(isOverride),
-          isExtern_(isExtern), isDestructor_(isDestructor), templateParams_(std::move(templateParams)) {}
+          isExtern_(isExtern), isDestructor_(isDestructor), templateParams_(std::move(templateParams)), abi_(abi) {}
     const std::string& getName() const { return name_; }
     const std::vector<Parameter>& getParams() const { return params_; }
     const std::vector<std::unique_ptr<Statement>>& getBody() const { return body_; }
@@ -855,6 +862,8 @@ public:
     bool isDestructor() const { return isDestructor_; }
     const std::vector<std::string>& getTemplateParams() const { return templateParams_; }
     bool hasTemplateParams() const { return !templateParams_.empty(); }
+    Abi getAbi() const { return abi_; }
+    void setAbi(Abi a) { abi_ = a; }
     void dump(std::string& out, int depth) const override;
 private:
     std::string name_;
@@ -867,6 +876,7 @@ private:
     bool isExtern_;
     bool isDestructor_;
     std::vector<std::string> templateParams_;
+    Abi abi_ = Abi::Default;
 };
 
 class StructDeclStmt : public Statement {
@@ -1234,6 +1244,8 @@ inline void ExpressionStmt::dump(std::string& out, int depth) const {
 
 inline void FunctionDeclStmt::dump(std::string& out, int depth) const {
     out += "(FunctionDecl " + name_;
+    if (abi_ == Abi::Ms) out += " msabi";
+    else if (abi_ == Abi::SysV) out += " sysvabi";
     if (isVirtual_) out += " virtual";
     if (isOverride_) out += " override";
     if (isExtern_) out += " extern";

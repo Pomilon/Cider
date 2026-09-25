@@ -285,6 +285,7 @@ public:
         sym->returnType = TypeInfo::fromAST(stmt.getReturnType());
         sym->isExtern = stmt.isExtern();
         sym->isAsync = stmt.isAsync();
+        sym->abi = stmt.getAbi();
         sym->isExported = inExport_;
 
         // CID-020/021 (spec §5 Review Focus): `main`/`_start` are never
@@ -1745,9 +1746,13 @@ public:
             auto cloned = cloneStmtWithSubst(s.get(), tmplSym->typeParams, parsed.second);
             if (cloned) clonedBody.push_back(std::move(cloned));
         }
+        // CID-005: the clone inherits the template's ABI. The intervening
+        // constructor parameters keep their defaults (templateParams must
+        // stay empty so the clone is not re-registered as a template).
         auto clonedFunc = std::make_unique<FunctionDeclStmt>(
             mangledName, std::move(clonedParams), std::move(clonedBody), std::move(clonedReturnType),
-            tmplFunc->getLine(), tmplFunc->getColumn());
+            tmplFunc->getLine(), tmplFunc->getColumn(),
+            false, false, false, false, false, std::vector<std::string>{}, tmplFunc->getAbi());
         FunctionDeclStmt* rawPtr = clonedFunc.get();
 
         // Process the cloned function through the collector (defines its

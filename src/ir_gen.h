@@ -653,6 +653,7 @@ public:
         currentReturnType_ = funcRetType;
         IRType funcRetIR = funcIsSret ? IRType::VOID : mapType(funcRetType.name);
         currentFunction_ = std::make_unique<FunctionIR>(funcName, funcRetIR);
+        currentFunction_->setAbi(stmt.getAbi());
         currentFunction_->setSourcePath(currentSourcePath_);
         currentBlock_ = std::make_unique<BasicBlock>("entry");
 
@@ -673,7 +674,7 @@ public:
         // The caller allocates the result slot and passes its address first;
         // `return <struct>` memcpys into it instead of malloc'ing.
         if (funcIsSret) {
-            currentFunction_->addParam("__sret");
+            currentFunction_->addParam("__sret", IRType::PTR);
             auto sretSym = std::make_shared<Symbol>();
             sretSym->kind = SymbolKind::VARIABLE;
             sretSym->name = "__sret";
@@ -691,7 +692,7 @@ public:
         if (!currentClassName_.empty()) {
             std::string paramName = "this";
             IRType paramIRType = IRType::PTR;
-            currentFunction_->addParam(paramName);
+            currentFunction_->addParam(paramName, paramIRType);
 
             auto thisSym = std::make_shared<Symbol>();
             thisSym->kind = SymbolKind::VARIABLE;
@@ -717,7 +718,7 @@ public:
 
             IRType paramIRType = (sym->type.pointerLevel > 0) ? IRType::PTR : mapType(sym->type.name);
             std::string paramRegName = "arg_" + param.first;
-            currentFunction_->addParam(paramRegName);
+            currentFunction_->addParam(paramRegName, paramIRType);
             IRValue paramReg = IRValue::Register(paramRegName, paramIRType);
             IRValue addr = IRValue::Register(nextTemp(), IRType::PTR);
             currentBlock_->addInstruction({IROp::ALLOCA, addr, {IRValue::Constant(getTypeSize(sym->type), IRType::I32)}});

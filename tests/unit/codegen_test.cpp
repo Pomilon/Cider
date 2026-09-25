@@ -42,7 +42,35 @@ std::string genAsm(const std::string& src) {
     return ss.str();
 }
 
+std::string genAsmTarget(const std::string& src, const std::string& target) {
+    cider::ErrorReporter rep;
+    cider::Lexer lex(src, rep);
+    cider::Parser parser(lex, rep);
+    auto prog = parser.parseProgram();
+    cider::SymbolTable table;
+    cider::ModuleResolver resolver;
+    cider::SymbolCollector collector(table, rep, resolver);
+    collector.collect(*prog);
+    cider::IRGenerator gen(table);
+    auto module = gen.generate(*prog);
+    cider::SSADeconstructor decon;
+    decon.process(module);
+
+    std::string path = "<tmp>/codegen_target_out.asm";
+    cider::CodeGenerator cg(target);
+    CHECKSTR(cg.generate(module, path));
+    std::ifstream in(path);
+    std::ostringstream ss;
+    ss << in.rdbuf();
+    return ss.str();
+}
+
 int run() {
+    // CID-005: the target string selects the default ABI descriptor.
+    CHECK(cider::targetAbiFor("native") == cider::Abi::SysV);
+    CHECK(cider::targetAbiFor("pomeos") == cider::Abi::SysV);
+    CHECK(cider::targetAbiFor("uefi") == cider::Abi::Ms);
+
     // Arithmetic + branch function.
     std::string asmText = genAsm(
         "func main() -> int {\n"

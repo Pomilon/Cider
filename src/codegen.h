@@ -3,6 +3,7 @@
 #include <memory>
 #include <string>
 
+#include "abi.h"
 #include "ir.h"
 
 namespace cider {
@@ -16,5 +17,8 @@ public:
 private:
     std::string target_;
 };
+
+// CID-005: the ABI an unmarked function/call uses for a target.
+Abi targetAbiFor(const std::string& targetStr);
 
 }  // namespace cider
