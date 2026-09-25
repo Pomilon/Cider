@@ -251,13 +251,20 @@ int run() {
         "func bump(f: float) -> float { var x: float = f; x = x + 1.0; return x; }\n"
         "func main() -> int { return 0; }\n",
         "uefi");
-    CHECK(msXmm.find("movq [rsp], xmm8") != std::string::npos);
-    CHECK(msXmm.find("movq xmm8, [rsp]") != std::string::npos);
+    // CID-005 fix round 3: each XMM save occupies a full 16-byte slot
+    // (`sub rsp, 16` + `movdqu`), so the upper 64 bits survive too. The
+    // old `movq` pair saved only half the register and a caller's upper
+    // halves came back zeroed (review repro).
+    CHECK(msXmm.find("sub rsp, 16") != std::string::npos);
+    CHECK(msXmm.find("movdqu [rsp], xmm8") != std::string::npos);
+    CHECK(msXmm.find("movdqu xmm8, [rsp]") != std::string::npos);
+    CHECK(msXmm.find("movq [rsp], xmm8") == std::string::npos);
+    CHECK(msXmm.find("movq xmm8, [rsp]") == std::string::npos);
     // The restore reads the slot the prologue saved: the frame must be
-    // rewound to the xmm saves (7 GP + 4 xmm = 88 bytes) first.
+    // rewound to the xmm saves first — 7 GP * 8 + 4 xmm * 16 = 120.
     {
-        size_t rewind = msXmm.find("lea rsp, [rbp - 88]");
-        size_t restore = msXmm.find("movq xmm8, [rsp]");
+        size_t rewind = msXmm.find("lea rsp, [rbp - 120]");
+        size_t restore = msXmm.find("movdqu xmm8, [rsp]");
         CHECK(rewind != std::string::npos);
         CHECK(restore != std::string::npos);
         CHECK(rewind < restore);

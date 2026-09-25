@@ -326,11 +326,16 @@ bool CodeGenerator::generate(ModuleIR& module, const std::string& outputPath,
         addText("    push rbp");
         addText("    mov rbp, rsp");
         for (const auto& reg : calleeSaved) addText("    push " + reg);
+        // CID-005 fix round 3: MS XMM6-15 are callee-saved and 128 bits
+        // wide, so each save gets its own 16-byte slot (`movdqu`) — the
+        // earlier 8-byte `movq` slot dropped the upper half. The GP
+        // pushes above are 8 bytes each.
         for (const auto& reg : xmmSaved) {
-            addText("    sub rsp, 8");
-            addText("    movq [rsp], " + reg);
+            addText("    sub rsp, 16");
+            addText("    movdqu [rsp], " + reg);
         }
-        int savedRegsSize = 8 + (int)(calleeSaved.size() + xmmSaved.size()) * 8;
+        int savedRegsSize = 8 + (int)calleeSaved.size() * 8 +
+                            (int)xmmSaved.size() * 16;
 
         std::map<std::string, int> localOffsets;
         int currentAllocaOffset = savedRegsSize;
@@ -468,13 +473,15 @@ bool CodeGenerator::generate(ModuleIR& module, const std::string& outputPath,
             if (!calleeSaved.empty() || !xmmSaved.empty()) {
                 // Rewind over the frame sub to the saved-register area. Any
                 // MS-ABI XMM saves sit just below the callee-saved GP
-                // pushes, so they must be restored (in reverse) before the
-                // pops; without the rewind [rsp] would point into the frame.
+                // pushes (16 bytes each), so they must be restored (in
+                // reverse) before the pops; without the rewind [rsp] would
+                // point into the frame.
                 addText("    lea rsp, [rbp - " +
-                        std::to_string((calleeSaved.size() + xmmSaved.size()) * 8) + "]");
+                        std::to_string(calleeSaved.size() * 8 +
+                                       xmmSaved.size() * 16) + "]");
                 for (auto it = xmmSaved.rbegin(); it != xmmSaved.rend(); ++it) {
-                    addText("    movq " + *it + ", [rsp]");
-                    addText("    add rsp, 8");
+                    addText("    movdqu " + *it + ", [rsp]");
+                    addText("    add rsp, 16");
                 }
                 for (auto it = calleeSaved.rbegin(); it != calleeSaved.rend(); ++it) {
                     addText("    pop " + *it);
@@ -1681,7 +1688,10 @@ bool CodeGenerator::generate(ModuleIR& module, const std::string& outputPath,
                         }
                     }
 
-                    // displacement = 8(rbp) + 40(callee) + extraStack + toSave*8 + xmmSaves*8
+                    // displacement = savedRegsSize (rbp + callee area:
+                    // 40 GP bytes SysV / 56 GP bytes MS, plus 16 per
+                    // saved MS XMM slot) + extraStack + toSave*8 +
+                    // xmmSaves*8
                     int displacement = savedRegsSize + extraStack + ((int)toSave.size() + (int)toSaveXmm.size()) * 8;
                     int padding = (displacement % 16 != 0) ? 8 : 0;
 
@@ -1887,9 +1897,11 @@ bool CodeGenerator::generate(ModuleIR& module, const std::string& outputPath,
             int frameSize = extraStack + savedRegsSize;
             int needed = maxSlotOffset + 8;
             if (needed > frameSize) {
-                // paddedTotal is 16-aligned, so the resulting rsp
-                // (rbp - paddedTotal) stays aligned even when
-                // savedRegsSize is only 8-aligned (e.g. an odd XMM count).
+                // The fixed-up rsp is `rbp - paddedTotal + 8` (the +8
+                // is totalStack's call-push guard, which is never
+                // subtracted), so a 16-aligned paddedTotal keeps the
+                // same 16-byte phase as the original `sub rsp,
+                // extraStack` — independent of savedRegsSize.
                 int paddedTotal = ((needed + 15) / 16) * 16;
                 textSection[(size_t)prologueFixupIndex] =
                     "    sub rsp, " + std::to_string(paddedTotal - savedRegsSize);
