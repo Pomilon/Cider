@@ -124,13 +124,34 @@ bool CodeGenerator::generate(ModuleIR& module, const std::string& outputPath,
         for (auto& block : func->getBlocks()) {
             for (auto& instr : block->getInstructions()) {
                 for (auto& arg : instr.args) {
-                    if (arg.kind == IRValue::CONSTANT && arg.type == IRType::PTR && arg.name.front() == '"') {
-                        std::string label = "str" + std::to_string(strCount++);
-                        std::string sanitized = sanitizeString(arg.name);
-                        if (sanitized.empty())
-                            addData(label + ": db 0");
-                        else
-                            addData(label + ": db " + sanitized + ", 0");
+                    // CID-005: narrow `"..."` and wide `L"..."` PTR constants
+                    // both become data labels here; the wide payload is a
+                    // UTF-16LE byte string, emitted as `dw` units preceded by
+                    // `align 2`.
+                    if (arg.kind == IRValue::CONSTANT && arg.type == IRType::PTR &&
+                        !arg.name.empty() &&
+                        (arg.name.front() == '"' || arg.name.rfind("L\"", 0) == 0)) {
+                        bool wide = arg.name.rfind("L\"", 0) == 0;
+                        std::string label = (wide ? "wstr" : "str") + std::to_string(strCount++);
+                        if (!wide) {
+                            std::string sanitized = sanitizeString(arg.name);
+                            if (sanitized.empty())
+                                addData(label + ": db 0");
+                            else
+                                addData(label + ": db " + sanitized + ", 0");
+                        } else {
+                            std::string raw = arg.name.substr(2, arg.name.size() - 3);
+                            std::string line = label + ": dw ";
+                            for (size_t i = 0; i + 1 < raw.size(); i += 2) {
+                                if (i) line += ", ";
+                                uint16_t u = (uint8_t)raw[i] | ((uint16_t)(uint8_t)raw[i + 1] << 8);
+                                std::ostringstream hs;
+                                hs << "0x" << std::hex << std::uppercase << std::setw(4) << std::setfill('0') << u;
+                                line += hs.str();
+                            }
+                            addData("align 2");
+                            addData(line);
+                        }
                         arg.name = label;
                         arg.kind = IRValue::LABEL;
                     }

@@ -455,6 +455,28 @@ std::unique_ptr<Expression> Parser::parsePrimaryExpression() {
         nextToken();
         return std::make_unique<CharExpr>(val, line, col);
     }
+    case TokenType::WIDE_STRING: {
+        std::string bytes = currentToken_.value;
+        int line = currentToken_.line;
+        int col = currentToken_.column;
+        nextToken();
+        std::u16string units;
+        for (size_t i = 0; i + 1 < bytes.size(); i += 2) {
+            units.push_back((char16_t)((uint8_t)bytes[i] | ((uint16_t)(uint8_t)bytes[i + 1] << 8)));
+        }
+        // The lexer appends the terminating NUL unit; the AST value has no
+        // NUL, and the checker/ir_gen add it back to size the [u16; N] type.
+        if (!units.empty() && units.back() == u'\0') units.pop_back();
+        return std::make_unique<WideStringExpr>(std::move(units), line, col);
+    }
+    case TokenType::WIDE_CHAR_LITERAL: {
+        std::string bytes = currentToken_.value;
+        int line = currentToken_.line;
+        int col = currentToken_.column;
+        nextToken();
+        uint16_t u = (uint16_t)((uint8_t)bytes[0] | ((uint16_t)(uint8_t)bytes[1] << 8));
+        return std::make_unique<WideCharExpr>(u, line, col);
+    }
     case TokenType::TRUE: {
         nextToken();
         return std::make_unique<BooleanExpr>(true, line, col);
@@ -888,6 +910,24 @@ std::unique_ptr<Expression> Parser::parseTableLiteral() {
     return std::make_unique<TableExpr>(std::move(entries), line, col);
 }
 
+// CID-005: `msabi`/`sysvabi` immediately before func/extern func/async func.
+// The token is a contextual identifier, so both the statement dispatcher
+// and `export` reach here only after confirming the function shape.
+std::unique_ptr<Statement> Parser::parseAbiModifiedFunction() {
+    Abi abi = (currentToken_.value == "msabi") ? Abi::Ms : Abi::SysV;
+    nextToken();  // consume the modifier
+    bool isExtern = false, isAsync = false;
+    if (currentToken_.type == TokenType::EXTERN) { isExtern = true; nextToken(); }
+    if (currentToken_.type == TokenType::ASYNC) { isAsync = true; nextToken(); }
+    if (currentToken_.type == TokenType::FUNC || currentToken_.type == TokenType::FUNCTION) {
+        auto fn = parseFunctionDeclaration(isAsync, false, false, isExtern);
+        if (auto* fd = dynamic_cast<FunctionDeclStmt*>(fn.get())) fd->setAbi(abi);
+        return fn;
+    }
+    error("Expected 'func' after ABI modifier.");
+    return nullptr;
+}
+
 std::unique_ptr<Statement> Parser::parseStatement() {
     // CID-005: contextual ABI modifiers. `msabi`/`sysvabi` stay ordinary
     // identifiers; they are modifiers only immediately before func/extern
@@ -899,18 +939,7 @@ std::unique_ptr<Statement> Parser::parseStatement() {
                           peekToken_.type == TokenType::EXTERN ||
                           peekToken_.type == TokenType::ASYNC);
         if (wantsFunc) {
-            Abi abi = (currentToken_.value == "msabi") ? Abi::Ms : Abi::SysV;
-            nextToken();  // consume the modifier
-            bool isExtern = false, isAsync = false;
-            if (currentToken_.type == TokenType::EXTERN) { isExtern = true; nextToken(); }
-            if (currentToken_.type == TokenType::ASYNC) { isAsync = true; nextToken(); }
-            if (currentToken_.type == TokenType::FUNC || currentToken_.type == TokenType::FUNCTION) {
-                auto fn = parseFunctionDeclaration(isAsync, false, false, isExtern);
-                if (auto* fd = dynamic_cast<FunctionDeclStmt*>(fn.get())) fd->setAbi(abi);
-                return fn;
-            }
-            error("Expected 'func' after ABI modifier.");
-            return nullptr;
+            return parseAbiModifiedFunction();
         }
     }
     switch (currentToken_.type) {
@@ -2239,7 +2268,13 @@ std::unique_ptr<Statement> Parser::parseExportStatement() {
     }
 
     std::unique_ptr<Statement> stmt = nullptr;
-    if (currentToken_.type == TokenType::VAR)
+    // CID-005/T5 (F3): `export msabi func ...` / `export sysvabi func ...`.
+    if (currentToken_.type == TokenType::IDENTIFIER &&
+        (currentToken_.value == "msabi" || currentToken_.value == "sysvabi") &&
+        (peekToken_.type == TokenType::FUNC || peekToken_.type == TokenType::FUNCTION ||
+         peekToken_.type == TokenType::EXTERN || peekToken_.type == TokenType::ASYNC)) {
+        stmt = parseAbiModifiedFunction();
+    } else if (currentToken_.type == TokenType::VAR)
         stmt = parseVarDeclarationStatement();
     else if (currentToken_.type == TokenType::CONST)
         stmt = parseVarDeclarationStatement();

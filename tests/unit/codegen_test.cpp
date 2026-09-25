@@ -779,6 +779,15 @@ int run() {
         CHECK(asmText.find("dd 0x0") != std::string::npos);              // +0.0 f32
         CHECK(asmText.find("dd 0x80000000") != std::string::npos);       // -0.0 f32
     }
+
+    // CID-005/T5: wide string constants become `dw` units (uppercase hex,
+    // zero-padded) preceded by `align 2`.
+    {
+        std::string wideAsm = genAsmTarget(
+            "func main() -> int { var p: *u16 = u\"AB\"; return p[0]; }\n", "native");
+        CHECK(wideAsm.find("dw 0x0041, 0x0042") != std::string::npos);
+        CHECK(wideAsm.find("align 2") != std::string::npos);
+    }
     return 0;
 }
 

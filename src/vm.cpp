@@ -574,6 +574,12 @@ VM::RegVal VM::resolveValue(const IRValue& v) {
     switch (v.kind) {
     case IRValue::CONSTANT: {
         if (v.type == IRType::PTR || (!v.name.empty() && v.name[0] == '"')) {
+            // CID-005: `L"..."` wide string constant.
+            if (v.name.size() >= 2 && v.name[0] == 'L' && v.name[1] == '"') {
+                RegVal d;
+                d.i = materializeWideString(v.name);
+                return d;
+            }
             // String constant: materialize into the heap.
             if (!v.name.empty() && v.name[0] == '"') {
                 RegVal d;
@@ -741,8 +747,32 @@ void VM::materializeLabels() {
         if (colon == std::string::npos) continue;
         std::string label = line.substr(0, colon);
         std::string body = line.substr(colon + 1);
-        if (body.find("db") == std::string::npos) continue;
+        // CID-005: `dw` lines are UTF-16LE code units (hex); `db` lines are
+        // the existing byte lists. The first keyword decides the width.
+        size_t kw = body.find("dw");
+        size_t kb = body.find("db");
+        bool isWide = (kw != std::string::npos) && (kb == std::string::npos || kw < kb);
+        if (kb == std::string::npos && kw == std::string::npos) continue;
         if (stringOffsets_.count(label)) continue;
+        if (isWide) {
+            std::vector<uint8_t> bytes;
+            size_t pos = kw + 2;
+            while (pos < body.size()) {
+                while (pos < body.size() && (body[pos] == ' ' || body[pos] == ',')) pos++;
+                if (pos >= body.size()) break;
+                char* end = nullptr;
+                long v = std::strtol(body.c_str() + pos, &end, 0);
+                if (end == body.c_str() + pos) break;
+                bytes.push_back((uint8_t)(v & 0xFF));
+                bytes.push_back((uint8_t)((v >> 8) & 0xFF));
+                pos = (size_t)(end - body.c_str());
+            }
+            int64_t off = malloc((int64_t)bytes.size());
+            if (off + (int64_t)bytes.size() > (int64_t)heap_.size()) heap_.resize(off + (int64_t)bytes.size());
+            std::memcpy(heap_.data() + off, bytes.data(), bytes.size());
+            stringOffsets_[label] = off;
+            continue;
+        }
         // Decode the db byte list.
         std::vector<uint8_t> bytes;
         size_t pos = body.find("db") + 2;
@@ -832,6 +862,22 @@ int64_t VM::materializeString(const std::string& name) {
     if (off + (int64_t)content.size() + 1 > (int64_t)heap_.size()) heap_.resize(off + (int64_t)content.size() + 1);
     std::memcpy(heap_.data() + off, content.data(), content.size());
     heap_[(size_t)(off + content.size())] = 0;
+    stringOffsets_[name] = off;
+    return off;
+}
+
+// CID-005: materialize `L"<UTF-16LE bytes incl. NUL unit>"` into the heap.
+// The payload already carries the wide NUL; two extra zero bytes keep the
+// allocation word-clean (mirrors the codegen's dw block plus alignment).
+int64_t VM::materializeWideString(const std::string& name) {
+    // name = L"<UTF-16LE bytes incl. NUL unit>"
+    std::string bytes = name.substr(2, name.size() - 3);
+    int64_t off = malloc((int64_t)bytes.size() + 2);
+    if (off + (int64_t)bytes.size() + 2 > (int64_t)heap_.size())
+        heap_.resize(off + (int64_t)bytes.size() + 2);
+    std::memcpy(heap_.data() + off, bytes.data(), bytes.size());
+    heap_[(size_t)(off + bytes.size())] = 0;
+    heap_[(size_t)(off + bytes.size() + 1)] = 0;
     stringOffsets_[name] = off;
     return off;
 }

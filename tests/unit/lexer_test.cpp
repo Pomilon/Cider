@@ -67,6 +67,23 @@ int run() {
     CHECK(n4().value == "'");
     CHECK(!rep4.hasErrors());
 
+    // CID-005: wide literals. Adjacent `u"` / `u'` only.
+    cider::ErrorReporter repW;
+    cider::Lexer lexW("u\"AB\" u'\\u0041' u \"x\" u", repW);
+    auto nW = [&] { return lexW.getNextToken(); };
+    auto wstrTok = nW();
+    CHECK(wstrTok.type == cider::TokenType::WIDE_STRING);
+    CHECK(wstrTok.value.size() == 6);  // 3 code units, UTF-16LE, incl. NUL
+    CHECK((unsigned char)wstrTok.value[0] == 'A' && wstrTok.value[1] == 0);
+    auto wcharTok = nW();
+    CHECK(wcharTok.type == cider::TokenType::WIDE_CHAR_LITERAL);
+    CHECK(wcharTok.value.size() == 2 && (unsigned char)wcharTok.value[0] == 'A');
+    auto uIdent = nW();
+    CHECK(uIdent.type == cider::TokenType::IDENTIFIER && uIdent.value == "u");  // `u` alone
+    CHECK(nW().type == cider::TokenType::STRING);   // `u "x"` is ident + string
+    CHECK(nW().type == cider::TokenType::IDENTIFIER);  // trailing `u`
+    CHECK(!repW.hasErrors());
+
     // Line/column tracking and unknown-char handling (parity: UNKNOWN token,
     // no lexer error — the parser reports on UNKNOWN).
     cider::ErrorReporter rep2;

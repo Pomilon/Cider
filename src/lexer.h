@@ -117,6 +117,8 @@ enum class TokenType {
     NUMBER,
     STRING,
     CHAR_LITERAL,
+    WIDE_STRING,
+    WIDE_CHAR_LITERAL,
 
     // End of File
     END_OF_FILE,
@@ -150,6 +152,8 @@ private:
     Token readNumber();
     Token readString();
     Token readCharLiteral();
+    Token readWideString();
+    Token readWideCharLiteral();
     Token makeToken(TokenType type, const std::string& value);
     void skipWhitespace();
     char advance();

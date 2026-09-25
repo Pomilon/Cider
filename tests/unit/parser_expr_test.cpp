@@ -36,6 +36,17 @@ int run() {
     CHECK(!rep.hasErrors());
     CHECK(d.find("(Cast (Ident p) -> sysvabi fn(int) -> void)") != std::string::npos);
 
+    // CID-005: wide string and wide char literals parse into their own nodes.
+    rep.clear();
+    d = parseDump(
+        "func f() -> void {\n"
+        "  var s: [u16; 3] = u\"AB\";\n"
+        "  var c: u16 = u'\\u0041';\n"
+        "}\n", rep);
+    CHECK(!rep.hasErrors());
+    CHECK(d.find("(WideString u\"AB\")") != std::string::npos);
+    CHECK(d.find("(WideChar u'A')") != std::string::npos);
+
     // Ternary, member access, index, call.
     rep.clear();
     d = parseDump(

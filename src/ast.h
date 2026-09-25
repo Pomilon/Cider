@@ -20,7 +20,8 @@ class ASTNode {
 public:
     enum NodeType {
         EXPRESSION, STATEMENT, PROGRAM,
-        NUMBER_EXPR, STRING_EXPR, CHAR_EXPR, BOOLEAN_EXPR, NEW_EXPR, NIL_EXPR,
+        NUMBER_EXPR, STRING_EXPR, CHAR_EXPR, WIDE_STRING_EXPR, WIDE_CHAR_EXPR,
+        BOOLEAN_EXPR, NEW_EXPR, NIL_EXPR,
         NIL_PTR_EXPR, IDENTIFIER_EXPR, BINARY_EXPR, UNARY_EXPR, CALL_EXPR,
         MEMBER_ACCESS_EXPR, LIST_EXPR, TABLE_EXPR, INDEX_EXPR, SLICE_EXPR,
         INTERPOLATED_STRING_EXPR,
@@ -203,6 +204,42 @@ public:
     }
 private:
     std::string value_;
+};
+
+// CID-005: `u"..."` — UTF-16 code units, no terminating NUL in the AST
+// value (the array type adds it: `u"AB"` is `[u16; 3]`).
+class WideStringExpr : public Expression {
+public:
+    WideStringExpr(std::u16string value, int line, int col)
+        : Expression(WIDE_STRING_EXPR, line, col), value_(std::move(value)) {}
+    const std::u16string& getValue() const { return value_; }
+    void dump(std::string& out, int /*depth*/) const override {
+        out += "(WideString u\"";
+        for (char16_t c : value_) {
+            if (c == u'\n') out += "\\n";
+            else if (c == u'\t') out += "\\t";
+            else if (c == u'\0') out += "\\0";
+            else out += std::string(1, (char)c);
+        }
+        out += "\")";
+    }
+private:
+    std::u16string value_;
+};
+
+// CID-005: `u'X'` — a single UTF-16 code unit.
+class WideCharExpr : public Expression {
+public:
+    WideCharExpr(uint16_t value, int line, int col)
+        : Expression(WIDE_CHAR_EXPR, line, col), value_(value) {}
+    uint16_t getValue() const { return value_; }
+    void dump(std::string& out, int /*depth*/) const override {
+        out += "(WideChar u'";
+        out += std::string(1, (char)(value_ & 0xFF));
+        out += "')";
+    }
+private:
+    uint16_t value_;
 };
 
 class CharExpr : public Expression {
@@ -1037,6 +1074,8 @@ public:
     virtual void visit(StringExpr&) {}
     virtual void visit(InterpolatedStringExpr&) {}
     virtual void visit(CharExpr&) {}
+    virtual void visit(WideStringExpr&) {}
+    virtual void visit(WideCharExpr&) {}
     virtual void visit(IdentifierExpr&) {}
     virtual void visit(BooleanExpr&) {}
     virtual void visit(NilExpr&) {}
@@ -1387,6 +1426,8 @@ inline void ASTNode::accept(ASTVisitor& v) {
     if (auto* n = dynamic_cast<StringExpr*>(this)) { v.visit(*n); return; }
     if (auto* n = dynamic_cast<InterpolatedStringExpr*>(this)) { v.visit(*n); return; }
     if (auto* n = dynamic_cast<CharExpr*>(this)) { v.visit(*n); return; }
+    if (auto* n = dynamic_cast<WideStringExpr*>(this)) { v.visit(*n); return; }
+    if (auto* n = dynamic_cast<WideCharExpr*>(this)) { v.visit(*n); return; }
     if (auto* n = dynamic_cast<BooleanExpr*>(this)) { v.visit(*n); return; }
     if (auto* n = dynamic_cast<NilExpr*>(this)) { v.visit(*n); return; }
     if (auto* n = dynamic_cast<NilPtrExpr*>(this)) { v.visit(*n); return; }

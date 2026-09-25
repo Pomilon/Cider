@@ -1,0 +1,17 @@
+func take(p: *u16) -> int { return p[0]; }
+
+func main() -> int {
+  var s: [u16; 3] = u"AB";
+  if (s[0] != 65) { return 1; }
+  if (s[1] != 66) { return 2; }
+  if (s[2] != 0) { return 3; }
+  var p: *u16 = u"C\u0044";
+  if (p[0] != 67) { return 4; }
+  if (p[1] != 68) { return 5; }
+  if (p[2] != 0) { return 6; }
+  if (u"X"[0] != 88) { return 7; }
+  if (take(u"Y") != 89) { return 8; }
+  var c: u16 = u'Z';
+  if (c != 90) { return 9; }
+  return 0;
+}

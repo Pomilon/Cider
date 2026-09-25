@@ -93,6 +93,7 @@ private:
     RegVal resolveValue(const IRValue& v);
     void materializeLabels();
     int64_t materializeString(const std::string& name);
+    int64_t materializeWideString(const std::string& name);
     int64_t materializeVTable(const std::string& label);
 
     bool isExternFunctionName(const std::string& name) const;

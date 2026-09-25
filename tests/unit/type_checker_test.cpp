@@ -387,6 +387,79 @@ int run() {
         "msabi func helper() -> u64 { return 0; }\n",
         /*defaultAbiMs=*/true, /*allowUefiEntry=*/true);
     CHECK(hasError(uefiEntryMissing, "Missing entry point"));
+
+    // CID-005/T5: wide literals type as [u16; N] (incl. NUL) and u'X' as
+    // u16; u16 arrays decay to *u16 (and *void) but never to *u8.
+    auto wideOk = checkSrc(
+        "func take(p: *u16) -> int { return p[0]; }\n"
+        "func main() -> int {\n"
+        "  var s: [u16; 3] = u\"AB\";\n"
+        "  var p: *u16 = u\"CD\";\n"
+        "  var c: u16 = u'X';\n"
+        "  return take(u\"EF\") + s[0] + p[1] + c;\n"
+        "}\n");
+    CHECK(wideOk.empty());
+    auto wideBad = checkSrc(
+        "func main() -> int { var p: *u8 = u\"AB\"; return 0; }\n");
+    CHECK(!wideBad.empty());  // u16 array never decays to u8*
+
+    // CID-005/T5 (F1): a function-pointer return must match the declared
+    // signature exactly, ABI included (the broad return-statement gap is
+    // out of scope).
+    auto retAbiBad = checkSrc(
+        "func g(a: int) -> int { return a; }\n"
+        "func f() -> msabi fn(int) -> int { return g; }\n"
+        "func main() -> int { return 0; }\n");
+    CHECK(hasError(retAbiBad,
+                   "Return type mismatch. Expected msabi fn(int) -> int, got fn(int) -> int"));
+    auto retAbiOk = checkSrc(
+        "msabi func g(a: int) -> int { return a; }\n"
+        "func f() -> msabi fn(int) -> int { return g; }\n"
+        "func main() -> int { return 0; }\n");
+    CHECK(retAbiOk.empty());
+    auto retSigBad = checkSrc(
+        "func g(a: int, b: int) -> int { return a + b; }\n"
+        "func f() -> fn(int) -> int { return g; }\n"
+        "func main() -> int { return 0; }\n");
+    CHECK(hasError(retSigBad,
+                   "Return type mismatch. Expected fn(int) -> int, got fn(int, int) -> int"));
+    // Under --target uefi an unmarked function is MS-ABI, so the same
+    // source flips which of the pair is the mismatch.
+    auto retDefaultMsOk = checkWithDefaultAbiMs(
+        "func g(a: int) -> int { return a; }\n"
+        "func f() -> msabi fn(int) -> int { return g; }\n"
+        "func main() -> int { return 0; }\n");
+    CHECK(retDefaultMsOk.empty());
+    auto retDefaultMsBad = checkWithDefaultAbiMs(
+        "func g(a: int) -> int { return a; }\n"
+        "func f() -> fn(int) -> int { return g; }\n"
+        "func main() -> int { return 0; }\n");
+    CHECK(hasError(retDefaultMsBad,
+                   "Return type mismatch. Expected fn(int) -> int, got msabi fn(int) -> int"));
+
+    // CID-005/T5 (F2): an interface implementation's method symbol is pinned
+    // to SysV by the collector, so a method VALUE types as plain `fn` under
+    // --target uefi (previously it typed as `msabi fn`, disagreeing with its
+    // SysV definition).
+    auto ifaceMethodValue = checkWithDefaultAbiMs(
+        "interface I { func m() -> int; }\n"
+        "class C { func m() -> int { return 7; } }\n"
+        "func main() -> int {\n"
+        "  var c: C;\n"
+        "  var p: fn(*C) -> int = C_m;\n"
+        "  return p(&c);\n"
+        "}\n");
+    CHECK(ifaceMethodValue.empty());
+    auto ifaceMethodValueMs = checkWithDefaultAbiMs(
+        "interface I { func m() -> int; }\n"
+        "class C { func m() -> int { return 7; } }\n"
+        "func main() -> int {\n"
+        "  var c: C;\n"
+        "  var p: msabi fn(*C) -> int = C_m;\n"
+        "  return p(&c);\n"
+        "}\n");
+    CHECK(hasError(ifaceMethodValueMs,
+                   "Type mismatch in declaration of 'p'. Expected msabi fn(*C) -> int, got fn(*C) -> int"));
     return 0;
 }
 

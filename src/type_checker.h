@@ -345,6 +345,14 @@ public:
         if (t1.name == "string" && t1.pointerLevel == 0 && isBytePtr(t2)) return true;
         if (t2.name == "string" && t2.pointerLevel == 0 && isBytePtr(t1)) return true;
 
+        // CID-005: `u"..."` is a [u16; N] array that decays to *u16
+        // (never to *u8). Only u16 arrays decay; all other arrays keep
+        // their previous strict behavior.
+        if (t1.name == "u16" && t1.isArray && !t2.isArray && t2.pointerLevel == 1 &&
+            (t2.name == "u16" || t2.name == "void")) return true;
+        if (t2.name == "u16" && t2.isArray && !t1.isArray && t1.pointerLevel == 1 &&
+            (t1.name == "u16" || t1.name == "void")) return true;
+
         // Pointer covariance for classes
         if (t1.pointerLevel > 0 && t2.pointerLevel > 0 && t1.pointerLevel == t2.pointerLevel) {
             auto sym2 = resolveScoped(t2.name);
@@ -916,6 +924,17 @@ public:
     void visit(CharExpr&) override { lastExprType_ = {"char", 0}; }
     void visit(StringExpr&) override { lastExprType_ = {"string", 0}; }
 
+    // CID-005: `u"AB"` is `[u16; 3]` — the AST value excludes the NUL the
+    // type (and the emitted data) include.
+    void visit(WideStringExpr& expr) override {
+        TypeInfo t;
+        t.name = "u16";
+        t.isArray = true;
+        t.arraySize = (int)expr.getValue().size() + 1;
+        lastExprType_ = t;
+    }
+    void visit(WideCharExpr&) override { lastExprType_ = {"u16", 0}; }
+
     void visit(InterpolatedStringExpr& expr) override {
         for (const auto& part : expr.getParts()) {
             if (!part.isExpr) continue;
@@ -1255,6 +1274,16 @@ public:
         // Skip template function bodies (uninstantiated)
         if (stmt.hasTemplateParams()) return;
 
+        // CID-005 (T5/F1): remember the declared return type for the
+        // narrow fn-pointer return check; saved/restored so nested
+        // declarations cannot leak it.
+        TypeInfo prevReturnType = currentDeclaredReturnType_;
+        bool prevHasReturnType = hasDeclaredReturnType_;
+        currentDeclaredReturnType_ = stmt.getReturnType()
+            ? canonicalizeNominal(TypeInfo::fromAST(stmt.getReturnType()), stmt.getLine())
+            : TypeInfo{"void", 0};
+        hasDeclaredReturnType_ = true;
+
         symbolTable_.enterScope();
 
         if (!currentClassName_.empty()) {
@@ -1287,6 +1316,8 @@ public:
             for (auto& s : stmt.getBody()) s->accept(*this);
         }
         symbolTable_.exitScope();
+        currentDeclaredReturnType_ = prevReturnType;
+        hasDeclaredReturnType_ = prevHasReturnType;
     }
 
     void visit(BlockStmt& stmt) override {
@@ -1335,8 +1366,37 @@ public:
     }
 
     void visit(ReturnStmt& stmt) override {
-        if (stmt.getValue()) stmt.getValue()->accept(*this);
-        else lastExprType_ = {"void", 0};
+        if (stmt.getValue()) {
+            stmt.getValue()->accept(*this);
+            // CID-005 (T5/F1): when a function-pointer type is on either
+            // side of a return, require the exact signature (ABI included).
+            // Narrow on purpose: the general return-statement type gap is
+            // pre-existing and out of scope, but returning a SysV function
+            // where an `msabi fn` is declared (or vice versa) used to be
+            // silently accepted and then crashed at the indirect call.
+            if (hasDeclaredReturnType_) {
+                TypeInfo declType = resolveFunctionPointerAlias(currentDeclaredReturnType_);
+                TypeInfo valType = resolveFunctionPointerAlias(lastExprType_);
+                bool declFn = declType.isFunctionPointer && !declType.isArray;
+                bool valFn = valType.isFunctionPointer && !valType.isArray;
+                if (declFn && valFn) {
+                    if (!declType.signatureEquals(valType)) {
+                        error("Return type mismatch. Expected " + declType.toString() +
+                                  ", got " + valType.toString(),
+                              stmt.getLine());
+                    }
+                } else if ((declFn || valFn) && !areTypesCompatible(declType, valType)) {
+                    // Non-fn value against a fn declaration (or the reverse):
+                    // only the pre-existing *void/nilPtr and wildcard routes
+                    // stay allowed.
+                    error("Return type mismatch. Expected " + canonicalizeNominal(declType).toString() +
+                              ", got " + canonicalizeNominal(valType).toString(),
+                          stmt.getLine());
+                }
+            }
+        } else {
+            lastExprType_ = {"void", 0};
+        }
     }
 
     void visit(ExpressionStmt& stmt) override { stmt.getExpression()->accept(*this); }
@@ -1518,6 +1578,11 @@ public:
         // Closure literal: check the body in a fresh scope with the params,
         // then type it as a function pointer. Captured identifiers resolve
         // in the enclosing scopes (they are read at the closure site).
+        // CID-005 (T5/F1): a closure body has no declared return type of its
+        // own, so the enclosing function's check must not apply inside it.
+        TypeInfo prevReturnType = currentDeclaredReturnType_;
+        bool prevHasReturnType = hasDeclaredReturnType_;
+        hasDeclaredReturnType_ = false;
         symbolTable_.enterScope();
         for (const auto& p : expr.getParams()) {
             auto sym = std::make_shared<Symbol>();
@@ -1531,6 +1596,8 @@ public:
             s->accept(*this);
         }
         symbolTable_.exitScope();
+        currentDeclaredReturnType_ = prevReturnType;
+        hasDeclaredReturnType_ = prevHasReturnType;
         lastExprType_ = {"func", 1};
     }
     void visit(TypeAST&) override {}
@@ -1693,6 +1760,10 @@ private:
     SymbolTable& symbolTable_;
     ErrorReporter& reporter_;
     TypeInfo lastExprType_ = {"void", 0};
+    // CID-005 (T5/F1): declared return type of the function declaration
+    // whose body is being checked (guarded: no function body == no check).
+    TypeInfo currentDeclaredReturnType_ = {"void", 0};
+    bool hasDeclaredReturnType_ = false;
     std::string currentClassName_;
     bool inClassFieldDecl_ = false;
     bool moduleMode_ = false;

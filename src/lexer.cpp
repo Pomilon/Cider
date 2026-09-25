@@ -25,6 +25,7 @@ std::string Token::toString(TokenType type) {
         {TokenType::COMMA, "COMMA"}, {TokenType::DOT, "DOT"}, {TokenType::COLON, "COLON"}, {TokenType::SEMICOLON, "SEMICOLON"},
 
         {TokenType::IDENTIFIER, "IDENTIFIER"}, {TokenType::NUMBER, "NUMBER"}, {TokenType::STRING, "STRING"}, {TokenType::CHAR_LITERAL, "CHAR_LITERAL"},
+        {TokenType::WIDE_STRING, "WIDE_STRING"}, {TokenType::WIDE_CHAR_LITERAL, "WIDE_CHAR_LITERAL"},
 
         {TokenType::END_OF_FILE, "END_OF_FILE"}, {TokenType::UNKNOWN, "UNKNOWN"}};
 
@@ -274,6 +275,166 @@ Token Lexer::readString() {
     return makeToken(TokenType::STRING, raw_value);
 }
 
+// CID-005: `u"..."` — UTF-16LE code units, including a terminating NUL
+// unit, stored as raw little-endian bytes in the token value. The caller
+// has already consumed the opening quote.
+Token Lexer::readWideString() {
+    std::u16string units;
+
+    while (peek() != '"' && peek() != '\0') {
+        if (peek() == '\n') {
+            reporter_.error("Unterminated string literal (newline encountered)", currentLine, currentCol);
+            return makeToken(TokenType::UNKNOWN, "");
+        }
+
+        if (peek() == '\\') {
+            advance();
+            char escapedChar = peek();
+            switch (escapedChar) {
+            case '"': units.push_back(u'"'); break;
+            case '\\': units.push_back(u'\\'); break;
+            case 'n': units.push_back(u'\n'); break;
+            case 't': units.push_back(u'\t'); break;
+            case 'r': units.push_back(u'\r'); break;
+            case 'b': units.push_back(u'\b'); break;
+            case '0': units.push_back(u'\0'); break;
+            case 'x': {
+                advance();  // consume 'x'
+                int value = 0;
+                int digits = 0;
+                while (digits < 2 && std::isxdigit(static_cast<unsigned char>(peek()))) {
+                    char h = peek();
+                    value = value * 16 + (h <= '9' ? h - '0' : (std::tolower(static_cast<unsigned char>(h)) - 'a' + 10));
+                    digits++;
+                    advance();
+                }
+                if (digits == 0) {
+                    reporter_.error("\\x escape requires at least one hex digit", currentLine, currentCol);
+                }
+                units.push_back((char16_t)value);
+                continue;  // digits (and 'x') already consumed
+            }
+            case 'u': {
+                advance();  // consume 'u'
+                int value = 0;
+                for (int d = 0; d < 4; ++d) {
+                    char h = peek();
+                    if (!std::isxdigit(static_cast<unsigned char>(h))) {
+                        reporter_.error("\\u escape requires four hex digits", currentLine, currentCol);
+                        break;
+                    }
+                    value = value * 16 + (h <= '9' ? h - '0' : (std::tolower(static_cast<unsigned char>(h)) - 'a' + 10));
+                    advance();
+                }
+                units.push_back((char16_t)value);
+                continue;  // digits already consumed
+            }
+            default:
+                units.push_back(u'\\');
+                units.push_back((char16_t)(unsigned char)escapedChar);
+                break;
+            }
+            advance();
+        } else {
+            // Raw UTF-8 input: copy bytes as Latin-1 code units (ASCII is
+            // the supported source case; `\uXXXX` covers the rest).
+            units.push_back((char16_t)(unsigned char)peek());
+            advance();
+        }
+    }
+
+    if (peek() == '\0') {
+        reporter_.error("Unterminated string literal (EOF)", currentLine, currentCol);
+        return makeToken(TokenType::UNKNOWN, "");
+    }
+
+    advance();  // closing quote
+    units.push_back(u'\0');
+    std::string bytes;
+    bytes.reserve(units.size() * 2);
+    for (char16_t u : units) {
+        bytes.push_back((char)(u & 0xFF));
+        bytes.push_back((char)((u >> 8) & 0xFF));
+    }
+    return makeToken(TokenType::WIDE_STRING, bytes);
+}
+
+// CID-005: `u'X'` — exactly one UTF-16 code unit, two raw little-endian
+// bytes in the token value, no NUL. The caller has already consumed the
+// opening quote.
+Token Lexer::readWideCharLiteral() {
+    std::u16string units;
+
+    if (peek() == '\0') {
+        reporter_.error("Unterminated character literal (EOF)", currentLine, currentCol);
+        return makeToken(TokenType::UNKNOWN, "");
+    }
+
+    if (peek() == '\\') {
+        advance();
+        char escapedChar = peek();
+        switch (escapedChar) {
+        case '\'': units.push_back(u'\''); break;
+        case '"': units.push_back(u'"'); break;
+        case '\\': units.push_back(u'\\'); break;
+        case 'n': units.push_back(u'\n'); break;
+        case 't': units.push_back(u'\t'); break;
+        case 'r': units.push_back(u'\r'); break;
+        case 'b': units.push_back(u'\b'); break;
+        case '0': units.push_back(u'\0'); break;
+        case 'x': {
+            advance();  // consume 'x'
+            int value = 0;
+            int digits = 0;
+            while (digits < 2 && std::isxdigit(static_cast<unsigned char>(peek()))) {
+                char h = peek();
+                value = value * 16 + (h <= '9' ? h - '0' : (std::tolower(static_cast<unsigned char>(h)) - 'a' + 10));
+                digits++;
+                advance();
+            }
+            if (digits == 0) {
+                reporter_.error("\\x escape requires at least one hex digit", currentLine, currentCol);
+            }
+            units.push_back((char16_t)value);
+            break;  // digits (and 'x') already consumed; no extra advance
+        }
+        case 'u': {
+            advance();  // consume 'u'
+            int value = 0;
+            for (int d = 0; d < 4; ++d) {
+                char h = peek();
+                if (!std::isxdigit(static_cast<unsigned char>(h))) {
+                    reporter_.error("\\u escape requires four hex digits", currentLine, currentCol);
+                    break;
+                }
+                value = value * 16 + (h <= '9' ? h - '0' : (std::tolower(static_cast<unsigned char>(h)) - 'a' + 10));
+                advance();
+            }
+            units.push_back((char16_t)value);
+            break;  // digits already consumed; no extra advance
+        }
+        default:
+            units.push_back((char16_t)(unsigned char)escapedChar);
+            break;
+        }
+        if (escapedChar != 'x' && escapedChar != 'u') advance();
+    } else {
+        units.push_back((char16_t)(unsigned char)peek());
+        advance();
+    }
+
+    if (peek() != '\'') {
+        reporter_.error("Unterminated character literal, expected '", currentLine, currentCol);
+        return makeToken(TokenType::UNKNOWN, "");
+    }
+    advance();  // closing quote
+
+    std::string bytes;
+    bytes.push_back((char)(units[0] & 0xFF));
+    bytes.push_back((char)((units[0] >> 8) & 0xFF));
+    return makeToken(TokenType::WIDE_CHAR_LITERAL, bytes);
+}
+
 Token Lexer::readCharLiteral() {
     advance();  // Skip opening quote
     if (peek() == '\0') {
@@ -350,6 +511,17 @@ Token Lexer::getNextToken() {
     Token token;
     if (std::isalpha(static_cast<unsigned char>(c)) || c == '_') {
         token = readIdentifier();
+        // CID-005: `u"..."` / `u'X'` are wide literals only when the
+        // quote is immediately adjacent; `u` stays an identifier otherwise.
+        if (token.type == TokenType::IDENTIFIER && token.value == "u") {
+            if (peek() == '"') {
+                advance();
+                token = readWideString();
+            } else if (peek() == '\'') {
+                advance();
+                token = readWideCharLiteral();
+            }
+        }
     } else if (std::isdigit(static_cast<unsigned char>(c))) {
         token = readNumber();
     } else if (c == '"') {

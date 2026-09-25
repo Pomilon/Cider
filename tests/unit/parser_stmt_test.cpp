@@ -72,7 +72,12 @@ int run() {
     d = parseDump("var t: [msabi fn(int) -> int; 2] = [a, b];\n", rep);
     CHECK(!rep.hasErrors());
     CHECK(d.find("msabi fn(int) -> int[2]") != std::string::npos);
-    CHECK(d.find("msabi fn(int) -> int[2]") != std::string::npos);
+
+    // CID-005/T5 (F3): `export msabi func` carries the modifier.
+    rep.clear();
+    d = parseDump("export msabi func f(a: int) -> int { return a; }\n", rep);
+    CHECK(!rep.hasErrors());
+    CHECK(d.find("(Export (FunctionDecl f msabi") != std::string::npos);
 
     // Assignment forms incl. compound.
     rep.clear();

@@ -1,5 +1,6 @@
 #pragma once
 
+#include <cstdio>
 #include <map>
 #include <memory>
 #include <optional>
@@ -1670,6 +1671,35 @@ public:
                 module_.addStringData(dataLine);
                 module_.addStringData(gname + ": dq " + strLabel);
                 globalValues_[gname] = IRValue::Label(gname);
+                return;
+            }
+            // CID-005: wide string globals. An array global IS the dw data
+            // (no NUL wrapper cell); a pointer global gets a `dq` cell
+            // pointing at a fresh wide data label.
+            if (auto ws = dynamic_cast<WideStringExpr*>(stmt.getInitializer())) {
+                auto emitWideData = [&](const std::string& label) {
+                    std::string line = label + ": dw ";
+                    const auto& units = ws->getValue();
+                    for (size_t i = 0; i < units.size(); ++i) {
+                        if (i) line += ", ";
+                        char buf[8];
+                        std::snprintf(buf, sizeof(buf), "0x%04X", (unsigned)units[i]);
+                        line += buf;
+                    }
+                    if (!units.empty()) line += ", ";
+                    line += "0x0000";
+                    module_.addStringData("align 2");
+                    module_.addStringData(line);
+                };
+                if (sym->type.isArray && sym->type.pointerLevel == 0) {
+                    emitWideData(gname);
+                    globalValues_[gname] = IRValue::Label(gname);
+                } else {
+                    std::string strLabel = "_gws" + std::to_string(globalStrCount_++);
+                    emitWideData(strLabel);
+                    module_.addStringData(gname + ": dq " + strLabel);
+                    globalValues_[gname] = IRValue::Label(gname);
+                }
                 return;
             }
             // Fixed-size array from a list literal (CID-007): with all
@@ -3771,6 +3801,37 @@ public:
         strVal.intValue = 0;
         lastValue_ = strVal;
         lastExprType_ = {"string", 0};
+    }
+
+    // CID-005: a wide literal crosses IR as a PTR constant whose name is
+    // `L"` + UTF-16LE bytes (NUL unit included) + `"`. Codegen rewrites it
+    // into a `dw` data block; the VM materializes the same bytes from the
+    // name. Marking it PTR with a constant payload keeps every consumer
+    // (stores, MEMCPY, indexing, calls) identical to the narrow string path.
+    void visit(WideStringExpr& expr) override {
+        std::string bytes;
+        bytes.reserve(expr.getValue().size() * 2 + 2);
+        for (char16_t u : expr.getValue()) {
+            bytes.push_back((char)(u & 0xFF));
+            bytes.push_back((char)((u >> 8) & 0xFF));
+        }
+        bytes.push_back('\0');
+        bytes.push_back('\0');
+        IRValue v;
+        v.kind = IRValue::CONSTANT;
+        v.type = IRType::PTR;
+        v.name = "L\"" + bytes + "\"";
+        lastValue_ = v;
+        TypeInfo t;
+        t.name = "u16";
+        t.isArray = true;
+        t.arraySize = (int)expr.getValue().size() + 1;
+        lastExprType_ = t;
+    }
+
+    void visit(WideCharExpr& expr) override {
+        lastValue_ = IRValue::Constant((int64_t)expr.getValue(), IRType::U16);
+        lastExprType_ = {"u16", 0};
     }
 
     // --- string interpolation lowering ---

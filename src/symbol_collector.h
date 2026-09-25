@@ -168,6 +168,7 @@ public:
                 if (!structSym) continue;
                 if (structSym->kind != SymbolKind::STRUCT && structSym->kind != SymbolKind::CLASS) continue;
                 auto ss = std::static_pointer_cast<StructSymbol>(structSym);
+                std::vector<const StructSymbol::Method*> matchedMethods;
                 bool satisfies = true;
                 for (auto& im : iface->methods) {
                     bool found = false;
@@ -184,6 +185,7 @@ public:
                         if (!paramsMatch) continue;
                         if (!(sm.returnType == im.returnType)) continue;
                         found = true;
+                        matchedMethods.push_back(&sm);
                         break;
                     }
                     if (!found) {
@@ -192,6 +194,20 @@ public:
                     }
                 }
                 if (satisfies && !iface->methods.empty()) {
+                    // CID-005 (T5/F2): a method reached through interface
+                    // dispatch runs under the SysV-only interface path (see
+                    // ir_gen's vtable analysis), so its definition symbol is
+                    // pinned SysV from the start — under --target uefi an
+                    // unpinned method would type as `msabi fn` while its
+                    // definition stays SysV. Mirrors the virtual/override
+                    // pin in visit(ClassDeclStmt). Only completed
+                    // implementations pin: a partial match gets no vtable.
+                    for (auto* sm : matchedMethods) {
+                        auto methodSym = symbolTable_.resolve(sm->mangledName);
+                        if (methodSym && methodSym->kind == SymbolKind::FUNCTION) {
+                            std::static_pointer_cast<FunctionSymbol>(methodSym)->abi = Abi::SysV;
+                        }
+                    }
                     interfaceImpls_[ifaceName].push_back(structName);
                 }
             }
@@ -1547,6 +1563,12 @@ public:
             case ASTNode::CHAR_EXPR:
                 return std::make_unique<CharExpr>(
                     dynamic_cast<CharExpr*>(expr)->getValue(), expr->getLine(), expr->getColumn());
+            case ASTNode::WIDE_STRING_EXPR:
+                return std::make_unique<WideStringExpr>(
+                    dynamic_cast<WideStringExpr*>(expr)->getValue(), expr->getLine(), expr->getColumn());
+            case ASTNode::WIDE_CHAR_EXPR:
+                return std::make_unique<WideCharExpr>(
+                    dynamic_cast<WideCharExpr*>(expr)->getValue(), expr->getLine(), expr->getColumn());
             case ASTNode::BINARY_EXPR: {
                 auto be = dynamic_cast<BinaryExpr*>(expr);
                 return std::make_unique<BinaryExpr>(

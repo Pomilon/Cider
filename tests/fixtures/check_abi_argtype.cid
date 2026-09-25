@@ -1,5 +1,5 @@
 func apply(f: fn(int) -> int, x: int) -> int { return f(x); }
-func inc(a: int) -> int { return a + 1; }
+msabi func inc(a: int) -> int { return a + 1; }
 func main() -> int {
   var m: msabi fn(int) -> int = inc;
   return apply(m, 1);
