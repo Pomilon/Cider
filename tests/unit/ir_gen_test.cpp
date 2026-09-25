@@ -780,6 +780,142 @@ int run() {
         }
         CHECK(allocas8 == 3);  // x, y and the parameter slot
     }
+    // CID-005 fix round 1: definitions reached through mechanisms whose
+    // call sites T3 pins to SysV (VIRTUAL_CALL, the interface branch, and
+    // closure calls) must themselves be SysV under every target. An
+    // unmarked interface implementation would otherwise emit an MS prologue
+    // under `--target uefi` while every interface call marshals SysV.
+    {
+        auto module = genModuleSrc(
+            "interface I {\n"
+            "  func m() -> int;\n"
+            "}\n"
+            "class C {\n"
+            "  virtual func v() -> int { return 1; }\n"
+            "  func m() -> int { return 2; }\n"
+            "}\n"
+            "func makeClosure() -> func(int) -> int {\n"
+            "  return func(x: int) -> int { return x; };\n"
+            "}\n"
+            "func main() -> int {\n"
+            "  var f: func(int) -> int = makeClosure();\n"
+            "  return f(0);\n"
+            "}\n");
+        bool sawVirtual = false;
+        bool sawIfaceImpl = false;
+        bool sawClosure = false;
+        for (const auto& fn : module.getFunctions()) {
+            if (fn->getName() == "C_v") {
+                sawVirtual = true;
+                CHECK(fn->getAbi() == cider::Abi::SysV);
+            }
+            if (fn->getName() == "C_m") {
+                sawIfaceImpl = true;
+                CHECK(fn->getAbi() == cider::Abi::SysV);
+            }
+            if (fn->getName().rfind("_closure_", 0) == 0) {
+                sawClosure = true;
+                CHECK(fn->getAbi() == cider::Abi::SysV);
+            }
+        }
+        CHECK(sawVirtual);
+        CHECK(sawIfaceImpl);
+        CHECK(sawClosure);
+    }
+
+    // CID-005 fix round 1: closure FunctionIRs carry real parameter IR
+    // types (hidden closure object PTR, typed params), not addParam's I32
+    // default the MS/SysV classifiers would misread.
+    {
+        auto module = genModuleSrc(
+            "func makeClosure() -> func(f64) -> f64 {\n"
+            "  return func(x: f64) -> f64 { return x; };\n"
+            "}\n"
+            "func main() -> int {\n"
+            "  var f: func(f64) -> f64 = makeClosure();\n"
+            "  return f(1.0) as int;\n"
+            "}\n");
+        bool sawClosure = false;
+        for (const auto& fn : module.getFunctions()) {
+            if (fn->getName().rfind("_closure_", 0) != 0) continue;
+            sawClosure = true;
+            const auto& pt = fn->getParamTypes();
+            CHECK(pt.size() == 2);
+            CHECK(pt[0] == cider::IRType::PTR);
+            CHECK(pt[1] == cider::IRType::F64);
+        }
+        CHECK(sawClosure);
+    }
+
+    // CID-005 fix round 1: an interface implementation inherited from a
+    // parent class is reached through the child's interface vtable; the
+    // parent's definition must be pinned too (the analysis resolves the
+    // inherited mangled name, not just the child's own methods).
+    {
+        auto module = genModuleSrc(
+            "interface I {\n"
+            "  func a() -> int;\n"
+            "  func b() -> int;\n"
+            "}\n"
+            "class Base {\n"
+            "  func a() -> int { return 1; }\n"
+            "}\n"
+            "class Derived extends Base {\n"
+            "  func b() -> int { return 2; }\n"
+            "}\n"
+            "func main() -> int { return 0; }\n");
+        bool sawBaseA = false;
+        bool sawDerivedB = false;
+        for (const auto& fn : module.getFunctions()) {
+            if (fn->getName() == "Base_a") {
+                sawBaseA = true;
+                CHECK(fn->getAbi() == cider::Abi::SysV);
+            }
+            if (fn->getName() == "Derived_b") {
+                sawDerivedB = true;
+                CHECK(fn->getAbi() == cider::Abi::SysV);
+            }
+        }
+        CHECK(sawBaseA);
+        CHECK(sawDerivedB);
+    }
+
+    // CID-005 fix round 1: the FunctionSymbols T3's direct-call lowering
+    // reads must agree with the pinned definitions, or a direct call to an
+    // interface implementation / virtual method would marshal MS under uefi
+    // against a SysV prologue.
+    {
+        cider::ErrorReporter rep;
+        cider::Lexer lex(
+            "interface I {\n"
+            "  func m() -> int;\n"
+            "}\n"
+            "class C {\n"
+            "  virtual func v() -> int { return 1; }\n"
+            "  func m() -> int { return 2; }\n"
+            "}\n"
+            "func main() -> int { return 0; }\n",
+            rep);
+        cider::Parser parser(lex, rep);
+        auto prog = parser.parseProgram();
+        cider::SymbolTable table;
+        cider::ModuleResolver resolver;
+        cider::SymbolCollector collector(table, rep, resolver);
+        collector.collect(*prog);
+        cider::IRGenerator gen(table);
+        gen.generate(*prog);
+        auto symOf = [&](const std::string& name)
+            -> std::shared_ptr<cider::FunctionSymbol> {
+            auto s = table.resolve(name);
+            return (s && s->kind == cider::SymbolKind::FUNCTION)
+                       ? std::static_pointer_cast<cider::FunctionSymbol>(s)
+                       : nullptr;
+        };
+        auto cv = symOf("C_v");
+        CHECK(cv && cv->abi == cider::Abi::SysV);
+        auto cm = symOf("C_m");
+        CHECK(cm && cm->abi == cider::Abi::SysV);
+    }
     return 0;
 }
 

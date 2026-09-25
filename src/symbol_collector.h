@@ -285,7 +285,12 @@ public:
         sym->returnType = TypeInfo::fromAST(stmt.getReturnType());
         sym->isExtern = stmt.isExtern();
         sym->isAsync = stmt.isAsync();
-        sym->abi = stmt.getAbi();
+        // CID-005: virtual/override definitions are VIRTUAL_CALL targets,
+        // which stay on the SysV path under every target (MS-ABI virtual
+        // dispatch is out of scope; T3 pins those call sites to SysV). The
+        // symbol must agree with the definition IR, or a call site that
+        // reads `abi` would marshal the wrong convention under uefi.
+        sym->abi = (stmt.isVirtual() || stmt.isOverride()) ? Abi::SysV : stmt.getAbi();
         sym->isExported = inExport_;
 
         // CID-020/021 (spec §5 Review Focus): `main`/`_start` are never
@@ -785,6 +790,14 @@ public:
                 funcSym->returnType = m.returnType;
                 funcSym->parameterTypes = m.parameterTypes;
                 funcSym->parameterTypes.insert(funcSym->parameterTypes.begin(), {sym->name, 1});
+                // CID-005: method symbols are defined here (the member
+                // FunctionDeclStmt visit below is first-wins and skips), so
+                // the definition ABI is recorded here. Virtual/override
+                // methods are VIRTUAL_CALL targets and stay SysV under every
+                // target (see visit(FunctionDeclStmt&)); interface
+                // implementations are pinned to SysV by the IR generator's
+                // vtable analysis.
+                funcSym->abi = (m.isVirtual || m.isOverride) ? Abi::SysV : method->getAbi();
                 symbolTable_.define(funcSym);
                 // CID-020/021: see the destructor site above.
                 recordDefiningModule(funcSym);

@@ -68,7 +68,16 @@ public:
             module_.addVTable(vtableKeyForClass(classSym), entries);
         }
 
-        // Generate interface vtables: for each interface-struct pair
+        // Generate interface vtables: for each interface-struct pair.
+        // CID-005: interface dispatch lowers to SysV calls (T3 pins the
+        // interface branch; MS-ABI interface/virtual dispatch is out of
+        // scope), but interface implementations are ordinary unmarked
+        // methods. Their definitions must therefore be pinned to SysV, or
+        // `--target uefi` would emit an MS prologue while every interface
+        // call marshals SysV. The exact set is collected while the vtables
+        // are built below, then applied to both the FunctionIR (definition
+        // emission) and its FunctionSymbol (direct call sites read `abi`).
+        std::set<std::string> ifaceDispatchedNames;
         for (auto& iface : ifaceSyms_) {
             if (!iface) continue;
             // Check all classes/structs that might implement this interface
@@ -119,6 +128,10 @@ public:
                                     sm.mangledName, definingScopeFor(ss, ss->name));
                                 vtableMethods.push_back(
                                     emitFunctionName(methodDef.second, sm.mangledName));
+                                // CID-005: this definition is dispatched
+                                // through the SysV-only interface path.
+                                ifaceDispatchedNames.insert(vtableMethods.back());
+                                if (methodDef.first) methodDef.first->abi = Abi::SysV;
                                 break;
                             }
                         }
@@ -126,6 +139,15 @@ public:
                     module_.addVTable(vtableIfaceKey(iface, iface->name, ss, ss->name), vtableMethods);
                 }
             }
+        }
+
+        // CID-005: apply the interface-dispatch pinning collected above to
+        // the generated definitions (see the comment on ifaceDispatchedNames).
+        // Definitions may be emitted before or after the vtable analysis, so
+        // this is post-accept; changed under native/pomeos only from
+        // Default -> SysV, which resolve to the same convention.
+        for (auto& fn : module_.getFunctions()) {
+            if (ifaceDispatchedNames.count(fn->getName())) fn->setAbi(Abi::SysV);
         }
 
         return std::move(module_);
@@ -653,7 +675,12 @@ public:
         currentReturnType_ = funcRetType;
         IRType funcRetIR = funcIsSret ? IRType::VOID : mapType(funcRetType.name);
         currentFunction_ = std::make_unique<FunctionIR>(funcName, funcRetIR);
-        currentFunction_->setAbi(stmt.getAbi());
+        // CID-005: virtual/override definitions are reached through
+        // VIRTUAL_CALL, which stays on the SysV path under every target
+        // (MS-ABI virtual dispatch is out of scope; T3 pins those call
+        // sites to SysV). Emitting them with the target descriptor (MS
+        // under `--target uefi`) would silently mismatch every dispatch.
+        currentFunction_->setAbi(isVirtMethod ? Abi::SysV : stmt.getAbi());
         currentFunction_->setSourcePath(currentSourcePath_);
         currentBlock_ = std::make_unique<BasicBlock>("entry");
 
@@ -1218,6 +1245,10 @@ public:
         currentReturnType_ = retType;
 
         currentFunction_ = std::make_unique<FunctionIR>(funcName, retIR);
+        // CID-005: closures are invoked through fn values, which T3 pins to
+        // SysV under every target (there is no MS closure convention in
+        // scope), so the synthesized body must be SysV too.
+        currentFunction_->setAbi(Abi::SysV);
         currentFunction_->setSourcePath(currentSourcePath_);
         currentBlock_ = std::make_unique<BasicBlock>("entry");
         variableValues_.clear();
@@ -1232,8 +1263,10 @@ public:
         destructorStack_.push_back({});
 
         symbolTable_.enterScope();
-        // Hidden closure parameter.
-        currentFunction_->addParam("arg__closure");
+        // Hidden closure parameter. CID-005: carry its real IR type (the
+        // MS/SysV classifiers read `getParamTypes()`, and the I32 default
+        // would misclassify the pointer).
+        currentFunction_->addParam("arg__closure", IRType::PTR);
         {
             auto sym = std::make_shared<Symbol>();
             sym->kind = SymbolKind::VARIABLE;
@@ -1259,13 +1292,15 @@ public:
         for (auto& p : expr.getParams()) {
             TypeInfo pt = p.second ? TypeInfo::fromAST(p.second.get()) : TypeInfo{"int", 0};
             std::string paramName = "arg_" + p.first;
-            currentFunction_->addParam(paramName);
+            // CID-005: computed before addParam so the FunctionIR carries
+            // the real IR type (see the hidden closure parameter above).
+            IRType paramIRType = (pt.pointerLevel > 0) ? IRType::PTR : mapType(pt.name);
+            currentFunction_->addParam(paramName, paramIRType);
             auto sym = std::make_shared<Symbol>();
             sym->kind = SymbolKind::VARIABLE;
             sym->name = p.first;
             sym->type = pt;
             symbolTable_.define(sym);
-            IRType paramIRType = (pt.pointerLevel > 0) ? IRType::PTR : mapType(pt.name);
             IRValue paramReg = IRValue::Register(paramName, paramIRType);
             IRValue addr = IRValue::Register(nextTemp(), IRType::PTR);
             currentBlock_->addInstruction({IROp::ALLOCA, addr, {IRValue::Constant(8, IRType::I32)}});
