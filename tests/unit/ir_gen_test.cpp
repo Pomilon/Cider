@@ -921,13 +921,13 @@ int run() {
     // A direct call carries the callee FunctionSymbol's ABI (`Default` when
     // unmarked; codegen resolves that from the target or from the pinned
     // definition). An indirect call through a typed fn value carries the
-    // type's ABI (`Ms` iff `isMsAbi`). The `msabi` spellings are Task 4's,
-    // so the Ms cases flip the symbol/type flags directly here.
+    // type's ABI (`Ms` iff `isMsAbi`). T4 supplies the real `msabi`
+    // spellings, so both the symbol and the value type come from source.
     {
         cider::ErrorReporter rep;
         cider::Lexer lex(
-            "func f(x: int) -> int { return x; }\n"
-            "var gp: fn(int) -> int = f;\n"
+            "msabi func f(x: int) -> int { return x; }\n"
+            "var gp: msabi fn(int) -> int = f;\n"
             "func main() -> int { return f(2) + gp(3); }\n",
             rep);
         cider::Parser parser(lex, rep);
@@ -936,17 +936,6 @@ int run() {
         cider::ModuleResolver resolver;
         cider::SymbolCollector collector(table, rep, resolver);
         collector.collect(*prog);
-        auto fsym = std::static_pointer_cast<cider::FunctionSymbol>(table.resolve("f"));
-        CHECK(fsym != nullptr);
-        fsym->abi = cider::Abi::Ms;
-        // Mark the `gp` declaration's fn type Ms at the AST so the symbol
-        // IR gen builds for the global carries the flag.
-        for (const auto& stmt : prog->getStatements()) {
-            auto vd = dynamic_cast<cider::VarDeclStmt*>(stmt.get());
-            if (vd && vd->getName() == "gp" && vd->getTypeAST()) {
-                vd->getTypeAST()->setAbi(cider::Abi::Ms);
-            }
-        }
         cider::IRGenerator gen(table);
         auto module = gen.generate(*prog);
         bool sawMsDirect = false, sawMsIndirect = false;
@@ -964,6 +953,28 @@ int run() {
         }
         CHECK(sawMsDirect);
         CHECK(sawMsIndirect);
+    }
+
+    // CID-005: an instantiated `msabi` template's fast-path symbol carries
+    // the template ABI, so direct calls marshal MS against the clone's MS
+    // definition (the clone's own collector visit is first-wins and skips
+    // this symbol).
+    {
+        cider::ErrorReporter rep;
+        cider::Lexer lex(
+            "msabi func id<T>(x: T) -> T { return x; }\n"
+            "func main() -> int { return id(7); }\n",
+            rep);
+        cider::Parser parser(lex, rep);
+        auto prog = parser.parseProgram();
+        cider::SymbolTable table;
+        cider::ModuleResolver resolver;
+        cider::SymbolCollector collector(table, rep, resolver);
+        collector.collect(*prog);
+        auto sym = table.resolve("id<int>");
+        CHECK(sym && sym->kind == cider::SymbolKind::FUNCTION);
+        auto fsym = std::static_pointer_cast<cider::FunctionSymbol>(sym);
+        CHECK(fsym->abi == cider::Abi::Ms);
     }
 
     // CID-005 T3: unmarked direct calls carry Default (resolved by codegen);

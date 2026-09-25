@@ -1713,6 +1713,12 @@ public:
         funcSym->type = {mangledName, 0};
         funcSym->line = tmplFunc->getLine();
         funcSym->col = tmplFunc->getColumn();
+        // CID-005: the fast-path symbol must carry the template's ABI (the
+        // clone's own visit is first-wins and skips this definition, so this
+        // is the only place it can be recorded). Virtual/override templates
+        // follow the same SysV-pin rule as visit(FunctionDeclStmt&).
+        funcSym->abi = (tmplFunc->isVirtual() || tmplFunc->isOverride()) ? Abi::SysV
+                                                                        : tmplFunc->getAbi();
 
         auto substType = [&](TypeAST* typeAST) -> TypeInfo {
             TypeInfo info = TypeInfo::fromAST(typeAST);
