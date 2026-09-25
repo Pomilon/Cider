@@ -283,6 +283,14 @@ bool CodeGenerator::generate(ModuleIR& module, const std::string& outputPath,
         std::vector<std::string> calleeSaved = {"rbx", "r12", "r13", "r14", "r15"};
         std::vector<std::string> xmmSaved;
         if (defMs) {
+            // Win64 makes RDI/RSI callee-saved (under SysV they are the
+            // first argument registers). IROp::MEMCPY writes them for
+            // `rep movsb`, so every MS definition preserves them — the
+            // save set is ABI-driven rather than MEMCPY-driven, which
+            // also covers any future body use. (Fix round 2: a struct
+            // copy previously leaked the caller's RDI/RSI.)
+            calleeSaved.push_back("rdi");
+            calleeSaved.push_back("rsi");
             // MS-ABI XMM8-15 are callee-saved. The allocator hands the float
             // pool out top-down (xmm15 first), so renumber the used part to
             // a dense xmm8.. run: the epilogue then saves exactly those used
@@ -1879,7 +1887,9 @@ bool CodeGenerator::generate(ModuleIR& module, const std::string& outputPath,
             int frameSize = extraStack + savedRegsSize;
             int needed = maxSlotOffset + 8;
             if (needed > frameSize) {
-                // savedRegsSize is 16-aligned, so the sub stays aligned.
+                // paddedTotal is 16-aligned, so the resulting rsp
+                // (rbp - paddedTotal) stays aligned even when
+                // savedRegsSize is only 8-aligned (e.g. an odd XMM count).
                 int paddedTotal = ((needed + 15) / 16) * 16;
                 textSection[(size_t)prologueFixupIndex] =
                     "    sub rsp, " + std::to_string(paddedTotal - savedRegsSize);

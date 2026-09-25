@@ -254,9 +254,9 @@ int run() {
     CHECK(msXmm.find("movq [rsp], xmm8") != std::string::npos);
     CHECK(msXmm.find("movq xmm8, [rsp]") != std::string::npos);
     // The restore reads the slot the prologue saved: the frame must be
-    // rewound to the xmm saves (5 GP + 4 xmm = 72 bytes) first.
+    // rewound to the xmm saves (7 GP + 4 xmm = 88 bytes) first.
     {
-        size_t rewind = msXmm.find("lea rsp, [rbp - 72]");
+        size_t rewind = msXmm.find("lea rsp, [rbp - 88]");
         size_t restore = msXmm.find("movq xmm8, [rsp]");
         CHECK(rewind != std::string::npos);
         CHECK(restore != std::string::npos);
@@ -264,6 +264,53 @@ int run() {
     }
     // An integer-only MS definition never saves an XMM register.
     CHECK(msStack.find("movq [rsp], xmm") == std::string::npos);
+    // CID-005 fix round 2: MEMCPY lowers to `rep movsb`, which writes
+    // RDI/RSI; Win64 makes both callee-saved, so an MS definition holding
+    // a struct copy must save them in the prologue and restore them in the
+    // epilogue (a bare rbx/r12-r15 save set leaked the caller's values).
+    std::string msMemcpy = genAsmTarget(
+        "struct S { var a: int; var b: int; var c: int; var d: int; }\n"
+        "func cp(x: int) -> int {\n"
+        "  var p: S;\n"
+        "  p.a = x; p.b = 2; p.c = 3; p.d = 4;\n"
+        "  var q: S = p;\n"
+        "  return q.a + q.d;\n"
+        "}\n"
+        "func main() -> int { return cp(1); }\n",
+        "uefi");
+    {
+        // Slice cp's body so main's own prologue/epilogue cannot satisfy
+        // the ordering checks.
+        size_t cpStart = msMemcpy.find("cp:");
+        size_t cpEnd = msMemcpy.find("global main");
+        CHECK(cpStart != std::string::npos);
+        CHECK(cpEnd != std::string::npos);
+        CHECK(cpStart < cpEnd);
+        std::string cpAsm = msMemcpy.substr(cpStart, cpEnd - cpStart);
+        CHECK(cpAsm.find("rep movsb") != std::string::npos);
+        size_t pushRdi = cpAsm.find("push rdi");
+        size_t pushRsi = cpAsm.find("push rsi");
+        size_t copy = cpAsm.find("rep movsb");
+        size_t popRsi = cpAsm.find("pop rsi");
+        size_t popRdi = cpAsm.find("pop rdi");
+        CHECK(pushRdi != std::string::npos);
+        CHECK(pushRsi != std::string::npos);
+        CHECK(popRsi != std::string::npos);
+        CHECK(popRdi != std::string::npos);
+        // Saved before the copy runs, restored after it (reverse order).
+        CHECK(pushRdi < copy && pushRsi < copy);
+        CHECK(copy < popRsi && popRsi < popRdi);
+    }
+    // The save is ABI-driven, not MEMCPY-driven: an MS definition with no
+    // struct copy saves RDI/RSI too.
+    std::string msNoCopy = genAsmTarget(
+        "func add(a: int, b: int) -> int { return a + b; }\n"
+        "func main() -> int { return add(1, 2); }\n",
+        "uefi");
+    CHECK(msNoCopy.find("push rdi") != std::string::npos);
+    CHECK(msNoCopy.find("push rsi") != std::string::npos);
+    CHECK(msNoCopy.find("pop rdi") != std::string::npos);
+    CHECK(msNoCopy.find("pop rsi") != std::string::npos);
     // CID-005 carry-over: virtual/override definitions are pinned SysV in
     // the IR, so they keep the SysV rdi/rsi marshaling under --target uefi.
     std::string msVirt = genAsmTarget(
