@@ -343,12 +343,12 @@ func parse_inline(text: char*) -> *PtrList {
             continue;
         }
         if (text[i] == '{' as char && i + 1 < n && text[i+1] == '{' as char) {
-            pl_push(st.levels[st.ilen - 1].nodes, make_text("{{" as char*) as *void);
+            pl_push(st.levels[st.ilen - 1].nodes, make_text("{{{{" as char*) as *void);
             i = i + 2;
             continue;
         }
         if (text[i] == '}' as char && i + 1 < n && text[i+1] == '}' as char) {
-            pl_push(st.levels[st.ilen - 1].nodes, make_text("}}" as char*) as *void);
+            pl_push(st.levels[st.ilen - 1].nodes, make_text("}}}}" as char*) as *void);
             i = i + 2;
             continue;
         }
@@ -762,7 +762,7 @@ func parse_doc(input: char*) -> *PtrList {
         }
 
         // {{ code block
-        if (str_find(trimmed, "{{" as char*) == 0) {
+        if (str_find(trimmed, "{{{{" as char*) == 0) {
             var lang: char* = str_dup("text" as char*);
             var langEnd: int = str_find(trimmed + 2, ":" as char*);
             if (langEnd >= 0) {
@@ -775,7 +775,7 @@ func parse_doc(input: char*) -> *PtrList {
             var cdone: bool = false;
             while (li < lineCount && !cdone) {
                 var tl: char* = str_trim(pl_get(lines, li) as char*);
-                if (str_find(tl, "}}" as char*) == 0) { cdone = true; free(tl as *void); break; }
+                if (str_find(tl, "}}}}" as char*) == 0) { cdone = true; free(tl as *void); break; }
                 var lineStr: char* = pl_get(lines, li) as char*;
                 var oldLen: int = strlen(cContent);
                 var nl: char* = malloc(oldLen + strlen(lineStr) + 2);

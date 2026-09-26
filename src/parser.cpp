@@ -411,8 +411,12 @@ std::unique_ptr<Expression> Parser::parsePrimaryExpression() {
                     j++;
                 }
                 if (!closed) {
-                    error("Unclosed '{' in interpolated string.");
-                    return nullptr;
+                    // CID-032: a `{` with no matching `}` cannot be an
+                    // interpolation (and may come from an escape like
+                    // "\x7B"); keep it as literal text, symmetric with the
+                    // unparseable-segment fallback below.
+                    i++;
+                    continue;
                 }
                 std::string seg = val.substr(exprStart, j - exprStart);
                 // Parse the segment as a full expression with a fresh parser.
@@ -445,7 +449,10 @@ std::unique_ptr<Expression> Parser::parsePrimaryExpression() {
             }
         }
         if (!interpolated) {
-            return std::make_unique<StringExpr>(val, line, col);
+            // CID-032: `{{`/`}}` collapse in plain literals too — previously
+            // only interpolated parts were collapsed, so "a{{b}}c" kept the
+            // doubled braces verbatim.
+            return std::make_unique<StringExpr>(collapseEscaped(val), line, col);
         }
         if (partStart < val.size()) parts.push_back({false, collapseEscaped(val.substr(partStart)), nullptr});
         return std::make_unique<InterpolatedStringExpr>(std::move(parts), line, col);
