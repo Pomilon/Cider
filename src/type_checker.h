@@ -1234,17 +1234,29 @@ public:
                 TypeInfo fnType = lastExprType_;
                 auto byValueAggregate = [&](const TypeInfo& t) {
                     if (t.pointerLevel > 0 || t.isArray || t.isFunctionPointer) return false;
+                    // CID-005/T7: `type EFI_STATUS = u64;` installs a
+                    // STRUCT-kind alias-provider symbol, so the kind test
+                    // below must run on the ALIAS-RESOLVED type (mirroring
+                    // ir_gen::isStructValueType) or every fn-pointer spelled
+                    // with a UEFI typedef is misreported as a by-value
+                    // struct call. A resolved pointer/array/fn is not
+                    // by-value either (e.g. `type P = *S;`).
+                    TypeInfo resolved = resolveType(t);
+                    if (resolved.pointerLevel > 0 || resolved.isArray ||
+                        resolved.isFunctionPointer) {
+                        return false;
+                    }
                     // CID-006 fix (F2): a canonical `mod::P` nominal carries
                     // its defining module, so resolve it there
                     // (resolveCanonical); the scope-chain resolveScoped(bare)
                     // cannot see sibling module scopes and let cross-module
                     // by-value aggregates slip past this rejection.
                     std::shared_ptr<Symbol> s;
-                    if (t.name.find("::") != std::string::npos) {
-                        s = resolveCanonical(t.name);
+                    if (resolved.name.find("::") != std::string::npos) {
+                        s = resolveCanonical(resolved.name);
                         if (!s) return true;  // unresolvable qualified nominal: stay conservative
                     } else {
-                        s = resolveScoped(t.name);
+                        s = resolveScoped(resolved.name);
                     }
                     return s && (s->kind == SymbolKind::STRUCT || s->kind == SymbolKind::CLASS);
                 };

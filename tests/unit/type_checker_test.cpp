@@ -496,6 +496,36 @@ int run() {
         "func main() -> int { return 0; }\n");
     CHECK(hasError(retFailedExpr, "Undefined identifier 'missing'"));
     CHECK(!hasError(retFailedExpr, "Return type mismatch"));
+
+    // CID-005/T7: `type` aliases are STRUCT-kind type providers in the
+    // symbol table, so the indirect-call by-value gate must resolve the
+    // alias chain before its kind test (mirroring ir_gen::isStructValueType)
+    // or every fn-pointer spelled with a UEFI typedef (`-> EFI_STATUS`,
+    // `EFI_MEMORY_TYPE` parameters) is misreported as a struct-by-value call.
+    auto aliasFnSig = checkSrc(
+        "type EFI_STATUS = u64;\n"
+        "type EFI_MEMORY_TYPE = u32;\n"
+        "struct P { var f: msabi fn(*P, EFI_MEMORY_TYPE) -> EFI_STATUS; }\n"
+        "msabi func cb(p: *P, t: EFI_MEMORY_TYPE) -> EFI_STATUS { return 0; }\n"
+        "msabi func g(p: *P) -> EFI_STATUS { p->f(p, 7); return cb(p, 7); }\n"
+        "func main() -> int { return 0; }\n");
+    CHECK(aliasFnSig.empty());
+
+    // Genuine by-value aggregates through fn pointers stay rejected, both
+    // direct and behind an alias.
+    auto aggFnSig = checkSrc(
+        "struct S { var x: int; }\n"
+        "struct Q { var f: msabi fn(*Q, S) -> u64; }\n"
+        "msabi func g(q: *Q, s: S) -> u64 { q->f(q, s); return 0; }\n"
+        "func main() -> int { return 0; }\n");
+    CHECK(hasError(aggFnSig, "do not support struct/class by-value"));
+    auto aggAliasFnSig = checkSrc(
+        "struct S { var x: int; }\n"
+        "type SAlias = S;\n"
+        "struct Q { var f: msabi fn(*Q, SAlias) -> u64; }\n"
+        "msabi func g(q: *Q, s: SAlias) -> u64 { q->f(q, s); return 0; }\n"
+        "func main() -> int { return 0; }\n");
+    CHECK(hasError(aggAliasFnSig, "do not support struct/class by-value"));
     return 0;
 }
 
