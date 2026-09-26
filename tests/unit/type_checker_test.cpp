@@ -601,6 +601,77 @@ int run() {
         "msabi func g(q: *Q, s: NopeAlias) -> u64 { q->f(q, s); return 0; }\n"
         "func main() -> int { return 0; }\n");
     CHECK(hasError(unresolvedAliasCall, "do not support struct/class by-value"));
+
+    // CID-005/T7 fix round 2: self-referential and mutually cyclic fn-type
+    // aliases must terminate signature-alias resolution. Before the visited
+    // set, `resolveSignatureAliases` and `resolveType` recursed into each
+    // other and every use of the alias below overflowed the compiler stack
+    // (check exit 139). Native behavior matches the pre-fix parent: the
+    // alias expands to the same signature as the raw function, so the
+    // declaration is accepted.
+    auto cyclicFnSelfRef = checkSrc(
+        "type F = fn(F) -> void;\n"
+        "func foo(x: F) -> void { }\n"
+        "func main() -> int { var h: F = foo; return 0; }\n");
+    CHECK(cyclicFnSelfRef.empty());
+    // Under `--target uefi` the alias's stored SysV signature and the
+    // target-default msabi function genuinely differ: the parent's normal
+    // mismatch diagnostic, not a crash.
+    auto cyclicFnSelfRefUefi = checkWithDefaultAbiMs(
+        "type F = fn(F) -> void;\n"
+        "func foo(x: F) -> void { }\n"
+        "func main() -> int { var h: F = foo; return 0; }\n");
+    CHECK(hasError(cyclicFnSelfRefUefi,
+                   "Type mismatch in declaration of 'h'. Expected F, got msabi fn(F) -> void"));
+    // The mutual-cycle shape (`type A = B; type B = fn(A) -> void;`), a
+    // previously accepted program that the round-1 fix crashed on.
+    auto cyclicFnMutual = checkSrc(
+        "type A = B;\n"
+        "type B = fn(A) -> void;\n"
+        "func foo(x: A) -> void { }\n"
+        "func main() -> int { var h: A = foo; return 0; }\n");
+    CHECK(cyclicFnMutual.empty());
+    auto cyclicFnMutualUefi = checkWithDefaultAbiMs(
+        "type A = B;\n"
+        "type B = fn(A) -> void;\n"
+        "func foo(x: A) -> void { }\n"
+        "func main() -> int { var h: A = foo; return 0; }\n");
+    CHECK(hasError(cyclicFnMutualUefi,
+                   "Type mismatch in declaration of 'h'. Expected A, got msabi fn(A) -> void"));
+    // Full use surface: declaration, assignment, argument passing (aliased
+    // and raw fn values) and an indirect call whose parameter is the cyclic
+    // alias. Each of these funnels through areTypesCompatible.
+    auto cyclicFnUses = checkSrc(
+        "type F = fn(F) -> void;\n"
+        "func noop(x: F) -> void { }\n"
+        "func take(h: F) -> void { }\n"
+        "func main() -> int {\n"
+        "  var h: F = noop;\n"
+        "  h = noop;\n"
+        "  take(h);\n"
+        "  take(noop);\n"
+        "  h(noop);\n"
+        "  return 0;\n"
+        "}\n");
+    CHECK(cyclicFnUses.empty());
+    // A genuine mismatch through the cyclic alias still reports normally.
+    auto cyclicFnBad = checkSrc(
+        "type F = fn(F) -> void;\n"
+        "func bad() -> void { }\n"
+        "func main() -> int { var h: F = bad; return 0; }\n");
+    CHECK(hasError(cyclicFnBad, "Type mismatch in declaration of 'h'. Expected F, got fn() -> void"));
+    // The cycle guard must not poison sibling positions: an alias used for
+    // both a parameter and the return type resolves fully in each position
+    // (a visited set that never pops would leave the second spelling
+    // unresolved and reject this valid declaration).
+    auto aliasFnRepeat = checkSrc(
+        "type EFI_STATUS = u64;\n"
+        "msabi func f(p: EFI_STATUS) -> u64 { return 0; }\n"
+        "func main() -> int {\n"
+        "  var h: msabi fn(EFI_STATUS) -> EFI_STATUS = f;\n"
+        "  return 0;\n"
+        "}\n");
+    CHECK(aliasFnRepeat.empty());
     return 0;
 }
 

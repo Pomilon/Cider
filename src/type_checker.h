@@ -304,25 +304,47 @@ public:
     // exact comparison then stay untouched: `u64` vs `int` still differs.
     // Arrays keep their declared spelling (resolveType would drop the
     // wrapper and its size, mirroring resolveFunctionPointerAlias).
+    //
+    // CID-005/T7 fix round 2: a cyclic fn-type alias (`type F = fn(F) ->
+    // void;`, or `type A = B; type B = fn(A) -> void;`) makes this walk and
+    // resolveType recurse into each other with no fixed point — resolveType's
+    // visited set is per-call, and it stops at the fn-typed alias *value*
+    // whose nested parameter is the alias spelling again, which this walk
+    // then re-resolves. Guard the walk with the set of spellings on the
+    // active expansion path (insert before resolving, erase on the way out,
+    // the recursive-walk analogue of resolveTypeImpl's stop): a spelling
+    // repeated up the path stops there, while the same spelling in sibling
+    // positions (e.g. `fn(EFI_STATUS) -> EFI_STATUS`) still resolves
+    // independently. Cyclic aliases are checker-accepted
+    // (`tests/programs/cyclic_alias_*`), so every walk must terminate.
     TypeInfo resolveSignatureAliases(TypeInfo t) {
+        std::set<std::string> visiting;
+        return resolveSignatureAliasesImpl(t, visiting);
+    }
+
+    TypeInfo resolveSignatureAliasesImpl(TypeInfo t, std::set<std::string>& visiting) {
         if (t.isFunctionPointer) {
             if (t.fnParamTypes) {
                 auto params = std::make_shared<std::vector<TypeInfo>>();
                 params->reserve(t.fnParamTypes->size());
                 for (const auto& p : *t.fnParamTypes) {
-                    params->push_back(resolveSignatureAliases(p));
+                    params->push_back(resolveSignatureAliasesImpl(p, visiting));
                 }
                 t.fnParamTypes = params;
             }
             if (t.fnReturnType) {
                 t.fnReturnType =
-                    std::make_shared<TypeInfo>(resolveSignatureAliases(*t.fnReturnType));
+                    std::make_shared<TypeInfo>(resolveSignatureAliasesImpl(*t.fnReturnType, visiting));
             }
             return t;
         }
         if (t.isArray) return t;
+        if (t.name.empty() || !visiting.insert(t.name).second) return t;
         TypeInfo resolved = resolveType(t);
-        if (resolved.isFunctionPointer) return resolveSignatureAliases(resolved);
+        if (resolved.isFunctionPointer) {
+            resolved = resolveSignatureAliasesImpl(resolved, visiting);
+        }
+        visiting.erase(t.name);
         return resolved;
     }
 
