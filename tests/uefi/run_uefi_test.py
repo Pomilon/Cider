@@ -7,7 +7,14 @@ and exits 77 (ctest SKIP) when QEMU or OVMF is unavailable.
 Each case compiles one .cid with `cider compile --target uefi`, links it with
 scripts/link_uefi.sh, drops the .efi on a directory-backed FAT image as
 \\EFI\\BOOT\\BOOTX64.EFI, boots QEMU with the PomeOS OVMF binaries and asserts
-the expected marker on the serial log.
+the expected serial markers (literal substrings, or compiled regexes for
+value-shaped assertions such as a non-zero memory-map size).
+
+The info/args markers are deliberately strict so protocol-layout regressions
+are caught, not just the banner: info must print both the firmware revision
+and a *non-zero* `MemoryMapSize:`, args must print `HandleProtocol: OK`
+(status 0) followed by `LoadedImage: non-nil` and reach `args done` (printed
+only after `LoadedImage->LoadOptions` has been dereferenced).
 
 TRAP documented for future maintainers: the OVMF_VARS store may carry
 `Boot####` entries from previous use (the shipped PomeOS VARS boots the EFI
@@ -20,6 +27,7 @@ Exit codes: 0 all cases pass, 1 a case failed, 77 skipped (no cider binary /
 OVMF / qemu-system-x86_64).
 """
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -70,7 +78,19 @@ def print_cmd(cmd):
     print("boot command: " + " ".join(cmd))
 
 
-def build_and_boot(src, expect, code, var, timeout=90):
+def missing_markers(text, expects):
+    """Literal substrings and compiled regexes that are not in `text` yet."""
+    missing = []
+    for expect in expects:
+        if isinstance(expect, re.Pattern):
+            if not expect.search(text):
+                missing.append(expect.pattern)
+        elif expect not in text:
+            missing.append(expect)
+    return missing
+
+
+def build_and_boot(src, expects, code, var, timeout=90):
     with tempfile.TemporaryDirectory() as tmp:
         asm = os.path.join(tmp, "app.asm")
         efi = os.path.join(tmp, "app.efi")
@@ -100,7 +120,7 @@ def build_and_boot(src, expect, code, var, timeout=90):
         try:
             while time.monotonic() < deadline:
                 text = read_log(log)
-                if expect in text or qemu.poll() is not None:
+                if not missing_markers(text, expects) or qemu.poll() is not None:
                     break
                 time.sleep(0.25)
         finally:
@@ -112,13 +132,15 @@ def build_and_boot(src, expect, code, var, timeout=90):
                     qemu.kill()
                     qemu.wait()
         text = read_log(log)
-        if expect not in text:
-            print(f"FAIL {src}: missing {expect!r}")
+        missing = missing_markers(text, expects)
+        if missing:
+            print(f"FAIL {src}: missing {missing!r}")
             print_cmd(cmd)
             tail = text[-2000:]
             print("--- serial (tail) ---\n" + tail)
             return False
-        print(f"PASS {src}: {expect!r}")
+        shown = [e.pattern if isinstance(e, re.Pattern) else e for e in expects]
+        print(f"PASS {src}: {shown!r}")
         return True
 
 
@@ -157,10 +179,20 @@ def main():
     print(f"OVMF:  {code}")
     print(f"       {var}")
     cases = [
-        ("examples/uefi/hello.cid", "Hello from Cider UEFI!"),
-        ("examples/uefi/info.cid", "FirmwareRevision: "),
-        ("examples/uefi/args.cid", "LoadOptions: "),
-        ("tests/uefi/abi_torture.cid", "ABI OK"),
+        ("examples/uefi/hello.cid", ["Hello from Cider UEFI!"]),
+        # `MemoryMapSize: 0x<non-zero>` proves GetMemoryMap actually ran and
+        # wrote through the *BootServices field/member offsets (a zero stays
+        # zero when a shifted pad sends the call elsewhere). `0x` plus a
+        # non-zero hex digit keeps the check OVMF-version-independent.
+        ("examples/uefi/info.cid",
+         ["FirmwareRevision: 0x",
+          re.compile(r"MemoryMapSize: 0x[0-9A-F]*[1-9A-F]")]),
+        # status 0 + non-nil loaded image + the completion marker printed
+        # after `LoadOptions` is dereferenced.
+        ("examples/uefi/args.cid",
+         ["HandleProtocol: OK", "LoadedImage: non-nil", "LoadOptions: ",
+          "args done"]),
+        ("tests/uefi/abi_torture.cid", ["ABI OK"]),
     ]
     ok = check_abi_identity_by_design()
     for src, expect in cases:
