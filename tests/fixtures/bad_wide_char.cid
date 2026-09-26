@@ -1,0 +1,1 @@
+func main() -> int { var c: u16 = u''; return c; }

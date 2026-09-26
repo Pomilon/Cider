@@ -167,6 +167,29 @@ int testGvn() {
     return 0;
 }
 
+int testGvnWideStrings() {
+    // CID-005/T5 fix round 1 (Q5/GVN): wide literals cross IR as PTR
+    // constants named `L"..."`; they must be numbered by content like the
+    // narrow `"..."` constants. The generic PTR key (`const_PTR_0`) made
+    // every wide literal share a value number, so under optimization an
+    // earlier `&u"X"[0]` replaced a later `&u"QR"[0]` with a MOV and the
+    // QR data was never emitted (silent wrong code on native + VM opt).
+    auto r = genModule(
+        "func main() -> int {\n"
+        "  var a: *u16 = &u\"X\"[0];\n"
+        "  var b: *u16 = &u\"QR\"[0];\n"
+        "  return a[0] + b[0];\n"
+        "}\n");
+    cider::GvnPass gvn;
+    gvn.run(r.module);
+    std::string d = r.print();
+    CHECK(d.find("L\"X") != std::string::npos);
+    // The wide name carries embedded NUL units, so only the prefix is
+    // contiguous: `L"Q` pins the QR literal's survival.
+    CHECK(d.find("L\"Q") != std::string::npos);  // not collapsed to a MOV
+    return 0;
+}
+
 int testGvnTypes() {
     // CID-003 follow-up (W5): value numbers must include the result type.
     // `x & 255` as i8 (raw 0x9C, widened with movsx to -100) and as u8
@@ -250,6 +273,7 @@ int run() {
     CHECK(testDce() == 0);
     CHECK(testConstFold() == 0);
     CHECK(testGvn() == 0);
+    CHECK(testGvnWideStrings() == 0);
     CHECK(testGvnTypes() == 0);
     CHECK(testLicm() == 0);
     CHECK(testInliner() == 0);

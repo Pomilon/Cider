@@ -309,6 +309,14 @@ public:
 
         if (t1 == t2) return true;
 
+        // CID-005 fix round 1 (Q1 follow-up): two array values must also
+        // agree on their element count. The integer fallback below ignores
+        // isArray/arraySize, so `[u16; 4] = u"AB"` and `s = u"AB"` into an
+        // existing [u16; 4] were accepted and then copied 8 bytes from a
+        // 6-byte data block (or silently truncated). Array/pointer mixes
+        // keep their existing rules (including the u16 decay branch below).
+        if (t1.isArray && t2.isArray && t1.arraySize != t2.arraySize) return false;
+
         // CID-006: two fn types match only via the exact signature test
         // above. One fn + one *void (nilPtr, legacy untyped references)
         // stays compatible both ways; fn arrays never decay to *void.
@@ -554,6 +562,34 @@ public:
         lastExprType_ = declaredType;
     }
 
+    // CID-005 fix round 1 (Q1): a fixed-size array initialised from a wide
+    // literal. The literal's checker type is [u16; units+1], but
+    // areTypesCompatible's integer fallback is size-blind, so the declared
+    // size must be compared explicitly (mirrors checkFixedArrayInit).
+    // Without this, `[u16; 4] = u"AB"` passed and the array MEMCPY read two
+    // bytes past the data block; `[u16; 2] = u"AB"` silently truncated.
+    void checkWideArrayInit(VarDeclStmt& stmt, const TypeInfo& declaredType,
+                            WideStringExpr& init) {
+        int expected = (int)init.getValue().size() + 1;  // units + NUL unit
+        if (declaredType.arraySize != expected) {
+            error("Array initializer size mismatch in declaration of '" + stmt.getName() +
+                      "': expected " + std::to_string(declaredType.arraySize) +
+                      ", got " + std::to_string(expected), stmt.getLine());
+            return;
+        }
+        TypeInfo elemDecl = declaredType;
+        elemDecl.isArray = false;
+        elemDecl.arraySize = 0;
+        TypeInfo elemInit;
+        elemInit.name = "u16";
+        if (!areTypesCompatible(elemDecl, elemInit)) {
+            error("Array element type mismatch in declaration of '" + stmt.getName() +
+                      "': expected " + elemDecl.toString() + ", got u16", stmt.getLine());
+            return;
+        }
+        lastExprType_ = declaredType;
+    }
+
     void visit(VarDeclStmt& stmt) override {
         TypeInfo declaredType = TypeInfo::fromAST(stmt.getTypeAST());
         // CID-020/021 §1: store the canonical nominal identity so later
@@ -569,9 +605,13 @@ public:
         }
 
         if (stmt.getInitializer()) {
+            auto* wideInit = dynamic_cast<WideStringExpr*>(stmt.getInitializer());
             if (dynamic_cast<ListExpr*>(stmt.getInitializer()) && declaredType.isArray &&
                 declaredType.pointerLevel == 0 && declaredType.arraySize > 0) {
                 checkFixedArrayInit(stmt, declaredType);
+            } else if (wideInit && declaredType.isArray &&
+                       declaredType.pointerLevel == 0 && declaredType.arraySize > 0) {
+                checkWideArrayInit(stmt, declaredType, *wideInit);
             } else {
                 stmt.getInitializer()->accept(*this);
                 TypeInfo initType = lastExprType_;
@@ -1374,7 +1414,10 @@ public:
             // pre-existing and out of scope, but returning a SysV function
             // where an `msabi fn` is declared (or vice versa) used to be
             // silently accepted and then crashed at the indirect call.
-            if (hasDeclaredReturnType_) {
+            // CID-005 fix round 1 (Q3): if the returned expression already
+            // failed, lastExprType_ is `error`; running the F1 signature
+            // comparison on it just adds a bogus cascade diagnostic.
+            if (hasDeclaredReturnType_ && lastExprType_.name != "error") {
                 TypeInfo declType = resolveFunctionPointerAlias(currentDeclaredReturnType_);
                 TypeInfo valType = resolveFunctionPointerAlias(lastExprType_);
                 bool declFn = declType.isFunctionPointer && !declType.isArray;

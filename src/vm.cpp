@@ -747,16 +747,21 @@ void VM::materializeLabels() {
         if (colon == std::string::npos) continue;
         std::string label = line.substr(0, colon);
         std::string body = line.substr(colon + 1);
-        // CID-005: `dw` lines are UTF-16LE code units (hex); `db` lines are
-        // the existing byte lists. The first keyword decides the width.
-        size_t kw = body.find("dw");
-        size_t kb = body.find("db");
-        bool isWide = (kw != std::string::npos) && (kb == std::string::npos || kw < kb);
-        if (kb == std::string::npos && kw == std::string::npos) continue;
+        // CID-005 fix round 1 (Q2): the width keyword is the line's FIRST
+        // token. Searching the whole body matched "dw"/"db" inside a `dq`
+        // target name (`g: dq dworker`), claiming the alias cell as (empty)
+        // wide data and skipping the dq pass — the indirect call then saw a
+        // nil/garbage value, and a `db`-named target spun forever in the
+        // byte decoder below (no digits consumed, no position advance).
+        size_t bodyStart = body.find_first_not_of(" \t");
+        if (bodyStart == std::string::npos) continue;
+        bool isWide = body.compare(bodyStart, 2, "dw") == 0;
+        bool isNarrow = body.compare(bodyStart, 2, "db") == 0;
+        if (!isWide && !isNarrow) continue;
         if (stringOffsets_.count(label)) continue;
         if (isWide) {
             std::vector<uint8_t> bytes;
-            size_t pos = kw + 2;
+            size_t pos = bodyStart + 2;
             while (pos < body.size()) {
                 while (pos < body.size() && (body[pos] == ' ' || body[pos] == ',')) pos++;
                 if (pos >= body.size()) break;
@@ -775,7 +780,7 @@ void VM::materializeLabels() {
         }
         // Decode the db byte list.
         std::vector<uint8_t> bytes;
-        size_t pos = body.find("db") + 2;
+        size_t pos = bodyStart + 2;
         while (pos < body.size()) {
             // skip separators
             while (pos < body.size() && (body[pos] == ' ' || body[pos] == ',')) pos++;
@@ -815,8 +820,10 @@ void VM::materializeLabels() {
         std::string label = line.substr(0, colon);
         if (stringOffsets_.count(label)) continue;
         std::string body = line.substr(colon + 1);
-        size_t dq = body.find("dq");
-        if (dq == std::string::npos) continue;
+        // CID-005 fix round 1 (Q2): same first-token anchoring as the db/dw
+        // pass, so only real `dq` alias lines reach the target extraction.
+        size_t dq = body.find_first_not_of(" \t");
+        if (dq == std::string::npos || body.compare(dq, 2, "dq") != 0) continue;
         size_t b = body.find_first_not_of(" \t", dq + 2);
         size_t e = body.find_last_not_of(" \t");
         if (b == std::string::npos || e == std::string::npos) continue;

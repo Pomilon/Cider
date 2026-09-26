@@ -460,6 +460,42 @@ int run() {
         "}\n");
     CHECK(hasError(ifaceMethodValueMs,
                    "Type mismatch in declaration of 'p'. Expected msabi fn(*C) -> int, got fn(*C) -> int"));
+
+    // CID-005/T5 fix round 1 (Q1): a fixed-size array initialised from a
+    // wide literal must match the literal's [u16; N+1] size exactly.
+    // areTypesCompatible's integer fallback is size-blind, so a short or
+    // long literal used to be accepted and then silently over-read (array
+    // MEMCPY of the declared size from the smaller data block) or truncated.
+    auto wideSizeOk = checkSrc(
+        "func main() -> int { var s: [u16; 3] = u\"AB\"; return s[0]; }\n");
+    CHECK(wideSizeOk.empty());
+    auto wideSizeLong = checkSrc(
+        "func main() -> int { var s: [u16; 4] = u\"AB\"; return 0; }\n");
+    CHECK(hasError(wideSizeLong,
+                   "Array initializer size mismatch in declaration of 's': expected 4, got 3"));
+    auto wideSizeShort = checkSrc(
+        "func main() -> int { var s: [u16; 2] = u\"AB\"; return 0; }\n");
+    CHECK(hasError(wideSizeShort,
+                   "Array initializer size mismatch in declaration of 's': expected 2, got 3"));
+    // Globals take the same declaration path.
+    auto wideSizeGlobal = checkSrc(
+        "var g: [u16; 4] = u\"AB\";\n"
+        "func main() -> int { return 0; }\n");
+    CHECK(hasError(wideSizeGlobal,
+                   "Array initializer size mismatch in declaration of 'g': expected 4, got 3"));
+    // The broader array-size rule in areTypesCompatible also rejects
+    // assigning a mismatched wide literal to an existing fixed array.
+    auto wideAssignBad = checkSrc(
+        "func main() -> int { var s: [u16; 4]; s = u\"AB\"; return 0; }\n");
+    CHECK(hasError(wideAssignBad, "Type mismatch in assignment"));
+
+    // CID-005/T5 fix round 1 (Q3): a return whose expression already failed
+    // must not cascade into a bogus F1 fn-signature mismatch.
+    auto retFailedExpr = checkSrc(
+        "func f() -> fn(int) -> int { return missing; }\n"
+        "func main() -> int { return 0; }\n");
+    CHECK(hasError(retFailedExpr, "Undefined identifier 'missing'"));
+    CHECK(!hasError(retFailedExpr, "Return type mismatch"));
     return 0;
 }
 

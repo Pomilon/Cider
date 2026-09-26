@@ -690,6 +690,83 @@ int run() {
         }
         CHECK(threw);
     }
+    // CID-005 fix round 1: a `dq` global cell whose target name contains
+    // "dw" must still resolve through the dq alias pass. The width scan used
+    // to match the keyword anywhere in the line, claim the cell as (empty)
+    // wide data and skip the alias pass, so the indirect call saw a bogus
+    // value ("call: nil function pointer").
+    {
+        auto target = makeFn("dworker", cider::IRType::I32);
+        auto we = std::make_unique<cider::BasicBlock>("entry");
+        cider::IRInstruction wret;
+        wret.op = cider::IROp::RET;
+        wret.args = {cider::IRValue::Constant(21, cider::IRType::I32)};
+        we->addInstruction(wret);
+        target->addBlock(std::move(we));
+
+        auto fn = makeFn("main", cider::IRType::I32);
+        auto e = std::make_unique<cider::BasicBlock>("entry");
+        cider::IRInstruction ld;
+        ld.op = cider::IROp::LOAD;
+        ld.dest = cider::IRValue::Register("gfp", cider::IRType::PTR);
+        ld.args = {cider::IRValue::Label("gdw"), cider::IRValue::Constant(0, cider::IRType::I32)};
+        e->addInstruction(ld);
+        cider::IRInstruction call;
+        call.op = cider::IROp::CALL;
+        call.dest = cider::IRValue::Register("gr", cider::IRType::I32);
+        call.args = {cider::IRValue::Register("gfp", cider::IRType::PTR)};
+        e->addInstruction(call);
+        cider::IRInstruction ret;
+        ret.op = cider::IROp::RET;
+        ret.args = {cider::IRValue::Register("gr", cider::IRType::I32)};
+        e->addInstruction(ret);
+        fn->addBlock(std::move(e));
+
+        cider::ModuleIR mod;
+        mod.addStringData("gdw: dq dworker");
+        mod.addFunction(std::move(target));
+        mod.addFunction(std::move(fn));
+        cider::VM vm;
+        CHECK(vm.run(mod).exitCode == 21);
+    }
+
+    // Same shape with a "db"-named target: this one used to loop forever in
+    // the db decoder (the scan matched "db" inside the target name and
+    // pushed zero bytes without advancing).
+    {
+        auto target = makeFn("dbworker", cider::IRType::I32);
+        auto we = std::make_unique<cider::BasicBlock>("entry");
+        cider::IRInstruction wret;
+        wret.op = cider::IROp::RET;
+        wret.args = {cider::IRValue::Constant(22, cider::IRType::I32)};
+        we->addInstruction(wret);
+        target->addBlock(std::move(we));
+
+        auto fn = makeFn("main", cider::IRType::I32);
+        auto e = std::make_unique<cider::BasicBlock>("entry");
+        cider::IRInstruction ld;
+        ld.op = cider::IROp::LOAD;
+        ld.dest = cider::IRValue::Register("gfp", cider::IRType::PTR);
+        ld.args = {cider::IRValue::Label("gdb"), cider::IRValue::Constant(0, cider::IRType::I32)};
+        e->addInstruction(ld);
+        cider::IRInstruction call;
+        call.op = cider::IROp::CALL;
+        call.dest = cider::IRValue::Register("gr", cider::IRType::I32);
+        call.args = {cider::IRValue::Register("gfp", cider::IRType::PTR)};
+        e->addInstruction(call);
+        cider::IRInstruction ret;
+        ret.op = cider::IROp::RET;
+        ret.args = {cider::IRValue::Register("gr", cider::IRType::I32)};
+        e->addInstruction(ret);
+        fn->addBlock(std::move(e));
+
+        cider::ModuleIR mod;
+        mod.addStringData("gdb: dq dbworker");
+        mod.addFunction(std::move(target));
+        mod.addFunction(std::move(fn));
+        cider::VM vm;
+        CHECK(vm.run(mod).exitCode == 22);
+    }
     return 0;
 }
 

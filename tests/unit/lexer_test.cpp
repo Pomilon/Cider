@@ -84,6 +84,18 @@ int run() {
     CHECK(nW().type == cider::TokenType::IDENTIFIER);  // trailing `u`
     CHECK(!repW.hasErrors());
 
+    // CID-005 fix round 1: malformed wide char literals are rejected — the
+    // reader must not consume the closing quote as content or accept extra
+    // code units. `u''` and `u'AB'` yield UNKNOWN plus a lexer error.
+    cider::ErrorReporter repWBad1;
+    cider::Lexer lexWBad1("u''", repWBad1);
+    CHECK(lexWBad1.getNextToken().type == cider::TokenType::UNKNOWN);
+    CHECK(repWBad1.hasErrors());
+    cider::ErrorReporter repWBad2;
+    cider::Lexer lexWBad2("u'AB'", repWBad2);
+    CHECK(lexWBad2.getNextToken().type == cider::TokenType::UNKNOWN);
+    CHECK(repWBad2.hasErrors());
+
     // Line/column tracking and unknown-char handling (parity: UNKNOWN token,
     // no lexer error — the parser reports on UNKNOWN).
     cider::ErrorReporter rep2;

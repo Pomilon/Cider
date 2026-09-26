@@ -99,7 +99,13 @@ private:
             // content — two different literals are different values, and
             // sharing a VN would let GVN replace one literal with a MOV of
             // the other.
-            if (v.type == IRType::PTR && v.name.size() >= 2 && v.name.front() == '"') {
+            // CID-005 fix round 1: wide literals are the same shape with an
+            // `L"..."` name; without this branch they fell through to the
+            // generic `const_PTR_0` key, so `&u"X"[0]` replaced a later
+            // `&u"QR"[0]` with a MOV (native/opt VM read the wrong data).
+            if (v.type == IRType::PTR && v.name.size() >= 2 &&
+                (v.name.front() == '"' ||
+                 (v.name.front() == 'L' && v.name[1] == '"'))) {
                 return "const_str_" + v.name;
             }
             // Float constants are keyed by their exact IEEE-754 bits:
