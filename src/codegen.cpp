@@ -30,6 +30,9 @@ bool CodeGenerator::generate(ModuleIR& module, const std::string& outputPath,
     std::vector<std::string> textSection;
     int strCount = 0;
     std::set<std::string> generatedFunctions_;
+    // CID-005: UEFI (PE32+) emission differences (design §1): bare `efi_main`
+    // export, no implicit libc externs, and no `_start` kernel-stack entry.
+    const bool isUefi = (target_ == "uefi");
 
     auto addBss = [&](const std::string& line) { bssSection.push_back(line); };
     auto addData = [&](const std::string& line) { dataSection.push_back(line); };
@@ -286,7 +289,7 @@ bool CodeGenerator::generate(ModuleIR& module, const std::string& outputPath,
         }
 
         std::string fName = func->getName();
-        if (fName == "_start" || fName == "main") {
+        if (fName == "_start" || fName == "main" || (isUefi && fName == "efi_main")) {
             addText("global " + fName);
         }
         if (!sourceFile.empty()) {
@@ -696,11 +699,13 @@ bool CodeGenerator::generate(ModuleIR& module, const std::string& outputPath,
                 const auto& params = func->getParams();
                 int numParams = std::min((int)params.size(), 6);
 
-                if (fName == "_start" && !defMs) {
+                if (fName == "_start" && !defMs && !isUefi) {
                     // _start is called by the kernel, not by a call instruction.
                     // The kernel passes argc on the stack at [rsp] and the argv array
                     // starts at [rsp+8]. After our prologue, these are at [rbp+8] and
-                    // [rbp+16] respectively.
+                    // [rbp+16] respectively. Under uefi (design §1) `_start` is an
+                    // ordinary call-entered function even when declared `sysvabi`,
+                    // so only native/pomeos take this path.
                     for (int i = 0; i < numParams; ++i) {
                         if (i == 0) {
                             addText("    mov r11, [rbp + 8]");
@@ -2121,7 +2126,10 @@ bool CodeGenerator::generate(ModuleIR& module, const std::string& outputPath,
     out << "\nsection .data\n";
     for (const auto& line : dataSection) out << "    " << line << "\n";
     for (const auto& line : module.getStringData()) out << "    " << line << "\n";
-    out << "\nsection .text\n    extern malloc\n    extern free\n    extern _setjmp\n    extern longjmp\n";
+    out << "\nsection .text\n";
+    if (!isUefi) {
+        out << "    extern malloc\n    extern free\n    extern _setjmp\n    extern longjmp\n";
+    }
     for (const auto& extFunc : module.getExternFunctions()) {
         out << "    extern " << extFunc << "\n";
     }

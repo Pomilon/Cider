@@ -788,6 +788,49 @@ int run() {
         CHECK(wideAsm.find("dw 0x0041, 0x0042") != std::string::npos);
         CHECK(wideAsm.find("align 2") != std::string::npos);
     }
+
+    // CID-005: UEFI emission differences.
+    {
+        std::string uefiAsm = genAsmTarget(
+            "msabi func efi_main(image: *void, st: *void) -> u64 { return 0; }\n"
+            "func main() -> int { return 0; }\n",
+            "uefi");
+        CHECK(uefiAsm.find("global efi_main") != std::string::npos);
+        CHECK(uefiAsm.find("global main") != std::string::npos);
+        CHECK(uefiAsm.find("extern malloc") == std::string::npos);
+        CHECK(uefiAsm.find("extern free") == std::string::npos);
+        CHECK(uefiAsm.find("extern _setjmp") == std::string::npos);
+        CHECK(uefiAsm.find("extern longjmp") == std::string::npos);
+        CHECK(uefiAsm.find("default rel") != std::string::npos);
+        // The pomeos post-pass (`global _setjmp` + stub) must not run for uefi.
+        CHECK(uefiAsm.find("global _setjmp") == std::string::npos);
+        // User externs still emitted.
+        std::string uefiExt = genAsmTarget(
+            "msabi extern func puts(s: *u16) -> u64;\n"
+            "msabi func efi_main(i: *void, s: *void) -> u64 { return puts(nilPtr); }\n",
+            "uefi");
+        CHECK(uefiExt.find("extern puts") != std::string::npos);
+        // `_start` is a normal function: no kernel-stack [rbp + 8] argc load.
+        std::string uefiStart = genAsmTarget(
+            "msabi func _start(argc: int, argv: *u8) -> void { }\n",
+            "uefi");
+        CHECK(uefiStart.find("global _start") != std::string::npos);
+        // Definition side reads *from* the MS argument registers (`mov r15,
+        // rcx` here); the existing T2 tests pin the same `", rcx\n"` form.
+        // `mov rcx, <src>` is the call-site form, which an empty body never
+        // emits.
+        CHECK(uefiStart.find(", rcx\n") != std::string::npos);    // MS arg reg
+        CHECK(uefiStart.find("[rbp + 8]") == std::string::npos);  // no kernel convention
+        // Carry-over 3 (T4 repro): an explicit `sysvabi func _start` under
+        // uefi is still an ordinary call-entered function, not the native
+        // kernel entry — the kernel argc/argv window must not appear.
+        std::string uefiSysvStart = genAsmTarget(
+            "sysvabi func _start(argc: int, argv: *u8) -> void { }\n",
+            "uefi");
+        CHECK(uefiSysvStart.find("global _start") != std::string::npos);
+        CHECK(uefiSysvStart.find("[rbp + 8]") == std::string::npos);
+        CHECK(uefiSysvStart.find("[rbp + 16]") == std::string::npos);
+    }
     return 0;
 }
 
