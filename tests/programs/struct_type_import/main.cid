@@ -1,0 +1,13 @@
+import lib;
+from lib import g_percpu, setstack, getstack;
+from std.io import printInt, print;
+
+func main() -> int {
+  setstack(42);
+  printInt(getstack()); print("\n");
+  printInt(g_percpu.kernel_stack); print("\n");
+  g_percpu.user_stack = 7;
+  printInt(g_percpu.user_stack); print("\n");
+  printInt(lib.g_percpu.kernel_stack); print("\n");
+  return 0;
+}

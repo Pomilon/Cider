@@ -476,6 +476,26 @@ public:
         return ms->resolveLocal(bare);
     }
 
+    // CID-031: a symbol declared in another module carries that module's
+    // bare nominal type name. Re-root it in the owner's context so layout
+    // resolution (field offsets, sizes) matches the checker's canonical
+    // identity; without this, `g_percpu.kernel_stack` fell through to the
+    // garbage member fallback (base = the loaded struct value) because the
+    // bare name was unresolvable in the importing file.
+    TypeInfo canonicalizeSymbolType(const std::shared_ptr<Symbol>& sym, const std::string& name) {
+        TypeInfo t = sym->type;
+        if (t.name.empty() || t.name.find("::") != std::string::npos) return t;
+        if (t.name.find('<') != std::string::npos || t.name.find('.') != std::string::npos) return t;
+        std::string defMod = definingModuleFor(sym, name);
+        if (defMod.empty()) return t;
+        auto resolved = resolveNominalType(defMod + "::" + t.name);
+        if (resolved && (resolved->kind == SymbolKind::STRUCT || resolved->kind == SymbolKind::CLASS ||
+                         resolved->kind == SymbolKind::ENUM || resolved->kind == SymbolKind::INTERFACE)) {
+            t.name = defMod + "::" + t.name;
+        }
+        return t;
+    }
+
     // Defining-module logical name for a resolved symbol ("": main).
     // Bind-time provenance first: it survives chained from-aliases (the
     // alias shares the target object, so identity search alone would pick
@@ -1402,7 +1422,7 @@ public:
                 if (target && target->kind == SymbolKind::VARIABLE) {
                     std::string gname = emitGlobalName(
                         definingModuleFor(target, expr.getMember()), target->name);
-                    lastExprType_ = target->type;
+                    lastExprType_ = canonicalizeSymbolType(target, expr.getMember());
                     if (lastExprType_.pointerLevel == 0) {
                         auto typeSym = resolveNominalType(lastExprType_.name);
                         if (typeSym && (typeSym->kind == SymbolKind::STRUCT ||
@@ -2409,7 +2429,7 @@ public:
 
         auto sym = symbolTable_.resolve(expr.getName());
         if (sym) {
-            lastExprType_ = sym->type;
+            lastExprType_ = canonicalizeSymbolType(sym, expr.getName());
             if (lastExprType_.pointerLevel == 0) {
                 auto typeSym = resolveNominalType(lastExprType_.name);
                 if (typeSym && (typeSym->kind == SymbolKind::STRUCT || typeSym->kind == SymbolKind::CLASS)) {
