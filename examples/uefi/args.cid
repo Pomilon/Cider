@@ -1,0 +1,91 @@
+// CID-005: UEFI command-line application. Locates LoadedImage on the image
+// handle, then prints its LoadOptions (the UEFI "command line").
+// Build:
+//   build/cider compile --target uefi examples/uefi/args.cid -o args.asm
+//   scripts/link_uefi.sh args.asm -o args.efi
+// Run under QEMU+OVMF (see examples/uefi/README.md) and expect on serial:
+//   LoadOptions: <the boot option's load options, empty on a plain boot>
+
+type EFI_STATUS = u64;
+
+struct EFI_GUID {
+  var Data1: u32;
+  var Data2: u16;
+  var Data3: u16;
+  var Data4: [u8; 8];
+}
+
+struct EFI_SIMPLE_TEXT_OUTPUT_PROTOCOL {
+  var Reset: msabi fn(*EFI_SIMPLE_TEXT_OUTPUT_PROTOCOL) -> EFI_STATUS;
+  var OutputString: msabi fn(*EFI_SIMPLE_TEXT_OUTPUT_PROTOCOL, *u16) -> EFI_STATUS;
+  var _pad: [u64; 5];
+  var ClearScreen: msabi fn(*EFI_SIMPLE_TEXT_OUTPUT_PROTOCOL) -> EFI_STATUS;
+}
+
+type EFI_MEMORY_TYPE = u32;
+
+// Field offsets as in info.cid; HandleProtocol (offset 152) takes the
+// protocol GUID (LoadedImage = 5B1B31A1-9562-11D2-8E3F-00A0C969723B).
+struct EFI_BOOT_SERVICES {
+  var Hdr: [u64; 3];
+  var _pad1: [u64; 2];
+  var AllocatePages: msabi fn(u32, EFI_MEMORY_TYPE, u64, *u64) -> EFI_STATUS;
+  var FreePages: msabi fn(u64, u64) -> EFI_STATUS;
+  var GetMemoryMap: msabi fn(*u64, *void, *u64, *u64, *u32) -> EFI_STATUS;
+  var AllocatePool: msabi fn(EFI_MEMORY_TYPE, u64, **void) -> EFI_STATUS;
+  var FreePool: msabi fn(*void) -> EFI_STATUS;
+  var _pad2: [u64; 9];
+  var HandleProtocol: msabi fn(*void, *EFI_GUID, **void) -> EFI_STATUS;
+  var _pad3: [u64; 9];
+  var ExitBootServices: msabi fn(*void, u64) -> EFI_STATUS;
+  var _pad4: [u64; 10];
+  var LocateProtocol: msabi fn(*void, *void, **void) -> EFI_STATUS;
+}
+
+// EFI_LOADED_IMAGE_PROTOCOL, complete through LoadOptions. Layout:
+// Revision 0, ParentHandle 8, SystemTable 16, DeviceHandle 24,
+// FilePath 32, Reserved 40 (both covered by _pad1), LoadOptionsSize 48,
+// LoadOptions 56.
+struct EFI_LOADED_IMAGE_PROTOCOL {
+  var Revision: u32;
+  var _pad0: u32;
+  var ParentHandle: *void;
+  var SystemTable: *void;
+  var DeviceHandle: *void;
+  var _pad1: [u64; 2];
+  var LoadOptionsSize: u32;
+  var _pad2: u32;
+  var LoadOptions: *u16;
+}
+
+struct EFI_SYSTEM_TABLE {
+  var Hdr: [u64; 3];
+  var FirmwareVendor: *u16;
+  var FirmwareRevision: u32;
+  var _pad0: u32;
+  var ConsoleInHandle: *void;
+  var ConIn: *void;
+  var ConsoleOutHandle: *void;
+  var ConOut: *EFI_SIMPLE_TEXT_OUTPUT_PROTOCOL;
+  var StdErrHandle: *void;
+  var StdErr: *void;
+  var RuntimeServices: *void;
+  var BootServices: *EFI_BOOT_SERVICES;
+  var NumberOfTableEntries: u64;
+  var ConfigurationTable: *void;
+}
+
+msabi func efi_main(image: *void, st: *EFI_SYSTEM_TABLE) -> EFI_STATUS {
+  var guid: EFI_GUID;
+  guid.Data1 = 0x5b1b31a1;
+  guid.Data2 = 0x9562;
+  guid.Data3 = 0x11d2;
+  guid.Data4[0] = 0x8e; guid.Data4[1] = 0x3f; guid.Data4[2] = 0x00; guid.Data4[3] = 0xa0;
+  guid.Data4[4] = 0xc9; guid.Data4[5] = 0x69; guid.Data4[6] = 0x72; guid.Data4[7] = 0x3b;
+  var loaded: *EFI_LOADED_IMAGE_PROTOCOL = nilPtr;
+  st->BootServices->HandleProtocol(image, &guid, &loaded as **void);
+  st->ConOut->OutputString(st->ConOut, u"LoadOptions: ");
+  if (loaded->LoadOptions == nilPtr) { return 0; }
+  st->ConOut->OutputString(st->ConOut, loaded->LoadOptions);
+  return 0;
+}

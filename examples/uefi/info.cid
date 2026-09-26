@@ -1,0 +1,90 @@
+// CID-005: UEFI info application. Exercises EFI_BOOT_SERVICES and the system
+// table: prints the firmware revision and the memory-map size.
+// Build:
+//   build/cider compile --target uefi examples/uefi/info.cid -o info.asm
+//   scripts/link_uefi.sh info.asm -o info.efi
+// Run under QEMU+OVMF (see examples/uefi/README.md) and expect on serial:
+//   Cider UEFI info
+//   FirmwareRevision: 0x...
+//   MemoryMapSize: 0x...
+
+type EFI_STATUS = u64;
+
+struct EFI_SIMPLE_TEXT_OUTPUT_PROTOCOL {
+  var Reset: msabi fn(*EFI_SIMPLE_TEXT_OUTPUT_PROTOCOL) -> EFI_STATUS;
+  var OutputString: msabi fn(*EFI_SIMPLE_TEXT_OUTPUT_PROTOCOL, *u16) -> EFI_STATUS;
+  var _pad: [u64; 5];
+  var ClearScreen: msabi fn(*EFI_SIMPLE_TEXT_OUTPUT_PROTOCOL) -> EFI_STATUS;
+}
+
+type EFI_MEMORY_TYPE = u32;
+
+// EFI_BOOT_SERVICES field offsets (UEFI spec): Hdr 0, _pad1[2] 24..39,
+// AllocatePages 40, FreePages 48, GetMemoryMap 56, AllocatePool 64,
+// FreePool 72, _pad2[9] 80..151, HandleProtocol 152, _pad3[9] 160..231,
+// ExitBootServices 232, _pad4[10] 240..319, LocateProtocol 320.
+struct EFI_BOOT_SERVICES {
+  var Hdr: [u64; 3];
+  var _pad1: [u64; 2];
+  var AllocatePages: msabi fn(u32, EFI_MEMORY_TYPE, u64, *u64) -> EFI_STATUS;
+  var FreePages: msabi fn(u64, u64) -> EFI_STATUS;
+  var GetMemoryMap: msabi fn(*u64, *void, *u64, *u64, *u32) -> EFI_STATUS;
+  var AllocatePool: msabi fn(EFI_MEMORY_TYPE, u64, **void) -> EFI_STATUS;
+  var FreePool: msabi fn(*void) -> EFI_STATUS;
+  var _pad2: [u64; 9];
+  var HandleProtocol: msabi fn(*void, *void, **void) -> EFI_STATUS;
+  var _pad3: [u64; 9];
+  var ExitBootServices: msabi fn(*void, u64) -> EFI_STATUS;
+  var _pad4: [u64; 10];
+  var LocateProtocol: msabi fn(*void, *void, **void) -> EFI_STATUS;
+}
+
+struct EFI_SYSTEM_TABLE {
+  var Hdr: [u64; 3];
+  var FirmwareVendor: *u16;
+  var FirmwareRevision: u32;
+  var _pad0: u32;
+  var ConsoleInHandle: *void;
+  var ConIn: *void;
+  var ConsoleOutHandle: *void;
+  var ConOut: *EFI_SIMPLE_TEXT_OUTPUT_PROTOCOL;
+  var StdErrHandle: *void;
+  var StdErr: *void;
+  var RuntimeServices: *void;
+  // hello.cid leaves this *void; info/args dereference it as the boot
+  // services table, so the typed spelling is required here.
+  var BootServices: *EFI_BOOT_SERVICES;
+  var NumberOfTableEntries: u64;
+  var ConfigurationTable: *void;
+}
+
+func printHex(st: *EFI_SYSTEM_TABLE, v: u64) -> void {
+  var buf: [u16; 21];
+  var hex: [u16; 17] = u"0123456789ABCDEF";
+  buf[0] = u'0';
+  buf[1] = u'x';
+  var i: int = 0;
+  while (i < 16) {
+    var shift: u64 = (60 - i * 4) as u64;
+    var nibble: u64 = (v >> shift) & 15;
+    buf[2 + i] = hex[nibble as int];
+    i = i + 1;
+  }
+  buf[18] = u'\r';
+  buf[19] = u'\n';
+  buf[20] = 0;
+  st->ConOut->OutputString(st->ConOut, &buf[0]);
+}
+
+msabi func efi_main(image: *void, st: *EFI_SYSTEM_TABLE) -> EFI_STATUS {
+  st->ConOut->OutputString(st->ConOut, u"Cider UEFI info\r\nFirmwareRevision: ");
+  printHex(st, st->FirmwareRevision as u64);
+  var mapSize: u64 = 0;
+  var mapKey: u64 = 0;
+  var descSize: u64 = 0;
+  var descVer: u32 = 0;
+  st->BootServices->GetMemoryMap(&mapSize, nilPtr, &mapKey, &descSize, &descVer);
+  st->ConOut->OutputString(st->ConOut, u"MemoryMapSize: ");
+  printHex(st, mapSize);
+  return 0;
+}

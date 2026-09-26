@@ -48,6 +48,12 @@ if(Python3_FOUND)
     add_test(NAME harness COMMAND ${Python3_EXECUTABLE} ${CMAKE_SOURCE_DIR}/tests/run_tests.py)
 endif()
 
+option(CIDER_UEFI_TESTS "Enable QEMU/OVMF UEFI smoke tests" OFF)
+if(CIDER_UEFI_TESTS AND Python3_FOUND)
+    add_test(NAME uefi_smoke COMMAND ${Python3_EXECUTABLE} ${CMAKE_SOURCE_DIR}/tests/uefi/run_uefi_test.py)
+    set_tests_properties(uefi_smoke PROPERTIES SKIP_RETURN_CODE 77)
+endif()
+
 add_executable(parser_recovery_test tests/unit/parser_recovery_test.cpp src/parser.cpp src/lexer.cpp)
 target_include_directories(parser_recovery_test PRIVATE src)
 add_test(NAME parser_recovery_test COMMAND parser_recovery_test)
