@@ -108,6 +108,7 @@ struct Symbol {
     bool isConst = false;
     bool isExported = false;
     bool isExtern = false;  // linker-provided (extern var / extern func)
+    bool isTypeAlias = false;  // `type X = T` provider (STRUCT-kind, not StructSymbol)
     double constValue = 0;  // For const variables and enum variant values
 
     int memoryOffset = 0;  // stack offset or global address (set during codegen)

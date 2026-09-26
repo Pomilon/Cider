@@ -125,6 +125,44 @@ int run() {
     auto goFn = std::static_pointer_cast<cider::FunctionSymbol>(go);
     CHECK(goFn->parameterTypes.size() == 1 && goFn->parameterTypes[0].name == "K");
 
+    // CID-005/T8: `type X = T` alias-typed struct fields lay out exactly as
+    // the target type. Before the fix, getFieldAlignment/getFieldSize cast
+    // the STRUCT-kind alias provider (a plain Symbol, not a StructSymbol) and
+    // read past its allocation -> SIGSEGV on any alias-typed field.
+    Result r11 = collectSrc(
+        "type Handle = *void;\n"
+        "type Word = u64;\n"
+        "struct Inner {\n  var a: u32;\n  var b: u32;\n}\n"
+        "type InnerAlias = Inner;\n"
+        "struct Outer {\n"
+        "  var h: Handle;\n"
+        "  var w: Word;\n"
+        "  var in: InnerAlias;\n"
+        "  var t: u16;\n"
+        "}\n");
+    CHECK(r11.errors.empty());
+    auto outer = std::static_pointer_cast<cider::StructSymbol>(findSym(*r11.table, "Outer"));
+    CHECK(outer != nullptr);
+    // h(*void, 8) at 0, w(u64, 8) at 8, in(Inner, 8) at 16, t(u16, 2) at 24,
+    // total padded to the 8-byte max alignment: 32.
+    CHECK(outer->fields.size() == 4);
+    CHECK(outer->fields[0].offset == 0);
+    CHECK(outer->fields[1].offset == 8);
+    CHECK(outer->fields[2].offset == 16);
+    CHECK(outer->fields[3].offset == 24);
+    CHECK(outer->totalSize == 32);
+
+    // A mutually recursive alias chain must terminate (layout falls back to
+    // the 8-byte nominal size) instead of recursing forever.
+    Result r12 = collectSrc(
+        "type A = B;\n"
+        "type B = A;\n"
+        "struct Cyc {\n  var a: A;\n}\n");
+    CHECK(r12.errors.empty());
+    auto cyc = std::static_pointer_cast<cider::StructSymbol>(findSym(*r12.table, "Cyc"));
+    CHECK(cyc != nullptr);
+    CHECK(cyc->totalSize == 8);
+
     // CID-005/T7 fix round 1 (F2): the UEFI examples' protocol struct must
     // place ClearScreen at the spec offset 48 (Reset 0, OutputString 8,
     // TestString 16, QueryMode 24, SetMode 32, SetAttribute 40). A five-slot

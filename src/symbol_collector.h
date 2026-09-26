@@ -561,6 +561,7 @@ public:
     void visit(TypeAliasStmt& stmt) override {
         auto sym = std::make_shared<Symbol>();
         sym->kind = SymbolKind::STRUCT;  // Treat alias as a type provider
+        sym->isTypeAlias = true;
         sym->name = stmt.getName();
         sym->type = TypeInfo::fromAST(stmt.getTargetType());
         sym->line = stmt.getLine();
@@ -884,24 +885,41 @@ public:
         return nullptr;
     }
 
-    int getFieldSize(const TypeInfo& type) {
+    int getFieldSize(const TypeInfo& type, std::set<std::string>* visiting = nullptr) {
         if (type.pointerLevel > 0) return 8;
         if (type.isInterface) return 16;
         if (type.isArray) {
             TypeInfo elemType = type;
             elemType.isArray = false;
             elemType.arraySize = 0;
-            return type.arraySize * getFieldSize(elemType);
+            return type.arraySize * getFieldSize(elemType, visiting);
         }
         if (type.name == "u8" || type.name == "i8" || type.name == "char" || type.name == "byte" || type.name == "void") return 1;
         if (type.name == "u16" || type.name == "i16") return 2;
         if (type.name == "u32" || type.name == "i32" || type.name == "int" || type.name == "float" || type.name == "f32" || type.name == "bool") return 4;
         if (type.name == "u64" || type.name == "i64" || type.name == "f64") return 8;
-        auto sym = resolveNominalType(type.name);
-        if (sym && (sym->kind == SymbolKind::STRUCT || sym->kind == SymbolKind::CLASS)) {
-            return std::static_pointer_cast<StructSymbol>(sym)->totalSize;
+        bool ownSet = false;
+        if (!visiting) {
+            visiting = new std::set<std::string>();
+            ownSet = true;
         }
-        return 8;
+        int result = 8;
+        if (visiting->count(type.name)) {
+            result = 8;  // cycle (e.g. `type A = B; type B = A;`): nominal size
+        } else {
+            visiting->insert(type.name);
+            auto sym = resolveNominalType(type.name);
+            if (sym && sym->isTypeAlias) {
+                // CID-005/T8: a `type X = T` alias provider is a STRUCT-kind
+                // plain Symbol, not a StructSymbol: size of the target type.
+                result = getFieldSize(sym->type, visiting);
+            } else if (sym && (sym->kind == SymbolKind::STRUCT || sym->kind == SymbolKind::CLASS)) {
+                result = std::static_pointer_cast<StructSymbol>(sym)->totalSize;
+            }
+            visiting->erase(type.name);
+        }
+        if (ownSet) delete visiting;
+        return result;
     }
 
     int getFieldAlignment(const TypeInfo& type, std::set<std::string>* visiting = nullptr) {
@@ -928,7 +946,11 @@ public:
         } else {
             visiting->insert(type.name);
             auto sym = resolveNominalType(type.name);
-            if (sym && (sym->kind == SymbolKind::STRUCT || sym->kind == SymbolKind::CLASS)) {
+            if (sym && sym->isTypeAlias) {
+                // CID-005/T8: `type X = T` alias provider (plain Symbol, not
+                // a StructSymbol): alignment of the target type.
+                result = getFieldAlignment(sym->type, visiting);
+            } else if (sym && (sym->kind == SymbolKind::STRUCT || sym->kind == SymbolKind::CLASS)) {
                 auto ss = std::static_pointer_cast<StructSymbol>(sym);
                 int maxA = 1;
                 for (auto& f : ss->fields) {
