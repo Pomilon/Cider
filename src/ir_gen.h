@@ -913,7 +913,7 @@ public:
 
             // Check if object is an interface type -> interface method call
             if (objType.isInterface) {
-                auto ifaceSym = symbolTable_.resolve(objType.name);
+                auto ifaceSym = resolveNominalType(objType.name);
                 if (ifaceSym && ifaceSym->kind == SymbolKind::INTERFACE) {
                     auto iface = std::static_pointer_cast<InterfaceSymbol>(ifaceSym);
                     int methodIdx = 0;
@@ -1848,7 +1848,7 @@ public:
         // Check if this type has a destructor
         TypeInfo varType = sym->type;
         if (varType.pointerLevel == 0 && !varType.isArray) {
-            auto typeSym = symbolTable_.resolve(varType.name);
+            auto typeSym = resolveNominalType(varType.name);
             if (typeSym && typeSym->kind == SymbolKind::CLASS) {
                 auto classSym = std::static_pointer_cast<StructSymbol>(typeSym);
                 if (!classSym->destructorName.empty()) {
@@ -3511,7 +3511,7 @@ public:
         if (!iterableType.isArray && !iterableType.isSlice) {
             // Custom iterator protocol: the element type comes from next()'s
             // return pointee, not the iterable's own type.
-            auto typeSym0 = symbolTable_.resolve(iterableType.name);
+            auto typeSym0 = resolveNominalType(iterableType.name);
             if (typeSym0 && (typeSym0->kind == SymbolKind::STRUCT || typeSym0->kind == SymbolKind::CLASS)) {
                 auto ss0 = std::static_pointer_cast<StructSymbol>(typeSym0);
                 for (const auto& m : ss0->methods) {
@@ -3519,7 +3519,7 @@ public:
                         elemType = m.returnType;
                         elemType.pointerLevel--;
                         if (elemType.pointerLevel == 0 && !elemType.isArray) {
-                            auto ts2 = symbolTable_.resolve(elemType.name);
+                            auto ts2 = resolveNominalType(elemType.name);
                             if (!ts2 || (ts2->kind != SymbolKind::STRUCT && ts2->kind != SymbolKind::CLASS)) {
                                 elemType.isUserDefined = false;
                             }
@@ -4279,7 +4279,12 @@ public:
         lastExprType_ = elemType;
         bool elemIsStruct = (elemType.pointerLevel == 0);
         if (elemIsStruct) {
-            auto elemTypeSym = symbolTable_.resolve(elemType.name);
+            // CID-031 regression: elemType may carry a canonical defining-module
+            // name (`lib::E`) after symbol-type canonicalization; a bare
+            // symbolTable_ lookup misses it and the element was then treated as
+            // a loaded value instead of an address, producing an extra
+            // dereference on `entries[num].field = v`.
+            auto elemTypeSym = resolveNominalType(elemType.name);
             if (!elemTypeSym || (elemTypeSym->kind != SymbolKind::STRUCT && elemTypeSym->kind != SymbolKind::CLASS)) {
                 elemIsStruct = false;
             }
