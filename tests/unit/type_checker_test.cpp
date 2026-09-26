@@ -1,3 +1,4 @@
+#include <chrono>
 #include <cstdio>
 #include <memory>
 #include <string>
@@ -672,6 +673,52 @@ int run() {
         "  return 0;\n"
         "}\n");
     CHECK(aliasFnRepeat.empty());
+
+    // CID-005 final-review (F1): signature alias expansion must be bounded.
+    // A branched fn-type alias DAG doubles the work per level
+    // (`type A0 = fn(A1, A1) -> void; type A1 = fn(A2, A2) -> void; ...`),
+    // so the pre-fix compiler spent >60 s on 22 levels (the base compiler
+    // rejected the same source in ~7 ms). The expansion budget must make
+    // this finish in milliseconds and fall back to the unexpanded spelling
+    // comparison, keeping the base diagnostic.
+    {
+        std::string dag;
+        for (int i = 0; i < 22; ++i) {
+            dag += "type A" + std::to_string(i) + " = fn(A" + std::to_string(i + 1) +
+                   ", A" + std::to_string(i + 1) + ") -> void;\n";
+        }
+        dag += "type A22 = fn(u64, u64) -> void;\n";
+        dag += "func foo(a: u64, b: u64) -> void { }\n";
+        dag += "func main() -> int { var h: A0 = foo; return 0; }\n";
+        auto dagStart = std::chrono::steady_clock::now();
+        auto dagErrors = checkSrc(dag);
+        double dagSeconds = std::chrono::duration<double>(
+                                std::chrono::steady_clock::now() - dagStart).count();
+        // Generous bound: the pre-fix compiler needs >60 s here, the fix
+        // milliseconds; a wall-clock assert catches any reintroduced
+        // exponential blow-up even on slow CI machines.
+        if (dagSeconds > 5.0) {
+            std::fprintf(stderr, "FAIL branched alias DAG took %.3fs\n", dagSeconds);
+            return 1;
+        }
+        CHECK(hasError(dagErrors, "Type mismatch in declaration of 'h'"));
+    }
+
+    // The budget must not truncate expansions a real signature can reach:
+    // a 10-level branched DAG is ~2^11 alias expansions per side, expands
+    // fully, and the alias spelling stays interchangeable with a function
+    // whose parameters carry the alias.
+    {
+        std::string dag;
+        for (int i = 0; i < 10; ++i) {
+            dag += "type B" + std::to_string(i) + " = fn(B" + std::to_string(i + 1) +
+                   ", B" + std::to_string(i + 1) + ") -> void;\n";
+        }
+        dag += "type B10 = fn(u64, u64) -> void;\n";
+        dag += "func bar(a: B1, b: B1) -> void { }\n";
+        dag += "func main() -> int { var h: B0 = bar; return 0; }\n";
+        CHECK(checkSrc(dag).empty());
+    }
     return 0;
 }
 

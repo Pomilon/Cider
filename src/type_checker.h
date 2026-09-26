@@ -317,32 +317,70 @@ public:
     // positions (e.g. `fn(EFI_STATUS) -> EFI_STATUS`) still resolves
     // independently. Cyclic aliases are checker-accepted
     // (`tests/programs/cyclic_alias_*`), so every walk must terminate.
-    TypeInfo resolveSignatureAliases(TypeInfo t) {
+    //
+    // CID-005 final-review (F1): the walk above re-expands every alias
+    // occurrence, so a *branched* DAG (`type A0 = fn(A1, A1) -> void;
+    // type A1 = fn(A2, A2) -> void; ...`) doubles the work per level: the
+    // 22-level DAG took ~100 s on the branch tip while the base compiler
+    // rejected the same source in ~7 ms. Bound the total number of
+    // expansions per resolution; once the budget is spent the remaining
+    // spellings stay unresolved and the comparison keeps both unexpanded
+    // types, which is the pre-alias path (every F3/ABI/cyclic result below
+    // the budget is unchanged). A memoized DAG would share subtrees, but
+    // TypeInfo equality walks them without a visited set, so the bound must
+    // count repeated sibling expansions — as it does here.
+    static constexpr int kMaxSignatureAliasExpansions = 8192;
+
+    TypeInfo resolveSignatureAliases(TypeInfo t, bool* exhausted = nullptr) {
         std::set<std::string> visiting;
-        return resolveSignatureAliasesImpl(t, visiting);
+        int budget = kMaxSignatureAliasExpansions;
+        bool hitBudget = false;
+        TypeInfo resolved = resolveSignatureAliasesImpl(t, visiting, budget, hitBudget);
+        if (exhausted) *exhausted = hitBudget;
+        return resolved;
     }
 
-    TypeInfo resolveSignatureAliasesImpl(TypeInfo t, std::set<std::string>& visiting) {
+    // Resolves both sides of a comparison under one exhaustion flag: when
+    // either side runs out of budget neither is replaced, so the caller
+    // compares the unexpanded spellings instead of a partial expansion.
+    void resolveSignatureAliasPair(TypeInfo& t1, TypeInfo& t2) {
+        bool exhausted = false;
+        TypeInfo r1 = resolveSignatureAliases(t1, &exhausted);
+        TypeInfo r2 = resolveSignatureAliases(t2, &exhausted);
+        if (!exhausted) {
+            t1 = r1;
+            t2 = r2;
+        }
+    }
+
+    TypeInfo resolveSignatureAliasesImpl(TypeInfo t, std::set<std::string>& visiting,
+                                         int& budget, bool& exhausted) {
         if (t.isFunctionPointer) {
             if (t.fnParamTypes) {
                 auto params = std::make_shared<std::vector<TypeInfo>>();
                 params->reserve(t.fnParamTypes->size());
                 for (const auto& p : *t.fnParamTypes) {
-                    params->push_back(resolveSignatureAliasesImpl(p, visiting));
+                    params->push_back(resolveSignatureAliasesImpl(p, visiting, budget, exhausted));
                 }
                 t.fnParamTypes = params;
             }
             if (t.fnReturnType) {
-                t.fnReturnType =
-                    std::make_shared<TypeInfo>(resolveSignatureAliasesImpl(*t.fnReturnType, visiting));
+                t.fnReturnType = std::make_shared<TypeInfo>(
+                    resolveSignatureAliasesImpl(*t.fnReturnType, visiting, budget, exhausted));
             }
             return t;
         }
         if (t.isArray) return t;
         if (t.name.empty() || !visiting.insert(t.name).second) return t;
+        if (budget <= 0) {
+            exhausted = true;
+            visiting.erase(t.name);
+            return t;
+        }
+        --budget;
         TypeInfo resolved = resolveType(t);
         if (resolved.isFunctionPointer) {
-            resolved = resolveSignatureAliasesImpl(resolved, visiting);
+            resolved = resolveSignatureAliasesImpl(resolved, visiting, budget, exhausted);
         }
         visiting.erase(t.name);
         return resolved;
@@ -409,9 +447,9 @@ public:
         // signatures too, so a typedef spelling and its expansion are
         // interchangeable in every fn-value position (declaration,
         // assignment, argument passing). The comparison itself stays
-        // exact, including the ABI marker.
-        t1 = resolveSignatureAliases(t1);
-        t2 = resolveSignatureAliases(t2);
+        // exact, including the ABI marker. F1: the resolution is bounded,
+        // and on budget exhaustion both sides stay unexpanded.
+        resolveSignatureAliasPair(t1, t2);
         // CID-020/021 §1: compare nominal type identities canonically, so
         // same-named types in different modules differ.
         t1 = canonicalizeNominal(t1);
@@ -1512,10 +1550,11 @@ public:
             // failed, lastExprType_ is `error`; running the F1 signature
             // comparison on it just adds a bogus cascade diagnostic.
             if (hasDeclaredReturnType_ && lastExprType_.name != "error") {
-                TypeInfo declType =
-                    resolveSignatureAliases(resolveFunctionPointerAlias(currentDeclaredReturnType_));
-                TypeInfo valType =
-                    resolveSignatureAliases(resolveFunctionPointerAlias(lastExprType_));
+                TypeInfo declType = resolveFunctionPointerAlias(currentDeclaredReturnType_);
+                TypeInfo valType = resolveFunctionPointerAlias(lastExprType_);
+                // F1: bounded alias resolution; on budget exhaustion both
+                // sides keep their unexpanded (pre-resolution) form.
+                resolveSignatureAliasPair(declType, valType);
                 bool declFn = declType.isFunctionPointer && !declType.isArray;
                 bool valFn = valType.isFunctionPointer && !valType.isArray;
                 if (declFn && valFn) {

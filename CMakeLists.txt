@@ -54,6 +54,13 @@ if(CIDER_UEFI_TESTS AND Python3_FOUND)
     set_tests_properties(uefi_smoke PROPERTIES SKIP_RETURN_CODE 77)
 endif()
 
+# CID-005/T8: MS-ABI callee-saved XMM preservation smoke. Unlike the QEMU
+# harness above it needs no OVMF, just nasm/objcopy/ld (the script exits 77
+# when they are missing).
+add_test(NAME ms_abi_xmm_smoke
+         COMMAND bash ${CMAKE_SOURCE_DIR}/tests/unit/ms_abi_xmm_smoke.sh $<TARGET_FILE:cider>)
+set_tests_properties(ms_abi_xmm_smoke PROPERTIES SKIP_RETURN_CODE 77)
+
 add_executable(parser_recovery_test tests/unit/parser_recovery_test.cpp src/parser.cpp src/lexer.cpp)
 target_include_directories(parser_recovery_test PRIVATE src)
 add_test(NAME parser_recovery_test COMMAND parser_recovery_test)
