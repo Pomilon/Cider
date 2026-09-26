@@ -831,6 +831,18 @@ int run() {
         CHECK(uefiSysvStart.find("[rbp + 8]") == std::string::npos);
         CHECK(uefiSysvStart.find("[rbp + 16]") == std::string::npos);
     }
+
+    // CID-031: typed globals carry a natural-alignment directive so the
+    // linker cannot place 8-byte-bearing objects at odd addresses.
+    std::string alignAsm = genAsm(
+        "var g: u64 = 5;\n"
+        "var h: u64;\n"
+        "var i: u16;\n"
+        "func main() -> int { h = g + 1; return (h + i) as int; }\n");
+    CHECK(alignAsm.find("align 8") != std::string::npos);
+    CHECK(alignAsm.find("align 2") != std::string::npos);
+    CHECK(alignAsm.find("g: dq 5") != std::string::npos);
+
     return 0;
 }
 

@@ -183,7 +183,28 @@ bool CodeGenerator::generate(ModuleIR& module, const std::string& outputPath,
         return std::to_string(v);
     };
 
+    // CID-031 follow-up: typed globals must be naturally aligned. The port's
+    // GDT array (u64-bearing entries) was emitted as a bare `resb 2816` with
+    // no alignment and the linker placed it at an odd address (0x45b336b),
+    // so 8-byte field stores crossed boundaries and the boot double-faulted.
+    auto globalAlign = [](IRType t) -> int {
+        switch (t) {
+            case IRType::I64: case IRType::U64: case IRType::F64: case IRType::PTR: return 8;
+            case IRType::I32: case IRType::U32: case IRType::F32: return 4;
+            case IRType::I16: case IRType::U16: return 2;
+            default: return 1;
+        }
+    };
+
     for (const auto& var : module.getGlobalVars()) {
+        int align = globalAlign(var.type);
+        if (align > 1) {
+            if (var.initialIsFloat || var.initialValue != 0) {
+                addData("align " + std::to_string(align));
+            } else {
+                addBss("align " + std::to_string(align));
+            }
+        }
         if (var.initialIsFloat) {
             // Float initializer (CID-029): emit the exact IEEE-754 bit
             // pattern as hex. A decimal `dq 10` is an integer 10, not
