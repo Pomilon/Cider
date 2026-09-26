@@ -294,6 +294,87 @@ public:
         return resolved.isFunctionPointer ? resolved : t;
     }
 
+    // CID-005/T7 fix round 1 (F3): TypeInfo::signatureEquals compares the
+    // nested parameter/return TypeInfos exactly, so a fn value spelled
+    // `msabi fn(*P) -> EFI_STATUS` did not match `msabi fn(*P) -> u64`
+    // (likewise an outer `type Cb = ...` spelling against the expanded
+    // one). Resolve the alias chain on every nested type with the same
+    // cycle-safe resolveType used everywhere else, cloning the signature
+    // vectors instead of mutating the shared ones. The ABI marker and the
+    // exact comparison then stay untouched: `u64` vs `int` still differs.
+    // Arrays keep their declared spelling (resolveType would drop the
+    // wrapper and its size, mirroring resolveFunctionPointerAlias).
+    TypeInfo resolveSignatureAliases(TypeInfo t) {
+        if (t.isFunctionPointer) {
+            if (t.fnParamTypes) {
+                auto params = std::make_shared<std::vector<TypeInfo>>();
+                params->reserve(t.fnParamTypes->size());
+                for (const auto& p : *t.fnParamTypes) {
+                    params->push_back(resolveSignatureAliases(p));
+                }
+                t.fnParamTypes = params;
+            }
+            if (t.fnReturnType) {
+                t.fnReturnType =
+                    std::make_shared<TypeInfo>(resolveSignatureAliases(*t.fnReturnType));
+            }
+            return t;
+        }
+        if (t.isArray) return t;
+        TypeInfo resolved = resolveType(t);
+        if (resolved.isFunctionPointer) return resolveSignatureAliases(resolved);
+        return resolved;
+    }
+
+    // The language's builtin value spellings are never symbol-table
+    // entries, so an unresolved name that matches one is a primitive and
+    // not a candidate by-value aggregate (used by the call gate below).
+    static bool isBuiltinTypeName(const std::string& n) {
+        return n == "void" || n == "bool" || n == "string" || n == "char" || n == "byte" ||
+               n == "int" || n == "float" || n == "f32" || n == "f64" ||
+               n == "u8" || n == "i8" || n == "u16" || n == "i16" ||
+               n == "u32" || n == "i32" || n == "u64" || n == "i64";
+    }
+
+    // CID-005/T7 fix round 1 (F4): classify a fn-pointer parameter/return
+    // for the by-value indirect-call gate. Mirrors ir_gen::isStructValueType:
+    // alias-resolve to a fixed point, skip resolved pointers/arrays/fn
+    // values, and fall back to the spelling's defining module for a bare
+    // nominal that does not resolve at the use site (qualified `mod::X`
+    // goes through resolveCanonical). An alias whose resolved target does
+    // not resolve either is rejected conservatively: the pre-alias gate saw
+    // the STRUCT-kind alias provider and rejected it, so e.g.
+    // `type NopeAlias = Nope` must not silently widen the gate. A direct
+    // unresolved spelling (e.g. a template instantiation name) never
+    // reached an alias provider and keeps its previous accept path.
+    bool isByValueAggregateAtCall(const TypeInfo& t) {
+        if (t.pointerLevel > 0 || t.isArray || t.isFunctionPointer) return false;
+        TypeInfo resolved = resolveType(t);
+        if (resolved.pointerLevel > 0 || resolved.isArray || resolved.isFunctionPointer) {
+            return false;
+        }
+        if (isBuiltinTypeName(resolved.name)) return false;
+        std::shared_ptr<Symbol> s;
+        if (resolved.name.find("::") != std::string::npos) {
+            s = resolveCanonical(resolved.name);
+            if (!s) return true;  // unresolvable qualified nominal: stay conservative
+        } else {
+            s = resolveScoped(resolved.name);
+            if (!s) {
+                if (resolved.name == t.name) return false;  // no alias followed
+                // Same fallback ir_gen::isStructValueType applies with the
+                // callee's defining module: try the module that owns the
+                // alias spelling before giving up.
+                auto spellingSym = resolveScoped(t.name);
+                std::string ownerMod = spellingSym ? definingModuleOf(spellingSym) : "";
+                Scope* ms = scopeForModule(ownerMod);
+                if (ms) s = ms->resolveLocal(resolved.name);
+                if (!s) return true;  // dangling alias target: stay conservative
+            }
+        }
+        return s->kind == SymbolKind::STRUCT || s->kind == SymbolKind::CLASS;
+    }
+
     // CID-003: the float-family spellings, shared by areTypesCompatible
     // and visit(BinaryExpr) so the two copies cannot drift.
     static bool isFloatName(const std::string& n) { return n == "float" || n == "f64"; }
@@ -302,6 +383,13 @@ public:
         if (t1.name == "wildcard" || t2.name == "wildcard") return true;
         t1 = resolveType(t1);
         t2 = resolveType(t2);
+        // CID-005/T7 fix round 1 (F3): resolve alias chains inside fn
+        // signatures too, so a typedef spelling and its expansion are
+        // interchangeable in every fn-value position (declaration,
+        // assignment, argument passing). The comparison itself stays
+        // exact, including the ABI marker.
+        t1 = resolveSignatureAliases(t1);
+        t2 = resolveSignatureAliases(t2);
         // CID-020/021 §1: compare nominal type identities canonically, so
         // same-named types in different modules differ.
         t1 = canonicalizeNominal(t1);
@@ -1232,37 +1320,9 @@ public:
             if (lastExprType_.isFunctionPointer && !lastExprType_.isArray &&
                 lastExprType_.fnParamTypes && lastExprType_.fnReturnType) {
                 TypeInfo fnType = lastExprType_;
-                auto byValueAggregate = [&](const TypeInfo& t) {
-                    if (t.pointerLevel > 0 || t.isArray || t.isFunctionPointer) return false;
-                    // CID-005/T7: `type EFI_STATUS = u64;` installs a
-                    // STRUCT-kind alias-provider symbol, so the kind test
-                    // below must run on the ALIAS-RESOLVED type (mirroring
-                    // ir_gen::isStructValueType) or every fn-pointer spelled
-                    // with a UEFI typedef is misreported as a by-value
-                    // struct call. A resolved pointer/array/fn is not
-                    // by-value either (e.g. `type P = *S;`).
-                    TypeInfo resolved = resolveType(t);
-                    if (resolved.pointerLevel > 0 || resolved.isArray ||
-                        resolved.isFunctionPointer) {
-                        return false;
-                    }
-                    // CID-006 fix (F2): a canonical `mod::P` nominal carries
-                    // its defining module, so resolve it there
-                    // (resolveCanonical); the scope-chain resolveScoped(bare)
-                    // cannot see sibling module scopes and let cross-module
-                    // by-value aggregates slip past this rejection.
-                    std::shared_ptr<Symbol> s;
-                    if (resolved.name.find("::") != std::string::npos) {
-                        s = resolveCanonical(resolved.name);
-                        if (!s) return true;  // unresolvable qualified nominal: stay conservative
-                    } else {
-                        s = resolveScoped(resolved.name);
-                    }
-                    return s && (s->kind == SymbolKind::STRUCT || s->kind == SymbolKind::CLASS);
-                };
-                bool unsupportedAggregate = byValueAggregate(*fnType.fnReturnType);
+                bool unsupportedAggregate = isByValueAggregateAtCall(*fnType.fnReturnType);
                 for (const auto& pt : *fnType.fnParamTypes) {
-                    if (byValueAggregate(pt)) unsupportedAggregate = true;
+                    if (isByValueAggregateAtCall(pt)) unsupportedAggregate = true;
                 }
                 if (unsupportedAggregate) {
                     error("Calls through '" + fnType.toString() +
@@ -1430,8 +1490,10 @@ public:
             // failed, lastExprType_ is `error`; running the F1 signature
             // comparison on it just adds a bogus cascade diagnostic.
             if (hasDeclaredReturnType_ && lastExprType_.name != "error") {
-                TypeInfo declType = resolveFunctionPointerAlias(currentDeclaredReturnType_);
-                TypeInfo valType = resolveFunctionPointerAlias(lastExprType_);
+                TypeInfo declType =
+                    resolveSignatureAliases(resolveFunctionPointerAlias(currentDeclaredReturnType_));
+                TypeInfo valType =
+                    resolveSignatureAliases(resolveFunctionPointerAlias(lastExprType_));
                 bool declFn = declType.isFunctionPointer && !declType.isArray;
                 bool valFn = valType.isFunctionPointer && !valType.isArray;
                 if (declFn && valFn) {

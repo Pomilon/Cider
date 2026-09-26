@@ -526,6 +526,81 @@ int run() {
         "msabi func g(q: *Q, s: SAlias) -> u64 { q->f(q, s); return 0; }\n"
         "func main() -> int { return 0; }\n");
     CHECK(hasError(aggAliasFnSig, "do not support struct/class by-value"));
+
+    // CID-005/T7 fix round 1 (F3): fn-pointer signature equality must
+    // alias-resolve the nested signature (parameters AND return), not just
+    // the outer spelling: `msabi fn(*P) -> EFI_STATUS` and
+    // `msabi fn(*P) -> u64` are the same type. Everything else (primitive
+    // width, ABI) stays exact.
+    auto aliasFnRet = checkSrc(
+        "type EFI_STATUS = u64;\n"
+        "struct P { var x: u64; }\n"
+        "msabi func f(p: *P) -> EFI_STATUS { return 0; }\n"
+        "func main() -> int {\n"
+        "  var h: msabi fn(*P) -> u64 = f;\n"
+        "  return 0;\n"
+        "}\n");
+    CHECK(aliasFnRet.empty());
+    auto aliasFnRetReverse = checkSrc(
+        "type EFI_STATUS = u64;\n"
+        "struct P { var x: u64; }\n"
+        "msabi func f(p: *P) -> u64 { return 0; }\n"
+        "func main() -> int {\n"
+        "  var h: msabi fn(*P) -> EFI_STATUS = f;\n"
+        "  return 0;\n"
+        "}\n");
+    CHECK(aliasFnRetReverse.empty());
+    // An outer fn-type alias is interchangeable with the expanded spelling
+    // in declarations, argument passing and returns.
+    auto aliasFnOuter = checkSrc(
+        "type EFI_STATUS = u64;\n"
+        "struct P { var x: u64; }\n"
+        "type Cb = msabi fn(*P) -> u64;\n"
+        "msabi func f(p: *P) -> EFI_STATUS { return 0; }\n"
+        "msabi func pass(h: Cb) -> void { h(nilPtr); }\n"
+        "msabi func pick() -> Cb { return f; }\n"
+        "func main() -> int {\n"
+        "  var h: Cb = f;\n"
+        "  pass(h);\n"
+        "  return 0;\n"
+        "}\n");
+    CHECK(aliasFnOuter.empty());
+    // Alias parameter spelling against an expanded signature at an
+    // argument site and through an indirect call.
+    auto aliasFnParam = checkSrc(
+        "type EFI_MEMORY_TYPE = u32;\n"
+        "struct P { var f: msabi fn(*P, u32) -> u64; }\n"
+        "msabi func take(h: msabi fn(*P, EFI_MEMORY_TYPE) -> u64) -> void { }\n"
+        "msabi func g(p: *P, t: u32) -> u64 { p->f(p, t); return 0; }\n"
+        "func main() -> int { take(g); return 0; }\n");
+    CHECK(aliasFnParam.empty());
+    // A raw function argument whose alias-return type meets an expanded
+    // parameter signature (the finding's argument-passing repro).
+    auto aliasFnArg = checkSrc(
+        "type EFI_STATUS = u64;\n"
+        "struct P { var x: u64; }\n"
+        "msabi func f(p: *P) -> EFI_STATUS { return 0; }\n"
+        "msabi func take(h: msabi fn(*P) -> u64) -> void { h(nilPtr); }\n"
+        "func main() -> int { take(f); return 0; }\n");
+    CHECK(aliasFnArg.empty());
+    // Genuine mismatch stays rejected: the alias resolves to `u64` while
+    // the other spelling is `int`.
+    auto aliasFnRetBad = checkSrc(
+        "type EFI_STATUS = u64;\n"
+        "struct P { var x: u64; }\n"
+        "msabi func f(p: *P) -> int { return 0; }\n"
+        "func main() -> int { var h: msabi fn(*P) -> EFI_STATUS = f; return 0; }\n");
+    CHECK(hasError(aliasFnRetBad, "Type mismatch in declaration of 'h'"));
+
+    // CID-005/T7 fix round 1 (F4): an alias whose target does not resolve
+    // (`type NopeAlias = Nope`) must stay rejected by the by-value gate
+    // instead of silently widening it.
+    auto unresolvedAliasCall = checkSrc(
+        "type NopeAlias = Nope;\n"
+        "struct Q { var f: msabi fn(*Q, NopeAlias) -> u64; }\n"
+        "msabi func g(q: *Q, s: NopeAlias) -> u64 { q->f(q, s); return 0; }\n"
+        "func main() -> int { return 0; }\n");
+    CHECK(hasError(unresolvedAliasCall, "do not support struct/class by-value"));
     return 0;
 }
 

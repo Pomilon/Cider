@@ -18,7 +18,9 @@ struct EFI_GUID {
 struct EFI_SIMPLE_TEXT_OUTPUT_PROTOCOL {
   var Reset: msabi fn(*EFI_SIMPLE_TEXT_OUTPUT_PROTOCOL) -> EFI_STATUS;
   var OutputString: msabi fn(*EFI_SIMPLE_TEXT_OUTPUT_PROTOCOL, *u16) -> EFI_STATUS;
-  var _pad: [u64; 5];
+  // TestString 16, QueryMode 24, SetMode 32, SetAttribute 40; ClearScreen
+  // is at 48 in the UEFI spec (a 5-slot pad put it at 56).
+  var _pad: [u64; 4];
   var ClearScreen: msabi fn(*EFI_SIMPLE_TEXT_OUTPUT_PROTOCOL) -> EFI_STATUS;
 }
 

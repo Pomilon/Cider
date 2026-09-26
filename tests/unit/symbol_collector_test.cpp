@@ -1,5 +1,7 @@
 #include <cstdio>
+#include <fstream>
 #include <memory>
+#include <sstream>
 #include <string>
 #include <vector>
 
@@ -122,6 +124,32 @@ int run() {
     CHECK(go != nullptr);
     auto goFn = std::static_pointer_cast<cider::FunctionSymbol>(go);
     CHECK(goFn->parameterTypes.size() == 1 && goFn->parameterTypes[0].name == "K");
+
+    // CID-005/T7 fix round 1 (F2): the UEFI examples' protocol struct must
+    // place ClearScreen at the spec offset 48 (Reset 0, OutputString 8,
+    // TestString 16, QueryMode 24, SetMode 32, SetAttribute 40). A five-slot
+    // `_pad` silently moved it to 56; parse the shipped files so the example
+    // text itself is pinned, not a copy.
+    std::string root = __FILE__;
+    auto slash = root.find("/tests/unit/");
+    CHECK(slash != std::string::npos);
+    root = root.substr(0, slash);
+    for (const char* rel : {"examples/uefi/hello.cid", "examples/uefi/info.cid",
+                            "examples/uefi/args.cid", "tests/uefi/abi_torture.cid"}) {
+        std::ifstream in(root + "/" + rel);
+        CHECK(in.good());
+        std::ostringstream ss;
+        ss << in.rdbuf();
+        Result rf = collectSrc(ss.str());
+        CHECK(rf.errors.empty());
+        auto proto =
+            std::static_pointer_cast<cider::StructSymbol>(findSym(*rf.table, "EFI_SIMPLE_TEXT_OUTPUT_PROTOCOL"));
+        CHECK(proto != nullptr);
+        CHECK(proto->fields.size() == 4);
+        CHECK(proto->fields[0].offset == 0);   // Reset
+        CHECK(proto->fields[1].offset == 8);   // OutputString
+        CHECK(proto->fields[3].offset == 48);  // ClearScreen
+    }
     return 0;
 }
 
