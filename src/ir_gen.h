@@ -258,6 +258,25 @@ public:
         return resolveTypeAliasImpl(t, defModule, visiting);
     }
 
+    // CIDER-BUG-015: `type X = T` providers are STRUCT-kind plain Symbols,
+    // not StructSymbols. Every StructSymbol cast must first follow the alias
+    // chain (cycle-safe via resolveTypeAlias) and reject providers
+    // (`type.name` non-empty), or member access through an alias-typed
+    // object is undefined behavior and alias-typed FIELDS get classified
+    // as by-value structs (address emitted instead of a typed load).
+    // A pointer level does not change the nominal identity (callers
+    // decrement for deref contexts; the lookup below is by name), so strip
+    // it before resolving — mirroring the legacy by-name lookup.
+    std::shared_ptr<Symbol> resolveStructOrClassSymbol(TypeInfo t, const std::string& defModule = "") {
+        t.pointerLevel = 0;
+        TypeInfo resolved = resolveTypeAlias(t, defModule);
+        auto sym = resolveNominalType(resolved.name);
+        if (!sym && !defModule.empty()) sym = resolveCalleeNominal(resolved.name, defModule);
+        if (!sym || (sym->kind != SymbolKind::STRUCT && sym->kind != SymbolKind::CLASS)) return nullptr;
+        if (!sym->type.name.empty()) return nullptr;  // alias provider / self-alias stop
+        return sym;
+    }
+
     // CID-006 (Task 2 F1 carry-over): the ir_gen half of the checker's
     // resolveFunctionPointerAlias gate. Returns the resolved fn(...)
     // signature when the spelling aliases one, else the original TypeInfo
@@ -966,8 +985,10 @@ public:
                 }
             }
 
-            auto sym = resolveNominalType(objType.name);
-            if (sym && (sym->kind == SymbolKind::CLASS || sym->kind == SymbolKind::STRUCT)) {
+            // CIDER-BUG-015: alias-safe lookup (providers are STRUCT-kind
+            // plain Symbols, not StructSymbols).
+            auto sym = resolveStructOrClassSymbol(objType);
+            if (sym) {
                 auto classSym = std::static_pointer_cast<StructSymbol>(sym);
                 // CID-020/021 (spec §5/§6): method calls use the defining
                 // module's composed name, matching the definition. The
@@ -1424,10 +1445,16 @@ public:
                         definingModuleFor(target, expr.getMember()), target->name);
                     lastExprType_ = canonicalizeSymbolType(target, expr.getMember());
                     if (lastExprType_.pointerLevel == 0) {
-                        auto typeSym = resolveNominalType(lastExprType_.name);
-                        if (typeSym && (typeSym->kind == SymbolKind::STRUCT ||
-                                        typeSym->kind == SymbolKind::CLASS)) {
-                            lastExprType_.isUserDefined = typeSym->type.name.empty();
+                        // CIDER-BUG-015: alias-aware (see visit(IdentifierExpr)).
+                        if (resolveStructOrClassSymbol(lastExprType_,
+                                                       definingModuleFor(target, expr.getMember()))) {
+                            lastExprType_.isUserDefined = true;
+                        } else {
+                            auto typeSym = resolveNominalType(lastExprType_.name);
+                            if (typeSym && (typeSym->kind == SymbolKind::STRUCT ||
+                                            typeSym->kind == SymbolKind::CLASS)) {
+                                lastExprType_.isUserDefined = typeSym->type.name.empty();
+                            }
                         }
                     } else {
                         lastExprType_.isUserDefined = false;
@@ -1455,38 +1482,52 @@ public:
         TypeInfo objType = lastExprType_;
         if (objType.pointerLevel > 0) objType.pointerLevel--;
 
-        auto sym = resolveNominalType(objType.name);
-        if (sym && (sym->kind == SymbolKind::STRUCT || sym->kind == SymbolKind::CLASS)) {
+        // CIDER-BUG-015: alias providers are STRUCT-kind plain Symbols;
+        // resolve `type X = T` chains before the StructSymbol cast (an
+        // alias-typed object used to reach undefined behavior here).
+        auto sym = resolveStructOrClassSymbol(objType);
+        if (sym) {
             auto structSym = std::static_pointer_cast<StructSymbol>(sym);
+            std::string ownerMod = definingModuleFor(sym, structSym->name);
             for (const auto& field : structSym->fields) {
                 if (field.name == expr.getMember()) {
                     IRValue addr = IRValue::Register(nextTemp(), IRType::PTR);
                     currentBlock_->addInstruction({IROp::ADD, addr, {obj, IRValue::Constant(field.offset, IRType::I32)}});
 
-                    bool fieldIsStruct = (field.type.pointerLevel == 0);
+                    // The field's declared type may itself be an alias
+                    // spelling: resolve the chain before classifying
+                    // (struct vs scalar) and before choosing the load
+                    // width, or `type W = u64` fields lower as addresses
+                    // and `type H = *void` fields as non-pointers.
+                    TypeInfo fieldType = resolveTypeAlias(field.type, ownerMod);
+                    bool fieldIsStruct = (fieldType.pointerLevel == 0);
                     if (fieldIsStruct) {
-                        auto fieldTypeSym = resolveNominalType(field.type.name);
-                        if (!fieldTypeSym || (fieldTypeSym->kind != SymbolKind::STRUCT && fieldTypeSym->kind != SymbolKind::CLASS)) {
+                        auto fieldTypeSym = resolveNominalType(fieldType.name);
+                        if (!fieldTypeSym && !ownerMod.empty()) {
+                            fieldTypeSym = resolveCalleeNominal(fieldType.name, ownerMod);
+                        }
+                        if (!fieldTypeSym || (fieldTypeSym->kind != SymbolKind::STRUCT && fieldTypeSym->kind != SymbolKind::CLASS) ||
+                            !fieldTypeSym->type.name.empty()) {
                             fieldIsStruct = false;
                         }
                     }
                     // Array-typed fields are address-like (like locals):
                     // indexing them must operate on the array's location,
                     // not on a loaded copy of its first element.
-                    bool fieldIsArray = field.type.isArray;
+                    bool fieldIsArray = fieldType.isArray;
                     if (field.bitWidth > 0 && !isAddress_) {
-                        bool isSigned = (field.type.name == "int" || field.type.name == "i8" ||
-                                         field.type.name == "i16" || field.type.name == "i32");
+                        bool isSigned = (fieldType.name == "int" || fieldType.name == "i8" ||
+                                         fieldType.name == "i16" || fieldType.name == "i32");
                         lastValue_ = emitBitfieldLoad(addr, field.bitOffset, field.bitWidth, isSigned);
                     } else if (isAddress_ || fieldIsStruct || fieldIsArray) {
                         lastValue_ = addr;
                     } else {
-                        IRType fieldIRType = (field.type.pointerLevel > 0) ? IRType::PTR : mapType(field.type.name);
+                        IRType fieldIRType = (fieldType.pointerLevel > 0) ? IRType::PTR : mapType(fieldType.name);
                         IRValue dest = IRValue::Register(nextTemp(), fieldIRType);
                         currentBlock_->addInstruction({IROp::LOAD, dest, {addr, IRValue::Constant(0, IRType::I32)}});
                         lastValue_ = dest;
                     }
-                    lastExprType_ = field.type;
+                    lastExprType_ = fieldType;
                     return;
                 }
             }
@@ -2431,9 +2472,16 @@ public:
         if (sym) {
             lastExprType_ = canonicalizeSymbolType(sym, expr.getName());
             if (lastExprType_.pointerLevel == 0) {
-                auto typeSym = resolveNominalType(lastExprType_.name);
-                if (typeSym && (typeSym->kind == SymbolKind::STRUCT || typeSym->kind == SymbolKind::CLASS)) {
-                    lastExprType_.isUserDefined = typeSym->type.name.empty();
+                // CIDER-BUG-015: follow `type X = T` chains before
+                // classifying, or an alias-to-struct value is treated as
+                // a scalar and loaded from its own stack slot.
+                if (resolveStructOrClassSymbol(lastExprType_)) {
+                    lastExprType_.isUserDefined = true;
+                } else {
+                    auto typeSym = resolveNominalType(lastExprType_.name);
+                    if (typeSym && (typeSym->kind == SymbolKind::STRUCT || typeSym->kind == SymbolKind::CLASS)) {
+                        lastExprType_.isUserDefined = typeSym->type.name.empty();
+                    }
                 }
             } else {
                 lastExprType_.isUserDefined = false;
@@ -2559,11 +2607,13 @@ public:
         } else if (auto mem = dynamic_cast<MemberAccessExpr*>(expr)) {
             TypeInfo objType = inferExprType(mem->getObject());
             if (objType.pointerLevel > 0) objType.pointerLevel--;
-            auto sym = resolveNominalType(objType.name);
-            if (sym && (sym->kind == SymbolKind::STRUCT || sym->kind == SymbolKind::CLASS)) {
+            // CIDER-BUG-015: alias-safe struct lookup and field typing.
+            auto sym = resolveStructOrClassSymbol(objType);
+            if (sym) {
                 auto ss = std::static_pointer_cast<StructSymbol>(sym);
+                std::string ownerMod = definingModuleFor(sym, ss->name);
                 for (const auto& f : ss->fields) {
-                    if (f.name == mem->getMember()) return f.type;
+                    if (f.name == mem->getMember()) return resolveTypeAlias(f.type, ownerMod);
                 }
             }
         } else if (auto idx = dynamic_cast<IndexExpr*>(expr)) {
@@ -2599,8 +2649,8 @@ public:
         // would advance the temp counters and emit duplicate instructions.
         TypeInfo objType = inferExprType(mem->getObject());
         if (objType.pointerLevel > 0) objType.pointerLevel--;
-        auto sym = resolveNominalType(objType.name);
-        if (!sym || (sym->kind != SymbolKind::STRUCT && sym->kind != SymbolKind::CLASS)) return false;
+        auto sym = resolveStructOrClassSymbol(objType);
+        if (!sym) return false;
         auto structSym = std::static_pointer_cast<StructSymbol>(sym);
         for (const auto& field : structSym->fields) {
             if (field.name == mem->getMember() && field.bitWidth > 0) {
@@ -2618,12 +2668,15 @@ public:
         if (!mem) return false;
         TypeInfo objType = inferExprType(mem->getObject());
         if (objType.pointerLevel > 0) objType.pointerLevel--;
-        auto sym = resolveNominalType(objType.name);
-        if (!sym || (sym->kind != SymbolKind::STRUCT && sym->kind != SymbolKind::CLASS)) return false;
+        auto sym = resolveStructOrClassSymbol(objType);
+        if (!sym) return false;
         auto ss = std::static_pointer_cast<StructSymbol>(sym);
+        std::string ownerMod = definingModuleFor(sym, ss->name);
         for (const auto& f : ss->fields) {
             if (f.name == mem->getMember()) {
-                out = f.type;
+                // CIDER-BUG-015: report the resolved type so store widths
+                // and conversions see through `type X = T` spellings.
+                out = resolveTypeAlias(f.type, ownerMod);
                 return true;
             }
         }

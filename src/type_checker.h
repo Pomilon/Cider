@@ -264,6 +264,25 @@ public:
         return resolveTypeImpl(info, visiting);
     }
 
+    // CIDER-BUG-015: `type X = T` providers are STRUCT-kind plain Symbols
+    // (`isTypeAlias`), not StructSymbols, so a kind test alone admits them
+    // and the StructSymbol cast is undefined behavior. Follow the alias
+    // chain (cycle-safe, via resolveType) and return the symbol only when
+    // it is a genuine struct/class definition; nullptr for alias
+    // providers, primitives, cyclic stops and unresolvable spellings.
+    // A pointer level does not change the nominal identity here (dot
+    // access auto-derefs; arrow access decremented before the call), so
+    // strip it before resolving — this mirrors the legacy lookup, which
+    // was by name only.
+    std::shared_ptr<Symbol> resolveStructOrClass(TypeInfo t) {
+        t.pointerLevel = 0;
+        TypeInfo resolved = resolveType(t);
+        auto sym = resolveScoped(resolved.name);
+        if (!sym || (sym->kind != SymbolKind::STRUCT && sym->kind != SymbolKind::CLASS)) return nullptr;
+        if (!sym->type.name.empty()) return nullptr;  // alias provider / self-alias stop
+        return sym;
+    }
+
     // CID-006 fix round 2: cycle-safe recursion (mirrors ir_gen's alias
     // resolver). Aliases are checker-accepted even when cyclic; stopping at
     // the repeated spelling keeps areTypesCompatible and every other caller
@@ -1190,8 +1209,11 @@ public:
             return;
         }
 
-        auto sym = resolveScoped(objType.name);
-        if (!sym || (sym->kind != SymbolKind::STRUCT && sym->kind != SymbolKind::CLASS)) {
+        // CIDER-BUG-015: `type X = T` providers are STRUCT-kind plain
+        // Symbols; resolve the alias chain before the StructSymbol cast
+        // (alias-to-struct member access used to be undefined behavior).
+        auto sym = resolveStructOrClass(objType);
+        if (!sym) {
             error("Type " + objType.toString() + " is not a struct or class", expr.getLine());
             lastExprType_ = {"error", 0};
             return;
@@ -1344,8 +1366,10 @@ public:
                 TypeInfo objType = lastExprType_;
                 if (objType.pointerLevel > 0) objType.pointerLevel--;
 
-                auto sym = resolveScoped(objType.name);
-                if (sym && (sym->kind == SymbolKind::CLASS || sym->kind == SymbolKind::STRUCT)) {
+                // CIDER-BUG-015: alias-safe lookup (providers are
+                // STRUCT-kind plain Symbols, not StructSymbols).
+                auto sym = resolveStructOrClass(objType);
+                if (sym) {
                     auto classSym = std::static_pointer_cast<StructSymbol>(sym);
                     // CID-020/021 §1: method signature nominals belong to
                     // the class's owner module; canonicalize there so
