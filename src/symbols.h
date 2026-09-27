@@ -142,6 +142,12 @@ struct Symbol {
     int line;
     int col;
     bool isConst = false;
+    // CIDER-BUG-060: module visibility. Only exported symbols are importable
+    // from another module (`from m import x`, `m.x`, `m.f()`, `m.T`).
+    // Intra-module use is unrestricted, and `isExtern` symbols are exempt:
+    // they name linker-provided storage/functions, not module-private state,
+    // so they stay accessible without an `export` (see the collector's
+    // bindFromAliases and the checker's isVisibleMember).
     bool isExported = false;
     bool isExtern = false;  // linker-provided (extern var / extern func)
     bool isTypeAlias = false;  // `type X = T` provider (STRUCT-kind, not StructSymbol)

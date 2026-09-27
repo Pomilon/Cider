@@ -2303,7 +2303,11 @@ std::unique_ptr<Statement> Parser::parseExportStatement() {
         nextToken();
         if (currentToken_.type != TokenType::SEMICOLON) return nullptr;
         nextToken();
-        return std::make_unique<BlockStmt>(std::move(exports), line, col);
+        // CIDER-BUG-060: wrap the export list in an ExportStmt so the global
+        // scope check accepts it (a bare BlockStmt reads as an executable
+        // statement) and so the collector can mark the names exported.
+        return std::make_unique<ExportStmt>(
+            std::make_unique<BlockStmt>(std::move(exports), line, col), line, col);
     }
 
     std::unique_ptr<Statement> stmt = nullptr;
@@ -2319,7 +2323,39 @@ std::unique_ptr<Statement> Parser::parseExportStatement() {
         stmt = parseVarDeclarationStatement();
     else if (currentToken_.type == TokenType::FUNCTION || currentToken_.type == TokenType::FUNC)
         stmt = parseFunctionDeclaration();
-    else if (currentToken_.type == TokenType::STRUCT)
+    // CIDER-BUG-060: `export type X = T;` / `export interface I { ... }`
+    // used to fall into "Unexpected token after 'export'", so types and
+    // interfaces could never be marked exported. Both helpers consume their
+    // own keyword.
+    else if (currentToken_.type == TokenType::TYPE)
+        stmt = parseTypeAliasStatement();
+    else if (currentToken_.type == TokenType::INTERFACE)
+        stmt = parseInterfaceDeclaration();
+    // CIDER-BUG-060: `export async func ...` — ASYNC is a distinct token, so
+    // the plain FUNC branch above never matched it. `export extern func/var`
+    // is accepted too (an extern needs no export, but rejecting the spelling
+    // would be arbitrary). `export virtual/override func` deliberately stays
+    // a parse error: those are class-body modifiers and are meaningless at
+    // module level.
+    else if (currentToken_.type == TokenType::ASYNC) {
+        nextToken();  // consume 'async'
+        if (currentToken_.type == TokenType::FUNCTION || currentToken_.type == TokenType::FUNC) {
+            stmt = parseFunctionDeclaration(true);
+        } else {
+            error("Expected 'func' after 'async'.");
+            return nullptr;
+        }
+    } else if (currentToken_.type == TokenType::EXTERN) {
+        nextToken();  // consume 'extern'
+        if (currentToken_.type == TokenType::FUNCTION || currentToken_.type == TokenType::FUNC) {
+            stmt = parseFunctionDeclaration(false, false, false, true);
+        } else if (currentToken_.type == TokenType::VAR) {
+            stmt = parseVarDeclarationStatement(true);
+        } else {
+            error("Expected 'func' or 'var' after 'extern'.");
+            return nullptr;
+        }
+    } else if (currentToken_.type == TokenType::STRUCT)
         stmt = parseStructDeclaration();
     else if (currentToken_.type == TokenType::UNION)
         stmt = parseStructDeclaration(true);

@@ -1,0 +1,10 @@
+// CIDER-BUG-060: a module's non-exported members are not reachable through
+// qualified access, qualified calls, or qualified type use. `import` alone
+// does not fail in the collector, so the checker reports all three forms.
+import check_export_missing_lib;
+
+func main() -> int {
+  var h: check_export_missing_lib.Hidden;
+  var g: int = check_export_missing_lib.hidden_global;
+  return check_export_missing_lib.hidden_fn() + g;
+}

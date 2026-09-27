@@ -1,4 +1,6 @@
-async func fetch(n: int) -> int {
+// CIDER-BUG-060: `export async func` is a module-level export form too (the
+// main file ignores visibility, but the spelling must parse and mark).
+export async func fetch(n: int) -> int {
   return n * 2;
 }
 

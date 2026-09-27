@@ -1,0 +1,7 @@
+// CIDER-BUG-060 fixture module: none of these symbols is exported, so the
+// importing fixtures must diagnose every access form.
+func hidden_fn() -> int { return 1; }
+
+var hidden_global: int = 2;
+
+struct Hidden { var x: int; }

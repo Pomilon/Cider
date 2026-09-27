@@ -1,0 +1,3 @@
+symbol 'Hidden' is not exported from module 'check_export_missing_lib'
+symbol 'hidden_global' is not exported from module 'check_export_missing_lib'
+symbol 'hidden_fn' is not exported from module 'check_export_missing_lib'

@@ -142,6 +142,20 @@ public:
         return it != ambiguousModules_.end() && it->second.size() >= 2;
     }
 
+    // CIDER-BUG-060: cross-module visibility. A module member is reachable
+    // only when exported; extern declarations are linker-provided and stay
+    // accessible without an export. References from inside the owning module
+    // (a self-qualified `m.x` inside m, or canonicalization that re-enters
+    // m's own scope) are unrestricted.
+    bool isVisibleMember(const std::shared_ptr<Symbol>& mem, const std::string& ownerModule) {
+        if (!mem) return true;
+        // A nested-module qualifier is registration syntax, not a member
+        // declaration: its own kind error (if any) is reported elsewhere.
+        if (mem->kind == SymbolKind::MODULE) return true;
+        if (mem->isExported || mem->isExtern) return true;
+        return !ownerModule.empty() && ownerModule == currentModule_;
+    }
+
     // Canonicalize a dotted `qualifier.Name` (qualifier = last segment or
     // full logical path) to `logical::Name`.
     TypeInfo canonicalizeDotted(TypeInfo t, int line = -1) {
@@ -156,6 +170,14 @@ public:
             auto ms = std::static_pointer_cast<ModuleSymbol>(modSym);
             logical = ms->logicalName;
             if (ms->scope) mem = ms->scope->resolveLocal(bare);
+        }
+        // CIDER-BUG-060: a qualified type is usable only when the member is
+        // exported (externs exempt). line < 0 marks silent pre-check calls
+        // that must keep failing safely instead of emitting a diagnostic.
+        if (mem && !isVisibleMember(mem, logical)) {
+            if (line < 0) return t;
+            error("symbol '" + bare + "' is not exported from module '" + prefix + "'", line);
+            return t;
         }
         bool ok = isModule && mem &&
                   (mem->kind == SymbolKind::STRUCT || mem->kind == SymbolKind::CLASS ||
@@ -661,6 +683,7 @@ public:
                 type != ASTNode::IMPORT_STMT &&
                 type != ASTNode::FROM_IMPORT_STMT &&
                 type != ASTNode::EXPORT_STMT &&
+                type != ASTNode::EXPORT_EXPRESSION_STMT &&
                 type != ASTNode::ASM_STMT &&
                 type != ASTNode::INTERFACE_DECL_STMT) {
                 error("Executable statements are not allowed at the global scope", stmt->getLine());
@@ -1716,6 +1739,16 @@ public:
             lastExprType_ = {"error", 0};
             return;
         }
+        // CIDER-BUG-060: qualified access to a non-exported member is a
+        // visibility error (values, consts, enum variants, functions-as-
+        // values). Externs stay accessible; the owning module's own
+        // self-qualified references are unrestricted. Fall through with the
+        // member's real type after reporting: one visibility error should
+        // not cascade into a bogus type-mismatch error.
+        if (!isVisibleMember(mem, modSym->logicalName)) {
+            error("symbol '" + mem->name + "' is not exported from module '" + qualifier + "'",
+                  expr.getLine());
+        }
         if (mem->kind == SymbolKind::FUNCTION) {
             // CIDER-BUG-023: a module-qualified function value carries its
             // fn signature, not *void (the *void spelling made indirect
@@ -1813,6 +1846,14 @@ public:
                             if (!target) {
                                 error("module '" + base->getName() + "' has no symbol '" +
                                           mem->getMember() + "'",
+                                      expr.getLine());
+                            } else if (!isVisibleMember(target, modSym->logicalName)) {
+                                // CIDER-BUG-060: `m.f()` on a non-exported
+                                // function. Leaves funcSym null so the
+                                // indirect-call fallback visits the arguments
+                                // without cascading errors.
+                                error("symbol '" + mem->getMember() +
+                                          "' is not exported from module '" + base->getName() + "'",
                                       expr.getLine());
                             } else if (target->kind != SymbolKind::FUNCTION) {
                                 error("'" + displayName + "' is not a function", expr.getLine());

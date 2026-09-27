@@ -1,2 +1,4 @@
-type B = nsa.A;
+// CIDER-BUG-060: main.cid uses `nsa.B`, so B must be exported; A stays
+// module-private (B's target is resolved in nsa's own scope).
+export type B = nsa.A;
 type A = nsa.B;

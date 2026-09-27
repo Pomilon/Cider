@@ -240,6 +240,50 @@ int run() {
     }
     CHECK(w1Override);
 
+    // CIDER-BUG-060: `export` marks module-level declarations importable;
+    // unmarked ones stay private. `export type` / `export interface` now
+    // parse and mark; enum variants inherit the enum's export; the
+    // `export name;` expression form marks a symbol too.
+    Result r14 = collectSrc(
+        "export func pub() -> int { return 1; }\n"
+        "func priv() -> int { return 2; }\n"
+        "export var pub_global: int = 3;\n"
+        "var priv_global: int = 4;\n"
+        "export const PUB_CONST: int = 5;\n"
+        "export type Alias = int;\n"
+        "type PrivAlias = int;\n"
+        "export interface Shape { func area() -> int; }\n"
+        "export struct Point { var x: int; }\n"
+        "export enum Color { RED, GREEN }\n"
+        "export async func af() -> int { return 6; }\n"
+        "func marked() -> int { return 7; }\n"
+        "export marked;\n");
+    CHECK(r14.errors.empty());
+    CHECK(findSym(*r14.table, "pub") && findSym(*r14.table, "pub")->isExported);
+    CHECK(findSym(*r14.table, "priv") && !findSym(*r14.table, "priv")->isExported);
+    CHECK(findSym(*r14.table, "pub_global") && findSym(*r14.table, "pub_global")->isExported);
+    CHECK(findSym(*r14.table, "priv_global") && !findSym(*r14.table, "priv_global")->isExported);
+    CHECK(findSym(*r14.table, "PUB_CONST") && findSym(*r14.table, "PUB_CONST")->isExported);
+    CHECK(findSym(*r14.table, "Alias") && findSym(*r14.table, "Alias")->isExported);
+    CHECK(findSym(*r14.table, "PrivAlias") && !findSym(*r14.table, "PrivAlias")->isExported);
+    CHECK(findSym(*r14.table, "Shape") && findSym(*r14.table, "Shape")->isExported);
+    CHECK(findSym(*r14.table, "Point") && findSym(*r14.table, "Point")->isExported);
+    CHECK(findSym(*r14.table, "Color") && findSym(*r14.table, "Color")->isExported);
+    CHECK(findSym(*r14.table, "RED") && findSym(*r14.table, "RED")->isExported);
+    CHECK(findSym(*r14.table, "GREEN") && findSym(*r14.table, "GREEN")->isExported);
+    CHECK(findSym(*r14.table, "af") && findSym(*r14.table, "af")->isExported);
+    CHECK(findSym(*r14.table, "marked") && findSym(*r14.table, "marked")->isExported);
+    // Locals inside an exported function body are never module members, so
+    // they must not be marked exported.
+    Result r15 = collectSrc("export func f() -> int { var local: int = 1; return local; }\n");
+    CHECK(r15.errors.empty());
+    CHECK(findSym(*r15.table, "f") && findSym(*r15.table, "f")->isExported);
+    auto localSym = findSym(*r15.table, "local");
+    CHECK(!localSym || !localSym->isExported);
+    // Exporting an undefined name is diagnosed instead of silently ignored.
+    Result r16 = collectSrc("export nonexistent;\n");
+    CHECK(!r16.errors.empty());
+
     return 0;
 }
 

@@ -1,3 +1,6 @@
-struct P { var x: int; }
-func make() -> P { return P { x: 1 }; }
-func take(p: P) -> int { return p.x; }
+// CIDER-BUG-060: check_fnptr_mod_struct uses all three through the module
+// qualifier, so they need `export`. The fixture's single intended diagnostic
+// (by-value structs through fn values) stays the only one.
+export struct P { var x: int; }
+export func make() -> P { return P { x: 1 }; }
+export func take(p: P) -> int { return p.x; }

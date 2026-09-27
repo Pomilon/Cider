@@ -7,7 +7,8 @@ export struct S {
   var y: u64;
 }
 
-type SAlias = S;
+// CIDER-BUG-060: main.cid uses `va.SAlias`, so the alias must be exported.
+export type SAlias = S;
 
 export func makeS(x: u64, y: u64) -> SAlias {
   var s: SAlias;

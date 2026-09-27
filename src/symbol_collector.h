@@ -239,6 +239,11 @@ public:
         sym->col = stmt.getColumn();
         sym->isConst = stmt.isConst();
         sym->isExtern = stmt.isExtern();
+        // CIDER-BUG-060: module-level `export var/const` marks the symbol
+        // importable. Locals inside an exported function body are visited
+        // while inExport_ is set but never live in the module scope, so the
+        // depth check keeps the flag meaningful (module scopes count as 0).
+        sym->isExported = inExport_ && symbolTable_.scopeDepth() == 0;
         // CIDER-BUG-048: keep the initializer AST of a const declaration so
         // constant folding can resolve const references exactly (recursively,
         // order-independently) instead of baking in constValue's default 0.
@@ -273,6 +278,7 @@ public:
             tmplSym->kind = SymbolKind::TEMPLATE;
             tmplSym->name = stmt.getName();
             tmplSym->typeParams = stmt.getTemplateParams();
+            tmplSym->isExported = inExport_;  // CIDER-BUG-060
             bool specialization = true;
             for (const auto& p : stmt.getTemplateParams()) {
                 if (!isKnownTypeName(p)) { specialization = false; break; }
@@ -406,6 +412,7 @@ public:
             tmplSym->kind = SymbolKind::TEMPLATE;
             tmplSym->name = stmt.getName();
             tmplSym->typeParams = stmt.getTemplateParams();
+            tmplSym->isExported = inExport_;  // CIDER-BUG-060
             bool specialization = true;
             for (const auto& p : stmt.getTemplateParams()) {
                 if (!isKnownTypeName(p)) { specialization = false; break; }
@@ -429,6 +436,7 @@ public:
         sym->name = stmt.getName();
         sym->line = stmt.getLine();
         sym->col = stmt.getColumn();
+        sym->isExported = inExport_;  // CIDER-BUG-060
 
         if (stmt.isUnion()) {
             int maxSize = 0;
@@ -509,6 +517,7 @@ public:
         sym->type.isInterface = true;
         sym->line = stmt.getLine();
         sym->col = stmt.getColumn();
+        sym->isExported = inExport_;  // CIDER-BUG-060
         for (auto& m : stmt.getMethods()) {
             StructSymbol::Method method;
             method.name = m.name;
@@ -535,6 +544,7 @@ public:
         sym->type = {"int", 0};
         sym->line = stmt.getLine();
         sym->col = stmt.getColumn();
+        sym->isExported = inExport_;  // CIDER-BUG-060
 
         if (symbolTable_.getCurrentScope()->resolveLocal(sym->name)) {
             reporter_.error("Redeclaration of enum '" + sym->name + "'", sym->line, sym->col);
@@ -554,6 +564,10 @@ public:
             variant->col = stmt.getColumn();
             variant->isConst = true;
             variant->constValue = (double)i;
+            // CIDER-BUG-060: exporting the enum exports its variants, which
+            // are ordinary module-scope const symbols (`m.RED`, `from m
+            // import RED`).
+            variant->isExported = inExport_;
             if (symbolTable_.getCurrentScope()->resolveLocal(variant->name)) {
                 reporter_.error("Redeclaration of variant '" + variant->name + "'", variant->line, variant->col);
             } else {
@@ -570,6 +584,7 @@ public:
         sym->type = TypeInfo::fromAST(stmt.getTargetType());
         sym->line = stmt.getLine();
         sym->col = stmt.getColumn();
+        sym->isExported = inExport_;  // CIDER-BUG-060
 
         if (symbolTable_.getCurrentScope()->resolveLocal(sym->name)) {
             reporter_.error("Redeclaration of type '" + sym->name + "'", sym->line, sym->col);
@@ -712,6 +727,7 @@ public:
         sym->line = stmt.getLine();
         sym->col = stmt.getColumn();
         sym->parentName = stmt.getParentName();
+        sym->isExported = inExport_;  // CIDER-BUG-060
 
         int currentOffset = 0;
         bool hasVTable = false;
@@ -780,6 +796,7 @@ public:
                     funcSym->name = sym->destructorName;
                     funcSym->returnType = {"void", 0};
                     funcSym->parameterTypes = {{sym->name, 1}};
+                    funcSym->isExported = inExport_;  // CIDER-BUG-060
                     symbolTable_.define(funcSym);
                     // CID-020/021: the visit(ClassDeclStmt) member pass
                     // below skips this re-definition, so record here.
@@ -847,6 +864,7 @@ public:
                 // implementations are pinned to SysV by the IR generator's
                 // vtable analysis.
                 funcSym->abi = (m.isVirtual || m.isOverride) ? Abi::SysV : method->getAbi();
+                funcSym->isExported = inExport_;  // CIDER-BUG-060
                 symbolTable_.define(funcSym);
                 // CID-020/021: see the destructor site above.
                 recordDefiningModule(funcSym);
@@ -890,7 +908,58 @@ public:
         inExport_ = false;
     }
 
-    void visit(ExportExpressionStmt&) override {}
+    // CIDER-BUG-060: `export name;` / `export { a, b };` — the parser's
+    // expression form — accept a symbol name and mark it importable. The
+    // name is resolved module-locally (walk up to the enclosing module scope,
+    // never into the importer's scope). A name bound by `from c import x`
+    // shares c's symbol object, so marking it is a re-export; importing it
+    // already required c to export it, hence the object carries the flag.
+    // Undefined names are diagnosed (the old no-op silently accepted typos).
+    void visit(ExportExpressionStmt& stmt) override {
+        auto id = dynamic_cast<IdentifierExpr*>(stmt.getExpression());
+        if (!id) {
+            reporter_.error("Export expects a symbol name.", stmt.getLine(), stmt.getColumn());
+            return;
+        }
+        std::shared_ptr<Symbol> sym;
+        for (Scope* s = symbolTable_.getCurrentScope(); s; s = s->getParent()) {
+            sym = s->resolveLocal(id->getName());
+            if (sym || s->isModuleScope()) break;  // never leak into the importer
+        }
+        if (!sym) {
+            // A template name lives in the template table, not in a scope.
+            // Only the current module's (or the main file's legacy bare) key
+            // may be marked; exporting another module's template would need a
+            // from-import and is that module's decision.
+            auto tmpl = templateTable_.find(templateKey(getCurrentModule(), id->getName()));
+            if (tmpl == templateTable_.end()) tmpl = templateTable_.find(id->getName());
+            if (tmpl != templateTable_.end()) {
+                tmpl->second->isExported = true;
+                return;
+            }
+            reporter_.error("Cannot export undefined symbol '" + id->getName() + "'",
+                            stmt.getLine(), stmt.getColumn());
+            return;
+        }
+        sym->isExported = true;
+    }
+
+    // CIDER-BUG-060: is any template with this base name exported? A
+    // from-import may name a template (templates live in the table, not in
+    // any scope); its export flag must be enforced like any other member.
+    // Chained/specialized keys are matched by suffix.
+    bool isAnyTemplateExported(const std::string& baseName) {
+        auto it = templateTable_.find(baseName);
+        if (it != templateTable_.end() && it->second->isExported) return true;
+        std::string suffix = "::" + baseName;
+        for (auto& [key, sym] : templateTable_) {
+            if (key.size() > suffix.size() &&
+                key.compare(key.size() - suffix.size(), suffix.size(), suffix) == 0 &&
+                sym->isExported)
+                return true;
+        }
+        return false;
+    }
 
     void addStructClassName(const std::string& name) {
         structClassNames_.push_back(name);
@@ -1062,10 +1131,29 @@ public:
                 // Function/struct templates live in the template table, not
                 // in any scope; as with the legacy flattening, importing one
                 // is a no-op and use sites instantiate on demand.
-                if (hasTemplateAnyModule(name)) continue;
+                if (hasTemplateAnyModule(name)) {
+                    // CIDER-BUG-060: the import still implies visibility, so
+                    // the template's export flag is enforced.
+                    if (!isAnyTemplateExported(name)) {
+                        reporter_.error("symbol '" + name + "' is not exported from module '" +
+                                            stmt.getModuleName() + "'",
+                                        stmt.getLine(), stmt.getColumn());
+                    }
+                    continue;
+                }
                 reporter_.error("module '" + stmt.getModuleName() + "' has no symbol '" + name + "'",
                                 stmt.getLine(), stmt.getColumn());
                 continue;
+            }
+            // CIDER-BUG-060: only exported members are importable. Extern
+            // declarations are exempt: they name linker-provided symbols,
+            // not module-private storage (see symbols.h). Binding continues
+            // after the diagnostic so use sites do not cascade "undefined
+            // identifier" errors on top of the visibility error.
+            if (!target->isExported && !target->isExtern) {
+                reporter_.error("symbol '" + name + "' is not exported from module '" +
+                                    stmt.getModuleName() + "'",
+                                stmt.getLine(), stmt.getColumn());
             }
             if (importingScope->resolveLocal(name)) {
                 // CID-020/021 (spec §4): same-named aliases from two modules
