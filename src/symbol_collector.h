@@ -239,6 +239,10 @@ public:
         sym->col = stmt.getColumn();
         sym->isConst = stmt.isConst();
         sym->isExtern = stmt.isExtern();
+        // CIDER-BUG-048: keep the initializer AST of a const declaration so
+        // constant folding can resolve const references exactly (recursively,
+        // order-independently) instead of baking in constValue's default 0.
+        if (sym->isConst) sym->constInit = stmt.getInitializer();
 
         if (symbolTable_.getCurrentScope()->resolveLocal(sym->name)) {
             reporter_.error("Redeclaration of variable '" + sym->name + "'", sym->line, sym->col);

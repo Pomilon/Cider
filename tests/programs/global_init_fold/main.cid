@@ -1,0 +1,62 @@
+// CIDER-BUG-048: non-constant integer global initializers used to be
+// silently BSS-zeroed. Constant shapes now land in .data (const references
+// are folded recursively, order-independently) and non-constant ones are
+// rejected by the checker.
+from std.io import printInt, print;
+import gc;
+from gc import MK, MK2;
+
+const BASE: int = 5;
+const DERIVED: int = BASE * 2 + 1;
+var g_base: int = BASE;
+var g_derived: int = DERIVED;
+var g_forward: int = LATER;  // declared below: folds order-independently
+const LATER: int = 42;
+var g_neg: int = -BASE;
+var g_expr: u64 = (BASE << 40) + 7;
+var g_bool: bool = true;
+var g_bool_f: bool = false;
+var g_char: char = 'A';
+var g_byte: byte = 200;
+var g_alias: int = MK2;              // from-import const chain (MK2 = MK * 2)
+var g_dotted: int = gc.MK2;          // module-qualified const
+var g_arr: [u8; 3] = [BASE, MK, 9];  // const elements in a global array
+var g_farr: [f64; 2] = [BASE, 4];    // float array element from a const
+var g_cast: u64 = MK as u64;         // const inside a cast
+const FLAG: bool = true;
+var g_cbool: bool = FLAG;            // bool const reference
+var g_np: *int = nilPtr;
+var g_str: char* = "ok";
+
+func main() -> int {
+  if (g_base != 5) { return 1; }
+  if (g_derived != 11) { return 2; }
+  if (g_forward != 42) { return 3; }
+  if (g_neg != -5) { return 4; }
+  if (g_expr != 5497558138887) { return 5; }
+  if (g_bool != true || g_bool_f != false) { return 6; }
+  if (g_char != 'A') { return 7; }
+  if (g_byte != 200) { return 8; }
+  if (g_alias != 22 || g_dotted != 22) { return 9; }
+  if (g_arr[0] != 5 || g_arr[1] != 11 || g_arr[2] != 9) { return 10; }
+  if (g_farr[0] != 5.0 || g_farr[1] != 4.0) { return 13; }
+  if (g_cast != 11) { return 14; }
+  if (g_cbool != true) { return 15; }
+  if (g_np != nilPtr) { return 11; }
+  if (g_str[0] != 'o' || g_str[1] != 'k') { return 12; }
+
+  printInt(g_base); print(",");
+  printInt(g_derived); print(",");
+  printInt(g_forward); print(",");
+  printInt(g_neg); print(",");
+  printInt(g_alias); print(",");
+  printInt(g_dotted); print(",");
+  printInt(g_arr[0] as int); print(",");
+  printInt(g_arr[1] as int); print(",");
+  printInt(g_arr[2] as int); print(",");
+  printInt(g_char as int); print(",");
+  printInt(g_bool as int); print(",");
+  printInt(g_bool_f as int); print(",");
+  printInt(g_byte as int); print("\n");
+  return 0;
+}

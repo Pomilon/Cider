@@ -1,0 +1,5 @@
+Global integer initializer in declaration of 'g_call' must use constant expressions
+Global integer initializer in declaration of 'g_nonconst' must use constant expressions
+Global integer initializer in declaration of 'BAD' must use constant expressions
+Global pointer initializer in declaration of 'p' must be nilPtr, a string literal, or a function name
+Global pointer initializer in declaration of 's' must be nilPtr, a string literal, or a function name

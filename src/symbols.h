@@ -112,6 +112,13 @@ struct Symbol {
     bool isTypeAlias = false;  // `type X = T` provider (STRUCT-kind, not StructSymbol)
     double constValue = 0;  // For const variables and enum variant values
 
+    // CIDER-BUG-048: initializer AST of a `const` declaration. Global
+    // scalar initializers fold references to const symbols by recursing
+    // into this expression, so the value stays exact (no double round
+    // trip) and forward references resolve order-independently. Null for
+    // enum variants and for symbols that are not const declarations.
+    Expression* constInit = nullptr;
+
     int memoryOffset = 0;  // stack offset or global address (set during codegen)
 
     // CIDER-BUG-044: stable identity for the defining-module provenance

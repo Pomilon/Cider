@@ -493,6 +493,17 @@ public:
         return "";
     }
 
+    // CIDER-BUG-048: scope of a logical module ("" == main/root). Used while
+    // folding a const's initializer, whose identifiers bind in the
+    // declaration's own module rather than at the use site.
+    Scope* scopeForModule(const std::string& logical) {
+        if (logical.empty()) return symbolTable_.getRootScope();
+        for (const auto& [path, scope] : moduleScopes_) {
+            if (scope && logicalForScope(scope) == logical) return scope;
+        }
+        return nullptr;
+    }
+
     // Scope that binds `name` to this exact symbol object. Module scopes
     // win over root so `from`-aliases (same object as the definition, spec
     // §4) and template clones attribute to the defining module. Null when
@@ -1791,6 +1802,24 @@ public:
                 sym->type.isInterface = true;
             }
         }
+        // CIDER-BUG-048: a global `const` keeps its isConst marker and
+        // initializer AST so tryEvalConstU64 can fold references to it
+        // exactly (recursively). Locals are excluded on purpose:
+        // visit(IdentifierExpr) folds sym->constValue for any isConst symbol
+        // without global storage, and that is 0 for const variables — a
+        // local const read must keep loading its stored value.
+        if (!currentFunction_ && stmt.isConst()) {
+            sym->isConst = true;
+            sym->constInit = stmt.getInitializer();
+        }
+        // CIDER-BUG-048: this fresh symbol replaces the collector's/checker's
+        // in the shared scope; keep its bind-time defining-module provenance
+        // so const folding (and mangling) still resolves the declaration's
+        // own module after replacement.
+        if (auto prev = symbolTable_.getCurrentScope()->resolveLocal(sym->name)) {
+            auto pit = symbolModules_.find(prev->id);
+            if (pit != symbolModules_.end()) symbolModules_[sym->id] = pit->second;
+        }
         symbolTable_.define(sym);
 
         if (stmt.isExtern()) {
@@ -1943,12 +1972,10 @@ public:
                     // expressions and integer literals like the local path
                     // (`var g: f64 = 5`, `1.0 + 2.0`, `7 as f64`, mixed
                     // widths) and store the declared width's IEEE-754 bits
-                    // (CID-029). Before this only a bare float literal
-                    // survived; every other shape silently read 0 from
-                    // .bss. Non-constant initializers (identifiers, calls,
-                    // struct literals) still BSS-zero — global scalars have
-                    // no runtime initializer, and no silent-zero-free fix
-                    // exists without a checker diagnostic.
+                    // (CID-029). CIDER-BUG-048: the checker gates
+                    // non-constant float initializers; if a checker-accepted
+                    // shape still cannot fold, report it instead of silently
+                    // BSS-zeroing the slot.
                     double fv = 0;
                     if (tryEvalConstF64(stmt.getInitializer(), fv)) {
                         uint64_t bits = 0;
@@ -1962,6 +1989,10 @@ public:
                         }
                         initVal = (int64_t)bits;
                         initIsFloat = true;
+                    } else if (reporter_) {
+                        reporter_->error("Global float initializer in declaration of '" +
+                                             stmt.getName() + "' must use constant expressions",
+                                         stmt.getLine());
                     }
                 } else if (auto num = dynamic_cast<NumberExpr*>(stmt.getInitializer())) {
                     initVal = (int64_t)num->getUIntValue();
@@ -1972,6 +2003,16 @@ public:
                     uint64_t folded = 0;
                     if (tryEvalConstU64(stmt.getInitializer(), folded)) {
                         initVal = (int64_t)folded;
+                    } else if (reporter_) {
+                        // CIDER-BUG-048 safety net: the checker accepts only
+                        // constant shapes, but a few cannot fold (division by
+                        // zero, an oversized shift, a single-precision cast
+                        // round-trip) and non-scalar aggregates have no
+                        // supported initializer. Report them — never a
+                        // silent zero.
+                        reporter_->error("Global initializer in declaration of '" +
+                                             stmt.getName() + "' must use constant expressions",
+                                         stmt.getLine());
                     }
                 }
             }
@@ -2814,10 +2855,19 @@ public:
     // Evaluate an integer constant expression for global initializers
     // (CID-014): `1 << 4`, `0x10|0x20`, `~0x10`, `(1<<4)`, casts of
     // constants, etc. Only folds what is exactly representable (integers,
-    // chars, groups, unary -/~, int binary ops with no div-by-zero and
-    // shifts < 64). Anything else (floats, identifiers, calls) returns
-    // false and the global keeps the old BSS-zero behavior.
+    // chars, bools, groups, unary -/+/~, int binary ops with no div-by-zero
+    // and shifts < 64). CIDER-BUG-048: an identifier naming a `const`
+    // symbol folds by recursing into the declaration's initializer
+    // (order-independently, cycle-safe); enum variants fold via constValue.
+    // Anything else (floats, calls, non-const globals) returns false — the
+    // checker rejects those shapes before IR generation, so no global is
+    // silently BSS-zeroed.
     bool tryEvalConstU64(Expression* expr, uint64_t& out) {
+        std::set<uint64_t> visiting;
+        return tryEvalConstU64(expr, out, visiting);
+    }
+
+    bool tryEvalConstU64(Expression* expr, uint64_t& out, std::set<uint64_t>& visiting) {
         if (!expr) return false;
         if (auto num = dynamic_cast<NumberExpr*>(expr)) {
             if (num->isFloat()) return false;
@@ -2828,19 +2878,28 @@ public:
             out = (uint64_t)(unsigned char)ch->getValue();
             return true;
         }
+        if (auto b = dynamic_cast<BooleanExpr*>(expr)) {
+            out = b->getValue() ? 1 : 0;
+            return true;
+        }
+        if (dynamic_cast<NilPtrExpr*>(expr)) {
+            out = 0;
+            return true;
+        }
         if (auto grp = dynamic_cast<GroupingExpr*>(expr)) {
-            return tryEvalConstU64(grp->getExpression(), out);
+            return tryEvalConstU64(grp->getExpression(), out, visiting);
         }
         if (auto un = dynamic_cast<UnaryExpr*>(expr)) {
             uint64_t v = 0;
-            if (!tryEvalConstU64(un->getOperand(), v)) return false;
+            if (!tryEvalConstU64(un->getOperand(), v, visiting)) return false;
             if (un->getOperator() == "-") { out = 0 - v; return true; }
             if (un->getOperator() == "~") { out = ~v; return true; }
+            if (un->getOperator() == "+") { out = v; return true; }
             return false;
         }
         if (auto cast = dynamic_cast<CastExpr*>(expr)) {
             uint64_t v = 0;
-            if (!tryEvalConstU64(cast->getExpression(), v)) return false;
+            if (!tryEvalConstU64(cast->getExpression(), v, visiting)) return false;
             TypeInfo target = TypeInfo::fromAST(cast->getTargetType());
             if (target.pointerLevel > 0) return false;
             IRType irType = mapType(target.name);
@@ -2851,10 +2910,26 @@ public:
             out = v;
             return true;
         }
+        if (auto id = dynamic_cast<IdentifierExpr*>(expr)) {
+            auto sym = resolveConstIdentifier(id->getName());
+            return tryEvalConstSymbolU64(sym, out, visiting);
+        }
+        // CIDER-BUG-048: a module-qualified const (`mc.K`) folds like the
+        // bare name (mirrors functionPointerInitTarget's module-member path).
+        if (auto mem = dynamic_cast<MemberAccessExpr*>(expr)) {
+            if (mem->isArrow()) return false;
+            auto base = dynamic_cast<IdentifierExpr*>(mem->getObject());
+            if (!base) return false;
+            auto baseSym = resolveConstIdentifier(base->getName());
+            if (!baseSym || baseSym->kind != SymbolKind::MODULE) return false;
+            auto modSym = std::static_pointer_cast<ModuleSymbol>(baseSym);
+            auto target = modSym->scope ? modSym->scope->resolveLocal(mem->getMember()) : nullptr;
+            return tryEvalConstSymbolU64(target, out, visiting);
+        }
         if (auto bin = dynamic_cast<BinaryExpr*>(expr)) {
             uint64_t l = 0, r = 0;
-            if (!tryEvalConstU64(bin->getLeft(), l)) return false;
-            if (!tryEvalConstU64(bin->getRight(), r)) return false;
+            if (!tryEvalConstU64(bin->getLeft(), l, visiting)) return false;
+            if (!tryEvalConstU64(bin->getRight(), r, visiting)) return false;
             const std::string& op = bin->getOperator();
             if (op == "+") out = l + r;
             else if (op == "-") out = l - r;
@@ -2880,6 +2955,43 @@ public:
         return false;
     }
 
+    // CIDER-BUG-048: fold an identifier that names a `const` symbol. A
+    // const declaration recurses into its (exact) initializer; enum
+    // variants and initializer-less consts carry constValue. `visiting`
+    // breaks cycles (`const a = b; const b = a;`), which the checker
+    // reports as non-constant before ir_gen runs.
+    bool tryEvalConstSymbolU64(const std::shared_ptr<Symbol>& sym, uint64_t& out,
+                               std::set<uint64_t>& visiting) {
+        if (!sym || !sym->isConst || sym->kind != SymbolKind::VARIABLE) return false;
+        if (!sym->constInit) {
+            out = (uint64_t)(int64_t)sym->constValue;
+            return true;
+        }
+        if (!visiting.insert(sym->id).second) return false;
+        // Resolve the const's own initializer in its declaration scope, so
+        // a module const that references an unexported sibling still folds
+        // when the use site is another module.
+        Scope* prevScope = constEvalScope_;
+        if (Scope* declScope = scopeForModule(definingModuleFor(sym, sym->name))) {
+            constEvalScope_ = declScope;
+        }
+        bool ok = tryEvalConstU64(sym->constInit, out, visiting);
+        constEvalScope_ = prevScope;
+        visiting.erase(sym->id);
+        return ok;
+    }
+
+    // CIDER-BUG-048: resolve an identifier while folding const
+    // initializers. Inside a const declaration, names bind in that
+    // declaration scope (then the root); at top level they bind at the
+    // use site.
+    std::shared_ptr<Symbol> resolveConstIdentifier(const std::string& name) {
+        if (!constEvalScope_) return symbolTable_.resolve(name);
+        if (auto sym = constEvalScope_->resolveLocal(name)) return sym;
+        Scope* root = symbolTable_.getRootScope();
+        return root ? root->resolveLocal(name) : nullptr;
+    }
+
     // Constant evaluation for global float initializers (CID-003 follow-up
     // M3). Evaluates the same shapes as tryEvalConstU64 plus float
     // arithmetic, and mirrors the local-variable path so a global and an
@@ -2890,9 +3002,10 @@ public:
     // operand's width (CVT_ITOF), and mixed f32/f64 computes at f64. A
     // bare float literal keeps its parsed double until a width context
     // rounds it, exactly like an IR F32 constant (see convertFloatWidth);
-    // `literal` tracks that. Returns false for non-constant shapes
-    // (identifiers, calls, ternary, sizeof, struct literals), which global
-    // scalars cannot materialize.
+    // `literal` tracks that. Returns false for non-constant shapes (calls,
+    // ternary, sizeof, struct literals, non-const identifiers); `const`
+    // references fold recursively (CIDER-BUG-048). Global scalars cannot
+    // materialize the rejected shapes, so the checker rejects them.
     struct ConstEvalValue {
         bool isFloat = false;
         bool isF64 = false;       // float width: false == f32
@@ -3049,6 +3162,25 @@ public:
             out.u = canonicalInt(bits, width, tgtUnsigned);
             return true;
         }
+        // CIDER-BUG-048: a `const` reference folds through its initializer
+        // with full typed semantics (so an i8/u32 const keeps its width and
+        // sign instead of being re-typed as a literal). Enum variants and
+        // initializer-less consts carry constValue (int). `constEvalVisiting_`
+        // breaks cycles; the checker rejects them first.
+        if (auto id = dynamic_cast<IdentifierExpr*>(expr)) {
+            return tryEvalConstSymbolValue(resolveConstIdentifier(id->getName()), out);
+        }
+        // CIDER-BUG-048: module-qualified consts fold like bare ones.
+        if (auto mem = dynamic_cast<MemberAccessExpr*>(expr)) {
+            if (mem->isArrow()) return false;
+            auto base = dynamic_cast<IdentifierExpr*>(mem->getObject());
+            if (!base) return false;
+            auto baseSym = resolveConstIdentifier(base->getName());
+            if (!baseSym || baseSym->kind != SymbolKind::MODULE) return false;
+            auto modSym = std::static_pointer_cast<ModuleSymbol>(baseSym);
+            auto target = modSym->scope ? modSym->scope->resolveLocal(mem->getMember()) : nullptr;
+            return tryEvalConstSymbolValue(target, out);
+        }
         if (auto bin = dynamic_cast<BinaryExpr*>(expr)) {
             ConstEvalValue l, r;
             if (!tryEvalConstValue(bin->getLeft(), l)) return false;
@@ -3126,6 +3258,30 @@ public:
             return true;
         }
         return false;
+    }
+
+    // CIDER-BUG-048: fold a `const` symbol reference into a typed value.
+    // Recurses into the declaration's initializer in its own scope; enum
+    // variants and initializer-less consts carry constValue (int).
+    bool tryEvalConstSymbolValue(const std::shared_ptr<Symbol>& sym, ConstEvalValue& out) {
+        if (!sym || !sym->isConst || sym->kind != SymbolKind::VARIABLE) return false;
+        if (!sym->constInit) {
+            out = ConstEvalValue{};
+            out.isFloat = false;
+            out.intBits = 32;
+            out.isUnsigned = false;
+            out.u = canonicalInt((uint64_t)(int64_t)sym->constValue, 32, false);
+            return true;
+        }
+        if (!constEvalVisiting_.insert(sym->id).second) return false;
+        Scope* prevScope = constEvalScope_;
+        if (Scope* declScope = scopeForModule(definingModuleFor(sym, sym->name))) {
+            constEvalScope_ = declScope;
+        }
+        bool ok = tryEvalConstValue(sym->constInit, out);
+        constEvalScope_ = prevScope;
+        constEvalVisiting_.erase(sym->id);
+        return ok;
     }
 
     // Global float initializer entry point: the expression's own value,
@@ -4949,6 +5105,12 @@ private:
     std::set<std::string> paramNames_;
     std::set<std::string> assignedParams_;
     std::map<std::string, IRValue> globalValues_;
+    // CIDER-BUG-048: cycle guard while folding `const` references in
+    // tryEvalConstValue (balanced insert/erase around each recursion), and
+    // the declaration scope that const-initializer identifiers resolve in
+    // (null at top level: resolve at the use site).
+    std::set<uint64_t> constEvalVisiting_;
+    Scope* constEvalScope_ = nullptr;
     // CID-020/021 (spec §6): resolved class/struct/interface objects for
     // vtable emission in generate(). Objects (not names) so module-scope
     // types keep their identity; same-named types in two modules stay

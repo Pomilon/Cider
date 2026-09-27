@@ -1,0 +1,23 @@
+// CIDER-BUG-048: integer scalars have no runtime initializer, so a
+// non-constant global initializer used to be silently BSS-zeroed. They must
+// use constant expressions, mirroring the float / function-pointer global
+// rules. `const` references are constant (folded recursively by ir_gen).
+func get() -> int { return 5; }
+
+var g_call: int = get();
+var b: int = 2;
+var g_nonconst: int = b + 1;  // mutable global: not a constant
+
+var good: int = 7;
+var g_const_ok: int = LATER;  // forward const reference: still accepted
+const LATER: int = 42;
+
+const BAD: int = get();  // consts have no runtime initializer either
+
+// Pointer scalars only fold nilPtr, string literals and function names.
+var p: *int = &good;
+var s: string = get() as *char;
+
+func main() -> int {
+  return 0;
+}

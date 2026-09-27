@@ -476,6 +476,15 @@ public:
     // and visit(BinaryExpr) so the two copies cannot drift.
     static bool isFloatName(const std::string& n) { return n == "float" || n == "f64"; }
 
+    // CIDER-BUG-048: integer scalar spellings that ir_gen materialises as an
+    // integer .data/.bss slot (mapType). `bool` is included: it maps to I32
+    // storage and a bool literal must not be silently dropped to zero.
+    static bool isIntegerName(const std::string& n) {
+        return n == "int" || n == "u8" || n == "i8" || n == "u16" || n == "i16" ||
+               n == "u32" || n == "i32" || n == "u64" || n == "i64" ||
+               n == "char" || n == "byte" || n == "bool";
+    }
+
     bool areTypesCompatible(TypeInfo t1, TypeInfo t2) {
         if (t1.name == "wildcard" || t2.name == "wildcard") return true;
         t1 = resolveType(t1);
@@ -645,26 +654,85 @@ public:
         reporter_.setFile(prevFile);
     }
 
+    // CIDER-BUG-048: while folding a const's initializer, identifiers must
+    // resolve in the declaration's own module, not at the use site (a module
+    // const may reference an unexported const next to it). Null at top level
+    // means "resolve in the current scope".
+    Scope* constEvalScope_ = nullptr;
+
+    std::shared_ptr<Symbol> resolveConstIdentifier(const std::string& name) {
+        if (!constEvalScope_) return resolveScoped(name);
+        if (auto sym = constEvalScope_->resolveLocal(name)) return sym;
+        Scope* root = symbolTable_.getRootScope();
+        return root ? root->resolveLocal(name) : nullptr;
+    }
+
     // Shape check for compile-time integer constants (CID-007). Paired
     // with IRGenerator::tryEvalConstU64, which evaluates the same shapes;
     // anything rejected here would otherwise silently zero-initialise.
-    static bool isConstIntExpr(Expression* expr) {
+    // CIDER-BUG-048: identifiers naming `const` symbols recurse into the
+    // declaration's initializer, so `var g: int = SOME_CONST;` and const
+    // chains keep their value (order-independently, with cycle detection).
+    bool isConstIntExpr(Expression* expr) {
+        std::set<uint64_t> visiting;
+        return isConstIntExpr(expr, visiting);
+    }
+
+    bool isConstIntExpr(Expression* expr, std::set<uint64_t>& visiting) {
         if (!expr) return false;
         if (auto num = dynamic_cast<NumberExpr*>(expr)) return !num->isFloat();
         if (dynamic_cast<CharExpr*>(expr)) return true;
-        if (auto grp = dynamic_cast<GroupingExpr*>(expr)) return isConstIntExpr(grp->getExpression());
+        if (dynamic_cast<BooleanExpr*>(expr)) return true;
+        if (auto grp = dynamic_cast<GroupingExpr*>(expr)) return isConstIntExpr(grp->getExpression(), visiting);
         if (auto un = dynamic_cast<UnaryExpr*>(expr)) {
-            return (un->getOperator() == "-" || un->getOperator() == "~") &&
-                   isConstIntExpr(un->getOperand());
+            return (un->getOperator() == "-" || un->getOperator() == "+" ||
+                    un->getOperator() == "~") &&
+                   isConstIntExpr(un->getOperand(), visiting);
         }
         if (auto bin = dynamic_cast<BinaryExpr*>(expr)) {
             const std::string& op = bin->getOperator();
             bool supported = (op == "+" || op == "-" || op == "*" || op == "/" || op == "%" ||
                               op == "<<" || op == ">>" || op == "&" || op == "|" || op == "^");
-            return supported && isConstIntExpr(bin->getLeft()) && isConstIntExpr(bin->getRight());
+            return supported && isConstIntExpr(bin->getLeft(), visiting) &&
+                   isConstIntExpr(bin->getRight(), visiting);
         }
-        if (auto cast = dynamic_cast<CastExpr*>(expr)) return isConstIntExpr(cast->getExpression());
+        if (auto cast = dynamic_cast<CastExpr*>(expr)) {
+            return isConstIntExpr(cast->getExpression(), visiting);
+        }
+        if (auto id = dynamic_cast<IdentifierExpr*>(expr)) {
+            return isConstSymbolIntExpr(resolveConstIdentifier(id->getName()), visiting);
+        }
+        // CIDER-BUG-048: a module-qualified const (`mc.K`) is the same
+        // constant as a from-import alias; resolve the member in the
+        // module's own scope (mirrors isConstantFunctionPointerInit).
+        if (auto mem = dynamic_cast<MemberAccessExpr*>(expr)) {
+            if (mem->isArrow()) return false;
+            auto base = dynamic_cast<IdentifierExpr*>(mem->getObject());
+            if (!base) return false;
+            auto baseSym = resolveConstIdentifier(base->getName());
+            if (!baseSym || baseSym->kind != SymbolKind::MODULE) return false;
+            auto modSym = std::static_pointer_cast<ModuleSymbol>(baseSym);
+            auto target = modSym->scope ? modSym->scope->resolveLocal(mem->getMember()) : nullptr;
+            return isConstSymbolIntExpr(target, visiting);
+        }
         return false;
+    }
+
+    // CIDER-BUG-048: foldable `const` symbol for the integer shape check.
+    // Recurse into the declaration's initializer (in its own scope, cycle-
+    // checked). Enum variants and initializer-less consts are constants by
+    // construction.
+    bool isConstSymbolIntExpr(const std::shared_ptr<Symbol>& sym,
+                              std::set<uint64_t>& visiting) {
+        if (!sym || !sym->isConst || sym->kind != SymbolKind::VARIABLE) return false;
+        if (!sym->constInit) return true;
+        if (!visiting.insert(sym->id).second) return false;
+        Scope* prevScope = constEvalScope_;
+        if (Scope* declScope = scopeForModule(definingModuleOf(sym))) constEvalScope_ = declScope;
+        bool ok = isConstIntExpr(sym->constInit, visiting);
+        constEvalScope_ = prevScope;
+        visiting.erase(sym->id);
+        return ok;
     }
 
     // Shape check for compile-time constant float initializers (CID-003
@@ -919,6 +987,45 @@ public:
                   stmt.getLine());
         }
 
+        // CIDER-BUG-048: integer scalars have no runtime initializer either.
+        // `var g: int = get();` and `var a: int = b + 1;` (b a non-const
+        // global) used to type-check and silently read 0 from .bss on every
+        // backend. Only shapes ir_gen's tryEvalConstU64 folds are accepted —
+        // literals, constant expressions and `const` references resolved
+        // recursively — so an accepted declaration always lands in .data.
+        if (stmt.getInitializer() && !stmt.isExtern() && symbolTable_.scopeDepth() == 0 &&
+            declaredType.pointerLevel == 0 && !declaredType.isArray) {
+            TypeInfo resolvedType = resolveType(declaredType);
+            if (resolvedType.pointerLevel == 0 && !resolvedType.isArray &&
+                isIntegerName(resolvedType.name) &&
+                !isConstIntExpr(stmt.getInitializer())) {
+                error("Global integer initializer in declaration of '" + stmt.getName() +
+                          "' must use constant expressions", stmt.getLine());
+            }
+        }
+
+        // CIDER-BUG-048: pointer and string scalars share the problem —
+        // without a runtime initializer ir_gen can only materialise nilPtr
+        // (zero), a string/wide-string literal (the early string paths) or
+        // a function-name shape (a .data cell holding the label). Addresses
+        // (`&x`) and calls used to silently BSS-zero; they are rejected
+        // now. Function-pointer spellings have their own, stricter gate.
+        if (stmt.getInitializer() && !stmt.isExtern() && symbolTable_.scopeDepth() == 0 &&
+            !declaredType.isArray) {
+            TypeInfo resolvedPtr = resolveType(declaredType);
+            bool scalarPtr = !resolvedPtr.isArray &&
+                             (resolvedPtr.pointerLevel > 0 || resolvedPtr.name == "string");
+            Expression* init = stmt.getInitializer();
+            if (scalarPtr && !resolvedFnDecl.isFunctionPointer &&
+                !isConstantFunctionPointerInit(init) &&
+                !dynamic_cast<StringExpr*>(init) &&
+                !dynamic_cast<WideStringExpr*>(init)) {
+                error("Global pointer initializer in declaration of '" + stmt.getName() +
+                          "' must be nilPtr, a string literal, or a function name",
+                      stmt.getLine());
+            }
+        }
+
         auto sym = std::make_shared<Symbol>();
         sym->kind = SymbolKind::VARIABLE;
         sym->name = stmt.getName();
@@ -926,6 +1033,16 @@ public:
         sym->line = stmt.getLine();
         sym->col = stmt.getColumn();
         sym->isConst = stmt.isConst();
+        // CIDER-BUG-048: checker-created symbols replace the collector's in
+        // the shared scope; carry the const initializer so later constant
+        // folding (and uses checked after this declaration) sees it, and
+        // keep the defining-module provenance so folding a reference still
+        // resolves the initializer in its own module.
+        if (sym->isConst) sym->constInit = stmt.getInitializer();
+        if (auto prev = symbolTable_.getCurrentScope()->resolveLocal(sym->name)) {
+            auto pit = symbolModules_.find(prev->id);
+            if (pit != symbolModules_.end()) symbolModules_[sym->id] = pit->second;
+        }
         symbolTable_.define(sym);
     }
 
