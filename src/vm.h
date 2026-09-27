@@ -52,6 +52,10 @@ private:
         int frameIndex = 0;
         int blockIdx = 0;
         int instrIdx = 0;
+        // CIDER-BUG-053: register that receives the _setjmp result. The
+        // snapshot below is taken before the CALL handler writes it, so
+        // longjmp must redeliver the jump value there itself.
+        std::string dest;
         std::map<std::string, RegVal> regs;
     };
 
@@ -103,7 +107,11 @@ private:
 
     bool isExternFunctionName(const std::string& name) const;
     int64_t externValueId(const std::string& name);
-    bool tryBuiltinCall(const std::string& name, const std::vector<IRValue>& args);
+    // CIDER-BUG-053: destName is the CALL destination register; _setjmp
+    // records it so longjmp can redeliver the jump value after a callee
+    // frame unwinds.
+    bool tryBuiltinCall(const std::string& name, const std::vector<IRValue>& args,
+                        const std::string& destName = "");
 
     int64_t malloc(int64_t size);
     void free(int64_t offset);
@@ -117,7 +125,8 @@ private:
     void store(int64_t addr, const RegVal& val, IRType type, int64_t offset = 0);
 
     void execAsm(const IRInstruction& instr);
-    void doCall(const IRValue& target, const std::vector<IRValue>& args);
+    void doCall(const IRValue& target, const std::vector<IRValue>& args,
+                const std::string& destName = "");
     void doVirtualCall(const IRValue& obj, int64_t vtableIndex, const std::vector<IRValue>& args);
 };
 

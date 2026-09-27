@@ -473,14 +473,12 @@ VMResult VM::run(const ModuleIR& module, const std::string& runFunction) {
         }
         case IROp::CALL: {
             size_t before = frames_.size();
-            doCall(instr.args[0], std::vector<IRValue>(instr.args.begin() + 1, instr.args.end()));
+            doCall(instr.args[0], std::vector<IRValue>(instr.args.begin() + 1, instr.args.end()),
+                   instr.dest ? instr.dest->name : "");
             if (instr.dest) {
                 if (frames_.size() == before) {
                     // Builtin: the callee returned without pushing a frame.
                     regs_[instr.dest->name] = retReg_;
-                    // Also record the pending dest so a longjmp can
-                    // re-deliver the setjmp's result.
-                    frames_.back().pendingDest = instr.dest->name;
                 } else if (frames_.size() >= 2) {
                     frames_[frames_.size() - 2].pendingDest = instr.dest->name;
                 }
@@ -1083,7 +1081,10 @@ int64_t VM::externValueId(const std::string& name) {
 
 // Builtins the VM provides directly (no module body). Shared by direct
 // calls to unresolved labels and indirect calls carrying an extern id.
-bool VM::tryBuiltinCall(const std::string& name, const std::vector<IRValue>& args) {
+// destName carries the CALL's destination register for _setjmp
+// (CIDER-BUG-053); the other builtins deliver through retReg_.
+bool VM::tryBuiltinCall(const std::string& name, const std::vector<IRValue>& args,
+                        const std::string& destName) {
     if (name == "malloc") {
         RegVal v = args.empty() ? RegVal{} : resolveValue(args[0]);
         RegVal d;
@@ -1116,6 +1117,7 @@ bool VM::tryBuiltinCall(const std::string& name, const std::vector<IRValue>& arg
         const Frame& f = frames_.back();
         st.blockIdx = (int)f.blockIdx;
         st.instrIdx = (int)f.instrIdx;
+        st.dest = destName;
         st.regs = regs_;
         jumpStates_[buf.i] = std::move(st);
         retReg_ = RegVal{};
@@ -1129,21 +1131,29 @@ bool VM::tryBuiltinCall(const std::string& name, const std::vector<IRValue>& arg
         const JumpState& st = it->second;
         if (st.frameIndex < 0 || st.frameIndex >= (int)frames_.size())
             throw VMError{"longjmp: frame gone"};
+        // CIDER-BUG-053: discard the unwound callee frames and release
+        // their frame-local regions. The interrupted call's pending result
+        // is voided — the jump leaves that call site for good.
+        for (size_t i = frames_.size(); i > (size_t)st.frameIndex + 1; --i) {
+            if (frames_[i - 1].localBase != 0) free(frames_[i - 1].localBase);
+        }
         frames_.resize((size_t)st.frameIndex + 1);
         Frame& f = frames_[(size_t)st.frameIndex];
         f.blockIdx = (size_t)st.blockIdx;
         f.instrIdx = (size_t)st.instrIdx;
         regs_ = st.regs;
-        if (!f.pendingDest.empty()) {
-            regs_[f.pendingDest] = val;
-            f.pendingDest.clear();
-        }
+        f.pendingDest.clear();
+        // Redeliver the setjmp result to its own destination register: the
+        // snapshot predates the CALL handler's write, and a callee CALL may
+        // have overwritten pendingDest in the meantime.
+        if (!st.dest.empty()) regs_[st.dest] = val;
         return true;
     }
     return false;
 }
 
-void VM::doCall(const IRValue& target, const std::vector<IRValue>& args) {
+void VM::doCall(const IRValue& target, const std::vector<IRValue>& args,
+                const std::string& destName) {
     int64_t fid;
     if (target.kind == IRValue::LABEL) {
         // A module-defined function wins over the builtins (e.g. the
@@ -1152,7 +1162,7 @@ void VM::doCall(const IRValue& target, const std::vector<IRValue>& args) {
         if (defined != functionIds_.end()) {
             fid = defined->second;
         } else {
-            if (tryBuiltinCall(target.name, args)) return;
+            if (tryBuiltinCall(target.name, args, destName)) return;
             throw VMError{"call to unknown function " + target.name};
         }
     } else {
@@ -1164,7 +1174,7 @@ void VM::doCall(const IRValue& target, const std::vector<IRValue>& args) {
             // reporting a bare bad id.
             auto nit = externValueNames_.find(fid);
             if (nit != externValueNames_.end()) {
-                if (tryBuiltinCall(nit->second, args)) return;
+                if (tryBuiltinCall(nit->second, args, destName)) return;
                 throw VMError{"call: unresolved extern function " + nit->second};
             }
             throw VMError{"call: bad function id"};

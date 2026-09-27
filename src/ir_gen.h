@@ -803,6 +803,8 @@ public:
         auto prevUnwindDepths = unwindDepths_;
         auto prevDeferStack = deferStack_;
         auto prevDestructorStack = destructorStack_;
+        auto prevActiveTryScopes = activeTryScopes_;
+        BasicBlock* prevEntryBlock = functionEntryBlock_;
         bool prevIsSret = currentIsSret_;
         TypeInfo prevReturnType = currentReturnType_;
 
@@ -823,6 +825,7 @@ public:
         currentFunction_->setAbi(isVirtMethod ? Abi::SysV : stmt.getAbi());
         currentFunction_->setSourcePath(currentSourcePath_);
         currentBlock_ = std::make_unique<BasicBlock>("entry");
+        functionEntryBlock_ = currentBlock_.get();
 
         variableValues_.clear();
         paramNames_.clear();
@@ -833,6 +836,7 @@ public:
         unwindDepths_.clear();
         deferStack_.clear();
         destructorStack_.clear();
+        activeTryScopes_.clear();
         deferStack_.push_back({});  // Function scope level
         destructorStack_.push_back({});
 
@@ -937,6 +941,8 @@ public:
         unwindDepths_ = prevUnwindDepths;
         deferStack_ = prevDeferStack;
         destructorStack_ = prevDestructorStack;
+        activeTryScopes_ = std::move(prevActiveTryScopes);
+        functionEntryBlock_ = prevEntryBlock;
         currentIsSret_ = prevIsSret;
         currentReturnType_ = prevReturnType;
     }
@@ -966,6 +972,9 @@ public:
                 lastExprType_ = currentReturnType_;
                 emitDefers();
                 emitDestructors();
+                // CIDER-BUG-053: a return from inside a try must restore the
+                // enclosing handler for the caller's frame.
+                emitExceptionUnwind(0);
                 currentBlock_->addInstruction({IROp::RET, std::nullopt, {}});
                 startBlock(nextLabel("dead"));
                 return;
@@ -986,10 +995,12 @@ public:
 
             emitDefers();
             emitDestructors();
+            emitExceptionUnwind(0);
             currentBlock_->addInstruction({IROp::RET, std::nullopt, {val}});
         } else {
             emitDefers();
             emitDestructors();
+            emitExceptionUnwind(0);
             currentBlock_->addInstruction({IROp::RET, std::nullopt, {}});
         }
         startBlock(nextLabel("dead"));
@@ -1412,6 +1423,8 @@ public:
         auto prevUnwindDepths = unwindDepths_;
         auto prevDeferStack = deferStack_;
         auto prevDestructorStack = destructorStack_;
+        auto prevActiveTryScopes = activeTryScopes_;
+        BasicBlock* prevEntryBlock = functionEntryBlock_;
         bool prevIsSret = currentIsSret_;
         TypeInfo prevReturnType = currentReturnType_;
         // Closures are invoked via function pointers (non-sret convention),
@@ -1426,6 +1439,7 @@ public:
         currentFunction_->setAbi(Abi::SysV);
         currentFunction_->setSourcePath(currentSourcePath_);
         currentBlock_ = std::make_unique<BasicBlock>("entry");
+        functionEntryBlock_ = currentBlock_.get();
         variableValues_.clear();
         paramNames_.clear();
         tempCount_ = 0;
@@ -1435,6 +1449,7 @@ public:
         unwindDepths_.clear();
         deferStack_.clear();
         destructorStack_.clear();
+        activeTryScopes_.clear();
         deferStack_.push_back({});
         destructorStack_.push_back({});
 
@@ -1501,6 +1516,8 @@ public:
         unwindDepths_ = std::move(prevUnwindDepths);
         deferStack_ = std::move(prevDeferStack);
         destructorStack_ = std::move(prevDestructorStack);
+        activeTryScopes_ = std::move(prevActiveTryScopes);
+        functionEntryBlock_ = prevEntryBlock;
         currentIsSret_ = prevIsSret;
         currentReturnType_ = prevReturnType;
 
@@ -3832,6 +3849,8 @@ public:
             // are not run twice.
             emitDefers(unwindDepths_.back());
             emitDestructors(unwindDepths_.back());
+            // CIDER-BUG-053: same partial unwind for active try handlers.
+            emitExceptionUnwind(unwindDepths_.back());
             currentBlock_->addInstruction({IROp::BR, std::nullopt, {IRValue::Label(breakLabels_.back())}});
             startBlock(nextLabel("dead"));
         }
@@ -3841,6 +3860,7 @@ public:
             // Same partial unwind as break (CIDER-BUG-050).
             emitDefers(unwindDepths_.back());
             emitDestructors(unwindDepths_.back());
+            emitExceptionUnwind(unwindDepths_.back());
             currentBlock_->addInstruction({IROp::BR, std::nullopt, {IRValue::Label(continueLabels_.back())}});
             startBlock(nextLabel("dead"));
         }
@@ -4109,11 +4129,18 @@ public:
             IRValue excValAddr = IRValue::Label("_exception_value");
             currentBlock_->addInstruction({IROp::STORE, std::nullopt, {excValAddr, thrownVal}});
 
+            // CIDER-BUG-053: jump to the handler active at this dynamic
+            // point, which may live in an ancestor frame. The pointer is
+            // swapped at every try entry/exit, so a throw in a callee (or
+            // after nested/recursive tries) unwinds to the right catch.
+            IRValue bufPtr = IRValue::Register(nextTemp(), IRType::PTR);
+            currentBlock_->addInstruction({IROp::LOAD, bufPtr, {IRValue::Label("_exception_buf_ptr")}});
+
             IRInstruction call;
             call.op = IROp::CALL;
             call.dest = std::nullopt;
             call.args.push_back(IRValue::Label("longjmp"));
-            call.args.push_back(IRValue::Label("_exception_jmp_buf"));
+            call.args.push_back(bufPtr);
             call.args.push_back(IRValue::Constant(1, IRType::I32));
             currentBlock_->addInstruction(call);
 
@@ -4130,12 +4157,24 @@ public:
             // exits rather than being dropped when the jump skips them.
             ensureExceptionGlobals();
 
+            // CIDER-BUG-053: the try owns a jmp_buf allocated in the
+            // function entry block (one per frame invocation, even when the
+            // try runs in a loop) and saves the enclosing active handler in
+            // a local. Nested tries and throws from callee frames then land
+            // in the right handler instead of a shared global buffer.
+            IRValue bufAddr = IRValue::Register(nextTemp(), IRType::PTR);
+            emitEntryAlloca(bufAddr, kJmpBufSize);
+            IRValue prevBuf = IRValue::Register(nextTemp(), IRType::PTR);
+            currentBlock_->addInstruction({IROp::LOAD, prevBuf, {IRValue::Label("_exception_buf_ptr")}});
+            currentBlock_->addInstruction({IROp::STORE, std::nullopt, {IRValue::Label("_exception_buf_ptr"), bufAddr}});
+            activeTryScopes_.push_back({prevBuf, deferStack_.size()});
+
             IRValue setjmpDest = IRValue::Register(nextTemp(), IRType::I32);
             IRInstruction setjmpCall;
             setjmpCall.op = IROp::CALL;
             setjmpCall.dest = setjmpDest;
             setjmpCall.args.push_back(IRValue::Label("_setjmp"));
-            setjmpCall.args.push_back(IRValue::Label("_exception_jmp_buf"));
+            setjmpCall.args.push_back(bufAddr);
             currentBlock_->addInstruction(setjmpCall);
 
             std::string tryBlockName = nextLabel("try_body");
@@ -4152,11 +4191,17 @@ public:
             if (currentBlock_ && (currentBlock_->getInstructions().empty() ||
                                   (currentBlock_->getInstructions().back().op != IROp::BR &&
                                    currentBlock_->getInstructions().back().op != IROp::RET))) {
+                // Normal completion: the enclosing handler is active again.
+                currentBlock_->addInstruction({IROp::STORE, std::nullopt, {IRValue::Label("_exception_buf_ptr"), prevBuf}});
                 currentBlock_->addInstruction({IROp::BR, std::nullopt, {IRValue::Label(endName)}});
             }
             symbolTable_.exitScope();
 
             startBlock(catchBlockName);
+            // The throw path skipped the normal exit: reinstall the
+            // enclosing handler before the catch body runs, so a rethrow
+            // targets the enclosing try rather than this one.
+            currentBlock_->addInstruction({IROp::STORE, std::nullopt, {IRValue::Label("_exception_buf_ptr"), prevBuf}});
             symbolTable_.enterScope();
 
             IRValue catchAddr = IRValue::Register(nextTemp(), IRType::PTR);
@@ -4178,6 +4223,7 @@ public:
             symbolTable_.exitScope();
 
             startBlock(endName);
+            activeTryScopes_.pop_back();
         } else {
             symbolTable_.enterScope();
             for (auto& s : stmt.getTryBlock()) s->accept(*this);
@@ -5255,11 +5301,49 @@ public:
             ifaceSyms_.push_back(std::static_pointer_cast<InterfaceSymbol>(isym));
     }
 
+    // CIDER-BUG-053: a jmp_buf slot. glibc's is 25 qwords (200 bytes); the
+    // pomeos runtime only stores 8 but the larger slot is harmless.
+    static constexpr int kJmpBufSize = 200;
+
+    // Allocate a try's jmp_buf in the function's entry block so a try that
+    // runs in a loop reuses one slot per frame invocation. The ALLOCA has no
+    // register operands, so it can go anywhere after the block's leading
+    // PHIs (the entry block may already be terminated by then).
+    void emitEntryAlloca(IRValue dest, int size) {
+        IRInstruction allocaInstr{IROp::ALLOCA, dest, {IRValue::Constant(size, IRType::I32)}};
+        if (!functionEntryBlock_ || functionEntryBlock_ == currentBlock_.get()) {
+            currentBlock_->addInstruction(std::move(allocaInstr));
+            return;
+        }
+        auto& insts = functionEntryBlock_->getInstructions();
+        auto pos = insts.begin();
+        while (pos != insts.end() && pos->op == IROp::PHI) ++pos;
+        insts.insert(pos, std::move(allocaInstr));
+    }
+
+    // Restore _exception_buf_ptr for every try scope entered inside the
+    // blocks being unwound. firstDeferDepth is the deferStack_ size at the
+    // loop's entry (unwindDepths_.back()): the loop pushes its own scope
+    // after recording it, so a try inside the unwound region has a strictly
+    // larger depth. Return passes 0 to unwind every active try.
+    void emitExceptionUnwind(size_t firstDeferDepth) {
+        for (size_t i = activeTryScopes_.size(); i > 0; --i) {
+            if (activeTryScopes_[i - 1].deferDepth <= firstDeferDepth) continue;
+            currentBlock_->addInstruction({IROp::STORE, std::nullopt,
+                                           {IRValue::Label("_exception_buf_ptr"),
+                                            activeTryScopes_[i - 1].prevBuf}});
+        }
+    }
+
     void ensureExceptionGlobals() {
         if (!exceptionGlobalsEnsured_) {
             exceptionGlobalsEnsured_ = true;
-            module_.addGlobalAsm("global _exception_jmp_buf");
-            module_.addGlobalAsm("_exception_jmp_buf: resq 25");
+            // CIDER-BUG-053: _exception_buf_ptr holds the jmp_buf of the
+            // innermost active try (0 when none). Each try allocates its own
+            // buffer, so nested tries, throws after an inner try completed,
+            // and throws from callee frames all reach the right handler.
+            module_.addGlobalAsm("global _exception_buf_ptr");
+            module_.addGlobalAsm("_exception_buf_ptr: resq 1");
             module_.addGlobalAsm("global _exception_value");
             module_.addGlobalAsm("_exception_value: resq 1");
         }
@@ -5313,6 +5397,18 @@ private:
     // leaving enclosing scopes pending until they exit normally. Parallel to
     // breakLabels_/continueLabels_.
     std::vector<size_t> unwindDepths_;
+    // CIDER-BUG-053: each try scope active in the function being generated,
+    // innermost last. `deferDepth` mirrors unwindDepths_ so return/break/
+    // continue restore exactly the handlers they leave.
+    struct ActiveTryScope {
+        IRValue prevBuf;         // enclosing _exception_buf_ptr value
+        size_t deferDepth = 0;   // deferStack_.size() at try entry
+    };
+    std::vector<ActiveTryScope> activeTryScopes_;
+    // Entry block of the function being generated (CIDER-BUG-053): try
+    // buffers are allocated there so a try in a loop reuses one slot per
+    // frame invocation instead of allocating per iteration.
+    BasicBlock* functionEntryBlock_ = nullptr;
     std::vector<std::vector<Statement*>> deferStack_;
     std::vector<std::vector<DestructorInfo>> destructorStack_;
     bool exceptionGlobalsEnsured_ = false;
