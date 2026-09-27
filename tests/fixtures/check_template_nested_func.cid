@@ -1,0 +1,12 @@
+// CIDER-BUG-051: a nested function declaration is not a working function-body
+// form in Cider (the inner name never resolves), so template bodies cannot
+// clone it. It must be reported instead of silently dropped from the
+// instantiation.
+func outer<T>(x: T) -> T {
+    func inner(y: T) -> T { return y; }
+    return inner(x);
+}
+
+func main() -> int {
+    return outer<int>(4) - 4;
+}

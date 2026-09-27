@@ -1224,6 +1224,33 @@ public:
         return name;
     }
 
+    // CIDER-BUG-051: same substitution for a resolved TypeInfo. A function
+    // pointer's signature lives in fnParamTypes/fnReturnType, not in the
+    // name ("fn"), so those recurse; array wrappers keep their element
+    // fields (fromAST copies them onto the wrapper) and recurse the same way.
+    static TypeInfo substituteTypeInfo(const TypeInfo& info,
+                                       const std::vector<std::string>& tmplParams,
+                                       const std::vector<std::string>& tmplArgs) {
+        TypeInfo out = info;
+        if (!out.isFunctionPointer) {
+            out.name = substituteTypeName(out.name, tmplParams, tmplArgs);
+            return out;
+        }
+        if (out.fnParamTypes) {
+            auto params = std::make_shared<std::vector<TypeInfo>>();
+            params->reserve(out.fnParamTypes->size());
+            for (auto& p : *out.fnParamTypes) {
+                params->push_back(substituteTypeInfo(p, tmplParams, tmplArgs));
+            }
+            out.fnParamTypes = std::move(params);
+        }
+        if (out.fnReturnType) {
+            out.fnReturnType = std::make_shared<TypeInfo>(
+                substituteTypeInfo(*out.fnReturnType, tmplParams, tmplArgs));
+        }
+        return out;
+    }
+
     void checkAndInstantiateStructTemplate(const std::string& typeName) {
         size_t pos = typeName.find('<');
         if (pos == std::string::npos) return;
@@ -1339,8 +1366,26 @@ public:
     void visitStmtForTemplateCalls(Statement* stmt) {
         if (!stmt) return;
         switch (stmt->getType()) {
+            // CIDER-BUG-051: unwrap exports, or an explicit template call in
+            // an exported function body is never instantiated ("Undefined
+            // identifier 'id<int>'").
+            case ASTNode::EXPORT_STMT:
+                if (auto es = dynamic_cast<ExportStmt*>(stmt))
+                    visitStmtForTemplateCalls(es->getStmt());
+                break;
+            case ASTNode::EXPORT_EXPRESSION_STMT:
+                if (auto ee = dynamic_cast<ExportExpressionStmt*>(stmt))
+                    visitExprForTemplateCalls(ee->getExpression());
+                break;
             case ASTNode::FUNCTION_DECL_STMT:
                 if (auto fd = dynamic_cast<FunctionDeclStmt*>(stmt)) {
+                    // CIDER-BUG-051: an uninstantiated template body is
+                    // scanned again when its clone is built, where the type
+                    // arguments are concrete. Instantiating calls found here
+                    // would create bogus clones like `grow<T>` whose generic
+                    // names fail type checking. Concrete functions and
+                    // instantiated clones carry no template params.
+                    if (fd->hasTemplateParams()) break;
                     for (auto& s : fd->getBody()) visitStmtForTemplateCalls(s.get());
                 }
                 break;
@@ -1377,10 +1422,58 @@ public:
                     for (auto& s : ws->getBody()) visitStmtForTemplateCalls(s.get());
                 }
                 break;
+            case ASTNode::FOR_STMT:
+                if (auto fs = dynamic_cast<ForStmt*>(stmt)) {
+                    visitStmtForTemplateCalls(fs->getInitializer());
+                    visitExprForTemplateCalls(fs->getCondition());
+                    visitStmtForTemplateCalls(fs->getIncrement());
+                    for (auto& s : fs->getBody()) visitStmtForTemplateCalls(s.get());
+                }
+                break;
             case ASTNode::BLOCK_STMT:
                 if (auto bs = dynamic_cast<BlockStmt*>(stmt)) {
                     for (auto& s : bs->getStatements()) visitStmtForTemplateCalls(s.get());
                 }
+                break;
+            // CIDER-BUG-051: the same statement kinds the template-body
+            // cloner now supports must be scanned for nested template calls
+            // — including in instantiated bodies, which are appended to the
+            // program and re-scanned by collect().
+            case ASTNode::FOR_EACH_STMT:
+                if (auto fe = dynamic_cast<ForEachStmt*>(stmt)) {
+                    visitExprForTemplateCalls(fe->getIterable());
+                    for (auto& s : fe->getBody()) visitStmtForTemplateCalls(s.get());
+                }
+                break;
+            case ASTNode::DELETE_STMT:
+                if (auto ds = dynamic_cast<DeleteStmt*>(stmt))
+                    visitExprForTemplateCalls(ds->getTarget());
+                break;
+            case ASTNode::THROW_STMT:
+                if (auto ts = dynamic_cast<ThrowStmt*>(stmt))
+                    visitExprForTemplateCalls(ts->getValue());
+                break;
+            case ASTNode::TRY_CATCH_STMT:
+                if (auto tc = dynamic_cast<TryCatchStmt*>(stmt)) {
+                    for (auto& s : tc->getTryBlock()) visitStmtForTemplateCalls(s.get());
+                    for (auto& s : tc->getCatchBlock()) visitStmtForTemplateCalls(s.get());
+                }
+                break;
+            case ASTNode::DEFER_STMT:
+                if (auto df = dynamic_cast<DeferStmt*>(stmt))
+                    visitStmtForTemplateCalls(df->getDeferredStmt());
+                break;
+            case ASTNode::MATCH_STMT:
+                if (auto ms = dynamic_cast<MatchStmt*>(stmt)) {
+                    visitExprForTemplateCalls(ms->getExpression());
+                    for (auto& arm : ms->getArms()) {
+                        visitExprForTemplateCalls(arm.pattern.get());
+                        visitStmtForTemplateCalls(arm.body.get());
+                    }
+                }
+                break;
+            case ASTNode::ASM_STMT:
+                // Raw assembly carries no template calls.
                 break;
             default:
                 break;
@@ -1473,6 +1566,32 @@ public:
         } else if (auto index = dynamic_cast<IndexExpr*>(expr)) {
             visitExprForTemplateCalls(index->getObject());
             visitExprForTemplateCalls(index->getIndex());
+        } else if (auto cast = dynamic_cast<CastExpr*>(expr)) {
+            visitExprForTemplateCalls(cast->getExpression());
+        // CIDER-BUG-051: instantiate template calls nested in the expression
+        // kinds the template-body cloner now supports, or a call inside an
+        // instantiated body (which collect() re-scans) would never resolve.
+        } else if (auto list = dynamic_cast<ListExpr*>(expr)) {
+            for (auto& e : list->getElements()) visitExprForTemplateCalls(e.get());
+        } else if (auto table = dynamic_cast<TableExpr*>(expr)) {
+            for (auto& e : table->getEntries()) {
+                visitExprForTemplateCalls(e.first.get());
+                visitExprForTemplateCalls(e.second.get());
+            }
+        } else if (auto slice = dynamic_cast<SliceExpr*>(expr)) {
+            visitExprForTemplateCalls(slice->getObject());
+            visitExprForTemplateCalls(slice->getStart());
+            visitExprForTemplateCalls(slice->getEnd());
+        } else if (auto interp = dynamic_cast<InterpolatedStringExpr*>(expr)) {
+            for (auto& p : interp->getParts()) {
+                if (p.isExpr) visitExprForTemplateCalls(p.expr.get());
+            }
+        } else if (auto fn = dynamic_cast<FunctionExpr*>(expr)) {
+            for (auto& s : fn->getBody()) visitStmtForTemplateCalls(s.get());
+        } else if (auto await = dynamic_cast<AwaitExpr*>(expr)) {
+            visitExprForTemplateCalls(await->getValue());
+        } else if (auto lit = dynamic_cast<StructLiteralExpr*>(expr)) {
+            for (auto& f : lit->getFields()) visitExprForTemplateCalls(f.second.get());
         }
     }
 
@@ -1485,9 +1604,25 @@ public:
                 cloneTypeWithSubst(arr->getBaseType(), tmplParams, tmplArgs),
                 arr->getSize(), arr->getLine(), arr->getColumn());
         }
+        // CIDER-BUG-051: an `fn(T1, ...) -> R` type must keep its signature
+        // (and substituted parameter/return types); the plain-TypeAST path
+        // below would silently degrade it to a bare "fn" name.
+        if (type->isFunctionType()) {
+            std::vector<std::unique_ptr<TypeAST>> clonedParamTypes;
+            for (auto& p : type->getFnParamTypes()) {
+                clonedParamTypes.push_back(cloneTypeWithSubst(p.get(), tmplParams, tmplArgs));
+            }
+            auto cloned = std::make_unique<TypeAST>(
+                type->getName(), type->getPointerLevel(), type->getLine(), type->getColumn(),
+                type->isVolatile(), type->getAbi());
+            cloned->setFunctionSignature(
+                std::move(clonedParamTypes),
+                cloneTypeWithSubst(type->getFnReturnType(), tmplParams, tmplArgs));
+            return cloned;
+        }
         std::string name = substituteTypeName(type->getName(), tmplParams, tmplArgs);
         return std::make_unique<TypeAST>(name, type->getPointerLevel(), type->getLine(), type->getColumn(),
-                                         type->isVolatile());
+                                         type->isVolatile(), type->getAbi());
     }
 
     // Clone one template-body statement into `out`, dropping uncloneable
@@ -1582,11 +1717,91 @@ public:
                 return std::make_unique<BreakStmt>(stmt->getLine(), stmt->getColumn());
             case ASTNode::CONTINUE_STMT:
                 return std::make_unique<ContinueStmt>(stmt->getLine(), stmt->getColumn());
+            // CIDER-BUG-051: the remaining body-legal statement kinds used
+            // to hit the diagnostic below (their nodes were dropped from
+            // every instantiation). They clone mechanically; all nested
+            // expressions/types go through the substitution-aware helpers.
+            case ASTNode::FOR_EACH_STMT: {
+                auto fe = dynamic_cast<ForEachStmt*>(stmt);
+                std::vector<std::unique_ptr<Statement>> clonedBody;
+                for (auto& s : fe->getBody()) {
+                    cloneInto(clonedBody, s.get(), tmplParams, tmplArgs);
+                }
+                return std::make_unique<ForEachStmt>(
+                    fe->getVarName(),
+                    cloneExprWithSubst(fe->getIterable(), tmplParams, tmplArgs),
+                    std::move(clonedBody), fe->getLine(), fe->getColumn());
+            }
+            case ASTNode::DELETE_STMT: {
+                auto ds = dynamic_cast<DeleteStmt*>(stmt);
+                return std::make_unique<DeleteStmt>(
+                    cloneExprWithSubst(ds->getTarget(), tmplParams, tmplArgs),
+                    ds->getLine(), ds->getColumn());
+            }
+            case ASTNode::THROW_STMT: {
+                auto ts = dynamic_cast<ThrowStmt*>(stmt);
+                return std::make_unique<ThrowStmt>(
+                    cloneExprWithSubst(ts->getValue(), tmplParams, tmplArgs),
+                    ts->getLine(), ts->getColumn());
+            }
+            case ASTNode::TRY_CATCH_STMT: {
+                auto tc = dynamic_cast<TryCatchStmt*>(stmt);
+                std::vector<std::unique_ptr<Statement>> clonedTry;
+                for (auto& s : tc->getTryBlock()) {
+                    cloneInto(clonedTry, s.get(), tmplParams, tmplArgs);
+                }
+                std::vector<std::unique_ptr<Statement>> clonedCatch;
+                for (auto& s : tc->getCatchBlock()) {
+                    cloneInto(clonedCatch, s.get(), tmplParams, tmplArgs);
+                }
+                return std::make_unique<TryCatchStmt>(
+                    std::move(clonedTry), tc->getCatchVar(),
+                    std::move(clonedCatch), tc->getLine(), tc->getColumn());
+            }
+            case ASTNode::DEFER_STMT: {
+                auto df = dynamic_cast<DeferStmt*>(stmt);
+                auto clonedInner =
+                    cloneStmtWithSubst(df->getDeferredStmt(), tmplParams, tmplArgs);
+                if (!clonedInner) return nullptr;  // diagnostic already reported
+                return std::make_unique<DeferStmt>(
+                    std::move(clonedInner), df->getLine(), df->getColumn());
+            }
+            case ASTNode::ASM_STMT: {
+                auto as = dynamic_cast<AsmStmt*>(stmt);
+                auto cloned = std::make_unique<AsmStmt>(
+                    as->getCode(), as->getLine(), as->getColumn());
+                // `{var}` placeholders and their operand bindings are part
+                // of the statement's meaning; the clone keeps both.
+                cloned->localVariables = as->localVariables;
+                return cloned;
+            }
+            case ASTNode::MATCH_STMT: {
+                auto ms = dynamic_cast<MatchStmt*>(stmt);
+                std::vector<MatchStmt::Arm> clonedArms;
+                for (auto& arm : ms->getArms()) {
+                    MatchStmt::Arm clonedArm;
+                    clonedArm.pattern =
+                        cloneExprWithSubst(arm.pattern.get(), tmplParams, tmplArgs);
+                    clonedArm.body =
+                        cloneStmtWithSubst(arm.body.get(), tmplParams, tmplArgs);
+                    if (!clonedArm.pattern || !clonedArm.body) {
+                        cloneFailed_ = true;
+                        return nullptr;  // diagnostic already reported
+                    }
+                    clonedArms.push_back(std::move(clonedArm));
+                }
+                return std::make_unique<MatchStmt>(
+                    cloneExprWithSubst(ms->getExpression(), tmplParams, tmplArgs),
+                    std::move(clonedArms), ms->getLine(), ms->getColumn());
+            }
             default:
-                // Anything else (defer, match, asm, ...) cannot be cloned
-                // yet: say so loudly instead of silently dropping it (top
-                // level) or segfaulting on the null child (nested). The
-                // function-body clone loop already skips nulls the same way.
+                // No known statement kind reaches here: everything a normal
+                // function body can contain clones above. Should a new node
+                // kind appear, say so loudly instead of silently dropping it
+                // (top level) or segfaulting on the null child (nested); the
+                // clone loop skips nulls, and cloneFailed_ keeps the partial
+                // clone from being visited or emitted.
+                cloneFailed_ = true;
                 reporter_.error("Statement cannot be used inside a template body yet",
                                 stmt->getLine(), stmt->getColumn());
                 return nullptr;
@@ -1692,7 +1907,123 @@ public:
                     cloneExprWithSubst(ie->getIndex(), tmplParams, tmplArgs),
                     ie->getLine(), ie->getColumn());
             }
+            // CIDER-BUG-051: these kinds used to fall through to the
+            // nullptr default, silently erasing the expression (a `return
+            // new T;` clone became a value-less return, etc.). Types and
+            // nested expressions clone with type-parameter substitution.
+            case ASTNode::NEW_EXPR: {
+                auto ne = dynamic_cast<NewExpr*>(expr);
+                return std::make_unique<NewExpr>(
+                    cloneTypeWithSubst(ne->getNewType(), tmplParams, tmplArgs),
+                    ne->getLine(), ne->getColumn());
+            }
+            case ASTNode::LIST_EXPR: {
+                auto le = dynamic_cast<ListExpr*>(expr);
+                std::vector<std::unique_ptr<Expression>> clonedElements;
+                for (auto& e : le->getElements()) {
+                    auto cloned = cloneExprWithSubst(e.get(), tmplParams, tmplArgs);
+                    if (!cloned) {
+                        cloneFailed_ = true;
+                        return nullptr;  // diagnostic already reported
+                    }
+                    clonedElements.push_back(std::move(cloned));
+                }
+                return std::make_unique<ListExpr>(
+                    std::move(clonedElements), le->getLine(), le->getColumn());
+            }
+            case ASTNode::TABLE_EXPR: {
+                auto te = dynamic_cast<TableExpr*>(expr);
+                std::vector<TableExpr::Entry> clonedEntries;
+                for (auto& e : te->getEntries()) {
+                    auto clonedKey = cloneExprWithSubst(e.first.get(), tmplParams, tmplArgs);
+                    auto clonedVal = cloneExprWithSubst(e.second.get(), tmplParams, tmplArgs);
+                    if (!clonedKey || !clonedVal) {
+                        cloneFailed_ = true;
+                        return nullptr;  // diagnostic already reported
+                    }
+                    clonedEntries.push_back({std::move(clonedKey), std::move(clonedVal)});
+                }
+                return std::make_unique<TableExpr>(
+                    std::move(clonedEntries), te->getLine(), te->getColumn());
+            }
+            case ASTNode::SLICE_EXPR: {
+                auto se = dynamic_cast<SliceExpr*>(expr);
+                // Bounds are optional (`a[:n]`, `a[1:]`), so null children
+                // are legitimate and stay null.
+                return std::make_unique<SliceExpr>(
+                    cloneExprWithSubst(se->getObject(), tmplParams, tmplArgs),
+                    cloneExprWithSubst(se->getStart(), tmplParams, tmplArgs),
+                    cloneExprWithSubst(se->getEnd(), tmplParams, tmplArgs),
+                    se->getLine(), se->getColumn());
+            }
+            case ASTNode::INTERPOLATED_STRING_EXPR: {
+                auto ie = dynamic_cast<InterpolatedStringExpr*>(expr);
+                std::vector<InterpolatedStringExpr::Part> clonedParts;
+                for (auto& p : ie->getParts()) {
+                    InterpolatedStringExpr::Part part;
+                    part.isExpr = p.isExpr;
+                    part.text = p.text;
+                    if (p.isExpr) {
+                        part.expr = cloneExprWithSubst(p.expr.get(), tmplParams, tmplArgs);
+                        if (!part.expr) {
+                            cloneFailed_ = true;
+                            return nullptr;  // diagnostic already reported
+                        }
+                    }
+                    clonedParts.push_back(std::move(part));
+                }
+                return std::make_unique<InterpolatedStringExpr>(
+                    std::move(clonedParts), ie->getLine(), ie->getColumn());
+            }
+            case ASTNode::FUNCTION_EXPR: {
+                auto fe = dynamic_cast<FunctionExpr*>(expr);
+                std::vector<FunctionExpr::Parameter> clonedParams;
+                for (auto& p : fe->getParams()) {
+                    clonedParams.push_back({p.first,
+                        cloneTypeWithSubst(p.second.get(), tmplParams, tmplArgs)});
+                }
+                std::vector<std::unique_ptr<Statement>> clonedBody;
+                for (auto& s : fe->getBody()) {
+                    cloneInto(clonedBody, s.get(), tmplParams, tmplArgs);
+                }
+                return std::make_unique<FunctionExpr>(
+                    fe->getName(), std::move(clonedParams), std::move(clonedBody),
+                    cloneTypeWithSubst(fe->getReturnType(), tmplParams, tmplArgs),
+                    fe->getLine(), fe->getColumn(), fe->isAsync());
+            }
+            case ASTNode::AWAIT_EXPR: {
+                auto ae = dynamic_cast<AwaitExpr*>(expr);
+                return std::make_unique<AwaitExpr>(
+                    cloneExprWithSubst(ae->getValue(), tmplParams, tmplArgs),
+                    ae->getLine(), ae->getColumn());
+            }
+            case ASTNode::STRUCT_LITERAL_EXPR: {
+                auto sl = dynamic_cast<StructLiteralExpr*>(expr);
+                std::vector<StructLiteralExpr::FieldInit> clonedFields;
+                for (auto& f : sl->getFields()) {
+                    auto cloned = cloneExprWithSubst(f.second.get(), tmplParams, tmplArgs);
+                    if (!cloned) {
+                        cloneFailed_ = true;
+                        return nullptr;  // diagnostic already reported
+                    }
+                    clonedFields.push_back({f.first, std::move(cloned)});
+                }
+                return std::make_unique<StructLiteralExpr>(
+                    substituteTypeName(sl->getStructName(), tmplParams, tmplArgs),
+                    std::move(clonedFields), sl->getLine(), sl->getColumn());
+            }
+            case ASTNode::SUPER_EXPR:
+                return std::make_unique<SuperExpr>(
+                    dynamic_cast<SuperExpr*>(expr)->getMember(),
+                    expr->getLine(), expr->getColumn());
             default:
+                // No known expression kind reaches here: everything a normal
+                // function body can contain clones above. Should a new node
+                // kind appear, say so loudly instead of silently dropping the
+                // expression (the old behavior) or crashing on it later.
+                cloneFailed_ = true;
+                reporter_.error("Expression cannot be used inside a template body yet",
+                                expr->getLine(), expr->getColumn());
                 return nullptr;
         }
     }
@@ -1795,11 +2126,15 @@ public:
         // follow the same SysV-pin rule as visit(FunctionDeclStmt&).
         funcSym->abi = (tmplFunc->isVirtual() || tmplFunc->isOverride()) ? Abi::SysV
                                                                         : tmplFunc->getAbi();
+        // CIDER-BUG-051: `await` is legal in a template body, so the clone
+        // must stay async; otherwise callers cannot await the instantiation
+        // ("Only async functions can be awaited"). The checker ignores the
+        // enclosing function's own async flag.
+        funcSym->isAsync = tmplFunc->isAsync();
 
         auto substType = [&](TypeAST* typeAST) -> TypeInfo {
             TypeInfo info = TypeInfo::fromAST(typeAST);
-            info.name = substituteTypeName(info.name, tmplSym->typeParams, parsed.second);
-            return info;
+            return substituteTypeInfo(info, tmplSym->typeParams, parsed.second);
         };
 
         funcSym->returnType = substType(tmplFunc->getReturnType());
@@ -1837,17 +2172,31 @@ public:
         }
         auto clonedReturnType = cloneTypeWithSubst(tmplFunc->getReturnType(), tmplSym->typeParams, parsed.second);
         std::vector<std::unique_ptr<Statement>> clonedBody;
+        // CIDER-BUG-051: a failed clone reports its diagnostic at the
+        // offending node and sets cloneFailed_; the partial body must then
+        // not be visited (null children would crash the collector) nor
+        // emitted (the program is rejected anyway).
+        bool prevCloneFailed = cloneFailed_;
+        cloneFailed_ = false;
         for (auto& s : tmplFunc->getBody()) {
             auto cloned = cloneStmtWithSubst(s.get(), tmplSym->typeParams, parsed.second);
             if (cloned) clonedBody.push_back(std::move(cloned));
         }
+        bool cloneFailed = cloneFailed_;
+        cloneFailed_ = prevCloneFailed;
+        if (cloneFailed) {
+            symbolTable_.setCurrentScope(prevScope);
+            return;
+        }
         // CID-005: the clone inherits the template's ABI. The intervening
         // constructor parameters keep their defaults (templateParams must
         // stay empty so the clone is not re-registered as a template).
+        // CIDER-BUG-051: mark the clone async when the template is, or an
+        // `await` inside the body would fail the awaited-call check.
         auto clonedFunc = std::make_unique<FunctionDeclStmt>(
             mangledName, std::move(clonedParams), std::move(clonedBody), std::move(clonedReturnType),
             tmplFunc->getLine(), tmplFunc->getColumn(),
-            false, false, false, false, false, std::vector<std::string>{}, tmplFunc->getAbi());
+            tmplFunc->isAsync(), false, false, false, false, std::vector<std::string>{}, tmplFunc->getAbi());
         FunctionDeclStmt* rawPtr = clonedFunc.get();
 
         // Process the cloned function through the collector (defines its
@@ -1890,6 +2239,11 @@ private:
     // Instantiations currently being built (recursion guard for
     // self-referential struct templates, e.g. `next: *L<T>`).
     std::set<std::string> structTemplateActive_;
+    // CIDER-BUG-051: set when a template-body clone hits a node kind it
+    // cannot copy. The diagnostic is reported at the node, and the partial
+    // instantiation is discarded instead of being visited/emitted with
+    // null children.
+    bool cloneFailed_ = false;
 };
 
 }  // namespace cider
