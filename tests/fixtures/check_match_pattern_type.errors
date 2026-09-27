@@ -1,0 +1,2 @@
+Match pattern type mismatch. Expected int, got string
+Match pattern type mismatch. Expected string, got int

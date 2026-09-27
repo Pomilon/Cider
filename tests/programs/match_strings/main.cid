@@ -1,0 +1,141 @@
+// CIDER-BUG-055: `match` arms over a `string` scrutinee must compare the
+// pointed-to bytes (the CIDER-BUG-056 `==` semantics), not the addresses.
+// Before the fix every string pattern compared two literal addresses, so
+// only `default` ever ran. Each wrong branch returns a distinct code.
+
+func classify(s: string) -> int {
+  match (s) {
+    "" => { return 10; }
+    "hi" => { return 11; }
+    "hello" => { return 12; }
+    "hi" => { return 13; }   // unreachable: the first "hi" arm wins
+    default => { return 14; }
+  }
+  return 99;
+}
+
+func name_of(n: int) -> string {
+  match (n) {
+    1 => { return "one"; }
+    2 => { return "two"; }
+    default => { return "many"; }
+  }
+  return "";
+}
+
+func pass_through(s: string) -> string { return s; }
+
+func main() -> int {
+  // Literal scrutinee: content selects the arm.
+  match ("hello") {
+    "hello" => { }
+    default => { return 20; }
+  }
+  match ("hello") {
+    "hi" => { return 21; }
+    "hello" => { }
+    default => { return 22; }
+  }
+  match ("nope") {
+    "hi" => { return 23; }
+    "hello" => { return 24; }
+    default => { }
+  }
+
+  // Empty string vs non-empty.
+  if (classify("") != 10) { return 25; }
+  if (classify("a") != 14) { return 26; }
+
+  // Equal-content variables (runtime byte comparison, no literal fold).
+  var a: string = "hello";
+  var b: string = "hello";
+  if (classify(a) != 12) { return 27; }
+  if (classify(b) != 12) { return 28; }
+
+  // Different content falls through to default.
+  var c: string = "world";
+  if (classify(c) != 14) { return 29; }
+
+  // First match wins even when the duplicate arm comes later.
+  if (classify("hi") != 11) { return 30; }
+
+  // A string-typed variable pattern also compares by content.
+  var needle: string = "hello";
+  match (a) {
+    needle => { }
+    default => { return 31; }
+  }
+  match (c) {
+    needle => { return 32; }
+    default => { }
+  }
+
+  // Match over a string parameter and a string return, including an
+  // interpolated (heap) string with equal content.
+  if (classify(pass_through("hi")) != 11) { return 33; }
+  match (name_of(1)) {
+    "one" => { }
+    "two" => { return 34; }
+    default => { return 35; }
+  }
+  match (name_of(3)) {
+    "one" => { return 36; }
+    "two" => { return 37; }
+    "many" => { }
+    default => { return 38; }
+  }
+  var x: int = 42;
+  var built: string = "v={x}";
+  match (built) {
+    "v=42" => { }
+    default => { return 39; }
+  }
+
+  // nil strings: two nils are equal content, and nil vs a non-empty
+  // pattern must not dereference the null pointer.
+  var nil1: string = nilPtr as string;
+  var nil2: string = nilPtr as string;
+  match (nil1) {
+    nil2 => { }
+    default => { return 40; }
+  }
+  match (nil1) {
+    "" => { return 41; }
+    "hi" => { return 42; }
+    default => { }
+  }
+
+  // Explicit pointer patterns keep identity comparison (the BUG-056
+  // escape hatch): the same address matches, a same-content different
+  // address does not.
+  var p: *u8 = "hi";
+  var q: *u8 = p;
+  match (q) {
+    p => { }
+    default => { return 43; }
+  }
+  match (p) {
+    "hi" => { return 44; }
+    default => { }
+  }
+
+  // Non-string patterns keep their existing semantics.
+  match (2) {
+    1 => { return 45; }
+    2 => { }
+    default => { return 46; }
+  }
+  var flag: bool = true;
+  match (flag) {
+    true => { }
+    false => { return 47; }
+  }
+  var ch: char = 'z';
+  match (ch) {
+    'a' => { return 48; }
+    'z' => { }
+    default => { return 49; }
+  }
+
+  return 0;
+}

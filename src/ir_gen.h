@@ -5178,6 +5178,9 @@ public:
     void visit(MatchStmt& stmt) override {
         stmt.getExpression()->accept(*this);
         IRValue matchVal = lastValue_;
+        // CIDER-BUG-055: the scrutinee type decides whether a pattern is
+        // compared by content; captured before any pattern is evaluated.
+        TypeInfo matchType = lastExprType_;
         std::string exitName = nextLabel("match_exit");
         for (auto& arm : stmt.getArms()) {
             std::string armName = nextLabel("arm");
@@ -5191,8 +5194,23 @@ public:
             } else {
                 arm.pattern->accept(*this);
                 IRValue patternVal = lastValue_;
+                TypeInfo patternType = lastExprType_;
                 IRValue cond = IRValue::Register(nextTemp(), IRType::BOOL);
-                currentBlock_->addInstruction({IROp::CMP_EQ, cond, {matchVal, patternVal}});
+                // CIDER-BUG-055: `match` over a `string` (name "string",
+                // pointer level 0) must test the pointed-to bytes, not the
+                // addresses; pattern arms used to compare LITERAL addresses
+                // and silently fell through to `default`. Reuse the
+                // CIDER-BUG-056 `_streq` helper, so arm selection and `==`
+                // agree. Explicit pointer patterns (`*u8`/`char*`) keep
+                // their identity comparison, exactly as in `==`.
+                if (matchType.name == "string" && matchType.pointerLevel == 0 &&
+                    patternType.name == "string" && patternType.pointerLevel == 0) {
+                    ensureStringEqualityHelpers();
+                    IRValue eq = emitCall("_streq", {matchVal, patternVal});
+                    currentBlock_->addInstruction({IROp::CMP_NE, cond, {eq, IRValue::Constant(0, IRType::I32)}});
+                } else {
+                    currentBlock_->addInstruction({IROp::CMP_EQ, cond, {matchVal, patternVal}});
+                }
                 currentBlock_->addInstruction({IROp::COND_BR, std::nullopt, {cond, IRValue::Label(armName), IRValue::Label(nextCheckName)}});
             }
             startBlock(armName);
