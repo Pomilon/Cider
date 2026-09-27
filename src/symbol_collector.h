@@ -787,17 +787,31 @@ public:
                 }
 
                 if (m.isOverride) {
-                    for (size_t i = 0; i < sym->vtable.size(); ++i) {
-                        if (sym->methods[i].name == m.name) {
-                            sym->vtable[i] = m.mangledName;
-                            m.vtableIndex = (int)i;
-                            break;
-                        }
-                    }
+                    // CIDER-BUG-047: `sym->methods` also holds plain
+                    // methods, so positioning the vtable slot by vtable
+                    // index desyncs as soon as a plain method precedes a
+                    // virtual. Follow the inherited method's own recorded
+                    // slot instead; a plain method that shares the name has
+                    // vtableIndex -1 and is never the override target.
+                    bool matchedSlot = false;
                     for (auto& em : sym->methods) {
-                        if (em.name == m.name) {
-                            em = m;
-                            break;
+                        if (em.name != m.name || em.vtableIndex < 0) continue;
+                        m.vtableIndex = em.vtableIndex;
+                        sym->vtable[m.vtableIndex] = m.mangledName;
+                        em = m;
+                        matchedSlot = true;
+                        break;
+                    }
+                    if (!matchedSlot) {
+                        // No inherited virtual slot (invalid override):
+                        // preserve the legacy binding of a same-named
+                        // method so direct calls still reach the derived
+                        // body.
+                        for (auto& em : sym->methods) {
+                            if (em.name == m.name) {
+                                em = m;
+                                break;
+                            }
                         }
                     }
                 } else if (m.isVirtual) {

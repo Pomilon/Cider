@@ -188,6 +188,58 @@ int run() {
         CHECK(proto->fields[1].offset == 8);   // OutputString
         CHECK(proto->fields[3].offset == 48);  // ClearScreen
     }
+
+    // CIDER-BUG-047: an override follows the inherited method's recorded
+    // vtable index, not its position in `methods` (which also holds plain
+    // methods). Plain methods before, between and after virtuals must not
+    // shift a slot, and a plain method sharing a virtual's name must not
+    // capture it (plain methods keep vtableIndex -1).
+    Result r13 = collectSrc(
+        "class V0 {\n"
+        "  func plain() -> int { return 0; }\n"
+        "  virtual func a() -> int { return 1; }\n"
+        "  func mid() -> int { return 2; }\n"
+        "  virtual func b() -> int { return 3; }\n"
+        "}\n"
+        "class V1 extends V0 {\n"
+        "  override func b() -> int { return 4; }\n"
+        "  virtual func c() -> int { return 5; }\n"
+        "}\n"
+        "class V2 extends V1 {\n"
+        "  override func a() -> int { return 6; }\n"
+        "  override func c() -> int { return 7; }\n"
+        "}\n"
+        "class W0 {\n"
+        "  func m() -> int { return 0; }\n"
+        "  virtual func keep() -> int { return 1; }\n"
+        "  virtual func m() -> int { return 2; }\n"
+        "}\n"
+        "class W1 extends W0 {\n"
+        "  override func m() -> int { return 3; }\n"
+        "}\n");
+    CHECK(r13.errors.empty());
+    auto v0 = std::static_pointer_cast<cider::StructSymbol>(findSym(*r13.table, "V0"));
+    CHECK(v0->vtable.size() == 2 && v0->vtable[0] == "V0_a" && v0->vtable[1] == "V0_b");
+    auto v1 = std::static_pointer_cast<cider::StructSymbol>(findSym(*r13.table, "V1"));
+    CHECK(v1->vtable.size() == 3);
+    CHECK(v1->vtable[0] == "V0_a" && v1->vtable[1] == "V1_b" && v1->vtable[2] == "V1_c");
+    auto v2 = std::static_pointer_cast<cider::StructSymbol>(findSym(*r13.table, "V2"));
+    CHECK(v2->vtable.size() == 3);
+    CHECK(v2->vtable[0] == "V2_a" && v2->vtable[1] == "V1_b" && v2->vtable[2] == "V2_c");
+    // A plain `m` (no slot) precedes the virtual `m` (slot 1): the override
+    // must rewrite slot 1 and leave `keep`'s slot 0 alone.
+    auto w1 = std::static_pointer_cast<cider::StructSymbol>(findSym(*r13.table, "W1"));
+    CHECK(w1->vtable.size() == 2 && w1->vtable[0] == "W0_keep" && w1->vtable[1] == "W1_m");
+    bool w1Override = false;
+    for (auto& m : w1->methods) {
+        if (m.name == "m" && m.isOverride) {
+            CHECK(m.vtableIndex == 1);
+            CHECK(m.mangledName == "W1_m");
+            w1Override = true;
+        }
+    }
+    CHECK(w1Override);
+
     return 0;
 }
 
