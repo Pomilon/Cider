@@ -1203,6 +1203,13 @@ std::unique_ptr<TypeAST> Parser::parseType(bool castContext) {
         // ordinary identifier; recognize it only in type position and only
         // when '(' follows immediately.
         if (isPlainIdent && typeName == "fn" && currentToken_.type == TokenType::LPAREN) {
+            // CIDER-BUG-026: `*fn(...)` is out of the supported surface — fn
+            // values are already pointers. Reject the written level instead
+            // of silently dropping it.
+            if (pointerLevel > 0) {
+                error("Pointer-to-function types are not supported: 'fn(...)' is already a pointer value; remove the leading '*'.");
+                return nullptr;
+            }
             return parseFunctionPointerType(line, col, isVolatile, typeAbi);
         }
 
@@ -2096,7 +2103,20 @@ std::unique_ptr<Statement> Parser::parseClassDeclaration() {
 
     std::vector<std::unique_ptr<Statement>> members;
     while (currentToken_.type != TokenType::RBRACE && currentToken_.type != TokenType::END_OF_FILE) {
-        if (currentToken_.type == TokenType::FUNCTION || currentToken_.type == TokenType::FUNC) {
+        if (currentToken_.type == TokenType::IDENTIFIER &&
+            (currentToken_.value == "msabi" || currentToken_.value == "sysvabi")) {
+            // CIDER-BUG-027: class methods cannot carry an explicit ABI —
+            // virtual/override/interface dispatch is pinned to SysV. Report
+            // the marker specifically instead of silently coercing it.
+            error("Explicit '" + currentToken_.value +
+                      "' on a class method is not supported: virtual/override/interface dispatch is always SysV.");
+            nextToken();
+            if (currentToken_.type == TokenType::FUNCTION || currentToken_.type == TokenType::FUNC) {
+                members.push_back(parseFunctionDeclaration());
+            } else {
+                error("Expected 'func' after ABI modifier.");
+            }
+        } else if (currentToken_.type == TokenType::FUNCTION || currentToken_.type == TokenType::FUNC) {
             members.push_back(parseFunctionDeclaration());
         } else if (currentToken_.type == TokenType::ASYNC) {
             nextToken();
@@ -2112,6 +2132,12 @@ std::unique_ptr<Statement> Parser::parseClassDeclaration() {
                 isAsync = true;
                 nextToken();
             }
+            if (currentToken_.type == TokenType::IDENTIFIER &&
+                (currentToken_.value == "msabi" || currentToken_.value == "sysvabi")) {
+                error("Explicit '" + currentToken_.value +
+                          "' on a virtual method is not supported: virtual dispatch is always SysV.");
+                nextToken();
+            }
             if (currentToken_.type == TokenType::FUNCTION || currentToken_.type == TokenType::FUNC) {
                 members.push_back(parseFunctionDeclaration(isAsync, true, false));
             } else {
@@ -2122,6 +2148,12 @@ std::unique_ptr<Statement> Parser::parseClassDeclaration() {
             bool isAsync = false;
             if (currentToken_.type == TokenType::ASYNC) {
                 isAsync = true;
+                nextToken();
+            }
+            if (currentToken_.type == TokenType::IDENTIFIER &&
+                (currentToken_.value == "msabi" || currentToken_.value == "sysvabi")) {
+                error("Explicit '" + currentToken_.value +
+                          "' on an override method is not supported: virtual dispatch is always SysV.");
                 nextToken();
             }
             if (currentToken_.type == TokenType::FUNCTION || currentToken_.type == TokenType::FUNC) {

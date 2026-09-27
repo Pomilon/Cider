@@ -1,0 +1,4 @@
+// CIDER-BUG-027: same for an explicit ABI on a virtual method.
+class C { virtual msabi func m() -> void { } }
+
+func main() -> int { return 0; }
