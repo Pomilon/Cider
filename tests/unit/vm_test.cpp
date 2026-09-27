@@ -482,6 +482,146 @@ int run() {
         CHECK(threw);  // before the fix: no throw, silent OOB read
     }
 
+    // CIDER-BUG-059: nilPtr is the zero address. A LOAD/STORE/MEMCPY through
+    // it used to read/write heap offset 0 (the first block's size header) and
+    // return silent garbage where native traps with SIGSEGV. Each must now
+    // throw a clear VMError instead.
+    {
+        auto fn = makeFn("main", cider::IRType::I32);
+        auto e = std::make_unique<cider::BasicBlock>("entry");
+        cider::IRInstruction ld;
+        ld.op = cider::IROp::LOAD;
+        ld.dest = cider::IRValue::Register("v", cider::IRType::I32);
+        ld.args = {cider::IRValue::Constant(0, cider::IRType::PTR),
+                   cider::IRValue::Constant(0, cider::IRType::I32)};
+        e->addInstruction(ld);
+        cider::IRInstruction ret;
+        ret.op = cider::IROp::RET;
+        ret.args = {cider::IRValue::Constant(0, cider::IRType::I32)};
+        e->addInstruction(ret);
+        fn->addBlock(std::move(e));
+
+        cider::ModuleIR mod;
+        mod.addFunction(std::move(fn));
+        cider::VM vm;
+        bool threw = false;
+        try {
+            vm.run(mod);
+        } catch (const cider::VMError& err) {
+            threw = true;
+            CHECK(err.message.find("null pointer dereference") != std::string::npos);
+        }
+        CHECK(threw);  // before the fix: silent read of heap offset 0
+    }
+    {
+        auto fn = makeFn("main", cider::IRType::I32);
+        auto e = std::make_unique<cider::BasicBlock>("entry");
+        cider::IRInstruction st;
+        st.op = cider::IROp::STORE;
+        st.args = {cider::IRValue::Constant(0, cider::IRType::PTR),
+                   cider::IRValue::Constant(7, cider::IRType::I32),
+                   cider::IRValue::Constant(0, cider::IRType::I32)};
+        e->addInstruction(st);
+        cider::IRInstruction ret;
+        ret.op = cider::IROp::RET;
+        ret.args = {cider::IRValue::Constant(0, cider::IRType::I32)};
+        e->addInstruction(ret);
+        fn->addBlock(std::move(e));
+
+        cider::ModuleIR mod;
+        mod.addFunction(std::move(fn));
+        cider::VM vm;
+        bool threw = false;
+        try {
+            vm.run(mod);
+        } catch (const cider::VMError& err) {
+            threw = true;
+            CHECK(err.message.find("null pointer dereference") != std::string::npos);
+        }
+        CHECK(threw);  // before the fix: silent write to heap offset 0
+    }
+    {
+        // MEMCPY with a nil destination and a real source.
+        auto fn = makeFn("main", cider::IRType::I32);
+        auto e = std::make_unique<cider::BasicBlock>("entry");
+        e->addInstruction(opInstr(cider::IROp::ALLOCA, "buf",
+                                  {cider::IRValue::Constant(8, cider::IRType::I32)}));
+        cider::IRInstruction mc;
+        mc.op = cider::IROp::MEMCPY;
+        mc.args = {cider::IRValue::Constant(0, cider::IRType::PTR),
+                   cider::IRValue::Register("buf", cider::IRType::PTR),
+                   cider::IRValue::Constant(4, cider::IRType::I32)};
+        e->addInstruction(mc);
+        cider::IRInstruction ret;
+        ret.op = cider::IROp::RET;
+        ret.args = {cider::IRValue::Constant(0, cider::IRType::I32)};
+        e->addInstruction(ret);
+        fn->addBlock(std::move(e));
+
+        cider::ModuleIR mod;
+        mod.addFunction(std::move(fn));
+        cider::VM vm;
+        bool threw = false;
+        try {
+            vm.run(mod);
+        } catch (const cider::VMError& err) {
+            threw = true;
+            CHECK(err.message.find("null pointer dereference") != std::string::npos);
+        }
+        CHECK(threw);  // before the fix: silent write to heap offset 0
+    }
+    {
+        // MEMCPY with a real destination and a nil source.
+        auto fn = makeFn("main", cider::IRType::I32);
+        auto e = std::make_unique<cider::BasicBlock>("entry");
+        e->addInstruction(opInstr(cider::IROp::ALLOCA, "buf",
+                                  {cider::IRValue::Constant(8, cider::IRType::I32)}));
+        cider::IRInstruction mc;
+        mc.op = cider::IROp::MEMCPY;
+        mc.args = {cider::IRValue::Register("buf", cider::IRType::PTR),
+                   cider::IRValue::Constant(0, cider::IRType::PTR),
+                   cider::IRValue::Constant(4, cider::IRType::I32)};
+        e->addInstruction(mc);
+        cider::IRInstruction ret;
+        ret.op = cider::IROp::RET;
+        ret.args = {cider::IRValue::Constant(0, cider::IRType::I32)};
+        e->addInstruction(ret);
+        fn->addBlock(std::move(e));
+
+        cider::ModuleIR mod;
+        mod.addFunction(std::move(fn));
+        cider::VM vm;
+        bool threw = false;
+        try {
+            vm.run(mod);
+        } catch (const cider::VMError& err) {
+            threw = true;
+            CHECK(err.message.find("null pointer dereference") != std::string::npos);
+        }
+        CHECK(threw);  // before the fix: silent read from heap offset 0
+    }
+    {
+        // A zero-length MEMCPY through nil stays the conventional no-op.
+        auto fn = makeFn("main", cider::IRType::I32);
+        auto e = std::make_unique<cider::BasicBlock>("entry");
+        cider::IRInstruction mc;
+        mc.op = cider::IROp::MEMCPY;
+        mc.args = {cider::IRValue::Constant(0, cider::IRType::PTR),
+                   cider::IRValue::Constant(0, cider::IRType::PTR),
+                   cider::IRValue::Constant(0, cider::IRType::I32)};
+        e->addInstruction(mc);
+        cider::IRInstruction ret;
+        ret.op = cider::IROp::RET;
+        ret.args = {cider::IRValue::Constant(0, cider::IRType::I32)};
+        e->addInstruction(ret);
+        fn->addBlock(std::move(e));
+
+        cider::ModuleIR mod;
+        mod.addFunction(std::move(fn));
+        cider::VM vm;
+        CHECK(vm.run(mod).exitCode == 0);
+    }
+
     // CID-006 F1 (front-end shape): ir_gen now registers `extern var` via
     // addExternVariable, so a value read cannot resolve to any function id
     // and fails with the pre-CID-006 clean unresolved-label error.

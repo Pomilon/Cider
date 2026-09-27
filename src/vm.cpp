@@ -118,8 +118,19 @@ VMResult VM::run(const ModuleIR& module, const std::string& runFunction) {
             regs_["arg_argc"] = v;
         }
         if (params.size() > 1 && params[1] == "arg_argv") {
+            // CIDER-BUG-059: a process never starts with a nil argv. The old
+            // zero placeholder was masked by LOAD(0) returning the first heap
+            // block's header (garbage); with the nil guard it would trap, but
+            // native argv is a real vector. Materialize a minimal one
+            // (program name + NULL terminator) so argv[0] is a valid pointer
+            // while a genuine nil deref still fails loudly.
+            int64_t nameOff = materializeString("\"cider\"");
+            int64_t argvOff = malloc(16);
+            std::memcpy(heap_.data() + argvOff, &nameOff, 8);
+            int64_t nullArg = 0;
+            std::memcpy(heap_.data() + argvOff + 8, &nullArg, 8);
             RegVal v;
-            v.i = 0;
+            v.i = argvOff;
             regs_["arg_argv"] = v;
         }
     }
@@ -433,6 +444,12 @@ VMResult VM::run(const ModuleIR& module, const std::string& runFunction) {
             RegVal src = resolveValue(instr.args[1]);
             RegVal len = resolveValue(instr.args[2]);
             int64_t d = dst.i, s = src.i, n = len.i;
+            // CIDER-BUG-059: copying through a nil (zero) pointer is a null
+            // dereference; offset 0 is the first heap block's header, so this
+            // used to silently read/write it. A zero-length copy stays a
+            // no-op (memcpy(NULL, NULL, 0) is the conventional shape).
+            if (n > 0 && d == 0) throw VMError{"memcpy: null pointer dereference (destination)"};
+            if (n > 0 && s == 0) throw VMError{"memcpy: null pointer dereference (source)"};
             if (d + n > (int64_t)heap_.size()) heap_.resize(d + n);
             for (int64_t k = 0; k < n; ++k) {
                 heap_[(size_t)(d + k)] = s + k < (int64_t)heap_.size() ? heap_[(size_t)(s + k)] : 0;
@@ -947,6 +964,10 @@ VM::RegVal VM::load(int64_t addr, IRType type) {
     // hand out negative ids (extern value handles); memcpy-ing from
     // heap_.data() + addr is host OOB. Mirrors store's guard.
     if (addr < 0) throw VMError{"load: negative address"};
+    // CIDER-BUG-059: nilPtr is the zero address. Offset 0 is the first heap
+    // block's size header, so this used to return silent garbage where
+    // native traps with SIGSEGV; fail loudly instead.
+    if (addr == 0) throw VMError{"load: null pointer dereference"};
     RegVal d;
     switch (type) {
     case IRType::I8: {
@@ -1015,6 +1036,8 @@ VM::RegVal VM::load(int64_t addr, IRType type) {
 void VM::store(int64_t addr, const RegVal& val, IRType type, int64_t offset) {
     addr += offset;
     if (addr < 0) throw VMError{"store: negative address"};
+    // CIDER-BUG-059: nilPtr is the zero address (see load).
+    if (addr == 0) throw VMError{"store: null pointer dereference"};
     if (addr + 8 > (int64_t)heap_.size()) heap_.resize(addr + 8);
     switch (type) {
     case IRType::I8: {
