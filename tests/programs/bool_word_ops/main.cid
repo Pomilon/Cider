@@ -53,15 +53,16 @@ func main() -> int {
     expect("true or bump()", r2 as int, 1);
     expect("true or bump() bumps", bumps, 0);
 
-    // ...while the evaluating side still does run. (Asserted through the
-    // side effect only: the optimizer miscompiles the *value* of a call on
-    // this branch for `&&`/`||` alike — pre-existing, not CIDER-BUG-046.)
+    // ...while the evaluating side still runs, and its result survives the
+    // merge. (CIDER-BUG-064: the inliner used to leave this merged value 0.)
     bumps = 0;
-    true and bump();
+    var r3: bool = true and bump();
+    expect("true and bump()", r3 as int, 1);
     expect("true and bump() bumps", bumps, 1);
 
     bumps = 0;
-    false or bump();
+    var r4: bool = false or bump();
+    expect("false or bump()", r4 as int, 1);
     expect("false or bump() bumps", bumps, 1);
 
     // Precedence: `and` binds tighter than `or`, so this is

@@ -254,6 +254,10 @@ private:
 
         std::string entryName = callee.getBlocks().front()->getName();
         std::string afterName = prefix + "after";
+        // The block is about to be split at the call site: everything from
+        // the call on (including the original terminator) moves to `after`.
+        // Remember its name for the PHI edge rewrite below.
+        const std::string splitBlockName = block.getName();
 
         auto& insts = block.getInstructions();
         std::vector<IRInstruction> afterInsts(insts.begin() + pos + 1, insts.end());
@@ -315,6 +319,24 @@ private:
         blocks.insert(blocks.begin() + blockIdx + 1,
                       std::make_move_iterator(newBlocks.begin()),
                       std::make_move_iterator(newBlocks.end()));
+
+        // CIDER-BUG-064: the original terminator now belongs to `after`, so
+        // every successor PHI that listed the split block as the predecessor
+        // of that edge must key its incoming value on `after` instead. The
+        // VM (frame.prevBlock) and the SSA deconstructor both resolve PHI
+        // operands by predecessor block name; a stale key makes the edge
+        // unmatchable, and the merged value of a short-circuit arm with a
+        // call silently becomes 0 (uninitialized on native).
+        for (auto& b : caller.getBlocks()) {
+            for (auto& ci : b->getInstructions()) {
+                if (ci.op != IROp::PHI) continue;
+                auto phiIt = ci.phiArgs.find(splitBlockName);
+                if (phiIt == ci.phiArgs.end()) continue;
+                IRValue incoming = phiIt->second;
+                ci.phiArgs.erase(phiIt);
+                ci.phiArgs[afterName] = incoming;
+            }
+        }
         return numCloned;
     }
 };

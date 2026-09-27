@@ -1,0 +1,85 @@
+// CIDER-BUG-064: the merged value of a short-circuit `&&`/`||` whose
+// evaluating arm calls a function must be that call's result, and the side
+// effect must run exactly once. Inlining splits the arm block at the call
+// site; the merge PHI's predecessor key must follow the split, or the VM and
+// the deconstructor look up a predecessor that no longer branches to the
+// merge and silently merge 0.
+from std.io import print, puts, printInt, exit;
+
+var bumps: int = 0;
+
+func bump() -> bool {
+    bumps = bumps + 1;
+    return true;
+}
+
+func bumpFalse() -> bool {
+    bumps = bumps + 1;
+    return false;
+}
+
+func expect(name: string, got: int, want: int) -> void {
+    print(name);
+    print(" = ");
+    printInt(got);
+    if (got != want) {
+        print(" (want ");
+        printInt(want);
+        puts(") FAIL");
+        exit(1);
+    }
+    puts("");
+}
+
+func main() -> int {
+    // The evaluating arm calls a function: the merge takes its result.
+    bumps = 0;
+    var a: bool = true && bump();
+    expect("true && bump()", a as int, 1);
+    expect("bumps after true && bump()", bumps, 1);
+
+    var b: bool = false || bump();
+    expect("false || bump()", b as int, 1);
+    expect("bumps after false || bump()", bumps, 2);
+
+    // A false call result must also survive the merge.
+    var c: bool = true && bumpFalse();
+    expect("true && bumpFalse()", c as int, 0);
+    expect("bumps after true && bumpFalse()", bumps, 3);
+
+    var d: bool = false || bumpFalse();
+    expect("false || bumpFalse()", d as int, 0);
+    expect("bumps after false || bumpFalse()", bumps, 4);
+
+    // Short-circuited arms still skip the call entirely.
+    var e: bool = false && bump();
+    expect("false && bump()", e as int, 0);
+    var f: bool = true || bump();
+    expect("true || bump()", f as int, 1);
+    expect("bumps after skipped arms", bumps, 4);
+
+    // Nested: the inner call's block split must move the inner merge key too.
+    var k: bool = true && (true && bump());
+    expect("true && (true && bump())", k as int, 1);
+    expect("bumps after nested &&", bumps, 5);
+
+    // A call on each side: both splits must retarget their own PHI edges.
+    bumps = 0;
+    var m: bool = bump() && bumpFalse();
+    expect("bump() && bumpFalse()", m as int, 0);
+    expect("bumps for bump() && bumpFalse()", bumps, 2);
+
+    // Non-call controls: the merge is right with no call site in the arm.
+    var t: bool = true;
+    var g: bool = t && t;
+    expect("true && true", g as int, 1);
+    var h: bool = false || t;
+    expect("false || true", h as int, 1);
+    var i: bool = t && false;
+    expect("true && false", i as int, 0);
+    var j: bool = false || false;
+    expect("false || false", j as int, 0);
+
+    puts("PASS: short-circuit arm values");
+    return 0;
+}
