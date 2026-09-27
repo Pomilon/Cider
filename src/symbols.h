@@ -1,5 +1,6 @@
 #pragma once
 
+#include <cstdint>
 #include <map>
 #include <memory>
 #include <optional>
@@ -112,6 +113,17 @@ struct Symbol {
     double constValue = 0;  // For const variables and enum variant values
 
     int memoryOffset = 0;  // stack offset or global address (set during codegen)
+
+    // CIDER-BUG-044: stable identity for the defining-module provenance
+    // maps. Keying by the raw pointer is unsafe: freed symbols' addresses
+    // are reused, so a fresh symbol can inherit a dead one's entry (an
+    // ir_gen-created global inherited a discarded `common.net` local's
+    // module, and its reads fell into the unresolved-identifier fallback).
+    uint64_t id = nextSymbolId();
+    static uint64_t nextSymbolId() {
+        static uint64_t next = 1;
+        return next++;
+    }
 };
 
 struct FunctionSymbol : public Symbol {

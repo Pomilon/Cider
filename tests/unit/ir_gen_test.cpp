@@ -65,7 +65,7 @@ std::string genSrcWithProvenance(const std::string& src, const std::string& symN
     // Fake a defining module for one symbol: with module provenance and no
     // exemption these would all emit mod_<m>__ names.
     auto sym = table.resolve(symName);
-    if (sym) gen.setSymbolModules({{sym.get(), mod}});
+    if (sym) gen.setSymbolModules({{sym->id, mod}});
     auto module = gen.generate(*prog);
     std::ostringstream ss;
     std::streambuf* old = std::cout.rdbuf(ss.rdbuf());
@@ -212,7 +212,7 @@ int run() {
         helper->name = "helper";
         table.define(helper);
         cider::IRGenerator gen(table);
-        gen.setSymbolModules({{ext.get(), "m"}, {helper.get(), "m"}});
+        gen.setSymbolModules({{ext->id, "m"}, {helper->id, "m"}});
         CHECK(gen.definingModuleFor(ext, "putchar") == "");
         CHECK(gen.definingModuleFor(helper, "helper") == "m");
         std::shared_ptr<cider::Symbol> nullSym;

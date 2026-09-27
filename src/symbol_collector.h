@@ -132,7 +132,7 @@ public:
     // even through chained aliases (b's alias of c's `h` still mangles as
     // c's). Absent entries (unit tests without a collector, type aliases)
     // fall back to the legacy scope-identity search.
-    const std::map<const Symbol*, std::string>& getSymbolModules() const { return symbolModules_; }
+    const std::map<uint64_t, std::string>& getSymbolModules() const { return symbolModules_; }
 
     // CID-020/021: record the defining module for a newly defined symbol
     // (getCurrentModule(), "" == main). First write wins: definitions
@@ -140,7 +140,7 @@ public:
     // records, so chained aliases keep the origin module's entry.
     void recordDefiningModule(const std::shared_ptr<Symbol>& sym) {
         if (!sym) return;
-        symbolModules_.emplace(sym.get(), getCurrentModule());
+        symbolModules_.emplace(sym->id, getCurrentModule());
     }
 
     // Basename of a source path, for diagnostics that name two files
@@ -1054,7 +1054,7 @@ public:
                 // the diagnostic's file prefix cites the importing file.
                 auto existing = importingScope->resolveLocal(name);
                 std::string msg = "Redeclaration of '" + name + "'";
-                auto prov = symbolModules_.find(existing.get());
+                auto prov = existing ? symbolModules_.find(existing->id) : symbolModules_.end();
                 if (prov != symbolModules_.end() && !prov->second.empty() &&
                     prov->second != stmt.getModuleName()) {
                     msg += " (from modules '" + prov->second + "' and '" +
@@ -1800,7 +1800,7 @@ public:
                 auto pmit = programModules_.find(definingProg);
                 defMod = (pmit != programModules_.end()) ? pmit->second : getCurrentModule();
             }
-            symbolModules_.emplace(funcSym.get(), defMod);
+            symbolModules_.emplace(funcSym->id, defMod);
         }
 
         // Clone the full function with type substitution and add to the
@@ -1853,7 +1853,7 @@ private:
     std::map<std::string, std::vector<std::shared_ptr<ModuleSymbol>>> ambiguousModules_;
     std::map<const AstProgram*, std::string> programModules_;  // imported AST -> logical name
     // CID-020/021: defined symbol object -> defining module logical ("" == main).
-    std::map<const Symbol*, std::string> symbolModules_;
+    std::map<uint64_t, std::string> symbolModules_;
     // From-alias bindings per scope (spec §4): (scope, name) -> source
     // module. A local definition after a from-import of the same name is a
     // redeclaration (bindFromAliases covers the opposite order). Keyed by

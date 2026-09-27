@@ -102,6 +102,17 @@ int run() {
     CHECK(abl != ablMs);
     CHECK(abl.toString() == "fn() -> u64");
     CHECK(ablMs.toString() == "msabi fn() -> u64");
+
+    // CIDER-BUG-044: symbols carry stable unique ids; the defining-module
+    // provenance maps key by id, so a freed symbol's address reuse cannot
+    // leak a stale module into a fresh symbol.
+    {
+        auto s1 = std::make_shared<cider::Symbol>();
+        auto s2 = std::make_shared<cider::Symbol>();
+        CHECK(s1->id != 0 && s2->id != 0 && s1->id != s2->id);
+        auto s3 = std::make_shared<cider::Symbol>();
+        CHECK(s3->id != s1->id && s3->id != s2->id);
+    }
     return 0;
 }
 

@@ -37,7 +37,7 @@ public:
     // IRGenerator::setSymbolModules): lets nominal identity resolve by the
     // type's owner, not the file being checked. Unset (unit tests) falls
     // back to the legacy current-module rule.
-    void setSymbolModules(const std::map<const Symbol*, std::string>& symbolModules) {
+    void setSymbolModules(const std::map<uint64_t, std::string>& symbolModules) {
         symbolModules_ = symbolModules;
     }
 
@@ -102,7 +102,7 @@ public:
     // comparison fails safely instead of accepting.
     std::string definingModuleOf(const std::shared_ptr<Symbol>& sym) {
         if (sym) {
-            auto it = symbolModules_.find(sym.get());
+            auto it = symbolModules_.find(sym->id);
             if (it != symbolModules_.end()) return it->second;
         }
         return currentModule_;
@@ -2087,7 +2087,7 @@ private:
     std::map<std::string, Scope*> moduleScopes_;  // resolved path -> module scope
     std::map<const AstProgram*, std::string> programModules_;  // imported AST -> logical name
     std::map<std::string, std::vector<std::shared_ptr<ModuleSymbol>>> ambiguousModules_;
-    std::map<const Symbol*, std::string> symbolModules_;  // symbol identity -> defining module
+    std::map<uint64_t, std::string> symbolModules_;  // symbol identity -> defining module
     std::string currentModule_;      // logical name of the file being checked ("" == main)
     Scope* currentModuleScope_ = nullptr;
 

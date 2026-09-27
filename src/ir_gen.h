@@ -44,7 +44,7 @@ public:
     // collector (bind-time provenance; aliases share the target object, so
     // chained aliases resolve to the origin module, not path-order luck).
     // Empty by default: legacy scope-identity search behavior.
-    void setSymbolModules(const std::map<const Symbol*, std::string>& symbolModules) {
+    void setSymbolModules(const std::map<uint64_t, std::string>& symbolModules) {
         symbolModules_ = symbolModules;
     }
 
@@ -597,7 +597,7 @@ public:
         // values, globals, runtime helpers) treats them as main-file names.
         if (sym && sym->isExtern) return "";
         if (sym) {
-            auto pit = symbolModules_.find(sym.get());
+            auto pit = symbolModules_.find(sym->id);
             if (pit != symbolModules_.end()) return pit->second;
         }
         Scope* ds = definingScopeFor(sym, name);
@@ -624,7 +624,7 @@ public:
                 auto fsym = std::static_pointer_cast<FunctionSymbol>(sym);
                 // Bind-time provenance first (see definingModuleFor):
                 // the name search may hit an importer's alias scope.
-                auto pit = symbolModules_.find(sym.get());
+                auto pit = symbolModules_.find(sym->id);
                 std::string mod = (pit != symbolModules_.end()) ? pit->second : logicalForScope(s);
                 return {fsym, mod};
             }
@@ -739,7 +739,7 @@ public:
         // (chained alias). Falls back to the qualifier when no provenance
         // is recorded (unit tests without a collector).
         std::string defMod = modSym->logicalName;
-        auto pit = symbolModules_.find(target.get());
+        auto pit = symbolModules_.find(target->id);
         if (pit != symbolModules_.end()) defMod = pit->second;
         // `extern` members are never mangled (spec Review Focus): they must
         // match the linker-provided symbol (same rule as definingModuleFor).
@@ -2661,6 +2661,16 @@ public:
                 lastValue_ = dest;
             }
         } else {
+            // CIDER-BUG-044: this fallback used to silently emit a register
+            // read named after the identifier; an unresolved global then
+            // read a stale temp (the port's `g_my_ip` read the address of a
+            // nearby string). The checker rejects undefined identifiers
+            // first, so reaching here is an internal inconsistency: report
+            // it (the driver aborts before codegen).
+            if (reporter_) {
+                reporter_->error("cannot resolve identifier '" + expr.getName() +
+                                     "' (unresolved value reference)", expr.getLine());
+            }
             lastValue_ = IRValue::Register(expr.getName(), IRType::I32);
             lastExprType_ = {"int", 0};
         }
@@ -4924,7 +4934,7 @@ private:
     std::map<const AstProgram*, std::string> programModules_;
     // CID-020/021: defined symbol -> defining module logical (bind-time
     // provenance from the collector; "" == main).
-    std::map<const Symbol*, std::string> symbolModules_;
+    std::map<uint64_t, std::string> symbolModules_;
     // CID-020/021 (spec §2): logical name of the file being generated
     // ("" == main file, which keeps plain names).
     std::string currentModule_;
