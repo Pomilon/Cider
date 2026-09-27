@@ -1,0 +1,97 @@
+from std.io import printInt, print;
+
+// CIDER-BUG-050: a defer runs when the lexical block it is written in
+// exits (per iteration for loop bodies), LIFO within a scope, and all
+// pending defers run innermost-first on `return`.
+
+var out: int = 0;
+
+func digit(d: int) -> void { out = out * 10 + d; }
+
+func lifoA() -> void {
+    out = 0;
+    defer { digit(1); }
+    defer { digit(2); }
+}
+
+func lifoB() -> void {
+    out = 0;
+    defer { digit(1); }
+    { defer { digit(2); } }
+    defer { digit(3); }
+}
+
+func earlyRet(x: int) -> int {
+    out = 0;
+    defer { digit(1); }
+    {
+        defer { digit(2); }
+        if (x > 0) { return 7; }
+    }
+    return 0;
+}
+
+func breaksAndContinues() -> void {
+    out = 0;
+    for (var i: int = 0; i < 10; i++) {
+        defer { digit(1); }
+        if (i == 2) { continue; }
+        if (i == 4) { break; }
+    }
+    // i = 0, 1 normal; i = 2 continue; i = 3 normal; i = 4 break.
+    print("loop="); printInt(out); print("\n");
+}
+
+func main() -> int {
+    // One defer run per for iteration.
+    out = 0;
+    for (var i: int = 0; i < 3; i++) {
+        defer { digit(1); }
+    }
+    print("for="); printInt(out); print("\n");
+
+    // One defer run per while iteration.
+    out = 0;
+    var i: int = 0;
+    while (i < 3) {
+        i = i + 1;
+        defer { digit(2); }
+    }
+    print("while="); printInt(out); print("\n");
+
+    // If body runs its defers at branch exit; the not-taken branch runs none.
+    out = 0;
+    if (true) { defer { digit(3); } }
+    print("if="); printInt(out); print("\n");
+    out = 0;
+    if (false) { defer { digit(3); } }
+    print("if-false="); printInt(out); print("\n");
+
+    // Plain nested block.
+    out = 0;
+    { defer { digit(4); } }
+    print("block="); printInt(out); print("\n");
+
+    // LIFO in one scope; an inner block's defer runs before outer defers.
+    lifoA();
+    print("lifo-a="); printInt(out); print("\n");
+    lifoB();
+    print("lifo-b="); printInt(out); print("\n");
+
+    // Return runs every pending defer, innermost-first.
+    var r: int = earlyRet(1);
+    print("early="); printInt(out); print("/"); printInt(r); print("\n");
+
+    breaksAndContinues();
+
+    // One defer run per foreach iteration.
+    out = 0;
+    var a: [int; 3];
+    a[0] = 10;
+    a[1] = 20;
+    a[2] = 30;
+    for (var v in a) { defer { digit(5); } }
+    print("foreach="); printInt(out); print("\n");
+
+    return 0;
+}

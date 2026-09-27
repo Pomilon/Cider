@@ -176,27 +176,41 @@ public:
         IRValue varAddr;
     };
 
-    void emitDefers() {
-        // Emit all defers in reverse order of scopes, and reverse order within scope
-        for (auto it = deferStack_.rbegin(); it != deferStack_.rend(); ++it) {
-            for (auto s_it = it->rbegin(); s_it != it->rend(); ++s_it) {
-                (*s_it)->accept(*this);
+    // CIDER-BUG-050: a `defer` runs when the lexical block it is written in
+    // exits, so emission unwinds from the innermost scope down to (and
+    // including) `firstScope`, each scope in reverse order of registration
+    // (LIFO). Emitting leaves the scopes on the stack: the construct owning
+    // a scope pops it when its block ends. firstScope == 0 unwinds every
+    // pending defer, which is what `return` and function fallthrough need.
+    void emitDefers(size_t firstScope) {
+        for (size_t i = deferStack_.size(); i > firstScope; --i) {
+            for (size_t j = deferStack_[i - 1].size(); j > 0; --j) {
+                // Re-read the slot on every step: a deferred statement may
+                // itself be a block, whose accept pushes/pops a scope (and
+                // may reallocate the outer vector).
+                Statement* s = deferStack_[i - 1][j - 1];
+                s->accept(*this);
             }
         }
     }
 
-    void emitDestructors() {
-        for (auto it = destructorStack_.rbegin(); it != destructorStack_.rend(); ++it) {
-            for (auto d_it = it->rbegin(); d_it != it->rend(); ++d_it) {
+    void emitDefers() { emitDefers(0); }
+
+    void emitDestructors(size_t firstScope) {
+        for (size_t i = destructorStack_.size(); i > firstScope; --i) {
+            for (size_t j = destructorStack_[i - 1].size(); j > 0; --j) {
+                const DestructorInfo& d = destructorStack_[i - 1][j - 1];
                 IRInstruction call;
                 call.op = IROp::CALL;
                 call.dest = std::nullopt;
-                call.args.push_back(IRValue::Label(d_it->mangledName));
-                call.args.push_back(d_it->varAddr);
+                call.args.push_back(IRValue::Label(d.mangledName));
+                call.args.push_back(d.varAddr);
                 currentBlock_->addInstruction(call);
             }
         }
     }
+
+    void emitDestructors() { emitDestructors(0); }
 
     // CID-006 fix round 3: the alias walk is cycle-safe. `visiting` is a
     // per-call visited set; a repeated spelling (the checker accepts cyclic
@@ -786,6 +800,7 @@ public:
         int prevLabelCount = labelCount_;
         auto prevBreakLabels = breakLabels_;
         auto prevContinueLabels = continueLabels_;
+        auto prevUnwindDepths = unwindDepths_;
         auto prevDeferStack = deferStack_;
         auto prevDestructorStack = destructorStack_;
         bool prevIsSret = currentIsSret_;
@@ -815,6 +830,7 @@ public:
         labelCount_ = 0;
         breakLabels_.clear();
         continueLabels_.clear();
+        unwindDepths_.clear();
         deferStack_.clear();
         destructorStack_.clear();
         deferStack_.push_back({});  // Function scope level
@@ -918,6 +934,7 @@ public:
         labelCount_ = prevLabelCount;
         breakLabels_ = prevBreakLabels;
         continueLabels_ = prevContinueLabels;
+        unwindDepths_ = prevUnwindDepths;
         deferStack_ = prevDeferStack;
         destructorStack_ = prevDestructorStack;
         currentIsSret_ = prevIsSret;
@@ -1392,6 +1409,7 @@ public:
         int prevLabelCount = labelCount_;
         auto prevBreakLabels = breakLabels_;
         auto prevContinueLabels = continueLabels_;
+        auto prevUnwindDepths = unwindDepths_;
         auto prevDeferStack = deferStack_;
         auto prevDestructorStack = destructorStack_;
         bool prevIsSret = currentIsSret_;
@@ -1414,6 +1432,7 @@ public:
         labelCount_ = 0;
         breakLabels_.clear();
         continueLabels_.clear();
+        unwindDepths_.clear();
         deferStack_.clear();
         destructorStack_.clear();
         deferStack_.push_back({});
@@ -1479,6 +1498,7 @@ public:
         labelCount_ = prevLabelCount;
         breakLabels_ = std::move(prevBreakLabels);
         continueLabels_ = std::move(prevContinueLabels);
+        unwindDepths_ = std::move(prevUnwindDepths);
         deferStack_ = std::move(prevDeferStack);
         destructorStack_ = std::move(prevDestructorStack);
         currentIsSret_ = prevIsSret;
@@ -3617,18 +3637,32 @@ public:
 
         startBlock(thenName);
         symbolTable_.enterScope();
+        deferStack_.push_back({});
+        destructorStack_.push_back({});
         for (auto& s : stmt.getThenBranch()) s->accept(*this);
         if (currentBlock_ && (currentBlock_->getInstructions().empty() || (currentBlock_->getInstructions().back().op != IROp::BR && currentBlock_->getInstructions().back().op != IROp::RET))) {
+            // CIDER-BUG-050: an if branch is a lexical block; its defers run
+            // when the branch exits, not at the enclosing block's exit.
+            emitDefers(deferStack_.size() - 1);
+            emitDestructors(destructorStack_.size() - 1);
             currentBlock_->addInstruction({IROp::BR, std::nullopt, {IRValue::Label(mergeName)}});
         }
+        destructorStack_.pop_back();
+        deferStack_.pop_back();
         symbolTable_.exitScope();
 
         startBlock(elseName);
         symbolTable_.enterScope();
+        deferStack_.push_back({});
+        destructorStack_.push_back({});
         for (auto& s : stmt.getElseBranch()) s->accept(*this);
         if (currentBlock_ && (currentBlock_->getInstructions().empty() || (currentBlock_->getInstructions().back().op != IROp::BR && currentBlock_->getInstructions().back().op != IROp::RET))) {
+            emitDefers(deferStack_.size() - 1);
+            emitDestructors(destructorStack_.size() - 1);
             currentBlock_->addInstruction({IROp::BR, std::nullopt, {IRValue::Label(mergeName)}});
         }
+        destructorStack_.pop_back();
+        deferStack_.pop_back();
         symbolTable_.exitScope();
 
         startBlock(mergeName);
@@ -3648,26 +3682,26 @@ public:
 
         continueLabels_.push_back(headerName);
         breakLabels_.push_back(exitName);
-        deferStack_.push_back({});
-        destructorStack_.push_back({});
+        // Index the loop's iteration scope (pushed below, per iteration):
+        // break/continue unwind down to it, not past it.
+        unwindDepths_.push_back(deferStack_.size());
         symbolTable_.enterScope();
 
         startBlock(bodyName);
+        // CIDER-BUG-050: a fresh scope per iteration, so body defers run at
+        // the end of every iteration (and before a break/continue jump).
+        deferStack_.push_back({});
+        destructorStack_.push_back({});
         for (auto& s : stmt.getBody()) s->accept(*this);
         if (currentBlock_ && (currentBlock_->getInstructions().empty() || (currentBlock_->getInstructions().back().op != IROp::BR && currentBlock_->getInstructions().back().op != IROp::RET))) {
-            for (auto it = destructorStack_.back().rbegin(); it != destructorStack_.back().rend(); ++it) {
-                IRInstruction call;
-                call.op = IROp::CALL;
-                call.dest = std::nullopt;
-                call.args.push_back(IRValue::Label(it->mangledName));
-                call.args.push_back(it->varAddr);
-                currentBlock_->addInstruction(call);
-            }
+            emitDefers(deferStack_.size() - 1);
+            emitDestructors(destructorStack_.size() - 1);
             currentBlock_->addInstruction({IROp::BR, std::nullopt, {IRValue::Label(headerName)}});
         }
-        symbolTable_.exitScope();
         destructorStack_.pop_back();
         deferStack_.pop_back();
+        symbolTable_.exitScope();
+        unwindDepths_.pop_back();
         continueLabels_.pop_back();
         breakLabels_.pop_back();
 
@@ -3695,20 +3729,19 @@ public:
 
         continueLabels_.push_back(incName);
         breakLabels_.push_back(exitName);
-        deferStack_.push_back({});
-        destructorStack_.push_back({});
+        // Index the loop's iteration scope (pushed below): break/continue
+        // unwind down to it, not past it.
+        unwindDepths_.push_back(deferStack_.size());
 
         startBlock(bodyName);
+        // CIDER-BUG-050: a fresh scope per iteration, so body defers run at
+        // the end of every iteration (and before a break/continue jump).
+        deferStack_.push_back({});
+        destructorStack_.push_back({});
         for (auto& s : stmt.getBody()) s->accept(*this);
         if (currentBlock_ && (currentBlock_->getInstructions().empty() || (currentBlock_->getInstructions().back().op != IROp::BR && currentBlock_->getInstructions().back().op != IROp::RET))) {
-            for (auto it = destructorStack_.back().rbegin(); it != destructorStack_.back().rend(); ++it) {
-                IRInstruction call;
-                call.op = IROp::CALL;
-                call.dest = std::nullopt;
-                call.args.push_back(IRValue::Label(it->mangledName));
-                call.args.push_back(it->varAddr);
-                currentBlock_->addInstruction(call);
-            }
+            emitDefers(deferStack_.size() - 1);
+            emitDestructors(destructorStack_.size() - 1);
             currentBlock_->addInstruction({IROp::BR, std::nullopt, {IRValue::Label(incName)}});
         }
 
@@ -3718,6 +3751,7 @@ public:
 
         destructorStack_.pop_back();
         deferStack_.pop_back();
+        unwindDepths_.pop_back();
         continueLabels_.pop_back();
         breakLabels_.pop_back();
         symbolTable_.exitScope();
@@ -3792,16 +3826,21 @@ public:
 
     void visit(BreakStmt&) override {
         if (!breakLabels_.empty()) {
-            emitDefers();
-            emitDestructors();
+            // CIDER-BUG-050: run the defers of the exited blocks (the loop's
+            // iteration scope and anything nested inside it) before jumping.
+            // Enclosing scopes keep their defers for their own exit, so they
+            // are not run twice.
+            emitDefers(unwindDepths_.back());
+            emitDestructors(unwindDepths_.back());
             currentBlock_->addInstruction({IROp::BR, std::nullopt, {IRValue::Label(breakLabels_.back())}});
             startBlock(nextLabel("dead"));
         }
     }
     void visit(ContinueStmt&) override {
         if (!continueLabels_.empty()) {
-            emitDefers();
-            emitDestructors();
+            // Same partial unwind as break (CIDER-BUG-050).
+            emitDefers(unwindDepths_.back());
+            emitDestructors(unwindDepths_.back());
             currentBlock_->addInstruction({IROp::BR, std::nullopt, {IRValue::Label(continueLabels_.back())}});
             startBlock(nextLabel("dead"));
         }
@@ -3859,9 +3898,6 @@ public:
             loopVarSym->type = elemType;
             symbolTable_.define(loopVarSym);
         }
-        deferStack_.push_back({});
-        destructorStack_.push_back({});
-
         if (!iterableType.isArray && !iterableType.isSlice) {
             // Custom iterator protocol: it = obj.iter();
             // loop: p = it.next(); if (p == nilPtr) break; x = *p; body.
@@ -3923,8 +3959,12 @@ public:
 
             continueLabels_.push_back(headerName);
             breakLabels_.push_back(exitName);
+            unwindDepths_.push_back(deferStack_.size());
 
             startBlock(bodyName);
+            // CIDER-BUG-050: fresh per-iteration scope for body defers.
+            deferStack_.push_back({});
+            destructorStack_.push_back({});
             IRValue varAddr = IRValue::Register(nextTemp(), IRType::PTR);
             currentBlock_->addInstruction({IROp::ALLOCA, varAddr, {IRValue::Constant(getTypeSize(elemType), IRType::I32)}});
             variableValues_[stmt.getVarName()] = varAddr;
@@ -3946,12 +3986,15 @@ public:
             if (currentBlock_ && (currentBlock_->getInstructions().empty() ||
                                   (currentBlock_->getInstructions().back().op != IROp::BR &&
                                    currentBlock_->getInstructions().back().op != IROp::RET))) {
+                emitDefers(deferStack_.size() - 1);
+                emitDestructors(destructorStack_.size() - 1);
                 currentBlock_->addInstruction({IROp::BR, std::nullopt, {IRValue::Label(headerName)}});
             }
-
-            startBlock(exitName);
             destructorStack_.pop_back();
             deferStack_.pop_back();
+
+            startBlock(exitName);
+            unwindDepths_.pop_back();
             continueLabels_.pop_back();
             breakLabels_.pop_back();
             symbolTable_.exitScope();
@@ -3987,8 +4030,12 @@ public:
 
         continueLabels_.push_back(incName);
         breakLabels_.push_back(exitName);
+        unwindDepths_.push_back(deferStack_.size());
 
         startBlock(bodyName);
+        // CIDER-BUG-050: fresh per-iteration scope for body defers.
+        deferStack_.push_back({});
+        destructorStack_.push_back({});
         iVal = IRValue::Register(nextTemp(), IRType::I32);
         currentBlock_->addInstruction({IROp::LOAD, iVal, {iAddr, IRValue::Constant(0, IRType::I32)}});
 
@@ -4028,8 +4075,12 @@ public:
 
         if (currentBlock_ && (currentBlock_->getInstructions().empty() ||
                               (currentBlock_->getInstructions().back().op != IROp::BR && currentBlock_->getInstructions().back().op != IROp::RET))) {
+            emitDefers(deferStack_.size() - 1);
+            emitDestructors(destructorStack_.size() - 1);
             currentBlock_->addInstruction({IROp::BR, std::nullopt, {IRValue::Label(incName)}});
         }
+        destructorStack_.pop_back();
+        deferStack_.pop_back();
 
         startBlock(incName);
         iVal = IRValue::Register(nextTemp(), IRType::I32);
@@ -4040,8 +4091,7 @@ public:
         currentBlock_->addInstruction({IROp::STORE, std::nullopt, {iAddr, newI, IRValue::Constant(0, IRType::I32)}});
         currentBlock_->addInstruction({IROp::BR, std::nullopt, {IRValue::Label(headerName)}});
 
-        destructorStack_.pop_back();
-        deferStack_.pop_back();
+        unwindDepths_.pop_back();
         continueLabels_.pop_back();
         breakLabels_.pop_back();
         symbolTable_.exitScope();
@@ -4073,6 +4123,11 @@ public:
 
     void visit(TryCatchStmt& stmt) override {
         if (currentFunction_) {
+            // CIDER-BUG-050: try/catch bodies deliberately do not push a
+            // defer/destructor scope. Throws are setjmp/longjmp-based, so a
+            // scope here could not run its exits on the throw path; defers
+            // written in these bodies stay pending until the enclosing block
+            // exits rather than being dropped when the jump skips them.
             ensureExceptionGlobals();
 
             IRValue setjmpDest = IRValue::Register(nextTemp(), IRType::I32);
@@ -4853,10 +4908,19 @@ public:
                 currentBlock_->addInstruction({IROp::COND_BR, std::nullopt, {cond, IRValue::Label(armName), IRValue::Label(nextCheckName)}});
             }
             startBlock(armName);
+            // CIDER-BUG-050: an arm body is its own scope (an implicit block
+            // when written as a single statement), so its defers run at that
+            // arm's end rather than at the enclosing block's exit.
+            deferStack_.push_back({});
+            destructorStack_.push_back({});
             arm.body->accept(*this);
             if (currentBlock_ && (currentBlock_->getInstructions().empty() || currentBlock_->getInstructions().back().op != IROp::BR)) {
+                emitDefers(deferStack_.size() - 1);
+                emitDestructors(destructorStack_.size() - 1);
                 currentBlock_->addInstruction({IROp::BR, std::nullopt, {IRValue::Label(exitName)}});
             }
+            destructorStack_.pop_back();
+            deferStack_.pop_back();
             startBlock(nextCheckName);
         }
         if (currentBlock_) currentBlock_->addInstruction({IROp::BR, std::nullopt, {IRValue::Label(exitName)}});
@@ -5243,6 +5307,12 @@ private:
     std::set<AstProgram*> visitedPrograms_;
     std::vector<std::string> breakLabels_;
     std::vector<std::string> continueLabels_;
+    // CIDER-BUG-050: for each enclosing loop, the deferStack_/destructorStack_
+    // depth above which a break/continue must emit scope exits. That covers
+    // the loop's per-iteration scope and every block nested inside it, while
+    // leaving enclosing scopes pending until they exit normally. Parallel to
+    // breakLabels_/continueLabels_.
+    std::vector<size_t> unwindDepths_;
     std::vector<std::vector<Statement*>> deferStack_;
     std::vector<std::vector<DestructorInfo>> destructorStack_;
     bool exceptionGlobalsEnsured_ = false;
