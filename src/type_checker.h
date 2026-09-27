@@ -299,6 +299,13 @@ public:
             TypeInfo target = canonicalizeInModule(sym->type, definingModuleOf(sym), -1);
             TypeInfo resolved = resolveTypeImpl(target, visiting);
             resolved.pointerLevel += info.pointerLevel;  // Should be 0 here
+            // CIDER-BUG-019: an alias spelling can be an ELEMENT type inside
+            // an array (`[Cb; N]`); keep the outer array wrapper, or the
+            // shape is lost and indexing is rejected / sizes compare equal.
+            if (info.isArray && !resolved.isArray) {
+                resolved.isArray = true;
+                resolved.arraySize = info.arraySize;
+            }
             return resolved;
         }
         return info;
@@ -1775,7 +1782,10 @@ public:
 
     void visit(IndexExpr& expr) override {
         expr.getObject()->accept(*this);
-        TypeInfo objType = lastExprType_;
+        // CIDER-BUG-019: resolve `type X = [T; N]` aliases before the
+        // array/pointer tests, or indexing an alias-typed array is
+        // rejected as "non-array and non-pointer type X".
+        TypeInfo objType = resolveType(lastExprType_);
         expr.getIndex()->accept(*this);
         TypeInfo idxType = lastExprType_;
 
@@ -1799,7 +1809,8 @@ public:
 
     void visit(SliceExpr& expr) override {
         expr.getObject()->accept(*this);
-        TypeInfo objType = lastExprType_;
+        // CIDER-BUG-019: same alias resolution as visit(IndexExpr).
+        TypeInfo objType = resolveType(lastExprType_);
 
         if (objType.isArray) {
             lastExprType_ = objType;

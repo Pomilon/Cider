@@ -1482,7 +1482,9 @@ public:
                         definingModuleFor(target, expr.getMember()), target->name);
                     lastExprType_ = canonicalizeSymbolType(target, expr.getMember());
                     if (lastExprType_.pointerLevel == 0) {
-                        // CIDER-BUG-015: alias-aware (see visit(IdentifierExpr)).
+                        // CIDER-BUG-015/019: alias-aware (see visit(IdentifierExpr)).
+                        lastExprType_ = resolveTypeAlias(lastExprType_,
+                                                         definingModuleFor(target, expr.getMember()));
                         if (resolveStructOrClassSymbol(lastExprType_,
                                                        definingModuleFor(target, expr.getMember()))) {
                             lastExprType_.isUserDefined = true;
@@ -2523,9 +2525,13 @@ public:
         if (sym) {
             lastExprType_ = canonicalizeSymbolType(sym, expr.getName());
             if (lastExprType_.pointerLevel == 0) {
-                // CIDER-BUG-015: follow `type X = T` chains before
-                // classifying, or an alias-to-struct value is treated as
-                // a scalar and loaded from its own stack slot.
+                // CIDER-BUG-015/019: follow `type X = T` chains before
+                // classifying. An alias-to-array value is address-like
+                // (isArray), an alias-to-struct value is user-defined, and
+                // an alias-to-fn value carries its signature; presenting
+                // the resolved type keeps indexing and calls consistent.
+                // (Non-alias types are returned unchanged.)
+                lastExprType_ = resolveTypeAlias(lastExprType_);
                 if (resolveStructOrClassSymbol(lastExprType_)) {
                     lastExprType_.isUserDefined = true;
                 } else {
@@ -4367,6 +4373,11 @@ public:
         IRValue idx = lastValue_;
         isAddress_ = wasAddress;
 
+        // CIDER-BUG-019: `type X = [T; N]` / `type Cb = fn(...)` element
+        // aliases must resolve before the shape strip and the load/address
+        // decision. resolveTypeAlias stops at array/fn wrappers, so resolve
+        // the base first, strip, then resolve the element.
+        baseType = resolveTypeAlias(baseType);
         TypeInfo elemType = baseType;
         if (elemType.isArray) {
             elemType.isArray = false;
@@ -4376,6 +4387,7 @@ public:
         } else if (elemType.name == "string") {
             elemType.name = "char";
         }
+        elemType = resolveTypeAlias(elemType);
 
         int elemSize = getTypeSize(elemType);
         IRValue scaledIdx = IRValue::Register(nextTemp(), IRType::I32);
@@ -4391,15 +4403,18 @@ public:
             // symbolTable_ lookup misses it and the element was then treated as
             // a loaded value instead of an address, producing an extra
             // dereference on `entries[num].field = v`.
-            auto elemTypeSym = resolveNominalType(elemType.name);
-            if (!elemTypeSym || (elemTypeSym->kind != SymbolKind::STRUCT && elemTypeSym->kind != SymbolKind::CLASS)) {
-                elemIsStruct = false;
-            }
+            // CIDER-BUG-019: alias providers are STRUCT-kind plain Symbols,
+            // so go through the alias-safe resolver (an alias-to-fn element
+            // used to stay "struct" and the call then invoked the slot
+            // address instead of the loaded function pointer).
+            elemIsStruct = resolveStructOrClassSymbol(elemType) != nullptr;
         }
         if (isAddress_ || elemIsStruct) {
             lastValue_ = addr;
         } else {
-            IRType irType = (elemType.pointerLevel > 0) ? IRType::PTR : mapType(elemType.name);
+            IRType irType = (elemType.pointerLevel > 0 || elemType.isFunctionPointer)
+                                ? IRType::PTR
+                                : mapType(elemType.name);
             IRValue dest = IRValue::Register(nextTemp(), irType);
             currentBlock_->addInstruction({IROp::LOAD, dest, {addr, IRValue::Constant(0, IRType::I32)}});
             lastValue_ = dest;
