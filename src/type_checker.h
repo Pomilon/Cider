@@ -439,11 +439,13 @@ public:
     // unresolved spelling (e.g. a template instantiation name) never
     // reached an alias provider and keeps its previous accept path.
     bool isByValueAggregateAtCall(const TypeInfo& t) {
-        if (t.pointerLevel > 0 || t.isArray || t.isFunctionPointer) return false;
+        if (t.pointerLevel > 0 || t.isFunctionPointer) return false;
         TypeInfo resolved = resolveType(t);
-        if (resolved.pointerLevel > 0 || resolved.isArray || resolved.isFunctionPointer) {
-            return false;
-        }
+        if (resolved.pointerLevel > 0 || resolved.isFunctionPointer) return false;
+        // CIDER-BUG-045: fixed-size arrays are by-value aggregates (params
+        // copy, returns use sret), which indirect calls do not pass.
+        if (t.isArray) return t.arraySize > 0;
+        if (resolved.isArray) return resolved.arraySize > 0;
         if (isBuiltinTypeName(resolved.name)) return false;
         std::shared_ptr<Symbol> s;
         if (resolved.name.find("::") != std::string::npos) {
@@ -1479,7 +1481,7 @@ public:
                 }
                 if (unsupportedAggregate) {
                     error("Calls through '" + fnType.toString() +
-                              "' values do not support struct/class by-value parameters or returns",
+                              "' values do not support struct/class/array by-value parameters or returns",
                           expr.getLine());
                 } else if (expr.getArgs().size() != fnType.fnParamTypes->size()) {
                     error("Function '" + fnType.toString() + "' expects " +

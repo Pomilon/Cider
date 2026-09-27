@@ -293,7 +293,7 @@ int run() {
         "struct P { var x: int; }\n"
         "func take(p: P) -> int { return p.x; }\n"
         "func main() -> int { var f: fn(P) -> int = take; var r: int = f(0); return r; }\n");
-    CHECK(hasError(fnStruct, "do not support struct/class by-value"));
+    CHECK(hasError(fnStruct, "do not support struct/class/array by-value"));
 
     // CID-006 fix (F1): aliases of fn(...) types must reach the same checks
     // as the spelled-out type — valid use, indirect-call arity/argument
@@ -527,14 +527,14 @@ int run() {
         "struct Q { var f: msabi fn(*Q, S) -> u64; }\n"
         "msabi func g(q: *Q, s: S) -> u64 { q->f(q, s); return 0; }\n"
         "func main() -> int { return 0; }\n");
-    CHECK(hasError(aggFnSig, "do not support struct/class by-value"));
+    CHECK(hasError(aggFnSig, "do not support struct/class/array by-value"));
     auto aggAliasFnSig = checkSrc(
         "struct S { var x: int; }\n"
         "type SAlias = S;\n"
         "struct Q { var f: msabi fn(*Q, SAlias) -> u64; }\n"
         "msabi func g(q: *Q, s: SAlias) -> u64 { q->f(q, s); return 0; }\n"
         "func main() -> int { return 0; }\n");
-    CHECK(hasError(aggAliasFnSig, "do not support struct/class by-value"));
+    CHECK(hasError(aggAliasFnSig, "do not support struct/class/array by-value"));
 
     // CID-005/T7 fix round 1 (F3): fn-pointer signature equality must
     // alias-resolve the nested signature (parameters AND return), not just
@@ -609,7 +609,7 @@ int run() {
         "struct Q { var f: msabi fn(*Q, NopeAlias) -> u64; }\n"
         "msabi func g(q: *Q, s: NopeAlias) -> u64 { q->f(q, s); return 0; }\n"
         "func main() -> int { return 0; }\n");
-    CHECK(hasError(unresolvedAliasCall, "do not support struct/class by-value"));
+    CHECK(hasError(unresolvedAliasCall, "do not support struct/class/array by-value"));
 
     // CID-005/T7 fix round 2: self-referential and mutually cyclic fn-type
     // aliases must terminate signature-alias resolution. Before the visited

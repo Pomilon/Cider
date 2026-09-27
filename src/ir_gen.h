@@ -365,6 +365,20 @@ public:
         return sym->type.name.empty();
     }
 
+    // CIDER-BUG-045: fixed-size array values are by-value aggregates too —
+    // they return through the same hidden-sret convention (the caller slot
+    // outlives the frame). Slices/interfaces/fn values are not.
+    bool isByValueAggregate(const TypeInfo& t, const std::string& defModule = "") {
+        if (t.pointerLevel > 0 || t.isSlice || t.isInterface || t.isFunctionPointer) return false;
+        TypeInfo resolved = resolveTypeAlias(t, defModule);
+        if (resolved.pointerLevel > 0 || resolved.isSlice || resolved.isInterface ||
+            resolved.isFunctionPointer) {
+            return false;
+        }
+        if (resolved.isArray) return resolved.arraySize > 0;
+        return isStructValueType(t, defModule);
+    }
+
     // Visitor methods
     void visit(AstProgram& program) override {
         if (visitedPrograms_.count(&program)) return;
@@ -770,7 +784,7 @@ public:
         // Virtual methods stay on the legacy malloc path so VIRTUAL_CALL
         // callers (which don't pass sret) keep matching the callee.
         bool isVirtMethod = stmt.isVirtual() || stmt.isOverride();
-        bool funcIsSret = isStructValueType(funcRetType) && !isVirtMethod;
+        bool funcIsSret = isByValueAggregate(funcRetType) && !isVirtMethod;
         currentIsSret_ = funcIsSret;
         currentReturnType_ = funcRetType;
         IRType funcRetIR = funcIsSret ? IRType::VOID : mapType(funcRetType.name);
@@ -849,10 +863,11 @@ public:
             IRValue paramReg = IRValue::Register(paramRegName, paramIRType);
             IRValue addr = IRValue::Register(nextTemp(), IRType::PTR);
             currentBlock_->addInstruction({IROp::ALLOCA, addr, {IRValue::Constant(getTypeSize(sym->type), IRType::I32)}});
-            if (sym->type.pointerLevel == 0 && !sym->type.isArray && isStructValueType(sym->type)) {
-                // Struct-by-value params arrive as a caller pointer
-                // (CID-022): copy the pointee into the local slot instead
-                // of storing the pointer value as the first field.
+            if (sym->type.pointerLevel == 0 && isByValueAggregate(sym->type)) {
+                // By-value aggregate params (struct/class/fixed-size array)
+                // arrive as a caller pointer: copy the pointee into the
+                // local slot instead of storing the pointer value as the
+                // first field (CID-022; CIDER-BUG-045 for arrays).
                 currentBlock_->addInstruction({IROp::MEMCPY, std::nullopt, {addr, paramReg, IRValue::Constant(getTypeSize(sym->type), IRType::I32)}});
             } else {
                 currentBlock_->addInstruction({IROp::STORE, std::nullopt, {addr, paramReg, IRValue::Constant(0, IRType::I32)}});
@@ -912,7 +927,7 @@ public:
 
             // Struct-by-value return via hidden sret pointer: no malloc,
             // freestanding-safe. The caller-provided slot outlives the frame.
-            if (currentIsSret_ && isStructValueType(currentReturnType_)) {
+            if (currentIsSret_ && isByValueAggregate(currentReturnType_)) {
                 int structSize = getTypeSize(currentReturnType_);
                 IRValue sretAddr = variableValues_.count("__sret")
                     ? variableValues_["__sret"]
@@ -1110,7 +1125,7 @@ public:
             } else if (sym && sym->kind == SymbolKind::FUNCTION) {
                 calleeAbi = std::static_pointer_cast<FunctionSymbol>(sym)->abi;
             }
-            bool calleeIsSret = isStructValueType(calleeRet, calleeDefMod);
+            bool calleeIsSret = isByValueAggregate(calleeRet, calleeDefMod);
             // Virtual callees are never sret (they stay on the malloc path);
             // direct CALLs here are free functions / non-virtual methods.
             if (calleeIsSret && !(isVirtual && vtableIndex != -1)) {
@@ -2295,6 +2310,11 @@ public:
     // truncateIntToType. Pointers and aggregates pass through untouched.
     IRValue convertValueToType(IRValue val, const TypeInfo& target) {
         if (target.pointerLevel > 0) return val;
+        // CIDER-BUG-045: an array target (direct or alias spelling) is
+        // address-like — scalar conversion would truncate the data label to
+        // a 16-bit constant, so `return u"AB";` memcpy'd from address 0.
+        TypeInfo resolvedTarget = resolveTypeAlias(target);
+        if (target.isArray || resolvedTarget.isArray) return val;
         IRType targetIR = mapType(target.name);
         bool valIsFloat = (val.type == IRType::F32 || val.type == IRType::F64);
         bool valIsInt = isIntIRType(val.type);
