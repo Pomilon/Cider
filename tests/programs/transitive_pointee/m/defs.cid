@@ -1,0 +1,23 @@
+// CIDER-BUG-043: the pointee type (Inner) is intentionally NOT imported by
+// main.cid — it is only reachable transitively through Holder.p.
+export struct Inner {
+  var a: u32;
+  var b: u32;
+}
+
+export struct Holder {
+  var p: *Inner;
+}
+
+export var g_inner: Inner;
+
+export func setInner(a: u32, b: u32) -> void {
+  g_inner.a = a;
+  g_inner.b = b;
+}
+
+export func getHolder() -> Holder {
+  var h: Holder;
+  h.p = &g_inner;
+  return h;
+}

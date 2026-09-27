@@ -495,6 +495,25 @@ public:
         return ms->resolveLocal(bare);
     }
 
+    // CIDER-BUG-043: a field's declared type is written in the struct's
+    // defining module; re-root a bare nominal in that module so downstream
+    // lookups (member access on a transitively reached pointee type, e.g.
+    // `st->ConOut->OutputString` without importing TXT) resolve without an
+    // explicit import. Mirrors the checker's canonicalizeInModule for field
+    // types; main-module types keep bare names (canonical == bare there),
+    // so import-free IR stays identical.
+    TypeInfo canonicalizeFieldType(TypeInfo t, const std::string& ownerMod) {
+        if (t.name.empty() || t.name.find("::") != std::string::npos) return t;
+        if (t.name.find('<') != std::string::npos || t.name.find('.') != std::string::npos) return t;
+        if (ownerMod.empty()) return t;
+        auto resolved = resolveNominalType(ownerMod + "::" + t.name);
+        if (resolved && (resolved->kind == SymbolKind::STRUCT || resolved->kind == SymbolKind::CLASS ||
+                         resolved->kind == SymbolKind::ENUM || resolved->kind == SymbolKind::INTERFACE)) {
+            t.name = ownerMod + "::" + t.name;
+        }
+        return t;
+    }
+
     // CID-031: a symbol declared in another module carries that module's
     // bare nominal type name. Re-root it in the owner's context so layout
     // resolution (field offsets, sizes) matches the checker's canonical
@@ -1498,8 +1517,12 @@ public:
                     // spelling: resolve the chain before classifying
                     // (struct vs scalar) and before choosing the load
                     // width, or `type W = u64` fields lower as addresses
-                    // and `type H = *void` fields as non-pointers.
-                    TypeInfo fieldType = resolveTypeAlias(field.type, ownerMod);
+                    // and `type H = *void` fields as non-pointers. Re-root
+                    // bare nominals in the struct's module so a
+                    // transitively reached pointee type resolves without
+                    // an explicit import (CIDER-BUG-043).
+                    TypeInfo fieldType =
+                        canonicalizeFieldType(resolveTypeAlias(field.type, ownerMod), ownerMod);
                     bool fieldIsStruct = (fieldType.pointerLevel == 0);
                     if (fieldIsStruct) {
                         auto fieldTypeSym = resolveNominalType(fieldType.name);
@@ -2613,7 +2636,9 @@ public:
                 auto ss = std::static_pointer_cast<StructSymbol>(sym);
                 std::string ownerMod = definingModuleFor(sym, ss->name);
                 for (const auto& f : ss->fields) {
-                    if (f.name == mem->getMember()) return resolveTypeAlias(f.type, ownerMod);
+                    if (f.name == mem->getMember()) {
+                        return canonicalizeFieldType(resolveTypeAlias(f.type, ownerMod), ownerMod);
+                    }
                 }
             }
         } else if (auto idx = dynamic_cast<IndexExpr*>(expr)) {
@@ -2674,9 +2699,10 @@ public:
         std::string ownerMod = definingModuleFor(sym, ss->name);
         for (const auto& f : ss->fields) {
             if (f.name == mem->getMember()) {
-                // CIDER-BUG-015: report the resolved type so store widths
-                // and conversions see through `type X = T` spellings.
-                out = resolveTypeAlias(f.type, ownerMod);
+                // CIDER-BUG-015/043: report the resolved, module-rooted
+                // type so store widths and conversions see through
+                // `type X = T` spellings and cross-module pointees.
+                out = canonicalizeFieldType(resolveTypeAlias(f.type, ownerMod), ownerMod);
                 return true;
             }
         }
