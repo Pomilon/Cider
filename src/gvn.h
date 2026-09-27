@@ -135,7 +135,11 @@ private:
     }
 
     std::string computeVN(const IRInstruction& instr) {
-        if (!isDedupable(instr.op)) {
+        // CIDER-BUG-061: a volatile access is an observable side effect, so
+        // it never gets a repeatable value number. Even if a future opcode
+        // is added to isDedupable, a volatile instruction can then never be
+        // replaced by a MOV of an earlier equal-looking result.
+        if (instr.isVolatile || !isDedupable(instr.op)) {
             return opToString(instr.op) + "_" + std::to_string(uniqueCounter_++);
         }
         // CID-003 follow-up (W5): the value number carries the instruction's

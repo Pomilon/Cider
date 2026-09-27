@@ -254,6 +254,131 @@ int testLicm() {
     return 0;
 }
 
+int testVolatileIrFlags() {
+    // CIDER-BUG-061: ir_gen marks every access that touches a volatile
+    // object — a volatile local, a volatile global, and a store through a
+    // pointer to volatile — so the optimizer passes can see it.
+    auto r = genModule(
+        "var g: volatile int = 0;\n"
+        "func f() -> int {\n"
+        "  var x: volatile int = 3;\n"
+        "  var p: volatile int* = &x;\n"
+        "  *p = 5;\n"
+        "  g = x + *p;\n"
+        "  return g;\n"
+        "}\n");
+    int volatileLoads = 0, volatileStores = 0;
+    for (const auto& b : r.module.getFunctions()[0]->getBlocks()) {
+        for (const auto& in : b->getInstructions()) {
+            if (in.op == cider::IROp::LOAD && in.isVolatile) volatileLoads++;
+            if (in.op == cider::IROp::STORE && in.isVolatile) volatileStores++;
+        }
+    }
+    // x init, *p = 5, and the g store are all volatile writes.
+    CHECK(volatileStores >= 3);
+    // x, *p and g are all volatile reads.
+    CHECK(volatileLoads >= 3);
+
+    // Negative control: the same function without `volatile` carries no
+    // volatile instruction, so non-volatile IR keeps its existing shape.
+    auto r2 = genModule(
+        "var g: int = 0;\n"
+        "func f() -> int {\n"
+        "  var x: int = 3;\n"
+        "  var p: int* = &x;\n"
+        "  *p = 5;\n"
+        "  g = x + *p;\n"
+        "  return g;\n"
+        "}\n");
+    for (const auto& b : r2.module.getFunctions()[0]->getBlocks()) {
+        for (const auto& in : b->getInstructions()) {
+            CHECK(!in.isVolatile);
+        }
+    }
+    return 0;
+}
+
+int testVolatileGvn() {
+    // CIDER-BUG-061: GVN must never replace a volatile access with a MOV of
+    // an earlier occurrence — even for an opcode that is normally deduped.
+    // The straight-line loads pin the LOAD case; the artificially volatile
+    // ADD pins the value-number guard itself.
+    auto fn = std::make_unique<cider::FunctionIR>("f", cider::IRType::I32);
+    auto block = std::make_unique<cider::BasicBlock>("entry");
+    cider::IRInstruction load1;
+    load1.op = cider::IROp::LOAD;
+    load1.dest = cider::IRValue::Register("v1", cider::IRType::I32);
+    load1.args = {cider::IRValue::Register("p", cider::IRType::PTR),
+                  cider::IRValue::Constant(0, cider::IRType::I32)};
+    load1.isVolatile = true;
+    cider::IRInstruction load2 = load1;
+    load2.dest = cider::IRValue::Register("v2", cider::IRType::I32);
+    cider::IRInstruction add1;
+    add1.op = cider::IROp::ADD;
+    add1.dest = cider::IRValue::Register("a", cider::IRType::I32);
+    add1.args = {cider::IRValue::Register("x", cider::IRType::I32),
+                 cider::IRValue::Constant(1, cider::IRType::I32)};
+    cider::IRInstruction add2 = add1;
+    add2.dest = cider::IRValue::Register("b", cider::IRType::I32);
+    add2.isVolatile = true;
+    block->addInstruction(load1);
+    block->addInstruction(load2);
+    block->addInstruction(add1);
+    block->addInstruction(add2);
+    cider::IRInstruction ret;
+    ret.op = cider::IROp::RET;
+    ret.args = {cider::IRValue::Register("b", cider::IRType::I32)};
+    block->addInstruction(ret);
+    fn->addBlock(std::move(block));
+    cider::ModuleIR mod;
+    mod.addFunction(std::move(fn));
+    cider::GvnPass gvn;
+    gvn.run(mod);
+    const auto& instrs = mod.getFunctions()[0]->getBlocks()[0]->getInstructions();
+    CHECK(instrs[0].op == cider::IROp::LOAD && instrs[0].isVolatile);
+    CHECK(instrs[1].op == cider::IROp::LOAD && instrs[1].isVolatile);  // kept, not MOV v1
+    CHECK(instrs[2].op == cider::IROp::ADD && !instrs[2].isVolatile);
+    CHECK(instrs[3].op == cider::IROp::ADD && instrs[3].isVolatile);   // not deduped
+    return 0;
+}
+
+int testVolatileLicm() {
+    // CIDER-BUG-061: LICM hoists a non-volatile alloca load out of the loop
+    // (control), but must leave the volatile load in place.
+    auto r = genModule(
+        "func f(n: int) -> int {\n"
+        "  var x: volatile int = 0;\n"
+        "  var y: int = 0;\n"
+        "  var i: int = 0;\n"
+        "  var s: int = 0;\n"
+        "  while (i < n) {\n"
+        "    s = s + x;\n"
+        "    s = s + y;\n"
+        "    i = i + 1;\n"
+        "  }\n"
+        "  return s;\n"
+        "}\n");
+    cider::SSALicmPass licm;
+    CHECK(licm.run(r.module));
+    int volLoadsStayed = 0, volLoadsInPreheader = 0, plainLoadsInPreheader = 0;
+    for (const auto& b : r.module.getFunctions()[0]->getBlocks()) {
+        bool preheader = b->getName().find("preheader") != std::string::npos;
+        for (const auto& in : b->getInstructions()) {
+            if (in.op != cider::IROp::LOAD) continue;
+            if (in.isVolatile) {
+                if (preheader) volLoadsInPreheader++;
+                else volLoadsStayed++;
+            } else if (preheader) {
+                plainLoadsInPreheader++;
+            }
+        }
+    }
+    CHECK(volLoadsStayed == 1);         // volatile load stayed in the loop
+    CHECK(volLoadsInPreheader == 0);    // and was not hoisted
+    CHECK(plainLoadsInPreheader >= 1);  // control: a plain load did hoist
+    return 0;
+}
+
 int testInliner() {
     // A small helper gets inlined; recursion does not.
     auto r = genModule(
@@ -276,6 +401,9 @@ int run() {
     CHECK(testGvnWideStrings() == 0);
     CHECK(testGvnTypes() == 0);
     CHECK(testLicm() == 0);
+    CHECK(testVolatileIrFlags() == 0);
+    CHECK(testVolatileGvn() == 0);
+    CHECK(testVolatileLicm() == 0);
     CHECK(testInliner() == 0);
     return 0;
 }

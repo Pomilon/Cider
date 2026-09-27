@@ -100,6 +100,13 @@ struct IRInstruction {
     IROp op;
     std::optional<IRValue> dest;
     std::vector<IRValue> args;
+    // CIDER-BUG-061: the access touches a `volatile`-qualified object
+    // (MMIO register, driver-shared memory). Volatile accesses are
+    // observable: the optimizer must not CSE, hoist, reorder or eliminate
+    // them. ir_gen sets this on LOAD/STORE/MEMCPY whose accessed type is
+    // volatile; every other instruction leaves it false, so non-volatile
+    // IR keeps its existing shape.
+    bool isVolatile = false;
     // CID-005: calling convention of a CALL. Default resolves to the
     // target descriptor in codegen; indirect calls through typed fn
     // values always set a concrete Ms/SysV.
@@ -114,6 +121,10 @@ struct IRInstruction {
     IRInstruction() = default;
     IRInstruction(IROp o, std::optional<IRValue> d, std::vector<IRValue> a)
         : op(o), dest(std::move(d)), args(std::move(a)) {}
+    // CIDER-BUG-061: access instructions carry their volatility.
+    IRInstruction(IROp o, std::optional<IRValue> d, std::vector<IRValue> a,
+                  bool vol)
+        : op(o), dest(std::move(d)), args(std::move(a)), isVolatile(vol) {}
 
     std::string toString() const;
 };

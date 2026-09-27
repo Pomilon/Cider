@@ -275,6 +275,10 @@ public:
         TypeInfo target = canonicalizeNominalInModule(sym->type, definingModuleFor(sym, t.name));
         TypeInfo resolved = resolveTypeAliasImpl(target, defModule, visiting);
         resolved.pointerLevel += t.pointerLevel;
+        // CIDER-BUG-061: `volatile` written at the use site (`var x: volatile
+        // V` with `type V = int`) must survive alias resolution exactly like
+        // the qualifier on the alias target itself.
+        resolved.isVolatile = resolved.isVolatile || t.isVolatile;
         return resolved;
     }
 
@@ -1675,7 +1679,9 @@ public:
                     IRType irType = (target->type.pointerLevel > 0) ? IRType::PTR
                                                                    : mapType(target->type.name);
                     IRValue dest = IRValue::Register(nextTemp(), irType);
-                    currentBlock_->addInstruction({IROp::LOAD, dest, {IRValue::Label(gname)}});
+                    // CIDER-BUG-061: a volatile symbol read is observable.
+                    currentBlock_->addInstruction({IROp::LOAD, dest, {IRValue::Label(gname)},
+                                                   lastExprType_.isVolatile});
                     lastValue_ = dest;
                     return;
                 }
@@ -1727,16 +1733,21 @@ public:
                     // indexing them must operate on the array's location,
                     // not on a loaded copy of its first element.
                     bool fieldIsArray = fieldType.isArray;
+                    // CIDER-BUG-061: the field type may be volatile itself,
+                    // and every member of a volatile object is volatile.
+                    bool fieldVolatile = fieldType.isVolatile || objType.isVolatile;
                     if (field.bitWidth > 0 && !isAddress_) {
                         bool isSigned = (fieldType.name == "int" || fieldType.name == "i8" ||
                                          fieldType.name == "i16" || fieldType.name == "i32");
-                        lastValue_ = emitBitfieldLoad(addr, field.bitOffset, field.bitWidth, isSigned);
+                        lastValue_ = emitBitfieldLoad(addr, field.bitOffset, field.bitWidth, isSigned,
+                                                      fieldVolatile);
                     } else if (isAddress_ || fieldIsStruct || fieldIsArray) {
                         lastValue_ = addr;
                     } else {
                         IRType fieldIRType = (fieldType.pointerLevel > 0) ? IRType::PTR : mapType(fieldType.name);
                         IRValue dest = IRValue::Register(nextTemp(), fieldIRType);
-                        currentBlock_->addInstruction({IROp::LOAD, dest, {addr, IRValue::Constant(0, IRType::I32)}});
+                        currentBlock_->addInstruction({IROp::LOAD, dest, {addr, IRValue::Constant(0, IRType::I32)},
+                                                       fieldVolatile});
                         lastValue_ = dest;
                     }
                     lastExprType_ = fieldType;
@@ -1835,7 +1846,9 @@ public:
                 }
                 IRType derefType = (type.pointerLevel > 1) ? IRType::PTR : mapType(type.name);
                 IRValue dest = IRValue::Register(nextTemp(), derefType);
-                currentBlock_->addInstruction({IROp::LOAD, dest, {operand, IRValue::Constant(0, IRType::I32)}});
+                // CIDER-BUG-061: a load through `volatile T*` is observable.
+                currentBlock_->addInstruction({IROp::LOAD, dest, {operand, IRValue::Constant(0, IRType::I32)},
+                                               type.isVolatile});
                 lastValue_ = dest;
             }
             if (type.pointerLevel > 0) type.pointerLevel--;
@@ -1850,16 +1863,21 @@ public:
 
             IRType irType = (operandType.pointerLevel > 0) ? IRType::PTR : mapType(operandType.name);
             IRValue current = IRValue::Register(nextTemp(), irType);
-            currentBlock_->addInstruction({IROp::LOAD, current, {addr, IRValue::Constant(0, IRType::I32)}});
+            // CIDER-BUG-061: `++`/`--` on a volatile object is a volatile
+            // read-modify-write.
+            currentBlock_->addInstruction({IROp::LOAD, current, {addr, IRValue::Constant(0, IRType::I32)},
+                                           operandType.isVolatile});
 
             IRValue one = IRValue::Constant(1, irType);
             IRValue result = IRValue::Register(nextTemp(), irType);
             currentBlock_->addInstruction({expr.getOperator() == "++" ? IROp::ADD : IROp::SUB, result, {current, one}});
 
             if (addr.kind == IRValue::LABEL) {
-                currentBlock_->addInstruction({IROp::STORE, std::nullopt, {addr, result}});
+                currentBlock_->addInstruction({IROp::STORE, std::nullopt, {addr, result},
+                                               operandType.isVolatile});
             } else {
-                currentBlock_->addInstruction({IROp::STORE, std::nullopt, {addr, result, IRValue::Constant(0, IRType::I32)}});
+                currentBlock_->addInstruction({IROp::STORE, std::nullopt, {addr, result, IRValue::Constant(0, IRType::I32)},
+                                               operandType.isVolatile});
             }
 
             type = operandType;
@@ -2181,9 +2199,11 @@ public:
                             if (elemIsArray) {
                                 IRValue dst = IRValue::Register(nextTemp(), IRType::PTR);
                                 currentBlock_->addInstruction({IROp::ADD, dst, {addr, offset}});
-                                currentBlock_->addInstruction({IROp::MEMCPY, std::nullopt, {dst, eval, IRValue::Constant(elemSize, IRType::I32)}});
+                                currentBlock_->addInstruction({IROp::MEMCPY, std::nullopt, {dst, eval, IRValue::Constant(elemSize, IRType::I32)},
+                                                               sym->type.isVolatile});
                             } else {
-                                currentBlock_->addInstruction({IROp::STORE, std::nullopt, {addr, eval, offset}});
+                                currentBlock_->addInstruction({IROp::STORE, std::nullopt, {addr, eval, offset},
+                                                               sym->type.isVolatile});
                             }
                         }
                         lastExprType_ = sym->type;
@@ -2234,7 +2254,8 @@ public:
                 bool initIsStruct = (lastExprType_.pointerLevel == 0) && (isStructValueType(lastExprType_) || lastExprType_.isUserDefined ||
                                     lastExprType_.isArray || getTypeSize(lastExprType_) > 8);
                 if (sym->type.pointerLevel == 0 && (sym->type.isArray || sym->type.isUserDefined || isStructType || getTypeSize(sym->type) > 8 || initIsStruct)) {
-                    currentBlock_->addInstruction({IROp::MEMCPY, std::nullopt, {addr, val, IRValue::Constant(getTypeSize(sym->type), IRType::I32)}});
+                    currentBlock_->addInstruction({IROp::MEMCPY, std::nullopt, {addr, val, IRValue::Constant(getTypeSize(sym->type), IRType::I32)},
+                                                   sym->type.isVolatile});
                 } else {
                     // Store at the declared width (same rule as fields and
                     // elements): a narrow initializer in a wide local slot
@@ -2250,7 +2271,10 @@ public:
                                           declIR == IRType::I64 || declIR == IRType::U64);
                         if (declIsInt) val = truncateIntToType(val, sym->type);
                     }
-                    currentBlock_->addInstruction({IROp::STORE, std::nullopt, {addr, val, IRValue::Constant(0, IRType::I32)}});
+                    // CIDER-BUG-061: initialization of a volatile local is
+                    // itself an observable write.
+                    currentBlock_->addInstruction({IROp::STORE, std::nullopt, {addr, val, IRValue::Constant(0, IRType::I32)},
+                                                   sym->type.isVolatile});
                 }
             }
         }
@@ -2777,7 +2801,10 @@ public:
         // so folding here would bake in 0. True immediates without storage
         // (enum variants) still fold below. The key mangles by defining
         // module (spec §5), same as every global reference below.
-        if (sym && sym->isConst && !globalValues_.count(globalRefName(sym, expr.getName()))) {
+        // CIDER-BUG-061: a `const volatile` symbol (a read-only MMIO
+        // register) must still be read at each use — never folded.
+        if (sym && sym->isConst && !sym->type.isVolatile &&
+            !globalValues_.count(globalRefName(sym, expr.getName()))) {
             IRType irType = (sym->type.pointerLevel > 0) ? IRType::PTR : mapType(sym->type.name);
             lastValue_ = IRValue::Constant(sym->constValue, irType);
             return;
@@ -2826,7 +2853,9 @@ public:
                 IRValue addr = variableValues_[expr.getName()];
                 IRType irType = (lastExprType_.pointerLevel > 0) ? IRType::PTR : mapType(lastExprType_.name);
                 IRValue dest = IRValue::Register(nextTemp(), irType);
-                currentBlock_->addInstruction({IROp::LOAD, dest, {addr, IRValue::Constant(0, IRType::I32)}});
+                // CIDER-BUG-061: reading a volatile local is observable.
+                currentBlock_->addInstruction({IROp::LOAD, dest, {addr, IRValue::Constant(0, IRType::I32)},
+                                               lastExprType_.isVolatile});
                 lastValue_ = dest;
             }
         } else if (globalValues_.count(globalRefName(sym, expr.getName()))) {
@@ -2834,7 +2863,9 @@ public:
             if (!isAddress_) {
                 IRType irType = (lastExprType_.pointerLevel > 0) ? IRType::PTR : mapType(lastExprType_.name);
                 IRValue dest = IRValue::Register(nextTemp(), irType);
-                currentBlock_->addInstruction({IROp::LOAD, dest, {lastValue_}});
+                // CIDER-BUG-061: reading a volatile global is observable.
+                currentBlock_->addInstruction({IROp::LOAD, dest, {lastValue_},
+                                               lastExprType_.isVolatile});
                 lastValue_ = dest;
             }
         } else {
@@ -2985,6 +3016,28 @@ public:
             }
         }
         return false;
+    }
+
+    // CIDER-BUG-061: a member access is volatile when the member itself is
+    // `volatile`-qualified or when the object it sits in is (every member of
+    // a volatile object is volatile, as in C). Module-qualified globals
+    // (`mod.reg`) resolve through the module scope.
+    bool memberAccessIsVolatile(MemberAccessExpr* mem) {
+        if (!mem) return false;
+        if (auto base = dynamic_cast<IdentifierExpr*>(mem->getObject())) {
+            auto baseSym = symbolTable_.resolve(base->getName());
+            if (baseSym && baseSym->kind == SymbolKind::MODULE) {
+                auto modSym = std::static_pointer_cast<ModuleSymbol>(baseSym);
+                auto target = modSym->scope ? modSym->scope->resolveLocal(mem->getMember())
+                                            : nullptr;
+                if (target && resolveTypeAlias(target->type).isVolatile) return true;
+            }
+        }
+        TypeInfo objType = inferExprType(mem->getObject());
+        if (objType.pointerLevel > 0) objType.pointerLevel--;
+        if (resolveTypeAlias(objType).isVolatile) return true;
+        TypeInfo fieldType;
+        return getMemberFieldType(mem, fieldType) && fieldType.isVolatile;
     }
 
     // Convert an integer IR value to a field/element type so the subsequent
@@ -3493,9 +3546,11 @@ public:
         return val;
     }
 
-    IRValue emitBitfieldLoad(IRValue addr, int bitOffset, int bitWidth, bool isSigned) {
+    IRValue emitBitfieldLoad(IRValue addr, int bitOffset, int bitWidth, bool isSigned,
+                             bool isVolatile = false) {
         IRValue word = IRValue::Register(nextTemp(), IRType::I32);
-        currentBlock_->addInstruction({IROp::LOAD, word, {addr, IRValue::Constant(0, IRType::I32)}});
+        currentBlock_->addInstruction({IROp::LOAD, word, {addr, IRValue::Constant(0, IRType::I32)},
+                                       isVolatile});
         IRValue shifted = IRValue::Register(nextTemp(), IRType::I32);
         currentBlock_->addInstruction({IROp::RSHIFT, shifted, {word, IRValue::Constant(bitOffset, IRType::I32)}});
         IRValue masked = IRValue::Register(nextTemp(), IRType::I32);
@@ -3515,9 +3570,11 @@ public:
         return masked;
     }
 
-    void emitBitfieldStore(IRValue addr, IRValue val, int bitOffset, int bitWidth) {
+    void emitBitfieldStore(IRValue addr, IRValue val, int bitOffset, int bitWidth,
+                           bool isVolatile = false) {
         IRValue word = IRValue::Register(nextTemp(), IRType::I32);
-        currentBlock_->addInstruction({IROp::LOAD, word, {addr, IRValue::Constant(0, IRType::I32)}});
+        currentBlock_->addInstruction({IROp::LOAD, word, {addr, IRValue::Constant(0, IRType::I32)},
+                                       isVolatile});
         IRValue vm = IRValue::Register(nextTemp(), IRType::I32);
         currentBlock_->addInstruction({IROp::BIT_AND, vm, {val, IRValue::Constant(bitfieldMask(bitWidth), IRType::I32)}});
         IRValue shifted = IRValue::Register(nextTemp(), IRType::I32);
@@ -3527,7 +3584,8 @@ public:
         currentBlock_->addInstruction({IROp::BIT_AND, cleared, {word, IRValue::Constant(clearMask, IRType::I32)}});
         IRValue nw = IRValue::Register(nextTemp(), IRType::I32);
         currentBlock_->addInstruction({IROp::BIT_OR, nw, {cleared, shifted}});
-        currentBlock_->addInstruction({IROp::STORE, std::nullopt, {addr, nw, IRValue::Constant(0, IRType::I32)}});
+        currentBlock_->addInstruction({IROp::STORE, std::nullopt, {addr, nw, IRValue::Constant(0, IRType::I32)},
+                                       isVolatile});
     }
 
     // CIDER-BUG-057: a slice value is a pointer to a {dataPtr, len}
@@ -3576,6 +3634,33 @@ public:
             addr = getAddress(stmt.getTarget());
         }
 
+        // CIDER-BUG-061: whether this assignment writes a volatile object.
+        // Each target shape reports the object being written: an identifier
+        // its declared type, a deref its pointee, an index its element, a
+        // member its field (or a volatile enclosing object), a module-global
+        // member its symbol.
+        bool targetIsVolatile = false;
+        if (auto ident = dynamic_cast<IdentifierExpr*>(stmt.getTarget())) {
+            auto sym = symbolTable_.resolve(ident->getName());
+            if (sym) targetIsVolatile = resolveTypeAlias(sym->type).isVolatile;
+        } else if (auto mem = dynamic_cast<MemberAccessExpr*>(stmt.getTarget())) {
+            targetIsVolatile = memberAccessIsVolatile(mem);
+        } else if (auto idx = dynamic_cast<IndexExpr*>(stmt.getTarget())) {
+            TypeInfo elemType = inferExprType(idx->getObject());
+            if (elemType.isArray) {
+                elemType = elemType.elementType();
+            } else if (elemType.pointerLevel > 0) {
+                elemType.pointerLevel--;
+            } else if (elemType.name == "string") {
+                elemType.name = "char";
+            }
+            targetIsVolatile = resolveTypeAlias(elemType).isVolatile;
+        } else if (hasDerefTarget) {
+            targetIsVolatile = derefPointeeType.isVolatile;
+        } else {
+            targetIsVolatile = inferExprType(stmt.getTarget()).isVolatile;
+        }
+
         if (compoundOp.empty()) {
             // CIDER-BUG-054: an interface variable target stores the fat
             // pointer (data + vtable) through the same helper the
@@ -3610,7 +3695,7 @@ public:
             if (auto mem = dynamic_cast<MemberAccessExpr*>(stmt.getTarget())) {
                 int bitOffset = 0, bitWidth = 0;
                 if (getMemberBitfield(mem, bitOffset, bitWidth)) {
-                    emitBitfieldStore(addr, val, bitOffset, bitWidth);
+                    emitBitfieldStore(addr, val, bitOffset, bitWidth, targetIsVolatile);
                     return;
                 }
                 TypeInfo fieldType;
@@ -3684,12 +3769,14 @@ public:
             }
 
             if (lastExprType_.pointerLevel == 0 && (lastExprType_.isArray || lastExprType_.isUserDefined || getTypeSize(lastExprType_) > 8)) {
-                currentBlock_->addInstruction({IROp::MEMCPY, std::nullopt, {addr, val, IRValue::Constant(getTypeSize(lastExprType_), IRType::I32)}});
+                currentBlock_->addInstruction({IROp::MEMCPY, std::nullopt, {addr, val, IRValue::Constant(getTypeSize(lastExprType_), IRType::I32)},
+                                               targetIsVolatile});
             } else {
                 if (addr.kind == IRValue::LABEL) {
-                    currentBlock_->addInstruction({IROp::STORE, std::nullopt, {addr, val}});
+                    currentBlock_->addInstruction({IROp::STORE, std::nullopt, {addr, val}, targetIsVolatile});
                 } else {
-                    currentBlock_->addInstruction({IROp::STORE, std::nullopt, {addr, val, IRValue::Constant(0, IRType::I32)}});
+                    currentBlock_->addInstruction({IROp::STORE, std::nullopt, {addr, val, IRValue::Constant(0, IRType::I32)},
+                                                   targetIsVolatile});
                 }
             }
         } else {
@@ -3700,7 +3787,7 @@ public:
             }
             IRValue current;
             if (isBitfield) {
-                current = emitBitfieldLoad(addr, bitOffset, bitWidth, true);
+                current = emitBitfieldLoad(addr, bitOffset, bitWidth, true, targetIsVolatile);
             } else {
                 // Compound assignment computes at the target's width
                 // (CID-028): hardcoding I32 truncated u64 loop counters
@@ -3733,10 +3820,13 @@ public:
                     targetIR = (derefPointeeType.pointerLevel > 0) ? IRType::PTR : mapType(derefPointeeType.name);
                 }
                 current = IRValue::Register(nextTemp(), targetIR);
+                // CIDER-BUG-061: compound assignment reads the volatile
+                // object before writing it back.
                 if (addr.kind == IRValue::LABEL) {
-                    currentBlock_->addInstruction({IROp::LOAD, current, {addr}});
+                    currentBlock_->addInstruction({IROp::LOAD, current, {addr}, targetIsVolatile});
                 } else {
-                    currentBlock_->addInstruction({IROp::LOAD, current, {addr, IRValue::Constant(0, IRType::I32)}});
+                    currentBlock_->addInstruction({IROp::LOAD, current, {addr, IRValue::Constant(0, IRType::I32)},
+                                                   targetIsVolatile});
                 }
             }
 
@@ -3793,7 +3883,7 @@ public:
             currentBlock_->addInstruction({irOp, result, {current, rhs}});
 
             if (isBitfield) {
-                emitBitfieldStore(addr, result, bitOffset, bitWidth);
+                emitBitfieldStore(addr, result, bitOffset, bitWidth, targetIsVolatile);
                 return;
             }
             if (widenedFloat && targetFloatWidth == IRType::F32) {
@@ -3802,9 +3892,10 @@ public:
                 result = convertFloatWidth(result, IRType::F32);
             }
             if (addr.kind == IRValue::LABEL) {
-                currentBlock_->addInstruction({IROp::STORE, std::nullopt, {addr, result}});
+                currentBlock_->addInstruction({IROp::STORE, std::nullopt, {addr, result}, targetIsVolatile});
             } else {
-                currentBlock_->addInstruction({IROp::STORE, std::nullopt, {addr, result, IRValue::Constant(0, IRType::I32)}});
+                currentBlock_->addInstruction({IROp::STORE, std::nullopt, {addr, result, IRValue::Constant(0, IRType::I32)},
+                                               targetIsVolatile});
             }
         }
     }
@@ -5136,7 +5227,10 @@ public:
                                 ? IRType::PTR
                                 : mapType(elemType.name);
             IRValue dest = IRValue::Register(nextTemp(), irType);
-            currentBlock_->addInstruction({IROp::LOAD, dest, {addr, IRValue::Constant(0, IRType::I32)}});
+            // CIDER-BUG-061: an element of a volatile array/pointer read is
+            // observable.
+            currentBlock_->addInstruction({IROp::LOAD, dest, {addr, IRValue::Constant(0, IRType::I32)},
+                                           elemType.isVolatile});
             lastValue_ = dest;
         }
     }

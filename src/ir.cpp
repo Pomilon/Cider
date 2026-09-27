@@ -26,11 +26,13 @@ std::string IRInstruction::toString() const {
     case IROp::CMP_GT: ss << "icmp gt "; break;
     case IROp::CMP_LE: ss << "icmp le "; break;
     case IROp::CMP_GE: ss << "icmp ge "; break;
-    case IROp::LOAD: ss << "load "; break;
-    case IROp::STORE: ss << "store "; break;
+    // CIDER-BUG-061: volatile accesses are marked in the dump so an
+    // optimizer guard regression is visible in `cider build` output.
+    case IROp::LOAD: ss << (isVolatile ? "load volatile " : "load "); break;
+    case IROp::STORE: ss << (isVolatile ? "store volatile " : "store "); break;
     case IROp::ALLOCA: ss << "alloca "; break;
     case IROp::MOV: ss << "mov "; break;
-    case IROp::MEMCPY: ss << "memcpy "; break;
+    case IROp::MEMCPY: ss << (isVolatile ? "memcpy volatile " : "memcpy "); break;
     case IROp::PUSH: ss << "push "; break;
     case IROp::POP: ss << "pop "; break;
     case IROp::BR: ss << "br "; break;

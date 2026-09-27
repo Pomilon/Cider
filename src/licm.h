@@ -22,6 +22,10 @@ struct LicmCaches {
     std::map<std::string, const IRInstruction*> defMap;
     std::set<std::string> multiDef;
     std::set<std::string> loopStores;
+    // CIDER-BUG-061: a volatile store in the loop is an observable write
+    // that may alias any escaped object (the compiler has no alias oracle),
+    // so no load may be hoisted across it.
+    bool loopHasVolatileStore = false;
 };
 static LicmCaches buildLicmCaches(const FunctionIR& func,
                                   const std::set<std::string>& loopBlocks) {
@@ -37,9 +41,11 @@ static LicmCaches buildLicmCaches(const FunctionIR& func,
                 }
             }
             if (loopBlocks.find(b->getName()) != loopBlocks.end() &&
-                si.op == IROp::STORE && !si.args.empty() &&
-                si.args[0].kind == IRValue::REGISTER) {
-                c.loopStores.insert(si.args[0].name);
+                si.op == IROp::STORE) {
+                if (si.isVolatile) c.loopHasVolatileStore = true;
+                if (!si.args.empty() && si.args[0].kind == IRValue::REGISTER) {
+                    c.loopStores.insert(si.args[0].name);
+                }
             }
         }
     }
@@ -49,6 +55,10 @@ static bool isLoadInvariantCached(const IRInstruction& instr,
                                  const LicmCaches& c) {
     if (instr.op != IROp::LOAD || instr.args.empty() || instr.args[0].kind != IRValue::REGISTER)
         return false;
+    // CIDER-BUG-061: a volatile load must execute once per iteration, in
+    // place — never hoisted. A volatile store anywhere in the loop may alias
+    // the loaded object, so it conservatively blocks every load hoist.
+    if (instr.isVolatile || c.loopHasVolatileStore) return false;
     const std::string& reg = instr.args[0].name;
     if (c.multiDef.count(reg)) return false;
     auto it = c.defMap.find(reg);
@@ -160,6 +170,10 @@ bool SSALicmPass::hoistLoop(FunctionIR& func, const Loop& loop, const std::strin
             for (size_t ii = 0; ii < instrs.size(); ++ii) {
                 const auto& instr = instrs[ii];
                 if (invariantInsts.find({b->getName(), ii}) != invariantInsts.end()) continue;
+
+                // CIDER-BUG-061: volatile accesses never move — they must
+                // execute exactly where written.
+                if (instr.isVolatile) continue;
 
                 if (instr.op == IROp::STORE || instr.op == IROp::CALL ||
                     instr.op == IROp::VIRTUAL_CALL || instr.op == IROp::RET ||
@@ -324,6 +338,10 @@ bool PostLicmPass::hoistLoop(FunctionIR& func, const Loop& loop, const std::stri
             for (size_t ii = 0; ii < instrs.size(); ++ii) {
                 const auto& instr = instrs[ii];
                 if (invariantInsts.find({b->getName(), ii}) != invariantInsts.end()) continue;
+
+                // CIDER-BUG-061: volatile accesses never move — they must
+                // execute exactly where written.
+                if (instr.isVolatile) continue;
 
                 // Post-deconstruction: exclude same ops as SSA mode plus PUSH, POP.
                 if (instr.op == IROp::STORE || instr.op == IROp::CALL ||
