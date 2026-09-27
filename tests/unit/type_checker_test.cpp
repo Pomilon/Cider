@@ -727,6 +727,27 @@ int run() {
         dag += "func main() -> int { var h: B0 = bar; return 0; }\n";
         CHECK(checkSrc(dag).empty());
     }
+
+    // CIDER-BUG-022: when one side of a signature-alias comparison exhausts
+    // the expansion budget, the other side must not clobber the exhaustion
+    // flag — both sides stay unexpanded and the diagnostic stays short (a
+    // partial expansion produced a ~46 KB return-type message).
+    {
+        std::string deep;
+        for (int i = 0; i < 24; ++i) {
+            deep += "type A" + std::to_string(i) + " = fn(A" + std::to_string(i + 1) +
+                    ", A" + std::to_string(i + 1) + ") -> void;\n";
+        }
+        deep += "type A24 = fn(int, int) -> void;\n";
+        deep += "func inc(x: int) -> int { return x + 1; }\n";
+        deep += "func f() -> A0 { return inc; }\n";
+        deep += "func main() -> void { }\n";
+        auto deepRet = checkSrc(deep);
+        CHECK(hasError(deepRet, "Return type mismatch"));
+        for (const auto& e : deepRet) {
+            CHECK(e.size() < 2000);
+        }
+    }
     return 0;
 }
 

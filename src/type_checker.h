@@ -367,7 +367,11 @@ public:
         int budget = kMaxSignatureAliasExpansions;
         bool hitBudget = false;
         TypeInfo resolved = resolveSignatureAliasesImpl(t, visiting, budget, hitBudget);
-        if (exhausted) *exhausted = hitBudget;
+        // CIDER-BUG-022: OR into the caller's flag — resolveSignatureAliasPair
+        // resolves side 1 then side 2 under one flag, and side 2 must not
+        // clobber side 1's exhaustion (a partial expansion produced a ~46 KB
+        // return-type diagnostic).
+        if (exhausted) *exhausted = *exhausted || hitBudget;
         return resolved;
     }
 
