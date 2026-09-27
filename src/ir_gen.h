@@ -310,11 +310,30 @@ public:
             if (auto cast = dynamic_cast<CastExpr*>(init)) { init = cast->getExpression(); continue; }
             break;
         }
-        auto id = dynamic_cast<IdentifierExpr*>(init);
-        if (!id) return "";
-        auto sym = symbolTable_.resolve(id->getName());
-        if (!sym || sym->kind != SymbolKind::FUNCTION) return "";
-        return emitFunctionName(definingModuleFor(sym, id->getName()), sym->name);
+        if (auto id = dynamic_cast<IdentifierExpr*>(init)) {
+            auto sym = symbolTable_.resolve(id->getName());
+            if (!sym || sym->kind != SymbolKind::FUNCTION) return "";
+            return emitFunctionName(definingModuleFor(sym, id->getName()), sym->name);
+        }
+        // CIDER-BUG-023: a module-qualified function value (`b.inc`) folds
+        // to the member's mangled label, same as the bare name.
+        if (auto mem = dynamic_cast<MemberAccessExpr*>(init)) {
+            if (!mem->isArrow()) {
+                if (auto base = dynamic_cast<IdentifierExpr*>(mem->getObject())) {
+                    auto baseSym = symbolTable_.resolve(base->getName());
+                    if (baseSym && baseSym->kind == SymbolKind::MODULE) {
+                        auto modSym = std::static_pointer_cast<ModuleSymbol>(baseSym);
+                        Scope* ms = modSym->scope;
+                        auto target = ms ? ms->resolveLocal(mem->getMember()) : nullptr;
+                        if (target && target->kind == SymbolKind::FUNCTION) {
+                            return emitFunctionName(definingModuleFor(target, mem->getMember()),
+                                                    target->name);
+                        }
+                    }
+                }
+            }
+        }
+        return "";
     }
 
     // True for struct/class by-value returns (and params decaying likewise).
@@ -1474,7 +1493,17 @@ public:
                 if (target && target->kind == SymbolKind::FUNCTION) {
                     lastValue_ = IRValue::Label(emitFunctionName(
                         definingModuleFor(target, expr.getMember()), target->name));
-                    lastExprType_ = {"void", 1};
+                    // CIDER-BUG-023: carry the fn signature (not *void) so
+                    // indirect calls convert args/returns and global
+                    // initializers fold; mirrors visit(IdentifierExpr).
+                    auto fsym = std::static_pointer_cast<FunctionSymbol>(target);
+                    TypeInfo ft;
+                    ft.name = "fn";
+                    ft.isFunctionPointer = true;
+                    ft.isMsAbi = (fsym->abi == Abi::Ms) || (fsym->abi == Abi::Default && defaultAbiMs_);
+                    ft.fnParamTypes = std::make_shared<std::vector<TypeInfo>>(fsym->parameterTypes);
+                    ft.fnReturnType = std::make_shared<TypeInfo>(fsym->returnType);
+                    lastExprType_ = ft;
                     return;
                 }
                 if (target && target->kind == SymbolKind::VARIABLE) {

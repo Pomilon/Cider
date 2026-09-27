@@ -704,6 +704,22 @@ public:
             auto sym = resolveScoped(id->getName());
             return sym && sym->kind == SymbolKind::FUNCTION;
         }
+        // CIDER-BUG-023: a module-qualified function value (`b.inc`) is
+        // the same constant; the ir_gen fold resolves the member in the
+        // module scope and emits the mangled label.
+        if (auto mem = dynamic_cast<MemberAccessExpr*>(expr)) {
+            if (!mem->isArrow()) {
+                if (auto base = dynamic_cast<IdentifierExpr*>(mem->getObject())) {
+                    auto baseSym = resolveScoped(base->getName());
+                    if (baseSym && baseSym->kind == SymbolKind::MODULE) {
+                        auto modSym = std::static_pointer_cast<ModuleSymbol>(baseSym);
+                        Scope* ms = modSym->scope;
+                        auto target = ms ? ms->resolveLocal(mem->getMember()) : nullptr;
+                        return target && target->kind == SymbolKind::FUNCTION;
+                    }
+                }
+            }
+        }
         return false;
     }
 
@@ -1301,7 +1317,12 @@ public:
             return;
         }
         if (mem->kind == SymbolKind::FUNCTION) {
-            lastExprType_ = {"void", 1};
+            // CIDER-BUG-023: a module-qualified function value carries its
+            // fn signature, not *void (the *void spelling made indirect
+            // calls fall back to the generic int-result path and rejected
+            // `var g: fn(...) = mod.fn;` global initializers).
+            lastExprType_ = functionPointerTypeOf(
+                std::static_pointer_cast<FunctionSymbol>(mem), expr.getLine());
             return;
         }
         if (mem->kind == SymbolKind::MODULE) {
