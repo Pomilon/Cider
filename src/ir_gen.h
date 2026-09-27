@@ -23,6 +23,12 @@ public:
     IRGenerator(SymbolTable& syms, const std::string& sourcePath = "")
         : symbolTable_(syms), currentSourcePath_(sourcePath) {}
 
+    // CIDER-BUG-024: optional diagnostic sink. The driver passes its
+    // reporter so ir_gen can hard-error instead of silently emitting a
+    // named load when a nominal type cannot be resolved; unit tests
+    // without a reporter keep the legacy path.
+    void setReporter(ErrorReporter* rep) { reporter_ = rep; }
+
     // CID-020: module scopes keyed by resolved file path, from the
     // collector. Lets each imported AST generate with its own scope current
     // (spec §2). Empty by default: unit tests without a collector keep the
@@ -296,7 +302,14 @@ public:
     // CID-006: the label a global function-pointer initializer folds to.
     // Returns "" for nilPtr / no initializer (the cell stays zero).
     std::string functionPointerInitTarget(Expression* init) {
-        while (auto grp = dynamic_cast<GroupingExpr*>(init)) init = grp->getExpression();
+        // CIDER-BUG-024: `add as *void` / `add as fn(...)` spellings carry
+        // the same constant as the bare name; unwrap grouping and casts so
+        // the global folds to the label instead of silently BSS-zeroing.
+        while (true) {
+            if (auto grp = dynamic_cast<GroupingExpr*>(init)) { init = grp->getExpression(); continue; }
+            if (auto cast = dynamic_cast<CastExpr*>(init)) { init = cast->getExpression(); continue; }
+            break;
+        }
         auto id = dynamic_cast<IdentifierExpr*>(init);
         if (!id) return "";
         auto sym = symbolTable_.resolve(id->getName());
@@ -1561,6 +1574,16 @@ public:
             }
         }
 
+        // CIDER-BUG-024: this fallback used to emit a named load that
+        // codegen lowered as a 32-bit load at offset 0 when a nominal type
+        // could not be resolved — silent garbage. The checker rejects
+        // unresolved members first, so reaching here is an internal
+        // inconsistency: report it (the driver aborts before codegen)
+        // instead of emitting a wrong load.
+        if (reporter_) {
+            reporter_->error("cannot resolve member '" + expr.getMember() +
+                                 "' on type " + objType.toString(), expr.getLine());
+        }
         IRValue dest = IRValue::Register(nextTemp(), IRType::I32);
         currentBlock_->addInstruction({IROp::LOAD, dest, {obj, IRValue::Label(expr.getMember())}});
         lastValue_ = dest;
@@ -4820,6 +4843,8 @@ private:
     std::unique_ptr<BasicBlock> currentBlock_;
     std::string currentClassName_;
     std::string currentSourcePath_;
+    // CIDER-BUG-024: optional diagnostic sink (nullptr in unit tests).
+    ErrorReporter* reporter_ = nullptr;
     // CID-020: resolved-path -> module scope registry (from the collector).
     std::map<std::string, Scope*> moduleScopes_;
     // CID-020/021: imported AST -> logical module name (from the collector).

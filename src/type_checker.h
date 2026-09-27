@@ -683,7 +683,14 @@ public:
     // .data cell are `nilPtr` and an identifier naming a function
     // (grouping allowed). Everything else would silently read 0.
     bool isConstantFunctionPointerInit(Expression* expr) {
-        while (auto grp = dynamic_cast<GroupingExpr*>(expr)) expr = grp->getExpression();
+        // CIDER-BUG-024: unwrap grouping and casts — `add as *void` /
+        // `add as fn(...)` are constant spellings of the function name
+        // (ir_gen's functionPointerInitTarget folds the same shape).
+        while (true) {
+            if (auto grp = dynamic_cast<GroupingExpr*>(expr)) { expr = grp->getExpression(); continue; }
+            if (auto cast = dynamic_cast<CastExpr*>(expr)) { expr = cast->getExpression(); continue; }
+            break;
+        }
         if (!expr) return false;
         if (dynamic_cast<NilPtrExpr*>(expr)) return true;
         if (auto id = dynamic_cast<IdentifierExpr*>(expr)) {

@@ -1029,6 +1029,29 @@ int run() {
         CHECK(sawVirtual);
         CHECK(sawIface);
     }
+    {
+        // CIDER-BUG-024: an unresolvable member access must be REPORTED
+        // (hard error) instead of silently emitting the named-load
+        // fallback, which codegen lowers as a 32-bit load at offset 0.
+        // The checker rejects these first in the driver; this test calls
+        // ir_gen directly to pin the defense-in-depth path.
+        cider::ErrorReporter rep;
+        cider::Lexer lex("func main() -> int { var x: Unknown; return x.field as int; }", rep);
+        cider::Parser parser(lex, rep);
+        auto prog = parser.parseProgram();
+        cider::SymbolTable table;
+        cider::ModuleResolver resolver;
+        cider::SymbolCollector collector(table, rep, resolver);
+        collector.collect(*prog);
+        cider::IRGenerator gen(table);
+        gen.setReporter(&rep);
+        gen.generate(*prog);
+        bool sawUnresolved = false;
+        for (const auto& e : rep.errors()) {
+            if (e.message.find("cannot resolve member") != std::string::npos) sawUnresolved = true;
+        }
+        CHECK(sawUnresolved);
+    }
     return 0;
 }
 

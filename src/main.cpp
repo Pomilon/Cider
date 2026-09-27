@@ -219,7 +219,12 @@ int main(int argc, char** argv) {
             gen.setProgramModules(collector.getProgramModules());
             gen.setSymbolModules(collector.getSymbolModules());
             gen.setDefaultAbiMs(defaultAbiMs);
+            gen.setReporter(&rep);
             auto module = gen.generate(*prog);
+            if (rep.hasErrors()) {
+                printDiagnostics(text, opts.inputFile, rep.errors(), "ir");
+                return 1;
+            }
             if (!opts.noOpt) {
                 optimizeModule(module);
             }
@@ -241,7 +246,12 @@ int main(int argc, char** argv) {
             gen.setProgramModules(collector.getProgramModules());
             gen.setSymbolModules(collector.getSymbolModules());
             gen.setDefaultAbiMs(defaultAbiMs);
+            gen.setReporter(&rep);
             auto module = gen.generate(*prog);
+            if (rep.hasErrors()) {
+                printDiagnostics(text, opts.inputFile, rep.errors(), "ir");
+                return 1;
+            }
             if (!opts.noOpt) {
                 optimizeModule(module);
             }
@@ -262,7 +272,12 @@ int main(int argc, char** argv) {
         gen.setProgramModules(collector.getProgramModules());
         gen.setSymbolModules(collector.getSymbolModules());
         gen.setDefaultAbiMs(defaultAbiMs);
+        gen.setReporter(&rep);
         auto module = gen.generate(*prog);
+        if (rep.hasErrors()) {
+            printDiagnostics(text, opts.inputFile, rep.errors(), "ir");
+            return 1;
+        }
         module.print();
         return 0;
     } catch (const std::exception& e) {
