@@ -1080,9 +1080,11 @@ public:
                 lastExprType_ = operandType;
                 lastExprType_.pointerLevel--;
             }
-        } else if (expr.getOperator() == "!") {
+        } else if (expr.getOperator() == "!" || expr.getOperator() == "not") {
+            // CIDER-BUG-046: `not` is the word spelling of `!`; same bool
+            // operand requirement and bool result.
             if (resolveType(operandType).name != "bool" || operandType.pointerLevel > 0) {
-                error("Expected bool for '!' operator, got " + operandType.toString(), expr.getLine());
+                error("Expected bool for '" + expr.getOperator() + "' operator, got " + operandType.toString(), expr.getLine());
             }
             lastExprType_ = {"bool", 0};
         } else if (expr.getOperator() == "~") {

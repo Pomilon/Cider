@@ -1750,7 +1750,9 @@ public:
                 IRValue dest = IRValue::Register(nextTemp(), irType);
                 currentBlock_->addInstruction({IROp::BIT_NOT, dest, {operand}});
                 lastValue_ = dest;
-            } else if (expr.getOperator() == "!") {
+            } else if (expr.getOperator() == "!" || expr.getOperator() == "not") {
+                // CIDER-BUG-046: `not` is the word spelling of `!` and
+                // must lower to the same boolean negation.
                 IRValue dest = IRValue::Register(nextTemp(), IRType::BOOL);
                 currentBlock_->addInstruction({IROp::BIT_XOR, dest, {operand, IRValue::Constant(1, IRType::BOOL)}});
                 lastValue_ = dest;
@@ -2358,7 +2360,9 @@ public:
 
         std::string sOp = expr.getOperator();
 
-        if (sOp == "&&") {
+        // CIDER-BUG-046: the word forms `and`/`or` are synonyms for
+        // `&&`/`||`, so they share the short-circuit lowering below.
+        if (sOp == "&&" || sOp == "and") {
             IRValue condReg = lastValue_;
             std::string scTrueName = nextLabel("sc_true");
             std::string scFalseName = nextLabel("sc_false");
@@ -2387,7 +2391,7 @@ public:
             return;
         }
 
-        if (sOp == "||") {
+        if (sOp == "||" || sOp == "or") {
             IRValue condReg = lastValue_;
             std::string scTrueName = nextLabel("sc_true");
             std::string scFalseName = nextLabel("sc_false");

@@ -1,0 +1,7 @@
+// CIDER-BUG-046: `not` is the word spelling of `!` — it requires a bool
+// operand and must not silently act as the identity on integers.
+func main() -> int {
+  var x: int = 5;
+  var b: bool = not x;
+  return 0;
+}
