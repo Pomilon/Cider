@@ -741,6 +741,20 @@ public:
         lastExprType_ = declaredType;
     }
 
+    // CIDER-BUG-018: strict array element identity. The numeric fallback in
+    // areTypesCompatible is size-blind (`[i32;3] = u"AB"` passed), so array
+    // copies that must be byte-exact compare the resolved, canonicalized
+    // element types instead.
+    bool sameArrayElementType(TypeInfo a, TypeInfo b) {
+        a.isArray = false;
+        a.arraySize = 0;
+        b.isArray = false;
+        b.arraySize = 0;
+        a = canonicalizeNominal(resolveType(a));
+        b = canonicalizeNominal(resolveType(b));
+        return a == b;
+    }
+
     // CID-005 fix round 1 (Q1): a fixed-size array initialised from a wide
     // literal. The literal's checker type is [u16; units+1], but
     // areTypesCompatible's integer fallback is size-blind, so the declared
@@ -759,9 +773,12 @@ public:
         TypeInfo elemDecl = declaredType;
         elemDecl.isArray = false;
         elemDecl.arraySize = 0;
-        TypeInfo elemInit;
-        elemInit.name = "u16";
-        if (!areTypesCompatible(elemDecl, elemInit)) {
+        elemDecl = resolveType(elemDecl);
+        // CIDER-BUG-018: the payload is u16 units; the numeric fallback in
+        // areTypesCompatible is size-blind, so `[i32;3] = u"AB"` and
+        // `[f64;3] = u"AB"` passed and copied 12 bytes from a 6-byte block.
+        if (elemDecl.pointerLevel > 0 || elemDecl.isArray || elemDecl.isFunctionPointer ||
+            elemDecl.name != "u16") {
             error("Array element type mismatch in declaration of '" + stmt.getName() +
                       "': expected " + elemDecl.toString() + ", got u16", stmt.getLine());
             return;
@@ -1325,7 +1342,19 @@ public:
 
     void visit(CastExpr& expr) override {
         expr.getExpression()->accept(*this);
+        TypeInfo srcType = lastExprType_;
         lastExprType_ = canonicalizeNominal(TypeInfo::fromAST(expr.getTargetType()), expr.getLine());
+        // CIDER-BUG-018: an array-to-array cast is a layout reinterpretation
+        // whose copy uses the TARGET size; require the same element type and
+        // count, or `u"AB" as [u16;8]` copies 16 bytes from a 6-byte block.
+        TypeInfo target = resolveType(lastExprType_);
+        TypeInfo src = resolveType(srcType);
+        if (target.isArray && target.pointerLevel == 0 && target.arraySize > 0 &&
+            src.isArray && src.pointerLevel == 0 && src.arraySize > 0 &&
+            (target.arraySize != src.arraySize || !sameArrayElementType(target, src))) {
+            error("Array cast size/type mismatch. Expected " + target.toString() +
+                      ", got " + src.toString(), expr.getLine());
+        }
     }
 
     void visit(ArrayTypeAST&) override {}
@@ -1605,6 +1634,21 @@ public:
                     // stay allowed.
                     error("Return type mismatch. Expected " + canonicalizeNominal(declType).toString() +
                               ", got " + canonicalizeNominal(valType).toString(),
+                          stmt.getLine());
+                }
+                // CIDER-BUG-018: fixed-size array returns (wide strings
+                // included) must match in element type and count — the
+                // permissive numeric fallback would otherwise accept
+                // `return u"AB";` in a `[u16;4]` function and MEMCPY 8
+                // bytes from the 6-byte literal.
+                TypeInfo declArr = resolveType(currentDeclaredReturnType_);
+                TypeInfo valArr = resolveType(lastExprType_);
+                if (declArr.isArray && declArr.pointerLevel == 0 && declArr.arraySize > 0 &&
+                    valArr.isArray && valArr.pointerLevel == 0 && valArr.arraySize > 0 &&
+                    (declArr.arraySize != valArr.arraySize ||
+                     !sameArrayElementType(declArr, valArr))) {
+                    error("Return type mismatch. Expected " + declArr.toString() +
+                              ", got " + valArr.toString(),
                           stmt.getLine());
                 }
             }

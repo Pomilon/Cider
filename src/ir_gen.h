@@ -4414,6 +4414,15 @@ public:
     void visit(CastExpr& expr) override {
         expr.getExpression()->accept(*this);
         TypeInfo targetType = TypeInfo::fromAST(expr.getTargetType());
+        // CIDER-BUG-018: an array target is a layout reinterpretation, not
+        // a scalar conversion — pass the address-like value through (the
+        // checker pins size and element-type equality). Without this the
+        // cast lowered to a scalar BIT_AND of the data label, which native
+        // codegen emitted as a 16-bit immediate (R_X86_64_16 link error).
+        if (targetType.isArray) {
+            lastExprType_ = targetType;
+            return;
+        }
         IRType irType = (targetType.pointerLevel > 0) ? IRType::PTR : mapType(targetType.name);
 
         IRValue dest = IRValue::Register(nextTemp(), irType);

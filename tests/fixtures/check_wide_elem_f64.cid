@@ -1,0 +1,5 @@
+// CIDER-BUG-018: same gap with float elements (`[f64;3] = u"AB"`).
+func main() -> int {
+  var a: [f64;3] = u"AB";
+  return 0;
+}

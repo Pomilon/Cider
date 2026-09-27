@@ -33,5 +33,11 @@ func main() -> int {
   if (sp[0] != 0xD83D) { return 19; }
   if (sp[1] != 0xDE00) { return 20; }
   if (sp[2] != 0) { return 21; }
+  // CIDER-BUG-018 positives: a matching cast stays accepted and lowers as
+  // a pass-through (the size/type checks only reject mismatches).
+  var cs: [u16; 3] = u"AB" as [u16; 3];
+  if (cs[0] != 65) { return 22; }
+  if (cs[1] != 66) { return 23; }
+  if (cs[2] != 0) { return 24; }
   return 0;
 }
