@@ -139,10 +139,18 @@ int run() {
         "  var f: float = 1.0; f += 1; f *= 2; f -= 3; f /= 4; }\n");
     CHECK(okCompound.empty());
 
-    // Return values are typed but NOT checked against the function's
-    // return type (parity with main — the IR phase enforces it).
+    // CIDER-BUG-016: return values ARE checked against the function's
+    // declared return type (same compatibility rules as declarations;
+    // int/float and *void/nilPtr routes stay lenient).
     auto e3 = checkSrc("func f() -> int { return \"s\"; }\nfunc main() -> void { }\n");
-    CHECK(e3.empty());
+    CHECK(hasError(e3, "Return type mismatch"));
+    auto e3b = checkSrc("func f() -> void { return 0; }\nfunc main() -> void { }\n");
+    CHECK(hasError(e3b, "Return type mismatch"));
+    auto e3c = checkSrc("func f() -> int { return; }\nfunc main() -> void { }\n");
+    CHECK(hasError(e3c, "Return without a value"));
+    // Leniency preserved: an int literal returned from an f64 function.
+    auto okRet = checkSrc("func f() -> f64 { return 1; }\nfunc main() -> void { }\n");
+    CHECK(okRet.empty());
 
     // Undefined identifier.
     auto e4 = checkSrc("func main() -> void { var x: int = nope; }\n");

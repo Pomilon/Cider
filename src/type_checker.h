@@ -1663,6 +1663,16 @@ public:
                     error("Return type mismatch. Expected " + canonicalizeNominal(declType).toString() +
                               ", got " + canonicalizeNominal(valType).toString(),
                           stmt.getLine());
+                } else if (!declFn && !valFn && !areTypesCompatible(declType, valType)) {
+                    // CIDER-BUG-016: general return-statement check. Same
+                    // compatibility rules as declarations and assignments —
+                    // int/float and *void/nilPtr routes stay lenient — but
+                    // cross-kind returns that would silently reinterpret
+                    // (a value from a void function, a struct where a scalar
+                    // is declared, int -> pointer) are rejected.
+                    error("Return type mismatch. Expected " + canonicalizeNominal(declType).toString() +
+                              ", got " + canonicalizeNominal(valType).toString(),
+                          stmt.getLine());
                 }
                 // CIDER-BUG-018: fixed-size array returns (wide strings
                 // included) must match in element type and count — the
@@ -1681,6 +1691,15 @@ public:
                 }
             }
         } else {
+            // CIDER-BUG-016: a value-less return in a function declared to
+            // return something other than void.
+            if (hasDeclaredReturnType_ && currentDeclaredReturnType_.name != "error" &&
+                !(currentDeclaredReturnType_.name == "void" &&
+                  currentDeclaredReturnType_.pointerLevel == 0)) {
+                error("Return without a value in function declared to return " +
+                          canonicalizeNominal(currentDeclaredReturnType_).toString(),
+                      stmt.getLine());
+            }
             lastExprType_ = {"void", 0};
         }
     }

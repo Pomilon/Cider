@@ -1,0 +1,5 @@
+// CIDER-BUG-016: an integer returned from a pointer function must be
+// rejected (no implicit int -> pointer).
+func f() -> *u16 { return 5; }
+
+func main() -> int { return 0; }

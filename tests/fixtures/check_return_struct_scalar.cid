@@ -1,0 +1,10 @@
+// CIDER-BUG-016: a struct value returned from a scalar function must be
+// rejected (it used to pass check and silently reinterpret).
+struct S { var x: int; }
+
+func f() -> int {
+  var s: S;
+  return s;
+}
+
+func main() -> int { return f(); }
