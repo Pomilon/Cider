@@ -913,6 +913,131 @@ public:
         lastExprType_ = declaredType;
     }
 
+    // CIDER-BUG-057: fold a slice bound to a compile-time element index.
+    // Mirrors the expression shapes isConstIntExpr accepts (literals,
+    // grouping/unary/constant arithmetic, `const` references); anything
+    // else is a dynamic bound and skips the static element-count check.
+    bool evalConstIntBound(Expression* expr, int64_t& out) {
+        std::set<uint64_t> visiting;
+        return evalConstIntBound(expr, out, visiting);
+    }
+
+    bool evalConstIntBound(Expression* expr, int64_t& out, std::set<uint64_t>& visiting) {
+        if (!expr) return false;
+        if (auto num = dynamic_cast<NumberExpr*>(expr)) {
+            if (num->isFloat()) return false;
+            out = num->getIntValue();
+            return true;
+        }
+        if (auto ch = dynamic_cast<CharExpr*>(expr)) {
+            out = (int64_t)ch->getValue();
+            return true;
+        }
+        if (auto grp = dynamic_cast<GroupingExpr*>(expr)) {
+            return evalConstIntBound(grp->getExpression(), out, visiting);
+        }
+        if (auto un = dynamic_cast<UnaryExpr*>(expr)) {
+            int64_t v = 0;
+            if (!evalConstIntBound(un->getOperand(), v, visiting)) return false;
+            const std::string& op = un->getOperator();
+            if (op == "-") out = -v;
+            else if (op == "+") out = v;
+            else if (op == "~") out = ~v;
+            else return false;
+            return true;
+        }
+        if (auto bin = dynamic_cast<BinaryExpr*>(expr)) {
+            int64_t l = 0, r = 0;
+            if (!evalConstIntBound(bin->getLeft(), l, visiting) ||
+                !evalConstIntBound(bin->getRight(), r, visiting)) {
+                return false;
+            }
+            const std::string& op = bin->getOperator();
+            if (op == "+") out = l + r;
+            else if (op == "-") out = l - r;
+            else if (op == "*") out = l * r;
+            else if (op == "/") { if (r == 0) return false; out = l / r; }
+            else if (op == "%") { if (r == 0) return false; out = l % r; }
+            else if (op == "<<") { if (r < 0 || r >= 64) return false; out = (int64_t)((uint64_t)l << r); }
+            else if (op == ">>") { if (r < 0 || r >= 64) return false; out = l >> r; }
+            else if (op == "&") out = l & r;
+            else if (op == "|") out = l | r;
+            else if (op == "^") out = l ^ r;
+            else return false;
+            return true;
+        }
+        if (auto id = dynamic_cast<IdentifierExpr*>(expr)) {
+            return evalConstBoundSymbol(resolveConstIdentifier(id->getName()), out, visiting);
+        }
+        // Module-qualified const (`mc.K`), same resolution as isConstIntExpr.
+        if (auto mem = dynamic_cast<MemberAccessExpr*>(expr)) {
+            if (mem->isArrow()) return false;
+            auto base = dynamic_cast<IdentifierExpr*>(mem->getObject());
+            if (!base) return false;
+            auto baseSym = resolveConstIdentifier(base->getName());
+            if (!baseSym || baseSym->kind != SymbolKind::MODULE) return false;
+            auto modSym = std::static_pointer_cast<ModuleSymbol>(baseSym);
+            auto target = modSym->scope ? modSym->scope->resolveLocal(mem->getMember()) : nullptr;
+            return evalConstBoundSymbol(target, out, visiting);
+        }
+        return false;
+    }
+
+    bool evalConstBoundSymbol(const std::shared_ptr<Symbol>& sym, int64_t& out,
+                              std::set<uint64_t>& visiting) {
+        if (!sym || !sym->isConst || sym->kind != SymbolKind::VARIABLE) return false;
+        if (!sym->constInit) {
+            out = (int64_t)sym->constValue;
+            return true;
+        }
+        if (!visiting.insert(sym->id).second) return false;
+        Scope* prevScope = constEvalScope_;
+        if (Scope* declScope = scopeForModule(definingModuleOf(sym))) constEvalScope_ = declScope;
+        bool ok = evalConstIntBound(sym->constInit, out, visiting);
+        constEvalScope_ = prevScope;
+        visiting.erase(sym->id);
+        return ok;
+    }
+
+    // CIDER-BUG-057: `var s: [T; N] = base[start:end]` and
+    // `s = base[start:end]` copy the slice's elements into the fixed array.
+    // The element types must match exactly (areTypesCompatible's integer
+    // fallback is size-blind), and a statically-known slice length must
+    // equal N: a longer slice would silently truncate and a shorter one
+    // would copy elements past the slice's end (the copy always runs for
+    // the target's element count, starting at the slice's start address).
+    // A dynamic length copies N elements from the start address; the
+    // target size governs, and ir_gen's MEMCPY does exactly that.
+    void checkSliceArrayCopy(const std::string& where, const TypeInfo& declaredType,
+                             const TypeInfo& initType, SliceExpr* slice, int line) {
+        TypeInfo elemDecl = canonicalizeNominal(resolveType(declaredType.elementType()));
+        TypeInfo elemInit = canonicalizeNominal(resolveType(initType));
+        elemInit.isSlice = false;
+        if (!(elemDecl == elemInit)) {
+            error("Slice element type mismatch in " + where + ": expected " +
+                      elemDecl.toString() + ", got " + elemInit.toString(),
+                  line);
+            return;
+        }
+        if (!slice) return;  // e.g. a slice-typed ternary: length is dynamic
+        int64_t startVal = 0;
+        if (slice->getStart() && !evalConstIntBound(slice->getStart(), startVal)) return;
+        int64_t endVal = 0;
+        if (slice->getEnd()) {
+            if (!evalConstIntBound(slice->getEnd(), endVal)) return;
+        } else if (lastSliceBaseSize_ >= 0) {
+            endVal = lastSliceBaseSize_;
+        } else {
+            return;
+        }
+        int64_t len = endVal - startVal;
+        if (len != declaredType.arraySize) {
+            error("Slice size mismatch in " + where + ": expected " +
+                      std::to_string(declaredType.arraySize) + ", got " + std::to_string(len),
+                  line);
+        }
+    }
+
     // CIDER-BUG-054: the interface conversion rule, shared by
     // declaration-time assignment and reassignment so the two cannot
     // drift. Accepts a struct/class value, a pointer to one, or the same
@@ -993,6 +1118,18 @@ public:
                     // checkInterfaceValue so declaration and reassignment
                     // cannot drift.
                     checkInterfaceValue(declaredType, initType, stmt.getLine());
+                } else if (initType.isSlice && initType.pointerLevel == 0 &&
+                           declaredType.isArray && declaredType.pointerLevel == 0 &&
+                           symbolTable_.scopeDepth() > 0) {
+                    // CIDER-BUG-057: `var s: [T; N] = base[start:end]` copies
+                    // the slice's elements. Locals only: globals have no
+                    // runtime initializer and keep the type-mismatch
+                    // rejection, so a slice cannot silently BSS-zero them.
+                    checkSliceArrayCopy("declaration of '" + stmt.getName() + "'",
+                                        declaredType, initType,
+                                        dynamic_cast<SliceExpr*>(stmt.getInitializer()),
+                                        stmt.getLine());
+                    lastExprType_ = declaredType;
                 } else if (!areTypesCompatible(declaredType, initType)) {
                     error("Type mismatch in declaration of '" + stmt.getName() +
                               "'. Expected " + canonicalizeNominal(declaredType).toString() + ", got " +
@@ -1167,6 +1304,15 @@ public:
 
         if (ifaceTargetType.isInterface) {
             checkInterfaceValue(ifaceTargetType, valueType, stmt.getLine());
+        } else if (valueType.isSlice && valueType.pointerLevel == 0 &&
+                   targetType.isArray && targetType.pointerLevel == 0) {
+            // CIDER-BUG-057: `arr = base[start:end]` copies the slice's
+            // elements into the existing array, with the same size and
+            // element rules as the declaration-time copy above.
+            std::string where = target ? ("assignment to '" + target->getName() + "'")
+                                       : std::string("array assignment");
+            checkSliceArrayCopy(where, targetType, valueType,
+                                dynamic_cast<SliceExpr*>(stmt.getValue()), stmt.getLine());
         } else if (!areTypesCompatible(targetType, valueType)) {
             error("Type mismatch in assignment. Expected " + canonicalizeNominal(targetType).toString() +
                       ", got " + canonicalizeNominal(valueType).toString(),
@@ -2107,7 +2253,12 @@ public:
         if (objType.isArray) {
             lastExprType_ = objType.elementType();
             lastExprType_.isSlice = true;
+            // CIDER-BUG-057: remember the base array's element count so a
+            // `base[start:]` slice's statically-known length can be checked
+            // against a fixed array target (the end bound is the base size).
+            lastSliceBaseSize_ = objType.arraySize;
         } else {
+            lastSliceBaseSize_ = -1;
             error("Cannot slice non-array type " + objType.toString(), expr.getLine());
             lastExprType_ = {"error", 0};
         }
@@ -2321,6 +2472,10 @@ private:
     SymbolTable& symbolTable_;
     ErrorReporter& reporter_;
     TypeInfo lastExprType_ = {"void", 0};
+    // CIDER-BUG-057: array size of the object of the most recently checked
+    // SliceExpr, used to statically evaluate a `base[start:]` slice's end
+    // bound. -1 == no fixed-size base available.
+    int lastSliceBaseSize_ = -1;
     // CID-005 (T5/F1): declared return type of the function declaration
     // whose body is being checked (guarded: no function body == no check).
     TypeInfo currentDeclaredReturnType_ = {"void", 0};

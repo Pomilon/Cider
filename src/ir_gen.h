@@ -2192,6 +2192,15 @@ public:
                 }
                 stmt.getInitializer()->accept(*this);
                 IRValue val = lastValue_;
+                // CIDER-BUG-057: `var s: [T; N] = base[start:end]` copies
+                // the slice's elements. Use the descriptor's data pointer so
+                // the MEMCPY below starts at base+start; the copy length is
+                // the target's element count (the type checker rejects a
+                // statically-known mismatch and accepts a dynamic length).
+                if (lastExprType_.isSlice && lastExprType_.pointerLevel == 0 &&
+                    sym->type.isArray && sym->type.pointerLevel == 0) {
+                    val = sliceDataPointer(val);
+                }
                 if (sym->type.pointerLevel == 0) {
                     IRType declType = mapType(sym->type.name);
                     // Narrow/unsigned/bool float targets had no conversion
@@ -3521,6 +3530,17 @@ public:
         currentBlock_->addInstruction({IROp::STORE, std::nullopt, {addr, nw, IRValue::Constant(0, IRType::I32)}});
     }
 
+    // CIDER-BUG-057: a slice value is a pointer to a {dataPtr, len}
+    // descriptor (see visit(SliceExpr)). Copying a slice into a fixed array
+    // must read the elements through the descriptor's data pointer at
+    // offset 0 — copying the descriptor's own bytes would copy the start
+    // address word instead of the elements.
+    IRValue sliceDataPointer(IRValue sliceDesc) {
+        IRValue dataPtr = IRValue::Register(nextTemp(), IRType::PTR);
+        currentBlock_->addInstruction({IROp::LOAD, dataPtr, {sliceDesc, IRValue::Constant(0, IRType::I32)}});
+        return dataPtr;
+    }
+
     void visit(AssignStmt& stmt) override {
         std::string compoundOp = stmt.getOp();
 
@@ -3582,6 +3602,9 @@ public:
             }
             stmt.getValue()->accept(*this);
             IRValue val = lastValue_;
+            // CIDER-BUG-057: remember that the RHS is a slice before the
+            // target-specific conversions below overwrite lastExprType_.
+            bool valueIsSlice = lastExprType_.isSlice && lastExprType_.pointerLevel == 0;
 
             // Bitfield targets use the read-modify-write sequence.
             if (auto mem = dynamic_cast<MemberAccessExpr*>(stmt.getTarget())) {
@@ -3645,6 +3668,19 @@ public:
                                       !isStructValueType(derefPointeeType) &&
                                       !derefPointeeType.isInterface && !derefPointeeType.isSlice);
                 if (pointeeScalar) lastExprType_ = derefPointeeType;
+            }
+
+            // CIDER-BUG-057: `arr = base[start:end]` copies the slice's
+            // elements into the fixed array — resolve the descriptor's data
+            // pointer first, then let the aggregate MEMCPY below copy the
+            // target's element count (a slice-typed RHS is never a scalar
+            // store). The declaration path uses the same rule.
+            if (valueIsSlice) {
+                TypeInfo assignTargetType = inferExprType(stmt.getTarget());
+                if (assignTargetType.isArray && assignTargetType.pointerLevel == 0) {
+                    val = sliceDataPointer(val);
+                    lastExprType_ = assignTargetType;
+                }
             }
 
             if (lastExprType_.pointerLevel == 0 && (lastExprType_.isArray || lastExprType_.isUserDefined || getTypeSize(lastExprType_) > 8)) {
