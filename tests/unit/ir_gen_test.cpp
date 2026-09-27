@@ -1052,6 +1052,33 @@ int run() {
         }
         CHECK(sawUnresolved);
     }
+
+    // CIDER-BUG-054: interface reassignment lowers like declaration-time
+    // assignment — the value's address at +0 and the concrete vtable at +8
+    // — and same-interface copies move the two fat-pointer words without
+    // inventing a "vtable_I_I" label.
+    {
+        d = genSrc(
+            "interface I { func m() -> int; }\n"
+            "class A { var x: int; func m() -> int { return this.x; } }\n"
+            "class B { var y: int; func m() -> int { return this.y; } }\n"
+            "func main() -> int {\n"
+            "  var a: A; var b: B;\n"
+            "  var i: I = a;\n"
+            "  i = b;\n"
+            "  var j: I = i;\n"
+            "  i = j;\n"
+            "  return i.m();\n"
+            "}\n");
+        size_t countA = 0, pos = 0;
+        while ((pos = d.find("vtable_I_A", pos)) != std::string::npos) {
+            countA++;
+            pos++;
+        }
+        CHECK(countA == 1);  // one declaration label, no stale relabel
+        CHECK(d.find("vtable_I_B") != std::string::npos);
+        CHECK(d.find("vtable_I_I") == std::string::npos);
+    }
     return 0;
 }
 

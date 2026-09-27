@@ -913,6 +913,55 @@ public:
         lastExprType_ = declaredType;
     }
 
+    // CIDER-BUG-054: the interface conversion rule, shared by
+    // declaration-time assignment and reassignment so the two cannot
+    // drift. Accepts a struct/class value, a pointer to one, or the same
+    // interface (a fat-pointer copy: the stored vtable follows the target
+    // interface's method order, so a different interface cannot be
+    // re-labelled statically). Every interface method must be implemented
+    // with a matching signature; anything else is rejected.
+    void checkInterfaceValue(const TypeInfo& ifaceType, const TypeInfo& valueType, int line) {
+        auto ifaceSym = resolveScoped(ifaceType.name);
+        if (!ifaceSym || ifaceSym->kind != SymbolKind::INTERFACE) return;
+        auto iface = std::static_pointer_cast<InterfaceSymbol>(ifaceSym);
+        if (valueType.isInterface) {
+            if (canonicalizeNominal(ifaceType).name == canonicalizeNominal(valueType).name) return;
+            error("Cannot assign interface '" + valueType.name + "' to interface '" +
+                      ifaceType.name + "'", line);
+            return;
+        }
+        TypeInfo concreteType = valueType;
+        if (concreteType.pointerLevel > 0) concreteType.pointerLevel--;
+        auto concreteSym = resolveScoped(concreteType.name);
+        if (!concreteSym || (concreteSym->kind != SymbolKind::STRUCT && concreteSym->kind != SymbolKind::CLASS)) {
+            error("Cannot assign non-struct/class type to interface '" + ifaceType.name + "'", line);
+            return;
+        }
+        auto ss = std::static_pointer_cast<StructSymbol>(concreteSym);
+        for (auto& im : iface->methods) {
+            bool found = false;
+            for (auto& sm : ss->methods) {
+                if (sm.name != im.name) continue;
+                if (sm.parameterTypes.size() != im.parameterTypes.size()) continue;
+                bool paramsMatch = true;
+                for (size_t pi = 0; pi < sm.parameterTypes.size(); ++pi) {
+                    if (!(sm.parameterTypes[pi] == im.parameterTypes[pi])) {
+                        paramsMatch = false;
+                        break;
+                    }
+                }
+                if (!paramsMatch) continue;
+                if (!(sm.returnType == im.returnType)) continue;
+                found = true;
+                break;
+            }
+            if (!found) {
+                error("Type '" + concreteType.name + "' does not implement interface '" +
+                          ifaceType.name + "': missing method '" + im.name + "'", line);
+            }
+        }
+    }
+
     void visit(VarDeclStmt& stmt) override {
         TypeInfo declaredType = TypeInfo::fromAST(stmt.getTypeAST());
         // CID-020/021 §1: store the canonical nominal identity so later
@@ -940,45 +989,15 @@ public:
                 TypeInfo initType = lastExprType_;
 
                 if (declaredType.isInterface) {
-                auto ifaceSym = resolveScoped(declaredType.name);
-                if (ifaceSym && ifaceSym->kind == SymbolKind::INTERFACE) {
-                    auto iface = std::static_pointer_cast<InterfaceSymbol>(ifaceSym);
-                    TypeInfo concreteType = initType;
-                    if (concreteType.pointerLevel > 0) concreteType.pointerLevel--;
-                    auto concreteSym = resolveScoped(concreteType.name);
-                    if (!concreteSym || (concreteSym->kind != SymbolKind::STRUCT && concreteSym->kind != SymbolKind::CLASS)) {
-                        error("Cannot assign non-struct/class type to interface '" + declaredType.name + "'", stmt.getLine());
-                    } else {
-                        auto ss = std::static_pointer_cast<StructSymbol>(concreteSym);
-                        for (auto& im : iface->methods) {
-                            bool found = false;
-                            for (auto& sm : ss->methods) {
-                                if (sm.name != im.name) continue;
-                                if (sm.parameterTypes.size() != im.parameterTypes.size()) continue;
-                                bool paramsMatch = true;
-                                for (size_t pi = 0; pi < sm.parameterTypes.size(); ++pi) {
-                                    if (!(sm.parameterTypes[pi] == im.parameterTypes[pi])) {
-                                        paramsMatch = false;
-                                        break;
-                                    }
-                                }
-                                if (!paramsMatch) continue;
-                                if (!(sm.returnType == im.returnType)) continue;
-                                found = true;
-                                break;
-                            }
-                            if (!found) {
-                                error("Type '" + concreteType.name + "' does not implement interface '" +
-                                      declaredType.name + "': missing method '" + im.name + "'", stmt.getLine());
-                            }
-                        }
-                    }
-                }
-            } else if (!areTypesCompatible(declaredType, initType)) {
-                error("Type mismatch in declaration of '" + stmt.getName() +
-                          "'. Expected " + canonicalizeNominal(declaredType).toString() + ", got " +
-                          canonicalizeNominal(initType).toString(),
-                      stmt.getLine());
+                    // CIDER-BUG-054: the conversion rule lives in
+                    // checkInterfaceValue so declaration and reassignment
+                    // cannot drift.
+                    checkInterfaceValue(declaredType, initType, stmt.getLine());
+                } else if (!areTypesCompatible(declaredType, initType)) {
+                    error("Type mismatch in declaration of '" + stmt.getName() +
+                              "'. Expected " + canonicalizeNominal(declaredType).toString() + ", got " +
+                              canonicalizeNominal(initType).toString(),
+                          stmt.getLine());
                 }
             }
         }
@@ -1132,7 +1151,23 @@ public:
         stmt.getValue()->accept(*this);
         TypeInfo valueType = lastExprType_;
 
-        if (!areTypesCompatible(targetType, valueType)) {
+        // CIDER-BUG-054: reassigning an interface variable uses the same
+        // conversion rule as its declaration — any satisfying concrete
+        // value, or a copy of the same interface. The flag can be missing
+        // on spellings collected before lowering (e.g. a global interface
+        // variable), so resolve the declared name too.
+        TypeInfo ifaceTargetType = targetType;
+        if (dynamic_cast<IdentifierExpr*>(stmt.getTarget()) &&
+            !ifaceTargetType.isInterface && ifaceTargetType.pointerLevel == 0) {
+            auto typeSym = resolveScoped(ifaceTargetType.name);
+            if (typeSym && typeSym->kind == SymbolKind::INTERFACE) {
+                ifaceTargetType.isInterface = true;
+            }
+        }
+
+        if (ifaceTargetType.isInterface) {
+            checkInterfaceValue(ifaceTargetType, valueType, stmt.getLine());
+        } else if (!areTypesCompatible(targetType, valueType)) {
             error("Type mismatch in assignment. Expected " + canonicalizeNominal(targetType).toString() +
                       ", got " + canonicalizeNominal(valueType).toString(),
                   stmt.getLine());

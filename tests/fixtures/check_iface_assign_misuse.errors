@@ -1,0 +1,3 @@
+Type 'Bad' does not implement interface 'Other': missing method 'size'
+Type 'Bad' does not implement interface 'Shape': missing method 'area'
+Cannot assign interface 'Other' to interface 'Shape'

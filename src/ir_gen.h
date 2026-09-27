@@ -728,6 +728,59 @@ public:
         return "vtable_" + vtableIfaceKey(ifaceSym, ifaceSym->name, concSym, concSym->name);
     }
 
+    // CIDER-BUG-054: materialise an interface (fat pointer) value at
+    // `addr` — the data pointer at +0, the interface/concrete vtable
+    // pointer at +8. A concrete value contributes the object's address, a
+    // concrete pointer its pointer value; an interface source copies both
+    // words (the checker admits only the same interface, whose method
+    // order the stored vtable follows). Shared by declaration-time
+    // interface initialization and reassignment so the two lower
+    // identically on every backend.
+    void emitInterfaceStore(const TypeInfo& ifaceType, IRValue addr, Expression* value) {
+        value->accept(*this);
+        TypeInfo initType = lastExprType_;
+        // The interface flag can be missing on spellings that predate
+        // declaration lowering (e.g. a module global read through a
+        // from-alias): resolve the name before classifying.
+        if (!initType.isInterface && initType.pointerLevel == 0) {
+            auto typeSym = resolveNominalType(initType.name);
+            if (typeSym && typeSym->kind == SymbolKind::INTERFACE) initType.isInterface = true;
+        }
+        // A global target is a label: materialise its address so the two
+        // stores honour the +0/+8 offsets (label stores are sized by the
+        // global's declared type and ignore the offset).
+        if (addr.kind == IRValue::LABEL) {
+            IRValue addrReg = IRValue::Register(nextTemp(), IRType::PTR);
+            currentBlock_->addInstruction({IROp::MOV, addrReg, {addr}});
+            addr = addrReg;
+        }
+        if (initType.isInterface) {
+            // Fat-pointer copy: both words, no vtable relabelling.
+            IRValue dataPtr = IRValue::Register(nextTemp(), IRType::PTR);
+            currentBlock_->addInstruction({IROp::LOAD, dataPtr, {lastValue_, IRValue::Constant(0, IRType::I32)}});
+            IRValue vtablePtr = IRValue::Register(nextTemp(), IRType::PTR);
+            currentBlock_->addInstruction({IROp::LOAD, vtablePtr, {lastValue_, IRValue::Constant(8, IRType::I32)}});
+            currentBlock_->addInstruction({IROp::STORE, std::nullopt, {addr, dataPtr, IRValue::Constant(0, IRType::I32)}});
+            IRValue addr8 = IRValue::Register(nextTemp(), IRType::PTR);
+            currentBlock_->addInstruction({IROp::ADD, addr8, {addr, IRValue::Constant(8, IRType::I32)}});
+            currentBlock_->addInstruction({IROp::STORE, std::nullopt, {addr8, vtablePtr, IRValue::Constant(0, IRType::I32)}});
+        } else {
+            IRValue srcAddr = lastValue_;
+            currentBlock_->addInstruction({IROp::STORE, std::nullopt, {addr, srcAddr, IRValue::Constant(0, IRType::I32)}});
+            IRValue addr8 = IRValue::Register(nextTemp(), IRType::PTR);
+            currentBlock_->addInstruction({IROp::ADD, addr8, {addr, IRValue::Constant(8, IRType::I32)}});
+            std::string concreteTypeName = initType.name;
+            if (initType.pointerLevel > 0) {
+                TypeInfo base = initType;
+                base.pointerLevel--;
+                concreteTypeName = base.name;
+            }
+            std::string vtableLabel = interfaceVtableLabel(ifaceType.name, concreteTypeName);
+            currentBlock_->addInstruction({IROp::STORE, std::nullopt, {addr8, IRValue::Label(vtableLabel), IRValue::Constant(0, IRType::I32)}});
+        }
+        lastExprType_ = ifaceType;
+    }
+
     // Name for ir_gen-inserted runtime calls (`new`, `delete`, closures,
     // the interpolation helpers): the visible malloc/free definition's
     // mangled name, so the hardened std allocator — not the VM builtin /
@@ -886,6 +939,16 @@ public:
             sym->kind = SymbolKind::VARIABLE;
             sym->name = param.first;
             sym->type = TypeInfo::fromAST(param.second.get());
+            // CIDER-BUG-054: an interface-typed parameter is the same
+            // 16-byte fat pointer as a local interface variable. Resolve
+            // the flag here as visit(VarDeclStmt) does, so the alloca has
+            // the right size and dispatch/assignment see the interface.
+            if (!sym->type.isInterface && sym->type.pointerLevel == 0) {
+                auto typeSym = symbolTable_.resolve(sym->type.name);
+                if (typeSym && typeSym->kind == SymbolKind::INTERFACE) {
+                    sym->type.isInterface = true;
+                }
+            }
             symbolTable_.define(sym);
 
             IRType paramIRType = (sym->type.pointerLevel > 0) ? IRType::PTR : mapType(sym->type.name);
@@ -894,7 +957,20 @@ public:
             IRValue paramReg = IRValue::Register(paramRegName, paramIRType);
             IRValue addr = IRValue::Register(nextTemp(), IRType::PTR);
             currentBlock_->addInstruction({IROp::ALLOCA, addr, {IRValue::Constant(getTypeSize(sym->type), IRType::I32)}});
-            if (sym->type.pointerLevel == 0 && isByValueAggregate(sym->type)) {
+            if (sym->type.isInterface) {
+                // Interface values are address-like: callers pass the
+                // address of their fat pointer. Copy the two words into the
+                // parameter's own slot so method dispatch and reassignment
+                // use it directly, exactly like a declared local.
+                IRValue dataPtr = IRValue::Register(nextTemp(), IRType::PTR);
+                currentBlock_->addInstruction({IROp::LOAD, dataPtr, {paramReg, IRValue::Constant(0, IRType::I32)}});
+                IRValue vtablePtr = IRValue::Register(nextTemp(), IRType::PTR);
+                currentBlock_->addInstruction({IROp::LOAD, vtablePtr, {paramReg, IRValue::Constant(8, IRType::I32)}});
+                currentBlock_->addInstruction({IROp::STORE, std::nullopt, {addr, dataPtr, IRValue::Constant(0, IRType::I32)}});
+                IRValue addr8 = IRValue::Register(nextTemp(), IRType::PTR);
+                currentBlock_->addInstruction({IROp::ADD, addr8, {addr, IRValue::Constant(8, IRType::I32)}});
+                currentBlock_->addInstruction({IROp::STORE, std::nullopt, {addr8, vtablePtr, IRValue::Constant(0, IRType::I32)}});
+            } else if (sym->type.pointerLevel == 0 && isByValueAggregate(sym->type)) {
                 // By-value aggregate params (struct/class/fixed-size array)
                 // arrive as a caller pointer: copy the pointee into the
                 // local slot instead of storing the pointer value as the
@@ -2068,34 +2144,16 @@ public:
         }
 
         if (stmt.getInitializer()) {
-            // Handle interface variable initialization: assign concrete type to interface
-            bool isInterfaceInit = false;
-            TypeInfo initTypeInfo;
+            // CIDER-BUG-054: interface initialization stores the fat
+            // pointer (data + vtable). Reassignment shares this lowering
+            // (see visit(AssignStmt)), so the two paths cannot diverge.
             if (sym->type.isInterface) {
-                stmt.getInitializer()->accept(*this);
-                initTypeInfo = lastExprType_;
-                IRValue srcAddr = lastValue_;
-                // Store data pointer at [addr + 0]
-                currentBlock_->addInstruction({IROp::STORE, std::nullopt, {addr, srcAddr, IRValue::Constant(0, IRType::I32)}});
-                // Compute [addr + 8] in a separate register to avoid corrupting addr
-                IRValue addr8 = IRValue::Register(nextTemp(), IRType::PTR);
-                currentBlock_->addInstruction({IROp::ADD, addr8, {addr, IRValue::Constant(8, IRType::I32)}});
-                // Store vtable pointer at [addr + 8]
-                std::string concreteTypeName = initTypeInfo.name;
-                if (initTypeInfo.pointerLevel > 0) {
-                    TypeInfo base = initTypeInfo;
-                    base.pointerLevel--;
-                    concreteTypeName = base.name;
-                }
-                // CID-020/021 (spec §6): must match generate()'s interface
-                // vtable key — each part mangles by its own defining module
-                // (see interfaceVtableLabel).
-                std::string vtableLabel = interfaceVtableLabel(sym->type.name, concreteTypeName);
-                currentBlock_->addInstruction({IROp::STORE, std::nullopt, {addr8, IRValue::Label(vtableLabel), IRValue::Constant(0, IRType::I32)}});
-                lastExprType_ = sym->type;
-                isInterfaceInit = true;
+                emitInterfaceStore(sym->type, addr, stmt.getInitializer());
+                return;
             }
-            if (!isInterfaceInit) {
+            // Non-interface initializers keep the legacy scalar/aggregate
+            // store path.
+            {
                 // Fixed-size array from a list literal (CID-007): store
                 // each element at its own offset with the element width
                 // (a MEMCPY of the literal temp would copy I32-wide
@@ -3469,6 +3527,29 @@ public:
         }
 
         if (compoundOp.empty()) {
+            // CIDER-BUG-054: an interface variable target stores the fat
+            // pointer (data + vtable) through the same helper the
+            // declaration path uses, so reassignment dispatches exactly
+            // like a declaration-time assignment. Interface fields and
+            // elements keep the legacy path: their layout is 8 bytes (the
+            // collector sizes the field type before the interface flag is
+            // resolved), so a 16-byte fat-pointer store is not safe there.
+            if (auto ident = dynamic_cast<IdentifierExpr*>(stmt.getTarget())) {
+                auto sym = symbolTable_.resolve(ident->getName());
+                if (sym) {
+                    TypeInfo targetIface = sym->type;
+                    if (!targetIface.isInterface && targetIface.pointerLevel == 0) {
+                        auto typeSym = resolveNominalType(targetIface.name);
+                        if (typeSym && typeSym->kind == SymbolKind::INTERFACE) {
+                            targetIface.isInterface = true;
+                        }
+                    }
+                    if (targetIface.isInterface) {
+                        emitInterfaceStore(targetIface, addr, stmt.getValue());
+                        return;
+                    }
+                }
+            }
             stmt.getValue()->accept(*this);
             IRValue val = lastValue_;
 

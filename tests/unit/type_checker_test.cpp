@@ -244,6 +244,40 @@ int run() {
         "func main() -> void { var c: C* = nilPtr; var i: I = c; }\n");
     CHECK(ok4.empty());
 
+    // CIDER-BUG-054: interface variables reassign under the same rule as
+    // their declaration — any satisfying concrete value (or pointer) and
+    // same-interface fat-pointer copies. Misuse keeps a clear diagnostic.
+    {
+        auto reassignOk = checkSrc(
+            "interface I { func m() -> int; }\n"
+            "class A { var x: int; func m() -> int { return this.x; } }\n"
+            "class B { var y: int; func m() -> int { return this.y; } }\n"
+            "func main() -> void {\n"
+            "  var a: A; var b: B;\n"
+            "  var i: I = a;\n"
+            "  i = b;\n"
+            "  i = a;\n"
+            "  var j: I = i;\n"
+            "  i = j;\n"
+            "  var pb: B* = &b;\n"
+            "  i = pb;\n"
+            "}\n");
+        CHECK(reassignOk.empty());
+
+        auto reassignBad = checkSrc(
+            "interface I { func m() -> int; }\n"
+            "class C { var x: int; }\n"
+            "func main() -> void { var c: C; var i: I = c; i = c; }\n");
+        CHECK(hasError(reassignBad, "Type 'C' does not implement interface 'I': missing method 'm'"));
+
+        auto reassignIface = checkSrc(
+            "interface I { func m() -> int; }\n"
+            "interface K { func n() -> int; }\n"
+            "class C { func m() -> int { return 1; } func n() -> int { return 2; } }\n"
+            "func main() -> void { var c: C; var i: I = c; var k: K = c; i = k; }\n");
+        CHECK(hasError(reassignIface, "Cannot assign interface 'K' to interface 'I'"));
+    }
+
     // CID-006: fn(...) typing and checking.
     auto fnOk = checkSrc(
         "func add(a: int, b: int) -> int { return a + b; }\n"
