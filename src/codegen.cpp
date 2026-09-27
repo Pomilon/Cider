@@ -1805,7 +1805,19 @@ bool CodeGenerator::generate(ModuleIR& module, const std::string& outputPath,
                                     // stack garbage in the upper bytes. Heap/array
                                     // elements keep their native width — a qword store
                                     // into a 4-byte-element array clobbers the neighbor.
-                                    bool slotDest = (instr.args[0].kind == IRValue::REGISTER) &&
+                                    // CIDER-BUG-049: a nonzero STORE offset addresses a
+                                    // sub-object of the slot (struct/class field), not
+                                    // the variable's own qword slot — widening it wrote
+                                    // past the field and clobbered its neighbour.
+                                    bool zeroStoreOffset = true;
+                                    if (instr.args.size() > 2) {
+                                        zeroStoreOffset =
+                                            instr.args[2].kind == IRValue::LABEL ||
+                                            (instr.args[2].kind == IRValue::CONSTANT &&
+                                             instr.args[2].intValue == 0);
+                                    }
+                                    bool slotDest = zeroStoreOffset &&
+                                                    (instr.args[0].kind == IRValue::REGISTER) &&
                                                     isAllocaBased(instr.args[0].name);
                                         if (slotDest) {
                                         if (t == IRType::I8) addText("    movsx rax, al");

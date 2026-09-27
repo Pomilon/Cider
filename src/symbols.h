@@ -148,6 +148,15 @@ struct StructSymbol : public Symbol {
         int bits = 0;      // declared bitfield width (0 = regular field)
         int bitOffset = 0; // bit position within the containing word
         int bitWidth = 0;  // effective width in the layout
+        // CIDER-BUG-049: a class field declaration's initializer (null when
+        // the field has none). Non-owning: the declaration AST outlives
+        // collection and IR generation. Struct fields and struct-literal
+        // fields never carry one (the parser rejects initializers there).
+        Expression* initializer = nullptr;
+        // Module the initializer's identifiers bind in ("" == main); an
+        // inherited field keeps its declaring class's module. Used when
+        // folding const references at the object creation site.
+        std::string initializerModule;
     };
     struct Method {
         std::string name;

@@ -953,6 +953,47 @@ public:
             }
         }
 
+        // CIDER-BUG-049: class field initializers have no runtime
+        // initializer pass — ir_gen materialises them as constant stores at
+        // each object creation site (new C, value-class locals). Mirror
+        // CIDER-BUG-048's global-scalar policy: accept exactly the shapes the
+        // constant evaluator folds (literals, const references, arithmetic)
+        // and report the rest instead of silently leaving the field zero.
+        if (inClassFieldDecl_ && stmt.getInitializer()) {
+            TypeInfo resolvedField = resolveType(declaredType);
+            TypeInfo resolvedFn = resolveFunctionPointerAlias(declaredType);
+            Expression* fieldInit = stmt.getInitializer();
+            bool stringLiteral = dynamic_cast<StringExpr*>(fieldInit) != nullptr;
+            if (resolvedFn.isFunctionPointer && !resolvedFn.isArray) {
+                if (!isConstantFunctionPointerInit(fieldInit)) {
+                    error("Class function pointer field initializer in declaration of '" +
+                              stmt.getName() + "' must be a function name or nilPtr",
+                          stmt.getLine());
+                }
+            } else if (resolvedField.pointerLevel > 0 || resolvedField.name == "string") {
+                if (!isConstantFunctionPointerInit(fieldInit) && !stringLiteral) {
+                    error("Class pointer field initializer in declaration of '" + stmt.getName() +
+                              "' must be nilPtr, a string literal, or a function name",
+                          stmt.getLine());
+                }
+            } else if (!resolvedField.isArray && isFloatName(resolvedField.name)) {
+                if (!isConstFloatExpr(fieldInit)) {
+                    error("Class field initializer in declaration of '" + stmt.getName() +
+                              "' must use constant expressions", stmt.getLine());
+                }
+            } else if (!resolvedField.isArray && isIntegerName(resolvedField.name)) {
+                if (!isConstIntExpr(fieldInit)) {
+                    error("Class field initializer in declaration of '" + stmt.getName() +
+                              "' must use constant expressions", stmt.getLine());
+                }
+            } else {
+                // Aggregate (array/struct/class/slice/interface) fields have
+                // no constant materialisation at all.
+                error("Class field initializer in declaration of '" + stmt.getName() +
+                          "' must be a scalar constant expression", stmt.getLine());
+            }
+        }
+
         if (inClassFieldDecl_) return;  // see visit(ClassDeclStmt)
 
         // CID-003 follow-up (W5/W6): float-typed globals have no runtime

@@ -1839,25 +1839,7 @@ public:
             // defining module's mangled name; main-file globals stay bare.
             std::string gname = emitGlobalName(currentModule_, stmt.getName());
             if (auto strInit = dynamic_cast<StringExpr*>(stmt.getInitializer())) {
-                std::string strLabel = "_gs" + std::to_string(globalStrCount_++);
-                std::string strData = strInit->getValue();
-                std::string dataLine = strLabel + ": db ";
-                for (size_t ci = 0; ci < strData.size(); ++ci) {
-                    if (ci > 0) dataLine += ", ";
-                    char c = strData[ci];
-                    if (c == '\n') dataLine += "10";
-                    else if (c == '\t') dataLine += "9";
-                    // Single-quoted NASM strings process no escapes:
-                    // '\\' would emit two bytes and a bare apostrophe
-                    // parses as empty plus an unterminated tail (CID-024).
-                    // Numerics are read identically by NASM and the VM decoder.
-                    else if (c == '\\') dataLine += "92";
-                    else if (c == '\'') dataLine += "39";
-                    else if (c >= 32 && c < 127) dataLine += "'" + std::string(1, c) + "'";
-                    else dataLine += std::to_string((unsigned char)c);
-                }
-                dataLine += ", 0";
-                module_.addStringData(dataLine);
+                std::string strLabel = emitStringData(strInit->getValue());
                 module_.addStringData(gname + ": dq " + strLabel);
                 globalValues_[gname] = IRValue::Label(gname);
                 return;
@@ -2039,6 +2021,13 @@ public:
                                                       definingScopeFor(classSym, classSym->name));
                     destructorStack_.back().push_back(
                         {emitFunctionName(dtorDef.second, classSym->destructorName), addr});
+                }
+                // CIDER-BUG-049: a value-class instance without an explicit
+                // initializer runs the class's field initializers. With one
+                // (`var v: C = other;`) the copy/memcpy below copies the
+                // source object wholesale, so the source state wins.
+                if (!stmt.getInitializer()) {
+                    emitClassFieldInitializers(classSym, addr);
                 }
             }
         }
@@ -4517,6 +4506,136 @@ public:
         lastValue_ = IRValue::Constant(0, IRType::PTR);
         lastExprType_ = {"void", 1};
     }
+    // CIDER-BUG-049: emit a byte string as static data and return its label.
+    // Shared by string-literal fields and the global StringExpr path.
+    // Single-quoted NASM strings process no escapes: '\\' would emit two
+    // bytes and a bare apostrophe parses as empty plus an unterminated tail
+    // (CID-024); numeric bytes are read identically by NASM and the VM
+    // decoder.
+    std::string emitStringData(const std::string& strData) {
+        std::string strLabel = "_gs" + std::to_string(globalStrCount_++);
+        std::string dataLine = strLabel + ": db ";
+        for (size_t ci = 0; ci < strData.size(); ++ci) {
+            if (ci > 0) dataLine += ", ";
+            char c = strData[ci];
+            if (c == '\n') dataLine += "10";
+            else if (c == '\t') dataLine += "9";
+            else if (c == '\\') dataLine += "92";
+            else if (c == '\'') dataLine += "39";
+            else if (c >= 32 && c < 127) dataLine += "'" + std::string(1, c) + "'";
+            else dataLine += std::to_string((unsigned char)c);
+        }
+        dataLine += ", 0";
+        module_.addStringData(dataLine);
+        return strLabel;
+    }
+
+    // CIDER-BUG-049: folded integer constant typed/truncated for the field's
+    // declared width. truncateIntToType does not narrow 64 -> 32 bits, so the
+    // mask is applied here (what a register holds after a store of this
+    // width). A qword store into a narrower field would clobber its neighbor.
+    static IRValue typedFieldConstant(uint64_t v, IRType t) {
+        switch (t) {
+        case IRType::I8: return IRValue::Constant((int64_t)(int8_t)v, t);
+        case IRType::U8: return IRValue::Constant((uint64_t)(v & 0xFFULL), t);
+        case IRType::I16: return IRValue::Constant((int64_t)(int16_t)v, t);
+        case IRType::U16: return IRValue::Constant((uint64_t)(v & 0xFFFFULL), t);
+        case IRType::I32: return IRValue::Constant((int64_t)(int32_t)v, t);
+        case IRType::U32: return IRValue::Constant((uint64_t)(v & 0xFFFFFFFFULL), t);
+        case IRType::BOOL: return IRValue::Constant(v ? 1 : 0, t);
+        default: return IRValue::Constant(v, t);
+        }
+    }
+
+    // CIDER-BUG-049: materialise a class's field initializers as constant
+    // stores at `objAddr`, and value-initialise scalar fields that have none.
+    // The checker admits only foldable initializer shapes (literals, const
+    // references, constant arithmetic, string literals, function names), so
+    // no runtime initializer pass is needed. Inherited fields lead
+    // `classSym->fields` (the collector copies them), so base initializers
+    // run before derived ones. Field LAYOUT is untouched: only values are
+    // stored, at the offsets the collector already assigned.
+    void emitClassFieldInitializers(const std::shared_ptr<StructSymbol>& classSym,
+                                    IRValue objAddr) {
+        if (!classSym || !currentFunction_) return;
+        std::string classMod = definingModuleFor(classSym, classSym->name);
+        for (const auto& field : classSym->fields) {
+            TypeInfo fieldType =
+                canonicalizeNominalInModule(resolveTypeAlias(field.type, classMod), classMod);
+            IRType fieldIR = (fieldType.pointerLevel > 0) ? IRType::PTR : mapType(fieldType.name);
+            bool ptrLike = fieldType.pointerLevel > 0 || fieldType.isFunctionPointer ||
+                           fieldType.name == "string";
+            auto storeField = [&](IRValue val) {
+                currentBlock_->addInstruction(
+                    {IROp::STORE, std::nullopt,
+                     {objAddr, val, IRValue::Constant(field.offset, IRType::I32)}});
+            };
+            if (!field.initializer) {
+                // An escape-analysed `new` lands on the native stack, so the
+                // zero default of an initializer-less scalar field is only
+                // deterministic if it is actually stored. Aggregates keep the
+                // legacy layout-only treatment.
+                if (ptrLike) {
+                    storeField(IRValue::Constant(0, IRType::PTR));
+                } else if (!fieldType.isArray && !fieldType.isInterface &&
+                           !fieldType.isSlice && !isStructValueType(fieldType, classMod)) {
+                    if (fieldIR == IRType::F32 || fieldIR == IRType::F64) {
+                        storeField(IRValue::Constant(0.0, fieldIR));
+                    } else {
+                        storeField(typedFieldConstant(0, fieldIR));
+                    }
+                }
+                continue;
+            }
+            Expression* init = field.initializer;
+            // Field initializers are const-like: identifiers bind in the
+            // declaring class's module, not at the creation site
+            // (CIDER-BUG-048's const-folding rule).
+            Scope* prevScope = constEvalScope_;
+            if (Scope* declScope = scopeForModule(field.initializerModule)) {
+                constEvalScope_ = declScope;
+            }
+            bool folded = false;
+            if (auto strInit = dynamic_cast<StringExpr*>(init)) {
+                storeField(IRValue::Label(emitStringData(strInit->getValue())));
+                folded = true;
+            } else if (ptrLike) {
+                std::string fnTarget = functionPointerInitTarget(init);
+                uint64_t ptrVal = 0;
+                if (!fnTarget.empty()) {
+                    storeField(IRValue::Label(fnTarget));
+                    folded = true;
+                } else if (tryEvalConstU64(init, ptrVal)) {
+                    storeField(IRValue::Constant((int64_t)ptrVal, IRType::PTR));
+                    folded = true;
+                }
+            } else if (fieldType.pointerLevel == 0 && !fieldType.isArray) {
+                if (fieldIR == IRType::F32 || fieldIR == IRType::F64) {
+                    double fv = 0;
+                    if (tryEvalConstF64(init, fv)) {
+                        storeField(IRValue::Constant(fv, fieldIR));
+                        folded = true;
+                    }
+                } else {
+                    uint64_t v = 0;
+                    if (tryEvalConstU64(init, v)) {
+                        storeField(typedFieldConstant(v, fieldIR));
+                        folded = true;
+                    }
+                }
+            }
+            if (!folded && reporter_) {
+                // Checker-accepted shape that still cannot fold (division by
+                // zero, oversized shift, ...): report it — never a silent
+                // zero (the CIDER-BUG-048 safety net).
+                reporter_->error("Class field initializer in declaration of '" +
+                                     field.name + "' must use constant expressions",
+                                 classSym->line);
+            }
+            constEvalScope_ = prevScope;
+        }
+    }
+
     void visit(NewExpr& expr) override {
         TypeInfo type = TypeInfo::fromAST(expr.getNewType());
         int size = getTypeSize(type);
@@ -4538,6 +4657,9 @@ public:
                 IRValue vptrVal = IRValue::Label("vtable_" + vtableKeyForClass(classSym));
                 currentBlock_->addInstruction({IROp::STORE, std::nullopt, {dest, vptrVal, IRValue::Constant(0, IRType::I32)}});
             }
+            // CIDER-BUG-049: run the class's field initializers (inherited
+            // fields included, in layout order).
+            emitClassFieldInitializers(classSym, dest);
         }
 
         lastValue_ = dest;

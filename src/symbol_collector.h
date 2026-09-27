@@ -759,6 +759,13 @@ public:
                 StructSymbol::Field f;
                 f.name = field->getName();
                 f.type = TypeInfo::fromAST(field->getTypeAST());
+                // CIDER-BUG-049: class field initializers are materialised at
+                // every object creation site (ir_gen NewExpr / value-class
+                // locals), so the AST is kept on the field. Inheritance copies
+                // parent fields (and with them the initializer), which makes
+                // base-field initializers run for derived instances too.
+                f.initializer = field->getInitializer();
+                f.initializerModule = getCurrentModule();
                 int a = getFieldAlignment(f.type);
                 currentOffset = alignUp(currentOffset, a);
                 if (a > classMaxAlign) classMaxAlign = a;
