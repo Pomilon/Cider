@@ -1,0 +1,6 @@
+// CIDER-BUG-052: indexing past the innermost dimension stays diagnosed.
+func main() -> int {
+  var m: [[u8; 2]; 3];
+  m[0][0][0] = 1;
+  return 0;
+}

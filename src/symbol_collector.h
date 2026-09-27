@@ -921,10 +921,9 @@ public:
         if (type.pointerLevel > 0) return 8;
         if (type.isInterface) return 16;
         if (type.isArray) {
-            TypeInfo elemType = type;
-            elemType.isArray = false;
-            elemType.arraySize = 0;
-            return type.arraySize * getFieldSize(elemType, visiting);
+            // CIDER-BUG-052: elementType() covers the inner dimension of a
+            // nested fixed array.
+            return type.arraySize * getFieldSize(type.elementType(), visiting);
         }
         if (type.name == "u8" || type.name == "i8" || type.name == "char" || type.name == "byte" || type.name == "void") return 1;
         if (type.name == "u16" || type.name == "i16") return 2;
@@ -958,10 +957,9 @@ public:
         if (type.pointerLevel > 0) return 8;
         if (type.isInterface) return 8;
         if (type.isArray) {
-            TypeInfo elemType = type;
-            elemType.isArray = false;
-            elemType.arraySize = 0;
-            return getFieldAlignment(elemType, visiting);
+            // CIDER-BUG-052: elementType() covers the inner dimension of a
+            // nested fixed array.
+            return getFieldAlignment(type.elementType(), visiting);
         }
         if (type.name == "u8" || type.name == "i8" || type.name == "char" || type.name == "byte" || type.name == "void") return 1;
         if (type.name == "u16" || type.name == "i16") return 2;

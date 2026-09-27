@@ -1,0 +1,6 @@
+// CIDER-BUG-052: a row copy must match the declared inner dimension.
+func main() -> int {
+  var m: [[u8; 2]; 3];
+  var row: [u8; 3] = m[0];
+  return 0;
+}

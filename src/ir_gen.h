@@ -1917,9 +1917,7 @@ public:
             if (sym->type.isArray && sym->type.pointerLevel == 0 && sym->type.arraySize > 0) {
                 if (auto list = dynamic_cast<ListExpr*>(stmt.getInitializer())) {
                     auto& elems = list->getElements();
-                    TypeInfo elemType = sym->type;
-                    elemType.isArray = false;
-                    elemType.arraySize = 0;
+                    TypeInfo elemType = sym->type.elementType();
                     int elemSize = getTypeSize(elemType);
                     IRType elemIR = mapType(elemType.name);
                     std::string dataLine = gname + ": db ";
@@ -2105,17 +2103,29 @@ public:
                 if (sym->type.isArray && sym->type.pointerLevel == 0 && sym->type.arraySize > 0) {
                     if (auto list = dynamic_cast<ListExpr*>(stmt.getInitializer())) {
                         auto& elems = list->getElements();
-                        TypeInfo elemType = sym->type;
-                        elemType.isArray = false;
-                        elemType.arraySize = 0;
+                        TypeInfo elemType = sym->type.elementType();
+                        // CIDER-BUG-052: an element alias resolves to its
+                        // real shape (array elements need the MEMCPY below).
+                        elemType = resolveTypeAlias(elemType);
                         int elemSize = getTypeSize(elemType);
+                        // CIDER-BUG-052: an array-typed element is
+                        // address-like; copy its bytes into the slot instead
+                        // of storing the address itself.
+                        bool elemIsArray = elemType.pointerLevel == 0 && elemType.isArray;
                         for (size_t ei = 0; ei < elems.size(); ei++) {
                             elems[ei]->accept(*this);
                             // CID-003: elements store at the declared width
                             // (an f32 literal in an f64 element must not
                             // write 4 bytes; an int element converts).
                             IRValue eval = convertValueToType(lastValue_, elemType);
-                            currentBlock_->addInstruction({IROp::STORE, std::nullopt, {addr, eval, IRValue::Constant((int64_t)(ei * (size_t)elemSize), IRType::I32)}});
+                            IRValue offset = IRValue::Constant((int64_t)(ei * (size_t)elemSize), IRType::I32);
+                            if (elemIsArray) {
+                                IRValue dst = IRValue::Register(nextTemp(), IRType::PTR);
+                                currentBlock_->addInstruction({IROp::ADD, dst, {addr, offset}});
+                                currentBlock_->addInstruction({IROp::MEMCPY, std::nullopt, {dst, eval, IRValue::Constant(elemSize, IRType::I32)}});
+                            } else {
+                                currentBlock_->addInstruction({IROp::STORE, std::nullopt, {addr, eval, offset}});
+                            }
                         }
                         lastExprType_ = sym->type;
                         return;
@@ -2181,10 +2191,9 @@ public:
     int getTypeSize(TypeInfo type, const std::string& defModule = "") {
         if (type.pointerLevel > 0) return 8;
         if (type.isArray) {
-            TypeInfo elemType = type;
-            elemType.isArray = false;
-            elemType.arraySize = 0;
-            return type.arraySize * getTypeSize(elemType, defModule);
+            // CIDER-BUG-052: elementType() yields the inner dimension for a
+            // nested fixed array, so the product covers every dimension.
+            return type.arraySize * getTypeSize(type.elementType(), defModule);
         }
         // CID-006 (Task 2 F1 carry-over): a fn(...) value is a code pointer
         // (8 bytes), including an alias spelling.
@@ -2790,7 +2799,13 @@ public:
     TypeInfo inferExprType(Expression* expr) {
         if (auto id = dynamic_cast<IdentifierExpr*>(expr)) {
             auto sym = symbolTable_.resolve(id->getName());
-            if (sym) return sym->type;
+            if (sym) {
+                // CIDER-BUG-015/019/052: an alias-typed value presents its
+                // resolved shape (visit(IdentifierExpr) does the same), so
+                // chained indexing and assignment-target typing see the real
+                // array/struct shape instead of the alias spelling.
+                return resolveTypeAlias(sym->type);
+            }
         } else if (auto mem = dynamic_cast<MemberAccessExpr*>(expr)) {
             TypeInfo objType = inferExprType(mem->getObject());
             if (objType.pointerLevel > 0) objType.pointerLevel--;
@@ -2810,16 +2825,18 @@ public:
             // chained indexing like g_tasks[0].name[i] resolved to an
             // empty type, so the store path "widened" the char value to
             // a pointer width and emitted mov qword over the neighbors.
+            // CIDER-BUG-052: elementType() keeps the inner dimension of a
+            // nested fixed array.
             TypeInfo baseType = inferExprType(idx->getObject());
             if (baseType.isArray) {
-                baseType.isArray = false;
-                baseType.arraySize = 0;
+                baseType = baseType.elementType();
             } else if (baseType.pointerLevel > 0) {
                 baseType.pointerLevel--;
             } else if (baseType.name == "string") {
                 baseType.name = "char";
             }
-            return baseType;
+            // CIDER-BUG-052: an element alias resolves to its real shape.
+            return resolveTypeAlias(baseType);
         } else if (auto un = dynamic_cast<UnaryExpr*>(expr)) {
             if (un->getOperator() == "*") {
                 TypeInfo t = inferExprType(un->getOperand());
@@ -3473,13 +3490,15 @@ public:
                 TypeInfo baseType = inferExprType(idx->getObject());
                 TypeInfo elemType = baseType;
                 if (elemType.isArray) {
-                    elemType.isArray = false;
-                    elemType.arraySize = 0;
+                    elemType = elemType.elementType();
                 } else if (elemType.pointerLevel > 0) {
                     elemType.pointerLevel--;
                 } else if (elemType.name == "string") {
                     elemType.name = "char";
                 }
+                // CIDER-BUG-052: an element alias resolves to its real shape
+                // (array elements need the MEMCPY decision below).
+                elemType = resolveTypeAlias(elemType);
                 val = convertValueToType(val, elemType);
                 lastExprType_ = elemType;
             } else if (auto ident = dynamic_cast<IdentifierExpr*>(stmt.getTarget())) {
@@ -3553,13 +3572,14 @@ public:
                     TypeInfo baseType = inferExprType(idx->getObject());
                     TypeInfo elemType = baseType;
                     if (elemType.isArray) {
-                        elemType.isArray = false;
-                        elemType.arraySize = 0;
+                        elemType = elemType.elementType();
                     } else if (elemType.pointerLevel > 0) {
                         elemType.pointerLevel--;
                     } else if (elemType.name == "string") {
                         elemType.name = "char";
                     }
+                    // CIDER-BUG-052: resolve an element alias to its shape.
+                    elemType = resolveTypeAlias(elemType);
                     targetIR = (elemType.pointerLevel > 0) ? IRType::PTR : mapType(elemType.name);
                 } else if (hasDerefTarget) {
                     // CID-003: `*p += v` loads/stores at the pointee width.
@@ -3881,9 +3901,13 @@ public:
 
         TypeInfo elemType = iterableType;
         if (elemType.isArray) {
-            elemType.isArray = false;
-            elemType.arraySize = 0;
+            // CIDER-BUG-052: one dimension; for a nested array the loop
+            // variable is the inner array (by-value aggregate).
+            elemType = elemType.elementType();
         }
+        // CIDER-BUG-052: an element alias resolves to its real shape, or a
+        // `[Row; N]` loop variable would be treated as a scalar slot.
+        elemType = resolveTypeAlias(elemType);
         if (elemType.isSlice) {
             elemType.isSlice = false;
         }
@@ -4822,8 +4846,10 @@ public:
         baseType = resolveTypeAlias(baseType);
         TypeInfo elemType = baseType;
         if (elemType.isArray) {
-            elemType.isArray = false;
-            elemType.arraySize = 0;
+            // CIDER-BUG-052: elementType() keeps the inner dimension of a
+            // nested fixed array (its size is the indexing stride) and
+            // yields the flat element for a single-dimension array.
+            elemType = elemType.elementType();
         } else if (elemType.pointerLevel > 0) {
             elemType.pointerLevel--;
         } else if (elemType.name == "string") {
@@ -4851,7 +4877,10 @@ public:
             // address instead of the loaded function pointer).
             elemIsStruct = resolveStructOrClassSymbol(elemType) != nullptr;
         }
-        if (isAddress_ || elemIsStruct) {
+        // CIDER-BUG-052: an inner array element is address-like, exactly
+        // like a top-level array value — loading it would read the first
+        // element's bytes as a pointer.
+        if (isAddress_ || elemIsStruct || elemType.isArray) {
             lastValue_ = addr;
         } else {
             IRType irType = (elemType.pointerLevel > 0 || elemType.isFunctionPointer)
@@ -5133,8 +5162,7 @@ public:
 
         TypeInfo elemType = baseType;
         if (elemType.isArray) {
-            elemType.isArray = false;
-            elemType.arraySize = 0;
+            elemType = elemType.elementType();
         }
         int elemSize = getTypeSize(elemType);
 

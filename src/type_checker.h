@@ -198,6 +198,12 @@ public:
             }
             return r;
         }
+        // CIDER-BUG-052: canonicalize a nested array's inner dimensions too;
+        // the flattened name below only covers the innermost element.
+        if (t.arrayElement) {
+            t.arrayElement = std::make_shared<TypeInfo>(
+                canonicalizeInModule(*t.arrayElement, logical, line));
+        }
         if (t.name.empty() || t.name.find("::") != std::string::npos) return t;
         if (t.name.find('<') != std::string::npos) return t;  // template instantiation (T6)
         if (t.name.find('.') != std::string::npos) return canonicalizeDotted(t, line);
@@ -231,6 +237,11 @@ public:
                     canonicalizeNominal(*t.fnReturnType, line));
             }
             return r;
+        }
+        // CIDER-BUG-052: canonicalize a nested array's inner dimensions too;
+        // the flattened name below only covers the innermost element.
+        if (t.arrayElement) {
+            t.arrayElement = std::make_shared<TypeInfo>(canonicalizeNominal(*t.arrayElement, line));
         }
         if (t.name.empty() || t.name.find("::") != std::string::npos) return t;  // already canonical
         if (t.name.find('<') != std::string::npos) return t;                     // template instantiation (T6)
@@ -302,9 +313,21 @@ public:
             // CIDER-BUG-019: an alias spelling can be an ELEMENT type inside
             // an array (`[Cb; N]`); keep the outer array wrapper, or the
             // shape is lost and indexing is rejected / sizes compare equal.
-            if (info.isArray && !resolved.isArray) {
-                resolved.isArray = true;
-                resolved.arraySize = info.arraySize;
+            // CIDER-BUG-052: when the alias target is itself an array, the
+            // spelling adds an outer dimension around it — the flat
+            // representation used to drop that wrapper entirely.
+            if (info.isArray) {
+                if (!resolved.isArray) {
+                    resolved.isArray = true;
+                    resolved.arraySize = info.arraySize;
+                    resolved.arrayElement = info.arrayElement;
+                } else {
+                    TypeInfo outer = resolved;
+                    outer.isArray = true;
+                    outer.arraySize = info.arraySize;
+                    outer.arrayElement = std::make_shared<TypeInfo>(resolved);
+                    resolved = outer;
+                }
             }
             return resolved;
         }
@@ -509,7 +532,20 @@ public:
         // existing [u16; 4] were accepted and then copied 8 bytes from a
         // 6-byte data block (or silently truncated). Array/pointer mixes
         // keep their existing rules (including the u16 decay branch below).
-        if (t1.isArray && t2.isArray && t1.arraySize != t2.arraySize) return false;
+        // CIDER-BUG-052: nested arrays must also agree on their inner shape
+        // — the flattened name made `[[u8; 2]; 3]` and `[[u8; 3]; 3]`
+        // compatible through the numeric fallback.
+        if (t1.isArray && t2.isArray &&
+            (t1.arraySize != t2.arraySize || !t1.sameArrayElement(t2))) {
+            return false;
+        }
+
+        // CIDER-BUG-052: an array value and a scalar are never compatible.
+        // The numeric fallback below is size-blind and reads the flattened
+        // (innermost) element name, so `[u8; 2] = 5` — and, for a nested
+        // array element, `m[0] = 5` — passed and ir_gen then MEMCPY'd from
+        // the scalar as if it were an address.
+        if (t1.isArray != t2.isArray && t1.pointerLevel == 0 && t2.pointerLevel == 0) return false;
 
         // CID-006: two fn types match only via the exact signature test
         // above. One fn + one *void (nilPtr, legacy untyped references)
@@ -812,9 +848,7 @@ public:
                       ", got " + std::to_string(elems.size()), stmt.getLine());
             return;
         }
-        TypeInfo elemDecl = declaredType;
-        elemDecl.isArray = false;
-        elemDecl.arraySize = 0;
+        TypeInfo elemDecl = declaredType.elementType();
         for (auto& e : elems) {
             e->accept(*this);
             if (!areTypesCompatible(elemDecl, lastExprType_)) {
@@ -843,10 +877,8 @@ public:
     // copies that must be byte-exact compare the resolved, canonicalized
     // element types instead.
     bool sameArrayElementType(TypeInfo a, TypeInfo b) {
-        a.isArray = false;
-        a.arraySize = 0;
-        b.isArray = false;
-        b.arraySize = 0;
+        a = a.elementType();
+        b = b.elementType();
         a = canonicalizeNominal(resolveType(a));
         b = canonicalizeNominal(resolveType(b));
         return a == b;
@@ -867,9 +899,7 @@ public:
                       ", got " + std::to_string(expected), stmt.getLine());
             return;
         }
-        TypeInfo elemDecl = declaredType;
-        elemDecl.isArray = false;
-        elemDecl.arraySize = 0;
+        TypeInfo elemDecl = declaredType.elementType();
         elemDecl = resolveType(elemDecl);
         // CIDER-BUG-018: the payload is u16 units; the numeric fallback in
         // areTypesCompatible is size-blind, so `[i32;3] = u"AB"` and
@@ -2000,9 +2030,7 @@ public:
         }
 
         if (objType.isArray) {
-            lastExprType_ = objType;
-            lastExprType_.isArray = false;
-            lastExprType_.arraySize = 0;
+            lastExprType_ = objType.elementType();
         } else if (objType.pointerLevel > 0 || objType.name == "string") {
             lastExprType_ = objType;
             if (objType.pointerLevel > 0) lastExprType_.pointerLevel--;
@@ -2019,10 +2047,8 @@ public:
         TypeInfo objType = resolveType(lastExprType_);
 
         if (objType.isArray) {
-            lastExprType_ = objType;
-            lastExprType_.isArray = false;
+            lastExprType_ = objType.elementType();
             lastExprType_.isSlice = true;
-            lastExprType_.arraySize = 0;
         } else {
             error("Cannot slice non-array type " + objType.toString(), expr.getLine());
             lastExprType_ = {"error", 0};
@@ -2105,13 +2131,15 @@ public:
 
     void visit(ForEachStmt& stmt) override {
         stmt.getIterable()->accept(*this);
-        TypeInfo iterableType = lastExprType_;
+        // CIDER-BUG-052: an alias spelling of an array/iterator type must
+        // present its resolved shape (the custom-iterator branch below casts
+        // the scoped symbol to a StructSymbol, which an alias provider is
+        // not).
+        TypeInfo iterableType = resolveType(lastExprType_);
 
         TypeInfo elemType;
         if (iterableType.isArray) {
-            elemType = iterableType;
-            elemType.isArray = false;
-            elemType.arraySize = 0;
+            elemType = iterableType.elementType();
         } else if (iterableType.isSlice) {
             elemType = iterableType;
             elemType.isSlice = false;

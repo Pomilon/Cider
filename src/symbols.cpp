@@ -8,6 +8,10 @@ TypeInfo TypeInfo::fromAST(TypeAST* ast) {
     // Use dynamic_cast to check for ArrayTypeAST
     if (auto arrayAst = dynamic_cast<ArrayTypeAST*>(ast)) {
         TypeInfo info = fromAST(arrayAst->getBaseType());
+        // CIDER-BUG-052: preserve the full inner shape. The flat
+        // isArray/arraySize pair only carries the outermost dimension, so a
+        // nested base's shape used to be overwritten and lost.
+        if (info.isArray) info.arrayElement = std::make_shared<TypeInfo>(info);
         info.isArray = true;
         info.arraySize = arrayAst->getSize();
         return info;

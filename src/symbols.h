@@ -21,6 +21,12 @@ struct TypeInfo {
     bool isUserDefined = false;  // Struct or Enum
     bool isArray = false;
     int arraySize = 0;
+    // CIDER-BUG-052: full element type of a nested fixed array — the inner
+    // dimension, itself possibly an array. Null for single-dimension arrays
+    // (their element is this TypeInfo with the wrapper stripped), so every
+    // pre-existing flat-array path stays byte-identical. name/pointerLevel
+    // still mirror the innermost element (the legacy flat spelling).
+    std::shared_ptr<TypeInfo> arrayElement = nullptr;
     bool isVolatile = false;
     bool isInterface = false;
     bool isSlice = false;
@@ -38,6 +44,26 @@ struct TypeInfo {
 
     static TypeInfo fromAST(TypeAST* ast);
 
+    // CIDER-BUG-052: drop exactly one array dimension. For a nested fixed
+    // array this returns the inner dimension (descriptor); for a
+    // single-dimension array it returns the flat element, exactly as the
+    // former manual `isArray = false; arraySize = 0;` strip did.
+    TypeInfo elementType() const {
+        if (isArray && arrayElement) return *arrayElement;
+        TypeInfo elem = *this;
+        elem.isArray = false;
+        elem.arraySize = 0;
+        elem.arrayElement = nullptr;
+        return elem;
+    }
+
+    // CIDER-BUG-052: exact inner-shape comparison (both absent = flat array).
+    bool sameArrayElement(const TypeInfo& other) const {
+        if (static_cast<bool>(arrayElement) != static_cast<bool>(other.arrayElement)) return false;
+        if (!arrayElement) return true;
+        return *arrayElement == *other.arrayElement;
+    }
+
     // Exact signature equality (spec §2): same parameter count, same
     // parameter types, same return type.
     bool signatureEquals(const TypeInfo& other) const {
@@ -51,11 +77,13 @@ struct TypeInfo {
         if (isFunctionPointer || other.isFunctionPointer) {
             return isFunctionPointer == other.isFunctionPointer &&
                    isArray == other.isArray && arraySize == other.arraySize &&
+                   sameArrayElement(other) &&
                    isMsAbi == other.isMsAbi &&
                    signatureEquals(other);
         }
         return name == other.name && pointerLevel == other.pointerLevel &&
                isArray == other.isArray && arraySize == other.arraySize &&
+               sameArrayElement(other) &&
                isVolatile == other.isVolatile && isInterface == other.isInterface &&
                isSlice == other.isSlice;
     }
@@ -77,6 +105,13 @@ struct TypeInfo {
     }
 
     std::string toString() const {
+        // CIDER-BUG-052: a nested fixed array renders its full inner shape.
+        // The descriptor carries the volatile/pointer/function-pointer
+        // spelling copied from the base, so the outer wrapper contributes
+        // only its own dimension.
+        if (isArray && arrayElement) {
+            return "[" + arrayElement->toString() + "; " + std::to_string(arraySize) + "]";
+        }
         std::string res = "";
         if (isVolatile) res += "volatile ";
         for (int i = 0; i < pointerLevel; ++i) res += "*";
