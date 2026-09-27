@@ -410,6 +410,7 @@ bool CodeGenerator::generate(ModuleIR& module, const std::string& outputPath,
         int prologueFixupIndex = -1;
         int maxSlotOffset = 0;
         int cvtLabelCount = 0;  // NASM-local labels for u64 -> float (I2)
+        int divZeroLabelCount = 0;  // NASM-local labels for the /0,%0 guard (CIDER-BUG-058)
         if (extraStack > 0) {
             prologueFixupIndex = (int)textSection.size();
             addText("    sub rsp, " + std::to_string(extraStack));
@@ -1251,6 +1252,34 @@ bool CodeGenerator::generate(ModuleIR& module, const std::string& outputPath,
                         addText("    movsd " + d + ", xmm0");
                         break;
                     }
+                    // CIDER-BUG-058: integer / and % by zero are defined
+                    // as 0 (the VM's behavior). x86 div/idiv raise #DE on
+                    // a zero divisor, so unless the divisor is a known
+                    // nonzero constant, test it and branch over the
+                    // divide, leaving 0 in the result register (rax for /,
+                    // rdx for %) for the store below. Float division is
+                    // untouched (IEEE: x/0 is inf/nan).
+                    bool divZeroGuard = !(instr.args.size() > 1 &&
+                                          instr.args[1].kind == IRValue::CONSTANT &&
+                                          instr.args[1].intValue != 0);
+                    std::string divZeroLbl, divDoneLbl;
+                    if (divZeroGuard) {
+                        divZeroLbl = ".divzero" + std::to_string(divZeroLabelCount++);
+                        divDoneLbl = divZeroLbl + "_done";
+                    }
+                    auto emitDivZeroTest = [&](const std::string& divisor) {
+                        if (!divZeroGuard) return;
+                        addText("    test " + divisor + ", " + divisor);
+                        addText("    jz " + divZeroLbl);
+                    };
+                    auto emitDivZeroResult = [&]() {
+                        if (!divZeroGuard) return;
+                        addText("    jmp " + divDoneLbl);
+                        addText(divZeroLbl + ":");
+                        addText(instr.op == IROp::DIV ? "    xor eax, eax"
+                                                      : "    xor edx, edx");
+                        addText(divDoneLbl + ":");
+                    };
                     std::vector<std::string> clobbered = {"rax", "rdx"};
                     std::vector<std::string> toSave;
                     for (const auto& reg : clobbered) {
@@ -1314,6 +1343,7 @@ bool CodeGenerator::generate(ModuleIR& module, const std::string& outputPath,
                             else addText("    mov " + dst + ", " + srcOp);
                         };
                         widenDiv64("r11", instr.args[1], a2);
+                        emitDivZeroTest("r11");
                         widenDiv64("rax", instr.args[0], a1);
                         // Unsigned divides zero-extend the dividend
                         // (CID-028): cqo/idiv sign-fills and miscomputes
@@ -1325,10 +1355,12 @@ bool CodeGenerator::generate(ModuleIR& module, const std::string& outputPath,
                             addText("    cqo");
                             addText("    idiv r11");
                         }
+                        emitDivZeroResult();
                         addText("    mov " + getSizedReg(d, t) + ", " + (instr.op == IROp::DIV ? "rax" : "rdx"));
                     } else if (isNarrowDiv) {
                         // Widen to 32 bits, divide, then truncate to narrow.
                         loadDivOp(a2, instr.args[1], "r11d");
+                        emitDivZeroTest("r11d");
                         loadDivOp(a1, instr.args[0], "eax");
                         if (t == IRType::U8 || t == IRType::U16 || t == IRType::BOOL) {
                             addText("    xor edx, edx");
@@ -1337,6 +1369,7 @@ bool CodeGenerator::generate(ModuleIR& module, const std::string& outputPath,
                             addText("    cdq");
                             addText("    idiv r11d");
                         }
+                        emitDivZeroResult();
                         std::string res32 = (instr.op == IROp::DIV ? "eax" : "edx");
                         if (t == IRType::I8 || t == IRType::U8 || t == IRType::BOOL) {
                             if (isMem(d)) {
@@ -1379,6 +1412,7 @@ bool CodeGenerator::generate(ModuleIR& module, const std::string& outputPath,
                             else addText("    mov " + dst32 + ", " + srcOp);
                         };
                         widenDiv32("r11d", instr.args[1], a2);
+                        emitDivZeroTest("r11d");
                         widenDiv32("eax", instr.args[0], a1);
                         if (t == IRType::U32 || t == IRType::BOOL) {
                             addText("    xor edx, edx");
@@ -1387,6 +1421,7 @@ bool CodeGenerator::generate(ModuleIR& module, const std::string& outputPath,
                             addText("    cdq");
                             addText("    idiv r11d");
                         }
+                        emitDivZeroResult();
                         addText("    mov " + getSizedReg(d, t) + ", " + (instr.op == IROp::DIV ? "eax" : "edx"));
                     }
                     for (auto it = toSave.rbegin(); it != toSave.rend(); ++it) addText("    pop " + *it);
