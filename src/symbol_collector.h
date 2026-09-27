@@ -571,6 +571,13 @@ public:
             reporter_.error("Redeclaration of type '" + sym->name + "'", sym->line, sym->col);
         } else {
             symbolTable_.define(sym);
+            // CIDER-BUG-029: record the alias's own defining module so
+            // canonicalization can root its (bare) target name there —
+            // `type X = othermod.S` declared in a module must canonicalize
+            // X as <mod>::X and its target as <othermod>::S. Alias symbols
+            // are fresh objects (unlike from-import aliases, which share
+            // the target object and must keep its provenance).
+            recordDefiningModule(sym);
         }
     }
 

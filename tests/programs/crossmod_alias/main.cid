@@ -1,0 +1,11 @@
+// CIDER-BUG-029: `var s: va.SAlias = va.makeS(...)` used to SIGSEGV in
+// TypeChecker::visit(MemberAccessExpr) (the alias target only resolves in
+// va's scope) and member access through the alias failed to canonicalize.
+import va;
+
+func main() -> int {
+  var s: va.SAlias = va.makeS(7, 35);
+  var t: va.SAlias;
+  t = s;
+  return (t.x + t.y) as int;
+}

@@ -292,7 +292,12 @@ public:
         if (info.name.empty() || !visiting.insert(info.name).second) return info;
         auto sym = resolveScoped(info.name);
         if (sym && sym->kind == SymbolKind::STRUCT && sym->type.name != info.name && !sym->type.name.empty()) {
-            TypeInfo resolved = resolveTypeImpl(sym->type, visiting);
+            // CIDER-BUG-029: the target spelling belongs to the alias's
+            // defining module; canonicalize it there so a cross-module
+            // `type X = othermod.S` resolves (and compares) at use sites
+            // that do not import S.
+            TypeInfo target = canonicalizeInModule(sym->type, definingModuleOf(sym), -1);
+            TypeInfo resolved = resolveTypeImpl(target, visiting);
             resolved.pointerLevel += info.pointerLevel;  // Should be 0 here
             return resolved;
         }

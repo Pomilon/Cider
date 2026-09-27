@@ -248,7 +248,11 @@ public:
             sym->type.name.empty()) {
             return t;
         }
-        TypeInfo resolved = resolveTypeAliasImpl(sym->type, defModule, visiting);
+        // CIDER-BUG-029: the target spelling belongs to the alias's
+        // defining module; re-root it there so a cross-module
+        // `type X = othermod.S` resolves at use sites that do not import S.
+        TypeInfo target = canonicalizeNominalInModule(sym->type, definingModuleFor(sym, t.name));
+        TypeInfo resolved = resolveTypeAliasImpl(target, defModule, visiting);
         resolved.pointerLevel += t.pointerLevel;
         return resolved;
     }
@@ -495,14 +499,15 @@ public:
         return ms->resolveLocal(bare);
     }
 
-    // CIDER-BUG-043: a field's declared type is written in the struct's
-    // defining module; re-root a bare nominal in that module so downstream
-    // lookups (member access on a transitively reached pointee type, e.g.
-    // `st->ConOut->OutputString` without importing TXT) resolve without an
-    // explicit import. Mirrors the checker's canonicalizeInModule for field
-    // types; main-module types keep bare names (canonical == bare there),
-    // so import-free IR stays identical.
-    TypeInfo canonicalizeFieldType(TypeInfo t, const std::string& ownerMod) {
+    // CIDER-BUG-043/029: a nominal spelling belongs to the module where it
+    // was written (a field's type in the struct's module, an alias target
+    // in the alias's module). Re-root a bare nominal in that module so
+    // downstream lookups resolve without an explicit import — e.g. member
+    // access on a transitively reached pointee type, or a cross-module
+    // `type X = othermod.S`. Mirrors the checker's canonicalizeInModule;
+    // main-module types keep bare names (canonical == bare there), so
+    // import-free IR stays identical.
+    TypeInfo canonicalizeNominalInModule(TypeInfo t, const std::string& ownerMod) {
         if (t.name.empty() || t.name.find("::") != std::string::npos) return t;
         if (t.name.find('<') != std::string::npos || t.name.find('.') != std::string::npos) return t;
         if (ownerMod.empty()) return t;
@@ -1522,7 +1527,7 @@ public:
                     // transitively reached pointee type resolves without
                     // an explicit import (CIDER-BUG-043).
                     TypeInfo fieldType =
-                        canonicalizeFieldType(resolveTypeAlias(field.type, ownerMod), ownerMod);
+                        canonicalizeNominalInModule(resolveTypeAlias(field.type, ownerMod), ownerMod);
                     bool fieldIsStruct = (fieldType.pointerLevel == 0);
                     if (fieldIsStruct) {
                         auto fieldTypeSym = resolveNominalType(fieldType.name);
@@ -2637,7 +2642,7 @@ public:
                 std::string ownerMod = definingModuleFor(sym, ss->name);
                 for (const auto& f : ss->fields) {
                     if (f.name == mem->getMember()) {
-                        return canonicalizeFieldType(resolveTypeAlias(f.type, ownerMod), ownerMod);
+                        return canonicalizeNominalInModule(resolveTypeAlias(f.type, ownerMod), ownerMod);
                     }
                 }
             }
@@ -2702,7 +2707,7 @@ public:
                 // CIDER-BUG-015/043: report the resolved, module-rooted
                 // type so store widths and conversions see through
                 // `type X = T` spellings and cross-module pointees.
-                out = canonicalizeFieldType(resolveTypeAlias(f.type, ownerMod), ownerMod);
+                out = canonicalizeNominalInModule(resolveTypeAlias(f.type, ownerMod), ownerMod);
                 return true;
             }
         }
