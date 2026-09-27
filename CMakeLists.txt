@@ -61,6 +61,11 @@ add_test(NAME ms_abi_xmm_smoke
          COMMAND bash ${CMAKE_SOURCE_DIR}/tests/unit/ms_abi_xmm_smoke.sh $<TARGET_FILE:cider>)
 set_tests_properties(ms_abi_xmm_smoke PROPERTIES SKIP_RETURN_CODE 77)
 
+# CIDER-CHORE-001: CLI usage/--target validation runs in the suite too
+# (previously manual only).
+add_test(NAME cli_test
+         COMMAND bash ${CMAKE_SOURCE_DIR}/tests/unit/cli_test.sh $<TARGET_FILE:cider>)
+
 add_executable(parser_recovery_test tests/unit/parser_recovery_test.cpp src/parser.cpp src/lexer.cpp)
 target_include_directories(parser_recovery_test PRIVATE src)
 add_test(NAME parser_recovery_test COMMAND parser_recovery_test)

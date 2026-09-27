@@ -166,6 +166,7 @@ int run() {
     cider::ModuleIR mod6;
     mod6.addFunction(std::move(fn6));
     cider::VM vm6;
+    vm6.setStepLimit(10000);  // CIDER-CHORE-002: pin the cap, not 1e9 steps
     bool threw = false;
     try {
         vm6.run(mod6);

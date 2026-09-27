@@ -22,6 +22,10 @@ struct VMResult {
 class VM {
 public:
     VMResult run(const ModuleIR& module, const std::string& runFunction = "main");
+    // CIDER-CHORE-002: the step cap is a fail-fast guard, not a work cap.
+    // Tests that pin the exhaustion path can lower it instead of burning
+    // the default 1e9 steps (~170-240 s).
+    void setStepLimit(int64_t limit) { stepLimit_ = limit; }
     bool debug_ = false;
 
     struct RegVal {
@@ -88,6 +92,7 @@ private:
     int64_t steps_ = 0;
 
     static constexpr int64_t kStepLimit = 1000000000;  // fail-fast guard, not a work cap
+    int64_t stepLimit_ = kStepLimit;
     static constexpr int64_t kHeaderSize = 16;
 
     RegVal resolveValue(const IRValue& v);

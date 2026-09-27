@@ -141,7 +141,7 @@ VMResult VM::run(const ModuleIR& module, const std::string& runFunction) {
         const IRInstruction& instr = instrs[frame.instrIdx];
         frame.instrIdx++;
 
-        if (++steps_ > kStepLimit) throw VMError{"vm: step limit exceeded"};
+        if (++steps_ > stepLimit_) throw VMError{"vm: step limit exceeded"};
 
         switch (instr.op) {
         case IROp::PHI: {
