@@ -1187,6 +1187,16 @@ public:
             if ((op == "&" || op == "|" || op == "^") && (targetFloat || valueFloat)) {
                 error("Bitwise operator '" + op + "' requires integer operands", stmt.getLine());
             }
+            // CIDER-BUG-056: `s += t` is the same unsupported concatenation
+            // shape as `s + t`; without this it stored the sum of two
+            // addresses into `s`.
+            bool targetString = targetType.name == "string" && targetType.pointerLevel == 0;
+            bool valueString = valueType.name == "string" && valueType.pointerLevel == 0;
+            if (op == "+" && targetString && valueString) {
+                error("String concatenation with '+=' is not supported; "
+                      "use std.string.strcat into a buffer",
+                      stmt.getLine());
+            }
         }
     }
 
@@ -1214,6 +1224,19 @@ public:
         bool rightIsString = (rightType.name == "string" && rightType.pointerLevel == 0);
         bool isStringMath = (leftIsString && isInteger(rightType.name) && (op == "+" || op == "-")) ||
                             (rightIsString && isInteger(leftType.name) && op == "+");
+
+        // CIDER-BUG-056: `+` on two string values has no concatenation
+        // lowering — IRGen's generic ADD would add the two addresses and
+        // produce garbage that compares unequal to a real "ab" forever.
+        // Reject it and steer to the buffer helpers in std.string. String
+        // plus/minus an integer (`s + 2`, `1 + s`, `s + 5 - 2`) stays a
+        // supported interior-pointer operation, and explicit char*/*u8
+        // arithmetic is untouched.
+        if (leftIsString && rightIsString && op == "+") {
+            error("String concatenation with '+' is not supported; "
+                  "use std.string.strcat into a buffer",
+                  expr.getLine());
+        }
 
         bool isMixedNumeric = (isInteger(leftType.name) && isFloatName(rightType.name)) ||
                               (isFloatName(leftType.name) && isInteger(rightType.name)) ||

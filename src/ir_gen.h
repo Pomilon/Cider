@@ -60,6 +60,7 @@ public:
         globalValues_.clear();
         exceptionGlobalsEnsured_ = false;
         interpHelpersEnsured_ = false;
+        stringEqHelpersEnsured_ = false;
         program.accept(*this);
 
         // Populate V-Tables in module (CID-020/021 spec §6: module-scope
@@ -2558,6 +2559,35 @@ public:
         IRValue right = lastValue_;
         TypeInfo rightType = lastExprType_;
 
+        // CIDER-BUG-056: `==`/`!=` between two `string` values compares
+        // the pointed-to bytes, not the addresses. `string` is the one
+        // type with string semantics (TypeInfo name "string", pointer
+        // level 0); explicit pointer types (`*u8`/`char*`, nilPtr) keep
+        // identity comparison, so a cast stays the escape hatch for
+        // pointer identity. Identical literal spellings are the same
+        // bytes and fold here; everything else calls the _streq helper.
+        bool stringEq = (leftType.name == "string" && leftType.pointerLevel == 0 &&
+                         rightType.name == "string" && rightType.pointerLevel == 0);
+        if (stringEq && (sOp == "==" || sOp == "!=")) {
+            auto isStringLiteral = [](const IRValue& v) {
+                return v.kind == IRValue::CONSTANT && v.type == IRType::PTR &&
+                       !v.name.empty() && v.name.front() == '"';
+            };
+            if (isStringLiteral(left) && isStringLiteral(right) &&
+                left.name == right.name) {
+                lastValue_ = IRValue::Constant((sOp == "==") ? 1 : 0, IRType::BOOL);
+            } else {
+                ensureStringEqualityHelpers();
+                IRValue eq = emitCall("_streq", {left, right});
+                IRValue dest = IRValue::Register(nextTemp(), IRType::BOOL);
+                currentBlock_->addInstruction({sOp == "==" ? IROp::CMP_NE : IROp::CMP_EQ,
+                                               dest, {eq, IRValue::Constant(0, IRType::I32)}});
+                lastValue_ = dest;
+            }
+            lastExprType_ = {"bool", 0};
+            return;
+        }
+
         IROp op;
 
         if (leftType.pointerLevel > 0 && (sOp == "+" || sOp == "-")) {
@@ -4647,6 +4677,108 @@ public:
         }
     }
 
+    // CIDER-BUG-056: `_streq(a: char*, b: char*) -> bool` — byte-wise
+    // content equality with strcmp semantics (both operands are
+    // NUL-terminated). Like the interpolation helpers above this is plain
+    // IR built once per module, so the VM (optimized and unoptimized) and
+    // the native backend run the same code. 1 = equal, 0 = not equal.
+    // nil is handled, not dereferenced: null vs null is equal, null vs a
+    // real string is unequal.
+    void ensureStringEqualityHelpers() {
+        if (stringEqHelpersEnsured_) return;
+        stringEqHelpersEnsured_ = true;
+
+        auto fn = std::make_unique<FunctionIR>("_streq", IRType::BOOL);
+        fn->addParam("arg_a");
+        fn->addParam("arg_b");
+
+        auto entry = std::make_unique<BasicBlock>("entry");
+        auto loop = std::make_unique<BasicBlock>("loop");
+        auto checkB = std::make_unique<BasicBlock>("check_b");
+        auto bothNull = std::make_unique<BasicBlock>("both_null");
+        auto content = std::make_unique<BasicBlock>("content");
+        auto check = std::make_unique<BasicBlock>("check");
+        auto advance = std::make_unique<BasicBlock>("advance");
+        auto equal = std::make_unique<BasicBlock>("equal");
+        auto differ = std::make_unique<BasicBlock>("differ");
+
+        IRValue pa = IRValue::Register(nextTemp(), IRType::PTR);
+        entry->addInstruction({IROp::ALLOCA, pa, {IRValue::Constant(8, IRType::I32)}});
+        entry->addInstruction({IROp::STORE, std::nullopt,
+                               {pa, IRValue::Register("arg_a", IRType::PTR),
+                                IRValue::Constant(0, IRType::I32)}});
+        IRValue pb = IRValue::Register(nextTemp(), IRType::PTR);
+        entry->addInstruction({IROp::ALLOCA, pb, {IRValue::Constant(8, IRType::I32)}});
+        entry->addInstruction({IROp::STORE, std::nullopt,
+                               {pb, IRValue::Register("arg_b", IRType::PTR),
+                                IRValue::Constant(0, IRType::I32)}});
+        entry->addInstruction({IROp::BR, std::nullopt, {IRValue::Label("loop")}});
+
+        IRValue va = IRValue::Register(nextTemp(), IRType::PTR);
+        loop->addInstruction({IROp::LOAD, va, {pa, IRValue::Constant(0, IRType::I32)}});
+        IRValue vb = IRValue::Register(nextTemp(), IRType::PTR);
+        loop->addInstruction({IROp::LOAD, vb, {pb, IRValue::Constant(0, IRType::I32)}});
+        IRValue aNull = IRValue::Register(nextTemp(), IRType::BOOL);
+        loop->addInstruction({IROp::CMP_EQ, aNull, {va, IRValue::Constant(0, IRType::I32)}});
+        loop->addInstruction({IROp::COND_BR, std::nullopt,
+                              {aNull, IRValue::Label("both_null"), IRValue::Label("check_b")}});
+
+        // Left non-null: a nil right side must not be dereferenced.
+        IRValue bNullR = IRValue::Register(nextTemp(), IRType::BOOL);
+        checkB->addInstruction({IROp::CMP_EQ, bNullR, {vb, IRValue::Constant(0, IRType::I32)}});
+        checkB->addInstruction({IROp::COND_BR, std::nullopt,
+                                {bNullR, IRValue::Label("differ"), IRValue::Label("content")}});
+
+        IRValue bNull = IRValue::Register(nextTemp(), IRType::BOOL);
+        bothNull->addInstruction({IROp::CMP_EQ, bNull, {vb, IRValue::Constant(0, IRType::I32)}});
+        bothNull->addInstruction({IROp::COND_BR, std::nullopt,
+                                  {bNull, IRValue::Label("equal"), IRValue::Label("differ")}});
+
+        IRValue ca = IRValue::Register(nextTemp(), IRType::U8);
+        content->addInstruction({IROp::LOAD, ca, {va, IRValue::Constant(0, IRType::I32)}});
+        IRValue cb = IRValue::Register(nextTemp(), IRType::U8);
+        content->addInstruction({IROp::LOAD, cb, {vb, IRValue::Constant(0, IRType::I32)}});
+        IRValue ne = IRValue::Register(nextTemp(), IRType::BOOL);
+        content->addInstruction({IROp::CMP_NE, ne, {ca, cb}});
+        content->addInstruction({IROp::COND_BR, std::nullopt,
+                                 {ne, IRValue::Label("differ"), IRValue::Label("check")}});
+
+        IRValue atEnd = IRValue::Register(nextTemp(), IRType::BOOL);
+        check->addInstruction({IROp::CMP_EQ, atEnd, {ca, IRValue::Constant(0, IRType::I32)}});
+        check->addInstruction({IROp::COND_BR, std::nullopt,
+                               {atEnd, IRValue::Label("equal"), IRValue::Label("advance")}});
+
+        // Advance both cursors. Reload from the slots so this block does
+        // not depend on the loop block's registers staying live.
+        IRValue va2 = IRValue::Register(nextTemp(), IRType::PTR);
+        advance->addInstruction({IROp::LOAD, va2, {pa, IRValue::Constant(0, IRType::I32)}});
+        IRValue na = IRValue::Register(nextTemp(), IRType::PTR);
+        advance->addInstruction({IROp::ADD, na, {va2, IRValue::Constant(1, IRType::I32)}});
+        advance->addInstruction({IROp::STORE, std::nullopt,
+                                 {pa, na, IRValue::Constant(0, IRType::I32)}});
+        IRValue vb2 = IRValue::Register(nextTemp(), IRType::PTR);
+        advance->addInstruction({IROp::LOAD, vb2, {pb, IRValue::Constant(0, IRType::I32)}});
+        IRValue nb = IRValue::Register(nextTemp(), IRType::PTR);
+        advance->addInstruction({IROp::ADD, nb, {vb2, IRValue::Constant(1, IRType::I32)}});
+        advance->addInstruction({IROp::STORE, std::nullopt,
+                                 {pb, nb, IRValue::Constant(0, IRType::I32)}});
+        advance->addInstruction({IROp::BR, std::nullopt, {IRValue::Label("loop")}});
+
+        equal->addInstruction({IROp::RET, std::nullopt, {IRValue::Constant(1, IRType::BOOL)}});
+        differ->addInstruction({IROp::RET, std::nullopt, {IRValue::Constant(0, IRType::BOOL)}});
+
+        fn->addBlock(std::move(entry));
+        fn->addBlock(std::move(loop));
+        fn->addBlock(std::move(checkB));
+        fn->addBlock(std::move(bothNull));
+        fn->addBlock(std::move(content));
+        fn->addBlock(std::move(check));
+        fn->addBlock(std::move(advance));
+        fn->addBlock(std::move(equal));
+        fn->addBlock(std::move(differ));
+        module_.addFunction(std::move(fn));
+    }
+
     void visit(InterpolatedStringExpr& expr) override {
         ensureInterpolationHelpers();
         std::vector<IRValue> partVals;
@@ -5522,6 +5654,7 @@ private:
     std::vector<std::vector<DestructorInfo>> destructorStack_;
     bool exceptionGlobalsEnsured_ = false;
     bool interpHelpersEnsured_ = false;
+    bool stringEqHelpersEnsured_ = false;  // CIDER-BUG-056 _streq helper
     bool currentIsSret_ = false;
     bool defaultAbiMs_ = false;  // CID-005: --target uefi function-value typing
     TypeInfo currentReturnType_ = {"void", 0};
