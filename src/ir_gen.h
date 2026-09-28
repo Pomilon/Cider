@@ -2111,7 +2111,23 @@ public:
                 // declared width, exactly like a variable store (a literal
                 // f32 into an f64 field must not write 4 bytes).
                 val = convertValueToType(val, fieldType);
-                currentBlock_->addInstruction({IROp::STORE, std::nullopt, {dest, val, IRValue::Constant(offset, IRType::I32)}});
+
+                // CIDER-BUG-081: a by-value struct/class (or array) field
+                // takes the same MEMCPY rule as a direct member store — the
+                // field is classified by its own RESOLVED declared type, and
+                // the RHS value of an aggregate is its source ADDRESS. The
+                // scalar STORE below would write that address into the field
+                // (4/8 bytes) instead of copying the value bytes.
+                if (fieldType.pointerLevel == 0 && !fieldType.isInterface && !fieldType.isSlice &&
+                    (fieldType.isArray || isStructValueType(fieldType) || getTypeSize(fieldType) > 8)) {
+                    IRValue fieldAddr = IRValue::Register(nextTemp(), IRType::PTR);
+                    currentBlock_->addInstruction({IROp::ADD, fieldAddr,
+                                                   {dest, IRValue::Constant(offset, IRType::I32)}});
+                    currentBlock_->addInstruction({IROp::MEMCPY, std::nullopt,
+                                                   {fieldAddr, val, IRValue::Constant(getTypeSize(fieldType), IRType::I32)}});
+                } else {
+                    currentBlock_->addInstruction({IROp::STORE, std::nullopt, {dest, val, IRValue::Constant(offset, IRType::I32)}});
+                }
             }
         }
         lastValue_ = dest;
@@ -4213,6 +4229,21 @@ public:
                 }
                 TypeInfo fieldType;
                 if (getMemberFieldType(mem, fieldType)) {
+                    // CIDER-BUG-081: classify the field by its own RESOLVED
+                    // shape, not by the RHS value's flags. A by-value struct/
+                    // class field of any size is an aggregate target whose RHS
+                    // value is already the source ADDRESS (locals, member/
+                    // element reads, struct literals and sret call results all
+                    // present struct values by address), so the store below
+                    // must MEMCPY the value bytes. Marking the field here
+                    // mirrors what visit(IdentifierExpr) does for struct
+                    // values and what CIDER-BUG-083 does for element targets.
+                    // Without it an exactly-8-byte (or narrower) struct field
+                    // missed both the isUserDefined flag and the
+                    // `getTypeSize(...) > 8` fallback, and the store lowered
+                    // to a scalar STORE of the source address. The
+                    // StructLiteralExpr field-init path takes the same rule.
+                    if (isStructValueType(fieldType)) fieldType.isUserDefined = true;
                     // CID-003: the field's declared type drives the stored
                     // representation (int narrowing, int<->float, widths).
                     val = convertValueToType(val, fieldType);

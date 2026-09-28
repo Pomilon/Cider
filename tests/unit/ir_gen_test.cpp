@@ -1153,6 +1153,56 @@ int run() {
         size_t eol = d.find('\n', pos);
         CHECK(d.substr(pos, eol - pos).find(", 8") != std::string::npos);
     }
+
+    // CIDER-BUG-081: a by-value struct member store (`s.p = p`) lowers to a
+    // MEMCPY of the field size even when the field is exactly 8 bytes. The
+    // resolved field type carries no isUserDefined flag and size 8 misses the
+    // `> 8` fallback, so the member branch must classify the field itself as
+    // a by-value struct before the shared store decision (the RHS value of an
+    // aggregate is its source address). Without this the store lowered to a
+    // scalar STORE of the address.
+    {
+        d = genSrc(
+            "struct P { var a: int; var b: int; }\n"
+            "struct S { var p: P; var tail: int; }\n"
+            "func main() -> int {\n"
+            "  var s: S;\n"
+            "  var p: P; p.a = 11; p.b = 22;\n"
+            "  s.p = p;\n"
+            "  return s.p.a + s.p.b;\n"
+            "}\n");
+        size_t pos = d.find("memcpy ");
+        CHECK(pos != std::string::npos);
+        size_t eol = d.find('\n', pos);
+        CHECK(d.substr(pos, eol - pos).find(", 8") != std::string::npos);
+    }
+
+    // CIDER-BUG-081: the StructLiteralExpr field-init path takes the same
+    // rule — `S{p: p}` copies the 8-byte field value instead of scalar-
+    // STOREing the literal's alloca address into it (the zero-init and the
+    // outer literal copy are 12-byte MEMCPYs, so the 8-byte one is the field
+    // store).
+    {
+        d = genSrc(
+            "struct P { var a: int; var b: int; }\n"
+            "struct S { var p: P; var tail: int; }\n"
+            "func main() -> int {\n"
+            "  var p: P; p.a = 11; p.b = 22;\n"
+            "  var lit: S = S{p: p, tail: 3};\n"
+            "  return lit.p.a + lit.p.b;\n"
+            "}\n");
+        size_t pos = d.find("memcpy ");
+        bool found8 = false;
+        while (pos != std::string::npos) {
+            size_t eol = d.find('\n', pos);
+            if (d.substr(pos, eol - pos).find(", 8") != std::string::npos) {
+                found8 = true;
+                break;
+            }
+            pos = d.find("memcpy ", pos + 1);
+        }
+        CHECK(found8);
+    }
     return 0;
 }
 
