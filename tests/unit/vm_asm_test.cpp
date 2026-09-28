@@ -196,6 +196,85 @@ int run() {
         cider::VM vm;
         CHECK(vm.run(mod).exitCode == -14);
     }
+
+    // CIDER-BUG-103: mmap(len=rsi) must validate the length. VM::malloc
+    // clamps any size < 1 to one byte, so a negative request used to
+    // "succeed" as a tiny block, and a near-INT64_MAX request overflowed
+    // its size + kHeaderSize arithmetic; a merely huge one threw
+    // std::bad_alloc out of the VM instead of reporting failure. Native
+    // mmap rejects length 0 with EINVAL and reports ENOMEM when the mapping
+    // cannot be established; the syscall result rides rax into the exit code.
+    {
+        auto r = runAsm("mov rax, 9\nmov rsi, -1\n"
+                        "syscall\nmov rdi, rax\nmov rax, 60\nsyscall\n");
+        CHECK(r.exitCode == -22);  // -EINVAL
+    }
+    {
+        // Native mmap(NULL, 0, ...) is EINVAL (verified against Linux).
+        auto r = runAsm("mov rax, 9\nmov rsi, 0\n"
+                        "syscall\nmov rdi, rax\nmov rax, 60\nsyscall\n");
+        CHECK(r.exitCode == -22);  // -EINVAL
+    }
+    {
+        // 2^62 exceeds every Linux user address space -> -ENOMEM.
+        auto r = runAsm("mov rax, 9\nmov rsi, 4611686018427387904\n"
+                        "syscall\nmov rdi, rax\nmov rax, 60\nsyscall\n");
+        CHECK(r.exitCode == -12);  // -ENOMEM
+    }
+    {
+        // INT64_MAX + kHeaderSize must not wrap: -ENOMEM, not a tiny block.
+        auto r = runAsm("mov rax, 9\nmov rsi, 9223372036854775807\n"
+                        "syscall\nmov rdi, rax\nmov rax, 60\nsyscall\n");
+        CHECK(r.exitCode == -12);  // -ENOMEM
+    }
+
+    // CIDER-BUG-103: offset 0 is the nil sentinel. VM::malloc returns
+    // offsets from kHeaderSize on, and offset 0 is the first block's size
+    // header (a read there used to corrupt it; the later frame cleanup
+    // reported "free: corrupt block"). A non-empty buffer at 0 must EFAULT
+    // like native; NULL with count 0 stays the accepted no-op.
+    {
+        auto r = runAsm("mov rax, 1\nmov rdi, 1\nmov rsi, 0\nmov rdx, 4\n"
+                        "syscall\nmov rdi, rax\nmov rax, 60\nsyscall\n");
+        CHECK(r.stdoutText.empty());
+        CHECK(r.exitCode == -14);  // -EFAULT
+    }
+    CHECK(::lseek(tfd, 0, SEEK_SET) == 0);
+    {
+        auto r = runAsm("mov rax, 0\nmov rdi, " + fdArg + "\nmov rsi, 0\nmov rdx, 4\n"
+                        "syscall\nmov rdi, rax\nmov rax, 60\nsyscall\n");
+        CHECK(r.exitCode == -14);               // -EFAULT
+        CHECK(::lseek(tfd, 0, SEEK_CUR) == 0);  // nothing consumed
+    }
+    {
+        auto r = runAsm("mov rax, 1\nmov rdi, 1\nmov rsi, 0\nmov rdx, 0\n"
+                        "syscall\nmov rdi, rax\nmov rax, 60\nsyscall\n");
+        CHECK(r.stdoutText.empty());
+        CHECK(r.exitCode == 0);  // native accepts NULL with count 0
+    }
+    {
+        auto r = runAsm("mov rax, 0\nmov rdi, " + fdArg + "\nmov rsi, 0\nmov rdx, 0\n"
+                        "syscall\nmov rdi, rax\nmov rax, 60\nsyscall\n");
+        CHECK(r.exitCode == 0);
+        CHECK(::lseek(tfd, 0, SEEK_CUR) == 0);
+    }
+
+    // A valid mmap keeps working: allocate 64 bytes, read the file into the
+    // fresh region, and report the byte count. The non-zero exit path above
+    // shows the validation did not reject usable lengths.
+    {
+        auto r = runAsm("mov rax, 9\nmov rsi, 64\nsyscall\n"
+                        "mov r8, rax\n"  // keep the buffer offset
+                        "mov rax, 0\n"   // read(<file>, buf, 4)
+                        "mov rdi, " + fdArg + "\n"
+                        "mov rsi, r8\n"
+                        "mov rdx, 4\n"
+                        "syscall\n"
+                        "mov rdi, rax\n"
+                        "mov rax, 60\n"
+                        "syscall\n");
+        CHECK(r.exitCode == 4);
+    }
     std::fclose(tf);
     return 0;
 }

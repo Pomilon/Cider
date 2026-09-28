@@ -3,7 +3,9 @@
 #include <algorithm>
 #include <cerrno>
 #include <cstring>
+#include <new>
 #include <sstream>
+#include <stdexcept>
 #include <fcntl.h>
 #include <unistd.h>
 
@@ -1429,7 +1431,14 @@ void VM::execAsm(const IRInstruction& instr) {
             // offset through and indexed the host heap out of bounds;
             // subtracting off instead of adding len also keeps the check
             // overflow-safe for bogus huge offsets.
+            // CIDER-BUG-103: offset 0 is the nil sentinel, not a heap
+            // address. VM::malloc hands out offsets from kHeaderSize on
+            // (offset 0 is the first block's size header) and load/store/
+            // memcpy already treat it as null, so a non-empty buffer there
+            // is a null-pointer access: EFAULT like native. The zero-length
+            // calls stay no-ops, matching NULL with count 0.
             auto inHeap = [&](int64_t off, int64_t len) {
+                if (off == 0 && len > 0) return false;
                 return off >= 0 && len >= 0 && off <= (int64_t)heap_.size() &&
                        len <= (int64_t)heap_.size() - off;
             };
@@ -1468,8 +1477,30 @@ void VM::execAsm(const IRInstruction& instr) {
                 exited = true;
             } else if (rax == 9) {
                 // mmap(len=rsi) -> fresh region, returned in rax
-                rdi = malloc(rsi);
-                rax = rdi;
+                // CIDER-BUG-103: validate the length before calling malloc.
+                // VM::malloc clamps any size < 1 to one byte (so a negative
+                // request used to "succeed" with a 1-byte block) and computes
+                // size + kHeaderSize on top of the current heap size
+                // (near-INT64_MAX requests overflowed that arithmetic).
+                // Native mmap rejects a zero length with EINVAL and reports
+                // ENOMEM when the mapping cannot be established; a length
+                // that already overflows the allocator's arithmetic is just
+                // as impossible. Valid requests still return the same
+                // offsets the allocator always handed out.
+                if (rsi <= 0) {
+                    rax = -EINVAL;
+                } else if (rsi > INT64_MAX - kHeaderSize - (int64_t)heap_.size()) {
+                    rax = -ENOMEM;
+                } else {
+                    try {
+                        rdi = malloc(rsi);
+                        rax = rdi;
+                    } catch (const std::bad_alloc&) {
+                        rax = -ENOMEM;
+                    } catch (const std::length_error&) {
+                        rax = -ENOMEM;
+                    }
+                }
             } else if (rax == 0) {
                 // read(fd=rdi, buf=rsi, len=rdx) — stdin (0) reads the real
                 // stdin into the VM heap; any other fd is a real file.
