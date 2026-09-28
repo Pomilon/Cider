@@ -36,6 +36,13 @@ struct TypeInfo {
     // isFunctionPointer on the array wrapper (fromAST copies the element
     // fields) so indexing recovers the element signature.
     bool isFunctionPointer = false;
+    // CIDER-BUG-063: closure-object representation. The legacy
+    // `func(...)`/`function(...)` spelling denotes a closure object
+    // {fnptr, captures...} whose call passes the object as a hidden first
+    // argument; `fn(...)` values are raw code pointers. The two share the
+    // signature but not the runtime shape, so identity tracks this marker
+    // (the name is kept too, for the legacy spelling and diagnostics).
+    bool isClosure = false;
     // CID-005: an `msabi fn(...)` type. `fn` stays SysV; arrays copy the
     // element's ABI through TypeInfo::fromAST.
     bool isMsAbi = false;
@@ -76,6 +83,7 @@ struct TypeInfo {
     bool operator==(const TypeInfo& other) const {
         if (isFunctionPointer || other.isFunctionPointer) {
             return isFunctionPointer == other.isFunctionPointer &&
+                   isClosure == other.isClosure &&
                    isArray == other.isArray && arraySize == other.arraySize &&
                    sameArrayElement(other) &&
                    isMsAbi == other.isMsAbi &&
@@ -90,9 +98,12 @@ struct TypeInfo {
 
     bool operator!=(const TypeInfo& other) const { return !(*this == other); }
 
-    // Canonical diagnostic spelling: `fn(int, int) -> int`.
+    // Canonical diagnostic spelling: `fn(int, int) -> int`; the legacy
+    // closure spelling keeps its `func(...)` name (CIDER-BUG-063), so a
+    // closure/plain mismatch is readable.
     std::string functionPointerToString() const {
-        std::string res = isMsAbi ? "msabi fn(" : "fn(";
+        std::string res = isMsAbi ? "msabi " : "";
+        res += isClosure ? "func(" : "fn(";
         if (fnParamTypes) {
             for (size_t i = 0; i < fnParamTypes->size(); ++i) {
                 if (i) res += ", ";
@@ -114,7 +125,12 @@ struct TypeInfo {
         }
         std::string res = "";
         if (isVolatile) res += "volatile ";
-        for (int i = 0; i < pointerLevel; ++i) res += "*";
+        // CIDER-BUG-063: a non-array function type renders its canonical
+        // signature; the legacy `func(...)` spelling's +1 level is the
+        // closure object pointer, not part of the printed identity.
+        if (!(isFunctionPointer && !isArray)) {
+            for (int i = 0; i < pointerLevel; ++i) res += "*";
+        }
         if (isArray) {
             if (isFunctionPointer) {
                 TypeInfo elem = *this;

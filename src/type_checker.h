@@ -1163,6 +1163,21 @@ public:
                 stmt.getInitializer()->accept(*this);
                 TypeInfo initType = lastExprType_;
 
+                // CIDER-BUG-063: a legacy closure-typed declaration
+                // (`func(...)`/`function(...)`, direct or through a `type`
+                // alias) initialized with a named function stores the raw
+                // code pointer. Accept the same-signature conversion and
+                // refine the declared type to the plain representation, so
+                // later uses take the fn(...) paths and a raw pointer can
+                // never be fed to a closure call.
+                TypeInfo declaredFn = resolveFunctionPointerAlias(declaredType);
+                TypeInfo initFn = resolveFunctionPointerAlias(initType);
+                bool closureFromPlainFn =
+                    !inClassFieldDecl_ &&
+                    declaredFn.isFunctionPointer && declaredFn.isClosure && !declaredFn.isArray &&
+                    initFn.isFunctionPointer && !initFn.isClosure && !initFn.isArray &&
+                    declaredFn.signatureEquals(initFn);
+
                 if (declaredType.isInterface) {
                     // CIDER-BUG-054: the conversion rule lives in
                     // checkInterfaceValue so declaration and reassignment
@@ -1180,11 +1195,17 @@ public:
                                         dynamic_cast<SliceExpr*>(stmt.getInitializer()),
                                         stmt.getLine());
                     lastExprType_ = declaredType;
-                } else if (!areTypesCompatible(declaredType, initType)) {
+                } else if (!closureFromPlainFn && !areTypesCompatible(declaredType, initType)) {
                     error("Type mismatch in declaration of '" + stmt.getName() +
                               "'. Expected " + canonicalizeNominal(declaredType).toString() + ", got " +
                               canonicalizeNominal(initType).toString(),
                           stmt.getLine());
+                }
+                if (closureFromPlainFn) {
+                    // Keep the declared signature; store the plain value
+                    // representation (the checker defines the symbol below).
+                    declaredType = declaredFn;
+                    declaredType.isClosure = false;
                 }
             }
         }
@@ -2160,7 +2181,12 @@ public:
                 bool declFn = declType.isFunctionPointer && !declType.isArray;
                 bool valFn = valType.isFunctionPointer && !valType.isArray;
                 if (declFn && valFn) {
-                    if (!declType.signatureEquals(valType)) {
+                    // CIDER-BUG-063: a closure object and a raw fn code
+                    // pointer are distinct representations even with an
+                    // identical signature; returning one where the other is
+                    // declared would call through the wrong convention.
+                    if (!declType.signatureEquals(valType) ||
+                        declType.isClosure != valType.isClosure) {
                         error("Return type mismatch. Expected " + declType.toString() +
                                   ", got " + valType.toString(),
                               stmt.getLine());
@@ -2423,12 +2449,20 @@ public:
         // never resolved; note it so a type-only import used here counts.
         noteTypeUse(expr.getReturnType());
         symbolTable_.enterScope();
+        // CIDER-BUG-063: the literal's own signature, so a declared
+        // `func(...)`/`fn(...)` type can check it exactly (and the closure
+        // representation marker distinguishes it from a raw fn value).
+        auto closureParams = std::make_shared<std::vector<TypeInfo>>();
         for (const auto& p : expr.getParams()) {
             auto sym = std::make_shared<Symbol>();
             sym->kind = SymbolKind::VARIABLE;
             sym->name = p.first;
-            if (p.second)
+            if (p.second) {
                 sym->type = canonicalizeNominal(TypeInfo::fromAST(p.second.get()), expr.getLine());
+            } else {
+                sym->type = {"int", 0};
+            }
+            closureParams->push_back(sym->type);
             symbolTable_.define(sym);
             // CIDER-FEAT-005: closure params are parameters, not locals.
             if (warningsActive_) {
@@ -2442,7 +2476,17 @@ public:
         exitScopeChecked();
         currentDeclaredReturnType_ = prevReturnType;
         hasDeclaredReturnType_ = prevHasReturnType;
-        lastExprType_ = {"func", 1};
+        TypeInfo closureType;
+        closureType.name = "func";
+        closureType.pointerLevel = 1;
+        closureType.isFunctionPointer = true;
+        closureType.isClosure = true;
+        closureType.fnParamTypes = std::move(closureParams);
+        closureType.fnReturnType = std::make_shared<TypeInfo>(
+            expr.getReturnType()
+                ? canonicalizeNominal(TypeInfo::fromAST(expr.getReturnType()), expr.getLine())
+                : TypeInfo{"int", 0});
+        lastExprType_ = closureType;
     }
     void visit(TypeAST&) override {}
     void visit(StructDeclStmt& stmt) override {

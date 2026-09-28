@@ -1318,13 +1318,26 @@ public:
                 args.push_back(lastValue_);
             }
 
-            if (calleeType.name == "func" && calleeType.pointerLevel >= 1) {
+            if (calleeType.isClosure) {
                 // Closure call: the value is a closure object {fnptr,
                 // captures...} — load the fnptr and pass the object first.
                 IRValue obj = fnPtr;
                 fnPtr = IRValue::Register(nextTemp(), IRType::PTR);
                 currentBlock_->addInstruction({IROp::LOAD, fnPtr, {obj, IRValue::Constant(0, IRType::I32)}});
-                IRValue dest = IRValue::Register(nextTemp(), IRType::I32);
+                // CIDER-BUG-063: the declared `func(...)` signature (now
+                // parsed instead of discarded) drives argument conversion and
+                // the result type exactly like the typed fn(...) path below;
+                // an untyped legacy marker keeps the assumed-int result.
+                TypeInfo retType{"int", 0};
+                if (calleeType.fnReturnType) retType = *calleeType.fnReturnType;
+                if (calleeType.fnParamTypes) {
+                    convertCallArgs(args, 0, *calleeType.fnParamTypes);
+                }
+                IRType destIR = (retType.pointerLevel > 0 || retType.isFunctionPointer)
+                                    ? IRType::PTR
+                                    : mapType(retType.name);
+                if (destIR == IRType::VOID) destIR = IRType::I32;
+                IRValue dest = IRValue::Register(nextTemp(), destIR);
                 IRInstruction callInstr;
                 callInstr.op = IROp::CALL;
                 // CID-005: closure definitions are pinned SysV (T1 fix
@@ -1336,7 +1349,7 @@ public:
                 callInstr.dest = dest;
                 currentBlock_->addInstruction(callInstr);
                 lastValue_ = dest;
-                lastExprType_ = {"int", 0};
+                lastExprType_ = retType;
             } else {
                 // CID-006: a call through a typed fn(...) value returns the
                 // stored return type and converts arguments through the
@@ -1479,7 +1492,9 @@ public:
     void visit(FunctionExpr& expr) override {
         if (!currentFunction_) {
             lastValue_ = IRValue::Constant(0, IRType::PTR);
+            // CIDER-BUG-063: closure-object representation marker.
             lastExprType_ = {"func", 1};
+            lastExprType_.isClosure = true;
             return;
         }
 
@@ -1617,7 +1632,21 @@ public:
             currentBlock_->addInstruction({IROp::STORE, std::nullopt, {capSlot, capVal, IRValue::Constant(0, IRType::I32)}});
         }
         lastValue_ = obj;
-        lastExprType_ = {"func", 1};
+        // CIDER-BUG-063: closure-object representation marker plus the
+        // literal's own signature, so a direct literal call converts
+        // arguments and types its result like the checker's literal type.
+        TypeInfo closureType;
+        closureType.name = "func";
+        closureType.pointerLevel = 1;
+        closureType.isFunctionPointer = true;
+        closureType.isClosure = true;
+        closureType.fnParamTypes = std::make_shared<std::vector<TypeInfo>>();
+        for (auto& p : expr.getParams()) {
+            closureType.fnParamTypes->push_back(p.second ? TypeInfo::fromAST(p.second.get())
+                                                         : TypeInfo{"int", 0});
+        }
+        closureType.fnReturnType = std::make_shared<TypeInfo>(retType);
+        lastExprType_ = closureType;
     }
 
     void visit(MemberAccessExpr& expr) override {
@@ -1967,6 +1996,18 @@ public:
         }
 
         if (!currentFunction_) {
+            // CIDER-BUG-063: a legacy `func(...)` global initialized with a
+            // named function stores a raw code pointer in its .data cell
+            // (see the function-pointer path below). Present the symbol as
+            // the plain representation, so reads and calls take the typed
+            // indirect path instead of the closure-object path. nilPtr and
+            // closure initializers keep the closure marker.
+            TypeInfo declaredFn = resolveFunctionPointerAlias(sym->type);
+            if (declaredFn.isClosure &&
+                !functionPointerInitTarget(stmt.getInitializer()).empty()) {
+                sym->type = declaredFn;
+                sym->type.isClosure = false;
+            }
             // CID-020/021 (spec §5): module-scope globals emit under the
             // defining module's mangled name; main-file globals stay bare.
             std::string gname = emitGlobalName(currentModule_, stmt.getName());
@@ -2212,6 +2253,17 @@ public:
                 }
                 stmt.getInitializer()->accept(*this);
                 IRValue val = lastValue_;
+                // CIDER-BUG-063: a legacy `func(...)`-typed declaration
+                // initialized with a named function stores a raw code
+                // pointer. Retype the symbol to the plain fn value (same
+                // signature, closure marker cleared), so this variable's
+                // calls take the typed indirect path; an initializer that
+                // really is a closure object keeps the closure marker.
+                TypeInfo declaredFn = resolveFunctionPointerAlias(sym->type);
+                if (declaredFn.isClosure && lastExprType_.isFunctionPointer &&
+                    !lastExprType_.isClosure && !lastExprType_.isArray) {
+                    sym->type = lastExprType_;
+                }
                 // CIDER-BUG-057: `var s: [T; N] = base[start:end]` copies
                 // the slice's elements. Use the descriptor's data pointer so
                 // the MEMCPY below starts at base+start; the copy length is

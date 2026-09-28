@@ -1061,10 +1061,15 @@ std::unique_ptr<Statement> Parser::parseStatement() {
 }
 
 // CID-006: `fn(T1, T2, ...) -> R`. Called with the current token on '('
-// and `fn` already consumed. Parameters may be empty (`fn() -> R`); the
-// return type may be `void`. CID-005: `abi` is the explicit `msabi`/
-// `sysvabi` prefix (Default for a plain `fn`).
-std::unique_ptr<TypeAST> Parser::parseFunctionPointerType(int line, int col, bool isVolatile, Abi abi) {
+// and the function keyword already consumed. Parameters may be empty
+// (`fn() -> R`); the return type may be `void`. CID-005: `abi` is the
+// explicit `msabi`/`sysvabi` prefix (Default for a plain `fn`).
+// CIDER-BUG-063: `kindName` is the written keyword (`fn`, or the legacy
+// `func`/`function` closure spelling) and `basePointerLevel` its pointer
+// level (the legacy closure spelling is an object pointer, level + 1).
+std::unique_ptr<TypeAST> Parser::parseFunctionPointerType(int line, int col, bool isVolatile, Abi abi,
+                                                          const std::string& kindName,
+                                                          int basePointerLevel) {
     nextToken();  // consume '('
     std::vector<std::unique_ptr<TypeAST>> params;
     if (currentToken_.type != TokenType::RPAREN) {
@@ -1080,18 +1085,18 @@ std::unique_ptr<TypeAST> Parser::parseFunctionPointerType(int line, int col, boo
         }
     }
     if (currentToken_.type != TokenType::RPAREN) {
-        error("Expected ')' after function-pointer parameter types.");
+        error("Expected ')' after '" + kindName + "(...)' parameter types.");
         return nullptr;
     }
     nextToken();  // consume ')'
     if (currentToken_.type != TokenType::ARROW) {
-        error("Expected '->' after 'fn(...)' parameter list.");
+        error("Expected '->' after '" + kindName + "(...)' parameter list.");
         return nullptr;
     }
     nextToken();  // consume '->'
     auto ret = parseType(false);
     if (!ret) return nullptr;
-    auto node = std::make_unique<TypeAST>("fn", 0, line, col, isVolatile);
+    auto node = std::make_unique<TypeAST>(kindName, basePointerLevel, line, col, isVolatile);
     node->setFunctionSignature(std::move(params), std::move(ret));
     node->setAbi(abi);
     return node;
@@ -1149,37 +1154,19 @@ std::unique_ptr<TypeAST> Parser::parseType(bool castContext) {
         nextToken();
     }
 
-    // Function type: func(int) -> int — the parameters and return type are
-    // parsed and discarded (the type carries only the func marker; the
-    // closure's own literal carries the full signature).
+    // Function type: `func(int) -> int` — the legacy closure spelling.
+    // CIDER-BUG-063: parse a real signature (reusing parseFunctionPointerType)
+    // instead of consuming and discarding the parameter/return tokens. The
+    // name stays "func"/"function" and the pointer level keeps the legacy
+    // +1 object-pointer shape, so closure call sites keep their marker; the
+    // attached signature now drives argument/return typing like `fn(...)`.
+    // A bare `func` without a parameter list keeps the marker-only shape.
     if (currentToken_.type == TokenType::FUNCTION || currentToken_.type == TokenType::FUNC) {
         std::string typeName = currentToken_.value;
         nextToken();
         if (currentToken_.type == TokenType::LPAREN) {
-            int depth = 1;
-            nextToken();
-            while (depth > 0 && currentToken_.type != TokenType::END_OF_FILE) {
-                if (currentToken_.type == TokenType::LPAREN) depth++;
-                else if (currentToken_.type == TokenType::RPAREN) depth--;
-                nextToken();
-            }
-        }
-        if (currentToken_.type == TokenType::ARROW) {
-            nextToken();
-            // consume the return type's tokens
-            int depth = 0;
-            while (currentToken_.type != TokenType::END_OF_FILE) {
-                if (currentToken_.type == TokenType::LBRACE || currentToken_.type == TokenType::SEMICOLON ||
-                    currentToken_.type == TokenType::COMMA || currentToken_.type == TokenType::RPAREN ||
-                    currentToken_.type == TokenType::RBRACE || currentToken_.type == TokenType::EQ ||
-                    currentToken_.type == TokenType::ASSIGN) {
-                    break;
-                }
-                if (currentToken_.type == TokenType::LT || currentToken_.type == TokenType::LPAREN) depth++;
-                else if (currentToken_.type == TokenType::GT || currentToken_.type == TokenType::RPAREN) depth--;
-                if (depth < 0) break;
-                nextToken();
-            }
+            return parseFunctionPointerType(line, col, isVolatile, typeAbi, typeName,
+                                            pointerLevel + 1);
         }
         return std::make_unique<TypeAST>(typeName, pointerLevel + 1, line, col, isVolatile);
     }

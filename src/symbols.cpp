@@ -23,6 +23,12 @@ TypeInfo TypeInfo::fromAST(TypeAST* ast) {
     // downstream comparison and diagnostic uses the canonical name.
     if (info.name == "f32") info.name = "float";
 
+    // CIDER-BUG-063: the legacy `func`/`function` spelling is the closure
+    // type. Mark the runtime representation so a plain `fn` value with the
+    // same signature is not silently interchangeable at a call site (the
+    // closure path passes the object as a hidden first argument).
+    if (info.name == "func" || info.name == "function") info.isClosure = true;
+
     // CID-006: `fn(...)` carries ordered parameter types and a return
     // type. The array branch above copies these fields onto the array
     // wrapper (isArray + signature), so `[fn(...); N]` indexing recovers

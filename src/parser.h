@@ -93,7 +93,12 @@ private:
     std::unique_ptr<Statement> parseExportStatement();
 
     std::unique_ptr<TypeAST> parseType(bool castContext = false);
-    std::unique_ptr<TypeAST> parseFunctionPointerType(int line, int col, bool isVolatile, Abi abi);
+    // CID-006 `fn(...) -> R`; CIDER-BUG-063 reuses it for the legacy
+    // `func(...)`/`function(...)` closure spelling (kindName carries the
+    // written keyword, basePointerLevel the legacy +1 object-pointer level).
+    std::unique_ptr<TypeAST> parseFunctionPointerType(int line, int col, bool isVolatile, Abi abi,
+                                                      const std::string& kindName = "fn",
+                                                      int basePointerLevel = 0);
     std::vector<std::unique_ptr<Statement>> parseBlockStatement();
     std::vector<std::string> parseTemplateParams();
 
