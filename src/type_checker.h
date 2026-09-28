@@ -10,13 +10,14 @@
 #include "errors.h"
 #include "module_scope.h"
 #include "symbols.h"
+#include "warnings.h"
 
 namespace cider {
 
 class TypeChecker : public ASTVisitor {
 public:
     TypeChecker(SymbolTable& symbolTable, ErrorReporter& reporter, bool moduleMode = false)
-        : symbolTable_(symbolTable), reporter_(reporter), moduleMode_(moduleMode) {}
+        : symbolTable_(symbolTable), reporter_(reporter), warnings_(reporter), moduleMode_(moduleMode) {}
 
     void check(AstProgram& program) {
         program.accept(*this);
@@ -48,13 +49,31 @@ public:
     void setDefaultAbiMs(bool v) { defaultAbiMs_ = v; }
     void setUefiEntryAllowed(bool v) { uefiEntryAllowed_ = v; }
 
+    // CIDER-FEAT-005: opt-in warnings (--warn). Disabled by default so the
+    // default pipeline stays byte-identical; when enabled the checker feeds
+    // the WarningTracker (unused variables/imports, shadowing) whose
+    // diagnostics go to reporter_.warning() and never affect hasErrors() or
+    // exit codes. Only the root program is analyzed: imported module bodies
+    // are error-checked, never warned about.
+    void setWarningsEnabled(bool v) { warningsEnabled_ = v; }
+
+    // CIDER-FEAT-005: every successful name resolution counts as a use for
+    // the unused-import bookkeeping — identifiers, type spellings, callees
+    // and every other path that binds a name flow through here. Speculative
+    // lookups can only mark a binding used, so this stays conservative.
+    std::shared_ptr<Symbol> resolveScoped(const std::string& name) {
+        auto sym = resolveScopedRaw(name);
+        if (warningsActive_ && sym) warnings_.markImportUsed(sym);
+        return sym;
+    }
+
     // CID-020/021 §2: strict current-module-then-root lookup. The collector
     // parents module scopes under the importer (nested enterScope), so a
     // naive resolve() would leak importer symbols here; instead walk from
     // the current scope up to (and including) the module scope, then fall
     // back to the root scope only. With no module current this is exactly
     // symbolTable_.resolve().
-    std::shared_ptr<Symbol> resolveScoped(const std::string& name) {
+    std::shared_ptr<Symbol> resolveScopedRaw(const std::string& name) {
         if (name.find("::") != std::string::npos) return resolveCanonical(name);
         if (!currentModuleScope_) return symbolTable_.resolve(name);
         bool underModule = false;
@@ -647,7 +666,12 @@ public:
         // (Issue #16): imported ASTs carry their module path.
         std::string prevFile = reporter_.getFile();
         if (!program.getSourcePath().empty()) reporter_.setFile(program.getSourcePath());
+        // CIDER-FEAT-005: warning analysis is active for the root program
+        // only (this visitor runs exactly once, for the root AST).
+        bool prevWarningsActive = warningsActive_;
+        warningsActive_ = warningsEnabled_;
         checkTopLevelStatements(program);
+        warningsActive_ = prevWarningsActive;
 
         auto mainSym = resolveScoped("main");
         auto startSym = resolveScoped("_start");
@@ -668,6 +692,9 @@ public:
         for (auto& imported : program.getImportedAsts()) {
             checkImportedProgram(*imported);
         }
+        // CIDER-FEAT-005: imports are declared before any use, so they are
+        // reported once the whole root program has been checked.
+        if (warningsEnabled_) warnings_.reportUnusedImports();
         reporter_.setFile(prevFile);
     }
 
@@ -1294,10 +1321,25 @@ public:
             if (pit != symbolModules_.end()) symbolModules_[sym->id] = pit->second;
         }
         symbolTable_.define(sym);
+        if (warningsActive_) {
+            // CIDER-FEAT-005: only function-local declarations are unused-
+            // warned; globals are recorded so locals shadowing them warn.
+            bool isLocal = symbolTable_.scopeDepth() > 0;
+            warnings_.declare(symbolTable_.getCurrentScope(), sym, stmt.getLine(),
+                              stmt.getColumn(), isLocal && !stmt.isExtern(), isLocal);
+        }
     }
 
     void visit(AssignStmt& stmt) override {
+        // CIDER-FEAT-005: `x = v` writes x without reading it, so it must
+        // not clear the unused-variable warning. Compound assignments
+        // (`x += v`) read the target and are not suppressed.
+        bool prevSuppressRead = suppressIdentRead_;
+        if (stmt.getOp().empty() && dynamic_cast<IdentifierExpr*>(stmt.getTarget())) {
+            suppressIdentRead_ = true;
+        }
         stmt.getTarget()->accept(*this);
+        suppressIdentRead_ = prevSuppressRead;
         TypeInfo targetType = lastExprType_;
 
         auto target = dynamic_cast<IdentifierExpr*>(stmt.getTarget());
@@ -1485,6 +1527,14 @@ public:
         expr.getOperand()->accept(*this);
         TypeInfo operandType = lastExprType_;
 
+        // CIDER-FEAT-005: `&x` keeps x out of the unused report — the
+        // address may escape to code the checker cannot see.
+        if (warningsActive_ && expr.getOperator() == "&") {
+            if (auto id = dynamic_cast<IdentifierExpr*>(expr.getOperand())) {
+                warnings_.markAddressTaken(resolveScopedRaw(id->getName()));
+            }
+        }
+
         if (expr.getOperator() == "&") {
             lastExprType_ = operandType;
             lastExprType_.pointerLevel++;
@@ -1532,6 +1582,9 @@ public:
             return;
         }
         auto sym = resolveScoped(expr.getName());
+        // CIDER-FEAT-005: a bare assignment target is a write; everything
+        // else that reaches an identifier is a read.
+        if (warningsActive_ && !suppressIdentRead_) warnings_.markRead(sym);
         if (!sym) {
             // Inside a method, a name matching one of the class's fields is
             // almost always a missing `this.` — point at it instead of the
@@ -1799,7 +1852,11 @@ public:
         lastExprType_ = canonicalizeNominal({expr.getStructName(), 0}, expr.getLine());
     }
 
-    void visit(SizeofExpr& /*expr*/) override { lastExprType_ = {"int", 0}; }
+    void visit(SizeofExpr& expr) override {
+        // CIDER-FEAT-005: `sizeof(T)` names T without reading it; note it.
+        noteTypeUse(expr.getTargetType());
+        lastExprType_ = {"int", 0};
+    }
 
     void visit(CastExpr& expr) override {
         expr.getExpression()->accept(*this);
@@ -1977,8 +2034,13 @@ public:
     }
 
     void visit(FunctionDeclStmt& stmt) override {
-        // Skip template function bodies (uninstantiated)
-        if (stmt.hasTemplateParams()) return;
+        // Skip template function bodies (uninstantiated). CIDER-FEAT-005:
+        // references inside them are not traversed, so unused-import
+        // warnings are disabled for a program that declares a template.
+        if (stmt.hasTemplateParams()) {
+            if (warningsActive_) warnings_.suppressUnusedImports();
+            return;
+        }
 
         // CID-005 (T5/F1): remember the declared return type for the
         // narrow fn-pointer return check; saved/restored so nested
@@ -2017,11 +2079,17 @@ public:
                 }
             }
             symbolTable_.define(paramSym);
+            // CIDER-FEAT-005: parameters are never unused-warned, but a
+            // local shadowing one is.
+            if (warningsActive_) {
+                warnings_.declare(symbolTable_.getCurrentScope(), paramSym, stmt.getLine(),
+                                  stmt.getColumn(), /*warnUnused=*/false, /*checkShadow=*/false);
+            }
         }
         if (!stmt.isExtern()) {
             for (auto& s : stmt.getBody()) s->accept(*this);
         }
-        symbolTable_.exitScope();
+        exitScopeChecked();
         currentDeclaredReturnType_ = prevReturnType;
         hasDeclaredReturnType_ = prevHasReturnType;
     }
@@ -2029,7 +2097,7 @@ public:
     void visit(BlockStmt& stmt) override {
         symbolTable_.enterScope();
         for (auto& s : stmt.getStatements()) s->accept(*this);
-        symbolTable_.exitScope();
+        exitScopeChecked();
     }
 
     void visit(IfStmt& stmt) override {
@@ -2039,11 +2107,11 @@ public:
         }
         symbolTable_.enterScope();
         for (auto& s : stmt.getThenBranch()) s->accept(*this);
-        symbolTable_.exitScope();
+        exitScopeChecked();
         if (!stmt.getElseBranch().empty()) {
             symbolTable_.enterScope();
             for (auto& s : stmt.getElseBranch()) s->accept(*this);
-            symbolTable_.exitScope();
+            exitScopeChecked();
         }
     }
 
@@ -2054,7 +2122,7 @@ public:
         }
         symbolTable_.enterScope();
         for (auto& s : stmt.getBody()) s->accept(*this);
-        symbolTable_.exitScope();
+        exitScopeChecked();
     }
 
     void visit(ForStmt& stmt) override {
@@ -2068,7 +2136,7 @@ public:
         }
         if (stmt.getIncrement()) stmt.getIncrement()->accept(*this);
         for (auto& s : stmt.getBody()) s->accept(*this);
-        symbolTable_.exitScope();
+        exitScopeChecked();
     }
 
     void visit(ReturnStmt& stmt) override {
@@ -2287,6 +2355,23 @@ public:
     }
 
     void visit(SliceExpr& expr) override {
+        // CIDER-FEAT-005: slice bounds are not type-checked by the
+        // pre-existing traversal (only the object is visited), so a
+        // variable used solely as a bound must still count as read. Visit
+        // the bounds with diagnostics suppressed and every piece of checker
+        // state restored: references are recorded, type-checking is not
+        // changed.
+        if (warningsActive_ && (expr.getStart() || expr.getEnd())) {
+            TypeInfo savedType = lastExprType_;
+            int savedSliceBaseSize = lastSliceBaseSize_;
+            int savedSuppressErrors = suppressErrors_;
+            suppressErrors_ = savedSuppressErrors + 1;
+            if (expr.getStart()) expr.getStart()->accept(*this);
+            if (expr.getEnd()) expr.getEnd()->accept(*this);
+            suppressErrors_ = savedSuppressErrors;
+            lastExprType_ = savedType;
+            lastSliceBaseSize_ = savedSliceBaseSize;
+        }
         expr.getObject()->accept(*this);
         // CIDER-BUG-019: same alias resolution as visit(IndexExpr).
         TypeInfo objType = resolveType(lastExprType_);
@@ -2334,6 +2419,9 @@ public:
         TypeInfo prevReturnType = currentDeclaredReturnType_;
         bool prevHasReturnType = hasDeclaredReturnType_;
         hasDeclaredReturnType_ = false;
+        // CIDER-FEAT-005: a closure's declared return type is otherwise
+        // never resolved; note it so a type-only import used here counts.
+        noteTypeUse(expr.getReturnType());
         symbolTable_.enterScope();
         for (const auto& p : expr.getParams()) {
             auto sym = std::make_shared<Symbol>();
@@ -2342,23 +2430,43 @@ public:
             if (p.second)
                 sym->type = canonicalizeNominal(TypeInfo::fromAST(p.second.get()), expr.getLine());
             symbolTable_.define(sym);
+            // CIDER-FEAT-005: closure params are parameters, not locals.
+            if (warningsActive_) {
+                warnings_.declare(symbolTable_.getCurrentScope(), sym, expr.getLine(),
+                                  expr.getColumn(), /*warnUnused=*/false, /*checkShadow=*/false);
+            }
         }
         for (auto& s : expr.getBody()) {
             s->accept(*this);
         }
-        symbolTable_.exitScope();
+        exitScopeChecked();
         currentDeclaredReturnType_ = prevReturnType;
         hasDeclaredReturnType_ = prevHasReturnType;
         lastExprType_ = {"func", 1};
     }
     void visit(TypeAST&) override {}
-    void visit(StructDeclStmt&) override {}
+    void visit(StructDeclStmt& stmt) override {
+        // CIDER-FEAT-005: field type spellings are otherwise not resolved by
+        // the checker; note them for the import bookkeeping. Template
+        // structs disable the unused-import report like template functions.
+        if (warningsActive_ && stmt.hasTemplateParams()) warnings_.suppressUnusedImports();
+        for (const auto& field : stmt.getFields()) noteTypeUse(field.type.get());
+    }
     void visit(EnumDeclStmt&) override {}
-    void visit(TypeAliasStmt&) override {}
+    void visit(TypeAliasStmt& stmt) override {
+        // CIDER-FEAT-005: `type A = ImportedType;` aliases a type the
+        // checker never resolves; note it so the import is not "unused".
+        noteTypeUse(stmt.getTargetType());
+    }
 
     void visit(ClassDeclStmt& stmt) override {
         std::string prevClass = currentClassName_;
         currentClassName_ = stmt.getName();
+        // CIDER-FEAT-005: inheriting from a name is a use of that name even
+        // when no `super`/subclass-check ever resolves the base class.
+        if (warningsActive_ && !stmt.getParentName().empty()) {
+            (void)canonicalizeNominal(TypeInfo{stmt.getParentName(), 0});
+        }
         for (auto& member : stmt.getMembers()) {
             // Field declarations are validated but must not define symbols
             // in the enclosing scope (pre-existing leak fix): fields live in
@@ -2374,10 +2482,39 @@ public:
     }
 
     void visit(ImportStmt&) override {}
-    void visit(FromImportStmt&) override {}
+
+    void visit(FromImportStmt& stmt) override {
+        // CIDER-FEAT-005: record the from-import aliases. The collector has
+        // already bound them in this scope, so they resolve here; the raw
+        // lookup avoids marking the binding as used by its own declaration.
+        if (!warningsActive_) return;
+        for (const auto& name : stmt.getSymbols()) {
+            auto sym = resolveScopedRaw(name);
+            warnings_.recordImport(symbolTable_.getCurrentScope(), sym, name,
+                                   stmt.getModuleName(), stmt.getLine(), stmt.getColumn());
+        }
+    }
+
     void visit(ExportStmt& stmt) override { if (auto inner = stmt.getStmt()) inner->accept(*this); }
-    void visit(ExportExpressionStmt&) override {}
-    void visit(InterfaceDeclStmt&) override {}
+
+    void visit(ExportExpressionStmt& stmt) override {
+        // CIDER-FEAT-005: `export { x };` references x even though the
+        // expression is never read; a re-exported import is not "unused".
+        if (!warningsActive_) return;
+        if (auto id = dynamic_cast<IdentifierExpr*>(stmt.getExpression())) {
+            warnings_.markRead(resolveScopedRaw(id->getName()));
+        }
+    }
+
+    void visit(InterfaceDeclStmt& stmt) override {
+        // CIDER-FEAT-005: interface method signatures are otherwise not
+        // resolved by the checker; note them for the import bookkeeping.
+        if (!warningsActive_) return;
+        for (const auto& method : stmt.getMethods()) {
+            for (const auto& param : method.params) noteTypeUse(param.second.get());
+            noteTypeUse(method.returnType.get());
+        }
+    }
 
     void visit(ForEachStmt& stmt) override {
         stmt.getIterable()->accept(*this);
@@ -2438,11 +2575,16 @@ public:
         sym->line = stmt.getLine();
         sym->col = stmt.getColumn();
         symbolTable_.define(sym);
+        // CIDER-FEAT-005: the loop variable is a local like any other.
+        if (warningsActive_) {
+            warnings_.declare(symbolTable_.getCurrentScope(), sym, stmt.getLine(),
+                              stmt.getColumn(), /*warnUnused=*/true, /*checkShadow=*/true);
+        }
 
         for (auto& s : stmt.getBody()) {
             s->accept(*this);
         }
-        symbolTable_.exitScope();
+        exitScopeChecked();
     }
 
     void visit(DeleteStmt& stmt) override {
@@ -2464,7 +2606,7 @@ public:
         for (auto& s : stmt.getTryBlock()) {
             s->accept(*this);
         }
-        symbolTable_.exitScope();
+        exitScopeChecked();
 
         symbolTable_.enterScope();
         auto catchVarSym = std::make_shared<Symbol>();
@@ -2472,17 +2614,36 @@ public:
         catchVarSym->name = stmt.getCatchVar();
         catchVarSym->type = {"int", 0};
         symbolTable_.define(catchVarSym);
+        // CIDER-FEAT-005: the catch binding is a local declaration too.
+        if (warningsActive_) {
+            warnings_.declare(symbolTable_.getCurrentScope(), catchVarSym, stmt.getLine(),
+                              stmt.getColumn(), /*warnUnused=*/true, /*checkShadow=*/true);
+        }
         for (auto& s : stmt.getCatchBlock()) {
             s->accept(*this);
         }
-        symbolTable_.exitScope();
+        exitScopeChecked();
     }
 
     void visit(DeferStmt& stmt) override {
         stmt.getDeferredStmt()->accept(*this);
     }
 
-    void visit(AsmStmt&) override {}
+    void visit(AsmStmt& stmt) override {
+        // CIDER-FEAT-005: inline asm references locals by name through
+        // `{x}` placeholders; mark every mentioned variable as a use so an
+        // asm-only variable is not reported unused. IrGen strips the same
+        // `*` deref marker and `:width` suffix.
+        if (!warningsActive_) return;
+        for (const auto& entry : stmt.localVariables) {
+            std::string name = entry.first.empty() ? entry.second : entry.first;
+            if (!name.empty() && name[0] == '*') name = name.substr(1);
+            size_t colon = name.find(':');
+            if (colon != std::string::npos) name = name.substr(0, colon);
+            if (name.empty()) continue;
+            warnings_.markRead(resolveScopedRaw(name));
+        }
+    }
 
     void visit(MatchStmt& stmt) override {
         stmt.getExpression()->accept(*this);
@@ -2505,13 +2666,26 @@ public:
 
             symbolTable_.enterScope();
             arm.body->accept(*this);
-            symbolTable_.exitScope();
+            exitScopeChecked();
         }
     }
 
 private:
     SymbolTable& symbolTable_;
     ErrorReporter& reporter_;
+    // CIDER-FEAT-005: opt-in warning bookkeeping (see setWarningsEnabled).
+    WarningTracker warnings_;
+    bool warningsEnabled_ = false;
+    // True while the root program's statements are being visited; imports
+    // and module bodies are checked without warning analysis.
+    bool warningsActive_ = false;
+    // Set while visiting a bare assignment target (`x = v`), where the
+    // identifier is written but not read.
+    bool suppressIdentRead_ = false;
+    // >0 while walking expressions the checker normally never type-checks
+    // (slice bounds): the walk is for warning bookkeeping only, so any
+    // diagnostic it would raise must stay silent.
+    int suppressErrors_ = 0;
     TypeInfo lastExprType_ = {"void", 0};
     // CIDER-BUG-057: array size of the object of the most recently checked
     // SliceExpr, used to statically evaluate a `base[start:]` slice's end
@@ -2538,7 +2712,23 @@ private:
     bool uefiEntryAllowed_ = false;
 
     void error(const std::string& msg, int line) {
+        if (suppressErrors_ > 0) return;
         reporter_.error(msg, line);
+    }
+
+    // CIDER-FEAT-005: close a checker scope, reporting its unused locals
+    // first. Every symbolTable_.exitScope() in this class goes through here.
+    void exitScopeChecked() {
+        if (warningsActive_) warnings_.onScopeExit(symbolTable_.getCurrentScope());
+        symbolTable_.exitScope();
+    }
+
+    // CIDER-FEAT-005: resolve a declared type only to record import usage
+    // (silent: line < 0 keeps unresolvable spellings from adding
+    // diagnostics). The result is discarded; type-checking is unchanged.
+    void noteTypeUse(TypeAST* type) {
+        if (!warningsActive_ || !type) return;
+        (void)canonicalizeNominal(TypeInfo::fromAST(type));
     }
 };
 

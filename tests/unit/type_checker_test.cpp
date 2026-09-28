@@ -56,9 +56,36 @@ std::vector<std::string> checkWithDefaultAbiMs(const std::string& src) {
     return checkSrcOpts(src, /*defaultAbiMs=*/true, /*allowUefiEntry=*/false);
 }
 
+// CIDER-FEAT-005: same pipeline as checkSrc with warnings enabled; returns
+// the collected warning messages.
+std::vector<std::string> checkSrcWarnings(const std::string& src) {
+    cider::ErrorReporter rep;
+    cider::Lexer lex(src, rep);
+    cider::Parser parser(lex, rep);
+    auto prog = parser.parseProgram();
+    cider::SymbolTable table;
+    cider::ModuleResolver resolver;
+    cider::SymbolCollector collector(table, rep, resolver);
+    collector.collect(*prog);
+    rep.clear();
+    cider::TypeChecker checker(table, rep);
+    checker.setWarningsEnabled(true);
+    checker.check(*prog);
+    std::vector<std::string> out;
+    for (auto& w : rep.warnings()) out.push_back(w.message);
+    return out;
+}
+
 bool hasError(const std::vector<std::string>& errors, const std::string& sub) {
     for (auto& e : errors) {
         if (e.find(sub) != std::string::npos) return true;
+    }
+    return false;
+}
+
+bool hasWarning(const std::vector<std::string>& warnings, const std::string& sub) {
+    for (auto& w : warnings) {
+        if (w.find(sub) != std::string::npos) return true;
     }
     return false;
 }
@@ -781,6 +808,90 @@ int run() {
         for (const auto& e : deepRet) {
             CHECK(e.size() < 2000);
         }
+    }
+
+    // CIDER-FEAT-005: opt-in warnings. The checkSrc calls above double as
+    // the disabled-by-default guard (they never inspect warnings): enabling
+    // the pass reports unused locals/loop/catch bindings and shadowing, and
+    // warnings never become errors.
+    {
+        auto w = checkSrcWarnings("func main() -> void { var unused: int = 1; }\n");
+        CHECK(hasWarning(w, "unused variable 'unused'"));
+        CHECK(checkSrc("func main() -> void { var unused: int = 1; }\n").empty());
+    }
+    {
+        // Reads clear the warning; a write-only variable warns; '_'-prefixed
+        // names are the documented opt-out.
+        auto w = checkSrcWarnings(
+            "func main() -> void {\n"
+            "    var read: int = 1;\n"
+            "    var written: int = 2;\n"
+            "    written = read;\n"
+            "    var _hidden: int = 3;\n"
+            "}\n");
+        CHECK(!hasWarning(w, "'read'"));
+        CHECK(hasWarning(w, "unused variable 'written'"));
+        CHECK(!hasWarning(w, "'_hidden'"));
+    }
+    {
+        // Compound assignment and increment read their target.
+        auto w = checkSrcWarnings(
+            "func main() -> void {\n"
+            "    var a: int = 1;\n"
+            "    var b: int = 2;\n"
+            "    a += 1;\n"
+            "    b++;\n"
+            "}\n");
+        CHECK(w.empty());
+    }
+    {
+        // Address-taken locals are exempt (the address may escape); a
+        // parameter is never unused-warned even when the body ignores it.
+        auto w = checkSrcWarnings(
+            "func sink(p: int*) -> void { }\n"
+            "func main() -> void { var x: int = 1; sink(&x); }\n");
+        CHECK(w.empty());
+    }
+    {
+        // A local shadowing an outer local/parameter/global warns.
+        auto w = checkSrcWarnings(
+            "func main() -> void {\n"
+            "    var x: int = 1;\n"
+            "    { var x: int = 2; x = x + 1; }\n"
+            "    var y: int = x;\n"
+            "}\n");
+        CHECK(hasWarning(w, "shadows an outer declaration"));
+        auto p = checkSrcWarnings(
+            "func f(x: int) -> void { { var x: int = 1; x = x + 1; } }\n"
+            "func main() -> void { f(1); }\n");
+        CHECK(hasWarning(p, "shadows an outer declaration"));
+        auto g = checkSrcWarnings(
+            "var g: int = 1;\n"
+            "func main() -> void { { var g: int = 2; g = g + 1; } }\n");
+        CHECK(hasWarning(g, "shadows an outer declaration"));
+    }
+    {
+        // Templates: their bodies are not traversed, so the checker still
+        // runs and warns for checked code (and unused-import reporting is
+        // conservatively disabled while any template is declared).
+        auto w = checkSrcWarnings(
+            "func id<T>(x: T) -> T { var unused_local: int = 1; return x; }\n"
+            "func main() -> void { var y: int = id<int>(1); }\n");
+        CHECK(hasWarning(w, "unused variable 'y'"));
+    }
+    {
+        // for-in loop variables and catch bindings are locals too.
+        auto loopWarn = checkSrcWarnings(
+            "func main() -> void {\n"
+            "    var arr: [int; 2];\n"
+            "    for (var v in arr) { }\n"
+            "}\n");
+        CHECK(hasWarning(loopWarn, "unused variable 'v'"));
+        auto catchWarn = checkSrcWarnings(
+            "func main() -> void {\n"
+            "    try { } catch (e) { }\n"
+            "}\n");
+        CHECK(hasWarning(catchWarn, "unused variable 'e'"));
     }
     return 0;
 }

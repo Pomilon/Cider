@@ -16,6 +16,11 @@ add_executable(ir_test tests/unit/ir_test.cpp src/ir.cpp)
 target_include_directories(ir_test PRIVATE src)
 add_test(NAME ir_test COMMAND ir_test)
 
+# CIDER-FEAT-005: ErrorReporter severity/collection (header-only).
+add_executable(errors_test tests/unit/errors_test.cpp)
+target_include_directories(errors_test PRIVATE src)
+add_test(NAME errors_test COMMAND errors_test)
+
 add_executable(ir_gen_test tests/unit/ir_gen_test.cpp src/ir.cpp src/lexer.cpp src/parser.cpp src/symbols.cpp src/module_resolver.cpp)
 target_include_directories(ir_gen_test PRIVATE src)
 add_test(NAME ir_gen_test COMMAND ir_gen_test)

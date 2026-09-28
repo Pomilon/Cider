@@ -11,6 +11,7 @@ set +e
 "$BIN" compile --target >/dev/null 2>&1; [ $? -eq 2 ] || { echo "target-no-arg: got $?"; exit 1; }
 USAGE=$("$BIN" 2>&1 || true)
 echo "$USAGE" | grep -q -- "--target native|pomeos|uefi" || { echo "usage missing --target"; exit 1; }
+echo "$USAGE" | grep -q -- "--warn" || { echo "usage missing --warn"; exit 1; }
 set -e
 echo "cli_test: OK"
 
@@ -24,3 +25,32 @@ set +e
 RC=$?
 set -e
 [ "$RC" -eq 1 ] || { echo "check error-case failed: $RC"; exit 1; }
+
+# CIDER-FEAT-005: warnings are opt-in. Without --warn the output stays
+# byte-identical/empty; with --warn the warning goes to stderr and the exit
+# code stays 0.
+printf 'func main() -> void { var unused: int = 1; }\n' > "$SRC"
+DEFAULT_OUT=$("$BIN" check "$SRC" 2>&1)
+[ -z "$DEFAULT_OUT" ] || { echo "default check not silent: $DEFAULT_OUT"; exit 1; }
+set +e
+WARN_OUT=$("$BIN" check --warn "$SRC" 2>&1)
+WARN_RC=$?
+set -e
+[ "$WARN_RC" -eq 0 ] || { echo "warn-check exit: $WARN_RC"; exit 1; }
+echo "$WARN_OUT" | grep -q "warning: unused variable 'unused'" \
+    || { echo "missing unused-variable warning: $WARN_OUT"; exit 1; }
+
+# --warn must not disturb build/run: stdout stays exact and the exit code
+# unchanged.
+RUN_OUT=$("$BIN" run --warn "$SRC" 2>/dev/null)
+[ -z "$RUN_OUT" ] || { echo "warn-run stdout not empty: $RUN_OUT"; exit 1; }
+
+# An unreferenced from-import is reported too.
+printf 'from std.io import print;\nfunc main() -> void { }\n' > "$SRC"
+set +e
+IMPORT_OUT=$("$BIN" check --warn "$SRC" 2>&1)
+IMPORT_RC=$?
+set -e
+[ "$IMPORT_RC" -eq 0 ] || { echo "warn-import exit: $IMPORT_RC"; exit 1; }
+echo "$IMPORT_OUT" | grep -q "warning: unused import 'print' from module 'std.io'" \
+    || { echo "missing unused-import warning: $IMPORT_OUT"; exit 1; }

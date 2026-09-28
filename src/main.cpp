@@ -29,6 +29,7 @@
 struct CliOptions {
     std::string command;      // "parse" | "check" | "build" | "run" | "compile" | "bundle"
     bool noOpt = false;
+    bool warn = false;        // CIDER-FEAT-005: opt-in diagnostics
     std::string inputFile;
     std::string outputFile;
     std::string target = "native";  // "native" | "pomeos" | "uefi"
@@ -44,6 +45,10 @@ bool parseCli(int argc, char** argv, CliOptions& out) {
         std::string a = argv[i];
         if (a == "--no-opt") {
             out.noOpt = true;
+        } else if (a == "--warn") {
+            // CIDER-FEAT-005: accepted by every command; only the checking
+            // commands have an analysis pass to drive.
+            out.warn = true;
         } else if (a == "--target") {
             if (i + 1 >= argc) return false;
             out.target = argv[++i];
@@ -99,7 +104,8 @@ void optimizeModule(cider::ModuleIR& module) {
 }
 
 // Print a diagnostic with the source line and a caret under the column.
-// Prefixes distinguish the compiler stage (the error-code scheme).
+// Prefixes distinguish the compiler stage (the error-code scheme). Warnings
+// (CIDER-FEAT-005) use the severity-neutral `warning:` prefix.
 // Each diagnostic carries its own filename (Issue #16): errors in imported
 // modules show that module's path and source line, not the main file's.
 void printDiagnostics(const std::string& text, const std::string& path,
@@ -118,8 +124,13 @@ void printDiagnostics(const std::string& text, const std::string& path,
     };
     for (const auto& d : diags) {
         const std::string& file = d.filename.empty() ? path : d.filename;
-        std::fprintf(stderr, "%s:%d:%d: %s error: %s\n", file.c_str(),
-                     d.line, d.col, stage, d.message.c_str());
+        if (d.severity == cider::Diagnostic::Severity::Warning) {
+            std::fprintf(stderr, "%s:%d:%d: warning: %s\n", file.c_str(),
+                         d.line, d.col, d.message.c_str());
+        } else {
+            std::fprintf(stderr, "%s:%d:%d: %s error: %s\n", file.c_str(),
+                         d.line, d.col, stage, d.message.c_str());
+        }
         // Extract the offending source line and draw the caret.
         const std::string& src = textFor(file);
         size_t start = 0;
@@ -147,7 +158,7 @@ int main(int argc, char** argv) {
     }
     CliOptions opts;
     if (!parseCli(argc, argv, opts)) {
-        std::fprintf(stderr, "usage: cider <parse|check|build|run|compile|bundle> [--no-opt] [--target native|pomeos|uefi] [-o out.asm] <file>\n");
+        std::fprintf(stderr, "usage: cider <parse|check|build|run|compile|bundle> [--no-opt] [--warn] [--target native|pomeos|uefi] [-o out.asm] <file>\n");
         return 2;
     }
     // bundle is self-contained (see bundler.h): it runs before — and
@@ -205,10 +216,16 @@ int main(int argc, char** argv) {
         const bool defaultAbiMs = (opts.target == "uefi");
         checker.setDefaultAbiMs(defaultAbiMs);
         checker.setUefiEntryAllowed(defaultAbiMs);
+        // CIDER-FEAT-005: warnings are opt-in. They are collected and
+        // printed only with --warn and never change the exit code.
+        checker.setWarningsEnabled(opts.warn);
         checker.check(*prog);
         if (rep.hasErrors()) {
             printDiagnostics(text, opts.inputFile, rep.errors(), "type");
             return 1;
+        }
+        if (opts.warn && rep.hasWarnings()) {
+            printDiagnostics(text, opts.inputFile, rep.warnings(), "type");
         }
         if (opts.command == "check") {
             return 0;
