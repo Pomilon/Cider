@@ -1,0 +1,57 @@
+// CIDER-BUG-093: a plain fn value cannot be cast to the closure spelling
+// func(...) (rejected; see the check_fn_cast_closure_repr fixture). These
+// are the supported neighboring forms, pinned on all three backends:
+//   - the closure spelling via a declaration: a named function in a
+//     func(...) variable stores the raw pointer (CIDER-BUG-063), the
+//     adaptation the diagnostic points at,
+//   - the reverse direction (CIDER-BUG-068/074): a closure object cast to
+//     the plain fn(...) spelling stays a closure and is called through the
+//     closure path,
+//   - a closure object cast through fn(...) and back to func(...): the
+//     outer cast keeps the source's closure shape,
+//   - a fn(...) parameter whose inference resolved it to a closure may be
+//     cast to func(...) (the source really is a closure object),
+//   - a fn(...) -> fn(...) cast of a plain function keeps the plain path.
+
+type Cb = func(int) -> int;
+
+func add1(x: int) -> int { return x + 1; }
+func toF(x: int) -> f64 { return x as f64 + 0.5; }
+
+// The diagnostic's suggested adaptation: a named function stored in a
+// func(...) variable; the declaration refines it to the raw pointer shape.
+func viaDecl() -> int {
+  var f: func(int) -> int = add1;
+  return f(41);
+}
+
+// Plain-spelled fn(...) parameter that the call site resolves to a closure:
+// casting it to the closure spelling reinterprets a real closure object.
+func castClosureParam(p: fn(int) -> int, x: int) -> int {
+  return (p as func(int) -> int)(x);
+}
+
+func main() -> int {
+  if (viaDecl() != 42) return 1;
+
+  // The legacy f64 signature still drives the call through the same spelling.
+  var ff: func(int) -> f64 = toF;
+  if (ff(2) != 2.5) return 2;
+
+  // Reverse direction: closure object -> plain fn(...) cast.
+  var c: Cb = func(x: int) -> int { return x * 2; };
+  var k: fn(int) -> int = c as fn(int) -> int;
+  if (k(21) != 42) return 3;
+
+  // Closure -> fn(...) -> func(...): the outer cast is still a closure.
+  var back: func(int) -> int = (c as fn(int) -> int) as func(int) -> int;
+  if (back(21) != 42) return 4;
+
+  if (castClosureParam(c, 21) != 42) return 5;
+
+  // Plain -> plain cast keeps the plain indirect path.
+  var pl: fn(int) -> int = add1 as fn(int) -> int;
+  if (pl(41) != 42) return 6;
+
+  return 0;
+}

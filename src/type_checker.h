@@ -667,6 +667,10 @@ public:
         for (size_t i = 1; i < fnSlotParent_.size(); ++i) {
             if (fnSlotPolarity_[fnFind((int)i)] != FnRepr::Closure) continue;
             const std::string& key = fnSlotKey_[i];
+            // CIDER-BUG-093: cast-check slots are not storage; they only
+            // carry the source shape. A closure-resolved one is the allowed
+            // `closure as func(...)` reinterpretation, so nothing to mark.
+            if (!key.empty() && key[0] == 'c') continue;
             auto astIt = fnParamAst_.find(key);
             if (astIt != fnParamAst_.end()) {
                 if (astIt->second) astIt->second->setClosureRepr(true);
@@ -702,6 +706,29 @@ public:
             error("A closure value is passed to " + label +
                       ", but that parameter's closure representation cannot be inferred "
                       "(CIDER-BUG-068 supports fn(...) parameters of free functions)",
+                  fnSlotLine_[i]);
+        }
+        // CIDER-BUG-093: a cast to the closure spelling func(...) whose
+        // source resolves to a plain fn pointer would leave a raw code
+        // pointer in a closure-typed value — every later call would read
+        // the function's first bytes as the closure object and pass the
+        // pointer as the hidden object argument. Report it instead of
+        // emitting the misread call. A source that resolves Closure (or
+        // stays Unknown: nilPtr and other unchecked shapes) is untouched.
+        std::set<int> reportedCastRoots;
+        for (size_t i = 1; i < fnSlotParent_.size(); ++i) {
+            const std::string& key = fnSlotKey_[i];
+            if (key.empty() || key[0] != 'c') continue;
+            int root = fnFind((int)i);
+            if (fnSlotPolarity_[root] != FnRepr::Plain) continue;
+            if (!reportedCastRoots.insert(root).second) continue;
+            error("Function cast cannot produce the closure spelling. Expected " +
+                      fnSlotLabel_[i] +
+                      ", got a plain fn(...) value: a raw code pointer is not a closure "
+                      "object {fnptr, captures...} whose calls pass the object as a hidden "
+                      "first argument (CIDER-BUG-093). Use the fn(...) spelling, or store "
+                      "the function in a func(...) variable (CIDER-BUG-063 adapts it to the "
+                      "raw pointer representation).",
                   fnSlotLine_[i]);
         }
     }
@@ -2875,6 +2902,26 @@ public:
         // signature is the only thing the target spelling may not change.
         // Arrays are left to the layout rule above; a non-fn source (nilPtr,
         // *void) keeps its existing unchecked cast semantics.
+        //
+        // CIDER-BUG-093: keeping the source shape also means a cast cannot
+        // *gain* one. Casting a plain fn value to the closure spelling
+        // func(...) passed the signature check but left the raw code pointer
+        // in a value typed as a closure object: every closure call loads a
+        // fnptr from the object and passes the object as a hidden first
+        // argument, so `f(1)` read instructions as a pointer on the VM and
+        // segfaulted natively. A capture-less record cannot bridge the two
+        // conventions either — the plain function would receive the record
+        // pointer as its own first parameter. Record the source's runtime
+        // shape in a cast-check slot exactly like the other representation
+        // rules: a source that is really a closure (a closure-typed value,
+        // or one reached through `closure as fn(...)`) resolves the slot
+        // Closure and the reinterpretation stays allowed, while a source
+        // that resolves to a plain pointer is reported in the post-pass.
+        // The `fn(...)` spelling and a `func(...)` declaration (which
+        // CIDER-BUG-063 adapts to the raw pointer representation) are the
+        // supported spellings. The reverse direction is unaffected: a
+        // closure cast to `fn(...)` stays a closure and is called through
+        // the closure path (CIDER-BUG-068).
         TypeInfo fnTarget = resolveFunctionPointerAlias(target);
         TypeInfo fnSrc = resolveFunctionPointerAlias(src);
         if (fnTarget.isFunctionPointer && !fnTarget.isArray &&
@@ -2887,6 +2934,13 @@ public:
             if (!fnTarget.signatureEquals(fnSrc)) {
                 error("Function cast signature mismatch. Expected " + fnTarget.toString() +
                           ", got " + fnSrc.toString(), expr.getLine());
+            } else if (fnTarget.isClosure) {
+                int slot = fnSlot("c:" + std::to_string(fnCastCheckCount_++),
+                                  fnTarget.toString(), expr.getLine());
+                // fnRecordExpr follows the source shape through nested casts
+                // and unifies with a fn-typed variable/parameter's slot, so
+                // the verdict below is the resolved shape, not the spelling.
+                fnRecordExpr(slot, expr.getExpression(), srcType, expr.getLine());
             }
         }
     }
@@ -4002,6 +4056,10 @@ private:
     // Field/element/pointee store sites (key prefix "s:"): that storage
     // keeps raw fn pointers, so a closure value is reported after the walk.
     int fnStoreCheckCount_ = 0;
+    // Cast-to-closure sites (key prefix "c:"): the source shape resolves
+    // through the same inference; a plain-resolved source is reported after
+    // the walk (CIDER-BUG-093).
+    int fnCastCheckCount_ = 0;
     // Name of the function whose body is being checked (diagnostics).
     std::string currentFunctionName_;
 
