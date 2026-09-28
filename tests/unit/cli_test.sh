@@ -10,7 +10,7 @@ set +e
 "$BIN" compile --target bogus /dev/null >/dev/null 2>&1; [ $? -eq 2 ] || { echo "bogus-target: got $?"; exit 1; }
 "$BIN" compile --target >/dev/null 2>&1; [ $? -eq 2 ] || { echo "target-no-arg: got $?"; exit 1; }
 USAGE=$("$BIN" 2>&1 || true)
-echo "$USAGE" | grep -q -- "--target native|pomeos|uefi" || { echo "usage missing --target"; exit 1; }
+echo "$USAGE" | grep -q -- "--target native|linux|x86_64-linux|pomeos|uefi" || { echo "usage missing --target"; exit 1; }
 echo "$USAGE" | grep -q -- "--warn" || { echo "usage missing --warn"; exit 1; }
 echo "$USAGE" | grep -q -- "--checks" || { echo "usage missing --checks"; exit 1; }
 echo "$USAGE" | grep -q -- "-g|--debug" || { echo "usage missing -g/--debug"; exit 1; }
@@ -71,3 +71,32 @@ set -e
 [ "$UNINIT_RC" -eq 0 ] || { echo "warn-uninit exit: $UNINIT_RC"; exit 1; }
 echo "$UNINIT_OUT" | grep -q "warning: local 'x' may be read before being assigned" \
     || { echo "missing read-before-assignment warning: $UNINIT_OUT"; exit 1; }
+
+# CIDER-ISS-006: `linux` / `x86_64-linux` are the backend's names for the
+# native ELF output (the CodeGenerator defaults to "x86_64-linux"). Both must
+# take the identical native path; an unknown target must keep failing.
+printf 'func main() -> int { return 7; }\n' > "$SRC"
+TARGET_TMP=$(mktemp -d)
+trap 'rm -f "$SRC"; rm -rf "$TARGET_TMP"' EXIT
+set +e
+"$BIN" run "$SRC" >/dev/null 2>&1
+NATIVE_RC=$?
+set -e
+[ "$NATIVE_RC" -eq 7 ] || { echo "native run exit: $NATIVE_RC"; exit 1; }
+"$BIN" compile "$SRC" -o "$TARGET_TMP/native.asm"
+for T in linux x86_64-linux; do
+    set +e
+    "$BIN" run --target "$T" "$SRC" >/dev/null 2>&1
+    TARGET_RC=$?
+    set -e
+    [ "$TARGET_RC" -eq "$NATIVE_RC" ] || { echo "$T run exit: $TARGET_RC"; exit 1; }
+    "$BIN" compile --target "$T" "$SRC" -o "$TARGET_TMP/$T.asm"
+    cmp -s "$TARGET_TMP/native.asm" "$TARGET_TMP/$T.asm" \
+        || { echo "$T assembly differs from native"; exit 1; }
+done
+set +e
+"$BIN" compile --target bogus "$SRC" >/dev/null 2>&1
+BOGUS_RC=$?
+set -e
+[ "$BOGUS_RC" -eq 2 ] || { echo "bogus target accepted: $BOGUS_RC"; exit 1; }
+echo "cli_test: target aliases OK"

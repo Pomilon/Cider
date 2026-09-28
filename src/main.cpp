@@ -38,8 +38,19 @@ struct CliOptions {
     std::string cacheDir;     // CIDER-FEAT-006: .cider-meta cache directory
     std::string inputFile;
     std::string outputFile;
-    std::string target = "native";  // "native" | "pomeos" | "uefi"
+    std::string target = "native";  // canonical: "native" | "pomeos" | "uefi"
 };
+
+// CIDER-ISS-006: the CodeGenerator names the native ELF/x86-64 output
+// `x86_64-linux` (its constructor default); the CLI has always called it
+// `native`. Accept both backend spellings plus the short `linux` and
+// canonicalize them to `native`, so every downstream target check (uefi ABI
+// typing, codegen) sees one value. Returns "" for an unknown target.
+std::string canonicalTarget(const std::string& target) {
+    if (target == "native" || target == "linux" || target == "x86_64-linux") return "native";
+    if (target == "pomeos" || target == "uefi") return target;
+    return "";
+}
 
 // Returns false + prints usage to stderr on bad arguments.
 bool parseCli(int argc, char** argv, CliOptions& out) {
@@ -74,7 +85,10 @@ bool parseCli(int argc, char** argv, CliOptions& out) {
             out.emitMeta = true;
         } else if (a == "--target") {
             if (i + 1 >= argc) return false;
-            out.target = argv[++i];
+            // CIDER-ISS-006: validate + canonicalize here; the accepted set
+            // lives in canonicalTarget() above.
+            out.target = canonicalTarget(argv[++i]);
+            if (out.target.empty()) return false;
         } else if (a == "-o") {
             if (i + 1 >= argc) return false;
             out.outputFile = argv[++i];
@@ -87,7 +101,6 @@ bool parseCli(int argc, char** argv, CliOptions& out) {
         }
     }
     if (out.inputFile.empty()) return false;
-    if (out.target != "native" && out.target != "pomeos" && out.target != "uefi") return false;
     if (out.command == "compile" && out.outputFile.empty()) return false;
     // CIDER-FEAT-006: --emit-meta writes `<cache-dir>/<module>.cider-meta`;
     // without a cache directory there is nowhere to write, and `parse` /
@@ -210,7 +223,7 @@ int main(int argc, char** argv) {
     }
     CliOptions opts;
     if (!parseCli(argc, argv, opts)) {
-        std::fprintf(stderr, "usage: cider <parse|check|build|run|compile|bundle> [--no-opt] [--warn] [--checks] [-g|--debug] [--cache <dir>] [--emit-meta] [--target native|pomeos|uefi] [-o out.asm] <file>\n");
+        std::fprintf(stderr, "usage: cider <parse|check|build|run|compile|bundle> [--no-opt] [--warn] [--checks] [-g|--debug] [--cache <dir>] [--emit-meta] [--target native|linux|x86_64-linux|pomeos|uefi] [-o out.asm] <file>\n");
         return 2;
     }
     // bundle is self-contained (see bundler.h): it runs before — and
