@@ -1,0 +1,3 @@
+Function cast cannot change array layout. Expected fn(f64) -> int, got [fn(int) -> int; 2]
+Function cast cannot change array layout. Expected fn(int) -> int, got [fn(int) -> int; 2]
+Function cast cannot change array layout. Expected [fn(int) -> int; 2], got fn(int) -> int

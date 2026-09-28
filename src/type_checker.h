@@ -2942,6 +2942,22 @@ public:
         // the closure path (CIDER-BUG-068).
         TypeInfo fnTarget = resolveFunctionPointerAlias(target);
         TypeInfo fnSrc = resolveFunctionPointerAlias(src);
+        // CIDER-BUG-094: an array of fn pointers and a scalar fn are
+        // different layouts, not two spellings of one value. The array rule
+        // above only compares array-to-array and the signature rule below
+        // explicitly skips arrays ("left to the layout rule"), so a mixed
+        // cast used to fall through both: the array's data-block address was
+        // then called as a raw code pointer (VM `bad function id`, native
+        // segfault), or the code pointer was indexed as a data block. There
+        // is no fn-array decay rule in the language, so reject the mixed
+        // shapes in both directions — the runtime shapes differ even when
+        // the signatures agree (the element count is not part of a scalar
+        // fn type at all).
+        if (fnTarget.isFunctionPointer && fnSrc.isFunctionPointer &&
+            fnTarget.isArray != fnSrc.isArray) {
+            error("Function cast cannot change array layout. Expected " + fnTarget.toString() +
+                      ", got " + fnSrc.toString(), expr.getLine());
+        }
         if (fnTarget.isFunctionPointer && !fnTarget.isArray &&
             fnSrc.isFunctionPointer && !fnSrc.isArray) {
             resolveInterfaceFlag(fnTarget);

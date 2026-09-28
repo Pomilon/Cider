@@ -1,0 +1,21 @@
+// CIDER-BUG-094: a cast cannot change an fn value's array layout. An array
+// of fn pointers is a data-block address; a scalar fn(...) is a raw code
+// pointer. CIDER-BUG-018's layout rule only compares array-to-array and
+// CIDER-BUG-074's signature rule skips arrays, so the mixed cast used to
+// slip through both: every later call jumped into the data block (VM `bad
+// function id`, native segfault), and the reverse direction indexed the
+// code bytes as a data block. There is no fn-array decay rule, so both
+// directions are rejected, matching signatures included (the element count
+// is not part of a scalar fn type at all).
+func add1(x: int) -> int { return x + 1; }
+
+func main() -> int {
+  var table: [fn(int) -> int; 2] = [add1, add1];
+  // Array of fn pointers to a scalar fn spelling (different signature).
+  var a: fn(f64) -> int = table as fn(f64) -> int;
+  // Same signature: still a data block reinterpreted as code.
+  var b: fn(int) -> int = table as fn(int) -> int;
+  // The reverse direction: a code pointer reinterpreted as a data block.
+  var c: [fn(int) -> int; 2] = add1 as [fn(int) -> int; 2];
+  return a(1.5) as int + b(1) + c[0](1);
+}

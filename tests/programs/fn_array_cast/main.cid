@@ -1,0 +1,26 @@
+// CIDER-BUG-094 positive control: legitimate fn casts keep working after
+// the mixed array/scalar rejection — a same-shape array-to-array
+// reinterpretation (CIDER-BUG-018) and a same-signature scalar-to-scalar
+// cast (CIDER-BUG-074) both stay accepted and callable in all three paths.
+from std.io import print, printInt;
+
+type Cb = fn(int) -> int;
+
+func add1(x: int) -> int { return x + 1; }
+func dbl(x: int) -> int { return x * 2; }
+
+func main() -> int {
+  var table: [fn(int) -> int; 2] = [add1, dbl];
+  var same: [fn(int) -> int; 2] = table as [fn(int) -> int; 2];
+  printInt(same[0](1)); print("\n");
+  printInt(same[1](2)); print("\n");
+
+  var f: fn(int) -> int = add1 as fn(int) -> int;
+  printInt(f(40)); print("\n");
+
+  // Alias spelling target: the same scalar rule, resolved.
+  var g: Cb = add1 as Cb;
+  printInt(g(9)); print("\n");
+
+  return 0;
+}
