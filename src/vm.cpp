@@ -1423,20 +1423,31 @@ void VM::execAsm(const IRInstruction& instr) {
             else if (dst == "r9") r9 = y;
             else if (dst == "r10") r10 = y;
         } else if (mnem == "syscall") {
+            // CIDER-BUG-099: validate a heap-relative buffer as a signed
+            // range the way native validates a user pointer. The old
+            // unsigned-style `off + len <= heap_.size()` let a negative
+            // offset through and indexed the host heap out of bounds;
+            // subtracting off instead of adding len also keeps the check
+            // overflow-safe for bogus huge offsets.
+            auto inHeap = [&](int64_t off, int64_t len) {
+                return off >= 0 && len >= 0 && off <= (int64_t)heap_.size() &&
+                       len <= (int64_t)heap_.size() - off;
+            };
             if (rax == 1) {
                 // write(fd=rdi, buf=rsi, len=rdx)
                 int64_t fd = rdi;
                 int64_t len = rdx;
+                bool valid = inHeap(rsi, len);
                 std::string bytes;
-                for (int64_t k = 0; k < len; ++k) {
-                    bytes += (char)(rsi + k < (int64_t)heap_.size() ? heap_[(size_t)(rsi + k)] : 0);
+                if (valid && len > 0) {
+                    bytes.assign((const char*)heap_.data() + rsi, (size_t)len);
                 }
                 if (fd == 1 || fd == 2) {
                     // Buffered std streams: report the number of bytes
                     // accepted, like a kernel write on a healthy fd. A
-                    // negative count is a size_t-wrapped count in native;
-                    // it cannot be emulated, so fail with EFAULT.
-                    if (len >= 0) {
+                    // negative offset or count is a bad user pointer in
+                    // native; it cannot be emulated, so fail with EFAULT.
+                    if (valid) {
                         if (fd == 1) result_.stdoutText += bytes;
                         else result_.stderrText += bytes;
                         rax = len;
@@ -1445,7 +1456,7 @@ void VM::execAsm(const IRInstruction& instr) {
                     }
                 } else {
                     // Real file descriptor (opened via the open syscall).
-                    if (rsi + len <= (int64_t)heap_.size()) {
+                    if (valid) {
                         rax = syscallResult((int64_t)::write((int)fd, heap_.data() + rsi, (size_t)len));
                     } else {
                         rax = -EFAULT;
@@ -1462,19 +1473,23 @@ void VM::execAsm(const IRInstruction& instr) {
             } else if (rax == 0) {
                 // read(fd=rdi, buf=rsi, len=rdx) — stdin (0) reads the real
                 // stdin into the VM heap; any other fd is a real file.
-                int64_t len = rdx;
-                int64_t got = 0;
-                int64_t room = (rsi + len <= (int64_t)heap_.size()) ? len : (int64_t)heap_.size() - rsi;
-                if (room > 0) {
-                    got = syscallResult((int64_t)::read((int)rdi, heap_.data() + rsi, (size_t)room));
+                // CIDER-BUG-099: a negative offset/length or a range past
+                // the heap is EFAULT like native. The old `room` clamp ran
+                // a negative offset through as a positive room and turned a
+                // fully out-of-heap buffer into an EOF (0).
+                if (!inHeap(rsi, rdx)) {
+                    rax = -EFAULT;
+                } else {
+                    rax = syscallResult((int64_t)::read((int)rdi, heap_.data() + rsi, (size_t)rdx));
                 }
-                rax = got;
             } else {
                 // General passthrough for the remaining syscalls (open,
                 // close, unlink, lseek, ...): run the real syscall with the
                 // heap-relative pointers mapped to real memory.
                 auto ptrOf = [&](int64_t v) -> void* {
-                    if (v > 0 && v + 8 <= (int64_t)heap_.size()) return heap_.data() + v;
+                    // CIDER-BUG-099: the same signed-range validation; the
+                    // old `v + 8 <= size` form overflowed near INT64_MAX.
+                    if (v > 0 && inHeap(v, 8)) return heap_.data() + v;
                     return nullptr;
                 };
                 int64_t result = 0;

@@ -1,6 +1,7 @@
 #include <cstdio>
 #include <memory>
 #include <string>
+#include <unistd.h>
 #include <vector>
 
 #include "vm.h"
@@ -98,6 +99,104 @@ int run() {
         CHECK(std::string(e.message).find("unsupported asm") != std::string::npos);
     }
     CHECK(threw);
+
+    // CIDER-BUG-099: write/read must validate the buffer as a signed heap
+    // range. A negative offset used to index the host heap out of bounds
+    // and an out-of-heap read used to report EOF (0) instead of the
+    // -EFAULT native returns for a bad user pointer. Each check exits with
+    // the syscall result so a wrong rax shows up as the exit code.
+    auto runAsm = [](const std::string& code) {
+        auto fn = std::make_unique<cider::FunctionIR>("main", cider::IRType::VOID);
+        auto block = std::make_unique<cider::BasicBlock>("entry");
+        block->addInstruction(asmInstr(code));
+        fn->addBlock(std::move(block));
+        cider::ModuleIR mod;
+        mod.addFunction(std::move(fn));
+        cider::VM vm;
+        return vm.run(mod);
+    };
+    // A live file fd makes the read/write paths take their real-fd branch,
+    // where the pre-fix check called ::write/::read with an out-of-heap
+    // host pointer (the buffered fd 1/2 path read host memory instead).
+    std::FILE* tf = std::tmpfile();
+    CHECK(tf != nullptr);
+    CHECK(std::fwrite("ABCD", 1, 4, tf) == 4);
+    std::fflush(tf);
+    int tfd = fileno(tf);
+    // Raw fd positioning only: the VM reads the fd directly, and stdio's
+    // lazy seek tracking would otherwise disagree with the real offset.
+    CHECK(::lseek(tfd, 0, SEEK_SET) == 0);
+    const std::string fdArg = std::to_string(tfd);
+
+    // write(1, (void*)-16, 4) -> -EFAULT, nothing buffered.
+    {
+        auto r = runAsm("mov rax, 1\nmov rdi, 1\nmov rsi, -16\nmov rdx, 4\n"
+                        "syscall\nmov rdi, rax\nmov rax, 60\nsyscall\n");
+        CHECK(r.stdoutText.empty());
+        CHECK(r.stderrText.empty());
+        CHECK(r.exitCode == -14);
+    }
+
+    // write(<file>, (void*)-16, 4) -> -EFAULT, no bytes reach the file.
+    {
+        auto r = runAsm("mov rax, 1\nmov rdi, " + fdArg + "\nmov rsi, -16\nmov rdx, 4\n"
+                        "syscall\nmov rdi, rax\nmov rax, 60\nsyscall\n");
+        CHECK(r.exitCode == -14);
+        CHECK(::lseek(tfd, 0, SEEK_END) == 4);  // the bad write left 4 bytes
+        CHECK(::lseek(tfd, 0, SEEK_SET) == 0);
+    }
+
+    // read(<file>, (void*)-16, 4) -> -EFAULT (negative offset).
+    {
+        auto r = runAsm("mov rax, 0\nmov rdi, " + fdArg + "\nmov rsi, -16\nmov rdx, 4\n"
+                        "syscall\nmov rdi, rax\nmov rax, 60\nsyscall\n");
+        CHECK(r.exitCode == -14);
+    }
+
+    // read(<file>, heap+2^40, 4) -> -EFAULT, not the old EOF (0).
+    {
+        auto r = runAsm("mov rax, 0\nmov rdi, " + fdArg + "\nmov rsi, 1099511627776\nmov rdx, 4\n"
+                        "syscall\nmov rdi, rax\nmov rax, 60\nsyscall\n");
+        CHECK(r.exitCode == -14);
+    }
+
+    // read(<file>, buf, -4) -> -EFAULT (negative length).
+    {
+        auto r = runAsm("mov rax, 0\nmov rdi, " + fdArg + "\nmov rsi, 0\nmov rdx, -4\n"
+                        "syscall\nmov rdi, rax\nmov rax, 60\nsyscall\n");
+        CHECK(r.exitCode == -14);
+    }
+
+    // A valid in-heap buffer extended past the heap -> -EFAULT; exact
+    // in-heap ranges stay usable (the good path is unchanged).
+    {
+        auto fn = std::make_unique<cider::FunctionIR>("main", cider::IRType::VOID);
+        auto block = std::make_unique<cider::BasicBlock>("entry");
+        auto readIn = asmInstr("mov rax, 0\nmov rdi, " + fdArg + "\nmov rsi, {buf}\nmov rdx, 4\n"
+                               "syscall\nmov rdi, rax\nmov rax, 60\nsyscall\n");
+        readIn.asmMap["buf"] = stringConst("efault-buffer");
+        block->addInstruction(readIn);
+        fn->addBlock(std::move(block));
+        cider::ModuleIR mod;
+        mod.addFunction(std::move(fn));
+        cider::VM vm;
+        CHECK(vm.run(mod).exitCode == 4);  // file still at offset 0
+    }
+    {
+        auto fn = std::make_unique<cider::FunctionIR>("main", cider::IRType::VOID);
+        auto block = std::make_unique<cider::BasicBlock>("entry");
+        auto overrun = asmInstr("mov rax, 0\nmov rdi, " + fdArg + "\nmov rsi, {buf}\n"
+                                "mov rdx, 1099511627776\n"
+                                "syscall\nmov rdi, rax\nmov rax, 60\nsyscall\n");
+        overrun.asmMap["buf"] = stringConst("efault-buffer");
+        block->addInstruction(overrun);
+        fn->addBlock(std::move(block));
+        cider::ModuleIR mod;
+        mod.addFunction(std::move(fn));
+        cider::VM vm;
+        CHECK(vm.run(mod).exitCode == -14);
+    }
+    std::fclose(tf);
     return 0;
 }
 
