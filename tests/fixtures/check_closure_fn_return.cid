@@ -1,0 +1,12 @@
+// CIDER-BUG-068: returning a closure-valued `fn(...)` parameter from a
+// function declared to return a plain `fn(...)` value is unsupported — the
+// caller would treat the closure object as a raw code pointer. The
+// `func(...)` return spelling is the supported way to return a closure.
+type Cb = fn(int) -> int;
+
+func idfn(cb: Cb) -> Cb { return cb; }
+
+func main() -> int {
+  var f: Cb = idfn(func(x: int) -> int { return x + 1; });
+  return f(1) - 2;
+}

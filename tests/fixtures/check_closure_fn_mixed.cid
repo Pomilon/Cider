@@ -1,0 +1,12 @@
+// CIDER-BUG-068: a fn(...) parameter holds one representation for the whole
+// program. Passing a closure and a plain named function to the same
+// parameter is reported instead of silently calling one through the wrong
+// convention.
+func inc(x: int) -> int { return x + 1; }
+func apply(cb: fn(int) -> int, x: int) -> int { return cb(x); }
+
+func main() -> int {
+  var r1: int = apply(func(x: int) -> int { return x + 2; }, 1);
+  var r2: int = apply(inc, 1);
+  return r1 + r2 - 5;
+}

@@ -117,6 +117,14 @@ public:
         fnReturnType_ = std::move(ret);
     }
 
+    // CIDER-BUG-068: set by the checker's whole-program representation
+    // inference when this `fn(...)` spelling (a parameter) is only ever
+    // given closure objects, so TypeInfo::fromAST marks it as the closure
+    // representation and calls through it use the closure path. Never set
+    // for `func(...)` spellings (already closures) or raw fn values.
+    bool hasClosureRepr() const { return hasClosureRepr_; }
+    void setClosureRepr(bool v) { hasClosureRepr_ = v; }
+
     void dump(std::string& out, int /*depth*/) const override {
         if (isFunctionType_) {
             if (abi_ == Abi::Ms) out += "msabi ";
@@ -140,6 +148,7 @@ private:
     bool isVolatile_;
     Abi abi_ = Abi::Default;
     bool isFunctionType_ = false;
+    bool hasClosureRepr_ = false;  // CIDER-BUG-068 (see setClosureRepr)
     std::vector<std::unique_ptr<TypeAST>> fnParamTypes_;
     std::unique_ptr<TypeAST> fnReturnType_;
 };

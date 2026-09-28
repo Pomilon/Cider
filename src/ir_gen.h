@@ -352,6 +352,10 @@ public:
         // V` with `type V = int`) must survive alias resolution exactly like
         // the qualifier on the alias target itself.
         resolved.isVolatile = resolved.isVolatile || t.isVolatile;
+        // CIDER-BUG-068: the same rule for an inferred closure
+        // representation on an alias-spelled parameter (`type Cb = fn(...)`;
+        // the checker marks the spelling, the alias target is plain fn).
+        resolved.isClosure = resolved.isClosure || t.isClosure;
         return resolved;
     }
 
@@ -2519,9 +2523,19 @@ public:
                 // signature, closure marker cleared), so this variable's
                 // calls take the typed indirect path; an initializer that
                 // really is a closure object keeps the closure marker.
+                // CIDER-BUG-068: the mirror direction. A `fn(...)`-typed
+                // declaration initialized with a closure-valued source
+                // (literal, closure-returning call, or closure-typed
+                // variable/parameter) stores the closure object pointer, so
+                // retype the symbol to the closure representation and calls
+                // through it take the closure path. Both directions require
+                // an fn-typed source; the checker has already enforced the
+                // exact signature/ABI match.
                 TypeInfo declaredFn = resolveFunctionPointerAlias(sym->type);
-                if (declaredFn.isClosure && lastExprType_.isFunctionPointer &&
-                    !lastExprType_.isClosure && !lastExprType_.isArray) {
+                TypeInfo initFn = resolveFunctionPointerAlias(lastExprType_);
+                if (declaredFn.isFunctionPointer && !declaredFn.isArray &&
+                    initFn.isFunctionPointer && !initFn.isArray &&
+                    declaredFn.isClosure != initFn.isClosure) {
                     sym->type = lastExprType_;
                 }
                 // CIDER-BUG-057: `var s: [T; N] = base[start:end]` copies
@@ -5996,8 +6010,19 @@ public:
             lastValue_ = dest;
         }
 
+        // CIDER-BUG-068: a cast between function types reinterprets the
+        // pointer but not its runtime shape. A closure object cast to a plain
+        // `fn(...)` spelling (direct or through a `type` alias) stays a
+        // closure, so calls through it take the closure path (the checker's
+        // representation inference follows the same source-shape rule).
+        TypeInfo resolvedTarget = resolveFunctionPointerAlias(targetType);
+        if (!resolvedTarget.isClosure && resolvedTarget.isFunctionPointer &&
+            !resolvedTarget.isArray && !resolvedTarget.isMsAbi && lastExprType_.isClosure) {
+            targetType.isClosure = true;
+        }
         lastExprType_ = targetType;
     }
+
     void visit(MatchStmt& stmt) override {
         stmt.getExpression()->accept(*this);
         IRValue matchVal = lastValue_;

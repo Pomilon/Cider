@@ -1,0 +1,10 @@
+// CIDER-BUG-068: a `fn(...)` variable's representation is fixed by its
+// initializer; assigning a closure object to a variable that already holds
+// a raw code pointer (or vice versa) is rejected instead of miscompiled.
+func inc(x: int) -> int { return x + 1; }
+
+func main() -> int {
+  var f: fn(int) -> int = inc;
+  f = func(x: int) -> int { return x + 2; };
+  return f(1) - 3;
+}

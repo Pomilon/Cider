@@ -1,0 +1,129 @@
+// CIDER-BUG-068: closure literals where an `fn(...)` type is expected.
+//
+// Triple-differential (VM unopt, VM opt, native) pins:
+//   - closure literals assigned to `fn(...)`-typed variables (int and f64
+//     returns) and called through the closure path,
+//   - closures with captures (direct literals, factories, and captured
+//     closure values) stored in `fn(...)` variables,
+//   - representation-preserving reassignment (closure <- closure,
+//     named function <- named function); a cross-representation assignment
+//     is a type error (check_closure_fn_reassign fixture),
+//   - passing closures to function parameters typed `fn(...)`, including
+//     forwarding through another `fn(...)` parameter, passing a closure
+//     held in a legacy `func(...)` variable, and an uninitialized `fn(...)`
+//     local assigned a closure-valued parameter,
+//   - named functions in `fn(...)` storage keeping the plain indirect path,
+//   - exact signature/ABI compatibility (mismatches are fixtures).
+
+type Cb = fn(int) -> int;
+
+func inc(x: int) -> int { return x + 1; }
+func dec(x: int) -> int { return x - 1; }
+func toF(x: int) -> f64 { return x as f64 + 0.5; }
+
+// Closure factory returning the legacy `func(...)` closure spelling.
+func makeAdder(base: int) -> func(int) -> int {
+  return func(x: int) -> int { return x + base; };
+}
+
+// f64 closure factory.
+func makeDbl() -> func(f64) -> f64 {
+  return func(x: f64) -> f64 { return x * 2.0; };
+}
+
+// Callback with a plain `fn(...)` parameter, called through the closure path
+// once the checker infers the parameter's representation from this call site.
+func apply(cb: Cb, x: int) -> int { return cb(x); }
+func applyF(cb: fn(f64) -> f64, x: f64) -> f64 { return cb(x); }
+
+// Forwarding: `cb` is passed on to `apply`, so both parameters resolve to
+// the closure representation transitively.
+func forward(cb: Cb, x: int) -> int { return apply(cb, x); }
+
+// A closure capturing a closure-valued variable.
+func wrap(inner: Cb) -> func(int) -> int {
+  return func(x: int) -> int { return inner(x) + 1; };
+}
+
+// A fn(...) local declared without an initializer, then assigned a
+// closure-valued parameter: the representation is inferred through the
+// assignment (the declared type is annotated, not the initializer).
+func lateLocal(cb: Cb, x: int) -> int {
+  var h: Cb;
+  h = cb;
+  return h(x);
+}
+
+func main() -> int {
+  // Closure literal -> fn(...) variable (int return).
+  var lit: fn(int) -> int = func(x: int) -> int { return x + 1; };
+  if (lit(1) != 2) return 1;
+
+  // Closure literal -> fn(...) variable (f64 return); `d(3)` also checks
+  // the int -> f64 argument conversion through the closure path.
+  var dbl: fn(f64) -> f64 = func(x: f64) -> f64 { return x * 2.0; };
+  if (dbl(1.5) != 3.0) return 2;
+  if (dbl(3) != 6.0) return 3;
+
+  // Named function into fn(...) storage: the plain indirect path is kept.
+  var plain: fn(int) -> int = inc;
+  if (plain(1) != 2) return 4;
+  var plainF: fn(int) -> f64 = toF;
+  if (plainF(2) != 2.5) return 5;
+
+  // Closure factory result -> fn(...) variable; captures must survive.
+  var add10: fn(int) -> int = makeAdder(10);
+  if (add10(5) != 15) return 6;
+  var dblF: fn(f64) -> f64 = makeDbl();
+  if (dblF(1.5) != 3.0) return 7;
+
+  // Copying one fn(...) variable to another keeps the representation.
+  var add10b: fn(int) -> int = add10;
+  if (add10b(5) != 15) return 8;
+  var plainb: fn(int) -> int = plain;
+  if (plainb(1) != 2) return 9;
+
+  // Reassignment keeps each variable's representation.
+  add10b = func(x: int) -> int { return x + 20; };
+  if (add10b(5) != 25) return 10;
+  plainb = dec;
+  if (plainb(5) != 4) return 11;
+
+  // Closure literal passed to a parameter typed fn(...).
+  if (apply(func(x: int) -> int { return x + 2; }, 1) != 3) return 12;
+
+  // Closure with captures passed as a callback (variable and factory call).
+  var add30: fn(int) -> int = makeAdder(30);
+  if (apply(add30, 1) != 31) return 13;
+  if (apply(makeAdder(40), 1) != 41) return 14;
+
+  // Forwarding through a second fn(...) parameter.
+  if (forward(func(x: int) -> int { return x + 3; }, 1) != 4) return 15;
+  if (forward(add30, 1) != 31) return 16;
+
+  // A closure held in a legacy func(...) variable works as an fn(...)
+  // argument too.
+  var legacy: func(int) -> int = makeAdder(50);
+  if (apply(legacy, 1) != 51) return 17;
+
+  // f64 callback.
+  if (applyF(func(x: f64) -> f64 { return x + 0.25; }, 1.0) != 1.25) return 18;
+
+  // f64 closure (factory result) passed as a callback.
+  var dblCb: fn(f64) -> f64 = makeDbl();
+  if (applyF(dblCb, 2.0) != 4.0) return 19;
+
+  // Closure capturing a closure-valued variable.
+  var inner: Cb = makeAdder(60);
+  var outer: fn(int) -> int = wrap(inner);
+  if (outer(1) != 62) return 20;
+
+  // Uninitialized fn(...) local assigned a closure-valued parameter.
+  if (lateLocal(makeAdder(70), 1) != 71) return 21;
+
+  // Closure literal capturing a local, passed directly as a callback.
+  var k: int = 5;
+  if (apply(func(x: int) -> int { return x + k; }, 1) != 6) return 22;
+
+  return 0;
+}

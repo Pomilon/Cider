@@ -21,6 +21,10 @@ public:
 
     void check(AstProgram& program) {
         program.accept(*this);
+        // CIDER-BUG-068: resolve the fn/closure representation inference
+        // once the whole program (imports included) has been walked; the
+        // annotations it writes are read by ir_gen.
+        resolveFnRepresentations();
     }
 
     // CID-020/021 module context, wired from the collector (mirrors
@@ -388,6 +392,228 @@ public:
         if (t.isFunctionPointer || t.isArray) return t;
         TypeInfo resolved = resolveType(t);
         return resolved.isFunctionPointer ? resolved : t;
+    }
+
+    // ------------------------------------------------------------------
+    // CIDER-BUG-068: closure/plain representation inference for `fn(...)`
+    // storage.
+    //
+    // A closure literal produces a heap object {fnptr, captures...} whose
+    // call passes the object as a hidden first argument; a named function
+    // is a raw code pointer. A single `fn(...)` variable or parameter can
+    // hold only one of the two shapes, so the checker infers each
+    // parameter's shape from every argument it receives (and every value
+    // copied into a fn-typed local that is later passed on). The inference
+    // is a union-find over storage slots with two polarities:
+    //   * closure values and plain fn values constrain a slot directly,
+    //   * an identifier naming a fn-typed parameter/local unions its slot
+    //     with the target, so forwarding chains resolve transitively.
+    // Conflicting polarities are reported at the second use instead of
+    // silently miscompiling. After the walk, resolved closure parameters
+    // are marked on their TypeAST; TypeInfo::fromAST (and therefore
+    // ir_gen) then emits the closure call path for them.
+    enum class FnRepr : uint8_t { Unknown = 0, Plain = 1, Closure = 2 };
+
+    static std::string fnParamSlotKey(const std::shared_ptr<Symbol>& fnSym, size_t index) {
+        return "p:" + std::to_string(fnSym->id) + ":" + std::to_string(index);
+    }
+
+    int fnSlot(const std::string& key, const std::string& label, int line) {
+        auto it = fnSlotIndex_.find(key);
+        if (it != fnSlotIndex_.end()) return it->second;
+        int idx = (int)fnSlotParent_.size();
+        fnSlotIndex_.emplace(key, idx);
+        fnSlotParent_.push_back(idx);
+        fnSlotPolarity_.push_back(FnRepr::Unknown);
+        fnSlotLabel_.push_back(label);
+        fnSlotLine_.push_back(line);
+        fnSlotKey_.push_back(key);
+        return idx;
+    }
+
+    int fnSlotForSymbol(const std::shared_ptr<Symbol>& sym, const std::string& label, int line) {
+        return fnSlot("v:" + std::to_string(sym->id), label, line);
+    }
+
+    int fnParamSlot(const std::shared_ptr<FunctionSymbol>& fnSym, size_t index, int line) {
+        return fnSlot(fnParamSlotKey(fnSym, index),
+                      "parameter " + std::to_string(index + 1) + " of '" + fnSym->name + "'", line);
+    }
+
+    int fnFind(int x) {
+        while (fnSlotParent_[x] != x) {
+            fnSlotParent_[x] = fnSlotParent_[fnSlotParent_[x]];
+            x = fnSlotParent_[x];
+        }
+        return x;
+    }
+
+    void fnConflictError(const std::string& label, int line) {
+        std::string what = label.empty() ? std::string("an fn(...) value") : label;
+        error("Closure representation conflict for " + what +
+                  ": a closure object and a plain fn(...) value are both used with it, but one "
+                  "storage holds one representation (CIDER-BUG-068)",
+              line);
+    }
+
+    void fnConstrain(int slot, FnRepr repr, int line, const std::string& label) {
+        if (repr == FnRepr::Unknown) return;
+        int r = fnFind(slot);
+        if (fnSlotPolarity_[r] == FnRepr::Unknown) {
+            fnSlotPolarity_[r] = repr;
+            fnSlotLine_[r] = line;
+            return;
+        }
+        if (fnSlotPolarity_[r] != repr) {
+            fnConflictError(label.empty() ? fnSlotLabel_[r] : label, line);
+        }
+    }
+
+    void fnUnion(int a, int b, int line) {
+        a = fnFind(a);
+        b = fnFind(b);
+        if (a == b) return;
+        FnRepr pa = fnSlotPolarity_[a];
+        FnRepr pb = fnSlotPolarity_[b];
+        if (pa != FnRepr::Unknown && pb != FnRepr::Unknown && pa != pb) {
+            std::string la = fnSlotLabel_[a].empty() ? std::string("one fn(...) storage") : fnSlotLabel_[a];
+            std::string lb = fnSlotLabel_[b].empty() ? std::string("another fn(...) storage") : fnSlotLabel_[b];
+            error("Closure representation conflict between " + la + " and " + lb +
+                      ": a closure object and a plain fn(...) value are both used with them, but one "
+                      "storage holds one representation (CIDER-BUG-068)",
+                  line);
+            return;
+        }
+        fnSlotParent_[b] = a;
+        if (pa == FnRepr::Unknown) {
+            fnSlotPolarity_[a] = pb;
+            if (pb != FnRepr::Unknown) fnSlotLine_[a] = line;
+        }
+    }
+
+    // Constrain/union `slot` from a fn-typed expression's runtime shape.
+    // Returns true when the expression's representation was tied to the slot
+    // (a direct constraint or a slot edge); false for representation-neutral
+    // shapes (nilPtr) and shapes whose unchecked semantics are unchanged.
+    bool fnRecordExpr(int slot, Expression* expr, TypeInfo type, int line) {
+        TypeInfo t = resolveFunctionPointerAlias(type);
+        if (!t.isFunctionPointer || t.isArray) return false;
+        if (t.isClosure) {
+            fnConstrain(slot, FnRepr::Closure, line, fnSlotLabel_[fnFind(slot)]);
+            return true;
+        }
+        if (!expr || dynamic_cast<NilPtrExpr*>(expr)) return false;  // nil: either shape
+        if (auto* g = dynamic_cast<GroupingExpr*>(expr)) {
+            return fnRecordExpr(slot, g->getExpression(), type, line);
+        }
+        if (auto* t3 = dynamic_cast<TernaryExpr*>(expr)) {
+            // Either branch can supply the runtime value.
+            bool thenRec = fnRecordExpr(slot, t3->getThenExpr(), type, line);
+            bool elseRec = fnRecordExpr(slot, t3->getElseExpr(), type, line);
+            return thenRec || elseRec;
+        }
+        if (auto* id = dynamic_cast<IdentifierExpr*>(expr)) {
+            auto sym = resolveScoped(id->getName());
+            if (sym && sym->kind == SymbolKind::FUNCTION) {
+                fnConstrain(slot, FnRepr::Plain, line, fnSlotLabel_[fnFind(slot)]);
+                return true;
+            }
+            if (sym && sym->kind == SymbolKind::VARIABLE) {
+                auto pk = fnParamSymKey_.find(sym->id);
+                if (pk != fnParamSymKey_.end()) {
+                    // The argument is a parameter of the enclosing function:
+                    // unify the two parameters instead of pinning a shape.
+                    fnUnion(slot, fnSlot(pk->second, "", line), line);
+                    return true;
+                }
+                TypeInfo symFn = resolveFunctionPointerAlias(sym->type);
+                if (symFn.isFunctionPointer && !symFn.isArray) {
+                    fnUnion(slot, fnSlotForSymbol(sym, "variable '" + sym->name + "'", line), line);
+                    return true;
+                }
+            }
+            return false;
+        }
+        if (dynamic_cast<CallExpr*>(expr)) {
+            // Only fn(...)-returning calls reach here; `func(...)`-returning
+            // calls are closure-typed and handled above. Returning a closure
+            // where `fn(...)` is declared is rejected, so a plain fn result
+            // is definitely a raw pointer.
+            fnConstrain(slot, FnRepr::Plain, line, fnSlotLabel_[fnFind(slot)]);
+            return true;
+        }
+        if (dynamic_cast<MemberAccessExpr*>(expr) || dynamic_cast<IndexExpr*>(expr)) {
+            // A fn-typed struct/class field or array element can only ever
+            // hold raw fn values: storing a closure there is rejected (the
+            // field/array storage has no representation refinement), so a
+            // module-qualified `m.fn` and `arr[i]` are definitely plain.
+            fnConstrain(slot, FnRepr::Plain, line, fnSlotLabel_[fnFind(slot)]);
+            return true;
+        }
+        if (auto* c = dynamic_cast<CastExpr*>(expr)) {
+            // An unchecked cast reinterprets the pointer but keeps its
+            // runtime shape: follow the source expression's representation
+            // (`inc as fn(...)` is plain, `closure as fn(...)` is a closure).
+            auto it = castSourceTypes_.find(c);
+            if (it == castSourceTypes_.end()) return false;
+            return fnRecordExpr(slot, c->getExpression(), it->second, line);
+        }
+        // Any other shape keeps its pre-existing unchecked semantics; leave
+        // the slot unconstrained (plain default).
+        return false;
+    }
+
+    // Resolve the union-find after the whole program has been checked and
+    // mark every closure-represented parameter on its TypeAST. Variable
+    // slots whose declaration had no representation-bearing initializer
+    // (an uninitialized `fn(...)` local/global later assigned a closure)
+    // are annotated too; the other variable slots are re-derived by ir_gen
+    // from their initializer/assignment shapes. Parameter slots with no
+    // registration belong to a callee whose representation cannot be
+    // inferred (a method or an extern function): report instead of emitting
+    // a call through the wrong convention.
+    void resolveFnRepresentations() {
+        for (size_t i = 1; i < fnSlotParent_.size(); ++i) (void)fnFind((int)i);
+        for (size_t i = 1; i < fnSlotParent_.size(); ++i) {
+            if (fnSlotPolarity_[fnFind((int)i)] != FnRepr::Closure) continue;
+            const std::string& key = fnSlotKey_[i];
+            auto astIt = fnParamAst_.find(key);
+            if (astIt != fnParamAst_.end()) {
+                if (astIt->second) astIt->second->setClosureRepr(true);
+                continue;
+            }
+            if (!key.empty() && key[0] == 'v') {
+                auto varIt = fnVarAst_.find(key);
+                if (varIt != fnVarAst_.end() && varIt->second) {
+                    varIt->second->setClosureRepr(true);
+                }
+                continue;
+            }
+            if (!key.empty() && key[0] == 'x') {
+                error("A closure value is returned from " +
+                          (fnSlotLabel_[i].empty() ? std::string("a function") : fnSlotLabel_[i]) +
+                          ", which is declared with a plain fn(...) return type; returning a "
+                          "closure object where fn(...) is declared is not supported "
+                          "(CIDER-BUG-068: use the func(...) return spelling)",
+                      fnSlotLine_[i]);
+                continue;
+            }
+            if (!key.empty() && key[0] == 's') {
+                error("A closure value is stored into " +
+                          (fnSlotLabel_[i].empty() ? std::string("a fn(...) storage location")
+                                                   : fnSlotLabel_[i]) +
+                          ", which keeps the plain fn(...) representation; storing a closure "
+                          "object into a field, array element or pointee is not supported "
+                          "(CIDER-BUG-068)",
+                      fnSlotLine_[i]);
+                continue;
+            }
+            std::string label = fnSlotLabel_[i].empty() ? "an fn(...) parameter" : fnSlotLabel_[i];
+            error("A closure value is passed to " + label +
+                      ", but that parameter's closure representation cannot be inferred "
+                      "(CIDER-BUG-068 supports fn(...) parameters of free functions)",
+                  fnSlotLine_[i]);
+        }
     }
 
     // CID-005/T7 fix round 1 (F3): TypeInfo::signatureEquals compares the
@@ -1019,6 +1245,16 @@ public:
                       stmt.getLine());
                 return;
             }
+            // CIDER-BUG-068: a fixed fn(...) array element keeps the plain
+            // raw-pointer shape, so a statically-plain element that resolves
+            // to a closure (a closure-valued parameter/local) is reported in
+            // the post-pass instead of being stored as an object pointer.
+            TypeInfo elemFn = resolveFunctionPointerAlias(elemDecl);
+            if (elemFn.isFunctionPointer && !elemFn.isArray) {
+                int slot = fnSlot("s:" + std::to_string(fnStoreCheckCount_++), "an array element",
+                                  stmt.getLine());
+                fnRecordExpr(slot, e.get(), lastExprType_, stmt.getLine());
+            }
         }
         // CID-020/021 (spec §6): scopeDepth skips module scopes via the
         // scope-kind flag, so a module-level array still counts as global.
@@ -1267,6 +1503,10 @@ public:
 
     void visit(VarDeclStmt& stmt) override {
         TypeInfo declaredType = TypeInfo::fromAST(stmt.getTypeAST());
+        // CIDER-BUG-068: initializer type captured for the parameter
+        // representation inference recorded after the symbol is defined.
+        TypeInfo declInitType;
+        bool hasDeclInitType = false;
         // CID-020/021 §1: store the canonical nominal identity so later
         // uses compare by defining module, not by the using file. Done
         // before the interface check so dotted spellings resolve too.
@@ -1290,6 +1530,8 @@ public:
             } else {
                 stmt.getInitializer()->accept(*this);
                 TypeInfo initType = lastExprType_;
+                declInitType = initType;
+                hasDeclInitType = true;
 
                 // CIDER-BUG-063: a legacy closure-typed declaration
                 // (`func(...)`/`function(...)`, direct or through a `type`
@@ -1304,6 +1546,18 @@ public:
                     !inClassFieldDecl_ &&
                     declaredFn.isFunctionPointer && declaredFn.isClosure && !declaredFn.isArray &&
                     initFn.isFunctionPointer && !initFn.isClosure && !initFn.isArray &&
+                    declaredFn.signatureEquals(initFn);
+                // CIDER-BUG-068: the mirror direction. A `fn(...)`-typed
+                // declaration (local, global assignment, or through a `type`
+                // alias) initialized with a closure object adopts the
+                // closure representation, exactly like writing the legacy
+                // `func(...)` spelling; the signature (and ABI) must match
+                // exactly. Class fields keep their existing rejection (their
+                // constant-init rule cannot materialise a closure object).
+                bool fnFromClosure =
+                    !inClassFieldDecl_ &&
+                    declaredFn.isFunctionPointer && !declaredFn.isClosure && !declaredFn.isArray &&
+                    initFn.isFunctionPointer && initFn.isClosure && !initFn.isArray &&
                     declaredFn.signatureEquals(initFn);
 
                 if (declaredType.isInterface) {
@@ -1323,7 +1577,8 @@ public:
                                         dynamic_cast<SliceExpr*>(stmt.getInitializer()),
                                         stmt.getLine());
                     lastExprType_ = declaredType;
-                } else if (!closureFromPlainFn && !areTypesCompatible(declaredType, initType)) {
+                } else if (!closureFromPlainFn && !fnFromClosure &&
+                           !areTypesCompatible(declaredType, initType)) {
                     error("Type mismatch in declaration of '" + stmt.getName() +
                               "'. Expected " + canonicalizeNominal(declaredType).toString() + ", got " +
                               canonicalizeNominal(initType).toString(),
@@ -1334,6 +1589,12 @@ public:
                     // representation (the checker defines the symbol below).
                     declaredType = declaredFn;
                     declaredType.isClosure = false;
+                }
+                if (fnFromClosure) {
+                    // Keep the declared signature; store the closure-object
+                    // representation so later calls take the closure path.
+                    declaredType = declaredFn;
+                    declaredType.isClosure = true;
                 }
             }
         }
@@ -1469,6 +1730,25 @@ public:
             if (pit != symbolModules_.end()) symbolModules_[sym->id] = pit->second;
         }
         symbolTable_.define(sym);
+        // CIDER-BUG-068: feed the fn/closure representation inference with
+        // this declaration (locals, globals and class fields alike; class
+        // fields were rejected above, and extern storage keeps its external
+        // raw-pointer shape). The slot follows the symbol identity, so later
+        // uses and assignments unify with it. When the declaration has no
+        // representation-bearing initializer (none, nilPtr, or an unchecked
+        // shape), remember its TypeAST: if a later assignment from a
+        // closure-valued parameter/local resolves the slot to closure,
+        // ir_gen cannot re-derive that from the initializer, so the declared
+        // type is annotated instead.
+        if (!inClassFieldDecl_ && !stmt.isExtern()) {
+            TypeInfo slotType = resolveFunctionPointerAlias(declaredType);
+            if (slotType.isFunctionPointer && !slotType.isArray) {
+                int slot = fnSlotForSymbol(sym, "variable '" + sym->name + "'", stmt.getLine());
+                bool recorded = hasDeclInitType &&
+                                fnRecordExpr(slot, stmt.getInitializer(), declInitType, stmt.getLine());
+                if (!recorded) fnVarAst_[fnSlotKey_[slot]] = stmt.getTypeAST();
+            }
+        }
         if (warningsActive_) {
             // CIDER-FEAT-005: only function-local declarations are unused-
             // warned; globals are recorded so locals shadowing them warn.
@@ -1563,6 +1843,39 @@ public:
             error("Type mismatch in assignment. Expected " + canonicalizeNominal(targetType).toString() +
                       ", got " + canonicalizeNominal(valueType).toString(),
                   stmt.getLine());
+        } else {
+            // CIDER-BUG-068: the assignment is representation-consistent
+            // (the compatibility test above rejects closure/plain mixes on
+            // one storage), so feed the inference with the value's
+            // representation for later argument-passing decisions. A
+            // fn-typed field/element/pointee store keeps the plain raw-pointer
+            // shape (that storage has no representation refinement), so its
+            // site is recorded and a closure value is reported in the
+            // post-pass instead of being miscompiled.
+            TypeInfo targetFn = resolveFunctionPointerAlias(targetType);
+            TypeInfo valueFn = resolveFunctionPointerAlias(valueType);
+            if (targetFn.isFunctionPointer && !targetFn.isArray &&
+                valueFn.isFunctionPointer && !valueFn.isArray) {
+                if (target) {
+                    auto sym = resolveScoped(target->getName());
+                    if (sym && sym->kind == SymbolKind::VARIABLE) {
+                        int slot = fnSlotForSymbol(sym, "variable '" + sym->name + "'", stmt.getLine());
+                        fnRecordExpr(slot, stmt.getValue(), valueType, stmt.getLine());
+                    }
+                } else {
+                    std::string siteLabel = "a fn(...) storage location";
+                    if (auto* mem = dynamic_cast<MemberAccessExpr*>(stmt.getTarget())) {
+                        siteLabel = "field '" + mem->getMember() + "'";
+                    } else if (dynamic_cast<IndexExpr*>(stmt.getTarget())) {
+                        siteLabel = "an array element";
+                    } else if (auto* un = dynamic_cast<UnaryExpr*>(stmt.getTarget())) {
+                        if (un->getOperator() == "*") siteLabel = "a pointer target";
+                    }
+                    int slot = fnSlot("s:" + std::to_string(fnStoreCheckCount_++), siteLabel,
+                                      stmt.getLine());
+                    fnRecordExpr(slot, stmt.getValue(), valueType, stmt.getLine());
+                }
+            }
         }
 
         // CID-003 follow-up (W5): compound assignments mirror the binary
@@ -2271,6 +2584,10 @@ public:
     void visit(CastExpr& expr) override {
         expr.getExpression()->accept(*this);
         TypeInfo srcType = lastExprType_;
+        // CIDER-BUG-068: an unchecked cast does not change the runtime shape;
+        // remember the source type so the representation inference can follow
+        // a closure object through `closure as fn(...)`.
+        castSourceTypes_[&expr] = srcType;
         lastExprType_ = canonicalizeNominal(TypeInfo::fromAST(expr.getTargetType()), expr.getLine());
         // CIDER-BUG-018: an array-to-array cast is a layout reinterpretation
         // whose copy uses the TARGET size; require the same element type and
@@ -2429,14 +2746,33 @@ public:
             std::string defMod = definingModuleOf(funcSym);
             for (size_t i = 0; i < expr.getArgs().size(); ++i) {
                 expr.getArgs()[i]->accept(*this);
+                TypeInfo argT = lastExprType_;
                 TypeInfo paramT =
                     canonicalizeInModule(funcSym->parameterTypes[i], defMod, expr.getLine());
-                if (!areTypesCompatible(paramT, lastExprType_)) {
+                TypeInfo fnParam = resolveFunctionPointerAlias(paramT);
+                TypeInfo fnArg = resolveFunctionPointerAlias(argT);
+                // CIDER-BUG-068: a closure object is accepted where a plain
+                // `fn(...)` parameter with the exact same signature (ABI
+                // included) is expected. The whole-program inference below
+                // then decides whether this parameter is closure-represented;
+                // a parameter that also receives raw fn values is reported as
+                // a representation conflict instead of being miscompiled.
+                bool closureToFnParam =
+                    fnParam.isFunctionPointer && !fnParam.isClosure && !fnParam.isArray &&
+                    fnArg.isFunctionPointer && fnArg.isClosure && !fnArg.isArray &&
+                    fnParam.signatureEquals(fnArg);
+                if (!areTypesCompatible(paramT, argT) && !closureToFnParam) {
                     const std::string& label = displayName.empty() ? funcSym->name : displayName;
                     error("Argument " + std::to_string(i + 1) + " to '" + label +
                               "' type mismatch. Expected " + paramT.toString() + ", got " +
                               canonicalizeNominal(lastExprType_).toString(),
                           expr.getLine());
+                } else if (fnParam.isFunctionPointer && !fnParam.isArray) {
+                    // Record the argument's representation against the
+                    // parameter slot (closure/plain constant or a slot edge
+                    // when a parameter/local value flows through).
+                    int slot = fnParamSlot(funcSym, i, expr.getLine());
+                    fnRecordExpr(slot, expr.getArgs()[i].get(), argT, expr.getLine());
                 }
             }
         }
@@ -2457,6 +2793,10 @@ public:
         // declarations cannot leak it.
         TypeInfo prevReturnType = currentDeclaredReturnType_;
         bool prevHasReturnType = hasDeclaredReturnType_;
+        // CIDER-BUG-068: the function name labels return-representation
+        // diagnostics; saved/restored like the declared return type.
+        std::string prevFunctionName = currentFunctionName_;
+        currentFunctionName_ = stmt.getName();
         currentDeclaredReturnType_ = stmt.getReturnType()
             ? canonicalizeNominal(TypeInfo::fromAST(stmt.getReturnType()), stmt.getLine())
             : TypeInfo{"void", 0};
@@ -2474,6 +2814,20 @@ public:
             symbolTable_.define(thisSym);
         }
 
+        // CIDER-BUG-068: register this free function's fn-typed parameters
+        // with the representation inference, so call sites can constrain
+        // them and the resolution can mark their TypeAST. Methods keep the
+        // existing rejection (their call sites resolve a synthesized
+        // FunctionSymbol, so no parameter slot can be identified).
+        std::shared_ptr<FunctionSymbol> fnDeclSym;
+        if (currentClassName_.empty() && !stmt.isExtern()) {
+            auto declSym = resolveScoped(stmt.getName());
+            if (declSym && declSym->kind == SymbolKind::FUNCTION) {
+                fnDeclSym = std::static_pointer_cast<FunctionSymbol>(declSym);
+            }
+        }
+
+        size_t fnParamIndex = 0;
         for (auto& param : stmt.getParams()) {
             auto paramSym = std::make_shared<Symbol>();
             paramSym->kind = SymbolKind::VARIABLE;
@@ -2489,6 +2843,18 @@ public:
                 }
             }
             symbolTable_.define(paramSym);
+            if (fnDeclSym) {
+                TypeInfo paramFn = resolveFunctionPointerAlias(paramSym->type);
+                if (paramFn.isFunctionPointer && !paramFn.isArray) {
+                    std::string key = fnParamSlotKey(fnDeclSym, fnParamIndex);
+                    fnParamAst_[key] = param.second.get();
+                    fnParamSymKey_[paramSym->id] = key;
+                    fnSlot(key,
+                           "parameter '" + param.first + "' of '" + stmt.getName() + "'",
+                           stmt.getLine());
+                }
+            }
+            ++fnParamIndex;
             // CIDER-FEAT-005: parameters are never unused-warned, but a
             // local shadowing one is.
             if (warningsActive_) {
@@ -2502,6 +2868,7 @@ public:
         exitScopeChecked();
         currentDeclaredReturnType_ = prevReturnType;
         hasDeclaredReturnType_ = prevHasReturnType;
+        currentFunctionName_ = prevFunctionName;
     }
 
     void visit(BlockStmt& stmt) override {
@@ -2612,6 +2979,25 @@ public:
                     error("Return type mismatch. Expected " + declArr.toString() +
                               ", got " + valArr.toString(),
                           stmt.getLine());
+                }
+                // CIDER-BUG-068: a function declared to return a plain
+                // `fn(...)` value must not hand a closure object to its
+                // caller (callers type the result as a raw code pointer and
+                // call it directly). The value is statically a raw pointer
+                // here (the exact-match branch above accepted it), but a
+                // parameter/local/cast can resolve to the closure
+                // representation; record it and report in the post-pass
+                // resolution. Returning a closure object where `fn(...)` is
+                // declared stays unsupported (use the `func(...)` return
+                // spelling); a closure-typed return value is already reported
+                // by the mismatch branch above.
+                if (declType.isFunctionPointer && !declType.isClosure && !declType.isArray &&
+                    valType.isFunctionPointer && !valType.isClosure && !valType.isArray &&
+                    declType.signatureEquals(valType)) {
+                    int slot = fnSlot("x:" + std::to_string(fnReturnCheckCount_++),
+                                      "the return value of '" + currentFunctionName_ + "'",
+                                      stmt.getLine());
+                    fnRecordExpr(slot, stmt.getValue(), lastExprType_, stmt.getLine());
                 }
             }
         } else {
@@ -3190,6 +3576,36 @@ private:
         if (suppressErrors_ > 0) return;
         reporter_.error(msg, line);
     }
+
+    // CIDER-BUG-068 representation inference state (slot 0 is a sentinel so
+    // a valid slot index is never 0). See the helpers near
+    // resolveFunctionPointerAlias for the design.
+    std::map<std::string, int> fnSlotIndex_;
+    std::vector<int> fnSlotParent_ = {0};
+    std::vector<FnRepr> fnSlotPolarity_ = {FnRepr::Unknown};
+    std::vector<std::string> fnSlotLabel_ = {""};
+    std::vector<int> fnSlotLine_ = {0};
+    std::vector<std::string> fnSlotKey_ = {""};
+    // Parameter slot key -> declared TypeAST (annotated on resolution).
+    std::map<std::string, TypeAST*> fnParamAst_;
+    // Variable slot key -> declared TypeAST, for declarations with no
+    // representation-bearing initializer (annotated when the slot resolves
+    // to closure through a later assignment).
+    std::map<std::string, TypeAST*> fnVarAst_;
+    // Cast expression -> its source type, so the representation inference
+    // can follow a closure object through `closure as fn(...)`.
+    std::map<const CastExpr*, TypeInfo> castSourceTypes_;
+    // Parameter symbol id -> its slot key (forwarding chains).
+    std::map<uint64_t, std::string> fnParamSymKey_;
+    // Return-site check slots (key prefix "x:"): a return from a function
+    // declared to return a plain `fn(...)` value that resolves to a closure
+    // is reported after the walk.
+    int fnReturnCheckCount_ = 0;
+    // Field/element/pointee store sites (key prefix "s:"): that storage
+    // keeps raw fn pointers, so a closure value is reported after the walk.
+    int fnStoreCheckCount_ = 0;
+    // Name of the function whose body is being checked (diagnostics).
+    std::string currentFunctionName_;
 
     // CIDER-FEAT-005: close a checker scope, reporting its unused locals
     // first. Every symbolTable_.exitScope() in this class goes through here.

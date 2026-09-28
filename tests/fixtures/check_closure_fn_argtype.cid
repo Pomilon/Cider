@@ -1,0 +1,7 @@
+// CIDER-BUG-068: a closure whose signature differs from the declared
+// `fn(...)` parameter is still rejected (exact signature compatibility).
+func apply(cb: fn(int, int) -> int, x: int) -> int { return cb(x, x); }
+
+func main() -> int {
+  return apply(func(x: int) -> int { return x + 1; }, 1);
+}
