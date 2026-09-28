@@ -144,9 +144,15 @@ public:
         ft.fnParamTypes = std::make_shared<std::vector<TypeInfo>>();
         std::string defMod = definingModuleOf(fsym);
         for (const auto& p : fsym->parameterTypes) {
-            ft.fnParamTypes->push_back(canonicalizeInModule(p, defMod, line));
+            TypeInfo paramT = canonicalizeInModule(p, defMod, line);
+            // CIDER-BUG-085: the named function's signature is the reference
+            // spelling AST-derived fn types must match; resolve its nested
+            // interface flags here so both sides carry them.
+            resolveInterfaceFlag(paramT);
+            ft.fnParamTypes->push_back(paramT);
         }
         ft.fnReturnType = std::make_shared<TypeInfo>(canonicalizeInModule(fsym->returnType, defMod, line));
+        resolveInterfaceFlag(*ft.fnReturnType);
         return ft;
     }
 
@@ -389,9 +395,22 @@ public:
     // gate must apply the same resolution to `sym->type` before testing
     // isFunctionPointer (ir_gen::mapType already walks the alias chain).
     TypeInfo resolveFunctionPointerAlias(TypeInfo t) {
-        if (t.isFunctionPointer || t.isArray) return t;
+        // CIDER-BUG-085: this helper feeds both sides of every explicit
+        // signatureEquals comparison. Resolve interface flags through the
+        // signature here as well, so a symbol-stored `fn(I) -> int` and an
+        // AST-derived spelling of the same type compare with identical
+        // flags even when the type reached the comparison without passing a
+        // collection/declaration boundary.
+        if (t.isFunctionPointer || t.isArray) {
+            resolveInterfaceFlag(t);
+            return t;
+        }
         TypeInfo resolved = resolveType(t);
-        return resolved.isFunctionPointer ? resolved : t;
+        if (resolved.isFunctionPointer) {
+            resolveInterfaceFlag(resolved);
+            return resolved;
+        }
+        return t;
     }
 
     // ------------------------------------------------------------------
@@ -870,6 +889,18 @@ public:
         if (t1.name == "wildcard" || t2.name == "wildcard") return true;
         t1 = resolveType(t1);
         t2 = resolveType(t2);
+        // CIDER-BUG-085: every spelling of a nominal interface carries the
+        // same flag. A signature that reached this comparison without a
+        // collection/declaration boundary (a cast target, a synthesized
+        // signature copy) may still have an unresolved nested interface
+        // param; resolve both sides with the same spelling-derived rule.
+        // This cannot mask a real mismatch: the flag is only ever SET from
+        // the resolved kind of the spelling's own name and is never cleared,
+        // so `fn(int) -> int` vs `fn(I) -> int` and `fn(I) -> int` vs
+        // `fn(J) -> int` still differ by name, while the two spellings of
+        // the one type stop disagreeing about internal representation.
+        resolveInterfaceFlag(t1);
+        resolveInterfaceFlag(t2);
         // CID-005/T7 fix round 1 (F3): resolve alias chains inside fn
         // signatures too, so a typedef spelling and its expansion are
         // interchangeable in every fn-value position (declaration,
@@ -1449,7 +1480,22 @@ public:
     // CIDER-BUG-080: dotted spellings (`lib.Shape`) resolve their member in
     // the qualifier's module scope, mirroring the 070 collector fix, so the
     // flag is recovered for qualified parameters in every call position.
+    // CIDER-BUG-085: recurse through fn(...) signatures. A `fn(I) -> int`
+    // spelling's parameters/return are TypeInfos built by
+    // TypeInfo::fromAST, which cannot resolve symbols, so an interface
+    // nested in the signature starts unflagged while the same position in a
+    // named function's signature carries the flag from the collector. Walks
+    // the same shape canonicalizeNominal walks, so every spelling of one
+    // type resolves to the same flags. Arrays keep their wrapper unflagged
+    // (CIDER-BUG-069); a fn-typed element still resolves its signature.
     void resolveInterfaceFlag(TypeInfo& t) {
+        if (t.isFunctionPointer) {
+            if (t.fnParamTypes) {
+                for (auto& p : *t.fnParamTypes) resolveInterfaceFlag(p);
+            }
+            if (t.fnReturnType) resolveInterfaceFlag(*t.fnReturnType);
+            return;
+        }
         if (t.isInterface || t.pointerLevel > 0 || t.isArray) return;
         auto typeSym = resolveScoped(t.name);
         if (!typeSym && t.name.find('.') != std::string::npos) {
@@ -2857,6 +2903,10 @@ public:
         currentDeclaredReturnType_ = stmt.getReturnType()
             ? canonicalizeNominal(TypeInfo::fromAST(stmt.getReturnType()), stmt.getLine())
             : TypeInfo{"void", 0};
+        // CIDER-BUG-085: a declared `-> fn(I) -> int` return type resolves
+        // its signature's interface flags, so the ReturnStmt signature check
+        // compares it with a named function's flagged signature consistently.
+        resolveInterfaceFlag(currentDeclaredReturnType_);
         hasDeclaredReturnType_ = true;
 
         symbolTable_.enterScope();
@@ -2893,12 +2943,10 @@ public:
             // CID-020/021 §1: store the canonical nominal identity (dotted
             // spellings resolve here, with the diagnostic at this line).
             paramSym->type = canonicalizeNominal(paramSym->type, stmt.getLine());
-            if (!paramSym->type.isInterface && paramSym->type.pointerLevel == 0) {
-                auto typeSym = resolveScoped(paramSym->type.name);
-                if (typeSym && typeSym->kind == SymbolKind::INTERFACE) {
-                    paramSym->type.isInterface = true;
-                }
-            }
+            // CIDER-BUG-085: recursive, so a `f: fn(I) -> int` parameter
+            // carries the interface flag nested in its signature, matching
+            // the signature the collector stored on the function symbol.
+            resolveInterfaceFlag(paramSym->type);
             symbolTable_.define(paramSym);
             if (fnDeclSym) {
                 TypeInfo paramFn = resolveFunctionPointerAlias(paramSym->type);
@@ -3296,6 +3344,11 @@ public:
             sym->name = p.first;
             if (p.second) {
                 sym->type = canonicalizeNominal(TypeInfo::fromAST(p.second.get()), expr.getLine());
+                // CIDER-BUG-085: a closure parameter spelled with an
+                // interface (or a fn signature containing one) carries the
+                // same flags as any other declaration, so the literal's
+                // signature compares equal to the declared spelling.
+                resolveInterfaceFlag(sym->type);
             } else {
                 sym->type = {"int", 0};
             }
@@ -3323,6 +3376,9 @@ public:
             expr.getReturnType()
                 ? canonicalizeNominal(TypeInfo::fromAST(expr.getReturnType()), expr.getLine())
                 : TypeInfo{"int", 0});
+        // CIDER-BUG-085: the closure's return spelling resolves its
+        // interface flags like every other signature position.
+        resolveInterfaceFlag(*closureType.fnReturnType);
         lastExprType_ = closureType;
     }
     void visit(TypeAST&) override {}

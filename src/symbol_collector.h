@@ -313,6 +313,9 @@ public:
         // CIDER-BUG-066: a signature-only use instantiates its struct
         // templates before the checker resolves the annotation.
         instantiateStructTemplatesInTypeInfo(sym->returnType);
+        // CIDER-BUG-085: a return type that is a fn(...) spelling resolves
+        // its signature's interface flags like every other collected type.
+        resolveInterfaceTypeFlag(sym->returnType);
         sym->isExtern = stmt.isExtern();
         sym->isAsync = stmt.isAsync();
         // CID-005: virtual/override definitions are VIRTUAL_CALL targets,
@@ -342,15 +345,11 @@ public:
 
         for (auto& param : stmt.getParams()) {
             TypeInfo paramType = TypeInfo::fromAST(param.second.get());
-            // CIDER-BUG-070: resolve through the nominal lookup so a
-            // module-qualified interface spelling (`lib.Shape`) gets the
-            // fat-pointer flag exactly like a bare one.
-            if (!paramType.isInterface && paramType.pointerLevel == 0) {
-                auto typeSym = resolveNominalType(paramType.name);
-                if (typeSym && typeSym->kind == SymbolKind::INTERFACE) {
-                    paramType.isInterface = true;
-                }
-            }
+            // CIDER-BUG-070/CIDER-BUG-080: resolve through the nominal lookup
+            // so a module-qualified interface spelling (`lib.Shape`) gets the
+            // fat-pointer flag exactly like a bare one; CIDER-BUG-085 extends
+            // this through fn(...) signatures (see resolveInterfaceTypeFlag).
+            resolveInterfaceTypeFlag(paramType);
             // CIDER-BUG-066: parameter annotations (`p: *Pair<int>`, arrays,
             // fn-pointer signatures) instantiate their struct templates.
             instantiateStructTemplatesInTypeInfo(paramType);
@@ -547,6 +546,9 @@ public:
             method.returnType = TypeInfo::fromAST(m.returnType.get());
             // CIDER-BUG-066: interface signatures are type annotations too.
             instantiateStructTemplatesInTypeInfo(method.returnType);
+            // CIDER-BUG-085: fn(...) return spellings resolve their
+            // signature's interface flags like every other collected type.
+            resolveInterfaceTypeFlag(method.returnType);
             for (auto& p : m.params) {
                 TypeInfo paramType = TypeInfo::fromAST(p.second.get());
                 // CIDER-BUG-066: interface signatures are type annotations
@@ -903,6 +905,9 @@ public:
                 m.name = method->getName();
                 m.mangledName = sym->name + "_" + m.name;
                 m.returnType = TypeInfo::fromAST(method->getReturnType());
+                // CIDER-BUG-085: fn(...) return spellings resolve their
+                // signature's interface flags like every other collected type.
+                resolveInterfaceTypeFlag(m.returnType);
                 m.isVirtual = method->isVirtual();
                 m.isOverride = method->isOverride();
 
@@ -1100,7 +1105,23 @@ public:
     // CIDER-BUG-080: the same resolution is applied to class-method,
     // constructor and interface-method parameter types, so call sites and
     // interface satisfaction see `x: Shape` as the 16-byte fat pointer it is.
+    // CIDER-BUG-085: resolve through fn(...) signatures too. The parameters
+    // and return type of a `fn(I) -> int` spelling are built by
+    // TypeInfo::fromAST, which cannot consult the symbol table, so an
+    // interface nested in the signature would stay unflagged while the same
+    // position in a named function's collected signature carries the flag
+    // (CIDER-BUG-080). Without this, the two spellings of one type compare
+    // unequal. The recursion mirrors canonicalizeNominal's signature walk;
+    // arrays keep their wrapper unflagged (CIDER-BUG-069) but an element that
+    // is a fn type still resolves its own signature.
     void resolveInterfaceTypeFlag(TypeInfo& type) {
+        if (type.isFunctionPointer) {
+            if (type.fnParamTypes) {
+                for (auto& p : *type.fnParamTypes) resolveInterfaceTypeFlag(p);
+            }
+            if (type.fnReturnType) resolveInterfaceTypeFlag(*type.fnReturnType);
+            return;
+        }
         if (type.isInterface || type.pointerLevel > 0 || type.isArray) return;
         auto sym = resolveNominalType(type.name);
         if (sym && sym->kind == SymbolKind::INTERFACE) type.isInterface = true;
@@ -2523,7 +2544,10 @@ public:
         // template's defining scope (substitution above runs before the
         // scope switch), so an instantiated `f<T>(x: Shape)` keeps the
         // fat-pointer flag at call sites.
+        // CIDER-BUG-085: the return type is resolved the same way (an
+        // instantiated `f<T>() -> fn(Shape) -> int` keeps the nested flags).
         for (auto& pt : funcSym->parameterTypes) resolveInterfaceTypeFlag(pt);
+        resolveInterfaceTypeFlag(funcSym->returnType);
         symbolTable_.define(funcSym);
         if (definingScope != rootScope && !rootScope->resolveLocal(mangledName)) {
             rootScope->define(funcSym);

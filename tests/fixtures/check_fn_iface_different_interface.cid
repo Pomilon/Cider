@@ -1,0 +1,14 @@
+// CIDER-BUG-085: two different interfaces keep their distinct signatures in
+// a fn(...) parameter position. Only the same interface spelling compares
+// equal after flag resolution.
+interface I { func v() -> int; }
+interface J { func w() -> int; }
+
+func named(x: I) -> int { return x.v(); }
+
+func callIt(f: fn(J) -> int) -> int { return 0; }
+
+func main() -> int {
+  callIt(named);
+  return 0;
+}
