@@ -28,6 +28,18 @@ namespace cider {
 //    (identifier read, type spelling, callee, ...) ever bound to.
 //  * shadowing: a local declaration whose name is already bound by an outer
 //    local/parameter/global of the same program.
+//  * read-before-assignment (CIDER-ISS-002): a local declared without an
+//    initializer that is read before any assignment that appears textually
+//    earlier in source order. The rule is lexical and deliberately
+//    conservative: an assignment anywhere earlier — including a store
+//    through an element/member chain (`arr[i] = v`, `s.f = v`), even one
+//    guarded by a branch that may not run — suppresses the warning, so this
+//    is a "may be read before being assigned" diagnostic with false
+//    negatives rather than a definite-assignment proof. Parameters,
+//    `for-in` bindings, catch bindings and `_`-prefixed names are exempt
+//    like unused-variable analysis; taking the address (`&x`, `&x[i]`) is a
+//    possible initialization (the address may escape and be written
+//    through), not a read.
 class WarningTracker {
 public:
     explicit WarningTracker(ErrorReporter& reporter) : reporter_(reporter) {}
@@ -71,9 +83,36 @@ public:
     }
 
     // A read/reference of a tracked declaration clears its unused status.
-    void markRead(const std::shared_ptr<Symbol>& sym) {
+    // CIDER-ISS-002: a read of a local that no earlier assignment
+    // initialized reports the read-before-assignment warning once per
+    // variable. `line`/`col` locate the diagnostic at the read site;
+    // `checkUninit=false` keeps bookkeeping-only references (asm operands,
+    // re-exports) from warning.
+    void markRead(const std::shared_ptr<Symbol>& sym, int line = 0, int col = 0,
+                  bool checkUninit = true) {
         auto it = sym ? decls_.find(sym->id) : decls_.end();
-        if (it != decls_.end()) it->second.read = true;
+        if (it == decls_.end()) return;
+        Decl& decl = it->second;
+        decl.read = true;
+        if (!checkUninit || !decl.warnUninit || decl.assigned || decl.uninitWarned) return;
+        decl.uninitWarned = true;
+        reporter_.warning("local '" + decl.name + "' may be read before being assigned", line, col);
+    }
+
+    // CIDER-ISS-002: a local declared without an initializer starts
+    // unassigned and is subject to the read-before-assignment warning until
+    // an assignment is seen. `_`-prefixed names stay silent.
+    void markUninitialized(const std::shared_ptr<Symbol>& sym) {
+        auto it = sym ? decls_.find(sym->id) : decls_.end();
+        if (it != decls_.end() && !isSilenced(it->second.name)) it->second.warnUninit = true;
+    }
+
+    // CIDER-ISS-002: an assignment (`=`, `+=`, ..., `++`/`--`) initializes
+    // the local for the lexical analysis. Writes are not reads, so the
+    // unused-variable flag is unaffected.
+    void markAssigned(const std::shared_ptr<Symbol>& sym) {
+        auto it = sym ? decls_.find(sym->id) : decls_.end();
+        if (it != decls_.end()) it->second.assigned = true;
     }
 
     // A name resolution bound to an imported symbol (identifier, type
@@ -85,10 +124,15 @@ public:
     }
 
     // `&x` keeps the variable out of the unused report entirely (the
-    // address may escape to code the checker cannot see).
+    // address may escape to code the checker cannot see). CIDER-ISS-002:
+    // the address may also be written through, so an escape counts as a
+    // possible initialization and is never itself read as a value.
     void markAddressTaken(const std::shared_ptr<Symbol>& sym) {
         auto it = sym ? decls_.find(sym->id) : decls_.end();
-        if (it != decls_.end()) it->second.addressTaken = true;
+        if (it != decls_.end()) {
+            it->second.addressTaken = true;
+            it->second.assigned = true;
+        }
     }
 
     // Report the unused locals of a scope as it closes (the checker calls
@@ -139,6 +183,14 @@ private:
         bool addressTaken = false;
         bool warnUnused = false;
         bool isImport = false;
+        // CIDER-ISS-002: read-before-assignment bookkeeping. `warnUninit` is
+        // set for locals declared without an initializer; `assigned` records
+        // whether an assignment was seen textually earlier in the traversal
+        // (lexical source order); `uninitWarned` caps the report at one
+        // diagnostic per variable.
+        bool warnUninit = false;
+        bool assigned = false;
+        bool uninitWarned = false;
     };
 
     // `_`-prefixed names are the documented opt-out (unused/shadowing);

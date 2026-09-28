@@ -51,10 +51,11 @@ public:
 
     // CIDER-FEAT-005: opt-in warnings (--warn). Disabled by default so the
     // default pipeline stays byte-identical; when enabled the checker feeds
-    // the WarningTracker (unused variables/imports, shadowing) whose
-    // diagnostics go to reporter_.warning() and never affect hasErrors() or
-    // exit codes. Only the root program is analyzed: imported module bodies
-    // are error-checked, never warned about.
+    // the WarningTracker (unused variables/imports, shadowing,
+    // read-before-assignment) whose diagnostics go to reporter_.warning()
+    // and never affect hasErrors() or exit codes. Only the root program is
+    // analyzed: imported module bodies are error-checked, never warned
+    // about.
     void setWarningsEnabled(bool v) { warningsEnabled_ = v; }
 
     // CIDER-FEAT-005: every successful name resolution counts as a use for
@@ -1348,6 +1349,15 @@ public:
             bool isLocal = symbolTable_.scopeDepth() > 0;
             warnings_.declare(symbolTable_.getCurrentScope(), sym, stmt.getLine(),
                               stmt.getColumn(), isLocal && !stmt.isExtern(), isLocal);
+            // CIDER-ISS-002: a local without an initializer starts
+            // unassigned; reads before the first assignment warn. Externs
+            // are backed by storage the checker cannot see (like globals),
+            // and value-class locals run the class's field initializers /
+            // zero-default stores at the declaration site (CIDER-BUG-049).
+            if (isLocal && !stmt.isExtern() && !stmt.getInitializer() &&
+                !isValueClassType(declaredType)) {
+                warnings_.markUninitialized(sym);
+            }
         }
     }
 
@@ -1358,6 +1368,23 @@ public:
         bool prevSuppressRead = suppressIdentRead_;
         if (stmt.getOp().empty() && dynamic_cast<IdentifierExpr*>(stmt.getTarget())) {
             suppressIdentRead_ = true;
+        }
+        // CIDER-ISS-002: a store through an element/member chain
+        // (`arr[i] = v`, `s.f = v`) initializes that storage lexically.
+        // Mark the storage base before the target walk so its base read is
+        // not reported (conservative: any element/member store counts for
+        // the whole variable). A bare identifier target keeps the ordering
+        // rule below (`x = x + 1` must still read x), and a pointer indexed
+        // target (`p[i] = v`) genuinely reads p, so it is left to the walk.
+        if (warningsActive_) {
+            bool indexed = false;
+            if (const std::string* base = addressBaseName(stmt.getTarget(), indexed)) {
+                auto baseSym = resolveScopedRaw(*base);
+                bool pointerIndex = indexed && indexesPointerValue(baseSym);
+                if (!dynamic_cast<IdentifierExpr*>(stmt.getTarget()) && !pointerIndex) {
+                    warnings_.markAssigned(baseSym);
+                }
+            }
         }
         stmt.getTarget()->accept(*this);
         suppressIdentRead_ = prevSuppressRead;
@@ -1373,6 +1400,13 @@ public:
 
         stmt.getValue()->accept(*this);
         TypeInfo valueType = lastExprType_;
+
+        // CIDER-ISS-002: the target is initialized from here on (simple and
+        // compound forms both count). Marked after the value walk so
+        // `x = x + 1` on an unassigned x still reports the value read.
+        if (warningsActive_ && target) {
+            warnings_.markAssigned(resolveScoped(target->getName()));
+        }
 
         // CIDER-BUG-054: reassigning an interface variable uses the same
         // conversion rule as its declaration — any satisfying concrete
@@ -1544,17 +1578,73 @@ public:
         return false;
     }
 
-    void visit(UnaryExpr& expr) override {
-        expr.getOperand()->accept(*this);
-        TypeInfo operandType = lastExprType_;
+    // CIDER-ISS-002: indexing a pointer value (`p[i]`, `p[i].f`) reads p's
+    // value; indexing fixed-array storage does not. Array-of-pointer types
+    // carry pointerLevel too, so isArray disambiguates. Slices index their
+    // descriptor, which is a value read.
+    bool indexesPointerValue(const std::shared_ptr<Symbol>& sym) const {
+        return sym && !sym->type.isArray &&
+               (sym->type.pointerLevel > 0 || sym->type.isSlice);
+    }
 
-        // CIDER-FEAT-005: `&x` keeps x out of the unused report — the
-        // address may escape to code the checker cannot see.
+    // CIDER-ISS-002: a value-class local runs the class's field
+    // initializers and zero-default stores at its declaration site even
+    // without an explicit initializer (CIDER-BUG-049), so it is not an
+    // "unassigned" local. Interfaces and structs have no such pass.
+    bool isValueClassType(const TypeInfo& type) {
+        if (type.pointerLevel > 0 || type.isArray || type.isInterface) return false;
+        TypeInfo resolved = resolveType(type);  // follow `type X = C` aliases
+        if (resolved.pointerLevel > 0 || resolved.isArray || resolved.isInterface) return false;
+        auto sym = resolveScopedRaw(resolved.name);
+        return sym && sym->kind == SymbolKind::CLASS;
+    }
+
+    // CIDER-ISS-002: the identifier whose storage `&operand` denotes (`x`
+    // for `&x`, `&x[i]`, `&x.f`). Returns null when the operand is not
+    // based on a bare identifier (calls, literals, dereferences), or when
+    // the chain crosses `->`, which reads a pointer's value. `indexed`
+    // reports whether an `[]` was crossed so the caller can distinguish
+    // fixed-array storage from indexing a pointer (which reads its value).
+    const std::string* addressBaseName(Expression* expr, bool& indexed) {
+        indexed = false;
+        for (Expression* cur = expr; cur != nullptr;) {
+            if (auto* id = dynamic_cast<IdentifierExpr*>(cur)) return &id->getName();
+            if (auto* grp = dynamic_cast<GroupingExpr*>(cur)) {
+                cur = grp->getExpression();
+                continue;
+            }
+            if (auto* ma = dynamic_cast<MemberAccessExpr*>(cur)) {
+                if (ma->isArrow()) return nullptr;
+                cur = ma->getObject();
+                continue;
+            }
+            if (auto* ix = dynamic_cast<IndexExpr*>(cur)) {
+                indexed = true;
+                cur = ix->getObject();
+                continue;
+            }
+            return nullptr;
+        }
+        return nullptr;
+    }
+
+    void visit(UnaryExpr& expr) override {
+        // CIDER-ISS-002: `&x` (`&x[i]`, `&x.f`) does not read x's value.
+        // Mark the storage base address-taken BEFORE the operand walk so
+        // the walk does not report a read-before-assignment for it. A
+        // pointer indexed under `&` (`&p[i]` is p + i) does read p's value,
+        // so it is left to the normal walk, as is any `*p` base.
         if (warningsActive_ && expr.getOperator() == "&") {
-            if (auto id = dynamic_cast<IdentifierExpr*>(expr.getOperand())) {
-                warnings_.markAddressTaken(resolveScopedRaw(id->getName()));
+            bool indexed = false;
+            if (const std::string* base = addressBaseName(expr.getOperand(), indexed)) {
+                auto baseSym = resolveScopedRaw(*base);
+                if (!(indexed && indexesPointerValue(baseSym))) {
+                    warnings_.markAddressTaken(baseSym);
+                }
             }
         }
+        expr.getOperand()->accept(*this);
+        TypeInfo operandType = lastExprType_;
 
         if (expr.getOperator() == "&") {
             lastExprType_ = operandType;
@@ -1593,6 +1683,16 @@ public:
                           "' must be a variable, member, element, or dereference",
                       expr.getLine());
             }
+            // CIDER-ISS-002: `x++` stores back, so x counts as assigned
+            // after the operand's read (already reported above when x had
+            // never been assigned).
+            if (warningsActive_) {
+                Expression* inc = expr.getOperand();
+                while (auto* grp = dynamic_cast<GroupingExpr*>(inc)) inc = grp->getExpression();
+                if (auto* id = dynamic_cast<IdentifierExpr*>(inc)) {
+                    warnings_.markAssigned(resolveScopedRaw(id->getName()));
+                }
+            }
             lastExprType_ = operandType;
         }
     }
@@ -1604,8 +1704,11 @@ public:
         }
         auto sym = resolveScoped(expr.getName());
         // CIDER-FEAT-005: a bare assignment target is a write; everything
-        // else that reaches an identifier is a read.
-        if (warningsActive_ && !suppressIdentRead_) warnings_.markRead(sym);
+        // else that reaches an identifier is a read. CIDER-ISS-002: the
+        // read position locates a read-before-assignment warning.
+        if (warningsActive_ && !suppressIdentRead_) {
+            warnings_.markRead(sym, expr.getLine(), expr.getColumn());
+        }
         if (!sym) {
             // Inside a method, a name matching one of the class's fields is
             // almost always a missing `this.` — point at it instead of the
@@ -2544,9 +2647,11 @@ public:
     void visit(ExportExpressionStmt& stmt) override {
         // CIDER-FEAT-005: `export { x };` references x even though the
         // expression is never read; a re-exported import is not "unused".
+        // CIDER-ISS-002: exporting is not a value read either.
         if (!warningsActive_) return;
         if (auto id = dynamic_cast<IdentifierExpr*>(stmt.getExpression())) {
-            warnings_.markRead(resolveScopedRaw(id->getName()));
+            warnings_.markRead(resolveScopedRaw(id->getName()), stmt.getLine(), stmt.getColumn(),
+                               /*checkUninit=*/false);
         }
     }
 
@@ -2677,7 +2782,9 @@ public:
         // CIDER-FEAT-005: inline asm references locals by name through
         // `{x}` placeholders; mark every mentioned variable as a use so an
         // asm-only variable is not reported unused. IrGen strips the same
-        // `*` deref marker and `:width` suffix.
+        // `*` deref marker and `:width` suffix. CIDER-ISS-002: a placeholder
+        // may be an output operand, so asm counts as an escape/possible
+        // initialization rather than a value read.
         if (!warningsActive_) return;
         for (const auto& entry : stmt.localVariables) {
             std::string name = entry.first.empty() ? entry.second : entry.first;
@@ -2685,7 +2792,9 @@ public:
             size_t colon = name.find(':');
             if (colon != std::string::npos) name = name.substr(0, colon);
             if (name.empty()) continue;
-            warnings_.markRead(resolveScopedRaw(name));
+            auto sym = resolveScopedRaw(name);
+            warnings_.markRead(sym, stmt.getLine(), stmt.getColumn(), /*checkUninit=*/false);
+            warnings_.markAssigned(sym);
         }
     }
 

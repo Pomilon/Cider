@@ -893,6 +893,162 @@ int run() {
             "}\n");
         CHECK(hasWarning(catchWarn, "unused variable 'e'"));
     }
+    // CIDER-ISS-002: reading a local before any assignment warns once, at
+    // the read, and the program stays error-free (warning-only).
+    {
+        auto w = checkSrcWarnings(
+            "func main() -> void {\n"
+            "    var x: int;\n"
+            "    var y: int = x;\n"
+            "}\n");
+        CHECK(hasWarning(w, "local 'x' may be read before being assigned"));
+        CHECK(checkSrc("func main() -> void { var x: int; var y: int = x; }\n").empty());
+
+        // A read-before-assignment is still a read, so the later assignment
+        // does not also produce an unused-variable warning for x.
+        auto later = checkSrcWarnings(
+            "func main() -> void {\n"
+            "    var x: int;\n"
+            "    var y: int = x;\n"
+            "    x = 1;\n"
+            "}\n");
+        CHECK(hasWarning(later, "local 'x' may be read before being assigned"));
+        CHECK(!hasWarning(later, "unused variable 'x'"));
+    }
+    {
+        // Assigned first, declared with an initializer, or address-taken:
+        // no read-before-assignment warning.
+        auto assigned = checkSrcWarnings(
+            "func main() -> void {\n"
+            "    var x: int;\n"
+            "    x = 1;\n"
+            "    var y: int = x;\n"
+            "}\n");
+        CHECK(!hasWarning(assigned, "read before being assigned"));
+        auto init = checkSrcWarnings(
+            "func main() -> void {\n"
+            "    var x: int = 1;\n"
+            "    var y: int = x;\n"
+            "}\n");
+        CHECK(!hasWarning(init, "read before being assigned"));
+        // The address may escape and be written through; `&x` is not a read.
+        auto addr = checkSrcWarnings(
+            "func sink(p: int*) -> void { }\n"
+            "func main() -> void { var x: int; sink(&x); }\n");
+        CHECK(!hasWarning(addr, "read before being assigned"));
+    }
+    {
+        // Parameters, for-in bindings and catch bindings start assigned;
+        // '_'-prefixed locals are the documented opt-out.
+        auto param = checkSrcWarnings(
+            "func f(x: int) -> int { return x; }\n"
+            "func main() -> void { }\n");
+        CHECK(!hasWarning(param, "read before being assigned"));
+        auto loopVar = checkSrcWarnings(
+            "func main() -> void {\n"
+            "    var arr: [int; 2] = [0, 0];\n"
+            "    for (var v in arr) { var w: int = v; }\n"
+            "}\n");
+        CHECK(!hasWarning(loopVar, "read before being assigned"));
+        auto catchVar = checkSrcWarnings(
+            "func main() -> void {\n"
+            "    try { } catch (e) { var w: int = e; }\n"
+            "}\n");
+        CHECK(!hasWarning(catchVar, "read before being assigned"));
+        auto hidden = checkSrcWarnings(
+            "func main() -> void {\n"
+            "    var _x: int;\n"
+            "    var y: int = _x;\n"
+            "}\n");
+        CHECK(!hasWarning(hidden, "'_x'"));
+    }
+    {
+        // Lexical rule: any earlier assignment counts (even one guarded by
+        // a branch that may not run), while a read earlier in a loop body
+        // still warns. Compound assignment and ++/-- read their target;
+        // `x = x + 1` reads x before the store.
+        auto branch = checkSrcWarnings(
+            "func main() -> void {\n"
+            "    var x: int;\n"
+            "    var c: bool = true;\n"
+            "    if (c) { x = 1; }\n"
+            "    var y: int = x;\n"
+            "}\n");
+        CHECK(!hasWarning(branch, "read before being assigned"));
+        auto loopRead = checkSrcWarnings(
+            "func main() -> void {\n"
+            "    var x: int;\n"
+            "    var c: bool = false;\n"
+            "    while (c) { var y: int = x; x = 1; }\n"
+            "}\n");
+        CHECK(hasWarning(loopRead, "local 'x' may be read before being assigned"));
+        auto compound = checkSrcWarnings(
+            "func main() -> void {\n"
+            "    var x: int;\n"
+            "    x += 1;\n"
+            "}\n");
+        CHECK(hasWarning(compound, "read before being assigned"));
+        auto increment = checkSrcWarnings(
+            "func main() -> void {\n"
+            "    var x: int;\n"
+            "    x++;\n"
+            "}\n");
+        CHECK(hasWarning(increment, "read before being assigned"));
+        auto selfAssign = checkSrcWarnings(
+            "func main() -> void {\n"
+            "    var x: int;\n"
+            "    x = x + 1;\n"
+            "}\n");
+        CHECK(hasWarning(selfAssign, "read before being assigned"));
+    }
+    {
+        // Element/member stores initialize the storage base conservatively;
+        // a base read before any store still warns, and indexing a pointer
+        // reads the pointer's value.
+        auto elemStore = checkSrcWarnings(
+            "func main() -> void {\n"
+            "    var a: [int; 2];\n"
+            "    a[0] = 1;\n"
+            "    var y: int = a[0];\n"
+            "}\n");
+        CHECK(!hasWarning(elemStore, "read before being assigned"));
+        auto elemRead = checkSrcWarnings(
+            "func main() -> void {\n"
+            "    var a: [int; 2];\n"
+            "    var y: int = a[0];\n"
+            "}\n");
+        CHECK(hasWarning(elemRead, "local 'a' may be read before being assigned"));
+        auto ptrIndex = checkSrcWarnings(
+            "func main() -> void {\n"
+            "    var p: *int;\n"
+            "    p[0] = 1;\n"
+            "}\n");
+        CHECK(hasWarning(ptrIndex, "local 'p' may be read before being assigned"));
+        // Array-of-pointer storage is not a pointer index, and value-class
+        // locals run their field initializers at the declaration site.
+        auto ptrArray = checkSrcWarnings(
+            "func main() -> void {\n"
+            "    var a: [*void; 2];\n"
+            "    a[0] = nilPtr;\n"
+            "    var y: *void = a[0];\n"
+            "}\n");
+        CHECK(!hasWarning(ptrArray, "read before being assigned"));
+        auto classLocal = checkSrcWarnings(
+            "class C { var n: int = 1; }\n"
+            "func main() -> void {\n"
+            "    var c: C;\n"
+            "    var y: int = c.n;\n"
+            "}\n");
+        CHECK(!hasWarning(classLocal, "read before being assigned"));
+        auto classAlias = checkSrcWarnings(
+            "class C { var n: int = 1; }\n"
+            "type Alias = C;\n"
+            "func main() -> void {\n"
+            "    var c: Alias;\n"
+            "    var y: int = c.n;\n"
+            "}\n");
+        CHECK(!hasWarning(classAlias, "read before being assigned"));
+    }
     return 0;
 }
 

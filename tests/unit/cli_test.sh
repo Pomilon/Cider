@@ -54,3 +54,16 @@ set -e
 [ "$IMPORT_RC" -eq 0 ] || { echo "warn-import exit: $IMPORT_RC"; exit 1; }
 echo "$IMPORT_OUT" | grep -q "warning: unused import 'print' from module 'std.io'" \
     || { echo "missing unused-import warning: $IMPORT_OUT"; exit 1; }
+
+# CIDER-ISS-002: a local read before any assignment warns at the read; the
+# default path stays silent and --warn keeps exit code 0.
+printf 'func main() -> void { var x: int; var y: int = x; }\n' > "$SRC"
+DEFAULT_OUT=$("$BIN" check "$SRC" 2>&1)
+[ -z "$DEFAULT_OUT" ] || { echo "default uninit check not silent: $DEFAULT_OUT"; exit 1; }
+set +e
+UNINIT_OUT=$("$BIN" check --warn "$SRC" 2>&1)
+UNINIT_RC=$?
+set -e
+[ "$UNINIT_RC" -eq 0 ] || { echo "warn-uninit exit: $UNINIT_RC"; exit 1; }
+echo "$UNINIT_OUT" | grep -q "warning: local 'x' may be read before being assigned" \
+    || { echo "missing read-before-assignment warning: $UNINIT_OUT"; exit 1; }
