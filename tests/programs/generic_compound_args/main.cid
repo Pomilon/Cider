@@ -1,0 +1,122 @@
+// CIDER-FEAT-004: compound and nested generic type arguments.
+//
+// Type arguments parse as real recursive types: pointer arguments
+// (`Node*`, `*int`, `int**`), nested generics (`Nested<Nested<int>>`,
+// `Vec<Vec<int>>`, the `>>>` triple form) and multi-parameter inner
+// generics (`Pair<int,int>`) used as a single argument. Explicit call-site
+// arguments (`id<Pair<int,int>>(...)`, `first<Vec<int>>(...)`) take the
+// same path, and `>>` closes two argument lists. The canonical spelling
+// carries pointers as a trailing star run, which template substitution
+// folds back into the pointer level.
+from std.vector import new_vec, push, get, len_vec, free_vec;
+
+struct Node {
+    var x: int;
+    var y: int;
+}
+
+struct Box<T> {
+    var v: T;
+}
+
+struct Pair<A, B> {
+    var a: A;
+    var b: B;
+}
+
+struct Nested<T> {
+    var inner: T;
+}
+
+func id<T>(x: T) -> T {
+    return x;
+}
+
+// A function template whose signature combines a pointer and a generic
+// parameter (`*Vec<T>`); instantiating it with a nested argument
+// (`first<Vec<int>>`) exercises substitution through both.
+func first<T>(v: *Vec<T>) -> *T {
+    return get<T>(v, 0);
+}
+
+func main() -> int {
+    // 1. Pointer type argument: Box<Node*> stores the pointer, and the
+    // field reads/writes through it.
+    var b: Box<Node*>;
+    var n: Node;
+    n.x = 7;
+    n.y = 9;
+    b.v = &n;
+    if (b.v->x != 7) return 1;
+    if (b.v->y != 9) return 2;
+    b.v->x = 11;
+    if (n.x != 11) return 3;
+
+    // 2. Leading-star pointer argument and a pointer-to-generic argument.
+    var p: Box<*int>;
+    var z: int = 21;
+    p.v = &z;
+    if (*p.v != 21) return 4;
+    var q: Box<Pair<int,int>*>;
+    var pr: Pair<int,int>;
+    pr.a = 3;
+    pr.b = 4;
+    q.v = &pr;
+    if (q.v->a + q.v->b != 7) return 5;
+
+    // 3. Nested generic struct: Nested<Nested<int>> and the `>>>`
+    // spelling (RSHIFT + GT) of a triple nesting.
+    var nest: Nested<Nested<int>>;
+    nest.inner.inner = 42;
+    if (nest.inner.inner != 42) return 6;
+    var triple: Nested<Nested<Nested<int>>>;
+    triple.inner.inner.inner = 43;
+    if (triple.inner.inner.inner != 43) return 7;
+
+    // 4. Two-parameter inner generic as one type argument, an explicit
+    // call with the same argument (`>>` closing), and a double pointer.
+    var w: Box<Pair<int,int>>;
+    w.v.a = 5;
+    w.v.b = 6;
+    if (w.v.a * w.v.b != 30) return 8;
+    var r: Pair<int,int> = id<Pair<int,int>>(pr);
+    if (r.a != 3 || r.b != 4) return 9;
+    var pp: Box<int**>;
+    var p1: *int = &z;
+    pp.v = &p1;
+    if (**pp.v != 21) return 10;
+
+    // 5. Nested std container: Vec<Vec<int>> through nested new_vec/push/
+    // get calls; the outer element type is a pointer to a Vec.
+    var outer: Vec<Vec<int>> = new_vec<Vec<int>>();
+    var inner: Vec<int> = new_vec<int>();
+    push<int>(&inner, 10);
+    push<int>(&inner, 20);
+    push<Vec<int>>(&outer, inner);
+    var inner2: Vec<int> = new_vec<int>();
+    push<int>(&inner2, 30);
+    push<Vec<int>>(&outer, inner2);
+    if (len_vec<Vec<int>>(&outer) != 2) return 11;
+    var row: *Vec<int> = get<Vec<int>>(&outer, 1);
+    if (len_vec<int>(row) != 1) return 12;
+    var cell: *int = get<int>(row, 0);
+    if (*cell != 30) return 13;
+    free_vec<int>(&inner);
+    free_vec<int>(&inner2);
+    free_vec<Vec<int>>(&outer);
+
+    // 6. Function template with a pointer-to-generic parameter:
+    // `first<Vec<int>>` substitutes `*Vec<T>` and `*T` for the nested
+    // argument, and its body instantiates `get<Vec<int>>`.
+    var rows: Vec<Vec<int>> = new_vec<Vec<int>>();
+    var row0: Vec<int> = new_vec<int>();
+    push<int>(&row0, 55);
+    push<Vec<int>>(&rows, row0);
+    var f: *Vec<int> = first<Vec<int>>(&rows);
+    if (len_vec<int>(f) != 1) return 14;
+    if (*get<int>(f, 0) != 55) return 15;
+    free_vec<int>(&row0);
+    free_vec<Vec<int>>(&rows);
+
+    return 0;
+}

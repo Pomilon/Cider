@@ -515,6 +515,9 @@ public:
             if (c == '<') result += "_l_";
             else if (c == '>') result += "_g_";
             else if (c == ',') result += "_c_";
+            // CIDER-FEAT-004: pointer type arguments put '*' into mangled
+            // names (`id<Node*>`); keep it out of assembler symbols.
+            else if (c == '*') result += "_p_";
             else result += c;
         }
         return result;

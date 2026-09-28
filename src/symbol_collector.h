@@ -1349,22 +1349,61 @@ public:
 
     // --- template instantiation helpers ---
 
+    // CIDER-FEAT-004: index of the '>' matching the '<' at `open`, or npos.
+    // Nested argument lists contain their own '<'/'>' pairs, so a plain
+    // find('>') would stop at an inner closer.
+    static size_t matchingAngle(const std::string& s, size_t open) {
+        int depth = 0;
+        for (size_t i = open; i < s.size(); ++i) {
+            if (s[i] == '<') depth++;
+            else if (s[i] == '>') {
+                if (--depth == 0) return i;
+            }
+        }
+        return std::string::npos;
+    }
+
+    // CIDER-FEAT-004: split the interior of an argument list at top-level
+    // commas only, so `Pair<int,int>` passed as one argument stays one
+    // argument while `Pair<int,int>,Vec<int>` yields two.
+    static std::vector<std::string> splitTemplateArgs(const std::string& argsStr) {
+        std::vector<std::string> args;
+        int depth = 0;
+        size_t start = 0;
+        for (size_t i = 0; i < argsStr.size(); ++i) {
+            char c = argsStr[i];
+            if (c == '<') depth++;
+            else if (c == '>') depth--;
+            else if (c == ',' && depth == 0) {
+                args.push_back(argsStr.substr(start, i - start));
+                start = i + 1;
+            }
+        }
+        if (start < argsStr.size()) args.push_back(argsStr.substr(start));
+        return args;
+    }
+
+    // CIDER-FEAT-004: peel a top-level trailing '*' run from a substituted
+    // spelling (`Node*`, `Vec<int>*`) and return its length. Callers fold
+    // the count into TypeInfo::pointerLevel / TypeAST's pointer level. Stars
+    // inside `<...>` are nested arguments and stay untouched.
+    static int peelTrailingPointers(std::string& spelling) {
+        int stars = 0;
+        while (!spelling.empty() && spelling.back() == '*') {
+            spelling.pop_back();
+            stars++;
+        }
+        return stars;
+    }
+
     static std::pair<std::string, std::vector<std::string>> parseMangledTemplateName(const std::string& mangled) {
         size_t pos = mangled.find('<');
         if (pos == std::string::npos) return {mangled, {}};
         std::string baseName = mangled.substr(0, pos);
-        std::string argsStr = mangled.substr(pos + 1, mangled.size() - pos - 2);
-        std::vector<std::string> args;
-        size_t start = 0;
-        while (start < argsStr.size()) {
-            size_t comma = argsStr.find(',', start);
-            if (comma == std::string::npos) {
-                args.push_back(argsStr.substr(start));
-                break;
-            }
-            args.push_back(argsStr.substr(start, comma - start));
-            start = comma + 1;
-        }
+        size_t end = matchingAngle(mangled, pos);
+        if (end == std::string::npos) return {baseName, {}};
+        std::vector<std::string> args =
+            splitTemplateArgs(mangled.substr(pos + 1, end - pos - 1));
         return {baseName, args};
     }
 
@@ -1378,18 +1417,10 @@ public:
         size_t pos = name.find('<');
         if (pos != std::string::npos) {
             std::string baseName = name.substr(0, pos);
-            std::string argsStr = name.substr(pos + 1, name.size() - pos - 2);
-            std::vector<std::string> args;
-            size_t start = 0;
-            while (start < argsStr.size()) {
-                size_t comma = argsStr.find(',', start);
-                if (comma == std::string::npos) {
-                    args.push_back(argsStr.substr(start));
-                    break;
-                }
-                args.push_back(argsStr.substr(start, comma - start));
-                start = comma + 1;
-            }
+            size_t end = matchingAngle(name, pos);
+            if (end == std::string::npos) return name;
+            std::vector<std::string> args =
+                splitTemplateArgs(name.substr(pos + 1, end - pos - 1));
             std::string result = baseName + "<";
             for (size_t i = 0; i < args.size(); i++) {
                 if (i > 0) result += ",";
@@ -1411,6 +1442,10 @@ public:
         TypeInfo out = info;
         if (!out.isFunctionPointer) {
             out.name = substituteTypeName(out.name, tmplParams, tmplArgs);
+            // CIDER-FEAT-004: a pointer type argument was spelled with a
+            // trailing star run (`T` <- `Node*`); fold it back into the
+            // pointer level so the TypeInfo keeps its real shape.
+            out.pointerLevel += peelTrailingPointers(out.name);
             return out;
         }
         if (out.fnParamTypes) {
@@ -1497,6 +1532,9 @@ public:
             f.name = field.name;
             f.type = TypeInfo::fromAST(field.type.get());
             f.type.name = substituteTypeName(f.type.name, tmplSym->typeParams, parsed.second);
+            // CIDER-FEAT-004: fold a pointer argument's trailing stars
+            // (`var v: T` with T = `Node*`) into the field's pointer level.
+            f.type.pointerLevel += peelTrailingPointers(f.type.name);
             // Nested instantiations in field position (e.g. HashMap's
             // `entries: *Entry<K, V>`): instantiate the substituted type so
             // member access through it resolves (T6 std sweep).
@@ -1800,7 +1838,10 @@ public:
             return cloned;
         }
         std::string name = substituteTypeName(type->getName(), tmplParams, tmplArgs);
-        return std::make_unique<TypeAST>(name, type->getPointerLevel(), type->getLine(), type->getColumn(),
+        // CIDER-FEAT-004: fold a pointer argument's trailing stars into the
+        // cloned type's pointer level (`var v: T` with T = `Node*`).
+        int extraPointers = peelTrailingPointers(name);
+        return std::make_unique<TypeAST>(name, type->getPointerLevel() + extraPointers, type->getLine(), type->getColumn(),
                                          type->isVolatile(), type->getAbi());
     }
 

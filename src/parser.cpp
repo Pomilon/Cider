@@ -122,6 +122,19 @@ bool parseIntToken(const std::string& text, uint64_t& out) {
     }
 }
 
+// CIDER-FEAT-004: canonical flat spelling of a parsed template type
+// argument. Pointers are written as a trailing run (`Node*`, `Vec<int>*`)
+// so a substitution site can fold the run back into TypeInfo::pointerLevel
+// with one suffix scan; nested generic args keep their recursive spelling
+// (`Vec<Vec<int>>`). The collector parses this spelling depth-aware.
+static std::string typeArgSpelling(const TypeAST* type) {
+    if (!type) return "void";
+    std::string s = type->getName();
+    int stars = type->getPointerLevel();
+    if (stars > 0) s.append(static_cast<size_t>(stars), '*');
+    return s;
+}
+
 std::map<TokenType, Parser::Precedence> precedences = {
     {TokenType::EQ, Parser::EQUALS},
     {TokenType::NE, Parser::EQUALS},
@@ -164,7 +177,21 @@ Parser::Parser(Lexer& lexer, ErrorReporter& reporter) : lexer_(lexer), reporter_
 void Parser::nextToken() {
     currentToken_ = peekToken_;
     peekToken_ = peekToken2_;
-    peekToken2_ = lexer_.getNextToken();
+    if (!lookahead_.empty()) {
+        peekToken2_ = lookahead_.front();
+        lookahead_.pop_front();
+    } else {
+        peekToken2_ = lexer_.getNextToken();
+    }
+}
+
+Token Parser::peekAhead(size_t index) {
+    if (index == 0) return peekToken_;
+    if (index == 1) return peekToken2_;
+    while (lookahead_.size() < index - 1) {
+        lookahead_.push_back(lexer_.getNextToken());
+    }
+    return lookahead_[index - 2];
 }
 
 bool Parser::expect(TokenType type) {
@@ -299,31 +326,12 @@ std::unique_ptr<Expression> Parser::parsePrimaryExpression() {
         std::string val = currentToken_.value;
         nextToken();
 
-        // Check for template arguments: funcName<Type1,Type2>
-        if (currentToken_.type == TokenType::LT &&
-            isTypeToken(peekToken_.type) &&
-            (peekToken2_.type == TokenType::GT || peekToken2_.type == TokenType::COMMA)) {
-            nextToken();  // consume <
-            val += "<";
-            while (true) {
-                if (!isTypeToken(currentToken_.type)) {
-                    error("Expected type in template argument.");
-                    return nullptr;
-                }
-                val += currentToken_.value;
-                nextToken();
-                if (currentToken_.type == TokenType::COMMA) {
-                    val += ",";
-                    nextToken();
-                } else if (currentToken_.type == TokenType::GT) {
-                    val += ">";
-                    nextToken();  // consume >
-                    break;
-                } else {
-                    error("Expected ',' or '>' in template arguments.");
-                    return nullptr;
-                }
-            }
+        // Check for template arguments: funcName<Type1,Type2>.
+        // CIDER-FEAT-004: compound argument lists (`id<Vec<int>>(x)`) are
+        // detected by a balanced scan; the list itself parses through the
+        // same recursive type-argument path as declarations.
+        if (currentToken_.type == TokenType::LT && looksLikeTemplateArgList()) {
+            if (!parseTemplateArgListInto(val)) return nullptr;
         }
 
         return std::make_unique<IdentifierExpr>(val, line, col);
@@ -1141,6 +1149,134 @@ std::unique_ptr<TypeAST> Parser::parseFunctionPointerType(int line, int col, boo
     return node;
 }
 
+// CIDER-FEAT-004: does the `<` in `name < ...` start an explicit
+// template-argument list? The legacy shape — one bare type token followed
+// by `>` or `,` — stays accepted so non-call uses like `id<int>` keep
+// working. Compound forms (`Push<Vec<int>>(...)`) are recognized by a
+// balanced scan of a minimal type grammar; it only accepts token sequences
+// that can spell types, so `a < b * c > (d)` and `a < b[i] > (d)` remain
+// comparisons. The list must close immediately before `(` (a call) or at a
+// token that cannot continue the comparison.
+bool Parser::looksLikeTemplateArgList() {
+    // Legacy shape: one bare type token followed by '>' or ','.
+    if (isTypeToken(peekToken_.type) &&
+        (peekToken2_.type == TokenType::GT || peekToken2_.type == TokenType::COMMA)) {
+        return true;
+    }
+    // A close is a template-list close when the next token starts a call
+    // (`(`) or cannot continue a comparison (`;`, `)`, `,`, ...).
+    auto closesHere = [&](size_t nextIndex) {
+        TokenType t = peekAhead(nextIndex).type;
+        return t == TokenType::LPAREN || !canStartExpression(t);
+    };
+    int depth = 1;        // the '<' at currentToken_
+    bool needType = true; // a base type token must come next
+    bool complete = false;  // the current argument already has a type
+    bool afterDot = false;  // a qualified-type segment must come next
+    for (size_t i = 0; i < 64; ++i) {
+        Token t = peekAhead(i);
+        if (afterDot) {
+            if (t.type != TokenType::IDENTIFIER) return false;
+            afterDot = false;
+            complete = true;
+            continue;
+        }
+        switch (t.type) {
+        case TokenType::MULTIPLY:
+            // Leading (`*int`) or trailing (`Node*`) pointer star.
+            if (!needType && !complete) return false;
+            break;
+        case TokenType::DOT:
+            if (needType || !complete) return false;
+            afterDot = true;
+            complete = false;
+            break;
+        case TokenType::LT:
+            if (needType || !complete) return false;
+            depth++;
+            needType = true;
+            complete = false;
+            break;
+        case TokenType::GT:
+            if (needType || !complete) return false;
+            if (--depth == 0) return closesHere(i + 1);
+            complete = true;
+            break;
+        case TokenType::RSHIFT:
+            // '>>' closes two nested lists.
+            if (needType || !complete) return false;
+            depth -= 2;
+            if (depth <= 0) return depth == 0 && closesHere(i + 1);
+            complete = true;
+            break;
+        case TokenType::COMMA:
+            if (needType || !complete) return false;
+            needType = true;
+            complete = false;
+            break;
+        default:
+            if (!isTypeToken(t.type) || !needType) return false;
+            needType = false;
+            complete = true;
+            break;
+        }
+    }
+    return false;
+}
+
+// CIDER-FEAT-004: parse `Type1, Type2, ...` with the current token on '<'.
+// Arguments are real types (recursive parseType), so pointer arguments
+// (`Node*`, `*int`) and nested generics (`Vec<int>`, `Pair<int,int>`) all
+// work, and `>>` closes two levels. `out` receives the canonical spelling.
+bool Parser::parseTemplateArgListInto(std::string& out) {
+    nextToken();  // consume '<'
+    out += "<";
+    while (true) {
+        auto argType = parseType(false);
+        if (!argType) return false;
+        if (dynamic_cast<ArrayTypeAST*>(argType.get())) {
+            reporter_.error("Array types cannot be used as template arguments yet "
+                            "(CIDER-FEAT-004): wrap the array in a struct and pass that.",
+                            argType->getLine(), argType->getColumn());
+            return false;
+        }
+        if (argType->isFunctionType()) {
+            reporter_.error("Function types cannot be used as template arguments yet "
+                            "(CIDER-FEAT-004): wrap the fn type in a struct and pass that.",
+                            argType->getLine(), argType->getColumn());
+            return false;
+        }
+        if (argType->isVolatile()) {
+            reporter_.error("'volatile' type arguments are not supported yet (CIDER-FEAT-004).",
+                            argType->getLine(), argType->getColumn());
+            return false;
+        }
+        out += typeArgSpelling(argType.get());
+        if (currentToken_.type == TokenType::COMMA) {
+            out += ",";
+            nextToken();
+            continue;
+        }
+        if (currentToken_.type == TokenType::GT) {
+            out += ">";
+            nextToken();  // consume '>'
+            break;
+        }
+        if (currentToken_.type == TokenType::RSHIFT) {
+            // `>>` is this list's closer plus the enclosing one's. Consume
+            // one '>' here and leave the token as a plain GT: the enclosing
+            // argument-list loop consumes it with its own nextToken().
+            out += ">";
+            currentToken_.type = TokenType::GT;
+            currentToken_.value = ">";
+            break;
+        }
+        error("Expected ',' or '>' in template arguments.");
+        return false;
+    }
+    return true;
+}
+
 std::unique_ptr<TypeAST> Parser::parseType(bool castContext) {
     int line = currentToken_.line;
     int col = currentToken_.column;
@@ -1256,29 +1392,12 @@ std::unique_ptr<TypeAST> Parser::parseType(bool castContext) {
             }
         }
 
-        // Check for template type arguments: Vec<int> or Vec<int, float>
+        // Check for template type arguments: Vec<int>, Vec<int, float>.
+        // CIDER-FEAT-004: arguments are real recursive types, so
+        // `Box<Node*>`, `Vec<Vec<int>>` and `Pair<int, int>` arguments
+        // parse; the flat spelling they build is depth-aware downstream.
         if (currentToken_.type == TokenType::LT) {
-            nextToken();  // consume <
-            typeName += "<";
-            while (true) {
-                if (!isTypeToken(currentToken_.type)) {
-                    error("Expected type in template argument.");
-                    return nullptr;
-                }
-                typeName += currentToken_.value;
-                nextToken();
-                if (currentToken_.type == TokenType::COMMA) {
-                    typeName += ",";
-                    nextToken();
-                } else if (currentToken_.type == TokenType::GT) {
-                    typeName += ">";
-                    nextToken();  // consume >
-                    break;
-                } else {
-                    error("Expected ',' or '>' in template arguments.");
-                    return nullptr;
-                }
-            }
+            if (!parseTemplateArgListInto(typeName)) return nullptr;
         }
 
         // Trailing '*'s: in declarations they are always pointers (greedy).

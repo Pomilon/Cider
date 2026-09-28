@@ -88,6 +88,43 @@ int run() {
     d = parseDump("func f(v: Vec<int>) -> void { }\n", rep);
     CHECK(!rep.hasErrors());
     CHECK(d.find("(params (v Vec<int>))") != std::string::npos);
+
+    // CIDER-FEAT-004: compound and nested type arguments. Pointer
+    // arguments canonicalize to a trailing star run; nested lists keep
+    // their recursive spelling.
+    rep.clear();
+    d = parseDump(
+        "func f() -> void {\n"
+        "  var a: Box<Node*>;\n"
+        "  var b: Vec<Vec<int>>;\n"
+        "  var c: Vec<*int>;\n"
+        "  var e: Box<Pair<int,int>>;\n"
+        "}\n", rep);
+    CHECK(!rep.hasErrors());
+    CHECK(d.find("(VarDecl a Box<Node*>)") != std::string::npos);
+    CHECK(d.find("(VarDecl b Vec<Vec<int>>)") != std::string::npos);
+    CHECK(d.find("(VarDecl c Vec<int*>)") != std::string::npos);
+    CHECK(d.find("(VarDecl e Box<Pair<int,int>>)") != std::string::npos);
+
+    // CIDER-FEAT-004: explicit call-site arguments parse compound types,
+    // and `>>` closes both lists.
+    rep.clear();
+    d = parseDump(
+        "func f(x: Pair<int,int>) -> Pair<int,int> {\n"
+        "  return id<Pair<int,int>>(x);\n"
+        "}\n", rep);
+    CHECK(!rep.hasErrors());
+    CHECK(d.find("(Call (Ident id<Pair<int,int>>) (Ident x))") != std::string::npos);
+
+    // CIDER-FEAT-004: a `<` whose tokens cannot spell a type stays a
+    // comparison (`a < b * c`), not a template-argument list.
+    rep.clear();
+    d = parseDump(
+        "func f(a: int, b: int, c: int) -> bool {\n"
+        "  return a < b * c;\n"
+        "}\n", rep);
+    CHECK(!rep.hasErrors());
+    CHECK(d.find("(Binary < (Ident a) (Binary * (Ident b) (Ident c)))") != std::string::npos);
     return 0;
 }
 

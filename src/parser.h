@@ -1,6 +1,8 @@
 #pragma once
 
+#include <deque>
 #include <memory>
+#include <string>
 #include <vector>
 
 #include "ast.h"
@@ -40,8 +42,15 @@ private:
     Token currentToken_;
     Token peekToken_;
     Token peekToken2_;
+    // CIDER-FEAT-004: tokens pulled from the lexer by look-ahead scans but
+    // not yet shifted through the current/peek pipeline. nextToken() drains
+    // this before asking the lexer, so peeking is observable but lossless.
+    std::deque<Token> lookahead_;
 
     void nextToken();
+    // Token n positions ahead: 0 == peekToken_, 1 == peekToken2_, 2+ from
+    // the look-ahead buffer (filled on demand from the lexer).
+    Token peekAhead(size_t index);
     bool expect(TokenType type);
     bool match(TokenType type);
     void error(const std::string& message);
@@ -93,6 +102,14 @@ private:
     std::unique_ptr<Statement> parseExportStatement();
 
     std::unique_ptr<TypeAST> parseType(bool castContext = false);
+    // CIDER-FEAT-004: `name<Type1, Type2, ...>` with real recursive type
+    // arguments (pointer/nested forms) and `>>` closing. `out` receives the
+    // canonical flat spelling (`Box<Node*>`, `Vec<Vec<int>>`); the caller
+    // has `currentToken_` on the opening '<'.
+    bool parseTemplateArgListInto(std::string& out);
+    // CIDER-FEAT-004: does the '<' at currentToken_ open an explicit
+    // template-argument list (as opposed to a comparison)?
+    bool looksLikeTemplateArgList();
     // CID-006 `fn(...) -> R`; CIDER-BUG-063 reuses it for the legacy
     // `func(...)`/`function(...)` closure spelling (kindName carries the
     // written keyword, basePointerLevel the legacy +1 object-pointer level).
