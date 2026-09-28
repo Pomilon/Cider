@@ -2510,6 +2510,9 @@ public:
                 if (method.name == expr.getMember()) {
                     lastExprType_ =
                         canonicalizeInModule(method.returnType, definingModuleOf(ifaceSym), expr.getLine());
+                    // CIDER-BUG-077: an interface method returning an
+                    // interface yields the fat pointer (caller sret slot).
+                    resolveInterfaceFlag(lastExprType_);
                     return;
                 }
             }
@@ -2549,6 +2552,8 @@ public:
                 if (method.name == expr.getMember()) {
                     lastExprType_ = canonicalizeInModule(method.returnType, definingModuleOf(sym),
                                                          expr.getLine());
+                    // CIDER-BUG-077: class methods may return interfaces.
+                    resolveInterfaceFlag(lastExprType_);
                     found = true;
                     break;
                 }
@@ -2761,6 +2766,10 @@ public:
                             }
                             funcSym->returnType =
                                 canonicalizeInModule(m.returnType, ownerMod, expr.getLine());
+                            // CIDER-BUG-077: a method's interface-typed
+                            // return is a fat pointer; recover the flag for
+                            // signature copies that lost it.
+                            resolveInterfaceFlag(funcSym->returnType);
                             break;
                         }
                     }
@@ -2783,7 +2792,16 @@ public:
                 for (const auto& pt : *fnType.fnParamTypes) {
                     if (isByValueAggregateAtCall(pt)) unsupportedAggregate = true;
                 }
-                if (unsupportedAggregate) {
+                // CIDER-BUG-077: a fn(...) value returning an interface would
+                // need the hidden sret slot, which indirect calls do not
+                // pass; reject instead of misreading the call result.
+                TypeInfo fnRetFlag = *fnType.fnReturnType;
+                resolveInterfaceFlag(fnRetFlag);
+                if (fnRetFlag.isInterface) {
+                    error("Calls through '" + fnType.toString() +
+                              "' values do not support interface returns",
+                          expr.getLine());
+                } else if (unsupportedAggregate) {
                     error("Calls through '" + fnType.toString() +
                               "' values do not support struct/class/array by-value parameters or returns",
                           expr.getLine());
@@ -2818,8 +2836,18 @@ public:
                 lastExprType_ = *fnType.fnReturnType;
                 return;
             }
+            // CIDER-BUG-077: an interface method call reaches here through
+            // the callee member access, which leaves the method's return
+            // type in lastExprType_ (the vtable dispatch has no
+            // FunctionSymbol). Preserve an interface result — the legacy
+            // fallback below assumes int and would drop the fat pointer.
+            TypeInfo calleeResultType = lastExprType_;
             for (auto& arg : expr.getArgs()) {
                 arg->accept(*this);
+            }
+            if (calleeResultType.isInterface) {
+                lastExprType_ = calleeResultType;
+                return;
             }
             lastExprType_ = {"int", 0};
             return;
@@ -2880,6 +2908,10 @@ public:
             }
         }
         lastExprType_ = canonicalizeInModule(funcSym->returnType, definingModuleOf(funcSym), expr.getLine());
+        // CIDER-BUG-077: an interface-typed call result is the address of
+        // the caller's 16-byte sret slot; keep the fat-pointer flag so
+        // assignment, dispatch, chaining and argument passing all see it.
+        resolveInterfaceFlag(lastExprType_);
     }
 
     void visit(FunctionDeclStmt& stmt) override {
@@ -2906,7 +2938,20 @@ public:
         // CIDER-BUG-085: a declared `-> fn(I) -> int` return type resolves
         // its signature's interface flags, so the ReturnStmt signature check
         // compares it with a named function's flagged signature consistently.
+        // CIDER-BUG-077: an interface-typed return is the 16-byte fat
+        // pointer, not a plain nominal; resolve the flag here so the return
+        // check and the IR generator's sret decision agree.
         resolveInterfaceFlag(currentDeclaredReturnType_);
+        // CIDER-BUG-077: virtual/override methods stay on the legacy
+        // pointer-return path (VIRTUAL_CALL cannot carry a hidden sret
+        // slot), so an interface-typed virtual return would dispatch with
+        // the wrong convention. Reject it loudly instead.
+        if (currentDeclaredReturnType_.isInterface &&
+            (stmt.isVirtual() || stmt.isOverride())) {
+            error("Virtual method '" + stmt.getName() +
+                      "' cannot return an interface: virtual dispatch does not support interface returns",
+                  stmt.getLine());
+        }
         hasDeclaredReturnType_ = true;
 
         symbolTable_.enterScope();
@@ -3036,6 +3081,18 @@ public:
             if (hasDeclaredReturnType_ && lastExprType_.name != "error") {
                 TypeInfo declType = resolveFunctionPointerAlias(currentDeclaredReturnType_);
                 TypeInfo valType = resolveFunctionPointerAlias(lastExprType_);
+                // CIDER-BUG-077: an interface-typed return accepts the same
+                // satisfying values as every other interface position — the
+                // same interface (a fat-pointer copy), or a satisfying
+                // concrete struct/class value or single pointer (the fat
+                // pointer is built at the return site). Different interfaces
+                // and non-object values (nilPtr included) are rejected by
+                // the shared rule, exactly like declaration-time assignment
+                // and call arguments. ir_gen returns the 16-byte fat pointer
+                // through the hidden-sret convention.
+                if (declType.isInterface) {
+                    checkInterfaceValue(declType, valType, stmt.getLine());
+                } else {
                 // F1: bounded alias resolution; on budget exhaustion both
                 // sides keep their unexpanded (pre-resolution) form.
                 resolveSignatureAliasPair(declType, valType);
@@ -3104,6 +3161,7 @@ public:
                                       stmt.getLine());
                     fnRecordExpr(slot, stmt.getValue(), lastExprType_, stmt.getLine());
                 }
+                }  // !declType.isInterface
             }
         } else {
             // CIDER-BUG-016: a value-less return in a function declared to

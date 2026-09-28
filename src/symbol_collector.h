@@ -315,6 +315,8 @@ public:
         instantiateStructTemplatesInTypeInfo(sym->returnType);
         // CIDER-BUG-085: a return type that is a fn(...) spelling resolves
         // its signature's interface flags like every other collected type.
+        // CIDER-BUG-077: an interface-typed return is the 16-byte fat
+        // pointer; flag it so call sites classify the result correctly.
         resolveInterfaceTypeFlag(sym->returnType);
         sym->isExtern = stmt.isExtern();
         sym->isAsync = stmt.isAsync();
@@ -548,6 +550,8 @@ public:
             instantiateStructTemplatesInTypeInfo(method.returnType);
             // CIDER-BUG-085: fn(...) return spellings resolve their
             // signature's interface flags like every other collected type.
+            // CIDER-BUG-077: an interface method's interface-typed return is
+            // a fat pointer; flag it for vtable call sites.
             resolveInterfaceTypeFlag(method.returnType);
             for (auto& p : m.params) {
                 TypeInfo paramType = TypeInfo::fromAST(p.second.get());
@@ -907,6 +911,8 @@ public:
                 m.returnType = TypeInfo::fromAST(method->getReturnType());
                 // CIDER-BUG-085: fn(...) return spellings resolve their
                 // signature's interface flags like every other collected type.
+                // CIDER-BUG-077: a class method may return an interface
+                // (fat pointer); resolve the flag for call sites.
                 resolveInterfaceTypeFlag(m.returnType);
                 m.isVirtual = method->isVirtual();
                 m.isOverride = method->isOverride();

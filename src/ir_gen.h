@@ -823,7 +823,15 @@ public:
     // identically on every backend.
     void emitInterfaceStore(const TypeInfo& ifaceType, IRValue addr, Expression* value) {
         value->accept(*this);
-        TypeInfo initType = lastExprType_;
+        emitInterfaceStoreAt(ifaceType, addr, lastValue_, lastExprType_);
+        lastExprType_ = ifaceType;
+    }
+
+    // CIDER-BUG-077: the store half of emitInterfaceStore, for callers
+    // that already evaluated the source (the hidden-sret return slot).
+    // `value` is the source value and `initType` its type.
+    void emitInterfaceStoreAt(const TypeInfo& ifaceType, IRValue addr, IRValue value,
+                              TypeInfo initType) {
         // The interface flag can be missing on spellings that predate
         // declaration lowering (e.g. a module global read through a
         // from-alias): resolve the name before classifying.
@@ -842,16 +850,15 @@ public:
         if (initType.isInterface) {
             // Fat-pointer copy: both words, no vtable relabelling.
             IRValue dataPtr = IRValue::Register(nextTemp(), IRType::PTR);
-            currentBlock_->addInstruction({IROp::LOAD, dataPtr, {lastValue_, IRValue::Constant(0, IRType::I32)}});
+            currentBlock_->addInstruction({IROp::LOAD, dataPtr, {value, IRValue::Constant(0, IRType::I32)}});
             IRValue vtablePtr = IRValue::Register(nextTemp(), IRType::PTR);
-            currentBlock_->addInstruction({IROp::LOAD, vtablePtr, {lastValue_, IRValue::Constant(8, IRType::I32)}});
+            currentBlock_->addInstruction({IROp::LOAD, vtablePtr, {value, IRValue::Constant(8, IRType::I32)}});
             currentBlock_->addInstruction({IROp::STORE, std::nullopt, {addr, dataPtr, IRValue::Constant(0, IRType::I32)}});
             IRValue addr8 = IRValue::Register(nextTemp(), IRType::PTR);
             currentBlock_->addInstruction({IROp::ADD, addr8, {addr, IRValue::Constant(8, IRType::I32)}});
             currentBlock_->addInstruction({IROp::STORE, std::nullopt, {addr8, vtablePtr, IRValue::Constant(0, IRType::I32)}});
         } else {
-            IRValue srcAddr = lastValue_;
-            currentBlock_->addInstruction({IROp::STORE, std::nullopt, {addr, srcAddr, IRValue::Constant(0, IRType::I32)}});
+            currentBlock_->addInstruction({IROp::STORE, std::nullopt, {addr, value, IRValue::Constant(0, IRType::I32)}});
             IRValue addr8 = IRValue::Register(nextTemp(), IRType::PTR);
             currentBlock_->addInstruction({IROp::ADD, addr8, {addr, IRValue::Constant(8, IRType::I32)}});
             std::string concreteTypeName = initType.name;
@@ -863,7 +870,6 @@ public:
             std::string vtableLabel = interfaceVtableLabel(ifaceType.name, concreteTypeName);
             currentBlock_->addInstruction({IROp::STORE, std::nullopt, {addr8, IRValue::Label(vtableLabel), IRValue::Constant(0, IRType::I32)}});
         }
-        lastExprType_ = ifaceType;
     }
 
     // Name for ir_gen-inserted runtime calls (`new`, `delete`, closures,
@@ -947,10 +953,15 @@ public:
         TypeInfo prevReturnType = currentReturnType_;
 
         TypeInfo funcRetType = TypeInfo::fromAST(stmt.getReturnType());
+        // CIDER-BUG-077: an interface-typed return is a 16-byte fat pointer
+        // and rides the hidden-sret convention, exactly like a by-value
+        // struct/array return. Resolve the flag here (the definition AST
+        // carries the bare spelling) so the prologue and return sites agree.
+        funcRetType = resolveInterfaceNominal(resolveTypeAlias(funcRetType));
         // Virtual methods stay on the legacy malloc path so VIRTUAL_CALL
         // callers (which don't pass sret) keep matching the callee.
         bool isVirtMethod = stmt.isVirtual() || stmt.isOverride();
-        bool funcIsSret = isByValueAggregate(funcRetType) && !isVirtMethod;
+        bool funcIsSret = (isByValueAggregate(funcRetType) || funcRetType.isInterface) && !isVirtMethod;
         currentIsSret_ = funcIsSret;
         currentReturnType_ = funcRetType;
         IRType funcRetIR = funcIsSret ? IRType::VOID : mapType(funcRetType.name);
@@ -1112,6 +1123,48 @@ public:
             IRValue val = lastValue_;
             TypeInfo retType = lastExprType_;
 
+            // CIDER-BUG-077: interface-typed return. The hidden-sret slot
+            // receives the 16-byte fat pointer — a copied data/vtable pair
+            // for an interface source, or a pair built from a satisfying
+            // concrete value/single pointer. No scalar conversion applies:
+            // the checker admits only interface or struct/class sources.
+            if (currentIsSret_ && currentReturnType_.isInterface) {
+                TypeInfo valIface = resolveInterfaceNominal(retType);
+                if (!valIface.isInterface && !valIface.isArray && valIface.pointerLevel == 0 &&
+                    isStructValueType(valIface)) {
+                    // A concrete struct/class VALUE is boxed: the fat
+                    // pointer's data word must not address the callee's
+                    // frame, which dies on return. Copy the object into a
+                    // fresh heap slot (the same allocation `new` uses) so
+                    // the caller's interface stays valid; a concrete pointer
+                    // or interface source passes its address through.
+                    int objSize = getTypeSize(valIface);
+                    IRValue box = IRValue::Register(nextTemp(), IRType::PTR);
+                    IRInstruction alloc;
+                    alloc.op = IROp::CALL;
+                    alloc.dest = box;
+                    alloc.args.push_back(IRValue::Label(runtimeHelperName("malloc")));
+                    alloc.args.push_back(IRValue::Constant(objSize, IRType::I32));
+                    currentBlock_->addInstruction(alloc);
+                    currentBlock_->addInstruction({IROp::MEMCPY, std::nullopt,
+                                                   {box, val, IRValue::Constant(objSize, IRType::I32)}});
+                    val = box;
+                }
+                IRValue sretAddr = variableValues_.count("__sret")
+                    ? variableValues_["__sret"]
+                    : IRValue::Register("__sret", IRType::PTR);
+                IRValue sretPtr = IRValue::Register(nextTemp(), IRType::PTR);
+                currentBlock_->addInstruction({IROp::LOAD, sretPtr, {sretAddr, IRValue::Constant(0, IRType::I32)}});
+                emitInterfaceStoreAt(currentReturnType_, sretPtr, val, retType);
+                lastExprType_ = currentReturnType_;
+                emitDefers();
+                emitDestructors();
+                emitExceptionUnwind(0);
+                currentBlock_->addInstruction({IROp::RET, std::nullopt, {}});
+                startBlock(nextLabel("dead"));
+                return;
+            }
+
             // CID-003: the function's declared return type drives the
             // returned representation (a returned literal keeps its parsed
             // double; registers convert through the CVT ops; int returns
@@ -1247,18 +1300,37 @@ public:
                                             rootCallParams(m.parameterTypes,
                                                            definingModuleFor(ifaceSym, ifaceSym->name)),
                                             0, &argTypes);
-                            IRType retIRType = (m.returnType.pointerLevel > 0) ? IRType::PTR : mapType(m.returnType.name);
-                            IRValue dest = IRValue::Register(nextTemp(), retIRType);
+                            // CIDER-BUG-077: a method returning an interface
+                            // returns through the hidden-sret convention (its
+                            // implementation is a non-virtual method, which
+                            // ir_gen compiles as sret). The 16-byte slot goes
+                            // right after the method address, so the callee's
+                            // prologue sees [__sret, this, ...].
+                            TypeInfo methodRet =
+                                resolveInterfaceNominal(canonicalizeNominalInModule(
+                                    m.returnType, definingModuleFor(ifaceSym, ifaceSym->name)));
+                            bool ifaceRet = methodRet.isInterface;
+                            IRValue retBuf;
+                            IRValue dest;
+                            IRType retIRType = IRType::I32;
+                            if (ifaceRet) {
+                                retBuf = IRValue::Register(nextTemp(), IRType::PTR);
+                                currentBlock_->addInstruction({IROp::ALLOCA, retBuf, {IRValue::Constant(16, IRType::I32)}});
+                                args.insert(args.begin() + 1, retBuf);
+                            } else {
+                                retIRType = (m.returnType.pointerLevel > 0) ? IRType::PTR : mapType(m.returnType.name);
+                                dest = IRValue::Register(nextTemp(), retIRType);
+                            }
                             IRInstruction callInstr;
                             callInstr.op = IROp::CALL;
                             // CID-005: interface dispatch is SysV (the
                             // implementations are pinned SysV by generate()).
                             callInstr.callAbi = Abi::SysV;
-                            callInstr.dest = dest;
+                            callInstr.dest = ifaceRet ? std::nullopt : std::optional<IRValue>(dest);
                             callInstr.args = std::move(args);
                             currentBlock_->addInstruction(callInstr);
-                            lastValue_ = dest;
-                            lastExprType_ = m.returnType;
+                            lastValue_ = ifaceRet ? retBuf : dest;
+                            lastExprType_ = ifaceRet ? methodRet : m.returnType;
                             return;
                         }
                         methodIdx++;
@@ -1350,11 +1422,15 @@ public:
             } else if (sym && sym->kind == SymbolKind::FUNCTION) {
                 calleeAbi = std::static_pointer_cast<FunctionSymbol>(sym)->abi;
             }
-            bool calleeIsSret = isByValueAggregate(calleeRet, calleeDefMod);
-            // Virtual callees are never sret (they stay on the malloc path);
-            // direct CALLs here are free functions / non-virtual methods.
+            TypeInfo calleeIfaceRet = callInterfaceParamType(calleeRet, calleeDefMod);
+            bool calleeIsIfaceRet = calleeIfaceRet.isInterface;
+            bool calleeIsSret = isByValueAggregate(calleeRet, calleeDefMod) || calleeIsIfaceRet;
+            // Virtual callees are never sret (they stay on the malloc path;
+            // an interface-typed virtual return is rejected by the checker,
+            // because VIRTUAL_CALL cannot carry the hidden slot); direct
+            // CALLs here are free functions / non-virtual methods.
             if (calleeIsSret && !(isVirtual && vtableIndex != -1)) {
-                int retSize = getTypeSize(calleeRet, calleeDefMod);
+                int retSize = calleeIsIfaceRet ? 16 : getTypeSize(calleeRet, calleeDefMod);
                 IRValue retBuf = IRValue::Register(nextTemp(), IRType::PTR);
                 currentBlock_->addInstruction({IROp::ALLOCA, retBuf, {IRValue::Constant(retSize, IRType::I32)}});
                 IRInstruction callInstr;
@@ -1370,8 +1446,15 @@ public:
                 for (auto& a : args) callInstr.args.push_back(a);
                 currentBlock_->addInstruction(callInstr);
                 lastValue_ = retBuf;
-                lastExprType_ = calleeRet;
-                lastExprType_.isUserDefined = true;
+                if (calleeIsIfaceRet) {
+                    // CIDER-BUG-077: the result is the address of the
+                    // caller's 16-byte fat pointer; the interface flag lets
+                    // assignment/dispatch/argument paths treat it as one.
+                    lastExprType_ = calleeIfaceRet;
+                } else {
+                    lastExprType_ = calleeRet;
+                    lastExprType_.isUserDefined = true;
+                }
                 return;
             }
             IRType retIRType = IRType::I32;
