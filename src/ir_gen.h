@@ -377,6 +377,11 @@ public:
         // representation on an alias-spelled parameter (`type Cb = fn(...)`;
         // the checker marks the spelling, the alias target is plain fn).
         resolved.isClosure = resolved.isClosure || t.isClosure;
+        // CIDER-BUG-078: and for an interface flag resolved on the alias
+        // spelling (`type S = Shape`): the fat-pointer representation
+        // belongs to the target, so losing it here would treat the value as
+        // a scalar at every resolved read/store site.
+        resolved.isInterface = resolved.isInterface || t.isInterface;
         return resolved;
     }
 
@@ -854,12 +859,21 @@ public:
     // Unresolvable parts keep the legacy bare spelling (same loud
     // unresolved-label failure as before, never a silently wrong vtable).
     std::string interfaceVtableLabel(const std::string& ifaceName, const std::string& concreteName) {
-        auto ifaceSym = resolveNominalType(ifaceName);
+        // CIDER-BUG-078: an alias spelling (`type S = Shape`, `type T = Sq`)
+        // names the same definition; resolve the chain so the label matches
+        // the vtable generate() emits for the direct spelling.
+        TypeInfo ifaceT;
+        ifaceT.name = ifaceName;
+        TypeInfo ifaceResolved = resolveTypeAlias(ifaceT);
+        auto ifaceSym = resolveNominalType(ifaceResolved.name);
         if (!ifaceSym || ifaceSym->kind != SymbolKind::INTERFACE) {
             return "vtable_" + separateToken_ + ifaceName + "_" + concreteName;
         }
-        auto concSym = resolveNominalType(concreteName);
-        if (!concSym) concSym = resolveUniqueModuleNominal(concreteName);
+        TypeInfo concreteT;
+        concreteT.name = concreteName;
+        TypeInfo concreteResolved = resolveTypeAlias(concreteT);
+        auto concSym = resolveNominalType(concreteResolved.name);
+        if (!concSym) concSym = resolveUniqueModuleNominal(concreteResolved.name);
         if (!concSym || (concSym->kind != SymbolKind::STRUCT && concSym->kind != SymbolKind::CLASS)) {
             return "vtable_" + separateToken_ + ifaceName + "_" + concreteName;
         }
@@ -893,11 +907,9 @@ public:
                               TypeInfo initType, bool isVolatile = false) {
         // The interface flag can be missing on spellings that predate
         // declaration lowering (e.g. a module global read through a
-        // from-alias): resolve the name before classifying.
-        if (!initType.isInterface && initType.pointerLevel == 0) {
-            auto typeSym = resolveNominalType(initType.name);
-            if (typeSym && typeSym->kind == SymbolKind::INTERFACE) initType.isInterface = true;
-        }
+        // from-alias): resolve the name before classifying; CIDER-BUG-078:
+        // an alias spelling resolves through its chain.
+        initType = resolveInterfaceNominal(initType);
         // A global target is a label: materialise its address so the two
         // stores honour the +0/+8 offsets (label stores are sized by the
         // global's declared type and ignore the offset).
@@ -1335,7 +1347,11 @@ public:
 
             // Check if object is an interface type -> interface method call
             if (objType.isInterface) {
-                auto ifaceSym = resolveNominalType(objType.name);
+                // CIDER-BUG-078: the isInterface flag may come from an alias
+                // spelling (`type S = Shape`); resolve the chain before the
+                // symbol lookup so the vtable index comes from the target
+                // interface, exactly like the direct spelling.
+                auto ifaceSym = resolveNominalType(resolveTypeAlias(objType).name);
                 if (ifaceSym && ifaceSym->kind == SymbolKind::INTERFACE) {
                     auto iface = std::static_pointer_cast<InterfaceSymbol>(ifaceSym);
                     int methodIdx = 0;
@@ -3671,9 +3687,12 @@ public:
     // interface values themselves: only scalar elements are flagged.
     // CIDER-BUG-070: the name goes through resolveNominalType, so
     // module-qualified spellings (`lib.Shape`) recover the flag too.
+    // CIDER-BUG-078: resolve `type S = Shape` chains first, so an alias
+    // spelling presents the same 16-byte fat pointer as the direct name.
     TypeInfo resolveInterfaceNominal(TypeInfo t) {
         if (!t.isInterface && t.pointerLevel == 0 && !t.isArray) {
-            auto typeSym = resolveNominalType(t.name);
+            TypeInfo resolved = resolveTypeAlias(t);
+            auto typeSym = resolveNominalType(resolved.name);
             if (typeSym && typeSym->kind == SymbolKind::INTERFACE) t.isInterface = true;
         }
         return t;

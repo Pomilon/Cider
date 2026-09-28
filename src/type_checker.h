@@ -1518,14 +1518,37 @@ public:
         }
     }
 
+    // CIDER-BUG-078: the interface symbol behind a type spelling, resolved
+    // through `type S = Shape` chains. An alias declaration stores the ALIAS
+    // NAME in every declaration/annotation, so the name-keyed interface
+    // tests used to miss it (mirroring CIDER-BUG-071's shape resolution).
+    // Resolve once through resolveType (cycle-safe) and key off the resolved
+    // nominal. CIDER-BUG-080: dotted spellings (`lib.Shape`) resolve their
+    // member in the qualifier's module scope, mirroring the 070 collector
+    // fix. Null for non-interface shapes.
+    std::shared_ptr<Symbol> resolveInterfaceSymbol(TypeInfo t) {
+        TypeInfo resolved = resolveType(t);
+        auto typeSym = resolveScoped(resolved.name);
+        if (!typeSym && resolved.name.find('.') != std::string::npos) {
+            auto dot = resolved.name.rfind('.');
+            auto modSym = resolveScoped(resolved.name.substr(0, dot));
+            if (modSym && modSym->kind == SymbolKind::MODULE) {
+                auto ms = std::static_pointer_cast<ModuleSymbol>(modSym)->scope;
+                if (ms) typeSym = ms->resolveLocal(resolved.name.substr(dot + 1));
+            }
+        }
+        if (typeSym && typeSym->kind == SymbolKind::INTERFACE) return typeSym;
+        return nullptr;
+    }
+
     // CIDER-BUG-069: resolve the interface flag on a captured field/element
     // type the same way visit(VarDeclStmt) resolves a declaration — a plain
     // interface name is a fat pointer even when the flag was not set when
     // the type was captured. Arrays keep their wrapper unflagged; callers
     // resolve the element after elementType().
-    // CIDER-BUG-080: dotted spellings (`lib.Shape`) resolve their member in
-    // the qualifier's module scope, mirroring the 070 collector fix, so the
-    // flag is recovered for qualified parameters in every call position.
+    // CIDER-BUG-078: follow `type S = Shape` aliases too, so an alias-typed
+    // declaration/field/parameter is the same 16-byte fat pointer as the
+    // direct spelling.
     // CIDER-BUG-085: recurse through fn(...) signatures. A `fn(I) -> int`
     // spelling's parameters/return are TypeInfos built by
     // TypeInfo::fromAST, which cannot resolve symbols, so an interface
@@ -1543,16 +1566,7 @@ public:
             return;
         }
         if (t.isInterface || t.pointerLevel > 0 || t.isArray) return;
-        auto typeSym = resolveScoped(t.name);
-        if (!typeSym && t.name.find('.') != std::string::npos) {
-            auto dot = t.name.rfind('.');
-            auto modSym = resolveScoped(t.name.substr(0, dot));
-            if (modSym && modSym->kind == SymbolKind::MODULE) {
-                auto ms = std::static_pointer_cast<ModuleSymbol>(modSym)->scope;
-                if (ms) typeSym = ms->resolveLocal(t.name.substr(dot + 1));
-            }
-        }
-        if (typeSym && typeSym->kind == SymbolKind::INTERFACE) t.isInterface = true;
+        if (resolveInterfaceSymbol(t)) t.isInterface = true;
     }
 
     // CIDER-BUG-054: the interface conversion rule, shared by
@@ -1563,11 +1577,15 @@ public:
     // re-labelled statically). Every interface method must be implemented
     // with a matching signature; anything else is rejected.
     void checkInterfaceValue(const TypeInfo& ifaceType, const TypeInfo& valueType, int line) {
-        auto ifaceSym = resolveScoped(ifaceType.name);
-        if (!ifaceSym || ifaceSym->kind != SymbolKind::INTERFACE) return;
+        auto ifaceSym = resolveInterfaceSymbol(ifaceType);
+        if (!ifaceSym) return;
         auto iface = std::static_pointer_cast<InterfaceSymbol>(ifaceSym);
         if (valueType.isInterface) {
-            if (canonicalizeNominal(ifaceType).name == canonicalizeNominal(valueType).name) return;
+            // CIDER-BUG-078: compare the resolved spellings, so an alias and
+            // its direct spelling are the same interface (a fat-pointer copy:
+            // the stored vtable follows the target interface's method order,
+            // so a different interface cannot be re-labelled statically).
+            if (resolveType(ifaceType).name == resolveType(valueType).name) return;
             error("Cannot assign interface '" + valueType.name + "' to interface '" +
                       ifaceType.name + "'", line);
             return;
@@ -1585,8 +1603,15 @@ public:
                       ifaceType.name + "': expected a struct/class value or pointer", line);
             return;
         }
-        auto concreteSym = resolveScoped(concreteType.name);
-        if (!concreteSym || (concreteSym->kind != SymbolKind::STRUCT && concreteSym->kind != SymbolKind::CLASS)) {
+        // CIDER-BUG-078: an alias spelling of a struct/class (`type T = Sq`)
+        // resolves to the definition before the StructSymbol cast, exactly
+        // like the direct spelling; an unresolvable/cyclic provider is not a
+        // struct and keeps the rejection (alias providers are plain Symbols,
+        // never StructSymbols — mirror resolveStructOrClass).
+        TypeInfo concreteResolved = resolveType(concreteType);
+        auto concreteSym = resolveScoped(concreteResolved.name);
+        if (!concreteSym || concreteSym->isTypeAlias ||
+            (concreteSym->kind != SymbolKind::STRUCT && concreteSym->kind != SymbolKind::CLASS)) {
             error("Cannot assign non-struct/class type to interface '" + ifaceType.name + "'", line);
             return;
         }
@@ -1625,12 +1650,12 @@ public:
         // uses compare by defining module, not by the using file. Done
         // before the interface check so dotted spellings resolve too.
         declaredType = canonicalizeNominal(declaredType, stmt.getLine());
-        // Resolve interface type
-        if (!declaredType.isInterface && declaredType.pointerLevel == 0) {
-            auto typeSym = resolveScoped(declaredType.name);
-            if (typeSym && typeSym->kind == SymbolKind::INTERFACE) {
-                declaredType.isInterface = true;
-            }
+        // Resolve interface type; CIDER-BUG-078: through `type S = Shape`
+        // alias chains too, so an alias spelling is the same fat pointer as
+        // the direct spelling.
+        if (!declaredType.isInterface && declaredType.pointerLevel == 0 &&
+            resolveInterfaceSymbol(declaredType)) {
+            declaredType.isInterface = true;
         }
         // CIDER-BUG-071: an alias declaration (`type Row = [u8;3]`) stores
         // the alias spelling in declaredType, so isArray is false until the
@@ -1945,14 +1970,13 @@ public:
         // conversion rule as its declaration — any satisfying concrete
         // value, or a copy of the same interface. The flag can be missing
         // on spellings collected before lowering (e.g. a global interface
-        // variable), so resolve the declared name too.
+        // variable), so resolve the declared name too; CIDER-BUG-078: an
+        // alias spelling resolves through its chain like the direct one.
         TypeInfo ifaceTargetType = targetType;
         if (dynamic_cast<IdentifierExpr*>(stmt.getTarget()) &&
-            !ifaceTargetType.isInterface && ifaceTargetType.pointerLevel == 0) {
-            auto typeSym = resolveScoped(ifaceTargetType.name);
-            if (typeSym && typeSym->kind == SymbolKind::INTERFACE) {
-                ifaceTargetType.isInterface = true;
-            }
+            !ifaceTargetType.isInterface && ifaceTargetType.pointerLevel == 0 &&
+            resolveInterfaceSymbol(ifaceTargetType)) {
+            ifaceTargetType.isInterface = true;
         }
 
         // CIDER-BUG-071: an alias-typed target (`type Row = [u8;3]`;
@@ -2389,12 +2413,11 @@ public:
                 // CID-006 fix (F1): an alias-typed value must present its
                 // underlying fn signature to the call/global rules.
                 lastExprType_ = resolveFunctionPointerAlias(lastExprType_);
-                // Resolve interface type
-                if (!lastExprType_.isInterface && lastExprType_.pointerLevel == 0) {
-                    auto typeSym = resolveScoped(lastExprType_.name);
-                    if (typeSym && typeSym->kind == SymbolKind::INTERFACE) {
-                        lastExprType_.isInterface = true;
-                    }
+                // Resolve interface type; CIDER-BUG-078: alias spellings
+                // (`type S = Shape`) resolve through their chain.
+                if (!lastExprType_.isInterface && lastExprType_.pointerLevel == 0 &&
+                    resolveInterfaceSymbol(lastExprType_)) {
+                    lastExprType_.isInterface = true;
                 }
             }
         }
@@ -2567,9 +2590,10 @@ public:
             objType.pointerLevel--;
         }
 
-        // Check if object type is an interface
-        auto ifaceSym = resolveScoped(objType.name);
-        if (ifaceSym && ifaceSym->kind == SymbolKind::INTERFACE) {
+        // Check if object type is an interface; CIDER-BUG-078: an alias
+        // spelling (`type S = Shape`) resolves through its chain.
+        auto ifaceSym = resolveInterfaceSymbol(objType);
+        if (ifaceSym) {
             auto iface = std::static_pointer_cast<InterfaceSymbol>(ifaceSym);
             for (const auto& method : iface->methods) {
                 if (method.name == expr.getMember()) {

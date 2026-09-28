@@ -1208,6 +1208,18 @@ public:
         }
         if (type.isInterface || type.pointerLevel > 0 || type.isArray) return;
         auto sym = resolveNominalType(type.name);
+        // CIDER-BUG-078: follow `type S = Shape` (and alias-of-alias) chains
+        // before the kind test. The alias provider is STRUCT-kind with the
+        // target in `type`, so a direct lookup stopped at the spelling and
+        // the flag was lost; the alias spelling must size, store and dispatch
+        // exactly like the direct interface name. Cycle-safe: a repeated
+        // spelling stops (the same bounded walk as getFieldSize).
+        std::set<std::string> visiting;
+        if (!type.name.empty()) visiting.insert(type.name);
+        while (sym && sym->isTypeAlias && !sym->type.name.empty() &&
+               sym->type.name != type.name && visiting.insert(sym->type.name).second) {
+            sym = resolveNominalType(sym->type.name);
+        }
         if (sym && sym->kind == SymbolKind::INTERFACE) type.isInterface = true;
     }
 
