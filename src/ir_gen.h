@@ -272,6 +272,11 @@ public:
     struct DestructorInfo {
         std::string mangledName;
         IRValue varAddr;
+        // CIDER-BUG-088: byte offset of the object within `varAddr`. Direct
+        // class locals register offset 0 (byte-identical IR); an embedded
+        // class-value subobject registers its accumulated field/element
+        // offset and gets its address computed at scope exit.
+        int offset = 0;
     };
 
     // CIDER-BUG-050: a `defer` runs when the lexical block it is written in
@@ -298,11 +303,22 @@ public:
         for (size_t i = destructorStack_.size(); i > firstScope; --i) {
             for (size_t j = destructorStack_[i - 1].size(); j > 0; --j) {
                 const DestructorInfo& d = destructorStack_[i - 1][j - 1];
+                // CIDER-BUG-088: an embedded subobject's address is computed
+                // here (lazily) instead of at declaration, so no pointer for
+                // it stays live through the enclosing scope. The direct
+                // class-local case keeps its existing address (offset 0).
+                IRValue addr = d.varAddr;
+                if (d.offset != 0) {
+                    addr = IRValue::Register(nextTemp(), IRType::PTR);
+                    currentBlock_->addInstruction(
+                        {IROp::ADD, addr,
+                         {d.varAddr, IRValue::Constant((int64_t)d.offset, IRType::I32)}});
+                }
                 IRInstruction call;
                 call.op = IROp::CALL;
                 call.dest = std::nullopt;
                 call.args.push_back(IRValue::Label(d.mangledName));
-                call.args.push_back(d.varAddr);
+                call.args.push_back(addr);
                 currentBlock_->addInstruction(call);
             }
         }
@@ -2735,18 +2751,27 @@ public:
 
         // Check if this type has a destructor
         TypeInfo varType = sym->type;
+        // CIDER-BUG-088: scope-exit finalizers. A local's destructor set is
+        // the class's own destructor (if any) plus every class value it
+        // embeds by value — class fields, nested structs and fixed arrays of
+        // class values included. Registration is the same recursion the
+        // initializer fix uses (registerEmbeddedDestructors, gated by
+        // aggregateHasDestructors), so aggregates without embedded class
+        // destructors register exactly what they did before. Registration is
+        // independent of the initializer: an aggregate initialized by a
+        // copy/literal still owns subobjects to destroy. Push order is
+        // construction order, so the stack's reverse walk destroys the class
+        // body first and then embedded values in reverse declaration order.
+        {
+            std::set<const StructSymbol*> visiting;
+            if (aggregateHasDestructors(varType, currentModule_, visiting)) {
+                registerEmbeddedDestructors(varType, addr, 0, currentModule_, visiting);
+            }
+        }
         if (varType.pointerLevel == 0 && !varType.isArray) {
             auto typeSym = resolveNominalType(varType.name);
             if (typeSym && typeSym->kind == SymbolKind::CLASS) {
                 auto classSym = std::static_pointer_cast<StructSymbol>(typeSym);
-                if (!classSym->destructorName.empty()) {
-                    // CID-020/021 (spec §5/§6): destructors mangle with the
-                    // class's defining module, matching the definition.
-                    auto dtorDef = resolveFunctionDef(classSym->destructorName,
-                                                      definingScopeFor(classSym, classSym->name));
-                    destructorStack_.back().push_back(
-                        {emitFunctionName(dtorDef.second, classSym->destructorName), addr});
-                }
                 // CIDER-BUG-049: a value-class instance without an explicit
                 // initializer runs the class's field initializers. With one
                 // (`var v: C = other;`) the copy/memcpy below copies the
@@ -6135,6 +6160,84 @@ public:
         visiting.erase(structSym.get());
     }
 
+    // CIDER-BUG-088: the finalizer twin of aggregateHasInitializers. True
+    // when `t` is a class carrying a destructor or embeds (through class
+    // fields, struct fields and fixed arrays of class/struct values) a class
+    // value that carries one. Mirrors registerEmbeddedDestructors so the two
+    // cannot disagree about when IR is emitted: aggregates without embedded
+    // class destructors register nothing and stay byte-identical. `visiting`
+    // is the same by-value layout cycle guard as the initializer walk.
+    bool aggregateHasDestructors(TypeInfo t, const std::string& defModule,
+                                 std::set<const StructSymbol*>& visiting) {
+        t = canonicalizeNominalInModule(resolveTypeAlias(t, defModule), defModule);
+        if (t.pointerLevel > 0 || t.isSlice || t.isInterface || t.isFunctionPointer) return false;
+        if (t.isArray) {
+            if (t.arraySize <= 0) return false;
+            return aggregateHasDestructors(t.elementType(), defModule, visiting);
+        }
+        auto sym = resolveStructOrClassSymbol(t, defModule);
+        if (!sym) return false;
+        auto aggSym = std::static_pointer_cast<StructSymbol>(sym);
+        if (!visiting.insert(aggSym.get()).second) return false;
+        // A class's own destructor is registered by the walk too (last, so
+        // it runs first at scope exit).
+        bool found = aggSym->kind == SymbolKind::CLASS && !aggSym->destructorName.empty();
+        if (!found) {
+            std::string aggMod = definingModuleFor(aggSym, aggSym->name);
+            for (const auto& field : aggSym->fields) {
+                if (aggregateHasDestructors(field.type, aggMod, visiting)) {
+                    found = true;
+                    break;
+                }
+            }
+        }
+        visiting.erase(aggSym.get());
+        return found;
+    }
+
+    // CIDER-BUG-088: register scope-exit destructor calls for every class
+    // value embedded under `base + offset`, mirroring the
+    // emitEmbeddedInitializers traversal (structs, classes and fixed arrays;
+    // pointers/slices/interfaces/fn-pointers are not embedded aggregates).
+    // Push order is construction order — embedded fields first, the class's
+    // own destructor last — so the scope-exit emission, which iterates the
+    // stack in reverse, destroys the class body first (a destructor may
+    // still read its subobjects) and then the embedded values in reverse
+    // declaration/element order.
+    void registerEmbeddedDestructors(TypeInfo t, IRValue base, int offset,
+                                     const std::string& defModule,
+                                     std::set<const StructSymbol*>& visiting) {
+        t = canonicalizeNominalInModule(resolveTypeAlias(t, defModule), defModule);
+        if (t.pointerLevel > 0 || t.isSlice || t.isInterface || t.isFunctionPointer) return;
+        if (t.isArray) {
+            TypeInfo elem = canonicalizeNominalInModule(resolveTypeAlias(t.elementType(), defModule),
+                                                        defModule);
+            int elemSize = getTypeSize(elem);
+            for (int i = 0; i < t.arraySize; ++i) {
+                registerEmbeddedDestructors(elem, base, offset + i * elemSize, defModule, visiting);
+            }
+            return;
+        }
+        auto sym = resolveStructOrClassSymbol(t, defModule);
+        if (!sym) return;
+        auto aggSym = std::static_pointer_cast<StructSymbol>(sym);
+        if (!visiting.insert(aggSym.get()).second) return;
+        std::string aggMod = definingModuleFor(aggSym, aggSym->name);
+        for (const auto& field : aggSym->fields) {
+            registerEmbeddedDestructors(field.type, base, offset + field.offset, aggMod, visiting);
+        }
+        if (aggSym->kind == SymbolKind::CLASS && !aggSym->destructorName.empty()) {
+            // CID-020/021 (spec §5/§6): destructors mangle with the class's
+            // defining module, matching the definition (same rule as the
+            // direct class-local registration in visit(VarDeclStmt)).
+            auto dtorDef = resolveFunctionDef(aggSym->destructorName,
+                                              definingScopeFor(aggSym, aggSym->name));
+            destructorStack_.back().push_back(
+                {emitFunctionName(dtorDef.second, aggSym->destructorName), base, offset});
+        }
+        visiting.erase(aggSym.get());
+    }
+
     // CIDER-BUG-087: module-scope class/struct values are zero in .bss (and
     // in the VM's zero-filled global storage), so their embedded class
     // values need the same initializer stores a local gets. There is no
@@ -6719,14 +6822,9 @@ public:
         destructorStack_.push_back({});
         for (auto& s : stmt.getStatements()) visitStatement(s.get());
         for (auto it = deferStack_.back().rbegin(); it != deferStack_.back().rend(); ++it) visitStatement(*it);
-        for (auto it = destructorStack_.back().rbegin(); it != destructorStack_.back().rend(); ++it) {
-            IRInstruction call;
-            call.op = IROp::CALL;
-            call.dest = std::nullopt;
-            call.args.push_back(IRValue::Label(it->mangledName));
-            call.args.push_back(it->varAddr);
-            currentBlock_->addInstruction(call);
-        }
+        // CIDER-BUG-088: share emitDestructors so embedded-subobject
+        // addresses (offset != 0) are handled identically at every exit site.
+        emitDestructors(destructorStack_.size() - 1);
         destructorStack_.pop_back();
         deferStack_.pop_back();
         symbolTable_.exitScope();
