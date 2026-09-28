@@ -1,0 +1,26 @@
+// CIDER-ISS-012: `-`, `*`, `/`, `%` and the bitwise operators on two
+// `string` values have no content lowering (IRGen's generic path would
+// combine the two data addresses), so they are checker errors like the
+// 056 `+`. Only `<`/`>`/`<=`/`>=` gained content semantics; `s + n` /
+// `s - n` interior-pointer arithmetic stays valid (str_ptr).
+func main() -> int {
+  var a: string = "a";
+  var b: string = "b";
+  var s: string = a - b;    // rejected
+  var t: string = a * b;    // rejected
+  var u: string = a / b;    // rejected
+  var v: string = a % b;    // rejected
+  var w: string = a & b;    // rejected
+  var x: string = a | b;    // rejected
+  var y: string = a ^ b;    // rejected
+  var z: string = a << b;   // rejected
+  var q: string = a >> b;   // rejected
+  a -= b;                   // rejected
+  a *= b;                   // rejected
+  a /= b;                   // rejected
+  a %= b;                   // rejected
+  a &= b;                   // rejected
+  a |= b;                   // rejected
+  a ^= b;                   // rejected
+  return 0;
+}

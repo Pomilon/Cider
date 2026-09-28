@@ -67,6 +67,7 @@ public:
         exceptionGlobalsEnsured_ = false;
         interpHelpersEnsured_ = false;
         stringEqHelpersEnsured_ = false;
+        stringCmpHelpersEnsured_ = false;
         program.accept(*this);
 
         // Populate V-Tables in module (CID-020/021 spec §6: module-scope
@@ -2913,9 +2914,10 @@ public:
         // identity comparison, so a cast stays the escape hatch for
         // pointer identity. Identical literal spellings are the same
         // bytes and fold here; everything else calls the _streq helper.
-        bool stringEq = (leftType.name == "string" && leftType.pointerLevel == 0 &&
-                         rightType.name == "string" && rightType.pointerLevel == 0);
-        if (stringEq && (sOp == "==" || sOp == "!=")) {
+        // CIDER-ISS-012 extends the same split to `<`/`>`/`<=`/`>=`.
+        bool bothStrings = (leftType.name == "string" && leftType.pointerLevel == 0 &&
+                             rightType.name == "string" && rightType.pointerLevel == 0);
+        if (bothStrings && (sOp == "==" || sOp == "!=")) {
             auto isStringLiteral = [](const IRValue& v) {
                 return v.kind == IRValue::CONSTANT && v.type == IRType::PTR &&
                        !v.name.empty() && v.name.front() == '"';
@@ -2929,6 +2931,38 @@ public:
                 IRValue dest = IRValue::Register(nextTemp(), IRType::BOOL);
                 currentBlock_->addInstruction({sOp == "==" ? IROp::CMP_NE : IROp::CMP_EQ,
                                                dest, {eq, IRValue::Constant(0, IRType::I32)}});
+                lastValue_ = dest;
+            }
+            lastExprType_ = {"bool", 0};
+            return;
+        }
+
+        // CIDER-ISS-012: ordered comparisons between two `string` values
+        // compare contents lexicographically (strcmp sign), not addresses.
+        // The `_strcmp` helper is plain IR built once per module — like
+        // _streq — so the VM (optimized and unoptimized) and the native
+        // backend run identical code. nil sorts before every non-nil
+        // string and is never dereferenced. Explicit pointer types keep
+        // address ordering; identical literal spellings fold to the known
+        // equality result so a common case needs no helper call.
+        if (bothStrings && (sOp == "<" || sOp == ">" || sOp == "<=" || sOp == ">=")) {
+            auto isStringLiteral = [](const IRValue& v) {
+                return v.kind == IRValue::CONSTANT && v.type == IRType::PTR &&
+                       !v.name.empty() && v.name.front() == '"';
+            };
+            if (isStringLiteral(left) && isStringLiteral(right) &&
+                left.name == right.name) {
+                bool le = (sOp == "<=" || sOp == ">=");
+                lastValue_ = IRValue::Constant(le ? 1 : 0, IRType::BOOL);
+            } else {
+                ensureStringComparisonHelpers();
+                IRValue cmp = emitCall("_strcmp", {left, right}, IRType::I32);
+                IROp cmpOp = (sOp == "<") ? IROp::CMP_LT
+                           : (sOp == ">") ? IROp::CMP_GT
+                           : (sOp == "<=") ? IROp::CMP_LE : IROp::CMP_GE;
+                IRValue dest = IRValue::Register(nextTemp(), IRType::BOOL);
+                currentBlock_->addInstruction({cmpOp, dest,
+                                               {cmp, IRValue::Constant(0, IRType::I32)}});
                 lastValue_ = dest;
             }
             lastExprType_ = {"bool", 0};
@@ -4956,8 +4990,9 @@ public:
         return n;
     }
 
-    IRValue emitCall(const std::string& callee, std::vector<IRValue> args) {
-        IRValue dest = IRValue::Register(nextTemp(), IRType::PTR);
+    IRValue emitCall(const std::string& callee, std::vector<IRValue> args,
+                     IRType returnType = IRType::PTR) {
+        IRValue dest = IRValue::Register(nextTemp(), returnType);
         IRInstruction call;
         call.op = IROp::CALL;
         call.dest = dest;
@@ -5308,6 +5343,123 @@ public:
         fn->addBlock(std::move(advance));
         fn->addBlock(std::move(equal));
         fn->addBlock(std::move(differ));
+        module_.addFunction(std::move(fn));
+    }
+
+    // CIDER-ISS-012: `_strcmp(a: char*, b: char*) -> int` — lexicographic
+    // content comparison with strcmp's sign convention (both operands are
+    // NUL-terminated): <0 if a sorts before b, 0 if equal, >0 if a sorts
+    // after b. Like _streq above this is plain IR built once per module,
+    // so the VM (optimized and unoptimized) and the native backend run the
+    // same code rather than delegating to a backend-specific libc strcmp.
+    // nil is defined and never dereferenced: nil sorts before every
+    // non-nil string, including "", and two nils compare equal. Bytes
+    // compare as unsigned char, matching C strcmp.
+    void ensureStringComparisonHelpers() {
+        if (stringCmpHelpersEnsured_) return;
+        stringCmpHelpersEnsured_ = true;
+
+        auto fn = std::make_unique<FunctionIR>("_strcmp", IRType::I32);
+        fn->addParam("arg_a");
+        fn->addParam("arg_b");
+
+        auto entry = std::make_unique<BasicBlock>("entry");
+        auto loop = std::make_unique<BasicBlock>("loop");
+        auto checkB = std::make_unique<BasicBlock>("check_b");
+        auto aNull = std::make_unique<BasicBlock>("a_null");
+        auto content = std::make_unique<BasicBlock>("content");
+        auto check = std::make_unique<BasicBlock>("check");
+        auto advance = std::make_unique<BasicBlock>("advance");
+        auto differ = std::make_unique<BasicBlock>("differ");
+        auto equal = std::make_unique<BasicBlock>("equal");
+        auto less = std::make_unique<BasicBlock>("less");
+        auto greater = std::make_unique<BasicBlock>("greater");
+
+        IRValue pa = IRValue::Register(nextTemp(), IRType::PTR);
+        entry->addInstruction({IROp::ALLOCA, pa, {IRValue::Constant(8, IRType::I32)}});
+        entry->addInstruction({IROp::STORE, std::nullopt,
+                               {pa, IRValue::Register("arg_a", IRType::PTR),
+                                IRValue::Constant(0, IRType::I32)}});
+        IRValue pb = IRValue::Register(nextTemp(), IRType::PTR);
+        entry->addInstruction({IROp::ALLOCA, pb, {IRValue::Constant(8, IRType::I32)}});
+        entry->addInstruction({IROp::STORE, std::nullopt,
+                               {pb, IRValue::Register("arg_b", IRType::PTR),
+                                IRValue::Constant(0, IRType::I32)}});
+        entry->addInstruction({IROp::BR, std::nullopt, {IRValue::Label("loop")}});
+
+        IRValue va = IRValue::Register(nextTemp(), IRType::PTR);
+        loop->addInstruction({IROp::LOAD, va, {pa, IRValue::Constant(0, IRType::I32)}});
+        IRValue vb = IRValue::Register(nextTemp(), IRType::PTR);
+        loop->addInstruction({IROp::LOAD, vb, {pb, IRValue::Constant(0, IRType::I32)}});
+        IRValue aIsNull = IRValue::Register(nextTemp(), IRType::BOOL);
+        loop->addInstruction({IROp::CMP_EQ, aIsNull, {va, IRValue::Constant(0, IRType::I32)}});
+        loop->addInstruction({IROp::COND_BR, std::nullopt,
+                              {aIsNull, IRValue::Label("a_null"), IRValue::Label("check_b")}});
+
+        // Left non-nil: a nil right side sorts after every string.
+        IRValue bNullRight = IRValue::Register(nextTemp(), IRType::BOOL);
+        checkB->addInstruction({IROp::CMP_EQ, bNullRight, {vb, IRValue::Constant(0, IRType::I32)}});
+        checkB->addInstruction({IROp::COND_BR, std::nullopt,
+                                {bNullRight, IRValue::Label("greater"), IRValue::Label("content")}});
+
+        // Left nil: equal to nil, less than every non-nil string.
+        IRValue bNullLeft = IRValue::Register(nextTemp(), IRType::BOOL);
+        aNull->addInstruction({IROp::CMP_EQ, bNullLeft, {vb, IRValue::Constant(0, IRType::I32)}});
+        aNull->addInstruction({IROp::COND_BR, std::nullopt,
+                               {bNullLeft, IRValue::Label("equal"), IRValue::Label("less")}});
+
+        IRValue ca = IRValue::Register(nextTemp(), IRType::U8);
+        content->addInstruction({IROp::LOAD, ca, {va, IRValue::Constant(0, IRType::I32)}});
+        IRValue cb = IRValue::Register(nextTemp(), IRType::U8);
+        content->addInstruction({IROp::LOAD, cb, {vb, IRValue::Constant(0, IRType::I32)}});
+        // The first differing byte decides; CMP on two U8 regs is an
+        // unsigned byte compare in both backends (matching strcmp).
+        IRValue ne = IRValue::Register(nextTemp(), IRType::BOOL);
+        content->addInstruction({IROp::CMP_NE, ne, {ca, cb}});
+        IRValue lt = IRValue::Register(nextTemp(), IRType::BOOL);
+        content->addInstruction({IROp::CMP_LT, lt, {ca, cb}});
+        content->addInstruction({IROp::COND_BR, std::nullopt,
+                                 {ne, IRValue::Label("differ"), IRValue::Label("check")}});
+
+        IRValue atEnd = IRValue::Register(nextTemp(), IRType::BOOL);
+        check->addInstruction({IROp::CMP_EQ, atEnd, {ca, IRValue::Constant(0, IRType::I32)}});
+        check->addInstruction({IROp::COND_BR, std::nullopt,
+                               {atEnd, IRValue::Label("equal"), IRValue::Label("advance")}});
+
+        // Advance both cursors. Reload from the slots so this block does
+        // not depend on the loop block's registers staying live.
+        IRValue va2 = IRValue::Register(nextTemp(), IRType::PTR);
+        advance->addInstruction({IROp::LOAD, va2, {pa, IRValue::Constant(0, IRType::I32)}});
+        IRValue na = IRValue::Register(nextTemp(), IRType::PTR);
+        advance->addInstruction({IROp::ADD, na, {va2, IRValue::Constant(1, IRType::I32)}});
+        advance->addInstruction({IROp::STORE, std::nullopt,
+                                 {pa, na, IRValue::Constant(0, IRType::I32)}});
+        IRValue vb2 = IRValue::Register(nextTemp(), IRType::PTR);
+        advance->addInstruction({IROp::LOAD, vb2, {pb, IRValue::Constant(0, IRType::I32)}});
+        IRValue nb = IRValue::Register(nextTemp(), IRType::PTR);
+        advance->addInstruction({IROp::ADD, nb, {vb2, IRValue::Constant(1, IRType::I32)}});
+        advance->addInstruction({IROp::STORE, std::nullopt,
+                                 {pb, nb, IRValue::Constant(0, IRType::I32)}});
+        advance->addInstruction({IROp::BR, std::nullopt, {IRValue::Label("loop")}});
+
+        differ->addInstruction({IROp::COND_BR, std::nullopt,
+                                {lt, IRValue::Label("less"), IRValue::Label("greater")}});
+
+        equal->addInstruction({IROp::RET, std::nullopt, {IRValue::Constant(0, IRType::I32)}});
+        less->addInstruction({IROp::RET, std::nullopt, {IRValue::Constant(-1, IRType::I32)}});
+        greater->addInstruction({IROp::RET, std::nullopt, {IRValue::Constant(1, IRType::I32)}});
+
+        fn->addBlock(std::move(entry));
+        fn->addBlock(std::move(loop));
+        fn->addBlock(std::move(checkB));
+        fn->addBlock(std::move(aNull));
+        fn->addBlock(std::move(content));
+        fn->addBlock(std::move(check));
+        fn->addBlock(std::move(advance));
+        fn->addBlock(std::move(differ));
+        fn->addBlock(std::move(equal));
+        fn->addBlock(std::move(less));
+        fn->addBlock(std::move(greater));
         module_.addFunction(std::move(fn));
     }
 
@@ -6347,6 +6499,7 @@ private:
     bool exceptionGlobalsEnsured_ = false;
     bool interpHelpersEnsured_ = false;
     bool stringEqHelpersEnsured_ = false;  // CIDER-BUG-056 _streq helper
+    bool stringCmpHelpersEnsured_ = false;  // CIDER-ISS-012 _strcmp helper
     bool currentIsSret_ = false;
     bool defaultAbiMs_ = false;  // CID-005: --target uefi function-value typing
     bool checks_ = false;        // CIDER-ISS-001: opt-in runtime bounds checks

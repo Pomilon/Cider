@@ -1589,6 +1589,17 @@ public:
                       "use std.string.strcat into a buffer",
                       stmt.getLine());
             }
+            // CIDER-ISS-012: the other compound forms on two `string`
+            // values are equally meaningless — the generic path would
+            // combine the two addresses. Compound string ± integer
+            // (`s += n`, `s -= n`) stays a supported interior-pointer
+            // operation, and explicit `*u8`/`char*` targets are untouched.
+            if (targetString && valueString && op != "+" &&
+                (op == "-" || op == "*" || op == "/" || op == "%" ||
+                 op == "&" || op == "|" || op == "^")) {
+                error("Operator '" + op + "=' is not supported on two string values; "
+                      "use std.string", stmt.getLine());
+            }
         }
     }
 
@@ -1628,6 +1639,27 @@ public:
             error("String concatenation with '+' is not supported; "
                   "use std.string.strcat into a buffer",
                   expr.getLine());
+        }
+
+        // CIDER-ISS-012: `<`/`>`/`<=`/`>=` between two `string` values now
+        // compare contents (lexicographic, strcmp sign) via the IR-built
+        // `_strcmp` helper. The remaining arithmetic/bitwise operators have
+        // no string-content lowering — IRGen's generic path would combine
+        // the two byte addresses — so reject them here the same way as the
+        // 056 concatenation. `s + n` / `s - n` interior-pointer arithmetic
+        // is unaffected (an integer is not a string), and explicit
+        // `*u8`/`char*` operands never reach this branch.
+        bool stringOpUnsupported = (op == "-" || op == "*" || op == "/" || op == "%" ||
+                                    op == "&" || op == "|" || op == "^" ||
+                                    op == "<<" || op == ">>");
+        if (leftIsString && rightIsString && stringOpUnsupported) {
+            error("Operator '" + op + "' is not supported on two string values; "
+                  "use std.string", expr.getLine());
+            // Keep the (invalid) expression typed as string so the enclosing
+            // assignment/return checks do not report a second, misleading
+            // type-mismatch diagnostic.
+            lastExprType_ = leftType;
+            return;
         }
 
         bool isMixedNumeric = (isInteger(leftType.name) && isFloatName(rightType.name)) ||

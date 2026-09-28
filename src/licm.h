@@ -175,6 +175,19 @@ bool SSALicmPass::hoistLoop(FunctionIR& func, const Loop& loop, const std::strin
                 // execute exactly where written.
                 if (instr.isVolatile) continue;
 
+                // CIDER-ISS-012 support: a register with more than one
+                // definition is not SSA. Hoisting one definition to the
+                // preheader (and dropping it from the loop) lets the other
+                // definitions — and the stale preheader value — reach uses
+                // that used to be path-dependent. The inliner creates
+                // exactly this shape: every cloned RET does
+                // `MOV callDest, retval`. Registers were unique before
+                // inlining, so this was never guarded.
+                if (instr.dest && instr.dest->kind == IRValue::REGISTER &&
+                    licmCache.multiDef.count(instr.dest->name)) {
+                    continue;
+                }
+
                 if (instr.op == IROp::STORE || instr.op == IROp::CALL ||
                     instr.op == IROp::VIRTUAL_CALL || instr.op == IROp::RET ||
                     instr.op == IROp::COND_BR || instr.op == IROp::BR ||
@@ -342,6 +355,15 @@ bool PostLicmPass::hoistLoop(FunctionIR& func, const Loop& loop, const std::stri
                 // CIDER-BUG-061: volatile accesses never move — they must
                 // execute exactly where written.
                 if (instr.isVolatile) continue;
+
+                // CIDER-ISS-012 support: see SSALicmPass::hoistLoop — a
+                // multi-defined register is not SSA, and hoisting one of its
+                // definitions corrupts the other paths. The inliner's
+                // multi-RET `MOV callDest, retval` shape hits this.
+                if (instr.dest && instr.dest->kind == IRValue::REGISTER &&
+                    licmCache.multiDef.count(instr.dest->name)) {
+                    continue;
+                }
 
                 // Post-deconstruction: exclude same ops as SSA mode plus PUSH, POP.
                 if (instr.op == IROp::STORE || instr.op == IROp::CALL ||

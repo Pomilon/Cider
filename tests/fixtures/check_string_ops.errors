@@ -1,0 +1,16 @@
+Operator '-' is not supported on two string values; use std.string
+Operator '*' is not supported on two string values; use std.string
+Operator '/' is not supported on two string values; use std.string
+Operator '%' is not supported on two string values; use std.string
+Operator '&' is not supported on two string values; use std.string
+Operator '|' is not supported on two string values; use std.string
+Operator '^' is not supported on two string values; use std.string
+Operator '<<' is not supported on two string values; use std.string
+Operator '>>' is not supported on two string values; use std.string
+Operator '-=' is not supported on two string values; use std.string
+Operator '*=' is not supported on two string values; use std.string
+Operator '/=' is not supported on two string values; use std.string
+Operator '%=' is not supported on two string values; use std.string
+Operator '&=' is not supported on two string values; use std.string
+Operator '|=' is not supported on two string values; use std.string
+Operator '^=' is not supported on two string values; use std.string
