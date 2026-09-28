@@ -203,12 +203,21 @@ int run() {
     // "succeed" as a tiny block, and a near-INT64_MAX request overflowed
     // its size + kHeaderSize arithmetic; a merely huge one threw
     // std::bad_alloc out of the VM instead of reporting failure. Native
-    // mmap rejects length 0 with EINVAL and reports ENOMEM when the mapping
-    // cannot be established; the syscall result rides rax into the exit code.
+    // mmap takes the length as size_t, so only 0 is EINVAL: a negative i64
+    // is a huge size_t that reports ENOMEM (CIDER-BUG-114), as does any
+    // mapping that cannot be established; the syscall result rides rax into
+    // the exit code.
     {
+        // (size_t)-1: native fails with ENOMEM, not EINVAL (CIDER-BUG-114).
         auto r = runAsm("mov rax, 9\nmov rsi, -1\n"
                         "syscall\nmov rdi, rax\nmov rax, 60\nsyscall\n");
-        CHECK(r.exitCode == -22);  // -EINVAL
+        CHECK(r.exitCode == -12);  // -ENOMEM
+    }
+    {
+        // INT64_MIN is the other end of the negative range; still ENOMEM.
+        auto r = runAsm("mov rax, 9\nmov rsi, -9223372036854775808\n"
+                        "syscall\nmov rdi, rax\nmov rax, 60\nsyscall\n");
+        CHECK(r.exitCode == -12);  // -ENOMEM
     }
     {
         // Native mmap(NULL, 0, ...) is EINVAL (verified against Linux).

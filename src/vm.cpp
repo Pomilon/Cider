@@ -1503,14 +1503,16 @@ void VM::execAsm(const IRInstruction& instr) {
                 // computes
                 // size + kHeaderSize on top of the current heap size
                 // (near-INT64_MAX requests overflowed that arithmetic).
-                // Native mmap rejects a zero length with EINVAL and reports
-                // ENOMEM when the mapping cannot be established; a length
-                // that already overflows the allocator's arithmetic is just
-                // as impossible. Valid requests still return the same
-                // offsets the allocator always handed out.
-                if (rsi <= 0) {
+                // CIDER-BUG-114: native mmap takes the length as size_t, so
+                // only length 0 is EINVAL; a negative i64 is a huge size_t
+                // and, like a length that overflows the allocator's signed
+                // arithmetic or simply cannot be satisfied, reports ENOMEM.
+                // Valid requests still return the same offsets the allocator
+                // always handed out.
+                if (rsi == 0) {
                     rax = -EINVAL;
-                } else if (rsi > INT64_MAX - kHeaderSize - (int64_t)heap_.size()) {
+                } else if (rsi < 0 ||
+                           rsi > INT64_MAX - kHeaderSize - (int64_t)heap_.size()) {
                     rax = -ENOMEM;
                 } else {
                     try {

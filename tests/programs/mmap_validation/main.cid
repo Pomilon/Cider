@@ -1,4 +1,6 @@
 // CIDER-BUG-103: mmap length validation + the nil-buffer sentinel.
+// CIDER-BUG-114: negative lengths are huge size_t values natively, so they
+// fail with ENOMEM; only length 0 is EINVAL.
 // Each failing check names itself in the exit code; 0 means all paths agree.
 // stdin carries "ABCD" for the non-consumption check.
 func main() -> int {
@@ -19,6 +21,21 @@ func main() -> int {
     }
     if (ret != -22) return 1;
 
+    // mmap(NULL, (size_t)-1, ...) -> ENOMEM (a negative i64 is a huge
+    // size_t for native), like native. CIDER-BUG-114.
+    asm {
+        "mov rax, 9\n"
+        "mov rdi, 0\n"
+        "mov rsi, -1\n"
+        "mov rdx, 3\n"
+        "mov r10, 34\n"
+        "mov r8, -1\n"
+        "mov r9, 0\n"
+        "syscall\n"
+        "mov {ret}, eax\n"
+    }
+    if (ret != -12) return 2;
+
     // mmap(NULL, 2^62, ...) -> ENOMEM (no Linux user address space is
     // that large), like native.
     asm {
@@ -32,7 +49,7 @@ func main() -> int {
         "syscall\n"
         "mov {ret}, eax\n"
     }
-    if (ret != -12) return 2;
+    if (ret != -12) return 3;
 
     // write(1, NULL, 4) -> EFAULT and no output.
     asm {
@@ -43,7 +60,7 @@ func main() -> int {
         "syscall\n"
         "mov {ret}, eax\n"
     }
-    if (ret != -14) return 3;
+    if (ret != -14) return 4;
 
     // write(1, NULL, 0) -> 0: native accepts NULL with count 0.
     asm {
@@ -54,7 +71,7 @@ func main() -> int {
         "syscall\n"
         "mov {ret}, eax\n"
     }
-    if (ret != 0) return 4;
+    if (ret != 0) return 5;
 
     // A valid mmap is still usable; 64 bytes is enough for the checks.
     var p: *void = 0 as *void;
@@ -69,7 +86,7 @@ func main() -> int {
         "syscall\n"
         "mov {p}, rax\n"
     }
-    if (p == 0 as *void) return 5;
+    if (p == 0 as *void) return 6;
 
     // read(0, NULL, 4) -> EFAULT; the pending input stays available for
     // the valid read that follows (native does not consume it either).
@@ -81,7 +98,7 @@ func main() -> int {
         "syscall\n"
         "mov {ret}, eax\n"
     }
-    if (ret != -14) return 6;
+    if (ret != -14) return 7;
     asm {
         "mov rax, 0\n"
         "mov rdi, 0\n"
@@ -90,13 +107,13 @@ func main() -> int {
         "syscall\n"
         "mov {ret}, eax\n"
     }
-    if (ret != 4) return 7;
+    if (ret != 4) return 8;
 
     // The bytes landed in the freshly mapped region ("ABCD": 'A' == 65).
     var q: char* = p as char*;
-    if (*q != 65) return 8;
+    if (*q != 65) return 9;
     *q = 90;  // 'Z'
-    if (*q != 90) return 9;
+    if (*q != 90) return 10;
 
     return 0;
 }
