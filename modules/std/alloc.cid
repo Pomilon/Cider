@@ -21,7 +21,10 @@ var MAX_ARENAS: int = 1024;
 var MAX_TOTAL_BYTES: int = 1073741824;  // 1 GiB (fits int32; 2 GiB overflows the 32-bit int type)
 var MAX_WALK_BLOCKS: int = 1000000;
 var arena_count: int = 0;
-var total_bytes: int = 0;
+// CIDER-BUG-117: 64-bit accumulator. The cap check below is evaluated in
+// i64; keeping the total in the same width means an accepted request can
+// never wrap the accumulator and disable the cap for later arenas.
+var total_bytes: i64 = 0;
 
 var fail_msg: string = "allocator: fatal error\n";
 
@@ -51,7 +54,15 @@ func mmap_arena(size: int) -> *void {
     if (arena_count >= MAX_ARENAS) {
         fail_fast(70);
     }
-    if (total_bytes + size > MAX_TOTAL_BYTES) {
+    // CIDER-BUG-117: compare against the cap in 64-bit, subtraction form.
+    // The old `total_bytes + size > MAX_TOTAL_BYTES` was evaluated in
+    // 32-bit int: once a full 1 GiB arena had raised total_bytes to 2^30, a
+    // second ~1 GiB request wrapped the sum to -2^31, so the check passed,
+    // the mmap went ahead and total_bytes was left negative — the cap was
+    // silently disabled for every later arena. total_bytes is never
+    // negative (every accepted request keeps the total <= MAX_TOTAL_BYTES),
+    // so `MAX_TOTAL_BYTES - total_bytes` cannot overflow either.
+    if (size as i64 > MAX_TOTAL_BYTES as i64 - total_bytes) {
         fail_fast(71);
     }
     // CIDER-BUG-109: keep the syscall result as a signed 64-bit value.
@@ -81,7 +92,9 @@ func mmap_arena(size: int) -> *void {
         fail_fast(75);
     }
     arena_count = arena_count + 1;
-    total_bytes = total_bytes + size;
+    // The cap check above bounds the sum, so this i64 addition cannot
+    // wrap and total_bytes never goes negative.
+    total_bytes = total_bytes + size as i64;
     return raw as *void;
 }
 
