@@ -1083,7 +1083,7 @@ void VM::store(int64_t addr, const RegVal& val, IRType type, int64_t offset) {
 
 namespace {
 const char* const kVMBuiltins[] = {"malloc", "free", "exit", "putchar", "_setjmp", "longjmp",
-                                   "_uncaught_exception"};
+                                   "_uncaught_exception", "_bounds_fail"};
 }  // namespace
 
 bool VM::isExternFunctionName(const std::string& name) const {
@@ -1141,6 +1141,13 @@ bool VM::tryBuiltinCall(const std::string& name, const std::vector<IRValue>& arg
         // `vm error: uncaught exception` and exit 2, matching the native
         // and pomeos stub byte for byte.
         throw VMError{"uncaught exception"};
+    }
+    if (name == "_bounds_fail") {
+        // CIDER-ISS-001: --checks routed a fixed-size array index outside
+        // [0, N) here. VMError makes main print
+        // `vm error: index out of bounds` and exit 2, matching the native
+        // and pomeos stub byte for byte.
+        throw VMError{"index out of bounds"};
     }
     if (name == "_setjmp") {
         RegVal buf = args.empty() ? RegVal{} : resolveValue(args[0]);

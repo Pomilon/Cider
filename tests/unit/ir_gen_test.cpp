@@ -36,6 +36,26 @@ std::string genSrc(const std::string& src, std::vector<std::string>* errors = nu
     return ss.str();
 }
 
+// CIDER-ISS-001: like genSrc, with the opt-in `--checks` bounds mode on.
+std::string genSrcChecked(const std::string& src) {
+    cider::ErrorReporter rep;
+    cider::Lexer lex(src, rep);
+    cider::Parser parser(lex, rep);
+    auto prog = parser.parseProgram();
+    cider::SymbolTable table;
+    cider::ModuleResolver resolver;
+    cider::SymbolCollector collector(table, rep, resolver);
+    collector.collect(*prog);
+    cider::IRGenerator gen(table);
+    gen.setChecks(true);
+    auto module = gen.generate(*prog);
+    std::ostringstream ss;
+    std::streambuf* old = std::cout.rdbuf(ss.rdbuf());
+    module.print();
+    std::cout.rdbuf(old);
+    return ss.str();
+}
+
 // Like genSrc, but hands back the module so tests can assert IR types
 // (the printed text does not show operand/result types).
 cider::ModuleIR genModuleSrc(const std::string& src) {
@@ -1078,6 +1098,39 @@ int run() {
         CHECK(countA == 1);  // one declaration label, no stale relabel
         CHECK(d.find("vtable_I_B") != std::string::npos);
         CHECK(d.find("vtable_I_I") == std::string::npos);
+    }
+
+    // CIDER-ISS-001: `--checks` guards fixed-size array indexing with a
+    // branch to `_bounds_fail`; the default path emits none. Pointer
+    // indexing stays unchecked (no static bound), and an out-of-range
+    // constant routes straight to the trap without a runtime compare.
+    {
+        const char* arrSrc =
+            "func main() -> void {\n"
+            "  var a: [int; 3];\n"
+            "  var i: int = 1;\n"
+            "  a[i] = a[i] + 1;\n"
+            "}\n";
+        CHECK(genSrc(arrSrc).find("_bounds_fail") == std::string::npos);
+        d = genSrcChecked(arrSrc);
+        CHECK(d.find("call _bounds_fail") != std::string::npos);
+        CHECK(d.find("bounds_fail") != std::string::npos);  // guard block
+
+        d = genSrcChecked(
+            "func main() -> void {\n"
+            "  var a: [int; 3];\n"
+            "  var p: int* = &a[0];\n"
+            "  var i: int = 9;\n"
+            "  p[i] = 1;\n"
+            "}\n");
+        CHECK(d.find("_bounds_fail") == std::string::npos);
+
+        d = genSrcChecked(
+            "func main() -> void {\n"
+            "  var a: [int; 3];\n"
+            "  var v: int = a[5];\n"
+            "}\n");
+        CHECK(d.find("call _bounds_fail") != std::string::npos);
     }
     return 0;
 }

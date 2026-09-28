@@ -66,6 +66,13 @@ add_test(NAME ms_abi_xmm_smoke
          COMMAND bash ${CMAKE_SOURCE_DIR}/tests/unit/ms_abi_xmm_smoke.sh $<TARGET_FILE:cider>)
 set_tests_properties(ms_abi_xmm_smoke PROPERTIES SKIP_RETURN_CODE 77)
 
+# CIDER-ISS-001: opt-in --checks bounds checks must trap identically on the
+# VM and the native backend; default (no flag) stays silent. The script
+# exits 77 when nasm/gcc are missing.
+add_test(NAME bounds_check_smoke
+         COMMAND bash ${CMAKE_SOURCE_DIR}/tests/unit/bounds_check_smoke.sh $<TARGET_FILE:cider>)
+set_tests_properties(bounds_check_smoke PROPERTIES SKIP_RETURN_CODE 77)
+
 # CIDER-CHORE-001: CLI usage/--target validation runs in the suite too
 # (previously manual only).
 add_test(NAME cli_test

@@ -33,6 +33,8 @@ bool CodeGenerator::generate(ModuleIR& module, const std::string& outputPath,
     // pseudo-builtin; the terminating diagnostic helper is then emitted
     // once, after all functions, so each call site can `call` it.
     bool needsUncaughtHelper = false;
+    // CIDER-ISS-001: same for the --checks bounds-fail pseudo-builtin.
+    bool needsBoundsHelper = false;
     std::set<std::string> generatedFunctions_;
     // CID-005: UEFI (PE32+) emission differences (design §1): bare `efi_main`
     // export, no implicit libc externs, and no `_start` kernel-stack entry.
@@ -137,6 +139,12 @@ bool CodeGenerator::generate(ModuleIR& module, const std::string& outputPath,
                     instr.args[0].kind == IRValue::LABEL &&
                     instr.args[0].name == "_uncaught_exception") {
                     needsUncaughtHelper = true;
+                }
+                // CIDER-ISS-001: same for the --checks bounds-fail call.
+                if (instr.op == IROp::CALL && !instr.args.empty() &&
+                    instr.args[0].kind == IRValue::LABEL &&
+                    instr.args[0].name == "_bounds_fail") {
+                    needsBoundsHelper = true;
                 }
                 for (auto& arg : instr.args) {
                     // CID-005: narrow `"..."` and wide `L"..."` PTR constants
@@ -2225,6 +2233,41 @@ bool CodeGenerator::generate(ModuleIR& module, const std::string& outputPath,
             addText("    mov rax, 1     ; write(2, msg, len)");
             addText("    mov rdi, 2");
             addText("    lea rsi, [rel _uncaught_exception_msg]");
+            addText("    mov rdx, " + std::to_string(std::strlen(msg)));
+            addText("    syscall");
+            addText("    mov rax, 60    ; exit(2)");
+            addText("    mov rdi, 2");
+            addText("    syscall");
+        }
+    }
+
+    // CIDER-ISS-001: define the --checks bounds-failure runtime error. The
+    // ir-gen branches here when a fixed-size array index is outside
+    // [0, N). Native/pomeos report the exact line the VM reports
+    // (`vm error: index out of bounds`) on stderr and exit 2, so the two
+    // backends are byte-for-byte identical; UEFI traps (ud2), exactly like
+    // the uncaught helper above. A user-defined function of the same name
+    // wins on both backends, so the helper is emitted only when the name is
+    // free (no duplicate label).
+    bool userDefinedBounds = false;
+    for (const auto& fn : module.getFunctions()) {
+        if (fn->getName() == "_bounds_fail") {
+            userDefinedBounds = true;
+            break;
+        }
+    }
+    if (needsBoundsHelper && !userDefinedBounds) {
+        addText("");
+        addText("; CIDER-ISS-001: array index out of bounds (--checks)");
+        addText("_bounds_fail:");
+        if (isUefi) {
+            addText("    ud2    ; no write/exit syscalls on uefi: trap loudly");
+        } else {
+            const char* msg = "vm error: index out of bounds\n";
+            addData("_bounds_fail_msg: db \"vm error: index out of bounds\", 10");
+            addText("    mov rax, 1     ; write(2, msg, len)");
+            addText("    mov rdi, 2");
+            addText("    lea rsi, [rel _bounds_fail_msg]");
             addText("    mov rdx, " + std::to_string(std::strlen(msg)));
             addText("    syscall");
             addText("    mov rax, 60    ; exit(2)");

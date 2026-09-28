@@ -52,6 +52,12 @@ public:
     // MS-ABI fn values (mirrors the checker's functionPointerTypeOf).
     void setDefaultAbiMs(bool v) { defaultAbiMs_ = v; }
 
+    // CIDER-ISS-001: opt-in `--checks` mode. When on, an IndexExpr whose
+    // base is a fixed-size array value emits a runtime bounds guard against
+    // the array's static length. When off (the default) the generated IR is
+    // unchanged, so default output stays byte-identical.
+    void setChecks(bool v) { checks_ = v; }
+
     ModuleIR generate(AstProgram& program) {
         visitedPrograms_.clear();
         classSyms_.clear();
@@ -5330,6 +5336,70 @@ public:
         call.args.push_back(ptr);
         currentBlock_->addInstruction(call);
     }
+    // CIDER-ISS-001: `--checks` bounds guard for a fixed-size array index.
+    // Emitted for an array VALUE with a statically known length (single or
+    // nested dimension): `idx < 0 || idx >= count` branches to a call of
+    // the `_bounds_fail` runtime routine; the normal load/store then
+    // proceeds in a fresh block. Pointer indexing is deliberately NOT
+    // checked — the pointee extent is not known, so no static bound exists.
+    // A compile-time constant index in range costs nothing; an out-of-range
+    // constant routes straight to the trap. `idx` is evaluated exactly once
+    // by the caller. Comparisons use 64-bit constants so every index width
+    // widens consistently on both backends (see codegen widenCmpOp).
+    void emitBoundsCheck(const IRValue& idx, int64_t count) {
+        if (!checks_ || count <= 0) return;
+        IRType it = idx.type;
+        if (it == IRType::F32 || it == IRType::F64) return;  // not an integer index
+        bool idxUnsigned = (it == IRType::U8 || it == IRType::U16 ||
+                            it == IRType::U32 || it == IRType::U64 ||
+                            it == IRType::PTR || it == IRType::BOOL);
+        auto failCall = [&]() {
+            IRInstruction call;
+            call.op = IROp::CALL;
+            call.dest = std::nullopt;
+            call.args.push_back(IRValue::Label("_bounds_fail"));
+            currentBlock_->addInstruction(call);
+        };
+        if (idx.kind == IRValue::CONSTANT) {
+            bool bad = idxUnsigned ? (uint64_t)idx.intValue >= (uint64_t)count
+                                   : (idx.intValue < 0 || idx.intValue >= count);
+            if (!bad) return;
+            // Known out of range: unconditional trap, then a fresh block so
+            // the normal indexing sequence still has a well-formed block
+            // (only reachable if a user-defined _bounds_fail returns).
+            std::string resumeName = nextLabel("bounds_ok");
+            failCall();
+            currentBlock_->addInstruction({IROp::BR, std::nullopt, {IRValue::Label(resumeName)}});
+            startBlock(resumeName);
+            return;
+        }
+        std::string failName = nextLabel("bounds_fail");
+        std::string okName = nextLabel("bounds_ok");
+        if (!idxUnsigned) {
+            std::string loOkName = nextLabel("bounds_lo_ok");
+            IRValue below = IRValue::Register(nextTemp(), IRType::BOOL);
+            currentBlock_->addInstruction(
+                {IROp::CMP_LT, below, {idx, IRValue::Constant(0, IRType::I64)}});
+            currentBlock_->addInstruction({IROp::COND_BR, std::nullopt,
+                                           {below, IRValue::Label(failName),
+                                            IRValue::Label(loOkName)}});
+            startBlock(loOkName);
+        }
+        IRValue over = IRValue::Register(nextTemp(), IRType::BOOL);
+        currentBlock_->addInstruction(
+            {IROp::CMP_GE, over, {idx, IRValue::Constant(count, IRType::I64)}});
+        currentBlock_->addInstruction({IROp::COND_BR, std::nullopt,
+                                       {over, IRValue::Label(failName),
+                                        IRValue::Label(okName)}});
+        startBlock(failName);
+        failCall();
+        // The routine never returns on VM/native; the branch keeps the CFG
+        // well-formed (and resumes the normal path if a user-defined
+        // _bounds_fail returns).
+        currentBlock_->addInstruction({IROp::BR, std::nullopt, {IRValue::Label(okName)}});
+        startBlock(okName);
+    }
+
     void visit(IndexExpr& expr) override {
         bool wasAddress = isAddress_;
         isAddress_ = false;
@@ -5346,6 +5416,13 @@ public:
         // decision. resolveTypeAlias stops at array/fn wrappers, so resolve
         // the base first, strip, then resolve the element.
         baseType = resolveTypeAlias(baseType);
+        // CIDER-ISS-001: --checks guards an index into a fixed-size array
+        // VALUE against the array's static length before the scaled address
+        // is formed. A pointer base (pointerLevel > 0) stays unchecked: its
+        // pointee extent is unknown; so do slices and strings.
+        if (baseType.isArray && baseType.pointerLevel == 0 && baseType.arraySize > 0) {
+            emitBoundsCheck(idx, baseType.arraySize);
+        }
         TypeInfo elemType = baseType;
         if (elemType.isArray) {
             // CIDER-BUG-052: elementType() keeps the inner dimension of a
@@ -5967,6 +6044,7 @@ private:
     bool stringEqHelpersEnsured_ = false;  // CIDER-BUG-056 _streq helper
     bool currentIsSret_ = false;
     bool defaultAbiMs_ = false;  // CID-005: --target uefi function-value typing
+    bool checks_ = false;        // CIDER-ISS-001: opt-in runtime bounds checks
     TypeInfo currentReturnType_ = {"void", 0};
     int tempCount_ = 0;
     int globalStrCount_ = 0;

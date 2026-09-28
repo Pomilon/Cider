@@ -30,6 +30,7 @@ struct CliOptions {
     std::string command;      // "parse" | "check" | "build" | "run" | "compile" | "bundle"
     bool noOpt = false;
     bool warn = false;        // CIDER-FEAT-005: opt-in diagnostics
+    bool checks = false;      // CIDER-ISS-001: opt-in runtime bounds checks
     std::string inputFile;
     std::string outputFile;
     std::string target = "native";  // "native" | "pomeos" | "uefi"
@@ -49,6 +50,11 @@ bool parseCli(int argc, char** argv, CliOptions& out) {
             // CIDER-FEAT-005: accepted by every command; only the checking
             // commands have an analysis pass to drive.
             out.warn = true;
+        } else if (a == "--checks") {
+            // CIDER-ISS-001: accepted by every command; only `run` and
+            // `compile` have an IR-gen path where bounds checks can be
+            // emitted, so elsewhere the flag is a no-op.
+            out.checks = true;
         } else if (a == "--target") {
             if (i + 1 >= argc) return false;
             out.target = argv[++i];
@@ -158,7 +164,7 @@ int main(int argc, char** argv) {
     }
     CliOptions opts;
     if (!parseCli(argc, argv, opts)) {
-        std::fprintf(stderr, "usage: cider <parse|check|build|run|compile|bundle> [--no-opt] [--warn] [--target native|pomeos|uefi] [-o out.asm] <file>\n");
+        std::fprintf(stderr, "usage: cider <parse|check|build|run|compile|bundle> [--no-opt] [--warn] [--checks] [--target native|pomeos|uefi] [-o out.asm] <file>\n");
         return 2;
     }
     // bundle is self-contained (see bundler.h): it runs before — and
@@ -237,6 +243,7 @@ int main(int argc, char** argv) {
             gen.setSymbolModules(collector.getSymbolModules());
             gen.setDefaultAbiMs(defaultAbiMs);
             gen.setReporter(&rep);
+            gen.setChecks(opts.checks);  // CIDER-ISS-001
             auto module = gen.generate(*prog);
             if (rep.hasErrors()) {
                 printDiagnostics(text, opts.inputFile, rep.errors(), "ir");
@@ -264,6 +271,7 @@ int main(int argc, char** argv) {
             gen.setSymbolModules(collector.getSymbolModules());
             gen.setDefaultAbiMs(defaultAbiMs);
             gen.setReporter(&rep);
+            gen.setChecks(opts.checks);  // CIDER-ISS-001
             auto module = gen.generate(*prog);
             if (rep.hasErrors()) {
                 printDiagnostics(text, opts.inputFile, rep.errors(), "ir");
