@@ -379,6 +379,56 @@ int testVolatileLicm() {
     return 0;
 }
 
+int testCallClobberLicm() {
+    // CIDER-BUG-086: a call is a memory clobber. LICM must not hoist the
+    // caller's MEMCPY of an sret aggregate result, nor a load of an alloca
+    // whose address was passed to a callee (both would freeze the first
+    // iteration's bytes). The alloca holding `i` is loop-written and the
+    // sret slot and `x` escape, so after the fix no load may reach the
+    // preheader at all.
+    auto r = genModule(
+        "struct Pair { var a: int; var b: int; }\n"
+        "func make(n: int) -> Pair {\n"
+        "  var p: Pair;\n"
+        "  p.a = n;\n"
+        "  p.b = n;\n"
+        "  return p;\n"
+        "}\n"
+        "func store(p: *int, v: int) -> void { *p = v; }\n"
+        "func main() -> void {\n"
+        "  var x: int = 0;\n"
+        "  var i: int = 1;\n"
+        "  while (i <= 3) {\n"
+        "    var p: Pair = make(i);\n"
+        "    store(&x, i);\n"
+        "    p.b = x;\n"
+        "    i = i + 1;\n"
+        "  }\n"
+        "}\n");
+    cider::SSALicmPass licm;
+    CHECK(licm.run(r.module));
+    int preMemcpy = 0, loopMemcpy = 0, preLoads = 0, loopLoads = 0;
+    for (const auto& func : r.module.getFunctions()) {
+        if (func->getName() != "main") continue;
+        for (const auto& b : func->getBlocks()) {
+            bool preheader = b->getName().find("preheader") != std::string::npos;
+            for (const auto& in : b->getInstructions()) {
+                if (in.op == cider::IROp::MEMCPY) {
+                    if (preheader) preMemcpy++; else loopMemcpy++;
+                }
+                if (in.op == cider::IROp::LOAD) {
+                    if (preheader) preLoads++; else loopLoads++;
+                }
+            }
+        }
+    }
+    CHECK(preMemcpy == 0);    // sret copy not hoisted
+    CHECK(loopMemcpy >= 1);   // it stays in the loop
+    CHECK(preLoads == 0);     // escaped x / loop-written i not hoisted
+    CHECK(loopLoads >= 1);    // x is re-read every iteration
+    return 0;
+}
+
 int testInliner() {
     // A small helper gets inlined; recursion does not.
     auto r = genModule(
@@ -404,6 +454,7 @@ int run() {
     CHECK(testVolatileIrFlags() == 0);
     CHECK(testVolatileGvn() == 0);
     CHECK(testVolatileLicm() == 0);
+    CHECK(testCallClobberLicm() == 0);
     CHECK(testInliner() == 0);
     return 0;
 }

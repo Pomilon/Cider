@@ -18,6 +18,18 @@ namespace cider {
 // Issue #15: the old version scanned the whole function for the def and the
 // whole loop for STOREs on EVERY LOAD (quadratic). Callers now build the
 // def map + loop STORE set once per hoistLoop and reuse them here (O(1)).
+//
+// CIDER-BUG-086: a CALL/VIRTUAL_CALL/ASM in the loop is a memory clobber —
+// the callee may write any memory reachable from the pointers it is given —
+// and a MEMCPY is a bulk write like STORE. Two consequences:
+//   * MEMCPY is never hoisted (see the op exclusion in both hoistLoop
+//     implementations): moving the write out of the loop freezes the first
+//     iteration's bytes, and its source may be call-written.
+//   * a LOAD from an alloca whose address escaped the function (passed to a
+//     callee, stored into memory, returned, or substituted into an ASM)
+//     cannot be hoisted across a clobber: the callee can write that alloca.
+//     Allocas whose address never escapes are unreachable from any callee,
+//     so their loads keep hoisting.
 struct LicmCaches {
     std::map<std::string, const IRInstruction*> defMap;
     std::set<std::string> multiDef;
@@ -26,7 +38,60 @@ struct LicmCaches {
     // that may alias any escaped object (the compiler has no alias oracle),
     // so no load may be hoisted across it.
     bool loopHasVolatileStore = false;
+    // CIDER-BUG-086: a CALL/VIRTUAL_CALL/ASM in the loop may write any
+    // memory reachable from its arguments.
+    bool loopHasClobber = false;
+    // Allocas whose address can reach a callee: passed as a CALL/VIRTUAL_CALL/
+    // ASM argument (directly or through ADD/MOV/PHI), stored as a value, or
+    // returned. Only these can be written by a clobber.
+    std::set<std::string> escapedAllocas;
+    // A multi-defined register (the inliner writes one `MOV dest, ret` per
+    // cloned return) can carry any of several pointers; if one reaches a
+    // callee, every alloca is conservatively treated as escaped.
+    bool escapedUnknown = false;
 };
+
+// Follows ADD/MOV/PHI chains and collects every ALLOCA whose address `reg`
+// may carry. Unknown provenance (a LOAD result, a parameter, ...) yields
+// nothing: an address stored into memory is already marked when the STORE
+// that stored it is scanned.
+static void collectAllocaBases(const std::string& reg, const LicmCaches& c,
+                               std::set<std::string>& out,
+                               std::set<std::string>& visiting) {
+    if (reg.empty() || !visiting.insert(reg).second) return;
+    auto it = c.defMap.find(reg);
+    if (it == c.defMap.end()) return;
+    const IRInstruction* def = it->second;
+    if (def->op == IROp::ALLOCA) {
+        out.insert(reg);
+        return;
+    }
+    if ((def->op == IROp::ADD || def->op == IROp::MOV) && !def->args.empty() &&
+        def->args[0].kind == IRValue::REGISTER) {
+        collectAllocaBases(def->args[0].name, c, out, visiting);
+        return;
+    }
+    if (def->op == IROp::PHI) {
+        for (const auto& [_, val] : def->phiArgs) {
+            if (val.kind == IRValue::REGISTER) {
+                collectAllocaBases(val.name, c, out, visiting);
+            }
+        }
+    }
+}
+
+// Marks the allocas an escape-triggering operand may point at.
+static void markEscapedValue(const IRValue& v, LicmCaches& c) {
+    if (v.kind != IRValue::REGISTER) return;
+    if (c.multiDef.count(v.name)) {
+        c.escapedUnknown = true;
+        return;
+    }
+    std::set<std::string> bases, visiting;
+    collectAllocaBases(v.name, c, bases, visiting);
+    c.escapedAllocas.insert(bases.begin(), bases.end());
+}
+
 static LicmCaches buildLicmCaches(const FunctionIR& func,
                                   const std::set<std::string>& loopBlocks) {
     LicmCaches c;
@@ -40,17 +105,39 @@ static LicmCaches buildLicmCaches(const FunctionIR& func,
                     c.multiDef.insert(si.dest->name);
                 }
             }
-            if (loopBlocks.find(b->getName()) != loopBlocks.end() &&
-                si.op == IROp::STORE) {
+            const bool inLoop = loopBlocks.find(b->getName()) != loopBlocks.end();
+            if (inLoop && (si.op == IROp::STORE || si.op == IROp::MEMCPY)) {
                 if (si.isVolatile) c.loopHasVolatileStore = true;
                 if (!si.args.empty() && si.args[0].kind == IRValue::REGISTER) {
                     c.loopStores.insert(si.args[0].name);
                 }
             }
+            if (inLoop && (si.op == IROp::CALL || si.op == IROp::VIRTUAL_CALL ||
+                           si.op == IROp::ASM)) {
+                c.loopHasClobber = true;
+            }
+        }
+    }
+    // Escape sites are resolved after the whole def map exists: the block
+    // order is not topological, so a use may precede its def here.
+    // They are function-wide: a callee that received the address earlier can
+    // be asked to write through it by an in-loop call (a stored address makes
+    // the alloca reachable from whatever later holds it).
+    for (const auto& b : func.getBlocks()) {
+        for (const auto& si : b->getInstructions()) {
+            if (si.op == IROp::CALL || si.op == IROp::VIRTUAL_CALL || si.op == IROp::ASM) {
+                for (const auto& arg : si.args) markEscapedValue(arg, c);
+                for (const auto& [_, val] : si.asmMap) markEscapedValue(val, c);
+            } else if (si.op == IROp::STORE) {
+                if (si.args.size() > 1) markEscapedValue(si.args[1], c);
+            } else if (si.op == IROp::RET) {
+                if (!si.args.empty()) markEscapedValue(si.args[0], c);
+            }
         }
     }
     return c;
 }
+
 static bool isLoadInvariantCached(const IRInstruction& instr,
                                  const LicmCaches& c) {
     if (instr.op != IROp::LOAD || instr.args.empty() || instr.args[0].kind != IRValue::REGISTER)
@@ -65,6 +152,9 @@ static bool isLoadInvariantCached(const IRInstruction& instr,
     if (it == c.defMap.end()) return false;
     if (it->second->op != IROp::ALLOCA) return false;  // non-alloca: conservative
     if (c.loopStores.count(reg)) return false;
+    // CIDER-BUG-086: a clobber in the loop can only write an alloca whose
+    // address escaped the function; non-escaping slots are callee-unreachable.
+    if (c.loopHasClobber && (c.escapedUnknown || c.escapedAllocas.count(reg))) return false;
     return true;
 }
 
@@ -188,7 +278,12 @@ bool SSALicmPass::hoistLoop(FunctionIR& func, const Loop& loop, const std::strin
                     continue;
                 }
 
-                if (instr.op == IROp::STORE || instr.op == IROp::CALL ||
+                // CIDER-BUG-086: MEMCPY is a bulk memory write like STORE —
+                // never hoist it. Its source may be written by an in-loop
+                // call (the sret slot), and moving the write to the
+                // preheader freezes the first iteration's bytes.
+                if (instr.op == IROp::STORE || instr.op == IROp::MEMCPY ||
+                    instr.op == IROp::CALL ||
                     instr.op == IROp::VIRTUAL_CALL || instr.op == IROp::RET ||
                     instr.op == IROp::COND_BR || instr.op == IROp::BR ||
                     instr.op == IROp::ASM ||
@@ -365,8 +460,10 @@ bool PostLicmPass::hoistLoop(FunctionIR& func, const Loop& loop, const std::stri
                     continue;
                 }
 
-                // Post-deconstruction: exclude same ops as SSA mode plus PUSH, POP.
-                if (instr.op == IROp::STORE || instr.op == IROp::CALL ||
+                // Post-deconstruction: exclude same ops as SSA mode plus PUSH,
+                // POP (and MEMCPY, see CIDER-BUG-086 above).
+                if (instr.op == IROp::STORE || instr.op == IROp::MEMCPY ||
+                    instr.op == IROp::CALL ||
                     instr.op == IROp::VIRTUAL_CALL || instr.op == IROp::RET ||
                     instr.op == IROp::COND_BR || instr.op == IROp::BR ||
                     instr.op == IROp::ASM ||
