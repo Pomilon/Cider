@@ -5496,6 +5496,42 @@ public:
         }
     }
 
+    // CIDER-FEAT-003: run a class's `func init(...)` constructor on a fresh
+    // object. Constructors are never virtual (the collector rejects
+    // virtual/override `init`), so this is a direct call with `this` as the
+    // hidden first argument. Called after the zero/field-initializer stores
+    // so the ordering is: zero defaults -> 049 field initializers -> body.
+    void emitConstructorCall(const std::shared_ptr<StructSymbol>& classSym, IRValue objPtr,
+                             const std::vector<std::unique_ptr<Expression>>& argExprs) {
+        auto ctorDef = resolveFunctionDef(classSym->constructorName,
+                                          definingScopeFor(classSym, classSym->name));
+        if (!ctorDef.first) {
+            if (reporter_) {
+                reporter_->error("Constructor '" + classSym->constructorName +
+                                     "' has no definition",
+                                 classSym->line);
+            }
+            return;
+        }
+        std::vector<IRValue> args;
+        args.push_back(objPtr);
+        for (auto& argExpr : argExprs) {
+            argExpr->accept(*this);
+            args.push_back(lastValue_);
+        }
+        // parameterTypes[0] is the hidden `this`; args[0] is its value, so
+        // conversion starts at the first real parameter on both sides.
+        convertCallArgs(args, 1, ctorDef.first->parameterTypes, 1);
+        IRInstruction call;
+        call.op = IROp::CALL;
+        call.dest = std::nullopt;
+        call.callAbi = ctorDef.first->abi;
+        call.args.push_back(
+            IRValue::Label(emitFunctionName(ctorDef.second, classSym->constructorName)));
+        for (auto& a : args) call.args.push_back(a);
+        currentBlock_->addInstruction(call);
+    }
+
     void visit(NewExpr& expr) override {
         TypeInfo type = TypeInfo::fromAST(expr.getNewType());
         int size = getTypeSize(type);
@@ -5510,7 +5546,10 @@ public:
         // Initialize vptr if class is virtual (CID-020/021 spec §6: the
         // label mangles with the class's defining module, matching the
         // vtable key emitted in generate()).
-        auto sym = resolveNominalType(type.name);
+        // CIDER-FEAT-003: resolve alias-aware (matching the checker), so
+        // `type A = C; new A(...)` gets the same vptr, field initializers
+        // and constructor as `new C(...)` instead of silently skipping them.
+        auto sym = resolveStructOrClassSymbol(type);
         if (sym && sym->kind == SymbolKind::CLASS) {
             auto classSym = std::static_pointer_cast<StructSymbol>(sym);
             if (!classSym->vtable.empty()) {
@@ -5520,6 +5559,11 @@ public:
             // CIDER-BUG-049: run the class's field initializers (inherited
             // fields included, in layout order).
             emitClassFieldInitializers(classSym, dest);
+            // CIDER-FEAT-003: the constructor body runs last, with `this`
+            // bound to the fresh object.
+            if (!classSym->constructorName.empty()) {
+                emitConstructorCall(classSym, dest, expr.getArgs());
+            }
         }
 
         lastValue_ = dest;

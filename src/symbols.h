@@ -261,6 +261,16 @@ struct StructSymbol : public Symbol {
     std::vector<std::string> vtable;  // List of mangled function names
     std::string parentName;           // For inheritance
     std::string destructorName;       // Mangled name of destructor, empty if none
+    // CIDER-FEAT-003: the class's constructor, declared as `func init(...)`
+    // in the class body. `constructorName` is the mangled name ("C_init"),
+    // empty when the class declares none. Own declarations only: an
+    // inherited `init` method is an ordinary method, never the derived
+    // class's constructor (base constructors are not inherited).
+    std::string constructorName;
+    // Constructor parameter types WITHOUT the hidden `this`, recorded at
+    // collection time so the checker can validate `new C(args)` even when
+    // an inherited `init` shadows the own one in `methods`.
+    std::vector<TypeInfo> constructorParamTypes;
     int totalSize = 0;
 };
 

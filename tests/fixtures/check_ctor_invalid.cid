@@ -1,0 +1,20 @@
+// CIDER-FEAT-003: constructor declarations are restricted to the shapes
+// `new C(args)` can run: void return, no virtual/override dispatch (the
+// construction site is statically known), and no async (creation cannot
+// await).
+class BadReturn {
+  var x: int;
+  func init() -> int { return 1; }
+}
+
+class BadVirtual {
+  var x: int;
+  virtual func init() -> void { this.x = 1; }
+}
+
+class BadAsync {
+  var x: int;
+  async func init() -> void { this.x = 1; }
+}
+
+func main() -> int { return 0; }

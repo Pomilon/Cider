@@ -1,0 +1,14 @@
+// CIDER-FEAT-003: base-class constructors are not auto-invoked this
+// iteration, and an explicit `super(...)` call is not implemented — report
+// the attempt specifically instead of silently ignoring it.
+class Base {
+  var b: int;
+  func init(v: int) -> void { this.b = v; }
+}
+
+class Child extends Base {
+  var c: int;
+  func init() -> void { super(1); }
+}
+
+func main() -> int { return 0; }

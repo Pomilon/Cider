@@ -1,0 +1,122 @@
+// CIDER-FEAT-003: class constructors. `func init(...)` in a class body is
+// the class's constructor: `new C(args)` allocates and zero/default
+// initializes the object, runs the field initializers (CIDER-BUG-049), then
+// runs the constructor body with `this` bound and the arguments passed like
+// a normal method. `new C` (no argument list) also runs a zero-argument
+// constructor. Value-class instances (`var c: C;`) get the zero/field
+// initializer treatment but never run a constructor.
+//
+// Base-class constructors are NOT inherited and are NOT auto-invoked this
+// iteration (an explicit `super(...)` call is diagnosed, not implemented),
+// so a derived instance's base fields only see their field initializers.
+import lib;
+from std.io import print, printInt;
+
+class Counter {
+    var value: int = 10;    // field initializer: overwritten by init below
+    var steps: int = 1;     // overwritten by init below
+
+    func init(start: int, step: int) -> void {
+        this.value = start;
+        this.steps = step;
+    }
+
+    func bump() -> void { this.value = this.value + this.steps; }
+    func get() -> int { return this.value; }
+}
+
+class Plain {
+    var x: int = 3;
+}
+
+// Constructor calling methods: the delegated calls run in declaration order.
+class MethodCaller {
+    var total: int = 0;
+
+    func add(n: int) -> void { this.total = this.total + n; }
+
+    func init(a: int, b: int) -> void {
+        this.add(a);
+        this.add(b);
+    }
+}
+
+class Zero {
+    var z: int = 5;
+    func init() -> void { this.z = this.z + 1; }
+}
+
+class Base {
+    var base: int = 1;
+    virtual func who() -> int { return 10; }
+}
+
+class Derived extends Base {
+    var own: int = 2;
+    func init(v: int) -> void { this.own = v; }
+    override func who() -> int { return 20; }
+}
+
+// The base constructor is not auto-invoked from the derived constructor:
+// `tag` keeps the field-initializer value.
+class CtorBase {
+    var tag: int = 0;
+    func init() -> void { this.tag = 99; }
+}
+
+class CtorChild extends CtorBase {
+    var mine: int = 1;
+    func init(v: int) -> void { this.mine = v; }
+}
+
+func read(c: *Counter) -> int { return c->get(); }
+
+func main() -> int {
+    // Constructor arguments set fields; methods see them (pointer use).
+    var c: *Counter = new Counter(5, 2);
+    c->bump();
+    printInt(c->get()); print("\n");            // 7
+    c->bump();
+    printInt(read(c)); print("\n");             // 9
+
+    // Class without a constructor: `new C` stays zero/field-initialized.
+    var p: *Plain = new Plain;
+    printInt(p->x); print("\n");                // 3
+
+    // Constructor calling other methods.
+    var mc: *MethodCaller = new MethodCaller(4, 6);
+    printInt(mc->total); print("\n");           // 10
+
+    // Inheritance: inherited field initializers run, the derived constructor
+    // runs, and virtual/override dispatch still works through a base pointer.
+    var d: *Derived = new Derived(7);
+    var b: *Base = d;
+    printInt(d->own); print("\n");              // 7
+    printInt(d->base); print("\n");             // 1 (field initializer)
+    printInt(b->who()); print("\n");            // 20 (override)
+
+    // Base ctor not invoked by the derived ctor.
+    var cc: *CtorChild = new CtorChild(8);
+    printInt(cc->tag); print("\n");             // 0
+    printInt(cc->mine); print("\n");            // 8
+
+    // Zero-argument constructor: both `new Zero` and `new Zero()` run it.
+    var z1: *Zero = new Zero;
+    var z2: *Zero = new Zero();
+    printInt(z1->z); print("\n");               // 6
+    printInt(z2->z); print("\n");               // 6
+
+    // Value-class instance: field initializers only, no constructor.
+    var vc: Counter;
+    printInt(vc.value); print("\n");            // 10
+    printInt(vc.steps); print("\n");            // 1
+
+    // Class in a module: constructor mangling + qualified construction.
+    var w: *lib.Widget = new lib.Widget(42);
+    printInt(w->id); print("\n");               // 42
+    var w2: *lib.Widget = lib.makeWidget(9);
+    printInt(w2->id); print("\n");              // 9
+
+    print("constructors_ok\n");
+    return 0;
+}

@@ -1,0 +1,6 @@
+// CIDER-FEAT-003: constructor arguments require a class type; `new int(5)`
+// is rejected instead of silently ignoring the arguments.
+func main() -> int {
+  var p: *int = new int(5);
+  return 0;
+}

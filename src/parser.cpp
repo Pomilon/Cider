@@ -334,6 +334,16 @@ std::unique_ptr<Expression> Parser::parsePrimaryExpression() {
     }
     case TokenType::SUPER: {
         nextToken();  // Consume super
+        if (currentToken_.type == TokenType::LPAREN) {
+            // CIDER-FEAT-003: base-class constructors are not auto-invoked
+            // and an explicit `super(...)` call is not implemented yet.
+            // Diagnose the attempt specifically instead of the generic
+            // "Expected '.' after 'super'" recovery error.
+            error("super(...) constructor calls are not supported yet; "
+                  "base-class constructors are not auto-invoked "
+                  "(CIDER-FEAT-003).");
+            return nullptr;
+        }
         if (currentToken_.type != TokenType::DOT) {
             error("Expected '.' after 'super'.");
             return nullptr;
@@ -504,7 +514,36 @@ std::unique_ptr<Expression> Parser::parsePrimaryExpression() {
         nextToken();  // Consume 'new'
         auto type = parseType();
         if (!type) return nullptr;
-        return std::make_unique<NewExpr>(std::move(type), line, col);
+        // CIDER-FEAT-003: `new C(args)` — the argument list is part of the
+        // NEW expression (not a call on the allocated value), so the checker
+        // validates it against the class constructor and the IR generator
+        // runs the constructor after zero/field initialization.
+        std::vector<std::unique_ptr<Expression>> args;
+        bool hasArgList = false;
+        if (currentToken_.type == TokenType::LPAREN) {
+            hasArgList = true;
+            nextToken();  // Consume '('
+            if (currentToken_.type != TokenType::RPAREN) {
+                while (true) {
+                    auto arg = parseExpression();
+                    if (!arg) return nullptr;
+                    args.push_back(std::move(arg));
+
+                    if (currentToken_.type == TokenType::COMMA) {
+                        nextToken();
+                    } else {
+                        break;
+                    }
+                }
+            }
+            if (currentToken_.type != TokenType::RPAREN) {
+                error("Expected ')' after constructor arguments.");
+                return nullptr;
+            }
+            nextToken();  // Consume ')'
+        }
+        return std::make_unique<NewExpr>(std::move(type), line, col,
+                                         std::move(args), hasArgList);
     }
     case TokenType::LPAREN: {
         nextToken();  // Consume '('

@@ -1,0 +1,11 @@
+// CIDER-FEAT-003: constructor arguments are type-checked against the
+// declared parameter types like a method call.
+class C {
+  var x: int;
+  func init(v: *int) -> void { this.x = 1; }
+}
+
+func main() -> int {
+  var p: *C = new C(5);
+  return 0;
+}

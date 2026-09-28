@@ -280,16 +280,34 @@ public:
 
 class NewExpr : public Expression {
 public:
-    NewExpr(std::unique_ptr<TypeAST> type, int line, int col)
-        : Expression(NEW_EXPR, line, col), type_(std::move(type)) {}
+    // CIDER-FEAT-003: `new C(args)` carries the constructor argument list.
+    // `hasArgList()` distinguishes `new C` (no call) from `new C()` (an
+    // explicit zero-argument constructor call) — the checker must reject
+    // the latter when the class has no constructor.
+    NewExpr(std::unique_ptr<TypeAST> type, int line, int col,
+            std::vector<std::unique_ptr<Expression>> args = {}, bool hasArgList = false)
+        : Expression(NEW_EXPR, line, col), type_(std::move(type)),
+          args_(std::move(args)), hasArgList_(hasArgList) {}
     TypeAST* getNewType() const { return type_.get(); }
+    const std::vector<std::unique_ptr<Expression>>& getArgs() const { return args_; }
+    bool hasArgList() const { return hasArgList_; }
     void dump(std::string& out, int depth) const override {
         out += "(New ";
         type_->dump(out, depth);
+        if (hasArgList_) {
+            out += " (";
+            for (size_t i = 0; i < args_.size(); ++i) {
+                if (i) out += " ";
+                args_[i]->dump(out, depth);
+            }
+            out += ")";
+        }
         out += ")";
     }
 private:
     std::unique_ptr<TypeAST> type_;
+    std::vector<std::unique_ptr<Expression>> args_;
+    bool hasArgList_ = false;
 };
 
 class IdentifierExpr : public Expression {

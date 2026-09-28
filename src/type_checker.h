@@ -1962,8 +1962,77 @@ public:
     void visit(NilExpr&) override { lastExprType_ = {"nil", 0}; }
     void visit(NilPtrExpr&) override { lastExprType_ = {"void", 1}; }
 
+    // CIDER-FEAT-003: a class without its own constructor reached from
+    // `new C(...)`. If an ancestor declares one, explain why it cannot be
+    // used: constructors are not inherited and base constructors are not
+    // auto-invoked this iteration (`super(...)` is not supported yet).
+    std::string missingConstructorHint(const std::shared_ptr<StructSymbol>& classSym) {
+        std::string parent = classSym->parentName;
+        while (!parent.empty()) {
+            auto parentSym = resolveScoped(parent);
+            if (!parentSym || parentSym->kind != SymbolKind::CLASS) return "";
+            auto ps = std::static_pointer_cast<StructSymbol>(parentSym);
+            if (!ps->constructorName.empty()) {
+                return " (base-class constructors are not inherited or auto-invoked; "
+                       "declare 'func init(...)' in '" + classSym->name + "')";
+            }
+            parent = ps->parentName;
+        }
+        return "";
+    }
+
     void visit(NewExpr& expr) override {
         TypeInfo type = canonicalizeNominal(TypeInfo::fromAST(expr.getNewType()), expr.getLine());
+        // CIDER-FEAT-003: resolve the constructed class alias-aware, exactly
+        // like the IR generator, so a constructor is never validated here
+        // and then silently skipped through a `type A = C` spelling.
+        std::shared_ptr<StructSymbol> classSym = nullptr;
+        if (type.pointerLevel == 0) {
+            auto sym = resolveStructOrClass(type);
+            if (sym && sym->kind == SymbolKind::CLASS) {
+                classSym = std::static_pointer_cast<StructSymbol>(sym);
+            }
+        }
+        bool hasCtor = classSym && !classSym->constructorName.empty();
+        if (expr.hasArgList()) {
+            if (!classSym) {
+                error("'new " + type.toString() +
+                          "(...)' requires a class type with a constructor",
+                      expr.getLine());
+            } else if (!hasCtor) {
+                error("Class '" + type.name + "' has no constructor" +
+                          missingConstructorHint(classSym),
+                      expr.getLine());
+            } else if (expr.getArgs().size() != classSym->constructorParamTypes.size()) {
+                error("Constructor of class '" + type.name + "' expects " +
+                          std::to_string(classSym->constructorParamTypes.size()) +
+                          " arguments, got " + std::to_string(expr.getArgs().size()),
+                      expr.getLine());
+            } else {
+                // Same argument rules as a method call whose first parameter
+                // is the hidden `this` (arity, then per-argument
+                // compatibility with the callee's canonical parameter types).
+                std::string defMod = definingModuleOf(classSym);
+                for (size_t i = 0; i < expr.getArgs().size(); ++i) {
+                    expr.getArgs()[i]->accept(*this);
+                    TypeInfo paramT = canonicalizeInModule(
+                        classSym->constructorParamTypes[i], defMod, expr.getLine());
+                    if (!areTypesCompatible(paramT, lastExprType_)) {
+                        error("Argument " + std::to_string(i + 1) +
+                                  " to constructor of class '" + type.name +
+                                  "' type mismatch. Expected " + paramT.toString() +
+                                  ", got " + canonicalizeNominal(lastExprType_).toString(),
+                              expr.getLine());
+                    }
+                }
+            }
+        } else if (hasCtor && !classSym->constructorParamTypes.empty()) {
+            // A constructor with parameters called without them (`new C`).
+            error("Constructor of class '" + type.name + "' expects " +
+                      std::to_string(classSym->constructorParamTypes.size()) +
+                      " arguments, got 0",
+                  expr.getLine());
+        }
         type.pointerLevel++;  // new T returns T*
         lastExprType_ = type;
     }

@@ -1,0 +1,8 @@
+// CIDER-FEAT-003: a class may declare at most one constructor.
+class C {
+  var x: int;
+  func init() -> void { this.x = 1; }
+  func init(a: int) -> void { this.x = a; }
+}
+
+func main() -> int { return 0; }

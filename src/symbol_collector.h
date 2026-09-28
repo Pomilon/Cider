@@ -826,6 +826,41 @@ public:
                     recordDefiningModule(funcSym);
                     continue;
                 }
+                // CIDER-FEAT-003: `func init(...)` declares the class
+                // constructor. Record it (own declarations only — an
+                // inherited `init` copied from the parent is not the
+                // derived class's constructor) and reject the shapes that
+                // have no usable semantics. The method symbol itself is
+                // still defined below like any other method, so explicit
+                // `obj.init(...)` calls and interface satisfaction keep
+                // working.
+                if (method->getName() == "init") {
+                    TypeInfo ctorRet = TypeInfo::fromAST(method->getReturnType());
+                    if (!sym->constructorName.empty()) {
+                        reporter_.error("Class '" + sym->name +
+                                            "' already has a constructor ('init')",
+                                        method->getLine(), method->getColumn());
+                    } else if (method->isVirtual() || method->isOverride()) {
+                        reporter_.error("Constructor 'init' of class '" + sym->name +
+                                            "' cannot be virtual or override",
+                                        method->getLine(), method->getColumn());
+                    } else if (method->isAsync()) {
+                        reporter_.error("Constructor 'init' of class '" + sym->name +
+                                            "' cannot be async",
+                                        method->getLine(), method->getColumn());
+                    } else if (ctorRet.name != "void" || ctorRet.pointerLevel != 0) {
+                        reporter_.error("Constructor 'init' of class '" + sym->name +
+                                            "' must return void, got " +
+                                            ctorRet.toString(),
+                                        method->getLine(), method->getColumn());
+                    } else {
+                        sym->constructorName = sym->name + "_init";
+                        for (auto& param : method->getParams()) {
+                            sym->constructorParamTypes.push_back(
+                                TypeInfo::fromAST(param.second.get()));
+                        }
+                    }
+                }
                 StructSymbol::Method m;
                 m.name = method->getName();
                 m.mangledName = sym->name + "_" + m.name;
@@ -2057,9 +2092,23 @@ public:
             // nested expressions clone with type-parameter substitution.
             case ASTNode::NEW_EXPR: {
                 auto ne = dynamic_cast<NewExpr*>(expr);
+                // CIDER-FEAT-003: constructor arguments clone too; dropping
+                // them turned `new T(5)` into `new T` inside a template.
+                std::vector<std::unique_ptr<Expression>> clonedArgs;
+                if (ne->hasArgList()) {
+                    for (auto& arg : ne->getArgs()) {
+                        auto cloned = cloneExprWithSubst(arg.get(), tmplParams, tmplArgs);
+                        if (!cloned) {
+                            cloneFailed_ = true;
+                            return nullptr;  // diagnostic already reported
+                        }
+                        clonedArgs.push_back(std::move(cloned));
+                    }
+                }
                 return std::make_unique<NewExpr>(
                     cloneTypeWithSubst(ne->getNewType(), tmplParams, tmplArgs),
-                    ne->getLine(), ne->getColumn());
+                    ne->getLine(), ne->getColumn(), std::move(clonedArgs),
+                    ne->hasArgList());
             }
             case ASTNode::LIST_EXPR: {
                 auto le = dynamic_cast<ListExpr*>(expr);
