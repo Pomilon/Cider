@@ -2580,6 +2580,12 @@ public:
             // CID-005: wide string globals. An array global IS the dw data
             // (no NUL wrapper cell); a pointer global gets a `dq` cell
             // pointing at a fresh wide data label.
+            // CIDER-BUG-092: an alias-declared fixed array (`type W =
+            // [u16;3]`) carries the alias spelling in sym->type, so isArray
+            // is false until the chain resolves. The array-shaped
+            // initializer paths below (wide literal, list literal) decide by
+            // shape, so resolve once and use the resolved form.
+            TypeInfo declArray = resolveTypeAlias(sym->type);
             if (auto ws = dynamic_cast<WideStringExpr*>(stmt.getInitializer())) {
                 auto emitWideData = [&](const std::string& label) {
                     std::string line = label + ": dw ";
@@ -2595,7 +2601,7 @@ public:
                     module_.addStringData("align 2");
                     module_.addStringData(line);
                 };
-                if (sym->type.isArray && sym->type.pointerLevel == 0) {
+                if (declArray.isArray && declArray.pointerLevel == 0) {
                     emitWideData(gname);
                     globalValues_[gname] = IRValue::Label(gname);
                 } else {
@@ -2609,15 +2615,16 @@ public:
             // Fixed-size array from a list literal (CID-007): with all
             // elements constant (guaranteed by the type checker for
             // globals), emit the bytes directly into .data. Otherwise fall
-            // through to the legacy BSS path below.
-            if (sym->type.isArray && sym->type.pointerLevel == 0 && sym->type.arraySize > 0) {
+            // through to the legacy BSS path below. CIDER-BUG-092: use the
+            // alias-resolved shape so an alias spelling lands here too.
+            if (declArray.isArray && declArray.pointerLevel == 0 && declArray.arraySize > 0) {
                 if (auto list = dynamic_cast<ListExpr*>(stmt.getInitializer())) {
                     auto& elems = list->getElements();
-                    TypeInfo elemType = sym->type.elementType();
+                    TypeInfo elemType = declArray.elementType();
                     int elemSize = getTypeSize(elemType);
                     IRType elemIR = mapType(elemType.name);
                     std::string dataLine = gname + ": db ";
-                    bool allConst = ((int)elems.size() == sym->type.arraySize);
+                    bool allConst = ((int)elems.size() == declArray.arraySize);
                     for (size_t ei = 0; allConst && ei < elems.size(); ei++) {
                         uint64_t v = 0;
                         if (elemIR == IRType::F32 || elemIR == IRType::F64) {
@@ -2818,14 +2825,21 @@ public:
             // Non-interface initializers keep the legacy scalar/aggregate
             // store path.
             {
+                // CIDER-BUG-092: an alias-declared fixed array (`type Row =
+                // [u8;3]`) carries the alias spelling in sym->type, so
+                // isArray is false until the chain resolves. The array-shaped
+                // paths below (list literal, slice copy) decide by shape, so
+                // resolve once and use the resolved form, mirroring the
+                // declaration-site checks.
+                TypeInfo declArray = resolveTypeAlias(sym->type);
                 // Fixed-size array from a list literal (CID-007): store
                 // each element at its own offset with the element width
                 // (a MEMCPY of the literal temp would copy I32-wide
                 // elements into narrow slots).
-                if (sym->type.isArray && sym->type.pointerLevel == 0 && sym->type.arraySize > 0) {
+                if (declArray.isArray && declArray.pointerLevel == 0 && declArray.arraySize > 0) {
                     if (auto list = dynamic_cast<ListExpr*>(stmt.getInitializer())) {
                         auto& elems = list->getElements();
-                        TypeInfo elemType = sym->type.elementType();
+                        TypeInfo elemType = declArray.elementType();
                         // CIDER-BUG-052: an element alias resolves to its
                         // real shape (array elements need the MEMCPY below).
                         elemType = resolveTypeAlias(elemType);
@@ -2883,11 +2897,9 @@ public:
                 // the MEMCPY below starts at base+start; the copy length is
                 // the target's element count (the type checker rejects a
                 // statically-known mismatch and accepts a dynamic length).
-                // CIDER-BUG-071: an alias-declared array (`type Row = [u8;3]`)
-                // carries the alias spelling in sym->type, so resolve the
-                // shape first — otherwise the copy is missed and the
-                // descriptor pointer is stored as a scalar.
-                TypeInfo declArray = resolveTypeAlias(sym->type);
+                // CIDER-BUG-071: declArray (resolved above) also covers the
+                // alias spelling, so the descriptor pointer is followed by
+                // the aggregate MEMCPY rather than stored as a scalar.
                 if (lastExprType_.isSlice && lastExprType_.pointerLevel == 0 &&
                     declArray.isArray && declArray.pointerLevel == 0) {
                     val = sliceDataPointer(val);

@@ -1352,6 +1352,8 @@ public:
     // constant (a clear error otherwise, never silent BSS-zero). Only
     // called for fixed-size array declarations; pointer-from-list (`var
     // l: *int = [...]`) keeps the legacy path.
+    // CIDER-BUG-092: declaredType is the alias-resolved shape (an alias
+    // spelling carries isArray=false until its chain resolves).
     void checkFixedArrayInit(VarDeclStmt& stmt, const TypeInfo& declaredType) {
         auto* list = static_cast<ListExpr*>(stmt.getInitializer());
         auto& elems = list->getElements();
@@ -1413,6 +1415,8 @@ public:
     // size must be compared explicitly (mirrors checkFixedArrayInit).
     // Without this, `[u16; 4] = u"AB"` passed and the array MEMCPY read two
     // bytes past the data block; `[u16; 2] = u"AB"` silently truncated.
+    // CIDER-BUG-092: declaredType is the alias-resolved shape, mirroring
+    // checkFixedArrayInit.
     void checkWideArrayInit(VarDeclStmt& stmt, const TypeInfo& declaredType,
                             WideStringExpr& init) {
         int expected = (int)init.getValue().size() + 1;  // units + NUL unit
@@ -1710,16 +1714,19 @@ public:
         // chain is resolved. The initializer rules below decide by shape, so
         // resolve here and use the resolved form wherever isArray picks the
         // rule; resolveType keeps the outer array wrapper (CIDER-BUG-019/052).
+        // CIDER-BUG-092: the list- and wide-literal rules below take the
+        // same resolved shape, so an alias spelling reaches the element and
+        // size checks instead of the generic mismatch.
         TypeInfo declaredArray = resolveType(declaredType);
 
         if (stmt.getInitializer()) {
             auto* wideInit = dynamic_cast<WideStringExpr*>(stmt.getInitializer());
-            if (dynamic_cast<ListExpr*>(stmt.getInitializer()) && declaredType.isArray &&
-                declaredType.pointerLevel == 0 && declaredType.arraySize > 0) {
-                checkFixedArrayInit(stmt, declaredType);
-            } else if (wideInit && declaredType.isArray &&
-                       declaredType.pointerLevel == 0 && declaredType.arraySize > 0) {
-                checkWideArrayInit(stmt, declaredType, *wideInit);
+            if (dynamic_cast<ListExpr*>(stmt.getInitializer()) && declaredArray.isArray &&
+                declaredArray.pointerLevel == 0 && declaredArray.arraySize > 0) {
+                checkFixedArrayInit(stmt, declaredArray);
+            } else if (wideInit && declaredArray.isArray &&
+                       declaredArray.pointerLevel == 0 && declaredArray.arraySize > 0) {
+                checkWideArrayInit(stmt, declaredArray, *wideInit);
             } else {
                 stmt.getInitializer()->accept(*this);
                 TypeInfo initType = lastExprType_;
@@ -1774,8 +1781,13 @@ public:
                     lastExprType_ = declaredType;
                 } else if (!closureFromPlainFn && !fnFromClosure &&
                            !areTypesCompatible(declaredType, initType)) {
+                    // CIDER-BUG-092: an array-shaped alias reports its
+                    // resolved shape (direct-array spellings already print
+                    // it); non-array aliases keep their declared spelling
+                    // in diagnostics.
+                    TypeInfo diagDeclared = declaredArray.isArray ? declaredArray : declaredType;
                     error("Type mismatch in declaration of '" + stmt.getName() +
-                              "'. Expected " + canonicalizeNominal(declaredType).toString() + ", got " +
+                              "'. Expected " + canonicalizeNominal(diagDeclared).toString() + ", got " +
                               canonicalizeNominal(initType).toString(),
                           stmt.getLine());
                 }

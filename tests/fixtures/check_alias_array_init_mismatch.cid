@@ -1,0 +1,23 @@
+// CIDER-BUG-092: alias-declared fixed-array initializers keep the same
+// element and size checks as the direct spelling (and report the resolved
+// shape, not the alias name). The list- and wide-literal paths now run
+// through the alias instead of a generic type mismatch; these rejections
+// are the legitimate remainder.
+type Row = [u8; 3];
+type RowAlias = Row;
+type Wide = [u16; 4];
+type Wide32 = [u32; 3];
+
+var n: int = 1;
+var g_bad: Row = [n, 2, 3];
+
+func main() -> int {
+  var a: Row = [1, 2];
+  var b: RowAlias = [1, 2];
+  var c: Wide = u"AB";
+  var d: Row = u"AB";
+  var e: RowAlias = [1, 2, 3, 4];
+  var f: Wide32 = u"AB";
+  var h: Row = 5;
+  return 0;
+}
