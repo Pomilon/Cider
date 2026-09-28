@@ -2154,6 +2154,41 @@ public:
         id->setName(mangled);
     }
 
+    // CIDER-BUG-095: a member access whose member carries an explicit
+    // type-argument list (`m.id<int>`) names a function template in the
+    // qualifier's module. The qualified spelling is recorded so the checker
+    // resolves the call to the shared bare instantiation, and the template
+    // instantiates under the same bare spelling (`id<int>`) the
+    // bare/from-import path uses. An explicit qualifier is a module member
+    // access, so the template must be exported (CIDER-BUG-060) and the
+    // qualifier must name a visible module (CIDER-BUG-073 resolution); a
+    // self-qualified use inside the owner is unrestricted.
+    void instantiateQualifiedMemberTemplate(MemberAccessExpr& member) {
+        const std::string& memberName = member.getMember();
+        if (memberName.find('<') == std::string::npos) return;
+        auto base = dynamic_cast<IdentifierExpr*>(member.getObject());
+        if (!base) return;
+        auto parsed = parseMangledTemplateName(memberName);
+        if (parsed.first.empty()) return;
+        auto found = findQualifiedTemplate(base->getName(), parsed.first);
+        if (found.first == templateTable_.end()) return;
+        auto tmplSym = found.first->second;
+        if (tmplSym->kind != SymbolKind::TEMPLATE) return;
+        std::string spelling = base->getName() + "." + memberName;
+        if (found.second != getCurrentModule() && !tmplSym->isExported) {
+            if (qualifiedExportErrors_.insert(spelling).second) {
+                reporter_.error("symbol '" + parsed.first + "' is not exported from module '" +
+                                    base->getName() + "'", 0, 0);
+            }
+            return;
+        }
+        // Recorded before instantiation: the checker resolves the call
+        // through this map when the member lookup cannot see the shared
+        // instantiation (self-qualified spellings, module-mode roots).
+        qualifiedTemplateInstantiations_[spelling] = memberName;
+        instantiateFunctionTemplate(memberName, found.second);
+    }
+
     void visitExprForTemplateCalls(Expression* expr) {
         if (!expr) return;
         if (auto id = dynamic_cast<IdentifierExpr*>(expr)) {
@@ -2182,6 +2217,9 @@ public:
         } else if (auto grouping = dynamic_cast<GroupingExpr*>(expr)) {
             visitExprForTemplateCalls(grouping->getExpression());
         } else if (auto member = dynamic_cast<MemberAccessExpr*>(expr)) {
+            // CIDER-BUG-095: `m.id<int>` as a callee (or function value)
+            // instantiates the module's function template first.
+            instantiateQualifiedMemberTemplate(*member);
             visitExprForTemplateCalls(member->getObject());
         } else if (auto index = dynamic_cast<IndexExpr*>(expr)) {
             visitExprForTemplateCalls(index->getObject());
@@ -2681,12 +2719,20 @@ public:
         }
     }
 
-    void instantiateFunctionTemplate(const std::string& mangledName) {
+    void instantiateFunctionTemplate(const std::string& mangledName,
+                                     const std::string& ownerModule = "") {
         auto parsed = parseMangledTemplateName(mangledName);
         // CID-020/021 (spec §6): instantiation keys include the defining
         // module. Prefer the use-site module's entry, then the main file,
         // then any imported module (legacy first-wins on-demand use).
         auto found = findTemplate(parsed.first);
+        // CIDER-BUG-095: an explicitly qualified call (`m.id<int>(x)`) names
+        // the template in that module, so the bare-name preference above is
+        // overridden by the owner's entry (already resolved by the caller).
+        if (!ownerModule.empty()) {
+            auto ownerIt = templateTable_.find(templateKey(ownerModule, parsed.first));
+            if (ownerIt != templateTable_.end()) found = {ownerIt, ownerModule};
+        }
         // An explicit specialization (keyed by the mangled name) wins over
         // the primary template: owner-scoped first, then the legacy bare
         // key (main-file specializations).
@@ -2784,6 +2830,13 @@ public:
         // ("Only async functions can be awaited"). The checker ignores the
         // enclosing function's own async flag.
         funcSym->isAsync = tmplFunc->isAsync();
+        // CIDER-BUG-095: an instantiation is a member of the template's
+        // module, so a module-qualified call must pass the same visibility
+        // gate as any other exported member. A non-exported template never
+        // reaches instantiation through a qualified spelling (the caller
+        // gates it, CIDER-BUG-060); bare/from-import uses resolve through
+        // the root scope and never consult this flag.
+        funcSym->isExported = tmplSym->isExported;
 
         auto substType = [&](TypeAST* typeAST) -> TypeInfo {
             TypeInfo info = TypeInfo::fromAST(typeAST);

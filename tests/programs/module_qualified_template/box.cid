@@ -12,6 +12,12 @@ export struct Pair<A, B> {
   var b: B;
 }
 
+// CIDER-BUG-095: a function template used through the qualified call
+// spelling (`box.id<int>(x)`) as well as the bare/from-import spelling.
+export func id<T>(x: T) -> T {
+  return x;
+}
+
 export func makeBox(n: int) -> *Box<int> {
   var b: *Box<int> = new Box<int>;
   b->v = n;

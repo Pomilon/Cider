@@ -332,6 +332,7 @@ int main(int argc, char** argv) {
             gen.setModuleScopes(collector.getModuleScopes());
             gen.setProgramModules(collector.getProgramModules());
             gen.setSymbolModules(collector.getSymbolModules());
+            gen.setQualifiedTemplateInstantiations(collector.getQualifiedTemplateInstantiations());
             gen.setDefaultAbiMs(defaultAbiMs);
             gen.setReporter(&rep);
             gen.setChecks(opts.checks);  // CIDER-ISS-001
@@ -370,6 +371,7 @@ int main(int argc, char** argv) {
             gen.setModuleScopes(collector.getModuleScopes());
             gen.setProgramModules(collector.getProgramModules());
             gen.setSymbolModules(collector.getSymbolModules());
+            gen.setQualifiedTemplateInstantiations(collector.getQualifiedTemplateInstantiations());
             gen.setDefaultAbiMs(defaultAbiMs);
             gen.setReporter(&rep);
             gen.setChecks(opts.checks);  // CIDER-ISS-001
@@ -397,6 +399,7 @@ int main(int argc, char** argv) {
         gen.setModuleScopes(collector.getModuleScopes());
         gen.setProgramModules(collector.getProgramModules());
         gen.setSymbolModules(collector.getSymbolModules());
+        gen.setQualifiedTemplateInstantiations(collector.getQualifiedTemplateInstantiations());
         gen.setDefaultAbiMs(defaultAbiMs);
         gen.setReporter(&rep);
         auto module = gen.generate(*prog);

@@ -671,6 +671,14 @@ std::unique_ptr<Expression> Parser::parseMemberAccessExpression(std::unique_ptr<
     }
     std::string memberName = currentToken_.value;
     nextToken();  // Consume member name
+    // CIDER-BUG-095: a module-qualified callee or struct literal may carry
+    // an explicit type-argument list (`m.id<int>(x)`, `m.Box<int>{...}`).
+    // Attach it to the member spelling exactly like a bare identifier
+    // (`id<int>`); the collector's qualified-template path resolves the
+    // dotted spelling against the module.
+    if (currentToken_.type == TokenType::LT && looksLikeTemplateArgList()) {
+        if (!parseTemplateArgListInto(memberName)) return nullptr;
+    }
     return std::make_unique<MemberAccessExpr>(std::move(object), memberName, line, col, isArrow);
 }
 
@@ -716,16 +724,43 @@ std::unique_ptr<Expression> Parser::parseIndexExpression(std::unique_ptr<Express
     return std::make_unique<IndexExpr>(std::move(object), std::move(start), line, col);
 }
 
+// CIDER-BUG-095: rebuild a dotted spelling from a chain of plain identifier
+// accesses (`m.Box<int>`, `a.util.Box<int>`). Returns "" when any link is not
+// an identifier member access, so an arbitrary expression can never stand in
+// for a struct name. Used by the qualified struct-literal parse path.
+static std::string flattenDottedAccess(const Expression* expr) {
+    if (auto id = dynamic_cast<const IdentifierExpr*>(expr)) return id->getName();
+    if (auto mem = dynamic_cast<const MemberAccessExpr*>(expr)) {
+        if (mem->isArrow()) return "";
+        std::string base = flattenDottedAccess(mem->getObject());
+        if (base.empty()) return "";
+        return base + "." + mem->getMember();
+    }
+    return "";
+}
+
 std::unique_ptr<Expression> Parser::parseStructLiteralExpression(std::unique_ptr<Expression> object) {
     int line = currentToken_.line;
     int col = currentToken_.column;
 
-    IdentifierExpr* id = dynamic_cast<IdentifierExpr*>(object.get());
-    if (!id) {
+    std::string structName;
+    if (auto id = dynamic_cast<IdentifierExpr*>(object.get())) {
+        structName = id->getName();
+    } else if (auto mem = dynamic_cast<MemberAccessExpr*>(object.get());
+               mem && mem->getMember().find('<') != std::string::npos) {
+        // CIDER-BUG-095: a module-qualified struct-template literal
+        // (`m.Box<int>{...}`). The dotted spelling is flattened to the same
+        // form a type annotation uses, so the collector's qualified-template
+        // resolution and the checker/IR rewrite agree on one instantiation.
+        structName = flattenDottedAccess(mem);
+        if (structName.empty()) {
+            error("Struct literal must follow a struct name (identifier).");
+            return nullptr;
+        }
+    } else {
         error("Struct literal must follow a struct name (identifier).");
         return nullptr;
     }
-    std::string structName = id->getName();
 
     std::vector<StructLiteralExpr::FieldInit> fields;
     nextToken();  // Consume '{'

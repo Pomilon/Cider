@@ -48,6 +48,14 @@ public:
     void setSymbolModules(const std::map<uint64_t, std::string>& symbolModules) {
         symbolModules_ = symbolModules;
     }
+    // CIDER-BUG-095: accepted module-qualified template spellings
+    // (`m.id<int>` -> shared bare `id<int>`), from the collector. A
+    // qualified call resolves through this map when the module scope does
+    // not hold the shared instantiation (mirrors the checker). Empty by
+    // default: existing programs are untouched.
+    void setQualifiedTemplateInstantiations(const std::map<std::string, std::string>& map) {
+        qualifiedTemplateInstantiations_ = map;
+    }
 
     // CID-005: `--target uefi` types unmarked function identifiers as
     // MS-ABI fn values (mirrors the checker's functionPointerTypeOf).
@@ -979,6 +987,15 @@ public:
         auto modSym = std::static_pointer_cast<ModuleSymbol>(baseSym);
         Scope* ms = modSym->scope;
         auto target = ms ? ms->resolveLocal(mem->getMember()) : nullptr;
+        // CIDER-BUG-095: a qualified function-template call (`m.id<int>(x)`)
+        // uses the shared bare instantiation when the module scope does not
+        // hold it (mirrors the checker's accepted-spelling fallback).
+        if (!target) {
+            auto qti = qualifiedTemplateInstantiations_.find(
+                base->getName() + "." + mem->getMember());
+            if (qti != qualifiedTemplateInstantiations_.end())
+                target = symbolTable_.resolve(qti->second);
+        }
         if (!target || target->kind != SymbolKind::FUNCTION) return false;
         outSym = std::static_pointer_cast<FunctionSymbol>(target);
         // Mangle by the member's DEFINING module, not the qualifier: the
@@ -2270,7 +2287,11 @@ public:
         // not whatever the shared alloca slot held.
         emitZeroInstance(dest, structSize);
 
-        auto sym = symbolTable_.resolve(expr.getStructName());
+        // CIDER-BUG-095: a module-qualified template literal
+        // (`m.Box<int>{...}`) resolves through the same nominal lookup the
+        // type-position spelling uses (CIDER-BUG-073), so field offsets
+        // come from the shared instantiation.
+        auto sym = resolveNominalType(expr.getStructName());
         if (sym && (sym->kind == SymbolKind::STRUCT || sym->kind == SymbolKind::CLASS)) {
             auto structSym = std::static_pointer_cast<StructSymbol>(sym);
             // CIDER-BUG-087: fields the literal omits must run the field
@@ -2338,7 +2359,10 @@ public:
             }
         }
         lastValue_ = dest;
-        lastExprType_ = {expr.getStructName(), 0};
+        // CIDER-BUG-095: report the resolved symbol's spelling, so a
+        // qualified literal (`m.Box<int>`) carries the shared bare
+        // instantiation name like every other use.
+        lastExprType_ = {sym ? sym->name : expr.getStructName(), 0};
     }
 
     IRValue getAddress(Expression* expr) {
@@ -7098,6 +7122,9 @@ private:
     // CID-020/021: defined symbol -> defining module logical (bind-time
     // provenance from the collector; "" == main).
     std::map<uint64_t, std::string> symbolModules_;
+    // CIDER-BUG-095: accepted module-qualified template spellings -> shared
+    // bare instantiation name (from the collector; see setter).
+    std::map<std::string, std::string> qualifiedTemplateInstantiations_;
     // CID-020/021 (spec §2): logical name of the file being generated
     // ("" == main file, which keeps plain names).
     std::string currentModule_;

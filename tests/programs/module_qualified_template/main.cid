@@ -6,6 +6,7 @@
 import box;
 import wrap;
 from box import Box;
+from box import id;
 
 func readQ(p: *box.Box<int>) -> int { return p->v; }
 func readB(p: *Box<int>) -> int { return p->v; }
@@ -85,6 +86,27 @@ func main() -> int {
   // Function-pointer signature naming the qualified instantiation.
   var cb: fn(*box.Box<int>) -> int = nilPtr;
   if (cb != nilPtr) { return 17; }
+
+  // CIDER-BUG-095: qualified function-template calls with explicit type
+  // arguments. The qualified and bare spellings share one instantiation
+  // (int and non-int type arguments alike).
+  var qi: int = box.id<int>(20);
+  var qc: char = box.id<char>('C');
+  var bc: char = id<char>(qc);
+  if (qi != 20 || (qc as int) != 67 || (bc as int) != 67) { return 18; }
+  if (id<int>(21) != 21) { return 19; }
+
+  // Qualified struct literal; identity with the bare literal both ways.
+  var ql: box.Box<int> = box.Box<int>{ v: 3, tag: 4 };
+  var bl: Box<int> = Box<int>{ v: 5, tag: 6 };
+  ql = bl;
+  bl = ql;
+  if (ql.v != 5 || ql.tag != 6 || bl.v != 5 || bl.tag != 6) { return 20; }
+
+  // Qualified spellings written in a module that imports box transitively.
+  if (wrap.readId(31) != 31) { return 21; }
+  var wl: box.Box<int> = wrap.makeLit(32);
+  if (wl.v != 32 || wl.tag != 9) { return 22; }
 
   return 0;
 }

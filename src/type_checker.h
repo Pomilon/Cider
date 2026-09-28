@@ -2707,7 +2707,14 @@ public:
     }
 
     void visit(StructLiteralExpr& expr) override {
-        auto sym = resolveScoped(expr.getStructName());
+        // CIDER-BUG-095: an accepted module-qualified template spelling
+        // (`m.Box<int>{...}`) resolves to the shared bare instantiation the
+        // collector registered, exactly like the type-position spelling
+        // (CIDER-BUG-073). Bare names are untouched.
+        std::string structName = expr.getStructName();
+        auto qti = qualifiedTemplateInstantiations_.find(structName);
+        if (qti != qualifiedTemplateInstantiations_.end()) structName = qti->second;
+        auto sym = resolveScoped(structName);
         if (!sym || sym->kind != SymbolKind::STRUCT) {
             error("Unknown struct type '" + expr.getStructName() + "'", expr.getLine());
             lastExprType_ = {"error", 0};
@@ -2824,6 +2831,19 @@ public:
                             Scope* modScope = modSym->scope;
                             auto target =
                                 modScope ? modScope->resolveLocal(mem->getMember()) : nullptr;
+                            // CIDER-BUG-095: a qualified function-template
+                            // call (`m.id<int>(x)`) resolves to the shared
+                            // bare instantiation when the member itself is
+                            // not in the module scope (self-qualified
+                            // spellings, module-mode roots). The accepted-
+                            // spelling map is the gate: a rejected spelling
+                            // was never recorded.
+                            if (!target) {
+                                auto qti = qualifiedTemplateInstantiations_.find(
+                                    base->getName() + "." + mem->getMember());
+                                if (qti != qualifiedTemplateInstantiations_.end())
+                                    target = resolveScoped(qti->second);
+                            }
                             if (!target) {
                                 error("module '" + base->getName() + "' has no symbol '" +
                                           mem->getMember() + "'",

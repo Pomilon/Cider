@@ -23,3 +23,13 @@ export func makeBox(n: int) -> box.Box<int> {
 export func sumPair(p: *box.Pair<int, char>) -> int {
   return p->a + (p->b as int);
 }
+
+// CIDER-BUG-095: qualified function-template call and struct literal from a
+// module that only ever spells box's template with an explicit qualifier.
+export func readId(n: int) -> int {
+  return box.id<int>(n);
+}
+
+export func makeLit(n: int) -> box.Box<int> {
+  return box.Box<int>{ v: n, tag: 9 };
+}
