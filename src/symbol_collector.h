@@ -91,6 +91,25 @@ public:
         return qualifiedTemplateInstantiations_;
     }
 
+    // CIDER-BUG-096: base names of the templates DECLARED in each module
+    // ("" == main file), keyed by logical module name. A qualified template
+    // spelling missing from the accepted map is only "unknown" when its
+    // module declares no template with that base name; the excluded cases
+    // (missing export, wrong arity) already carry the collector's own
+    // diagnostic.
+    std::map<std::string, std::set<std::string>> getModuleTemplateNames() const {
+        std::map<std::string, std::set<std::string>> out;
+        for (const auto& [key, sym] : templateTable_) {
+            (void)sym;
+            std::string owner = ownerOfTemplateKey(key);
+            std::string name = owner.empty() ? key : key.substr(owner.size() + 2);
+            auto lt = name.find('<');  // explicit specializations key by `Name<args>`
+            if (lt != std::string::npos) name = name.substr(0, lt);
+            out[owner].insert(name);
+        }
+        return out;
+    }
+
     // --- module-namespace context (CID-020/021) ---
     // Logical name of the module currently being collected ("" == main file).
     std::string getCurrentModule() const {

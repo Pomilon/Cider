@@ -52,6 +52,14 @@ public:
     void setQualifiedTemplateInstantiations(const std::map<std::string, std::string>& map) {
         qualifiedTemplateInstantiations_ = map;
     }
+    // CIDER-BUG-096: base names of the templates each module declares
+    // ("" == main file). A qualified template spelling the collector did
+    // not accept is reported as an unknown template only when its module
+    // declares no such template; export/arity rejections already carry the
+    // collector's diagnostic. Unset (unit tests) keeps the legacy silence.
+    void setModuleTemplateNames(const std::map<std::string, std::set<std::string>>& names) {
+        moduleTemplateNames_ = names;
+    }
 
     // CID-005: target ABI defaults. `--target uefi` sets defaultAbiMs, which
     // types unmarked functions as MS-ABI in fn-value position; plain `fn`
@@ -319,7 +327,10 @@ public:
             t.name = qti->second;
             return t;
         }
-        if (t.name.find('<') != std::string::npos) return t;                     // template instantiation (T6)
+        // CIDER-BUG-096: a qualified template spelling the collector did not
+        // accept (ambiguous qualifier / unknown template) is diagnosed here
+        // instead of bailing out to the generic member-access error.
+        if (t.name.find('<') != std::string::npos) return canonicalizeDottedTemplate(t, line);
         if (t.name.find('.') != std::string::npos) return canonicalizeDotted(t, line);
         auto sym = resolveScoped(t.name);
         if (sym && (sym->kind == SymbolKind::STRUCT || sym->kind == SymbolKind::CLASS ||
@@ -343,6 +354,43 @@ public:
         msg += "; use a from-import)";
         error(msg, line);
         return true;
+    }
+
+    // CIDER-BUG-096: a qualified template spelling (`m.Box<int>`) that the
+    // collector did not accept. Accepted spellings were rewritten through
+    // qualifiedTemplateInstantiations_ before this runs, and export/arity
+    // rejections were already reported by the collector; the remaining
+    // failures are an ambiguous qualifier or a module that declares no such
+    // template. Both must surface here: the collector instantiates lazily
+    // from annotations, so an unused declaration never reached the checker's
+    // member lookups and used to stay silent (or fell through to the generic
+    // "is not a struct or class"). A dot after the '<' belongs to an
+    // argument list (`Box<m.Thing>`) and is not a qualifier. line < 0 marks
+    // silent pre-check calls that must keep failing safely.
+    TypeInfo canonicalizeDottedTemplate(TypeInfo t, int line) {
+        auto lt = t.name.find('<');
+        if (lt == std::string::npos) return t;
+        auto dot = t.name.rfind('.', lt);
+        if (dot == std::string::npos) return t;  // bare instantiation (T6)
+        if (line < 0) return t;
+        std::string prefix = t.name.substr(0, dot);
+        std::string bare = t.name.substr(dot + 1, lt - dot - 1);
+        if (reportAmbiguousQualifier(prefix, line)) return t;
+        auto modSym = resolveScoped(prefix);
+        if (modSym && modSym->kind == SymbolKind::MODULE) {
+            auto ms = std::static_pointer_cast<ModuleSymbol>(modSym);
+            auto namesIt = moduleTemplateNames_.find(ms->logicalName);
+            if (namesIt != moduleTemplateNames_.end() && namesIt->second.count(bare)) {
+                return t;  // declared: collector already accepted or reported it
+            }
+            error("unknown template '" + bare + "' in module '" + prefix + "'", line);
+            return t;
+        }
+        // Not a module qualifier: the same diagnostics a plain dotted
+        // spelling gets (the member's argument list does not obscure it).
+        if (modSym) error("'" + prefix + "' is not a module", line);
+        else error("Undefined identifier '" + prefix + "'", line);
+        return t;
     }
 
     TypeInfo resolveType(TypeInfo info) {
@@ -3875,6 +3923,9 @@ private:
     // CIDER-BUG-073: accepted qualified template spellings -> shared bare
     // instantiation spelling (see setter above).
     std::map<std::string, std::string> qualifiedTemplateInstantiations_;
+    // CIDER-BUG-096: logical module ("" == main) -> template base names the
+    // module declares (see setter above).
+    std::map<std::string, std::set<std::string>> moduleTemplateNames_;
     std::string currentModule_;      // logical name of the file being checked ("" == main)
     Scope* currentModuleScope_ = nullptr;
 

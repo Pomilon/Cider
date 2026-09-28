@@ -1,0 +1,11 @@
+// CIDER-BUG-096: a template spelling under an ambiguous module qualifier
+// must report the ambiguity (with both candidates) at the declaration,
+// not the generic "is not a struct or class" later. The declaration is
+// unused: the ambiguity is real even though nothing instantiates.
+import ambig_a.util;
+import ambig_b.util;
+
+func main() -> int {
+  var b: util.Box<int>;
+  return 0;
+}

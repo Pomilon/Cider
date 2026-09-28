@@ -291,6 +291,7 @@ int main(int argc, char** argv) {
         checker.setAmbiguousModules(collector.getAmbiguousModules());
         checker.setSymbolModules(collector.getSymbolModules());
         checker.setQualifiedTemplateInstantiations(collector.getQualifiedTemplateInstantiations());
+        checker.setModuleTemplateNames(collector.getModuleTemplateNames());
         // CID-005: the uefi target types unmarked functions MS-ABI and
         // allows `efi_main` as the entry point (check and compile alike).
         const bool defaultAbiMs = (opts.target == "uefi");
