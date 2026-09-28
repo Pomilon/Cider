@@ -1,0 +1,11 @@
+// CIDER-BUG-120: an inheritance cycle (here A -> B -> A) is impossible to
+// lay out and must be reported once instead of silently truncating.
+class A extends B {
+  var x: int = 1;
+}
+
+class B extends A {
+  var y: int = 2;
+}
+
+func main() -> int { return 0; }

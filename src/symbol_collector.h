@@ -41,6 +41,21 @@ class SymbolCollector : public ASTVisitor {
         bool vptrReserved = false;        // classes: vptr slot reserved at collection
         bool isUnion = false;
         int state = 0;  // 0 pending, 1 in progress, 2 finalized
+        // CIDER-BUG-120: a class whose `extends` name could not be resolved
+        // to a class while collection was still in progress. The base (and
+        // with it the inherited fields, methods, vtable and vptr slot) is
+        // merged by finalizeClassBase() once the whole program is collected;
+        // `rebuilt` marks a class that was re-merged so its own children
+        // (which copied the then-stale member lists) rebuild too.
+        // `baseError` marks a chain already reported as unknown/cyclic by
+        // validateBaseChains(): such a class keeps its collection-time shape
+        // and never recurses into the broken base.
+        bool forwardParent = false;
+        bool rebuilt = false;
+        bool baseError = false;
+        std::vector<StructSymbol::Field> ownFields;    // own fields as collected
+        std::vector<StructSymbol::Method> ownMethods;  // own declarations, merge order
+        std::string file;                              // file for late diagnostics
     };
     std::vector<AggregateLayout> aggregateLayouts_;
     std::map<const StructSymbol*, size_t> aggregateIndex_;
@@ -104,6 +119,9 @@ public:
         // instantiation) is known now. Re-lay out aggregates that were
         // sized against not-yet-declared types while collection was still
         // in progress (see AggregateLayout).
+        // CIDER-BUG-120: report unknown/cyclic base classes first; those
+        // chains never inherit, the rest resolve their base below.
+        validateBaseChains();
         finalizeLayouts();
     }
 
@@ -888,6 +906,11 @@ public:
                 inherited = true;
             }
         }
+        // CIDER-BUG-120: a named base that did not resolve to a class right
+        // now may still be declared later (or in a later import). Record the
+        // class's own members so finalizeClassBase() can merge the inherited
+        // prefix once the whole program is collected.
+        bool forwardParent = !sym->parentName.empty() && !inherited;
 
         // First pass: identify if this class introduces new virtual methods
         for (auto& member : stmt.getMembers()) {
@@ -906,6 +929,8 @@ public:
         // forward-declared field type no longer bakes a wrong size in.
         bool vptrReserved = hasVTable && sym->vtable.empty();
         int ownFieldStart = (int)sym->fields.size();
+        // CIDER-BUG-120: own declarations in order, for the eventual rebuild.
+        std::vector<StructSymbol::Method> ownMethods;
 
         for (auto& member : stmt.getMembers()) {
             if (auto field = dynamic_cast<VarDeclStmt*>(member.get())) {
@@ -1004,41 +1029,11 @@ public:
                     m.parameterTypes.push_back(paramType);
                 }
 
-                if (m.isOverride) {
-                    // CIDER-BUG-047: `sym->methods` also holds plain
-                    // methods, so positioning the vtable slot by vtable
-                    // index desyncs as soon as a plain method precedes a
-                    // virtual. Follow the inherited method's own recorded
-                    // slot instead; a plain method that shares the name has
-                    // vtableIndex -1 and is never the override target.
-                    bool matchedSlot = false;
-                    for (auto& em : sym->methods) {
-                        if (em.name != m.name || em.vtableIndex < 0) continue;
-                        m.vtableIndex = em.vtableIndex;
-                        sym->vtable[m.vtableIndex] = m.mangledName;
-                        em = m;
-                        matchedSlot = true;
-                        break;
-                    }
-                    if (!matchedSlot) {
-                        // No inherited virtual slot (invalid override):
-                        // preserve the legacy binding of a same-named
-                        // method so direct calls still reach the derived
-                        // body.
-                        for (auto& em : sym->methods) {
-                            if (em.name == m.name) {
-                                em = m;
-                                break;
-                            }
-                        }
-                    }
-                } else if (m.isVirtual) {
-                    m.vtableIndex = (int)sym->vtable.size();
-                    sym->vtable.push_back(m.mangledName);
-                    sym->methods.push_back(m);
-                } else {
-                    sym->methods.push_back(m);
-                }
+                // CIDER-BUG-120: record the declaration before it is merged
+                // so a rebuild against a later-resolved base binds the same
+                // override slot (see rebuildClassMembers).
+                ownMethods.push_back(m);
+                mergeClassMethod(*sym, m);
 
                 auto funcSym = std::make_shared<FunctionSymbol>();
                 funcSym->kind = SymbolKind::FUNCTION;
@@ -1085,6 +1080,13 @@ public:
         rec.ownFieldStart = ownFieldStart;
         rec.inherited = inherited;
         rec.vptrReserved = vptrReserved;
+        // CIDER-BUG-120: stash the own members and the declaration site so a
+        // base declared later can be merged after collection with the same
+        // order and file attribution collection would have used.
+        rec.forwardParent = forwardParent;
+        rec.ownFields.assign(sym->fields.begin() + ownFieldStart, sym->fields.end());
+        rec.ownMethods = std::move(ownMethods);
+        rec.file = reporter_.getFile();
         layoutClass(*sym, rec);
         symbolTable_.define(sym);
         recordDefiningModule(sym);
@@ -1492,6 +1494,165 @@ public:
         for (size_t i = 0; i < aggregateLayouts_.size(); i++) finalizeAggregate(i);
     }
 
+    // CIDER-BUG-120: merge one own method declaration into a class's method
+    // and vtable lists, which may already hold an inherited prefix. Shared
+    // by collection and the post-collection rebuild so an override binds the
+    // same slot in both (CIDER-BUG-047's slot rules are the body below).
+    void mergeClassMethod(StructSymbol& sym, StructSymbol::Method m) {
+        if (m.isOverride) {
+            // CIDER-BUG-047: `sym.methods` also holds plain methods, so
+            // positioning the vtable slot by vtable index desyncs as soon as
+            // a plain method precedes a virtual. Follow the inherited
+            // method's own recorded slot instead; a plain method that shares
+            // the name has vtableIndex -1 and is never the override target.
+            bool matchedSlot = false;
+            for (auto& em : sym.methods) {
+                if (em.name != m.name || em.vtableIndex < 0) continue;
+                m.vtableIndex = em.vtableIndex;
+                sym.vtable[m.vtableIndex] = m.mangledName;
+                em = m;
+                matchedSlot = true;
+                break;
+            }
+            if (!matchedSlot) {
+                // No inherited virtual slot (invalid override): preserve the
+                // legacy binding of a same-named method so direct calls
+                // still reach the derived body.
+                for (auto& em : sym.methods) {
+                    if (em.name == m.name) {
+                        em = m;
+                        break;
+                    }
+                }
+            }
+        } else if (m.isVirtual) {
+            m.vtableIndex = (int)sym.vtable.size();
+            sym.vtable.push_back(m.mangledName);
+            sym.methods.push_back(m);
+        } else {
+            sym.methods.push_back(m);
+        }
+    }
+
+    // CIDER-BUG-120: inheritance could not be resolved while collection was
+    // in progress. Walk every class's resolved base chain and report a
+    // missing link ("Parent class 'X' of class 'A' not found") or a cycle
+    // once per family, mirroring the collector's "Circular import" wording.
+    // Classes in a broken chain get baseError and keep their collection-time
+    // members; the error aborts compilation, so no half-inherited shape is
+    // ever code-generated.
+    void validateBaseChains() {
+        std::set<const StructSymbol*> reported;
+        Scope* prevScope = symbolTable_.getCurrentScope();
+        for (size_t i = 0; i < aggregateLayouts_.size(); i++) {
+            AggregateLayout& rec = aggregateLayouts_[i];
+            if (rec.sym->kind != SymbolKind::CLASS || rec.sym->parentName.empty()) continue;
+            std::set<const StructSymbol*> seen;
+            std::vector<const StructSymbol*> chain;
+            const StructSymbol* cur = rec.sym.get();
+            const StructSymbol* unknownAt = nullptr;
+            bool cyclic = false;
+            while (true) {
+                if (!seen.insert(cur).second) {
+                    cyclic = true;
+                    break;
+                }
+                chain.push_back(cur);
+                if (cur->parentName.empty()) break;
+                // Resolve each link in the declaring scope of the class that
+                // owns it (a module-qualified base needs its own module).
+                Scope* scope = rec.declaringScope;
+                auto it = aggregateIndex_.find(cur);
+                if (it != aggregateIndex_.end()) scope = aggregateLayouts_[it->second].declaringScope;
+                symbolTable_.setCurrentScope(scope);
+                auto parentSym = resolveNominalType(cur->parentName);
+                if (!parentSym || parentSym->kind != SymbolKind::CLASS) {
+                    if (!parentSym) unknownAt = cur;
+                    break;
+                }
+                cur = static_cast<const StructSymbol*>(parentSym.get());
+            }
+            if (unknownAt) {
+                rec.baseError = true;
+                if (reported.insert(unknownAt).second) {
+                    auto it = aggregateIndex_.find(unknownAt);
+                    std::string file = it != aggregateIndex_.end()
+                                           ? aggregateLayouts_[it->second].file
+                                           : reporter_.getFile();
+                    reportAtFile("Parent class '" + unknownAt->parentName +
+                                     "' of class '" + unknownAt->name + "' not found",
+                                 unknownAt->line, unknownAt->col, file);
+                }
+            } else if (cyclic) {
+                rec.baseError = true;
+                bool alreadyReported = false;
+                for (auto* member : chain) {
+                    if (reported.count(member)) alreadyReported = true;
+                }
+                if (!alreadyReported) {
+                    reportAtFile("Circular inheritance detected for class '" +
+                                     rec.sym->name + "'",
+                                 rec.sym->line, rec.sym->col, rec.file);
+                }
+                reported.insert(chain.begin(), chain.end());
+            }
+        }
+        symbolTable_.setCurrentScope(prevScope);
+    }
+
+    // Attribute a late (post-collection) diagnostic to the file the symbol
+    // was declared in, like collection-time diagnostics.
+    void reportAtFile(const std::string& message, int line, int col, const std::string& file) {
+        std::string prevFile = reporter_.getFile();
+        if (!file.empty()) reporter_.setFile(file);
+        reporter_.error(message, line, col);
+        reporter_.setFile(prevFile);
+    }
+
+    // CIDER-BUG-120: resolve a class's base after collection. A base
+    // declared later (or collected later) was invisible to
+    // visit(ClassDeclStmt), which then kept only the class's own fields,
+    // methods and vtable. Re-merge the inherited prefix from the finalized
+    // base. A base that was itself rebuilt invalidates the copy its child
+    // took at collection, so the child rebuilds too (`rebuilt` propagates
+    // down the chain).
+    void finalizeClassBase(AggregateLayout& rec) {
+        // Unknown/cyclic chains were reported and are never inherited.
+        if (rec.baseError) return;
+        auto parentSym = resolveNominalType(rec.sym->parentName);
+        if (!parentSym || parentSym->kind != SymbolKind::CLASS) return;  // non-class base
+        auto parent = std::static_pointer_cast<StructSymbol>(parentSym);
+        bool parentRebuilt = false;
+        auto it = aggregateIndex_.find(parent.get());
+        if (it != aggregateIndex_.end()) {
+            finalizeAggregate(it->second);
+            parentRebuilt = aggregateLayouts_[it->second].rebuilt;
+        }
+        if (rec.forwardParent || parentRebuilt) rebuildClassMembers(rec, *parent);
+    }
+
+    // CIDER-BUG-120: rebuild `rec.sym`'s fields, methods and vtable on top of
+    // its now-resolved base, replaying the declaration-time merge from the
+    // own members recorded at collection. Field offsets are recomputed by
+    // layoutClass() afterwards; the vptr reservation follows the base's
+    // vtable exactly as the collection-time test would have seen it.
+    void rebuildClassMembers(AggregateLayout& rec, const StructSymbol& parent) {
+        auto& sym = *rec.sym;
+        sym.fields = parent.fields;
+        sym.fields.insert(sym.fields.end(), rec.ownFields.begin(), rec.ownFields.end());
+        rec.ownFieldStart = (int)parent.fields.size();
+        rec.inherited = true;
+        sym.methods = parent.methods;
+        sym.vtable = parent.vtable;
+        bool ownVTable = false;
+        for (auto& m : rec.ownMethods) {
+            if (m.isVirtual || m.isOverride) ownVTable = true;
+            mergeClassMethod(sym, m);
+        }
+        rec.vptrReserved = ownVTable && parent.vtable.empty();
+        rec.rebuilt = true;
+    }
+
     void finalizeAggregate(size_t index) {
         AggregateLayout& rec = aggregateLayouts_[index];
         // A by-value cycle (degenerate, but accepted) would recurse forever:
@@ -1502,13 +1663,8 @@ public:
         Scope* prevScope = symbolTable_.getCurrentScope();
         symbolTable_.setCurrentScope(rec.declaringScope);
 
-        if (rec.inherited) {
-            auto parentSym = resolveNominalType(rec.sym->parentName);
-            if (parentSym && parentSym->kind == SymbolKind::CLASS) {
-                auto parent = std::static_pointer_cast<StructSymbol>(parentSym);
-                auto it = aggregateIndex_.find(parent.get());
-                if (it != aggregateIndex_.end()) finalizeAggregate(it->second);
-            }
+        if (rec.sym->kind == SymbolKind::CLASS && !rec.sym->parentName.empty()) {
+            finalizeClassBase(rec);
         }
         for (size_t i = (size_t)rec.ownFieldStart; i < rec.sym->fields.size(); i++) {
             std::set<std::string> visiting;

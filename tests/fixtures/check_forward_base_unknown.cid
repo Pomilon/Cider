@@ -1,0 +1,7 @@
+// CIDER-BUG-120: a base class that is never declared must be a clear
+// diagnostic, not a silent "own members only" class. `Later` is made up.
+class A extends Later {
+  var x: int = 1;
+}
+
+func main() -> int { return 0; }
