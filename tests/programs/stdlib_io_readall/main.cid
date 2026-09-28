@@ -1,0 +1,24 @@
+// CIDER-CHORE-003: std.io read_all was only reachable through solum's
+// end-to-end render. input.txt has two newlines and no trailing newline, so
+// this pins that read_all returns every byte verbatim until EOF.
+//
+// read_all returns a pointer into its own stack buffer, so the bytes are
+// copied out immediately before printing.
+from std.io import print, read_all;
+
+func main() -> int {
+    var data: string = read_all();
+    var keep: [char; 4096];
+    var p: char* = data as char*;
+    var i: int = 0;
+    while (p[i] != 0 as char) {
+        keep[i] = p[i];
+        i = i + 1;
+    }
+    keep[i] = 0 as char;
+
+    print("BEGIN\n");
+    print(keep as string);
+    print("END\n");
+    return 0;
+}

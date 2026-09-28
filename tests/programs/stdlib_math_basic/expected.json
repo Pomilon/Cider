@@ -1,0 +1,1 @@
+{"stdout": "abs(-7)=7\nfabs(-2.5)=2.500000\nmin(3,4)=3\nmax(-1,5)=5\nclamp(10,0,5)=5\nclamp(-3,0,5)=0\nclamp(3,0,5)=3\nmin_f=0.500000\nmax_f=1.500000\nclamp_f=1.000000\nmath ok\n", "stderr": "", "exit": 0}

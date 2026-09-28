@@ -1,0 +1,1 @@
+{"stdout": "strcpy=hello\nhello world\nabc def 123!\ntrim me\nparse_int=-250\nparse_float=123.750000\nstring_ops ok\n", "stderr": "", "exit": 0}
