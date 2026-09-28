@@ -2667,9 +2667,15 @@ public:
                 // the MEMCPY below starts at base+start; the copy length is
                 // the target's element count (the type checker rejects a
                 // statically-known mismatch and accepts a dynamic length).
+                // CIDER-BUG-071: an alias-declared array (`type Row = [u8;3]`)
+                // carries the alias spelling in sym->type, so resolve the
+                // shape first — otherwise the copy is missed and the
+                // descriptor pointer is stored as a scalar.
+                TypeInfo declArray = resolveTypeAlias(sym->type);
                 if (lastExprType_.isSlice && lastExprType_.pointerLevel == 0 &&
-                    sym->type.isArray && sym->type.pointerLevel == 0) {
+                    declArray.isArray && declArray.pointerLevel == 0) {
                     val = sliceDataPointer(val);
+                    lastExprType_ = declArray;
                 }
                 if (sym->type.pointerLevel == 0) {
                     IRType declType = mapType(sym->type.name);

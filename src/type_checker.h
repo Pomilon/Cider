@@ -1586,6 +1586,12 @@ public:
                 declaredType.isInterface = true;
             }
         }
+        // CIDER-BUG-071: an alias declaration (`type Row = [u8;3]`) stores
+        // the alias spelling in declaredType, so isArray is false until the
+        // chain is resolved. The initializer rules below decide by shape, so
+        // resolve here and use the resolved form wherever isArray picks the
+        // rule; resolveType keeps the outer array wrapper (CIDER-BUG-019/052).
+        TypeInfo declaredArray = resolveType(declaredType);
 
         if (stmt.getInitializer()) {
             auto* wideInit = dynamic_cast<WideStringExpr*>(stmt.getInitializer());
@@ -1634,14 +1640,16 @@ public:
                     // cannot drift.
                     checkInterfaceValue(declaredType, initType, stmt.getLine());
                 } else if (initType.isSlice && initType.pointerLevel == 0 &&
-                           declaredType.isArray && declaredType.pointerLevel == 0 &&
+                           declaredArray.isArray && declaredArray.pointerLevel == 0 &&
                            symbolTable_.scopeDepth() > 0) {
                     // CIDER-BUG-057: `var s: [T; N] = base[start:end]` copies
                     // the slice's elements. Locals only: globals have no
                     // runtime initializer and keep the type-mismatch
                     // rejection, so a slice cannot silently BSS-zero them.
+                    // CIDER-BUG-071: declaredArray also covers the alias
+                    // spelling (`var s: Row = a[1:4]`).
                     checkSliceArrayCopy("declaration of '" + stmt.getName() + "'",
-                                        declaredType, initType,
+                                        declaredArray, initType,
                                         dynamic_cast<SliceExpr*>(stmt.getInitializer()),
                                         stmt.getLine());
                     lastExprType_ = declaredType;
@@ -1896,16 +1904,22 @@ public:
             }
         }
 
+        // CIDER-BUG-071: an alias-typed target (`type Row = [u8;3]`;
+        // `s = base[1:4]`, or a field/member of alias type) carries the
+        // alias spelling in targetType; resolve it so the slice-copy rule
+        // sees the array shape, exactly like the direct spelling.
+        TypeInfo targetArray = resolveType(targetType);
+
         if (ifaceTargetType.isInterface) {
             checkInterfaceValue(ifaceTargetType, valueType, stmt.getLine());
         } else if (valueType.isSlice && valueType.pointerLevel == 0 &&
-                   targetType.isArray && targetType.pointerLevel == 0) {
+                   targetArray.isArray && targetArray.pointerLevel == 0) {
             // CIDER-BUG-057: `arr = base[start:end]` copies the slice's
             // elements into the existing array, with the same size and
             // element rules as the declaration-time copy above.
             std::string where = target ? ("assignment to '" + target->getName() + "'")
                                        : std::string("array assignment");
-            checkSliceArrayCopy(where, targetType, valueType,
+            checkSliceArrayCopy(where, targetArray, valueType,
                                 dynamic_cast<SliceExpr*>(stmt.getValue()), stmt.getLine());
         } else if (!areTypesCompatible(targetType, valueType)) {
             error("Type mismatch in assignment. Expected " + canonicalizeNominal(targetType).toString() +
