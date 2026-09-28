@@ -14,6 +14,8 @@ echo "$USAGE" | grep -q -- "--target native|pomeos|uefi" || { echo "usage missin
 echo "$USAGE" | grep -q -- "--warn" || { echo "usage missing --warn"; exit 1; }
 echo "$USAGE" | grep -q -- "--checks" || { echo "usage missing --checks"; exit 1; }
 echo "$USAGE" | grep -q -- "-g|--debug" || { echo "usage missing -g/--debug"; exit 1; }
+echo "$USAGE" | grep -q -- "--cache <dir>" || { echo "usage missing --cache"; exit 1; }
+echo "$USAGE" | grep -q -- "--emit-meta" || { echo "usage missing --emit-meta"; exit 1; }
 set -e
 echo "cli_test: OK"
 

@@ -2,6 +2,7 @@
 
 #include <algorithm>
 #include <cstdint>
+#include <cstdio>
 #include <cstdlib>
 #include <cstring>
 #include <fstream>
@@ -252,6 +253,22 @@ bool CodeGenerator::generate(ModuleIR& module, const std::string& outputPath,
     std::vector<std::string> globalAsmSection;
     std::vector<std::string> textSection;
     int strCount = 0;
+    // CIDER-FEAT-006: per-object prefix for codegen-local data labels
+    // (string payloads). They are referenced only inside this object, so a
+    // distinct name per object keeps multi-object links free of duplicate
+    // `str0` symbols. Empty in whole-program mode, where the output stays
+    // byte-identical to the pre-feature compiler.
+    std::string localLabelPrefix;
+    if (!sourceFile.empty()) {
+        uint64_t h = 1469598103934665603ULL;
+        for (unsigned char c : sourceFile) {
+            h ^= c;
+            h *= 1099511628211ULL;
+        }
+        char buf[32];
+        std::snprintf(buf, sizeof(buf), "sep_%016llx_", (unsigned long long)h);
+        localLabelPrefix = buf;
+    }
     // CIDER-ISS-010: set when the IR calls the uncaught-exception
     // pseudo-builtin; the terminating diagnostic helper is then emitted
     // once, after all functions, so each call site can `call` it.
@@ -391,7 +408,7 @@ bool CodeGenerator::generate(ModuleIR& module, const std::string& outputPath,
                         !arg.name.empty() &&
                         (arg.name.front() == '"' || arg.name.rfind("L\"", 0) == 0)) {
                         bool wide = arg.name.rfind("L\"", 0) == 0;
-                        std::string label = (wide ? "wstr" : "str") + std::to_string(strCount++);
+                        std::string label = localLabelPrefix + (wide ? "wstr" : "str") + std::to_string(strCount++);
                         if (!wide) {
                             std::string sanitized = sanitizeString(arg.name);
                             if (sanitized.empty())
@@ -453,6 +470,21 @@ bool CodeGenerator::generate(ModuleIR& module, const std::string& outputPath,
     };
 
     for (const auto& var : module.getGlobalVars()) {
+        // CIDER-FEAT-006: per-file codegen emits only this file's globals;
+        // globals owned by other objects become extern references (their
+        // defining module's object carries the storage).
+        if (!sourceFile.empty() && !var.sourcePath.empty() && var.sourcePath != sourceFile) {
+            addGlobalAsm("extern " + var.name);
+            continue;
+        }
+        // CIDER-FEAT-006: the defining object must export its globals so
+        // other objects' `extern` references resolve at link time. Globals
+        // with no source path are compiler-synthesized (`_cider_zero_*`,
+        // `_gs*` string payloads): per-object labels, referenced only from
+        // this object, so they stay local symbols and cannot collide.
+        if (!sourceFile.empty() && !var.sourcePath.empty()) {
+            addGlobalAsm("global " + var.name);
+        }
         int align = globalAlign(var.type);
         if (align > 1) {
             if (var.initialIsFloat || var.initialValue != 0) {
@@ -576,8 +608,14 @@ bool CodeGenerator::generate(ModuleIR& module, const std::string& outputPath,
         if (fName == "_start" || fName == "main" || (isUefi && fName == "efi_main")) {
             addText("global " + fName);
         }
-        if (!sourceFile.empty()) {
-            addText("global " + fName);
+        if (!sourceFile.empty() && !func->getSourcePath().empty()) {
+            // CIDER-FEAT-006: compiler-synthesized runtime helpers
+            // (`_strlen`, `_streq`, interpolation formatters) have no
+            // source path; they are referenced only from this object, so
+            // they stay local symbols instead of colliding at link time.
+            // Template instantiations are weak: every using object may
+            // contribute a copy and the linker keeps one.
+            addText("global " + fName + (func->isWeak() ? ":weak" : ""));
         }
 
         // CID-005: resolve the definition's ABI from the FunctionIR.

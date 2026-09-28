@@ -171,6 +171,11 @@ public:
     const std::string& getName() const { return name_; }
     void setSourcePath(const std::string& p) { sourcePath_ = p; }
     const std::string& getSourcePath() const { return sourcePath_; }
+    // CIDER-FEAT-006: emit this definition as a weak global
+    // (`global name:weak`), so several separate objects that instantiate the
+    // same template link with one shared copy. Off in whole-program mode.
+    void setWeak(bool v) { weak_ = v; }
+    bool isWeak() const { return weak_; }
     // CIDER-FEAT-001: declaration line in sourcePath_ (0 = unknown).
     void setSourceLine(int l) { sourceLine_ = l; }
     int getSourceLine() const { return sourceLine_; }
@@ -191,6 +196,7 @@ private:
     Abi abi_ = Abi::Default;
     std::string sourcePath_;
     int sourceLine_ = 0;
+    bool weak_ = false;
 };
 
 class ModuleIR {
@@ -215,9 +221,14 @@ public:
         // bit pattern (u32 bits for F32, u64 bits for F64), not a
         // truncated integer. A plain `10.0` used to land as `dq 10`.
         bool initialIsFloat = false;
+        // CIDER-FEAT-006: source file that declared this global ("" =
+        // unknown / synthesized). Per-file codegen emits only the current
+        // file's globals and declares the rest `extern`; the defining
+        // module's object owns their storage.
+        std::string sourcePath;
     };
-    void addGlobalVar(const std::string& name, IRType type, int64_t init = 0, int arraySize = 0, int totalBytes = 0, bool isFloat = false) {
-        globalVars_.push_back({name, type, init, arraySize, totalBytes, isFloat});
+    void addGlobalVar(const std::string& name, IRType type, int64_t init = 0, int arraySize = 0, int totalBytes = 0, bool isFloat = false, const std::string& sourcePath = "") {
+        globalVars_.push_back({name, type, init, arraySize, totalBytes, isFloat, sourcePath});
     }
     const std::vector<GlobalVar>& getGlobalVars() const { return globalVars_; }
 

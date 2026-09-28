@@ -1052,6 +1052,22 @@ public:
         // (Issue #16): imported ASTs carry their module path.
         std::string prevFile = reporter_.getFile();
         if (!program.getSourcePath().empty()) reporter_.setFile(program.getSourcePath());
+        // CIDER-FEAT-006: module mode (`--emit-meta`) collects the root file
+        // as a named module. Install the same module context the imported
+        // path uses, so definitions resolve with their own module current.
+        std::string prevModule = currentModule_;
+        Scope* prevModuleScope = currentModuleScope_;
+        Scope* prevScope = symbolTable_.getCurrentScope();
+        auto pmIt = programModules_.find(&program);
+        if (pmIt != programModules_.end()) {
+            currentModule_ = pmIt->second;
+            currentModuleScope_ = nullptr;
+            if (!program.getSourcePath().empty()) {
+                auto scIt = moduleScopes_.find(program.getSourcePath());
+                if (scIt != moduleScopes_.end()) currentModuleScope_ = scIt->second;
+            }
+            if (currentModuleScope_) symbolTable_.setCurrentScope(currentModuleScope_);
+        }
         // CIDER-FEAT-005: warning analysis is active for the root program
         // only (this visitor runs exactly once, for the root AST).
         bool prevWarningsActive = warningsActive_;
@@ -1075,13 +1091,20 @@ public:
         // that module as current, so unqualified names bind per-module and
         // latent errors surface as file-attributed diagnostics at check
         // time. The main/_start presence check above stays main-only.
+        // CIDER-FEAT-006: `.cider-meta` snapshots were checked when their
+        // module was compiled; re-checking the declaration-only AST would
+        // duplicate that work and reject bodies the snapshot omits.
         for (auto& imported : program.getImportedAsts()) {
+            if (imported->isMeta()) continue;
             checkImportedProgram(*imported);
         }
         // CIDER-FEAT-005: imports are declared before any use, so they are
         // reported once the whole root program has been checked.
         if (warningsEnabled_) warnings_.reportUnusedImports();
         reporter_.setFile(prevFile);
+        symbolTable_.setCurrentScope(prevScope);
+        currentModule_ = prevModule;
+        currentModuleScope_ = prevModuleScope;
     }
 
     void checkTopLevelStatements(AstProgram& program) {
@@ -1825,6 +1848,11 @@ public:
         // resolves the initializer in its own module.
         if (sym->isConst) sym->constInit = stmt.getInitializer();
         if (auto prev = symbolTable_.getCurrentScope()->resolveLocal(sym->name)) {
+            // CIDER-FEAT-006: the replacement must keep the collector's
+            // module-visibility flags — the meta emitter reads them after
+            // checking to decide which declarations are exported.
+            sym->isExported = prev->isExported;
+            sym->isExtern = prev->isExtern;
             auto pit = symbolModules_.find(prev->id);
             if (pit != symbolModules_.end()) symbolModules_[sym->id] = pit->second;
         }

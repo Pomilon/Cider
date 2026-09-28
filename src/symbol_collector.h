@@ -11,6 +11,7 @@
 #include "ast.h"
 #include "errors.h"
 #include "lexer.h"
+#include "module_meta.h"
 #include "module_resolver.h"
 #include "module_scope.h"
 #include "parser.h"
@@ -23,7 +24,37 @@ public:
     SymbolCollector(SymbolTable& symbolTable, ErrorReporter& reporter,
                     ModuleResolver& resolver, const std::string& originPath = "")
         : symbolTable_(symbolTable), resolver_(resolver), reporter_(reporter),
-          currentProgram_(nullptr), originPath_(originPath) {}
+          currentProgram_(nullptr), originPath_(originPath),
+          currentFilePath_(originPath) {}
+
+    // CIDER-FEAT-006: separate-compilation inputs. `cacheDir` makes module
+    // imports check `<dir>/<module>.cider-meta` before parsing source;
+    // `separate` marks the compilation as one object of a multi-object build
+    // (template instantiations are emitted at their use site).
+    void setCacheDir(const std::string& dir) { cacheDir_ = dir; }
+    void setSeparateCompilation(bool v) { separateCompilation_ = v; }
+
+    // CIDER-FEAT-006 module mode (`--emit-meta`): collect the root file as a
+    // named module, so its definitions mangle exactly as importers expect
+    // (`util` -> `mod_util__f`) and its module scope is registered under the
+    // input path for the meta emitter and downstream phases.
+    void collectModule(AstProgram& program, const std::string& moduleName) {
+        if (moduleName.empty()) {
+            collect(program);
+            return;
+        }
+        if (program.getSourcePath().empty()) program.setSourcePath(originPath_);
+        symbolTable_.enterModuleScope();
+        moduleScopes_[program.getSourcePath()] = symbolTable_.getCurrentScope();
+        programModules_[&program] = moduleName;
+        moduleStack_.push_back(moduleName);
+        std::string prevFile = reporter_.getFile();
+        if (!program.getSourcePath().empty()) reporter_.setFile(program.getSourcePath());
+        collect(program);
+        reporter_.setFile(prevFile);
+        moduleStack_.pop_back();
+        symbolTable_.exitScope();
+    }
 
     void collect(AstProgram& program) {
         currentProgram_ = &program;
@@ -1401,6 +1432,28 @@ public:
     // parsing failed. MODULE symbol registration in the importing scope
     // happens for every import, including scope reuses.
     Scope* importModule(const std::string& moduleName, int line, int col) {
+        // The scope that issued this import: root for main-file imports, the
+        // importer's own module scope for nested ones.
+        Scope* importingScope = symbolTable_.getCurrentScope();
+
+        // CIDER-FEAT-006: in separate-compilation mode the meta cache is
+        // checked before source resolution, keyed by the logical module name
+        // (`<dir>/<module>.cider-meta`). A corrupt or mismatched snapshot
+        // falls back to the source path below.
+        if (!cacheDir_.empty()) {
+            std::string metaPath = cacheDir_ + "/" + metaFileName(moduleName, ".cider-meta");
+            auto cached = moduleScopes_.find(metaPath);
+            if (cached != moduleScopes_.end()) {
+                registerModuleSymbol(importingScope, moduleName, cached->second, line, col);
+                return cached->second;
+            }
+            if (metaFileExists(metaPath)) {
+                Scope* metaScope = loadMetaModule(moduleName, metaPath, importingScope, line, col);
+                if (metaScope) return metaScope;
+                // Invalid snapshot: fall through and parse the source.
+            }
+        }
+
         auto result = resolver_.resolve(moduleName, originPath_);
         if (result.type == ModuleType::NOT_FOUND) {
             reporter_.error("Could not resolve module '" + moduleName + "'", line, col);
@@ -1412,10 +1465,6 @@ public:
             reporter_.error("Circular import detected for module '" + moduleName + "'", line, col);
             return nullptr;
         }
-
-        // The scope that issued this import: root for main-file imports, the
-        // importer's own module scope for nested ones.
-        Scope* importingScope = symbolTable_.getCurrentScope();
 
         auto scopeIt = moduleScopes_.find(result.path);
         if (scopeIt != moduleScopes_.end()) {
@@ -1452,7 +1501,12 @@ public:
             modScope = symbolTable_.getCurrentScope();
             moduleScopes_[result.path] = modScope;
             moduleStack_.push_back(moduleName);
+            // CIDER-FEAT-006: template instantiations created while this
+            // module is being collected belong to this module's object.
+            std::string prevFilePath = currentFilePath_;
+            currentFilePath_ = result.path;
             importedAst->accept(*this);
+            currentFilePath_ = prevFilePath;
             moduleStack_.pop_back();
             symbolTable_.exitScope();
             if (currentProgram_) {
@@ -1467,6 +1521,111 @@ public:
 
         registerModuleSymbol(importingScope, moduleName, modScope, line, col);
         return modScope;
+    }
+
+    // CIDER-FEAT-006: load a module from its `.cider-meta` snapshot instead
+    // of parsing source. The snapshot's declaration text is ordinary Cider
+    // source; it is parsed with a scratch reporter first (a corrupt cache
+    // must not fail the build or leak diagnostics), then collected in a
+    // fresh module scope with this module as current. The AST is registered
+    // like a parsed import (programModules_/moduleScopes_/importedAsts) so
+    // template instantiation and module identity keep working, and is
+    // flagged `isMeta()` so the type checker skips its bodies.
+    Scope* loadMetaModule(const std::string& moduleName, const std::string& metaPath,
+                          Scope* importingScope, int line, int col) {
+        if (importingPaths_.count(metaPath)) {
+            reporter_.error("Circular import detected for module '" + moduleName + "'", line, col);
+            return nullptr;
+        }
+        std::ifstream file(metaPath);
+        if (!file) return nullptr;
+        std::stringstream buffer;
+        buffer << file.rdbuf();
+
+        MetaFile meta;
+        if (!parseMetaText(buffer.str(), meta)) return nullptr;
+        if (meta.moduleName != moduleName) return nullptr;
+
+        std::string declSource;
+        for (const auto& dep : meta.deps) {
+            declSource += "import " + dep + ";\n";
+        }
+        declSource += translateMetaDeclarations(meta.declarations);
+
+        // Validation parse with a scratch reporter: corrupt caches are
+        // ignored silently (the source path below rebuilds the module).
+        {
+            ErrorReporter scratch;
+            scratch.setFile(metaPath);
+            Lexer lexer(declSource, scratch);
+            Parser parser(lexer, scratch);
+            auto ast = parser.parseProgram();
+            if (scratch.hasErrors() || !ast) return nullptr;
+        }
+
+        std::string prevFile = reporter_.getFile();
+        reporter_.setFile(metaPath);
+        Lexer lexer(declSource, reporter_);
+        Parser parser(lexer, reporter_);
+        auto metaAst = parser.parseProgram();
+        if (!metaAst) {
+            reporter_.setFile(prevFile);
+            return nullptr;
+        }
+        metaAst->setSourcePath(metaPath);
+        metaAst->setMeta(true);
+        markMetaDeclarations(*metaAst);
+
+        importingPaths_.insert(metaPath);
+        symbolTable_.enterModuleScope();
+        Scope* modScope = symbolTable_.getCurrentScope();
+        moduleScopes_[metaPath] = modScope;
+        programModules_[metaAst.get()] = moduleName;
+        moduleStack_.push_back(moduleName);
+        std::string prevFilePath = currentFilePath_;
+        currentFilePath_ = metaPath;
+        metaAst->accept(*this);
+        currentFilePath_ = prevFilePath;
+        moduleStack_.pop_back();
+        symbolTable_.exitScope();
+        importingPaths_.erase(metaPath);
+        reporter_.setFile(prevFile);
+
+        registerModuleSymbol(importingScope, moduleName, modScope, line, col);
+        if (currentProgram_) currentProgram_->addImportedAst(std::move(metaAst));
+        return modScope;
+    }
+
+    static bool metaFileExists(const std::string& path) {
+        std::ifstream f(path);
+        return static_cast<bool>(f);
+    }
+
+    // Mark parsed meta declarations: plain (non-template) functions and
+    // module-level variables become external references in IR generation.
+    // Classes keep their declaration (methods are marked through their own
+    // FunctionDeclStmt) so vtable analysis still sees the class.
+    static void markMetaDeclarations(AstProgram& program) {
+        for (auto& stmt : program.getStatements()) {
+            Statement* inner = stmt.get();
+            if (auto es = dynamic_cast<ExportStmt*>(inner)) inner = es->getStmt();
+            if (!inner) continue;
+            if (auto fd = dynamic_cast<FunctionDeclStmt*>(inner)) {
+                if (!fd->hasTemplateParams() && !fd->isExtern()) fd->setMetaDecl(true);
+                continue;
+            }
+            if (auto cd = dynamic_cast<ClassDeclStmt*>(inner)) {
+                for (auto& member : cd->getMembers()) {
+                    if (auto m = dynamic_cast<FunctionDeclStmt*>(member.get())) {
+                        if (!m->hasTemplateParams() && !m->isExtern()) m->setMetaDecl(true);
+                    }
+                }
+                continue;
+            }
+            if (auto vd = dynamic_cast<VarDeclStmt*>(inner)) {
+                if (!vd->isExtern()) vd->setMetaDecl(true);
+            }
+        }
     }
 
     // --- template instantiation helpers ---
@@ -2688,6 +2847,11 @@ public:
             tmplFunc->getLine(), tmplFunc->getColumn(),
             tmplFunc->isAsync(), false, false, false, false, std::vector<std::string>{}, tmplFunc->getAbi());
         FunctionDeclStmt* rawPtr = clonedFunc.get();
+        // CIDER-FEAT-006: in separate-compilation mode the instantiation is
+        // emitted in the object of the file that uses it (the template's
+        // defining module may never instantiate this specialization). The
+        // override keeps per-file codegen from extern'ing the clone.
+        if (separateCompilation_) clonedFunc->setEmitSourcePath(currentFilePath_);
 
         // Process the cloned function through the collector (defines its
         // params and body symbols) in the defining scope, then scan its body
@@ -2744,6 +2908,17 @@ private:
     // instantiation is discarded instead of being visited/emitted with
     // null children.
     bool cloneFailed_ = false;
+    // CIDER-FEAT-006: `.cider-meta` cache directory (`--cache`); empty keeps
+    // the legacy source-only import path byte-identical.
+    std::string cacheDir_;
+    // CIDER-FEAT-006: true when this compilation is one object of a
+    // separate-compilation build; template instantiations are tagged with
+    // the file that uses them so per-file codegen emits them locally.
+    bool separateCompilation_ = false;
+    // CIDER-FEAT-006: the file whose statements are currently being
+    // collected (root file, an imported module, or a meta snapshot). Used to
+    // tag instantiation clones for per-file codegen.
+    std::string currentFilePath_;
 };
 
 }  // namespace cider

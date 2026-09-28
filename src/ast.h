@@ -89,6 +89,16 @@ public:
 class Statement : public ASTNode {
 public:
     Statement(NodeType type, int line, int col) : ASTNode(type, line, col) {}
+
+    // CIDER-FEAT-006: this declaration was loaded from a `.cider-meta`
+    // module snapshot, not parsed from source. IR generation skips its
+    // (empty) body and emits an `extern` reference instead; the defining
+    // module's object provides the real definition.
+    void setMetaDecl(bool v) { metaDecl_ = v; }
+    bool isMetaDecl() const { return metaDecl_; }
+
+private:
+    bool metaDecl_ = false;
 };
 
 // ---------------------------------------------------------------- types
@@ -930,6 +940,13 @@ public:
     bool hasTemplateParams() const { return !templateParams_.empty(); }
     Abi getAbi() const { return abi_; }
     void setAbi(Abi a) { abi_ = a; }
+    // CIDER-FEAT-006: in separate-compilation mode a template instantiation
+    // is emitted in the object that uses it (the instantiation site), not in
+    // the template's defining module. IR generation records this path on the
+    // generated function so per-file codegen keeps the clone local. Empty
+    // (the default) keeps the enclosing program's source path.
+    void setEmitSourcePath(const std::string& p) { emitSourcePath_ = p; }
+    const std::string& getEmitSourcePath() const { return emitSourcePath_; }
     void dump(std::string& out, int depth) const override;
 private:
     std::string name_;
@@ -943,6 +960,7 @@ private:
     bool isDestructor_;
     std::vector<std::string> templateParams_;
     Abi abi_ = Abi::Default;
+    std::string emitSourcePath_;
 };
 
 class StructDeclStmt : public Statement {
@@ -1083,6 +1101,11 @@ public:
     bool isStrict = false;
     void setSourcePath(const std::string& p) { sourcePath_ = p; }
     const std::string& getSourcePath() const { return sourcePath_; }
+    // CIDER-FEAT-006: this program is a declaration snapshot loaded from a
+    // `.cider-meta` file. The type checker does not re-check its bodies and
+    // IR generation treats its declarations as external references.
+    void setMeta(bool v) { isMeta_ = v; }
+    bool isMeta() const { return isMeta_; }
     void addImportedAst(std::unique_ptr<AstProgram> ast) { importedAsts_.push_back(std::move(ast)); }
     const std::vector<std::unique_ptr<AstProgram>>& getImportedAsts() const { return importedAsts_; }
     void dump(std::string& out, int depth) const override;
@@ -1090,6 +1113,7 @@ private:
     std::vector<std::unique_ptr<Statement>> statements_;
     std::vector<std::unique_ptr<AstProgram>> importedAsts_;
     std::string sourcePath_;
+    bool isMeta_ = false;
 };
 
 // ---------------------------------------------------------------- visitor

@@ -58,7 +58,27 @@ public:
     // unchanged, so default output stays byte-identical.
     void setChecks(bool v) { checks_ = v; }
 
+    // CIDER-FEAT-006: separate-compilation mode. Compiler-synthesized data
+    // labels (vtables, zero buffers, global string payloads) get a
+    // deterministic per-object prefix so two objects linked together do not
+    // collide; empty (the default) keeps whole-program output byte-identical.
+    void setSeparateCompilation(bool v) { separateCompilation_ = v; }
+
     ModuleIR generate(AstProgram& program) {
+        // CIDER-FEAT-006: token derived from this object's entry source
+        // path. Deterministic (identical rebuilds stay byte-identical) and
+        // distinct per compilation unit.
+        separateToken_.clear();
+        if (separateCompilation_) {
+            uint64_t h = 1469598103934665603ULL;
+            for (unsigned char c : currentSourcePath_) {
+                h ^= c;
+                h *= 1099511628211ULL;
+            }
+            char buf[32];
+            std::snprintf(buf, sizeof(buf), "sep_%016llx_", (unsigned long long)h);
+            separateToken_ = buf;
+        }
         visitedPrograms_.clear();
         classSyms_.clear();
         structSyms_.clear();
@@ -767,7 +787,10 @@ public:
     // (NewExpr, interface stores, VM, native emitter).
     std::string vtableKeyForClass(const std::shared_ptr<StructSymbol>& classSym) {
         if (!classSym) return "";
-        return emitGlobalName(definingModuleFor(classSym, classSym->name), classSym->name);
+        // CIDER-FEAT-006: per-object prefix in separate compilation (the
+        // vtable is emitted by each object that uses the class; references
+        // are intra-object, so distinct names link cleanly).
+        return separateToken_ + emitGlobalName(definingModuleFor(classSym, classSym->name), classSym->name);
     }
 
     // CID-020/021 (spec §6): vtable-map key joining an interface and its
@@ -777,7 +800,7 @@ public:
                                const std::shared_ptr<Symbol>& scSym, const std::string& scName) {
         std::string im = ifaceSym ? definingModuleFor(ifaceSym, ifaceSym->name) : "";
         std::string sm = scSym ? definingModuleFor(scSym, scSym->name) : "";
-        return emitGlobalName(im, ifaceName) + "_" + emitGlobalName(sm, scName);
+        return separateToken_ + emitGlobalName(im, ifaceName) + "_" + emitGlobalName(sm, scName);
     }
 
     // CID-020/021 (spec §6): bare nominal defined by exactly one module
@@ -821,12 +844,12 @@ public:
     std::string interfaceVtableLabel(const std::string& ifaceName, const std::string& concreteName) {
         auto ifaceSym = resolveNominalType(ifaceName);
         if (!ifaceSym || ifaceSym->kind != SymbolKind::INTERFACE) {
-            return "vtable_" + ifaceName + "_" + concreteName;
+            return "vtable_" + separateToken_ + ifaceName + "_" + concreteName;
         }
         auto concSym = resolveNominalType(concreteName);
         if (!concSym) concSym = resolveUniqueModuleNominal(concreteName);
         if (!concSym || (concSym->kind != SymbolKind::STRUCT && concSym->kind != SymbolKind::CLASS)) {
-            return "vtable_" + ifaceName + "_" + concreteName;
+            return "vtable_" + separateToken_ + ifaceName + "_" + concreteName;
         }
         return "vtable_" + vtableIfaceKey(ifaceSym, ifaceSym->name, concSym, concSym->name);
     }
@@ -950,6 +973,13 @@ public:
             module_.addExternFunction(funcName);
             return;
         }
+        // CIDER-FEAT-006: a declaration loaded from a `.cider-meta` snapshot
+        // has no body here — the defining module's object carries it. Emit
+        // the mangled name as an extern reference.
+        if (stmt.isMetaDecl()) {
+            module_.addExternFunction(emitFunctionName(currentModule_, funcName));
+            return;
+        }
         // CID-020/021 (spec §5): non-main definitions are emitted under the
         // defining module's mangled name (`main`/`_start` stay bare).
         funcName = emitFunctionName(currentModule_, funcName);
@@ -990,7 +1020,16 @@ public:
         // sites to SysV). Emitting them with the target descriptor (MS
         // under `--target uefi`) would silently mismatch every dispatch.
         currentFunction_->setAbi(isVirtMethod ? Abi::SysV : stmt.getAbi());
-        currentFunction_->setSourcePath(currentSourcePath_);
+        // CIDER-FEAT-006: a template instantiation cloned for a use site in
+        // separate-compilation mode carries the use-site file so per-file
+        // codegen emits it locally; every other definition follows the
+        // enclosing program's source path.
+        const std::string& emitPath = stmt.getEmitSourcePath();
+        currentFunction_->setSourcePath(emitPath.empty() ? currentSourcePath_ : emitPath);
+        // A use-site instantiation may be emitted by every object that uses
+        // it (Phase 1 accepts duplicates instead of COMDAT dedup), so the
+        // definition is weak: the linker keeps one shared copy.
+        if (separateCompilation_ && !emitPath.empty()) currentFunction_->setWeak(true);
         currentFunction_->setSourceLine(stmt.getLine());
         currentBlock_ = std::make_unique<BasicBlock>("entry");
         functionEntryBlock_ = currentBlock_.get();
@@ -2357,6 +2396,17 @@ public:
     }
 
     void visit(VarDeclStmt& stmt) override {
+        // CIDER-FEAT-006: a module-level variable loaded from a
+        // `.cider-meta` snapshot. The defining module's object owns the
+        // storage; register it as extern DATA and let reads/writes resolve
+        // through the mangled label. The collector's symbol (with its
+        // `constInit` for folding) stays in the scope untouched.
+        if (stmt.isMetaDecl()) {
+            std::string gname = emitGlobalName(currentModule_, stmt.getName());
+            module_.addExternVariable(gname);
+            globalValues_[gname] = IRValue::Label(gname);
+            return;
+        }
         auto sym = std::make_shared<Symbol>();
         sym->kind = SymbolKind::VARIABLE;
         sym->name = stmt.getName();
@@ -2515,7 +2565,7 @@ public:
                 return;
             }
             if (fnDecl.isFunctionPointer && !fnDecl.isArray) {
-                module_.addGlobalVar(gname, IRType::PTR, 0, 0, 8, false);
+                module_.addGlobalVar(gname, IRType::PTR, 0, 0, 8, false, currentSourcePath_);
                 globalValues_[gname] = IRValue::Label(gname);
                 return;
             }
@@ -2573,7 +2623,7 @@ public:
                 }
             }
             int totalBytes = getTypeSize(sym->type);
-            module_.addGlobalVar(gname, (sym->type.pointerLevel > 0) ? IRType::PTR : mapType(sym->type.name), initVal, sym->type.isArray ? sym->type.arraySize : 0, totalBytes, initIsFloat);
+            module_.addGlobalVar(gname, (sym->type.pointerLevel > 0) ? IRType::PTR : mapType(sym->type.name), initVal, sym->type.isArray ? sym->type.arraySize : 0, totalBytes, initIsFloat, currentSourcePath_);
             globalValues_[gname] = IRValue::Label(gname);
             return;
         }
@@ -5782,7 +5832,7 @@ public:
     // (CID-024); numeric bytes are read identically by NASM and the VM
     // decoder.
     std::string emitStringData(const std::string& strData) {
-        std::string strLabel = "_gs" + std::to_string(globalStrCount_++);
+        std::string strLabel = "_gs" + separateToken_ + std::to_string(globalStrCount_++);
         std::string dataLine = strLabel + ": db ";
         for (size_t ci = 0; ci < strData.size(); ++ci) {
             if (ci > 0) dataLine += ", ";
@@ -5830,7 +5880,7 @@ public:
         if (size <= 0) return;
         auto it = zeroBuffers_.find(size);
         if (it == zeroBuffers_.end()) {
-            std::string label = "_cider_zero_" + std::to_string(size);
+            std::string label = "_cider_zero_" + separateToken_ + std::to_string(size);
             module_.addGlobalVar(label, IRType::U8, 0, 0, size, false);
             it = zeroBuffers_.emplace(size, label).first;
         }
@@ -6761,10 +6811,20 @@ public:
             // innermost active try (0 when none). Each try allocates its own
             // buffer, so nested tries, throws after an inner try completed,
             // and throws from callee frames all reach the right handler.
-            module_.addGlobalAsm("global _exception_buf_ptr");
-            module_.addGlobalAsm("_exception_buf_ptr: resq 1");
-            module_.addGlobalAsm("global _exception_value");
-            module_.addGlobalAsm("_exception_value: resq 1");
+            // CIDER-FEAT-006: separate objects must share one handler chain
+            // (a try in one object catches a throw from another). `common`
+            // symbols are merged by the linker and every reference goes
+            // through a relocation, so the slot is genuinely shared; a
+            // weak definition in each object would bind locally instead.
+            if (separateCompilation_) {
+                module_.addGlobalAsm("common _exception_buf_ptr 8");
+                module_.addGlobalAsm("common _exception_value 8");
+            } else {
+                module_.addGlobalAsm("global _exception_buf_ptr");
+                module_.addGlobalAsm("_exception_buf_ptr: resq 1");
+                module_.addGlobalAsm("global _exception_value");
+                module_.addGlobalAsm("_exception_value: resq 1");
+            }
         }
     }
 
@@ -6775,6 +6835,10 @@ private:
     std::unique_ptr<BasicBlock> currentBlock_;
     std::string currentClassName_;
     std::string currentSourcePath_;
+    // CIDER-FEAT-006: separate-compilation mode + per-object data label
+    // prefix ("" in whole-program mode keeps output byte-identical).
+    bool separateCompilation_ = false;
+    std::string separateToken_;
     // CIDER-FEAT-001: line of the statement currently being lowered; stamped
     // on blocks/instructions so `compile -g` can emit DWARF line tables.
     int currentSourceLine_ = 0;

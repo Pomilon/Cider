@@ -85,6 +85,14 @@ set_tests_properties(debug_info_smoke PROPERTIES SKIP_RETURN_CODE 77)
 add_test(NAME cli_test
          COMMAND bash ${CMAKE_SOURCE_DIR}/tests/unit/cli_test.sh $<TARGET_FILE:cider>)
 
+# CIDER-FEAT-006: separate-compilation smoke: per-file objects via
+# `--emit-meta` + `--cache`, cross-object linking, cache reuse without the
+# module source, corrupted-cache fallback and snapshot rebuild byte-identity.
+# Exits 77 when nasm/gcc are missing.
+add_test(NAME separate_compilation_smoke
+         COMMAND bash ${CMAKE_SOURCE_DIR}/tests/unit/separate_compilation_smoke.sh $<TARGET_FILE:cider>)
+set_tests_properties(separate_compilation_smoke PROPERTIES SKIP_RETURN_CODE 77)
+
 add_executable(parser_recovery_test tests/unit/parser_recovery_test.cpp src/parser.cpp src/lexer.cpp)
 target_include_directories(parser_recovery_test PRIVATE src)
 add_test(NAME parser_recovery_test COMMAND parser_recovery_test)
@@ -104,6 +112,12 @@ add_test(NAME symbols_test COMMAND symbols_test)
 add_executable(module_scope_test tests/unit/module_scope_test.cpp)
 target_include_directories(module_scope_test PRIVATE src)
 add_test(NAME module_scope_test COMMAND module_scope_test)
+
+# CIDER-FEAT-006: `.cider-meta` snapshot helpers (SHA-256, header parsing,
+# template translation, declaration spans, module-name derivation).
+add_executable(module_meta_test tests/unit/module_meta_test.cpp)
+target_include_directories(module_meta_test PRIVATE src)
+add_test(NAME module_meta_test COMMAND module_meta_test)
 
 add_executable(symbol_collector_test tests/unit/symbol_collector_test.cpp src/symbols.cpp src/parser.cpp src/lexer.cpp src/module_resolver.cpp)
 target_include_directories(symbol_collector_test PRIVATE src)
