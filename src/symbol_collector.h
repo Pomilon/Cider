@@ -220,12 +220,13 @@ public:
 
     void visit(VarDeclStmt& stmt) override {
         auto typeInfo = TypeInfo::fromAST(stmt.getTypeAST());
-        // Check for struct template instantiation (e.g., Vec<int>). The
-        // match is on the base nominal, so pointers and arrays to
-        // instantiations (e.g. `*Entry<K, V>`) instantiate too (T6 std
-        // sweep: map.cid's `entries` field never instantiated, so every
-        // member use failed to resolve).
-        checkAndInstantiateStructTemplate(typeInfo.name);
+        // CIDER-BUG-066: type-driven struct template instantiation. The
+        // hook is on the resolved type, so pointers, arrays and function
+        // pointer signatures (`var cb: fn(*Pair<int>) -> int`) instantiate
+        // exactly like a bare `Pair<int>` spelling. Signatures, struct
+        // fields, casts, sizeof and new expressions hook the same helper;
+        // it is idempotent, so repeated mentions are cheap.
+        instantiateStructTemplatesInTypeInfo(typeInfo);
         // Class fields live in the ClassDeclStmt's StructSymbol (built from
         // the member list directly): defining an enclosing-scope variable
         // here leaked them (pre-existing: two classes could not share a
@@ -309,6 +310,9 @@ public:
         sym->line = stmt.getLine();
         sym->col = stmt.getColumn();
         sym->returnType = TypeInfo::fromAST(stmt.getReturnType());
+        // CIDER-BUG-066: a signature-only use instantiates its struct
+        // templates before the checker resolves the annotation.
+        instantiateStructTemplatesInTypeInfo(sym->returnType);
         sym->isExtern = stmt.isExtern();
         sym->isAsync = stmt.isAsync();
         // CID-005: virtual/override definitions are VIRTUAL_CALL targets,
@@ -347,6 +351,9 @@ public:
                     paramType.isInterface = true;
                 }
             }
+            // CIDER-BUG-066: parameter annotations (`p: *Pair<int>`, arrays,
+            // fn-pointer signatures) instantiate their struct templates.
+            instantiateStructTemplatesInTypeInfo(paramType);
             sym->parameterTypes.push_back(paramType);
         }
 
@@ -448,6 +455,10 @@ public:
                 StructSymbol::Field f;
                 f.name = field.name;
                 f.type = TypeInfo::fromAST(field.type.get());
+                // CIDER-BUG-066: field annotations instantiate their struct
+                // templates before the field is sized, so enclosing layouts
+                // use the real totalSize instead of the 8-byte unknown default.
+                instantiateStructTemplatesInTypeInfo(f.type);
                 // CIDER-BUG-069: resolve interface-ness before sizing.
                 resolveInterfaceTypeFlag(f.type);
                 f.offset = 0;
@@ -469,6 +480,10 @@ public:
                 StructSymbol::Field f;
                 f.name = field.name;
                 f.type = TypeInfo::fromAST(field.type.get());
+                // CIDER-BUG-066: field annotations instantiate their struct
+                // templates before the field is sized, so enclosing layouts
+                // use the real totalSize instead of the 8-byte unknown default.
+                instantiateStructTemplatesInTypeInfo(f.type);
                 // CIDER-BUG-069: resolve interface-ness before sizing.
                 resolveInterfaceTypeFlag(f.type);
                 f.bits = field.bits;
@@ -530,8 +545,13 @@ public:
             method.name = m.name;
             method.mangledName = m.name;
             method.returnType = TypeInfo::fromAST(m.returnType.get());
+            // CIDER-BUG-066: interface signatures are type annotations too.
+            instantiateStructTemplatesInTypeInfo(method.returnType);
             for (auto& p : m.params) {
                 TypeInfo paramType = TypeInfo::fromAST(p.second.get());
+                // CIDER-BUG-066: interface signatures are type annotations
+                // too, so instantiate any struct templates in them first.
+                instantiateStructTemplatesInTypeInfo(paramType);
                 // CIDER-BUG-080: an interface-typed method parameter is a
                 // 16-byte fat pointer, exactly like a function parameter;
                 // resolve the flag so satisfaction comparisons and the
@@ -609,6 +629,9 @@ public:
         sym->isTypeAlias = true;
         sym->name = stmt.getName();
         sym->type = TypeInfo::fromAST(stmt.getTargetType());
+        // CIDER-BUG-066: `type IP = Pair<int>` names the template too; the
+        // alias must resolve to a registered instantiation.
+        instantiateStructTemplatesInTypeInfo(sym->type);
         sym->line = stmt.getLine();
         sym->col = stmt.getColumn();
         sym->isExported = inExport_;  // CIDER-BUG-060
@@ -802,6 +825,11 @@ public:
                 StructSymbol::Field f;
                 f.name = field->getName();
                 f.type = TypeInfo::fromAST(field->getTypeAST());
+                // CIDER-BUG-066: class field annotations instantiate their
+                // struct templates before the field contributes to the class
+                // layout (the member pass below would only hook them after
+                // sizes were already computed).
+                instantiateStructTemplatesInTypeInfo(f.type);
                 // CIDER-BUG-069: resolve interface-ness before sizing.
                 resolveInterfaceTypeFlag(f.type);
                 // CIDER-BUG-049: class field initializers are materialised at
@@ -1483,6 +1511,33 @@ public:
         return out;
     }
 
+    // CIDER-BUG-066: type-driven instantiation hook. Any resolved type
+    // annotation mentioning a struct template (`Pair<int>`, `*Pair<int>`,
+    // `[Pair<int>; N]`, `fn(*Pair<int>) -> Pair<int>`, ...) instantiates it,
+    // not just the var-decl spelling. Function pointer signatures live in
+    // fnParamTypes/fnReturnType (fromAST resolved those recursively) and a
+    // nested array's inner shape in arrayElement; both recurse. The plain
+    // name branch covers pointers and single-dimension arrays, whose
+    // TypeInfo keeps the element spelling in `name`.
+    void instantiateStructTemplatesInTypeInfo(const TypeInfo& type) {
+        // Nested array dimensions are reached even when the innermost
+        // element is a function pointer (array wrappers copy the element
+        // signature), so recurse the wrapper before the signature branch.
+        if (type.arrayElement) instantiateStructTemplatesInTypeInfo(*type.arrayElement);
+        if (type.isFunctionPointer) {
+            if (type.fnParamTypes) {
+                for (const auto& p : *type.fnParamTypes) instantiateStructTemplatesInTypeInfo(p);
+            }
+            if (type.fnReturnType) instantiateStructTemplatesInTypeInfo(*type.fnReturnType);
+            return;
+        }
+        checkAndInstantiateStructTemplate(type.name);
+    }
+
+    void instantiateStructTemplatesInTypeAST(TypeAST* ast) {
+        instantiateStructTemplatesInTypeInfo(TypeInfo::fromAST(ast));
+    }
+
     void checkAndInstantiateStructTemplate(const std::string& typeName) {
         size_t pos = typeName.find('<');
         if (pos == std::string::npos) return;
@@ -1498,6 +1553,17 @@ public:
         if (found.first == templateTable_.end()) return;
         auto tmplSym = found.first->second;
         if (tmplSym->kind != SymbolKind::TEMPLATE) return;
+        // CIDER-BUG-066: the type hook runs from every annotation position,
+        // so the same spelling reaches here repeatedly. A spelling that
+        // already failed its argument check must report once, not once per
+        // use. Successful instantiations redefine nothing (the root-scope
+        // guard at the end), but their fields are re-walked: a nested
+        // instantiation can have been skipped when an enclosing spelling
+        // was first mentioned before the nested template was collected
+        // (declaration/import ordering), and a later mention must still
+        // create it.
+        Scope* globalScope = symbolTable_.getRootScope();
+        if (structTemplateErrors_.count(typeName)) return;
 
         StructDeclStmt* tmplStruct = nullptr;
         auto findStruct = [&](const std::vector<std::unique_ptr<Statement>>& stmts) -> StructDeclStmt* {
@@ -1526,6 +1592,7 @@ public:
 
         auto parsed = parseMangledTemplateName(typeName);
         if (parsed.second.size() != tmplSym->typeParams.size()) {
+            structTemplateErrors_.insert(typeName);
             reporter_.error("Template '" + baseName + "' expects " +
                 std::to_string(tmplSym->typeParams.size()) + " type arguments, got " +
                 std::to_string(parsed.second.size()), 0, 0);
@@ -1558,7 +1625,9 @@ public:
             // Nested instantiations in field position (e.g. HashMap's
             // `entries: *Entry<K, V>`): instantiate the substituted type so
             // member access through it resolves (T6 std sweep).
-            checkAndInstantiateStructTemplate(f.type.name);
+            // CIDER-BUG-066: the type hook also covers fn-pointer and
+            // nested-array field signatures.
+            instantiateStructTemplatesInTypeInfo(f.type);
             // CIDER-BUG-069: resolve interface-ness before sizing.
             resolveInterfaceTypeFlag(f.type);
             f.bits = field.bits;
@@ -1591,8 +1660,6 @@ public:
         if (bitPos > 0) currentOffset += 4;
         structSym->totalSize = alignUp(currentOffset, maxAlign);
 
-        auto globalScope = symbolTable_.getCurrentScope();
-        while (globalScope->getParent()) globalScope = globalScope->getParent();
         if (!globalScope->resolveLocal(typeName)) {
             globalScope->define(structSym);
             structClassNames_.push_back(typeName);
@@ -1623,6 +1690,14 @@ public:
                     // names fail type checking. Concrete functions and
                     // instantiated clones carry no template params.
                     if (fd->hasTemplateParams()) break;
+                    // CIDER-BUG-066: re-hook the signature after the whole
+                    // program (and every import) is collected, so a
+                    // signature-only use still instantiates when the
+                    // template declaration or import appears textually later.
+                    instantiateStructTemplatesInTypeAST(fd->getReturnType());
+                    for (auto& param : fd->getParams()) {
+                        instantiateStructTemplatesInTypeAST(param.second.get());
+                    }
                     for (auto& s : fd->getBody()) visitStmtForTemplateCalls(s.get());
                 }
                 break;
@@ -1711,6 +1786,36 @@ public:
                 break;
             case ASTNode::ASM_STMT:
                 // Raw assembly carries no template calls.
+                break;
+            // CIDER-BUG-066: re-hook class-method and interface-method
+            // signatures (and type-alias targets) after the whole program is
+            // collected, covering a template declared later than its first
+            // signature mention. Struct/class FIELD types are only rescanned
+            // for expressions in initializers: their enclosing layout was
+            // already computed during collection, so a late instantiation
+            // cannot repair offsets — those keep the loud undefined-type
+            // diagnostic instead of silently mis-sizing.
+            case ASTNode::CLASS_DECL_STMT:
+                if (auto cd = dynamic_cast<ClassDeclStmt*>(stmt)) {
+                    for (auto& member : cd->getMembers()) {
+                        if (dynamic_cast<VarDeclStmt*>(member.get()) ||
+                            dynamic_cast<FunctionDeclStmt*>(member.get())) {
+                            visitStmtForTemplateCalls(member.get());
+                        }
+                    }
+                }
+                break;
+            case ASTNode::INTERFACE_DECL_STMT:
+                if (auto id = dynamic_cast<InterfaceDeclStmt*>(stmt)) {
+                    for (auto& m : id->getMethods()) {
+                        instantiateStructTemplatesInTypeAST(m.returnType.get());
+                        for (auto& p : m.params) instantiateStructTemplatesInTypeAST(p.second.get());
+                    }
+                }
+                break;
+            case ASTNode::TYPE_ALIAS_STMT:
+                if (auto ta = dynamic_cast<TypeAliasStmt*>(stmt))
+                    instantiateStructTemplatesInTypeAST(ta->getTargetType());
                 break;
             default:
                 break;
@@ -1804,7 +1909,20 @@ public:
             visitExprForTemplateCalls(index->getObject());
             visitExprForTemplateCalls(index->getIndex());
         } else if (auto cast = dynamic_cast<CastExpr*>(expr)) {
+            // CIDER-BUG-066: a cast target type is an annotation too.
+            instantiateStructTemplatesInTypeAST(cast->getTargetType());
             visitExprForTemplateCalls(cast->getExpression());
+        // CIDER-BUG-066: `sizeof(T)`, `new T(...)` and `T{...}` name T in
+        // expression position; without the hook an instantiation that only
+        // ever appears there kept the 8-byte unknown-nominal default size.
+        } else if (auto sz = dynamic_cast<SizeofExpr*>(expr)) {
+            instantiateStructTemplatesInTypeAST(sz->getTargetType());
+        } else if (auto nw = dynamic_cast<NewExpr*>(expr)) {
+            instantiateStructTemplatesInTypeAST(nw->getNewType());
+            for (auto& arg : nw->getArgs()) visitExprForTemplateCalls(arg.get());
+        } else if (auto lit = dynamic_cast<StructLiteralExpr*>(expr)) {
+            checkAndInstantiateStructTemplate(lit->getStructName());
+            for (auto& f : lit->getFields()) visitExprForTemplateCalls(f.second.get());
         // CIDER-BUG-051: instantiate template calls nested in the expression
         // kinds the template-body cloner now supports, or a call inside an
         // instantiated body (which collect() re-scans) would never resolve.
@@ -1824,11 +1942,14 @@ public:
                 if (p.isExpr) visitExprForTemplateCalls(p.expr.get());
             }
         } else if (auto fn = dynamic_cast<FunctionExpr*>(expr)) {
+            // CIDER-BUG-066: lambda parameter/return annotations name types.
+            instantiateStructTemplatesInTypeAST(fn->getReturnType());
+            for (auto& p : fn->getParams()) {
+                instantiateStructTemplatesInTypeAST(p.second.get());
+            }
             for (auto& s : fn->getBody()) visitStmtForTemplateCalls(s.get());
         } else if (auto await = dynamic_cast<AwaitExpr*>(expr)) {
             visitExprForTemplateCalls(await->getValue());
-        } else if (auto lit = dynamic_cast<StructLiteralExpr*>(expr)) {
-            for (auto& f : lit->getFields()) visitExprForTemplateCalls(f.second.get());
         }
     }
 
@@ -2498,6 +2619,10 @@ private:
     // Instantiations currently being built (recursion guard for
     // self-referential struct templates, e.g. `next: *L<T>`).
     std::set<std::string> structTemplateActive_;
+    // CIDER-BUG-066: spellings whose instantiation already failed (bad type
+    // argument count). The type hook is reached from many annotation
+    // positions, so the diagnostic must be emitted once per spelling.
+    std::set<std::string> structTemplateErrors_;
     // CIDER-BUG-051: set when a template-body clone hits a node kind it
     // cannot copy. The diagnostic is reported at the node, and the partial
     // instantiation is discarded instead of being visited/emitted with

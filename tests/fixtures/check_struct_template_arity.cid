@@ -1,0 +1,16 @@
+// CIDER-BUG-066: a wrong-arity template spelling in a signature-only
+// position must still report the instantiation error (and the type hook,
+// which runs from every annotation site, reports it once).
+struct Pair<T> {
+  var a: T;
+  var b: T;
+}
+
+func touch(p: *Pair<int,int>) -> int {
+  return p->a;
+}
+
+func main() -> int {
+  var y: int = 0;
+  return y;
+}
