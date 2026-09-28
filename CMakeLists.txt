@@ -73,6 +73,13 @@ add_test(NAME bounds_check_smoke
          COMMAND bash ${CMAKE_SOURCE_DIR}/tests/unit/bounds_check_smoke.sh $<TARGET_FILE:cider>)
 set_tests_properties(bounds_check_smoke PROPERTIES SKIP_RETURN_CODE 77)
 
+# CIDER-FEAT-001: `compile -g` DWARF line-table/function-DIE smoke. Assembles
+# with plain `nasm -f elf64` and inspects the result with readelf/objdump;
+# exits 77 when nasm/gcc/readelf are missing.
+add_test(NAME debug_info_smoke
+         COMMAND bash ${CMAKE_SOURCE_DIR}/tests/unit/debug_info_smoke.sh $<TARGET_FILE:cider>)
+set_tests_properties(debug_info_smoke PROPERTIES SKIP_RETURN_CODE 77)
+
 # CIDER-CHORE-001: CLI usage/--target validation runs in the suite too
 # (previously manual only).
 add_test(NAME cli_test

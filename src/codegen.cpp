@@ -11,6 +11,7 @@
 #include <map>
 #include <set>
 #include <sstream>
+#include <unistd.h>
 
 #include "reg_alloc.h"
 
@@ -19,6 +20,228 @@ namespace cider {
 Abi targetAbiFor(const std::string& targetStr) {
     return targetStr == "uefi" ? Abi::Ms : Abi::SysV;
 }
+
+namespace {
+
+// CIDER-FEAT-001: DWARF-4 emission for `compile -g`.
+//
+// Instead of asking NASM for debug info (which would need `-g -F dwarf` at
+// assemble time and would describe the generated .asm, not the .cid source),
+// codegen writes .debug_abbrev/.debug_str/.debug_info/.debug_line itself.
+// Addresses come from NASM labels defined in .text (the only values that
+// need relocations); every other value — ULEB/SLEB encodings, offsets,
+// string bytes — is computed here and emitted as plain `db` bytes. All debug
+// labels use the `..@` prefix, which does not disturb NASM's local-label
+// scoping, so the ordinary block labels and jumps are unchanged.
+struct DwarfFunction {
+    std::string name;
+    std::string startLabel;
+    std::string endLabel;
+    int declLine = 0;
+    std::string path;
+};
+
+struct DwarfLineRow {
+    std::string label;
+    int line = 0;
+    std::string path;
+};
+
+// Comma-separated decimal bytes for a NASM `db` directive. Numeric bytes
+// sidestep any quoting/escaping question for paths and function names.
+std::string dbBytes(const std::string& s) {
+    std::string out = "db ";
+    if (s.empty()) return out + "0";
+    for (size_t i = 0; i < s.size(); ++i) {
+        if (i) out += ", ";
+        out += std::to_string((unsigned int)(unsigned char)s[i]);
+    }
+    return out;
+}
+
+std::string ulebBytes(uint64_t v) {
+    std::string out;
+    do {
+        unsigned int b = (unsigned int)(v & 0x7f);
+        v >>= 7;
+        if (v) b |= 0x80;
+        if (!out.empty()) out += ", ";
+        out += std::to_string(b);
+    } while (v);
+    return out;
+}
+
+std::string slebBytes(int64_t v) {
+    std::string out;
+    bool more = true;
+    while (more) {
+        unsigned int b = (unsigned int)((uint64_t)v & 0x7f);
+        v >>= 7;  // arithmetic shift: sign-extends
+        bool sign = (b & 0x40) != 0;
+        if ((v == 0 && !sign) || (v == -1 && sign)) more = false;
+        else b |= 0x80;
+        if (!out.empty()) out += ", ";
+        out += std::to_string(b);
+    }
+    return out;
+}
+
+// Render the four debug sections. `funcs` must be in emission order (their
+// address ranges and the enclosing compile unit's low/high pc depend on it)
+// and non-empty; `rows` likewise. References `..@cid_text_end`, which the
+// caller defines at the end of .text.
+std::string emitDwarfSections(const std::vector<DwarfFunction>& funcs,
+                              const std::vector<DwarfLineRow>& rows,
+                              const std::string& cuPath,
+                              const std::string& compDir) {
+    // Line-table file table: 1-based, first-seen order. The compile unit's
+    // own file is forced to index 1.
+    std::vector<std::string> files;
+    auto fileIndex = [&](const std::string& p) -> int {
+        std::string f = p.empty() ? cuPath : p;
+        for (size_t i = 0; i < files.size(); ++i) {
+            if (files[i] == f) return (int)i + 1;
+        }
+        files.push_back(f);
+        return (int)files.size();
+    };
+    fileIndex(cuPath);  // guarantees the CU file is entry 1
+    std::vector<int> funcFile;
+    funcFile.reserve(funcs.size());
+    for (const auto& f : funcs) funcFile.push_back(fileIndex(f.path));
+    std::vector<int> rowFile;
+    rowFile.reserve(rows.size());
+    for (const auto& r : rows) rowFile.push_back(fileIndex(r.path));
+
+    // .debug_str: one entry per distinct function name.
+    std::vector<std::string> funcNames;
+    std::vector<int> funcName;
+    funcName.reserve(funcs.size());
+    for (const auto& f : funcs) {
+        int idx = -1;
+        for (size_t i = 0; i < funcNames.size(); ++i) {
+            if (funcNames[i] == f.name) { idx = (int)i; break; }
+        }
+        if (idx < 0) {
+            funcNames.push_back(f.name);
+            idx = (int)funcNames.size() - 1;
+        }
+        funcName.push_back(idx);
+    }
+
+    std::string out;
+
+    // ---- .debug_abbrev: abbrev 1 = DW_TAG_compile_unit with children,
+    // abbrev 2 = DW_TAG_subprogram without.
+    out += "\nsection .debug_abbrev progbits noalloc nowrite align=1\n";
+    out += "..@cid_abbrev:\n";
+    out += "db 1, 0x11, 1\n";        // code, DW_TAG_compile_unit, children=yes
+    out += "db 0x25, 0x0e\n";        // DW_AT_producer   DW_FORM_strp
+    out += "db 0x13, 0x05\n";        // DW_AT_language   DW_FORM_data2
+    out += "db 0x03, 0x0e\n";        // DW_AT_name       DW_FORM_strp
+    out += "db 0x1b, 0x0e\n";        // DW_AT_comp_dir   DW_FORM_strp
+    out += "db 0x10, 0x17\n";        // DW_AT_stmt_list  DW_FORM_sec_offset
+    out += "db 0x11, 0x01\n";        // DW_AT_low_pc     DW_FORM_addr
+    out += "db 0x12, 0x01\n";        // DW_AT_high_pc    DW_FORM_addr
+    out += "db 0, 0\n";
+    out += "db 2, 0x2e, 0\n";        // code, DW_TAG_subprogram, children=no
+    out += "db 0x3f, 0x0c\n";        // DW_AT_external   DW_FORM_flag
+    out += "db 0x03, 0x0e\n";        // DW_AT_name       DW_FORM_strp
+    out += "db 0x3a, 0x0b\n";        // DW_AT_decl_file  DW_FORM_data1
+    out += "db 0x3b, 0x05\n";        // DW_AT_decl_line  DW_FORM_data2
+    out += "db 0x11, 0x01\n";        // DW_AT_low_pc     DW_FORM_addr
+    out += "db 0x12, 0x01\n";        // DW_AT_high_pc    DW_FORM_addr
+    out += "db 0, 0\n";
+    out += "db 0\n";
+
+    // ---- .debug_str
+    out += "\nsection .debug_str progbits noalloc nowrite align=1\n";
+    out += "..@cid_str_base:\n";
+    out += "..@cid_str_producer:\n";
+    out += dbBytes("cider 0.2.0") + ", 0\n";
+    out += "..@cid_str_cu:\n";
+    out += dbBytes(cuPath) + ", 0\n";
+    out += "..@cid_str_compdir:\n";
+    out += dbBytes(compDir) + ", 0\n";
+    for (size_t i = 0; i < funcNames.size(); ++i) {
+        out += "..@cid_str_fn_" + std::to_string(i) + ":\n";
+        out += dbBytes(funcNames[i]) + ", 0\n";
+    }
+
+    // ---- .debug_info: one compile unit DIE, then one subprogram DIE per
+    // emitted function (low/high pc via .text label relocations).
+    out += "\nsection .debug_info progbits noalloc nowrite align=1\n";
+    out += "dd ..@cid_di_end - ..@cid_di_body\n";
+    out += "..@cid_di_body:\n";
+    out += "dw 4\n";                         // version
+    out += "dd ..@cid_abbrev\n";             // abbrev table offset
+    out += "db 8\n";                         // address size
+    out += "db 1\n";                         // DW_TAG_compile_unit
+    out += "dd ..@cid_str_producer - ..@cid_str_base\n";
+    out += "dw 0x000c\n";                    // DW_LANG_C99
+    out += "dd ..@cid_str_cu - ..@cid_str_base\n";
+    out += "dd ..@cid_str_compdir - ..@cid_str_base\n";
+    out += "dd 0\n";                         // DW_AT_stmt_list (offset 0)
+    out += "dq " + funcs.front().startLabel + "\n";
+    out += "dq " + funcs.back().endLabel + "\n";
+    for (size_t i = 0; i < funcs.size(); ++i) {
+        out += "db 2\n";                     // DW_TAG_subprogram
+        out += "db 1\n";                     // DW_AT_external
+        out += "dd ..@cid_str_fn_" + std::to_string(funcName[i]) + " - ..@cid_str_base\n";
+        out += "db " + std::to_string(funcFile[i]) + "\n";
+        out += "dw " + std::to_string(funcs[i].declLine > 0 ? funcs[i].declLine : 1) + "\n";
+        out += "dq " + funcs[i].startLabel + "\n";
+        out += "dq " + funcs[i].endLabel + "\n";
+    }
+    out += "db 0\n";                         // end of children
+    out += "..@cid_di_end:\n";
+
+    // ---- .debug_line: DWARF-4 header plus one row per labelled position.
+    // Each row re-states its address with DW_LNE_set_address, so no
+    // ULEB address advances are needed; line deltas are SLEB128 bytes
+    // computed here.
+    out += "\nsection .debug_line progbits noalloc nowrite align=1\n";
+    out += "dd ..@cid_line_end - ..@cid_line_body\n";
+    out += "..@cid_line_body:\n";
+    out += "dw 4\n";                         // version
+    out += "dd ..@cid_line_hdr_end - ..@cid_line_hdr_start\n";
+    out += "..@cid_line_hdr_start:\n";
+    out += "db 1, 1, 1\n";                   // min insn len, max ops, is_stmt
+    out += "db 0xfb, 14\n";                  // line_base -5, line_range 14
+    out += "db 13\n";                        // opcode_base
+    out += "db 0, 1, 1, 1, 1, 0, 0, 0, 1, 0, 0, 1\n";
+    out += dbBytes(compDir) + ", 0\n";       // include dir 1
+    out += "db 0\n";
+    for (const auto& f : files) {
+        out += dbBytes(f) + ", 0\n";
+        out += "db 1, 0, 0\n";               // dir index 1, mtime 0, size 0
+    }
+    out += "db 0\n";
+    out += "..@cid_line_hdr_end:\n";
+    int prevFile = 1;                        // DWARF file register starts at 1
+    int prevLine = 1;                        // ... and line at 1
+    for (size_t i = 0; i < rows.size(); ++i) {
+        out += "db 0, 9, 2\n";               // DW_LNE_set_address, 8-byte addr
+        out += "dq " + rows[i].label + "\n";
+        if (rowFile[i] != prevFile) {
+            // DW_LNS_set_file (standard opcode 4) takes a ULEB file index.
+            out += "db 4, " + ulebBytes((uint64_t)rowFile[i]) + "\n";
+            prevFile = rowFile[i];
+        }
+        if (rows[i].line != prevLine) {
+            out += "db 3, " + slebBytes((int64_t)rows[i].line - prevLine) + "\n";
+            prevLine = rows[i].line;
+        }
+        out += "db 1\n";                     // DW_LNS_copy
+    }
+    out += "db 0, 9, 2\n";                   // DW_LNE_set_address
+    out += "dq ..@cid_text_end\n";
+    out += "db 0, 1, 1\n";                   // DW_LNE_end_sequence
+    out += "..@cid_line_end:\n";
+    return out;
+}
+
+}  // namespace
 
 CodeGenerator::CodeGenerator(const std::string& targetStr) : target_(targetStr) {}
 
@@ -39,6 +262,19 @@ bool CodeGenerator::generate(ModuleIR& module, const std::string& outputPath,
     // CID-005: UEFI (PE32+) emission differences (design §1): bare `efi_main`
     // export, no implicit libc externs, and no `_start` kernel-stack entry.
     const bool isUefi = (target_ == "uefi");
+    // CIDER-FEAT-001: `-g` writes DWARF sections into the NASM source. Only
+    // the ELF native target is supported; pomeos and uefi are assembled by
+    // toolchains that do not consume these sections.
+    const bool emitDebug = debugInfo_ && !isUefi && target_ != "pomeos";
+    std::vector<DwarfFunction> debugFuncs;
+    std::vector<DwarfLineRow> debugRows;
+    int debugSeq = 0;
+    // `..@` labels are special to NASM: they can be referenced anywhere and
+    // do not become "the previous non-local label" for local-label scoping,
+    // so inserting them never changes how `.block` labels resolve.
+    auto nextDebugLabel = [&](const char* prefix) {
+        return std::string("..@cid_") + prefix + "_" + std::to_string(debugSeq++);
+    };
 
     auto addBss = [&](const std::string& line) { bssSection.push_back(line); };
     auto addData = [&](const std::string& line) { dataSection.push_back(line); };
@@ -330,6 +566,13 @@ bool CodeGenerator::generate(ModuleIR& module, const std::string& outputPath,
         }
 
         std::string fName = func->getName();
+        // CIDER-FEAT-001: per-function DWARF range labels (only under -g).
+        const std::string dbgPath = func->getSourcePath().empty() ? sourcePath_ : func->getSourcePath();
+        std::string dbgFuncStart, dbgFuncEnd;
+        if (emitDebug) {
+            dbgFuncStart = nextDebugLabel("fn");
+            dbgFuncEnd = nextDebugLabel("fne");
+        }
         if (fName == "_start" || fName == "main" || (isUefi && fName == "efi_main")) {
             addText("global " + fName);
         }
@@ -387,6 +630,7 @@ bool CodeGenerator::generate(ModuleIR& module, const std::string& outputPath,
             }
         }
 
+        if (emitDebug) addText(dbgFuncStart + ":");
         addText(fName + ":");
         addText("    push rbp");
         addText("    mov rbp, rsp");
@@ -733,8 +977,22 @@ bool CodeGenerator::generate(ModuleIR& module, const std::string& outputPath,
             return false;
         };
 
+        // CIDER-FEAT-001: a line row at the function entry (declaration line)
+        // plus one at each block whose opening statement line differs.
+        int debugRowLine = 0;
+        if (emitDebug && func->getSourceLine() > 0) {
+            debugRowLine = func->getSourceLine();
+            debugRows.push_back({dbgFuncStart, debugRowLine, dbgPath});
+        }
         bool firstBlock = true;
         for (auto& block : func->getBlocks()) {
+            if (emitDebug && block->getSourceLine() > 0 &&
+                block->getSourceLine() != debugRowLine) {
+                std::string dbgBlock = nextDebugLabel("blk");
+                addText(dbgBlock + ":");
+                debugRows.push_back({dbgBlock, block->getSourceLine(), dbgPath});
+                debugRowLine = block->getSourceLine();
+            }
             addText("." + block->getName() + ":");
             if (firstBlock) {
                 firstBlock = false;
@@ -855,6 +1113,15 @@ bool CodeGenerator::generate(ModuleIR& module, const std::string& outputPath,
             }
 
             for (auto& instr : block->getInstructions()) {
+                // CIDER-FEAT-001: statement-level line row whenever the
+                // stamped line changes (unknown/optimizer-synthesized lines
+                // are 0 and keep the previous row).
+                if (emitDebug && instr.sourceLine > 0 && instr.sourceLine != debugRowLine) {
+                    std::string dbgLine = nextDebugLabel("ln");
+                    addText(dbgLine + ":");
+                    debugRows.push_back({dbgLine, instr.sourceLine, dbgPath});
+                    debugRowLine = instr.sourceLine;
+                }
                 std::string d = (instr.dest ? getOperand(*instr.dest) : "");
                 std::string a1 = (instr.args.size() > 0 ? getOperand(instr.args[0]) : "");
                 std::string a2 = (instr.args.size() > 1 ? getOperand(instr.args[1]) : "");
@@ -2179,6 +2446,13 @@ bool CodeGenerator::generate(ModuleIR& module, const std::string& outputPath,
             }
         }
         genEpilogue(func->getReturnType() == IRType::VOID);
+        if (emitDebug) {
+            // High-pc marker: `genEpilogue` always emits at least `pop rbp;
+            // ret`, so the range is non-empty.
+            addText(dbgFuncEnd + ":");
+            debugFuncs.push_back({fName, dbgFuncStart, dbgFuncEnd,
+                                  func->getSourceLine(), dbgPath});
+        }
 
         // Fix up the prologue frame size now that the whole body is emitted.
         // Frame-overrun fix (Cider port CID-009): a spilled value can be
@@ -2202,6 +2476,11 @@ bool CodeGenerator::generate(ModuleIR& module, const std::string& outputPath,
             }
         }
     }
+
+    // CIDER-FEAT-001: one past the last emitted function. The line program's
+    // end_sequence points here, so gdb does not treat the last function's
+    // final address as "after the sequence" (which would drop its lines).
+    if (emitDebug && !debugFuncs.empty()) addText("..@cid_text_end:");
 
     // CIDER-ISS-010: define the uncaught-exception runtime error. The
     // ir-gen branches here only when the active handler pointer is null;
@@ -2276,6 +2555,20 @@ bool CodeGenerator::generate(ModuleIR& module, const std::string& outputPath,
         }
     }
 
+    // CIDER-FEAT-001: render the DWARF sections once the whole module is
+    // emitted (the line table needs every label). `-g` only; otherwise the
+    // output below is byte-identical to before the feature.
+    std::string debugSections;
+    if (emitDebug && !debugFuncs.empty()) {
+        std::string compDir = ".";
+        char cwdBuf[4096];
+        if (getcwd(cwdBuf, sizeof(cwdBuf)) != nullptr) compDir = cwdBuf;
+        std::string cuPath = sourcePath_;
+        if (cuPath.empty()) cuPath = debugFuncs.front().path;
+        if (cuPath.empty()) cuPath = "<unknown>";
+        debugSections = emitDwarfSections(debugFuncs, debugRows, cuPath, compDir);
+    }
+
     std::ofstream out(outputPath, std::ios::trunc);
     if (!out) return false;
     // 64-bit relative addressing is the standard for ELF output (Issue #18):
@@ -2300,6 +2593,7 @@ bool CodeGenerator::generate(ModuleIR& module, const std::string& outputPath,
         out << "    extern " << extVar << "\n";
     }
     for (const auto& line : textSection) out << line << "\n";
+    if (!debugSections.empty()) out << debugSections;
 
     if (target_ == "pomeos") {
         // Flush and close the initial emission first: its destructor would

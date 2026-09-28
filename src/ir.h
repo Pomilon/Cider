@@ -112,6 +112,12 @@ struct IRInstruction {
     // values always set a concrete Ms/SysV.
     Abi callAbi = Abi::Default;
 
+    // CIDER-FEAT-001 (compile -g): source line this instruction was lowered
+    // from, or 0 when unknown (instructions synthesized by optimizer passes
+    // carry 0). Codegen with `-g` emits a DWARF line-table row whenever the
+    // line changes; 0 keeps the previous row, so passes degrade gracefully.
+    int sourceLine = 0;
+
     // For PHI nodes: maps basic block name to value
     std::map<std::string, IRValue> phiArgs;
 
@@ -140,9 +146,16 @@ public:
     std::vector<IRInstruction>& getInstructions() { return instructions_; }
     const std::vector<IRInstruction>& getInstructions() const { return instructions_; }
 
+    // CIDER-FEAT-001: source line this block was opened from (0 = unknown).
+    // Only consumed by `compile -g` to seed a DWARF line row at the block's
+    // label; optimizer-created blocks leave it 0 and get no row.
+    void setSourceLine(int l) { sourceLine_ = l; }
+    int getSourceLine() const { return sourceLine_; }
+
 private:
     std::string name_;
     std::vector<IRInstruction> instructions_;
+    int sourceLine_ = 0;
 };
 
 class FunctionIR {
@@ -158,6 +171,9 @@ public:
     const std::string& getName() const { return name_; }
     void setSourcePath(const std::string& p) { sourcePath_ = p; }
     const std::string& getSourcePath() const { return sourcePath_; }
+    // CIDER-FEAT-001: declaration line in sourcePath_ (0 = unknown).
+    void setSourceLine(int l) { sourceLine_ = l; }
+    int getSourceLine() const { return sourceLine_; }
     std::vector<std::unique_ptr<BasicBlock>>& getBlocks() { return blocks_; }
     const std::vector<std::unique_ptr<BasicBlock>>& getBlocks() const { return blocks_; }
     const std::vector<std::string>& getParams() const { return params_; }
@@ -174,6 +190,7 @@ private:
     std::vector<IRType> paramTypes_;
     Abi abi_ = Abi::Default;
     std::string sourcePath_;
+    int sourceLine_ = 0;
 };
 
 class ModuleIR {

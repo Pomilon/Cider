@@ -13,6 +13,7 @@ USAGE=$("$BIN" 2>&1 || true)
 echo "$USAGE" | grep -q -- "--target native|pomeos|uefi" || { echo "usage missing --target"; exit 1; }
 echo "$USAGE" | grep -q -- "--warn" || { echo "usage missing --warn"; exit 1; }
 echo "$USAGE" | grep -q -- "--checks" || { echo "usage missing --checks"; exit 1; }
+echo "$USAGE" | grep -q -- "-g|--debug" || { echo "usage missing -g/--debug"; exit 1; }
 set -e
 echo "cli_test: OK"
 

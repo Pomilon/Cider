@@ -176,6 +176,60 @@ public:
             currentFunction_->addBlock(std::move(currentBlock_));
         }
         currentBlock_ = std::make_unique<BasicBlock>(name);
+        // CIDER-FEAT-001: a block inherits the source line of the statement
+        // that opened it; codegen -g turns that into a line-table row.
+        currentBlock_->setSourceLine(currentSourceLine_);
+    }
+
+    // CIDER-FEAT-001 (compile -g): source positions are tracked at
+    // statement granularity. `visitStatement` records which blocks and
+    // instructions exist before the statement runs and stamps the new
+    // instructions with the statement's line afterwards. Nested statements
+    // stamp first; the outer pass only fills in still-unknown (0) lines, so
+    // the innermost statement wins. Instructions synthesized later by
+    // optimizer passes keep line 0 and emit no row.
+    struct StatementMark {
+        FunctionIR* func = nullptr;
+        size_t blockCount = 0;
+        BasicBlock* block = nullptr;
+        size_t instrCount = 0;
+    };
+
+    StatementMark beginStatementMark() {
+        StatementMark m;
+        m.func = currentFunction_.get();
+        if (m.func) m.blockCount = m.func->getBlocks().size();
+        m.block = currentBlock_.get();
+        if (m.block) m.instrCount = m.block->getInstructions().size();
+        return m;
+    }
+
+    void endStatementMark(const StatementMark& m, int line) {
+        if (!m.func || line <= 0) return;
+        auto stamp = [&](BasicBlock* b, size_t from) {
+            if (!b) return;
+            auto& ins = b->getInstructions();
+            for (size_t i = from; i < ins.size(); ++i) {
+                if (ins[i].sourceLine == 0) ins[i].sourceLine = line;
+            }
+        };
+        // Blocks appended while the statement ran (branch/loop bodies and
+        // merges) plus anything appended to the block that was current.
+        auto& blocks = m.func->getBlocks();
+        for (size_t i = m.blockCount; i < blocks.size(); ++i) {
+            stamp(blocks[i].get(), 0);
+        }
+        stamp(m.block, m.instrCount);
+    }
+
+    void visitStatement(Statement* s) {
+        if (!s) return;
+        StatementMark m = beginStatementMark();
+        int prevLine = currentSourceLine_;
+        currentSourceLine_ = s->getLine();
+        s->accept(*this);
+        endStatementMark(m, s->getLine());
+        currentSourceLine_ = prevLine;
     }
 
     struct DestructorInfo {
@@ -196,7 +250,7 @@ public:
                 // itself be a block, whose accept pushes/pops a scope (and
                 // may reallocate the outer vector).
                 Statement* s = deferStack_[i - 1][j - 1];
-                s->accept(*this);
+                visitStatement(s);
             }
         }
     }
@@ -435,7 +489,7 @@ public:
             imported->accept(*this);
         }
         for (auto& stmt : program.getStatements()) {
-            stmt->accept(*this);
+            visitStatement(stmt.get());
         }
 
         symbolTable_.setCurrentScope(prevScope);
@@ -888,6 +942,7 @@ public:
         // under `--target uefi`) would silently mismatch every dispatch.
         currentFunction_->setAbi(isVirtMethod ? Abi::SysV : stmt.getAbi());
         currentFunction_->setSourcePath(currentSourcePath_);
+        currentFunction_->setSourceLine(stmt.getLine());
         currentBlock_ = std::make_unique<BasicBlock>("entry");
         functionEntryBlock_ = currentBlock_.get();
 
@@ -999,7 +1054,7 @@ public:
         for (auto& s : stmt.getBody()) collectAssignedParams(s.get());
 
         for (auto& s : stmt.getBody()) {
-            s->accept(*this);
+            visitStatement(s.get());
         }
 
         if (currentBlock_ && (currentBlock_->getInstructions().empty() || currentBlock_->getInstructions().back().op != IROp::RET)) {
@@ -1627,6 +1682,7 @@ public:
         // scope), so the synthesized body must be SysV too.
         currentFunction_->setAbi(Abi::SysV);
         currentFunction_->setSourcePath(currentSourcePath_);
+        currentFunction_->setSourceLine(expr.getLine());
         currentBlock_ = std::make_unique<BasicBlock>("entry");
         functionEntryBlock_ = currentBlock_.get();
         variableValues_.clear();
@@ -1689,7 +1745,7 @@ public:
             paramNames_.insert(paramName);
         }
         for (auto& s : expr.getBody()) {
-            s->accept(*this);
+            visitStatement(s.get());
         }
         symbolTable_.exitScope();
 
@@ -4059,7 +4115,7 @@ public:
         symbolTable_.enterScope();
         deferStack_.push_back({});
         destructorStack_.push_back({});
-        for (auto& s : stmt.getThenBranch()) s->accept(*this);
+        for (auto& s : stmt.getThenBranch()) visitStatement(s.get());
         if (currentBlock_ && (currentBlock_->getInstructions().empty() || (currentBlock_->getInstructions().back().op != IROp::BR && currentBlock_->getInstructions().back().op != IROp::RET))) {
             // CIDER-BUG-050: an if branch is a lexical block; its defers run
             // when the branch exits, not at the enclosing block's exit.
@@ -4075,7 +4131,7 @@ public:
         symbolTable_.enterScope();
         deferStack_.push_back({});
         destructorStack_.push_back({});
-        for (auto& s : stmt.getElseBranch()) s->accept(*this);
+        for (auto& s : stmt.getElseBranch()) visitStatement(s.get());
         if (currentBlock_ && (currentBlock_->getInstructions().empty() || (currentBlock_->getInstructions().back().op != IROp::BR && currentBlock_->getInstructions().back().op != IROp::RET))) {
             emitDefers(deferStack_.size() - 1);
             emitDestructors(destructorStack_.size() - 1);
@@ -4112,7 +4168,7 @@ public:
         // the end of every iteration (and before a break/continue jump).
         deferStack_.push_back({});
         destructorStack_.push_back({});
-        for (auto& s : stmt.getBody()) s->accept(*this);
+        for (auto& s : stmt.getBody()) visitStatement(s.get());
         if (currentBlock_ && (currentBlock_->getInstructions().empty() || (currentBlock_->getInstructions().back().op != IROp::BR && currentBlock_->getInstructions().back().op != IROp::RET))) {
             emitDefers(deferStack_.size() - 1);
             emitDestructors(destructorStack_.size() - 1);
@@ -4158,7 +4214,7 @@ public:
         // the end of every iteration (and before a break/continue jump).
         deferStack_.push_back({});
         destructorStack_.push_back({});
-        for (auto& s : stmt.getBody()) s->accept(*this);
+        for (auto& s : stmt.getBody()) visitStatement(s.get());
         if (currentBlock_ && (currentBlock_->getInstructions().empty() || (currentBlock_->getInstructions().back().op != IROp::BR && currentBlock_->getInstructions().back().op != IROp::RET))) {
             emitDefers(deferStack_.size() - 1);
             emitDestructors(destructorStack_.size() - 1);
@@ -4408,7 +4464,7 @@ public:
             }
 
             for (auto& s : stmt.getBody()) {
-                s->accept(*this);
+                visitStatement(s.get());
             }
             if (currentBlock_ && (currentBlock_->getInstructions().empty() ||
                                   (currentBlock_->getInstructions().back().op != IROp::BR &&
@@ -4497,7 +4553,7 @@ public:
         }
 
         for (auto& s : stmt.getBody()) {
-            s->accept(*this);
+            visitStatement(s.get());
         }
 
         if (currentBlock_ && (currentBlock_->getInstructions().empty() ||
@@ -4616,7 +4672,7 @@ public:
             startBlock(tryBlockName);
             symbolTable_.enterScope();
             for (auto& s : stmt.getTryBlock()) {
-                s->accept(*this);
+                visitStatement(s.get());
             }
             if (currentBlock_ && (currentBlock_->getInstructions().empty() ||
                                   (currentBlock_->getInstructions().back().op != IROp::BR &&
@@ -4643,7 +4699,7 @@ public:
             currentBlock_->addInstruction({IROp::STORE, std::nullopt, {catchAddr, excVal, IRValue::Constant(0, IRType::I32)}});
 
             for (auto& s : stmt.getCatchBlock()) {
-                s->accept(*this);
+                visitStatement(s.get());
             }
             if (currentBlock_ && (currentBlock_->getInstructions().empty() ||
                                   (currentBlock_->getInstructions().back().op != IROp::BR &&
@@ -4656,10 +4712,10 @@ public:
             activeTryScopes_.pop_back();
         } else {
             symbolTable_.enterScope();
-            for (auto& s : stmt.getTryBlock()) s->accept(*this);
+            for (auto& s : stmt.getTryBlock()) visitStatement(s.get());
             symbolTable_.exitScope();
             symbolTable_.enterScope();
-            for (auto& s : stmt.getCatchBlock()) s->accept(*this);
+            for (auto& s : stmt.getCatchBlock()) visitStatement(s.get());
             symbolTable_.exitScope();
         }
     }
@@ -5588,7 +5644,7 @@ public:
             // arm's end rather than at the enclosing block's exit.
             deferStack_.push_back({});
             destructorStack_.push_back({});
-            arm.body->accept(*this);
+            visitStatement(arm.body.get());
             if (currentBlock_ && (currentBlock_->getInstructions().empty() || currentBlock_->getInstructions().back().op != IROp::BR)) {
                 emitDefers(deferStack_.size() - 1);
                 emitDestructors(destructorStack_.size() - 1);
@@ -5605,8 +5661,8 @@ public:
         symbolTable_.enterScope();
         deferStack_.push_back({});
         destructorStack_.push_back({});
-        for (auto& s : stmt.getStatements()) s->accept(*this);
-        for (auto it = deferStack_.back().rbegin(); it != deferStack_.back().rend(); ++it) (*it)->accept(*this);
+        for (auto& s : stmt.getStatements()) visitStatement(s.get());
+        for (auto it = deferStack_.back().rbegin(); it != deferStack_.back().rend(); ++it) visitStatement(*it);
         for (auto it = destructorStack_.back().rbegin(); it != destructorStack_.back().rend(); ++it) {
             IRInstruction call;
             call.op = IROp::CALL;
@@ -5632,11 +5688,11 @@ public:
         std::string oldClass = currentClassName_;
         currentClassName_ = stmt.getName();
         for (auto& member : stmt.getMembers()) {
-            if (dynamic_cast<FunctionDeclStmt*>(member.get())) member->accept(*this);
+            if (dynamic_cast<FunctionDeclStmt*>(member.get())) visitStatement(member.get());
         }
         currentClassName_ = oldClass;
     }
-    void visit(ExportStmt& stmt) override { if (auto inner = stmt.getStmt()) inner->accept(*this); }
+    void visit(ExportStmt& stmt) override { if (auto inner = stmt.getStmt()) visitStatement(inner); }
     void visit(ThisExpr& /*expr*/) override {
         if (variableValues_.count("this")) {
             IRValue addr = variableValues_["this"];
@@ -5984,6 +6040,9 @@ private:
     std::unique_ptr<BasicBlock> currentBlock_;
     std::string currentClassName_;
     std::string currentSourcePath_;
+    // CIDER-FEAT-001: line of the statement currently being lowered; stamped
+    // on blocks/instructions so `compile -g` can emit DWARF line tables.
+    int currentSourceLine_ = 0;
     // CIDER-BUG-024: optional diagnostic sink (nullptr in unit tests).
     ErrorReporter* reporter_ = nullptr;
     // CID-020: resolved-path -> module scope registry (from the collector).

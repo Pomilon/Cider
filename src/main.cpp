@@ -31,6 +31,7 @@ struct CliOptions {
     bool noOpt = false;
     bool warn = false;        // CIDER-FEAT-005: opt-in diagnostics
     bool checks = false;      // CIDER-ISS-001: opt-in runtime bounds checks
+    bool debug = false;       // CIDER-FEAT-001: DWARF in compile output
     std::string inputFile;
     std::string outputFile;
     std::string target = "native";  // "native" | "pomeos" | "uefi"
@@ -55,6 +56,10 @@ bool parseCli(int argc, char** argv, CliOptions& out) {
             // `compile` have an IR-gen path where bounds checks can be
             // emitted, so elsewhere the flag is a no-op.
             out.checks = true;
+        } else if (a == "-g" || a == "--debug") {
+            // CIDER-FEAT-001: DWARF debug info. Accepted by every command;
+            // only `compile` emits anything (the others have no output).
+            out.debug = true;
         } else if (a == "--target") {
             if (i + 1 >= argc) return false;
             out.target = argv[++i];
@@ -164,7 +169,7 @@ int main(int argc, char** argv) {
     }
     CliOptions opts;
     if (!parseCli(argc, argv, opts)) {
-        std::fprintf(stderr, "usage: cider <parse|check|build|run|compile|bundle> [--no-opt] [--warn] [--checks] [--target native|pomeos|uefi] [-o out.asm] <file>\n");
+        std::fprintf(stderr, "usage: cider <parse|check|build|run|compile|bundle> [--no-opt] [--warn] [--checks] [-g|--debug] [--target native|pomeos|uefi] [-o out.asm] <file>\n");
         return 2;
     }
     // bundle is self-contained (see bundler.h): it runs before — and
@@ -256,6 +261,9 @@ int main(int argc, char** argv) {
             decon.process(module);
             if (std::getenv("CIDER_DEBUG_IR")) module.print();
             cider::CodeGenerator cg(opts.target);
+            // CIDER-FEAT-001: -g emits DWARF line tables + function DIEs.
+            cg.setDebugInfo(opts.debug);
+            cg.setSourcePath(opts.inputFile);
             // Whole-program compilation: every function (including module
             // functions) is emitted into the binary.
             if (!cg.generate(module, opts.outputFile)) {
