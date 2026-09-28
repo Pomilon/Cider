@@ -984,6 +984,22 @@ public:
         t1 = canonicalizeNominal(t1);
         t2 = canonicalizeNominal(t2);
 
+        // CIDER-BUG-100: the interface flag is a value-level marker (this
+        // type is a 16-byte fat pointer). On a pointer type it instead
+        // records the pointee's kind, and only one spelling carries it:
+        // `&t` inherits it from the interface operand, while the straight
+        // declaration `*Shape` comes from the type AST, which cannot
+        // resolve interface symbols. Two pointers to the same interface are
+        // the same type, so compare nominal identity and level without the
+        // inherited marker. The flag is only ever SET from the resolved
+        // kind of the spelling's own name, never semantic on a pointer, so
+        // this cannot mask a real mismatch: `*I` vs `*J`, `*I` vs `*int`
+        // and `*I` vs `**I` still differ by name/level.
+        if (t1.pointerLevel > 0 && t2.pointerLevel > 0) {
+            t1.isInterface = false;
+            t2.isInterface = false;
+        }
+
         if (t1 == t2) return true;
 
         // CIDER-FEAT-002: enum conversion rules (t1 = target/expected,
@@ -2361,6 +2377,15 @@ public:
             } else {
                 lastExprType_ = operandType;
                 lastExprType_.pointerLevel--;
+                // CIDER-BUG-100: `*p` through a pointer-to-interface names
+                // the interface value itself (a 16-byte fat pointer), so
+                // recover the flag a declaration spelling (`*Shape`) cannot
+                // carry, exactly like visit(IndexExpr) does for `p[i]`.
+                // Without this the deref target classified as a plain
+                // nominal, so `*p = c` and `*p = <interface>` were rejected
+                // as shape mismatches instead of taking the interface store
+                // rule.
+                resolveInterfaceFlag(lastExprType_);
             }
         } else if (expr.getOperator() == "!" || expr.getOperator() == "not") {
             // CIDER-BUG-046: `not` is the word spelling of `!`; same bool

@@ -2414,8 +2414,17 @@ public:
                 // types go through LOAD.
                 TypeInfo pointee = type;
                 if (pointee.pointerLevel > 0) pointee.pointerLevel--;
+                // CIDER-BUG-100: a pointer-to-interface dereferences to the
+                // 16-byte fat pointer, so `*p` presents its address (like an
+                // interface variable) for the interface copy and dispatch
+                // read paths; a scalar LOAD would hand the data word to
+                // dispatch as if it were the fat pointer's address. Recover
+                // the flag by name first: the `*Shape` declaration spelling
+                // cannot carry it.
+                pointee = resolveInterfaceNominal(pointee);
                 bool pointeeIsAggregate = (pointee.pointerLevel == 0) &&
-                    (pointee.isArray || isStructValueType(pointee) ||
+                    (pointee.isArray || pointee.isInterface ||
+                     isStructValueType(pointee) ||
                      isUniqueModuleAggregate(pointee.name));
                 if (pointeeIsAggregate) {
                     lastValue_ = operand;
@@ -4526,6 +4535,14 @@ public:
                 } else if (baseType.name == "string") {
                     targetIface = {"char", 0};
                 }
+                haveInterfaceTarget = true;
+            } else if (hasDerefTarget) {
+                // CIDER-BUG-100: `*p` through a pointer-to-interface names
+                // the same 16-byte fat-pointer slot `p[i]` does, so it
+                // takes the shared interface store too. derefPointeeType is
+                // the declared pointee, so a `volatile Shape` pointee keeps
+                // its volatile flag for the two target stores (CIDER-BUG-079).
+                targetIface = derefPointeeType;
                 haveInterfaceTarget = true;
             }
             if (haveInterfaceTarget) {

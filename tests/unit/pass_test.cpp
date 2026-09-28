@@ -344,6 +344,95 @@ int testVolatileInterfaceIrFlags() {
     return 0;
 }
 
+int testPointerInterfaceStoreIrFlags() {
+    // CIDER-BUG-100: `*p = v` through a pointer-to-interface takes the same
+    // 16-byte fat-pointer store as `p[i] = v` (two STOREs, data at +0 and
+    // vtable at +8) and carries the pointee's volatile flag on both words
+    // (CIDER-BUG-079). The lowering this bug produced was a 16-byte MEMCPY
+    // of the pointer value (data word + stale neighbour), corrupting
+    // dispatch.
+    struct StoreTally {
+        int stores = 0;
+        int volatileStores = 0;
+        int memcpyCount = 0;
+    };
+    auto tally = [](const ModuleResult& m) {
+        StoreTally t;
+        for (const auto& func : m.module.getFunctions()) {
+            for (const auto& b : func->getBlocks()) {
+                for (const auto& in : b->getInstructions()) {
+                    if (in.op == cider::IROp::MEMCPY) t.memcpyCount++;
+                    if (in.op == cider::IROp::STORE) {
+                        t.stores++;
+                        if (in.isVolatile) t.volatileStores++;
+                    }
+                }
+            }
+        }
+        return t;
+    };
+
+    // Control without the deref store: declaration and pointer locals only.
+    auto control = genModule(
+        "interface Shape { func area() -> int; }\n"
+        "func f(c: Shape) -> void {\n"
+        "  var x: Shape = c;\n"
+        "  var p: *Shape = &x;\n"
+        "}\n");
+    auto t0 = tally(control);
+
+    // The deref store adds exactly the two fat-pointer words, volatile-
+    // free, and never a MEMCPY of the source address.
+    auto r = genModule(
+        "interface Shape { func area() -> int; }\n"
+        "func f(c: Shape) -> void {\n"
+        "  var x: Shape = c;\n"
+        "  var p: *Shape = &x;\n"
+        "  *p = c;\n"
+        "}\n");
+    auto t1 = tally(r);
+    CHECK(t1.stores == t0.stores + 2);
+    CHECK(t1.volatileStores == t0.volatileStores);
+    CHECK(t1.memcpyCount == t0.memcpyCount);
+
+    // Volatile pointee: the two deref words are volatile (the volatile
+    // declaration/pointer stores every access, so the deref adds exactly
+    // two more volatile stores), matching the volatile interface
+    // variable/field stores.
+    auto controlV = genModule(
+        "interface Shape { func area() -> int; }\n"
+        "func f(c: Shape) -> void {\n"
+        "  var x: volatile Shape = c;\n"
+        "  var p: volatile *Shape = &x;\n"
+        "}\n");
+    auto t0v = tally(controlV);
+    auto r2 = genModule(
+        "interface Shape { func area() -> int; }\n"
+        "func f(c: Shape) -> void {\n"
+        "  var x: volatile Shape = c;\n"
+        "  var p: volatile *Shape = &x;\n"
+        "  *p = c;\n"
+        "}\n");
+    auto t2 = tally(r2);
+    CHECK(t2.stores == t0.stores + 2);
+    CHECK(t2.volatileStores == t0v.volatileStores + 2);
+    CHECK(t2.memcpyCount == t0.memcpyCount);
+
+    // The pre-existing `p[0] = c` spelling keeps the same two-word shape.
+    auto r3 = genModule(
+        "interface Shape { func area() -> int; }\n"
+        "func f(c: Shape) -> void {\n"
+        "  var x: Shape = c;\n"
+        "  var p: *Shape = &x;\n"
+        "  p[0] = c;\n"
+        "}\n");
+    auto t3 = tally(r3);
+    CHECK(t3.stores == t0.stores + 2);
+    CHECK(t3.volatileStores == t0.volatileStores);
+    CHECK(t3.memcpyCount == t0.memcpyCount);
+    return 0;
+}
+
 int testVolatileGvn() {
     // CIDER-BUG-061: GVN must never replace a volatile access with a MOV of
     // an earlier occurrence — even for an opcode that is normally deduped.
@@ -499,6 +588,7 @@ int run() {
     CHECK(testLicm() == 0);
     CHECK(testVolatileIrFlags() == 0);
     CHECK(testVolatileInterfaceIrFlags() == 0);
+    CHECK(testPointerInterfaceStoreIrFlags() == 0);
     CHECK(testVolatileGvn() == 0);
     CHECK(testVolatileLicm() == 0);
     CHECK(testCallClobberLicm() == 0);
