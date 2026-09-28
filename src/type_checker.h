@@ -2695,6 +2695,33 @@ public:
             error("Array cast size/type mismatch. Expected " + target.toString() +
                       ", got " + src.toString(), expr.getLine());
         }
+        // CIDER-BUG-074: a cast of a function value to a fn(...)/func(...)
+        // type fixes the signature every later call uses, so it must not
+        // invent one. `add1 as fn(int, int) -> int` type-checked for a
+        // one-parameter function and the callee was then invoked with the
+        // target's arity/conventions. Require the exact signature, the same
+        // comparison every declaration, assignment, argument and return
+        // position uses (params, return type, ABI; aliases resolved on both
+        // sides). The closure/plain representation bit stays out of the
+        // comparison: an unchecked cast keeps the source runtime shape
+        // (CIDER-BUG-068's inference follows `closure as fn(...)`), so the
+        // signature is the only thing the target spelling may not change.
+        // Arrays are left to the layout rule above; a non-fn source (nilPtr,
+        // *void) keeps its existing unchecked cast semantics.
+        TypeInfo fnTarget = resolveFunctionPointerAlias(target);
+        TypeInfo fnSrc = resolveFunctionPointerAlias(src);
+        if (fnTarget.isFunctionPointer && !fnTarget.isArray &&
+            fnSrc.isFunctionPointer && !fnSrc.isArray) {
+            resolveInterfaceFlag(fnTarget);
+            resolveInterfaceFlag(fnSrc);
+            resolveSignatureAliasPair(fnTarget, fnSrc);
+            fnTarget = canonicalizeNominal(fnTarget);
+            fnSrc = canonicalizeNominal(fnSrc);
+            if (!fnTarget.signatureEquals(fnSrc)) {
+                error("Function cast signature mismatch. Expected " + fnTarget.toString() +
+                          ", got " + fnSrc.toString(), expr.getLine());
+            }
+        }
     }
 
     void visit(ArrayTypeAST&) override {}
