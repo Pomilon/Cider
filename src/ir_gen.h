@@ -1392,15 +1392,22 @@ public:
 
     // --- closures ---
 
+    // CIDER-BUG-065: record `n` as a capture when it is an outer local that
+    // is not shadowed by a parameter or a nearer binding (the catch variable,
+    // a loop variable, a nested literal's parameter).
+    void noteCapture(const std::string& n, const std::set<std::string>& shadowed,
+                     std::vector<std::string>& out) {
+        if (!shadowed.count(n) && variableValues_.count(n) &&
+            std::find(out.begin(), out.end(), n) == out.end()) {
+            out.push_back(n);
+        }
+    }
+
     void collectCapturesExpr(Expression* e, const std::set<std::string>& params,
                              std::vector<std::string>& out) {
         if (!e) return;
         if (auto id = dynamic_cast<IdentifierExpr*>(e)) {
-            const std::string& n = id->getName();
-            if (!params.count(n) && variableValues_.count(n) &&
-                std::find(out.begin(), out.end(), n) == out.end()) {
-                out.push_back(n);
-            }
+            noteCapture(id->getName(), params, out);
         } else if (auto call = dynamic_cast<CallExpr*>(e)) {
             collectCapturesExpr(call->getCallee(), params, out);
             for (auto& a : call->getArgs()) collectCapturesExpr(a.get(), params, out);
@@ -1426,6 +1433,29 @@ public:
             for (const auto& p : interp->getParts()) {
                 if (p.isExpr) collectCapturesExpr(p.expr.get(), params, out);
             }
+        } else if (auto list = dynamic_cast<ListExpr*>(e)) {
+            for (auto& el : list->getElements()) collectCapturesExpr(el.get(), params, out);
+        } else if (auto table = dynamic_cast<TableExpr*>(e)) {
+            for (auto& entry : table->getEntries()) {
+                collectCapturesExpr(entry.first.get(), params, out);
+                collectCapturesExpr(entry.second.get(), params, out);
+            }
+        } else if (auto slice = dynamic_cast<SliceExpr*>(e)) {
+            collectCapturesExpr(slice->getObject(), params, out);
+            collectCapturesExpr(slice->getStart(), params, out);
+            collectCapturesExpr(slice->getEnd(), params, out);
+        } else if (auto aw = dynamic_cast<AwaitExpr*>(e)) {
+            collectCapturesExpr(aw->getValue(), params, out);
+        } else if (auto lit = dynamic_cast<StructLiteralExpr*>(e)) {
+            for (auto& field : lit->getFields()) collectCapturesExpr(field.second.get(), params, out);
+        } else if (auto fn = dynamic_cast<FunctionExpr*>(e)) {
+            // CIDER-BUG-065: a nested literal's uses must also become captures
+            // of this closure, so the chain passes outer variables through;
+            // the nested literal collects them again from this closure's
+            // frame when its own body is generated.
+            std::set<std::string> nestedParams = params;
+            for (auto& p : fn->getParams()) nestedParams.insert(p.first);
+            for (auto& b : fn->getBody()) collectCapturesStmt(b.get(), nestedParams, out);
         }
     }
 
@@ -1473,17 +1503,74 @@ public:
             case ASTNode::FOR_STMT: {
                 auto fs = dynamic_cast<ForStmt*>(s);
                 if (fs->getInitializer()) collectCapturesStmt(fs->getInitializer(), params, out);
-                if (fs->getCondition()) collectCapturesExpr(fs->getCondition(), params, out);
-                if (fs->getIncrement()) collectCapturesStmt(fs->getIncrement(), params, out);
-                for (auto& b : fs->getBody()) collectCapturesStmt(b.get(), params, out);
+                // CIDER-BUG-065: `for (var i = ...)` shadows an outer capture
+                // of the same name in the condition, increment and body.
+                std::set<std::string> loopParams = params;
+                if (auto initDecl = dynamic_cast<VarDeclStmt*>(fs->getInitializer())) {
+                    loopParams.insert(initDecl->getName());
+                }
+                if (fs->getCondition()) collectCapturesExpr(fs->getCondition(), loopParams, out);
+                if (fs->getIncrement()) collectCapturesStmt(fs->getIncrement(), loopParams, out);
+                for (auto& b : fs->getBody()) collectCapturesStmt(b.get(), loopParams, out);
                 break;
             }
             case ASTNode::FOR_EACH_STMT: {
                 auto fe = dynamic_cast<ForEachStmt*>(s);
                 collectCapturesExpr(fe->getIterable(), params, out);
-                for (auto& b : fe->getBody()) collectCapturesStmt(b.get(), params, out);
+                // CIDER-BUG-065: the loop variable shadows an outer capture of
+                // the same name inside the body.
+                std::set<std::string> bodyParams = params;
+                if (!fe->getVarName().empty()) bodyParams.insert(fe->getVarName());
+                for (auto& b : fe->getBody()) collectCapturesStmt(b.get(), bodyParams, out);
                 break;
             }
+            case ASTNode::DELETE_STMT:
+                collectCapturesExpr(dynamic_cast<DeleteStmt*>(s)->getTarget(), params, out);
+                break;
+            case ASTNode::THROW_STMT:
+                collectCapturesExpr(dynamic_cast<ThrowStmt*>(s)->getValue(), params, out);
+                break;
+            case ASTNode::TRY_CATCH_STMT: {
+                auto ts = dynamic_cast<TryCatchStmt*>(s);
+                for (auto& b : ts->getTryBlock()) collectCapturesStmt(b.get(), params, out);
+                // CIDER-BUG-065: the catch binding is not a capture, and it
+                // shadows an outer variable of the same name in the body.
+                std::set<std::string> catchParams = params;
+                if (!ts->getCatchVar().empty()) catchParams.insert(ts->getCatchVar());
+                for (auto& b : ts->getCatchBlock()) collectCapturesStmt(b.get(), catchParams, out);
+                break;
+            }
+            case ASTNode::DEFER_STMT:
+                collectCapturesStmt(dynamic_cast<DeferStmt*>(s)->getDeferredStmt(), params, out);
+                break;
+            case ASTNode::ASM_STMT: {
+                // CIDER-BUG-065: `{var}` placeholders are uses of the named
+                // variable; mirror visit(AsmStmt)'s `*`/`:width` stripping.
+                auto asmStmt = dynamic_cast<AsmStmt*>(s);
+                for (const auto& entry : asmStmt->localVariables) {
+                    std::string name = entry.first.empty() ? entry.second : entry.first;
+                    if (!name.empty() && name[0] == '*') name = name.substr(1);
+                    size_t colon = name.find(':');
+                    if (colon != std::string::npos) name = name.substr(0, colon);
+                    if (!name.empty()) noteCapture(name, params, out);
+                }
+                break;
+            }
+            case ASTNode::MATCH_STMT: {
+                auto ms = dynamic_cast<MatchStmt*>(s);
+                collectCapturesExpr(ms->getExpression(), params, out);
+                for (auto& arm : ms->getArms()) {
+                    collectCapturesExpr(arm.pattern.get(), params, out);
+                    collectCapturesStmt(arm.body.get(), params, out);
+                }
+                break;
+            }
+            case ASTNode::EXPORT_STMT:
+                collectCapturesStmt(dynamic_cast<ExportStmt*>(s)->getStmt(), params, out);
+                break;
+            case ASTNode::EXPORT_EXPRESSION_STMT:
+                collectCapturesExpr(dynamic_cast<ExportExpressionStmt*>(s)->getExpression(), params, out);
+                break;
             default:
                 break;
         }
