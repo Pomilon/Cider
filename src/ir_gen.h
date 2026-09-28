@@ -628,6 +628,24 @@ public:
     std::shared_ptr<Symbol> resolveNominalType(const std::string& name) {
         auto sym = symbolTable_.resolve(name);
         if (sym) return sym;
+        // CIDER-BUG-073: a module-qualified template instantiation spelling
+        // (`m.Box<int>`) resolves to the shared root-scope instantiation the
+        // collector registered under the bare spelling, exactly like the
+        // from-import path. The dot must precede the '<': dots inside
+        // argument lists (`Box<m.Thing>`) are not qualifiers.
+        auto lt = name.find('<');
+        if (lt != std::string::npos) {
+            auto dot = name.rfind('.', lt);
+            if (dot == std::string::npos) return nullptr;
+            auto modSym = symbolTable_.resolve(name.substr(0, dot));
+            if (!modSym || modSym->kind != SymbolKind::MODULE) return nullptr;
+            Scope* root = symbolTable_.getRootScope();
+            if (!root) return nullptr;
+            auto inst = root->resolveLocal(name.substr(dot + 1));
+            if (inst && (inst->kind == SymbolKind::STRUCT || inst->kind == SymbolKind::CLASS))
+                return inst;
+            return nullptr;
+        }
         std::string qualifier, bare;
         auto canonical = name.find("::");
         if (canonical != std::string::npos) {

@@ -45,6 +45,13 @@ public:
     void setSymbolModules(const std::map<uint64_t, std::string>& symbolModules) {
         symbolModules_ = symbolModules;
     }
+    // CIDER-BUG-073: qualified template spellings the collector accepted,
+    // mapped to the shared bare instantiation spelling. Unset (unit tests)
+    // keeps the legacy behavior: names containing '<' are never
+    // canonicalized (T6).
+    void setQualifiedTemplateInstantiations(const std::map<std::string, std::string>& map) {
+        qualifiedTemplateInstantiations_ = map;
+    }
 
     // CID-005: target ABI defaults. `--target uefi` sets defaultAbiMs, which
     // types unmarked functions as MS-ABI in fn-value position; plain `fn`
@@ -257,6 +264,15 @@ public:
                 canonicalizeInModule(*t.arrayElement, logical, line));
         }
         if (t.name.empty() || t.name.find("::") != std::string::npos) return t;
+        // CIDER-BUG-073: a qualified template instantiation (`m.Box<int>`)
+        // resolves to the shared bare instantiation the collector
+        // registered, exactly like the from-import spelling. Bare template
+        // instantiations stay untouched (T6).
+        auto qti = qualifiedTemplateInstantiations_.find(t.name);
+        if (qti != qualifiedTemplateInstantiations_.end()) {
+            t.name = qti->second;
+            return t;
+        }
         if (t.name.find('<') != std::string::npos) return t;  // template instantiation (T6)
         if (t.name.find('.') != std::string::npos) return canonicalizeDotted(t, line);
         Scope* ms = scopeForModule(logical);
@@ -296,6 +312,13 @@ public:
             t.arrayElement = std::make_shared<TypeInfo>(canonicalizeNominal(*t.arrayElement, line));
         }
         if (t.name.empty() || t.name.find("::") != std::string::npos) return t;  // already canonical
+        // CIDER-BUG-073: see canonicalizeInModule — accepted qualified
+        // template spellings resolve to the shared bare instantiation.
+        auto qti = qualifiedTemplateInstantiations_.find(t.name);
+        if (qti != qualifiedTemplateInstantiations_.end()) {
+            t.name = qti->second;
+            return t;
+        }
         if (t.name.find('<') != std::string::npos) return t;                     // template instantiation (T6)
         if (t.name.find('.') != std::string::npos) return canonicalizeDotted(t, line);
         auto sym = resolveScoped(t.name);
@@ -3777,6 +3800,9 @@ private:
     std::map<const AstProgram*, std::string> programModules_;  // imported AST -> logical name
     std::map<std::string, std::vector<std::shared_ptr<ModuleSymbol>>> ambiguousModules_;
     std::map<uint64_t, std::string> symbolModules_;  // symbol identity -> defining module
+    // CIDER-BUG-073: accepted qualified template spellings -> shared bare
+    // instantiation spelling (see setter above).
+    std::map<std::string, std::string> qualifiedTemplateInstantiations_;
     std::string currentModule_;      // logical name of the file being checked ("" == main)
     Scope* currentModuleScope_ = nullptr;
 

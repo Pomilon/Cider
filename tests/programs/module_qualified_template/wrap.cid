@@ -1,0 +1,25 @@
+// CIDER-BUG-073: a module that names the imported module's templates only
+// through qualified spellings, in field, parameter and return positions.
+// The collector must resolve `box.Box` against box's template table entry
+// (not the bare `Box` key) while collecting this module.
+import box;
+
+export struct Holder {
+  var b: box.Box<int>;
+  var p: box.Pair<int, char>;
+}
+
+export func readHolder(h: *Holder) -> int {
+  return h->b.v;
+}
+
+export func makeBox(n: int) -> box.Box<int> {
+  var b: box.Box<int>;
+  b.v = n;
+  b.tag = 6;
+  return b;
+}
+
+export func sumPair(p: *box.Pair<int, char>) -> int {
+  return p->a + (p->b as int);
+}

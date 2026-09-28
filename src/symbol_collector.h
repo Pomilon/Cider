@@ -50,6 +50,16 @@ public:
         return templateTable_;
     }
 
+    // CIDER-BUG-073: module-qualified template spellings accepted by the
+    // collector (`m.Box<int>`), mapped to the shared bare instantiation
+    // spelling (`Box<int>`) the from-import path registers. The checker and
+    // IR generator rewrite uses through this map, so both spellings name
+    // one StructSymbol. Only spellings that passed the qualifier,
+    // visibility and arity checks are recorded.
+    const std::map<std::string, std::string>& getQualifiedTemplateInstantiations() const {
+        return qualifiedTemplateInstantiations_;
+    }
+
     // --- module-namespace context (CID-020/021) ---
     // Logical name of the module currently being collected ("" == main file).
     std::string getCurrentModule() const {
@@ -87,6 +97,43 @@ public:
                 return {it, key.substr(0, key.size() - suffix.size())};
         }
         return {templateTable_.end(), std::string()};
+    }
+    // CIDER-BUG-073: resolve a module qualifier as the use site sees it.
+    // During collection the scope stack is authoritative; the whole-program
+    // post-pass re-runs with module scopes unwound, so the current module's
+    // own scope is consulted too (mirrors findTemplate's current-module
+    // preference). Null when the qualifier is not a visible module.
+    std::shared_ptr<Symbol> resolveQualifierSymbol(const std::string& qualifier) {
+        if (auto sym = symbolTable_.resolve(qualifier)) return sym;
+        std::string cur = getCurrentModule();
+        if (!cur.empty()) {
+            for (auto& [prog, mod] : programModules_) {
+                if (!prog || mod != cur) continue;
+                auto it = moduleScopes_.find(prog->getSourcePath());
+                if (it != moduleScopes_.end() && it->second) {
+                    if (auto sym = it->second->resolveLocal(qualifier)) return sym;
+                }
+            }
+        }
+        return nullptr;
+    }
+    // CIDER-BUG-073: template entry named by a module qualifier (`m.Box`,
+    // `a.util.Box`). The qualifier must name a visible imported module (full
+    // logical path or last-segment spelling); an ambiguous last segment is
+    // skipped here so the checker rejects the spelling instead of silently
+    // picking one candidate. {end, ""} when absent.
+    std::pair<std::map<std::string, std::shared_ptr<TemplateSymbol>>::iterator, std::string>
+    findQualifiedTemplate(const std::string& qualifier, const std::string& baseName) {
+        auto ambIt = ambiguousModules_.find(qualifier);
+        if (ambIt != ambiguousModules_.end() && ambIt->second.size() >= 2)
+            return {templateTable_.end(), std::string()};
+        auto modSym = resolveQualifierSymbol(qualifier);
+        if (!modSym || modSym->kind != SymbolKind::MODULE)
+            return {templateTable_.end(), std::string()};
+        auto ms = std::static_pointer_cast<ModuleSymbol>(modSym);
+        auto it = templateTable_.find(templateKey(ms->logicalName, baseName));
+        if (it == templateTable_.end()) return {templateTable_.end(), std::string()};
+        return {it, ms->logicalName};
     }
     // Legacy bare-name presence across all owners (bindFromAliases
     // template no-op: importing a template name never binds).
@@ -1569,6 +1616,19 @@ public:
         size_t pos = typeName.find('<');
         if (pos == std::string::npos) return;
         std::string baseName = typeName.substr(0, pos);
+        // CIDER-BUG-073: a dotted qualifier before the '<' (`m.Box<int>`,
+        // `a.util.Box<int>`) selects that module's template. The
+        // instantiation keeps the bare spelling the from-import path
+        // registers, so both spellings share one StructSymbol (nominal
+        // identity stays conflated, as before). Dots inside argument lists
+        // (`Box<m.Thing>`) are not qualifiers.
+        std::string qualifier;
+        auto dot = baseName.rfind('.');
+        if (dot != std::string::npos) {
+            qualifier = baseName.substr(0, dot);
+            baseName = baseName.substr(dot + 1);
+        }
+        std::string instName = baseName + typeName.substr(pos);
         // CID-020/021 (spec §6): prefer the use-site module's template so
         // same-named struct templates resolve to a consistent
         // entry/body pair. The instantiation below stays shared in the
@@ -1576,10 +1636,24 @@ public:
         // `Box<int>` across modules (T3 advisory, T7 follow-up), so
         // per-module struct symbols would only trade a loud error for a
         // silent layout mix-up.
-        auto found = findTemplate(baseName);
+        auto found = qualifier.empty() ? findTemplate(baseName)
+                                       : findQualifiedTemplate(qualifier, baseName);
         if (found.first == templateTable_.end()) return;
         auto tmplSym = found.first->second;
         if (tmplSym->kind != SymbolKind::TEMPLATE) return;
+        // CIDER-BUG-060: an explicit qualifier is a module member access, so
+        // the template must be exported (a self-qualified use inside the
+        // owner is unrestricted). The bare/from-import path keeps its own
+        // visibility gate at the import statement. Deduped separately from
+        // structTemplateErrors_: a cross-module rejection must not suppress
+        // the owner's own legal use of the same spelling.
+        if (!qualifier.empty() && found.second != getCurrentModule() && !tmplSym->isExported) {
+            if (qualifiedExportErrors_.insert(typeName).second) {
+                reporter_.error("symbol '" + baseName + "' is not exported from module '" +
+                                    qualifier + "'", 0, 0);
+            }
+            return;
+        }
         // CIDER-BUG-066: the type hook runs from every annotation position,
         // so the same spelling reaches here repeatedly. A spelling that
         // already failed its argument check must report once, not once per
@@ -1626,9 +1700,15 @@ public:
             return;
         }
 
+        // CIDER-BUG-073: record the accepted qualified spelling so the
+        // checker and IR generator resolve it to this shared instantiation.
+        // Recorded before the recursion guard: an inner reference to an
+        // in-progress instantiation still needs the mapping.
+        if (!qualifier.empty()) qualifiedTemplateInstantiations_[typeName] = instName;
+
         auto structSym = std::make_shared<StructSymbol>();
         structSym->kind = SymbolKind::STRUCT;
-        structSym->name = typeName;
+        structSym->name = instName;
         structSym->line = 0;
         structSym->col = 0;
 
@@ -1636,7 +1716,7 @@ public:
         // instantiation under construction (`next: *L<T>`) or a cycle of
         // them. The outer call defines the symbol; the inner call just
         // returns (the field type resolves once collection finishes).
-        if (!structTemplateActive_.insert(typeName).second) return;
+        if (!structTemplateActive_.insert(instName).second) return;
 
         int currentOffset = 0;
         int maxAlign = 1;
@@ -1687,11 +1767,11 @@ public:
         if (bitPos > 0) currentOffset += 4;
         structSym->totalSize = alignUp(currentOffset, maxAlign);
 
-        if (!globalScope->resolveLocal(typeName)) {
+        if (!globalScope->resolveLocal(instName)) {
             globalScope->define(structSym);
-            structClassNames_.push_back(typeName);
+            structClassNames_.push_back(instName);
         }
-        structTemplateActive_.erase(typeName);
+        structTemplateActive_.erase(instName);
     }
 
     void visitStmtForTemplateCalls(Statement* stmt) {
@@ -2631,6 +2711,12 @@ private:
     std::vector<std::string> structClassNames_;
     std::map<std::string, std::vector<std::string>> interfaceImpls_;
     std::map<std::string, std::shared_ptr<TemplateSymbol>> templateTable_;
+    // CIDER-BUG-073: accepted qualified template spellings (`m.Box<int>`)
+    // -> the shared bare instantiation spelling (`Box<int>`).
+    std::map<std::string, std::string> qualifiedTemplateInstantiations_;
+    // Spellings whose cross-module qualified use was rejected for a missing
+    // export, so the diagnostic is emitted once per spelling.
+    std::set<std::string> qualifiedExportErrors_;
     bool inExport_ = false;
     std::set<std::string> importingPaths_;
     std::map<std::string, Scope*> moduleScopes_;  // resolved path -> module scope (spec §1)

@@ -1,0 +1,20 @@
+// CIDER-BUG-073: a module exporting struct templates that another module
+// uses through the qualified spelling (`box.Box<int>`). The module's own
+// factory keeps the from-import/bare spelling, so both spellings must name
+// the same instantiation.
+export struct Box<T> {
+  var v: T;
+  var tag: int;
+}
+
+export struct Pair<A, B> {
+  var a: A;
+  var b: B;
+}
+
+export func makeBox(n: int) -> *Box<int> {
+  var b: *Box<int> = new Box<int>;
+  b->v = n;
+  b->tag = 5;
+  return b;
+}

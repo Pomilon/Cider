@@ -1,0 +1,8 @@
+// CIDER-BUG-073: `qualified_template_export_lib.Box` is not exported, so
+// the qualified template spelling must not instantiate (or resolve) it.
+import qualified_template_export_lib;
+
+func main() -> int {
+  var b: qualified_template_export_lib.Box<int>;
+  return 0;
+}
