@@ -338,8 +338,11 @@ public:
 
         for (auto& param : stmt.getParams()) {
             TypeInfo paramType = TypeInfo::fromAST(param.second.get());
+            // CIDER-BUG-070: resolve through the nominal lookup so a
+            // module-qualified interface spelling (`lib.Shape`) gets the
+            // fat-pointer flag exactly like a bare one.
             if (!paramType.isInterface && paramType.pointerLevel == 0) {
-                auto typeSym = symbolTable_.resolve(paramType.name);
+                auto typeSym = resolveNominalType(paramType.name);
                 if (typeSym && typeSym->kind == SymbolKind::INTERFACE) {
                     paramType.isInterface = true;
                 }

@@ -1021,12 +1021,9 @@ public:
             // 16-byte fat pointer as a local interface variable. Resolve
             // the flag here as visit(VarDeclStmt) does, so the alloca has
             // the right size and dispatch/assignment see the interface.
-            if (!sym->type.isInterface && sym->type.pointerLevel == 0) {
-                auto typeSym = symbolTable_.resolve(sym->type.name);
-                if (typeSym && typeSym->kind == SymbolKind::INTERFACE) {
-                    sym->type.isInterface = true;
-                }
-            }
+            // CIDER-BUG-070: resolve through the nominal lookup so a
+            // module-qualified spelling (`lib.Shape`) is seen too.
+            sym->type = resolveInterfaceNominal(sym->type);
             symbolTable_.define(sym);
 
             IRType paramIRType = (sym->type.pointerLevel > 0) ? IRType::PTR : mapType(sym->type.name);
@@ -1193,6 +1190,12 @@ public:
 
             TypeInfo objType = lastExprType_;
             if (objType.pointerLevel > 0) objType.pointerLevel--;
+
+            // CIDER-BUG-070: recover a missing interface flag from the
+            // nominal spelling before choosing the dispatch path, so a
+            // module-qualified interface value (`sh: lib.Shape`) dispatches
+            // through its vtable exactly like an unqualified one.
+            objType = resolveInterfaceNominal(objType);
 
             // Check if object is an interface type -> interface method call
             if (objType.isInterface) {
@@ -2204,12 +2207,11 @@ public:
         sym->kind = SymbolKind::VARIABLE;
         sym->name = stmt.getName();
         sym->type = TypeInfo::fromAST(stmt.getTypeAST());
-        if (!sym->type.isInterface && sym->type.pointerLevel == 0) {
-            auto typeSym = symbolTable_.resolve(sym->type.name);
-            if (typeSym && typeSym->kind == SymbolKind::INTERFACE) {
-                sym->type.isInterface = true;
-            }
-        }
+        // CIDER-BUG-070: resolve the interface flag through the nominal
+        // lookup (bare, dotted `lib.Shape`, canonical `lib::Shape`) so a
+        // module-qualified declaration is a 16-byte fat pointer exactly
+        // like an unqualified one.
+        sym->type = resolveInterfaceNominal(sym->type);
         // CIDER-BUG-048: a global `const` keeps its isConst marker and
         // initializer AST so tryEvalConstU64 can fold references to it
         // exactly (recursively). Locals are excluded on purpose:
@@ -3330,6 +3332,8 @@ public:
     // bare element name, an alias spelling), mirroring the declaration-time
     // resolution so stores, reads and dispatch agree. Arrays are never
     // interface values themselves: only scalar elements are flagged.
+    // CIDER-BUG-070: the name goes through resolveNominalType, so
+    // module-qualified spellings (`lib.Shape`) recover the flag too.
     TypeInfo resolveInterfaceNominal(TypeInfo t) {
         if (!t.isInterface && t.pointerLevel == 0 && !t.isArray) {
             auto typeSym = resolveNominalType(t.name);
