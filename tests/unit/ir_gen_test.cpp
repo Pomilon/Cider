@@ -1232,6 +1232,11 @@ int run() {
     // CIDER-BUG-104: the class-element spelling (here through an alias) takes
     // the same rule: a 4-byte class value is an aggregate regardless of the
     // size fallback, so each element store is a 4-byte MEMCPY.
+    // CIDER-BUG-113: the alias-to-class locals now zero-fill like their
+    // direct spelling does (CIDER-BUG-067), so this function contains four
+    // 4-byte MEMCPYs: the two `_cider_zero_4` fills plus the two element
+    // stores. Every one must stay 4 bytes, and losing either element store
+    // drops the count.
     {
         d = genSrc(
             "class C { var x: int; }\n"
@@ -1250,7 +1255,7 @@ int run() {
             count++;
             pos = d.find("memcpy ", pos + 1);
         }
-        CHECK(count == 2);
+        CHECK(count == 4);
     }
 
     // CIDER-BUG-104: the list-literal expression path (a `*T` context such

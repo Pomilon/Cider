@@ -2310,6 +2310,7 @@ public:
         auto sym = resolveNominalType(expr.getStructName());
         if (sym && (sym->kind == SymbolKind::STRUCT || sym->kind == SymbolKind::CLASS)) {
             auto structSym = std::static_pointer_cast<StructSymbol>(sym);
+            std::string structMod = definingModuleFor(structSym, structSym->name);
             // CIDER-BUG-087: fields the literal omits must run the field
             // initializers of the class values they embed, exactly like a
             // declared local. Explicit fields copy their slot wholesale
@@ -2319,7 +2320,6 @@ public:
                 for (auto& fieldInit : expr.getFields()) {
                     explicitFields.insert(fieldInit.first);
                 }
-                std::string structMod = definingModuleFor(structSym, structSym->name);
                 std::set<const StructSymbol*> visiting;
                 for (const auto& f : structSym->fields) {
                     if (explicitFields.count(f.name)) continue;
@@ -2332,7 +2332,15 @@ public:
                 for (const auto& f : structSym->fields) {
                     if (f.name == fieldInit.first) {
                         offset = f.offset;
-                        fieldType = f.type;
+                        // CIDER-BUG-113: classify the field by its
+                        // alias-resolved shape like the member-read and
+                        // member-store paths do; an alias spelling kept
+                        // `isArray` false, so a small alias-declared array
+                        // field took the scalar STORE below (writing the
+                        // source address over the field and its neighbor)
+                        // instead of copying the element bytes.
+                        fieldType = canonicalizeNominalInModule(
+                            resolveTypeAlias(f.type, structMod), structMod);
                         break;
                     }
                 }
@@ -2746,17 +2754,24 @@ public:
                 }
             }
             int totalBytes = getTypeSize(sym->type);
+            // CIDER-BUG-113: classify the aggregate by its alias-resolved
+            // shape, like the literal paths above (CIDER-BUG-092). An
+            // alias-declared fixed array (`type Arr = [Inner;3]`) carries
+            // the alias spelling in sym->type, where isArray is false and
+            // isStructValueType rejects the array shape, so the global was
+            // never queued and its embedded class initializers were skipped.
+            std::string aggMod = definingModuleFor(sym, stmt.getName());
+            TypeInfo declAgg = resolveTypeAlias(sym->type, aggMod);
             // CIDER-BUG-087: a module-scope aggregate whose embedded class
             // values carry initializers stays zero in .bss, so queue its
             // field-initializer pass for the synthesized startup function
             // (see emitGlobalFieldInitializers). The predicate filters out
             // scalars and class-free aggregates, which emit nothing.
-            if (sym->type.pointerLevel == 0 &&
-                (sym->type.isArray || isStructValueType(sym->type))) {
-                pendingGlobalInits_.push_back(
-                    {sym->type, definingModuleFor(sym, stmt.getName()), IRValue::Label(gname)});
+            if (declAgg.pointerLevel == 0 &&
+                (declAgg.isArray || isStructValueType(declAgg))) {
+                pendingGlobalInits_.push_back({declAgg, aggMod, IRValue::Label(gname)});
             }
-            module_.addGlobalVar(gname, (sym->type.pointerLevel > 0) ? IRType::PTR : mapType(sym->type.name), initVal, sym->type.isArray ? sym->type.arraySize : 0, totalBytes, initIsFloat, currentSourcePath_);
+            module_.addGlobalVar(gname, (declAgg.pointerLevel > 0) ? IRType::PTR : mapType(declAgg.name), initVal, declAgg.isArray ? declAgg.arraySize : 0, totalBytes, initIsFloat, currentSourcePath_);
             globalValues_[gname] = IRValue::Label(gname);
             return;
         }
@@ -2766,7 +2781,14 @@ public:
         variableValues_[stmt.getName()] = addr;
 
         // Check if this type has a destructor
-        TypeInfo varType = sym->type;
+        // CIDER-BUG-113: classify the declaration by its alias-resolved
+        // shape, mirroring CIDER-BUG-092's declArray below. An
+        // alias-to-class spelling otherwise took the struct branch (the
+        // alias provider is STRUCT-kind), skipping the class instance's
+        // zero-fill, and an alias-declared array only reached the array
+        // branch incidentally through aggregateHasInitializers' own
+        // resolution.
+        TypeInfo varType = resolveTypeAlias(sym->type, currentModule_);
         // CIDER-BUG-088: scope-exit finalizers. A local's destructor set is
         // the class's own destructor (if any) plus every class value it
         // embeds by value — class fields, nested structs and fixed arrays of
