@@ -1,6 +1,7 @@
 #include "vm.h"
 
 #include <algorithm>
+#include <cerrno>
 #include <cstring>
 #include <sstream>
 #include <fcntl.h>
@@ -28,6 +29,12 @@ int64_t extendIntByType(int64_t v, IRType t) {
     default: return v;  // 64-bit types, PTR, BOOL unaffected
     }
 }
+
+// The stdlib's asm blocks emit raw Linux syscalls, whose failures are
+// negative errno values; the libc wrappers the VM uses instead return -1
+// and set errno. Translate so VM callers observe the same values native
+// does (e.g. -EBADF rather than -1 for a write to a closed fd).
+int64_t syscallResult(int64_t r) { return r < 0 ? -(int64_t)errno : r; }
 
 // CID-003 follow-up (M5/W5): common comparison domain for mixed
 // signed/unsigned integer operands, mirroring IRGenerator::mixedCmpCommon.
@@ -1424,14 +1431,24 @@ void VM::execAsm(const IRInstruction& instr) {
                 for (int64_t k = 0; k < len; ++k) {
                     bytes += (char)(rsi + k < (int64_t)heap_.size() ? heap_[(size_t)(rsi + k)] : 0);
                 }
-                if (fd == 1) result_.stdoutText += bytes;
-                else if (fd == 2) result_.stderrText += bytes;
-                else {
+                if (fd == 1 || fd == 2) {
+                    // Buffered std streams: report the number of bytes
+                    // accepted, like a kernel write on a healthy fd. A
+                    // negative count is a size_t-wrapped count in native;
+                    // it cannot be emulated, so fail with EFAULT.
+                    if (len >= 0) {
+                        if (fd == 1) result_.stdoutText += bytes;
+                        else result_.stderrText += bytes;
+                        rax = len;
+                    } else {
+                        rax = -EFAULT;
+                    }
+                } else {
                     // Real file descriptor (opened via the open syscall).
                     if (rsi + len <= (int64_t)heap_.size()) {
-                        rax = (int64_t)::write((int)fd, heap_.data() + rsi, (size_t)len);
+                        rax = syscallResult((int64_t)::write((int)fd, heap_.data() + rsi, (size_t)len));
                     } else {
-                        rax = -1;
+                        rax = -EFAULT;
                     }
                 }
                 wrote = true;
@@ -1449,7 +1466,7 @@ void VM::execAsm(const IRInstruction& instr) {
                 int64_t got = 0;
                 int64_t room = (rsi + len <= (int64_t)heap_.size()) ? len : (int64_t)heap_.size() - rsi;
                 if (room > 0) {
-                    got = (int64_t)::read((int)rdi, heap_.data() + rsi, (size_t)room);
+                    got = syscallResult((int64_t)::read((int)rdi, heap_.data() + rsi, (size_t)room));
                 }
                 rax = got;
             } else {
@@ -1463,16 +1480,16 @@ void VM::execAsm(const IRInstruction& instr) {
                 int64_t result = 0;
                 switch (rax) {
                 case 2:  // open(path, flags, mode)
-                    result = (int64_t)::open((const char*)ptrOf(rdi), (int)rsi, (int)rdx);
+                    result = syscallResult((int64_t)::open((const char*)ptrOf(rdi), (int)rsi, (int)rdx));
                     break;
                 case 3:  // close(fd)
-                    result = (int64_t)::close((int)rdi);
+                    result = syscallResult((int64_t)::close((int)rdi));
                     break;
                 case 8:  // lseek(fd, offset, whence)
-                    result = (int64_t)::lseek((int)rdi, rsi, (int)rdx);
+                    result = syscallResult((int64_t)::lseek((int)rdi, rsi, (int)rdx));
                     break;
                 case 87:  // unlink(path)
-                    result = (int64_t)::unlink((const char*)ptrOf(rdi));
+                    result = syscallResult((int64_t)::unlink((const char*)ptrOf(rdi)));
                     break;
                 default:
                     throw VMError{"unsupported asm syscall: rax=" + std::to_string(rax)};

@@ -24,7 +24,9 @@ cider::IRValue stringConst(const std::string& s) {
 }
 
 int run() {
-    // Hello via the write syscall whitelist.
+    // Hello via the write syscall whitelist. The write returns the byte
+    // count in rax (CIDER-BUG-076); move it to rdi so the exit code proves
+    // it is 14, not the syscall number or the fd.
     auto fn = std::make_unique<cider::FunctionIR>("main", cider::IRType::VOID);
     auto block = std::make_unique<cider::BasicBlock>("entry");
     block->addInstruction(asmInstr("mov rax, 1"));
@@ -34,8 +36,8 @@ int run() {
     block->addInstruction(w);
     block->addInstruction(asmInstr("mov rdx, 14"));
     block->addInstruction(asmInstr("syscall"));
+    block->addInstruction(asmInstr("mov rdi, rax"));
     block->addInstruction(asmInstr("mov rax, 60"));
-    block->addInstruction(asmInstr("mov rdi, 0"));
     block->addInstruction(asmInstr("syscall"));
     fn->addBlock(std::move(block));
     cider::ModuleIR mod;
@@ -43,7 +45,7 @@ int run() {
     cider::VM vm;
     auto r = vm.run(mod);
     CHECK(r.stdoutText == "Hello, world!\n");
-    CHECK(r.exitCode == 0);
+    CHECK(r.exitCode == 14);
     CHECK(r.stderrText.empty());
 
     // Exit code variant.
@@ -58,7 +60,7 @@ int run() {
     cider::VM vm2;
     CHECK(vm2.run(mod2).exitCode == 7);
 
-    // stderr write.
+    // stderr write: its byte count comes back in rax too.
     auto fn3 = std::make_unique<cider::FunctionIR>("main", cider::IRType::VOID);
     auto b3 = std::make_unique<cider::BasicBlock>("entry");
     b3->addInstruction(asmInstr("mov rax, 1"));
@@ -68,8 +70,8 @@ int run() {
     b3->addInstruction(w3);
     b3->addInstruction(asmInstr("mov rdx, 5"));
     b3->addInstruction(asmInstr("syscall"));
+    b3->addInstruction(asmInstr("mov rdi, rax"));
     b3->addInstruction(asmInstr("mov rax, 60"));
-    b3->addInstruction(asmInstr("mov rdi, 3"));
     b3->addInstruction(asmInstr("syscall"));
     fn3->addBlock(std::move(b3));
     cider::ModuleIR mod3;
@@ -77,7 +79,7 @@ int run() {
     cider::VM vm3;
     auto r3 = vm3.run(mod3);
     CHECK(r3.stderrText == "oops\n");
-    CHECK(r3.exitCode == 3);
+    CHECK(r3.exitCode == 5);
 
     // Unsupported asm -> VMError.
     auto fn4 = std::make_unique<cider::FunctionIR>("main", cider::IRType::VOID);

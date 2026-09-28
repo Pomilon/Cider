@@ -3,10 +3,9 @@
 // unused there), and never O_RDWR. This program pins all of them through the
 // triple-differential harness.
 //
-// Output is printed with std.io.print, not via `write(1, ...)`, because the
-// VM's write syscall path for fd 1/2 appends to the captured stdout but
-// leaves rax at the syscall number, so it returns 1 instead of the byte
-// count that native returns (reported, not fixed).
+// Output is printed with std.io.print, not via `write(1, ...)`, because this
+// test targets file descriptors; the fd 1/2 write return value is pinned by
+// tests/programs/write_returns_count (CIDER-BUG-076).
 //
 // The path is unique to this test so parallel test runs cannot collide.
 from std.io import print, puts;
