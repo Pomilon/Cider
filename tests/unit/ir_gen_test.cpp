@@ -1203,6 +1203,39 @@ int run() {
         }
         CHECK(found8);
     }
+
+    // CIDER-BUG-072: a main-file symbol whose Cider name collides with a
+    // NASM reserved word (`gs`, `cs`, `align`, ...) escapes to a `$` suffix
+    // in the emitted name — definition and every reference alike. Names
+    // NASM accepts as labels keep their spelling exactly, including
+    // instruction mnemonics like `add`.
+    {
+        cider::ModuleIR m = genModuleSrc(
+            "var gs: int = 7;\n"
+            "var align: int = 2;\n"
+            "func cs() -> int { return gs + align; }\n"
+            "func add() -> int { return 1; }\n"
+            "func main() -> int { return cs() + add(); }\n");
+        bool gsEscaped = false;
+        bool alignEscaped = false;
+        for (const auto& g : m.getGlobalVars()) {
+            if (g.name == "gs$") gsEscaped = true;
+            if (g.name == "align$") alignEscaped = true;
+        }
+        CHECK(gsEscaped);
+        CHECK(alignEscaped);
+        d = genSrc(
+            "var gs: int = 7;\n"
+            "func cs() -> int { return gs; }\n"
+            "func add() -> int { return 1; }\n"
+            "func main() -> int { return cs() + add(); }\n");
+        CHECK(d.find("define cs$() {") != std::string::npos);
+        CHECK(d.find("load gs$") != std::string::npos);
+        CHECK(d.find("call cs$") != std::string::npos);
+        CHECK(d.find("define add() {") != std::string::npos);
+        CHECK(d.find("call add") != std::string::npos);
+        CHECK(d.find("define cs(") == std::string::npos);
+    }
     return 0;
 }
 

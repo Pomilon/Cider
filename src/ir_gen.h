@@ -14,6 +14,7 @@
 #include <algorithm>
 #include "ir.h"
 #include "module_scope.h"
+#include "nasm_reserved.h"
 #include "symbols.h"
 
 namespace cider {
@@ -429,7 +430,8 @@ public:
         if (auto id = dynamic_cast<IdentifierExpr*>(init)) {
             auto sym = symbolTable_.resolve(id->getName());
             if (!sym || sym->kind != SymbolKind::FUNCTION) return "";
-            return emitFunctionName(definingModuleFor(sym, id->getName()), sym->name);
+            return emitFunctionName(definingModuleFor(sym, id->getName()), sym->name,
+                                    sym->isExtern);
         }
         // CIDER-BUG-023: a module-qualified function value (`b.inc`) folds
         // to the member's mangled label, same as the bare name.
@@ -443,7 +445,7 @@ public:
                         auto target = ms ? ms->resolveLocal(mem->getMember()) : nullptr;
                         if (target && target->kind == SymbolKind::FUNCTION) {
                             return emitFunctionName(definingModuleFor(target, mem->getMember()),
-                                                    target->name);
+                                                    target->name, target->isExtern);
                         }
                     }
                 }
@@ -554,12 +556,17 @@ public:
     // composes outside per spec §6). Main-file symbols and `main`/`_start`
     // keep legacy names, which keeps import-free IR byte-identical;
     // `extern` never reaches here (early return at each emission site).
+    // CIDER-BUG-072: main-file definitions additionally escape names that
+    // collide with a NASM reserved word (see nasm_reserved.h); `extern`
+    // references pass isExtern and keep the linker's spelling untouched.
     static bool isNeverMangled(const std::string& bare) {
         return bare == "main" || bare == "_start";
     }
 
-    static std::string emitFunctionName(const std::string& defModule, const std::string& bare) {
-        if (defModule.empty() || isNeverMangled(bare)) return bare;
+    static std::string emitFunctionName(const std::string& defModule, const std::string& bare,
+                                        bool isExtern = false) {
+        if (isExtern) return bare;
+        if (defModule.empty() || isNeverMangled(bare)) return escapeNasmReservedWord(bare);
         return sanitizeAsmName(mangleQualifiedName(defModule, bare));
     }
 
@@ -570,8 +577,13 @@ public:
     // byte-identical. `main`/`_start` are never mangled (spec Review Focus);
     // `extern` references resolve through definingModuleFor (bare) and never
     // reach emission (early return at the emission site).
-    static std::string emitGlobalName(const std::string& defModule, const std::string& bare) {
-        if (defModule.empty() || isNeverMangled(bare)) return bare;
+    // CIDER-BUG-072: main-file definitions escape NASM reserved words (the
+    // module-mangled form always starts with `mod_`, so it cannot collide);
+    // `extern` references keep the linker's spelling untouched.
+    static std::string emitGlobalName(const std::string& defModule, const std::string& bare,
+                                      bool isExtern = false) {
+        if (isExtern) return bare;
+        if (defModule.empty() || isNeverMangled(bare)) return escapeNasmReservedWord(bare);
         return mangleQualifiedName(defModule, bare);
     }
 
@@ -597,7 +609,7 @@ public:
     // definingModuleFor chain as function calls.
     std::string globalRefName(const std::shared_ptr<Symbol>& sym, const std::string& name) {
         if (!sym) return name;
-        return emitGlobalName(definingModuleFor(sym, name), name);
+        return emitGlobalName(definingModuleFor(sym, name), name, sym->isExtern);
     }
 
     // Logical module name for a scope: "" for main/root/unknown (legacy).
@@ -927,7 +939,7 @@ public:
     std::string runtimeHelperName(const std::string& bare) {
         auto sym = symbolTable_.resolve(bare);
         if (sym && sym->kind == SymbolKind::FUNCTION)
-            return emitFunctionName(definingModuleFor(sym, bare), bare);
+            return emitFunctionName(definingModuleFor(sym, bare), bare, sym->isExtern);
         return bare;
     }
 
@@ -960,7 +972,7 @@ public:
         // `extern` members are never mangled (spec Review Focus): they must
         // match the linker-provided symbol (same rule as definingModuleFor).
         if (target->isExtern) defMod = "";
-        funcName = emitFunctionName(defMod, sanitizeAsmName(mem->getMember()));
+        funcName = emitFunctionName(defMod, sanitizeAsmName(mem->getMember()), target->isExtern);
         return true;
     }
 
@@ -1297,7 +1309,7 @@ public:
                 // mangled name, so same-module, from-alias, and template
                 // uses all match the definition.
                 funcName = emitFunctionName(definingModuleFor(sym, lookupName),
-                                            sanitizeAsmName(lookupName));
+                                            sanitizeAsmName(lookupName), sym->isExtern);
                 resolvedFuncSym = std::static_pointer_cast<FunctionSymbol>(sym);
             }
         } else if (auto mem = dynamic_cast<MemberAccessExpr*>(calleeExpr)) {
@@ -2069,7 +2081,8 @@ public:
                 auto target = ms ? ms->resolveLocal(expr.getMember()) : nullptr;
                 if (target && target->kind == SymbolKind::FUNCTION) {
                     lastValue_ = IRValue::Label(emitFunctionName(
-                        definingModuleFor(target, expr.getMember()), target->name));
+                        definingModuleFor(target, expr.getMember()), target->name,
+                        target->isExtern));
                     // CIDER-BUG-023: carry the fn signature (not *void) so
                     // indirect calls convert args/returns and global
                     // initializers fold; mirrors visit(IdentifierExpr).
@@ -2095,7 +2108,8 @@ public:
                         return;
                     }
                     std::string gname = emitGlobalName(
-                        definingModuleFor(target, expr.getMember()), target->name);
+                        definingModuleFor(target, expr.getMember()), target->name,
+                        target->isExtern);
                     lastExprType_ = canonicalizeSymbolType(target, expr.getMember());
                     if (lastExprType_.pointerLevel == 0) {
                         // CIDER-BUG-015/019: alias-aware (see visit(IdentifierExpr)).
@@ -3440,7 +3454,8 @@ public:
             // CID-020/021 (spec §5): function values label the mangled
             // definition name. CID-006: the value's type is the fn
             // signature (labels and mangling are unchanged).
-            lastValue_ = IRValue::Label(emitFunctionName(definingModuleFor(sym, expr.getName()), sym->name));
+            lastValue_ = IRValue::Label(emitFunctionName(definingModuleFor(sym, expr.getName()),
+                                                          sym->name, sym->isExtern));
             auto fsym = std::static_pointer_cast<FunctionSymbol>(sym);
             TypeInfo ft;
             ft.name = "fn";
@@ -4802,9 +4817,15 @@ public:
                 if (variableValues_.count(name)) {
                     varAddr = variableValues_[name];
                     found = true;
-                } else if (globalValues_.count(name)) {
-                    varAddr = globalValues_[name];
-                    found = true;
+                } else if (auto sym = symbolTable_.resolve(name)) {
+                    // CIDER-BUG-072: globals key by their escaped/mangled
+                    // spelling, so look the address up the same way the
+                    // reference above did.
+                    auto git = globalValues_.find(globalRefName(sym, name));
+                    if (git != globalValues_.end()) {
+                        varAddr = git->second;
+                        found = true;
+                    }
                 }
 
                 if (found) {
