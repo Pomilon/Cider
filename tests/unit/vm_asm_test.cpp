@@ -1,5 +1,6 @@
 #include <cstdio>
 #include <memory>
+#include <new>
 #include <string>
 #include <unistd.h>
 #include <vector>
@@ -198,7 +199,7 @@ int run() {
     }
 
     // CIDER-BUG-103: mmap(len=rsi) must validate the length. VM::malloc
-    // clamps any size < 1 to one byte, so a negative request used to
+    // used to clamp any size < 1 to one byte, so a negative request used to
     // "succeed" as a tiny block, and a near-INT64_MAX request overflowed
     // its size + kHeaderSize arithmetic; a merely huge one threw
     // std::bad_alloc out of the VM instead of reporting failure. Native
@@ -257,6 +258,110 @@ int run() {
                         "syscall\nmov rdi, rax\nmov rax, 60\nsyscall\n");
         CHECK(r.exitCode == 0);
         CHECK(::lseek(tfd, 0, SEEK_CUR) == 0);
+    }
+
+    // CIDER-BUG-110: count 0 performs no access and faults on nothing, so
+    // write/read accept ANY buffer pointer and report 0 bytes (the pre-fix
+    // inHeap check rejected a bogus pointer with -EFAULT even though no
+    // byte is transferred). Non-zero lengths keep the CIDER-BUG-099/103
+    // validation exercised above.
+    {
+        // write(1, (void*)-16, 0) -> 0, nothing buffered.
+        auto r = runAsm("mov rax, 1\nmov rdi, 1\nmov rsi, -16\nmov rdx, 0\n"
+                        "syscall\nmov rdi, rax\nmov rax, 60\nsyscall\n");
+        CHECK(r.stdoutText.empty());
+        CHECK(r.stderrText.empty());
+        CHECK(r.exitCode == 0);
+    }
+    {
+        // write(2, (void*)-16, 0) -> 0, nothing buffered.
+        auto r = runAsm("mov rax, 1\nmov rdi, 2\nmov rsi, -16\nmov rdx, 0\n"
+                        "syscall\nmov rdi, rax\nmov rax, 60\nsyscall\n");
+        CHECK(r.stderrText.empty());
+        CHECK(r.exitCode == 0);
+    }
+    {
+        // write(<file>, (void*)-16, 0) -> 0 bytes written, file unchanged.
+        auto r = runAsm("mov rax, 1\nmov rdi, " + fdArg + "\nmov rsi, -16\nmov rdx, 0\n"
+                        "syscall\nmov rdi, rax\nmov rax, 60\nsyscall\n");
+        CHECK(r.exitCode == 0);
+        CHECK(::lseek(tfd, 0, SEEK_END) == 4);
+        CHECK(::lseek(tfd, 0, SEEK_SET) == 0);
+    }
+    {
+        // read(<file>, (void*)-16, 0) -> 0, nothing consumed.
+        auto r = runAsm("mov rax, 0\nmov rdi, " + fdArg + "\nmov rsi, -16\nmov rdx, 0\n"
+                        "syscall\nmov rdi, rax\nmov rax, 60\nsyscall\n");
+        CHECK(r.exitCode == 0);
+        CHECK(::lseek(tfd, 0, SEEK_CUR) == 0);
+    }
+    {
+        // A huge out-of-heap offset with count 0 is accepted too.
+        auto r = runAsm("mov rax, 0\nmov rdi, " + fdArg + "\nmov rsi, 1099511627776\nmov rdx, 0\n"
+                        "syscall\nmov rdi, rax\nmov rax, 60\nsyscall\n");
+        CHECK(r.exitCode == 0);
+        CHECK(::lseek(tfd, 0, SEEK_CUR) == 0);
+    }
+
+    // CIDER-BUG-110: a NEGATIVE allocation size must not silently allocate.
+    // ALLOCA's unsigned bump arithmetic used to wrap a negative size into a
+    // bogus slot and VM::malloc clamped it to one byte; the allocator now
+    // fails the request like any other impossible allocation (the same
+    // std::bad_alloc the mmap path maps to -ENOMEM). A zero-size ALLOCA
+    // keeps working, mirroring a native malloc(0) block.
+    auto runAlloca = [](int64_t size) {
+        auto fn = std::make_unique<cider::FunctionIR>("main", cider::IRType::VOID);
+        auto block = std::make_unique<cider::BasicBlock>("entry");
+        cider::IRInstruction al;
+        al.op = cider::IROp::ALLOCA;
+        al.dest = cider::IRValue::Register("p", cider::IRType::PTR);
+        al.args = {cider::IRValue::Constant(size, cider::IRType::I64)};
+        block->addInstruction(al);
+        fn->addBlock(std::move(block));
+        cider::ModuleIR mod;
+        mod.addFunction(std::move(fn));
+        cider::VM vm;
+        return vm.run(mod);
+    };
+    {
+        bool zeroOk = true;
+        try {
+            (void)runAlloca(0);
+        } catch (...) {
+            zeroOk = false;
+        }
+        CHECK(zeroOk);
+    }
+    {
+        bool threw = false;
+        try {
+            (void)runAlloca(-8);
+        } catch (const std::bad_alloc&) {
+            threw = true;
+        }
+        CHECK(threw);
+    }
+    {
+        // The builtin allocator rejects a negative size the same way.
+        auto fn = std::make_unique<cider::FunctionIR>("main", cider::IRType::PTR);
+        auto block = std::make_unique<cider::BasicBlock>("entry");
+        cider::IRInstruction call;
+        call.op = cider::IROp::CALL;
+        call.dest = cider::IRValue::Register("p", cider::IRType::PTR);
+        call.args = {cider::IRValue::Label("malloc"),
+                     cider::IRValue::Constant(-1, cider::IRType::I64)};
+        block->addInstruction(call);
+        fn->addBlock(std::move(block));
+        cider::ModuleIR mod;
+        mod.addFunction(std::move(fn));
+        cider::VM vm;
+        bool threw = false;
+        try {
+            (void)vm.run(mod);
+        } catch (const std::bad_alloc&) {
+            threw = true;
+        }
+        CHECK(threw);
     }
 
     // A valid mmap keeps working: allocate 64 bytes, read the file into the

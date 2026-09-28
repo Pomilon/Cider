@@ -425,9 +425,13 @@ VMResult VM::run(const ModuleIR& module, const std::string& runFunction) {
                 af.localSize = kLocalChunk;
                 af.localUsed = 0;
             }
+            // CIDER-BUG-110: a negative size must not enter the bump path.
+            // Casting it to size_t makes sz huge, and localUsed + sz can
+            // wrap back below localSize, handing out a stale slot. Route it
+            // to malloc, whose negative-size rule fails the allocation.
             size_t sz = (size_t)size.i;
             sz = (sz + 7) & ~(size_t)7;
-            if (af.localUsed + sz <= af.localSize) {
+            if (size.i >= 0 && af.localUsed + sz <= af.localSize) {
                 d.i = af.localBase + (int64_t)af.localUsed;
                 af.localUsed += sz;
             } else {
@@ -934,7 +938,15 @@ int64_t VM::materializeVTable(const std::string& label) {
 }
 
 int64_t VM::malloc(int64_t size) {
-    if (size < 1) size = 1;
+    // CIDER-BUG-110: a negative size is not an allocatable request. Native
+    // malloc takes a size_t, so the negative value is a huge request that
+    // returns NULL; the VM has no NULL-return path and its allocation
+    // failures already surface as an allocation exception (the mmap caller
+    // maps std::bad_alloc to -ENOMEM), so throw that instead of silently
+    // handing out a clamped 1-byte block. size == 0 keeps the 1-byte block:
+    // native malloc(0) returns a unique, freeable pointer.
+    if (size < 0) throw std::bad_alloc();
+    if (size == 0) size = 1;
     int64_t total = size + kHeaderSize;
     // First fit.
     for (size_t fi = 0; fi < freeList_.size(); ++fi) {
@@ -1435,8 +1447,8 @@ void VM::execAsm(const IRInstruction& instr) {
             // address. VM::malloc hands out offsets from kHeaderSize on
             // (offset 0 is the first block's size header) and load/store/
             // memcpy already treat it as null, so a non-empty buffer there
-            // is a null-pointer access: EFAULT like native. The zero-length
-            // calls stay no-ops, matching NULL with count 0.
+            // is a null-pointer access: EFAULT like native; count-0 calls
+            // never reach this check (CIDER-BUG-110).
             auto inHeap = [&](int64_t off, int64_t len) {
                 if (off == 0 && len > 0) return false;
                 return off >= 0 && len >= 0 && off <= (int64_t)heap_.size() &&
@@ -1446,7 +1458,11 @@ void VM::execAsm(const IRInstruction& instr) {
                 // write(fd=rdi, buf=rsi, len=rdx)
                 int64_t fd = rdi;
                 int64_t len = rdx;
-                bool valid = inHeap(rsi, len);
+                // CIDER-BUG-110: count 0 transfers no bytes and faults on
+                // nothing, so the buffer needs no validation at all — any
+                // pointer is accepted and the call reports 0 bytes written.
+                // Non-zero lengths keep the CIDER-BUG-099/103 checks.
+                bool valid = len == 0 || inHeap(rsi, len);
                 std::string bytes;
                 if (valid && len > 0) {
                     bytes.assign((const char*)heap_.data() + rsi, (size_t)len);
@@ -1466,7 +1482,11 @@ void VM::execAsm(const IRInstruction& instr) {
                 } else {
                     // Real file descriptor (opened via the open syscall).
                     if (valid) {
-                        rax = syscallResult((int64_t)::write((int)fd, heap_.data() + rsi, (size_t)len));
+                        // Count 0 must not form a host pointer from a bogus
+                        // offset: that is out-of-range pointer arithmetic
+                        // even though the kernel would not dereference it.
+                        uint8_t* wbuf = len > 0 ? heap_.data() + rsi : nullptr;
+                        rax = syscallResult((int64_t)::write((int)fd, wbuf, (size_t)len));
                     } else {
                         rax = -EFAULT;
                     }
@@ -1478,8 +1498,9 @@ void VM::execAsm(const IRInstruction& instr) {
             } else if (rax == 9) {
                 // mmap(len=rsi) -> fresh region, returned in rax
                 // CIDER-BUG-103: validate the length before calling malloc.
-                // VM::malloc clamps any size < 1 to one byte (so a negative
-                // request used to "succeed" with a 1-byte block) and computes
+                // VM::malloc used to clamp any size < 1 to one byte (so a
+                // negative request used to "succeed" with a 1-byte block) and
+                // computes
                 // size + kHeaderSize on top of the current heap size
                 // (near-INT64_MAX requests overflowed that arithmetic).
                 // Native mmap rejects a zero length with EINVAL and reports
@@ -1508,10 +1529,13 @@ void VM::execAsm(const IRInstruction& instr) {
                 // the heap is EFAULT like native. The old `room` clamp ran
                 // a negative offset through as a positive room and turned a
                 // fully out-of-heap buffer into an EOF (0).
-                if (!inHeap(rsi, rdx)) {
+                // CIDER-BUG-110: count 0 performs no access and faults on
+                // nothing, so skip the heap check like write above.
+                if (rdx != 0 && !inHeap(rsi, rdx)) {
                     rax = -EFAULT;
                 } else {
-                    rax = syscallResult((int64_t)::read((int)rdi, heap_.data() + rsi, (size_t)rdx));
+                    uint8_t* rbuf = rdx > 0 ? heap_.data() + rsi : nullptr;
+                    rax = syscallResult((int64_t)::read((int)rdi, rbuf, (size_t)rdx));
                 }
             } else {
                 // General passthrough for the remaining syscalls (open,
