@@ -1,5 +1,5 @@
 from std.alloc import malloc, free;
-from std.string import memcpy;
+from std.string import memcpy, memset;
 
 export struct Vec<T> {
     var data: *T;
@@ -8,6 +8,20 @@ export struct Vec<T> {
 }
 
 const INITIAL_CAP: int = 8;
+
+// CIDER-BUG-075: a bare `var zero: T;` emits no store on any backend, so the
+// local keeps whatever stale bytes the frame slot held. Returning it from an
+// empty pop() / out-of-range remove() gave backend-divergent garbage (VM
+// unopt/opt returned 4239392 where native returned 0, etc.). Byte-zero the
+// local instead: all-zero bytes are the zero value of every Cider type
+// (0, false, nilPtr, 0.0, all-zero aggregate fields), so this is defined for
+// arbitrary T. memset takes the local's address, which also keeps the
+// zeroing as a real store that no backend can optimize away.
+func zeroed<T>() -> T {
+    var zero: T;
+    memset((&zero) as *void, 0 as u8, sizeof(T));
+    return zero;
+}
 
 export func new_vec<T>() -> Vec<T> {
     var v: Vec<T>;
@@ -42,8 +56,7 @@ export func push<T>(v: *Vec<T>, val: T) -> void {
 
 export func pop<T>(v: *Vec<T>) -> T {
     if (v.len <= 0) {
-        var zero: T;
-        return zero;
+        return zeroed<T>();
     }
     v.len = v.len - 1;
     return v.data[v.len];
@@ -93,8 +106,7 @@ export func insert<T>(v: *Vec<T>, i: int, val: T) -> void {
 
 export func remove<T>(v: *Vec<T>, i: int) -> T {
     if (i < 0 || i >= v.len) {
-        var zero: T;
-        return zero;
+        return zeroed<T>();
     }
     var val: T = v.data[i];
     var j: int = i;

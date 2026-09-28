@@ -3,11 +3,11 @@
 // cap_vec, reserve, free_vec, capacity growth/clamping, reserve-then-push,
 // reuse after clear/free_vec, and deterministic bounds errors.
 //
-// BUG (reported, not fixed): pop() on an empty vector and remove() with an
-// out-of-range index return an *uninitialized* T (`var zero: T;`), so the
-// returned value is garbage and differs between VM unopt, VM opt and native.
-// Only the stable side effect is asserted here; the garbage value is
-// discarded.
+// CIDER-BUG-075 fixed: pop() on an empty vector and remove() with an
+// out-of-range index used to return an *uninitialized* T (`var zero: T;`),
+// so the value was garbage and differed between VM unopt, VM opt and native.
+// Both now return a defined zero T (0 for int) on every backend, which the
+// assertions below check.
 from std.io import puts;
 from std.vector import new_vec, push, pop, get, len_vec, cap_vec, reserve, insert, remove, clear, free_vec;
 
@@ -17,9 +17,9 @@ func main() -> int {
     if (cap_vec<int>(&v) != 0) return 2;
     if (v.data != nilPtr) return 3;
 
-    // Empty pop: len must not change (result is unspecified).
-    var ignored_pop: int = pop<int>(&v);
-    if (len_vec<int>(&v) != 0) return 4;
+    // Empty pop: defined zero result; len must not change.
+    var zero_pop: int = pop<int>(&v);
+    if (zero_pop != 0 || len_vec<int>(&v) != 0) return 4;
 
     // First growth clamps to INITIAL_CAP even though cap*2 was 0.
     push<int>(&v, 0);
@@ -75,13 +75,13 @@ func main() -> int {
     if (*get<int>(&x, 1) != 99) return 25;
     if (*get<int>(&x, 2) != 2) return 26;
 
-    // Out-of-range insert is a no-op; out-of-range remove returns an
-    // unspecified value but must leave the vector untouched.
+    // Out-of-range insert is a no-op; out-of-range remove returns the
+    // defined zero T and must leave the vector untouched.
     insert<int>(&x, -1, 7);
     insert<int>(&x, 5, 7);
     if (len_vec<int>(&x) != 3) return 27;
-    var ignored_remove: int = remove<int>(&x, 5);
-    if (len_vec<int>(&x) != 3) return 28;
+    var zero_remove: int = remove<int>(&x, 5);
+    if (zero_remove != 0 || len_vec<int>(&x) != 3) return 28;
     if (get<int>(&x, 3) != nilPtr) return 29;
 
     // Valid remove returns the element and shifts the tail down.
