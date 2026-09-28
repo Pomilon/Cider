@@ -1082,7 +1082,8 @@ void VM::store(int64_t addr, const RegVal& val, IRType type, int64_t offset) {
 }
 
 namespace {
-const char* const kVMBuiltins[] = {"malloc", "free", "exit", "putchar", "_setjmp", "longjmp"};
+const char* const kVMBuiltins[] = {"malloc", "free", "exit", "putchar", "_setjmp", "longjmp",
+                                   "_uncaught_exception"};
 }  // namespace
 
 bool VM::isExternFunctionName(const std::string& name) const {
@@ -1133,6 +1134,14 @@ bool VM::tryBuiltinCall(const std::string& name, const std::vector<IRValue>& arg
         retReg_ = v;
         return true;
     }
+    if (name == "_uncaught_exception") {
+        // CIDER-ISS-010: ir-gen routes a throw whose active-handler
+        // pointer is null here (no enclosing try, or a rethrow from the
+        // outermost catch). VMError makes main print
+        // `vm error: uncaught exception` and exit 2, matching the native
+        // and pomeos stub byte for byte.
+        throw VMError{"uncaught exception"};
+    }
     if (name == "_setjmp") {
         RegVal buf = args.empty() ? RegVal{} : resolveValue(args[0]);
         JumpState st;
@@ -1149,6 +1158,10 @@ bool VM::tryBuiltinCall(const std::string& name, const std::vector<IRValue>& arg
     if (name == "longjmp") {
         RegVal buf = args.empty() ? RegVal{} : resolveValue(args[0]);
         RegVal val = args.size() > 1 ? resolveValue(args[1]) : RegVal{};
+        // CIDER-ISS-010: a null handler pointer is the uncaught case.
+        // ir-gen branches around longjmp for it; keep the VM defined if a
+        // null buffer ever reaches this builtin anyway.
+        if (buf.i == 0) throw VMError{"uncaught exception"};
         auto it = jumpStates_.find(buf.i);
         if (it == jumpStates_.end()) throw VMError{"longjmp: no matching setjmp"};
         const JumpState& st = it->second;

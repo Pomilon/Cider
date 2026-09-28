@@ -29,6 +29,10 @@ bool CodeGenerator::generate(ModuleIR& module, const std::string& outputPath,
     std::vector<std::string> globalAsmSection;
     std::vector<std::string> textSection;
     int strCount = 0;
+    // CIDER-ISS-010: set when the IR calls the uncaught-exception
+    // pseudo-builtin; the terminating diagnostic helper is then emitted
+    // once, after all functions, so each call site can `call` it.
+    bool needsUncaughtHelper = false;
     std::set<std::string> generatedFunctions_;
     // CID-005: UEFI (PE32+) emission differences (design §1): bare `efi_main`
     // export, no implicit libc externs, and no `_start` kernel-stack entry.
@@ -126,6 +130,14 @@ bool CodeGenerator::generate(ModuleIR& module, const std::string& outputPath,
     for (auto& func : module.getFunctions()) {
         for (auto& block : func->getBlocks()) {
             for (auto& instr : block->getInstructions()) {
+                // CIDER-ISS-010: note the ir-gen's uncaught-exception call
+                // before emission (the helper below is emitted only when
+                // some throw path actually references it).
+                if (instr.op == IROp::CALL && !instr.args.empty() &&
+                    instr.args[0].kind == IRValue::LABEL &&
+                    instr.args[0].name == "_uncaught_exception") {
+                    needsUncaughtHelper = true;
+                }
                 for (auto& arg : instr.args) {
                     // CID-005: narrow `"..."` and wide `L"..."` PTR constants
                     // both become data labels here; the wide payload is a
@@ -2180,6 +2192,44 @@ bool CodeGenerator::generate(ModuleIR& module, const std::string& outputPath,
                 textSection[(size_t)prologueFixupIndex] =
                     "    sub rsp, " + std::to_string(paddedTotal - savedRegsSize);
             }
+        }
+    }
+
+    // CIDER-ISS-010: define the uncaught-exception runtime error. The
+    // ir-gen branches here only when the active handler pointer is null;
+    // a handled throw never reaches this label. On native/pomeos the body
+    // reports the exact line the VM reports (`vm error: uncaught
+    // exception`) on stderr and exits 2, so all backends are byte-for-byte
+    // identical. UEFI has no write/exit syscalls at this layer, so it
+    // traps (ud2) instead: loud and deterministic, though the observable
+    // behavior there is a firmware fault rather than exit 2.
+    // A user-defined function of the same name wins (the VM prefers a
+    // module function over its builtin), so the helper is only emitted
+    // when the name is free: no duplicate label in the assembly.
+    bool userDefinedUncaught = false;
+    for (const auto& fn : module.getFunctions()) {
+        if (fn->getName() == "_uncaught_exception") {
+            userDefinedUncaught = true;
+            break;
+        }
+    }
+    if (needsUncaughtHelper && !userDefinedUncaught) {
+        addText("");
+        addText("; CIDER-ISS-010: uncaught exception (no active handler)");
+        addText("_uncaught_exception:");
+        if (isUefi) {
+            addText("    ud2    ; no write/exit syscalls on uefi: trap loudly");
+        } else {
+            const char* msg = "vm error: uncaught exception\n";
+            addData("_uncaught_exception_msg: db \"vm error: uncaught exception\", 10");
+            addText("    mov rax, 1     ; write(2, msg, len)");
+            addText("    mov rdi, 2");
+            addText("    lea rsi, [rel _uncaught_exception_msg]");
+            addText("    mov rdx, " + std::to_string(std::strlen(msg)));
+            addText("    syscall");
+            addText("    mov rax, 60    ; exit(2)");
+            addText("    mov rdi, 2");
+            addText("    syscall");
         }
     }
 

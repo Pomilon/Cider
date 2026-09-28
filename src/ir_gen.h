@@ -4537,6 +4537,19 @@ public:
             IRValue bufPtr = IRValue::Register(nextTemp(), IRType::PTR);
             currentBlock_->addInstruction({IROp::LOAD, bufPtr, {IRValue::Label("_exception_buf_ptr")}});
 
+            // CIDER-ISS-010: a null active-handler pointer means no try is
+            // in scope — a plain uncaught throw, or a rethrow from the
+            // outermost catch (which reinstalls the enclosing, possibly
+            // null, handler before its body runs). Longjmping to null is
+            // undefined and crashed the native backend, so branch to the
+            // defined uncaught-exception path instead.
+            std::string handlerBlockName = nextLabel("throw_handler");
+            std::string uncaughtBlockName = nextLabel("uncaught");
+            currentBlock_->addInstruction({IROp::COND_BR, std::nullopt,
+                                           {bufPtr, IRValue::Label(handlerBlockName),
+                                            IRValue::Label(uncaughtBlockName)}});
+
+            startBlock(handlerBlockName);
             IRInstruction call;
             call.op = IROp::CALL;
             call.dest = std::nullopt;
@@ -4544,6 +4557,16 @@ public:
             call.args.push_back(bufPtr);
             call.args.push_back(IRValue::Constant(1, IRType::I32));
             currentBlock_->addInstruction(call);
+
+            startBlock(uncaughtBlockName);
+            // The VM implements this label as a builtin that raises
+            // `vm error: uncaught exception` and exits 2; codegen defines a
+            // terminating stub with byte-identical stderr and exit code.
+            IRInstruction uncaught;
+            uncaught.op = IROp::CALL;
+            uncaught.dest = std::nullopt;
+            uncaught.args.push_back(IRValue::Label("_uncaught_exception"));
+            currentBlock_->addInstruction(uncaught);
 
             startBlock(nextLabel("dead"));
         }

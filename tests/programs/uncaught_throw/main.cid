@@ -1,0 +1,13 @@
+// CIDER-ISS-010: a throw with no enclosing try must be a defined runtime
+// error on every backend, never a longjmp to a null handler.
+// Expected on all three paths (VM unopt, VM opt, native):
+//   stderr = "vm error: uncaught exception\n", exit = 2.
+func boom() -> int {
+    throw 1;
+}
+
+func main() -> int {
+    // The throw is raised one frame below main; no try exists anywhere,
+    // so the active handler pointer is null when the throw executes.
+    return boom();
+}
