@@ -1204,6 +1204,10 @@ public:
                 // local slot instead of storing the pointer value as the
                 // first field (CID-022; CIDER-BUG-045 for arrays).
                 currentBlock_->addInstruction({IROp::MEMCPY, std::nullopt, {addr, paramReg, IRValue::Constant(getTypeSize(sym->type), IRType::I32)}});
+                // CIDER-BUG-089: the parameter is a declared class value, so
+                // re-stamp its class's vptr after the copy (`v: V` receiving
+                // `*p` from a dynamically-typed pointer slices to V).
+                emitClassVptrStoreForType(sym->type, addr, currentModule_);
             } else {
                 currentBlock_->addInstruction({IROp::STORE, std::nullopt, {addr, paramReg, IRValue::Constant(0, IRType::I32)}});
             }
@@ -1315,6 +1319,9 @@ public:
                 IRValue sretPtr = IRValue::Register(nextTemp(), IRType::PTR);
                 currentBlock_->addInstruction({IROp::LOAD, sretPtr, {sretAddr, IRValue::Constant(0, IRType::I32)}});
                 currentBlock_->addInstruction({IROp::MEMCPY, std::nullopt, {sretPtr, val, IRValue::Constant(structSize, IRType::I32)}});
+                // CIDER-BUG-089: the returned value's declared class owns
+                // the vptr word, so `return *p;` slices to the return type.
+                emitClassVptrStoreForType(currentReturnType_, sretPtr, currentModule_);
                 lastExprType_ = currentReturnType_;
                 emitDefers();
                 emitDestructors();
@@ -2377,6 +2384,11 @@ public:
                                                    {dest, IRValue::Constant(offset, IRType::I32)}});
                     currentBlock_->addInstruction({IROp::MEMCPY, std::nullopt,
                                                    {fieldAddr, val, IRValue::Constant(getTypeSize(fieldType), IRType::I32)}});
+                    // CIDER-BUG-089: an explicit class-valued field copy
+                    // re-stamps the field's declared class vptr, so
+                    // `S{ inner: *p }` slices to Inner like every other copy.
+                    emitClassVptrStoreForType(fieldType, fieldAddr,
+                                              definingModuleFor(structSym, structSym->name));
                 } else {
                     currentBlock_->addInstruction({IROp::STORE, std::nullopt, {dest, val, IRValue::Constant(offset, IRType::I32)}});
                 }
@@ -2762,11 +2774,12 @@ public:
             // never queued and its embedded class initializers were skipped.
             std::string aggMod = definingModuleFor(sym, stmt.getName());
             TypeInfo declAgg = resolveTypeAlias(sym->type, aggMod);
-            // CIDER-BUG-087: a module-scope aggregate whose embedded class
-            // values carry initializers stays zero in .bss, so queue its
-            // field-initializer pass for the synthesized startup function
-            // (see emitGlobalFieldInitializers). The predicate filters out
-            // scalars and class-free aggregates, which emit nothing.
+            // CIDER-BUG-087/089: a module-scope aggregate whose embedded
+            // class values need formation stores (field initializers or a
+            // vptr) stays zero in .bss, so queue its pass for the
+            // synthesized startup function (see emitGlobalFieldInitializers).
+            // The predicate filters out scalars and class-free aggregates,
+            // which emit nothing.
             if (declAgg.pointerLevel == 0 &&
                 (declAgg.isArray || isStructValueType(declAgg))) {
                 pendingGlobalInits_.push_back({declAgg, aggMod, IRValue::Label(gname)});
@@ -2814,6 +2827,9 @@ public:
                 // initializer runs the class's field initializers. With one
                 // (`var v: C = other;`) the copy/memcpy below copies the
                 // source object wholesale, so the source state wins.
+                // CIDER-BUG-089: the same pass stamps the class's vptr (part
+                // of emitClassFieldInitializersImpl), so a value local of a
+                // virtual class dispatches through its declared class.
                 if (!stmt.getInitializer()) {
                     // CIDER-BUG-067: zero the whole value-class slot first,
                     // then run the constant field initializers on top.
@@ -2827,7 +2843,7 @@ public:
                 // predicate so structs without embedded class initializers
                 // keep their existing (unzeroed) emission.
                 std::set<const StructSymbol*> visiting;
-                if (aggregateHasInitializers(varType, currentModule_, visiting)) {
+                if (aggregateNeedsInit(varType, currentModule_, visiting)) {
                     emitZeroInstance(addr, getTypeSize(varType));
                     emitEmbeddedInitializers(varType, addr, 0, currentModule_, visiting);
                 }
@@ -2838,7 +2854,7 @@ public:
             // read zero, then run every element's initializers. Struct
             // elements recurse through their own class-valued fields.
             std::set<const StructSymbol*> visiting;
-            if (aggregateHasInitializers(varType, currentModule_, visiting)) {
+            if (aggregateNeedsInit(varType, currentModule_, visiting)) {
                 emitZeroInstance(addr, getTypeSize(varType));
                 emitEmbeddedInitializers(varType, addr, 0, currentModule_, visiting);
             }
@@ -2893,7 +2909,7 @@ public:
                             // write 4 bytes; an int element converts).
                             IRValue eval = convertValueToType(lastValue_, elemType);
                             emitListElementStore(addr, (int64_t)(ei * (size_t)elemSize), eval,
-                                                 elemSize, elemIsAggregate,
+                                                 elemType, elemSize, elemIsAggregate,
                                                  sym->type.isVolatile);
                         }
                         lastExprType_ = sym->type;
@@ -2971,6 +2987,10 @@ public:
                 if (sym->type.pointerLevel == 0 && (sym->type.isArray || sym->type.isUserDefined || isStructType || getTypeSize(sym->type) > 8 || initIsStruct)) {
                     currentBlock_->addInstruction({IROp::MEMCPY, std::nullopt, {addr, val, IRValue::Constant(getTypeSize(sym->type), IRType::I32)},
                                                    sym->type.isVolatile});
+                    // CIDER-BUG-089: a copy into a class value re-stamps the
+                    // declared class's vptr, so `var v: V = *p;` slices to V
+                    // even when the pointee's dynamic type is derived.
+                    emitClassVptrStoreForType(varType, addr, currentModule_);
                 } else {
                     // Store at the declared width (same rule as fields and
                     // elements): a narrow initializer in a wide local slot
@@ -3243,7 +3263,8 @@ public:
     }
 
     void emitListElementStore(IRValue base, int64_t offset, IRValue val,
-                              int elemSize, bool aggregate, bool isVolatile = false) {
+                              const TypeInfo& elemType, int elemSize, bool aggregate,
+                              bool isVolatile = false) {
         if (!aggregate) {
             currentBlock_->addInstruction({IROp::STORE, std::nullopt,
                                            {base, val, IRValue::Constant(offset, IRType::I32)},
@@ -3255,6 +3276,9 @@ public:
         currentBlock_->addInstruction({IROp::MEMCPY, std::nullopt,
                                        {dst, val, IRValue::Constant(elemSize, IRType::I32)},
                                        isVolatile});
+        // CIDER-BUG-089: a class-valued element is a declared class slot,
+        // so an explicit copy (`[*p]`) re-stamps the element's class vptr.
+        emitClassVptrStoreForType(elemType, dst, currentModule_);
     }
 
     // CIDER-BUG-080: materialise a call-site interface argument. An
@@ -4715,9 +4739,26 @@ public:
                 }
             }
 
-            if (lastExprType_.pointerLevel == 0 && (lastExprType_.isArray || lastExprType_.isUserDefined || getTypeSize(lastExprType_) > 8)) {
+            // CIDER-BUG-081/083 classified member and element aggregate
+            // targets; CIDER-BUG-089 closes the identifier shape for virtual
+            // class values: a value assigned through a deref (`v = *p`)
+            // carries no isUserDefined marker, so an exactly-8-byte virtual
+            // class (vptr only) fell to the scalar STORE and wrote the
+            // source ADDRESS into the value. The added test is restricted to
+            // virtual classes so every non-virtual aggregate keeps its
+            // existing emission.
+            bool rhsVirtualClass = virtualClassForType(lastExprType_, currentModule_) != nullptr;
+            if (lastExprType_.pointerLevel == 0 &&
+                (lastExprType_.isArray || lastExprType_.isUserDefined ||
+                 rhsVirtualClass || getTypeSize(lastExprType_) > 8)) {
                 currentBlock_->addInstruction({IROp::MEMCPY, std::nullopt, {addr, val, IRValue::Constant(getTypeSize(lastExprType_), IRType::I32)},
                                                targetIsVolatile});
+                // CIDER-BUG-089: `v = *p;` is a copy like a declaration
+                // initializer, so the target's declared class re-stamps its
+                // vptr (the checker admits aggregate assignments only
+                // between equal static types, so the declared class is the
+                // value's class).
+                emitClassVptrStoreForType(lastExprType_, addr, currentModule_);
             } else {
                 if (addr.kind == IRValue::LABEL) {
                     currentBlock_->addInstruction({IROp::STORE, std::nullopt, {addr, val}, targetIsVolatile});
@@ -6148,59 +6189,99 @@ public:
         emitClassFieldInitializersImpl(classSym, objAddr, visiting);
     }
 
-    // CIDER-BUG-087: true when an embedded class value under `t` has a
-    // field initializer to run — directly (a class field with an
-    // initializer) or nested through struct fields and fixed arrays of
-    // class/struct values. Mirrors emitEmbeddedInitializers so the two
-    // cannot disagree about when IR is emitted: aggregates that are
-    // statically all-zero stay byte-identical (no address computation, no
-    // stores). `visiting` is the by-value layout cycle guard (a repeated
-    // class or struct means `class A { var a: A; }` /
-    // `struct S { var s: S; }`): stop instead of recursing without bound.
-    bool aggregateHasInitializers(TypeInfo t, const std::string& defModule,
-                                  std::set<const StructSymbol*>& visiting) {
+    // CIDER-BUG-089: a class value's first word is its vptr (the collector
+    // reserves offset 0 for every class whose hierarchy has a vtable).
+    // Stamp the DECLARED class's vtable there — never a dynamic type's — so
+    // a value instance is a C++-style slice of its static class, while
+    // `new` pointers and interfaces keep dynamic dispatch. A class without
+    // virtual methods reserves no vptr and emits nothing, keeping programs
+    // without virtual value instances byte-identical.
+    void emitClassVptrStore(const std::shared_ptr<StructSymbol>& classSym, IRValue objAddr) {
+        if (!classSym || classSym->kind != SymbolKind::CLASS || classSym->vtable.empty()) return;
+        currentBlock_->addInstruction(
+            {IROp::STORE, std::nullopt,
+             {objAddr, IRValue::Label("vtable_" + vtableKeyForClass(classSym)),
+              IRValue::Constant(0, IRType::I32)}});
+    }
+
+    // CIDER-BUG-089: resolve `t` to the class whose values reserve a vptr
+    // (offset 0) — a CLASS with a non-empty vtable. Null for pointers,
+    // interfaces, slices, arrays, structs, non-virtual classes and
+    // unresolvable spellings, so every CIDER-BUG-089 path can test
+    // "virtual class value" without emitting anything.
+    std::shared_ptr<StructSymbol> virtualClassForType(TypeInfo t, const std::string& defModule = "") {
+        if (t.pointerLevel > 0 || t.isArray || t.isSlice || t.isInterface || t.isFunctionPointer) return nullptr;
+        t = canonicalizeNominalInModule(resolveTypeAlias(t, defModule), defModule);
+        auto sym = resolveStructOrClassSymbol(t, defModule);
+        if (!sym || sym->kind != SymbolKind::CLASS) return nullptr;
+        auto classSym = std::static_pointer_cast<StructSymbol>(sym);
+        if (classSym->vtable.empty()) return nullptr;
+        return classSym;
+    }
+
+    // CIDER-BUG-089: the copy-site twin of emitClassVptrStore. Resolves an
+    // alias or module-qualified spelling to its class before stamping, so a
+    // copy into a declared class value re-asserts the static vptr instead
+    // of smuggling the pointee's dynamic vptr into the value.
+    void emitClassVptrStoreForType(TypeInfo t, IRValue objAddr, const std::string& defModule = "") {
+        emitClassVptrStore(virtualClassForType(t, defModule), objAddr);
+    }
+
+    // CIDER-BUG-087/089: true when an embedded class value under `t` needs
+    // formation-time stores — a field initializer to run, or a vptr word to
+    // stamp (any class with a vtable). Mirrors emitEmbeddedInitializers so
+    // the two cannot disagree about when IR is emitted: aggregates with
+    // neither stay byte-identical (no address computation, no stores).
+    // `visiting` is the by-value layout cycle guard (a repeated class or
+    // struct means `class A { var a: A; }` / `struct S { var s: S; }`):
+    // stop instead of recursing without bound.
+    bool aggregateNeedsInit(TypeInfo t, const std::string& defModule,
+                            std::set<const StructSymbol*>& visiting) {
         t = canonicalizeNominalInModule(resolveTypeAlias(t, defModule), defModule);
         if (t.pointerLevel > 0 || t.isSlice || t.isInterface || t.isFunctionPointer) return false;
         if (t.isArray) {
             if (t.arraySize <= 0) return false;
-            return aggregateHasInitializers(t.elementType(), defModule, visiting);
+            return aggregateNeedsInit(t.elementType(), defModule, visiting);
         }
         auto sym = resolveStructOrClassSymbol(t, defModule);
         if (!sym) return false;
         auto aggSym = std::static_pointer_cast<StructSymbol>(sym);
         if (!visiting.insert(aggSym.get()).second) return false;
-        std::string aggMod = definingModuleFor(aggSym, aggSym->name);
-        bool found = false;
-        for (const auto& field : aggSym->fields) {
-            // CIDER-BUG-049: only class fields carry initializers; the
-            // parser rejects them on struct fields.
-            if (field.initializer) {
-                found = true;
-                break;
-            }
-            if (aggregateHasInitializers(field.type, aggMod, visiting)) {
-                found = true;
-                break;
+        // CIDER-BUG-089: a virtual class's own vptr stamp is formation work.
+        bool found = aggSym->kind == SymbolKind::CLASS && !aggSym->vtable.empty();
+        if (!found) {
+            std::string aggMod = definingModuleFor(aggSym, aggSym->name);
+            for (const auto& field : aggSym->fields) {
+                // CIDER-BUG-049: only class fields carry initializers; the
+                // parser rejects them on struct fields.
+                if (field.initializer) {
+                    found = true;
+                    break;
+                }
+                if (aggregateNeedsInit(field.type, aggMod, visiting)) {
+                    found = true;
+                    break;
+                }
             }
         }
         visiting.erase(aggSym.get());
         return found;
     }
 
-    // CIDER-BUG-087: run the initializers of every embedded class value
-    // under `base + offset`. The caller established via
-    // aggregateHasInitializers that at least one exists, so no IR is
-    // emitted for all-zero aggregates (byte-identity) — the address is
-    // computed lazily here for the same reason. Pointer, slice, interface
+    // CIDER-BUG-087/089: run the formation stores (field initializers and
+    // vptr words) of every embedded class value under `base + offset`. The
+    // caller established via aggregateNeedsInit that at least one exists, so
+    // no IR is emitted for all-zero aggregates (byte-identity) — the address
+    // is computed lazily here for the same reason. Pointer, slice, interface
     // and fn-pointer values are not embedded aggregates: pointers handle
-    // their target where it is constructed, slices hold descriptor
-    // storage, and an interface is a fat pointer.
+    // their target where it is constructed, slices hold descriptor storage,
+    // and an interface is a fat pointer.
     void emitEmbeddedInitializers(TypeInfo t, IRValue base, int offset,
                                   const std::string& defModule,
                                   std::set<const StructSymbol*>& visiting) {
         t = canonicalizeNominalInModule(resolveTypeAlias(t, defModule), defModule);
         if (t.pointerLevel > 0 || t.isSlice || t.isInterface || t.isFunctionPointer) return;
-        if (!aggregateHasInitializers(t, defModule, visiting)) return;
+        if (!aggregateNeedsInit(t, defModule, visiting)) return;
         IRValue addr = IRValue::Register(nextTemp(), IRType::PTR);
         currentBlock_->addInstruction(
             {IROp::ADD, addr, {base, IRValue::Constant((int64_t)offset, IRType::I32)}});
@@ -6241,7 +6322,7 @@ public:
         visiting.erase(structSym.get());
     }
 
-    // CIDER-BUG-088: the finalizer twin of aggregateHasInitializers. True
+    // CIDER-BUG-088: the finalizer twin of aggregateNeedsInit. True
     // when `t` is a class carrying a destructor or embeds (through class
     // fields, struct fields and fixed arrays of class/struct values) a class
     // value that carries one. Mirrors registerEmbeddedDestructors so the two
@@ -6321,8 +6402,9 @@ public:
 
     // CIDER-BUG-087: module-scope class/struct values are zero in .bss (and
     // in the VM's zero-filled global storage), so their embedded class
-    // values need the same initializer stores a local gets. There is no
-    // runtime pass for globals, so synthesize `_cider_global_init` and call
+    // values need the same formation stores a local gets (CIDER-BUG-089:
+    // field initializers and vptrs). There is no runtime pass for globals,
+    // so synthesize `_cider_global_init` and call
     // it from every entry function before user code; the body replays the
     // same emitEmbeddedInitializers machinery at each global's label.
     // Programs with no such globals emit nothing (byte-identical).
@@ -6333,7 +6415,7 @@ public:
         for (const auto& pending : pendingGlobalInits_) {
             TypeInfo t = canonicalizeNominalInModule(
                 resolveTypeAlias(pending.type, pending.defModule), pending.defModule);
-            if (aggregateHasInitializers(t, pending.defModule, visiting)) {
+            if (aggregateNeedsInit(t, pending.defModule, visiting)) {
                 any = true;
                 break;
             }
@@ -6364,7 +6446,7 @@ public:
         for (const auto& pending : pendingGlobalInits_) {
             TypeInfo t = canonicalizeNominalInModule(
                 resolveTypeAlias(pending.type, pending.defModule), pending.defModule);
-            if (!aggregateHasInitializers(t, pending.defModule, visiting)) continue;
+            if (!aggregateNeedsInit(t, pending.defModule, visiting)) continue;
             IRValue base = IRValue::Register(nextTemp(), IRType::PTR);
             currentBlock_->addInstruction({IROp::MOV, base, {pending.addr}});
             emitEmbeddedInitializers(t, base, 0, pending.defModule, visiting);
@@ -6416,6 +6498,11 @@ public:
                                         std::set<const StructSymbol*>& visiting) {
         if (!classSym || !currentFunction_) return;
         if (!visiting.insert(classSym.get()).second) return;
+        // CIDER-BUG-089: the class's first word is its vptr, so stamp it
+        // before the field stores (the same position `new` used to emit it
+        // from). Nested class values recurse below and stamp their own
+        // addresses, including through struct fields and fixed arrays.
+        emitClassVptrStore(classSym, objAddr);
         std::string classMod = definingModuleFor(classSym, classSym->name);
         for (const auto& field : classSym->fields) {
             Expression* init = field.initializer;
@@ -6545,19 +6632,15 @@ public:
         // this malloc to a stack slot.
         emitZeroInstance(dest, size);
 
-        // Initialize vptr if class is virtual (CID-020/021 spec §6: the
-        // label mangles with the class's defining module, matching the
-        // vtable key emitted in generate()).
         // CIDER-FEAT-003: resolve alias-aware (matching the checker), so
         // `type A = C; new A(...)` gets the same vptr, field initializers
         // and constructor as `new C(...)` instead of silently skipping them.
+        // CIDER-BUG-089: the class's vptr store is part of the shared
+        // formation pass (emitClassFieldInitializersImpl), so `new` and
+        // value locals take the same path instead of duplicating the store.
         auto sym = resolveStructOrClassSymbol(type);
         if (sym && sym->kind == SymbolKind::CLASS) {
             auto classSym = std::static_pointer_cast<StructSymbol>(sym);
-            if (!classSym->vtable.empty()) {
-                IRValue vptrVal = IRValue::Label("vtable_" + vtableKeyForClass(classSym));
-                currentBlock_->addInstruction({IROp::STORE, std::nullopt, {dest, vptrVal, IRValue::Constant(0, IRType::I32)}});
-            }
             // CIDER-BUG-049: run the class's field initializers (inherited
             // fields included, in layout order).
             emitClassFieldInitializers(classSym, dest);
@@ -6571,7 +6654,7 @@ public:
             // embedded class-valued fields run their initializers on the
             // zeroed allocation, exactly like a declared local.
             std::set<const StructSymbol*> visiting;
-            if (aggregateHasInitializers(type, "", visiting)) {
+            if (aggregateNeedsInit(type, "", visiting)) {
                 emitEmbeddedInitializers(type, dest, 0, "", visiting);
             }
         }
@@ -6970,7 +7053,7 @@ public:
         currentBlock_->addInstruction({IROp::ALLOCA, addr, {IRValue::Constant(totalSize, IRType::I32)}});
 
         // Store first element
-        emitListElementStore(addr, 0, firstVal, elemSize, elemIsAggregate);
+        emitListElementStore(addr, 0, firstVal, elemType, elemSize, elemIsAggregate);
 
         // Store remaining elements
         for (size_t i = 1; i < elements.size(); i++) {
@@ -6982,7 +7065,7 @@ public:
                 return;
             }
             emitListElementStore(addr, (int64_t)i * elemSize, lastValue_,
-                                 elemSize, elemIsAggregate);
+                                 elemType, elemSize, elemIsAggregate);
         }
 
         lastValue_ = addr;
