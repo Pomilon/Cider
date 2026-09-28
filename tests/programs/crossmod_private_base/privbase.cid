@@ -1,0 +1,24 @@
+// CIDER-BUG-090 regression module: `Inner` is private to this module, yet
+// the exported `Base` layout embeds it by value and its methods use it in
+// their signatures. A derived class in another module must inherit the
+// layout, field access, method signatures and dispatch even though its own
+// module cannot name `Inner` at all. `Inner` is 8-byte aligned so a derived
+// class that resolves the inherited spelling in the WRONG module sizes its
+// layout differently.
+from std.io import print;
+
+class Inner {
+  var v: int = 3;
+  var big: u64;
+  func ~Inner() { print("i"); }
+}
+
+export class Base {
+  var inner: Inner;
+  var tag: int = 10;
+  func init(x: int) -> void { this.inner.v = x; }
+  virtual func who() -> int { return 100; }
+  func baseInner() -> int { return this.inner.v; }
+  func getInner() -> Inner { return this.inner; }
+  func setInner(x: Inner) -> void { this.inner = x; }
+}

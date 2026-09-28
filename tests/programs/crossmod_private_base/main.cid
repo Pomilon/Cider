@@ -1,0 +1,68 @@
+// CIDER-BUG-090: a base whose embedded field type is only visible in the
+// base's module used to be rejected with "Type Inner is not a struct or
+// class" as soon as the derived class (in another module) touched the
+// inherited field or a method whose signature names `Inner`. The checker
+// (and IR generator) must resolve the field/signature spelling in the
+// DEFINING module, not at the derived use site.
+//
+// Covered here:
+//   - construction of the derived class runs the private type's own field
+//     initializer through the inherited embedded field
+//   - member access/stores on the inherited private-typed field
+//   - a same-named local type stays distinct: `mine` is this module's
+//     `Inner`, the inherited `inner` is `privbase`'s
+//   - inherited methods whose parameter and return types are the private
+//     type, including passing the value through
+//   - `super` calls and virtual dispatch through a base pointer
+//   - the derived layout uses the inherited type's real 8-byte alignment
+//     (48; resolving `Inner` in this module would size it 44)
+//   - value copies of the derived class carry the inherited prefix
+//   - the embedded private type's destructor runs at scope exit
+import privbase;
+from privbase import Base;
+from std.io import print, printInt;
+
+// Same name as the base module's private type: the inherited field must
+// keep resolving to `privbase::Inner`, this field to the local `Inner`.
+class Inner {
+  var w: int = 7;
+}
+
+class Derived extends Base {
+  var extra: int = 5;
+  var mine: Inner;
+  var tail: u8;
+  override func who() -> int { return super.who() + 1; }
+}
+
+func main() -> int {
+  var d: *Derived = new Derived;
+  printInt(d->mine.w); print(",");        // 7  local same-named type is distinct
+  printInt(d->inner.v); print(",");       // 3  Inner's initializer ran
+  d->inner.v = 20;
+  d->extra = 2;
+  d->tail = 6;
+  printInt(d->inner.v); print(",");       // 20 inherited field store
+  printInt(d->extra); print(",");         // 2
+  printInt(d->tail); print(",");          // 6
+  printInt(d->baseInner()); print(",");   // 20 inherited method
+  printInt(d->getInner().v); print(",");  // 20 method returning private type
+  d->setInner(d->getInner());             // private-typed parameter
+  printInt(d->getInner().v); print(",");  // 20
+  printInt(d->who()); print(",");         // 101 override calling super
+  var b: *Base = d;
+  printInt(b->who()); print(",");         // 101 dispatch through base
+  printInt(b->tag); print(",");           // 10 base field initializer
+  printInt(sizeof(Derived)); print("\n"); // 48: inherited 8-byte alignment
+
+  var db: Derived;
+  printInt(db.inner.v); print(",");       // 3 value-local embedded initializer
+  db.inner.v = 9;
+  db.extra = 4;
+  var db2: Derived;
+  db2 = db;
+  printInt(db2.inner.v); print(",");      // 9 inherited prefix copied
+  printInt(db2.extra); print(",");        // 4
+  printInt(db2.baseInner()); print("\n"); // 9
+  return 0;
+}

@@ -1,0 +1,6 @@
+// CIDER-BUG-090 negative fixture module: `Hidden` is private to this
+// module, so another module can never name it (the defining-module
+// resolution must not leak visibility).
+class Hidden {
+  var v: int;
+}

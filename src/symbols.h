@@ -246,6 +246,13 @@ struct StructSymbol : public Symbol {
         // inherited field keeps its declaring class's module. Used when
         // folding const references at the object creation site.
         std::string initializerModule;
+        // CIDER-BUG-090: module the field's TYPE SPELLING binds in ("" ==
+        // main). An inherited field keeps its declaring class's module,
+        // which may differ from the module of the class being accessed or
+        // laid out, so consumers must resolve `type` there rather than in
+        // the derived class's scope (same defining-module rule as
+        // initializerModule).
+        std::string typeModule;
     };
     struct Method {
         std::string name;
@@ -255,6 +262,11 @@ struct StructSymbol : public Symbol {
         int vtableIndex = -1;
         bool isVirtual = false;
         bool isOverride = false;
+        // CIDER-BUG-090: module this method's signature spellings bind in
+        // ("" == main). An inherited method keeps its declaring class's
+        // module, which may differ from the derived class's and may be the
+        // only module where a parameter/return type is visible.
+        std::string declaringModule;
     };
     std::vector<Field> fields;
     std::vector<Method> methods;

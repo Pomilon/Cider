@@ -761,6 +761,23 @@ public:
         return t;
     }
 
+    // CIDER-BUG-090: module a field's type spelling belongs to ("" == main).
+    // An inherited field keeps its declaring class's module, which the
+    // derived class's module may not see; field type resolution must use
+    // this, not the accessed class's module. `ownerMod` covers symbols
+    // built outside the collector (unit tests), where the field's module is
+    // the aggregate's.
+    static std::string fieldTypeModule(const StructSymbol::Field& f, const std::string& ownerMod) {
+        return f.typeModule.empty() ? ownerMod : f.typeModule;
+    }
+
+    // CIDER-BUG-090: module a method's signature spellings belong to; an
+    // inherited method keeps its declaring class's module. `ownerMod`
+    // covers symbols built outside the collector (unit tests).
+    static std::string methodModule(const StructSymbol::Method& m, const std::string& ownerMod) {
+        return m.declaringModule.empty() ? ownerMod : m.declaringModule;
+    }
+
     // CID-031: a symbol declared in another module carries that module's
     // bare nominal type name. Re-root it in the owner's context so layout
     // resolution (field offsets, sizes) matches the checker's canonical
@@ -1540,7 +1557,13 @@ public:
                 // same-named type in the caller (or no visible type at all)
                 // cannot change the call convention.
                 calleeDefMod = definingModuleFor(sym, funcName);
-                lastExprType_ = calleeRet;
+                // CIDER-BUG-090: present the result spelling rooted in the
+                // callee's module (mirroring the checker), so member access
+                // on the result resolves a return type the caller's module
+                // may not see — e.g. an inherited method returning the base
+                // module's private type.
+                lastExprType_ =
+                    canonicalizeNominalInModule(resolveTypeAlias(calleeRet, calleeDefMod), calleeDefMod);
                 // CID-003: the parameter's declared width drives the
                 // conversion of float-family arguments (a literal in a
                 // float context keeps its parsed double). Method symbols
@@ -1597,7 +1620,7 @@ public:
                     // assignment/dispatch/argument paths treat it as one.
                     lastExprType_ = calleeIfaceRet;
                 } else {
-                    lastExprType_ = calleeRet;
+                    // CIDER-BUG-090: keep the callee-module-rooted spelling.
                     lastExprType_.isUserDefined = true;
                 }
                 return;
@@ -2243,8 +2266,12 @@ public:
                     // bare nominals in the struct's module so a
                     // transitively reached pointee type resolves without
                     // an explicit import (CIDER-BUG-043).
+                    // CIDER-BUG-090: an inherited field keeps its own
+                    // declaring module, which the accessed class's module
+                    // may not see.
+                    std::string fieldMod = fieldTypeModule(field, ownerMod);
                     TypeInfo fieldType =
-                        canonicalizeNominalInModule(resolveTypeAlias(field.type, ownerMod), ownerMod);
+                        canonicalizeNominalInModule(resolveTypeAlias(field.type, fieldMod), fieldMod);
                     // CIDER-BUG-069: an interface-typed field is a 16-byte
                     // fat pointer; reads present its address (like an
                     // interface variable) so dispatch sees both words.
@@ -2252,8 +2279,8 @@ public:
                     bool fieldIsStruct = (fieldType.pointerLevel == 0);
                     if (fieldIsStruct) {
                         auto fieldTypeSym = resolveNominalType(fieldType.name);
-                        if (!fieldTypeSym && !ownerMod.empty()) {
-                            fieldTypeSym = resolveCalleeNominal(fieldType.name, ownerMod);
+                        if (!fieldTypeSym && !fieldMod.empty()) {
+                            fieldTypeSym = resolveCalleeNominal(fieldType.name, fieldMod);
                         }
                         if (!fieldTypeSym || (fieldTypeSym->kind != SymbolKind::STRUCT && fieldTypeSym->kind != SymbolKind::CLASS) ||
                             !fieldTypeSym->type.name.empty()) {
@@ -2330,7 +2357,9 @@ public:
                 std::set<const StructSymbol*> visiting;
                 for (const auto& f : structSym->fields) {
                     if (explicitFields.count(f.name)) continue;
-                    emitEmbeddedInitializers(f.type, dest, f.offset, structMod, visiting);
+                    // CIDER-BUG-090: per-field declaring module (templates).
+                    emitEmbeddedInitializers(f.type, dest, f.offset,
+                                             fieldTypeModule(f, structMod), visiting);
                 }
             }
             for (auto& fieldInit : expr.getFields()) {
@@ -3832,7 +3861,10 @@ public:
                 std::string ownerMod = definingModuleFor(sym, ss->name);
                 for (const auto& f : ss->fields) {
                     if (f.name == mem->getMember()) {
-                        return canonicalizeNominalInModule(resolveTypeAlias(f.type, ownerMod), ownerMod);
+                        // CIDER-BUG-090: resolve in the declaring class's
+                        // module (inherited fields keep theirs).
+                        std::string fieldMod = fieldTypeModule(f, ownerMod);
+                        return canonicalizeNominalInModule(resolveTypeAlias(f.type, fieldMod), fieldMod);
                     }
                 }
             }
@@ -3918,7 +3950,10 @@ public:
                 // CIDER-BUG-015/043: report the resolved, module-rooted
                 // type so store widths and conversions see through
                 // `type X = T` spellings and cross-module pointees.
-                out = canonicalizeNominalInModule(resolveTypeAlias(f.type, ownerMod), ownerMod);
+                // CIDER-BUG-090: an inherited field resolves in its own
+                // declaring module.
+                std::string fieldMod = fieldTypeModule(f, ownerMod);
+                out = canonicalizeNominalInModule(resolveTypeAlias(f.type, fieldMod), fieldMod);
                 // CIDER-BUG-069: present an interface field as the 16-byte
                 // fat pointer it is (name fallback for unflagged shapes).
                 out = resolveInterfaceNominal(out);
@@ -6258,7 +6293,9 @@ public:
                     found = true;
                     break;
                 }
-                if (aggregateNeedsInit(field.type, aggMod, visiting)) {
+                // CIDER-BUG-090: an inherited field's type resolves in its
+                // declaring class's module, not the accessed class's.
+                if (aggregateNeedsInit(field.type, fieldTypeModule(field, aggMod), visiting)) {
                     found = true;
                     break;
                 }
@@ -6317,7 +6354,9 @@ public:
         if (!visiting.insert(structSym.get()).second) return;
         std::string structMod = definingModuleFor(structSym, structSym->name);
         for (const auto& field : structSym->fields) {
-            emitEmbeddedInitializers(field.type, objAddr, field.offset, structMod, visiting);
+            // CIDER-BUG-090: per-field declaring module (templates).
+            emitEmbeddedInitializers(field.type, objAddr, field.offset,
+                                     fieldTypeModule(field, structMod), visiting);
         }
         visiting.erase(structSym.get());
     }
@@ -6347,7 +6386,8 @@ public:
         if (!found) {
             std::string aggMod = definingModuleFor(aggSym, aggSym->name);
             for (const auto& field : aggSym->fields) {
-                if (aggregateHasDestructors(field.type, aggMod, visiting)) {
+                // CIDER-BUG-090: per-field declaring module.
+                if (aggregateHasDestructors(field.type, fieldTypeModule(field, aggMod), visiting)) {
                     found = true;
                     break;
                 }
@@ -6386,7 +6426,9 @@ public:
         if (!visiting.insert(aggSym.get()).second) return;
         std::string aggMod = definingModuleFor(aggSym, aggSym->name);
         for (const auto& field : aggSym->fields) {
-            registerEmbeddedDestructors(field.type, base, offset + field.offset, aggMod, visiting);
+            // CIDER-BUG-090: per-field declaring module.
+            registerEmbeddedDestructors(field.type, base, offset + field.offset,
+                                        fieldTypeModule(field, aggMod), visiting);
         }
         if (aggSym->kind == SymbolKind::CLASS && !aggSym->destructorName.empty()) {
             // CID-020/021 (spec §5/§6): destructors mangle with the class's
@@ -6506,15 +6548,19 @@ public:
         std::string classMod = definingModuleFor(classSym, classSym->name);
         for (const auto& field : classSym->fields) {
             Expression* init = field.initializer;
+            // CIDER-BUG-090: an inherited field's type spelling belongs to
+            // the base's module; resolving it in the derived class's module
+            // loses the layout (and the embedded initializers) entirely.
+            std::string fieldMod = fieldTypeModule(field, classMod);
             TypeInfo fieldType =
-                canonicalizeNominalInModule(resolveTypeAlias(field.type, classMod), classMod);
+                canonicalizeNominalInModule(resolveTypeAlias(field.type, fieldMod), fieldMod);
             // CIDER-BUG-082/087: an embedded class value lives in a class
             // field, a struct field or a fixed array (any nesting), so run
             // the inner initializers at the field's address before this
             // class's own stores — matching a direct `var inner: Inner;`
             // local / `new Inner`. No IR is emitted when the nested
             // aggregate is statically all-zero.
-            emitEmbeddedInitializers(fieldType, objAddr, field.offset, classMod, visiting);
+            emitEmbeddedInitializers(fieldType, objAddr, field.offset, fieldMod, visiting);
             if (!init) continue;  // default zero already stored by emitZeroInstance
             IRType fieldIR = (fieldType.pointerLevel > 0) ? IRType::PTR : mapType(fieldType.name);
             bool ptrLike = fieldType.pointerLevel > 0 || fieldType.isFunctionPointer ||
@@ -7264,7 +7310,12 @@ public:
                 // every other method reference.
                 auto methodDef = resolveFunctionDef(m.mangledName, definingScopeFor(ps, ps->name));
                 lastValue_ = IRValue::Label(emitFunctionName(methodDef.second, m.mangledName));
-                lastExprType_ = m.returnType;
+                // CIDER-BUG-090: an inherited method's return spelling
+                // belongs to the class that declared it.
+                std::string methodMod =
+                    methodModule(m, definingModuleFor(parentSym, ps->name));
+                lastExprType_ =
+                    canonicalizeNominalInModule(resolveTypeAlias(m.returnType, methodMod), methodMod);
                 return;
             }
         }

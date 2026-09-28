@@ -165,6 +165,19 @@ public:
     }
     // Module scopes keyed by RESOLVED FILE PATH (spec §1).
     const std::map<std::string, Scope*>& getModuleScopes() const { return moduleScopes_; }
+    // CIDER-BUG-090: scope in which a field's type spelling resolves — its
+    // declaring class/struct's module ("" == main), which for an inherited
+    // field is NOT the derived class's scope. Null when unknown (callers
+    // keep the current scope).
+    Scope* scopeForFieldTypeModule(const std::string& logical) {
+        if (logical.empty()) return symbolTable_.getRootScope();
+        for (const auto& [prog, mod] : programModules_) {
+            if (!prog || mod != logical) continue;
+            auto it = moduleScopes_.find(prog->getSourcePath());
+            if (it != moduleScopes_.end()) return it->second;
+        }
+        return nullptr;
+    }
     // CID-020/021 (spec §6): template instantiation keys include the
     // defining module (`a.Box<int>` vs `b.Box<int>`). The table key joins
     // the defining module's logical name with the template (or explicit
@@ -605,6 +618,8 @@ public:
                 instantiateStructTemplatesInTypeInfo(f.type);
                 // CIDER-BUG-069: resolve interface-ness before sizing.
                 resolveInterfaceTypeFlag(f.type);
+                // CIDER-BUG-090: the spelling belongs to this module.
+                f.typeModule = getCurrentModule();
                 f.offset = 0;
                 f.bits = field.bits;
                 sym->fields.push_back(f);
@@ -621,6 +636,8 @@ public:
                 instantiateStructTemplatesInTypeInfo(f.type);
                 // CIDER-BUG-069: resolve interface-ness before sizing.
                 resolveInterfaceTypeFlag(f.type);
+                // CIDER-BUG-090: the spelling belongs to this module.
+                f.typeModule = getCurrentModule();
                 f.bits = field.bits;
                 sym->fields.push_back(f);
             }
@@ -651,6 +668,7 @@ public:
             StructSymbol::Method method;
             method.name = m.name;
             method.mangledName = m.name;
+            method.declaringModule = getCurrentModule();  // CIDER-BUG-090
             method.returnType = TypeInfo::fromAST(m.returnType.get());
             // CIDER-BUG-066: interface signatures are type annotations too.
             instantiateStructTemplatesInTypeInfo(method.returnType);
@@ -944,6 +962,10 @@ public:
                 instantiateStructTemplatesInTypeInfo(f.type);
                 // CIDER-BUG-069: resolve interface-ness before sizing.
                 resolveInterfaceTypeFlag(f.type);
+                // CIDER-BUG-090: the field's type spelling belongs to the
+                // class's module; inheritance copies it, so the derived
+                // class keeps resolving the inherited type here.
+                f.typeModule = getCurrentModule();
                 // CIDER-BUG-049: class field initializers are materialised at
                 // every object creation site (ir_gen NewExpr / value-class
                 // locals), so the AST is kept on the field. Inheritance copies
@@ -1009,6 +1031,9 @@ public:
                 StructSymbol::Method m;
                 m.name = method->getName();
                 m.mangledName = sym->name + "_" + m.name;
+                // CIDER-BUG-090: signature spellings bind in the module
+                // that declares the method; inheritance copies them.
+                m.declaringModule = getCurrentModule();
                 m.returnType = TypeInfo::fromAST(method->getReturnType());
                 // CIDER-BUG-085: fn(...) return spellings resolve their
                 // signature's interface flags like every other collected type.
@@ -1341,6 +1366,24 @@ public:
     // ordered program (whose field types were all known at collection time)
     // keeps byte-identical offsets and sizes.
 
+    // CIDER-BUG-090: run `fn` with name resolution switched to the module
+    // the field's type spelling was written in. A no-op for the common case
+    // (an own field of the aggregate being laid out); inherited fields and
+    // cross-module template instantiations otherwise resolve their bare
+    // nominals in the wrong scope and fall back to the 8-byte unknown size.
+    template <typename Fn>
+    decltype(auto) inFieldTypeScope(const StructSymbol::Field& f, Fn&& fn) {
+        Scope* fieldScope = scopeForFieldTypeModule(f.typeModule);
+        if (!fieldScope) return fn();
+        struct ScopeRestore {
+            SymbolTable& table;
+            Scope* prev;
+            ~ScopeRestore() { table.setCurrentScope(prev); }
+        } restore{symbolTable_, symbolTable_.getCurrentScope()};
+        symbolTable_.setCurrentScope(fieldScope);
+        return fn();
+    }
+
     // Union: every field overlaps at offset 0; the union is as large and as
     // aligned as its largest field (bitfield members align to their word).
     void layoutUnion(StructSymbol& sym) {
@@ -1348,9 +1391,9 @@ public:
         int maxAlign = 1;
         for (auto& f : sym.fields) {
             f.offset = 0;
-            int size = getFieldSize(f.type);
+            int size = inFieldTypeScope(f, [&] { return getFieldSize(f.type); });
             if (size > maxSize) maxSize = size;
-            int a = (f.bits > 0) ? 4 : getFieldAlignment(f.type);
+            int a = (f.bits > 0) ? 4 : inFieldTypeScope(f, [&] { return getFieldAlignment(f.type); });
             if (a > maxAlign) maxAlign = a;
         }
         sym.totalSize = alignUp(maxSize, maxAlign);
@@ -1385,11 +1428,11 @@ public:
                     currentOffset += 4;
                     bitPos = 0;
                 }
-                int a = getFieldAlignment(f.type);
+                int a = inFieldTypeScope(f, [&] { return getFieldAlignment(f.type); });
                 currentOffset = alignUp(currentOffset, a);
                 if (a > maxAlign) maxAlign = a;
                 f.offset = currentOffset;
-                currentOffset += getFieldSize(f.type);
+                currentOffset += inFieldTypeScope(f, [&] { return getFieldSize(f.type); });
             }
         }
         if (bitPos > 0) currentOffset += 4;
@@ -1413,7 +1456,10 @@ public:
             fields = parent->fields;
             currentOffset = parent->totalSize;
             for (auto& f : fields) {
-                int a = getFieldAlignment(f.type);
+                // CIDER-BUG-090: an inherited field's type spelling belongs
+                // to the base's module; resolving it in the derived class's
+                // scope would size/align it from the 8-byte unknown default.
+                int a = inFieldTypeScope(f, [&] { return getFieldAlignment(f.type); });
                 if (a > maxAlign) maxAlign = a;
             }
         }
@@ -1668,7 +1714,11 @@ public:
         }
         for (size_t i = (size_t)rec.ownFieldStart; i < rec.sym->fields.size(); i++) {
             std::set<std::string> visiting;
-            finalizeTypeDependencies(rec.sym->fields[i].type, visiting);
+            // CIDER-BUG-090: resolve the embedded dependency in the field's
+            // declaring module (inherited fields, cross-module templates).
+            inFieldTypeScope(rec.sym->fields[i], [&] {
+                finalizeTypeDependencies(rec.sym->fields[i].type, visiting);
+            });
         }
 
         if (rec.isUnion) {
@@ -2283,6 +2333,10 @@ public:
             instantiateStructTemplatesInTypeInfo(f.type);
             // CIDER-BUG-069: resolve interface-ness before sizing.
             resolveInterfaceTypeFlag(f.type);
+            // CIDER-BUG-090: the field spellings come from the template
+            // body, so they bind in the template's module even when the
+            // instantiation happens at a use site in another module.
+            f.typeModule = found.second;
             f.bits = field.bits;
             structSym->fields.push_back(f);
         }

@@ -147,6 +147,15 @@ public:
         return currentModule_;
     }
 
+    // CIDER-BUG-090: module a method's signature spellings were written in
+    // ("" == main). An inherited method keeps its declaring class's module,
+    // which may be the only module where a parameter/return type is visible.
+    // `fallback` covers methods built without the collector (unit tests).
+    static std::string methodModuleOf(const StructSymbol::Method& m,
+                                      const std::string& fallback) {
+        return m.declaringModule.empty() ? fallback : m.declaringModule;
+    }
+
     // CID-006: the fn(...) type of a named function, with every nominal
     // canonicalized in the function's defining module (same rule as call
     // signatures, spec §5). `line` attributes dotted-name errors the same
@@ -2709,8 +2718,9 @@ public:
             auto iface = std::static_pointer_cast<InterfaceSymbol>(ifaceSym);
             for (const auto& method : iface->methods) {
                 if (method.name == expr.getMember()) {
-                    lastExprType_ =
-                        canonicalizeInModule(method.returnType, definingModuleOf(ifaceSym), expr.getLine());
+                    lastExprType_ = canonicalizeInModule(
+                        method.returnType, methodModuleOf(method, definingModuleOf(ifaceSym)),
+                        expr.getLine());
                     // CIDER-BUG-077: an interface method returning an
                     // interface yields the fat pointer (caller sret slot).
                     resolveInterfaceFlag(lastExprType_);
@@ -2738,7 +2748,10 @@ public:
             if (field.name == expr.getMember()) {
                 // CID-020/021 §1: field nominals belong to the struct's
                 // owner module; canonicalize there, not at the use site.
-                lastExprType_ = canonicalizeInModule(field.type, definingModuleOf(sym), expr.getLine());
+                // CIDER-BUG-090: an inherited field's spelling belongs to
+                // the class that declared it, not to the derived class's
+                // module (which may not see the field's type at all).
+                lastExprType_ = canonicalizeInModule(field.type, field.typeModule, expr.getLine());
                 // CIDER-BUG-069: an interface-typed field is a fat pointer;
                 // resolve the flag by name as a fallback (the collector sets
                 // it for module-local declarations).
@@ -2751,8 +2764,11 @@ public:
         if (!found) {
             for (const auto& method : structSym->methods) {
                 if (method.name == expr.getMember()) {
-                    lastExprType_ = canonicalizeInModule(method.returnType, definingModuleOf(sym),
-                                                         expr.getLine());
+                    // CIDER-BUG-090: an inherited method's return spelling
+                    // belongs to the class that declared it.
+                    lastExprType_ = canonicalizeInModule(
+                        method.returnType, methodModuleOf(method, definingModuleOf(sym)),
+                        expr.getLine());
                     // CIDER-BUG-077: class methods may return interfaces.
                     resolveInterfaceFlag(lastExprType_);
                     found = true;
@@ -2834,14 +2850,16 @@ public:
         }
 
         auto structSym = std::static_pointer_cast<StructSymbol>(sym);
-        std::string ownerMod = definingModuleOf(sym);
         for (auto& fieldInit : expr.getFields()) {
             bool fieldFound = false;
             for (const auto& fieldDef : structSym->fields) {
                 if (fieldDef.name == fieldInit.first) {
                     fieldFound = true;
                     fieldInit.second->accept(*this);
-                    TypeInfo expT = canonicalizeInModule(fieldDef.type, ownerMod, expr.getLine());
+                    // CIDER-BUG-090: resolve in the field's declaring
+                    // module, like member access does.
+                    TypeInfo expT = canonicalizeInModule(fieldDef.type, fieldDef.typeModule,
+                                                         expr.getLine());
                     // CIDER-BUG-069: an interface-typed field in a struct
                     // literal accepts any satisfying concrete value, exactly
                     // like a direct assignment to the field.
@@ -3030,8 +3048,11 @@ public:
                             // Found the method
                             funcSym = std::make_shared<FunctionSymbol>();
                             funcSym->name = m.name;
+                            // CIDER-BUG-090: an inherited method's signature
+                            // spellings belong to the class that declared it.
+                            std::string methodMod = methodModuleOf(m, ownerMod);
                             for (const auto& pt : m.parameterTypes) {
-                                TypeInfo paramT = canonicalizeInModule(pt, ownerMod, expr.getLine());
+                                TypeInfo paramT = canonicalizeInModule(pt, methodMod, expr.getLine());
                                 // CIDER-BUG-080: class-method interface
                                 // parameters carry the fat-pointer flag; the
                                 // collector resolves it, this keeps the
@@ -3040,7 +3061,7 @@ public:
                                 funcSym->parameterTypes.push_back(paramT);
                             }
                             funcSym->returnType =
-                                canonicalizeInModule(m.returnType, ownerMod, expr.getLine());
+                                canonicalizeInModule(m.returnType, methodMod, expr.getLine());
                             // CIDER-BUG-077: a method's interface-typed
                             // return is a fat pointer; recover the flag for
                             // signature copies that lost it.
@@ -3491,8 +3512,10 @@ public:
         auto ps = std::static_pointer_cast<StructSymbol>(parentSym);
         for (auto& m : ps->methods) {
             if (m.name == expr.getMember()) {
-                lastExprType_ =
-                    canonicalizeInModule(m.returnType, definingModuleOf(parentSym), expr.getLine());
+                // CIDER-BUG-090: resolve in the method's declaring module,
+                // which the parent may itself have inherited the method from.
+                lastExprType_ = canonicalizeInModule(
+                    m.returnType, methodModuleOf(m, definingModuleOf(parentSym)), expr.getLine());
                 return;
             }
         }
