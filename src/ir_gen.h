@@ -85,6 +85,8 @@ public:
         structSyms_.clear();
         ifaceSyms_.clear();
         globalValues_.clear();
+        pendingGlobalInits_.clear();
+        entryFunctions_.clear();
         exceptionGlobalsEnsured_ = false;
         interpHelpersEnsured_ = false;
         stringEqHelpersEnsured_ = false;
@@ -189,6 +191,11 @@ public:
         for (auto& fn : module_.getFunctions()) {
             if (ifaceDispatchedNames.count(fn->getName())) fn->setAbi(Abi::SysV);
         }
+
+        // CIDER-BUG-087: run embedded class-value field initializers for
+        // module-scope aggregates from a synthesized startup function (the
+        // entry calls it). No-op unless such a global exists.
+        emitGlobalFieldInitializers();
 
         return std::move(module_);
     }
@@ -1061,6 +1068,13 @@ public:
         // definition is weak: the linker keeps one shared copy.
         if (separateCompilation_ && !emitPath.empty()) currentFunction_->setWeak(true);
         currentFunction_->setSourceLine(stmt.getLine());
+        // CIDER-BUG-087: a top-level entry function runs the synthesized
+        // global field-initializer pass before any user code (see
+        // emitGlobalFieldInitializers). Nested functions are not entries.
+        if (!prevFunction && (stmt.getName() == "main" || stmt.getName() == "_start" ||
+                              stmt.getName() == "efi_main")) {
+            entryFunctions_.push_back(currentFunction_.get());
+        }
         currentBlock_ = std::make_unique<BasicBlock>("entry");
         functionEntryBlock_ = currentBlock_.get();
 
@@ -2259,6 +2273,22 @@ public:
         auto sym = symbolTable_.resolve(expr.getStructName());
         if (sym && (sym->kind == SymbolKind::STRUCT || sym->kind == SymbolKind::CLASS)) {
             auto structSym = std::static_pointer_cast<StructSymbol>(sym);
+            // CIDER-BUG-087: fields the literal omits must run the field
+            // initializers of the class values they embed, exactly like a
+            // declared local. Explicit fields copy their slot wholesale
+            // (below), so the omitted ones are initialised first.
+            {
+                std::set<std::string> explicitFields;
+                for (auto& fieldInit : expr.getFields()) {
+                    explicitFields.insert(fieldInit.first);
+                }
+                std::string structMod = definingModuleFor(structSym, structSym->name);
+                std::set<const StructSymbol*> visiting;
+                for (const auto& f : structSym->fields) {
+                    if (explicitFields.count(f.name)) continue;
+                    emitEmbeddedInitializers(f.type, dest, f.offset, structMod, visiting);
+                }
+            }
             for (auto& fieldInit : expr.getFields()) {
                 int offset = 0;
                 TypeInfo fieldType;
@@ -2660,6 +2690,16 @@ public:
                 }
             }
             int totalBytes = getTypeSize(sym->type);
+            // CIDER-BUG-087: a module-scope aggregate whose embedded class
+            // values carry initializers stays zero in .bss, so queue its
+            // field-initializer pass for the synthesized startup function
+            // (see emitGlobalFieldInitializers). The predicate filters out
+            // scalars and class-free aggregates, which emit nothing.
+            if (sym->type.pointerLevel == 0 &&
+                (sym->type.isArray || isStructValueType(sym->type))) {
+                pendingGlobalInits_.push_back(
+                    {sym->type, definingModuleFor(sym, stmt.getName()), IRValue::Label(gname)});
+            }
             module_.addGlobalVar(gname, (sym->type.pointerLevel > 0) ? IRType::PTR : mapType(sym->type.name), initVal, sym->type.isArray ? sym->type.arraySize : 0, totalBytes, initIsFloat, currentSourcePath_);
             globalValues_[gname] = IRValue::Label(gname);
             return;
@@ -2693,6 +2733,27 @@ public:
                     emitZeroInstance(addr, getTypeSize(varType));
                     emitClassFieldInitializers(classSym, addr);
                 }
+            } else if (!stmt.getInitializer()) {
+                // CIDER-BUG-087: a struct value embeds its class-valued
+                // fields by value, so a fresh local must run those classes'
+                // field initializers at the fields' addresses. Gated on the
+                // predicate so structs without embedded class initializers
+                // keep their existing (unzeroed) emission.
+                std::set<const StructSymbol*> visiting;
+                if (aggregateHasInitializers(varType, currentModule_, visiting)) {
+                    emitZeroInstance(addr, getTypeSize(varType));
+                    emitEmbeddedInitializers(varType, addr, 0, currentModule_, visiting);
+                }
+            }
+        } else if (varType.pointerLevel == 0 && varType.isArray && !stmt.getInitializer()) {
+            // CIDER-BUG-087: a fixed array of class values embeds each
+            // element as a subobject; zero the whole array so unset fields
+            // read zero, then run every element's initializers. Struct
+            // elements recurse through their own class-valued fields.
+            std::set<const StructSymbol*> visiting;
+            if (aggregateHasInitializers(varType, currentModule_, visiting)) {
+                emitZeroInstance(addr, getTypeSize(varType));
+                emitEmbeddedInitializers(varType, addr, 0, currentModule_, visiting);
             }
         }
 
@@ -5957,46 +6018,191 @@ public:
         emitClassFieldInitializersImpl(classSym, objAddr, visiting);
     }
 
-    // CIDER-BUG-082: true when `classSym` has a field initializer to run,
-    // directly or through an embedded class-value field. Lets the recursion
-    // below skip its address computation entirely for nested objects that
-    // are statically all-zero, keeping output byte-identical for programs
-    // whose embedded classes have no initializers. `visiting` is the same
-    // path set as emitClassFieldInitializersImpl (by-value layout cycles).
-    bool classHasFieldInitializers(const std::shared_ptr<StructSymbol>& classSym,
-                                   std::set<const StructSymbol*>& visiting) {
-        if (!classSym || !visiting.insert(classSym.get()).second) return false;
-        std::string classMod = definingModuleFor(classSym, classSym->name);
+    // CIDER-BUG-087: true when an embedded class value under `t` has a
+    // field initializer to run — directly (a class field with an
+    // initializer) or nested through struct fields and fixed arrays of
+    // class/struct values. Mirrors emitEmbeddedInitializers so the two
+    // cannot disagree about when IR is emitted: aggregates that are
+    // statically all-zero stay byte-identical (no address computation, no
+    // stores). `visiting` is the by-value layout cycle guard (a repeated
+    // class or struct means `class A { var a: A; }` /
+    // `struct S { var s: S; }`): stop instead of recursing without bound.
+    bool aggregateHasInitializers(TypeInfo t, const std::string& defModule,
+                                  std::set<const StructSymbol*>& visiting) {
+        t = canonicalizeNominalInModule(resolveTypeAlias(t, defModule), defModule);
+        if (t.pointerLevel > 0 || t.isSlice || t.isInterface || t.isFunctionPointer) return false;
+        if (t.isArray) {
+            if (t.arraySize <= 0) return false;
+            return aggregateHasInitializers(t.elementType(), defModule, visiting);
+        }
+        auto sym = resolveStructOrClassSymbol(t, defModule);
+        if (!sym) return false;
+        auto aggSym = std::static_pointer_cast<StructSymbol>(sym);
+        if (!visiting.insert(aggSym.get()).second) return false;
+        std::string aggMod = definingModuleFor(aggSym, aggSym->name);
         bool found = false;
-        for (const auto& field : classSym->fields) {
+        for (const auto& field : aggSym->fields) {
+            // CIDER-BUG-049: only class fields carry initializers; the
+            // parser rejects them on struct fields.
             if (field.initializer) {
                 found = true;
                 break;
             }
-            TypeInfo fieldType =
-                canonicalizeNominalInModule(resolveTypeAlias(field.type, classMod), classMod);
-            if (fieldType.pointerLevel > 0 || fieldType.isArray || fieldType.isSlice ||
-                fieldType.isInterface) {
-                continue;
-            }
-            auto innerSym = resolveStructOrClassSymbol(fieldType, classMod);
-            if (innerSym && innerSym->kind == SymbolKind::CLASS &&
-                classHasFieldInitializers(std::static_pointer_cast<StructSymbol>(innerSym),
-                                          visiting)) {
+            if (aggregateHasInitializers(field.type, aggMod, visiting)) {
                 found = true;
                 break;
             }
         }
-        visiting.erase(classSym.get());
+        visiting.erase(aggSym.get());
         return found;
     }
 
-    // CIDER-BUG-082: `visiting` is the recursion path for embedded
-    // class-value fields, keyed by class identity. A repeated class means a
-    // by-value layout cycle (`class A { var a: A; }`, which the collector
-    // sizes with a fallback): stop instead of recursing without bound. It is
-    // a path set, not a global one, so two sibling fields of one class both
-    // run.
+    // CIDER-BUG-087: run the initializers of every embedded class value
+    // under `base + offset`. The caller established via
+    // aggregateHasInitializers that at least one exists, so no IR is
+    // emitted for all-zero aggregates (byte-identity) — the address is
+    // computed lazily here for the same reason. Pointer, slice, interface
+    // and fn-pointer values are not embedded aggregates: pointers handle
+    // their target where it is constructed, slices hold descriptor
+    // storage, and an interface is a fat pointer.
+    void emitEmbeddedInitializers(TypeInfo t, IRValue base, int offset,
+                                  const std::string& defModule,
+                                  std::set<const StructSymbol*>& visiting) {
+        t = canonicalizeNominalInModule(resolveTypeAlias(t, defModule), defModule);
+        if (t.pointerLevel > 0 || t.isSlice || t.isInterface || t.isFunctionPointer) return;
+        if (!aggregateHasInitializers(t, defModule, visiting)) return;
+        IRValue addr = IRValue::Register(nextTemp(), IRType::PTR);
+        currentBlock_->addInstruction(
+            {IROp::ADD, addr, {base, IRValue::Constant((int64_t)offset, IRType::I32)}});
+        if (t.isArray) {
+            // CIDER-BUG-087: a fixed array of class values embeds every
+            // element as a subobject; run them in index order.
+            TypeInfo elem = canonicalizeNominalInModule(resolveTypeAlias(t.elementType(), defModule),
+                                                        defModule);
+            int elemSize = getTypeSize(elem);
+            for (int i = 0; i < t.arraySize; ++i) {
+                emitEmbeddedInitializers(elem, addr, i * elemSize, defModule, visiting);
+            }
+            return;
+        }
+        auto sym = resolveStructOrClassSymbol(t, defModule);
+        if (!sym) return;
+        auto aggSym = std::static_pointer_cast<StructSymbol>(sym);
+        if (aggSym->kind == SymbolKind::CLASS) {
+            emitClassFieldInitializersImpl(aggSym, addr, visiting);
+        } else {
+            emitStructFieldInitializersImpl(aggSym, addr, visiting);
+        }
+    }
+
+    // CIDER-BUG-087: structs have no field initializers of their own (the
+    // parser rejects them), so this only recurses into the class values
+    // their fields embed, at the field's address. `visiting` carries the
+    // layout cycle guard for struct-in-struct by-value nesting.
+    void emitStructFieldInitializersImpl(const std::shared_ptr<StructSymbol>& structSym,
+                                         IRValue objAddr,
+                                         std::set<const StructSymbol*>& visiting) {
+        if (!structSym || !currentFunction_) return;
+        if (!visiting.insert(structSym.get()).second) return;
+        std::string structMod = definingModuleFor(structSym, structSym->name);
+        for (const auto& field : structSym->fields) {
+            emitEmbeddedInitializers(field.type, objAddr, field.offset, structMod, visiting);
+        }
+        visiting.erase(structSym.get());
+    }
+
+    // CIDER-BUG-087: module-scope class/struct values are zero in .bss (and
+    // in the VM's zero-filled global storage), so their embedded class
+    // values need the same initializer stores a local gets. There is no
+    // runtime pass for globals, so synthesize `_cider_global_init` and call
+    // it from every entry function before user code; the body replays the
+    // same emitEmbeddedInitializers machinery at each global's label.
+    // Programs with no such globals emit nothing (byte-identical).
+    void emitGlobalFieldInitializers() {
+        if (pendingGlobalInits_.empty() || entryFunctions_.empty()) return;
+        std::set<const StructSymbol*> visiting;
+        bool any = false;
+        for (const auto& pending : pendingGlobalInits_) {
+            TypeInfo t = canonicalizeNominalInModule(
+                resolveTypeAlias(pending.type, pending.defModule), pending.defModule);
+            if (aggregateHasInitializers(t, pending.defModule, visiting)) {
+                any = true;
+                break;
+            }
+        }
+        if (!any) return;
+
+        // Build the helper in a fresh function context: field initializers
+        // fold consts in their declaring module and allocate temps, exactly
+        // as at a local creation site.
+        auto prevFunction = std::move(currentFunction_);
+        auto prevBlock = std::move(currentBlock_);
+        auto prevVariableValues = variableValues_;
+        int prevTempCount = tempCount_;
+        int prevLabelCount = labelCount_;
+        BasicBlock* prevEntryBlock = functionEntryBlock_;
+        TypeInfo prevReturnType = currentReturnType_;
+        bool prevIsSret = currentIsSret_;
+
+        currentFunction_ = std::make_unique<FunctionIR>(globalInitFunctionName(), IRType::VOID);
+        currentBlock_ = std::make_unique<BasicBlock>("entry");
+        functionEntryBlock_ = currentBlock_.get();
+        variableValues_.clear();
+        tempCount_ = 0;
+        labelCount_ = 0;
+        currentReturnType_ = {"void", 0};
+        currentIsSret_ = false;
+
+        for (const auto& pending : pendingGlobalInits_) {
+            TypeInfo t = canonicalizeNominalInModule(
+                resolveTypeAlias(pending.type, pending.defModule), pending.defModule);
+            if (!aggregateHasInitializers(t, pending.defModule, visiting)) continue;
+            IRValue base = IRValue::Register(nextTemp(), IRType::PTR);
+            currentBlock_->addInstruction({IROp::MOV, base, {pending.addr}});
+            emitEmbeddedInitializers(t, base, 0, pending.defModule, visiting);
+        }
+        currentBlock_->addInstruction({IROp::RET, std::nullopt, {}});
+        currentFunction_->addBlock(std::move(currentBlock_));
+        currentBlock_ = nullptr;
+        module_.addFunction(std::move(currentFunction_));
+
+        currentFunction_ = std::move(prevFunction);
+        currentBlock_ = std::move(prevBlock);
+        variableValues_ = prevVariableValues;
+        tempCount_ = prevTempCount;
+        labelCount_ = prevLabelCount;
+        functionEntryBlock_ = prevEntryBlock;
+        currentReturnType_ = prevReturnType;
+        currentIsSret_ = prevIsSret;
+
+        // The call runs before any user code. A program with both `main`
+        // and `_start` gets it in each; the pass is idempotent, so a shared
+        // entry cannot observe a half-initialised global.
+        IRInstruction call;
+        call.op = IROp::CALL;
+        call.dest = std::nullopt;
+        call.args.push_back(IRValue::Label(globalInitFunctionName()));
+        for (FunctionIR* entry : entryFunctions_) {
+            if (!entry) continue;
+            auto& blocks = entry->getBlocks();
+            if (blocks.empty()) continue;
+            auto& instructions = blocks[0]->getInstructions();
+            instructions.insert(instructions.begin(), call);
+        }
+    }
+
+    // CIDER-BUG-087: fixed helper name, matching the runtime-helper style
+    // (`_strlen`, `_streq`). Synthesized (empty source path), so codegen
+    // emits it in the object that generated it and only that object's entry
+    // references it.
+    static std::string globalInitFunctionName() { return "_cider_global_init"; }
+
+    // CIDER-BUG-082/087: `visiting` is the recursion path for embedded
+    // class-value fields, keyed by aggregate identity. A repeated class or
+    // struct means a by-value layout cycle (`class A { var a: A; }`,
+    // `struct S { var s: S; }`, which the collector sizes with a
+    // fallback): stop instead of recursing without bound. It is a path
+    // set, not a global one, so two sibling fields of one class both run.
     void emitClassFieldInitializersImpl(const std::shared_ptr<StructSymbol>& classSym,
                                         IRValue objAddr,
                                         std::set<const StructSymbol*>& visiting) {
@@ -6007,29 +6213,13 @@ public:
             Expression* init = field.initializer;
             TypeInfo fieldType =
                 canonicalizeNominalInModule(resolveTypeAlias(field.type, classMod), classMod);
-            // CIDER-BUG-082: an embedded class-value field is a nested
-            // object, so run the INNER class's field initializers at the
-            // field's address before this class's own stores — matching a
-            // direct `var inner: Inner;` local / `new Inner`, where
-            // emitClassFieldInitializers(Inner) runs with no initializer
-            // required on the field. Pointer/array/slice/interface fields
-            // are not embedded objects: pointers handle their target where
-            // it is constructed, arrays and slices hold elements/descriptor
-            // storage, and an interface field is a fat pointer.
-            if (fieldType.pointerLevel == 0 && !fieldType.isArray && !fieldType.isSlice &&
-                !fieldType.isInterface) {
-                auto innerSym = resolveStructOrClassSymbol(fieldType, classMod);
-                if (innerSym && innerSym->kind == SymbolKind::CLASS) {
-                    auto innerClassSym = std::static_pointer_cast<StructSymbol>(innerSym);
-                    if (classHasFieldInitializers(innerClassSym, visiting)) {
-                        IRValue innerAddr = IRValue::Register(nextTemp(), IRType::PTR);
-                        currentBlock_->addInstruction(
-                            {IROp::ADD, innerAddr,
-                             {objAddr, IRValue::Constant(field.offset, IRType::I32)}});
-                        emitClassFieldInitializersImpl(innerClassSym, innerAddr, visiting);
-                    }
-                }
-            }
+            // CIDER-BUG-082/087: an embedded class value lives in a class
+            // field, a struct field or a fixed array (any nesting), so run
+            // the inner initializers at the field's address before this
+            // class's own stores — matching a direct `var inner: Inner;`
+            // local / `new Inner`. No IR is emitted when the nested
+            // aggregate is statically all-zero.
+            emitEmbeddedInitializers(fieldType, objAddr, field.offset, classMod, visiting);
             if (!init) continue;  // default zero already stored by emitZeroInstance
             IRType fieldIR = (fieldType.pointerLevel > 0) ? IRType::PTR : mapType(fieldType.name);
             bool ptrLike = fieldType.pointerLevel > 0 || fieldType.isFunctionPointer ||
@@ -6167,6 +6357,14 @@ public:
             // bound to the fresh object.
             if (!classSym->constructorName.empty()) {
                 emitConstructorCall(classSym, dest, expr.getArgs());
+            }
+        } else if (sym && sym->kind == SymbolKind::STRUCT) {
+            // CIDER-BUG-087: `new S` is a fresh struct value, so its
+            // embedded class-valued fields run their initializers on the
+            // zeroed allocation, exactly like a declared local.
+            std::set<const StructSymbol*> visiting;
+            if (aggregateHasInitializers(type, "", visiting)) {
+                emitEmbeddedInitializers(type, dest, 0, "", visiting);
             }
         }
 
@@ -6962,6 +7160,20 @@ private:
     // CIDER-BUG-067: static all-zero blocks keyed by byte size, the source of
     // the whole-instance zeroing at each creation site (one per distinct size).
     std::map<int, std::string> zeroBuffers_;
+    // CIDER-BUG-087: module-scope aggregates (class/struct values and fixed
+    // arrays of them) whose embedded class-valued fields need a startup
+    // pass. Their storage is zero in .bss / the VM's zero-filled globals,
+    // so a synthesized function replays the same field-initializer stores a
+    // local gets; the program entry calls it before any user code.
+    struct PendingGlobalInit {
+        TypeInfo type;
+        std::string defModule;
+        IRValue addr;
+    };
+    std::vector<PendingGlobalInit> pendingGlobalInits_;
+    // CIDER-BUG-087: top-level entry functions (main/_start/efi_main)
+    // generated in this unit; each runs the global initializer pass.
+    std::vector<FunctionIR*> entryFunctions_;
     std::string nextTemp() { return "v" + std::to_string(tempCount_++); }
     std::string nextLabel(const std::string& prefix) {
         return (currentFunction_ ? currentFunction_->getName() + "_" : "") + prefix + std::to_string(labelCount_++);
