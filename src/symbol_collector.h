@@ -449,7 +449,7 @@ public:
                 f.name = field.name;
                 f.type = TypeInfo::fromAST(field.type.get());
                 // CIDER-BUG-069: resolve interface-ness before sizing.
-                resolveInterfaceFieldFlag(f.type);
+                resolveInterfaceTypeFlag(f.type);
                 f.offset = 0;
                 f.bits = field.bits;
 
@@ -470,7 +470,7 @@ public:
                 f.name = field.name;
                 f.type = TypeInfo::fromAST(field.type.get());
                 // CIDER-BUG-069: resolve interface-ness before sizing.
-                resolveInterfaceFieldFlag(f.type);
+                resolveInterfaceTypeFlag(f.type);
                 f.bits = field.bits;
 
                 if (field.bits > 0) {
@@ -531,7 +531,13 @@ public:
             method.mangledName = m.name;
             method.returnType = TypeInfo::fromAST(m.returnType.get());
             for (auto& p : m.params) {
-                method.parameterTypes.push_back(TypeInfo::fromAST(p.second.get()));
+                TypeInfo paramType = TypeInfo::fromAST(p.second.get());
+                // CIDER-BUG-080: an interface-typed method parameter is a
+                // 16-byte fat pointer, exactly like a function parameter;
+                // resolve the flag so satisfaction comparisons and the
+                // call paths agree on the representation.
+                resolveInterfaceTypeFlag(paramType);
+                method.parameterTypes.push_back(paramType);
             }
             sym->methods.push_back(method);
         }
@@ -797,7 +803,7 @@ public:
                 f.name = field->getName();
                 f.type = TypeInfo::fromAST(field->getTypeAST());
                 // CIDER-BUG-069: resolve interface-ness before sizing.
-                resolveInterfaceFieldFlag(f.type);
+                resolveInterfaceTypeFlag(f.type);
                 // CIDER-BUG-049: class field initializers are materialised at
                 // every object creation site (ir_gen NewExpr / value-class
                 // locals), so the AST is kept on the field. Inheritance copies
@@ -856,8 +862,12 @@ public:
                     } else {
                         sym->constructorName = sym->name + "_init";
                         for (auto& param : method->getParams()) {
-                            sym->constructorParamTypes.push_back(
-                                TypeInfo::fromAST(param.second.get()));
+                            TypeInfo paramType = TypeInfo::fromAST(param.second.get());
+                            // CIDER-BUG-080: interface-typed constructor
+                            // parameters follow the same fat-pointer
+                            // representation as method/function parameters.
+                            resolveInterfaceTypeFlag(paramType);
+                            sym->constructorParamTypes.push_back(paramType);
                         }
                     }
                 }
@@ -869,7 +879,14 @@ public:
                 m.isOverride = method->isOverride();
 
                 for (auto& param : method->getParams()) {
-                    m.parameterTypes.push_back(TypeInfo::fromAST(param.second.get()));
+                    TypeInfo paramType = TypeInfo::fromAST(param.second.get());
+                    // CIDER-BUG-080: a class-method parameter declared with
+                    // an interface type is a 16-byte fat pointer; resolve
+                    // the flag here (the 070 fix covered free functions) so
+                    // call sites and satisfaction see the same representation
+                    // as the method definition.
+                    resolveInterfaceTypeFlag(paramType);
+                    m.parameterTypes.push_back(paramType);
                 }
 
                 if (m.isOverride) {
@@ -1052,7 +1069,10 @@ public:
     // a declaration-site assignment produces. Array wrappers stay unflagged:
     // an array is not itself an interface value, and getFieldSize sizes each
     // element interface-aware from the element name.
-    void resolveInterfaceFieldFlag(TypeInfo& type) {
+    // CIDER-BUG-080: the same resolution is applied to class-method,
+    // constructor and interface-method parameter types, so call sites and
+    // interface satisfaction see `x: Shape` as the 16-byte fat pointer it is.
+    void resolveInterfaceTypeFlag(TypeInfo& type) {
         if (type.isInterface || type.pointerLevel > 0 || type.isArray) return;
         auto sym = resolveNominalType(type.name);
         if (sym && sym->kind == SymbolKind::INTERFACE) type.isInterface = true;
@@ -1540,7 +1560,7 @@ public:
             // member access through it resolves (T6 std sweep).
             checkAndInstantiateStructTemplate(f.type.name);
             // CIDER-BUG-069: resolve interface-ness before sizing.
-            resolveInterfaceFieldFlag(f.type);
+            resolveInterfaceTypeFlag(f.type);
             f.bits = field.bits;
             if (field.bits > 0) {
                 if (bitPos == 0) {
@@ -2378,6 +2398,11 @@ public:
 
         Scope* prevScope = symbolTable_.getCurrentScope();
         symbolTable_.setCurrentScope(definingScope);
+        // CIDER-BUG-080: resolve interface-typed parameters in the
+        // template's defining scope (substitution above runs before the
+        // scope switch), so an instantiated `f<T>(x: Shape)` keeps the
+        // fat-pointer flag at call sites.
+        for (auto& pt : funcSym->parameterTypes) resolveInterfaceTypeFlag(pt);
         symbolTable_.define(funcSym);
         if (definingScope != rootScope && !rootScope->resolveLocal(mangledName)) {
             rootScope->define(funcSym);

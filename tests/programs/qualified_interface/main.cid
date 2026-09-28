@@ -27,10 +27,10 @@ class Box {
 var gshape: lib.Shape;
 var grect: lib.Rect;
 
-// Qualified interface parameter (interface-to-interface passing is the
-// supported form; concrete-to-interface at a call boundary is rejected for
-// both spellings). Reassigning the callee's by-value copy must not disturb
-// the caller's fat pointer.
+// Qualified interface parameter. CIDER-BUG-080 accepts concrete values at
+// call boundaries too, for both spellings; this test keeps to
+// interface-to-interface passing. Reassigning the callee's by-value copy
+// must not disturb the caller's fat pointer.
 func areaVia(x: lib.Shape) -> int {
   return x.area();
 }

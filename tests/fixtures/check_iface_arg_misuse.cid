@@ -1,0 +1,44 @@
+// CIDER-BUG-080: call arguments to interface parameters follow the shared
+// interface conversion rule. A satisfying concrete value, pointer, or the
+// same interface is accepted; anything else is rejected — never silently
+// reinterpreted as an object. nilPtr (`*void`) is deliberately rejected:
+// a null fat pointer has no vtable to dispatch through (the language has no
+// nil-interface concept; `var i: Shape = nilPtr` is rejected the same way).
+interface Shape {
+  func area() -> int;
+}
+interface Other {
+  func size() -> int;
+}
+class Bad {
+  var x: int;
+}
+class Good {
+  var x: int;
+  func area() -> int { return this.x; }
+  func size() -> int { return this.x; }
+}
+class Wrap {
+  var pad: int;
+  func init(x: Shape) -> void { }
+  func use(x: Shape) -> int { return x.area(); }
+}
+
+func take(x: Shape) -> int { return x.area(); }
+
+func main() -> int {
+  var b: Bad;
+  var g: Good;
+  var o: Other = g;
+  var gp: Good* = &g;
+  var gpp: Good** = &gp;
+  var arr: [Good; 2];
+  take(b);
+  take(o);
+  take(nilPtr);
+  take(gpp);
+  take(arr);
+  var w: Wrap* = new Wrap(nilPtr);
+  w.use(b);
+  return 0;
+}

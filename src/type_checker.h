@@ -1446,9 +1446,20 @@ public:
     // interface name is a fat pointer even when the flag was not set when
     // the type was captured. Arrays keep their wrapper unflagged; callers
     // resolve the element after elementType().
+    // CIDER-BUG-080: dotted spellings (`lib.Shape`) resolve their member in
+    // the qualifier's module scope, mirroring the 070 collector fix, so the
+    // flag is recovered for qualified parameters in every call position.
     void resolveInterfaceFlag(TypeInfo& t) {
         if (t.isInterface || t.pointerLevel > 0 || t.isArray) return;
         auto typeSym = resolveScoped(t.name);
+        if (!typeSym && t.name.find('.') != std::string::npos) {
+            auto dot = t.name.rfind('.');
+            auto modSym = resolveScoped(t.name.substr(0, dot));
+            if (modSym && modSym->kind == SymbolKind::MODULE) {
+                auto ms = std::static_pointer_cast<ModuleSymbol>(modSym)->scope;
+                if (ms) typeSym = ms->resolveLocal(t.name.substr(dot + 1));
+            }
+        }
         if (typeSym && typeSym->kind == SymbolKind::INTERFACE) t.isInterface = true;
     }
 
@@ -1471,6 +1482,17 @@ public:
         }
         TypeInfo concreteType = valueType;
         if (concreteType.pointerLevel > 0) concreteType.pointerLevel--;
+        // CIDER-BUG-080: only a single indirection (class/struct value or
+        // one pointer to it) is an object address. A pointer-to-pointer or
+        // array value presents the address of a pointer/array, which the
+        // fat pointer would then hand to method dispatch as if it were the
+        // object — reject instead of silently corrupting. nilPtr (`*void`)
+        // and function values are rejected by the same rule.
+        if (concreteType.pointerLevel > 0 || concreteType.isArray) {
+            error("Cannot assign " + valueType.toString() + " to interface '" +
+                      ifaceType.name + "': expected a struct/class value or pointer", line);
+            return;
+        }
         auto concreteSym = resolveScoped(concreteType.name);
         if (!concreteSym || (concreteSym->kind != SymbolKind::STRUCT && concreteSym->kind != SymbolKind::CLASS)) {
             error("Cannot assign non-struct/class type to interface '" + ifaceType.name + "'", line);
@@ -2362,7 +2384,15 @@ public:
                     expr.getArgs()[i]->accept(*this);
                     TypeInfo paramT = canonicalizeInModule(
                         classSym->constructorParamTypes[i], defMod, expr.getLine());
-                    if (!areTypesCompatible(paramT, lastExprType_)) {
+                    // CIDER-BUG-080: an interface-typed constructor
+                    // parameter accepts a satisfying concrete value or the
+                    // same interface, like every other interface position.
+                    resolveInterfaceFlag(paramT);
+                    if (paramT.isInterface) {
+                        if (lastExprType_.name != "error") {
+                            checkInterfaceValue(paramT, lastExprType_, expr.getLine());
+                        }
+                    } else if (!areTypesCompatible(paramT, lastExprType_)) {
                         error("Argument " + std::to_string(i + 1) +
                                   " to constructor of class '" + type.name +
                                   "' type mismatch. Expected " + paramT.toString() +
@@ -2675,8 +2705,13 @@ public:
                             funcSym = std::make_shared<FunctionSymbol>();
                             funcSym->name = m.name;
                             for (const auto& pt : m.parameterTypes) {
-                                funcSym->parameterTypes.push_back(
-                                    canonicalizeInModule(pt, ownerMod, expr.getLine()));
+                                TypeInfo paramT = canonicalizeInModule(pt, ownerMod, expr.getLine());
+                                // CIDER-BUG-080: class-method interface
+                                // parameters carry the fat-pointer flag; the
+                                // collector resolves it, this keeps the
+                                // fallback for signature copies.
+                                resolveInterfaceFlag(paramT);
+                                funcSym->parameterTypes.push_back(paramT);
                             }
                             funcSym->returnType =
                                 canonicalizeInModule(m.returnType, ownerMod, expr.getLine());
@@ -2715,7 +2750,17 @@ public:
                     for (size_t i = 0; i < expr.getArgs().size(); ++i) {
                         expr.getArgs()[i]->accept(*this);
                         TypeInfo paramT = (*fnType.fnParamTypes)[i];
-                        if (!areTypesCompatible(paramT, lastExprType_)) {
+                        // CIDER-BUG-080: an interface-typed slot in a
+                        // fn(...) signature accepts the same satisfying
+                        // concrete values/pointers as a declaration; the IR
+                        // generator materialises the fat pointer at the call
+                        // site for any callee shape.
+                        resolveInterfaceFlag(paramT);
+                        if (paramT.isInterface) {
+                            if (lastExprType_.name != "error") {
+                                checkInterfaceValue(paramT, lastExprType_, expr.getLine());
+                            }
+                        } else if (!areTypesCompatible(paramT, lastExprType_)) {
                             error("Argument " + std::to_string(i + 1) + " to '" +
                                       fnType.toString() + "' type mismatch. Expected " +
                                       paramT.toString() + ", got " +
@@ -2749,6 +2794,13 @@ public:
                 TypeInfo argT = lastExprType_;
                 TypeInfo paramT =
                     canonicalizeInModule(funcSym->parameterTypes[i], defMod, expr.getLine());
+                // CIDER-BUG-080: a parameter declared with an interface type
+                // accepts a satisfying concrete value/pointer or the same
+                // interface, exactly like a declaration-time assignment
+                // (checkInterfaceValue is the shared rule). A method's
+                // parameter flags are resolved by the collector; this is the
+                // fallback for signature copies that lost the flag.
+                resolveInterfaceFlag(paramT);
                 TypeInfo fnParam = resolveFunctionPointerAlias(paramT);
                 TypeInfo fnArg = resolveFunctionPointerAlias(argT);
                 // CIDER-BUG-068: a closure object is accepted where a plain
@@ -2761,7 +2813,12 @@ public:
                     fnParam.isFunctionPointer && !fnParam.isClosure && !fnParam.isArray &&
                     fnArg.isFunctionPointer && fnArg.isClosure && !fnArg.isArray &&
                     fnParam.signatureEquals(fnArg);
-                if (!areTypesCompatible(paramT, argT) && !closureToFnParam) {
+                if (paramT.isInterface) {
+                    // CIDER-BUG-080: interface call arguments. Skip the
+                    // conversion when the argument already failed (an
+                    // `error` type would only cascade).
+                    if (argT.name != "error") checkInterfaceValue(paramT, argT, expr.getLine());
+                } else if (!areTypesCompatible(paramT, argT) && !closureToFnParam) {
                     const std::string& label = displayName.empty() ? funcSym->name : displayName;
                     error("Argument " + std::to_string(i + 1) + " to '" + label +
                               "' type mismatch. Expected " + paramT.toString() + ", got " +

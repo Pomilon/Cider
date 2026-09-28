@@ -1232,11 +1232,21 @@ public:
                             // CID-003: parameter widths drive argument
                             // conversion here too (m.parameterTypes has no
                             // hidden `this`, which is passed separately).
+                            // CIDER-BUG-080: arguments flow through the same
+                            // interface conversion, so a concrete value can
+                            // be passed to an interface parameter of an
+                            // interface method and the vtable of a concrete
+                            // receiver's method sees a fat pointer.
+                            std::vector<TypeInfo> argTypes;
                             for (auto& arg : expr.getArgs()) {
                                 arg->accept(*this);
                                 args.push_back(lastValue_);
+                                argTypes.push_back(lastExprType_);
                             }
-                            convertCallArgs(args, 2, m.parameterTypes);
+                            convertCallArgs(args, 2,
+                                            rootCallParams(m.parameterTypes,
+                                                           definingModuleFor(ifaceSym, ifaceSym->name)),
+                                            0, &argTypes);
                             IRType retIRType = (m.returnType.pointerLevel > 0) ? IRType::PTR : mapType(m.returnType.name);
                             IRValue dest = IRValue::Register(nextTemp(), retIRType);
                             IRInstruction callInstr;
@@ -1286,9 +1296,15 @@ public:
 
         if (!funcName.empty()) {
             std::vector<IRValue> args;
+            // CIDER-BUG-080: each evaluated argument's type drives the
+            // interface conversion below (concrete value/pointer -> fat
+            // pointer); collected here because lastExprType_ is overwritten
+            // by later arguments.
+            std::vector<TypeInfo> argTypes;
             for (auto& arg : expr.getArgs()) {
                 arg->accept(*this);
                 args.push_back(lastValue_);
+                argTypes.push_back(lastExprType_);
             }
 
             auto sym = resolvedFuncSym;
@@ -1318,7 +1334,12 @@ public:
                     !funcSym->parameterTypes.empty()) {
                     paramBase = 1;
                 }
-                convertCallArgs(args, 0, funcSym->parameterTypes, paramBase);
+                // CIDER-BUG-080: root the signature's interface spellings in
+                // the callee's module before conversion, so an imported
+                // callee's bare `Shape` parameter materialises the vtable
+                // label that module generated.
+                convertCallArgs(args, 0, rootCallParams(funcSym->parameterTypes, calleeDefMod),
+                                paramBase, &argTypes);
             }
             // CID-005: direct calls carry the callee FunctionSymbol's ABI
             // (`Default` when unmarked; codegen resolves that from the target
@@ -1397,9 +1418,13 @@ public:
             TypeInfo calleeType = resolveFunctionPointerAlias(lastExprType_);
 
             std::vector<IRValue> args;
+            // CIDER-BUG-080: evaluated argument types for the interface
+            // conversion (see materializeInterfaceArg).
+            std::vector<TypeInfo> argTypes;
             for (auto& arg : expr.getArgs()) {
                 arg->accept(*this);
                 args.push_back(lastValue_);
+                argTypes.push_back(lastExprType_);
             }
 
             if (calleeType.isClosure) {
@@ -1415,7 +1440,7 @@ public:
                 TypeInfo retType{"int", 0};
                 if (calleeType.fnReturnType) retType = *calleeType.fnReturnType;
                 if (calleeType.fnParamTypes) {
-                    convertCallArgs(args, 0, *calleeType.fnParamTypes);
+                    convertCallArgs(args, 0, *calleeType.fnParamTypes, 0, &argTypes);
                 }
                 IRType destIR = (retType.pointerLevel > 0 || retType.isFunctionPointer)
                                     ? IRType::PTR
@@ -1446,7 +1471,7 @@ public:
                 }
                 if (calleeType.isFunctionPointer && !calleeType.isArray &&
                     calleeType.fnParamTypes) {
-                    convertCallArgs(args, 0, *calleeType.fnParamTypes);
+                    convertCallArgs(args, 0, *calleeType.fnParamTypes, 0, &argTypes);
                 }
                 IRType destIR = (retType.pointerLevel > 0 || retType.isFunctionPointer)
                                     ? IRType::PTR
@@ -2838,15 +2863,73 @@ public:
         return truncateIntToType(val, target);
     }
 
+    // CIDER-BUG-080: materialise a call-site interface argument. An
+    // interface argument already evaluates to the address of its 16-byte
+    // fat pointer (declaration/reassignment/parameter materialisation), so
+    // it passes through. A satisfying concrete value or pointer evaluates
+    // to the object's address; build the fat pointer in a caller-frame
+    // temp — data at +0, the interface/concrete vtable at +8 — and pass
+    // that address, exactly the shape emitInterfaceStore materialises for
+    // `var i: I = <value>` (without re-evaluating the argument, whose code
+    // is already emitted).
+    IRValue materializeInterfaceArg(const TypeInfo& ifaceType, const TypeInfo& argType,
+                                    IRValue val) {
+        if (resolveInterfaceNominal(argType).isInterface) return val;
+        IRValue slot = IRValue::Register(nextTemp(), IRType::PTR);
+        currentBlock_->addInstruction({IROp::ALLOCA, slot, {IRValue::Constant(16, IRType::I32)}});
+        currentBlock_->addInstruction({IROp::STORE, std::nullopt,
+                                       {slot, val, IRValue::Constant(0, IRType::I32)}});
+        IRValue slot8 = IRValue::Register(nextTemp(), IRType::PTR);
+        currentBlock_->addInstruction({IROp::ADD, slot8, {slot, IRValue::Constant(8, IRType::I32)}});
+        std::string concreteName = argType.name;
+        if (argType.pointerLevel > 0) {
+            TypeInfo base = argType;
+            base.pointerLevel--;
+            concreteName = base.name;
+        }
+        currentBlock_->addInstruction({IROp::STORE, std::nullopt,
+                                       {slot8, IRValue::Label(interfaceVtableLabel(ifaceType.name, concreteName)),
+                                        IRValue::Constant(0, IRType::I32)}});
+        return slot;
+    }
+
+    // CIDER-BUG-080: a bare interface spelling in a callee signature
+    // belongs to the callee's defining module, which the caller may not
+    // import. Root it there before the vtable-label lookup; an unrooted
+    // bare name would fall back to the legacy label and the interface call
+    // would fail at the first dispatch. Non-interface parameters are
+    // returned unchanged.
+    TypeInfo callInterfaceParamType(TypeInfo t, const std::string& defMod) {
+        return resolveInterfaceNominal(canonicalizeNominalInModule(t, defMod));
+    }
+
+    std::vector<TypeInfo> rootCallParams(const std::vector<TypeInfo>& params,
+                                         const std::string& defMod) {
+        std::vector<TypeInfo> out;
+        out.reserve(params.size());
+        for (const auto& pt : params) out.push_back(callInterfaceParamType(pt, defMod));
+        return out;
+    }
+
     // CID-003: convert call arguments to the callee's declared parameter
     // types. `argBase` skips leading call-construction entries (an
     // interface call's method address and data pointer); `paramBase`
     // skips a hidden leading parameter (a method's `this`).
+    // CIDER-BUG-080: `argTypes`, when given, holds each evaluated
+    // argument's type aligned with `args[argBase..]`; an interface
+    // parameter then materialises a fat pointer for a concrete argument
+    // instead of passing the raw object address.
     void convertCallArgs(std::vector<IRValue>& args, size_t argBase,
                          const std::vector<TypeInfo>& paramTypes,
-                         size_t paramBase = 0) {
+                         size_t paramBase = 0,
+                         const std::vector<TypeInfo>* argTypes = nullptr) {
         for (size_t i = 0; argBase + i < args.size() && paramBase + i < paramTypes.size(); ++i) {
-            args[argBase + i] = convertValueToType(args[argBase + i], paramTypes[paramBase + i]);
+            TypeInfo paramT = resolveInterfaceNominal(paramTypes[paramBase + i]);
+            if (paramT.isInterface && argTypes && i < argTypes->size()) {
+                args[argBase + i] = materializeInterfaceArg(paramT, (*argTypes)[i], args[argBase + i]);
+            } else {
+                args[argBase + i] = convertValueToType(args[argBase + i], paramT);
+            }
         }
     }
 
@@ -5714,13 +5797,18 @@ public:
         }
         std::vector<IRValue> args;
         args.push_back(objPtr);
+        // CIDER-BUG-080: evaluated argument types drive interface argument
+        // conversion (a concrete value becomes a call-site fat pointer).
+        std::vector<TypeInfo> argTypes;
         for (auto& argExpr : argExprs) {
             argExpr->accept(*this);
             args.push_back(lastValue_);
+            argTypes.push_back(lastExprType_);
         }
         // parameterTypes[0] is the hidden `this`; args[0] is its value, so
         // conversion starts at the first real parameter on both sides.
-        convertCallArgs(args, 1, ctorDef.first->parameterTypes, 1);
+        convertCallArgs(args, 1, rootCallParams(ctorDef.first->parameterTypes, ctorDef.second),
+                        1, &argTypes);
         IRInstruction call;
         call.op = IROp::CALL;
         call.dest = std::nullopt;
