@@ -30,5 +30,13 @@ func main() -> int {
   *s = 1234;
   free(s as *void);
 
+  // CIDER-BUG-109: a request above ARENA_SIZE takes the dedicated big-arena
+  // mmap path, whose successful result must still be a usable pointer.
+  var big: *u64 = malloc(2097152) as *u64;
+  if (big == nilPtr) return 9;
+  *big = 4242;
+  if (*big != 4242) return 10;
+  free(big as *void);
+
   return 0;
 }

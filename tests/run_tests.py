@@ -6,9 +6,13 @@ to agree with each other and with expected.json (stdout/stderr/exit):
   1. VM on unoptimized IR   : cider run --no-opt
   2. VM on optimized IR     : cider run            (optimizer arrives in Phase 7)
   3. Native                 : cider compile -> nasm -> ld -> run
+
+An expected.json may also carry "limit_kb" to run every path under the same
+RLIMIT_AS cap (CIDER-BUG-109: makes a failed mmap in std.alloc deterministic).
 """
 import json
 import os
+import resource
 import subprocess
 import sys
 import tempfile
@@ -22,13 +26,37 @@ PROGRAMS = os.path.join(REPO, "tests", "programs")
 RunResult = namedtuple("RunResult", "returncode stdout stderr")
 
 
-def run_cider(args, stdin_data=None):
+def addr_limit_preexec(limit_kb):
+    """preexec_fn that caps RLIMIT_AS for one child.
+
+    CIDER-BUG-109: some failure paths (a failed mmap inside std.alloc) only
+    trigger when the OS refuses address space, which cannot be requested
+    portably from inside the program. A test's expected.json may set
+    "limit_kb" to run every path under the same deterministic cap.
+    """
+    if limit_kb is None:
+        return None
+
+    def apply_limit():
+        limit = int(limit_kb) * 1024
+        _, hard = resource.getrlimit(resource.RLIMIT_AS)
+        if hard != resource.RLIM_INFINITY:
+            # Cannot raise the soft limit past the inherited hard limit; a
+            # lower cap still forces the failure this test needs.
+            limit = min(limit, hard)
+        resource.setrlimit(resource.RLIMIT_AS, (limit, hard))
+
+    return apply_limit
+
+
+def run_cider(args, stdin_data=None, limit_kb=None):
     r = subprocess.run([CIDER] + args, input=stdin_data, capture_output=True,
-                       text=True, timeout=180)
+                       text=True, timeout=180,
+                       preexec_fn=addr_limit_preexec(limit_kb))
     return RunResult(r.returncode, r.stdout, r.stderr)
 
 
-def run_native(ir_path, stdin_data=None):
+def run_native(ir_path, stdin_data=None, limit_kb=None):
     with tempfile.TemporaryDirectory() as tmp:
         asm = os.path.join(tmp, "prog.asm")
         obj = os.path.join(tmp, "prog.o")
@@ -51,7 +79,8 @@ def run_native(ir_path, stdin_data=None):
             subprocess.run(["gcc", obj, "-o", exe, "-no-pie"], check=True,
                            capture_output=True, text=True)
         r = subprocess.run([exe], input=stdin_data, capture_output=True,
-                           text=True, timeout=180)
+                           text=True, timeout=180,
+                           preexec_fn=addr_limit_preexec(limit_kb))
         return RunResult(r.returncode, r.stdout, r.stderr)
 
 
@@ -64,15 +93,16 @@ def make_test(name):
     def test(self):
         src = os.path.join(PROGRAMS, name, "main.cid")
         exp = load_expected(name)
+        limit_kb = exp.get("limit_kb")
         inp = None
         in_path = os.path.join(PROGRAMS, name, "input.txt")
         if os.path.exists(in_path):
             with open(in_path) as f:
                 inp = f.read()
 
-        r1 = run_cider(["run", "--no-opt", src], inp)
-        r2 = run_cider(["run", src], inp)
-        r3 = run_native(src, inp)
+        r1 = run_cider(["run", "--no-opt", src], inp, limit_kb)
+        r2 = run_cider(["run", src], inp, limit_kb)
+        r3 = run_native(src, inp, limit_kb)
 
         paths = [("vm-unopt", r1), ("vm-opt", r2), ("native", r3)]
         for label, r in paths:

@@ -31,7 +31,10 @@ func fail_fast(code: int) -> void {
         "mov rax, 1"
         "mov rdi, 2"
         "mov rsi, {s}"
-        "mov rdx, 24"
+        // 23 = strlen("allocator: fatal error\n"); the old count 24 also
+        // wrote the string's NUL terminator (CIDER-BUG-109 regression test
+        // compares stderr byte-for-byte).
+        "mov rdx, 23"
         "syscall"
     }
     asm {
@@ -51,7 +54,15 @@ func mmap_arena(size: int) -> *void {
     if (total_bytes + size > MAX_TOTAL_BYTES) {
         fail_fast(71);
     }
-    var addr: *void = 0 as *void;
+    // CIDER-BUG-109: keep the syscall result as a signed 64-bit value.
+    // Native mmap reports failure as a NEGATIVE errno in rax (-ENOMEM for an
+    // impossible mapping) and the VM mirrors that (-EINVAL for a
+    // non-positive length, -ENOMEM when the request cannot be satisfied); a
+    // successful mapping is always a positive address. Testing a *void for
+    // `== 0` treated every negative errno as success, so malloc wrote the
+    // block header through a bad pointer and later faulted or corrupted the
+    // heap. Any non-positive result is a failed mapping.
+    var raw: i64 = 0;
     asm {
         "mov rax, 9"
         "xor rdi, rdi"
@@ -61,11 +72,17 @@ func mmap_arena(size: int) -> *void {
         "mov r8, -1"
         "xor r9, r9"
         "syscall"
-        "mov {addr}, rax"
+        "mov {raw}, rax"
+    }
+    // No fallback exists (this arena is the only remaining source for the
+    // request), so report and stop through the allocator's fail-fast channel
+    // (spec §9, exit codes 70-79) instead of handing back a bad pointer.
+    if (raw <= 0) {
+        fail_fast(75);
     }
     arena_count = arena_count + 1;
     total_bytes = total_bytes + size;
-    return addr;
+    return raw as *void;
 }
 
 export func malloc(size: int) -> *void {
