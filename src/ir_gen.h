@@ -5826,15 +5826,88 @@ public:
     // CIDER-BUG-067: callers zero the whole instance first (emitZeroInstance),
     // so fields without an initializer need no store here; this runs after
     // the zero and therefore overrides it.
+    // CIDER-BUG-082: the recursion into embedded class-value fields lives in
+    // emitClassFieldInitializersImpl.
     void emitClassFieldInitializers(const std::shared_ptr<StructSymbol>& classSym,
                                     IRValue objAddr) {
+        std::set<const StructSymbol*> visiting;
+        emitClassFieldInitializersImpl(classSym, objAddr, visiting);
+    }
+
+    // CIDER-BUG-082: true when `classSym` has a field initializer to run,
+    // directly or through an embedded class-value field. Lets the recursion
+    // below skip its address computation entirely for nested objects that
+    // are statically all-zero, keeping output byte-identical for programs
+    // whose embedded classes have no initializers. `visiting` is the same
+    // path set as emitClassFieldInitializersImpl (by-value layout cycles).
+    bool classHasFieldInitializers(const std::shared_ptr<StructSymbol>& classSym,
+                                   std::set<const StructSymbol*>& visiting) {
+        if (!classSym || !visiting.insert(classSym.get()).second) return false;
+        std::string classMod = definingModuleFor(classSym, classSym->name);
+        bool found = false;
+        for (const auto& field : classSym->fields) {
+            if (field.initializer) {
+                found = true;
+                break;
+            }
+            TypeInfo fieldType =
+                canonicalizeNominalInModule(resolveTypeAlias(field.type, classMod), classMod);
+            if (fieldType.pointerLevel > 0 || fieldType.isArray || fieldType.isSlice ||
+                fieldType.isInterface) {
+                continue;
+            }
+            auto innerSym = resolveStructOrClassSymbol(fieldType, classMod);
+            if (innerSym && innerSym->kind == SymbolKind::CLASS &&
+                classHasFieldInitializers(std::static_pointer_cast<StructSymbol>(innerSym),
+                                          visiting)) {
+                found = true;
+                break;
+            }
+        }
+        visiting.erase(classSym.get());
+        return found;
+    }
+
+    // CIDER-BUG-082: `visiting` is the recursion path for embedded
+    // class-value fields, keyed by class identity. A repeated class means a
+    // by-value layout cycle (`class A { var a: A; }`, which the collector
+    // sizes with a fallback): stop instead of recursing without bound. It is
+    // a path set, not a global one, so two sibling fields of one class both
+    // run.
+    void emitClassFieldInitializersImpl(const std::shared_ptr<StructSymbol>& classSym,
+                                        IRValue objAddr,
+                                        std::set<const StructSymbol*>& visiting) {
         if (!classSym || !currentFunction_) return;
+        if (!visiting.insert(classSym.get()).second) return;
         std::string classMod = definingModuleFor(classSym, classSym->name);
         for (const auto& field : classSym->fields) {
             Expression* init = field.initializer;
-            if (!init) continue;  // default zero already stored by emitZeroInstance
             TypeInfo fieldType =
                 canonicalizeNominalInModule(resolveTypeAlias(field.type, classMod), classMod);
+            // CIDER-BUG-082: an embedded class-value field is a nested
+            // object, so run the INNER class's field initializers at the
+            // field's address before this class's own stores — matching a
+            // direct `var inner: Inner;` local / `new Inner`, where
+            // emitClassFieldInitializers(Inner) runs with no initializer
+            // required on the field. Pointer/array/slice/interface fields
+            // are not embedded objects: pointers handle their target where
+            // it is constructed, arrays and slices hold elements/descriptor
+            // storage, and an interface field is a fat pointer.
+            if (fieldType.pointerLevel == 0 && !fieldType.isArray && !fieldType.isSlice &&
+                !fieldType.isInterface) {
+                auto innerSym = resolveStructOrClassSymbol(fieldType, classMod);
+                if (innerSym && innerSym->kind == SymbolKind::CLASS) {
+                    auto innerClassSym = std::static_pointer_cast<StructSymbol>(innerSym);
+                    if (classHasFieldInitializers(innerClassSym, visiting)) {
+                        IRValue innerAddr = IRValue::Register(nextTemp(), IRType::PTR);
+                        currentBlock_->addInstruction(
+                            {IROp::ADD, innerAddr,
+                             {objAddr, IRValue::Constant(field.offset, IRType::I32)}});
+                        emitClassFieldInitializersImpl(innerClassSym, innerAddr, visiting);
+                    }
+                }
+            }
+            if (!init) continue;  // default zero already stored by emitZeroInstance
             IRType fieldIR = (fieldType.pointerLevel > 0) ? IRType::PTR : mapType(fieldType.name);
             bool ptrLike = fieldType.pointerLevel > 0 || fieldType.isFunctionPointer ||
                            fieldType.name == "string";
@@ -5890,6 +5963,7 @@ public:
             }
             constEvalScope_ = prevScope;
         }
+        visiting.erase(classSym.get());
     }
 
     // CIDER-FEAT-003: run a class's `func init(...)` constructor on a fresh
