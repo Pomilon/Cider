@@ -99,6 +99,12 @@ private:
     int64_t stepLimit_ = kStepLimit;
     static constexpr int64_t kHeaderSize = 16;
 
+    // CIDER-BUG-121: the interpreter body. run() wraps it so that allocation
+    // failures (std::bad_alloc / std::length_error from heap_/frame growth)
+    // surface through the VMError channel instead of escaping as a host
+    // exception that the CLI reports as a compiler failure.
+    VMResult runBody(const ModuleIR& module, const std::string& runFunction);
+
     RegVal resolveValue(const IRValue& v);
     void materializeLabels();
     int64_t materializeString(const std::string& name);

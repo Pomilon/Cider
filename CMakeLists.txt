@@ -80,6 +80,14 @@ add_test(NAME debug_info_smoke
          COMMAND bash ${CMAKE_SOURCE_DIR}/tests/unit/debug_info_smoke.sh $<TARGET_FILE:cider>)
 set_tests_properties(debug_info_smoke PROPERTIES SKIP_RETURN_CODE 77)
 
+# CIDER-BUG-121: VM allocation failures (frame-local chunks / heap growth)
+# under RLIMIT_AS must surface as `vm error: out of memory` (exit 2), never
+# as an uncaught std::bad_alloc reported by the CLI (exit 1). Skips (77) when
+# the inherited hard RLIMIT_AS cannot allow the 1536 MiB cap.
+add_test(NAME vm_oom_smoke
+         COMMAND bash ${CMAKE_SOURCE_DIR}/tests/unit/vm_oom_smoke.sh $<TARGET_FILE:cider>)
+set_tests_properties(vm_oom_smoke PROPERTIES SKIP_RETURN_CODE 77)
+
 # CIDER-CHORE-001: CLI usage/--target validation runs in the suite too
 # (previously manual only).
 add_test(NAME cli_test

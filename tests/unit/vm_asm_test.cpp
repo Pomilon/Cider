@@ -315,9 +315,10 @@ int run() {
     // CIDER-BUG-110: a NEGATIVE allocation size must not silently allocate.
     // ALLOCA's unsigned bump arithmetic used to wrap a negative size into a
     // bogus slot and VM::malloc clamped it to one byte; the allocator now
-    // fails the request like any other impossible allocation (the same
-    // std::bad_alloc the mmap path maps to -ENOMEM). A zero-size ALLOCA
-    // keeps working, mirroring a native malloc(0) block.
+    // fails the request like any other impossible allocation (CIDER-BUG-121:
+    // the failure reaches run() callers as VMError "out of memory"; the mmap
+    // path keeps mapping the same std::bad_alloc to -ENOMEM). A zero-size
+    // ALLOCA keeps working, mirroring a native malloc(0) block.
     auto runAlloca = [](int64_t size) {
         auto fn = std::make_unique<cider::FunctionIR>("main", cider::IRType::VOID);
         auto block = std::make_unique<cider::BasicBlock>("entry");
@@ -345,8 +346,11 @@ int run() {
         bool threw = false;
         try {
             (void)runAlloca(-8);
-        } catch (const std::bad_alloc&) {
+        } catch (const cider::VMError& e) {
             threw = true;
+            CHECK(e.message == "out of memory");
+        } catch (const std::bad_alloc&) {
+            CHECK(false);  // CIDER-BUG-121: must be translated to VMError
         }
         CHECK(threw);
     }
@@ -367,8 +371,11 @@ int run() {
         bool threw = false;
         try {
             (void)vm.run(mod);
-        } catch (const std::bad_alloc&) {
+        } catch (const cider::VMError& e) {
             threw = true;
+            CHECK(e.message == "out of memory");
+        } catch (const std::bad_alloc&) {
+            CHECK(false);  // CIDER-BUG-121: must be translated to VMError
         }
         CHECK(threw);
     }

@@ -71,7 +71,26 @@ bool isUnsignedCmpType(IRType t) {
 
 }  // namespace
 
+// CIDER-BUG-121: the interpreter performs raw host allocations everywhere
+// (heap_ vector growth for frame-local chunks / oversized locals /
+// materialized data, frames_ and register maps). Under host memory pressure
+// those throw std::bad_alloc or std::length_error. The mmap syscall handler
+// catches them locally to report -ENOMEM like native, but anywhere else they
+// used to escape VM::run and the CLI's generic std::exception handler
+// reported them as a compiler failure (exit 1). Translate every escaping
+// allocation failure into the VM's single error convention so `run` reports
+// `vm error: <message>` with the VM's exit code.
 VMResult VM::run(const ModuleIR& module, const std::string& runFunction) {
+    try {
+        return runBody(module, runFunction);
+    } catch (const std::bad_alloc&) {
+        throw VMError{"out of memory"};
+    } catch (const std::length_error&) {
+        throw VMError{"out of memory"};
+    }
+}
+
+VMResult VM::runBody(const ModuleIR& module, const std::string& runFunction) {
     module_ = &module;
     runFunction_ = runFunction;
     result_ = VMResult{};
@@ -942,9 +961,10 @@ int64_t VM::malloc(int64_t size) {
     // malloc takes a size_t, so the negative value is a huge request that
     // returns NULL; the VM has no NULL-return path and its allocation
     // failures already surface as an allocation exception (the mmap caller
-    // maps std::bad_alloc to -ENOMEM), so throw that instead of silently
-    // handing out a clamped 1-byte block. size == 0 keeps the 1-byte block:
-    // native malloc(0) returns a unique, freeable pointer.
+    // maps std::bad_alloc to -ENOMEM; run() translates any that escape to
+    // VMError), so throw that instead of silently handing out a clamped
+    // 1-byte block. size == 0 keeps the 1-byte block: native malloc(0)
+    // returns a unique, freeable pointer.
     if (size < 0) throw std::bad_alloc();
     if (size == 0) size = 1;
     int64_t total = size + kHeaderSize;

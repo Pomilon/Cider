@@ -1,5 +1,6 @@
 #include <cstdio>
 #include <memory>
+#include <new>
 #include <string>
 #include <vector>
 
@@ -907,6 +908,64 @@ int run() {
         mod.addFunction(std::move(fn));
         cider::VM vm;
         CHECK(vm.run(mod).exitCode == 22);
+    }
+    // CIDER-BUG-121: an allocation failure inside the interpreter must
+    // surface as VMError through run(), never as an escaping std::bad_alloc
+    // (which the CLI's generic handler reports as a compiler failure, exit
+    // 1). A 2^62-byte ALLOCA cannot be satisfied by the host, so VM::malloc's
+    // heap growth throws; run() must translate it.
+    {
+        auto fn = makeFn("main", cider::IRType::I32);
+        auto e = std::make_unique<cider::BasicBlock>("entry");
+        e->addInstruction(opInstr(cider::IROp::ALLOCA, "huge",
+                                  {cider::IRValue::Constant(INT64_C(4611686018427387904),
+                                                            cider::IRType::I64)}));
+        cider::IRInstruction ret;
+        ret.op = cider::IROp::RET;
+        ret.args = {cider::IRValue::Constant(0, cider::IRType::I32)};
+        e->addInstruction(ret);
+        fn->addBlock(std::move(e));
+        cider::ModuleIR mod;
+        mod.addFunction(std::move(fn));
+        cider::VM vm;
+        bool threw = false;
+        try {
+            vm.run(mod);
+        } catch (const cider::VMError& err) {
+            threw = true;
+            CHECK(err.message == "out of memory");
+        } catch (const std::bad_alloc&) {
+            CHECK(false);  // before the fix: escaped run() as bad_alloc
+        }
+        CHECK(threw);
+    }
+
+    // CIDER-BUG-121: VM::malloc's negative-size failure (CIDER-BUG-110) is
+    // the allocator's own std::bad_alloc signal; it too must reach callers
+    // as a clean VMError once it escapes run().
+    {
+        auto fn = makeFn("main", cider::IRType::I32);
+        auto e = std::make_unique<cider::BasicBlock>("entry");
+        e->addInstruction(opInstr(cider::IROp::ALLOCA, "neg",
+                                  {cider::IRValue::Constant(-1, cider::IRType::I64)}));
+        cider::IRInstruction ret;
+        ret.op = cider::IROp::RET;
+        ret.args = {cider::IRValue::Constant(0, cider::IRType::I32)};
+        e->addInstruction(ret);
+        fn->addBlock(std::move(e));
+        cider::ModuleIR mod;
+        mod.addFunction(std::move(fn));
+        cider::VM vm;
+        bool threw = false;
+        try {
+            vm.run(mod);
+        } catch (const cider::VMError& err) {
+            threw = true;
+            CHECK(err.message == "out of memory");
+        } catch (const std::bad_alloc&) {
+            CHECK(false);  // before the fix: escaped run() as bad_alloc
+        }
+        CHECK(threw);
     }
     return 0;
 }
