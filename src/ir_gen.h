@@ -2855,24 +2855,24 @@ public:
                         int elemSize = getTypeSize(elemType);
                         // CIDER-BUG-052: an array-typed element is
                         // address-like; copy its bytes into the slot instead
-                        // of storing the address itself.
-                        bool elemIsArray = elemType.pointerLevel == 0 && elemType.isArray;
+                        // of storing the address itself. CIDER-BUG-104: a
+                        // by-value struct/class element (at ANY size — an
+                        // exactly-8-byte struct missed the `> 8` fallback)
+                        // and any other value wider than a machine word
+                        // (interfaces) are address-like too: the element
+                        // expression yields the source ADDRESS, so the legacy
+                        // scalar STORE wrote pointer words into the element.
+                        // Mirrors CIDER-BUG-083's element-store rule.
+                        bool elemIsAggregate = isListAggregateElement(elemType);
                         for (size_t ei = 0; ei < elems.size(); ei++) {
                             elems[ei]->accept(*this);
                             // CID-003: elements store at the declared width
                             // (an f32 literal in an f64 element must not
                             // write 4 bytes; an int element converts).
                             IRValue eval = convertValueToType(lastValue_, elemType);
-                            IRValue offset = IRValue::Constant((int64_t)(ei * (size_t)elemSize), IRType::I32);
-                            if (elemIsArray) {
-                                IRValue dst = IRValue::Register(nextTemp(), IRType::PTR);
-                                currentBlock_->addInstruction({IROp::ADD, dst, {addr, offset}});
-                                currentBlock_->addInstruction({IROp::MEMCPY, std::nullopt, {dst, eval, IRValue::Constant(elemSize, IRType::I32)},
-                                                               sym->type.isVolatile});
-                            } else {
-                                currentBlock_->addInstruction({IROp::STORE, std::nullopt, {addr, eval, offset},
-                                                               sym->type.isVolatile});
-                            }
+                            emitListElementStore(addr, (int64_t)(ei * (size_t)elemSize), eval,
+                                                 elemSize, elemIsAggregate,
+                                                 sym->type.isVolatile);
                         }
                         lastExprType_ = sym->type;
                         return;
@@ -3203,6 +3203,36 @@ public:
             return convertIntToFloat(val, targetIR);
         }
         return truncateIntToType(val, target);
+    }
+
+    // CIDER-BUG-104: store one element of a list-literal buffer. Scalar
+    // element values keep the legacy scalar STORE; a by-value aggregate
+    // (array, struct/class or a wider-than-a-word value such as an
+    // interface) is presented as its source ADDRESS, so the slot must
+    // MEMCPY the element bytes. The shared rule keeps the declaration and
+    // expression list paths from diverging (mirrors CIDER-BUG-083's
+    // element-store classification).
+    bool isListAggregateElement(const TypeInfo& t) {
+        TypeInfo r = resolveTypeAlias(t);
+        // Slices evaluate to their descriptor pointer — a scalar — even when
+        // the element type is a struct, so they are never MEMCPY'd.
+        if (r.pointerLevel > 0 || r.isSlice) return false;
+        return r.isArray || isStructValueType(r) || getTypeSize(r) > 8;
+    }
+
+    void emitListElementStore(IRValue base, int64_t offset, IRValue val,
+                              int elemSize, bool aggregate, bool isVolatile = false) {
+        if (!aggregate) {
+            currentBlock_->addInstruction({IROp::STORE, std::nullopt,
+                                           {base, val, IRValue::Constant(offset, IRType::I32)},
+                                           isVolatile});
+            return;
+        }
+        IRValue dst = IRValue::Register(nextTemp(), IRType::PTR);
+        currentBlock_->addInstruction({IROp::ADD, dst, {base, IRValue::Constant(offset, IRType::I32)}});
+        currentBlock_->addInstruction({IROp::MEMCPY, std::nullopt,
+                                       {dst, val, IRValue::Constant(elemSize, IRType::I32)},
+                                       isVolatile});
     }
 
     // CIDER-BUG-080: materialise a call-site interface argument. An
@@ -6904,6 +6934,13 @@ public:
         IRValue firstVal = lastValue_;
         TypeInfo elemType = lastExprType_;
         int elemSize = getTypeSize(elemType);
+        // CIDER-BUG-104: classify the element like the fixed-array
+        // declaration path. A by-value aggregate (array/struct/class) or any
+        // value wider than a machine word is presented as its source
+        // ADDRESS, so the buffer must MEMCPY the element bytes; the legacy
+        // scalar STORE put pointer words into the slot. Mirrors
+        // CIDER-BUG-083's element-store rule.
+        bool elemIsAggregate = isListAggregateElement(elemType);
 
         // Allocate stack space for all elements
         int totalSize = elemSize * (int)elements.size();
@@ -6911,7 +6948,7 @@ public:
         currentBlock_->addInstruction({IROp::ALLOCA, addr, {IRValue::Constant(totalSize, IRType::I32)}});
 
         // Store first element
-        currentBlock_->addInstruction({IROp::STORE, std::nullopt, {addr, firstVal, IRValue::Constant(0, IRType::I32)}});
+        emitListElementStore(addr, 0, firstVal, elemSize, elemIsAggregate);
 
         // Store remaining elements
         for (size_t i = 1; i < elements.size(); i++) {
@@ -6922,8 +6959,8 @@ public:
                 lastExprType_ = {"error", 0};
                 return;
             }
-            IRValue offset = IRValue::Constant(i * elemSize, IRType::I32);
-            currentBlock_->addInstruction({IROp::STORE, std::nullopt, {addr, lastValue_, offset}});
+            emitListElementStore(addr, (int64_t)i * elemSize, lastValue_,
+                                 elemSize, elemIsAggregate);
         }
 
         lastValue_ = addr;

@@ -1204,6 +1204,90 @@ int run() {
         CHECK(found8);
     }
 
+    // CIDER-BUG-104: a fixed-array declaration initialized from a list
+    // literal of by-value aggregate elements copies each element VALUE into
+    // its slot (a MEMCPY of the element size) instead of scalar-STOREing the
+    // element expression's source address. The exactly-8-byte struct also
+    // pins the any-size classification (the `> 8` fallback alone misses it).
+    {
+        d = genSrc(
+            "struct P { var a: int; var b: int; }\n"
+            "func main() -> int {\n"
+            "  var p: P; p.a = 11; p.b = 22;\n"
+            "  var q: P; q.a = 33; q.b = 44;\n"
+            "  var arr: [P; 2] = [p, q];\n"
+            "  return arr[0].a + arr[1].b;\n"
+            "}\n");
+        size_t pos = d.find("memcpy ");
+        int count = 0;
+        while (pos != std::string::npos) {
+            size_t eol = d.find('\n', pos);
+            CHECK(d.substr(pos, eol - pos).find(", 8") != std::string::npos);
+            count++;
+            pos = d.find("memcpy ", pos + 1);
+        }
+        CHECK(count == 2);
+    }
+
+    // CIDER-BUG-104: the class-element spelling (here through an alias) takes
+    // the same rule: a 4-byte class value is an aggregate regardless of the
+    // size fallback, so each element store is a 4-byte MEMCPY.
+    {
+        d = genSrc(
+            "class C { var x: int; }\n"
+            "type CA = C;\n"
+            "func main() -> int {\n"
+            "  var a: CA; a.x = 11;\n"
+            "  var b: CA; b.x = 22;\n"
+            "  var arr: [CA; 2] = [a, b];\n"
+            "  return arr[0].x + arr[1].x;\n"
+            "}\n");
+        size_t pos = d.find("memcpy ");
+        int count = 0;
+        while (pos != std::string::npos) {
+            size_t eol = d.find('\n', pos);
+            CHECK(d.substr(pos, eol - pos).find(", 4") != std::string::npos);
+            count++;
+            pos = d.find("memcpy ", pos + 1);
+        }
+        CHECK(count == 2);
+    }
+
+    // CIDER-BUG-104: the list-literal expression path (a `*T` context such
+    // as a pointer parameter) builds its temp buffer with the same MEMCPY
+    // element stores, so `f([p, q])` reads the element values through the
+    // pointer, not the stack addresses of p/q.
+    {
+        d = genSrc(
+            "struct P { var a: int; var b: int; }\n"
+            "func f(p: *P) -> int { return p->a; }\n"
+            "func main() -> int {\n"
+            "  var p: P; p.a = 11; p.b = 22;\n"
+            "  var q: P; q.a = 33; q.b = 44;\n"
+            "  return f([p, q]);\n"
+            "}\n");
+        size_t pos = d.find("memcpy ");
+        int count = 0;
+        while (pos != std::string::npos) {
+            size_t eol = d.find('\n', pos);
+            CHECK(d.substr(pos, eol - pos).find(", 8") != std::string::npos);
+            count++;
+            pos = d.find("memcpy ", pos + 1);
+        }
+        CHECK(count == 2);
+    }
+
+    // CIDER-BUG-104: scalar-element list declarations are untouched — the
+    // per-element scalar STOREs emit no MEMCPY at all.
+    {
+        d = genSrc(
+            "func main() -> int {\n"
+            "  var arr: [int; 2] = [3, 4];\n"
+            "  return arr[0] + arr[1];\n"
+            "}\n");
+        CHECK(d.find("memcpy ") == std::string::npos);
+    }
+
     // CIDER-BUG-072: a main-file symbol whose Cider name collides with a
     // NASM reserved word (`gs`, `cs`, `align`, ...) escapes to a `$` suffix
     // in the emitted name — definition and every reference alike. Names
