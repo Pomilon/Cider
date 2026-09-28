@@ -1,0 +1,4 @@
+Type 'Bad' does not implement interface 'Shape': missing method 'area'
+Cannot assign interface 'Other' to interface 'Shape'
+h.shapes[0] = b;
+One{shape: b}

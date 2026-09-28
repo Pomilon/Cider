@@ -1,0 +1,29 @@
+// CIDER-BUG-069: interface-typed fields and elements keep the CIDER-BUG-054
+// conversion rule — a concrete value must implement every interface method,
+// and a different interface cannot be re-labelled onto the field.
+interface Shape {
+  func area() -> int;
+}
+interface Other {
+  func size() -> int;
+}
+struct Bad {
+  var x: int;
+}
+struct One {
+  var shape: Shape;
+}
+struct Holder {
+  var shape: Shape;
+  var shapes: [Shape; 2];
+}
+func main() -> int {
+  var b: Bad;
+  var o: Other;
+  var h: Holder;
+  h.shape = b;
+  h.shapes[0] = b;
+  h.shape = o;
+  var lit: One = One{shape: b};
+  return 0;
+}

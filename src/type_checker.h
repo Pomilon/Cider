@@ -1089,6 +1089,17 @@ public:
         }
     }
 
+    // CIDER-BUG-069: resolve the interface flag on a captured field/element
+    // type the same way visit(VarDeclStmt) resolves a declaration — a plain
+    // interface name is a fat pointer even when the flag was not set when
+    // the type was captured. Arrays keep their wrapper unflagged; callers
+    // resolve the element after elementType().
+    void resolveInterfaceFlag(TypeInfo& t) {
+        if (t.isInterface || t.pointerLevel > 0 || t.isArray) return;
+        auto typeSym = resolveScoped(t.name);
+        if (typeSym && typeSym->kind == SymbolKind::INTERFACE) t.isInterface = true;
+    }
+
     // CIDER-BUG-054: the interface conversion rule, shared by
     // declaration-time assignment and reassignment so the two cannot
     // drift. Accepts a struct/class value, a pointer to one, or the same
@@ -1878,6 +1889,10 @@ public:
                 // CID-020/021 §1: field nominals belong to the struct's
                 // owner module; canonicalize there, not at the use site.
                 lastExprType_ = canonicalizeInModule(field.type, definingModuleOf(sym), expr.getLine());
+                // CIDER-BUG-069: an interface-typed field is a fat pointer;
+                // resolve the flag by name as a fallback (the collector sets
+                // it for module-local declarations).
+                resolveInterfaceFlag(lastExprType_);
                 found = true;
                 break;
             }
@@ -1960,7 +1975,13 @@ public:
                     fieldFound = true;
                     fieldInit.second->accept(*this);
                     TypeInfo expT = canonicalizeInModule(fieldDef.type, ownerMod, expr.getLine());
-                    if (!areTypesCompatible(expT, lastExprType_)) {
+                    // CIDER-BUG-069: an interface-typed field in a struct
+                    // literal accepts any satisfying concrete value, exactly
+                    // like a direct assignment to the field.
+                    resolveInterfaceFlag(expT);
+                    if (expT.isInterface) {
+                        checkInterfaceValue(expT, lastExprType_, expr.getLine());
+                    } else if (!areTypesCompatible(expT, lastExprType_)) {
                         error("Type mismatch for field '" + fieldDef.name +
                                   "'. Expected " + expT.toString() + ", got " +
                                   canonicalizeNominal(lastExprType_).toString(),
@@ -2473,10 +2494,15 @@ public:
 
         if (objType.isArray) {
             lastExprType_ = objType.elementType();
+            // CIDER-BUG-069: an element of an interface array is a fat
+            // pointer; resolve the flag by element name.
+            resolveInterfaceFlag(lastExprType_);
         } else if (objType.pointerLevel > 0 || objType.name == "string") {
             lastExprType_ = objType;
-            if (objType.pointerLevel > 0) lastExprType_.pointerLevel--;
-            else lastExprType_ = {"char", 0};
+            if (objType.pointerLevel > 0) {
+                lastExprType_.pointerLevel--;
+                resolveInterfaceFlag(lastExprType_);
+            } else lastExprType_ = {"char", 0};
         } else {
             error("Cannot index non-array and non-pointer type " + objType.toString(), expr.getLine());
             lastExprType_ = {"error", 0};

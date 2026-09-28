@@ -445,6 +445,8 @@ public:
                 StructSymbol::Field f;
                 f.name = field.name;
                 f.type = TypeInfo::fromAST(field.type.get());
+                // CIDER-BUG-069: resolve interface-ness before sizing.
+                resolveInterfaceFieldFlag(f.type);
                 f.offset = 0;
                 f.bits = field.bits;
 
@@ -464,6 +466,8 @@ public:
                 StructSymbol::Field f;
                 f.name = field.name;
                 f.type = TypeInfo::fromAST(field.type.get());
+                // CIDER-BUG-069: resolve interface-ness before sizing.
+                resolveInterfaceFieldFlag(f.type);
                 f.bits = field.bits;
 
                 if (field.bits > 0) {
@@ -775,6 +779,8 @@ public:
                 StructSymbol::Field f;
                 f.name = field->getName();
                 f.type = TypeInfo::fromAST(field->getTypeAST());
+                // CIDER-BUG-069: resolve interface-ness before sizing.
+                resolveInterfaceFieldFlag(f.type);
                 // CIDER-BUG-049: class field initializers are materialised at
                 // every object creation site (ir_gen NewExpr / value-class
                 // locals), so the AST is kept on the field. Inheritance copies
@@ -986,14 +992,31 @@ public:
         return nullptr;
     }
 
+    // CIDER-BUG-069: a field declared with a bare (or dotted) interface name
+    // is a 16-byte fat pointer (CIDER-BUG-054), but TypeInfo::fromAST cannot
+    // know the name denotes an interface until the declaration is collected.
+    // Resolve the flag before any layout query so the field is sized and
+    // aligned interface-aware and the checker/IR generator see the same type
+    // a declaration-site assignment produces. Array wrappers stay unflagged:
+    // an array is not itself an interface value, and getFieldSize sizes each
+    // element interface-aware from the element name.
+    void resolveInterfaceFieldFlag(TypeInfo& type) {
+        if (type.isInterface || type.pointerLevel > 0 || type.isArray) return;
+        auto sym = resolveNominalType(type.name);
+        if (sym && sym->kind == SymbolKind::INTERFACE) type.isInterface = true;
+    }
+
     int getFieldSize(const TypeInfo& type, std::set<std::string>* visiting = nullptr) {
         if (type.pointerLevel > 0) return 8;
-        if (type.isInterface) return 16;
+        // CIDER-BUG-069: an array of interfaces is sized by its elements
+        // (16 bytes each); the array wrapper is never an interface value, so
+        // the array test must come before the interface test.
         if (type.isArray) {
             // CIDER-BUG-052: elementType() covers the inner dimension of a
             // nested fixed array.
             return type.arraySize * getFieldSize(type.elementType(), visiting);
         }
+        if (type.isInterface) return 16;
         if (type.name == "u8" || type.name == "i8" || type.name == "char" || type.name == "byte" || type.name == "void") return 1;
         if (type.name == "u16" || type.name == "i16") return 2;
         if (type.name == "u32" || type.name == "i32" || type.name == "int" || type.name == "float" || type.name == "f32" || type.name == "bool") return 4;
@@ -1015,6 +1038,10 @@ public:
                 result = getFieldSize(sym->type, visiting);
             } else if (sym && (sym->kind == SymbolKind::STRUCT || sym->kind == SymbolKind::CLASS)) {
                 result = std::static_pointer_cast<StructSymbol>(sym)->totalSize;
+            } else if (sym && sym->kind == SymbolKind::INTERFACE) {
+                // CIDER-BUG-069: an interface name reached through an alias
+                // or an unresolved flag is still a 16-byte fat pointer.
+                result = 16;
             }
             visiting->erase(type.name);
         }
@@ -1024,12 +1051,14 @@ public:
 
     int getFieldAlignment(const TypeInfo& type, std::set<std::string>* visiting = nullptr) {
         if (type.pointerLevel > 0) return 8;
-        if (type.isInterface) return 8;
+        // CIDER-BUG-069: mirror getFieldSize — an array wrapper is aligned
+        // by its elements, so the array test comes first.
         if (type.isArray) {
             // CIDER-BUG-052: elementType() covers the inner dimension of a
             // nested fixed array.
             return getFieldAlignment(type.elementType(), visiting);
         }
+        if (type.isInterface) return 8;
         if (type.name == "u8" || type.name == "i8" || type.name == "char" || type.name == "byte" || type.name == "void") return 1;
         if (type.name == "u16" || type.name == "i16") return 2;
         if (type.name == "u32" || type.name == "i32" || type.name == "int" || type.name == "float" || type.name == "f32" || type.name == "bool") return 4;
@@ -1057,6 +1086,10 @@ public:
                     if (a > maxA) maxA = a;
                 }
                 result = maxA;
+            } else if (sym && sym->kind == SymbolKind::INTERFACE) {
+                // CIDER-BUG-069: an interface name reached through an alias
+                // or an unresolved flag aligns like a pointer (8 bytes).
+                result = 8;
             } else {
                 result = 8;
             }
@@ -1410,6 +1443,8 @@ public:
             // `entries: *Entry<K, V>`): instantiate the substituted type so
             // member access through it resolves (T6 std sweep).
             checkAndInstantiateStructTemplate(f.type.name);
+            // CIDER-BUG-069: resolve interface-ness before sizing.
+            resolveInterfaceFieldFlag(f.type);
             f.bits = field.bits;
             if (field.bits > 0) {
                 if (bitPos == 0) {

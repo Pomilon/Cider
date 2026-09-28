@@ -1896,6 +1896,10 @@ public:
                     // an explicit import (CIDER-BUG-043).
                     TypeInfo fieldType =
                         canonicalizeNominalInModule(resolveTypeAlias(field.type, ownerMod), ownerMod);
+                    // CIDER-BUG-069: an interface-typed field is a 16-byte
+                    // fat pointer; reads present its address (like an
+                    // interface variable) so dispatch sees both words.
+                    fieldType = resolveInterfaceNominal(fieldType);
                     bool fieldIsStruct = (fieldType.pointerLevel == 0);
                     if (fieldIsStruct) {
                         auto fieldTypeSym = resolveNominalType(fieldType.name);
@@ -1919,7 +1923,7 @@ public:
                                          fieldType.name == "i16" || fieldType.name == "i32");
                         lastValue_ = emitBitfieldLoad(addr, field.bitOffset, field.bitWidth, isSigned,
                                                       fieldVolatile);
-                    } else if (isAddress_ || fieldIsStruct || fieldIsArray) {
+                    } else if (isAddress_ || fieldIsStruct || fieldIsArray || fieldType.isInterface) {
                         lastValue_ = addr;
                     } else {
                         IRType fieldIRType = (fieldType.pointerLevel > 0) ? IRType::PTR : mapType(fieldType.name);
@@ -1957,9 +1961,6 @@ public:
         if (sym && (sym->kind == SymbolKind::STRUCT || sym->kind == SymbolKind::CLASS)) {
             auto structSym = std::static_pointer_cast<StructSymbol>(sym);
             for (auto& fieldInit : expr.getFields()) {
-                fieldInit.second->accept(*this);
-                IRValue val = lastValue_;
-
                 int offset = 0;
                 TypeInfo fieldType;
                 for (const auto& f : structSym->fields) {
@@ -1969,6 +1970,20 @@ public:
                         break;
                     }
                 }
+                fieldType = resolveInterfaceNominal(fieldType);
+                if (fieldType.isInterface) {
+                    // CIDER-BUG-069: an interface-typed field of a struct
+                    // literal stores the same 16-byte fat pointer a direct
+                    // field assignment does.
+                    IRValue fieldAddr = IRValue::Register(nextTemp(), IRType::PTR);
+                    currentBlock_->addInstruction({IROp::ADD, fieldAddr,
+                                                   {dest, IRValue::Constant(offset, IRType::I32)}});
+                    emitInterfaceStore(fieldType, fieldAddr, fieldInit.second.get());
+                    continue;
+                }
+                fieldInit.second->accept(*this);
+                IRValue val = lastValue_;
+
                 // CID-003: an aggregate literal's field stores at the
                 // declared width, exactly like a variable store (a literal
                 // f32 into an f64 field must not write 4 bytes).
@@ -3136,6 +3151,30 @@ public:
                 return resolveTypeAlias(sym->type);
             }
         } else if (auto mem = dynamic_cast<MemberAccessExpr*>(expr)) {
+            // CID-020/021 §3: `mod.g` names a module-scope global; resolve
+            // its declared type from the module's own scope (the same symbol
+            // visit(MemberAccessExpr) reads). Without this, a field of a
+            // module-qualified global struct has no inferred type, so
+            // CIDER-BUG-069's interface-target detection cannot see the
+            // fat pointer and the store would write only the data word.
+            if (!mem->isArrow()) {
+                if (auto base = dynamic_cast<IdentifierExpr*>(mem->getObject())) {
+                    auto baseSym = symbolTable_.resolve(base->getName());
+                    if (baseSym && baseSym->kind == SymbolKind::MODULE) {
+                        auto modSym = std::static_pointer_cast<ModuleSymbol>(baseSym);
+                        auto target = modSym->scope ? modSym->scope->resolveLocal(mem->getMember())
+                                                    : nullptr;
+                        if (target && target->kind == SymbolKind::VARIABLE) {
+                            std::string memberName = mem->getMember();
+                            std::string defMod = definingModuleFor(target, memberName);
+                            TypeInfo t = canonicalizeSymbolType(target, memberName);
+                            if (t.pointerLevel == 0) t = resolveTypeAlias(t, defMod);
+                            return resolveInterfaceNominal(t);
+                        }
+                        return TypeInfo{};
+                    }
+                }
+            }
             TypeInfo objType = inferExprType(mem->getObject());
             if (objType.pointerLevel > 0) objType.pointerLevel--;
             // CIDER-BUG-015: alias-safe struct lookup and field typing.
@@ -3199,6 +3238,20 @@ public:
 
     static int64_t bitfieldMask(int width) { return (1LL << width) - 1; }
 
+    // CIDER-BUG-069: interface-typed fields/elements carry the interface
+    // flag once the collector resolves it; recover it by name for shapes
+    // that reach IR generation without it (an array element stripped from a
+    // bare element name, an alias spelling), mirroring the declaration-time
+    // resolution so stores, reads and dispatch agree. Arrays are never
+    // interface values themselves: only scalar elements are flagged.
+    TypeInfo resolveInterfaceNominal(TypeInfo t) {
+        if (!t.isInterface && t.pointerLevel == 0 && !t.isArray) {
+            auto typeSym = resolveNominalType(t.name);
+            if (typeSym && typeSym->kind == SymbolKind::INTERFACE) t.isInterface = true;
+        }
+        return t;
+    }
+
     bool getMemberFieldType(MemberAccessExpr* mem, TypeInfo& out) {
         if (!mem) return false;
         TypeInfo objType = inferExprType(mem->getObject());
@@ -3213,6 +3266,9 @@ public:
                 // type so store widths and conversions see through
                 // `type X = T` spellings and cross-module pointees.
                 out = canonicalizeNominalInModule(resolveTypeAlias(f.type, ownerMod), ownerMod);
+                // CIDER-BUG-069: present an interface field as the 16-byte
+                // fat pointer it is (name fallback for unflagged shapes).
+                out = resolveInterfaceNominal(out);
                 return true;
             }
         }
@@ -3866,24 +3922,38 @@ public:
             // CIDER-BUG-054: an interface variable target stores the fat
             // pointer (data + vtable) through the same helper the
             // declaration path uses, so reassignment dispatches exactly
-            // like a declaration-time assignment. Interface fields and
-            // elements keep the legacy path: their layout is 8 bytes (the
-            // collector sizes the field type before the interface flag is
-            // resolved), so a 16-byte fat-pointer store is not safe there.
+            // like a declaration-time assignment.
+            // CIDER-BUG-069: interface-typed fields and elements are the
+            // same 16-byte fat pointer (the collector sizes them that way
+            // and the read paths present their address for dispatch), so
+            // `s.field = v` and `a[i] = v` take the same store path.
+            TypeInfo targetIface;
+            bool haveInterfaceTarget = false;
             if (auto ident = dynamic_cast<IdentifierExpr*>(stmt.getTarget())) {
                 auto sym = symbolTable_.resolve(ident->getName());
                 if (sym) {
-                    TypeInfo targetIface = sym->type;
-                    if (!targetIface.isInterface && targetIface.pointerLevel == 0) {
-                        auto typeSym = resolveNominalType(targetIface.name);
-                        if (typeSym && typeSym->kind == SymbolKind::INTERFACE) {
-                            targetIface.isInterface = true;
-                        }
-                    }
-                    if (targetIface.isInterface) {
-                        emitInterfaceStore(targetIface, addr, stmt.getValue());
-                        return;
-                    }
+                    targetIface = sym->type;
+                    haveInterfaceTarget = true;
+                }
+            } else if (auto mem = dynamic_cast<MemberAccessExpr*>(stmt.getTarget())) {
+                haveInterfaceTarget = getMemberFieldType(mem, targetIface);
+            } else if (auto idx = dynamic_cast<IndexExpr*>(stmt.getTarget())) {
+                TypeInfo baseType = inferExprType(idx->getObject());
+                if (baseType.isArray) {
+                    targetIface = baseType.elementType();
+                } else if (baseType.pointerLevel > 0) {
+                    targetIface = baseType;
+                    targetIface.pointerLevel--;
+                } else if (baseType.name == "string") {
+                    targetIface = {"char", 0};
+                }
+                haveInterfaceTarget = true;
+            }
+            if (haveInterfaceTarget) {
+                targetIface = resolveInterfaceNominal(targetIface);
+                if (targetIface.isInterface) {
+                    emitInterfaceStore(targetIface, addr, stmt.getValue());
+                    return;
                 }
             }
             stmt.getValue()->accept(*this);
@@ -5491,6 +5561,9 @@ public:
             elemType.name = "char";
         }
         elemType = resolveTypeAlias(elemType);
+        // CIDER-BUG-069: an element of an interface-typed array/pointer is
+        // the same 16-byte fat pointer as an interface variable.
+        elemType = resolveInterfaceNominal(elemType);
 
         int elemSize = getTypeSize(elemType);
         IRValue scaledIdx = IRValue::Register(nextTemp(), IRType::I32);
@@ -5514,8 +5587,9 @@ public:
         }
         // CIDER-BUG-052: an inner array element is address-like, exactly
         // like a top-level array value — loading it would read the first
-        // element's bytes as a pointer.
-        if (isAddress_ || elemIsStruct || elemType.isArray) {
+        // element's bytes as a pointer. CIDER-BUG-069: an interface element
+        // is address-like too (the fat pointer's address feeds dispatch).
+        if (isAddress_ || elemIsStruct || elemType.isArray || elemType.isInterface) {
             lastValue_ = addr;
         } else {
             IRType irType = (elemType.pointerLevel > 0 || elemType.isFunctionPointer)
