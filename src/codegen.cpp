@@ -973,6 +973,14 @@ bool CodeGenerator::generate(ModuleIR& module, const std::string& outputPath,
             std::set<std::string> seen;
             std::string cur = reg;
             long long totalOffset = 0;
+            // CIDER-BUG-105: an address that goes through an ADD is a
+            // sub-object (struct/class field), even when the accumulated
+            // offset is 0 — `hd.d.label = 55` in an 8-byte Holder addresses
+            // offset 0 of the slot, but a widened qword store there wrote
+            // over the following field (`hd.n` at offset 4). Only a plain
+            // variable's own slot (the alloca register, possibly copied
+            // through MOVs) may be widened.
+            bool derived = false;
             while (!cur.empty() && !seen.count(cur)) {
                 seen.insert(cur);
                 auto it = regDefs.find(cur);
@@ -986,11 +994,12 @@ bool CodeGenerator::generate(ModuleIR& module, const std::string& outputPath,
                     // are 4-byte packed — a qword store there would
                     // clobber the neighbor.
                     double allocSize = def->args.empty() ? 0.0 : (double)def->args[0].intValue;
-                    return totalOffset == 0 && allocSize == 8.0;
+                    return !derived && totalOffset == 0 && allocSize == 8.0;
                 }
                 if (def->op == IROp::ADD) {
                     if (!def->args.empty() && def->args[0].kind == IRValue::REGISTER) {
                         if (def->args.size() > 1 && def->args[1].kind == IRValue::CONSTANT) {
+                            derived = true;
                             totalOffset += (long long)def->args[1].intValue;
                         } else {
                             // A variable index (scaled array access): the

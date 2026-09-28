@@ -20,6 +20,31 @@
 namespace cider {
 
 class SymbolCollector : public ASTVisitor {
+    // CIDER-BUG-105: aggregate (struct/class/union and template
+    // instantiation) layouts are computed when their declaration is visited,
+    // in declaration order. A field whose type is declared LATER is sized by
+    // the unresolved-type default, and the enclosing layout is never
+    // updated: `class A { var b: B; }` followed by `class B` mis-sizes A.b,
+    // so fields after it (and every access through b) overlap. Each
+    // aggregate is recorded here at declaration time; finalizeLayouts()
+    // re-lays it out once the whole program (and its imports) is collected,
+    // using the same layout helpers as collection, so dependency-ordered
+    // programs keep byte-identical layouts. Recursion follows by-value field
+    // dependencies (which also covers an earlier aggregate embedding a type
+    // that itself had a forward reference); `state` breaks by-value cycles,
+    // whose collection-time layouts are kept.
+    struct AggregateLayout {
+        std::shared_ptr<StructSymbol> sym;
+        Scope* declaringScope = nullptr;  // scope field types resolve in
+        int ownFieldStart = 0;            // classes: first own field index
+        bool inherited = false;           // classes: parent resolved at collection
+        bool vptrReserved = false;        // classes: vptr slot reserved at collection
+        bool isUnion = false;
+        int state = 0;  // 0 pending, 1 in progress, 2 finalized
+    };
+    std::vector<AggregateLayout> aggregateLayouts_;
+    std::map<const StructSymbol*, size_t> aggregateIndex_;
+
 public:
     SymbolCollector(SymbolTable& symbolTable, ErrorReporter& reporter,
                     ModuleResolver& resolver, const std::string& originPath = "")
@@ -75,6 +100,11 @@ public:
             }
             if (pmit != programModules_.end()) moduleStack_.pop_back();
         }
+        // CIDER-BUG-105: every declaration (and every template
+        // instantiation) is known now. Re-lay out aggregates that were
+        // sized against not-yet-declared types while collection was still
+        // in progress (see AggregateLayout).
+        finalizeLayouts();
     }
 
     const std::map<std::string, std::shared_ptr<TemplateSymbol>>& getTemplateTable() const {
@@ -547,8 +577,6 @@ public:
         sym->isExported = inExport_;  // CIDER-BUG-060
 
         if (stmt.isUnion()) {
-            int maxSize = 0;
-            int maxAlign = 1;
             for (auto& field : stmt.getFields()) {
                 StructSymbol::Field f;
                 f.name = field.name;
@@ -561,19 +589,10 @@ public:
                 resolveInterfaceTypeFlag(f.type);
                 f.offset = 0;
                 f.bits = field.bits;
-
-                int size = getFieldSize(f.type);
-                if (size > maxSize) maxSize = size;
-                int a = (field.bits > 0) ? 4 : getFieldAlignment(f.type);
-                if (a > maxAlign) maxAlign = a;
-
                 sym->fields.push_back(f);
             }
-            sym->totalSize = alignUp(maxSize, maxAlign);
+            layoutUnion(*sym);
         } else {
-            int currentOffset = 0;
-            int maxAlign = 1;
-            int bitPos = 0;  // bit position within the current word
             for (auto& field : stmt.getFields()) {
                 StructSymbol::Field f;
                 f.name = field.name;
@@ -585,39 +604,9 @@ public:
                 // CIDER-BUG-069: resolve interface-ness before sizing.
                 resolveInterfaceTypeFlag(f.type);
                 f.bits = field.bits;
-
-                if (field.bits > 0) {
-                    // Bitfield: align the containing word to 4, then pack
-                    // into the current 32-bit word if it fits.
-                    if (bitPos == 0) {
-                        currentOffset = alignUp(currentOffset, 4);
-                        if (4 > maxAlign) maxAlign = 4;
-                    }
-                    if (bitPos + field.bits > 32) {
-                        currentOffset += 4;
-                        bitPos = 0;
-                    }
-                    f.offset = currentOffset;
-                    f.bitOffset = bitPos;
-                    f.bitWidth = field.bits;
-                    bitPos += field.bits;
-                } else {
-                    // Regular field: close any partially used bitfield word,
-                    // then align to its natural alignment.
-                    if (bitPos > 0) {
-                        currentOffset += 4;
-                        bitPos = 0;
-                    }
-                    int a = getFieldAlignment(f.type);
-                    currentOffset = alignUp(currentOffset, a);
-                    if (a > maxAlign) maxAlign = a;
-                    f.offset = currentOffset;
-                    currentOffset += getFieldSize(f.type);
-                }
                 sym->fields.push_back(f);
             }
-            if (bitPos > 0) currentOffset += 4;
-            sym->totalSize = alignUp(currentOffset, maxAlign);
+            layoutSequential(*sym);
         }
 
         if (symbolTable_.getCurrentScope()->resolveLocal(sym->name)) {
@@ -625,6 +614,8 @@ public:
         } else {
             symbolTable_.define(sym);
             recordDefiningModule(sym);
+            addAggregateLayout(sym, symbolTable_.getCurrentScope(), 0, false, false,
+                               stmt.isUnion());
         }
         structClassNames_.push_back(stmt.getName());
     }
@@ -882,8 +873,8 @@ public:
         sym->parentName = stmt.getParentName();
         sym->isExported = inExport_;  // CIDER-BUG-060
 
-        int currentOffset = 0;
         bool hasVTable = false;
+        bool inherited = false;
 
         // Inherit from parent if it exists
         if (!sym->parentName.empty()) {
@@ -893,8 +884,8 @@ public:
                 sym->fields = parentStruct->fields;
                 sym->methods = parentStruct->methods;
                 sym->vtable = parentStruct->vtable;
-                currentOffset = parentStruct->totalSize;
                 if (!sym->vtable.empty()) hasVTable = true;
+                inherited = true;
             }
         }
 
@@ -907,21 +898,14 @@ public:
             }
         }
 
-        // If this is the root of a virtual hierarchy, reserve space for vptr
-        int classMaxAlign = 1;
-        for (auto& f : sym->fields) {
-            int a = getFieldAlignment(f.type);
-            if (a > classMaxAlign) classMaxAlign = a;
-        }
-        if (hasVTable && sym->vtable.empty()) {
-            if (currentOffset == 0) {
-                currentOffset = 8;  // Size of vptr
-            } else {
-                for (auto& f : sym->fields) f.offset += 8;
-                currentOffset += 8;
-            }
-            if (8 > classMaxAlign) classMaxAlign = 8;
-        }
+        // CIDER-BUG-105: record whether this class is the root of a virtual
+        // hierarchy and reserves the vptr slot. The test must run before this
+        // class's own virtual methods are appended to the vtable below;
+        // layoutClass() (called after the member pass) applies the
+        // reservation and computes the field offsets from scratch, so a
+        // forward-declared field type no longer bakes a wrong size in.
+        bool vptrReserved = hasVTable && sym->vtable.empty();
+        int ownFieldStart = (int)sym->fields.size();
 
         for (auto& member : stmt.getMembers()) {
             if (auto field = dynamic_cast<VarDeclStmt*>(member.get())) {
@@ -942,11 +926,6 @@ public:
                 // base-field initializers run for derived instances too.
                 f.initializer = field->getInitializer();
                 f.initializerModule = getCurrentModule();
-                int a = getFieldAlignment(f.type);
-                currentOffset = alignUp(currentOffset, a);
-                if (a > classMaxAlign) classMaxAlign = a;
-                f.offset = currentOffset;
-                currentOffset += getFieldSize(f.type);
                 sym->fields.push_back(f);
             } else if (auto method = dynamic_cast<FunctionDeclStmt*>(member.get())) {
                 if (method->isDestructor()) {
@@ -1094,14 +1073,23 @@ public:
         }
         currentClassName_ = prevClass;
 
-        if (currentOffset == 0) {
-            currentOffset = 8;
-            if (8 > classMaxAlign) classMaxAlign = 8;
-        }
-        sym->totalSize = alignUp(currentOffset, classMaxAlign);
+        // CIDER-BUG-105: lay out from the inherited prefix plus this class's
+        // own fields (which the loop above appended past ownFieldStart).
+        // layoutClass() re-resolves the parent and applies the vptr
+        // reservation, exactly as the old inline pass did — but now the same
+        // helper also re-runs after collection, once forward-declared field
+        // types are known.
+        AggregateLayout rec;
+        rec.sym = sym;
+        rec.declaringScope = symbolTable_.getCurrentScope();
+        rec.ownFieldStart = ownFieldStart;
+        rec.inherited = inherited;
+        rec.vptrReserved = vptrReserved;
+        layoutClass(*sym, rec);
         symbolTable_.define(sym);
         recordDefiningModule(sym);
         structClassNames_.push_back(stmt.getName());
+        addAggregateLayout(std::move(rec));
     }
 
     void visit(FromImportStmt& stmt) override {
@@ -1344,6 +1332,221 @@ public:
     static int alignUp(int offset, int align) {
         if (align <= 1) return offset;
         return (offset + align - 1) & ~(align - 1);
+    }
+
+    // CIDER-BUG-105: shared aggregate layout algorithms. Collection and the
+    // post-collection finalize pass both go through them, so a dependency-
+    // ordered program (whose field types were all known at collection time)
+    // keeps byte-identical offsets and sizes.
+
+    // Union: every field overlaps at offset 0; the union is as large and as
+    // aligned as its largest field (bitfield members align to their word).
+    void layoutUnion(StructSymbol& sym) {
+        int maxSize = 0;
+        int maxAlign = 1;
+        for (auto& f : sym.fields) {
+            f.offset = 0;
+            int size = getFieldSize(f.type);
+            if (size > maxSize) maxSize = size;
+            int a = (f.bits > 0) ? 4 : getFieldAlignment(f.type);
+            if (a > maxAlign) maxAlign = a;
+        }
+        sym.totalSize = alignUp(maxSize, maxAlign);
+    }
+
+    // Plain struct / template instantiation: declared field order, with
+    // 32-bit bitfield words packed as in the original inline pass.
+    void layoutSequential(StructSymbol& sym) {
+        int currentOffset = 0;
+        int maxAlign = 1;
+        int bitPos = 0;  // bit position within the current word
+        for (auto& f : sym.fields) {
+            if (f.bits > 0) {
+                // Bitfield: align the containing word to 4, then pack
+                // into the current 32-bit word if it fits.
+                if (bitPos == 0) {
+                    currentOffset = alignUp(currentOffset, 4);
+                    if (4 > maxAlign) maxAlign = 4;
+                }
+                if (bitPos + f.bits > 32) {
+                    currentOffset += 4;
+                    bitPos = 0;
+                }
+                f.offset = currentOffset;
+                f.bitOffset = bitPos;
+                f.bitWidth = f.bits;
+                bitPos += f.bits;
+            } else {
+                // Regular field: close any partially used bitfield word,
+                // then align to its natural alignment.
+                if (bitPos > 0) {
+                    currentOffset += 4;
+                    bitPos = 0;
+                }
+                int a = getFieldAlignment(f.type);
+                currentOffset = alignUp(currentOffset, a);
+                if (a > maxAlign) maxAlign = a;
+                f.offset = currentOffset;
+                currentOffset += getFieldSize(f.type);
+            }
+        }
+        if (bitPos > 0) currentOffset += 4;
+        sym.totalSize = alignUp(currentOffset, maxAlign);
+    }
+
+    // Class: inherited fields (rebuilt from the parent so a parent whose own
+    // layout changed is picked up), optional vptr reservation, then this
+    // class's own fields past `rec.ownFieldStart`. Mirrors the original
+    // inline class pass exactly.
+    void layoutClass(StructSymbol& sym, const AggregateLayout& rec) {
+        std::vector<StructSymbol::Field> fields;
+        int currentOffset = 0;
+        int maxAlign = 1;
+        if (rec.inherited) {
+            auto parentSym = resolveNominalType(sym.parentName);
+            if (!parentSym || parentSym->kind != SymbolKind::CLASS) {
+                return;  // defensive: keep the collection-time layout
+            }
+            auto parent = std::static_pointer_cast<StructSymbol>(parentSym);
+            fields = parent->fields;
+            currentOffset = parent->totalSize;
+            for (auto& f : fields) {
+                int a = getFieldAlignment(f.type);
+                if (a > maxAlign) maxAlign = a;
+            }
+        }
+        if (rec.vptrReserved) {
+            if (currentOffset == 0) {
+                currentOffset = 8;  // Size of vptr
+            } else {
+                for (auto& f : fields) f.offset += 8;
+                currentOffset += 8;
+            }
+            if (8 > maxAlign) maxAlign = 8;
+        }
+        int bitPos = 0;
+        for (size_t i = (size_t)rec.ownFieldStart; i < sym.fields.size(); i++) {
+            StructSymbol::Field f = sym.fields[i];
+            if (f.bits > 0) {
+                if (bitPos == 0) {
+                    currentOffset = alignUp(currentOffset, 4);
+                    if (4 > maxAlign) maxAlign = 4;
+                }
+                if (bitPos + f.bits > 32) {
+                    currentOffset += 4;
+                    bitPos = 0;
+                }
+                f.offset = currentOffset;
+                f.bitOffset = bitPos;
+                f.bitWidth = f.bits;
+                bitPos += f.bits;
+            } else {
+                if (bitPos > 0) {
+                    currentOffset += 4;
+                    bitPos = 0;
+                }
+                int a = getFieldAlignment(f.type);
+                currentOffset = alignUp(currentOffset, a);
+                if (a > maxAlign) maxAlign = a;
+                f.offset = currentOffset;
+                currentOffset += getFieldSize(f.type);
+            }
+            fields.push_back(std::move(f));
+        }
+        if (bitPos > 0) currentOffset += 4;
+        if (currentOffset == 0) {
+            currentOffset = 8;
+            if (8 > maxAlign) maxAlign = 8;
+        }
+        sym.fields = std::move(fields);
+        sym.totalSize = alignUp(currentOffset, maxAlign);
+    }
+
+    // CIDER-BUG-105: record an aggregate whose layout may have to be
+    // recomputed once the whole program is collected. `sym` must already be
+    // defined in its scope.
+    void addAggregateLayout(const std::shared_ptr<StructSymbol>& sym, Scope* scope,
+                            int ownFieldStart = 0, bool inherited = false,
+                            bool vptrReserved = false, bool isUnion = false) {
+        AggregateLayout rec;
+        rec.sym = sym;
+        rec.declaringScope = scope;
+        rec.ownFieldStart = ownFieldStart;
+        rec.inherited = inherited;
+        rec.vptrReserved = vptrReserved;
+        rec.isUnion = isUnion;
+        aggregateIndex_[sym.get()] = aggregateLayouts_.size();
+        aggregateLayouts_.push_back(std::move(rec));
+    }
+
+    void addAggregateLayout(AggregateLayout rec) {
+        aggregateIndex_[rec.sym.get()] = aggregateLayouts_.size();
+        aggregateLayouts_.push_back(std::move(rec));
+    }
+
+    // Finalize every recorded aggregate. Declaration order is enough:
+    // finalizeAggregate() recurses into by-value field dependencies (and the
+    // parent of an inheriting class) before relaying out the symbol, so each
+    // type is finalized only after the types it embeds.
+    void finalizeLayouts() {
+        for (size_t i = 0; i < aggregateLayouts_.size(); i++) finalizeAggregate(i);
+    }
+
+    void finalizeAggregate(size_t index) {
+        AggregateLayout& rec = aggregateLayouts_[index];
+        // A by-value cycle (degenerate, but accepted) would recurse forever:
+        // keep the collection-time layout for the symbol still in progress.
+        if (rec.state != 0) return;
+        rec.state = 1;
+
+        Scope* prevScope = symbolTable_.getCurrentScope();
+        symbolTable_.setCurrentScope(rec.declaringScope);
+
+        if (rec.inherited) {
+            auto parentSym = resolveNominalType(rec.sym->parentName);
+            if (parentSym && parentSym->kind == SymbolKind::CLASS) {
+                auto parent = std::static_pointer_cast<StructSymbol>(parentSym);
+                auto it = aggregateIndex_.find(parent.get());
+                if (it != aggregateIndex_.end()) finalizeAggregate(it->second);
+            }
+        }
+        for (size_t i = (size_t)rec.ownFieldStart; i < rec.sym->fields.size(); i++) {
+            std::set<std::string> visiting;
+            finalizeTypeDependencies(rec.sym->fields[i].type, visiting);
+        }
+
+        if (rec.isUnion) {
+            layoutUnion(*rec.sym);
+        } else if (rec.sym->kind == SymbolKind::CLASS) {
+            layoutClass(*rec.sym, rec);
+        } else {
+            layoutSequential(*rec.sym);
+        }
+
+        symbolTable_.setCurrentScope(prevScope);
+        rec.state = 2;
+    }
+
+    // Resolve the by-value aggregate types a field type embeds, so their
+    // layouts are finalized before the enclosing one. Pointer, interface and
+    // function-pointer fields do not embed anything by value; arrays and
+    // `type X = T` aliases are followed (with a spelling guard, like
+    // getFieldSize, for alias cycles).
+    void finalizeTypeDependencies(const TypeInfo& type, std::set<std::string>& visiting) {
+        if (type.isArray) {
+            finalizeTypeDependencies(type.elementType(), visiting);
+            return;
+        }
+        if (type.isFunctionPointer || type.pointerLevel > 0 || type.isInterface) return;
+        if (type.name.empty()) return;
+        if (!visiting.insert(type.name).second) return;  // alias/aggregate cycle
+        auto sym = resolveNominalType(type.name);
+        if (sym && sym->isTypeAlias) {
+            finalizeTypeDependencies(sym->type, visiting);
+        } else if (sym && (sym->kind == SymbolKind::STRUCT || sym->kind == SymbolKind::CLASS)) {
+            auto it = aggregateIndex_.find(static_cast<const StructSymbol*>(sym.get()));
+            if (it != aggregateIndex_.end()) finalizeAggregate(it->second);
+        }
     }
 
     // Define the MODULE symbol for an imported module in the importing scope
@@ -1908,9 +2111,6 @@ public:
         // returns (the field type resolves once collection finishes).
         if (!structTemplateActive_.insert(instName).second) return;
 
-        int currentOffset = 0;
-        int maxAlign = 1;
-        int bitPos = 0;
         for (auto& field : tmplStruct->getFields()) {
             StructSymbol::Field f;
             f.name = field.name;
@@ -1928,38 +2128,17 @@ public:
             // CIDER-BUG-069: resolve interface-ness before sizing.
             resolveInterfaceTypeFlag(f.type);
             f.bits = field.bits;
-            if (field.bits > 0) {
-                if (bitPos == 0) {
-                    currentOffset = alignUp(currentOffset, 4);
-                    if (4 > maxAlign) maxAlign = 4;
-                }
-                if (bitPos + field.bits > 32) {
-                    currentOffset += 4;
-                    bitPos = 0;
-                }
-                f.offset = currentOffset;
-                f.bitOffset = bitPos;
-                f.bitWidth = field.bits;
-                bitPos += field.bits;
-            } else {
-                if (bitPos > 0) {
-                    currentOffset += 4;
-                    bitPos = 0;
-                }
-                int a = getFieldAlignment(f.type);
-                currentOffset = alignUp(currentOffset, a);
-                if (a > maxAlign) maxAlign = a;
-                f.offset = currentOffset;
-                currentOffset += getFieldSize(f.type);
-            }
             structSym->fields.push_back(f);
         }
-        if (bitPos > 0) currentOffset += 4;
-        structSym->totalSize = alignUp(currentOffset, maxAlign);
+        layoutSequential(*structSym);
 
         if (!globalScope->resolveLocal(instName)) {
             globalScope->define(structSym);
             structClassNames_.push_back(instName);
+            // CIDER-BUG-105: forward-declared field types of an
+            // instantiation are re-resolved by the post-collection pass,
+            // like any other aggregate.
+            addAggregateLayout(structSym, symbolTable_.getCurrentScope());
         }
         structTemplateActive_.erase(instName);
     }
