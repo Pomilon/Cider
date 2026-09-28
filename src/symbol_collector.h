@@ -542,7 +542,11 @@ public:
     }
 
     void visit(EnumDeclStmt& stmt) override {
-        auto sym = std::make_shared<Symbol>();
+        // CIDER-FEAT-002: a real enum type. The EnumSymbol carries the
+        // nominal identity and the variant list; the underlying runtime
+        // representation stays `int` (int-sized IRType::I32), and variants
+        // remain module-scope const symbols for the legacy bare spelling.
+        auto sym = std::make_shared<EnumSymbol>();
         sym->kind = SymbolKind::ENUM;
         sym->name = stmt.getName();
         sym->type = {"int", 0};
@@ -559,14 +563,19 @@ public:
             recordDefiningModule(sym);
         }
 
+        // Variants type as the enum's own canonical nominal, so an enum
+        // value is distinct from a plain int; the implicit values are
+        // 0, 1, 2, ... in declaration order.
+        std::string enumTypeName = canonicalTypeName(stmt.getName(), getCurrentModule());
         for (size_t i = 0; i < stmt.getVariants().size(); i++) {
             auto variant = std::make_shared<Symbol>();
             variant->kind = SymbolKind::VARIABLE;
             variant->name = stmt.getVariants()[i];
-            variant->type = {"int", 0};
+            variant->type = {enumTypeName, 0};
             variant->line = stmt.getLine();
             variant->col = stmt.getColumn();
             variant->isConst = true;
+            variant->isEnumVariant = true;
             variant->constValue = (double)i;
             // CIDER-BUG-060: exporting the enum exports its variants, which
             // are ordinary module-scope const symbols (`m.RED`, `from m
@@ -576,7 +585,12 @@ public:
                 reporter_.error("Redeclaration of variant '" + variant->name + "'", variant->line, variant->col);
             } else {
                 symbolTable_.define(variant);
+                // Provenance lets a from-imported variant keep the enum's
+                // defining module through chained aliases (mirrors the
+                // enum symbol itself).
+                recordDefiningModule(variant);
             }
+            sym->variants.push_back({variant->name, (int64_t)i});
         }
     }
 
@@ -1032,7 +1046,10 @@ public:
         } else {
             visiting->insert(type.name);
             auto sym = resolveNominalType(type.name);
-            if (sym && sym->isTypeAlias) {
+            if (sym && sym->kind == SymbolKind::ENUM) {
+                // CIDER-FEAT-002: an enum is its int-sized underlying value.
+                result = 4;
+            } else if (sym && sym->isTypeAlias) {
                 // CID-005/T8: a `type X = T` alias provider is a STRUCT-kind
                 // plain Symbol, not a StructSymbol: size of the target type.
                 result = getFieldSize(sym->type, visiting);
@@ -1074,7 +1091,10 @@ public:
         } else {
             visiting->insert(type.name);
             auto sym = resolveNominalType(type.name);
-            if (sym && sym->isTypeAlias) {
+            if (sym && sym->kind == SymbolKind::ENUM) {
+                // CIDER-FEAT-002: an enum aligns as its int-sized value.
+                result = 4;
+            } else if (sym && sym->isTypeAlias) {
                 // CID-005/T8: `type X = T` alias provider (plain Symbol, not
                 // a StructSymbol): alignment of the target type.
                 result = getFieldAlignment(sym->type, visiting);

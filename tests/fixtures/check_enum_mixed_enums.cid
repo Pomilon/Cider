@@ -1,0 +1,9 @@
+// CIDER-FEAT-002: two enum types never interconvert, even with the same
+// underlying representation.
+enum Color { RED, GREEN }
+enum Size { SMALL, LARGE }
+
+func main() -> int {
+    var s: Size = Color.RED;
+    return s as int;
+}

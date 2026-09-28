@@ -88,6 +88,26 @@ int run() {
     auto green = findSym(*r5.table, "GREEN");
     CHECK(red && red->isConst && red->constValue == 0);
     CHECK(green && green->isConst && green->constValue == 1);
+    // CIDER-FEAT-002: the enum is a distinct EnumSymbol holding the
+    // variant list; variants carry the enum's nominal type and the
+    // variant marker (still module-scope consts for the bare spelling).
+    auto colorSym = std::static_pointer_cast<cider::EnumSymbol>(findSym(*r5.table, "Color"));
+    CHECK(colorSym && colorSym->kind == cider::SymbolKind::ENUM);
+    CHECK(colorSym->variants.size() == 3);
+    CHECK(colorSym->variants[0].name == "RED" && colorSym->variants[0].value == 0);
+    CHECK(colorSym->variants[2].name == "BLUE" && colorSym->variants[2].value == 2);
+    CHECK(red->isEnumVariant && red->type.name == "Color");
+    int64_t variantValue = 0;
+    CHECK(colorSym->findVariant("GREEN", variantValue) && variantValue == 1);
+    CHECK(!colorSym->findVariant("PURPLE", variantValue));
+    // An enum-typed struct field lays out as the 4-byte underlying value,
+    // not the legacy 8-byte unknown-nominal default.
+    Result r5b = collectSrc(
+        "enum Color { RED, GREEN }\n"
+        "struct S {\n  var c: Color;\n  var n: int;\n}\n");
+    CHECK(r5b.errors.empty());
+    auto enumFieldStruct = std::static_pointer_cast<cider::StructSymbol>(findSym(*r5b.table, "S"));
+    CHECK(enumFieldStruct && enumFieldStruct->totalSize == 8 && enumFieldStruct->fields[1].offset == 4);
 
     // Function symbol with params/return.
     Result r6 = collectSrc("func f(x: int) -> char* { return nilPtr; }\n");

@@ -169,6 +169,12 @@ struct Symbol {
     bool isTypeAlias = false;  // `type X = T` provider (STRUCT-kind, not StructSymbol)
     double constValue = 0;  // For const variables and enum variant values
 
+    // CIDER-FEAT-002: a bare variant constant of an enum declaration
+    // (`RED` in `enum Color { RED }`). The variant has no storage; its
+    // value is constValue and its type is the owning enum's canonical
+    // name. Qualified access (`Color.RED`) resolves through EnumSymbol.
+    bool isEnumVariant = false;
+
     // CIDER-BUG-048: initializer AST of a `const` declaration. Global
     // scalar initializers fold references to const symbols by recursing
     // into this expression, so the value stays exact (no double round
@@ -195,6 +201,32 @@ struct FunctionSymbol : public Symbol {
     TypeInfo returnType;
     bool isAsync = false;
     Abi abi = Abi::Default;
+};
+
+// CIDER-FEAT-002: a real enum type. The runtime representation is the
+// underlying integer (int-sized, IRType::I32); the distinct symbol carries
+// the type's nominal identity plus the variant list, which powers
+// qualified access (`Color.RED`, `lib.Color.RED`) and the opt-in match
+// exhaustiveness warning. Variants also stay bound as module-scope const
+// symbols, so the legacy bare spelling (`var c: int = RED;`) keeps
+// working.
+struct EnumSymbol : public Symbol {
+    struct Variant {
+        std::string name;
+        int64_t value = 0;
+    };
+    std::vector<Variant> variants;
+
+    // Look one variant up by name. Returns false when not a variant.
+    bool findVariant(const std::string& variantName, int64_t& out) const {
+        for (const auto& v : variants) {
+            if (v.name == variantName) {
+                out = v.value;
+                return true;
+            }
+        }
+        return false;
+    }
 };
 
 struct StructSymbol : public Symbol {

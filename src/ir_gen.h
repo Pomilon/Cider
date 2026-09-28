@@ -293,11 +293,23 @@ public:
         if (name == "void") return IRType::VOID;
         // Resolve type aliases through symbol table
         if (name.empty() || !visiting.insert(name).second) return IRType::PTR;
-        auto typeSym = symbolTable_.resolve(name);
+        // CIDER-FEAT-002: an enum lowers as its underlying integer
+        // (int-sized); bare, dotted and canonical spellings all resolve.
+        auto typeSym = resolveNominalType(name);
+        if (typeSym && typeSym->kind == SymbolKind::ENUM) return IRType::I32;
         if (typeSym && typeSym->type.pointerLevel == 0 && !typeSym->type.name.empty()) {
             std::string targetName = typeSym->type.name;
             if (targetName != name) {
-                IRType resolved = mapTypeImpl(targetName, visiting);
+                // CID-020/021/CIDER-BUG-029 rule: an alias target spelling
+                // belongs to the alias's defining module. Re-root it before
+                // the recursive lookup so a cross-module `type X = Y` maps
+                // Y's real width (an enum target stays I32) instead of
+                // falling through to PTR.
+                TypeInfo target;
+                target.name = targetName;
+                std::string rooted =
+                    canonicalizeNominalInModule(target, definingModuleFor(typeSym, name)).name;
+                IRType resolved = mapTypeImpl(rooted, visiting);
                 if (resolved != IRType::PTR) return resolved;
             }
         }
@@ -1798,7 +1810,68 @@ public:
         lastExprType_ = closureType;
     }
 
+    // CIDER-FEAT-002: the EnumSymbol a `Enum` / `lib.Enum` qualifier names
+    // (or a `type Alias = Enum` provider resolving to one). `constContext`
+    // binds names like the const fold does (the declaration scope first);
+    // otherwise the ordinary use-site scope walk applies.
+    std::shared_ptr<Symbol> resolveEnumQualifierSymbol(Expression* object, bool constContext) {
+        auto resolveName = [&](const std::string& n) {
+            return constContext ? resolveConstIdentifier(n) : symbolTable_.resolve(n);
+        };
+        auto asEnum = [&](const std::shared_ptr<Symbol>& sym) -> std::shared_ptr<Symbol> {
+            if (sym && sym->kind == SymbolKind::ENUM) return sym;
+            // `type Alias = Enum`: follow the provider chain rooted at the
+            // alias's own canonical name, so its bare target spelling
+            // resolves in the alias's defining module (mirrors the
+            // checker's enumSymbolOfTypeName).
+            if (sym && sym->isTypeAlias) {
+                TypeInfo rooted;
+                rooted.name = canonicalTypeName(sym->name, definingModuleFor(sym, sym->name));
+                TypeInfo target = resolveTypeAlias(rooted);
+                auto resolved = resolveNominalType(target.name);
+                if (resolved && resolved->kind == SymbolKind::ENUM) return resolved;
+            }
+            return nullptr;
+        };
+        if (auto* base = dynamic_cast<IdentifierExpr*>(object)) {
+            return asEnum(resolveName(base->getName()));
+        }
+        if (auto* inner = dynamic_cast<MemberAccessExpr*>(object)) {
+            if (inner->isArrow()) return nullptr;
+            if (auto* base = dynamic_cast<IdentifierExpr*>(inner->getObject())) {
+                auto baseSym = resolveName(base->getName());
+                if (baseSym && baseSym->kind == SymbolKind::MODULE) {
+                    Scope* ms = std::static_pointer_cast<ModuleSymbol>(baseSym)->scope;
+                    auto target = ms ? ms->resolveLocal(inner->getMember()) : nullptr;
+                    return asEnum(target);
+                }
+            }
+        }
+        return nullptr;
+    }
+
+    // CIDER-FEAT-002: fold `Enum.VARIANT` / `lib.Enum.VARIANT`. The enum
+    // name is a type qualifier, so the variant's constant is emitted
+    // directly (no storage, no object value). Returns true when `expr` is a
+    // qualified enum variant reference.
+    bool tryFoldEnumVariant(MemberAccessExpr& expr) {
+        if (expr.isArrow()) return false;
+        auto enumSym = resolveEnumQualifierSymbol(expr.getObject(), /*constContext=*/false);
+        if (!enumSym) return false;
+        auto esym = std::static_pointer_cast<EnumSymbol>(enumSym);
+        int64_t value = 0;
+        if (!esym->findVariant(expr.getMember(), value)) return false;
+        lastValue_ = IRValue::Constant((double)value, IRType::I32);
+        lastExprType_ = {canonicalTypeName(esym->name, definingModuleFor(esym, esym->name)), 0};
+        return true;
+    }
+
     void visit(MemberAccessExpr& expr) override {
+        // CIDER-FEAT-002: `Enum.VARIANT` / `lib.Enum.VARIANT` has no object
+        // value; fold the variant constant directly. Checked before the
+        // module-const paths so a qualified enum type never evaluates as an
+        // expression.
+        if (tryFoldEnumVariant(expr)) return;
         // CID-020/021 (spec §3/§5): `m.gval` where m is a module qualifier
         // reads the member in m's module scope (T6 probe G1/G3: this used to
         // emit `load %m, gval` garbage). The member may itself be a
@@ -1829,6 +1902,16 @@ public:
                     return;
                 }
                 if (target && target->kind == SymbolKind::VARIABLE) {
+                    // CIDER-FEAT-002: a module-qualified enum variant
+                    // (`lib.RED`) has no storage — fold its constant. A
+                    // non-variant `const` keeps its global load (the
+                    // collector never evaluates its initializer into
+                    // constValue), so folding is limited to variants.
+                    if (target->isEnumVariant) {
+                        lastValue_ = IRValue::Constant(target->constValue, mapType(target->type.name));
+                        lastExprType_ = canonicalizeSymbolType(target, expr.getMember());
+                        return;
+                    }
                     std::string gname = emitGlobalName(
                         definingModuleFor(target, expr.getMember()), target->name);
                     lastExprType_ = canonicalizeSymbolType(target, expr.getMember());
@@ -2524,6 +2607,9 @@ public:
         if (type.isInterface) return 16;
         auto sym = resolveNominalType(type.name);
         if (!sym && !defModule.empty()) sym = resolveCalleeNominal(type.name, defModule);
+        // CIDER-FEAT-002: an enum value is its int-sized underlying
+        // integer, never the legacy 8-byte unknown-nominal default.
+        if (sym && sym->kind == SymbolKind::ENUM) return 4;
         if (sym && (sym->kind == SymbolKind::STRUCT || sym->kind == SymbolKind::CLASS)) {
             // Alias providers carry another name in type.name and are plain
             // Symbols, never StructSymbols (cycle / self-alias): sizing one
@@ -3368,6 +3454,17 @@ public:
         // bare name (mirrors functionPointerInitTarget's module-member path).
         if (auto mem = dynamic_cast<MemberAccessExpr*>(expr)) {
             if (mem->isArrow()) return false;
+            // CIDER-FEAT-002: `Enum.VARIANT` / `lib.Enum.VARIANT` folds to
+            // the variant's integer value (the qualifier is a type, not a
+            // value). A module-qualified bare variant (`lib.RED`) is an
+            // ordinary const symbol and folds through the path below.
+            if (auto enumSym = resolveEnumQualifierSymbol(mem->getObject(), /*constContext=*/true)) {
+                int64_t enumValue = 0;
+                if (std::static_pointer_cast<EnumSymbol>(enumSym)->findVariant(mem->getMember(), enumValue)) {
+                    out = (uint64_t)enumValue;
+                    return true;
+                }
+            }
             auto base = dynamic_cast<IdentifierExpr*>(mem->getObject());
             if (!base) return false;
             auto baseSym = resolveConstIdentifier(base->getName());

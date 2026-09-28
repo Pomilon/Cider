@@ -1,0 +1,8 @@
+// CIDER-FEAT-002: an enum name is a type, not a value; `Color.RED` is the
+// qualified variant spelling.
+enum Color { RED }
+
+func main() -> int {
+    var c: Color = Color;
+    return c as int;
+}

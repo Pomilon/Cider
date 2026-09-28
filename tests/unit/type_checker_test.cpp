@@ -810,6 +810,105 @@ int run() {
         }
     }
 
+    // CIDER-FEAT-002: real enum types. `Color` is a distinct nominal type;
+    // qualified variants, int <-> enum casts, comparisons, parameters,
+    // fields and match all check; bare variants keep working as int consts.
+    {
+        auto okEnum = checkSrc(
+            "enum Color { RED, GREEN, BLUE }\n"
+            "enum Size { SMALL, LARGE }\n"
+            "struct Paint { var c: Color; var n: int; }\n"
+            "var g: Color = Color.GREEN;\n"
+            "func take(c: Color) -> int { return c as int; }\n"
+            "func same(c: Color) -> Color { return c; }\n"
+            "func main() -> int {\n"
+            "  var c: Color = Color.GREEN;\n"
+            "  if (c == Color.GREEN) { }\n"
+            "  if (c != 1) { }\n"
+            "  if (!(1 == c)) { }\n"
+            "  c = BLUE;\n"
+            "  c = 2 as Color;\n"
+            "  var i: int = RED;\n"
+            "  var j: int = c;\n"
+            "  var fromInt: Color = 1 as Color;\n"
+            "  var s: Size = Size.LARGE;\n"
+            "  var p: Paint;\n"
+            "  p.c = Color.RED;\n"
+            "  match (c) { RED => { } BLUE => { } default => { } }\n"
+            "  return take(c) + i + j + (fromInt as int) + (s as int);\n"
+            "}\n");
+        CHECK(okEnum.empty());
+
+        // int -> enum needs a cast; two different enums never interconvert.
+        auto badDecl = checkSrc(
+            "enum Color { RED }\nfunc main() -> int { var c: Color = 0; return c as int; }\n");
+        CHECK(hasError(badDecl, "Type mismatch in declaration of 'c'. Expected Color, got int"));
+        auto badOther = checkSrc(
+            "enum Color { RED }\nenum Size { BIG }\n"
+            "func main() -> int { var s: Size = Color.RED; return s as int; }\n");
+        CHECK(hasError(badOther, "Type mismatch in declaration of 's'. Expected Size, got Color"));
+        auto badAssign = checkSrc(
+            "enum Color { RED }\nfunc main() -> int { var c: Color = Color.RED; c = 3; return c as int; }\n");
+        CHECK(hasError(badAssign, "Type mismatch in assignment. Expected Color, got int"));
+
+        // Unknown variant, type-as-value and enum arithmetic are diagnosed.
+        auto badVariant = checkSrc(
+            "enum Color { RED }\nfunc main() -> int { var c: Color = Color.NOPE; return c as int; }\n");
+        CHECK(hasError(badVariant, "Enum 'Color' has no variant 'NOPE'"));
+        auto typeValue = checkSrc(
+            "enum Color { RED }\nfunc main() -> int { var c: Color = Color; return c as int; }\n");
+        CHECK(hasError(typeValue, "'Color' is a type, not a value"));
+        auto badArith = checkSrc(
+            "enum Color { RED }\n"
+            "func main() -> int { var c: Color = Color.RED; return c + 1; }\n");
+        CHECK(hasError(badArith, "Type mismatch in binary expression '+'. Color vs int"));
+
+        // Enum globals take the integer constant-initializer rule.
+        auto badGlobal = checkSrc(
+            "enum Color { RED }\nfunc pick() -> Color { return Color.RED; }\n"
+            "var g: Color = pick();\nfunc main() -> int { return g as int; }\n");
+        CHECK(hasError(badGlobal,
+                       "Global integer initializer in declaration of 'g' must use constant expressions"));
+        auto okGlobal = checkSrc(
+            "enum Color { RED, GREEN }\nvar g: Color = Color.GREEN;\n"
+            "const K: int = Color.RED as int;\n"
+            "func main() -> int { return (g as int) + K; }\n");
+        CHECK(okGlobal.empty());
+
+        // CIDER-FEAT-002: opt-in match exhaustiveness. Missing variants warn
+        // under --warn; complete coverage, a `default` arm and dynamic
+        // patterns stay silent; disabled by default.
+        auto missing = checkSrcWarnings(
+            "enum Color { RED, GREEN, BLUE }\n"
+            "func main() -> int { var c: Color = Color.RED;\n"
+            "  match (c) { RED => { } Color.GREEN => { } }\n"
+            "  return 0; }\n");
+        CHECK(hasWarning(missing, "match on enum 'Color' does not handle variant 'BLUE'"));
+        auto complete = checkSrcWarnings(
+            "enum Color { RED, GREEN }\n"
+            "func main() -> int { var c: Color = Color.RED;\n"
+            "  match (c) { RED => { } GREEN => { } }\n"
+            "  return 0; }\n");
+        CHECK(!hasWarning(complete, "does not handle"));
+        auto withDefault = checkSrcWarnings(
+            "enum Color { RED, GREEN, BLUE }\n"
+            "func main() -> int { var c: Color = Color.RED;\n"
+            "  match (c) { RED => { } default => { } }\n"
+            "  return 0; }\n");
+        CHECK(!hasWarning(withDefault, "does not handle"));
+        auto dynamicPattern = checkSrcWarnings(
+            "enum Color { RED, GREEN, BLUE }\n"
+            "func main() -> int { var c: Color = Color.RED; var o: Color = Color.GREEN;\n"
+            "  match (c) { RED => { } o => { } }\n"
+            "  return 0; }\n");
+        CHECK(!hasWarning(dynamicPattern, "does not handle"));
+        auto noWarnByDefault = checkSrc(
+            "enum Color { RED, GREEN }\n"
+            "func main() -> int { var c: Color = Color.RED;"
+            "  match (c) { RED => { } } return 0; }\n");
+        CHECK(noWarnByDefault.empty());
+    }
+
     // CIDER-FEAT-005: opt-in warnings. The checkSrc calls above double as
     // the disabled-by-default guard (they never inspect warnings): enabling
     // the pass reports unused locals/loop/catch bindings and shadowing, and

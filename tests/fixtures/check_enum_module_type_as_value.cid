@@ -1,0 +1,8 @@
+// CIDER-FEAT-002: a module-qualified enum name is a type qualifier, not a
+// value (`enum_module_lib.Color.RED` is the variant spelling).
+import enum_module_lib;
+
+func main() -> int {
+    var c: enum_module_lib.Color = enum_module_lib.Color;
+    return c as int;
+}

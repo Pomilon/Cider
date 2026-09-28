@@ -550,6 +550,96 @@ public:
                n == "char" || n == "byte" || n == "bool";
     }
 
+    // CIDER-FEAT-002: the EnumSymbol a nominal type spelling names, or null.
+    // Handles bare (`Color`), dotted (`lib.Color`) and canonical
+    // (`lib::Color`) spellings through the normal nominal lookup. Pointers,
+    // arrays, fn types and interfaces are never enums, and neither is an
+    // alias that does not resolve to one.
+    std::shared_ptr<EnumSymbol> resolveEnumSymbol(TypeInfo t) {
+        if (t.pointerLevel > 0 || t.isArray || t.isFunctionPointer || t.isInterface) return nullptr;
+        if (t.name.empty() || t.name == "error" || t.name == "wildcard") return nullptr;
+        TypeInfo resolved = resolveType(canonicalizeNominal(t, -1));
+        if (resolved.pointerLevel > 0 || resolved.isArray || resolved.isFunctionPointer) return nullptr;
+        auto sym = resolveScoped(resolved.name);
+        if (!sym || sym->kind != SymbolKind::ENUM) return nullptr;
+        return std::static_pointer_cast<EnumSymbol>(sym);
+    }
+
+    // CIDER-FEAT-002: canonical nominal type of an enum definition.
+    TypeInfo enumTypeOf(const std::shared_ptr<EnumSymbol>& sym) {
+        TypeInfo t;
+        t.name = canonicalTypeName(sym->name, definingModuleOf(sym));
+        return t;
+    }
+
+    // CIDER-FEAT-002: the enum a type-provider symbol names — a direct
+    // enum, or a `type Alias = Enum` provider whose chain ends in one.
+    std::shared_ptr<EnumSymbol> enumSymbolOfTypeName(const std::shared_ptr<Symbol>& sym) {
+        if (!sym) return nullptr;
+        if (sym->kind == SymbolKind::ENUM) return std::static_pointer_cast<EnumSymbol>(sym);
+        if (sym->isTypeAlias) {
+            // Root the chain at the alias's own canonical name, so its bare
+            // target spelling resolves in the alias's defining module
+            // (`type A = Shape` inside module m means m.Shape here).
+            TypeInfo rooted;
+            rooted.name = canonicalTypeName(sym->name, definingModuleOf(sym));
+            TypeInfo target = resolveType(rooted);
+            auto resolved = resolveScoped(target.name);
+            if (resolved && resolved->kind == SymbolKind::ENUM) {
+                return std::static_pointer_cast<EnumSymbol>(resolved);
+            }
+        }
+        return nullptr;
+    }
+
+    // CIDER-FEAT-002: the enum a QUALIFIER expression names (`Color`,
+    // `lib.Color` or an alias spelling). Used where the qualifier is not a
+    // value — the object of `Enum.VARIANT` must not be evaluated through
+    // visit(IdentifierExpr)'s value paths.
+    std::shared_ptr<EnumSymbol> enumSymbolFromQualifier(Expression* expr) {
+        if (!expr) return nullptr;
+        if (auto id = dynamic_cast<IdentifierExpr*>(expr)) {
+            return enumSymbolOfTypeName(resolveScoped(id->getName()));
+        }
+        if (auto mem = dynamic_cast<MemberAccessExpr*>(expr)) {
+            if (mem->isArrow()) return nullptr;
+            if (auto base = dynamic_cast<IdentifierExpr*>(mem->getObject())) {
+                // An ambiguous qualifier stays the module-access path's
+                // diagnostic (spec §1), never a silent pick here.
+                if (isAmbiguousQualifier(base->getName())) return nullptr;
+                auto baseSym = resolveScoped(base->getName());
+                if (baseSym && baseSym->kind == SymbolKind::MODULE) {
+                    auto modSym = std::static_pointer_cast<ModuleSymbol>(baseSym);
+                    Scope* ms = modSym->scope;
+                    auto target = ms ? ms->resolveLocal(mem->getMember()) : nullptr;
+                    return enumSymbolOfTypeName(target);
+                }
+            }
+        }
+        return nullptr;
+    }
+
+    // CIDER-FEAT-002: fold `Color.RED` / `lib.Color.RED` to the variant's
+    // integer value for constant-expression contexts. A module-qualified
+    // bare variant (`lib.RED`) is an ordinary const symbol and is folded by
+    // the existing module-const paths instead.
+    bool resolveEnumVariantConst(Expression* expr, int64_t& value) {
+        auto mem = dynamic_cast<MemberAccessExpr*>(expr);
+        if (!mem || mem->isArrow()) return false;
+        auto enumSym = enumSymbolFromQualifier(mem->getObject());
+        if (!enumSym) return false;
+        return enumSym->findVariant(mem->getMember(), value);
+    }
+
+    // CIDER-FEAT-002: an enum-typed scalar takes the same "no runtime
+    // initializer" route as an integer (its underlying representation is
+    // int-sized), so global/class-field constants rules apply to it too.
+    bool isIntegerLikeType(TypeInfo t) {
+        t = resolveType(t);
+        if (t.pointerLevel > 0 || t.isArray) return false;
+        return isIntegerName(t.name) || resolveEnumSymbol(t) != nullptr;
+    }
+
     bool areTypesCompatible(TypeInfo t1, TypeInfo t2) {
         if (t1.name == "wildcard" || t2.name == "wildcard") return true;
         t1 = resolveType(t1);
@@ -567,6 +657,21 @@ public:
         t2 = canonicalizeNominal(t2);
 
         if (t1 == t2) return true;
+
+        // CIDER-FEAT-002: enum conversion rules (t1 = target/expected,
+        // t2 = source/actual).
+        //  * two enums interconvert only when they are the SAME enum;
+        //  * an enum value flows implicitly to an integer-family target
+        //    (the legacy bare spelling assigns to `int`);
+        //  * an integer does NOT flow to an enum target without an explicit
+        //    `value as Enum` cast.
+        auto enum1 = resolveEnumSymbol(t1);
+        auto enum2 = resolveEnumSymbol(t2);
+        if (enum1 || enum2) {
+            if (enum1 && enum2) return enum1 == enum2;
+            if (enum2) return isIntegerName(t1.name) && t1.pointerLevel == 0 && !t1.isArray;
+            return false;
+        }
 
         // CID-005 fix round 1 (Q1 follow-up): two array values must also
         // agree on their element count. The integer fallback below ignores
@@ -788,6 +893,12 @@ public:
         }
         if (auto id = dynamic_cast<IdentifierExpr*>(expr)) {
             return isConstSymbolIntExpr(resolveConstIdentifier(id->getName()), visiting);
+        }
+        // CIDER-FEAT-002: `Color.RED` / `lib.Color.RED` is an enum constant.
+        if (auto mem = dynamic_cast<MemberAccessExpr*>(expr)) {
+            if (mem->isArrow()) return false;
+            int64_t enumValue = 0;
+            if (resolveEnumVariantConst(expr, enumValue)) return true;
         }
         // CIDER-BUG-048: a module-qualified const (`mc.K`) is the same
         // constant as a from-import alias; resolve the member in the
@@ -1020,6 +1131,11 @@ public:
         if (auto id = dynamic_cast<IdentifierExpr*>(expr)) {
             return evalConstBoundSymbol(resolveConstIdentifier(id->getName()), out, visiting);
         }
+        // CIDER-FEAT-002: an enum variant spelling folds to its value.
+        if (auto mem = dynamic_cast<MemberAccessExpr*>(expr)) {
+            if (mem->isArrow()) return false;
+            if (resolveEnumVariantConst(expr, out)) return true;
+        }
         // Module-qualified const (`mc.K`), same resolution as isConstIntExpr.
         if (auto mem = dynamic_cast<MemberAccessExpr*>(expr)) {
             if (mem->isArrow()) return false;
@@ -1250,7 +1366,7 @@ public:
                     error("Class field initializer in declaration of '" + stmt.getName() +
                               "' must use constant expressions", stmt.getLine());
                 }
-            } else if (!resolvedField.isArray && isIntegerName(resolvedField.name)) {
+            } else if (isIntegerLikeType(resolvedField)) {
                 if (!isConstIntExpr(fieldInit)) {
                     error("Class field initializer in declaration of '" + stmt.getName() +
                               "' must use constant expressions", stmt.getLine());
@@ -1305,10 +1421,9 @@ public:
         // recursively — so an accepted declaration always lands in .data.
         if (stmt.getInitializer() && !stmt.isExtern() && symbolTable_.scopeDepth() == 0 &&
             declaredType.pointerLevel == 0 && !declaredType.isArray) {
+            // CIDER-FEAT-002: enum-typed globals take the same route.
             TypeInfo resolvedType = resolveType(declaredType);
-            if (resolvedType.pointerLevel == 0 && !resolvedType.isArray &&
-                isIntegerName(resolvedType.name) &&
-                !isConstIntExpr(stmt.getInitializer())) {
+            if (isIntegerLikeType(resolvedType) && !isConstIntExpr(stmt.getInitializer())) {
                 error("Global integer initializer in declaration of '" + stmt.getName() +
                           "' must use constant expressions", stmt.getLine());
             }
@@ -1519,7 +1634,25 @@ public:
                               (isFloatName(leftType.name) && isInteger(rightType.name)) ||
                               (isFloatName(leftType.name) && isFloatName(rightType.name));
 
-        if (!areTypesCompatible(leftType, rightType) && !isPtrMath && !isStringMath && !isMixedNumeric) {
+        // CIDER-FEAT-002: enum operands compare against the same enum or an
+        // integer in EITHER position without a cast (`c == Color.GREEN`,
+        // `0 != c`); the comparison lowers on the underlying integer.
+        // Ordering across two different enums stays rejected. Arithmetic on
+        // an enum still requires an explicit `c as int`.
+        bool isComparison = (op == "==" || op == "!=" || op == "<" || op == ">" ||
+                             op == "<=" || op == ">=");
+        bool enumComparable = false;
+        if (isComparison) {
+            auto leftEnum = resolveEnumSymbol(leftType);
+            auto rightEnum = resolveEnumSymbol(rightType);
+            bool leftInt = isInteger(leftType.name) && leftType.pointerLevel == 0;
+            bool rightInt = isInteger(rightType.name) && rightType.pointerLevel == 0;
+            enumComparable = (leftEnum && rightEnum && leftEnum == rightEnum) ||
+                             (leftEnum && rightInt) || (rightEnum && leftInt);
+        }
+
+        if (!areTypesCompatible(leftType, rightType) && !isPtrMath && !isStringMath &&
+            !isMixedNumeric && !enumComparable) {
             error("Type mismatch in binary expression '" + expr.getOperator() +
                       "'. " + leftType.toString() + " vs " + rightType.toString(),
                   expr.getLine());
@@ -1752,6 +1885,12 @@ public:
                 error("'" + expr.getName() + "' is a module, not a value", expr.getLine());
             }
             lastExprType_ = {"error", 0};
+        } else if (sym->kind == SymbolKind::ENUM) {
+            // CIDER-FEAT-002: an enum name is a type, not a value; qualified
+            // variant access (`Color.RED`) is intercepted by
+            // visit(MemberAccessExpr) before this path runs.
+            error("'" + expr.getName() + "' is a type, not a value", expr.getLine());
+            lastExprType_ = {"error", 0};
         } else {
             if (sym->kind == SymbolKind::FUNCTION) {
                 // CID-006: a bare function name is a value of its fn
@@ -1830,6 +1969,23 @@ public:
     }
 
     void visit(MemberAccessExpr& expr) override {
+        // CIDER-FEAT-002: `Enum.VARIANT` and `lib.Enum.VARIANT`. The enum
+        // name is a type qualifier, not a value, so it is resolved directly
+        // (never evaluated through the expression paths). The variant's type
+        // is the enum itself.
+        if (!expr.isArrow()) {
+            if (auto enumSym = enumSymbolFromQualifier(expr.getObject())) {
+                int64_t variantValue = 0;
+                if (enumSym->findVariant(expr.getMember(), variantValue)) {
+                    lastExprType_ = enumTypeOf(enumSym);
+                } else {
+                    error("Enum '" + enumSym->name + "' has no variant '" +
+                              expr.getMember() + "'", expr.getLine());
+                    lastExprType_ = {"error", 0};
+                }
+                return;
+            }
+        }
         // CID-020/021 §3: `b.name` where b is a module qualifier resolves
         // the member in that module's scope. Values shadow qualifiers
         // (strict lookup finds the nearer value first), so a MODULE result
@@ -1940,6 +2096,14 @@ public:
         if (!isVisibleMember(mem, modSym->logicalName)) {
             error("symbol '" + mem->name + "' is not exported from module '" + qualifier + "'",
                   expr.getLine());
+        }
+        if (mem->kind == SymbolKind::ENUM) {
+            // CIDER-FEAT-002: `lib.Color` alone is a type qualifier, not a
+            // value; `lib.Color.RED` is intercepted before the object here
+            // is evaluated.
+            error("'" + qualifier + "." + mem->name + "' is a type, not a value", expr.getLine());
+            lastExprType_ = {"error", 0};
+            return;
         }
         if (mem->kind == SymbolKind::FUNCTION) {
             // CIDER-BUG-023: a module-qualified function value carries its
@@ -2846,6 +3010,37 @@ public:
             symbolTable_.enterScope();
             arm.body->accept(*this);
             exitScopeChecked();
+        }
+
+        // CIDER-FEAT-002: opt-in exhaustiveness warning (see helper).
+        if (warningsActive_) warnMissingEnumVariants(stmt, matchType);
+    }
+
+    // CIDER-FEAT-002: with `--warn`, a match over an enum that has no
+    // `default` arm and does not statically cover every variant reports one
+    // warning per missing variant. A pattern that is not a compile-time
+    // constant (a variable, a call) could match anything, so the analysis
+    // stays silent instead of risking a false positive; a `default` arm is
+    // exhaustive by construction. Variants are identified by value, so
+    // explicit-value enums stay correct once the parser grows them.
+    void warnMissingEnumVariants(MatchStmt& stmt, const TypeInfo& matchType) {
+        auto enumSym = resolveEnumSymbol(matchType);
+        if (!enumSym) return;
+        std::set<int64_t> covered;
+        for (auto& arm : stmt.getArms()) {
+            if (auto pid = dynamic_cast<IdentifierExpr*>(arm.pattern.get())) {
+                if (pid->getName() == "default") return;
+            }
+            int64_t value = 0;
+            if (!evalConstIntBound(arm.pattern.get(), value)) return;
+            covered.insert(value);
+        }
+        for (auto& variant : enumSym->variants) {
+            if (!covered.count(variant.value)) {
+                reporter_.warning("match on enum '" + enumSym->name +
+                                      "' does not handle variant '" + variant.name + "'",
+                                  stmt.getLine());
+            }
         }
     }
 

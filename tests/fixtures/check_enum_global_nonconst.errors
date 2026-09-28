@@ -1,0 +1,1 @@
+Global integer initializer in declaration of 'g' must use constant expressions
