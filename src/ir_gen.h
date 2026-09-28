@@ -4148,6 +4148,18 @@ public:
                 // CIDER-BUG-052: an element alias resolves to its real shape
                 // (array elements need the MEMCPY decision below).
                 elemType = resolveTypeAlias(elemType);
+                // CIDER-BUG-083: classify the element by its own RESOLVED
+                // shape, not by the RHS value's flags. A by-value struct/
+                // class element of any size is an aggregate target whose RHS
+                // value is already the source ADDRESS (locals, element reads,
+                // struct fields and sret call results all present struct
+                // values by address), so the store below must MEMCPY the
+                // value bytes. Marking the element here mirrors what
+                // visit(IdentifierExpr) does for struct values. Without it an
+                // exactly-8-byte struct missed both the isUserDefined flag
+                // and the `getTypeSize(...) > 8` fallback, and the store
+                // lowered to a scalar STORE of the source address.
+                if (isStructValueType(elemType)) elemType.isUserDefined = true;
                 val = convertValueToType(val, elemType);
                 lastExprType_ = elemType;
             } else if (auto ident = dynamic_cast<IdentifierExpr*>(stmt.getTarget())) {

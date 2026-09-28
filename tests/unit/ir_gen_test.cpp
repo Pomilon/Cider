@@ -1132,6 +1132,27 @@ int run() {
             "}\n");
         CHECK(d.find("call _bounds_fail") != std::string::npos);
     }
+
+    // CIDER-BUG-083: an exactly-8-byte struct stored through an array index
+    // lowers to a by-value MEMCPY of the element size, not a scalar STORE of
+    // the source address. The resolved element type carries no isUserDefined
+    // flag (inferExprType sets none) and size 8 misses the `> 8` fallback, so
+    // the element branch must classify the element itself as a by-value
+    // struct before the store decision.
+    {
+        d = genSrc(
+            "struct P { var a: int; var b: int; }\n"
+            "func main() -> int {\n"
+            "  var arr: [P; 2];\n"
+            "  var p: P; p.a = 11; p.b = 22;\n"
+            "  arr[0] = p;\n"
+            "  return arr[0].a + arr[0].b;\n"
+            "}\n");
+        size_t pos = d.find("memcpy ");
+        CHECK(pos != std::string::npos);
+        size_t eol = d.find('\n', pos);
+        CHECK(d.substr(pos, eol - pos).find(", 8") != std::string::npos);
+    }
     return 0;
 }
 
