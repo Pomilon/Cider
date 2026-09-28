@@ -1,0 +1,140 @@
+from std.io import print, printInt;
+
+// CIDER-BUG-067 regression: every field of a newly created class instance
+// must read as zero until an initializer sets it. CIDER-BUG-049 zeroed
+// scalar fields one by one, but aggregate fields (struct, class-value,
+// fixed array, nested array, 16-byte interface fat pointer) were left as
+// backend-dependent residue — most visibly on native once escape analysis
+// rewrites `new` to a stack slot. Covers `new Outer`, a value-class local
+// (`var o: Outer;`) and an omitted struct-literal field, on all three
+// backends (VM unopt, VM optimized, native).
+
+interface Shape {
+  func area() -> int;
+}
+
+class Sq {
+  var s: int;
+  func area() -> int { return this.s * this.s; }
+}
+
+class Leaf {
+  var n: int;
+}
+
+struct Inner {
+  var x: int;
+  var y: int;
+}
+
+struct Link {
+  var next: *Link;
+  var v: int;
+}
+
+struct Pair {
+  var a: int;
+  var b: int;
+}
+
+class Outer {
+  var inner: Inner;         // nested struct field
+  var arr: [u8; 8];         // array field
+  var grid: [[u16; 2]; 4];  // nested array field
+  var leaf: Leaf;           // class-value field
+  var shape: Shape;         // 16-byte interface fat pointer
+  var p: *int;              // pointer field
+  var link: Link;           // struct containing a pointer
+  var text: string;         // pointer-like string field
+  var tag: int = 77;        // control: initializer overrides the zero
+  var label: string = "field";
+}
+
+// Fill a large local buffer with 0xFF so the caller's later frames reuse
+// 0xFF-filled stack bytes. The loop keeps the body above the inliner's
+// bloat cost, so the fill really happens in its own frame.
+func dirtyStack() -> int {
+  var buf: [u8; 8192];
+  var i: int = 0;
+  var acc: int = 0;
+  while (i < 8192) {
+    buf[i] = 0xFF;
+    acc = acc + (buf[i] as int);
+    i = i + 1;
+  }
+  return acc;
+}
+
+// All zero assertions return a distinct nonzero code for diagnosis.
+func checkHeap() -> int {
+  var o: *Outer = new Outer;
+  if (o->inner.x != 0) return 1;
+  if (o->inner.y != 0) return 2;
+  if (o->arr[0] != 0) return 3;
+  if (o->arr[7] != 0) return 4;
+  if (o->grid[0][0] != 0) return 5;
+  if (o->grid[3][1] != 0) return 6;
+  if (o->leaf.n != 0) return 7;
+  // Interface field: both words of the fat pointer must be nil (data + vtable).
+  var pp: **void = o->shape as **void;
+  if (*(pp) != nilPtr) return 8;
+  if (*(pp + 1) != nilPtr) return 9;
+  if (o->p != nilPtr) return 10;
+  if (o->link.next != nilPtr) return 11;
+  if (o->link.v != 0) return 12;
+  if (o->text != nilPtr) return 13;
+  // Field initializers still override the zero.
+  if (o->tag != 77) return 14;
+  if (o->label != "field") return 15;
+  // A real interface assignment still dispatches.
+  var sq: Sq;
+  sq.s = 3;
+  o->shape = sq;
+  if (o->shape.area() != 9) return 16;
+  return 0;
+}
+
+func checkValue() -> int {
+  var o: Outer;
+  if (o.inner.x != 0) return 21;
+  if (o.inner.y != 0) return 22;
+  if (o.arr[3] != 0) return 23;
+  if (o.grid[1][1] != 0) return 24;
+  if (o.leaf.n != 0) return 25;
+  var pp: **void = o.shape as **void;
+  if (*(pp) != nilPtr) return 26;
+  if (*(pp + 1) != nilPtr) return 27;
+  if (o.p != nilPtr) return 28;
+  if (o.link.next != nilPtr) return 29;
+  if (o.link.v != 0) return 30;
+  if (o.text != nilPtr) return 31;
+  if (o.tag != 77) return 32;
+  if (o.label != "field") return 33;
+  var sq: Sq;
+  sq.s = 4;
+  o.shape = sq;
+  if (o.shape.area() != 16) return 34;
+  return 0;
+}
+
+// A literal that omits fields leaves them zero as well.
+func checkLiteral() -> int {
+  var p: Pair = Pair{a: 5};
+  if (p.a != 5) return 41;
+  if (p.b != 0) return 42;
+  return 0;
+}
+
+func main() -> int {
+  var sink: int = dirtyStack();
+  var r1: int = checkHeap();
+  var r2: int = checkValue();
+  var r3: int = checkLiteral();
+  printInt(sink % 256);
+  print("\n");
+  if (r1 != 0) return r1;
+  if (r2 != 0) return r2;
+  if (r3 != 0) return r3;
+  print("aggregate_zero_init_ok\n");
+  return 0;
+}

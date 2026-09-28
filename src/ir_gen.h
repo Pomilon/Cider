@@ -2041,7 +2041,11 @@ public:
 
     void visit(StructLiteralExpr& expr) override {
         IRValue dest = IRValue::Register(nextTemp(), IRType::PTR);
-        currentBlock_->addInstruction({IROp::ALLOCA, dest, {IRValue::Constant(getTypeSize({expr.getStructName(), 0}), IRType::I32)}});
+        int structSize = getTypeSize({expr.getStructName(), 0});
+        currentBlock_->addInstruction({IROp::ALLOCA, dest, {IRValue::Constant(structSize, IRType::I32)}});
+        // CIDER-BUG-067: a literal that omits fields must leave them zero,
+        // not whatever the shared alloca slot held.
+        emitZeroInstance(dest, structSize);
 
         auto sym = symbolTable_.resolve(expr.getStructName());
         if (sym && (sym->kind == SymbolKind::STRUCT || sym->kind == SymbolKind::CLASS)) {
@@ -2447,6 +2451,9 @@ public:
                 // (`var v: C = other;`) the copy/memcpy below copies the
                 // source object wholesale, so the source state wins.
                 if (!stmt.getInitializer()) {
+                    // CIDER-BUG-067: zero the whole value-class slot first,
+                    // then run the constant field initializers on top.
+                    emitZeroInstance(addr, getTypeSize(varType));
                     emitClassFieldInitializers(classSym, addr);
                 }
             }
@@ -5407,19 +5414,47 @@ public:
         }
     }
 
+    // CIDER-BUG-067: zero a freshly created instance. Every field must read
+    // as zero until an initializer stores it. Scalar fields were already
+    // covered field-by-field by CIDER-BUG-049, but aggregate fields (struct,
+    // class-value, fixed array, 16-byte interface fat pointer) were not, and
+    // escape analysis can rewrite `new` to a stack slot whose previous
+    // contents are backend-dependent. The zero bytes come from a lazily
+    // created static block of `size` zero bytes: the native backend emits it
+    // in .bss (zero by definition at load), the VM zero-fills global storage
+    // when materialising labels. Sharing one block per distinct size keeps
+    // the data small; MEMCPY/MOV are understood by every backend and pass.
+    void emitZeroInstance(IRValue addr, int size) {
+        if (size <= 0) return;
+        auto it = zeroBuffers_.find(size);
+        if (it == zeroBuffers_.end()) {
+            std::string label = "_cider_zero_" + std::to_string(size);
+            module_.addGlobalVar(label, IRType::U8, 0, 0, size, false);
+            it = zeroBuffers_.emplace(size, label).first;
+        }
+        IRValue src = IRValue::Register(nextTemp(), IRType::PTR);
+        currentBlock_->addInstruction({IROp::MOV, src, {IRValue::Label(it->second)}});
+        currentBlock_->addInstruction({IROp::MEMCPY, std::nullopt,
+                                       {addr, src, IRValue::Constant(size, IRType::I32)}});
+    }
+
     // CIDER-BUG-049: materialise a class's field initializers as constant
-    // stores at `objAddr`, and value-initialise scalar fields that have none.
-    // The checker admits only foldable initializer shapes (literals, const
-    // references, constant arithmetic, string literals, function names), so
-    // no runtime initializer pass is needed. Inherited fields lead
-    // `classSym->fields` (the collector copies them), so base initializers
-    // run before derived ones. Field LAYOUT is untouched: only values are
-    // stored, at the offsets the collector already assigned.
+    // stores at `objAddr`. The checker admits only foldable initializer shapes
+    // (literals, const references, constant arithmetic, string literals,
+    // function names), so no runtime initializer pass is needed. Inherited
+    // fields lead `classSym->fields` (the collector copies them), so base
+    // initializers run before derived ones. Field LAYOUT is untouched: only
+    // values are stored, at the offsets the collector already assigned.
+    // CIDER-BUG-067: callers zero the whole instance first (emitZeroInstance),
+    // so fields without an initializer need no store here; this runs after
+    // the zero and therefore overrides it.
     void emitClassFieldInitializers(const std::shared_ptr<StructSymbol>& classSym,
                                     IRValue objAddr) {
         if (!classSym || !currentFunction_) return;
         std::string classMod = definingModuleFor(classSym, classSym->name);
         for (const auto& field : classSym->fields) {
+            Expression* init = field.initializer;
+            if (!init) continue;  // default zero already stored by emitZeroInstance
             TypeInfo fieldType =
                 canonicalizeNominalInModule(resolveTypeAlias(field.type, classMod), classMod);
             IRType fieldIR = (fieldType.pointerLevel > 0) ? IRType::PTR : mapType(fieldType.name);
@@ -5430,27 +5465,10 @@ public:
                     {IROp::STORE, std::nullopt,
                      {objAddr, val, IRValue::Constant(field.offset, IRType::I32)}});
             };
-            if (!field.initializer) {
-                // An escape-analysed `new` lands on the native stack, so the
-                // zero default of an initializer-less scalar field is only
-                // deterministic if it is actually stored. Aggregates keep the
-                // legacy layout-only treatment.
-                if (ptrLike) {
-                    storeField(IRValue::Constant(0, IRType::PTR));
-                } else if (!fieldType.isArray && !fieldType.isInterface &&
-                           !fieldType.isSlice && !isStructValueType(fieldType, classMod)) {
-                    if (fieldIR == IRType::F32 || fieldIR == IRType::F64) {
-                        storeField(IRValue::Constant(0.0, fieldIR));
-                    } else {
-                        storeField(typedFieldConstant(0, fieldIR));
-                    }
-                }
-                continue;
-            }
-            Expression* init = field.initializer;
             // Field initializers are const-like: identifiers bind in the
             // declaring class's module, not at the creation site
             // (CIDER-BUG-048's const-folding rule).
+
             Scope* prevScope = constEvalScope_;
             if (Scope* declScope = scopeForModule(field.initializerModule)) {
                 constEvalScope_ = declScope;
@@ -5542,6 +5560,12 @@ public:
         call.args.push_back(IRValue::Label(runtimeHelperName("malloc")));
         call.args.push_back(IRValue::Constant(size, IRType::I32));
         currentBlock_->addInstruction(call);
+
+        // CIDER-BUG-067: start from an all-zero instance before the vptr and
+        // the field initializers, so aggregate fields (struct / class-value /
+        // array / interface) read as zero even when escape analysis rewrites
+        // this malloc to a stack slot.
+        emitZeroInstance(dest, size);
 
         // Initialize vptr if class is virtual (CID-020/021 spec §6: the
         // label mangles with the class's defining module, matching the
@@ -6329,6 +6353,9 @@ private:
     int labelCount_ = 0;
     int anonFuncCount_ = 0;
     int closureCount_ = 0;
+    // CIDER-BUG-067: static all-zero blocks keyed by byte size, the source of
+    // the whole-instance zeroing at each creation site (one per distinct size).
+    std::map<int, std::string> zeroBuffers_;
     std::string nextTemp() { return "v" + std::to_string(tempCount_++); }
     std::string nextLabel(const std::string& prefix) {
         return (currentFunction_ ? currentFunction_->getName() + "_" : "") + prefix + std::to_string(labelCount_++);
