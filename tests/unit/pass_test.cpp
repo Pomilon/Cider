@@ -298,6 +298,52 @@ int testVolatileIrFlags() {
     return 0;
 }
 
+int testVolatileInterfaceIrFlags() {
+    // CIDER-BUG-079: an interface (16-byte fat pointer) store must mark BOTH
+    // words volatile when the target is volatile — the same guarantee
+    // CIDER-BUG-061 gives scalar/pointer/aggregate stores. Covers a volatile
+    // local declaration, its reassignment, and a volatile interface field.
+    auto r = genModule(
+        "interface Shape { func area() -> int; }\n"
+        "struct Holder { var shape: volatile Shape; }\n"
+        "func f(c: Shape) -> void {\n"
+        "  var x: volatile Shape = c;\n"
+        "  x = c;\n"
+        "  var h: Holder;\n"
+        "  h.shape = c;\n"
+        "}\n");
+    int volatileStores = 0;
+    for (const auto& func : r.module.getFunctions()) {
+        for (const auto& b : func->getBlocks()) {
+            for (const auto& in : b->getInstructions()) {
+                if (in.op == cider::IROp::STORE && in.isVolatile) volatileStores++;
+            }
+        }
+    }
+    // x init, x reassignment, field store: data + vtable words each.
+    CHECK(volatileStores == 6);
+
+    // Negative control: the same function without `volatile` carries no
+    // volatile instruction at all, so non-volatile IR keeps its shape.
+    auto r2 = genModule(
+        "interface Shape { func area() -> int; }\n"
+        "struct Holder { var shape: Shape; }\n"
+        "func f(c: Shape) -> void {\n"
+        "  var x: Shape = c;\n"
+        "  x = c;\n"
+        "  var h: Holder;\n"
+        "  h.shape = c;\n"
+        "}\n");
+    for (const auto& func : r2.module.getFunctions()) {
+        for (const auto& b : func->getBlocks()) {
+            for (const auto& in : b->getInstructions()) {
+                CHECK(!in.isVolatile);
+            }
+        }
+    }
+    return 0;
+}
+
 int testVolatileGvn() {
     // CIDER-BUG-061: GVN must never replace a volatile access with a MOV of
     // an earlier occurrence — even for an opcode that is normally deduped.
@@ -452,6 +498,7 @@ int run() {
     CHECK(testGvnTypes() == 0);
     CHECK(testLicm() == 0);
     CHECK(testVolatileIrFlags() == 0);
+    CHECK(testVolatileInterfaceIrFlags() == 0);
     CHECK(testVolatileGvn() == 0);
     CHECK(testVolatileLicm() == 0);
     CHECK(testCallClobberLicm() == 0);

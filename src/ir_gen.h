@@ -862,17 +862,23 @@ public:
     // order the stored vtable follows). Shared by declaration-time
     // interface initialization and reassignment so the two lower
     // identically on every backend.
-    void emitInterfaceStore(const TypeInfo& ifaceType, IRValue addr, Expression* value) {
+    // CIDER-BUG-079: `isVolatile` is the target's volatile flag, sourced
+    // exactly like the scalar/aggregate store paths source it (a volatile
+    // declared type, field or pointee). Both fat-pointer words are then
+    // observable writes under CIDER-BUG-061.
+    void emitInterfaceStore(const TypeInfo& ifaceType, IRValue addr, Expression* value,
+                            bool isVolatile = false) {
         value->accept(*this);
-        emitInterfaceStoreAt(ifaceType, addr, lastValue_, lastExprType_);
+        emitInterfaceStoreAt(ifaceType, addr, lastValue_, lastExprType_, isVolatile);
         lastExprType_ = ifaceType;
     }
 
     // CIDER-BUG-077: the store half of emitInterfaceStore, for callers
     // that already evaluated the source (the hidden-sret return slot).
     // `value` is the source value and `initType` its type.
+    // CIDER-BUG-079: `isVolatile` marks the two target stores volatile.
     void emitInterfaceStoreAt(const TypeInfo& ifaceType, IRValue addr, IRValue value,
-                              TypeInfo initType) {
+                              TypeInfo initType, bool isVolatile = false) {
         // The interface flag can be missing on spellings that predate
         // declaration lowering (e.g. a module global read through a
         // from-alias): resolve the name before classifying.
@@ -894,12 +900,12 @@ public:
             currentBlock_->addInstruction({IROp::LOAD, dataPtr, {value, IRValue::Constant(0, IRType::I32)}});
             IRValue vtablePtr = IRValue::Register(nextTemp(), IRType::PTR);
             currentBlock_->addInstruction({IROp::LOAD, vtablePtr, {value, IRValue::Constant(8, IRType::I32)}});
-            currentBlock_->addInstruction({IROp::STORE, std::nullopt, {addr, dataPtr, IRValue::Constant(0, IRType::I32)}});
+            currentBlock_->addInstruction({IROp::STORE, std::nullopt, {addr, dataPtr, IRValue::Constant(0, IRType::I32)}, isVolatile});
             IRValue addr8 = IRValue::Register(nextTemp(), IRType::PTR);
             currentBlock_->addInstruction({IROp::ADD, addr8, {addr, IRValue::Constant(8, IRType::I32)}});
-            currentBlock_->addInstruction({IROp::STORE, std::nullopt, {addr8, vtablePtr, IRValue::Constant(0, IRType::I32)}});
+            currentBlock_->addInstruction({IROp::STORE, std::nullopt, {addr8, vtablePtr, IRValue::Constant(0, IRType::I32)}, isVolatile});
         } else {
-            currentBlock_->addInstruction({IROp::STORE, std::nullopt, {addr, value, IRValue::Constant(0, IRType::I32)}});
+            currentBlock_->addInstruction({IROp::STORE, std::nullopt, {addr, value, IRValue::Constant(0, IRType::I32)}, isVolatile});
             IRValue addr8 = IRValue::Register(nextTemp(), IRType::PTR);
             currentBlock_->addInstruction({IROp::ADD, addr8, {addr, IRValue::Constant(8, IRType::I32)}});
             std::string concreteTypeName = initType.name;
@@ -909,7 +915,7 @@ public:
                 concreteTypeName = base.name;
             }
             std::string vtableLabel = interfaceVtableLabel(ifaceType.name, concreteTypeName);
-            currentBlock_->addInstruction({IROp::STORE, std::nullopt, {addr8, IRValue::Label(vtableLabel), IRValue::Constant(0, IRType::I32)}});
+            currentBlock_->addInstruction({IROp::STORE, std::nullopt, {addr8, IRValue::Label(vtableLabel), IRValue::Constant(0, IRType::I32)}, isVolatile});
         }
     }
 
@@ -2241,7 +2247,8 @@ public:
                     IRValue fieldAddr = IRValue::Register(nextTemp(), IRType::PTR);
                     currentBlock_->addInstruction({IROp::ADD, fieldAddr,
                                                    {dest, IRValue::Constant(offset, IRType::I32)}});
-                    emitInterfaceStore(fieldType, fieldAddr, fieldInit.second.get());
+                    emitInterfaceStore(fieldType, fieldAddr, fieldInit.second.get(),
+                                       fieldType.isVolatile);
                     continue;
                 }
                 fieldInit.second->accept(*this);
@@ -2664,7 +2671,8 @@ public:
             // pointer (data + vtable). Reassignment shares this lowering
             // (see visit(AssignStmt)), so the two paths cannot diverge.
             if (sym->type.isInterface) {
-                emitInterfaceStore(sym->type, addr, stmt.getInitializer());
+                emitInterfaceStore(sym->type, addr, stmt.getInitializer(),
+                                   sym->type.isVolatile);
                 return;
             }
             // Non-interface initializers keep the legacy scalar/aggregate
@@ -4367,7 +4375,8 @@ public:
             if (haveInterfaceTarget) {
                 targetIface = resolveInterfaceNominal(targetIface);
                 if (targetIface.isInterface) {
-                    emitInterfaceStore(targetIface, addr, stmt.getValue());
+                    emitInterfaceStore(targetIface, addr, stmt.getValue(),
+                                       targetIsVolatile);
                     return;
                 }
             }
