@@ -17,6 +17,73 @@ echo "$USAGE" | grep -q -- "-g|--debug" || { echo "usage missing -g/--debug"; ex
 echo "$USAGE" | grep -q -- "--cache <dir>" || { echo "usage missing --cache"; exit 1; }
 echo "$USAGE" | grep -q -- "--emit-meta" || { echo "usage missing --emit-meta"; exit 1; }
 set -e
+
+# CIDER-FEAT-013: `--help` (also `-h` and the `help` subcommand) prints the
+# long help on stdout, keeps stderr empty and exits 0.
+HELP=""
+for FORM in --help -h help; do
+    set +e
+    OUT=$("$BIN" "$FORM" 2>/dev/null)
+    HELP_RC=$?
+    ERR=$("$BIN" "$FORM" 2>&1 >/dev/null)
+    set -e
+    [ "$HELP_RC" -eq 0 ] || { echo "help ($FORM) exit: $HELP_RC"; exit 1; }
+    # The long help is a successful, expected answer: stdout, never stderr.
+    [ -z "$ERR" ] || { echo "help ($FORM) wrote to stderr: $ERR"; exit 1; }
+    [ -n "$OUT" ] || { echo "help ($FORM) printed nothing"; exit 1; }
+    # The three spellings are aliases: identical output.
+    [ -z "$HELP" ] || [ "$OUT" = "$HELP" ] \
+        || { echo "help ($FORM) differs from --help"; exit 1; }
+    HELP="$OUT"
+done
+
+# The help must cover the whole real surface: every command the CLI accepts.
+for CMD in parse check build run compile bundle; do
+    echo "$HELP" | grep -q "  $CMD " || { echo "help missing command '$CMD'"; exit 1; }
+done
+# ... every flag it accepts, including the `--target` spellings.
+for FLAG in --no-opt --warn --checks --debug --cache --emit-meta -o; do
+    echo "$HELP" | grep -q -- "$FLAG" || { echo "help missing flag '$FLAG'"; exit 1; }
+done
+echo "$HELP" | grep -q -- "native|linux|x86_64-linux|pomeos|uefi" \
+    || { echo "help missing --target spellings"; exit 1; }
+echo "$HELP" | grep -q -- "-g, --debug" || { echo "help missing -g spelling"; exit 1; }
+# The constraints the parser really enforces must be stated, not just the
+# flag names: `run` rejects both separate-compilation flags, `--emit-meta`
+# needs `--cache`, `compile` needs `-o`, and `-o` is optional for bundle.
+echo "$HELP" | grep -q "rejected by parse, bundle, run" \
+    || { echo "help does not say which commands reject --emit-meta"; exit 1; }
+echo "$HELP" | grep -q "requires --cache" \
+    || { echo "help does not say --emit-meta requires --cache"; exit 1; }
+echo "$HELP" | grep -q "required by compile, optional for bundle" \
+    || { echo "help does not document the -o convention"; exit 1; }
+# The separate-compilation artifacts the flag really writes.
+echo "$HELP" | grep -q "<module>.cider-meta" || { echo "help missing .cider-meta"; exit 1; }
+echo "$HELP" | grep -q "<module>.hash" || { echo "help missing .hash"; exit 1; }
+
+# Help must not dispatch a subcommand: the token wins whatever follows it, and
+# no file is read (a runnable path would have failed, never exited 0).
+set +e
+"$BIN" help /nonexistent/never-compiled.cid >/dev/null 2>&1
+HELP_NOSUB_RC=$?
+"$BIN" --help run /nonexistent/never-compiled.cid >/dev/null 2>&1
+HELP_NOSUB2_RC=$?
+set -e
+[ "$HELP_NOSUB_RC" -eq 0 ] || { echo "help ran a subcommand: $HELP_NOSUB_RC"; exit 1; }
+[ "$HELP_NOSUB2_RC" -eq 0 ] || { echo "--help ran a subcommand: $HELP_NOSUB2_RC"; exit 1; }
+
+# The help token is only recognised as the first argument, so the unknown-flag
+# usage error is unchanged for every other position.
+set +e
+"$BIN" --help-bogus >/dev/null 2>&1
+HELPBOGUS_RC=$?
+"$BIN" run --help /nonexistent/never-compiled.cid >/dev/null 2>&1
+RUNHELP_RC=$?
+set -e
+[ "$HELPBOGUS_RC" -eq 2 ] || { echo "--help-bogus exit: $HELPBOGUS_RC"; exit 1; }
+[ "$RUNHELP_RC" -eq 2 ] || { echo "run --help exit: $RUNHELP_RC"; exit 1; }
+echo "cli_test: help OK"
+
 echo "cli_test: OK"
 
 SRC=$(mktemp --suffix=.cid)

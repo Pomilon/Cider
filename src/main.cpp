@@ -216,10 +216,69 @@ void printDiagnostics(const std::string& text, const std::string& path,
     }
 }
 
+// CIDER-FEAT-013: the long help. Every line is derived from the dispatch in
+// parseCli() above and the branches in main() below, not from intent:
+//   - the command list mirrors the accepted set in parseCli;
+//   - each option's "(...)" note names the commands that actually consume it
+//     (the flags are parsed for every command; the ones in a note are the
+//     only ones that read it);
+//   - the output-file rules mirror the per-command branches.
+void printHelp() {
+    std::printf(
+        "usage: cider <command> [options] <file.cid>\n"
+        "\n"
+        "commands:\n"
+        "  parse <file.cid>                 parse only, print the AST dump\n"
+        "  check <file.cid>                 collect symbols and type check\n"
+        "  build <file.cid>                 generate IR, print the module dump\n"
+        "  run <file.cid>                   execute the program in the VM\n"
+        "  compile <file.cid> -o out.asm    emit NASM assembly for the target\n"
+        "  bundle <file.cid> [-o bundle.cid]  flatten a program into one file\n"
+        "\n"
+        "options:\n"
+        "  --target <target>    native|linux|x86_64-linux|pomeos|uefi (default: native)\n"
+        "  --no-opt             skip the optimizer (compile, run)\n"
+        "  --warn               opt-in warnings on stderr; never changes the exit\n"
+        "                       code (check, build, run, compile)\n"
+        "  --checks             runtime bounds checks on fixed-size array indexing\n"
+        "                       (compile, run)\n"
+        "  -g, --debug          emit DWARF debug info into the output (compile;\n"
+        "                       native target only)\n"
+        "  -o <file>            output file: required by compile, optional for bundle,\n"
+        "                       ignored by parse, check, build and run\n"
+        "  --cache <dir>        separate compilation: read <dir>/<module>.cider-meta\n"
+        "                       snapshots instead of the imported source\n"
+        "  --emit-meta          compile this file as a module and write\n"
+        "                       <dir>/<module>.cider-meta and <dir>/<module>.hash\n"
+        "                       (requires --cache; rejected by parse, bundle, run)\n"
+        "  -h, --help           print this help and exit 0\n"
+        "  --version            print the version and exit 0\n"
+        "\n"
+        "separate compilation (--cache, --emit-meta) is also accepted by check and\n"
+        "build. A bad command line prints the one-line usage on stderr and exits 2.\n"
+        "\n"
+        "exit codes:\n"
+        "  0  success\n"
+        "  1  parse, symbol, type or IR error; unreadable input; write failure\n"
+        "  2  usage error (unknown command or flag, missing operand), or a VM\n"
+        "     runtime error under `run`; `run` otherwise forwards the program's\n"
+        "     own exit code\n");
+}
+
 int main(int argc, char** argv) {
     if (argc == 2 && std::string(argv[1]) == "--version") {
         std::printf("cider 0.2.0\n");
         return 0;
+    }
+    // CIDER-FEAT-013: `--help` / `-h` / `help` print the long help and exit
+    // 0. Only the first argument is inspected, so `cider <cmd> --help` keeps
+    // its meaning: an unknown flag for that command, i.e. a usage error.
+    if (argc >= 2) {
+        const std::string first = argv[1];
+        if (first == "--help" || first == "-h" || first == "help") {
+            printHelp();
+            return 0;
+        }
     }
     CliOptions opts;
     if (!parseCli(argc, argv, opts)) {
