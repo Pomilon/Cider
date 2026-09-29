@@ -70,6 +70,13 @@ func grow_map<K, V>(m: *HashMap<K, V>) -> void {
     var old_entries: *Entry<K, V> = m.entries;
     var old_cap: int = m.cap;
     var new_cap: int = old_cap * 2;
+    // CIDER-ISS-015: free_map leaves cap == 0, and a double would keep it
+    // there. Clamp to the initial capacity so a grow always hands back a
+    // real bucket array and restores the invariant cap > 0. Same clamp as
+    // std.vector's grow.
+    if (new_cap < MAP_INITIAL_CAP) {
+        new_cap = MAP_INITIAL_CAP;
+    }
     var entry_size: int = sizeof(Entry<K, V>);
     m.entries = malloc(new_cap * entry_size) as *Entry<K, V>;
     m.cap = new_cap;
@@ -100,6 +107,16 @@ func grow_map<K, V>(m: *HashMap<K, V>) -> void {
 }
 
 export func insert_map<K, V>(m: *HashMap<K, V>, key: K, val: V) -> void {
+    // CIDER-ISS-015: re-establish the capacity invariant before m.cap is
+    // used as a divisor. free_map (and a map that was never new_map'd) leaves
+    // cap == 0 with entries == nilPtr; the load-factor division below then
+    // divided by zero, which both backends define as 0 (CIDER-BUG-058), so
+    // the growth check silently passed and the insert stored through the null
+    // bucket array. Grow first, exactly as std.vector's push re-grows a freed
+    // Vec.
+    if (m.cap <= 0) {
+        grow_map<K, V>(m);
+    }
     // Tombstones count toward the load factor: churn therefore triggers a
     // grow, and grow_map rehashes live entries without tombstones.
     if ((m.len + m.tombstones + 1) * 100 / m.cap > MAP_LOAD_FACTOR) {
