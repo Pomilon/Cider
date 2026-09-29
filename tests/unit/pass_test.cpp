@@ -949,6 +949,174 @@ int testVolatileArraySpelling145IrFlags() {
     return 0;
 }
 
+int testVolatileLiteral146IrFlags() {
+    // CIDER-BUG-146: an explicit field store in a struct literal into a
+    // volatile-qualified field (`H{ f: 5 }`) stayed a plain STORE while the
+    // direct member store (`h.f = 5`) marked through memberAccessIsVolatile.
+    // The literal's field-store paths now mirror CIDER-BUG-144's field rule:
+    // the field's own alias-resolved flag marks the scalar STORE, joins
+    // CIDER-BUG-133's source flag on the aggregate MEMCPY, and marks the
+    // class-value vptr re-stamp. Pinned with exact counts against
+    // non-volatile controls, so non-volatile IR keeps its shape.
+    //
+    // The documented non-fix (investigated, no ABI change): `new volatile
+    // C(args)` marks every caller-side formation store (CIDER-BUG-144) but
+    // the constructor BODY writes `this` fields plainly — one shared callee
+    // with a plain `C*` hidden parameter and no per-argument volatility in
+    // IR CALL (the same architecture limit CIDER-BUG-133 records for
+    // by-value arguments; see emitConstructorCall). The case below pins the
+    // reviewed behaviour so a future mechanism is a deliberate change.
+    struct Tally {
+        int volatileLoads = 0;
+        int volatileStores = 0;
+        int volatileMemcpy = 0;
+        int volatileTotal = 0;
+    };
+    auto tallyFn = [](const ModuleResult& m, const std::string& name) {
+        Tally t;
+        for (const auto& func : m.module.getFunctions()) {
+            if (func->getName() != name) continue;
+            for (const auto& b : func->getBlocks()) {
+                for (const auto& in : b->getInstructions()) {
+                    if (!in.isVolatile) continue;
+                    t.volatileTotal++;
+                    if (in.op == cider::IROp::LOAD) t.volatileLoads++;
+                    if (in.op == cider::IROp::STORE) t.volatileStores++;
+                    if (in.op == cider::IROp::MEMCPY) t.volatileMemcpy++;
+                }
+            }
+        }
+        return t;
+    };
+    // Whole-module tally: range-for over every function.
+    auto tallyAll = [](const ModuleResult& m) {
+        Tally t;
+        for (const auto& func : m.module.getFunctions()) {
+            for (const auto& b : func->getBlocks()) {
+                for (const auto& in : b->getInstructions()) {
+                    if (!in.isVolatile) continue;
+                    t.volatileTotal++;
+                    if (in.op == cider::IROp::LOAD) t.volatileLoads++;
+                    if (in.op == cider::IROp::STORE) t.volatileStores++;
+                    if (in.op == cider::IROp::MEMCPY) t.volatileMemcpy++;
+                }
+            }
+        }
+        return t;
+    };
+
+    // (1) Scalar volatile field: the literal's `f` store and the direct
+    // assignment are the two volatile stores; the `g` store, the literal
+    // temp's zero/copy and the return local's copy stay plain. The alias
+    // spelling `type VI = volatile int` marks identically. The all-plain
+    // shape carries no volatile instruction.
+    auto s1 = tallyAll(genModule("struct H { var f: volatile int; var g: int; }\n"
+        "func f() -> int { var h: H = H{ f: 5, g: 6 }; h.f = 7; return h.f; }\n"
+        "func main() -> i32 { return f(); }\n"));
+    CHECK(s1.volatileStores == 2);
+    CHECK(s1.volatileLoads == 1);
+    CHECK(s1.volatileMemcpy == 0);
+    auto s2 = tallyAll(genModule(
+        "type VI = volatile int;\n"
+        "struct H { var f: VI; var g: int; }\n"
+        "func f() -> int { var h: H = H{ f: 5, g: 6 }; h.f = 7; return h.f; }\n"
+        "func main() -> i32 { return f(); }\n"));
+    CHECK(s2.volatileStores == 2);
+    CHECK(s2.volatileLoads == 1);
+    CHECK(tallyAll(genModule(
+        "struct H { var f: int; var g: int; }\n"
+        "func f() -> int { var h: H = H{ f: 5, g: 6 }; h.f = 7; return h.f; }\n"
+        "func main() -> i32 { return f(); }\n")).volatileTotal == 0);
+
+    // (2) Aggregate struct field: the literal's copy into the volatile field
+    // is marked (joins the volatile source's CIDER-BUG-133 flag; the
+    // materialised volatile parameter is the second MEMCPY). The same copy
+    // through a plain field with a volatile enclosing source is marked by the
+    // source flag alone; both all-plain controls stay at zero.
+    auto a1 = tallyAll(genModule(
+        "struct Inner { var a: int; var b: int; }\n"
+        "struct HIn { var inner: volatile Inner; var g: int; }\n"
+        "func f(src: volatile Inner) -> void { var h: HIn = HIn{ inner: src, g: 1 }; }\n"
+        "func main() -> i32 { return 0; }\n"));
+    CHECK(a1.volatileMemcpy == 2);
+    CHECK(a1.volatileLoads == 0 && a1.volatileStores == 0);
+    CHECK(tallyAll(genModule(
+        "struct Inner { var a: int; var b: int; }\n"
+        "struct PIn { var inner: Inner; var g: int; }\n"
+        "func f(src: Inner) -> void { var h: PIn = PIn{ inner: src, g: 1 }; }\n"
+        "func main() -> i32 { return 0; }\n")).volatileTotal == 0);
+    auto a2 = tallyAll(genModule(
+        "struct Inner { var a: int; var b: int; }\n"
+        "struct Holder { var inner: Inner; }\n"
+        "struct PIn { var inner: Inner; var g: int; }\n"
+        "func f(h: volatile Holder) -> void { var x: PIn = PIn{ inner: h.inner, g: 1 }; }\n"
+        "func main() -> i32 { return 0; }\n"));
+    CHECK(a2.volatileMemcpy == 2);
+    CHECK(a2.volatileTotal == 2);
+    CHECK(tallyAll(genModule(
+        "struct Inner { var a: int; var b: int; }\n"
+        "struct Holder { var inner: Inner; }\n"
+        "struct PIn { var inner: Inner; var g: int; }\n"
+        "func f(h: Holder) -> void { var x: PIn = PIn{ inner: h.inner, g: 1 }; }\n"
+        "func main() -> i32 { return 0; }\n")).volatileTotal == 0);
+
+    // (3) Class-valued volatile field: the literal's copy AND its vptr
+    // re-stamp are volatile; the volatile parameter's materialisation copy and
+    // re-stamp are the other two (CIDER-BUG-101/133). The plain field/source
+    // control carries nothing. Before the fix only the copy was marked, so
+    // the two stores pin the vptr half of the rule.
+    const std::string vclass = "class V { virtual func f() -> int { return 1; } }\n";
+    auto v1 = tallyAll(genModule(vclass +
+        "struct HV { var v: volatile V; var g: int; }\n"
+        "func f(src: volatile V) -> void { var h: HV = HV{ v: src, g: 1 }; }\n"
+        "func main() -> i32 { return 0; }\n"));
+    CHECK(v1.volatileMemcpy == 2);
+    CHECK(v1.volatileStores == 2);
+    CHECK(v1.volatileLoads == 0);
+    CHECK(tallyAll(genModule(vclass +
+        "struct PV { var v: V; var g: int; }\n"
+        "func f(src: V) -> void { var h: PV = PV{ v: src, g: 1 }; }\n"
+        "func main() -> i32 { return 0; }\n")).volatileTotal == 0);
+
+    // (4) Interface-typed volatile field: the literal's two fat-pointer
+    // words are volatile (the path already carried the field flag); the plain
+    // control carries nothing.
+    const std::string iface =
+        "interface Shape { func area() -> int; }\n"
+        "class C { var x: int; func area() -> int { return this.x; } }\n";
+    auto i1 = tallyAll(genModule(iface +
+        "struct HI { var shape: volatile Shape; var g: int; }\n"
+        "func f(c: Shape) -> void { var h: HI = HI{ shape: c, g: 1 }; }\n"
+        "func main() -> i32 { return 0; }\n"));
+    CHECK(i1.volatileStores == 2);
+    CHECK(i1.volatileTotal == 2);
+    CHECK(tallyAll(genModule(iface +
+        "struct PI { var shape: Shape; var g: int; }\n"
+        "func f(c: Shape) -> void { var h: PI = PI{ shape: c, g: 1 }; }\n"
+        "func main() -> i32 { return 0; }\n")).volatileTotal == 0);
+
+    // (5) Documented non-fix: `new volatile K(5)` marks the caller-side zero
+    // (MEMCPY) and the two caller stores (field initializer + volatile
+    // pointer local), but the shared constructor's own `this` stores are
+    // plain — there is no per-call-site volatility to thread. The same shape
+    // without `volatile` carries nothing.
+    const std::string kclass =
+        "class K { var x: int = 42; func init(v: int) { this.x = v; } }\n";
+    auto m1 = genModule(kclass +
+        "func f() -> void { var p: volatile K* = new volatile K(5); }\n"
+        "func main() -> i32 { return 0; }\n");
+    auto c1 = tallyAll(m1);
+    CHECK(c1.volatileMemcpy == 1);
+    CHECK(c1.volatileStores == 2);
+    CHECK(c1.volatileLoads == 0);
+    auto k1 = tallyFn(m1, "K_init");
+    CHECK(k1.volatileTotal == 0);
+    CHECK(tallyAll(genModule(kclass +
+        "func f() -> void { var p: K* = new K(5); }\n"
+        "func main() -> i32 { return 0; }\n")).volatileTotal == 0);
+    return 0;
+}
+
 int testVolatileGvn() {
     // CIDER-BUG-061: GVN must never replace a volatile access with a MOV of
     // an earlier occurrence — even for an opcode that is normally deduped.
@@ -1509,6 +1677,7 @@ int run() {
     CHECK(testVolatileGap133IrFlags() == 0);
     CHECK(testVolatileFormation144IrFlags() == 0);
     CHECK(testVolatileArraySpelling145IrFlags() == 0);
+    CHECK(testVolatileLiteral146IrFlags() == 0);
     CHECK(testVolatileGvn() == 0);
     CHECK(testVolatileLicm() == 0);
     CHECK(testCallClobberLicm() == 0);

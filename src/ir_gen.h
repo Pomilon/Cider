@@ -2693,18 +2693,32 @@ public:
                                                    {dest, IRValue::Constant(offset, IRType::I32)}});
                     // CIDER-BUG-133: the copy from a volatile field-init
                     // source (e.g. a member of a volatile enclosing object)
-                    // is an observable read; the literal temp itself is not
-                    // a user object, so the destination contributes nothing.
+                    // is an observable read. CIDER-BUG-146: a
+                    // volatile-qualified field is itself a user-qualified
+                    // volatile object even inside the literal temp, so its
+                    // destination flag marks the copy exactly like the
+                    // direct member store (`h.inner = src`); an unqualified
+                    // field of an unqualified temp still contributes nothing.
                     currentBlock_->addInstruction({IROp::MEMCPY, std::nullopt,
                                                    {fieldAddr, val, IRValue::Constant(getTypeSize(fieldType), IRType::I32)},
-                                                   lastExprType_.isVolatile});
+                                                   fieldType.isVolatile || lastExprType_.isVolatile});
                     // CIDER-BUG-089: an explicit class-valued field copy
                     // re-stamps the field's declared class vptr, so
                     // `S{ inner: *p }` slices to Inner like every other copy.
+                    // CIDER-BUG-146: the stamp follows the destination field's
+                    // volatile flag, like every other copy-site re-stamp.
                     emitClassVptrStoreForType(fieldType, fieldAddr,
-                                              definingModuleFor(structSym, structSym->name));
+                                              definingModuleFor(structSym, structSym->name),
+                                              fieldType.isVolatile);
                 } else {
-                    currentBlock_->addInstruction({IROp::STORE, std::nullopt, {dest, val, IRValue::Constant(offset, IRType::I32)}});
+                    // CIDER-BUG-146: an explicit field store into a
+                    // volatile-qualified field is an observable write,
+                    // mirroring the direct member store's field rule
+                    // (memberAccessIsVolatile). The literal's temp is not
+                    // itself volatile, so only the field's own flag marks
+                    // the store.
+                    currentBlock_->addInstruction({IROp::STORE, std::nullopt, {dest, val, IRValue::Constant(offset, IRType::I32)},
+                                                   fieldType.isVolatile});
                 }
             }
         }
@@ -7633,6 +7647,22 @@ public:
     // virtual/override `init`), so this is a direct call with `this` as the
     // hidden first argument. Called after the zero/field-initializer stores
     // so the ordering is: zero defaults -> 049 field initializers -> body.
+    //
+    // CIDER-BUG-146 (investigated, documented decision): `new volatile C(...)`
+    // marks every caller-side formation store (the zero, vptr and field
+    // initializers — CIDER-BUG-144) but the constructor BODY still writes
+    // `this` fields plainly. The constructor is ONE shared callee: its
+    // hidden `this` parameter is a plain `C*` in the generated function
+    // (visit(FunctionDeclStmt)), and IR CALL carries no per-argument
+    // volatility — the same architecture limit the CIDER-BUG-133 note in
+    // convertCallArgs records for by-value arguments. Supporting it would
+    // require either emitting a per-call-site volatile-`this` clone of every
+    // constructor (code duplication plus a dispatch decision for every
+    // call shape) or a new ABI/parameter flag on the hidden `this`
+    // (explicitly out of scope; there is no user syntax to declare it).
+    // `volatile` on the constructor's own parameters already marks the
+    // writes to those parameters; `this` has no such spelling. Decision:
+    // document, do not thread — no ABI flag, no cloning.
     void emitConstructorCall(const std::shared_ptr<StructSymbol>& classSym, IRValue objPtr,
                              const std::vector<std::unique_ptr<Expression>>& argExprs) {
         auto ctorDef = resolveFunctionDef(classSym->constructorName,
@@ -7701,6 +7731,8 @@ public:
         // its formation stores are observable accesses. The flag comes from
         // the alias-resolved `new` type (mirroring the checker and the copy
         // sites), covering `type VV = volatile V; new VV`.
+        // CIDER-BUG-146: the constructor BODY is out of this flag's reach —
+        // see the documented decision in emitConstructorCall.
         const bool newIsVolatile = resolveTypeAlias(type, currentModule_).isVolatile;
         emitZeroInstance(dest, size, newIsVolatile);
 
