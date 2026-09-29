@@ -280,6 +280,10 @@ bool CodeGenerator::generate(ModuleIR& module, const std::string& outputPath,
     bool needsUncaughtHelper = false;
     // CIDER-ISS-001: same for the --checks bounds-fail pseudo-builtin.
     bool needsBoundsHelper = false;
+    // CIDER-BUG-211: same for the nil-interface-dispatch pseudo-builtin.
+    // Unlike the two above this guard is NOT --checks-gated, so the helper is
+    // needed by any module that dispatches through an interface.
+    bool needsNilDispatchHelper = false;
     std::set<std::string> generatedFunctions_;
     // CID-005: UEFI (PE32+) emission differences (design §1): bare `efi_main`
     // export, no implicit libc externs, and no `_start` kernel-stack entry.
@@ -403,6 +407,12 @@ bool CodeGenerator::generate(ModuleIR& module, const std::string& outputPath,
                     instr.args[0].kind == IRValue::LABEL &&
                     instr.args[0].name == "_bounds_fail") {
                     needsBoundsHelper = true;
+                }
+                // CIDER-BUG-211: same for the nil-interface-dispatch call.
+                if (instr.op == IROp::CALL && !instr.args.empty() &&
+                    instr.args[0].kind == IRValue::LABEL &&
+                    instr.args[0].name == "_nil_dispatch_fail") {
+                    needsNilDispatchHelper = true;
                 }
                 for (auto& arg : instr.args) {
                     // CID-005: narrow `"..."` and wide `L"..."` PTR constants
@@ -2708,6 +2718,41 @@ bool CodeGenerator::generate(ModuleIR& module, const std::string& outputPath,
             addText("    mov rax, 1     ; write(2, msg, len)");
             addText("    mov rdi, 2");
             addText("    lea rsi, [rel _bounds_fail_msg]");
+            addText("    mov rdx, " + std::to_string(std::strlen(msg)));
+            addText("    syscall");
+            addText("    mov rax, 60    ; exit(2)");
+            addText("    mov rdi, 2");
+            addText("    syscall");
+        }
+    }
+
+    // CIDER-BUG-211: define the nil-interface-dispatch runtime error. ir-gen
+    // branches here when an interface receiver's vtable word is zero, before
+    // the method-address load dereferences it. Native/pomeos report the exact
+    // line the VM reports (`vm error: nil interface dispatch`) on stderr and
+    // exit 2, the CIDER-ISS-001 convention, so the backends are byte-for-byte
+    // identical; UEFI traps (ud2), exactly like the two helpers above. A
+    // user-defined function of the same name wins on both backends, so the
+    // helper is only emitted when the name is free (no duplicate label).
+    bool userDefinedNilDispatch = false;
+    for (const auto& fn : module.getFunctions()) {
+        if (fn->getName() == "_nil_dispatch_fail") {
+            userDefinedNilDispatch = true;
+            break;
+        }
+    }
+    if (needsNilDispatchHelper && !userDefinedNilDispatch) {
+        addText("");
+        addText("; CIDER-BUG-211: method call on a nil interface");
+        addText("_nil_dispatch_fail:");
+        if (isUefi) {
+            addText("    ud2    ; no write/exit syscalls on uefi: trap loudly");
+        } else {
+            const char* msg = "vm error: nil interface dispatch\n";
+            addData("_nil_dispatch_fail_msg: db \"vm error: nil interface dispatch\", 10");
+            addText("    mov rax, 1     ; write(2, msg, len)");
+            addText("    mov rdi, 2");
+            addText("    lea rsi, [rel _nil_dispatch_fail_msg]");
             addText("    mov rdx, " + std::to_string(std::strlen(msg)));
             addText("    syscall");
             addText("    mov rax, 60    ; exit(2)");

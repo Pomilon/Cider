@@ -1374,6 +1374,93 @@ int run() {
         CHECK(vm.run(mod).exitCode == 0);
     }
 
+    // CIDER-BUG-211: ir-gen's interface-dispatch guard calls
+    // `_nil_dispatch_fail` when the receiver's vtable word is zero. The VM
+    // must answer with the same message the native helper writes, so both
+    // backends report `vm error: nil interface dispatch` and exit 2. This
+    // used to surface only as load's CIDER-BUG-059 "load: null pointer
+    // dereference", naming the wrong fault entirely.
+    {
+        auto fn = makeFn("main", cider::IRType::I32);
+        auto e = std::make_unique<cider::BasicBlock>("entry");
+        cider::IRInstruction boom;
+        boom.op = cider::IROp::CALL;
+        boom.args = {cider::IRValue::Label("_nil_dispatch_fail")};
+        e->addInstruction(boom);
+        cider::IRInstruction ret;
+        ret.op = cider::IROp::RET;
+        ret.args = {cider::IRValue::Constant(0, cider::IRType::I32)};
+        e->addInstruction(ret);
+        fn->addBlock(std::move(e));
+        cider::ModuleIR mod;
+        mod.addFunction(std::move(fn));
+        cider::VM vm;
+        bool threw = false;
+        try {
+            vm.run(mod);
+        } catch (const cider::VMError& err) {
+            threw = true;
+            // Exact text: run_tests.py pins the same string byte for byte
+            // against the native helper's `db "vm error: nil interface
+            // dispatch"` payload.
+            CHECK(err.message == "nil interface dispatch");
+        }
+        CHECK(threw);
+    }
+    {
+        // The guard is a builtin, so `cider run` must recognise the label
+        // instead of failing with an unresolved-label error. This mirrors
+        // the shape of the branch ir-gen emits: a nil comparison whose fail
+        // edge calls the builtin and rejoins the live path. The live path
+        // must still run, so the guard costs a taken branch and nothing
+        // else when the receiver is not nil.
+        auto fn = makeFn("main", cider::IRType::I32);
+        auto e = std::make_unique<cider::BasicBlock>("entry");
+        e->addInstruction(opInstr(cider::IROp::ALLOCA, "vt",
+                                  {cider::IRValue::Constant(8, cider::IRType::I32)}));
+        cider::IRInstruction st;
+        st.op = cider::IROp::STORE;
+        st.dest = std::nullopt;
+        st.args = {cider::IRValue::Register("vt", cider::IRType::PTR),
+                   cider::IRValue::Constant(0x1234, cider::IRType::I64),
+                   cider::IRValue::Constant(0, cider::IRType::I32)};
+        e->addInstruction(st);
+        cider::IRInstruction ld;
+        ld.op = cider::IROp::LOAD;
+        ld.dest = cider::IRValue::Register("v", cider::IRType::PTR);
+        ld.args = {cider::IRValue::Register("vt", cider::IRType::PTR),
+                   cider::IRValue::Constant(0, cider::IRType::I32)};
+        e->addInstruction(ld);
+        cider::IRInstruction cmp;
+        cmp.op = cider::IROp::CMP_EQ;
+        cmp.dest = cider::IRValue::Register("isnil", cider::IRType::BOOL);
+        cmp.args = {cider::IRValue::Register("v", cider::IRType::PTR),
+                    cider::IRValue::Constant(0, cider::IRType::I64)};
+        e->addInstruction(cmp);
+        e->addInstruction({cider::IROp::COND_BR, std::nullopt,
+                           {cider::IRValue::Register("isnil", cider::IRType::BOOL),
+                            cider::IRValue::Label("fail"),
+                            cider::IRValue::Label("ok")}});
+        fn->addBlock(std::move(e));
+        auto fail = std::make_unique<cider::BasicBlock>("fail");
+        cider::IRInstruction boom;
+        boom.op = cider::IROp::CALL;
+        boom.args = {cider::IRValue::Label("_nil_dispatch_fail")};
+        fail->addInstruction(boom);
+        fail->addInstruction({cider::IROp::BR, std::nullopt, {cider::IRValue::Label("ok")}});
+        fn->addBlock(std::move(fail));
+        auto ok = std::make_unique<cider::BasicBlock>("ok");
+        cider::IRInstruction ret;
+        ret.op = cider::IROp::RET;
+        ret.args = {cider::IRValue::Constant(0, cider::IRType::I32)};
+        ok->addInstruction(ret);
+        fn->addBlock(std::move(ok));
+        cider::ModuleIR mod;
+        mod.addFunction(std::move(fn));
+        cider::VM vm;
+        CHECK(vm.run(mod).exitCode == 0);
+    }
+
     // CID-006 F1 (front-end shape): ir_gen now registers `extern var` via
     // addExternVariable, so a value read cannot resolve to any function id
     // and fails with the pre-CID-006 clean unresolved-label error.

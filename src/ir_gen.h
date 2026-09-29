@@ -2285,6 +2285,22 @@ public:
                             // Load vtable_ptr from [objPtr + 8]
                             IRValue vtablePtrReg = IRValue::Register(nextTemp(), IRType::PTR);
                             currentBlock_->addInstruction({IROp::LOAD, vtablePtrReg, {objPtr, IRValue::Constant(8, IRType::I32)}, objIsVolatile});
+                            // CIDER-BUG-211: a nil interface (never assigned,
+                            // or read out of an uninitialized slot) carries a
+                            // zero vtable word, so the method-address load
+                            // below dereferences nil. The VM caught that only
+                            // by accident, in `load`'s CIDER-BUG-059 zero-address
+                            // guard, and native x86 SIGSEGVed with no output at
+                            // all. Guard the vtable word here — the one place
+                            // every interface dispatch loads it — so both
+                            // backends take the same defined route to the
+                            // `_nil_dispatch_fail` runtime error. Unconditional
+                            // (not `--checks`-gated): the guard is a
+                            // language-level runtime check like the dispatch it
+                            // protects, and the VM's nil-load error is
+                            // unconditional too, so gating would make the
+                            // backends disagree in the default configuration.
+                            emitNilDispatchCheck(vtablePtrReg);
                             // Load method address from vtable[methodIdx]
                             IRValue methodAddrReg = IRValue::Register(nextTemp(), IRType::PTR);
                             currentBlock_->addInstruction({IROp::LOAD, methodAddrReg, {vtablePtrReg, IRValue::Constant(methodIdx * 8, IRType::I32)}});
@@ -9687,6 +9703,38 @@ public:
         // The routine never returns on VM/native; the branch keeps the CFG
         // well-formed (and resumes the normal path if a user-defined
         // _bounds_fail returns).
+        currentBlock_->addInstruction({IROp::BR, std::nullopt, {IRValue::Label(okName)}});
+        startBlock(okName);
+    }
+
+    // CIDER-BUG-211: nil-interface dispatch guard. `vtable` is the word an
+    // interface dispatch just loaded from the receiver's fat pointer; a zero
+    // vtable means the interface value is nil, and the method-address load
+    // that follows would dereference it. The check branches to a call of the
+    // `_nil_dispatch_fail` runtime routine and the normal load continues in a
+    // fresh block, exactly the shape of emitBoundsCheck above (which its
+    // `--checks` gate does not share: this guard is always on). Both backends
+    // answer the same way: `vm error: nil interface dispatch` on stderr and
+    // exit 2 (the CIDER-ISS-001 convention), or `ud2` on uefi, which has no
+    // write/exit syscalls at this layer.
+    void emitNilDispatchCheck(const IRValue& vtable) {
+        IRValue isNil = IRValue::Register(nextTemp(), IRType::BOOL);
+        currentBlock_->addInstruction(
+            {IROp::CMP_EQ, isNil, {vtable, IRValue::Constant(0, IRType::I64)}});
+        std::string failName = nextLabel("nil_dispatch_fail");
+        std::string okName = nextLabel("nil_dispatch_ok");
+        currentBlock_->addInstruction({IROp::COND_BR, std::nullopt,
+                                       {isNil, IRValue::Label(failName),
+                                        IRValue::Label(okName)}});
+        startBlock(failName);
+        IRInstruction call;
+        call.op = IROp::CALL;
+        call.dest = std::nullopt;
+        call.args.push_back(IRValue::Label("_nil_dispatch_fail"));
+        currentBlock_->addInstruction(call);
+        // The routine never returns on VM/native; the branch keeps the CFG
+        // well-formed (and resumes the dispatch if a user-defined
+        // _nil_dispatch_fail returns).
         currentBlock_->addInstruction({IROp::BR, std::nullopt, {IRValue::Label(okName)}});
         startBlock(okName);
     }

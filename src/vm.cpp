@@ -1297,7 +1297,7 @@ void VM::store(int64_t addr, const RegVal& val, IRType type, int64_t offset) {
 
 namespace {
 const char* const kVMBuiltins[] = {"malloc", "free", "exit", "putchar", "_setjmp", "longjmp",
-                                   "_uncaught_exception", "_bounds_fail"};
+                                   "_uncaught_exception", "_bounds_fail", "_nil_dispatch_fail"};
 }  // namespace
 
 bool VM::isExternFunctionName(const std::string& name) const {
@@ -1373,6 +1373,16 @@ bool VM::tryBuiltinCall(const std::string& name, const std::vector<IRValue>& arg
         // `vm error: index out of bounds` and exit 2, matching the native
         // and pomeos stub byte for byte.
         throw VMError{"index out of bounds"};
+    }
+    if (name == "_nil_dispatch_fail") {
+        // CIDER-BUG-211: ir-gen's interface-dispatch guard routes a nil
+        // receiver (zero vtable word) here, before the method-address load
+        // dereferences it. This used to surface accidentally as
+        // `vm error: load: null pointer dereference`, from load's
+        // CIDER-BUG-059 zero-address guard, while native x86 SIGSEGVed with
+        // no output at all. Now both backends report the same line and exit
+        // with the same code, matching the CIDER-ISS-001 convention.
+        throw VMError{"nil interface dispatch"};
     }
     if (name == "_setjmp") {
         RegVal buf = args.empty() ? RegVal{} : resolveValue(args[0]);

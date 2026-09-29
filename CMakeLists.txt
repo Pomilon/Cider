@@ -101,6 +101,17 @@ add_test(NAME bounds_check_smoke
          COMMAND bash ${CMAKE_SOURCE_DIR}/tests/unit/bounds_check_smoke.sh $<TARGET_FILE:cider>)
 set_tests_properties(bounds_check_smoke PROPERTIES SKIP_RETURN_CODE 77)
 
+# CIDER-BUG-211: a method call on a nil interface reports
+# `vm error: nil interface dispatch` and exits 2 identically on the VM
+# (optimized and not) and the native backend, in the DEFAULT configuration
+# (the guard is not --checks-gated). Also pins the codegen-side invariants:
+# the helper is emitted without a flag, a user-defined
+# `_nil_dispatch_fail` suppresses it, and uefi traps with ud2. Exits 77 when
+# nasm/gcc are missing.
+add_test(NAME nil_iface_dispatch_smoke
+         COMMAND bash ${CMAKE_SOURCE_DIR}/tests/unit/nil_iface_dispatch_smoke.sh $<TARGET_FILE:cider>)
+set_tests_properties(nil_iface_dispatch_smoke PROPERTIES SKIP_RETURN_CODE 77)
+
 # CIDER-FEAT-001: `compile -g` DWARF line-table/function-DIE smoke. Assembles
 # with plain `nasm -f elf64` and inspects the result with readelf/objdump;
 # exits 77 when nasm/gcc/readelf are missing.
