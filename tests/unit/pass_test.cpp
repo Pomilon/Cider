@@ -523,6 +523,201 @@ int testVolatileGap101IrFlags() {
     return 0;
 }
 
+int testVolatileGap133IrFlags() {
+    // CIDER-BUG-133: round 2 of the volatile sweep. Five emission points
+    // still bypassed the CIDER-BUG-061/079/101 model — (1) aggregate copies
+    // consulted only the TARGET flag, so a volatile SOURCE copied through a
+    // plain MEMCPY; (2) emitClassVptrStore always stamped plainly, so a
+    // volatile class value's re-stamp after a copy was unmarked; (3) a
+    // member access dropped the enclosing object's volatile flag from the
+    // expression type, so dispatch through an interface field of a volatile
+    // object (and nested member targets) were classified non-volatile; (5)
+    // the declaration paths used the raw spelling flag, missing
+    // `type V = volatile T` aliases; (6) the foreach element copy (array or
+    // slice) read volatile elements plainly. Every case is pinned with
+    // exact counts against a non-volatile control, so non-volatile IR keeps
+    // its existing shape.
+    //
+    // The documented non-fixes: by-value call arguments materialise inside
+    // the callee from the CALLEE parameter's flag (no per-argument
+    // volatility in IR CALL; see convertCallArgs), and the foreach
+    // slice-limit load reads a compiler-generated descriptor, not a
+    // user-qualified object, so it stays plain.
+    struct Tally {
+        int volatileLoads = 0;
+        int volatileStores = 0;
+        int volatileMemcpy = 0;
+        int volatileTotal = 0;
+    };
+    auto tally = [](const ModuleResult& m) {
+        Tally t;
+        for (const auto& func : m.module.getFunctions()) {
+            for (const auto& b : func->getBlocks()) {
+                for (const auto& in : b->getInstructions()) {
+                    if (!in.isVolatile) continue;
+                    t.volatileTotal++;
+                    if (in.op == cider::IROp::LOAD) t.volatileLoads++;
+                    if (in.op == cider::IROp::STORE) t.volatileStores++;
+                    if (in.op == cider::IROp::MEMCPY) t.volatileMemcpy++;
+                }
+            }
+        }
+        return t;
+    };
+
+    // (1)+(3) Source-side aggregate copies. `h.inner` type-checks as Inner
+    // (the declared field type); its volatility is inherited from the
+    // volatile enclosing Holder, so only the source flag can mark the copy.
+    // Each function also materialises its volatile parameter (CIDER-BUG-101),
+    // so declaration + sret return + assignment contribute three source
+    // copies on top of three parameter copies: six volatile MEMCPYs.
+    auto g1 = tally(genModule(
+        "struct Inner { var a: int; var b: int; }\n"
+        "struct Holder { var inner: Inner; }\n"
+        "func decl(h: volatile Holder) -> void { var y: Inner = h.inner; }\n"
+        "func ret(h: volatile Holder) -> Inner { return h.inner; }\n"
+        "func assign(h: volatile Holder) -> void { var y: Inner; y = h.inner; }\n"));
+    CHECK(g1.volatileMemcpy == 6);
+    CHECK(g1.volatileLoads == 0 && g1.volatileStores == 0);
+    CHECK(tally(genModule(
+        "struct Inner { var a: int; var b: int; }\n"
+        "struct Holder { var inner: Inner; }\n"
+        "func decl(h: Holder) -> void { var y: Inner = h.inner; }\n"
+        "func ret(h: Holder) -> Inner { return h.inner; }\n"
+        "func assign(h: Holder) -> void { var y: Inner; y = h.inner; }\n")).volatileTotal == 0);
+
+    // The declared-return copy: `return gv` of a volatile global into a
+    // volatile return type is one source+target volatile sret MEMCPY (it
+    // carried no flag at all before).
+    auto g2 = tally(genModule(
+        "struct S { var a: int; var b: int; }\n"
+        "var gv: volatile S;\n"
+        "func ret() -> volatile S { return gv; }\n"));
+    CHECK(g2.volatileMemcpy == 1);
+    CHECK(g2.volatileTotal == 1);
+    CHECK(tally(genModule(
+        "struct S { var a: int; var b: int; }\n"
+        "var gv: S;\n"
+        "func ret() -> S { return gv; }\n")).volatileTotal == 0);
+
+    // CIDER-BUG-077 boxing: the heap box copy reads the volatile struct
+    // value (the parameter materialisation adds the second volatile MEMCPY;
+    // the interface stores target a plain Shape return).
+    auto g3 = tally(genModule(
+        "interface Shape { func area() -> int; }\n"
+        "class C { var x: int; func area() -> int { return this.x; } }\n"
+        "func box(v: volatile C) -> Shape { return v; }\n"));
+    CHECK(g3.volatileMemcpy == 2);
+    CHECK(g3.volatileTotal == 2);
+    CHECK(tally(genModule(
+        "interface Shape { func area() -> int; }\n"
+        "class C { var x: int; func area() -> int { return this.x; } }\n"
+        "func box(v: C) -> Shape { return v; }\n")).volatileTotal == 0);
+
+    // (2) Vptr stamps when the destination is volatile: the parameter, the
+    // deref copy and the volatile return each re-stamp `vtable_V` through a
+    // volatile STORE; the two pointer parameters store their own slots
+    // volatile too (five stores). The three materialisation copies are the
+    // three volatile MEMCPYs.
+    auto g4 = tally(genModule(
+        "class V { virtual func f() -> int { return 1; } }\n"
+        "func param(v: volatile V) -> void { }\n"
+        "func copy(p: volatile *V) -> void { var x: volatile V = *p; }\n"
+        "func ret(p: volatile *V) -> volatile V { return *p; }\n"));
+    CHECK(g4.volatileStores == 5);
+    CHECK(g4.volatileMemcpy == 3);
+    CHECK(g4.volatileLoads == 0);
+    CHECK(tally(genModule(
+        "class V { virtual func f() -> int { return 1; } }\n"
+        "func param(v: V) -> void { }\n"
+        "func copy(p: *V) -> void { var x: V = *p; }\n"
+        "func ret(p: *V) -> V { return *p; }\n")).volatileTotal == 0);
+
+    // (3) Dispatch and store through an interface field of a volatile
+    // enclosing object: both fat-pointer words are volatile loads, and the
+    // NESTED member store (`o.inner.shape = c`) marks its two target words.
+    // The three volatile parameters contribute three materialisation
+    // MEMCPYs.
+    auto g5 = tally(genModule(
+        "interface Shape { func area() -> int; }\n"
+        "struct Holder { var shape: Shape; }\n"
+        "struct Inner { var shape: Shape; }\n"
+        "struct Outer { var inner: Inner; }\n"
+        "func f(h: volatile Holder) -> int { return h.shape.area(); }\n"
+        "func g(o: volatile Outer) -> int { return o.inner.shape.area(); }\n"
+        "func s(o: volatile Outer, c: Shape) -> void { o.inner.shape = c; }\n"));
+    CHECK(g5.volatileLoads == 4);
+    CHECK(g5.volatileStores == 2);
+    CHECK(g5.volatileMemcpy == 3);
+    CHECK(tally(genModule(
+        "interface Shape { func area() -> int; }\n"
+        "struct Holder { var shape: Shape; }\n"
+        "struct Inner { var shape: Shape; }\n"
+        "struct Outer { var inner: Inner; }\n"
+        "func f(h: Holder) -> int { return h.shape.area(); }\n"
+        "func g(o: Outer) -> int { return o.inner.shape.area(); }\n"
+        "func s(o: Outer, c: Shape) -> void { o.inner.shape = c; }\n")).volatileTotal == 0);
+
+    // (5) Alias spellings: `type VS = volatile Shape` marks the
+    // declaration's two fat-pointer stores, and `type VI = volatile int`
+    // prevents the const read from folding and marks the load. The plain
+    // aliases carry no volatile instruction.
+    auto g6 = tally(genModule(
+        "interface Shape { func area() -> int; }\n"
+        "type VS = volatile Shape;\n"
+        "type VI = volatile int;\n"
+        "const K: VI = 7;\n"
+        "func f(c: Shape) -> void { var x: VS = c; }\n"
+        "func g() -> int { return K; }\n"));
+    CHECK(g6.volatileLoads == 1);
+    CHECK(g6.volatileStores == 2);
+    CHECK(g6.volatileMemcpy == 0);
+    CHECK(tally(genModule(
+        "interface Shape { func area() -> int; }\n"
+        "type VS = Shape;\n"
+        "type VI = int;\n"
+        "const K: VI = 7;\n"
+        "func f(c: Shape) -> void { var x: VS = c; }\n"
+        "func g() -> int { return K; }\n")).volatileTotal == 0);
+
+    // (6) Foreach element reads: the element copy of a `[volatile T; N]`
+    // array (directly, or through a slice expression over one) is a volatile
+    // load; the loop-variable temp reads are volatile too (its declared type
+    // is the volatile element). The array element-init stores were already
+    // marked by the wrapper flag. The slice descriptor's length/data loads
+    // stay plain (there is no volatile slice spelling).
+    auto g7 = tally(genModule(
+        "func f() -> int {\n"
+        "  var arr: [volatile int; 3] = [1, 2, 3];\n"
+        "  var s: int = 0;\n"
+        "  for (var x in arr) { s = s + x; }\n"
+        "  return s;\n"
+        "}\n"
+        "func g() -> int {\n"
+        "  var arr: [volatile int; 3] = [1, 2, 3];\n"
+        "  var s: int = 0;\n"
+        "  for (var x in arr[0:2]) { s = s + x; }\n"
+        "  return s;\n"
+        "}\n"));
+    CHECK(g7.volatileLoads == 4);
+    CHECK(g7.volatileStores == 6);
+    CHECK(g7.volatileMemcpy == 0);
+    CHECK(tally(genModule(
+        "func f() -> int {\n"
+        "  var arr: [int; 3] = [1, 2, 3];\n"
+        "  var s: int = 0;\n"
+        "  for (var x in arr) { s = s + x; }\n"
+        "  return s;\n"
+        "}\n"
+        "func g() -> int {\n"
+        "  var arr: [int; 3] = [1, 2, 3];\n"
+        "  var s: int = 0;\n"
+        "  for (var x in arr[0:2]) { s = s + x; }\n"
+        "  return s;\n"
+        "}\n")).volatileTotal == 0);
+    return 0;
+}
+
 int testVolatileGvn() {
     // CIDER-BUG-061: GVN must never replace a volatile access with a MOV of
     // an earlier occurrence — even for an opcode that is normally deduped.
@@ -847,6 +1042,7 @@ int run() {
     CHECK(testVolatileInterfaceIrFlags() == 0);
     CHECK(testPointerInterfaceStoreIrFlags() == 0);
     CHECK(testVolatileGap101IrFlags() == 0);
+    CHECK(testVolatileGap133IrFlags() == 0);
     CHECK(testVolatileGvn() == 0);
     CHECK(testVolatileLicm() == 0);
     CHECK(testCallClobberLicm() == 0);

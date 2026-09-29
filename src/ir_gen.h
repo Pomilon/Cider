@@ -1286,7 +1286,9 @@ public:
                 // CIDER-BUG-089: the parameter is a declared class value, so
                 // re-stamp its class's vptr after the copy (`v: V` receiving
                 // `*p` from a dynamically-typed pointer slices to V).
-                emitClassVptrStoreForType(sym->type, addr, currentModule_);
+                // CIDER-BUG-133: a volatile parameter's re-stamp is an
+                // observable write, marked like the copy above.
+                emitClassVptrStoreForType(sym->type, addr, currentModule_, paramIsVolatile);
             } else {
                 currentBlock_->addInstruction({IROp::STORE, std::nullopt, {addr, paramReg, IRValue::Constant(0, IRType::I32)},
                                                paramIsVolatile});
@@ -1364,8 +1366,12 @@ public:
                     alloc.args.push_back(IRValue::Label(runtimeHelperName("malloc")));
                     alloc.args.push_back(IRValue::Constant(objSize, IRType::I32));
                     currentBlock_->addInstruction(alloc);
+                    // CIDER-BUG-133: the box copy reads the (possibly
+                    // volatile) source VALUE, so its volatility marks the
+                    // MEMCPY; the heap destination is a compiler temp.
                     currentBlock_->addInstruction({IROp::MEMCPY, std::nullopt,
-                                                   {box, val, IRValue::Constant(objSize, IRType::I32)}});
+                                                   {box, val, IRValue::Constant(objSize, IRType::I32)},
+                                                   valIface.isVolatile});
                     val = box;
                 }
                 IRValue sretAddr = variableValues_.count("__sret")
@@ -1373,7 +1379,11 @@ public:
                     : IRValue::Register("__sret", IRType::PTR);
                 IRValue sretPtr = IRValue::Register(nextTemp(), IRType::PTR);
                 currentBlock_->addInstruction({IROp::LOAD, sretPtr, {sretAddr, IRValue::Constant(0, IRType::I32)}});
-                emitInterfaceStoreAt(currentReturnType_, sretPtr, val, retType);
+                // CIDER-BUG-133: a volatile interface return type marks the
+                // two fat-pointer target stores (the source's own flag is
+                // handled inside via retType).
+                emitInterfaceStoreAt(currentReturnType_, sretPtr, val, retType,
+                                     currentReturnType_.isVolatile);
                 lastExprType_ = currentReturnType_;
                 emitDefers();
                 emitDestructors();
@@ -1398,10 +1408,18 @@ public:
                     : IRValue::Register("__sret", IRType::PTR);
                 IRValue sretPtr = IRValue::Register(nextTemp(), IRType::PTR);
                 currentBlock_->addInstruction({IROp::LOAD, sretPtr, {sretAddr, IRValue::Constant(0, IRType::I32)}});
-                currentBlock_->addInstruction({IROp::MEMCPY, std::nullopt, {sretPtr, val, IRValue::Constant(structSize, IRType::I32)}});
+                // CIDER-BUG-133: an aggregate return copy is observable
+                // when either end is volatile — the declared return type or
+                // the returned VALUE (including volatility inferred from a
+                // volatile enclosing object), mirroring the declaration and
+                // assignment copies.
+                currentBlock_->addInstruction({IROp::MEMCPY, std::nullopt, {sretPtr, val, IRValue::Constant(structSize, IRType::I32)},
+                                               retType.isVolatile || currentReturnType_.isVolatile});
                 // CIDER-BUG-089: the returned value's declared class owns
                 // the vptr word, so `return *p;` slices to the return type.
-                emitClassVptrStoreForType(currentReturnType_, sretPtr, currentModule_);
+                // CIDER-BUG-133: a volatile return target marks the stamp.
+                emitClassVptrStoreForType(currentReturnType_, sretPtr, currentModule_,
+                                          currentReturnType_.isVolatile);
                 lastExprType_ = currentReturnType_;
                 emitDefers();
                 emitDestructors();
@@ -1421,7 +1439,9 @@ public:
                 int structSize = getTypeSize(retType);
                 IRValue localPtr = IRValue::Register(nextTemp(), IRType::PTR);
                 currentBlock_->addInstruction({IROp::CALL, localPtr, {IRValue::Label(runtimeHelperName("malloc")), IRValue::Constant(structSize, IRType::I32)}});
-                currentBlock_->addInstruction({IROp::MEMCPY, std::nullopt, {localPtr, val, IRValue::Constant(structSize, IRType::I32)}});
+                // CIDER-BUG-133: same source/target rule as the sret copy.
+                currentBlock_->addInstruction({IROp::MEMCPY, std::nullopt, {localPtr, val, IRValue::Constant(structSize, IRType::I32)},
+                                               retType.isVolatile || currentReturnType_.isVolatile});
                 val = localPtr;
                 lastExprType_.isUserDefined = true;
             }
@@ -2364,6 +2384,13 @@ public:
                     // CIDER-BUG-061: the field type may be volatile itself,
                     // and every member of a volatile object is volatile.
                     bool fieldVolatile = fieldType.isVolatile || objType.isVolatile;
+                    // CIDER-BUG-133: present that same flag on the read's
+                    // type, so consumers that classify by the EXPRESSION's
+                    // type (interface dispatch reads, aggregate copies) keep
+                    // the enclosing-object volatility that the load above
+                    // already carries. Without it `h.shape.area()` through a
+                    // volatile Holder read both fat-pointer words plainly.
+                    fieldType.isVolatile = fieldVolatile;
                     if (field.bitWidth > 0 && !isAddress_) {
                         bool isSigned = (fieldType.name == "int" || fieldType.name == "i8" ||
                                          fieldType.name == "i16" || fieldType.name == "i32");
@@ -2481,8 +2508,13 @@ public:
                     IRValue fieldAddr = IRValue::Register(nextTemp(), IRType::PTR);
                     currentBlock_->addInstruction({IROp::ADD, fieldAddr,
                                                    {dest, IRValue::Constant(offset, IRType::I32)}});
+                    // CIDER-BUG-133: the copy from a volatile field-init
+                    // source (e.g. a member of a volatile enclosing object)
+                    // is an observable read; the literal temp itself is not
+                    // a user object, so the destination contributes nothing.
                     currentBlock_->addInstruction({IROp::MEMCPY, std::nullopt,
-                                                   {fieldAddr, val, IRValue::Constant(getTypeSize(fieldType), IRType::I32)}});
+                                                   {fieldAddr, val, IRValue::Constant(getTypeSize(fieldType), IRType::I32)},
+                                                   lastExprType_.isVolatile});
                     // CIDER-BUG-089: an explicit class-valued field copy
                     // re-stamps the field's declared class vptr, so
                     // `S{ inner: *p }` slices to Inner like every other copy.
@@ -2964,8 +2996,12 @@ public:
             // pointer (data + vtable). Reassignment shares this lowering
             // (see visit(AssignStmt)), so the two paths cannot diverge.
             if (sym->type.isInterface) {
+                // CIDER-BUG-133: the target flag comes from the
+                // alias-resolved type, so a volatile declaration through an
+                // alias (`type VS = volatile Shape`) marks both words
+                // exactly like the direct spelling.
                 emitInterfaceStore(sym->type, addr, stmt.getInitializer(),
-                                   sym->type.isVolatile);
+                                   varType.isVolatile);
                 return;
             }
             // Non-interface initializers keep the legacy scalar/aggregate
@@ -3007,9 +3043,13 @@ public:
                             // (an f32 literal in an f64 element must not
                             // write 4 bytes; an int element converts).
                             IRValue eval = convertValueToType(lastValue_, elemType);
+                            // CIDER-BUG-133: both flags flow into the copy —
+                            // the declared array's volatile target and the
+                            // element expression's own volatile source
+                            // (e.g. a member of a volatile enclosing object).
                             emitListElementStore(addr, (int64_t)(ei * (size_t)elemSize), eval,
                                                  elemType, elemSize, elemIsAggregate,
-                                                 sym->type.isVolatile);
+                                                 varType.isVolatile, lastExprType_.isVolatile);
                         }
                         lastExprType_ = sym->type;
                         return;
@@ -3017,6 +3057,12 @@ public:
                 }
                 stmt.getInitializer()->accept(*this);
                 IRValue val = lastValue_;
+                // CIDER-BUG-133: remember the initializer's own volatile
+                // flag before the target-specific conversions below can
+                // overwrite lastExprType_ (a slice source is replaced by the
+                // declared array type at CIDER-BUG-057's step). An aggregate
+                // copy reads this flag into its MEMCPY.
+                const bool initIsVolatile = lastExprType_.isVolatile;
                 // CIDER-BUG-063: a legacy `func(...)`-typed declaration
                 // initialized with a named function stores a raw code
                 // pointer. Retype the symbol to the plain fn value (same
@@ -3084,12 +3130,20 @@ public:
                 bool initIsStruct = (lastExprType_.pointerLevel == 0) && (isStructValueType(lastExprType_) || lastExprType_.isUserDefined ||
                                     lastExprType_.isArray || getTypeSize(lastExprType_) > 8);
                 if (sym->type.pointerLevel == 0 && (sym->type.isArray || sym->type.isUserDefined || isStructType || getTypeSize(sym->type) > 8 || initIsStruct)) {
+                    // CIDER-BUG-133: an aggregate copy is observable when
+                    // EITHER end is volatile — the target's declared flag
+                    // (CIDER-BUG-061/092; alias-resolved, so `type V =
+                    // volatile S` marks too) or the source's flag, which may
+                    // be inferred from a volatile enclosing object (a member
+                    // read) rather than spelled on the initializer's type.
                     currentBlock_->addInstruction({IROp::MEMCPY, std::nullopt, {addr, val, IRValue::Constant(getTypeSize(sym->type), IRType::I32)},
-                                                   sym->type.isVolatile});
+                                                   varType.isVolatile || initIsVolatile});
                     // CIDER-BUG-089: a copy into a class value re-stamps the
                     // declared class's vptr, so `var v: V = *p;` slices to V
                     // even when the pointee's dynamic type is derived.
-                    emitClassVptrStoreForType(varType, addr, currentModule_);
+                    // CIDER-BUG-133: a volatile destination's vptr stamp is
+                    // an observable write too.
+                    emitClassVptrStoreForType(varType, addr, currentModule_, varType.isVolatile);
                 } else {
                     // Store at the declared width (same rule as fields and
                     // elements): a narrow initializer in a wide local slot
@@ -3106,9 +3160,11 @@ public:
                         if (declIsInt) val = truncateIntToType(val, sym->type);
                     }
                     // CIDER-BUG-061: initialization of a volatile local is
-                    // itself an observable write.
+                    // itself an observable write. CIDER-BUG-133: the flag
+                    // comes from the alias-resolved declared type, so
+                    // `type VI = volatile int; var x: VI = ...` marks too.
                     currentBlock_->addInstruction({IROp::STORE, std::nullopt, {addr, val, IRValue::Constant(0, IRType::I32)},
-                                                   sym->type.isVolatile});
+                                                   varType.isVolatile});
                 }
             }
         }
@@ -3363,7 +3419,7 @@ public:
 
     void emitListElementStore(IRValue base, int64_t offset, IRValue val,
                               const TypeInfo& elemType, int elemSize, bool aggregate,
-                              bool isVolatile = false) {
+                              bool isVolatile = false, bool sourceIsVolatile = false) {
         if (!aggregate) {
             currentBlock_->addInstruction({IROp::STORE, std::nullopt,
                                            {base, val, IRValue::Constant(offset, IRType::I32)},
@@ -3372,12 +3428,17 @@ public:
         }
         IRValue dst = IRValue::Register(nextTemp(), IRType::PTR);
         currentBlock_->addInstruction({IROp::ADD, dst, {base, IRValue::Constant(offset, IRType::I32)}});
+        // CIDER-BUG-133: the MEMCPY is an aggregate copy, so either end's
+        // volatile flag makes it an observable access (the read when the
+        // element VALUE comes from a volatile source, CIDER-BUG-061's twin
+        // of the interface rule in emitInterfaceStoreAt).
         currentBlock_->addInstruction({IROp::MEMCPY, std::nullopt,
                                        {dst, val, IRValue::Constant(elemSize, IRType::I32)},
-                                       isVolatile});
+                                       isVolatile || sourceIsVolatile});
         // CIDER-BUG-089: a class-valued element is a declared class slot,
-        // so an explicit copy (`[*p]`) re-stamps the element's class vptr.
-        emitClassVptrStoreForType(elemType, dst, currentModule_);
+        // so an explicit copy (`[*p]`) re-stamps the element's class vptr;
+        // CIDER-BUG-133: a volatile destination makes that stamp volatile.
+        emitClassVptrStoreForType(elemType, dst, currentModule_, isVolatile);
     }
 
     // CIDER-BUG-080: materialise a call-site interface argument. An
@@ -3436,6 +3497,17 @@ public:
     // argument's type aligned with `args[argBase..]`; an interface
     // parameter then materialises a fat pointer for a concrete argument
     // instead of passing the raw object address.
+    // CIDER-BUG-133 (investigated, documented decision): a by-value
+    // aggregate/interface argument is passed as its source ADDRESS and the
+    // CALLEE materialises it from the callee parameter's own volatile flag
+    // (CIDER-BUG-101). A volatile caller-side source therefore copies
+    // plainly inside a plain parameter. That is by design: the callee is
+    // shared by every call site, IR CALL carries no per-argument
+    // volatility, and inserting a caller-side temp copy would change the
+    // calling shape rather than mark an access ir_gen already emits. The
+    // volatile parameter spelling (`p: volatile S`) is the supported way to
+    // mark the callee-side copy; see the parameter materialisation in
+    // visit(FunctionDeclStmt).
     void convertCallArgs(std::vector<IRValue>& args, size_t argBase,
                          const std::vector<TypeInfo>& paramTypes,
                          size_t paramBase = 0,
@@ -3765,7 +3837,10 @@ public:
         // module (spec §5), same as every global reference below.
         // CIDER-BUG-061: a `const volatile` symbol (a read-only MMIO
         // register) must still be read at each use — never folded.
-        if (sym && sym->isConst && !sym->type.isVolatile &&
+        // CIDER-BUG-133: resolve alias chains first, so a volatile
+        // declaration through an alias (`type VI = volatile int`) is not
+        // folded away.
+        if (sym && sym->isConst && !resolveTypeAlias(sym->type).isVolatile &&
             !globalValues_.count(globalRefName(sym, expr.getName()))) {
             IRType irType = (sym->type.pointerLevel > 0) ? IRType::PTR : mapType(sym->type.name);
             lastValue_ = IRValue::Constant(sym->constValue, irType);
@@ -3934,7 +4009,16 @@ public:
                         // CIDER-BUG-090: resolve in the declaring class's
                         // module (inherited fields keep theirs).
                         std::string fieldMod = fieldTypeModule(f, ownerMod);
-                        return canonicalizeNominalInModule(resolveTypeAlias(f.type, fieldMod), fieldMod);
+                        TypeInfo fieldType =
+                            canonicalizeNominalInModule(resolveTypeAlias(f.type, fieldMod), fieldMod);
+                        // CIDER-BUG-133: every member of a volatile object
+                        // is volatile. Present the enclosing flag on the
+                        // inferred field type, so target classification of
+                        // NESTED member accesses (`o.inner.shape = ...`)
+                        // sees the volatility that the direct store paths
+                        // already honour for one level.
+                        if (objType.isVolatile) fieldType.isVolatile = true;
+                        return fieldType;
                     }
                 }
             }
@@ -4769,9 +4853,12 @@ public:
                         // CID-003: elements store at the declared width,
                         // exactly like the declaration path.
                         IRValue eval = convertValueToType(lastValue_, elemType);
+                        // CIDER-BUG-133: the element copy carries both the
+                        // target array's flag and the element source's own
+                        // flag (mirrors the declaration list path).
                         emitListElementStore(storeBase, (int64_t)(ei * (size_t)elemSize), eval,
                                              elemType, elemSize, elemIsAggregate,
-                                             targetIsVolatile);
+                                             targetIsVolatile, lastExprType_.isVolatile);
                     }
                     lastExprType_ = assignArray;
                     lastValue_ = storeBase;
@@ -4783,6 +4870,12 @@ public:
             // CIDER-BUG-057: remember that the RHS is a slice before the
             // target-specific conversions below overwrite lastExprType_.
             bool valueIsSlice = lastExprType_.isSlice && lastExprType_.pointerLevel == 0;
+            // CIDER-BUG-133: remember the RHS's own volatile flag before the
+            // target-specific branches overwrite lastExprType_ with the
+            // TARGET type. An aggregate MEMCPY below reads this flag: the
+            // copy is observable when the source is volatile even though the
+            // target is not (e.g. `h.inner` of a volatile enclosing object).
+            const bool valueIsVolatile = lastExprType_.isVolatile;
 
             // CIDER-BUG-116: classify the RHS value by its own RESOLVED
             // shape, not by flags the producing expression happened to set.
@@ -4917,14 +5010,19 @@ public:
             if (lastExprType_.pointerLevel == 0 &&
                 (lastExprType_.isArray || lastExprType_.isUserDefined ||
                  rhsVirtualClass || getTypeSize(lastExprType_) > 8)) {
+                // CIDER-BUG-133: either end's volatile flag marks the copy
+                // (the source flag was captured before the target-specific
+                // conversions above overwrote lastExprType_).
                 currentBlock_->addInstruction({IROp::MEMCPY, std::nullopt, {addr, val, IRValue::Constant(getTypeSize(lastExprType_), IRType::I32)},
-                                               targetIsVolatile});
+                                               targetIsVolatile || valueIsVolatile});
                 // CIDER-BUG-089: `v = *p;` is a copy like a declaration
                 // initializer, so the target's declared class re-stamps its
                 // vptr (the checker admits aggregate assignments only
                 // between equal static types, so the declared class is the
                 // value's class).
-                emitClassVptrStoreForType(lastExprType_, addr, currentModule_);
+                // CIDER-BUG-133: the stamp follows the DESTINATION's
+                // volatile flag (the vptr label is constant, not a read).
+                emitClassVptrStoreForType(lastExprType_, addr, currentModule_, targetIsVolatile);
             } else {
                 if (addr.kind == IRValue::LABEL) {
                     currentBlock_->addInstruction({IROp::STORE, std::nullopt, {addr, val}, targetIsVolatile});
@@ -5428,13 +5526,20 @@ public:
             variableValues_[stmt.getVarName()] = varAddr;
             // Struct copies only for by-value aggregates (Issue #13): pointers
             // must go through LOAD+STORE, never MEMCPY.
+            // CIDER-BUG-133: the element type may be volatile (an array of
+            // `volatile T`, or an iterator whose next() yields a volatile
+            // pointee); the copy READS the iterable's storage, so it is
+            // observable. The loop-variable slot itself is a fresh temp, so
+            // only the source access carries the flag.
             if (elemType.pointerLevel == 0 &&
                 (elemType.isArray || isStructValueType(elemType) || getTypeSize(elemType) > 8)) {
-                currentBlock_->addInstruction({IROp::MEMCPY, std::nullopt, {varAddr, p, IRValue::Constant(getTypeSize(elemType), IRType::I32)}});
+                currentBlock_->addInstruction({IROp::MEMCPY, std::nullopt, {varAddr, p, IRValue::Constant(getTypeSize(elemType), IRType::I32)},
+                                               elemType.isVolatile});
             } else {
                 IRType irType = (elemType.pointerLevel > 0) ? IRType::PTR : mapType(elemType.name);
                 IRValue elemVal = IRValue::Register(nextTemp(), irType);
-                currentBlock_->addInstruction({IROp::LOAD, elemVal, {p, IRValue::Constant(0, IRType::I32)}});
+                currentBlock_->addInstruction({IROp::LOAD, elemVal, {p, IRValue::Constant(0, IRType::I32)},
+                                               elemType.isVolatile});
                 currentBlock_->addInstruction({IROp::STORE, std::nullopt, {varAddr, elemVal, IRValue::Constant(0, IRType::I32)}});
             }
             // CIDER-BUG-108: the copied element finalizes at the end of this
@@ -5482,6 +5587,12 @@ public:
             limit = IRValue::Constant(iterableType.arraySize, IRType::I32);
         } else {
             limit = IRValue::Register(nextTemp(), IRType::I32);
+            // CIDER-BUG-133: this load reads the COMPILER-GENERATED slice
+            // descriptor's length word (see visit(SliceExpr)), not the
+            // user's object. Slices are expression-internal descriptors —
+            // the language has no volatile-qualified slice spelling — so the
+            // descriptor has no volatile model and the read stays plain; the
+            // element accesses below carry the element type's actual flag.
             currentBlock_->addInstruction({IROp::LOAD, limit, {iterable, IRValue::Constant(8, IRType::I32)}});
         }
 
@@ -5520,13 +5631,20 @@ public:
         variableValues_[stmt.getVarName()] = varAddr;
 
         // Same aggregate-only rule as the iterator path (Issue #13).
+        // CIDER-BUG-133: the element read carries the element type's
+        // volatile flag (a `[volatile T; N]` array, or the element type of a
+        // slice expression over one); the loop-variable temp store stays
+        // plain. The descriptor words read above remain plain — the
+        // descriptor is compiler-generated, not a volatile object.
         if (elemType.pointerLevel == 0 &&
             (elemType.isArray || isStructValueType(elemType) || getTypeSize(elemType) > 8)) {
-            currentBlock_->addInstruction({IROp::MEMCPY, std::nullopt, {varAddr, elemAddr, IRValue::Constant(getTypeSize(elemType), IRType::I32)}});
+            currentBlock_->addInstruction({IROp::MEMCPY, std::nullopt, {varAddr, elemAddr, IRValue::Constant(getTypeSize(elemType), IRType::I32)},
+                                           elemType.isVolatile});
         } else {
             IRType irType = (elemType.pointerLevel > 0) ? IRType::PTR : mapType(elemType.name);
             IRValue elemVal = IRValue::Register(nextTemp(), irType);
-            currentBlock_->addInstruction({IROp::LOAD, elemVal, {elemAddr, IRValue::Constant(0, IRType::I32)}});
+            currentBlock_->addInstruction({IROp::LOAD, elemVal, {elemAddr, IRValue::Constant(0, IRType::I32)},
+                                           elemType.isVolatile});
             currentBlock_->addInstruction({IROp::STORE, std::nullopt, {varAddr, elemVal, IRValue::Constant(0, IRType::I32)}});
         }
         // CIDER-BUG-108: the copied element finalizes at the end of this
@@ -6384,12 +6502,16 @@ public:
     // `new` pointers and interfaces keep dynamic dispatch. A class without
     // virtual methods reserves no vptr and emits nothing, keeping programs
     // without virtual value instances byte-identical.
-    void emitClassVptrStore(const std::shared_ptr<StructSymbol>& classSym, IRValue objAddr) {
+    // CIDER-BUG-133: `isVolatile` marks the write when `objAddr` is a
+    // volatile destination (CIDER-BUG-061/079 model), so a volatile class
+    // value's re-stamp after a copy is itself an observable access.
+    void emitClassVptrStore(const std::shared_ptr<StructSymbol>& classSym, IRValue objAddr,
+                            bool isVolatile = false) {
         if (!classSym || classSym->kind != SymbolKind::CLASS || classSym->vtable.empty()) return;
         currentBlock_->addInstruction(
             {IROp::STORE, std::nullopt,
              {objAddr, IRValue::Label("vtable_" + vtableKeyForClass(classSym)),
-              IRValue::Constant(0, IRType::I32)}});
+              IRValue::Constant(0, IRType::I32)}, isVolatile});
     }
 
     // CIDER-BUG-089: resolve `t` to the class whose values reserve a vptr
@@ -6411,8 +6533,11 @@ public:
     // alias or module-qualified spelling to its class before stamping, so a
     // copy into a declared class value re-asserts the static vptr instead
     // of smuggling the pointee's dynamic vptr into the value.
-    void emitClassVptrStoreForType(TypeInfo t, IRValue objAddr, const std::string& defModule = "") {
-        emitClassVptrStore(virtualClassForType(t, defModule), objAddr);
+    // CIDER-BUG-133: `isVolatile` is the destination's volatile flag (the
+    // same flag the copy's MEMCPY carries), marking the re-stamp.
+    void emitClassVptrStoreForType(TypeInfo t, IRValue objAddr, const std::string& defModule = "",
+                                   bool isVolatile = false) {
+        emitClassVptrStore(virtualClassForType(t, defModule), objAddr, isVolatile);
     }
 
     // CIDER-BUG-087/089: true when an embedded class value under `t` needs
@@ -7326,7 +7451,10 @@ public:
         currentBlock_->addInstruction({IROp::ALLOCA, addr, {IRValue::Constant(totalSize, IRType::I32)}});
 
         // Store first element
-        emitListElementStore(addr, 0, firstVal, elemType, elemSize, elemIsAggregate);
+        // CIDER-BUG-133: mirror the declaration/assignment list paths — the
+        // element source's volatile flag marks an aggregate copy's read.
+        emitListElementStore(addr, 0, firstVal, elemType, elemSize, elemIsAggregate,
+                             false, lastExprType_.isVolatile);
 
         // Store remaining elements
         for (size_t i = 1; i < elements.size(); i++) {
@@ -7338,7 +7466,8 @@ public:
                 return;
             }
             emitListElementStore(addr, (int64_t)i * elemSize, lastValue_,
-                                 elemType, elemSize, elemIsAggregate);
+                                 elemType, elemSize, elemIsAggregate,
+                                 false, lastExprType_.isVolatile);
         }
 
         lastValue_ = addr;
