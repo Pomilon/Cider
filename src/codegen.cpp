@@ -251,6 +251,10 @@ bool CodeGenerator::generate(ModuleIR& module, const std::string& outputPath,
     std::vector<std::string> bssSection;
     std::vector<std::string> dataSection;
     std::vector<std::string> globalAsmSection;
+    // CIDER-BUG-142: top-level user `asm {}` blocks are file-scope code and
+    // data, kept apart from the compiler-generated global asm above so they
+    // can be emitted in .text rather than the .bss context.
+    std::vector<std::string> userAsmSection;
     std::vector<std::string> textSection;
     int strCount = 0;
     // CIDER-FEAT-006: per-object prefix for codegen-local data labels
@@ -438,6 +442,9 @@ bool CodeGenerator::generate(ModuleIR& module, const std::string& outputPath,
 
     for (const auto& c : module.getGlobalAsm()) {
         addGlobalAsm(c);
+    }
+    for (const auto& c : module.getUserAsm()) {
+        userAsmSection.push_back(c);
     }
 
     // Format an integer immediate for NASM (Issue #18): 32-bit values with
@@ -2645,6 +2652,13 @@ bool CodeGenerator::generate(ModuleIR& module, const std::string& outputPath,
     for (const auto& extVar : module.getExternVariables()) {
         out << "    extern " << extVar << "\n";
     }
+    // CIDER-BUG-142: file-scope user asm blocks go in .text, the section for
+    // code and labels at file scope. They used to sit in the .bss context
+    // above, which made initialized directives (`db`/`dq`, `align`) trigger
+    // NASM's "attempt to initialize memory in BSS section" warning and put
+    // instruction bytes in a NOBITS section. A block may still switch
+    // sections itself (e.g. `section .data` / `section .text`) for data.
+    for (const auto& line : userAsmSection) out << "    " << line << "\n";
     for (const auto& line : textSection) out << line << "\n";
     if (!debugSections.empty()) out << debugSections;
 

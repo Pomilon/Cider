@@ -208,6 +208,13 @@ public:
     void addGlobalAsm(const std::string& code) { globalAsm_.push_back(code); }
     const std::vector<std::string>& getGlobalAsm() const { return globalAsm_; }
 
+    // CIDER-BUG-142: top-level user `asm {}` blocks hold code, labels and
+    // data at file scope, so codegen emits them in .text. Compiler-generated
+    // global asm (exception globals, extern/global declarations) stays in
+    // globalAsm_ and is emitted in .bss, where its reserved cells belong.
+    void addUserAsm(const std::string& code) { userAsm_.push_back(code); }
+    const std::vector<std::string>& getUserAsm() const { return userAsm_; }
+
     void addStringData(const std::string& line) { stringData_.push_back(line); }
     const std::vector<std::string>& getStringData() const { return stringData_; }
 
@@ -261,6 +268,7 @@ public:
 private:
     std::vector<std::unique_ptr<FunctionIR>> functions_;
     std::vector<std::string> globalAsm_;
+    std::vector<std::string> userAsm_;
     std::vector<std::string> stringData_;
     std::vector<GlobalVar> globalVars_;
     std::map<std::string, std::vector<std::string>> vtables_;

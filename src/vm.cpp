@@ -733,7 +733,12 @@ void VM::materializeLabels() {
     // 8-byte cell per label so setjmp/longjmp code can address them.
     // "label: db ..." lines (raw data blocks) are materialized like string
     // data, with the label mapping to the bytes themselves.
-    for (const auto& code : module_->getGlobalAsm()) {
+    // CIDER-BUG-142: file-scope user asm blocks live in their own list
+    // (codegen emits them in .text); their data labels must resolve here
+    // exactly as before, so scan both lists.
+    std::vector<std::string> allGlobalAsm = module_->getGlobalAsm();
+    for (const auto& code : module_->getUserAsm()) allGlobalAsm.push_back(code);
+    for (const auto& code : allGlobalAsm) {
         std::istringstream gass(code);
         std::string line;
         while (std::getline(gass, line)) {

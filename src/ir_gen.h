@@ -5434,7 +5434,10 @@ public:
                 }
             }
         } else {
-            module_.addGlobalAsm(stmt.getCode());
+            // CIDER-BUG-142: file-scope asm is user code/labels/data; keep it
+            // in its own list so codegen can emit it in .text instead of the
+            // .bss context used for compiler-generated global asm.
+            module_.addUserAsm(stmt.getCode());
         }
     }
 
