@@ -175,6 +175,18 @@ public:
         return qualifiedTemplateInstantiations_;
     }
 
+    // CIDER-BUG-136: per-owner struct-template instantiation identities for
+    // separate compilation, keyed by (spelling context module, spelling) —
+    // see templateSpellingKey. The value is the canonical instantiation
+    // identity the spelling resolves to: `<owner>::Box<int>` for a template
+    // owned by a module, bare `Box<int>` for a main-file template. Recorded
+    // only in separate mode (whole-program keeps the legacy shared bare
+    // instantiation), so the checker and IR generator can re-root a bare
+    // spelling in the module that actually declares its template.
+    const std::map<std::string, std::string>& getTemplateInstanceIdentities() const {
+        return templateInstanceIdentities_;
+    }
+
     // CIDER-BUG-096: base names of the templates DECLARED in each module
     // ("" == main file), keyed by logical module name. A qualified template
     // spelling missing from the accepted map is only "unknown" when its
@@ -214,6 +226,18 @@ public:
         }
         return nullptr;
     }
+    // CIDER-BUG-136: logical module owning a live scope ("" == root/main).
+    // Used to recover the spelling context during the post-collection layout
+    // walk, when the module stack no longer holds it.
+    std::string logicalForScope(Scope* s) {
+        if (!s || s == symbolTable_.getRootScope()) return "";
+        for (const auto& [prog, mod] : programModules_) {
+            if (!prog) continue;
+            auto it = moduleScopes_.find(prog->getSourcePath());
+            if (it != moduleScopes_.end() && it->second == s) return mod;
+        }
+        return "";
+    }
     // CIDER-BUG-102: logical module ("" == main) recorded as a symbol's
     // definition site; the module being collected is the fallback for
     // symbols built outside the collector (unit tests) or unrecorded.
@@ -252,6 +276,10 @@ public:
     // site: the current module first, then the main file, then any
     // imported module (map order). The last leg preserves the legacy
     // first-wins on-demand use of a module's template from the main file.
+    // CIDER-BUG-136: in separate compilation a `from m import Box` in
+    // scope selects m's template before the map-order fallback, so the
+    // import statement disambiguates two modules exporting the same
+    // template name (whole-program keeps the legacy order).
     // {end, ""} when absent everywhere.
     std::pair<std::map<std::string, std::shared_ptr<TemplateSymbol>>::iterator, std::string> findTemplate(
         const std::string& baseName) {
@@ -262,6 +290,12 @@ public:
         }
         auto mainIt = templateTable_.find(baseName);
         if (mainIt != templateTable_.end()) return {mainIt, std::string()};
+        if (separateCompilation_) {
+            if (std::string imported = fromImportedTemplateOwner(baseName); !imported.empty()) {
+                auto it = templateTable_.find(templateKey(imported, baseName));
+                if (it != templateTable_.end()) return {it, imported};
+            }
+        }
         std::string suffix = "::" + baseName;
         for (auto it = templateTable_.begin(); it != templateTable_.end(); ++it) {
             const std::string& key = it->first;
@@ -270,6 +304,28 @@ public:
                 return {it, key.substr(0, key.size() - suffix.size())};
         }
         return {templateTable_.end(), std::string()};
+    }
+    // CIDER-BUG-136: module a `from m import Name` in scope bound for a
+    // template `Name` (see bindFromAliases). Walks the live scope chain to
+    // the root; "" when no such import is in scope.
+    std::string fromImportedTemplateOwner(const std::string& name) {
+        Scope* root = symbolTable_.getRootScope();
+        for (Scope* s = symbolTable_.getCurrentScope(); s; s = s->getParent()) {
+            auto it = fromAliasBindings_.find({s, name});
+            if (it != fromAliasBindings_.end()) return it->second;
+            if (s == root) break;
+        }
+        // The post-collection signature scan runs with module scopes unwound
+        // but the module stack pushed: consult the current module's own
+        // from-import bindings directly.
+        std::string cur = getCurrentModule();
+        if (!cur.empty()) {
+            if (Scope* ms = scopeForFieldTypeModule(cur)) {
+                auto it = fromAliasBindings_.find({ms, name});
+                if (it != fromAliasBindings_.end()) return it->second;
+            }
+        }
+        return "";
     }
     // CIDER-BUG-073: resolve a module qualifier as the use site sees it.
     // During collection the scope stack is authoritative; the whole-program
@@ -325,8 +381,18 @@ public:
     // Lets instantiation search the owner's template body first instead of
     // whatever import order finds first. Null when the owner has no live
     // AST here (callers fall back to the legacy program order).
+    // CIDER-BUG-136: in separate compilation the owner's AST may not be in
+    // `currentProgram_`'s imported list yet while its own body is being
+    // collected (imports register it after collection). The registry is
+    // consulted directly then, so a module instantiating its own same-named
+    // template never picks a previously imported module's body.
     AstProgram* astForTemplateOwner(const std::string& owner) {
         if (owner.empty() || !currentProgram_) return currentProgram_;
+        if (separateCompilation_) {
+            for (const auto& [prog, mod] : programModules_) {
+                if (prog && mod == owner) return const_cast<AstProgram*>(prog);
+            }
+        }
         for (auto& imported : currentProgram_->getImportedAsts()) {
             auto pmit = programModules_.find(imported.get());
             if (pmit != programModules_.end() && pmit->second == owner) return imported.get();
@@ -1303,19 +1369,58 @@ public:
     std::shared_ptr<Symbol> resolveNominalType(const std::string& name) {
         auto sym = symbolTable_.resolve(name);
         if (sym) return sym;
+        // CIDER-BUG-136: separate compilation gives a spelling a per-owner
+        // instantiation identity; re-root the lookup through it before the
+        // legacy paths. The context is the module whose SCOPE is current
+        // (scope switches in the layout/alias walks), falling back to the
+        // module stack (collection-time signature scans of imported ASTs
+        // run with the root scope current).
+        if (name.find('<') != std::string::npos && name.find("::") == std::string::npos) {
+            std::string ctx = logicalForScope(symbolTable_.getCurrentScope());
+            if (ctx.empty()) ctx = getCurrentModule();
+            auto ident = templateInstanceIdentities_.find(templateSpellingKey(ctx, name));
+            if (ident != templateInstanceIdentities_.end() && ident->second != name) {
+                auto resolved = resolveNominalType(ident->second);
+                if (resolved) return resolved;
+            }
+        }
         // CIDER-BUG-111: a qualified template instantiation spelling
-        // (`m.Box<int>`) names the shared root-scope instantiation the
-        // collector registered under the bare spelling. Layout and
+        // (`m.Box<int>`) names the instantiation registered under the bare
+        // spelling. In separate mode that is the OWNER's scope (CIDER-BUG-136);
+        // whole-program keeps the legacy root-scope lookup. Layout and
         // dependency walks resolve through here, so a field whose template
         // was collected later sizes against the real instantiation instead
         // of the 8-byte unknown default. Dots inside argument lists
         // (`Box<m.Thing>`) are not qualifiers. Mirrors ir_gen's lookup.
         auto lt = name.find('<');
         if (lt != std::string::npos) {
+            auto canonSep = name.find("::");
+            if (canonSep != std::string::npos && canonSep < lt) {
+                // CIDER-BUG-136 canonical identity (`a::Box<int>`): the bare
+                // part lives in the owner module's scope.
+                std::string logical = name.substr(0, canonSep);
+                std::string bare = name.substr(canonSep + 2);
+                for (auto& [path, scope] : moduleScopes_) {
+                    if (!scope || logicalForScope(scope) != logical) continue;
+                    auto member = scope->resolveLocal(bare);
+                    if (member && (member->kind == SymbolKind::STRUCT || member->kind == SymbolKind::CLASS))
+                        return member;
+                    return nullptr;
+                }
+                return nullptr;
+            }
             auto dot = name.rfind('.', lt);
             if (dot == std::string::npos || dot == 0 || dot + 1 >= name.size()) return nullptr;
             auto modSym = symbolTable_.resolve(name.substr(0, dot));
             if (!modSym || modSym->kind != SymbolKind::MODULE) return nullptr;
+            // Owner module scope first (per-owner instantiation, separate
+            // compilation), then root (legacy shared instantiation).
+            auto ms = std::static_pointer_cast<ModuleSymbol>(modSym)->scope;
+            if (ms) {
+                auto owned = ms->resolveLocal(name.substr(dot + 1));
+                if (owned && (owned->kind == SymbolKind::STRUCT || owned->kind == SymbolKind::CLASS))
+                    return owned;
+            }
             Scope* root = symbolTable_.getRootScope();
             if (!root) return nullptr;
             auto inst = root->resolveLocal(name.substr(dot + 1));
@@ -2087,6 +2192,13 @@ public:
                                             stmt.getModuleName() + "'",
                                         stmt.getLine(), stmt.getColumn());
                     }
+                    // CIDER-BUG-136: separate compilation remembers which
+                    // module's template this from-import selects, so a bare
+                    // `Name<...>` spelling in this scope resolves to that
+                    // owner instead of map order.
+                    if (separateCompilation_) {
+                        fromAliasBindings_[{importingScope, name}] = stmt.getModuleName();
+                    }
                     continue;
                 }
                 reporter_.error("module '" + stmt.getModuleName() + "' has no symbol '" + name + "'",
@@ -2204,6 +2316,11 @@ public:
             symbolTable_.enterModuleScope();
             modScope = symbolTable_.getCurrentScope();
             moduleScopes_[result.path] = modScope;
+            // CIDER-BUG-136: register the logical module BEFORE collecting
+            // its body, so a template instantiation inside the module can
+            // find the module's own template body (astForTemplateOwner)
+            // rather than a previously imported module's same-named one.
+            programModules_[importedAst.get()] = moduleName;
             moduleStack_.push_back(moduleName);
             // CIDER-FEAT-006: template instantiations created while this
             // module is being collected belong to this module's object.
@@ -2214,7 +2331,6 @@ public:
             moduleStack_.pop_back();
             symbolTable_.exitScope();
             if (currentProgram_) {
-                programModules_[importedAst.get()] = moduleName;
                 currentProgram_->addImportedAst(std::move(importedAst));
             }
         }
@@ -2494,11 +2610,12 @@ public:
         std::string instName = baseName + typeName.substr(pos);
         // CID-020/021 (spec §6): prefer the use-site module's template so
         // same-named struct templates resolve to a consistent
-        // entry/body pair. The instantiation below stays shared in the
-        // root scope (first wins): nominal identity still conflates
-        // `Box<int>` across modules (T3 advisory, T7 follow-up), so
-        // per-module struct symbols would only trade a loud error for a
-        // silent layout mix-up.
+        // entry/body pair. CIDER-BUG-136: in separate compilation the
+        // instantiation is owned by the template's module and keeps that
+        // owner as its identity (`a::Box<int>` vs `b::Box<int>`), so two
+        // modules instantiating their own same-named template cannot
+        // conflate layouts or link labels. Whole-program builds keep the
+        // legacy shared root-scope instantiation (first wins).
         auto found = qualifier.empty() ? findTemplate(baseName)
                                        : findQualifiedTemplate(qualifier, baseName);
         if (found.first == templateTable_.end()) return;
@@ -2520,8 +2637,8 @@ public:
         // CIDER-BUG-066: the type hook runs from every annotation position,
         // so the same spelling reaches here repeatedly. A spelling that
         // already failed its argument check must report once, not once per
-        // use. Successful instantiations redefine nothing (the root-scope
-        // guard at the end), but their fields are re-walked: a nested
+        // use. Successful instantiations redefine nothing (the scope guard
+        // at the end), but their fields are re-walked: a nested
         // instantiation can have been skipped when an enclosing spelling
         // was first mentioned before the nested template was collected
         // (declaration/import ordering), and a later mention must still
@@ -2563,11 +2680,25 @@ public:
             return;
         }
 
+        // CIDER-BUG-136: the identity a use of this spelling resolves to.
+        // Separate mode: the template owner's canonical name (bare for the
+        // main file). The spelling->identity mapping is keyed by the
+        // spelling's context module, so a bare `Box<int>` written in two
+        // modules keeps two distinct owners. Recorded for every mention
+        // (not just the creating one, and before the recursion guard), since
+        // an inner reference to an in-progress instantiation still needs the
+        // mapping.
+        const std::string owner = found.second;
+        const std::string identity =
+            separateCompilation_ ? canonicalTypeName(instName, owner) : instName;
+        if (separateCompilation_) {
+            templateInstanceIdentities_[templateSpellingKey(getCurrentModule(), typeName)] = identity;
+        }
         // CIDER-BUG-073: record the accepted qualified spelling so the
-        // checker and IR generator resolve it to this shared instantiation.
-        // Recorded before the recursion guard: an inner reference to an
-        // in-progress instantiation still needs the mapping.
-        if (!qualifier.empty()) qualifiedTemplateInstantiations_[typeName] = instName;
+        // checker and IR generator resolve it to this instantiation.
+        if (!qualifier.empty()) {
+            qualifiedTemplateInstantiations_[typeName] = separateCompilation_ ? identity : instName;
+        }
 
         auto structSym = std::make_shared<StructSymbol>();
         structSym->kind = SymbolKind::STRUCT;
@@ -2579,8 +2710,16 @@ public:
         // instantiation under construction (`next: *L<T>`) or a cycle of
         // them. The outer call defines the symbol; the inner call just
         // returns (the field type resolves once collection finishes).
-        if (!structTemplateActive_.insert(instName).second) return;
+        if (!structTemplateActive_.insert(identity).second) return;
 
+        // CIDER-BUG-136: the field spellings come from the template body, so
+        // nested instantiations must resolve in the template's OWN module
+        // (mirrors the `f.typeModule` attribution below). Whole-program
+        // collection leaves the use-site context in place, keeping the
+        // legacy shared instantiation.
+        const bool pushedOwner =
+            separateCompilation_ && !owner.empty() && getCurrentModule() != owner;
+        if (pushedOwner) moduleStack_.push_back(owner);
         for (auto& field : tmplStruct->getFields()) {
             StructSymbol::Field f;
             f.name = field.name;
@@ -2604,17 +2743,31 @@ public:
             f.bits = field.bits;
             structSym->fields.push_back(f);
         }
+        if (pushedOwner) moduleStack_.pop_back();
         layoutSequential(*structSym);
 
-        if (!globalScope->resolveLocal(instName)) {
-            globalScope->define(structSym);
+        // CIDER-BUG-136: separate mode homes the instantiation in its
+        // owner's module scope (root for the main file), so a bare lookup
+        // from another module can never silently land on a same-named
+        // template owned by someone else. Whole-program keeps the legacy
+        // root-scope home (first wins).
+        Scope* instScope = globalScope;
+        if (separateCompilation_ && !owner.empty()) {
+            if (Scope* ownerScope = scopeForFieldTypeModule(owner)) instScope = ownerScope;
+        }
+        if (!instScope->resolveLocal(instName)) {
+            instScope->define(structSym);
             structClassNames_.push_back(instName);
             // CIDER-BUG-105: forward-declared field types of an
             // instantiation are re-resolved by the post-collection pass,
             // like any other aggregate.
             addAggregateLayout(structSym, symbolTable_.getCurrentScope());
         }
-        structTemplateActive_.erase(instName);
+        // CIDER-BUG-136: per-owner provenance (CIDER-BUG-107's rule for
+        // function clones) so ir_gen's nominal and layout lookups attribute
+        // the instantiation to the template's module, not the use site's.
+        if (separateCompilation_) symbolModules_.emplace(structSym->id, owner);
+        structTemplateActive_.erase(identity);
     }
 
     void visitStmtForTemplateCalls(Statement* stmt) {
@@ -3635,6 +3788,11 @@ private:
     // CIDER-BUG-073: accepted qualified template spellings (`m.Box<int>`)
     // -> the shared bare instantiation spelling (`Box<int>`).
     std::map<std::string, std::string> qualifiedTemplateInstantiations_;
+    // CIDER-BUG-136: (spelling context module, spelling) -> per-owner
+    // canonical instantiation identity in separate compilation (see
+    // templateSpellingKey / getTemplateInstanceIdentities). Empty in
+    // whole-program mode, so the legacy shared identity is untouched.
+    std::map<std::string, std::string> templateInstanceIdentities_;
     // Spellings whose cross-module qualified use was rejected for a missing
     // export, so the diagnostic is emitted once per spelling.
     std::set<std::string> qualifiedExportErrors_;

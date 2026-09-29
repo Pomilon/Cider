@@ -68,4 +68,13 @@ inline std::string canonicalTypeName(const std::string& name, const std::string&
     return currentModule + "::" + name;
 }
 
+// CIDER-BUG-136: key for the per-owner template-instantiation spelling map:
+// the spelling exactly as written in `context` ("" == main file). Main-file
+// spellings keep the raw key, so the legacy (whole-program) map lookups
+// behave identically; a module context prefixes its full logical path, so
+// the same bare spelling used by two modules keys two distinct identities.
+inline std::string templateSpellingKey(const std::string& context, const std::string& spelling) {
+    return context.empty() ? spelling : context + "::" + spelling;
+}
+
 }  // namespace cider

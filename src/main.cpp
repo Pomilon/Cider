@@ -291,6 +291,7 @@ int main(int argc, char** argv) {
         checker.setAmbiguousModules(collector.getAmbiguousModules());
         checker.setSymbolModules(collector.getSymbolModules());
         checker.setQualifiedTemplateInstantiations(collector.getQualifiedTemplateInstantiations());
+        checker.setTemplateInstanceIdentities(collector.getTemplateInstanceIdentities());
         checker.setLocalAggregates(collector.getLocalAggregates());
         checker.setModuleTemplateNames(collector.getModuleTemplateNames());
         // CID-005: the uefi target types unmarked functions MS-ABI and
@@ -335,6 +336,7 @@ int main(int argc, char** argv) {
             gen.setProgramModules(collector.getProgramModules());
             gen.setSymbolModules(collector.getSymbolModules());
             gen.setQualifiedTemplateInstantiations(collector.getQualifiedTemplateInstantiations());
+            gen.setTemplateInstanceIdentities(collector.getTemplateInstanceIdentities());
             gen.setLocalAggregates(collector.getLocalAggregates());
             gen.setDefaultAbiMs(defaultAbiMs);
             gen.setReporter(&rep);
@@ -375,6 +377,7 @@ int main(int argc, char** argv) {
             gen.setProgramModules(collector.getProgramModules());
             gen.setSymbolModules(collector.getSymbolModules());
             gen.setQualifiedTemplateInstantiations(collector.getQualifiedTemplateInstantiations());
+            gen.setTemplateInstanceIdentities(collector.getTemplateInstanceIdentities());
             gen.setLocalAggregates(collector.getLocalAggregates());
             gen.setDefaultAbiMs(defaultAbiMs);
             gen.setReporter(&rep);
@@ -404,6 +407,7 @@ int main(int argc, char** argv) {
         gen.setProgramModules(collector.getProgramModules());
         gen.setSymbolModules(collector.getSymbolModules());
         gen.setQualifiedTemplateInstantiations(collector.getQualifiedTemplateInstantiations());
+        gen.setTemplateInstanceIdentities(collector.getTemplateInstanceIdentities());
         gen.setLocalAggregates(collector.getLocalAggregates());
         gen.setDefaultAbiMs(defaultAbiMs);
         gen.setReporter(&rep);

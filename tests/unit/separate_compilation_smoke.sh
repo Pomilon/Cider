@@ -18,6 +18,14 @@
 #     the module-mangled clone (not a bare shared name), two such modules
 #     link to distinct weak definitions, and the linked program runs each
 #     module's own body (CIDER-BUG-107);
+#   * same-named STRUCT templates exported by two modules keep per-owner
+#     instantiations in separate mode: each module object lays out its own
+#     fields/size, the entry object resolves each qualified spelling to its
+#     owner (`a.SBox<int>` 8 bytes vs `b.SBox<int>` 12, field only one
+#     declares), a `from`-import selects the owner for the bare spelling,
+#     a struct embedding another module's instantiation keeps its layout,
+#     and the linked program uses each module's own layout (CIDER-BUG-136;
+#     whole-program conflation may remain, T3/T7);
 #   * a library object's class/struct globals run their field initializers
 #     (and vptr) before user code (CIDER-BUG-106), on the linked and the
 #     whole-program VM paths;
@@ -396,6 +404,132 @@ FINI_ORDER=$(grep -o "mod_d[abc]___ucider_uglobal_ufini" fini/build/main.asm | a
     || fail "main.asm calls the shared dependency's fini more than once"
 grep -q "call mod_db__.*ufini" fini/build/da.asm \
     && fail "da.asm chains its importer's fini"
+
+# --- CIDER-BUG-136: same-named struct templates across modules ------------
+# Two modules export a same-named struct template with different field
+# layouts, and each instantiates its own. In separate compilation the
+# instantiations must keep per-owner identities (`sboxa::SBox<int>` vs
+# `sboxb::SBox<int>`), so the entry object resolves each qualified spelling
+# to its own owner: `sizeof` differs (8 vs 12), field `y` exists only in
+# sboxb's template, and each module object allocates its own layout. Under
+# the old shared root-scope `SBox<int>` the entry object resolved both to
+# whichever template was collected first (rejecting `y` when sboxa won,
+# mis-sizing when sboxb won). Whole-program builds keep the documented
+# T3/T7 conflation, so only the separate objects are exercised here.
+mkdir -p sbox/modules sbox/cache sbox/build
+cat > sbox/modules/sboxa.cid <<'CID'
+export struct SBox<T> {
+  var v: T;
+  var x: int;
+}
+
+export func makeSBoxA(n: int) -> *SBox<int> {
+  var b: *SBox<int> = new SBox<int>;
+  b->v = n;
+  b->x = 10;
+  return b;
+}
+
+export func sumSBoxA(b: *SBox<int>) -> int { return b->v + b->x; }
+CID
+cat > sbox/modules/sboxb.cid <<'CID'
+export struct SBox<T> {
+  var v: T;
+  var x: int;
+  var y: int;
+}
+
+export func makeSBoxB(n: int) -> *SBox<int> {
+  var b: *SBox<int> = new SBox<int>;
+  b->v = n;
+  b->x = 20;
+  b->y = 30;
+  return b;
+}
+
+export func sumSBoxB(b: *SBox<int>) -> int { return b->v + b->x + b->y; }
+CID
+cat > sbox/modules/holder.cid <<'CID'
+import sboxb;
+
+export struct Holder {
+  var b: sboxb.SBox<int>;
+}
+
+export func readHolder(h: *Holder) -> int { return h->b.v + h->b.x + h->b.y; }
+CID
+cat > sbox/main.cid <<'CID'
+import sboxa;
+import sboxb;
+import holder;
+from sboxa import SBox;
+from std.io import printInt, print;
+
+func main() -> int {
+  printInt(sizeof(sboxa.SBox<int>)); print(",");  // 8
+  printInt(sizeof(sboxb.SBox<int>)); print(",");  // 12
+  var a: *sboxa.SBox<int> = sboxa.makeSBoxA(1);
+  printInt(sboxa.sumSBoxA(a)); print(",");        // 11
+  var b: *sboxb.SBox<int> = sboxb.makeSBoxB(2);
+  printInt(sboxb.sumSBoxB(b)); print(",");        // 52
+  b->y = 100;
+  printInt(sboxb.sumSBoxB(b)); print(",");        // 122
+  // The from-import selects sboxa's template for the bare spelling.
+  var z: *SBox<int> = sboxa.makeSBoxA(3);
+  printInt(z->v + z->x); print(",");              // 13
+  printInt(sizeof(SBox<int>)); print(",");        // 8
+  // A struct embedding sboxb's instantiation keeps its 12-byte layout.
+  var h: holder.Holder;
+  h.b.v = 1;
+  h.b.x = 2;
+  h.b.y = 3;
+  printInt(holder.readHolder(&h)); print(",");    // 6
+  printInt(sizeof(holder.Holder)); print("\n");   // 12
+  return 0;
+}
+CID
+SBOX_EXPECTED=$'8,12,11,52,122,13,8,6,12'
+
+"$BIN" compile --cache sbox/cache --emit-meta "$IO_SRC" -o sbox/build/io.asm
+"$BIN" compile --cache sbox/cache --emit-meta sbox/modules/sboxa.cid -o sbox/build/sboxa.asm
+"$BIN" compile --cache sbox/cache --emit-meta sbox/modules/sboxb.cid -o sbox/build/sboxb.asm
+"$BIN" compile --cache sbox/cache --emit-meta sbox/modules/holder.cid -o sbox/build/holder.asm
+"$BIN" compile --cache sbox/cache sbox/main.cid -o sbox/build/main.asm
+for m in io sboxa sboxb holder main; do
+    nasm -O0 -f elf64 "sbox/build/$m.asm" -o "sbox/build/$m.o"
+done
+gcc sbox/build/main.o sbox/build/sboxa.o sbox/build/sboxb.o sbox/build/holder.o \
+    sbox/build/io.o -o sbox/build/sep -no-pie
+set +e
+SBOX_OUT=$(sbox/build/sep 2>&1)
+SBOX_RC=$?
+set -e
+[ "$SBOX_RC" -eq 0 ] || fail "struct-template separate exit $SBOX_RC"
+[ "$SBOX_OUT" = "$SBOX_EXPECTED" ] || fail "struct-template separate output [$SBOX_OUT]"
+# Each module's own object uses its own layout; the entry object picks up
+# sboxb's 12-byte layout (the allocation constants) and calls each module's
+# mangled factory.
+grep -q "push 8" sbox/build/sboxa.asm || fail "sboxa.asm does not use its 8-byte layout"
+grep -q "push 12" sbox/build/sboxb.asm || fail "sboxb.asm does not use its 12-byte layout"
+grep -q "push 12" sbox/build/main.asm || fail "main.asm does not use sboxb's 12-byte layout"
+grep -q "call mod_sboxa__makeSBoxA" sbox/build/main.asm \
+    || fail "main.asm does not call sboxa's mangled factory"
+grep -q "call mod_sboxb__makeSBoxB" sbox/build/main.asm \
+    || fail "main.asm does not call sboxb's mangled factory"
+# Corrupt-cache fallback: recompiling the entry against sboxb's SOURCE (its
+# snapshot is rejected) must still resolve sboxb's owner identity and link
+# with the already-built objects.
+printf 'this is not a .cider-meta file\n' > sbox/cache/sboxb.cider-meta
+"$BIN" compile --cache sbox/cache sbox/main.cid -o sbox/build/main.src.asm
+nasm -O0 -f elf64 sbox/build/main.src.asm -o sbox/build/main.src.o
+gcc sbox/build/main.src.o sbox/build/sboxa.o sbox/build/sboxb.o sbox/build/holder.o \
+    sbox/build/io.o -o sbox/build/sep_src -no-pie
+set +e
+SBOX_SRC_OUT=$(sbox/build/sep_src 2>&1)
+SBOX_SRC_RC=$?
+set -e
+[ "$SBOX_SRC_RC" -eq 0 ] || fail "struct-template source-fallback exit $SBOX_SRC_RC"
+[ "$SBOX_SRC_OUT" = "$SBOX_EXPECTED" ] || fail "struct-template source-fallback output [$SBOX_SRC_OUT]"
 
 # --- CLI guards -----------------------------------------------------------
 set +e
