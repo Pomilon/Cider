@@ -1,0 +1,170 @@
+// CIDER-BUG-158: several calls whose callees use the hidden-sret convention
+// (by-value aggregate returns and parameters) inside one caller expression.
+//
+// The ticket was filed as "four sret-returning calls in one expression
+// segfault the VM and native" from the probe expression below. That half is
+// a false positive from reading the shell's `$?`: 4*1000 + 7*100 + 4*10 + 7
+// = 4747, and the kernel truncates a process exit status to its low byte
+// (4747 & 0xFF = 139 = the usual shell spelling of SIGSEGV). `strace` shows
+// `exit_group(4747)` on both the VM and the native binary; nothing crashes
+// and all three backends agree. The probe shape is pinned here anyway, with
+// the values printed so an exit-status artifact cannot be mistaken for a
+// crash again.
+//
+// Reducing the sret interaction did uncover a real miscompilation, covered
+// below: the ELEMENT read of a by-value array return. visit(CallExpr) marks
+// every non-interface sret result `isUserDefined` so member access keeps its
+// callee-module-rooted spelling. A flat fixed array's TypeInfo mirrors its
+// element's name, so the indexing strip copied that marker onto the scalar
+// element: `var r: int = f()[1]` classified the loaded int as an aggregate
+// presented by address and lowered to `memcpy` FROM the value as if it were
+// a pointer (native SIGSEGV, VM read garbage from that address). Element
+// extraction now re-derives the marker from the element's own nominal shape
+// (elementTypeOf), so scalars store by value and struct elements stay
+// address-like.
+//
+// All three backends (VM --no-opt, optimized VM, native) must agree.
+from std.io import print, printInt;
+
+// --- the original probe: module-scope class, sret return + by-value param --
+
+class K2 {
+    var v: int = 3;
+    func clone() -> K2 { var c: K2; c.v = this.v + 1; return c; }
+    func add(o: K2) -> int { return this.v + o.v; }
+    func get() -> int { return this.v; }
+}
+
+func modRet() -> int { var k: K2; var c: K2 = k.clone(); return c.get(); }  // 4
+func modParam() -> int { var k: K2; var c: K2; c.v = 4; return k.add(c); }  // 7
+
+// --- function-local class: same shape under local mangling (BUG-119) ------
+
+func locRet() -> int {
+    class K { var v: int = 3; func clone() -> K { var c: K; c.v = this.v + 1; return c; } func get() -> int { return this.v; } }
+    var k: K;
+    var c: K = k.clone();
+    return c.get();
+}   // 4
+
+func locParam() -> int {
+    class K { var v: int = 3; func add(o: K) -> int { return this.v + o.v; } }
+    var k: K;
+    var c: K;
+    c.v = 4;
+    return k.add(c);
+}   // 7
+
+// --- struct: sret return + by-value parameter + field read ----------------
+
+struct P {
+    var a: int;
+    var b: int;
+}
+
+func mkp(n: int) -> P {
+    var p: P;
+    p.a = n;
+    p.b = n * 10;
+    return p;
+}
+
+func takep(p: P) -> int { return p.a + p.b; }
+
+// --- the real fix: element reads of by-value array returns ----------------
+
+func mkarr(n: int) -> [int; 3] {
+    var a: [int; 3];
+    a[0] = n;
+    a[1] = n + 10;
+    a[2] = n + 20;
+    return a;
+}
+
+class MA {
+    var pad: int;
+    func arr(n: int) -> [int; 3] { return mkarr(n); }
+}
+
+// An 8-byte struct is exactly one word, so the element marker alone decides
+// aggregate vs scalar store for `p1 = mkpt(8)[1]` below.
+struct Pt {
+    var x: int;
+    var y: int;
+}
+
+func mkpt(n: int) -> [Pt; 2] {
+    var a: [Pt; 2];
+    a[0].x = n;
+    a[0].y = n + 1;
+    a[1].x = n + 2;
+    a[1].y = n + 3;
+    return a;
+}
+
+func main() -> int {
+    // 1. The exact CIDER-BUG-158 probe expression.
+    var r: int = modRet() * 1000 + modParam() * 100 + modRet() * 10 + modParam();
+    printInt(r);                    // 4747, not a signal
+    print("\n");
+    if (r != 4747) { return 1; }
+
+    // 2. The same four-call shape with function-local classes.
+    var l: int = locRet() * 1000 + locParam() * 100 + locRet() * 10 + locParam();
+    printInt(l);
+    print("\n");
+    if (l != 4747) { return 2; }
+
+    // 3. Mixed local/module callees, terms reordered: 7000 + 400 + 70 + 4.
+    var mix: int = modParam() * 1000 + modRet() * 100 + locParam() * 10 + locRet();
+    printInt(mix);
+    print("\n");
+    if (mix != 7474) { return 3; }
+
+    // 4. Struct-returning calls in one expression, mixing arithmetic with a
+    //    by-value parameter and a field read: 11*100 + 22*10 + 33 + 4.
+    var s: int = takep(mkp(1)) * 100 + takep(mkp(2)) * 10 + takep(mkp(3)) + mkp(4).a;
+    printInt(s);
+    print("\n");
+    if (s != 1357) { return 4; }
+
+    // 5. Nested sret calls: takep(mkp(11)) + takep(mkp(22)) = 121 + 242.
+    var n: int = takep(mkp(takep(mkp(1)))) + takep(mkp(takep(mkp(2))));
+    printInt(n);
+    print("\n");
+    if (n != 363) { return 5; }
+
+    // 6. Scalar element reads of sret array returns: declaration,
+    //    assignment into an existing local, and arithmetic over two calls.
+    var e1: int = mkarr(1)[1];                  // 11
+    if (e1 != 11) { return 6; }
+    var e2: int;
+    e2 = mkarr(2)[2];                           // 22
+    if (e2 != 22) { return 7; }
+    var e3: int = mkarr(3)[0] + mkarr(4)[2];    // 3 + 24
+    printInt(e3);
+    print("\n");
+    if (e3 != 27) { return 8; }
+
+    // 7. The whole array still copies by value, and a method's array return
+    //    indexes like a function's.
+    var w: [int; 3] = mkarr(5);
+    if (w[1] != 15) { return 9; }
+    var ma: MA;
+    var e4: int = ma.arr(6)[1];                 // 16
+    if (e4 != 16) { return 10; }
+
+    // 8. Small struct elements stay address-like: `= mkpt(7)[0]` copies and
+    //    `p1 = mkpt(8)[1]` is an aggregate assignment, not a scalar store of
+    //    the element address.
+    var p0: Pt = mkpt(7)[0];
+    var p1: Pt;
+    p1 = mkpt(8)[1];
+    if (p0.x != 7 || p0.y != 8) { return 11; }
+    if (p1.x != 10 || p1.y != 11) { return 12; }
+    printInt(p0.x + p0.y + p1.x + p1.y);        // 36
+    print("\n");
+
+    print("sret_expr_calls_ok\n");
+    return 0;
+}

@@ -482,6 +482,37 @@ public:
         return sym;
     }
 
+    // CIDER-BUG-158: element type of an array/pointer/string base, with the
+    // `isUserDefined` marker re-derived from the ELEMENT's own nominal shape.
+    // A flat fixed array's TypeInfo mirrors its element's name, so producers
+    // that mark the ARRAY wrapper user-defined — an identifier read of
+    // `[S; N]` (resolveStructOrClassSymbol sees the mirrored `S`) and every
+    // by-value aggregate call result (visit(CallExpr) keeps the
+    // callee-module-rooted spelling) — used to survive `elementType()`. A
+    // scalar element then looked like an address-presented aggregate:
+    // `var r: int = f()[1]` (f returns `[int; N]` through the hidden sret
+    // slot) lowered to a MEMCPY from the loaded element value instead of a
+    // STORE, which faulted natively and read the wrong heap address in the
+    // VM. Deriving the marker by the same rule identifier/member reads use
+    // keeps struct elements address-like and scalars plain.
+    TypeInfo elementTypeOf(TypeInfo base) {
+        if (base.isArray) {
+            base = base.elementType();
+        } else if (base.pointerLevel > 0) {
+            base.pointerLevel--;
+        } else if (base.name == "string") {
+            base.name = "char";
+        }
+        base = resolveTypeAlias(base);
+        if (base.pointerLevel == 0 && !base.isArray && !base.isInterface &&
+            !base.isFunctionPointer) {
+            base.isUserDefined = resolveStructOrClassSymbol(base) != nullptr;
+        } else {
+            base.isUserDefined = false;
+        }
+        return base;
+    }
+
     // CID-006 (Task 2 F1 carry-over): the ir_gen half of the checker's
     // resolveFunctionPointerAlias gate. Returns the resolved fn(...)
     // signature when the spelling aliases one, else the original TypeInfo
@@ -4502,17 +4533,10 @@ public:
             // empty type, so the store path "widened" the char value to
             // a pointer width and emitted mov qword over the neighbors.
             // CIDER-BUG-052: elementType() keeps the inner dimension of a
-            // nested fixed array.
-            TypeInfo baseType = inferExprType(idx->getObject());
-            if (baseType.isArray) {
-                baseType = baseType.elementType();
-            } else if (baseType.pointerLevel > 0) {
-                baseType.pointerLevel--;
-            } else if (baseType.name == "string") {
-                baseType.name = "char";
-            }
-            // CIDER-BUG-052: an element alias resolves to its real shape.
-            return resolveTypeAlias(baseType);
+            // nested fixed array. CIDER-BUG-158: the shared strip resolves
+            // an element alias to its real shape and re-derives
+            // `isUserDefined` from the element itself.
+            return elementTypeOf(inferExprType(idx->getObject()));
         } else if (auto un = dynamic_cast<UnaryExpr*>(expr)) {
             if (un->getOperator() == "*") {
                 TypeInfo t = inferExprType(un->getOperand());
@@ -8275,18 +8299,14 @@ public:
         if (isFixedArrayValue(baseType)) {
             emitBoundsCheck(idx, baseType.arraySize);
         }
-        TypeInfo elemType = baseType;
-        if (elemType.isArray) {
-            // CIDER-BUG-052: elementType() keeps the inner dimension of a
-            // nested fixed array (its size is the indexing stride) and
-            // yields the flat element for a single-dimension array.
-            elemType = elemType.elementType();
-        } else if (elemType.pointerLevel > 0) {
-            elemType.pointerLevel--;
-        } else if (elemType.name == "string") {
-            elemType.name = "char";
-        }
-        elemType = resolveTypeAlias(elemType);
+        // CIDER-BUG-158: the shared strip re-derives the element's
+        // user-defined marker from its own shape (see elementTypeOf), so a
+        // stale flag on the array wrapper cannot turn a scalar element into
+        // an address-presented aggregate. CIDER-BUG-052: elementType() keeps
+        // the inner dimension of a nested fixed array (its size is the
+        // indexing stride) and yields the flat element for a
+        // single-dimension array.
+        TypeInfo elemType = elementTypeOf(baseType);
         // CIDER-BUG-069: an element of an interface-typed array/pointer is
         // the same 16-byte fat pointer as an interface variable.
         elemType = resolveInterfaceNominal(elemType);
