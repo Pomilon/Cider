@@ -2089,10 +2089,20 @@ public:
                 return;
             }
 
-            // Legacy heap path for struct values returned from non-sret
-            // contexts (should not occur for declared struct returns, which
-            // are always sret; kept for robustness). The struct test resolves
+            // Legacy heap path for by-value aggregates returned from non-sret
+            // contexts (virtual/override definitions, which VIRTUAL_CALL
+            // dispatches without a hidden slot). The struct test resolves
             // alias chains, so a scalar alias is not copied as a struct.
+            // CIDER-BUG-203: this gate must be the SAME predicate the caller
+            // uses to claim ownership of the result (visit(CallExpr) pairs it
+            // with `registerTempDestructors(..., ownsHeapCopy=true)`), namely
+            // `isByValueAggregate` — not the narrower `isStructValueType`,
+            // which rejects arrays. With the old struct-only gate a virtual
+            // method returning a fixed array skipped the copy entirely and
+            // returned the address of its own dead frame alloca; the caller
+            // then memcpy'd the elements out of that dangling pointer and
+            // `free`d it (CIDER-BUG-156's release), so the value was garbage
+            // and the free aborted the heap on every backend.
             // CIDER-BUG-156: this copy is an internal caller/callee ABI, so
             // it uses the FIXED runtime malloc/free pair (the bare names are
             // the VM builtins / libc, or an unmangled main-file definition),
@@ -2102,7 +2112,7 @@ public:
             // free would crash (the imported allocator's blocks are not
             // libc's). The caller-side release in registerTempDestructors
             // uses the matching bare `free`.
-            if (retType.pointerLevel == 0 && isStructValueType(retType)) {
+            if (isByValueAggregate(retType)) {
                 int structSize = getTypeSize(retType);
                 IRValue localPtr = IRValue::Register(nextTemp(), IRType::PTR);
                 currentBlock_->addInstruction({IROp::CALL, localPtr, {IRValue::Label("malloc"), IRValue::Constant(structSize, IRType::I32)}});
