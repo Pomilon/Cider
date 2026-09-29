@@ -1,0 +1,5 @@
+Function cast cannot produce the closure spelling. Expected func(int) -> int, got a value of type *u8 whose fn representation is not known to be a closure object
+Function cast cannot produce the closure spelling. Expected func(int) -> int, got a value of type int whose fn representation is not known to be a closure object
+Function cast cannot produce the closure spelling. Expected func(int) -> int, got a plain fn(...) value
+Function cast cannot produce the closure spelling. Expected func(int) -> int, got a *void value whose fn representation is not known to be a closure object
+A closure value may be stored into field 'cb'
