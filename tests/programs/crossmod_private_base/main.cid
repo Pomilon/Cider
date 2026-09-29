@@ -18,6 +18,10 @@
 //     (48; resolving `Inner` in this module would size it 44)
 //   - value copies of the derived class carry the inherited prefix
 //   - the embedded private type's destructor runs at scope exit
+//   - CIDER-BUG-137: by-value returns and by-value parameters are owned
+//     copies: the returned `Inner` temporary finalizes at the caller's
+//     scope exit and `setInner`'s parameter copy at callee exit, adding
+//     four `i`s to this trace (one at setInner's exit, three at main's)
 import privbase;
 from privbase import Base;
 from std.io import print, printInt;
@@ -46,7 +50,16 @@ func main() -> int {
   printInt(d->extra); print(",");         // 2
   printInt(d->tail); print(",");          // 6
   printInt(d->baseInner()); print(",");   // 20 inherited method
+  // CIDER-BUG-137: `getInner` returns `Inner` BY VALUE, so each call
+  // materialises a caller-owned temporary (the hidden sret slot). Its
+  // finalizer runs at the exit of the enclosing scope — main here — so the
+  // three calls below each add one `i` to the end of the trace, after the
+  // two value-locals' embedded `Inner`s (they are declared later and the
+  // scope unwinds LIFO): `ii` + `iii` = `iiiii`.
   printInt(d->getInner().v); print(",");  // 20 method returning private type
+  // `setInner(x: Inner)` takes its parameter by value: the callee owns the
+  // copied parameter and finalizes it at callee exit, before the next user
+  // statement ("i" right before the next 20).
   d->setInner(d->getInner());             // private-typed parameter
   printInt(d->getInner().v); print(",");  // 20
   printInt(d->who()); print(",");         // 101 override calling super

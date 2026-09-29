@@ -1,6 +1,7 @@
 #pragma once
 
 #include <cstdio>
+#include <functional>
 #include <map>
 #include <memory>
 #include <optional>
@@ -204,6 +205,12 @@ public:
         // module-scope aggregates from a synthesized startup function (the
         // entry calls it). No-op unless such a global exists.
         emitGlobalFieldInitializers(program);
+
+        // CIDER-BUG-137: run global destructors at program exit from a
+        // synthesized fini function (every entry return calls it). Mirrors
+        // the startup pass; no-op unless a global has embedded class
+        // destructors.
+        emitGlobalFieldFinalizers(program);
 
         return std::move(module_);
     }
@@ -1303,6 +1310,17 @@ public:
             variableValues_[param.first] = addr;
             variableValues_[paramRegName] = addr;  // Support both for lookup convenience
             paramNames_.insert(param.first);
+            // CIDER-BUG-137: a by-value aggregate parameter is the callee's
+            // OWN copy — callers pass their source address and the prologue
+            // memcpys it into this slot. It therefore finalizes exactly like
+            // a declared local: at function-scope exit, after every later-
+            // registered local (LIFO), with the CIDER-BUG-088 order (own
+            // destructor first, embedded values in reverse construction
+            // order). Params register in declaration order, so the reverse
+            // walk destroys the last parameter first. Scalars, pointers,
+            // slices and interfaces carry no embedded class destructors and
+            // register nothing.
+            registerTempDestructors(sym->type, addr, currentModule_);
         }
         // Pre-pass: params assigned anywhere in the body must not read-through.
         assignedParams_.clear();
@@ -1711,6 +1729,14 @@ public:
                 for (auto& a : args) callInstr.args.push_back(a);
                 currentBlock_->addInstruction(callInstr);
                 lastValue_ = retBuf;
+                // CIDER-BUG-137: the sret slot is the caller's OWN copy of
+                // the returned class/struct value (the callee memcpys into
+                // it). The caller therefore finalizes it at the end of its
+                // enclosing scope, after every use of the result, with the
+                // same CIDER-BUG-088 order a declared local gets. Interface
+                // results (fat pointers) own no embedded class values and
+                // register nothing.
+                registerTempDestructors(calleeRet, retBuf, calleeDefMod);
                 if (calleeIsIfaceRet) {
                     // CIDER-BUG-077: the result is the address of the
                     // caller's 16-byte fat pointer; the interface flag lets
@@ -1752,6 +1778,16 @@ public:
             callInstr.dest = dest;
             currentBlock_->addInstruction(callInstr);
             lastValue_ = dest;
+            // CIDER-BUG-137: a virtual (or otherwise non-sret) by-value
+            // aggregate return comes back as a fresh heap copy (the legacy
+            // malloc path in visit(ReturnStmt)); it is the caller's owned
+            // temporary just like an sret slot, so register its finalizers
+            // at the caller's enclosing scope. `lastExprType_` still holds
+            // the callee-rooted return spelling from above.
+            if (isVirtual && vtableIndex != -1 &&
+                isByValueAggregate(lastExprType_, calleeDefMod)) {
+                registerTempDestructors(lastExprType_, dest, calleeDefMod);
+            }
         } else {
             // Function pointer / closure call: callee is an expression.
             bool wasAddress = isAddress_;
@@ -3585,9 +3621,18 @@ public:
             std::string scMergeName = nextLabel("sc_merge");
             currentBlock_->addInstruction({IROp::COND_BR, std::nullopt, {condReg, IRValue::Label(scTrueName), IRValue::Label(scFalseName)}});
             startBlock(scTrueName);
+            // CIDER-BUG-137: the short-circuit RHS evaluates only on this
+            // path, so its temporaries must finalize here — before the merge
+            // — or a scope-exit destructor would read a slot the other path
+            // never wrote.
+            deferStack_.push_back({});
+            destructorStack_.push_back({});
             expr.getRight()->accept(*this);
             IRValue rightVal = lastValue_;
             TypeInfo rightType = lastExprType_;
+            emitDestructors(destructorStack_.size() - 1);
+            destructorStack_.pop_back();
+            deferStack_.pop_back();
             currentBlock_->addInstruction({IROp::BR, std::nullopt, {IRValue::Label(scMergeName)}});
             std::string trueEndName = currentBlock_->getName();
             startBlock(scFalseName);
@@ -3618,9 +3663,15 @@ public:
             currentBlock_->addInstruction({IROp::BR, std::nullopt, {IRValue::Label(scMergeName)}});
             std::string trueEndName = currentBlock_->getName();
             startBlock(scFalseName);
+            // CIDER-BUG-137: same per-path temp scope as `&&`.
+            deferStack_.push_back({});
+            destructorStack_.push_back({});
             expr.getRight()->accept(*this);
             IRValue rightVal = lastValue_;
             TypeInfo rightType = lastExprType_;
+            emitDestructors(destructorStack_.size() - 1);
+            destructorStack_.pop_back();
+            deferStack_.pop_back();
             currentBlock_->addInstruction({IROp::BR, std::nullopt, {IRValue::Label(scMergeName)}});
             std::string falseEndName = currentBlock_->getName();
             startBlock(scMergeName);
@@ -5268,8 +5319,19 @@ public:
         currentBlock_->addInstruction({IROp::BR, std::nullopt, {IRValue::Label(headerName)}});
 
         startBlock(headerName);
+        // CIDER-BUG-137: the condition re-evaluates on every iteration, so
+        // temporaries it creates (a class-valued call's sret slot) must
+        // finalize at the end of each evaluation — registering them in the
+        // enclosing scope would only reach the last iteration's slot. The
+        // pushed scope is balanced before the body starts, so it never
+        // affects unwindDepths_.
+        deferStack_.push_back({});
+        destructorStack_.push_back({});
         stmt.getCondition()->accept(*this);
         IRValue cond = lastValue_;
+        emitDestructors(destructorStack_.size() - 1);
+        destructorStack_.pop_back();
+        deferStack_.pop_back();
         currentBlock_->addInstruction({IROp::COND_BR, std::nullopt, {cond, IRValue::Label(bodyName), IRValue::Label(exitName)}});
 
         continueLabels_.push_back(headerName);
@@ -5321,8 +5383,16 @@ public:
 
         startBlock(headerName);
         if (stmt.getCondition()) {
+            // CIDER-BUG-137: per-evaluation temp scope, exactly like the
+            // while header (the condition re-evaluates every iteration).
+            deferStack_.push_back({});
+            destructorStack_.push_back({});
             stmt.getCondition()->accept(*this);
-            currentBlock_->addInstruction({IROp::COND_BR, std::nullopt, {lastValue_, IRValue::Label(bodyName), IRValue::Label(exitName)}});
+            IRValue condVal = lastValue_;
+            emitDestructors(destructorStack_.size() - 1);
+            destructorStack_.pop_back();
+            deferStack_.pop_back();
+            currentBlock_->addInstruction({IROp::COND_BR, std::nullopt, {condVal, IRValue::Label(bodyName), IRValue::Label(exitName)}});
         } else {
             currentBlock_->addInstruction({IROp::BR, std::nullopt, {IRValue::Label(bodyName)}});
         }
@@ -5346,7 +5416,15 @@ public:
         }
 
         startBlock(incName);
+        // CIDER-BUG-137: per-evaluation temp scope, like the condition: the
+        // increment runs on every iteration, so its temporaries finalize
+        // right after each evaluation.
+        deferStack_.push_back({});
+        destructorStack_.push_back({});
         if (stmt.getIncrement()) stmt.getIncrement()->accept(*this);
+        emitDestructors(destructorStack_.size() - 1);
+        destructorStack_.pop_back();
+        deferStack_.pop_back();
         currentBlock_->addInstruction({IROp::BR, std::nullopt, {IRValue::Label(headerName)}});
 
         destructorStack_.pop_back();
@@ -5537,7 +5615,9 @@ public:
             // a full struct slot (not a hardcoded 8-byte pointer slot) and
             // pass it as the hidden first argument.
             bool iterIsSret = false;
+            bool iterRetKnown = false;
             int iterStructSize = 8;
+            TypeInfo iterRetType = iterableType;
             {
                 auto iterSym = symbolTable_.resolve(iterFn);
                 if (iterSym && iterSym->kind == SymbolKind::FUNCTION) {
@@ -5545,6 +5625,8 @@ public:
                     if (isStructValueType(fnSym->returnType)) {
                         iterIsSret = true;
                         iterStructSize = getTypeSize(fnSym->returnType);
+                        iterRetType = fnSym->returnType;
+                        iterRetKnown = true;
                     }
                 } else {
                     // Unresolved (e.g. template instantiation ordering):
@@ -5560,6 +5642,14 @@ public:
                 currentBlock_->addInstruction({IROp::ALLOCA, itBuf, {IRValue::Constant(iterStructSize, IRType::I32)}});
                 currentBlock_->addInstruction({IROp::CALL, std::nullopt, {IRValue::Label(iterFn), itBuf, iterable}});
                 itAddr = itBuf;
+                // CIDER-BUG-137: `iter()`'s sret slot is a caller-owned
+                // temporary (the iterator object) that lives for the whole
+                // loop; register its finalizers in the enclosing scope, so
+                // it is destroyed after the last iteration like any other
+                // returned temporary. Only a resolved return type may
+                // register: the unresolved fallback sizes the slot from the
+                // iterable, which is not the iterator's own type.
+                if (iterRetKnown) registerTempDestructors(iterRetType, itBuf, currentModule_);
             } else {
                 currentBlock_->addInstruction({IROp::ALLOCA, itAddr, {IRValue::Constant(8, IRType::I32)}});
                 IRValue itReg = IRValue::Register(nextTemp(), IRType::PTR);
@@ -6820,6 +6910,25 @@ public:
         }
     }
 
+    // CIDER-BUG-137: an owned compiler temporary finalizes at the exit of
+    // the scope that owns it, exactly like a declared local. The current
+    // cases are a by-value parameter copy (registered at function scope) and
+    // a caller-side by-value return slot (registered at the caller's
+    // enclosing scope after the call). Registration reuses the CIDER-BUG-088
+    // recursion and ordering — own destructor first, then embedded class
+    // values in reverse construction order, LIFO with the surrounding
+    // locals — so temporaries cannot disagree with locals about depth or
+    // order. `t` is a declaration spelling; `defModule` roots its nominal
+    // names like every type query at the site. Aggregates without embedded
+    // class destructors register nothing (byte-identical IR).
+    void registerTempDestructors(TypeInfo t, IRValue addr, const std::string& defModule) {
+        if (!currentFunction_ || destructorStack_.empty()) return;
+        std::set<const StructSymbol*> visiting;
+        if (aggregateHasDestructors(t, defModule, visiting)) {
+            registerEmbeddedDestructors(t, addr, 0, defModule, visiting);
+        }
+    }
+
     // CIDER-BUG-087: module-scope class/struct values are zero in .bss (and
     // in the VM's zero-filled global storage), so their embedded class
     // values need the same formation stores a local gets (CIDER-BUG-089:
@@ -6970,6 +7079,192 @@ public:
     // importing object can name it without extra metadata.
     static std::string moduleGlobalInitFunctionName(const std::string& module) {
         return mangleQualifiedName(module, "_cider_global_init");
+    }
+
+    // CIDER-BUG-137: module-scope globals with embedded class destructors
+    // finalize at program exit, in reverse construction order. The startup
+    // pass (CIDER-BUG-087/106) constructed them dependency-first in the same
+    // order the whole-program IR walk produces; the fini undoes exactly that
+    // order: this object's own globals last-declared first, then every
+    // transitively imported module's fini, each exactly once, in reverse
+    // dependency order.
+    //
+    // Whole-program builds get one local `_cider_global_fini`, called from
+    // every entry function (`main`/`_start`/`efi_main`) just before each
+    // return, so the VM entry return and the native entry return both run
+    // it. Programs with no destructible globals emit nothing (byte-
+    // identical). Separate compilation mirrors CIDER-FEAT-006: every module
+    // object exports a mangled fini that destroys ONLY its own globals. The
+    // entry object owns the ordering: it walks its transitive import graph
+    // in the same dependency-first order the init chain uses, reverses it,
+    // and calls each module's fini once. Chaining finis per module was
+    // rejected because a diamond import would destroy a shared module's
+    // globals twice and a per-object chain would destroy them in graph
+    // order, not reverse construction order. A module object has no entry,
+    // so its fini only runs when an entry object calls it; the unusual
+    // `--emit-meta` object that also defines an entry still does not chain
+    // its own dependencies (an importer's walk reaches them; a standalone
+    // run of such an object leaves its dependency globals unfinalized).
+    void emitGlobalFieldFinalizers(AstProgram& program) {
+        std::string rootModule;
+        auto rootIt = programModules_.find(&program);
+        if (rootIt != programModules_.end()) rootModule = rootIt->second;
+
+        // This object's own destructible globals, in construction order.
+        // Under separate compilation an imported source AST (the corrupt-
+        // cache fallback) can also contribute pending globals; those belong
+        // to the imported module's object, whose fini destroys them, so keep
+        // only the root module's own. Whole-program mode has one combined
+        // pass and no dep chain, so every pending global is ours.
+        std::vector<const PendingGlobalInit*> own;
+        for (const auto& pending : pendingGlobalInits_) {
+            if (separateCompilation_ && pending.defModule != rootModule) continue;
+            std::set<const StructSymbol*> visiting;
+            if (aggregateHasDestructors(pending.type, pending.defModule, visiting)) {
+                own.push_back(&pending);
+            }
+        }
+
+        // Transitive module dependencies in construction order: the exact
+        // order `generate` first initializes their globals (imports before
+        // the importing module, siblings in import order, each module once).
+        // Reversed below into destruction order. A module object does not
+        // chain its dependencies: the entry object's single ordered list
+        // makes the reverse construction order exact and diamond-safe.
+        std::vector<std::string> depFinis;
+        const bool exported = separateCompilation_ && !rootModule.empty();
+        // A module object never chains its dependencies: the entry object
+        // owns the single ordered list, which is the only diamond-safe and
+        // exact-reverse-construction way. An imported module that happens to
+        // define an entry therefore leaves its own dependencies to the
+        // importing entry object's walk (documented limitation for the
+        // unusual module-with-main build).
+        if (separateCompilation_ && !exported) {
+            std::set<std::string> seen;
+            std::vector<std::string> order;
+            std::function<void(AstProgram*)> walk = [&](AstProgram* p) {
+                if (!p) return;
+                auto it = programModules_.find(p);
+                std::string mod = (it != programModules_.end()) ? it->second : std::string();
+                if (mod == rootModule) return;   // the root is handled as `own`
+                if (!mod.empty() && !seen.insert(mod).second) return;  // diamond
+                for (const auto& imp : p->getImportedAsts()) walk(imp.get());
+                if (!mod.empty()) order.push_back(mod);
+            };
+            for (const auto& imported : program.getImportedAsts()) walk(imported.get());
+            std::reverse(order.begin(), order.end());
+            for (const auto& mod : order) {
+                depFinis.push_back(moduleGlobalFiniFunctionName(mod));
+            }
+        }
+
+        if (!separateCompilation_) {
+            if (own.empty() || entryFunctions_.empty()) return;
+        } else if (rootModule.empty() && own.empty() && depFinis.empty()) {
+            return;
+        }
+
+        const std::string finiName =
+            exported ? moduleGlobalFiniFunctionName(rootModule) : globalFiniFunctionName();
+
+        // Build the helper in a fresh function context, mirroring
+        // emitGlobalFieldInitializers. Destruction registration uses the
+        // ordinary local machinery (registerEmbeddedDestructors), pushed in
+        // construction order so the reverse emission runs the last-built
+        // object's own destructor first, then its embedded values in
+        // reverse, and so on down to the first global.
+        auto prevFunction = std::move(currentFunction_);
+        auto prevBlock = std::move(currentBlock_);
+        auto prevVariableValues = variableValues_;
+        int prevTempCount = tempCount_;
+        int prevLabelCount = labelCount_;
+        BasicBlock* prevEntryBlock = functionEntryBlock_;
+        TypeInfo prevReturnType = currentReturnType_;
+        bool prevIsSret = currentIsSret_;
+        auto prevDeferStack = deferStack_;
+        auto prevDestructorStack = destructorStack_;
+
+        currentFunction_ = std::make_unique<FunctionIR>(finiName, IRType::VOID);
+        if (exported) {
+            // A source path marks the definition for per-file codegen: the
+            // module's own object emits and exports the symbol.
+            currentFunction_->setSourcePath(currentSourcePath_);
+        }
+        currentBlock_ = std::make_unique<BasicBlock>("entry");
+        functionEntryBlock_ = currentBlock_.get();
+        variableValues_.clear();
+        tempCount_ = 0;
+        labelCount_ = 0;
+        currentReturnType_ = {"void", 0};
+        currentIsSret_ = false;
+        deferStack_.clear();
+        destructorStack_.clear();
+        deferStack_.push_back({});
+        destructorStack_.push_back({});
+
+        for (const PendingGlobalInit* pending : own) {
+            IRValue base = IRValue::Register(nextTemp(), IRType::PTR);
+            currentBlock_->addInstruction({IROp::MOV, base, {pending->addr}});
+            std::set<const StructSymbol*> visiting;
+            registerEmbeddedDestructors(pending->type, base, 0, pending->defModule, visiting);
+        }
+        emitDestructors();
+
+        // Imported modules destroy their own globals, each exactly once,
+        // after this object's; the entry's reverse construction order is
+        // carried by this list (module objects have an empty one).
+        for (const auto& dep : depFinis) {
+            currentBlock_->addInstruction({IROp::CALL, std::nullopt, {IRValue::Label(dep)}});
+            module_.addExternFunction(dep);
+        }
+
+        currentBlock_->addInstruction({IROp::RET, std::nullopt, {}});
+        currentFunction_->addBlock(std::move(currentBlock_));
+        currentBlock_ = nullptr;
+        module_.addFunction(std::move(currentFunction_));
+
+        currentFunction_ = std::move(prevFunction);
+        currentBlock_ = std::move(prevBlock);
+        variableValues_ = prevVariableValues;
+        tempCount_ = prevTempCount;
+        labelCount_ = prevLabelCount;
+        functionEntryBlock_ = prevEntryBlock;
+        currentReturnType_ = prevReturnType;
+        currentIsSret_ = prevIsSret;
+        deferStack_ = std::move(prevDeferStack);
+        destructorStack_ = std::move(prevDestructorStack);
+
+        // Call the fini from every exit of every entry function. The entry
+        // runs once per program, and one RET is taken, so the fini runs
+        // exactly once; the return value stays live across the call (IR
+        // registers survive calls on every backend).
+        IRInstruction finiCall;
+        finiCall.op = IROp::CALL;
+        finiCall.dest = std::nullopt;
+        finiCall.args.push_back(IRValue::Label(finiName));
+        for (FunctionIR* entry : entryFunctions_) {
+            if (!entry) continue;
+            for (auto& block : entry->getBlocks()) {
+                auto& instructions = block->getInstructions();
+                for (size_t i = instructions.size(); i > 0; --i) {
+                    if (instructions[i - 1].op == IROp::RET) {
+                        instructions.insert(instructions.begin() + (i - 1), finiCall);
+                    }
+                }
+            }
+        }
+    }
+
+    // CIDER-BUG-137: fixed whole-program exit-pass name, styled like
+    // globalInitFunctionName. Synthesized (empty source path), so codegen
+    // emits it in the object that generated it and only that object's entry
+    // references it.
+    static std::string globalFiniFunctionName() { return "_cider_global_fini"; }
+
+    // CIDER-BUG-137: exported per-object exit-pass symbol of a separate-
+    // compilation module object (the fini twin of moduleGlobalInitFunctionName).
+    static std::string moduleGlobalFiniFunctionName(const std::string& module) {
+        return mangleQualifiedName(module, "_cider_global_fini");
     }
 
     // CIDER-BUG-082/087: `visiting` is the recursion path for embedded
@@ -7681,15 +7976,37 @@ public:
         currentBlock_->addInstruction({IROp::COND_BR, std::nullopt, {cond, IRValue::Label(thenName), IRValue::Label(elseName)}});
 
         startBlock(thenName);
+        // CIDER-BUG-137: an arm evaluates on one path only, so a temporary
+        // it creates must finalize before the merge or a scope-exit
+        // destructor would read a slot the other path never wrote. A
+        // by-value aggregate arm's value IS that arm's object (the merge
+        // aliases it), so finalizing it here would hand the ternary a
+        // dangling slot; aggregate arms stay on the pre-existing
+        // no-registration path and the scope is discarded unemitted.
+        deferStack_.push_back({});
+        destructorStack_.push_back({});
         expr.getThenExpr()->accept(*this);
         IRValue thenVal = lastValue_;
         TypeInfo thenType = lastExprType_;
+        if (!isListAggregateElement(thenType)) {
+            emitDestructors(destructorStack_.size() - 1);
+        }
+        destructorStack_.pop_back();
+        deferStack_.pop_back();
         BasicBlock* thenBlock = currentBlock_.get();
 
         startBlock(elseName);
+        // Same per-arm temp scope as the then arm.
+        deferStack_.push_back({});
+        destructorStack_.push_back({});
         expr.getElseExpr()->accept(*this);
         IRValue elseVal = lastValue_;
         TypeInfo elseType = lastExprType_;
+        if (!isListAggregateElement(elseType)) {
+            emitDestructors(destructorStack_.size() - 1);
+        }
+        destructorStack_.pop_back();
+        deferStack_.pop_back();
         BasicBlock* elseBlock = currentBlock_.get();
 
         // CID-003 follow-up (I4): the PHI type is the common type of both

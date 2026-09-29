@@ -130,6 +130,9 @@ func foreachPair() -> void {
 // Custom iterator protocol: the loop variable is a copy of the *D element,
 // so each iteration finalizes it. The iterator object itself embeds no class
 // values, keeping the trace focused.
+// CIDER-BUG-137: `garr` is a module-scope array of class values; its
+// elements are finalized at PROGRAM EXIT in reverse construction order
+// (91 then 90), after everything main's own scope destroys.
 var garr: [D; 2];
 
 class Iter {
@@ -175,5 +178,8 @@ func main() -> int {
     print("\n");
     if (drops != 30) { return 2; }
     print("loop_scope_destructors_ok\n");
+    // CIDER-BUG-137: after this return the program-exit fini pass destroys
+    // the `garr` global's elements (labels 91, 90); the run's stdout ends
+    // with that trace, while the drops check above already passed.
     return 0;
-}
+}   // expected tail: 91,90,

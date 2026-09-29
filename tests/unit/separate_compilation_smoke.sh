@@ -20,7 +20,12 @@
 #     module's own body (CIDER-BUG-107);
 #   * a library object's class/struct globals run their field initializers
 #     (and vptr) before user code (CIDER-BUG-106), on the linked and the
-#     whole-program VM paths.
+#     whole-program VM paths;
+#   * CIDER-BUG-137: module-scope globals with destructors finalize at
+#     program exit. Each module object exports a fini that destroys only
+#     its own globals; the entry object calls them once each, diamond
+#     imports included, in reverse construction order, matching the
+#     whole-program build's trace.
 #
 # Usage: separate_compilation_smoke.sh <cider-binary>
 # Exits 77 when nasm/gcc are missing (no compiled-toolchain SKIP).
@@ -286,6 +291,111 @@ emit_meta modules/mathx.cid mathx
 cmp -s build/mathx.cached.asm build/mathx.asm || fail "meta rebuild changed module assembly"
 "$BIN" compile --cache cache main.cid -o build/main.rebuilt.asm
 cmp -s build/main.cached.asm build/main.rebuilt.asm || fail "cache rebuild changed main.asm"
+
+# --- CIDER-BUG-137: global destructors across objects ---------------------
+# A diamond import: da's globals are imported by main directly AND through db
+# and dc. Each module object exports a fini that destroys only its OWN
+# globals; the entry object calls them exactly once, in reverse construction
+# order: its own globals, then the last-imported module, ..., then the shared
+# dependency. The whole-program and separate builds must run the same trace.
+mkdir -p fini/modules fini/cache fini/build
+cat > fini/modules/da.cid <<'CID'
+from std.io import print, printInt;
+export class R { var label: int; func ~R() { printInt(this.label); print(","); } }
+export var ga: R;
+export func setA(n: int) -> void { ga.label = n; }
+CID
+cat > fini/modules/db.cid <<'CID'
+import da;
+from da import R;
+export var gb: R;
+export func setB(n: int) -> void { gb.label = n; }
+CID
+cat > fini/modules/dc.cid <<'CID'
+import da;
+from da import R;
+export var gc: R;
+export func setC(n: int) -> void { gc.label = n; }
+CID
+cat > fini/main.cid <<'CID'
+import da;
+import db;
+import dc;
+from da import R;
+from std.io import print, printInt;
+var gm: R;
+func main() -> int {
+  da.setA(1);
+  db.setB(2);
+  dc.setC(3);
+  gm.label = 4;
+  print("main,");
+  return 0;
+}
+CID
+FINI_EXPECTED=$'main,4,3,2,1,'
+
+"$BIN" compile fini/main.cid -o fini/build/whole.asm
+nasm -O0 -f elf64 fini/build/whole.asm -o fini/build/whole.o
+gcc fini/build/whole.o -o fini/build/whole -no-pie
+set +e
+F_OUT=$(fini/build/whole 2>&1)
+F_RC=$?
+set -e
+[ "$F_RC" -eq 0 ] || fail "fini whole-program exit $F_RC"
+[ "$F_OUT" = "$FINI_EXPECTED" ] || fail "fini whole-program output [$F_OUT]"
+# The VM entry return runs the same pass (run rejects --cache, so the VM
+# reference is the whole-program source).
+F_VM_OUT=$("$BIN" run fini/main.cid 2>&1)
+[ "$F_VM_OUT" = "$FINI_EXPECTED" ] || fail "fini whole-program VM output [$F_VM_OUT]"
+
+# A `_start`-only program: the VM's _start entry return is the program exit,
+# so it must run the fini too (the native kernel entry cannot be checked
+# here: this _start returns instead of issuing an exit syscall).
+cat > fini/start_only.cid <<'CID'
+from std.io import print, printInt;
+var drops: int = 0;
+class D { var label: int; func ~D() { drops = drops + 1; printInt(this.label); print(","); } }
+var g: D;
+func _start() -> void {
+  g.label = 9;
+  print("start,");
+  return;
+}
+CID
+F_START_OUT=$("$BIN" run fini/start_only.cid 2>&1)
+[ "$F_START_OUT" = "start,9," ] || fail "fini VM _start output [$F_START_OUT]"
+
+"$BIN" compile --cache fini/cache --emit-meta "$IO_SRC" -o fini/build/io.asm
+for m in da db dc; do
+    "$BIN" compile --cache fini/cache --emit-meta "fini/modules/$m.cid" -o "fini/build/$m.asm"
+done
+"$BIN" compile --cache fini/cache fini/main.cid -o fini/build/main.asm
+for m in io da db dc main; do nasm -O0 -f elf64 "fini/build/$m.asm" -o "fini/build/$m.o"; done
+gcc fini/build/main.o fini/build/da.o fini/build/db.o fini/build/dc.o fini/build/io.o \
+    -o fini/build/sep -no-pie
+set +e
+F_SEP_OUT=$(fini/build/sep 2>&1)
+F_SEP_RC=$?
+set -e
+[ "$F_SEP_RC" -eq 0 ] || fail "fini separate exit $F_SEP_RC"
+[ "$F_SEP_OUT" = "$FINI_EXPECTED" ] || fail "fini separate output [$F_SEP_OUT]"
+# Every module object exports its own fini symbol (empty or not) and does
+# NOT chain its dependencies; the entry object calls each exactly once, in
+# reverse construction order.
+for m in da db dc; do
+    grep -q "global mod_${m}__.*ufini" "fini/build/$m.asm" \
+        || fail "$m.asm does not export its global-fini pass"
+done
+FINI_ORDER=$(grep -o "mod_d[abc]___ucider_uglobal_ufini" fini/build/main.asm | awk '!seen[$0]++' | tr '\n' ' ')
+[ "$FINI_ORDER" = "mod_dc___ucider_uglobal_ufini mod_db___ucider_uglobal_ufini mod_da___ucider_uglobal_ufini " ] \
+    || fail "main.asm fini call order [$FINI_ORDER]"
+# The entry's fini function is emitted once, so each dependency's call site
+# there must appear exactly once (the runtime trace above proves one run).
+[ "$(grep -c "call mod_da___ucider_uglobal_ufini" fini/build/main.asm)" = "1" ] \
+    || fail "main.asm calls the shared dependency's fini more than once"
+grep -q "call mod_db__.*ufini" fini/build/da.asm \
+    && fail "da.asm chains its importer's fini"
 
 # --- CLI guards -----------------------------------------------------------
 set +e
