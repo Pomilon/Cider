@@ -156,6 +156,10 @@ private:
     // CIDER-BUG-149: oversized-local heap fallbacks are frame storage too;
     // they are released here and zeroed on claim, like a claimed chunk.
     void retireFrame(const Frame& frame);
+    // CIDER-BUG-159: the exit paths (exit builtin, asm exit syscall)
+    // abandon every live frame at once; retire the lot through the same
+    // release as RET/longjmp/fall-off before dropping the stack.
+    void retireAllFrames();
 };
 
 }  // namespace cider

@@ -1025,6 +1025,17 @@ void VM::free(int64_t offset) {
     int64_t total;
     std::memcpy(&total, heap_.data() + block, 8);
     if (total <= 0 || block + total > (int64_t)heap_.size()) throw VMError{"free: corrupt block"};
+    // CIDER-BUG-159: double-free guard. Freeing the same block twice is UB
+    // (native's allocator aborts); the VM instead keeps its free list
+    // consistent by ignoring a block that overlaps one already on the list.
+    // This is reachable from otherwise clean IR: a program frees an ALLOCA
+    // pointer explicitly (UB) and retireFrame then releases the same block
+    // when the frame dies — the duplicate entry made malloc hand the same
+    // bytes out twice while both entries remained. Live blocks never
+    // overlap, so no valid free is affected.
+    for (const FreeBlock& b : freeList_) {
+        if (block < b.offset + b.size && b.offset < block + total) return;
+    }
     freeList_.push_back({block, total});
 }
 
@@ -1048,6 +1059,17 @@ void VM::free(int64_t offset) {
 void VM::retireFrame(const Frame& frame) {
     if (frame.localBase != 0) free(frame.localBase);
     for (int64_t off : frame.localHeapAllocs) free(off);
+}
+
+// CIDER-BUG-159: the exit paths (the exit builtin, the asm exit syscall)
+// abandon every live frame instead of unwinding it. Retire them first so
+// their chunks and oversized fallbacks return to the free list, exactly as
+// RET, longjmp and fall-off do. The heap dies with the VM either way, but
+// the free list stays consistent for the accounting accessors and for an
+// embedder that keeps using the VM instance.
+void VM::retireAllFrames() {
+    for (size_t i = frames_.size(); i > 0; --i) retireFrame(frames_[i - 1]);
+    frames_.clear();
 }
 
 VM::RegVal VM::load(int64_t addr, IRType type) {
@@ -1216,7 +1238,9 @@ bool VM::tryBuiltinCall(const std::string& name, const std::vector<IRValue>& arg
         RegVal v = args.empty() ? RegVal{} : resolveValue(args[0]);
         result_.exitCode = (int)v.i;
         result_.stdoutText += putcharBuf_;
-        frames_.clear();
+        // CIDER-BUG-159: abandoning the stack still retires the live frames,
+        // like every other frame-death site (RET/longjmp/fall-off).
+        retireAllFrames();
         return true;
     }
     if (name == "putchar") {
@@ -1645,7 +1669,9 @@ void VM::execAsm(const IRInstruction& instr) {
     }
     (void)wrote;
     if (exited) {
-        frames_.clear();
+        // CIDER-BUG-159: the asm exit syscall (std.io.exit) drops the stack
+        // too; retire the live frames first, same as the builtin exit.
+        retireAllFrames();
     }
 }
 

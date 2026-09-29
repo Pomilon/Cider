@@ -463,6 +463,141 @@ int run() {
         CHECK(vm.heapBytes() == vm.freeListBytes());
     }
 
+    // CIDER-BUG-159: the exit builtin abandons every live frame instead of
+    // unwinding it. The frames must still be retired, like RET/longjmp/
+    // fall-off, so their chunks and oversized fallbacks return to the free
+    // list (the heap dies with the VM either way, but the free list stays
+    // consistent for a reused VM and for the accounting).
+    {
+        // deep(): an oversized local, then exit(7) from inside the call.
+        auto deep = makeFn("deep", cider::IRType::VOID);
+        auto db = std::make_unique<cider::BasicBlock>("entry");
+        db->addInstruction(opInstr(cider::IROp::ALLOCA, "big",
+                                   {cider::IRValue::Constant(8192, cider::IRType::I64)}));
+        cider::IRInstruction ex;
+        ex.op = cider::IROp::CALL;
+        ex.args = {cider::IRValue::Label("exit"),
+                   cider::IRValue::Constant(7, cider::IRType::I32)};
+        db->addInstruction(ex);
+        cider::IRInstruction dret;
+        dret.op = cider::IROp::RET;
+        db->addInstruction(dret);
+        deep->addBlock(std::move(db));
+
+        // main(): a frame chunk, then the exiting call.
+        auto fn = makeFn("main", cider::IRType::I32);
+        auto b = std::make_unique<cider::BasicBlock>("entry");
+        b->addInstruction(opInstr(cider::IROp::ALLOCA, "slot",
+                                  {cider::IRValue::Constant(8, cider::IRType::I32)}));
+        cider::IRInstruction callDeep;
+        callDeep.op = cider::IROp::CALL;
+        callDeep.args = {cider::IRValue::Label("deep")};
+        b->addInstruction(callDeep);
+        cider::IRInstruction ret;
+        ret.op = cider::IROp::RET;
+        ret.args = {cider::IRValue::Constant(0, cider::IRType::I32)};
+        b->addInstruction(ret);
+        fn->addBlock(std::move(b));
+
+        cider::ModuleIR mod;
+        mod.addFunction(std::move(deep));
+        mod.addFunction(std::move(fn));
+        cider::VM vm;
+        CHECK(vm.run(mod).exitCode == 7);
+        // main's chunk and deep's chunk + fallback were retired on exit
+        // (pre-fix every block stayed live, freeListBytes() == 0).
+        CHECK(vm.heapBytes() == vm.freeListBytes());
+    }
+
+    // CIDER-BUG-159: freeing an ALLOCA pointer by hand is UB (native
+    // crashes); pre-fix the VM pushed the same block onto the free list
+    // again when retireFrame released it, so the block was counted twice
+    // and a later malloc could hand the same bytes out twice. VM::free now
+    // ignores a free that overlaps a block already on the free list.
+    {
+        // (a) explicit free of a frame chunk, then RET retires it again.
+        auto fn = makeFn("main", cider::IRType::I32);
+        auto b = std::make_unique<cider::BasicBlock>("entry");
+        b->addInstruction(opInstr(cider::IROp::ALLOCA, "p",
+                                  {cider::IRValue::Constant(8, cider::IRType::I32)}));
+        cider::IRInstruction fr;
+        fr.op = cider::IROp::CALL;
+        fr.args = {cider::IRValue::Label("free"),
+                   cider::IRValue::Register("p", cider::IRType::PTR)};
+        b->addInstruction(fr);
+        cider::IRInstruction ret;
+        ret.op = cider::IROp::RET;
+        ret.args = {cider::IRValue::Constant(0, cider::IRType::I32)};
+        b->addInstruction(ret);
+        fn->addBlock(std::move(b));
+        cider::ModuleIR mod;
+        mod.addFunction(std::move(fn));
+        cider::VM vm;
+        CHECK(vm.run(mod).exitCode == 0);
+        // One block, one free-list entry (pre-fix: 2x the chunk bytes).
+        CHECK(vm.heapBytes() == vm.freeListBytes());
+    }
+    {
+        // (b) the same UB on an oversized fallback: retireFrame's second
+        // free must not duplicate the fallback block either.
+        auto fn = makeFn("main", cider::IRType::I32);
+        auto b = std::make_unique<cider::BasicBlock>("entry");
+        b->addInstruction(opInstr(cider::IROp::ALLOCA, "big",
+                                  {cider::IRValue::Constant(8192, cider::IRType::I64)}));
+        cider::IRInstruction fr;
+        fr.op = cider::IROp::CALL;
+        fr.args = {cider::IRValue::Label("free"),
+                   cider::IRValue::Register("big", cider::IRType::PTR)};
+        b->addInstruction(fr);
+        cider::IRInstruction ret;
+        ret.op = cider::IROp::RET;
+        ret.args = {cider::IRValue::Constant(0, cider::IRType::I32)};
+        b->addInstruction(ret);
+        fn->addBlock(std::move(b));
+        cider::ModuleIR mod;
+        mod.addFunction(std::move(fn));
+        cider::VM vm;
+        CHECK(vm.run(mod).exitCode == 0);
+        CHECK(vm.heapBytes() == vm.freeListBytes());
+    }
+    {
+        // (c) classic double free of a malloc'd block, with valid frees of
+        // two distinct blocks around it: the guard drops only the
+        // duplicate, so every distinct block is listed exactly once.
+        auto fn = makeFn("main", cider::IRType::I32);
+        auto b = std::make_unique<cider::BasicBlock>("entry");
+        auto mallocCall = [](const std::string& destName) {
+            cider::IRInstruction m;
+            m.op = cider::IROp::CALL;
+            m.dest = cider::IRValue::Register(destName, cider::IRType::PTR);
+            m.args = {cider::IRValue::Label("malloc"),
+                      cider::IRValue::Constant(64, cider::IRType::I64)};
+            return m;
+        };
+        auto freeCall = [](const std::string& reg) {
+            cider::IRInstruction f;
+            f.op = cider::IROp::CALL;
+            f.args = {cider::IRValue::Label("free"),
+                      cider::IRValue::Register(reg, cider::IRType::PTR)};
+            return f;
+        };
+        b->addInstruction(mallocCall("p"));
+        b->addInstruction(mallocCall("q"));
+        b->addInstruction(freeCall("p"));
+        b->addInstruction(freeCall("q"));
+        b->addInstruction(freeCall("q"));  // duplicate: ignored, not re-listed
+        cider::IRInstruction ret;
+        ret.op = cider::IROp::RET;
+        ret.args = {cider::IRValue::Constant(0, cider::IRType::I32)};
+        b->addInstruction(ret);
+        fn->addBlock(std::move(b));
+        cider::ModuleIR mod;
+        mod.addFunction(std::move(fn));
+        cider::VM vm;
+        CHECK(vm.run(mod).exitCode == 0);
+        CHECK(vm.heapBytes() == vm.freeListBytes());
+    }
+
     // Step cap: an infinite loop fails fast instead of hanging.
     auto fn6 = makeFn("main", cider::IRType::VOID);
     auto b6 = std::make_unique<cider::BasicBlock>("entry");

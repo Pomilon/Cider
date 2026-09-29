@@ -380,6 +380,47 @@ int run() {
         CHECK(threw);
     }
 
+    // CIDER-BUG-159: the asm exit syscall (what std.io.exit lowers to)
+    // abandons the live frames; it must retire them like the builtin exit
+    // and RET do, so their ALLOCA chunk and oversized fallback return to
+    // the free list.
+    {
+        auto deep = std::make_unique<cider::FunctionIR>("deep", cider::IRType::VOID);
+        auto db = std::make_unique<cider::BasicBlock>("entry");
+        cider::IRInstruction big;
+        big.op = cider::IROp::ALLOCA;
+        big.dest = cider::IRValue::Register("big", cider::IRType::PTR);
+        big.args = {cider::IRValue::Constant(8192, cider::IRType::I64)};
+        db->addInstruction(big);
+        db->addInstruction(asmInstr("mov rax, 60\nmov rdi, 9\nsyscall"));
+        deep->addBlock(std::move(db));
+
+        auto fn = std::make_unique<cider::FunctionIR>("main", cider::IRType::I32);
+        auto b = std::make_unique<cider::BasicBlock>("entry");
+        cider::IRInstruction slot;
+        slot.op = cider::IROp::ALLOCA;
+        slot.dest = cider::IRValue::Register("slot", cider::IRType::PTR);
+        slot.args = {cider::IRValue::Constant(8, cider::IRType::I32)};
+        b->addInstruction(slot);
+        cider::IRInstruction callDeep;
+        callDeep.op = cider::IROp::CALL;
+        callDeep.args = {cider::IRValue::Label("deep")};
+        b->addInstruction(callDeep);
+        cider::IRInstruction ret;
+        ret.op = cider::IROp::RET;
+        ret.args = {cider::IRValue::Constant(0, cider::IRType::I32)};
+        b->addInstruction(ret);
+        fn->addBlock(std::move(b));
+
+        cider::ModuleIR mod;
+        mod.addFunction(std::move(deep));
+        mod.addFunction(std::move(fn));
+        cider::VM vm;
+        CHECK(vm.run(mod).exitCode == 9);
+        // Both frames' storage is on the free list (pre-fix it stayed live).
+        CHECK(vm.heapBytes() == vm.freeListBytes());
+    }
+
     // A valid mmap keeps working: allocate 64 bytes, read the file into the
     // fresh region, and report the byte count. The non-zero exit path above
     // shows the validation did not reject usable lengths.
