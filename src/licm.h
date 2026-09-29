@@ -30,9 +30,16 @@ namespace cider {
 //     cannot be hoisted across a clobber: the callee can write that alloca.
 //     Allocas whose address never escapes are unreachable from any callee,
 //     so their loads keep hoisting.
+//
+// CIDER-BUG-091: a STORE/MEMCPY through a derived pointer (`add %base, off`)
+// writes the base alloca's storage. loopStores therefore holds base alloca
+// names, not the raw address registers: a direct `load %base` must be
+// blocked by an in-loop `store (add %base, off)`. Raw addresses are resolved
+// through ADD/MOV/PHI chains with collectAllocaBases once the def map exists.
 struct LicmCaches {
     std::map<std::string, const IRInstruction*> defMap;
     std::set<std::string> multiDef;
+    // CIDER-BUG-091: base allocas written by an in-loop STORE/MEMCPY.
     std::set<std::string> loopStores;
     // CIDER-BUG-061: a volatile store in the loop is an observable write
     // that may alias any escaped object (the compiler has no alias oracle),
@@ -95,6 +102,10 @@ static void markEscapedValue(const IRValue& v, LicmCaches& c) {
 static LicmCaches buildLicmCaches(const FunctionIR& func,
                                   const std::set<std::string>& loopBlocks) {
     LicmCaches c;
+    // CIDER-BUG-091: raw addresses of in-loop stores, resolved to their base
+    // allocas after the def map exists (a use may precede its def in block
+    // order, and the def may itself be an ADD/MOV/PHI chain).
+    std::set<std::string> loopStoreRegs;
     for (const auto& b : func.getBlocks()) {
         for (const auto& si : b->getInstructions()) {
             if (si.dest && si.dest->kind == IRValue::REGISTER) {
@@ -109,7 +120,7 @@ static LicmCaches buildLicmCaches(const FunctionIR& func,
             if (inLoop && (si.op == IROp::STORE || si.op == IROp::MEMCPY)) {
                 if (si.isVolatile) c.loopHasVolatileStore = true;
                 if (!si.args.empty() && si.args[0].kind == IRValue::REGISTER) {
-                    c.loopStores.insert(si.args[0].name);
+                    loopStoreRegs.insert(si.args[0].name);
                 }
             }
             if (inLoop && (si.op == IROp::CALL || si.op == IROp::VIRTUAL_CALL ||
@@ -117,6 +128,15 @@ static LicmCaches buildLicmCaches(const FunctionIR& func,
                 c.loopHasClobber = true;
             }
         }
+    }
+    // CIDER-BUG-091: record every alloca an in-loop store/memcpy may write,
+    // walking ADD/MOV/PHI chains to the base (a derived-pointer store used to
+    // record only the derived register, leaving a direct load of the base
+    // alloca unblocked).
+    for (const auto& reg : loopStoreRegs) {
+        std::set<std::string> bases, visiting;
+        collectAllocaBases(reg, c, bases, visiting);
+        c.loopStores.insert(bases.begin(), bases.end());
     }
     // Escape sites are resolved after the whole def map exists: the block
     // order is not topological, so a use may precede its def here.

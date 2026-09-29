@@ -654,6 +654,173 @@ int testCallClobberLicm() {
     return 0;
 }
 
+int testDerivedStoreLicm() {
+    // CIDER-BUG-091: an in-loop STORE through a derived pointer
+    // (`%seed = add %slot, %off`, carried through a PHI and a MOV) writes the
+    // base alloca's storage, so a direct LOAD of `%slot` must not hoist. A
+    // LOAD of an alloca the loop never writes (`%other`) still must — the
+    // loop-store set records base allocas, not raw address registers.
+    // Today's ir_gen only stores aggregates through `add` temps, so this
+    // latent case is built as IR by hand.
+    auto build = []() {
+        cider::ModuleIR mod;
+        auto fn = std::make_unique<cider::FunctionIR>("f", cider::IRType::VOID);
+
+        auto entry = std::make_unique<cider::BasicBlock>("entry");
+        cider::IRInstruction slot;
+        slot.op = cider::IROp::ALLOCA;
+        slot.dest = cider::IRValue::Register("slot", cider::IRType::PTR);
+        slot.args = {cider::IRValue::Constant(64, cider::IRType::I32)};
+        entry->addInstruction(slot);
+        cider::IRInstruction other;
+        other.op = cider::IROp::ALLOCA;
+        other.dest = cider::IRValue::Register("other", cider::IRType::PTR);
+        other.args = {cider::IRValue::Constant(8, cider::IRType::I32)};
+        entry->addInstruction(other);
+        cider::IRInstruction initOther;
+        initOther.op = cider::IROp::STORE;
+        initOther.args = {cider::IRValue::Register("other", cider::IRType::PTR),
+                          cider::IRValue::Constant(7, cider::IRType::I32),
+                          cider::IRValue::Constant(0, cider::IRType::I32)};
+        entry->addInstruction(initOther);
+        cider::IRInstruction off;
+        off.op = cider::IROp::MOV;
+        off.dest = cider::IRValue::Register("off", cider::IRType::I64);
+        off.args = {cider::IRValue::Constant(0, cider::IRType::I64)};
+        entry->addInstruction(off);
+        cider::IRInstruction seed;
+        seed.op = cider::IROp::ADD;
+        seed.dest = cider::IRValue::Register("seed", cider::IRType::PTR);
+        seed.args = {cider::IRValue::Register("slot", cider::IRType::PTR),
+                     cider::IRValue::Register("off", cider::IRType::I64)};
+        entry->addInstruction(seed);
+        cider::IRInstruction i0;
+        i0.op = cider::IROp::MOV;
+        i0.dest = cider::IRValue::Register("i0", cider::IRType::I32);
+        i0.args = {cider::IRValue::Constant(0, cider::IRType::I32)};
+        entry->addInstruction(i0);
+        cider::IRInstruction one;
+        one.op = cider::IROp::MOV;
+        one.dest = cider::IRValue::Register("one", cider::IRType::I32);
+        one.args = {cider::IRValue::Constant(1, cider::IRType::I32)};
+        entry->addInstruction(one);
+        cider::IRInstruction enter;
+        enter.op = cider::IROp::BR;
+        enter.args = {cider::IRValue::Label("header")};
+        entry->addInstruction(enter);
+
+        auto header = std::make_unique<cider::BasicBlock>("header");
+        cider::IRInstruction i;
+        i.op = cider::IROp::PHI;
+        i.dest = cider::IRValue::Register("i", cider::IRType::I32);
+        i.phiArgs = {{"entry", cider::IRValue::Register("i0", cider::IRType::I32)},
+                     {"body", cider::IRValue::Register("iNext", cider::IRType::I32)}};
+        header->addInstruction(i);
+        cider::IRInstruction p;
+        p.op = cider::IROp::PHI;
+        p.dest = cider::IRValue::Register("p", cider::IRType::PTR);
+        p.phiArgs = {{"entry", cider::IRValue::Register("seed", cider::IRType::PTR)},
+                     {"body", cider::IRValue::Register("pNext", cider::IRType::PTR)}};
+        header->addInstruction(p);
+        cider::IRInstruction st;
+        st.op = cider::IROp::STORE;
+        st.args = {cider::IRValue::Register("p", cider::IRType::PTR),
+                   cider::IRValue::Register("i", cider::IRType::I32),
+                   cider::IRValue::Constant(0, cider::IRType::I32)};
+        header->addInstruction(st);
+        cider::IRInstruction ldSlot;
+        ldSlot.op = cider::IROp::LOAD;
+        ldSlot.dest = cider::IRValue::Register("v", cider::IRType::I32);
+        ldSlot.args = {cider::IRValue::Register("slot", cider::IRType::PTR),
+                       cider::IRValue::Constant(0, cider::IRType::I32)};
+        header->addInstruction(ldSlot);
+        cider::IRInstruction ldOther;
+        ldOther.op = cider::IROp::LOAD;
+        ldOther.dest = cider::IRValue::Register("w", cider::IRType::I32);
+        ldOther.args = {cider::IRValue::Register("other", cider::IRType::PTR),
+                        cider::IRValue::Constant(0, cider::IRType::I32)};
+        header->addInstruction(ldOther);
+        cider::IRInstruction sum;
+        sum.op = cider::IROp::ADD;
+        sum.dest = cider::IRValue::Register("s", cider::IRType::I32);
+        sum.args = {cider::IRValue::Register("v", cider::IRType::I32),
+                    cider::IRValue::Register("w", cider::IRType::I32)};
+        header->addInstruction(sum);
+        cider::IRInstruction inc;
+        inc.op = cider::IROp::ADD;
+        inc.dest = cider::IRValue::Register("iNext", cider::IRType::I32);
+        inc.args = {cider::IRValue::Register("i", cider::IRType::I32),
+                    cider::IRValue::Register("one", cider::IRType::I32)};
+        header->addInstruction(inc);
+        cider::IRInstruction cmp;
+        cmp.op = cider::IROp::CMP_LT;
+        cmp.dest = cider::IRValue::Register("cond", cider::IRType::BOOL);
+        cmp.args = {cider::IRValue::Register("iNext", cider::IRType::I32),
+                    cider::IRValue::Constant(10, cider::IRType::I32)};
+        header->addInstruction(cmp);
+        cider::IRInstruction cbr;
+        cbr.op = cider::IROp::COND_BR;
+        cbr.args = {cider::IRValue::Register("cond", cider::IRType::BOOL),
+                    cider::IRValue::Label("body"), cider::IRValue::Label("exit")};
+        header->addInstruction(cbr);
+
+        auto body = std::make_unique<cider::BasicBlock>("body");
+        cider::IRInstruction pNext;
+        pNext.op = cider::IROp::MOV;
+        pNext.dest = cider::IRValue::Register("pNext", cider::IRType::PTR);
+        pNext.args = {cider::IRValue::Register("p", cider::IRType::PTR)};
+        body->addInstruction(pNext);
+        cider::IRInstruction back;
+        back.op = cider::IROp::BR;
+        back.args = {cider::IRValue::Label("header")};
+        body->addInstruction(back);
+
+        auto exit = std::make_unique<cider::BasicBlock>("exit");
+        cider::IRInstruction ret;
+        ret.op = cider::IROp::RET;
+        exit->addInstruction(ret);
+
+        fn->addBlock(std::move(entry));
+        fn->addBlock(std::move(header));
+        fn->addBlock(std::move(body));
+        fn->addBlock(std::move(exit));
+        mod.addFunction(std::move(fn));
+        return mod;
+    };
+
+    auto checkHoist = [](cider::ModuleIR& mod) {
+        int preLoads = 0, preOther = 0, loopLoads = 0;
+        for (const auto& b : mod.getFunctions()[0]->getBlocks()) {
+            const bool preheader = b->getName().find("preheader") != std::string::npos;
+            for (const auto& in : b->getInstructions()) {
+                if (in.op != cider::IROp::LOAD) continue;
+                if (preheader) {
+                    preLoads++;
+                    if (in.args[0].kind == cider::IRValue::REGISTER &&
+                        in.args[0].name == "other") preOther++;
+                } else if (b->getName() == "header") {
+                    loopLoads++;
+                }
+            }
+        }
+        CHECK(preLoads == 1);   // only the unwritten `other` load hoists
+        CHECK(preOther == 1);
+        CHECK(loopLoads == 1);  // `slot` load blocked by the derived store
+        return 0;
+    };
+
+    auto ssaMod = build();
+    cider::SSALicmPass licm;
+    CHECK(licm.run(ssaMod));
+    CHECK(checkHoist(ssaMod) == 0);
+
+    auto postMod = build();
+    cider::PostLicmPass postLicm;
+    CHECK(postLicm.run(postMod));
+    CHECK(checkHoist(postMod) == 0);
+    return 0;
+}
+
 int testInliner() {
     // A small helper gets inlined; recursion does not.
     auto r = genModule(
@@ -683,6 +850,7 @@ int run() {
     CHECK(testVolatileGvn() == 0);
     CHECK(testVolatileLicm() == 0);
     CHECK(testCallClobberLicm() == 0);
+    CHECK(testDerivedStoreLicm() == 0);
     CHECK(testInliner() == 0);
     return 0;
 }
