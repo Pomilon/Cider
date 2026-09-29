@@ -10,6 +10,9 @@
 //   - fail-fast diagnostics: one line on stderr + a distinct exit code (70-79)
 //   - free-list walk cycle guard: a walk that visits too many blocks dies
 //     instead of looping (the 98GB incident's root cause)
+//   - CIDER-BUG-215: malloc clears a block's free-list canary as it hands the
+//     block out, so the allocator's own stamp is never served as data (see
+//     clear_canary for the whole uninitialized-value policy)
 
 var free_list: *void = nilPtr;
 var ARENA_SIZE: int = 1048576;
@@ -48,6 +51,62 @@ func fail_fast(code: int) -> void {
 }
 
 export func init_heap() -> void {
+}
+
+// CIDER-BUG-215: THE UNINITIALIZED-VALUE POLICY, part 2 of 2 (part 1 is
+// VM::malloc, which makes the `mmap` syscall hand back zeroed memory on the
+// VM exactly as native's kernel-zeroed MAP_ANONYMOUS pages do).
+//
+// The remaining source of a never-written read seeing a NON-zero value was
+// the allocator's own corruption canary. This allocator marks a block as
+// "on the free list" by stamping CANARY_VAL over the first 8 bytes of its
+// PAYLOAD, and the walk validates that stamp before reuse. Two places write
+// it, and both write it into a block the very next malloc will hand out:
+//
+//   * free() stamps `block + 16` as it returns a block to the list;
+//   * mmap_arena stamps `arena + 16` to bootstrap the free list. The block
+//     header is 16 bytes (size at +0, next/magic at +8), so `arena + 16` is
+//     the user-data address of the first block carved out of every new arena.
+//
+// Nothing cleared the stamp on allocation, so the canary was served to the
+// program as if it were data. CANARY_VAL is 0xFFFFFFFFFFFFFFF6, which reads
+// back as -10 and -1 in the first two signed int words -- exactly the value
+// `var back: D = p[1]` observed.
+//
+// Whether that happened at all depended on the run's allocation history, so
+// it was not stable across backends. On the VM, mmap is emulated by a
+// first-fit free list over the interpreter heap, so a program's first Cider
+// arena can come out of a recycled (already-zeroed) frame chunk instead of a
+// fresh extension, and which of the two happens depends on the IR's frame and
+// ALLOCA layout -- which the optimizer rewrites. Hence one program saw the
+// canary on `cider run --no-opt` and zeros on `cider run` and on native.
+//
+// The canary belongs to a block WHILE IT IS FREE, so malloc clears it as the
+// block leaves the list. That restores the invariant the walk is supposed to
+// enforce -- a stamp proves a real free(), not the arena bootstrap -- and
+// makes every byte the allocator itself ever wrote into a payload invisible
+// to the program.
+//
+// Only the stamp is cleared, not the whole payload, and that is deliberate:
+// zeroing every allocation is not affordable here. The walk is interpreted,
+// and MAX_TOTAL_BYTES exists so a program can legitimately request a 1 GiB
+// block (see the alloc_cap_overflow regression); a byte-at-a-time zero fill
+// turns that into a billion interpreted stores. So the policy is:
+//
+//   * fresh memory -- a block from a new arena, a dedicated big arena, or an
+//     mmap from a program -- reads as 0 on all three backends;
+//   * a RECYCLED block (one a previous free() returned) reads as whatever
+//     that previous block contained beyond the cleared stamp, and is NOT
+//     backend-independent: whether a given request even gets that block back
+//     depends on free-list history, which differs per backend. That is C's
+//     malloc contract, and defining it would mean zeroing every allocation --
+//     a byte-at-a-time fill in an interpreted walk, which the 1 GiB request
+//     MAX_TOTAL_BYTES exists to allow (see the alloc_cap_overflow regression)
+//     cannot afford. Only the canary is defined, and only because the
+//     allocator itself wrote it.
+func clear_canary(ptr: *void) -> void {
+    var p: *u64 = ptr as *u64;
+    *p = 0 as u64;
 }
 
 func mmap_arena(size: int) -> *void {
@@ -170,6 +229,11 @@ export func malloc(size: int) -> *void {
             var magic_ptr: *u64 = (curr + 8) as *u64;
             *magic_ptr = MAGIC_VAL;
 
+            // CIDER-BUG-215: clear the canary the block is carrying as a free
+            // block, so the allocator's own stamp is not served to the
+            // program as data (see clear_canary).
+            clear_canary(curr + HEADER_SIZE);
+
             return curr + HEADER_SIZE;
         }
 
@@ -188,6 +252,10 @@ export func malloc(size: int) -> *void {
         *big_size_ptr = needed_u64b;
         var big_magic_ptr: *u64 = (big_arena + 8) as *u64;
         *big_magic_ptr = MAGIC_VAL;
+        // CIDER-BUG-215: a dedicated arena is bootstrapped without a canary
+        // stamp (free() has not run on it), and its mmap is zeroed on every
+        // backend, so there is nothing to clear here -- the first word of the
+        // payload is already 0.
         return big_arena + HEADER_SIZE;
     }
 
@@ -258,6 +326,11 @@ export func malloc(size: int) -> *void {
 
             var magic_ptr: *u64 = (curr + 8) as *u64;
             *magic_ptr = MAGIC_VAL;
+
+            // CIDER-BUG-215: the block served here is the head of the list,
+            // i.e. the arena just mapped, whose payload still holds
+            // mmap_arena's bootstrap canary. Clear it (see clear_canary).
+            clear_canary(curr + HEADER_SIZE);
 
             return curr + HEADER_SIZE;
         }

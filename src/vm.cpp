@@ -1101,12 +1101,26 @@ int64_t VM::malloc(int64_t size) {
         }
         if (block + total > (int64_t)heap_.size()) heap_.resize(block + total);
         std::memcpy(heap_.data() + block, &total, 8);  // size header
+        // CIDER-BUG-215: a first-fit block may be a RECYCLED one (a retired
+        // frame's bump chunk, a freed program block), so the user region still
+        // holds its previous tenant's bytes. That is unobservable for stack
+        // storage, whose claim path memsets anyway, but this allocator also
+        // backs the `mmap` syscall, and native mmap(MAP_ANONYMOUS) hands back
+        // KERNEL-ZEROED pages: a read before any write is 0 there and was
+        // whatever the last frame left in the chunk here. Zero the user region
+        // so mmap agrees with native on every VM mode. The growth path below
+        // needs no memset: heap_.resize value-initializes the bytes it
+        // appends, and that path only ever serves fresh territory.
+        std::memset(heap_.data() + user, 0, (size_t)size);
         return user;
     }
     int64_t off = (int64_t)heap_.size();
     int64_t user = (off + kHeaderSize + kAlign - 1) & ~(kAlign - 1);
     int64_t block = user - kHeaderSize;
     int64_t total = size + kHeaderSize;
+    // CIDER-BUG-215: no memset here — the block starts at the current end of
+    // the heap and heap_.resize value-initializes every byte it appends, so
+    // the user region is already zero, like a fresh native mapping.
     heap_.resize(block + total);
     std::memcpy(heap_.data() + block, &total, 8);
     return user;
