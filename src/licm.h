@@ -44,6 +44,15 @@ namespace cider {
 // missed. Such addresses take the conservative fallback: every alloca is
 // treated as written, mirroring escapedUnknown for clobbers.
 //
+// CIDER-BUG-160: the multi-defined check covered only the raw store address.
+// A multi-defined register DEEPER in the chain (`%p = add %q, off` with a
+// multi-defined `%q`) still resolved through defMap's first def, so a base
+// reachable solely through a later def was missed the same way. The chain
+// walk (collectAllocaBases) now reports every multi-defined register it
+// meets — root or intermediate — and both CIDER-BUG-143's store fallback
+// and CIDER-BUG-086's escape fallback (markEscapedValue shares the walk)
+// trigger on that report.
+//
 // CIDER-BUG-161: an address that does not resolve to any local alloca at all
 // (a parameter, a value loaded from memory, a call result, a mixed PHI) used
 // to record nothing in loopStores, and escapedAllocas was consulted only
@@ -93,11 +102,23 @@ struct LicmCaches {
 // that stored it is scanned. CIDER-BUG-161 callers pass `mayBeExternal` to
 // also learn that the chain contains such a non-local producer, so a STORE
 // through it can be treated like a clobber for escaped allocas.
+// CIDER-BUG-160: defMap holds only the first definition of a register, so a
+// multi-defined value anywhere in the chain cannot be resolved soundly — a
+// base reachable solely through a later def would be invisible. Callers
+// that pass `mayBeMultiDef` learn this and take their conservative
+// fallbacks instead of trusting the partial walk.
 static void collectAllocaBases(const std::string& reg, const LicmCaches& c,
                                std::set<std::string>& out,
                                std::set<std::string>& visiting,
-                               bool* mayBeExternal = nullptr) {
+                               bool* mayBeExternal = nullptr,
+                               bool* mayBeMultiDef = nullptr) {
     if (reg.empty() || !visiting.insert(reg).second) return;
+    // CIDER-BUG-160: a multi-defined root or intermediate — the first def
+    // defMap points at may hide a base carried by a later def.
+    if (c.multiDef.count(reg)) {
+        if (mayBeMultiDef) *mayBeMultiDef = true;
+        return;
+    }
     auto it = c.defMap.find(reg);
     if (it == c.defMap.end()) {
         // No def in this function: a parameter or other external value.
@@ -111,13 +132,15 @@ static void collectAllocaBases(const std::string& reg, const LicmCaches& c,
     }
     if ((def->op == IROp::ADD || def->op == IROp::MOV) && !def->args.empty() &&
         def->args[0].kind == IRValue::REGISTER) {
-        collectAllocaBases(def->args[0].name, c, out, visiting, mayBeExternal);
+        collectAllocaBases(def->args[0].name, c, out, visiting, mayBeExternal,
+                           mayBeMultiDef);
         return;
     }
     if (def->op == IROp::PHI) {
         for (const auto& [_, val] : def->phiArgs) {
             if (val.kind == IRValue::REGISTER) {
-                collectAllocaBases(val.name, c, out, visiting, mayBeExternal);
+                collectAllocaBases(val.name, c, out, visiting, mayBeExternal,
+                                   mayBeMultiDef);
             } else if (mayBeExternal) {
                 // A non-register incoming (constant/label) is not a local
                 // alloca either.
@@ -134,12 +157,16 @@ static void collectAllocaBases(const std::string& reg, const LicmCaches& c,
 // Marks the allocas an escape-triggering operand may point at.
 static void markEscapedValue(const IRValue& v, LicmCaches& c) {
     if (v.kind != IRValue::REGISTER) return;
-    if (c.multiDef.count(v.name)) {
+    std::set<std::string> bases, visiting;
+    // CIDER-BUG-086/160: a multi-defined value — the operand itself or any
+    // intermediate in its chain — may carry any of several pointers; if one
+    // reaches a callee, every alloca is conservatively treated as escaped.
+    bool multiDef = false;
+    collectAllocaBases(v.name, c, bases, visiting, nullptr, &multiDef);
+    if (multiDef) {
         c.escapedUnknown = true;
         return;
     }
-    std::set<std::string> bases, visiting;
-    collectAllocaBases(v.name, c, bases, visiting);
     c.escapedAllocas.insert(bases.begin(), bases.end());
 }
 
@@ -182,13 +209,16 @@ static LicmCaches buildLicmCaches(const FunctionIR& func,
         // defMap holds just the first def of a multi-defined register, so a
         // base reachable solely through a later def would be missing from
         // loopStores; fall back to treating every alloca as written.
-        if (c.multiDef.count(reg)) {
+        // CIDER-BUG-160: the same applies to a multi-defined INTERMEDIATE
+        // in the chain, which the walk now reports too.
+        std::set<std::string> bases, visiting;
+        bool external = false;
+        bool multiDef = false;
+        collectAllocaBases(reg, c, bases, visiting, &external, &multiDef);
+        if (multiDef) {
             c.loopStoresUnknown = true;
             continue;
         }
-        std::set<std::string> bases, visiting;
-        bool external = false;
-        collectAllocaBases(reg, c, bases, visiting, &external);
         c.loopStores.insert(bases.begin(), bases.end());
         // CIDER-BUG-161: an address with an unresolved producer may hold an
         // external pointer, which can only write an escaped alloca. The

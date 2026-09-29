@@ -1907,6 +1907,428 @@ int testUnknownStoreAddressLicm() {
     return 0;
 }
 
+int testDeepMultiDefStoreLicm() {
+    // CIDER-BUG-160: the CIDER-BUG-143 fallback checked only the raw store
+    // address for multi-defness. A multi-defined register DEEPER in the
+    // chain (`%p = add %q, off`) still resolved through defMap's first def
+    // of `%q`, so a base carried solely by a later def was missing from
+    // loopStores and its in-loop LOAD hoisted to the preheader, freezing
+    // the first iteration's bytes. The chain walk now reports the
+    // intermediate and the store takes the loopStoresUnknown fallback.
+    // Control: a single-defined ADD/MOV/PHI chain keeps resolving, so loads
+    // of allocas the loop never writes still hoist.
+    enum Mode { MultiDefMov, MultiDefPhi, SingleDefChain };
+    auto build = [](Mode mode) {
+        cider::ModuleIR mod;
+        auto fn = std::make_unique<cider::FunctionIR>("f", cider::IRType::VOID);
+
+        auto entry = std::make_unique<cider::BasicBlock>("entry");
+        auto addAlloca = [&](const char* name, int64_t size) {
+            cider::IRInstruction a;
+            a.op = cider::IROp::ALLOCA;
+            a.dest = cider::IRValue::Register(name, cider::IRType::PTR);
+            a.args = {cider::IRValue::Constant(size, cider::IRType::I32)};
+            entry->addInstruction(a);
+        };
+        addAlloca("slot", 64);   // written through the derived address
+        addAlloca("victim", 8);  // reachable only through the later `q` def
+        addAlloca("other", 8);   // never written: control alloca
+        cider::IRInstruction initOther;
+        initOther.op = cider::IROp::STORE;
+        initOther.args = {cider::IRValue::Register("other", cider::IRType::PTR),
+                          cider::IRValue::Constant(7, cider::IRType::I32),
+                          cider::IRValue::Constant(0, cider::IRType::I32)};
+        entry->addInstruction(initOther);
+        cider::IRInstruction off;
+        off.op = cider::IROp::MOV;
+        off.dest = cider::IRValue::Register("off", cider::IRType::I64);
+        off.args = {cider::IRValue::Constant(0, cider::IRType::I64)};
+        entry->addInstruction(off);
+        // `q` is the address intermediate; defMap keeps only its first def.
+        cider::IRInstruction qSlot;
+        qSlot.op = cider::IROp::MOV;
+        qSlot.dest = cider::IRValue::Register("q", cider::IRType::PTR);
+        qSlot.args = {cider::IRValue::Register("slot", cider::IRType::PTR)};
+        entry->addInstruction(qSlot);
+        if (mode == MultiDefMov) {
+            // A later def of `q` carries another base, mirroring the
+            // inliner's per-clone `MOV dest, ret`.
+            cider::IRInstruction qVictim;
+            qVictim.op = cider::IROp::MOV;
+            qVictim.dest = cider::IRValue::Register("q", cider::IRType::PTR);
+            qVictim.args = {cider::IRValue::Register("victim", cider::IRType::PTR)};
+            entry->addInstruction(qVictim);
+        } else if (mode == MultiDefPhi) {
+            cider::IRInstruction qEntry;
+            qEntry.op = cider::IROp::MOV;
+            qEntry.dest = cider::IRValue::Register("qEntry", cider::IRType::PTR);
+            qEntry.args = {cider::IRValue::Register("victim", cider::IRType::PTR)};
+            entry->addInstruction(qEntry);
+        }
+        cider::IRInstruction i0;
+        i0.op = cider::IROp::MOV;
+        i0.dest = cider::IRValue::Register("i0", cider::IRType::I32);
+        i0.args = {cider::IRValue::Constant(0, cider::IRType::I32)};
+        entry->addInstruction(i0);
+        cider::IRInstruction one;
+        one.op = cider::IROp::MOV;
+        one.dest = cider::IRValue::Register("one", cider::IRType::I32);
+        one.args = {cider::IRValue::Constant(1, cider::IRType::I32)};
+        entry->addInstruction(one);
+        cider::IRInstruction enter;
+        enter.op = cider::IROp::BR;
+        enter.args = {cider::IRValue::Label("header")};
+        entry->addInstruction(enter);
+
+        auto header = std::make_unique<cider::BasicBlock>("header");
+        cider::IRInstruction i;
+        i.op = cider::IROp::PHI;
+        i.dest = cider::IRValue::Register("i", cider::IRType::I32);
+        i.phiArgs = {{"entry", cider::IRValue::Register("i0", cider::IRType::I32)},
+                     {"body", cider::IRValue::Register("iNext", cider::IRType::I32)}};
+        header->addInstruction(i);
+        if (mode == MultiDefPhi) {
+            // The second def of `q` is a PHI whose arms carry the hidden
+            // base; the walk must not resolve `q` through its first def only.
+            cider::IRInstruction qPhi;
+            qPhi.op = cider::IROp::PHI;
+            qPhi.dest = cider::IRValue::Register("q", cider::IRType::PTR);
+            qPhi.phiArgs = {{"entry", cider::IRValue::Register("qEntry", cider::IRType::PTR)},
+                            {"body", cider::IRValue::Register("qBack", cider::IRType::PTR)}};
+            header->addInstruction(qPhi);
+        }
+        cider::IRInstruction p;
+        p.op = cider::IROp::ADD;
+        p.dest = cider::IRValue::Register("p", cider::IRType::PTR);
+        p.args = {cider::IRValue::Register("q", cider::IRType::PTR),
+                  cider::IRValue::Register("off", cider::IRType::I64)};
+        header->addInstruction(p);
+        cider::IRInstruction st;
+        st.op = cider::IROp::STORE;
+        st.args = {cider::IRValue::Register("p", cider::IRType::PTR),
+                   cider::IRValue::Register("i", cider::IRType::I32),
+                   cider::IRValue::Constant(0, cider::IRType::I32)};
+        header->addInstruction(st);
+        cider::IRInstruction ldSlot;
+        ldSlot.op = cider::IROp::LOAD;
+        ldSlot.dest = cider::IRValue::Register("v", cider::IRType::I32);
+        ldSlot.args = {cider::IRValue::Register("slot", cider::IRType::PTR),
+                       cider::IRValue::Constant(0, cider::IRType::I32)};
+        header->addInstruction(ldSlot);
+        cider::IRInstruction ldVictim;
+        ldVictim.op = cider::IROp::LOAD;
+        ldVictim.dest = cider::IRValue::Register("w", cider::IRType::I32);
+        ldVictim.args = {cider::IRValue::Register("victim", cider::IRType::PTR),
+                         cider::IRValue::Constant(0, cider::IRType::I32)};
+        header->addInstruction(ldVictim);
+        cider::IRInstruction ldOther;
+        ldOther.op = cider::IROp::LOAD;
+        ldOther.dest = cider::IRValue::Register("u", cider::IRType::I32);
+        ldOther.args = {cider::IRValue::Register("other", cider::IRType::PTR),
+                        cider::IRValue::Constant(0, cider::IRType::I32)};
+        header->addInstruction(ldOther);
+        cider::IRInstruction sum;
+        sum.op = cider::IROp::ADD;
+        sum.dest = cider::IRValue::Register("s", cider::IRType::I32);
+        sum.args = {cider::IRValue::Register("v", cider::IRType::I32),
+                    cider::IRValue::Register("w", cider::IRType::I32)};
+        header->addInstruction(sum);
+        cider::IRInstruction sum2;
+        sum2.op = cider::IROp::ADD;
+        sum2.dest = cider::IRValue::Register("s2", cider::IRType::I32);
+        sum2.args = {cider::IRValue::Register("s", cider::IRType::I32),
+                     cider::IRValue::Register("u", cider::IRType::I32)};
+        header->addInstruction(sum2);
+        cider::IRInstruction inc;
+        inc.op = cider::IROp::ADD;
+        inc.dest = cider::IRValue::Register("iNext", cider::IRType::I32);
+        inc.args = {cider::IRValue::Register("i", cider::IRType::I32),
+                    cider::IRValue::Register("one", cider::IRType::I32)};
+        header->addInstruction(inc);
+        cider::IRInstruction cmp;
+        cmp.op = cider::IROp::CMP_LT;
+        cmp.dest = cider::IRValue::Register("cond", cider::IRType::BOOL);
+        cmp.args = {cider::IRValue::Register("iNext", cider::IRType::I32),
+                    cider::IRValue::Constant(10, cider::IRType::I32)};
+        header->addInstruction(cmp);
+        cider::IRInstruction cbr;
+        cbr.op = cider::IROp::COND_BR;
+        cbr.args = {cider::IRValue::Register("cond", cider::IRType::BOOL),
+                    cider::IRValue::Label("body"), cider::IRValue::Label("exit")};
+        header->addInstruction(cbr);
+
+        auto body = std::make_unique<cider::BasicBlock>("body");
+        if (mode == MultiDefPhi) {
+            cider::IRInstruction qBack;
+            qBack.op = cider::IROp::MOV;
+            qBack.dest = cider::IRValue::Register("qBack", cider::IRType::PTR);
+            qBack.args = {cider::IRValue::Register("victim", cider::IRType::PTR)};
+            body->addInstruction(qBack);
+        }
+        cider::IRInstruction back;
+        back.op = cider::IROp::BR;
+        back.args = {cider::IRValue::Label("header")};
+        body->addInstruction(back);
+
+        auto exit = std::make_unique<cider::BasicBlock>("exit");
+        cider::IRInstruction ret;
+        ret.op = cider::IROp::RET;
+        exit->addInstruction(ret);
+
+        fn->addBlock(std::move(entry));
+        fn->addBlock(std::move(header));
+        fn->addBlock(std::move(body));
+        fn->addBlock(std::move(exit));
+        mod.addFunction(std::move(fn));
+        return mod;
+    };
+
+    struct Counts { int preSlot, loopSlot, preVictim, loopVictim, preOther, loopOther; };
+    auto count = [](cider::ModuleIR& mod) {
+        Counts n{0, 0, 0, 0, 0, 0};
+        for (const auto& b : mod.getFunctions()[0]->getBlocks()) {
+            const bool pre = b->getName().find("preheader") != std::string::npos;
+            const bool inLoop = b->getName() == "header";
+            for (const auto& in : b->getInstructions()) {
+                if (in.op != cider::IROp::LOAD || in.args.empty() ||
+                    in.args[0].kind != cider::IRValue::REGISTER) continue;
+                const std::string& a = in.args[0].name;
+                if (a == "slot") { if (pre) n.preSlot++; else if (inLoop) n.loopSlot++; }
+                if (a == "victim") { if (pre) n.preVictim++; else if (inLoop) n.loopVictim++; }
+                if (a == "other") { if (pre) n.preOther++; else if (inLoop) n.loopOther++; }
+            }
+        }
+        return n;
+    };
+    auto checkFallback = [&](cider::ModuleIR& mod) {
+        Counts n = count(mod);
+        CHECK(n.preSlot == 0);     // written through the chain: stays
+        CHECK(n.loopSlot == 1);
+        CHECK(n.preVictim == 0);   // hidden base: must stay too
+        CHECK(n.loopVictim == 1);
+        CHECK(n.preOther == 0);    // conservative fallback: nothing hoists
+        CHECK(n.loopOther == 1);
+        return 0;
+    };
+    auto checkPrecise = [&](cider::ModuleIR& mod) {
+        Counts n = count(mod);
+        CHECK(n.preSlot == 0);     // written through the chain: stays
+        CHECK(n.loopSlot == 1);
+        CHECK(n.preVictim == 1);   // control: unwritten allocas still hoist
+        CHECK(n.loopVictim == 0);
+        CHECK(n.preOther == 1);
+        CHECK(n.loopOther == 0);
+        return 0;
+    };
+
+    const Mode modes[] = {MultiDefMov, MultiDefPhi, SingleDefChain};
+    for (Mode mode : modes) {
+        auto ssaMod = build(mode);
+        cider::SSALicmPass licm;
+        licm.run(ssaMod);
+        CHECK((mode == SingleDefChain ? checkPrecise(ssaMod) : checkFallback(ssaMod)) == 0);
+
+        auto postMod = build(mode);
+        cider::PostLicmPass postLicm;
+        postLicm.run(postMod);
+        CHECK((mode == SingleDefChain ? checkPrecise(postMod) : checkFallback(postMod)) == 0);
+    }
+    return 0;
+}
+
+int testDeepMultiDefEscapeLicm() {
+    // CIDER-BUG-160 / CIDER-BUG-086: markEscapedValue resolves an operand
+    // that reaches a callee through the same chain walk, and checked only
+    // the raw register for multi-defness. With a multi-defined intermediate
+    // (`%p = add %q, off`, `%q` defined twice), defMap's first def marked
+    // the wrong alloca as escaped, so `slot` — reachable solely through the
+    // later def — was not, and its in-loop LOAD hoisted across the in-loop
+    // clobber, freezing the first iteration's bytes. The walk now reports
+    // the intermediate and escapedUnknown takes over. Control: a
+    // single-defined chain still marks precisely, so only the escaping
+    // alloca is blocked and the non-escaping one keeps hoisting.
+    enum Mode { MultiDef, SingleDef };
+    auto build = [](Mode mode) {
+        cider::ModuleIR mod;
+        auto fn = std::make_unique<cider::FunctionIR>("f", cider::IRType::VOID);
+
+        auto entry = std::make_unique<cider::BasicBlock>("entry");
+        auto addAlloca = [&](const char* name, int64_t size) {
+            cider::IRInstruction a;
+            a.op = cider::IROp::ALLOCA;
+            a.dest = cider::IRValue::Register(name, cider::IRType::PTR);
+            a.args = {cider::IRValue::Constant(size, cider::IRType::I32)};
+            entry->addInstruction(a);
+        };
+        addAlloca("slot", 64);   // really reaches the callee through `q`
+        addAlloca("other", 8);   // never escapes: control alloca
+        cider::IRInstruction initOther;
+        initOther.op = cider::IROp::STORE;
+        initOther.args = {cider::IRValue::Register("other", cider::IRType::PTR),
+                          cider::IRValue::Constant(7, cider::IRType::I32),
+                          cider::IRValue::Constant(0, cider::IRType::I32)};
+        entry->addInstruction(initOther);
+        cider::IRInstruction off;
+        off.op = cider::IROp::MOV;
+        off.dest = cider::IRValue::Register("off", cider::IRType::I64);
+        off.args = {cider::IRValue::Constant(0, cider::IRType::I64)};
+        entry->addInstruction(off);
+        // `q` is the escape-operand intermediate; defMap keeps only its
+        // first def, so a base carried by a later def is hidden.
+        if (mode == MultiDef) {
+            cider::IRInstruction qOther;
+            qOther.op = cider::IROp::MOV;
+            qOther.dest = cider::IRValue::Register("q", cider::IRType::PTR);
+            qOther.args = {cider::IRValue::Register("other", cider::IRType::PTR)};
+            entry->addInstruction(qOther);
+        }
+        cider::IRInstruction qSlot;
+        qSlot.op = cider::IROp::MOV;
+        qSlot.dest = cider::IRValue::Register("q", cider::IRType::PTR);
+        qSlot.args = {cider::IRValue::Register("slot", cider::IRType::PTR)};
+        entry->addInstruction(qSlot);
+        cider::IRInstruction p;
+        p.op = cider::IROp::ADD;
+        p.dest = cider::IRValue::Register("p", cider::IRType::PTR);
+        p.args = {cider::IRValue::Register("q", cider::IRType::PTR),
+                  cider::IRValue::Register("off", cider::IRType::I64)};
+        entry->addInstruction(p);
+        // Escape site outside the loop: the callee can keep the pointer and
+        // later write `slot` through it. `q`'s later def is the real one.
+        cider::IRInstruction esc;
+        esc.op = cider::IROp::CALL;
+        esc.args = {cider::IRValue::Label("sink"),
+                    cider::IRValue::Register("p", cider::IRType::PTR)};
+        entry->addInstruction(esc);
+        cider::IRInstruction i0;
+        i0.op = cider::IROp::MOV;
+        i0.dest = cider::IRValue::Register("i0", cider::IRType::I32);
+        i0.args = {cider::IRValue::Constant(0, cider::IRType::I32)};
+        entry->addInstruction(i0);
+        cider::IRInstruction one;
+        one.op = cider::IROp::MOV;
+        one.dest = cider::IRValue::Register("one", cider::IRType::I32);
+        one.args = {cider::IRValue::Constant(1, cider::IRType::I32)};
+        entry->addInstruction(one);
+        cider::IRInstruction enter;
+        enter.op = cider::IROp::BR;
+        enter.args = {cider::IRValue::Label("header")};
+        entry->addInstruction(enter);
+
+        auto header = std::make_unique<cider::BasicBlock>("header");
+        cider::IRInstruction i;
+        i.op = cider::IROp::PHI;
+        i.dest = cider::IRValue::Register("i", cider::IRType::I32);
+        i.phiArgs = {{"entry", cider::IRValue::Register("i0", cider::IRType::I32)},
+                     {"body", cider::IRValue::Register("iNext", cider::IRType::I32)}};
+        header->addInstruction(i);
+        cider::IRInstruction clobber;
+        clobber.op = cider::IROp::CALL;
+        clobber.args = {cider::IRValue::Label("touch")};
+        header->addInstruction(clobber);
+        cider::IRInstruction ldSlot;
+        ldSlot.op = cider::IROp::LOAD;
+        ldSlot.dest = cider::IRValue::Register("v", cider::IRType::I32);
+        ldSlot.args = {cider::IRValue::Register("slot", cider::IRType::PTR),
+                       cider::IRValue::Constant(0, cider::IRType::I32)};
+        header->addInstruction(ldSlot);
+        cider::IRInstruction ldOther;
+        ldOther.op = cider::IROp::LOAD;
+        ldOther.dest = cider::IRValue::Register("w", cider::IRType::I32);
+        ldOther.args = {cider::IRValue::Register("other", cider::IRType::PTR),
+                        cider::IRValue::Constant(0, cider::IRType::I32)};
+        header->addInstruction(ldOther);
+        cider::IRInstruction sum;
+        sum.op = cider::IROp::ADD;
+        sum.dest = cider::IRValue::Register("s", cider::IRType::I32);
+        sum.args = {cider::IRValue::Register("v", cider::IRType::I32),
+                    cider::IRValue::Register("w", cider::IRType::I32)};
+        header->addInstruction(sum);
+        cider::IRInstruction inc;
+        inc.op = cider::IROp::ADD;
+        inc.dest = cider::IRValue::Register("iNext", cider::IRType::I32);
+        inc.args = {cider::IRValue::Register("i", cider::IRType::I32),
+                    cider::IRValue::Register("one", cider::IRType::I32)};
+        header->addInstruction(inc);
+        cider::IRInstruction cmp;
+        cmp.op = cider::IROp::CMP_LT;
+        cmp.dest = cider::IRValue::Register("cond", cider::IRType::BOOL);
+        cmp.args = {cider::IRValue::Register("iNext", cider::IRType::I32),
+                    cider::IRValue::Constant(10, cider::IRType::I32)};
+        header->addInstruction(cmp);
+        cider::IRInstruction cbr;
+        cbr.op = cider::IROp::COND_BR;
+        cbr.args = {cider::IRValue::Register("cond", cider::IRType::BOOL),
+                    cider::IRValue::Label("body"), cider::IRValue::Label("exit")};
+        header->addInstruction(cbr);
+
+        auto body = std::make_unique<cider::BasicBlock>("body");
+        cider::IRInstruction back;
+        back.op = cider::IROp::BR;
+        back.args = {cider::IRValue::Label("header")};
+        body->addInstruction(back);
+
+        auto exit = std::make_unique<cider::BasicBlock>("exit");
+        cider::IRInstruction ret;
+        ret.op = cider::IROp::RET;
+        exit->addInstruction(ret);
+
+        fn->addBlock(std::move(entry));
+        fn->addBlock(std::move(header));
+        fn->addBlock(std::move(body));
+        fn->addBlock(std::move(exit));
+        mod.addFunction(std::move(fn));
+        return mod;
+    };
+
+    struct Counts { int preSlot, loopSlot, preOther, loopOther; };
+    auto count = [](cider::ModuleIR& mod) {
+        Counts n{0, 0, 0, 0};
+        for (const auto& b : mod.getFunctions()[0]->getBlocks()) {
+            const bool pre = b->getName().find("preheader") != std::string::npos;
+            const bool inLoop = b->getName() == "header";
+            for (const auto& in : b->getInstructions()) {
+                if (in.op != cider::IROp::LOAD || in.args.empty() ||
+                    in.args[0].kind != cider::IRValue::REGISTER) continue;
+                const std::string& a = in.args[0].name;
+                if (a == "slot") { if (pre) n.preSlot++; else if (inLoop) n.loopSlot++; }
+                if (a == "other") { if (pre) n.preOther++; else if (inLoop) n.loopOther++; }
+            }
+        }
+        return n;
+    };
+    auto checkEscape = [&](cider::ModuleIR& mod) {
+        Counts n = count(mod);
+        CHECK(n.preSlot == 0);     // escaped alloca: no hoist across the clobber
+        CHECK(n.loopSlot == 1);
+        CHECK(n.preOther == 0);    // conservative fallback: nothing hoists
+        CHECK(n.loopOther == 1);
+        return 0;
+    };
+    auto checkPrecise = [&](cider::ModuleIR& mod) {
+        Counts n = count(mod);
+        CHECK(n.preSlot == 0);     // only the escaping alloca is blocked
+        CHECK(n.loopSlot == 1);
+        CHECK(n.preOther == 1);    // non-escaping control still hoists
+        CHECK(n.loopOther == 0);
+        return 0;
+    };
+
+    const Mode modes[] = {MultiDef, SingleDef};
+    for (Mode mode : modes) {
+        auto ssaMod = build(mode);
+        cider::SSALicmPass licm;
+        licm.run(ssaMod);
+        CHECK((mode == SingleDef ? checkPrecise(ssaMod) : checkEscape(ssaMod)) == 0);
+
+        auto postMod = build(mode);
+        cider::PostLicmPass postLicm;
+        postLicm.run(postMod);
+        CHECK((mode == SingleDef ? checkPrecise(postMod) : checkEscape(postMod)) == 0);
+    }
+    return 0;
+}
+
 int testInliner() {
     // A small helper gets inlined; recursion does not.
     auto r = genModule(
@@ -1995,6 +2417,8 @@ int run() {
     CHECK(testDerivedStoreLicm() == 0);
     CHECK(testMultiDefStoreLicm() == 0);
     CHECK(testUnknownStoreAddressLicm() == 0);
+    CHECK(testDeepMultiDefStoreLicm() == 0);
+    CHECK(testDeepMultiDefEscapeLicm() == 0);
     CHECK(testInliner() == 0);
     CHECK(testInlinerSiteBudget() == 0);
     return 0;
