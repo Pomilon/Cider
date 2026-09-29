@@ -1270,11 +1270,22 @@ public:
         // spelling stops (the same bounded walk as getFieldSize).
         std::set<std::string> visiting;
         if (!type.name.empty()) visiting.insert(type.name);
+        // CIDER-BUG-112: follow the chain while remembering the last target
+        // shape. An alias-to-array (`type Shapes2 = [Shape; 2]`) stops the
+        // walk on the element name, and flagging the aggregate as one
+        // 16-byte interface would break its sizing and store paths; only a
+        // scalar target is the fat pointer (same rule as CIDER-BUG-069's
+        // "arrays keep their wrapper unflagged").
+        TypeInfo aliasTarget = sym ? sym->type : TypeInfo{};
         while (sym && sym->isTypeAlias && !sym->type.name.empty() &&
                sym->type.name != type.name && visiting.insert(sym->type.name).second) {
+            aliasTarget = sym->type;
             sym = resolveNominalType(sym->type.name);
         }
-        if (sym && sym->kind == SymbolKind::INTERFACE) type.isInterface = true;
+        if (sym && sym->kind == SymbolKind::INTERFACE &&
+            aliasTarget.pointerLevel == 0 && !aliasTarget.isArray) {
+            type.isInterface = true;
+        }
     }
 
     int getFieldSize(const TypeInfo& type, std::set<std::string>* visiting = nullptr) {

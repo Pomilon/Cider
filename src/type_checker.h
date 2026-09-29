@@ -1398,31 +1398,29 @@ public:
         return false;
     }
 
-    // Fixed-size array from a list literal (CID-007): `var t: [u8; 4] =
-    // [10, 20, 30, 40]`. Checks element count and per-element types.
-    // Globals have no runtime initialiser, so their elements must be
-    // constant (a clear error otherwise, never silent BSS-zero). Only
-    // called for fixed-size array declarations; pointer-from-list (`var
-    // l: *int = [...]`) keeps the legacy path.
+    // Fixed-size array elements from a list literal (CID-007): element
+    // count and per-element types. Shared by the declaration-time
+    // initializer and CIDER-BUG-112's reassignment so the two sites cannot
+    // drift; `where` names the site in diagnostics ("declaration of 'x'" /
+    // "assignment to 'x'"). Returns false after reporting.
     // CIDER-BUG-092: declaredType is the alias-resolved shape (an alias
     // spelling carries isArray=false until its chain resolves).
-    void checkFixedArrayInit(VarDeclStmt& stmt, const TypeInfo& declaredType) {
-        auto* list = static_cast<ListExpr*>(stmt.getInitializer());
-        auto& elems = list->getElements();
+    bool checkFixedArrayElements(const std::string& where, const TypeInfo& declaredType,
+                                 ListExpr& list, int line) {
+        auto& elems = list.getElements();
         if ((int)elems.size() != declaredType.arraySize) {
-            error("Array initializer size mismatch in declaration of '" + stmt.getName() +
-                      "': expected " + std::to_string(declaredType.arraySize) +
-                      ", got " + std::to_string(elems.size()), stmt.getLine());
-            return;
+            error("Array initializer size mismatch in " + where + ": expected " +
+                      std::to_string(declaredType.arraySize) + ", got " +
+                      std::to_string(elems.size()), line);
+            return false;
         }
         TypeInfo elemDecl = declaredType.elementType();
         for (auto& e : elems) {
             e->accept(*this);
             if (!areTypesCompatible(elemDecl, lastExprType_)) {
-                error("Array element type mismatch in declaration of '" + stmt.getName() +
-                          "': expected " + elemDecl.toString() + ", got " + lastExprType_.toString(),
-                      stmt.getLine());
-                return;
+                error("Array element type mismatch in " + where + ": expected " +
+                          elemDecl.toString() + ", got " + lastExprType_.toString(), line);
+                return false;
             }
             // CIDER-BUG-068: a fixed fn(...) array element keeps the plain
             // raw-pointer shape, so a statically-plain element that resolves
@@ -1431,14 +1429,26 @@ public:
             TypeInfo elemFn = resolveFunctionPointerAlias(elemDecl);
             if (elemFn.isFunctionPointer && !elemFn.isArray) {
                 int slot = fnSlot("s:" + std::to_string(fnStoreCheckCount_++), "an array element",
-                                  stmt.getLine());
-                fnRecordExpr(slot, e.get(), lastExprType_, stmt.getLine());
+                                  line);
+                fnRecordExpr(slot, e.get(), lastExprType_, line);
             }
         }
+        return true;
+    }
+
+    // Fixed-size array from a list literal (CID-007): `var t: [u8; 4] =
+    // [10, 20, 30, 40]`. Globals have no runtime initialiser, so their
+    // elements must be constant (a clear error otherwise, never silent
+    // BSS-zero). Only called for fixed-size array declarations;
+    // pointer-from-list (`var l: *int = [...]`) keeps the legacy path.
+    void checkFixedArrayInit(VarDeclStmt& stmt, const TypeInfo& declaredType) {
+        auto* list = static_cast<ListExpr*>(stmt.getInitializer());
+        std::string where = "declaration of '" + stmt.getName() + "'";
+        if (!checkFixedArrayElements(where, declaredType, *list, stmt.getLine())) return;
         // CID-020/021 (spec §6): scopeDepth skips module scopes via the
         // scope-kind flag, so a module-level array still counts as global.
         if (symbolTable_.scopeDepth() == 0) {
-            for (auto& e : elems) {
+            for (auto& e : list->getElements()) {
                 if (!isConstIntExpr(e.get())) {
                     error("Global array initializer in declaration of '" + stmt.getName() +
                               "' must use constant expressions", stmt.getLine());
@@ -1446,6 +1456,18 @@ public:
                 }
             }
         }
+        lastExprType_ = declaredType;
+    }
+
+    // CIDER-BUG-112: reassigning a list literal into an existing fixed
+    // array (`s = [1,2,3]`, direct or alias spelling) takes the same
+    // size/element checks as the declaration-time initializer. Unlike a
+    // module-scope declaration, the assignment is a runtime site even for
+    // a global target, so the elements may be runtime expressions; the
+    // shared helper visits each element exactly once.
+    void checkFixedArrayAssign(const std::string& where, const TypeInfo& declaredType,
+                               ListExpr& list, int line) {
+        if (!checkFixedArrayElements(where, declaredType, list, line)) return;
         lastExprType_ = declaredType;
     }
 
@@ -1632,6 +1654,14 @@ public:
     // fix. Null for non-interface shapes.
     std::shared_ptr<Symbol> resolveInterfaceSymbol(TypeInfo t) {
         TypeInfo resolved = resolveType(t);
+        // CIDER-BUG-112: an alias spelling can resolve to an aggregate whose
+        // innermost element names an interface (`type Shapes2 = [Shape; 2]`).
+        // Only a scalar shape is a fat pointer; without this guard the
+        // name-keyed lookup below sees the array's element name and flags
+        // the whole aggregate as one interface (wrong storage size and
+        // store path). Callers strip an array/pointer first when they mean
+        // an element.
+        if (resolved.pointerLevel > 0 || resolved.isArray) return nullptr;
         auto typeSym = resolveScoped(resolved.name);
         if (!typeSym && resolved.name.find('.') != std::string::npos) {
             auto dot = resolved.name.rfind('.');
@@ -2068,16 +2098,12 @@ public:
             }
         }
 
-        stmt.getValue()->accept(*this);
-        TypeInfo valueType = lastExprType_;
-
-        // CIDER-ISS-002: the target is initialized from here on (simple and
-        // compound forms both count). Marked after the value walk so
-        // `x = x + 1` on an unassigned x still reports the value read.
-        if (warningsActive_ && target) {
-            warnings_.markAssigned(resolveScoped(target->getName()));
-        }
-
+        // CIDER-BUG-054 / CIDER-BUG-071: the target's interface and array
+        // shapes are needed before the value walk so CIDER-BUG-112's
+        // list-literal path can run the declaration-time element checks in
+        // place of the generic compatibility test. Both are derived from
+        // targetType only, exactly as before.
+        //
         // CIDER-BUG-054: reassigning an interface variable uses the same
         // conversion rule as its declaration — any satisfying concrete
         // value, or a copy of the same interface. The flag can be missing
@@ -2093,58 +2119,93 @@ public:
 
         // CIDER-BUG-071: an alias-typed target (`type Row = [u8;3]`;
         // `s = base[1:4]`, or a field/member of alias type) carries the
-        // alias spelling in targetType; resolve it so the slice-copy rule
-        // sees the array shape, exactly like the direct spelling.
+        // alias spelling in targetType; resolve it so the slice-copy and
+        // list-literal rules see the array shape, exactly like the direct
+        // spelling.
         TypeInfo targetArray = resolveType(targetType);
 
-        if (ifaceTargetType.isInterface) {
-            checkInterfaceValue(ifaceTargetType, valueType, stmt.getLine());
-        } else if (valueType.isSlice && valueType.pointerLevel == 0 &&
-                   targetArray.isArray && targetArray.pointerLevel == 0) {
-            // CIDER-BUG-057: `arr = base[start:end]` copies the slice's
-            // elements into the existing array, with the same size and
-            // element rules as the declaration-time copy above.
+        // CIDER-BUG-112: a list literal reassigned into a fixed array
+        // (`s = [1,2,3]`, direct or alias spelling) takes the same
+        // size/element checks as the declaration-time initializer, with
+        // each element visited exactly once (the declaration path also
+        // skips visit(ListExpr) for array targets). Plain assignments only:
+        // `s += [1,2,3]` keeps the existing mismatch rejection.
+        TypeInfo valueType;
+        auto* listValue = stmt.getOp().empty() ? dynamic_cast<ListExpr*>(stmt.getValue())
+                                               : nullptr;
+        if (listValue && !ifaceTargetType.isInterface && targetArray.isArray &&
+            targetArray.pointerLevel == 0 && targetArray.arraySize > 0) {
             std::string where = target ? ("assignment to '" + target->getName() + "'")
                                        : std::string("array assignment");
-            checkSliceArrayCopy(where, targetArray, valueType,
-                                dynamic_cast<SliceExpr*>(stmt.getValue()), stmt.getLine());
-        } else if (!areTypesCompatible(targetType, valueType)) {
-            error("Type mismatch in assignment. Expected " + canonicalizeNominal(targetType).toString() +
-                      ", got " + canonicalizeNominal(valueType).toString(),
-                  stmt.getLine());
+            checkFixedArrayAssign(where, targetArray, *listValue, stmt.getLine());
+            valueType = lastExprType_;
         } else {
-            // CIDER-BUG-068: the assignment is representation-consistent
-            // (the compatibility test above rejects closure/plain mixes on
-            // one storage), so feed the inference with the value's
-            // representation for later argument-passing decisions. A
-            // fn-typed field/element/pointee store keeps the plain raw-pointer
-            // shape (that storage has no representation refinement), so its
-            // site is recorded and a closure value is reported in the
-            // post-pass instead of being miscompiled.
-            TypeInfo targetFn = resolveFunctionPointerAlias(targetType);
-            TypeInfo valueFn = resolveFunctionPointerAlias(valueType);
-            if (targetFn.isFunctionPointer && !targetFn.isArray &&
-                valueFn.isFunctionPointer && !valueFn.isArray) {
-                if (target) {
-                    auto sym = resolveScoped(target->getName());
-                    if (sym && sym->kind == SymbolKind::VARIABLE) {
-                        int slot = fnSlotForSymbol(sym, "variable '" + sym->name + "'", stmt.getLine());
+            stmt.getValue()->accept(*this);
+            valueType = lastExprType_;
+
+            if (ifaceTargetType.isInterface) {
+                checkInterfaceValue(ifaceTargetType, valueType, stmt.getLine());
+            } else if (valueType.isSlice && valueType.pointerLevel == 0 &&
+                       targetArray.isArray && targetArray.pointerLevel == 0) {
+                // CIDER-BUG-057: `arr = base[start:end]` copies the slice's
+                // elements into the existing array, with the same size and
+                // element rules as the declaration-time copy above.
+                std::string where = target ? ("assignment to '" + target->getName() + "'")
+                                           : std::string("array assignment");
+                checkSliceArrayCopy(where, targetArray, valueType,
+                                    dynamic_cast<SliceExpr*>(stmt.getValue()), stmt.getLine());
+            } else if (!stmt.getOp().empty() && dynamic_cast<ListExpr*>(stmt.getValue())) {
+                // CIDER-BUG-112: a list literal has no compound-assignment
+                // lowering — the element-wise copy rule applies to a plain
+                // assignment only — so report that instead of the generic
+                // type mismatch below.
+                error("A list literal cannot be used with compound assignment '" +
+                          stmt.getOp() + "='", stmt.getLine());
+            } else if (!areTypesCompatible(targetType, valueType)) {
+                error("Type mismatch in assignment. Expected " + canonicalizeNominal(targetType).toString() +
+                          ", got " + canonicalizeNominal(valueType).toString(),
+                      stmt.getLine());
+            } else {
+                // CIDER-BUG-068: the assignment is representation-consistent
+                // (the compatibility test above rejects closure/plain mixes on
+                // one storage), so feed the inference with the value's
+                // representation for later argument-passing decisions. A
+                // fn-typed field/element/pointee store keeps the plain raw-pointer
+                // shape (that storage has no representation refinement), so its
+                // site is recorded and a closure value is reported in the
+                // post-pass instead of being miscompiled.
+                TypeInfo targetFn = resolveFunctionPointerAlias(targetType);
+                TypeInfo valueFn = resolveFunctionPointerAlias(valueType);
+                if (targetFn.isFunctionPointer && !targetFn.isArray &&
+                    valueFn.isFunctionPointer && !valueFn.isArray) {
+                    if (target) {
+                        auto sym = resolveScoped(target->getName());
+                        if (sym && sym->kind == SymbolKind::VARIABLE) {
+                            int slot = fnSlotForSymbol(sym, "variable '" + sym->name + "'", stmt.getLine());
+                            fnRecordExpr(slot, stmt.getValue(), valueType, stmt.getLine());
+                        }
+                    } else {
+                        std::string siteLabel = "a fn(...) storage location";
+                        if (auto* mem = dynamic_cast<MemberAccessExpr*>(stmt.getTarget())) {
+                            siteLabel = "field '" + mem->getMember() + "'";
+                        } else if (dynamic_cast<IndexExpr*>(stmt.getTarget())) {
+                            siteLabel = "an array element";
+                        } else if (auto* un = dynamic_cast<UnaryExpr*>(stmt.getTarget())) {
+                            if (un->getOperator() == "*") siteLabel = "a pointer target";
+                        }
+                        int slot = fnSlot("s:" + std::to_string(fnStoreCheckCount_++), siteLabel,
+                                          stmt.getLine());
                         fnRecordExpr(slot, stmt.getValue(), valueType, stmt.getLine());
                     }
-                } else {
-                    std::string siteLabel = "a fn(...) storage location";
-                    if (auto* mem = dynamic_cast<MemberAccessExpr*>(stmt.getTarget())) {
-                        siteLabel = "field '" + mem->getMember() + "'";
-                    } else if (dynamic_cast<IndexExpr*>(stmt.getTarget())) {
-                        siteLabel = "an array element";
-                    } else if (auto* un = dynamic_cast<UnaryExpr*>(stmt.getTarget())) {
-                        if (un->getOperator() == "*") siteLabel = "a pointer target";
-                    }
-                    int slot = fnSlot("s:" + std::to_string(fnStoreCheckCount_++), siteLabel,
-                                      stmt.getLine());
-                    fnRecordExpr(slot, stmt.getValue(), valueType, stmt.getLine());
                 }
             }
+        }
+
+        // CIDER-ISS-002: the target is initialized from here on (simple and
+        // compound forms both count). Marked after the value walk so
+        // `x = x + 1` on an unassigned x still reports the value read.
+        if (warningsActive_ && target) {
+            warnings_.markAssigned(resolveScoped(target->getName()));
         }
 
         // CID-003 follow-up (W5): compound assignments mirror the binary

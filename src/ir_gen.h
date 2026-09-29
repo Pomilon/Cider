@@ -3949,8 +3949,15 @@ public:
     TypeInfo resolveInterfaceNominal(TypeInfo t) {
         if (!t.isInterface && t.pointerLevel == 0 && !t.isArray) {
             TypeInfo resolved = resolveTypeAlias(t);
-            auto typeSym = resolveNominalType(resolved.name);
-            if (typeSym && typeSym->kind == SymbolKind::INTERFACE) t.isInterface = true;
+            // CIDER-BUG-112: an alias spelling can resolve to an aggregate
+            // whose innermost element names an interface (`type Shapes2 =
+            // [Shape; 2]`). Only the scalar shape is the 16-byte fat
+            // pointer; flagging the aggregate spelling would size it as one
+            // interface and route its copies through emitInterfaceStore.
+            if (resolved.pointerLevel == 0 && !resolved.isArray) {
+                auto typeSym = resolveNominalType(resolved.name);
+                if (typeSym && typeSym->kind == SymbolKind::INTERFACE) t.isInterface = true;
+            }
         }
         return t;
     }
@@ -4679,6 +4686,43 @@ public:
                 if (targetIface.isInterface) {
                     emitInterfaceStore(targetIface, addr, stmt.getValue(),
                                        targetIsVolatile);
+                    return;
+                }
+            }
+            // CIDER-BUG-112: a list literal reassigned into an existing
+            // fixed array (`s = [1,2,3]`, direct or alias spelling) mirrors
+            // the declaration-time lowering: each element stores at its
+            // declared width/offset, and aggregate elements (CIDER-BUG-104)
+            // are copied through emitListElementStore. The literal is never
+            // materialised as a temp buffer, exactly like a declaration.
+            // A label target (a global) is materialised into a register
+            // first: the label STORE path has no per-element offset. The
+            // checker has already enforced the size and element types.
+            if (auto list = dynamic_cast<ListExpr*>(stmt.getValue())) {
+                TypeInfo assignArray = resolveTypeAlias(inferExprType(stmt.getTarget()));
+                if (assignArray.isArray && assignArray.pointerLevel == 0 &&
+                    assignArray.arraySize > 0) {
+                    TypeInfo elemType = resolveTypeAlias(assignArray.elementType());
+                    int elemSize = getTypeSize(elemType);
+                    bool elemIsAggregate = isListAggregateElement(elemType);
+                    IRValue storeBase = addr;
+                    if (storeBase.kind == IRValue::LABEL) {
+                        storeBase = IRValue::Register(nextTemp(), IRType::PTR);
+                        currentBlock_->addInstruction({IROp::ADD, storeBase,
+                                                       {addr, IRValue::Constant(0, IRType::I32)}});
+                    }
+                    auto& elems = list->getElements();
+                    for (size_t ei = 0; ei < elems.size(); ei++) {
+                        elems[ei]->accept(*this);
+                        // CID-003: elements store at the declared width,
+                        // exactly like the declaration path.
+                        IRValue eval = convertValueToType(lastValue_, elemType);
+                        emitListElementStore(storeBase, (int64_t)(ei * (size_t)elemSize), eval,
+                                             elemType, elemSize, elemIsAggregate,
+                                             targetIsVolatile);
+                    }
+                    lastExprType_ = assignArray;
+                    lastValue_ = storeBase;
                     return;
                 }
             }
