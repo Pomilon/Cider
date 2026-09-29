@@ -94,7 +94,25 @@ public:
     // collide; empty (the default) keeps whole-program output byte-identical.
     void setSeparateCompilation(bool v) { separateCompilation_ = v; }
 
+    // CIDER-BUG-184: the checked program boxes at least one concrete
+    // struct/class value into an interface-typed return (see
+    // TypeChecker::hasInterfaceBoxing). The driver passes the flag before
+    // generate(); unit tests that build IR without a checker leave it unset
+    // and keep the legacy boxing path. With the flag on, every box is
+    // tagged and every interface-returning call site releases the tag, so
+    // the release must be decided program-wide, before any function is
+    // generated: a call site may precede the boxing return that feeds it.
+    void setInterfaceBoxing(bool v) { ifaceBoxing_ = v; }
+
     ModuleIR generate(AstProgram& program) {
+        // CIDER-BUG-184: separate-compilation objects cannot see whether an
+        // imported function boxes (only declaration snapshots travel), while
+        // a tagged box from another object must still be masked at dispatch
+        // and released at the call site. Using the same boxing program
+        // representation in every object of a separate build keeps both ends
+        // consistent; whole-program builds keep the checker-derived flag, so
+        // programs without concrete-to-interface returns stay byte-identical.
+        if (separateCompilation_) ifaceBoxing_ = true;
         // CIDER-FEAT-006: token derived from this object's entry source
         // path. Deterministic (identical rebuilds stay byte-identical) and
         // distinct per compilation unit.
@@ -314,7 +332,24 @@ public:
         // class-value subobject registers its accumulated field/element
         // offset and gets its address computed at scope exit.
         int offset = 0;
+        // CIDER-BUG-184: when non-zero, this entry is not a destructor call
+        // but the release of an interface-returned concrete box. `varAddr`
+        // is the call's fat-pointer slot and the value is this site's box
+        // ownership token: the box header keeps the token of the last
+        // registration, and only that holder releases the box (its
+        // destructors, then the heap block). Zero means a plain finalizer.
+        int ifaceBoxToken = 0;
     };
+
+    // CIDER-BUG-184: reserved box-header token values. A returned box is
+    // transferred to the caller by overwriting the header token with
+    // `kIfaceBoxTransferred`, so every holder still registered in the
+    // returning frame skips its release; the caller's own call-site
+    // registration writes its token afterwards. The dummy box (the
+    // branchless release's safe target when a value is not a box) keeps
+    // token 0, which no registration ever uses.
+    static constexpr int kIfaceBoxTransferred = 0;
+    static constexpr int kIfaceBoxNoToken = 0;
 
     // CIDER-BUG-050: a `defer` runs when the lexical block it is written in
     // exits, so emission unwinds from the innermost scope down to (and
@@ -340,6 +375,14 @@ public:
         for (size_t i = destructorStack_.size(); i > firstScope; --i) {
             for (size_t j = destructorStack_[i - 1].size(); j > 0; --j) {
                 const DestructorInfo& d = destructorStack_[i - 1][j - 1];
+                // CIDER-BUG-184: an interface-box release is a self-contained
+                // branchless sequence (see emitIfaceBoxRelease); it stays in
+                // the current block so unwinding sites do not multiply the
+                // control-flow graph.
+                if (d.ifaceBoxToken != kIfaceBoxNoToken) {
+                    emitIfaceBoxRelease(d.varAddr, d.ifaceBoxToken);
+                    continue;
+                }
                 // CIDER-BUG-088: an embedded subobject's address is computed
                 // here (lazily) instead of at declaration, so no pointer for
                 // it stays live through the enclosing scope. The direct
@@ -367,6 +410,154 @@ public:
     }
 
     void emitDestructors() { emitDestructors(0); }
+
+    // CIDER-BUG-184: branchless address select used by the box release and
+    // registration paths. `cond` is 0/1; the result is `a` when it is 1 and
+    // `b` otherwise. No branches: the release must not grow the CFG at
+    // every unwind site (a conditional variant exploded GVN).
+    IRValue selectValue(IRValue cond, IRValue a, IRValue b) {
+        IRValue flipped = IRValue::Register(nextTemp(), IRType::I64);
+        currentBlock_->addInstruction({IROp::BIT_XOR, flipped,
+                                       {cond, IRValue::Constant(1, IRType::I64)}});
+        IRValue mask = IRValue::Register(nextTemp(), IRType::I64);
+        currentBlock_->addInstruction({IROp::SUB, mask,
+                                       {flipped, IRValue::Constant(1, IRType::I64)}});
+        IRValue diff = IRValue::Register(nextTemp(), IRType::PTR);
+        currentBlock_->addInstruction({IROp::BIT_XOR, diff, {b, a}});
+        IRValue masked = IRValue::Register(nextTemp(), IRType::PTR);
+        currentBlock_->addInstruction({IROp::BIT_AND, masked, {diff, mask}});
+        IRValue out = IRValue::Register(nextTemp(), IRType::PTR);
+        currentBlock_->addInstruction({IROp::BIT_XOR, out, {b, masked}});
+        return out;
+    }
+
+    // CIDER-BUG-184: per-function two-word scratch cell the release uses as
+    // its safe fallback when a fat pointer carries no box: the word at
+    // `dummy - 16` holds the no-op thunk and `dummy - 8` the never-matching
+    // token 0. Allocated and initialised lazily in the entry block, keyed by
+    // the function's IR name so nested generation cannot mix functions.
+    IRValue ensureIfaceDummyBox() {
+        std::string name = "__iface_dummy_" + (currentFunction_ ? currentFunction_->getName()
+                                                                : std::string("fn"));
+        std::string baseName;
+        auto it = ifaceDummyRegs_.find(name);
+        if (it != ifaceDummyRegs_.end()) {
+            baseName = it->second;
+        } else {
+            baseName = name + "_base";
+            ifaceDummyRegs_[name] = baseName;
+            std::string noop = ensureIfaceBoxNoop();
+            IRValue base = IRValue::Register(baseName, IRType::PTR);
+            if (functionEntryBlock_) {
+                // Prepend in reverse so the final order is alloca, address,
+                // thunk word, token word.
+                IRValue base8 = IRValue::Register(name + "_t", IRType::PTR);
+                IRInstruction storeToken;
+                storeToken.op = IROp::STORE;
+                storeToken.args = {base8, IRValue::Constant(kIfaceBoxNoToken, IRType::I64),
+                                   IRValue::Constant(0, IRType::I32)};
+                functionEntryBlock_->prependInstruction(storeToken);
+                IRInstruction storeThunk;
+                storeThunk.op = IROp::STORE;
+                storeThunk.args = {base, IRValue::Label(noop), IRValue::Constant(0, IRType::I32)};
+                functionEntryBlock_->prependInstruction(storeThunk);
+                // The token cell is `base + 8`; materialise its address.
+                IRInstruction addr8;
+                addr8.op = IROp::ADD;
+                addr8.dest = base8;
+                addr8.args = {base, IRValue::Constant(8, IRType::I32)};
+                functionEntryBlock_->prependInstruction(addr8);
+                IRInstruction alloca;
+                alloca.op = IROp::ALLOCA;
+                alloca.dest = base;
+                alloca.args = {IRValue::Constant(16, IRType::I32)};
+                functionEntryBlock_->prependInstruction(alloca);
+            }
+        }
+        // The dummy box is the scratch cell + 16: its header spans
+        // [base, base + 16) and the object address is the (never used) tail.
+        IRValue base = IRValue::Register(baseName, IRType::PTR);
+        IRValue addr = IRValue::Register(nextTemp(), IRType::PTR);
+        currentBlock_->addInstruction({IROp::ADD, addr,
+                                       {base, IRValue::Constant(16, IRType::I32)}});
+        return addr;
+    }
+
+    // CIDER-BUG-184: the no-op thunk the dummy box points at, so the release
+    // always has a callable target and needs no branch. Synthesized once per
+    // IR; weak in separate compilation so duplicate objects link to one body.
+    std::string ensureIfaceBoxNoop() {
+        if (!ifaceBoxNoopLabel_.empty()) return ifaceBoxNoopLabel_;
+        std::string label = "__cider_iface_box_noop";
+        ifaceBoxNoopLabel_ = label;
+        auto prevFunction = std::move(currentFunction_);
+        auto prevBlock = std::move(currentBlock_);
+        int prevTempCount = tempCount_;
+        int prevLabelCount = labelCount_;
+        BasicBlock* prevEntryBlock = functionEntryBlock_;
+        currentFunction_ = std::make_unique<FunctionIR>(label, IRType::VOID);
+        if (separateCompilation_) {
+            currentFunction_->setSourcePath(currentSourcePath_);
+            currentFunction_->setWeak(true);
+        }
+        currentFunction_->addParam("arg_obj", IRType::PTR);
+        currentBlock_ = std::make_unique<BasicBlock>("entry");
+        functionEntryBlock_ = currentBlock_.get();
+        tempCount_ = 0;
+        labelCount_ = 0;
+        currentBlock_->addInstruction({IROp::RET, std::nullopt, {}});
+        currentFunction_->addBlock(std::move(currentBlock_));
+        currentBlock_ = nullptr;
+        module_.addFunction(std::move(currentFunction_));
+        currentFunction_ = std::move(prevFunction);
+        currentBlock_ = std::move(prevBlock);
+        tempCount_ = prevTempCount;
+        labelCount_ = prevLabelCount;
+        functionEntryBlock_ = prevEntryBlock;
+        return label;
+    }
+
+    // CIDER-BUG-184: the scope-exit release of one interface-box temporary.
+    // Branchless: pick the box (when the data word's tag bit is set) or the
+    // dummy box, read that box's header token, and call its thunk only when
+    // the token still matches this entry's registration. A mismatched token
+    // (a later call-site registration took ownership, an interface return
+    // transferred the box out, or the value was never a box at all) selects
+    // the dummy's no-op thunk, so unwinding code stays straight-line.
+    void emitIfaceBoxRelease(IRValue slot, int token) {
+        IRValue dummy = ensureIfaceDummyBox();
+        IRValue data = IRValue::Register(nextTemp(), IRType::PTR);
+        currentBlock_->addInstruction({IROp::LOAD, data, {slot, IRValue::Constant(0, IRType::I32)}});
+        IRValue tagged = IRValue::Register(nextTemp(), IRType::I64);
+        currentBlock_->addInstruction({IROp::BIT_AND, tagged,
+                                       {data, IRValue::Constant(1, IRType::I64)}});
+        IRValue box = IRValue::Register(nextTemp(), IRType::PTR);
+        currentBlock_->addInstruction({IROp::BIT_AND, box,
+                                       {data, IRValue::Constant((int64_t)-2, IRType::I64)}});
+        IRValue addr = selectValue(tagged, box, dummy);
+        IRValue tokenAddr = IRValue::Register(nextTemp(), IRType::PTR);
+        currentBlock_->addInstruction({IROp::SUB, tokenAddr,
+                                       {addr, IRValue::Constant(8, IRType::I64)}});
+        IRValue storedToken = IRValue::Register(nextTemp(), IRType::I64);
+        currentBlock_->addInstruction({IROp::LOAD, storedToken,
+                                       {tokenAddr, IRValue::Constant(0, IRType::I32)}});
+        IRValue match = IRValue::Register(nextTemp(), IRType::I64);
+        currentBlock_->addInstruction({IROp::CMP_EQ, match,
+                                       {storedToken, IRValue::Constant(token, IRType::I64)}});
+        IRValue callAddr = selectValue(match, addr, dummy);
+        IRValue thunkAddr = IRValue::Register(nextTemp(), IRType::PTR);
+        currentBlock_->addInstruction({IROp::SUB, thunkAddr,
+                                       {callAddr, IRValue::Constant(16, IRType::I64)}});
+        IRValue thunk = IRValue::Register(nextTemp(), IRType::PTR);
+        currentBlock_->addInstruction({IROp::LOAD, thunk,
+                                       {thunkAddr, IRValue::Constant(0, IRType::I32)}});
+        IRInstruction call;
+        call.op = IROp::CALL;
+        call.dest = std::nullopt;
+        call.args.push_back(thunk);
+        call.args.push_back(callAddr);
+        currentBlock_->addInstruction(call);
+    }
 
     // CID-006 fix round 3: the alias walk is cycle-safe. `visiting` is a
     // per-call visited set; a repeated spelling (the checker accepts cyclic
@@ -1212,8 +1403,14 @@ public:
     // CIDER-BUG-101: the SOURCE carries its own flag — copying FROM a
     // volatile interface object reads both fat-pointer words through
     // volatile loads (CIDER-BUG-061 model), independent of the target.
+    // CIDER-BUG-184: `outData` (when non-null) receives the fat-pointer
+    // data word this store wrote: the loaded source word for an interface
+    // copy, or `value` for a concrete source. The interface-return path
+    // uses it to record the transferred box for the frame's release walk
+    // without a second load of a possibly volatile source.
     void emitInterfaceStoreAt(const TypeInfo& ifaceType, IRValue addr, IRValue value,
-                              TypeInfo initType, bool isVolatile = false) {
+                              TypeInfo initType, bool isVolatile = false,
+                              IRValue* outData = nullptr) {
         // The interface flag can be missing on spellings that predate
         // declaration lowering (e.g. a module global read through a
         // from-alias): resolve the name before classifying; CIDER-BUG-078:
@@ -1238,6 +1435,7 @@ public:
             IRValue addr8 = IRValue::Register(nextTemp(), IRType::PTR);
             currentBlock_->addInstruction({IROp::ADD, addr8, {addr, IRValue::Constant(8, IRType::I32)}});
             currentBlock_->addInstruction({IROp::STORE, std::nullopt, {addr8, vtablePtr, IRValue::Constant(0, IRType::I32)}, isVolatile});
+            if (outData) *outData = dataPtr;
         } else {
             currentBlock_->addInstruction({IROp::STORE, std::nullopt, {addr, value, IRValue::Constant(0, IRType::I32)}, isVolatile});
             IRValue addr8 = IRValue::Register(nextTemp(), IRType::PTR);
@@ -1250,6 +1448,7 @@ public:
             }
             std::string vtableLabel = interfaceVtableLabel(ifaceType.name, concreteTypeName);
             currentBlock_->addInstruction({IROp::STORE, std::nullopt, {addr8, IRValue::Label(vtableLabel), IRValue::Constant(0, IRType::I32)}, isVolatile});
+            if (outData) *outData = value;
         }
     }
 
@@ -1590,20 +1789,69 @@ public:
                     // the caller's interface stays valid; a concrete pointer
                     // or interface source passes its address through.
                     int objSize = getTypeSize(valIface);
-                    IRValue box = IRValue::Register(nextTemp(), IRType::PTR);
-                    IRInstruction alloc;
-                    alloc.op = IROp::CALL;
-                    alloc.dest = box;
-                    alloc.args.push_back(IRValue::Label(runtimeHelperName("malloc")));
-                    alloc.args.push_back(IRValue::Constant(objSize, IRType::I32));
-                    currentBlock_->addInstruction(alloc);
-                    // CIDER-BUG-133: the box copy reads the (possibly
-                    // volatile) source VALUE, so its volatility marks the
-                    // MEMCPY; the heap destination is a compiler temp.
-                    currentBlock_->addInstruction({IROp::MEMCPY, std::nullopt,
-                                                   {box, val, IRValue::Constant(objSize, IRType::I32)},
-                                                   valIface.isVolatile});
-                    val = box;
+                    // The thunk label resolves whenever isStructValueType
+                    // accepted the value; an empty label keeps the legacy
+                    // (unreleased) box instead of calling address 0.
+                    std::string thunk = ifaceBoxing_ ? ensureIfaceBoxFini(valIface, currentModule_)
+                                                     : std::string();
+                    if (!thunk.empty()) {
+                        // CIDER-BUG-184: the box is the caller's own
+                        // temporary. Its header holds the per-type release
+                        // thunk — the boxed value's destructors (CIDER-BUG-088
+                        // order) followed by the block's return — plus the
+                        // ownership token the caller's call-site registration
+                        // writes. The data word's low bit tags the box, so the
+                        // type-erased release can find the header without
+                        // knowing the concrete type. The object sits at
+                        // block + 16; `malloc`/`free` stay the fixed bare pair
+                        // (CIDER-BUG-156), because the caller may live in
+                        // another module.
+                        IRValue block = IRValue::Register(nextTemp(), IRType::PTR);
+                        IRInstruction alloc;
+                        alloc.op = IROp::CALL;
+                        alloc.dest = block;
+                        alloc.args.push_back(IRValue::Label("malloc"));
+                        alloc.args.push_back(IRValue::Constant(objSize + 16, IRType::I32));
+                        currentBlock_->addInstruction(alloc);
+                        currentBlock_->addInstruction({IROp::STORE, std::nullopt,
+                                                       {block, IRValue::Label(thunk),
+                                                        IRValue::Constant(0, IRType::I32)}});
+                        IRValue box = IRValue::Register(nextTemp(), IRType::PTR);
+                        currentBlock_->addInstruction({IROp::ADD, box,
+                                                       {block, IRValue::Constant(16, IRType::I32)}});
+                        // CIDER-BUG-133: the box copy reads the (possibly
+                        // volatile) source VALUE, so its volatility marks the
+                        // MEMCPY; the heap destination is a compiler temp.
+                        currentBlock_->addInstruction({IROp::MEMCPY, std::nullopt,
+                                                       {box, val, IRValue::Constant(objSize, IRType::I32)},
+                                                       valIface.isVolatile});
+                        IRValue tagged = IRValue::Register(nextTemp(), IRType::PTR);
+                        // ADD (not OR): bit 0 of the 8-aligned object address
+                        // is free, and the escape analysis propagates ADD, so
+                        // the box keeps its heap escape (a stack promotion
+                        // would dangle it across the return).
+                        currentBlock_->addInstruction({IROp::ADD, tagged,
+                                                       {box, IRValue::Constant(1, IRType::I64)}});
+                        val = tagged;
+                    } else {
+                        // Legacy path when the program does not box (or the
+                        // type's release thunk did not resolve): the buffer
+                        // has no header and nobody releases it.
+                        IRValue box = IRValue::Register(nextTemp(), IRType::PTR);
+                        IRInstruction alloc;
+                        alloc.op = IROp::CALL;
+                        alloc.dest = box;
+                        alloc.args.push_back(IRValue::Label(runtimeHelperName("malloc")));
+                        alloc.args.push_back(IRValue::Constant(objSize, IRType::I32));
+                        currentBlock_->addInstruction(alloc);
+                        // CIDER-BUG-133: the box copy reads the (possibly
+                        // volatile) source VALUE, so its volatility marks the
+                        // MEMCPY; the heap destination is a compiler temp.
+                        currentBlock_->addInstruction({IROp::MEMCPY, std::nullopt,
+                                                       {box, val, IRValue::Constant(objSize, IRType::I32)},
+                                                       valIface.isVolatile});
+                        val = box;
+                    }
                 }
                 IRValue sretAddr = variableValues_.count("__sret")
                     ? variableValues_["__sret"]
@@ -1613,8 +1861,33 @@ public:
                 // CIDER-BUG-133: a volatile interface return type marks the
                 // two fat-pointer target stores (the source's own flag is
                 // handled inside via retType).
+                IRValue storedData;
                 emitInterfaceStoreAt(currentReturnType_, sretPtr, val, retType,
-                                     currentReturnType_.isVolatile);
+                                     currentReturnType_.isVolatile, &storedData);
+                if (ifaceBoxing_) {
+                    // CIDER-BUG-184: the returned value is the caller's own
+                    // box now. Overwrite the box's ownership token with the
+                    // reserved transferred value so this frame's own release
+                    // entries (an argument or inner-call temporary that
+                    // still holds the same box) do not free it before the
+                    // caller uses it; the outer call site's registration
+                    // claims it again.
+                    IRValue dummy = ensureIfaceDummyBox();
+                    IRValue tagged = IRValue::Register(nextTemp(), IRType::I64);
+                    currentBlock_->addInstruction({IROp::BIT_AND, tagged,
+                                                   {storedData, IRValue::Constant(1, IRType::I64)}});
+                    IRValue box = IRValue::Register(nextTemp(), IRType::PTR);
+                    currentBlock_->addInstruction({IROp::BIT_AND, box,
+                                                   {storedData, IRValue::Constant((int64_t)-2, IRType::I64)}});
+                    IRValue cell = selectValue(tagged, box, dummy);
+                    IRValue tokenCell = IRValue::Register(nextTemp(), IRType::PTR);
+                    currentBlock_->addInstruction({IROp::SUB, tokenCell,
+                                                   {cell, IRValue::Constant(8, IRType::I64)}});
+                    currentBlock_->addInstruction({IROp::STORE, std::nullopt,
+                                                   {tokenCell,
+                                                    IRValue::Constant(kIfaceBoxTransferred, IRType::I64),
+                                                    IRValue::Constant(0, IRType::I32)}});
+                }
                 lastExprType_ = currentReturnType_;
                 emitDefers();
                 emitDestructors();
@@ -1764,6 +2037,16 @@ public:
                             // Load data_ptr from [objPtr + 0]
                             IRValue dataPtrReg = IRValue::Register(nextTemp(), IRType::PTR);
                             currentBlock_->addInstruction({IROp::LOAD, dataPtrReg, {objPtr, IRValue::Constant(0, IRType::I32)}, objIsVolatile});
+                            // CIDER-BUG-184: a boxed interface value tags its
+                            // data word (bit 0) so the call-site release can
+                            // recognise the box. Dispatch uses the untagged
+                            // object address as `this`.
+                            if (ifaceBoxing_) {
+                                IRValue plainDataPtr = IRValue::Register(nextTemp(), IRType::PTR);
+                                currentBlock_->addInstruction({IROp::BIT_AND, plainDataPtr,
+                                                               {dataPtrReg, IRValue::Constant((int64_t)-2, IRType::I64)}});
+                                dataPtrReg = plainDataPtr;
+                            }
                             // Load vtable_ptr from [objPtr + 8]
                             IRValue vtablePtrReg = IRValue::Register(nextTemp(), IRType::PTR);
                             currentBlock_->addInstruction({IROp::LOAD, vtablePtrReg, {objPtr, IRValue::Constant(8, IRType::I32)}, objIsVolatile});
@@ -1830,6 +2113,10 @@ public:
                             currentBlock_->addInstruction(callInstr);
                             lastValue_ = ifaceRet ? retBuf : dest;
                             lastExprType_ = ifaceRet ? methodRet : m.returnType;
+                            // CIDER-BUG-184: a dispatched implementation may
+                            // box a concrete value; the caller temp owns it
+                            // and releases it at the enclosing scope exit.
+                            if (ifaceRet) registerIfaceBoxRelease(retBuf);
                             return;
                         }
                         methodIdx++;
@@ -1969,13 +2256,15 @@ public:
                 // it). The caller therefore finalizes it at the end of its
                 // enclosing scope, after every use of the result, with the
                 // same CIDER-BUG-088 order a declared local gets. Interface
-                // results (fat pointers) own no embedded class values and
-                // register nothing.
+                // results (fat pointers) own no embedded class values; when
+                // the program boxes, the slot may still carry a tagged
+                // CIDER-BUG-184 box, released at this same scope exit.
                 registerTempDestructors(calleeRet, retBuf, calleeDefMod);
                 if (calleeIsIfaceRet) {
                     // CIDER-BUG-077: the result is the address of the
                     // caller's 16-byte fat pointer; the interface flag lets
                     // assignment/dispatch/argument paths treat it as one.
+                    registerIfaceBoxRelease(retBuf);
                     lastExprType_ = calleeIfaceRet;
                 } else {
                     // CIDER-BUG-090: keep the callee-module-rooted spelling.
@@ -7382,6 +7671,155 @@ public:
         }
     }
 
+    // CIDER-BUG-184: a call that returns an interface may hand back a boxed
+    // concrete value (directly, or through any chain of interface returns).
+    // The box is the caller's own temporary: released at the exit of the
+    // scope that encloses the call, after every use, exactly like the
+    // CIDER-BUG-137/156 caller-owned return temporaries. Unlike an aggregate
+    // slot the concrete type is not statically known here, so the release is
+    // type-erased: the box header carries the release thunk the boxing
+    // callee generated.
+    //
+    // Ownership is claimed by writing this site's unique token into the box
+    // header; a later registration for the same box overwrites it, so a
+    // chain of pass-through calls (one box, several caller temporaries)
+    // releases exactly once — the last claimant. A value that is not a box
+    // (a concrete pointer or an interface copy) has a clear tag bit, so the
+    // write is redirected to a scratch cell and the release is a no-op.
+    void registerIfaceBoxRelease(IRValue slot) {
+        if (!ifaceBoxing_ || !currentFunction_ || destructorStack_.empty()) return;
+        int token = ++ifaceBoxToken_;
+        IRValue dummy = ensureIfaceDummyBox();
+        IRValue data = IRValue::Register(nextTemp(), IRType::PTR);
+        currentBlock_->addInstruction({IROp::LOAD, data, {slot, IRValue::Constant(0, IRType::I32)}});
+        IRValue tagged = IRValue::Register(nextTemp(), IRType::I64);
+        currentBlock_->addInstruction({IROp::BIT_AND, tagged,
+                                       {data, IRValue::Constant(1, IRType::I64)}});
+        IRValue box = IRValue::Register(nextTemp(), IRType::PTR);
+        currentBlock_->addInstruction({IROp::BIT_AND, box,
+                                       {data, IRValue::Constant((int64_t)-2, IRType::I64)}});
+        IRValue tokenAddr = selectValue(tagged, box, dummy);
+        IRValue cell = IRValue::Register(nextTemp(), IRType::PTR);
+        currentBlock_->addInstruction({IROp::SUB, cell,
+                                       {tokenAddr, IRValue::Constant(8, IRType::I64)}});
+        currentBlock_->addInstruction({IROp::STORE, std::nullopt,
+                                       {cell, IRValue::Constant(token, IRType::I64),
+                                        IRValue::Constant(0, IRType::I32)}});
+        DestructorInfo entry;
+        entry.varAddr = slot;
+        entry.ifaceBoxToken = token;
+        destructorStack_.back().push_back(entry);
+    }
+
+    // CIDER-BUG-184: synthesize the release thunk of one boxed concrete
+    // type: run the value's destructors on the boxed object (own destructor
+    // first, embedded class values in reverse construction order, the
+    // CIDER-BUG-088 rule) and then return the heap block. The box header
+    // stores this label, so the caller's type-erased release reaches the
+    // right finalizers without knowing the type. One thunk per type per
+    // module: all boxing sites share the label, weak in separate
+    // compilation so duplicate objects link to one body. The thunk is a
+    // normal helper function (empty source path in whole-program mode, the
+    // boxing object's path in separate mode), built in a fresh generation
+    // context like the global init/fini passes.
+    std::string ensureIfaceBoxFini(TypeInfo concrete, const std::string& defModule) {
+        TypeInfo resolved = canonicalizeNominalInModule(
+            resolveTypeAlias(concrete, defModule), defModule);
+        auto sym = resolveStructOrClassSymbol(resolved, defModule);
+        if (!sym) return "";
+        auto ss = std::static_pointer_cast<StructSymbol>(sym);
+        auto it = ifaceBoxFiniLabels_.find(ss.get());
+        if (it != ifaceBoxFiniLabels_.end()) return it->second;
+        // Destructor labels mangle by the type's own defining module.
+        std::string typeMod = definingModuleFor(ss, ss->name);
+
+        std::string classBase = ss->manglePrefix.empty() ? ss->name
+                                                         : ss->manglePrefix + "_" + ss->name;
+        std::string label = emitFunctionName(typeMod,
+                                             "__cider_iface_box_fini_" +
+                                                 sanitizeAsmName(classBase));
+        ifaceBoxFiniLabels_[ss.get()] = label;
+
+        auto prevFunction = std::move(currentFunction_);
+        auto prevBlock = std::move(currentBlock_);
+        auto prevVariableValues = variableValues_;
+        int prevTempCount = tempCount_;
+        int prevLabelCount = labelCount_;
+        BasicBlock* prevEntryBlock = functionEntryBlock_;
+        TypeInfo prevReturnType = currentReturnType_;
+        bool prevIsSret = currentIsSret_;
+        auto prevDeferStack = deferStack_;
+        auto prevDestructorStack = destructorStack_;
+
+        currentFunction_ = std::make_unique<FunctionIR>(label, IRType::VOID);
+        if (separateCompilation_) {
+            // The boxing object emits (and exports) the body; other objects
+            // may box the same type and emit a weak duplicate.
+            currentFunction_->setSourcePath(currentSourcePath_);
+            currentFunction_->setWeak(true);
+        }
+        currentBlock_ = std::make_unique<BasicBlock>("entry");
+        functionEntryBlock_ = currentBlock_.get();
+        variableValues_.clear();
+        tempCount_ = 0;
+        labelCount_ = 0;
+        currentReturnType_ = {"void", 0};
+        currentIsSret_ = false;
+        deferStack_.clear();
+        destructorStack_.clear();
+        deferStack_.push_back({});
+        destructorStack_.push_back({});
+
+        // Parameter slot: the boxed object address (the block + 16). The
+        // destructor walk and the block release use the loaded box value,
+        // not the slot, because the object lives on the heap.
+        currentFunction_->addParam("arg_obj", IRType::PTR);
+        IRValue paramReg = IRValue::Register("arg_obj", IRType::PTR);
+        IRValue obj = IRValue::Register(nextTemp(), IRType::PTR);
+        currentBlock_->addInstruction({IROp::ALLOCA, obj, {IRValue::Constant(8, IRType::I32)}});
+        currentBlock_->addInstruction({IROp::STORE, std::nullopt,
+                                       {obj, paramReg, IRValue::Constant(0, IRType::I32)}});
+        IRValue boxVal = IRValue::Register(nextTemp(), IRType::PTR);
+        currentBlock_->addInstruction({IROp::LOAD, boxVal,
+                                       {obj, IRValue::Constant(0, IRType::I32)}});
+
+        std::set<const StructSymbol*> visiting;
+        if (aggregateHasDestructors(resolved, typeMod, visiting)) {
+            registerEmbeddedDestructors(resolved, boxVal, 0, typeMod, visiting);
+        }
+        // Finalizers first (reverse construction order), then the block goes
+        // back: the object is alive until the last destructor has run
+        // (CIDER-BUG-156's ordering rule). The two header words precede the
+        // object, so the block is the box minus its header size (a positive
+        // constant: a negative ADD immediate is not portable here).
+        emitDestructors();
+        IRValue block = IRValue::Register(nextTemp(), IRType::PTR);
+        currentBlock_->addInstruction({IROp::SUB, block,
+                                       {boxVal, IRValue::Constant(16, IRType::I32)}});
+        IRInstruction release;
+        release.op = IROp::CALL;
+        release.dest = std::nullopt;
+        release.args.push_back(IRValue::Label("free"));
+        release.args.push_back(block);
+        currentBlock_->addInstruction(release);
+        currentBlock_->addInstruction({IROp::RET, std::nullopt, {}});
+        currentFunction_->addBlock(std::move(currentBlock_));
+        currentBlock_ = nullptr;
+        module_.addFunction(std::move(currentFunction_));
+
+        currentFunction_ = std::move(prevFunction);
+        currentBlock_ = std::move(prevBlock);
+        variableValues_ = prevVariableValues;
+        tempCount_ = prevTempCount;
+        labelCount_ = prevLabelCount;
+        functionEntryBlock_ = prevEntryBlock;
+        currentReturnType_ = prevReturnType;
+        currentIsSret_ = prevIsSret;
+        deferStack_ = std::move(prevDeferStack);
+        destructorStack_ = std::move(prevDestructorStack);
+        return label;
+    }
+
     // CIDER-BUG-087: module-scope class/struct values are zero in .bss (and
     // in the VM's zero-filled global storage), so their embedded class
     // values need the same formation stores a local gets (CIDER-BUG-089:
@@ -9065,6 +9503,23 @@ private:
     bool currentIsSret_ = false;
     bool defaultAbiMs_ = false;  // CID-005: --target uefi function-value typing
     bool checks_ = false;        // CIDER-ISS-001: opt-in runtime bounds checks
+    // CIDER-BUG-184: program boxes a concrete value into an interface return
+    // (see setInterfaceBoxing). Off keeps every interface call site and the
+    // legacy boxing path byte-identical.
+    bool ifaceBoxing_ = false;
+    // CIDER-BUG-184: unique ownership token per call-site registration (0 is
+    // reserved: the dummy box's never-matching token and the transferred
+    // marker).
+    int ifaceBoxToken_ = 0;
+    // CIDER-BUG-184: the shared no-op thunk label (see ensureIfaceBoxNoop).
+    std::string ifaceBoxNoopLabel_;
+    // CIDER-BUG-184: per-function dummy-box scratch cell base register,
+    // keyed by IR function name (nested generation cannot mix functions).
+    std::map<std::string, std::string> ifaceDummyRegs_;
+    // CIDER-BUG-184: release thunk emitted per boxed concrete type, keyed by
+    // the resolved type symbol so every boxing site of one type shares both
+    // the label and the single emitted body.
+    std::map<const StructSymbol*, std::string> ifaceBoxFiniLabels_;
     TypeInfo currentReturnType_ = {"void", 0};
     int tempCount_ = 0;
     int globalStrCount_ = 0;

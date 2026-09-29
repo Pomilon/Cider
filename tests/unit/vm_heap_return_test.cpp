@@ -33,6 +33,7 @@
 #include "parser.h"
 #include "symbol_collector.h"
 #include "symbols.h"
+#include "type_checker.h"
 #include "vm.h"
 
 #define CHECK(cond) do { if (!(cond)) { \
@@ -44,7 +45,11 @@
 // far below one leaked block and far above the accumulated drift.
 static constexpr size_t kAllocatorSlack = 1024;
 
-// Mirrors tests/unit/ir_gen_test.cpp's genModuleSrc.
+// Mirrors tests/unit/ir_gen_test.cpp's genModuleSrc, plus the checker pass
+// the driver runs before ir_gen: the CIDER-BUG-184 boxing flag is computed
+// while checking interface returns, so the boxing tests must generate the
+// same way the CLI does. Programs without concrete-to-interface returns
+// leave the flag clear, exactly like the driver.
 cider::ModuleIR genModule(const std::string& src) {
     cider::ErrorReporter rep;
     cider::Lexer lex(src, rep);
@@ -54,7 +59,11 @@ cider::ModuleIR genModule(const std::string& src) {
     cider::ModuleResolver resolver;
     cider::SymbolCollector collector(table, rep, resolver);
     collector.collect(*prog);
+    cider::TypeChecker checker(table, rep);
+    checker.setLocalAggregates(collector.getLocalAggregates());
+    checker.check(*prog);
     cider::IRGenerator gen(table);
+    gen.setInterfaceBoxing(checker.hasInterfaceBoxing());
     cider::ModuleIR module = gen.generate(*prog);
     if (rep.hasErrors()) {
         std::fprintf(stderr, "gen errors: %s\n", rep.errors()[0].message.c_str());
@@ -154,6 +163,117 @@ std::string nestedProgram(int iterations) {
         "}\n";
 }
 
+// CIDER-BUG-184: an interface-returning function that boxes a concrete
+// value. The box is the caller's own temporary, released at the exit of the
+// scope enclosing the call. The element carries a 512-byte payload like the
+// aggregate cases, so one leaked box is ~544 bytes, far above
+// kAllocatorSlack. `drops` counts BOTH the callee's returned local and the
+// caller's box copy, so a skipped finalizer or a duplicated release shows up
+// as a non-zero exit code.
+std::string ifaceBoxProgram(int iterations) {
+    return
+        "var drops: int = 0;\n"
+        "interface Shape {\n"
+        "  func area() -> int;\n"
+        "}\n"
+        "class Sq {\n"
+        "  var s: int;\n"
+        "  var pad: [u64; 64];\n"
+        "  func ~Sq() { drops = drops + 1; }\n"
+        "  func area() -> int { return this.s * this.s; }\n"
+        "}\n"
+        "func makeSq(v: int) -> Shape {\n"
+        "  var c: Sq;\n"
+        "  c.s = v;\n"
+        "  return c;\n"
+        "}\n"
+        "func main() -> int {\n"
+        "  var i: int = 0;\n"
+        "  while (i < " + std::to_string(iterations) + ") {\n"
+        "    var s: Shape = makeSq(i);\n"
+        "    if (s.area() != i * i) { return 1; }\n"
+        "    i = i + 1;\n"
+        "  }\n"
+        // One callee local + one boxed copy per call.
+        "  if (drops != " + std::to_string(iterations * 2) + ") { return 2; }\n"
+        "  return 0;\n"
+        "}\n";
+}
+
+// A pass-through chain: the box crosses two interface returns before the
+// caller that does not return it owns it. The inner temporary's record must
+// transfer, so the box is released exactly once (a double release would trip
+// the VM's free-list guard, a skipped release would grow the live set).
+std::string ifaceChainProgram(int iterations) {
+    return
+        "var drops: int = 0;\n"
+        "interface Shape {\n"
+        "  func area() -> int;\n"
+        "}\n"
+        "class Sq {\n"
+        "  var s: int;\n"
+        "  var pad: [u64; 64];\n"
+        "  func ~Sq() { drops = drops + 1; }\n"
+        "  func area() -> int { return this.s * this.s; }\n"
+        "}\n"
+        "func makeSq(v: int) -> Shape {\n"
+        "  var c: Sq;\n"
+        "  c.s = v;\n"
+        "  return c;\n"
+        "}\n"
+        "func pass(x: Shape) -> Shape { return x; }\n"
+        "func chain(v: int) -> Shape { return pass(makeSq(v)); }\n"
+        "func main() -> int {\n"
+        "  var i: int = 0;\n"
+        "  while (i < " + std::to_string(iterations) + ") {\n"
+        "    var s: Shape = chain(i);\n"
+        "    if (s.area() != i * i) { return 1; }\n"
+        "    i = i + 1;\n"
+        "  }\n"
+        "  if (drops != " + std::to_string(iterations * 2) + ") { return 2; }\n"
+        "  return 0;\n"
+        "}\n";
+}
+
+// A vtable-dispatched implementation boxes: the dispatch call site registers
+// the release too, so the loop must not grow either.
+std::string ifaceDispatchProgram(int iterations) {
+    return
+        "var drops: int = 0;\n"
+        "interface Shape {\n"
+        "  func area() -> int;\n"
+        "}\n"
+        "interface Maker {\n"
+        "  func make(v: int) -> Shape;\n"
+        "}\n"
+        "class Sq {\n"
+        "  var s: int;\n"
+        "  var pad: [u64; 64];\n"
+        "  func ~Sq() { drops = drops + 1; }\n"
+        "  func area() -> int { return this.s * this.s; }\n"
+        "}\n"
+        "class SqMaker {\n"
+        "  var pad: int;\n"
+        "  func make(v: int) -> Shape {\n"
+        "    var c: Sq;\n"
+        "    c.s = v;\n"
+        "    return c;\n"
+        "  }\n"
+        "}\n"
+        "func main() -> int {\n"
+        "  var sm: SqMaker;\n"
+        "  var m: Maker = sm;\n"
+        "  var i: int = 0;\n"
+        "  while (i < " + std::to_string(iterations) + ") {\n"
+        "    var s: Shape = m.make(i);\n"
+        "    if (s.area() != i * i) { return 1; }\n"
+        "    i = i + 1;\n"
+        "  }\n"
+        "  if (drops != " + std::to_string(iterations * 2) + ") { return 2; }\n"
+        "  return 0;\n"
+        "}\n";
+}
+
 // Runs `src` in a fresh VM and returns the bytes still live after the run
 // (heap minus free list).
 size_t runLiveBytes(const std::string& src, int expectedExit) {
@@ -197,6 +317,31 @@ int run() {
     {
         size_t one = runLiveBytes(nestedProgram(1), 0);
         size_t many = runLiveBytes(nestedProgram(1000), 0);
+        CHECK(bounded(one, many));
+    }
+
+    // CIDER-BUG-184: interface boxing. A concrete-value interface return is
+    // a caller-owned heap box with a type-erased release; every call must
+    // return its block and run the box copy's finalizer exactly once.
+    {
+        size_t one = runLiveBytes(ifaceBoxProgram(1), 0);
+        size_t many = runLiveBytes(ifaceBoxProgram(500), 0);
+        CHECK(bounded(one, many));
+    }
+
+    // Pass-through chains: one box, several temporary holders, released
+    // exactly once by the caller that does not return it.
+    {
+        size_t one = runLiveBytes(ifaceChainProgram(1), 0);
+        size_t many = runLiveBytes(ifaceChainProgram(500), 0);
+        CHECK(bounded(one, many));
+    }
+
+    // Vtable-dispatched boxing implementation: the dispatch call site owns
+    // and releases the box like a direct call.
+    {
+        size_t one = runLiveBytes(ifaceDispatchProgram(1), 0);
+        size_t many = runLiveBytes(ifaceDispatchProgram(500), 0);
         CHECK(bounded(one, many));
     }
 

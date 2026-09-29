@@ -35,6 +35,13 @@ add_executable(vm_heap_return_test tests/unit/vm_heap_return_test.cpp src/ir.cpp
 target_include_directories(vm_heap_return_test PRIVATE src)
 add_test(NAME vm_heap_return_test COMMAND vm_heap_return_test)
 
+# CIDER-BUG-184: VM allocation accounting for the caller-owned heap box of
+# an interface-typed return of a concrete value (needs ir_gen + vm, and the
+# interface-boxing flag, in one binary).
+add_executable(vm_iface_box_test tests/unit/vm_iface_box_test.cpp src/ir.cpp src/lexer.cpp src/parser.cpp src/symbols.cpp src/module_resolver.cpp src/vm.cpp)
+target_include_directories(vm_iface_box_test PRIVATE src)
+add_test(NAME vm_iface_box_test COMMAND vm_iface_box_test)
+
 add_executable(ast_test tests/unit/ast_test.cpp)
 target_include_directories(ast_test PRIVATE src)
 add_test(NAME ast_test COMMAND ast_test)

@@ -27,6 +27,13 @@ public:
         resolveFnRepresentations();
     }
 
+    // CIDER-BUG-184: true when some interface-typed return in the program
+    // boxes a concrete struct/class value. ir_gen reads this via
+    // setInterfaceBoxing so the boxing program uses one consistent
+    // representation (tagged boxes + caller-side release); programs that
+    // never box keep their byte-identical IR.
+    bool hasInterfaceBoxing() const { return interfaceBoxing_; }
+
     // CID-020/021 module context, wired from the collector (mirrors
     // IRGenerator::setModuleScopes). Until set, the checker behaves exactly
     // as before (all lookups are plain resolves in the root scope).
@@ -2356,7 +2363,13 @@ public:
     // CIDER-BUG-135: returns whether the conversion is accepted (false
     // after reporting), so the list-element check can stop like every other
     // site; callers that only need the diagnostic may ignore it.
-    bool checkInterfaceValue(const TypeInfo& ifaceType, const TypeInfo& valueType, int line) {
+    // CIDER-BUG-184: `boxesConcrete` (when non-null) reports that an
+    // accepted value is a concrete struct/class VALUE, the one shape ir_gen
+    // must box (copy to the heap) because the interface result outlives the
+    // frame that produced it. An interface source is a fat-pointer copy and
+    // a single concrete pointer passes through; neither allocates.
+    bool checkInterfaceValue(const TypeInfo& ifaceType, const TypeInfo& valueType, int line,
+                             bool* boxesConcrete = nullptr) {
         auto ifaceSym = resolveInterfaceSymbol(ifaceType);
         if (!ifaceSym) return true;
         auto iface = std::static_pointer_cast<InterfaceSymbol>(ifaceSym);
@@ -2396,6 +2409,12 @@ public:
             return false;
         }
         auto ss = std::static_pointer_cast<StructSymbol>(concreteSym);
+        // CIDER-BUG-184: a value source (no indirection) is the boxing
+        // shape; a single concrete pointer aliases its pointee instead.
+        if (boxesConcrete && valueType.pointerLevel == 0 && !valueType.isArray &&
+            !valueType.isInterface) {
+            *boxesConcrete = true;
+        }
         bool ok = true;
         for (auto& im : iface->methods) {
             bool found = false;
@@ -4524,7 +4543,12 @@ public:
                 // and call arguments. ir_gen returns the 16-byte fat pointer
                 // through the hidden-sret convention.
                 if (declType.isInterface) {
-                    checkInterfaceValue(declType, valType, stmt.getLine());
+                    // CIDER-BUG-184: record the boxing shape (concrete value
+                    // source) so ir_gen can release the box it allocates;
+                    // see hasInterfaceBoxing.
+                    bool boxesConcrete = false;
+                    checkInterfaceValue(declType, valType, stmt.getLine(), &boxesConcrete);
+                    if (boxesConcrete) interfaceBoxing_ = true;
                 } else {
                 // F1: bounded alias resolution; on budget exhaustion both
                 // sides keep their unexpanded (pre-resolution) form.
@@ -5327,6 +5351,10 @@ private:
     int fnBranchCheckCount_ = 0;
     // Name of the function whose body is being checked (diagnostics).
     std::string currentFunctionName_;
+
+    // CIDER-BUG-184: set when an interface-typed return boxes a concrete
+    // struct/class value (see hasInterfaceBoxing).
+    bool interfaceBoxing_ = false;
 
     // CIDER-FEAT-005: close a checker scope, reporting its unused locals
     // first. Every symbolTable_.exitScope() in this class goes through here.

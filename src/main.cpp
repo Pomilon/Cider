@@ -340,6 +340,11 @@ int main(int argc, char** argv) {
             gen.setLocalAggregates(collector.getLocalAggregates());
             gen.setDefaultAbiMs(defaultAbiMs);
             gen.setReporter(&rep);
+            // CIDER-BUG-184: interface returns that box a concrete value
+            // get one program-wide box representation (tagged boxes with a
+            // caller-side release); programs that never box stay
+            // byte-identical.
+            gen.setInterfaceBoxing(checker.hasInterfaceBoxing());
             gen.setChecks(opts.checks);  // CIDER-ISS-001
             // CIDER-FEAT-006: per-object data labels when this is one object
             // of a separate-compilation build.
@@ -381,6 +386,11 @@ int main(int argc, char** argv) {
             gen.setLocalAggregates(collector.getLocalAggregates());
             gen.setDefaultAbiMs(defaultAbiMs);
             gen.setReporter(&rep);
+            // CIDER-BUG-184: interface returns that box a concrete value
+            // get one program-wide box representation (tagged boxes with a
+            // caller-side release); programs that never box stay
+            // byte-identical.
+            gen.setInterfaceBoxing(checker.hasInterfaceBoxing());
             gen.setChecks(opts.checks);  // CIDER-ISS-001
             auto module = gen.generate(*prog);
             if (rep.hasErrors()) {
@@ -411,6 +421,9 @@ int main(int argc, char** argv) {
         gen.setLocalAggregates(collector.getLocalAggregates());
         gen.setDefaultAbiMs(defaultAbiMs);
         gen.setReporter(&rep);
+        // CIDER-BUG-184: boxed interface returns use the program-wide tagged
+        // representation when the checker found one (see setInterfaceBoxing).
+        gen.setInterfaceBoxing(checker.hasInterfaceBoxing());
         auto module = gen.generate(*prog);
         if (rep.hasErrors()) {
             printDiagnostics(text, opts.inputFile, rep.errors(), "ir");
