@@ -466,6 +466,94 @@ public:
         return t;
     }
 
+    // CIDER-BUG-128: canonical identity of a TYPE SPELLING written in
+    // `logical`'s module, for the signature comparisons that decide
+    // interface satisfaction (checkInterfaceValue). Collected signatures
+    // keep the spellings as written — bare, dotted or through a `type`
+    // alias, each in its own declaring module — so comparing them raw
+    // conflates two same-named types declared in different modules (a
+    // look-alike class silently "implements" the interface) and splits one
+    // type spelled two ways (a genuine cross-module implementor is
+    // rejected). The walk mirrors resolveType + canonicalizeInModule: a
+    // `type` alias hop resolves in the ALIAS's defining module
+    // (CIDER-BUG-102) and the nominal that ends the chain canonicalizes
+    // where it was written (CID-020/021), so `Param`, `a.Param` and an
+    // alias of either written in module a are one identity — while a bare
+    // `Param` written in module b is another. Nested fn/array spellings
+    // recurse in the same module. An unresolvable spelling keeps its
+    // written name and line < 0 marks the silent pre-check the convention
+    // already uses: the outer comparison then fails safely instead of
+    // accepting (or of reporting a second, stray diagnostic).
+    TypeInfo canonicalSignatureType(const TypeInfo& t, const std::string& logical,
+                                    int line = -1) {
+        if (t.isFunctionPointer) {
+            TypeInfo r = t;
+            if (t.fnParamTypes) {
+                r.fnParamTypes = std::make_shared<std::vector<TypeInfo>>();
+                for (const auto& p : *t.fnParamTypes) {
+                    r.fnParamTypes->push_back(canonicalSignatureType(p, logical, line));
+                }
+            }
+            if (t.fnReturnType) {
+                r.fnReturnType = std::make_shared<TypeInfo>(
+                    canonicalSignatureType(*t.fnReturnType, logical, line));
+            }
+            return r;
+        }
+        if (t.arrayElement) {
+            // CIDER-BUG-052: name/pointerLevel mirror the innermost element,
+            // so the canonical element spelling carries both with it (the
+            // element walk below already resolved its alias chain).
+            TypeInfo elem = canonicalSignatureType(*t.arrayElement, logical, line);
+            TypeInfo r = t;
+            r.arrayElement = std::make_shared<TypeInfo>(elem);
+            r.name = elem.name;
+            r.pointerLevel = elem.pointerLevel;
+            return r;
+        }
+        if (t.name.empty()) return t;
+        // The written spelling canonicalizes first (dotted qualifiers,
+        // templates, bare nominals), then each `type` hop in its own
+        // module; `visiting` bounds a cyclic chain exactly like
+        // resolveTypeImpl.
+        TypeInfo cur = canonicalizeInModule(t, logical, line);
+        std::set<std::string> visiting;
+        std::string mod = logical;
+        while (!cur.name.empty() && visiting.insert(cur.name).second) {
+            auto sym = resolveScopedInModule(cur.name, mod);
+            if (!sym || !sym->isTypeAlias || sym->type.name.empty() ||
+                sym->type.name == cur.name) {
+                break;
+            }
+            std::string hopMod = definingModuleOf(sym);
+            TypeInfo target = canonicalizeInModule(sym->type, hopMod, line);
+            // The written wrapper/markings belong to the spelling, not to
+            // how the alias spells its target (resolveTypeImpl rewraps the
+            // array the same way; the flags keep the representation the
+            // collector recorded — CIDER-BUG-078/080).
+            if (cur.isArray) {
+                if (!target.isArray) {
+                    target.isArray = true;
+                    target.arraySize = cur.arraySize;
+                    target.arrayElement = cur.arrayElement;
+                } else {
+                    TypeInfo outer = target;
+                    outer.arraySize = cur.arraySize;
+                    outer.arrayElement = std::make_shared<TypeInfo>(target);
+                    target = outer;
+                }
+            }
+            target.pointerLevel += cur.pointerLevel;
+            target.isInterface = target.isInterface || cur.isInterface;
+            target.isVolatile = target.isVolatile || cur.isVolatile;
+            target.isClosure = target.isClosure || cur.isClosure;
+            target.isSlice = target.isSlice || cur.isSlice;
+            cur = target;
+            mod = hopMod;
+        }
+        return cur;
+    }
+
     // Spec §1: two imports sharing a last segment make the bare qualifier an
     // ambiguity error listing both candidates, never a silent pick. Returns
     // true when an error was emitted.
@@ -2422,20 +2510,36 @@ public:
             *boxesConcrete = true;
         }
         bool ok = true;
+        // CIDER-BUG-128: every signature below is compared by its CANONICAL
+        // identity — each spelling resolved in the module that declared it
+        // (the interface method's for the interface side, the implementing
+        // method's for the class side), never by raw equality. Same-spelled
+        // types from two modules are then different types, and one type
+        // spelled bare, dotted or through an alias is the same type.
+        std::string ifaceMod = definingModuleOf(ifaceSym);
+        std::string valueMod = definingModuleOf(concreteSym);
         for (auto& im : iface->methods) {
+            std::string imMod = methodModuleOf(im, ifaceMod);
+            std::vector<TypeInfo> imParams;
+            imParams.reserve(im.parameterTypes.size());
+            for (const auto& pt : im.parameterTypes) {
+                imParams.push_back(canonicalSignatureType(pt, imMod));
+            }
+            TypeInfo imRet = canonicalSignatureType(im.returnType, imMod);
             bool found = false;
             for (auto& sm : ss->methods) {
                 if (sm.name != im.name) continue;
-                if (sm.parameterTypes.size() != im.parameterTypes.size()) continue;
+                if (sm.parameterTypes.size() != imParams.size()) continue;
+                std::string smMod = methodModuleOf(sm, valueMod);
                 bool paramsMatch = true;
                 for (size_t pi = 0; pi < sm.parameterTypes.size(); ++pi) {
-                    if (!(sm.parameterTypes[pi] == im.parameterTypes[pi])) {
+                    if (!(canonicalSignatureType(sm.parameterTypes[pi], smMod) == imParams[pi])) {
                         paramsMatch = false;
                         break;
                     }
                 }
                 if (!paramsMatch) continue;
-                if (!(sm.returnType == im.returnType)) continue;
+                if (!(canonicalSignatureType(sm.returnType, smMod) == imRet)) continue;
                 found = true;
                 break;
             }

@@ -1,0 +1,19 @@
+// CIDER-BUG-128: the interface's method signature is written in THIS
+// module, so its `Param` spelling means shapes.Param. An implementor in
+// another module must be able to name the very same type with a different
+// spelling (dotted, from-imported bare, or through a `type` alias) and
+// still satisfy the interface — and its vtable must dispatch with this
+// module's layout.
+export struct Param {
+  var v: int;
+}
+
+export interface Shape {
+  func draw(p: Param) -> int;
+}
+
+export func make(v: int) -> Param {
+  var p: Param;
+  p.v = v;
+  return p;
+}

@@ -1,0 +1,84 @@
+// CIDER-BUG-128: a cross-module interface satisfied through FOUR different
+// spellings of one and the same parameter type. The interface declares
+// `draw(p: Param)` in shapes (so its signature names shapes.Param); each
+// implementor below spells that exact type differently — dotted, bare
+// through a from-import, through a `type` alias, and (in mid.cid) through
+// a second module's own from-import. All must satisfy the interface, build
+// a vtable and dispatch correctly on every backend: the satisfaction
+// comparison resolves each signature spelling in the module that declared
+// it instead of comparing the raw text.
+//
+// The companion fixture check_iface_param_lookalike.cid pins the other
+// direction: a class whose `draw` takes a DIFFERENT `Param` (same name,
+// other module) is rejected with the normal diagnostic.
+import shapes;
+import mid;
+from shapes import Shape, Param, make;
+
+type P = shapes.Param;   // alias spelling of the very same type
+
+class Dotted {
+  var tag: int;
+  func draw(p: shapes.Param) -> int { return p.v * 10 + this.tag; }
+}
+
+class Bare {
+  var tag: int;
+  func draw(p: Param) -> int { return p.v * 100 + this.tag; }
+}
+
+class Aliased {
+  var tag: int;
+  func draw(p: P) -> int { return p.v * 1000 + this.tag; }
+}
+
+// Interface parameter position: a concrete value from any of the three
+// classes converts against the imported interface exactly like a
+// declaration does.
+func drawVia(s: Shape, p: Param) -> int { return s.draw(p); }
+
+func main() -> int {
+  var d: Dotted;
+  d.tag = 1;
+  var b: Bare;
+  b.tag = 2;
+  var a: Aliased;
+  a.tag = 3;
+
+  // Declaration-time conversion, then dispatch through each implementor.
+  var s: Shape = d;
+  if (s.draw(make(4)) != 41) { return 1; }
+  s = b;
+  if (s.draw(make(4)) != 402) { return 2; }
+  s = a;
+  if (s.draw(make(4)) != 4003) { return 3; }
+
+  // Reassignment back to the first implementor (fat-pointer store).
+  s = d;
+  if (s.draw(make(4)) != 41) { return 4; }
+
+  // The from-import of another module: bare `Param` in mid.cid still names
+  // shapes.Param, so mid.Mid satisfies the interface too.
+  var m: mid.Mid;
+  m.tag = 4;
+  s = m;
+  if (s.draw(make(4)) != 40004) { return 5; }
+  s = d;
+  if (s.draw(make(4)) != 41) { return 6; }
+
+  // Concrete -> interface argument across modules, one per spelling.
+  if (drawVia(d, make(7)) != 71) { return 7; }
+  if (drawVia(b, make(7)) != 702) { return 8; }
+  if (drawVia(a, make(7)) != 7003) { return 9; }
+  if (drawVia(m, make(7)) != 70004) { return 10; }
+
+  // A value of the interface type flows through the same parameter.
+  if (drawVia(s, make(7)) != 71) { return 11; }
+
+  // The imported factory's struct comes back with the caller's value.
+  var p: Param = make(5);
+  if (p.v != 5) { return 12; }
+  if (d.draw(p) != 51) { return 13; }
+
+  return 0;
+}

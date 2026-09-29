@@ -1,0 +1,11 @@
+// CIDER-BUG-128: a fourth module that reaches shapes' parameter type
+// through a from-import instead of declaring or qualifying it. Its bare
+// `Param` spelling must canonicalize to shapes.Param — the origin module,
+// not this one — or the checker would admit the class while the IR
+// generator declined to build its vtable.
+from shapes import Param;
+
+export class Mid {
+  var tag: int;
+  func draw(p: Param) -> int { return p.v * 10000 + this.tag; }
+}

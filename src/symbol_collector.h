@@ -439,6 +439,99 @@ public:
         return (slash == std::string::npos) ? path : path.substr(slash + 1);
     }
 
+    // CIDER-BUG-128: canonical identity of a SIGNATURE SPELLING written in
+    // `mod`, for the interface-satisfaction scan below. The collected
+    // spellings keep their written form — bare, dotted or through a `type`
+    // alias, each in its own declaring module — so comparing them raw
+    // conflates two same-named types from different modules (the scan
+    // would pin SysV on a method no checker-approved vtable dispatches)
+    // and splits one type spelled two ways (it would miss the implementation
+    // the checker admits). Mirrors the checker's canonicalSignatureType:
+    // the written spelling canonicalizes in `mod` first, then every `type`
+    // hop resolves in the ALIAS's own module (CIDER-BUG-102), nested
+    // fn/array spellings recurse in the same module, and an unresolvable
+    // spelling keeps its written name so the comparison fails safely.
+    TypeInfo canonicalSignatureTypeInModule(const TypeInfo& t, const std::string& mod) {
+        if (t.isFunctionPointer) {
+            TypeInfo r = t;
+            if (t.fnParamTypes) {
+                r.fnParamTypes = std::make_shared<std::vector<TypeInfo>>();
+                for (const auto& p : *t.fnParamTypes) {
+                    r.fnParamTypes->push_back(canonicalSignatureTypeInModule(p, mod));
+                }
+            }
+            if (t.fnReturnType) {
+                r.fnReturnType = std::make_shared<TypeInfo>(
+                    canonicalSignatureTypeInModule(*t.fnReturnType, mod));
+            }
+            return r;
+        }
+        if (t.arrayElement) {
+            // CIDER-BUG-052: name/pointerLevel mirror the innermost element.
+            TypeInfo elem = canonicalSignatureTypeInModule(*t.arrayElement, mod);
+            TypeInfo r = t;
+            r.arrayElement = std::make_shared<TypeInfo>(elem);
+            r.name = elem.name;
+            r.pointerLevel = elem.pointerLevel;
+            return r;
+        }
+        if (t.name.empty()) return t;
+        TypeInfo cur = t;
+        cur.name = canonicalSignatureNameInModule(t.name, mod);
+        // `visiting` bounds a cyclic `type` chain exactly like the
+        // checker's resolveTypeImpl.
+        std::set<std::string> visiting;
+        std::string curMod = mod;
+        while (!cur.name.empty() && visiting.insert(cur.name).second) {
+            auto sym = inModuleScope(curMod, [&] { return resolveNominalType(cur.name); });
+            if (!sym || !sym->isTypeAlias || sym->type.name.empty() ||
+                sym->type.name == cur.name) {
+                break;
+            }
+            std::string hopMod = definingModuleOfSymbol(sym);
+            TypeInfo target = sym->type;
+            target.name = canonicalSignatureNameInModule(target.name, hopMod);
+            // The written wrapper/markings belong to the spelling, not to
+            // how the alias spells its target (mirrors the checker).
+            if (cur.isArray) {
+                if (!target.isArray) {
+                    target.isArray = true;
+                    target.arraySize = cur.arraySize;
+                    target.arrayElement = cur.arrayElement;
+                } else {
+                    TypeInfo outer = target;
+                    outer.arraySize = cur.arraySize;
+                    outer.arrayElement = std::make_shared<TypeInfo>(target);
+                    target = outer;
+                }
+            }
+            target.pointerLevel += cur.pointerLevel;
+            target.isInterface = target.isInterface || cur.isInterface;
+            target.isVolatile = target.isVolatile || cur.isVolatile;
+            target.isClosure = target.isClosure || cur.isClosure;
+            target.isSlice = target.isSlice || cur.isSlice;
+            cur = target;
+            curMod = hopMod;
+        }
+        return cur;
+    }
+
+    // CIDER-BUG-128: the `mod::Name` a nominal written in `mod` names —
+    // the collector's half of the checker's canonicalizeInModule, scoped
+    // through inModuleScope so a bare name resolves in that module's scope
+    // (then root) and a dotted qualifier resolves as a module visible from
+    // there, never from the scan's own scope. An unresolvable spelling and
+    // a non-type symbol keep the written name (fail-safe comparison).
+    std::string canonicalSignatureNameInModule(const std::string& name, const std::string& mod) {
+        if (name.empty() || name.find("::") != std::string::npos) return name;
+        auto sym = inModuleScope(mod, [&] { return resolveNominalType(name); });
+        if (!sym || (sym->kind != SymbolKind::STRUCT && sym->kind != SymbolKind::CLASS &&
+                     sym->kind != SymbolKind::ENUM && sym->kind != SymbolKind::INTERFACE)) {
+            return name;
+        }
+        return canonicalTypeName(sym->name, definingModuleOfSymbol(sym));
+    }
+
     // Visitor methods
     void visit(AstProgram& program) override {
         for (auto& stmt : program.getStatements()) {
@@ -456,20 +549,40 @@ public:
                 auto ss = std::static_pointer_cast<StructSymbol>(structSym);
                 std::vector<const StructSymbol::Method*> matchedMethods;
                 bool satisfies = true;
+                // CIDER-BUG-128: satisfaction compares CANONICAL signature
+                // identities — each side resolved in the module that
+                // declared it (see canonicalSignatureTypeInModule) — never
+                // the raw collected spellings, so same-named types from two
+                // modules never satisfy each other and one type spelled
+                // bare/dotted/aliased always does.
+                std::string ifaceMod = definingModuleOfSymbol(ifaceSym);
+                std::string structMod = definingModuleOfSymbol(structSym);
                 for (auto& im : iface->methods) {
+                    std::string imMod = im.declaringModule.empty() ? ifaceMod : im.declaringModule;
+                    std::vector<TypeInfo> imParams;
+                    imParams.reserve(im.parameterTypes.size());
+                    for (const auto& pt : im.parameterTypes) {
+                        imParams.push_back(canonicalSignatureTypeInModule(pt, imMod));
+                    }
+                    TypeInfo imRet = canonicalSignatureTypeInModule(im.returnType, imMod);
                     bool found = false;
                     for (auto& sm : ss->methods) {
                         if (sm.name != im.name) continue;
-                        if (sm.parameterTypes.size() != im.parameterTypes.size()) continue;
+                        if (sm.parameterTypes.size() != imParams.size()) continue;
+                        std::string smMod = sm.declaringModule.empty() ? structMod
+                                                                       : sm.declaringModule;
                         bool paramsMatch = true;
                         for (size_t pi = 0; pi < sm.parameterTypes.size(); ++pi) {
-                            if (!(sm.parameterTypes[pi] == im.parameterTypes[pi])) {
+                            if (!(canonicalSignatureTypeInModule(sm.parameterTypes[pi], smMod) ==
+                                  imParams[pi])) {
                                 paramsMatch = false;
                                 break;
                             }
                         }
                         if (!paramsMatch) continue;
-                        if (!(sm.returnType == im.returnType)) continue;
+                        if (!(canonicalSignatureTypeInModule(sm.returnType, smMod) == imRet)) {
+                            continue;
+                        }
                         found = true;
                         matchedMethods.push_back(&sm);
                         break;

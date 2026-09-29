@@ -189,20 +189,40 @@ public:
             for (auto& ss : allStructClasses) {
                 if (!ss) continue;
                 bool satisfies = true;
+                // CIDER-BUG-128: satisfaction compares CANONICAL signature
+                // identities — each side resolved in the module that
+                // declared it (see canonicalSignatureType), never the raw
+                // collected spellings — so two same-named types from
+                // different modules never satisfy each other and one type
+                // spelled bare/dotted/aliased does. The checker's
+                // checkInterfaceValue applies the same rule, so a pair it
+                // admits always has a vtable here and a pair it rejects
+                // never gets one.
+                std::string ifaceMod = definingModuleFor(iface, iface->name);
+                std::string ssMod = definingModuleFor(ss, ss->name);
                 for (auto& im : iface->methods) {
+                    std::string imMod = methodModule(im, ifaceMod);
+                    std::vector<TypeInfo> imParams;
+                    imParams.reserve(im.parameterTypes.size());
+                    for (const auto& pt : im.parameterTypes) {
+                        imParams.push_back(canonicalSignatureType(pt, imMod));
+                    }
+                    TypeInfo imRet = canonicalSignatureType(im.returnType, imMod);
                     bool found = false;
                     for (auto& sm : ss->methods) {
                         if (sm.name != im.name) continue;
-                        if (sm.parameterTypes.size() != im.parameterTypes.size()) continue;
+                        if (sm.parameterTypes.size() != imParams.size()) continue;
+                        std::string smMod = methodModule(sm, ssMod);
                         bool paramsMatch = true;
                         for (size_t pi = 0; pi < sm.parameterTypes.size(); ++pi) {
-                            if (!(sm.parameterTypes[pi] == im.parameterTypes[pi])) {
+                            if (!(canonicalSignatureType(sm.parameterTypes[pi], smMod) ==
+                                  imParams[pi])) {
                                 paramsMatch = false;
                                 break;
                             }
                         }
                         if (!paramsMatch) continue;
-                        if (!(sm.returnType == im.returnType)) continue;
+                        if (!(canonicalSignatureType(sm.returnType, smMod) == imRet)) continue;
                         found = true;
                         break;
                     }
@@ -1165,6 +1185,114 @@ public:
     // covers symbols built outside the collector (unit tests).
     static std::string methodModule(const StructSymbol::Method& m, const std::string& ownerMod) {
         return m.declaringModule.empty() ? ownerMod : m.declaringModule;
+    }
+
+    // CIDER-BUG-128: canonical identity of a SIGNATURE SPELLING written in
+    // `mod`, for the interface-vtable satisfaction scan in generate(). The
+    // collected spellings keep their written form — bare, dotted or through
+    // a `type` alias, each in its own declaring module — so comparing them
+    // raw conflates two same-named types from different modules (a vtable
+    // would dispatch a signature the checker never agreed to) and splits
+    // one type spelled two ways (no vtable for a pair the checker admits).
+    // Mirrors the checker's canonicalSignatureType: the written spelling
+    // canonicalizes in `mod` first, then every `type` hop resolves in the
+    // ALIAS's own module (CIDER-BUG-090/102), nested fn/array spellings
+    // recurse in the same module, and an unresolvable spelling keeps its
+    // written name so the comparison fails safely.
+    TypeInfo canonicalSignatureType(const TypeInfo& t, const std::string& mod) {
+        if (t.isFunctionPointer) {
+            TypeInfo r = t;
+            if (t.fnParamTypes) {
+                r.fnParamTypes = std::make_shared<std::vector<TypeInfo>>();
+                for (const auto& p : *t.fnParamTypes) {
+                    r.fnParamTypes->push_back(canonicalSignatureType(p, mod));
+                }
+            }
+            if (t.fnReturnType) {
+                r.fnReturnType = std::make_shared<TypeInfo>(
+                    canonicalSignatureType(*t.fnReturnType, mod));
+            }
+            return r;
+        }
+        if (t.arrayElement) {
+            // CIDER-BUG-052: name/pointerLevel mirror the innermost element.
+            TypeInfo elem = canonicalSignatureType(*t.arrayElement, mod);
+            TypeInfo r = t;
+            r.arrayElement = std::make_shared<TypeInfo>(elem);
+            r.name = elem.name;
+            r.pointerLevel = elem.pointerLevel;
+            return r;
+        }
+        if (t.name.empty()) return t;
+        // CIDER-BUG-128: canonicalize the written spelling, then key the
+        // identity by the SYMBOL's defining module (never by the spelling's
+        // alone), then follow any `type` hop in its own module.
+        TypeInfo cur = t;
+        std::set<std::string> visiting;
+        std::string curMod = mod;
+        while (!cur.name.empty() && visiting.insert(cur.name).second) {
+            TypeInfo canon = canonicalizeNominalInModule(cur, curMod);
+            auto sym = signatureSymbolInModule(canon.name, curMod);
+            if (sym && sym->isTypeAlias && !sym->type.name.empty() &&
+                sym->type.name != canon.name) {
+                // The target spelling belongs to the alias's defining
+                // module; it canonicalizes there on the next iteration.
+                TypeInfo target = sym->type;
+                if (canon.isArray) {
+                    if (!target.isArray) {
+                        target.isArray = true;
+                        target.arraySize = canon.arraySize;
+                        target.arrayElement = canon.arrayElement;
+                    } else {
+                        TypeInfo outer = target;
+                        outer.arraySize = canon.arraySize;
+                        outer.arrayElement = std::make_shared<TypeInfo>(target);
+                        target = outer;
+                    }
+                }
+                target.pointerLevel += canon.pointerLevel;
+                target.isInterface = target.isInterface || canon.isInterface;
+                target.isVolatile = target.isVolatile || canon.isVolatile;
+                target.isClosure = target.isClosure || canon.isClosure;
+                target.isSlice = target.isSlice || canon.isSlice;
+                cur = target;
+                curMod = definingModuleFor(sym, canon.name);
+                continue;
+            }
+            if (sym && (sym->kind == SymbolKind::STRUCT || sym->kind == SymbolKind::CLASS ||
+                        sym->kind == SymbolKind::ENUM || sym->kind == SymbolKind::INTERFACE)) {
+                // canonicalizeNominalInModule roots a bare name in the
+                // SPELLING's module (and leaves main spellings bare), so a
+                // name a from-import or a re-export carries would keep the
+                // wrong owner here. The checker keys identity by the
+                // symbol's own defining module; match it, or a pair the
+                // checker admits would get no vtable.
+                canon.name = canonicalTypeName(sym->name, definingModuleFor(sym, canon.name));
+            }
+            cur = canon;
+            break;
+        }
+        return cur;
+    }
+
+    // CIDER-BUG-128: the symbol a (possibly canonical) signature nominal
+    // names, resolved as the module that wrote the spelling sees it —
+    // that module's scope, then root, never the generation site's scope
+    // (mirrors the checker's canonicalizeInModule order); dotted and
+    // canonical spellings resolve their qualifier instead. Null when the
+    // spelling names nothing, so the caller keeps it as written.
+    std::shared_ptr<Symbol> signatureSymbolInModule(const std::string& name,
+                                                    const std::string& mod) {
+        if (name.empty()) return nullptr;
+        if (name.find("::") != std::string::npos || name.find('.') != std::string::npos) {
+            return resolveNominalType(name);
+        }
+        Scope* ms = scopeForModule(mod);
+        if (!ms) return resolveNominalType(name);
+        if (auto sym = ms->resolveLocal(name)) return sym;
+        Scope* root = symbolTable_.getRootScope();
+        if (root && root != ms) return root->resolveLocal(name);
+        return nullptr;
     }
 
     // CID-031: a symbol declared in another module carries that module's
