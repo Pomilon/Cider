@@ -1,6 +1,7 @@
 #pragma once
 
 #include <algorithm>
+#include <cstdint>
 #include <functional>
 #include <iostream>
 #include <map>
@@ -32,6 +33,40 @@ struct RegisterAllocation {
 };
 
 typedef RegisterAllocation AllocationResult;
+
+// CIDER-BUG-172: compact id-numbered liveness sets. Liveness used to be
+// materialised as std::set<std::string> per block, so every union in the
+// fixpoint and every per-value block history paid a string comparison and
+// a set-node allocation: allocate() was O(blocks x live values) with a
+// large constant (2.3 s of codegen at N=400 on the destructor chain).
+// Values are now numbered once per function; a block's live set is a
+// fixed-width vector of uint64 words and union/difference are word
+// operations. The data-flow equations (CID-019, CIDER-BUG-166) are
+// untouched and the least fixed point is unique, so the live sets — and
+// every register/slot decision derived from them — are exactly the ones
+// the string sets produced (byte-identical asm).
+struct LiveBits {
+    std::vector<uint64_t> words;
+
+    void reset(size_t numBits) { words.assign((numBits + 63) / 64, 0); }
+    void set(size_t bit) { words[bit >> 6] |= (uint64_t(1) << (bit & 63)); }
+};
+
+// Visit every set bit in ascending order. The consumers below only keep
+// per-value first/last block numbers, so the visit order cannot change a
+// decision; ascending order keeps the pass deterministic and easy to
+// compare with the old per-value std::set<int> histories.
+template <typename F>
+inline void forEachSetBit(const std::vector<uint64_t>& words, F&& f) {
+    for (size_t w = 0; w < words.size(); w++) {
+        uint64_t bits = words[w];
+        while (bits) {
+            unsigned bit = (unsigned)__builtin_ctzll(bits);
+            f((int)(w * 64 + bit));
+            bits &= bits - 1;
+        }
+    }
+}
 
 class RegisterAllocator {
 public:
@@ -109,12 +144,43 @@ public:
             }
         }
 
-        // Track register types
-        std::map<std::string, bool> isFloat;
+        // CIDER-BUG-172: number every register value once, in scan order.
+        // The ids are only a key for the compact live sets; every decision
+        // below is still keyed and ordered by value name, as before.
+        // `isFloat` keeps the old last-occurrence-wins typing because the
+        // scan visits args, asmMap, phiArgs and dest in the same order the
+        // string-keyed map was written in.
+        std::map<std::string, int> valueId;
+        std::vector<std::string> valueNames;
+        std::vector<char> isFloat;
+        for (int b = 0; b < numBlocks; b++) {
+            auto& instrs = func.getBlocks()[b]->getInstructions();
+            for (auto& instr : instrs) {
+                auto note = [&](const IRValue& v) {
+                    if (v.kind != IRValue::REGISTER) return;
+                    auto ins = valueId.emplace(v.name, (int)valueNames.size());
+                    if (ins.second) {
+                        valueNames.push_back(v.name);
+                        isFloat.push_back(0);
+                    }
+                    isFloat[ins.first->second] = (v.type == IRType::F32 || v.type == IRType::F64);
+                };
+                for (auto& arg : instr.args) note(arg);
+                for (auto& pair : instr.asmMap) note(pair.second);
+                for (auto& kv : instr.phiArgs) note(kv.second);
+                if (instr.dest) note(*instr.dest);
+            }
+        }
+        const int numValues = (int)valueNames.size();
+        const size_t numWords = ((size_t)numValues + 63) / 64;
 
         // Compute USE[b] and DEF[b]
-        std::vector<std::set<std::string>> USE(numBlocks);
-        std::vector<std::set<std::string>> DEF(numBlocks);
+        std::vector<LiveBits> USE(numBlocks);
+        std::vector<LiveBits> DEF(numBlocks);
+        for (int b = 0; b < numBlocks; b++) {
+            USE[b].reset(numValues);
+            DEF[b].reset(numValues);
+        }
 
         // PHI edge uses (CID-019). A value consumed by a PHI in successor s
         // along the edge b -> s is read when the PHI runs (the VM looks up
@@ -122,44 +188,37 @@ public:
         // because the same PHI takes a different value from each
         // predecessor. Without this, a value defined in b and used only by
         // a PHI in s would claim to die in b before the edge is taken.
-        std::vector<std::map<int, std::set<std::string>>> PHI_EDGE_USE(numBlocks);
+        std::vector<std::map<int, LiveBits>> PHI_EDGE_USE(numBlocks);
 
+        std::vector<int> definedInBlock(numValues, -1);
         for (int b = 0; b < numBlocks; b++) {
-            std::set<std::string> definedInBlock;
             auto& instrs = func.getBlocks()[b]->getInstructions();
             for (auto& instr : instrs) {
                 for (auto& arg : instr.args) {
-                    if (arg.kind == IRValue::REGISTER) {
-                        if (definedInBlock.find(arg.name) == definedInBlock.end()) {
-                            USE[b].insert(arg.name);
-                        }
-                        isFloat[arg.name] = (arg.type == IRType::F32 || arg.type == IRType::F64);
-                    }
+                    if (arg.kind != IRValue::REGISTER) continue;
+                    int id = valueId.at(arg.name);
+                    if (definedInBlock[id] != b) USE[b].set(id);
                 }
                 for (auto& pair : instr.asmMap) {
-                    if (pair.second.kind == IRValue::REGISTER) {
-                        if (definedInBlock.find(pair.second.name) == definedInBlock.end()) {
-                            USE[b].insert(pair.second.name);
-                        }
-                        isFloat[pair.second.name] = (pair.second.type == IRType::F32 || pair.second.type == IRType::F64);
-                    }
+                    if (pair.second.kind != IRValue::REGISTER) continue;
+                    int id = valueId.at(pair.second.name);
+                    if (definedInBlock[id] != b) USE[b].set(id);
                 }
                 for (auto& [phiBlock, val] : instr.phiArgs) {
-                    if (val.kind == IRValue::REGISTER) {
-                        if (definedInBlock.find(val.name) == definedInBlock.end()) {
-                            USE[b].insert(val.name);
-                        }
-                        isFloat[val.name] = (val.type == IRType::F32 || val.type == IRType::F64);
-                        auto pit = blockIndex.find(phiBlock);
-                        if (pit != blockIndex.end()) {
-                            PHI_EDGE_USE[pit->second][b].insert(val.name);
-                        }
+                    if (val.kind != IRValue::REGISTER) continue;
+                    int id = valueId.at(val.name);
+                    if (definedInBlock[id] != b) USE[b].set(id);
+                    auto pit = blockIndex.find(phiBlock);
+                    if (pit != blockIndex.end()) {
+                        LiveBits& edge = PHI_EDGE_USE[pit->second][b];
+                        if (edge.words.empty()) edge.words.assign(numWords, 0);
+                        edge.set(id);
                     }
                 }
                 if (instr.dest && instr.dest->kind == IRValue::REGISTER) {
-                    DEF[b].insert(instr.dest->name);
-                    definedInBlock.insert(instr.dest->name);
-                    isFloat[instr.dest->name] = (instr.dest->type == IRType::F32 || instr.dest->type == IRType::F64);
+                    int id = valueId.at(instr.dest->name);
+                    DEF[b].set(id);
+                    definedInBlock[id] = b;
                 }
             }
         }
@@ -168,13 +227,15 @@ public:
         // every value live entering one of b's successors (plus the PHI
         // operands that successor reads along the edge), and LIVE_IN[b]
         // adds b's own upward-exposed uses, killed by b's definitions.
-        std::vector<std::set<std::string>> LIVE_IN(numBlocks);
-        std::vector<std::set<std::string>> LIVE_OUT(numBlocks);
-
+        std::vector<LiveBits> LIVE_IN(numBlocks);
+        std::vector<LiveBits> LIVE_OUT(numBlocks);
         for (int b = 0; b < numBlocks; b++) {
-            LIVE_IN[b] = USE[b];
+            LIVE_IN[b].words = USE[b].words;
+            LIVE_OUT[b].reset(numValues);
         }
 
+        std::vector<uint64_t> newOut(numWords, 0);
+        std::vector<uint64_t> newIn(numWords, 0);
         bool changed = true;
         while (changed) {
             changed = false;
@@ -184,31 +245,32 @@ public:
             // on straight-line code (each sweep moved liveness back a single
             // block: O(B^2) set merges); reverse order reaches the same least
             // fixed point in one pass plus the confirming pass for acyclic
-            // CFGs. The fixed point, and therefore every register decision,
-            // is unchanged.
+            // CFGs. CIDER-BUG-172: the merges are now word ORs, so a sweep
+            // is O(blocks x live-set words) instead of O(blocks x live
+            // values x log) with string allocations. The fixed point, and
+            // therefore every register decision, is unchanged.
             for (int b = numBlocks - 1; b >= 0; b--) {
-                std::set<std::string> newOut;
+                std::fill(newOut.begin(), newOut.end(), 0);
                 for (int s : successors[b]) {
-                    newOut.insert(LIVE_IN[s].begin(), LIVE_IN[s].end());
+                    const auto& succIn = LIVE_IN[s].words;
+                    for (size_t i = 0; i < numWords; i++) newOut[i] |= succIn[i];
                     auto edgeUse = PHI_EDGE_USE[b].find(s);
                     if (edgeUse != PHI_EDGE_USE[b].end()) {
-                        newOut.insert(edgeUse->second.begin(), edgeUse->second.end());
+                        const auto& edge = edgeUse->second.words;
+                        for (size_t i = 0; i < edge.size(); i++) newOut[i] |= edge[i];
                     }
                 }
-                if (newOut != LIVE_OUT[b]) {
+                if (newOut != LIVE_OUT[b].words) {
                     changed = true;
-                    LIVE_OUT[b] = newOut;
+                    LIVE_OUT[b].words = newOut;
                 }
 
-                std::set<std::string> newIn = USE[b];
-                for (auto& v : LIVE_OUT[b]) {
-                    if (DEF[b].find(v) == DEF[b].end()) {
-                        newIn.insert(v);
-                    }
+                for (size_t i = 0; i < numWords; i++) {
+                    newIn[i] = USE[b].words[i] | (LIVE_OUT[b].words[i] & ~DEF[b].words[i]);
                 }
-                if (newIn != LIVE_IN[b]) {
+                if (newIn != LIVE_IN[b].words) {
                     changed = true;
-                    LIVE_IN[b] = newIn;
+                    LIVE_IN[b].words = newIn;
                 }
             }
         }
@@ -227,28 +289,35 @@ public:
         // (unnecessary spills). So only extend along back edges: every
         // value live into a back-edge target (loop header) must keep its
         // register through all blocks of the loop body.
-        std::map<std::string, std::set<int>> blocksForReg;
+        // CIDER-BUG-172: regFirst/regLast per value replace the old
+        // map<string, set<int>> histories (same min/max results).
+        std::vector<int> regFirst(numValues, numBlocks);
+        std::vector<int> regLast(numValues, -1);
         for (int b = 0; b < numBlocks; b++) {
-            for (auto& v : USE[b]) blocksForReg[v].insert(b);
-            for (auto& v : DEF[b]) blocksForReg[v].insert(b);
+            auto noteBlock = [&](int id) {
+                if (b < regFirst[id]) regFirst[id] = b;
+                if (b > regLast[id]) regLast[id] = b;
+            };
+            forEachSetBit(USE[b].words, noteBlock);
+            forEachSetBit(DEF[b].words, noteBlock);
         }
         for (int src = 0; src < numBlocks; src++) {
             for (int tgt : successors[src]) {
                 if (tgt < src) {  // back edge: src -> tgt
                     for (int t = tgt; t <= src; ++t) {
-                        for (auto& v : LIVE_IN[tgt]) {
-                            blocksForReg[v].insert(t);
-                        }
+                        forEachSetBit(LIVE_IN[tgt].words, [&](int id) {
+                            if (t < regFirst[id]) regFirst[id] = t;
+                            if (t > regLast[id]) regLast[id] = t;
+                        });
                     }
                 }
             }
         }
 
         std::map<std::string, LiveInterval> intervals;
-        for (auto& pair : blocksForReg) {
-            int firstBlock = *pair.second.begin();
-            int lastBlock = *pair.second.rbegin();
-            intervals[pair.first] = {pair.first, firstBlock, lastBlock, isFloat[pair.first]};
+        for (int id = 0; id < numValues; id++) {
+            if (regLast[id] < 0) continue;
+            intervals[valueNames[id]] = {valueNames[id], regFirst[id], regLast[id], isFloat[id] != 0};
         }
 
         // Extend LOAD address register intervals
@@ -275,17 +344,21 @@ public:
         // block gap only costs reuse opportunities, never correctness.
         std::map<std::string, LiveInterval> slotRanges;
         {
-            std::map<std::string, std::set<int>> liveBlocks;
+            std::vector<int> slotFirst(numValues, numBlocks);
+            std::vector<int> slotLast(numValues, -1);
             for (int b = 0; b < numBlocks; b++) {
-                for (auto& v : USE[b]) liveBlocks[v].insert(b);
-                for (auto& v : DEF[b]) liveBlocks[v].insert(b);
-                for (auto& v : LIVE_IN[b]) liveBlocks[v].insert(b);
-                for (auto& v : LIVE_OUT[b]) liveBlocks[v].insert(b);
+                auto noteBlock = [&](int id) {
+                    if (b < slotFirst[id]) slotFirst[id] = b;
+                    if (b > slotLast[id]) slotLast[id] = b;
+                };
+                forEachSetBit(USE[b].words, noteBlock);
+                forEachSetBit(DEF[b].words, noteBlock);
+                forEachSetBit(LIVE_IN[b].words, noteBlock);
+                forEachSetBit(LIVE_OUT[b].words, noteBlock);
             }
-            for (auto& pair : liveBlocks) {
-                int firstBlock = *pair.second.begin();
-                int lastBlock = *pair.second.rbegin();
-                slotRanges[pair.first] = {pair.first, firstBlock, lastBlock, isFloat[pair.first]};
+            for (int id = 0; id < numValues; id++) {
+                if (slotLast[id] < 0) continue;
+                slotRanges[valueNames[id]] = {valueNames[id], slotFirst[id], slotLast[id], isFloat[id] != 0};
             }
         }
 
