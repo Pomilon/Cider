@@ -313,7 +313,13 @@ public:
         // CIDER-BUG-060: a qualified type is usable only when the member is
         // exported (externs exempt). line < 0 marks silent pre-check calls
         // that must keep failing safely instead of emitting a diagnostic.
-        if (mem && !isVisibleMember(mem, logical)) {
+        // CIDER-BUG-176: the spelling belongs to `spellingModule`
+        // (CIDER-BUG-102 re-rooting), so a self-qualified target written in
+        // its own module (`export type S = lib.Internal;` inside lib) stays
+        // visible when an alias chain re-resolves it from a foreign use
+        // site; a foreign spelling of the same private target still errors.
+        bool selfSpelling = !logical.empty() && spellingModule == logical;
+        if (mem && !selfSpelling && !isVisibleMember(mem, logical)) {
             if (line < 0) return t;
             error("symbol '" + bare + "' is not exported from module '" + prefix + "'", line);
             return t;
