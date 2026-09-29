@@ -3511,13 +3511,27 @@ public:
                 // compatibility with the callee's canonical parameter types).
                 std::string defMod = definingModuleOf(classSym);
                 for (size_t i = 0; i < expr.getArgs().size(); ++i) {
-                    expr.getArgs()[i]->accept(*this);
                     TypeInfo paramT = canonicalizeInModule(
                         classSym->constructorParamTypes[i], defMod, expr.getLine());
                     // CIDER-BUG-080: an interface-typed constructor
                     // parameter accepts a satisfying concrete value or the
                     // same interface, like every other interface position.
                     resolveInterfaceFlag(paramT);
+                    // CIDER-BUG-165: a list literal passed to a fixed-array
+                    // constructor parameter takes the same declaration-time
+                    // checks as every other call argument (the IR generator
+                    // materialises the declared shape).
+                    TypeInfo paramArray = resolveType(paramT);
+                    if (auto* list = dynamic_cast<ListExpr*>(expr.getArgs()[i].get());
+                        list && !paramT.isInterface && paramArray.isArray &&
+                        paramArray.pointerLevel == 0 && paramArray.arraySize > 0) {
+                        checkFixedArrayElements(
+                            "argument " + std::to_string(i + 1) +
+                                " to constructor of class '" + type.name + "'",
+                            paramArray, *list, expr.getLine());
+                        continue;
+                    }
+                    expr.getArgs()[i]->accept(*this);
                     if (paramT.isInterface) {
                         if (lastExprType_.name != "error") {
                             checkInterfaceValue(paramT, lastExprType_, expr.getLine());
@@ -3732,7 +3746,6 @@ public:
             for (const auto& fieldDef : structSym->fields) {
                 if (fieldDef.name == fieldInit.first) {
                     fieldFound = true;
-                    fieldInit.second->accept(*this);
                     // CIDER-BUG-090: resolve in the field's declaring
                     // module, like member access does.
                     TypeInfo expT = canonicalizeInModule(fieldDef.type, fieldDef.typeModule,
@@ -3741,6 +3754,23 @@ public:
                     // literal accepts any satisfying concrete value, exactly
                     // like a direct assignment to the field.
                     resolveInterfaceFlag(expT);
+                    // CIDER-BUG-165: a list literal for a fixed-array field
+                    // takes the declaration-time checks against the declared
+                    // shape, exactly like a declaration or assignment target
+                    // (CIDER-BUG-112). visit(ListExpr) infers the context-free
+                    // flat `*T` and rejected every list field; the shared
+                    // helper also recurses into nested rows (CIDER-BUG-163)
+                    // and converts interface elements (CIDER-BUG-135).
+                    TypeInfo expArray = resolveType(expT);
+                    if (auto* list = dynamic_cast<ListExpr*>(fieldInit.second.get());
+                        list && !expT.isInterface && expArray.isArray &&
+                        expArray.pointerLevel == 0 && expArray.arraySize > 0) {
+                        checkFixedArrayElements("field '" + fieldDef.name + "'", expArray,
+                                                *list, expr.getLine());
+                        lastExprType_ = expT;
+                        break;
+                    }
+                    fieldInit.second->accept(*this);
                     if (expT.isInterface) {
                         checkInterfaceValue(expT, lastExprType_, expr.getLine());
                     } else if (!areTypesCompatible(expT, lastExprType_)) {
@@ -3920,6 +3950,12 @@ public:
         auto callee = expr.getCallee();
         std::shared_ptr<FunctionSymbol> funcSym = nullptr;
         std::string displayName;
+        // CIDER-BUG-165: an interface method call has no FunctionSymbol, so
+        // its list-literal arguments are checked against the declared
+        // signature in the member-access branch below; record those indices
+        // so the indirect fallback does not visit the same list a second
+        // time (duplicate element diagnostics).
+        std::set<size_t> ifaceListArgsChecked;
 
         if (auto id = dynamic_cast<IdentifierExpr*>(callee)) {
             auto sym = resolveScoped(id->getName());
@@ -4021,6 +4057,39 @@ public:
                         }
                     }
                 }
+                // CIDER-BUG-165: interface dispatch is indirect (funcSym
+                // stays null), so the shared argument loop below cannot
+                // check its arguments. Validate a list literal against the
+                // interface method's declared fixed-array parameter here;
+                // every other argument spelling keeps the legacy unchecked
+                // behavior. The signature lookups mirror the member-access
+                // return-type rule above.
+                if (auto ifaceSym = resolveInterfaceSymbol(objType)) {
+                    auto iface = std::static_pointer_cast<InterfaceSymbol>(ifaceSym);
+                    std::string ifaceMod = definingModuleOf(ifaceSym);
+                    for (const auto& m : iface->methods) {
+                        if (m.name != mem->getMember()) continue;
+                        std::string methodMod = methodModuleOf(m, ifaceMod);
+                        for (size_t i = 0;
+                             i < expr.getArgs().size() && i < m.parameterTypes.size(); ++i) {
+                            auto* list = dynamic_cast<ListExpr*>(expr.getArgs()[i].get());
+                            if (!list) continue;
+                            TypeInfo paramT = canonicalizeInModule(
+                                m.parameterTypes[i], methodMod, expr.getLine());
+                            resolveInterfaceFlag(paramT);
+                            TypeInfo paramArray = resolveType(paramT);
+                            if (paramT.isInterface || !paramArray.isArray ||
+                                paramArray.pointerLevel != 0 || paramArray.arraySize <= 0) {
+                                continue;
+                            }
+                            checkFixedArrayElements(
+                                "argument " + std::to_string(i + 1) + " to '" + m.name + "'",
+                                paramArray, *list, expr.getLine());
+                            ifaceListArgsChecked.insert(i);
+                        }
+                        break;
+                    }
+                }
             }
         }
 
@@ -4089,8 +4158,11 @@ public:
             // FunctionSymbol). Preserve an interface result — the legacy
             // fallback below assumes int and would drop the fat pointer.
             TypeInfo calleeResultType = lastExprType_;
-            for (auto& arg : expr.getArgs()) {
-                arg->accept(*this);
+            for (size_t ai = 0; ai < expr.getArgs().size(); ++ai) {
+                // CIDER-BUG-165: an interface method call's list arguments
+                // were already visited by the declared-shape check above.
+                if (ifaceListArgsChecked.count(ai)) continue;
+                expr.getArgs()[ai]->accept(*this);
             }
             if (calleeResultType.isInterface) {
                 lastExprType_ = calleeResultType;
@@ -4110,9 +4182,8 @@ public:
             // defining module; canonicalize there so b.Event passed where
             // a.Event is expected is a type error, not a layout mix-up.
             std::string defMod = definingModuleOf(funcSym);
+            const std::string& label = displayName.empty() ? funcSym->name : displayName;
             for (size_t i = 0; i < expr.getArgs().size(); ++i) {
-                expr.getArgs()[i]->accept(*this);
-                TypeInfo argT = lastExprType_;
                 TypeInfo paramT =
                     canonicalizeInModule(funcSym->parameterTypes[i], defMod, expr.getLine());
                 // CIDER-BUG-080: a parameter declared with an interface type
@@ -4122,6 +4193,24 @@ public:
                 // parameter flags are resolved by the collector; this is the
                 // fallback for signature copies that lost the flag.
                 resolveInterfaceFlag(paramT);
+                // CIDER-BUG-165: a list literal passed to a fixed-array
+                // parameter takes the declaration-time checks against the
+                // declared shape, exactly like a declaration/assignment
+                // target (CIDER-BUG-112/163); visit(ListExpr) infers the
+                // context-free flat `*T` and rejected every list argument.
+                // The IR generator materialises the same declared shape at
+                // the call site.
+                TypeInfo paramArray = resolveType(paramT);
+                if (auto* list = dynamic_cast<ListExpr*>(expr.getArgs()[i].get());
+                    list && !paramT.isInterface && paramArray.isArray &&
+                    paramArray.pointerLevel == 0 && paramArray.arraySize > 0) {
+                    checkFixedArrayElements(
+                        "argument " + std::to_string(i + 1) + " to '" + label + "'",
+                        paramArray, *list, expr.getLine());
+                    continue;
+                }
+                expr.getArgs()[i]->accept(*this);
+                TypeInfo argT = lastExprType_;
                 TypeInfo fnParam = resolveFunctionPointerAlias(paramT);
                 TypeInfo fnArg = resolveFunctionPointerAlias(argT);
                 // CIDER-BUG-068: a closure object is accepted where a plain
@@ -4140,7 +4229,6 @@ public:
                     // `error` type would only cascade).
                     if (argT.name != "error") checkInterfaceValue(paramT, argT, expr.getLine());
                 } else if (!areTypesCompatible(paramT, argT) && !closureToFnParam) {
-                    const std::string& label = displayName.empty() ? funcSym->name : displayName;
                     error("Argument " + std::to_string(i + 1) + " to '" + label +
                               "' type mismatch. Expected " + paramT.toString() + ", got " +
                               canonicalizeNominal(lastExprType_).toString(),

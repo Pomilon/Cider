@@ -1707,15 +1707,22 @@ public:
                             // interface method and the vtable of a concrete
                             // receiver's method sees a fat pointer.
                             std::vector<TypeInfo> argTypes;
-                            for (auto& arg : expr.getArgs()) {
-                                arg->accept(*this);
-                                args.push_back(lastValue_);
+                            // CIDER-BUG-165: the method's declared parameter
+                            // shapes are known here, so a list argument is
+                            // materialised against its array parameter shape
+                            // (the checker validates the same shape).
+                            std::vector<TypeInfo> ifaceParams =
+                                rootCallParams(m.parameterTypes,
+                                               definingModuleFor(ifaceSym, ifaceSym->name));
+                            for (size_t ai = 0; ai < expr.getArgs().size(); ++ai) {
+                                const TypeInfo* paramT = ai < ifaceParams.size()
+                                                             ? &ifaceParams[ai]
+                                                             : nullptr;
+                                args.push_back(
+                                    evaluateCallArg(expr.getArgs()[ai].get(), paramT));
                                 argTypes.push_back(lastExprType_);
                             }
-                            convertCallArgs(args, 2,
-                                            rootCallParams(m.parameterTypes,
-                                                           definingModuleFor(ifaceSym, ifaceSym->name)),
-                                            0, &argTypes);
+                            convertCallArgs(args, 2, ifaceParams, 0, &argTypes);
                             // CIDER-BUG-077: a method returning an interface
                             // returns through the hidden-sret convention (its
                             // implementation is a non-virtual method, which
@@ -1784,18 +1791,6 @@ public:
         }
 
         if (!funcName.empty()) {
-            std::vector<IRValue> args;
-            // CIDER-BUG-080: each evaluated argument's type drives the
-            // interface conversion below (concrete value/pointer -> fat
-            // pointer); collected here because lastExprType_ is overwritten
-            // by later arguments.
-            std::vector<TypeInfo> argTypes;
-            for (auto& arg : expr.getArgs()) {
-                arg->accept(*this);
-                args.push_back(lastValue_);
-                argTypes.push_back(lastExprType_);
-            }
-
             auto sym = resolvedFuncSym;
             if (!sym) {
                 auto rawSym = symbolTable_.resolve(funcName);
@@ -1804,6 +1799,13 @@ public:
             }
             TypeInfo calleeRet = {"int", 0};
             std::string calleeDefMod;
+            // CIDER-BUG-165: the callee's declared parameter shapes are
+            // resolved BEFORE the arguments are evaluated, so a list-literal
+            // argument can be materialised against its parameter's array
+            // shape (evaluateCallArg); the legacy loop had no parameter
+            // information until after the argument temporaries were built.
+            std::vector<TypeInfo> calleeParams;
+            size_t paramBase = 0;
             if (sym && sym->kind == SymbolKind::FUNCTION) {
                 auto funcSym = std::static_pointer_cast<FunctionSymbol>(sym);
                 calleeRet = funcSym->returnType;
@@ -1812,6 +1814,35 @@ public:
                 // same-named type in the caller (or no visible type at all)
                 // cannot change the call convention.
                 calleeDefMod = definingModuleFor(sym, funcName);
+                // CID-003: method symbols carry `this` as parameter 0, so
+                // shift past it when an object is passed as the hidden first
+                // argument.
+                if ((objPtr.kind != IRValue::CONSTANT || objPtr.intValue != 0) &&
+                    !funcSym->parameterTypes.empty()) {
+                    paramBase = 1;
+                }
+                // CIDER-BUG-080: root the signature's interface spellings in
+                // the callee's module before conversion, so an imported
+                // callee's bare `Shape` parameter materialises the vtable
+                // label that module generated.
+                calleeParams = rootCallParams(funcSym->parameterTypes, calleeDefMod);
+            }
+
+            std::vector<IRValue> args;
+            // CIDER-BUG-080: each evaluated argument's type drives the
+            // interface conversion below (concrete value/pointer -> fat
+            // pointer); collected here because lastExprType_ is overwritten
+            // by later arguments.
+            std::vector<TypeInfo> argTypes;
+            for (size_t ai = 0; ai < expr.getArgs().size(); ++ai) {
+                const TypeInfo* paramT = (paramBase + ai < calleeParams.size())
+                                             ? &calleeParams[paramBase + ai]
+                                             : nullptr;
+                args.push_back(evaluateCallArg(expr.getArgs()[ai].get(), paramT));
+                argTypes.push_back(lastExprType_);
+            }
+
+            if (sym && sym->kind == SymbolKind::FUNCTION) {
                 // CIDER-BUG-090: present the result spelling rooted in the
                 // callee's module (mirroring the checker), so member access
                 // on the result resolves a return type the caller's module
@@ -1821,20 +1852,8 @@ public:
                     canonicalizeNominalInModule(resolveTypeAlias(calleeRet, calleeDefMod), calleeDefMod);
                 // CID-003: the parameter's declared width drives the
                 // conversion of float-family arguments (a literal in a
-                // float context keeps its parsed double). Method symbols
-                // carry `this` as parameter 0, so shift past it when an
-                // object is passed as the hidden first argument.
-                size_t paramBase = 0;
-                if ((objPtr.kind != IRValue::CONSTANT || objPtr.intValue != 0) &&
-                    !funcSym->parameterTypes.empty()) {
-                    paramBase = 1;
-                }
-                // CIDER-BUG-080: root the signature's interface spellings in
-                // the callee's module before conversion, so an imported
-                // callee's bare `Shape` parameter materialises the vtable
-                // label that module generated.
-                convertCallArgs(args, 0, rootCallParams(funcSym->parameterTypes, calleeDefMod),
-                                paramBase, &argTypes);
+                // float context keeps its parsed double).
+                convertCallArgs(args, 0, calleeParams, paramBase, &argTypes);
             }
             // CID-005: direct calls carry the callee FunctionSymbol's ABI
             // (`Default` when unmarked; codegen resolves that from the target
@@ -2672,7 +2691,20 @@ public:
                                        fieldType.isVolatile);
                     continue;
                 }
-                fieldInit.second->accept(*this);
+                // CIDER-BUG-165: a list literal for a fixed-array field is
+                // materialised against the field's declared shape
+                // (CIDER-BUG-163's emitListLiteralTemp) exactly like a
+                // declaration-time array; the aggregate branch below then
+                // copies the whole array into the field. visit(ListExpr)'s
+                // context-free inference would have stored pointer words for
+                // nested rows / word-sized elements for narrow ones.
+                if (auto* list = dynamic_cast<ListExpr*>(fieldInit.second.get());
+                    list && fieldType.isArray && fieldType.pointerLevel == 0 &&
+                    fieldType.arraySize > 0) {
+                    lastValue_ = emitListLiteralTemp(*list, fieldType, false);
+                } else {
+                    fieldInit.second->accept(*this);
+                }
                 IRValue val = lastValue_;
 
                 // CID-003: an aggregate literal's field stores at the
@@ -3818,6 +3850,31 @@ public:
         out.reserve(params.size());
         for (const auto& pt : params) out.push_back(callInterfaceParamType(pt, defMod));
         return out;
+    }
+
+    // CIDER-BUG-165: evaluate one call argument against its declared
+    // parameter shape. A list literal passed to a fixed-array parameter
+    // must be materialised against that DECLARED shape (CIDER-BUG-163's
+    // emitListLiteralTemp), exactly like a declaration or assignment
+    // target; letting visit(ListExpr) infer the context-free flat `*T`
+    // shape stored pointer words for nested rows and word-sized elements
+    // for narrow ones. The materialisation temp is caller storage, so its
+    // element stores carry no volatile flag: a volatile parameter is
+    // marked by the callee's own parameter copy (CIDER-BUG-101), and a
+    // volatile element SOURCE still marks its read inside
+    // emitListLiteralTemp. A null paramType (an unresolved indirect
+    // callee) keeps the legacy expression evaluation.
+    IRValue evaluateCallArg(Expression* arg, const TypeInfo* paramType) {
+        if (paramType) {
+            TypeInfo paramArray = resolveTypeAlias(*paramType);
+            if (auto* list = dynamic_cast<ListExpr*>(arg);
+                list && paramArray.isArray && paramArray.pointerLevel == 0 &&
+                paramArray.arraySize > 0) {
+                return emitListLiteralTemp(*list, paramArray, false);
+            }
+        }
+        arg->accept(*this);
+        return lastValue_;
     }
 
     // CID-003: convert call arguments to the callee's declared parameter
@@ -7692,16 +7749,20 @@ public:
         args.push_back(objPtr);
         // CIDER-BUG-080: evaluated argument types drive interface argument
         // conversion (a concrete value becomes a call-site fat pointer).
+        // CIDER-BUG-165: the constructor's declared parameter shapes are
+        // rooted here first, so a list argument is materialised against its
+        // parameter's array shape.
         std::vector<TypeInfo> argTypes;
-        for (auto& argExpr : argExprs) {
-            argExpr->accept(*this);
-            args.push_back(lastValue_);
+        std::vector<TypeInfo> ctorParams =
+            rootCallParams(ctorDef.first->parameterTypes, ctorDef.second);
+        for (size_t ai = 0; ai < argExprs.size(); ++ai) {
+            const TypeInfo* paramT = (1 + ai < ctorParams.size()) ? &ctorParams[1 + ai] : nullptr;
+            args.push_back(evaluateCallArg(argExprs[ai].get(), paramT));
             argTypes.push_back(lastExprType_);
         }
         // parameterTypes[0] is the hidden `this`; args[0] is its value, so
         // conversion starts at the first real parameter on both sides.
-        convertCallArgs(args, 1, rootCallParams(ctorDef.first->parameterTypes, ctorDef.second),
-                        1, &argTypes);
+        convertCallArgs(args, 1, ctorParams, 1, &argTypes);
         IRInstruction call;
         call.op = IROp::CALL;
         call.dest = std::nullopt;

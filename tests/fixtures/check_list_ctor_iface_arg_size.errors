@@ -1,0 +1,2 @@
+Array initializer size mismatch in argument 1 to constructor of class 'C': expected 2, got 3
+Array initializer size mismatch in argument 1 to 'take': expected 2, got 3

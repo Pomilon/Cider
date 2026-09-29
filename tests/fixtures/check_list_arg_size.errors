@@ -1,0 +1,5 @@
+Array initializer size mismatch in argument 1 to 'flat': expected 2, got 3
+Array initializer size mismatch in argument 1 to 'flat': expected 2, got 0
+Array initializer size mismatch in argument 1 to 'nested': expected 2, got 3
+Array initializer size mismatch in argument 1 to 'alias': expected 3, got 2
+Array initializer size mismatch in argument 1 to 'm': expected 2, got 3
