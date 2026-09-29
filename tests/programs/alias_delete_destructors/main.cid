@@ -1,0 +1,229 @@
+// CIDER-BUG-125 regression: `delete` through an alias-spelled class pointer
+// runs the same finalizer set the direct spelling does — the class's own
+// destructor body first, then every class value it embeds by value in reverse
+// construction order (the CIDER-BUG-088/CIDER-BUG-108 set), struct targets'
+// embedded values included.
+//
+// The lowering must key on the alias-RESOLVED pointee, never the declaration
+// spelling: visit(DeleteStmt) routes the pointee through
+// aggregateHasDestructors, which follows the alias chain to the class symbol
+// (resolveTypeAlias + resolveStructOrClassSymbol) exactly like `new` does. The
+// pre-CIDER-BUG-108 lowering instead called resolveNominalType on the raw
+// pointee spelling, where an alias provider is a plain STRUCT-kind Symbol that
+// never reaches the class, so the whole finalizer set was skipped.
+//
+// Shapes pinned here:
+//   * the ticket's own repro (`type Alias = D; var p: *Alias = new Alias;`)
+//     next to the direct-spelling control, so the two must agree;
+//   * alias chains (Chain1, Chain2) and an alias-of-alias of a class carrying
+//     both its own destructor and embedded class values;
+//   * struct aliases, and a struct alias whose members are themselves
+//     alias-spelled (class field, array of alias-typed structs, tail field);
+//   * pointees reached through a parameter, a function return, a struct field,
+//     a fixed array of alias pointers, a ternary and a `defer` body;
+//   * cross-module: an exported alias chain over a NON-exported class, used
+//     directly and re-aliased in this module, so the destructor label is
+//     attributed to the class's defining module;
+//   * neighbors that must stay silent: an alias to a destructor-less class and
+//     an alias to a plain scalar, which still free without emitting anything.
+// All three backends (VM unopt, VM optimized, native) must agree.
+from std.io import print, printInt;
+import xmod;
+
+var drops: int = 0;
+
+class D {
+    var label: int;
+    func ~D() {
+        drops = drops + 1;
+        printInt(this.label);
+        print(",");
+    }
+}
+
+class Pair {
+    var first: D;
+    var second: D;
+}
+
+class Owner {
+    var a: D;
+    var b: D;
+    func ~Owner() {
+        print("O,");
+    }
+}
+
+class Quiet {
+    var n: int;
+}
+
+struct SWrap {
+    var d: D;
+    var pad: int;
+}
+
+struct SNested {
+    var wrap: SWrap;
+    var arr: [D; 2];
+}
+
+struct Slot {
+    var d: D;
+}
+
+type Alias = D;
+type Chain1 = Alias;
+type Chain2 = Chain1;
+type PairAlias = Pair;
+type OwnerAlias = Owner;
+type OwnerChain = OwnerAlias;
+type WrapAlias = SWrap;
+type NestedAlias = SNested;
+type SlotAlias = Slot;
+type ArrAlias = [SlotAlias; 2];
+type DAlias = D;
+type QuietAlias = Quiet;
+type IntAlias = int;
+type XAlias = xmod.Chain2;
+
+struct Basket {
+    var slots: [SlotAlias; 2];
+    var tail: DAlias;
+}
+type BasketAlias = Basket;
+
+struct Holder {
+    var p: *Alias;
+}
+
+func direct() -> void {
+    var p: *D = new D;         // control: direct spelling
+    p->label = 0;
+    delete p;                  // 0,
+}
+
+func ticket() -> void {
+    var p: *Alias = new Alias; // CIDER-BUG-125 repro
+    p->label = 1;
+    delete p;                  // 1,
+}
+
+func chain() -> void {
+    var p: *Chain2 = new Chain2;
+    p->label = 2;
+    delete p;                  // 2,
+    var q: *PairAlias = new PairAlias;
+    q->first.label = 3;
+    q->second.label = 4;
+    delete q;                  // 4,3,
+}
+
+func owners() -> void {
+    var p: *OwnerChain = new OwnerChain;
+    p->a.label = 5;
+    p->b.label = 6;
+    delete p;                  // O,6,5,  (own body first, members reversed)
+}
+
+func structs() -> void {
+    var w: *WrapAlias = new WrapAlias;
+    w->d.label = 7;
+    delete w;                  // 7,
+    var n: *NestedAlias = new NestedAlias;
+    n->wrap.d.label = 8;
+    n->arr[0].label = 9;
+    n->arr[1].label = 10;
+    delete n;                  // 10,9,8,
+    var b: *BasketAlias = new BasketAlias;
+    b->slots[0].d.label = 11;
+    b->slots[1].d.label = 12;
+    b->tail.label = 13;
+    delete b;                  // 13,12,11,
+}
+
+func viaParam(p: *Chain2) -> void {
+    p->label = 14;
+    delete p;                  // 14,
+}
+
+func viaReturn() -> *Alias {
+    return new Alias;
+}
+
+func viaField() -> void {
+    var h: Holder;
+    h.p = new Alias;
+    h.p->label = 15;
+    delete h.p;                // 15,
+}
+
+func viaArray() -> void {
+    var ps: [*Chain2; 2];
+    ps[0] = new Chain2;
+    ps[1] = new Chain2;
+    ps[0]->label = 16;
+    ps[1]->label = 17;
+    delete ps[0];              // 16,
+    delete ps[1];              // 17,
+}
+
+func viaTernary() -> void {
+    var p: *Chain2 = new Chain2;
+    var q: *Chain2 = new Chain2;
+    p->label = 0;
+    q->label = 18;
+    var pick: bool = true;
+    delete (pick ? q : p);     // 18,
+}
+
+func viaDefer() -> void {
+    var p: *Alias = new Alias;
+    p->label = 19;
+    defer {
+        delete p;              // 19, at function scope exit
+    }
+}
+
+func silent() -> void {
+    var q: *QuietAlias = new QuietAlias;
+    q->n = 1;
+    delete q;                  // alias to a destructor-less class
+    var i: *IntAlias = new IntAlias;
+    delete i;                  // alias to a scalar pointee
+}
+
+func crossModule() -> void {
+    var p: *xmod.Chain2 = new xmod.Chain2;
+    p->label = 0;
+    delete p;                  // silent body, counted in xmod
+    var q: *XAlias = new XAlias;
+    q->label = 0;
+    delete q;                  // local alias chain over the imported alias
+    var r: *xmod.Chain2 = xmod.xmake();
+    r->label = 0;
+    delete r;                  // pointee from a cross-module return
+}
+
+func main() -> int {
+    direct();
+    ticket();
+    chain();
+    owners();
+    structs();
+    viaParam(new Chain2);
+    var r: *Alias = viaReturn();
+    r->label = 20;
+    delete r;                  // 20,
+    viaField();
+    viaArray();
+    viaTernary();
+    viaDefer();
+    silent();
+    crossModule();
+    print("\n");
+    if (drops != 21) { return 1; }   // every label 0..20 above runs once
+    if (xmod.xcount() != 3) { return 2; }
+    print("alias_delete_destructors_ok\n");
+    return 0;
+}
