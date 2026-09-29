@@ -3946,15 +3946,22 @@ public:
         // not exported, not a module), so no second generic error is added.
         bool dotted = structName.find('.') != std::string::npos;
         std::shared_ptr<Symbol> sym;
+        std::string lookupName = structName;
         if (dotted && structName.find('<') == std::string::npos) {
             TypeInfo canon = canonicalizeNominal({structName, 0}, expr.getLine());
             if (canon.name == structName) {
                 lastExprType_ = {"error", 0};
                 return;
             }
-            sym = resolveScoped(canon.name);
-        } else {
-            sym = resolveScoped(structName);
+            lookupName = canon.name;
+        }
+        sym = resolveScoped(lookupName);
+        // CIDER-BUG-179: aliases are plain STRUCT-kind Symbols, not
+        // StructSymbols. Resolve their chain before the literal's field
+        // lookup, retaining the original spelling for diagnostics.
+        if (sym && sym->isTypeAlias) {
+            TypeInfo resolved = resolveType({lookupName, 0});
+            sym = resolveScoped(resolved.name);
         }
         if (!sym || sym->kind != SymbolKind::STRUCT || sym->isTypeAlias) {
             error("Unknown struct type '" + expr.getStructName() + "'", expr.getLine());

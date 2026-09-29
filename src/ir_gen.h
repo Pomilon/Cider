@@ -3127,7 +3127,10 @@ public:
 
     void visit(StructLiteralExpr& expr) override {
         IRValue dest = IRValue::Register(nextTemp(), IRType::PTR);
-        int structSize = getTypeSize({expr.getStructName(), 0});
+        TypeInfo literalType;
+        literalType.name = expr.getStructName();
+        TypeInfo concreteType = resolveTypeAlias(literalType);
+        int structSize = getTypeSize(concreteType);
         currentBlock_->addInstruction({IROp::ALLOCA, dest, {IRValue::Constant(structSize, IRType::I32)}});
         // CIDER-BUG-067: a literal that omits fields must leave them zero,
         // not whatever the shared alloca slot held.
@@ -3137,8 +3140,9 @@ public:
         // (`m.Box<int>{...}`) resolves through the same nominal lookup the
         // type-position spelling uses (CIDER-BUG-073), so field offsets
         // come from the shared instantiation.
-        auto sym = resolveNominalType(expr.getStructName());
-        if (sym && (sym->kind == SymbolKind::STRUCT || sym->kind == SymbolKind::CLASS)) {
+        auto sym = resolveNominalType(concreteType.name);
+        if (sym && (sym->kind == SymbolKind::STRUCT || sym->kind == SymbolKind::CLASS) &&
+            sym->type.name.empty()) {
             auto structSym = std::static_pointer_cast<StructSymbol>(sym);
             std::string structMod = definingModuleFor(structSym, structSym->name);
             // CIDER-BUG-087: fields the literal omits must run the field
