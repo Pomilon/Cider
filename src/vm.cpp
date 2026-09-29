@@ -275,12 +275,34 @@ VMResult VM::runBody(const ModuleIR& module, const std::string& runFunction) {
                     }
                 };
                 IRType dt = instr.dest ? instr.dest->type : IRType::I64;
+                // CIDER-ISS-013: signed division overflow (INT_MIN / -1)
+                // is defined as 0, extending the CIDER-BUG-058
+                // division-by-zero policy (faulting integer division
+                // yields 0; the const evaluator already folds these
+                // literal cases to 0 with unsigned semantics). Raw C++
+                // / and % on INT_MIN / -1 are undefined behavior - in
+                // practice the 64-bit case traps like x86 idiv while a
+                // narrower quotient silently exceeds the destination
+                // width - and native idiv raises #DE, so the overflow
+                // needs an explicit guard on both sides. Unsigned
+                // division cannot overflow. The width follows the
+                // destination type, matching codegen's path selection
+                // (64-bit, 32-bit, or widened-narrow, whose range
+                // cannot reach INT32_MIN).
+                IRType divWidth = instr.dest ? instr.dest->type : IRType::I32;
+                bool divOverflow = false;
+                if (!divUnsigned && y != 0) {
+                    if (divWidth == IRType::I64)
+                        divOverflow = (x == INT64_MIN && y == -1);
+                    else if (divWidth == IRType::I32)
+                        divOverflow = ((int32_t)x == INT32_MIN && (int32_t)y == -1);
+                }
                 switch (instr.op) {
                 case IROp::ADD: d.i = narrowInt((int64_t)(ux + uy), dt); break;
                 case IROp::SUB: d.i = narrowInt((int64_t)(ux - uy), dt); break;
                 case IROp::MUL: d.i = narrowInt((int64_t)(ux * uy), dt); break;
-                case IROp::DIV: d.i = (y != 0) ? (divUnsigned ? (int64_t)(ux / uy) : x / y) : 0; break;
-                case IROp::MOD: d.i = (y != 0) ? (divUnsigned ? (int64_t)(ux % uy) : x % y) : 0; break;
+                case IROp::DIV: d.i = (y != 0 && !divOverflow) ? (divUnsigned ? (int64_t)(ux / uy) : x / y) : 0; break;
+                case IROp::MOD: d.i = (y != 0 && !divOverflow) ? (divUnsigned ? (int64_t)(ux % uy) : x % y) : 0; break;
                 case IROp::BIT_AND: d.i = x & y; break;
                 case IROp::BIT_OR: d.i = x | y; break;
                 case IROp::BIT_XOR: d.i = x ^ y; break;

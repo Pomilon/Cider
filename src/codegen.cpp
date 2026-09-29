@@ -1641,10 +1641,57 @@ bool CodeGenerator::generate(ModuleIR& module, const std::string& outputPath,
                     bool divZeroGuard = !(instr.args.size() > 1 &&
                                           instr.args[1].kind == IRValue::CONSTANT &&
                                           instr.args[1].intValue != 0);
-                    std::string divZeroLbl, divDoneLbl;
-                    if (divZeroGuard) {
+                    // CIDER-ISS-013: signed division overflow (INT_MIN /
+                    // -1) is defined as 0, extending the CIDER-BUG-058
+                    // division-by-zero policy above (the const evaluator
+                    // already folds these literal cases to 0 with
+                    // unsigned semantics). x86 idiv raises #DE on the
+                    // overflowing quotient just like on a zero divisor,
+                    // so the signed paths probe for it and reuse the
+                    // zero-result label (both faulting cases yield 0 for
+                    // /, and the exact 0 for %). Unsigned division cannot
+                    // overflow, and narrow signed dividends widen to 32
+                    // bits where INT32_MIN is unreachable, so neither
+                    // needs the probe. A constant operand that cannot form
+                    // the corner after widening skips it, keeping output
+                    // byte-identical everywhere else.
+                    bool destIs64 = (t == IRType::I64 || t == IRType::U64 || t == IRType::PTR);
+                    bool destIsNarrow = (t == IRType::I8 || t == IRType::U8 || t == IRType::I16 ||
+                                         t == IRType::U16 || t == IRType::BOOL);
+                    bool isOvfPath = destIs64 ? (t == IRType::I64)
+                                              : (!destIsNarrow && t == IRType::I32);
+                    auto widenConstBits = [](const IRValue& v, bool to64) -> uint64_t {
+                        IRType srcT = v.type;
+                        int w = 64;
+                        if (srcT == IRType::I8 || srcT == IRType::U8 || srcT == IRType::BOOL) w = 8;
+                        else if (srcT == IRType::I16 || srcT == IRType::U16) w = 16;
+                        else if (srcT == IRType::I32 || srcT == IRType::U32) w = 32;
+                        uint64_t mask = (w == 64) ? ~0ULL : ((w == 32) ? 0xFFFFFFFFULL : ((1ULL << w) - 1));
+                        uint64_t bits = (uint64_t)v.intValue & mask;
+                        bool isSigned = (srcT == IRType::I8 || srcT == IRType::I16 ||
+                                         srcT == IRType::I32 || srcT == IRType::I64);
+                        if (isSigned && w < 64 && (bits & (1ULL << (w - 1)))) bits |= ~mask;
+                        if (!to64) bits &= 0xFFFFFFFFULL;
+                        return bits;
+                    };
+                    bool divisorMayNeg1 = true, dividendMayMin = true;
+                    if (instr.args.size() > 1 && instr.args[1].kind == IRValue::CONSTANT) {
+                        uint64_t w = widenConstBits(instr.args[1], destIs64);
+                        divisorMayNeg1 = destIs64 ? (w == 0xFFFFFFFFFFFFFFFFULL)
+                                                  : ((uint32_t)w == 0xFFFFFFFFUL);
+                    }
+                    if (instr.args.size() > 0 && instr.args[0].kind == IRValue::CONSTANT) {
+                        uint64_t w = widenConstBits(instr.args[0], destIs64);
+                        dividendMayMin = destIs64 ? (w == 0x8000000000000000ULL)
+                                                  : ((uint32_t)w == 0x80000000UL);
+                    }
+                    bool ovfGuard = isOvfPath && divisorMayNeg1 && dividendMayMin;
+                    bool divGuardLabels = divZeroGuard || ovfGuard;
+                    std::string divZeroLbl, divDoneLbl, divOvfLbl;
+                    if (divGuardLabels) {
                         divZeroLbl = ".divzero" + std::to_string(divZeroLabelCount++);
                         divDoneLbl = divZeroLbl + "_done";
+                        if (ovfGuard) divOvfLbl = divZeroLbl + "_ovf";
                     }
                     auto emitDivZeroTest = [&](const std::string& divisor) {
                         if (!divZeroGuard) return;
@@ -1652,12 +1699,28 @@ bool CodeGenerator::generate(ModuleIR& module, const std::string& outputPath,
                         addText("    jz " + divZeroLbl);
                     };
                     auto emitDivZeroResult = [&]() {
-                        if (!divZeroGuard) return;
+                        if (!divGuardLabels) return;
                         addText("    jmp " + divDoneLbl);
                         addText(divZeroLbl + ":");
                         addText(instr.op == IROp::DIV ? "    xor eax, eax"
                                                       : "    xor edx, edx");
                         addText(divDoneLbl + ":");
+                    };
+                    // The overflow probe for one signed path: the divisor
+                    // is already in `divisor`, the dividend in `dividend`.
+                    // neg sets OF exactly when the dividend is INT_MIN at
+                    // the operation width; the second neg restores it, and
+                    // the taken branch lands on the shared zero result
+                    // (whose xor ignores both registers).
+                    auto emitDivOvfProbe = [&](const std::string& divisor,
+                                               const std::string& dividend) {
+                        if (!ovfGuard) return;
+                        addText("    cmp " + divisor + ", -1");
+                        addText("    jne " + divOvfLbl);
+                        addText("    neg " + dividend);
+                        addText("    jo " + divZeroLbl);
+                        addText("    neg " + dividend);
+                        addText(divOvfLbl + ":");
                     };
                     std::vector<std::string> clobbered = {"rax", "rdx"};
                     std::vector<std::string> toSave;
@@ -1721,6 +1784,7 @@ bool CodeGenerator::generate(ModuleIR& module, const std::string& outputPath,
                         widenDiv64("r11", instr.args[1], a2);
                         emitDivZeroTest("r11");
                         widenDiv64("rax", instr.args[0], a1);
+                        emitDivOvfProbe("r11", "rax");
                         // Unsigned divides zero-extend the dividend
                         // (CID-028): cqo/idiv sign-fills and miscomputes
                         // u64 values >= 2^63.
@@ -1790,6 +1854,7 @@ bool CodeGenerator::generate(ModuleIR& module, const std::string& outputPath,
                         widenDiv32("r11d", instr.args[1], a2);
                         emitDivZeroTest("r11d");
                         widenDiv32("eax", instr.args[0], a1);
+                        emitDivOvfProbe("r11d", "eax");
                         if (t == IRType::U32 || t == IRType::BOOL) {
                             addText("    xor edx, edx");
                             addText("    div r11d");
