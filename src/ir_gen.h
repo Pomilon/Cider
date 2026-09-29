@@ -389,7 +389,7 @@ public:
         if (t.pointerLevel > 0 || t.isFunctionPointer || t.isArray) return t;
         if (t.name.empty() || !visiting.insert(t.name).second) return t;
         auto sym = resolveNominalType(t.name);
-        if (!sym && !defModule.empty()) sym = resolveCalleeNominal(t.name, defModule);
+        if (!sym && !defModule.empty()) sym = resolveNominalInModule(t.name, defModule);
         if (!sym || sym->kind != SymbolKind::STRUCT || sym->type.name == t.name ||
             sym->type.name.empty()) {
             return t;
@@ -434,7 +434,7 @@ public:
         t.pointerLevel = 0;
         TypeInfo resolved = resolveTypeAlias(t, defModule);
         auto sym = resolveNominalType(resolved.name);
-        if (!sym && !defModule.empty()) sym = resolveCalleeNominal(resolved.name, defModule);
+        if (!sym && !defModule.empty()) sym = resolveNominalInModule(resolved.name, defModule);
         if (!sym || (sym->kind != SymbolKind::STRUCT && sym->kind != SymbolKind::CLASS)) return nullptr;
         if (!sym->type.name.empty()) return nullptr;  // alias provider / self-alias stop
         return sym;
@@ -510,7 +510,7 @@ public:
             return false;
         }
         auto sym = resolveNominalType(resolved.name);
-        if (!sym && !defModule.empty()) sym = resolveCalleeNominal(resolved.name, defModule);
+        if (!sym && !defModule.empty()) sym = resolveNominalInModule(resolved.name, defModule);
         if (!sym) return false;
         if (sym->kind != SymbolKind::STRUCT && sym->kind != SymbolKind::CLASS) return false;
         // A STRUCT-kind symbol that still provides another name (alias
@@ -639,6 +639,26 @@ public:
         return nullptr;
     }
 
+    // CIDER-BUG-102: resolve a signature/field/target spelling as written in
+    // `defModule` (bare names keep the module-scope fallback above; a
+    // qualified spelling re-roots its qualifier there first), so a callee's
+    // `lib.Shape` resolves even when the use site does not import lib. Null
+    // when the spelling does not resolve in that module.
+    std::shared_ptr<Symbol> resolveNominalInModule(const std::string& name,
+                                                   const std::string& defModule) {
+        if (name.empty() || defModule.empty()) return nullptr;
+        std::string rooted = name;
+        if (name.find("::") == std::string::npos && name.find('<') == std::string::npos &&
+            name.find('.') != std::string::npos) {
+            TypeInfo t;
+            t.name = name;
+            rooted = canonicalizeNominalInModule(t, defModule).name;
+            if (rooted == name) return nullptr;  // qualifier not visible there
+        }
+        if (rooted.find("::") != std::string::npos) return resolveNominalType(rooted);
+        return resolveCalleeNominal(rooted, defModule);
+    }
+
     // Mangled global key for a resolved symbol: bind-time provenance first
     // (from-aliases share the target object, so the origin module wins),
     // then the scope-identity search, then the same-module rule — the same
@@ -668,6 +688,20 @@ public:
         for (const auto& [path, scope] : moduleScopes_) {
             if (scope && logicalForScope(scope) == logical) return scope;
         }
+        return nullptr;
+    }
+
+    // CIDER-BUG-102: resolve a name as a spelling written in `logical`'s
+    // module sees it (that module's scope, then root — never the use
+    // site's). Mirrors the checker's resolveScopedInModule; "" keeps the
+    // legacy current-scope walk so main-file spellings are unchanged.
+    std::shared_ptr<Symbol> resolveInModule(const std::string& name, const std::string& logical) {
+        if (logical.empty()) return symbolTable_.resolve(name);
+        Scope* ms = scopeForModule(logical);
+        if (!ms) return symbolTable_.resolve(name);
+        if (auto sym = ms->resolveLocal(name)) return sym;
+        Scope* root = symbolTable_.getRootScope();
+        if (root && root != ms) return root->resolveLocal(name);
         return nullptr;
     }
 
@@ -749,9 +783,23 @@ public:
     // `type X = othermod.S`. Mirrors the checker's canonicalizeInModule;
     // main-module types keep bare names (canonical == bare there), so
     // import-free IR stays identical.
+    // CIDER-BUG-102: a DOTTED spelling gets the same treatment — its
+    // qualifier is re-rooted in the spelling's module (`lib.Shape` written
+    // in module mid becomes `lib::Shape`), so a use site that does not
+    // import lib still resolves the alias target or signature nominal.
     TypeInfo canonicalizeNominalInModule(TypeInfo t, const std::string& ownerMod) {
         if (t.name.empty() || t.name.find("::") != std::string::npos) return t;
-        if (t.name.find('<') != std::string::npos || t.name.find('.') != std::string::npos) return t;
+        if (t.name.find('<') != std::string::npos) return t;
+        if (t.name.find('.') != std::string::npos) {
+            auto dot = t.name.rfind('.');
+            if (dot == 0 || dot + 1 >= t.name.size()) return t;
+            auto modSym = resolveInModule(t.name.substr(0, dot), ownerMod);
+            if (modSym && modSym->kind == SymbolKind::MODULE) {
+                auto ms = std::static_pointer_cast<ModuleSymbol>(modSym);
+                t.name = canonicalTypeName(t.name.substr(dot + 1), ms->logicalName);
+            }
+            return t;
+        }
         if (ownerMod.empty()) return t;
         auto resolved = resolveNominalType(ownerMod + "::" + t.name);
         if (resolved && (resolved->kind == SymbolKind::STRUCT || resolved->kind == SymbolKind::CLASS ||
@@ -787,8 +835,12 @@ public:
     TypeInfo canonicalizeSymbolType(const std::shared_ptr<Symbol>& sym, const std::string& name) {
         TypeInfo t = sym->type;
         if (t.name.empty() || t.name.find("::") != std::string::npos) return t;
-        if (t.name.find('<') != std::string::npos || t.name.find('.') != std::string::npos) return t;
+        if (t.name.find('<') != std::string::npos) return t;
         std::string defMod = definingModuleFor(sym, name);
+        // CIDER-BUG-102: a qualified spelling belongs to the symbol's
+        // defining module, so re-root its qualifier there (same rule as
+        // canonicalizeNominalInModule).
+        if (t.name.find('.') != std::string::npos) return canonicalizeNominalInModule(t, defMod);
         if (defMod.empty()) return t;
         auto resolved = resolveNominalType(defMod + "::" + t.name);
         if (resolved && (resolved->kind == SymbolKind::STRUCT || resolved->kind == SymbolKind::CLASS ||
@@ -2298,7 +2350,7 @@ public:
                     if (fieldIsStruct) {
                         auto fieldTypeSym = resolveNominalType(fieldType.name);
                         if (!fieldTypeSym && !fieldMod.empty()) {
-                            fieldTypeSym = resolveCalleeNominal(fieldType.name, fieldMod);
+                            fieldTypeSym = resolveNominalInModule(fieldType.name, fieldMod);
                         }
                         if (!fieldTypeSym || (fieldTypeSym->kind != SymbolKind::STRUCT && fieldTypeSym->kind != SymbolKind::CLASS) ||
                             !fieldTypeSym->type.name.empty()) {
@@ -3089,7 +3141,7 @@ public:
 
         if (type.isInterface) return 16;
         auto sym = resolveNominalType(type.name);
-        if (!sym && !defModule.empty()) sym = resolveCalleeNominal(type.name, defModule);
+        if (!sym && !defModule.empty()) sym = resolveNominalInModule(type.name, defModule);
         // CIDER-FEAT-002: an enum value is its int-sized underlying
         // integer, never the legacy 8-byte unknown-nominal default.
         if (sym && sym->kind == SymbolKind::ENUM) return 4;

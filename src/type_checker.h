@@ -113,6 +113,30 @@ public:
         return root ? root->resolveLocal(name) : nullptr;
     }
 
+    // CIDER-BUG-102: resolve a name as a spelling WRITTEN in `logical`'s
+    // module sees it — that module's scope, then root, never the use site's
+    // scope. Dotted spellings and alias targets pass their defining module
+    // here, so `lib.Shape` written in module mid resolves against mid's
+    // imports even when the ultimate use site does not import lib. A no-op
+    // for the current module (and for unregistered modules), which keeps
+    // ordinary lookups unchanged.
+    std::shared_ptr<Symbol> resolveScopedInModule(const std::string& name, const std::string& logical) {
+        if (logical == currentModule_) return resolveScoped(name);
+        Scope* ms = scopeForModule(logical);
+        if (!ms) return resolveScoped(name);
+        Scope* prevScope = symbolTable_.getCurrentScope();
+        Scope* prevModuleScope = currentModuleScope_;
+        std::string prevModule = currentModule_;
+        currentModule_ = logical;
+        currentModuleScope_ = ms;
+        symbolTable_.setCurrentScope(ms);
+        auto sym = resolveScoped(name);
+        symbolTable_.setCurrentScope(prevScope);
+        currentModule_ = prevModule;
+        currentModuleScope_ = prevModuleScope;
+        return sym;
+    }
+
     // A canonical "logical::Name" (spec §1 identity) resolves its bare part
     // in that module's scope.
     std::shared_ptr<Symbol> resolveCanonical(const std::string& name) {
@@ -211,12 +235,15 @@ public:
     }
 
     // Canonicalize a dotted `qualifier.Name` (qualifier = last segment or
-    // full logical path) to `logical::Name`.
-    TypeInfo canonicalizeDotted(TypeInfo t, int line = -1) {
+    // full logical path) to `logical::Name`. The qualifier resolves as a
+    // spelling written in `spellingModule` sees it (CIDER-BUG-102), so a
+    // cross-module signature/alias target written in its own module does
+    // not depend on the ultimate use site's imports.
+    TypeInfo canonicalizeDotted(TypeInfo t, int line, const std::string& spellingModule) {
         auto dot = t.name.rfind('.');
         std::string prefix = t.name.substr(0, dot);
         std::string bare = t.name.substr(dot + 1);
-        auto modSym = resolveScoped(prefix);
+        auto modSym = resolveScopedInModule(prefix, spellingModule);
         bool isModule = modSym && modSym->kind == SymbolKind::MODULE;
         std::shared_ptr<Symbol> mem;
         std::string logical;
@@ -291,7 +318,7 @@ public:
             return t;
         }
         if (t.name.find('<') != std::string::npos) return t;  // template instantiation (T6)
-        if (t.name.find('.') != std::string::npos) return canonicalizeDotted(t, line);
+        if (t.name.find('.') != std::string::npos) return canonicalizeDotted(t, line, logical);
         Scope* ms = scopeForModule(logical);
         std::shared_ptr<Symbol> sym;
         if (ms) sym = ms->resolveLocal(t.name);
@@ -339,8 +366,8 @@ public:
         // CIDER-BUG-096: a qualified template spelling the collector did not
         // accept (ambiguous qualifier / unknown template) is diagnosed here
         // instead of bailing out to the generic member-access error.
-        if (t.name.find('<') != std::string::npos) return canonicalizeDottedTemplate(t, line);
-        if (t.name.find('.') != std::string::npos) return canonicalizeDotted(t, line);
+        if (t.name.find('<') != std::string::npos) return canonicalizeDottedTemplate(t, line, currentModule_);
+        if (t.name.find('.') != std::string::npos) return canonicalizeDotted(t, line, currentModule_);
         auto sym = resolveScoped(t.name);
         if (sym && (sym->kind == SymbolKind::STRUCT || sym->kind == SymbolKind::CLASS ||
                     sym->kind == SymbolKind::ENUM || sym->kind == SymbolKind::INTERFACE)) {
@@ -376,7 +403,7 @@ public:
     // "is not a struct or class"). A dot after the '<' belongs to an
     // argument list (`Box<m.Thing>`) and is not a qualifier. line < 0 marks
     // silent pre-check calls that must keep failing safely.
-    TypeInfo canonicalizeDottedTemplate(TypeInfo t, int line) {
+    TypeInfo canonicalizeDottedTemplate(TypeInfo t, int line, const std::string& spellingModule) {
         auto lt = t.name.find('<');
         if (lt == std::string::npos) return t;
         auto dot = t.name.rfind('.', lt);
@@ -385,7 +412,7 @@ public:
         std::string prefix = t.name.substr(0, dot);
         std::string bare = t.name.substr(dot + 1, lt - dot - 1);
         if (reportAmbiguousQualifier(prefix, line)) return t;
-        auto modSym = resolveScoped(prefix);
+        auto modSym = resolveScopedInModule(prefix, spellingModule);
         if (modSym && modSym->kind == SymbolKind::MODULE) {
             auto ms = std::static_pointer_cast<ModuleSymbol>(modSym);
             auto namesIt = moduleTemplateNames_.find(ms->logicalName);

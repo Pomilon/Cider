@@ -178,6 +178,32 @@ public:
         }
         return nullptr;
     }
+    // CIDER-BUG-102: logical module ("" == main) recorded as a symbol's
+    // definition site; the module being collected is the fallback for
+    // symbols built outside the collector (unit tests) or unrecorded.
+    std::string definingModuleOfSymbol(const std::shared_ptr<Symbol>& sym) {
+        if (sym) {
+            auto it = symbolModules_.find(sym->id);
+            if (it != symbolModules_.end()) return it->second;
+        }
+        return getCurrentModule();
+    }
+    // CIDER-BUG-102: run `fn` with name resolution switched to `logical`'s
+    // module scope ("" == root); a no-op when the module is unknown. Alias
+    // chains use it so a target spelling resolves in the alias's defining
+    // module, not the use site's.
+    template <typename Fn>
+    decltype(auto) inModuleScope(const std::string& logical, Fn&& fn) {
+        Scope* s = scopeForFieldTypeModule(logical);
+        if (!s) return fn();
+        struct ScopeRestore {
+            SymbolTable& table;
+            Scope* prev;
+            ~ScopeRestore() { table.setCurrentScope(prev); }
+        } restore{symbolTable_, symbolTable_.getCurrentScope()};
+        symbolTable_.setCurrentScope(s);
+        return fn();
+    }
     // CID-020/021 (spec §6): template instantiation keys include the
     // defining module (`a.Box<int>` vs `b.Box<int>`). The table key joins
     // the defining module's logical name with the template (or explicit
@@ -1280,7 +1306,12 @@ public:
         while (sym && sym->isTypeAlias && !sym->type.name.empty() &&
                sym->type.name != type.name && visiting.insert(sym->type.name).second) {
             aliasTarget = sym->type;
-            sym = resolveNominalType(sym->type.name);
+            // CIDER-BUG-102: each hop's target spelling belongs to the hop
+            // symbol's defining module (`type M = lib.Shape` in mid must
+            // resolve the lib qualifier in mid's scope, not the use site's).
+            auto hopSym = sym;
+            sym = inModuleScope(definingModuleOfSymbol(hopSym),
+                                [&] { return resolveNominalType(aliasTarget.name); });
         }
         if (sym && sym->kind == SymbolKind::INTERFACE &&
             aliasTarget.pointerLevel == 0 && !aliasTarget.isArray) {
@@ -1320,7 +1351,11 @@ public:
             } else if (sym && sym->isTypeAlias) {
                 // CID-005/T8: a `type X = T` alias provider is a STRUCT-kind
                 // plain Symbol, not a StructSymbol: size of the target type.
-                result = getFieldSize(sym->type, visiting);
+                // CIDER-BUG-102: the target spelling belongs to the alias's
+                // defining module, so a qualified hop (`type M = lib.Shape`)
+                // resolves there even when the use site does not import lib.
+                result = inModuleScope(definingModuleOfSymbol(sym),
+                                       [&]() -> int { return getFieldSize(sym->type, visiting); });
             } else if (sym && (sym->kind == SymbolKind::STRUCT || sym->kind == SymbolKind::CLASS)) {
                 result = std::static_pointer_cast<StructSymbol>(sym)->totalSize;
             } else if (sym && sym->kind == SymbolKind::INTERFACE) {
@@ -1365,12 +1400,18 @@ public:
             } else if (sym && sym->isTypeAlias) {
                 // CID-005/T8: `type X = T` alias provider (plain Symbol, not
                 // a StructSymbol): alignment of the target type.
-                result = getFieldAlignment(sym->type, visiting);
+                // CIDER-BUG-102: resolved in the alias's defining module.
+                result = inModuleScope(definingModuleOfSymbol(sym),
+                                       [&]() -> int { return getFieldAlignment(sym->type, visiting); });
             } else if (sym && (sym->kind == SymbolKind::STRUCT || sym->kind == SymbolKind::CLASS)) {
                 auto ss = std::static_pointer_cast<StructSymbol>(sym);
                 int maxA = 1;
                 for (auto& f : ss->fields) {
-                    int a = getFieldAlignment(f.type, visiting);
+                    // CIDER-BUG-090: a foreign field's spelling belongs to
+                    // its own module (CIDER-BUG-102: including a qualified
+                    // one), not the current layout context.
+                    int a = inModuleScope(f.typeModule,
+                                          [&]() -> int { return getFieldAlignment(f.type, visiting); });
                     if (a > maxA) maxA = a;
                 }
                 result = maxA;
@@ -1404,15 +1445,7 @@ public:
     // nominals in the wrong scope and fall back to the 8-byte unknown size.
     template <typename Fn>
     decltype(auto) inFieldTypeScope(const StructSymbol::Field& f, Fn&& fn) {
-        Scope* fieldScope = scopeForFieldTypeModule(f.typeModule);
-        if (!fieldScope) return fn();
-        struct ScopeRestore {
-            SymbolTable& table;
-            Scope* prev;
-            ~ScopeRestore() { table.setCurrentScope(prev); }
-        } restore{symbolTable_, symbolTable_.getCurrentScope()};
-        symbolTable_.setCurrentScope(fieldScope);
-        return fn();
+        return inModuleScope(f.typeModule, std::forward<Fn>(fn));
     }
 
     // Union: every field overlaps at offset 0; the union is as large and as
