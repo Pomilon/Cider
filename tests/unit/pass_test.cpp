@@ -718,6 +718,124 @@ int testVolatileGap133IrFlags() {
     return 0;
 }
 
+int testVolatileFormation144IrFlags() {
+    // CIDER-BUG-144: formation-time stores into volatile aggregates stayed
+    // plain. emitZeroInstance, emitClassFieldInitializersImpl,
+    // emitEmbeddedInitializers (and the struct twin) took no destination
+    // flag, so `var x: volatile V;` zeroed, stamped its vptr and ran field
+    // initializers through plain instructions — the same gap at globals,
+    // `new` instances and embedded fields. The flag now comes from the same
+    // alias-resolved sources the copy sites use (CIDER-BUG-061/079/133) and
+    // is pinned here with exact counts against non-volatile controls, so
+    // non-volatile IR keeps its shape.
+    struct Tally {
+        int volatileLoads = 0;
+        int volatileStores = 0;
+        int volatileMemcpy = 0;
+        int volatileTotal = 0;
+    };
+    auto tally = [](const ModuleResult& m) {
+        Tally t;
+        for (const auto& func : m.module.getFunctions()) {
+            for (const auto& b : func->getBlocks()) {
+                for (const auto& in : b->getInstructions()) {
+                    if (!in.isVolatile) continue;
+                    t.volatileTotal++;
+                    if (in.op == cider::IROp::LOAD) t.volatileLoads++;
+                    if (in.op == cider::IROp::STORE) t.volatileStores++;
+                    if (in.op == cider::IROp::MEMCPY) t.volatileMemcpy++;
+                }
+            }
+        }
+        return t;
+    };
+
+    // V: vptr stamp, an embedded class value with its own field initializer,
+    // and a scalar field initializer — three stores per instance.
+    const std::string shape =
+        "class Inner { var a: int = 7; }\n"
+        "class V { virtual func f() -> int { return 1; } var inner: Inner; var x: int = 42; }\n";
+
+    // (1) A volatile value local: the whole-instance zero MEMCPY, the vptr
+    // stamp, the embedded Inner's initializer and V's own field
+    // initializer are all volatile (one memcpy + three stores). The alias
+    // spelling `type VV = volatile V` marks the same formation stores.
+    auto l1 = tally(genModule(shape + "func f() -> void { var x: volatile V; }\n"));
+    CHECK(l1.volatileMemcpy == 1);
+    CHECK(l1.volatileStores == 3);
+    CHECK(l1.volatileLoads == 0);
+    auto l2 = tally(genModule(shape +
+        "type VV = volatile V;\n"
+        "func f() -> void { var x: VV; }\n"));
+    CHECK(l2.volatileMemcpy == 1);
+    CHECK(l2.volatileStores == 3);
+    CHECK(tally(genModule(shape + "func f() -> void { var x: V; }\n")).volatileTotal == 0);
+
+    // (2) A volatile global: .bss starts zero, so the synthesized startup
+    // pass has no zero MEMCPY; its vptr and field-initializer stores are
+    // volatile. The same global without `volatile` stays wholly plain.
+    auto g1 = tally(genModule(shape +
+        "var gv: volatile V;\n"
+        "func main() -> i32 { return 0; }\n"));
+    CHECK(g1.volatileMemcpy == 0);
+    CHECK(g1.volatileStores == 3);
+    CHECK(tally(genModule(shape +
+        "var gp: V;\n"
+        "func main() -> i32 { return 0; }\n")).volatileTotal == 0);
+
+    // (3) `new volatile V`: the zero, vptr and field stores are marked; the
+    // volatile pointer local's own initialization adds the fourth store
+    // (CIDER-BUG-061). `new VV` through the alias marks the three formation
+    // stores while its plain pointer local adds none; `new V` stays plain.
+    auto n1 = tally(genModule(shape +
+        "func f() -> void { var p: volatile V* = new volatile V; }\n"));
+    CHECK(n1.volatileMemcpy == 1);
+    CHECK(n1.volatileStores == 4);
+    auto n2 = tally(genModule(shape +
+        "type VV = volatile V;\n"
+        "func f() -> void { var p: VV* = new VV; }\n"));
+    CHECK(n2.volatileMemcpy == 1);
+    CHECK(n2.volatileStores == 3);
+    CHECK(tally(genModule(shape +
+        "func f() -> void { var p: V* = new V; }\n")).volatileTotal == 0);
+
+    // (4) Embedded recursion: a volatile Holder zeroes and forms its
+    // embedded V volatile (one memcpy + three stores); a volatile-qualified
+    // FIELD marks its own formation stores even under a plain destination
+    // (its enclosing zero stays plain). The all-plain shapes carry nothing.
+    auto e1 = tally(genModule(shape +
+        "class Holder { var v: V; }\n"
+        "func f() -> void { var h: volatile Holder; }\n"));
+    CHECK(e1.volatileMemcpy == 1);
+    CHECK(e1.volatileStores == 3);
+    auto e2 = tally(genModule(shape +
+        "class VolField { var v: volatile V; }\n"
+        "func f() -> void { var h: VolField; }\n"));
+    CHECK(e2.volatileMemcpy == 0);
+    CHECK(e2.volatileStores == 3);
+
+    // (5) A fixed array of volatile class values: the zero covers the whole
+    // array and every element's formation stores are marked (2 x 3 stores).
+    auto a1 = tally(genModule(shape + "func f() -> void { var a: [volatile V; 2]; }\n"));
+    CHECK(a1.volatileMemcpy == 1);
+    CHECK(a1.volatileStores == 6);
+    CHECK(a1.volatileLoads == 0);
+
+    // Negative control: every shape above without `volatile` (locals,
+    // embedded fields, array, `new`, global, alias) carries no volatile
+    // instruction at all.
+    auto n = tally(genModule(shape +
+        "class Holder { var v: V; }\n"
+        "class PlainField { var v: V; }\n"
+        "type VV = V;\n"
+        "var gp: V;\n"
+        "func f() -> void { var x: V; var h: Holder; var hf: PlainField; var a: [V; 2]; }\n"
+        "func nf() -> void { var p: V* = new V; }\n"
+        "func main() -> i32 { return 0; }\n"));
+    CHECK(n.volatileLoads == 0 && n.volatileStores == 0 && n.volatileMemcpy == 0);
+    return 0;
+}
+
 int testVolatileGvn() {
     // CIDER-BUG-061: GVN must never replace a volatile access with a MOV of
     // an earlier occurrence — even for an opcode that is normally deduped.
@@ -1043,6 +1161,7 @@ int run() {
     CHECK(testPointerInterfaceStoreIrFlags() == 0);
     CHECK(testVolatileGap101IrFlags() == 0);
     CHECK(testVolatileGap133IrFlags() == 0);
+    CHECK(testVolatileFormation144IrFlags() == 0);
     CHECK(testVolatileGvn() == 0);
     CHECK(testVolatileLicm() == 0);
     CHECK(testCallClobberLicm() == 0);

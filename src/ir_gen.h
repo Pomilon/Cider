@@ -2913,7 +2913,10 @@ public:
             // which emit nothing.
             if (declAgg.pointerLevel == 0 &&
                 (declAgg.isArray || isStructValueType(declAgg))) {
-                pendingGlobalInits_.push_back({declAgg, aggMod, IRValue::Label(gname)});
+                // CIDER-BUG-144: carry the declared (alias-resolved)
+                // volatility into the synthesized startup pass.
+                pendingGlobalInits_.push_back({declAgg, aggMod, IRValue::Label(gname),
+                                               declAgg.isVolatile});
             }
             module_.addGlobalVar(gname, (declAgg.pointerLevel > 0) ? IRType::PTR : mapType(declAgg.name), initVal, declAgg.isArray ? declAgg.arraySize : 0, totalBytes, initIsFloat, currentSourcePath_);
             globalValues_[gname] = IRValue::Label(gname);
@@ -2964,8 +2967,11 @@ public:
                 if (!stmt.getInitializer()) {
                     // CIDER-BUG-067: zero the whole value-class slot first,
                     // then run the constant field initializers on top.
-                    emitZeroInstance(addr, getTypeSize(varType));
-                    emitClassFieldInitializers(classSym, addr);
+                    // CIDER-BUG-144: a volatile destination's formation
+                    // stores are observable accesses (alias-resolved flag,
+                    // like every copy site).
+                    emitZeroInstance(addr, getTypeSize(varType), varType.isVolatile);
+                    emitClassFieldInitializers(classSym, addr, varType.isVolatile);
                 }
             } else if (!stmt.getInitializer()) {
                 // CIDER-BUG-087: a struct value embeds its class-valued
@@ -2975,8 +2981,9 @@ public:
                 // keep their existing (unzeroed) emission.
                 std::set<const StructSymbol*> visiting;
                 if (aggregateNeedsInit(varType, currentModule_, visiting)) {
-                    emitZeroInstance(addr, getTypeSize(varType));
-                    emitEmbeddedInitializers(varType, addr, 0, currentModule_, visiting);
+                    emitZeroInstance(addr, getTypeSize(varType), varType.isVolatile);
+                    emitEmbeddedInitializers(varType, addr, 0, currentModule_, visiting,
+                                             varType.isVolatile);
                 }
             }
         } else if (varType.pointerLevel == 0 && varType.isArray && !stmt.getInitializer()) {
@@ -2986,8 +2993,9 @@ public:
             // elements recurse through their own class-valued fields.
             std::set<const StructSymbol*> visiting;
             if (aggregateNeedsInit(varType, currentModule_, visiting)) {
-                emitZeroInstance(addr, getTypeSize(varType));
-                emitEmbeddedInitializers(varType, addr, 0, currentModule_, visiting);
+                emitZeroInstance(addr, getTypeSize(varType), varType.isVolatile);
+                emitEmbeddedInitializers(varType, addr, 0, currentModule_, visiting,
+                                         varType.isVolatile);
             }
         }
 
@@ -6463,7 +6471,10 @@ public:
     // in .bss (zero by definition at load), the VM zero-fills global storage
     // when materialising labels. Sharing one block per distinct size keeps
     // the data small; MEMCPY/MOV are understood by every backend and pass.
-    void emitZeroInstance(IRValue addr, int size) {
+    // CIDER-BUG-144: `isVolatile` is the destination's volatile flag (the
+    // same flag every copy/declaration site sources from its alias-resolved
+    // type), so zeroing a volatile aggregate is itself an observable MEMCPY.
+    void emitZeroInstance(IRValue addr, int size, bool isVolatile = false) {
         if (size <= 0) return;
         auto it = zeroBuffers_.find(size);
         if (it == zeroBuffers_.end()) {
@@ -6474,7 +6485,8 @@ public:
         IRValue src = IRValue::Register(nextTemp(), IRType::PTR);
         currentBlock_->addInstruction({IROp::MOV, src, {IRValue::Label(it->second)}});
         currentBlock_->addInstruction({IROp::MEMCPY, std::nullopt,
-                                       {addr, src, IRValue::Constant(size, IRType::I32)}});
+                                       {addr, src, IRValue::Constant(size, IRType::I32)},
+                                       isVolatile});
     }
 
     // CIDER-BUG-049: materialise a class's field initializers as constant
@@ -6489,10 +6501,13 @@ public:
     // the zero and therefore overrides it.
     // CIDER-BUG-082: the recursion into embedded class-value fields lives in
     // emitClassFieldInitializersImpl.
+    // CIDER-BUG-144: `isVolatile` is the destination's volatile flag, so a
+    // volatile value local / `new` instance / global stamps its vptr and
+    // field initializers through observable stores.
     void emitClassFieldInitializers(const std::shared_ptr<StructSymbol>& classSym,
-                                    IRValue objAddr) {
+                                    IRValue objAddr, bool isVolatile = false) {
         std::set<const StructSymbol*> visiting;
-        emitClassFieldInitializersImpl(classSym, objAddr, visiting);
+        emitClassFieldInitializersImpl(classSym, objAddr, visiting, isVolatile);
     }
 
     // CIDER-BUG-089: a class value's first word is its vptr (the collector
@@ -6591,10 +6606,19 @@ public:
     // and fn-pointer values are not embedded aggregates: pointers handle
     // their target where it is constructed, slices hold descriptor storage,
     // and an interface is a fat pointer.
+    // CIDER-BUG-144: `isVolatile` is the destination aggregate's volatile
+    // flag (or an enclosing volatile object's, through the field/array
+    // recursion). Every formation store beneath it is an observable access
+    // (CIDER-BUG-061's "every member of a volatile object is volatile"), and
+    // a volatile-qualified field/element makes its own subobject volatile
+    // even under a plain destination, so `t.isVolatile` merges into the flag
+    // for this recursion level.
     void emitEmbeddedInitializers(TypeInfo t, IRValue base, int offset,
                                   const std::string& defModule,
-                                  std::set<const StructSymbol*>& visiting) {
+                                  std::set<const StructSymbol*>& visiting,
+                                  bool isVolatile = false) {
         t = canonicalizeNominalInModule(resolveTypeAlias(t, defModule), defModule);
+        isVolatile = isVolatile || t.isVolatile;
         if (t.pointerLevel > 0 || t.isSlice || t.isInterface || t.isFunctionPointer) return;
         if (!aggregateNeedsInit(t, defModule, visiting)) return;
         IRValue addr = IRValue::Register(nextTemp(), IRType::PTR);
@@ -6607,7 +6631,7 @@ public:
                                                         defModule);
             int elemSize = getTypeSize(elem);
             for (int i = 0; i < t.arraySize; ++i) {
-                emitEmbeddedInitializers(elem, addr, i * elemSize, defModule, visiting);
+                emitEmbeddedInitializers(elem, addr, i * elemSize, defModule, visiting, isVolatile);
             }
             return;
         }
@@ -6615,9 +6639,9 @@ public:
         if (!sym) return;
         auto aggSym = std::static_pointer_cast<StructSymbol>(sym);
         if (aggSym->kind == SymbolKind::CLASS) {
-            emitClassFieldInitializersImpl(aggSym, addr, visiting);
+            emitClassFieldInitializersImpl(aggSym, addr, visiting, isVolatile);
         } else {
-            emitStructFieldInitializersImpl(aggSym, addr, visiting);
+            emitStructFieldInitializersImpl(aggSym, addr, visiting, isVolatile);
         }
     }
 
@@ -6625,16 +6649,19 @@ public:
     // parser rejects them), so this only recurses into the class values
     // their fields embed, at the field's address. `visiting` carries the
     // layout cycle guard for struct-in-struct by-value nesting.
+    // CIDER-BUG-144: `isVolatile` carries the enclosing destination's flag;
+    // a volatile-qualified field is merged in emitEmbeddedInitializers.
     void emitStructFieldInitializersImpl(const std::shared_ptr<StructSymbol>& structSym,
                                          IRValue objAddr,
-                                         std::set<const StructSymbol*>& visiting) {
+                                         std::set<const StructSymbol*>& visiting,
+                                         bool isVolatile = false) {
         if (!structSym || !currentFunction_) return;
         if (!visiting.insert(structSym.get()).second) return;
         std::string structMod = definingModuleFor(structSym, structSym->name);
         for (const auto& field : structSym->fields) {
             // CIDER-BUG-090: per-field declaring module (templates).
             emitEmbeddedInitializers(field.type, objAddr, field.offset,
-                                     fieldTypeModule(field, structMod), visiting);
+                                     fieldTypeModule(field, structMod), visiting, isVolatile);
         }
         visiting.erase(structSym.get());
     }
@@ -6837,7 +6864,9 @@ public:
             if (!aggregateNeedsInit(t, pending.defModule, visiting)) continue;
             IRValue base = IRValue::Register(nextTemp(), IRType::PTR);
             currentBlock_->addInstruction({IROp::MOV, base, {pending.addr}});
-            emitEmbeddedInitializers(t, base, 0, pending.defModule, visiting);
+            // CIDER-BUG-144: a volatile global's formation stores are
+            // observable accesses, exactly like a volatile local's.
+            emitEmbeddedInitializers(t, base, 0, pending.defModule, visiting, pending.isVolatile);
         }
         currentBlock_->addInstruction({IROp::RET, std::nullopt, {}});
         currentFunction_->addBlock(std::move(currentBlock_));
@@ -6889,16 +6918,21 @@ public:
     // `struct S { var s: S; }`, which the collector sizes with a
     // fallback): stop instead of recursing without bound. It is a path
     // set, not a global one, so two sibling fields of one class both run.
+    // CIDER-BUG-144: `isVolatile` is the destination's volatile flag (the
+    // value local / `new` / global site, or an enclosing volatile object),
+    // marking the vptr stamp, each field-initializer store and the embedded
+    // recursion. A volatile-qualified field marks its own stores too.
     void emitClassFieldInitializersImpl(const std::shared_ptr<StructSymbol>& classSym,
                                         IRValue objAddr,
-                                        std::set<const StructSymbol*>& visiting) {
+                                        std::set<const StructSymbol*>& visiting,
+                                        bool isVolatile = false) {
         if (!classSym || !currentFunction_) return;
         if (!visiting.insert(classSym.get()).second) return;
         // CIDER-BUG-089: the class's first word is its vptr, so stamp it
         // before the field stores (the same position `new` used to emit it
         // from). Nested class values recurse below and stamp their own
         // addresses, including through struct fields and fixed arrays.
-        emitClassVptrStore(classSym, objAddr);
+        emitClassVptrStore(classSym, objAddr, isVolatile);
         std::string classMod = definingModuleFor(classSym, classSym->name);
         for (const auto& field : classSym->fields) {
             Expression* init = field.initializer;
@@ -6908,13 +6942,17 @@ public:
             std::string fieldMod = fieldTypeModule(field, classMod);
             TypeInfo fieldType =
                 canonicalizeNominalInModule(resolveTypeAlias(field.type, fieldMod), fieldMod);
+            // CIDER-BUG-144: a volatile destination marks every member, and
+            // a volatile-qualified field is itself a volatile object.
+            const bool fieldVolatile = isVolatile || fieldType.isVolatile;
             // CIDER-BUG-082/087: an embedded class value lives in a class
             // field, a struct field or a fixed array (any nesting), so run
             // the inner initializers at the field's address before this
             // class's own stores — matching a direct `var inner: Inner;`
             // local / `new Inner`. No IR is emitted when the nested
             // aggregate is statically all-zero.
-            emitEmbeddedInitializers(fieldType, objAddr, field.offset, fieldMod, visiting);
+            emitEmbeddedInitializers(fieldType, objAddr, field.offset, fieldMod, visiting,
+                                     fieldVolatile);
             if (!init) continue;  // default zero already stored by emitZeroInstance
             IRType fieldIR = (fieldType.pointerLevel > 0) ? IRType::PTR : mapType(fieldType.name);
             bool ptrLike = fieldType.pointerLevel > 0 || fieldType.isFunctionPointer ||
@@ -6922,7 +6960,7 @@ public:
             auto storeField = [&](IRValue val) {
                 currentBlock_->addInstruction(
                     {IROp::STORE, std::nullopt,
-                     {objAddr, val, IRValue::Constant(field.offset, IRType::I32)}});
+                     {objAddr, val, IRValue::Constant(field.offset, IRType::I32)}, fieldVolatile});
             };
             // Field initializers are const-like: identifiers bind in the
             // declaring class's module, not at the creation site
@@ -7030,7 +7068,12 @@ public:
         // the field initializers, so aggregate fields (struct / class-value /
         // array / interface) read as zero even when escape analysis rewrites
         // this malloc to a stack slot.
-        emitZeroInstance(dest, size);
+        // CIDER-BUG-144: `new volatile V` allocates a volatile object, so
+        // its formation stores are observable accesses. The flag comes from
+        // the alias-resolved `new` type (mirroring the checker and the copy
+        // sites), covering `type VV = volatile V; new VV`.
+        const bool newIsVolatile = resolveTypeAlias(type, currentModule_).isVolatile;
+        emitZeroInstance(dest, size, newIsVolatile);
 
         // CIDER-FEAT-003: resolve alias-aware (matching the checker), so
         // `type A = C; new A(...)` gets the same vptr, field initializers
@@ -7043,7 +7086,7 @@ public:
             auto classSym = std::static_pointer_cast<StructSymbol>(sym);
             // CIDER-BUG-049: run the class's field initializers (inherited
             // fields included, in layout order).
-            emitClassFieldInitializers(classSym, dest);
+            emitClassFieldInitializers(classSym, dest, newIsVolatile);
             // CIDER-FEAT-003: the constructor body runs last, with `this`
             // bound to the fresh object.
             if (!classSym->constructorName.empty()) {
@@ -7055,7 +7098,7 @@ public:
             // zeroed allocation, exactly like a declared local.
             std::set<const StructSymbol*> visiting;
             if (aggregateNeedsInit(type, "", visiting)) {
-                emitEmbeddedInitializers(type, dest, 0, "", visiting);
+                emitEmbeddedInitializers(type, dest, 0, "", visiting, newIsVolatile);
             }
         }
 
@@ -7878,6 +7921,9 @@ private:
         TypeInfo type;
         std::string defModule;
         IRValue addr;
+        // CIDER-BUG-144: the global's alias-resolved volatile flag, so the
+        // startup pass marks its formation stores like a volatile local's.
+        bool isVolatile = false;
     };
     std::vector<PendingGlobalInit> pendingGlobalInits_;
     // CIDER-BUG-087: top-level entry functions (main/_start/efi_main)
