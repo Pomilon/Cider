@@ -7,6 +7,16 @@
 // code bytes as a data block. There is no fn-array decay rule, so both
 // directions are rejected, matching signatures included (the element count
 // is not part of a scalar fn type at all).
+//
+// CIDER-BUG-130: the rejection must not depend on the array's element
+// being a fn pointer. A non-fn array ([int; 2]) is still a data-block
+// address, so the same mixed shapes are rejected, through array/scalar-fn
+// alias spellings and the closure spelling as well.
+type Cb = fn(int) -> int;
+type CbF = fn(f64) -> f64;
+type Ints = [int; 2];
+type Ints4 = [int; 4];
+
 func add1(x: int) -> int { return x + 1; }
 
 func main() -> int {
@@ -17,5 +27,15 @@ func main() -> int {
   var b: fn(int) -> int = table as fn(int) -> int;
   // The reverse direction: a code pointer reinterpreted as a data block.
   var c: [fn(int) -> int; 2] = add1 as [fn(int) -> int; 2];
-  return a(1.5) as int + b(1) + c[0](1);
+
+  // Non-fn array element: the same two layouts, both directions.
+  var ints: [int; 2] = [1, 2];
+  var d: fn(int) -> int = ints as fn(int) -> int;
+  var e: [int; 2] = add1 as [int; 2];
+  // Alias spellings resolve to the same array/scalar-fn shapes.
+  var f: CbF = ints as CbF;
+  var g: Ints4 = add1 as Ints4;
+  // The closure spelling is a scalar fn shape too.
+  var h: func(int) -> int = ints as func(int) -> int;
+  return a(1.5) as int + b(1) + c[0](1) + d(1) + e[0] + f(1.5) as int + g[0] + h(1);
 }

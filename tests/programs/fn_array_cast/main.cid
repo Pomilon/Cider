@@ -22,5 +22,14 @@ func main() -> int {
   var g: Cb = add1 as Cb;
   printInt(g(9)); print("\n");
 
+  // CIDER-BUG-130 positive controls: a non-fn array-to-array
+  // reinterpretation stays allowed (CIDER-BUG-018), and an array cast to a
+  // plain pointer is not an array/scalar-fn cast either.
+  var ints: [int; 2] = [7, 8];
+  var ints2: [int; 2] = ints as [int; 2];
+  printInt(ints2[0] + ints2[1]); print("\n");
+  var raw: *void = ints as *void;
+  if (raw == nilPtr) return 1;
+
   return 0;
 }

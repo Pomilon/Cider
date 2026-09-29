@@ -1,3 +1,8 @@
 Function cast cannot change array layout. Expected fn(f64) -> int, got [fn(int) -> int; 2]
 Function cast cannot change array layout. Expected fn(int) -> int, got [fn(int) -> int; 2]
 Function cast cannot change array layout. Expected [fn(int) -> int; 2], got fn(int) -> int
+Function cast cannot change array layout. Expected fn(int) -> int, got [int; 2]
+Function cast cannot change array layout. Expected [int; 2], got fn(int) -> int
+Function cast cannot change array layout. Expected fn(f64) -> f64, got [int; 2]
+Function cast cannot change array layout. Expected [int; 4], got fn(int) -> int
+Function cast cannot change array layout. Expected func(int) -> int, got [int; 2]

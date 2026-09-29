@@ -3697,8 +3697,18 @@ public:
         // shapes in both directions — the runtime shapes differ even when
         // the signatures agree (the element count is not part of a scalar
         // fn type at all).
-        if (fnTarget.isFunctionPointer && fnSrc.isFunctionPointer &&
-            fnTarget.isArray != fnSrc.isArray) {
+        //
+        // CIDER-BUG-130: the rejection must not depend on the array's
+        // *element* being a fn pointer. `[int; 2]` is still a data-block
+        // address and a scalar fn is still a code pointer; keying on
+        // isFunctionPointer on both sides let a non-fn array slip through
+        // the layout rule (array-to-array only) and the signature rule
+        // (scalar fn on both sides only) and fail identically at runtime.
+        // Test each side's array layout against the other side's scalar fn
+        // spelling, in both directions, with aliases already resolved.
+        bool targetScalarFn = fnTarget.isFunctionPointer && !fnTarget.isArray;
+        bool srcScalarFn = fnSrc.isFunctionPointer && !fnSrc.isArray;
+        if ((targetScalarFn && fnSrc.isArray) || (srcScalarFn && fnTarget.isArray)) {
             error("Function cast cannot change array layout. Expected " + fnTarget.toString() +
                       ", got " + fnSrc.toString(), expr.getLine());
         }
