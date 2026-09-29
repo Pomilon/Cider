@@ -70,7 +70,8 @@ class VBase {
 
 // --- 5. Destructor through the inherited layout: the base carries a
 // class-valued field with a destructor, and a `delete` on the (forward-base)
-// subclass runs its own destructor.
+// subclass runs its own destructor followed by the embedded class-valued
+// fields (CIDER-BUG-108); base-class destructors are still not invoked.
 class Dropper {
     var label: int;
     func ~Dropper() {
@@ -156,8 +157,9 @@ func main() -> int {
     printInt(sizeof(PlainChild)); print("\n"); // 20 (16-byte base + 4)
 
     // 5: the inherited class-valued field destroys at scope exit (after the
-    // subclass's own destructor); `delete` runs only the subclass destructor
-    // (base destructors are not auto-invoked).
+    // subclass's own destructor); `delete` runs the subclass destructor and
+    // then the embedded Dropper (CIDER-BUG-108: base-class destructors are
+    // not auto-invoked).
     {
         var h: HolderKid;
         h.d.label = 21;
@@ -167,7 +169,7 @@ func main() -> int {
     }                                  // k,d21,
     var d: *HolderKid = new HolderKid;
     d->d.label = 31;
-    delete d;                          // k,
+    delete d;                          // k,d31,
 
     // 6: rebuild propagation through a resolved-but-stale parent.
     var c: *ChildT = new ChildT;
@@ -177,7 +179,7 @@ func main() -> int {
     printInt(c->gp); print(",");       // 11
     printInt(gpp->deep()); print("\n");// 130
 
-    if (drops != 1) { return 1; }
+    if (drops != 2) { return 1; }
     print("forward_decl_bases_ok\n");
     return 0;
 }

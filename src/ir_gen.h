@@ -5087,6 +5087,14 @@ public:
 
     void visit(ForStmt& stmt) override {
         symbolTable_.enterScope();
+        // CIDER-BUG-108: the header's declarations own the for statement's
+        // scope, so their finalizers run at the for-scope exit (the exit
+        // block below), not at the enclosing block's exit. deferStack_ moves
+        // in lockstep (the header grammar only admits expressions, so these
+        // entries stay empty) because unwindDepths_ indexes both stacks and
+        // break/continue must stop above this scope, not inside it.
+        deferStack_.push_back({});
+        destructorStack_.push_back({});
         if (stmt.getInitializer()) stmt.getInitializer()->accept(*this);
 
         std::string headerName = nextLabel("for_header");
@@ -5133,7 +5141,15 @@ public:
         breakLabels_.pop_back();
         symbolTable_.exitScope();
 
+        // CIDER-BUG-108: run the header scope's finalizers exactly once on
+        // the way out (condition false or `break`), before the next
+        // statement. `continue` jumps to the increment block inside the
+        // loop, so the scope survives across iterations.
         startBlock(exitName);
+        emitDefers(deferStack_.size() - 1);
+        emitDestructors(destructorStack_.size() - 1);
+        destructorStack_.pop_back();
+        deferStack_.pop_back();
     }
 
     void visit(AsmStmt& stmt) override {
@@ -5369,6 +5385,9 @@ public:
                 currentBlock_->addInstruction({IROp::LOAD, elemVal, {p, IRValue::Constant(0, IRType::I32)}});
                 currentBlock_->addInstruction({IROp::STORE, std::nullopt, {varAddr, elemVal, IRValue::Constant(0, IRType::I32)}});
             }
+            // CIDER-BUG-108: the copied element finalizes at the end of this
+            // iteration (see registerLoopVarDestructors).
+            registerLoopVarDestructors(elemType, varAddr);
 
             for (auto& s : stmt.getBody()) {
                 visitStatement(s.get());
@@ -5458,6 +5477,9 @@ public:
             currentBlock_->addInstruction({IROp::LOAD, elemVal, {elemAddr, IRValue::Constant(0, IRType::I32)}});
             currentBlock_->addInstruction({IROp::STORE, std::nullopt, {varAddr, elemVal, IRValue::Constant(0, IRType::I32)}});
         }
+        // CIDER-BUG-108: the copied element finalizes at the end of this
+        // iteration (see registerLoopVarDestructors).
+        registerLoopVarDestructors(elemType, varAddr);
 
         for (auto& s : stmt.getBody()) {
             visitStatement(s.get());
@@ -6521,6 +6543,19 @@ public:
         visiting.erase(aggSym.get());
     }
 
+    // CIDER-BUG-108: an iteration variable is a fresh copy of the element
+    // (both foreach paths below copy it into its own slot), so it owns
+    // embedded class values exactly like a declared local and finalizes when
+    // the per-iteration scope exits — break/continue included, because
+    // unwindDepths_ indexes that scope. Gated by aggregateHasDestructors so
+    // scalar and class-free elements register nothing (byte-identical).
+    void registerLoopVarDestructors(TypeInfo elemType, IRValue varAddr) {
+        std::set<const StructSymbol*> visiting;
+        if (aggregateHasDestructors(elemType, currentModule_, visiting)) {
+            registerEmbeddedDestructors(elemType, varAddr, 0, currentModule_, visiting);
+        }
+    }
+
     // CIDER-BUG-087: module-scope class/struct values are zero in .bss (and
     // in the VM's zero-filled global storage), so their embedded class
     // values need the same formation stores a local gets (CIDER-BUG-089:
@@ -6860,25 +6895,23 @@ public:
         if (deletedType.pointerLevel > 0) {
             TypeInfo baseType = deletedType;
             baseType.pointerLevel--;
-            // CID-020/021: module-aware so `delete` on a qualified-typed
-            // object finds a module class's destructor (bare fallback
-            // preserves legacy behavior where it resolved).
-            auto sym = resolveNominalType(baseType.name);
-            if (sym && sym->kind == SymbolKind::CLASS) {
-                auto classSym = std::static_pointer_cast<StructSymbol>(sym);
-                if (!classSym->destructorName.empty()) {
-                    IRInstruction dtorCall;
-                    dtorCall.op = IROp::CALL;
-                    dtorCall.dest = std::nullopt;
-                    // CID-020/021 (spec §5/§6): see the destructor-stack
-                    // site; both must match the definition.
-                    auto dtorDef = resolveFunctionDef(classSym->destructorName,
-                                                      definingScopeFor(classSym, classSym->name));
-                    dtorCall.args.push_back(
-                        IRValue::Label(emitFunctionName(dtorDef.second, classSym->destructorName)));
-                    dtorCall.args.push_back(ptr);
-                    currentBlock_->addInstruction(dtorCall);
-                }
+            // CIDER-BUG-108: a heap target runs the same finalizer set a
+            // scope-exit local of its type does — the class's own destructor
+            // body first, then every class value it embeds by value in
+            // reverse construction order (the CIDER-BUG-088 ordering), and
+            // for a struct target its embedded class values. A transient
+            // destructor scope reuses registerEmbeddedDestructors /
+            // emitDestructors, so the heap and scope paths cannot disagree;
+            // a class carrying only its own destructor emits exactly the old
+            // single offset-0 call. CID-020/021: resolution is module-aware
+            // through resolveStructOrClassSymbol, so a qualified-typed
+            // object still finds its module class's destructor.
+            std::set<const StructSymbol*> visiting;
+            if (aggregateHasDestructors(baseType, currentModule_, visiting)) {
+                destructorStack_.push_back({});
+                registerEmbeddedDestructors(baseType, ptr, 0, currentModule_, visiting);
+                emitDestructors(destructorStack_.size() - 1);
+                destructorStack_.pop_back();
             }
         }
         IRInstruction call;
