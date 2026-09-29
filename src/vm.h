@@ -11,6 +11,13 @@ namespace cider {
 
 struct VMError {
     std::string message;
+    // CIDER-BUG-154: bytes the program already printed (raw syscalls on
+    // native, so always visible there) before the failing operation. Only
+    // populated on paths that flush it (the uncaught-exception builtin);
+    // every other throw site leaves it empty.
+    std::string stdoutText;
+    VMError() = default;
+    explicit VMError(std::string m) : message(std::move(m)) {}
 };
 
 struct VMResult {

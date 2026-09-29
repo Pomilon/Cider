@@ -1,0 +1,31 @@
+// CIDER-BUG-154: a rethrow from the OUTERMOST catch takes the uncaught
+// path, whose handler is dynamic (an ancestor frame or none) — so this
+// frame dies whole and EVERY pending scope exit runs, including the
+// locals declared before the try. Before the fix the unwind stopped at
+// the try's own entry depth and the outer local was skipped.
+// Expected on all three paths (VM unopt, VM optim, native):
+//   stdout = "6,5,"  (try-body local first, from the original throw,
+//                     then the function-scope local, from the rethrow),
+//   stderr = "vm error: uncaught exception\n", exit = 2.
+from std.io import print, printInt;
+
+class D {
+    var label: int;
+    func ~D() {
+        printInt(this.label);
+        print(",");
+    }
+}
+
+func main() -> int {
+    var a: D;
+    a.label = 5;
+    try {
+        var b: D;
+        b.label = 6;
+        throw 3;
+    } catch (e) {
+        throw e + 1;
+    }
+    return 0;
+}

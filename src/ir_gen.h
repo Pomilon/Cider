@@ -6556,6 +6556,65 @@ public:
             IRValue excValAddr = IRValue::Label("_exception_value");
             currentBlock_->addInstruction({IROp::STORE, std::nullopt, {excValAddr, thrownVal}});
 
+            // CIDER-BUG-154: a throw abandons every scope it unwinds
+            // through in this frame, so run their exits (defers, then
+            // destructors, innermost-first LIFO — the same order as a
+            // normal scope exit) BEFORE the longjmp, while every address
+            // register is still live. Scopes at or below the live
+            // handler's entry depth survive (its catch runs in this frame
+            // and control continues after it); when the handler is not in
+            // this frame every pending scope exits.
+            // The payload store above already saved the value for the
+            // catch.
+            //
+            // The live handler is the innermost try whose BODY encloses
+            // this point: a try whose CATCH encloses it (a rethrow) has
+            // already restored its enclosing handler, so catch tries are
+            // skipped here. When every active try is a catch — or none is
+            // active — the handler pointer is dynamic (an ancestor frame
+            // or null), this whole frame dies, and the unwind depth is 0.
+            //
+            // Documented limitations (each needs a runtime cleanup chain
+            // or landing pads — an ABI/runtime redesign, not reachable
+            // from this emission):
+            //   * INTERMEDIATE frames — a caller between the thrower and
+            //     the catcher, with no try of its own — are skipped:
+            //     longjmp lands directly in the handler frame and the
+            //     skipped frames are already gone.
+            //   * The HANDLER frame's own try-body scope is skipped when
+            //     the throw comes from a callee (same reason, one frame):
+            //     its locals' address registers hold setjmp-time values
+            //     after the jump, so replaying that scope's exits in the
+            //     catch would read clobbered registers — the try-body
+            //     exits can only run inline at a throw inside that very
+            //     body, which is what visit(TryCatchStmt) scopes enable.
+            //   * Global destructors (CIDER-BUG-137) belong to the
+            //     program-exit pass, which runs on entry returns and on
+            //     the terminal entry asm exit (CIDER-BUG-153); the
+            //     uncaught-exception termination path (exit 2) does not
+            //     return from the entry, so it reports the error without
+            //     them, like an explicit exit().
+            size_t throwUnwindDepth = 0;
+            bool handlerInFrame = false;
+            for (size_t i = activeTryScopes_.size(); i > 0; --i) {
+                if (activeTryScopes_[i - 1].inCatch) continue;
+                throwUnwindDepth = activeTryScopes_[i - 1].deferDepth;
+                handlerInFrame = true;
+                break;
+            }
+            if (handlerInFrame) {
+                // The compile-time try stack is path-insensitive: a depth
+                // above the live stack only occurs on unreachable
+                // (already-jumped) paths, where any emission is dead.
+                // Clamp so dead code can never under-clean the scopes it
+                // sees.
+                if (throwUnwindDepth > deferStack_.size())
+                    throwUnwindDepth = deferStack_.size();
+            }
+            emitDefers(throwUnwindDepth);
+            emitDestructors(throwUnwindDepth);
+            emitExceptionUnwind(throwUnwindDepth);
+
             // CIDER-BUG-053: jump to the handler active at this dynamic
             // point, which may live in an ancestor frame. The pointer is
             // swapped at every try entry/exit, so a throw in a callee (or
@@ -6600,11 +6659,15 @@ public:
 
     void visit(TryCatchStmt& stmt) override {
         if (currentFunction_) {
-            // CIDER-BUG-050: try/catch bodies deliberately do not push a
-            // defer/destructor scope. Throws are setjmp/longjmp-based, so a
-            // scope here could not run its exits on the throw path; defers
-            // written in these bodies stay pending until the enclosing block
-            // exits rather than being dropped when the jump skips them.
+            // CIDER-BUG-154: try/catch bodies own a defer/destructor scope,
+            // like any other block (superseding CIDER-BUG-050's no-scope
+            // workaround). A throw inside the try runs the body's exits
+            // inline before the longjmp (see visit(ThrowStmt)), while every
+            // address register is still live; after the jump the longjmp
+            // restores the setjmp-time registers, which is why these
+            // locals must NOT be registered in the enclosing scope (their
+            // exit code there would read clobbered registers, and the
+            // try-body exits would never run on the throw path).
             ensureExceptionGlobals();
 
             // CIDER-BUG-053: the try owns a jmp_buf allocated in the
@@ -6635,16 +6698,24 @@ public:
 
             startBlock(tryBlockName);
             symbolTable_.enterScope();
+            deferStack_.push_back({});
+            destructorStack_.push_back({});
             for (auto& s : stmt.getTryBlock()) {
                 visitStatement(s.get());
             }
             if (currentBlock_ && (currentBlock_->getInstructions().empty() ||
                                   (currentBlock_->getInstructions().back().op != IROp::BR &&
                                    currentBlock_->getInstructions().back().op != IROp::RET))) {
+                // Normal completion runs the body scope's exits before the
+                // enclosing handler goes live again.
+                emitDefers(deferStack_.size() - 1);
+                emitDestructors(destructorStack_.size() - 1);
                 // Normal completion: the enclosing handler is active again.
                 currentBlock_->addInstruction({IROp::STORE, std::nullopt, {IRValue::Label("_exception_buf_ptr"), prevBuf}});
                 currentBlock_->addInstruction({IROp::BR, std::nullopt, {IRValue::Label(endName)}});
             }
+            destructorStack_.pop_back();
+            deferStack_.pop_back();
             symbolTable_.exitScope();
 
             startBlock(catchBlockName);
@@ -6652,7 +6723,15 @@ public:
             // enclosing handler before the catch body runs, so a rethrow
             // targets the enclosing try rather than this one.
             currentBlock_->addInstruction({IROp::STORE, std::nullopt, {IRValue::Label("_exception_buf_ptr"), prevBuf}});
+            // CIDER-BUG-154: this try's handler is live again, so a throw
+            // from inside the catch body unwinds past it (see
+            // visit(ThrowStmt)); the try-body scope above already ran its
+            // exits at the throw that landed here (or, for a throw from a
+            // callee, is the documented skipped scope).
+            activeTryScopes_.back().inCatch = true;
             symbolTable_.enterScope();
+            deferStack_.push_back({});
+            destructorStack_.push_back({});
 
             IRValue catchAddr = IRValue::Register(nextTemp(), IRType::PTR);
             currentBlock_->addInstruction({IROp::ALLOCA, catchAddr, {IRValue::Constant(8, IRType::I32)}});
@@ -6668,8 +6747,12 @@ public:
             if (currentBlock_ && (currentBlock_->getInstructions().empty() ||
                                   (currentBlock_->getInstructions().back().op != IROp::BR &&
                                    currentBlock_->getInstructions().back().op != IROp::RET))) {
+                emitDefers(deferStack_.size() - 1);
+                emitDestructors(destructorStack_.size() - 1);
                 currentBlock_->addInstruction({IROp::BR, std::nullopt, {IRValue::Label(endName)}});
             }
+            destructorStack_.pop_back();
+            deferStack_.pop_back();
             symbolTable_.exitScope();
 
             startBlock(endName);
@@ -9488,6 +9571,11 @@ private:
     struct ActiveTryScope {
         IRValue prevBuf;         // enclosing _exception_buf_ptr value
         size_t deferDepth = 0;   // deferStack_.size() at try entry
+        // CIDER-BUG-154: set while the catch body is emitted. Its
+        // handler (prevBuf) was already restored, so a throw inside it —
+        // a rethrow — must unwind to the try that is still in its BODY,
+        // not to this one; see visit(ThrowStmt).
+        bool inCatch = false;
     };
     std::vector<ActiveTryScope> activeTryScopes_;
     // Entry block of the function being generated (CIDER-BUG-053): try

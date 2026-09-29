@@ -407,6 +407,11 @@ int main(int argc, char** argv) {
                 std::fwrite(r.stderrText.data(), 1, r.stderrText.size(), stderr);
                 return r.exitCode;
             } catch (const cider::VMError& e) {
+                // CIDER-BUG-154: an error may carry bytes the program
+                // printed before failing (the uncaught-exception path
+                // flushes destructor output); emit them first so VM stdout
+                // matches native's raw syscalls byte for byte.
+                std::fwrite(e.stdoutText.data(), 1, e.stdoutText.size(), stdout);
                 std::fprintf(stderr, "vm error: %s\n", e.message.c_str());
                 return 2;
             }

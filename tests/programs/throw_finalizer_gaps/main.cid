@@ -1,0 +1,71 @@
+// CIDER-BUG-154 — documented limitations of the longjmp-based unwinder.
+// These two shapes do NOT run every finalizer, on any backend; the test
+// pins that they are crash-free and agree across VM unopt, VM optim and
+// native (before the fix both crashed: the VM reported `read of unset
+// register`, native segfaulted). Fixing either needs a runtime cleanup
+// chain or landing pads — an ABI/runtime redesign — so the gaps are
+// documented at the throw site in src/ir_gen.h instead:
+//
+//   1. INTERMEDIATE FRAME (mid): main has the try, mid() has a class
+//      local but no try, deep() throws. longjmp lands directly in main's
+//      handler and mid()'s frame is already gone, so `m` is never
+//      destroyed (`drops` stays 0 for it).
+//   2. HANDLER FRAME'S TRY BODY (the second try): the throw comes from a
+//      callee and lands in this frame's catch, which runs at the
+//      setjmp-time register state — the try-body locals' address
+//      registers were written after setjmp, so replaying that scope's
+//      exits there would read clobbered registers. The exits can only run
+//      inline at a throw inside that very body (covered by
+//      throw_scope_finalizers), so `d` is never destroyed here.
+//
+// If a future redesign closes either gap, `drops` becomes nonzero and
+// this test's expectation must be updated with it.
+from std.io import print, printInt;
+
+var drops: int = 0;
+
+class D {
+    var label: int;
+    func ~D() {
+        drops = drops + 1;
+        printInt(this.label);
+        print(",");
+    }
+}
+
+func deep() -> int {
+    throw 5;
+}
+
+func mid() -> int {
+    var m: D;
+    m.label = 9;
+    return deep();
+}
+
+func callee() -> int {
+    throw 4;
+}
+
+func main() -> int {
+    try {
+        mid();
+    } catch (e) {
+        print("A;");
+    }
+
+    try {
+        var d: D;
+        d.label = 8;
+        callee();
+        print("no;");
+    } catch (e) {
+        print("B;");
+    }
+
+    print("drops=");
+    printInt(drops);
+    print(";\n");
+    if (drops != 0) { return 1; }
+    return 0;
+}

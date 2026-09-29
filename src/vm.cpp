@@ -1261,7 +1261,15 @@ bool VM::tryBuiltinCall(const std::string& name, const std::vector<IRValue>& arg
         // outermost catch). VMError makes main print
         // `vm error: uncaught exception` and exit 2, matching the native
         // and pomeos stub byte for byte.
-        throw VMError{"uncaught exception"};
+        // CIDER-BUG-154: the throw site already ran this frame's scope
+        // exits (destructors print via raw syscalls on native), so flush
+        // what they buffered and carry it on the error: main prints it
+        // to stdout before the stderr line, exactly like native.
+        result_.stdoutText += putcharBuf_;
+        putcharBuf_.clear();
+        VMError err{"uncaught exception"};
+        err.stdoutText = result_.stdoutText;
+        throw err;
     }
     if (name == "_bounds_fail") {
         // CIDER-ISS-001: --checks routed a fixed-size array index outside
