@@ -24,9 +24,10 @@
 //     at PROGRAM EXIT in reverse construction order (last declared first;
 //     own destructor before embedded values, arrays last index first).
 //     Whole-program builds call one synthesized `_cider_global_fini` from
-//     every entry return; in separate compilation the entry object calls
-//     each module's fini once, in reverse construction order (see
-//     separate_compilation_smoke.sh).
+//     every entry return, and (CIDER-BUG-153) before a terminal inline-asm
+//     exit syscall visible in the entry; in separate compilation the entry
+//     object calls each module's fini once, in reverse construction order
+//     (see separate_compilation_smoke.sh).
 //
 // Within one object the order stays the CIDER-BUG-088 rule: the class's
 // own destructor runs first (its body may read the subobjects), then every

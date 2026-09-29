@@ -1593,7 +1593,10 @@ void VM::execAsm(const IRInstruction& instr) {
                     }
                 }
                 wrote = true;
-            } else if (rax == 60) {
+            } else if (rax == 60 || rax == 231) {
+                // CIDER-BUG-153: exit_group(2) (231) is exit(2) (60) for
+                // this single-threaded VM, and the CIDER-BUG-153 entry-exit
+                // recognizer accepts both. The status rides rdi either way.
                 result_.exitCode = (int)rdi;
                 exited = true;
             } else if (rax == 9) {

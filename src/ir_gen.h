@@ -1,6 +1,8 @@
 #pragma once
 
+#include <cctype>
 #include <cstdio>
+#include <cstdlib>
 #include <functional>
 #include <map>
 #include <memory>
@@ -7433,19 +7435,22 @@ public:
     // Whole-program builds get one local `_cider_global_fini`, called from
     // every entry function (`main`/`_start`/`efi_main`) just before each
     // return, so the VM entry return and the native entry return both run
-    // it. Programs with no destructible globals emit nothing (byte-
-    // identical). Separate compilation mirrors CIDER-FEAT-006: every module
-    // object exports a mangled fini that destroys ONLY its own globals. The
-    // entry object owns the ordering: it walks its transitive import graph
-    // in the same dependency-first order the init chain uses, reverses it,
-    // and calls each module's fini once. Chaining finis per module was
-    // rejected because a diamond import would destroy a shared module's
-    // globals twice and a per-object chain would destroy them in graph
-    // order, not reverse construction order. A module object has no entry,
-    // so its fini only runs when an entry object calls it; the unusual
-    // `--emit-meta` object that also defines an entry still does not chain
-    // its own dependencies (an importer's walk reaches them; a standalone
-    // run of such an object leaves its dependency globals unfinalized).
+    // it. CIDER-BUG-153 extends the same call to a terminal inline-asm exit
+    // syscall visible in the entry (a native `_start` cannot return at all);
+    // see emitFiniBeforeAsmExits. Programs with no destructible globals emit
+    // nothing (byte-identical). Separate compilation mirrors CIDER-FEAT-006:
+    // every module object exports a mangled fini that destroys ONLY its own
+    // globals. The entry object owns the ordering: it walks its transitive
+    // import graph in the same dependency-first order the init chain uses,
+    // reverses it, and calls each module's fini once. Chaining finis per
+    // module was rejected because a diamond import would destroy a shared
+    // module's globals twice and a per-object chain would destroy them in
+    // graph order, not reverse construction order. A module object has no
+    // entry, so its fini only runs when an entry object calls it; the
+    // unusual `--emit-meta` object that also defines an entry still does not
+    // chain its own dependencies (an importer's walk reaches them; a
+    // standalone run of such an object leaves its dependency globals
+    // unfinalized).
     void emitGlobalFieldFinalizers(AstProgram& program) {
         std::string rootModule;
         auto rootIt = programModules_.find(&program);
@@ -7593,6 +7598,231 @@ public:
                     }
                 }
             }
+            // CIDER-BUG-153: an inline-asm exit syscall never returns, so
+            // the RET-site call above is unreachable on that path. Where the
+            // syscall is compiler-visible in the entry's own asm, call the
+            // fini in front of it instead.
+            emitFiniBeforeAsmExits(entry, finiCall);
+        }
+    }
+
+    // CIDER-BUG-153: a native `_start` cannot return (the kernel enters it
+    // with no return address), so bare-metal programs end in an inline-asm
+    // exit syscall; that never reaches the RET-site fini call CIDER-BUG-137
+    // injects, while the VM's `_start` return path does run it. Where the
+    // exit syscall is directly visible in an entry's own asm, run the fini
+    // there so both backends agree.
+    //
+    // The call goes immediately BEFORE the exit sequence's register setup,
+    // never between the setup and the syscall: the fini runs destructors
+    // (arbitrary user code) and both backends lose the raw syscall state
+    // across it (a native call clobbers caller-saved registers; the VM's
+    // single asm register file is shared with the callee's asm). Writing
+    // rax/rdi after the call re-establishes the exit state on both.
+    //
+    // The recognition is deliberately conservative:
+    //   * only the entry's own inline asm is inspected, never a function it
+    //     calls (an asm exit inside a helper keeps the documented gap);
+    //   * rax must be provably the exit(2) (60) or exit_group(2) (231)
+    //     number from a `mov rax/eax, <imm>` or `xor rax, rax` in the same
+    //     basic block, and the exit-status register rdi must be written at
+    //     or after the insertion point; a call, a non-asm instruction, an
+    //     unrecognized rax/rdi mention or another syscall clears the
+    //     candidate, so a `syscall` that is not provably an exit
+    //     (write/read/mmap/...) is never touched;
+    //   * the insertion point is the first write of the setup region that
+    //     ends at the syscall, so earlier work in a multi-line block (a
+    //     write syscall, a print) still runs first.
+    void emitFiniBeforeAsmExits(FunctionIR* entry, const IRInstruction& finiCall) {
+        if (!entry) return;
+
+        // Only a full-width write establishes an input: `rax`/`eax` (32-bit
+        // writes zero-extend) and `rdi`/`edi`. Partial writes (`ax`, `al`,
+        // `di`, `dil`) leave the rest of the register unknown and are treated
+        // as conservative clobbers by the mention checks below.
+        auto isFullRax = [](const std::string& t) {
+            return t == "rax" || t == "eax";
+        };
+        auto isFullRdi = [](const std::string& t) {
+            return t == "rdi" || t == "edi";
+        };
+        // Word-boundary scan for any spelling in a raw asm line.
+        auto mentionsAny = [](const std::string& text, const char* const* names, size_t count) {
+            auto isWordChar = [](char c) {
+                return std::isalnum((unsigned char)c) || c == '_';
+            };
+            for (size_t n = 0; n < count; ++n) {
+                size_t len = std::strlen(names[n]);
+                size_t pos = 0;
+                while ((pos = text.find(names[n], pos)) != std::string::npos) {
+                    bool leftOk = (pos == 0) || !isWordChar(text[pos - 1]);
+                    bool rightOk = (pos + len >= text.size()) || !isWordChar(text[pos + len]);
+                    if (leftOk && rightOk) return true;
+                    pos += len;
+                }
+            }
+            return false;
+        };
+        auto mentionsRax = [&](const std::string& t) {
+            static const char* const kNames[] = {"rax", "eax", "ax", "al", "ah"};
+            return mentionsAny(t, kNames, 5);
+        };
+        auto mentionsRdi = [&](const std::string& t) {
+            static const char* const kNames[] = {"rdi", "edi", "di", "dil"};
+            return mentionsAny(t, kNames, 4);
+        };
+        auto trim = [](const std::string& s) {
+            size_t b = s.find_first_not_of(" \t\r");
+            if (b == std::string::npos) return std::string();
+            size_t e = s.find_last_not_of(" \t\r");
+            return s.substr(b, e - b + 1);
+        };
+        // A bare integer operand (decimal or 0x...). Anything else (a
+        // placeholder, register, symbol, expression) is not statically known.
+        auto parseImm = [](const std::string& s, int64_t& out) {
+            if (s.empty()) return false;
+            char* end = nullptr;
+            long long v = std::strtoll(s.c_str(), &end, 0);
+            if (end == s.c_str() || *end != '\0') return false;
+            out = v;
+            return true;
+        };
+        // First whitespace-delimited token: the operand proper, with any
+        // trailing comment dropped.
+        auto firstToken = [](const std::string& s) {
+            size_t b = s.find_first_not_of(" \t");
+            if (b == std::string::npos) return std::string();
+            size_t e = s.find_first_of(" \t", b);
+            return s.substr(b, e == std::string::npos ? std::string::npos : e - b);
+        };
+
+        // One linear walk per block: the rax value, the rdi write and the
+        // start of the setup region carry across consecutive asm blocks (the
+        // `asm{"mov rax, 60"} asm{"mov rdi, 0"} asm{"syscall"}` idiom).
+        // Anything else -- a call, a non-asm instruction, an unrecognized
+        // rax/rdi mention or another syscall -- ends the region.
+        for (auto& block : entry->getBlocks()) {
+            auto& instrs = block->getInstructions();
+            bool raxKnown = false;
+            int64_t raxVal = 0;
+            bool rdiKnown = false;
+            bool inRegion = false;
+            size_t setupInstr = 0;   // instruction holding the region's first write
+            size_t setupOffset = 0;  // byte offset of that line in its asm text
+            std::map<size_t, std::vector<size_t>> insertions;
+
+            auto clearRegion = [&]() {
+                raxKnown = false;
+                rdiKnown = false;
+                inRegion = false;
+            };
+            auto beginRegion = [&](size_t instrIdx, size_t off) {
+                if (!inRegion) {
+                    inRegion = true;
+                    setupInstr = instrIdx;
+                    setupOffset = off;
+                }
+            };
+
+            for (size_t i = 0; i < instrs.size(); ++i) {
+                if (instrs[i].op != IROp::ASM || instrs[i].args.empty() ||
+                    instrs[i].args[0].kind != IRValue::LABEL) {
+                    clearRegion();
+                    continue;
+                }
+                const std::string& code = instrs[i].args[0].name;
+                size_t pos = 0;
+                while (pos <= code.size()) {
+                    size_t nl = code.find('\n', pos);
+                    std::string line = trim(code.substr(
+                        pos, nl == std::string::npos ? std::string::npos : nl - pos));
+                    if (!line.empty()) {
+                        size_t sp = line.find_first_of(" \t");
+                        std::string mnem = (sp == std::string::npos) ? line : line.substr(0, sp);
+                        if (mnem == "syscall") {
+                            if (raxKnown && (raxVal == 60 || raxVal == 231) && rdiKnown &&
+                                inRegion) {
+                                insertions[setupInstr].push_back(setupOffset);
+                            }
+                            // The syscall returns its result in rax (or does
+                            // not return at all); either way the state is
+                            // consumed and rdi must be set up again.
+                            clearRegion();
+                        } else if (mnem == "mov" || mnem == "xor" || mnem == "movsxd" ||
+                                   mnem == "lea") {
+                            size_t p = (sp == std::string::npos)
+                                           ? std::string::npos
+                                           : line.find_first_not_of(" \t", sp);
+                            std::string rest = (p == std::string::npos) ? std::string()
+                                                                        : line.substr(p);
+                            size_t comma = rest.find(',');
+                            std::string dst = trim(comma == std::string::npos
+                                                       ? rest
+                                                       : rest.substr(0, comma));
+                            std::string src = firstToken(comma == std::string::npos
+                                                             ? std::string()
+                                                             : rest.substr(comma + 1));
+                            if (isFullRax(dst)) {
+                                int64_t v = 0;
+                                if (mnem == "xor" && src == dst) {
+                                    raxKnown = true;
+                                    raxVal = 0;
+                                } else if (mnem == "mov" && parseImm(src, v)) {
+                                    raxKnown = true;
+                                    raxVal = v;
+                                } else {
+                                    raxKnown = false;
+                                }
+                                beginRegion(i, pos);
+                            } else if (isFullRdi(dst)) {
+                                rdiKnown = true;
+                                beginRegion(i, pos);
+                            } else if (mentionsRax(line) || mentionsRdi(line)) {
+                                clearRegion();
+                            }
+                        } else if (mnem == "call" || mentionsRax(line) || mentionsRdi(line)) {
+                            // A call may return into rax/rdi; any other
+                            // mention is conservatively a possible write.
+                            clearRegion();
+                        }
+                    }
+                    if (nl == std::string::npos) break;
+                    pos = nl + 1;
+                }
+            }
+            if (insertions.empty()) continue;
+
+            std::vector<IRInstruction> rebuilt;
+            rebuilt.reserve(instrs.size() + insertions.size() * 2);
+            for (size_t i = 0; i < instrs.size(); ++i) {
+                auto it = insertions.find(i);
+                if (it == insertions.end()) {
+                    rebuilt.push_back(instrs[i]);
+                    continue;
+                }
+                std::vector<size_t>& offsets = it->second;
+                std::sort(offsets.begin(), offsets.end());
+                offsets.erase(std::unique(offsets.begin(), offsets.end()), offsets.end());
+                const std::string& code = instrs[i].args[0].name;
+                size_t start = 0;
+                for (size_t off : offsets) {
+                    std::string chunk = code.substr(start, off - start);
+                    if (chunk.find_first_not_of(" \t\r\n") != std::string::npos) {
+                        IRInstruction piece = instrs[i];
+                        piece.args[0] = IRValue::Label(chunk);
+                        rebuilt.push_back(std::move(piece));
+                    }
+                    rebuilt.push_back(finiCall);
+                    start = off;
+                }
+                // The setup region and everything after it (including the
+                // syscall) stay as their own asm block, with the placeholder
+                // map preserved.
+                IRInstruction piece = instrs[i];
+                piece.args[0] = IRValue::Label(code.substr(start));
+                rebuilt.push_back(std::move(piece));
+            }
+            instrs = std::move(rebuilt);
         }
     }
 
