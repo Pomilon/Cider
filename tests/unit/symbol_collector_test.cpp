@@ -260,6 +260,46 @@ int run() {
     }
     CHECK(w1Override);
 
+    // CIDER-BUG-126: an `override` that bound no virtual base slot is
+    // reported at the declaration instead of silently staying a direct
+    // call. Covered: plain base method, unknown base method name, no base at
+    // all, and a plain base declared after the class (CIDER-BUG-120
+    // rebuild).
+    Result r13b = collectSrc(
+        "class P { func f() -> int { return 1; } }\n"
+        "class D extends P { override func f() -> int { return 2; } }\n"
+        "class N { func g() -> int { return 1; } }\n"
+        "class U extends N { override func h() -> int { return 2; } }\n"
+        "class O { override func k() -> int { return 3; } }\n"
+        "class FD extends FwdBase { override func f() -> int { return 4; } }\n"
+        "class FwdBase { func f() -> int { return 1; } }\n");
+    CHECK(r13b.errors.size() == 4);
+    bool sawPlain = false, sawUnknown = false, sawOrphan = false, sawForward = false;
+    for (auto& e : r13b.errors) {
+        if (e.find("Method 'f' of class 'D' is marked 'override' but base method 'f' is not virtual") !=
+            std::string::npos) sawPlain = true;
+        if (e.find("Method 'h' of class 'U' is marked 'override' but no base method named 'h' exists") !=
+            std::string::npos) sawUnknown = true;
+        if (e.find("Method 'k' of class 'O' is marked 'override' but no base method named 'k' exists") !=
+            std::string::npos) sawOrphan = true;
+        if (e.find("Method 'f' of class 'FD' is marked 'override' but base method 'f' is not virtual") !=
+            std::string::npos) sawForward = true;
+    }
+    CHECK(sawPlain && sawUnknown && sawOrphan && sawForward);
+
+    // A legitimate override still binds its slot, including over a
+    // forward-declared virtual base (no diagnostic).
+    Result r13c = collectSrc(
+        "class VB { virtual func f() -> int { return 1; } }\n"
+        "class VD extends VB { override func f() -> int { return 2; } }\n"
+        "class FVD extends FVB { override func f() -> int { return 3; } }\n"
+        "class FVB { virtual func f() -> int { return 1; } }\n");
+    CHECK(r13c.errors.empty());
+    auto vd = std::static_pointer_cast<cider::StructSymbol>(findSym(*r13c.table, "VD"));
+    CHECK(vd->vtable.size() == 1 && vd->vtable[0] == "VD_f");
+    auto fvd = std::static_pointer_cast<cider::StructSymbol>(findSym(*r13c.table, "FVD"));
+    CHECK(fvd->vtable.size() == 1 && fvd->vtable[0] == "FVD_f");
+
     // CIDER-BUG-060: `export` marks module-level declarations importable;
     // unmarked ones stay private. `export type` / `export interface` now
     // parse and mark; enum variants inherit the enum's export; the

@@ -262,6 +262,11 @@ struct StructSymbol : public Symbol {
         int vtableIndex = -1;
         bool isVirtual = false;
         bool isOverride = false;
+        // CIDER-BUG-126: declaration site, so a late diagnostic about an
+        // override with no virtual base slot can point at the declaration
+        // (the collector reports after the whole program is collected).
+        int line = 0;
+        int col = 0;
         // CIDER-BUG-090: module this method's signature spellings bind in
         // ("" == main). An inherited method keeps its declaring class's
         // module, which may differ from the derived class's and may be the

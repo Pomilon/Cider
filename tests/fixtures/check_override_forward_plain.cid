@@ -1,0 +1,12 @@
+// CIDER-BUG-126 x CIDER-BUG-120: the base is declared after the derived
+// class, so the override only sees the plain base method once the forward
+// base chain is rebuilt after collection. It must still be diagnosed.
+class Derived extends Later {
+    override func f() -> int { return 2; }
+}
+
+class Later {
+    func f() -> int { return 1; }
+}
+
+func main() -> int { return 0; }

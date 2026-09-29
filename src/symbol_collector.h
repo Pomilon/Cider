@@ -53,6 +53,9 @@ class SymbolCollector : public ASTVisitor {
         bool forwardParent = false;
         bool rebuilt = false;
         bool baseError = false;
+        // CIDER-BUG-126: validateOverrides() has already inspected this
+        // class (collect() can run more than once on one collector).
+        bool overrideChecked = false;
         std::vector<StructSymbol::Field> ownFields;    // own fields as collected
         std::vector<StructSymbol::Method> ownMethods;  // own declarations, merge order
         std::string file;                              // file for late diagnostics
@@ -123,6 +126,10 @@ public:
         // chains never inherit, the rest resolve their base below.
         validateBaseChains();
         finalizeLayouts();
+        // CIDER-BUG-126: after every base chain and vtable is final, report
+        // overrides that bound no virtual slot (they used to be accepted and
+        // silently call the derived body directly instead of dispatching).
+        validateOverrides();
     }
 
     const std::map<std::string, std::shared_ptr<TemplateSymbol>>& getTemplateTable() const {
@@ -1057,6 +1064,8 @@ public:
                 StructSymbol::Method m;
                 m.name = method->getName();
                 m.mangledName = sym->name + "_" + m.name;
+                m.line = method->getLine();
+                m.col = method->getColumn();
                 // CIDER-BUG-090: signature spellings bind in the module
                 // that declares the method; inheritance copies them.
                 m.declaringModule = getCurrentModule();
@@ -1708,6 +1717,44 @@ public:
             }
         }
         symbolTable_.setCurrentScope(prevScope);
+    }
+
+    // CIDER-BUG-126: an `override` method that bound no virtual slot (its
+    // base method is plain, or no base method of that name exists) was
+    // silently accepted: mergeClassMethod kept the method at vtableIndex -1,
+    // so calls stayed direct/static while the source implied dispatch. The
+    // vtable slots are final once every base chain is merged (the two passes
+    // above), so one pass over the recorded own declarations reports the
+    // misuse at the method's declaration. A constructor `init` override and
+    // a broken base chain already carry their own, more specific diagnostic.
+    void validateOverrides() {
+        for (size_t i = 0; i < aggregateLayouts_.size(); i++) {
+            AggregateLayout& rec = aggregateLayouts_[i];
+            if (rec.overrideChecked) continue;
+            rec.overrideChecked = true;
+            if (rec.sym->kind != SymbolKind::CLASS || rec.baseError) continue;
+            for (const auto& m : rec.ownMethods) {
+                if (!m.isOverride || m.name == "init") continue;
+                bool boundSlot = false;
+                bool plainBase = false;
+                for (const auto& em : rec.sym->methods) {
+                    if (em.name != m.name) continue;
+                    if (em.vtableIndex >= 0) {
+                        boundSlot = true;
+                        break;
+                    }
+                    // The merge kept (or replaced) a same-named plain
+                    // method: that is the non-virtual method overridden.
+                    plainBase = true;
+                }
+                if (boundSlot) continue;
+                std::string message = "Method '" + m.name + "' of class '" +
+                                      rec.sym->name + "' is marked 'override' but ";
+                message += plainBase ? "base method '" + m.name + "' is not virtual"
+                                     : "no base method named '" + m.name + "' exists";
+                reportAtFile(message, m.line, m.col, rec.file);
+            }
+        }
     }
 
     // Attribute a late (post-collection) diagnostic to the file the symbol
