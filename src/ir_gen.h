@@ -1683,6 +1683,9 @@ public:
         auto prevDeferStack = deferStack_;
         auto prevDestructorStack = destructorStack_;
         auto prevActiveTryScopes = activeTryScopes_;
+        // CIDER-ISS-016: the frame's entry chain is per function, like the
+        // try stack above.
+        IRValue prevFrameHandlerPrev = frameHandlerPrev_;
         BasicBlock* prevEntryBlock = functionEntryBlock_;
         bool prevIsSret = currentIsSret_;
         TypeInfo prevReturnType = currentReturnType_;
@@ -1738,6 +1741,7 @@ public:
         deferStack_.clear();
         destructorStack_.clear();
         activeTryScopes_.clear();
+        frameHandlerPrev_ = IRValue{};
         deferStack_.push_back({});  // Function scope level
         destructorStack_.push_back({});
 
@@ -1866,6 +1870,11 @@ public:
         if (currentBlock_ && (currentBlock_->getInstructions().empty() || currentBlock_->getInstructions().back().op != IROp::RET)) {
             emitDefers();
             emitDestructors();
+            // CIDER-ISS-016: the implicit void return is a frame exit like
+            // any other, so it restores the chain the frame was entered
+            // with. It used to be the one RET site with no restore at all.
+            emitExceptionUnwind(0);
+            emitFrameHandlerRestore();
             currentBlock_->addInstruction({IROp::RET, std::nullopt, {}});
         }
 
@@ -1890,6 +1899,7 @@ public:
         deferStack_ = prevDeferStack;
         destructorStack_ = prevDestructorStack;
         activeTryScopes_ = std::move(prevActiveTryScopes);
+        frameHandlerPrev_ = prevFrameHandlerPrev;
         functionEntryBlock_ = prevEntryBlock;
         currentIsSret_ = prevIsSret;
         currentReturnType_ = prevReturnType;
@@ -2046,6 +2056,7 @@ public:
                 emitDefers();
                 emitDestructors();
                 emitExceptionUnwind(0);
+                emitFrameHandlerRestore();
                 currentBlock_->addInstruction({IROp::RET, std::nullopt, {}});
                 startBlock(nextLabel("dead"));
                 return;
@@ -2084,6 +2095,7 @@ public:
                 // CIDER-BUG-053: a return from inside a try must restore the
                 // enclosing handler for the caller's frame.
                 emitExceptionUnwind(0);
+                emitFrameHandlerRestore();
                 currentBlock_->addInstruction({IROp::RET, std::nullopt, {}});
                 startBlock(nextLabel("dead"));
                 return;
@@ -2126,11 +2138,13 @@ public:
             emitDefers();
             emitDestructors();
             emitExceptionUnwind(0);
+            emitFrameHandlerRestore();
             currentBlock_->addInstruction({IROp::RET, std::nullopt, {val}});
         } else {
             emitDefers();
             emitDestructors();
             emitExceptionUnwind(0);
+            emitFrameHandlerRestore();
             currentBlock_->addInstruction({IROp::RET, std::nullopt, {}});
         }
         startBlock(nextLabel("dead"));
@@ -2833,6 +2847,9 @@ public:
         auto prevDeferStack = deferStack_;
         auto prevDestructorStack = destructorStack_;
         auto prevActiveTryScopes = activeTryScopes_;
+        // CIDER-ISS-016: the frame's entry chain is per function, like the
+        // try stack above.
+        IRValue prevFrameHandlerPrev = frameHandlerPrev_;
         BasicBlock* prevEntryBlock = functionEntryBlock_;
         bool prevIsSret = currentIsSret_;
         TypeInfo prevReturnType = currentReturnType_;
@@ -2860,6 +2877,7 @@ public:
         deferStack_.clear();
         destructorStack_.clear();
         activeTryScopes_.clear();
+        frameHandlerPrev_ = IRValue{};
         deferStack_.push_back({});
         destructorStack_.push_back({});
 
@@ -2927,6 +2945,7 @@ public:
         deferStack_ = std::move(prevDeferStack);
         destructorStack_ = std::move(prevDestructorStack);
         activeTryScopes_ = std::move(prevActiveTryScopes);
+        frameHandlerPrev_ = prevFrameHandlerPrev;
         functionEntryBlock_ = prevEntryBlock;
         currentIsSret_ = prevIsSret;
         currentReturnType_ = prevReturnType;
@@ -6878,6 +6897,10 @@ public:
             // exit code there would read clobbered registers, and the
             // try-body exits would never run on the throw path).
             ensureExceptionGlobals();
+            // CIDER-ISS-016: this frame is about to start swapping the
+            // global handler chain, so it must record the chain it was
+            // entered with and put it back on every exit.
+            ensureFrameHandlerPrev();
 
             // CIDER-BUG-053: the try owns a jmp_buf allocated in the
             // function entry block (one per frame invocation, even when the
@@ -9673,15 +9696,51 @@ public:
     // register operands, so it can go anywhere after the block's leading
     // PHIs (the entry block may already be terminated by then).
     void emitEntryAlloca(IRValue dest, int size) {
-        IRInstruction allocaInstr{IROp::ALLOCA, dest, {IRValue::Constant(size, IRType::I32)}};
+        emitEntryInstr(IRInstruction{IROp::ALLOCA, dest, {IRValue::Constant(size, IRType::I32)}});
+    }
+
+    // CIDER-ISS-016: hoist an instruction into the function's entry block,
+    // after the leading PHIs, so it runs once per frame invocation even
+    // though the try that needs it is emitted deep in the body (possibly
+    // inside a loop). Same slot rules as emitEntryAlloca.
+    void emitEntryInstr(IRInstruction instr) {
         if (!functionEntryBlock_ || functionEntryBlock_ == currentBlock_.get()) {
-            currentBlock_->addInstruction(std::move(allocaInstr));
+            currentBlock_->addInstruction(std::move(instr));
             return;
         }
         auto& insts = functionEntryBlock_->getInstructions();
         auto pos = insts.begin();
         while (pos != insts.end() && pos->op == IROp::PHI) ++pos;
-        insts.insert(pos, std::move(allocaInstr));
+        insts.insert(pos, std::move(instr));
+    }
+
+    // CIDER-ISS-016: a frame must leave the handler chain exactly as it
+    // found it. The per-try discipline below (emitExceptionUnwind at every
+    // scope exit) covers the paths ir-gen knows about, but the chain is a
+    // global: a single missed restore leaves a pointer into a dead frame
+    // that the NEXT throw longjmps through (CIDER-ISS-010 fixed the null
+    // case only). So the frame itself takes ownership of the invariant:
+    // the first try in a function hoists a load of the entry chain into the
+    // entry block, and every frame exit (all five RET sites, including the
+    // implicit void return a body falls off the end into) stores it back.
+    // A function without a try never touches the chain, so it emits nothing.
+    void ensureFrameHandlerPrev() {
+        if (frameHandlerPrev_.kind == IRValue::REGISTER) return;
+        ensureExceptionGlobals();
+        IRValue prev = IRValue::Register(nextTemp(), IRType::PTR);
+        emitEntryInstr({IROp::LOAD, prev, {IRValue::Label("_exception_buf_ptr")}});
+        frameHandlerPrev_ = prev;
+    }
+
+    // CIDER-ISS-016: the frame-exit half of the invariant above. Emitted
+    // right before each RET, after the per-try unwinds (which restore the
+    // same value, innermost first) — the last store is the frame's own
+    // entry chain, which is what the caller must see.
+    void emitFrameHandlerRestore() {
+        if (frameHandlerPrev_.kind != IRValue::REGISTER) return;
+        currentBlock_->addInstruction({IROp::STORE, std::nullopt,
+                                       {IRValue::Label("_exception_buf_ptr"),
+                                        frameHandlerPrev_}});
     }
 
     // Restore _exception_buf_ptr for every try scope entered inside the
@@ -9799,6 +9858,14 @@ private:
         bool inCatch = false;
     };
     std::vector<ActiveTryScope> activeTryScopes_;
+    // CIDER-ISS-016: the handler chain this frame was entered with, hoisted
+    // into the entry block by ensureFrameHandlerPrev() the first time the
+    // function's body needs it. Every frame exit stores it back, so the
+    // global chain can never keep pointing into a frame that has returned.
+    // Default-constructed (no REGISTER kind) until then, which also scopes
+    // it per function: the nested-function and method visitors save, clear
+    // and restore it like activeTryScopes_.
+    IRValue frameHandlerPrev_{};
     // Entry block of the function being generated (CIDER-BUG-053): try
     // buffers are allocated there so a try in a loop reuses one slot per
     // frame invocation instead of allocating per iteration.

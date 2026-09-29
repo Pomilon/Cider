@@ -67,7 +67,18 @@ private:
         // CIDER-BUG-149: oversized ALLOCAs that fell back to VM::malloc
         // (the 4096-byte bump region could not hold them). Frame storage
         // like localBase: retireFrame releases each block on frame death.
-        std::vector<int64_t> localHeapAllocs{};
+        // CIDER-ISS-016: the size is kept too, so the pre-longjmp check can
+        // tell whether a buffer address lies inside a live block instead of
+        // matching any offset at or above it.
+        struct HeapAlloc {
+            int64_t offset = 0;
+            int64_t size = 0;
+        };
+        std::vector<HeapAlloc> localHeapAllocs{};
+        // CIDER-ISS-016: buffers this frame handed to _setjmp. retireFrame
+        // drops their jumpStates_ entries, so a handler whose frame is gone
+        // can never be resumed (directly or through a recycled address).
+        std::vector<int64_t> jumpStateAddrs{};
     };
 
     // State captured by _setjmp for longjmp to restore.
@@ -141,6 +152,10 @@ private:
     // frame unwinds.
     bool tryBuiltinCall(const std::string& name, const std::vector<IRValue>& args,
                         const std::string& destName = "");
+    // CIDER-ISS-016: the live jump state a handler buffer stands for, or
+    // nullptr when the address is not a live handler (null, dead frame, or
+    // a recycled frame region). Definition next to tryBuiltinCall.
+    const JumpState* resolveJumpState(int64_t buf);
 
     int64_t malloc(int64_t size);
     void free(int64_t offset);

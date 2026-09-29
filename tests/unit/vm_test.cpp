@@ -598,6 +598,238 @@ int run() {
         CHECK(vm.heapBytes() == vm.freeListBytes());
     }
 
+    // CIDER-ISS-016: a handler buffer whose frame is gone must read as "no
+    // handler", not be resumed. The IR here is hand-built to the shape the
+    // bug needs — a callee that registers a handler and returns WITHOUT
+    // restoring the chain, then a throw that finds the stale pointer. Before
+    // the fix the longjmp found the surviving jumpStates_ entry (its
+    // frameIndex still in range) and resumed a dead frame, so the program
+    // continued at a retired frame's saved block/instr and printed garbage;
+    // now it takes the defined uncaught path.
+    {
+        // register(): alloca buf; setjmp(buf); ret 0 — the chain keeps buf.
+        auto reg = makeFn("register", cider::IRType::I32);
+        auto rb = std::make_unique<cider::BasicBlock>("entry");
+        rb->addInstruction(opInstr(cider::IROp::ALLOCA, "rbuf",
+                                   {cider::IRValue::Constant(200, cider::IRType::I32)}));
+        rb->addInstruction(opInstr(cider::IROp::STORE, "",
+                                   {cider::IRValue::Label("_exception_buf_ptr"),
+                                    cider::IRValue::Register("rbuf", cider::IRType::PTR)}));
+        cider::IRInstruction rsj;
+        rsj.op = cider::IROp::CALL;
+        rsj.dest = cider::IRValue::Register("rsjd", cider::IRType::I32);
+        rsj.args = {cider::IRValue::Label("_setjmp"),
+                    cider::IRValue::Register("rbuf", cider::IRType::PTR)};
+        rb->addInstruction(rsj);
+        cider::IRInstruction rret;
+        rret.op = cider::IROp::RET;
+        rret.args = {cider::IRValue::Constant(0, cider::IRType::I32)};
+        rb->addInstruction(rret);
+        reg->addBlock(std::move(rb));
+
+        // main(): call register(); then longjmp to whatever the chain holds.
+        auto fn = makeFn("main", cider::IRType::I32);
+        auto e = std::make_unique<cider::BasicBlock>("entry");
+        e->addInstruction(opInstr(cider::IROp::CALL, "",
+                                  {cider::IRValue::Label("register")}));
+        e->addInstruction(opInstr(cider::IROp::LOAD, "chain",
+                                  {cider::IRValue::Label("_exception_buf_ptr")}));
+        cider::IRInstruction jump;
+        jump.op = cider::IROp::CALL;
+        jump.args = {cider::IRValue::Label("longjmp"),
+                     cider::IRValue::Register("chain", cider::IRType::PTR),
+                     cider::IRValue::Constant(1, cider::IRType::I32)};
+        e->addInstruction(jump);
+        cider::IRInstruction ret;
+        ret.op = cider::IROp::RET;
+        ret.args = {cider::IRValue::Constant(0, cider::IRType::I32)};
+        e->addInstruction(ret);
+        fn->addBlock(std::move(e));
+
+        cider::ModuleIR mod;
+        mod.addGlobalAsm("global _exception_buf_ptr");
+        mod.addGlobalAsm("_exception_buf_ptr: resq 1");
+        mod.addFunction(std::move(reg));
+        mod.addFunction(std::move(fn));
+        cider::VM vm;
+        bool threw = false;
+        try {
+            vm.run(mod);
+        } catch (const cider::VMError& e) {
+            threw = true;
+            // The stale pointer reports the same message as the null one
+            // (CIDER-ISS-010), so both backends print the same stderr.
+            CHECK(std::string(e.message) == "uncaught exception");
+        }
+        CHECK(threw);
+    }
+
+    // CIDER-ISS-016: the same stale buffer, but the frame-index guard alone
+    // does not catch it. register()'s jumpStates_ entry records frameIndex
+    // 2; after it returns, a() calls b(), which becomes frame index 2 again,
+    // so a longjmp to the stale buffer finds an in-range index and resumes
+    // b at register's saved block with register's register snapshot. Only
+    // the ownership check (the buffer must live in the frame that captured
+    // it) rejects this. Pre-fix this corrupted state; b is entered as if
+    // mid-body, so the program runs off into b's blocks with the wrong
+    // registers and the observable result is not the defined error.
+    {
+        // register(): alloca buf; store chain=buf; setjmp(buf); ret 0.
+        auto reg = makeFn("register", cider::IRType::I32);
+        auto rb = std::make_unique<cider::BasicBlock>("entry");
+        rb->addInstruction(opInstr(cider::IROp::ALLOCA, "rbuf",
+                                   {cider::IRValue::Constant(200, cider::IRType::I32)}));
+        rb->addInstruction(opInstr(cider::IROp::STORE, "",
+                                   {cider::IRValue::Label("_exception_buf_ptr"),
+                                    cider::IRValue::Register("rbuf", cider::IRType::PTR)}));
+        cider::IRInstruction rsj;
+        rsj.op = cider::IROp::CALL;
+        rsj.dest = cider::IRValue::Register("rsjd", cider::IRType::I32);
+        rsj.args = {cider::IRValue::Label("_setjmp"),
+                    cider::IRValue::Register("rbuf", cider::IRType::PTR)};
+        rb->addInstruction(rsj);
+        cider::IRInstruction rret;
+        rret.op = cider::IROp::RET;
+        rret.args = {cider::IRValue::Constant(0, cider::IRType::I32)};
+        rb->addInstruction(rret);
+        reg->addBlock(std::move(rb));
+
+        // a(): register(); then b(); then ret 0.  a is frame index 1, so
+        // register runs as index 2 and b later runs as index 2 too.
+        auto a = makeFn("a", cider::IRType::I32);
+        auto ab = std::make_unique<cider::BasicBlock>("entry");
+        ab->addInstruction(opInstr(cider::IROp::CALL, "ra",
+                                   {cider::IRValue::Label("register")}));
+        ab->addInstruction(opInstr(cider::IROp::CALL, "rb",
+                                   {cider::IRValue::Label("b")}));
+        cider::IRInstruction aret;
+        aret.op = cider::IROp::RET;
+        aret.args = {cider::IRValue::Constant(0, cider::IRType::I32)};
+        ab->addInstruction(aret);
+        a->addBlock(std::move(ab));
+
+        // b(): load the chain and longjmp to whatever it holds. Its own
+        // frame is index 2, the index register's dead one recorded.
+        auto b = makeFn("b", cider::IRType::I32);
+        auto bb = std::make_unique<cider::BasicBlock>("entry");
+        bb->addInstruction(opInstr(cider::IROp::LOAD, "chain",
+                                   {cider::IRValue::Label("_exception_buf_ptr")}));
+        cider::IRInstruction bj;
+        bj.op = cider::IROp::CALL;
+        bj.args = {cider::IRValue::Label("longjmp"),
+                   cider::IRValue::Register("chain", cider::IRType::PTR),
+                   cider::IRValue::Constant(1, cider::IRType::I32)};
+        bb->addInstruction(bj);
+        cider::IRInstruction bret;
+        bret.op = cider::IROp::RET;
+        bret.args = {cider::IRValue::Constant(0, cider::IRType::I32)};
+        bb->addInstruction(bret);
+        b->addBlock(std::move(bb));
+
+        auto fn = makeFn("main", cider::IRType::I32);
+        auto e = std::make_unique<cider::BasicBlock>("entry");
+        e->addInstruction(opInstr(cider::IROp::CALL, "r",
+                                  {cider::IRValue::Label("a")}));
+        cider::IRInstruction ret;
+        ret.op = cider::IROp::RET;
+        ret.args = {cider::IRValue::Constant(0, cider::IRType::I32)};
+        e->addInstruction(ret);
+        fn->addBlock(std::move(e));
+
+        cider::ModuleIR mod;
+        mod.addGlobalAsm("global _exception_buf_ptr");
+        mod.addGlobalAsm("_exception_buf_ptr: resq 1");
+        mod.addFunction(std::move(reg));
+        mod.addFunction(std::move(a));
+        mod.addFunction(std::move(b));
+        mod.addFunction(std::move(fn));
+        cider::VM vm;
+        bool threw = false;
+        try {
+            vm.run(mod);
+        } catch (const cider::VMError& e) {
+            threw = true;
+            CHECK(std::string(e.message) == "uncaught exception");
+        }
+        CHECK(threw);
+    }
+
+    // CIDER-ISS-016: a live handler still works. Same shape, but the frame
+    // that owns the buffer is still on the stack when the longjmp runs, so
+    // the jump must land in its catch and resume normally.
+    {
+        // owner(): the frame that owns buf installs a handler, calls the
+        // thrower (which longjmps) and the jump lands back in catch.
+        auto owner = makeFn("owner", cider::IRType::I32);
+        auto ob = std::make_unique<cider::BasicBlock>("entry");
+        ob->addInstruction(opInstr(cider::IROp::ALLOCA, "obuf",
+                                   {cider::IRValue::Constant(200, cider::IRType::I32)}));
+        ob->addInstruction(opInstr(cider::IROp::STORE, "",
+                                   {cider::IRValue::Label("_exception_buf_ptr"),
+                                    cider::IRValue::Register("obuf", cider::IRType::PTR)}));
+        cider::IRInstruction osj;
+        osj.op = cider::IROp::CALL;
+        osj.dest = cider::IRValue::Register("osjd", cider::IRType::I32);
+        osj.args = {cider::IRValue::Label("_setjmp"),
+                    cider::IRValue::Register("obuf", cider::IRType::PTR)};
+        ob->addInstruction(osj);
+        cider::IRInstruction obr;
+        obr.op = cider::IROp::COND_BR;
+        obr.args = {cider::IRValue::Register("osjd", cider::IRType::I32),
+                    cider::IRValue::Label("catch"), cider::IRValue::Label("body")};
+        ob->addInstruction(obr);
+        auto obody = std::make_unique<cider::BasicBlock>("body");
+        obody->addInstruction(opInstr(cider::IROp::CALL, "",
+                                      {cider::IRValue::Label("thrower"),
+                                       cider::IRValue::Register("obuf", cider::IRType::PTR)}));
+        cider::IRInstruction ob2;
+        ob2.op = cider::IROp::BR;
+        ob2.args = {cider::IRValue::Label("catch")};
+        obody->addInstruction(ob2);
+        auto ocatch = std::make_unique<cider::BasicBlock>("catch");
+        cider::IRInstruction oret;
+        oret.op = cider::IROp::RET;
+        oret.args = {cider::IRValue::Constant(33, cider::IRType::I32)};
+        ocatch->addInstruction(oret);
+        owner->addBlock(std::move(ob));
+        owner->addBlock(std::move(obody));
+        owner->addBlock(std::move(ocatch));
+
+        auto thr = makeFn("thrower", cider::IRType::VOID);
+        thr->addParam("arg_buf", cider::IRType::PTR);
+        auto tb = std::make_unique<cider::BasicBlock>("entry");
+        cider::IRInstruction tj;
+        tj.op = cider::IROp::CALL;
+        tj.args = {cider::IRValue::Label("longjmp"),
+                   cider::IRValue::Register("arg_buf", cider::IRType::PTR),
+                   cider::IRValue::Constant(1, cider::IRType::I32)};
+        tb->addInstruction(tj);
+        cider::IRInstruction tret;
+        tret.op = cider::IROp::RET;
+        tb->addInstruction(tret);
+        thr->addBlock(std::move(tb));
+
+        auto fn = makeFn("main", cider::IRType::I32);
+        auto e = std::make_unique<cider::BasicBlock>("entry");
+        e->addInstruction(opInstr(cider::IROp::CALL, "r",
+                                  {cider::IRValue::Label("owner")}));
+        cider::IRInstruction ret;
+        ret.op = cider::IROp::RET;
+        ret.args = {cider::IRValue::Register("r", cider::IRType::I32)};
+        e->addInstruction(ret);
+        fn->addBlock(std::move(e));
+
+        cider::ModuleIR mod;
+        mod.addGlobalAsm("global _exception_buf_ptr");
+        mod.addGlobalAsm("_exception_buf_ptr: resq 1");
+        mod.addFunction(std::move(owner));
+        mod.addFunction(std::move(thr));
+        mod.addFunction(std::move(fn));
+        cider::VM vm;
+        // 33 comes from the catch block, so the jump really landed there.
+        CHECK(vm.run(mod).exitCode == 33);
+    }
+
     // Step cap: an infinite loop fails fast instead of hanging.
     auto fn6 = makeFn("main", cider::IRType::VOID);
     auto b6 = std::make_unique<cider::BasicBlock>("entry");

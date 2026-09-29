@@ -502,7 +502,7 @@ VMResult VM::runBody(const ModuleIR& module, const std::string& runFunction) {
                 // stack slot.
                 d.i = malloc(size.i);
                 if (size.i > 0) std::memset(heap_.data() + d.i, 0, (size_t)size.i);
-                af.localHeapAllocs.push_back(d.i);
+                af.localHeapAllocs.push_back({d.i, size.i > 0 ? size.i : 0});
             }
             if (instr.dest) regs_[instr.dest->name] = d;
             break;
@@ -1085,7 +1085,14 @@ void VM::free(int64_t offset) {
 // so an immediate post-return read still sees the dead frame's bytes.
 void VM::retireFrame(const Frame& frame) {
     if (frame.localBase != 0) free(frame.localBase);
-    for (int64_t off : frame.localHeapAllocs) free(off);
+    for (const Frame::HeapAlloc& a : frame.localHeapAllocs) free(a.offset);
+    // CIDER-ISS-016: the frame's jump states die with it. The handler chain
+    // is a global, so a pointer to one of these buffers can outlive the
+    // frame (a try that is still installed when its function returns). The
+    // entry must not survive to be resumed after the frame is gone — and
+    // its address can be recycled by the next frame, which would make the
+    // surviving entry resume an unrelated frame. See resolveJumpState.
+    for (int64_t addr : frame.jumpStateAddrs) jumpStates_.erase(addr);
 }
 
 // CIDER-BUG-159: the exit paths (the exit builtin, the asm exit syscall)
@@ -1309,6 +1316,13 @@ bool VM::tryBuiltinCall(const std::string& name, const std::vector<IRValue>& arg
         st.instrIdx = (int)f.instrIdx;
         st.dest = destName;
         st.regs = regs_;
+        // CIDER-ISS-016: remember the address for this frame so retireFrame
+        // can drop the entry when the frame dies. A re-try in a loop
+        // re-registers the same address, so avoid a duplicate.
+        Frame& hf = frames_.back();
+        if (std::find(hf.jumpStateAddrs.begin(), hf.jumpStateAddrs.end(), buf.i) ==
+            hf.jumpStateAddrs.end())
+            hf.jumpStateAddrs.push_back(buf.i);
         jumpStates_[buf.i] = std::move(st);
         retReg_ = RegVal{};
         return true;
@@ -1319,32 +1333,72 @@ bool VM::tryBuiltinCall(const std::string& name, const std::vector<IRValue>& arg
         // CIDER-ISS-010: a null handler pointer is the uncaught case.
         // ir-gen branches around longjmp for it; keep the VM defined if a
         // null buffer ever reaches this builtin anyway.
-        if (buf.i == 0) throw VMError{"uncaught exception"};
-        auto it = jumpStates_.find(buf.i);
-        if (it == jumpStates_.end()) throw VMError{"longjmp: no matching setjmp"};
-        const JumpState& st = it->second;
-        if (st.frameIndex < 0 || st.frameIndex >= (int)frames_.size())
-            throw VMError{"longjmp: frame gone"};
+        //
+        // CIDER-ISS-016: a non-null pointer is no guarantee of a live
+        // handler. The chain is one global, so a frame that exits with a try
+        // still installed leaves a pointer into its dead jmp_buf behind, and
+        // the next throw jumps through it: the frame is gone, and its
+        // ALLOCA region has already been recycled (CIDER-BUG-115), so the
+        // jump lands in whatever now occupies those bytes. resolveJumpState
+        // accepts a buffer only when it belongs to a frame that is still on
+        // the stack, so a stale or recycled pointer takes the same defined
+        // uncaught path as a null one — byte-identical stderr and exit code
+        // to the null case, which is also what native's
+        // _uncaught_exception stub reports.
+        const JumpState* st = resolveJumpState(buf.i);
+        if (!st) throw VMError{"uncaught exception"};
         // CIDER-BUG-053: discard the unwound callee frames and release
         // their frame-local regions. The interrupted call's pending result
         // is voided — the jump leaves that call site for good.
         // CIDER-BUG-115: retirement releases each region; reuse zeroes it.
-        for (size_t i = frames_.size(); i > (size_t)st.frameIndex + 1; --i) {
+        for (size_t i = frames_.size(); i > (size_t)st->frameIndex + 1; --i) {
             retireFrame(frames_[i - 1]);
         }
-        frames_.resize((size_t)st.frameIndex + 1);
-        Frame& f = frames_[(size_t)st.frameIndex];
-        f.blockIdx = (size_t)st.blockIdx;
-        f.instrIdx = (size_t)st.instrIdx;
-        regs_ = st.regs;
+        frames_.resize((size_t)st->frameIndex + 1);
+        Frame& f = frames_[(size_t)st->frameIndex];
+        f.blockIdx = (size_t)st->blockIdx;
+        f.instrIdx = (size_t)st->instrIdx;
+        regs_ = st->regs;
         f.pendingDest.clear();
         // Redeliver the setjmp result to its own destination register: the
         // snapshot predates the CALL handler's write, and a callee CALL may
         // have overwritten pendingDest in the meantime.
-        if (!st.dest.empty()) regs_[st.dest] = val;
+        if (!st->dest.empty()) regs_[st->dest] = val;
         return true;
     }
     return false;
+}
+
+// CIDER-ISS-016: resolve a handler buffer to the jump state it stands for,
+// or nullptr when there is no live handler at that address.
+//
+// A non-null buffer is not enough. The chain is one global, so a frame that
+// returned with a try still installed leaves a pointer into its dead jmp_buf
+// behind (retireFrame now drops those entries, so this is the belt to the
+// ir-gen braces that restore the chain on frame exit), and even a live
+// entry's address can have been recycled: the map is keyed by address, and
+// CIDER-BUG-115 hands a retired frame's region straight back to the next
+// frame. Accepting either would resume a foreign frame at a foreign
+// instruction, so both must read as "no handler here" — the same defined
+// uncaught path a null pointer takes.
+const VM::JumpState* VM::resolveJumpState(int64_t buf) {
+    if (buf == 0) return nullptr;
+    auto it = jumpStates_.find(buf);
+    if (it == jumpStates_.end()) return nullptr;
+    const JumpState& st = it->second;
+    if (st.frameIndex < 0 || st.frameIndex >= (int)frames_.size()) return nullptr;
+    // The buffer must be storage the target frame still owns: either its
+    // ALLOCA bump region or one of its oversized-local fallbacks. This is
+    // what makes an address-recycled buffer fail even though some other
+    // live frame's jump state happens to sit under the same key.
+    const Frame& tf = frames_[(size_t)st.frameIndex];
+    bool inRegion = tf.localSize > 0 && buf >= tf.localBase &&
+                    buf + 8 <= tf.localBase + (int64_t)tf.localSize;
+    for (const Frame::HeapAlloc& a : tf.localHeapAllocs)
+        if (a.size > 0 && buf >= a.offset && buf + 8 <= a.offset + a.size)
+            inRegion = true;
+    if (!inRegion) return nullptr;
+    return &st;
 }
 
 void VM::doCall(const IRValue& target, const std::vector<IRValue>& args,
