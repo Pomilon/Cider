@@ -1,0 +1,11 @@
+// CIDER-BUG-124 negative fixture module: `Hidden` is private to this
+// module, so another module can never name it as a base — the
+// defining-module resolution must not widen visibility.
+class Hidden {
+  var h: int = 1;
+  virtual func who() -> int { return 1; }
+}
+
+export class Shown {
+  var s: int = 2;
+}

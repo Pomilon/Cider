@@ -135,6 +135,18 @@ int run() {
     CHECK(!rep.hasErrors());
     CHECK(d.find("(Class A extends B (VarDecl v int) (FunctionDecl m (returns void) (body)))") != std::string::npos);
 
+    // CIDER-BUG-124: module-qualified base spellings join the dotted path
+    // exactly like every other type position.
+    rep.clear();
+    d = parseDump("class A extends lib.Base {\n  var v: int;\n}\n", rep);
+    CHECK(!rep.hasErrors());
+    CHECK(d.find("(Class A extends lib.Base (VarDecl v int))") != std::string::npos);
+
+    rep.clear();
+    d = parseDump("class A extends a.util.Foo {\n  var v: int;\n}\n", rep);
+    CHECK(!rep.hasErrors());
+    CHECK(d.find("(Class A extends a.util.Foo (VarDecl v int))") != std::string::npos);
+
     rep.clear();
     d = parseDump("enum Color { RED, GREEN, BLUE }\n", rep);
     CHECK(!rep.hasErrors());

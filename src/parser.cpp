@@ -2276,6 +2276,16 @@ std::unique_ptr<Statement> Parser::parseClassDeclaration() {
         nextToken();
         if (!expect(TokenType::IDENTIFIER)) return nullptr;
         superclassName = currentToken_.value;
+        // CIDER-BUG-124: accept module-qualified base spellings (`lib.Base`,
+        // `a.util.Foo`) exactly like every other type position (CID-020/021);
+        // resolution happens in the collector/checker, the parser only joins
+        // the dotted path.
+        while (peekToken_.type == TokenType::DOT) {
+            nextToken();  // consume the identifier; the '.' is next
+            if (!expect(TokenType::IDENTIFIER)) return nullptr;
+            superclassName += ".";
+            superclassName += currentToken_.value;
+        }
     }
 
     if (!expect(TokenType::LBRACE)) return nullptr;

@@ -7653,7 +7653,13 @@ public:
             lastExprType_ = {"error", 0};
             return;
         }
-        auto parentSym = symbolTable_.resolve(cs->parentName);
+        // CIDER-BUG-124: the base spelling may be dotted (`lib.Base`) or an
+        // alias; resolve it like any other type position (dotted qualifiers
+        // through the module registry, alias chains to the class they end
+        // at).
+        TypeInfo parentType;
+        parentType.name = cs->parentName;
+        auto parentSym = resolveStructOrClassSymbol(parentType);
         if (!parentSym || (parentSym->kind != SymbolKind::CLASS && parentSym->kind != SymbolKind::STRUCT)) {
             lastValue_ = IRValue::Constant(0, IRType::PTR);
             lastExprType_ = {"error", 0};

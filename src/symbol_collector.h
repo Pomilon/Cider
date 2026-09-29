@@ -947,7 +947,11 @@ public:
 
         // Inherit from parent if it exists
         if (!sym->parentName.empty()) {
-            auto parent = symbolTable_.resolve(sym->parentName);
+            // CIDER-BUG-124: resolve qualified (`lib.Base`) and alias
+            // spellings through the same defining-module rules as every
+            // other type position; forward bases still re-resolve after
+            // collection (CIDER-BUG-120, finalizeClassBase).
+            auto parent = resolveBaseName(sym->parentName);
             if (parent && parent->kind == SymbolKind::CLASS) {
                 auto parentStruct = std::static_pointer_cast<StructSymbol>(parent);
                 sym->fields = parentStruct->fields;
@@ -1267,6 +1271,27 @@ public:
         return nullptr;
     }
 
+    // CIDER-BUG-124: resolve a class's `extends` spelling. Bare names keep
+    // the legacy scope walk; a dotted spelling resolves its qualifier as a
+    // visible module like every other type position (CID-020/021). `type`
+    // alias chains are followed with each hop's target spelling resolved in
+    // the alias's own defining module (CIDER-BUG-102), so `class A extends
+    // lib.Base`, `a.util.Foo` and an alias of either name the class they
+    // resolve to. Returns the resolved symbol (possibly not a class) or null
+    // when the spelling names nothing; callers kind-test the result.
+    std::shared_ptr<Symbol> resolveBaseName(const std::string& name) {
+        auto sym = resolveNominalType(name);
+        std::set<std::string> visiting;
+        if (!name.empty()) visiting.insert(name);
+        while (sym && sym->isTypeAlias && !sym->type.name.empty() &&
+               visiting.insert(sym->type.name).second) {
+            auto hopSym = sym;
+            sym = inModuleScope(definingModuleOfSymbol(hopSym),
+                                [&] { return resolveNominalType(hopSym->type.name); });
+        }
+        return sym;
+    }
+
     // CIDER-BUG-069: a field declared with a bare (or dotted) interface name
     // is a 16-byte fat pointer (CIDER-BUG-054), but TypeInfo::fromAST cannot
     // know the name denotes an interface until the declaration is collected.
@@ -1521,7 +1546,7 @@ public:
         int currentOffset = 0;
         int maxAlign = 1;
         if (rec.inherited) {
-            auto parentSym = resolveNominalType(sym.parentName);
+            auto parentSym = resolveBaseName(sym.parentName);
             if (!parentSym || parentSym->kind != SymbolKind::CLASS) {
                 return;  // defensive: keep the collection-time layout
             }
@@ -1684,7 +1709,7 @@ public:
                 auto it = aggregateIndex_.find(cur);
                 if (it != aggregateIndex_.end()) scope = aggregateLayouts_[it->second].declaringScope;
                 symbolTable_.setCurrentScope(scope);
-                auto parentSym = resolveNominalType(cur->parentName);
+                auto parentSym = resolveBaseName(cur->parentName);
                 if (!parentSym || parentSym->kind != SymbolKind::CLASS) {
                     if (!parentSym) unknownAt = cur;
                     break;
@@ -1776,7 +1801,7 @@ public:
     void finalizeClassBase(AggregateLayout& rec) {
         // Unknown/cyclic chains were reported and are never inherited.
         if (rec.baseError) return;
-        auto parentSym = resolveNominalType(rec.sym->parentName);
+        auto parentSym = resolveBaseName(rec.sym->parentName);
         if (!parentSym || parentSym->kind != SymbolKind::CLASS) return;  // non-class base
         auto parent = std::static_pointer_cast<StructSymbol>(parentSym);
         bool parentRebuilt = false;

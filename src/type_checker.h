@@ -453,6 +453,21 @@ public:
         return sym;
     }
 
+    // CIDER-BUG-124: resolve a class's `extends` spelling to the class it
+    // names. Dotted spellings canonicalize through the same defining-module
+    // rules as every other type position (CID-020/021, CIDER-BUG-102; a
+    // `lib.Base` written in a module resolves its qualifier in that module),
+    // and `type` alias chains resolve to the class they end at. `line` >= 0
+    // attributes dotted-name/visibility diagnostics; line < 0 stays silent
+    // for speculative walks. Null when the spelling names no class.
+    std::shared_ptr<Symbol> resolveParentClass(const std::string& name, int line = -1) {
+        if (name.empty()) return nullptr;
+        TypeInfo t;
+        t.name = name;
+        t = canonicalizeNominal(t, line);
+        return resolveStructOrClass(t);
+    }
+
     // CID-006 fix round 2: cycle-safe recursion (mirrors ir_gen's alias
     // resolver). Aliases are checker-accepted even when cyclic; stopping at
     // the repeated spelling keeps areTypesCompatible and every other caller
@@ -1304,20 +1319,22 @@ public:
                 auto classSym2 = std::static_pointer_cast<StructSymbol>(sym2);
                 std::string parent = classSym2->parentName;
                 while (!parent.empty()) {
-                    // Stored parent names are bare; compare canonically so
-                    // in-module hierarchies keep matching (spec §1).
-                    // Explicit construction (not `{parent, 0}`): robust
-                    // against TypeInfo field reordering.
+                    // CIDER-BUG-124: the stored parent spelling may be
+                    // dotted (`lib.Base`) or an alias. Compare the written
+                    // spelling canonically first (as before), then the
+                    // resolved class's canonical identity (spec §1) so a
+                    // hierarchy spelled either way keeps matching.
                     TypeInfo parentType;
                     parentType.name = parent;
                     parentType.pointerLevel = 0;
                     if (canonicalizeNominal(parentType).name == t1.name) return true;
-                    auto parentSym = resolveScoped(parent);
-                    if (parentSym && parentSym->kind == SymbolKind::CLASS) {
-                        parent = std::static_pointer_cast<StructSymbol>(parentSym)->parentName;
-                    } else {
-                        break;
+                    auto parentSym = resolveParentClass(parent);
+                    if (!parentSym || parentSym->kind != SymbolKind::CLASS) break;
+                    if (canonicalTypeName(parentSym->name, definingModuleOf(parentSym)) ==
+                        t1.name) {
+                        return true;
                     }
+                    parent = std::static_pointer_cast<StructSymbol>(parentSym)->parentName;
                 }
             }
         }
@@ -2850,7 +2867,9 @@ public:
     std::string missingConstructorHint(const std::shared_ptr<StructSymbol>& classSym) {
         std::string parent = classSym->parentName;
         while (!parent.empty()) {
-            auto parentSym = resolveScoped(parent);
+            // CIDER-BUG-124: dotted/alias parent spellings resolve like any
+            // other type position so the ancestor walk keeps working.
+            auto parentSym = resolveParentClass(parent);
             if (!parentSym || parentSym->kind != SymbolKind::CLASS) return "";
             auto ps = std::static_pointer_cast<StructSymbol>(parentSym);
             if (!ps->constructorName.empty()) {
@@ -3820,7 +3839,7 @@ public:
             lastExprType_ = {"error", 0};
             return;
         }
-        auto parentSym = resolveScoped(cs->parentName);
+        auto parentSym = resolveParentClass(cs->parentName);
         if (!parentSym || (parentSym->kind != SymbolKind::CLASS && parentSym->kind != SymbolKind::STRUCT)) {
             error("Parent class '" + cs->parentName + "' not found", expr.getLine());
             lastExprType_ = {"error", 0};
@@ -4085,10 +4104,16 @@ public:
     void visit(ClassDeclStmt& stmt) override {
         std::string prevClass = currentClassName_;
         currentClassName_ = stmt.getName();
-        // CIDER-FEAT-005: inheriting from a name is a use of that name even
-        // when no `super`/subclass-check ever resolves the base class.
-        if (warningsActive_ && !stmt.getParentName().empty()) {
-            (void)canonicalizeNominal(TypeInfo{stmt.getParentName(), 0});
+        // CIDER-BUG-124: the `extends` spelling is a type use and is
+        // canonicalized (and diagnosed) exactly like any other type
+        // position: a module-qualified base must be reachable and exported
+        // from here, and a misspelled qualifier/member is reported instead
+        // of silently yielding a class with no base. Self-qualified bases
+        // inside the owner module stay unrestricted (CIDER-BUG-060
+        // visibility). This also marks the name used for the CIDER-FEAT-005
+        // import bookkeeping.
+        if (!stmt.getParentName().empty()) {
+            (void)canonicalizeNominal(TypeInfo{stmt.getParentName(), 0}, stmt.getLine());
         }
         for (auto& member : stmt.getMembers()) {
             // Field declarations are validated but must not define symbols
