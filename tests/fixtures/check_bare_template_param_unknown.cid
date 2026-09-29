@@ -1,0 +1,10 @@
+// CIDER-BUG-134: a BARE unknown template spelling in a parameter
+// annotation is reported at the declaration, like the qualified spelling
+// (CIDER-BUG-111).
+func take(x: Nope<int>) -> int {
+  return 0;
+}
+
+func main() -> int {
+  return 0;
+}

@@ -78,6 +78,7 @@ public:
     // collector's diagnostic. Unset (unit tests) keeps the legacy silence.
     void setModuleTemplateNames(const std::map<std::string, std::set<std::string>>& names) {
         moduleTemplateNames_ = names;
+        moduleTemplateNamesSet_ = true;
     }
 
     // CID-005: target ABI defaults. `--target uefi` sets defaultAbiMs, which
@@ -483,7 +484,13 @@ public:
         auto lt = t.name.find('<');
         if (lt == std::string::npos) return t;
         auto dot = t.name.rfind('.', lt);
-        if (dot == std::string::npos) return t;  // bare instantiation (T6)
+        if (dot == std::string::npos) {  // bare instantiation
+            // CIDER-BUG-134: unlike qualified spellings, a bare template
+            // name has no qualifier to check against; report it when no
+            // known template carries its base name.
+            checkBareTemplate(t, line);
+            return t;
+        }
         if (line < 0) return t;
         std::string prefix = t.name.substr(0, dot);
         std::string bare = t.name.substr(dot + 1, lt - dot - 1);
@@ -503,6 +510,27 @@ public:
         if (modSym) error("'" + prefix + "' is not a module", line);
         else error("Undefined identifier '" + prefix + "'", line);
         return t;
+    }
+
+    // CIDER-BUG-134: declaration-site diagnostic for a BARE template
+    // spelling (`type X = Nope<int>;`) that names no known template. The
+    // collector instantiates lazily from annotations, so an UNUSED bare
+    // spelling used to stay silent and only a later use failed with the
+    // generic "is not a struct or class". A bare spelling the collector
+    // accepted always has its base name in moduleTemplateNames_ (and, in
+    // separate compilation, a per-owner identity); export/arity rejections
+    // already carry the collector's own diagnostic, so nothing more is
+    // reported for those. Only a name no module declares is unknown. line
+    // < 0 marks silent pre-check calls; without a collector-supplied
+    // template table (unit tests) the legacy silence is kept.
+    void checkBareTemplate(const TypeInfo& t, int line) {
+        if (line < 0 || !moduleTemplateNamesSet_) return;
+        std::string base = t.name.substr(0, t.name.find('<'));
+        for (const auto& [module, names] : moduleTemplateNames_) {
+            (void)module;
+            if (names.count(base)) return;
+        }
+        error("unknown template '" + base + "'", line);
     }
 
     TypeInfo resolveType(TypeInfo info) {
@@ -5028,6 +5056,11 @@ private:
     // CIDER-BUG-096: logical module ("" == main) -> template base names the
     // module declares (see setter above).
     std::map<std::string, std::set<std::string>> moduleTemplateNames_;
+    // CIDER-BUG-134: whether the collector supplied moduleTemplateNames_
+    // (unit tests do not). The bare-unknown-template diagnostic needs the
+    // table to tell "unknown" from "declared but not accepted"; unset keeps
+    // the legacy silence.
+    bool moduleTemplateNamesSet_ = false;
     // CIDER-BUG-119: function/block-local aggregate AST -> collector symbol
     // (see setter above).
     std::map<const Statement*, std::shared_ptr<StructSymbol>> localAggregates_;
