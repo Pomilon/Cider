@@ -351,6 +351,11 @@ public:
                         {IROp::ADD, addr,
                          {d.varAddr, IRValue::Constant((int64_t)d.offset, IRType::I32)}});
                 }
+                // CIDER-BUG-156: an entry's `mangledName` is the allocator's
+                // `free` instead of a destructor when it releases a
+                // caller-owned heap copy. Both are a one-argument call, and
+                // the release is registered ahead of the copy's finalizers
+                // so this reverse walk runs it after the last of them.
                 IRInstruction call;
                 call.op = IROp::CALL;
                 call.dest = std::nullopt;
@@ -1630,10 +1635,19 @@ public:
             // contexts (should not occur for declared struct returns, which
             // are always sret; kept for robustness). The struct test resolves
             // alias chains, so a scalar alias is not copied as a struct.
+            // CIDER-BUG-156: this copy is an internal caller/callee ABI, so
+            // it uses the FIXED runtime malloc/free pair (the bare names are
+            // the VM builtins / libc, or an unmangled main-file definition),
+            // never the module-resolved `runtimeHelperName`: a virtual
+            // override may live in any module, and a callee that resolved
+            // std.alloc's hardened malloc while the caller resolved libc's
+            // free would crash (the imported allocator's blocks are not
+            // libc's). The caller-side release in registerTempDestructors
+            // uses the matching bare `free`.
             if (retType.pointerLevel == 0 && isStructValueType(retType)) {
                 int structSize = getTypeSize(retType);
                 IRValue localPtr = IRValue::Register(nextTemp(), IRType::PTR);
-                currentBlock_->addInstruction({IROp::CALL, localPtr, {IRValue::Label(runtimeHelperName("malloc")), IRValue::Constant(structSize, IRType::I32)}});
+                currentBlock_->addInstruction({IROp::CALL, localPtr, {IRValue::Label("malloc"), IRValue::Constant(structSize, IRType::I32)}});
                 // CIDER-BUG-133: same source/target rule as the sret copy.
                 currentBlock_->addInstruction({IROp::MEMCPY, std::nullopt, {localPtr, val, IRValue::Constant(structSize, IRType::I32)},
                                                retType.isVolatile || currentReturnType_.isVolatile});
@@ -1974,9 +1988,13 @@ public:
             // temporary just like an sret slot, so register its finalizers
             // at the caller's enclosing scope. `lastExprType_` still holds
             // the callee-rooted return spelling from above.
+            // CIDER-BUG-156: unlike an sret slot, the copy's storage is the
+            // callee's malloc buffer, so the registration also releases it
+            // — after the finalizers, never before.
             if (isVirtual && vtableIndex != -1 &&
                 isByValueAggregate(lastExprType_, calleeDefMod)) {
-                registerTempDestructors(lastExprType_, dest, calleeDefMod);
+                registerTempDestructors(lastExprType_, dest, calleeDefMod,
+                                        /*ownsHeapCopy=*/true);
             }
         } else {
             // Function pointer / closure call: callee is an expression.
@@ -7311,8 +7329,29 @@ public:
     // order. `t` is a declaration spelling; `defModule` roots its nominal
     // names like every type query at the site. Aggregates without embedded
     // class destructors register nothing (byte-identical IR).
-    void registerTempDestructors(TypeInfo t, IRValue addr, const std::string& defModule) {
+    //
+    // CIDER-BUG-156: `ownsHeapCopy` marks the one caller-owned temporary
+    // whose storage is a fresh malloc buffer — the legacy heap path a
+    // non-sret virtual aggregate return uses (see visit(CallExpr)). The
+    // release is pushed BEFORE the finalizers, and the scope-exit walk
+    // emits in reverse, so the last destructor runs with the object still
+    // alive and the buffer goes back only afterwards. It registers even
+    // when the aggregate has no destructors: the buffer leaks regardless
+    // of whether there is anything to destroy inside it. Only heap copies
+    // pass true, so stack slots (sret, parameters, merge slots) keep their
+    // existing byte-identical IR.
+    //
+    // The release target is the bare `free`, mirroring the callee's bare
+    // `malloc` in visit(ReturnStmt): the heap-return copy is an internal
+    // ABI shared by every virtual override, so it must not be resolved in
+    // the caller's or the callee's module scope (`runtimeHelperName`),
+    // where the two ends can disagree about which allocator owns the block.
+    void registerTempDestructors(TypeInfo t, IRValue addr, const std::string& defModule,
+                                 bool ownsHeapCopy = false) {
         if (!currentFunction_ || destructorStack_.empty()) return;
+        if (ownsHeapCopy) {
+            destructorStack_.back().push_back({"free", addr, 0});
+        }
         std::set<const StructSymbol*> visiting;
         if (aggregateHasDestructors(t, defModule, visiting)) {
             registerEmbeddedDestructors(t, addr, 0, defModule, visiting);

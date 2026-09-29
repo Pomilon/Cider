@@ -29,6 +29,12 @@ add_executable(vm_test tests/unit/vm_test.cpp src/vm.cpp)
 target_include_directories(vm_test PRIVATE src)
 add_test(NAME vm_test COMMAND vm_test)
 
+# CIDER-BUG-156: VM allocation accounting for the caller-owned heap copy of
+# a non-sret virtual aggregate return (needs ir_gen + vm in one binary).
+add_executable(vm_heap_return_test tests/unit/vm_heap_return_test.cpp src/ir.cpp src/lexer.cpp src/parser.cpp src/symbols.cpp src/module_resolver.cpp src/vm.cpp)
+target_include_directories(vm_heap_return_test PRIVATE src)
+add_test(NAME vm_heap_return_test COMMAND vm_heap_return_test)
+
 add_executable(ast_test tests/unit/ast_test.cpp)
 target_include_directories(ast_test PRIVATE src)
 add_test(NAME ast_test COMMAND ast_test)

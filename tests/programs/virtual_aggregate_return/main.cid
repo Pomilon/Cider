@@ -1,0 +1,129 @@
+// CIDER-BUG-156 regression, runtime half: a non-sret virtual aggregate
+// return comes back as a fresh heap copy. CIDER-BUG-137 already treats the
+// copy as a caller-owned temporary (its destructors run at the caller's
+// enclosing scope); CIDER-BUG-156 releases the malloc buffer right after
+// the last of those destructors.
+//
+// This program pins the observable half on all three backends (VM unopt,
+// VM opt, native): every call below crosses virtual dispatch with a
+// by-value class/struct result, so an early release, a double release or a
+// release of the wrong (stack) storage would crash or corrupt the
+// allocator instead of exiting 0 with this trace. The release itself is
+// pinned by VM allocation accounting in tests/unit/vm_heap_return_test.cpp
+// (a leak has no program-visible output).
+//
+// Covered shapes:
+//   * local initializer, assignment and a bare discarded temporary
+//   * passed straight to a by-value parameter
+//   * returned again from a plain (sret) function, where the inner heap
+//     temporary is released at that function's exit
+//   * a destructor-free struct result (the release is not gated on the
+//     finalizer walk finding something to destroy)
+//   * a virtual aggregate return whose DEFINING MODULE imports the
+//     hardened std.alloc allocator while the caller does not: the
+//     hidden heap-return copy must use the fixed bare malloc/free pair on
+//     both sides, or the module's mmap-arena block reaches libc free and
+//     the native build crashes (see allocmod.cid).
+import allocmod;
+from std.io import print, printInt;
+
+var drops: int = 0;
+
+class D {
+    var label: int;
+    func ~D() {
+        drops = drops + 1;
+        printInt(this.label);
+        print(",");
+    }
+}
+
+struct P {
+    var a: int;
+    var b: int;
+}
+
+class Base {
+    virtual func make(n: int) -> D {
+        var d: D;
+        d.label = n;
+        return d;
+    }
+    virtual func makeP(n: int) -> P {
+        var p: P;
+        p.a = n;
+        p.b = n + 1;
+        return p;
+    }
+}
+
+class Derived extends Base {
+    override func make(n: int) -> D {
+        var d: D;
+        d.label = n + 10;
+        return d;
+    }
+    override func makeP(n: int) -> P {
+        var p: P;
+        p.a = n + 20;
+        p.b = n + 21;
+        return p;
+    }
+}
+
+func takeD(x: D) {
+    print("T,");
+    printInt(x.label);
+    print(",");
+}   // x's own parameter copy dies at callee exit
+
+func wrap(b: *Base, n: int) -> D {
+    // The virtual call's heap copy is destroyed and released at wrap's
+    // exit, after the value has been copied into wrap's sret slot.
+    return b->make(n);
+}
+
+func main() -> int {
+    var d: Derived;
+    var bp: *Base = &d;
+
+    var r1: D = bp->make(1);          // 11
+    print("A,");
+    printInt(r1.label); print(",");   // A,11,
+
+    var r2: D;
+    r2 = bp->make(2);                 // 12
+    r2.label = 102;
+    print("B,"); printInt(r2.label); print(",");   // B,102,
+
+    bp->make(3);                      // 13: bare discarded temporary
+    print("C,");
+
+    takeD(bp->make(4));               // 14,T,14,14,
+
+    var p: P = bp->makeP(7);          // destructor-free result
+    printInt(p.a); print(","); printInt(p.b); print(",");   // 27,28,
+
+    var w: D = wrap(bp, 5);           // 15,15,
+    w.label = 55;                     // distinguishes w from its sret temp
+    printInt(w.label); print(",");    // 55,
+
+    // allocmod's module scope imports std.alloc; the caller-side release
+    // here (main has no such import) must still match the allocator the
+    // callee used, or the native build crashes inside free.
+    var ab: allocmod.AllocBase;
+    var hr: allocmod.H = ab.make(77);
+    if (hr.label != 77) { return 2; }
+
+    print("\n");
+    // Before main's exit: every temporary and parameter copy so far; r1,
+    // r2 and w still own their declared copies.
+    if (drops != 7) { return 1; }
+    return 0;
+}
+// Main's scope then unwinds in reverse registration order: each
+// declaration's initialization temporary dies before the declared copy
+// (the local registers first), and a heap temporary's release runs right
+// after its destructor print. Reverse of the registration order
+//   [r1, temp1, r2, temp2, temp3, temp4, w, wrap's sret temp, hr, hr temp]:
+//   15, 55, 14, 13, 12, 102, 11, 11  (allocmod.H prints nothing)
