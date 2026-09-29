@@ -585,6 +585,16 @@ bool CodeGenerator::generate(ModuleIR& module, const std::string& outputPath,
     };
     const AbiDesc desc = abiDescFor(target_);
 
+    // CIDER-BUG-166: resolve a call target's explicit ABI from a module-level
+    // map instead of scanning every function at every call site. The first
+    // definition with a non-Default ABI wins, matching the old scan order.
+    std::map<std::string, Abi> functionAbis;
+    for (const auto& fn : module.getFunctions()) {
+        if (fn->getAbi() != Abi::Default) {
+            functionAbis.emplace(fn->getName(), fn->getAbi());
+        }
+    }
+
     for (auto& func : module.getFunctions()) {
         if (generatedFunctions_.count(func->getName())) continue;
         generatedFunctions_.insert(func->getName());
@@ -677,6 +687,27 @@ bool CodeGenerator::generate(ModuleIR& module, const std::string& outputPath,
                 for (const auto& [var, res] : alloc) {
                     (void)var;
                     if (!res.isSpilled && res.reg == xr) { xmmSaved.push_back(xr); break; }
+                }
+            }
+        }
+
+        // CIDER-BUG-166: index the allocation once per function. The DIV,
+        // ASM and CALL emitters below used to rescan every mapped value per
+        // instruction to answer "is this caller-saved register in use",
+        // which is O(values) per instruction and quadratic on call-heavy
+        // functions. regVars preserves the allocation map's order so the
+        // register save lists (and the emitted assembly) are unchanged.
+        std::map<std::string, std::vector<std::string>> regVars;
+        std::set<std::string> usedRegs;
+        std::vector<std::string> allocXmmOrder;
+        {
+            std::set<std::string> seenXmm;
+            for (const auto& [var, res] : alloc) {
+                if (res.isSpilled) continue;
+                regVars[res.reg].push_back(var);
+                usedRegs.insert(res.reg);
+                if (res.reg.rfind("xmm", 0) == 0 && seenXmm.insert(res.reg).second) {
+                    allocXmmOrder.push_back(res.reg);
                 }
             }
         }
@@ -1631,12 +1662,9 @@ bool CodeGenerator::generate(ModuleIR& module, const std::string& outputPath,
                     std::vector<std::string> toSave;
                     for (const auto& reg : clobbered) {
                         if (reg == d) continue;
-                        for (const auto& [var, res] : alloc) {
-                            if (!res.isSpilled && res.reg == reg) {
-                                toSave.push_back(reg);
-                                break;
-                            }
-                        }
+                        // CIDER-BUG-166: index lookup instead of a scan of
+                        // every allocated value per divide.
+                        if (usedRegs.count(reg)) toSave.push_back(reg);
                     }
                     for (const auto& reg : toSave) addText("    push " + reg);
                     t = (instr.dest ? instr.dest->type : IRType::I32);
@@ -1987,7 +2015,9 @@ bool CodeGenerator::generate(ModuleIR& module, const std::string& outputPath,
                     std::vector<std::string> callerSavedAsm = {"rax", "rcx", "rdx", "rsi", "rdi", "r8", "r9", "r10", "r11"};
                     std::vector<std::string> toSaveAsm;
                     for (const auto& reg : callerSavedAsm) {
-                        for (const auto& [var, res] : alloc) { if (!res.isSpilled && res.reg == reg) { toSaveAsm.push_back(reg); break; } }
+                        // CIDER-BUG-166: index lookup instead of a scan of
+                        // every allocated value per asm block.
+                        if (usedRegs.count(reg)) toSaveAsm.push_back(reg);
                     }
 
                     if (toSaveAsm.size() % 2 != 0) addText("    sub rsp, 8");
@@ -2233,12 +2263,9 @@ bool CodeGenerator::generate(ModuleIR& module, const std::string& outputPath,
                     Abi resolvedCallAbi = instr.callAbi;
                     if (!instr.args.empty() &&
                         instr.args[0].kind == IRValue::LABEL) {
-                        for (const auto& calleeFn : module.getFunctions()) {
-                            if (calleeFn->getName() == instr.args[0].name &&
-                                calleeFn->getAbi() != Abi::Default) {
-                                resolvedCallAbi = calleeFn->getAbi();
-                                break;
-                            }
+                        auto fit = functionAbis.find(instr.args[0].name);
+                        if (fit != functionAbis.end()) {
+                            resolvedCallAbi = fit->second;
                         }
                     }
                     if (resolvedCallAbi == Abi::Default) {
@@ -2267,7 +2294,19 @@ bool CodeGenerator::generate(ModuleIR& module, const std::string& outputPath,
                     std::vector<std::string> callerSaved = {"rax", "rcx", "rdx", "rsi", "rdi", "r8", "r9", "r10", "r11"};
                     std::vector<std::string> toSave;
                     for (const auto& reg : callerSaved) {
-                        for (const auto& [var, res] : alloc) { if (!res.isSpilled && res.reg == reg) { if (instr.dest && instr.dest->name == var && reg == "rax") continue; toSave.push_back(reg); break; } }
+                        // CIDER-BUG-166: index lookup instead of a scan of
+                        // every allocated value per call site. The dest's own
+                        // incoming register is not saved when it is the only
+                        // value using it (the return value arrives there).
+                        if (!usedRegs.count(reg)) continue;
+                        if (reg == "rax" && instr.dest) {
+                            auto rv = regVars.find(reg);
+                            if (rv->second.size() == 1 &&
+                                rv->second.front() == instr.dest->name) {
+                                continue;
+                            }
+                        }
+                        toSave.push_back(reg);
                     }
                     std::string destReg;
                     if (instr.dest && alloc.count(instr.dest->name) && !alloc.at(instr.dest->name).isSpilled) {
@@ -2283,12 +2322,8 @@ bool CodeGenerator::generate(ModuleIR& module, const std::string& outputPath,
                         // definition uses, full width), so an MS call needs
                         // no caller-side spill. The dest's own reg is skipped
                         // (the return value arrives in it).
-                        for (const auto& [var, res] : alloc) {
-                            if (!res.isSpilled && res.reg.rfind("xmm", 0) == 0 && res.reg != destReg) {
-                                if (std::find(toSaveXmm.begin(), toSaveXmm.end(), res.reg) == toSaveXmm.end()) {
-                                    toSaveXmm.push_back(res.reg);
-                                }
-                            }
+                        for (const auto& reg : allocXmmOrder) {
+                            if (reg != destReg) toSaveXmm.push_back(reg);
                         }
                     }
 

@@ -128,6 +128,10 @@ add_test(NAME inliner_sites_smoke
          COMMAND bash ${CMAKE_SOURCE_DIR}/tests/unit/inliner_sites_smoke.sh $<TARGET_FILE:cider>)
 set_tests_properties(inliner_sites_smoke PROPERTIES SKIP_RETURN_CODE 77)
 
+add_test(NAME codegen_scale_smoke
+         COMMAND bash ${CMAKE_SOURCE_DIR}/tests/unit/codegen_scale_smoke.sh $<TARGET_FILE:cider>)
+set_tests_properties(codegen_scale_smoke PROPERTIES SKIP_RETURN_CODE 77 TIMEOUT 120)
+
 add_executable(parser_recovery_test tests/unit/parser_recovery_test.cpp src/parser.cpp src/lexer.cpp)
 target_include_directories(parser_recovery_test PRIVATE src)
 add_test(NAME parser_recovery_test COMMAND parser_recovery_test)

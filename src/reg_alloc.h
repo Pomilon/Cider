@@ -178,7 +178,15 @@ public:
         bool changed = true;
         while (changed) {
             changed = false;
-            for (int b = 0; b < numBlocks; b++) {
+            // CIDER-BUG-166: liveness flows backward, so process blocks in
+            // reverse order — a sweep then reads each block's already-final
+            // successors. The old forward order needed one sweep per block
+            // on straight-line code (each sweep moved liveness back a single
+            // block: O(B^2) set merges); reverse order reaches the same least
+            // fixed point in one pass plus the confirming pass for acyclic
+            // CFGs. The fixed point, and therefore every register decision,
+            // is unchanged.
+            for (int b = numBlocks - 1; b >= 0; b--) {
                 std::set<std::string> newOut;
                 for (int s : successors[b]) {
                     newOut.insert(LIVE_IN[s].begin(), LIVE_IN[s].end());
