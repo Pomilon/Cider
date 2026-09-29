@@ -3740,8 +3740,26 @@ public:
         std::string structName = expr.getStructName();
         std::string ident = templateInstanceIdentity(structName, currentModule_);
         if (!ident.empty()) structName = ident;
-        auto sym = resolveScoped(structName);
-        if (!sym || sym->kind != SymbolKind::STRUCT) {
+        // CIDER-BUG-175: a qualified non-template spelling (`m.Holder{...}`)
+        // resolves through the same nominal machinery as the type-position
+        // spelling (CIDER-BUG-090): the qualifier selects the module, the
+        // member must be exported (CIDER-BUG-060), and the canonical
+        // identity matches every other use of the struct. canonicalize-
+        // Nominal reports a failed dotted resolution itself (unknown member,
+        // not exported, not a module), so no second generic error is added.
+        bool dotted = structName.find('.') != std::string::npos;
+        std::shared_ptr<Symbol> sym;
+        if (dotted && structName.find('<') == std::string::npos) {
+            TypeInfo canon = canonicalizeNominal({structName, 0}, expr.getLine());
+            if (canon.name == structName) {
+                lastExprType_ = {"error", 0};
+                return;
+            }
+            sym = resolveScoped(canon.name);
+        } else {
+            sym = resolveScoped(structName);
+        }
+        if (!sym || sym->kind != SymbolKind::STRUCT || sym->isTypeAlias) {
             error("Unknown struct type '" + expr.getStructName() + "'", expr.getLine());
             lastExprType_ = {"error", 0};
             return;

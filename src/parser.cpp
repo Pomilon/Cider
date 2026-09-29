@@ -746,12 +746,13 @@ std::unique_ptr<Expression> Parser::parseStructLiteralExpression(std::unique_ptr
     std::string structName;
     if (auto id = dynamic_cast<IdentifierExpr*>(object.get())) {
         structName = id->getName();
-    } else if (auto mem = dynamic_cast<MemberAccessExpr*>(object.get());
-               mem && mem->getMember().find('<') != std::string::npos) {
+    } else if (auto mem = dynamic_cast<MemberAccessExpr*>(object.get())) {
         // CIDER-BUG-095: a module-qualified struct-template literal
-        // (`m.Box<int>{...}`). The dotted spelling is flattened to the same
-        // form a type annotation uses, so the collector's qualified-template
-        // resolution and the checker/IR rewrite agree on one instantiation.
+        // (`m.Box<int>{...}`). CIDER-BUG-175: a qualified non-template
+        // literal (`m.Holder{...}`) flattens the same way. The dotted
+        // spelling reaches the collector/checker/IR as one name, exactly
+        // like the equivalent type-position spelling, so a qualified
+        // literal resolves and materialises like the from-import form.
         structName = flattenDottedAccess(mem);
         if (structName.empty()) {
             error("Struct literal must follow a struct name (identifier).");
