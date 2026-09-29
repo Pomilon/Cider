@@ -557,11 +557,20 @@ public:
     // CIDER-BUG-045: fixed-size array values are by-value aggregates too —
     // they return through the same hidden-sret convention (the caller slot
     // outlives the frame). Slices/interfaces/fn values are not.
+    // CIDER-BUG-174: an ARRAY of fn values retains the element's
+    // isFunctionPointer flag (TypeInfo::fromAST copies the element signature
+    // onto the array wrapper so indexing recovers it), so the scalar-fn
+    // rejection must exclude arrays. Without `!t.isArray` such an array was
+    // a "scalar fn" here: callers passed its address but the callee stored
+    // that pointer as the first element instead of memcpying the array.
     bool isByValueAggregate(const TypeInfo& t, const std::string& defModule = "") {
-        if (t.pointerLevel > 0 || t.isSlice || t.isInterface || t.isFunctionPointer) return false;
+        if (t.pointerLevel > 0 || t.isSlice || t.isInterface ||
+            (t.isFunctionPointer && !t.isArray)) {
+            return false;
+        }
         TypeInfo resolved = resolveTypeAlias(t, defModule);
         if (resolved.pointerLevel > 0 || resolved.isSlice || resolved.isInterface ||
-            resolved.isFunctionPointer) {
+            (resolved.isFunctionPointer && !resolved.isArray)) {
             return false;
         }
         if (resolved.isArray) return resolved.arraySize > 0;

@@ -1385,9 +1385,16 @@ public:
     // unresolved spelling (e.g. a template instantiation name) never
     // reached an alias provider and keeps its previous accept path.
     bool isByValueAggregateAtCall(const TypeInfo& t) {
-        if (t.pointerLevel > 0 || t.isFunctionPointer) return false;
+        // CIDER-BUG-174: mirror ir_gen::isByValueAggregate — an array of fn
+        // values carries the element's isFunctionPointer flag, so only a
+        // scalar fn value is excluded here; the array falls through to the
+        // fixed-size-array rule below (indirect calls cannot pass it,
+        // exactly like any other array).
+        if (t.pointerLevel > 0 || (t.isFunctionPointer && !t.isArray)) return false;
         TypeInfo resolved = resolveType(t);
-        if (resolved.pointerLevel > 0 || resolved.isFunctionPointer) return false;
+        if (resolved.pointerLevel > 0 || (resolved.isFunctionPointer && !resolved.isArray)) {
+            return false;
+        }
         // CIDER-BUG-045: fixed-size arrays are by-value aggregates (params
         // copy, returns use sret), which indirect calls do not pass.
         if (t.isArray) return t.arraySize > 0;

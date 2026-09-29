@@ -1,0 +1,10 @@
+// CIDER-BUG-174: an array of fn pointers carries the element's
+// isFunctionPointer flag, but it is still a fixed-size array and therefore a
+// by-value aggregate (CIDER-BUG-045) — an indirect call carrying one is
+// rejected exactly like one carrying [int; 2], instead of silently
+// miscompiling the callee's scalar-store materialisation.
+func main() -> int {
+  var f: fn([fn(int) -> int; 2]) -> int;
+  var t: [fn(int) -> int; 2];
+  return f(t);
+}
