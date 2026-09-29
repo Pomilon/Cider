@@ -36,11 +36,22 @@ namespace cider {
 // names, not the raw address registers: a direct `load %base` must be
 // blocked by an in-loop `store (add %base, off)`. Raw addresses are resolved
 // through ADD/MOV/PHI chains with collectAllocaBases once the def map exists.
+//
+// CIDER-BUG-143: resolution runs through defMap, which keeps only the first
+// definition of a register. A multi-defined store address (the inliner
+// writes one `MOV dest, ret` per cloned return) can therefore carry several
+// pointers and a base alloca reachable solely through a later def would be
+// missed. Such addresses take the conservative fallback: every alloca is
+// treated as written, mirroring escapedUnknown for clobbers.
 struct LicmCaches {
     std::map<std::string, const IRInstruction*> defMap;
     std::set<std::string> multiDef;
     // CIDER-BUG-091: base allocas written by an in-loop STORE/MEMCPY.
     std::set<std::string> loopStores;
+    // CIDER-BUG-143: an in-loop STORE/MEMCPY address register is
+    // multi-defined, so loopStores cannot name every alloca it may write.
+    // Conservative fallback: every alloca is treated as written.
+    bool loopStoresUnknown = false;
     // CIDER-BUG-061: a volatile store in the loop is an observable write
     // that may alias any escaped object (the compiler has no alias oracle),
     // so no load may be hoisted across it.
@@ -134,6 +145,14 @@ static LicmCaches buildLicmCaches(const FunctionIR& func,
     // record only the derived register, leaving a direct load of the base
     // alloca unblocked).
     for (const auto& reg : loopStoreRegs) {
+        // CIDER-BUG-143: only single-defined addresses resolve precisely.
+        // defMap holds just the first def of a multi-defined register, so a
+        // base reachable solely through a later def would be missing from
+        // loopStores; fall back to treating every alloca as written.
+        if (c.multiDef.count(reg)) {
+            c.loopStoresUnknown = true;
+            continue;
+        }
         std::set<std::string> bases, visiting;
         collectAllocaBases(reg, c, bases, visiting);
         c.loopStores.insert(bases.begin(), bases.end());
@@ -171,7 +190,9 @@ static bool isLoadInvariantCached(const IRInstruction& instr,
     auto it = c.defMap.find(reg);
     if (it == c.defMap.end()) return false;
     if (it->second->op != IROp::ALLOCA) return false;  // non-alloca: conservative
-    if (c.loopStores.count(reg)) return false;
+    // CIDER-BUG-143: a multi-defined store address may write any alloca,
+    // so no alloca load is provably unwritten.
+    if (c.loopStoresUnknown || c.loopStores.count(reg)) return false;
     // CIDER-BUG-086: a clobber in the loop can only write an alloca whose
     // address escaped the function; non-escaping slots are callee-unreachable.
     if (c.loopHasClobber && (c.escapedUnknown || c.escapedAllocas.count(reg))) return false;
