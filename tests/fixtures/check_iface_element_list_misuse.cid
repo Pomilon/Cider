@@ -1,0 +1,39 @@
+// CIDER-BUG-135: interface-typed list elements accept concrete implementors
+// through the normal interface conversion, but the conversion's rejections
+// must stay exactly the non-list ones (same messages), at the declaration
+// and the reassignment site. A class missing a required method, an integer,
+// a pointer-to-pointer and a different interface are all rejected.
+interface Shape {
+  func area() -> int;
+}
+
+interface Named {
+  func name() -> int;
+}
+
+class Bad {
+  var x: int;
+}
+
+class Sq {
+  var side: int;
+  func area() -> int { return this.side; }
+}
+
+func main() -> int {
+  var b: Bad;
+  var s: Sq;
+  var n: int = 5;
+  var i: Shape = s;
+  var pp: **Sq;
+  var arr: [Shape; 2] = [s, b];
+  var arr2: [Shape; 2] = [n, s];
+  var arr3: [Named; 2] = [i, i];
+  var arr4: [Shape; 2] = [pp, s];
+  var dst: [Shape; 2];
+  dst = [b, s];
+  dst = [n, n];
+  var dst2: [Named; 2];
+  dst2 = [i, i];
+  return 0;
+}

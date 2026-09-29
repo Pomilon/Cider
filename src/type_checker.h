@@ -1611,9 +1611,22 @@ public:
             return false;
         }
         TypeInfo elemDecl = declaredType.elementType();
+        // CIDER-BUG-135: an interface-typed element is the same 16-byte fat
+        // pointer as a non-list interface target, so a concrete implementor
+        // element must take the normal interface conversion instead of the
+        // exact compatibility test. Recover the flag on the scalar element
+        // (a spelling stripped from the array can reach here unflagged),
+        // mirroring the declaration-time resolution.
+        resolveInterfaceFlag(elemDecl);
         for (auto& e : elems) {
             e->accept(*this);
-            if (!areTypesCompatible(elemDecl, lastExprType_)) {
+            if (elemDecl.isInterface) {
+                // CIDER-BUG-135: the shared rule reports the same clear
+                // errors as `var i: Shape = <value>` (a non-implementor
+                // names the missing method; a different interface is
+                // rejected), and stops the remaining element checks.
+                if (!checkInterfaceValue(elemDecl, lastExprType_, line)) return false;
+            } else if (!areTypesCompatible(elemDecl, lastExprType_)) {
                 error("Array element type mismatch in " + where + ": expected " +
                           elemDecl.toString() + ", got " + lastExprType_.toString(), line);
                 return false;
@@ -1906,19 +1919,22 @@ public:
     // interface's method order, so a different interface cannot be
     // re-labelled statically). Every interface method must be implemented
     // with a matching signature; anything else is rejected.
-    void checkInterfaceValue(const TypeInfo& ifaceType, const TypeInfo& valueType, int line) {
+    // CIDER-BUG-135: returns whether the conversion is accepted (false
+    // after reporting), so the list-element check can stop like every other
+    // site; callers that only need the diagnostic may ignore it.
+    bool checkInterfaceValue(const TypeInfo& ifaceType, const TypeInfo& valueType, int line) {
         auto ifaceSym = resolveInterfaceSymbol(ifaceType);
-        if (!ifaceSym) return;
+        if (!ifaceSym) return true;
         auto iface = std::static_pointer_cast<InterfaceSymbol>(ifaceSym);
         if (valueType.isInterface) {
             // CIDER-BUG-078: compare the resolved spellings, so an alias and
             // its direct spelling are the same interface (a fat-pointer copy:
             // the stored vtable follows the target interface's method order,
             // so a different interface cannot be re-labelled statically).
-            if (resolveType(ifaceType).name == resolveType(valueType).name) return;
+            if (resolveType(ifaceType).name == resolveType(valueType).name) return true;
             error("Cannot assign interface '" + valueType.name + "' to interface '" +
                       ifaceType.name + "'", line);
-            return;
+            return false;
         }
         TypeInfo concreteType = valueType;
         if (concreteType.pointerLevel > 0) concreteType.pointerLevel--;
@@ -1931,7 +1947,7 @@ public:
         if (concreteType.pointerLevel > 0 || concreteType.isArray) {
             error("Cannot assign " + valueType.toString() + " to interface '" +
                       ifaceType.name + "': expected a struct/class value or pointer", line);
-            return;
+            return false;
         }
         // CIDER-BUG-078: an alias spelling of a struct/class (`type T = Sq`)
         // resolves to the definition before the StructSymbol cast, exactly
@@ -1943,9 +1959,10 @@ public:
         if (!concreteSym || concreteSym->isTypeAlias ||
             (concreteSym->kind != SymbolKind::STRUCT && concreteSym->kind != SymbolKind::CLASS)) {
             error("Cannot assign non-struct/class type to interface '" + ifaceType.name + "'", line);
-            return;
+            return false;
         }
         auto ss = std::static_pointer_cast<StructSymbol>(concreteSym);
+        bool ok = true;
         for (auto& im : iface->methods) {
             bool found = false;
             for (auto& sm : ss->methods) {
@@ -1966,8 +1983,10 @@ public:
             if (!found) {
                 error("Type '" + concreteType.name + "' does not implement interface '" +
                           ifaceType.name + "': missing method '" + im.name + "'", line);
+                ok = false;
             }
         }
+        return ok;
     }
 
     void visit(VarDeclStmt& stmt) override {

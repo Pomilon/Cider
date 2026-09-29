@@ -1,0 +1,4 @@
+Type 'Bad' does not implement interface 'Shape': missing method 'area'
+Cannot assign non-struct/class type to interface 'Shape'
+Cannot assign interface 'Shape' to interface 'Named'
+Cannot assign **Sq to interface 'Shape': expected a struct/class value or pointer

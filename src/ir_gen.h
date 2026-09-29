@@ -3040,6 +3040,11 @@ public:
                         // CIDER-BUG-052: an element alias resolves to its
                         // real shape (array elements need the MEMCPY below).
                         elemType = resolveTypeAlias(elemType);
+                        // CIDER-BUG-135: an interface-typed element is the
+                        // 16-byte fat pointer, exactly like a non-list
+                        // interface target; recover the flag for a spelling
+                        // stripped from the array's bare element name.
+                        elemType = resolveInterfaceNominal(elemType);
                         int elemSize = getTypeSize(elemType);
                         // CIDER-BUG-052: an array-typed element is
                         // address-like; copy its bytes into the slot instead
@@ -3054,6 +3059,19 @@ public:
                         bool elemIsAggregate = isListAggregateElement(elemType);
                         for (size_t ei = 0; ei < elems.size(); ei++) {
                             elems[ei]->accept(*this);
+                            // CIDER-BUG-135: an interface-typed element
+                            // accepts a concrete implementor with the normal
+                            // interface conversion (object address + vtable),
+                            // exactly like `var i: Shape = <value>`; an
+                            // interface-valued element keeps the existing
+                            // fat-pointer copy below.
+                            if (elemType.isInterface &&
+                                !resolveInterfaceNominal(lastExprType_).isInterface) {
+                                emitInterfaceStoreAt(
+                                    elemType, listElementAddress(addr, ei, elemSize),
+                                    lastValue_, lastExprType_, varType.isVolatile);
+                                continue;
+                            }
                             // CID-003: elements store at the declared width
                             // (an f32 literal in an f64 element must not
                             // write 4 bytes; an int element converts).
@@ -3415,6 +3433,20 @@ public:
             return convertIntToFloat(val, targetIR);
         }
         return truncateIntToType(val, target);
+    }
+
+    // CIDER-BUG-135: address of element `index` in a list-literal target
+    // buffer. Element 0 reuses the base — every caller passes a register or
+    // an already-materialised global label, the shapes the interface store
+    // accepts — and the rest form base + index*elemSize, exactly the offset
+    // the element-store path computes for itself.
+    IRValue listElementAddress(IRValue base, size_t index, int elemSize) {
+        if (index == 0) return base;
+        IRValue addr = IRValue::Register(nextTemp(), IRType::PTR);
+        currentBlock_->addInstruction(
+            {IROp::ADD, addr,
+             {base, IRValue::Constant((int64_t)(index * (size_t)elemSize), IRType::I32)}});
+        return addr;
     }
 
     // CIDER-BUG-104: store one element of a list-literal buffer. Scalar
@@ -4854,6 +4886,11 @@ public:
                 if (assignArray.isArray && assignArray.pointerLevel == 0 &&
                     assignArray.arraySize > 0) {
                     TypeInfo elemType = resolveTypeAlias(assignArray.elementType());
+                    // CIDER-BUG-135: an interface-typed element is the
+                    // 16-byte fat pointer, exactly like the declaration
+                    // path; recover the flag for an unflagged element
+                    // spelling.
+                    elemType = resolveInterfaceNominal(elemType);
                     int elemSize = getTypeSize(elemType);
                     bool elemIsAggregate = isListAggregateElement(elemType);
                     IRValue storeBase = addr;
@@ -4865,6 +4902,19 @@ public:
                     auto& elems = list->getElements();
                     for (size_t ei = 0; ei < elems.size(); ei++) {
                         elems[ei]->accept(*this);
+                        // CIDER-BUG-135: a concrete implementor element of
+                        // an interface-typed array converts through the
+                        // shared interface store (object address + vtable),
+                        // exactly like the declaration path and a non-list
+                        // interface assignment; an interface-valued element
+                        // keeps the existing fat-pointer copy.
+                        if (elemType.isInterface &&
+                            !resolveInterfaceNominal(lastExprType_).isInterface) {
+                            emitInterfaceStoreAt(
+                                elemType, listElementAddress(storeBase, ei, elemSize),
+                                lastValue_, lastExprType_, targetIsVolatile);
+                            continue;
+                        }
                         // CID-003: elements store at the declared width,
                         // exactly like the declaration path.
                         IRValue eval = convertValueToType(lastValue_, elemType);
