@@ -1,0 +1,17 @@
+// CIDER-BUG-138 positive fixture module: private in-module targets (bare
+// and self-qualified) and exported alias chains are all legal.
+struct Internal {
+  var v: int;
+}
+
+type PrivateAlias = Internal;
+
+export type Chained = PrivateAlias;
+
+// Self-qualified private target: visible inside the owner module.
+export type SelfQualified = alias_vis_lib.Internal;
+
+export struct Pub {
+  var w: int;
+  var h: int;
+}

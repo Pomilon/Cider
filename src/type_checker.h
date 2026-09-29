@@ -4868,6 +4868,18 @@ public:
         noteTypeUse(stmt.getTargetType());
         // CIDER-BUG-111: same declaration-site resolution as struct fields.
         checkDeclaredTemplateType(stmt.getTargetType(), stmt.getLine());
+        // CIDER-BUG-138: a non-template target is resolved at its own line
+        // too, so a module-qualified target naming a non-exported symbol
+        // gets the standard visibility diagnostic here (CIDER-BUG-060/102)
+        // instead of surfacing later as the generic "is not a struct or
+        // class". Template-mentioning targets keep the CIDER-BUG-111 path
+        // above; bare targets resolve silently.
+        if (stmt.getTargetType()) {
+            TypeInfo target = TypeInfo::fromAST(stmt.getTargetType());
+            if (!mentionsTemplateType(target)) {
+                (void)canonicalizeNominal(target, stmt.getLine());
+            }
+        }
     }
 
     void visit(ClassDeclStmt& stmt) override {

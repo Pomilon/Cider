@@ -1,0 +1,12 @@
+// CIDER-BUG-138: the visibility check also applies when the target is
+// itself an alias (`HiddenAlias` exists in the library but is not
+// exported) and inside nested spellings (array element and function
+// pointer positions), so none of them slips through to a later generic
+// "is not a struct or class" failure.
+import alias_visibility_lib;
+
+export type BadAlias = alias_visibility_lib.HiddenAlias;
+export type BadArray = [alias_visibility_lib.Private; 2];
+export type BadFn = fn(alias_visibility_lib.Private) -> int;
+
+func main() -> int { return 0; }
