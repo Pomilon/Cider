@@ -1409,6 +1409,97 @@ int run() {
         }
         CHECK(threw);
     }
+
+    // CIDER-BUG-171: putchar's buffer is per-run state. A reused VM instance
+    // must not re-emit a previous run's bytes, no matter how that run ended:
+    // a normal RET, the exit builtin, falling off the entry block (which
+    // never reaches a flush and leaves bytes buffered), or a thrown VMError.
+    {
+        auto putcCall = [](int c) {
+            cider::IRInstruction in;
+            in.op = cider::IROp::CALL;
+            in.args = {cider::IRValue::Label("putchar"),
+                       cider::IRValue::Constant(c, cider::IRType::I32)};
+            return in;
+        };
+        // main() emits "A\n"; endKind 0 = RET, 1 = exit builtin, 2 = fall-off.
+        auto buildMain = [&](int endKind) {
+            auto fn = makeFn("main", cider::IRType::I32);
+            auto e = std::make_unique<cider::BasicBlock>("entry");
+            e->addInstruction(putcCall('A'));
+            e->addInstruction(putcCall('\n'));
+            if (endKind == 0) {
+                cider::IRInstruction ret;
+                ret.op = cider::IROp::RET;
+                ret.args = {cider::IRValue::Constant(0, cider::IRType::I32)};
+                e->addInstruction(ret);
+            } else if (endKind == 1) {
+                cider::IRInstruction ex;
+                ex.op = cider::IROp::CALL;
+                ex.args = {cider::IRValue::Label("exit"),
+                           cider::IRValue::Constant(9, cider::IRType::I32)};
+                e->addInstruction(ex);
+            }
+            fn->addBlock(std::move(e));
+            cider::ModuleIR mod;
+            mod.addFunction(std::move(fn));
+            return mod;
+        };
+        // RET ending: both runs report their own bytes only.
+        {
+            auto mod = buildMain(0);
+            cider::VM vm;
+            CHECK(vm.run(mod).stdoutText == "A\n");
+            auto r2 = vm.run(mod);
+            CHECK(r2.exitCode == 0);
+            CHECK(r2.stdoutText == "A\n");
+        }
+        // exit builtin ending: same independence.
+        {
+            auto mod = buildMain(1);
+            cider::VM vm;
+            CHECK(vm.run(mod).exitCode == 9);
+            auto r2 = vm.run(mod);
+            CHECK(r2.exitCode == 9);
+            CHECK(r2.stdoutText == "A\n");
+        }
+        // Fall-off ending buffers bytes without flushing; the next run must
+        // start clean (a RET run must not emit the fall-off run's bytes).
+        {
+            auto modOff = buildMain(2);
+            auto modRet = buildMain(0);
+            cider::VM vm;
+            CHECK(vm.run(modOff).stdoutText.empty());
+            auto r2 = vm.run(modRet);
+            CHECK(r2.exitCode == 0);
+            CHECK(r2.stdoutText == "A\n");
+        }
+        // A run that throws before any flush leaves bytes buffered; the next
+        // run must still start clean.
+        {
+            auto fn = makeFn("main", cider::IRType::I32);
+            auto e = std::make_unique<cider::BasicBlock>("entry");
+            e->addInstruction(putcCall('X'));
+            cider::IRInstruction boom;
+            boom.op = cider::IROp::CALL;
+            boom.args = {cider::IRValue::Label("_uncaught_exception")};
+            e->addInstruction(boom);
+            fn->addBlock(std::move(e));
+            cider::ModuleIR mod;
+            mod.addFunction(std::move(fn));
+            cider::VM vm;
+            bool threw = false;
+            try {
+                vm.run(mod);
+            } catch (const cider::VMError&) {
+                threw = true;
+            }
+            CHECK(threw);
+            auto r2 = vm.run(buildMain(0));
+            CHECK(r2.exitCode == 0);
+            CHECK(r2.stdoutText == "A\n");
+        }
+    }
     return 0;
 }
 

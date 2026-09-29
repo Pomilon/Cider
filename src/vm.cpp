@@ -94,6 +94,10 @@ VMResult VM::runBody(const ModuleIR& module, const std::string& runFunction) {
     module_ = &module;
     runFunction_ = runFunction;
     result_ = VMResult{};
+    // CIDER-BUG-171: putchar's buffer is per-run state. Clear it with the
+    // rest so a reused VM cannot re-emit a previous run's bytes — including
+    // after an exit that never flushed (fall-off) or a thrown VMError.
+    putcharBuf_.clear();
     regs_.clear();
     frames_.clear();
     jumpStates_.clear();
@@ -574,6 +578,7 @@ VMResult VM::runBody(const ModuleIR& module, const std::string& runFunction) {
                 // The entry function returned: its value is the exit code.
                 result_.exitCode = (int)retReg_.i;
                 result_.stdoutText += putcharBuf_;
+                putcharBuf_.clear();  // CIDER-BUG-171: bytes are delivered
             } else {
                 // Restore the caller's registers from the callee's snapshot
                 // (the callee frame holds the caller's registers), then
@@ -1238,6 +1243,7 @@ bool VM::tryBuiltinCall(const std::string& name, const std::vector<IRValue>& arg
         RegVal v = args.empty() ? RegVal{} : resolveValue(args[0]);
         result_.exitCode = (int)v.i;
         result_.stdoutText += putcharBuf_;
+        putcharBuf_.clear();  // CIDER-BUG-171: bytes are delivered
         // CIDER-BUG-159: abandoning the stack still retires the live frames,
         // like every other frame-death site (RET/longjmp/fall-off).
         retireAllFrames();
@@ -1675,6 +1681,7 @@ void VM::execAsm(const IRInstruction& instr) {
         // buffered. Flush first, then drop the stack, matching the
         // builtin's order.
         result_.stdoutText += putcharBuf_;
+        putcharBuf_.clear();  // CIDER-BUG-171: bytes are delivered
         // CIDER-BUG-159: the asm exit syscall drops the stack too; retire
         // the live frames, same as the builtin exit.
         retireAllFrames();

@@ -492,6 +492,33 @@ int run() {
         CHECK(vm.heapBytes() == vm.freeListBytes());
     }
 
+    // CIDER-BUG-171: the asm exit path's flush must also empty the buffer,
+    // so a reused VM instance does not re-emit the first run's bytes.
+    {
+        auto fn = std::make_unique<cider::FunctionIR>("main", cider::IRType::VOID);
+        auto b = std::make_unique<cider::BasicBlock>("entry");
+        auto putc = [](int c) {
+            cider::IRInstruction call;
+            call.op = cider::IROp::CALL;
+            call.args = {cider::IRValue::Label("putchar"),
+                         cider::IRValue::Constant(c, cider::IRType::I32)};
+            return call;
+        };
+        b->addInstruction(putc('C'));
+        b->addInstruction(putc('\n'));
+        b->addInstruction(asmInstr("mov rax, 60\nmov rdi, 5\nsyscall"));
+        fn->addBlock(std::move(b));
+        cider::ModuleIR mod;
+        mod.addFunction(std::move(fn));
+        cider::VM vm;
+        auto r1 = vm.run(mod);
+        CHECK(r1.stdoutText == "C\n");
+        CHECK(r1.exitCode == 5);
+        auto r2 = vm.run(mod);
+        CHECK(r2.stdoutText == "C\n");
+        CHECK(r2.exitCode == 5);
+    }
+
     // A valid mmap keeps working: allocate 64 bytes, read the file into the
     // fresh region, and report the byte count. The non-zero exit path above
     // shows the validation did not reject usable lengths.
