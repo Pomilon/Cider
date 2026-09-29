@@ -1,0 +1,46 @@
+// CIDER-BUG-118: a *void launder cannot feed the closure spelling func(...).
+// An unchecked cast keeps the source's runtime shape, and the *void family is
+// the untyped carrier: the representation inference tracks what was stored
+// through it, so a source proven (or unproven) to be a raw code pointer is
+// rejected exactly like the direct `add1 as func(...)` of CIDER-BUG-093
+// (VM `bad function id`, native segfault). The legitimate direction — a
+// closure stored in a *void and cast back where the inference can see it — is
+// pinned in tests/programs/fn_cast_closure_void_repr.
+
+type Cb = func(int) -> int;
+
+func add1(x: int) -> int { return x + 1; }
+
+var gfn: *void = add1;
+
+func apply(v: *void) -> func(int) -> int {
+  return v as func(int) -> int;
+}
+
+func main() -> int {
+  // Local *void initialized with a named function.
+  var v1: *void = add1;
+  var f1: func(int) -> int = v1 as func(int) -> int;
+
+  // Named function assigned into the *void later.
+  var v2: *void = nilPtr;
+  v2 = add1;
+  var f2: func(int) -> int = v2 as func(int) -> int;
+
+  // A global *void launders the same way.
+  var f3: func(int) -> int = gfn as func(int) -> int;
+
+  // A *void parameter: the call site records the argument's raw pointer.
+  var f4: func(int) -> int = apply(add1);
+
+  // Mixed provenance: one *void received both shapes.
+  var v5: *void = func(x: int) -> int { return x * 2; };
+  v5 = add1;
+  var f5: func(int) -> int = v5 as func(int) -> int;
+
+  // Unproven *void: never received a fn value at all.
+  var v6: *void = nilPtr;
+  var f6: func(int) -> int = v6 as func(int) -> int;
+
+  return f1(1) + f2(1) + f3(1) + f4(1) + f5(1) + f6(1);
+}

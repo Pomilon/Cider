@@ -538,7 +538,11 @@ public:
     // silently miscompiling. After the walk, resolved closure parameters
     // are marked on their TypeAST; TypeInfo::fromAST (and therefore
     // ir_gen) then emits the closure call path for them.
-    enum class FnRepr : uint8_t { Unknown = 0, Plain = 1, Closure = 2 };
+    // CIDER-BUG-118: Mixed is a *void provenance slot that received both
+    // shapes over the program. It is reported only where the closure shape is
+    // required; a fn(...) storage never resolves to Mixed (a real storage
+    // conflict is an error).
+    enum class FnRepr : uint8_t { Unknown = 0, Plain = 1, Closure = 2, Mixed = 3 };
 
     static std::string fnParamSlotKey(const std::shared_ptr<Symbol>& fnSym, size_t index) {
         return "p:" + std::to_string(fnSym->id) + ":" + std::to_string(index);
@@ -554,16 +558,89 @@ public:
         fnSlotLabel_.push_back(label);
         fnSlotLine_.push_back(line);
         fnSlotKey_.push_back(key);
+        fnSlotVoid_.push_back(0);
+        fnSlotRigid_.push_back(0);
+        fnSlotMustProve_.push_back(0);
         return idx;
     }
 
     int fnSlotForSymbol(const std::shared_ptr<Symbol>& sym, const std::string& label, int line) {
-        return fnSlot("v:" + std::to_string(sym->id), label, line);
+        int idx = fnSlot("v:" + std::to_string(sym->id), label, line);
+        // A fn-typed declaration fixes its storage representation for the
+        // whole program; mixing shapes there is a conflict, never the
+        // recoverable *void ambiguity (CIDER-BUG-118).
+        fnSlotRigid_[fnFind(idx)] = 1;
+        return idx;
     }
 
     int fnParamSlot(const std::shared_ptr<FunctionSymbol>& fnSym, size_t index, int line) {
         return fnSlot(fnParamSlotKey(fnSym, index),
                       "parameter " + std::to_string(index + 1) + " of '" + fnSym->name + "'", line);
+    }
+
+    // CIDER-BUG-118: `*void` storage carries fn values without fixing a
+    // representation, so its slot is provenance-only: mixing shapes in it is
+    // recorded as Mixed (never a storage conflict) and the post-pass never
+    // annotates its TypeAST.
+    int fnVoidSlot(const std::string& key, const std::string& label, int line) {
+        int idx = fnSlot(key, label, line);
+        fnSlotVoid_[idx] = 1;
+        return idx;
+    }
+
+    int fnSlotForVoidSymbol(const std::shared_ptr<Symbol>& sym, const std::string& label, int line) {
+        return fnVoidSlot("v:" + std::to_string(sym->id), label, line);
+    }
+
+    int fnVoidParamSlot(const std::shared_ptr<FunctionSymbol>& fnSym, size_t index, int line) {
+        return fnVoidSlot(fnParamSlotKey(fnSym, index),
+                          "parameter " + std::to_string(index + 1) + " of '" + fnSym->name + "'", line);
+    }
+
+    // The untyped carrier whose runtime shape the inference must prove: a
+    // `*void`/`**void` spelling or an alias chain resolving to one. Only this
+    // family keeps unchecked cast semantics into the closure spelling
+    // (CIDER-BUG-118); fn(...) spellings are handled by the signature rules.
+    bool isVoidCarrier(const TypeInfo& t) {
+        if (t.isFunctionPointer || t.isArray) return false;
+        TypeInfo r = t.pointerLevel > 0 ? t : resolveType(t);
+        if (r.isFunctionPointer || r.isArray) return false;
+        return r.name == "void" && r.pointerLevel >= 1;
+    }
+
+    // A nilPtr source (through any grouping) is representation-neutral:
+    // either shape fits, exactly like the nil initializer of a func(...)
+    // declaration.
+    static bool isNilSource(Expression* expr) {
+        while (auto* g = dynamic_cast<GroupingExpr*>(expr)) expr = g->getExpression();
+        return dynamic_cast<NilPtrExpr*>(expr) != nullptr;
+    }
+
+    // CIDER-BUG-118: does the cast source's value come from a tracked *void
+    // storage location (a variable or parameter), possibly through nested
+    // unchecked casts? Those are the shapes the inference can judge. Fields,
+    // array elements, pointees and call results keep their pre-existing
+    // unchecked semantics, exactly like fn(...) storage without a
+    // representation refinement (CIDER-BUG-068).
+    bool fnCastSourceTracked(Expression* expr, TypeInfo type) {
+        if (auto* g = dynamic_cast<GroupingExpr*>(expr)) {
+            return fnCastSourceTracked(g->getExpression(), type);
+        }
+        if (auto* c = dynamic_cast<CastExpr*>(expr)) {
+            auto it = castSourceTypes_.find(c);
+            if (it == castSourceTypes_.end()) return false;
+            return fnCastSourceTracked(c->getExpression(), it->second);
+        }
+        if (auto* t3 = dynamic_cast<TernaryExpr*>(expr)) {
+            return fnCastSourceTracked(t3->getThenExpr(), type) ||
+                   fnCastSourceTracked(t3->getElseExpr(), type);
+        }
+        if (!isVoidCarrier(type)) return false;
+        if (auto* id = dynamic_cast<IdentifierExpr*>(expr)) {
+            auto sym = resolveScoped(id->getName());
+            return sym && sym->kind == SymbolKind::VARIABLE;
+        }
+        return false;
     }
 
     int fnFind(int x) {
@@ -591,6 +668,16 @@ public:
             return;
         }
         if (fnSlotPolarity_[r] != repr) {
+            // CIDER-BUG-118: *void provenance has no fixed representation,
+            // so both shapes may flow through it over the program. Record
+            // the ambiguity for a later closure cast instead of reporting a
+            // storage conflict no program site is responsible for. A
+            // component with a fn(...) storage (rigid) keeps the
+            // CIDER-BUG-068 conflict.
+            if (!fnSlotRigid_[r]) {
+                fnSlotPolarity_[r] = FnRepr::Mixed;
+                return;
+            }
             fnConflictError(label.empty() ? fnSlotLabel_[r] : label, line);
         }
     }
@@ -602,15 +689,24 @@ public:
         FnRepr pa = fnSlotPolarity_[a];
         FnRepr pb = fnSlotPolarity_[b];
         if (pa != FnRepr::Unknown && pb != FnRepr::Unknown && pa != pb) {
-            std::string la = fnSlotLabel_[a].empty() ? std::string("one fn(...) storage") : fnSlotLabel_[a];
-            std::string lb = fnSlotLabel_[b].empty() ? std::string("another fn(...) storage") : fnSlotLabel_[b];
-            error("Closure representation conflict between " + la + " and " + lb +
-                      ": a closure object and a plain fn(...) value are both used with them, but one "
-                      "storage holds one representation (CIDER-BUG-068)",
-                  line);
-            return;
+            // CIDER-BUG-118: merging the two shapes through *void provenance
+            // is not a storage conflict; resolve the component to Mixed and
+            // leave the verdict to the closure-cast site. A fn(...) storage
+            // (rigid) in either component keeps the CIDER-BUG-068 conflict.
+            if (fnSlotRigid_[a] || fnSlotRigid_[b]) {
+                std::string la = fnSlotLabel_[a].empty() ? std::string("one fn(...) storage") : fnSlotLabel_[a];
+                std::string lb = fnSlotLabel_[b].empty() ? std::string("another fn(...) storage") : fnSlotLabel_[b];
+                error("Closure representation conflict between " + la + " and " + lb +
+                          ": a closure object and a plain fn(...) value are both used with them, but one "
+                          "storage holds one representation (CIDER-BUG-068)",
+                      line);
+                return;
+            }
+            pa = FnRepr::Mixed;
+            fnSlotPolarity_[a] = FnRepr::Mixed;
         }
         fnSlotParent_[b] = a;
+        fnSlotRigid_[a] = fnSlotRigid_[a] || fnSlotRigid_[b];
         if (pa == FnRepr::Unknown) {
             fnSlotPolarity_[a] = pb;
             if (pb != FnRepr::Unknown) fnSlotLine_[a] = line;
@@ -621,26 +717,37 @@ public:
     // Returns true when the expression's representation was tied to the slot
     // (a direct constraint or a slot edge); false for representation-neutral
     // shapes (nilPtr) and shapes whose unchecked semantics are unchanged.
-    bool fnRecordExpr(int slot, Expression* expr, TypeInfo type, int line) {
+    // CIDER-BUG-118: `*void` sources carry a fn value without a spelling, so
+    // they are followed through the same edges as fn(...) values. When
+    // `viaVoid` is given it is set as soon as the recorded shape passed
+    // through a *void carrier, so a fn(...) declaration can annotate its
+    // TypeAST for ir_gen (whose own retyping cannot see through *void).
+    bool fnRecordExpr(int slot, Expression* expr, TypeInfo type, int line,
+                      bool* viaVoid = nullptr) {
         TypeInfo t = resolveFunctionPointerAlias(type);
-        if (!t.isFunctionPointer || t.isArray) return false;
-        if (t.isClosure) {
+        bool fnTyped = t.isFunctionPointer && !t.isArray;
+        bool voidCarrier = isVoidCarrier(t);
+        if (!fnTyped && !voidCarrier) return false;
+        if (voidCarrier && viaVoid) *viaVoid = true;
+        if (fnTyped && t.isClosure) {
             fnConstrain(slot, FnRepr::Closure, line, fnSlotLabel_[fnFind(slot)]);
             return true;
         }
         if (!expr || dynamic_cast<NilPtrExpr*>(expr)) return false;  // nil: either shape
         if (auto* g = dynamic_cast<GroupingExpr*>(expr)) {
-            return fnRecordExpr(slot, g->getExpression(), type, line);
+            return fnRecordExpr(slot, g->getExpression(), type, line, viaVoid);
         }
         if (auto* t3 = dynamic_cast<TernaryExpr*>(expr)) {
             // Either branch can supply the runtime value.
-            bool thenRec = fnRecordExpr(slot, t3->getThenExpr(), type, line);
-            bool elseRec = fnRecordExpr(slot, t3->getElseExpr(), type, line);
+            bool thenRec = fnRecordExpr(slot, t3->getThenExpr(), type, line, viaVoid);
+            bool elseRec = fnRecordExpr(slot, t3->getElseExpr(), type, line, viaVoid);
             return thenRec || elseRec;
         }
         if (auto* id = dynamic_cast<IdentifierExpr*>(expr)) {
             auto sym = resolveScoped(id->getName());
             if (sym && sym->kind == SymbolKind::FUNCTION) {
+                // A named function is a raw code pointer even when it is
+                // laundered through *void storage (CIDER-BUG-118).
                 fnConstrain(slot, FnRepr::Plain, line, fnSlotLabel_[fnFind(slot)]);
                 return true;
             }
@@ -657,32 +764,40 @@ public:
                     fnUnion(slot, fnSlotForSymbol(sym, "variable '" + sym->name + "'", line), line);
                     return true;
                 }
+                if (isVoidCarrier(sym->type)) {
+                    // Forward the *void storage's provenance (CIDER-BUG-118).
+                    fnUnion(slot, fnSlotForVoidSymbol(sym, "variable '" + sym->name + "'", line), line);
+                    return true;
+                }
             }
             return false;
         }
-        if (dynamic_cast<CallExpr*>(expr)) {
+        if (fnTyped && dynamic_cast<CallExpr*>(expr)) {
             // Only fn(...)-returning calls reach here; `func(...)`-returning
             // calls are closure-typed and handled above. Returning a closure
             // where `fn(...)` is declared is rejected, so a plain fn result
-            // is definitely a raw pointer.
+            // is definitely a raw pointer. A *void-returning call stays
+            // unconstrained: the value could be either shape.
             fnConstrain(slot, FnRepr::Plain, line, fnSlotLabel_[fnFind(slot)]);
             return true;
         }
-        if (dynamic_cast<MemberAccessExpr*>(expr) || dynamic_cast<IndexExpr*>(expr)) {
+        if (fnTyped && (dynamic_cast<MemberAccessExpr*>(expr) || dynamic_cast<IndexExpr*>(expr))) {
             // A fn-typed struct/class field or array element can only ever
             // hold raw fn values: storing a closure there is rejected (the
             // field/array storage has no representation refinement), so a
-            // module-qualified `m.fn` and `arr[i]` are definitely plain.
+            // module-qualified `m.fn` and `arr[i]` are definitely plain. A
+            // *void-typed field/element keeps its unchecked semantics.
             fnConstrain(slot, FnRepr::Plain, line, fnSlotLabel_[fnFind(slot)]);
             return true;
         }
         if (auto* c = dynamic_cast<CastExpr*>(expr)) {
             // An unchecked cast reinterprets the pointer but keeps its
             // runtime shape: follow the source expression's representation
-            // (`inc as fn(...)` is plain, `closure as fn(...)` is a closure).
+            // (`inc as fn(...)` is plain, `closure as fn(...)` is a closure,
+            // `*void as ...` follows the *void provenance).
             auto it = castSourceTypes_.find(c);
             if (it == castSourceTypes_.end()) return false;
-            return fnRecordExpr(slot, c->getExpression(), it->second, line);
+            return fnRecordExpr(slot, c->getExpression(), it->second, line, viaVoid);
         }
         // Any other shape keeps its pre-existing unchecked semantics; leave
         // the slot unconstrained (plain default).
@@ -702,6 +817,11 @@ public:
         for (size_t i = 1; i < fnSlotParent_.size(); ++i) (void)fnFind((int)i);
         for (size_t i = 1; i < fnSlotParent_.size(); ++i) {
             if (fnSlotPolarity_[fnFind((int)i)] != FnRepr::Closure) continue;
+            // CIDER-BUG-118: a *void provenance slot has no declaration/ABI
+            // to refine (the *void TypeAST stays untyped); only real
+            // fn(...) storage is annotated. A fn(...) member of the same
+            // component is still annotated below (its own flag is clear).
+            if (fnSlotVoid_[i]) continue;
             const std::string& key = fnSlotKey_[i];
             // CIDER-BUG-093: cast-check slots are not storage; they only
             // carry the source shape. A closure-resolved one is the allowed
@@ -750,22 +870,54 @@ public:
         // the function's first bytes as the closure object and pass the
         // pointer as the hidden object argument. Report it instead of
         // emitting the misread call. A source that resolves Closure (or
-        // stays Unknown: nilPtr and other unchecked shapes) is untouched.
+        // stays Unknown: nilPtr and other unchecked fn(...) shapes) is
+        // untouched.
+        // CIDER-BUG-118: a cast whose source flows through *void must prove
+        // the closure shape. A proven closure object is the allowed
+        // reinterpretation; a source that resolves to a plain raw pointer is
+        // reported by the rule above, and an unproven *void (opaque pointer,
+        // extern storage, uninferable parameter) is reported here too — the
+        // pre-118 leniency for unproven sources was exactly the launder.
         std::set<int> reportedCastRoots;
         for (size_t i = 1; i < fnSlotParent_.size(); ++i) {
             const std::string& key = fnSlotKey_[i];
             if (key.empty() || key[0] != 'c') continue;
             int root = fnFind((int)i);
-            if (fnSlotPolarity_[root] != FnRepr::Plain) continue;
+            FnRepr pol = fnSlotPolarity_[root];
+            if (pol == FnRepr::Closure) continue;
+            // The pre-118 rule for fn(...) sources: only a resolved plain
+            // pointer is reported. A source chain that reached a tracked
+            // *void storage location must prove closure instead.
+            if (pol == FnRepr::Unknown && !fnSlotMustProve_[i]) continue;
             if (!reportedCastRoots.insert(root).second) continue;
-            error("Function cast cannot produce the closure spelling. Expected " +
-                      fnSlotLabel_[i] +
-                      ", got a plain fn(...) value: a raw code pointer is not a closure "
-                      "object {fnptr, captures...} whose calls pass the object as a hidden "
-                      "first argument (CIDER-BUG-093). Use the fn(...) spelling, or store "
-                      "the function in a func(...) variable (CIDER-BUG-063 adapts it to the "
-                      "raw pointer representation).",
-                  fnSlotLine_[i]);
+            if (pol == FnRepr::Mixed) {
+                error("Function cast cannot produce the closure spelling. Expected " +
+                          fnSlotLabel_[i] +
+                          ", but the *void source received both a closure object and a plain "
+                          "fn(...) value, so its fn representation cannot be proven "
+                          "(CIDER-BUG-118). Use the fn(...) spelling, or store the function in a "
+                          "func(...) variable (CIDER-BUG-063 adapts it to the raw pointer "
+                          "representation).",
+                      fnSlotLine_[i]);
+            } else if (pol == FnRepr::Unknown) {
+                error("Function cast cannot produce the closure spelling. Expected " +
+                          fnSlotLabel_[i] +
+                          ", got a *void value whose fn representation is not known to be a "
+                          "closure object: a raw code pointer would be read as {fnptr, "
+                          "captures...} and passed as the hidden first argument of every call "
+                          "(CIDER-BUG-118). Store a closure object in the *void first, or use "
+                          "the fn(...) spelling.",
+                      fnSlotLine_[i]);
+            } else {
+                error("Function cast cannot produce the closure spelling. Expected " +
+                          fnSlotLabel_[i] +
+                          ", got a plain fn(...) value: a raw code pointer is not a closure "
+                          "object {fnptr, captures...} whose calls pass the object as a hidden "
+                          "first argument (CIDER-BUG-093). Use the fn(...) spelling, or store "
+                          "the function in a func(...) variable (CIDER-BUG-063 adapts it to the "
+                          "raw pointer representation).",
+                      fnSlotLine_[i]);
+            }
         }
     }
 
@@ -2061,13 +2213,23 @@ public:
         // closure-valued parameter/local resolves the slot to closure,
         // ir_gen cannot re-derive that from the initializer, so the declared
         // type is annotated instead.
+        // CIDER-BUG-118: *void declarations get a provenance-only slot
+        // (their untyped storage fixes nothing) so casts back to a closure
+        // spelling can be proven or rejected.
         if (!inClassFieldDecl_ && !stmt.isExtern()) {
             TypeInfo slotType = resolveFunctionPointerAlias(declaredType);
-            if (slotType.isFunctionPointer && !slotType.isArray) {
-                int slot = fnSlotForSymbol(sym, "variable '" + sym->name + "'", stmt.getLine());
+            bool fnStorage = slotType.isFunctionPointer && !slotType.isArray;
+            bool voidStorage = isVoidCarrier(declaredType);
+            if (fnStorage || voidStorage) {
+                int slot = fnStorage
+                               ? fnSlotForSymbol(sym, "variable '" + sym->name + "'", stmt.getLine())
+                               : fnSlotForVoidSymbol(sym, "variable '" + sym->name + "'",
+                                                     stmt.getLine());
+                bool viaVoid = false;
                 bool recorded = hasDeclInitType &&
-                                fnRecordExpr(slot, stmt.getInitializer(), declInitType, stmt.getLine());
-                if (!recorded) fnVarAst_[fnSlotKey_[slot]] = stmt.getTypeAST();
+                                fnRecordExpr(slot, stmt.getInitializer(), declInitType,
+                                             stmt.getLine(), &viaVoid);
+                if (fnStorage && (!recorded || viaVoid)) fnVarAst_[fnSlotKey_[slot]] = stmt.getTypeAST();
             }
         }
         if (warningsActive_) {
@@ -2201,17 +2363,26 @@ public:
                 // shape (that storage has no representation refinement), so its
                 // site is recorded and a closure value is reported in the
                 // post-pass instead of being miscompiled.
+                // CIDER-BUG-118: a *void target has no fixed representation;
+                // record the value's fn shape as provenance so a later cast
+                // back to a closure spelling can be proven or rejected.
                 TypeInfo targetFn = resolveFunctionPointerAlias(targetType);
                 TypeInfo valueFn = resolveFunctionPointerAlias(valueType);
-                if (targetFn.isFunctionPointer && !targetFn.isArray &&
-                    valueFn.isFunctionPointer && !valueFn.isArray) {
+                bool fnTarget = targetFn.isFunctionPointer && !targetFn.isArray;
+                bool fnValue = valueFn.isFunctionPointer && !valueFn.isArray;
+                bool voidTarget = isVoidCarrier(targetType);
+                if ((fnTarget && fnValue) || voidTarget) {
                     if (target) {
                         auto sym = resolveScoped(target->getName());
                         if (sym && sym->kind == SymbolKind::VARIABLE) {
-                            int slot = fnSlotForSymbol(sym, "variable '" + sym->name + "'", stmt.getLine());
+                            int slot = fnTarget
+                                           ? fnSlotForSymbol(sym, "variable '" + sym->name + "'",
+                                                             stmt.getLine())
+                                           : fnSlotForVoidSymbol(sym, "variable '" + sym->name + "'",
+                                                                 stmt.getLine());
                             fnRecordExpr(slot, stmt.getValue(), valueType, stmt.getLine());
                         }
-                    } else {
+                    } else if (fnTarget) {
                         std::string siteLabel = "a fn(...) storage location";
                         if (auto* mem = dynamic_cast<MemberAccessExpr*>(stmt.getTarget())) {
                             siteLabel = "field '" + mem->getMember() + "'";
@@ -3059,11 +3230,35 @@ public:
             } else if (fnTarget.isClosure) {
                 int slot = fnSlot("c:" + std::to_string(fnCastCheckCount_++),
                                   fnTarget.toString(), expr.getLine());
+                // CIDER-BUG-118: a chain that reaches a tracked *void storage
+                // location must resolve to a closure object; the pre-118
+                // leniency for an unresolved fn(...) parameter stays for
+                // pure fn(...) sources.
+                if (fnCastSourceTracked(expr.getExpression(), srcType)) {
+                    fnSlotMustProve_[slot] = 1;
+                }
                 // fnRecordExpr follows the source shape through nested casts
                 // and unifies with a fn-typed variable/parameter's slot, so
                 // the verdict below is the resolved shape, not the spelling.
                 fnRecordExpr(slot, expr.getExpression(), srcType, expr.getLine());
             }
+        } else if (fnTarget.isFunctionPointer && !fnTarget.isArray && fnTarget.isClosure &&
+                   isVoidCarrier(srcType) && !isNilSource(expr.getExpression())) {
+            // CIDER-BUG-118: a `*void` source has no spelling that fixes the
+            // shape, so a tracked source (a *void variable/parameter, or a
+            // chain through one) must prove the value is a closure object.
+            // Follow its provenance through *void storage, assignments,
+            // argument passing and nested casts; a proven closure object
+            // stays allowed, a proven (or unproven tracked) raw pointer is
+            // reported in the post-pass. A direct nilPtr source is
+            // representation-neutral, exactly like a func(...) declaration
+            // initialized with nilPtr.
+            int slot = fnVoidSlot("c:" + std::to_string(fnCastCheckCount_++),
+                                  fnTarget.toString(), expr.getLine());
+            if (fnCastSourceTracked(expr.getExpression(), srcType)) {
+                fnSlotMustProve_[slot] = 1;
+            }
+            fnRecordExpr(slot, expr.getExpression(), srcType, expr.getLine());
         }
     }
 
@@ -3304,6 +3499,13 @@ public:
                     // when a parameter/local value flows through).
                     int slot = fnParamSlot(funcSym, i, expr.getLine());
                     fnRecordExpr(slot, expr.getArgs()[i].get(), argT, expr.getLine());
+                } else if (isVoidCarrier(paramT)) {
+                    // CIDER-BUG-118: record the argument's fn representation
+                    // against the *void parameter slot, so a cast inside the
+                    // callee can prove the closure shape (or report a raw fn
+                    // pointer) exactly like an in-body *void storage.
+                    int slot = fnVoidParamSlot(funcSym, i, expr.getLine());
+                    fnRecordExpr(slot, expr.getArgs()[i].get(), argT, expr.getLine());
                 }
             }
         }
@@ -3399,9 +3601,20 @@ public:
                     std::string key = fnParamSlotKey(fnDeclSym, fnParamIndex);
                     fnParamAst_[key] = param.second.get();
                     fnParamSymKey_[paramSym->id] = key;
-                    fnSlot(key,
-                           "parameter '" + param.first + "' of '" + stmt.getName() + "'",
-                           stmt.getLine());
+                    int slot = fnSlot(key,
+                                      "parameter '" + param.first + "' of '" + stmt.getName() + "'",
+                                      stmt.getLine());
+                    fnSlotRigid_[fnFind(slot)] = 1;
+                } else if (isVoidCarrier(paramSym->type)) {
+                    // CIDER-BUG-118: a *void parameter is a provenance-only
+                    // slot. Call sites record the arguments' fn shapes here,
+                    // and a cast inside the body follows the parameter
+                    // symbol into this slot; there is no *void TypeAST
+                    // annotation (the storage is untyped).
+                    std::string key = fnParamSlotKey(fnDeclSym, fnParamIndex);
+                    fnParamSymKey_[paramSym->id] = key;
+                    fnVoidSlot(key, "parameter '" + param.first + "' of '" + stmt.getName() + "'",
+                               stmt.getLine());
                 }
             }
             ++fnParamIndex;
@@ -4178,6 +4391,17 @@ private:
     std::vector<std::string> fnSlotLabel_ = {""};
     std::vector<int> fnSlotLine_ = {0};
     std::vector<std::string> fnSlotKey_ = {""};
+    // CIDER-BUG-118: provenance-only slot (a *void storage/source). Mixing
+    // shapes there resolves to Mixed instead of a conflict, and the slot is
+    // never annotated on a TypeAST. A rigid slot is a fn(...) declaration or
+    // parameter whose representation is fixed for the program: mixing in a
+    // component that contains one stays a CIDER-BUG-068 conflict.
+    std::vector<uint8_t> fnSlotVoid_ = {0};
+    std::vector<uint8_t> fnSlotRigid_ = {0};
+    // Cast-check slots whose source chain reaches a tracked *void storage
+    // location: the post-pass rejects an unresolved shape for them
+    // (CIDER-BUG-118); other cast slots keep the CIDER-BUG-093 leniency.
+    std::vector<uint8_t> fnSlotMustProve_ = {0};
     // Parameter slot key -> declared TypeAST (annotated on resolution).
     std::map<std::string, TypeAST*> fnParamAst_;
     // Variable slot key -> declared TypeAST, for declarations with no
@@ -4198,7 +4422,8 @@ private:
     int fnStoreCheckCount_ = 0;
     // Cast-to-closure sites (key prefix "c:"): the source shape resolves
     // through the same inference; a plain-resolved source is reported after
-    // the walk (CIDER-BUG-093).
+    // the walk (CIDER-BUG-093), and an unresolved source that reached a
+    // tracked *void storage location is reported too (CIDER-BUG-118).
     int fnCastCheckCount_ = 0;
     // Name of the function whose body is being checked (diagnostics).
     std::string currentFunctionName_;
