@@ -1474,6 +1474,56 @@ int run() {
         CHECK(d.find("define f() {") != std::string::npos);
         CHECK(countOf(d, "store n,") == 1);
     }
+    // CIDER-BUG-199: `a[i]` on a pointer to a fixed array scales the index by
+    // the ELEMENT size, and `a + n` steps by the same amount. The language
+    // has no `*[T; N]` spelling, so the pointee is an array only through an
+    // alias; resolveTypeAlias stops at a pointer level, so the index used to
+    // keep the whole array as its "element" and scale by getTypeSize(array).
+    // In the IR that is the constant in the MUL: 4 for the element, 12 for
+    // the `[D; 3]` array the miscompile wrote through.
+    {
+        const char* kPtrArraySrc =
+            "class D { var label: int; }\n"
+            "type A3 = [D; 3];\n"
+            "func main() -> int {\n"
+            "  var a: *A3 = nilPtr;\n"
+            "  a[1].label = 20;\n"
+            "  var q: *A3 = a + 2;\n"
+            "  return a[0].label + q[1].label;\n"
+            "}\n";
+        d = genSrc(kPtrArraySrc);
+        // The element stride, never the 12-byte array stride.
+        CHECK(d.find("mul 1, 12") == std::string::npos);
+        CHECK(d.find("mul 2, 12") == std::string::npos);
+        CHECK(d.find("mul 1, 4") != std::string::npos);
+        // Pointer arithmetic steps by the element, so it agrees with `a[i]`.
+        CHECK(d.find("mul 2, 4") != std::string::npos);
+        CHECK(d.find("mul 1, 8") == std::string::npos);
+        // The label store is address-presented: the class element is
+        // classified by its own shape, so the field store takes the element
+        // address rather than loading the slot.
+        CHECK(d.find("add %v") != std::string::npos);
+    }
+
+    // CIDER-BUG-199: a nested array through a pointer-to-array keeps its
+    // inner dimension — the outer stride is the row (8 bytes), the inner one
+    // is the int (4).
+    {
+        d = genSrc(
+            "type Rows = [int; 2];\n"
+            "type M = [Rows; 3];\n"
+            "func main() -> int {\n"
+            "  var m: *M = nilPtr;\n"
+            "  m[1][1] = 5;\n"
+            "  return m[0][0];\n"
+            "}\n");
+        CHECK(d.find("mul 1, 8") != std::string::npos);
+        CHECK(d.find("mul 1, 4") != std::string::npos);
+        // 3 rows of 2 ints is 24 bytes, not 12 (the flat size) or 48.
+        CHECK(d.find("mul 1, 24") == std::string::npos);
+        CHECK(d.find("mul 1, 12") == std::string::npos);
+    }
+
     return 0;
 }
 

@@ -712,11 +712,30 @@ public:
     // STORE, which faulted natively and read the wrong heap address in the
     // VM. Deriving the marker by the same rule identifier/member reads use
     // keeps struct elements address-like and scalars plain.
+    //
+    // CIDER-BUG-199: the language has no `*[T; N]` spelling, so a pointer to
+    // a fixed array always arrives through an alias (`type A3 = [D; 3]`,
+    // `var a: *A3`). resolveTypeAlias stops at a pointer level, so the
+    // pointee is only revealed to be an array AFTER the level is dropped:
+    // strip that dimension as well, or the index keeps the whole array as its
+    // "element" and getTypeSize scales by the ARRAY size — `a[1].label = v`
+    // in a 12-byte D[3] block stored at offset 12 and `a[2]` at 24, while
+    // registerEmbeddedDestructors walks the same three elements at
+    // sizeof(D) (visit(DeleteStmt) resolves the alias before the walk), so
+    // the finalizers read cells nobody wrote. Dropping the dimension here
+    // gives the element, the element stride, and the one rule every caller
+    // (indexing, pointer arithmetic, assignment element typing) needs.
     TypeInfo elementTypeOf(TypeInfo base) {
         if (base.isArray) {
             base = base.elementType();
         } else if (base.pointerLevel > 0) {
             base.pointerLevel--;
+            // Only the LAST pointer level reaches the pointee; a deeper one
+            // names a pointer, whose element is the pointer itself.
+            if (base.pointerLevel == 0) {
+                TypeInfo pointee = resolveTypeAlias(base);
+                if (pointee.isArray) base = pointee.elementType();
+            }
         } else if (base.name == "string") {
             base.name = "char";
         }
@@ -4706,19 +4725,19 @@ public:
 
         IROp op;
 
+        // CIDER-BUG-199: `p + n` steps over the pointee ELEMENT, the same
+        // element `p[n]` names, so both go through elementTypeOf — for a
+        // pointer to a fixed array (`var a: *A3`) that is the element and not
+        // the whole array, keeping `a + 1` and `a[1]` the same address.
         if (leftType.pointerLevel > 0 && (sOp == "+" || sOp == "-")) {
-            TypeInfo baseType = leftType;
-            baseType.pointerLevel--;
-            int size = getTypeSize(baseType);
+            int size = getTypeSize(elementTypeOf(leftType));
             if (size > 1) {
                 IRValue scaled = IRValue::Register(nextTemp(), right.type);
                 currentBlock_->addInstruction({IROp::MUL, scaled, {right, IRValue::Constant(size, IRType::I32)}});
                 right = scaled;
             }
         } else if (rightType.pointerLevel > 0 && sOp == "+") {
-            TypeInfo baseType = rightType;
-            baseType.pointerLevel--;
-            int size = getTypeSize(baseType);
+            int size = getTypeSize(elementTypeOf(rightType));
             if (size > 1) {
                 IRValue scaled = IRValue::Register(nextTemp(), left.type);
                 currentBlock_->addInstruction({IROp::MUL, scaled, {left, IRValue::Constant(size, IRType::I32)}});
@@ -5805,15 +5824,10 @@ public:
         } else if (auto mem = dynamic_cast<MemberAccessExpr*>(stmt.getTarget())) {
             targetIsVolatile = memberAccessIsVolatile(mem);
         } else if (auto idx = dynamic_cast<IndexExpr*>(stmt.getTarget())) {
-            TypeInfo elemType = inferExprType(idx->getObject());
-            if (elemType.isArray) {
-                elemType = elemType.elementType();
-            } else if (elemType.pointerLevel > 0) {
-                elemType.pointerLevel--;
-            } else if (elemType.name == "string") {
-                elemType.name = "char";
-            }
-            targetIsVolatile = resolveTypeAlias(elemType).isVolatile;
+            // CIDER-BUG-199: the shared element strip, so a store through a
+            // pointer to a fixed array (`a[1] = v`) sees the ELEMENT's
+            // qualifiers and not the array's.
+            targetIsVolatile = elementTypeOf(inferExprType(idx->getObject())).isVolatile;
         } else if (hasDerefTarget) {
             targetIsVolatile = derefPointeeType.isVolatile;
         } else {
@@ -5840,15 +5854,11 @@ public:
             } else if (auto mem = dynamic_cast<MemberAccessExpr*>(stmt.getTarget())) {
                 haveInterfaceTarget = getMemberFieldType(mem, targetIface);
             } else if (auto idx = dynamic_cast<IndexExpr*>(stmt.getTarget())) {
-                TypeInfo baseType = inferExprType(idx->getObject());
-                if (baseType.isArray) {
-                    targetIface = baseType.elementType();
-                } else if (baseType.pointerLevel > 0) {
-                    targetIface = baseType;
-                    targetIface.pointerLevel--;
-                } else if (baseType.name == "string") {
-                    targetIface = {"char", 0};
-                }
+                // CIDER-BUG-199: the shared element strip, so an interface
+                // element of a pointer to a fixed array
+                // (`type I2 = [Shape; 2]; p[0] = c;`) still takes the fat
+                // pointer store.
+                targetIface = elementTypeOf(inferExprType(idx->getObject()));
                 haveInterfaceTarget = true;
             } else if (hasDerefTarget) {
                 // CIDER-BUG-100: `*p` through a pointer-to-interface names
@@ -5995,18 +6005,13 @@ public:
                     lastExprType_ = fieldType;
                 }
             } else if (auto idx = dynamic_cast<IndexExpr*>(stmt.getTarget())) {
-                TypeInfo baseType = inferExprType(idx->getObject());
-                TypeInfo elemType = baseType;
-                if (elemType.isArray) {
-                    elemType = elemType.elementType();
-                } else if (elemType.pointerLevel > 0) {
-                    elemType.pointerLevel--;
-                } else if (elemType.name == "string") {
-                    elemType.name = "char";
-                }
                 // CIDER-BUG-052: an element alias resolves to its real shape
                 // (array elements need the MEMCPY decision below).
-                elemType = resolveTypeAlias(elemType);
+                // CIDER-BUG-199: through the shared element strip, so a
+                // pointer to a fixed array stores at the ELEMENT's width and
+                // copy length instead of MEMCPY-ing the whole array into a
+                // one-element slot.
+                TypeInfo elemType = elementTypeOf(inferExprType(idx->getObject()));
                 // CIDER-BUG-083: classify the element by its own RESOLVED
                 // shape, not by the RHS value's flags. A by-value struct/
                 // class element of any size is an aggregate target whose RHS
@@ -6133,17 +6138,10 @@ public:
                         targetIR = (fieldType.pointerLevel > 0) ? IRType::PTR : mapType(fieldType.name);
                     }
                 } else if (auto idx = dynamic_cast<IndexExpr*>(stmt.getTarget())) {
-                    TypeInfo baseType = inferExprType(idx->getObject());
-                    TypeInfo elemType = baseType;
-                    if (elemType.isArray) {
-                        elemType = elemType.elementType();
-                    } else if (elemType.pointerLevel > 0) {
-                        elemType.pointerLevel--;
-                    } else if (elemType.name == "string") {
-                        elemType.name = "char";
-                    }
-                    // CIDER-BUG-052: resolve an element alias to its shape.
-                    elemType = resolveTypeAlias(elemType);
+                    // CIDER-BUG-052/199: the shared element strip, so a
+                    // compound assignment through a pointer to a fixed array
+                    // computes at the ELEMENT's width.
+                    TypeInfo elemType = elementTypeOf(inferExprType(idx->getObject()));
                     targetIR = (elemType.pointerLevel > 0) ? IRType::PTR : mapType(elemType.name);
                 } else if (hasDerefTarget) {
                     // CID-003: `*p += v` loads/stores at the pointee width.

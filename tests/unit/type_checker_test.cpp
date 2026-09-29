@@ -1440,6 +1440,83 @@ int run() {
         CHECK(checkSrc("func main() -> int { for (var i: int = 0; i < 3; i++) { if (i == 1) { break; } } return 0; }\n").empty());
     }
 
+    // CIDER-BUG-199: `a[i]` on a pointer to a fixed array names the array's
+    // ELEMENT. The language has no `*[T; N]` spelling, so the pointee is only
+    // an array through an alias (`type A3 = [int; 3]; var a: *A3;`), and both
+    // alias resolvers stop at a pointer level. The index used to keep the
+    // whole-array type, so every use was rejected ("Expected A3, got int").
+    {
+        // Scalar element: read, write, declaration, argument and index
+        // expressions all type as int.
+        auto okScalar = checkSrc(
+            "type A3 = [int; 3];\n"
+            "func take(x: int) -> int { return x; }\n"
+            "func main() -> int {\n"
+            "  var a: *A3 = nilPtr;\n"
+            "  var v: int = a[1];\n"
+            "  a[1] = v;\n"
+            "  a[2] += 1;\n"
+            "  return take(a[0]) + v + (a[1] + 1);\n"
+            "}\n");
+        CHECK(okScalar.empty());
+
+        // The array VALUE spelling must keep typing the index as the
+        // element, and `**A3` one step shallower: `p[i]` is a `*A3`, whose
+        // own element is the pointer itself.
+        auto okDepth = checkSrc(
+            "type A3 = [int; 3];\n"
+            "func main() -> int {\n"
+            "  var v: [int; 3];\n"
+            "  var fromValue: int = v[2];\n"
+            "  var pp: **A3 = nilPtr;\n"
+            "  var inner: *A3 = pp[1];\n"
+            "  var deep: int = inner[1];\n"
+            "  return fromValue + deep;\n"
+            "}\n");
+        CHECK(okDepth.empty());
+
+        // Class element: the member access sees the class, and the whole
+        // class value (not the array) is what an element target accepts.
+        auto okClass = checkSrc(
+            "class D { var label: int; }\n"
+            "type A2 = [D; 2];\n"
+            "func main() -> int {\n"
+            "  var a: *A2 = nilPtr;\n"
+            "  a[0].label = 1;\n"
+            "  var d: D = a[1];\n"
+            "  return a[0].label + d.label;\n"
+            "}\n");
+        CHECK(okClass.empty());
+
+        // Nested arrays keep the inner dimension: `m[i]` is a ROW, so
+        // `m[i][j]` is the int and `var row: Rows = m[1]` is legal.
+        auto okNested = checkSrc(
+            "type Rows = [int; 2];\n"
+            "type M = [Rows; 3];\n"
+            "func main() -> int {\n"
+            "  var m: *M = nilPtr;\n"
+            "  m[1][0] = 5;\n"
+            "  var row: Rows = m[1];\n"
+            "  return m[0][1] + row[0];\n"
+            "}\n");
+        CHECK(okNested.empty());
+
+        // A wrong element type is still a mismatch, and the diagnostic
+        // names the ELEMENT (`int`), never the whole array it came from
+        // (`A3`) — the pre-fix typing put A3 in every one of these.
+        auto badElement = checkSrc(
+            "struct Other { var a: int; }\n"
+            "type A3 = [int; 3];\n"
+            "func main() -> int {\n"
+            "  var a: *A3 = nilPtr;\n"
+            "  var v: Other = a[1];\n"
+            "  return 0;\n"
+            "}\n");
+        CHECK(hasError(badElement, "Type mismatch in declaration of 'v'"));
+        CHECK(!hasError(badElement, "got A3"));
+        CHECK(!hasError(badElement, "got [int; 3]"));
+    }
+
     return 0;
 }
 

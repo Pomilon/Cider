@@ -1,0 +1,5 @@
+{
+  "stdout": "guard: 123456789,123456789,123456789,123456789\nsum: 33\ncells: 10,11,12\ndestructors: 12,11,10,\nneighbours: 111,222,333 / 444,555,666\narith: 222,667,2331\ncompound: 1000\nchain: 5,6,7\nchain dtor: 7,6,5,\nnested: 0,11,20,63\nrow: 10,11\nwide: 1,2,3 / 9,2,3 / 1,2,3\niface: 25\nstride: 99,3,102\nparam: 42\nfield: 70,5\nholder: 71,72\nnest field: 8,9,3\nscalar ptr: 31,32\nptr elems: 81,82\narray value: 1,2,3 / 123456789,123456789,123456789,123456789\nptr_array_index_ok\n",
+  "stderr": "",
+  "exit": 0
+}

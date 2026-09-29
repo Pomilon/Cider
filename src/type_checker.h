@@ -5058,6 +5058,20 @@ public:
             lastExprType_ = objType;
             if (objType.pointerLevel > 0) {
                 lastExprType_.pointerLevel--;
+                // CIDER-BUG-199: `type A3 = [D; 3]; var a: *A3;` — the
+                // language has no `*[T; N]` spelling, so a pointer to a
+                // fixed array only appears through an alias. resolveType
+                // stops at a pointer level, so the pointee is known to be an
+                // array only after the level is dropped; `a[i]` then names
+                // the array's ELEMENT, exactly like an array-valued base.
+                // Without this the index kept the whole-array type and every
+                // use was rejected ("Expected A3, got int"). Only the last
+                // level reaches the pointee; a deeper one names a pointer,
+                // whose element is the pointer itself.
+                if (lastExprType_.pointerLevel == 0) {
+                    TypeInfo pointee = resolveType(lastExprType_);
+                    if (pointee.isArray) lastExprType_ = pointee.elementType();
+                }
                 resolveInterfaceFlag(lastExprType_);
             } else lastExprType_ = {"char", 0};
         } else {
