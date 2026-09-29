@@ -988,6 +988,13 @@ public:
     // order the stored vtable follows). Shared by declaration-time
     // interface initialization and reassignment so the two lower
     // identically on every backend.
+    // CIDER-BUG-115: because a concrete value contributes its ADDRESS
+    // (aliasing, like a C++ reference), a by-value source that dies with
+    // the current frame leaves the stored data pointer dangling once the
+    // frame returns. The checker reports the statically detectable shapes
+    // under --warn (warnDanglingInterfaceStore) and the VM makes frame
+    // reuse observable (VM::retireFrame), matching native's next call
+    // overwriting the dead stack slots.
     // CIDER-BUG-079: `isVolatile` is the target's volatile flag, sourced
     // exactly like the scalar/aggregate store paths source it (a volatile
     // declared type, field or pointee). Both fat-pointer words are then

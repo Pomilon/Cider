@@ -156,6 +156,101 @@ int run() {
     cider::VM vm5;
     CHECK(vm5.run(mod5).exitCode == 99);
 
+    // CIDER-BUG-115: frame reuse is observable on the VM. A callee-local
+    // by-value object whose address escaped (an interface's data word, a
+    // returned `[x, x, x]`, a std.io buffer) stays readable immediately
+    // after the return — native's dead stack slots are still there — but
+    // once another frame claims the region the bytes are gone, exactly like
+    // native's next call overwriting those slots. The VM zeroes a freshly
+    // claimed frame chunk so a dangling pointer cannot read the old object
+    // back after reuse.
+    {
+        auto retarget = makeFn("retarget", cider::IRType::VOID);
+        retarget->addParam("arg_p", cider::IRType::PTR);
+        auto rb = std::make_unique<cider::BasicBlock>("entry");
+        rb->addInstruction(opInstr(cider::IROp::ALLOCA, "tmp",
+                                   {cider::IRValue::Constant(8, cider::IRType::I32)}));
+        cider::IRInstruction seed;
+        seed.op = cider::IROp::STORE;
+        seed.args = {cider::IRValue::Register("tmp", cider::IRType::PTR),
+                     cider::IRValue::Constant(42, cider::IRType::I32),
+                     cider::IRValue::Constant(0, cider::IRType::I32)};
+        rb->addInstruction(seed);
+        cider::IRInstruction leak;
+        leak.op = cider::IROp::STORE;
+        leak.args = {cider::IRValue::Register("arg_p", cider::IRType::PTR),
+                     cider::IRValue::Register("tmp", cider::IRType::PTR),
+                     cider::IRValue::Constant(0, cider::IRType::I32)};
+        rb->addInstruction(leak);
+        cider::IRInstruction rret;
+        rret.op = cider::IROp::RET;
+        rb->addInstruction(rret);
+        retarget->addBlock(std::move(rb));
+
+        // A later call whose first ALLOCA claims a frame region (and writes
+        // nothing there).
+        auto reuse = makeFn("reuse", cider::IRType::VOID);
+        auto ub = std::make_unique<cider::BasicBlock>("entry");
+        ub->addInstruction(opInstr(cider::IROp::ALLOCA, "scratch",
+                                   {cider::IRValue::Constant(8, cider::IRType::I32)}));
+        cider::IRInstruction uret;
+        uret.op = cider::IROp::RET;
+        ub->addInstruction(uret);
+        reuse->addBlock(std::move(ub));
+
+        // entry: call retarget(&slot) [, call reuse], v = *(slot's pointee).
+        auto buildEntry = [&](const std::string& name, bool callReuse) {
+            auto entry = makeFn(name, cider::IRType::I32);
+            auto b = std::make_unique<cider::BasicBlock>("entry");
+            b->addInstruction(opInstr(cider::IROp::ALLOCA, "slot",
+                                      {cider::IRValue::Constant(8, cider::IRType::I32)}));
+            cider::IRInstruction callRetarget;
+            callRetarget.op = cider::IROp::CALL;
+            callRetarget.args = {cider::IRValue::Label("retarget"),
+                                 cider::IRValue::Register("slot", cider::IRType::PTR)};
+            b->addInstruction(callRetarget);
+            if (callReuse) {
+                cider::IRInstruction callReuse;
+                callReuse.op = cider::IROp::CALL;
+                callReuse.args = {cider::IRValue::Label("reuse")};
+                b->addInstruction(callReuse);
+            }
+            cider::IRInstruction loadP;
+            loadP.op = cider::IROp::LOAD;
+            loadP.dest = cider::IRValue::Register("p", cider::IRType::PTR);
+            loadP.args = {cider::IRValue::Register("slot", cider::IRType::PTR),
+                          cider::IRValue::Constant(0, cider::IRType::I32)};
+            b->addInstruction(loadP);
+            cider::IRInstruction loadV;
+            loadV.op = cider::IROp::LOAD;
+            loadV.dest = cider::IRValue::Register("v", cider::IRType::I32);
+            loadV.args = {cider::IRValue::Register("p", cider::IRType::PTR),
+                          cider::IRValue::Constant(0, cider::IRType::I32)};
+            b->addInstruction(loadV);
+            cider::IRInstruction ret;
+            ret.op = cider::IROp::RET;
+            ret.args = {cider::IRValue::Register("v", cider::IRType::I32)};
+            b->addInstruction(ret);
+            entry->addBlock(std::move(b));
+            return entry;
+        };
+
+        cider::ModuleIR mod;
+        mod.addFunction(std::move(retarget));
+        mod.addFunction(std::move(reuse));
+        mod.addFunction(buildEntry("immediate", /*callReuse=*/false));
+        mod.addFunction(buildEntry("reuseFrame", /*callReuse=*/true));
+
+        // Before any reuse the dead bytes are still visible, like native's
+        // unconsumed stack slots (the supported read-all/tripled pattern).
+        cider::VM vmNow;
+        CHECK(vmNow.run(mod, "immediate").exitCode == 42);
+        // After a later frame claims (and its prologue zeroes) the region,
+        // the dangling pointer no longer reads the old object.
+        cider::VM vmReuse;
+        CHECK(vmReuse.run(mod, "reuseFrame").exitCode == 0);
+    }
+
     // Step cap: an infinite loop fails fast instead of hanging.
     auto fn6 = makeFn("main", cider::IRType::VOID);
     auto b6 = std::make_unique<cider::BasicBlock>("entry");

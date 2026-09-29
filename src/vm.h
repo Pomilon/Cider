@@ -134,6 +134,10 @@ private:
     void doCall(const IRValue& target, const std::vector<IRValue>& args,
                 const std::string& destName = "");
     void doVirtualCall(const IRValue& obj, int64_t vtableIndex, const std::vector<IRValue>& args);
+    // CIDER-BUG-115: release a dead frame's ALLOCA region. The region's
+    // bytes are zeroed when a later frame claims (and reuses) the chunk,
+    // mirroring native's next call overwriting the dead stack slots.
+    void retireFrame(const Frame& frame);
 };
 
 }  // namespace cider

@@ -2264,6 +2264,14 @@ public:
                 !isValueClassType(declaredType)) {
                 warnings_.markUninitialized(sym);
             }
+            // CIDER-BUG-115: a function-local declaration is current-frame
+            // storage; a local pointer initialized with `&local` (or a copy
+            // of one) stays provably frame-local until it is reassigned.
+            if (isLocal) {
+                frameLocalSymbols_.insert(sym->id);
+                if (resolveType(declaredType).pointerLevel > 0)
+                    recordFrameLocalPointer(sym, stmt.getInitializer());
+            }
         }
     }
 
@@ -2351,6 +2359,11 @@ public:
 
             if (ifaceTargetType.isInterface) {
                 checkInterfaceValue(ifaceTargetType, valueType, stmt.getLine());
+                // CIDER-BUG-115: warn when the store aliases a by-value
+                // object that dies with this function into storage that is
+                // not provably in the same frame.
+                warnDanglingInterfaceStore(stmt.getValue(), stmt.getTarget(), valueType,
+                                           stmt.getLine());
             } else if (valueType.isSlice && valueType.pointerLevel == 0 &&
                        targetArray.isArray && targetArray.pointerLevel == 0) {
                 // CIDER-BUG-057: `arr = base[start:end]` copies the slice's
@@ -2421,6 +2434,24 @@ public:
         // `x = x + 1` on an unassigned x still reports the value read.
         if (warningsActive_ && target) {
             warnings_.markAssigned(resolveScoped(target->getName()));
+        }
+
+        // CIDER-BUG-115: keep a local pointer's `&local` provenance in step
+        // with its current value. A plain assignment adopts the RHS's
+        // provenance (kept for `&local`/copies, dropped for everything
+        // else); a compound assignment always drops it.
+        if (warningsActive_) {
+            if (auto* tid = dynamic_cast<IdentifierExpr*>(stmt.getTarget())) {
+                auto tsym = resolveScopedRaw(tid->getName());
+                if (tsym && tsym->kind == SymbolKind::VARIABLE &&
+                    frameLocalSymbols_.count(tsym->id) > 0) {
+                    if (stmt.getOp().empty()) {
+                        recordFrameLocalPointer(tsym, stmt.getValue());
+                    } else {
+                        frameLocalPointers_.erase(tsym->id);
+                    }
+                }
+            }
         }
 
         // CID-003 follow-up (W5): compound assignments mirror the binary
@@ -2662,6 +2693,118 @@ public:
         return nullptr;
     }
 
+    // ------------------------------------------------------------------
+    // CIDER-BUG-115: interface stores and frame lifetime.
+    //
+    // An interface built from a concrete struct/class VALUE stores that
+    // object's address in the fat pointer (aliasing, like a C++
+    // reference), so a by-value object local to the current function
+    // leaves the interface dangling once the frame dies. The checker
+    // cannot prove whether the interface outlives the function, so it
+    // reports the detectable shapes as an opt-in (--warn) may-dangle
+    // diagnostic: the source must be provably current-frame storage and
+    // the target must NOT be provably current-frame storage. The VM
+    // additionally makes frame reuse observable (a chunk claimed by a
+    // later frame is zeroed, like native's next call overwriting the dead
+    // stack slots), so an undetectable case cannot read the old object
+    // back once its frame has been reused.
+    // ------------------------------------------------------------------
+
+    // Storage that certainly dies with the current frame: a local/parameter
+    // object, a member/element of one, or a pointee reached through a
+    // frame-local pointer. Globals, module members, heap objects and
+    // parameter pointees are not provable, so they return false.
+    bool denotesFrameLocalStorage(Expression* expr) {
+        if (!expr) return false;
+        if (auto* grp = dynamic_cast<GroupingExpr*>(expr))
+            return denotesFrameLocalStorage(grp->getExpression());
+        if (auto* id = dynamic_cast<IdentifierExpr*>(expr)) {
+            auto sym = resolveScopedRaw(id->getName());
+            return sym && sym->kind == SymbolKind::VARIABLE &&
+                   frameLocalSymbols_.count(sym->id) > 0;
+        }
+        if (auto* ma = dynamic_cast<MemberAccessExpr*>(expr)) {
+            if (ma->isArrow()) return pointerValueIsFrameLocal(ma->getObject());
+            return denotesFrameLocalStorage(ma->getObject());
+        }
+        if (auto* ix = dynamic_cast<IndexExpr*>(expr)) {
+            bool indexed = false;
+            const std::string* base = addressBaseName(expr, indexed);
+            if (base) {
+                auto sym = resolveScopedRaw(*base);
+                if (!sym || frameLocalSymbols_.count(sym->id) == 0) return false;
+                // Indexing a pointer reads the pointer value: the element
+                // storage is frame-local only through `&local` provenance.
+                if (indexed && indexesPointerValue(sym))
+                    return pointerValueIsFrameLocal(ix->getObject());
+                return true;
+            }
+            // Chain crossed `->` or a dereference: classify at the crossing.
+            return denotesFrameLocalStorage(ix->getObject());
+        }
+        if (auto* un = dynamic_cast<UnaryExpr*>(expr)) {
+            if (un->getOperator() == "*") return pointerValueIsFrameLocal(un->getOperand());
+        }
+        return false;
+    }
+
+    // The pointer VALUE `expr` is known to address current-frame storage:
+    // `&<frame-local lvalue>` or a local pointer with recorded provenance.
+    bool pointerValueIsFrameLocal(Expression* expr) {
+        if (!expr) return false;
+        if (auto* grp = dynamic_cast<GroupingExpr*>(expr))
+            return pointerValueIsFrameLocal(grp->getExpression());
+        if (auto* id = dynamic_cast<IdentifierExpr*>(expr)) {
+            auto sym = resolveScopedRaw(id->getName());
+            return sym && sym->kind == SymbolKind::VARIABLE &&
+                   frameLocalPointers_.count(sym->id) > 0;
+        }
+        if (auto* un = dynamic_cast<UnaryExpr*>(expr)) {
+            if (un->getOperator() == "&") return denotesFrameLocalStorage(un->getOperand());
+        }
+        return false;
+    }
+
+    // Adopt/drop the frame-local provenance of a local pointer variable from
+    // its new value. `&local`, `&local.field`, `&arr[i]` and copies of an
+    // already-proven pointer keep the flag; every other value (a call, a
+    // parameter, `new`, a global) drops it. Non-pointer locals are ignored.
+    void recordFrameLocalPointer(const std::shared_ptr<Symbol>& sym, Expression* value) {
+        if (!sym || sym->kind != SymbolKind::VARIABLE) return;
+        if (!frameLocalSymbols_.count(sym->id)) return;
+        if (resolveType(sym->type).pointerLevel == 0) {
+            frameLocalPointers_.erase(sym->id);
+            return;
+        }
+        if (pointerValueIsFrameLocal(value)) {
+            frameLocalPointers_.insert(sym->id);
+        } else {
+            frameLocalPointers_.erase(sym->id);
+        }
+    }
+
+    // The opt-in may-dangle diagnostic. Only a concrete by-value source
+    // (not a pointer, interface or array) that is provably current-frame
+    // storage, stored into a target that is NOT provably current-frame
+    // storage, reports: exactly the shapes where the stored data pointer
+    // dies with the function while the interface may outlive it. Same-frame
+    // stores (local targets, local-object members/elements, proven `&local`
+    // pointer targets) stay silent.
+    void warnDanglingInterfaceStore(Expression* source, Expression* target,
+                                    const TypeInfo& sourceType, int line) {
+        if (!warningsActive_ || !source || !target) return;
+        if (sourceType.name == "error") return;  // no cascade on a failed source
+        if (sourceType.isInterface || sourceType.isArray || sourceType.pointerLevel > 0)
+            return;
+        if (denotesFrameLocalStorage(source) && !denotesFrameLocalStorage(target)) {
+            reporter_.warning(
+                "interface store of a by-value object that dies at the end of the "
+                "current function; the stored pointer dangles if the interface "
+                "outlives it",
+                line);
+        }
+    }
+
     void visit(UnaryExpr& expr) override {
         // CIDER-ISS-002: `&x` (`&x[i]`, `&x.f`) does not read x's value.
         // Mark the storage base address-taken BEFORE the operand walk so
@@ -2674,6 +2817,13 @@ public:
                 auto baseSym = resolveScopedRaw(*base);
                 if (!(indexed && indexesPointerValue(baseSym))) {
                     warnings_.markAddressTaken(baseSym);
+                    // CIDER-BUG-115: an address-taken local pointer may be
+                    // repointed through the taken address, so its `&local`
+                    // provenance stops being provable.
+                    if (!indexed && baseSym && baseSym->kind == SymbolKind::VARIABLE &&
+                        resolveType(baseSym->type).pointerLevel > 0) {
+                        frameLocalPointers_.erase(baseSym->id);
+                    }
                 }
             }
         }
@@ -3544,6 +3694,18 @@ public:
             return;
         }
 
+        // CIDER-BUG-115: lifetime bookkeeping is per frame. A nested
+        // function body knows only its own locals/params as frame storage;
+        // the outer sets are restored when it finishes.
+        std::set<uint64_t> prevFrameLocalSymbols;
+        std::set<uint64_t> prevFrameLocalPointers;
+        if (warningsActive_) {
+            prevFrameLocalSymbols = frameLocalSymbols_;
+            prevFrameLocalPointers = frameLocalPointers_;
+            frameLocalSymbols_.clear();
+            frameLocalPointers_.clear();
+        }
+
         // CID-005 (T5/F1): remember the declared return type for the
         // narrow fn-pointer return check; saved/restored so nested
         // declarations cannot leak it.
@@ -3614,6 +3776,8 @@ public:
             // the signature the collector stored on the function symbol.
             resolveInterfaceFlag(paramSym->type);
             symbolTable_.define(paramSym);
+            // CIDER-BUG-115: a parameter's storage dies with this frame.
+            if (warningsActive_) frameLocalSymbols_.insert(paramSym->id);
             if (fnDeclSym) {
                 TypeInfo paramFn = resolveFunctionPointerAlias(paramSym->type);
                 if (paramFn.isFunctionPointer && !paramFn.isArray) {
@@ -3648,6 +3812,10 @@ public:
             for (auto& s : stmt.getBody()) s->accept(*this);
         }
         exitScopeChecked();
+        if (warningsActive_) {
+            frameLocalSymbols_ = std::move(prevFrameLocalSymbols);
+            frameLocalPointers_ = std::move(prevFrameLocalPointers);
+        }
         currentDeclaredReturnType_ = prevReturnType;
         hasDeclaredReturnType_ = prevHasReturnType;
         currentFunctionName_ = prevFunctionName;
@@ -4364,6 +4532,13 @@ private:
     // True while the root program's statements are being visited; imports
     // and module bodies are checked without warning analysis.
     bool warningsActive_ = false;
+    // CIDER-BUG-115: lifetime bookkeeping for interface stores. Symbols
+    // defined by the function body currently being checked (parameters and
+    // locals), and local pointers whose value is known through `&local`
+    // provenance to address that same frame. Both are saved/cleared/
+    // restored per function (see visit(FunctionDeclStmt)).
+    std::set<uint64_t> frameLocalSymbols_;
+    std::set<uint64_t> frameLocalPointers_;
     // Set while visiting a bare assignment target (`x = v`), where the
     // identifier is written but not read.
     bool suppressIdentRead_ = false;

@@ -169,11 +169,13 @@ VMResult VM::runBody(const ModuleIR& module, const std::string& runFunction) {
         const auto& blocks = frame.fn->getBlocks();
         if (frame.blockIdx >= blocks.size()) {
             // Fell off the end: implicit void return.
+            retireFrame(frame);
             frames_.pop_back();
             continue;
         }
         const auto& instrs = blocks[frame.blockIdx]->getInstructions();
         if (frame.instrIdx >= instrs.size()) {
+            retireFrame(frame);
             frames_.pop_back();
             continue;
         }
@@ -443,6 +445,16 @@ VMResult VM::runBody(const ModuleIR& module, const std::string& runFunction) {
                 af.localBase = malloc(kLocalChunk);
                 af.localSize = kLocalChunk;
                 af.localUsed = 0;
+                // CIDER-BUG-115: zero a freshly claimed frame region so a
+                // chunk reused from a retired frame cannot serve its old
+                // contents to a dangling data pointer. Mirrors native, where
+                // the next call's frame overwrites the dead stack slots;
+                // reading before any reuse still sees the old bytes, exactly
+                // like native.
+                if (af.localBase > 0 &&
+                    af.localBase + (int64_t)kLocalChunk <= (int64_t)heap_.size()) {
+                    std::memset(heap_.data() + af.localBase, 0, kLocalChunk);
+                }
             }
             // CIDER-BUG-110: a negative size must not enter the bump path.
             // Casting it to size_t makes sz huge, and localUsed + sz can
@@ -545,7 +557,8 @@ VMResult VM::runBody(const ModuleIR& module, const std::string& runFunction) {
         case IROp::RET: {
             retReg_ = instr.args.empty() ? RegVal{} : resolveValue(instr.args[0]);
             Frame callee = std::move(frames_.back());
-            if (callee.localBase != 0) free(callee.localBase);
+            // CIDER-BUG-115: the callee's frame-local storage dies here.
+            retireFrame(callee);
             frames_.pop_back();
             if (frames_.empty()) {
                 // The entry function returned: its value is the exit code.
@@ -1000,6 +1013,22 @@ void VM::free(int64_t offset) {
     freeList_.push_back({block, total});
 }
 
+// CIDER-BUG-115: a frame's ALLOCA region dies with the frame. Native stack
+// storage stays physically readable until a later call overwrites it, so
+// programs that consume a returned frame pointer immediately (std.io's
+// read_all/read_line buffers, a template's `return [x, x, x]`) still work —
+// but once another frame reuses the region, the old object is gone. The VM
+// used to recycle the chunk without touching its bytes, so a dangling fat
+// pointer (an interface built from a callee-local by-value object) could
+// read the old, plausible object back even after the region was reused,
+// masking the hazard native exposes as garbage. Releasing stays as before;
+// the ALLOCA path zeroes a freshly claimed chunk so frame REUSE is
+// observable, exactly where native's next call overwrites the slots.
+void VM::retireFrame(const Frame& frame) {
+    if (frame.localBase == 0) return;
+    free(frame.localBase);
+}
+
 VM::RegVal VM::load(int64_t addr, IRType type) {
     // CID-006 F1: a negative address must fail cleanly. resolveValue can
     // hand out negative ids (extern value handles); memcpy-ing from
@@ -1218,8 +1247,9 @@ bool VM::tryBuiltinCall(const std::string& name, const std::vector<IRValue>& arg
         // CIDER-BUG-053: discard the unwound callee frames and release
         // their frame-local regions. The interrupted call's pending result
         // is voided — the jump leaves that call site for good.
+        // CIDER-BUG-115: retirement releases each region; reuse zeroes it.
         for (size_t i = frames_.size(); i > (size_t)st.frameIndex + 1; --i) {
-            if (frames_[i - 1].localBase != 0) free(frames_[i - 1].localBase);
+            retireFrame(frames_[i - 1]);
         }
         frames_.resize((size_t)st.frameIndex + 1);
         Frame& f = frames_[(size_t)st.frameIndex];

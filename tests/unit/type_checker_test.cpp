@@ -1148,6 +1148,88 @@ int run() {
             "}\n");
         CHECK(!hasWarning(classAlias, "read before being assigned"));
     }
+    // CIDER-BUG-115: an interface store aliases its concrete by-value
+    // source, so storing an object that dies with the current frame into
+    // storage that is not provably in the same frame is a may-dangle
+    // diagnostic under --warn. The diagnostic is opt-in and one-sided:
+    // same-frame stores and pointer/interface sources stay silent.
+    {
+        const std::string prelude =
+            "interface Shape { func area() -> int; }\n"
+            "class Rect { var w: int; var h: int; "
+            "func area() -> int { return this.w * this.h; } }\n"
+            "struct Holder { var shape: Shape; }\n";
+
+        // Callee-local by-value parameter stored through a pointer
+        // parameter (the reported CIDER-BUG-115 shape), both the deref and
+        // the member-store spelling, and an index store.
+        auto hazard = checkSrcWarnings(
+            prelude +
+            "func retarget(p: *Shape, r: Rect) { *p = r; }\n"
+            "func main() -> void { var t: Shape; var r: Rect; retarget(&t, r); }\n");
+        CHECK(hasWarning(hazard, "dies at the end of the current function"));
+        auto memberHazard = checkSrcWarnings(
+            prelude +
+            "func retarget(hp: *Holder, r: Rect) { hp->shape = r; }\n"
+            "func main() -> void { var h: Holder; var r: Rect; retarget(&h, r); }\n");
+        CHECK(hasWarning(memberHazard, "dies at the end of the current function"));
+        auto indexHazard = checkSrcWarnings(
+            prelude +
+            "func retarget(p: *Shape, r: Rect) { p[0] = r; }\n"
+            "func main() -> void { var t: Shape; var r: Rect; retarget(&t, r); }\n");
+        CHECK(hasWarning(indexHazard, "dies at the end of the current function"));
+        // The diagnostic never changes the exit code: the default check
+        // accepts the same program silently.
+        CHECK(checkSrc(
+            prelude +
+            "func retarget(p: *Shape, r: Rect) { *p = r; }\n"
+            "func main() -> void { var t: Shape; var r: Rect; retarget(&t, r); }\n").empty());
+
+        // Valid same-frame stores stay silent: a local target, a member of
+        // a local object, an element of a local array, and pointer targets
+        // with `&local` provenance (the pointer_interface/interface_fields
+        // spellings).
+        auto sameFrame = checkSrcWarnings(
+            prelude +
+            "func main() -> void {\n"
+            "  var r: Rect;\n"
+            "  var s: Shape = r;\n"
+            "  var h: Holder; h.shape = r;\n"
+            "  var arr: [Shape; 2]; arr[0] = r;\n"
+            "  var p: *Shape = &s; *p = r; p[0] = r;\n"
+            "  var hp: *Holder = &h; hp->shape = r;\n"
+            "}\n");
+        CHECK(!hasWarning(sameFrame, "dies at the end of the current function"));
+
+        // A pointer source aliases storage the fat pointer merely copies,
+        // and an interface source is a fat-pointer copy: neither is a
+        // by-value frame-local object.
+        auto pointerSource = checkSrcWarnings(
+            prelude +
+            "func take(p: *Shape, r: Rect) { var rp: *Rect = &r; *p = rp; }\n"
+            "func main() -> void { var t: Shape; var r: Rect; take(&t, r); }\n");
+        CHECK(!hasWarning(pointerSource, "dies at the end of the current function"));
+        auto ifaceSource = checkSrcWarnings(
+            prelude +
+            "func take(p: *Shape, s: Shape) { *p = s; }\n"
+            "func main() -> void { var t: Shape; take(&t, t); }\n");
+        CHECK(!hasWarning(ifaceSource, "dies at the end of the current function"));
+
+        // Globals and heap object fields outlive the frame: storing a
+        // frame-local value there reports.
+        auto globalTarget = checkSrcWarnings(
+            prelude +
+            "var shared: Shape;\n"
+            "func f() -> void { var r: Rect; shared = r; }\n"
+            "func main() -> void { f(); }\n");
+        CHECK(hasWarning(globalTarget, "dies at the end of the current function"));
+        auto heapTarget = checkSrcWarnings(
+            prelude +
+            "class Box { var shape: Shape; }\n"
+            "func f() -> void { var r: Rect; var b: *Box = new Box; b->shape = r; }\n"
+            "func main() -> void { f(); }\n");
+        CHECK(hasWarning(heapTarget, "dies at the end of the current function"));
+    }
     return 0;
 }
 
