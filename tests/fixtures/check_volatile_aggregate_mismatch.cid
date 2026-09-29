@@ -1,0 +1,18 @@
+// CIDER-BUG-167: accepting plain <-> volatile aggregate values must not
+// widen any other mismatch. Aggregate kinds still have to agree, array
+// shapes still have to match, and a pointer's pointee qualifier keeps the
+// exact rule — dropping it would let plain accesses reach a volatile
+// object (the one sub-case deliberately left out of scope).
+struct Inner { var a: int; }
+struct Other { var a: int; }
+
+func main() -> int {
+  var other: Other;
+  var v: volatile Inner = other;      // different nominal aggregate
+  var s: volatile Inner = 5;          // scalar into aggregate
+  var arr: [int; 2] = [1, 2];
+  var short: volatile [int; 3] = arr; // volatile must not hide a size mismatch
+  var p: volatile int* = nilPtr;
+  var q: int* = p;                    // pointee qualifier drop stays rejected
+  return 0;
+}

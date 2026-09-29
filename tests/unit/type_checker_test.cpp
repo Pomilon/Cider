@@ -1279,6 +1279,82 @@ int run() {
         CHECK(localSelfReturn.empty());
     }
 
+    // CIDER-BUG-167: `volatile` qualifies the object an access goes through,
+    // not the value being stored — the same conversion the scalar and
+    // interface positions already accept. A plain aggregate may
+    // initialize/assign a volatile-qualified destination (local, field,
+    // struct-literal field, parameter, return, array) and reading a
+    // volatile aggregate into a plain destination is accepted too. Genuine
+    // mismatches and pointer pointee-qualifier drops stay rejected.
+    {
+        auto ok = checkSrc(
+            "struct Inner { var a: int; var b: int; }\n"
+            "type VI = volatile Inner;\n"
+            "struct VH { var f: volatile Inner; var g: int; }\n"
+            "struct PH { var f: Inner; var g: int; }\n"
+            "func take(x: volatile Inner) -> int { return x.a + x.b; }\n"
+            "func takePlain(x: Inner) -> int { return x.a + x.b; }\n"
+            "func give() -> volatile Inner { var v: VI; v.a = 1; v.b = 2; return v; }\n"
+            "func givePlain() -> volatile Inner { var p: Inner; p.a = 5; p.b = 6; return p; }\n"
+            "func main() -> int {\n"
+            "  var p: Inner; p.a = 3; p.b = 4;\n"
+            "  var vl: volatile Inner = p;\n"
+            "  vl = p;\n"
+            "  var pl: Inner = vl;\n"
+            "  pl = vl;\n"
+            "  var av: VI = p;\n"
+            "  var sl: VI = Inner{ a: 7, b: 8 };\n"
+            "  var h: VH; h.f = p;\n"
+            "  var lit: VH = VH{ f: p, g: 1 };\n"
+            "  var lp: PH = PH{ f: vl, g: 2 };\n"
+            "  lp.f = vl;\n"
+            "  var arr: [int; 2] = [1, 2];\n"
+            "  var varr: volatile [int; 2] = arr;\n"
+            "  var earr: [volatile int; 2] = arr;\n"
+            "  var barr: [int; 2] = varr;\n"
+            "  var r1: VI = give();\n"
+            "  var r2: Inner = give();\n"
+            "  var r3: VI = givePlain();\n"
+            "  var n: int = take(p);\n"
+            "  var np: int = takePlain(vl);\n"
+            "  return n + np + vl.a + sl.a + pl.b + av.a + h.f.b + lit.f.a + lp.f.b + varr[0] + earr[1] + barr[0] + r1.a + r2.b + r3.a;\n"
+            "}\n");
+        CHECK(ok.empty());
+
+        auto badNominal = checkSrc(
+            "struct Inner { var a: int; }\n"
+            "struct Other { var a: int; }\n"
+            "func main() -> int { var o: Other; var v: volatile Inner = o; return v.a; }\n");
+        CHECK(hasError(badNominal,
+                       "Type mismatch in declaration of 'v'. Expected volatile Inner, got Other"));
+        auto badScalar = checkSrc(
+            "struct Inner { var a: int; }\n"
+            "func main() -> int { var v: volatile Inner = 5; return v.a; }\n");
+        CHECK(hasError(badScalar,
+                       "Type mismatch in declaration of 'v'. Expected volatile Inner, got int"));
+        auto badLiteralField = checkSrc(
+            "struct Inner { var a: int; }\n"
+            "struct Other { var a: int; }\n"
+            "struct VH { var f: volatile Inner; }\n"
+            "func main() -> int { var o: Other; var h: VH = VH{ f: o }; return h.f.a; }\n");
+        CHECK(hasError(badLiteralField,
+                       "Type mismatch for field 'f'. Expected volatile Inner, got Other"));
+        auto badArraySize = checkSrc(
+            "func main() -> int {\n"
+            "  var arr: [int; 2] = [1, 2];\n"
+            "  var v: volatile [int; 3] = arr;\n"
+            "  return v[0];\n"
+            "}\n");
+        CHECK(hasError(badArraySize, "Type mismatch in declaration of 'v'"));
+        // Pointer pointee qualifiers keep the exact rule (out of scope for
+        // the aggregate value conversion): dropping `volatile` from the
+        // pointee would let plain accesses reach a volatile object.
+        auto badPtrDrop = checkSrc(
+            "func main() -> int { var p: volatile int* = nilPtr; var q: int* = p; return q[0]; }\n");
+        CHECK(hasError(badPtrDrop,
+                       "Type mismatch in declaration of 'q'. Expected *int, got volatile *int"));
+    }
+
     return 0;
 }
 

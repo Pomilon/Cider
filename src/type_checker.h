@@ -1517,6 +1517,30 @@ public:
         return isIntegerName(t.name) || resolveEnumSymbol(t) != nullptr;
     }
 
+    // CIDER-BUG-167: the volatile mark is a property of the object an
+    // access goes through, not of the value being stored. Reading a
+    // volatile object yields a plain value and a plain value may
+    // initialize/assign a volatile-qualified destination; the aggregate
+    // copy marks the observable accesses either way (CIDER-BUG-133/144).
+    // Scalars already compare equal through the numeric fallback below and
+    // interfaces through checkInterfaceValue, so only aggregates (structs,
+    // classes, arrays) were left with the exact identity test and its
+    // embedded `isVolatile` comparison. `withoutVolatileMarks` builds the
+    // value shape with every mark cleared for that comparison; pointer
+    // types keep the exact rule, because there the flag describes the
+    // pointee and dropping it would silently widen what the pointer
+    // permits.
+    static TypeInfo withoutVolatileMarks(TypeInfo t) {
+        t.isVolatile = false;
+        if (t.arrayElement) {
+            // arrayElement descriptors are shared between TypeInfo copies,
+            // so clear the flag on a clone instead of in place.
+            t.arrayElement =
+                std::make_shared<TypeInfo>(withoutVolatileMarks(*t.arrayElement));
+        }
+        return t;
+    }
+
     bool areTypesCompatible(TypeInfo t1, TypeInfo t2) {
         if (t1.name == "wildcard" || t2.name == "wildcard") return true;
         t1 = resolveType(t1);
@@ -1562,6 +1586,17 @@ public:
         }
 
         if (t1 == t2) return true;
+
+        // CIDER-BUG-167: same value shape with the volatile marks dropped
+        // is compatible (see withoutVolatileMarks). Checked before the
+        // array-shape rules below, whose sameArrayElement comparison would
+        // otherwise reject a nested array that differs only by its marks.
+        // Top-level pointers are excluded: there isVolatile qualifies the
+        // pointee, not the value being copied.
+        if (t1.pointerLevel == 0 && t2.pointerLevel == 0 &&
+            withoutVolatileMarks(t1) == withoutVolatileMarks(t2)) {
+            return true;
+        }
 
         // CIDER-FEAT-002: enum conversion rules (t1 = target/expected,
         // t2 = source/actual).

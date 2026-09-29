@@ -1,0 +1,4 @@
+Type mismatch in declaration of 'v'. Expected volatile Inner, got Other
+Type mismatch in declaration of 's'. Expected volatile Inner, got int
+Type mismatch in declaration of 'short'. Expected volatile [int; 3], got [int; 2]
+Type mismatch in declaration of 'q'. Expected *int, got volatile *int

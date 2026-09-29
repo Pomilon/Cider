@@ -1117,6 +1117,131 @@ int testVolatileLiteral146IrFlags() {
     return 0;
 }
 
+int testVolatileAggregateConvert167IrFlags() {
+    // CIDER-BUG-167: the checker now accepts a plain aggregate value for a
+    // volatile-qualified destination (and a volatile source read into a
+    // plain destination), the qualifier being a property of the access, not
+    // of the value. The IR side already marks the resulting aggregate
+    // copies through CIDER-BUG-133/144's destination||source rule; this
+    // test pins that every newly accepted path marks its MEMCPY (and the
+    // class vptr re-stamp) when either end is volatile, with all-plain
+    // controls carrying nothing.
+    struct Tally {
+        int volatileLoads = 0;
+        int volatileStores = 0;
+        int volatileMemcpy = 0;
+        int volatileTotal = 0;
+    };
+    auto tallyAll = [](const ModuleResult& m) {
+        Tally t;
+        for (const auto& func : m.module.getFunctions()) {
+            for (const auto& b : func->getBlocks()) {
+                for (const auto& in : b->getInstructions()) {
+                    if (!in.isVolatile) continue;
+                    t.volatileTotal++;
+                    if (in.op == cider::IROp::LOAD) t.volatileLoads++;
+                    if (in.op == cider::IROp::STORE) t.volatileStores++;
+                    if (in.op == cider::IROp::MEMCPY) t.volatileMemcpy++;
+                }
+            }
+        }
+        return t;
+    };
+
+    // (1) Plain -> volatile destination: local declaration, field
+    // assignment, struct-literal field, alias-spelled local and a struct
+    // literal as the source value each lower to exactly one volatile
+    // MEMCPY. The copies into plain destinations in the same functions
+    // stay plain.
+    auto a1 = tallyAll(genModule(
+        "struct Inner { var a: int; var b: int; }\n"
+        "struct H { var f: volatile Inner; var g: int; }\n"
+        "type VI = volatile Inner;\n"
+        "func aa() -> void { var src: Inner; var dst: volatile Inner = src; }\n"
+        "func bb() -> void { var h: H; var src: Inner; h.f = src; }\n"
+        "func cc() -> void { var src: Inner; var h: H = H{ f: src, g: 1 }; }\n"
+        "func dd() -> void { var src: Inner; var dst: VI = src; }\n"
+        "func ee() -> void { var dst: volatile Inner = Inner{ a: 7, b: 8 }; }\n"
+        "func main() -> i32 { return 0; }\n"));
+    CHECK(a1.volatileMemcpy == 5);
+    CHECK(a1.volatileTotal == 5);
+    // All-plain controls for the same shapes carry no volatile instruction.
+    CHECK(tallyAll(genModule(
+        "struct Inner { var a: int; var b: int; }\n"
+        "struct H { var f: Inner; var g: int; }\n"
+        "type VI = Inner;\n"
+        "func aa() -> void { var src: Inner; var dst: VI = src; }\n"
+        "func bb() -> void { var h: H; var src: Inner; h.f = src; }\n"
+        "func cc() -> void { var src: Inner; var h: H = H{ f: src, g: 1 }; }\n"
+        "func dd() -> void { var dst: VI = Inner{ a: 7, b: 8 }; }\n"
+        "func main() -> i32 { return 0; }\n")).volatileTotal == 0);
+
+    // (2) Volatile source -> plain destination: both the declaration and
+    // the reassignment mark their copy through CIDER-BUG-133's source flag.
+    auto b1 = tallyAll(genModule(
+        "struct Inner { var a: int; var b: int; }\n"
+        "func f() -> void {\n"
+        "  var src: volatile Inner;\n"
+        "  var dst: Inner = src;\n"
+        "  var dst2: Inner;\n"
+        "  dst2 = src;\n"
+        "  var plain: Inner;\n"
+        "  var control: Inner = plain;\n"
+        "}\n"
+        "func main() -> i32 { return 0; }\n"));
+    CHECK(b1.volatileMemcpy == 2);
+    CHECK(b1.volatileTotal == 2);
+
+    // (3) Parameter materialisation and the sret return copy: a plain
+    // argument into a volatile parameter marks the callee's copy, a plain
+    // value returned from a volatile-returning function marks the sret
+    // copy, and storing that result into a volatile local marks the local
+    // copy too.
+    auto c1 = tallyAll(genModule(
+        "struct Inner { var a: int; var b: int; }\n"
+        "func take(x: volatile Inner) -> void { }\n"
+        "func give() -> volatile Inner { var v: Inner; return v; }\n"
+        "func f() -> void { var src: Inner; take(src); var r: volatile Inner = give(); }\n"
+        "func main() -> i32 { return 0; }\n"));
+    CHECK(c1.volatileMemcpy == 3);
+    CHECK(c1.volatileTotal == 3);
+    // Non-volatile control: no volatile instruction.
+    CHECK(tallyAll(genModule(
+        "struct Inner { var a: int; var b: int; }\n"
+        "func take(x: Inner) -> void { }\n"
+        "func give() -> Inner { var v: Inner; return v; }\n"
+        "func f() -> void { var src: Inner; take(src); var r: Inner = give(); }\n"
+        "func main() -> i32 { return 0; }\n")).volatileTotal == 0);
+
+    // (4) Nested array: the deep destination marks (volatile [[int;2];3])
+    // reach the whole-object MEMCPY; the same shape with only the element
+    // spelling also marks.
+    auto d1 = tallyAll(genModule(
+        "func f() -> void {\n"
+        "  var src: [[int; 2]; 3];\n"
+        "  var dst: volatile [[int; 2]; 3] = src;\n"
+        "  var dst2: [[volatile int; 2]; 3] = src;\n"
+        "}\n"
+        "func main() -> i32 { return 0; }\n"));
+    CHECK(d1.volatileMemcpy == 2);
+    CHECK(d1.volatileTotal == 2);
+
+    // (5) Class value: the copy and the vptr re-stamp both follow the
+    // volatile destination, exactly like CIDER-BUG-144/146's other paths.
+    auto e1 = tallyAll(genModule(
+        "class V { var x: int; virtual func f() -> int { return 1; } }\n"
+        "func f() -> void { var src: V; var dst: volatile V = src; }\n"
+        "func main() -> i32 { return 0; }\n"));
+    CHECK(e1.volatileMemcpy == 1);
+    CHECK(e1.volatileStores == 1);
+    CHECK(e1.volatileTotal == 2);
+    CHECK(tallyAll(genModule(
+        "class V { var x: int; virtual func f() -> int { return 1; } }\n"
+        "func f() -> void { var src: V; var dst: V = src; }\n"
+        "func main() -> i32 { return 0; }\n")).volatileTotal == 0);
+    return 0;
+}
+
 int testVolatileGvn() {
     // CIDER-BUG-061: GVN must never replace a volatile access with a MOV of
     // an earlier occurrence — even for an opcode that is normally deduped.
@@ -1678,6 +1803,7 @@ int run() {
     CHECK(testVolatileFormation144IrFlags() == 0);
     CHECK(testVolatileArraySpelling145IrFlags() == 0);
     CHECK(testVolatileLiteral146IrFlags() == 0);
+    CHECK(testVolatileAggregateConvert167IrFlags() == 0);
     CHECK(testVolatileGvn() == 0);
     CHECK(testVolatileLicm() == 0);
     CHECK(testCallClobberLicm() == 0);
