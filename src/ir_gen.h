@@ -102,6 +102,10 @@ public:
     // tagged and every interface-returning call site releases the tag, so
     // the release must be decided program-wide, before any function is
     // generated: a call site may precede the boxing return that feeds it.
+    // CIDER-BUG-202: the flag also covers a returned fixed array whose
+    // elements are interfaces — the same tagging, the same per-call-site
+    // release, and the type descriptor every interface vtable carries for
+    // the return site to read (see generate()'s vtable pass).
     void setInterfaceBoxing(bool v) { ifaceBoxing_ = v; }
 
     ModuleIR generate(AstProgram& program) {
@@ -188,49 +192,8 @@ public:
             }
             for (auto& ss : allStructClasses) {
                 if (!ss) continue;
-                bool satisfies = true;
-                // CIDER-BUG-128: satisfaction compares CANONICAL signature
-                // identities — each side resolved in the module that
-                // declared it (see canonicalSignatureType), never the raw
-                // collected spellings — so two same-named types from
-                // different modules never satisfy each other and one type
-                // spelled bare/dotted/aliased does. The checker's
-                // checkInterfaceValue applies the same rule, so a pair it
-                // admits always has a vtable here and a pair it rejects
-                // never gets one.
-                std::string ifaceMod = definingModuleFor(iface, iface->name);
+                bool satisfies = ifaceSatisfiedBy(iface, ss);
                 std::string ssMod = definingModuleFor(ss, ss->name);
-                for (auto& im : iface->methods) {
-                    std::string imMod = methodModule(im, ifaceMod);
-                    std::vector<TypeInfo> imParams;
-                    imParams.reserve(im.parameterTypes.size());
-                    for (const auto& pt : im.parameterTypes) {
-                        imParams.push_back(canonicalSignatureType(pt, imMod));
-                    }
-                    TypeInfo imRet = canonicalSignatureType(im.returnType, imMod);
-                    bool found = false;
-                    for (auto& sm : ss->methods) {
-                        if (sm.name != im.name) continue;
-                        if (sm.parameterTypes.size() != imParams.size()) continue;
-                        std::string smMod = methodModule(sm, ssMod);
-                        bool paramsMatch = true;
-                        for (size_t pi = 0; pi < sm.parameterTypes.size(); ++pi) {
-                            if (!(canonicalSignatureType(sm.parameterTypes[pi], smMod) ==
-                                  imParams[pi])) {
-                                paramsMatch = false;
-                                break;
-                            }
-                        }
-                        if (!paramsMatch) continue;
-                        if (!(canonicalSignatureType(sm.returnType, smMod) == imRet)) continue;
-                        found = true;
-                        break;
-                    }
-                    if (!found) {
-                        satisfies = false;
-                        break;
-                    }
-                }
                 if (satisfies && !iface->methods.empty()) {
                     std::vector<std::string> vtableMethods;
                     for (auto& im : iface->methods) {
@@ -254,6 +217,30 @@ public:
                                 break;
                             }
                         }
+                    }
+                    // CIDER-BUG-202: a returned array's element is only a fat
+                    // pointer, so the concrete type behind it is not known at
+                    // the return site — only the element's vtable word
+                    // identifies it. Append the type descriptor the
+                    // per-element boxing needs (the object's size and the
+                    // CIDER-BUG-184 release thunk for a box holding a copy of
+                    // it) AFTER the method slots, so method dispatch keeps
+                    // indexing the slots it always did. The pair is present
+                    // for every interface vtable whenever the program boxes,
+                    // so a return site can read it without re-deriving which
+                    // vtables carry one; a concrete type whose own thunk does
+                    // not resolve falls back to the shared no-op (its box is
+                    // then simply never released, which is the pre-existing
+                    // behaviour for an unresolvable concrete type). Only
+                    // emitted when the program boxes at all (ifaceBoxing_, see
+                    // TypeChecker::hasInterfaceBoxing), so a program that never
+                    // boxes keeps byte-identical vtables, and therefore
+                    // byte-identical IR.
+                    if (ifaceBoxing_) {
+                        std::string fini = ensureIfaceBoxFini(nominalOf(ss), ssMod);
+                        if (fini.empty()) fini = ensureIfaceBoxNoop();
+                        vtableMethods.push_back(std::to_string(ss->totalSize));
+                        vtableMethods.push_back(fini);
                     }
                     module_.addVTable(vtableIfaceKey(iface, iface->name, ss, ss->name), vtableMethods);
                 }
@@ -436,17 +423,24 @@ public:
     // `b` otherwise. No branches: the release must not grow the CFG at
     // every unwind site (a conditional variant exploded GVN).
     IRValue selectValue(IRValue cond, IRValue a, IRValue b) {
+        return selectValue(cond, a, b, IRType::PTR);
+    }
+
+    // The same select over a value of another width (the per-element boxing
+    // selects a 0/1 flag, not an address). `t` types the intermediates so
+    // the result keeps the operands' own width.
+    IRValue selectValue(IRValue cond, IRValue a, IRValue b, IRType t) {
         IRValue flipped = IRValue::Register(nextTemp(), IRType::I64);
         currentBlock_->addInstruction({IROp::BIT_XOR, flipped,
                                        {cond, IRValue::Constant(1, IRType::I64)}});
         IRValue mask = IRValue::Register(nextTemp(), IRType::I64);
         currentBlock_->addInstruction({IROp::SUB, mask,
                                        {flipped, IRValue::Constant(1, IRType::I64)}});
-        IRValue diff = IRValue::Register(nextTemp(), IRType::PTR);
+        IRValue diff = IRValue::Register(nextTemp(), t);
         currentBlock_->addInstruction({IROp::BIT_XOR, diff, {b, a}});
-        IRValue masked = IRValue::Register(nextTemp(), IRType::PTR);
+        IRValue masked = IRValue::Register(nextTemp(), t);
         currentBlock_->addInstruction({IROp::BIT_AND, masked, {diff, mask}});
-        IRValue out = IRValue::Register(nextTemp(), IRType::PTR);
+        IRValue out = IRValue::Register(nextTemp(), t);
         currentBlock_->addInstruction({IROp::BIT_XOR, out, {b, masked}});
         return out;
     }
@@ -2089,6 +2083,20 @@ public:
                 // CIDER-BUG-133: a volatile return target marks the stamp.
                 emitClassVptrStoreForType(currentReturnType_, sretPtr, currentModule_,
                                           currentReturnType_.isVolatile);
+                // CIDER-BUG-202: the copy above moved the array's fat
+                // pointers verbatim, so an interface element converted from a
+                // concrete value in this frame still pointed at this frame's
+                // slot and dangled the moment the frame died. Box each such
+                // element in the caller's slot — the storage that outlives
+                // this frame — with the CIDER-BUG-184 header, ownership token
+                // and release thunk, exactly as the whole-value interface
+                // return above does for the fat pointer it returns. It runs
+                // BEFORE this frame's scope exits so the transferred token it
+                // writes also disarms any release entry registered here
+                // against the same box. A non-interface array takes the
+                // `!elem.isInterface` early-out and stays byte-identical.
+                boxIfaceArrayReturn(sretPtr, currentReturnType_, currentModule_,
+                                    retType.isVolatile || currentReturnType_.isVolatile);
                 lastExprType_ = currentReturnType_;
                 emitDefers();
                 emitDestructors();
@@ -2486,6 +2494,13 @@ public:
                     registerIfaceBoxRelease(retBuf);
                     lastExprType_ = calleeIfaceRet;
                 } else {
+                    // CIDER-BUG-202: a returned array of interfaces carries
+                    // one box per element (see boxIfaceArrayReturn), so each
+                    // element slot is a caller-owned temporary on the same
+                    // terms as the whole-value fat pointer's: claimed here,
+                    // released after every use at the exit of the enclosing
+                    // scope. A non-interface array registers nothing.
+                    registerIfaceArrayBoxReleases(retBuf, calleeRet, calleeDefMod);
                     // CIDER-BUG-090: keep the callee-module-rooted spelling.
                     lastExprType_.isUserDefined = true;
                 }
@@ -8024,6 +8039,340 @@ public:
         entry.varAddr = slot;
         entry.ifaceBoxToken = token;
         destructorStack_.back().push_back(entry);
+    }
+
+    // CIDER-BUG-202: the byte offset of the type descriptor an interface
+    // vtable carries after its method slots when the program boxes (see
+    // generate()'s vtable pass): the concrete object's size, then its
+    // CIDER-BUG-184 release thunk. An interface-typed value is a fat
+    // pointer, so this is the only place the concrete type behind one can be
+    // recovered without knowing it statically.
+    static constexpr int kIfaceBoxVTableSizeOffset = 0;
+    static constexpr int kIfaceBoxVTableFiniOffset = 8;
+    static constexpr int kIfaceBoxVTableHeaderSize = 16;
+
+    // CIDER-BUG-202: the number of method slots an interface dispatches
+    // through, i.e. where its vtable's type descriptor starts. Zero when the
+    // spelling does not resolve to an interface (the checker rejects such a
+    // program, so no element of that shape is ever produced).
+    int ifaceVTableMethodSlots(const TypeInfo& elem, const std::string& defModule) {
+        auto ifaceSym = resolveNominalType(resolveTypeAlias(elem, defModule).name);
+        if (!ifaceSym || ifaceSym->kind != SymbolKind::INTERFACE) return 0;
+        return (int)std::static_pointer_cast<InterfaceSymbol>(ifaceSym)->methods.size();
+    }
+
+    // CIDER-BUG-128: satisfaction compares CANONICAL signature identities —
+    // each side resolved in the module that declared it (see
+    // canonicalSignatureType), never the raw collected spellings — so two
+    // same-named types from different modules never satisfy each other and
+    // one type spelled bare/dotted/aliased does. The checker's
+    // checkInterfaceValue applies the same rule, so a pair it admits always
+    // gets a vtable in generate() and a pair it rejects never gets one.
+    //
+    // CIDER-BUG-202: shared with the return site's candidate list, so the
+    // vtable labels a per-element box compares against are exactly the
+    // pairings the vtable pass emitted — including a local class keyed
+    // under its mangling prefix (CIDER-BUG-119), which only this shared
+    // computation produces.
+    bool ifaceSatisfiedBy(const std::shared_ptr<InterfaceSymbol>& iface,
+                          const std::shared_ptr<StructSymbol>& ss) {
+        std::string ifaceMod = definingModuleFor(iface, iface->name);
+        std::string ssMod = definingModuleFor(ss, ss->name);
+        for (auto& im : iface->methods) {
+            std::string imMod = methodModule(im, ifaceMod);
+            std::vector<TypeInfo> imParams;
+            imParams.reserve(im.parameterTypes.size());
+            for (const auto& pt : im.parameterTypes) {
+                imParams.push_back(canonicalSignatureType(pt, imMod));
+            }
+            TypeInfo imRet = canonicalSignatureType(im.returnType, imMod);
+            bool found = false;
+            for (auto& sm : ss->methods) {
+                if (sm.name != im.name) continue;
+                if (sm.parameterTypes.size() != imParams.size()) continue;
+                std::string smMod = methodModule(sm, ssMod);
+                bool paramsMatch = true;
+                for (size_t pi = 0; pi < sm.parameterTypes.size(); ++pi) {
+                    if (!(canonicalSignatureType(sm.parameterTypes[pi], smMod) ==
+                          imParams[pi])) {
+                        paramsMatch = false;
+                        break;
+                    }
+                }
+                if (!paramsMatch) continue;
+                if (!(canonicalSignatureType(sm.returnType, smMod) == imRet)) continue;
+                found = true;
+                break;
+            }
+            if (!found) return false;
+        }
+        return true;
+    }
+
+    // CIDER-BUG-202: the vtable labels an interface's own implementors are
+    // stored under, in the same order and with the same keys generate()'s
+    // vtable pass emits. A return site compares an element's vtable word
+    // against exactly this set: a match identifies the element's concrete
+    // type (whose type descriptor the vtable then carries), and anything
+    // else is an element the compiler did not produce — a nil interface, or
+    // the indeterminate contents of a never-assigned array slot — which is
+    // left alone instead of read through.
+    std::vector<std::string> ifaceVTableCandidates(const TypeInfo& elem,
+                                                   const std::string& defModule) {
+        std::vector<std::string> out;
+        auto ifaceSym = resolveNominalType(resolveTypeAlias(elem, defModule).name);
+        if (!ifaceSym || ifaceSym->kind != SymbolKind::INTERFACE) return out;
+        auto iface = std::static_pointer_cast<InterfaceSymbol>(ifaceSym);
+        if (iface->methods.empty()) return out;
+        // The same set generate() walks: every class, plus the structs that
+        // are not already among them.
+        std::vector<std::shared_ptr<StructSymbol>> all = classSyms_;
+        for (auto& sn : structSyms_) {
+            bool isClass = false;
+            for (auto& cn : classSyms_) {
+                if (cn == sn) { isClass = true; break; }
+            }
+            if (!isClass) all.push_back(sn);
+        }
+        for (auto& ss : all) {
+            if (!ss) continue;
+            if (!ifaceSatisfiedBy(iface, ss)) continue;
+            out.push_back("vtable_" + vtableIfaceKey(ifaceSym, iface->name, ss, ss->name));
+        }
+        return out;
+    }
+
+    // CIDER-BUG-202: box the interface ELEMENTS of a returned fixed array.
+    //
+    // CIDER-BUG-077/184 already give a whole-value interface return the right
+    // lifetime: the concrete value is copied into a heap box at the return
+    // site, because the frame address it would otherwise name dies with the
+    // frame. An array return had no such step — the sret copy moved the fat
+    // pointers verbatim, so an element converted from a concrete value in
+    // this frame still pointed at this frame's slot and the caller
+    // dispatched through a dead address (a nil frame slot reads as a
+    // zeroed object, so `area()` returned 0 instead of the real value).
+    //
+    // The same treatment is applied per element, in the caller's sret slot
+    // (the storage that outlives this frame), with the CIDER-BUG-184
+    // ownership rule: each box is written with the reserved transferred
+    // token so this frame's own release entries skip it, and the caller's
+    // call-site registration (registerIfaceArrayBoxReleases) claims it and
+    // releases it at the exit of the caller's enclosing scope — running the
+    // boxed value's destructors and freeing the block.
+    //
+    // An element that already carries a box is not re-boxed (that would copy
+    // a box into a box and lose the inner one's ownership); it is only
+    // re-marked transferred, which is what the chained-ownership rule needs.
+    // An element that is not a box and has no vtable of its own (a zeroed,
+    // never-assigned element) is left exactly as it is.
+    //
+    // Nested rows are walked the way the sret copy and the caller's release
+    // walk walk them: the leaf interface elements are found by descending
+    // array dimensions with each level's element size as its stride, so
+    // `[[Shape; 2]; 2]` boxes its four leaves and not its two rows. `depth`
+    // bounds a cyclic row alias (`type T = [T; 2]`).
+    void boxIfaceArrayReturn(IRValue base, const TypeInfo& arrType,
+                             const std::string& defModule, bool isVolatile, int depth = 0) {
+        if (!ifaceBoxing_ || !currentFunction_ || depth > 8) return;
+        TypeInfo resolved = resolveTypeAlias(arrType, defModule);
+        if (!isFixedArrayValue(resolved)) return;
+        TypeInfo elem = resolveTypeAlias(resolved.elementType(), defModule);
+        int stride = getTypeSize(elem, defModule);
+        if (stride <= 0) return;
+        for (int i = 0; i < resolved.arraySize; ++i) {
+            IRValue slot = IRValue::Register(nextTemp(), IRType::PTR);
+            currentBlock_->addInstruction({IROp::ADD, slot,
+                                           {base, IRValue::Constant(i * stride, IRType::I32)}});
+            // A row element is a nested array, not a fat pointer: recurse.
+            // Only a scalar interface element is the 16-byte fat pointer the
+            // element path understands.
+            if (isFixedArrayValue(elem)) {
+                boxIfaceArrayReturn(slot, elem, defModule, isVolatile, depth + 1);
+                continue;
+            }
+            TypeInfo leaf = resolveInterfaceNominal(elem);
+            if (!leaf.isInterface || stride != 16) continue;
+            boxIfaceArrayElement(slot, leaf, defModule, isVolatile);
+        }
+    }
+
+    // CIDER-BUG-202: box one interface element of a returned array, in place.
+    // `methodSlots` is the element interface's vtable method count, so the
+    // type descriptor is read at a fixed offset from the element's own
+    // vtable word.
+    void boxIfaceArrayElement(IRValue slot, const TypeInfo& elem,
+                              const std::string& defModule, bool isVolatile) {
+        IRValue data = IRValue::Register(nextTemp(), IRType::PTR);
+        currentBlock_->addInstruction({IROp::LOAD, data,
+                                       {slot, IRValue::Constant(0, IRType::I32)}, isVolatile});
+        IRValue vtable = IRValue::Register(nextTemp(), IRType::PTR);
+        currentBlock_->addInstruction({IROp::LOAD, vtable,
+                                       {slot, IRValue::Constant(8, IRType::I32)}, isVolatile});
+        // CIDER-BUG-184: bit 0 of the data word marks a box, so an element
+        // that is already one is recognised here (and masked at dispatch).
+        IRValue tagged = IRValue::Register(nextTemp(), IRType::I64);
+        currentBlock_->addInstruction({IROp::BIT_AND, tagged,
+                                       {data, IRValue::Constant(1, IRType::I64)}});
+
+        // An element that IS a box is handed to the caller as it is: writing
+        // the transferred token into its header stops this frame's own
+        // release entries (an inner interface-returning call registered
+        // against the same box) from freeing it, and the caller's
+        // registration claims it again. The address is selected rather than
+        // branched so this stays straight-line; a non-box element selects the
+        // per-function scratch cell, whose never-matching token makes the
+        // write inert.
+        IRValue dummy = ensureIfaceDummyBox();
+        IRValue boxAddr = IRValue::Register(nextTemp(), IRType::PTR);
+        currentBlock_->addInstruction({IROp::BIT_AND, boxAddr,
+                                       {data, IRValue::Constant((int64_t)-2, IRType::I64)}});
+        IRValue header = selectValue(tagged, boxAddr, dummy);
+        IRValue cell = IRValue::Register(nextTemp(), IRType::PTR);
+        currentBlock_->addInstruction({IROp::SUB, cell,
+                                       {header, IRValue::Constant(8, IRType::I64)}});
+        currentBlock_->addInstruction({IROp::STORE, std::nullopt,
+                                       {cell, IRValue::Constant(kIfaceBoxTransferred, IRType::I64),
+                                        IRValue::Constant(0, IRType::I32)}});
+
+        // Which concrete type is behind this element? Its own vtable word,
+        // compared against every vtable this interface has — the exact set
+        // an interface store could have put there. That comparison is what
+        // makes the copy safe, and it is not redundant with a nil test: an
+        // element that was NEVER ASSIGNED holds whatever the frame happened
+        // to contain, because an array local is an uninitialised `alloca` on
+        // native (the VM's frame region is zeroed, so the two backends
+        // disagree here). A non-zero test on either word alone would read a
+        // type descriptor through stack residue and fault. Matching a real
+        // vtable is the only condition under which the descriptor below can
+        // be read at all.
+        int methodSlots = ifaceVTableMethodSlots(elem, defModule);
+        std::vector<std::string> candidates = ifaceVTableCandidates(elem, defModule);
+        if (methodSlots <= 0 || candidates.empty()) return;
+
+        // Branchless select chain: `known` ends up 1 only when the element's
+        // vtable is one of ours. A non-matching element (nil,
+        // indeterminate, or a foreign fat pointer) is left exactly as it is.
+        IRValue known = IRValue::Register(nextTemp(), IRType::I64);
+        currentBlock_->addInstruction({IROp::MOV, known, {IRValue::Constant(0, IRType::I64)}});
+        for (const std::string& label : candidates) {
+            IRValue hit = IRValue::Register(nextTemp(), IRType::I64);
+            currentBlock_->addInstruction({IROp::CMP_EQ, hit, {vtable, IRValue::Label(label)}});
+            IRValue one = IRValue::Register(nextTemp(), IRType::I64);
+            currentBlock_->addInstruction({IROp::MOV, one, {IRValue::Constant(1, IRType::I64)}});
+            known = selectValue(hit, one, known, IRType::I64);
+        }
+        // A box is already owned, so it is not boxed again (that would copy a
+        // box into a box and strand the inner one's ownership).
+        IRValue untagged = IRValue::Register(nextTemp(), IRType::I64);
+        currentBlock_->addInstruction({IROp::BIT_XOR, untagged,
+                                       {tagged, IRValue::Constant(1, IRType::I64)}});
+        IRValue boxable = IRValue::Register(nextTemp(), IRType::I64);
+        currentBlock_->addInstruction({IROp::BIT_AND, boxable, {known, untagged}});
+
+        std::string boxLabel = nextLabel("ifacebox");
+        std::string joinLabel = nextLabel("ifaceboxend");
+        currentBlock_->addInstruction({IROp::COND_BR, std::nullopt,
+                                       {boxable, IRValue::Label(boxLabel), IRValue::Label(joinLabel)}});
+        startBlock(boxLabel);
+
+        // The concrete type behind this element: its vtable carries the
+        // object's size and the release thunk for a box holding a copy of it.
+        IRValue sizeSlot = IRValue::Register(nextTemp(), IRType::PTR);
+        currentBlock_->addInstruction({IROp::ADD, sizeSlot,
+                                       {vtable, IRValue::Constant(methodSlots * 8, IRType::I32)}});
+        IRValue objSize = IRValue::Register(nextTemp(), IRType::I64);
+        currentBlock_->addInstruction({IROp::LOAD, objSize,
+                                       {sizeSlot, IRValue::Constant(kIfaceBoxVTableSizeOffset, IRType::I32)}});
+        IRValue thunkSlot = IRValue::Register(nextTemp(), IRType::PTR);
+        currentBlock_->addInstruction({IROp::ADD, thunkSlot,
+                                       {vtable,
+                                        IRValue::Constant(methodSlots * 8 + kIfaceBoxVTableFiniOffset,
+                                                          IRType::I32)}});
+        IRValue thunk = IRValue::Register(nextTemp(), IRType::PTR);
+        currentBlock_->addInstruction({IROp::LOAD, thunk,
+                                       {thunkSlot, IRValue::Constant(0, IRType::I32)}});
+
+        // The box layout is the CIDER-BUG-184 one: a two-word header (the
+        // release thunk, the ownership token) followed by the object, with
+        // the data word tagged so a call site can recognise the box without
+        // knowing the concrete type. `malloc`/`free` stay the fixed bare
+        // pair (CIDER-BUG-156): the caller may live in another module.
+        IRValue allocSize = IRValue::Register(nextTemp(), IRType::I64);
+        currentBlock_->addInstruction({IROp::ADD, allocSize,
+                                       {objSize, IRValue::Constant(kIfaceBoxVTableHeaderSize, IRType::I64)}});
+        IRValue block = IRValue::Register(nextTemp(), IRType::PTR);
+        IRInstruction alloc;
+        alloc.op = IROp::CALL;
+        alloc.dest = block;
+        alloc.args.push_back(IRValue::Label("malloc"));
+        alloc.args.push_back(allocSize);
+        currentBlock_->addInstruction(alloc);
+        currentBlock_->addInstruction({IROp::STORE, std::nullopt,
+                                       {block, thunk, IRValue::Constant(0, IRType::I32)}});
+        currentBlock_->addInstruction({IROp::STORE, std::nullopt,
+                                       {block, IRValue::Constant(kIfaceBoxTransferred, IRType::I64),
+                                        IRValue::Constant(8, IRType::I32)}});
+        IRValue obj = IRValue::Register(nextTemp(), IRType::PTR);
+        currentBlock_->addInstruction({IROp::ADD, obj,
+                                       {block, IRValue::Constant(kIfaceBoxVTableHeaderSize, IRType::I64)}});
+        // CIDER-BUG-133: the copy reads the element's own (possibly volatile)
+        // data word, so its volatility marks the MEMCPY; the heap destination
+        // is a compiler temp.
+        currentBlock_->addInstruction({IROp::MEMCPY, std::nullopt, {obj, boxAddr, objSize}, isVolatile});
+        // ADD (not OR): bit 0 of the 8-aligned object address is free, and
+        // the escape analysis propagates ADD, so the box keeps its heap
+        // escape (a stack promotion would dangle it across the return).
+        IRValue taggedObj = IRValue::Register(nextTemp(), IRType::PTR);
+        currentBlock_->addInstruction({IROp::ADD, taggedObj,
+                                       {obj, IRValue::Constant(1, IRType::I64)}});
+        currentBlock_->addInstruction({IROp::STORE, std::nullopt,
+                                       {slot, taggedObj, IRValue::Constant(0, IRType::I32)}, isVolatile});
+        currentBlock_->addInstruction({IROp::BR, std::nullopt, {IRValue::Label(joinLabel)}});
+        startBlock(joinLabel);
+    }
+
+    // CIDER-BUG-202: the caller half of the per-element boxing. A call that
+    // returns a fixed array of interfaces hands back one box per element
+    // (see boxIfaceArrayReturn); each element slot is a caller-owned
+    // temporary exactly like the whole-value fat pointer's, so it is claimed
+    // here and released at the exit of the scope enclosing the call. An
+    // element that is not a box has a clear tag bit, so the claim is
+    // redirected to the scratch cell and its release is a no-op.
+    // The nested-row walk mirrors the callee's boxIfaceArrayReturn exactly
+    // (same recursion, same strides), so every leaf the callee boxed has a
+    // matching registration here and no other slot is claimed. A mismatch
+    // would either leak a box (unclaimed) or free an object the callee never
+    // boxed (a non-interface leaf claimed here), so the two must descend
+    // together. `depth` bounds a cyclic row alias, as above.
+    void registerIfaceArrayBoxReleases(IRValue base, const TypeInfo& arrType,
+                                       const std::string& defModule, int depth = 0) {
+        if (!ifaceBoxing_ || !currentFunction_ || destructorStack_.empty() || depth > 8) return;
+        TypeInfo resolved = resolveTypeAlias(arrType, defModule);
+        if (!isFixedArrayValue(resolved)) return;
+        TypeInfo elem = resolveTypeAlias(resolved.elementType(), defModule);
+        int stride = getTypeSize(elem, defModule);
+        if (stride <= 0) return;
+        for (int i = 0; i < resolved.arraySize; ++i) {
+            IRValue slot = IRValue::Register(nextTemp(), IRType::PTR);
+            currentBlock_->addInstruction({IROp::ADD, slot,
+                                           {base, IRValue::Constant(i * stride, IRType::I32)}});
+            if (isFixedArrayValue(elem)) {
+                registerIfaceArrayBoxReleases(slot, elem, defModule, depth + 1);
+                continue;
+            }
+            if (!resolveInterfaceNominal(elem).isInterface || stride != 16) continue;
+            registerIfaceBoxRelease(slot);
+        }
+    }
+
+    // CIDER-BUG-202: the nominal TypeInfo naming a collected struct/class,
+    // for the places that must name a concrete type to synthesize a helper
+    // for it (the CIDER-BUG-184 box release thunk).
+    static TypeInfo nominalOf(const std::shared_ptr<StructSymbol>& ss) {
+        TypeInfo t;
+        t.name = ss->name;
+        return t;
     }
 
     // CIDER-BUG-184: synthesize the release thunk of one boxed concrete

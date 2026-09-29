@@ -2,6 +2,7 @@
 
 #include <algorithm>
 #include <cerrno>
+#include <cstdlib>
 #include <cstring>
 #include <new>
 #include <sstream>
@@ -998,7 +999,24 @@ int64_t VM::materializeVTable(const std::string& label) {
     int64_t off = malloc(n * 8);
     if (off + n * 8 > (int64_t)heap_.size()) heap_.resize(off + n * 8);
     for (int64_t k = 0; k < n; ++k) {
-        auto fit = functionIds_.find(it->second[(size_t)k]);
+        const std::string& entry = it->second[(size_t)k];
+        // CIDER-BUG-202: a boxing program's interface vtable ends with a
+        // two-word type descriptor after its method slots — the concrete
+        // object's size and its box release thunk (see IRGenerator's vtable
+        // pass). The size is emitted as a plain integer, which is
+        // unambiguous here: a method slot always holds a function VALUE id
+        // and never a small literal, so a digits-only entry is the size.
+        // codegen's `dq` list stores the same integer natively.
+        bool numeric = !entry.empty();
+        for (char c : entry) {
+            if (c < '0' || c > '9') { numeric = false; break; }
+        }
+        if (numeric) {
+            int64_t size = std::strtoll(entry.c_str(), nullptr, 10);
+            std::memcpy(heap_.data() + off + k * 8, &size, 8);
+            continue;
+        }
+        auto fit = functionIds_.find(entry);
         // CID-006: vtable slots hold function VALUE ids (1-based, 0 = nil);
         // doVirtualCall converts back to an index.
         int64_t fid = fit != functionIds_.end() ? fit->second : -1;
@@ -1022,27 +1040,53 @@ int64_t VM::malloc(int64_t size) {
     // returns a unique, freeable pointer.
     if (size < 0) throw std::bad_alloc();
     if (size == 0) size = 1;
-    int64_t total = size + kHeaderSize;
+    // CIDER-BUG-202: the returned pointer is 8-ALIGNED, as a real malloc's
+    // is. CIDER-BUG-184's box representation keeps its ownership tag in bit 0
+    // of a pointer, which is only sound while every address that may carry
+    // the tag is even. Native gets that from malloc and the stack for free,
+    // but the VM hands out raw heap offsets, so an ODD offset (a frame bump
+    // slot after a 4-byte local, say) read as "this is already a box" and
+    // skipped the boxing — and the mask at dispatch then read the object one
+    // byte off. The same premise makes every frame address even, since the
+    // chunk and its bump slots derive from this.
+    //
+    // The size header MOVES with the pointer (it sits at `user -
+    // kHeaderSize`, exactly where free() looks for it), and `total` spans the
+    // block the pointer sits in, so the free list re-splits the same way a
+    // recycled block yields an aligned pointer again. The bytes the
+    // alignment skips belong to no block, like the padding in a real
+    // allocator.
+    constexpr int64_t kAlign = 8;
     // First fit.
     for (size_t fi = 0; fi < freeList_.size(); ++fi) {
-        if (freeList_[fi].size >= total) {
-            int64_t off = freeList_[fi].offset;
-            int64_t remaining = freeList_[fi].size - total;
-            if (remaining > kHeaderSize) {
-                freeList_[fi].offset += total;
-                freeList_[fi].size = remaining;
-            } else {
-                freeList_.erase(freeList_.begin() + (long)fi);
-            }
-            if (off + total > (int64_t)heap_.size()) heap_.resize(off + total);
-            std::memcpy(heap_.data() + off, &total, 8);  // size header
-            return off + kHeaderSize;
+        int64_t blockStart = freeList_[fi].offset;
+        int64_t blockAvail = freeList_[fi].size;
+        int64_t user = (blockStart + kHeaderSize + kAlign - 1) & ~(kAlign - 1);
+        if (user + size > blockStart + blockAvail) continue;
+        // The header lands where free() will look for it, `user -
+        // kHeaderSize` — which is NOT the free-list offset when this block's
+        // start is unaligned (a remainder split off a padded one), so the
+        // free list is re-split from there too.
+        int64_t block = user - kHeaderSize;
+        int64_t total = size + kHeaderSize;
+        int64_t remaining = blockStart + blockAvail - (block + total);
+        if (remaining > kHeaderSize) {
+            freeList_[fi].offset = block + total;
+            freeList_[fi].size = remaining;
+        } else {
+            freeList_.erase(freeList_.begin() + (long)fi);
         }
+        if (block + total > (int64_t)heap_.size()) heap_.resize(block + total);
+        std::memcpy(heap_.data() + block, &total, 8);  // size header
+        return user;
     }
     int64_t off = (int64_t)heap_.size();
-    heap_.resize(off + total);
-    std::memcpy(heap_.data() + off, &total, 8);
-    return off + kHeaderSize;
+    int64_t user = (off + kHeaderSize + kAlign - 1) & ~(kAlign - 1);
+    int64_t block = user - kHeaderSize;
+    int64_t total = size + kHeaderSize;
+    heap_.resize(block + total);
+    std::memcpy(heap_.data() + block, &total, 8);
+    return user;
 }
 
 void VM::free(int64_t offset) {

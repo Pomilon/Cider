@@ -2082,6 +2082,24 @@ public:
         return t.isArray && t.arraySize > 0;
     }
 
+    // CIDER-BUG-202: true when a fixed array's LEAVES are interface
+    // elements — the shapes whose returned elements ir_gen boxes per
+    // element (nested rows are walked to their innermost row, an alias
+    // spelling resolved first, exactly like checkFixedArrayElements does).
+    // `depth` bounds a cyclic row alias (`type T = [T;2]`), which the
+    // element walk would otherwise follow forever; past the bound the row
+    // is not treated as an interface-element array.
+    bool hasInterfaceArrayElement(const TypeInfo& t, int depth) {
+        if (depth > 8) return false;
+        TypeInfo resolved = resolveType(t);
+        if (isFixedArrayValue(resolved)) {
+            return hasInterfaceArrayElement(resolved.elementType(), depth + 1);
+        }
+        TypeInfo leaf = resolved;
+        resolveInterfaceFlag(leaf);
+        return leaf.isInterface;
+    }
+
     // Fixed-size array elements from a list literal (CID-007): element
     // count and per-element types. Shared by the declaration-time
     // initializer and CIDER-BUG-112's reassignment so the two sites cannot
@@ -4744,6 +4762,21 @@ public:
             // emitListLiteralTemp).
             TypeInfo declArray;
             if (hasDeclaredReturnType_) declArray = resolveType(currentDeclaredReturnType_);
+            // CIDER-BUG-202: a returned fixed array whose leaves are
+            // interface elements carries N fat pointers whose data words
+            // may address THIS frame (an element converted from a concrete
+            // value stores the object's address, exactly like a non-list
+            // interface store). ir_gen boxes every element at the return
+            // site — the CIDER-BUG-077/184 whole-value interface rule
+            // applied per element — and the caller releases the boxes, so
+            // the program needs the tagged boxing representation decided
+            // before any function is generated. Record the shape here, like
+            // the whole-value case below. Bounded to the declared shape
+            // (no dataflow: an element may alias a frame, a global or a
+            // heap object, and only the return-site rule covers all three).
+            if (hasDeclaredReturnType_ && hasInterfaceArrayElement(declArray, 0)) {
+                interfaceBoxing_ = true;
+            }
             if (auto* list = dynamic_cast<ListExpr*>(stmt.getValue());
                 list && isFixedArrayValue(declArray)) {
                 if (checkFixedArrayElements("return of '" + currentFunctionName_ + "'",
