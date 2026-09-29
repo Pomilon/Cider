@@ -12,7 +12,10 @@
 #     assembly (cache rebuild);
 #   * `.hash` holds the SHA-256 of the module source;
 #   * two objects that instantiate the same template link cleanly (the
-#     use-site instantiation is a weak definition).
+#     use-site instantiation is a weak definition);
+#   * a library object's class/struct globals run their field initializers
+#     (and vptr) before user code (CIDER-BUG-106), on the linked and the
+#     whole-program VM paths.
 #
 # Usage: separate_compilation_smoke.sh <cider-binary>
 # Exits 77 when nasm/gcc are missing (no compiled-toolchain SKIP).
@@ -50,7 +53,8 @@ export func boxed<T>(x: T) -> T { return x + x; }
 CID
 
 # mathx: exported const/var/struct/class/interface/functions plus a private
-# helper and a use-site template instantiation.
+# helper, a use-site template instantiation, and (CIDER-BUG-106) library
+# globals whose class-typed fields carry initializers and a vptr.
 cat > modules/mathx.cid <<'CID'
 from boxy import boxed;
 
@@ -70,6 +74,22 @@ export class Twice {
   var n: int;
   func twice() -> int { return this.n * 2; }
 }
+
+// CIDER-BUG-106: this object's own startup pass must initialise these
+// before any user code, exactly as the whole-program build does.
+export class Counter {
+  var n: int = 41;
+  var unset: int;
+  virtual func value() -> int { return this.n; }
+}
+
+export struct Wrap {
+  var c: Counter;
+}
+
+export var counter: Counter;
+export var wrap: Wrap;
+export var counters: [Counter; 2];
 
 func hidden(x: int) -> int { return x * 2; }
 
@@ -110,11 +130,18 @@ func main() -> int {
   var tw: mathx.Twice;
   tw.n = 21;
   var d: mathx.Doubler = tw;
-  printInt(mathx.useDoubler(d)); print("\n"); // cross-object dispatch: 42
+  printInt(mathx.useDoubler(d)); print(","); // cross-object dispatch: 42
+  // CIDER-BUG-106: class-typed library globals run their field initializers
+  // (and vptr) in mathx's object before main's user code.
+  printInt(mathx.counter.n); print(",");          // 41
+  printInt(mathx.counter.unset); print(",");      // 0
+  printInt(mathx.counter.value()); print(",");    // 41 via the global's vptr
+  printInt(mathx.wrap.c.n); print(",");           // 41 struct-embedded
+  printInt(mathx.counters[1].n); print("\n");     // 41 array element
   return 0;
 }
 CID
-EXPECTED=$'43,10,7,1,11,41,10,42,42'
+EXPECTED=$'43,10,7,1,11,41,10,42,42,41,0,41,41,41'
 
 assemble() { # <name>
     nasm -O0 -f elf64 "build/$1.asm" -o "build/$1.o"
@@ -134,6 +161,10 @@ assemble whole
 link_run whole build/whole.o
 [ "$RUN_RC" -eq 0 ] || fail "whole-program exit $RUN_RC"
 [ "$RUN_OUT" = "$EXPECTED" ] || fail "whole-program output [$RUN_OUT]"
+# VM path: `run` rejects the cache flags (every body must be present), so the
+# VM reference is the same whole-program sources.
+VM_OUT=$("$BIN" run main.cid 2>&1)
+[ "$VM_OUT" = "$EXPECTED" ] || fail "whole-program VM output [$VM_OUT]"
 
 # --- per-file objects -----------------------------------------------------
 emit_meta() { # <src> <name>
@@ -152,6 +183,14 @@ grep -q "^mod_mathx__add:" build/mathx.asm || fail "mathx.asm misses mod_mathx__
 grep -q "global mod_mathx__hits" build/mathx.asm || fail "mathx.asm does not export mod_mathx__hits"
 # An imported const is folded from the snapshot into main's static data.
 grep -q "folded: dd 42" build/main.asm || fail "cross-module const did not fold into main.o"
+# CIDER-BUG-106: mathx's object exports its own global-init pass, and main's
+# startup chains it (and only its own `_cider_global_init` is local).
+grep -q "global mod_mathx__.*uinit" build/mathx.asm \
+    || fail "mathx.asm does not export its global-init pass"
+grep -q "call mod_mathx__.*uinit" build/main.asm \
+    || fail "main.asm does not chain mathx's global-init pass"
+grep -q "^_cider_global_init:" build/mathx.asm \
+    && fail "mathx.asm emits the whole-program global-init name"
 
 for name in io boxy mathx main; do assemble "$name"; done
 link_run sep build/main.o build/mathx.o build/boxy.o build/io.o

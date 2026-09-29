@@ -203,7 +203,7 @@ public:
         // CIDER-BUG-087: run embedded class-value field initializers for
         // module-scope aggregates from a synthesized startup function (the
         // entry calls it). No-op unless such a global exists.
-        emitGlobalFieldInitializers();
+        emitGlobalFieldInitializers(program);
 
         return std::move(module_);
     }
@@ -6463,12 +6463,41 @@ public:
     // in the VM's zero-filled global storage), so their embedded class
     // values need the same formation stores a local gets (CIDER-BUG-089:
     // field initializers and vptrs). There is no runtime pass for globals,
-    // so synthesize `_cider_global_init` and call
-    // it from every entry function before user code; the body replays the
-    // same emitEmbeddedInitializers machinery at each global's label.
-    // Programs with no such globals emit nothing (byte-identical).
-    void emitGlobalFieldInitializers() {
-        if (pendingGlobalInits_.empty() || entryFunctions_.empty()) return;
+    // so synthesize an init function and call it from every entry function
+    // before user code; the body replays the same emitEmbeddedInitializers
+    // machinery at each global's label. Programs with no such globals emit
+    // nothing (byte-identical).
+    //
+    // CIDER-BUG-106: under separate compilation a module object has no entry
+    // function to hang the call off, and the entry object's own .bss does
+    // not cover the library's globals. Each object therefore emits a
+    // per-object init: a `--emit-meta` module exports a deterministic
+    // symbol and every object chains the init of each module it imported
+    // (the collector appends imported ASTs dependency-first, so the calls
+    // replay the whole-program declaration order). Whole-program builds
+    // keep the single local `_cider_global_init`.
+    void emitGlobalFieldInitializers(AstProgram& program) {
+        // The root file's logical module: non-empty only for a `--emit-meta`
+        // module object (the main/entry file keeps "").
+        std::string rootModule;
+        auto rootIt = programModules_.find(&program);
+        if (rootIt != programModules_.end()) rootModule = rootIt->second;
+
+        // CIDER-BUG-106: init functions this object calls before its own
+        // globals. Empty in whole-program mode (one combined pass).
+        std::vector<std::string> depInits;
+        if (separateCompilation_) {
+            for (const auto& imported : program.getImportedAsts()) {
+                auto it = programModules_.find(imported.get());
+                if (it == programModules_.end()) continue;
+                if (it->second.empty() || it->second == rootModule) continue;
+                std::string depName = moduleGlobalInitFunctionName(it->second);
+                if (std::find(depInits.begin(), depInits.end(), depName) == depInits.end()) {
+                    depInits.push_back(depName);
+                }
+            }
+        }
+
         std::set<const StructSymbol*> visiting;
         bool any = false;
         for (const auto& pending : pendingGlobalInits_) {
@@ -6479,7 +6508,21 @@ public:
                 break;
             }
         }
-        if (!any) return;
+
+        // Whole-program: emit only when there is something to initialise and
+        // an entry to call it. Separate compilation: a module object always
+        // exports its init (importers call it unconditionally; its body may
+        // be empty); an entry object emits one as soon as it has its own
+        // globals or an imported module to chain.
+        if (!separateCompilation_) {
+            if (!any || entryFunctions_.empty()) return;
+        } else if (rootModule.empty() && !any && depInits.empty()) {
+            return;
+        }
+
+        const bool exported = separateCompilation_ && !rootModule.empty();
+        const std::string initName =
+            exported ? moduleGlobalInitFunctionName(rootModule) : globalInitFunctionName();
 
         // Build the helper in a fresh function context: field initializers
         // fold consts in their declaring module and allocate temps, exactly
@@ -6493,7 +6536,12 @@ public:
         TypeInfo prevReturnType = currentReturnType_;
         bool prevIsSret = currentIsSret_;
 
-        currentFunction_ = std::make_unique<FunctionIR>(globalInitFunctionName(), IRType::VOID);
+        currentFunction_ = std::make_unique<FunctionIR>(initName, IRType::VOID);
+        if (exported) {
+            // A source path marks the definition for per-file codegen: the
+            // module's own object emits and exports the symbol.
+            currentFunction_->setSourcePath(currentSourcePath_);
+        }
         currentBlock_ = std::make_unique<BasicBlock>("entry");
         functionEntryBlock_ = currentBlock_.get();
         variableValues_.clear();
@@ -6501,6 +6549,13 @@ public:
         labelCount_ = 0;
         currentReturnType_ = {"void", 0};
         currentIsSret_ = false;
+
+        // CIDER-BUG-106: chain imported modules first, mirroring the
+        // whole-program declaration order (dependencies precede the module).
+        for (const auto& dep : depInits) {
+            currentBlock_->addInstruction({IROp::CALL, std::nullopt, {IRValue::Label(dep)}});
+            module_.addExternFunction(dep);
+        }
 
         for (const auto& pending : pendingGlobalInits_) {
             TypeInfo t = canonicalizeNominalInModule(
@@ -6530,7 +6585,7 @@ public:
         IRInstruction call;
         call.op = IROp::CALL;
         call.dest = std::nullopt;
-        call.args.push_back(IRValue::Label(globalInitFunctionName()));
+        call.args.push_back(IRValue::Label(initName));
         for (FunctionIR* entry : entryFunctions_) {
             if (!entry) continue;
             auto& blocks = entry->getBlocks();
@@ -6545,6 +6600,14 @@ public:
     // emits it in the object that generated it and only that object's entry
     // references it.
     static std::string globalInitFunctionName() { return "_cider_global_init"; }
+
+    // CIDER-BUG-106: exported per-object init symbol of a separate-
+    // compilation module object. Derived from the logical module name with
+    // the same injective mangling as every other module symbol, so an
+    // importing object can name it without extra metadata.
+    static std::string moduleGlobalInitFunctionName(const std::string& module) {
+        return mangleQualifiedName(module, "_cider_global_init");
+    }
 
     // CIDER-BUG-082/087: `visiting` is the recursion path for embedded
     // class-value fields, keyed by aggregate identity. A repeated class or
