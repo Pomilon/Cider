@@ -466,7 +466,17 @@ VMResult VM::runBody(const ModuleIR& module, const std::string& runFunction) {
                 d.i = af.localBase + (int64_t)af.localUsed;
                 af.localUsed += sz;
             } else {
-                d.i = malloc(size.i);  // oversized local: heap fallback
+                // Oversized local: heap fallback. CIDER-BUG-149: the block
+                // is frame storage like the bump chunk — retireFrame frees
+                // it when the frame dies — and is zeroed on claim like a
+                // claimed chunk (CIDER-BUG-115): a block recycled from a
+                // dead frame must not serve the old object back to a
+                // dangling data pointer, while a read before any reuse
+                // still sees the old bytes exactly as for a dead native
+                // stack slot.
+                d.i = malloc(size.i);
+                if (size.i > 0) std::memset(heap_.data() + d.i, 0, (size_t)size.i);
+                af.localHeapAllocs.push_back(d.i);
             }
             if (instr.dest) regs_[instr.dest->name] = d;
             break;
@@ -1029,9 +1039,15 @@ void VM::free(int64_t offset) {
 // masking the hazard native exposes as garbage. Releasing stays as before;
 // the ALLOCA path zeroes a freshly claimed chunk so frame REUSE is
 // observable, exactly where native's next call overwrites the slots.
+// CIDER-BUG-149: a frame's oversized-local heap fallbacks (allocated in the
+// ALLOCA path when the chunk cannot hold the local) are frame storage too.
+// They used to be leaked: the block stayed live and readable across returns
+// and every call allotted a fresh one. Release each here, alongside the
+// chunk; like the chunk they are zeroed when claimed again, not when freed,
+// so an immediate post-return read still sees the dead frame's bytes.
 void VM::retireFrame(const Frame& frame) {
-    if (frame.localBase == 0) return;
-    free(frame.localBase);
+    if (frame.localBase != 0) free(frame.localBase);
+    for (int64_t off : frame.localHeapAllocs) free(off);
 }
 
 VM::RegVal VM::load(int64_t addr, IRType type) {

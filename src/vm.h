@@ -28,6 +28,18 @@ public:
     void setStepLimit(int64_t limit) { stepLimit_ = limit; }
     bool debug_ = false;
 
+    // CIDER-BUG-149: read-only allocation accounting for unit tests. A dead
+    // frame's oversized-local fallbacks must return to the free list, so
+    // repeated calls do not grow heapBytes(). After a completed run in which
+    // the program frees everything it allocated, every heap byte sits on the
+    // free list, i.e. freeListBytes() == heapBytes().
+    size_t heapBytes() const { return heap_.size(); }
+    size_t freeListBytes() const {
+        size_t total = 0;
+        for (const FreeBlock& b : freeList_) total += (size_t)b.size;
+        return total;
+    }
+
     struct RegVal {
         bool isFloat = false;
         int64_t i = 0;
@@ -45,6 +57,10 @@ private:
         int64_t localBase = 0;    // frame-local region for ALLOCAs (bump)
         size_t localSize = 0;
         size_t localUsed = 0;
+        // CIDER-BUG-149: oversized ALLOCAs that fell back to VM::malloc
+        // (the 4096-byte bump region could not hold them). Frame storage
+        // like localBase: retireFrame releases each block on frame death.
+        std::vector<int64_t> localHeapAllocs{};
     };
 
     // State captured by _setjmp for longjmp to restore.
@@ -137,6 +153,8 @@ private:
     // CIDER-BUG-115: release a dead frame's ALLOCA region. The region's
     // bytes are zeroed when a later frame claims (and reuses) the chunk,
     // mirroring native's next call overwriting the dead stack slots.
+    // CIDER-BUG-149: oversized-local heap fallbacks are frame storage too;
+    // they are released here and zeroed on claim, like a claimed chunk.
     void retireFrame(const Frame& frame);
 };
 

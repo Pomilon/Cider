@@ -251,6 +251,218 @@ int run() {
         CHECK(vmReuse.run(mod, "reuseFrame").exitCode == 0);
     }
 
+    // CIDER-BUG-149: an oversized local (one the 4096-byte frame chunk cannot
+    // hold) is a heap fallback in the VM. It is frame storage: freed when the
+    // frame dies and zeroed when the block is claimed again, so a dangling
+    // pointer cannot keep reading the dead frame's object after the block is
+    // recycled, and repeated calls reuse the retired blocks instead of
+    // stacking up fresh ones (the old leak).
+    {
+        // retargetBig(&slot): seed an 8 KiB local, publish its address.
+        auto retargetBig = makeFn("retargetBig", cider::IRType::VOID);
+        retargetBig->addParam("arg_p", cider::IRType::PTR);
+        auto rb = std::make_unique<cider::BasicBlock>("entry");
+        rb->addInstruction(opInstr(cider::IROp::ALLOCA, "big",
+                                   {cider::IRValue::Constant(8192, cider::IRType::I64)}));
+        cider::IRInstruction seed;
+        seed.op = cider::IROp::STORE;
+        seed.args = {cider::IRValue::Register("big", cider::IRType::PTR),
+                     cider::IRValue::Constant(42, cider::IRType::I32),
+                     cider::IRValue::Constant(0, cider::IRType::I32)};
+        rb->addInstruction(seed);
+        cider::IRInstruction leak;
+        leak.op = cider::IROp::STORE;
+        leak.args = {cider::IRValue::Register("arg_p", cider::IRType::PTR),
+                     cider::IRValue::Register("big", cider::IRType::PTR),
+                     cider::IRValue::Constant(0, cider::IRType::I32)};
+        rb->addInstruction(leak);
+        cider::IRInstruction rret;
+        rret.op = cider::IROp::RET;
+        rb->addInstruction(rret);
+        retargetBig->addBlock(std::move(rb));
+
+        // reuseBig(): claims a frame chunk and an 8 KiB fallback, writes
+        // nothing there.
+        auto reuseBig = makeFn("reuseBig", cider::IRType::VOID);
+        auto ub = std::make_unique<cider::BasicBlock>("entry");
+        ub->addInstruction(opInstr(cider::IROp::ALLOCA, "scratch",
+                                   {cider::IRValue::Constant(8192, cider::IRType::I64)}));
+        cider::IRInstruction uret;
+        uret.op = cider::IROp::RET;
+        ub->addInstruction(uret);
+        reuseBig->addBlock(std::move(ub));
+
+        // entry: call retargetBig(&slot) [, call reuseBig], v = *slot's pointee.
+        auto buildBigEntry = [&](const std::string& name, bool callReuse) {
+            auto entry = makeFn(name, cider::IRType::I32);
+            auto b = std::make_unique<cider::BasicBlock>("entry");
+            b->addInstruction(opInstr(cider::IROp::ALLOCA, "slot",
+                                      {cider::IRValue::Constant(8, cider::IRType::I32)}));
+            cider::IRInstruction callRetarget;
+            callRetarget.op = cider::IROp::CALL;
+            callRetarget.args = {cider::IRValue::Label("retargetBig"),
+                                 cider::IRValue::Register("slot", cider::IRType::PTR)};
+            b->addInstruction(callRetarget);
+            if (callReuse) {
+                cider::IRInstruction callReuse;
+                callReuse.op = cider::IROp::CALL;
+                callReuse.args = {cider::IRValue::Label("reuseBig")};
+                b->addInstruction(callReuse);
+            }
+            cider::IRInstruction loadP;
+            loadP.op = cider::IROp::LOAD;
+            loadP.dest = cider::IRValue::Register("p", cider::IRType::PTR);
+            loadP.args = {cider::IRValue::Register("slot", cider::IRType::PTR),
+                          cider::IRValue::Constant(0, cider::IRType::I32)};
+            b->addInstruction(loadP);
+            cider::IRInstruction loadV;
+            loadV.op = cider::IROp::LOAD;
+            loadV.dest = cider::IRValue::Register("v", cider::IRType::I32);
+            loadV.args = {cider::IRValue::Register("p", cider::IRType::PTR),
+                          cider::IRValue::Constant(0, cider::IRType::I32)};
+            b->addInstruction(loadV);
+            cider::IRInstruction ret;
+            ret.op = cider::IROp::RET;
+            ret.args = {cider::IRValue::Register("v", cider::IRType::I32)};
+            b->addInstruction(ret);
+            entry->addBlock(std::move(b));
+            return entry;
+        };
+
+        cider::ModuleIR mod;
+        mod.addFunction(std::move(retargetBig));
+        mod.addFunction(std::move(reuseBig));
+        mod.addFunction(buildBigEntry("bigImmediate", /*callReuse=*/false));
+        mod.addFunction(buildBigEntry("bigReuse", /*callReuse=*/true));
+
+        // Immediate post-return read: the dead bytes are still there, like a
+        // dead native stack slot (the supported read-all/tripled pattern).
+        cider::VM vmNow;
+        CHECK(vmNow.run(mod, "bigImmediate").exitCode == 42);
+        // Once the fallback block is claimed again it is zeroed: no old object.
+        cider::VM vmReuse;
+        CHECK(vmReuse.run(mod, "bigReuse").exitCode == 0);
+        // Retirement returned every block to the free list (no leak).
+        CHECK(vmReuse.heapBytes() == vmReuse.freeListBytes());
+    }
+
+    // CIDER-BUG-149 accounting: repeated calls whose frames carry oversized
+    // locals must not grow the VM heap; the retired blocks are recycled.
+    {
+        auto makeBusy = []() {
+            auto fn = makeFn("busy", cider::IRType::VOID);
+            auto b = std::make_unique<cider::BasicBlock>("entry");
+            b->addInstruction(opInstr(cider::IROp::ALLOCA, "big",
+                                      {cider::IRValue::Constant(8192, cider::IRType::I64)}));
+            cider::IRInstruction st;
+            st.op = cider::IROp::STORE;
+            st.args = {cider::IRValue::Register("big", cider::IRType::PTR),
+                       cider::IRValue::Constant(7, cider::IRType::I32),
+                       cider::IRValue::Constant(0, cider::IRType::I32)};
+            b->addInstruction(st);
+            cider::IRInstruction ret;
+            ret.op = cider::IROp::RET;
+            b->addInstruction(ret);
+            fn->addBlock(std::move(b));
+            return fn;
+        };
+        auto buildCalls = [&](const std::string& name, int calls) {
+            auto fn = makeFn(name, cider::IRType::I32);
+            auto b = std::make_unique<cider::BasicBlock>("entry");
+            for (int i = 0; i < calls; ++i) {
+                cider::IRInstruction call;
+                call.op = cider::IROp::CALL;
+                call.args = {cider::IRValue::Label("busy")};
+                b->addInstruction(call);
+            }
+            cider::IRInstruction ret;
+            ret.op = cider::IROp::RET;
+            ret.args = {cider::IRValue::Constant(0, cider::IRType::I32)};
+            b->addInstruction(ret);
+            fn->addBlock(std::move(b));
+            return fn;
+        };
+
+        cider::ModuleIR modOne;
+        modOne.addFunction(makeBusy());
+        modOne.addFunction(buildCalls("one", 1));
+        cider::ModuleIR modMany;
+        modMany.addFunction(makeBusy());
+        modMany.addFunction(buildCalls("many", 8));
+        cider::VM vmOne;
+        CHECK(vmOne.run(modOne, "one").exitCode == 0);
+        cider::VM vmMany;
+        CHECK(vmMany.run(modMany, "many").exitCode == 0);
+        CHECK(vmOne.heapBytes() == vmMany.heapBytes());
+        CHECK(vmMany.heapBytes() == vmMany.freeListBytes());
+    }
+
+    // CIDER-BUG-149: the longjmp unwind retires unwound frames through the
+    // same retireFrame; an oversized local in an unwound frame is freed too.
+    {
+        auto deep = makeFn("deep", cider::IRType::VOID);
+        deep->addParam("arg_buf", cider::IRType::PTR);
+        auto db = std::make_unique<cider::BasicBlock>("entry");
+        db->addInstruction(opInstr(cider::IROp::ALLOCA, "big",
+                                   {cider::IRValue::Constant(8192, cider::IRType::I64)}));
+        cider::IRInstruction jump;
+        jump.op = cider::IROp::CALL;
+        jump.args = {cider::IRValue::Label("longjmp"),
+                     cider::IRValue::Register("arg_buf", cider::IRType::PTR),
+                     cider::IRValue::Constant(1, cider::IRType::I32)};
+        db->addInstruction(jump);
+        cider::IRInstruction dret;
+        dret.op = cider::IROp::RET;
+        db->addInstruction(dret);
+        deep->addBlock(std::move(db));
+
+        auto fn = makeFn("main", cider::IRType::I32);
+        auto e = std::make_unique<cider::BasicBlock>("entry");
+        e->addInstruction(opInstr(cider::IROp::ALLOCA, "buf",
+                                  {cider::IRValue::Constant(64, cider::IRType::I32)}));
+        cider::IRInstruction setjmpCall;
+        setjmpCall.op = cider::IROp::CALL;
+        setjmpCall.dest = cider::IRValue::Register("sj", cider::IRType::I32);
+        setjmpCall.args = {cider::IRValue::Label("_setjmp"),
+                           cider::IRValue::Register("buf", cider::IRType::PTR)};
+        e->addInstruction(setjmpCall);
+        cider::IRInstruction br;
+        br.op = cider::IROp::COND_BR;
+        br.args = {cider::IRValue::Register("sj", cider::IRType::I32),
+                   cider::IRValue::Label("after"), cider::IRValue::Label("first")};
+        e->addInstruction(br);
+
+        auto first = std::make_unique<cider::BasicBlock>("first");
+        cider::IRInstruction callDeep;
+        callDeep.op = cider::IROp::CALL;
+        callDeep.args = {cider::IRValue::Label("deep"),
+                         cider::IRValue::Register("buf", cider::IRType::PTR)};
+        first->addInstruction(callDeep);
+        cider::IRInstruction brAfter;
+        brAfter.op = cider::IROp::BR;
+        brAfter.args = {cider::IRValue::Label("after")};
+        first->addInstruction(brAfter);
+
+        auto after = std::make_unique<cider::BasicBlock>("after");
+        cider::IRInstruction ret;
+        ret.op = cider::IROp::RET;
+        ret.args = {cider::IRValue::Constant(0, cider::IRType::I32)};
+        after->addInstruction(ret);
+
+        fn->addBlock(std::move(e));
+        fn->addBlock(std::move(first));
+        fn->addBlock(std::move(after));
+
+        cider::ModuleIR mod;
+        mod.addFunction(std::move(deep));
+        mod.addFunction(std::move(fn));
+        cider::VM vm;
+        CHECK(vm.run(mod).exitCode == 0);
+        // deep's chunk and fallback were unwound; every allocated byte is
+        // back on the free list (the old leak left the 8 KiB block live).
+        CHECK(vm.heapBytes() == vm.freeListBytes());
+    }
+
     // Step cap: an infinite loop fails fast instead of hanging.
     auto fn6 = makeFn("main", cider::IRType::VOID);
     auto b6 = std::make_unique<cider::BasicBlock>("entry");
