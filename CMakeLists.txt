@@ -80,6 +80,14 @@ add_test(NAME debug_info_smoke
          COMMAND bash ${CMAKE_SOURCE_DIR}/tests/unit/debug_info_smoke.sh $<TARGET_FILE:cider>)
 set_tests_properties(debug_info_smoke PROPERTIES SKIP_RETURN_CODE 77)
 
+# CIDER-BUG-132: .bss globals of heterogeneous alignment must assemble
+# warning-free with nasm (no "attempt to initialize memory in BSS section"
+# from padding) while keeping identical .bss symbol offsets. Exits 77 when
+# nasm/nm are missing.
+add_test(NAME bss_align_smoke
+         COMMAND bash ${CMAKE_SOURCE_DIR}/tests/unit/bss_align_smoke.sh $<TARGET_FILE:cider>)
+set_tests_properties(bss_align_smoke PROPERTIES SKIP_RETURN_CODE 77)
+
 # CIDER-BUG-121: VM allocation failures (frame-local chunks / heap growth)
 # under RLIMIT_AS must surface as `vm error: out of memory` (exit 2), never
 # as an uncaught std::bad_alloc reported by the CLI (exit 1). Skips (77) when

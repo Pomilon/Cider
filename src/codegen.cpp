@@ -490,7 +490,13 @@ bool CodeGenerator::generate(ModuleIR& module, const std::string& outputPath,
             if (var.initialIsFloat || var.initialValue != 0) {
                 addData("align " + std::to_string(align));
             } else {
-                addBss("align " + std::to_string(align));
+                // CIDER-BUG-132: NASM's `align` macro fills with `nop`
+                // (initialized data), which warns in .bss -- "attempt to
+                // initialize memory in BSS section" -- and bloats the object
+                // with bytes that NOBITS would discard. `alignb` is the
+                // BSS-specific macro: identical padding size via `resb 1`,
+                // so symbol layout/alignment is unchanged.
+                addBss("alignb " + std::to_string(align));
             }
         }
         if (var.initialIsFloat) {
