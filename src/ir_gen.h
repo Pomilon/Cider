@@ -6702,19 +6702,26 @@ public:
     // in .bss (zero by definition at load), the VM zero-fills global storage
     // when materialising labels. Sharing one block per distinct size keeps
     // the data small; MEMCPY/MOV are understood by every backend and pass.
-    // CIDER-BUG-144: `isVolatile` is the destination's volatile flag (the
-    // same flag every copy/declaration site sources from its alias-resolved
-    // type), so zeroing a volatile aggregate is itself an observable MEMCPY.
-    void emitZeroInstance(IRValue addr, int size, bool isVolatile = false) {
-        if (size <= 0) return;
+    // CIDER-BUG-155: the label lookup is split out for sites that must emit
+    // the zeroing copy into a block other than the current one (the ternary
+    // merge slot lives in the dominating condition block).
+    std::string zeroBufferLabel(int size) {
         auto it = zeroBuffers_.find(size);
         if (it == zeroBuffers_.end()) {
             std::string label = "_cider_zero_" + separateToken_ + std::to_string(size);
             module_.addGlobalVar(label, IRType::U8, 0, 0, size, false);
             it = zeroBuffers_.emplace(size, label).first;
         }
+        return it->second;
+    }
+
+    // CIDER-BUG-144: `isVolatile` is the destination's volatile flag (the
+    // same flag every copy/declaration site sources from its alias-resolved
+    // type), so zeroing a volatile aggregate is itself an observable MEMCPY.
+    void emitZeroInstance(IRValue addr, int size, bool isVolatile = false) {
+        if (size <= 0) return;
         IRValue src = IRValue::Register(nextTemp(), IRType::PTR);
-        currentBlock_->addInstruction({IROp::MOV, src, {IRValue::Label(it->second)}});
+        currentBlock_->addInstruction({IROp::MOV, src, {IRValue::Label(zeroBufferLabel(size))}});
         currentBlock_->addInstruction({IROp::MEMCPY, std::nullopt,
                                        {addr, src, IRValue::Constant(size, IRType::I32)},
                                        isVolatile});
@@ -8079,21 +8086,53 @@ public:
         std::string mergeName = nextLabel("tern_end");
 
         currentBlock_->addInstruction({IROp::COND_BR, std::nullopt, {cond, IRValue::Label(thenName), IRValue::Label(elseName)}});
+        // CIDER-BUG-155: the block holding the COND_BR dominates both arms.
+        // An aggregate-valued result allocates (and zeroes) its merge slot
+        // here, before the branch, so both arms copy into one slot and the
+        // slot register is set on every path.
+        BasicBlock* condBlock = currentBlock_.get();
 
         startBlock(thenName);
         // CIDER-BUG-137: an arm evaluates on one path only, so a temporary
         // it creates must finalize before the merge or a scope-exit
-        // destructor would read a slot the other path never wrote. A
-        // by-value aggregate arm's value IS that arm's object (the merge
-        // aliases it), so finalizing it here would hand the ternary a
-        // dangling slot; aggregate arms stay on the pre-existing
-        // no-registration path and the scope is discarded unemitted.
+        // destructor would read a slot the other path never wrote.
         deferStack_.push_back({});
         destructorStack_.push_back({});
         expr.getThenExpr()->accept(*this);
         IRValue thenVal = lastValue_;
         TypeInfo thenType = lastExprType_;
-        if (!isListAggregateElement(thenType)) {
+        // CIDER-BUG-155: a by-value aggregate arm yields the address of an
+        // arm-scoped temporary. Copying that value into the dominating
+        // merge slot makes the arm temporary dead at the arm's end (it can
+        // finalize per-arm like a scalar arm's temps, CIDER-BUG-137) while
+        // the merged temporary owns the value for the enclosing scope. The
+        // slot is zeroed like a declared aggregate local, so a destructor
+        // reached after the arm threw (an enclosing catch continues the
+        // scope) finalizes zeroed storage, never stack garbage.
+        bool aggregateMerge = isByValueAggregate(thenType, currentModule_);
+        IRValue mergeSlot;
+        int mergeSize = 0;
+        if (aggregateMerge) {
+            mergeSize = getTypeSize(thenType);
+            mergeSlot = IRValue::Register(nextTemp(), IRType::PTR);
+            IRValue zeroSrc = IRValue::Register(nextTemp(), IRType::PTR);
+            auto& condInstrs = condBlock->getInstructions();
+            condInstrs.insert(condInstrs.end() - 1,
+                              IRInstruction{IROp::ALLOCA, mergeSlot,
+                                            {IRValue::Constant(mergeSize, IRType::I32)}});
+            if (mergeSize > 0) {
+                condInstrs.insert(condInstrs.end() - 1,
+                                  IRInstruction{IROp::MOV, zeroSrc,
+                                                {IRValue::Label(zeroBufferLabel(mergeSize))}});
+                condInstrs.insert(condInstrs.end() - 1,
+                                  IRInstruction{IROp::MEMCPY, std::nullopt,
+                                                {mergeSlot, zeroSrc, IRValue::Constant(mergeSize, IRType::I32)}});
+            }
+            currentBlock_->addInstruction({IROp::MEMCPY, std::nullopt,
+                                           {mergeSlot, thenVal, IRValue::Constant(mergeSize, IRType::I32)},
+                                           thenType.isVolatile});
+        }
+        if (aggregateMerge || !isListAggregateElement(thenType)) {
             emitDestructors(destructorStack_.size() - 1);
         }
         destructorStack_.pop_back();
@@ -8107,12 +8146,30 @@ public:
         expr.getElseExpr()->accept(*this);
         IRValue elseVal = lastValue_;
         TypeInfo elseType = lastExprType_;
-        if (!isListAggregateElement(elseType)) {
+        if (aggregateMerge) {
+            currentBlock_->addInstruction({IROp::MEMCPY, std::nullopt,
+                                           {mergeSlot, elseVal, IRValue::Constant(mergeSize, IRType::I32)},
+                                           elseType.isVolatile});
+        }
+        if (aggregateMerge || !isListAggregateElement(elseType)) {
             emitDestructors(destructorStack_.size() - 1);
         }
         destructorStack_.pop_back();
         deferStack_.pop_back();
         BasicBlock* elseBlock = currentBlock_.get();
+
+        if (aggregateMerge) {
+            // CIDER-BUG-155: the merged temporary is the caller's OWN copy
+            // (CIDER-BUG-137's ownership rule): it survives the arm that
+            // produced it and finalizes at the exit of the enclosing scope,
+            // LIFO with the surrounding locals/temporaries. Both arms wrote
+            // the one slot, so the result is that slot directly — no PHI of
+            // arm addresses (and no dangling alias) is needed. Registration
+            // happens after the arm scopes are gone, so it lands in the
+            // enclosing scope; aggregates without embedded class destructors
+            // register nothing.
+            registerTempDestructors(thenType, mergeSlot, currentModule_);
+        }
 
         // CID-003 follow-up (I4): the PHI type is the common type of both
         // arms, and each arm converts inside its own block (a conversion
@@ -8126,7 +8183,7 @@ public:
         bool elseFloat = (elseIR == IRType::F32 || elseIR == IRType::F64);
         bool floatMerge = thenFloat || elseFloat;
         IRType phiType = thenIR;
-        if (floatMerge) {
+        if (!aggregateMerge && floatMerge) {
             phiType = (thenIR == IRType::F64 || elseIR == IRType::F64)
                           ? IRType::F64 : IRType::F32;
             if (isIntIRType(thenIR)) {
@@ -8147,6 +8204,11 @@ public:
         std::string elseEndName = elseBlock->getName();
 
         startBlock(mergeName);
+        if (aggregateMerge) {
+            lastValue_ = mergeSlot;
+            lastExprType_ = thenType;
+            return;
+        }
         IRValue phiDest = IRValue::Register(nextTemp(), phiType);
         IRInstruction phiInstr;
         phiInstr.op = IROp::PHI;

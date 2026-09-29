@@ -1,0 +1,228 @@
+// CIDER-BUG-155 regression: aggregate-valued `?:`.
+//
+// Before this fix an aggregate arm's value WAS the arm's own temporary, so
+// the merge aliased a slot that CIDER-BUG-137 could not finalize (the other
+// path never wrote it) and neither the arm temporary nor the merged value
+// was ever destroyed. The lowering now allocates one merge slot in the
+// dominating condition block, zeroes it like a declared aggregate local,
+// copies each arm's value into it before that arm's scope unwinds, yields
+// the slot as the expression value, and registers the merged temporary in
+// the ENCLOSING scope (CIDER-BUG-137's caller-owned rule). The arm
+// temporary is dead after the copy and finalizes per-arm exactly like a
+// scalar arm's temporaries.
+//
+// Part 1 pins VALUE semantics through destructor-free structs in every
+// context (declaration, assignment, argument, return, nested, member read,
+// alias, member-target assignment, array, lvalue arms, false arm).
+// Part 2 pins OWNERSHIP with a class destructor: per-arm destruction of the
+// arm's own sret temporary (mk's local dies on return, then the returned
+// temporary at the arm's end), the merged temporary at the enclosing
+// scope's exit (LIFO with the surrounding locals: merged temp before the
+// local it initialized), embedded class values, and a per-evaluation scope.
+//
+// All three backends (VM unopt, VM optim, native) must agree.
+//
+// (The class part stays small on purpose: the inliner's site-count
+// feedback inflates any function with many destructor call sites, which is
+// pre-existing and unrelated to this fix; destructor-free struct ternaries
+// are not affected and cover the same lowering.)
+from std.io import print, printInt;
+
+// --- value semantics: destructor-free aggregates -------------------------
+
+struct P {
+    var a: int;
+    var b: int;
+}
+
+// Nested aggregate: a P inside a struct.
+struct SP {
+    var p: P;
+    var n: int;
+}
+
+// Alias spelling of an aggregate arm/result type.
+type PP = P;
+
+func mkp(n: int) -> P {
+    var p: P;
+    p.a = n;
+    p.b = n * 10;
+    return p;
+}
+
+// Aggregate-valued ternary in return position.
+func pickp(n: int) -> P {
+    return n > 0 ? mkp(n) : mkp(0 - n);
+}
+
+func takep(x: P) -> int {
+    return x.a;
+}
+
+// Array-valued by-value return: arrays are aggregates too (sret).
+func mka(n: int) -> [P; 2] {
+    var a: [P; 2];
+    a[0] = mkp(n);
+    a[1] = mkp(n + 1);
+    return a;
+}
+
+// --- ownership: class-valued aggregates ----------------------------------
+
+var drops: int = 0;
+
+class D {
+    var label: int;
+    func ~D() {
+        drops = drops + 1;
+        printInt(this.label);
+        print(",");
+    }
+}
+
+// Embedded class value: the merged struct temporary must finalize its D.
+struct SD {
+    var d: D;
+}
+
+func mk(n: int) -> D {
+    var d: D;
+    d.label = n;
+    return d;
+}   // n,   (mk's local finalizes on return)
+
+// Aggregate-valued ternary in return position: mkd's own merged temporary
+// finalizes at mkd's exit, after the sret copy to the caller.
+func mkd(n: int) -> D {
+    return n > 0 ? mk(n) : mk(0 - n);
+}
+
+func take(x: D) -> int {
+    return x.label;
+}   // x (the callee's own parameter copy) finalizes at callee exit
+
+func main() -> int {
+    var c: bool = true;
+
+    // --- part 1: values -------------------------------------------------
+
+    // 1. Declaration.
+    var p1: P = c ? mkp(1) : mkp(2);
+    if (p1.a != 1 || p1.b != 10) { return 1; }
+
+    // 2. Assignment into an existing local.
+    var p2: P;
+    p2 = c ? mkp(3) : mkp(4);
+    if (p2.a != 3 || p2.b != 30) { return 2; }
+
+    // 3. By-value argument.
+    if (takep(c ? mkp(5) : mkp(6)) != 5) { return 3; }
+
+    // 4. By-value return (the else arm).
+    var p4: P = pickp(0 - 7);
+    if (p4.a != 7 || p4.b != 70) { return 4; }
+
+    // 5. Nested aggregate ternary.
+    var p5: P = c ? (c ? mkp(8) : mkp(9)) : mkp(10);
+    if (p5.a != 8) { return 5; }
+
+    // 6. Member read directly on the merged temporary.
+    if ((c ? mkp(11) : mkp(12)).b != 110) { return 6; }
+
+    // 7. Alias-typed declaration.
+    var p7: PP = c ? mkp(13) : mkp(14);
+    if (p7.a != 13) { return 7; }
+
+    // 8. Member-target assignment through an aggregate ternary.
+    var sp: SP;
+    sp.p = c ? mkp(15) : mkp(16);
+    if (sp.p.a != 15 || sp.p.b != 150) { return 8; }
+
+    // 9. Array-valued ternary.
+    var a1: [P; 2] = c ? mka(17) : mka(18);
+    if (a1[0].a != 17 || a1[1].b != 180) { return 9; }
+
+    // 10. Both arms are lvalues: the merged temporary owns a copy.
+    var pa: P = mkp(19);
+    var pb: P = mkp(20);
+    var p10: P = c ? pa : pb;
+    if (p10.a != 19) { return 10; }
+
+    // 11. The false arm must take the else path and produce its value.
+    c = false;
+    var p11: P = c ? mkp(21) : mkp(22);
+    if (p11.a != 22) { return 11; }
+    if ((c ? mkp(23) : mkp(24)).a != 24) { return 12; }
+    c = true;
+
+    // --- part 2: ownership ----------------------------------------------
+
+    // 12. Declaration: the arm's sret temporary dies at the arm's end (its
+    // value having been copied into the merge slot); the merged temporary
+    // outlives the arm and dies at main's exit, before the local it
+    // initialized (LIFO).
+    var r12: D = c ? mk(25) : mk(26);
+    if (r12.label != 25) { return 13; }
+
+    // 13. By-value argument: the caller's merged temporary feeds the
+    // caller-side copy that becomes take's parameter (destroyed at take's
+    // exit); the merged temporary itself dies at main's exit.
+    if (take(c ? mk(29) : mk(30)) != 29) { return 14; }
+
+    // 14. By-value return: mkd's own merged temporary finalizes at mkd's
+    // exit; the caller's returned temporary (the sret slot) and r15
+    // finalize at main's exit.
+    var r15: D = mkd(-31);
+    if (r15.label != 31) { return 15; }
+
+    // 15. Embedded class value: each arm builds a struct temporary whose D
+    // finalizes with it; the merged struct temporary's D finalizes at
+    // main's exit.
+    var s16: SD = c ? SD{d: mk(32)} : SD{d: mk(33)};
+    if (s16.d.label != 32) { return 16; }
+
+    // 16. Loop-body scope with lvalue arms: only the merged temporary and
+    // the loop-local copy are destructor-pinned, once per iteration.
+    var la: D;
+    la.label = 34;
+    var lb: D;
+    lb.label = 35;
+    var total: int = 0;
+    var i: int = 0;
+    while (i < 2) {
+        var r: D = c ? la : lb;
+        total = total + r.label;
+        i = i + 1;
+    }
+    if (total != 68) { return 17; }
+
+    // 17. Per-evaluation scope (short-circuit RHS) with lvalue arms: the
+    // merged temporary dies at the end of the evaluation, not at main's
+    // exit.
+    var t: bool = c && (c ? la : lb).label == 34;
+    if (!t) { return 18; }
+
+    // Part 1 creates no destructible temporaries. Part 2's inline drops:
+    // 12: mk local 25 + arm temp 25                          = 2
+    // 13: mk local 29 + arm temp 29 + take's parameter 29    = 3
+    // 14: mk local 31 + arm temp 31 + mkd's merged 31        = 3
+    // 15: mk local 32 + arm SD temporary's D 32              = 2
+    // 16: two iterations x (merged 34 + r 34)                = 4
+    // 17: short-circuit RHS merged temp 34                   = 1
+    // total inline = 15; still alive (destroyed after the prints) = 9:
+    // r12, r12's merged, take's merged, r15, r15's sret temporary, s16,
+    // s16's merged, la, lb.
+    print("labels\n");
+    printInt(drops);
+    print("!\n");
+    if (drops != 15) { return 19; }
+
+    // Expected destruction after the asserts, in reverse registration order:
+    //   main scope: lb 35, la 34,
+    //               s16's merged 32, s16 32,
+    //               r15's sret temp 31, r15 31,
+    //               take's merged 29,
+    //               r12's merged 25, r12 25.
+    return 0;
+}
