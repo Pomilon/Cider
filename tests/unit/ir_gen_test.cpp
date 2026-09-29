@@ -1293,6 +1293,103 @@ int run() {
         CHECK(d.find("memcpy ") == std::string::npos);
     }
 
+    // CIDER-BUG-116: a deref-to-deref struct copy (`*p = *r`) copies the
+    // pointee VALUE — a MEMCPY of the aggregate size — instead of scalar-
+    // STOREing the source address. visit(UnaryExpr) recovers the pointee
+    // spelling but sets no isUserDefined marker, and an exactly-8-byte
+    // pointee misses the `> 8` fallback, so the plain-assignment path must
+    // classify the RHS value by its own resolved shape before the shared
+    // store decision (mirrors CIDER-BUG-081/083's target-side
+    // classification). The program emits no other MEMCPY, so a scalar-
+    // STORE regression makes the assertion fail.
+    {
+        d = genSrc(
+            "struct S8 { var a: int; var b: int; }\n"
+            "func main() -> int {\n"
+            "  var a: S8; var b: S8;\n"
+            "  var p: *S8 = &a; var r: *S8 = &b;\n"
+            "  *p = *r;\n"
+            "  return 0;\n"
+            "}\n");
+        size_t pos = d.find("memcpy ");
+        CHECK(pos != std::string::npos);
+        size_t eol = d.find('\n', pos);
+        CHECK(d.substr(pos, eol - pos).find(", 8") != std::string::npos);
+        CHECK(d.find("memcpy ", pos + 1) == std::string::npos);
+    }
+
+    // CIDER-BUG-116: the narrower pointee (a 4-byte class) takes the same
+    // rule. Both class locals are zero-filled (CIDER-BUG-113's 4-byte
+    // MEMCPYs) and the deref copy is one more; losing the classification
+    // leaves the address STORE and drops the count to two.
+    {
+        d = genSrc(
+            "class C4 { var x: int; }\n"
+            "func main() -> int {\n"
+            "  var a: C4; var b: C4;\n"
+            "  var p: *C4 = &a; var r: *C4 = &b;\n"
+            "  *p = *r;\n"
+            "  return 0;\n"
+            "}\n");
+        size_t pos = d.find("memcpy ");
+        int count = 0;
+        while (pos != std::string::npos) {
+            size_t eol = d.find('\n', pos);
+            CHECK(d.substr(pos, eol - pos).find(", 4") != std::string::npos);
+            count++;
+            pos = d.find("memcpy ", pos + 1);
+        }
+        CHECK(count == 3);
+    }
+
+    // CIDER-BUG-116: the sibling plain-assignment shapes take the same
+    // classification — a value target (`v = *r`) copies the 8-byte pointee,
+    // while the scalar pointer assignment (`p = r`) stays a pointer STORE
+    // with no MEMCPY at all.
+    {
+        d = genSrc(
+            "struct S8 { var a: int; var b: int; }\n"
+            "func main() -> int {\n"
+            "  var a: S8; var b: S8;\n"
+            "  var r: *S8 = &b;\n"
+            "  a = *r;\n"
+            "  return 0;\n"
+            "}\n");
+        size_t pos = d.find("memcpy ");
+        CHECK(pos != std::string::npos);
+        size_t eol = d.find('\n', pos);
+        CHECK(d.substr(pos, eol - pos).find(", 8") != std::string::npos);
+
+        d = genSrc(
+            "struct S8 { var a: int; var b: int; }\n"
+            "func main() -> int {\n"
+            "  var a: S8; var b: S8;\n"
+            "  var p: *S8 = &a; var r: *S8 = &b;\n"
+            "  p = r;\n"
+            "  return 0;\n"
+            "}\n");
+        CHECK(d.find("memcpy ") == std::string::npos);
+    }
+
+    // CIDER-BUG-116: a vptr-only virtual class (exactly 8 bytes) takes the
+    // same MEMCPY and re-stamps the declared class's vptr (CIDER-BUG-089)
+    // after the copy, so dispatch through the copied-to value stays alive.
+    {
+        d = genSrc(
+            "class V0 { virtual func f() -> int { return 1; } }\n"
+            "func main() -> int {\n"
+            "  var a: V0; var b: V0;\n"
+            "  var p: *V0 = &a; var r: *V0 = &b;\n"
+            "  *p = *r;\n"
+            "  return 0;\n"
+            "}\n");
+        size_t pos = d.find("memcpy ");
+        CHECK(pos != std::string::npos);
+        size_t eol = d.find('\n', pos);
+        CHECK(d.substr(pos, eol - pos).find(", 8") != std::string::npos);
+        CHECK(d.find("vtable_V0") != std::string::npos);
+    }
+
     // CIDER-BUG-072: a main-file symbol whose Cider name collides with a
     // NASM reserved word (`gs`, `cs`, `align`, ...) escapes to a `$` suffix
     // in the emitted name — definition and every reference alike. Names

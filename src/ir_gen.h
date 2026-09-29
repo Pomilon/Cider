@@ -4670,6 +4670,23 @@ public:
             // target-specific conversions below overwrite lastExprType_.
             bool valueIsSlice = lastExprType_.isSlice && lastExprType_.pointerLevel == 0;
 
+            // CIDER-BUG-116: classify the RHS value by its own RESOLVED
+            // shape, not by flags the producing expression happened to set.
+            // A by-value struct/class value of any size is an aggregate whose
+            // value is already its source ADDRESS (locals, derefs, member
+            // reads, ternaries and sret call results all present struct
+            // values by address), so the store below must MEMCPY the value
+            // bytes. A deref source (`*r`) carries no isUserDefined marker
+            // (visit(UnaryExpr) only recovers the pointee spelling), so an
+            // exactly-8-byte (or narrower) pointee missed both the flag and
+            // the `getTypeSize(...) > 8` fallback: `*p = *r` lowered to a
+            // scalar STORE of the source address instead of copying the
+            // object. Marking the value here mirrors CIDER-BUG-081/083's
+            // classification of member and element targets; the
+            // target-specific branches below still take precedence for the
+            // shapes they classify themselves.
+            if (isStructValueType(lastExprType_)) lastExprType_.isUserDefined = true;
+
             // Bitfield targets use the read-modify-write sequence.
             if (auto mem = dynamic_cast<MemberAccessExpr*>(stmt.getTarget())) {
                 int bitOffset = 0, bitWidth = 0;
