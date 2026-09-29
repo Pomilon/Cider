@@ -1,0 +1,365 @@
+// CIDER-BUG-212: a returned aggregate that CONTAINS an interface value (a
+// bare interface field, an interface array field, or either nested deeper)
+// gets the same boxing/ownership treatment a bare returned interface-element
+// array already had (CIDER-BUG-202), applied to embedded FIELDS.
+//
+// CIDER-BUG-077 boxes a concrete value at a whole-value interface RETURN,
+// because the fat pointer's data word is the object's address and that
+// address dies with the frame; CIDER-BUG-184 gave that box a header (a
+// type-erased release thunk plus an ownership token) and made the box the
+// CALLER's temporary, released after its last use at the exit of the caller's
+// enclosing scope. CIDER-BUG-202 applied the same rule per ELEMENT of a
+// returned fixed array. A returned STRUCT or CLASS had neither step: the sret
+// copy moved every interface-valued FIELD verbatim, so `h.s` converted from a
+// concrete value in the callee still pointed at the callee's stack slot.
+// Dispatch then read the dead slot — a nil frame slot reads as a zeroed
+// object — so `h.s.area()` returned 0 instead of 9. Moving the implementor to
+// a global made the repro work, which is what identified the data word as the
+// frame address.
+//
+// The traversal is now a recursive walk of the returned aggregate's by-value
+// LAYOUT, not of array dimensions alone: struct/class fields are descended at
+// their own byte offsets, and the caller's release walk descends identically,
+// so every leaf the callee boxed has exactly one matching claim. Covered here
+// on all three backends (VM unopt, VM optimized, native):
+//
+//   * the ticket repro itself — a local implementor held in a returned
+//     struct's interface field, dispatched after the callee returned, with a
+//     global implementor as the control that already worked before the fix;
+//   * an interface ARRAY field (`struct H { var arr: [Shape; 2]; }`), which is
+//     the two rules composed in one layout, and nested rows inside it;
+//   * a struct field inside a struct field, and a CLASS-typed return, so the
+//     walk is not array- or struct-specific;
+//   * several implementors in one aggregate, distinguished through dispatch
+//     (a per-leaf box takes its size and thunk from the leaf's own vtable, so
+//     a wrong size or thunk fails visibly rather than silently);
+//   * alias spellings of the aggregate and of the field type, and a
+//     return-position call result (a pass-through, which must release exactly
+//     once by the last holder);
+//   * the release: the boxed copy's own destructor and its embedded class
+//     value's finalizer run at the CALLER's scope exit, after the last use
+//     (the callee's own local finalizer runs at the callee's return, so
+//     `drops` counts both), in CIDER-BUG-088 order (own first, then the
+//     embedded class value);
+//   * an assignment of a returned aggregate into an existing local, the
+//     sibling path where the box travels from the call's sret slot to the
+//     target;
+//   * a zeroed, never-assigned field, which the return site must not read a
+//     type descriptor through;
+//   * an already-boxed leaf (from an inner interface-returning call), handed
+//     over rather than re-boxed, and a heap-backed leaf, copied not freed;
+//   * the aggregate, the interface, the implementor and the returning
+//     function all declared in an IMPORTED module (lib.cid), so the walk has
+//     to root each field's type spelling in the module the field was declared
+//     in rather than the use site's (CIDER-BUG-090's rule);
+//   * 200 calls in a loop: dispatch stays valid and nothing grows (the
+//     leak-free property is pinned by VM allocation accounting in
+//     tests/unit/vm_iface_aggregate_box_test.cpp).
+import lib;
+from std.io import print, printInt;
+
+var drops: int = 0;
+
+interface Shape {
+  func area() -> int;
+  func kind() -> int;
+}
+
+class Sq {
+  var side: int;
+  var pad: [u64; 8];
+  func area() -> int { return this.side * this.side; }
+  func kind() -> int { return 1; }
+  func ~Sq() { drops = drops + 1; print("S"); }
+}
+
+class Rect {
+  var w: int;
+  var h: int;
+  func area() -> int { return this.w * this.h; }
+  func kind() -> int { return 2; }
+  func ~Rect() { drops = drops + 1; print("R"); }
+}
+
+// An embedded class value with its own finalizer: the box release must run it
+// too, own destructor first (CIDER-BUG-088 order). It counts SILENTLY — the
+// embedded finalizer's identity is pinned by the `label` read back in main,
+// so a 200-iteration loop does not fill the expected trace with its output.
+class Dropper {
+  var label: int;
+  func ~Dropper() { drops = drops + 1; }
+}
+
+class Wrap {
+  var w: int;
+  var d: Dropper;
+  func area() -> int { return this.w; }
+  func kind() -> int { return 3; }
+  func ~Wrap() { drops = drops + 1; print("W"); }
+}
+
+// The aggregate shapes walked here.
+struct Holder { var s: Shape; var tag: int; }
+struct ArrHolder { var arr: [Shape; 2]; var tag: int; }
+struct Inner { var s: Shape; }
+struct Outer { var in: Inner; var tag: int; }
+class CHolder {
+  var s: Shape;
+  var tag: int;
+  func tagOf() -> int { return this.tag; }
+}
+// Alias spellings of the aggregate and of the field type.
+type Alias = Holder;
+type IfaceAlias = Shape;
+type ArrAlias = [Shape; 2];
+type Rows = [[Shape; 2]; 2];
+
+var g: Sq;
+
+// --- the ticket repro -------------------------------------------------------
+
+// A local implementor held in a returned struct's interface field.
+func localField() -> Holder {
+  var s: Sq; s.side = 3;
+  var i: Shape = s;
+  var h: Holder; h.s = i; h.tag = 7;
+  return h;
+}
+
+// The control that already worked before the fix: the data word names a
+// global, not a frame slot.
+func globalField() -> Holder {
+  g.side = 3;
+  var i: Shape = g;
+  var h: Holder; h.s = i; h.tag = 8;
+  return h;
+}
+
+// --- interface array and nested fields --------------------------------------
+
+func localArr() -> ArrHolder {
+  var s: Sq; s.side = 5;
+  var i: Shape = s;
+  var h: ArrHolder; h.arr = [i, i]; h.tag = 9;
+  return h;
+}
+
+func nestedRows() -> Rows {
+  var a: Sq; a.side = 2;
+  var b: Sq; b.side = 3;
+  var ia: Shape = a; var ib: Shape = b;
+  var r: Rows = [[ia, ib], [ib, ia]];
+  return r;
+}
+
+func nestedStruct() -> Outer {
+  var a: Sq; a.side = 4;
+  var i: Shape = a;
+  var o: Outer; o.in.s = i; o.tag = 4;
+  return o;
+}
+
+// A CLASS-typed return, so the walk is not struct-specific.
+func classReturn() -> CHolder {
+  var a: Sq; a.side = 5;
+  var i: Shape = a;
+  var c: CHolder; c.s = i; c.tag = 11;
+  return c;
+}
+
+// --- several implementors, alias spellings, pass-throughs --------------------
+
+// The same two implementors reached through different field shapes: one
+// converts a local to an interface variable first, the other assigns the
+// concrete value straight into the field (the interface STORE path).
+func twoImpls() -> Holder {
+  var a: Sq; a.side = 3;
+  var b: Rect; b.w = 4; b.h = 5;
+  var ia: Shape = a; var ib: Shape = b;
+  var h: Holder; h.s = ia; h.tag = 0;
+  return h;
+}
+
+func twoImplsArr() -> Holder {
+  var b: Rect; b.w = 4; b.h = 5;
+  var h: Holder; h.s = b; h.tag = 0;
+  return h;
+}
+
+func viaAlias() -> Alias {
+  var a: Rect; a.w = 6; a.h = 7;
+  var i: IfaceAlias = a;
+  var h: Alias; h.s = i; h.tag = 6;
+  return h;
+}
+
+func forward() -> Holder { return localField(); }
+func pass(x: Holder) -> Holder { return x; }
+
+func innerBox() -> Shape {
+  var a: Sq; a.side = 9;
+  return a;             // CIDER-BUG-184 whole-value box
+}
+
+func passIface(x: Shape) -> Shape { return x; }
+
+// A field that is ALREADY a box (from the inner call, through a pass-through
+// that adds a second holder) must be handed over, not re-boxed.
+func alreadyBoxed() -> Holder {
+  var j: Shape = passIface(innerBox());
+  var h: Holder; h.s = j; h.tag = 1;
+  return h;
+}
+
+// A zeroed, never-assigned field: both fat-pointer words are 0.
+func zeroed() -> Holder {
+  var h: Holder;
+  return h;
+}
+
+// A field backed by a heap object: the box is a COPY, so the original object
+// is neither freed by the release nor aliased by it.
+func heapBacked() -> Holder {
+  var p: *Sq = new Sq;
+  p.side = 8;
+  var i: Shape = p;
+  var h: Holder; h.s = i; h.tag = 2;
+  return h;
+}
+
+// A second implementor whose destructors only COUNT, so the expected trace
+// carries no 200-character run of letters for the loop in main; the per-call
+// accounting is what the assertions there check.
+class Counter {
+  var s: int;
+  var d: Dropper;
+  func area() -> int { return this.s; }
+  func kind() -> int { return 4; }
+  func ~Counter() { drops = drops + 1; }
+}
+
+// The release must run the boxed copy's OWN destructor and its embedded
+// finalizer (CIDER-BUG-088 order: own first, then the class-valued field).
+func embedded() -> Holder {
+  var c: Counter; c.s = 12; c.d.label = 41;
+  var i: Shape = c;
+  var h: Holder; h.s = i; h.tag = 5;
+  return h;
+}
+
+// The loop's implementor: no letter output, just the counter.
+func loopImpl() -> Holder {
+  var c: Counter; c.s = 9; c.d.label = 0;
+  var i: Shape = c;
+  var h: Holder; h.s = i; h.tag = 0;
+  return h;
+}
+
+func main() -> int {
+  // The repro: a local implementor in a returned struct's field, dispatched
+  // after the callee returned.
+  var h: Holder = localField();
+  if (h.s.area() != 9) { return 1; }
+  if (h.s.kind() != 1) { return 2; }
+  if (h.tag != 7) { return 3; }
+
+  // The control, unchanged by the fix.
+  var g1: Holder = globalField();
+  if (g1.s.area() != 9) { return 4; }
+  if (g1.tag != 8) { return 5; }
+
+  // An interface ARRAY field, and nested rows inside one.
+  var a: ArrHolder = localArr();
+  if (a.arr[0].area() != 25 || a.arr[1].area() != 25) { return 6; }
+  if (a.tag != 9) { return 7; }
+  var nr: Rows = nestedRows();
+  if (nr[0][0].area() != 4 || nr[0][1].area() != 9) { return 8; }
+  if (nr[1][0].area() != 9 || nr[1][1].area() != 4) { return 9; }
+
+  // A struct field inside a struct field, and a CLASS-typed return.
+  var o: Outer = nestedStruct();
+  if (o.in.s.area() != 16) { return 10; }
+  if (o.tag != 4) { return 11; }
+  var c: CHolder = classReturn();
+  if (c.s.area() != 25) { return 12; }
+  if (c.tagOf() != 11) { return 13; }
+
+  // The same shapes declared and returned from an IMPORTED module: the walk
+  // must root each field's type spelling in the module the field was declared
+  // in, not the call site's.
+  var xh: lib.Holder = lib.localHolder();
+  if (xh.s.area() != 9) { return 27; }
+  if (xh.tag != 3) { return 28; }
+  var xo: lib.Outer = lib.nestedOuter();
+  if (xo.in.s.area() != 16) { return 29; }
+  if (xo.tag != 5) { return 30; }
+
+  // Several implementors: the per-leaf box must pick the right size and
+  // thunk from the leaf's own vtable, or the dispatch is wrong.
+  var t: Holder = twoImpls();
+  if (t.s.area() != 9 || t.s.kind() != 1) { return 14; }
+  var t2: Holder = twoImplsArr();
+  if (t2.s.area() != 20 || t2.s.kind() != 2) { return 15; }
+
+  // Alias spellings of the aggregate and of the field type.
+  var al: Alias = viaAlias();
+  if (al.s.area() != 42) { return 16; }
+  if (al.tag != 6) { return 17; }
+
+  // A returned call result, and a pass-through with an extra holder.
+  var fw: Holder = forward();
+  if (fw.s.area() != 9) { return 18; }
+  var pt: Holder = pass(localField());
+  if (pt.s.area() != 9) { return 19; }
+
+  // The sibling ASSIGNMENT path: the box travels from the call's sret slot
+  // into an existing local through a plain aggregate copy.
+  var asg: Holder;
+  asg = localField();
+  if (asg.s.area() != 9) { return 20; }
+  if (asg.tag != 7) { return 21; }
+
+  // An already-boxed field and a heap-backed one.
+  var ab: Holder = alreadyBoxed();
+  if (ab.s.area() != 81) { return 22; }
+  var hb: Holder = heapBacked();
+  if (hb.s.area() != 64) { return 23; }
+
+  // A zeroed, never-assigned field is returned as it is: the return site must
+  // not read a type descriptor through a field with no vtable (that would load
+  // from address 0). The field is copied out, not dispatched through — a
+  // method call on a NIL interface is a pre-existing gap, independent of
+  // returns: `var z: Holder; z.s.kind()` fails the same way with no return
+  // involved at all, because a nil interface has no vtable and the method
+  // slot loads as a nil function pointer.
+  var zr: Holder = zeroed();
+  var zi: Shape = zr.s;
+  if (localField().s.area() != 9) { return 24; }
+
+  // The box release must run the boxed copy's own destructor AND the embedded
+  // class value's finalizer, and only after the value's last use (the count is
+  // unchanged between the call and the last dispatch below).
+  print("drops_at_embed=");
+  printInt(drops); print("\n");
+  var em: Holder = embedded();
+  if (em.s.area() != 12 || em.s.kind() != 4) { return 26; }
+  print("drops_after_embed=");
+  printInt(drops); print("\n");
+
+  // 200 calls through a helper whose finalizers only COUNT, so the expected
+  // trace carries no 200-character run of letters. Each call contributes its
+  // callee local's finalizer and its box's (plus the embedded Dropper's,
+  // twice), so the total is exact; the leak itself is pinned by the VM
+  // accounting in vm_iface_aggregate_box_test.cpp.
+  var k: int = 0;
+  while (k < 200) {
+    var d: Holder = loopImpl();
+    if (d.s.area() != 9) { return 25; }
+    k = k + 1;
+  }
+  print("drops_after_loop=");
+  printInt(drops); print("\n");
+
+  print("iface_aggregate_return_boxing_ok\n");
+  return 0;
+}

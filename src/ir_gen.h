@@ -2114,20 +2114,22 @@ public:
                 // CIDER-BUG-133: a volatile return target marks the stamp.
                 emitClassVptrStoreForType(currentReturnType_, sretPtr, currentModule_,
                                           currentReturnType_.isVolatile);
-                // CIDER-BUG-202: the copy above moved the array's fat
-                // pointers verbatim, so an interface element converted from a
-                // concrete value in this frame still pointed at this frame's
-                // slot and dangled the moment the frame died. Box each such
-                // element in the caller's slot — the storage that outlives
-                // this frame — with the CIDER-BUG-184 header, ownership token
-                // and release thunk, exactly as the whole-value interface
-                // return above does for the fat pointer it returns. It runs
-                // BEFORE this frame's scope exits so the transferred token it
-                // writes also disarms any release entry registered here
-                // against the same box. A non-interface array takes the
-                // `!elem.isInterface` early-out and stays byte-identical.
-                boxIfaceArrayReturn(sretPtr, currentReturnType_, currentModule_,
-                                    retType.isVolatile || currentReturnType_.isVolatile);
+                // CIDER-BUG-202/212: the copy above moved the aggregate's
+                // interface fat pointers verbatim, so an interface value
+                // converted from a concrete value in this frame — a returned
+                // array's ELEMENT (202) or a returned struct/class's FIELD
+                // (212) — still pointed at this frame's slot and dangled the
+                // moment the frame died. Box each such embedded value in the
+                // caller's slot — the storage that outlives this frame — with
+                // the CIDER-BUG-184 header, ownership token and release thunk,
+                // exactly as the whole-value interface return above does for
+                // the fat pointer it returns. It runs BEFORE this frame's
+                // scope exits so the transferred token it writes also
+                // disarms any release entry registered here against the same
+                // box. An aggregate with no embedded interface value takes
+                // the walk's early-outs and stays byte-identical.
+                boxIfaceAggregateReturn(sretPtr, currentReturnType_, currentModule_,
+                                        retType.isVolatile || currentReturnType_.isVolatile);
                 lastExprType_ = currentReturnType_;
                 emitDefers();
                 emitDestructors();
@@ -2170,6 +2172,22 @@ public:
                 // CIDER-BUG-133: same source/target rule as the sret copy.
                 currentBlock_->addInstruction({IROp::MEMCPY, std::nullopt, {localPtr, val, IRValue::Constant(structSize, IRType::I32)},
                                                retType.isVolatile || currentReturnType_.isVolatile});
+                // CIDER-BUG-202/212: the copy above moved the aggregate's
+                // interface fat pointers verbatim, so an embedded value
+                // converted from a concrete value in this frame still pointed
+                // at this frame's slot and dangled the moment the frame died.
+                // The heap block does NOT save it: the block is fresh but the
+                // data WORD inside it still names a dead address, so the
+                // caller dispatched through a dead object exactly as on the
+                // sret path. Box each embedded interface value in the block —
+                // which, like the caller's sret slot, outlives this frame —
+                // with CIDER-BUG-184's header, ownership token and release
+                // thunk. It runs BEFORE this frame's scope exits so the
+                // transferred token also disarms any release entry registered
+                // here against the same box. The caller side is the matching
+                // registerIfaceAggregateBoxReleases below the VIRTUAL_CALL.
+                boxIfaceAggregateReturn(localPtr, retType, currentModule_,
+                                        retType.isVolatile || currentReturnType_.isVolatile);
                 val = localPtr;
                 lastExprType_.isUserDefined = true;
             }
@@ -2368,6 +2386,16 @@ public:
                                     resolveTypeAlias(m.returnType, ifaceDefMod), ifaceDefMod);
                                 lastExprType_.isUserDefined = true;
                                 registerTempDestructors(m.returnType, retBuf, ifaceDefMod);
+                                // CIDER-BUG-202/212: a dispatched
+                                // implementation's aggregate return carries one
+                                // box per embedded interface leaf (the callee
+                                // is an ordinary non-virtual method, so it took
+                                // the same sret return path and the same
+                                // boxIfaceAggregateReturn). Each leaf is a
+                                // caller-owned temporary exactly as on the
+                                // direct sret call site, so it is claimed here
+                                // and released at the enclosing scope exit.
+                                registerIfaceAggregateBoxReleases(retBuf, m.returnType, ifaceDefMod);
                             } else {
                                 lastExprType_ = ifaceRet ? methodRet : m.returnType;
                             }
@@ -2525,13 +2553,15 @@ public:
                     registerIfaceBoxRelease(retBuf);
                     lastExprType_ = calleeIfaceRet;
                 } else {
-                    // CIDER-BUG-202: a returned array of interfaces carries
-                    // one box per element (see boxIfaceArrayReturn), so each
-                    // element slot is a caller-owned temporary on the same
-                    // terms as the whole-value fat pointer's: claimed here,
-                    // released after every use at the exit of the enclosing
-                    // scope. A non-interface array registers nothing.
-                    registerIfaceArrayBoxReleases(retBuf, calleeRet, calleeDefMod);
+                    // CIDER-BUG-202/212: a returned aggregate embedding
+                    // interface values carries one box per embedded leaf (see
+                    // boxIfaceAggregateReturn), so each such slot is a
+                    // caller-owned temporary on the same terms as the
+                    // whole-value fat pointer's: claimed here, released after
+                    // every use at the exit of the enclosing scope. An
+                    // aggregate with no embedded interface value registers
+                    // nothing.
+                    registerIfaceAggregateBoxReleases(retBuf, calleeRet, calleeDefMod);
                     // CIDER-BUG-090: keep the callee-module-rooted spelling.
                     lastExprType_.isUserDefined = true;
                 }
@@ -2580,6 +2610,19 @@ public:
                 isByValueAggregate(lastExprType_, calleeDefMod)) {
                 registerTempDestructors(lastExprType_, dest, calleeDefMod,
                                         /*ownsHeapCopy=*/true);
+                // CIDER-BUG-202/212: the callee boxed every interface value
+                // this aggregate embeds into the very buffer released just
+                // above (see the matching boxIfaceAggregateReturn in
+                // visit(ReturnStmt)'s heap path), so each embedded leaf is a
+                // caller-owned temporary on the same terms as the sret path's.
+                // Registered AFTER registerTempDestructors so the reverse
+                // scope-exit walk releases the boxes BEFORE the buffer's own
+                // `free` — the boxes are separate heap blocks, so order does
+                // not matter for the blocks themselves, but the finalizers
+                // registered by registerTempDestructors must still run first,
+                // exactly as on the sret path where they were registered
+                // before this claim.
+                registerIfaceAggregateBoxReleases(dest, lastExprType_, calleeDefMod);
             }
         } else {
             // Function pointer / closure call: callee is an expression.
@@ -8269,7 +8312,8 @@ public:
         return out;
     }
 
-    // CIDER-BUG-202: box the interface ELEMENTS of a returned fixed array.
+    // CIDER-BUG-202/212: box every interface value a returned by-value
+    // aggregate EMBEDS, wherever in its layout it sits.
     //
     // CIDER-BUG-077/184 already give a whole-value interface return the right
     // lifetime: the concrete value is copied into a heap box at the return
@@ -8279,49 +8323,103 @@ public:
     // this frame still pointed at this frame's slot and the caller
     // dispatched through a dead address (a nil frame slot reads as a
     // zeroed object, so `area()` returned 0 instead of the real value).
+    // CIDER-BUG-212 is the same defect one level in: the sret copy of a
+    // returned STRUCT or CLASS moves every one of its interface-valued FIELD
+    // words verbatim, so `struct H { var s: Shape; }` dangled exactly as a
+    // bare returned `[Shape; 1]` did. The fix is the same rule, applied by a
+    // recursive walk of the aggregate's layout rather than of array
+    // dimensions alone.
     //
-    // The same treatment is applied per element, in the caller's sret slot
-    // (the storage that outlives this frame), with the CIDER-BUG-184
-    // ownership rule: each box is written with the reserved transferred
-    // token so this frame's own release entries skip it, and the caller's
-    // call-site registration (registerIfaceArrayBoxReleases) claims it and
-    // releases it at the exit of the caller's enclosing scope — running the
-    // boxed value's destructors and freeing the block.
+    // The treatment per leaf is CIDER-BUG-184's, in the caller's sret slot
+    // (the storage that outlives this frame): the box header is
+    // {thunk, token}, the data word's bit 0 tags it, the callee writes the
+    // reserved transferred token so its own release entries skip the box, and
+    // the caller's call-site registration
+    // (registerIfaceAggregateBoxReleases) claims it and releases it at the
+    // exit of the caller's enclosing scope — the boxed value's destructors,
+    // then the block's free.
     //
-    // An element that already carries a box is not re-boxed (that would copy
-    // a box into a box and lose the inner one's ownership); it is only
-    // re-marked transferred, which is what the chained-ownership rule needs.
-    // An element that is not a box and has no vtable of its own (a zeroed,
-    // never-assigned element) is left exactly as it is.
+    // A leaf that already carries a box is not re-boxed (that would copy a box
+    // into a box and lose the inner one's ownership); it is only re-marked
+    // transferred, which is what the chained-ownership rule needs. A leaf that
+    // is not a box and has no vtable of its own (a zeroed, never-assigned
+    // field) is left exactly as it is.
     //
-    // Nested rows are walked the way the sret copy and the caller's release
-    // walk walk them: the leaf interface elements are found by descending
-    // array dimensions with each level's element size as its stride, so
-    // `[[Shape; 2]; 2]` boxes its four leaves and not its two rows. `depth`
-    // bounds a cyclic row alias (`type T = [T; 2]`).
-    void boxIfaceArrayReturn(IRValue base, const TypeInfo& arrType,
-                             const std::string& defModule, bool isVolatile, int depth = 0) {
+    // The walk descends fixed-array dimensions with each level's element size
+    // as its stride (so `[[Shape; 2]; 2]` boxes its four leaves, not its two
+    // rows) and struct/class FIELDS with each field's own byte offset — the
+    // same by-value layout traversal `registerEmbeddedDestructors` uses for
+    // the callee's embedded finalizers, so the two agree on what "embedded"
+    // means. `visiting` is that walk's by-value layout cycle guard and
+    // `depth` additionally bounds a cyclic row alias (`type T = [T; 2]`).
+    // Nothing is emitted for an aggregate with no embedded interface value,
+    // so such programs keep byte-identical IR.
+    void boxIfaceAggregateReturn(IRValue base, const TypeInfo& aggType,
+                                 const std::string& defModule, bool isVolatile,
+                                 std::set<const StructSymbol*>& visiting, int depth = 0) {
         if (!ifaceBoxing_ || !currentFunction_ || depth > 8) return;
-        TypeInfo resolved = resolveTypeAlias(arrType, defModule);
-        if (!isFixedArrayValue(resolved)) return;
-        TypeInfo elem = resolveTypeAlias(resolved.elementType(), defModule);
-        int stride = getTypeSize(elem, defModule);
-        if (stride <= 0) return;
-        for (int i = 0; i < resolved.arraySize; ++i) {
-            IRValue slot = IRValue::Register(nextTemp(), IRType::PTR);
-            currentBlock_->addInstruction({IROp::ADD, slot,
-                                           {base, IRValue::Constant(i * stride, IRType::I32)}});
-            // A row element is a nested array, not a fat pointer: recurse.
-            // Only a scalar interface element is the 16-byte fat pointer the
-            // element path understands.
-            if (isFixedArrayValue(elem)) {
-                boxIfaceArrayReturn(slot, elem, defModule, isVolatile, depth + 1);
-                continue;
+        TypeInfo resolved = canonicalizeNominalInModule(resolveTypeAlias(aggType, defModule),
+                                                        defModule);
+        if (resolved.pointerLevel > 0 || resolved.isSlice || resolved.isFunctionPointer) return;
+        if (isFixedArrayValue(resolved)) {
+            TypeInfo elem = resolveTypeAlias(resolved.elementType(), defModule);
+            int stride = getTypeSize(elem, defModule);
+            if (stride <= 0) return;
+            for (int i = 0; i < resolved.arraySize; ++i) {
+                IRValue slot = IRValue::Register(nextTemp(), IRType::PTR);
+                currentBlock_->addInstruction({IROp::ADD, slot,
+                                               {base, IRValue::Constant(i * stride, IRType::I32)}});
+                // A row element is a nested aggregate, not a fat pointer:
+                // recurse. Only a scalar interface leaf is the 16-byte fat
+                // pointer the element path understands.
+                boxIfaceAggregateReturn(slot, elem, defModule, isVolatile, visiting, depth + 1);
             }
-            TypeInfo leaf = resolveInterfaceNominal(elem);
-            if (!leaf.isInterface || stride != 16) continue;
-            boxIfaceArrayElement(slot, leaf, defModule, isVolatile);
+            return;
         }
+        // CIDER-BUG-212: a bare interface FIELD is the leaf, at its own byte
+        // offset. An interface is a 16-byte fat pointer, so a leaf whose size
+        // is not 16 is not one this path can read.
+        TypeInfo leafType = resolveInterfaceNominal(resolved);
+        if (leafType.isInterface) {
+            if (getTypeSize(leafType, defModule) != 16) return;
+            boxIfaceArrayElement(base, leafType, defModule, isVolatile);
+            return;
+        }
+        // CIDER-BUG-212: otherwise a struct/class value, whose fields may
+        // embed interface values. `visiting` is the by-value layout cycle
+        // guard `registerEmbeddedDestructors` carries for struct-in-struct
+        // nesting; a type that embeds itself by value cannot be laid out, so
+        // this only ever stops a pathologically deep chain.
+        auto sym = resolveStructOrClassSymbol(resolved, defModule);
+        if (!sym) return;
+        auto aggSym = std::static_pointer_cast<StructSymbol>(sym);
+        if (!visiting.insert(aggSym.get()).second) return;
+        std::string aggMod = definingModuleFor(aggSym, aggSym->name);
+        for (const auto& field : aggSym->fields) {
+            // CIDER-BUG-061: every member of a volatile object is volatile,
+            // and a volatile-qualified field makes its own subobject volatile
+            // even under a plain destination (same merge as
+            // emitEmbeddedInitializers).
+            bool fieldVolatile = isVolatile || field.type.isVolatile;
+            IRValue fieldAddr = IRValue::Register(nextTemp(), IRType::PTR);
+            currentBlock_->addInstruction({IROp::ADD, fieldAddr,
+                                           {base, IRValue::Constant((int64_t)field.offset, IRType::I32)}});
+            // CIDER-BUG-090: per-field declaring module (templates,
+            // inherited fields).
+            boxIfaceAggregateReturn(fieldAddr, field.type,
+                                    fieldTypeModule(field, aggMod), fieldVolatile, visiting, depth + 1);
+        }
+        visiting.erase(aggSym.get());
+    }
+
+    // CIDER-BUG-202/212: the top-level entry, for a returned aggregate. The
+    // `visiting` set is fresh per return statement, as it is for the
+    // embedded-initializer and destructor walks.
+    void boxIfaceAggregateReturn(IRValue base, const TypeInfo& aggType,
+                                 const std::string& defModule, bool isVolatile) {
+        if (!ifaceBoxing_ || !currentFunction_) return;
+        std::set<const StructSymbol*> visiting;
+        boxIfaceAggregateReturn(base, aggType, defModule, isVolatile, visiting, 0);
     }
 
     // CIDER-BUG-202: box one interface element of a returned array, in place.
@@ -8459,38 +8557,69 @@ public:
         startBlock(joinLabel);
     }
 
-    // CIDER-BUG-202: the caller half of the per-element boxing. A call that
-    // returns a fixed array of interfaces hands back one box per element
-    // (see boxIfaceArrayReturn); each element slot is a caller-owned
-    // temporary exactly like the whole-value fat pointer's, so it is claimed
-    // here and released at the exit of the scope enclosing the call. An
-    // element that is not a box has a clear tag bit, so the claim is
+    // CIDER-BUG-202/212: the caller half of the per-leaf boxing. A call that
+    // returns an aggregate embedding interface values hands back one box per
+    // embedded leaf (see boxIfaceAggregateReturn); each leaf slot is a
+    // caller-owned temporary exactly like the whole-value fat pointer's, so it
+    // is claimed here and released at the exit of the scope enclosing the
+    // call. A leaf that is not a box has a clear tag bit, so the claim is
     // redirected to the scratch cell and its release is a no-op.
-    // The nested-row walk mirrors the callee's boxIfaceArrayReturn exactly
-    // (same recursion, same strides), so every leaf the callee boxed has a
-    // matching registration here and no other slot is claimed. A mismatch
-    // would either leak a box (unclaimed) or free an object the callee never
-    // boxed (a non-interface leaf claimed here), so the two must descend
-    // together. `depth` bounds a cyclic row alias, as above.
-    void registerIfaceArrayBoxReleases(IRValue base, const TypeInfo& arrType,
-                                       const std::string& defModule, int depth = 0) {
+    //
+    // The walk mirrors the callee's boxIfaceAggregateReturn exactly — same
+    // recursion, same array strides, same field offsets — so every leaf the
+    // callee boxed has a matching registration here and no other slot is
+    // claimed. A mismatch would either leak a box (unclaimed) or free an
+    // object the callee never boxed (a non-interface leaf claimed here), so
+    // the two must descend together. `visiting` and `depth` are the same
+    // by-value layout and row-alias cycle guards.
+    void registerIfaceAggregateBoxReleases(IRValue base, const TypeInfo& aggType,
+                                           const std::string& defModule,
+                                           std::set<const StructSymbol*>& visiting, int depth = 0) {
         if (!ifaceBoxing_ || !currentFunction_ || destructorStack_.empty() || depth > 8) return;
-        TypeInfo resolved = resolveTypeAlias(arrType, defModule);
-        if (!isFixedArrayValue(resolved)) return;
-        TypeInfo elem = resolveTypeAlias(resolved.elementType(), defModule);
-        int stride = getTypeSize(elem, defModule);
-        if (stride <= 0) return;
-        for (int i = 0; i < resolved.arraySize; ++i) {
-            IRValue slot = IRValue::Register(nextTemp(), IRType::PTR);
-            currentBlock_->addInstruction({IROp::ADD, slot,
-                                           {base, IRValue::Constant(i * stride, IRType::I32)}});
-            if (isFixedArrayValue(elem)) {
-                registerIfaceArrayBoxReleases(slot, elem, defModule, depth + 1);
-                continue;
+        TypeInfo resolved = canonicalizeNominalInModule(resolveTypeAlias(aggType, defModule),
+                                                        defModule);
+        if (resolved.pointerLevel > 0 || resolved.isSlice || resolved.isFunctionPointer) return;
+        if (isFixedArrayValue(resolved)) {
+            TypeInfo elem = resolveTypeAlias(resolved.elementType(), defModule);
+            int stride = getTypeSize(elem, defModule);
+            if (stride <= 0) return;
+            for (int i = 0; i < resolved.arraySize; ++i) {
+                IRValue slot = IRValue::Register(nextTemp(), IRType::PTR);
+                currentBlock_->addInstruction({IROp::ADD, slot,
+                                               {base, IRValue::Constant(i * stride, IRType::I32)}});
+                registerIfaceAggregateBoxReleases(slot, elem, defModule, visiting, depth + 1);
             }
-            if (!resolveInterfaceNominal(elem).isInterface || stride != 16) continue;
-            registerIfaceBoxRelease(slot);
+            return;
         }
+        TypeInfo leafType = resolveInterfaceNominal(resolved);
+        if (leafType.isInterface) {
+            if (getTypeSize(leafType, defModule) != 16) return;
+            registerIfaceBoxRelease(base);
+            return;
+        }
+        auto sym = resolveStructOrClassSymbol(resolved, defModule);
+        if (!sym) return;
+        auto aggSym = std::static_pointer_cast<StructSymbol>(sym);
+        if (!visiting.insert(aggSym.get()).second) return;
+        std::string aggMod = definingModuleFor(aggSym, aggSym->name);
+        for (const auto& field : aggSym->fields) {
+            IRValue fieldAddr = IRValue::Register(nextTemp(), IRType::PTR);
+            currentBlock_->addInstruction({IROp::ADD, fieldAddr,
+                                           {base, IRValue::Constant((int64_t)field.offset, IRType::I32)}});
+            // CIDER-BUG-090: per-field declaring module.
+            registerIfaceAggregateBoxReleases(fieldAddr, field.type,
+                                              fieldTypeModule(field, aggMod), visiting, depth + 1);
+        }
+        visiting.erase(aggSym.get());
+    }
+
+    // CIDER-BUG-202/212: the top-level entry, for a returned aggregate. The
+    // `visiting` set is fresh per call site, mirroring the callee side.
+    void registerIfaceAggregateBoxReleases(IRValue base, const TypeInfo& aggType,
+                                           const std::string& defModule) {
+        if (!ifaceBoxing_ || !currentFunction_ || destructorStack_.empty()) return;
+        std::set<const StructSymbol*> visiting;
+        registerIfaceAggregateBoxReleases(base, aggType, defModule, visiting, 0);
     }
 
     // CIDER-BUG-202: the nominal TypeInfo naming a collected struct/class,

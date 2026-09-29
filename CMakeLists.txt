@@ -49,6 +49,14 @@ add_executable(vm_iface_array_box_test tests/unit/vm_iface_array_box_test.cpp sr
 target_include_directories(vm_iface_array_box_test PRIVATE src)
 add_test(NAME vm_iface_array_box_test COMMAND vm_iface_array_box_test)
 
+# CIDER-BUG-212: the same accounting for the caller-owned boxes behind the
+# interface values a returned AGGREGATE embeds (one box per embedded leaf —
+# a bare interface field, an interface array field, or either nested — released
+# at the caller's scope exit).
+add_executable(vm_iface_aggregate_box_test tests/unit/vm_iface_aggregate_box_test.cpp src/ir.cpp src/lexer.cpp src/parser.cpp src/symbols.cpp src/module_resolver.cpp src/vm.cpp)
+target_include_directories(vm_iface_aggregate_box_test PRIVATE src)
+add_test(NAME vm_iface_aggregate_box_test COMMAND vm_iface_aggregate_box_test)
+
 add_executable(ast_test tests/unit/ast_test.cpp)
 target_include_directories(ast_test PRIVATE src)
 add_test(NAME ast_test COMMAND ast_test)

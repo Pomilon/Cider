@@ -2082,22 +2082,59 @@ public:
         return t.isArray && t.arraySize > 0;
     }
 
-    // CIDER-BUG-202: true when a fixed array's LEAVES are interface
-    // elements — the shapes whose returned elements ir_gen boxes per
-    // element (nested rows are walked to their innermost row, an alias
-    // spelling resolved first, exactly like checkFixedArrayElements does).
-    // `depth` bounds a cyclic row alias (`type T = [T;2]`), which the
-    // element walk would otherwise follow forever; past the bound the row
-    // is not treated as an interface-element array.
-    bool hasInterfaceArrayElement(const TypeInfo& t, int depth) {
+    // CIDER-BUG-212: true when a by-value aggregate EMBEDS an interface value
+    // anywhere in its layout — a bare interface field, a fixed array of
+    // interfaces, or a struct/class field that (transitively) embeds one.
+    //
+    // CIDER-BUG-202 established this for a returned fixed array whose LEAVES
+    // are interface elements, walking only ARRAY dimensions. A returned
+    // struct or class carrying an interface field was invisible to it: the
+    // program kept the untagged representation, the sret copy moved the fat
+    // pointer verbatim, and dispatch after return read the callee's dead
+    // frame slot (a nil slot reads as a zeroed object, so `area()` returned 0
+    // instead of 9). This walks the whole by-value layout instead.
+    //
+    // This is the same by-value layout walk the IR generator's boxing uses
+    // (`registerEmbeddedDestructors`' traversal, shared rule), so the two
+    // cannot disagree about which programs need the tagged boxing
+    // representation. `defModule` is the module the spelling was written in,
+    // threaded the way ir_gen's `fieldTypeModule` threads a field's own:
+    // an inherited field keeps its declaring class's module, which the
+    // aggregate's module may not be able to resolve the spelling in.
+    // The `depth` bound is the one hasInterfaceArrayElement already used: a
+    // cyclic row alias (`type T = [T;2]`) and a cyclic field chain both
+    // terminate.
+    bool hasEmbeddedInterfaceValue(const TypeInfo& t, const std::string& defModule, int depth) {
         if (depth > 8) return false;
         TypeInfo resolved = resolveType(t);
-        if (isFixedArrayValue(resolved)) {
-            return hasInterfaceArrayElement(resolved.elementType(), depth + 1);
+        if (resolved.pointerLevel > 0 || resolved.isSlice || resolved.isFunctionPointer) {
+            return false;
         }
+        if (isFixedArrayValue(resolved)) {
+            return hasEmbeddedInterfaceValue(resolved.elementType(), defModule, depth + 1);
+        }
+        // A bare interface leaf: the 16-byte fat pointer itself. The flag is
+        // resolved by name so an alias spelling of the interface counts too.
         TypeInfo leaf = resolved;
-        resolveInterfaceFlag(leaf);
-        return leaf.isInterface;
+        if (resolveInterfaceSymbolInModule(leaf, defModule)) return true;
+        // Otherwise a struct/class value may embed one through its fields. An
+        // alias provider (a `type X = Y` spelling) is not a by-value nominal:
+        // resolveType already followed the chain above, so a symbol still
+        // carrying a target name is a spelling the layout walk cannot read
+        // fields from.
+        auto sym = resolveScopedInModule(resolved.name, defModule);
+        if (!sym || (sym->kind != SymbolKind::STRUCT && sym->kind != SymbolKind::CLASS)) {
+            return false;
+        }
+        if (!sym->type.name.empty()) return false;
+        auto aggSym = std::static_pointer_cast<StructSymbol>(sym);
+        std::string ownerMod = definingModuleOf(sym);
+        for (const auto& field : aggSym->fields) {
+            // CIDER-BUG-090: per-field declaring module.
+            std::string fieldMod = field.typeModule.empty() ? ownerMod : field.typeModule;
+            if (hasEmbeddedInterfaceValue(field.type, fieldMod, depth + 1)) return true;
+        }
+        return false;
     }
 
     // Fixed-size array elements from a list literal (CID-007): element
@@ -2435,6 +2472,31 @@ public:
         }
         if (typeSym && typeSym->kind == SymbolKind::INTERFACE) return typeSym;
         return nullptr;
+    }
+
+    // CIDER-BUG-212: resolveInterfaceSymbol rooted in the module the spelling
+    // was WRITTEN in, not the module currently being checked. The embedded
+    // interface walk descends into a field's type, and an inherited field
+    // keeps its declaring class's module (CIDER-BUG-090) — which the use
+    // site's scope may not resolve the spelling in. A canonical `mod::Name`
+    // resolves through resolveScopedRaw's canonical path either way, so this
+    // only re-roots a BARE name, which is exactly the case a field's raw
+    // spelling is.
+    std::shared_ptr<Symbol> resolveInterfaceSymbolInModule(TypeInfo t, const std::string& defModule) {
+        if (defModule.empty() || defModule == currentModule_) return resolveInterfaceSymbol(t);
+        Scope* ms = scopeForModule(defModule);
+        if (!ms) return resolveInterfaceSymbol(t);
+        Scope* prevScope = symbolTable_.getCurrentScope();
+        Scope* prevModuleScope = currentModuleScope_;
+        std::string prevModule = currentModule_;
+        currentModule_ = defModule;
+        currentModuleScope_ = ms;
+        symbolTable_.setCurrentScope(ms);
+        auto sym = resolveInterfaceSymbol(t);
+        symbolTable_.setCurrentScope(prevScope);
+        currentModule_ = prevModule;
+        currentModuleScope_ = prevModuleScope;
+        return sym;
     }
 
     // CIDER-BUG-069: resolve the interface flag on a captured field/element
@@ -4785,7 +4847,16 @@ public:
             // the whole-value case below. Bounded to the declared shape
             // (no dataflow: an element may alias a frame, a global or a
             // heap object, and only the return-site rule covers all three).
-            if (hasDeclaredReturnType_ && hasInterfaceArrayElement(declArray, 0)) {
+            //
+            // CIDER-BUG-212: the same holds for an interface value EMBEDDED
+            // in the returned aggregate — a struct/class field, at any
+            // nesting depth, including an interface array field. The sret
+            // copy moves those fat pointers verbatim exactly as it moved a
+            // returned array's elements, so they dangle the same way;
+            // hasEmbeddedInterfaceValue walks the whole by-value layout, not
+            // just array dimensions, so a returned struct carrying an
+            // interface field turns the representation on.
+            if (hasDeclaredReturnType_ && hasEmbeddedInterfaceValue(declArray, currentModule_, 0)) {
                 interfaceBoxing_ = true;
             }
             if (auto* list = dynamic_cast<ListExpr*>(stmt.getValue());
