@@ -1722,6 +1722,191 @@ int testMultiDefStoreLicm() {
     return 0;
 }
 
+int testUnknownStoreAddressLicm() {
+    // CIDER-BUG-161: an in-loop STORE/MEMCPY through an address of unknown
+    // provenance recorded nothing in loopStores, and escapedAllocas was only
+    // consulted when the loop had a clobber. In a clobber-free loop such a
+    // store may write an escaped alloca (an external pointer can only name
+    // an address that left the function), yet the LOAD of that alloca still
+    // hoisted to the preheader and froze the first iteration's bytes.
+    // Chosen rule: an unresolved store address is treated like a clobber for
+    // ESCAPED allocas only. A LOAD of the non-escaping `other` alloca still
+    // hoists (control), while `slot` stays in the loop.
+    enum Mode { ParamAddr, LoadAddr, MemcpyDest };
+    auto build = [](Mode mode) {
+        cider::ModuleIR mod;
+        auto fn = std::make_unique<cider::FunctionIR>("f", cider::IRType::VOID);
+        fn->addParam("p", cider::IRType::PTR);
+
+        auto entry = std::make_unique<cider::BasicBlock>("entry");
+        auto addAlloca = [&](const char* name, int64_t size) {
+            cider::IRInstruction a;
+            a.op = cider::IROp::ALLOCA;
+            a.dest = cider::IRValue::Register(name, cider::IRType::PTR);
+            a.args = {cider::IRValue::Constant(size, cider::IRType::I32)};
+            entry->addInstruction(a);
+        };
+        addAlloca("slot", 64);   // escapes through the call below
+        addAlloca("other", 8);   // never escapes: control alloca
+        addAlloca("pp", 8);      // holds the pointer parameter (LoadAddr mode)
+        cider::IRInstruction initOther;
+        initOther.op = cider::IROp::STORE;
+        initOther.args = {cider::IRValue::Register("other", cider::IRType::PTR),
+                          cider::IRValue::Constant(7, cider::IRType::I32),
+                          cider::IRValue::Constant(0, cider::IRType::I32)};
+        entry->addInstruction(initOther);
+        cider::IRInstruction initPp;
+        initPp.op = cider::IROp::STORE;
+        initPp.args = {cider::IRValue::Register("pp", cider::IRType::PTR),
+                       cider::IRValue::Register("p", cider::IRType::PTR),
+                       cider::IRValue::Constant(0, cider::IRType::I32)};
+        entry->addInstruction(initPp);
+        // The alloca's address leaves the function, so an external pointer
+        // can legitimately name it. The call is OUTSIDE the loop, so it is
+        // not a clobber and escapedAllocas used to stay unconsulted.
+        cider::IRInstruction esc;
+        esc.op = cider::IROp::CALL;
+        esc.args = {cider::IRValue::Label("sink"),
+                    cider::IRValue::Register("slot", cider::IRType::PTR)};
+        entry->addInstruction(esc);
+        if (mode == LoadAddr) {
+            // Unknown provenance through a LOAD: `pp` holds `p`, and
+            // `pload` is a copy of that pointer from memory.
+            cider::IRInstruction ld;
+            ld.op = cider::IROp::LOAD;
+            ld.dest = cider::IRValue::Register("pload", cider::IRType::PTR);
+            ld.args = {cider::IRValue::Register("pp", cider::IRType::PTR),
+                       cider::IRValue::Constant(0, cider::IRType::I32)};
+            entry->addInstruction(ld);
+        }
+        cider::IRInstruction i0;
+        i0.op = cider::IROp::MOV;
+        i0.dest = cider::IRValue::Register("i0", cider::IRType::I32);
+        i0.args = {cider::IRValue::Constant(0, cider::IRType::I32)};
+        entry->addInstruction(i0);
+        cider::IRInstruction one;
+        one.op = cider::IROp::MOV;
+        one.dest = cider::IRValue::Register("one", cider::IRType::I32);
+        one.args = {cider::IRValue::Constant(1, cider::IRType::I32)};
+        entry->addInstruction(one);
+        cider::IRInstruction enter;
+        enter.op = cider::IROp::BR;
+        enter.args = {cider::IRValue::Label("header")};
+        entry->addInstruction(enter);
+
+        auto header = std::make_unique<cider::BasicBlock>("header");
+        cider::IRInstruction i;
+        i.op = cider::IROp::PHI;
+        i.dest = cider::IRValue::Register("i", cider::IRType::I32);
+        i.phiArgs = {{"entry", cider::IRValue::Register("i0", cider::IRType::I32)},
+                     {"body", cider::IRValue::Register("iNext", cider::IRType::I32)}};
+        header->addInstruction(i);
+        const char* addr = (mode == LoadAddr) ? "pload" : "p";
+        if (mode == MemcpyDest) {
+            cider::IRInstruction mc;
+            mc.op = cider::IROp::MEMCPY;
+            mc.args = {cider::IRValue::Register(addr, cider::IRType::PTR),
+                       cider::IRValue::Register("other", cider::IRType::PTR),
+                       cider::IRValue::Constant(8, cider::IRType::I32)};
+            header->addInstruction(mc);
+        } else {
+            cider::IRInstruction st;
+            st.op = cider::IROp::STORE;
+            st.args = {cider::IRValue::Register(addr, cider::IRType::PTR),
+                       cider::IRValue::Register("i", cider::IRType::I32),
+                       cider::IRValue::Constant(0, cider::IRType::I32)};
+            header->addInstruction(st);
+        }
+        cider::IRInstruction ldSlot;
+        ldSlot.op = cider::IROp::LOAD;
+        ldSlot.dest = cider::IRValue::Register("v", cider::IRType::I32);
+        ldSlot.args = {cider::IRValue::Register("slot", cider::IRType::PTR),
+                       cider::IRValue::Constant(0, cider::IRType::I32)};
+        header->addInstruction(ldSlot);
+        cider::IRInstruction ldOther;
+        ldOther.op = cider::IROp::LOAD;
+        ldOther.dest = cider::IRValue::Register("w", cider::IRType::I32);
+        ldOther.args = {cider::IRValue::Register("other", cider::IRType::PTR),
+                        cider::IRValue::Constant(0, cider::IRType::I32)};
+        header->addInstruction(ldOther);
+        cider::IRInstruction sum;
+        sum.op = cider::IROp::ADD;
+        sum.dest = cider::IRValue::Register("s", cider::IRType::I32);
+        sum.args = {cider::IRValue::Register("v", cider::IRType::I32),
+                    cider::IRValue::Register("w", cider::IRType::I32)};
+        header->addInstruction(sum);
+        cider::IRInstruction inc;
+        inc.op = cider::IROp::ADD;
+        inc.dest = cider::IRValue::Register("iNext", cider::IRType::I32);
+        inc.args = {cider::IRValue::Register("i", cider::IRType::I32),
+                    cider::IRValue::Register("one", cider::IRType::I32)};
+        header->addInstruction(inc);
+        cider::IRInstruction cmp;
+        cmp.op = cider::IROp::CMP_LT;
+        cmp.dest = cider::IRValue::Register("cond", cider::IRType::BOOL);
+        cmp.args = {cider::IRValue::Register("iNext", cider::IRType::I32),
+                    cider::IRValue::Constant(10, cider::IRType::I32)};
+        header->addInstruction(cmp);
+        cider::IRInstruction cbr;
+        cbr.op = cider::IROp::COND_BR;
+        cbr.args = {cider::IRValue::Register("cond", cider::IRType::BOOL),
+                    cider::IRValue::Label("body"), cider::IRValue::Label("exit")};
+        header->addInstruction(cbr);
+
+        auto body = std::make_unique<cider::BasicBlock>("body");
+        cider::IRInstruction back;
+        back.op = cider::IROp::BR;
+        back.args = {cider::IRValue::Label("header")};
+        body->addInstruction(back);
+
+        auto exit = std::make_unique<cider::BasicBlock>("exit");
+        cider::IRInstruction ret;
+        ret.op = cider::IROp::RET;
+        exit->addInstruction(ret);
+
+        fn->addBlock(std::move(entry));
+        fn->addBlock(std::move(header));
+        fn->addBlock(std::move(body));
+        fn->addBlock(std::move(exit));
+        mod.addFunction(std::move(fn));
+        return mod;
+    };
+
+    auto checkHoist = [](cider::ModuleIR& mod) {
+        int preSlot = 0, loopSlot = 0, preOther = 0, loopOther = 0;
+        for (const auto& b : mod.getFunctions()[0]->getBlocks()) {
+            const bool preheader = b->getName().find("preheader") != std::string::npos;
+            for (const auto& in : b->getInstructions()) {
+                if (in.op != cider::IROp::LOAD || in.args.empty() ||
+                    in.args[0].kind != cider::IRValue::REGISTER) continue;
+                const std::string& a = in.args[0].name;
+                const bool inLoop = b->getName() == "header";
+                if (a == "slot") { if (preheader) preSlot++; else if (inLoop) loopSlot++; }
+                if (a == "other") { if (preheader) preOther++; else if (inLoop) loopOther++; }
+            }
+        }
+        CHECK(preSlot == 0);   // escaped alloca load stays in the loop
+        CHECK(loopSlot == 1);
+        CHECK(preOther == 1);  // control: non-escaping load still hoists
+        CHECK(loopOther == 0);
+        return 0;
+    };
+
+    const Mode modes[] = {ParamAddr, LoadAddr, MemcpyDest};
+    for (Mode mode : modes) {
+        auto ssaMod = build(mode);
+        cider::SSALicmPass licm;
+        licm.run(ssaMod);
+        CHECK(checkHoist(ssaMod) == 0);
+
+        auto postMod = build(mode);
+        cider::PostLicmPass postLicm;
+        postLicm.run(postMod);
+        CHECK(checkHoist(postMod) == 0);
+    }
+    return 0;
+}
+
 int testInliner() {
     // A small helper gets inlined; recursion does not.
     auto r = genModule(
@@ -1809,6 +1994,7 @@ int run() {
     CHECK(testCallClobberLicm() == 0);
     CHECK(testDerivedStoreLicm() == 0);
     CHECK(testMultiDefStoreLicm() == 0);
+    CHECK(testUnknownStoreAddressLicm() == 0);
     CHECK(testInliner() == 0);
     CHECK(testInlinerSiteBudget() == 0);
     return 0;

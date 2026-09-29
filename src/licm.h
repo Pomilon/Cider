@@ -43,6 +43,18 @@ namespace cider {
 // pointers and a base alloca reachable solely through a later def would be
 // missed. Such addresses take the conservative fallback: every alloca is
 // treated as written, mirroring escapedUnknown for clobbers.
+//
+// CIDER-BUG-161: an address that does not resolve to any local alloca at all
+// (a parameter, a value loaded from memory, a call result, a mixed PHI) used
+// to record nothing in loopStores, and escapedAllocas was consulted only
+// when the loop had a clobber. Such an address may be an external pointer,
+// and external pointers can only name objects whose address left the
+// function — ir_gen derives local addresses solely through ADD/MOV/PHI,
+// every other producer is foreign. An in-loop store through it therefore
+// blocks loads of ESCAPED allocas exactly like a clobber, while loads of
+// non-escaping slots still hoist. This stays tighter than CIDER-BUG-143's
+// "every alloca is written": a multi-defined address can still resolve to a
+// fresh local alloca, an external one cannot.
 struct LicmCaches {
     std::map<std::string, const IRInstruction*> defMap;
     std::set<std::string> multiDef;
@@ -52,6 +64,12 @@ struct LicmCaches {
     // multi-defined, so loopStores cannot name every alloca it may write.
     // Conservative fallback: every alloca is treated as written.
     bool loopStoresUnknown = false;
+    // CIDER-BUG-161: an in-loop STORE/MEMCPY address with no local alloca in
+    // its provenance may be an external pointer. External pointers can only
+    // write allocas whose address escaped, so such a store blocks loads of
+    // escaped allocas like a clobber does — not every alloca, as
+    // loopStoresUnknown does.
+    bool loopHasExternalStore = false;
     // CIDER-BUG-061: a volatile store in the loop is an observable write
     // that may alias any escaped object (the compiler has no alias oracle),
     // so no load may be hoisted across it.
@@ -72,13 +90,20 @@ struct LicmCaches {
 // Follows ADD/MOV/PHI chains and collects every ALLOCA whose address `reg`
 // may carry. Unknown provenance (a LOAD result, a parameter, ...) yields
 // nothing: an address stored into memory is already marked when the STORE
-// that stored it is scanned.
+// that stored it is scanned. CIDER-BUG-161 callers pass `mayBeExternal` to
+// also learn that the chain contains such a non-local producer, so a STORE
+// through it can be treated like a clobber for escaped allocas.
 static void collectAllocaBases(const std::string& reg, const LicmCaches& c,
                                std::set<std::string>& out,
-                               std::set<std::string>& visiting) {
+                               std::set<std::string>& visiting,
+                               bool* mayBeExternal = nullptr) {
     if (reg.empty() || !visiting.insert(reg).second) return;
     auto it = c.defMap.find(reg);
-    if (it == c.defMap.end()) return;
+    if (it == c.defMap.end()) {
+        // No def in this function: a parameter or other external value.
+        if (mayBeExternal) *mayBeExternal = true;
+        return;
+    }
     const IRInstruction* def = it->second;
     if (def->op == IROp::ALLOCA) {
         out.insert(reg);
@@ -86,16 +111,24 @@ static void collectAllocaBases(const std::string& reg, const LicmCaches& c,
     }
     if ((def->op == IROp::ADD || def->op == IROp::MOV) && !def->args.empty() &&
         def->args[0].kind == IRValue::REGISTER) {
-        collectAllocaBases(def->args[0].name, c, out, visiting);
+        collectAllocaBases(def->args[0].name, c, out, visiting, mayBeExternal);
         return;
     }
     if (def->op == IROp::PHI) {
         for (const auto& [_, val] : def->phiArgs) {
             if (val.kind == IRValue::REGISTER) {
-                collectAllocaBases(val.name, c, out, visiting);
+                collectAllocaBases(val.name, c, out, visiting, mayBeExternal);
+            } else if (mayBeExternal) {
+                // A non-register incoming (constant/label) is not a local
+                // alloca either.
+                *mayBeExternal = true;
             }
         }
+        return;
     }
+    // Any other producer (LOAD, CALL dest, arithmetic, constant): the value
+    // does not demonstrably originate from a local alloca.
+    if (mayBeExternal) *mayBeExternal = true;
 }
 
 // Marks the allocas an escape-triggering operand may point at.
@@ -154,8 +187,14 @@ static LicmCaches buildLicmCaches(const FunctionIR& func,
             continue;
         }
         std::set<std::string> bases, visiting;
-        collectAllocaBases(reg, c, bases, visiting);
+        bool external = false;
+        collectAllocaBases(reg, c, bases, visiting, &external);
         c.loopStores.insert(bases.begin(), bases.end());
+        // CIDER-BUG-161: an address with an unresolved producer may hold an
+        // external pointer, which can only write an escaped alloca. The
+        // resolved bases are still recorded above: a mixed PHI chain both
+        // writes its local bases and may name an escapee.
+        if (external) c.loopHasExternalStore = true;
     }
     // Escape sites are resolved after the whole def map exists: the block
     // order is not topological, so a use may precede its def here.
@@ -195,7 +234,11 @@ static bool isLoadInvariantCached(const IRInstruction& instr,
     if (c.loopStoresUnknown || c.loopStores.count(reg)) return false;
     // CIDER-BUG-086: a clobber in the loop can only write an alloca whose
     // address escaped the function; non-escaping slots are callee-unreachable.
-    if (c.loopHasClobber && (c.escapedUnknown || c.escapedAllocas.count(reg))) return false;
+    // CIDER-BUG-161: an in-loop store through an address of unknown
+    // provenance may be an external pointer, which can only refer to an
+    // escaped alloca too — treat it like a clobber for this load.
+    if ((c.loopHasClobber || c.loopHasExternalStore) &&
+        (c.escapedUnknown || c.escapedAllocas.count(reg))) return false;
     return true;
 }
 
