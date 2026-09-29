@@ -18,6 +18,17 @@
 # ~6.9 s. The large-N stage (N=1200) must stay well under its 25 s bound:
 # the set-based allocator takes ~41 s here and times out, the fixed
 # allocator has ~3.5x headroom.
+#
+# CIDER-BUG-173: on top of that, the inliner split one call site at a time,
+# deep-copying (then moving) the whole remaining tail of the caller block
+# per site and rewriting PHI edges by rescanning every block of the
+# function per site — both quadratic on large straight-line functions, and
+# they dominated everything else. On e00d85b this chain costs ~3.7 s at
+# N=800, ~8.4 s at N=1200 and ~13.9 s at N=1600 (the inliner alone is
+# ~12.5 s of the N=1600 run). With the batch split and the predecessor
+# index the same points are ~0.6 s, ~1.1 s and ~1.6 s. The N=1600 stage
+# below must stay under its 12 s bound: the per-site splitter takes ~14 s
+# here and times out, the linear splitter has ~7x headroom.
 set -euo pipefail
 BIN=${1:?usage: codegen_scale_smoke.sh <cider-binary>}
 command -v timeout >/dev/null 2>&1 || exit 77
@@ -67,5 +78,11 @@ gen 1200 "$TMP/scale1200.cid"
 timeout 25 "$BIN" compile "$TMP/scale1200.cid" -o "$TMP/scale1200.asm" \
     || { echo "codegen_scale_smoke: N=1200 compile failed or timed out"; exit 1; }
 [ -s "$TMP/scale1200.asm" ] || { echo "codegen_scale_smoke: empty N=1200 asm output"; exit 1; }
+
+# CIDER-BUG-173 large-N bound.
+gen 1600 "$TMP/scale1600.cid"
+timeout 12 "$BIN" compile "$TMP/scale1600.cid" -o "$TMP/scale1600.asm" \
+    || { echo "codegen_scale_smoke: N=1600 compile failed or timed out"; exit 1; }
+[ -s "$TMP/scale1600.asm" ] || { echo "codegen_scale_smoke: empty N=1600 asm output"; exit 1; }
 
 echo "codegen_scale_smoke: OK"

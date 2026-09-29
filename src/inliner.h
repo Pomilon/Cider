@@ -185,14 +185,74 @@ private:
     bool sitesCaptured_ = false;
     std::map<std::string, FunctionIR*> functionMap_;
     std::map<std::string, int> remainingSites_;
+    // CIDER-BUG-173: predecessor block name -> blocks with a PHI keyed by it.
+    // BasicBlock objects are owned by unique_ptr and never freed by the
+    // inliner, so raw pointers stay valid for the duration of one
+    // inlineFunction() pass.
+    std::map<std::string, std::vector<BasicBlock*>> phiPredIndex_;
+
+    // Register every PHI predecessor key of `block`. Repeated keys for the
+    // same block are collapsed (pushes for one block are contiguous).
+    void indexPhiPredecessors(BasicBlock& block) {
+        for (auto& ci : block.getInstructions()) {
+            if (ci.op != IROp::PHI) continue;
+            for (const auto& kv : ci.phiArgs) {
+                auto& v = phiPredIndex_[kv.first];
+                if (v.empty() || v.back() != &block) v.push_back(&block);
+            }
+        }
+    }
+
+    // CIDER-BUG-064: every PHI edge keyed `from` now leaves from `to`
+    // instead. Only the indexed PHIs can match, so the rewrite is
+    // proportional to the affected edges.
+    void rewritePhiEdges(const std::string& from, const std::string& to) {
+        auto predIt = phiPredIndex_.find(from);
+        if (predIt == phiPredIndex_.end()) return;
+        std::vector<BasicBlock*> affected = std::move(predIt->second);
+        phiPredIndex_.erase(predIt);
+        for (BasicBlock* b : affected) {
+            for (auto& ci : b->getInstructions()) {
+                if (ci.op != IROp::PHI) continue;
+                auto phiIt = ci.phiArgs.find(from);
+                if (phiIt == ci.phiArgs.end()) continue;
+                IRValue incoming = phiIt->second;
+                ci.phiArgs.erase(phiIt);
+                ci.phiArgs[to] = incoming;
+            }
+            auto& v = phiPredIndex_[to];
+            if (v.empty() || v.back() != b) v.push_back(b);
+        }
+    }
+
+    // One accepted call site: where it is and the already-materialised clone
+    // blocks that replace it.
+    struct PlannedSite {
+        size_t pos = 0;
+        std::string afterName;
+        std::string entryName;
+        std::vector<std::unique_ptr<BasicBlock>> clones;
+    };
 
     bool inlineFunction(FunctionIR& func) {
         bool changed = false;
+        // CIDER-BUG-173: index which blocks hold a PHI keyed by each
+        // predecessor. A split only has to rewrite the PHIs that list the
+        // split block as an incoming edge; without this index every inline
+        // site rescanned every block (and instruction) of the caller, which
+        // is quadratic in the number of call sites on large straight-line
+        // functions.
+        phiPredIndex_.clear();
+        for (auto& block : func.getBlocks()) indexPhiPredecessors(*block);
         for (size_t bi = 0; bi < func.getBlocks().size(); ++bi) {
-            auto& block = *func.getBlocks()[bi];
-            auto& insts = block.getInstructions();
+            BasicBlock& block = *func.getBlocks()[bi];
+            // Collect every call site of this block that the (fixed) budget
+            // admits, in program order. Mutating the block per site used to
+            // move the whole remaining tail each time; see splitAtSites.
+            std::vector<PlannedSite> sites;
+            const auto& insts = block.getInstructions();
             for (size_t ii = 0; ii < insts.size(); ++ii) {
-                auto& instr = insts[ii];
+                const IRInstruction& instr = insts[ii];
                 if (instr.op != IROp::CALL || instr.args.empty() || instr.args[0].kind != IRValue::LABEL) {
                     continue;
                 }
@@ -204,21 +264,30 @@ private:
                 if (instr.args.size() != callee->getParams().size() + 1) continue;
                 if (callee->getBlocks().empty()) continue;
                 if (!costModel_.shouldInline(*callee, remainingSites_[calleeName], graph_)) continue;
-
-                size_t numCloned = inlineAtSite(func, bi, ii, *callee);
+                sites.push_back(planSite(*callee, instr, ii));
                 remainingSites_[calleeName]--;
-                changed = true;
-                bi += numCloned;
-                break;
             }
+            if (sites.empty()) continue;
+            changed = true;
+            size_t inserted = splitAtSites(func, bi, block, sites);
+            // CIDER-BUG-162: the blocks just created hold the call sites that
+            // were handled above plus compiler-generated clones of them; the
+            // budget does not re-count either, so skip them for this pass.
+            bi += inserted;
         }
         return changed;
     }
 
-    size_t inlineAtSite(FunctionIR& caller, size_t blockIdx, size_t pos, FunctionIR& callee) {
-        auto& block = *caller.getBlocks()[blockIdx];
+    // Materialises the clone blocks for one call site without touching the
+    // caller. `pos` is the call's index in the caller block; `entryName` and
+    // `afterName` match the names the previous per-site splitter generated.
+    PlannedSite planSite(FunctionIR& callee, const IRInstruction& callInstr, size_t pos) {
+        PlannedSite site;
+        site.pos = pos;
         std::string prefix = callee.getName() + "_" + std::to_string(siteCounter_++) + "_";
-        const IRInstruction callInstr = block.getInstructions()[pos];
+        site.afterName = prefix + "after";
+        std::string entryName = callee.getBlocks().front()->getName();
+        site.entryName = prefix + entryName;
 
         std::map<std::string, std::string> blockRename;
         for (const auto& cb : callee.getBlocks()) {
@@ -269,22 +338,6 @@ private:
             return v;
         };
 
-        std::string entryName = callee.getBlocks().front()->getName();
-        std::string afterName = prefix + "after";
-        // The block is about to be split at the call site: everything from
-        // the call on (including the original terminator) moves to `after`.
-        // Remember its name for the PHI edge rewrite below.
-        const std::string splitBlockName = block.getName();
-
-        auto& insts = block.getInstructions();
-        std::vector<IRInstruction> afterInsts(insts.begin() + pos + 1, insts.end());
-        insts.erase(insts.begin() + pos, insts.end());
-        IRInstruction entryBr;
-        entryBr.op = IROp::BR;
-        entryBr.args.push_back(IRValue::Label(blockRename[entryName]));
-        insts.push_back(entryBr);
-
-        std::vector<std::unique_ptr<BasicBlock>> newBlocks;
         for (const auto& cb : callee.getBlocks()) {
             auto clone = std::make_unique<BasicBlock>(blockRename[cb->getName()]);
             for (const auto& ci : cb->getInstructions()) {
@@ -318,43 +371,72 @@ private:
                     }
                     IRInstruction br;
                     br.op = IROp::BR;
-                    br.args.push_back(IRValue::Label(afterName));
+                    br.args.push_back(IRValue::Label(site.afterName));
                     clone->addInstruction(br);
                 } else {
                     clone->addInstruction(cloned);
                 }
             }
-            newBlocks.push_back(std::move(clone));
+            site.clones.push_back(std::move(clone));
+        }
+        return site;
+    }
+
+    // Splits `block` at every planned site and inserts, after it, each
+    // site's clones followed by the `after` segment that holds the code past
+    // the replaced call. Returns the number of inserted blocks.
+    //
+    // The segments are cut from the last site backwards: each cut moves only
+    // the (small) segment after one call, and the final tail once, so the
+    // whole block is split in linear time. Cutting forwards moved the entire
+    // remaining tail per site, which is quadratic on large straight-line
+    // blocks (CIDER-BUG-173).
+    size_t splitAtSites(FunctionIR& func, size_t blockIdx, BasicBlock& block,
+                        std::vector<PlannedSite>& sites) {
+        // CIDER-BUG-064: the original terminator ends up in the last tail
+        // segment, so every successor PHI that listed the split block as the
+        // predecessor of that edge must key its incoming value on that
+        // segment instead. Rewrite before the instructions move, while the
+        // index's pointer to `block` is still accurate; the per-site chain
+        // collapses to this one rewrite because the intermediate segment
+        // names are fresh and cannot be referenced yet.
+        const std::string splitBlockName = block.getName();
+        const std::string& lastAfterName = sites.back().afterName;
+        rewritePhiEdges(splitBlockName, lastAfterName);
+
+        auto& insts = block.getInstructions();
+        std::vector<std::unique_ptr<BasicBlock>> tails(sites.size());
+        for (size_t j = sites.size(); j-- > 0;) {
+            auto tail = std::make_unique<BasicBlock>(sites[j].afterName);
+            auto& tailInsts = tail->getInstructions();
+            tailInsts.reserve(insts.size() - sites[j].pos - 1);
+            tailInsts.insert(tailInsts.end(),
+                             std::make_move_iterator(insts.begin() + sites[j].pos + 1),
+                             std::make_move_iterator(insts.end()));
+            insts.resize(sites[j].pos);  // drop the call and the moved tail
+            tails[j] = std::move(tail);
+            IRInstruction br;
+            br.op = IROp::BR;
+            br.args.push_back(IRValue::Label(sites[j].entryName));
+            insts.push_back(br);
         }
 
-        auto afterBlock = std::make_unique<BasicBlock>(afterName);
-        afterBlock->getInstructions() = std::move(afterInsts);
-        newBlocks.push_back(std::move(afterBlock));
-
-        auto& blocks = caller.getBlocks();
-        size_t numCloned = callee.getBlocks().size();
+        std::vector<std::unique_ptr<BasicBlock>> newBlocks;
+        for (size_t j = 0; j < sites.size(); ++j) {
+            for (auto& clone : sites[j].clones) newBlocks.push_back(std::move(clone));
+            newBlocks.push_back(std::move(tails[j]));
+        }
+        size_t inserted = newBlocks.size();
+        auto& blocks = func.getBlocks();
         blocks.insert(blocks.begin() + blockIdx + 1,
                       std::make_move_iterator(newBlocks.begin()),
                       std::make_move_iterator(newBlocks.end()));
-
-        // CIDER-BUG-064: the original terminator now belongs to `after`, so
-        // every successor PHI that listed the split block as the predecessor
-        // of that edge must key its incoming value on `after` instead. The
-        // VM (frame.prevBlock) and the SSA deconstructor both resolve PHI
-        // operands by predecessor block name; a stale key makes the edge
-        // unmatchable, and the merged value of a short-circuit arm with a
-        // call silently becomes 0 (uninitialized on native).
-        for (auto& b : caller.getBlocks()) {
-            for (auto& ci : b->getInstructions()) {
-                if (ci.op != IROp::PHI) continue;
-                auto phiIt = ci.phiArgs.find(splitBlockName);
-                if (phiIt == ci.phiArgs.end()) continue;
-                IRValue incoming = phiIt->second;
-                ci.phiArgs.erase(phiIt);
-                ci.phiArgs[afterName] = incoming;
-            }
+        // The new blocks can be split targets of later sites in this pass
+        // (tails) or hold PHIs of their own (clones).
+        for (size_t ni = blockIdx + 1; ni <= blockIdx + inserted; ++ni) {
+            indexPhiPredecessors(*blocks[ni]);
         }
-        return numCloned;
+        return inserted;
     }
 };
 
