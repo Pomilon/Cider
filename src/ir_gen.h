@@ -489,6 +489,17 @@ public:
         return resolved.isFunctionPointer ? resolved : t;
     }
 
+    // CIDER-BUG-157: a fixed-array descriptor copies its element's own
+    // pointer level (a closure object or a pointer element carries one), so
+    // an array of closure-typed elements is not `pointerLevel == 0` even
+    // though the VALUE is the array object. The language has no
+    // pointer-to-array spelling, so `isArray` alone identifies the array
+    // value; the list materialisation paths key on this helper (mirrors the
+    // checker's isFixedArrayValue).
+    static bool isFixedArrayValue(const TypeInfo& t) {
+        return t.isArray && t.arraySize > 0;
+    }
+
     // CID-006: the label a global function-pointer initializer folds to.
     // Returns "" for nilPtr / no initializer (the cell stays zero).
     std::string functionPointerInitTarget(Expression* init) {
@@ -566,16 +577,22 @@ public:
     // a "scalar fn" here: callers passed its address but the callee stored
     // that pointer as the first element instead of memcpying the array.
     bool isByValueAggregate(const TypeInfo& t, const std::string& defModule = "") {
+        // CIDER-BUG-157: an array VALUE is by-value whatever its element's
+        // pointer level (a closure/pointer element carries one on the
+        // descriptor), so the array test comes before the pointer
+        // rejections; the old `pointerLevel > 0` gate treated a closure
+        // array as a pointer scalar and the callee stored the caller's
+        // address as the first element instead of memcpying the array.
+        TypeInfo resolved = resolveTypeAlias(t, defModule);
+        if (resolved.isArray) return resolved.arraySize > 0;
         if (t.pointerLevel > 0 || t.isSlice || t.isInterface ||
             (t.isFunctionPointer && !t.isArray)) {
             return false;
         }
-        TypeInfo resolved = resolveTypeAlias(t, defModule);
         if (resolved.pointerLevel > 0 || resolved.isSlice || resolved.isInterface ||
             (resolved.isFunctionPointer && !resolved.isArray)) {
             return false;
         }
-        if (resolved.isArray) return resolved.arraySize > 0;
         return isStructValueType(t, defModule);
     }
 
@@ -1440,11 +1457,14 @@ public:
                 IRValue addr8 = IRValue::Register(nextTemp(), IRType::PTR);
                 currentBlock_->addInstruction({IROp::ADD, addr8, {addr, IRValue::Constant(8, IRType::I32)}});
                 currentBlock_->addInstruction({IROp::STORE, std::nullopt, {addr8, vtablePtr, IRValue::Constant(0, IRType::I32)}, paramIsVolatile});
-            } else if (sym->type.pointerLevel == 0 && isByValueAggregate(sym->type)) {
+            } else if (isByValueAggregate(sym->type)) {
                 // By-value aggregate params (struct/class/fixed-size array)
                 // arrive as a caller pointer: copy the pointee into the
                 // local slot instead of storing the pointer value as the
                 // first field (CID-022; CIDER-BUG-045 for arrays).
+                // CIDER-BUG-157: an array of closure/pointer elements is a
+                // by-value aggregate too, so the old `pointerLevel == 0`
+                // guard must not exclude it.
                 currentBlock_->addInstruction({IROp::MEMCPY, std::nullopt, {addr, paramReg, IRValue::Constant(getTypeSize(sym->type), IRType::I32)},
                                                paramIsVolatile});
                 // CIDER-BUG-089: the parameter is a declared class value, so
@@ -2710,8 +2730,7 @@ public:
                 // context-free inference would have stored pointer words for
                 // nested rows / word-sized elements for narrow ones.
                 if (auto* list = dynamic_cast<ListExpr*>(fieldInit.second.get());
-                    list && fieldType.isArray && fieldType.pointerLevel == 0 &&
-                    fieldType.arraySize > 0) {
+                    list && isFixedArrayValue(fieldType)) {
                     lastValue_ = emitListLiteralTemp(*list, fieldType, false);
                 } else {
                     fieldInit.second->accept(*this);
@@ -2729,8 +2748,15 @@ public:
                 // the RHS value of an aggregate is its source ADDRESS. The
                 // scalar STORE below would write that address into the field
                 // (4/8 bytes) instead of copying the value bytes.
-                if (fieldType.pointerLevel == 0 && !fieldType.isInterface && !fieldType.isSlice &&
-                    (fieldType.isArray || isStructValueType(fieldType) || getTypeSize(fieldType) > 8)) {
+                // CIDER-BUG-157: an ARRAY field is an aggregate whatever its
+                // element's pointer level (a closure/pointer element carries
+                // one on the descriptor); the old `pointerLevel == 0` test
+                // scalar-stored the source address for those fields.
+                bool fieldIsAggregate =
+                    fieldType.isArray ||
+                    (fieldType.pointerLevel == 0 &&
+                     (isStructValueType(fieldType) || getTypeSize(fieldType) > 8));
+                if (fieldIsAggregate && !fieldType.isInterface && !fieldType.isSlice) {
                     IRValue fieldAddr = IRValue::Register(nextTemp(), IRType::PTR);
                     currentBlock_->addInstruction({IROp::ADD, fieldAddr,
                                                    {dest, IRValue::Constant(offset, IRType::I32)}});
@@ -3294,7 +3320,7 @@ public:
                 // each element at its own offset with the element width
                 // (a MEMCPY of the literal temp would copy I32-wide
                 // elements into narrow slots).
-                if (declArray.isArray && declArray.pointerLevel == 0 && declArray.arraySize > 0) {
+                if (isFixedArrayValue(declArray)) {
                     if (auto list = dynamic_cast<ListExpr*>(stmt.getInitializer())) {
                         auto& elems = list->getElements();
                         TypeInfo elemType = declArray.elementType();
@@ -3326,8 +3352,7 @@ public:
                             // letting visit(ListExpr) type it `*T` and store
                             // a pointer word into the row slot.
                             if (auto* inner = dynamic_cast<ListExpr*>(elems[ei].get());
-                                inner && elemType.isArray && elemType.pointerLevel == 0 &&
-                                elemType.arraySize > 0) {
+                                inner && isFixedArrayValue(elemType)) {
                                 IRValue innerAddr = emitListLiteralTemp(*inner, elemType,
                                                                        varType.isVolatile);
                                 emitListElementStore(addr, (int64_t)(ei * (size_t)elemSize),
@@ -3439,7 +3464,17 @@ public:
                 bool isStructType = isStructValueType(sym->type);
                 bool initIsStruct = (lastExprType_.pointerLevel == 0) && (isStructValueType(lastExprType_) || lastExprType_.isUserDefined ||
                                     lastExprType_.isArray || getTypeSize(lastExprType_) > 8);
-                if (sym->type.pointerLevel == 0 && (sym->type.isArray || sym->type.isUserDefined || isStructType || getTypeSize(sym->type) > 8 || initIsStruct)) {
+                // CIDER-BUG-157: an ARRAY declaration is an aggregate
+                // whatever its element's pointer level (a closure/pointer
+                // element carries one on the descriptor); the old
+                // `pointerLevel == 0` test scalar-stored a source address
+                // (copying 8 bytes of a wider array) for those declarations.
+                bool declIsAggregate =
+                    declArray.isArray ||
+                    (sym->type.pointerLevel == 0 &&
+                     (sym->type.isUserDefined || isStructType ||
+                      getTypeSize(sym->type) > 8 || initIsStruct));
+                if (declIsAggregate) {
                     // CIDER-BUG-133: an aggregate copy is observable when
                     // EITHER end is volatile — the target's declared flag
                     // (CIDER-BUG-061/092; alias-resolved, so `type V =
@@ -3481,12 +3516,17 @@ public:
     }
 
     int getTypeSize(TypeInfo type, const std::string& defModule = "") {
-        if (type.pointerLevel > 0) return 8;
+        // CIDER-BUG-157: an array VALUE is sized by its dimensions before
+        // the pointer rule — a closure- or pointer-element array descriptor
+        // carries the element's pointer level, so the old `pointerLevel`
+        // first test sized `[func(...); 2]` as one 8-byte pointer and the
+        // second element store ran past the slot.
         if (type.isArray) {
             // CIDER-BUG-052: elementType() yields the inner dimension for a
             // nested fixed array, so the product covers every dimension.
             return type.arraySize * getTypeSize(type.elementType(), defModule);
         }
+        if (type.pointerLevel > 0) return 8;
         // CID-006 (Task 2 F1 carry-over): a fn(...) value is a code pointer
         // (8 bytes), including an alias spelling.
         if (type.isFunctionPointer) return 8;
@@ -3735,10 +3775,14 @@ public:
     // element-store classification).
     bool isListAggregateElement(const TypeInfo& t) {
         TypeInfo r = resolveTypeAlias(t);
+        // CIDER-BUG-157: an array VALUE is always an aggregate, even when
+        // its element's pointer level leaks onto the descriptor (a closure/
+        // pointer element); only a scalar pointer or a slice is not.
+        if (r.isArray) return true;
         // Slices evaluate to their descriptor pointer — a scalar — even when
         // the element type is a struct, so they are never MEMCPY'd.
         if (r.pointerLevel > 0 || r.isSlice) return false;
-        return r.isArray || isStructValueType(r) || getTypeSize(r) > 8;
+        return isStructValueType(r) || getTypeSize(r) > 8;
     }
 
     // CIDER-BUG-163: materialise a (possibly nested) fixed-array list
@@ -3764,8 +3808,7 @@ public:
              {IRValue::Constant(elemSize * (int)elems.size(), IRType::I32)}});
         for (size_t ei = 0; ei < elems.size(); ei++) {
             if (auto* inner = dynamic_cast<ListExpr*>(elems[ei].get());
-                inner && elemType.isArray && elemType.pointerLevel == 0 &&
-                elemType.arraySize > 0) {
+                inner && isFixedArrayValue(elemType)) {
                 IRValue innerAddr = emitListLiteralTemp(*inner, elemType, targetIsVolatile);
                 emitListElementStore(addr, (int64_t)(ei * (size_t)elemSize), innerAddr,
                                      elemType, elemSize, true, targetIsVolatile, false);
@@ -3879,8 +3922,7 @@ public:
         if (paramType) {
             TypeInfo paramArray = resolveTypeAlias(*paramType);
             if (auto* list = dynamic_cast<ListExpr*>(arg);
-                list && paramArray.isArray && paramArray.pointerLevel == 0 &&
-                paramArray.arraySize > 0) {
+                list && isFixedArrayValue(paramArray)) {
                 return emitListLiteralTemp(*list, paramArray, false);
             }
         }
@@ -5250,8 +5292,7 @@ public:
             // checker has already enforced the size and element types.
             if (auto list = dynamic_cast<ListExpr*>(stmt.getValue())) {
                 TypeInfo assignArray = resolveTypeAlias(inferExprType(stmt.getTarget()));
-                if (assignArray.isArray && assignArray.pointerLevel == 0 &&
-                    assignArray.arraySize > 0) {
+                if (isFixedArrayValue(assignArray)) {
                     TypeInfo elemType = resolveTypeAlias(assignArray.elementType());
                     // CIDER-BUG-135: an interface-typed element is the
                     // 16-byte fat pointer, exactly like the declaration
@@ -5272,8 +5313,7 @@ public:
                         // the declaration path, shared through
                         // emitListLiteralTemp.
                         if (auto* inner = dynamic_cast<ListExpr*>(elems[ei].get());
-                            inner && elemType.isArray && elemType.pointerLevel == 0 &&
-                            elemType.arraySize > 0) {
+                            inner && isFixedArrayValue(elemType)) {
                             IRValue innerAddr = emitListLiteralTemp(*inner, elemType,
                                                                     targetIsVolatile);
                             emitListElementStore(storeBase, (int64_t)(ei * (size_t)elemSize),
@@ -5452,9 +5492,16 @@ public:
             // virtual classes so every non-virtual aggregate keeps its
             // existing emission.
             bool rhsVirtualClass = virtualClassForType(lastExprType_, currentModule_) != nullptr;
-            if (lastExprType_.pointerLevel == 0 &&
-                (lastExprType_.isArray || lastExprType_.isUserDefined ||
-                 rhsVirtualClass || getTypeSize(lastExprType_) > 8)) {
+            // CIDER-BUG-157: an ARRAY RHS is an aggregate whatever its
+            // element's pointer level (a closure/pointer element carries one
+            // on the descriptor), so a by-value array assignment copies the
+            // whole value instead of scalar-storing the source address.
+            bool rhsIsAggregate =
+                lastExprType_.isArray ||
+                (lastExprType_.pointerLevel == 0 &&
+                 (lastExprType_.isUserDefined || rhsVirtualClass ||
+                  getTypeSize(lastExprType_) > 8));
+            if (rhsIsAggregate) {
                 // CIDER-BUG-133: either end's volatile flag marks the copy
                 // (the source flag was captured before the target-specific
                 // conversions above overwrote lastExprType_).
@@ -8186,7 +8233,7 @@ public:
         // VALUE against the array's static length before the scaled address
         // is formed. A pointer base (pointerLevel > 0) stays unchecked: its
         // pointee extent is unknown; so do slices and strings.
-        if (baseType.isArray && baseType.pointerLevel == 0 && baseType.arraySize > 0) {
+        if (isFixedArrayValue(baseType)) {
             emitBoundsCheck(idx, baseType.arraySize);
         }
         TypeInfo elemType = baseType;

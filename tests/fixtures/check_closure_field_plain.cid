@@ -1,0 +1,15 @@
+// CIDER-BUG-157: a closure-typed field/element holds a closure object, so a
+// plain fn(...) value is rejected exactly like the reverse store: the
+// representation already is the closure one, and no raw code pointer may
+// feed the hidden-object calling convention.
+func add1(x: int) -> int { return x + 1; }
+
+struct Ops { var cf: func(int) -> int; }
+
+func main() -> int {
+  var o: Ops;
+  o.cf = add1;
+  var a: [func(int) -> int; 2];
+  a[0] = add1;
+  return o.cf(1) + a[0](1);
+}

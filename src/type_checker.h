@@ -1390,15 +1390,18 @@ public:
         // scalar fn value is excluded here; the array falls through to the
         // fixed-size-array rule below (indirect calls cannot pass it,
         // exactly like any other array).
-        if (t.pointerLevel > 0 || (t.isFunctionPointer && !t.isArray)) return false;
+        // CIDER-BUG-157: an array descriptor carries its element's pointer
+        // level, so the array test comes before the pointer rejections
+        // (mirrors ir_gen::isByValueAggregate for closure-element arrays).
         TypeInfo resolved = resolveType(t);
+        if (resolved.isArray) return resolved.arraySize > 0;
+        if (t.pointerLevel > 0 || (t.isFunctionPointer && !t.isArray)) return false;
         if (resolved.pointerLevel > 0 || (resolved.isFunctionPointer && !resolved.isArray)) {
             return false;
         }
         // CIDER-BUG-045: fixed-size arrays are by-value aggregates (params
         // copy, returns use sret), which indirect calls do not pass.
         if (t.isArray) return t.arraySize > 0;
-        if (resolved.isArray) return resolved.arraySize > 0;
         if (isBuiltinTypeName(resolved.name)) return false;
         std::shared_ptr<Symbol> s;
         if (resolved.name.find("::") != std::string::npos) {
@@ -1967,6 +1970,17 @@ public:
         return false;
     }
 
+    // CIDER-BUG-157: a fixed-array descriptor copies its element's own
+    // pointer level (a closure object or a pointer element carries one), so
+    // an array of closure-typed elements has pointerLevel > 0 even though
+    // the VALUE is the array object, not a pointer. The language has no
+    // pointer-to-array spelling (`*[T; N]` is rejected by the parser), so
+    // `isArray` alone identifies the array value; the list/element rules
+    // below key on this helper instead of `pointerLevel == 0`.
+    static bool isFixedArrayValue(const TypeInfo& t) {
+        return t.isArray && t.arraySize > 0;
+    }
+
     // Fixed-size array elements from a list literal (CID-007): element
     // count and per-element types. Shared by the declaration-time
     // initializer and CIDER-BUG-112's reassignment so the two sites cannot
@@ -2005,8 +2019,7 @@ public:
             // for `[1,2]` where the declared row is `[int;2]` and rejected
             // the declaration.
             if (auto* inner = dynamic_cast<ListExpr*>(e.get());
-                inner && elemArray.isArray && elemArray.pointerLevel == 0 &&
-                elemArray.arraySize > 0) {
+                inner && isFixedArrayValue(elemArray)) {
                 if (!checkFixedArrayElements(where, elemArray, *inner, line)) return false;
                 continue;
             }
@@ -2022,15 +2035,28 @@ public:
                           elemDecl.toString() + ", got " + lastExprType_.toString(), line);
                 return false;
             }
-            // CIDER-BUG-068: a fixed fn(...) array element keeps the plain
-            // raw-pointer shape, so a statically-plain element that resolves
-            // to a closure (a closure-valued parameter/local) is reported in
-            // the post-pass instead of being stored as an object pointer.
+            // CIDER-BUG-068: a fixed plain fn(...) array element keeps the
+            // plain raw-pointer shape, so a statically-plain element that
+            // resolves to a closure (a closure-valued parameter/local) is
+            // reported in the post-pass instead of being stored as an object
+            // pointer.
+            // CIDER-BUG-157: a closure-typed (func(...)) element already has
+            // the closure representation, so a direct closure value is the
+            // matching shape and needs no rejection slot; only a *void value
+            // takes the cast-free conversion proof, exactly like a direct
+            // field/element assignment (a plain fn(...) value is rejected by
+            // the compatibility test above).
             TypeInfo elemFn = resolveFunctionPointerAlias(elemDecl);
             if (elemFn.isFunctionPointer && !elemFn.isArray) {
-                int slot = fnSlot("s:" + std::to_string(fnStoreCheckCount_++), "an array element",
-                                  line);
-                fnRecordExpr(slot, e.get(), lastExprType_, line);
+                if (elemFn.isClosure) {
+                    if (isVoidCarrier(lastExprType_)) {
+                        fnCheckClosureConversion(elemDecl, e.get(), lastExprType_, line);
+                    }
+                } else {
+                    int slot = fnSlot("s:" + std::to_string(fnStoreCheckCount_++),
+                                      "an array element", line);
+                    fnRecordExpr(slot, e.get(), lastExprType_, line);
+                }
             }
         }
         return true;
@@ -2067,8 +2093,7 @@ public:
         TypeInfo elemDecl = resolveType(arrayType.elementType());
         for (auto& e : list.getElements()) {
             if (auto* inner = dynamic_cast<ListExpr*>(e.get());
-                inner && elemDecl.isArray && elemDecl.pointerLevel == 0 &&
-                elemDecl.arraySize > 0) {
+                inner && isFixedArrayValue(elemDecl)) {
                 if (!isConstArrayLiteral(*inner, elemDecl)) return false;
             } else if (!isConstIntExpr(e.get())) {
                 return false;
@@ -2427,8 +2452,8 @@ public:
 
         if (stmt.getInitializer()) {
             auto* wideInit = dynamic_cast<WideStringExpr*>(stmt.getInitializer());
-            if (dynamic_cast<ListExpr*>(stmt.getInitializer()) && declaredArray.isArray &&
-                declaredArray.pointerLevel == 0 && declaredArray.arraySize > 0) {
+            if (dynamic_cast<ListExpr*>(stmt.getInitializer()) &&
+                isFixedArrayValue(declaredArray)) {
                 checkFixedArrayInit(stmt, declaredArray);
             } else if (wideInit && declaredArray.isArray &&
                        declaredArray.pointerLevel == 0 && declaredArray.arraySize > 0) {
@@ -2784,8 +2809,7 @@ public:
         TypeInfo valueType;
         auto* listValue = stmt.getOp().empty() ? dynamic_cast<ListExpr*>(stmt.getValue())
                                                : nullptr;
-        if (listValue && !ifaceTargetType.isInterface && targetArray.isArray &&
-            targetArray.pointerLevel == 0 && targetArray.arraySize > 0) {
+        if (listValue && !ifaceTargetType.isInterface && isFixedArrayValue(targetArray)) {
             std::string where = target ? ("assignment to '" + target->getName() + "'")
                                        : std::string("array assignment");
             checkFixedArrayAssign(where, targetArray, *listValue, stmt.getLine());
@@ -2845,8 +2869,15 @@ public:
                 bool fnClosureTarget = fnTarget && targetFn.isClosure;
                 bool voidTarget = isVoidCarrier(targetType);
                 bool voidValue = isVoidCarrier(valueType);
-                if ((fnTarget && fnValue) || (fnTarget && !fnClosureTarget && voidValue) ||
-                    voidTarget) {
+                // CIDER-BUG-157: a closure-typed target already holds the
+                // closure representation, so a direct closure value (or the
+                // cast-free *void conversion checked below) needs no store
+                // verdict; only a plain fn(...) storage site records the
+                // value shape for the post-pass rejection. A plain fn(...)
+                // value against a closure target is rejected by the
+                // compatibility test above.
+                if ((fnTarget && !fnClosureTarget && fnValue) ||
+                    (fnTarget && !fnClosureTarget && voidValue) || voidTarget) {
                     if (target) {
                         auto sym = resolveScoped(target->getName());
                         if (sym && sym->kind == SymbolKind::VARIABLE) {
@@ -3530,8 +3561,7 @@ public:
                     // materialises the declared shape).
                     TypeInfo paramArray = resolveType(paramT);
                     if (auto* list = dynamic_cast<ListExpr*>(expr.getArgs()[i].get());
-                        list && !paramT.isInterface && paramArray.isArray &&
-                        paramArray.pointerLevel == 0 && paramArray.arraySize > 0) {
+                        list && !paramT.isInterface && isFixedArrayValue(paramArray)) {
                         checkFixedArrayElements(
                             "argument " + std::to_string(i + 1) +
                                 " to constructor of class '" + type.name + "'",
@@ -3788,8 +3818,7 @@ public:
                     // and converts interface elements (CIDER-BUG-135).
                     TypeInfo expArray = resolveType(expT);
                     if (auto* list = dynamic_cast<ListExpr*>(fieldInit.second.get());
-                        list && !expT.isInterface && expArray.isArray &&
-                        expArray.pointerLevel == 0 && expArray.arraySize > 0) {
+                        list && !expT.isInterface && isFixedArrayValue(expArray)) {
                         checkFixedArrayElements("field '" + fieldDef.name + "'", expArray,
                                                 *list, expr.getLine());
                         lastExprType_ = expT;
@@ -3847,10 +3876,13 @@ public:
         // CIDER-BUG-018: an array-to-array cast is a layout reinterpretation
         // whose copy uses the TARGET size; require the same element type and
         // count, or `u"AB" as [u16;8]` copies 16 bytes from a 6-byte block.
+        // CIDER-BUG-157: the array test must not key on `pointerLevel == 0`
+        // — a closure/pointer-element array descriptor carries the element's
+        // level, and without the check a `[*int;2] as [*int;3]` read past
+        // the source (the shape the widened list support now reaches).
         TypeInfo target = resolveType(lastExprType_);
         TypeInfo src = resolveType(srcType);
-        if (target.isArray && target.pointerLevel == 0 && target.arraySize > 0 &&
-            src.isArray && src.pointerLevel == 0 && src.arraySize > 0 &&
+        if (isFixedArrayValue(target) && isFixedArrayValue(src) &&
             (target.arraySize != src.arraySize || !sameArrayElementType(target, src))) {
             error("Array cast size/type mismatch. Expected " + target.toString() +
                       ", got " + src.toString(), expr.getLine());
@@ -4103,8 +4135,7 @@ public:
                                 m.parameterTypes[i], methodMod, expr.getLine());
                             resolveInterfaceFlag(paramT);
                             TypeInfo paramArray = resolveType(paramT);
-                            if (paramT.isInterface || !paramArray.isArray ||
-                                paramArray.pointerLevel != 0 || paramArray.arraySize <= 0) {
+                            if (paramT.isInterface || !isFixedArrayValue(paramArray)) {
                                 continue;
                             }
                             checkFixedArrayElements(
@@ -4227,8 +4258,7 @@ public:
                 // the call site.
                 TypeInfo paramArray = resolveType(paramT);
                 if (auto* list = dynamic_cast<ListExpr*>(expr.getArgs()[i].get());
-                    list && !paramT.isInterface && paramArray.isArray &&
-                    paramArray.pointerLevel == 0 && paramArray.arraySize > 0) {
+                    list && !paramT.isInterface && isFixedArrayValue(paramArray)) {
                     checkFixedArrayElements(
                         "argument " + std::to_string(i + 1) + " to '" + label + "'",
                         paramArray, *list, expr.getLine());

@@ -1,0 +1,13 @@
+// CIDER-BUG-157: a cast between closure-element arrays must keep the same
+// element count/type (CIDER-BUG-018's layout rule). The old
+// `pointerLevel == 0` guard skipped arrays whose elements are closure
+// objects, so `[func(...); 2] as [func(...); 3]` read past the source.
+func makeAdder(base: int) -> func(int) -> int {
+  return func(x: int) -> int { return x + base; };
+}
+
+func main() -> int {
+  var a: [func(int) -> int; 2] = [makeAdder(1), makeAdder(2)];
+  var b: [func(int) -> int; 3] = a as [func(int) -> int; 3];
+  return b[0](1);
+}

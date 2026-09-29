@@ -1,0 +1,1 @@
+Array cast size/type mismatch. Expected *[func(int) -> int; 3], got *[func(int) -> int; 2]

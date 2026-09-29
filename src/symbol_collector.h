@@ -1524,7 +1524,10 @@ public:
     }
 
     int getFieldSize(const TypeInfo& type, std::set<std::string>* visiting = nullptr) {
-        if (type.pointerLevel > 0) return 8;
+        // CIDER-BUG-157: an array VALUE is sized by its dimensions before
+        // the pointer rule — a closure- or pointer-element array descriptor
+        // carries the element's pointer level, so the old `pointerLevel`
+        // first test sized `[func(...); 2]` fields as one 8-byte pointer.
         // CIDER-BUG-069: an array of interfaces is sized by its elements
         // (16 bytes each); the array wrapper is never an interface value, so
         // the array test must come before the interface test.
@@ -1533,6 +1536,7 @@ public:
             // nested fixed array.
             return type.arraySize * getFieldSize(type.elementType(), visiting);
         }
+        if (type.pointerLevel > 0) return 8;
         if (type.isInterface) return 16;
         if (type.name == "u8" || type.name == "i8" || type.name == "char" || type.name == "byte" || type.name == "void") return 1;
         if (type.name == "u16" || type.name == "i16") return 2;
@@ -1574,14 +1578,16 @@ public:
     }
 
     int getFieldAlignment(const TypeInfo& type, std::set<std::string>* visiting = nullptr) {
-        if (type.pointerLevel > 0) return 8;
-        // CIDER-BUG-069: mirror getFieldSize — an array wrapper is aligned
-        // by its elements, so the array test comes first.
+        // CIDER-BUG-157: mirror getFieldSize — the array shape is decided
+        // before the pointer rule, so a closure/pointer-element array is
+        // aligned by its elements, not treated as a pointer.
+        // CIDER-BUG-069: an array wrapper is aligned by its elements.
         if (type.isArray) {
             // CIDER-BUG-052: elementType() covers the inner dimension of a
             // nested fixed array.
             return getFieldAlignment(type.elementType(), visiting);
         }
+        if (type.pointerLevel > 0) return 8;
         if (type.isInterface) return 8;
         if (type.name == "u8" || type.name == "i8" || type.name == "char" || type.name == "byte" || type.name == "void") return 1;
         if (type.name == "u16" || type.name == "i16") return 2;
