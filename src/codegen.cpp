@@ -1,6 +1,7 @@
 #include "codegen.h"
 
 #include <algorithm>
+#include <cctype>
 #include <cstdint>
 #include <cstdio>
 #include <cstdlib>
@@ -2693,7 +2694,53 @@ bool CodeGenerator::generate(ModuleIR& module, const std::string& outputPath,
     // NASM's "attempt to initialize memory in BSS section" warning and put
     // instruction bytes in a NOBITS section. A block may still switch
     // sections itself (e.g. `section .data` / `section .text`) for data.
+    //
+    // CIDER-BUG-152: .text is not a BSS section, so NASM's uninitialized-space
+    // directives (`resb`/`resw`/`resd`/`resq`) have no legal context here and
+    // make it warn "uninitialized space declared in non-BSS section `.text':
+    // zeroing". The space is still emitted and zeroed, but it sits in the
+    // read-only executable .text mapping, so this is a supported-but-avoided
+    // case rather than a defect: the policy is that file-scope data uses
+    // `db`/`dq`, or a block brackets itself into a section where `res*` is
+    // legal (`section .bss` ... `section .text`). The bracket is safe
+    // because of the re-anchor below.
+    //
+    // That re-anchor matters for the bracket: a block that stops on another
+    // section would otherwise hand that section to every generated line
+    // below, so the whole module's code would land in .bss and NASM would
+    // drop it. Re-emitting `section .text` is only done when a block actually
+    // stopped elsewhere, so a block that returns to .text (or never switches)
+    // keeps its output byte-identical.
+    auto lower = [](std::string s) {
+        for (char& c : s) c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+        return s;
+    };
+    auto isSpace = [](char c) { return std::isspace(static_cast<unsigned char>(c)) != 0; };
+    std::string userAsmEndSection = ".text";
+    for (const auto& block : userAsmSection) {
+        std::istringstream blockLines(block);
+        std::string asmLine;
+        while (std::getline(blockLines, asmLine)) {
+            size_t i = 0;
+            while (i < asmLine.size() && isSpace(asmLine[i])) i++;
+            size_t opStart = i;
+            while (i < asmLine.size() && !isSpace(asmLine[i])) i++;
+            std::string op = lower(asmLine.substr(opStart, i - opStart));
+            if (op == "section" || op == "segment") {
+                while (i < asmLine.size() && isSpace(asmLine[i])) i++;
+                size_t nameStart = i;
+                while (i < asmLine.size() && !isSpace(asmLine[i])) i++;
+                std::string name = asmLine.substr(nameStart, i - nameStart);
+                if (!name.empty() && name.back() == ':') name.pop_back();
+                if (!name.empty()) userAsmEndSection = lower(name);
+            } else if (op == "absolute") {
+                // A pseudo-section: anything emitted after it is discarded.
+                userAsmEndSection = "absolute";
+            }
+        }
+    }
     for (const auto& line : userAsmSection) out << "    " << line << "\n";
+    if (userAsmEndSection != ".text") out << "\nsection .text\n";
     for (const auto& line : textSection) out << line << "\n";
     if (!debugSections.empty()) out << debugSections;
 

@@ -12,6 +12,13 @@
 # live section. The second half asserts the block now lands in .text and
 # that its code really executes.
 #
+# CIDER-BUG-152: .text is not a BSS section, so NASM's uninitialized-space
+# directives (`resb`/`resw`/`resd`/`resq`) have no legal context there. The
+# policy is: file-scope data uses `db`/`dq`, or a block brackets itself into
+# .bss and back. The third part pins all three halves of that policy — the
+# understood `res*`-in-.text warning, the warning-free .bss bracket, and the
+# .text re-anchor that keeps a block from swallowing the generated code.
+#
 # Usage: bss_align_smoke.sh <cider-binary>
 # Exits 77 when nasm/nm/gcc are missing (no compiled-toolchain SKIP).
 set -euo pipefail
@@ -125,5 +132,149 @@ set +e
 USER_ASM_RC=$?
 set -e
 [ "$USER_ASM_RC" -eq 42 ] || fail "user asm body exited $USER_ASM_RC, want 42"
+
+# ---------------------------------------------------------------- BUG-152 ---
+# CIDER-BUG-152: `res*` at file scope. Under the .text emission above, NASM
+# has no legal context for uninitialized space, so it warns while still
+# emitting the zeroed space. That space is read-only, so this form is
+# documented-but-avoided rather than useful: the test pins the warning so it
+# is an understood outcome instead of an accident, and pins the two forms
+# that are actually usable — `db`/`dq`, and a block that brackets itself
+# into .bss and back.
+sym_type() { # <object> <name>
+    nm "$1" | awk -v s="$2" '$3 == s { print $2 }'
+}
+check_sym_type() { # <object> <name> <t|T> <label>
+    local got upper
+    got=$(sym_type "$1" "$2")
+    upper=$(printf '%s' "$3" | tr '[:lower:]' '[:upper:]')
+    [ "$got" = "$3" ] || [ "$got" = "$upper" ] || \
+        fail "$4: symbol $2 has type '${got:-missing}', want $3/$upper"
+}
+run_rc() { # <binary> -> echoes exit code
+    set +e
+    "$1"
+    local rc=$?
+    set -e
+    echo "$rc"
+}
+
+# (a) The understood case: `resq` in .text. Must still assemble, and the
+# space must be emitted and zero-initialized. It is read-only (it lives in
+# the R E .text mapping), so this probes a read, never a store.
+cat > "$DIR/res_text.cid" <<'CID'
+extern func probe_res() -> int;
+
+func main() -> int {
+  return probe_res();
+}
+
+asm {
+  "buf_res:"
+  "resq 4"
+  "probe_res:"
+  "mov eax, [rel buf_res]"
+  "test eax, eax"
+  "jnz .res_notzero"
+  "xor eax, eax"
+  "ret"
+  ".res_notzero:"
+  "mov eax, 1"
+  "ret"
+}
+CID
+
+"$BIN" compile "$DIR/res_text.cid" -o "$DIR/res_text.asm" \
+    || fail "cider compile (res* in .text) failed"
+
+NASM_ERR=$(nasm -O0 -f elf64 "$DIR/res_text.asm" -o "$DIR/res_text.o" 2>&1 >/dev/null) \
+    || fail "nasm failed (res* in .text): $NASM_ERR"
+# The documented warning, and nothing else: no BSS-initialization warning
+# (BUG-142 regression) and no assembler error.
+if ! echo "$NASM_ERR" | grep -q "uninitialized space declared in non-BSS section"; then
+    fail "missing the documented zeroing warning for res* in .text: ${NASM_ERR:-<none>}"
+fi
+if echo "$NASM_ERR" | grep -q "attempt to initialize memory"; then
+    fail "res* block emitted initialized data in .bss: $NASM_ERR"
+fi
+NONZERO=$(echo "$NASM_ERR" | grep -vc "uninitialized space declared in non-BSS section" || true)
+[ "$NONZERO" -eq 0 ] || fail "unexpected nasm diagnostics for res* in .text: $NASM_ERR"
+
+check_sym_type "$DIR/res_text.o" buf_res t "res* in .text"
+check_sym_type "$DIR/res_text.o" probe_res t "res* in .text"
+gcc "$DIR/res_text.o" -o "$DIR/res_text" -no-pie || fail "link (res* in .text) failed"
+[ "$(run_rc "$DIR/res_text")" -eq 0 ] \
+    || fail "res* in .text: space not emitted/zero-initialized (want 0)"
+
+# (b) The warning-free alternative: bracket the storage into .bss. Must
+# assemble with no diagnostics at all, the data must really be BSS, and it
+# must be writable — the whole reason to prefer this form.
+cat > "$DIR/res_bss.cid" <<'CID'
+extern func probe_bss() -> int;
+
+func main() -> int {
+  return probe_bss();
+}
+
+asm {
+  "section .bss"
+  "buf_bss:"
+  "resq 4"
+  "section .text"
+  "probe_bss:"
+  "mov eax, [rel buf_bss]"
+  "test eax, eax"
+  "jnz .bss_notzero"
+  "mov qword [rel buf_bss], 7"
+  "mov eax, [rel buf_bss]"
+  "ret"
+  ".bss_notzero:"
+  "mov eax, 1"
+  "ret"
+}
+CID
+
+"$BIN" compile "$DIR/res_bss.cid" -o "$DIR/res_bss.asm" \
+    || fail "cider compile (res* in .bss bracket) failed"
+
+NASM_ERR=$(nasm -O0 -f elf64 "$DIR/res_bss.asm" -o "$DIR/res_bss.o" 2>&1 >/dev/null) \
+    || fail "nasm failed (res* in .bss bracket): $NASM_ERR"
+[ -z "$NASM_ERR" ] || fail "bracketed .bss storage must be warning-free: $NASM_ERR"
+
+check_sym_type "$DIR/res_bss.o" buf_bss b "res* in .bss bracket"
+check_sym_type "$DIR/res_bss.o" probe_bss t "res* in .bss bracket"
+gcc "$DIR/res_bss.o" -o "$DIR/res_bss" -no-pie || fail "link (res* in .bss bracket) failed"
+[ "$(run_rc "$DIR/res_bss")" -eq 7 ] \
+    || fail "res* in .bss bracket: not zeroed/writable (want 7)"
+
+# (c) The bracket is safe even when the block forgets to switch back. Without
+# the compiler's .text re-anchor, every generated line below inherits .bss:
+# NASM discards the code and the binary has no entry point at all.
+cat > "$DIR/res_stray.cid" <<'CID'
+func main() -> int {
+  return 42;
+}
+
+asm {
+  "section .bss"
+  "buf_stray:"
+  "resq 4"
+}
+CID
+
+"$BIN" compile "$DIR/res_stray.cid" -o "$DIR/res_stray.asm" \
+    || fail "cider compile (unterminated .bss bracket) failed"
+
+NASM_ERR=$(nasm -O0 -f elf64 "$DIR/res_stray.asm" -o "$DIR/res_stray.o" 2>&1 >/dev/null) \
+    || fail "nasm failed (unterminated .bss bracket): $NASM_ERR"
+if echo "$NASM_ERR" | grep -q "attempt to initialize memory"; then
+    fail "generated code was emitted in .bss: $NASM_ERR"
+fi
+check_sym_type "$DIR/res_stray.o" buf_stray b "unterminated .bss bracket"
+check_sym_type "$DIR/res_stray.o" main t "unterminated .bss bracket"
+gcc "$DIR/res_stray.o" -o "$DIR/res_stray" -no-pie \
+    || fail "link (unterminated .bss bracket) failed"
+[ "$(run_rc "$DIR/res_stray")" -eq 42 ] \
+    || fail "generated code lost to .bss (want 42)"
 
 echo "bss_align_smoke: OK"
