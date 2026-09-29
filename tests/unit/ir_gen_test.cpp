@@ -94,6 +94,16 @@ std::string genSrcWithProvenance(const std::string& src, const std::string& symN
     return ss.str();
 }
 
+// Non-overlapping occurrences of `needle` (0, 1, 2, ...).
+size_t countOf(const std::string& hay, const std::string& needle) {
+    size_t n = 0;
+    for (size_t p = hay.find(needle); p != std::string::npos;
+         p = hay.find(needle, p + needle.size())) {
+        n++;
+    }
+    return n;
+}
+
 int run() {
     // Function with typed arithmetic.
     std::string d = genSrc("func f(a: int) -> int {\n  return a + 1;\n}\n");
@@ -1421,6 +1431,48 @@ int run() {
         CHECK(d.find("define add() {") != std::string::npos);
         CHECK(d.find("call add") != std::string::npos);
         CHECK(d.find("define cs(") == std::string::npos);
+    }
+
+    // CIDER-BUG-210: the checker rejects a control transfer in a defer body,
+    // but ir_gen is the backstop — genSrc here bypasses the checker, which
+    // is exactly the path that used to recurse until the stack was gone.
+    // Every transfer form must terminate and stay bounded.
+    {
+        struct Case { const char* src; };
+        const Case cases[] = {
+            {"func f() -> int { defer { return 7; } return 0; }\n"},
+            {"func f() -> int { defer { throw 5; } return 0; }\n"},
+            {"func f() -> int { for (var i: int = 0; i < 3; i++) { defer { break; } } return 0; }\n"},
+            {"func f() -> int { var n: int = 0; while (n < 3) { n = n + 1; defer { continue; } } return 0; }\n"},
+            // Nested: the transfer sits deeper, the recursion is the same.
+            {"func f() -> int { defer { if (true) { return 1; } } return 0; }\n"},
+            {"func f() -> int { defer { defer { throw 2; } } return 0; }\n"},
+        };
+        for (const auto& c : cases) {
+            std::string d = genSrc(c.src);
+            // Bounded, not merely finished: the unbounded emit produced
+            // megabytes of IR (and, past a few MB of stack, SIGSEGV).
+            CHECK(countOf(d, "\n  ret") >= 1);
+            CHECK(countOf(d, "\n  ret") <= 6);
+            CHECK(d.size() < 4096);
+        }
+        // The guard is per emission, not permanent: a defer nested in a
+        // branch inside a defer body is a different statement and must
+        // still unwind. Both bodies emit — the inner one (n + 1) before the
+        // outer one (n + 10).
+        d = genSrc("var n: int = 0;\n"
+                   "func f() -> void { defer { if (true) { defer { n = n + 1; } } n = n + 10; } }\n");
+        CHECK(countOf(d, "store n,") == 2);
+        CHECK(d.find("add %v0, 1") != std::string::npos);
+        CHECK(d.find("add %v2, 10") != std::string::npos);
+        CHECK(d.find("add %v0, 1") < d.find("add %v2, 10"));
+        // A loop whose body defers still runs them, so the statement is
+        // emitted rather than skipped: the IR carries one copy in the loop
+        // body (the loop is a runtime back-edge, not repeated emission).
+        d = genSrc("var n: int = 0;\n"
+                   "func f() -> void { for (var i: int = 0; i < 4; i++) { defer { n = n + 1; } } }\n");
+        CHECK(d.find("define f() {") != std::string::npos);
+        CHECK(countOf(d, "store n,") == 1);
     }
     return 0;
 }

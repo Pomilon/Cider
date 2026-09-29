@@ -4593,6 +4593,11 @@ public:
         // CIDER-BUG-068: the function name labels return-representation
         // diagnostics; saved/restored like the declared return type.
         std::string prevFunctionName = currentFunctionName_;
+        // CIDER-BUG-210: a nested function body is its own frame (ir_gen
+        // clears deferStack_ for it), so a defer of the OUTER function
+        // cannot make a `return` in here illegal.
+        int prevDeferBodyDepth = deferBodyDepth_;
+        deferBodyDepth_ = 0;
         currentFunctionName_ = stmt.getName();
         currentDeclaredReturnType_ = stmt.getReturnType()
             ? canonicalizeNominal(TypeInfo::fromAST(stmt.getReturnType()), stmt.getLine())
@@ -4698,6 +4703,7 @@ public:
         currentDeclaredReturnType_ = prevReturnType;
         hasDeclaredReturnType_ = prevHasReturnType;
         currentFunctionName_ = prevFunctionName;
+        deferBodyDepth_ = prevDeferBodyDepth;
     }
 
     void visit(BlockStmt& stmt) override {
@@ -4746,6 +4752,8 @@ public:
     }
 
     void visit(ReturnStmt& stmt) override {
+        // CIDER-BUG-210: see rejectDeferTransfer.
+        if (rejectDeferTransfer("return", stmt.getLine())) return;
         if (stmt.getValue()) {
             // CIDER-BUG-177: a list literal returned into a fixed-array
             // return type takes the declaration-time checks against the
@@ -5128,6 +5136,11 @@ public:
         TypeInfo prevReturnType = currentDeclaredReturnType_;
         bool prevHasReturnType = hasDeclaredReturnType_;
         hasDeclaredReturnType_ = false;
+        // CIDER-BUG-210: a closure body is its own frame (see
+        // visit(FunctionDeclStmt)), so `return` inside it stays legal even
+        // when the literal is written in a defer body.
+        int prevDeferBodyDepth = deferBodyDepth_;
+        deferBodyDepth_ = 0;
         // CIDER-FEAT-005: a closure's declared return type is otherwise
         // never resolved; note it so a type-only import used here counts.
         noteTypeUse(expr.getReturnType());
@@ -5164,6 +5177,7 @@ public:
         exitScopeChecked();
         currentDeclaredReturnType_ = prevReturnType;
         hasDeclaredReturnType_ = prevHasReturnType;
+        deferBodyDepth_ = prevDeferBodyDepth;
         TypeInfo closureType;
         closureType.name = "func";
         closureType.pointerLevel = 1;
@@ -5374,10 +5388,19 @@ public:
         }
     }
 
-    void visit(BreakStmt&) override {}
-    void visit(ContinueStmt&) override {}
+    // CIDER-BUG-210: see rejectDeferTransfer. Both are accepted anywhere
+    // else (ir_gen drops a break/continue with no enclosing loop), but
+    // inside a `defer` body they reach the unwinder and re-enter it.
+    void visit(BreakStmt& stmt) override {
+        rejectDeferTransfer("break", stmt.getLine());
+    }
+    void visit(ContinueStmt& stmt) override {
+        rejectDeferTransfer("continue", stmt.getLine());
+    }
 
     void visit(ThrowStmt& stmt) override {
+        // CIDER-BUG-210: see rejectDeferTransfer.
+        if (rejectDeferTransfer("throw", stmt.getLine())) return;
         stmt.getValue()->accept(*this);
     }
 
@@ -5406,7 +5429,11 @@ public:
     }
 
     void visit(DeferStmt& stmt) override {
+        // CIDER-BUG-210: the body is still inside the defer, so a `defer`
+        // written in a defer body does not clear the flag.
+        ++deferBodyDepth_;
         stmt.getDeferredStmt()->accept(*this);
+        --deferBodyDepth_;
     }
 
     void visit(AsmStmt& stmt) override {
@@ -5508,6 +5535,16 @@ private:
     // (slice bounds): the walk is for warning bookkeeping only, so any
     // diagnostic it would raise must stay silent.
     int suppressErrors_ = 0;
+    // CIDER-BUG-210: how many enclosing `defer` bodies the statement being
+    // checked sits in. A `return`/`throw`/`break`/`continue` written there
+    // transfers control out of the very emission that is running the defer,
+    // so ir_gen's unwinder re-entered the statement it was emitting and
+    // recursed until the compiler's stack was gone (SIGSEGV). The checker
+    // rejects those shapes where it can still print a diagnostic; cleared
+    // at every function-body boundary (visit(FunctionDeclStmt),
+    // visit(FunctionExpr)) because a nested function or closure is its own
+    // frame and ir_gen gives it a fresh defer stack.
+    int deferBodyDepth_ = 0;
     TypeInfo lastExprType_ = {"void", 0};
     // CIDER-BUG-057: array size of the object of the most recently checked
     // SliceExpr, used to statically evaluate a `base[start:]` slice's end
@@ -5553,6 +5590,21 @@ private:
     void error(const std::string& msg, int line) {
         if (suppressErrors_ > 0) return;
         reporter_.error(msg, line);
+    }
+
+    // CIDER-BUG-210: a control transfer written in a `defer` body leaves the
+    // defer's own exit sequence unfinished, and ir_gen's unwinder then
+    // re-entered the very statement it was emitting (unbounded recursion,
+    // see ir_gen.h emitDefers). The rule is lexical: a transfer anywhere
+    // inside a defer body is rejected, however deeply nested in blocks,
+    // loops or further defers, because every one of those emits through the
+    // same unwinder. Returns true when the statement was rejected, so the
+    // callers skip the remaining (moot) checks instead of piling on
+    // diagnostics about a value that is never used.
+    bool rejectDeferTransfer(const char* keyword, int line) {
+        if (deferBodyDepth_ == 0) return false;
+        error("'" + std::string(keyword) + "' is not allowed in a defer body", line);
+        return true;
     }
 
     // CIDER-BUG-068 representation inference state (slot 0 is a sentinel so

@@ -371,7 +371,19 @@ public:
                 // itself be a block, whose accept pushes/pops a scope (and
                 // may reallocate the outer vector).
                 Statement* s = deferStack_[i - 1][j - 1];
+                // CIDER-BUG-210: a control transfer in a defer body
+                // (`return`, `throw`, `break`, `continue`) makes this loop
+                // re-enter the statement it is already emitting, so it
+                // never reached the bottom and the compiler died on a
+                // stack overflow. The checker rejects those shapes; this
+                // is the backstop for anything that still reaches here.
+                // Only the in-progress statement is skipped, so a `defer`
+                // nested in a block, branch or loop inside a defer body is
+                // a different Statement* and still unwinds normally.
+                if (emittingDefers_.count(s) != 0) continue;
+                emittingDefers_.insert(s);
                 visitStatement(s);
+                emittingDefers_.erase(s);
             }
         }
     }
@@ -10220,6 +10232,14 @@ private:
     // frame invocation instead of allocating per iteration.
     BasicBlock* functionEntryBlock_ = nullptr;
     std::vector<std::vector<Statement*>> deferStack_;
+    // CIDER-BUG-210: the defer statements this generator is emitting right
+    // now. emitDefers skips a statement that is already in the set, so a
+    // defer body that transfers control out of its own emission unwinds
+    // once instead of recursing forever (the checker rejects the shape;
+    // see type_checker.h rejectDeferTransfer). Entries are removed on the
+    // way out, so a later, separate unwind of the same statement — the
+    // next loop iteration, say — still runs it.
+    std::set<Statement*> emittingDefers_;
     std::vector<std::vector<DestructorInfo>> destructorStack_;
     bool exceptionGlobalsEnsured_ = false;
     bool interpHelpersEnsured_ = false;

@@ -1,0 +1,44 @@
+// CIDER-BUG-210: a control transfer written in a `defer` body leaves the
+// defer's own exit sequence unfinished. The IR unwinder re-entered the
+// statement it was emitting, so `emitDefers` recursed until the compiler's
+// stack was gone and `cider compile` died on SIGSEGV. Every transfer form
+// that reaches the unwinder is rejected here instead.
+
+// A plain defer body is fine; only the transfers below are rejected.
+func legal() -> int {
+    defer { sink = sink + 1; }
+    return 0;
+}
+
+func returnsFromDefer() -> int {
+    defer { return 7; }
+    return 0;
+}
+
+func throwsFromDefer() -> int {
+    defer { throw 5; }
+    return 0;
+}
+
+func breaksFromDefer() -> int {
+    for (var i: int = 0; i < 3; i++) {
+        defer { break; }
+    }
+    return 0;
+}
+
+func continuesFromDefer() -> int {
+    var n: int = 0;
+    while (n < 3) {
+        n = n + 1;
+        defer { continue; }
+    }
+    return 0;
+}
+
+var sink: int = 0;
+
+func main() -> int {
+    legal();
+    return returnsFromDefer() + throwsFromDefer() + breaksFromDefer() + continuesFromDefer();
+}

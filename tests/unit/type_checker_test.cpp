@@ -1397,6 +1397,49 @@ int run() {
                        "Type mismatch in declaration of 'q'. Expected *int, got volatile *int"));
     }
 
+    // CIDER-BUG-210: a control transfer in a `defer` body segfaulted the
+    // compiler (ir_gen's emitDefers re-entered the statement it was
+    // emitting). All four transfer forms are rejected at check time.
+    {
+        auto ret = checkSrc("func f() -> int { defer { return 7; } return 0; }\n");
+        CHECK(hasError(ret, "'return' is not allowed in a defer body"));
+
+        auto thr = checkSrc("func f() -> int { defer { throw 5; } return 0; }\n");
+        CHECK(hasError(thr, "'throw' is not allowed in a defer body"));
+
+        auto brk = checkSrc(
+            "func f() -> int { for (var i: int = 0; i < 3; i++) { defer { break; } } return 0; }\n");
+        CHECK(hasError(brk, "'break' is not allowed in a defer body"));
+
+        auto cont = checkSrc(
+            "func f() -> int { var n: int = 0; while (n < 3) { n = n + 1; defer { continue; } } return 0; }\n");
+        CHECK(hasError(cont, "'continue' is not allowed in a defer body"));
+
+        // The rule is lexical: a nested defer, branch or match arm inside
+        // the body is still inside the defer.
+        CHECK(hasError(checkSrc("func f() -> int { defer { defer { return 1; } } return 0; }\n"),
+                       "'return' is not allowed in a defer body"));
+        CHECK(hasError(checkSrc("func f() -> int { defer { if (true) { return 2; } } return 0; }\n"),
+                       "'return' is not allowed in a defer body"));
+        CHECK(hasError(checkSrc("func f() -> int { defer { match (1) { 1 => { return 3; } } } return 0; }\n"),
+                       "'return' is not allowed in a defer body"));
+
+        // A closure body is its own frame, so its `return` stays legal
+        // inside a defer body.
+        CHECK(checkSrc("func main() -> int {\n"
+                       "  defer { var g: func() -> int = func() -> int { return 1; }; }\n"
+                       "  return 0;\n"
+                       "}\n").empty());
+        // A plain defer body is still clean, and the flag is restored when
+        // the function ends: the next function's defer must not inherit it.
+        CHECK(checkSrc("var sink: int = 0;\n"
+                       "func g() -> void { defer { sink = 1; } }\n"
+                       "func main() -> int { defer { g(); } return 0; }\n").empty());
+        // A transfer outside any defer body stays exactly as it was.
+        CHECK(checkSrc("func main() -> int { { if (true) { return 1; } } return 0; }\n").empty());
+        CHECK(checkSrc("func main() -> int { for (var i: int = 0; i < 3; i++) { if (i == 1) { break; } } return 0; }\n").empty());
+    }
+
     return 0;
 }
 
