@@ -13,6 +13,11 @@
 #   * `.hash` holds the SHA-256 of the module source;
 #   * two objects that instantiate the same template link cleanly (the
 #     use-site instantiation is a weak definition);
+#   * same-named templates exported by different modules get per-owner
+#     instantiation symbols: a module instantiating its OWN template calls
+#     the module-mangled clone (not a bare shared name), two such modules
+#     link to distinct weak definitions, and the linked program runs each
+#     module's own body (CIDER-BUG-107);
 #   * a library object's class/struct globals run their field initializers
 #     (and vptr) before user code (CIDER-BUG-106), on the linked and the
 #     whole-program VM paths.
@@ -50,6 +55,21 @@ fail() {
 # boxy: a function template used from two objects (duplicate weak clones).
 cat > modules/boxy.cid <<'CID'
 export func boxed<T>(x: T) -> T { return x + x; }
+CID
+
+# CIDER-BUG-107: two modules export a SAME-NAMED function template with
+# different bodies and each instantiates its own. In separate compilation
+# each object's clone must mangle by its owning module, so the two
+# specializations stay distinct symbols and each module's own call binds to
+# its own body.
+cat > modules/twina.cid <<'CID'
+export func twin<T>(x: T) -> T { return x * 10 + 1; }
+export func ownTwinA(x: int) -> int { return twin<int>(x); }
+CID
+
+cat > modules/twinb.cid <<'CID'
+export func twin<T>(x: T) -> T { return x * 10 + 2; }
+export func ownTwinB(x: int) -> int { return twin<int>(x); }
 CID
 
 # mathx: exported const/var/struct/class/interface/functions plus a private
@@ -109,6 +129,8 @@ CID
 
 cat > main.cid <<'CID'
 import mathx;
+import twina;
+import twinb;
 from boxy import boxed;
 from std.io import printInt, print;
 
@@ -137,11 +159,17 @@ func main() -> int {
   printInt(mathx.counter.unset); print(",");      // 0
   printInt(mathx.counter.value()); print(",");    // 41 via the global's vptr
   printInt(mathx.wrap.c.n); print(",");           // 41 struct-embedded
-  printInt(mathx.counters[1].n); print("\n");     // 41 array element
+  printInt(mathx.counters[1].n); print(",");      // 41 array element
+  // CIDER-BUG-107: same-named templates in two modules keep their own
+  // instantiation bodies (per-owner symbols) on both use paths.
+  printInt(twina.ownTwinA(4)); print(",");        // 41: twina's own twin<int>
+  printInt(twinb.ownTwinB(4)); print(",");        // 42: twinb's own twin<int>
+  printInt(twina.twin<int>(3)); print(",");       // 31: qualified from main
+  printInt(twinb.twin<int>(3)); print("\n");      // 32: qualified from main
   return 0;
 }
 CID
-EXPECTED=$'43,10,7,1,11,41,10,42,42,41,0,41,41,41'
+EXPECTED=$'43,10,7,1,11,41,10,42,42,41,0,41,41,41,41,42,31,32'
 
 assemble() { # <name>
     nasm -O0 -f elf64 "build/$1.asm" -o "build/$1.o"
@@ -173,6 +201,8 @@ emit_meta() { # <src> <name>
 emit_meta "$IO_SRC" io
 emit_meta modules/boxy.cid boxy
 emit_meta modules/mathx.cid mathx
+emit_meta modules/twina.cid twina
+emit_meta modules/twinb.cid twinb
 "$BIN" compile --cache cache main.cid -o build/main.asm
 
 # Imported definitions are externs in main's object and definitions in the
@@ -192,8 +222,8 @@ grep -q "call mod_mathx__.*uinit" build/main.asm \
 grep -q "^_cider_global_init:" build/mathx.asm \
     && fail "mathx.asm emits the whole-program global-init name"
 
-for name in io boxy mathx main; do assemble "$name"; done
-link_run sep build/main.o build/mathx.o build/boxy.o build/io.o
+for name in io boxy mathx twina twinb main; do assemble "$name"; done
+link_run sep build/main.o build/mathx.o build/boxy.o build/twina.o build/twinb.o build/io.o
 [ "$RUN_RC" -eq 0 ] || fail "separate build exit $RUN_RC"
 [ "$RUN_OUT" = "$EXPECTED" ] || fail "separate build output [$RUN_OUT]"
 
@@ -201,6 +231,31 @@ link_run sep build/main.o build/mathx.o build/boxy.o build/io.o
 # clone, so the link above only succeeds if duplicates are tolerated.
 nm build/mathx.o | grep -q " W mod_boxy__boxed" || fail "mathx.o: weak boxed<int> clone missing"
 nm build/main.o | grep -q " W mod_boxy__boxed" || fail "main.o: weak boxed<int> clone missing"
+
+# CIDER-BUG-107: same-named templates in different modules get per-owner
+# instantiation symbols. Each module's object defines its OWN weak clone and
+# calls the module-mangled name — the bare shared `twin_l_int_g_` reference
+# this pins was the bug — and main's object carries both distinct clones.
+grep -q "global mod_twina__twin.*:weak" build/twina.asm \
+    || fail "twina.asm does not define its own weak twin<int> clone"
+grep -q "global mod_twinb__twin.*:weak" build/twinb.asm \
+    || fail "twinb.asm does not define its own weak twin<int> clone"
+grep -q "call mod_twina__twin" build/twina.asm \
+    || fail "twina.asm does not call its module-mangled twin<int> clone"
+grep -q "call mod_twinb__twin" build/twinb.asm \
+    || fail "twinb.asm does not call its module-mangled twin<int> clone"
+grep -q "call twin_l_int_g_" build/twina.asm \
+    && fail "twina.asm calls the bare shared twin<int> name"
+grep -q "call twin_l_int_g_" build/twinb.asm \
+    && fail "twinb.asm calls the bare shared twin<int> name"
+nm build/twina.o | grep -q " W mod_twina__twin" \
+    || fail "twina.o: per-owner weak twin<int> clone missing"
+nm build/twinb.o | grep -q " W mod_twinb__twin" \
+    || fail "twinb.o: per-owner weak twin<int> clone missing"
+nm build/main.o | grep -q " W mod_twina__twin" \
+    || fail "main.o: weak mod_twina twin<int> clone missing"
+nm build/main.o | grep -q " W mod_twinb__twin" \
+    || fail "main.o: weak mod_twinb twin<int> clone missing"
 
 # --- cache reuse: compile with the module source gone ---------------------
 cp build/main.asm build/main.cached.asm
@@ -219,7 +274,7 @@ printf 'this is not a .cider-meta file\n' > cache/mathx.cider-meta
 "$BIN" compile --cache cache main.cid -o build/main.corrupt.asm
 nasm -O0 -f elf64 build/main.corrupt.asm -o build/main.corrupt.o
 [ -s build/main.corrupt.o ] || fail "corrupt-cache fallback produced no object"
-gcc build/main.corrupt.o build/mathx.o build/boxy.o build/io.o -o build/sep_corrupt -no-pie
+gcc build/main.corrupt.o build/mathx.o build/boxy.o build/twina.o build/twinb.o build/io.o -o build/sep_corrupt -no-pie
 set +e
 CORRUPT_OUT=$(./build/sep_corrupt 2>&1)
 CORRUPT_RC=$?

@@ -3316,18 +3316,21 @@ public:
         if (definingScope != rootScope && !rootScope->resolveLocal(mangledName)) {
             rootScope->define(funcSym);
         }
-        // CID-020/021: provenance for ir_gen mangling. The clone may be
-        // instantiated while collecting a different module (or main) than
-        // the template's owner, so the module stack is not authoritative:
-        // prefer the defining program's logical name, falling back to the
-        // module under collection (owner not yet registered while its own
-        // body instantiates its own template).
+        // CID-020/021: provenance for ir_gen mangling. The clone is emitted
+        // as a definition inside `definingProg`, so its logical module is
+        // that program's name — whether or not it differs from the program
+        // under collection. CIDER-BUG-107: a module instantiating its OWN
+        // template in module mode (`--emit-meta`) previously left this
+        // entry empty, so the definition was module-mangled by the IR
+        // walker (which keys the owner program) while call sites emitted a
+        // bare reference — and every module's same-named instantiation
+        // shared that one bare name. The main program is not registered in
+        // `programModules_` and keeps the legacy bare identity (""), so
+        // whole-program output stays byte-identical.
         {
             std::string defMod;
-            if (definingProg && definingProg != currentProgram_) {
-                auto pmit = programModules_.find(definingProg);
-                defMod = (pmit != programModules_.end()) ? pmit->second : getCurrentModule();
-            }
+            auto pmit = programModules_.find(definingProg);
+            if (pmit != programModules_.end()) defMod = pmit->second;
             symbolModules_.emplace(funcSym->id, defMod);
         }
 
