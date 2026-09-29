@@ -111,6 +111,14 @@ add_test(NAME separate_compilation_smoke
          COMMAND bash ${CMAKE_SOURCE_DIR}/tests/unit/separate_compilation_smoke.sh $<TARGET_FILE:cider>)
 set_tests_properties(separate_compilation_smoke PROPERTIES SKIP_RETURN_CODE 77)
 
+# CIDER-BUG-162: the inliner's site term must not grow with the clones it
+# produces. A 20-site destructor chain whose helpers each call the next twice
+# used to double the IR every optimizer round and take minutes to compile;
+# the bounded site budget keeps it sub-second.
+add_test(NAME inliner_sites_smoke
+         COMMAND bash ${CMAKE_SOURCE_DIR}/tests/unit/inliner_sites_smoke.sh $<TARGET_FILE:cider>)
+set_tests_properties(inliner_sites_smoke PROPERTIES SKIP_RETURN_CODE 77)
+
 add_executable(parser_recovery_test tests/unit/parser_recovery_test.cpp src/parser.cpp src/lexer.cpp)
 target_include_directories(parser_recovery_test PRIVATE src)
 add_test(NAME parser_recovery_test COMMAND parser_recovery_test)

@@ -1443,6 +1443,57 @@ int testInliner() {
     return 0;
 }
 
+int testInlinerSiteBudget() {
+    // CIDER-BUG-162: cloned call sites must not feed back into the inliner's
+    // gain term. `mk` is called at `sites` places; its body destroys a local
+    // whose destructor calls each level below twice, so inlining clones both
+    // the destructor call and (in later fixpoint rounds) the destructor body
+    // itself. If every round re-counted those compiler-generated sites, the
+    // site term would double per round and the inliner would duplicate the IR
+    // exponentially. The budget is captured once and only consumed, so the
+    // body stays linear in the source call sites.
+    constexpr int kSites = 10;
+    constexpr int kLevels = 6;
+    std::string src = "var drops: int = 0;\n";
+    src += "func p0() -> int { return 1; }\n";
+    for (int i = 1; i <= kLevels; ++i) {
+        const std::string prev = "p" + std::to_string(i - 1);
+        src += "func p" + std::to_string(i) + "() -> int { return " + prev +
+               "() + " + prev + "(); }\n";
+    }
+    const std::string top = "p" + std::to_string(kLevels);
+    src += "class D {\n  var label: int;\n  func ~D() {\n";
+    src += "    drops = drops + " + top + "();\n";
+    src += "    drops = drops + " + top + "();\n";
+    src += "  }\n}\n";
+    src += "func mk(n: int) -> D {\n  var d: D;\n  d.label = n;\n  return d;\n}\n";
+    src += "func main() -> int {\n  var total: int = 0;\n";
+    for (int i = 0; i < kSites; ++i) {
+        src += "  total = total + mk(" + std::to_string(i) + ").label;\n";
+    }
+    src += "  return total;\n}\n";
+
+    auto r = genModule(src);
+    auto countInstrs = [&]() {
+        size_t n = 0;
+        for (const auto& f : r.module.getFunctions()) {
+            for (const auto& b : f->getBlocks()) n += b->getInstructions().size();
+        }
+        return n;
+    };
+    const size_t before = countInstrs();
+    cider::Inliner<> inliner;
+    for (int pass = 0; pass < 10; ++pass) {
+        if (!inliner.run(r.module)) break;
+    }
+    const size_t after = countInstrs();
+    // Pre-fix this reaches ~8.7k instructions (doubling each round); the
+    // bounded budget keeps the 10-site shape around 300.
+    CHECK(after < 1000);
+    CHECK(after >= before);  // inlining only substitutes bodies
+    return 0;
+}
+
 int run() {
     CHECK(testDominators() == 0);
     CHECK(testDce() == 0);
@@ -1464,6 +1515,7 @@ int run() {
     CHECK(testDerivedStoreLicm() == 0);
     CHECK(testMultiDefStoreLicm() == 0);
     CHECK(testInliner() == 0);
+    CHECK(testInlinerSiteBudget() == 0);
     return 0;
 }
 

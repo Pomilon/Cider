@@ -132,6 +132,7 @@ struct HybridCycleCostModel {
         }
 
         if (bodyInstrs > BLOAT_CAP) return false;
+        if (nSites <= 0) return false;  // no gain without live call sites
         return (CALL_OVERHEAD * nSites) >= bodyCost;
     }
 };
@@ -142,18 +143,33 @@ public:
     bool run(ModuleIR& module) {
         graph_.build(module);
         functionMap_.clear();
-        remainingSites_.clear();
         for (auto& func : module.getFunctions()) {
             functionMap_[func->getName()] = func.get();
-            for (auto& block : func->getBlocks()) {
-                for (auto& instr : block->getInstructions()) {
-                    if ((instr.op == IROp::CALL || instr.op == IROp::VIRTUAL_CALL) && !instr.args.empty()) {
-                        if (instr.args[0].kind == IRValue::LABEL) {
-                            remainingSites_[instr.args[0].name]++;
+        }
+        // CIDER-BUG-162: capture the static call-site counts exactly once,
+        // before any inlining, and only consume them from then on. Later
+        // fixpoint rounds run over IR that already contains clones of
+        // previously inlined bodies; re-counting those clones would feed
+        // compiler-generated sites back into the cost model's gain term
+        // (`CALL_OVERHEAD * nSites`), unlocking ever-larger callees whose
+        // bodies contain yet more calls. That multiplies the site count on
+        // every round and grows the IR exponentially, which then swamps the
+        // downstream passes (N call sites: ~5x compile time per +2 sites).
+        // Tying the budget to the source program keeps total inlining work
+        // proportional to the real call sites.
+        if (!sitesCaptured_) {
+            for (auto& func : module.getFunctions()) {
+                for (auto& block : func->getBlocks()) {
+                    for (auto& instr : block->getInstructions()) {
+                        if ((instr.op == IROp::CALL || instr.op == IROp::VIRTUAL_CALL) && !instr.args.empty()) {
+                            if (instr.args[0].kind == IRValue::LABEL) {
+                                remainingSites_[instr.args[0].name]++;
+                            }
                         }
                     }
                 }
             }
+            sitesCaptured_ = true;
         }
         bool changed = false;
         for (auto& func : module.getFunctions()) {
@@ -166,6 +182,7 @@ private:
     CallGraph graph_;
     CostModel costModel_;
     int siteCounter_ = 0;
+    bool sitesCaptured_ = false;
     std::map<std::string, FunctionIR*> functionMap_;
     std::map<std::string, int> remainingSites_;
 
