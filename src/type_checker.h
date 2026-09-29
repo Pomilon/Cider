@@ -4691,6 +4691,29 @@ public:
 
     void visit(ReturnStmt& stmt) override {
         if (stmt.getValue()) {
+            // CIDER-BUG-177: a list literal returned into a fixed-array
+            // return type takes the declaration-time checks against the
+            // DECLARED shape, exactly like a declaration, an assignment
+            // (CIDER-BUG-112) or a call argument (CIDER-BUG-165) target.
+            // visit(ListExpr) infers the context-free flat `*T` for every
+            // list literal, so the general compatibility test below saw
+            // `*int` where the function returns `[int;2]` and rejected
+            // every return-position list literal. Nothing else in this
+            // visit applies to an array: a declared array is never a
+            // function pointer, a non-list interface or a closure, so the
+            // checks below would only re-test the declared shape against
+            // itself. ir_gen materialises the same declared shape (see
+            // emitListLiteralTemp).
+            TypeInfo declArray;
+            if (hasDeclaredReturnType_) declArray = resolveType(currentDeclaredReturnType_);
+            if (auto* list = dynamic_cast<ListExpr*>(stmt.getValue());
+                list && isFixedArrayValue(declArray)) {
+                if (checkFixedArrayElements("return of '" + currentFunctionName_ + "'",
+                                            declArray, *list, stmt.getLine())) {
+                    lastExprType_ = declArray;
+                }
+                return;
+            }
             stmt.getValue()->accept(*this);
             // CID-005 (T5/F1): when a function-pointer type is on either
             // side of a return, require the exact signature (ABI included).

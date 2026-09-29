@@ -1,0 +1,47 @@
+// CIDER-BUG-177: a list literal in return position is checked against the
+// DECLARED return shape with the same size/element rules a declaration
+// initializer takes (CIDER-BUG-104/112/163/165), so these rejections are
+// the legitimate remainder of routing it through the declared-shape
+// materialisation. The direct and alias spellings report identically, and
+// the nested-row rule (CIDER-BUG-163) recurses with the declared row shape.
+// A wide-string literal is not a list literal and keeps the existing
+// CIDER-BUG-018 array/array identity check.
+type Row = [u8; 3];
+type RowAlias = Row;
+type Rows = [Row; 2];
+
+struct S8 { var a: int; var b: int; }
+
+interface Shape {
+  func area() -> int;
+}
+
+class Sq {
+  var side: int;
+  func area() -> int { return this.side * this.side; }
+}
+
+func tooFew() -> [int; 3] { return [1, 2]; }
+func tooMany() -> [int; 2] { return [1, 2, 3]; }
+func aliasTooFew() -> Row { return [1, 2]; }
+func aliasTooMany() -> RowAlias { return [1, 2, 3, 4]; }
+func innerTooShort() -> Rows { return [[1, 2, 3], [1, 2]]; }
+func innerNotARow() -> Rows { return [1, 2]; }
+func innerTooLong() -> [[int; 2]; 2] { return [[1, 2, 3], [4, 5]]; }
+func structRowWrong() -> [S8; 2] { var p: S8; p.a = 1; p.b = 2; return [p, 1]; }
+func ifaceMissing() -> [Shape; 1] { return [7]; }
+func fnPtrMismatch() -> [fn(int) -> int; 1] { return [7]; }
+
+func main() -> int {
+  tooFew();
+  tooMany();
+  aliasTooFew();
+  aliasTooMany();
+  innerTooShort();
+  innerNotARow();
+  innerTooLong();
+  structRowWrong();
+  ifaceMissing();
+  fnPtrMismatch();
+  return 0;
+}

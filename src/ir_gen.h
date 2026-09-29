@@ -1897,9 +1897,35 @@ public:
 
     void visit(ReturnStmt& stmt) override {
         if (stmt.getValue()) {
-            stmt.getValue()->accept(*this);
-            IRValue val = lastValue_;
-            TypeInfo retType = lastExprType_;
+            // CIDER-BUG-177: a list literal returned into a fixed-array
+            // return type is materialised against the DECLARED shape
+            // (CIDER-BUG-163's emitListLiteralTemp), exactly like a
+            // declaration, an assignment (CIDER-BUG-112) or a call argument
+            // (CIDER-BUG-165) target. Letting visit(ListExpr) run its
+            // context-free inference sized the buffer from the first
+            // element's own type instead of the declared row, so the sret
+            // MEMCPY below copied pointer words for a nested row, full words
+            // for a narrow element, and read past the end of a short
+            // buffer. The checker has already validated the literal against
+            // this same shape, so `val` is the address of a correctly laid
+            // out temp and the existing sret copy is the only step left.
+            // The materialisation temp is callee storage, so its element
+            // stores carry no volatile flag: a volatile declared return type
+            // is marked by the sret MEMCPY below, and a volatile element
+            // SOURCE still marks its read inside emitListLiteralTemp (the
+            // CIDER-BUG-165 argument-site rule).
+            IRValue val;
+            TypeInfo retType;
+            TypeInfo retArray = resolveTypeAlias(currentReturnType_);
+            if (auto* list = dynamic_cast<ListExpr*>(stmt.getValue());
+                list && isFixedArrayValue(retArray)) {
+                val = emitListLiteralTemp(*list, retArray, false);
+                retType = retArray;
+            } else {
+                stmt.getValue()->accept(*this);
+                val = lastValue_;
+                retType = lastExprType_;
+            }
 
             // CIDER-BUG-077: interface-typed return. The hidden-sret slot
             // receives the 16-byte fat pointer — a copied data/vtable pair
