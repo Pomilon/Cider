@@ -1199,6 +1199,26 @@ public:
     std::shared_ptr<Symbol> resolveNominalType(const std::string& name) {
         auto sym = symbolTable_.resolve(name);
         if (sym) return sym;
+        // CIDER-BUG-111: a qualified template instantiation spelling
+        // (`m.Box<int>`) names the shared root-scope instantiation the
+        // collector registered under the bare spelling. Layout and
+        // dependency walks resolve through here, so a field whose template
+        // was collected later sizes against the real instantiation instead
+        // of the 8-byte unknown default. Dots inside argument lists
+        // (`Box<m.Thing>`) are not qualifiers. Mirrors ir_gen's lookup.
+        auto lt = name.find('<');
+        if (lt != std::string::npos) {
+            auto dot = name.rfind('.', lt);
+            if (dot == std::string::npos || dot == 0 || dot + 1 >= name.size()) return nullptr;
+            auto modSym = symbolTable_.resolve(name.substr(0, dot));
+            if (!modSym || modSym->kind != SymbolKind::MODULE) return nullptr;
+            Scope* root = symbolTable_.getRootScope();
+            if (!root) return nullptr;
+            auto inst = root->resolveLocal(name.substr(dot + 1));
+            if (inst && (inst->kind == SymbolKind::STRUCT || inst->kind == SymbolKind::CLASS))
+                return inst;
+            return nullptr;
+        }
         auto dot = name.rfind('.');
         if (dot == std::string::npos || dot == 0 || dot + 1 >= name.size()) return nullptr;
         auto modSym = symbolTable_.resolve(name.substr(0, dot));
@@ -2398,6 +2418,11 @@ public:
                 break;
             case ASTNode::VAR_DECL_STMT:
                 if (auto vs = dynamic_cast<VarDeclStmt*>(stmt)) {
+                    // CIDER-BUG-111: re-hook the declared type like a
+                    // signature (CIDER-BUG-066), so a body/field declaration
+                    // whose template is only collected later still
+                    // instantiates it. The initializer is scanned as before.
+                    instantiateStructTemplatesInTypeAST(vs->getTypeAST());
                     if (vs->getInitializer()) visitExprForTemplateCalls(vs->getInitializer());
                 }
                 break;
@@ -2476,13 +2501,23 @@ public:
             // CIDER-BUG-066: re-hook class-method and interface-method
             // signatures (and type-alias targets) after the whole program is
             // collected, covering a template declared later than its first
-            // signature mention. Struct/class FIELD types are only rescanned
-            // for expressions in initializers: their enclosing layout was
-            // already computed during collection, so a late instantiation
-            // cannot repair offsets — those keep the loud undefined-type
-            // diagnostic instead of silently mis-sizing.
+            // signature mention. CIDER-BUG-111: struct/class FIELD types are
+            // re-hooked the same way; a late instantiation is picked up by
+            // finalizeLayouts(), which re-lays out every aggregate recorded
+            // during collection.
+            case ASTNode::STRUCT_DECL_STMT:
+                if (auto sd = dynamic_cast<StructDeclStmt*>(stmt)) {
+                    // Template structs stay lazy like template functions:
+                    // their fields are concrete only after substitution.
+                    if (sd->hasTemplateParams()) break;
+                    for (const auto& field : sd->getFields())
+                        instantiateStructTemplatesInTypeAST(field.type.get());
+                }
+                break;
             case ASTNode::CLASS_DECL_STMT:
                 if (auto cd = dynamic_cast<ClassDeclStmt*>(stmt)) {
+                    // Class fields are VarDeclStmt members: the VAR_DECL case
+                    // re-hooks their type AST along with the initializer.
                     for (auto& member : cd->getMembers()) {
                         if (dynamic_cast<VarDeclStmt*>(member.get()) ||
                             dynamic_cast<FunctionDeclStmt*>(member.get())) {

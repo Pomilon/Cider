@@ -1,0 +1,9 @@
+// CIDER-BUG-111: struct templates used by modules that are collected before
+// the template's own module is imported (the importing `import` appears
+// textually after the uses). The whole-program hook must instantiate them
+// from body declarations and field annotations too, not just signatures.
+export struct Triple<T> {
+  var a: T;
+  var b: T;
+  var c: T;
+}

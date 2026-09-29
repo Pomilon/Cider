@@ -1,0 +1,56 @@
+// CIDER-BUG-111: every use below is collected before `import late_lib` is
+// processed, so collection-time instantiation cannot see the template. The
+// post-collection hook must re-hook body declarations (used and unused),
+// struct/class fields and the alias target, resolve them against the real
+// instantiation (12 bytes for Triple<int>, not the 8-byte unknown default)
+// and diagnose nothing for this valid program.
+
+export func bodyUsed() -> int {
+  var x: late_lib.Triple<int>;
+  x.a = 10;
+  x.c = 32;
+  return x.a + x.c;
+}
+
+export func bodyUnused() -> int {
+  var x: late_lib.Triple<char>;
+  return 1;
+}
+
+export func bodyBareUsed() -> int {
+  var x: Triple<int>;  // from-import spelling, bound below
+  x.c = 7;
+  return x.c;
+}
+
+export struct Holder {
+  var f: late_lib.Triple<char>;
+}
+
+export class Counter {
+  var f: late_lib.Triple<int>;
+  func init() { }
+}
+
+export type Alias = late_lib.Triple<int>;
+
+export func fieldUsed() -> int {
+  var h: Holder;
+  h.f.c = 'A';
+  return h.f.c as int;
+}
+
+export func classFieldUsed() -> int {
+  var c: Counter;
+  c.f.b = 4;
+  return c.f.b;
+}
+
+export func aliasUsed() -> int {
+  var a: Alias;
+  a.b = 9;
+  return a.b;
+}
+
+import late_lib;
+from late_lib import Triple;

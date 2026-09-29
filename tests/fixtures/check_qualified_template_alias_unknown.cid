@@ -1,0 +1,8 @@
+// CIDER-BUG-111: same declaration-site diagnostic for an unused type alias.
+import qualified_template_unknown_lib;
+
+type X = qualified_template_unknown_lib.Nope<int>;
+
+func main() -> int {
+  return 0;
+}

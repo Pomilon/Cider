@@ -3760,12 +3760,25 @@ public:
         // structs disable the unused-import report like template functions.
         if (warningsActive_ && stmt.hasTemplateParams()) warnings_.suppressUnusedImports();
         for (const auto& field : stmt.getFields()) noteTypeUse(field.type.get());
+        // CIDER-BUG-111: a plain struct's field annotation naming a
+        // qualified template is resolved at its own line, so an unaccepted
+        // spelling is diagnosed at the declaration like a body var decl
+        // (CIDER-BUG-096). Template structs stay lazy like template
+        // functions: their fields are concrete only after substitution.
+        if (!stmt.hasTemplateParams()) {
+            for (const auto& field : stmt.getFields()) {
+                checkDeclaredTemplateType(field.type.get(),
+                                          field.type ? field.type->getLine() : stmt.getLine());
+            }
+        }
     }
     void visit(EnumDeclStmt&) override {}
     void visit(TypeAliasStmt& stmt) override {
         // CIDER-FEAT-005: `type A = ImportedType;` aliases a type the
         // checker never resolves; note it so the import is not "unused".
         noteTypeUse(stmt.getTargetType());
+        // CIDER-BUG-111: same declaration-site resolution as struct fields.
+        checkDeclaredTemplateType(stmt.getTargetType(), stmt.getLine());
     }
 
     void visit(ClassDeclStmt& stmt) override {
@@ -4115,6 +4128,38 @@ private:
     void noteTypeUse(TypeAST* type) {
         if (!warningsActive_ || !type) return;
         (void)canonicalizeNominal(TypeInfo::fromAST(type));
+    }
+
+    // CIDER-BUG-111: true when a resolved annotation mentions an explicit
+    // template argument list anywhere (`m.Box<int>`, `*Box<int>`,
+    // `[Pair<int, char>; 2]`, `fn(*m.Box<int>) -> void`). Non-template
+    // spellings are excluded so struct-field and alias resolution stays as
+    // lazy as before for everything else.
+    static bool mentionsTemplateType(const TypeInfo& type) {
+        if (type.isFunctionPointer) {
+            if (type.fnParamTypes) {
+                for (const auto& p : *type.fnParamTypes) {
+                    if (mentionsTemplateType(p)) return true;
+                }
+            }
+            return type.fnReturnType && mentionsTemplateType(*type.fnReturnType);
+        }
+        if (type.arrayElement && mentionsTemplateType(*type.arrayElement)) return true;
+        return type.name.find('<') != std::string::npos;
+    }
+
+    // CIDER-BUG-111: resolve a struct-field or alias annotation at its own
+    // line so an unaccepted qualified template spelling (`m.Nope<int>`) is
+    // diagnosed at the declaration, exactly like a body var decl
+    // (CIDER-BUG-096). Accepted spellings were rewritten through
+    // qualifiedTemplateInstantiations_ by the collector's whole-program
+    // pass, so this call is silent for them; anything without an argument
+    // list keeps its previous (lazy) behavior.
+    void checkDeclaredTemplateType(TypeAST* type, int line) {
+        if (!type) return;
+        TypeInfo t = TypeInfo::fromAST(type);
+        if (!mentionsTemplateType(t)) return;
+        (void)canonicalizeNominal(t, line);
     }
 };
 
