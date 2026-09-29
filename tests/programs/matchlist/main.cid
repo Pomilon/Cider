@@ -2,10 +2,18 @@ func _start() {
   var l: *int = [1, 2, 3];
   if (l[0] + l[1] + l[2] != 6) { asm { "mov rax, 60" } asm { "mov rdi, 1" } asm { "syscall" } }
   var n: int = 2;
-  match (n) {
-    1 => { asm { "mov rax, 60" } asm { "mov rdi, 2" } asm { "syscall" } }
-    2 => { break; }
-    default => { asm { "mov rax, 60" } asm { "mov rdi, 3" } asm { "syscall" } }
+  // CIDER-BUG-214: a `break` names the innermost enclosing LOOP, never a
+  // match arm. This arm used to hold one with no loop around it at all,
+  // where ir_gen dropped the statement (`if (!breakLabels_.empty())`) and the
+  // arm silently fell through to the exit below — the program passed for the
+  // wrong reason. The loop makes the arm's `break` legal and still lands on
+  // that same exit-0 sequence, so the expected result is unchanged.
+  for (var i: int = 0; i < 1; i = i + 1) {
+    match (n) {
+      1 => { asm { "mov rax, 60" } asm { "mov rdi, 2" } asm { "syscall" } }
+      2 => { break; }
+      default => { asm { "mov rax, 60" } asm { "mov rdi, 3" } asm { "syscall" } }
+    }
   }
   asm { "mov rax, 60" } asm { "mov rdi, 0" } asm { "syscall" }
 }

@@ -1,0 +1,69 @@
+// CIDER-BUG-214, nested shapes: an enclosing block, branch or match arm is
+// not a loop, so a transfer written in one still has no label to name. The
+// rule is lexical and per-function: a loop AROUND a nested function or
+// closure does not carry into its body either, because ir_gen empties
+// breakLabels_/continueLabels_ at both function-body boundaries and the
+// transfer there reaches no loop of the inner frame.
+
+// Rejected: a block or a branch is not a loop.
+func inABlock() -> int {
+    { break; }
+    if (true) { continue; }
+    return 0;
+}
+
+// Rejected: a match arm pushes no label of its own.
+func inAMatchArm(x: int) -> int {
+    match (x) {
+        1 => { break; }
+        default => { continue; }
+    }
+    return x;
+}
+
+// Rejected: the inner frame is its own set of labels, so the loop around
+// the declaration does not make these legal.
+func inANestedFunction() -> int {
+    var xs: [int; 2] = [1, 2];
+    for (var x in xs) {
+        func early(v: int) -> int {
+            break;
+            return v;
+        }
+        func again(v: int) -> int { continue; return v; }
+    }
+    return 0;
+}
+
+func inAClosure() -> int {
+    var xs: [int; 2] = [1, 2];
+    for (var x in xs) {
+        var f: func() -> int = func() -> int { break; return x; };
+        var g: func() -> int = func() -> int { continue; return x; };
+    }
+    return 0;
+}
+
+// Legal: the same nested shapes one loop level out, where the enclosing
+// loop is the innermost one still in scope in THIS frame.
+func legalNested() -> int {
+    var xs: [int; 2] = [1, 2];
+    for (var x in xs) {
+        if (x > 0) {
+            match (x) {
+                1 => { continue; }
+                default => { }
+            }
+            break;
+        }
+    }
+    return 0;
+}
+
+func main() -> int {
+    inABlock();
+    inAMatchArm(1);
+    inANestedFunction();
+    inAClosure();
+    return legalNested();
+}

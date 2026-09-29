@@ -4663,6 +4663,12 @@ public:
         // cannot make a `return` in here illegal.
         int prevDeferBodyDepth = deferBodyDepth_;
         deferBodyDepth_ = 0;
+        // CIDER-BUG-214: a `break`/`continue` names the innermost enclosing
+        // loop of ITS OWN function (ir_gen empties breakLabels_/continueLabels_
+        // at exactly these two boundaries), so a loop around the declaration
+        // does not make one legal in here. See rejectOrphanLoopTransfer.
+        int prevLoopDepth = loopDepth_;
+        loopDepth_ = 0;
         currentFunctionName_ = stmt.getName();
         currentDeclaredReturnType_ = stmt.getReturnType()
             ? canonicalizeNominal(TypeInfo::fromAST(stmt.getReturnType()), stmt.getLine())
@@ -4769,6 +4775,7 @@ public:
         hasDeclaredReturnType_ = prevHasReturnType;
         currentFunctionName_ = prevFunctionName;
         deferBodyDepth_ = prevDeferBodyDepth;
+        loopDepth_ = prevLoopDepth;
     }
 
     void visit(BlockStmt& stmt) override {
@@ -4798,7 +4805,12 @@ public:
             error("While condition must be a boolean, got " + lastExprType_.toString(), stmt.getLine());
         }
         symbolTable_.enterScope();
+        // CIDER-BUG-214: the body is a loop context, so a `break`/`continue`
+        // written anywhere in it has a label to name (see
+        // rejectOrphanLoopTransfer).
+        ++loopDepth_;
         for (auto& s : stmt.getBody()) s->accept(*this);
+        --loopDepth_;
         exitScopeChecked();
     }
 
@@ -4812,7 +4824,10 @@ public:
             }
         }
         if (stmt.getIncrement()) stmt.getIncrement()->accept(*this);
+        // CIDER-BUG-214: the body is a loop context (see visit(WhileStmt)).
+        ++loopDepth_;
         for (auto& s : stmt.getBody()) s->accept(*this);
+        --loopDepth_;
         exitScopeChecked();
     }
 
@@ -5229,6 +5244,12 @@ public:
         // when the literal is written in a defer body.
         int prevDeferBodyDepth = deferBodyDepth_;
         deferBodyDepth_ = 0;
+        // CIDER-BUG-214: a `break`/`continue` names the innermost enclosing
+        // loop of ITS OWN function (ir_gen empties breakLabels_/continueLabels_
+        // at exactly these two boundaries), so a loop around the declaration
+        // does not make one legal in here. See rejectOrphanLoopTransfer.
+        int prevLoopDepth = loopDepth_;
+        loopDepth_ = 0;
         // CIDER-FEAT-005: a closure's declared return type is otherwise
         // never resolved; note it so a type-only import used here counts.
         noteTypeUse(expr.getReturnType());
@@ -5266,6 +5287,7 @@ public:
         currentDeclaredReturnType_ = prevReturnType;
         hasDeclaredReturnType_ = prevHasReturnType;
         deferBodyDepth_ = prevDeferBodyDepth;
+        loopDepth_ = prevLoopDepth;
         TypeInfo closureType;
         closureType.name = "func";
         closureType.pointerLevel = 1;
@@ -5463,9 +5485,12 @@ public:
                               stmt.getColumn(), /*warnUnused=*/true, /*checkShadow=*/true);
         }
 
+        // CIDER-BUG-214: the body is a loop context (see visit(WhileStmt)).
+        ++loopDepth_;
         for (auto& s : stmt.getBody()) {
             s->accept(*this);
         }
+        --loopDepth_;
         exitScopeChecked();
     }
 
@@ -5479,11 +5504,16 @@ public:
     // CIDER-BUG-210: see rejectDeferTransfer. Both are accepted anywhere
     // else (ir_gen drops a break/continue with no enclosing loop), but
     // inside a `defer` body they reach the unwinder and re-enter it.
+    // CIDER-BUG-214: rejectOrphanLoopTransfer covers the other half: with
+    // no enclosing loop at all they are dropped silently, with no
+    // diagnostic anywhere.
     void visit(BreakStmt& stmt) override {
-        rejectDeferTransfer("break", stmt.getLine());
+        if (rejectDeferTransfer("break", stmt.getLine())) return;
+        rejectOrphanLoopTransfer("break", stmt.getLine());
     }
     void visit(ContinueStmt& stmt) override {
-        rejectDeferTransfer("continue", stmt.getLine());
+        if (rejectDeferTransfer("continue", stmt.getLine())) return;
+        rejectOrphanLoopTransfer("continue", stmt.getLine());
     }
 
     void visit(ThrowStmt& stmt) override {
@@ -5633,6 +5663,16 @@ private:
     // visit(FunctionExpr)) because a nested function or closure is its own
     // frame and ir_gen gives it a fresh defer stack.
     int deferBodyDepth_ = 0;
+    // CIDER-BUG-214: how many `while` / `for` / `for-in` bodies of the
+    // function being checked enclose the statement. A `break`/`continue`
+    // reaches only the innermost enclosing loop, so with none there is no
+    // label to branch to: ir_gen dropped the statement behind
+    // `if (!breakLabels_.empty())` and the program's control flow was
+    // silently discarded. The checker rejects that shape here, where it can
+    // still print a diagnostic; cleared at every function-body boundary
+    // (visit(FunctionDeclStmt), visit(FunctionExpr)) because a nested
+    // function or closure is its own frame with its own label stacks.
+    int loopDepth_ = 0;
     TypeInfo lastExprType_ = {"void", 0};
     // CIDER-BUG-057: array size of the object of the most recently checked
     // SliceExpr, used to statically evaluate a `base[start:]` slice's end
@@ -5692,6 +5732,28 @@ private:
     bool rejectDeferTransfer(const char* keyword, int line) {
         if (deferBodyDepth_ == 0) return false;
         error("'" + std::string(keyword) + "' is not allowed in a defer body", line);
+        return true;
+    }
+
+    // CIDER-BUG-214: `break`/`continue` name the innermost enclosing loop's
+    // exit / step label, and ir_gen pushes those labels only while generating
+    // a `while` / `for` / `for-in` body (see IrGen::visit(BreakStmt) and the
+    // four breakLabels_.push_back sites). Written anywhere else the statement
+    // guarded ITSELF away — `if (!breakLabels_.empty())` — and vanished: the
+    // program compiled, ran, and quietly ran the code after the transfer
+    // instead. A `match` pushes no label either, so a transfer in an arm only
+    // reaches an enclosing loop of the same function.
+    //
+    // The rule is lexical, exactly like rejectDeferTransfer's: the statement
+    // is inside a loop when some enclosing `while` / `for` / `for-in` body of
+    // the SAME function does, however deeply nested in blocks, branches,
+    // match arms, further loops or defers. Cleared at the two function-body
+    // boundaries because a nested function or closure is its own frame and
+    // ir_gen gives it empty label stacks there. Returns true when rejected,
+    // so the caller can skip the remaining (moot) checks.
+    bool rejectOrphanLoopTransfer(const char* keyword, int line) {
+        if (loopDepth_ > 0) return false;
+        error("'" + std::string(keyword) + "' is not allowed outside a loop", line);
         return true;
     }
 

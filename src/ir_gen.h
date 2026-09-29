@@ -6523,6 +6523,12 @@ public:
     }
 
     void visit(BreakStmt&) override {
+        // CIDER-BUG-214: with no enclosing loop there is no label to branch
+        // to, and the statement used to disappear here — a `break` outside
+        // any loop compiled, ran, and was silently dropped. The type checker
+        // now rejects that shape (rejectOrphanLoopTransfer); the guard stays
+        // as the last line of defence for IR built without the checker (the
+        // unit tests) rather than dereferencing an empty label stack.
         if (!breakLabels_.empty()) {
             // CIDER-BUG-050: run the defers of the exited blocks (the loop's
             // iteration scope and anything nested inside it) before jumping.
@@ -6537,6 +6543,7 @@ public:
         }
     }
     void visit(ContinueStmt&) override {
+        // CIDER-BUG-214: see visit(BreakStmt).
         if (!continueLabels_.empty()) {
             // Same partial unwind as break (CIDER-BUG-050).
             emitDefers(unwindDepths_.back());

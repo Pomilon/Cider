@@ -1,0 +1,78 @@
+// CIDER-BUG-214: `break`/`continue` name the innermost enclosing loop's
+// exit / step label. With no enclosing loop there is no label to branch to,
+// and ir_gen guarded the statement away behind `if (!breakLabels_.empty())`
+// (see IrGen::visit(BreakStmt)): it emitted nothing at all, the program
+// compiled and ran, and the author's control flow was silently discarded —
+// the same class of silently-ignored user control flow as CIDER-BUG-210.
+// These are rejected at check time instead.
+
+// Rejected: neither transfer has an enclosing loop.
+func breakAtTopLevel() -> int {
+    break;
+    return 0;
+}
+
+func continueAtTopLevel() -> int {
+    continue;
+    return 0;
+}
+
+// A loop has ended, so a transfer written after it is still outside one
+// (the rule is lexical, not a reachability one).
+func afterTheLoop() -> int {
+    while (false) { }
+    break;
+    continue;
+    return 0;
+}
+
+// Legal: every loop form pushes the labels the transfers name.
+func inWhile() -> int {
+    var n: int = 0;
+    while (n < 3) {
+        n = n + 1;
+        if (n == 1) { continue; }
+        if (n == 2) { break; }
+    }
+    return n;
+}
+
+func inFor() -> int {
+    var n: int = 0;
+    for (var i: int = 0; i < 3; i = i + 1) {
+        if (i == 1) { continue; }
+        if (i == 2) { break; }
+        n = n + 1;
+    }
+    return n;
+}
+
+func inForIn() -> int {
+    var xs: [int; 3] = [1, 2, 3];
+    var n: int = 0;
+    for (var x in xs) {
+        if (x == 1) { continue; }
+        n = n + 1;
+        if (n == 2) { break; }
+    }
+    return n;
+}
+
+// Legal: an inner loop is the innermost one, and the outer loop's labels
+// are still named by a transfer written around the inner loop.
+func inNestedLoops() -> int {
+    var n: int = 0;
+    for (var i: int = 0; i < 3; i = i + 1) {
+        while (true) { break; }
+        if (i == 1) { continue; }
+        break;
+    }
+    return n;
+}
+
+func main() -> int {
+    breakAtTopLevel();
+    continueAtTopLevel();
+    afterTheLoop();
+    return inWhile() + inFor() + inForIn() + inNestedLoops() - 9;
+}
