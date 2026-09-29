@@ -1,0 +1,3 @@
+Base 'dotted_nonclass_lib.Thing' of class 'A' is not a class
+Base 'dotted_nonclass_lib.Shape' of class 'B' is not a class
+Base 'dotted_nonclass_lib.AliasThing' of class 'C' is not a class

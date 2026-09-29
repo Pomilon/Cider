@@ -1,0 +1,50 @@
+// CIDER-BUG-122 control: the "base is not a class" diagnostic must not
+// disturb bases that genuinely resolve to classes. Covers a bare
+// alias-to-class, an alias chain, and a FORWARD alias (declared before its
+// target class, so the base is merged after collection through
+// resolveBaseName's alias walk), with inherited fields, overrides and
+// pointer covariance at each level.
+from std.io import print, printInt;
+
+class B1 {
+  var b1: int = 1;
+  virtual func id() -> int { return 10; }
+}
+
+type A1 = B1;                // bare alias to a class declared earlier
+
+type ForwardAlias = B2;      // forward: B2 is declared later
+type AliasChain = ForwardAlias;
+
+class C1 extends A1 {
+  var c1: int = 2;
+  override func id() -> int { return 20; }
+}
+
+class C2 extends AliasChain {
+  var c2: int = 3;
+  override func id() -> int { return 30; }
+}
+
+class B2 {
+  var b2: int = 4;
+  virtual func id() -> int { return 40; }
+}
+
+func main() -> int {
+  var a: *C1 = new C1;
+  printInt(a->b1); print(",");    // 1 inherited through the alias
+  printInt(a->id()); print(",");  // 20
+  var b: *B1 = a;
+  printInt(b->id()); print(",");  // 20 dispatch through the base
+
+  var c: *C2 = new C2;
+  printInt(c->b2); print(",");    // 4 inherited through the forward alias chain
+  printInt(c->id()); print(",");  // 30
+  var d: *B2 = c;
+  printInt(d->id()); print(",");  // 30 dispatch through the base
+  printInt(sizeof(C1)); print(",");  // 20 (padded base layout + c1)
+  printInt(sizeof(C2)); print("\n"); // 20 (padded base layout + c2)
+  print("base_alias_kinds_ok\n");
+  return 0;
+}

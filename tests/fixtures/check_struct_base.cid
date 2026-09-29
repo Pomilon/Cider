@@ -1,0 +1,18 @@
+// CIDER-BUG-122: `extends` naming a struct (directly or through a `type`
+// alias) used to inherit nothing with no diagnostic at all. Both spellings
+// must now be reported at the declaring class instead of being ignored.
+struct S {
+  var x: int;
+}
+
+type SA = S;
+
+class A extends S {
+  var a: int = 2;
+}
+
+class B extends SA {
+  var b: int = 3;
+}
+
+func main() -> int { return 0; }

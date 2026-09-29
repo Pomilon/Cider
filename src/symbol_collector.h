@@ -47,9 +47,9 @@ class SymbolCollector : public ASTVisitor {
         // merged by finalizeClassBase() once the whole program is collected;
         // `rebuilt` marks a class that was re-merged so its own children
         // (which copied the then-stale member lists) rebuild too.
-        // `baseError` marks a chain already reported as unknown/cyclic by
-        // validateBaseChains(): such a class keeps its collection-time shape
-        // and never recurses into the broken base.
+        // `baseError` marks a chain already reported as unknown/non-class/
+        // cyclic by validateBaseChains(): such a class keeps its
+        // collection-time shape and never recurses into the broken base.
         bool forwardParent = false;
         bool rebuilt = false;
         bool baseError = false;
@@ -1682,9 +1682,11 @@ public:
     // in progress. Walk every class's resolved base chain and report a
     // missing link ("Parent class 'X' of class 'A' not found") or a cycle
     // once per family, mirroring the collector's "Circular import" wording.
-    // Classes in a broken chain get baseError and keep their collection-time
-    // members; the error aborts compilation, so no half-inherited shape is
-    // ever code-generated.
+    // CIDER-BUG-122: a base that resolves but is not a class (a struct, an
+    // interface, or an alias of either) is reported the same way instead of
+    // being silently ignored. Classes in a broken chain get baseError and
+    // keep their collection-time members; the error aborts compilation, so
+    // no half-inherited shape is ever code-generated.
     void validateBaseChains() {
         std::set<const StructSymbol*> reported;
         Scope* prevScope = symbolTable_.getCurrentScope();
@@ -1695,6 +1697,7 @@ public:
             std::vector<const StructSymbol*> chain;
             const StructSymbol* cur = rec.sym.get();
             const StructSymbol* unknownAt = nullptr;
+            const StructSymbol* nonClassAt = nullptr;
             bool cyclic = false;
             while (true) {
                 if (!seen.insert(cur).second) {
@@ -1712,6 +1715,7 @@ public:
                 auto parentSym = resolveBaseName(cur->parentName);
                 if (!parentSym || parentSym->kind != SymbolKind::CLASS) {
                     if (!parentSym) unknownAt = cur;
+                    else nonClassAt = cur;
                     break;
                 }
                 cur = static_cast<const StructSymbol*>(parentSym.get());
@@ -1726,6 +1730,21 @@ public:
                     reportAtFile("Parent class '" + unknownAt->parentName +
                                      "' of class '" + unknownAt->name + "' not found",
                                  unknownAt->line, unknownAt->col, file);
+                }
+            } else if (nonClassAt) {
+                // CIDER-BUG-122: the spelling resolved, but to something that
+                // is not a class, so nothing could be inherited. Report it at
+                // the declaring class like a missing base.
+                rec.baseError = true;
+                if (reported.insert(nonClassAt).second) {
+                    auto it = aggregateIndex_.find(nonClassAt);
+                    std::string file = it != aggregateIndex_.end()
+                                           ? aggregateLayouts_[it->second].file
+                                           : reporter_.getFile();
+                    reportAtFile("Base '" + nonClassAt->parentName +
+                                     "' of class '" + nonClassAt->name +
+                                     "' is not a class",
+                                 nonClassAt->line, nonClassAt->col, file);
                 }
             } else if (cyclic) {
                 rec.baseError = true;
