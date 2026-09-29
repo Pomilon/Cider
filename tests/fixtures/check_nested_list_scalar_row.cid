@@ -1,0 +1,6 @@
+// CIDER-BUG-163: a nested literal cannot stand for a scalar element
+// (only a fixed-array element recurses).
+func main() -> int {
+  var a: [int; 2] = [[1, 2], [3, 4]];
+  return 0;
+}

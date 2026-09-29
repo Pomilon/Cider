@@ -1,0 +1,6 @@
+// CIDER-BUG-163: an inner nested literal must match the declared inner
+// dimension (the recursive check shares the flat size rule).
+func main() -> int {
+  var a: [[int; 2]; 2] = [[1, 2], [3, 4, 5]];
+  return 0;
+}

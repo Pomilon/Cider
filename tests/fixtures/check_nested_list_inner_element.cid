@@ -1,0 +1,6 @@
+// CIDER-BUG-163: a scalar inside a nested row literal is checked against
+// the declared element type.
+func main() -> int {
+  var a: [[int; 2]; 2] = [[1, 2], ["x", 4]];
+  return 0;
+}

@@ -1,0 +1,6 @@
+// CIDER-BUG-163: the assignment path checks nested scalar elements too.
+func main() -> int {
+  var a: [[int; 2]; 2];
+  a = [[1, 2], ["x", 4]];
+  return 0;
+}

@@ -2963,12 +2963,33 @@ public:
             if (declArray.isArray && declArray.pointerLevel == 0 && declArray.arraySize > 0) {
                 if (auto list = dynamic_cast<ListExpr*>(stmt.getInitializer())) {
                     auto& elems = list->getElements();
-                    TypeInfo elemType = declArray.elementType();
-                    int elemSize = getTypeSize(elemType);
-                    IRType elemIR = mapType(elemType.name);
                     std::string dataLine = gname + ": db ";
+                    bool firstByte = true;
                     bool allConst = ((int)elems.size() == declArray.arraySize);
-                    for (size_t ei = 0; allConst && ei < elems.size(); ei++) {
+                    // CIDER-BUG-163: append one element's constant bytes in
+                    // declaration order. A nested list literal for a
+                    // fixed-array row recurses against the declared row
+                    // shape; the bytes of consecutive rows are contiguous,
+                    // so the flat concatenation stays the array image.
+                    std::function<bool(Expression*, TypeInfo)> appendConstBytes =
+                        [&](Expression* e, TypeInfo et) -> bool {
+                        // CIDER-BUG-163: the row element may be an alias
+                        // spelling of an array (`type Row = [u8;2]`), so
+                        // resolve before the shape test.
+                        et = resolveTypeAlias(et);
+                        if (et.isArray && et.pointerLevel == 0 && et.arraySize > 0) {
+                            auto* inner = dynamic_cast<ListExpr*>(e);
+                            if (!inner || (int)inner->getElements().size() != et.arraySize) {
+                                return false;
+                            }
+                            TypeInfo innerElem = et.elementType();
+                            for (auto& ie : inner->getElements()) {
+                                if (!appendConstBytes(ie.get(), innerElem)) return false;
+                            }
+                            return true;
+                        }
+                        int elemSize = getTypeSize(et);
+                        IRType elemIR = mapType(et.name);
                         uint64_t v = 0;
                         if (elemIR == IRType::F32 || elemIR == IRType::F64) {
                             // CID-003 follow-up (M3c): a float-typed element
@@ -2978,7 +2999,7 @@ public:
                             // f32/f64); float literal elements are rejected
                             // by the checker before this point.
                             double fv = 0;
-                            if (!tryEvalConstF64(elems[ei].get(), fv)) { allConst = false; break; }
+                            if (!tryEvalConstF64(e, fv)) return false;
                             if (elemIR == IRType::F32) {
                                 float f = (float)fv;
                                 uint32_t b32 = 0;
@@ -2987,13 +3008,20 @@ public:
                             } else {
                                 std::memcpy(&v, &fv, sizeof(v));
                             }
-                        } else if (!tryEvalConstU64(elems[ei].get(), v)) {
-                            allConst = false;
-                            break;
+                        } else if (!tryEvalConstU64(e, v)) {
+                            return false;
                         }
                         for (int b = 0; b < elemSize; b++) {
-                            if (ei > 0 || b > 0) dataLine += ", ";
+                            if (!firstByte) dataLine += ", ";
+                            firstByte = false;
                             dataLine += std::to_string((v >> (8 * b)) & 0xFFULL);
+                        }
+                        return true;
+                    };
+                    for (size_t ei = 0; allConst && ei < elems.size(); ei++) {
+                        if (!appendConstBytes(elems[ei].get(), declArray.elementType())) {
+                            allConst = false;
+                            break;
                         }
                     }
                     if (allConst) {
@@ -3234,6 +3262,22 @@ public:
                         // Mirrors CIDER-BUG-083's element-store rule.
                         bool elemIsAggregate = isListAggregateElement(elemType);
                         for (size_t ei = 0; ei < elems.size(); ei++) {
+                            // CIDER-BUG-163: a nested list literal for a
+                            // fixed-array row is materialised against the
+                            // declared row shape and copied as an aggregate
+                            // (CIDER-BUG-104's store rule), instead of
+                            // letting visit(ListExpr) type it `*T` and store
+                            // a pointer word into the row slot.
+                            if (auto* inner = dynamic_cast<ListExpr*>(elems[ei].get());
+                                inner && elemType.isArray && elemType.pointerLevel == 0 &&
+                                elemType.arraySize > 0) {
+                                IRValue innerAddr = emitListLiteralTemp(*inner, elemType,
+                                                                       varType.isVolatile);
+                                emitListElementStore(addr, (int64_t)(ei * (size_t)elemSize),
+                                                     innerAddr, elemType, elemSize, true,
+                                                     varType.isVolatile, false);
+                                continue;
+                            }
                             elems[ei]->accept(*this);
                             // CIDER-BUG-135: an interface-typed element
                             // accepts a concrete implementor with the normal
@@ -3638,6 +3682,56 @@ public:
         // the element type is a struct, so they are never MEMCPY'd.
         if (r.pointerLevel > 0 || r.isSlice) return false;
         return r.isArray || isStructValueType(r) || getTypeSize(r) > 8;
+    }
+
+    // CIDER-BUG-163: materialise a (possibly nested) fixed-array list
+    // literal into a stack temp shaped by the DECLARED array type. The flat
+    // rule (CIDER-BUG-104/112) stores one element per slot; an element that
+    // is itself a list literal for a fixed-array row recurses against the
+    // declared row shape and is copied through emitListElementStore as an
+    // aggregate. Without this, visit(ListExpr)'s context-free inference
+    // typed the inner literal `*T` and the slot received a pointer word
+    // instead of the row bytes. Returns the temp base; sets lastExprType_ to
+    // the declared shape.
+    IRValue emitListLiteralTemp(ListExpr& list, TypeInfo arrayType, bool targetIsVolatile) {
+        auto& elems = list.getElements();
+        TypeInfo elemType = resolveTypeAlias(arrayType.elementType());
+        // CIDER-BUG-135: an interface-typed row element is the 16-byte fat
+        // pointer, exactly like a non-list interface target.
+        elemType = resolveInterfaceNominal(elemType);
+        int elemSize = getTypeSize(elemType);
+        bool elemIsAggregate = isListAggregateElement(elemType);
+        IRValue addr = IRValue::Register(nextTemp(), IRType::PTR);
+        currentBlock_->addInstruction(
+            {IROp::ALLOCA, addr,
+             {IRValue::Constant(elemSize * (int)elems.size(), IRType::I32)}});
+        for (size_t ei = 0; ei < elems.size(); ei++) {
+            if (auto* inner = dynamic_cast<ListExpr*>(elems[ei].get());
+                inner && elemType.isArray && elemType.pointerLevel == 0 &&
+                elemType.arraySize > 0) {
+                IRValue innerAddr = emitListLiteralTemp(*inner, elemType, targetIsVolatile);
+                emitListElementStore(addr, (int64_t)(ei * (size_t)elemSize), innerAddr,
+                                     elemType, elemSize, true, targetIsVolatile, false);
+                continue;
+            }
+            elems[ei]->accept(*this);
+            // CIDER-BUG-135: a concrete implementor element of an
+            // interface-typed row converts through the shared interface
+            // store (object address + vtable), exactly like the declaration
+            // path; an interface-valued element keeps the fat-pointer copy.
+            if (elemType.isInterface &&
+                !resolveInterfaceNominal(lastExprType_).isInterface) {
+                emitInterfaceStoreAt(elemType, listElementAddress(addr, ei, elemSize),
+                                     lastValue_, lastExprType_, targetIsVolatile);
+                continue;
+            }
+            IRValue eval = convertValueToType(lastValue_, elemType);
+            emitListElementStore(addr, (int64_t)(ei * (size_t)elemSize), eval,
+                                 elemType, elemSize, elemIsAggregate,
+                                 targetIsVolatile, lastExprType_.isVolatile);
+        }
+        lastExprType_ = arrayType;
+        return addr;
     }
 
     void emitListElementStore(IRValue base, int64_t offset, IRValue val,
@@ -5092,6 +5186,19 @@ public:
                     }
                     auto& elems = list->getElements();
                     for (size_t ei = 0; ei < elems.size(); ei++) {
+                        // CIDER-BUG-163: same nested-row materialisation as
+                        // the declaration path, shared through
+                        // emitListLiteralTemp.
+                        if (auto* inner = dynamic_cast<ListExpr*>(elems[ei].get());
+                            inner && elemType.isArray && elemType.pointerLevel == 0 &&
+                            elemType.arraySize > 0) {
+                            IRValue innerAddr = emitListLiteralTemp(*inner, elemType,
+                                                                    targetIsVolatile);
+                            emitListElementStore(storeBase, (int64_t)(ei * (size_t)elemSize),
+                                                 innerAddr, elemType, elemSize, true,
+                                                 targetIsVolatile, false);
+                            continue;
+                        }
                         elems[ei]->accept(*this);
                         // CIDER-BUG-135: a concrete implementor element of
                         // an interface-typed array converts through the

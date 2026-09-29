@@ -1,0 +1,1 @@
+Array element type mismatch in declaration of 'a': expected int, got *int

@@ -1921,7 +1921,25 @@ public:
         // (a spelling stripped from the array can reach here unflagged),
         // mirroring the declaration-time resolution.
         resolveInterfaceFlag(elemDecl);
+        // CIDER-BUG-163: a row element spelled as an alias of an array
+        // (`type Row = [u8;2]`; `[Row;3]`) carries no isArray flag until
+        // its chain resolves, so resolve the shape used for the nested
+        // literal test. The generic comparison below keeps the declared
+        // spelling for its diagnostics.
+        TypeInfo elemArray = resolveType(elemDecl);
         for (auto& e : elems) {
+            // CIDER-BUG-163: an element that is itself a list literal for a
+            // fixed-array row is validated against the inner shape
+            // recursively. visit(ListExpr) infers a flat `*T` for every list
+            // literal, so the generic compatibility test below saw `*int`
+            // for `[1,2]` where the declared row is `[int;2]` and rejected
+            // the declaration.
+            if (auto* inner = dynamic_cast<ListExpr*>(e.get());
+                inner && elemArray.isArray && elemArray.pointerLevel == 0 &&
+                elemArray.arraySize > 0) {
+                if (!checkFixedArrayElements(where, elemArray, *inner, line)) return false;
+                continue;
+            }
             e->accept(*this);
             if (elemDecl.isInterface) {
                 // CIDER-BUG-135: the shared rule reports the same clear
@@ -1959,16 +1977,34 @@ public:
         if (!checkFixedArrayElements(where, declaredType, *list, stmt.getLine())) return;
         // CID-020/021 (spec §6): scopeDepth skips module scopes via the
         // scope-kind flag, so a module-level array still counts as global.
-        if (symbolTable_.scopeDepth() == 0) {
-            for (auto& e : list->getElements()) {
-                if (!isConstIntExpr(e.get())) {
-                    error("Global array initializer in declaration of '" + stmt.getName() +
-                              "' must use constant expressions", stmt.getLine());
-                    return;
-                }
-            }
+        if (symbolTable_.scopeDepth() == 0 && !isConstArrayLiteral(*list, declaredType)) {
+            error("Global array initializer in declaration of '" + stmt.getName() +
+                      "' must use constant expressions", stmt.getLine());
+            return;
         }
         lastExprType_ = declaredType;
+    }
+
+    // CIDER-BUG-163: the global constant rule for a (possibly nested)
+    // fixed-array list literal. An inner list recurses with its declared row
+    // shape; a scalar element keeps the existing isConstIntExpr shape check
+    // (paired with ir_gen's constant-byte emission). A non-list inner
+    // expression is never constant-foldable here, matching the flat rule.
+    bool isConstArrayLiteral(ListExpr& list, const TypeInfo& arrayType) {
+        // CIDER-BUG-163: the row element may be an alias spelling of an
+        // array (`type Row = [u8;2]`; `[Row;3]`), so resolve before the
+        // shape test or the nested literal is treated as a scalar.
+        TypeInfo elemDecl = resolveType(arrayType.elementType());
+        for (auto& e : list.getElements()) {
+            if (auto* inner = dynamic_cast<ListExpr*>(e.get());
+                inner && elemDecl.isArray && elemDecl.pointerLevel == 0 &&
+                elemDecl.arraySize > 0) {
+                if (!isConstArrayLiteral(*inner, elemDecl)) return false;
+            } else if (!isConstIntExpr(e.get())) {
+                return false;
+            }
+        }
+        return true;
     }
 
     // CIDER-BUG-112: reassigning a list literal into an existing fixed
