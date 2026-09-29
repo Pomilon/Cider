@@ -291,6 +291,7 @@ int main(int argc, char** argv) {
         checker.setAmbiguousModules(collector.getAmbiguousModules());
         checker.setSymbolModules(collector.getSymbolModules());
         checker.setQualifiedTemplateInstantiations(collector.getQualifiedTemplateInstantiations());
+        checker.setLocalAggregates(collector.getLocalAggregates());
         checker.setModuleTemplateNames(collector.getModuleTemplateNames());
         // CID-005: the uefi target types unmarked functions MS-ABI and
         // allows `efi_main` as the entry point (check and compile alike).
@@ -334,6 +335,7 @@ int main(int argc, char** argv) {
             gen.setProgramModules(collector.getProgramModules());
             gen.setSymbolModules(collector.getSymbolModules());
             gen.setQualifiedTemplateInstantiations(collector.getQualifiedTemplateInstantiations());
+            gen.setLocalAggregates(collector.getLocalAggregates());
             gen.setDefaultAbiMs(defaultAbiMs);
             gen.setReporter(&rep);
             gen.setChecks(opts.checks);  // CIDER-ISS-001
@@ -373,6 +375,7 @@ int main(int argc, char** argv) {
             gen.setProgramModules(collector.getProgramModules());
             gen.setSymbolModules(collector.getSymbolModules());
             gen.setQualifiedTemplateInstantiations(collector.getQualifiedTemplateInstantiations());
+            gen.setLocalAggregates(collector.getLocalAggregates());
             gen.setDefaultAbiMs(defaultAbiMs);
             gen.setReporter(&rep);
             gen.setChecks(opts.checks);  // CIDER-ISS-001
@@ -401,6 +404,7 @@ int main(int argc, char** argv) {
         gen.setProgramModules(collector.getProgramModules());
         gen.setSymbolModules(collector.getSymbolModules());
         gen.setQualifiedTemplateInstantiations(collector.getQualifiedTemplateInstantiations());
+        gen.setLocalAggregates(collector.getLocalAggregates());
         gen.setDefaultAbiMs(defaultAbiMs);
         gen.setReporter(&rep);
         auto module = gen.generate(*prog);

@@ -344,6 +344,98 @@ int run() {
     Result r16 = collectSrc("export nonexistent;\n");
     CHECK(!r16.errors.empty());
 
+    // CIDER-BUG-119: function/block-local aggregate declarations are
+    // registered with finalized layouts, keyed by their AST node, for the
+    // checker and IR generator (which never walk the collector's transient
+    // local scope). Both a local struct and a local class must be present.
+    {
+        cider::ErrorReporter rep;
+        cider::Lexer lex("func main() -> void {\n"
+                         "  struct S { var a: int; var b: int; }\n"
+                         "  class C { var x: int; }\n"
+                         "}\n", rep);
+        cider::Parser parser(lex, rep);
+        auto prog = parser.parseProgram();
+        cider::SymbolTable table;
+        cider::ModuleResolver resolver;
+        cider::SymbolCollector collector(table, rep, resolver);
+        collector.collect(*prog);
+        CHECK(rep.errors().empty());
+        const auto& locals = collector.getLocalAggregates();
+        CHECK(locals.size() == 2);
+        bool sawStruct = false;
+        bool sawClass = false;
+        for (const auto& [decl, sym] : locals) {
+            (void)decl;
+            if (sym->name == "S") {
+                sawStruct = true;
+                CHECK(sym->kind == cider::SymbolKind::STRUCT);
+                CHECK(sym->totalSize == 8);
+            } else if (sym->name == "C") {
+                sawClass = true;
+                CHECK(sym->kind == cider::SymbolKind::CLASS);
+                CHECK(sym->totalSize == 4);
+            }
+        }
+        CHECK(sawStruct && sawClass);
+    }
+
+    // CIDER-BUG-119: a local struct template has no reachable declaring
+    // scope after collection, so it is rejected at the declaration instead
+    // of failing later with a misleading member-access diagnostic.
+    Result r17 = collectSrc("func main() -> void {\n"
+                            "  struct Box<T> { var v: T; }\n"
+                            "}\n");
+    bool localTemplateRejected = false;
+    for (const auto& e : r17.errors) {
+        if (e.find("cannot be declared inside a function body") != std::string::npos)
+            localTemplateRejected = true;
+    }
+    CHECK(localTemplateRejected);
+
+    // CIDER-BUG-119: same-named local classes in two functions get distinct
+    // mangling prefixes, so their method labels cannot collide; a
+    // module-scope class keeps the bare name (legacy mangling).
+    {
+        cider::ErrorReporter rep;
+        cider::Lexer lex("class M { var v: int; }\n"
+                         "func a() -> void { class L { var x: int; func f() -> int { return this.x; } } }\n"
+                         "func b() -> void { class L { var y: int; func f() -> int { return this.y; } } }\n",
+                         rep);
+        cider::Parser parser(lex, rep);
+        auto prog = parser.parseProgram();
+        cider::SymbolTable table;
+        cider::ModuleResolver resolver;
+        cider::SymbolCollector collector(table, rep, resolver);
+        collector.collect(*prog);
+        CHECK(rep.errors().empty());
+        auto moduleM = std::static_pointer_cast<cider::StructSymbol>(findSym(table, "M"));
+        CHECK(moduleM && moduleM->manglePrefix.empty());
+        std::vector<std::string> localPrefixes;
+        for (const auto& [decl, sym] : collector.getLocalAggregates()) {
+            (void)decl;
+            if (sym->name != "L") continue;
+            CHECK(!sym->manglePrefix.empty());
+            CHECK(sym->methods.size() == 1);
+            CHECK(sym->methods[0].mangledName == sym->manglePrefix + "_f");
+            localPrefixes.push_back(sym->manglePrefix);
+        }
+        CHECK(localPrefixes.size() == 2);
+        CHECK(localPrefixes[0] != localPrefixes[1]);
+    }
+
+    // CIDER-BUG-119: a function-local aggregate may not shadow an enclosing
+    // type — including a module type declared textually later — because
+    // local type identity is the bare written name.
+    Result r18 = collectSrc("func f() -> void { struct T { var a: int; } }\n"
+                            "struct T { var a: int; var b: int; }\n");
+    bool shadowRejected = false;
+    for (const auto& e : r18.errors) {
+        if (e.find("cannot be shadowed inside a function body") != std::string::npos)
+            shadowRejected = true;
+    }
+    CHECK(shadowRejected);
+
     return 0;
 }
 

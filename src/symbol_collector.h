@@ -62,6 +62,19 @@ class SymbolCollector : public ASTVisitor {
     };
     std::vector<AggregateLayout> aggregateLayouts_;
     std::map<const StructSymbol*, size_t> aggregateIndex_;
+    // CIDER-BUG-119: aggregate declarations at function/block scope. The
+    // symbol is defined in the collector's (transient) local scope, which
+    // the checker and IR generator never walk: each phase re-enters its own
+    // scope stack while re-visiting the same AST. Keying the declaration's
+    // AST node lets those phases re-install the very same (finalized)
+    // StructSymbol in their live scope. Top-level declarations are not
+    // recorded: they are reachable through the module/root scope directly,
+    // so existing programs keep identical lookups.
+    std::map<const Statement*, std::shared_ptr<StructSymbol>> localAggregates_;
+    // CIDER-BUG-119: serial for local class mangling prefixes (see
+    // StructSymbol::manglePrefix). Monotonic in declaration order, so a
+    // given source file compiles to the same labels every time.
+    size_t localAggregateSerial_ = 0;
 
 public:
     SymbolCollector(SymbolTable& symbolTable, ErrorReporter& reporter,
@@ -130,10 +143,26 @@ public:
         // overrides that bound no virtual slot (they used to be accepted and
         // silently call the derived body directly instead of dispatching).
         validateOverrides();
+        // CIDER-BUG-119: local aggregates are identified with their written
+        // (bare) name in the checker's type comparisons; a local declaration
+        // that shadows an enclosing type would be indistinguishable from it
+        // and a mismatched use (wrong field layout / method set) would
+        // type-check. Rejected here, after collection, so a module type
+        // declared later than the local declaration is caught too.
+        validateLocalAggregateShadowing();
     }
 
     const std::map<std::string, std::shared_ptr<TemplateSymbol>>& getTemplateTable() const {
         return templateTable_;
+    }
+
+    // CIDER-BUG-119: function/block-local aggregate declarations, keyed by
+    // their AST node, holding the collector-finalized StructSymbol. The
+    // checker and IR generator install the entry into their current scope
+    // when they visit the declaration (see TypeChecker::visit(StructDeclStmt)
+    // and IRGenerator::visit(StructDeclStmt)).
+    const std::map<const Statement*, std::shared_ptr<StructSymbol>>& getLocalAggregates() const {
+        return localAggregates_;
     }
 
     // CIDER-BUG-073: module-qualified template spellings accepted by the
@@ -610,6 +639,19 @@ public:
         // Check for template struct declaration (explicit specializations
         // are keyed by their mangled name, like function templates).
         if (stmt.hasTemplateParams()) {
+            // CIDER-BUG-119: a function-local struct template is rejected at
+            // the declaration. Its entry would have to live in the module
+            // template table — the declaring scope is unreachable after
+            // collection — so a use either fails with a misleading
+            // "not a struct or class" or, worse, silently resolves a
+            // same-named module template. A clear declaration-site
+            // diagnostic keeps local (non-template) aggregates coherent.
+            if (symbolTable_.scopeDepth() > 0) {
+                reporter_.error("Struct template '" + stmt.getName() +
+                                    "' cannot be declared inside a function body",
+                                stmt.getLine(), stmt.getColumn());
+                return;
+            }
             auto tmplSym = std::make_shared<TemplateSymbol>();
             tmplSym->kind = SymbolKind::TEMPLATE;
             tmplSym->name = stmt.getName();
@@ -682,6 +724,10 @@ public:
         } else {
             symbolTable_.define(sym);
             recordDefiningModule(sym);
+            // CIDER-BUG-119: a function/block-local declaration is
+            // unreachable from the module scope after collection; record it
+            // for the checker and IR generator (see localAggregates_).
+            if (symbolTable_.scopeDepth() > 0) localAggregates_[&stmt] = sym;
             addAggregateLayout(sym, symbolTable_.getCurrentScope(), 0, false, false,
                                stmt.isUnion());
         }
@@ -933,6 +979,13 @@ public:
     void visit(ReturnStmt&) override {}
     void visit(ExpressionStmt&) override {}
 
+    // CIDER-BUG-119: base name for composing a class's member labels. Local
+    // classes use their unique prefix; module-scope classes keep the bare
+    // written name (byte-identical legacy mangling).
+    static std::string mangleBase(const StructSymbol& sym) {
+        return sym.manglePrefix.empty() ? sym.name : sym.manglePrefix;
+    }
+
     void visit(ClassDeclStmt& stmt) override {
         auto sym = std::make_shared<StructSymbol>();
         sym->kind = SymbolKind::CLASS;
@@ -941,6 +994,16 @@ public:
         sym->col = stmt.getColumn();
         sym->parentName = stmt.getParentName();
         sym->isExported = inExport_;  // CIDER-BUG-060
+        // CIDER-BUG-119: a function/block-local class mangles its methods,
+        // constructor and destructor under a unique prefix, so same-named
+        // local classes in different functions/scopes cannot emit colliding
+        // labels. Module-scope classes keep the bare name (byte-identical
+        // output). A local class that shadows an enclosing type is rejected
+        // after collection (validateLocalAggregateShadowing).
+        if (symbolTable_.scopeDepth() > 0) {
+            sym->manglePrefix = "__local" + std::to_string(++localAggregateSerial_) + "_" +
+                                sym->name;
+        }
 
         bool hasVTable = false;
         bool inherited = false;
@@ -1013,7 +1076,7 @@ public:
                 sym->fields.push_back(f);
             } else if (auto method = dynamic_cast<FunctionDeclStmt*>(member.get())) {
                 if (method->isDestructor()) {
-                    sym->destructorName = sym->name + "_" + method->getName();
+                    sym->destructorName = mangleBase(*sym) + "_" + method->getName();
                     auto funcSym = std::make_shared<FunctionSymbol>();
                     funcSym->kind = SymbolKind::FUNCTION;
                     funcSym->name = sym->destructorName;
@@ -1054,7 +1117,7 @@ public:
                                             ctorRet.toString(),
                                         method->getLine(), method->getColumn());
                     } else {
-                        sym->constructorName = sym->name + "_init";
+                        sym->constructorName = mangleBase(*sym) + "_init";
                         for (auto& param : method->getParams()) {
                             TypeInfo paramType = TypeInfo::fromAST(param.second.get());
                             // CIDER-BUG-080: interface-typed constructor
@@ -1067,7 +1130,7 @@ public:
                 }
                 StructSymbol::Method m;
                 m.name = method->getName();
-                m.mangledName = sym->name + "_" + m.name;
+                m.mangledName = mangleBase(*sym) + "_" + m.name;
                 m.line = method->getLine();
                 m.col = method->getColumn();
                 // CIDER-BUG-090: signature spellings bind in the module
@@ -1154,6 +1217,8 @@ public:
         layoutClass(*sym, rec);
         symbolTable_.define(sym);
         recordDefiningModule(sym);
+        // CIDER-BUG-119: see the struct declaration site above.
+        if (symbolTable_.scopeDepth() > 0) localAggregates_[&stmt] = sym;
         structClassNames_.push_back(stmt.getName());
         addAggregateLayout(std::move(rec));
     }
@@ -1621,6 +1686,9 @@ public:
         rec.inherited = inherited;
         rec.vptrReserved = vptrReserved;
         rec.isUnion = isUnion;
+        // CIDER-BUG-119: late diagnostics (shadow validation) attribute to
+        // the file the local declaration was collected in, like classes.
+        rec.file = reporter_.getFile();
         aggregateIndex_[sym.get()] = aggregateLayouts_.size();
         aggregateLayouts_.push_back(std::move(rec));
     }
@@ -1808,6 +1876,47 @@ public:
         if (!file.empty()) reporter_.setFile(file);
         reporter_.error(message, line, col);
         reporter_.setFile(prevFile);
+    }
+
+    // CIDER-BUG-119: symbol kinds whose bare name is a type identity for the
+    // checker (aliases are STRUCT-kind providers). A function-local
+    // aggregate carrying the same name would be treated as the same type.
+    static bool isTypeLikeSymbol(const std::shared_ptr<Symbol>& sym) {
+        if (!sym) return false;
+        return sym->kind == SymbolKind::STRUCT || sym->kind == SymbolKind::CLASS ||
+               sym->kind == SymbolKind::ENUM || sym->kind == SymbolKind::INTERFACE;
+    }
+
+    // CIDER-BUG-119: reject a function/block-local aggregate whose name is
+    // already bound to a type in an enclosing scope (module scope, root, or
+    // an outer function/block). Local type identity is the written name —
+    // there is no module-qualified spelling for it — so two same-named types
+    // cannot coexist without the checker silently treating one as the other.
+    // Checked after collection so a module type declared textually later
+    // (forward declaration) is seen as well; the enclosing scope objects
+    // survive their exitScope(). Iterating aggregateLayouts_ keeps the
+    // diagnostics in declaration order (localAggregates_ is keyed by AST
+    // pointer, whose order is not source order).
+    void validateLocalAggregateShadowing() {
+        std::set<const StructSymbol*> locals;
+        for (const auto& [decl, sym] : localAggregates_) {
+            (void)decl;
+            if (sym) locals.insert(sym.get());
+        }
+        for (const auto& rec : aggregateLayouts_) {
+            if (!rec.sym || !locals.count(rec.sym.get())) continue;
+            for (Scope* s = rec.declaringScope ? rec.declaringScope->getParent() : nullptr; s;
+                 s = s->getParent()) {
+                auto outer = s->resolveLocal(rec.sym->name);
+                if (outer && outer != rec.sym && isTypeLikeSymbol(outer)) {
+                    reportAtFile("Type '" + rec.sym->name +
+                                     "' is already declared in an enclosing scope and cannot be "
+                                     "shadowed inside a function body",
+                                 rec.sym->line, rec.sym->col, rec.file);
+                    break;
+                }
+            }
+        }
     }
 
     // CIDER-BUG-120: resolve a class's base after collection. A base

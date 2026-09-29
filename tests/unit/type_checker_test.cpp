@@ -25,6 +25,7 @@ std::vector<std::string> checkSrc(const std::string& src) {
     collector.collect(*prog);
     rep.clear();
     cider::TypeChecker checker(table, rep);
+    checker.setLocalAggregates(collector.getLocalAggregates());
     checker.check(*prog);
     std::vector<std::string> out;
     for (auto& e : rep.errors()) out.push_back(e.message);
@@ -44,6 +45,7 @@ std::vector<std::string> checkSrcOpts(const std::string& src, bool defaultAbiMs,
     collector.collect(*prog);
     rep.clear();
     cider::TypeChecker checker(table, rep);
+    checker.setLocalAggregates(collector.getLocalAggregates());
     checker.setDefaultAbiMs(defaultAbiMs);
     checker.setUefiEntryAllowed(allowUefiEntry);
     checker.check(*prog);
@@ -69,6 +71,7 @@ std::vector<std::string> checkSrcWarnings(const std::string& src) {
     collector.collect(*prog);
     rep.clear();
     cider::TypeChecker checker(table, rep);
+    checker.setLocalAggregates(collector.getLocalAggregates());
     checker.setWarningsEnabled(true);
     checker.check(*prog);
     std::vector<std::string> out;
@@ -1230,6 +1233,52 @@ int run() {
             "func main() -> void { f(); }\n");
         CHECK(hasWarning(heapTarget, "dies at the end of the current function"));
     }
+
+    // CIDER-BUG-119: function-local struct/class declarations type-check
+    // like module-scope aggregates — member access, `this`, methods and a
+    // local class satisfying a module-scope interface.
+    {
+        auto localStruct = checkSrc(
+            "func main() -> int {\n"
+            "    struct S { var x: int; var y: int; }\n"
+            "    var s: S;\n"
+            "    s.x = 3;\n"
+            "    s.y = 4;\n"
+            "    return s.x + s.y;\n"
+            "}\n");
+        CHECK(localStruct.empty());
+
+        auto localClass = checkSrc(
+            "interface Shape { func area() -> int; }\n"
+            "func main() -> int {\n"
+            "    class C {\n"
+            "        var v: int = 2;\n"
+            "        func get() -> int { return this.v; }\n"
+            "        func area() -> int { return this.v * this.v; }\n"
+            "    }\n"
+            "    var c: C;\n"
+            "    var sh: Shape = c;\n"
+            "    return c.get() + sh.area();\n"
+            "}\n");
+        CHECK(localClass.empty());
+
+        // A local class may name its own (function-local) type in a method
+        // signature; the checker must keep the lexical spelling instead of
+        // rebasing it onto the module.
+        auto localSelfReturn = checkSrc(
+            "func main() -> int {\n"
+            "    class K {\n"
+            "        var v: int = 3;\n"
+            "        func clone() -> K { var c: K; c.v = this.v + 1; return c; }\n"
+            "        func get() -> int { return this.v; }\n"
+            "    }\n"
+            "    var k: K;\n"
+            "    var c: K = k.clone();\n"
+            "    return c.get();\n"
+            "}\n");
+        CHECK(localSelfReturn.empty());
+    }
+
     return 0;
 }
 

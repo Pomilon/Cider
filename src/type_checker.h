@@ -52,6 +52,16 @@ public:
     void setQualifiedTemplateInstantiations(const std::map<std::string, std::string>& map) {
         qualifiedTemplateInstantiations_ = map;
     }
+    // CIDER-BUG-119: function/block-local aggregate declarations the
+    // collector registered, keyed by their AST node (see the getter in
+    // SymbolCollector). Visiting the declaration installs the finalized
+    // StructSymbol into the live scope; without this, the symbol only ever
+    // lived in the collector's transient local scope and every use fell
+    // through to "Type X is not a struct or class".
+    void setLocalAggregates(
+        const std::map<const Statement*, std::shared_ptr<StructSymbol>>& map) {
+        localAggregates_ = map;
+    }
     // CIDER-BUG-096: base names of the templates each module declares
     // ("" == main file). A qualified template spelling the collector did
     // not accept is reported as an unknown template only when its module
@@ -111,6 +121,19 @@ public:
         }
         Scope* root = symbolTable_.getRootScope();
         return root ? root->resolveLocal(name) : nullptr;
+    }
+
+    // CIDER-BUG-119: true when `sym` is bound to `name` by a scope BELOW
+    // the current module/root scope — i.e. a function- or block-local
+    // declaration. Such a binding has no module-qualified canonical
+    // spelling: its identity is lexical, so callers must keep the written
+    // name and resolve it through the live scope stack.
+    bool isScopeLocalBinding(const std::string& name, const std::shared_ptr<Symbol>& sym) {
+        for (Scope* s = symbolTable_.getCurrentScope(); s; s = s->getParent()) {
+            if (s == currentModuleScope_ || s == symbolTable_.getRootScope()) return false;
+            if (s->resolveLocal(name) == sym) return true;
+        }
+        return false;
     }
 
     // CIDER-BUG-102: resolve a name as a spelling WRITTEN in `logical`'s
@@ -371,6 +394,11 @@ public:
         auto sym = resolveScoped(t.name);
         if (sym && (sym->kind == SymbolKind::STRUCT || sym->kind == SymbolKind::CLASS ||
                     sym->kind == SymbolKind::ENUM || sym->kind == SymbolKind::INTERFACE)) {
+            // CIDER-BUG-119: a function-local binding keeps its written
+            // spelling; qualifying it with the module would make later
+            // lookups miss the lexical scope (and local types of two
+            // functions in one module must stay distinct).
+            if (isScopeLocalBinding(t.name, sym)) return t;
             t.name = canonicalTypeName(t.name, definingModuleOf(sym));
         }
         return t;
@@ -4562,6 +4590,13 @@ public:
     }
     void visit(TypeAST&) override {}
     void visit(StructDeclStmt& stmt) override {
+        // CIDER-BUG-119: a function/block-local declaration is re-installed
+        // in the checker's own scope here; the collector's symbol (layout
+        // already finalized) is keyed by this AST node. Top-level
+        // declarations are absent from the map and stay resolvable through
+        // the module/root scope, exactly as before.
+        if (auto la = localAggregates_.find(&stmt); la != localAggregates_.end())
+            symbolTable_.define(la->second);
         // CIDER-FEAT-005: field type spellings are otherwise not resolved by
         // the checker; note them for the import bookkeeping. Template
         // structs disable the unused-import report like template functions.
@@ -4589,6 +4624,11 @@ public:
     }
 
     void visit(ClassDeclStmt& stmt) override {
+        // CIDER-BUG-119: see visit(StructDeclStmt) — install the
+        // collector-finalized local class in the checker's live scope
+        // before its members (`this` etc.) are checked.
+        if (auto la = localAggregates_.find(&stmt); la != localAggregates_.end())
+            symbolTable_.define(la->second);
         std::string prevClass = currentClassName_;
         currentClassName_ = stmt.getName();
         // CIDER-BUG-124: the `extends` spelling is a type use and is
@@ -4889,6 +4929,9 @@ private:
     // CIDER-BUG-096: logical module ("" == main) -> template base names the
     // module declares (see setter above).
     std::map<std::string, std::set<std::string>> moduleTemplateNames_;
+    // CIDER-BUG-119: function/block-local aggregate AST -> collector symbol
+    // (see setter above).
+    std::map<const Statement*, std::shared_ptr<StructSymbol>> localAggregates_;
     std::string currentModule_;      // logical name of the file being checked ("" == main)
     Scope* currentModuleScope_ = nullptr;
 

@@ -58,6 +58,16 @@ public:
         qualifiedTemplateInstantiations_ = map;
     }
 
+    // CIDER-BUG-119: function/block-local aggregate declarations the
+    // collector registered, keyed by their AST node (mirrors
+    // TypeChecker::setLocalAggregates). Visiting the declaration defines
+    // the finalized StructSymbol in the generator's live scope, so later
+    // type-size and member-offset lookups resolve it.
+    void setLocalAggregates(
+        const std::map<const Statement*, std::shared_ptr<StructSymbol>>& map) {
+        localAggregates_ = map;
+    }
+
     // CID-005: `--target uefi` types unmarked function identifiers as
     // MS-ABI fn values (mirrors the checker's functionPointerTypeOf).
     void setDefaultAbiMs(bool v) { defaultAbiMs_ = v; }
@@ -114,6 +124,11 @@ public:
             std::vector<std::string> entries;
             for (const auto& e : classSym->vtable) {
                 auto methodDef = resolveFunctionDef(e, classScope);
+                // CIDER-BUG-119: a local class's own entries resolve through
+                // the Method record (see localMethodDef), so the vtable
+                // references the same module-mangled label as the
+                // definition.
+                if (!methodDef.first) methodDef = localMethodDef(classSym, e);
                 entries.push_back(emitFunctionName(methodDef.second, e));
             }
             module_.addVTable(vtableKeyForClass(classSym), entries);
@@ -177,6 +192,11 @@ public:
                                 // with the struct's defining module.
                                 auto methodDef = resolveFunctionDef(
                                     sm.mangledName, definingScopeFor(ss, ss->name));
+                                // CIDER-BUG-119: a function/block-local
+                                // implementation's symbol is rebuilt from its
+                                // record (see localMethodDef), so the entry
+                                // label matches the definition's mangling.
+                                if (!methodDef.first) methodDef = localMethodDef(ss, sm.mangledName);
                                 vtableMethods.push_back(
                                     emitFunctionName(methodDef.second, sm.mangledName));
                                 // CID-005: this definition is dispatched
@@ -904,6 +924,42 @@ public:
         return {nullptr, ""};
     }
 
+    // CIDER-BUG-119: FunctionSymbol for a method of a function/block-local
+    // class. The collector defined it in its transient local scope, so it is
+    // unreachable after collection; the Method record still carries the full
+    // signature. Rebuilding it keeps the call convention (return type, sret,
+    // ABI) decisions identical to module-scope methods.
+    std::shared_ptr<FunctionSymbol> localMethodSymbol(
+        const std::shared_ptr<StructSymbol>& classSym, const StructSymbol::Method& m) {
+        auto fs = std::make_shared<FunctionSymbol>();
+        fs->kind = SymbolKind::FUNCTION;
+        fs->name = m.mangledName;
+        fs->returnType = m.returnType;
+        fs->parameterTypes = m.parameterTypes;
+        fs->parameterTypes.insert(fs->parameterTypes.begin(), {classSym->name, 1});
+        fs->abi = (m.isVirtual || m.isOverride) ? Abi::SysV : Abi::Default;
+        return fs;
+    }
+
+    // CIDER-BUG-119: (FunctionSymbol, defining module) for a method of a
+    // function/block-local class, by collector-composed mangled name. The
+    // collector defined the symbol in its transient local scope, so
+    // resolveFunctionDef misses it; rebuilding from the Method record (see
+    // localMethodSymbol) and attributing it to the class's defining module
+    // makes vtable entries and call sites compose the same label as the
+    // method definition. Null for an unknown name (module classes and
+    // inherited module methods resolve through resolveFunctionDef first).
+    std::pair<std::shared_ptr<FunctionSymbol>, std::string> localMethodDef(
+        const std::shared_ptr<StructSymbol>& classSym, const std::string& mangledName) {
+        if (!classSym) return {nullptr, ""};
+        for (const auto& m : classSym->methods) {
+            if (m.mangledName != mangledName) continue;
+            return {localMethodSymbol(classSym, m),
+                    methodModule(m, definingModuleFor(classSym, classSym->name))};
+        }
+        return {nullptr, ""};
+    }
+
     // CID-020/021 (spec §6): vtable-map key for a class/struct symbol —
     // the bare legacy name for main-file types, defining-module mangling
     // otherwise (same rule as method names, so keys stay injective and
@@ -911,10 +967,14 @@ public:
     // (NewExpr, interface stores, VM, native emitter).
     std::string vtableKeyForClass(const std::shared_ptr<StructSymbol>& classSym) {
         if (!classSym) return "";
+        // CIDER-BUG-119: a function/block-local class keys its vtable under
+        // the unique mangling prefix, so same-named local classes in
+        // different functions cannot collide.
+        std::string base = classSym->manglePrefix.empty() ? classSym->name : classSym->manglePrefix;
         // CIDER-FEAT-006: per-object prefix in separate compilation (the
         // vtable is emitted by each object that uses the class; references
         // are intra-object, so distinct names link cleanly).
-        return separateToken_ + emitGlobalName(definingModuleFor(classSym, classSym->name), classSym->name);
+        return separateToken_ + emitGlobalName(definingModuleFor(classSym, classSym->name), base);
     }
 
     // CID-020/021 (spec §6): vtable-map key joining an interface and its
@@ -924,7 +984,16 @@ public:
                                const std::shared_ptr<Symbol>& scSym, const std::string& scName) {
         std::string im = ifaceSym ? definingModuleFor(ifaceSym, ifaceSym->name) : "";
         std::string sm = scSym ? definingModuleFor(scSym, scSym->name) : "";
-        return separateToken_ + emitGlobalName(im, ifaceName) + "_" + emitGlobalName(sm, scName);
+        // CIDER-BUG-119: a function/block-local implementing class keys
+        // under its unique mangling prefix (mirrors vtableKeyForClass), so
+        // same-named local classes in different functions never share a
+        // vtable.
+        std::string scBase = scName;
+        if (scSym && (scSym->kind == SymbolKind::STRUCT || scSym->kind == SymbolKind::CLASS)) {
+            auto ss = std::static_pointer_cast<StructSymbol>(scSym);
+            if (!ss->manglePrefix.empty()) scBase = ss->manglePrefix;
+        }
+        return separateToken_ + emitGlobalName(im, ifaceName) + "_" + emitGlobalName(sm, scBase);
     }
 
     // CID-020/021 (spec §6): bare nominal defined by exactly one module
@@ -1121,7 +1190,18 @@ public:
 
         std::string funcName = sanitizeAsmName(stmt.getName());
         if (!currentClassName_.empty()) {
-            funcName = currentClassName_ + "_" + funcName;
+            // CIDER-BUG-119: a function/block-local class carries a unique
+            // mangling prefix (the collector assigned it before composing
+            // the Method records); resolve the live class symbol so the
+            // definition matches `m.mangledName`. Module-scope classes have
+            // an empty prefix and keep the legacy `Class_method` name.
+            std::string classBase = currentClassName_;
+            auto classSym = symbolTable_.resolve(currentClassName_);
+            if (classSym && classSym->kind == SymbolKind::CLASS) {
+                auto cs = std::static_pointer_cast<StructSymbol>(classSym);
+                if (!cs->manglePrefix.empty()) classBase = cs->manglePrefix;
+            }
+            funcName = classBase + "_" + funcName;
         }
 
         if (stmt.isExtern()) {
@@ -1632,6 +1712,7 @@ public:
                 for (const auto& m : classSym->methods) {
                     if (m.name == mem->getMember()) {
                         auto methodDef = resolveFunctionDef(m.mangledName, classScope);
+                        if (!methodDef.first) methodDef = localMethodDef(classSym, m.mangledName);
                         funcName = emitFunctionName(methodDef.second, m.mangledName);
                         if (methodDef.first) resolvedFuncSym = methodDef.first;
                         isVirtual = m.isVirtual || m.isOverride;
@@ -6891,6 +6972,13 @@ public:
             // direct class-local registration in visit(VarDeclStmt)).
             auto dtorDef = resolveFunctionDef(aggSym->destructorName,
                                               definingScopeFor(aggSym, aggSym->name));
+            if (!dtorDef.first && !aggSym->manglePrefix.empty()) {
+                // CIDER-BUG-119: a function/block-local class's destructor
+                // symbol is unreachable after collection; attribute the
+                // label to the class's defining module directly (the
+                // definition is emitted from the class body under it).
+                dtorDef.second = definingModuleFor(aggSym, aggSym->name);
+            }
             destructorStack_.back().push_back(
                 {emitFunctionName(dtorDef.second, aggSym->destructorName), base, offset});
         }
@@ -7376,6 +7464,19 @@ public:
                              const std::vector<std::unique_ptr<Expression>>& argExprs) {
         auto ctorDef = resolveFunctionDef(classSym->constructorName,
                                           definingScopeFor(classSym, classSym->name));
+        if (!ctorDef.first && !classSym->manglePrefix.empty()) {
+            // CIDER-BUG-119: a function/block-local class's constructor
+            // FunctionSymbol was defined in the collector's transient local
+            // scope; rebuild it from the recorded signature (the definition
+            // itself is still emitted from the class body).
+            auto fs = std::make_shared<FunctionSymbol>();
+            fs->kind = SymbolKind::FUNCTION;
+            fs->name = classSym->constructorName;
+            fs->returnType = {"void", 0};
+            fs->parameterTypes = classSym->constructorParamTypes;
+            fs->parameterTypes.insert(fs->parameterTypes.begin(), {classSym->name, 1});
+            ctorDef = {fs, definingModuleFor(classSym, classSym->name)};
+        }
         if (!ctorDef.first) {
             if (reporter_) {
                 reporter_->error("Constructor '" + classSym->constructorName +
@@ -7791,12 +7892,16 @@ public:
     }
     void visit(ExpressionStmt& stmt) override { stmt.getExpression()->accept(*this); }
     void visit(ClassDeclStmt& stmt) override {
-        // CID-020/021 (spec §6): stash the resolved class object for vtable
-        // emission in generate(). Resolved in the current (own) scope, so a
-        // module class keeps its own object and same-named classes in two
-        // modules stay distinct entries that mangle apart. Skipped when
+        // CIDER-BUG-119: install a function/block-local class in the live
+        // scope first (see visit(StructDeclStmt)). Skipped when
         // unresolvable (the checker rejects such programs first).
-        auto csym = symbolTable_.resolve(stmt.getName());
+        std::shared_ptr<Symbol> csym;
+        if (auto la = localAggregates_.find(&stmt); la != localAggregates_.end()) {
+            csym = la->second;
+            symbolTable_.define(csym);
+        } else {
+            csym = symbolTable_.resolve(stmt.getName());
+        }
         if (csym && (csym->kind == SymbolKind::STRUCT || csym->kind == SymbolKind::CLASS))
             classSyms_.push_back(std::static_pointer_cast<StructSymbol>(csym));
         std::string oldClass = currentClassName_;
@@ -8123,7 +8228,15 @@ public:
     void visit(StructDeclStmt& stmt) override {
         // CID-020/021 (spec §6): stash the resolved struct object for the
         // interface-vtable loop in generate(); see visit(ClassDeclStmt).
-        auto ssym = symbolTable_.resolve(stmt.getName());
+        // CIDER-BUG-119: a function/block-local declaration is installed in
+        // the live scope from the collector registry first.
+        std::shared_ptr<Symbol> ssym;
+        if (auto la = localAggregates_.find(&stmt); la != localAggregates_.end()) {
+            ssym = la->second;
+            symbolTable_.define(ssym);
+        } else {
+            ssym = symbolTable_.resolve(stmt.getName());
+        }
         if (ssym && (ssym->kind == SymbolKind::STRUCT || ssym->kind == SymbolKind::CLASS))
             structSyms_.push_back(std::static_pointer_cast<StructSymbol>(ssym));
         lastExprType_ = {stmt.getName(), 0};
@@ -8227,6 +8340,9 @@ private:
     // CIDER-BUG-095: accepted module-qualified template spellings -> shared
     // bare instantiation name (from the collector; see setter).
     std::map<std::string, std::string> qualifiedTemplateInstantiations_;
+    // CIDER-BUG-119: function/block-local aggregate AST -> collector symbol
+    // (see setter).
+    std::map<const Statement*, std::shared_ptr<StructSymbol>> localAggregates_;
     // CID-020/021 (spec §2): logical name of the file being generated
     // ("" == main file, which keeps plain names).
     std::string currentModule_;

@@ -288,6 +288,14 @@ struct StructSymbol : public Symbol {
     // collection time so the checker can validate `new C(args)` even when
     // an inherited `init` shadows the own one in `methods`.
     std::vector<TypeInfo> constructorParamTypes;
+    // CIDER-BUG-119: unique mangling prefix for a class declared at
+    // function/block scope ("__localN_ClassName"), empty for module-scope
+    // classes. Method, constructor and destructor mangled names compose
+    // from this base instead of `name`, so two same-named local classes in
+    // different functions/scopes emit distinct labels (a local class that
+    // shadows an enclosing type is rejected by the collector).
+    // The written name stays in `name` for diagnostics and type lookups.
+    std::string manglePrefix;
     int totalSize = 0;
 };
 
