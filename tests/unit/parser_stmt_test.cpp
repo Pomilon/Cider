@@ -1,5 +1,7 @@
 #include <cstdio>
+#include <memory>
 #include <string>
+#include <utility>
 #include "lexer.h"
 #include "parser.h"
 
@@ -25,6 +27,69 @@ int run() {
     d = parseDump("const C: int = 10;\n", rep);
     CHECK(!rep.hasErrors());
     CHECK(d.find("(ConstDecl C int = (Number 10))") != std::string::npos);
+
+    // CIDER-BUG-145: `volatile [T; N]` used to be consumed by parseType's
+    // leading-qualifier branch and then discarded by the array wrapper, so
+    // the qualifier was silently lost. It now rides on the ArrayTypeAST
+    // itself; `[volatile T; N]` keeps marking the element type, and a
+    // scalar `volatile T` is unchanged.
+    auto parseOneVar = [&](const std::string& src)
+        -> std::pair<std::unique_ptr<cider::AstProgram>, cider::TypeAST*> {
+        cider::Lexer lex(src, rep);
+        cider::Parser parser(lex, rep);
+        auto prog = parser.parseProgram();
+        cider::TypeAST* type = nullptr;
+        if (prog && prog->getStatements().size() == 1) {
+            if (auto* var = dynamic_cast<cider::VarDeclStmt*>(prog->getStatements()[0].get()))
+                type = var->getTypeAST();
+        }
+        return {std::move(prog), type};
+    };
+
+    rep.clear();
+    auto [xProg, vArr] = parseOneVar("var x: volatile [int; 3];\n");
+    CHECK(!rep.hasErrors());
+    auto* arr = dynamic_cast<cider::ArrayTypeAST*>(vArr);
+    CHECK(arr != nullptr);
+    CHECK(arr->isVolatile());                  // the array keeps the qualifier
+    CHECK(!arr->getBaseType()->isVolatile());  // not moved onto the element
+    CHECK(arr->getSize() == 3);
+    CHECK(arr->getBaseType()->getName() == "int");
+
+    rep.clear();
+    auto [yProg, eArr0] = parseOneVar("var y: [volatile int; 3];\n");
+    CHECK(!rep.hasErrors());
+    auto* eArr = dynamic_cast<cider::ArrayTypeAST*>(eArr0);
+    CHECK(eArr != nullptr);
+    CHECK(!eArr->isVolatile());                // wrapper stays plain
+    CHECK(eArr->getBaseType()->isVolatile());  // element keeps the qualifier
+
+    rep.clear();
+    auto [zProg, scalar] = parseOneVar("var z: volatile int;\n");
+    CHECK(!rep.hasErrors());
+    CHECK(scalar != nullptr && !dynamic_cast<cider::ArrayTypeAST*>(scalar));
+    CHECK(scalar->isVolatile());
+    CHECK(scalar->getName() == "int");
+
+    // Nested arrays keep the two spellings distinguishable on the AST (the
+    // TypeInfo fold makes them equivalent at the descriptor level).
+    rep.clear();
+    auto [nProg, nOuter0] = parseOneVar("var n: volatile [[int; 2]; 3];\n");
+    CHECK(!rep.hasErrors());
+    auto* nOuter = dynamic_cast<cider::ArrayTypeAST*>(nOuter0);
+    CHECK(nOuter != nullptr && nOuter->isVolatile());
+    auto* nInner = dynamic_cast<cider::ArrayTypeAST*>(nOuter->getBaseType());
+    CHECK(nInner != nullptr && !nInner->isVolatile());
+    CHECK(!nInner->getBaseType()->isVolatile());
+
+    rep.clear();
+    auto [mProg, dOuter0] = parseOneVar("var m: [[volatile int; 2]; 3];\n");
+    CHECK(!rep.hasErrors());
+    auto* dOuter = dynamic_cast<cider::ArrayTypeAST*>(dOuter0);
+    CHECK(dOuter != nullptr && !dOuter->isVolatile());
+    auto* dInner = dynamic_cast<cider::ArrayTypeAST*>(dOuter->getBaseType());
+    CHECK(dInner != nullptr && !dInner->isVolatile());
+    CHECK(dInner->getBaseType()->isVolatile());
 
     // CID-006: function-pointer type spelling.
     rep.clear();

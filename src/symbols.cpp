@@ -2,12 +2,28 @@
 
 namespace cider {
 
+// CIDER-BUG-145: `volatile [T; N]` qualifies the array object, so every
+// element — through any number of nested array dimensions — is an
+// observable access, exactly like `[volatile T; N]` marks its element.
+// The TypeInfo descriptor is flat at the top (a single `isVolatile` flag
+// serves the array and its element), so mark the descriptor and every
+// nested `arrayElement` it carries.
+static void markVolatileDeep(TypeInfo& t) {
+    t.isVolatile = true;
+    if (t.arrayElement) markVolatileDeep(*t.arrayElement);
+}
+
 TypeInfo TypeInfo::fromAST(TypeAST* ast) {
     if (!ast) return {"void", 0};
 
     // Use dynamic_cast to check for ArrayTypeAST
     if (auto arrayAst = dynamic_cast<ArrayTypeAST*>(ast)) {
         TypeInfo info = fromAST(arrayAst->getBaseType());
+        // CIDER-BUG-145: the wrapper qualifier (`volatile [T; N]`) reaches
+        // the descriptor here; without this fold parseType's consumed
+        // `volatile` was dropped and element accesses stayed plain. Marking
+        // before the arrayElement copy below also covers the inner shape.
+        if (arrayAst->isVolatile()) markVolatileDeep(info);
         // CIDER-BUG-052: preserve the full inner shape. The flat
         // isArray/arraySize pair only carries the outermost dimension, so a
         // nested base's shape used to be overwritten and lost.

@@ -1355,7 +1355,11 @@ std::unique_ptr<TypeAST> Parser::parseType(bool castContext) {
             return nullptr;
         }
         nextToken();
-        return std::make_unique<ArrayTypeAST>(std::move(baseType), size, line, col);
+        // CIDER-BUG-145: a leading `volatile` qualifies the array itself
+        // (`volatile [T; N]`), like a volatile aggregate; the element
+        // spelling `[volatile T; N]` marks the base type via the recursive
+        // parseType above. Passing the flag here stops the silent loss.
+        return std::make_unique<ArrayTypeAST>(std::move(baseType), size, line, col, isVolatile);
     }
 
     int pointerLevel = 0;

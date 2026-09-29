@@ -165,9 +165,15 @@ private:
 
 class ArrayTypeAST : public TypeAST {
 public:
-    ArrayTypeAST(std::unique_ptr<TypeAST> baseType, int size, int line, int col)
+    // CIDER-BUG-145: `isVolatile` is the array wrapper's own qualifier,
+    // written as `volatile [T; N]`; the element spelling `[volatile T; N]`
+    // stays on the base type, exactly as before. TypeInfo::fromAST folds
+    // both spellings into the same descriptor, so every element access of
+    // a volatile array is observable.
+    ArrayTypeAST(std::unique_ptr<TypeAST> baseType, int size, int line, int col,
+                 bool isVolatile = false)
         : TypeAST(baseType->getName() + "[" + std::to_string(size) + "]",
-                  baseType->getPointerLevel(), line, col, false, baseType->getAbi()),
+                  baseType->getPointerLevel(), line, col, isVolatile, baseType->getAbi()),
           baseType_(std::move(baseType)), size_(size) {}
 
     TypeAST* getBaseType() const { return baseType_.get(); }

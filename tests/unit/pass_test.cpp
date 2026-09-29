@@ -836,6 +836,119 @@ int testVolatileFormation144IrFlags() {
     return 0;
 }
 
+int testVolatileArraySpelling145IrFlags() {
+    // CIDER-BUG-145: parseType consumed a leading `volatile` and the array
+    // wrapper discarded it, so `volatile [T; N]` compiled to a plain array
+    // while `[volatile T; N]` marked the element. The wrapper qualifier now
+    // reaches TypeInfo::fromAST, and both spellings describe the same
+    // volatile aggregate: every element access (at any nesting depth) is
+    // observable. Pinned with exact counts, spelling-pair equality and
+    // non-volatile controls.
+    struct Tally {
+        int volatileLoads = 0;
+        int volatileStores = 0;
+        int volatileMemcpy = 0;
+        int volatileTotal = 0;
+    };
+    auto tally = [](const ModuleResult& m) {
+        Tally t;
+        for (const auto& func : m.module.getFunctions()) {
+            for (const auto& b : func->getBlocks()) {
+                for (const auto& in : b->getInstructions()) {
+                    if (!in.isVolatile) continue;
+                    t.volatileTotal++;
+                    if (in.op == cider::IROp::LOAD) t.volatileLoads++;
+                    if (in.op == cider::IROp::STORE) t.volatileStores++;
+                    if (in.op == cider::IROp::MEMCPY) t.volatileMemcpy++;
+                }
+            }
+        }
+        return t;
+    };
+
+    // (1) One dimension: one volatile store and one volatile load for the
+    // wrapper spelling, exactly the counts the element spelling already
+    // produced; the plain array stays at zero.
+    auto oneD = [](const std::string& ty) {
+        return "func f() -> int {\n"
+               "  var a: " + ty + ";\n"
+               "  a[0] = 1;\n"
+               "  return a[1];\n"
+               "}\n"
+               "func main() -> int { return f(); }\n";
+    };
+    auto d1w = tally(genModule(oneD("volatile [int; 3]")));
+    CHECK(d1w.volatileStores == 1);
+    CHECK(d1w.volatileLoads == 1);
+    auto d1e = tally(genModule(oneD("[volatile int; 3]")));
+    CHECK(d1e.volatileStores == 1);
+    CHECK(d1e.volatileLoads == 1);
+    CHECK(tally(genModule(oneD("[int; 3]"))).volatileTotal == 0);
+
+    // (2) Nested dimensions: the wrapper qualifier reaches the innermost
+    // element, so 2-D and 3-D wrapper spellings match their element twins.
+    auto twoD = [](const std::string& ty) {
+        return "func f() -> int {\n"
+               "  var a: " + ty + ";\n"
+               "  a[0][1] = 1;\n"
+               "  return a[1][0];\n"
+               "}\n"
+               "func main() -> int { return f(); }\n";
+    };
+    auto d2w = tally(genModule(twoD("volatile [[int; 2]; 3]")));
+    CHECK(d2w.volatileStores == 1);
+    CHECK(d2w.volatileLoads == 1);
+    auto d2e = tally(genModule(twoD("[[volatile int; 2]; 3]")));
+    CHECK(d2e.volatileStores == 1);
+    CHECK(d2e.volatileLoads == 1);
+    CHECK(tally(genModule(twoD("[[int; 2]; 3]"))).volatileTotal == 0);
+
+    auto threeD = [](const std::string& ty) {
+        return "func f() -> int {\n"
+               "  var a: " + ty + ";\n"
+               "  a[0][1][0] = 1;\n"
+               "  return a[1][0][1];\n"
+               "}\n"
+               "func main() -> int { return f(); }\n";
+    };
+    auto d3w = tally(genModule(threeD("volatile [[[int; 2]; 3]; 4]")));
+    CHECK(d3w.volatileStores == 1);
+    CHECK(d3w.volatileLoads == 1);
+    auto d3e = tally(genModule(threeD("[[[volatile int; 2]; 3]; 4]")));
+    CHECK(d3e.volatileStores == 1);
+    CHECK(d3e.volatileLoads == 1);
+    CHECK(tally(genModule(threeD("[[[int; 2]; 3]; 4]"))).volatileTotal == 0);
+
+    // (3) Formation of a volatile class-value array: the whole-array zero
+    // MEMCPY plus each element's vptr stamp and field initializer are
+    // volatile (1 memcpy + 2 x 2 stores), identically for both spellings.
+    const std::string shape =
+        "class V { virtual func f() -> int { return 1; } var x: int = 42; }\n";
+    auto form = [&](const std::string& ty) {
+        return shape + "func g() -> void { var a: " + ty + "; }\n";
+    };
+    auto f1 = tally(genModule(form("volatile [V; 2]")));
+    CHECK(f1.volatileMemcpy == 1);
+    CHECK(f1.volatileStores == 4);
+    auto f2 = tally(genModule(form("[volatile V; 2]")));
+    CHECK(f2.volatileMemcpy == 1);
+    CHECK(f2.volatileStores == 4);
+    CHECK(tally(genModule(form("[V; 2]"))).volatileTotal == 0);
+
+    // (4) Scalar `volatile T` is untouched: one init store, one assignment
+    // store and one read.
+    auto s = tally(genModule(
+        "func f() -> int {\n"
+        "  var v: volatile int = 1;\n"
+        "  v = 2;\n"
+        "  return v;\n"
+        "}\n"
+        "func main() -> int { return f(); }\n"));
+    CHECK(s.volatileStores == 2);
+    CHECK(s.volatileLoads == 1);
+    return 0;
+}
+
 int testVolatileGvn() {
     // CIDER-BUG-061: GVN must never replace a volatile access with a MOV of
     // an earlier occurrence — even for an opcode that is normally deduped.
@@ -1162,6 +1275,7 @@ int run() {
     CHECK(testVolatileGap101IrFlags() == 0);
     CHECK(testVolatileGap133IrFlags() == 0);
     CHECK(testVolatileFormation144IrFlags() == 0);
+    CHECK(testVolatileArraySpelling145IrFlags() == 0);
     CHECK(testVolatileGvn() == 0);
     CHECK(testVolatileLicm() == 0);
     CHECK(testCallClobberLicm() == 0);

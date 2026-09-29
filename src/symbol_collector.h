@@ -2852,9 +2852,11 @@ public:
                                                 const std::vector<std::string>& tmplArgs) {
         if (!type) return nullptr;
         if (auto arr = dynamic_cast<ArrayTypeAST*>(type)) {
+            // CIDER-BUG-145: substitutions clone the AST; keep the array
+            // wrapper's own `volatile [T; N]` qualifier.
             return std::make_unique<ArrayTypeAST>(
                 cloneTypeWithSubst(arr->getBaseType(), tmplParams, tmplArgs),
-                arr->getSize(), arr->getLine(), arr->getColumn());
+                arr->getSize(), arr->getLine(), arr->getColumn(), arr->isVolatile());
         }
         // CIDER-BUG-051: an `fn(T1, ...) -> R` type must keep its signature
         // (and substituted parameter/return types); the plain-TypeAST path
