@@ -9007,6 +9007,18 @@ public:
     void visit(CastExpr& expr) override {
         expr.getExpression()->accept(*this);
         TypeInfo targetType = TypeInfo::fromAST(expr.getTargetType());
+        TypeInfo sourceIfaceType = resolveInterfaceNominal(lastExprType_);
+        TypeInfo targetIfaceType = resolveInterfaceNominal(targetType);
+        if (sourceIfaceType.isInterface && targetIfaceType.isInterface) {
+            // CIDER-ISS-011: the checker permits only a prefix-compatible
+            // projection, whose methods occupy the same initial slots in
+            // both vtables. Keep the address of the original 16-byte
+            // fat-pointer value unchanged; scalar cast lowering would discard
+            // its vtable word and corrupt dispatch.
+            targetType.isInterface = true;
+            lastExprType_ = targetType;
+            return;
+        }
         // CIDER-BUG-018: an array target is a layout reinterpretation, not
         // a scalar conversion — pass the address-like value through (the
         // checker pins size and element-type equality). Without this the

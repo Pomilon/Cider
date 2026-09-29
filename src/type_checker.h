@@ -2447,13 +2447,53 @@ public:
         if (resolveInterfaceSymbol(t)) t.isInterface = true;
     }
 
-    // CIDER-BUG-054: the interface conversion rule, shared by
-    // declaration-time assignment and reassignment so the two cannot
-    // drift. Accepts a struct/class value, a pointer to one, or the same
-    // interface (a fat-pointer copy: the stored vtable follows the target
-    // interface's method order, so a different interface cannot be
-    // re-labelled statically). Every interface method must be implemented
-    // with a matching signature; anything else is rejected.
+    // CIDER-ISS-011: a source interface can be projected to a target whose
+    // methods are an exact prefix of the source's method order. Interface
+    // vtables are plain method-pointer arrays in declaration order, so this
+    // is the largest subset conversion that can copy the fat pointer without
+    // changing its vtable. Each projected signature must match canonically.
+    bool interfaceProjectionCompatible(const TypeInfo& targetType,
+                                       const TypeInfo& sourceType) {
+        auto targetSymbol = resolveInterfaceSymbol(targetType);
+        auto sourceSymbol = resolveInterfaceSymbol(sourceType);
+        if (!targetSymbol || !sourceSymbol) return false;
+        if (targetSymbol == sourceSymbol) return true;
+
+        auto target = std::static_pointer_cast<InterfaceSymbol>(targetSymbol);
+        auto source = std::static_pointer_cast<InterfaceSymbol>(sourceSymbol);
+        if (target->methods.size() > source->methods.size()) return false;
+
+        std::string targetModule = definingModuleOf(targetSymbol);
+        std::string sourceModule = definingModuleOf(sourceSymbol);
+        for (size_t i = 0; i < target->methods.size(); ++i) {
+            const auto& targetMethod = target->methods[i];
+            const auto& sourceMethod = source->methods[i];
+            if (targetMethod.name != sourceMethod.name ||
+                targetMethod.parameterTypes.size() != sourceMethod.parameterTypes.size()) {
+                return false;
+            }
+
+            std::string targetMethodModule = methodModuleOf(targetMethod, targetModule);
+            std::string sourceMethodModule = methodModuleOf(sourceMethod, sourceModule);
+            for (size_t p = 0; p < targetMethod.parameterTypes.size(); ++p) {
+                if (!(canonicalSignatureType(targetMethod.parameterTypes[p], targetMethodModule) ==
+                      canonicalSignatureType(sourceMethod.parameterTypes[p], sourceMethodModule))) {
+                    return false;
+                }
+            }
+            if (!(canonicalSignatureType(targetMethod.returnType, targetMethodModule) ==
+                  canonicalSignatureType(sourceMethod.returnType, sourceMethodModule))) {
+                return false;
+            }
+        }
+        return true;
+    }
+
+    // The interface conversion rule, shared by declaration-time assignment,
+    // reassignment, parameters, and returns so the sites cannot drift.
+    // Accepts a struct/class value, a pointer to one, or a same-layout
+    // interface projection. Every concrete interface method must be
+    // implemented with a matching signature; anything else is rejected.
     // CIDER-BUG-135: returns whether the conversion is accepted (false
     // after reporting), so the list-element check can stop like every other
     // site; callers that only need the diagnostic may ignore it.
@@ -2468,13 +2508,11 @@ public:
         if (!ifaceSym) return true;
         auto iface = std::static_pointer_cast<InterfaceSymbol>(ifaceSym);
         if (valueType.isInterface) {
-            // CIDER-BUG-078: compare the resolved spellings, so an alias and
-            // its direct spelling are the same interface (a fat-pointer copy:
-            // the stored vtable follows the target interface's method order,
-            // so a different interface cannot be re-labelled statically).
-            if (resolveType(ifaceType).name == resolveType(valueType).name) return true;
+            if (interfaceProjectionCompatible(ifaceType, valueType)) return true;
             error("Cannot assign interface '" + valueType.name + "' to interface '" +
-                      ifaceType.name + "'", line);
+                      ifaceType.name +
+                      "': source must provide target methods in the same order with matching signatures",
+                  line);
             return false;
         }
         TypeInfo concreteType = valueType;
@@ -3997,11 +4035,13 @@ public:
     void visit(CastExpr& expr) override {
         expr.getExpression()->accept(*this);
         TypeInfo srcType = lastExprType_;
+        resolveInterfaceFlag(srcType);
         // CIDER-BUG-068: an unchecked cast does not change the runtime shape;
         // remember the source type so the representation inference can follow
         // a closure object through `closure as fn(...)`.
         castSourceTypes_[&expr] = srcType;
         lastExprType_ = canonicalizeNominal(TypeInfo::fromAST(expr.getTargetType()), expr.getLine());
+        resolveInterfaceFlag(lastExprType_);
         // CIDER-BUG-018: an array-to-array cast is a layout reinterpretation
         // whose copy uses the TARGET size; require the same element type and
         // count, or `u"AB" as [u16;8]` copies 16 bytes from a 6-byte block.
@@ -4011,6 +4051,20 @@ public:
         // the source (the shape the widened list support now reaches).
         TypeInfo target = resolveType(lastExprType_);
         TypeInfo src = resolveType(srcType);
+        // CIDER-ISS-011: an interface cast is only a vtable-preserving
+        // projection. Reject incompatible method order/signatures instead of
+        // reinterpreting the source fat pointer as an unrelated interface.
+        if (target.isInterface && !src.isInterface) {
+            error("Cannot cast non-interface type '" + srcType.name + "' to interface '" +
+                      lastExprType_.name + "'",
+                  expr.getLine());
+        } else if (target.isInterface && src.isInterface &&
+                   !interfaceProjectionCompatible(target, src)) {
+            error("Cannot cast interface '" + srcType.name + "' to interface '" +
+                      lastExprType_.name +
+                      "': source must provide target methods in the same order with matching signatures",
+                  expr.getLine());
+        }
         if (isFixedArrayValue(target) && isFixedArrayValue(src) &&
             (target.arraySize != src.arraySize || !sameArrayElementType(target, src))) {
             error("Array cast size/type mismatch. Expected " + target.toString() +

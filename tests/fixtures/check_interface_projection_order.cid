@@ -1,0 +1,12 @@
+// A target interface can only project a prefix of the source vtable.
+interface AB { func a() -> int; func b() -> int; }
+interface BA { func b() -> int; func a() -> int; }
+class C {
+  func a() -> int { return 1; }
+  func b() -> int { return 2; }
+}
+func main() -> void {
+  var c: C;
+  var ab: AB = c;
+  var ba: BA = ab;
+}

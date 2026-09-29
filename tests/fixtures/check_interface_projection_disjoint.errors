@@ -1,0 +1,1 @@
+Cannot cast interface 'Write' to interface 'Read': source must provide target methods in the same order with matching signatures

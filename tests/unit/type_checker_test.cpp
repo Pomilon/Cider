@@ -306,6 +306,48 @@ int run() {
             "class C { func m() -> int { return 1; } func n() -> int { return 2; } }\n"
             "func main() -> void { var c: C; var i: I = c; var k: K = c; i = k; }\n");
         CHECK(hasError(reassignIface, "Cannot assign interface 'K' to interface 'I'"));
+
+        // CIDER-ISS-011: an interface whose method list starts with the
+        // target interface's exact method list can be projected by copying
+        // its fat pointer unchanged. Exercise declarations, assignment,
+        // parameters, returns, and explicit casts through the shared rule.
+        auto interfaceProjection = checkSrc(
+            "interface Read { func read() -> int; }\n"
+            "interface ReadWrite { func read() -> int; func write() -> int; }\n"
+            "class C { func read() -> int { return 1; } func write() -> int { return 2; } }\n"
+            "func narrow(x: ReadWrite) -> Read { return x; }\n"
+            "func use(x: Read) -> int { return x.read(); }\n"
+            "func main() -> int {\n"
+            "  var c: C; var rw: ReadWrite = c;\n"
+            "  var r: Read = rw; r = rw;\n"
+            "  var cast: Read = rw as Read;\n"
+            "  if (use(cast) != 1) { return 1; }\n"
+            "  return use(narrow(rw));\n"
+            "}\n");
+        CHECK(interfaceProjection.empty());
+
+        auto interfaceOrderMismatch = checkSrc(
+            "interface AB { func a() -> int; func b() -> int; }\n"
+            "interface BA { func b() -> int; func a() -> int; }\n"
+            "class C { func a() -> int { return 1; } func b() -> int { return 2; } }\n"
+            "func main() -> void { var c: C; var ab: AB = c; var ba: BA = ab; }\n");
+        CHECK(hasError(interfaceOrderMismatch,
+                       "source must provide target methods in the same order with matching signatures"));
+
+        auto interfaceCastMismatch = checkSrc(
+            "interface I { func m() -> int; }\n"
+            "interface K { func n() -> int; }\n"
+            "class C { func m() -> int { return 1; } func n() -> int { return 2; } }\n"
+            "func main() -> void { var c: C; var k: K = c; var i: I = k as I; }\n");
+        CHECK(hasError(interfaceCastMismatch,
+                       "Cannot cast interface 'K' to interface 'I': source must provide target methods in the same order with matching signatures"));
+
+        auto interfaceConcreteCast = checkSrc(
+            "interface I { func m() -> int; }\n"
+            "class C { func m() -> int { return 1; } }\n"
+            "func main() -> void { var c: C; var i: I = c as I; }\n");
+        CHECK(hasError(interfaceConcreteCast,
+                       "Cannot cast non-interface type 'C' to interface 'I'"));
     }
 
     // CID-006: fn(...) typing and checking.
