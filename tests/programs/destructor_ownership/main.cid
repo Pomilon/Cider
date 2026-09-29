@@ -32,7 +32,12 @@
 // Within one object the order stays the CIDER-BUG-088 rule: the class's
 // own destructor runs first (its body may read the subobjects), then every
 // embedded class value in reverse construction order (declaration order,
-// arrays last element first, structs/classes recursing).
+// arrays last element first, structs/classes recursing). CIDER-BUG-123
+// splices the base chain in between: after the class's own destructor and
+// before the embedded values, the base destructors run nearest base first
+// (the reverse of the root-first constructor chain). No class here extends
+// another, so this trace is the CIDER-BUG-088 order unchanged — the chained
+// case is pinned by base_ctor_dtor_chain.
 //
 // All three backends (VM unopt, VM optim, native) must agree on the trace.
 from std.io import print, printInt;

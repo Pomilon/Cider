@@ -1,4 +1,4 @@
-// CIDER-FEAT-003: class constructors. `func init(...)` in a class body is
+// CIDER-FEAT-003 / CIDER-BUG-123: class constructors. `func init(...)` in a class body is
 // the class's constructor: `new C(args)` allocates and zero/default
 // initializes the object, runs the field initializers (CIDER-BUG-049), then
 // runs the constructor body with `this` bound and the arguments passed like
@@ -6,9 +6,15 @@
 // constructor. Value-class instances (`var c: C;`) get the zero/field
 // initializer treatment but never run a constructor.
 //
-// Base-class constructors are NOT inherited and are NOT auto-invoked this
-// iteration (an explicit `super(...)` call is diagnosed, not implemented),
-// so a derived instance's base fields only see their field initializers.
+// Base constructors are NOT inherited — `new C(...)` still requires C to
+// declare its own `func init(...)` — but a base constructor that declares NO
+// PARAMETERS IS CHAINED (CIDER-BUG-123): it runs first, so a derived
+// constructor always sees an initialized base. There is no `super(...)`
+// (still diagnosed, not implemented), so a base constructor that declares
+// parameters has no argument source at the construction site and is not
+// auto-invoked — see the ParamBase cases. Base DESTRUCTORS are chained the
+// other way round, most derived first; tests/programs/base_ctor_dtor_chain
+// pins the full ordering for `new`, `delete` and value scopes.
 import lib;
 from std.io import print, printInt;
 
@@ -57,8 +63,9 @@ class Derived extends Base {
     override func who() -> int { return 20; }
 }
 
-// The base constructor is not auto-invoked from the derived constructor:
-// `tag` keeps the field-initializer value.
+// CIDER-BUG-123: a zero-parameter base constructor IS chained and runs
+// before the derived one, so `tag` is 99 — not the field-initializer 0 that
+// the pre-123 behavior pinned.
 class CtorBase {
     var tag: int = 0;
     func init() -> void { this.tag = 99; }
@@ -67,6 +74,19 @@ class CtorBase {
 class CtorChild extends CtorBase {
     var mine: int = 1;
     func init(v: int) -> void { this.mine = v; }
+}
+
+// A base constructor that DECLARES PARAMETERS is not auto-invoked: without
+// `super(...)` there is no argument source for it at `new`, so `p` keeps its
+// field-initializer value and only the derived constructor runs.
+class ParamBase {
+    var p: int = 1;
+    func init(n: int) -> void { this.p = n; }
+}
+
+class ParamChild extends ParamBase {
+    var q: int = 2;
+    func init(n: int) -> void { this.q = n; }
 }
 
 func read(c: *Counter) -> int { return c->get(); }
@@ -95,10 +115,15 @@ func main() -> int {
     printInt(d->base); print("\n");             // 1 (field initializer)
     printInt(b->who()); print("\n");            // 20 (override)
 
-    // Base ctor not invoked by the derived ctor.
+    // Chained zero-parameter base ctor runs first, then the derived one.
     var cc: *CtorChild = new CtorChild(8);
-    printInt(cc->tag); print("\n");             // 0
+    printInt(cc->tag); print("\n");             // 99 (CIDER-BUG-123)
     printInt(cc->mine); print("\n");            // 8
+
+    // A base ctor WITH parameters is not chained; only the derived ctor runs.
+    var pc: *ParamChild = new ParamChild(8);
+    printInt(pc->p); print("\n");               // 1 (field initializer)
+    printInt(pc->q); print("\n");               // 8
 
     // Zero-argument constructor: both `new Zero` and `new Zero()` run it.
     var z1: *Zero = new Zero;

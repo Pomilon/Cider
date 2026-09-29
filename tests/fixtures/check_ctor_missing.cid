@@ -1,8 +1,11 @@
 // CIDER-FEAT-003: `new C(args)` requires a constructor declared as
 // `func init(...)` in C's own class body. Base-class constructors are not
-// inherited and are not auto-invoked, so constructing a derived class with
-// arguments is an error too (the diagnostic says so). `new C()` is an
-// explicit constructor call, so it is also an error when C has none.
+// INHERITED, so constructing a derived class with arguments is an error too
+// (the diagnostic says so). `new C()` is an explicit constructor call, so it
+// is also an error when C has none.
+// CIDER-BUG-123: a base constructor that declares no parameters IS chained
+// and runs first (initializing the base subobject) — that is not inheritance:
+// `Child` still has no constructor of its own for `new Child(1)` to call.
 class NoCtor {
   var x: int;
 }

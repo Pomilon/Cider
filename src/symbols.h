@@ -282,7 +282,11 @@ struct StructSymbol : public Symbol {
     // in the class body. `constructorName` is the mangled name ("C_init"),
     // empty when the class declares none. Own declarations only: an
     // inherited `init` method is an ordinary method, never the derived
-    // class's constructor (base constructors are not inherited).
+    // class's constructor (base constructors are not INHERITED).
+    // CIDER-BUG-123: a zero-parameter constructor still takes part in the
+    // chain a derived object's construction runs (see emitConstructorChain
+    // in ir_gen) — chaining is not inheritance, and `new C(...)` still
+    // requires C's own entry here.
     std::string constructorName;
     // Constructor parameter types WITHOUT the hidden `this`, recorded at
     // collection time so the checker can validate `new C(args)` even when

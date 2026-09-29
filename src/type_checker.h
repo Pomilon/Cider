@@ -3681,9 +3681,12 @@ public:
     void visit(NilPtrExpr&) override { lastExprType_ = {"void", 1}; }
 
     // CIDER-FEAT-003: a class without its own constructor reached from
-    // `new C(...)`. If an ancestor declares one, explain why it cannot be
-    // used: constructors are not inherited and base constructors are not
-    // auto-invoked this iteration (`super(...)` is not supported yet).
+    // `new C(...)`. If an ancestor declares one, explain why it cannot serve
+    // as C's constructor: constructors are not INHERITED, so `new` still
+    // requires an own `func init(...)`. CIDER-BUG-123: a base constructor
+    // declaring no parameters now runs as part of the chain (before the
+    // derived one) — it initializes the base subobject, it is not this
+    // class's constructor, and it cannot take the arguments written at `new`.
     std::string missingConstructorHint(const std::shared_ptr<StructSymbol>& classSym) {
         std::string parent = classSym->parentName;
         while (!parent.empty()) {
@@ -3693,7 +3696,7 @@ public:
             if (!parentSym || parentSym->kind != SymbolKind::CLASS) return "";
             auto ps = std::static_pointer_cast<StructSymbol>(parentSym);
             if (!ps->constructorName.empty()) {
-                return " (base-class constructors are not inherited or auto-invoked; "
+                return " (base-class constructors are not inherited; "
                        "declare 'func init(...)' in '" + classSym->name + "')";
             }
             parent = ps->parentName;

@@ -343,13 +343,16 @@ std::unique_ptr<Expression> Parser::parsePrimaryExpression() {
     case TokenType::SUPER: {
         nextToken();  // Consume super
         if (currentToken_.type == TokenType::LPAREN) {
-            // CIDER-FEAT-003: base-class constructors are not auto-invoked
-            // and an explicit `super(...)` call is not implemented yet.
-            // Diagnose the attempt specifically instead of the generic
-            // "Expected '.' after 'super'" recovery error.
+            // CIDER-FEAT-003: an explicit `super(...)` call is not
+            // implemented, so there is no way to pass arguments to a base
+            // constructor: a base constructor declaring parameters has no
+            // argument source and is not auto-invoked (CIDER-BUG-123 chains
+            // only the zero-parameter ones). Diagnose the attempt
+            // specifically instead of the generic "Expected '.' after
+            // 'super'" recovery error.
             error("super(...) constructor calls are not supported yet; "
-                  "base-class constructors are not auto-invoked "
-                  "(CIDER-FEAT-003).");
+                  "only zero-parameter base constructors are chained "
+                  "(CIDER-BUG-123).");
             return nullptr;
         }
         if (currentToken_.type != TokenType::DOT) {

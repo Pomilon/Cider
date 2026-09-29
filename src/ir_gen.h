@@ -7870,6 +7870,86 @@ public:
         visiting.erase(structSym.get());
     }
 
+    // CIDER-BUG-123: the class named by `classSym`'s `extends` clause, or
+    // null. The spelling may be bare, dotted (`mod.Base`, CIDER-BUG-124) or
+    // an alias, and it belongs to the EXTENDING class's module, so it is
+    // rooted there first and then through the module-independent lookup
+    // (the SuperExpr resolution path). Null for a class with no base, for a
+    // non-class base and for a cyclic/unknown spelling — the collector's
+    // validateBaseChains has already reported those, so no IR is generated.
+    std::shared_ptr<StructSymbol> resolveBaseClassSymbol(
+        const std::shared_ptr<StructSymbol>& classSym) {
+        if (!classSym || classSym->parentName.empty()) return nullptr;
+        TypeInfo parentType;
+        parentType.name = classSym->parentName;
+        std::string defMod = definingModuleFor(classSym, classSym->name);
+        auto sym = resolveStructOrClassSymbol(parentType, defMod);
+        if (!sym && !defMod.empty()) sym = resolveStructOrClassSymbol(parentType);
+        if (!sym || sym->kind != SymbolKind::CLASS) return nullptr;
+        return std::static_pointer_cast<StructSymbol>(sym);
+    }
+
+    // CIDER-BUG-123: the ancestors of `classSym`, NEAREST base first. The
+    // constructor chain walks it backwards (root first) and the destructor
+    // chain forwards (nearest first, which is also reverse-construction
+    // order), so both directions are the same chain read two ways. `seen`
+    // is the cycle guard the collector enforces for base chains; a repeat
+    // stops the walk.
+    std::vector<std::shared_ptr<StructSymbol>> baseClassChain(
+        const std::shared_ptr<StructSymbol>& classSym) {
+        std::vector<std::shared_ptr<StructSymbol>> chain;
+        std::set<const StructSymbol*> seen;
+        if (classSym && seen.insert(classSym.get()).second) {
+            std::shared_ptr<StructSymbol> cur = resolveBaseClassSymbol(classSym);
+            while (cur && seen.insert(cur.get()).second) {
+                chain.push_back(cur);
+                cur = resolveBaseClassSymbol(cur);
+            }
+        }
+        return chain;
+    }
+
+    // CIDER-BUG-123: byte offset of `base`'s subobject inside a `derived`
+    // instance — the address a base constructor/destructor is entered at. A
+    // base body addresses its OWN layout (vptr first, then its fields), so
+    // this has to line the base's whole object up, not just its fields.
+    //
+    // layoutClass copies the base's field list into the derived verbatim as a
+    // PREFIX (each class's own fields are appended after the inherited ones),
+    // so the base's first field keeps its relative position and the only
+    // thing that can move it is the vptr: a derived class that reserves the
+    // hierarchy's vptr slot itself (which happens exactly when the base has
+    // no vtable of its own, because an inherited vtable is copied into the
+    // derived and then never re-reserved) shifts every inherited field by 8.
+    // So the base's object address moves with its first field:
+    //
+    //   base has a vtable  -> the derived reuses that vptr at offset 0, so
+    //                          the base object is the derived object (0)
+    //   base has none      -> the base object is the inherited prefix, which
+    //                          starts after the derived's vptr
+    //
+    // Both fall out of the field shift `derived.fields[0] - base.fields[0]`,
+    // and every ancestor sits at that same offset, so the walk only has to
+    // test membership (a non-ancestor must never get a base call). A base
+    // with no fields has no anchor and reads no vptr of its own unless it has
+    // a vtable, which puts it at 0 — the default.
+    //
+    // Entering a shifted base is safe precisely because the shift only exists
+    // for a base without a vtable, and a class without a vtable declares no
+    // virtual methods, so its body can never read a vptr. A base that DOES
+    // have a vtable is entered at offset 0, where the derived object's vptr
+    // sits — so a virtual call in a base destructor still dispatches on the
+    // most-derived type.
+    int baseSubobjectOffset(const std::shared_ptr<StructSymbol>& derived,
+                            const std::shared_ptr<StructSymbol>& base) {
+        if (!derived || !base || derived == base) return 0;
+        if (derived->fields.empty() || base->fields.empty()) return 0;
+        for (const auto& ancestor : baseClassChain(derived)) {
+            if (ancestor == base) return derived->fields[0].offset - base->fields[0].offset;
+        }
+        return 0;  // `base` is not an ancestor of `derived`
+    }
+
     // CIDER-BUG-088: the finalizer twin of aggregateNeedsInit. True
     // when `t` is a class carrying a destructor or embeds (through class
     // fields, struct fields and fixed arrays of class/struct values) a class
@@ -7892,6 +7972,17 @@ public:
         // A class's own destructor is registered by the walk too (last, so
         // it runs first at scope exit).
         bool found = aggSym->kind == SymbolKind::CLASS && !aggSym->destructorName.empty();
+        // CIDER-BUG-123: base destructors are chained, so a derived class
+        // that declares none still owns finalizers — this gate must see the
+        // chain too, or nothing registers and the base destructor never runs.
+        if (!found && aggSym->kind == SymbolKind::CLASS) {
+            for (const auto& base : baseClassChain(aggSym)) {
+                if (!base->destructorName.empty()) {
+                    found = true;
+                    break;
+                }
+            }
+        }
         if (!found) {
             std::string aggMod = definingModuleFor(aggSym, aggSym->name);
             for (const auto& field : aggSym->fields) {
@@ -7910,11 +8001,13 @@ public:
     // value embedded under `base + offset`, mirroring the
     // emitEmbeddedInitializers traversal (structs, classes and fixed arrays;
     // pointers/slices/interfaces/fn-pointers are not embedded aggregates).
-    // Push order is construction order — embedded fields first, the class's
-    // own destructor last — so the scope-exit emission, which iterates the
-    // stack in reverse, destroys the class body first (a destructor may
-    // still read its subobjects) and then the embedded values in reverse
-    // declaration/element order.
+    // Push order is construction order — embedded fields first, then the
+    // CIDER-BUG-123 base chain (root-most first), then the class's own
+    // destructor last — so the scope-exit emission, which iterates the stack
+    // in reverse, destroys the class body first (a destructor may still read
+    // its subobjects), then the base chain from the nearest base up to the
+    // root (reverse of the constructor chain, which ran root-first), and
+    // finally the embedded values in reverse declaration/element order.
     void registerEmbeddedDestructors(TypeInfo t, IRValue base, int offset,
                                      const std::string& defModule,
                                      std::set<const StructSymbol*>& visiting) {
@@ -7938,6 +8031,30 @@ public:
             // CIDER-BUG-090: per-field declaring module.
             registerEmbeddedDestructors(field.type, base, offset + field.offset,
                                         fieldTypeModule(field, aggMod), visiting);
+        }
+        // CIDER-BUG-123: chain the base destructors. baseClassChain is
+        // nearest-first and this walk is walked backwards, so the root's
+        // destructor is pushed first and therefore runs LAST — the reverse of
+        // construction. Each base is entered at ITS subobject's address
+        // (baseSubobjectOffset), which is offset 0 for every hierarchy whose
+        // base already carries a vtable.
+        std::vector<std::shared_ptr<StructSymbol>> baseChain = baseClassChain(aggSym);
+        for (auto it = baseChain.rbegin(); it != baseChain.rend(); ++it) {
+            const auto& baseSym = *it;
+            if (baseSym->destructorName.empty()) continue;
+            // CID-020/021 (spec §5/§6): destructors mangle with the BASE
+            // class's own defining module, matching its definition.
+            auto dtorDef = resolveFunctionDef(baseSym->destructorName,
+                                              definingScopeFor(baseSym, baseSym->name));
+            if (!dtorDef.first && !baseSym->manglePrefix.empty()) {
+                // CIDER-BUG-119: a function/block-local class's destructor
+                // symbol is unreachable after collection; attribute the
+                // label to the class's defining module directly.
+                dtorDef.second = definingModuleFor(baseSym, baseSym->name);
+            }
+            destructorStack_.back().push_back(
+                {emitFunctionName(dtorDef.second, baseSym->destructorName), base,
+                 offset + baseSubobjectOffset(aggSym, baseSym)});
         }
         if (aggSym->kind == SymbolKind::CLASS && !aggSym->destructorName.empty()) {
             // CID-020/021 (spec §5/§6): destructors mangle with the class's
@@ -9234,6 +9351,54 @@ public:
         currentBlock_->addInstruction(call);
     }
 
+    // CIDER-BUG-123: run `classSym`'s CONSTRUCTOR CHAIN on a fresh object:
+    // every base constructor, root-most first, then the class's own
+    // constructor with the construction site's arguments. Combined with the
+    // field initializers, which already run for the whole hierarchy in layout
+    // order (a base's fields are a prefix of the derived's, so base field
+    // initializers run first), the full construction order is
+    //
+    //     zero -> vptr -> base field initializers -> derived field
+    //     initializers -> base constructors (root first) -> this constructor
+    //
+    // so a derived constructor always observes a fully initialized base.
+    //
+    // Which base constructors join the chain: only ones that declare NO
+    // parameters. There is no `super(...)` syntax (the parser still diagnoses
+    // it), so a base constructor that declares parameters has no argument
+    // source at the construction site and is not auto-invoked — its fields
+    // keep their field initializers, and the derived constructor is the only
+    // way to initialize them, exactly as before this change. That is the
+    // whole of the "not inherited" half of the rule: a derived class still
+    // has to declare its own `func init(...)` for `new D(args)` to
+    // type-check (see missingConstructorHint in the checker).
+    //
+    // Each base is entered at ITS subobject's address (baseSubobjectOffset),
+    // which is offset 0 unless the derived class reserved the hierarchy's
+    // vptr slot. A hierarchy with no chained base constructor emits exactly
+    // the single call it emitted before, so programs without inheritance
+    // constructor/destructor chains stay byte-identical.
+    void emitConstructorChain(const std::shared_ptr<StructSymbol>& classSym, IRValue objPtr,
+                              const std::vector<std::unique_ptr<Expression>>& argExprs) {
+        std::vector<std::shared_ptr<StructSymbol>> baseChain = baseClassChain(classSym);
+        for (auto it = baseChain.rbegin(); it != baseChain.rend(); ++it) {
+            const auto& base = *it;
+            if (base->constructorName.empty()) continue;
+            if (!base->constructorParamTypes.empty()) continue;  // no `super(...)`
+            IRValue basePtr = objPtr;
+            int off = baseSubobjectOffset(classSym, base);
+            if (off != 0) {
+                basePtr = IRValue::Register(nextTemp(), IRType::PTR);
+                currentBlock_->addInstruction(
+                    {IROp::ADD, basePtr, {objPtr, IRValue::Constant((int64_t)off, IRType::I32)}});
+            }
+            emitConstructorCall(base, basePtr, {});
+        }
+        if (!classSym->constructorName.empty()) {
+            emitConstructorCall(classSym, objPtr, argExprs);
+        }
+    }
+
     void visit(NewExpr& expr) override {
         TypeInfo type = TypeInfo::fromAST(expr.getNewType());
         int size = getTypeSize(type);
@@ -9272,9 +9437,11 @@ public:
             emitClassFieldInitializers(classSym, dest, newIsVolatile);
             // CIDER-FEAT-003: the constructor body runs last, with `this`
             // bound to the fresh object.
-            if (!classSym->constructorName.empty()) {
-                emitConstructorCall(classSym, dest, expr.getArgs());
-            }
+            // CIDER-BUG-123: as a CHAIN — the base constructors run first
+            // (root-most first), then this class's own. Emitted
+            // unconditionally because emitConstructorChain emits nothing when
+            // neither this class nor any base declares a constructor.
+            emitConstructorChain(classSym, dest, expr.getArgs());
         } else if (sym && sym->kind == SymbolKind::STRUCT) {
             // CIDER-BUG-087: `new S` is a fresh struct value, so its
             // embedded class-valued fields run their initializers on the
