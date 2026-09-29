@@ -4,6 +4,7 @@
 #include <string>
 #include <vector>
 
+#include "ssa_deconstructor.h"
 #include "vm.h"
 
 #define CHECK(cond) do { if (!(cond)) { \
@@ -94,6 +95,82 @@ int run() {
     mod3.addFunction(std::move(fn3));
     cider::VM vm3;
     CHECK(vm3.run(mod3, "main3").exitCode == 2);
+
+    // CIDER-BUG-204: the VM executes the PHI form of the IR, never the
+    // SSADeconstructor's PUSH/POP form (see src/ssa_deconstructor.h). Pin
+    // both halves of that contract:
+    //   1. deconstructing a phi diamond does remove the phi and emit
+    //      PUSH/POP, so the two backends really do see different IR; and
+    //   2. feeding that deconstructed IR to the VM is REJECTED with a
+    //      diagnostic naming the invariant -- not silently ignored, which
+    //      would leave the phi destination unset and fail later with a
+    //      confusing "read of unset register" further from the cause.
+    auto phiDiamond = []() {
+        auto fn = makeFn("maind", cider::IRType::I32);
+        auto e = std::make_unique<cider::BasicBlock>("entry");
+        e->addInstruction(opInstr(cider::IROp::COND_BR, "",
+            {cider::IRValue::Constant(0, cider::IRType::I32),
+             cider::IRValue::Label("T"), cider::IRValue::Label("F")}));
+        auto t = std::make_unique<cider::BasicBlock>("T");
+        t->addInstruction(opInstr(cider::IROp::BR, "", {cider::IRValue::Label("M")}));
+        auto f = std::make_unique<cider::BasicBlock>("F");
+        f->addInstruction(opInstr(cider::IROp::BR, "", {cider::IRValue::Label("M")}));
+        auto m = std::make_unique<cider::BasicBlock>("M");
+        cider::IRInstruction p;
+        p.op = cider::IROp::PHI;
+        p.dest = cider::IRValue::Register("p", cider::IRType::I32);
+        p.phiArgs["T"] = cider::IRValue::Constant(1, cider::IRType::I32);
+        p.phiArgs["F"] = cider::IRValue::Constant(2, cider::IRType::I32);
+        m->addInstruction(p);
+        cider::IRInstruction r;
+        r.op = cider::IROp::RET;
+        r.args = {cider::IRValue::Register("p", cider::IRType::I32)};
+        m->addInstruction(r);
+        fn->addBlock(std::move(e));
+        fn->addBlock(std::move(t));
+        fn->addBlock(std::move(f));
+        fn->addBlock(std::move(m));
+        return fn;
+    };
+
+    auto countOp = [](const cider::FunctionIR* f, cider::IROp op) {
+        size_t n = 0;
+        for (const auto& b : f->getBlocks())
+            for (const auto& in : b->getInstructions())
+                if (in.op == op) ++n;
+        return n;
+    };
+
+    auto deconMod = std::make_unique<cider::ModuleIR>();
+    deconMod->addFunction(phiDiamond());
+    const cider::FunctionIR* deconIn = deconMod->getFunctions().front().get();
+    CHECK(countOp(deconIn, cider::IROp::PHI) == 1);
+    CHECK(countOp(deconIn, cider::IROp::PUSH) == 0);
+    cider::SSADeconstructor decon;
+    decon.process(*deconMod);
+    const cider::FunctionIR* deconOut = deconMod->getFunctions().front().get();
+    CHECK(countOp(deconOut, cider::IROp::PHI) == 0);
+    CHECK(countOp(deconOut, cider::IROp::PUSH) == 2);
+    CHECK(countOp(deconOut, cider::IROp::POP) == 2);
+
+    // (2) The VM must refuse that deconstructed IR outright.
+    cider::VM vmDecon;
+    bool deconThrew = false;
+    std::string deconMsg;
+    try {
+        vmDecon.run(*deconMod, "maind");
+    } catch (const cider::VMError& err) {
+        deconThrew = true;
+        deconMsg = err.message;
+    }
+    CHECK(deconThrew);
+    CHECK(deconMsg.find("native-only") != std::string::npos);
+
+    // (3) The phi-form IR still runs: a fresh undeconstructed diamond.
+    auto phiMod = std::make_unique<cider::ModuleIR>();
+    phiMod->addFunction(phiDiamond());
+    cider::VM vmPhi;
+    CHECK(vmPhi.run(*phiMod, "maind").exitCode == 2);
 
     // Calls: main calls helper(21) which returns x*2.
     auto helper = makeFn("helper", cider::IRType::I32);

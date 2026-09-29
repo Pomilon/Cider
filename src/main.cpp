@@ -400,6 +400,11 @@ int main(int argc, char** argv) {
             if (!opts.noOpt) {
                 optimizeModule(module);
             }
+            // CIDER-BUG-204: deliberately NO SSADeconstructor here, unlike
+            // the compile path above. The VM executes the PHI form of the IR
+            // (its own interpreter resolves phi edges and rejects the
+            // deconstructor's PUSH/POP); the deconstructor is a native-only
+            // physical-register lowering. See src/ssa_deconstructor.h.
             cider::VM vm;
             try {
                 cider::VMResult r = vm.run(module);

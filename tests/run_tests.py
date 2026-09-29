@@ -7,6 +7,16 @@ to agree with each other and with expected.json (stdout/stderr/exit):
   2. VM on optimized IR     : cider run            (optimizer arrives in Phase 7)
   3. Native                 : cider compile -> nasm -> ld -> run
 
+Note that paths 2 and 3 do NOT execute the same IR (CIDER-BUG-204). The VM
+interprets the phi form of the IR; `cider compile` additionally runs the
+native-only SSADeconstructor, whose PUSH/POP lower the phi edges into x86's
+finite physical register file. The representations differ by design, so this
+harness pins what must be equal -- observable stdout/stderr/exit -- rather
+than comparing IR shape. That is deliberate: two representations of one
+function are allowed to disagree structurally, but a bug that only manifests
+in one of them (an interpretation error vs. a register-allocation error) is
+caught exactly because all three outputs are required to match.
+
 An expected.json may also carry "limit_kb" to run every path under the same
 RLIMIT_AS cap (CIDER-BUG-109: makes a failed mmap in std.alloc deterministic).
 """

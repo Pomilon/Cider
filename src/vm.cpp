@@ -190,6 +190,25 @@ VMResult VM::runBody(const ModuleIR& module, const std::string& runFunction) {
         if (++steps_ > stepLimit_) throw VMError{"vm: step limit exceeded"};
 
         switch (instr.op) {
+        // CIDER-BUG-204: the VM and codegen consume DIFFERENT representations
+        // of the same function, and that is deliberate.
+        //
+        //   `cider run`    -> optimize -> PHI-form SSA IR   -> this interpreter
+        //   `cider compile`-> optimize -> SSADeconstructor -> physical registers
+        //
+        // SSADeconstructor is a native-only lowering: it exists to solve the
+        // parallel-move problem inside x86's *finite* physical register file,
+        // by PUSHing sources and POPing them into the phi destinations. The VM
+        // has an unbounded map of virtual registers (regs_), so there is no
+        // parallel-move problem and nothing for PUSH/POP to carry -- a phi
+        // edge is just a copy, resolved here from the predecessor block.
+        //
+        // The two representations are therefore expected to differ
+        // structurally; only their OBSERVABLE behaviour must agree, which is
+        // what the triple-differential harness (tests/run_tests.py: VM
+        // --no-opt, VM optimized, and native) checks. PUSH/POP arriving here
+        // means someone fed deconstructed IR to the VM, so it is rejected
+        // below rather than ignored.
         case IROp::PHI: {
             RegVal v = RegVal{};
             auto it = instr.phiArgs.find(frame.prevBlock);
@@ -537,9 +556,13 @@ VMResult VM::runBody(const ModuleIR& module, const std::string& runFunction) {
             }
             break;
         }
+        // CIDER-BUG-204: the VM interprets the PHI form of the IR; the
+        // SSADeconstructor's PUSH/POP are a native-only lowering and must
+        // never reach it. See the invariant on the PHI case above.
         case IROp::PUSH:
         case IROp::POP:
-            break;  // handled by the SSA deconstructor's block-edge moves; no-op here
+            throw VMError{"vm: PUSH/POP is native-only IR (SSADeconstructor); "
+                          "the VM executes phi-form IR"};
         case IROp::BR: {
             const std::string& target = instr.args[0].name;
             frame.prevBlock = blocks[frame.blockIdx]->getName();

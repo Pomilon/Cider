@@ -12,6 +12,23 @@ namespace cider {
 /**
  * SSA Deconstructor that handles the "Parallel Move" problem
  * by using the stack (PUSH/POP) to safely shuffle registers.
+ *
+ * CIDER-BUG-204: NATIVE-ONLY pass. Its output is the physical-register form
+ * codegen consumes, NOT an interchangeable IR form:
+ *
+ *   - The parallel-move problem only exists because x86 has a finite set of
+ *     physical registers, so a phi edge may need several values moved at once
+ *     and the sources/destinations can overlap. PUSH-all-then-POP-in-reverse
+ *     is the standard fix, and codegen lowers PUSH/POP to real `push r*` /
+ *     `pop r*` on allocated registers.
+ *   - The VM has an unbounded map of virtual registers, so the same edge is a
+ *     plain copy. The VM therefore runs the PHI form of the IR and its
+ *     interpreter rejects PUSH/POP (see the IROp::PHI case in vm.cpp).
+ *
+ * `cider run` must NOT call this pass. The two backends executing different
+ * IR shapes is expected; tests/run_tests.py pins that they still agree on
+ * stdout/stderr/exit. Wiring this pass into the run path is the regression
+ * this class documents.
  */
 class SSADeconstructor {
 public:
