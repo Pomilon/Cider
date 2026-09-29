@@ -1950,6 +1950,14 @@ public:
     // above), so one pass over the recorded own declarations reports the
     // misuse at the method's declaration. A constructor `init` override and
     // a broken base chain already carry their own, more specific diagnostic.
+    //
+    // CIDER-BUG-141: an override that DID bind a slot was still matched by
+    // name alone, so `override func f(x: f64)` displaced a base
+    // `virtual func f(x: int)` in the slot and virtual dispatch called the
+    // derived body with the base's arguments (and expected the base's
+    // return). The bound base declaration's full signature — parameter
+    // count, parameter types and return type — is validated here too, at
+    // the same declaration site.
     void validateOverrides() {
         for (size_t i = 0; i < aggregateLayouts_.size(); i++) {
             AggregateLayout& rec = aggregateLayouts_[i];
@@ -1970,14 +1978,212 @@ public:
                     // method: that is the non-virtual method overridden.
                     plainBase = true;
                 }
-                if (boundSlot) continue;
-                std::string message = "Method '" + m.name + "' of class '" +
-                                      rec.sym->name + "' is marked 'override' but ";
-                message += plainBase ? "base method '" + m.name + "' is not virtual"
-                                     : "no base method named '" + m.name + "' exists";
-                reportAtFile(message, m.line, m.col, rec.file);
+                if (!boundSlot) {
+                    std::string message = "Method '" + m.name + "' of class '" +
+                                          rec.sym->name + "' is marked 'override' but ";
+                    message += plainBase ? "base method '" + m.name + "' is not virtual"
+                                         : "no base method named '" + m.name + "' exists";
+                    reportAtFile(message, m.line, m.col, rec.file);
+                    continue;
+                }
+                // CIDER-BUG-141: the slot bound by name; the base
+                // declaration it displaces must redeclare the same
+                // signature. An own same-named virtual declared ahead of
+                // the override (no base entry) has nothing to compare and
+                // keeps its legacy binding.
+                const StructSymbol* owner = nullptr;
+                const StructSymbol::Method* base = findBaseVirtualMethod(rec, m.name, &owner);
+                if (!base || !owner) continue;
+                if (overrideSignaturesMatch(*base, m)) continue;
+                reportAtFile("Method '" + m.name + "' of class '" + rec.sym->name +
+                                 "' is marked 'override' but its signature does not match base method '" +
+                                 m.name + "' of class '" + owner->name + "': expected " +
+                                 methodSignatureString(*base) + ", got " + methodSignatureString(m),
+                             m.line, m.col, rec.file);
             }
         }
+    }
+
+    // CIDER-BUG-141: the base declaration mergeClassMethod bound an
+    // override's slot to — the first same-named virtual entry of the base
+    // chain, scanned in the order the merge scans the inherited prefix (a
+    // same-named plain entry never qualifies: vtableIndex -1,
+    // CIDER-BUG-047). Every `extends` link resolves in the scope its class
+    // declared it in, mirroring validateBaseChains, so a dotted/alias base
+    // and a base declared later resolve the same way the merge saw them.
+    // `owner` receives the class the entry belongs to; null when the chain
+    // carries no virtual of that name (the CIDER-BUG-126 diagnostics own
+    // those cases).
+    const StructSymbol::Method* findBaseVirtualMethod(const AggregateLayout& rec,
+                                                      const std::string& name,
+                                                      const StructSymbol** owner) {
+        *owner = nullptr;
+        Scope* prevScope = symbolTable_.getCurrentScope();
+        struct ScopeRestore {
+            SymbolTable& table;
+            Scope* prev;
+            ~ScopeRestore() { table.setCurrentScope(prev); }
+        } restore{symbolTable_, prevScope};
+        symbolTable_.setCurrentScope(rec.declaringScope);
+        auto parent = resolveBaseName(rec.sym->parentName);
+        std::set<const StructSymbol*> seen;
+        while (parent && parent->kind == SymbolKind::CLASS) {
+            const StructSymbol* cls = static_cast<const StructSymbol*>(parent.get());
+            // Cycles are already reported by validateBaseChains; stop anyway.
+            if (!seen.insert(cls).second) return nullptr;
+            for (const auto& em : cls->methods) {
+                if (em.name != name || em.vtableIndex < 0) continue;
+                *owner = cls;
+                return &em;
+            }
+            if (cls->parentName.empty()) return nullptr;
+            Scope* scope = rec.declaringScope;
+            auto it = aggregateIndex_.find(cls);
+            if (it != aggregateIndex_.end()) scope = aggregateLayouts_[it->second].declaringScope;
+            symbolTable_.setCurrentScope(scope);
+            parent = resolveBaseName(cls->parentName);
+        }
+        return nullptr;
+    }
+
+    // CIDER-BUG-141: a full signature match — parameter count, parameter
+    // types and return type — the same exact comparison interface
+    // satisfaction uses (visit(AstProgram)). Spellings that differ only in
+    // how they name one type go through normalizeSignatureType first, so an
+    // alias spelling or a module qualifier of the same type stays a
+    // compatible override; a genuinely different type does not.
+    bool overrideSignaturesMatch(const StructSymbol::Method& base, const StructSymbol::Method& m) {
+        if (m.parameterTypes.size() != base.parameterTypes.size()) return false;
+        for (size_t i = 0; i < base.parameterTypes.size(); i++) {
+            if (!sameSignatureType(base.parameterTypes[i], base.declaringModule,
+                                   m.parameterTypes[i], m.declaringModule)) {
+                return false;
+            }
+        }
+        return sameSignatureType(base.returnType, base.declaringModule,
+                                 m.returnType, m.declaringModule);
+    }
+
+    bool sameSignatureType(const TypeInfo& base, const std::string& baseModule,
+                           const TypeInfo& derived, const std::string& derivedModule) {
+        if (base == derived) return true;  // the common exactly-spelled case
+        // Each side normalizes on its own (its own module context, its own
+        // expansion budget), so neither can starve the other.
+        return normalizeSignatureType(base, baseModule) ==
+               normalizeSignatureType(derived, derivedModule);
+    }
+
+    // CIDER-BUG-141: bound the alias expansion of one signature type, the
+    // same guard resolveSignatureAliases carries in the checker (a cyclic
+    // or deeply layered `type` chain must terminate the collector walk).
+    static constexpr int kMaxSignatureTypeExpansions = 64;
+
+    TypeInfo normalizeSignatureType(const TypeInfo& t, const std::string& module) {
+        std::set<std::string> visiting;
+        int budget = kMaxSignatureTypeExpansions;
+        return normalizeSignatureTypeImpl(t, module, visiting, budget);
+    }
+
+    // CIDER-BUG-141: one collected signature spelling, normalized for the
+    // override comparison:
+    //   * representation marks that are not part of the value's shape are
+    //     dropped (CIDER-BUG-100: the interface flag is not semantic on a
+    //     pointer; CIDER-BUG-167: volatile marks keep the same shape);
+    //   * nested fn signatures and array elements resolve in the module the
+    //     signature was written in (CIDER-BUG-090);
+    //   * a nominal resolves through `type` alias chains (each hop in its
+    //     own defining module, CIDER-BUG-102) to the module-qualified
+    //     identity (CID-020/021), so `Base`, `lib.Base` and an alias of
+    //     either name one type;
+    //   * an unresolvable spelling keeps its written name: the comparison
+    //     then stays spelling-exact instead of guessing.
+    TypeInfo normalizeSignatureTypeImpl(TypeInfo t, const std::string& module,
+                                        std::set<std::string>& visiting, int& budget) {
+        auto stripMarks = [](TypeInfo& x) {
+            if (x.pointerLevel > 0) x.isInterface = false;  // CIDER-BUG-100
+            x.isVolatile = false;                          // CIDER-BUG-167
+        };
+        stripMarks(t);
+        if (t.isFunctionPointer) {
+            if (t.fnParamTypes) {
+                auto params = std::make_shared<std::vector<TypeInfo>>();
+                params->reserve(t.fnParamTypes->size());
+                for (const auto& p : *t.fnParamTypes) {
+                    params->push_back(normalizeSignatureTypeImpl(p, module, visiting, budget));
+                }
+                t.fnParamTypes = params;
+            }
+            if (t.fnReturnType) {
+                t.fnReturnType = std::make_shared<TypeInfo>(
+                    normalizeSignatureTypeImpl(*t.fnReturnType, module, visiting, budget));
+            }
+            stripMarks(t);
+            return t;
+        }
+        if (t.arrayElement) {
+            // CIDER-BUG-052: name/pointerLevel mirror the innermost
+            // element, so the element's resolved spelling carries the flat
+            // one with it.
+            TypeInfo elem = normalizeSignatureTypeImpl(*t.arrayElement, module, visiting, budget);
+            t.arrayElement = std::make_shared<TypeInfo>(elem);
+            t.name = elem.name;
+            t.pointerLevel = elem.pointerLevel;
+            stripMarks(t);
+            return t;
+        }
+        if (t.name.empty()) return t;
+        if (!visiting.insert(t.name).second) return t;  // active path: cycle
+        if (budget <= 0) {
+            visiting.erase(t.name);
+            return t;
+        }
+        --budget;
+        TypeInfo resolved = t;
+        inModuleScope(module, [&] {
+            auto sym = resolveNominalType(t.name);
+            TypeInfo target = t;
+            bool aliased = false;
+            std::set<std::string> hops;
+            hops.insert(t.name);
+            while (sym && sym->isTypeAlias && !sym->type.name.empty() &&
+                   hops.insert(sym->type.name).second) {
+                target = sym->type;
+                aliased = true;
+                auto hop = sym;
+                sym = inModuleScope(definingModuleOfSymbol(hop),
+                                    [&] { return resolveNominalType(target.name); });
+            }
+            if (sym && (sym->kind == SymbolKind::STRUCT || sym->kind == SymbolKind::CLASS ||
+                        sym->kind == SymbolKind::ENUM || sym->kind == SymbolKind::INTERFACE)) {
+                resolved = target;
+                resolved.name = canonicalTypeName(sym->name, definingModuleOfSymbol(sym));
+            } else if (aliased) {
+                // Chain ended at a primitive (or an unresolvable target):
+                // the target spelling is the type it names.
+                resolved = target;
+            }
+        });
+        visiting.erase(t.name);
+        stripMarks(resolved);
+        // An alias may target a fn/array spelling, whose nested types still
+        // need the same walk (the visiting set keeps `type F = fn(F) -> void`
+        // from expanding forever).
+        if (resolved.isFunctionPointer || resolved.arrayElement) {
+            return normalizeSignatureTypeImpl(resolved, module, visiting, budget);
+        }
+        return resolved;
+    }
+
+    // CIDER-BUG-141: a method's signature as the diagnostic spells it.
+    static std::string methodSignatureString(const StructSymbol::Method& m) {
+        std::string s = "(";
+        for (size_t i = 0; i < m.parameterTypes.size(); i++) {
+            if (i) s += ", ";
+            s += m.parameterTypes[i].toString();
+        }
+        s += ") -> ";
+        s += m.returnType.toString();
+        return s;
     }
 
     // Attribute a late (post-collection) diagnostic to the file the symbol

@@ -1,0 +1,44 @@
+// CIDER-BUG-141: an `override` binds its base's vtable slot by NAME, so
+// the full signature (parameter count, parameter types and return type)
+// must match the base declaration it displaces — otherwise dispatch calls
+// the derived body with the base's arguments and expects the base's
+// return. Each class below displaces a virtual base method with an
+// incompatible signature and must be rejected at its declaration; `Good`
+// (same signature) and `GoodFwd` (base declared later) are the controls
+// that must keep binding and compiling.
+class Base {
+    virtual func f(x: int) -> int { return x; }
+}
+
+class BadParam extends Base {
+    override func f(x: f64) -> int { return 1; }
+}
+
+class BadArity extends Base {
+    override func f() -> int { return 2; }
+}
+
+class Mid {
+    virtual func g(x: int) -> int { return x; }
+}
+
+class BadReturn extends Mid {
+    override func g(x: int) -> f64 { return 1.5; }
+}
+
+// CIDER-BUG-120 x CIDER-BUG-141: the base is declared after the derived
+// class, so the slot only binds when the forward base chain is rebuilt
+// after collection. The signature check must run on that path too.
+class BadFwd extends Later {
+    override func h(x: f64) -> int { return 3; }
+}
+
+class Later {
+    virtual func h(x: int) -> int { return x; }
+}
+
+class Good extends Base {
+    override func f(x: int) -> int { return x + 1; }
+}
+
+func main() -> int { return 0; }

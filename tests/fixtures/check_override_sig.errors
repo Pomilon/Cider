@@ -1,0 +1,4 @@
+Method 'f' of class 'BadParam' is marked 'override' but its signature does not match base method 'f' of class 'Base': expected (int) -> int, got (f64) -> int
+Method 'f' of class 'BadArity' is marked 'override' but its signature does not match base method 'f' of class 'Base': expected (int) -> int, got () -> int
+Method 'g' of class 'BadReturn' is marked 'override' but its signature does not match base method 'g' of class 'Mid': expected (int) -> int, got (int) -> f64
+Method 'h' of class 'BadFwd' is marked 'override' but its signature does not match base method 'h' of class 'Later': expected (int) -> int, got (f64) -> int

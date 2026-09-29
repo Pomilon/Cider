@@ -300,6 +300,37 @@ int run() {
     auto fvd = std::static_pointer_cast<cider::StructSymbol>(findSym(*r13c.table, "FVD"));
     CHECK(fvd->vtable.size() == 1 && fvd->vtable[0] == "FVD_f");
 
+    // CIDER-BUG-141: an override that BINDS a virtual slot but redeclares
+    // a different signature is reported at the declaration instead of
+    // silently displacing the base method (parameter type, parameter count
+    // and return type are all part of the contract). A same-signature
+    // override and an alias spelling of the parameter type (`Num` for
+    // `int`) are the controls that must keep binding the slot.
+    Result r13d = collectSrc(
+        "type Num = int;\n"
+        "class SB { virtual func f(x: int) -> int { return x; } }\n"
+        "class P1 extends SB { override func f(x: f64) -> int { return 1; } }\n"
+        "class P2 extends SB { override func f() -> int { return 2; } }\n"
+        "class P3 extends SB { override func f(x: int) -> f64 { return 1.5; } }\n"
+        "class OK extends SB { override func f(x: Num) -> int { return 3; } }\n");
+    CHECK(r13d.errors.size() == 3);
+    bool sawParam = false, sawArity = false, sawReturn = false;
+    for (auto& e : r13d.errors) {
+        if (e.find("Method 'f' of class 'P1' is marked 'override' but its signature does not "
+                   "match base method 'f' of class 'SB'") != std::string::npos)
+            sawParam = true;
+        if (e.find("Method 'f' of class 'P2' is marked 'override' but its signature does not "
+                   "match base method 'f' of class 'SB'") != std::string::npos)
+            sawArity = true;
+        if (e.find("Method 'f' of class 'P3' is marked 'override' but its signature does not "
+                   "match base method 'f' of class 'SB'") != std::string::npos)
+            sawReturn = true;
+    }
+    CHECK(sawParam && sawArity && sawReturn);
+    auto ok = std::static_pointer_cast<cider::StructSymbol>(findSym(*r13d.table, "OK"));
+    CHECK(ok != nullptr);
+    CHECK(ok->vtable.size() == 1 && ok->vtable[0] == "OK_f");
+
     // CIDER-BUG-060: `export` marks module-level declarations importable;
     // unmarked ones stay private. `export type` / `export interface` now
     // parse and mark; enum variants inherit the enum's export; the
