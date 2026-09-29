@@ -35,7 +35,8 @@ namespace cider {
 // writes the base alloca's storage. loopStores therefore holds base alloca
 // names, not the raw address registers: a direct `load %base` must be
 // blocked by an in-loop `store (add %base, off)`. Raw addresses are resolved
-// through ADD/MOV/PHI chains with collectAllocaBases once the def map exists.
+// through ADD/SUB/MOV/PHI chains with collectAllocaBases once the def map
+// exists.
 //
 // CIDER-BUG-143: resolution runs through defMap, which keeps only the first
 // definition of a register. A multi-defined store address (the inliner
@@ -58,12 +59,26 @@ namespace cider {
 // to record nothing in loopStores, and escapedAllocas was consulted only
 // when the loop had a clobber. Such an address may be an external pointer,
 // and external pointers can only name objects whose address left the
-// function — ir_gen derives local addresses solely through ADD/MOV/PHI,
+// function — ir_gen derives local addresses solely through ADD/SUB/MOV/PHI,
 // every other producer is foreign. An in-loop store through it therefore
 // blocks loads of ESCAPED allocas exactly like a clobber, while loads of
 // non-escaping slots still hoist. This stays tighter than CIDER-BUG-143's
 // "every alloca is written": a multi-defined address can still resolve to a
 // fresh local alloca, an external one cannot.
+//
+// CIDER-BUG-180: collectAllocaBases followed ADD/MOV/PHI only, so a
+// SUB-derived address (`%p = sub %base, %off` — the shape ir_gen emits for
+// `ptr - n` and `&field - n`) was flagged external with its base silently
+// dropped. An in-loop STORE through it therefore did not enter loopStores,
+// and a direct LOAD of the (non-escaping, provably aliasable) base alloca
+// hoisted to the preheader and froze the first iteration's bytes; the shared
+// walk also marks escape operands, so such a pointer passed to a callee left
+// the base out of escapedAllocas and unblocked across an in-loop clobber.
+// SUB now follows its base operand (args[0]) exactly like ADD. The offset
+// operand — constant or register — shifts the address relative to the base
+// and is not itself a pointer into it, so it is not followed. A SUB whose
+// base operand is not a register (or whose chain hits an unsupported
+// producer) still takes the external fallback.
 struct LicmCaches {
     std::map<std::string, const IRInstruction*> defMap;
     std::set<std::string> multiDef;
@@ -96,17 +111,19 @@ struct LicmCaches {
     bool escapedUnknown = false;
 };
 
-// Follows ADD/MOV/PHI chains and collects every ALLOCA whose address `reg`
-// may carry. Unknown provenance (a LOAD result, a parameter, ...) yields
-// nothing: an address stored into memory is already marked when the STORE
-// that stored it is scanned. CIDER-BUG-161 callers pass `mayBeExternal` to
-// also learn that the chain contains such a non-local producer, so a STORE
-// through it can be treated like a clobber for escaped allocas.
+// Follows ADD/SUB/MOV/PHI chains and collects every ALLOCA whose address
+// `reg` may carry. Unknown provenance (a LOAD result, a parameter, ...)
+// yields nothing: an address stored into memory is already marked when the
+// STORE that stored it is scanned. CIDER-BUG-161 callers pass `mayBeExternal`
+// to also learn that the chain contains such a non-local producer, so a
+// STORE through it can be treated like a clobber for escaped allocas.
 // CIDER-BUG-160: defMap holds only the first definition of a register, so a
 // multi-defined value anywhere in the chain cannot be resolved soundly — a
 // base reachable solely through a later def would be invisible. Callers
 // that pass `mayBeMultiDef` learn this and take their conservative
 // fallbacks instead of trusting the partial walk.
+// CIDER-BUG-180: SUB follows its base operand like ADD; see the struct
+// comment for why the offset operand is not walked.
 static void collectAllocaBases(const std::string& reg, const LicmCaches& c,
                                std::set<std::string>& out,
                                std::set<std::string>& visiting,
@@ -130,8 +147,11 @@ static void collectAllocaBases(const std::string& reg, const LicmCaches& c,
         out.insert(reg);
         return;
     }
-    if ((def->op == IROp::ADD || def->op == IROp::MOV) && !def->args.empty() &&
-        def->args[0].kind == IRValue::REGISTER) {
+    if ((def->op == IROp::ADD || def->op == IROp::SUB || def->op == IROp::MOV) &&
+        !def->args.empty() && def->args[0].kind == IRValue::REGISTER) {
+        // CIDER-BUG-180: SUB's base is its minuend (args[0]), the same
+        // operand position ADD uses; the offset (args[1]) only shifts the
+        // address relative to that base.
         collectAllocaBases(def->args[0].name, c, out, visiting, mayBeExternal,
                            mayBeMultiDef);
         return;
@@ -201,9 +221,9 @@ static LicmCaches buildLicmCaches(const FunctionIR& func,
         }
     }
     // CIDER-BUG-091: record every alloca an in-loop store/memcpy may write,
-    // walking ADD/MOV/PHI chains to the base (a derived-pointer store used to
-    // record only the derived register, leaving a direct load of the base
-    // alloca unblocked).
+    // walking ADD/SUB/MOV/PHI chains to the base (a derived-pointer store
+    // used to record only the derived register, leaving a direct load of the
+    // base alloca unblocked).
     for (const auto& reg : loopStoreRegs) {
         // CIDER-BUG-143: only single-defined addresses resolve precisely.
         // defMap holds just the first def of a multi-defined register, so a
