@@ -433,6 +433,96 @@ int testPointerInterfaceStoreIrFlags() {
     return 0;
 }
 
+int testVolatileGap101IrFlags() {
+    // CIDER-BUG-101: three emission points missed the CIDER-BUG-061/079
+    // volatile model — (1) parameter materialisation wrote the local copy
+    // through plain stores (scalar and interface), (2) copying FROM a
+    // volatile interface source read the two fat-pointer words through
+    // plain loads, and (3) interface dispatch reads of a volatile
+    // object/pointee were plain. Every case is pinned with an exact count
+    // against a non-volatile control, so non-volatile IR keeps its shape.
+    struct Tally {
+        int volatileLoads = 0;
+        int volatileStores = 0;
+    };
+    auto tally = [](const ModuleResult& m) {
+        Tally t;
+        for (const auto& func : m.module.getFunctions()) {
+            for (const auto& b : func->getBlocks()) {
+                for (const auto& in : b->getInstructions()) {
+                    if (!in.isVolatile) continue;
+                    if (in.op == cider::IROp::LOAD) t.volatileLoads++;
+                    if (in.op == cider::IROp::STORE) t.volatileStores++;
+                }
+            }
+        }
+        return t;
+    };
+
+    // (1) Parameter materialisation: the scalar copy is one volatile
+    // store; the interface copy reads both fat-pointer words through
+    // volatile loads and writes them through volatile stores.
+    auto p1 = tally(genModule(
+        "interface Shape { func area() -> int; }\n"
+        "func f(x: volatile int, s: volatile Shape) -> void { }\n"));
+    CHECK(p1.volatileLoads == 2);
+    CHECK(p1.volatileStores == 3);
+    auto p0 = tally(genModule(
+        "interface Shape { func area() -> int; }\n"
+        "func f(x: int, s: Shape) -> void { }\n"));
+    CHECK(p0.volatileLoads == 0 && p0.volatileStores == 0);
+
+    // (2) Copying from a volatile interface source: `var y: Shape = x`
+    // adds two volatile source loads while the volatile target's
+    // declaration and reassignment keep their CIDER-BUG-079 stores (2+2).
+    auto c1 = tally(genModule(
+        "interface Shape { func area() -> int; }\n"
+        "func f(c: Shape) -> void {\n"
+        "  var x: volatile Shape = c;\n"
+        "  var y: Shape = x;\n"
+        "  x = y;\n"
+        "}\n"));
+    CHECK(c1.volatileLoads == 2);
+    CHECK(c1.volatileStores == 4);
+
+    // The same holds for `return <volatile interface>`: the volatile
+    // parameter materialises through 2+2 volatile accesses and the return
+    // adds two source loads; the sret target stays a plain store.
+    auto r1 = tally(genModule(
+        "interface Shape { func area() -> int; }\n"
+        "func f(c: Shape) -> Shape { return c; }\n"
+        "func g(x: volatile Shape) -> Shape { return x; }\n"));
+    CHECK(r1.volatileLoads == 4);
+    CHECK(r1.volatileStores == 2);
+
+    // (3) Dispatch through a volatile pointee: both fat-pointer words are
+    // volatile loads; the parameter store is volatile too and the
+    // method-address load stays plain (the vtable is static data).
+    auto d1 = tally(genModule(
+        "interface Shape { func area() -> int; }\n"
+        "func f(p: volatile *Shape) -> int { return (*p).area(); }\n"));
+    CHECK(d1.volatileLoads == 2);
+    CHECK(d1.volatileStores == 1);
+    auto d0 = tally(genModule(
+        "interface Shape { func area() -> int; }\n"
+        "func f(p: *Shape) -> int { return (*p).area(); }\n"));
+    CHECK(d0.volatileLoads == 0 && d0.volatileStores == 0);
+
+    // Negative control: the combined shapes without `volatile` carry no
+    // volatile instruction at all.
+    auto n = tally(genModule(
+        "interface Shape { func area() -> int; }\n"
+        "func f(c: Shape) -> Shape {\n"
+        "  var x: Shape = c;\n"
+        "  var y: Shape = x;\n"
+        "  x = y;\n"
+        "  return y;\n"
+        "}\n"
+        "func d(p: *Shape) -> int { return (*p).area(); }\n"));
+    CHECK(n.volatileLoads == 0 && n.volatileStores == 0);
+    return 0;
+}
+
 int testVolatileGvn() {
     // CIDER-BUG-061: GVN must never replace a volatile access with a MOV of
     // an earlier occurrence — even for an opcode that is normally deduped.
@@ -589,6 +679,7 @@ int run() {
     CHECK(testVolatileIrFlags() == 0);
     CHECK(testVolatileInterfaceIrFlags() == 0);
     CHECK(testPointerInterfaceStoreIrFlags() == 0);
+    CHECK(testVolatileGap101IrFlags() == 0);
     CHECK(testVolatileGvn() == 0);
     CHECK(testVolatileLicm() == 0);
     CHECK(testCallClobberLicm() == 0);

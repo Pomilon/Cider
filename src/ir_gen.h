@@ -951,6 +951,9 @@ public:
     // that already evaluated the source (the hidden-sret return slot).
     // `value` is the source value and `initType` its type.
     // CIDER-BUG-079: `isVolatile` marks the two target stores volatile.
+    // CIDER-BUG-101: the SOURCE carries its own flag — copying FROM a
+    // volatile interface object reads both fat-pointer words through
+    // volatile loads (CIDER-BUG-061 model), independent of the target.
     void emitInterfaceStoreAt(const TypeInfo& ifaceType, IRValue addr, IRValue value,
                               TypeInfo initType, bool isVolatile = false) {
         // The interface flag can be missing on spellings that predate
@@ -958,6 +961,7 @@ public:
         // from-alias): resolve the name before classifying; CIDER-BUG-078:
         // an alias spelling resolves through its chain.
         initType = resolveInterfaceNominal(initType);
+        const bool sourceIsVolatile = initType.isVolatile;
         // A global target is a label: materialise its address so the two
         // stores honour the +0/+8 offsets (label stores are sized by the
         // global's declared type and ignore the offset).
@@ -969,9 +973,9 @@ public:
         if (initType.isInterface) {
             // Fat-pointer copy: both words, no vtable relabelling.
             IRValue dataPtr = IRValue::Register(nextTemp(), IRType::PTR);
-            currentBlock_->addInstruction({IROp::LOAD, dataPtr, {value, IRValue::Constant(0, IRType::I32)}});
+            currentBlock_->addInstruction({IROp::LOAD, dataPtr, {value, IRValue::Constant(0, IRType::I32)}, sourceIsVolatile});
             IRValue vtablePtr = IRValue::Register(nextTemp(), IRType::PTR);
-            currentBlock_->addInstruction({IROp::LOAD, vtablePtr, {value, IRValue::Constant(8, IRType::I32)}});
+            currentBlock_->addInstruction({IROp::LOAD, vtablePtr, {value, IRValue::Constant(8, IRType::I32)}, sourceIsVolatile});
             currentBlock_->addInstruction({IROp::STORE, std::nullopt, {addr, dataPtr, IRValue::Constant(0, IRType::I32)}, isVolatile});
             IRValue addr8 = IRValue::Register(nextTemp(), IRType::PTR);
             currentBlock_->addInstruction({IROp::ADD, addr8, {addr, IRValue::Constant(8, IRType::I32)}});
@@ -1194,6 +1198,11 @@ public:
             // CIDER-BUG-070: resolve through the nominal lookup so a
             // module-qualified spelling (`lib.Shape`) is seen too.
             sym->type = resolveInterfaceNominal(sym->type);
+            // CIDER-BUG-101: a volatile parameter's materialisation copy is
+            // the same observable-access family as a volatile declaration
+            // (CIDER-BUG-061): the local slot's two stores (and, for an
+            // interface, the source words they read) are marked volatile.
+            const bool paramIsVolatile = resolveTypeAlias(sym->type).isVolatile;
             symbolTable_.define(sym);
 
             IRType paramIRType = (sym->type.pointerLevel > 0) ? IRType::PTR : mapType(sym->type.name);
@@ -1208,25 +1217,27 @@ public:
                 // parameter's own slot so method dispatch and reassignment
                 // use it directly, exactly like a declared local.
                 IRValue dataPtr = IRValue::Register(nextTemp(), IRType::PTR);
-                currentBlock_->addInstruction({IROp::LOAD, dataPtr, {paramReg, IRValue::Constant(0, IRType::I32)}});
+                currentBlock_->addInstruction({IROp::LOAD, dataPtr, {paramReg, IRValue::Constant(0, IRType::I32)}, paramIsVolatile});
                 IRValue vtablePtr = IRValue::Register(nextTemp(), IRType::PTR);
-                currentBlock_->addInstruction({IROp::LOAD, vtablePtr, {paramReg, IRValue::Constant(8, IRType::I32)}});
-                currentBlock_->addInstruction({IROp::STORE, std::nullopt, {addr, dataPtr, IRValue::Constant(0, IRType::I32)}});
+                currentBlock_->addInstruction({IROp::LOAD, vtablePtr, {paramReg, IRValue::Constant(8, IRType::I32)}, paramIsVolatile});
+                currentBlock_->addInstruction({IROp::STORE, std::nullopt, {addr, dataPtr, IRValue::Constant(0, IRType::I32)}, paramIsVolatile});
                 IRValue addr8 = IRValue::Register(nextTemp(), IRType::PTR);
                 currentBlock_->addInstruction({IROp::ADD, addr8, {addr, IRValue::Constant(8, IRType::I32)}});
-                currentBlock_->addInstruction({IROp::STORE, std::nullopt, {addr8, vtablePtr, IRValue::Constant(0, IRType::I32)}});
+                currentBlock_->addInstruction({IROp::STORE, std::nullopt, {addr8, vtablePtr, IRValue::Constant(0, IRType::I32)}, paramIsVolatile});
             } else if (sym->type.pointerLevel == 0 && isByValueAggregate(sym->type)) {
                 // By-value aggregate params (struct/class/fixed-size array)
                 // arrive as a caller pointer: copy the pointee into the
                 // local slot instead of storing the pointer value as the
                 // first field (CID-022; CIDER-BUG-045 for arrays).
-                currentBlock_->addInstruction({IROp::MEMCPY, std::nullopt, {addr, paramReg, IRValue::Constant(getTypeSize(sym->type), IRType::I32)}});
+                currentBlock_->addInstruction({IROp::MEMCPY, std::nullopt, {addr, paramReg, IRValue::Constant(getTypeSize(sym->type), IRType::I32)},
+                                               paramIsVolatile});
                 // CIDER-BUG-089: the parameter is a declared class value, so
                 // re-stamp its class's vptr after the copy (`v: V` receiving
                 // `*p` from a dynamically-typed pointer slices to V).
                 emitClassVptrStoreForType(sym->type, addr, currentModule_);
             } else {
-                currentBlock_->addInstruction({IROp::STORE, std::nullopt, {addr, paramReg, IRValue::Constant(0, IRType::I32)}});
+                currentBlock_->addInstruction({IROp::STORE, std::nullopt, {addr, paramReg, IRValue::Constant(0, IRType::I32)},
+                                               paramIsVolatile});
             }
             variableValues_[param.first] = addr;
             variableValues_[paramRegName] = addr;  // Support both for lookup convenience
@@ -1418,6 +1429,13 @@ public:
 
             // Check if object is an interface type -> interface method call
             if (objType.isInterface) {
+                // CIDER-BUG-101: reads of the interface object are observable
+                // when the object — or, for a pointer-to-interface, the
+                // pointee — is volatile. This is the read twin of the
+                // CIDER-BUG-079 store rule: both fat-pointer words are
+                // marked, so `(*p).area()` through a volatile pointee is
+                // never elided or reordered by LICM/GVN/DCE.
+                const bool objIsVolatile = objType.isVolatile;
                 // CIDER-BUG-078: the isInterface flag may come from an alias
                 // spelling (`type S = Shape`); resolve the chain before the
                 // symbol lookup so the vtable index comes from the target
@@ -1433,10 +1451,10 @@ public:
                             // objPtr points to the fat pointer (address of interface variable)
                             // Load data_ptr from [objPtr + 0]
                             IRValue dataPtrReg = IRValue::Register(nextTemp(), IRType::PTR);
-                            currentBlock_->addInstruction({IROp::LOAD, dataPtrReg, {objPtr, IRValue::Constant(0, IRType::I32)}});
+                            currentBlock_->addInstruction({IROp::LOAD, dataPtrReg, {objPtr, IRValue::Constant(0, IRType::I32)}, objIsVolatile});
                             // Load vtable_ptr from [objPtr + 8]
                             IRValue vtablePtrReg = IRValue::Register(nextTemp(), IRType::PTR);
-                            currentBlock_->addInstruction({IROp::LOAD, vtablePtrReg, {objPtr, IRValue::Constant(8, IRType::I32)}});
+                            currentBlock_->addInstruction({IROp::LOAD, vtablePtrReg, {objPtr, IRValue::Constant(8, IRType::I32)}, objIsVolatile});
                             // Load method address from vtable[methodIdx]
                             IRValue methodAddrReg = IRValue::Register(nextTemp(), IRType::PTR);
                             currentBlock_->addInstruction({IROp::LOAD, methodAddrReg, {vtablePtrReg, IRValue::Constant(methodIdx * 8, IRType::I32)}});
