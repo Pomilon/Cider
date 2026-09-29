@@ -1,0 +1,44 @@
+// CIDER-BUG-206 module half: the aggregate return type and the interface are
+// declared HERE, while every dispatch site lives in main. The call site must
+// size the caller slot and root the result spelling in THIS module, not in
+// whatever the caller can see — a caller-module type of the same name, or no
+// visible type at all, must not change the lowering.
+export struct Remote {
+    var lo: int;
+    var hi: int;
+}
+
+export type RemoteRow = [int; 2];
+
+export interface RemoteShape {
+    func area() -> int;
+}
+
+export interface RemoteMaker {
+    func pair(n: int) -> Remote;
+    func row(n: int) -> RemoteRow;
+    func shape() -> RemoteShape;
+}
+
+export class RemoteImpl {
+    var pad: int;
+    func init(p: int) -> void { this.pad = p; }
+    func pair(n: int) -> Remote {
+        var r: Remote;
+        r.lo = n;
+        r.hi = n + this.pad;
+        return r;
+    }
+    func row(n: int) -> RemoteRow { return [n, n + this.pad]; }
+    func shape() -> RemoteShape {
+        var sq: RemoteSq;
+        sq.init(this.pad);
+        return sq;
+    }
+}
+
+export class RemoteSq {
+    var s: int;
+    func init(x: int) -> void { this.s = x; }
+    func area() -> int { return this.s * this.s; }
+}

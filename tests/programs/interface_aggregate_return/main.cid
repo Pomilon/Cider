@@ -1,0 +1,387 @@
+// CIDER-BUG-206: an interface-dispatched call returning a by-value AGGREGATE
+// (struct, class or fixed array) was miscompiled.
+//
+// Root cause: an interface implementation is an ordinary NON-virtual method,
+// so ir_gen::visit(FuncDecl) compiles it with the hidden sret convention
+// (`funcIsSret = (isByValueAggregate(ret) || ret.isInterface) && !isVirt`)
+// for EVERY by-value aggregate result. But the dispatch call site
+// (ir_gen::visit(CallExpr), the interface branch) only allocated and passed
+// the caller slot when the return was INTERFACE-typed. A struct/class/array
+// result therefore got no slot: the callee's prologue stored the receiver into
+// its `__sret` slot, read the never-set `%__sret` register as `this` and died
+// with "read of unset register %this" (a native SIGSEGV).
+//
+// The shape was hidden by the checker: interface dispatch has no
+// FunctionSymbol, so type_checker's indirect fallback typed the result as a
+// bare `int`. That rejected every USEFUL shape ("Expected P, got int") while
+// the DISCARDED-result shape — the only one that type-checked — fell through
+// straight into the miscompile. The bug was therefore a silent wrong-code
+// path, not a hard error.
+//
+// The fix makes the two ends agree: the call site now allocates and passes the
+// slot for the whole by-value-aggregate family (the same `isByValueAggregate`
+// predicate the definition gates `funcIsSret` on, sized by `getTypeSize`), and
+// the checker types the dispatch result with the method's declared return
+// spelling. This program pins the result on all three backends (VM
+// unoptimized, VM optimized, native):
+//   * struct, class and fixed-array returns, dispatched through the interface
+//   * the result read into a local, read through a member access, indexed and
+//     element-assigned (the result is the caller's OWN copy, so mutating it
+//     must not be visible to a second call)
+//   * two implementors of the same interface, so the slot is really
+//     re-targeted per dispatch
+//   * alias-spelled and nested-fixed-array return shapes
+//   * results consumed directly off the dispatch, and DISCARDED results (the
+//     shape that miscompiled before, which must not crash)
+//   * a list-literal argument next to an aggregate return, to keep the
+//     declared-shape argument path (CIDER-BUG-165) on the same lowering
+//   * an interface-typed return and a scalar return, the shapes that already
+//     worked, stay pinned too
+//   * a class result carrying a destructor, so the caller-owned slot is
+//     finalized at scope exit exactly like a direct sret call
+//   * the aggregate type and the interface declared in an IMPORTED module,
+//     dispatched from here, so the slot size and the result spelling are
+//     rooted in the callee's module and not in the caller's view
+// Every read is content-checked and each break returns a distinct non-zero
+// code, so a failure names the shape that broke.
+import lib;
+from std.io import print, printInt;
+
+struct Pair {
+    var a: int;
+    var b: int;
+}
+
+class Cell {
+    var v: int;
+    func init(x: int) -> void { this.v = x; }
+}
+
+type Row = [int; 2];
+
+// The three aggregate result shapes. `Shape` is declared first so the
+// interface-typed return below resolves from its declaration site (the
+// collector resolves members in declaration order).
+interface Shape {
+    func area() -> int;
+}
+
+interface Maker {
+    func makePair(n: int) -> Pair;
+    func makeCell(n: int) -> Cell;
+    func makeRow(n: int) -> Row;
+    func makeNested(n: int) -> [[int; 2]; 2];
+    func makeCells(n: int) -> [Cell; 2];
+    // A by-value aggregate parameter next to a by-value aggregate return:
+    // the return slot goes between the method address and `this`, so a
+    // mis-sized or mis-placed slot corrupts the argument too.
+    func mix(n: int, p: Pair) -> Pair;
+    // The shapes that already worked stay pinned on the same lowering.
+    func makeShape() -> Shape;
+    func twice(n: int) -> int;
+}
+
+class Sq {
+    var s: int;
+    func init(x: int) -> void { this.s = x; }
+    func area() -> int { return this.s * this.s; }
+}
+
+class MakerA {
+    var pad: int;
+    func init(p: int) -> void { this.pad = p; }
+    func makePair(n: int) -> Pair {
+        var r: Pair;
+        r.a = n;
+        r.b = n + this.pad;
+        return r;
+    }
+    func makeCell(n: int) -> Cell {
+        var c: Cell;
+        c.init(n * 10 + this.pad);
+        return c;
+    }
+    func makeRow(n: int) -> Row {
+        return [n, n + this.pad];
+    }
+    func makeNested(n: int) -> [[int; 2]; 2] {
+        return [[n, n + 1], [n + 2, n + this.pad]];
+    }
+    func makeCells(n: int) -> [Cell; 2] {
+        var r: [Cell; 2];
+        r[0].init(n);
+        r[1].init(n + this.pad);
+        return r;
+    }
+    func mix(n: int, p: Pair) -> Pair {
+        var r: Pair;
+        r.a = p.a + n;
+        r.b = p.b + this.pad;
+        return r;
+    }
+    func makeShape() -> Shape {
+        var sq: Sq;
+        sq.init(this.pad);
+        return sq;
+    }
+    func twice(n: int) -> int { return n * 2; }
+}
+
+class MakerB {
+    var pad: int;
+    func init(p: int) -> void { this.pad = p; }
+    func makePair(n: int) -> Pair {
+        var r: Pair;
+        r.a = n * 100;
+        r.b = n * 100 + this.pad;
+        return r;
+    }
+    func makeCell(n: int) -> Cell {
+        var c: Cell;
+        c.init(n * 10 + this.pad);
+        return c;
+    }
+    func makeRow(n: int) -> Row {
+        return [n * 100, n * 100 + this.pad];
+    }
+    func makeNested(n: int) -> [[int; 2]; 2] {
+        return [[n * 100, n * 101], [n * 102, n * 100 + this.pad]];
+    }
+    func makeCells(n: int) -> [Cell; 2] {
+        var r: [Cell; 2];
+        r[0].init(n * 100);
+        r[1].init(n * 100 + this.pad);
+        return r;
+    }
+    func mix(n: int, p: Pair) -> Pair {
+        var r: Pair;
+        r.a = p.a + n * 100;
+        r.b = p.b + this.pad;
+        return r;
+    }
+    func makeShape() -> Shape {
+        var sq: Sq;
+        sq.init(this.pad + 1);
+        return sq;
+    }
+    func twice(n: int) -> int { return n * 2 + this.pad; }
+}
+
+// A destructor-bearing class result: the caller's slot is its own copy and is
+// finalized at the enclosing scope exit, exactly like a direct sret call
+// (CIDER-BUG-137).
+var drops: int = 0;
+
+class Owned {
+    var tag: int;
+    func init(t: int) -> void { this.tag = t; }
+    func ~Owned() {
+        drops = drops + 1;
+        print("D,");
+        printInt(this.tag);
+        print(",");
+    }
+}
+
+interface Factory {
+    func make(t: int) -> Owned;
+}
+
+class OwnedFactory {
+    func make(t: int) -> Owned {
+        var o: Owned;
+        o.init(t);
+        return o;
+    }
+}
+
+// A destructor-bearing class result. The interface dispatch must produce the
+// SAME ownership trace as the direct non-virtual method call, which is the
+// path that already worked: both lower the callee with the hidden sret
+// convention, so the caller's slot is its own copy and is finalized on the
+// same schedule (CIDER-BUG-137). Asserting equality between the two paths
+// pins the fix without freezing a lifetime model of its own. Each helper
+// runs the same four-call sequence and reports the drop count its own scope
+// observed at exit.
+func dropsViaDirect(f: *OwnedFactory) -> int {
+    var a: Owned = f->make(1);
+    var b: Owned = f->make(2);
+    a.tag = 11;
+    if (a.tag != 11 || b.tag != 2) { return 1000; }
+    f->make(3);
+    f->make(4);
+    print("DONE,");
+    return drops;
+}
+
+func dropsViaInterface(f: *OwnedFactory) -> int {
+    var g: Factory = f;
+    var a: Owned = g.make(1);
+    var b: Owned = g.make(2);
+    a.tag = 11;
+    if (a.tag != 11 || b.tag != 2) { return 1001; }
+    g.make(3);
+    g.make(4);
+    print("DONE,");
+    return drops;
+}
+
+// Churns the stack frame a dangling/undersized slot would point into, so a
+// result is caught rather than accidentally reading what the callee left.
+func churn(n: int) -> int {
+    var acc: int = 0;
+    for (var k: int = 0; k < n; k = k + 1) {
+        acc = acc + k;
+    }
+    return acc;
+}
+
+func main() -> int {
+    var a: MakerA;
+    a.init(1);
+    var b: MakerB;
+    b.init(2);
+    var ma: Maker = a;
+    var mb: Maker = b;
+
+    // 1. Struct return, two implementors, into a local.
+    var pa: Pair = ma.makePair(5);
+    if (pa.a != 5 || pa.b != 6) { return 1; }
+    var pb: Pair = mb.makePair(5);
+    if (pb.a != 500 || pb.b != 502) { return 2; }
+
+    // 2. The result is the caller's OWN copy: mutating it must not affect a
+    //    second dispatch.
+    pa.a = 99;
+    if (pa.a != 99) { return 3; }
+    var pa2: Pair = ma.makePair(5);
+    if (pa2.a != 5 || pa2.b != 6) { return 4; }
+
+    // 3. Class return (member access on the result).
+    var ca: Cell = ma.makeCell(3);
+    if (ca.v != 31) { return 5; }
+    ca.v = 77;
+    var ca2: Cell = ma.makeCell(3);
+    if (ca2.v != 31) { return 6; }
+    var cb: Cell = mb.makeCell(3);
+    if (cb.v != 32) { return 7; }
+
+    // 4. Fixed-array return (indexing on the result).
+    var ra: Row = ma.makeRow(7);
+    if (ra[0] != 7 || ra[1] != 8) { return 8; }
+    ra[0] = 42;
+    var ra2: Row = ma.makeRow(7);
+    if (ra2[0] != 7 || ra2[1] != 8) { return 9; }
+    var rb: Row = mb.makeRow(7);
+    if (rb[0] != 700 || rb[1] != 702) { return 10; }
+
+    // 5. Nested fixed array.
+    var na: [[int; 2]; 2] = ma.makeNested(1);
+    if (na[0][0] != 1 || na[0][1] != 2 || na[1][0] != 3 || na[1][1] != 2) { return 11; }
+    var nb: [[int; 2]; 2] = mb.makeNested(1);
+    if (nb[0][0] != 100 || nb[1][1] != 102) { return 12; }
+
+    // 6. Array of class values.
+    var cells: [Cell; 2] = ma.makeCells(4);
+    if (cells[0].v != 4 || cells[1].v != 5) { return 13; }
+    cells[0].v = 55;
+    var cells2: [Cell; 2] = ma.makeCells(4);
+    if (cells2[0].v != 4 || cells2[1].v != 5) { return 14; }
+
+    // 7. A by-value aggregate argument alongside the aggregate return: the
+    //    hidden slot must sit between the method address and `this`.
+    var arg: Pair;
+    arg.a = 10;
+    arg.b = 20;
+    var mx: Pair = ma.mix(1, arg);
+    if (mx.a != 11 || mx.b != 21) { return 15; }
+    var mxb: Pair = mb.mix(1, arg);
+    if (mxb.a != 110 || mxb.b != 22) { return 16; }
+    if (arg.a != 10 || arg.b != 20) { return 17; }
+
+    // 8. Results read AFTER a call that churns the caller's frame.
+    churn(200);
+    if (pa2.a != 5 || pa2.b != 6) { return 18; }
+    churn(500);
+    if (ca2.v != 31) { return 19; }
+    churn(1000);
+    if (ra2[0] != 7 || ra2[1] != 8) { return 20; }
+
+    // 9. The result consumed directly off the dispatch, and DISCARDED — the
+    //    discarded shape is the one that miscompiled before the fix (no slot
+    //    at all). It must simply not crash.
+    if (ma.makePair(9).b != 10) { return 21; }
+    if (mb.makeRow(9)[1] != 902) { return 22; }
+    ma.makePair(1);
+    ma.makeRow(1);
+    ma.makeNested(1);
+    ma.makeCells(1);
+    ma.makeCell(1);
+    mb.makePair(1);
+    mb.makeRow(1);
+    churn(64);
+
+    // 10. The interface-typed and scalar returns, unchanged shapes.
+    var sh: Shape = ma.makeShape();
+    if (sh.area() != 1) { return 23; }
+    var shb: Shape = mb.makeShape();
+    if (shb.area() != 9) { return 24; }
+    if (ma.twice(21) != 42) { return 25; }
+    if (mb.twice(21) != 44) { return 26; }
+
+    // 11. A list literal as an argument, next to an aggregate return.
+    var mix2: Pair = ma.mix(1, [3, 4]);
+    if (mix2.a != 4 || mix2.b != 5) { return 27; }
+
+    // 12. A destructor-bearing class result through the interface must
+    //     finalize its caller-owned slot exactly like the direct
+    //     non-virtual method call does. Both helpers run the same sequence;
+    //     their drop counts (and the trace printed just before each) must
+    //     agree, and the values must be right on both paths.
+    var fac: OwnedFactory;
+    var fp: *OwnedFactory = &fac;
+    drops = 0;
+    var nDirect: int = dropsViaDirect(fp);
+    print("D:");
+    printInt(nDirect);
+    print(";");
+    drops = 0;
+    var nIface: int = dropsViaInterface(fp);
+    print("I:");
+    printInt(nIface);
+    print(";");
+    if (nDirect != nIface) { return 28; }
+    // The trace is only meaningful if the drops really happened: a path that
+    // leaked or double-freed would land on 0 or an inflated count.
+    if (nDirect == 0) { return 29; }
+
+    // 13. Cross-module: the aggregate type AND the interface are declared in
+    //     lib, and the dispatch happens here. The slot must be sized with
+    //     lib's `Remote` / `RemoteRow` layouts, and the result must present
+    //     the callee-module spelling so the field / index accesses below
+    //     resolve at all.
+    var ri: lib.RemoteImpl;
+    ri.init(3);
+    var rm: lib.RemoteMaker = ri;
+    var rp: lib.Remote = rm.pair(4);
+    if (rp.lo != 4 || rp.hi != 7) { return 30; }
+    rp.lo = 40;
+    var rp2: lib.Remote = rm.pair(4);
+    if (rp2.lo != 4 || rp2.hi != 7) { return 31; }
+    var rr: lib.RemoteRow = rm.row(5);
+    if (rr[0] != 5 || rr[1] != 8) { return 32; }
+    rr[0] = 50;
+    var rr2: lib.RemoteRow = rm.row(5);
+    if (rr2[0] != 5 || rr2[1] != 8) { return 33; }
+    // The already-working interface-return shape across the same module.
+    var rs: lib.RemoteShape = rm.shape();
+    if (rs.area() != 9) { return 34; }
+    // A discarded cross-module aggregate result, and a dispatch chained
+    // straight off the call.
+    rm.pair(6);
+    rm.row(6);
+    if (rm.pair(7).hi != 10) { return 35; }
+    if (rm.row(7)[1] != 10) { return 36; }
+
+    return 0;
+}

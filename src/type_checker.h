@@ -4203,6 +4203,12 @@ public:
         // so the indirect fallback does not visit the same list a second
         // time (duplicate element diagnostics).
         std::set<size_t> ifaceListArgsChecked;
+        // CIDER-BUG-206: the declared return type of a dispatched interface
+        // method, recorded alongside the list-argument indices for the same
+        // reason — the indirect fallback has no FunctionSymbol to read it
+        // from. Left default (empty name) when the callee is not an
+        // interface dispatch, which the fallback checks before using it.
+        TypeInfo ifaceDispatchRet;
 
         if (auto id = dynamic_cast<IdentifierExpr*>(callee)) {
             auto sym = resolveScoped(id->getName());
@@ -4317,6 +4323,23 @@ public:
                     for (const auto& m : iface->methods) {
                         if (m.name != mem->getMember()) continue;
                         std::string methodMod = methodModuleOf(m, ifaceMod);
+                        // CIDER-BUG-206: interface dispatch has no
+                        // FunctionSymbol, so this is the only place the
+                        // declared return type of a dispatched method is
+                        // available. Record it for the indirect fallback
+                        // below, which otherwise types the dispatch result as
+                        // a bare `int` and so rejected every useful
+                        // by-value aggregate result ("Expected P, got int")
+                        // while letting the discarded-result shape through to
+                        // a miscompile. The spelling is rooted in the
+                        // method's defining module, exactly like the parameter
+                        // spellings below and the member-access return-type
+                        // rule above.
+                        ifaceDispatchRet =
+                            canonicalizeInModule(m.returnType, methodMod, expr.getLine());
+                        // CIDER-BUG-077: an interface-typed return is the
+                        // 16-byte fat pointer, not an aggregate.
+                        resolveInterfaceFlag(ifaceDispatchRet);
                         for (size_t i = 0;
                              i < expr.getArgs().size() && i < m.parameterTypes.size(); ++i) {
                             auto* list = dynamic_cast<ListExpr*>(expr.getArgs()[i].get());
@@ -4412,6 +4435,21 @@ public:
             }
             if (calleeResultType.isInterface) {
                 lastExprType_ = calleeResultType;
+                return;
+            }
+            // CIDER-BUG-206: same rule for a by-value AGGREGATE result
+            // (struct, class or fixed array). The implementation is a
+            // non-virtual method, so ir_gen compiles it with the hidden sret
+            // convention and the dispatch call site allocates and passes the
+            // result slot (ir_gen::visit(CallExpr), the interface branch);
+            // typing the result as `int` here rejected every useful shape
+            // ("Expected P, got int") while the discarded-result shape fell
+            // through to the miscompile. `ifaceDispatchRet` is the declared
+            // return spelling recorded by the member-access branch above; it
+            // is empty for every non-dispatch callee, and an interface result
+            // already returned above, so this only fires for aggregates.
+            if (!ifaceDispatchRet.name.empty() && isByValueAggregateAtCall(ifaceDispatchRet)) {
+                lastExprType_ = ifaceDispatchRet;
                 return;
             }
             lastExprType_ = {"int", 0};

@@ -2252,16 +2252,41 @@ public:
                             // ir_gen compiles as sret). The 16-byte slot goes
                             // right after the method address, so the callee's
                             // prologue sees [__sret, this, ...].
+                            // CIDER-BUG-206: that hidden slot is NOT specific
+                            // to interface results. An interface
+                            // implementation is an ordinary NON-virtual
+                            // method, so `funcIsSret` (ir_gen::visit(FuncDecl))
+                            // adds `__sret` for EVERY by-value aggregate
+                            // result — struct, class or fixed array — exactly
+                            // as it does for a direct method call. The call
+                            // site must therefore allocate and pass the slot
+                            // for the whole aggregate family, not just the
+                            // 16-byte interface fat pointer. It used to pass
+                            // only `this`, so the callee's prologue stored
+                            // that data pointer into its `__sret` slot, read
+                            // the never-set `%__sret` register as `this` and
+                            // died with "read of unset register %this" (a
+                            // native SIGSEGV), while the discarded-result
+                            // shape checked clean — a silent miscompile.
+                            std::string ifaceDefMod = definingModuleFor(ifaceSym, ifaceSym->name);
                             TypeInfo methodRet =
                                 resolveInterfaceNominal(canonicalizeNominalInModule(
-                                    m.returnType, definingModuleFor(ifaceSym, ifaceSym->name)));
+                                    m.returnType, ifaceDefMod));
                             bool ifaceRet = methodRet.isInterface;
+                            // Same predicate the definition side gates
+                            // `funcIsSret` on, so both ends of the interface
+                            // ABI agree on what travels through the slot.
+                            bool ifaceAggRet =
+                                !ifaceRet && isByValueAggregate(m.returnType, ifaceDefMod);
+                            bool ifaceSret = ifaceRet || ifaceAggRet;
                             IRValue retBuf;
                             IRValue dest;
                             IRType retIRType = IRType::I32;
-                            if (ifaceRet) {
+                            if (ifaceSret) {
+                                int retSize =
+                                    ifaceRet ? 16 : getTypeSize(m.returnType, ifaceDefMod);
                                 retBuf = IRValue::Register(nextTemp(), IRType::PTR);
-                                currentBlock_->addInstruction({IROp::ALLOCA, retBuf, {IRValue::Constant(16, IRType::I32)}});
+                                currentBlock_->addInstruction({IROp::ALLOCA, retBuf, {IRValue::Constant(retSize, IRType::I32)}});
                                 args.insert(args.begin() + 1, retBuf);
                             } else {
                                 retIRType = (m.returnType.pointerLevel > 0) ? IRType::PTR : mapType(m.returnType.name);
@@ -2272,11 +2297,27 @@ public:
                             // CID-005: interface dispatch is SysV (the
                             // implementations are pinned SysV by generate()).
                             callInstr.callAbi = Abi::SysV;
-                            callInstr.dest = ifaceRet ? std::nullopt : std::optional<IRValue>(dest);
+                            callInstr.dest = ifaceSret ? std::nullopt : std::optional<IRValue>(dest);
                             callInstr.args = std::move(args);
                             currentBlock_->addInstruction(callInstr);
-                            lastValue_ = ifaceRet ? retBuf : dest;
-                            lastExprType_ = ifaceRet ? methodRet : m.returnType;
+                            lastValue_ = ifaceSret ? retBuf : dest;
+                            if (ifaceAggRet) {
+                                // CIDER-BUG-206: the result is the caller's own
+                                // copy inside its slot (the callee memcpys into
+                                // it), so present the callee-module-rooted
+                                // aggregate spelling — member access / indexing
+                                // on it resolves the declared shape, exactly
+                                // like the direct sret call site — and
+                                // finalize the slot at the enclosing scope exit
+                                // (CIDER-BUG-137). This owns no heap buffer,
+                                // so `ownsHeapCopy` stays false.
+                                lastExprType_ = canonicalizeNominalInModule(
+                                    resolveTypeAlias(m.returnType, ifaceDefMod), ifaceDefMod);
+                                lastExprType_.isUserDefined = true;
+                                registerTempDestructors(m.returnType, retBuf, ifaceDefMod);
+                            } else {
+                                lastExprType_ = ifaceRet ? methodRet : m.returnType;
+                            }
                             // CIDER-BUG-184: a dispatched implementation may
                             // box a concrete value; the caller temp owns it
                             // and releases it at the enclosing scope exit.
