@@ -98,6 +98,15 @@ add_test(NAME vm_oom_smoke
          COMMAND bash ${CMAKE_SOURCE_DIR}/tests/unit/vm_oom_smoke.sh $<TARGET_FILE:cider>)
 set_tests_properties(vm_oom_smoke PROPERTIES SKIP_RETURN_CODE 77)
 
+# CIDER-BUG-169: the asm exit syscall must flush putchar's buffer exactly like
+# the exit builtin. A mixed extern-putchar + asm-exit program must keep its
+# buffered output on both VM paths; the exit-builtin control also covers the
+# native path (raw exit syscalls do not flush glibc's pipe buffer, libc exit
+# does). Exits 77 when nasm/gcc are missing.
+add_test(NAME vm_asm_exit_flush_smoke
+         COMMAND bash ${CMAKE_SOURCE_DIR}/tests/unit/vm_asm_exit_flush_smoke.sh $<TARGET_FILE:cider>)
+set_tests_properties(vm_asm_exit_flush_smoke PROPERTIES SKIP_RETURN_CODE 77)
+
 # CIDER-CHORE-001: CLI usage/--target validation runs in the suite too
 # (previously manual only).
 add_test(NAME cli_test

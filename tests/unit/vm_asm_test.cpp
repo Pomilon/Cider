@@ -421,6 +421,77 @@ int run() {
         CHECK(vm.heapBytes() == vm.freeListBytes());
     }
 
+    // CIDER-BUG-169: the asm exit syscall must flush putchar's buffer exactly
+    // like the exit builtin. Pre-fix execAsm only retired the frames, so a
+    // program mixing extern putchar with it lost every byte still buffered.
+    {
+        auto fn = std::make_unique<cider::FunctionIR>("main", cider::IRType::VOID);
+        auto b = std::make_unique<cider::BasicBlock>("entry");
+        auto putc = [](int c) {
+            cider::IRInstruction call;
+            call.op = cider::IROp::CALL;
+            call.args = {cider::IRValue::Label("putchar"),
+                         cider::IRValue::Constant(c, cider::IRType::I32)};
+            return call;
+        };
+        b->addInstruction(putc('H'));
+        b->addInstruction(putc('\n'));
+        b->addInstruction(asmInstr("mov rax, 60\nmov rdi, 5\nsyscall"));
+        fn->addBlock(std::move(b));
+        cider::ModuleIR mod;
+        mod.addFunction(std::move(fn));
+        cider::VM vm;
+        auto r = vm.run(mod);
+        CHECK(r.stdoutText == "H\n");
+        CHECK(r.exitCode == 5);
+    }
+
+    // The flush keeps the builtin exit's order: the buffered bytes are
+    // emitted, then the abandoned frames are retired (CIDER-BUG-159), so the
+    // frame storage still lands on the free list.
+    {
+        auto deep = std::make_unique<cider::FunctionIR>("deep", cider::IRType::VOID);
+        auto db = std::make_unique<cider::BasicBlock>("entry");
+        cider::IRInstruction big;
+        big.op = cider::IROp::ALLOCA;
+        big.dest = cider::IRValue::Register("big", cider::IRType::PTR);
+        big.args = {cider::IRValue::Constant(8192, cider::IRType::I64)};
+        db->addInstruction(big);
+        cider::IRInstruction pc;
+        pc.op = cider::IROp::CALL;
+        pc.args = {cider::IRValue::Label("putchar"),
+                   cider::IRValue::Constant('B', cider::IRType::I32)};
+        db->addInstruction(pc);
+        db->addInstruction(asmInstr("mov rax, 60\nmov rdi, 6\nsyscall"));
+        deep->addBlock(std::move(db));
+
+        auto fn = std::make_unique<cider::FunctionIR>("main", cider::IRType::I32);
+        auto b = std::make_unique<cider::BasicBlock>("entry");
+        cider::IRInstruction slot;
+        slot.op = cider::IROp::ALLOCA;
+        slot.dest = cider::IRValue::Register("slot", cider::IRType::PTR);
+        slot.args = {cider::IRValue::Constant(8, cider::IRType::I32)};
+        b->addInstruction(slot);
+        cider::IRInstruction callDeep;
+        callDeep.op = cider::IROp::CALL;
+        callDeep.args = {cider::IRValue::Label("deep")};
+        b->addInstruction(callDeep);
+        cider::IRInstruction ret;
+        ret.op = cider::IROp::RET;
+        ret.args = {cider::IRValue::Constant(0, cider::IRType::I32)};
+        b->addInstruction(ret);
+        fn->addBlock(std::move(b));
+
+        cider::ModuleIR mod;
+        mod.addFunction(std::move(deep));
+        mod.addFunction(std::move(fn));
+        cider::VM vm;
+        auto r = vm.run(mod);
+        CHECK(r.stdoutText == "B");
+        CHECK(r.exitCode == 6);
+        CHECK(vm.heapBytes() == vm.freeListBytes());
+    }
+
     // A valid mmap keeps working: allocate 64 bytes, read the file into the
     // fresh region, and report the byte count. The non-zero exit path above
     // shows the validation did not reject usable lengths.

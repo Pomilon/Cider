@@ -1669,8 +1669,14 @@ void VM::execAsm(const IRInstruction& instr) {
     }
     (void)wrote;
     if (exited) {
-        // CIDER-BUG-159: the asm exit syscall (std.io.exit) drops the stack
-        // too; retire the live frames first, same as the builtin exit.
+        // CIDER-BUG-169: the asm exit syscall (what std.io.exit lowers to)
+        // must flush putchar's buffer exactly like the exit builtin, or a
+        // program mixing extern putchar with it loses everything still
+        // buffered. Flush first, then drop the stack, matching the
+        // builtin's order.
+        result_.stdoutText += putcharBuf_;
+        // CIDER-BUG-159: the asm exit syscall drops the stack too; retire
+        // the live frames, same as the builtin exit.
         retireAllFrames();
     }
 }
