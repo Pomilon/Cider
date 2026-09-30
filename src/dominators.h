@@ -34,8 +34,16 @@ public:
         return a != b && dominates(a, b);
     }
 
+    // CIDER-BUG-259: total lookup. A block the tree knows nothing about — one
+    // unreachable from the entry, or one whose dominator the analysis could
+    // not establish — reports the empty name instead of throwing
+    // std::out_of_range out of the optimizer. Every caller only ever compares
+    // the result against a block name, and "dominates nothing" is the answer
+    // a block outside the tree deserves.
     const std::string& idom(const std::string& block) const {
-        return idom_.at(block);
+        static const std::string kNoDominator;
+        auto it = idom_.find(block);
+        return it == idom_.end() ? kNoDominator : it->second;
     }
 
 private:
@@ -69,9 +77,14 @@ DominatorTree::CFG DominatorTree::buildCFG(const FunctionIR& func) const {
     cfg.blockNames.reserve(blocks.size());
     std::map<std::string, int> nameToIdx;
 
+    // CIDER-BUG-259: block names are the CFG's only keys, so a duplicated
+    // name makes an edge ambiguous. The first occurrence wins (the same
+    // choice RegisterAllocator::allocate makes); a function with duplicate
+    // block names is malformed either way, and neither analysis can say
+    // anything trustworthy about it.
     for (size_t i = 0; i < blocks.size(); ++i) {
         cfg.blockNames.push_back(blocks[i]->getName());
-        nameToIdx[blocks[i]->getName()] = (int)i;
+        nameToIdx.emplace(blocks[i]->getName(), (int)i);
     }
 
     int n = (int)blocks.size();
@@ -84,18 +97,28 @@ DominatorTree::CFG DominatorTree::buildCFG(const FunctionIR& func) const {
         const auto& instrs = blocks[i]->getInstructions();
         if (instrs.empty()) continue;
 
-        const auto& term = instrs.back();
-        if (term.op == IROp::BR && !term.args.empty() && term.args[0].kind == IRValue::LABEL) {
-            int v = nameToIdx.at(term.args[0].name);
+        // CIDER-BUG-259: an edge is recorded only for a terminator that
+        // names a block of THIS function. A BR/COND_BR whose operand is not
+        // a label, or whose target is not a block here, is malformed IR —
+        // the edge is then unknown, and an unknown edge is left out instead
+        // of throwing std::map::at out of the optimizer (the same
+        // conservative rule RegisterAllocator::allocate applies to a
+        // malformed terminator).
+        auto addEdge = [&](const IRValue& target) {
+            if (target.kind != IRValue::LABEL) return;
+            auto it = nameToIdx.find(target.name);
+            if (it == nameToIdx.end()) return;
+            int v = it->second;
             cfg.succs[u].push_back(v);
             cfg.preds[v].push_back(u);
+        };
+
+        const auto& term = instrs.back();
+        if (term.op == IROp::BR) {
+            if (!term.args.empty()) addEdge(term.args[0]);
         } else if (term.op == IROp::COND_BR && term.args.size() >= 3) {
-            int v1 = nameToIdx.at(term.args[1].name);
-            int v2 = nameToIdx.at(term.args[2].name);
-            cfg.succs[u].push_back(v1);
-            cfg.succs[u].push_back(v2);
-            cfg.preds[v1].push_back(u);
-            cfg.preds[v2].push_back(u);
+            addEdge(term.args[1]);
+            addEdge(term.args[2]);
         }
     }
     return cfg;
@@ -199,17 +222,46 @@ void DominatorTree::build(const FunctionIR& func) {
     }
     idomIdx[cfg.entry] = cfg.entry;
 
+    // CIDER-BUG-259: record the dominator TREE by walking it from the entry,
+    // so a block's parent is always filled before the block itself. The old
+    // code filled idom_/depth_ by walking the blocks in LAYOUT-INDEX order
+    // and reading the parent's depth with std::map::at, so it silently
+    // required every immediate dominator to have a LOWER block index than
+    // the block it dominates. Nothing in the IR requires that ordering — the
+    // landing-pad pass's first block layout (see ir_gen.h) violated it, and a
+    // legal CFG like `entry -> header; header -> body` with `body` numbered
+    // before `header` threw a bare std::out_of_range out of the optimizer.
+    // Depth is now read off the tree, so the result depends only on the CFG.
+    std::vector<std::vector<int>> domChildren(n);
     for (int i = 0; i < n; ++i) {
-        if (dfn[i] == -1) continue;
-        const std::string& name = cfg.blockNames[i];
-        if (i == cfg.entry) {
-            idom_[name] = name;
-            depth_[name] = 0;
-        } else {
-            const std::string& parentName = cfg.blockNames[idomIdx[i]];
-            idom_[name] = parentName;
-            depth_[name] = depth_.at(parentName) + 1;
+        if (dfn[i] == -1 || i == cfg.entry) continue;
+        int p = idomIdx[i];
+        // A self-parent or a parent the DFS never reached is not a tree edge:
+        // such a block is left out of the maps entirely, so dominates()
+        // answers "no" for it and idom() reports no dominator — both safe
+        // answers, and the only ones the tree does not support.
+        if (p < 0 || p == i || dfn[p] == -1) continue;
+        domChildren[p].push_back(i);
+    }
+
+    std::vector<int> depthIdx(n, -1);
+    const std::string& entryName = cfg.blockNames[cfg.entry];
+    idom_[entryName] = entryName;
+    depthIdx[cfg.entry] = 0;
+    std::vector<int> stack;
+    stack.push_back(cfg.entry);
+    while (!stack.empty()) {
+        int v = stack.back();
+        stack.pop_back();
+        for (int c : domChildren[v]) {
+            idom_[cfg.blockNames[c]] = cfg.blockNames[v];
+            depthIdx[c] = depthIdx[v] + 1;
+            stack.push_back(c);
         }
+    }
+    for (int i = 0; i < n; ++i) {
+        if (depthIdx[i] < 0) continue;
+        depth_[cfg.blockNames[i]] = depthIdx[i];
     }
 }
 
@@ -365,7 +417,11 @@ void NaturalLoopFinder::computeExits(const FunctionIR& func) {
                     loop.exits.push_back(target);
                 }
             };
-            if (term.op == IROp::BR && term.args[0].kind == IRValue::LABEL) {
+            // CIDER-BUG-259: the BR arm read args[0] without checking that
+            // the terminator has any operand at all (the COND_BR arm did) —
+            // a BR with no operand read past the end of the vector.
+            if (term.op == IROp::BR && !term.args.empty() &&
+                term.args[0].kind == IRValue::LABEL) {
                 addExitIfOutside(term.args[0].name);
             } else if (term.op == IROp::COND_BR && term.args.size() >= 3) {
                 if (term.args[1].kind == IRValue::LABEL) addExitIfOutside(term.args[1].name);

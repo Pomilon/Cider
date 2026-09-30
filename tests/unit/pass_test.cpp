@@ -1,5 +1,10 @@
+#include <algorithm>
 #include <cstdio>
+#include <iterator>
+#include <map>
 #include <memory>
+#include <random>
+#include <set>
 #include <string>
 #include <vector>
 
@@ -2833,6 +2838,375 @@ int testSubDerivedEscapeLicm() {
     return 0;
 }
 
+// --- CIDER-BUG-259: the dominator tree must not depend on block numbering ---
+
+// A block whose TERMINATOR is a branch to `targets`.
+static std::unique_ptr<cider::BasicBlock> brBlock(const std::string& name,
+                                                  const std::vector<std::string>& targets) {
+    auto b = std::make_unique<cider::BasicBlock>(name);
+    cider::IRInstruction br;
+    br.op = cider::IROp::BR;
+    for (const auto& t : targets) br.args.push_back(cider::IRValue::Label(t));
+    b->addInstruction(br);
+    return b;
+}
+
+static std::unique_ptr<cider::BasicBlock> condBrBlock(const std::string& name,
+                                                      const std::string& t,
+                                                      const std::string& f) {
+    auto b = std::make_unique<cider::BasicBlock>(name);
+    cider::IRInstruction br;
+    br.op = cider::IROp::COND_BR;
+    br.args = {cider::IRValue::Constant(1, cider::IRType::I32), cider::IRValue::Label(t),
+               cider::IRValue::Label(f)};
+    b->addInstruction(br);
+    return b;
+}
+
+static std::unique_ptr<cider::BasicBlock> retBlock(const std::string& name) {
+    auto b = std::make_unique<cider::BasicBlock>(name);
+    cider::IRInstruction ret;
+    ret.op = cider::IROp::RET;
+    b->addInstruction(ret);
+    return b;
+}
+
+int testDominatorLayoutIndependent() {
+    // CIDER-BUG-259: DominatorTree::build filled its depth map by walking the
+    // blocks in LAYOUT-INDEX order and reading the parent's depth with
+    // std::map::at, so it required every immediate dominator to have a LOWER
+    // block index than the block it dominates. Nothing in the IR says so: this
+    // loop's body (block 1) is reachable only through its header (block 2),
+    // and the latch (block 3) closes the back edge. Building the tree on this
+    // layout used to abort the compiler with a bare std::out_of_range
+    // (map::at) — no diagnostic, no IR, just a throw out of the optimizer.
+    //
+    //   0 entry : br  -> header
+    //   1 body  : br  -> latch
+    //   2 header: cond-> body, exit
+    //   3 latch : br  -> header
+    //   4 exit  : ret
+    auto fn = std::make_unique<cider::FunctionIR>("f", cider::IRType::VOID);
+    fn->addBlock(brBlock("entry", {"header"}));
+    fn->addBlock(brBlock("body", {"latch"}));
+    fn->addBlock(condBrBlock("header", "body", "exit"));
+    fn->addBlock(brBlock("latch", {"header"}));
+    fn->addBlock(retBlock("exit"));
+
+    cider::DominatorTree dt;
+    dt.build(*fn);
+    // The tree, not the layout: the header dominates the body even though it
+    // is numbered after it.
+    CHECK(dt.idom("header") == "entry");
+    CHECK(dt.idom("body") == "header");   // <-- higher-index dominator
+    CHECK(dt.idom("latch") == "body");
+    CHECK(dt.idom("exit") == "header");  // only the header branches to it
+    CHECK(dt.idom("entry") == "entry");
+    CHECK(dt.dominates("header", "body"));
+    CHECK(dt.dominates("entry", "latch"));
+    CHECK(dt.dominates("body", "latch"));
+    CHECK(!dt.dominates("latch", "header"));
+    CHECK(!dt.dominates("body", "exit"));
+    CHECK(!dt.dominates("exit", "body"));
+    // A block the tree knows nothing about reports no dominator instead of
+    // throwing: every caller only compares the name, and "dominates nothing"
+    // is the answer a block outside the tree deserves.
+    CHECK(dt.idom("nosuch").empty());
+
+    // The loop finder reads the same tree: header is a natural loop header
+    // whose latch (block 1's successor, index 3) precedes its body in layout
+    // terms but not in the tree.
+    cider::NaturalLoopFinder loops;
+    loops.build(*fn, dt);
+    const cider::Loop* loop = loops.loopForHeader("header");
+    CHECK(loop != nullptr);
+    if (loop) {
+        CHECK(loop->blocks.count("header") == 1);
+        CHECK(loop->blocks.count("body") == 1);
+        CHECK(loop->blocks.count("latch") == 1);
+        CHECK(loop->blocks.count("exit") == 0);
+    }
+
+    // A layout that violates the old invariant must give the SAME tree as the
+    // DFS-ordered layout of the same CFG — the property the fix restores.
+    auto fn2 = std::make_unique<cider::FunctionIR>("f", cider::IRType::VOID);
+    fn2->addBlock(brBlock("entry", {"header"}));
+    fn2->addBlock(condBrBlock("header", "body", "exit"));
+    fn2->addBlock(brBlock("body", {"latch"}));
+    fn2->addBlock(brBlock("latch", {"header"}));
+    fn2->addBlock(retBlock("exit"));
+    cider::DominatorTree dt2;
+    dt2.build(*fn2);
+    for (const char* b : {"entry", "header", "body", "latch", "exit"})
+        CHECK(dt.idom(b) == dt2.idom(b));
+    for (const char* a : {"entry", "header", "body", "latch", "exit"})
+        for (const char* b : {"entry", "header", "body", "latch", "exit"})
+            CHECK(dt.dominates(a, b) == dt2.dominates(a, b));
+    return 0;
+}
+
+int testDominatorUnreachableAndMalformed() {
+    // CIDER-BUG-259: the other ways a layout could make the optimizer throw.
+    //
+    // (1) An unreachable block (dead code after a `return`, or a block whose
+    //     only predecessor was rewired) has no dominator. build() used to
+    //     leave it out of the maps, and idom() then threw map::at on it.
+    auto fn = std::make_unique<cider::FunctionIR>("f", cider::IRType::VOID);
+    fn->addBlock(brBlock("entry", {"live"}));
+    fn->addBlock(retBlock("live"));
+    fn->addBlock(brBlock("dead", {"live"}));
+    cider::DominatorTree dt;
+    dt.build(*fn);
+    CHECK(dt.idom("live") == "entry");
+    CHECK(dt.idom("dead").empty());          // no throw
+    CHECK(!dt.dominates("entry", "dead"));
+    CHECK(dt.dominates("dead", "live") == false);
+
+    // (2) A branch to a label that is not a block of this function, a
+    //     COND_BR whose target operand is a register, and a BR with no
+    //     operand at all: malformed terminators must leave the tree empty
+    //     rather than throw std::out_of_range out of buildCFG. (This mirrors
+    //     RegisterAllocator::allocate, which already treats the same shapes
+    //     as a conservative fallback.)
+    auto bad = std::make_unique<cider::FunctionIR>("bad", cider::IRType::VOID);
+    bad->addBlock(brBlock("entry", {"missing"}));
+    {
+        auto b = std::make_unique<cider::BasicBlock>("regTarget");
+        cider::IRInstruction br;
+        br.op = cider::IROp::COND_BR;
+        br.args = {cider::IRValue::Register("x", cider::IRType::I32),
+                   cider::IRValue::Register("x", cider::IRType::I32),
+                   cider::IRValue::Label("nowhere")};
+        b->addInstruction(br);
+        bad->addBlock(std::move(b));
+    }
+    {
+        auto b = std::make_unique<cider::BasicBlock>("noOperand");
+        cider::IRInstruction br;
+        br.op = cider::IROp::BR;
+        b->addInstruction(br);
+        bad->addBlock(std::move(b));
+    }
+    {
+        auto b = std::make_unique<cider::BasicBlock>("empty");
+        bad->addBlock(std::move(b));
+    }
+    cider::DominatorTree badDt;
+    badDt.build(*bad);   // must not throw
+    CHECK(badDt.idom("entry") == "entry");
+    CHECK(badDt.idom("regTarget").empty());
+    CHECK(badDt.idom("noOperand").empty());
+    CHECK(badDt.idom("empty").empty());
+    CHECK(badDt.idom("missing").empty());
+    // The loop finder scans terminators the same way; the operand-less BR
+    // used to read args[0] off the end of the vector.
+    cider::NaturalLoopFinder badLoops;
+    badLoops.build(*bad, badDt);   // must not crash
+    CHECK(badLoops.getLoops().empty());
+
+    // (3) A function with no blocks at all is legal and yields an empty tree.
+    auto empty = std::make_unique<cider::FunctionIR>("empty", cider::IRType::VOID);
+    cider::DominatorTree emptyDt;
+    emptyDt.build(*empty);
+    CHECK(emptyDt.idom("entry").empty());
+    return 0;
+}
+
+// The textbook iterative dominator-SET dataflow: Dom(b) = {b} ∪ ⋂ Dom(pred),
+// solved to a fixed point. Independent of any dominator-tree algorithm, and
+// therefore an oracle for the CHK implementation.
+static std::map<int, std::set<int>> referenceDominators(
+    int entry, int n, const std::vector<std::vector<int>>& succs) {
+    std::vector<std::vector<int>> preds(n);
+    for (int u = 0; u < n; u++)
+        for (int v : succs[u]) preds[v].push_back(u);
+    std::set<int> all;
+    for (int i = 0; i < n; i++) all.insert(i);
+    // Every node starts at the top of the lattice (except the entry) so a
+    // self-loop cannot pin a node's set below its true dominators.
+    std::vector<std::set<int>> dom(n, all);
+    dom[entry] = {entry};
+    bool changed = true;
+    while (changed) {
+        changed = false;
+        for (int b = 0; b < n; b++) {
+            if (b == entry) continue;
+            std::set<int> in = all;
+            for (int p : preds[b]) {
+                std::set<int> inter;
+                std::set_intersection(in.begin(), in.end(), dom[p].begin(), dom[p].end(),
+                                      std::inserter(inter, inter.begin()));
+                in = inter;
+            }
+            in.insert(b);
+            if (in != dom[b]) { dom[b] = in; changed = true; }
+        }
+    }
+    std::map<int, std::set<int>> out;
+    for (int i = 0; i < n; i++) out[i] = dom[i];
+    return out;
+}
+
+int testDominatorRandomLayouts() {
+    // CIDER-BUG-259, at scale: random CFGs in random block layouts, each
+    // checked against the iterative dominator-set oracle above. The layout
+    // permutation is what makes this the ticket's case — a sixth of the
+    // generated blocks have an immediate dominator numbered AFTER them, and
+    // dead blocks appear throughout. Deterministic (fixed seed) so a failure
+    // reproduces exactly.
+    std::mt19937 rng(20260930);
+    long violatingLayouts = 0, deadBlocks = 0;
+    const int kIters = 400;
+    for (int iter = 0; iter < kIters; iter++) {
+        int n = 2 + (int)(rng() % 9);
+        std::vector<std::vector<int>> succs(n);
+        for (int u = 0; u < n; u++) {
+            int k = (int)(rng() % 3);
+            for (int j = 0; j < k; j++) succs[u].push_back((int)(rng() % n));
+        }
+        // Layout order: a random permutation of the vertices, so the block
+        // index is unrelated to the CFG's shape.
+        std::vector<int> order(n);
+        for (int i = 0; i < n; i++) order[i] = i;
+        std::shuffle(order.begin(), order.end(), rng);
+        int entry = order[0];
+        std::vector<int> pos(n);
+        for (int p = 0; p < n; p++) pos[order[p]] = p;
+        // The entry always branches; every other block must terminate too,
+        // so every block gets a BR or a COND_BR.
+        if (succs[entry].empty()) succs[entry].push_back((int)(rng() % n));
+        for (int u = 0; u < n; u++)
+            if (succs[u].empty()) succs[u].push_back((int)(rng() % n));
+
+        auto fn = std::make_unique<cider::FunctionIR>("f", cider::IRType::VOID);
+        std::vector<std::string> name(n);
+        for (int i = 0; i < n; i++) name[i] = "b" + std::to_string(i);
+        for (int p = 0; p < n; p++) {
+            int u = order[p];
+            if (succs[u].size() == 1) fn->addBlock(brBlock(name[u], {name[succs[u][0]]}));
+            else fn->addBlock(condBrBlock(name[u], name[succs[u][0]], name[succs[u][1]]));
+        }
+
+        cider::DominatorTree dt;
+        dt.build(*fn);
+        auto ref = referenceDominators(entry, n, succs);
+        std::vector<bool> reach(n, false);
+        std::vector<int> st{entry};
+        reach[entry] = true;
+        while (!st.empty()) {
+            int u = st.back(); st.pop_back();
+            for (int v : succs[u]) if (!reach[v]) { reach[v] = true; st.push_back(v); }
+        }
+        for (int i = 0; i < n; i++) if (!reach[i]) deadBlocks++;
+
+        for (int u = 0; u < n; u++) {
+            if (u == entry) {
+                CHECK(dt.idom(name[u]) == name[u]);
+                continue;
+            }
+            if (!reach[u]) {
+                // Dead code: no dominator, and asking must not throw.
+                CHECK(dt.idom(name[u]).empty());
+                continue;
+            }
+            // The idom must be the strict dominator whose set is exactly one
+            // larger — the definition of an immediate dominator.
+            const std::string& got = dt.idom(name[u]);
+            CHECK(!got.empty());
+            int gp = -1;
+            for (int c = 0; c < n; c++) if (name[c] == got) gp = c;
+            CHECK(gp >= 0 && gp != u);
+            if (gp > u) violatingLayouts++;
+            CHECK(ref[u].count(gp) == 1);
+            CHECK(ref[u].size() == ref[gp].size() + 1);
+            // dominates() must agree with the oracle in both directions.
+            for (int q = 0; q < n; q++) {
+                bool want = (q == u) || (reach[q] && ref[u].count(q) == 1);
+                CHECK(dt.dominates(name[q], name[u]) == want);
+            }
+        }
+    }
+    // The generator must actually produce the ticket's shape, or the rest of
+    // this test proves nothing.
+    CHECK(violatingLayouts > kIters);
+    CHECK(deadBlocks > kIters);
+    return 0;
+}
+
+int testLicmDominatorLayoutIndependent() {
+    // CIDER-BUG-259 end to end: LICM builds the dominator tree, then the loop
+    // forest, then inserts a preheader, then rebuilds. This loop's body block
+    // is numbered BEFORE its header, the layout the landing-pad pass's first
+    // version produced — the whole pipeline used to abort on it. The hoisted
+    // `mul` must land in the inserted preheader either way.
+    auto build = [](bool violatingLayout) {
+        auto fn = std::make_unique<cider::FunctionIR>("f", cider::IRType::VOID);
+        if (violatingLayout) {
+            fn->addBlock(brBlock("entry", {"header"}));
+            fn->addBlock(brBlock("body", {"latch"}));
+            fn->addBlock(condBrBlock("header", "body", "exit"));
+            fn->addBlock(brBlock("latch", {"header"}));
+        } else {
+            fn->addBlock(brBlock("entry", {"header"}));
+            fn->addBlock(condBrBlock("header", "body", "exit"));
+            fn->addBlock(brBlock("body", {"latch"}));
+            fn->addBlock(brBlock("latch", {"header"}));
+        }
+        fn->addBlock(retBlock("exit"));
+        // body: `%m = mul 2, 3` (loop-invariant, hoisted), `%i = add %i, 1`
+        auto body = [&]() {
+            auto b = std::make_unique<cider::BasicBlock>("body");
+            cider::IRInstruction m;
+            m.op = cider::IROp::MUL;
+            m.dest = cider::IRValue::Register("m", cider::IRType::I32);
+            m.args = {cider::IRValue::Constant(2, cider::IRType::I32),
+                      cider::IRValue::Constant(3, cider::IRType::I32)};
+            b->addInstruction(m);
+            cider::IRInstruction add;
+            add.op = cider::IROp::ADD;
+            add.dest = cider::IRValue::Register("a", cider::IRType::I32);
+            add.args = {cider::IRValue::Register("b", cider::IRType::I32),
+                        cider::IRValue::Constant(1, cider::IRType::I32)};
+            b->addInstruction(add);
+            cider::IRInstruction br;
+            br.op = cider::IROp::BR;
+            br.args = {cider::IRValue::Label("latch")};
+            b->addInstruction(br);
+            return b;
+        }();
+        // Replace the placeholder body block added above with the real one.
+        for (size_t i = 0; i < fn->getBlocks().size(); i++) {
+            if (fn->getBlocks()[i]->getName() == "body") {
+                fn->getBlocks()[i] = std::move(body);
+                break;
+            }
+        }
+        return fn;
+    };
+
+    for (int shape = 0; shape < 2; shape++) {
+        auto fn = build(shape == 0);
+        cider::ModuleIR mod;
+        mod.addFunction(std::move(fn));
+        cider::SSALicmPass licm;
+        CHECK(licm.run(mod));   // preheader inserted, mul hoisted
+        bool foundPreheader = false, mulInPreheader = false, mulInBody = false;
+        for (const auto& b : mod.getFunctions()[0]->getBlocks()) {
+            bool isPreheader = b->getName().find("_preheader") != std::string::npos;
+            if (isPreheader) foundPreheader = true;
+            for (const auto& in : b->getInstructions()) {
+                if (in.op != cider::IROp::MUL) continue;
+                if (isPreheader) mulInPreheader = true;
+                if (b->getName() == "body") mulInBody = true;
+            }
+        }
+        CHECK(foundPreheader);
+        CHECK(mulInPreheader);
+        CHECK(!mulInBody);
+    }
+    return 0;
+}
+
 int testInliner() {
     // A small helper gets inlined; recursion does not.
     auto r = genModule(
@@ -2926,6 +3300,10 @@ int run() {
     CHECK(testSubDerivedStoreLicm() == 0);
     CHECK(testSubUnknownBaseStoreLicm() == 0);
     CHECK(testSubDerivedEscapeLicm() == 0);
+    CHECK(testDominatorLayoutIndependent() == 0);
+    CHECK(testDominatorUnreachableAndMalformed() == 0);
+    CHECK(testDominatorRandomLayouts() == 0);
+    CHECK(testLicmDominatorLayoutIndependent() == 0);
     CHECK(testInliner() == 0);
     CHECK(testInlinerSiteBudget() == 0);
     return 0;

@@ -11798,12 +11798,18 @@ public:
         }
         // Lay the new blocks out front to back: continuation, then its
         // landing group, for the first call first. That order keeps the
-        // layout a depth-first order of the CFG, which the passes downstream
-        // assume when they lay a block's dominator out before it
-        // (DominatorTree::build walks the blocks in index order to fill its
-        // depth map). The reverse order — every continuation before every
-        // landing — put a landing ahead of the continuation that branches to
-        // it, and the depth map came up short.
+        // layout a depth-first order of the CFG, which is what a reader (and
+        // any future pass that walks blocks front to back) expects: each
+        // group is dominated by the block that branches into it.
+        //
+        // CIDER-BUG-259: this used to be a hard requirement, because
+        // DominatorTree::build filled its depth map in block-index order and
+        // therefore needed every block's dominator to be numbered BEFORE it.
+        // The tree is now built from the CFG alone, so the order below is
+        // hygiene, not correctness. It is kept because the reverse order —
+        // every continuation before every landing — is genuinely harder to
+        // read, and because the emitted asm is pinned byte-for-byte by the
+        // test corpus.
         std::vector<std::unique_ptr<BasicBlock>> insert;
         for (size_t j = sites.size(); j-- > 0;) {
             for (auto& b : fresh[j].second) insert.push_back(std::move(b));
