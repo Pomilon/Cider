@@ -1,0 +1,47 @@
+// CIDER-BUG-150: the return-position list conversion keeps the shared
+// interface rule's rejections — a class missing a required method, a
+// same-spelled method with a non-matching signature, and a different
+// interface are all rejected, exactly like the declaration site.
+interface Shape {
+  func area() -> int;
+}
+
+interface Named {
+  func name() -> int;
+}
+
+class Bad {
+  var x: int;
+}
+
+class WrongSig {
+  var side: int;
+  func area(x: int) -> int { return this.side * x; }
+}
+
+class Sq {
+  var side: int;
+  func area() -> int { return this.side; }
+}
+
+func retBad() -> [Shape; 2] {
+  var b: Bad;
+  var s: Sq;
+  return [b, s];
+}
+
+func retSig() -> [Shape; 2] {
+  var w: WrongSig;
+  var s: Sq;
+  return [w, s];
+}
+
+func retNamed() -> [Named; 2] {
+  var s: Sq;
+  var i: Shape = s;
+  return [i, i];
+}
+
+func main() -> int {
+  return 0;
+}

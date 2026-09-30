@@ -1,0 +1,3 @@
+Type 'Bad' does not implement interface 'Shape': missing method 'area'
+Type 'WrongSig' does not implement interface 'Shape': missing method 'area'
+Cannot assign interface 'Shape' to interface 'Named'
