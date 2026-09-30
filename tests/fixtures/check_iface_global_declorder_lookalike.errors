@@ -1,0 +1,5 @@
+Type 'LookAlike' does not implement interface 'iface_global_declorder_lib::Draw': missing method 'draw'
+Type 'Missing' does not implement interface 'iface_global_declorder_lib::Draw': missing method 'draw'
+Type 'LookAlike' does not implement interface 'iface_global_declorder_lib::DDraw': missing method 'draw'
+Type 'Missing' does not implement interface 'iface_global_declorder_lib::DDraw': missing method 'draw'
+symbol 'gHidden' is not exported from module 'iface_global_declorder_lib'

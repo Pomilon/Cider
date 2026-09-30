@@ -5363,17 +5363,18 @@ public:
                 // the resolved type keeps indexing and calls consistent.
                 // (Non-alias types are returned unchanged.)
                 lastExprType_ = resolveTypeAlias(lastExprType_);
-                // CIDER-BUG-238: recover the interface flag here too, so a
-                // read of a module-scope interface-typed global presents its
-                // ADDRESS (the address-of branch below tests isInterface) and
-                // the dispatch then reads both fat-pointer words out of the
-                // slot. The collector does not flag a VARIABLE declaration,
-                // and a from-imported name binds its stale unflagged object,
-                // so without this the read took the scalar branch, loaded the
-                // 8-byte DATA word, and the interface dispatch indexed that
-                // word as if it were the fat pointer — reading the concrete
-                // object's own fields as a vtable pointer. The canonical name
-                // above is what makes the by-name lookup succeed (CIDER-BUG-102).
+                // CIDER-BUG-243: still recover the flag BY NAME here, for the
+                // shapes the collector does NOT flag on a declaration: an
+                // interface ELEMENT stripped from a bare array element name
+                // (a `[Shape; 2]` wrapper stays unflagged by design,
+                // CIDER-BUG-069) and the bindings the checker/this file create
+                // outside a `var` declaration (a `for (var x in a)` element, a
+                // catch variable, a match binding, `this`, a deref/field
+                // expression). A `var` declaration now carries the flag from
+                // collection (symbol_collector.h visit(VarDeclStmt)), and the
+                // guard below makes this a no-op for it — which is exactly the
+                // property the canonical name from canonicalizeSymbolType
+                // above gives us (CIDER-BUG-102).
                 lastExprType_ = resolveInterfaceNominal(lastExprType_);
                 if (resolveStructOrClassSymbol(lastExprType_)) {
                     lastExprType_.isUserDefined = true;
@@ -5543,40 +5544,27 @@ public:
         return baseSym && baseSym->kind == SymbolKind::MODULE;
     }
 
-    // CIDER-BUG-238: the DECLARED type of a VARIABLE symbol — the one recovery
-    // every value-read site of a module-scope global has to perform, and the
-    // one they had each been re-deriving (differently) for themselves.
+    // CIDER-BUG-238: the DECLARED type of a VARIABLE symbol — canonicalized
+    // in the symbol's defining module, so the bare, from-alias and
+    // module-qualified spellings of one global agree.
     //
-    // The symbol's own `type` is not usable as-is for a global of ANOTHER
-    // module, for two independent reasons that both bite the from-alias
-    // spelling (`from lib import g; g = c;` / `g.m()`):
-    //
-    //   * the name is spelled as WRITTEN in the DEFINING module (`lib`'s bare
-    //     `ROther`), and the use site's scope need not contain that spelling
-    //     (CIDER-BUG-102). canonicalizeSymbolType re-roots it in the owner;
-    //   * the collector never resolves the interface flag on a VARIABLE
-    //     declaration — unlike a class field, a struct field and every
-    //     function signature, which all go through resolveInterfaceTypeFlag
-    //     — so `sym->type.isInterface` is false and the fat pointer has to be
-    //     recovered by name.
-    //
-    // A from-imported name binds the COLLECTOR's object, and ir_gen's own
-    // fresh symbol from visit(VarDeclStmt) — the one that DOES carry the
-    // resolved flag — is defined only in the owning module's scope, so it
-    // never reaches the alias. Every read site therefore has to redo this
-    // recovery, and a site that reads the raw `sym->type` silently miscompiles
-    // while the checker (which recovers it in visit(IdentifierExpr)) accepts
-    // the program: the STORE then writes the concrete object's 4 bytes into
-    // the 16-byte slot (nil vtable on dispatch), and the READ takes the
-    // address of a non-interface value, so the 8-byte data word is indexed as
-    // a fat pointer. One definition of the recovery, used everywhere, is what
-    // keeps the bare, from-alias and module-qualified spellings of one global
-    // in agreement.
+    // The name is spelled as WRITTEN in the DEFINING module (`lib`'s bare
+    // `ROther`), and the use site's scope need not contain that spelling
+    // (CIDER-BUG-102), so canonicalizeSymbolType re-roots it in the owner and
+    // the alias chain is resolved against that module. Neither step touches
+    // the interface flag: CIDER-BUG-243 resolves it at the DECLARATION
+    // (symbol_collector.h's visit(VarDeclStmt) -> resolveInterfaceTypeFlag),
+    // so the symbol's own `type` already carries it and both helpers above
+    // preserve it (canonicalizeNominalInModule rewrites only `name`;
+    // resolveTypeAliasImpl ORs it in, CIDER-BUG-078). A from-imported name
+    // binds this very object — the collector's — because the checker's and
+    // this file's own flagged replacements are defined only in the OWNING
+    // module's scope, so the flag reaches the alias with the symbol.
     TypeInfo declaredVarType(const std::shared_ptr<Symbol>& sym, const std::string& name) {
         std::string defMod = definingModuleFor(sym, name);
         TypeInfo t = canonicalizeSymbolType(sym, name);
         if (t.pointerLevel == 0) t = resolveTypeAlias(t, defMod);
-        return resolveInterfaceNominal(t);
+        return t;
     }
 
     // CID-020/021 §3: the declared type of a module-qualified global (`mod.g`),
@@ -5605,12 +5593,11 @@ public:
                 // resolved shape (visit(IdentifierExpr) does the same), so
                 // chained indexing and assignment-target typing see the real
                 // array/struct shape instead of the alias spelling.
-                // CIDER-BUG-238: the same recovery that read does — the
-                // canonical name and the interface flag — so a from-imported
-                // interface global is typed as the fat pointer here too. Without
-                // the flag this typed a 16-byte slot as a plain nominal, which
-                // is how a field-of / element-of / volatile read of one lost
-                // the fat pointer the dispatch needs.
+                // CIDER-BUG-238/243: the same canonicalization the read path
+                // does, so a from-imported interface global is typed as the
+                // fat pointer here too — the flag now rides on the symbol
+                // itself (resolved at the declaration), so a field-of /
+                // element-of / volatile read of one cannot lose it.
                 return declaredVarType(sym, id->getName());
             }
         } else if (auto mem = dynamic_cast<MemberAccessExpr*>(expr)) {
@@ -6461,17 +6448,18 @@ public:
             if (auto ident = dynamic_cast<IdentifierExpr*>(shapeTarget)) {
                 auto sym = symbolTable_.resolve(ident->getName());
                 if (sym) {
-                    // CIDER-BUG-238: the declared type has to be RECOVERED
-                    // (canonicalized in the defining module, interface flag
-                    // resolved), not read raw off the symbol — a from-imported
-                    // global's symbol carries the owner's bare nominal with no
-                    // flag, and ir_gen's own flagged replacement never reaches
-                    // the alias. Reading it raw, the flag was missed, the store
-                    // fell through to the plain aggregate path, and a concrete
-                    // value was memcpy'd into the 16-byte interface slot with
-                    // the vtable word left at zero: a program the checker
-                    // accepted that died with "call: nil function pointer" on
-                    // dispatch, on all three backends.
+                    // CIDER-BUG-238/243: the declared type is canonicalized in
+                    // the defining module (declaredVarType) and carries the
+                    // interface flag straight off the symbol — the collector
+                    // resolves it at the declaration, so the from-alias
+                    // (which binds the collector's object, not the flagged
+                    // replacement this file defines in the owning module's
+                    // scope) is flagged too. Reading it raw, or leaving the
+                    // flag off, the store fell through to the plain aggregate
+                    // path and a concrete value was memcpy'd into the 16-byte
+                    // interface slot with the vtable word left at zero: a
+                    // program the checker accepted that died with "call: nil
+                    // function pointer" on dispatch, on all three backends.
                     targetIface = declaredVarType(sym, ident->getName());
                     haveInterfaceTarget = true;
                 }
@@ -6494,6 +6482,12 @@ public:
                 haveInterfaceTarget = true;
             }
             if (haveInterfaceTarget) {
+                // CIDER-BUG-243: for an IDENTIFIER target the flag is already on
+                // the declared type (resolved at the declaration), so this is a
+                // no-op there; it stays load-bearing for the shapes the
+                // collector deliberately leaves unflagged — an array ELEMENT
+                // stripped from a bare element name and a deref through a
+                // pointer-to-interface (CIDER-BUG-100/135).
                 targetIface = resolveInterfaceNominal(targetIface);
                 if (targetIface.isInterface) {
                     emitInterfaceStore(targetIface, addr, stmt.getValue(),

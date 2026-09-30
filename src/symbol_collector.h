@@ -64,11 +64,13 @@ class SymbolCollector : public ASTVisitor {
     std::map<const StructSymbol*, size_t> aggregateIndex_;
     // CIDER-BUG-209: interface and class/struct method SIGNATURES whose
     // parameter/return spellings were resolved while collection was still in
-    // progress. The interface-typed return/parameter is a 16-byte fat
-    // pointer, and the flag that says so is resolved eagerly at the
-    // declaration (resolveInterfaceTypeFlag). A signature naming an
-    // interface declared LATER cannot resolve then, so the collected TypeInfo
-    // kept isInterface=false while the very same spelling collected after the
+    // progress, plus CIDER-BUG-243: a VARIABLE declaration whose type
+    // spelling stayed unresolved for the same reason. The interface-typed
+    // return/parameter/variable is a 16-byte fat pointer, and the flag that
+    // says so is resolved eagerly at the declaration
+    // (resolveInterfaceTypeFlag). A signature naming an interface declared
+    // LATER cannot resolve then, so the collected TypeInfo kept
+    // isInterface=false while the very same spelling collected after the
     // interface declaration carried true — a declaration-order sensitivity in
     // a flag that is part of the type's identity (TypeInfo::operator==
     // compares isInterface).
@@ -79,15 +81,18 @@ class SymbolCollector : public ASTVisitor {
     // checkInterfaceValue), or, for an override, "its signature does not match
     // base method" (validateOverrides). When BOTH sides are collected before
     // the interface, both are stale and the pair happens to match, which is
-    // what hid the defect.
+    // what hid the defect. For a variable the same staleness made a
+    // from-imported global read as a plain nominal, which is the gap
+    // CIDER-BUG-230/238 recovered per read site until this pass closed it.
     //
-    // Each interface and aggregate is recorded here at declaration time and
-    // re-resolved by resolveDeferredSignatureFlags() once the whole program
-    // is known (the same second pass as the CIDER-BUG-105 layout finalize),
-    // so declaration order stops mattering. `scope` is the scope the
-    // spellings were written in — a module scope, or the transient local
-    // scope of a function-body declaration — so the re-resolution binds the
-    // name exactly where the eager pass did.
+    // Each interface, aggregate and forward-referenced variable is recorded
+    // here at declaration time and re-resolved by
+    // resolveDeferredSignatureFlags() once the whole program is known (the
+    // same second pass as the CIDER-BUG-105 layout finalize), so declaration
+    // order stops mattering. `scope` is the scope the spellings were written
+    // in — a module scope, or the transient local scope of a function-body
+    // declaration — so the re-resolution binds the name exactly where the
+    // eager pass did.
     //
     // The re-resolution only ADDS flags (resolveInterfaceTypeFlag never clears
     // one), so a program that already resolved every spelling is untouched and
@@ -96,7 +101,7 @@ class SymbolCollector : public ASTVisitor {
     // unknown-type diagnostics are unchanged.
     struct DeferredSignatures {
         std::shared_ptr<Symbol> sym;
-        Scope* scope = nullptr;  // scope the signature spellings bind in
+        Scope* scope = nullptr;  // scope the spellings bind in
     };
     std::vector<DeferredSignatures> deferredSignatures_;
     // CIDER-BUG-119: aggregate declarations at function/block scope. The
@@ -676,6 +681,26 @@ public:
         // here leaked them (pre-existing: two classes could not share a
         // field name, and bare field names became phantom variables).
         if (inClassFieldDecl_) return;
+        // CIDER-BUG-243: a VARIABLE declaration resolves its interface-ness
+        // here, in the declaration's OWN scope, like every other collected
+        // type position (class field, struct field, function/method/
+        // constructor parameter, function return). Until now a global's
+        // `sym->type.isInterface` was false, so every value-read site had to
+        // recover the 16-byte fat pointer BY NAME: a from-imported name binds
+        // THIS object (the checker and the IR generator each replace it in the
+        // DECLARING module's scope only, so their flagged copies never reach
+        // the alias), and a site that read the raw type miscompiled while the
+        // checker — which recovered it per read — accepted the program.
+        //
+        // The declaration's own scope is current here, so a bare spelling binds
+        // where it was written and a dotted one (`lib.Shape`) resolves its
+        // qualifier as every other type position does; the helper follows
+        // `type S = Shape` chains with each hop re-rooted in the alias's own
+        // defining module (CIDER-BUG-078/102, the CIDER-BUG-128 canonical
+        // identity rule). An array wrapper and a pointer keep their own
+        // spelling unflagged (CIDER-BUG-069/112) — only a scalar interface
+        // value is the fat pointer.
+        resolveInterfaceTypeFlag(typeInfo);
         auto sym = std::make_shared<Symbol>();
         sym->kind = SymbolKind::VARIABLE;
         sym->name = stmt.getName();
@@ -703,6 +728,22 @@ public:
             // functions). Locals record harmlessly: ir_gen only queries
             // provenance for symbols outside variableValues_.
             recordDefiningModule(sym);
+            // CIDER-BUG-243/209: a global whose declared type names an
+            // interface declared BELOW it kept isInterface=false above,
+            // because the eager pass had nothing to resolve against — the
+            // same forward reference CIDER-BUG-209 fixed for method
+            // signatures. Record it for the post-collection re-resolution
+            // below, scoped to this declaration, so declaration order stops
+            // mattering for a variable's representation either. Only a
+            // non-flagged, non-builtin nominal is recorded: a pointer, an
+            // array, a fn(...) signature and a builtin were never candidates
+            // (the helper's own rules), so a program with no interface-typed
+            // variables records nothing and stays byte-identical.
+            if (!typeInfo.isInterface && !isKnownTypeName(typeInfo.name) &&
+                !typeInfo.isArray && typeInfo.pointerLevel == 0 &&
+                !typeInfo.isFunctionPointer) {
+                deferSignatureResolution(sym);
+            }
         }
     }
 
@@ -1689,8 +1730,21 @@ public:
         // scalar target is the fat pointer (same rule as CIDER-BUG-069's
         // "arrays keep their wrapper unflagged").
         TypeInfo aliasTarget = sym ? sym->type : TypeInfo{};
+        // CIDER-BUG-112 (chain form): the walk used to overwrite `aliasTarget`
+        // at every hop, so a chain THROUGH an array target forgot it —
+        // `type A2 = [S; 2]; type A3 = A2;` ended on A3 -> A2 (array) -> S ->
+        // Shape and the final scalar Shape made the whole aggregate look like
+        // one 16-byte interface. The rule the comment above states is "an
+        // alias-to-array STOPS the walk", so stop it: an array target anywhere
+        // on the chain makes the whole spelling an aggregate, and an aggregate
+        // is never an interface value. A chain with no array hop is unchanged.
+        bool chainHitArray = aliasTarget.isArray;
         while (sym && sym->isTypeAlias && !sym->type.name.empty() &&
                sym->type.name != type.name && visiting.insert(sym->type.name).second) {
+            if (sym->type.isArray || sym->type.pointerLevel > 0) {
+                chainHitArray = true;
+                break;
+            }
             aliasTarget = sym->type;
             // CIDER-BUG-102: each hop's target spelling belongs to the hop
             // symbol's defining module (`type M = lib.Shape` in mid must
@@ -1699,14 +1753,14 @@ public:
             sym = inModuleScope(definingModuleOfSymbol(hopSym),
                                 [&] { return resolveNominalType(aliasTarget.name); });
         }
-        if (sym && sym->kind == SymbolKind::INTERFACE &&
+        if (sym && sym->kind == SymbolKind::INTERFACE && !chainHitArray &&
             aliasTarget.pointerLevel == 0 && !aliasTarget.isArray) {
             type.isInterface = true;
         }
     }
 
-    // CIDER-BUG-209: record an interface or aggregate whose method
-    // signatures were resolved against the declarations known at its own
+    // CIDER-BUG-209: record an interface, an aggregate or a variable whose
+    // type spelling was resolved against the declarations known at its own
     // declaration site, for the second pass below. The scope is captured, not
     // re-derived, so a function-body declaration re-resolves in the same local
     // scope the eager pass used (the scope object outlives collection — the
@@ -1756,6 +1810,19 @@ public:
             if (rec.sym->kind == SymbolKind::INTERFACE) {
                 auto iface = std::static_pointer_cast<InterfaceSymbol>(rec.sym);
                 for (auto& m : iface->methods) resolveSignature(m);
+                continue;
+            }
+            // CIDER-BUG-243: a VARIABLE's `type` is the collector's record of
+            // a `var` declaration — and the object a cross-module from-alias
+            // binds, since the checker and the IR generator replace it only in
+            // the DECLARING module's scope. So the second pass has to reach it
+            // too, or a global naming an interface declared below it keeps the
+            // unflagged shape that the per-site by-name recoveries (CIDER-BUG-
+            // 230/238) were papering over. resolveInterfaceTypeFlag only ever
+            // ADDS a flag, so a declaration whose interface was already known
+            // is untouched.
+            if (rec.sym->kind == SymbolKind::VARIABLE) {
+                resolveInterfaceTypeFlag(rec.sym->type);
                 continue;
             }
             if (rec.sym->kind != SymbolKind::STRUCT && rec.sym->kind != SymbolKind::CLASS) {

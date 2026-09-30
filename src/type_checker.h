@@ -2489,6 +2489,11 @@ public:
     // resolves through resolveScopedRaw's canonical path either way, so this
     // only re-roots a BARE name, which is exactly the case a field's raw
     // spelling is.
+    //
+    // CIDER-BUG-243: the module-qualified VARIABLE read no longer needs this
+    // (its declaration resolves the flag itself, in its own module, so
+    // `mem->type` carries it); this remains for the embedded-interface walk
+    // above, which is a FIELD spelling and still resolved at the use site.
     std::shared_ptr<Symbol> resolveInterfaceSymbolInModule(TypeInfo t, const std::string& defModule) {
         if (defModule.empty() || defModule == currentModule_) return resolveInterfaceSymbol(t);
         Scope* ms = scopeForModule(defModule);
@@ -2693,6 +2698,23 @@ public:
         if (!declaredType.isInterface && declaredType.pointerLevel == 0 &&
             resolveInterfaceSymbol(declaredType)) {
             declaredType.isInterface = true;
+        }
+        // CIDER-BUG-243: the checker's own lookup above runs while this
+        // declaration is visited, so it cannot resolve a global whose
+        // interface is declared BELOW it — the same forward reference
+        // CIDER-BUG-209 closed for method signatures. The symbol this phase
+        // replaces (below) is the COLLECTOR's, whose flag was resolved after
+        // the whole program was known, so inherit it here rather than let the
+        // replacement silently drop it: the store/read paths, the interface
+        // satisfaction comparison and TypeInfo::operator== all read this
+        // symbol. A flag is only ever inherited, never cleared, so a
+        // declaration resolvable here is unchanged.
+        if (!declaredType.isInterface) {
+            if (auto prevSym = symbolTable_.getCurrentScope()->resolveLocal(stmt.getName())) {
+                if (prevSym->kind == SymbolKind::VARIABLE && prevSym->type.isInterface) {
+                    declaredType.isInterface = true;
+                }
+            }
         }
         // CIDER-BUG-071: an alias declaration (`type Row = [u8;3]`) stores
         // the alias spelling in declaredType, so isArray is false until the
@@ -3704,6 +3726,14 @@ public:
                 lastExprType_ = resolveFunctionPointerAlias(lastExprType_);
                 // Resolve interface type; CIDER-BUG-078: alias spellings
                 // (`type S = Shape`) resolve through their chain.
+                // CIDER-BUG-243: a `var` declaration now carries the flag from
+                // collection, so this is a no-op for one — but the guard is
+                // load-bearing for the bindings that are NOT `var` declarations
+                // and whose types no declaration ever flagged: an interface
+                // ELEMENT stripped from a `[Shape; 2]` array wrapper
+                // (unflagged by design, CIDER-BUG-069), a `for (var x in a)`
+                // variable, a catch variable, a match binding, `this`, and a
+                // deref/field expression.
                 if (!lastExprType_.isInterface && lastExprType_.pointerLevel == 0 &&
                     resolveInterfaceSymbol(lastExprType_)) {
                     lastExprType_.isInterface = true;
@@ -4018,29 +4048,21 @@ public:
             return;
         }
         lastExprType_ = canonicalizeInModule(mem->type, modSym->logicalName, expr.getLine());
-        // CIDER-BUG-230: a variable's interface flag is resolved BY NAME at
-        // every value read, because the collector does not flag one for a
-        // `var` declaration (unlike a class field, a struct field and a
-        // function signature — see symbol_collector.h's resolveInterfaceTypeFlag
-        // call sites, which cover no variable). visit(IdentifierExpr) does that
-        // resolution, so a from-imported / bare read of `lib`'s interface
-        // global presents the 16-byte fat pointer; this qualified spelling did
-        // not, so `lib.rIface = lib.rImpl` reached the generic
-        // areTypesCompatible path and was rejected with a bare nominal mismatch
-        // instead of the interface conversion it is. Resolve the flag here too,
-        // exactly as visit(IdentifierExpr) does, so the two spellings of one
-        // global are one type.
-        //
-        // The lookup is rooted in the OWNING module (CIDER-BUG-102): a spelling
-        // canonicalizeInModule left bare still names the interface as written
-        // there, which the use site's scope need not see. A canonical
-        // `lib::ROther` resolves through resolveScopedRaw's canonical path
-        // either way, so this only re-roots the bare-name fallback.
-        if (!lastExprType_.isInterface && lastExprType_.pointerLevel == 0 &&
-            !lastExprType_.isArray &&
-            resolveInterfaceSymbolInModule(lastExprType_, modSym->logicalName)) {
-            lastExprType_.isInterface = true;
-        }
+        // CIDER-BUG-230/243: this spelling and visit(IdentifierExpr)'s are now
+        // one type without a by-name recovery here. `mem` is a module-scope
+        // VARIABLE (every other kind returned above), and CIDER-BUG-243
+        // resolves the interface flag on a `var` declaration during collection,
+        // in the declaration's own module, so `mem->type` already carries it;
+        // canonicalizeInModule rewrites only the nominal NAME, never the flag.
+        // Before that, this qualified spelling resolved the flag by hand and the
+        // bare/from-alias one did it in visit(IdentifierExpr), so `lib.rIface =
+        // lib.rImpl` reached the generic areTypesCompatible path and was
+        // rejected with a bare nominal mismatch instead of the interface
+        // conversion it is ("Type mismatch in assignment. Expected lib::ROther,
+        // got lib::RImpl"). The lookup this recovery used was rooted in the
+        // OWNING module (CIDER-BUG-102) — which is now where the declaration
+        // itself resolves it, so a global's flag is a property of its
+        // declaration and not of the spelling that reads it.
     }
 
     void visit(StructLiteralExpr& expr) override {

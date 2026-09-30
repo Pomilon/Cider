@@ -467,6 +467,128 @@ int run() {
     }
     CHECK(shadowRejected);
 
+    // CIDER-BUG-243: a `var` declaration resolves its interface-ness during
+    // collection, like every other collected type position. Until now ONLY the
+    // class field, the struct field and the function parameter carried the
+    // flag, so a global's `sym->type.isInterface` was false and every
+    // value-read site had to recover the 16-byte fat pointer by name (the
+    // ir_gen/type_checker recoveries added for CIDER-BUG-230/238). The
+    // contrast below is the whole bug: same interface, same collector, one
+    // position flagged and the other not.
+    {
+        const std::string iface = "interface Shape {\n  func area() -> int;\n}\n";
+        auto isIfaceVar = [](cider::SymbolTable& t, const char* name, bool* found) {
+            *found = false;
+            for (auto& s : t.getAllSymbols()) {
+                if (s->kind != cider::SymbolKind::VARIABLE || s->name != name) continue;
+                *found = true;
+                return s->type.isInterface;
+            }
+            return false;
+        };
+        bool found = false;
+
+        // Interface declared BEFORE the variable: the eager pass resolves it.
+        Result early = collectSrc(iface + "var g: Shape;\n");
+        CHECK(early.errors.empty());
+        CHECK(isIfaceVar(*early.table, "g", &found) && found);
+
+        // Interface declared AFTER the variable: the eager pass has nothing to
+        // resolve against, so this is the CIDER-BUG-209 deferred pass (extended
+        // to variables) that has to add the flag — declaration order must stop
+        // mattering for a variable's representation too.
+        Result late = collectSrc("var g: Shape;\n" + iface);
+        CHECK(late.errors.empty());
+        CHECK(isIfaceVar(*late.table, "g", &found) && found);
+
+        // Alias chain (`type S = Shape`, then alias-of-alias), each hop
+        // resolved in its own defining module (CIDER-BUG-078/102/128).
+        Result alias = collectSrc(iface + "type S = Shape;\ntype S2 = S;\nvar g: S2;\n");
+        CHECK(alias.errors.empty());
+        CHECK(isIfaceVar(*alias.table, "g", &found) && found);
+
+        // CIDER-BUG-112 (chain form): an array target anywhere on the alias
+        // chain keeps the WHOLE spelling an aggregate. The walk used to
+        // overwrite its remembered target at every hop, so `A2 = [S; 2];
+        // A3 = A2` ended on the scalar S and flagged the aggregate — a
+        // 16-byte interface slot for a 32-byte array, on the field, parameter
+        // and variable positions alike.
+        Result arrAlias = collectSrc(
+            iface + "type S = Shape;\ntype A2 = [S; 2];\ntype A3 = A2;\n"
+                    "var g: A3;\nvar h: A2;\nstruct H3 { var f: A3; }\n"
+                    "struct H2 { var f: A2; }\nfunc f3(x: A3) -> void {}\n");
+        CHECK(arrAlias.errors.empty());
+        bool haveG = false, haveH = false;
+        CHECK(!isIfaceVar(*arrAlias.table, "g", &haveG) && haveG);
+        CHECK(!isIfaceVar(*arrAlias.table, "h", &haveH) && haveH);
+        bool sawH3 = false, sawH2 = false, sawF3 = false;
+        for (auto& s : arrAlias.table->getAllSymbols()) {
+            if ((s->kind == cider::SymbolKind::STRUCT || s->kind == cider::SymbolKind::CLASS) &&
+                !s->isTypeAlias && (s->name == "H2" || s->name == "H3")) {
+                auto ss = std::static_pointer_cast<cider::StructSymbol>(s);
+                CHECK(ss->fields.size() == 1);
+                CHECK(!ss->fields[0].type.isInterface);
+                // Sized as two 16-byte fat-pointer elements, not one interface.
+                CHECK(ss->totalSize == 32);
+                if (s->name == "H3") sawH3 = true;
+                if (s->name == "H2") sawH2 = true;
+            } else if (s->kind == cider::SymbolKind::FUNCTION && s->name == "f3") {
+                auto fs = std::static_pointer_cast<cider::FunctionSymbol>(s);
+                CHECK(fs->parameterTypes.size() == 1);
+                CHECK(!fs->parameterTypes[0].isInterface);
+                sawF3 = true;
+            }
+        }
+        CHECK(sawH2 && sawH3 && sawF3);
+
+        // A pointer and an array wrapper are NOT interface values themselves
+        // (CIDER-BUG-069/112) — the same rule the field path already follows.
+        // A wrongly flagged wrapper would size and store it as one 16-byte
+        // interface, so pin the negative side too.
+        Result neg = collectSrc(iface + "var p: *Shape;\nvar a: [Shape; 2];\n");
+        CHECK(neg.errors.empty());
+        bool haveP = false, haveA = false;
+        CHECK(!isIfaceVar(*neg.table, "p", &haveP) && haveP);
+        CHECK(!isIfaceVar(*neg.table, "a", &haveA) && haveA);
+
+        // The contrast that made the bug visible: one interface, one collector,
+        // four positions. The field, the parameter and now the variable all
+        // carry the flag; the array wrapper must not.
+        Result contrast = collectSrc(
+            iface +
+            "class C {\n  var f: Shape;\n}\n"
+            "struct S {\n  var f: Shape;\n}\n"
+            "func take(x: Shape) -> int { return x.area(); }\n"
+            "var v: Shape;\n"
+            "var arr: [Shape; 2];\n");
+        CHECK(contrast.errors.empty());
+        bool haveV = false, haveArr = false;
+        CHECK(isIfaceVar(*contrast.table, "v", &haveV) && haveV);
+        CHECK(!isIfaceVar(*contrast.table, "arr", &haveArr) && haveArr);
+        bool haveField = false, haveParam = false;
+        for (auto& s : contrast.table->getAllSymbols()) {
+            if (s->kind == cider::SymbolKind::CLASS) {
+                auto cs = std::static_pointer_cast<cider::StructSymbol>(s);
+                CHECK(cs->fields.size() == 1);
+                CHECK(cs->fields[0].type.isInterface);
+                CHECK(cs->fields[0].offset == 0);
+                CHECK(cs->totalSize == 16);
+                haveField = true;
+            } else if (s->kind == cider::SymbolKind::STRUCT) {
+                auto ss = std::static_pointer_cast<cider::StructSymbol>(s);
+                CHECK(ss->fields.size() == 1);
+                CHECK(ss->fields[0].type.isInterface);
+                haveField = true;
+            } else if (s->kind == cider::SymbolKind::FUNCTION && s->name == "take") {
+                auto fs = std::static_pointer_cast<cider::FunctionSymbol>(s);
+                CHECK(fs->parameterTypes.size() == 1);
+                CHECK(fs->parameterTypes[0].isInterface);
+                haveParam = true;
+            }
+        }
+        CHECK(haveField && haveParam);
+    }
+
     return 0;
 }
 
