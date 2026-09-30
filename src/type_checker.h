@@ -3197,7 +3197,7 @@ public:
             if (op == "%" && (targetFloat || valueFloat)) {
                 error("Modulo operator '%' requires integer operands", stmt.getLine());
             }
-            if ((op == "&" || op == "|" || op == "^") && (targetFloat || valueFloat)) {
+            if ((op == "&" || op == "|" || op == "^" || op == "<<" || op == ">>") && (targetFloat || valueFloat)) {
                 error("Bitwise operator '" + op + "' requires integer operands", stmt.getLine());
             }
             // CIDER-BUG-056: `s += t` is the same unsupported concatenation
@@ -3217,7 +3217,10 @@ public:
             // operation, and explicit `*u8`/`char*` targets are untouched.
             if (targetString && valueString && op != "+" &&
                 (op == "-" || op == "*" || op == "/" || op == "%" ||
-                 op == "&" || op == "|" || op == "^")) {
+                 op == "&" || op == "|" || op == "^" ||
+                 // CIDER-FEAT-008: the shift forms join the same list, so
+                 // `s <<= t` is rejected rather than combining two addresses.
+                 op == "<<" || op == ">>")) {
                 error("Operator '" + op + "=' is not supported on two string values; "
                       "use std.string", stmt.getLine());
             }

@@ -1,0 +1,16 @@
+// CIDER-FEAT-008: `<<=` / `>>=` are the compound forms of `<<` / `>>`, so
+// they carry the same rules as their binary counterparts: the bitwise
+// operators have no float lowering, and a shift count of the wrong type is
+// a plain assignment mismatch. Both are rejected here instead of reaching
+// codegen (silent shl on a float register) or the VM (runtime throw).
+func main() -> int {
+  var a: f64 = 5.0;
+  a <<= 2;        // f64 target
+  var b: float = 6.0;
+  b >>= 1;        // float target
+  var c: int = 5;
+  c <<= 2.5;      // float value
+  var d: int = 5;
+  d >>= 1.5;      // float value
+  return 0;
+}

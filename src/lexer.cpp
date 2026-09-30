@@ -18,6 +18,8 @@ std::string Token::toString(TokenType type) {
 
         {TokenType::PLUS, "PLUS"}, {TokenType::MINUS, "MINUS"}, {TokenType::MULTIPLY, "MULTIPLY"}, {TokenType::DIVIDE, "DIVIDE"}, {TokenType::MODULO, "MODULO"}, {TokenType::ASSIGN, "ASSIGN"},
         {TokenType::PLUS_ASSIGN, "PLUS_ASSIGN"}, {TokenType::MINUS_ASSIGN, "MINUS_ASSIGN"}, {TokenType::MULT_ASSIGN, "MULT_ASSIGN"}, {TokenType::DIV_ASSIGN, "DIV_ASSIGN"}, {TokenType::MOD_ASSIGN, "MOD_ASSIGN"},
+        {TokenType::AMPERSAND_ASSIGN, "AMPERSAND_ASSIGN"}, {TokenType::BIT_OR_ASSIGN, "BIT_OR_ASSIGN"}, {TokenType::BIT_XOR_ASSIGN, "BIT_XOR_ASSIGN"},
+        {TokenType::LSHIFT_ASSIGN, "LSHIFT_ASSIGN"}, {TokenType::RSHIFT_ASSIGN, "RSHIFT_ASSIGN"},
         {TokenType::EQ, "EQ"}, {TokenType::NE, "NE"}, {TokenType::LT, "LT"}, {TokenType::LE, "LE"}, {TokenType::GT, "GT"}, {TokenType::GE, "GE"}, {TokenType::AND, "AND"}, {TokenType::OR, "OR"}, {TokenType::NOT, "NOT"}, {TokenType::QUESTION, "QUESTION"}, {TokenType::CARET, "CARET"}, {TokenType::AMPERSAND, "AMPERSAND"},
         {TokenType::ARROW, "ARROW"}, {TokenType::FAT_ARROW, "FAT_ARROW"}, {TokenType::BIT_OR, "BIT_OR"}, {TokenType::BIT_XOR, "BIT_XOR"}, {TokenType::BIT_NOT, "BIT_NOT"}, {TokenType::TILDE, "TILDE"}, {TokenType::LSHIFT, "LSHIFT"}, {TokenType::RSHIFT, "RSHIFT"},
 
@@ -589,13 +591,24 @@ Token Lexer::getNextToken() {
         case '<':
             advance();
             if (peek() == '=') { advance(); token = makeToken(TokenType::LE, "<="); }
-            else if (peek() == '<') { advance(); token = makeToken(TokenType::LSHIFT, "<<"); }
+            // CIDER-FEAT-008: `<<=`/`>>=` — the second `=` is peeked only
+            // after the pair is confirmed, so `a < <b` still lexes as two
+            // `<` tokens rather than a shift-assign.
+            else if (peek() == '<') {
+                advance();
+                if (peek() == '=') { advance(); token = makeToken(TokenType::LSHIFT_ASSIGN, "<<="); }
+                else { token = makeToken(TokenType::LSHIFT, "<<"); }
+            }
             else { token = makeToken(TokenType::LT, "<"); }
             break;
         case '>':
             advance();
             if (peek() == '=') { advance(); token = makeToken(TokenType::GE, ">="); }
-            else if (peek() == '>') { advance(); token = makeToken(TokenType::RSHIFT, ">>"); }
+            else if (peek() == '>') {
+                advance();
+                if (peek() == '=') { advance(); token = makeToken(TokenType::RSHIFT_ASSIGN, ">>="); }
+                else { token = makeToken(TokenType::RSHIFT, ">>"); }
+            }
             else { token = makeToken(TokenType::GT, ">"); }
             break;
         case '(': advance(); token = makeToken(TokenType::LPAREN, "("); break;

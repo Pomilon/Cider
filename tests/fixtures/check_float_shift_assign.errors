@@ -1,0 +1,4 @@
+Bitwise operator '<<' requires integer operands
+Bitwise operator '>>' requires integer operands
+Type mismatch in assignment. Expected int, got float
+Type mismatch in assignment. Expected int, got float

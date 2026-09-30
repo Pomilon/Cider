@@ -6310,6 +6310,13 @@ public:
             else if (compoundOp == "&") irOp = IROp::BIT_AND;
             else if (compoundOp == "|") irOp = IROp::BIT_OR;
             else if (compoundOp == "^") irOp = IROp::BIT_XOR;
+            // CIDER-FEAT-008: `<<=`/`>>=` emit the same LSHIFT/RSHIFT node
+            // as the plain binary shift, so the store below narrows back to
+            // the target's width and the `mixedIntCommon` promotion above
+            // stays off (shifts are excluded there, exactly as in
+            // visit(BinaryExpr)).
+            else if (compoundOp == "<<") irOp = IROp::LSHIFT;
+            else if (compoundOp == ">>") irOp = IROp::RSHIFT;
             else return;
 
             IRValue result = IRValue::Register(nextTemp(), widenedFloat ? IRType::F64 : current.type);

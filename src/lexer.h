@@ -79,6 +79,8 @@ enum class TokenType {
     AMPERSAND_ASSIGN,
     BIT_OR_ASSIGN,
     BIT_XOR_ASSIGN,
+    LSHIFT_ASSIGN,  // <<=
+    RSHIFT_ASSIGN,  // >>=
     EQ,
     NE,
     LT,

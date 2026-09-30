@@ -96,6 +96,36 @@ int run() {
     CHECK(lexWBad2.getNextToken().type == cider::TokenType::UNKNOWN);
     CHECK(repWBad2.hasErrors());
 
+    // CIDER-FEAT-008: the shift compound assignments. The trailing `=` is
+    // only consumed once the `<<` / `>>` pair is confirmed, so the plain
+    // shift, the comparison and two separate `<` / `>` tokens are unaffected.
+    cider::ErrorReporter repSA;
+    cider::Lexer lexSA("a <<= b >>= c << d >> e < f <  g > h >= i <= j", repSA);
+    auto nSA = [&] { return lexSA.getNextToken(); };
+    CHECK(nSA().type == cider::TokenType::IDENTIFIER);
+    auto shlAssign = nSA();
+    CHECK(shlAssign.type == cider::TokenType::LSHIFT_ASSIGN && shlAssign.value == "<<=");
+    CHECK(nSA().type == cider::TokenType::IDENTIFIER);
+    auto shrAssign = nSA();
+    CHECK(shrAssign.type == cider::TokenType::RSHIFT_ASSIGN && shrAssign.value == ">>=");
+    CHECK(nSA().type == cider::TokenType::IDENTIFIER);
+    CHECK(nSA().type == cider::TokenType::LSHIFT);   // `<<` is still a shift
+    CHECK(nSA().type == cider::TokenType::IDENTIFIER);
+    CHECK(nSA().type == cider::TokenType::RSHIFT);   // `>>` is still a shift
+    CHECK(nSA().type == cider::TokenType::IDENTIFIER);
+    CHECK(nSA().type == cider::TokenType::LT);       // `<` alone
+    CHECK(nSA().type == cider::TokenType::IDENTIFIER);
+    CHECK(nSA().type == cider::TokenType::LT);       // `a <  <b` is two `<`
+    CHECK(nSA().type == cider::TokenType::IDENTIFIER);
+    CHECK(nSA().type == cider::TokenType::GT);       // `>` alone
+    CHECK(nSA().type == cider::TokenType::IDENTIFIER);
+    CHECK(nSA().type == cider::TokenType::GE);       // `>=` is still a compare
+    CHECK(nSA().type == cider::TokenType::IDENTIFIER);
+    CHECK(nSA().type == cider::TokenType::LE);       // `<=` is still a compare
+    CHECK(nSA().type == cider::TokenType::IDENTIFIER);
+    CHECK(nSA().type == cider::TokenType::END_OF_FILE);
+    CHECK(!repSA.hasErrors());
+
     // Line/column tracking and unknown-char handling (parity: UNKNOWN token,
     // no lexer error — the parser reports on UNKNOWN).
     cider::ErrorReporter rep2;

@@ -1583,6 +1583,11 @@ std::unique_ptr<Statement> Parser::parseAssignmentStatement(std::unique_ptr<Expr
     case TokenType::AMPERSAND_ASSIGN: binaryOp = "&"; break;
     case TokenType::BIT_OR_ASSIGN: binaryOp = "|"; break;
     case TokenType::BIT_XOR_ASSIGN: binaryOp = "^"; break;
+    // CIDER-FEAT-008: `<<=`/`>>=` reuse the binary-op spelling so the
+    // type-checker and IR generator see the identical `<<` / `>>` node
+    // that `x = x << n` would produce.
+    case TokenType::LSHIFT_ASSIGN: binaryOp = "<<"; break;
+    case TokenType::RSHIFT_ASSIGN: binaryOp = ">>"; break;
     default: break;
     }
     return std::make_unique<AssignStmt>(std::move(target), std::move(value), line, col, binaryOp);
@@ -1905,7 +1910,10 @@ std::unique_ptr<Statement> Parser::parseExpressionStatement() {
         currentToken_.type == TokenType::PLUS_ASSIGN || currentToken_.type == TokenType::MINUS_ASSIGN ||
         currentToken_.type == TokenType::MULT_ASSIGN || currentToken_.type == TokenType::DIV_ASSIGN ||
         currentToken_.type == TokenType::MOD_ASSIGN || currentToken_.type == TokenType::AMPERSAND_ASSIGN ||
-        currentToken_.type == TokenType::BIT_OR_ASSIGN || currentToken_.type == TokenType::BIT_XOR_ASSIGN) {
+        currentToken_.type == TokenType::BIT_OR_ASSIGN || currentToken_.type == TokenType::BIT_XOR_ASSIGN ||
+        // CIDER-FEAT-008: the shift forms lower exactly like the other
+        // compound assignments (same `=`-plus-binary-operator AST node).
+        currentToken_.type == TokenType::LSHIFT_ASSIGN || currentToken_.type == TokenType::RSHIFT_ASSIGN) {
         return parseAssignmentStatement(std::move(expr));
     } else {
         if (currentToken_.type != TokenType::RBRACE && currentToken_.type != TokenType::END_OF_FILE) {
