@@ -1,0 +1,18 @@
+// CIDER-BUG-256: the transitive shape. Neither `A` nor `B` names itself,
+// so the growing-argument check sees nothing, but `A<int>` -> `B<int>`
+// -> `A<A<int>>` -> ... grows across templates without end. The live
+// instantiation path (the active set) is bounded, so this is still a
+// clean depth diagnostic instead of a burn.
+struct A<T> {
+  var b: B<T>;
+}
+
+struct B<T> {
+  var a: A<A<T>>;
+}
+
+type X = A<int>;
+
+func main() -> int {
+  return 0;
+}

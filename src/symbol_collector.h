@@ -3072,6 +3072,120 @@ public:
         return name;
     }
 
+    // CIDER-BUG-256: a template field that instantiates the template
+    // itself with LARGER arguments (`struct G<T> { var next: G<G<T>>; }`)
+    // makes the collector diverge: every instantiation's substituted
+    // field names a new, strictly longer spelling, so the active set
+    // never empties (a time/memory burn; historically a SIGSEGV). This
+    // is a property of the template DEFINITION, not of any single
+    // spelling: substituting any arguments for the parameters still
+    // grows. It must be distinguished from the finite shapes, which all
+    // keep working through the active-set guard further down:
+    //   * identity arguments (`next: *Node<T>`, `[Node<T>; 4]`, fn
+    //     signatures over `Node<T>`) name the instantiation already
+    //     under construction and stop there;
+    //   * a bare-parameter permutation (`other: Pair<U, T>`) only cycles
+    //     through finitely many spellings (a depth-1-only argument map
+    //     is a renaming, so every position's orbit is finite);
+    //   * a parameter-free nested spelling (`w: Box<Box<int>>`) is one
+    //     constant instantiation, however deep it is written.
+    // The growing shape is exactly a self-headed field argument that
+    // mentions a template parameter BELOW its top level (a bare `T` in
+    // argument position is the identity/permutation case above): each
+    // substitution then wraps the previous arguments in one more
+    // spelling level, so `G<int>` -> `G<G<int>>` -> ... never repeats.
+    // The walk below is structural (whole-identifier comparison,
+    // angle-aware), so `Tag<int>` never counts as mentioning `T`, and
+    // pointer runs (`T*`) peel first exactly like substitution does.
+    static bool templateSpellingMentionsParam(const std::string& spelling,
+                                              const std::vector<std::string>& tmplParams) {
+        std::string s = spelling;
+        peelTrailingPointers(s);
+        for (const auto& p : tmplParams) {
+            if (s == p) return true;
+        }
+        size_t pos = s.find('<');
+        if (pos == std::string::npos) return false;
+        size_t end = matchingAngle(s, pos);
+        if (end == std::string::npos) return false;
+        for (const auto& arg : splitTemplateArgs(s.substr(pos + 1, end - pos - 1))) {
+            if (templateSpellingMentionsParam(arg, tmplParams)) return true;
+        }
+        return false;
+    }
+
+    // True when one TOP-LEVEL argument of a self-headed field spelling
+    // grows under substitution: it is not itself a bare parameter (that
+    // is the identity/permutation case) but still mentions one deeper
+    // down, so each round of substitution nests the previous arguments.
+    static bool templateArgGrows(const std::string& arg,
+                                 const std::vector<std::string>& tmplParams) {
+        std::string s = arg;
+        peelTrailingPointers(s);
+        for (const auto& p : tmplParams) {
+            if (s == p) return false;
+        }
+        return templateSpellingMentionsParam(s, tmplParams);
+    }
+
+    // CIDER-BUG-256: bound on the live instantiation path (the backstop
+    // behind the precise growing-argument check below). Ordinary chains
+    // (HashMap -> Entry, ...) nest a handful deep; 64 matches the
+    // collector's other budget (CIDER-BUG-141 kMaxSignatureTypeExpansions).
+    static constexpr size_t kMaxStructTemplateInstantiationDepth = 64;
+
+    // CIDER-BUG-256: the unsubstituted TypeInfo of one template-body
+    // field instantiates the template under construction (`ownBase`)
+    // with growing arguments; the growing field spelling is returned in
+    // `witness`. Mirrors instantiateStructTemplatesInTypeInfo's walk
+    // (array elements and fn-pointer signatures carry field spellings
+    // too), but matches the template HEAD structurally: a dotted
+    // qualifier (`m.G<...>`) still names this template, and only a
+    // deeper parameter mention counts as growth (see above).
+    static bool fieldTypeGrowsSelfInstantiation(const TypeInfo& type,
+                                                const std::string& ownBase,
+                                                const std::vector<std::string>& tmplParams,
+                                                std::string& witness) {
+        if (type.arrayElement &&
+            fieldTypeGrowsSelfInstantiation(*type.arrayElement, ownBase, tmplParams, witness)) {
+            return true;
+        }
+        if (type.isFunctionPointer) {
+            if (type.fnParamTypes) {
+                for (const auto& p : *type.fnParamTypes) {
+                    if (fieldTypeGrowsSelfInstantiation(p, ownBase, tmplParams, witness)) return true;
+                }
+            }
+            if (type.fnReturnType &&
+                fieldTypeGrowsSelfInstantiation(*type.fnReturnType, ownBase, tmplParams, witness)) {
+                return true;
+            }
+            return false;
+        }
+        size_t pos = type.name.find('<');
+        if (pos == std::string::npos) return false;
+        std::string base = type.name.substr(0, pos);
+        auto dot = base.rfind('.');
+        if (dot != std::string::npos) base = base.substr(dot + 1);
+        if (base != ownBase) return false;
+        auto parsed = parseMangledTemplateName(type.name);
+        if (parsed.second.size() != tmplParams.size()) return false;
+        bool identity = true;
+        for (size_t i = 0; i < parsed.second.size(); i++) {
+            std::string a = parsed.second[i];
+            peelTrailingPointers(a);
+            if (a != tmplParams[i]) identity = false;
+        }
+        if (identity) return false;
+        for (const auto& arg : parsed.second) {
+            if (templateArgGrows(arg, tmplParams)) {
+                witness = type.name;
+                return true;
+            }
+        }
+        return false;
+    }
+
     // CIDER-BUG-051: same substitution for a resolved TypeInfo. A function
     // pointer's signature lives in fnParamTypes/fnReturnType, not in the
     // name ("fn"), so those recurse; array wrappers keep their element
@@ -3260,7 +3374,50 @@ public:
         // instantiation under construction (`next: *L<T>`) or a cycle of
         // them. The outer call defines the symbol; the inner call just
         // returns (the field type resolves once collection finishes).
+        // CIDER-BUG-256: before that, reject a body that instantiates
+        // ITSELF with growing arguments (see
+        // fieldTypeGrowsSelfInstantiation): any argument list diverges
+        // there, so diagnose on the first attempt — in microseconds —
+        // instead of generating ever-longer spellings. Deduped through
+        // structTemplateErrors_ like the arity check, so repeated
+        // mentions report once.
+        {
+            std::string witness;
+            bool grows = false;
+            for (auto& field : tmplStruct->getFields()) {
+                TypeInfo raw = TypeInfo::fromAST(field.type.get());
+                if (fieldTypeGrowsSelfInstantiation(raw, baseName, tmplSym->typeParams, witness)) {
+                    grows = true;
+                    break;
+                }
+            }
+            if (grows) {
+                structTemplateErrors_.insert(typeName);
+                reporter_.error("Template '" + baseName +
+                    "' recursively instantiates itself with growing arguments ('" +
+                    typeName + "' -> '" +
+                    substituteTypeName(witness, tmplSym->typeParams, parsed.second) +
+                    "'); a template field must not instantiate its own template with larger arguments",
+                    0, 0);
+                return;
+            }
+        }
         if (!structTemplateActive_.insert(identity).second) return;
+        // CIDER-BUG-256 backstop: the growing-argument check above
+        // catches every single-template divergence, but a TRANSITIVE
+        // cycle (A<T> through B<T> back to a larger A<...>) only grows
+        // across several templates. The active set is exactly the live
+        // instantiation path, so bounding it bounds every remaining
+        // shape (kMaxStructTemplateInstantiationDepth).
+        if (structTemplateActive_.size() > kMaxStructTemplateInstantiationDepth) {
+            structTemplateActive_.erase(identity);
+            structTemplateErrors_.insert(typeName);
+            reporter_.error("Template '" + baseName +
+                "' exceeds the maximum template instantiation depth (64) while instantiating '" +
+                typeName + "'; the instantiation chain does not terminate",
+                0, 0);
+            return;
+        }
 
         // CIDER-BUG-136: the field spellings come from the template body, so
         // nested instantiations must resolve in the template's OWN module

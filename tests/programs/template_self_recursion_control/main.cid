@@ -1,0 +1,83 @@
+// CIDER-BUG-256 control: every FINITE recursive-template shape the
+// growing-self guard must keep accepting. Recursive-by-pointer types
+// are the whole point of a recursive type; mutual recursion and
+// same-argument (or permuted, or concrete-nested) self-mentions all
+// terminate through the active-set guard. All three backends must run
+// this to exit 0.
+struct Node<T> {
+  var v: T;
+  var next: *Node<T>;
+}
+
+struct A<T> {
+  var v: T;
+  var b: B<T>;
+}
+
+struct B<T> {
+  var v: T;
+  var a: *A<T>;
+}
+
+struct Box<T> {
+  var v: T;
+}
+
+struct HasBoxed {
+  var w: Box<Box<int>>;
+}
+
+struct Swapped<T, U> {
+  var first: T;
+  var second: U;
+  var other: Swapped<U, T>;
+}
+
+struct FnSelf<T> {
+  var v: T;
+  var cb: fn(*FnSelf<T>) -> int;
+}
+
+struct ArrSelf<T> {
+  var v: T;
+  var kids: [ArrSelf<T>; 2];
+}
+
+type N2 = Node<Node<int>>;
+type AB = A<int>;
+
+func useNode(n: *Node<int>) -> int {
+  return n->v;
+}
+
+func main() -> int {
+  var a: Node<int>;
+  var b: Node<int>;
+  a.v = 10;
+  b.v = 20;
+  a.next = &b;
+  var total: int = a.v + a.next.v;
+  var m: AB;
+  m.v = 1;
+  m.b.v = 2;
+  total = total + m.v + m.b.v;
+  var h: HasBoxed;
+  h.w.v.v = 4;
+  total = total + h.w.v.v;
+  var s: Swapped<int, int>;
+  s.first = 5;
+  s.other.second = 6;
+  total = total + s.first + s.other.second;
+  var n2: N2;
+  n2.v.v = 7;
+  total = total + n2.v.v;
+  var f: FnSelf<int>;
+  f.v = 8;
+  total = total + f.v;
+  var ar: ArrSelf<int>;
+  ar.v = 9;
+  total = total + ar.v;
+  total = total + useNode(&a);
+  if (total != 82) { return 1; }
+  return 0;
+}

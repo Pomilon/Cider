@@ -1,0 +1,1 @@
+Template 'G' recursively instantiates itself with growing arguments ('G<int>' -> 'G<G<int>>')
