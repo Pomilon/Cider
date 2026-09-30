@@ -208,6 +208,19 @@ add_test(NAME std_resolve_smoke
          COMMAND bash ${CMAKE_SOURCE_DIR}/tests/unit/std_resolve_smoke.sh $<TARGET_FILE:cider>)
 set_tests_properties(std_resolve_smoke PROPERTIES SKIP_RETURN_CODE 77)
 
+# CIDER-BUG-239: an inline-asm placeholder whose value the register
+# allocator spilled must still be a fully defined operand, or the block
+# writes nothing: a `{len:q}` over a narrow `int` in a 4-valid-byte spill
+# slot reached `write` as a garbage byte count, EFAULT, and an empty program
+# with a correct exit code. Runs the minimal case and the reported shape (a
+# callee dispatching through a fat pointer received as a parameter) on all
+# three backends, and pins the emitted staging so the corpus programs cannot
+# silently stop covering the spilled path. Exits 77 when nasm/gcc are
+# missing.
+add_test(NAME asm_spilled_operand_smoke
+         COMMAND bash ${CMAKE_SOURCE_DIR}/tests/unit/asm_spilled_operand_smoke.sh $<TARGET_FILE:cider>)
+set_tests_properties(asm_spilled_operand_smoke PROPERTIES SKIP_RETURN_CODE 77)
+
 # CIDER-BUG-162: the inliner's site term must not grow with the clones it
 # produces. A 20-site destructor chain whose helpers each call the next twice
 # used to double the IR every optimizer round and take minutes to compile;

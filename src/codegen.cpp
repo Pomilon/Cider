@@ -2161,6 +2161,60 @@ bool CodeGenerator::generate(ModuleIR& module, const std::string& outputPath,
                     if (toSaveAsm.size() % 2 != 0) addText("    sub rsp, 8");
                     for (const auto& reg : toSaveAsm) addText("    push " + reg);
 
+                    // CIDER-BUG-239: a placeholder names a REGISTER-width
+                    // operand -- `{name}` is the variable's register and
+                    // `{name:q}` re-sizes that register -- but the allocator
+                    // may have handed the value a SPILL SLOT instead, and
+                    // substituting that slot is wrong twice over:
+                    //   * unsuffixed, it is `dword [rbp-N]` against the
+                    //     template's 64-bit register, which NASM rejects
+                    //     ("invalid combination of opcode and operands");
+                    //   * suffixed `:q`, it is `qword [rbp-N]`, and a
+                    //     narrow value's slot has only its own 4 (or 2, or
+                    //     1) bytes written -- the rest is stale stack data,
+                    //     the same trap pushArg documents. An inline write
+                    //     syscall then got a garbage length, and the program
+                    //     printed NOTHING while every other backend
+                    //     printed the string.
+                    // Stage each spilled placeholder in a fresh 8-byte slot
+                    // filled at the value's own width, so every byte the
+                    // block can reach is defined, and copy it back after the
+                    // block so an output placeholder still writes through.
+                    // (A memory operand needs no register to be safe: the
+                    // staging slot is what the block names, so nothing the
+                    // block does to a register can break an operand.)
+                    std::map<std::string, std::pair<std::string, std::string>> asmStaged;
+                    {
+                        int stageNext = maxSlotOffset;
+                        for (auto& pair : instr.asmMap) {
+                            std::string slot = getOperand(pair.second);
+                            if (!isMem(slot)) continue;
+                            stageNext += 8;
+                            std::string stage = "[rbp - " + std::to_string(stageNext) + "]";
+                            // Load through r10 at the value's own width, then
+                            // move it with the width the register path would
+                            // use (a 32-bit write for a narrow value, which is
+                            // what zeroes the upper half there too), so the
+                            // staged 8 bytes hold exactly what a
+                            // register-resident operand would. An f64 is as
+                            // wide as a pointer: its bits have to survive
+                            // whole, so it takes the 64-bit path even though
+                            // it has no integer register of its own.
+                            IRType t = pair.second.type;
+                            bool narrow = !(t == IRType::I64 || t == IRType::U64 ||
+                                            t == IRType::PTR || t == IRType::F64);
+                            if (narrow) t = IRType::I32;
+                            addText("    mov " + getSizedReg("r10", t) + ", " +
+                                        getSizedReg(slot, pair.second.type));
+                            // Always the 64-bit name: the 32-bit move above is
+                            // what zeroes r10's upper half, exactly as it does
+                            // for a register-resident narrow value.
+                            addText("    mov qword " + stage + ", r10");
+                            asmStaged[pair.first] = {slot, stage};
+                        }
+                        if (!asmStaged.empty()) maxSlotOffset = stageNext;
+                    }
+
                     // REPLACE placeholders like {s}, {len}, {code} literally.
                     // A width suffix re-sizes a REGISTER operand to the width
                     // the template instruction needs (Issue #24): {fd:q} is
@@ -2169,7 +2223,16 @@ bool CodeGenerator::generate(ModuleIR& module, const std::string& outputPath,
                     // width. Suffixed forms are replaced first: {fd} is a
                     // prefix of {fd:q} and would otherwise match inside it.
                     for (auto& pair : instr.asmMap) {
-                        std::string raw = getOperand(pair.second);
+                        auto staged = asmStaged.find(pair.first);
+                        // A staged (CIDER-BUG-239) placeholder is an 8-byte
+                        // clean slot, so every width the block may ask for is
+                        // defined; the width it is ASKED for stays the same as
+                        // for a register operand, so a template whose other
+                        // operand disagrees still gets NASM's size diagnostic
+                        // instead of silently changing with register pressure.
+                        std::string raw = staged != asmStaged.end()
+                                              ? staged->second.second
+                                              : getOperand(pair.second);
                         auto sizedAs = [&](char spec) -> std::string {
                             IRType t = pair.second.type;
                             if (spec == 'q' || spec == 'Q') t = IRType::U64;
@@ -2205,6 +2268,18 @@ bool CodeGenerator::generate(ModuleIR& module, const std::string& outputPath,
                     std::string line;
                     while (std::getline(ss, line)) {
                         if (!line.empty()) addText("    " + line);
+                    }
+
+                    // CIDER-BUG-239: the block may have written a placeholder
+                    // (`asm { "mov {out}, {fd:q}" }`), so copy each staged
+                    // operand back to the slot the rest of the function --
+                    // including the store ir_gen emits right after the block
+                    // -- reads. Full width: the slot is the allocator's 8-byte
+                    // unit, and a narrow store would leave the value a second
+                    // layer of undefined bytes for any 64-bit reader.
+                    for (const auto& pair : asmStaged) {
+                        addText("    mov r10, qword " + pair.second.second);
+                        addText("    mov qword " + pair.second.first + ", r10");
                     }
 
                     for (auto it = toSaveAsm.rbegin(); it != toSaveAsm.rend(); ++it) addText("    pop " + *it);

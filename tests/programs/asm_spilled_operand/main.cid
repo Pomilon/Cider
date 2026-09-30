@@ -1,0 +1,86 @@
+// CIDER-BUG-239 regression: an inline-asm placeholder whose value the
+// register allocator SPILLED.
+//
+// `{name}` is register syntax -- the block names a register and `{name:q}`
+// re-sizes that register -- but the allocator hands out only rbx/r12-r15, so
+// past five simultaneously live values an operand lands in an 8-byte spill
+// slot holding only the value's own 4 bytes. Substituting that slot made the
+// write syscall's length a `qword` read of 4 defined bytes and 4 stale stack
+// bytes, so `write` got a garbage count, returned EFAULT, and the program
+// printed NOTHING -- silently, with a correct exit code, and only on the
+// native backend (the VM keeps full int64 registers, so it printed).
+//
+// Pins on all three backends (VM --no-opt, VM optimized, native):
+//   * the inline write syscall emits its message, byte for byte, with the
+//     length coming from a spilled `int` placeholder;
+//   * a spilled 8-byte placeholder (the string) names the same buffer;
+//   * a spilled OUTPUT placeholder still writes through: the block assigns it
+//     and the variable must hold the value, which is what the copy-back after
+//     the block is for;
+//   * the `int` survives every block unchanged, so each read placeholder is a
+//     read and not an accidental write.
+//
+// The `keep` locals are each read before the first asm block and again in the
+// sum after the last one, so all eight hold their registers across every
+// block; the operands' temporaries are born later, at the asm, and are the
+// ones the allocator spills. tests/unit/asm_spilled_operand_smoke.sh pins
+// that they are spilled, so this test cannot silently stop covering the path
+// it exists for.
+//
+// `dirty` is the call the report's fat-pointer dispatch stands in for: it is
+// not inlined (the DIV puts its cost over the inliner's gain threshold), so a
+// real call happens. Together with `pad` it puts a placeholder's slot in
+// stack the process inherited non-zero, which is what makes the pre-fix
+// failure reproducible instead of a coin flip on zeroed memory -- and the
+// reason the report needed a dispatch (itself a call) to see the bug at all.
+var msg: string = "asm_spilled_operand\n";
+
+func dirty(n: int) -> int { return (n + n) / 2; }
+
+func main() -> int {
+  var len: int = 20;
+  var out: u64 = 0;
+  // A wide local pushes the spill region well below rbp, which is what puts a
+  // placeholder's slot in stack the process inherited non-zero rather than in
+  // the part the prologue zeroes (CIDER-BUG-220 zeroes only the ALLOCA region,
+  // never the allocator's spill slots).
+  var pad: [u64; 40] = [0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+                        0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+                        0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+                        0, 0, 0, 0, 0, 0, 0, 0, 0, 0];
+  var keep0: int = 1;
+  var keep1: int = 2;
+  var keep2: int = 3;
+  var keep3: int = 4;
+  var keep4: int = 5;
+  var keep5: int = 6;
+  var keep6: int = 7;
+  var keep7: int = 8;
+
+  if (pad[39] != 0) { return 11; }
+  if (keep0 + keep1 + keep2 + keep3 + keep4 + keep5 + keep6 + keep7 != 36) { return 7; }
+  if (dirty(len) != 20) { return 10; }
+
+  // The reported shape: the documented write syscall whose length is a
+  // `{x:q}` placeholder over a narrow value.
+  asm { "mov rax, 1" "mov rdi, 1" "mov rsi, {msg}" "mov rdx, {len:q}" "syscall" }
+  if (len != 20) { return 1; }
+
+  // A block that ASSIGNS a spilled placeholder. The immediate source keeps
+  // the instruction encodable: two spilled operands would be a memory-to-
+  // memory `mov`, which no register allocator could have made legal either.
+  asm { "mov {out:q}, 7" }
+  if (out != 7) { return 2; }
+
+  asm { "mov {out:q}, 9" "mov rax, 1" "mov rdi, 1" "mov rsi, {msg}" "mov rdx, {len:q}" "syscall" }
+  if (out != 9) { return 3; }
+  if (len != 20) { return 4; }
+  if (pad[0] != 0) { return 5; }
+
+  if (keep0 + keep1 + keep2 + keep3 + keep4 + keep5 + keep6 + keep7 != 36) { return 6; }
+  if (out != 9) { return 8; }
+  if (len != 20) { return 9; }
+
+  asm { "mov rax, 60" "xor rdi, rdi" "syscall" }
+  return 0;
+}

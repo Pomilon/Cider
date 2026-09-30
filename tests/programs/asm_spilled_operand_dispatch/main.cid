@@ -1,0 +1,131 @@
+// CIDER-BUG-239 regression: the shape the report was found in -- a callee
+// that dispatches through a fat pointer received AS A PARAMETER, followed by
+// an inline-asm write in the caller.
+//
+// `func probe(i: Shape) { return i.area(); }` takes the fat pointer as a
+// parameter and reaches the method through the vtable word at offset 0, and
+// the three-method interface is what put the reported program on the losing
+// side (a two-method variant kept its placeholders in registers). The dispatch
+// itself was correct in every build: the symptom is that the *next* inline
+// write emitted nothing -- silently, with a correct exit code, and only on the
+// native backend, because the VM keeps full int64 registers.
+//
+// Root cause (not the dispatch): the write's length is a `{len:q}` placeholder
+// over a narrow `int`, and register pressure (the locals below, live across
+// the block) put that value in an 8-byte spill slot with only 4 bytes written.
+// `{len:q}` then substituted `qword [rbp-N]`, so `write` was handed a garbage
+// byte count, returned EFAULT, and the message never appeared. The inline-asm
+// contract is that the program prints what it wrote, so the codegen stages a
+// spilled placeholder and every byte the block can reach is defined.
+//
+// Pins on all three backends (VM --no-opt, VM optimized, native):
+//   * the dispatch through the parameter returns the right value for both
+//     implementors, for all three methods, before AND after the inline writes
+//     (each wrong answer pins a different exit code);
+//   * the first block writes the message in four pieces, so all eight of its
+//     placeholders (four narrow lengths, four pointers) are live at once --
+//     more than the five callee-saved registers, which is what forces the
+//     spill this regression exists for -- and the four writes must concatenate
+//     to the message exactly;
+//   * the second block writes the whole message with the reported
+//     `{s}`/`{len:q}` operand pair;
+//   * a block that ASSIGNS a spilled placeholder writes through;
+//   * no placeholder disturbs the value it names.
+var p0: string = "asm_";
+var p1: string = "spilled_";
+var p2: string = "dispatch_";
+var p3: string = "ok\n";
+var whole: string = "asm_spilled_dispatch_ok\n";
+var l0: int = 4;
+var l1: int = 8;
+var l2: int = 9;
+var l3: int = 3;
+var wlen: int = 24;
+
+interface Shape {
+  func area() -> int;
+  func kind() -> int;
+  func side() -> int;
+}
+
+class Sq {
+  var k: int;
+  func area() -> int { return this.k * this.k; }
+  func kind() -> int { return 1; }
+  func side() -> int { return 11; }
+}
+
+class Tri {
+  var k: int;
+  func area() -> int { return this.k * this.k * this.k; }
+  func kind() -> int { return 2; }
+  func side() -> int { return 22; }
+}
+
+// The fat pointer arrives as a parameter: vtable word + data word.
+func probe(i: Shape) -> int { return i.area(); }
+func kindOf(i: Shape) -> int { return i.kind(); }
+func sideOf(i: Shape) -> int { return i.side(); }
+
+func main() -> int {
+  var out: u64 = 0;
+  // Read before the first asm block and again in the sum after the last one,
+  // so they hold their registers across every block. asm_spilled_operand_smoke
+  // .sh pins that the operands really are spilled, so this test cannot
+  // silently stop covering the path it exists for.
+  var keep0: int = 1;
+  var keep1: int = 2;
+  var keep2: int = 3;
+  var keep3: int = 4;
+  var keep4: int = 5;
+  var keep5: int = 6;
+  var keep6: int = 7;
+  var keep7: int = 8;
+
+  var sq: Sq;
+  sq.k = 3;
+  var tri: Tri;
+  tri.k = 2;
+  var a: Shape = sq;
+  var b: Shape = tri;
+
+  if (keep0 + keep1 + keep2 + keep3 + keep4 + keep5 + keep6 + keep7 != 36) { return 20; }
+
+  // Three dispatches per implementor, all through a fat-pointer parameter.
+  if (probe(a) != 9) { return 1; }
+  if (kindOf(a) != 1) { return 2; }
+  if (sideOf(a) != 11) { return 3; }
+  if (probe(b) != 8) { return 4; }
+  if (kindOf(b) != 2) { return 5; }
+  if (sideOf(b) != 22) { return 6; }
+
+  // The message in four pieces: eight placeholders in one block.
+  asm { "mov rax, 1" "mov rdi, 1" "mov rsi, {p0}" "mov rdx, {l0:q}" "syscall"
+        "mov rax, 1" "mov rdi, 1" "mov rsi, {p1}" "mov rdx, {l1:q}" "syscall"
+        "mov rax, 1" "mov rdi, 1" "mov rsi, {p2}" "mov rdx, {l2:q}" "syscall"
+        "mov rax, 1" "mov rdi, 1" "mov rsi, {p3}" "mov rdx, {l3:q}" "syscall" }
+  if (l0 != 4) { return 7; }
+  if (l1 != 8) { return 8; }
+  if (l2 != 9) { return 9; }
+  if (l3 != 3) { return 10; }
+
+  // The reported operand pair: a pointer and a narrow length.
+  asm { "mov rax, 1" "mov rdi, 1" "mov rsi, {whole}" "mov rdx, {wlen:q}" "syscall" }
+  if (wlen != 24) { return 11; }
+
+  // A block that ASSIGNS a spilled placeholder must write through. The
+  // immediate source keeps the instruction encodable: two spilled operands
+  // would be a memory-to-memory `mov`, which no register allocation could
+  // have made legal either.
+  asm { "mov {out:q}, 42" }
+  if (out != 42) { return 12; }
+
+  if (keep0 + keep1 + keep2 + keep3 + keep4 + keep5 + keep6 + keep7 != 36) { return 13; }
+  if (probe(a) != 9) { return 14; }
+  if (sideOf(b) != 22) { return 15; }
+  if (out != 42) { return 16; }
+  if (wlen != 24) { return 17; }
+
+  asm { "mov rax, 60" "xor rdi, rdi" "syscall" }
+  return 0;
+}
