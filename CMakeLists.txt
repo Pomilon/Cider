@@ -131,6 +131,25 @@ add_test(NAME nil_pointer_deref_smoke
          COMMAND bash ${CMAKE_SOURCE_DIR}/tests/unit/nil_pointer_deref_smoke.sh $<TARGET_FILE:cider>)
 set_tests_properties(nil_pointer_deref_smoke PROPERTIES SKIP_RETURN_CODE 77)
 
+# CIDER-BUG-225: a call through a nil function pointer reports
+# `vm error: call: nil function pointer` and exits 2 identically on the VM
+# (optimized and not) and the native backend, in the DEFAULT configuration
+# (the guard is not --checks-gated). Covers every shape the guard is attached
+# to — local, alias spelling, parameter, class field, pointer-to-class field,
+# array element, a nil returned from a function (direct and via a temporary),
+# a module-scope global, the `msabi fn` route, and the closure route on its
+# live path — each with a live counterpart first. Also pins the codegen-side
+# invariants: the helper is emitted without a flag with the VM's message
+# payload byte for byte, the guard precedes the indirect call, a statically
+# known callee pays nothing, a user-defined `_nil_fnptr_fail` suppresses the
+# helper, pomeos gets its own syscall numbers, uefi traps with ud2, --checks
+# still reports the bounds error, and the nil-deref and nil-interface
+# diagnostics are unchanged (this is its own pseudo-builtin, not
+# `_nil_deref_fail`). Exits 77 when nasm/gcc are missing.
+add_test(NAME nil_fnptr_call_smoke
+         COMMAND bash ${CMAKE_SOURCE_DIR}/tests/unit/nil_fnptr_call_smoke.sh $<TARGET_FILE:cider>)
+set_tests_properties(nil_fnptr_call_smoke PROPERTIES SKIP_RETURN_CODE 77)
+
 # CIDER-FEAT-001: `compile -g` DWARF line-table/function-DIE smoke. Assembles
 # with plain `nasm -f elf64` and inspects the result with readelf/objdump;
 # exits 77 when nasm/gcc/readelf are missing.

@@ -288,6 +288,10 @@ bool CodeGenerator::generate(ModuleIR& module, const std::string& outputPath,
     // --checks-gated either, so any module that dereferences a pointer typed
     // value through a pointer needs the helper.
     bool needsNilDerefHelper = false;
+    // CIDER-BUG-225: and for the nil-function-pointer pseudo-builtin. Also not
+    // --checks-gated, so any module with an indirect call through a `fn(...)`
+    // value needs the helper.
+    bool needsNilFnPtrHelper = false;
     std::set<std::string> generatedFunctions_;
     // CID-005: UEFI (PE32+) emission differences (design §1): bare `efi_main`
     // export, no implicit libc externs, and no `_start` kernel-stack entry.
@@ -423,6 +427,12 @@ bool CodeGenerator::generate(ModuleIR& module, const std::string& outputPath,
                     instr.args[0].kind == IRValue::LABEL &&
                     instr.args[0].name == "_nil_deref_fail") {
                     needsNilDerefHelper = true;
+                }
+                // CIDER-BUG-225: same for the nil-function-pointer call.
+                if (instr.op == IROp::CALL && !instr.args.empty() &&
+                    instr.args[0].kind == IRValue::LABEL &&
+                    instr.args[0].name == "_nil_fnptr_fail") {
+                    needsNilFnPtrHelper = true;
                 }
                 for (auto& arg : instr.args) {
                     // CID-005: narrow `"..."` and wide `L"..."` PTR constants
@@ -2844,6 +2854,45 @@ bool CodeGenerator::generate(ModuleIR& module, const std::string& outputPath,
             addText("    mov rax, 1     ; write(2, msg, len)");
             addText("    mov rdi, 2");
             addText("    lea rsi, [rel _nil_deref_fail_msg]");
+            addText("    mov rdx, " + std::to_string(std::strlen(msg)));
+            addText("    syscall");
+            addText("    mov rax, 60    ; exit(2)");
+            addText("    mov rdi, 2");
+            addText("    syscall");
+        }
+    }
+
+    // CIDER-BUG-225: define the nil-function-pointer runtime error. ir-gen
+    // branches here when an indirect call is about to ENTER a nil `fn(...)`
+    // value, immediately before the CALL. Native/pomeos report the exact line
+    // the VM reports (`vm error: call: nil function pointer`) on stderr and
+    // exit 2, the CIDER-ISS-001 convention, so the backends are byte-for-byte
+    // identical instead of the VM reporting a diagnostic and native branching
+    // to address 0 and dying on SIGSEGV with no output at all. Its OWN routine,
+    // not CIDER-BUG-219's: a nil function pointer is entered, not dereferenced,
+    // so it keeps the `call:` diagnostic rather than borrowing the
+    // dereference one. UEFI traps (ud2), exactly like the four helpers above.
+    // A user-defined function of the same name wins on both backends, so the
+    // helper is only emitted when the name is free (no duplicate label).
+    bool userDefinedNilFnPtr = false;
+    for (const auto& fn : module.getFunctions()) {
+        if (fn->getName() == "_nil_fnptr_fail") {
+            userDefinedNilFnPtr = true;
+            break;
+        }
+    }
+    if (needsNilFnPtrHelper && !userDefinedNilFnPtr) {
+        addText("");
+        addText("; CIDER-BUG-225: call through a nil function pointer");
+        addText("_nil_fnptr_fail:");
+        if (isUefi) {
+            addText("    ud2    ; no write/exit syscalls on uefi: trap loudly");
+        } else {
+            const char* msg = "vm error: call: nil function pointer\n";
+            addData("_nil_fnptr_fail_msg: db \"vm error: call: nil function pointer\", 10");
+            addText("    mov rax, 1     ; write(2, msg, len)");
+            addText("    mov rdi, 2");
+            addText("    lea rsi, [rel _nil_fnptr_fail_msg]");
             addText("    mov rdx, " + std::to_string(std::strlen(msg)));
             addText("    syscall");
             addText("    mov rax, 60    ; exit(2)");

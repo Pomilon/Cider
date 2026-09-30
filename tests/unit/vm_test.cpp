@@ -1557,6 +1557,198 @@ int run() {
         CHECK(vm.run(mod).exitCode == 0x1234);
     }
 
+    // CIDER-BUG-225: ir-gen's nil function-pointer guard calls
+    // `_nil_fnptr_fail` when an indirect call is about to ENTER a nil
+    // `fn(...)` value. The VM must answer with the same message the native
+    // helper writes, so both backends report `vm error: call: nil function
+    // pointer` and exit 2. This is its OWN pseudo-builtin, NOT CIDER-BUG-219's
+    // `_nil_deref_fail`: a nil function pointer is entered, not dereferenced,
+    // so it keeps the `call:` text doCall already used for the same value.
+    {
+        auto fn = makeFn("main", cider::IRType::I32);
+        auto e = std::make_unique<cider::BasicBlock>("entry");
+        cider::IRInstruction boom;
+        boom.op = cider::IROp::CALL;
+        boom.args = {cider::IRValue::Label("_nil_fnptr_fail")};
+        e->addInstruction(boom);
+        cider::IRInstruction ret;
+        ret.op = cider::IROp::RET;
+        ret.args = {cider::IRValue::Constant(0, cider::IRType::I32)};
+        e->addInstruction(ret);
+        fn->addBlock(std::move(e));
+        cider::ModuleIR mod;
+        mod.addFunction(std::move(fn));
+        cider::VM vm;
+        bool threw = false;
+        try {
+            vm.run(mod);
+        } catch (const cider::VMError& err) {
+            threw = true;
+            // Exact text: run_tests.py pins the same string byte for byte
+            // against the native helper's `db "vm error: call: nil function
+            // pointer"` payload, and the smoke test pins `mov rdx, 37` (its
+            // length) alongside it.
+            CHECK(err.message == "call: nil function pointer");
+        }
+        CHECK(threw);
+    }
+    {
+        // The guard is a builtin, so `cider run` must recognise the label
+        // instead of failing with an unresolved-label error. This mirrors the
+        // three-block shape ir-gen emits: a nil comparison on the CALLEE
+        // value (the loaded slot, immediately before the CALL) whose fail edge
+        // calls the builtin and rejoins the live path, with the indirect call
+        // itself in that rejoined block. The live path must still run, so the
+        // guard costs a not-taken branch and nothing else when the callee is
+        // not nil.
+        auto callee = makeFn("callee", cider::IRType::I32);
+        auto ce = std::make_unique<cider::BasicBlock>("entry");
+        cider::IRInstruction cret;
+        cret.op = cider::IROp::RET;
+        cret.args = {cider::IRValue::Constant(7, cider::IRType::I32)};
+        ce->addInstruction(cret);
+        callee->addBlock(std::move(ce));
+
+        auto fn = makeFn("main", cider::IRType::I32);
+        auto e = std::make_unique<cider::BasicBlock>("entry");
+        e->addInstruction(opInstr(cider::IROp::ALLOCA, "slot",
+                                  {cider::IRValue::Constant(8, cider::IRType::I32)}));
+        // A non-nil callee: the function-value id of `callee`, which is 1
+        // because module function values are 1-based and 0 is nilPtr.
+        cider::IRInstruction st;
+        st.op = cider::IROp::STORE;
+        st.dest = std::nullopt;
+        st.args = {cider::IRValue::Register("slot", cider::IRType::PTR),
+                   cider::IRValue::Constant(1, cider::IRType::I64),
+                   cider::IRValue::Constant(0, cider::IRType::I32)};
+        e->addInstruction(st);
+        cider::IRInstruction ld;
+        ld.op = cider::IROp::LOAD;
+        ld.dest = cider::IRValue::Register("fp", cider::IRType::PTR);
+        ld.args = {cider::IRValue::Register("slot", cider::IRType::PTR),
+                   cider::IRValue::Constant(0, cider::IRType::I32)};
+        e->addInstruction(ld);
+        cider::IRInstruction cmp;
+        cmp.op = cider::IROp::CMP_EQ;
+        cmp.dest = cider::IRValue::Register("isnil", cider::IRType::BOOL);
+        cmp.args = {cider::IRValue::Register("fp", cider::IRType::PTR),
+                    cider::IRValue::Constant(0, cider::IRType::I64)};
+        e->addInstruction(cmp);
+        e->addInstruction({cider::IROp::COND_BR, std::nullopt,
+                           {cider::IRValue::Register("isnil", cider::IRType::BOOL),
+                            cider::IRValue::Label("fail"),
+                            cider::IRValue::Label("ok")}});
+        fn->addBlock(std::move(e));
+        auto fail = std::make_unique<cider::BasicBlock>("fail");
+        cider::IRInstruction boom;
+        boom.op = cider::IROp::CALL;
+        boom.args = {cider::IRValue::Label("_nil_fnptr_fail")};
+        fail->addInstruction(boom);
+        fail->addInstruction({cider::IROp::BR, std::nullopt, {cider::IRValue::Label("ok")}});
+        fn->addBlock(std::move(fail));
+        auto ok = std::make_unique<cider::BasicBlock>("ok");
+        // The indirect call the guard protects, in the block both edges rejoin.
+        cider::IRInstruction call;
+        call.op = cider::IROp::CALL;
+        call.dest = cider::IRValue::Register("r", cider::IRType::I32);
+        call.args = {cider::IRValue::Register("fp", cider::IRType::PTR)};
+        ok->addInstruction(call);
+        cider::IRInstruction ret;
+        ret.op = cider::IROp::RET;
+        // Returning the callee's own result proves both that the live path ran
+        // and that the guard did not clobber the callee.
+        ret.args = {cider::IRValue::Register("r", cider::IRType::I32)};
+        ok->addInstruction(ret);
+        fn->addBlock(std::move(ok));
+        cider::ModuleIR mod;
+        mod.addFunction(std::move(callee));
+        mod.addFunction(std::move(fn));
+        cider::VM vm;
+        CHECK(vm.run(mod).exitCode == 7);
+    }
+    {
+        // doCall's own `fid == 0` check is the IR-level safety net that stays
+        // behind the guard, for a zero callee formed without one. It must keep
+        // reporting the same message the builtin does, so the diagnostic does
+        // not depend on which of the two caught it.
+        auto fn = makeFn("main", cider::IRType::I32);
+        auto e = std::make_unique<cider::BasicBlock>("entry");
+        e->addInstruction(opInstr(cider::IROp::ALLOCA, "slot",
+                                  {cider::IRValue::Constant(8, cider::IRType::I32)}));
+        cider::IRInstruction st;
+        st.op = cider::IROp::STORE;
+        st.dest = std::nullopt;
+        st.args = {cider::IRValue::Register("slot", cider::IRType::PTR),
+                   cider::IRValue::Constant(0, cider::IRType::I64),
+                   cider::IRValue::Constant(0, cider::IRType::I32)};
+        e->addInstruction(st);
+        cider::IRInstruction ld;
+        ld.op = cider::IROp::LOAD;
+        ld.dest = cider::IRValue::Register("fp", cider::IRType::PTR);
+        ld.args = {cider::IRValue::Register("slot", cider::IRType::PTR),
+                   cider::IRValue::Constant(0, cider::IRType::I32)};
+        e->addInstruction(ld);
+        cider::IRInstruction call;
+        call.op = cider::IROp::CALL;
+        call.args = {cider::IRValue::Register("fp", cider::IRType::PTR)};
+        e->addInstruction(call);
+        cider::IRInstruction ret;
+        ret.op = cider::IROp::RET;
+        ret.args = {cider::IRValue::Constant(0, cider::IRType::I32)};
+        e->addInstruction(ret);
+        fn->addBlock(std::move(e));
+        cider::ModuleIR mod;
+        mod.addFunction(std::move(fn));
+        cider::VM vm;
+        bool threw = false;
+        try {
+            vm.run(mod);
+        } catch (const cider::VMError& err) {
+            threw = true;
+            CHECK(err.message == "call: nil function pointer");
+        }
+        CHECK(threw);
+    }
+    {
+        // The three guards stay distinguishable: CIDER-BUG-219's
+        // `_nil_deref_fail` must not answer with the `call:` text, and this
+        // ticket's `_nil_fnptr_fail` must not answer with the dereference one.
+        // If either borrowed the other's message, a program could no longer
+        // tell a failed call from a failed load.
+        for (const char* name : {"_nil_deref_fail", "_nil_fnptr_fail",
+                                 "_nil_dispatch_fail"}) {
+            auto fn = makeFn("main", cider::IRType::I32);
+            auto e = std::make_unique<cider::BasicBlock>("entry");
+            cider::IRInstruction boom;
+            boom.op = cider::IROp::CALL;
+            boom.args = {cider::IRValue::Label(name)};
+            e->addInstruction(boom);
+            cider::IRInstruction ret;
+            ret.op = cider::IROp::RET;
+            ret.args = {cider::IRValue::Constant(0, cider::IRType::I32)};
+            e->addInstruction(ret);
+            fn->addBlock(std::move(e));
+            cider::ModuleIR mod;
+            mod.addFunction(std::move(fn));
+            cider::VM vm;
+            bool threw = false;
+            std::string msg;
+            try {
+                vm.run(mod);
+            } catch (const cider::VMError& err) {
+                threw = true;
+                msg = err.message;
+            }
+            CHECK(threw);
+            const std::string want = std::string(name) == "_nil_deref_fail"
+                                         ? "null pointer dereference"
+                                     : std::string(name) == "_nil_fnptr_fail"
+                                         ? "call: nil function pointer"
+                                         : "nil interface dispatch";
+            CHECK(msg == want);
+        }
+    }
+
     // CID-006 F1 (front-end shape): ir_gen now registers `extern var` via
     // addExternVariable, so a value read cannot resolve to any function id
     // and fails with the pre-CID-006 clean unresolved-label error.

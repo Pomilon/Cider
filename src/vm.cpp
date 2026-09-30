@@ -1320,7 +1320,7 @@ void VM::store(int64_t addr, const RegVal& val, IRType type, int64_t offset) {
 namespace {
 const char* const kVMBuiltins[] = {"malloc", "free", "exit", "putchar", "_setjmp", "longjmp",
                                    "_uncaught_exception", "_bounds_fail", "_nil_dispatch_fail",
-                                   "_nil_deref_fail"};
+                                   "_nil_deref_fail", "_nil_fnptr_fail"};
 }  // namespace
 
 bool VM::isExternFunctionName(const std::string& name) const {
@@ -1421,6 +1421,21 @@ bool VM::tryBuiltinCall(const std::string& name, const std::vector<IRValue>& arg
         // guards stay: they are still the IR-level safety net for a zero
         // address formed without a source-level pointer (vm_test pins them).
         throw VMError{"null pointer dereference"};
+    }
+    if (name == "_nil_fnptr_fail") {
+        // CIDER-BUG-225: ir-gen's nil function-pointer guard routes a call
+        // through a nil `fn(...)` value here, BEFORE the indirect call enters
+        // it. The message is deliberately the `call:` one this very file
+        // already used in doCall's 1-based-id check (module function values
+        // start at 1, so 0 is nilPtr): a nil function pointer is not a nil
+        // dereference, so it must not borrow CIDER-BUG-219's `_nil_deref_fail`
+        // text. Before the guard the two backends disagreed in every
+        // configuration -- the VM reached doCall's `fid == 0` test and
+        // reported this line, while native x86 executed `call r11` with r11 = 0
+        // and died with SIGSEGV and no output at all (exit 139). doCall's own
+        // check stays: it is the IR-level safety net for a zero callee formed
+        // without a source-level guard.
+        throw VMError{"call: nil function pointer"};
     }
     if (name == "_setjmp") {
         RegVal buf = args.empty() ? RegVal{} : resolveValue(args[0]);

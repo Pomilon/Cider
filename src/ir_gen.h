@@ -2914,6 +2914,17 @@ public:
                                     : mapType(retType.name);
                 if (destIR == IRType::VOID) destIR = IRType::I32;
                 IRValue dest = IRValue::Register(nextTemp(), destIR);
+                // CIDER-BUG-225: the callee is the loaded callable slot, so the
+                // guard goes on `fnPtr` and not on the closure OBJECT -- a nil
+                // object is a nil DEREFERENCE of the load just above (which
+                // CIDER-BUG-219's source-level guard cannot see, because this
+                // load is ir-gen's own, and which keeps the VM's
+                // `load: null pointer dereference`), a nil callable slot is
+                // this ticket's case. Placed after the arguments and after the
+                // argument conversion, immediately before the CALL, so the
+                // guard's ordering matches the VM's: `doCall` resolves the
+                // already-evaluated target and only then tests it for nil.
+                emitNilFnPtrCheck(fnPtr);
                 IRInstruction callInstr;
                 callInstr.op = IROp::CALL;
                 // CID-005: closure definitions are pinned SysV (T1 fix
@@ -2945,6 +2956,13 @@ public:
                                     : mapType(retType.name);
                 if (destIR == IRType::VOID) destIR = IRType::I32;
                 IRValue dest = IRValue::Register(nextTemp(), destIR);
+                // CIDER-BUG-225: guard the callee value just before the CALL,
+                // after the arguments and the argument conversion have run, so
+                // the ordering matches the VM's `doCall` (which sees the
+                // already-evaluated target and tests it for nil at dispatch
+                // time). A LABEL callee is a static function address and
+                // skips the guard entirely.
+                emitNilFnPtrCheck(fnPtr);
                 IRInstruction callInstr;
                 callInstr.op = IROp::CALL;
                 // CID-005: the fn type carries the convention: `msabi fn`
@@ -10194,6 +10212,70 @@ public:
         call.op = IROp::CALL;
         call.dest = std::nullopt;
         call.args.push_back(IRValue::Label("_nil_deref_fail"));
+        currentBlock_->addInstruction(call);
+        currentBlock_->addInstruction({IROp::BR, std::nullopt, {IRValue::Label(okName)}});
+        startBlock(okName);
+    }
+
+    // CIDER-BUG-225: nil function-pointer guard. `fnPtr` is the callee VALUE
+    // an indirect call is about to branch to -- a `fn(...)` local, parameter,
+    // class field or array element read back out, or a `nilPtr` a function
+    // returned. The VM caught a zero callee only by accident, in doCall's
+    // 1-based-id convention (module function values start at 1, so 0 is
+    // nilPtr), and reported `call: nil function pointer`; native x86 executed
+    // `call r11` with r11 = 0 and died with SIGSEGV and no output at all
+    // (exit 139). No address-level test can close this the way one closed the
+    // CIDER-BUG-219 pointer hole: the callee is not dereferenced, it is
+    // ENTERED, so the only sound place to look is the value itself, right
+    // before the CALL.
+    //
+    // It routes to a new `_nil_fnptr_fail` routine rather than reusing
+    // CIDER-BUG-219's `_nil_deref_fail`. A nil function pointer is not a nil
+    // dereference: nothing is read through it, so the language-level
+    // diagnostic is the `call:` one the VM already used. Like the 211 and 219
+    // guards this is NOT `--checks`-gated (the VM's report is unconditional,
+    // so gating would leave the backends disagreeing by default), answers
+    // `vm error: call: nil function pointer` on stderr and exit 2 on
+    // VM/native/pomeos, `ud2` on uefi, and a user-defined `_nil_fnptr_fail`
+    // still wins on both backends.
+    //
+    // A callee that is provably not nil costs nothing, exactly as in
+    // emitNilDerefCheck: a LABEL is a static function address (`super.m()`,
+    // and a bare module function that reached this path), and a non-zero
+    // CONSTANT is a folded address. A CONSTANT zero is a statically known nil,
+    // so it traps unconditionally -- the same fold-to-a-trap shape
+    // emitNilDerefCheck and emitBoundsCheck use.
+    void emitNilFnPtrCheck(const IRValue& fnPtr) {
+        if (fnPtr.kind == IRValue::LABEL) return;
+        if (fnPtr.kind == IRValue::CONSTANT && fnPtr.intValue != 0) return;
+        std::string failName = nextLabel("nil_fnptr_fail");
+        std::string okName = nextLabel("nil_fnptr_ok");
+        if (fnPtr.kind == IRValue::CONSTANT) {
+            // Statically nil: trap straight away, then a fresh block so the
+            // call still has a well-formed block (only reachable if a
+            // user-defined _nil_fnptr_fail returns).
+            startBlock(failName);
+            emitNilFnPtrTrap(okName);
+            return;
+        }
+        IRValue isNil = IRValue::Register(nextTemp(), IRType::BOOL);
+        currentBlock_->addInstruction(
+            {IROp::CMP_EQ, isNil, {fnPtr, IRValue::Constant(0, IRType::I64)}});
+        currentBlock_->addInstruction({IROp::COND_BR, std::nullopt,
+                                       {isNil, IRValue::Label(failName),
+                                        IRValue::Label(okName)}});
+        startBlock(failName);
+        emitNilFnPtrTrap(okName);
+    }
+
+    // The trap half of emitNilFnPtrCheck: call `_nil_fnptr_fail` and branch
+    // back so the CFG stays well-formed (the routine never returns on
+    // VM/native, but a user-defined `_nil_fnptr_fail` may).
+    void emitNilFnPtrTrap(const std::string& okName) {
+        IRInstruction call;
+        call.op = IROp::CALL;
+        call.dest = std::nullopt;
+        call.args.push_back(IRValue::Label("_nil_fnptr_fail"));
         currentBlock_->addInstruction(call);
         currentBlock_->addInstruction({IROp::BR, std::nullopt, {IRValue::Label(okName)}});
         startBlock(okName);
