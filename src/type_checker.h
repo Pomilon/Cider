@@ -439,9 +439,16 @@ public:
             t.arrayElement = std::make_shared<TypeInfo>(canonicalizeNominal(*t.arrayElement, line));
         }
         if (t.name.empty() || t.name.find("::") != std::string::npos) return t;  // already canonical
-        // CIDER-BUG-136: per-owner instantiation identity for this spelling
-        // context (separate compilation); see canonicalizeInModule.
         if (t.name.find('<') != std::string::npos) {
+            // CIDER-BUG-168: the argument list names types too, and the head
+            // checks below never read it — an unknown template inside a known
+            // one (`Wrap<Nope<int>>`) stayed silent. Runs BEFORE the two
+            // accepted-spelling rewrites, which return early for exactly the
+            // qualified spellings a nested argument needs to be checked in.
+            checkTemplateArgumentTypes(t.name, line);
+            // CIDER-BUG-136: per-owner instantiation identity for this
+            // spelling context (separate compilation); see
+            // canonicalizeInModule.
             std::string ident = templateInstanceIdentity(t.name, currentModule_);
             if (!ident.empty()) {
                 t.name = ident;
@@ -639,6 +646,72 @@ public:
             if (names.count(base)) return;
         }
         error("unknown template '" + base + "'", line);
+    }
+
+    // CIDER-BUG-168: index of the '>' matching the '<' at `open`, or npos.
+    // Argument lists nest (`Wrap<Pair<int,int>>`), so a plain find('>')
+    // would stop at an inner closer. Mirrors the collector's matchingAngle.
+    static size_t matchingTemplateAngle(const std::string& s, size_t open) {
+        int depth = 0;
+        for (size_t i = open; i < s.size(); ++i) {
+            if (s[i] == '<') depth++;
+            else if (s[i] == '>' && --depth == 0) return i;
+        }
+        return std::string::npos;
+    }
+
+    // CIDER-BUG-168: split an argument list at top-level commas only, so
+    // `Pair<int,int>` passed as one argument stays one argument. Mirrors
+    // the collector's splitTemplateArgs.
+    static std::vector<std::string> splitTemplateArgumentSpellings(const std::string& args) {
+        std::vector<std::string> out;
+        int depth = 0;
+        size_t start = 0;
+        for (size_t i = 0; i < args.size(); ++i) {
+            char c = args[i];
+            if (c == '<') depth++;
+            else if (c == '>') depth--;
+            else if (c == ',' && depth == 0) {
+                out.push_back(args.substr(start, i - start));
+                start = i + 1;
+            }
+        }
+        if (start < args.size()) out.push_back(args.substr(start));
+        return out;
+    }
+
+    // CIDER-BUG-168: a template ARGUMENT names a type just like the head of
+    // the spelling does, so a template nested in a KNOWN one is checked with
+    // the same rules. The head checks (canonicalizeDottedTemplate for a
+    // qualified spelling, checkBareTemplate for a bare one) read only the
+    // text before the first '<', which made `Wrap<Nope<int>>` — and
+    // `m.Wrap<m.Nope<int>>` — accepted at the declaration in both
+    // spellings: the collector instantiates lazily from the head alone, so
+    // nothing else reported them, and a use of the instantiation only failed
+    // later with an unrelated message. Each nested spelling goes back
+    // through canonicalizeNominal, which reports it in the head's own shape
+    // ("unknown template 'Nope'", or the same plus "in module 'm'");
+    // export / arity rejections keep coming from the collector.
+    //
+    // No depth cap is needed: the walk follows the FINITE nesting of one
+    // written spelling (every step consumes a '<' of the same string), and
+    // the parser already rejects array / fn / volatile arguments. A
+    // self-referential template terminates for the same reason its spelling
+    // does — `Node<Node<int>>` walks two levels and stops, and an argument
+    // that is a bare type parameter or alias (`Wrap<T>`, `Wrap<P>`) has no
+    // '<' at all, ending the walk without recursing.
+    void checkTemplateArgumentTypes(const std::string& spelling, int line) {
+        if (line < 0) return;  // silent pre-check: fail safely, report nothing
+        size_t open = spelling.find('<');
+        size_t close = matchingTemplateAngle(spelling, open);
+        if (close == std::string::npos) return;  // unbalanced: nothing to walk
+        for (const std::string& arg :
+             splitTemplateArgumentSpellings(spelling.substr(open + 1, close - open - 1))) {
+            if (arg.find('<') == std::string::npos) continue;  // plain nominal
+            TypeInfo inner;
+            inner.name = arg;
+            (void)canonicalizeNominal(inner, line);
+        }
     }
 
     TypeInfo resolveType(TypeInfo info) {

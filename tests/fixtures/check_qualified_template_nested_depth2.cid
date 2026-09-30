@@ -1,0 +1,9 @@
+// CIDER-BUG-168: the qualified walk recurses too, so an unknown template two
+// argument levels down is reported at the same declaration.
+import nested_template_unknown_lib;
+
+type W = nested_template_unknown_lib.Tag<nested_template_unknown_lib.Tag<nested_template_unknown_lib.Nope<int>>>;
+
+func main() -> int {
+  return 0;
+}

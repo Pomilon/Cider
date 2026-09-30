@@ -1,0 +1,13 @@
+// CIDER-BUG-168: wrong arity in a nested argument of a module-qualified
+// spelling, checked with the same collector diagnostic the head uses. The
+// outer `Tag<int>` is fine; the inner `Cell` is spelled with two arguments
+// for a one-parameter template. `Tag`'s body never names its parameter, so
+// no field substitution reaches the bad argument (see
+// nested_template_unknown_lib.cid).
+import nested_template_unknown_lib;
+
+type W = nested_template_unknown_lib.Tag<nested_template_unknown_lib.Cell<int, int>>;
+
+func main() -> int {
+  return 0;
+}

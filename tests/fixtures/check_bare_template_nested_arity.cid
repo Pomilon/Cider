@@ -1,0 +1,19 @@
+// CIDER-BUG-168: a wrong-arity template NESTED in a known one is reported
+// too. The inner `Cell` is a known template spelled with two arguments for a
+// one-parameter template, and the collector's arity check used to read only
+// the head of the spelling, so the argument was never checked. `Tag`'s body
+// never names its parameter, so no field substitution reaches the bad
+// argument either (see nested_template_unknown_lib.cid).
+struct Cell<A> {
+  var a: A;
+}
+
+struct Tag<T> {
+  var n: int;
+}
+
+type W = Tag<Cell<int, int>>;
+
+func main() -> int {
+  return 0;
+}

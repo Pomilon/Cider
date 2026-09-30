@@ -3133,6 +3133,17 @@ public:
     void checkAndInstantiateStructTemplate(const std::string& typeName) {
         size_t pos = typeName.find('<');
         if (pos == std::string::npos) return;
+        // CIDER-BUG-168: an argument list names templates exactly like the
+        // head does, so each nested spelling gets the same export/arity
+        // checks and the same instantiation. Recursed BEFORE the head is
+        // looked up, while the module stack still holds the context the
+        // spelling was written in (the head's own fields are substituted in
+        // its OWN module further down, CIDER-BUG-090/136). It terminates
+        // because each step descends into a shorter substring of the same
+        // written spelling — a self-referential template (`Node<Node<T>>`)
+        // has a finite nesting depth, and an argument without a '<' (a type
+        // parameter, an alias) stops the walk.
+        checkTemplateArgumentInstantiations(typeName);
         std::string baseName = typeName.substr(0, pos);
         // CIDER-BUG-073: a dotted qualifier before the '<' (`m.Box<int>`,
         // `a.util.Box<int>`) selects that module's template. The
@@ -3307,6 +3318,22 @@ public:
         // the instantiation to the template's module, not the use site's.
         if (separateCompilation_) symbolModules_.emplace(structSym->id, owner);
         structTemplateActive_.erase(identity);
+    }
+
+    // CIDER-BUG-168: recurse the head's own check into every template-named
+    // argument of `typeName`. A nested unknown template used to be dropped
+    // here (the head's lookup ignores the argument list) and diagnosed by
+    // neither pass; a nested wrong-arity one only by accident, when the head
+    // template's body happened to name the parameter in a field.
+    void checkTemplateArgumentInstantiations(const std::string& typeName) {
+        size_t open = typeName.find('<');
+        size_t close = matchingAngle(typeName, open);
+        if (close == std::string::npos) return;
+        for (const std::string& arg :
+             splitTemplateArgs(typeName.substr(open + 1, close - open - 1))) {
+            if (arg.find('<') == std::string::npos) continue;  // plain nominal
+            checkAndInstantiateStructTemplate(arg);
+        }
     }
 
     void visitStmtForTemplateCalls(Statement* stmt) {
