@@ -1,3 +1,4 @@
+#include <cstdint>
 #include <cstdio>
 #include <memory>
 #include <new>
@@ -2612,6 +2613,144 @@ int run() {
         mod.addFunction(std::move(fn));
         cider::VM vm;
         CHECK(vm.run(mod).exitCode == 0);
+    }
+
+    // CIDER-BUG-229: the VM masked every shift count to 6 bits while x86 masks
+    // to 5 for an 8/16/32-bit operand, so `1 as u8 << 33` was 0 here and 2
+    // natively. The rule is single-sourced in shiftCountMask; this pins the
+    // VM side of it directly on IR, independent of the source-level corpus
+    // test, for every width, both directions, and both count forms.
+    {
+        // Returns `lhs op count` narrowed to the destination width, as the
+        // VM computes it.
+        struct ShiftCase {
+            cider::IROp op;
+            cider::IRType width;
+            int64_t lhs;
+            int64_t count;
+            bool countIsRegister;
+            int64_t want;
+        };
+        // 1 << 33 == 1 << 1 == 2; 0xFF >> 33 == 0xFF >> 1 == 127; the
+        // 64-bit count register keeps 33 and 65 where the 5-bit one folds
+        // them to 1.
+        std::vector<ShiftCase> cases = {
+            {cider::IROp::LSHIFT, cider::IRType::U8,  1, 33, false, 2},
+            {cider::IROp::LSHIFT, cider::IRType::U8,  1, 65, false, 2},
+            {cider::IROp::LSHIFT, cider::IRType::I8,  16, 33, false, 32},
+            {cider::IROp::RSHIFT, cider::IRType::U8,  0xFF, 33, false, 127},
+            {cider::IROp::RSHIFT, cider::IRType::I8,  -1, 33, false, -1},
+            {cider::IROp::LSHIFT, cider::IRType::U16, 1, 33, false, 2},
+            {cider::IROp::LSHIFT, cider::IRType::I16, 256, 33, false, 512},
+            {cider::IROp::RSHIFT, cider::IRType::U16, 0xFFFF, 33, false, 32767},
+            {cider::IROp::RSHIFT, cider::IRType::I16, -1, 33, false, -1},
+            {cider::IROp::LSHIFT, cider::IRType::U32, 1, 33, false, 2},
+            {cider::IROp::LSHIFT, cider::IRType::I32, 1, 33, false, 2},
+            {cider::IROp::RSHIFT, cider::IRType::U32, 0xFFFFFFFF, 33, false, 0x7FFFFFFF},
+            {cider::IROp::RSHIFT, cider::IRType::I32, -8, 33, false, -4},
+            {cider::IROp::LSHIFT, cider::IRType::U32, 1, 65, false, 2},
+            // 64-bit: the count register is 6 bits, so 33 stays 33.
+            {cider::IROp::LSHIFT, cider::IRType::U64, 1, 65, false, 2},
+            {cider::IROp::LSHIFT, cider::IRType::I64, 1, 33, false, INT64_C(1) << 33},
+            {cider::IROp::RSHIFT, cider::IRType::U64, -1, 65, false, 0x7FFFFFFFFFFFFFFF},
+            {cider::IROp::RSHIFT, cider::IRType::I64, -8, 65, false, -4},
+            {cider::IROp::RSHIFT, cider::IRType::I64, -1, 65, false, -1},
+            // A register count takes the same rule as a constant one.
+            {cider::IROp::LSHIFT, cider::IRType::U8,  1, 33, true, 2},
+            {cider::IROp::RSHIFT, cider::IRType::U32, 0xFFFFFFFF, 33, true, 0x7FFFFFFF},
+            {cider::IROp::LSHIFT, cider::IRType::U64, 1, 65, true, 2},
+            // A negative count masks like its unsigned bits (-1 == all ones),
+            // and an in-range count is never touched.
+            {cider::IROp::LSHIFT, cider::IRType::U32, 1, -1, false, 0x80000000},
+            {cider::IROp::LSHIFT, cider::IRType::U64, 1, -1, false, INT64_MIN},
+            {cider::IROp::LSHIFT, cider::IRType::U8,  1, 7, false, 128},
+            {cider::IROp::LSHIFT, cider::IRType::U8,  1, 0, false, 1},
+            {cider::IROp::LSHIFT, cider::IRType::U64, 1, 63, false, INT64_MIN},
+        };
+
+        auto fn8 = makeFn("shiftmask", cider::IRType::I32);
+        auto blocks = std::vector<std::unique_ptr<cider::BasicBlock>>();
+        auto entry = std::make_unique<cider::BasicBlock>("entry");
+        for (size_t i = 0; i < cases.size(); i++) {
+            const ShiftCase& c = cases[i];
+            std::string tag = "c" + std::to_string(i);
+            if (c.countIsRegister) {
+                // The count lives in a register, the register-form path.
+                cider::IRInstruction m;
+                m.op = cider::IROp::MOV;
+                m.dest = cider::IRValue::Register("n" + tag, cider::IRType::I64);
+                m.args = {cider::IRValue::Constant(c.count, cider::IRType::I64)};
+                entry->addInstruction(m);
+            }
+            cider::IRInstruction v;
+            v.op = cider::IROp::MOV;
+            v.dest = cider::IRValue::Register("v" + tag, c.width);
+            v.args = {cider::IRValue::Constant(c.lhs, c.width)};
+            entry->addInstruction(v);
+            cider::IRInstruction s;
+            s.op = c.op;
+            s.dest = cider::IRValue::Register("r" + tag, c.width);
+            s.args = {cider::IRValue::Register("v" + tag, c.width),
+                      c.countIsRegister
+                          ? cider::IRValue::Register("n" + tag, cider::IRType::I64)
+                          : cider::IRValue::Constant(c.count, cider::IRType::I32)};
+            entry->addInstruction(s);
+            // Compare the raw result against the expectation in 64 bits, so a
+            // sign-extended narrow value compares equal to its Cider literal.
+            cider::IRInstruction x;
+            x.op = cider::IROp::MOV;
+            x.dest = cider::IRValue::Register("x" + tag, cider::IRType::I64);
+            x.args = {cider::IRValue::Register("r" + tag, c.width)};
+            entry->addInstruction(x);
+            cider::IRInstruction cm;
+            cm.op = cider::IROp::CMP_EQ;
+            cm.dest = cider::IRValue::Register("eq" + tag, cider::IRType::I32);
+            cm.args = {cider::IRValue::Register("x" + tag, cider::IRType::I64),
+                       cider::IRValue::Constant(c.want, cider::IRType::I64)};
+            entry->addInstruction(cm);
+            auto fail = std::make_unique<cider::BasicBlock>("bad" + tag);
+            // The 1-based case index, NOT the computed value: a case whose
+            // right answer is 0 would otherwise fail into a 0 that reads as
+            // success.
+            cider::IRInstruction fr;
+            fr.op = cider::IROp::RET;
+            fr.args = {cider::IRValue::Constant(int64_t(i + 1), cider::IRType::I32)};
+            fail->addInstruction(fr);
+            auto ok = std::make_unique<cider::BasicBlock>("ok" + tag);
+            cider::IRInstruction orr;
+            orr.op = cider::IROp::RET;
+            orr.args = {cider::IRValue::Constant(int64_t(0), cider::IRType::I32)};
+            ok->addInstruction(orr);
+            // args[1] is the TRUE target, so equality falls through to "ok".
+            cider::IRInstruction br;
+            br.op = cider::IROp::COND_BR;
+            br.args = {cider::IRValue::Register("eq" + tag, cider::IRType::I32),
+                       cider::IRValue::Label("ok" + tag),
+                       cider::IRValue::Label("bad" + tag)};
+            entry->addInstruction(br);
+            blocks.push_back(std::move(fail));
+            blocks.push_back(std::move(ok));
+        }
+        blocks.insert(blocks.begin(), std::move(entry));
+        for (auto& b : blocks) fn8->addBlock(std::move(b));
+        cider::ModuleIR mod8;
+        mod8.addFunction(std::move(fn8));
+        cider::VM vm8;
+        // The exit code is the 1-based index of the first failing case, so a
+        // failure names the case that broke.
+        int64_t rc = vm8.run(mod8, "shiftmask").exitCode;
+        // The exit code on failure is the 1-based index of the first failing
+        // case, so a failure names the case that broke.
+        if (rc != 0 && rc >= 1 && (size_t)rc <= cases.size()) {
+            const ShiftCase& c = cases[(size_t)rc - 1];
+            std::fprintf(stderr,
+                         "shiftmask case %lld: op=%d width=%d lhs=%lld count=%lld "
+                         "reg=%d want=%lld\n",
+                         (long long)rc, (int)c.op, (int)c.width, (long long)c.lhs,
+                         (long long)c.count, (int)c.countIsRegister,
+                         (long long)c.want);
+        }
+        CHECK(rc == 0);
     }
 
     return 0;

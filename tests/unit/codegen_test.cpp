@@ -846,6 +846,54 @@ int run() {
     CHECK(alignAsm.find("alignb 2") != std::string::npos);
     CHECK(alignAsm.find("g: dq 5") != std::string::npos);
 
+    // CIDER-BUG-229: the shift-count mask is single-sourced in shiftCountMask
+    // (5 bits for an 8/16/32-bit operand, 6 for a 64-bit one) and the VM
+    // applies it to its own count. The native backend gets the same mask from
+    // the CPU, so a constant count is emitted already masked: the assembly
+    // shows the count the shift will really use, and the two backends cannot
+    // drift apart.
+    CHECK(cider::shiftCountMask(cider::IRType::U8) == 31);
+    CHECK(cider::shiftCountMask(cider::IRType::I8) == 31);
+    CHECK(cider::shiftCountMask(cider::IRType::U16) == 31);
+    CHECK(cider::shiftCountMask(cider::IRType::I16) == 31);
+    CHECK(cider::shiftCountMask(cider::IRType::U32) == 31);
+    CHECK(cider::shiftCountMask(cider::IRType::I32) == 31);
+    CHECK(cider::shiftCountMask(cider::IRType::BOOL) == 31);  // sized "dword"
+    CHECK(cider::shiftCountMask(cider::IRType::U64) == 63);
+    CHECK(cider::shiftCountMask(cider::IRType::I64) == 63);
+    CHECK(cider::shiftCountMask(cider::IRType::PTR) == 63);
+
+    // A sub-32-bit operand emits the 5-bit-masked count, a 64-bit one keeps
+    // all six bits: `u8 << 33` is `shl ..., 1` while `u64 << 33` is `..., 33`.
+    // The u32/u64 operands are globals so they stay in memory, whose size
+    // prefix names the width the count register was chosen from; the u8 one
+    // may be register-allocated, so only its count is pinned.
+    std::string shiftAsm = genAsm(
+        "var gb: u8 = 1;\n"
+        "var gw: u32 = 1;\n"
+        "var gl: u64 = 1;\n"
+        "func main() -> int {\n"
+        "  return ((gb << 33) as i64) + (gw << 33) as i64 + (gl << 33) as i64;\n"
+        "}\n");
+    CHECK(shiftAsm.find("shl dword [") != std::string::npos);
+    CHECK(shiftAsm.find("shl qword [") != std::string::npos);
+    // 33 & 31 == 1 on the 5-bit widths, 33 & 63 == 33 on the 6-bit one. The
+    // unmasked form would have put 33 on the dword operand.
+    CHECK(shiftAsm.find("shl dword [rbp - 1], 33") == std::string::npos);
+    CHECK(shiftAsm.find("], 1\n") != std::string::npos);
+    CHECK(shiftAsm.find("], 33\n") != std::string::npos);
+    // A byte-wide shift never sees 33 either way it is spelled.
+    size_t bPos = shiftAsm.find("shl r");
+    if (bPos != std::string::npos)
+        CHECK(shiftAsm.substr(bPos, 24).find(", 1\n") != std::string::npos);
+
+    // A negative constant count is masked too, so it can never reach NASM as
+    // a negative shift immediate.
+    std::string negCountAsm = genAsm(
+        "func main() -> int { var b: u8 = 1; return (b << -1) as i64; }\n");
+    CHECK(negCountAsm.find("shl") != std::string::npos);
+    CHECK(negCountAsm.find(", -1\n") == std::string::npos);
+
     return 0;
 }
 

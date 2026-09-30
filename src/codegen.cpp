@@ -1953,7 +1953,11 @@ bool CodeGenerator::generate(ModuleIR& module, const std::string& outputPath,
                         IRType srcT = instr.args[0].type;
                         if (srcT == IRType::I8 || srcT == IRType::I16 || srcT == IRType::I32 || srcT == IRType::I64) opName = "sar";
                     }
-                    IRType t = (instr.dest ? instr.dest->type : IRType::I32);
+                    // The operand size of a bitwise op is the width of its
+                    // result (shiftCountWidth, the same helper the VM reads),
+                    // so a shift's count register and its data register can
+                    // never be sized from two different rules.
+                    IRType t = shiftCountWidth(instr);
                     if (d != a1) {
                         if (isMem(d) && isMem(a1)) {
                             addText("    mov " + getSizedReg("rax", t) + ", " + getSizedReg(a1, t));
@@ -1963,7 +1967,21 @@ bool CodeGenerator::generate(ModuleIR& module, const std::string& outputPath,
                         }
                     }
                     if (instr.op == IROp::LSHIFT || instr.op == IROp::RSHIFT) {
-                        if (instr.args[1].kind == IRValue::CONSTANT) addText("    " + opName + " " + getSizedReg(d, t) + ", " + a2);
+                        // CIDER-BUG-229: an out-of-range count is masked to the
+                        // width's count register (5 bits for 8/16/32-bit
+                        // operands, 6 for 64-bit) -- the rule ir.h
+                        // single-sources and the VM applies to its own count.
+                        // The CPU masks the count itself, so a constant
+                        // immediate is emitted already masked: the same
+                        // encoding, with the shared rule visible in the
+                        // assembly, and a negative count (which NASM would
+                        // reject) can no longer reach the assembler. The
+                        // register form needs no such help -- the CPU masks
+                        // CL exactly the same way.
+                        uint64_t mask = shiftCountMask(t);
+                        if (instr.args[1].kind == IRValue::CONSTANT)
+                            addText("    " + opName + " " + getSizedReg(d, t) + ", " +
+                                    std::to_string(instr.args[1].uintConst() & mask));
                         else { addText("    mov rcx, " + a2); addText("    " + opName + " " + getSizedReg(d, t) + ", cl"); }
                     } else {
                         // A 64-bit logic op with a constant that does not fit

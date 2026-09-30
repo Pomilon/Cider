@@ -257,14 +257,19 @@ VMResult VM::runBody(const ModuleIR& module, const std::string& runFunction) {
                 }
             } else {
                 int64_t x = a.i, y = b.i;
-                // Shift counts mask to 6 bits (x86 semantics; also avoids
-                // C++ UB for counts >= 64). Right shift is arithmetic for
-                // signed values, logical for unsigned (the value's type).
-                // Division follows C usual conversions: unsigned if the
-                // destination or either operand is unsigned (CID-028).
+                // Shift counts mask to the width's count register -- 5 bits
+                // for an 8/16/32-bit operand, 6 for a 64-bit one (x86
+                // semantics, and the rule ir.h single-sources for every
+                // backend; it also avoids C++ UB for counts >= 64). The VM
+                // used to mask to 6 bits at every width, so a count of 33
+                // on a u8 gave 0 here and 2 natively (CIDER-BUG-229).
+                // Right shift is arithmetic for signed values, logical for
+                // unsigned (the value's type). Division follows C usual
+                // conversions: unsigned if the destination or either
+                // operand is unsigned (CID-028).
                 uint64_t ux = (uint64_t)x;
                 uint64_t uy = (uint64_t)y;
-                unsigned n = (unsigned)(y & 63);
+                unsigned n = (unsigned)(uy & shiftCountMask(shiftCountWidth(instr)));
                 auto isUnsignedInt = [](IRType t) {
                     return t == IRType::U8 || t == IRType::U16 || t == IRType::U32 ||
                            t == IRType::U64 || t == IRType::PTR || t == IRType::BOOL;
@@ -327,7 +332,12 @@ VMResult VM::runBody(const ModuleIR& module, const std::string& runFunction) {
                 case IROp::BIT_OR: d.i = x | y; break;
                 case IROp::BIT_XOR: d.i = x ^ y; break;
                 case IROp::LSHIFT: d.i = narrowInt((int64_t)(ux << n), dt); break;
-                case IROp::RSHIFT: d.i = srcUnsigned ? (int64_t)(ux >> n) : (x >> n); break;
+                // A right shift fills from the top, so with the count already
+                // masked to the width it cannot leave a value wider than dt;
+                // narrowing keeps the "every integer ALU result is truncated
+                // to the destination width" invariant of CID-016 uniform
+                // across the op set.
+                case IROp::RSHIFT: d.i = narrowInt(srcUnsigned ? (int64_t)(ux >> n) : (x >> n), dt); break;
                 default: break;
                 }
             }

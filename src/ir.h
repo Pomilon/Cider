@@ -135,6 +135,54 @@ struct IRInstruction {
     std::string toString() const;
 };
 
+// CIDER-BUG-229: the one out-of-range shift-count rule, single-sourced for
+// every backend.
+//
+// `x << n` / `x >> n` keep the width of the left operand, and a count of
+// `n` is taken modulo the *count register* of that width: 5 bits (mod 32)
+// for an 8-, 16- or 32-bit operand, 6 bits (mod 64) for a 64-bit one. The
+// result is then truncated to the operand width like every other integer
+// ALU op (CID-016), so `1 as u8 << 33` is `1 << 1` = 2, and
+// `0xFF as u8 >> 33` is `0xFF >> 1` = 127. Any count in `[0, width)` --
+// every count a well-formed program writes -- is unaffected.
+//
+// The rule is x86's, chosen over a compile-time rejection for two reasons.
+// It is what the native backend already does for free (the CPU masks the
+// count itself), so matching the VM to it cannot change generated code's
+// behaviour; and Cider has no defined-overflow story to be consistent with
+// instead -- integer arithmetic wraps at the operand width (CID-016) and
+// overflow traps are explicitly not implemented, so rejecting one operator's
+// out-of-range value would make `<<` the only arithmetic operator with a
+// compile-time range check. Masking also keeps every shift total, needing
+// no runtime trap (which would add a branch to the hottest bit-twiddling
+// instruction and a new runtime-error class).
+//
+// Before this rule existed the VM masked to 6 bits at every width, so a
+// count of 33 on a `u8`/`i32` gave 0 in the VM and 2 natively.
+inline uint64_t shiftCountMask(IRType t) {
+    switch (t) {
+    // BOOL shifts as a 32-bit operand (codegen's getSizedReg sizes it
+    // "dword"), so it takes the 5-bit mask with the 32-bit widths.
+    case IRType::I8: case IRType::U8:
+    case IRType::I16: case IRType::U16:
+    case IRType::I32: case IRType::U32:
+    case IRType::BOOL:
+        return 31;
+    default:  // I64, U64, PTR (and VOID/F32/F64, which never reach a shift)
+        return 63;
+    }
+}
+
+// The width a shift's count register is chosen from: the result's own type,
+// falling back to the left operand for a dest-less node. Both the VM and
+// codegen must read the width the same way or the two disagree on the mask
+// (CIDER-BUG-229), so the fallback lives here rather than in either backend.
+inline IRType shiftCountWidth(const IRInstruction& instr) {
+    if (instr.dest) return instr.dest->type;
+    if (!instr.args.empty()) return instr.args[0].type;
+    return IRType::I32;
+}
+
 class BasicBlock {
 public:
     BasicBlock(const std::string& name) : name_(name) {}
