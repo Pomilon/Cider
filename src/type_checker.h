@@ -4011,6 +4011,29 @@ public:
             return;
         }
         lastExprType_ = canonicalizeInModule(mem->type, modSym->logicalName, expr.getLine());
+        // CIDER-BUG-230: a variable's interface flag is resolved BY NAME at
+        // every value read, because the collector does not flag one for a
+        // `var` declaration (unlike a class field, a struct field and a
+        // function signature — see symbol_collector.h's resolveInterfaceTypeFlag
+        // call sites, which cover no variable). visit(IdentifierExpr) does that
+        // resolution, so a from-imported / bare read of `lib`'s interface
+        // global presents the 16-byte fat pointer; this qualified spelling did
+        // not, so `lib.rIface = lib.rImpl` reached the generic
+        // areTypesCompatible path and was rejected with a bare nominal mismatch
+        // instead of the interface conversion it is. Resolve the flag here too,
+        // exactly as visit(IdentifierExpr) does, so the two spellings of one
+        // global are one type.
+        //
+        // The lookup is rooted in the OWNING module (CIDER-BUG-102): a spelling
+        // canonicalizeInModule left bare still names the interface as written
+        // there, which the use site's scope need not see. A canonical
+        // `lib::ROther` resolves through resolveScopedRaw's canonical path
+        // either way, so this only re-roots the bare-name fallback.
+        if (!lastExprType_.isInterface && lastExprType_.pointerLevel == 0 &&
+            !lastExprType_.isArray &&
+            resolveInterfaceSymbolInModule(lastExprType_, modSym->logicalName)) {
+            lastExprType_.isInterface = true;
+        }
     }
 
     void visit(StructLiteralExpr& expr) override {

@@ -5447,6 +5447,38 @@ public:
 
     // --- bitfield access lowering ---
 
+    // CIDER-BUG-230: `mod.g` (arrow never qualifies) — the object is a module
+    // qualifier, so the access is a MODULE member, not a field access. Shared
+    // by every shape classifier that must not mistake one for the other.
+    bool isModuleQualified(MemberAccessExpr* mem) {
+        if (!mem || mem->isArrow()) return false;
+        auto base = dynamic_cast<IdentifierExpr*>(mem->getObject());
+        if (!base) return false;
+        auto baseSym = symbolTable_.resolve(base->getName());
+        return baseSym && baseSym->kind == SymbolKind::MODULE;
+    }
+
+    // CID-020/021 §3: the declared type of a module-qualified global (`mod.g`),
+    // read from the owning module's own scope — the same symbol
+    // visit(MemberAccessExpr) reads — with the alias chain and the interface
+    // flag resolved. False when the access is not a qualified global (a struct
+    // field, or a qualifier naming something that is not a global), so the
+    // caller falls through to its own shape.
+    bool moduleQualifiedGlobalType(MemberAccessExpr* mem, TypeInfo& out) {
+        if (!isModuleQualified(mem)) return false;
+        auto baseSym = symbolTable_.resolve(
+            static_cast<IdentifierExpr*>(mem->getObject())->getName());
+        auto modSym = std::static_pointer_cast<ModuleSymbol>(baseSym);
+        auto target = modSym->scope ? modSym->scope->resolveLocal(mem->getMember()) : nullptr;
+        if (!target || target->kind != SymbolKind::VARIABLE) return false;
+        std::string memberName = mem->getMember();
+        std::string defMod = definingModuleFor(target, memberName);
+        TypeInfo t = canonicalizeSymbolType(target, memberName);
+        if (t.pointerLevel == 0) t = resolveTypeAlias(t, defMod);
+        out = resolveInterfaceNominal(t);
+        return true;
+    }
+
     // Resolve an expression's declared type WITHOUT generating code (no
     // temp counters, no instructions) — for the bitfield lookup helpers.
     TypeInfo inferExprType(Expression* expr) {
@@ -5460,30 +5492,14 @@ public:
                 return resolveTypeAlias(sym->type);
             }
         } else if (auto mem = dynamic_cast<MemberAccessExpr*>(expr)) {
-            // CID-020/021 §3: `mod.g` names a module-scope global; resolve
-            // its declared type from the module's own scope (the same symbol
-            // visit(MemberAccessExpr) reads). Without this, a field of a
-            // module-qualified global struct has no inferred type, so
-            // CIDER-BUG-069's interface-target detection cannot see the
-            // fat pointer and the store would write only the data word.
-            if (!mem->isArrow()) {
-                if (auto base = dynamic_cast<IdentifierExpr*>(mem->getObject())) {
-                    auto baseSym = symbolTable_.resolve(base->getName());
-                    if (baseSym && baseSym->kind == SymbolKind::MODULE) {
-                        auto modSym = std::static_pointer_cast<ModuleSymbol>(baseSym);
-                        auto target = modSym->scope ? modSym->scope->resolveLocal(mem->getMember())
-                                                    : nullptr;
-                        if (target && target->kind == SymbolKind::VARIABLE) {
-                            std::string memberName = mem->getMember();
-                            std::string defMod = definingModuleFor(target, memberName);
-                            TypeInfo t = canonicalizeSymbolType(target, memberName);
-                            if (t.pointerLevel == 0) t = resolveTypeAlias(t, defMod);
-                            return resolveInterfaceNominal(t);
-                        }
-                        return TypeInfo{};
-                    }
-                }
-            }
+            // CID-020/021 §3: `mod.g` names a module-scope global, not a
+            // struct field. Without this, a field of a module-qualified global
+            // struct has no inferred type, so CIDER-BUG-069's interface-target
+            // detection cannot see the fat pointer and the store would write
+            // only the data word.
+            TypeInfo modGlobal;
+            if (moduleQualifiedGlobalType(mem, modGlobal)) return modGlobal;
+            if (!mem->isArrow() && isModuleQualified(mem)) return TypeInfo{};
             TypeInfo objType = inferExprType(mem->getObject());
             if (objType.pointerLevel > 0) objType.pointerLevel--;
             // CIDER-BUG-015: alias-safe struct lookup and field typing.
@@ -5580,6 +5596,16 @@ public:
 
     bool getMemberFieldType(MemberAccessExpr* mem, TypeInfo& out) {
         if (!mem) return false;
+        // CIDER-BUG-230: `mod.g` is a module-scope GLOBAL, so the struct lookup
+        // below cannot type it (it resolves the qualifier, whose type is no
+        // aggregate). An assignment TARGET needs its declared type here — it is
+        // what decides the 16-byte fat-pointer store — and the declared type is
+        // exactly what inferExprType already resolves for the qualified-global
+        // shape, interface flag included. Without this branch `lib.rIface = c`
+        // fell through to the plain aggregate store: a copy of the concrete
+        // object's BYTES into the 16-byte slot, leaving the vtable word unset,
+        // so every dispatch through the stored value hit a nil vtable.
+        if (moduleQualifiedGlobalType(mem, out)) return true;
         TypeInfo objType = inferExprType(mem->getObject());
         if (objType.pointerLevel > 0) objType.pointerLevel--;
         auto sym = resolveStructOrClassSymbol(objType);
