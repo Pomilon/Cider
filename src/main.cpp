@@ -2,6 +2,7 @@
 #include <cstdlib>
 #include <cstring>
 #include <fstream>
+#include <iostream>
 #include <map>
 #include <new>
 #include <sstream>
@@ -119,10 +120,75 @@ bool parseCli(int argc, char** argv, CliOptions& out) {
     return true;
 }
 
+// CIDER-BUG-258: the one wording for a failed output write, shared by every
+// path that produces output — the `-o` artifacts, the `.cider-meta` cache and
+// the stdout/stderr dumps — so a failed write is greppable the same way
+// everywhere. `target` is the path, or `<stdout>` / `<stderr>` for a stream.
+// See printHelp's exit-code table: this is an exit-1 failure.
+std::string cannotWrite(const std::string& target) {
+    return "cannot write " + target;
+}
+
+// CIDER-BUG-258: write `content` to `path`.
+//
+// The open was always checked; the WRITE was not. A std::ofstream reports a
+// failed write on its own state (failbit/badbit) and never throws, so a full
+// disk, a full device or any other ENOSPC/EIO/EFBIG reached the destructor
+// and was discarded: `compile -o` and `bundle -o` exited 0 over an empty or
+// truncated file, and the cache snapshot said "module built" over garbage.
+//
+// close() is what flushes the last buffer, so it is also where a small
+// output's write failure surfaces (a few KB never fills the buffer) — the
+// check has to come after it, and it then covers a mid-stream failure too.
+// The wording stays the driver's existing fixed one, so the generic handler
+// reports `<input>: cannot write <target>` with exit 1, as it always has for
+// the open failure here.
 void writeFileOrThrow(const std::string& path, const std::string& content) {
     std::ofstream out(path, std::ios::binary | std::ios::trunc);
-    if (!out) throw std::runtime_error("cannot write " + path);
+    if (!out) throw std::runtime_error(cannotWrite(path));
     out << content;
+    out.close();
+    if (!out) throw std::runtime_error(cannotWrite(path));
+}
+
+// CIDER-BUG-258: write `bytes` to a C stream and report a failed write as
+// `cannot write <name>`, returning false so the caller can `return 1`.
+//
+// Both halves matter. stderr is unbuffered, so a rejected write shows up at
+// once as a short fwrite and a later flush has nothing left to say about it;
+// stdout is buffered, so the bytes are accepted into the buffer and only the
+// flush finds out that the kernel refused them. A stream with nothing to write
+// reports nothing: no bytes were lost.
+//
+// `name` is the target the message names: `<stdout>` or `<stderr>`.
+bool writeStreamOrReport(std::FILE* stream, const char* name, const std::string& bytes) {
+    if (!bytes.empty() && std::fwrite(bytes.data(), 1, bytes.size(), stream) != bytes.size()) {
+        std::fprintf(stderr, "%s\n", cannotWrite(name).c_str());
+        return false;
+    }
+    if (std::fflush(stream) == 0) return true;
+    std::fprintf(stderr, "%s\n", cannotWrite(name).c_str());
+    return false;
+}
+
+// CIDER-BUG-258: the same check for the one stdout write the driver does not
+// make with fwrite (`parse`'s printf). stdout is never unbuffered, so printf
+// succeeds into the buffer and the flush is where a failed write appears.
+bool flushStreamOrReport(std::FILE* stream, const char* name) {
+    if (std::fflush(stream) == 0) return true;
+    std::fprintf(stderr, "%s\n", cannotWrite(name).c_str());
+    return false;
+}
+
+// CIDER-BUG-258: the same check for the IR dump (`build`, and `compile` under
+// CIDER_DEBUG_IR), which src/ir.cpp prints through std::cout rather than
+// stdio. Without the explicit flush the error would only show up in the
+// static destructor at exit, i.e. never.
+bool flushCoutOrReport() {
+    std::cout.flush();
+    if (static_cast<bool>(std::cout)) return true;
+    std::fprintf(stderr, "%s\n", cannotWrite("<stdout>").c_str());
+    return false;
 }
 
 // `mkdir -p` for the --cache directory.
@@ -306,7 +372,14 @@ void printHelp() {
         "  2  usage error (unknown command or flag, missing operand), a VM\n"
         "     runtime error under `run`, or the compiler or the VM running out\n"
         "     of memory (`compiler: out of memory` / `vm error: out of\n"
-        "     memory`); `run` otherwise forwards the program's own exit code\n");
+        "     memory`); `run` otherwise forwards the program's own exit code\n"
+        "\n"
+        "every failed write — an output file that cannot be opened or written,\n"
+        "a `.cider-meta` snapshot, or stdout/stderr under `parse`, `build`,\n"
+        "`bundle` and `run` — is reported as `cannot write <target>` and exits\n"
+        "1. A partially written output is left in place, not removed: `-o` may\n"
+        "name a device or a FIFO, so the driver never unlinks the target; check\n"
+        "a stale file before reusing it.\n");
 }
 
 int main(int argc, char** argv) {
@@ -350,8 +423,19 @@ int main(int argc, char** argv) {
                     return 1;
                 }
                 out << r.output;
+                // CIDER-BUG-258: the open was checked but the write was not,
+                // so `bundle -o /dev/full` exited 0. Same close-then-check as
+                // writeFileOrThrow above (which the cache path uses), and the
+                // same wording this path already used for a failed open.
+                out.close();
+                if (!out) {
+                    std::fprintf(stderr, "cannot write %s\n", opts.outputFile.c_str());
+                    return 1;
+                }
             } else {
-                std::fwrite(r.output.data(), 1, r.output.size(), stdout);
+                // CIDER-BUG-258: `bundle f.cid > /dev/full` lost the bundle and
+                // still exited 0.
+                if (!writeStreamOrReport(stdout, "<stdout>", r.output)) return 1;
             }
             return 0;
         }
@@ -370,6 +454,9 @@ int main(int argc, char** argv) {
         }
         if (opts.command == "parse") {
             std::printf("%s\n", cider::dump(*prog).c_str());
+            // CIDER-BUG-258: the AST dump is an output too — a full stdout used
+            // to swallow the failure and exit 0.
+            if (!flushStreamOrReport(stdout, "<stdout>")) return 1;
             return 0;
         }
         faultInjectAlloc("symbol");
@@ -477,7 +564,12 @@ int main(int argc, char** argv) {
             cider::SSADeconstructor decon;
             faultInjectAlloc("deconstruct");
             decon.process(module);
-            if (std::getenv("CIDER_DEBUG_IR")) module.print();
+            if (std::getenv("CIDER_DEBUG_IR")) {
+                module.print();
+                // CIDER-BUG-258: the IR dump is an output artifact like any
+                // other (this is the `build` dump on the debug path).
+                if (!flushCoutOrReport()) return 1;
+            }
             cider::CodeGenerator cg(opts.target);
             // CIDER-FEAT-001: -g emits DWARF line tables + function DIEs.
             cg.setDebugInfo(opts.debug);
@@ -490,6 +582,9 @@ int main(int argc, char** argv) {
                 separateCompilation ? opts.inputFile : std::string();
             faultInjectAlloc("codegen");
             if (!cg.generate(module, opts.outputFile, codegenSource)) {
+                // CIDER-BUG-258: generate() now also returns false when a
+                // WRITE failed (it checked only the open before), so this one
+                // message covers both and a full disk no longer exits 0.
                 std::fprintf(stderr, "cannot write %s\n", opts.outputFile.c_str());
                 return 1;
             }
@@ -531,16 +626,24 @@ int main(int argc, char** argv) {
             cider::VM vm;
             try {
                 cider::VMResult r = vm.run(module);
-                std::fwrite(r.stdoutText.data(), 1, r.stdoutText.size(), stdout);
-                std::fwrite(r.stderrText.data(), 1, r.stderrText.size(), stderr);
+                // CIDER-BUG-258: the driver's copy of the program's output is
+                // an output write too — `run > /dev/full` used to lose it
+                // silently and still forward the program's exit code. A
+                // program that printed nothing writes no bytes and correctly
+                // reports nothing; one whose bytes were rejected gets this
+                // diagnostic and exit 1 (the documented write failure) in
+                // place of the program's own exit code.
+                if (!writeStreamOrReport(stdout, "<stdout>", r.stdoutText)) return 1;
+                if (!writeStreamOrReport(stderr, "<stderr>", r.stderrText)) return 1;
                 return r.exitCode;
             } catch (const cider::VMError& e) {
                 // CIDER-BUG-154: an error may carry bytes the program
                 // printed before failing (the uncaught-exception path
                 // flushes destructor output); emit them first so VM stdout
                 // matches native's raw syscalls byte for byte.
-                std::fwrite(e.stdoutText.data(), 1, e.stdoutText.size(), stdout);
                 std::fprintf(stderr, "vm error: %s\n", e.message.c_str());
+                // CIDER-BUG-258: same check on the path above.
+                if (!writeStreamOrReport(stdout, "<stdout>", e.stdoutText)) return 1;
                 return 2;
             }
         }
@@ -567,6 +670,8 @@ int main(int argc, char** argv) {
             return 1;
         }
         module.print();
+        // CIDER-BUG-258: the IR dump is this command's whole output.
+        if (!flushCoutOrReport()) return 1;
         return 0;
     } catch (const std::bad_alloc&) {
         // CIDER-BUG-129: THE allocation-failure boundary for every compiler

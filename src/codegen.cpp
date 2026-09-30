@@ -3091,11 +3091,21 @@ bool CodeGenerator::generate(ModuleIR& module, const std::string& outputPath,
     for (const auto& line : textSection) out << line << "\n";
     if (!debugSections.empty()) out << debugSections;
 
+    // CIDER-BUG-258: check the write, not just the open. A std::ofstream
+    // signals a failed write on its own state and never throws, so an ENOSPC
+    // / EIO / EFBIG only ever reached the destructor: `compile -o /dev/full`
+    // returned true and the CLI exited 0 over an empty or truncated file.
+    // close() flushes the last buffer (a small module never fills it, so only
+    // the close can see the failure) and this check then covers that and a
+    // mid-stream failure alike. Doing it here rather than inside the PomeOS
+    // branch below also keeps the two paths from closing the stream twice.
+    out.close();
+    if (!out) return false;
+
     if (target_ == "pomeos") {
-        // Flush and close the initial emission first: its destructor would
-        // otherwise re-flush the raw text over the processed result below.
-        out.flush();
-        out.close();
+        // The emission above is already flushed and closed: its destructor
+        // would otherwise re-flush the raw text over the processed result
+        // below, and the same path has to be free for the second pass.
         // The PomeOS backend:
         // 1. Swap the Linux syscall numbers for PomeOS's (the asm blocks
         //    emit `mov rax, <linux>` + `syscall`; only the mov immediately
@@ -3104,6 +3114,9 @@ bool CodeGenerator::generate(ModuleIR& module, const std::string& outputPath,
         //    definitions so the output assembles standalone with pasm.
         std::string final;
         std::ifstream in(outputPath);
+        // CIDER-BUG-258: an unreadable-back target used to produce an
+        // assembly file with every section silently missing.
+        if (!in) return false;
         final.assign(std::istreambuf_iterator<char>(in), std::istreambuf_iterator<char>());
         in.close();
 
@@ -3178,7 +3191,14 @@ longjmp:
     jmp qword [rdi + 56]
 )";
         std::ofstream out2(outputPath, std::ios::trunc);
+        // CIDER-BUG-258: the second pass was unchecked on both counts — its
+        // open and its write — so a PomeOS rewrite that failed on either
+        // still exited 0, over the pre-pass file for a failed open and over
+        // an empty file for a failed write.
+        if (!out2) return false;
         out2 << result;
+        out2.close();
+        if (!out2) return false;
     }
     return true;
 }

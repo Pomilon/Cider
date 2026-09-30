@@ -71,6 +71,19 @@ echo "$HELP" | grep -q "vm error: out of" \
     || { echo "help does not document the VM OOM diagnostic"; exit 1; }
 echo "$HELP" | grep -q "memory" || { echo "help does not mention memory"; exit 1; }
 
+# CIDER-BUG-258: the write-failure convention and the partial-file policy are
+# part of the driver's contract, so the help must state both: every failed
+# write is reported as `cannot write <target>` with exit 1, and a partially
+# written output is left in place rather than removed. The behaviour itself is
+# asserted for real in output_write_fail_smoke.sh; here the documentation is
+# pinned so the two cannot drift.
+echo "$HELP" | grep -q "cannot write <target>" \
+    || { echo "help does not document the write-failure diagnostic"; exit 1; }
+echo "$HELP" | grep -q "partially written output is left in place" \
+    || { echo "help does not document the partial-output policy"; exit 1; }
+echo "$HELP" | grep -q "never unlinks the target" \
+    || { echo "help does not document that the driver never unlinks -o"; exit 1; }
+
 # Help must not dispatch a subcommand: the token wins whatever follows it, and
 # no file is read (a runnable path would have failed, never exited 0).
 set +e

@@ -213,6 +213,17 @@ add_test(NAME vm_asm_exit_flush_smoke
          COMMAND bash ${CMAKE_SOURCE_DIR}/tests/unit/vm_asm_exit_flush_smoke.sh $<TARGET_FILE:cider>)
 set_tests_properties(vm_asm_exit_flush_smoke PROPERTIES SKIP_RETURN_CODE 77)
 
+# CIDER-BUG-258: every path that produces output (compile -o, bundle -o and
+# bundle to stdout, the parse/build/DEBUG_IR dumps, the program's own output
+# under `run`, and the --emit-meta cache snapshot) must report a failed write
+# with a nonzero exit and a diagnostic naming the target. /dev/full gives a
+# deterministic ENOSPC after a successful open; RLIMIT_FSIZE gives the same on
+# a regular file, which is where the partial-file policy is pinned. Exits 77
+# where /dev/full does not exist.
+add_test(NAME output_write_fail_smoke
+         COMMAND bash ${CMAKE_SOURCE_DIR}/tests/unit/output_write_fail_smoke.sh $<TARGET_FILE:cider>)
+set_tests_properties(output_write_fail_smoke PROPERTIES SKIP_RETURN_CODE 77 TIMEOUT 600)
+
 # CIDER-CHORE-001: CLI usage/--target validation runs in the suite too
 # (previously manual only).
 add_test(NAME cli_test
