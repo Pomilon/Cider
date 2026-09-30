@@ -3273,6 +3273,24 @@ public:
         // Typed parameters.
         for (auto& p : expr.getParams()) {
             TypeInfo pt = p.second ? TypeInfo::fromAST(p.second.get()) : TypeInfo{"int", 0};
+            // CIDER-BUG-238: a closure's typed parameter is compiled by the
+            // SAME rules a named function's is (visit(FunctionDeclStmt)'s
+            // parameter loop), and it used to compile by different ones: the
+            // interface flag was never resolved, the alloca was hard-coded to 8
+            // bytes, and the incoming word was stored as-is. An
+            // interface-typed parameter therefore stayed an unflagged nominal
+            // in an 8-byte slot, and the body read its two fat-pointer words
+            // straight off that 8-byte slot — the vtable word from 8 bytes
+            // past it. That only worked because the missing flag also kept
+            // visit(IdentifierExpr) on the register path, so the param's
+            // ADDRESS was never taken; recover the flag anywhere the
+            // interface is recovered by name (CIDER-BUG-238's shared
+            // declaredVarType, and here) and that accident stops holding, so
+            // the slot has to be a real fat pointer. Mirror the named-function
+            // prologue exactly: resolve the flag, size the alloca by the
+            // declared type, and copy both words out of the address the caller
+            // passed (the convention convertCallArgs documents).
+            pt = resolveInterfaceNominal(pt);
             std::string paramName = "arg_" + p.first;
             // CID-005: computed before addParam so the FunctionIR carries
             // the real IR type (see the hidden closure parameter above).
@@ -3285,8 +3303,20 @@ public:
             symbolTable_.define(sym);
             IRValue paramReg = IRValue::Register(paramName, paramIRType);
             IRValue addr = IRValue::Register(nextTemp(), IRType::PTR);
-            currentBlock_->addInstruction({IROp::ALLOCA, addr, {IRValue::Constant(8, IRType::I32)}});
-            currentBlock_->addInstruction({IROp::STORE, std::nullopt, {addr, paramReg, IRValue::Constant(0, IRType::I32)}});
+            currentBlock_->addInstruction({IROp::ALLOCA, addr,
+                                           {IRValue::Constant(getTypeSize(pt), IRType::I32)}});
+            if (pt.isInterface) {
+                IRValue dataPtr = IRValue::Register(nextTemp(), IRType::PTR);
+                currentBlock_->addInstruction({IROp::LOAD, dataPtr, {paramReg, IRValue::Constant(0, IRType::I32)}});
+                IRValue vtablePtr = IRValue::Register(nextTemp(), IRType::PTR);
+                currentBlock_->addInstruction({IROp::LOAD, vtablePtr, {paramReg, IRValue::Constant(8, IRType::I32)}});
+                currentBlock_->addInstruction({IROp::STORE, std::nullopt, {addr, dataPtr, IRValue::Constant(0, IRType::I32)}});
+                IRValue addr8 = IRValue::Register(nextTemp(), IRType::PTR);
+                currentBlock_->addInstruction({IROp::ADD, addr8, {addr, IRValue::Constant(8, IRType::I32)}});
+                currentBlock_->addInstruction({IROp::STORE, std::nullopt, {addr8, vtablePtr, IRValue::Constant(0, IRType::I32)}});
+            } else {
+                currentBlock_->addInstruction({IROp::STORE, std::nullopt, {addr, paramReg, IRValue::Constant(0, IRType::I32)}});
+            }
             variableValues_[p.first] = addr;
             paramNames_.insert(paramName);
         }
@@ -3338,8 +3368,16 @@ public:
         closureType.isClosure = true;
         closureType.fnParamTypes = std::make_shared<std::vector<TypeInfo>>();
         for (auto& p : expr.getParams()) {
-            closureType.fnParamTypes->push_back(p.second ? TypeInfo::fromAST(p.second.get())
-                                                         : TypeInfo{"int", 0});
+            // CIDER-BUG-238: the literal's signature has to resolve its
+            // interface parameters' flags exactly as its own prologue now
+            // does (and as a named function's collected signature does,
+            // CIDER-BUG-080/085), or an indirect call site classifies an
+            // interface argument as a raw 8-byte value instead of the
+            // caller's 16-byte fat pointer. The spelling is written in the
+            // literal's own scope, so the by-name lookup resolves it there.
+            closureType.fnParamTypes->push_back(
+                resolveInterfaceNominal(p.second ? TypeInfo::fromAST(p.second.get())
+                                                 : TypeInfo{"int", 0}));
         }
         closureType.fnReturnType = std::make_shared<TypeInfo>(retType);
         lastExprType_ = closureType;
@@ -5297,6 +5335,18 @@ public:
                 // the resolved type keeps indexing and calls consistent.
                 // (Non-alias types are returned unchanged.)
                 lastExprType_ = resolveTypeAlias(lastExprType_);
+                // CIDER-BUG-238: recover the interface flag here too, so a
+                // read of a module-scope interface-typed global presents its
+                // ADDRESS (the address-of branch below tests isInterface) and
+                // the dispatch then reads both fat-pointer words out of the
+                // slot. The collector does not flag a VARIABLE declaration,
+                // and a from-imported name binds its stale unflagged object,
+                // so without this the read took the scalar branch, loaded the
+                // 8-byte DATA word, and the interface dispatch indexed that
+                // word as if it were the fat pointer — reading the concrete
+                // object's own fields as a vtable pointer. The canonical name
+                // above is what makes the by-name lookup succeed (CIDER-BUG-102).
+                lastExprType_ = resolveInterfaceNominal(lastExprType_);
                 if (resolveStructOrClassSymbol(lastExprType_)) {
                     lastExprType_.isUserDefined = true;
                 } else {
@@ -5465,12 +5515,47 @@ public:
         return baseSym && baseSym->kind == SymbolKind::MODULE;
     }
 
+    // CIDER-BUG-238: the DECLARED type of a VARIABLE symbol — the one recovery
+    // every value-read site of a module-scope global has to perform, and the
+    // one they had each been re-deriving (differently) for themselves.
+    //
+    // The symbol's own `type` is not usable as-is for a global of ANOTHER
+    // module, for two independent reasons that both bite the from-alias
+    // spelling (`from lib import g; g = c;` / `g.m()`):
+    //
+    //   * the name is spelled as WRITTEN in the DEFINING module (`lib`'s bare
+    //     `ROther`), and the use site's scope need not contain that spelling
+    //     (CIDER-BUG-102). canonicalizeSymbolType re-roots it in the owner;
+    //   * the collector never resolves the interface flag on a VARIABLE
+    //     declaration — unlike a class field, a struct field and every
+    //     function signature, which all go through resolveInterfaceTypeFlag
+    //     — so `sym->type.isInterface` is false and the fat pointer has to be
+    //     recovered by name.
+    //
+    // A from-imported name binds the COLLECTOR's object, and ir_gen's own
+    // fresh symbol from visit(VarDeclStmt) — the one that DOES carry the
+    // resolved flag — is defined only in the owning module's scope, so it
+    // never reaches the alias. Every read site therefore has to redo this
+    // recovery, and a site that reads the raw `sym->type` silently miscompiles
+    // while the checker (which recovers it in visit(IdentifierExpr)) accepts
+    // the program: the STORE then writes the concrete object's 4 bytes into
+    // the 16-byte slot (nil vtable on dispatch), and the READ takes the
+    // address of a non-interface value, so the 8-byte data word is indexed as
+    // a fat pointer. One definition of the recovery, used everywhere, is what
+    // keeps the bare, from-alias and module-qualified spellings of one global
+    // in agreement.
+    TypeInfo declaredVarType(const std::shared_ptr<Symbol>& sym, const std::string& name) {
+        std::string defMod = definingModuleFor(sym, name);
+        TypeInfo t = canonicalizeSymbolType(sym, name);
+        if (t.pointerLevel == 0) t = resolveTypeAlias(t, defMod);
+        return resolveInterfaceNominal(t);
+    }
+
     // CID-020/021 §3: the declared type of a module-qualified global (`mod.g`),
     // read from the owning module's own scope — the same symbol
-    // visit(MemberAccessExpr) reads — with the alias chain and the interface
-    // flag resolved. False when the access is not a qualified global (a struct
-    // field, or a qualifier naming something that is not a global), so the
-    // caller falls through to its own shape.
+    // visit(MemberAccessExpr) reads. False when the access is not a qualified
+    // global (a struct field, or a qualifier naming something that is not a
+    // global), so the caller falls through to its own shape.
     bool moduleQualifiedGlobalType(MemberAccessExpr* mem, TypeInfo& out) {
         if (!isModuleQualified(mem)) return false;
         auto baseSym = symbolTable_.resolve(
@@ -5478,11 +5563,7 @@ public:
         auto modSym = std::static_pointer_cast<ModuleSymbol>(baseSym);
         auto target = modSym->scope ? modSym->scope->resolveLocal(mem->getMember()) : nullptr;
         if (!target || target->kind != SymbolKind::VARIABLE) return false;
-        std::string memberName = mem->getMember();
-        std::string defMod = definingModuleFor(target, memberName);
-        TypeInfo t = canonicalizeSymbolType(target, memberName);
-        if (t.pointerLevel == 0) t = resolveTypeAlias(t, defMod);
-        out = resolveInterfaceNominal(t);
+        out = declaredVarType(target, mem->getMember());
         return true;
     }
 
@@ -5496,7 +5577,13 @@ public:
                 // resolved shape (visit(IdentifierExpr) does the same), so
                 // chained indexing and assignment-target typing see the real
                 // array/struct shape instead of the alias spelling.
-                return resolveTypeAlias(sym->type);
+                // CIDER-BUG-238: the same recovery that read does — the
+                // canonical name and the interface flag — so a from-imported
+                // interface global is typed as the fat pointer here too. Without
+                // the flag this typed a 16-byte slot as a plain nominal, which
+                // is how a field-of / element-of / volatile read of one lost
+                // the fat pointer the dispatch needs.
+                return declaredVarType(sym, id->getName());
             }
         } else if (auto mem = dynamic_cast<MemberAccessExpr*>(expr)) {
             // CID-020/021 §3: `mod.g` names a module-scope global, not a
@@ -6346,7 +6433,18 @@ public:
             if (auto ident = dynamic_cast<IdentifierExpr*>(shapeTarget)) {
                 auto sym = symbolTable_.resolve(ident->getName());
                 if (sym) {
-                    targetIface = sym->type;
+                    // CIDER-BUG-238: the declared type has to be RECOVERED
+                    // (canonicalized in the defining module, interface flag
+                    // resolved), not read raw off the symbol — a from-imported
+                    // global's symbol carries the owner's bare nominal with no
+                    // flag, and ir_gen's own flagged replacement never reaches
+                    // the alias. Reading it raw, the flag was missed, the store
+                    // fell through to the plain aggregate path, and a concrete
+                    // value was memcpy'd into the 16-byte interface slot with
+                    // the vtable word left at zero: a program the checker
+                    // accepted that died with "call: nil function pointer" on
+                    // dispatch, on all three backends.
+                    targetIface = declaredVarType(sym, ident->getName());
                     haveInterfaceTarget = true;
                 }
             } else if (auto mem = dynamic_cast<MemberAccessExpr*>(shapeTarget)) {

@@ -1,0 +1,2 @@
+Type 'LookAlike' does not implement interface 'iface_global_store_lib::Store': missing method 'draw'
+Type 'Missing' does not implement interface 'iface_global_store_lib::Store': missing method 'draw'
