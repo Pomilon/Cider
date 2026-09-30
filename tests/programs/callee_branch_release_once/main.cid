@@ -1,0 +1,118 @@
+// CIDER-BUG-224: a callee with a conditional early exit must run its release
+// path exactly once, and the destructor byte count must be identical on all
+// three backends.
+//
+// THE DEFECT. A `return` runs the frame's whole scope-exit sequence (defers,
+// destructors, and the CIDER-BUG-184/202/212 interface-box releases registered
+// among them) and then opens a fresh block for whatever follows it in the same
+// lexical block. When the `return` was the function's LAST statement, that
+// block was the fallthrough target of the function-scope epilogue in
+// visit(FunctionDeclStmt) — so the epilogue ran the very same scope exits a
+// SECOND time into it. Every returning function therefore carried two copies of
+// its release path: one per `return` statement, plus a byte-for-byte duplicate
+// of the last one. Nothing branched to that copy, so the VM never executed it,
+// but codegen emits every block, so on NATIVE the callee's assembly held the
+// duplicate `call <dtor>` and the duplicate box-release sequence — and the
+// duplicate grew with every `return` and branch the callee gained. It was dead
+// only because the block before it ends in `ret`: a layout coincidence, not a
+// property anything in the compiler stated.
+//
+// This program is the shape the ticket asks the next change to be safe under: a
+// small field-reading accessor that gained a conditional early exit
+// (`Sq.area` below), and callees that return an aggregate embedding an
+// interface through more than one `return`. The destructors print one byte each,
+// so the destructor byte count IS part of stdout and `expected.json` pins it
+// byte for byte on all three backends: one extra release anywhere shows up as
+// one extra byte, and a missing one as one byte fewer.
+//
+// What is pinned:
+//   * `mkEarly`'s early-exit `return` and its trailing `return` each release
+//     the callee's own `Sq` exactly once, and each returns a usable box;
+//   * the box that `return` handed back is released exactly once, at the
+//     caller's scope exit (not by the callee, not twice);
+//   * the same for a callee reached in a loop, where the per-iteration
+//     temporary and the loop-carried release both matter;
+//   * `Sq.area`'s own branch runs, and the values it dispatches are the real
+//     ones, so a callee that returned a dead frame slot cannot pass;
+//   * the caller's OWN class local finalizes separately from the boxes, so the
+//     two release paths stay distinguishable in the byte count.
+from std.io import print, printInt;
+
+var drops: int = 0;
+
+interface Shape {
+  func area() -> int;
+}
+
+// The perturbed accessor: a conditional early exit in front of the field read,
+// which is what the ticket reports as the trigger shape.
+class Sq {
+  var side: int;
+  func area() -> int {
+    if (this.side < 0) { return 0; }
+    return this.side * this.side;
+  }
+  func ~Sq() { drops = drops + 1; print("S"); }
+}
+
+struct Holder { var s: Shape; var tag: int; }
+
+// A callee with a conditional early exit: the `return` inside the `if` and the
+// trailing `return` are two live release sites, and neither may be duplicated.
+func mkEarly(n: int) -> Holder {
+  var s: Sq; s.side = n;
+  var i: Shape = s;
+  var h: Holder; h.s = i; h.tag = n;
+  if (n > 0) { return h; }
+  return h;
+}
+
+// The same callee without the early exit, so the two counts are comparable.
+func mkPlain(n: int) -> Holder {
+  var s: Sq; s.side = n;
+  var i: Shape = s;
+  var h: Holder; h.s = i; h.tag = n;
+  return h;
+}
+
+func main() -> int {
+  // One call per return path of mkEarly. Each prints the callee's own `Sq`
+  // finalizer; the boxes are still owned here and release at the scope exit.
+  var early: Holder = mkEarly(3);
+  if (early.s.area() != 9) { return 1; }
+  if (early.tag != 3) { return 2; }
+
+  var late: Holder = mkEarly(-2);
+  // `area`'s own branch: a negative side reads 0, so the value proves the
+  // dispatch reached the live object and not a dead frame slot.
+  if (late.s.area() != 0) { return 3; }
+  if (late.tag != -2) { return 4; }
+
+  var plain: Holder = mkPlain(4);
+  if (plain.s.area() != 16) { return 5; }
+
+  // The same shape inside a loop: the callee's finalizer runs once per
+  // iteration and the per-iteration box is released once, on the way out.
+  var k: int = 0;
+  while (k < 5) {
+    var each: Holder = mkEarly(k + 1);
+    if (each.s.area() != (k + 1) * (k + 1)) { return 6; }
+    k = k + 1;
+  }
+
+  // The caller's own class local: a finalizer that is NOT a box release, so
+  // the trailing byte count stays separable from the box count.
+  var own: Sq; own.side = 5;
+  if (own.area() != 25) { return 7; }
+
+  // 3 callee finalizers from the three direct calls, 5 from the loop's
+  // iterations, and the 5 boxes the loop's own scope already released at the
+  // end of each iteration. The three boxes the direct calls handed back are
+  // still owned here, and so is `own`: they release at this scope's exit.
+  if (drops != 13) { return 8; }
+  print("drops_before_exit=");
+  printInt(drops);
+  print("\n");
+  print("callee_branch_release_once_ok\n");
+  return 0;
+}

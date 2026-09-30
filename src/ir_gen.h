@@ -280,6 +280,9 @@ public:
         // CIDER-FEAT-001: a block inherits the source line of the statement
         // that opened it; codegen -g turns that into a line-table row.
         currentBlock_->setSourceLine(currentSourceLine_);
+        // CIDER-BUG-224: a fresh block is a continuation again, whatever the
+        // block before it did (see blockDeadAfterReturn_).
+        blockDeadAfterReturn_ = false;
     }
 
     // CIDER-FEAT-001 (compile -g): source positions are tracked at
@@ -523,6 +526,7 @@ public:
         int prevTempCount = tempCount_;
         int prevLabelCount = labelCount_;
         BasicBlock* prevEntryBlock = functionEntryBlock_;
+        bool prevDeadAfterReturn = blockDeadAfterReturn_;
         currentFunction_ = std::make_unique<FunctionIR>(label, IRType::VOID);
         if (separateCompilation_) {
             currentFunction_->setSourcePath(currentSourcePath_);
@@ -531,6 +535,7 @@ public:
         currentFunction_->addParam("arg_obj", IRType::PTR);
         currentBlock_ = std::make_unique<BasicBlock>("entry");
         functionEntryBlock_ = currentBlock_.get();
+        blockDeadAfterReturn_ = false;
         tempCount_ = 0;
         labelCount_ = 0;
         currentBlock_->addInstruction({IROp::RET, std::nullopt, {}});
@@ -542,6 +547,7 @@ public:
         tempCount_ = prevTempCount;
         labelCount_ = prevLabelCount;
         functionEntryBlock_ = prevEntryBlock;
+        blockDeadAfterReturn_ = prevDeadAfterReturn;
         return label;
     }
 
@@ -1820,6 +1826,11 @@ public:
         }
         currentBlock_ = std::make_unique<BasicBlock>("entry");
         functionEntryBlock_ = currentBlock_.get();
+        // CIDER-BUG-224: the entry block is a fresh fallthrough target, not the
+        // block a previous function's last `return` left behind. startBlock
+        // clears the flag; this function's entry block is built directly, so
+        // clear it here too.
+        blockDeadAfterReturn_ = false;
 
         variableValues_.clear();
         paramNames_.clear();
@@ -1957,14 +1968,37 @@ public:
             visitStatement(s.get());
         }
 
+        // CIDER-BUG-224: this is the FUNCTION-SCOPE fallthrough epilogue. Its
+        // scope exits (defers, destructors, the CIDER-BUG-184 box releases
+        // registered among them) only belong on a path that actually falls out
+        // of the body. When the last statement was a `return`, the current block
+        // is the one that return created (`startBlock("deadN")`), nothing
+        // branches to it, and the `return` already ran every scope exit on its
+        // own path before its own RET.
+        //
+        // Running them here a second time is what made a returning callee emit a
+        // SECOND copy of its whole release path: a duplicate `call <dtor>` plus a
+        // duplicate box-release block for every box the frame had registered. The
+        // VM never entered that block, but the native backend emits every block,
+        // so the callee's assembly carried the release path twice — and the
+        // duplicate grew with every `return`/branch the callee gained, which is
+        // the "a callee with a branch emits a different release path on native"
+        // shape this ticket describes. The copy is dead only because the block
+        // before it ends in `ret`: a layout coincidence, not a property anything
+        // in the compiler states.
+        //
+        // The implicit `ret` is emitted either way, so the block a return left
+        // behind stays a well-formed terminator-bearing block, not an empty one.
         if (currentBlock_ && (currentBlock_->getInstructions().empty() || currentBlock_->getInstructions().back().op != IROp::RET)) {
-            emitDefers();
-            emitDestructors();
-            // CIDER-ISS-016: the implicit void return is a frame exit like
-            // any other, so it restores the chain the frame was entered
-            // with. It used to be the one RET site with no restore at all.
-            emitExceptionUnwind(0);
-            emitFrameHandlerRestore();
+            if (!blockDeadAfterReturn_) {
+                emitDefers();
+                emitDestructors();
+                // CIDER-ISS-016: the implicit void return is a frame exit like
+                // any other, so it restores the chain the frame was entered
+                // with. It used to be the one RET site with no restore at all.
+                emitExceptionUnwind(0);
+                emitFrameHandlerRestore();
+            }
             currentBlock_->addInstruction({IROp::RET, std::nullopt, {}});
         }
 
@@ -2149,6 +2183,7 @@ public:
                 emitFrameHandlerRestore();
                 currentBlock_->addInstruction({IROp::RET, std::nullopt, {}});
                 startBlock(nextLabel("dead"));
+                blockDeadAfterReturn_ = true;
                 return;
             }
 
@@ -2204,6 +2239,7 @@ public:
                 emitFrameHandlerRestore();
                 currentBlock_->addInstruction({IROp::RET, std::nullopt, {}});
                 startBlock(nextLabel("dead"));
+                blockDeadAfterReturn_ = true;
                 return;
             }
 
@@ -2270,6 +2306,7 @@ public:
             currentBlock_->addInstruction({IROp::RET, std::nullopt, {}});
         }
         startBlock(nextLabel("dead"));
+        blockDeadAfterReturn_ = true;
     }
 
     void visit(CallExpr& expr) override {
@@ -2664,7 +2701,31 @@ public:
             IRType retIRType = IRType::I32;
             if (sym && sym->kind == SymbolKind::FUNCTION) {
                 auto funcSym = std::static_pointer_cast<FunctionSymbol>(sym);
-                retIRType = (funcSym->returnType.pointerLevel > 0) ? IRType::PTR : mapType(funcSym->returnType.name);
+                // CIDER-BUG-224: a by-value aggregate return on this path
+                // travels as a POINTER to the callee's malloc buffer (the
+                // legacy heap-copy ABI in visit(ReturnStmt), which is the only
+                // shape that reaches here: every non-virtual aggregate return
+                // is sret and returned above). The result register therefore
+                // holds an address, never the aggregate's element type.
+                //
+                // Typing `dest` from the static spelling got that wrong for
+                // every array return, whose `name` is the ELEMENT spelling:
+                // `[int; 2]` mapped to I32, so codegen wrote the returned
+                // pointer back with `mov dword [slot], eax` and the next
+                // `memcpy` read a 32-bit-truncated address. The truncation is
+                // latent — it only faults when the destination slot's upper
+                // half is not already zero — so it survived on a low (brk-heap)
+                // malloc address and broke the moment the register allocator
+                // handed that slot a different value. That is the
+                // register-allocation half of this ticket: a callee's codegen
+                // changed because the CALLER's spill layout moved, with no
+                // source-level change at the call site.
+                if (funcSym->returnType.pointerLevel > 0 ||
+                    isByValueAggregate(calleeRet, calleeDefMod)) {
+                    retIRType = IRType::PTR;
+                } else {
+                    retIRType = mapType(funcSym->returnType.name);
+                }
             }
 
             IRValue dest = IRValue::Register(nextTemp(), retIRType);
@@ -3050,6 +3111,8 @@ public:
         currentFunction_->setSourceLine(expr.getLine());
         currentBlock_ = std::make_unique<BasicBlock>("entry");
         functionEntryBlock_ = currentBlock_.get();
+        // CIDER-BUG-224: see the FunctionDeclStmt entry block.
+        blockDeadAfterReturn_ = false;
         variableValues_.clear();
         paramNames_.clear();
         tempCount_ = 0;
@@ -8902,6 +8965,7 @@ public:
         bool prevIsSret = currentIsSret_;
         auto prevDeferStack = deferStack_;
         auto prevDestructorStack = destructorStack_;
+        bool prevDeadAfterReturn = blockDeadAfterReturn_;
 
         currentFunction_ = std::make_unique<FunctionIR>(label, IRType::VOID);
         if (separateCompilation_) {
@@ -8912,6 +8976,7 @@ public:
         }
         currentBlock_ = std::make_unique<BasicBlock>("entry");
         functionEntryBlock_ = currentBlock_.get();
+        blockDeadAfterReturn_ = false;
         variableValues_.clear();
         tempCount_ = 0;
         labelCount_ = 0;
@@ -8965,6 +9030,7 @@ public:
         tempCount_ = prevTempCount;
         labelCount_ = prevLabelCount;
         functionEntryBlock_ = prevEntryBlock;
+        blockDeadAfterReturn_ = prevDeadAfterReturn;
         currentReturnType_ = prevReturnType;
         currentIsSret_ = prevIsSret;
         deferStack_ = std::move(prevDeferStack);
@@ -9057,6 +9123,8 @@ public:
         }
         currentBlock_ = std::make_unique<BasicBlock>("entry");
         functionEntryBlock_ = currentBlock_.get();
+        // CIDER-BUG-224: see the FunctionDeclStmt entry block.
+        blockDeadAfterReturn_ = false;
         variableValues_.clear();
         tempCount_ = 0;
         labelCount_ = 0;
@@ -9238,6 +9306,8 @@ public:
         }
         currentBlock_ = std::make_unique<BasicBlock>("entry");
         functionEntryBlock_ = currentBlock_.get();
+        // CIDER-BUG-224: see the FunctionDeclStmt entry block.
+        blockDeadAfterReturn_ = false;
         variableValues_.clear();
         tempCount_ = 0;
         labelCount_ = 0;
@@ -10858,6 +10928,14 @@ private:
     // buffers are allocated there so a try in a loop reuses one slot per
     // frame invocation instead of allocating per iteration.
     BasicBlock* functionEntryBlock_ = nullptr;
+    // CIDER-BUG-224: true when the current block is the one a `return` opened
+    // (`startBlock("deadN")` in visit(ReturnStmt)) and nothing has branched to
+    // it since. A `return` already ran the whole scope-exit sequence for its
+    // own path, so the function epilogue must not run it a second time into
+    // this unreachable block. startBlock clears it; the two nested-function
+    // generators (ensureIfaceBoxNoop, ensureIfaceBoxFini) move currentBlock_
+    // by hand, so they save and restore it with the rest of that state.
+    bool blockDeadAfterReturn_ = false;
     std::vector<std::vector<Statement*>> deferStack_;
     // CIDER-BUG-210: the defer statements this generator is emitting right
     // now. emitDefers skips a statement that is already in the set, so a

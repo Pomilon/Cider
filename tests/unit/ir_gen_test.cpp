@@ -1524,6 +1524,73 @@ int run() {
         CHECK(d.find("mul 1, 12") == std::string::npos);
     }
 
+    // CIDER-BUG-224: a virtual/override by-value aggregate return travels as a
+    // POINTER to the callee's malloc buffer (the non-sret heap-copy ABI), so
+    // the VIRTUAL_CALL's destination register must be pointer-typed. It used to
+    // be typed from the static return spelling, and an array spelling's name is
+    // its ELEMENT name — so `[int; 2]` mapped to I32 and codegen wrote the
+    // returned address back with `mov dword [slot], eax`, truncating it. The
+    // truncation only faults when the slot's upper half is not already zero,
+    // which is why it survived until a register-allocation change moved the
+    // slot (the same class of defect as the release-path duplicate below).
+    {
+        auto module = genModuleSrc(
+            "class V { virtual func f() -> [int; 2] { return [1, 2]; } }\n"
+            "class W extends V { override func f() -> [int; 2] { return [3, 4]; } }\n"
+            "func main() -> int {\n"
+            "  var w: W;\n"
+            "  var v: *V = &w;\n"
+            "  var a: [int; 2] = v->f();\n"
+            "  return a[0];\n"
+            "}\n");
+        int vcalls = 0;
+        for (const auto& fn : module.getFunctions()) {
+            for (const auto& block : fn->getBlocks()) {
+                for (const auto& instr : block->getInstructions()) {
+                    if (instr.op != cider::IROp::VIRTUAL_CALL) continue;
+                    vcalls++;
+                    CHECK(instr.dest.has_value());
+                    CHECK(instr.dest->type == cider::IRType::PTR);
+                }
+            }
+        }
+        CHECK(vcalls == 1);
+    }
+
+    // CIDER-BUG-224: a function whose body ends in a `return` must emit its
+    // scope exits ONCE. The return already ran them before its own RET; the
+    // fallthrough epilogue used to run them a second time into the block the
+    // return left behind, so a native callee carried a second, byte-for-byte
+    // copy of its whole release path (every `call <dtor>` plus every
+    // CIDER-BUG-184 box release) that nothing branched to.
+    {
+        std::string t = genSrc(
+            "class D { var x: int; func ~D() { } }\n"
+            "func f(n: int) -> int {\n"
+            "  var d: D; d.x = n;\n"
+            "  return d.x;\n"
+            "}\n"
+            "func main() -> int { return f(1); }\n");
+        // One destructor definition and exactly one call site. A second call
+        // site is the epilogue's duplicate release path.
+        CHECK(countOf(t, "define D_~D(") == 1);
+        CHECK(countOf(t, "call D_~D,") == 1);
+    }
+    // Two `return` statements are two live release sites (one per return), and
+    // the fallthrough epilogue adds no third.
+    {
+        std::string t = genSrc(
+            "class D { var x: int; func ~D() { } }\n"
+            "func f(n: int) -> int {\n"
+            "  var d: D; d.x = n;\n"
+            "  if (n < 0) { return 0; }\n"
+            "  return d.x;\n"
+            "}\n"
+            "func main() -> int { return f(1); }\n");
+        CHECK(countOf(t, "define D_~D(") == 1);
+        CHECK(countOf(t, "call D_~D,") == 2);
+    }
+
     return 0;
 }
 
