@@ -83,6 +83,16 @@ std::unique_ptr<NumberExpr> makeNumberExpr(const std::string& text, int line, in
         }
         uint64_t v = std::stoull(s, nullptr, 10);
         return std::make_unique<NumberExpr>(v, line, col);
+    } catch (const std::bad_alloc&) {
+        // CIDER-BUG-129: an allocation failure is not a bad literal. This
+        // used to be caught by the `catch (std::exception&)` below and
+        // turned into "Invalid number literal: 42", i.e. host memory
+        // pressure was reported as a syntax error in a correct program.
+        // Let it propagate to the driver's boundary, which reports
+        // `compiler: out of memory`.
+        throw;
+    } catch (const std::length_error&) {
+        throw;   // same: std::string growth past max_size()
     } catch (const std::exception& e) {
         if (errOut) *errOut = e.what();
         return nullptr;
@@ -117,7 +127,14 @@ bool parseIntToken(const std::string& text, uint64_t& out) {
         }
         out = std::stoull(s, nullptr, 10);
         return true;
-    } catch (...) {
+    } catch (const std::bad_alloc&) {
+        // CIDER-BUG-129: `false` here means "not a valid size/bit-width
+        // literal", so this bare `catch (...)` turned an allocation failure
+        // into a bogus array-size parse error. Propagate instead.
+        throw;
+    } catch (const std::length_error&) {
+        throw;
+    } catch (const std::exception&) {
         return false;
     }
 }

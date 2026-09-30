@@ -193,6 +193,17 @@ add_test(NAME vm_oom_smoke
          COMMAND bash ${CMAKE_SOURCE_DIR}/tests/unit/vm_oom_smoke.sh $<TARGET_FILE:cider>)
 set_tests_properties(vm_oom_smoke PROPERTIES SKIP_RETURN_CODE 77)
 
+# CIDER-BUG-129: an allocation failure in ANY compiler stage must be reported
+# as `compiler: out of memory` with exit 2 — the same convention and the same
+# exit code the VM already uses (CIDER-BUG-121) — never as a raw
+# std::bad_alloc / std::terminate from the CLI's generic handler. Most of the
+# coverage is deterministic (a fault-injection hook, no memory pressure); the
+# rest is a real OOM under a per-child RLIMIT_AS. Skips (77) when the
+# inherited hard RLIMIT_AS cannot allow the cap that part needs.
+add_test(NAME compiler_oom_smoke
+         COMMAND bash ${CMAKE_SOURCE_DIR}/tests/unit/compiler_oom_smoke.sh $<TARGET_FILE:cider>)
+set_tests_properties(compiler_oom_smoke PROPERTIES SKIP_RETURN_CODE 77 TIMEOUT 900)
+
 # CIDER-BUG-169: the asm exit syscall must flush putchar's buffer exactly like
 # the exit builtin. A mixed extern-putchar + asm-exit program must keep its
 # buffered output on both VM paths; the exit-builtin control also covers the

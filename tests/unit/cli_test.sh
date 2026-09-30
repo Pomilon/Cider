@@ -61,6 +61,16 @@ echo "$HELP" | grep -q "required by compile, optional for bundle" \
 echo "$HELP" | grep -q "<module>.cider-meta" || { echo "help missing .cider-meta"; exit 1; }
 echo "$HELP" | grep -q "<module>.hash" || { echo "help missing .hash"; exit 1; }
 
+# CIDER-BUG-129: the help's exit-code table must name the allocation-failure
+# convention, so the documented contract and the real one cannot drift. The
+# exit code is asserted for real in compiler_oom_smoke.sh; here it is only the
+# documentation that is pinned.
+echo "$HELP" | grep -q "compiler: out of memory" \
+    || { echo "help does not document the compiler OOM diagnostic"; exit 1; }
+echo "$HELP" | grep -q "vm error: out of" \
+    || { echo "help does not document the VM OOM diagnostic"; exit 1; }
+echo "$HELP" | grep -q "memory" || { echo "help does not mention memory"; exit 1; }
+
 # Help must not dispatch a subcommand: the token wins whatever follows it, and
 # no file is read (a runnable path would have failed, never exited 0).
 set +e

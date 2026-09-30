@@ -1,11 +1,14 @@
 #include <cstdio>
 #include <cstdlib>
+#include <cstring>
 #include <fstream>
 #include <map>
+#include <new>
 #include <sstream>
 #include <stdexcept>
 #include <string>
 #include <sys/stat.h>
+#include <vector>
 
 #include "ast.h"
 #include "bundler.h"
@@ -142,9 +145,43 @@ std::string readFile(const std::string& path) {
     return ss.str();
 }
 
+// CIDER-BUG-129: test-only allocation-failure injection, so the CLI's OOM
+// path can be exercised deterministically and per stage instead of by
+// exhausting host memory (see tests/unit/compiler_oom_smoke.sh).
+//
+//   CIDER_FAULT_ALLOC=<stage>       a std::bad_alloc at that stage
+//   CIDER_FAULT_ALLOC=<stage>:len   a std::length_error at that stage
+//
+// Unset in every normal run: one getenv() the first time any stage asks, then
+// a strncmp per stage and nothing else.
+//
+// The injected failures are REAL allocation failures rather than a bare
+// `throw`, so the diagnostic path under test is the one memory pressure
+// actually takes — and neither touches a page, so the test never needs (or
+// spends) real memory.
+static void faultInjectAlloc(const char* stage) {
+    static const char* kWanted = std::getenv("CIDER_FAULT_ALLOC");
+    if (kWanted == nullptr || *kWanted == '\0') return;
+    const size_t n = std::strlen(stage);
+    if (std::strncmp(kWanted, stage, n) != 0) return;
+    if (std::strcmp(kWanted + n, ":len") == 0) {
+        std::vector<char> v;
+        v.resize(static_cast<size_t>(-1));
+        return;   // unreachable: the resize above always throws
+    }
+    // A request larger than any address space: the allocator fails without
+    // touching a page, so the throw is the only observable effect.
+    void* p = ::operator new(static_cast<size_t>(-1));   // std::bad_alloc
+    ::operator delete(p);                                // unreachable
+}
+
 // The optimization pipeline (main's fixpoint):
 //   SSA LICM -> GVN (pre-decon), then per round: DCE, inline, post-LICM (<=10).
 void optimizeModule(cider::ModuleIR& module) {
+    // CIDER-BUG-129: fault-injection marker for the optimizer stage (the
+    // pass fixpoint below is the stage's whole body). No-op unless
+    // CIDER_FAULT_ALLOC names it.
+    faultInjectAlloc("optimize");
     cider::SSALicmPass ssaLicm;
     ssaLicm.run(module);
     cider::GvnPass gvn;
@@ -182,7 +219,13 @@ void printDiagnostics(const std::string& text, const std::string& path,
         if (it != fileTexts.end()) return it->second;
         try {
             fileTexts[file] = readFile(file);
-        } catch (...) {
+        } catch (const std::runtime_error&) {
+            // CIDER-BUG-129: readFile's only non-allocation failure is the
+            // "cannot open file" throw, so the diagnostic falls back to the
+            // main text. An allocation failure is deliberately NOT caught
+            // here: this used to be `catch (...)`, which swallowed a bad_alloc
+            // into a bogus source line and hid the real problem. Letting it
+            // reach the driver's boundary reports `compiler: out of memory`.
             fileTexts[file] = text;
         }
         return fileTexts[file];
@@ -260,9 +303,10 @@ void printHelp() {
         "exit codes:\n"
         "  0  success\n"
         "  1  parse, symbol, type or IR error; unreadable input; write failure\n"
-        "  2  usage error (unknown command or flag, missing operand), or a VM\n"
-        "     runtime error under `run`; `run` otherwise forwards the program's\n"
-        "     own exit code\n");
+        "  2  usage error (unknown command or flag, missing operand), a VM\n"
+        "     runtime error under `run`, or the compiler or the VM running out\n"
+        "     of memory (`compiler: out of memory` / `vm error: out of\n"
+        "     memory`); `run` otherwise forwards the program's own exit code\n");
 }
 
 int main(int argc, char** argv) {
@@ -285,33 +329,40 @@ int main(int argc, char** argv) {
         std::fprintf(stderr, "usage: cider <parse|check|build|run|compile|bundle> [--no-opt] [--warn] [--checks] [-g|--debug] [--cache <dir>] [--emit-meta] [--target native|linux|x86_64-linux|pomeos|uefi] [-o out.asm] <file>\n");
         return 2;
     }
-    // bundle is self-contained (see bundler.h): it runs before — and
-    // outside — the normal parse/collect/check pipeline.
-    if (opts.command == "bundle") {
-        cider::Bundler bundler;
-        cider::BundleResult r = bundler.bundle(opts.inputFile);
-        if (!r.ok) {
-            std::fprintf(stderr, "bundle error: %s\n", r.error.c_str());
-            return 1;
-        }
-        if (!opts.outputFile.empty()) {
-            std::ofstream out(opts.outputFile, std::ios::binary | std::ios::trunc);
-            if (!out) {
-                std::fprintf(stderr, "cannot write %s\n", opts.outputFile.c_str());
+    try {
+        // CIDER-BUG-129: bundle is self-contained (see bundler.h) — it runs
+        // before, and instead of, the normal parse/collect/check pipeline —
+        // but it is still a compiler stage, so it lives inside the same
+        // boundary as the rest. Outside it, an allocation failure escaped
+        // main and std::terminate printed the raw C++ type name and aborted.
+        if (opts.command == "bundle") {
+            faultInjectAlloc("bundle");
+            cider::Bundler bundler;
+            cider::BundleResult r = bundler.bundle(opts.inputFile);
+            if (!r.ok) {
+                std::fprintf(stderr, "bundle error: %s\n", r.error.c_str());
                 return 1;
             }
-            out << r.output;
-        } else {
-            std::fwrite(r.output.data(), 1, r.output.size(), stdout);
+            if (!opts.outputFile.empty()) {
+                std::ofstream out(opts.outputFile, std::ios::binary | std::ios::trunc);
+                if (!out) {
+                    std::fprintf(stderr, "cannot write %s\n", opts.outputFile.c_str());
+                    return 1;
+                }
+                out << r.output;
+            } else {
+                std::fwrite(r.output.data(), 1, r.output.size(), stdout);
+            }
+            return 0;
         }
-        return 0;
-    }
-    try {
+        faultInjectAlloc("read");
         std::string text = readFile(opts.inputFile);
         cider::ErrorReporter rep;
         rep.setFile(opts.inputFile);
+        faultInjectAlloc("lex");
         cider::Lexer lex(text, rep);
         cider::Parser parser(lex, rep);
+        faultInjectAlloc("parse");
         auto prog = parser.parseProgram();
         if (rep.hasErrors()) {
             printDiagnostics(text, opts.inputFile, rep.errors(), "parse");
@@ -321,6 +372,7 @@ int main(int argc, char** argv) {
             std::printf("%s\n", cider::dump(*prog).c_str());
             return 0;
         }
+        faultInjectAlloc("symbol");
         cider::SymbolTable table;
         cider::ModuleResolver resolver;
         cider::SymbolCollector collector(table, rep, resolver, opts.inputFile);
@@ -361,6 +413,7 @@ int main(int argc, char** argv) {
         // CIDER-FEAT-005: warnings are opt-in. They are collected and
         // printed only with --warn and never change the exit code.
         checker.setWarningsEnabled(opts.warn);
+        faultInjectAlloc("typecheck");
         checker.check(*prog);
         if (rep.hasErrors()) {
             printDiagnostics(text, opts.inputFile, rep.errors(), "type");
@@ -373,6 +426,7 @@ int main(int argc, char** argv) {
         // source hash into the cache directory, after checking so a failed
         // module never lands in the cache.
         if (opts.emitMeta) {
+            faultInjectAlloc("meta");
             cider::Scope* moduleScope = table.getRootScope();
             auto scopeIt = collector.getModuleScopes().find(opts.inputFile);
             if (scopeIt != collector.getModuleScopes().end()) moduleScope = scopeIt->second;
@@ -411,6 +465,7 @@ int main(int argc, char** argv) {
             // CIDER-FEAT-006: per-object data labels when this is one object
             // of a separate-compilation build.
             gen.setSeparateCompilation(separateCompilation);
+            faultInjectAlloc("ir_gen");
             auto module = gen.generate(*prog);
             if (rep.hasErrors()) {
                 printDiagnostics(text, opts.inputFile, rep.errors(), "ir");
@@ -420,6 +475,7 @@ int main(int argc, char** argv) {
                 optimizeModule(module);
             }
             cider::SSADeconstructor decon;
+            faultInjectAlloc("deconstruct");
             decon.process(module);
             if (std::getenv("CIDER_DEBUG_IR")) module.print();
             cider::CodeGenerator cg(opts.target);
@@ -432,6 +488,7 @@ int main(int argc, char** argv) {
             // time. Without the flags the whole-program output is unchanged.
             const std::string codegenSource =
                 separateCompilation ? opts.inputFile : std::string();
+            faultInjectAlloc("codegen");
             if (!cg.generate(module, opts.outputFile, codegenSource)) {
                 std::fprintf(stderr, "cannot write %s\n", opts.outputFile.c_str());
                 return 1;
@@ -457,6 +514,7 @@ int main(int argc, char** argv) {
             // checker recorded; the operand itself is never generated.
             gen.setSizeofOperandTypes(checker.getSizeofOperandTypes());
             gen.setChecks(opts.checks);  // CIDER-ISS-001
+            faultInjectAlloc("ir_gen");
             auto module = gen.generate(*prog);
             if (rep.hasErrors()) {
                 printDiagnostics(text, opts.inputFile, rep.errors(), "ir");
@@ -502,6 +560,7 @@ int main(int argc, char** argv) {
         // CIDER-FEAT-007: `sizeof e` is lowered from the operand TYPE the
         // checker recorded; the operand itself is never generated.
         gen.setSizeofOperandTypes(checker.getSizeofOperandTypes());
+        faultInjectAlloc("ir_gen");
         auto module = gen.generate(*prog);
         if (rep.hasErrors()) {
             printDiagnostics(text, opts.inputFile, rep.errors(), "ir");
@@ -509,7 +568,32 @@ int main(int argc, char** argv) {
         }
         module.print();
         return 0;
+    } catch (const std::bad_alloc&) {
+        // CIDER-BUG-129: THE allocation-failure boundary for every compiler
+        // stage (bundle, read, lex, parse, symbol, typecheck, meta, ir_gen,
+        // optimize, deconstruct, codegen) plus the VM run. Before this the
+        // generic `catch (std::exception&)` below reported an allocation
+        // failure as `<file>: std::bad_alloc` with exit 1 — a C++ type name
+        // where a diagnostic belongs, and exit 1, which means "the program is
+        // wrong" (a parse/type/IR error). The VM already had its own
+        // convention (CIDER-BUG-121): `vm error: out of memory` with exit 2.
+        // OOM now uses that same exit code 2 everywhere, with the stage-free
+        // `compiler: out of memory` message the VM's counterpart is modelled
+        // on. std::bad_array_new_length derives from std::bad_alloc, so a
+        // `new T[n]` with a bogus count is covered by this clause too.
+        std::fprintf(stderr, "compiler: out of memory\n");
+        return 2;
+    } catch (const std::length_error&) {
+        // CIDER-BUG-129: std::string / std::vector growth past max_size()
+        // throws length_error (a std::logic_error, NOT a std::bad_alloc), so
+        // the clause above alone would let it reach the generic handler as
+        // the bare string "basic_string::_M_create". Same convention.
+        std::fprintf(stderr, "compiler: out of memory\n");
+        return 2;
     } catch (const std::exception& e) {
+        // CIDER-BUG-129: still no `std::` name reaches the user — the
+        // driver-level failures that are not allocation failures all have a
+        // fixed wording already (see readFile / writeFileOrThrow).
         std::fprintf(stderr, "%s: %s\n", opts.inputFile.c_str(), e.what());
         return 1;
     }
