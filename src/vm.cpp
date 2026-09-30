@@ -430,11 +430,25 @@ VMResult VM::runBody(const ModuleIR& module, const std::string& runFunction) {
                 offset = resolveValue(instr.args[1]).i;
             }
             IRType type = instr.dest ? instr.dest->type : IRType::I64;
-            if (instr.args[0].kind == IRValue::LABEL) type = IRType::I64;  // global cells are 8 bytes
+            // CIDER-BUG-245: the load width is the INSTRUCTION's width
+            // (the destination's IR type), however the address is spelled.
+            // The old rule forced every LABEL-base load to 8 bytes
+            // ("global cells are 8 bytes"), which silently truncates any
+            // wide aggregate load from a global to its first word (the
+            // data word of an interface value, half of a struct). Global
+            // cells are at least 8 bytes but can be wider (Issue #11:
+            // `resb totalBytes`), and a LABEL base with a nonzero offset
+            // already addresses the upper words of a 16-byte global, so
+            // width must never depend on the base spelling. Narrow globals
+            // keep working: their cells are zero-initialized and every
+            // consumer widens by the destination type, exactly like a
+            // non-global address — and native already sizes every load by
+            // the destination type, so this aligns the VM with native.
             if (instr.args[0].kind == IRValue::LABEL && offset == 0) {
                 // Float global (CID-029): the cell holds IEEE-754 bits,
                 // not a numeric integer. Reinterpret via the declared
-                // type; other types keep the legacy I64 cell read.
+                // type; every other type loads at the instruction width
+                // (CIDER-BUG-245).
                 auto git = globalVarTypes_.find(instr.args[0].name);
                 if (git != globalVarTypes_.end() &&
                     (git->second == IRType::F32 || git->second == IRType::F64)) {
