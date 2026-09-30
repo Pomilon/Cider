@@ -520,10 +520,14 @@ fi
 # --- the closure route guards the CALLABLE SLOT, not the object ------------
 # A closure value is an object {fnptr, captures...}; the call is made through
 # the loaded first word, not through the object. So the guard must compare the
-# LOADED slot, and must not have been placed on the object pointer -- a nil
-# object is a nil dereference of that load (CIDER-BUG-219's message family),
-# a nil slot is this ticket's. Pin which register each one tests in the IR, so
-# the two stay separated.
+# LOADED slot, and not the object pointer -- the two are different faults with
+# different messages. A nil OBJECT faults the load ir-gen emits for the slot
+# (ir-gen's own load, invisible to CIDER-BUG-219's source-level guards) and is
+# CIDER-BUG-237's `null pointer dereference`; a nil SLOT is this ticket's `call:
+# nil function pointer`. Since CIDER-BUG-237 both guards exist on the closure
+# route, so pin BOTH and that each tests the register the other one does not:
+# the `call:` guard immediately after the slot load, the `deref:` guard on the
+# slot load's own base before it.
 cat > "$DIR/clos.cid" <<'CID'
 func makeAdder(base: int) -> func(int) -> int {
   return func(x: int) -> int { return x + base; };
@@ -534,15 +538,26 @@ CID
     || fail "the closure program does not build"
 grep -q "_nil_fnptr_fail" "$DIR/clos.ir" \
     || fail "the closure route does not guard the callable slot"
-python3 - "$DIR/clos.ir" <<'PY' || fail "the closure guard is not on the loaded slot"
+python3 - "$DIR/clos.ir" <<'PY' || fail "the closure guards are not on the loaded slot and the object"
 import re, sys
 ir = open(sys.argv[1]).read()
-# The slot load: `%vN = load %vM, 0` immediately before the nil test.
-m = re.search(r"(%v\d+) = load (%v\d+), 0\s*\n\s*%v\d+ = icmp eq \1, 0", ir)
+ir = ir[ir.index("define main() {"):]
+# CIDER-BUG-225: the `call:` guard compares the LOADED slot, not the object.
+m = re.search(r"%v\d+ = icmp eq (%v\d+), 0\s*\n\s*br %v\d+, \w*_nil_fnptr_fail", ir)
 if m is None:
     sys.exit(1)
+slot = m.group(1)
+# The slot load it protects, and the object it came from.
+m = re.search(re.escape(slot) + r" = load (%v\d+), 0", ir)
+if m is None:
+    sys.exit(1)
+obj = m.group(1)
+# CIDER-BUG-237: the `deref:` guard compares the OBJECT, before the slot load.
+if not re.search(r"%v\d+ = icmp eq " + obj + r", 0\s*\n\s*br %v\d+, "
+                 r"\w*_nil_deref_fail", ir):
+    sys.exit(1)
 # The indirect call must pass the guarded slot, not the object it came from.
-if not re.search(r"call %s, %s" % (m.group(1), m.group(2)), ir):
+if not re.search(r"call " + slot + ", " + obj, ir):
     sys.exit(1)
 PY
 

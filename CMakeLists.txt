@@ -150,6 +150,24 @@ add_test(NAME nil_fnptr_call_smoke
          COMMAND bash ${CMAKE_SOURCE_DIR}/tests/unit/nil_fnptr_call_smoke.sh $<TARGET_FILE:cider>)
 set_tests_properties(nil_fnptr_call_smoke PROPERTIES SKIP_RETURN_CODE 77)
 
+# CIDER-BUG-237: a nil closure OBJECT must report the language-level
+# `vm error: null pointer dereference` on every backend. Drives eleven programs
+# covering every route a nil closure object travels (a local, the alias spelling,
+# a parameter, a class field, a pointer-to-class field, a nested field, an array
+# element, a `nilPtr` a function returned, a module-scope global and an explicit
+# nil initializer), each with a live counterpart first, plus the codegen-side
+# invariants: the helper is emitted without a flag with the VM's message payload
+# byte for byte, the guard sits on the object and precedes the load of the
+# callable slot it protects, the object guard and CIDER-BUG-225's slot guard each
+# test the register the other must not, a direct call pays nothing, a
+# user-defined `_nil_deref_fail` suppresses the helper, pomeos gets its own
+# syscall numbers, uefi traps with ud2, --checks still reports the bounds error,
+# and the nil-fnptr and nil-interface diagnostics are unchanged in both
+# directions. Exits 77 when nasm/gcc are missing.
+add_test(NAME nil_closure_call_smoke
+         COMMAND bash ${CMAKE_SOURCE_DIR}/tests/unit/nil_closure_call_smoke.sh $<TARGET_FILE:cider>)
+set_tests_properties(nil_closure_call_smoke PROPERTIES SKIP_RETURN_CODE 77)
+
 # CIDER-FEAT-001: `compile -g` DWARF line-table/function-DIE smoke. Assembles
 # with plain `nasm -f elf64` and inspects the result with readelf/objdump;
 # exits 77 when nasm/gcc/readelf are missing.

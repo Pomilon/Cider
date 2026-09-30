@@ -1775,6 +1775,224 @@ int run() {
         CHECK(countOf(t, "call D_~D,") == 2);
     }
 
+    // CIDER-BUG-237: the closure route carries BOTH nil guards, on the two
+    // different registers. A `func(...)` value is a closure OBJECT
+    // {callable slot, captures...}, so the call reads word 0 out of it, and
+    // that read is a LOAD ir-gen emits itself — which is why none of
+    // CIDER-BUG-219's source-level guards (on `*`, a pointer member/index base
+    // and a pointer receiver) can see it, and why CIDER-BUG-225's guard, which
+    // tests the LOADED slot, sits on the wrong side of it. So the object needs
+    // its own `_nil_deref_fail` guard BEFORE that load.
+    {
+        std::string t = genSrc(
+            "func makeAdder(base: int) -> func(int) -> int {\n"
+            "  return func(x: int) -> int { return x + base; };\n"
+            "}\n"
+            "func main() -> int {\n"
+            "  var c: func(int) -> int = makeAdder(1);\n"
+            "  return c(3);\n"
+            "}\n");
+        CHECK(countOf(t, "call _nil_deref_fail") == 1);
+        CHECK(countOf(t, "call _nil_fnptr_fail") == 1);
+        // The object guard must come FIRST: after the slot load it would be dead
+        // code and native would fault at address 0 before reaching it.
+        CHECK(t.find("call _nil_deref_fail") < t.find("call _nil_fnptr_fail"));
+    }
+    // The two guards test the OBJECT and the LOADED SLOT respectively, and the
+    // indirect call passes both: the slot as the callee, the object as the
+    // closure context. If either guard moved onto the other's register, one of
+    // the two faults would silently report the other ticket's message.
+    {
+        auto mod = genModuleSrc(
+            "func makeAdder(base: int) -> func(int) -> int {\n"
+            "  return func(x: int) -> int { return x + base; };\n"
+            "}\n"
+            "func main() -> int {\n"
+            "  var c: func(int) -> int = makeAdder(1);\n"
+            "  return c(3);\n"
+            "}\n");
+        const cider::FunctionIR* mainFn = nullptr;
+        for (const auto& f : mod.getFunctions()) {
+            if (f->getName() == "main") mainFn = f.get();
+        }
+        CHECK(mainFn != nullptr);
+        if (mainFn) {
+            // The indirect closure CALL is the one with a dest and two register
+            // args: the callee slot first, then the closure object it came from.
+            // The two helper calls name their target, so they carry a single
+            // LABEL arg and are skipped here.
+            std::string callSlot, callObj;
+            for (const auto& blk : mainFn->getBlocks()) {
+                for (const auto& ins : blk->getInstructions()) {
+                    if (ins.op != cider::IROp::CALL) continue;
+                    if (!ins.dest.has_value()) continue;
+                    if (ins.args.size() < 2) continue;
+                    if (ins.args[0].kind != cider::IRValue::REGISTER) continue;
+                    if (ins.args[1].kind != cider::IRValue::REGISTER) continue;
+                    callSlot = ins.args[0].name;
+                    callObj = ins.args[1].name;
+                }
+            }
+            CHECK(!callSlot.empty());
+            CHECK(callSlot != callObj);
+            // The two guards' CMP_EQ operands: the object guard tests the base
+            // of the slot load (callObj), the slot guard tests the callee
+            // itself (callSlot). Both must be present, and each must test only
+            // its own register.
+            std::vector<std::string> cmpTargets;
+            for (const auto& blk : mainFn->getBlocks()) {
+                for (const auto& ins : blk->getInstructions()) {
+                    if (ins.op != cider::IROp::CMP_EQ || ins.args.empty()) continue;
+                    if (ins.args[0].kind != cider::IRValue::REGISTER) continue;
+                    cmpTargets.push_back(ins.args[0].name);
+                }
+            }
+            bool sawObj = false, sawSlot = false;
+            for (const auto& r : cmpTargets) {
+                if (r == callObj) sawObj = true;
+                if (r == callSlot) sawSlot = true;
+            }
+            CHECK(sawObj);
+            CHECK(sawSlot);
+            // The slot load must read word 0 out of the OBJECT register and
+            // produce the register the call passes as its callee: that is the
+            // read the object guard protects.
+            bool sawSlotLoad = false;
+            for (const auto& blk : mainFn->getBlocks()) {
+                for (const auto& ins : blk->getInstructions()) {
+                    if (ins.op != cider::IROp::LOAD || ins.args.empty()) continue;
+                    if (!ins.dest.has_value()) continue;
+                    if (ins.args[0].kind != cider::IRValue::REGISTER) continue;
+                    if (ins.dest->kind != cider::IRValue::REGISTER) continue;
+                    if (ins.dest->name == callSlot && ins.args[0].name == callObj) {
+                        sawSlotLoad = true;
+                    }
+                }
+            }
+            CHECK(sawSlotLoad);
+        }
+    }
+    // A nil closure object is reachable from every route the closure value
+    // travels, and each one must carry the object guard: a local, the alias
+    // spelling, a parameter, a class field, a pointer-to-class field, a nested
+    // field, an array element, a `nilPtr` a function returned, a module-scope
+    // global and an explicit nil initializer. Each is pinned by the diagnostic
+    // it reports on all three backends in tests/programs/nil_closure_call and
+    // tests/unit/nil_closure_call_smoke.sh; here only the shape is pinned, so
+    // the guard cannot be dropped from a route whose message it no longer
+    // produces.
+    {
+        const char* const routes[] = {
+            // a local
+            "var c: func(int) -> int; return c(3);",
+            // a parameter, so the call happens in a non-inlined callee
+            "return viaParam(nilPtr, 3);",
+            // a class field, a pointer-to-class field and a nested field
+            "var h: Holder; return h.c(3);",
+            "var h: Holder; var hp: *Holder = &h; return hp.c(3);",
+            "var o: Outer; return o.b.c(3);",
+            // an array element
+            "var a: [func(int) -> int; 2]; return a[0](3);",
+            // a module-scope global
+            "return globalNil(3);",
+            // an explicit nil initializer: a different spelling of the same
+            // fault, and the slot load still faults, so it must not report the
+            // `call:` message
+            "var c: func(int) -> int = nilPtr; return c(3);",
+        };
+        const std::string preamble =
+            "type Cb = func(int) -> int;\n"
+            "class Holder { var c: func(int) -> int; }\n"
+            "class Outer { var b: Holder; }\n"
+            "var globalNil: func(int) -> int;\n"
+            "func viaParam(c: func(int) -> int, x: int) -> int { return c(x); }\n";
+        // AT LEAST one of each rather than exactly one: some routes legitimately carry
+        // a second `_nil_deref_fail` — an array-element base already has
+        // CIDER-BUG-219's guard, and a pointer-to-class field adds its own on the
+        // way to the object — and the `viaParam` route's call is in the CALLEE,
+        // not in main, so a main-only window would see none of it. The exact
+        // counts and the register identities are pinned in the two focused tests
+        // above, and the per-route DIAGNOSTIC on all three backends in
+        // tests/programs/nil_closure_call and nil_closure_call_smoke.sh.
+        for (const char* body : routes) {
+            std::string t = genSrc(preamble +
+                "func main() -> int {\n  " + body + "\n}\n");
+            CHECK(countOf(t, "call _nil_deref_fail") >= 1);
+            CHECK(countOf(t, "call _nil_fnptr_fail") >= 1);
+        }
+        // The alias spelling resolves to the same shape, so it guards too.
+        // Both counts are >= 1 because the preamble's own `viaParam` carries a
+        // closure call; the exact per-callsite shape is pinned above.
+        std::string alias = genSrc(preamble +
+            "func main() -> int {\n  var c: Cb; return c(3);\n}\n");
+        CHECK(countOf(alias, "call _nil_deref_fail") >= 2);
+        CHECK(countOf(alias, "call _nil_fnptr_fail") >= 2);
+        // A nil closure OBJECT returned by a function and called on the result.
+        std::string r = genSrc(preamble +
+            "func pick(b: bool) -> func(int) -> int {\n"
+            "  if (b) { return func(x: int) -> int { return x * 3; }; }\n"
+            "  return nilPtr;\n"
+            "}\n"
+            "func main() -> int { return pick(false)(3); }\n");
+        CHECK(countOf(r, "call _nil_deref_fail") >= 2);
+        CHECK(countOf(r, "call _nil_fnptr_fail") >= 2);
+        // And with only the picking helper — no `viaParam` in the preamble — the
+        // count is exactly the one call site.
+        std::string solo =
+            "func pick(b: bool) -> func(int) -> int {\n"
+            "  if (b) { return func(x: int) -> int { return x * 3; }; }\n"
+            "  return nilPtr;\n"
+            "}\n"
+            "func main() -> int { return pick(false)(3); }\n";
+        std::string soloT = genSrc(solo);
+        std::string soloMain = soloT.substr(soloT.find("define main() {"));
+        CHECK(countOf(soloMain, "call _nil_deref_fail") == 1);
+        CHECK(countOf(soloMain, "call _nil_fnptr_fail") == 1);
+    }
+    // The object guard is emitted in the DEFAULT configuration, like every other
+    // nil guard: the VM's report is unconditional, so gating it behind --checks
+    // would leave the backends disagreeing by default.
+    {
+        std::string t = genSrc(
+            "func makeAdder(base: int) -> func(int) -> int {\n"
+            "  return func(x: int) -> int { return x + base; };\n"
+            "}\n"
+            "func main() -> int {\n"
+            "  var c: func(int) -> int = makeAdder(1);\n"
+            "  return c(3);\n"
+            "}\n");
+        std::string checked = genSrcChecked(
+            "func makeAdder(base: int) -> func(int) -> int {\n"
+            "  return func(x: int) -> int { return x + base; };\n"
+            "}\n"
+            "func main() -> int {\n"
+            "  var c: func(int) -> int = makeAdder(1);\n"
+            "  return c(3);\n"
+            "}\n");
+        CHECK(countOf(t, "call _nil_deref_fail") == countOf(checked, "call _nil_deref_fail"));
+        CHECK(countOf(t, "call _nil_fnptr_fail") == countOf(checked, "call _nil_fnptr_fail"));
+    }
+    // A direct call to a named function is not the closure route and cannot be
+    // nil, so it must pay for neither guard.
+    {
+        std::string t = genSrc("func dbl(x: int) -> int { return x * 2; }\n"
+                               "func main() -> int { return dbl(3); }\n");
+        CHECK(countOf(t, "call _nil_deref_fail") == 0);
+        CHECK(countOf(t, "call _nil_fnptr_fail") == 0);
+    }
+    // A plain `fn(...)` value has no closure object, so the object guard must not
+    // appear on that route: a nil callee is a `call:`, not a dereference, and
+    // CIDER-BUG-225 already guards it. This is the assertion the two tickets
+    // could each not make before this one.
+    {
+        std::string t = genSrc("func main() -> int {\n"
+                               "  var g: fn(int) -> int = nilPtr;\n"
+                               "  return g(3);\n"
+                               "}\n");
+        CHECK(countOf(t, "call _nil_deref_fail") == 0);
+        CHECK(countOf(t, "call _nil_fnptr_fail") == 1);
+    }
+
     return 0;
 }
 

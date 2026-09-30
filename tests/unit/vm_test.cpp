@@ -1749,6 +1749,332 @@ int run() {
         }
     }
 
+    // CIDER-BUG-237: the fault this ticket removes, pinned at the VM level. A
+    // bare LOAD of the closure's callable slot out of address 0 is exactly the
+    // instruction ir-gen emitted with no guard; the VM reached its CIDER-BUG-059
+    // exact-zero test and reported the IR instruction that faulted, `load: null
+    // pointer dereference`, which is the message the native backend could not
+    // reproduce (it executed `mov rax, [rbx]` with rbx = 0 and SIGSEGVed with no
+    // output). Pin the `load:` text as the safety net it remains, and pin that it
+    // is DIFFERENT from the language-level message the guard reports — so the
+    // guard's value is not invisible here, and a future change that reroutes the
+    // unguarded load to the same message would break the distinction the backends
+    // depend on.
+    {
+        auto fn = makeFn("main", cider::IRType::I32);
+        auto e = std::make_unique<cider::BasicBlock>("entry");
+        // No guard at all: load word 0 out of address 0, the callable slot of a
+        // closure object that was never assigned.
+        cider::IRInstruction ld;
+        ld.op = cider::IROp::LOAD;
+        ld.dest = cider::IRValue::Register("fp", cider::IRType::PTR);
+        ld.args = {cider::IRValue::Constant(0, cider::IRType::I64),
+                   cider::IRValue::Constant(0, cider::IRType::I32)};
+        e->addInstruction(ld);
+        cider::IRInstruction ret;
+        ret.op = cider::IROp::RET;
+        ret.args = {cider::IRValue::Constant(0, cider::IRType::I32)};
+        e->addInstruction(ret);
+        fn->addBlock(std::move(e));
+        cider::ModuleIR mod;
+        mod.addFunction(std::move(fn));
+        cider::VM vm;
+        bool threw = false;
+        try {
+            vm.run(mod);
+        } catch (const cider::VMError& err) {
+            threw = true;
+            // The pre-guard report, kept as the IR-level safety net for a zero
+            // address formed without a source-level pointer (CIDER-BUG-219).
+            CHECK(err.message == "load: null pointer dereference");
+            // And it must NOT be the message the guard reports: a program cannot
+            // tell "this address was formed badly" from "you dereferenced nil"
+            // if the two texts collapse.
+            CHECK(err.message != "null pointer dereference");
+        }
+        CHECK(threw);
+    }
+
+    // CIDER-BUG-237: the closure route carries BOTH guards, in this order —
+    // ir-gen's nil-object guard on the closure OBJECT (CIDER-BUG-219's
+    // `_nil_deref_fail`), then CIDER-BUG-225's on the LOADED callable slot
+    // (`_nil_fnptr_fail`). These two tests run the SAME four-block shape with a
+    // different object and so pin which message each fault gets: a nil object
+    // dereferences the slot load `ir-gen` emits, so it is a nil pointer
+    // dereference and nothing else can report it.
+    {
+        // A nil closure object: the object guard fires, and the diagnostic is
+        // the language-level `null pointer dereference` -- NOT the `load:` text
+        // the VM's exact-zero guard used to report and NOT the `call:` text.
+        auto fn = makeFn("main", cider::IRType::I32);
+        auto e = std::make_unique<cider::BasicBlock>("entry");
+        e->addInstruction(opInstr(cider::IROp::ALLOCA, "obj",
+                                  {cider::IRValue::Constant(8, cider::IRType::I32)}));
+        // The frame slot holds 0: the never-assigned closure, zeroed by
+        // CIDER-BUG-220 on native and by the frame allocator in the VM.
+        cider::IRInstruction st;
+        st.op = cider::IROp::STORE;
+        st.dest = std::nullopt;
+        st.args = {cider::IRValue::Register("obj", cider::IRType::PTR),
+                   cider::IRValue::Constant(0, cider::IRType::I64),
+                   cider::IRValue::Constant(0, cider::IRType::I32)};
+        e->addInstruction(st);
+        cider::IRInstruction ldobj;
+        ldobj.op = cider::IROp::LOAD;
+        ldobj.dest = cider::IRValue::Register("o", cider::IRType::PTR);
+        ldobj.args = {cider::IRValue::Register("obj", cider::IRType::PTR),
+                      cider::IRValue::Constant(0, cider::IRType::I32)};
+        e->addInstruction(ldobj);
+        cider::IRInstruction cmpobj;
+        cmpobj.op = cider::IROp::CMP_EQ;
+        cmpobj.dest = cider::IRValue::Register("objnil", cider::IRType::BOOL);
+        cmpobj.args = {cider::IRValue::Register("o", cider::IRType::PTR),
+                       cider::IRValue::Constant(0, cider::IRType::I64)};
+        e->addInstruction(cmpobj);
+        e->addInstruction({cider::IROp::COND_BR, std::nullopt,
+                           {cider::IRValue::Register("objnil", cider::IRType::BOOL),
+                            cider::IRValue::Label("objfail"),
+                            cider::IRValue::Label("objok")}});
+        fn->addBlock(std::move(e));
+        auto objfail = std::make_unique<cider::BasicBlock>("objfail");
+        cider::IRInstruction boom;
+        boom.op = cider::IROp::CALL;
+        boom.args = {cider::IRValue::Label("_nil_deref_fail")};
+        objfail->addInstruction(boom);
+        objfail->addInstruction({cider::IROp::BR, std::nullopt, {cider::IRValue::Label("objok")}});
+        fn->addBlock(std::move(objfail));
+        // The slot load the object guard protects, in the block both edges
+        // rejoin — exactly where ir-gen puts it.
+        auto objok = std::make_unique<cider::BasicBlock>("objok");
+        cider::IRInstruction ldslot;
+        ldslot.op = cider::IROp::LOAD;
+        ldslot.dest = cider::IRValue::Register("fp", cider::IRType::PTR);
+        ldslot.args = {cider::IRValue::Register("o", cider::IRType::PTR),
+                       cider::IRValue::Constant(0, cider::IRType::I32)};
+        objok->addInstruction(ldslot);
+        cider::IRInstruction ret;
+        ret.op = cider::IROp::RET;
+        ret.args = {cider::IRValue::Constant(0, cider::IRType::I32)};
+        objok->addInstruction(ret);
+        fn->addBlock(std::move(objok));
+        cider::ModuleIR mod;
+        mod.addFunction(std::move(fn));
+        cider::VM vm;
+        bool threw = false;
+        try {
+            vm.run(mod);
+        } catch (const cider::VMError& err) {
+            threw = true;
+            // The language-level text, byte for byte what run_tests.py pins and
+            // what the native helper writes. The `load:` prefix of the
+            // pre-guard CIDER-BUG-059 report must be gone.
+            CHECK(err.message == "null pointer dereference");
+        }
+        CHECK(threw);
+    }
+    {
+        // The same shape with a NON-nil object whose callable slot is nil, so
+        // the object guard does not fire and CIDER-BUG-225's slot guard does.
+        // This is the boundary the two tickets share: same IR, same object
+        // register, different failure, different message. Build the object as a
+        // real heap block (alloca gives a non-nil address) holding a zero slot.
+        auto fn = makeFn("main", cider::IRType::I32);
+        auto e = std::make_unique<cider::BasicBlock>("entry");
+        e->addInstruction(opInstr(cider::IROp::ALLOCA, "obj",
+                                  {cider::IRValue::Constant(8, cider::IRType::I32)}));
+        e->addInstruction(opInstr(cider::IROp::ALLOCA, "arr",
+                                  {cider::IRValue::Constant(16, cider::IRType::I32)}));
+        // alloca of `arr` yields the block's address; its first word is the
+        // closure's callable slot, written with 0 here.
+        cider::IRInstruction st;
+        st.op = cider::IROp::STORE;
+        st.dest = std::nullopt;
+        st.args = {cider::IRValue::Register("arr", cider::IRType::PTR),
+                   cider::IRValue::Constant(0, cider::IRType::I64),
+                   cider::IRValue::Constant(0, cider::IRType::I32)};
+        e->addInstruction(st);
+        cider::IRInstruction keep;
+        keep.op = cider::IROp::STORE;
+        keep.dest = std::nullopt;
+        keep.args = {cider::IRValue::Register("obj", cider::IRType::PTR),
+                     cider::IRValue::Register("arr", cider::IRType::PTR),
+                     cider::IRValue::Constant(0, cider::IRType::I32)};
+        e->addInstruction(keep);
+        cider::IRInstruction ldobj;
+        ldobj.op = cider::IROp::LOAD;
+        ldobj.dest = cider::IRValue::Register("o", cider::IRType::PTR);
+        ldobj.args = {cider::IRValue::Register("obj", cider::IRType::PTR),
+                      cider::IRValue::Constant(0, cider::IRType::I32)};
+        e->addInstruction(ldobj);
+        cider::IRInstruction cmpobj;
+        cmpobj.op = cider::IROp::CMP_EQ;
+        cmpobj.dest = cider::IRValue::Register("objnil", cider::IRType::BOOL);
+        cmpobj.args = {cider::IRValue::Register("o", cider::IRType::PTR),
+                       cider::IRValue::Constant(0, cider::IRType::I64)};
+        e->addInstruction(cmpobj);
+        e->addInstruction({cider::IROp::COND_BR, std::nullopt,
+                           {cider::IRValue::Register("objnil", cider::IRType::BOOL),
+                            cider::IRValue::Label("objfail"),
+                            cider::IRValue::Label("objok")}});
+        fn->addBlock(std::move(e));
+        auto objfail = std::make_unique<cider::BasicBlock>("objfail");
+        cider::IRInstruction boom;
+        boom.op = cider::IROp::CALL;
+        boom.args = {cider::IRValue::Label("_nil_deref_fail")};
+        objfail->addInstruction(boom);
+        objfail->addInstruction({cider::IROp::BR, std::nullopt, {cider::IRValue::Label("objok")}});
+        fn->addBlock(std::move(objfail));
+        auto objok = std::make_unique<cider::BasicBlock>("objok");
+        cider::IRInstruction ldslot;
+        ldslot.op = cider::IROp::LOAD;
+        ldslot.dest = cider::IRValue::Register("fp", cider::IRType::PTR);
+        ldslot.args = {cider::IRValue::Register("o", cider::IRType::PTR),
+                       cider::IRValue::Constant(0, cider::IRType::I32)};
+        objok->addInstruction(ldslot);
+        cider::IRInstruction cmpslot;
+        cmpslot.op = cider::IROp::CMP_EQ;
+        cmpslot.dest = cider::IRValue::Register("slotnil", cider::IRType::BOOL);
+        cmpslot.args = {cider::IRValue::Register("fp", cider::IRType::PTR),
+                        cider::IRValue::Constant(0, cider::IRType::I64)};
+        objok->addInstruction(cmpslot);
+        objok->addInstruction({cider::IROp::COND_BR, std::nullopt,
+                               {cider::IRValue::Register("slotnil", cider::IRType::BOOL),
+                                cider::IRValue::Label("slotfail"),
+                                cider::IRValue::Label("done")}});
+        fn->addBlock(std::move(objok));
+        auto slotfail = std::make_unique<cider::BasicBlock>("slotfail");
+        cider::IRInstruction boom2;
+        boom2.op = cider::IROp::CALL;
+        boom2.args = {cider::IRValue::Label("_nil_fnptr_fail")};
+        slotfail->addInstruction(boom2);
+        slotfail->addInstruction({cider::IROp::BR, std::nullopt, {cider::IRValue::Label("done")}});
+        fn->addBlock(std::move(slotfail));
+        auto done = std::make_unique<cider::BasicBlock>("done");
+        cider::IRInstruction ret;
+        ret.op = cider::IROp::RET;
+        ret.args = {cider::IRValue::Constant(0, cider::IRType::I32)};
+        done->addInstruction(ret);
+        fn->addBlock(std::move(done));
+        cider::ModuleIR mod;
+        mod.addFunction(std::move(fn));
+        cider::VM vm;
+        bool threw = false;
+        try {
+            vm.run(mod);
+        } catch (const cider::VMError& err) {
+            threw = true;
+            // The `call:` text, not the dereference one: the object was fine, so
+            // the slot is what failed.
+            CHECK(err.message == "call: nil function pointer");
+        }
+        CHECK(threw);
+    }
+    {
+        // The live path through the same shape: a non-nil object holding a
+        // non-nil slot must reach the indirect call, so the object guard costs a
+        // not-taken branch and nothing more — and so the guard does not clobber
+        // the object register the call has to pass.
+        auto callee = makeFn("callee", cider::IRType::I32);
+        auto ce = std::make_unique<cider::BasicBlock>("entry");
+        cider::IRInstruction cret;
+        cret.op = cider::IROp::RET;
+        cret.args = {cider::IRValue::Constant(7, cider::IRType::I32)};
+        ce->addInstruction(cret);
+        callee->addBlock(std::move(ce));
+
+        auto fn = makeFn("main", cider::IRType::I32);
+        auto e = std::make_unique<cider::BasicBlock>("entry");
+        e->addInstruction(opInstr(cider::IROp::ALLOCA, "obj",
+                                  {cider::IRValue::Constant(8, cider::IRType::I32)}));
+        e->addInstruction(opInstr(cider::IROp::ALLOCA, "arr",
+                                  {cider::IRValue::Constant(16, cider::IRType::I32)}));
+        // 1 is `callee`'s function value: module function values are 1-based,
+        // so 0 is nilPtr.
+        cider::IRInstruction st;
+        st.op = cider::IROp::STORE;
+        st.dest = std::nullopt;
+        st.args = {cider::IRValue::Register("arr", cider::IRType::PTR),
+                   cider::IRValue::Constant(1, cider::IRType::I64),
+                   cider::IRValue::Constant(0, cider::IRType::I32)};
+        e->addInstruction(st);
+        cider::IRInstruction keep;
+        keep.op = cider::IROp::STORE;
+        keep.dest = std::nullopt;
+        keep.args = {cider::IRValue::Register("obj", cider::IRType::PTR),
+                     cider::IRValue::Register("arr", cider::IRType::PTR),
+                     cider::IRValue::Constant(0, cider::IRType::I32)};
+        e->addInstruction(keep);
+        cider::IRInstruction ldobj;
+        ldobj.op = cider::IROp::LOAD;
+        ldobj.dest = cider::IRValue::Register("o", cider::IRType::PTR);
+        ldobj.args = {cider::IRValue::Register("obj", cider::IRType::PTR),
+                      cider::IRValue::Constant(0, cider::IRType::I32)};
+        e->addInstruction(ldobj);
+        cider::IRInstruction cmpobj;
+        cmpobj.op = cider::IROp::CMP_EQ;
+        cmpobj.dest = cider::IRValue::Register("objnil", cider::IRType::BOOL);
+        cmpobj.args = {cider::IRValue::Register("o", cider::IRType::PTR),
+                       cider::IRValue::Constant(0, cider::IRType::I64)};
+        e->addInstruction(cmpobj);
+        e->addInstruction({cider::IROp::COND_BR, std::nullopt,
+                           {cider::IRValue::Register("objnil", cider::IRType::BOOL),
+                            cider::IRValue::Label("objfail"),
+                            cider::IRValue::Label("objok")}});
+        fn->addBlock(std::move(e));
+        auto objfail = std::make_unique<cider::BasicBlock>("objfail");
+        cider::IRInstruction boom;
+        boom.op = cider::IROp::CALL;
+        boom.args = {cider::IRValue::Label("_nil_deref_fail")};
+        objfail->addInstruction(boom);
+        objfail->addInstruction({cider::IROp::BR, std::nullopt, {cider::IRValue::Label("objok")}});
+        fn->addBlock(std::move(objfail));
+        auto objok = std::make_unique<cider::BasicBlock>("objok");
+        cider::IRInstruction ldslot;
+        ldslot.op = cider::IROp::LOAD;
+        ldslot.dest = cider::IRValue::Register("fp", cider::IRType::PTR);
+        ldslot.args = {cider::IRValue::Register("o", cider::IRType::PTR),
+                       cider::IRValue::Constant(0, cider::IRType::I32)};
+        objok->addInstruction(ldslot);
+        cider::IRInstruction cmpslot;
+        cmpslot.op = cider::IROp::CMP_EQ;
+        cmpslot.dest = cider::IRValue::Register("slotnil", cider::IRType::BOOL);
+        cmpslot.args = {cider::IRValue::Register("fp", cider::IRType::PTR),
+                        cider::IRValue::Constant(0, cider::IRType::I64)};
+        objok->addInstruction(cmpslot);
+        objok->addInstruction({cider::IROp::COND_BR, std::nullopt,
+                               {cider::IRValue::Register("slotnil", cider::IRType::BOOL),
+                                cider::IRValue::Label("slotfail"),
+                                cider::IRValue::Label("callok")}});
+        fn->addBlock(std::move(objok));
+        auto slotfail = std::make_unique<cider::BasicBlock>("slotfail");
+        cider::IRInstruction boom2;
+        boom2.op = cider::IROp::CALL;
+        boom2.args = {cider::IRValue::Label("_nil_fnptr_fail")};
+        slotfail->addInstruction(boom2);
+        slotfail->addInstruction({cider::IROp::BR, std::nullopt, {cider::IRValue::Label("callok")}});
+        fn->addBlock(std::move(slotfail));
+        auto callok = std::make_unique<cider::BasicBlock>("callok");
+        cider::IRInstruction call;
+        call.op = cider::IROp::CALL;
+        call.callAbi = cider::Abi::SysV;
+        call.dest = cider::IRValue::Register("r", cider::IRType::I32);
+        // The slot is the callee and the object is passed first, as a closure
+        // call does.
+        call.args = {cider::IRValue::Register("fp", cider::IRType::PTR),
+                     cider::IRValue::Register("o", cider::IRType::PTR)};
+        callok->addInstruction(call);
+        cider::IRInstruction ret;
+        ret.op = cider::IROp::RET;
+        ret.args = {cider::IRValue::Register("r", cider::IRType::I32)};
+        callok->addInstruction(ret);
+        fn->addBlock(std::move(callok));
+        cider::ModuleIR mod;
+        mod.addFunction(std::move(callee));
+        mod.addFunction(std::move(fn));
+        cider::VM vm;
+        CHECK(vm.run(mod).exitCode == 7);
+    }
+
     // CID-006 F1 (front-end shape): ir_gen now registers `extern var` via
     // addExternVariable, so a value read cannot resolve to any function id
     // and fails with the pre-CID-006 clean unresolved-label error.

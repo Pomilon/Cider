@@ -2905,6 +2905,32 @@ public:
                 // Closure call: the value is a closure object {fnptr,
                 // captures...} — load the fnptr and pass the object first.
                 IRValue obj = fnPtr;
+                // CIDER-BUG-237: guard the closure OBJECT, before the LOAD
+                // below reads its callable slot. That LOAD is ir-gen's own,
+                // not a source-level dereference, so none of CIDER-BUG-219's
+                // guards (which attach to `*`, a pointer member/index base
+                // and a pointer receiver) can see it, and a never-assigned
+                // closure — `var c: func(int) -> int; c(3);` — reached it
+                // with obj == 0 on every route a nil object travels (local,
+                // parameter, field, array element, a `nilPtr` a function
+                // returned). The VM caught it only in load's exact-zero
+                // CIDER-BUG-059 guard and reported `load: null pointer
+                // dereference`; native x86 executed `mov rax, [rbx]` with
+                // rbx = 0 and died with SIGSEGV and NO OUTPUT (exit 139).
+                // Routing it to the same `_nil_deref_fail` routine as 219
+                // makes the diagnostic the language-level `null pointer
+                // dereference` on every backend, and keeps it distinct from
+                // CIDER-BUG-225's `_nil_fnptr_fail`, which guards the LOADED
+                // slot (the callee) a few lines below.
+                //
+                // Placed where the fault is: BEFORE the LOAD and so before
+                // the arguments are evaluated, because the VM faults in the
+                // same place — the callee expression's own load executes
+                // before doCall ever looks at the target. The 225 guard
+                // sits after the arguments because a nil CALLEE is tested
+                // at dispatch time; a nil OBJECT is dereferenced while the
+                // callee expression is still being evaluated.
+                emitNilDerefCheck(obj);
                 fnPtr = IRValue::Register(nextTemp(), IRType::PTR);
                 currentBlock_->addInstruction({IROp::LOAD, fnPtr, {obj, IRValue::Constant(0, IRType::I32)}});
                 // CIDER-BUG-063: the declared `func(...)` signature (now
@@ -2923,11 +2949,13 @@ public:
                 IRValue dest = IRValue::Register(nextTemp(), destIR);
                 // CIDER-BUG-225: the callee is the loaded callable slot, so the
                 // guard goes on `fnPtr` and not on the closure OBJECT -- a nil
-                // object is a nil DEREFERENCE of the load just above (which
-                // CIDER-BUG-219's source-level guard cannot see, because this
-                // load is ir-gen's own, and which keeps the VM's
-                // `load: null pointer dereference`), a nil callable slot is
-                // this ticket's case. Placed after the arguments and after the
+                // object is a nil DEREFERENCE of the load above, which
+                // CIDER-BUG-219's source-level guard cannot see, because that
+                // load is ir-gen's own; CIDER-BUG-237 added the object's
+                // `_nil_deref_fail` guard for it, so the two messages stay
+                // distinguishable: a nil object reports `null pointer
+                // dereference`, a nil callable slot this ticket's `call: nil
+                // function pointer`. Placed after the arguments and after the
                 // argument conversion, immediately before the CALL, so the
                 // guard's ordering matches the VM's: `doCall` resolves the
                 // already-evaluated target and only then tests it for nil.
