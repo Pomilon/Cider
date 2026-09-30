@@ -1,0 +1,50 @@
+// CIDER-BUG-248 module half: the wide aggregate globals and the narrow
+// scalar globals that must survive each other's stores.
+//
+// Declaration order matters. Native lays these out back to back in .bss,
+// each with exactly its declared width (`resb totalBytes`, Issue #20/11):
+// a u8 global is ONE byte, an interface global is the 16-byte fat pointer,
+// a 2-word struct is 16. So a store whose width is not the cell's width is
+// observable as a clobbered neighbour in one direction and as a truncated
+// value in the other. The narrow globals are deliberately interleaved with
+// the wide ones so both directions are pinned at once.
+export interface Shape {
+  func area() -> int;
+  func tag() -> int;
+}
+
+// First implementor.
+export class Box {
+  var v: int;
+  func area() -> int { return this.v * 2; }
+  func tag() -> int { return 7; }
+}
+
+// Second implementor with a DIFFERENT tag and layout, so a stale or
+// zeroed vtable word shows up as a wrong tag instead of passing unnoticed.
+export class Pebble {
+  var w: int;
+  var pad: [u64; 4];
+  func area() -> int { return this.w + 1; }
+  func tag() -> int { return 9; }
+}
+
+// A 16-byte struct: two 8-byte halves.
+export struct Big {
+  var a: i64;
+  var b: i64;
+}
+
+// --- narrow globals, interleaved with the wide ones ----------------------
+export var gU8: u8;
+export var gBig1: Big;
+export var gBox: Box;
+export var gU16: u16;
+export var gShape1: Shape;
+export var gFlag: bool;
+export var gPeb: Pebble;
+export var gF32: float;
+export var gBig2: Big;
+export var gI32: i32;
+export var gShape2: Shape;
+export var gI64: i64;

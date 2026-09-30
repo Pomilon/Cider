@@ -470,23 +470,42 @@ VMResult VM::runBody(const ModuleIR& module, const std::string& runFunction) {
             }
             // The store width comes from the VALUE's IR type: bools and
             // 32-bit ints are 4 bytes — an 8-byte store would clobber the
-            // neighbor in a packed array. (Global cells are 8 bytes.)
+            // neighbor in a packed array.
             IRType type = instr.args[1].type;
             if (type == IRType::BOOL) type = IRType::I32;
-            if (instr.args[0].kind == IRValue::LABEL) {
-                type = IRType::I64;  // global cells are 8 bytes
-                if (offset == 0) {
-                    // Float global (CID-029): the cell holds IEEE-754 bits
-                    // of the declared width, so an F64 value must be stored
-                    // as its 8-byte pattern (and an F32 value as 4 bytes).
-                    // Forcing I64 wrote val.i, which is 0 for a float
-                    // constant (it carries only .f). Mirrors the LOAD
-                    // global-type lookup above.
-                    auto git = globalVarTypes_.find(instr.args[0].name);
-                    if (git != globalVarTypes_.end() &&
-                        (git->second == IRType::F32 || git->second == IRType::F64)) {
-                        type = git->second;
-                    }
+            // CIDER-BUG-248: the width follows the STORE instruction, not
+            // the spelling of the address. This used to force I64 for every
+            // LABEL base ("global cells are 8 bytes") — the exact mirror of
+            // the load rule CIDER-BUG-245 removed. The premise is false in
+            // both directions. A global cell is the declared type's width
+            // in .bss (`resb totalBytes`, Issue #20/11) and can be far
+            // WIDER than 8 bytes (an interface's 16-byte fat pointer, a
+            // 2-word struct, an array), so forcing 8 bytes truncated every
+            // wide aggregate store to its FIRST WORD — silently, because
+            // the discarded second word then reads back as whatever the
+            // cell held before (a stale vtable for an interface, a stale
+            // second half for a struct). Conversely a narrow global is
+            // `resb 1`, so the forced 8-byte store was 7 bytes wider than
+            // the cell the other backend reserves. ir_gen casts the
+            // right-hand side to the target's declared type before it
+            // stores (`rhsIsAggregate`/assignment in ir_gen.h, plus the
+            // `targetIR` conversion for a compound assignment), so the
+            // instruction's own width IS the global's declared width — the
+            // same rule native applies to a global store (`globalTypes`,
+            // codegen.cpp STORE), and the same one the LOAD handler above
+            // now follows (CIDER-BUG-245). Native needed no change.
+            if (instr.args[0].kind == IRValue::LABEL && offset == 0) {
+                // Float global (CID-029): the cell holds IEEE-754 bits of
+                // the declared width, so an F64 value must be stored as its
+                // 8-byte pattern (and an F32 value as 4 bytes). Forcing I64
+                // wrote val.i, which is 0 for a float constant (it carries
+                // only .f). A reachable float store's value type is already
+                // F32/F64, so this is a safety net for the CID-003 fix,
+                // unchanged. Mirrors the LOAD global-type lookup above.
+                auto git = globalVarTypes_.find(instr.args[0].name);
+                if (git != globalVarTypes_.end() &&
+                    (git->second == IRType::F32 || git->second == IRType::F64)) {
+                    type = git->second;
                 }
             }
             store(addr.i + offset, val, type);

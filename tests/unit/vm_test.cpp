@@ -2184,6 +2184,110 @@ int run() {
             CHECK(r2.stdoutText == "A\n");
         }
     }
+
+    // CIDER-BUG-248: a global (LABEL-base) STORE writes at the width of the
+    // STORE instruction, whatever the address spelling. The VM forced I64
+    // for every LABEL base ("global cells are 8 bytes"), which is wrong in
+    // both directions: a global cell is the declared type's width in
+    // native's .bss (`resb totalBytes`, Issue #20/#11) and can be WIDER
+    // than 8 bytes (an interface's 16-byte fat pointer, a 2-word struct),
+    // so forcing 8 bytes truncated a wide aggregate store to its first
+    // word and let a narrow store write past the cell native reserves as
+    // `resb 1`. ir_gen casts the right-hand side to the target's declared
+    // type before storing, so the instruction width IS the global's
+    // declared width — the rule native applies (codegen.cpp STORE,
+    // `globalTypes`) and the one the LOAD handler follows (CIDER-BUG-245).
+    //
+    // Poisoning a cell first is what makes the width observable at all: a
+    // narrow store must leave the bytes it does not cover alone. Before the
+    // fix every store below wrote 8 bytes, so checks 1, 2 and 3 read back a
+    // zero-extended low word with the poisoned high bytes overwritten. The
+    // f32/f64 cells guard the CID-029 float reinterpretation, which this
+    // path still honors.
+    {
+        auto fn = makeFn("main", cider::IRType::I32);
+        std::vector<std::unique_ptr<cider::BasicBlock>> blocks;
+        auto block = [&](const std::string& name) -> cider::BasicBlock* {
+            blocks.push_back(std::make_unique<cider::BasicBlock>(name));
+            return blocks.back().get();
+        };
+        cider::BasicBlock* cur = block("entry");
+        // STORE (label, value) and STORE (label, value, offset).
+        auto storeTo = [&](const std::string& label, cider::IRValue val, int64_t off) {
+            cider::IRInstruction st;
+            st.op = cider::IROp::STORE;
+            st.args = {cider::IRValue::Label(label), val};
+            if (off != 0) st.args.push_back(cider::IRValue::Constant(off, cider::IRType::I32));
+            cur->addInstruction(st);
+        };
+        // LOAD (label, offset) at `width`, compared against `expect`. A
+        // mismatch returns the check number, so a failure names the rule
+        // that moved.
+        auto check = [&](int64_t code, const std::string& label, int64_t off,
+                         cider::IRType width, cider::IRValue expect) {
+            std::string dst = "v" + std::to_string(code);
+            std::string cond = "c" + std::to_string(code);
+            std::string next = "s" + std::to_string(code + 1);
+            cider::IRInstruction ld;
+            ld.op = cider::IROp::LOAD;
+            ld.dest = cider::IRValue::Register(dst, width);
+            ld.args = {cider::IRValue::Label(label)};
+            if (off != 0) ld.args.push_back(cider::IRValue::Constant(off, cider::IRType::I32));
+            cur->addInstruction(ld);
+            cur->addInstruction(opInstr(cider::IROp::CMP_EQ, cond,
+                {cider::IRValue::Register(dst, width), expect}));
+            cur->addInstruction(opInstr(cider::IROp::COND_BR, "",
+                {cider::IRValue::Register(cond, cider::IRType::I32),
+                 cider::IRValue::Label(next),
+                 cider::IRValue::Label("fail" + std::to_string(code))}));
+            cur = block(next);
+        };
+        auto retCode = [&](const std::string& name, int64_t code) {
+            cider::IRInstruction ret;
+            ret.op = cider::IROp::RET;
+            ret.args = {cider::IRValue::Constant(code, cider::IRType::I32)};
+            block(name)->addInstruction(ret);
+        };
+
+        // A 1-byte global (`resb 1` in native, an 8-byte VM cell), a word
+        // inside a 16-byte global (the interface/struct shape), and the two
+        // float cell widths.
+        const uint64_t poison = 0x1122334455667788ULL;
+        storeTo("gCell", cider::IRValue::Constant(poison, cider::IRType::I64), 0);
+        storeTo("gCell", cider::IRValue::Constant(uint64_t(0xAABBCCDD), cider::IRType::I32), 0);
+        check(1, "gCell", 0, cider::IRType::I64, cider::IRValue::Constant(uint64_t(0x11223344AABBCCDD), cider::IRType::I64));
+        storeTo("gCell", cider::IRValue::Constant(0x99, cider::IRType::U8), 0);
+        check(2, "gCell", 0, cider::IRType::I64, cider::IRValue::Constant(uint64_t(0x11223344AABBCC99), cider::IRType::I64));
+
+        storeTo("gWide", cider::IRValue::Constant(poison, cider::IRType::I64), 0);
+        storeTo("gWide", cider::IRValue::Constant(uint64_t(0xFFFFFFFFFFFFFFFFULL), cider::IRType::I64), 12);
+        storeTo("gWide", cider::IRValue::Constant(0x01020304, cider::IRType::I32), 8);
+        // The 4-byte store into the second word must not touch the third.
+        check(3, "gWide", 8, cider::IRType::I64, cider::IRValue::Constant(uint64_t(0xFFFFFFFF01020304), cider::IRType::I64));
+        check(4, "gWide", 0, cider::IRType::I64, cider::IRValue::Constant(poison, cider::IRType::I64));
+
+        // A float cell keeps its declared width and its IEEE-754 bits
+        // (CID-029). The comparison is a float compare, because loading a
+        // float global reinterprets the cell through the declared type.
+        storeTo("gF64", cider::IRValue::Constant(3.5, cider::IRType::F64), 0);
+        check(5, "gF64", 0, cider::IRType::F64, cider::IRValue::Constant(3.5, cider::IRType::F64));
+        storeTo("gF32", cider::IRValue::Constant(0.25, cider::IRType::F32), 0);
+        check(6, "gF32", 0, cider::IRType::F32, cider::IRValue::Constant(0.25, cider::IRType::F32));
+
+        retCode("s7", 0);
+        for (int64_t i = 1; i <= 6; i++) retCode("fail" + std::to_string(i), i);
+        for (auto& b : blocks) fn->addBlock(std::move(b));
+
+        cider::ModuleIR mod;
+        mod.addGlobalVar("gCell", cider::IRType::U8, 0, 0, 1);
+        mod.addGlobalVar("gWide", cider::IRType::PTR, 0, 0, 16);
+        mod.addGlobalVar("gF64", cider::IRType::F64, 0, 0, 8);
+        mod.addGlobalVar("gF32", cider::IRType::F32, 0, 0, 4);
+        mod.addFunction(std::move(fn));
+        cider::VM vm;
+        CHECK(vm.run(mod).exitCode == 0);
+    }
+
     return 0;
 }
 
