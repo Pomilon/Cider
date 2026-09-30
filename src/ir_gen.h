@@ -94,6 +94,13 @@ public:
     // collide; empty (the default) keeps whole-program output byte-identical.
     void setSeparateCompilation(bool v) { separateCompilation_ = v; }
 
+    // CIDER-FEAT-007: `sizeof e` node -> the operand type the checker
+    // resolved (from TypeChecker::getSizeofOperandTypes). The operand is
+    // never lowered, so this is the only thing its size can come from.
+    void setSizeofOperandTypes(const std::map<const SizeofExpr*, TypeInfo>& map) {
+        sizeofOperandTypes_ = map;
+    }
+
     // CIDER-BUG-184: the checked program boxes at least one concrete
     // struct/class value into an interface-typed return (see
     // TypeChecker::hasInterfaceBoxing). The driver passes the flag before
@@ -10393,9 +10400,39 @@ public:
     }
     void visit(GroupingExpr& expr) override { expr.getExpression()->accept(*this); }
     void visit(SizeofExpr& expr) override {
-        TypeInfo targetType = TypeInfo::fromAST(expr.getTargetType());
+        TypeInfo targetType;
+        if (expr.getOperand()) {
+            // CIDER-FEAT-007: `sizeof e` is the size of the operand's TYPE,
+            // so the operand is NOT lowered — visiting it would run a call
+            // in operand position and emit loads whose value nothing reads.
+            // The checker recorded the type; reuse the type form's rule.
+            // Reaching here without an entry means the checker never walked
+            // this node, which is an internal inconsistency: report it
+            // (the driver aborts before codegen) rather than size a guess.
+            auto it = sizeofOperandTypes_.find(&expr);
+            if (it == sizeofOperandTypes_.end()) {
+                if (reporter_) {
+                    reporter_->error("sizeof operand has no recorded type "
+                                     "(internal: type checker did not visit it)",
+                                     expr.getLine());
+                }
+                lastValue_ = IRValue::Constant(0, IRType::I32);
+                lastExprType_ = {"int", 0};
+                return;
+            }
+            targetType = it->second;
+        } else {
+            targetType = TypeInfo::fromAST(expr.getTargetType());
+        }
         int size = getTypeSize(targetType);
         lastValue_ = IRValue::Constant(size, IRType::I32);
+        // The result is an int. CIDER-FEAT-007: the visitor used to leave
+        // `lastExprType_` alone, so a context that reads the type of the
+        // value it just built — `return sizeof(int);`, the first function
+        // after a struct declaration — saw whatever type was visited before
+        // and, for a struct, boxed the constant: `malloc 12; memcpy %v0, 4,
+        // 12; ret %v0`. Name the result's type like every other value.
+        lastExprType_ = {"int", 0};
     }
     void visit(CastExpr& expr) override {
         expr.getExpression()->accept(*this);
@@ -11102,6 +11139,9 @@ private:
     // CIDER-BUG-119: function/block-local aggregate AST -> collector symbol
     // (see setter).
     std::map<const Statement*, std::shared_ptr<StructSymbol>> localAggregates_;
+    // CIDER-FEAT-007: `sizeof e` AST -> the operand type the checker
+    // recorded (from TypeChecker::getSizeofOperandTypes; see setter).
+    std::map<const SizeofExpr*, TypeInfo> sizeofOperandTypes_;
     // CID-020/021 (spec §2): logical name of the file being generated
     // ("" == main file, which keeps plain names).
     std::string currentModule_;

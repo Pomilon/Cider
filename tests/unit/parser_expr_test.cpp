@@ -125,6 +125,30 @@ int run() {
         "}\n", rep);
     CHECK(!rep.hasErrors());
     CHECK(d.find("(Binary < (Ident a) (Binary * (Ident b) (Ident c)))") != std::string::npos);
+
+    // CIDER-FEAT-007: `sizeof` takes a type in parentheses and an operand
+    // without them. The type form is unchanged; the operand form keeps the
+    // postfix chain and binds like a prefix operator.
+    rep.clear();
+    d = parseDump(
+        "func f(a: [Point; 2], p: *Point, i: int) -> int {\n"
+        "  var t: int = sizeof(Point) + sizeof a[0].x + sizeof *p + sizeof g(1);\n"
+        "  return t + sizeof 42 + 1 + (sizeof i + 1);\n"
+        "}\n", rep);
+    CHECK(!rep.hasErrors());
+    CHECK(d.find("(Sizeof Point)") != std::string::npos);
+    CHECK(d.find("(Sizeof ((Member (Index (Ident a) (Number 0)) x)))") != std::string::npos);
+    CHECK(d.find("(Sizeof ((Unary * (Ident p))))") != std::string::npos);
+    CHECK(d.find("(Sizeof ((Call (Ident g) (Number 1))))") != std::string::npos);
+    CHECK(d.find("(Sizeof ((Number 42)))") != std::string::npos);
+    // `sizeof i + 1` is `sizeof i` then `+ 1` — the operator ends the operand.
+    CHECK(d.find("(Binary + (Sizeof ((Ident i))) (Number 1))") != std::string::npos);
+
+    // A `(` after `sizeof` always opens a type, so a parenthesized operand
+    // is rejected with the hint rather than read as a group.
+    rep.clear();
+    d = parseDump("func f() -> int {\n  return sizeof (a + 1);\n}\n", rep);
+    CHECK(rep.hasErrors());
     return 0;
 }
 

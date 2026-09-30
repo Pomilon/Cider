@@ -1,0 +1,2 @@
+'x' is a value, not a type: sizeof (...) reads its parentheses as a type. Write sizeof x to measure the value's type.
+'helper' is a function, not a type: sizeof (...) reads its parentheses as a type. Write sizeof helper to measure the value's type.

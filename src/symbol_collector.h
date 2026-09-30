@@ -3545,6 +3545,9 @@ public:
         // ever appears there kept the 8-byte unknown-nominal default size.
         } else if (auto sz = dynamic_cast<SizeofExpr*>(expr)) {
             instantiateStructTemplatesInTypeAST(sz->getTargetType());
+            // CIDER-FEAT-007: `sizeof e` names the types inside its operand
+            // (a template call, `new T`, `T{...}`), exactly like a cast's.
+            if (sz->getOperand()) visitExprForTemplateCalls(sz->getOperand());
         } else if (auto nw = dynamic_cast<NewExpr*>(expr)) {
             instantiateStructTemplatesInTypeAST(nw->getNewType());
             for (auto& arg : nw->getArgs()) visitExprForTemplateCalls(arg.get());
@@ -3880,6 +3883,13 @@ public:
                 return std::make_unique<ThisExpr>(expr->getLine(), expr->getColumn());
             case ASTNode::SIZEOF_EXPR: {
                 auto se = dynamic_cast<SizeofExpr*>(expr);
+                // CIDER-FEAT-007: the operand form clones its operand with
+                // the template substitution, like a cast's operand.
+                if (se->getOperand()) {
+                    return std::make_unique<SizeofExpr>(
+                        cloneExprWithSubst(se->getOperand(), tmplParams, tmplArgs),
+                        se->getLine(), se->getColumn());
+                }
                 return std::make_unique<SizeofExpr>(
                     cloneTypeWithSubst(se->getTargetType(), tmplParams, tmplArgs),
                     se->getLine(), se->getColumn());

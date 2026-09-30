@@ -814,18 +814,35 @@ std::unique_ptr<Expression> Parser::parseSizeofExpression() {
     int line = currentToken_.line;
     int col = currentToken_.column;
     nextToken();  // Consume 'sizeof'
-    if (currentToken_.type != TokenType::LPAREN) {
-        error("Expected '(' after 'sizeof'.");
-        return nullptr;
+    // CIDER-FEAT-007: `sizeof (T)` stays the parenthesized TYPE form, so
+    // every existing spelling — `sizeof(int)`, `sizeof([u8; 2])`,
+    // `sizeof(fn(int) -> int)`, `sizeof(m.T)` — parses exactly as before.
+    // A `(` here therefore always opens a type, and the operand form is
+    // written without those parens.
+    if (currentToken_.type == TokenType::LPAREN) {
+        nextToken();  // Consume '('
+        auto targetType = parseType();
+        if (!targetType) return nullptr;
+        if (currentToken_.type != TokenType::RPAREN) {
+            // CIDER-FEAT-007: a `(` right after `sizeof` always opened a
+            // type, so an operand written in parentheses lands here. Say so
+            // instead of only reporting the missing ')'.
+            error("Expected ')' after sizeof type. A parenthesized operand is "
+                  "read as a type; write the operand without parentheses "
+                  "(sizeof expr).");
+            return nullptr;
+        }
+        nextToken();  // Consume ')'
+        return std::make_unique<SizeofExpr>(std::move(targetType), line, col);
     }
-    nextToken();  // Consume '('
-    auto targetType = parseType();
-    if (currentToken_.type != TokenType::RPAREN) {
-        error("Expected ')' after sizeof type.");
-        return nullptr;
-    }
-    nextToken();  // Consume ')'
-    return std::make_unique<SizeofExpr>(std::move(targetType), line, col);
+    // CIDER-FEAT-007: otherwise the operand's TYPE is measured. It binds
+    // like a prefix operator (as in C): postfix `f()`, `.field` and `[i]`
+    // are part of the operand, while a binary operator ends it
+    // (`sizeof a + b` is `sizeof a + b`, not `sizeof (a + b)`). The operand
+    // is only ever type-checked, so its VALUE is never needed.
+    auto operand = parseExpression(Precedence::PREFIX);
+    if (!operand) return nullptr;
+    return std::make_unique<SizeofExpr>(std::move(operand), line, col);
 }
 
 std::unique_ptr<Expression> Parser::parseTernaryExpression(std::unique_ptr<Expression> condition) {

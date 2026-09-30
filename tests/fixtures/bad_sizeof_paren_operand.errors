@@ -1,0 +1,1 @@
+Expected ')' after sizeof type. A parenthesized operand is read as a type; write the operand without parentheses (sizeof expr).

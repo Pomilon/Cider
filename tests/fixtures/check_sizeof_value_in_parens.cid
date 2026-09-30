@@ -1,0 +1,11 @@
+// CIDER-FEAT-007: a `(` right after `sizeof` opens a TYPE, so `sizeof (x)`
+// for a value `x` names a type that does not exist. It used to size the
+// unresolved nominal and silently answer 8; the operand form is `sizeof x`.
+func helper() -> int { return 1; }
+
+func main() -> int {
+  var x: int = 1;
+  var n: int = sizeof (x);
+  var f: int = sizeof (helper);
+  return n + f;
+}

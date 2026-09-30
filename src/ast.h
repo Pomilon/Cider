@@ -673,18 +673,35 @@ private:
     std::vector<FieldInit> fields_;
 };
 
+// CIDER-FEAT-007: `sizeof` measures a TYPE in `sizeof (T)` (unchanged) and
+// an OPERAND's type in `sizeof e`. Exactly one of the two members is set.
+// The operand is type-checked but never evaluated: only its type is read, so
+// the result is the same compile-time constant the type form produces and a
+// call in operand position is not run.
 class SizeofExpr : public Expression {
 public:
     SizeofExpr(std::unique_ptr<TypeAST> targetType, int line, int col)
         : Expression(SIZEOF_EXPR, line, col), targetType_(std::move(targetType)) {}
+    SizeofExpr(std::unique_ptr<Expression> operand, int line, int col)
+        : Expression(SIZEOF_EXPR, line, col), operand_(std::move(operand)) {}
     TypeAST* getTargetType() const { return targetType_.get(); }
+    Expression* getOperand() const { return operand_.get(); }
     void dump(std::string& out, int depth) const override {
         out += "(Sizeof ";
-        targetType_->dump(out, depth);
+        // The operand form keeps its own parens so a dump distinguishes
+        // `(Sizeof Foo)` (the type) from `(Sizeof (Ident x))` (a value).
+        if (operand_) out += "(";
+        if (targetType_) {
+            targetType_->dump(out, depth);
+        } else {
+            operand_->dump(out, depth);
+        }
+        if (operand_) out += ")";
         out += ")";
     }
 private:
     std::unique_ptr<TypeAST> targetType_;
+    std::unique_ptr<Expression> operand_;
 };
 
 class CastExpr : public Expression {

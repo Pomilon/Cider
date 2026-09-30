@@ -1,0 +1,13 @@
+// CIDER-FEAT-007: the operand form drops the type form's parentheses, and a
+// `(` after `sizeof` still opens a TYPE. A parenthesized operand is
+// therefore a rejected spelling, not a group: the diagnostic points at the
+// unparenthesized form.
+struct Point { var x: int; var y: int; }
+
+func main() -> int {
+  var a: int = 1;
+  var b: int = 2;
+  var s: int = sizeof (a + b);
+  var p: int = sizeof (Point);
+  return s + p;
+}

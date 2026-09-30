@@ -404,6 +404,9 @@ int main(int argc, char** argv) {
             // caller-side release); programs that never box stay
             // byte-identical.
             gen.setInterfaceBoxing(checker.hasInterfaceBoxing());
+            // CIDER-FEAT-007: `sizeof e` is lowered from the operand TYPE the
+            // checker recorded; the operand itself is never generated.
+            gen.setSizeofOperandTypes(checker.getSizeofOperandTypes());
             gen.setChecks(opts.checks);  // CIDER-ISS-001
             // CIDER-FEAT-006: per-object data labels when this is one object
             // of a separate-compilation build.
@@ -450,6 +453,9 @@ int main(int argc, char** argv) {
             // caller-side release); programs that never box stay
             // byte-identical.
             gen.setInterfaceBoxing(checker.hasInterfaceBoxing());
+            // CIDER-FEAT-007: `sizeof e` is lowered from the operand TYPE the
+            // checker recorded; the operand itself is never generated.
+            gen.setSizeofOperandTypes(checker.getSizeofOperandTypes());
             gen.setChecks(opts.checks);  // CIDER-ISS-001
             auto module = gen.generate(*prog);
             if (rep.hasErrors()) {
@@ -493,6 +499,9 @@ int main(int argc, char** argv) {
         // CIDER-BUG-184: boxed interface returns use the program-wide tagged
         // representation when the checker found one (see setInterfaceBoxing).
         gen.setInterfaceBoxing(checker.hasInterfaceBoxing());
+        // CIDER-FEAT-007: `sizeof e` is lowered from the operand TYPE the
+        // checker recorded; the operand itself is never generated.
+        gen.setSizeofOperandTypes(checker.getSizeofOperandTypes());
         auto module = gen.generate(*prog);
         if (rep.hasErrors()) {
             printDiagnostics(text, opts.inputFile, rep.errors(), "ir");

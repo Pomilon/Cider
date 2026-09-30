@@ -34,6 +34,13 @@ public:
     // never box keep their byte-identical IR.
     bool hasInterfaceBoxing() const { return interfaceBoxing_; }
 
+    // CIDER-FEAT-007: `sizeof e` node -> the operand type the checker
+    // resolved for it. ir_gen needs it because the operand is never lowered
+    // (see IRGenerator::setSizeofOperandTypes).
+    const std::map<const SizeofExpr*, TypeInfo>& getSizeofOperandTypes() const {
+        return sizeofOperandTypes_;
+    }
+
     // CID-020/021 module context, wired from the collector (mirrors
     // IRGenerator::setModuleScopes). Until set, the checker behaves exactly
     // as before (all lookups are plain resolves in the root scope).
@@ -4143,8 +4150,24 @@ public:
     }
 
     void visit(SizeofExpr& expr) override {
-        // CIDER-FEAT-005: `sizeof(T)` names T without reading it; note it.
-        noteTypeUse(expr.getTargetType());
+        if (auto* operand = expr.getOperand()) {
+            // CIDER-FEAT-007: `sizeof e` measures the operand's type. The
+            // operand is checked like any other expression (so an undefined
+            // name or a bad argument list is still reported) but its VALUE
+            // is never used, so nothing is evaluated at runtime — record the
+            // type for ir_gen and let it emit the same constant the type
+            // form emits.
+            operand->accept(*this);
+            TypeInfo operandType = lastExprType_;
+            resolveInterfaceFlag(operandType);
+            sizeofOperandTypes_[&expr] = operandType;
+        } else {
+            // CIDER-FEAT-005: `sizeof(T)` names T without reading it; note it.
+            noteTypeUse(expr.getTargetType());
+            // CIDER-FEAT-007: `sizeof (x)` for a value x is a type spelling
+            // that names nothing; say so (see rejectValueInSizeofType).
+            rejectValueInSizeofType(expr);
+        }
         lastExprType_ = {"int", 0};
     }
 
@@ -5817,6 +5840,10 @@ private:
     // Cast expression -> its source type, so the representation inference
     // can follow a closure object through `closure as fn(...)`.
     std::map<const CastExpr*, TypeInfo> castSourceTypes_;
+    // CIDER-FEAT-007: `sizeof e` node -> the operand's type. ir_gen reads
+    // it (setSizeofOperandTypes) so the operand is never lowered: only the
+    // type form's size rule is applied to the recorded type.
+    std::map<const SizeofExpr*, TypeInfo> sizeofOperandTypes_;
     // CIDER-BUG-140: ternary expression -> its two branch types, so the
     // inference records each branch under its own spelling instead of the
     // ternary's result spelling.
@@ -5862,6 +5889,28 @@ private:
     void noteTypeUse(TypeAST* type) {
         if (!warningsActive_ || !type) return;
         (void)canonicalizeNominal(TypeInfo::fromAST(type));
+    }
+
+    // CIDER-FEAT-007: a `(` right after `sizeof` always opens a TYPE, so
+    // `sizeof (x)` for a value `x` is a type spelling that names nothing.
+    // It used to fall through to the 8-byte unknown-nominal default, which
+    // reads as a plausible answer; point at the operand form instead. Only a
+    // bare name is considered (a qualified, pointer, array or template
+    // spelling cannot be a value), and only when it resolves to a variable
+    // or a function — the kinds a value reference can name. The lookup is
+    // the raw one: a name that turns out to be a value is not an import use.
+    void rejectValueInSizeofType(SizeofExpr& expr) {
+        TypeAST* type = expr.getTargetType();
+        if (!type || type->getPointerLevel() != 0) return;
+        const std::string& name = type->getName();
+        if (name.find('.') != std::string::npos || name.find('<') != std::string::npos) return;
+        auto sym = resolveScopedRaw(name);
+        if (!sym) return;
+        if (sym->kind != SymbolKind::VARIABLE && sym->kind != SymbolKind::FUNCTION) return;
+        error("'" + name + "' is a " + (sym->kind == SymbolKind::FUNCTION ? "function" : "value") +
+                  ", not a type: sizeof (...) reads its parentheses as a type. "
+                  "Write sizeof " + name + " to measure the value's type.",
+              expr.getLine());
     }
 
     // CIDER-BUG-111: true when a resolved annotation mentions an explicit

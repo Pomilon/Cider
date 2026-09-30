@@ -148,7 +148,10 @@ public:
     void visit(AwaitExpr&) override {}
     void visit(StructLiteralExpr&) override {}
     void visit(SizeofExpr&) override {
-        // Will be handled in IR generation.
+        // Will be handled in IR generation. Nothing to fold either way: the
+        // type form is already a constant there, and CIDER-FEAT-007's operand
+        // form is never lowered (only its type is read), so there is no
+        // operand value to constant-fold in the first place.
     }
     void visit(CastExpr&) override {}
     void visit(ArrayTypeAST&) override {}
