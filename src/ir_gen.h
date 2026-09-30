@@ -144,6 +144,11 @@ public:
         interpHelpersEnsured_ = false;
         stringEqHelpersEnsured_ = false;
         stringCmpHelpersEnsured_ = false;
+        // CIDER-BUG-228: bind every module-scope variable's global name before
+        // a single body is generated, so declaration order stops mattering for
+        // globals (see predeclareModuleGlobals).
+        predeclaredPrograms_.clear();
+        predeclareModuleGlobals(program);
         program.accept(*this);
 
         // Populate V-Tables in module (CID-020/021 spec §6: module-scope
@@ -888,6 +893,93 @@ public:
     }
 
     // Visitor methods
+    // CIDER-BUG-228: bind the global name of every module-scope variable
+    // before any body is generated, so a function (or another global's
+    // initializer) may use a global declared later in the file.
+    //
+    // Root cause this replaces: `globalValues_` used to be filled only as the
+    // single source-order walk REACHED each declaration, so a use generated
+    // before its declaration could not resolve the name. The write path then
+    // fell into `globalValues_[key]`, whose std::map::operator[] default-
+    // inserts an IRValue with an uninitialized `kind` (ir.h) — a null address
+    // that read as `[0 + 0]`, so the VM reported a nil dereference and native
+    // code segfaulted, with no diagnostic on either. The read path instead
+    // reported "cannot resolve identifier" from IR generation, which
+    // `cider check` never reaches.
+    //
+    // Only the NAME -> label binding is hoisted. The declaration itself keeps
+    // owning the storage (initializer folding, the .data cell, extern data and
+    // the synthesized startup pass for embedded class values), so nothing is
+    // emitted twice and a program that never forward-references a global is
+    // byte-identical: the binding is the same value the declaration registers
+    // for the same key, just earlier.
+    //
+    // The key is `globalRefName(sym, name)` — the exact string every use site
+    // looks up (see the identifier read and assignment paths) — so a
+    // forward use and a declaration-after-use resolve to one label. Externs
+    // keep the linker's spelling (globalRefName passes isExtern through).
+    void predeclareModuleGlobals(AstProgram& program) {
+        if (predeclaredPrograms_.count(&program)) return;
+        predeclaredPrograms_.insert(&program);
+
+        // Same per-program context visit(AstProgram&) sets up, so
+        // definingModuleFor and the scope walk below see the module this
+        // program is being generated as.
+        std::string prevModule = currentModule_;
+        auto pmIt = programModules_.find(&program);
+        currentModule_ = (pmIt != programModules_.end()) ? pmIt->second : std::string();
+
+        Scope* prevScope = symbolTable_.getCurrentScope();
+        if (!program.getSourcePath().empty()) {
+            auto scopeIt = moduleScopes_.find(program.getSourcePath());
+            if (scopeIt != moduleScopes_.end()) {
+                symbolTable_.setCurrentScope(scopeIt->second);
+            }
+        }
+
+        for (auto& imported : program.getImportedAsts()) {
+            predeclareModuleGlobals(*imported);
+        }
+        // Only top-level declarations: a module-level block or `if` is
+        // rejected by the checker ("Executable statements are not allowed at
+        // the global scope"), so every module-scope variable is a direct child
+        // of a program. Imports come first, matching the main walk.
+        for (auto& stmt : program.getStatements()) {
+            if (auto* decl = dynamic_cast<VarDeclStmt*>(stmt.get())) {
+                predeclareGlobalVar(decl->getName());
+            } else if (auto* exp = dynamic_cast<ExportStmt*>(stmt.get())) {
+                // `export var x: T` parses as an ExportStmt WRAPPING the
+                // VarDeclStmt (ast.h), so an exported global is not a direct
+                // child of the program. The collector already unwrapped it
+                // (see SymbolCollector::visit(VarDeclStmt), reached through
+                // visit(ExportStmt)), so the pre-pass must too or an exported
+                // global — the only kind another module can name — keeps the
+                // declaration-before-use order it is supposed to be free of.
+                if (auto* decl = dynamic_cast<VarDeclStmt*>(exp->getStmt())) {
+                    predeclareGlobalVar(decl->getName());
+                }
+            }
+        }
+
+        symbolTable_.setCurrentScope(prevScope);
+        currentModule_ = prevModule;
+    }
+
+    // CIDER-BUG-228: bind one module-scope variable's global name to its
+    // label. The key is globalRefName, the exact string every use site looks
+    // up, so a forward use and the declaration resolve to one storage.
+    //
+    // `extern var` names linker-provided storage: the declaration registers
+    // the BARE name (visit(VarDeclStmt), and emitGlobalName passes isExtern
+    // through), which globalRefName reproduces. Bind it here too, so an
+    // `extern var` declared below its first use is as order-independent as a
+    // defined one; the declaration still emits the `extern` directive.
+    void predeclareGlobalVar(const std::string& name) {
+        auto sym = symbolTable_.resolve(name);
+        std::string gkey = globalRefName(sym, name);
+        globalValues_[gkey] = IRValue::Label(gkey);
+    }
+
     void visit(AstProgram& program) override {
         if (visitedPrograms_.count(&program)) return;
         visitedPrograms_.insert(&program);
@@ -6105,8 +6197,39 @@ public:
         if (auto ident = dynamic_cast<IdentifierExpr*>(shapeTarget)) {
             // CID-020/021 (spec §5): global stores key by defining module.
             auto sym = symbolTable_.resolve(ident->getName());
-            addr = variableValues_.count(ident->getName()) ? variableValues_[ident->getName()]
-                                                           : globalValues_[globalRefName(sym, ident->getName())];
+            // CIDER-BUG-228: look the name up instead of indexing
+            // `globalValues_`. operator[] default-inserts an IRValue whose
+            // `kind` is uninitialized (ir.h), so a miss became a null address
+            // and the store went to [0] — a nil-deref report on the VM and a
+            // SIGSEGV natively, with no diagnostic at all. The name is bound
+            // before any body is generated now (predeclareModuleGlobals), so a
+            // miss here is an internal inconsistency: report it with the use's
+            // location instead of storing through null. The driver aborts
+            // before codegen (main.cpp checks hasErrors after generate).
+            auto localIt = variableValues_.find(ident->getName());
+            if (localIt != variableValues_.end()) {
+                addr = localIt->second;
+            } else {
+                std::string gkey = globalRefName(sym, ident->getName());
+                auto globalIt = globalValues_.find(gkey);
+                if (globalIt != globalValues_.end()) {
+                    addr = globalIt->second;
+                } else {
+                    // A write to an unresolvable name must not become a store
+                    // through the null `addr` default — that is the SIGSEGV.
+                    // This is reachable only if the checker admitted the name
+                    // (it rejects an undefined identifier, so `cider check`
+                    // never gets here), i.e. an internal inconsistency; report
+                    // it and leave the address null so a driver that keeps
+                    // going still cannot corrupt memory silently.
+                    if (reporter_) {
+                        reporter_->error("cannot resolve identifier '" + ident->getName() +
+                                             "' (unresolved assignment target)",
+                                         ident->getLine());
+                    }
+                    addr = IRValue::Constant(0, IRType::PTR);
+                }
+            }
             // Param read-through must stop once the param is assigned:
             // subsequent reads go through memory (the alloca holds the new value).
             paramNames_.erase(ident->getName());
@@ -10895,6 +11018,11 @@ private:
     std::vector<std::shared_ptr<StructSymbol>> structSyms_;
     std::vector<std::shared_ptr<InterfaceSymbol>> ifaceSyms_;
     std::set<AstProgram*> visitedPrograms_;
+    // CIDER-BUG-228: programs already walked by the module-scope variable
+    // pre-pass (predeclareModuleGlobals), kept apart from visitedPrograms_
+    // because the main walk must still generate them in full — the pre-pass
+    // only hoists the name bindings, not the storage.
+    std::set<AstProgram*> predeclaredPrograms_;
     std::vector<std::string> breakLabels_;
     std::vector<std::string> continueLabels_;
     // CIDER-BUG-050: for each enclosing loop, the deferStack_/destructorStack_

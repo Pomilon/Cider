@@ -1,0 +1,35 @@
+// CIDER-BUG-228, cross-module half: the same declaration-order rule must hold
+// for a global reached from another module, and a module must be able to use
+// its own global from a function declared above it. This is the shape that
+// needs the pre-pass to walk imported programs too — a fix that only hoisted
+// the main file's globals would leave `gLibLate` unresolved here.
+export struct LibStruct {
+  var x: int;
+  var y: int;
+}
+
+// A bare use of this module's own global, from a function declared BEFORE it.
+// A below-declared global reached from ANOTHER file, both bare (via this
+// accessor) and through a from-import alias of the global itself. Both must
+// resolve before the declaration below is reached in this module.
+export func libLate() -> int {
+  return gLibLate;
+}
+
+// A write to this module's own below-declared global, the compound-assignment
+// shape that used to nil-deref.
+export func bumpLib() -> int {
+  gLibLate += 1;
+  return gLibLate;
+}
+
+// A below-declared struct global in this module, field-written from above.
+export func touchLibStruct() -> void {
+  gLibHolder.x = 4;
+  gLibHolder.y = 8;
+}
+
+// Declared after every use above — in this module AND, through the exports, in
+// the importing file.
+export var gLibLate: int = 21;
+var gLibHolder: LibStruct;

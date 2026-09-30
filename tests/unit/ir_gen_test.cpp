@@ -117,6 +117,92 @@ int run() {
     d = genSrc("var g: int = 5;\nfunc main() -> void { }\n");
     CHECK(d.find("define main() {") != std::string::npos);
 
+    // CIDER-BUG-228: a module-scope global used by a function declared ABOVE
+    // it must reference the global's own label, identically to the
+    // declaration-first order. The pre-fix write path indexed globalValues_
+    // with std::map::operator[], which default-inserts an IRValue whose
+    // `kind` is uninitialized (ir.h) — a null address, so this emitted a load
+    // and a store off a null operand and the program nil-dereferenced on the VM
+    // and segfaulted natively, with no diagnostic on either. These pin the
+    // LABEL on both the load and the store, in both orders.
+    {
+        std::string lateR = genSrc(
+            "func get() -> int {\n  return gLate;\n}\n"
+            "var gLate: int = 7;\n");
+        std::string earlyR = genSrc(
+            "var gEarly: int = 7;\n"
+            "func get() -> int {\n  return gEarly;\n}\n");
+        // The forward read loads the global's label, not a null operand, and
+        // the body is otherwise the same as in declaration-first order.
+        CHECK(lateR.find("load gLate") != std::string::npos);
+        CHECK(countOf(lateR, "load gLate") == countOf(earlyR, "load gEarly"));
+        CHECK(countOf(lateR, "define get() {") == countOf(earlyR, "define get() {"));
+
+        // The forward WRITE is the shape that produced the nil address: pin
+        // that both the load feeding `+=` and the store land on the label.
+        std::string lateW = genSrc(
+            "func bump() -> void {\n  gLateW += 1;\n}\n"
+            "var gLateW: int = 0;\n");
+        std::string earlyW = genSrc(
+            "var gEarlyW: int = 0;\n"
+            "func bump() -> void {\n  gEarlyW += 1;\n}\n");
+        CHECK(lateW.find("load gLateW") != std::string::npos);
+        CHECK(lateW.find("store gLateW") != std::string::npos);
+        CHECK(countOf(lateW, "load gLateW") == countOf(earlyW, "load gEarlyW"));
+        CHECK(countOf(lateW, "store gLateW") == countOf(earlyW, "store gEarlyW"));
+        CHECK(lateW.find("null") == std::string::npos);
+
+        // An ADDRESS taken before the declaration reaches the same binding,
+        // so `&g` must not be a null operand either.
+        std::string lateAddr = genSrc(
+            "func addr() -> int {\n"
+            "  var p: *int = &gLateA;\n"
+            "  return *p;\n"
+            "}\n"
+            "var gLateA: int = 1;\n");
+        CHECK(lateAddr.find("gLateA") != std::string::npos);
+        CHECK(lateAddr.find("null") == std::string::npos);
+
+        // A `const` global read before its declaration. This is a distinct
+        // path from a `var` read: visit(IdentifierExpr) folds a const to its
+        // value only when the name is NOT in globalValues_, and constValue is
+        // 0 for a const *variable* — so the forward order silently read 0.
+        std::string lateConst = genSrc(
+            "func get() -> int {\n  return kLate;\n}\n"
+            "const kLate: int = 55;\n");
+        CHECK(lateConst.find("load kLate") != std::string::npos);
+        CHECK(lateConst.find("ret 0") == std::string::npos);
+
+        // An `export var` parses as an ExportStmt WRAPPING the VarDeclStmt
+        // (ast.h), so the pre-pass must unwrap it. Exported globals are the
+        // only kind another module can name, so a fix that missed the wrapper
+        // would leave exactly the cross-module case order-dependent.
+        std::string exp = genSrc(
+            "export func get() -> int {\n  return gExp;\n}\n"
+            "export var gExp: int = 3;\n");
+        std::string plain = genSrc(
+            "export func get() -> int {\n  return gExp;\n}\n"
+            "var gExp: int = 3;\n");
+        CHECK(exp.find("load gExp") != std::string::npos);
+        CHECK(countOf(exp, "gExp") == countOf(plain, "gExp"));
+
+        // An `extern var` declared below its first use: the linker owns the
+        // storage, and both the declaration and every use spell it bare, so
+        // the forward order must produce the same extern data declaration and
+        // the same reference.
+        {
+            cider::ModuleIR late = genModuleSrc(
+                "func get() -> int {\n  return errno;\n}\n"
+                "extern var errno: int;\n");
+            cider::ModuleIR early = genModuleSrc(
+                "extern var errno: int;\n"
+                "func get() -> int {\n  return errno;\n}\n");
+            CHECK(late.getExternVariables().size() == 1);
+            CHECK(late.getExternVariables()[0] == "errno");
+            CHECK(late.getExternVariables() == early.getExternVariables());
+        }
+    }
+
     // Local var + assignment: alloca/store/load sequence.
     d = genSrc("func main() -> void {\n  var x: int = 1;\n  x = x + 1;\n}\n");
     CHECK(d.find("alloca") != std::string::npos);
