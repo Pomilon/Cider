@@ -62,6 +62,43 @@ class SymbolCollector : public ASTVisitor {
     };
     std::vector<AggregateLayout> aggregateLayouts_;
     std::map<const StructSymbol*, size_t> aggregateIndex_;
+    // CIDER-BUG-209: interface and class/struct method SIGNATURES whose
+    // parameter/return spellings were resolved while collection was still in
+    // progress. The interface-typed return/parameter is a 16-byte fat
+    // pointer, and the flag that says so is resolved eagerly at the
+    // declaration (resolveInterfaceTypeFlag). A signature naming an
+    // interface declared LATER cannot resolve then, so the collected TypeInfo
+    // kept isInterface=false while the very same spelling collected after the
+    // interface declaration carried true — a declaration-order sensitivity in
+    // a flag that is part of the type's identity (TypeInfo::operator==
+    // compares isInterface).
+    //
+    // The two sides of the interface satisfaction comparison then disagree and
+    // a genuine implementor is rejected: "Type 'Impl' does not implement
+    // interface 'Maker': missing method 'make'" (type_checker::
+    // checkInterfaceValue), or, for an override, "its signature does not match
+    // base method" (validateOverrides). When BOTH sides are collected before
+    // the interface, both are stale and the pair happens to match, which is
+    // what hid the defect.
+    //
+    // Each interface and aggregate is recorded here at declaration time and
+    // re-resolved by resolveDeferredSignatureFlags() once the whole program
+    // is known (the same second pass as the CIDER-BUG-105 layout finalize),
+    // so declaration order stops mattering. `scope` is the scope the
+    // spellings were written in — a module scope, or the transient local
+    // scope of a function-body declaration — so the re-resolution binds the
+    // name exactly where the eager pass did.
+    //
+    // The re-resolution only ADDS flags (resolveInterfaceTypeFlag never clears
+    // one), so a program that already resolved every spelling is untouched and
+    // stays byte-identical, and a spelling that is still unknown after the
+    // whole program is collected keeps its collected shape, so the existing
+    // unknown-type diagnostics are unchanged.
+    struct DeferredSignatures {
+        std::shared_ptr<Symbol> sym;
+        Scope* scope = nullptr;  // scope the signature spellings bind in
+    };
+    std::vector<DeferredSignatures> deferredSignatures_;
     // CIDER-BUG-119: aggregate declarations at function/block scope. The
     // symbol is defined in the collector's (transient) local scope, which
     // the checker and IR generator never walk: each phase re-enters its own
@@ -139,6 +176,14 @@ public:
         // chains never inherit, the rest resolve their base below.
         validateBaseChains();
         finalizeLayouts();
+        // CIDER-BUG-209: every declaration (and every template
+        // instantiation) is known now, so an interface-typed method
+        // parameter/return declared BEFORE the interface it names can finally
+        // be resolved. Runs after finalizeLayouts(), so a class whose base was
+        // a forward reference has already been rebuilt from its own method
+        // declarations and the re-resolution sees the live member list; before
+        // validateOverrides(), whose signature comparison reads these flags.
+        resolveDeferredSignatureFlags();
         // CIDER-BUG-126: after every base chain and vtable is final, report
         // overrides that bound no virtual slot (they used to be accepted and
         // silently call the derived body directly instead of dispatching).
@@ -910,6 +955,14 @@ public:
             addAggregateLayout(sym, symbolTable_.getCurrentScope(), 0, false, false,
                                stmt.isUnion());
         }
+        // CIDER-BUG-209: record the signature positions of this declaration
+        // for the post-collection re-resolution below. A struct declares no
+        // methods today, but the record is what makes the pass cover a
+        // struct-template instantiation (cloned through this same visit) and
+        // keeps the two aggregate visitors in step. The recorded scope is this
+        // declaration's, so a function-body struct re-resolves where it was
+        // written.
+        deferSignatureResolution(sym);
         structClassNames_.push_back(stmt.getName());
     }
 
@@ -949,6 +1002,11 @@ public:
             }
             sym->methods.push_back(method);
         }
+        // CIDER-BUG-209: a return type or parameter naming an interface
+        // declared BELOW this one kept isInterface=false above, because the
+        // eager pass above had nothing to resolve against. Re-resolve the
+        // signatures once the whole program is known.
+        deferSignatureResolution(sym);
         if (symbolTable_.getCurrentScope()->resolveLocal(sym->name)) {
             reporter_.error("Redeclaration of type '" + sym->name + "'", sym->line, sym->col);
         } else {
@@ -1400,6 +1458,17 @@ public:
         if (symbolTable_.scopeDepth() > 0) localAggregates_[&stmt] = sym;
         structClassNames_.push_back(stmt.getName());
         addAggregateLayout(std::move(rec));
+        // CIDER-BUG-209: a method return type or parameter naming an
+        // interface declared BELOW this class kept isInterface=false at
+        // collection time, so the interface-satisfaction comparison read this
+        // signature as a different type from the interface's own (correctly
+        // flagged) spelling and rejected a genuine implementor as a missing
+        // method. Re-resolve the whole signature list once the program is
+        // known; the recorded scope is this declaration's, so a
+        // function-body class re-resolves where it was written. The layout
+        // record above is recorded first so the second pass can fix the
+        // `ownMethods` copy finalizeClassBase() rebuilds from.
+        deferSignatureResolution(sym);
     }
 
     void visit(FromImportStmt& stmt) override {
@@ -1633,6 +1702,84 @@ public:
         if (sym && sym->kind == SymbolKind::INTERFACE &&
             aliasTarget.pointerLevel == 0 && !aliasTarget.isArray) {
             type.isInterface = true;
+        }
+    }
+
+    // CIDER-BUG-209: record an interface or aggregate whose method
+    // signatures were resolved against the declarations known at its own
+    // declaration site, for the second pass below. The scope is captured, not
+    // re-derived, so a function-body declaration re-resolves in the same local
+    // scope the eager pass used (the scope object outlives collection — the
+    // symbol table owns every scope it creates).
+    void deferSignatureResolution(const std::shared_ptr<Symbol>& sym) {
+        if (!sym) return;
+        for (const auto& rec : deferredSignatures_) {
+            if (rec.sym == sym) return;
+        }
+        deferredSignatures_.push_back({sym, symbolTable_.getCurrentScope()});
+    }
+
+    // CIDER-BUG-209: the second pass. Re-resolve the interface flag on every
+    // recorded method signature now that every declaration in the program and
+    // its imports is known, so a signature naming an interface declared after
+    // it carries the same flag as the same spelling declared before it.
+    // Declaration order then stops mattering for interface satisfaction
+    // (checkInterfaceValue) and for override signature checks
+    // (validateOverrides).
+    //
+    // Re-resolving the whole signature list is safe and cheap: the eager pass
+    // already flagged everything resolvable at declaration time, and
+    // resolveInterfaceTypeFlag only ever SETS a flag, never clears one, so a
+    // second run is a no-op for an order-independent program (byte-identical
+    // output) and adds exactly the flags a forward reference was missing. A
+    // spelling that is still unresolvable after the whole program is
+    // collected keeps its collected shape, leaving the existing unknown-type
+    // diagnostics and the satisfaction rejections they cause untouched.
+    //
+    // Only OWN methods are re-resolved. An inherited method keeps its base's
+    // declaringModule (CIDER-BUG-090), and the base carries its own record, so
+    // the base's scope already re-resolved that spelling; re-resolving it here
+    // would bind it to a same-named type of the DERIVED module.
+    void resolveDeferredSignatureFlags() {
+        for (const auto& rec : deferredSignatures_) {
+            if (!rec.sym) continue;
+            struct ScopeRestore {
+                SymbolTable& table;
+                Scope* prev;
+                ~ScopeRestore() { table.setCurrentScope(prev); }
+            } restore{symbolTable_, symbolTable_.getCurrentScope()};
+            if (rec.scope) symbolTable_.setCurrentScope(rec.scope);
+            auto resolveSignature = [this](StructSymbol::Method& m) {
+                resolveInterfaceTypeFlag(m.returnType);
+                for (auto& pt : m.parameterTypes) resolveInterfaceTypeFlag(pt);
+            };
+            if (rec.sym->kind == SymbolKind::INTERFACE) {
+                auto iface = std::static_pointer_cast<InterfaceSymbol>(rec.sym);
+                for (auto& m : iface->methods) resolveSignature(m);
+                continue;
+            }
+            if (rec.sym->kind != SymbolKind::STRUCT && rec.sym->kind != SymbolKind::CLASS) {
+                continue;
+            }
+            auto ss = std::static_pointer_cast<StructSymbol>(rec.sym);
+            const std::string ownModule = definingModuleOfSymbol(ss);
+            for (auto& pt : ss->constructorParamTypes) resolveInterfaceTypeFlag(pt);
+            for (auto& m : ss->methods) {
+                if (m.declaringModule != ownModule) continue;
+                resolveSignature(m);
+            }
+            // The layout record keeps its own copy of the declarations as
+            // collected, and finalizeClassBase() rebuilds the live member list
+            // from it for a class whose base was a forward reference.
+            // validateOverrides() reads that copy, so re-resolve it too or the
+            // override check would compare a stale flag against the freshly
+            // resolved one.
+            auto ait = aggregateIndex_.find(ss.get());
+            if (ait != aggregateIndex_.end()) {
+                for (auto& m : aggregateLayouts_[ait->second].ownMethods) {
+                    resolveSignature(m);
+                }
+            }
         }
     }
 

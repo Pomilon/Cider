@@ -1,0 +1,7 @@
+Type 'NoArea' does not implement interface 'NeedsArea': missing method 'area'
+Type 'WrongReturn' does not implement interface 'GivesShape': missing method 'give'
+Type 'WrongArity' does not implement interface 'AsksOne': missing method 'ask'
+Type 'WrongSibling' does not implement interface 'GivesTwo': missing method 'give'
+Type 'WrongParam' does not implement interface 'TakesShape': missing method 'put'
+Type 'WrongStruct' does not implement interface 'TakesPayload': missing method 'store'
+Type 'NoArea' does not implement interface 'Shape': missing method 'area'

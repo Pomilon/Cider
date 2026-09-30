@@ -1,0 +1,39 @@
+// CIDER-BUG-209 module half for check_iface_decl_order_lookalike.cid.
+//
+// `Shape` is declared BEFORE the two types its signatures name — the `Param`
+// parameter type is fine, but `make()` returns `Deep` and `Deep` is declared
+// below. So while `Shape`'s own declaration was collected, `Shape.make`'s
+// return type was unresolvable and kept the "not an interface" flag. The
+// re-resolution now flags it, which is the whole point of the fix — and this
+// fixture pins that doing so does NOT let a same-spelled interface from
+// another module satisfy the method: `Deep` in the importing file is a
+// different type, and the diagnostic must be the ordinary missing-method one.
+export struct Param {
+  var v: int;
+}
+
+export interface Shape {
+  func draw(p: Param) -> int;
+  func make() -> Deep;
+}
+
+export interface Deep {
+  func level() -> int;
+}
+
+export class DeepImpl {
+  var d: int;
+  func init(x: int) -> void { this.d = x; }
+  func level() -> int { return this.d; }
+}
+
+// The genuine implementor, declared AFTER the interface it satisfies.
+export class RealImpl {
+  var x: int;
+  func draw(p: Param) -> int { return p.v; }
+  func make() -> Deep {
+    var d: DeepImpl;
+    d.init(4);
+    return d;
+  }
+}

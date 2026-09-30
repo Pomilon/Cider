@@ -1,0 +1,140 @@
+// CIDER-BUG-209: the second-pass re-resolution must add the interface flags a
+// forward reference was missing and NOTHING else. A genuinely missing or
+// mismatched method is still rejected, with the same message at the same
+// site.
+//
+// Every type named by an interface signature here is declared ABOVE the
+// interface that names it, so these diagnostics do not depend on the
+// declaration order the fix is about and must be identical before and after
+// it. The acceptance side of the fix — a below-declared interface that a
+// correct implementor satisfies — is pinned by tests/programs/iface_decl_order
+// on all three backends.
+struct Payload {
+  var a: int;
+}
+
+interface Shape {
+  func area() -> int;
+}
+
+interface Sibling {
+  func area() -> int;
+}
+
+// One interface per break, each declaring only what it needs, so every class
+// below breaks exactly one method and produces exactly one diagnostic.
+
+// 1. No `area` at all: a genuinely missing method.
+interface NeedsArea {
+  func area() -> int;
+}
+
+class NoArea {
+  var x: int;
+}
+
+// 2. Right name, wrong RETURN type.
+interface GivesShape {
+  func give() -> Shape;
+}
+
+class WrongReturn {
+  func give() -> int { return 1; }
+}
+
+// 3. Right name, wrong PARAMETER COUNT.
+interface AsksOne {
+  func ask(n: int) -> int;
+}
+
+class WrongArity {
+  func ask() -> int { return 1; }
+}
+
+// 4. A same-spelled SIBLING interface where a different one is required.
+interface GivesTwo {
+  func give() -> Sibling;
+}
+
+class WrongSibling {
+  func give() -> Shape { return this; }
+  func area() -> int { return 1; }
+}
+
+// 5. An interface-typed parameter given a different interface.
+interface TakesShape {
+  func put(s: Shape) -> int;
+}
+
+class WrongParam {
+  func put(s: Sibling) -> int { return 0; }
+}
+
+// 6. A struct where an interface is required.
+interface TakesPayload {
+  func store(p: Payload) -> int;
+}
+
+class WrongStruct {
+  func store(p: Shape) -> int { return 0; }
+}
+
+// 7. The controls: classes that satisfy every interface above, so the
+//    re-resolution must not reject them. No diagnostic may name Full/Full2.
+class Full {
+  var x: int;
+  func area() -> int { return this.x; }
+  func give() -> Shape { return this; }
+}
+
+class Full2 {
+  var x: int;
+  func area() -> int { return this.x; }
+  func give() -> Sibling { return this; }
+  func ask(n: int) -> int { return n; }
+  func put(s: Shape) -> int { return s.area(); }
+  func store(p: Payload) -> int { return p.a; }
+}
+
+// Reaching the missing method from every site the shared conversion rule is
+// used from, so the fix must not shift a diagnostic off any of them.
+var gNoArea: NoArea;
+
+func takeShape(s: Shape) -> int { return s.area(); }
+
+func main() -> int {
+  var full: Full;
+  var full2: Full2;
+  var needsArea: NeedsArea = full;
+  var givesShape: GivesShape = full;
+  var asksOne: AsksOne = full2;
+  var givesTwo: GivesTwo = full2;
+  var takesShape: TakesShape = full2;
+  var takesPayload: TakesPayload = full2;
+
+  var noArea: NoArea;
+  var wrongReturn: WrongReturn;
+  var wrongArity: WrongArity;
+  var wrongSibling: WrongSibling;
+  var wrongParam: WrongParam;
+  var wrongStruct: WrongStruct;
+
+  needsArea = noArea;
+  givesShape = wrongReturn;
+  asksOne = wrongArity;
+  givesTwo = wrongSibling;
+  takesShape = wrongParam;
+  takesPayload = wrongStruct;
+
+  // The declaration-time site.
+  var bad: NeedsArea = noArea;
+  // Reassignment.
+  needsArea = noArea;
+  // A call argument.
+  takeShape(noArea);
+  // A list element.
+  var l: [Shape; 2] = [full, noArea];
+  // A return position.
+  gNoArea = noArea;
+  return 0;
+}
