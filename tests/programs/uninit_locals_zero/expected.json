@@ -1,0 +1,5 @@
+{
+  "stdout": "scalar: 0\nbyte: 0\nptr: 0\narray: 0\nmany: 0\ndeep_ran: -3885\nscalar2: 0\narray2: 0\nf64: 0\nbool: 0\nearly: 0\ncontrol: 0\nacross: 0\nuninit_locals_zero_ok\n",
+  "stderr": "",
+  "exit": 0
+}

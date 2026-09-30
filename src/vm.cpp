@@ -1158,6 +1158,14 @@ void VM::free(int64_t offset) {
 // masking the hazard native exposes as garbage. Releasing stays as before;
 // the ALLOCA path zeroes a freshly claimed chunk so frame REUSE is
 // observable, exactly where native's next call overwrites the slots.
+// CIDER-BUG-220: the native side now clears its own frame too, so the two
+// halves of the pair really do agree. This memset was already the observable
+// one, but native's prologue only did `sub rsp, N`, so an unassigned local
+// read 0 here and whatever the previous occupant of those stack addresses
+// left there on native (two sibling calls share rbp, so "previous occupant"
+// is ordinary reuse, not a dangling pointer). codegen.cpp zeroes the ALLOCA
+// region in every prologue; this memset is the same policy, and
+// CIDER-BUG-215's fresh-memory rule is the single statement of it.
 // CIDER-BUG-149: a frame's oversized-local heap fallbacks (allocated in the
 // ALLOCA path when the chunk cannot hold the local) are frame storage too.
 // They used to be leaked: the block stayed live and readable across returns

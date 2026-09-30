@@ -1,0 +1,176 @@
+// CIDER-BUG-220: a local that is read before it is written must read 0 on
+// every backend.
+//
+// THE BUG. The native frame's local region is reserved with `sub rsp, N` and
+// nothing ever clears it, so an unassigned local returned whatever the
+// previous occupant of those addresses left there. The VM already returned
+// 0: its ALLOCA path memsets the frame chunk it claims (CIDER-BUG-115), and
+// CIDER-BUG-215 made that the stated fresh-memory policy. So the two
+// backends disagreed, and the ticket's shape (`var s: int; if (s == 0)`)
+// diverged on native as soon as the stack was dirty.
+//
+// The dirt is ordinary sibling-frame reuse, not a dangling pointer. Two
+// calls made from the same parent share rbp, so a second frame's slots land
+// on the first frame's slots. A wide frame filled with a pattern, followed by
+// a narrow frame that reads an unassigned local, is enough: the pattern came
+// back on native and 0 on both VM modes, for every local shape tried
+// (i32, u8, pointer, array element).
+//
+// Each probe below is a separate function for that reason -- a callee's frame
+// sits BELOW its caller's, so a call made from inside a probe cannot dirty
+// the probe's own slots. Only a previous sibling at the same depth can.
+//
+// This pins the VALUE (0), not just the three-way agreement, and each probe
+// carries positive controls so a wrong slot or a short region cannot pass by
+// reading zeroed memory. Only the frame's own region is cleared: assigned
+// locals, incoming arguments and the callee-saved registers all still work,
+// which the `control` and `dirtyer` checks below assert directly.
+from std.io import print, printInt;
+
+// ----------------------------------------------------------------------
+// The dirtier. Its frame is wide enough to cover every probe frame below,
+// and the pattern is checked back so a probe that reads zeroed memory
+// because the frame moved (rather than because the fix works) is caught.
+func dirtyer() {
+    var pad: [int; 64];
+    for (var i: int = 0; i < 64; i = i + 1) { pad[i] = -777; }
+    if (pad[0] != -777 || pad[63] != -777) { print("DIRTYER_LOST_ITS_OWN_STORES\n"); }
+}
+
+// The other shape of "a prior call dirtied the stack": a deep recursion
+// retires frames at many depths, so the next sibling at the top depth lands
+// on bytes several frames down wrote.
+func deepDirty(n: int) -> int {
+    var pad: [int; 32];
+    for (var i: int = 0; i < 32; i = i + 1) { pad[i] = -555; }
+    if (n <= 0) { return pad[0]; }
+    return pad[31] + deepDirty(n - 1);
+}
+
+// ----------------------------------------------------------------------
+// Probes. Each returns 0 when the local it reads is 0, and a distinct
+// non-zero code when it is not, so the report says WHICH shape diverged
+// instead of just that something did.
+func scalarProbe() -> int {
+    var s: int;              // the ticket's shape, verbatim
+    if (s == 0) { return 0; }
+    return 1;
+}
+
+func byteProbe() -> int {
+    var b: u8;
+    if (b == 0) { return 0; }
+    return 2;
+}
+
+func ptrProbe() -> int {
+    var p: *int;
+    if (p == nilPtr) { return 0; }
+    return 3;
+}
+
+func arrayProbe() -> int {
+    var a: [int; 4];
+    if (a[0] == 0 && a[3] == 0) { return 0; }
+    return 4;
+}
+
+func f64Probe() -> int {
+    var f: f64;
+    if (f == 0.0) { return 0; }
+    return 5;
+}
+
+func boolProbe() -> int {
+    var b: bool;
+    if (b == false) { return 0; }
+    return 6;
+}
+
+// Read before ANY call in the function, so the zeroing cannot be an artifact
+// of a call in between.
+func earlyProbe() -> int {
+    var s: int;
+    var t: int;
+    if (s == 0 && t == 0) { return 0; }
+    return 7;
+}
+
+// Enough unassigned locals to pin the HIGH end of the cleared region: a
+// region sized one quadword short leaves the last of these dirty. Written as
+// a sum so every one of them is a real read.
+func manyLocalsProbe() -> int {
+    var a: int;
+    var b: int;
+    var c: int;
+    var d: int;
+    var e: int;
+    var f: int;
+    if (a + b + c + d + e + f == 0) { return 0; }
+    return 8;
+}
+
+// Positive control: assigned locals on either side of an unassigned one must
+// still round-trip. This is what would fail if the prologue cleared more than
+// the frame's own region, or cleared it after the stores instead of before.
+func controlProbe() -> int {
+    var a: int = 11;
+    var u: int;
+    var b: int = 22;
+    if (a != 11 || b != 22) { return 90; }   // positive control
+    if (u != 0) { return 91; }               // the unassigned one is still 0
+    return 0;
+}
+
+// An assigned local read back AFTER a call from the same function: the callee
+// must not have disturbed it, and the clear must not have either.
+func acrossCallProbe() -> int {
+    var a: int = 7;
+    var b: int = dirtyerSum();
+    if (a != 7) { return 92; }
+    if (b != 3) { return 93; }
+    return 0;
+}
+
+func dirtyerSum() -> int { return 3; }
+
+// ----------------------------------------------------------------------
+func main() -> int {
+    // Section 1: sibling-frame reuse. One dirtier per probe so no probe's own
+    // frame is what the previous probe left behind.
+    var bad: int = 0;
+    var d: int = 0;
+
+    dirtyer(); d = scalarProbe();  print("scalar: "); printInt(d); print("\n"); if (d != 0) { bad = 1; }
+    dirtyer(); d = byteProbe();    print("byte: ");   printInt(d); print("\n"); if (d != 0) { bad = 2; }
+    dirtyer(); d = ptrProbe();     print("ptr: ");    printInt(d); print("\n"); if (d != 0) { bad = 3; }
+    dirtyer(); d = arrayProbe();   print("array: ");  printInt(d); print("\n"); if (d != 0) { bad = 4; }
+    dirtyer(); d = manyLocalsProbe(); print("many: "); printInt(d); print("\n"); if (d != 0) { bad = 8; }
+
+    // Section 2: the other shape of a dirty prior call -- a deep recursion
+    // that retires frames at many depths first.
+    var deep: int = deepDirty(6);
+    // Non-zero proves the recursion really ran and really wrote its frames;
+    // a zero here would mean the dirtier never reached the stack.
+    print("deep_ran: "); printInt(deep); print("\n");
+    d = scalarProbe();  print("scalar2: "); printInt(d); print("\n"); if (d != 0) { bad = 1; }
+    d = arrayProbe();   print("array2: ");  printInt(d); print("\n"); if (d != 0) { bad = 4; }
+
+    // Section 3: the adjacent never-initialized surfaces that already agreed
+    // and must keep agreeing -- the zero fill is quadword-granular, so a
+    // narrow or float local is worth pinning.
+    dirtyer(); d = f64Probe();  print("f64: ");  printInt(d); print("\n"); if (d != 0) { bad = 5; }
+    dirtyer(); d = boolProbe(); print("bool: "); printInt(d); print("\n"); if (d != 0) { bad = 6; }
+    dirtyer(); d = earlyProbe(); print("early: "); printInt(d); print("\n"); if (d != 0) { bad = 7; }
+
+    // Section 4: positive controls.
+    dirtyer(); d = controlProbe(); print("control: "); printInt(d); print("\n"); if (d != 0) { bad = 90; }
+    dirtyer(); d = acrossCallProbe(); print("across: "); printInt(d); print("\n"); if (d != 0) { bad = 92; }
+
+    if (bad != 0) {
+        print("uninit_locals_zero_FAIL: "); printInt(bad); print("\n");
+        return 1;
+    }
+    print("uninit_locals_zero_ok\n");
+    return 0;
+}

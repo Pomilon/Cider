@@ -768,9 +768,51 @@ bool CodeGenerator::generate(ModuleIR& module, const std::string& outputPath,
         int maxSlotOffset = 0;
         int cvtLabelCount = 0;  // NASM-local labels for u64 -> float (I2)
         int divZeroLabelCount = 0;  // NASM-local labels for the /0,%0 guard (CIDER-BUG-058)
+        int zeroFrameLabelCount = 0;  // NASM-local labels for the frame zero fill (CIDER-BUG-220)
         if (extraStack > 0) {
             prologueFixupIndex = (int)textSection.size();
             addText("    sub rsp, " + std::to_string(extraStack));
+        }
+        // CIDER-BUG-220: zero the ALLOCA region on entry. `sub rsp, N`
+        // reserves it and nothing ever clears it, so a local that is read
+        // before it is written returns whatever the previous occupant of
+        // those addresses left behind. The VM already agrees on 0: its ALLOCA
+        // path memsets the frame chunk it claims (CIDER-BUG-115), so this
+        // loop is what makes the native frame honor the fresh-memory policy
+        // CIDER-BUG-215 states -- and what makes that VM comment's promise
+        // ("reading before any reuse still sees the old bytes, exactly like
+        // native") true, since only the native side was leaving the bytes.
+        //
+        // The dirt is ordinary sibling-frame reuse, not a dangling pointer: two
+        // calls made from the same parent share rbp, so the second frame's
+        // slots land on the first frame's slots. A big frame filled with a
+        // pattern, followed by a small frame reading an unassigned local,
+        // returned that pattern here and 0 on both VM modes.
+        //
+        // The region is exactly [rbp - spillBase, rbp - savedRegsSize): the
+        // slots are handed out back to back from savedRegsSize (see the
+        // localOffsets loop above, whose `+ size` addresses the LOW end of
+        // each slot), and the register allocator's spill slots all live at
+        // spillBase or deeper, so nothing this touches is written-before-read
+        // by the allocator, and nothing it touches holds an incoming
+        // argument -- the entry block spills those into the spill area after
+        // this point. Every alloca size is rounded up to 8 above, so the
+        // region is a whole number of quadwords. Emitted before `.entry:`
+        // for the same reason, and r10/r11 are the backend's scratch pair
+        // (never an argument register on SysV or Win64, so clobbering them
+        // here cannot lose a parameter). The frame-overrun fixup below only
+        // ever GROWS the `sub rsp`, and these bounds are rbp-relative, so
+        // they stay valid across it.
+        int allocaRegionSize = spillBase - savedRegsSize;
+        if (allocaRegionSize > 0) {
+            std::string zfLbl = ".zeroFrame" + std::to_string(zeroFrameLabelCount++);
+            addText("    lea r10, [rbp - " + std::to_string(spillBase) + "]");
+            addText("    mov r11, " + std::to_string(allocaRegionSize / 8));
+            addText(zfLbl + ":");
+            addText("    mov qword [r10], 0");
+            addText("    add r10, 8");
+            addText("    dec r11");
+            addText("    jnz " + zfLbl);
         }
 
         auto getOperand = [&](const IRValue& val) -> std::string {
