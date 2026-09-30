@@ -3573,6 +3573,24 @@ public:
         return addr;
     }
 
+    // CIDER-BUG-226: a parenthesised lvalue target. `(*p) = v`, `(*p) += n` and
+    // `(*p)++` parse the target/operand as a GroupingExpr around the `*`, and a
+    // grouping is transparent: it does not change the lvalue's shape, so every
+    // classification keyed on that node has to see through it.
+    static Expression* stripGroupings(Expression* expr) {
+        while (auto grp = dynamic_cast<GroupingExpr*>(expr)) expr = grp->getExpression();
+        return expr;
+    }
+
+    // CIDER-BUG-226: does this lvalue name a dereference (`*p`, `*a[i]`,
+    // `*s.f`)? Only such a target is reached through a pointer, so only it
+    // carries the CIDER-BUG-219 nil guard; an identifier, field or element
+    // target is a local/global/aggregate location that can never be nil.
+    static bool isDerefTarget(Expression* target) {
+        auto* un = dynamic_cast<UnaryExpr*>(stripGroupings(target));
+        return un && un->getOperator() == "*";
+    }
+
     void visit(UnaryExpr& expr) override {
         TypeInfo type = lastExprType_;
 
@@ -3584,7 +3602,22 @@ public:
             type.pointerLevel++;
             lastExprType_ = type;
         } else if (expr.getOperator() == "*") {
+            // CIDER-BUG-226: the ADDRESS of the deref lvalue `*p` is the VALUE
+            // of p, not p's own location. Visiting the operand with the
+            // incoming isAddress_ asked for p's location instead (the alloca of
+            // a local/param, the label of a global, the field address of
+            // `s.f`), so every caller that wanted the address — the `++`/`--`
+            // read-modify-write, the compound-assignment target, `&*p` — read
+            // and rewrote the POINTER variable itself: `(*p)++` lowered to
+            // `p = p + 1` and `(*p) += n` to `p = p + n`, identically on VM and
+            // native. Read the operand as a value; the pointer it yields is the
+            // location being named, which is what every address-mode caller
+            // wanted. `**p` and the member/index bases are unaffected: those
+            // already visited their operand with isAddress_ false.
+            bool operandWasAddress = isAddress_;
+            isAddress_ = false;
             expr.getOperand()->accept(*this);
+            isAddress_ = operandWasAddress;
             IRValue operand = lastValue_;
             type = lastExprType_;
             // CIDER-BUG-219: `*p` is the dereference, so the nil check belongs
@@ -3641,6 +3674,13 @@ public:
             IRValue addr = lastValue_;
             isAddress_ = false;
             TypeInfo operandType = lastExprType_;
+
+            // CIDER-BUG-226: `(*p)++` reaches the pointee through p, so the
+            // pointer takes the same CIDER-BUG-219 guard as a plain `*p` read.
+            // The `*` was visited in address mode (it only names the location),
+            // which deliberately does not fault on nil, so the guard belongs
+            // here — on the read-modify-write that actually dereferences.
+            if (isDerefTarget(expr.getOperand())) emitNilDerefCheck(addr);
 
             IRType irType = (operandType.pointerLevel > 0) ? IRType::PTR : mapType(operandType.name);
             IRValue current = IRValue::Register(nextTemp(), irType);
@@ -5986,12 +6026,20 @@ public:
     void visit(AssignStmt& stmt) override {
         std::string compoundOp = stmt.getOp();
 
+        // CIDER-BUG-226: a parenthesised target (`(*p) = v`, `(*p) += n`) parses
+        // as a GroupingExpr, and every target-shape decision below keys on the
+        // node the target really is. Classify the unwrapped target: before
+        // this the grouping hid the `*` from the dereference branch, so the
+        // read-modify-write fell through to the generic path, re-based itself
+        // onto the pointer variable and missed the CIDER-BUG-219 nil guard.
+        Expression* shapeTarget = stripGroupings(stmt.getTarget());
+
         IRValue addr = IRValue::Constant(0, IRType::PTR);
         // CID-003: for a `*p = v` target the pointee's declared type drives
         // the stored width (see the plain-assignment path below).
         TypeInfo derefPointeeType;
         bool hasDerefTarget = false;
-        if (auto ident = dynamic_cast<IdentifierExpr*>(stmt.getTarget())) {
+        if (auto ident = dynamic_cast<IdentifierExpr*>(shapeTarget)) {
             // CID-020/021 (spec §5): global stores key by defining module.
             auto sym = symbolTable_.resolve(ident->getName());
             addr = variableValues_.count(ident->getName()) ? variableValues_[ident->getName()]
@@ -5999,11 +6047,11 @@ public:
             // Param read-through must stop once the param is assigned:
             // subsequent reads go through memory (the alloca holds the new value).
             paramNames_.erase(ident->getName());
-        } else if (auto mem = dynamic_cast<MemberAccessExpr*>(stmt.getTarget())) {
+        } else if (auto mem = dynamic_cast<MemberAccessExpr*>(shapeTarget)) {
             addr = getAddress(mem);
-        } else if (auto idx = dynamic_cast<IndexExpr*>(stmt.getTarget())) {
+        } else if (auto idx = dynamic_cast<IndexExpr*>(shapeTarget)) {
             addr = getAddress(idx);
-        } else if (auto unary = dynamic_cast<UnaryExpr*>(stmt.getTarget())) {
+        } else if (auto unary = dynamic_cast<UnaryExpr*>(shapeTarget)) {
             if (unary->getOperator() == "*") {
                 unary->getOperand()->accept(*this);
                 addr = lastValue_;
@@ -6022,7 +6070,7 @@ public:
                 hasDerefTarget = true;
             }
         } else {
-            addr = getAddress(stmt.getTarget());
+            addr = getAddress(shapeTarget);
         }
 
         // CIDER-BUG-061: whether this assignment writes a volatile object.
@@ -6031,12 +6079,12 @@ public:
         // member its field (or a volatile enclosing object), a module-global
         // member its symbol.
         bool targetIsVolatile = false;
-        if (auto ident = dynamic_cast<IdentifierExpr*>(stmt.getTarget())) {
+        if (auto ident = dynamic_cast<IdentifierExpr*>(shapeTarget)) {
             auto sym = symbolTable_.resolve(ident->getName());
             if (sym) targetIsVolatile = resolveTypeAlias(sym->type).isVolatile;
-        } else if (auto mem = dynamic_cast<MemberAccessExpr*>(stmt.getTarget())) {
+        } else if (auto mem = dynamic_cast<MemberAccessExpr*>(shapeTarget)) {
             targetIsVolatile = memberAccessIsVolatile(mem);
-        } else if (auto idx = dynamic_cast<IndexExpr*>(stmt.getTarget())) {
+        } else if (auto idx = dynamic_cast<IndexExpr*>(shapeTarget)) {
             // CIDER-BUG-199: the shared element strip, so a store through a
             // pointer to a fixed array (`a[1] = v`) sees the ELEMENT's
             // qualifiers and not the array's.
@@ -6058,15 +6106,15 @@ public:
             // `s.field = v` and `a[i] = v` take the same store path.
             TypeInfo targetIface;
             bool haveInterfaceTarget = false;
-            if (auto ident = dynamic_cast<IdentifierExpr*>(stmt.getTarget())) {
+            if (auto ident = dynamic_cast<IdentifierExpr*>(shapeTarget)) {
                 auto sym = symbolTable_.resolve(ident->getName());
                 if (sym) {
                     targetIface = sym->type;
                     haveInterfaceTarget = true;
                 }
-            } else if (auto mem = dynamic_cast<MemberAccessExpr*>(stmt.getTarget())) {
+            } else if (auto mem = dynamic_cast<MemberAccessExpr*>(shapeTarget)) {
                 haveInterfaceTarget = getMemberFieldType(mem, targetIface);
-            } else if (auto idx = dynamic_cast<IndexExpr*>(stmt.getTarget())) {
+            } else if (auto idx = dynamic_cast<IndexExpr*>(shapeTarget)) {
                 // CIDER-BUG-199: the shared element strip, so an interface
                 // element of a pointer to a fixed array
                 // (`type I2 = [Shape; 2]; p[0] = c;`) still takes the fat
@@ -6189,7 +6237,7 @@ public:
             if (isStructValueType(lastExprType_)) lastExprType_.isUserDefined = true;
 
             // Bitfield targets use the read-modify-write sequence.
-            if (auto mem = dynamic_cast<MemberAccessExpr*>(stmt.getTarget())) {
+            if (auto mem = dynamic_cast<MemberAccessExpr*>(shapeTarget)) {
                 int bitOffset = 0, bitWidth = 0;
                 if (getMemberBitfield(mem, bitOffset, bitWidth)) {
                     emitBitfieldStore(addr, val, bitOffset, bitWidth, targetIsVolatile);
@@ -6217,7 +6265,7 @@ public:
                     val = convertValueToType(val, fieldType);
                     lastExprType_ = fieldType;
                 }
-            } else if (auto idx = dynamic_cast<IndexExpr*>(stmt.getTarget())) {
+            } else if (auto idx = dynamic_cast<IndexExpr*>(shapeTarget)) {
                 // CIDER-BUG-052: an element alias resolves to its real shape
                 // (array elements need the MEMCPY decision below).
                 // CIDER-BUG-199: through the shared element strip, so a
@@ -6239,7 +6287,7 @@ public:
                 if (isStructValueType(elemType)) elemType.isUserDefined = true;
                 val = convertValueToType(val, elemType);
                 lastExprType_ = elemType;
-            } else if (auto ident = dynamic_cast<IdentifierExpr*>(stmt.getTarget())) {
+            } else if (auto ident = dynamic_cast<IdentifierExpr*>(shapeTarget)) {
                 // Plain variable stores use the declared width (same rule as
                 // fields and elements above): a narrow value in a wide local
                 // slot leaves stale upper bytes for later wide loads.
@@ -6330,7 +6378,7 @@ public:
         } else {
             bool isBitfield = false;
             int bitOffset = 0, bitWidth = 0;
-            if (auto mem = dynamic_cast<MemberAccessExpr*>(stmt.getTarget())) {
+            if (auto mem = dynamic_cast<MemberAccessExpr*>(shapeTarget)) {
                 isBitfield = getMemberBitfield(mem, bitOffset, bitWidth);
             }
             IRValue current;
@@ -6341,16 +6389,16 @@ public:
                 // (CID-028): hardcoding I32 truncated u64 loop counters
                 // (temp /= 10) to 32 bits.
                 IRType targetIR = IRType::I32;
-                if (auto ident = dynamic_cast<IdentifierExpr*>(stmt.getTarget())) {
+                if (auto ident = dynamic_cast<IdentifierExpr*>(shapeTarget)) {
                     if (auto sym = symbolTable_.resolve(ident->getName())) {
                         targetIR = (sym->type.pointerLevel > 0) ? IRType::PTR : mapType(sym->type.name);
                     }
-                } else if (auto mem = dynamic_cast<MemberAccessExpr*>(stmt.getTarget())) {
+                } else if (auto mem = dynamic_cast<MemberAccessExpr*>(shapeTarget)) {
                     TypeInfo fieldType;
                     if (!getMemberBitfield(mem, bitOffset, bitWidth) && getMemberFieldType(mem, fieldType)) {
                         targetIR = (fieldType.pointerLevel > 0) ? IRType::PTR : mapType(fieldType.name);
                     }
-                } else if (auto idx = dynamic_cast<IndexExpr*>(stmt.getTarget())) {
+                } else if (auto idx = dynamic_cast<IndexExpr*>(shapeTarget)) {
                     // CIDER-BUG-052/199: the shared element strip, so a
                     // compound assignment through a pointer to a fixed array
                     // computes at the ELEMENT's width.
