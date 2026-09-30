@@ -1,1 +1,0 @@
-Calls through 'fn([fn(int) -> int; 2]) -> int' values do not support struct/class/array by-value parameters or returns

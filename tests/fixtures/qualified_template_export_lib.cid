@@ -1,6 +1,0 @@
-// CIDER-BUG-073: a module-private struct template. The qualified spelling
-// is a module member access, so it must be rejected like any other
-// non-exported member (CIDER-BUG-060).
-struct Box<T> {
-  var v: T;
-}

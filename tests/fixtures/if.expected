@@ -1,3 +1,0 @@
-(Program
-  (FunctionDecl f (returns void) (body (If (Ident a) (then (ExprStmt (Call (Ident b)))) (else (If (Ident c) (then (ExprStmt (Call (Ident d)))) (else (ExprStmt (Call (Ident e)))))))))
-)

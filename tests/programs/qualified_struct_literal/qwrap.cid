@@ -1,7 +1,0 @@
-// CIDER-BUG-175: a module that only imports qlib transitively reaches the
-// qualified literal spelling through its own import.
-import qlib;
-
-export func wrapHolder(n: int) -> qlib.Holder {
-  return qlib.Holder{ x: n, cells: [1, 2, 3], inner: qlib.Inner{ v: n } };
-}

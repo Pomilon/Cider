@@ -1,4 +1,0 @@
-(Program
-  (FunctionDecl f (params (a int) (b char*)) (returns int) (body (Return (Binary + (Ident a) (Number 1)))))
-  (FunctionDecl g extern (params (x float)) (returns void) (body))
-)

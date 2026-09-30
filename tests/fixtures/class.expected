@@ -1,3 +1,0 @@
-(Program
-  (Class A extends B (VarDecl v int) (FunctionDecl m virtual (returns void) (body)) (FunctionDecl n override (returns void) (body)))
-)

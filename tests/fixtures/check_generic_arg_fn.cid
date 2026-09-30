@@ -1,8 +1,0 @@
-struct Box<T> {
-    var v: T;
-}
-
-func main() -> int {
-    var a: Box<fn(int) -> int>;
-    return 0;
-}

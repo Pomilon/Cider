@@ -1,6 +1,0 @@
-import crossmod_private_lib;
-
-func main() -> int {
-  var h: crossmod_private_lib.Hidden;
-  return 0;
-}

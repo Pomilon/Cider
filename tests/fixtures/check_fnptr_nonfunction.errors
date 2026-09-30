@@ -1,2 +1,0 @@
-Type mismatch in declaration of 'f'. Expected fn(int) -> int, got int
-Type mismatch in declaration of 'g'. Expected fn(int) -> int, got string

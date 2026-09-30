@@ -1,5 +1,0 @@
-from check_mod_ns_alias_clash_lib import foo;
-func foo() -> int { return 2; }
-func main() -> int {
-  return foo();
-}

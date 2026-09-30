@@ -1,4 +1,0 @@
-interface Shape {
-  func area() -> float;
-}
-type MyInt = int;

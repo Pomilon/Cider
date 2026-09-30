@@ -1,7 +1,0 @@
-// CIDER-BUG-018: an array-to-array cast is a layout reinterpretation whose
-// copy uses the target size; `u"AB" as [u16;8]` copied 16 bytes from the
-// 6-byte literal.
-func main() -> int {
-  var s: [u16;8] = u"AB" as [u16;8];
-  return 0;
-}

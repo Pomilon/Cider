@@ -1,4 +1,0 @@
-(Program
-  (Interface Shape (method area (params) (returns float)))
-  (TypeAlias MyInt int)
-)

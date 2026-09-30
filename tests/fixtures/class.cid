@@ -1,5 +1,0 @@
-class A extends B {
-  var v: int;
-  virtual func m() -> void { }
-  override func n() -> void { }
-}

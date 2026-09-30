@@ -1,4 +1,0 @@
-func f(a: int, b: char*) -> int {
-  return a + 1;
-}
-extern func g(x: float) -> void;

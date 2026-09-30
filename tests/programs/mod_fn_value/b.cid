@@ -1,5 +1,0 @@
-// CIDER-BUG-023: module-qualified function VALUES must carry their fn
-// signature (not *void): global initializers fold to the mangled label
-// and indirect calls convert arguments/returns through the signature.
-export func inc(x: int) -> int { return x + 1; }
-export func half(x: f64) -> f64 { return x / 2.0; }

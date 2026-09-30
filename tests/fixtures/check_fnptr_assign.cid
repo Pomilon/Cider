@@ -1,8 +1,0 @@
-func inc(a: int) -> int { return a + 1; }
-func noret(a: int) -> void { }
-
-func main() -> int {
-  var f: fn(int) -> int = inc;
-  f = noret;
-  return 0;
-}

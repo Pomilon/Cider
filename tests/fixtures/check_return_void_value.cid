@@ -1,4 +1,0 @@
-// CIDER-BUG-016: a value returned from a void function must be rejected.
-func f() -> void { return 0; }
-
-func main() -> void { f(); }

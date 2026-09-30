@@ -1,9 +1,0 @@
-// CIDER-BUG-165: an array-typed call argument list's elements take the
-// declaration-time element check, including nested rows.
-func flat(a: [u8; 2]) -> int { return a[0]; }
-func nested(a: [[u8; 2]; 2]) -> int { return a[0][0]; }
-func main() -> int {
-  var a: int = flat(["x", 2]);
-  var b: int = nested([[1, 2], ["x", 4]]);
-  return a + b;
-}

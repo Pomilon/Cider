@@ -1,8 +1,0 @@
-import fnptr_mod_struct_lib;
-
-func main() -> int {
-  var p: fnptr_mod_struct_lib.P = fnptr_mod_struct_lib.make();
-  var f: fn(fnptr_mod_struct_lib.P) -> int = fnptr_mod_struct_lib.take;
-  var r: int = f(p);
-  return r;
-}

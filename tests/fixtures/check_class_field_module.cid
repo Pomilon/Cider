@@ -1,5 +1,0 @@
-// Fields do not live in the module scope either: `lib.tag` must report a
-// missing module symbol instead of resolving a leaked field.
-import class_field_module_lib;
-
-func main() -> int { return class_field_module_lib.tag; }

@@ -1,5 +1,0 @@
-Type 'LookAlike' does not implement interface 'iface_decl_order_lib::Shape': missing method 'draw'
-Type 'LookAlike' does not implement interface 'iface_decl_order_lib::Shape': missing method 'make'
-Type 'AliasedLookAlike' does not implement interface 'iface_decl_order_lib::Shape': missing method 'draw'
-Type 'AliasedLookAlike' does not implement interface 'iface_decl_order_lib::Shape': missing method 'make'
-Type 'OnlyMakeWrong' does not implement interface 'iface_decl_order_lib::Shape': missing method 'make'

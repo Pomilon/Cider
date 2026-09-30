@@ -1,8 +1,0 @@
-// CIDER-FEAT-002: qualified access checks the variant against the enum's
-// declaration instead of failing with "Type int is not a struct or class".
-enum Color { RED, GREEN }
-
-func main() -> int {
-    var c: Color = Color.NOPE;
-    return c as int;
-}

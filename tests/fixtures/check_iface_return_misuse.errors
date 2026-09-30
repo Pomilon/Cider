@@ -1,7 +1,0 @@
-Cannot assign non-struct/class type to interface 'Shape'
-Cannot assign interface 'Other' to interface 'Shape'
-Type 'Bad' does not implement interface 'Shape': missing method 'area'
-Cannot assign **Good to interface 'Shape': expected a struct/class value or pointer
-Cannot assign [Good; 2] to interface 'Shape': expected a struct/class value or pointer
-Virtual method 'v' cannot return an interface
-do not support interface returns

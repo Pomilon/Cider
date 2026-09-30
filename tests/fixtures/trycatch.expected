@@ -1,3 +1,0 @@
-(Program
-  (FunctionDecl f (returns void) (body (Defer (ExprStmt (Call (Ident close) (Ident f)))) (TryCatch e (try (ExprStmt (Call (Ident g)))) (catch (ExprStmt (Call (Ident h) (Ident e))))) (Throw (Ident err))))
-)

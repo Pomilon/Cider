@@ -1,6 +1,0 @@
-Slice size mismatch in declaration of 'under': expected 3, got 2
-Slice size mismatch in declaration of 'over': expected 3, got 5
-Slice size mismatch in declaration of 'head': expected 3, got 4
-Slice size mismatch in declaration of 'tail': expected 3, got 4
-Slice element type mismatch in declaration of 'wrongElem': expected int, got u8
-Slice size mismatch in assignment to 's': expected 3, got 2

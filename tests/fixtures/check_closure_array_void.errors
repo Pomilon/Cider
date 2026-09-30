@@ -1,2 +1,0 @@
-The closure representation of func(int) -> int cannot be inferred: its *void source's fn representation is not known to be a closure object
-The closure representation of func(int) -> int cannot be inferred: its *void source received both a closure object and a plain fn(...) value

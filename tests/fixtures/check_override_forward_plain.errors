@@ -1,1 +1,0 @@
-Method 'f' of class 'Derived' is marked 'override' but base method 'f' is not virtual

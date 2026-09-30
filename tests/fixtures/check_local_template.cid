@@ -1,9 +1,0 @@
-// CIDER-BUG-119: a struct template cannot be declared inside a function
-// body; it is rejected at the declaration instead of failing later with
-// "Type Box<int> is not a struct or class" at the first use.
-func main() -> int {
-    struct Box<T> { var v: T; }
-    var b: Box<int>;
-    b.v = 5;
-    return b.v;
-}

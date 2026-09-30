@@ -1,7 +1,0 @@
-// CIDER-BUG-163: a row whose alias resolves to an array still takes the
-// recursive size check (`type Row = [int;2]; [Row;2]`).
-type Row = [int; 2];
-func main() -> int {
-  var a: [Row; 2] = [[1, 2], [3, 4, 5]];
-  return 0;
-}

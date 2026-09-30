@@ -1,3 +1,0 @@
-(Program
-  (FunctionDecl f (returns void) (body (While (Binary < (Ident x) (Number 10)) (Assign = (Ident x) (Binary + (Ident x) (Number 1)))) (ExprStmt (Call (Ident do_break)))))
-)

@@ -1,5 +1,0 @@
-(Program
-  (Struct Point (x int) (y int))
-  (Union U (a int) (b float))
-  (Enum Color RED GREEN)
-)

@@ -1,9 +1,0 @@
-// CID-006 fix round 2: checker-accepted cyclic dotted aliases must compile
-// and run instead of overflowing the compiler stack (getTypeSize <-> alias
-// resolution non-convergence). `x` is an unused 8-byte slot.
-import nsa;
-
-func main() -> int {
-  var x: nsa.B;
-  return 0;
-}

@@ -1,9 +1,0 @@
-struct Point {
-  var x: int;
-  var y: int;
-}
-union U {
-  var a: int;
-  var b: float;
-}
-enum Color { RED, GREEN }

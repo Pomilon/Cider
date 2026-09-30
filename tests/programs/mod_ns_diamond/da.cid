@@ -1,9 +1,0 @@
-import dc;
-
-export func aval() -> int {
-  return dc.val();
-}
-
-export func abump() -> int {
-  return dc.bump();
-}

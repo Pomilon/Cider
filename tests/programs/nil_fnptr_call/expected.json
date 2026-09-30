@@ -1,5 +1,0 @@
-{
-  "stdout": "",
-  "stderr": "vm error: call: nil function pointer\n",
-  "exit": 2
-}

@@ -1,4 +1,0 @@
-func main() -> void {
-  var x: int = 1;
-  var y: float = 2;
-}

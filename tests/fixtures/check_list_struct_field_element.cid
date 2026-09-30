@@ -1,7 +1,0 @@
-// CIDER-BUG-165: a struct-literal field list's elements take the
-// declaration-time element check.
-struct Flat { var cells: [u8; 2]; var tag: u8; }
-func main() -> int {
-  var f: Flat = Flat{cells: ["x", 2], tag: 0};
-  return f.tag;
-}

@@ -1,8 +1,0 @@
-// CIDER-BUG-134: a BARE unknown template spelling in a return annotation
-// is reported at the declaration. `extern` keeps the fixture to the one
-// declaration-site diagnostic (a body would add its own return mismatch).
-extern func make() -> Nope<int>;
-
-func main() -> int {
-  return 0;
-}

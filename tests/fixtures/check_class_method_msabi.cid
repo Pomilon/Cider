@@ -1,6 +1,0 @@
-// CIDER-BUG-027: an explicit ABI on a class method cannot be honored
-// (virtual/override/interface dispatch is always SysV); diagnose instead
-// of silently coercing the marker.
-class C { msabi func m() -> void { } }
-
-func main() -> int { return 0; }

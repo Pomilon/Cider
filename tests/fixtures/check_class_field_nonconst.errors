@@ -1,4 +1,0 @@
-Class field initializer in declaration of 'call' must use constant expressions
-Class field initializer in declaration of 'nonconst' must use constant expressions
-Class pointer field initializer in declaration of 'addr' must be nilPtr, a string literal, or a function name
-Class field initializer in declaration of 'arr' must be a scalar constant expression

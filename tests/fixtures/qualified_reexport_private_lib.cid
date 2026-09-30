@@ -1,9 +1,0 @@
-// CIDER-BUG-102 visibility fixture: `Hidden` is private to this module.
-struct Hidden {
-  var v: int;
-}
-
-export struct Shape {
-  var w: u64;
-  var h: u64;
-}

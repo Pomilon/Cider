@@ -1,5 +1,0 @@
-// CIDER-BUG-175 visibility fixture: `Hidden` is private to this module, so
-// the qualified literal spelling must not resolve (or materialise) it.
-struct Hidden {
-  var v: int;
-}

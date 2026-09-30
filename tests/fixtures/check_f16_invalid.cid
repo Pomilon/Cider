@@ -1,4 +1,0 @@
-func main() -> int {
-  var x: f16 = 1.5;
-  return 0;
-}

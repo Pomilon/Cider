@@ -1,2 +1,0 @@
-String concatenation with '+' is not supported; use std.string.strcat into a buffer
-String concatenation with '+=' is not supported; use std.string.strcat into a buffer

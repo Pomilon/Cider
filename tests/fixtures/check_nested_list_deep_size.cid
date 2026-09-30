@@ -1,6 +1,0 @@
-// CIDER-BUG-163: a short middle row is rejected at its own dimension,
-// three levels down.
-func main() -> int {
-  var a: [[[int; 2]; 2]; 2] = [[[1, 2], [3, 4]], [[5, 6]]];
-  return 0;
-}

@@ -1,3 +1,0 @@
-(Program
-  (FunctionDecl f (returns void) (body (VarDecl s Point = (Struct Point (x (Number 1)) (y (Number 2)))) (VarDecl l int = (List (Number 1) (Number 2) (Number 3))) (VarDecl t int = (Table (String "k")=(Number 1))) (VarDecl a int = (Slice (Ident xs) (Number 1) (Number 3)))))
-)

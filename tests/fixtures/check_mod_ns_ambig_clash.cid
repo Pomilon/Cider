@@ -1,8 +1,0 @@
-import ambig_a.util;
-import ambig_b.util;
-from ambig_a.util import ping;
-from ambig_b.util import ping;
-
-func main() -> int {
-  return 0;
-}

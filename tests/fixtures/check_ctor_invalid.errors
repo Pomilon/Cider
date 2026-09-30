@@ -1,3 +1,0 @@
-Constructor 'init' of class 'BadReturn' must return void, got int
-Constructor 'init' of class 'BadVirtual' cannot be virtual or override
-Constructor 'init' of class 'BadAsync' cannot be async

@@ -1,3 +1,0 @@
-Method 'f' of class 'PlainDerived' is marked 'override' but base method 'f' is not virtual
-Method 'h' of class 'UnknownMethod' is marked 'override' but no base method named 'h' exists
-Method 'k' of class 'Orphan' is marked 'override' but no base method named 'k' exists

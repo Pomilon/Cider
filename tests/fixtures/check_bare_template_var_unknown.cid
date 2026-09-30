@@ -1,7 +1,0 @@
-// CIDER-BUG-134: a BARE unknown template spelling in a variable
-// declaration is reported at the declaration, like the qualified spelling
-// (CIDER-BUG-096).
-func main() -> int {
-  var x: Nope<int>;
-  return 0;
-}

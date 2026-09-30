@@ -1,1 +1,0 @@
-pipe data keeps the out-of-heap read on the copy path

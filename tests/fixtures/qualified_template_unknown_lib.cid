@@ -1,6 +1,0 @@
-// CIDER-BUG-096: a module the unknown-template fixture imports. It declares
-// `Box<T>` but no `Nope`, so a qualified `...Nope<int>` spelling is an
-// unknown template.
-export struct Box<T> {
-  var v: T;
-}

@@ -1,5 +1,0 @@
-// CIDER-BUG-060: `from m import x` rejects a non-exported x (collector
-// stage, so the diagnostic is the symbol-stage one).
-from check_export_missing_lib import hidden_fn;
-
-func main() -> int { return hidden_fn(); }

@@ -1,3 +1,0 @@
-Type mismatch in declaration of 'p'. Expected *Shape, got Shape
-Cannot assign non-struct/class type to interface 'Shape'
-Cannot assign non-struct/class type to interface 'Shape'

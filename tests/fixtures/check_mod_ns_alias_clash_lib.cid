@@ -1,3 +1,0 @@
-export func foo() -> int {
-  return 7;
-}

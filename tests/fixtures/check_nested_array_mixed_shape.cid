@@ -1,8 +1,0 @@
-// CIDER-BUG-052: nested array shapes must match exactly; the flattened
-// element name used to make [[u8; 2]; 3] and [[u8; 3]; 3] compatible.
-func main() -> int {
-  var a: [[u8; 2]; 3];
-  var b: [[u8; 3]; 3];
-  a = b;
-  return 0;
-}

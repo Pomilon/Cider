@@ -1,3 +1,0 @@
-Array initializer size mismatch in declaration of 'g': expected 4, got 3
-Array initializer size mismatch in declaration of 's': expected 4, got 3
-Array initializer size mismatch in declaration of 't': expected 2, got 3

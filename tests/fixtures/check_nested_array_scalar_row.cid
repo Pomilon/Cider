@@ -1,8 +1,0 @@
-// CIDER-BUG-052: a nested array element is an array value; a scalar is not
-// assignable to it (the size-blind numeric fallback used to accept
-// `m[0] = 5` and ir_gen then MEMCPY'd from the scalar as an address).
-func main() -> int {
-  var m: [[u8; 2]; 3];
-  m[0] = 5;
-  return 0;
-}

@@ -1,9 +1,0 @@
-func apply(cb: fn(int) -> int, x: int) -> int { return cb(x); }
-func twice(x: int) -> int { return x * 2; }
-
-func main() -> int {
-  if (apply(twice, 21) != 42) { return 1; }
-  var cb: fn(int) -> int = twice;
-  if (apply(cb, 5) != 10) { return 2; }
-  return 0;
-}

@@ -1,5 +1,0 @@
-// CIDER-BUG-060: the fixture uses cyclic_alias_mod_lib.B, so B must be
-// exported. A stays module-private: B's alias target is resolved in this
-// module's own scope (a self-qualified reference is not an import).
-export type B = cyclic_alias_mod_lib.A;
-type A = cyclic_alias_mod_lib.B;

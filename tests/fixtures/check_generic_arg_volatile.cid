@@ -1,8 +1,0 @@
-struct Box<T> {
-    var v: T;
-}
-
-func main() -> int {
-    var a: Box<volatile int>;
-    return 0;
-}

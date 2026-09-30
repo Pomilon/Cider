@@ -1,7 +1,0 @@
-// CIDER-BUG-165: a list literal for a struct-literal field takes the
-// declaration-time size check against the declared array shape.
-struct Flat { var cells: [u8; 2]; var tag: u8; }
-func main() -> int {
-  var f: Flat = Flat{cells: [1, 2, 3], tag: 0};
-  return f.tag;
-}

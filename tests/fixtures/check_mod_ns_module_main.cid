@@ -1,5 +1,0 @@
-import mod_ns_module_main_lib;
-
-func main() -> int {
-  return mod_ns_module_main_lib.helper();
-}

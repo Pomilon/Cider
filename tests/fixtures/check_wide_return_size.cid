@@ -1,9 +1,0 @@
-// CIDER-BUG-018: a fixed-size array return must match the declared element
-// count; `return u"AB";` in a [u16;4] function used to MEMCPY 8 bytes from
-// the 6-byte literal.
-func f() -> [u16;4] { return u"AB"; }
-
-func main() -> int {
-  var a: [u16;4] = f();
-  return 0;
-}

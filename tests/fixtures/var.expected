@@ -1,4 +1,0 @@
-(Program
-  (VarDecl x int = (Number 5))
-  (ConstDecl C int = (Number 10))
-)

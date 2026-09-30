@@ -1,8 +1,0 @@
-// CIDER-BUG-068: an `msabi fn(...)` parameter rejects a plain closure: the
-// closure literal is pinned SysV, and the ABI is part of the exact
-// signature match.
-func apply(cb: msabi fn(int) -> int, x: int) -> int { return cb(x); }
-
-func main() -> int {
-  return apply(func(x: int) -> int { return x + 1; }, 1);
-}

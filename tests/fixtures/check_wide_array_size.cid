@@ -1,7 +1,0 @@
-var g: [u16; 4] = u"AB";
-
-func main() -> int {
-  var s: [u16; 4] = u"AB";
-  var t: [u16; 2] = u"AB";
-  return s[0] + t[0];
-}

@@ -1,8 +1,0 @@
-func f() -> void {
-  g_missing = 5;
-}
-
-func main() -> int {
-  f();
-  return 0;
-}

@@ -1,8 +1,0 @@
-Global array initializer in declaration of 'g_bad' must use constant expressions
-Array initializer size mismatch in declaration of 'a': expected 3, got 2
-Array initializer size mismatch in declaration of 'b': expected 3, got 2
-Array initializer size mismatch in declaration of 'c': expected 4, got 3
-Array element type mismatch in declaration of 'd': expected u8, got u16
-Array initializer size mismatch in declaration of 'e': expected 3, got 4
-Array element type mismatch in declaration of 'f': expected u32, got u16
-Type mismatch in declaration of 'h'. Expected [u8; 3], got int

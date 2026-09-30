@@ -1,2 +1,0 @@
-Type 'LookAlike' does not implement interface 'iface_lookalike_lib::Shape': missing method 'draw'
-Type 'AliasedLookAlike' does not implement interface 'iface_lookalike_lib::Shape': missing method 'draw'

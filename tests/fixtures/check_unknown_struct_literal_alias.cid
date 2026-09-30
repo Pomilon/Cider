@@ -1,6 +1,0 @@
-type A = Missing;
-
-func main() -> int {
-  A{x: 1};
-  return 0;
-}

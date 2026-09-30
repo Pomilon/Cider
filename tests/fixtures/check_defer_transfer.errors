@@ -1,4 +1,0 @@
-'return' is not allowed in a defer body
-'throw' is not allowed in a defer body
-'break' is not allowed in a defer body
-'continue' is not allowed in a defer body

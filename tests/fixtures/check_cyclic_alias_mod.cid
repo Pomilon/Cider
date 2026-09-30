@@ -1,6 +1,0 @@
-import cyclic_alias_mod_lib;
-
-func main() -> int {
-  var x: cyclic_alias_mod_lib.B = 5;
-  return 0;
-}

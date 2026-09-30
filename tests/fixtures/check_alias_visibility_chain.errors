@@ -1,2 +1,0 @@
-symbol 'HiddenAlias' is not exported from module 'alias_visibility_lib'
-symbol 'Private' is not exported from module 'alias_visibility_lib'

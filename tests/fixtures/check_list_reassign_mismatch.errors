@@ -1,8 +1,0 @@
-Array initializer size mismatch in assignment to 'a': expected 3, got 2
-Array initializer size mismatch in assignment to 'b': expected 3, got 4
-Array initializer size mismatch in assignment to 'c': expected 3, got 0
-Array element type mismatch in assignment to 'd': expected C4, got S8
-A list literal cannot be used with compound assignment '+='
-Array initializer size mismatch in array assignment: expected 3, got 2
-Array initializer size mismatch in array assignment: expected 2, got 3
-Type mismatch in assignment. Expected [int; 3], got int

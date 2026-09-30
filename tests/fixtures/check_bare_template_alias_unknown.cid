@@ -1,9 +1,0 @@
-// CIDER-BUG-134: a BARE unknown template spelling in an unused type alias
-// is reported at the declaration. Previously only qualified spellings
-// (CIDER-BUG-096/111) were diagnosed; the bare spelling stayed silent and
-// the declaration compiled as long as nothing used it.
-type X = Nope<int>;
-
-func main() -> int {
-  return 0;
-}

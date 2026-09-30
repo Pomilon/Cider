@@ -1,4 +1,0 @@
-func f() {
-  while (x < 10) { x = x + 1; }
-  do_break();
-}

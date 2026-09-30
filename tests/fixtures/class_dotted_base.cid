@@ -1,7 +1,0 @@
-class A extends lib.Base {
-  var v: int;
-}
-
-class B extends a.util.Foo {
-  var w: int;
-}

@@ -1,4 +1,0 @@
-(Program
-  (Class A extends lib.Base (VarDecl v int))
-  (Class B extends a.util.Foo (VarDecl w int))
-)

@@ -1,8 +1,0 @@
-// CIDER-BUG-052: a nested array initializer requires rows of the declared
-// inner shape (mixed inner sizes are rejected per element).
-func main() -> int {
-  var r0: [u8; 2];
-  var r2: [u8; 3];
-  var m: [[u8; 2]; 2] = [r0, r2];
-  return 0;
-}

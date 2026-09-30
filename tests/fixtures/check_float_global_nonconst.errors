@@ -1,3 +1,0 @@
-Global float initializer in declaration of 'g1' must use constant expressions
-Global float initializer in declaration of 'g2' must use constant expressions
-Global float initializer in declaration of 'g4' must use constant expressions

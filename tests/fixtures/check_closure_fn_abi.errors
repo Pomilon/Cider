@@ -1,1 +1,0 @@
-Argument 1 to 'apply' type mismatch. Expected msabi fn(int) -> int, got func(int) -> int

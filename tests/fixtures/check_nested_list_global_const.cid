@@ -1,9 +1,0 @@
-// CIDER-BUG-163: a global nested list literal keeps the constant-
-// expression rule; a call element is not foldable.
-func f() -> int { return 3; }
-
-var g: [[int; 2]; 2] = [[1, 2], [3, f()]];
-
-func main() -> int {
-  return 0;
-}

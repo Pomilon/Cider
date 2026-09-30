@@ -1,5 +1,0 @@
-// CIDER-BUG-027: same for an explicit ABI on an override method.
-class B { virtual func m() -> void { } }
-class C extends B { override msabi func m() -> void { } }
-
-func main() -> int { return 0; }

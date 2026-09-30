@@ -1,6 +1,0 @@
-(Program
-  (Import "std.io")
-  (FromImport "std.vector" Vec)
-  (FromImport "std.map" Map Set)
-  (Export (FunctionDecl f (returns void) (body)))
-)

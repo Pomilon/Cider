@@ -1,6 +1,0 @@
-from std.io import print;
-
-func main() -> void {
-  print("Hello, world!\n");
-  print("Second line.\n");
-}

@@ -1,3 +1,0 @@
-// CIDER-FEAT-002 helper module: an exported enum for the module-qualified
-// `check_enum_module_*` fixtures.
-export enum Color { RED, GREEN }

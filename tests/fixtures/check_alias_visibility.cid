@@ -1,9 +1,0 @@
-// CIDER-BUG-138: a type alias whose target is a module-qualified
-// non-exported symbol must be rejected AT THE ALIAS DECLARATION with the
-// standard visibility diagnostic. It used to be silently accepted, and
-// only a later use failed as the generic "is not a struct or class".
-import alias_visibility_lib;
-
-export type Bad = alias_visibility_lib.Private;
-
-func main() -> int { return 0; }

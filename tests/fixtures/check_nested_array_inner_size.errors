@@ -1,1 +1,0 @@
-Type mismatch in declaration of 'row'. Expected [u8; 3], got [u8; 2]

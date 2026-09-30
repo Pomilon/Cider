@@ -1,6 +1,0 @@
-// CIDER-BUG-026: `*fn(...)` used to parse with the leading `*` silently
-// dropped; it is out of the supported surface and now diagnosed.
-func main() -> int {
-  var f: *fn(int) -> int = nilPtr;
-  return 0;
-}

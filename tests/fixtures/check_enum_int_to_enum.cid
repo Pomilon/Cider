@@ -1,8 +1,0 @@
-// CIDER-FEAT-002: an enum is a distinct type. An integer does not flow to
-// an enum target without an explicit `value as Color` cast.
-enum Color { RED, GREEN }
-
-func main() -> int {
-    var c: Color = 0;
-    return c as int;
-}

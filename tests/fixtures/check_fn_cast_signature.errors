@@ -1,5 +1,0 @@
-Function cast signature mismatch. Expected fn(int, int) -> int, got fn(int) -> int
-Function cast signature mismatch. Expected fn() -> *void, got fn() -> int
-Function cast signature mismatch. Expected fn(f64) -> int, got fn(int) -> int
-Function cast signature mismatch. Expected msabi fn(int) -> int, got fn(int) -> int
-Function cast signature mismatch. Expected fn(int, int) -> int, got func(int) -> int

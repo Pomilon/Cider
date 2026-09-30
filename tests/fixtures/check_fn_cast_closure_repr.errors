@@ -1,2 +1,0 @@
-Function cast cannot produce the closure spelling. Expected func(int) -> int, got a plain fn(...) value
-Use the fn(...) spelling, or store the function in a func(...) variable (CIDER-BUG-063 adapts it to the raw pointer representation).

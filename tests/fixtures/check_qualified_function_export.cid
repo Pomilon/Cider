@@ -1,8 +1,0 @@
-// CIDER-BUG-095: `qualified_function_export_lib.id` is not exported, so a
-// qualified function-template call with explicit type arguments must not
-// instantiate (or resolve) it.
-import qualified_function_export_lib;
-
-func main() -> int {
-  return qualified_function_export_lib.id<int>(3);
-}

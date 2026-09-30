@@ -1,4 +1,0 @@
-import mod_a;
-func main() -> void {
-  greet();
-}

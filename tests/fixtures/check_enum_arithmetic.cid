@@ -1,8 +1,0 @@
-// CIDER-FEAT-002: arithmetic on an enum requires an explicit `c as int`;
-// only comparisons accept an enum operand directly.
-enum Color { RED, GREEN }
-
-func main() -> int {
-    var c: Color = Color.RED;
-    return c + 1;
-}

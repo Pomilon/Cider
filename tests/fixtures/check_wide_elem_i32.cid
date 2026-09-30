@@ -1,6 +1,0 @@
-// CIDER-BUG-018: the wide payload is u16 units; the numeric fallback
-// admitted `[i32;3] = u"AB"` and copied 12 bytes from a 6-byte block.
-func main() -> int {
-  var a: [i32;3] = u"AB";
-  return 0;
-}

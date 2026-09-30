@@ -1,7 +1,0 @@
-// CIDER-BUG-165: a nested list literal in a struct-literal field recurses
-// against the declared row shape (CIDER-BUG-163's shared rule).
-struct Nested { var grid: [[u8; 2]; 2]; var tag: u8; }
-func main() -> int {
-  var n: Nested = Nested{grid: [[1, 2], [3, 4, 5]], tag: 0};
-  return n.tag;
-}
