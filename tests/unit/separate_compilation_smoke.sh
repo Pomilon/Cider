@@ -34,6 +34,9 @@
 #     its own globals; the entry object calls them once each, diamond
 #     imports included, in reverse construction order, matching the
 #     whole-program build's trace.
+#   * CIDER-BUG-190: a throw raised in another object's function still runs
+#     the pending scope exits of the object frame it unwinds through, on the
+#     whole-program and the separately linked build.
 #
 # Usage: separate_compilation_smoke.sh <cider-binary>
 # Exits 77 when nasm/gcc are missing (no compiled-toolchain SKIP).
@@ -530,6 +533,68 @@ SBOX_SRC_RC=$?
 set -e
 [ "$SBOX_SRC_RC" -eq 0 ] || fail "struct-template source-fallback exit $SBOX_SRC_RC"
 [ "$SBOX_SRC_OUT" = "$SBOX_EXPECTED" ] || fail "struct-template source-fallback output [$SBOX_SRC_OUT]"
+
+# --- CIDER-BUG-190: a throw crossing an object boundary ------------------
+# `midmod` holds a destructor-bearing local and calls a function defined in
+# ANOTHER object; the throw unwinds through midmod's frame. The unwinder's
+# landing pad for that call site can only be built if the analysis treats a
+# callee this object does not define as able to throw, so the destructor
+# prints on both the whole-program and the separately linked build. Before
+# the fix the separate build's midmod object had no landing and the trace
+# lost the `3,`.
+mkdir -p unw/modules unw/cache unw/build
+cat > unw/modules/thrower.cid <<'CID'
+from std.io import print, printInt;
+export func boom() -> int { throw 7; }
+export class D { var n: int; func ~D() { printInt(this.n); print(","); } }
+CID
+cat > unw/modules/midmod.cid <<'CID'
+import thrower;
+export func go(n: int) -> int {
+  var d: thrower.D; d.n = n;
+  return thrower.boom();
+}
+CID
+cat > unw/main.cid <<'CID'
+import midmod;
+from std.io import print;
+func main() -> int {
+  try { midmod.go(3); } catch (e) { print("C;"); }
+  print("|");
+  return 0;
+}
+CID
+UNW_EXPECTED='3,C;|'
+"$BIN" compile unw/main.cid -o unw/build/whole.asm
+nasm -O0 -f elf64 unw/build/whole.asm -o unw/build/whole.o
+gcc unw/build/whole.o -o unw/build/whole -no-pie
+set +e
+UNW_WHOLE=$(unw/build/whole 2>&1)
+UNW_WHOLE_RC=$?
+set -e
+[ "$UNW_WHOLE_RC" -eq 0 ] || fail "unwind whole-program exit $UNW_WHOLE_RC"
+[ "$UNW_WHOLE" = "$UNW_EXPECTED" ] || fail "unwind whole-program output [$UNW_WHOLE]"
+UNW_VM=$("$BIN" run unw/main.cid 2>&1)
+[ "$UNW_VM" = "$UNW_EXPECTED" ] || fail "unwind whole-program VM output [$UNW_VM]"
+
+"$BIN" compile --cache unw/cache --emit-meta "$IO_SRC" -o unw/build/io.asm
+for m in thrower midmod; do
+    "$BIN" compile --cache unw/cache --emit-meta "unw/modules/$m.cid" -o "unw/build/$m.asm"
+done
+"$BIN" compile --cache unw/cache unw/main.cid -o unw/build/main.asm
+for m in io thrower midmod main; do nasm -O0 -f elf64 "unw/build/$m.asm" -o "unw/build/$m.o"; done
+gcc unw/build/main.o unw/build/midmod.o unw/build/thrower.o unw/build/io.o \
+    -o unw/build/sep -no-pie
+set +e
+UNW_SEP=$(unw/build/sep 2>&1)
+UNW_SEP_RC=$?
+set -e
+[ "$UNW_SEP_RC" -eq 0 ] || fail "unwind separate exit $UNW_SEP_RC"
+[ "$UNW_SEP" = "$UNW_EXPECTED" ] || fail "unwind separate output [$UNW_SEP]"
+# The landing pad itself: midmod's object must set a jmp_buf around the
+# cross-object call, which is what runs `d`'s finalizer.
+grep -q "call _setjmp" unw/build/midmod.asm \
+    || fail "midmod.asm has no landing pad for its cross-object call"
 
 # --- CLI guards -----------------------------------------------------------
 set +e

@@ -148,6 +148,13 @@ public:
         storageOnlyPass_ = false;
         entryFunctions_.clear();
         exceptionGlobalsEnsured_ = false;
+        // CIDER-BUG-190: per-generation state for the whole-module unwind
+        // pass: the recorded call sites, the flag that says an indirect call
+        // can reach anything, and the reserved name range.
+        sawValueCall_ = false;
+        nextUnwindName_ = kUnwindNameBase;
+        unwindCallSites_.clear();
+        frameLandingBufName_.clear();
         interpHelpersEnsured_ = false;
         stringEqHelpersEnsured_ = false;
         stringCmpHelpersEnsured_ = false;
@@ -281,12 +288,24 @@ public:
         // destructors.
         emitGlobalFieldFinalizers(program);
 
+        // CIDER-BUG-190: now that every function exists, the call graph is
+        // complete and the call sites that can be crossed by a throw are
+        // known: pad them with landing pads that run the frame's pending
+        // scope exits (see noteUnwindCallSite / applyUnwindLandings). Runs
+        // last so it also covers the synthesized startup/fini functions.
+        applyUnwindLandings();
+
         return std::move(module_);
     }
 
     void startBlock(const std::string& name) {
         if (currentBlock_) {
-            currentFunction_->addBlock(std::move(currentBlock_));
+            // CIDER-BUG-190: a landing's exit code is generated outside the
+            // function (a `defer` body with a branch opens blocks of its
+            // own), so those blocks go to the detached list the landing is
+            // being built into instead of the function's block list.
+            if (detachedBlocks_) detachedBlocks_->push_back(std::move(currentBlock_));
+            else currentFunction_->addBlock(std::move(currentBlock_));
         }
         currentBlock_ = std::make_unique<BasicBlock>(name);
         // CIDER-FEAT-001: a block inherits the source line of the statement
@@ -1881,6 +1900,9 @@ public:
         // CIDER-ISS-016: the frame's entry chain is per function, like the
         // try stack above.
         IRValue prevFrameHandlerPrev = frameHandlerPrev_;
+        // CIDER-BUG-190: the frame's landing jmp_buf name, per function like
+        // the try chain above.
+        std::string prevFrameLandingBufName = frameLandingBufName_;
         BasicBlock* prevEntryBlock = functionEntryBlock_;
         bool prevIsSret = currentIsSret_;
         TypeInfo prevReturnType = currentReturnType_;
@@ -1942,6 +1964,7 @@ public:
         destructorStack_.clear();
         activeTryScopes_.clear();
         frameHandlerPrev_ = IRValue{};
+        frameLandingBufName_.clear();
         deferStack_.push_back({});  // Function scope level
         destructorStack_.push_back({});
 
@@ -2123,6 +2146,7 @@ public:
         destructorStack_ = prevDestructorStack;
         activeTryScopes_ = std::move(prevActiveTryScopes);
         frameHandlerPrev_ = prevFrameHandlerPrev;
+        frameLandingBufName_ = prevFrameLandingBufName;
         functionEntryBlock_ = prevEntryBlock;
         currentIsSret_ = prevIsSret;
         currentReturnType_ = prevReturnType;
@@ -2601,6 +2625,9 @@ public:
                             callInstr.dest = ifaceSret ? std::nullopt : std::optional<IRValue>(dest);
                             callInstr.args = std::move(args);
                             currentBlock_->addInstruction(callInstr);
+                            // CIDER-BUG-190: an interface dispatch
+                            // reaches only the module's dispatch targets.
+                            noteUnwindCallSite(callInstr, /*isDispatch=*/true);
                             lastValue_ = ifaceSret ? retBuf : dest;
                             if (ifaceAggRet) {
                                 // CIDER-BUG-206: the result is the caller's own
@@ -2766,6 +2793,9 @@ public:
                 }
                 for (auto& a : args) callInstr.args.push_back(a);
                 currentBlock_->addInstruction(callInstr);
+                // CIDER-BUG-190: a direct call to a resolved callee; the
+                // whole-module pass decides whether it can throw.
+                noteUnwindCallSite(callInstr, /*isDispatch=*/false);
                 lastValue_ = retBuf;
                 // CIDER-BUG-137: the sret slot is the caller's OWN copy of
                 // the returned class/struct value (the callee memcpys into
@@ -2850,6 +2880,8 @@ public:
 
             callInstr.dest = dest;
             currentBlock_->addInstruction(callInstr);
+            // CIDER-BUG-190: the ordinary call / virtual dispatch site.
+            noteUnwindCallSite(callInstr, /*isDispatch=*/true);
             lastValue_ = dest;
             // CIDER-BUG-137: a virtual (or otherwise non-sret) by-value
             // aggregate return comes back as a fresh heap copy (the legacy
@@ -2880,6 +2912,11 @@ public:
             }
         } else {
             // Function pointer / closure call: callee is an expression.
+            // CIDER-BUG-190: the target is a runtime value, so the
+            // whole-module analysis can no longer treat an indirect call as
+            // a dispatch (whose reachable definitions it knows) and has to
+            // treat it as unknown, i.e. able to throw.
+            sawValueCall_ = true;
             bool wasAddress = isAddress_;
             isAddress_ = false;
             calleeExpr->accept(*this);
@@ -2970,6 +3007,8 @@ public:
                 for (auto& a : args) callInstr.args.push_back(a);
                 callInstr.dest = dest;
                 currentBlock_->addInstruction(callInstr);
+                // CIDER-BUG-190: a closure call's target is whatever it is.
+                noteUnwindCallSite(callInstr, /*isDispatch=*/false);
                 lastValue_ = dest;
                 lastExprType_ = retType;
             } else {
@@ -3013,6 +3052,9 @@ public:
                 for (auto& a : args) callInstr.args.push_back(a);
                 callInstr.dest = dest;
                 currentBlock_->addInstruction(callInstr);
+                // CIDER-BUG-190: an `fn`-value call is indirect unless the
+                // callee expression resolved to a static label.
+                noteUnwindCallSite(callInstr, /*isDispatch=*/false);
                 lastValue_ = dest;
                 lastExprType_ = retType;
             }
@@ -3239,6 +3281,9 @@ public:
         // CIDER-ISS-016: the frame's entry chain is per function, like the
         // try stack above.
         IRValue prevFrameHandlerPrev = frameHandlerPrev_;
+        // CIDER-BUG-190: the frame's landing jmp_buf name, per function like
+        // the try chain above.
+        std::string prevFrameLandingBufName = frameLandingBufName_;
         BasicBlock* prevEntryBlock = functionEntryBlock_;
         bool prevIsSret = currentIsSret_;
         TypeInfo prevReturnType = currentReturnType_;
@@ -3269,6 +3314,7 @@ public:
         destructorStack_.clear();
         activeTryScopes_.clear();
         frameHandlerPrev_ = IRValue{};
+        frameLandingBufName_.clear();
         deferStack_.push_back({});
         destructorStack_.push_back({});
 
@@ -3367,6 +3413,7 @@ public:
         destructorStack_ = std::move(prevDestructorStack);
         activeTryScopes_ = std::move(prevActiveTryScopes);
         frameHandlerPrev_ = prevFrameHandlerPrev;
+        frameLandingBufName_ = prevFrameLandingBufName;
         functionEntryBlock_ = prevEntryBlock;
         currentIsSret_ = prevIsSret;
         currentReturnType_ = prevReturnType;
@@ -7232,7 +7279,14 @@ public:
             if (iterIsSret) {
                 itBuf = IRValue::Register(nextTemp(), IRType::PTR);
                 currentBlock_->addInstruction({IROp::ALLOCA, itBuf, {IRValue::Constant(iterStructSize, IRType::I32)}});
-                currentBlock_->addInstruction({IROp::CALL, std::nullopt, {IRValue::Label(iterFn), itBuf, iterable}});
+                IRInstruction iterCall;
+                iterCall.op = IROp::CALL;
+                iterCall.dest = std::nullopt;
+                iterCall.args = {IRValue::Label(iterFn), itBuf, iterable};
+                currentBlock_->addInstruction(iterCall);
+                // CIDER-BUG-190: the protocol's `iter()` is a user function
+                // and can throw.
+                noteUnwindCallSite(iterCall, /*isDispatch=*/false);
                 itAddr = itBuf;
                 // CIDER-BUG-137: `iter()`'s sret slot is a caller-owned
                 // temporary (the iterator object) that lives for the whole
@@ -7245,7 +7299,13 @@ public:
             } else {
                 currentBlock_->addInstruction({IROp::ALLOCA, itAddr, {IRValue::Constant(8, IRType::I32)}});
                 IRValue itReg = IRValue::Register(nextTemp(), IRType::PTR);
-                currentBlock_->addInstruction({IROp::CALL, itReg, {IRValue::Label(iterFn), iterable}});
+                IRInstruction iterCall;
+                iterCall.op = IROp::CALL;
+                iterCall.dest = itReg;
+                iterCall.args = {IRValue::Label(iterFn), iterable};
+                currentBlock_->addInstruction(iterCall);
+                // CIDER-BUG-190: see the sret `iter()` above.
+                noteUnwindCallSite(iterCall, /*isDispatch=*/false);
                 currentBlock_->addInstruction({IROp::STORE, std::nullopt, {itAddr, itReg, IRValue::Constant(0, IRType::I32)}});
             }
             currentBlock_->addInstruction({IROp::BR, std::nullopt, {IRValue::Label(headerName)}});
@@ -7258,7 +7318,16 @@ public:
                 currentBlock_->addInstruction({IROp::LOAD, itv, {itAddr, IRValue::Constant(0, IRType::I32)}});
             }
             IRValue p = IRValue::Register(nextTemp(), IRType::PTR);
-            currentBlock_->addInstruction({IROp::CALL, p, {IRValue::Label(nextFn), itv}});
+            IRInstruction nextCall;
+            nextCall.op = IROp::CALL;
+            nextCall.dest = p;
+            nextCall.args = {IRValue::Label(nextFn), itv};
+            currentBlock_->addInstruction(nextCall);
+            // CIDER-BUG-190: the protocol's `next()` is a user function and
+            // can throw; the iteration copy registered by the body is not
+            // pending yet at this point, so the landing's exits are the
+            // enclosing ones.
+            noteUnwindCallSite(nextCall, /*isDispatch=*/false);
             IRValue isNil = IRValue::Register(nextTemp(), IRType::BOOL);
             currentBlock_->addInstruction({IROp::CMP_EQ, isNil, {p, IRValue::Constant(0, IRType::I32)}});
             currentBlock_->addInstruction({IROp::COND_BR, std::nullopt, {isNil, IRValue::Label(exitName), IRValue::Label(bodyName)}});
@@ -7459,26 +7528,28 @@ public:
             // active — the handler pointer is dynamic (an ancestor frame
             // or null), this whole frame dies, and the unwind depth is 0.
             //
-            // Documented limitations (each needs a runtime cleanup chain
-            // or landing pads — an ABI/runtime redesign, not reachable
-            // from this emission):
-            //   * INTERMEDIATE frames — a caller between the thrower and
-            //     the catcher, with no try of its own — are skipped:
-            //     longjmp lands directly in the handler frame and the
-            //     skipped frames are already gone.
-            //   * The HANDLER frame's own try-body scope is skipped when
-            //     the throw comes from a callee (same reason, one frame):
-            //     its locals' address registers hold setjmp-time values
-            //     after the jump, so replaying that scope's exits in the
-            //     catch would read clobbered registers — the try-body
-            //     exits can only run inline at a throw inside that very
-            //     body, which is what visit(TryCatchStmt) scopes enable.
+            // This covers the THROWER's own frame. The frames a throw
+            // crosses on its way out are covered by CIDER-BUG-190's landing
+            // pads (see noteUnwindCallSite / applyUnwindLandings): every
+            // throwing-capable call site whose frame has pending exits gets
+            // a _setjmp whose landing runs exactly the same emission, with
+            // the same unwind depth rule, and re-throws outward.
+            //
+            // Still open, unchanged by BUG-190 (each needs a runtime
+            // cleanup chain for the calls the EXIT SEQUENCE itself makes,
+            // or a program-exit hook):
+            //   * A call made BY an exit — a destructor that throws, or
+            //     anything the emitted cleanup calls — is not intercepted:
+            //     the rest of that exit sequence is skipped, exactly as
+            //     before. (A destructor that throws while a LANDING is
+            //     running it is fine: the landing restores the saved chain
+            //     before it jumps, so the throw leaves the frame.)
             //   * Global destructors (CIDER-BUG-137) belong to the
             //     program-exit pass, which runs on entry returns and on
             //     the terminal entry asm exit (CIDER-BUG-153); the
             //     uncaught-exception termination path (exit 2) does not
             //     return from the entry, so it reports the error without
-            //     them, like an explicit exit().
+            //     them, like an explicit exit() (CIDER-BUG-192).
             size_t throwUnwindDepth = 0;
             bool handlerInFrame = false;
             for (size_t i = activeTryScopes_.size(); i > 0; --i) {
@@ -7553,6 +7624,14 @@ public:
             // locals must NOT be registered in the enclosing scope (their
             // exit code there would read clobbered registers, and the
             // try-body exits would never run on the throw path).
+            //
+            // CIDER-BUG-190: a throw from a CALLEE inside the try body used
+            // to skip the body's exits for the same reason — the catch
+            // resumes at this try's setjmp, before those locals were
+            // addressed. The landing pad at such a call site (see
+            // noteUnwindCallSite) does its own _setjmp at the call, where
+            // every one of them is live, so the body's exits run there and
+            // the catch below still finds its registers intact.
             ensureExceptionGlobals();
             // CIDER-ISS-016: this frame is about to start swapping the
             // global handler chain, so it must record the chain it was
@@ -7615,8 +7694,9 @@ public:
             // CIDER-BUG-154: this try's handler is live again, so a throw
             // from inside the catch body unwinds past it (see
             // visit(ThrowStmt)); the try-body scope above already ran its
-            // exits at the throw that landed here (or, for a throw from a
-            // callee, is the documented skipped scope).
+            // exits at the throw that landed here — inline for a throw in
+            // the body, and at the CIDER-BUG-190 landing pad for a throw
+            // from a callee the body called.
             activeTryScopes_.back().inCatch = true;
             symbolTable_.enterScope();
             deferStack_.push_back({});
@@ -10074,6 +10154,9 @@ public:
             IRValue::Label(emitFunctionName(ctorDef.second, classSym->constructorName)));
         for (auto& a : args) call.args.push_back(a);
         currentBlock_->addInstruction(call);
+        // CIDER-BUG-190: a constructor is an ordinary user function and can
+        // throw, so a `new` is a call site the unwinder can cross.
+        noteUnwindCallSite(call, /*isDispatch=*/false);
     }
 
     // CIDER-BUG-123: run `classSym`'s CONSTRUCTOR CHAIN on a fresh object:
@@ -11240,6 +11323,546 @@ public:
         }
     }
 
+    // --- CIDER-BUG-190: unwind landing pads ---
+
+    // One user-level call site a throw raised inside the callee would have
+    // to cross, with the landing that runs this frame's exits when it
+    // arrives. Recorded — and its exit code GENERATED — while the body is
+    // being lowered, because that is the only moment the pending scope
+    // stacks, the symbol scope and the variable map the exits read are live
+    // (a `defer` body resolves the locals it mentions by name). The
+    // whole-module pass applyUnwindLandings() then decides, with the
+    // finished call graph in hand, which of these sites a throw can reach at
+    // all, and splices the chosen ones in; the ones it drops were generated
+    // but never become part of the function.
+    struct UnwindCallSite {
+        std::string block;      // block holding the CALL
+        size_t instrIndex = 0;  // index of the CALL inside that block
+        // Resolved callee label, or "" for an indirect target.
+        std::string callee;
+        // The indirect target is a vtable / interface slot, so it can only be
+        // one of the module's dispatch-reachable definitions (see
+        // collectUnwindInfo). False for a closure or an `fn` value, whose
+        // target generation cannot pin down.
+        bool isDispatch = false;
+        // The frame's shared jmp_buf (see frameLandingBufName_), the chain
+        // value saved around the call, and this landing's own _setjmp
+        // result.
+        IRValue bufAddr;
+        IRValue savedBuf;
+        IRValue setjmpDest;
+        std::string contName;     // keeps the call and the rest of its block
+        std::string landingName;  // == blocks.front()->getName()
+        std::string handlerName;  // the out-of-line re-throw
+        std::string uncaughtName;
+        std::string deadName;
+        // The landing group, in emission order: the exits, the re-throw
+        // branch, the longjmp, the uncaught path, the dead block.
+        std::vector<std::unique_ptr<BasicBlock>> blocks;
+    };
+
+    // Reserved name range for the out-of-band landing code. It must not
+    // consume the function's own counters — that would renumber the body of
+    // a program that ends up needing no pad at all, changing its output for
+    // no reason — nor collide with another site's.
+    static constexpr int kUnwindNameBase = 1 << 22;
+    int nextUnwindName_ = kUnwindNameBase;
+    // A landing's blocks are generated outside the function's block list, so
+    // a `defer` body that opens a block of its own lands here instead
+    // (startBlock honours it). Null during normal generation.
+    std::vector<std::unique_ptr<BasicBlock>>* detachedBlocks_ = nullptr;
+    // This frame's one landing jmp_buf, shared by every landing in it and
+    // allocated in the entry block. Sharing is sound because a frame is one
+    // activation: while a call is in flight — the only window in which its
+    // landing is installed — the frame runs no other call site, and each
+    // landing restores the chain before jumping out, so no stale pointer
+    // survives a call. Per function, like frameHandlerPrev_.
+    std::string frameLandingBufName_;
+
+    // A register in the reserved range (see kUnwindNameBase).
+    IRValue unwindTemp(IRType type) {
+        return IRValue::Register("uv" + std::to_string(nextUnwindName_++), type);
+    }
+    std::string unwindLabel(const char* prefix) {
+        return (currentFunction_ ? currentFunction_->getName() + "_" : "") + prefix +
+               std::to_string(nextUnwindName_++);
+    }
+
+    // The number of scope exits a throw abandons in this frame: every
+    // registered defer and destructor in the scopes at or above
+    // `firstScope` (the live handler's entry depth, 0 for a frame with no
+    // try of its own). Zero means a landing pad would have nothing to run,
+    // which is what keeps the common path free of them.
+    size_t pendingExitCount(size_t firstScope) const {
+        size_t n = 0;
+        for (size_t i = firstScope; i < deferStack_.size(); ++i) n += deferStack_[i].size();
+        for (size_t i = firstScope; i < destructorStack_.size(); ++i)
+            n += destructorStack_[i].size();
+        return n;
+    }
+
+    // Called right after a user-level CALL/VIRTUAL_CALL is appended to the
+    // current block. Records the site together with the landing that would
+    // run the scope exits a throw from the callee would skip — but only when
+    // there is something to skip: a site with no pending exit above the
+    // frame's live handler needs no landing, so a frame with no destructor,
+    // defer or box release records nothing at all.
+    // `isDispatch` marks a vtable/interface call, whose reachable target set
+    // the whole-module pass knows; a closure or `fn` value passes false.
+    void noteUnwindCallSite(const IRInstruction& call, bool isDispatch) {
+        if (!currentFunction_ || !currentBlock_) return;
+        // A call made BY an exit sequence (a `defer` body that calls out) is
+        // already on the cleanup path: it is not a frame the exception has to
+        // cross, and a landing inside a landing would double every exit it
+        // contains. Generating one here would also recurse — the landing's
+        // own body calls noteUnwindCallSite again.
+        if (detachedBlocks_) return;
+        // The call is the instruction just appended; anything else means a
+        // caller appended them out of order, and guessing the index would pad
+        // the wrong site.
+        if (currentBlock_->getInstructions().empty() ||
+            currentBlock_->getInstructions().back().op != call.op) {
+            return;
+        }
+        // The live handler is the innermost try whose BODY encloses this
+        // point; a try whose CATCH encloses it already restored the
+        // enclosing handler, so it is skipped exactly as visit(ThrowStmt)
+        // does.
+        size_t handlerDepth = 0;
+        for (size_t i = activeTryScopes_.size(); i > 0; --i) {
+            if (activeTryScopes_[i - 1].inCatch) continue;
+            handlerDepth = activeTryScopes_[i - 1].deferDepth;
+            break;
+        }
+        if (handlerDepth > deferStack_.size()) handlerDepth = deferStack_.size();
+        if (pendingExitCount(handlerDepth) == 0) return;
+
+        UnwindCallSite site;
+        // A VIRTUAL_CALL's args[0] is the receiver, not a target, so only a
+        // plain CALL to a resolved label names a callee.
+        site.callee = (call.op == IROp::CALL && !call.args.empty() &&
+                       call.args[0].kind == IRValue::LABEL)
+                          ? call.args[0].name
+                          : std::string();
+        site.isDispatch = isDispatch;
+        if (frameLandingBufName_.empty()) {
+            frameLandingBufName_ = "uv" + std::to_string(nextUnwindName_++);
+        }
+        site.bufAddr = IRValue::Register(frameLandingBufName_, IRType::PTR);
+        site.savedBuf = unwindTemp(IRType::PTR);
+        site.setjmpDest = unwindTemp(IRType::I32);
+        site.contName = unwindLabel("unwind_cont");
+        site.landingName = unwindLabel("unwind_landing");
+        site.handlerName = unwindLabel("unwind_handler");
+        site.uncaughtName = unwindLabel("unwind_uncaught");
+        site.deadName = unwindLabel("unwind_dead");
+        preRenderUnwindLanding(site, handlerDepth);
+        // Read the index after the landing was generated: a lazily created
+        // interface-box dummy cell prepends to the ENTRY block, which may be
+        // this very block, and re-reading re-fetches the (reallocated)
+        // instruction vector.
+        site.block = currentBlock_->getName();
+        const auto& insts = currentBlock_->getInstructions();
+        if (insts.empty() || insts.back().op != call.op) return;
+        site.instrIndex = insts.size() - 1;
+        unwindCallSites_[currentFunction_->getName()].push_back(std::move(site));
+    }
+
+    // Generate `site`'s landing group out of band, into site.blocks, with
+    // this frame's live state: the scope stacks at the call site, the
+    // function's symbol scope and variable map. Nothing here touches the
+    // function's own blocks except an entry-block allocation, which is what
+    // the landing needs anyway.
+    void preRenderUnwindLanding(UnwindCallSite& site, size_t handlerDepth) {
+        // Point the name counters at the reserved range for the duration, so
+        // the exit code's own temporaries and block labels (a `defer` body
+        // with a branch opens blocks) stay out of the function's numbering.
+        int savedTemps = tempCount_;
+        int savedLabels = labelCount_;
+        tempCount_ = nextUnwindName_;
+        labelCount_ = nextUnwindName_;
+        auto savedBlock = std::move(currentBlock_);
+        auto savedUnwindDepths = unwindDepths_;
+        // A `defer` body can pull in a whole nested generation (a closure, an
+        // inner function), which saves and restores the visitor state around
+        // itself; keep this one saved the same way, so nothing that runs
+        // inside the landing can leave the detached list dangling.
+        auto savedDetachedBlocks = detachedBlocks_;
+        std::vector<std::unique_ptr<BasicBlock>> blocks;
+
+        detachedBlocks_ = &blocks;
+        currentBlock_ = std::make_unique<BasicBlock>(site.landingName);
+        currentBlock_->setSourceLine(currentSourceLine_);
+        // The exits, from the very same emission a `return` here would run:
+        // defers first, then destructors, innermost first, and only the
+        // scopes a throw abandons in this frame — everything above the live
+        // handler's entry depth, since an enclosing try of THIS frame still
+        // has a catch to run in this frame.
+        emitDefers(handlerDepth);
+        emitDestructors(handlerDepth);
+        // The re-throw needs a block of its own, entered by an explicit
+        // branch: the exits do not necessarily leave the current block
+        // unterminated — a `defer` body ending in a branch leaves that
+        // construct's join block current — and a block whose last instruction
+        // is not a branch is where the VM ends a frame (codegen reads it as a
+        // fallthrough, the VM does not). The branch goes in front of a
+        // terminator the exits already ended with, which then becomes the
+        // unreachable tail it would have been anyway.
+        std::string tailName = unwindLabel("unwind_tail");
+        IRInstruction br;
+        br.op = IROp::BR;
+        br.args.push_back(IRValue::Label(tailName));
+        auto& exitInsts = currentBlock_->getInstructions();
+        bool alreadyTerminated = !exitInsts.empty() &&
+                                 (exitInsts.back().op == IROp::BR ||
+                                  exitInsts.back().op == IROp::COND_BR ||
+                                  exitInsts.back().op == IROp::RET);
+        if (alreadyTerminated) {
+            exitInsts.insert(exitInsts.end() - 1, br);
+        } else {
+            exitInsts.push_back(br);
+        }
+        startBlock(tailName);
+        // Then the re-throw. `savedBuf` is the chain value live at the call
+        // site: this frame's innermost enclosing try, an ancestor frame's
+        // handler, or null. Putting it back before the jump is what keeps
+        // the chain right for the frame the exception continues through, and
+        // what makes the unwind step outward exactly one frame, so a run of
+        // crossed frames runs its exits innermost frame first. A null chain
+        // is the defined uncaught path (CIDER-ISS-010), branched around the
+        // longjmp exactly as visit(ThrowStmt) does.
+        currentBlock_->addInstruction({IROp::STORE, std::nullopt,
+                                       {IRValue::Label("_exception_buf_ptr"), site.savedBuf}});
+        IRValue bufPtr = unwindTemp(IRType::PTR);
+        currentBlock_->addInstruction(
+            {IROp::LOAD, bufPtr, {IRValue::Label("_exception_buf_ptr")}});
+        currentBlock_->addInstruction({IROp::COND_BR, std::nullopt,
+                                       {bufPtr, IRValue::Label(site.handlerName),
+                                        IRValue::Label(site.uncaughtName)}});
+        blocks.push_back(std::move(currentBlock_));
+        auto handler = std::make_unique<BasicBlock>(site.handlerName);
+        handler->addInstruction({IROp::CALL, std::nullopt,
+                                 {IRValue::Label("longjmp"), bufPtr,
+                                  IRValue::Constant(1, IRType::I32)}});
+        auto uncaught = std::make_unique<BasicBlock>(site.uncaughtName);
+        uncaught->addInstruction(
+            {IROp::CALL, std::nullopt, {IRValue::Label("_uncaught_exception")}});
+        // The longjmp does not return and `_uncaught_exception` terminates,
+        // so nothing branches into the last two blocks; the empty one is
+        // where the unreachable tail lands, as in visit(ThrowStmt).
+        blocks.push_back(std::move(handler));
+        blocks.push_back(std::move(uncaught));
+        blocks.push_back(std::make_unique<BasicBlock>(site.deadName));
+
+        detachedBlocks_ = savedDetachedBlocks;
+        currentBlock_ = std::move(savedBlock);
+        unwindDepths_ = std::move(savedUnwindDepths);
+        nextUnwindName_ = std::max({nextUnwindName_, tempCount_, labelCount_}) + 8;
+        tempCount_ = savedTemps;
+        labelCount_ = savedLabels;
+        site.blocks = std::move(blocks);
+    }
+
+    // Runtime helpers that cannot raise a Cider exception: the VM builtins
+    // and the bare allocator pair. A call to any other label the IR cannot
+    // resolve to a definition in this module is treated as throwing (see
+    // collectUnwindInfo).
+    static bool isNonThrowingHelperLabel(const std::string& name) {
+        static const char* const kSafe[] = {
+            "malloc", "free", "exit", "putchar", "_setjmp", "longjmp",
+            "_uncaught_exception", "_bounds_fail", "_nil_dispatch_fail",
+            "_nil_deref_fail", "_nil_fnptr_fail",
+        };
+        for (const char* s : kSafe) {
+            if (name == s) return true;
+        }
+        return false;
+    }
+
+    // CIDER-BUG-190: what a throw can escape from, as a fixpoint over the
+    // generated IR. A function may throw when its own body raises one
+    // (visit(ThrowStmt) reaches the unwinder through a `longjmp` /
+    // `_uncaught_exception` call) or when it calls, directly or
+    // transitively, another one; anything the IR cannot resolve to a
+    // definition in this module counts as throwing. Over-approximating only
+    // costs a landing pad, under-approximating would silently skip exits, so
+    // the rules err towards calling a target reachable.
+    struct UnwindInfo {
+        std::set<std::string> mayThrow;  // module functions a throw escapes from
+        // Whether a vtable / interface dispatch can throw. Computed from the
+        // dispatch-reachable definitions instead of per call site, so a
+        // program whose dispatch targets are all throw-free pays nothing at
+        // its dispatch sites (the common case: interfaces without throws).
+        bool dispatchMayThrow = false;
+    };
+
+    UnwindInfo collectUnwindInfo() {
+        std::set<std::string> defined;
+        for (const auto& fn : module_.getFunctions()) defined.insert(fn->getName());
+        // Every definition a dispatch can reach: the vtable entries of all
+        // classes and interfaces, plus the CIDER-BUG-184 box release thunks
+        // (a boxed interface return calls one through the box header, and
+        // they are vtable entries only for the types that satisfy an
+        // interface).
+        std::set<std::string> dispatchTargets;
+        for (const auto& kv : module_.getVTables()) {
+            for (const auto& entry : kv.second) dispatchTargets.insert(entry);
+        }
+        for (const auto& fn : module_.getFunctions()) {
+            if (fn->getName().rfind("__cider_iface_box_fini", 0) == 0) {
+                dispatchTargets.insert(fn->getName());
+            }
+        }
+        // An indirect call whose target generation could not pin down (a
+        // closure or an `fn` value) can be anything, so every indirect call
+        // in the module is treated as unknown. Separate compilation has the
+        // same problem across objects: a dispatch in this object can reach a
+        // method defined in another one.
+        const bool indirectIsUnknown = sawValueCall_ || separateCompilation_;
+        // Labels called but not defined here. In whole-program mode that is
+        // a runtime helper; in separate compilation it is a definition in
+        // another object, whose body — and so whose ability to throw — is
+        // not visible. Both the CALLER's own analysis and the call SITE that
+        // names such a label need this, so it is collected here and folded
+        // into mayThrow below.
+        std::set<std::string> externalTargets;
+        struct FnInfo {
+            bool directThrow = false;
+            bool unknownCallee = false;
+            std::set<std::string> callees;
+        };
+        std::map<std::string, FnInfo> info;
+        for (const auto& fn : module_.getFunctions()) {
+            FnInfo& in = info[fn->getName()];
+            for (const auto& block : fn->getBlocks()) {
+                for (const auto& instr : block->getInstructions()) {
+                    if (instr.op != IROp::CALL && instr.op != IROp::VIRTUAL_CALL) continue;
+                    if (instr.args.empty()) continue;
+                    // A VIRTUAL_CALL names its receiver, not a target, and a
+                    // register target is a dispatch (or a value call, see
+                    // indirectIsUnknown). Neither is a named callee.
+                    if (instr.op == IROp::VIRTUAL_CALL) continue;
+                    if (instr.args[0].kind != IRValue::LABEL) {
+                        if (indirectIsUnknown) in.unknownCallee = true;
+                        continue;
+                    }
+                    const std::string& target = instr.args[0].name;
+                    if (target == "longjmp" || target == "_uncaught_exception") {
+                        in.directThrow = true;
+                        continue;
+                    }
+                    if (defined.count(target)) {
+                        in.callees.insert(target);
+                    } else if (!isNonThrowingHelperLabel(target)) {
+                        in.unknownCallee = true;
+                        externalTargets.insert(target);
+                    }
+                }
+            }
+        }
+        UnwindInfo out;
+        bool changed = true;
+        while (changed) {
+            changed = false;
+            for (const auto& kv : info) {
+                if (out.mayThrow.count(kv.first)) continue;
+                bool mt = kv.second.directThrow || kv.second.unknownCallee;
+                if (!mt) {
+                    for (const auto& callee : kv.second.callees) {
+                        if (out.mayThrow.count(callee)) {
+                            mt = true;
+                            break;
+                        }
+                    }
+                }
+                if (mt) {
+                    out.mayThrow.insert(kv.first);
+                    changed = true;
+                }
+            }
+        }
+        // A call to a definition this object does not have can throw, so the
+        // call SITE naming it is padded exactly like a local callee.
+        for (const std::string& target : externalTargets) out.mayThrow.insert(target);
+        for (const std::string& target : dispatchTargets) {
+            if (out.mayThrow.count(target)) {
+                out.dispatchMayThrow = true;
+                break;
+            }
+        }
+        return out;
+    }
+
+    // Re-key every PHI edge arriving from `from` onto `to`, keeping the same
+    // incoming value. Needed after a block is split: the terminator moves
+    // into the last-cut continuation, so the successors that used to see
+    // the original block as their predecessor must see that one instead.
+    void rekeyPhiPredecessor(FunctionIR& func, const std::string& from,
+                             const std::string& to) {
+        for (auto& block : func.getBlocks()) {
+            for (auto& instr : block->getInstructions()) {
+                if (instr.op != IROp::PHI) continue;
+                auto it = instr.phiArgs.find(from);
+                if (it == instr.phiArgs.end()) continue;
+                IRValue incoming = it->second;
+                instr.phiArgs.erase(it);
+                instr.phiArgs[to] = incoming;
+            }
+        }
+    }
+
+    // Splits `block` at each site and appends, after it, the site's
+    // continuation followed by its landing group.
+    void padBlockWithLandings(FunctionIR& func, BasicBlock& block,
+                              const std::vector<UnwindCallSite*>& sites) {
+        auto& insts = block.getInstructions();
+        // Every recorded index must still be the call it was recorded for.
+        for (const UnwindCallSite* site : sites) {
+            if (site->instrIndex >= insts.size()) return;
+            IROp op = insts[site->instrIndex].op;
+            if (op != IROp::CALL && op != IROp::VIRTUAL_CALL) return;
+        }
+        // The first cut is the LAST call, so it is the one whose continuation
+        // receives the block's terminator — that is the block every successor
+        // PHI has to be re-keyed onto.
+        rekeyPhiPredecessor(func, block.getName(), sites.front()->contName);
+        // Cut back to front, so an index recorded for an earlier call is
+        // never invalidated by a later cut.
+        std::vector<std::pair<const UnwindCallSite*, std::vector<std::unique_ptr<BasicBlock>>>> fresh(
+            sites.size());
+        for (size_t j = 0; j < sites.size(); ++j) {
+            UnwindCallSite& site = *sites[j];
+            size_t pos = site.instrIndex;
+            // The continuation: the call, the chain restore its normal return
+            // owes, and everything after it.
+            auto cont = std::make_unique<BasicBlock>(site.contName);
+            cont->setSourceLine(block.getSourceLine());
+            auto& contInsts = cont->getInstructions();
+            contInsts.reserve(insts.size() - pos);
+            contInsts.push_back(std::move(insts[pos]));
+            contInsts.push_back(
+                {IROp::STORE, std::nullopt, {IRValue::Label("_exception_buf_ptr"), site.savedBuf}});
+            contInsts.insert(contInsts.end(),
+                             std::make_move_iterator(insts.begin() + pos + 1),
+                             std::make_move_iterator(insts.end()));
+            insts.resize(pos);
+            // The setup, ending the block the call was cut out of: save the
+            // live chain, install this frame's landing buffer, and split on
+            // the _setjmp result. A longjmp arriving from the callee resumes
+            // exactly after the _setjmp call with the jump value delivered to
+            // its destination register (CIDER-BUG-053), so that branch is the
+            // landing's entry.
+            insts.push_back({IROp::LOAD, site.savedBuf, {IRValue::Label("_exception_buf_ptr")}});
+            insts.push_back(
+                {IROp::STORE, std::nullopt, {IRValue::Label("_exception_buf_ptr"), site.bufAddr}});
+            insts.push_back({IROp::CALL, site.setjmpDest, {IRValue::Label("_setjmp"), site.bufAddr}});
+            insts.push_back({IROp::COND_BR, std::nullopt,
+                             {site.setjmpDest, IRValue::Label(site.landingName),
+                              IRValue::Label(site.contName)}});
+            std::vector<std::unique_ptr<BasicBlock>> group;
+            group.push_back(std::move(cont));
+            for (auto& b : site.blocks) group.push_back(std::move(b));
+            fresh[j] = {&site, std::move(group)};
+        }
+        // Lay the new blocks out front to back: continuation, then its
+        // landing group, for the first call first. That order keeps the
+        // layout a depth-first order of the CFG, which the passes downstream
+        // assume when they lay a block's dominator out before it
+        // (DominatorTree::build walks the blocks in index order to fill its
+        // depth map). The reverse order — every continuation before every
+        // landing — put a landing ahead of the continuation that branches to
+        // it, and the depth map came up short.
+        std::vector<std::unique_ptr<BasicBlock>> insert;
+        for (size_t j = sites.size(); j-- > 0;) {
+            for (auto& b : fresh[j].second) insert.push_back(std::move(b));
+        }
+        // Every continuation ends in a terminator — the setup's conditional
+        // branch, or the block's own terminator in the last-cut one — so
+        // nothing falls through into a landing.
+        auto& blocks = func.getBlocks();
+        size_t index = 0;
+        for (size_t i = 0; i < blocks.size(); ++i) {
+            if (blocks[i].get() == &block) {
+                index = i + 1;
+                break;
+            }
+        }
+        blocks.insert(blocks.begin() + index, std::make_move_iterator(insert.begin()),
+                      std::make_move_iterator(insert.end()));
+    }
+
+    void padFunctionWithLandings(FunctionIR& func, std::vector<UnwindCallSite>& sites) {
+        // The landing jmp_buf is allocated in the entry block, like a try's
+        // (once per frame invocation, so a call site in a loop reuses one
+        // slot), and every landing of the frame shares it. A function with no
+        // entry block to put it in cannot be padded at all: the buffer's
+        // address register would be undefined.
+        BasicBlock* entryBlock = nullptr;
+        for (auto& block : func.getBlocks()) {
+            if (block->getName() == "entry") entryBlock = block.get();
+        }
+        if (!entryBlock) return;
+        std::map<std::string, std::vector<UnwindCallSite*>> byBlock;
+        for (auto& site : sites) byBlock[site.block].push_back(&site);
+        for (auto& entry : byBlock) {
+            BasicBlock* target = nullptr;
+            for (auto& block : func.getBlocks()) {
+                if (block->getName() == entry.first) target = block.get();
+            }
+            if (!target) continue;
+            // Cut from the last call backwards, so an index recorded for an
+            // earlier call is never invalidated by a later cut.
+            std::sort(entry.second.begin(), entry.second.end(),
+                      [](const UnwindCallSite* a, const UnwindCallSite* b) {
+                          return a->instrIndex > b->instrIndex;
+                      });
+            padBlockWithLandings(func, *target, entry.second);
+        }
+        // After the cuts, because the entry block may be one of the blocks a
+        // cut shortened and an ALLOCA prepended to it would shift the recorded
+        // call indices.
+        auto& entryInsts = entryBlock->getInstructions();
+        size_t pos = 0;
+        while (pos < entryInsts.size() && entryInsts[pos].op == IROp::PHI) ++pos;
+        entryInsts.insert(entryInsts.begin() + pos,
+                          IRInstruction{IROp::ALLOCA, sites.front().bufAddr,
+                                        {IRValue::Constant(kJmpBufSize, IRType::I32)}});
+    }
+
+    // CIDER-BUG-190: splice in the landing of every recorded call site a
+    // throw can reach. A frame that is not the handler is skipped by the
+    // longjmp-based unwinder, so a throw raised in a callee used to leave
+    // this frame's pending scope exits (destructors, defers, interface-box
+    // releases) unrun; its landing runs them and re-throws outward, so each
+    // crossed frame runs its own exits, innermost frame first, before the
+    // exception reaches the handler. Whole-program, so the call graph is
+    // complete: a site whose callee cannot throw is left alone, and a
+    // program with no throw anywhere emits byte-identical IR.
+    void applyUnwindLandings() {
+        if (unwindCallSites_.empty()) return;
+        ensureExceptionGlobals();
+        UnwindInfo info = collectUnwindInfo();
+        for (auto& fn : module_.getFunctions()) {
+            auto it = unwindCallSites_.find(fn->getName());
+            if (it == unwindCallSites_.end()) continue;
+            std::vector<UnwindCallSite> wanted;
+            for (auto& site : it->second) {
+                bool crosses = false;
+                if (!site.callee.empty()) {
+                    crosses = info.mayThrow.count(site.callee) != 0;
+                } else if (site.isDispatch) {
+                    crosses = info.dispatchMayThrow;
+                } else {
+                    // A closure or `fn` value: the target is whatever it is.
+                    crosses = true;
+                }
+                if (crosses) wanted.push_back(std::move(site));
+            }
+            if (!wanted.empty()) padFunctionWithLandings(*fn, wanted);
+        }
+        unwindCallSites_.clear();
+    }
+
     void ensureExceptionGlobals() {
         if (!exceptionGlobalsEnsured_) {
             exceptionGlobalsEnsured_ = true;
@@ -11349,6 +11972,15 @@ private:
         bool inCatch = false;
     };
     std::vector<ActiveTryScope> activeTryScopes_;
+    // CIDER-BUG-190: the call sites of this compilation unit a throw could
+    // cross, each with the landing generated for it (see noteUnwindCallSite /
+    // applyUnwindLandings).
+    std::map<std::string, std::vector<UnwindCallSite>> unwindCallSites_;
+    // CIDER-BUG-190: the program takes the address of a function to call it
+    // (a closure or an `fn` value). Once it does, an indirect call in this
+    // module can reach anything, so the analysis stops treating indirect
+    // calls as vtable dispatches.
+    bool sawValueCall_ = false;
     // CIDER-ISS-016: the handler chain this frame was entered with, hoisted
     // into the entry block by ensureFrameHandlerPrev() the first time the
     // function's body needs it. Every frame exit stores it back, so the

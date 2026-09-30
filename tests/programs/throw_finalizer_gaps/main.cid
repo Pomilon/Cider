@@ -1,25 +1,25 @@
-// CIDER-BUG-154 — documented limitations of the longjmp-based unwinder.
-// These two shapes do NOT run every finalizer, on any backend; the test
-// pins that they are crash-free and agree across VM unopt, VM optim and
-// native (before the fix both crashed: the VM reported `read of unset
-// register`, native segfaulted). Fixing either needs a runtime cleanup
-// chain or landing pads — an ABI/runtime redesign — so the gaps are
-// documented at the throw site in src/ir_gen.h instead:
+// The two shapes CIDER-BUG-154 documented as unwinder gaps, pinned now
+// that CIDER-BUG-190 closed both. They used to be crash-free but lossy on
+// every backend (`drops` stayed 0), which is what this test used to assert;
+// the two landing pads close them, so `drops` is 2 and the trace is
+// `9,A;8,B;drops=2;`:
 //
 //   1. INTERMEDIATE FRAME (mid): main has the try, mid() has a class
-//      local but no try, deep() throws. longjmp lands directly in main's
-//      handler and mid()'s frame is already gone, so `m` is never
-//      destroyed (`drops` stays 0 for it).
+//      local but no try, deep() throws. The longjmp used to land
+//      directly in main's handler with mid()'s frame already gone, so
+//      `m` was never destroyed. mid()'s call site now carries a landing
+//      pad, which runs `m`'s finalizer and re-throws outward.
 //   2. HANDLER FRAME'S TRY BODY (the second try): the throw comes from a
-//      callee and lands in this frame's catch, which runs at the
-//      setjmp-time register state — the try-body locals' address
-//      registers were written after setjmp, so replaying that scope's
-//      exits there would read clobbered registers. The exits can only run
-//      inline at a throw inside that very body (covered by
-//      throw_scope_finalizers), so `d` is never destroyed here.
+//      callee and lands in this frame's catch. The try body's exits used
+//      to be skipped, because the catch runs at the setjmp-time register
+//      state of the try's own _setjmp, before the try body's locals were
+//      addressed. The landing pad's _setjmp sits at the CALL, after
+//      every one of those addresses is live, so the same scope's exits
+//      run there and the catch still finds its registers intact.
 //
-// If a future redesign closes either gap, `drops` becomes nonzero and
-// this test's expectation must be updated with it.
+// The general matrix (0/1/2/3 crossed frames, aggregates, interface-box
+// releases, defers, loops, nested try) is unwind_intermediate_frames; the
+// uncaught variant is unwind_intermediate_uncaught.
 from std.io import print, printInt;
 
 var drops: int = 0;
@@ -66,6 +66,6 @@ func main() -> int {
     print("drops=");
     printInt(drops);
     print(";\n");
-    if (drops != 0) { return 1; }
+    if (drops != 2) { return 1; }
     return 0;
 }
