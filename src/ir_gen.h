@@ -682,9 +682,25 @@ public:
     // cyclic aliases, and stopping at the repeated spelling keeps every
     // caller terminating (getTypeSize re-resolves its result, so a cap that
     // returned the other alias made the pair recurse without bound).
+    //
+    // CIDER-BUG-183: a pointer level no longer stops the walk when the
+    // target is a FUNCTION/closure object type, mirroring
+    // type_checker::resolveTypeImpl exactly -- the two mirrors must agree or
+    // the alias spelling sizes, guards and call-lower on one side and not
+    // the other. The closure-object level rides in pointerLevel (`type Cb =
+    // func(int) -> int` is one level, so `*Cb` is two), so bailing out at a
+    // level returned the alias spelling with a bare level. The
+    // `+= t.pointerLevel` below already carried the written level; it was
+    // dead (always 0) only because of that early return.
+    //
+    // As in the checker, the fold is limited to a function target: the flat
+    // representation makes the resolved form of `*A3` (pointer to an array
+    // alias) byte-identical to `[*int; 3]` (an array of pointers), and
+    // collapsing the two re-breaks CIDER-BUG-199's element stride, which
+    // depends on the alias SPELLING surviving the resolution.
     TypeInfo resolveTypeAliasImpl(TypeInfo t, const std::string& defModule,
                                   std::set<std::string>& visiting) {
-        if (t.pointerLevel > 0 || t.isFunctionPointer || t.isArray) return t;
+        if (t.isFunctionPointer || t.isArray) return t;
         if (t.name.empty() || !visiting.insert(t.name).second) return t;
         auto sym = resolveNominalType(t.name);
         if (!sym && !defModule.empty()) sym = resolveNominalInModule(t.name, defModule);
@@ -697,6 +713,14 @@ public:
         // `type X = othermod.S` resolves at use sites that do not import S.
         TypeInfo target = canonicalizeNominalInModule(sym->type, definingModuleFor(sym, t.name));
         TypeInfo resolved = resolveTypeAliasImpl(target, defModule, visiting);
+        // CIDER-BUG-183: mirror the checker's fold rule exactly — a written
+        // level folds only onto a function/closure object target, never onto
+        // an array target and never through an array wrapper, because the
+        // flat representation cannot distinguish the two array shapes
+        // (CIDER-BUG-199's stride depends on the alias spelling surviving).
+        if (t.pointerLevel > 0 && !(resolved.isFunctionPointer && !resolved.isArray)) {
+            return t;
+        }
         resolved.pointerLevel += t.pointerLevel;
         // CIDER-BUG-061: `volatile` written at the use site (`var x: volatile
         // V` with `type V = int`) must survive alias resolution exactly like
@@ -754,16 +778,24 @@ public:
     //
     // CIDER-BUG-199: the language has no `*[T; N]` spelling, so a pointer to
     // a fixed array always arrives through an alias (`type A3 = [D; 3]`,
-    // `var a: *A3`). resolveTypeAlias stops at a pointer level, so the
-    // pointee is only revealed to be an array AFTER the level is dropped:
-    // strip that dimension as well, or the index keeps the whole array as its
-    // "element" and getTypeSize scales by the ARRAY size — `a[1].label = v`
-    // in a 12-byte D[3] block stored at offset 12 and `a[2]` at 24, while
+    // `var a: *A3`). The pointee is only revealed to be an array AFTER the
+    // last pointer level is dropped, so that dimension has to be stripped
+    // too, or the index keeps the whole array as its "element" and
+    // getTypeSize scales by the ARRAY size — `a[1].label = v` in a 12-byte
+    // D[3] block stored at offset 12 and `a[2]` at 24, while
     // registerEmbeddedDestructors walks the same three elements at
     // sizeof(D) (visit(DeleteStmt) resolves the alias before the walk), so
     // the finalizers read cells nobody wrote. Dropping the dimension here
     // gives the element, the element stride, and the one rule every caller
     // (indexing, pointer arithmetic, assignment element typing) needs.
+    //
+    // CIDER-BUG-183: this deliberately resolves the pointee only AFTER the
+    // level is dropped. resolveTypeAlias folds a written level into a
+    // FUNCTION target but never an array one, precisely because the flat
+    // representation cannot tell `*A3` (pointer to an array alias) from
+    // `[*int; 3]` (an array of pointers) once resolved — the alias spelling
+    // is the only thing that distinguishes them, and this function depends
+    // on it. The checker half is the IndexExpr pointer branch.
     TypeInfo elementTypeOf(TypeInfo base) {
         if (base.isArray) {
             base = base.elementType();

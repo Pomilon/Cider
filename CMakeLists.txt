@@ -168,6 +168,27 @@ add_test(NAME nil_closure_call_smoke
          COMMAND bash ${CMAKE_SOURCE_DIR}/tests/unit/nil_closure_call_smoke.sh $<TARGET_FILE:cider>)
 set_tests_properties(nil_closure_call_smoke PROPERTIES SKIP_RETURN_CODE 77)
 
+# CIDER-BUG-183: alias resolution must reach THROUGH pointer levels, so `*Cb`
+# and `*func(int) -> int` are one type. Both resolvers bailed out at
+# `pointerLevel > 0`, which dropped the closure-object level and made
+# `var p: *Cb = &f;` a diagnostic the direct spelling was not. Since a
+# 16-byte closure object and an 8-byte raw code pointer differ in SIZE and
+# call semantics, the runtime diagnostics are the real assertion: a nil
+# closure object reached through each spelling (one and two pointer levels,
+# the alias, the alias of the alias and the direct spelling) must report
+# CIDER-BUG-237's `vm error: null pointer dereference` identically on all
+# three backends under both optimization settings, a nil callable slot must
+# keep reporting CIDER-BUG-225's `call: nil function pointer`, the sibling
+# nil diagnostics must be unchanged, a live closure must be called
+# correctly through every use position (a wrong level passes every nil case,
+# since both operands are zero), and the look-alikes must still be rejected
+# -- `*fn(...)` stays out of the supported surface and pointer-to-interface
+# is refused for the alias exactly as for the direct spelling. Exits 77 when
+# nasm/gcc are missing.
+add_test(NAME alias_closure_pointer_smoke
+         COMMAND bash ${CMAKE_SOURCE_DIR}/tests/unit/alias_closure_pointer_smoke.sh $<TARGET_FILE:cider>)
+set_tests_properties(alias_closure_pointer_smoke PROPERTIES SKIP_RETURN_CODE 77)
+
 # CIDER-FEAT-001: `compile -g` DWARF line-table/function-DIE smoke. Assembles
 # with plain `nasm -f elf64` and inspects the result with readelf/objdump;
 # exits 77 when nasm/gcc/readelf are missing.

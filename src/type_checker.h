@@ -757,8 +757,40 @@ public:
     // resolver). Aliases are checker-accepted even when cyclic; stopping at
     // the repeated spelling keeps areTypesCompatible and every other caller
     // terminating instead of overflowing the stack.
+    //
+    // CIDER-BUG-183: a pointer level no longer stops the walk when the
+    // target is a FUNCTION/closure object type. `type Cb = func(int) -> int`
+    // carries the closure object's own level in pointerLevel (parseType adds
+    // the +1 object pointer to the `func` spelling), so `*Cb` is a pointer to
+    // a closure -- two levels -- and `**Cb` three. Bailing at
+    // `pointerLevel > 0` returned the ALIAS SPELLING with a bare level and
+    // dropped the object level entirely, so `*Cb` and `*func(int) -> int` were
+    // two different types: the alias spelling compared as a pointer to a
+    // nameless pointee and was rejected in every position the direct
+    // spelling was accepted. The `+= info.pointerLevel` below already had to
+    // carry the written level onto the target; it was dead (always 0) only
+    // because of the early return.
+    //
+    // The fold is deliberately limited to a function target. The flat
+    // TypeInfo representation stores an array's shape as isArray/arraySize
+    // with pointerLevel mirroring the ELEMENT, so for every other kind the
+    // resolved form of `*A3` (pointer to an array alias) is byte-identical
+    // to `[*int; 3]` (an array of pointers) -- the two are not
+    // distinguishable once resolved, and collapsing them would silently
+    // re-break CIDER-BUG-199, whose `a[i]` element stride depends on the
+    // alias SPELLING surviving. A function type has no such ambiguity: its
+    // levels are closure-object levels, it is one word wide, and the direct
+    // spelling already produces the identical TypeInfo.
+    //
+    // Only a `type` alias is ever followed here: a struct/class/enum/
+    // interface definition carries `sym->type.name == sym->name` and an
+    // initializer-less target, and a `type` provider is the only STRUCT-kind
+    // symbol whose target name differs, so every other spelling returns
+    // unchanged exactly as before. A function type is still not re-resolved
+    // by its own name (`fn`/`func` are not aliases), so the signature
+    // attached to it survives.
     TypeInfo resolveTypeImpl(TypeInfo info, std::set<std::string>& visiting) {
-        if (info.pointerLevel > 0 || info.isFunctionPointer) return info;
+        if (info.isFunctionPointer) return info;
         if (info.name.empty() || !visiting.insert(info.name).second) return info;
         auto sym = resolveScoped(info.name);
         if (sym && sym->kind == SymbolKind::STRUCT && sym->type.name != info.name && !sym->type.name.empty()) {
@@ -768,7 +800,19 @@ public:
             // that do not import S.
             TypeInfo target = canonicalizeInModule(sym->type, definingModuleOf(sym), -1);
             TypeInfo resolved = resolveTypeImpl(target, visiting);
-            resolved.pointerLevel += info.pointerLevel;  // Should be 0 here
+            // CIDER-BUG-183: a written level folds into the target only when
+            // the target is a function/closure object type. For every other
+            // kind the flat representation cannot tell the resolved form of
+            // `*A3` (pointer to an array alias) from `[*int; 3]` (an array of
+            // pointers), and CIDER-BUG-199's element stride depends on the
+            // alias SPELLING surviving, so those keep the spelling they
+            // always had. An array wrapper is left alone for the same
+            // reason: `[Cb; N]` and `[*Cb; N]` resolved their ELEMENT only,
+            // and the outer dimension is already handled below.
+            if (info.pointerLevel > 0 && !(resolved.isFunctionPointer && !resolved.isArray)) {
+                return info;
+            }
+            resolved.pointerLevel += info.pointerLevel;
             // CIDER-BUG-019: an alias spelling can be an ELEMENT type inside
             // an array (`[Cb; N]`); keep the outer array wrapper, or the
             // shape is lost and indexing is rejected / sizes compare equal.
@@ -5290,17 +5334,24 @@ public:
         } else if (objType.pointerLevel > 0 || objType.name == "string") {
             lastExprType_ = objType;
             if (objType.pointerLevel > 0) {
-                lastExprType_.pointerLevel--;
                 // CIDER-BUG-199: `type A3 = [D; 3]; var a: *A3;` — the
                 // language has no `*[T; N]` spelling, so a pointer to a
-                // fixed array only appears through an alias. resolveType
-                // stops at a pointer level, so the pointee is known to be an
-                // array only after the level is dropped; `a[i]` then names
-                // the array's ELEMENT, exactly like an array-valued base.
-                // Without this the index kept the whole-array type and every
-                // use was rejected ("Expected A3, got int"). Only the last
-                // level reaches the pointee; a deeper one names a pointer,
-                // whose element is the pointer itself.
+                // fixed array only appears through an alias, and the pointee
+                // is known to be an array only after the level is dropped;
+                // `a[i]` then names the array's ELEMENT, exactly like an
+                // array-valued base. Without this the index kept the
+                // whole-array type and every use was rejected ("Expected A3,
+                // got int"). Only the last level reaches the pointee; a
+                // deeper one names a pointer, whose element is the pointer
+                // itself.
+                //
+                // CIDER-BUG-183: the drop stays on the SPELLING, which is
+                // what resolveType still hands back for an array target --
+                // the flat representation cannot tell a pointer-to-array
+                // alias from an array of pointers, so the alias name is the
+                // only thing that tells them apart, and the pointee is
+                // resolved only here, after the level is gone.
+                lastExprType_.pointerLevel--;
                 if (lastExprType_.pointerLevel == 0) {
                     TypeInfo pointee = resolveType(lastExprType_);
                     if (pointee.isArray) lastExprType_ = pointee.elementType();
