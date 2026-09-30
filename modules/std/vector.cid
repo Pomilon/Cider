@@ -1,4 +1,4 @@
-from std.alloc import malloc, free;
+from std.alloc import malloc, free, oom;
 from std.string import memcpy, memset;
 
 export struct Vec<T> {
@@ -38,6 +38,14 @@ func grow<T>(v: *Vec<T>) -> void {
     }
     var elem_size: int = sizeof(T);
     var new_data: *T = malloc(new_cap * elem_size) as *T;
+    // CIDER-BUG-193: malloc refuses (nilPtr) sizes < 0 -- e.g. a wrapped
+    // cap*elem_size product -- or > 1 GiB. Report through the stdlib OOM
+    // policy (std.alloc.oom) instead of copying through nil (a
+    // misattributed `null pointer dereference`) or installing a corrupt
+    // container (nil data + nonzero cap).
+    if (new_data == nilPtr) {
+        oom();
+    }
     if (v.data != nilPtr) {
         memcpy(new_data as *void, v.data as *void, v.len * elem_size);
         free(v.data as *void);
@@ -81,6 +89,12 @@ export func reserve<T>(v: *Vec<T>, n: int) -> void {
     if (n > v.cap) {
         var elem_size: int = sizeof(T);
         var new_data: *T = malloc(n * elem_size) as *T;
+        // CIDER-BUG-193: same OOM policy as grow (see above). Without
+        // this, a refused reserve on a non-empty Vec copies through nil,
+        // and on an empty Vec it silently installs nil data + nonzero cap.
+        if (new_data == nilPtr) {
+            oom();
+        }
         if (v.data != nilPtr) {
             memcpy(new_data as *void, v.data as *void, v.len * elem_size);
             free(v.data as *void);

@@ -1,4 +1,4 @@
-from std.alloc import malloc, free;
+from std.alloc import malloc, free, oom;
 from std.string import memcpy;
 
 export struct Entry<K, V> {
@@ -52,7 +52,15 @@ func hash_index(h: u64, cap: int) -> int {
 export func new_map<K, V>() -> HashMap<K, V> {
     var m: HashMap<K, V>;
     var entry_size: int = sizeof(Entry<K, V>);
-    m.entries = malloc(MAP_INITIAL_CAP * entry_size) as *Entry<K, V>;
+    // CIDER-BUG-193: malloc refuses (nilPtr) sizes < 0 or > 1 GiB -- here
+    // when Entry<K, V> is so large that one bucket array exceeds the guard.
+    // Report through the stdlib OOM policy (std.alloc.oom) instead of
+    // clearing through nil (a misattributed `null pointer dereference`).
+    var fresh: *Entry<K, V> = malloc(MAP_INITIAL_CAP * entry_size) as *Entry<K, V>;
+    if (fresh == nilPtr) {
+        oom();
+    }
+    m.entries = fresh;
     m.cap = MAP_INITIAL_CAP;
     m.len = 0;
     m.tombstones = 0;
@@ -78,7 +86,15 @@ func grow_map<K, V>(m: *HashMap<K, V>) -> void {
         new_cap = MAP_INITIAL_CAP;
     }
     var entry_size: int = sizeof(Entry<K, V>);
-    m.entries = malloc(new_cap * entry_size) as *Entry<K, V>;
+    // CIDER-BUG-193: same OOM policy as new_map (see above). The fresh
+    // array must be checked BEFORE m.entries is overwritten: on refusal
+    // the old array stays live and the program aborts, instead of
+    // installing nil entries + nonzero cap and rehashing through nil.
+    var fresh: *Entry<K, V> = malloc(new_cap * entry_size) as *Entry<K, V>;
+    if (fresh == nilPtr) {
+        oom();
+    }
+    m.entries = fresh;
     m.cap = new_cap;
     m.len = 0;
     m.tombstones = 0;

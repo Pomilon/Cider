@@ -1,0 +1,36 @@
+// CIDER-BUG-193 regression: std.vector reserve/grow must handle a nilPtr
+// refusal from std.alloc.malloc instead of ignoring it.
+//
+// 268435457 * sizeof(int) = 1073741828 > 1 GiB, so malloc refuses with
+// nilPtr deterministically WITHOUT allocating anything (the size<0 /
+// size>1GiB guard in std.alloc.malloc). Before the fix the non-empty
+// reserve below copied through nil and died with a misattributed
+// `vm error: null pointer dereference` (as if the program had a nil bug),
+// while a reserve on an EMPTY vec silently installed nil data + nonzero
+// cap and exited 0 with a corrupt container.
+//
+// The stdlib OOM policy (see std.alloc.oom): `vm error: out of memory` on
+// stderr, exit 2 -- the same line and code the VM reports for host-side
+// OOM (CIDER-BUG-121) -- identical on VM unoptimized, VM optimized, and
+// native. The small reserve first pins that the normal path still works.
+from std.io import puts;
+from std.vector import new_vec, push, get, reserve, len_vec, cap_vec;
+
+func main() -> int {
+    var v: Vec<int> = new_vec<int>();
+    push<int>(&v, 42);
+    push<int>(&v, 7);
+
+    // Normal path: a small reserve keeps len/data and sets cap.
+    reserve<int>(&v, 16);
+    if (len_vec<int>(&v) != 2) return 1;
+    if (cap_vec<int>(&v) != 16) return 2;
+    if (*get<int>(&v, 0) != 42) return 3;
+    if (*get<int>(&v, 1) != 7) return 4;
+    puts("ok");
+
+    // Over-guard request: must abort via the OOM policy, never return.
+    reserve<int>(&v, 268435457);
+    puts("BUG: survived a refused reserve");
+    return 5;
+}

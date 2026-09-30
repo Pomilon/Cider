@@ -13,6 +13,26 @@
 //   - CIDER-BUG-215: malloc clears a block's free-list canary as it hands the
 //     block out, so the allocator's own stamp is never served as data (see
 //     clear_canary for the whole uninitialized-value policy)
+//   - CIDER-BUG-193: malloc REFUSES some requests with nilPtr instead of
+//     aborting: size < 0 or size > MAX_TOTAL_BYTES (1 GiB). The refusal is
+//     cheap and deterministic -- no memory is touched -- so every caller
+//     MUST test the return before use. The stdlib grow/reserve paths
+//     (std.vector grow/reserve, std.map new_map/grow_map) report a refusal
+//     through oom() below: `vm error: out of memory` on stderr, exit 2 --
+//     the same line and code the VM reports for host-side OOM
+//     (CIDER-BUG-121), so there is ONE OOM diagnostic language-wide and all
+//     three backends (VM unoptimized, VM optimized, native) agree
+//     byte-for-byte by construction: oom() is plain .cid plus the same
+//     write(2)/exit asm pattern fail_fast uses, which the alloc_cap_overflow
+//     (71) and alloc_mmap_fail (75) fixtures already pin on every backend.
+//     Alternatives rejected: letting the nilPtr through misreports the
+//     failure as a *user program bug* (CIDER-BUG-219's `null pointer
+//     dereference`, exit 2, for a dereference the program never wrote) or
+//     -- when the path skips the copy on nil old data (reserve on an empty
+//     Vec) -- installs a silently corrupt container (nil data + nonzero
+//     cap) that fails later or never. A fallback (keep the old buffer)
+//     would either lie about cap or change every grow/push/insert
+//     signature; fail-fast keeps the API unchanged, matching spec §9.
 
 var free_list: *void = nilPtr;
 var ARENA_SIZE: int = 1048576;
@@ -51,6 +71,34 @@ func fail_fast(code: int) -> void {
 }
 
 export func init_heap() -> void {
+}
+
+// CIDER-BUG-193: the stdlib OOM policy. A malloc refusal (size < 0 or
+// size > MAX_TOTAL_BYTES -- see malloc) is reported here, never passed
+// through as a nil data pointer. The bytes and exit code match the VM's
+// host-side OOM diagnostic (CIDER-BUG-121) exactly: `vm error: out of
+// memory` on stderr (fd 2), exit 2, the CIDER-ISS-001 runtime-error
+// convention shared with the nil-pointer family (CIDER-BUG-211/219/225).
+// The write+exit asm is the same pattern fail_fast uses, so the three
+// backends agree byte-for-byte with no compiler support.
+var oom_msg: string = "vm error: out of memory\n";
+
+export func oom() -> void {
+    var m: char* = oom_msg as char*;
+    asm {
+        "mov rax, 1"
+        "mov rdi, 2"
+        "mov rsi, {m}"
+        // 24 = strlen("vm error: out of memory\n"); stopping before the
+        // string's NUL terminator (cf. fail_fast, CIDER-BUG-109).
+        "mov rdx, 24"
+        "syscall"
+    }
+    asm {
+        "mov rax, 60"
+        "mov rdi, 2"
+        "syscall"
+    }
 }
 
 // CIDER-BUG-215: THE UNINITIALIZED-VALUE POLICY, part 2 of 2 (part 1 is
