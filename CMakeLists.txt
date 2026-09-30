@@ -112,6 +112,25 @@ add_test(NAME nil_iface_dispatch_smoke
          COMMAND bash ${CMAKE_SOURCE_DIR}/tests/unit/nil_iface_dispatch_smoke.sh $<TARGET_FILE:cider>)
 set_tests_properties(nil_iface_dispatch_smoke PROPERTIES SKIP_RETURN_CODE 77)
 
+# CIDER-BUG-219: a dereference through a nil pointer reports
+# `vm error: null pointer dereference` and exits 2 identically on the VM
+# (optimized and not) and the native backend, in the DEFAULT configuration
+# (the guard is not --checks-gated). Covers every shape the guard is attached
+# to — read, store, compound store, member read/write, element read/write,
+# direct and virtual method call, aggregate copy and field, pointer-to-pointer,
+# a nil receiver behind a pointer to an interface, and the value arriving
+# through a parameter, an array element, a class field and a pointer-to-class
+# field — each with a live counterpart first. Also pins the codegen-side
+# invariants: the helper is emitted without a flag with the VM's message
+# payload byte for byte, the index guard precedes the element scale, a
+# user-defined `_nil_deref_fail` suppresses the helper, pomeos gets its own
+# syscall numbers, uefi traps with ud2, --checks still reports the bounds
+# error, and the nil-interface diagnostic is unchanged. Exits 77 when
+# nasm/gcc are missing.
+add_test(NAME nil_pointer_deref_smoke
+         COMMAND bash ${CMAKE_SOURCE_DIR}/tests/unit/nil_pointer_deref_smoke.sh $<TARGET_FILE:cider>)
+set_tests_properties(nil_pointer_deref_smoke PROPERTIES SKIP_RETURN_CODE 77)
+
 # CIDER-FEAT-001: `compile -g` DWARF line-table/function-DIE smoke. Assembles
 # with plain `nasm -f elf64` and inspects the result with readelf/objdump;
 # exits 77 when nasm/gcc/readelf are missing.

@@ -1319,7 +1319,8 @@ void VM::store(int64_t addr, const RegVal& val, IRType type, int64_t offset) {
 
 namespace {
 const char* const kVMBuiltins[] = {"malloc", "free", "exit", "putchar", "_setjmp", "longjmp",
-                                   "_uncaught_exception", "_bounds_fail", "_nil_dispatch_fail"};
+                                   "_uncaught_exception", "_bounds_fail", "_nil_dispatch_fail",
+                                   "_nil_deref_fail"};
 }  // namespace
 
 bool VM::isExternFunctionName(const std::string& name) const {
@@ -1405,6 +1406,21 @@ bool VM::tryBuiltinCall(const std::string& name, const std::vector<IRValue>& arg
         // no output at all. Now both backends report the same line and exit
         // with the same code, matching the CIDER-ISS-001 convention.
         throw VMError{"nil interface dispatch"};
+    }
+    if (name == "_nil_deref_fail") {
+        // CIDER-BUG-219: ir-gen's nil-pointer guard routes a dereference
+        // through a nil pointer here, BEFORE the address arithmetic, so the
+        // diagnostic is the language-level one on every backend. Before the
+        // guard the two backends disagreed in every configuration: the VM
+        // reached its exact-zero CIDER-BUG-059 guard in load/store and
+        // reported `load:`/`store:`/`memcpy: null pointer dereference` — or,
+        // for `p[1]` through a nil `p` (effective address 8), silently read
+        // the first heap block's size header and returned 0 — while native
+        // x86 executed `mov rax, [rbx]`/`[8]` with rbx = 0 and died with
+        // SIGSEGV and no output at all (exit 139). Those load/store/memcpy
+        // guards stay: they are still the IR-level safety net for a zero
+        // address formed without a source-level pointer (vm_test pins them).
+        throw VMError{"null pointer dereference"};
     }
     if (name == "_setjmp") {
         RegVal buf = args.empty() ? RegVal{} : resolveValue(args[0]);

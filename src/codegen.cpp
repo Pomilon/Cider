@@ -284,6 +284,10 @@ bool CodeGenerator::generate(ModuleIR& module, const std::string& outputPath,
     // Unlike the two above this guard is NOT --checks-gated, so the helper is
     // needed by any module that dispatches through an interface.
     bool needsNilDispatchHelper = false;
+    // CIDER-BUG-219: same for the nil-pointer-dereference pseudo-builtin. Not
+    // --checks-gated either, so any module that dereferences a pointer typed
+    // value through a pointer needs the helper.
+    bool needsNilDerefHelper = false;
     std::set<std::string> generatedFunctions_;
     // CID-005: UEFI (PE32+) emission differences (design §1): bare `efi_main`
     // export, no implicit libc externs, and no `_start` kernel-stack entry.
@@ -413,6 +417,12 @@ bool CodeGenerator::generate(ModuleIR& module, const std::string& outputPath,
                     instr.args[0].kind == IRValue::LABEL &&
                     instr.args[0].name == "_nil_dispatch_fail") {
                     needsNilDispatchHelper = true;
+                }
+                // CIDER-BUG-219: same for the nil-pointer-dereference call.
+                if (instr.op == IROp::CALL && !instr.args.empty() &&
+                    instr.args[0].kind == IRValue::LABEL &&
+                    instr.args[0].name == "_nil_deref_fail") {
+                    needsNilDerefHelper = true;
                 }
                 for (auto& arg : instr.args) {
                     // CID-005: narrow `"..."` and wide `L"..."` PTR constants
@@ -2795,6 +2805,45 @@ bool CodeGenerator::generate(ModuleIR& module, const std::string& outputPath,
             addText("    mov rax, 1     ; write(2, msg, len)");
             addText("    mov rdi, 2");
             addText("    lea rsi, [rel _nil_dispatch_fail_msg]");
+            addText("    mov rdx, " + std::to_string(std::strlen(msg)));
+            addText("    syscall");
+            addText("    mov rax, 60    ; exit(2)");
+            addText("    mov rdi, 2");
+            addText("    syscall");
+        }
+    }
+
+    // CIDER-BUG-219: define the nil-pointer-dereference runtime error. ir-gen
+    // branches here when a source-level load, store, copy or method call is
+    // about to go through a nil pointer, BEFORE the address arithmetic — so
+    // `p[1]` through a nil `p` (effective address 8) is caught, which an
+    // effective-address test could not see. Native/pomeos report the exact
+    // line the VM reports (`vm error: null pointer dereference`) on stderr and
+    // exit 2, the CIDER-ISS-001 convention, so the backends are byte-for-byte
+    // identical instead of the VM reporting a diagnostic and native dying on
+    // SIGSEGV with no output at all. UEFI traps (ud2), exactly like the three
+    // helpers above. A user-defined function of the same name wins on both
+    // backends, so the helper is only emitted when the name is free (no
+    // duplicate label).
+    bool userDefinedNilDeref = false;
+    for (const auto& fn : module.getFunctions()) {
+        if (fn->getName() == "_nil_deref_fail") {
+            userDefinedNilDeref = true;
+            break;
+        }
+    }
+    if (needsNilDerefHelper && !userDefinedNilDeref) {
+        addText("");
+        addText("; CIDER-BUG-219: dereference through a nil pointer");
+        addText("_nil_deref_fail:");
+        if (isUefi) {
+            addText("    ud2    ; no write/exit syscalls on uefi: trap loudly");
+        } else {
+            const char* msg = "vm error: null pointer dereference\n";
+            addData("_nil_deref_fail_msg: db \"vm error: null pointer dereference\", 10");
+            addText("    mov rax, 1     ; write(2, msg, len)");
+            addText("    mov rdi, 2");
+            addText("    lea rsi, [rel _nil_deref_fail_msg]");
             addText("    mov rdx, " + std::to_string(std::strlen(msg)));
             addText("    syscall");
             addText("    mov rax, 60    ; exit(2)");

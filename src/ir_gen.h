@@ -772,6 +772,17 @@ public:
         return t.isArray && t.arraySize > 0;
     }
 
+    // CIDER-BUG-219: is this expression the implicit `this` of a method? Used to
+    // keep the nil-deref guard off `this.f`: the receiver is already checked
+    // once at the call site (visit(CallExpr&)), and a second check per field
+    // read would put a branch on the hottest path in the language for a
+    // condition the call site has already settled. `this` is its own AST node
+    // (ThisExpr, from the lexer's reserved keyword), so an identifier can never
+    // be one.
+    static bool isThisReceiver(Expression* expr) {
+        return dynamic_cast<ThisExpr*>(expr) != nullptr;
+    }
+
     // CID-006: the label a global function-pointer initializer folds to.
     // Returns "" for nilPtr / no initializer (the cell stays zero).
     std::string functionPointerInitTarget(Expression* init) {
@@ -2239,7 +2250,20 @@ public:
             isAddress_ = wasAddress;
 
             TypeInfo objType = lastExprType_;
+            // CIDER-BUG-219: a method call through a POINTER dereferences it
+            // whatever dispatch route follows — the VIRTUAL_CALL below reads
+            // the vtable out of `[objPtr]`, the interface path reads the two
+            // fat-pointer words, and a direct method call reads `this.n` in
+            // the callee. So the check belongs here, on the receiver pointer,
+            // ahead of the route choice. It is the nil-receiver twin of the
+            // nil-*vtable* guard CIDER-BUG-211 added inside the interface path:
+            // that one catches a nil interface VALUE (zero vtable word), this
+            // one catches a nil pointer the receiver was read from, which the
+            // vtable guard cannot see. A class-typed receiver VALUE keeps the
+            // guard off — its address is a local or global slot, never nil.
+            const bool objViaPointer = objType.pointerLevel > 0;
             if (objType.pointerLevel > 0) objType.pointerLevel--;
+            if (objViaPointer) emitNilDerefCheck(objPtr);
 
             // CIDER-BUG-070: recover a missing interface flag from the
             // nominal spelling before choosing the dispatch path, so a
@@ -3234,7 +3258,24 @@ public:
         isAddress_ = wasAddress;
 
         TypeInfo objType = lastExprType_;
+        // CIDER-BUG-219: a pointer-typed object (`p.f`, `p->f`, `h.p.f`) is
+        // about to be dereferenced, and this is the one place both the field
+        // READ and the field WRITE (`p.f = v`, which asks for the address via
+        // getAddress) obtain the base, so one guard covers them. It is placed
+        // on the OBJECT pointer, not on `obj + field.offset` below: a field at
+        // a non-zero offset hides the nil base from an address-level test, and
+        // the VM's own zero-address guard could not see it either. A
+        // class-typed VALUE (`c.f`) keeps the guard off — its address is a
+        // local/global slot, which can never be nil — and so does the implicit
+        // `this` of a method (`this.f`), which is checked once at the call site
+        // instead: visit(CallExpr&) guards every pointer-typed receiver, so a
+        // method body can only be entered with a non-nil `this` from source.
+        // Re-checking it per field would put a branch on the hottest path in
+        // the language for a condition the call site has already decided.
+        const bool objViaPointer =
+            objType.pointerLevel > 0 && !isThisReceiver(expr.getObject());
         if (objType.pointerLevel > 0) objType.pointerLevel--;
+        if (objViaPointer) emitNilDerefCheck(obj);
 
         // CIDER-BUG-015: alias providers are STRUCT-kind plain Symbols;
         // resolve `type X = T` chains before the StructSymbol cast (an
@@ -3492,6 +3533,16 @@ public:
             expr.getOperand()->accept(*this);
             IRValue operand = lastValue_;
             type = lastExprType_;
+            // CIDER-BUG-219: `*p` is the dereference, so the nil check belongs
+            // here rather than at each consumer: an aggregate pointee returns
+            // its ADDRESS (below) and the load, copy or field access that
+            // consumes it happens further out, so a guard placed only on the
+            // scalar LOAD branch would miss `(*p).f`, `v = *p` and
+            // `(*p).m()`. `isAddress_` means the `*` is only naming a location
+            // (`&*p`, or a base the caller addresses through), which is not a
+            // dereference — matching the VM, whose zero-address guard sits in
+            // load/store and never fires for a bare address.
+            if (!isAddress_) emitNilDerefCheck(operand);
             if (isAddress_) {
                 lastValue_ = operand;
             } else {
@@ -5860,6 +5911,13 @@ public:
             if (unary->getOperator() == "*") {
                 unary->getOperand()->accept(*this);
                 addr = lastValue_;
+                // CIDER-BUG-219: an assignment target is evaluated by visiting
+                // the `*` OPERAND only, so visit(UnaryExpr&) — which owns the
+                // dereference's nil check — never runs for this shape. Guard
+                // the pointer here instead; it covers the plain store, the
+                // compound read-modify-write, and the interface-store
+                // (CIDER-BUG-100) shape that all three return through.
+                emitNilDerefCheck(addr);
                 // CID-003: remember the pointee so the store uses the
                 // declared width (`*p = 2.5` through an f64* must write 8
                 // bytes, not 4).
@@ -9739,6 +9797,64 @@ public:
         startBlock(okName);
     }
 
+    // CIDER-BUG-219: nil-pointer dereference guard. `ptr` is the pointer a
+    // source-level load, store, copy or call is about to go THROUGH — never
+    // the effective address, which may already carry a field offset or an
+    // index scale. That distinction is the whole fix: CIDER-BUG-059 made the
+    // VM fail only on the exact zero address, so `p[1]` through a nil `p`
+    // (effective address 8) silently read the first heap block's size header
+    // on the VM while native x86 executed `mov rax, [8]` and died with
+    // SIGSEGV and no output. Guarding the POINTER closes that hole and gives
+    // the general case the defined route the nil-interface dispatch got in
+    // CIDER-BUG-211: a `_nil_deref_fail` call, the same shape as
+    // emitNilDispatchCheck above, answering `vm error: null pointer
+    // dereference` on stderr and exit 2 on VM/native/pomeos, and `ud2` on
+    // uefi. Like the 211 guard this is NOT `--checks`-gated: the VM's own
+    // zero-address report is unconditional, so gating would leave the
+    // backends disagreeing in the default configuration.
+    //
+    // A pointer that is provably not nil costs nothing: a LABEL is a static
+    // symbol address, and a non-zero CONSTANT is a folded address. A CONSTANT
+    // zero is a statically known nil, so it traps unconditionally (the same
+    // fold-to-a-trap shape emitBoundsCheck uses for an out-of-range constant
+    // index).
+    void emitNilDerefCheck(const IRValue& ptr) {
+        if (ptr.kind == IRValue::LABEL) return;
+        if (ptr.kind == IRValue::CONSTANT && ptr.intValue != 0) return;
+        std::string failName = nextLabel("nil_deref_fail");
+        std::string okName = nextLabel("nil_deref_ok");
+        if (ptr.kind == IRValue::CONSTANT) {
+            // Statically nil: trap straight away, then a fresh block so the
+            // deref sequence still has a well-formed block (only reachable if
+            // a user-defined _nil_deref_fail returns).
+            startBlock(failName);
+            emitNilDerefTrap(okName);
+            return;
+        }
+        IRValue isNil = IRValue::Register(nextTemp(), IRType::BOOL);
+        currentBlock_->addInstruction(
+            {IROp::CMP_EQ, isNil, {ptr, IRValue::Constant(0, IRType::I64)}});
+        currentBlock_->addInstruction({IROp::COND_BR, std::nullopt,
+                                       {isNil, IRValue::Label(failName),
+                                        IRValue::Label(okName)}});
+        startBlock(failName);
+        emitNilDerefTrap(okName);
+    }
+
+    // The trap half of emitNilDerefCheck, factored out so the statically-nil
+    // fold and the runtime check share it: call `_nil_deref_fail`, branch back
+    // so the CFG stays well-formed (the routine never returns on VM/native, but
+    // a user-defined `_nil_deref_fail` may), and continue in the resume block.
+    void emitNilDerefTrap(const std::string& okName) {
+        IRInstruction call;
+        call.op = IROp::CALL;
+        call.dest = std::nullopt;
+        call.args.push_back(IRValue::Label("_nil_deref_fail"));
+        currentBlock_->addInstruction(call);
+        currentBlock_->addInstruction({IROp::BR, std::nullopt, {IRValue::Label(okName)}});
+        startBlock(okName);
+    }
+
     void visit(IndexExpr& expr) override {
         bool wasAddress = isAddress_;
         isAddress_ = false;
@@ -9755,6 +9871,17 @@ public:
         // decision. resolveTypeAlias stops at array/fn wrappers, so resolve
         // the base first, strip, then resolve the element.
         baseType = resolveTypeAlias(baseType);
+        // CIDER-BUG-219: a pointer base (`p[i]`) is about to be dereferenced,
+        // and this is the one place both the element READ and the element
+        // WRITE (`p[i] = v`, which asks for the address via getAddress)
+        // obtain the base. The guard goes on the POINTER, before the index
+        // scale is folded into the address below: with a nil `p`, `p[1]` has
+        // effective address 8, which the VM's exact-zero CIDER-BUG-059 test
+        // could not see (it read the first heap block's size header and
+        // returned 0) while native x86 executed `mov rax, [8]` and died with
+        // SIGSEGV and no output. An array/struct VALUE base keeps the guard
+        // off — its address is a local or global slot, never nil.
+        if (baseType.pointerLevel > 0) emitNilDerefCheck(obj);
         // CIDER-ISS-001: --checks guards an index into a fixed-size array
         // VALUE against the array's static length before the scaled address
         // is formed. A pointer base (pointerLevel > 0) stays unchecked: its

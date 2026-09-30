@@ -1461,6 +1461,102 @@ int run() {
         CHECK(vm.run(mod).exitCode == 0);
     }
 
+    // CIDER-BUG-219: ir-gen's nil-pointer guard calls `_nil_deref_fail` when a
+    // source-level load, store, copy or method call is about to go through a
+    // nil pointer. The VM must answer with the same message the native helper
+    // writes, so both backends report `vm error: null pointer dereference` and
+    // exit 2. Without the guard this surfaced only through load's
+    // CIDER-BUG-059 exact-zero test, as `load:`/`store:`/`memcpy: null pointer
+    // dereference` — and not at all for `p[1]` through a nil `p`, whose
+    // effective address 8 the exact-zero test cannot see.
+    {
+        auto fn = makeFn("main", cider::IRType::I32);
+        auto e = std::make_unique<cider::BasicBlock>("entry");
+        cider::IRInstruction boom;
+        boom.op = cider::IROp::CALL;
+        boom.args = {cider::IRValue::Label("_nil_deref_fail")};
+        e->addInstruction(boom);
+        cider::IRInstruction ret;
+        ret.op = cider::IROp::RET;
+        ret.args = {cider::IRValue::Constant(0, cider::IRType::I32)};
+        e->addInstruction(ret);
+        fn->addBlock(std::move(e));
+        cider::ModuleIR mod;
+        mod.addFunction(std::move(fn));
+        cider::VM vm;
+        bool threw = false;
+        try {
+            vm.run(mod);
+        } catch (const cider::VMError& err) {
+            threw = true;
+            // Exact text: run_tests.py pins the same string byte for byte
+            // against the native helper's `db "vm error: null pointer
+            // dereference"` payload, and the smoke test pins `mov rdx, 35`
+            // (its length) alongside it.
+            CHECK(err.message == "null pointer dereference");
+        }
+        CHECK(threw);
+    }
+    {
+        // The guard is a builtin, so `cider run` must recognise the label
+        // instead of failing with an unresolved-label error. This mirrors the
+        // three-block shape ir-gen emits: a nil comparison on the POINTER
+        // (before any address arithmetic) whose fail edge calls the builtin
+        // and rejoins the live path, with the dereference itself in that
+        // rejoined block. The live path must still run, so the guard costs a
+        // not-taken branch and nothing else when the pointer is not nil.
+        auto fn = makeFn("main", cider::IRType::I32);
+        auto e = std::make_unique<cider::BasicBlock>("entry");
+        // `alloca` yields the slot's address, so %slot IS the pointer: a real,
+        // non-nil heap address, never the zero address nilPtr is.
+        e->addInstruction(opInstr(cider::IROp::ALLOCA, "slot",
+                                  {cider::IRValue::Constant(8, cider::IRType::I32)}));
+        cider::IRInstruction st;
+        st.op = cider::IROp::STORE;
+        st.dest = std::nullopt;
+        st.args = {cider::IRValue::Register("slot", cider::IRType::PTR),
+                   cider::IRValue::Constant(0x1234, cider::IRType::I64),
+                   cider::IRValue::Constant(0, cider::IRType::I32)};
+        e->addInstruction(st);
+        cider::IRInstruction cmp;
+        cmp.op = cider::IROp::CMP_EQ;
+        cmp.dest = cider::IRValue::Register("isnil", cider::IRType::BOOL);
+        cmp.args = {cider::IRValue::Register("slot", cider::IRType::PTR),
+                    cider::IRValue::Constant(0, cider::IRType::I64)};
+        e->addInstruction(cmp);
+        e->addInstruction({cider::IROp::COND_BR, std::nullopt,
+                           {cider::IRValue::Register("isnil", cider::IRType::BOOL),
+                            cider::IRValue::Label("fail"),
+                            cider::IRValue::Label("ok")}});
+        fn->addBlock(std::move(e));
+        auto fail = std::make_unique<cider::BasicBlock>("fail");
+        cider::IRInstruction boom;
+        boom.op = cider::IROp::CALL;
+        boom.args = {cider::IRValue::Label("_nil_deref_fail")};
+        fail->addInstruction(boom);
+        fail->addInstruction({cider::IROp::BR, std::nullopt, {cider::IRValue::Label("ok")}});
+        fn->addBlock(std::move(fail));
+        auto ok = std::make_unique<cider::BasicBlock>("ok");
+        // The dereference the guard protects, in the block both edges rejoin.
+        cider::IRInstruction ld2;
+        ld2.op = cider::IROp::LOAD;
+        ld2.dest = cider::IRValue::Register("val", cider::IRType::I64);
+        ld2.args = {cider::IRValue::Register("slot", cider::IRType::PTR),
+                    cider::IRValue::Constant(0, cider::IRType::I32)};
+        ok->addInstruction(ld2);
+        cider::IRInstruction ret;
+        ret.op = cider::IROp::RET;
+        // Returning the guarded load's own result proves both that the live
+        // path ran and that the guard did not clobber the pointer.
+        ret.args = {cider::IRValue::Register("val", cider::IRType::I64)};
+        ok->addInstruction(ret);
+        fn->addBlock(std::move(ok));
+        cider::ModuleIR mod;
+        mod.addFunction(std::move(fn));
+        cider::VM vm;
+        CHECK(vm.run(mod).exitCode == 0x1234);
+    }
+
     // CID-006 F1 (front-end shape): ir_gen now registers `extern var` via
     // addExternVariable, so a value read cannot resolve to any function id
     // and fails with the pre-CID-006 clean unresolved-label error.
