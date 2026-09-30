@@ -10721,8 +10721,18 @@ public:
             lastExprType_ = {currentClassName_, 1};
             lastExprType_.isUserDefined = true;
         } else {
-            // Handle error or default
+            // CIDER-BUG-241: this branch used to set only `lastValue_`, so a
+            // `this` reaching it left `lastExprType_` naming whatever ran
+            // before — the same stale-type shape as the struct-declaration
+            // poison this ticket removes. It is unreachable from checked
+            // source (the checker rejects `'this' used outside of a class
+            // method` and the driver aborts before codegen), but a visitor
+            // that produces a value must name its type on every path, like
+            // visit(SuperExpr)'s and visit(ListExpr)'s error branches. Mark
+            // it `error` so a consumer that ever reached it types the value
+            // as an error instead of borrowing an unrelated type.
             lastValue_ = IRValue::Constant(0, IRType::PTR);
+            lastExprType_ = {"error", 0};
         }
     }
     void visit(ListExpr& expr) override {
@@ -11094,7 +11104,34 @@ public:
         }
         if (ssym && (ssym->kind == SymbolKind::STRUCT || ssym->kind == SymbolKind::CLASS))
             structSyms_.push_back(std::static_pointer_cast<StructSymbol>(ssym));
-        lastExprType_ = {stmt.getName(), 0};
+        // CIDER-BUG-241: this visitor emits NO value, so it must not name
+        // one. It used to write the declared struct's type into
+        // `lastExprType_`, which is the shared "type of the value the last
+        // visitor produced" slot every expression visitor both writes and
+        // reads. A declaration is not an expression: writing a struct type
+        // there poisoned the next value-producing visitor that did not
+        // overwrite it on its own path. `return sizeof(int);` in the first
+        // function after a struct declaration inherited `Pt`, and the return
+        // path — which reads the type of the value it just built to decide
+        // whether to box (visit(ReturnStmt)'s interface branch and
+        // `isByValueAggregate(retType)` heap path) — boxed the constant:
+        // `malloc 12; memcpy %v0, 4, 12; ret %v0`, read back as a pointer.
+        //
+        // The size was CIDER-FEAT-007's consumer fix, which made
+        // visit(SizeofExpr) name its own `int`; this is the producer half,
+        // and it is what made the bug reachable at all: the sizeof case was
+        // one instance of "whatever ran before left a struct type here".
+        // CIDER-FEAT-007's own program could not observe the difference (its
+        // preceding declaration is the same `Point`, so the checker agrees
+        // with sizeof either way), which is why the miscompile survived a
+        // fix aimed at it.
+        //
+        // No sibling decl visitor writes this slot — visit(ClassDeclStmt),
+        // visit(InterfaceDeclStmt), visit(EnumDeclStmt) and
+        // visit(TypeAliasStmt) all leave it alone, and the checker's own
+        // visit(StructDeclStmt) does not set its `lastExprType_` either.
+        // Matching them removes the poison source rather than patching each
+        // consumer that could read it.
     }
     void visit(EnumDeclStmt&) override {}
     void visit(TypeAliasStmt&) override {

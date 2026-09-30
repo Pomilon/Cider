@@ -203,6 +203,104 @@ int run() {
         }
     }
 
+    // CIDER-BUG-241: a DECLARATION is not an expression, so
+    // visit(StructDeclStmt) must not write ir_gen's shared "type of the value
+    // the last visitor produced" slot (`lastExprType_`). It used to store the
+    // declared struct's type there, poisoning whatever value came next: a
+    // return site reads that slot back (`retType = lastExprType_`) to decide
+    // whether to box a concrete struct, so a scalar returned right after a
+    // struct declaration was boxed into `malloc 12; memcpy %v0, 4, 12; ret
+    // %v0` and read back as a pointer.
+    //
+    // The observable is the IR SHAPE of the first function after a struct
+    // declaration: the type the return site reads decides between a plain
+    // `ret <value>` and an aggregate copy, so a scalar return must emit
+    // neither `malloc` nor `memcpy`.
+    //
+    // After CIDER-FEAT-007 the write is LATENT — that commit's own consumer
+    // fix makes visit(SizeofExpr) name its type, and a diff of every
+    // `cider build` over the whole test corpus is byte-identical with and
+    // without this line. So these cases are a GUARD rather than a live
+    // reproduction: they pin the invariant so the hazard cannot come back
+    // through a future value-producing visitor that forgets to name its
+    // type. The live end-to-end reproduction is
+    // tests/programs/irgen_return_type_stale, which fails (exit 1) when both
+    // halves are absent.
+    {
+        // A struct (12 bytes, a by-value aggregate) declared immediately
+        // before each function. `interface`/`class` declarations appear as
+        // controls: neither ever wrote the slot, so they must be unchanged.
+
+        // Each function is its own case: a declaration only poisons the
+        // value that IMMEDIATELY follows it, so no other declaration or
+        // function body may sit between the pair.
+        struct Case { const char* decl; const char* fn; const char* ret; };
+        const Case cases[] = {
+            {"struct Pt { var x: int; var y: int; var z: int; }\n",
+             "func f() -> int { return 4; }\n", "ret 4"},
+            {"struct Pt { var x: int; var y: int; var z: int; }\n",
+             "func f() -> int { return sizeof(int); }\n", "ret 4"},
+            {"struct Pt { var x: int; var y: int; var z: int; }\n",
+             "func f() -> int { return 0 + 4; }\n", "add"},
+            {"struct Pt { var x: int; var y: int; var z: int; }\n",
+             "func f() -> int { return -4; }\n", "sub"},
+            {"struct Pt { var x: int; var y: int; var z: int; }\n",
+             "func f() -> bool { return true; }\n", "ret 1"},
+            {"struct Pt { var x: int; var y: int; var z: int; }\n",
+             "func f() -> char { return 'a'; }\n", "ret 97"},
+            {"struct Pt { var x: int; var y: int; var z: int; }\n",
+             "func f() -> float { return 1.5; }\n", "ret 1.5"},
+            {"struct Pt { var x: int; var y: int; var z: int; }\n",
+             "func f() -> int { var v: int = 4; return v; }\n", "ret %v"},
+            // The interface and class declarations are controls: neither
+            // ever wrote the slot, so the same shapes must be unchanged.
+            {"interface Shape { func area() -> int; }\n",
+             "func f() -> int { return 4; }\n", "ret 4"},
+            {"interface Shape { func area() -> int; }\n",
+             "func f() -> int { return sizeof(int); }\n", "ret 4"},
+            {"class Sq { var side: int;\n"
+             "  func init(v: int) { this.side = v; }\n"
+             "  func area() -> int { return this.side; } }\n",
+             "func f() -> int { return 4; }\n", "ret 4"},
+            {"class Sq { var side: int;\n"
+             "  func init(v: int) { this.side = v; }\n"
+             "  func area() -> int { return this.side; } }\n",
+             "func f() -> int { return sizeof(int); }\n", "ret 4"},
+        };
+
+        for (const auto& c : cases) {
+            std::string body = genSrc(std::string(c.decl) + c.fn);
+            // Extract just f's body: the point is that THIS function did not
+            // take an aggregate path, which the surrounding declarations
+            // could have pushed it onto.
+            size_t fpos = body.find("define f() {");
+            CHECK(fpos != std::string::npos);
+            std::string fbody = body.substr(fpos, body.find("\n}", fpos) - fpos);
+            // A scalar return never allocates a box or copies an aggregate.
+            // Both appeared only when the return site mis-read the type.
+            CHECK(fbody.find("malloc") == std::string::npos);
+            CHECK(fbody.find("memcpy") == std::string::npos);
+            CHECK(fbody.find(c.ret) != std::string::npos);
+        }
+
+        // A declaration must be typed or ignored, never lowered: a struct
+        // declaration emits no code of its own, so the module holds exactly
+        // the one function below and nothing else.
+        std::string only = genSrc(
+            "struct Pt { var x: int; var y: int; var z: int; }\n"
+            "func f() -> int { return 4; }\n");
+        CHECK(countOf(only, "define ") == 1);
+
+        // And the aggregate path still fires when a value IS an aggregate:
+        // the fix is "type the value that was produced", not "stop typing
+        // aggregates". A struct-valued return keeps its copy.
+        std::string agg = genSrc(
+            "struct Pt { var x: int; var y: int; var z: int; }\n"
+            "func g() -> Pt { var p: Pt; return p; }\n");
+        CHECK(agg.find("define g() {") != std::string::npos);
+        CHECK(agg.find("memcpy") != std::string::npos);
+    }
+
     // Local var + assignment: alloca/store/load sequence.
     d = genSrc("func main() -> void {\n  var x: int = 1;\n  x = x + 1;\n}\n");
     CHECK(d.find("alloca") != std::string::npos);
