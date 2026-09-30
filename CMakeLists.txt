@@ -239,6 +239,19 @@ add_test(NAME asm_spilled_operand_smoke
          COMMAND bash ${CMAKE_SOURCE_DIR}/tests/unit/asm_spilled_operand_smoke.sh $<TARGET_FILE:cider>)
 set_tests_properties(asm_spilled_operand_smoke PROPERTIES SKIP_RETURN_CODE 77)
 
+# CIDER-BUG-234: VIRTUAL_CALL argument pushes bypassed pushArg, missing the
+# label, xmm, spilled-narrow-integer and wide-immediate cases it stages: a
+# float argument emitted `push xmmN` (NASM hard error), a wide u64 immediate
+# truncated to 32 bits, a function argument pushed as a 32-bit address, and
+# a spilled narrow int pushed as a whole qword over stale stack. Runs the
+# corpus program (spilled narrow int, float, wide immediate and function
+# arguments through virtual calls) on all three backends, and pins the
+# emitted staging so the corpus program cannot silently stop covering the
+# paths it exists for. Exits 77 when nasm/gcc are missing.
+add_test(NAME virtual_call_args_smoke
+         COMMAND bash ${CMAKE_SOURCE_DIR}/tests/unit/virtual_call_args_smoke.sh $<TARGET_FILE:cider>)
+set_tests_properties(virtual_call_args_smoke PROPERTIES SKIP_RETURN_CODE 77)
+
 # CIDER-BUG-162: the inliner's site term must not grow with the clones it
 # produces. A 20-site destructor chain whose helpers each call the next twice
 # used to double the IR every optimizer round and take minutes to compile;

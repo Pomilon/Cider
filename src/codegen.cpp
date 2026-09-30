@@ -2623,10 +2623,14 @@ bool CodeGenerator::generate(ModuleIR& module, const std::string& outputPath,
                         }
                         addText("    mov r11, [rax + " + std::to_string(vtableIndex * 8) + "]");
 
-                        // Push all params including 'this'
-                        addText("    push " + objPtr);
+                        // Push all params including 'this'. Route every push
+                        // through pushArg (CIDER-BUG-234), exactly like the
+                        // CALL paths above: a raw push misses the LABEL,
+                        // xmm, spilled-narrow-integer and wide-immediate
+                        // cases pushArg stages.
+                        pushArg(instr.args[0]);
                         for (size_t i = 2; i < instr.args.size() && (i - 1) < argRegs.size(); ++i) {
-                            addText("    push " + getOperand(instr.args[i]));
+                            pushArg(instr.args[i]);
                         }
 
                         // Pop into ABI regs (rdi, rsi, rdx...)
