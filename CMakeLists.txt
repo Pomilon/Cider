@@ -178,6 +178,17 @@ add_test(NAME separate_compilation_smoke
          COMMAND bash ${CMAKE_SOURCE_DIR}/tests/unit/separate_compilation_smoke.sh $<TARGET_FILE:cider>)
 set_tests_properties(separate_compilation_smoke PROPERTIES SKIP_RETURN_CODE 77)
 
+# CIDER-BUG-222: std resolution must not depend on where the compiler binary
+# lives. Copies one binary into three differently deep build directories
+# around a single stdlib and requires `compile`, `compile -g`, `bundle` and
+# `build` to be byte-identical from all three (before the fix the resolved
+# path — which lands in bundle banners and the DWARF file table — carried the
+# binary's own `..` segments, and the deepest copy resolved nothing at all).
+# Needs no assembler: it compares emitted text.
+add_test(NAME std_resolve_smoke
+         COMMAND bash ${CMAKE_SOURCE_DIR}/tests/unit/std_resolve_smoke.sh $<TARGET_FILE:cider>)
+set_tests_properties(std_resolve_smoke PROPERTIES SKIP_RETURN_CODE 77)
+
 # CIDER-BUG-162: the inliner's site term must not grow with the clones it
 # produces. A 20-site destructor chain whose helpers each call the next twice
 # used to double the IR every optimizer round and take minutes to compile;
