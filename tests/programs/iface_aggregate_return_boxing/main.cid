@@ -55,6 +55,10 @@
 //   * 200 calls in a loop: dispatch stays valid and nothing grows (the
 //     leak-free property is pinned by VM allocation accounting in
 //     tests/unit/vm_iface_aggregate_box_test.cpp).
+//
+// CIDER-BUG-221: the "move the implementor to a global" control now declares
+// its global BELOW the function that reads it, so the order no longer
+// decides whether the control means anything. See `var g: Sq;` below.
 import lib;
 from std.io import print, printInt;
 
@@ -113,8 +117,6 @@ type Alias = Holder;
 type IfaceAlias = Shape;
 type ArrAlias = [Shape; 2];
 type Rows = [[Shape; 2]; 2];
-
-var g: Sq;
 
 // --- the ticket repro -------------------------------------------------------
 
@@ -254,6 +256,18 @@ func loopImpl() -> Holder {
   var h: Holder; h.s = i; h.tag = 0;
   return h;
 }
+
+// CIDER-BUG-221: the control's global implementor, declared BELOW the
+// function that converts it to an interface. While ir_gen registered a
+// module-scope variable's storage as a side effect of walking declarations in
+// source order, a function above the declaration resolved the name to a
+// symbol with no storage: reading the aggregate by address fell through to
+// getAddress(), which re-ran the same visit with isAddress_ set, failed
+// identically and recursed until the stack died — so this control did not
+// pin what it claims to. Its expected output is unchanged: the same six
+// implementors are released and the same global is finalized at exit, only
+// the storage now exists before globalField() is generated.
+var g: Sq;
 
 func main() -> int {
   // The repro: a local implementor in a returned struct's field, dispatched

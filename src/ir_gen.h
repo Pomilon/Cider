@@ -137,6 +137,8 @@ public:
         ifaceSyms_.clear();
         globalValues_.clear();
         pendingGlobalInits_.clear();
+        declaredGlobals_.clear();
+        storageOnlyPass_ = false;
         entryFunctions_.clear();
         exceptionGlobalsEnsured_ = false;
         interpHelpersEnsured_ = false;
@@ -909,6 +911,9 @@ public:
         for (auto& imported : program.getImportedAsts()) {
             imported->accept(*this);
         }
+        // CIDER-BUG-221: declare this module's own variable storage before any
+        // of its function bodies is generated, whatever the source order.
+        predeclareModuleStorage(program);
         for (auto& stmt : program.getStatements()) {
             visitStatement(stmt.get());
         }
@@ -916,6 +921,55 @@ public:
         symbolTable_.setCurrentScope(prevScope);
         currentModule_ = prevModule;
         currentSourcePath_ = prevPath;
+    }
+
+    // CIDER-BUG-221: module-scope variable STORAGE must exist before any
+    // function body that can name the variable is generated.
+    //
+    // Root cause: `globalValues_` — the storage-label table every global
+    // reference resolves through — was filled as a SIDE EFFECT of walking the
+    // declarations in source order, while the collector's symbol table
+    // already held every one of them. A function written ABOVE a module-scope
+    // `var` therefore resolved the name to a symbol with no storage behind it:
+    // a scalar read reported "cannot resolve identifier" (a clean diagnostic
+    // for a program the checker had accepted), and an AGGREGATE one — a struct,
+    // class, array or interface value, the shapes visit(IdentifierExpr)
+    // presents by address — fell through to getAddress(), which re-ran the
+    // very same visit with isAddress_ set, failed identically and recursed
+    // until the stack died. That is the crash behind the ticket's repro
+    // (`func other() -> Other { return gOther; }` with `var gOther: OImpl;`
+    // below it) and it is a COMPILER crash, so it takes down all three
+    // backends alike. The same hole took out any aggregate-global use above
+    // its declaration: a field store, a by-value argument, `&g`, a whole
+    // aggregate read, an array element, and the "move the implementor to a
+    // global" control in tests/programs/iface_aggregate_return_boxing once
+    // its `var g: Sq;` sits below its use.
+    //
+    // This pre-pass runs the `var` declarations of THIS module, in source
+    // order, with storageOnlyPass_ set: only the .bss/.data slot, the `dq`
+    // cell, the extern directive and the globalValues_ label are emitted. The
+    // symbol the scope keeps, the globalVars_ order, the synthesized startup
+    // and fini passes and every generated function stay exactly where source
+    // order put them, because the main walk still visits each declaration and
+    // finds its storage already declared (the declaredGlobals_ guard). An
+    // imported module is handled by its own visit(AstProgram&), which runs
+    // before the importer's, so a module never needs the importer's globals.
+    void predeclareModuleStorage(AstProgram& program) {
+        storageOnlyPass_ = true;
+        for (const auto& stmt : program.getStatements()) {
+            VarDeclStmt* var = dynamic_cast<VarDeclStmt*>(stmt.get());
+            if (!var) {
+                // `export var` reaches ir_gen as an ExportStmt wrapping the
+                // declaration, and visit(ExportStmt) unwraps it during the
+                // main walk — so the pre-pass must see through it too.
+                auto* exported = dynamic_cast<ExportStmt*>(stmt.get());
+                if (!exported) continue;
+                var = dynamic_cast<VarDeclStmt*>(exported->getStmt());
+            }
+            if (!var) continue;
+            visitStatement(var);
+        }
+        storageOnlyPass_ = false;
     }
 
     static std::string sanitizeAsmName(const std::string& name) {
@@ -3658,8 +3712,13 @@ public:
         // `constInit` for folding) stays in the scope untouched.
         if (stmt.isMetaDecl()) {
             std::string gname = emitGlobalName(currentModule_, stmt.getName());
-            module_.addExternVariable(gname);
-            globalValues_[gname] = IRValue::Label(gname);
+            // CIDER-BUG-221: the storage pre-pass (predeclareModuleStorage)
+            // may have declared it already; a second declaration would emit
+            // the extern directive twice.
+            if (declaredGlobals_.insert(gname).second) {
+                module_.addExternVariable(gname);
+                globalValues_[gname] = IRValue::Label(gname);
+            }
             return;
         }
         auto sym = std::make_shared<Symbol>();
@@ -3689,7 +3748,14 @@ public:
             auto pit = symbolModules_.find(prev->id);
             if (pit != symbolModules_.end()) symbolModules_[sym->id] = pit->second;
         }
-        symbolTable_.define(sym);
+        // CIDER-BUG-221: the storage pre-pass (predeclareModuleStorage) runs
+        // this very visit for a module-scope `var` before any function body
+        // is generated, and it must touch the STORAGE only: the symbol the
+        // scope ends up with, the startup/fini passes' ordering and the
+        // generated functions all keep their original source order, so the
+        // pre-pass leaves the collector's object in the scope for the main
+        // walk to replace as before.
+        if (!storageOnlyPass_) symbolTable_.define(sym);
 
         if (stmt.isExtern()) {
             // Linker-provided symbol (CID-001): no storage emitted, just an
@@ -3698,8 +3764,10 @@ public:
             // unresolved-label error. CID-006 F1: variables are registered
             // as extern DATA — treating them as extern functions made the VM
             // fabricate a function VALUE and OOB-read the heap.
-            module_.addExternVariable(stmt.getName());
-            globalValues_[stmt.getName()] = IRValue::Label(stmt.getName());
+            if (declaredGlobals_.insert(stmt.getName()).second) {
+                module_.addExternVariable(stmt.getName());
+                globalValues_[stmt.getName()] = IRValue::Label(stmt.getName());
+            }
             return;
         }
 
@@ -3710,11 +3778,26 @@ public:
             // the plain representation, so reads and calls take the typed
             // indirect path instead of the closure-object path. nilPtr and
             // closure initializers keep the closure marker.
+            // CIDER-BUG-221: this normalisation belongs to the DECLARATION,
+            // not to the storage emission: it rewrites the type the scope
+            // keeps, so it has to run on every visit of the declaration. The
+            // pre-pass emits the slot from its own throwaway symbol and the
+            // main walk then skips the storage, so leaving this down among
+            // the storage paths would leave `var g: func(int) -> int = inc;`
+            // marked as a closure — the read then took the code address for a
+            // closure object and called it.
             TypeInfo declaredFn = resolveFunctionPointerAlias(sym->type);
             if (declaredFn.isClosure &&
                 !functionPointerInitTarget(stmt.getInitializer()).empty()) {
                 sym->type = declaredFn;
                 sym->type.isClosure = false;
+            }
+            // CIDER-BUG-221: the pre-pass already emitted this variable's
+            // storage (the label every reference to it resolves through), so
+            // reaching the emission again means the declaration was walked
+            // twice; emitting a second slot would duplicate the symbol.
+            if (!declaredGlobals_.insert(emitGlobalName(currentModule_, stmt.getName())).second) {
+                return;
             }
             // CID-020/021 (spec §5): module-scope globals emit under the
             // defining module's mangled name; main-file globals stay bare.
@@ -5042,6 +5125,17 @@ public:
             return;
         }
 
+        // CIDER-BUG-221: an address-like value is presented as its address,
+        // and for a bare identifier getAddress() can only re-run the branch
+        // above (it re-visits this same expression with isAddress_ set). It
+        // is therefore reached only when that branch found no storage at
+        // all, and going there anyway recursed without bound: `storageMissing`
+        // is the case, so the second visit failed the same way and the third
+        // with it, until the stack died. predeclareModuleStorage removes the
+        // cause (a module-scope `var` used above its declaration); this guard
+        // keeps any other way of reaching it a reported reference instead of
+        // a crash.
+        bool storageMissing = false;
         if (isAddress_) {
             if (variableValues_.count(expr.getName())) {
                 lastValue_ = variableValues_[expr.getName()];
@@ -5054,9 +5148,11 @@ public:
                 lastValue_ = globalValues_[gkey];
                 return;
             }
+            storageMissing = true;
         }
 
-        if (lastExprType_.isArray || lastExprType_.isUserDefined || lastExprType_.isInterface) {
+        if ((lastExprType_.isArray || lastExprType_.isUserDefined || lastExprType_.isInterface) &&
+            !storageMissing) {
             lastValue_ = getAddress(&expr);
             return;
         }
@@ -10771,6 +10867,15 @@ private:
         bool isVolatile = false;
     };
     std::vector<PendingGlobalInit> pendingGlobalInits_;
+    // CIDER-BUG-221: the storage keys (mangled global labels, or the bare name
+    // of an `extern` one) whose declaration has already been emitted, either
+    // by the storage pre-pass (predeclareModuleStorage) or by an earlier visit
+    // of the same declaration. Storage is emitted exactly once per key.
+    std::set<std::string> declaredGlobals_;
+    // CIDER-BUG-221: set while the storage pre-pass runs a `var` declaration,
+    // so it skips the parts of visit(VarDeclStmt) that belong to the main walk
+    // (above all replacing the scope's symbol).
+    bool storageOnlyPass_ = false;
     // CIDER-BUG-087: top-level entry functions (main/_start/efi_main)
     // generated in this unit; each runs the global initializer pass.
     std::vector<FunctionIR*> entryFunctions_;

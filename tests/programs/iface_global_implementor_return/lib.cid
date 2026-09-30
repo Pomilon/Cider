@@ -1,0 +1,46 @@
+// CIDER-BUG-221 module half: the global concrete implementor, the
+// interface-typed global that holds it and the global array it also lives in
+// are declared in an IMPORTED module, BELOW the exported class that returns
+// them through interface-typed methods. The pre-pass that declares a module's
+// variable storage before its function bodies (predeclareModuleStorage) has
+// to run for the imported module too, with the mangled labels the entry file
+// references.
+export interface ROther {
+  func o() -> int;
+  func tag() -> int;
+}
+
+export class RImpl {
+  var v: int;
+  func o() -> int { return this.v; }
+  func tag() -> int { return 7; }
+}
+
+// Declared BEFORE the exported class below reads it: the order the compiler
+// already handled, kept as the control.
+export var rImplFirst: RImpl;
+
+export class RFirst {
+  func other() -> ROther { return rImplFirst; }
+}
+
+// The class comes first, and every variable its method bodies name comes
+// after: the order that used to kill the compiler with a stack overflow.
+export class RLater {
+  func viaImpl() -> ROther { return rImpl; }
+  func viaIface() -> ROther { return rIface; }
+  func viaElem() -> ROther { return rArr[1]; }
+  func viaLocal() -> ROther {
+    var t: RImpl;
+    t.v = 3;
+    return t;
+  }
+}
+
+export var rImpl: RImpl;
+export var rIface: ROther;
+export var rArr: [RImpl; 2];
+
+// The interface-typed global is converted here, in its own module, which is
+// where an interface store of a module-qualified global is accepted.
+export func seedIface() -> void { rIface = rImpl; }
