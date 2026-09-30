@@ -23,14 +23,23 @@ public:
             escapingParams_[func->getName()] = {};
         }
         computeSummaries(module);
+        zeroBuffers_.clear();
+        zeroFillTempCount_ = 0;
         for (auto& func : module.getFunctions()) {
-            analyzeAndRewrite(*func);
+            analyzeAndRewrite(module, *func);
         }
     }
 
 private:
     // func name -> set of param indices that escape
     std::map<std::string, std::set<int>> escapingParams_;
+
+    // CIDER-BUG-221: a promoted block must present the same BYTES the heap
+    // block presented, not just the same address class. Shared zero buffers
+    // for the fill (size -> label) and the temp-name counter for the MOV that
+    // materializes each buffer's address. Both reset per run().
+    std::map<int, std::string> zeroBuffers_;
+    int zeroFillTempCount_ = 0;
 
     // Per-analysis state (rebuilt per call):
     std::map<std::string, const IRInstruction*> defs_;  // reg -> defining instruction
@@ -304,8 +313,60 @@ private:
         }
     }
 
-    void analyzeAndRewrite(FunctionIR& func) {
-        std::vector<std::pair<BasicBlock*, size_t>> toRemove;
+    // CIDER-BUG-221: a lazily created static block of `size` zero bytes, the
+    // same trick ir_gen's emitZeroInstance uses for `new C`. Native emits it
+    // in .bss (zero at load by definition) and the VM zero-fills global
+    // storage, so the copy source reads 0 on every backend. One block per
+    // distinct size keeps the data small; the label has no source path, so
+    // codegen keeps it a local symbol and separate-compilation objects cannot
+    // collide on it (see codegen's global loop). The prefix differs from
+    // ir_gen's `_cider_zero_` so one module never defines the same label twice.
+    std::string zeroBufferLabel(ModuleIR& module, int size) {
+        auto it = zeroBuffers_.find(size);
+        if (it == zeroBuffers_.end()) {
+            std::string label = "_cider_zeroblock_" + std::to_string(size);
+            module.addGlobalVar(label, IRType::U8, 0, 0, size, false);
+            it = zeroBuffers_.emplace(size, label).first;
+        }
+        return it->second;
+    }
+
+    // CIDER-BUG-221: a promoted malloc must hand the program the same bytes the
+    // heap block did. CIDER-BUG-215 made "fresh memory reads 0" the language's
+    // explicit policy on all three backends, so a bare ALLOCA silently replaced
+    // that guarantee with whatever the native stack happened to hold -- the VM
+    // zeroes its frame region (CIDER-BUG-115) and therefore kept agreeing with
+    // the heap, while native served frame residue. CIDER-BUG-067 already zeroes
+    // the `new` path for exactly this reason; the fill belongs here too, and it
+    // is emitted right after the ALLOCA so the slot reads 0 from its first use.
+    // MOV/MEMCPY are understood by every backend and by every pass, so no new
+    // IR op is needed.
+    void insertZeroFill(ModuleIR& module, std::vector<IRInstruction>& instrs,
+                        size_t at, const std::string& allocReg, int slotSize) {
+        if (at > instrs.size() || slotSize <= 0) return;
+        IRValue src = IRValue::Register("ciderzerofill" + std::to_string(zeroFillTempCount_++),
+                                        IRType::PTR);
+        instrs.insert(instrs.begin() + at,
+                      IRInstruction{IROp::MOV, src, {IRValue::Label(zeroBufferLabel(module, slotSize))}});
+        instrs.insert(instrs.begin() + at + 1,
+                      IRInstruction{IROp::MEMCPY, std::nullopt,
+                                    {IRValue::Register(allocReg, IRType::PTR), src,
+                                     IRValue::Constant(slotSize, IRType::I32)}});
+    }
+
+    // A pending rewrite of one block instruction. The index is in the space
+    // the block has while the pass walks it: converting a CALL to an ALLOCA
+    // rewrites the instruction in place, and nothing is inserted or erased
+    // until every block has been walked, so one space covers the whole block.
+    struct Edit {
+        size_t index;
+        bool insertFill;   // true: MOV + MEMCPY after `index`
+        int slotSize;      // fill only: bytes to zero
+        std::string allocReg;
+    };
+
+    void analyzeAndRewrite(ModuleIR& module, FunctionIR& func) {
+        std::map<BasicBlock*, std::vector<Edit>> edits;
 
         for (auto& block : func.getBlocks()) {
             auto& instrs = block->getInstructions();
@@ -326,24 +387,44 @@ private:
                 // tolerate this (allocator slack); packed stack slots don't,
                 // and the overrun would clobber the adjacent local slot.
                 // Large allocations stay on the heap: a multi-megabyte frame
-                // risks the stack guard and gains nothing.
+                // risks the stack guard and gains nothing. A negative size has
+                // no stack image at all, so it stays on the heap too.
                 int size = (int)instr.args[1].intValue;
-                if (size > kMaxStackAllocSize) continue;
+                if (size > kMaxStackAllocSize || size < 0) continue;
+                // CIDER-BUG-221: the padded slot is what the fill covers, so
+                // the 4 bytes of slack an over-wide tail store can touch are
+                // zero too and the slot's whole window is deterministic.
+                int slotSize = size + 8;
                 instr.op = IROp::ALLOCA;
-                instr.args = {IRValue::Constant(size + 8, IRType::I32)};
+                instr.args = {IRValue::Constant(slotSize, IRType::I32)};
 
-                for (auto& site : freeSites_) toRemove.push_back(site);
+                if (slotSize > 0) {
+                    edits[block.get()].push_back({i, true, slotSize, allocReg});
+                }
+                for (auto& site : freeSites_) {
+                    edits[site.first].push_back({site.second, false, 0, ""});
+                }
             }
         }
 
-        std::set<std::pair<BasicBlock*, size_t>> uniqueSites(toRemove.begin(), toRemove.end());
-        std::map<BasicBlock*, std::vector<size_t>> byBlock;
-        for (auto& [block, idx] : uniqueSites) byBlock[block].push_back(idx);
-        for (auto& [block, idxs] : byBlock) {
-            std::sort(idxs.begin(), idxs.end(), std::greater<size_t>());
+        // Apply each block's edits from the highest index down. Descending
+        // order is what keeps the recorded indices valid: the edits applied so
+        // far all sit ABOVE the current one, so none of them has shifted it,
+        // and everything still to be applied sits below it and cannot shift it
+        // either. A `free` index is erased at most once even if two promotions
+        // recorded the same site.
+        for (auto& [block, blockEdits] : edits) {
             auto& instrs = block->getInstructions();
-            for (size_t idx : idxs) {
-                if (idx < instrs.size()) instrs.erase(instrs.begin() + idx);
+            std::sort(blockEdits.begin(), blockEdits.end(),
+                      [](const Edit& a, const Edit& b) { return a.index > b.index; });
+            std::set<size_t> erased;
+            for (const auto& e : blockEdits) {
+                if (e.index >= instrs.size()) continue;
+                if (e.insertFill) {
+                    insertZeroFill(module, instrs, e.index + 1, e.allocReg, e.slotSize);
+                } else if (erased.insert(e.index).second) {
+                    instrs.erase(instrs.begin() + e.index);
+                }
             }
         }
     }
