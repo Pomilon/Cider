@@ -221,13 +221,25 @@ void Parser::syncToStmt() {
 
 std::unique_ptr<Program> Parser::parse() {
     Position start{file_, 1, 1};
-    std::vector<std::unique_ptr<Decl>> decls;
-    std::vector<std::unique_ptr<VarDecl>> globals;
+    // Built up front, because a directive sets a property of the file and the
+    // file has to exist before a directive names one.
+    std::unique_ptr<Program> program =
+        std::make_unique<Program>(start, file_, std::vector<std::unique_ptr<Decl>>{},
+                                  std::vector<std::unique_ptr<VarDecl>>{});
     while (!atEnd()) {
+        if (check(TokenKind::Hash)) {
+            if (!parseDirective(*program)) {
+                syncToDecl();
+                if (!atEnd() && check(TokenKind::Hash)) {
+                    advance();
+                }
+            }
+            continue;
+        }
         if (check(TokenKind::KwVar)) {
             std::unique_ptr<VarDecl> global = parseGlobal();
             if (global != nullptr) {
-                globals.push_back(std::move(global));
+                program->globals.push_back(std::move(global));
             } else {
                 syncToDecl();
             }
@@ -236,7 +248,7 @@ std::unique_ptr<Program> Parser::parse() {
         uint64_t before = save();
         std::unique_ptr<Decl> decl = parseDecl();
         if (decl != nullptr) {
-            decls.push_back(std::move(decl));
+            program->decls.push_back(std::move(decl));
         } else {
             syncToDecl();
             if (save() == before && !atEnd()) {
@@ -244,7 +256,7 @@ std::unique_ptr<Program> Parser::parse() {
             }
         }
     }
-    return std::make_unique<Program>(start, file_, std::move(decls), std::move(globals));
+    return program;
 }
 
 std::unique_ptr<Decl> Parser::parseDecl() {
@@ -858,6 +870,35 @@ std::unique_ptr<Decl> Parser::parseImport() {
         return nullptr;
     }
     return std::make_unique<FromImport>(start, std::move(module), std::move(names));
+}
+
+bool Parser::parseDirective(Program& program) {
+    Position start = advance().pos;
+    if (!match(TokenKind::KwExperimental)) {
+        failHere("expected 'experimental'");
+        return false;
+    }
+    if (!match(TokenKind::LParen)) {
+        failHere("expected '('");
+        return false;
+    }
+    if (!check(TokenKind::Ident)) {
+        failHere("a behaviour has a name");
+        return false;
+    }
+    std::string name = advance().text;
+    if (!match(TokenKind::RParen)) {
+        failHere("expected ')'");
+        return false;
+    }
+    if (name == "wrap") {
+        program.wrap = true;
+        return true;
+    }
+    // An unknown behaviour is refused by name: silently ignoring a directive
+    // would let a program ask for defined overflow and not get it.
+    fail(start, "unknown experimental behaviour '" + name + "'");
+    return false;
 }
 
 std::unique_ptr<Decl> Parser::parseFini() {

@@ -89,6 +89,9 @@ private:
     std::unique_ptr<Decl> parseExternFunc();
     std::unique_ptr<Decl> parseImport();
     std::unique_ptr<Decl> parseFini();
+    // `# experimental(name)`. Returns false for an unknown behaviour, which is a
+    // diagnostic naming it rather than a silent no-op.
+    bool parseDirective(Program& program);
     std::vector<Param> parseParams();
     std::unique_ptr<TypeExpr> parseReturnType();
     FieldDecl parseField();

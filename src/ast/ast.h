@@ -673,6 +673,10 @@ struct Program : Node {
     std::string file;
     std::vector<std::unique_ptr<Decl>> decls;
     std::vector<std::unique_ptr<VarDecl>> globals;
+    // `# experimental(wrap)` for this file (FEATURES.md §11.5). It is a
+    // property of the *file*, which is why lowering puts it on each
+    // instruction rather than in a compiler flag: inlining crosses files.
+    bool wrap = false;
     Program(Position p, std::string f, std::vector<std::unique_ptr<Decl>> d,
             std::vector<std::unique_ptr<VarDecl>> g)
         : Node(std::move(p)), file(std::move(f)), decls(std::move(d)),

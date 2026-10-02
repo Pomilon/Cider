@@ -63,6 +63,7 @@ const char* tokenName(TokenKind kind) {
         case TokenKind::KwSizeof: return "sizeof";
         case TokenKind::KwAsm: return "asm";
         case TokenKind::KwVolatile: return "volatile";
+        case TokenKind::KwExperimental: return "experimental";
         case TokenKind::KwInt: return "int";
         case TokenKind::KwI8: return "i8";
         case TokenKind::KwI16: return "i16";

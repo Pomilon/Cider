@@ -21,7 +21,30 @@
 #include "resolve/resolver.h"
 
 namespace cider {
+
+// Forward declaration in the real namespace. Declaring it inside `check` would
+// make `lower::Lowerer` resolve to check::lower from every member below, and
+// that type is only ever a pointer here.
+namespace lower {
+class Lowerer;
+}
+
 namespace check {
+
+// Where lowering listens, defined here rather than in the lowering header so
+// the checker does not depend on the layer that calls it: a static library
+// cannot include its own caller. Lowering implements this; the checker emits
+// through it while it walks.
+class LowerSink {
+public:
+    virtual ~LowerSink() = default;
+    virtual void onProgram(Program& n) { (void)n; }
+    virtual void onFuncDecl(FuncDecl& n) { (void)n; }
+    virtual void onVarDecl(VarDecl& n) { (void)n; }
+    virtual void onReturn(Return& n) { (void)n; }
+    virtual void onIf(IfStmt& n) { (void)n; }
+    virtual void onWhile(WhileStmt& n) { (void)n; }
+};
 
 struct CheckError {
     Position pos;
@@ -42,6 +65,13 @@ struct LocalScope {
 class Checker : public ASTVisitor {
 public:
     Checker(TypeContext& ctx, resolve::Resolver& resolver);
+
+    // Lowering is driven from this walk, not from a second one: LAYERS.md
+    // §3.5.1 says lowering queries the walk's result rather than re-walking the
+    // AST, which is also why this is the only visitor class in src/ (T5/L1).
+    // Null until lowerModule attaches one.
+    void setSink(LowerSink* sink) { sink_ = sink; }
+    LowerSink* sink() const { return sink_; }
 
     // Checks every body of one module. The module must be resolved first;
     // unknown names here are a checker bug, not a program error, and are
@@ -143,6 +173,7 @@ private:
     uint64_t loopDepth_ = 0;
     std::vector<CheckError> errors_;
     bool failed_ = false;
+    LowerSink* sink_ = nullptr;
 };
 
 }  // namespace check

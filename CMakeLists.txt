@@ -75,6 +75,25 @@ add_library(cider_check STATIC src/check/checker.cpp)
 target_link_libraries(cider_check PUBLIC cider_resolve cider_eval cider_types)
 target_include_directories(cider_check PUBLIC src)
 
+# --- The IR --------------------------------------------------------------------
+
+# IR.md: the instruction set, the aggregate representation and the ABI. Three
+# per-instruction flags exist because dead-code elimination, LICM and inlining
+# all depend on them.
+
+add_library(cider_ir STATIC src/ir/ir.cpp)
+target_link_libraries(cider_ir PUBLIC cider_types)
+target_include_directories(cider_ir PUBLIC src)
+
+# --- Lowering ------------------------------------------------------------------
+
+# Driven by the checker's walk: LAYERS.md 3.5.1 says lowering queries the walk's
+# result and does not re-walk the AST.
+
+add_library(cider_lower STATIC src/lower/lower.cpp)
+target_link_libraries(cider_lower PUBLIC cider_check cider_ir)
+target_include_directories(cider_lower PUBLIC src)
+
 # --- The parser ---------------------------------------------------------------
 #
 # LAYERS.md §3.2: accepts or rejects on syntax alone. Never resolves a name,
@@ -129,6 +148,12 @@ target_link_libraries(check_test PRIVATE cider_check cider_resolve cider_parse c
 target_include_directories(check_test PRIVATE src)
 add_test(NAME checker COMMAND check_test)
 
+add_executable(lower_test tests/unit/lower_test.cpp)
+target_link_libraries(lower_test PRIVATE cider_lower cider_check cider_parse cider_lexer)
+target_include_directories(lower_test PRIVATE src)
+add_test(NAME lowering COMMAND lower_test)
+
 # A gate that fails must fail the build, so nothing here is allowed to be
 # "informational".
-set_tests_properties(gates layout types lexer ast parser resolver checker PROPERTIES LABELS "gate")
+set_tests_properties(gates layout types lexer ast parser resolver checker lowering
+             PROPERTIES LABELS "gate")

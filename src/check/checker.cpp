@@ -16,6 +16,9 @@
 namespace cider {
 namespace check {
 
+// `lower` here would resolve to check::lower inside this namespace, so the
+// lowering header's namespace is named once and used from there on.
+
 namespace {
 
 // A repeat fills an array from exactly one element. Named, so the number is
@@ -141,6 +144,9 @@ const Local* Checker::findLocal(const std::string& name) const {
 // --- Declarations and statements -----------------------------------------------
 
 void Checker::visitProgram(Program& n) {
+    if (sink_ != nullptr) {
+        sink_->onProgram(n);
+    }
     for (auto& d : n.decls) {
         d->accept(*this);
     }
@@ -195,7 +201,11 @@ void Checker::visitFuncDecl(FuncDecl& n) {
     bool was = inFunc_;
     funcReturn_ = TypeRef{ret};
     inFunc_ = true;
-    n.body->accept(*this);
+    if (sink_ != nullptr) {
+        sink_->onFuncDecl(n);
+    } else {
+        n.body->accept(*this);
+    }
     funcReturn_ = saved;
     inFunc_ = was;
     popScope();
@@ -310,6 +320,9 @@ void Checker::visitVarDecl(VarDecl& n) {
     }
     bindLocal(n.name, declared, true, n.pos);
     record(&n, declared);
+    if (sink_ != nullptr) {
+        sink_->onVarDecl(n);
+    }
 }
 
 void Checker::visitBlock(Block& n) {
@@ -325,6 +338,10 @@ void Checker::visitIfStmt(IfStmt& n) {
     if (!cond.isError() && cond != TypeRef{ctx_.basic(BasicKind::Bool)}) {
         fail(n.cond->pos, "a condition is bool");
     }
+    if (sink_ != nullptr) {
+        sink_->onIf(n);
+        return;
+    }
     n.then->accept(*this);
     if (n.els != nullptr) {
         n.els->accept(*this);
@@ -337,6 +354,11 @@ void Checker::visitWhileStmt(WhileStmt& n) {
         fail(n.cond->pos, "a condition is bool");
     }
     ++loopDepth_;
+    if (sink_ != nullptr) {
+        sink_->onWhile(n);
+        --loopDepth_;
+        return;
+    }
     n.body->accept(*this);
     --loopDepth_;
 }
@@ -394,6 +416,9 @@ void Checker::visitForInStmt(ForInStmt& n) {
 }
 
 void Checker::visitReturn(Return& n) {
+    if (sink_ != nullptr) {
+        sink_->onReturn(n);
+    }
     if (!inFunc_) {
         fail(n.pos, "return outside a function");
         return;
