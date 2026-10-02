@@ -27,7 +27,8 @@ add_compile_options(-Wall -Wextra -Werror -Werror=switch -Wno-unused-parameter)
 # every switch in the compiler must agree with. Gate T1 polices that agreement,
 # which is why these switches have no `default:` -- see kind.cpp.
 
-add_library(cider_types STATIC src/types/kind.cpp)
+add_library(cider_types STATIC src/types/kind.cpp src/types/type.cpp
+                               src/types/signature.cpp src/types/context.cpp)
 target_include_directories(cider_types PUBLIC src)
 
 # --- Tests --------------------------------------------------------------------
@@ -37,6 +38,10 @@ enable_testing()
 add_executable(layout_test tests/unit/layout_test.cpp)
 target_include_directories(layout_test PRIVATE src)
 
+add_executable(type_test tests/unit/type_test.cpp)
+target_link_libraries(type_test PRIVATE cider_types)
+target_include_directories(type_test PRIVATE src)
+
 # The gates are a test like any other, so `ctest` alone is the whole gate. The
 # script reports three states (PASS/FAIL/PENDING) and exits non-zero only on
 # FAIL; a pending gate is unexamined, not satisfied, and the script says which
@@ -44,7 +49,8 @@ target_include_directories(layout_test PRIVATE src)
 find_package(Python3 COMPONENTS Interpreter REQUIRED)
 add_test(NAME gates COMMAND ${Python3_EXECUTABLE} ${CMAKE_SOURCE_DIR}/scripts/gates.py)
 add_test(NAME layout COMMAND layout_test)
+add_test(NAME types COMMAND type_test)
 
 # A gate that fails must fail the build, so nothing here is allowed to be
 # "informational".
-set_tests_properties(gates layout PROPERTIES LABELS "gate")
+set_tests_properties(gates layout types PROPERTIES LABELS "gate")

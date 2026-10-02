@@ -213,7 +213,11 @@ def _code_lines(path: str) -> list[tuple[int, str]]:
 def t4_grep() -> tuple[bool, str]:
     """The literal half of T4: a size-looking literal in code outside layout.h."""
     offenders = []
-    rx = re.compile(SIZE_WORD + r"[^\n]*?\d", re.IGNORECASE)
+    # A standalone literal: a digit that is not part of an identifier. Without
+    # the guard, `layout::kSizeI32` trips the gate on its own name — and a
+    # reference to layout:: is exactly what T4 wants, so the gate would punish
+    # obedience. `kOffsetProbe = 0` still trips: the 0 stands alone.
+    rx = re.compile(SIZE_WORD + r"[^\n]*?(?<![A-Za-z0-9_])\d", re.IGNORECASE)
     for path in src_files():
         rel = os.path.relpath(path, ROOT)
         if rel.endswith(os.path.join("src", "layout.h")):

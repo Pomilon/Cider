@@ -69,6 +69,11 @@ const char* kindName(Kind kind);
 // The human-readable name of a basic kind. Same rule.
 const char* basicKindName(BasicKind basic);
 
+// Whether a size is known for this kind. TYPES.md §3.2 requires sizeOf to be
+// total: Alias, TypeParam and Wildcard are unresolved by definition, so asking
+// for a size is a compile-time rejection rather than a default.
+bool kindHasResolvedLayout(Kind kind);
+
 // True for the kinds whose values own heap storage that `delete` releases.
 // MEMORY.md §3 lists them; a closure is absent because there is no
 // pointer-to-closure type and no `deinit` to run (§3.2 there).
