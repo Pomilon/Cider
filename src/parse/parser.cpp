@@ -511,6 +511,24 @@ std::unique_ptr<Decl> Parser::parseClassDecl(bool) {
         return nullptr;
     }
     std::string name = advance().text;
+    std::vector<std::string> tps;
+    if (match(TokenKind::Lt)) {
+        for (;;) {
+            if (!check(TokenKind::Ident)) {
+                failHere("a type parameter needs a name");
+                return nullptr;
+            }
+            tps.push_back(advance().text);
+            if (match(TokenKind::Comma)) {
+                continue;
+            }
+            break;
+        }
+        if (!match(TokenKind::Gt)) {
+            failHere("expected '>'");
+            return nullptr;
+        }
+    }
     std::vector<std::unique_ptr<TypeExpr>> bases;
     if (match(TokenKind::Colon)) {
         for (;;) {
@@ -567,8 +585,9 @@ std::unique_ptr<Decl> Parser::parseClassDecl(bool) {
         failHere("expected '}'");
         return nullptr;
     }
-    return std::make_unique<ClassDecl>(start, std::move(name), std::move(bases),
-                                       std::move(fields), std::move(methods), std::move(init),
+    return std::make_unique<ClassDecl>(start, std::move(name), std::move(tps),
+                                       std::move(bases), std::move(fields),
+                                       std::move(methods), std::move(init),
                                        std::move(deinit));
 }
 

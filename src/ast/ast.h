@@ -547,17 +547,19 @@ struct StructDecl : Decl {
 
 struct ClassDecl : Decl {
     std::string name;
+    std::vector<std::string> typeParams;
     std::vector<std::unique_ptr<TypeExpr>> bases;
     std::vector<FieldDecl> fields;
     std::vector<MethodDecl> methods;
     std::unique_ptr<FuncDecl> init;
     std::unique_ptr<FuncDecl> deinit;
-    ClassDecl(Position p, std::string n, std::vector<std::unique_ptr<TypeExpr>> b,
-              std::vector<FieldDecl> f, std::vector<MethodDecl> m,
-              std::unique_ptr<FuncDecl> i, std::unique_ptr<FuncDecl> d)
-        : Decl(std::move(p)), name(std::move(n)), bases(std::move(b)),
-          fields(std::move(f)), methods(std::move(m)), init(std::move(i)),
-          deinit(std::move(d)) {}
+    ClassDecl(Position p, std::string n, std::vector<std::string> tps,
+              std::vector<std::unique_ptr<TypeExpr>> b, std::vector<FieldDecl> f,
+              std::vector<MethodDecl> m, std::unique_ptr<FuncDecl> i,
+              std::unique_ptr<FuncDecl> d)
+        : Decl(std::move(p)), name(std::move(n)), typeParams(std::move(tps)),
+          bases(std::move(b)), fields(std::move(f)), methods(std::move(m)),
+          init(std::move(i)), deinit(std::move(d)) {}
     void accept(ASTVisitor& v) override;
 };
 

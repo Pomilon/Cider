@@ -48,6 +48,24 @@ target_include_directories(cider_lexer PUBLIC src)
 add_library(cider_ast INTERFACE)
 target_include_directories(cider_ast INTERFACE src)
 
+# --- Constant evaluation -------------------------------------------------------
+#
+# LAYERS.md §3.4: one folder for source expressions, shared by the resolver,
+# the checker and the optimiser.
+
+add_library(cider_eval STATIC src/eval/eval.cpp)
+target_link_libraries(cider_eval PUBLIC cider_types cider_ast)
+target_include_directories(cider_eval PUBLIC src)
+
+# --- The resolver ---------------------------------------------------------------
+#
+# LAYERS.md §3.3: headers of every module first, so module scope is
+# order-independent and imports resolve recursively.
+
+add_library(cider_resolve STATIC src/resolve/resolver.cpp)
+target_link_libraries(cider_resolve PUBLIC cider_eval cider_ast cider_types)
+target_include_directories(cider_resolve PUBLIC src)
+
 # --- The parser ---------------------------------------------------------------
 #
 # LAYERS.md §3.2: accepts or rejects on syntax alone. Never resolves a name,
@@ -92,6 +110,11 @@ target_link_libraries(parser_test PRIVATE cider_parse cider_lexer)
 target_include_directories(parser_test PRIVATE src)
 add_test(NAME parser COMMAND parser_test)
 
+add_executable(resolve_test tests/unit/resolve_test.cpp)
+target_link_libraries(resolve_test PRIVATE cider_resolve cider_parse cider_lexer)
+target_include_directories(resolve_test PRIVATE src)
+add_test(NAME resolver COMMAND resolve_test)
+
 # A gate that fails must fail the build, so nothing here is allowed to be
 # "informational".
-set_tests_properties(gates layout types lexer ast parser PROPERTIES LABELS "gate")
+set_tests_properties(gates layout types lexer ast parser resolver PROPERTIES LABELS "gate")

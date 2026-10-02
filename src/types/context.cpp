@@ -5,84 +5,53 @@
 // they are interned already, so pointer equality is structural equality and no
 // walk is needed. TYPES.md §2.3.
 
-#include <utility>
-
 #include "types/context.h"
-
-#include "types/type.h"
 
 namespace cider {
 
 namespace {
 
 bool payloadMatches(Kind kind, const TypePayload& a, const TypePayload& b) {
-    switch (kind) {
-        case Kind::Void:
-            return true;
-        case Kind::String:
-            return true;
-        case Kind::Error:
-            return true;
-        case Kind::Wildcard:
-            return true;
-        case Kind::FunctionItem:
-            return true;
-        case Kind::Basic:
-            return std::get<BasicPayload>(a).basic == std::get<BasicPayload>(b).basic;
-        case Kind::Pointer:
-            return std::get<PointerPayload>(a).pointee == std::get<PointerPayload>(b).pointee;
-        case Kind::Array: {
-            const ArrayPayload& x = std::get<ArrayPayload>(a);
-            const ArrayPayload& y = std::get<ArrayPayload>(b);
-            return x.element == y.element && x.length == y.length;
-        }
-        case Kind::Slice:
-            return std::get<SlicePayload>(a).element == std::get<SlicePayload>(b).element;
-        case Kind::Struct:
-        case Kind::Class:
-        case Kind::Interface:
-        case Kind::Union:
-        case Kind::Enum:
-            return sameDecl(std::get<NominalPayload>(a).decl, std::get<NominalPayload>(b).decl);
-        case Kind::Closure:
-        case Kind::FunctionPtr:
-            return sameSignature(std::get<SignaturePayload>(a).signature,
-                                 std::get<SignaturePayload>(b).signature);
-        case Kind::TypeParam: {
-            const TypeParamPayload& x = std::get<TypeParamPayload>(a);
-            const TypeParamPayload& y = std::get<TypeParamPayload>(b);
-            return sameDecl(x.decl, y.decl) && x.index == y.index;
-        }
-        case Kind::Alias:
-            return sameDecl(std::get<AliasPayload>(a).target, std::get<AliasPayload>(b).target);
+    if (kind == Kind::Void || kind == Kind::String || kind == Kind::Error ||
+        kind == Kind::Wildcard || kind == Kind::FunctionItem) {
+        return true;
+    }
+    if (kind == Kind::Basic) {
+        return std::get<BasicPayload>(a).basic == std::get<BasicPayload>(b).basic;
+    }
+    if (kind == Kind::Pointer) {
+        return std::get<PointerPayload>(a).pointee == std::get<PointerPayload>(b).pointee;
+    }
+    if (kind == Kind::Array) {
+        const ArrayPayload& x = std::get<ArrayPayload>(a);
+        const ArrayPayload& y = std::get<ArrayPayload>(b);
+        return x.element == y.element && x.length == y.length;
+    }
+    if (kind == Kind::Slice) {
+        return std::get<SlicePayload>(a).element == std::get<SlicePayload>(b).element;
+    }
+    if (kind == Kind::Struct || kind == Kind::Class || kind == Kind::Interface ||
+        kind == Kind::Union || kind == Kind::Enum) {
+        return sameDecl(std::get<NominalPayload>(a).decl, std::get<NominalPayload>(b).decl);
+    }
+    if (kind == Kind::Closure || kind == Kind::FunctionPtr) {
+        return sameSignature(std::get<SignaturePayload>(a).signature,
+                             std::get<SignaturePayload>(b).signature);
+    }
+    if (kind == Kind::TypeParam) {
+        const TypeParamPayload& x = std::get<TypeParamPayload>(a);
+        const TypeParamPayload& y = std::get<TypeParamPayload>(b);
+        return sameDecl(x.decl, y.decl) && x.index == y.index;
+    }
+    if (kind == Kind::Alias) {
+        return sameDecl(std::get<AliasPayload>(a).target, std::get<AliasPayload>(b).target);
     }
     return false;
 }
 
 bool nominalKind(Kind kind) {
-    switch (kind) {
-        case Kind::Struct:
-        case Kind::Class:
-        case Kind::Interface:
-        case Kind::Union:
-        case Kind::Enum:
-            return true;
-        case Kind::Error:
-        case Kind::Void:
-        case Kind::String:
-        case Kind::Basic:
-        case Kind::Pointer:
-        case Kind::Array:
-        case Kind::Slice:
-        case Kind::Closure:
-        case Kind::FunctionPtr:
-        case Kind::FunctionItem:
-        case Kind::TypeParam:
-        case Kind::Alias:
-        case Kind::Wildcard:
-            return false;
-    }
-    return false;
+    return kind == Kind::Struct || kind == Kind::Class || kind == Kind::Interface ||
+           kind == Kind::Union || kind == Kind::Enum;
 }
 
 }  // namespace
@@ -117,7 +86,8 @@ const Type* TypeContext::string() {
     return store(new Type(p));
 }
 
-const Type* TypeContext::basic(BasicKind b) {    BasicPayload p;
+const Type* TypeContext::basic(BasicKind b) {
+    BasicPayload p;
     p.basic = b;
     if (const Type* f = find(Kind::Basic, TypePayload(p))) {
         return f;
