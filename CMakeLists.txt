@@ -66,6 +66,15 @@ add_library(cider_resolve STATIC src/resolve/resolver.cpp)
 target_link_libraries(cider_resolve PUBLIC cider_eval cider_ast cider_types)
 target_include_directories(cider_resolve PUBLIC src)
 
+# --- The checker -----------------------------------------------------------------
+#
+# LAYERS.md §3.4: the body walk. Writes each expression's Type and checks it
+# in place. This is the one `public ASTVisitor` in src/ (gates T5/L1).
+
+add_library(cider_check STATIC src/check/checker.cpp)
+target_link_libraries(cider_check PUBLIC cider_resolve cider_eval cider_types)
+target_include_directories(cider_check PUBLIC src)
+
 # --- The parser ---------------------------------------------------------------
 #
 # LAYERS.md §3.2: accepts or rejects on syntax alone. Never resolves a name,
@@ -115,6 +124,11 @@ target_link_libraries(resolve_test PRIVATE cider_resolve cider_parse cider_lexer
 target_include_directories(resolve_test PRIVATE src)
 add_test(NAME resolver COMMAND resolve_test)
 
+add_executable(check_test tests/unit/check_test.cpp)
+target_link_libraries(check_test PRIVATE cider_check cider_resolve cider_parse cider_lexer)
+target_include_directories(check_test PRIVATE src)
+add_test(NAME checker COMMAND check_test)
+
 # A gate that fails must fail the build, so nothing here is allowed to be
 # "informational".
-set_tests_properties(gates layout types lexer ast parser resolver PROPERTIES LABELS "gate")
+set_tests_properties(gates layout types lexer ast parser resolver checker PROPERTIES LABELS "gate")

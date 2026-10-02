@@ -68,8 +68,29 @@ public:
     // parameter types, alias targets). The checker adds expression types to the
     // same table; one table, two writers in order, never two tables.
     TypeRef typeOf(const Node* node) const;
+    void recordType(const Node* node, TypeRef type);
+    // A field or member type by owning declaration and name. Error when no
+    // such field exists.
+    TypeRef fieldType(DeclId id, const std::string& name) const;
+    // A method signature by owning declaration and name. Null when absent.
+    const Signature* methodSig(DeclId id, const std::string& name) const;
+    // Every method name of a struct, class or interface, in declaration
+    // order. Empty for anything else.
+    std::vector<std::string> methodNames(DeclId id) const;
+    // Every field or member name of a struct, class or union, in declaration
+    // order. Empty for anything else.
+    std::vector<std::string> fieldNames(DeclId id) const;
+    // A class's direct bases, as declaration ids. Empty when none.
+    std::vector<DeclId> classBases(DeclId id) const;
+    EvalEnv evalEnv(const Scope* scope);
 
     const std::vector<ResolveError>& errors() const { return errors_; }
+
+    // Builds a signature from parameter declarations. Public because the
+    // checker rebuilds function signatures with it when walking bodies — one
+    // function, called from two phases, never two rules.
+    Signature buildSignature(const std::vector<Param>& params, const TypeExpr* returns,
+                             const Scope* scope, bool& failed);
 
 private:
     void fail(Position pos, const std::string& message);
@@ -80,8 +101,6 @@ private:
     void resolveDeclTypes(const std::string& name, Program& program, const Scope* scope);
     TypeRef resolveNamed(const NamedType* type, const Scope* scope);
     TypeRef resolveSignature(const FuncSigType* type, const Scope* scope, bool inPointer);
-    Signature buildSignature(const std::vector<Param>& params, const TypeExpr* returns,
-                             const Scope* scope, bool& failed);
     // Validates one method's signature. The checker rebuilds it with this same
     // function when it walks the body — one function, called twice, never two
     // rules.
@@ -93,7 +112,6 @@ private:
                                 const std::vector<std::string>& names, DeclId templateId,
                                 Position pos);
     static std::vector<const TypeExpr*> rawBases(const ClassDecl* decl);
-    EvalEnv evalEnv(const Scope* scope);
     std::string qualify(const std::string& bare) const;
 
     TypeContext& ctx_;
@@ -108,6 +126,11 @@ private:
     std::unordered_set<std::string> aliasActive_;
     std::unordered_map<std::string, const Expr*> constInits_;
     std::unordered_map<std::string, int64_t> enumValues_;
+    std::unordered_map<std::string, TypeRef> fieldTypes_;
+    std::unordered_map<std::string, Signature> methodSigs_;
+    std::unordered_map<std::string, std::vector<std::string>> methodLists_;
+    std::unordered_map<std::string, std::vector<std::string>> fieldLists_;
+    std::unordered_map<std::string, std::vector<DeclId>> baseTable_;
     std::vector<std::string> stack_;
     std::vector<ResolveError> errors_;
     const Scope* entry_ = nullptr;

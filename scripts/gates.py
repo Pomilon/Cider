@@ -274,7 +274,17 @@ def ast_visitor_count() -> tuple[bool, str]:
         # as a failure would mean an empty tree fails the gate instead of
         # admitting the gate has nothing to inspect yet.
         raise FileNotFoundError("src/ast.h")
-    hits = [h for p in src_files() for h in grep_lines(r"\bpublic\s+ASTVisitor\b", [p])]
+    # Comments are stripped for the same reason T3 and T4 strip them: a file
+    # may name the gate it satisfies, and a gate that fails on the file
+    # documenting it teaches its reader to write vaguer prose.
+    hits = []
+    for path in src_files():
+        for lineno, line in _code_lines(path):
+            # An optional qualifier: `public cider::ASTVisitor` is the same
+            # declaration as `public ASTVisitor`, and the first version of this
+            # pattern missed it, which was proved by planting one.
+            if re.search(r"\bpublic\s+(?:[A-Za-z_]\w*::)*ASTVisitor\b", line):
+                hits.append(f"{os.path.relpath(path, ROOT)}:{lineno}: {line.strip()}")
     count = len(hits)
     if count == 0:
         # src/ has source, but no AST yet. The visitor arrives with src/ast.h,

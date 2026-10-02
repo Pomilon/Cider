@@ -70,6 +70,51 @@ TypeRef Resolver::typeOf(const Node* node) const {
     return found->second;
 }
 
+void Resolver::recordType(const Node* node, TypeRef type) {
+    nodeTypes_[node] = type;
+}
+
+std::string declKey(DeclId id) {
+    return std::to_string(id.module) + "." + std::to_string(id.index);
+}
+
+TypeRef Resolver::fieldType(DeclId id, const std::string& name) const {
+    auto found = fieldTypes_.find(declKey(id) + "." + name);
+    if (found == fieldTypes_.end()) {
+        return errorRef();
+    }
+    return found->second;
+}
+
+std::vector<std::string> Resolver::fieldNames(DeclId id) const {
+    auto found = fieldLists_.find(declKey(id));
+    if (found == fieldLists_.end()) {
+        return {};
+    }
+    return found->second;
+}
+
+const Signature* Resolver::methodSig(DeclId id, const std::string& name) const {
+    auto found = methodSigs_.find(declKey(id) + "." + name);
+    return found == methodSigs_.end() ? nullptr : &found->second;
+}
+
+std::vector<std::string> Resolver::methodNames(DeclId id) const {
+    auto found = methodLists_.find(declKey(id));
+    if (found == methodLists_.end()) {
+        return {};
+    }
+    return found->second;
+}
+
+std::vector<DeclId> Resolver::classBases(DeclId id) const {
+    auto found = baseTable_.find(declKey(id));
+    if (found == baseTable_.end()) {
+        return {};
+    }
+    return found->second;
+}
+
 int64_t Resolver::enumValue(const std::string& qualifiedType,
                             const std::string& member) const {
     auto found = enumValues_.find(qualifiedType + "." + member);
@@ -141,6 +186,9 @@ bool Resolver::resolveProgram(Program& program, const std::string& module) {
                 alias->typeParams = target->typeParams;
                 alias->aliasTarget = target->aliasTarget;
                 alias->init = target->init;
+                if (target->kind == DeclKind::Const && target->init != nullptr) {
+                    constInits_[module + "." + name] = target->init;
+                }
             }
         } else if (const auto* single = dynamic_cast<const ImportDecl*>(decl.get())) {
             if (!resolveModule(single->module)) {
@@ -310,6 +358,11 @@ void Resolver::resolveDeclTypes(const std::string& module, Program& program,
             for (const FieldDecl& field : sd->fields) {
                 TypeRef t = resolveType(field.type.get(), inner);
                 nodeTypes_[&field] = t;
+                if (self != nullptr && !t.isError()) {
+                    std::string fkey = declKey(self->id);
+                    fieldTypes_[fkey + "." + field.name] = t;
+                    fieldLists_[fkey].push_back(field.name);
+                }
             }
             for (const auto& iface : sd->interfaces) {
                 TypeRef t = resolveType(iface.get(), inner);
@@ -319,7 +372,13 @@ void Resolver::resolveDeclTypes(const std::string& module, Program& program,
             }
             for (const MethodDecl& method : sd->methods) {
                 bool failed = false;
-                buildMethodSig(method, inner, failed);
+                Signature sig =
+                    buildSignature(method.params, method.returns.get(), inner, failed);
+                if (self != nullptr && !failed) {
+                    std::string key = declKey(self->id);
+                    methodSigs_[key + "." + method.name] = std::move(sig);
+                    methodLists_[key].push_back(method.name);
+                }
             }
             continue;
         }
@@ -329,26 +388,68 @@ void Resolver::resolveDeclTypes(const std::string& module, Program& program,
             if (!cd->typeParams.empty() && self != nullptr) {
                 inner = typeParamScope(scope, module, cd->typeParams, self->id, cd->pos);
             }
+            const Decl* cself = lookup(scope, cd->name);
             for (const TypeExpr* base : rawBases(cd)) {
                 TypeRef t = resolveType(base, inner);
-                if (!t.isError() && t.type->kind() != Kind::Class) {
+                if (t.isError()) {
+                    continue;
+                }
+                if (t.type->kind() != Kind::Class) {
                     fail(base->pos, "a class inherits classes");
+                    continue;
+                }
+                if (cself != nullptr) {
+                    std::optional<DeclId> baseId = t.type->decl();
+                    if (baseId.has_value()) {
+                        baseTable_[declKey(cself->id)].push_back(*baseId);
+                    }
                 }
             }
             for (const FieldDecl& field : cd->fields) {
                 TypeRef t = resolveType(field.type.get(), inner);
                 nodeTypes_[&field] = t;
+                if (cself != nullptr && !t.isError()) {
+                    std::string fkey = declKey(cself->id);
+                    fieldTypes_[fkey + "." + field.name] = t;
+                    fieldLists_[fkey].push_back(field.name);
+                }
             }
             for (const MethodDecl& method : cd->methods) {
                 bool failed = false;
-                buildMethodSig(method, inner, failed);
+                Signature sig =
+                    buildSignature(method.params, method.returns.get(), inner, failed);
+                if (cself != nullptr && !failed) {
+                    std::string key = declKey(cself->id);
+                    methodSigs_[key + "." + method.name] = std::move(sig);
+                    methodLists_[key].push_back(method.name);
+                }
+            }
+            continue;
+        }
+        if (const auto* id = dynamic_cast<const InterfaceDecl*>(decl.get())) {
+            const Decl* iself = lookup(scope, id->name);
+            for (const MethodSig& method : id->methods) {
+                bool failed = false;
+                Signature sig =
+                    buildSignature(method.params, method.returns.get(), scope, failed);
+                if (iself != nullptr && !failed) {
+                    std::string key = declKey(iself->id);
+                    methodSigs_[key + "." + method.name] = std::move(sig);
+                    methodLists_[key].push_back(method.name);
+                }
             }
             continue;
         }
         if (const auto* ud = dynamic_cast<const UnionDecl*>(decl.get())) {
+            const Decl* uself = lookup(scope, ud->name);
             for (const FieldDecl& member : ud->members) {
                 TypeRef t = resolveType(member.type.get(), scope);
                 nodeTypes_[&member] = t;
+                if (uself != nullptr && !t.isError()) {
+                    std::string fkey = declKey(uself->id);
+                    fieldTypes_[fkey + "." + member.name] = t;
+                    fieldLists_[fkey].push_back(member.name);
+                }
             }
             continue;
         }
@@ -633,17 +734,21 @@ void Resolver::bindPrelude(const Scope* scope, Position pos) {
 }
 
 EvalEnv Resolver::evalEnv(const Scope* scope) {
-    EvalEnv env{ctx_,
-                [this](const std::string& qualified) -> const Expr* {
-                    auto found = constInits_.find(qualified);
-                    return found == constInits_.end() ? nullptr : found->second;
-                },
-                [this, scope](const TypeExpr* spelling) -> TypeRef {
-                    return resolveType(spelling, scope);
-                },
-                [this](const std::string& bare) -> std::string {
-                    return qualify(bare);
-                }};
+    // Built field by field: EvalEnv holds a reference and cannot be copied, so
+    // it is constructed and filled rather than aggregate-initialised.
+    EvalEnv env(ctx_);
+    env.constantInit = [this](const std::string& qualified) -> const Expr* {
+        auto found = constInits_.find(qualified);
+        return found == constInits_.end() ? nullptr : found->second;
+    };
+    env.resolve = [this, scope](const TypeExpr* spelling) -> TypeRef {
+        return resolveType(spelling, scope);
+    };
+    // The scope's own module, not the resolver's stack: by the time a body is
+    // checked the header pass has unwound, and `main.x` must mean main's x.
+    env.qualify = [scope](const std::string& bare) -> std::string {
+        return scope->module + "." + bare;
+    };
     return env;
 }
 

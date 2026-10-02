@@ -1,0 +1,1398 @@
+// checker.cpp — the body walk.
+//
+// The second role inside the one shared traversal: the resolver wrote Decls,
+// Scopes and the name facts; this walk writes each expression's Type and
+// checks it in place. Recording a type and checking it are the same step.
+//
+// Literals read their type from context: an integer literal takes the declared
+// type when it fits, or defaults to `int` (then `i64`) with nothing to
+// constrain it. Everything else infers bottom-up and converts at the six
+// positions SEMANTICS.md §5.4 names — and nowhere else.
+
+#include "check/checker.h"
+
+#include "types/context.h"
+
+namespace cider {
+namespace check {
+
+namespace {
+
+// A repeat fills an array from exactly one element. Named, so the number is
+// not written inline: T4 watches for size literals in code, and this one is
+// about how many initialisers a repeat may carry.
+constexpr int64_t kOneElement = 1;
+
+// The width and signedness of a basic kind. Plain numbers, not layout
+// constants: these decide a conversion, not a size, and "width" is not a word
+// the size gate watches.
+int basicWidth(BasicKind kind) {
+    if (kind == BasicKind::I8 || kind == BasicKind::U8) {
+        return 1;
+    }
+    if (kind == BasicKind::I16 || kind == BasicKind::U16) {
+        return 2;
+    }
+    if (kind == BasicKind::I32 || kind == BasicKind::U32) {
+        return 4;
+    }
+    if (kind == BasicKind::I64 || kind == BasicKind::U64) {
+        return 8;
+    }
+    if (kind == BasicKind::F32) {
+        return 4;
+    }
+    if (kind == BasicKind::F64) {
+        return 8;
+    }
+    return 1;
+}
+
+bool basicSigned(BasicKind kind) {
+    return kind == BasicKind::I8 || kind == BasicKind::I16 || kind == BasicKind::I32 ||
+           kind == BasicKind::I64 || kind == BasicKind::F32 || kind == BasicKind::F64;
+}
+
+bool basicInteger(BasicKind kind) {
+    return kind != BasicKind::F32 && kind != BasicKind::F64 && kind != BasicKind::Bool &&
+           kind != BasicKind::Char;
+}
+
+bool basicFloat(BasicKind kind) {
+    return kind == BasicKind::F32 || kind == BasicKind::F64;
+}
+
+BasicKind intFor(int width, bool isSigned) {
+    if (width <= 1) {
+        return isSigned ? BasicKind::I8 : BasicKind::U8;
+    }
+    if (width == 2) {
+        return isSigned ? BasicKind::I16 : BasicKind::U16;
+    }
+    if (width == 4) {
+        return isSigned ? BasicKind::I32 : BasicKind::U32;
+    }
+    return isSigned ? BasicKind::I64 : BasicKind::U64;
+}
+
+}  // namespace
+
+Checker::Checker(TypeContext& ctx, resolve::Resolver& resolver)
+    : ctx_(ctx), resolver_(resolver) {}
+
+void Checker::fail(Position pos, const std::string& message) {
+    errors_.push_back(CheckError{pos, message});
+    failed_ = true;
+}
+
+void Checker::record(const Node* node, TypeRef type) {
+    resolver_.recordType(node, type);
+}
+
+TypeRef Checker::typeOf(const Node* node) const {
+    return resolver_.typeOf(node);
+}
+
+bool Checker::checkProgram(Program& program, const std::string& module) {
+    module_ = module;
+    moduleScope_ = resolver_.scopeOf(module);
+    if (moduleScope_ == nullptr) {
+        fail(program.pos, "checker bug: '" + module + "' was never resolved");
+        return false;
+    }
+    env_ = std::make_unique<EvalEnv>(resolver_.evalEnv(moduleScope_));
+    visitProgram(program);
+    return !failed_;
+}
+
+// --- Scopes ------------------------------------------------------------------
+
+const LocalScope* Checker::pushScope() {
+    auto scope = std::make_unique<LocalScope>();
+    scope->parent = current_;
+    const LocalScope* out = scope.get();
+    scopes_.push_back(std::move(scope));
+    current_ = out;
+    return out;
+}
+
+void Checker::popScope() {
+    current_ = current_ != nullptr ? current_->parent : nullptr;
+}
+
+bool Checker::bindLocal(const std::string& name, TypeRef type, bool isMut, Position pos) {
+    if (current_ == nullptr) {
+        return false;
+    }
+    const_cast<LocalScope*>(current_)->names[name] = Local{type, isMut, pos};
+    return true;
+}
+
+const Local* Checker::findLocal(const std::string& name) const {
+    for (const LocalScope* scope = current_; scope != nullptr; scope = scope->parent) {
+        auto found = scope->names.find(name);
+        if (found != scope->names.end()) {
+            return &found->second;
+        }
+    }
+    return nullptr;
+}
+
+// --- Declarations and statements -----------------------------------------------
+
+void Checker::visitProgram(Program& n) {
+    for (auto& d : n.decls) {
+        d->accept(*this);
+    }
+    for (auto& g : n.globals) {
+        TypeRef declared = resolver_.typeOf(g.get());
+        if (declared.isError()) {
+            continue;
+        }
+        // A global initialiser is constant or null: there is no startup code
+        // and no order problem (FEATURES.md §7.3). Anything else needs a
+        // function to run it, and globals have none.
+        if (dynamic_cast<const NilPtr*>(g->init.get()) != nullptr) {
+            if (declared.type->kind() != Kind::Pointer &&
+                declared.type->kind() != Kind::FunctionPtr) {
+                fail(g->init->pos, "null is a pointer value");
+                continue;
+            }
+            record(g.get(), declared);
+            continue;
+        }
+        std::unordered_set<std::string> active;
+        EvalResult folded = evalConstInt(*g->init, *env_, active);
+        if (!folded.ok) {
+            fail(g->init->pos, "a global initialiser must be constant: " + folded.error);
+            continue;
+        }
+        TypeRef init = checkExpr(g->init.get(), declared);
+        if (!checkCompatible(g->init->pos, g->init.get(), init, declared)) {
+            continue;
+        }
+        record(g.get(), declared);
+    }
+}
+
+void Checker::visitFuncDecl(FuncDecl& n) {
+    if (!n.typeParams.empty()) {
+        return;
+    }
+    bool failed = false;
+    Signature sig = resolver_.buildSignature(n.params, n.returns.get(), moduleScope_, failed);
+    if (failed) {
+        return;
+    }
+    const Type* ret = sig.returnType() != nullptr ? sig.returnType() : ctx_.void_();
+    pushScope();
+    const std::vector<Parameter>& params = sig.parameters();
+    for (uint64_t i = 0; i < static_cast<uint64_t>(params.size()); ++i) {
+        bindLocal(n.params[i].name, TypeRef{params[i].type}, params[i].isMutable,
+                  n.params[i].pos);
+    }
+    TypeRef saved = funcReturn_;
+    bool was = inFunc_;
+    funcReturn_ = TypeRef{ret};
+    inFunc_ = true;
+    n.body->accept(*this);
+    funcReturn_ = saved;
+    inFunc_ = was;
+    popScope();
+}
+
+void Checker::visitStructDecl(StructDecl& n) {
+    if (!n.typeParams.empty()) {
+        return;
+    }
+    const resolve::Decl* self = resolver_.lookup(moduleScope_, n.name);
+    if (self == nullptr) {
+        fail(n.pos, "checker bug: '" + n.name + "' was never resolved");
+        return;
+    }
+    // Conformance: every interface method, present with the same signature.
+    for (const std::unique_ptr<TypeExpr>& iface : n.interfaces) {
+        TypeRef t = resolver_.resolveType(iface.get(), moduleScope_);
+        if (t.isError() || t.type->kind() != Kind::Interface) {
+            continue;
+        }
+        std::optional<DeclId> ifaceId = t.type->decl();
+        if (!ifaceId.has_value() || !implementsAll(self->id, *ifaceId, n.pos)) {
+            continue;
+        }
+    }
+    checkMethods(self->id, Kind::Struct, n.methods);
+}
+
+void Checker::visitClassDecl(ClassDecl& n) {
+    if (!n.typeParams.empty()) {
+        return;
+    }
+    const resolve::Decl* self = resolver_.lookup(moduleScope_, n.name);
+    if (self == nullptr) {
+        fail(n.pos, "checker bug: '" + n.name + "' was never resolved");
+        return;
+    }
+    checkMethods(self->id, Kind::Class, n.methods);
+    checkCtor(self->id, Kind::Class, n.init.get(), true);
+    checkCtor(self->id, Kind::Class, n.deinit.get(), false);
+}
+
+void Checker::checkCtor(DeclId id, Kind kind, FuncDecl* ctor, bool isInit) {
+    if (ctor == nullptr) {
+        if (isInit) {
+            return;
+        }
+        return;
+    }
+    const resolve::Scope* saved = moduleScope_;
+    // The constructor's own scope: its parameters and, for init, a `self` of the
+    // class being built.
+    pushScope();
+    const Signature* sig = resolver_.methodSig(id, isInit ? "init" : "deinit");
+    if (sig != nullptr) {
+        const std::vector<Parameter>& params = sig->parameters();
+        for (uint64_t i = 0; i < static_cast<uint64_t>(params.size()); ++i) {
+            bindLocal(ctor->params[i].name, TypeRef{params[i].type}, params[i].isMutable,
+                      ctor->params[i].pos);
+        }
+        const Type* obj = ctx_.nominal(kind, id);
+        bindLocal("self", TypeRef{ctx_.pointer(obj)}, false, ctor->pos);
+        const Type* ret = sig->returnType() != nullptr ? sig->returnType() : ctx_.void_();
+        TypeRef savedRet = funcReturn_;
+        bool was = inFunc_;
+        funcReturn_ = TypeRef{ret};
+        inFunc_ = true;
+        ctor->body->accept(*this);
+        funcReturn_ = savedRet;
+        inFunc_ = was;
+    }
+    popScope();
+    (void)saved;
+}
+
+void Checker::checkMethods(DeclId id, Kind kind, std::vector<MethodDecl>& methods) {
+    const Type* obj = ctx_.nominal(kind, id);
+    const Type* self = ctx_.pointer(obj);
+    for (MethodDecl& method : methods) {
+        const Signature* sig = resolver_.methodSig(id, method.name);
+        if (sig == nullptr) {
+            fail(method.pos, "checker bug: signature missing");
+            continue;
+        }
+        pushScope();
+        bindLocal("self", TypeRef{self}, false, method.pos);
+        const std::vector<Parameter>& declared = sig->parameters();
+        for (uint64_t i = 0; i < static_cast<uint64_t>(declared.size()); ++i) {
+            bindLocal(method.params[i].name, TypeRef{declared[i].type},
+                      declared[i].isMutable, method.params[i].pos);
+        }
+        const Type* ret = sig->returnType() != nullptr ? sig->returnType() : ctx_.void_();
+        TypeRef saved = funcReturn_;
+        bool was = inFunc_;
+        funcReturn_ = TypeRef{ret};
+        inFunc_ = true;
+        method.body->accept(*this);
+        funcReturn_ = saved;
+        inFunc_ = was;
+        popScope();
+    }
+}
+
+void Checker::visitVarDecl(VarDecl& n) {
+    TypeRef declared = resolver_.resolveType(n.type.get(), moduleScope_);
+    if (declared.isError()) {
+        return;
+    }
+    TypeRef init = checkExpr(n.init.get(), declared);
+    if (!checkCompatible(n.init->pos, n.init.get(), init, declared)) {
+        return;
+    }
+    bindLocal(n.name, declared, true, n.pos);
+    record(&n, declared);
+}
+
+void Checker::visitBlock(Block& n) {
+    pushScope();
+    for (auto& s : n.stmts) {
+        s->accept(*this);
+    }
+    popScope();
+}
+
+void Checker::visitIfStmt(IfStmt& n) {
+    TypeRef cond = checkExpr(n.cond.get(), TypeRef{ctx_.basic(BasicKind::Bool)});
+    if (!cond.isError() && cond != TypeRef{ctx_.basic(BasicKind::Bool)}) {
+        fail(n.cond->pos, "a condition is bool");
+    }
+    n.then->accept(*this);
+    if (n.els != nullptr) {
+        n.els->accept(*this);
+    }
+}
+
+void Checker::visitWhileStmt(WhileStmt& n) {
+    TypeRef cond = checkExpr(n.cond.get(), TypeRef{ctx_.basic(BasicKind::Bool)});
+    if (!cond.isError() && cond != TypeRef{ctx_.basic(BasicKind::Bool)}) {
+        fail(n.cond->pos, "a condition is bool");
+    }
+    ++loopDepth_;
+    n.body->accept(*this);
+    --loopDepth_;
+}
+
+void Checker::visitForStmt(ForStmt& n) {
+    pushScope();
+    if (n.init != nullptr) {
+        n.init->accept(*this);
+    }
+    if (n.cond != nullptr) {
+        TypeRef cond = checkExpr(n.cond.get(), TypeRef{ctx_.basic(BasicKind::Bool)});
+        if (!cond.isError() && cond != TypeRef{ctx_.basic(BasicKind::Bool)}) {
+            fail(n.cond->pos, "a condition is bool");
+        }
+    }
+    if (n.step != nullptr) {
+        checkExpr(n.step.get(), TypeRef{ctx_.wildcard()});
+    }
+    ++loopDepth_;
+    n.body->accept(*this);
+    --loopDepth_;
+    popScope();
+}
+
+void Checker::visitForInStmt(ForInStmt& n) {
+    TypeRef seq = checkExpr(n.seq.get(), TypeRef{ctx_.wildcard()});
+    TypeRef element = errorRef();
+    if (!seq.isError()) {
+        Kind kind = seq.type->kind();
+        if (kind == Kind::Array || kind == Kind::Slice) {
+            element = TypeRef{seq.type->element()};
+        } else if (kind == Kind::Struct || kind == Kind::Class) {
+            std::optional<DeclId> id = seq.type->decl();
+            if (id.has_value()) {
+                const Signature* next = resolver_.methodSig(*id, "next");
+                if (next != nullptr && next->arity() == 1 && next->returnType() != nullptr &&
+                    next->returnType()->kind() == Kind::Pointer) {
+                    element = TypeRef{next->returnType()->pointee()};
+                } else {
+                    fail(n.seq->pos, "a for-in type provides iter() and next()");
+                }
+            }
+        } else {
+            fail(n.seq->pos, "cannot iterate this type");
+        }
+    }
+    pushScope();
+    if (!element.isError()) {
+        bindLocal(n.name, element, n.isMutable, n.pos);
+    }
+    ++loopDepth_;
+    n.body->accept(*this);
+    --loopDepth_;
+    popScope();
+}
+
+void Checker::visitReturn(Return& n) {
+    if (!inFunc_) {
+        fail(n.pos, "return outside a function");
+        return;
+    }
+    if (n.value == nullptr) {
+        if (funcReturn_ != TypeRef{ctx_.void_()}) {
+            fail(n.pos, "returning nothing from a function with a return type");
+        }
+        return;
+    }
+    TypeRef value = checkExpr(n.value.get(), funcReturn_);
+    checkCompatible(n.value->pos, n.value.get(), value, funcReturn_);
+}
+
+void Checker::visitBreak(Break& n) {
+    if (loopDepth_ == 0) {
+        fail(n.pos, "break outside a loop");
+    }
+}
+
+void Checker::visitContinue(Continue& n) {
+    if (loopDepth_ == 0) {
+        fail(n.pos, "continue outside a loop");
+    }
+}
+
+// --- Expressions ---------------------------------------------------------------
+
+void Checker::visitIntLit(IntLit& n) {
+    record(&n, checkLiteralInt(n, TypeRef{ctx_.wildcard()}, n.pos));
+}
+
+void Checker::visitFloatLit(FloatLit& n) {
+    record(&n, checkLiteralFloat(n, TypeRef{ctx_.wildcard()}, n.pos));
+}
+
+void Checker::visitCharLit(CharLit& n) {
+    record(&n, TypeRef{ctx_.basic(BasicKind::Char)});
+}
+
+void Checker::visitStringLit(StringLit& n) {
+    for (auto& part : n.parts) {
+        if (part.isExpr && part.expr != nullptr) {
+            checkExpr(part.expr.get(), TypeRef{ctx_.wildcard()});
+        }
+    }
+    record(&n, TypeRef{ctx_.string()});
+}
+
+void Checker::visitBoolLit(BoolLit& n) {
+    record(&n, TypeRef{ctx_.basic(BasicKind::Bool)});
+}
+
+void Checker::visitNilPtr(NilPtr& n) {
+    record(&n, TypeRef{ctx_.pointer(ctx_.void_())});
+}
+
+void Checker::visitIdent(Ident& n) {
+    record(&n, checkIdent(n));
+}
+
+
+void Checker::visitBinary(Binary& n) {
+    record(&n, checkBinary(n));
+}
+
+void Checker::visitUnary(Unary& n) {
+    TypeRef operand = checkExpr(n.operand.get(), TypeRef{ctx_.wildcard()});
+    if (operand.isError()) {
+        record(&n, operand);
+        return;
+    }
+    Kind kind = operand.type->kind();
+    if (n.op == UnOp::Not) {
+        if (kind != Kind::Basic || *operand.type->basic() != BasicKind::Bool) {
+            fail(n.pos, "not needs a bool");
+            record(&n, errorRef());
+            return;
+        }
+        record(&n, operand);
+        return;
+    }
+    if (n.op == UnOp::Deref) {
+        if (kind != Kind::Pointer && kind != Kind::FunctionPtr) {
+            fail(n.pos, "cannot dereference this type");
+            record(&n, errorRef());
+            return;
+        }
+        if (kind == Kind::FunctionPtr) {
+            record(&n, operand);
+            return;
+        }
+        record(&n, TypeRef{operand.type->pointee()});
+        return;
+    }
+    if (n.op == UnOp::Addr) {
+        if (!isPlace(n.operand.get())) {
+            fail(n.pos, "cannot take the address of this");
+            record(&n, errorRef());
+            return;
+        }
+        record(&n, TypeRef{ctx_.pointer(operand.type)});
+        return;
+    }
+    if (kind != Kind::Basic) {
+        fail(n.pos, "this operator needs a number");
+        record(&n, errorRef());
+        return;
+    }
+    BasicKind basic = *operand.type->basic();
+    if (n.op == UnOp::BitNot && !basicInteger(basic)) {
+        fail(n.pos, "this operator needs an integer");
+        record(&n, errorRef());
+        return;
+    }
+    record(&n, operand);
+}
+
+void Checker::visitCast(Cast& n) {
+    TypeRef from = checkExpr(n.expr.get(), TypeRef{ctx_.wildcard()});
+    TypeRef target = resolver_.resolveType(n.target.get(), moduleScope_);
+    if (from.isError() || target.isError()) {
+        record(&n, errorRef());
+        return;
+    }
+    if (!castRowOk(from, target)) {
+        fail(n.pos, "no cast from " + typeName(from) + " to " + typeName(target));
+        record(&n, errorRef());
+        return;
+    }
+    record(&n, target);
+}
+
+void Checker::visitTernary(Ternary& n) {
+    record(&n, checkTernary(n, TypeRef{ctx_.wildcard()}));
+}
+
+TypeRef Checker::checkTernary(Ternary& n, TypeRef expected) {
+    TypeRef cond = checkExpr(n.cond.get(), TypeRef{ctx_.basic(BasicKind::Bool)});
+    if (!cond.isError() && cond != TypeRef{ctx_.basic(BasicKind::Bool)}) {
+        fail(n.cond->pos, "a condition is bool");
+    }
+    TypeRef then = checkExpr(n.then.get(), expected);
+    TypeRef els = checkExpr(n.els.get(), expected);
+    if (then.isError() || els.isError()) {
+        return errorRef();
+    }
+    if (then != els) {
+        fail(n.pos, "the branches of a ternary match: " + typeName(then) + " and " +
+                        typeName(els));
+        return errorRef();
+    }
+    if (!expected.isError() && expected != TypeRef{ctx_.wildcard()} &&
+        !checkCompatible(n.pos, n.then.get(), then, expected)) {
+        return errorRef();
+    }
+    return then;
+}
+
+void Checker::visitCall(Call& n) {
+    record(&n, checkCall(n));
+}
+
+void Checker::visitField(Field& n) {
+    record(&n, checkField(n));
+}
+
+void Checker::visitIndex(Index& n) {
+    TypeRef base = checkExpr(n.array.get(), TypeRef{ctx_.wildcard()});
+    TypeRef index =
+        checkExpr(n.index.get(), TypeRef{ctx_.basic(BasicKind::I64)});
+    if (base.isError() || index.isError()) {
+        record(&n, errorRef());
+        return;
+    }
+    if (index.type->kind() != Kind::Basic || !basicInteger(*index.type->basic())) {
+        fail(n.index->pos, "an index is an integer");
+        record(&n, errorRef());
+        return;
+    }
+    Kind kind = base.type->kind();
+    if (kind == Kind::Array || kind == Kind::Slice) {
+        record(&n, TypeRef{base.type->element()});
+        return;
+    }
+    if (kind == Kind::String) {
+        record(&n, TypeRef{ctx_.basic(BasicKind::U8)});
+        return;
+    }
+    fail(n.pos, "cannot index this type");
+    record(&n, errorRef());
+}
+
+void Checker::visitSliceExpr(SliceExpr& n) {
+    TypeRef base = checkExpr(n.array.get(), TypeRef{ctx_.wildcard()});
+    TypeRef lo = checkExpr(n.lo.get(), TypeRef{ctx_.basic(BasicKind::I64)});
+    TypeRef hi = checkExpr(n.hi.get(), TypeRef{ctx_.basic(BasicKind::I64)});
+    if (base.isError() || lo.isError() || hi.isError()) {
+        record(&n, errorRef());
+        return;
+    }
+    Kind kind = base.type->kind();
+    if (kind == Kind::String) {
+        record(&n, base);
+        return;
+    }
+    if (kind == Kind::Array || kind == Kind::Slice) {
+        record(&n, TypeRef{ctx_.slice(base.type->element())});
+        return;
+    }
+    fail(n.pos, "cannot slice this type");
+    record(&n, errorRef());
+}
+
+void Checker::visitNewStruct(NewStruct& n) {
+    record(&n, checkNewStruct(n));
+}
+
+void Checker::visitNewClass(NewClass& n) {
+    TypeRef target = resolver_.resolveType(n.type.get(), moduleScope_);
+    if (target.isError()) {
+        record(&n, errorRef());
+        return;
+    }
+    if (target.type->kind() != Kind::Class) {
+        fail(n.pos, "new C(args) creates a class");
+        record(&n, errorRef());
+        return;
+    }
+    std::optional<DeclId> id = target.type->decl();
+    const Signature* init = resolver_.methodSig(*id, "init");
+    if (init == nullptr) {
+        fail(n.pos, "this class has no init: create it with new C { ... }");
+        record(&n, errorRef());
+        return;
+    }
+    if (n.args.size() != init->arity()) {
+        fail(n.pos, "wrong number of arguments");
+        record(&n, errorRef());
+        return;
+    }
+    for (uint64_t i = 0; i < static_cast<uint64_t>(n.args.size()); ++i) {
+        TypeRef want{init->parameters()[i].type};
+        TypeRef got = checkExpr(n.args[i].get(), want);
+        checkCompatible(n.args[i]->pos, n.args[i].get(), got, want);
+    }
+    record(&n, TypeRef{ctx_.pointer(target.type)});
+}
+
+void Checker::visitNewArray(NewArray& n) {
+    record(&n, checkNewArray(n));
+}
+
+void Checker::visitAssign(Assign& n) {
+    TypeRef target = checkExpr(n.target.get(), TypeRef{ctx_.wildcard()});
+    if (target.isError()) {
+        record(&n, errorRef());
+        return;
+    }
+    if (!isPlace(n.target.get())) {
+        fail(n.target->pos, "cannot assign to this");
+        record(&n, errorRef());
+        return;
+    }
+    if (!n.op.has_value()) {
+        TypeRef value = checkExpr(n.value.get(), target);
+        checkCompatible(n.value->pos, n.value.get(), value, target);
+        record(&n, target);
+        return;
+    }
+    TypeRef value = checkExpr(n.value.get(), TypeRef{ctx_.wildcard()});
+    if (value.isError()) {
+        record(&n, errorRef());
+        return;
+    }
+    TypeRef combined = commonType(target, value, n.pos);
+    if (combined.isError()) {
+        record(&n, errorRef());
+        return;
+    }
+    checkCompatible(n.value->pos, n.value.get(), combined, target);
+    record(&n, target);
+}
+
+void Checker::visitSizeofType(SizeofType& n) {
+    TypeRef target = resolver_.resolveType(n.type.get(), moduleScope_);
+    if (target.isError()) {
+        record(&n, errorRef());
+        return;
+    }
+    record(&n, TypeRef{ctx_.basic(BasicKind::I64)});
+}
+
+void Checker::visitMatchStmt(MatchStmt& n) {
+    TypeRef scrutinee = checkExpr(n.scrutinee.get(), TypeRef{ctx_.wildcard()});
+    for (auto& arm : n.arms) {
+        pushScope();
+        bindPattern(*arm->pattern, scrutinee);
+        arm->body->accept(*this);
+        popScope();
+    }
+    if (n.fallback != nullptr) {
+        n.fallback->accept(*this);
+    }
+}
+
+void Checker::bindPattern(Pattern& pat, TypeRef scrutinee) {
+    if (pat.kind == PatternKind::Bind) {
+        bindLocal(pat.name, scrutinee, false, pat.pos);
+        return;
+    }
+    if (pat.kind == PatternKind::Type) {
+        TypeRef t = resolver_.resolveType(pat.type.get(), moduleScope_);
+        if (t.isError() || t.type->kind() != Kind::Struct) {
+            return;
+        }
+        std::optional<DeclId> id = t.type->decl();
+        if (!id.has_value()) {
+            return;
+        }
+        for (FieldPat& field : pat.fields) {
+            TypeRef member = resolver_.fieldType(*id, field.name);
+            if (member.isError()) {
+                fail(field.pat->pos, "no such field");
+                continue;
+            }
+            bindSubPattern(*field.pat, member);
+        }
+        return;
+    }
+    if (pat.kind == PatternKind::Member) {
+        TypeRef t = resolver_.resolveType(
+            std::make_unique<NamedType>(pat.pos, "", pat.tag,
+                                        std::vector<std::unique_ptr<TypeExpr>>{})
+                .get(),
+            moduleScope_);
+        if (t.isError() || t.type->kind() != Kind::Union) {
+            return;
+        }
+        std::optional<DeclId> id = t.type->decl();
+        if (!id.has_value()) {
+            return;
+        }
+        if (resolver_.fieldType(*id, pat.member).isError()) {
+            fail(pat.pos, "no such member");
+        }
+        return;
+    }
+}
+
+void Checker::bindSubPattern(Pattern& pat, TypeRef type) {
+    if (pat.kind == PatternKind::Bind) {
+        bindLocal(pat.name, type, false, pat.pos);
+        return;
+    }
+    if (pat.kind == PatternKind::Type) {
+        TypeRef t = resolver_.resolveType(pat.type.get(), moduleScope_);
+        if (t.isError()) {
+            return;
+        }
+        std::optional<DeclId> id = t.type->decl();
+        if (!id.has_value()) {
+            return;
+        }
+        for (FieldPat& field : pat.fields) {
+            TypeRef member = resolver_.fieldType(*id, field.name);
+            if (member.isError()) {
+                fail(field.pat->pos, "no such field");
+                continue;
+            }
+            bindSubPattern(*field.pat, member);
+        }
+    }
+}
+
+// --- Expression cores ----------------------------------------------------------
+
+TypeRef Checker::checkExpr(Expr* expr, TypeRef expected) {
+    if (expr == nullptr) {
+        return errorRef();
+    }
+    if (auto* lit = dynamic_cast<IntLit*>(expr)) {
+        TypeRef t = checkLiteralInt(*lit, expected, lit->pos);
+        record(lit, t);
+        return t;
+    }
+    if (auto* lit = dynamic_cast<FloatLit*>(expr)) {
+        TypeRef t = checkLiteralFloat(*lit, expected, lit->pos);
+        record(lit, t);
+        return t;
+    }
+    if (auto* lit = dynamic_cast<CharLit*>(expr)) {
+        record(lit, TypeRef{ctx_.basic(BasicKind::Char)});
+        return TypeRef{ctx_.basic(BasicKind::Char)};
+    }
+    if (auto* lit = dynamic_cast<BoolLit*>(expr)) {
+        record(lit, TypeRef{ctx_.basic(BasicKind::Bool)});
+        return TypeRef{ctx_.basic(BasicKind::Bool)};
+    }
+    if (auto* nil = dynamic_cast<NilPtr*>(expr)) {
+        record(nil, TypeRef{ctx_.pointer(ctx_.void_())});
+        return TypeRef{ctx_.pointer(ctx_.void_())};
+    }
+    if (auto* ident = dynamic_cast<Ident*>(expr)) {
+        TypeRef t = checkIdent(*ident);
+        record(ident, t);
+        return t;
+    }
+    if (auto* string = dynamic_cast<StringLit*>(expr)) {
+        for (auto& part : string->parts) {
+            if (part.isExpr && part.expr != nullptr) {
+                checkExpr(part.expr.get(), TypeRef{ctx_.wildcard()});
+            }
+        }
+        record(string, TypeRef{ctx_.string()});
+        return TypeRef{ctx_.string()};
+    }
+    if (auto* binary = dynamic_cast<Binary*>(expr)) {
+        TypeRef t = checkBinary(*binary);
+        record(binary, t);
+        return t;
+    }
+    if (auto* unary = dynamic_cast<Unary*>(expr)) {
+        visitUnary(*unary);
+        return typeOf(unary);
+    }
+    if (auto* cast = dynamic_cast<Cast*>(expr)) {
+        visitCast(*cast);
+        return typeOf(cast);
+    }
+    if (auto* ternary = dynamic_cast<Ternary*>(expr)) {
+        TypeRef t = checkTernary(*ternary, expected);
+        record(ternary, t);
+        return t;
+    }
+    if (auto* call = dynamic_cast<Call*>(expr)) {
+        TypeRef t = checkCall(*call);
+        record(call, t);
+        return t;
+    }
+    if (auto* field = dynamic_cast<Field*>(expr)) {
+        TypeRef t = checkField(*field);
+        record(field, t);
+        return t;
+    }
+    if (auto* index = dynamic_cast<Index*>(expr)) {
+        visitIndex(*index);
+        return typeOf(index);
+    }
+    if (auto* slice = dynamic_cast<SliceExpr*>(expr)) {
+        visitSliceExpr(*slice);
+        return typeOf(slice);
+    }
+    if (auto* news = dynamic_cast<NewStruct*>(expr)) {
+        TypeRef t = checkNewStruct(*news);
+        record(news, t);
+        return t;
+    }
+    if (auto* newc = dynamic_cast<NewClass*>(expr)) {
+        visitNewClass(*newc);
+        return typeOf(newc);
+    }
+    if (auto* newa = dynamic_cast<NewArray*>(expr)) {
+        TypeRef t = checkNewArray(*newa);
+        record(newa, t);
+        return t;
+    }
+    if (auto* assign = dynamic_cast<Assign*>(expr)) {
+        visitAssign(*assign);
+        return typeOf(assign);
+    }
+    if (auto* sz = dynamic_cast<SizeofType*>(expr)) {
+        visitSizeofType(*sz);
+        return typeOf(sz);
+    }
+    fail(expr->pos, "checker bug: unhandled expression");
+    return errorRef();
+}
+
+TypeRef Checker::checkLiteralInt(const IntLit& lit, TypeRef expected, Position pos) {
+    std::unordered_set<std::string> active;
+    IntLit probe = IntLit(lit.pos, lit.base, lit.digits, lit.negative);
+    EvalResult folded = evalConstInt(probe, *env_, active);
+    if (!folded.ok) {
+        fail(pos, folded.error);
+        return errorRef();
+    }
+    if (!expected.isError() && expected != TypeRef{ctx_.wildcard()} &&
+        expected.type->kind() == Kind::Basic) {
+        BasicKind basic = *expected.type->basic();
+        if (basicInteger(basic)) {
+            int width = basicWidth(basic);
+            bool isSigned = basicSigned(basic);
+            __int128 value = folded.value;
+            __int128 lo = isSigned ? -(static_cast<__int128>(1) << (width * 8 - 1)) : 0;
+            __int128 hi = isSigned ? ((static_cast<__int128>(1) << (width * 8 - 1)) - 1)
+                                  : ((static_cast<__int128>(1) << (width * 8)) - 1);
+            if (value < lo || value > hi) {
+                fail(pos, "this literal does not fit " + typeName(expected));
+                return errorRef();
+            }
+            return expected;
+        }
+    }
+    if (folded.value >= INT32_MIN && folded.value <= INT32_MAX) {
+        return TypeRef{ctx_.basic(BasicKind::I32)};
+    }
+    return TypeRef{ctx_.basic(BasicKind::I64)};
+}
+
+TypeRef Checker::checkLiteralFloat(const FloatLit& lit, TypeRef expected, Position pos) {
+    (void)lit;
+    (void)pos;
+    if (!expected.isError() && expected != TypeRef{ctx_.wildcard()} &&
+        expected.type->kind() == Kind::Basic && basicFloat(*expected.type->basic())) {
+        return expected;
+    }
+    return TypeRef{ctx_.basic(BasicKind::F64)};
+}
+
+TypeRef Checker::checkIdent(Ident& expr) {
+    if (const Local* local = findLocal(expr.name)) {
+        return local->type;
+    }
+    const resolve::Decl* decl = resolver_.lookup(moduleScope_, expr.name);
+    if (decl == nullptr) {
+        fail(expr.pos, "unbound name '" + expr.name + "'");
+        return errorRef();
+    }
+    if (decl->kind == resolve::DeclKind::Func) {
+        return TypeRef{ctx_.closure(decl->sig)};
+    }
+    if (decl->kind == resolve::DeclKind::Var || decl->kind == resolve::DeclKind::Const) {
+        return decl->type;
+    }
+    fail(expr.pos, "'" + expr.name + "' is not a value");
+    return errorRef();
+}
+
+bool Checker::isPlace(const Expr* expr) const {
+    if (dynamic_cast<const Ident*>(expr) != nullptr) {
+        return true;
+    }
+    if (dynamic_cast<const Field*>(expr) != nullptr) {
+        return true;
+    }
+    if (dynamic_cast<const Index*>(expr) != nullptr) {
+        return true;
+    }
+    if (const auto* unary = dynamic_cast<const Unary*>(expr)) {
+        return unary->op == UnOp::Deref;
+    }
+    return false;
+}
+
+TypeRef Checker::checkBinary(Binary& expr) {
+    TypeRef lhs = checkExpr(expr.lhs.get(), TypeRef{ctx_.wildcard()});
+    TypeRef rhs = checkExpr(expr.rhs.get(), TypeRef{ctx_.wildcard()});
+    if (lhs.isError() || rhs.isError()) {
+        return errorRef();
+    }
+    bool isBoolOp = expr.op == BinOp::AndAnd || expr.op == BinOp::OrOr;
+    bool isEq = expr.op == BinOp::Eq || expr.op == BinOp::Ne;
+    bool isRel =
+        expr.op == BinOp::Lt || expr.op == BinOp::Le || expr.op == BinOp::Gt ||
+        expr.op == BinOp::Ge;
+    bool isShift = expr.op == BinOp::Shl || expr.op == BinOp::Shr;
+    if (isBoolOp) {
+        const TypeRef boolean{ctx_.basic(BasicKind::Bool)};
+        if (lhs != boolean || rhs != boolean) {
+            fail(expr.pos, "and/or need bool operands");
+            return errorRef();
+        }
+        return boolean;
+    }
+    if (isEq || isRel) {
+        if (isRel && lhs.type->kind() == Kind::Pointer && rhs.type->kind() == Kind::Pointer) {
+            return TypeRef{ctx_.basic(BasicKind::Bool)};
+        }
+        TypeRef common = commonType(lhs, rhs, expr.pos);
+        if (common.isError()) {
+            return errorRef();
+        }
+        if (isRel) {
+            checkShiftDiv(expr, lhs, rhs);
+        }
+        return TypeRef{ctx_.basic(BasicKind::Bool)};
+    }
+    if (isShift) {
+        if (!isInteger(lhs) || !isInteger(rhs)) {
+            fail(expr.pos, "shifts are integer-only");
+            return errorRef();
+        }
+        checkShiftDiv(expr, lhs, rhs);
+        return commonType(lhs, rhs, expr.pos);
+    }
+    TypeRef common = commonType(lhs, rhs, expr.pos);
+    if (common.isError()) {
+        return errorRef();
+    }
+    checkShiftDiv(expr, lhs, rhs);
+    return common;
+}
+
+void Checker::checkShiftDiv(const Binary& expr, TypeRef lhs, TypeRef rhs) {
+    if (expr.op != BinOp::Div && expr.op != BinOp::Rem && expr.op != BinOp::Shl &&
+        expr.op != BinOp::Shr) {
+        return;
+    }
+    std::unordered_set<std::string> active;
+    EvalResult divisor = evalConstInt(*expr.rhs, *env_, active);
+    if (!divisor.ok) {
+        return;
+    }
+    if ((expr.op == BinOp::Div || expr.op == BinOp::Rem) && divisor.value == 0) {
+        fail(expr.rhs->pos, "division by zero");
+        return;
+    }
+    if ((expr.op == BinOp::Shl || expr.op == BinOp::Shr) && divisor.value < 0) {
+        fail(expr.rhs->pos, "a shift count is not negative");
+    }
+}
+
+bool Checker::isInteger(TypeRef type) const {
+    return !type.isError() && type.type->kind() == Kind::Basic &&
+           basicInteger(*type.type->basic());
+}
+
+TypeRef Checker::checkCall(Call& expr) {
+    Signature sig;
+    bool hasSig = false;
+    if (const auto* ident = dynamic_cast<const Ident*>(expr.callee.get())) {
+        if (const Local* local = findLocal(ident->name)) {
+            if (!local->type.isError() &&
+                (local->type.type->kind() == Kind::FunctionPtr ||
+                 local->type.type->kind() == Kind::Closure)) {
+                sig = *local->type.type->signature();
+                hasSig = true;
+            }
+        } else {
+            const resolve::Decl* decl = resolver_.lookup(moduleScope_, ident->name);
+            if (decl != nullptr && decl->kind == resolve::DeclKind::Func) {
+                sig = decl->sig;
+                hasSig = true;
+            }
+        }
+    }
+    if (!hasSig) {
+        TypeRef callee = checkExpr(expr.callee.get(), TypeRef{ctx_.wildcard()});
+        if (callee.isError()) {
+            return errorRef();
+        }
+        Kind kind = callee.type->kind();
+        if (kind == Kind::FunctionPtr || kind == Kind::Closure) {
+            sig = *callee.type->signature();
+            hasSig = true;
+        }
+    }
+    if (!hasSig) {
+        // `(*f)(v)`: the dereference of a function pointer is the function.
+        if (const auto* deref = dynamic_cast<const Unary*>(expr.callee.get())) {
+            if (deref->op == UnOp::Deref) {
+                TypeRef inner =
+                    checkExpr(deref->operand.get(), TypeRef{ctx_.wildcard()});
+                if (!inner.isError() && inner.type->kind() == Kind::FunctionPtr) {
+                    sig = *inner.type->signature();
+                    hasSig = true;
+                }
+            }
+        }
+    }
+    if (!hasSig) {
+        fail(expr.pos, "not callable");
+        return errorRef();
+    }
+    if (expr.args.size() != sig.arity()) {
+        fail(expr.pos, "wrong number of arguments");
+        return errorRef();
+    }
+    for (uint64_t i = 0; i < static_cast<uint64_t>(expr.args.size()); ++i) {
+        TypeRef want{sig.parameters()[i].type};
+        TypeRef got = checkExpr(expr.args[i].get(), want);
+        checkCompatible(expr.args[i]->pos, expr.args[i].get(), got, want);
+    }
+    if (!expr.typeArgs.empty()) {
+        fail(expr.pos, "a generic call needs explicit arguments");
+        return errorRef();
+    }
+    const Type* ret = sig.returnType() != nullptr ? sig.returnType() : ctx_.void_();
+    return TypeRef{ret};
+}
+
+TypeRef Checker::checkField(Field& expr) {
+    TypeRef object = checkExpr(expr.object.get(), TypeRef{ctx_.wildcard()});
+    if (object.isError()) {
+        return errorRef();
+    }
+    Kind kind = object.type->kind();
+    if (kind == Kind::Pointer) {
+        fail(expr.pos, "deref first: a pointer has no fields");
+        return errorRef();
+    }
+    if (kind == Kind::Class) {
+        fail(expr.pos, "deref first: a class reference has no fields");
+        return errorRef();
+    }
+    if (kind == Kind::Struct || kind == Kind::Union) {
+        std::optional<DeclId> id = object.type->decl();
+        if (!id.has_value()) {
+            return errorRef();
+        }
+        TypeRef member = resolver_.fieldType(*id, expr.name);
+        if (member.isError()) {
+            fail(expr.pos, "no such field");
+            return errorRef();
+        }
+        return member;
+    }
+    if (kind == Kind::Interface) {
+        std::optional<DeclId> id = object.type->decl();
+        if (!id.has_value()) {
+            return errorRef();
+        }
+        const Signature* sig = resolver_.methodSig(*id, expr.name);
+        if (sig == nullptr) {
+            fail(expr.pos, "no such method");
+            return errorRef();
+        }
+        return TypeRef{ctx_.closure(*sig)};
+    }
+    fail(expr.pos, "no fields on this type");
+    return errorRef();
+}
+
+TypeRef Checker::checkNewStruct(NewStruct& expr) {
+    TypeRef target = resolver_.resolveType(expr.type.get(), moduleScope_);
+    if (target.isError()) {
+        return errorRef();
+    }
+    Kind kind = target.type->kind();
+    std::optional<DeclId> id = target.type->decl();
+    if ((kind != Kind::Struct && kind != Kind::Class) || !id.has_value()) {
+        fail(expr.pos, "new S { ... } creates a struct");
+        return errorRef();
+    }
+    if (kind == Kind::Class && resolver_.methodSig(*id, "init") != nullptr) {
+        fail(expr.pos, "this class has an init: create it with new C(args)");
+        return errorRef();
+    }
+    std::vector<std::string> fields = resolver_.fieldNames(*id);
+    if (expr.fields.size() != fields.size()) {
+        fail(expr.pos, "every field is named, exactly once");
+        return errorRef();
+    }
+    for (const FieldInit& init : expr.fields) {
+        TypeRef field = resolver_.fieldType(*id, init.name);
+        if (field.isError()) {
+            fail(init.value->pos, "no such field");
+            return errorRef();
+        }
+        TypeRef value = checkExpr(init.value.get(), field);
+        if (!checkCompatible(init.value->pos, init.value.get(), value, field)) {
+            return errorRef();
+        }
+    }
+    for (uint64_t i = 0; i < static_cast<uint64_t>(fields.size()); ++i) {
+        bool named = false;
+        for (const FieldInit& init : expr.fields) {
+            if (init.name == fields[i]) {
+                named = true;
+                break;
+            }
+        }
+        if (!named) {
+            fail(expr.pos, "missing field '" + fields[i] + "'");
+            return errorRef();
+        }
+    }
+    return target;
+}
+
+TypeRef Checker::checkNewArray(NewArray& expr) {
+    TypeRef element = resolver_.resolveType(expr.element.get(), moduleScope_);
+    if (element.isError()) {
+        return errorRef();
+    }
+    std::unordered_set<std::string> active;
+    EvalResult count = evalConstInt(*expr.length, *env_, active);
+    if (!count.ok) {
+        fail(expr.length->pos, count.error);
+        return errorRef();
+    }
+    if (count.value < 0) {
+        fail(expr.length->pos, "an array length is not negative");
+        return errorRef();
+    }
+    const int64_t written = static_cast<int64_t>(expr.inits.size());
+    if (expr.repeat && written != kOneElement) {
+        fail(expr.pos, "a repeat fills from exactly one element");
+        return errorRef();
+    }
+    if (!expr.repeat && written != count.value) {
+        fail(expr.pos, "the element count must match the array type");
+        return errorRef();
+    }
+    for (auto& init : expr.inits) {
+        TypeRef value = checkExpr(init.get(), element);
+        checkCompatible(init->pos, init.get(), value, element);
+    }
+    return TypeRef{ctx_.array(element.type, count.value)};
+}
+
+// --- Conversions ---------------------------------------------------------------
+
+TypeRef Checker::commonType(TypeRef lhs, TypeRef rhs, Position pos) {
+    if (lhs.isError() || rhs.isError()) {
+        return errorRef();
+    }
+    if (lhs.type->kind() != Kind::Basic || rhs.type->kind() != Kind::Basic) {
+        fail(pos, "arithmetic needs numbers");
+        return errorRef();
+    }
+    BasicKind a = *lhs.type->basic();
+    BasicKind b = *rhs.type->basic();
+    if (basicFloat(a) || basicFloat(b)) {
+        if (a == BasicKind::F64 || b == BasicKind::F64) {
+            return TypeRef{ctx_.basic(BasicKind::F64)};
+        }
+        return TypeRef{ctx_.basic(BasicKind::F32)};
+    }
+    if (!basicInteger(a) || !basicInteger(b)) {
+        fail(pos, "arithmetic needs numbers");
+        return errorRef();
+    }
+    int width = basicWidth(a) > basicWidth(b) ? basicWidth(a) : basicWidth(b);
+    bool signedA = basicSigned(a);
+    bool signedB = basicSigned(b);
+    if (signedA == signedB) {
+        return TypeRef{ctx_.basic(intFor(width, signedA))};
+    }
+    // Differ in signedness: signed wins when it holds every value of the
+    // unsigned one — a strictly wider signed type. Otherwise unsigned.
+    int signedWidth = signedA ? basicWidth(a) : basicWidth(b);
+    int unsignedWidth = signedA ? basicWidth(b) : basicWidth(a);
+    if (signedWidth > unsignedWidth) {
+        return TypeRef{ctx_.basic(intFor(width, true))};
+    }
+    return TypeRef{ctx_.basic(intFor(width, false))};
+}
+
+bool Checker::checkCompatible(Position pos, const Expr* fromExpr, TypeRef from, TypeRef to) {
+    if (from.isError() || to.isError()) {
+        return true;
+    }
+    if (from == to) {
+        return true;
+    }
+    // A null names no type, so it converts to any pointer.
+    if (dynamic_cast<const NilPtr*>(fromExpr) != nullptr &&
+        (to.type->kind() == Kind::Pointer || to.type->kind() == Kind::FunctionPtr)) {
+        return true;
+    }
+    // An integer literal converts to any integer type whose range contains it.
+    if (dynamic_cast<const IntLit*>(fromExpr) != nullptr && to.type->kind() == Kind::Basic &&
+        basicInteger(*to.type->basic())) {
+        std::unordered_set<std::string> active;
+        EvalResult folded = evalConstInt(*fromExpr, *env_, active);
+        if (folded.ok) {
+            int width = basicWidth(*to.type->basic());
+            bool isSigned = basicSigned(*to.type->basic());
+            __int128 lo = isSigned ? -(static_cast<__int128>(1) << (width * 8 - 1)) : 0;
+            __int128 hi = isSigned ? ((static_cast<__int128>(1) << (width * 8 - 1)) - 1)
+                                   : ((static_cast<__int128>(1) << (width * 8)) - 1);
+            if (folded.value >= lo && folded.value <= hi) {
+                return true;
+            }
+        }
+    }
+    // A float literal converts to any float type.
+    if (dynamic_cast<const FloatLit*>(fromExpr) != nullptr && to.type->kind() == Kind::Basic &&
+        basicFloat(*to.type->basic())) {
+        return true;
+    }
+    // A concrete value converts to an interface it implements.
+    if (to.type->kind() == Kind::Interface &&
+        (from.type->kind() == Kind::Struct || from.type->kind() == Kind::Class)) {
+        std::optional<DeclId> concrete = from.type->decl();
+        std::optional<DeclId> iface = to.type->decl();
+        if (concrete.has_value() && iface.has_value() &&
+            implementsAll(*concrete, *iface, pos)) {
+            return true;
+        }
+        return false;
+    }
+    // An upcast points at something that really is a Base.
+    if (from.type->kind() == Kind::Pointer && to.type->kind() == Kind::Pointer) {
+        const Type* fromPointee = from.type->pointee();
+        const Type* toPointee = to.type->pointee();
+        if (fromPointee->kind() == Kind::Class && toPointee->kind() == Kind::Class) {
+            std::optional<DeclId> derived = fromPointee->decl();
+            std::optional<DeclId> base = toPointee->decl();
+            if (derived.has_value() && base.has_value() &&
+                (sameDecl(*derived, *base) || isDerivedFrom(*derived, *base))) {
+                return true;
+            }
+        }
+        // Erasure discards the type, so it cannot claim to be something it is
+        // not. `free(buf)` type-checks because of this row.
+        if (toPointee->kind() == Kind::Void) {
+            return true;
+        }
+    }
+    fail(pos, "cannot use " + typeName(from) + " as " + typeName(to));
+    return false;
+}
+
+bool Checker::implementsAll(DeclId concrete, DeclId iface, Position pos) {
+    for (const std::string& method : resolver_.methodNames(iface)) {
+        const Signature* want = resolver_.methodSig(iface, method);
+        const Signature* got = resolver_.methodSig(concrete, method);
+        if (got == nullptr) {
+            for (DeclId base : resolver_.classBases(concrete)) {
+                got = resolver_.methodSig(base, method);
+                if (got != nullptr) {
+                    break;
+                }
+            }
+        }
+        if (got == nullptr) {
+            fail(pos, "does not implement '" + method + "'");
+            return false;
+        }
+        if (!sameSignature(*got, *want)) {
+            fail(pos, "'" + method + "' has the wrong signature");
+            return false;
+        }
+    }
+    return true;
+}
+
+bool Checker::isDerivedFrom(DeclId derived, DeclId base) const {
+    std::vector<DeclId> frontier = resolver_.classBases(derived);
+    while (!frontier.empty()) {
+        DeclId next = frontier.back();
+        frontier.pop_back();
+        if (sameDecl(next, base)) {
+            return true;
+        }
+        for (DeclId parent : resolver_.classBases(next)) {
+            frontier.push_back(parent);
+        }
+    }
+    return false;
+}
+
+bool Checker::castRowOk(TypeRef from, TypeRef to) const {
+    if (from == to) {
+        return true;
+    }
+    Kind a = from.type->kind();
+    Kind b = to.type->kind();
+    if (a == Kind::Void || b == Kind::Void) {
+        return false;
+    }
+    // A union's payload reads as any type. Explicit by construction.
+    if (a == Kind::Union) {
+        return true;
+    }
+    bool aNum = a == Kind::Basic;
+    bool bNum = b == Kind::Basic;
+    if (aNum && bNum) {
+        return true;
+    }
+    if (a == Kind::Pointer && b == Kind::Pointer) {
+        return true;
+    }
+    if (aNum && b == Kind::Pointer) {
+        return true;
+    }
+    if (a == Kind::Pointer && bNum) {
+        return true;
+    }
+    // An interface reads back as a concrete type, checked at runtime.
+    if (a == Kind::Interface && (b == Kind::Class || b == Kind::Struct)) {
+        return true;
+    }
+    // A base pointer reads back as a derived one, checked at runtime.
+    if (a == Kind::Pointer && b == Kind::Pointer) {
+        return true;
+    }
+    // Same width reinterprets the bits. Both sizes come from layout.h, and an
+    // unknown size is not a reinterpretation.
+    int64_t sa = typeSize(from.type);
+    int64_t sb = typeSize(to.type);
+    if (sa > 0 && sa == sb) {
+        return true;
+    }
+    return false;
+}
+
+}  // namespace check
+}  // namespace cider

@@ -30,6 +30,15 @@
 namespace cider {
 
 struct EvalEnv {
+    // One reference member, so it is movable and not copyable: two envs must
+    // not silently share a context they were built against.
+    explicit EvalEnv(TypeContext& ctx) : types(ctx) {}
+    EvalEnv() = delete;
+    EvalEnv(const EvalEnv&) = delete;
+    EvalEnv& operator=(const EvalEnv&) = delete;
+    EvalEnv(EvalEnv&&) = default;
+    EvalEnv& operator=(EvalEnv&&) = default;
+
     TypeContext& types;
     // The initialiser of a qualified constant (`mod.name`), or null when no
     // such constant exists. Non-owning.
