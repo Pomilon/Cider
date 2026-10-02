@@ -250,7 +250,15 @@ def t2() -> tuple[bool, str]:
 
 def t3() -> tuple[bool, str]:
     types = _types_files()
-    hits = [h for p in types for h in grep_lines(r"\bshared_ptr\b", [p])]
+    # Comments and string literals are stripped first, for the same reason T4
+    # strips them: `signature.h` says "gate T3 forbids shared_ptr" in a comment,
+    # and a gate that flags its own explanation teaches the reader that prose is
+    # the defect. A `shared_ptr` in code is the defect.
+    hits = []
+    for path in types:
+        for lineno, line in _code_lines(path):
+            if re.search(r"\bshared_ptr\b", line):
+                hits.append(f"{os.path.relpath(path, ROOT)}:{lineno}: {line.strip()}")
     if hits:
         return False, f"shared_ptr in the type representation: " + "; ".join(hits[:5])
     return True, "no shared_ptr in src/types/"
