@@ -21,6 +21,15 @@ set(CMAKE_CXX_EXTENSIONS OFF)
 # here rather than in the test target so that every future target inherits it.
 add_compile_options(-Wall -Wextra -Werror -Werror=switch -Wno-unused-parameter)
 
+# --- The type system ----------------------------------------------------------
+#
+# TYPES.md §2.1: a type is a tagged union, and the tag is the one list that
+# every switch in the compiler must agree with. Gate T1 polices that agreement,
+# which is why these switches have no `default:` -- see kind.cpp.
+
+add_library(cider_types STATIC src/types/kind.cpp)
+target_include_directories(cider_types PUBLIC src)
+
 # --- Tests --------------------------------------------------------------------
 
 enable_testing()

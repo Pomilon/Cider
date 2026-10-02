@@ -150,30 +150,98 @@ def t1() -> tuple[bool, str]:
 
 # --- T4: no size is computed twice ---------------------------------------------
 
-SIZE_WORD = r"\b(?:size|sizeof|offset|align|alignOf|sizeOf|width|stride|padding)\b"
+# A size-looking word, matched case-insensitively and NOT anchored to a word
+# boundary. The boundary was the first version's bug: `kOffsetDataWord` is one
+# identifier, so `\boffset\b` never matched it -- and a prefixed constant is
+# precisely the shape T4 exists to catch, since `layout::` is the only place
+# such a name should appear.
+#
+# `width` is deliberately absent. It is the most common word in this compiler
+# ("the operand's width", "an IR value's width") and almost never a second
+# authority for a number; including it would bury the real defects in noise.
+SIZE_WORD = r"(?:size|sizeof|offset|align|stride|padding)"
+
+
+def _code_lines(path: str) -> list[tuple[int, str]]:
+    """Source lines with comments and string literals removed.
+
+    A gate that greps raw text reports prose. "eight integer widths" in a
+    comment is not a second authority for a size, and a gate that fails on it
+    teaches its reader to write vaguer comments -- which is the opposite of what
+    TYPES.md wants. So comments and literals go before the pattern is applied,
+    and only executable code is judged.
+    """
+    kept = []
+    with open(path, encoding="utf-8") as handle:
+        for lineno, raw in enumerate(handle, 1):
+            line, out, i = raw, [], 0
+            while i < len(line):
+                two = line[i:i + 2]
+                if two == "//":
+                    break
+                if two == "/*":
+                    # Skip to the closing marker, tracking newlines so the line
+                    # numbering of what follows stays right.
+                    end = line.find("*/", i + 2)
+                    if end == -1:
+                        break
+                    out.append(" " * (end + 2 - i))
+                    i = end + 2
+                    continue
+                if line[i] == '"':
+                    end = i + 1
+                    while end < len(line) and line[end] != '"':
+                        end += 2 if line[end] == "\\" else 1
+                    out.append('""')
+                    i = min(end + 1, len(line))
+                    continue
+                if line[i] == "'":
+                    end = i + 1
+                    while end < len(line) and line[end] != "'":
+                        end += 2 if line[end] == "\\" else 1
+                    out.append("''")
+                    i = min(end + 1, len(line))
+                    continue
+                out.append(line[i])
+                i += 1
+            cleaned = "".join(out)
+            if cleaned.strip():
+                kept.append((lineno, cleaned))
+    return kept
 
 
 def t4_grep() -> tuple[bool, str]:
-    """The literal half of T4: a size-looking literal outside layout.h."""
+    """The literal half of T4: a size-looking literal in code outside layout.h."""
     offenders = []
+    rx = re.compile(SIZE_WORD + r"[^\n]*?\d", re.IGNORECASE)
     for path in src_files():
         rel = os.path.relpath(path, ROOT)
         if rel.endswith(os.path.join("src", "layout.h")):
             continue
-        for hit in grep_lines(SIZE_WORD + r"[^\n]*?\b\d+\b", [path]):
-            offenders.append(hit)
+        for lineno, line in _code_lines(path):
+            if rx.search(line):
+                offenders.append(f"{rel}:{lineno}: {line.strip()}")
     if offenders:
-        return False, f"{len(offenders)} size/offset literal(s) outside layout.h: " + "; ".join(offenders[:5])
-    return True, "no size/offset literals outside src/layout.h"
+        return False, (f"{len(offenders)} size/offset literal(s) in code outside layout.h: "
+                       + "; ".join(offenders[:5]))
+    return True, "no size/offset literals in code outside src/layout.h"
 
 
 # --- T2 / T3 / T5 / T6 / L1 / L2 / L3 -----------------------------------------
 
-def t2() -> tuple[bool, str]:
-    files = src_files()
-    types = [p for p in files if os.path.join("src", "types") in p]
-    if not types:
+def _types_files() -> list[str]:
+    """Every source file under src/types/, which is where the type representation
+    lives. The subject is src/types/type.h specifically -- `Kind` and `IRType`
+    are part of the representation but neither carries an operator== or a
+    shared_ptr, so their absence proves nothing and must not fail a gate.
+    """
+    if read(os.path.join("src", "types", "type.h")) is None:
         raise FileNotFoundError("src/types/type.h")
+    return [p for p in src_files() if os.path.join("src", "types") in p]
+
+
+def t2() -> tuple[bool, str]:
+    types = _types_files()
     count = sum(len(grep_lines(r"\boperator\s*==", [p])) for p in types)
     if count != 1:
         return False, f"src/types/ has {count} operator== definitions, expected exactly 1"
@@ -181,10 +249,7 @@ def t2() -> tuple[bool, str]:
 
 
 def t3() -> tuple[bool, str]:
-    files = src_files()
-    types = [p for p in files if os.path.join("src", "types") in p]
-    if not types:
-        raise FileNotFoundError("src/types/type.h")
+    types = _types_files()
     hits = [h for p in types for h in grep_lines(r"\bshared_ptr\b", [p])]
     if hits:
         return False, f"shared_ptr in the type representation: " + "; ".join(hits[:5])
