@@ -39,6 +39,15 @@ target_include_directories(cider_types PUBLIC src)
 add_library(cider_lexer STATIC src/lexer/token.cpp src/lexer/lexer.cpp)
 target_include_directories(cider_lexer PUBLIC src)
 
+# --- The AST ------------------------------------------------------------------
+#
+# Header-only: every node and the one visitor live in src/ast/ast.h, so there
+# is nothing to compile. The INTERFACE target exists so tests link against
+# something named, and so a future ast.cpp has a home.
+
+add_library(cider_ast INTERFACE)
+target_include_directories(cider_ast INTERFACE src)
+
 # --- Tests --------------------------------------------------------------------
 
 enable_testing()
@@ -64,6 +73,11 @@ add_test(NAME layout COMMAND layout_test)
 add_test(NAME types COMMAND type_test)
 add_test(NAME lexer COMMAND lexer_test)
 
+add_executable(ast_test tests/unit/ast_test.cpp)
+target_link_libraries(ast_test PRIVATE cider_ast cider_lexer)
+target_include_directories(ast_test PRIVATE src)
+add_test(NAME ast COMMAND ast_test)
+
 # A gate that fails must fail the build, so nothing here is allowed to be
 # "informational".
-set_tests_properties(gates layout types lexer PROPERTIES LABELS "gate")
+set_tests_properties(gates layout types lexer ast PROPERTIES LABELS "gate")
