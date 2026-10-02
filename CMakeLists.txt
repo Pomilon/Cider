@@ -31,6 +31,14 @@ add_library(cider_types STATIC src/types/kind.cpp src/types/type.cpp
                                src/types/signature.cpp src/types/context.cpp)
 target_include_directories(cider_types PUBLIC src)
 
+# --- The lexer ---------------------------------------------------------------
+#
+# LAYERS.md §3.1: one character in, one token out, with a position. May read
+# the source text and nothing else.
+
+add_library(cider_lexer STATIC src/lexer/token.cpp src/lexer/lexer.cpp)
+target_include_directories(cider_lexer PUBLIC src)
+
 # --- Tests --------------------------------------------------------------------
 
 enable_testing()
@@ -42,6 +50,10 @@ add_executable(type_test tests/unit/type_test.cpp)
 target_link_libraries(type_test PRIVATE cider_types)
 target_include_directories(type_test PRIVATE src)
 
+add_executable(lexer_test tests/unit/lexer_test.cpp)
+target_link_libraries(lexer_test PRIVATE cider_lexer)
+target_include_directories(lexer_test PRIVATE src)
+
 # The gates are a test like any other, so `ctest` alone is the whole gate. The
 # script reports three states (PASS/FAIL/PENDING) and exits non-zero only on
 # FAIL; a pending gate is unexamined, not satisfied, and the script says which
@@ -50,7 +62,8 @@ find_package(Python3 COMPONENTS Interpreter REQUIRED)
 add_test(NAME gates COMMAND ${Python3_EXECUTABLE} ${CMAKE_SOURCE_DIR}/scripts/gates.py)
 add_test(NAME layout COMMAND layout_test)
 add_test(NAME types COMMAND type_test)
+add_test(NAME lexer COMMAND lexer_test)
 
 # A gate that fails must fail the build, so nothing here is allowed to be
 # "informational".
-set_tests_properties(gates layout types PROPERTIES LABELS "gate")
+set_tests_properties(gates layout types lexer PROPERTIES LABELS "gate")
