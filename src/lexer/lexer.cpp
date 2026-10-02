@@ -54,6 +54,7 @@ const std::unordered_map<std::string, TokenKind>& keywords() {
         {"true", TokenKind::KwTrue}, {"false", TokenKind::KwFalse},
         {"nilPtr", TokenKind::KwNilPtr}, {"fini", TokenKind::KwFini},
         {"sizeof", TokenKind::KwSizeof}, {"asm", TokenKind::KwAsm},
+        {"volatile", TokenKind::KwVolatile},
         {"int", TokenKind::KwInt}, {"i8", TokenKind::KwI8},
         {"i16", TokenKind::KwI16}, {"i32", TokenKind::KwI32},
         {"i64", TokenKind::KwI64}, {"u8", TokenKind::KwU8},

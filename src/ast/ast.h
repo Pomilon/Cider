@@ -82,9 +82,9 @@ struct PointerType : TypeExpr {
 
 struct ArrayType : TypeExpr {
     std::unique_ptr<TypeExpr> element;
-    uint64_t count;
-    ArrayType(Position p, std::unique_ptr<TypeExpr> e, uint64_t n)
-        : TypeExpr(std::move(p)), element(std::move(e)), count(n) {}
+    std::unique_ptr<Expr> length;
+    ArrayType(Position p, std::unique_ptr<TypeExpr> e, std::unique_ptr<Expr> n)
+        : TypeExpr(std::move(p)), element(std::move(e)), length(std::move(n)) {}
     void accept(ASTVisitor& v) override;
 };
 
@@ -214,9 +214,12 @@ struct Ternary : Expr {
 
 struct Call : Expr {
     std::unique_ptr<Expr> callee;
+    std::vector<std::unique_ptr<TypeExpr>> typeArgs;
     std::vector<std::unique_ptr<Expr>> args;
-    Call(Position p, std::unique_ptr<Expr> c, std::vector<std::unique_ptr<Expr>> a)
-        : Expr(std::move(p)), callee(std::move(c)), args(std::move(a)) {}
+    Call(Position p, std::unique_ptr<Expr> c,
+         std::vector<std::unique_ptr<TypeExpr>> t, std::vector<std::unique_ptr<Expr>> a)
+        : Expr(std::move(p)), callee(std::move(c)), typeArgs(std::move(t)),
+          args(std::move(a)) {}
     void accept(ASTVisitor& v) override;
 };
 
@@ -269,21 +272,30 @@ struct NewClass : Expr {
 
 struct NewArray : Expr {
     std::unique_ptr<TypeExpr> element;
-    uint64_t count;
+    std::unique_ptr<Expr> length;
     std::vector<std::unique_ptr<Expr>> inits;
     bool repeat;
-    NewArray(Position p, std::unique_ptr<TypeExpr> e, uint64_t n,
+    NewArray(Position p, std::unique_ptr<TypeExpr> e, std::unique_ptr<Expr> n,
              std::vector<std::unique_ptr<Expr>> i, bool r)
-        : Expr(std::move(p)), element(std::move(e)), count(n), inits(std::move(i)),
-          repeat(r) {}
+        : Expr(std::move(p)), element(std::move(e)), length(std::move(n)),
+          inits(std::move(i)), repeat(r) {}
+    void accept(ASTVisitor& v) override;
+};
+
+struct SizeofType : Expr {
+    std::unique_ptr<TypeExpr> type;
+    SizeofType(Position p, std::unique_ptr<TypeExpr> t)
+        : Expr(std::move(p)), type(std::move(t)) {}
     void accept(ASTVisitor& v) override;
 };
 
 struct Assign : Expr {
     std::unique_ptr<Expr> target;
+    std::optional<BinOp> op;
     std::unique_ptr<Expr> value;
-    Assign(Position p, std::unique_ptr<Expr> t, std::unique_ptr<Expr> v)
-        : Expr(std::move(p)), target(std::move(t)), value(std::move(v)) {}
+    Assign(Position p, std::unique_ptr<Expr> t, std::optional<BinOp> o,
+           std::unique_ptr<Expr> v)
+        : Expr(std::move(p)), target(std::move(t)), op(o), value(std::move(v)) {}
     void accept(ASTVisitor& v) override;
 };
 
@@ -293,8 +305,11 @@ struct VarDecl : Stmt {
     std::string name;
     std::unique_ptr<TypeExpr> type;
     std::unique_ptr<Expr> init;
-    VarDecl(Position p, std::string n, std::unique_ptr<TypeExpr> t, std::unique_ptr<Expr> i)
-        : Stmt(std::move(p)), name(std::move(n)), type(std::move(t)), init(std::move(i)) {}
+    bool isVolatile;
+    VarDecl(Position p, std::string n, std::unique_ptr<TypeExpr> t, std::unique_ptr<Expr> i,
+            bool vol = false)
+        : Stmt(std::move(p)), name(std::move(n)), type(std::move(t)), init(std::move(i)),
+          isVolatile(vol) {}
     void accept(ASTVisitor& v) override;
 };
 
@@ -470,12 +485,12 @@ struct Param : Node {
 struct FieldDecl : Node {
     std::string name;
     std::unique_ptr<TypeExpr> type;
-    std::optional<int64_t> bitWidth;
+    std::unique_ptr<Expr> bitWidth;
     bool isVolatile;
     FieldDecl(Position p, std::string n, std::unique_ptr<TypeExpr> t,
-              std::optional<int64_t> w, bool vol)
+              std::unique_ptr<Expr> w, bool vol)
         : Node(std::move(p)), name(std::move(n)), type(std::move(t)),
-          bitWidth(w), isVolatile(vol) {}
+          bitWidth(std::move(w)), isVolatile(vol) {}
     void accept(ASTVisitor& v) override;
 };
 
@@ -489,6 +504,17 @@ struct MethodDecl : Node {
                std::unique_ptr<TypeExpr> r, std::unique_ptr<Block> b, bool virt)
         : Node(std::move(p)), name(std::move(n)), params(std::move(ps)),
           returns(std::move(r)), body(std::move(b)), isVirtual(virt) {}
+    void accept(ASTVisitor& v) override;
+};
+
+struct FuncLit : Expr {
+    std::vector<Param> params;
+    std::unique_ptr<TypeExpr> returns;
+    std::unique_ptr<Block> body;
+    FuncLit(Position p, std::vector<Param> ps, std::unique_ptr<TypeExpr> r,
+            std::unique_ptr<Block> b)
+        : Expr(std::move(p)), params(std::move(ps)), returns(std::move(r)),
+          body(std::move(b)) {}
     void accept(ASTVisitor& v) override;
 };
 
@@ -627,11 +653,28 @@ struct FiniDecl : Decl {
     void accept(ASTVisitor& v) override;
 };
 
+struct DeclStmt : Stmt {
+    std::unique_ptr<Decl> decl;
+    DeclStmt(Position p, std::unique_ptr<Decl> d)
+        : Stmt(std::move(p)), decl(std::move(d)) {}
+    void accept(ASTVisitor& v) override;
+};
+
+struct ExportDecl : Decl {
+    std::unique_ptr<Decl> decl;
+    ExportDecl(Position p, std::unique_ptr<Decl> d)
+        : Decl(std::move(p)), decl(std::move(d)) {}
+    void accept(ASTVisitor& v) override;
+};
+
 struct Program : Node {
     std::string file;
     std::vector<std::unique_ptr<Decl>> decls;
-    Program(Position p, std::string f, std::vector<std::unique_ptr<Decl>> d)
-        : Node(std::move(p)), file(std::move(f)), decls(std::move(d)) {}
+    std::vector<std::unique_ptr<VarDecl>> globals;
+    Program(Position p, std::string f, std::vector<std::unique_ptr<Decl>> d,
+            std::vector<std::unique_ptr<VarDecl>> g)
+        : Node(std::move(p)), file(std::move(f)), decls(std::move(d)),
+          globals(std::move(g)) {}
     void accept(ASTVisitor& v) override;
 };
 
@@ -669,6 +712,10 @@ struct ASTVisitor {
     virtual void visitNewClass(NewClass& n);
     virtual void visitNewArray(NewArray& n);
     virtual void visitAssign(Assign& n);
+    virtual void visitSizeofType(SizeofType& n);
+    virtual void visitFuncLit(FuncLit& n);
+    virtual void visitDeclStmt(DeclStmt& n);
+    virtual void visitExportDecl(ExportDecl& n);
     virtual void visitVarDecl(VarDecl& n);
     virtual void visitExprStmt(ExprStmt& n);
     virtual void visitReturn(Return& n);
@@ -733,6 +780,10 @@ inline void NewStruct::accept(ASTVisitor& v) { v.visitNewStruct(*this); }
 inline void NewClass::accept(ASTVisitor& v) { v.visitNewClass(*this); }
 inline void NewArray::accept(ASTVisitor& v) { v.visitNewArray(*this); }
 inline void Assign::accept(ASTVisitor& v) { v.visitAssign(*this); }
+inline void SizeofType::accept(ASTVisitor& v) { v.visitSizeofType(*this); }
+inline void FuncLit::accept(ASTVisitor& v) { v.visitFuncLit(*this); }
+inline void DeclStmt::accept(ASTVisitor& v) { v.visitDeclStmt(*this); }
+inline void ExportDecl::accept(ASTVisitor& v) { v.visitExportDecl(*this); }
 inline void VarDecl::accept(ASTVisitor& v) { v.visitVarDecl(*this); }
 inline void ExprStmt::accept(ASTVisitor& v) { v.visitExprStmt(*this); }
 inline void Return::accept(ASTVisitor& v) { v.visitReturn(*this); }
@@ -774,10 +825,14 @@ inline void Program::accept(ASTVisitor& v) { v.visitProgram(*this); }
 
 inline void ASTVisitor::visitProgram(Program& n) {
     for (auto& d : n.decls) d->accept(*this);
+    for (auto& g : n.globals) g->accept(*this);
 }
 inline void ASTVisitor::visitBasicType(BasicType&) {}
 inline void ASTVisitor::visitPointerType(PointerType& n) { n.pointee->accept(*this); }
-inline void ASTVisitor::visitArrayType(ArrayType& n) { n.element->accept(*this); }
+inline void ASTVisitor::visitArrayType(ArrayType& n) {
+    n.element->accept(*this);
+    if (n.length != nullptr) n.length->accept(*this);
+}
 inline void ASTVisitor::visitSliceType(SliceType& n) { n.element->accept(*this); }
 inline void ASTVisitor::visitNamedType(NamedType& n) {
     for (auto& a : n.args) a->accept(*this);
@@ -813,6 +868,7 @@ inline void ASTVisitor::visitTernary(Ternary& n) {
 }
 inline void ASTVisitor::visitCall(Call& n) {
     n.callee->accept(*this);
+    for (auto& t : n.typeArgs) t->accept(*this);
     for (auto& a : n.args) a->accept(*this);
 }
 inline void ASTVisitor::visitField(Field& n) { n.object->accept(*this); }
@@ -835,12 +891,21 @@ inline void ASTVisitor::visitNewClass(NewClass& n) {
 }
 inline void ASTVisitor::visitNewArray(NewArray& n) {
     n.element->accept(*this);
+    if (n.length != nullptr) n.length->accept(*this);
     for (auto& i : n.inits) i->accept(*this);
 }
+inline void ASTVisitor::visitSizeofType(SizeofType& n) { n.type->accept(*this); }
 inline void ASTVisitor::visitAssign(Assign& n) {
     n.target->accept(*this);
     n.value->accept(*this);
 }
+inline void ASTVisitor::visitFuncLit(FuncLit& n) {
+    for (auto& p : n.params) p.accept(*this);
+    if (n.returns != nullptr) n.returns->accept(*this);
+    n.body->accept(*this);
+}
+inline void ASTVisitor::visitDeclStmt(DeclStmt& n) { n.decl->accept(*this); }
+inline void ASTVisitor::visitExportDecl(ExportDecl& n) { n.decl->accept(*this); }
 inline void ASTVisitor::visitVarDecl(VarDecl& n) {
     n.type->accept(*this);
     n.init->accept(*this);

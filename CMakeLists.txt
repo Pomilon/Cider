@@ -48,6 +48,15 @@ target_include_directories(cider_lexer PUBLIC src)
 add_library(cider_ast INTERFACE)
 target_include_directories(cider_ast INTERFACE src)
 
+# --- The parser ---------------------------------------------------------------
+#
+# LAYERS.md §3.2: accepts or rejects on syntax alone. Never resolves a name,
+# never infers a type, never consults the resolver.
+
+add_library(cider_parse STATIC src/parse/parser.cpp)
+target_link_libraries(cider_parse PUBLIC cider_ast cider_lexer)
+target_include_directories(cider_parse PUBLIC src)
+
 # --- Tests --------------------------------------------------------------------
 
 enable_testing()
@@ -78,6 +87,11 @@ target_link_libraries(ast_test PRIVATE cider_ast cider_lexer)
 target_include_directories(ast_test PRIVATE src)
 add_test(NAME ast COMMAND ast_test)
 
+add_executable(parser_test tests/unit/parser_test.cpp)
+target_link_libraries(parser_test PRIVATE cider_parse cider_lexer)
+target_include_directories(parser_test PRIVATE src)
+add_test(NAME parser COMMAND parser_test)
+
 # A gate that fails must fail the build, so nothing here is allowed to be
 # "informational".
-set_tests_properties(gates layout types lexer ast PROPERTIES LABELS "gate")
+set_tests_properties(gates layout types lexer ast parser PROPERTIES LABELS "gate")
