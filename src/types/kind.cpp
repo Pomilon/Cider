@@ -52,6 +52,32 @@ const char* basicKindName(BasicKind basic) {
     return "unreachable";
 }
 
+bool kindHasResolvedLayout(Kind kind) {
+    switch (kind) {
+        case Kind::Alias:
+        case Kind::TypeParam:
+        case Kind::Wildcard:
+            return false;
+        case Kind::Error:
+        case Kind::Void:
+        case Kind::String:
+        case Kind::Basic:
+        case Kind::Pointer:
+        case Kind::Array:
+        case Kind::Slice:
+        case Kind::Struct:
+        case Kind::Class:
+        case Kind::Interface:
+        case Kind::Union:
+        case Kind::Enum:
+        case Kind::Closure:
+        case Kind::FunctionPtr:
+        case Kind::FunctionItem:
+            return true;
+    }
+    return false;
+}
+
 bool kindIsHeapOwned(Kind kind) {
     switch (kind) {
         // A class reference is heap storage, released by `delete`. A bare
