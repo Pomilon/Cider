@@ -247,11 +247,13 @@ void testLoop() {
     check(backEdge, "a block branches backwards");
 }
 
-// What is not lowered yet is refused, not approximated.
+// What is not lowered yet is refused, not approximated. Structs and arrays
+// lower now; what remains refused is named here. (Unions never reach the
+// lowerer at all: the checker refuses to construct one.)
 void testNotYetLowered() {
     std::printf("unlowered constructs are refused\n");
-    Lowered r = lower("struct P { var x: int; }\nfunc f() -> void { var p: P = new P { x: 1 }; }\n");
-    check(!r.ok && r.stage == "lower", "an aggregate is not lowered yet");
+    Lowered r = lower("func f(x: int) -> void { var s: string = \"v = {x}\"; }\n");
+    check(!r.ok && r.stage == "lower", "interpolation is not lowered yet");
 }
 
 }  // namespace

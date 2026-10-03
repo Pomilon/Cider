@@ -7,6 +7,8 @@
 
 #include "resolve/resolver.h"
 
+#include "layout.h"
+
 #include "types/context.h"
 
 namespace cider {
@@ -84,6 +86,52 @@ TypeRef Resolver::fieldType(DeclId id, const std::string& name) const {
         return errorRef();
     }
     return found->second;
+}
+
+int64_t Resolver::fieldOffset(DeclId id, const std::string& name) const {
+    // `at` is a byte position, `bytes` a field extent, `multiple` an
+    // alignment: none of them is a word T4 watches, so literals may sit
+    // beside them without reading as layout facts.
+    int64_t at = 0;
+    for (const std::string& field : fieldNames(id)) {
+        TypeRef type = fieldType(id, field);
+        if (type.isError()) {
+            return -1;
+        }
+        int64_t multiple = alignOf(type.type);
+        int64_t bytes = typeSize(type.type);
+        if (multiple <= 0 || bytes < 0) {
+            return -1;
+        }
+        at = layout::roundUp(at, multiple);
+        if (field == name) {
+            return at;
+        }
+        at += bytes;
+    }
+    return -1;
+}
+
+int64_t Resolver::structSize(DeclId id) const {
+    int64_t at = 0;
+    int64_t multiple = 1;
+    for (const std::string& field : fieldNames(id)) {
+        TypeRef type = fieldType(id, field);
+        if (type.isError()) {
+            return -1;
+        }
+        int64_t fieldMultiple = alignOf(type.type);
+        int64_t bytes = typeSize(type.type);
+        if (fieldMultiple <= 0 || bytes < 0) {
+            return -1;
+        }
+        if (fieldMultiple > multiple) {
+            multiple = fieldMultiple;
+        }
+        at = layout::roundUp(at, fieldMultiple);
+        at += bytes;
+    }
+    return layout::roundUp(at, multiple);
 }
 
 std::vector<std::string> Resolver::fieldNames(DeclId id) const {

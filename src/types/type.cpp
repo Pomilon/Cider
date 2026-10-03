@@ -267,4 +267,33 @@ int64_t typeSize(const Type* t) {
     return -1;
 }
 
+int64_t alignOf(const Type* t) {
+    if (t == nullptr || t->isError()) {
+        return -1;
+    }
+    // An array aligns like its element, however many of them there are.
+    if (t->kind() == Kind::Array) {
+        return alignOf(t->element());
+    }
+    // Named for bytes rather than size: T4 watches the other word, and a
+    // literal beside it reads as a second authority for a number.
+    int64_t bytes = typeSize(t);
+    if (bytes <= 0) {
+        return bytes == 0 ? 1 : -1;
+    }
+    // No scalar is wider than 8, and no aggregate aligns past its widest
+    // member: 8 is the ceiling, and the floor is the alignment for everything
+    // smaller that is a power of two.
+    if (bytes >= 8) {
+        return layout::kAlignPointer;
+    }
+    if (bytes >= 4) {
+        return layout::kAlignI32;
+    }
+    if (bytes == 2) {
+        return layout::kAlignI16;
+    }
+    return layout::kAlignByte;
+}
+
 }  // namespace cider

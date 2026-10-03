@@ -80,6 +80,14 @@ public:
     // Every field or member name of a struct, class or union, in declaration
     // order. Empty for anything else.
     std::vector<std::string> fieldNames(DeclId id) const;
+    // The byte offset of a field within its struct, laid out in declaration
+    // order with each field aligned to its own alignment (TYPES.md 3.4). -1
+    // when the struct, the field, or any size on the way there is unknown.
+    int64_t fieldOffset(DeclId id, const std::string& name) const;
+    // A struct's total size: fields plus padding, rounded to its own
+    // alignment, with no padding beyond that (TYPES.md 3.3). -1 when unknown.
+    // Only structs: classes, unions and interfaces are refused elsewhere.
+    int64_t structSize(DeclId id) const;
     // A class's direct bases, as declaration ids. Empty when none.
     std::vector<DeclId> classBases(DeclId id) const;
     EvalEnv evalEnv(const Scope* scope);

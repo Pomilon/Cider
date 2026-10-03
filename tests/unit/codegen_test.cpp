@@ -187,6 +187,33 @@ void testTrap() {
     check(signaled, "division by zero dies by signal");
 }
 
+// Structs live in memory: construct, read fields, add them.
+void testStruct() {
+    std::printf("structs\n");
+    check(runQuiet("struct P { var x: int; var y: int; }\n"
+                   "func main() -> int { var p: P = new P { x: 40, y: 2 }; return p.x + p.y; }\n") == 42,
+          "two fields add up");
+    check(runQuiet("struct M { var tag: u8; var val: i32; }\n"
+                   "func main() -> int { var m: M = new M { tag: 2, val: 40 }; return m.val + m.tag as int; }\n") == 42,
+          "mixed widths respect padding");
+}
+
+// Arrays live in memory too: constant and runtime indices, element stores.
+void testArray() {
+    std::printf("arrays\n");
+    check(runQuiet("func main() -> int { var a: [u8; 3] = new [u8; 3] { 7, 8, 9 }; return a[0] + a[1] + a[2] as int; }\n") == 24,
+          "constant indices read back");
+    check(runQuiet("func main() -> int {\n"
+                   " var a: [i32; 5] = new [i32; 5] { 1, 2, 3, 4, 5 };\n"
+                   " var s: int = 0;\n"
+                   " var i: int = 0;\n"
+                   " while (i < 5) { s = s + a[i]; i = i + 1; }\n"
+                   " return s; }\n") == 15,
+          "a runtime index walks the array");
+    check(runQuiet("func main() -> int { var a: [u8; 2] = new [u8; 2] { [0, ...] }; a[1] = 40; return a[0] + a[1] as int; }\n") == 40,
+          "element stores land");
+}
+
 // The same module emitted twice is byte-identical, and carries no build path.
 void testRepro() {
     std::printf("byte reproducibility\n");
@@ -207,6 +234,8 @@ int main() {
     testCalls();
     testControl();
     testGlobals();
+    testStruct();
+    testArray();
     testTrap();
     testRepro();
     std::printf("\n%d checks, %s\n", checks, failures == 0 ? "all passed" : "FAILURES");

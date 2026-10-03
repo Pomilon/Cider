@@ -216,7 +216,18 @@ uint64_t deadCode(ir::Module& module) {
             }
             // Slots no load reads: a store there changes nothing observable,
             // unless volatile. Sound because nothing takes a slot's address in
-            // this slice, so no other path can observe the write.
+            // this slice, so no other path can observe the write — except a
+            // Gep, which reads an element its index chooses at runtime. Any
+            // Gep in the function disables this rule for the whole function:
+            // precise ranges need allocation sizes the IR does not carry yet.
+            bool indexed = false;
+            for (const ir::Block& scan : fn.blocks) {
+                for (const ir::Instr& seen : scan.body) {
+                    if (seen.op == ir::Op::Gep) {
+                        indexed = true;
+                    }
+                }
+            }
             std::unordered_set<uint32_t> readSlots;
             for (const ir::Block& scan : fn.blocks) {
                 for (const ir::Instr& seen : scan.body) {
@@ -238,7 +249,8 @@ uint64_t deadCode(ir::Module& module) {
                     // Four reasons to keep a dead definition: it stores, it
                     // calls, it traps, or it is volatile. Each is one field.
                     // A store joins them only when its slot is never read.
-                    bool deadStore = instr.op == ir::Op::Store && !instr.isVolatile &&
+                    bool deadStore = !indexed && instr.op == ir::Op::Store &&
+                                     !instr.isVolatile &&
                                      readSlots.find(instr.addressBase.id) ==
                                          readSlots.end();
                     if (deadStore) {

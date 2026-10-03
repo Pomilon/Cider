@@ -10,6 +10,8 @@
 
 #include "codegen/codegen.h"
 
+#include <unordered_set>
+
 namespace cider {
 namespace codegen {
 
@@ -136,12 +138,89 @@ private:
         pos_ = pos;
     }
 
-    // One slot per value id, eight bytes each. Slots hold the value extended
-    // to 64 bits (sign or zero per the type), so every load is a full
-    // 64-bit read and no consumer ever guesses a slot's width — the defect
-    // v2's spill slots had.
+    // One slot per value id, eight bytes each. A slot holds a value extended
+    // to 64 bits on store (sign or zero per the type), and every load reads
+    // exactly the bytes its type names — so a narrow field never reads
+    // neighbor bytes, which is the defect v2's spill slots had.
     std::string slot(uint32_t id) const {
         return "[rsp + " + std::to_string(id * 8) + "]";
+    }
+
+    // Appends a displacement to an address string, omitting +0: `[rip + g+0]`
+    // assembles, but the plain form reads better and diffs cleaner.
+    std::string atAddr(const std::string& base, int64_t disp) const {
+        if (disp == 0) {
+            return "[" + base + "]";
+        }
+        return "[" + base + " + " + std::to_string(disp) + "]";
+    }
+
+    // True for basic kinds that read back sign-extended. Pointers read as
+    // addresses: 8 bytes, no extension question.
+    bool signedRead(TypeRef type) const {
+        if (type.isError() || type.type->kind() != Kind::Basic) {
+            return false;
+        }
+        return basicIsSigned(*type.type->basic());
+    }
+
+    // Loads exactly the bytes a type names into rax (xmm0 for floats),
+    // extending to 64 bits on the way.
+    void emitLoadMem(const std::string& mem, TypeRef type, ir::IRType width) {
+        if (width == ir::IRType::F32) {
+            out_ += "  movss xmm0, " + mem + "\n";
+            return;
+        }
+        if (width == ir::IRType::F64) {
+            out_ += "  movsd xmm0, " + mem + "\n";
+            return;
+        }
+        bool isSigned = signedRead(type);
+        if (width == ir::IRType::I8 || width == ir::IRType::U8 ||
+            width == ir::IRType::Bool) {
+            out_ += isSigned ? "  movsx eax, BYTE PTR " : "  movzx eax, BYTE PTR ";
+            out_ += mem + "\n";
+            out_ += "  movsxd rax, eax\n";
+            return;
+        }
+        if (width == ir::IRType::I16 || width == ir::IRType::U16) {
+            out_ += isSigned ? "  movsx eax, WORD PTR " : "  movzx eax, WORD PTR ";
+            out_ += mem + "\n";
+            out_ += "  movsxd rax, eax\n";
+            return;
+        }
+        if (width == ir::IRType::I32) {
+            out_ += "  movsxd rax, DWORD PTR " + mem + "\n";
+            return;
+        }
+        out_ += "  mov rax, " + mem + "\n";
+    }
+
+    // Stores the low bytes of rax (xmm0 for floats) with exactly the width a
+    // type names, so a narrow store never clobbers neighbor bytes.
+    void emitStoreMem(const std::string& mem, TypeRef type, ir::IRType width) {
+        if (width == ir::IRType::F32) {
+            out_ += "  movss " + mem + ", xmm0\n";
+            return;
+        }
+        if (width == ir::IRType::F64) {
+            out_ += "  movsd " + mem + ", xmm0\n";
+            return;
+        }
+        if (width == ir::IRType::I8 || width == ir::IRType::U8 ||
+            width == ir::IRType::Bool) {
+            out_ += "  mov " + mem + ", al\n";
+            return;
+        }
+        if (width == ir::IRType::I16 || width == ir::IRType::U16) {
+            out_ += "  mov " + mem + ", ax\n";
+            return;
+        }
+        if (width == ir::IRType::I32 || width == ir::IRType::U32) {
+            out_ += "  mov " + mem + ", eax\n";
+            return;
+        }
+        out_ += "  mov " + mem + ", rax\n";
     }
 
     std::string labelFor(const std::string& fn, uint32_t label) const {
@@ -203,6 +282,14 @@ private:
             ++index;
         }
 
+        computed_.clear();
+        for (const ir::Block& block : fn.blocks) {
+            for (const ir::Instr& instr : block.body) {
+                if (instr.op == ir::Op::Gep && !instr.results.empty()) {
+                    computed_.insert(instr.results[0].id);
+                }
+            }
+        }
         for (const ir::Block& block : fn.blocks) {
             out_ += labelFor(fn.name, block.label) + ":\n";
             for (const ir::Instr& instr : block.body) {
@@ -325,19 +412,54 @@ private:
         // same construction the frame uses. One branch, decided by which the
         // instruction names.
         if (instr.op == ir::Op::Load) {
-            std::string place = instr.globalLabel.empty()
-                                    ? slot(instr.addressBase.id)
-                                    : "[rip + " + instr.globalLabel + "]";
-            out_ += "  mov rax, " + place + "\n";
-            out_ += "  mov " + slot(instr.results[0].id) + ", rax\n";
+            // A computed address lives in its slot first: the two-step read
+            // through rax is what makes an indirect load one load too many
+            // for a single instruction, and keeps every memory operand shaped
+            // the same way.
+            if (computed_.find(instr.addressBase.id) != computed_.end()) {
+                out_ += "  mov rax, " + slot(instr.addressBase.id) + "\n";
+                emitLoadMem(atAddr("rax", instr.displacement), instr.type, instr.width);
+            } else if (!instr.globalLabel.empty()) {
+                emitLoadMem(atAddr("rip + " + instr.globalLabel, instr.displacement),
+                            instr.type, instr.width);
+            } else {
+                std::string base = "rsp + " + std::to_string(instr.addressBase.id * 8);
+                emitLoadMem(atAddr(base, instr.displacement), instr.type, instr.width);
+            }
+            if (instr.width == ir::IRType::F32) {
+                out_ += "  movss " + slot(instr.results[0].id) + ", xmm0\n";
+            } else if (instr.width == ir::IRType::F64) {
+                out_ += "  movsd " + slot(instr.results[0].id) + ", xmm0\n";
+            } else {
+                out_ += "  mov " + slot(instr.results[0].id) + ", rax\n";
+            }
             return true;
         }
         if (instr.op == ir::Op::Store) {
-            std::string place = instr.globalLabel.empty()
-                                    ? slot(instr.addressBase.id)
-                                    : "[rip + " + instr.globalLabel + "]";
             out_ += "  mov rax, " + slot(instr.storedValue.id) + "\n";
-            out_ += "  mov " + place + ", rax\n";
+            if (instr.width == ir::IRType::F32 || instr.width == ir::IRType::F64) {
+                out_ += "  movss xmm0, " + slot(instr.storedValue.id) + "\n";
+            }
+            if (computed_.find(instr.addressBase.id) != computed_.end()) {
+                out_ += "  mov rcx, " + slot(instr.addressBase.id) + "\n";
+                emitStoreMem(atAddr("rcx", instr.displacement), instr.type, instr.width);
+            } else if (!instr.globalLabel.empty()) {
+                emitStoreMem(atAddr("rip + " + instr.globalLabel, instr.displacement),
+                             instr.type, instr.width);
+            } else {
+                std::string base = "rsp + " + std::to_string(instr.addressBase.id * 8);
+                emitStoreMem(atAddr(base, instr.displacement), instr.type, instr.width);
+            }
+            return true;
+        }
+        if (instr.op == ir::Op::Gep) {
+            // Base slot plus byte offset, added at runtime: the base id is a
+            // compile-time constant, so the slot address folds into the lea.
+            out_ += "  lea rax, " + atAddr("rsp + " + std::to_string(instr.addressBase.id * 8),
+                                           instr.displacement) + "\n";
+            out_ += "  mov rcx, " + slot(instr.operands[0].id) + "\n";
+            out_ += "  add rax, rcx\n";
+            out_ += "  mov " + slot(instr.results[0].id) + ", rax\n";
             return true;
         }
         if (instr.op == ir::Op::Alloca) {
@@ -488,6 +610,10 @@ private:
 
 
     const ir::Module& module_;
+    // Gep-result ids in the function being emitted, derived fresh from its
+    // own instructions. A load or store through one of these reads an
+    // address first; through anything else it addresses a slot directly.
+    std::unordered_set<uint32_t> computed_;
     std::string out_;
     bool failed_ = false;
     std::string error_;

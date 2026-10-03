@@ -84,6 +84,19 @@ void checkDefs(const ir::Function& fn, std::vector<StructuralError>& errors) {
                     use(block.label, word.id);
                 }
             }
+            // A slot or a stored value is a use like any other. Defaults are
+            // id 0, which may be a real value, so only memory ops name them —
+            // and a load or store through a link label has no base slot: its
+            // address is the label, and the default base names nothing.
+            if ((instr.op == ir::Op::Load || instr.op == ir::Op::Store ||
+                 instr.op == ir::Op::Extract || instr.op == ir::Op::Insert ||
+                 instr.op == ir::Op::Gep) &&
+                instr.globalLabel.empty()) {
+                use(block.label, instr.addressBase.id);
+            }
+            if (instr.op == ir::Op::Store || instr.op == ir::Op::Insert) {
+                use(block.label, instr.storedValue.id);
+            }
             for (const ir::Value& result : instr.results) {
                 // A slot comes into existence twice by design: once as a
                 // function parameter and once as its Alloca, and both name

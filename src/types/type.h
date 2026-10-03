@@ -241,6 +241,12 @@ std::string typeName(TypeRef ref);
 // -1 rather than a default, because TYPES.md §3.2 forbids defaults.
 int64_t typeSize(const Type* type);
 
+// The alignment of a type, from the same table as typeSize. Answers -1 where
+// no alignment is known: nominals without field layout, and everything
+// typeSize answers -1 for. The resolver walks fields with this plus roundUp;
+// nobody else lays anything out.
+int64_t alignOf(const Type* type);
+
 }  // namespace cider
 
 #endif  // CIDER_TYPES_TYPE_H

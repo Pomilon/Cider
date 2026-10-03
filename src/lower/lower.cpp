@@ -6,6 +6,7 @@
 
 #include "lower/lower.h"
 
+#include "layout.h"
 #include "types/context.h"
 
 namespace cider {
@@ -178,7 +179,74 @@ int Lowerer::wordCount(TypeRef type) {
     if (kind == Kind::String) {
         return 2;
     }
-    return -1;
+    int64_t bytes = -1;
+    if (kind == Kind::Array) {
+        bytes = typeSize(type.type);
+    } else if (kind == Kind::Struct) {
+        std::optional<DeclId> id = type.type->decl();
+        if (id.has_value()) {
+            bytes = resolver_.structSize(*id);
+        }
+    }
+    if (bytes < 0) {
+        return -1;
+    }
+    // One word per eight bytes, rounding the tail up: a 12-byte struct is
+    // two words, and the second word's upper half belongs to it alone. The
+    // divisor comes from layout, not from a literal, for the usual reason.
+    int64_t per = layout::kSizePointer;
+    return static_cast<int>(bytes / per + (bytes % per == 0 ? 0 : 1));
+}
+
+bool Lowerer::resolvePlace(const Expr* expr, Place& out) {
+    if (const auto* ident = dynamic_cast<const Ident*>(expr)) {
+        uint64_t depth = static_cast<uint64_t>(locals_.size());
+        for (; depth > 0;) {
+            --depth;
+            auto found = locals_[depth].find(ident->name);
+            if (found != locals_[depth].end()) {
+                out.slots = found->second.slots;
+                out.type = found->second.type;
+                out.off = 0;
+                out.isVolatile = false;
+                return true;
+            }
+        }
+        for (const GlobalBinding& global : globals_) {
+            if (global.name == ident->name) {
+                out.slots.clear();
+                out.global = global.label;
+                out.type = global.type;
+                out.off = 0;
+                out.isVolatile = global.isVolatile;
+                return true;
+            }
+        }
+        return false;
+    }
+    if (const auto* field = dynamic_cast<const Field*>(expr)) {
+        // A nested chain accumulates the offset while the slots stay the
+        // base value's: `p.inner.y` is p's slots plus two offsets.
+        if (!resolvePlace(field->object.get(), out)) {
+            return false;
+        }
+        if (out.type.isError() || out.type.type->kind() != Kind::Struct) {
+            return false;
+        }
+        std::optional<DeclId> id = out.type.type->decl();
+        if (!id.has_value()) {
+            return false;
+        }
+        int64_t fieldOff = resolver_.fieldOffset(*id, field->name);
+        TypeRef fieldType = resolver_.fieldType(*id, field->name);
+        if (fieldOff < 0 || fieldType.isError()) {
+            return false;
+        }
+        out.off += fieldOff;
+        out.type = fieldType;
+        return true;
+    }
+    return false;
 }
 
 ir::Value Lowerer::undefined() const {
@@ -459,7 +527,367 @@ TypeRef Lowerer::wordType(TypeRef aggregate, uint64_t word) {
         }
         return TypeRef{ctx_.basic(BasicKind::I64)};
     }
+    if (aggregate.type->kind() == Kind::Struct ||
+        aggregate.type->kind() == Kind::Array) {
+        return TypeRef{ctx_.basic(BasicKind::U64)};
+    }
     return aggregate;
+}
+
+std::vector<ir::Value> Lowerer::loadRange(Position pos, const Place& place,
+                                         TypeRef fieldType) {
+    int64_t bytes = typeSize(fieldType.type);
+    int64_t local = place.off % 8;
+    if (bytes <= 0 || bytes > 8 || local + bytes > 8) {
+        refuse(pos, "this field layout is not lowered yet");
+        return {undefined()};
+    }
+    ir::IRType width = widthOf(fieldType, pos);
+    if (failed_) {
+        return {undefined()};
+    }
+    ir::Instr instr;
+    instr.op = ir::Op::Load;
+    instr.loc = pos;
+    instr.type = fieldType;
+    instr.width = width;
+    instr.displacement = local;
+    instr.isPure = true;
+    instr.isVolatile = place.isVolatile;
+    if (!place.global.empty()) {
+        instr.globalLabel = place.global;
+    } else {
+        uint64_t word = static_cast<uint64_t>(place.off / 8);
+        if (word >= place.slots.size()) {
+            refuse(pos, "this field layout is not lowered yet");
+            return {undefined()};
+        }
+        instr.addressBase = place.slots[word];
+    }
+    ir::Value out = newValue(instr.width, fieldType, pos);
+    instr.results.push_back(out);
+    emit(std::move(instr));
+    return {out};
+}
+
+void Lowerer::storeRange(Position pos, const Place& place,
+                         const std::vector<ir::Value>& words, TypeRef fieldType) {
+    if (words.size() == kOneWord) {
+        int64_t bytes = typeSize(fieldType.type);
+        int64_t local = place.off % 8;
+        if (bytes <= 0 || bytes > 8 || local + bytes > 8) {
+            refuse(pos, "this field layout is not lowered yet");
+            return;
+        }
+        ir::IRType width = widthOf(fieldType, pos);
+        if (failed_) {
+            return;
+        }
+        ir::Instr instr;
+        instr.op = ir::Op::Store;
+        instr.loc = pos;
+        instr.type = fieldType;
+        instr.width = width;
+        instr.displacement = local;
+        instr.storedValue = words[0];
+        instr.isVolatile = place.isVolatile;
+        if (!place.global.empty()) {
+            instr.globalLabel = place.global;
+        } else {
+            uint64_t word = static_cast<uint64_t>(place.off / 8);
+            if (word >= place.slots.size()) {
+                refuse(pos, "this field layout is not lowered yet");
+                return;
+            }
+            instr.addressBase = place.slots[word];
+        }
+        emit(std::move(instr));
+        return;
+    }
+    // Several words land word-aligned or not at all: an unaligned multi-word
+    // copy would guess the neighbor bytes at both ends.
+    if (place.off % 8 != 0) {
+        refuse(pos, "this field layout is not lowered yet");
+        return;
+    }
+    uint64_t first = static_cast<uint64_t>(place.off / 8);
+    if (first + words.size() > place.slots.size() && place.global.empty()) {
+        refuse(pos, "this field layout is not lowered yet");
+        return;
+    }
+    for (uint64_t i = 0; i < static_cast<uint64_t>(words.size()); ++i) {
+        ir::Instr instr;
+        instr.op = ir::Op::Store;
+        instr.loc = pos;
+        instr.type = words[i].type;
+        instr.width = widthOf(words[i].type, pos);
+        if (failed_) {
+            return;
+        }
+        instr.storedValue = words[i];
+        instr.isVolatile = place.isVolatile;
+        if (!place.global.empty()) {
+            instr.globalLabel = place.global;
+            instr.displacement = place.off + static_cast<int64_t>(i) * 8;
+        } else {
+            instr.addressBase = place.slots[first + i];
+        }
+        emit(std::move(instr));
+    }
+}
+
+void Lowerer::constructStruct(const std::vector<ir::Value>& slots, const NewStruct& n) {
+    TypeRef structType = checker_.typeOf(&n);
+    if (structType.isError() || structType.type->kind() != Kind::Struct) {
+        refuse(n.pos, "this construction");
+        return;
+    }
+    std::optional<DeclId> id = structType.type->decl();
+    if (!id.has_value()) {
+        refuse(n.pos, "this construction");
+        return;
+    }
+    Place base;
+    base.slots = slots;
+    base.type = structType;
+    for (const FieldInit& field : n.fields) {
+        int64_t fieldOff = resolver_.fieldOffset(*id, field.name);
+        TypeRef fieldType = resolver_.fieldType(*id, field.name);
+        if (fieldOff < 0 || fieldType.isError()) {
+            refuse(field.value->pos, "no such field");
+            return;
+        }
+        std::vector<ir::Value> value = lowerWords(field.value.get());
+        if (failed_) {
+            return;
+        }
+        Place at = base;
+        at.off = fieldOff;
+        at.type = fieldType;
+        storeRange(field.value->pos, at, value, fieldType);
+        if (failed_) {
+            return;
+        }
+    }
+}
+
+void Lowerer::constructArray(const std::vector<ir::Value>& slots, const NewArray& n) {
+    TypeRef arrayType = checker_.typeOf(&n);
+    if (arrayType.isError() || arrayType.type->kind() != Kind::Array) {
+        refuse(n.pos, "this construction");
+        return;
+    }
+    TypeRef element = TypeRef{arrayType.type->element()};
+    int64_t elemBytes = typeSize(element.type);
+    if (elemBytes <= 0) {
+        refuse(n.pos, "this construction");
+        return;
+    }
+    // Contiguity is checked, not assumed: the slots vector is only a base for
+    // address arithmetic when its ids run consecutively.
+    for (uint64_t i = 0; i < static_cast<uint64_t>(slots.size()); ++i) {
+        if (slots[i].id != slots[0].id + static_cast<uint32_t>(i)) {
+            refuse(n.pos, "this construction");
+            return;
+        }
+    }
+    auto atByte = [&](int64_t byteOff, TypeRef fieldType, const std::vector<ir::Value>& words,
+                      Position pos) {
+        Place at;
+        at.slots = slots;
+        at.type = fieldType;
+        at.off = byteOff;
+        storeRange(pos, at, words, fieldType);
+    };
+    if (n.repeat) {
+        if (n.inits.size() != kOneWord) {
+            refuse(n.pos, "a repeat fills from exactly one element");
+            return;
+        }
+        std::unordered_set<std::string> active;
+        EvalEnv env = resolver_.evalEnv(resolver_.moduleScope());
+        EvalResult count = evalConstInt(*n.length, env, active);
+        if (!count.ok || count.value < 0) {
+            refuse(n.length->pos, "an array length folds to a count");
+            return;
+        }
+        std::vector<ir::Value> one = lowerWords(n.inits[0].get());
+        if (failed_) {
+            return;
+        }
+        for (int64_t i = 0; i < count.value; ++i) {
+            atByte(i * elemBytes, element, one, n.pos);
+            if (failed_) {
+                return;
+            }
+        }
+        return;
+    }
+    for (uint64_t i = 0; i < static_cast<uint64_t>(n.inits.size()); ++i) {
+        std::vector<ir::Value> one = lowerWords(n.inits[i].get());
+        if (failed_) {
+            return;
+        }
+        atByte(static_cast<int64_t>(i) * elemBytes, element, one, n.inits[i]->pos);
+        if (failed_) {
+            return;
+        }
+    }
+}
+
+std::vector<ir::Value> Lowerer::lowerField(const Field& n) {
+    Place base;
+    if (!resolvePlace(n.object.get(), base)) {
+        refuse(n.object->pos, "this field access");
+        return {undefined()};
+    }
+    if (base.type.isError() || base.type.type->kind() != Kind::Struct) {
+        refuse(n.object->pos, "this field access");
+        return {undefined()};
+    }
+    std::optional<DeclId> id = base.type.type->decl();
+    TypeRef fieldType = resolver_.fieldType(id.has_value() ? *id : DeclId{}, n.name);
+    int64_t fieldOff = -1;
+    if (id.has_value()) {
+        fieldOff = resolver_.fieldOffset(*id, n.name);
+    }
+    if (!id.has_value() || fieldOff < 0 || fieldType.isError()) {
+        refuse(n.pos, "no such field");
+        return {undefined()};
+    }
+    base.off += fieldOff;
+    base.type = fieldType;
+    return loadRange(n.pos, base, fieldType);
+}
+
+std::vector<ir::Value> Lowerer::lowerIndex(const Index& n) {
+    Place base;
+    if (!resolvePlace(n.array.get(), base)) {
+        refuse(n.array->pos, "this index");
+        return {undefined()};
+    }
+    TypeRef arrayType = base.type;
+    if (arrayType.isError() || arrayType.type->kind() != Kind::Array) {
+        refuse(n.array->pos, "this index");
+        return {undefined()};
+    }
+    TypeRef element{arrayType.type->element()};
+    int64_t elemBytes = typeSize(element.type);
+    if (elemBytes <= 0) {
+        refuse(n.pos, "this index");
+        return {undefined()};
+    }
+    std::unordered_set<std::string> active;
+    EvalEnv env = resolver_.evalEnv(resolver_.moduleScope());
+    EvalResult folded = evalConstInt(*n.index, env, active);
+    if (folded.ok) {
+        // A folded index is an offset the compiler names: no address
+        // arithmetic at runtime, just a load like a field read.
+        if (folded.value < 0) {
+            refuse(n.index->pos, "a negative index");
+            return {undefined()};
+        }
+        base.off += folded.value * elemBytes;
+        base.type = element;
+        return loadRange(n.pos, base, element);
+    }
+    // Anything else computes its address: base plus index times bytes. Only
+    // one-word scalar elements ride this path; anything wider is refused.
+    if (elemBytes <= 0 || elemBytes > 8) {
+        refuse(n.pos, "this index");
+        return {undefined()};
+    }
+    if (wordCount(element) != 1) {
+        refuse(n.pos, "this index");
+        return {undefined()};
+    }
+    std::vector<ir::Value> index = lowerWords(n.index.get());
+    if (failed_ || index.size() != kOneWord) {
+        refuse(n.index->pos, "this index");
+        return {undefined()};
+    }
+    if (!base.global.empty()) {
+        refuse(n.pos, "this index");
+        return {undefined()};
+    }
+    for (uint64_t i = 0; i < static_cast<uint64_t>(base.slots.size()); ++i) {
+        if (base.slots[i].id != base.slots[0].id + static_cast<uint32_t>(i)) {
+            refuse(n.pos, "this index");
+            return {undefined()};
+        }
+    }
+    ir::Value byteOff = index[0];
+    if (elemBytes != 1) {
+        TypeRef count{ctx_.basic(BasicKind::I64)};
+        ir::Value stride = constantI64(elemBytes, count, n.index->pos);
+        ir::Instr mul;
+        mul.op = ir::Op::Mul;
+        mul.loc = n.index->pos;
+        mul.type = count;
+        mul.width = widthOf(count, n.index->pos);
+        if (failed_) {
+            return {undefined()};
+        }
+        mul.isPure = true;
+        mul.operands.push_back(index[0]);
+        mul.operands.push_back(stride);
+        ir::Value scaled = newValue(mul.width, count, n.index->pos);
+        mul.results.push_back(scaled);
+        emit(std::move(mul));
+        byteOff = scaled;
+    }
+    ir::Instr gep;
+    gep.op = ir::Op::Gep;
+    gep.loc = n.pos;
+    gep.type = TypeRef{ctx_.pointer(element.type)};
+    gep.width = ir::IRType::Ptr;
+    gep.addressBase = base.slots[0];
+    gep.displacement = base.off;
+    gep.isPure = true;
+    gep.operands.push_back(byteOff);
+    ir::Value at = newValue(gep.width, gep.type, n.pos);
+    gep.results.push_back(at);
+    emit(std::move(gep));
+    // The address is computed; the value is one indirect load away.
+    Place indirect;
+    indirect.slots = {at};
+    indirect.type = element;
+    indirect.off = 0;
+    indirect.isVolatile = base.isVolatile;
+    return loadRange(n.pos, indirect, element);
+}
+
+void Lowerer::storeIndex(const Index& target, const std::vector<ir::Value>& words) {
+    Place base;
+    if (!resolvePlace(target.array.get(), base)) {
+        refuse(target.array->pos, "this index");
+        return;
+    }
+    TypeRef arrayType = base.type;
+    if (arrayType.isError() || arrayType.type->kind() != Kind::Array) {
+        refuse(target.array->pos, "this index");
+        return;
+    }
+    TypeRef element{arrayType.type->element()};
+    int64_t elemBytes = typeSize(element.type);
+    if (elemBytes <= 0) {
+        refuse(target.pos, "this index");
+        return;
+    }
+    std::unordered_set<std::string> active;
+    EvalEnv env = resolver_.evalEnv(resolver_.moduleScope());
+    EvalResult folded = evalConstInt(*target.index, env, active);
+    if (folded.ok) {
+        if (folded.value < 0) {
+            refuse(target.index->pos, "a negative index");
+            return;
+        }
+        base.off += folded.value * elemBytes;
+        base.type = element;
+        storeRange(target.pos, base, words, element);
+        return;
+    }
+    refuse(target.pos, "this index");
 }
 
 std::vector<ir::Value> Lowerer::loadLocal(Position pos, const LocalBinding& binding) {
@@ -538,12 +966,92 @@ std::vector<ir::Value> Lowerer::loadGlobal(Position pos, const GlobalBinding& gl
     return words;
 }
 
+std::vector<ir::Value> Lowerer::lowerNewStruct(const NewStruct& n) {
+    TypeRef structType = checker_.typeOf(&n);
+    int count = wordCount(structType);
+    if (count < 0) {
+        refuse(n.pos, "this construction");
+        return {undefined()};
+    }
+    std::vector<ir::Value> slots =
+        allocaSlots(structType, n.pos, static_cast<uint64_t>(count));
+    constructStruct(slots, n);
+    if (failed_) {
+        return {undefined()};
+    }
+    std::vector<ir::Value> words;
+    for (int i = 0; i < count; ++i) {
+        TypeRef word = wordType(structType, static_cast<uint64_t>(i));
+        ir::Instr instr;
+        instr.op = ir::Op::Load;
+        instr.loc = n.pos;
+        instr.type = word;
+        instr.width = widthOf(word, n.pos);
+        if (failed_) {
+            return {undefined()};
+        }
+        instr.addressBase = slots[static_cast<size_t>(i)];
+        instr.isPure = true;
+        ir::Value out = newValue(instr.width, word, n.pos);
+        instr.results.push_back(out);
+        emit(std::move(instr));
+        words.push_back(out);
+    }
+    return words;
+}
+
+std::vector<ir::Value> Lowerer::lowerNewArray(const NewArray& n) {
+    TypeRef arrayType = checker_.typeOf(&n);
+    int count = wordCount(arrayType);
+    if (count < 0) {
+        refuse(n.pos, "this construction");
+        return {undefined()};
+    }
+    std::vector<ir::Value> slots =
+        allocaSlots(arrayType, n.pos, static_cast<uint64_t>(count));
+    constructArray(slots, n);
+    if (failed_) {
+        return {undefined()};
+    }
+    std::vector<ir::Value> words;
+    for (int i = 0; i < count; ++i) {
+        TypeRef word = wordType(arrayType, static_cast<uint64_t>(i));
+        ir::Instr instr;
+        instr.op = ir::Op::Load;
+        instr.loc = n.pos;
+        instr.type = word;
+        instr.width = widthOf(word, n.pos);
+        if (failed_) {
+            return {undefined()};
+        }
+        instr.addressBase = slots[static_cast<size_t>(i)];
+        instr.isPure = true;
+        ir::Value out = newValue(instr.width, word, n.pos);
+        instr.results.push_back(out);
+        emit(std::move(instr));
+        words.push_back(out);
+    }
+    return words;
+}
+
 std::vector<ir::Value> Lowerer::lowerWords(const Expr* expr) {
     if (expr == nullptr || failed_) {
         return {undefined()};
     }
     if (const auto* lit = dynamic_cast<const StringLit*>(expr)) {
         return lowerString(*lit).words;
+    }
+    if (dynamic_cast<const NewStruct*>(expr) != nullptr) {
+        return lowerNewStruct(static_cast<const NewStruct&>(*expr));
+    }
+    if (dynamic_cast<const NewArray*>(expr) != nullptr) {
+        return lowerNewArray(static_cast<const NewArray&>(*expr));
+    }
+    if (dynamic_cast<const Field*>(expr) != nullptr) {
+        return lowerField(static_cast<const Field&>(*expr));
+    }
+    if (dynamic_cast<const Index*>(expr) != nullptr) {
+        return lowerIndex(static_cast<const Index&>(*expr));
     }
     if (const auto* ident = dynamic_cast<const Ident*>(expr)) {
         TypeRef type = checker_.typeOf(ident);
@@ -910,6 +1418,26 @@ ir::Value Lowerer::onIdentOrExpr(const Expr* expr, TypeRef expected) {
     if (auto* assign = dynamic_cast<const Assign*>(expr)) {
         return lowerAssign(const_cast<Assign&>(*assign));
     }
+    // Scalar positions (binary operands, conditions) read fields and elements
+    // through the same paths values use, and demand exactly one word: an
+    // aggregate in an arithmetic operand is a checker error long before this,
+    // so arriving here with several words is a lowerer bug, not a program.
+    if (auto* field = dynamic_cast<const Field*>(expr)) {
+        std::vector<ir::Value> words = lowerField(const_cast<Field&>(*field));
+        if (words.size() != kOneWord) {
+            refuse(expr->pos, "this expression");
+            return undefined();
+        }
+        return words[0];
+    }
+    if (auto* index = dynamic_cast<const Index*>(expr)) {
+        std::vector<ir::Value> words = lowerIndex(const_cast<Index&>(*index));
+        if (words.size() != kOneWord) {
+            refuse(expr->pos, "this expression");
+            return undefined();
+        }
+        return words[0];
+    }
     refuse(expr->pos, "this expression");
     return undefined();
 }
@@ -942,18 +1470,39 @@ ir::Value Lowerer::lowerAssign(Assign& n) {
         }
         value = {emitArith(*n.op, old[0], value[0], current, n.pos)};
     }
-    const auto* ident = dynamic_cast<const Ident*>(n.target.get());
-    if (ident == nullptr) {
-        refuse(n.target->pos, "this assignment");
-        return undefined();
+    if (const auto* ident = dynamic_cast<const Ident*>(n.target.get())) {
+        std::vector<ir::Value> stored =
+            storeToIdent(const_cast<Ident&>(*ident), value);
+        if (stored.size() != kOneWord) {
+            refuse(n.pos, "a multi-word assignment is not an expression");
+            return undefined();
+        }
+        return stored[0];
     }
-    std::vector<ir::Value> stored =
-        storeToIdent(const_cast<Ident&>(*ident), value);
-    if (stored.size() != kOneWord) {
-        refuse(n.pos, "a multi-word assignment is not an expression");
-        return undefined();
+    if (const auto* index = dynamic_cast<const Index*>(n.target.get())) {
+        storeIndex(*index, value);
+        if (failed_ || value.size() != kOneWord) {
+            refuse(n.pos, "a multi-word assignment is not an expression");
+            return undefined();
+        }
+        return value[0];
     }
-    return stored[0];
+    if (dynamic_cast<const Field*>(n.target.get()) != nullptr) {
+        Place place;
+        if (!resolvePlace(n.target.get(), place)) {
+            refuse(n.target->pos, "this assignment");
+            return undefined();
+        }
+        place.type = checker_.typeOf(n.target.get());
+        storeRange(n.pos, place, value, place.type);
+        if (failed_ || value.size() != kOneWord) {
+            refuse(n.pos, "a multi-word assignment is not an expression");
+            return undefined();
+        }
+        return value[0];
+    }
+    refuse(n.target->pos, "this assignment");
+    return undefined();
 }
 
 }  // namespace lower

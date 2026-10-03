@@ -118,6 +118,35 @@ public:
     // slice has none.
     std::vector<ir::Value> storeToIdent(const Ident& target,
                                         const std::vector<ir::Value>& words);
+    // A place something lives: local slots or one global label, plus a byte
+    // offset into it for fields and elements. Nested field chains accumulate
+    // the offset while the slots stay the base value's.
+    struct Place {
+        std::vector<ir::Value> slots;
+        std::string global;
+        TypeRef type;
+        int64_t off = 0;
+        bool isVolatile = false;
+    };
+    // Names a place: identifiers, and field chains over them. Anything else
+    // (a call result, arithmetic) has no address and is refused.
+    bool resolvePlace(const Expr* expr, Place& out);
+    // One scalar load/store at a place plus offset. The bytes must sit inside
+    // a single word; anything straddling words is refused, not split, because
+    // a partial-word write that guessed its neighbors would corrupt them.
+    std::vector<ir::Value> loadRange(Position pos, const Place& place, TypeRef fieldType);
+    void storeRange(Position pos, const Place& place,
+                    const std::vector<ir::Value>& words, TypeRef fieldType);
+    // Construction into given slots, field by field (element by element). A
+    // nested value lands word-aligned or is refused: unaligned multi-word
+    // copies guess neighbor bytes.
+    void constructStruct(const std::vector<ir::Value>& slots, const NewStruct& n);
+    void constructArray(const std::vector<ir::Value>& slots, const NewArray& n);
+    std::vector<ir::Value> lowerNewStruct(const NewStruct& n);
+    std::vector<ir::Value> lowerNewArray(const NewArray& n);
+    std::vector<ir::Value> lowerField(const Field& n);
+    std::vector<ir::Value> lowerIndex(const Index& n);
+    void storeIndex(const Index& target, const std::vector<ir::Value>& words);
     // One arithmetic operation, shared by Binary and compound assignment so
     // the two cannot disagree about what `+` emits.
     ir::Value emitArith(BinOp op, ir::Value a, ir::Value b, TypeRef result,
