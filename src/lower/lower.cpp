@@ -95,6 +95,9 @@ std::unique_ptr<ir::Module> Lowerer::lowerModule(const std::string& name, Progra
     module_->name = name;
     failed_ = false;
     enabled_ = true;
+    // Before the walk, not in onProgram: the flag is per file and every
+    // instruction the walk emits reads it.
+    wrap_ = program.wrap;
     checker_.setSink(this);
     // One walk: the checker visits each node once and calls into here as it
     // types, so nothing in this file visits the AST.
@@ -123,6 +126,7 @@ uint32_t Lowerer::emitBlock(Position pos) {
 
 void Lowerer::startBlock(uint32_t label) {
     current_ = label;
+    terminated_ = false;
 }
 
 void Lowerer::sealBlock(uint32_t label) {
@@ -139,8 +143,12 @@ ir::Value Lowerer::newValue(ir::IRType width, TypeRef type, Position pos) {
 }
 
 ir::Value Lowerer::undefined() const {
+    // No real value ever carries this id: valueSeq_ counts up from zero, so
+    // the placeholder cannot collide with a definition the check looks for.
+    // Reading it back as %3 and calling it undefined was a real bug this
+    // function caused.
     ir::Value value;
-    value.id = valueSeq_;
+    value.id = 0xFFFFFFFFu;
     value.width = ir::IRType::Void;
     value.type = errorRef();
     return value;
@@ -163,7 +171,14 @@ void Lowerer::emitTerminator(const ir::Terminator& term) {
     if (current_ >= function_->blocks.size()) {
         return;
     }
+    // One terminator per block: a branch that already returned keeps its Ret,
+    // and unreachable code after it emits nothing. Overwriting the Ret with a
+    // branch to the join block was a real miscompile this guard removes.
+    if (terminated_) {
+        return;
+    }
     function_->blocks[current_].term = term;
+    terminated_ = true;
 }
 
 ir::IRType Lowerer::widthOf(TypeRef type, Position pos) {
@@ -216,7 +231,6 @@ const Signature* Lowerer::functionSig(const std::string& name) const {
 // --- Locals -------------------------------------------------------------------
 
 void Lowerer::onProgram(Program& n) {
-    wrap_ = n.wrap;
     for (auto& g : n.globals) {
         onGlobal(*g);
     }
@@ -278,6 +292,7 @@ void Lowerer::onFuncDecl(FuncDecl& n) {
         binding.value.width = widthOf(binding.type, n.params[i].pos);
         binding.value.type = binding.type;
         binding.value.id = valueSeq_++;
+        function_->params.push_back(binding.value);
         frame[n.params[i].name] = binding;
     }
     locals_.push_back(std::move(frame));
@@ -293,16 +308,18 @@ void Lowerer::onFuncDecl(FuncDecl& n) {
     function_ = nullptr;
 }
 
-void Lowerer::onBlock(Block& n) {
+void Lowerer::onBlockEnter(Block& n) {
+    (void)n;
     if (failed_ || !enabled_ || function_ == nullptr) {
         return;
     }
     locals_.push_back({});
-    for (auto& s : n.stmts) {
-        if (failed_) {
-            break;
-        }
-        s->accept(checker_);
+}
+
+void Lowerer::onBlockExit(Block& n) {
+    (void)n;
+    if (locals_.empty()) {
+        return;
     }
     locals_.pop_back();
 }

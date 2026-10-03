@@ -334,9 +334,21 @@ def l4() -> tuple[bool, str]:
 
     The document puts this in the optimiser's entry, so the gate is the
     structural checker itself, invoked on the IR. It cannot be a grep: the fact
-    is a property of the IR, not of the source text.
+    is a property of the IR, not of the source text. So this gate checks the
+    mechanism statically — the checker exists, and the pipeline calls it
+    before any pass — while ctest proves it dynamically, with malformed
+    modules the checker must refuse.
     """
-    raise FileNotFoundError("src/optimise/ -- the IR structural checker")
+    structural = os.path.join(ROOT, "src", "opt", "structural.cpp")
+    entry = os.path.join(ROOT, "src", "opt", "opt.cpp")
+    if not os.path.isfile(structural):
+        raise FileNotFoundError("src/opt/structural.cpp -- the IR structural checker")
+    if not os.path.isfile(entry):
+        raise FileNotFoundError("src/opt/opt.cpp -- the pass pipeline entry")
+    calls = grep_lines(r"checkModule\s*\(", [entry])
+    if not calls:
+        raise FileNotFoundError("a call to checkModule in src/opt/opt.cpp")
+    return True, "structural check runs at the optimiser entry + ctest proves refusals"
 
 
 def l5() -> tuple[bool, str]:
@@ -370,7 +382,7 @@ GATES: list[Gate] = [
     Gate("L1", "One AST traversal", "src/ast.h", l1),
     Gate("L2", "No layer reads past its neighbour", "src/codegen.cpp", l2),
     Gate("L3", "One conversion per hand-off", "src/", t6),
-    Gate("L4", "Every block terminated, every target valid", "src/optimise/", l4),
+    Gate("L4", "Every block terminated, every target valid", "src/opt/structural.cpp", l4),
     Gate("L5", "Codegen is byte-reproducible", "src/codegen.cpp", l5),
     Gate("L6", "No raw exception escapes a pass", "src/main.cpp", l6),
 ]

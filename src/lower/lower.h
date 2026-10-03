@@ -71,7 +71,8 @@ public:
     void onReturn(Return& n) override;
     void onIf(IfStmt& n) override;
     void onWhile(WhileStmt& n) override;
-    void onBlock(Block& n);
+    void onBlockEnter(Block& n) override;
+    void onBlockExit(Block& n) override;
     ir::Value onBinary(Binary& n);
     ir::Value onCall(Call& n);
     ir::Value onIdent(Ident& n);
@@ -117,6 +118,7 @@ private:
     uint32_t valueSeq_ = 0;
     uint32_t labelSeq_ = 0;
     uint32_t current_ = 0;
+    bool terminated_ = false;
     std::vector<uint32_t> blockOrder_;
     std::vector<std::unordered_map<std::string, LocalBinding>> locals_;
     std::vector<GlobalBinding> globals_;

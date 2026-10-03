@@ -52,6 +52,88 @@ const char* basicKindName(BasicKind basic) {
     return "unreachable";
 }
 
+bool basicIsSigned(BasicKind basic) {
+    switch (basic) {
+        case BasicKind::I8:
+        case BasicKind::I16:
+        case BasicKind::I32:
+        case BasicKind::I64:
+        case BasicKind::F32:
+        case BasicKind::F64:
+            return true;
+        case BasicKind::U8:
+        case BasicKind::U16:
+        case BasicKind::U32:
+        case BasicKind::U64:
+        case BasicKind::Bool:
+        case BasicKind::Char:
+            return false;
+    }
+    return false;
+}
+
+bool basicIsInteger(BasicKind basic) {
+    switch (basic) {
+        case BasicKind::F32:
+        case BasicKind::F64:
+        case BasicKind::Bool:
+        case BasicKind::Char:
+            return false;
+        case BasicKind::I8:
+        case BasicKind::I16:
+        case BasicKind::I32:
+        case BasicKind::I64:
+        case BasicKind::U8:
+        case BasicKind::U16:
+        case BasicKind::U32:
+        case BasicKind::U64:
+            return true;
+    }
+    return false;
+}
+
+bool basicIsFloat(BasicKind basic) {
+    switch (basic) {
+        case BasicKind::F32:
+        case BasicKind::F64:
+            return true;
+        case BasicKind::I8:
+        case BasicKind::I16:
+        case BasicKind::I32:
+        case BasicKind::I64:
+        case BasicKind::U8:
+        case BasicKind::U16:
+        case BasicKind::U32:
+        case BasicKind::U64:
+        case BasicKind::Bool:
+        case BasicKind::Char:
+            return false;
+    }
+    return false;
+}
+
+int basicWidthBits(BasicKind basic) {
+    switch (basic) {
+        case BasicKind::I8:
+        case BasicKind::U8:
+        case BasicKind::Bool:
+        case BasicKind::Char:
+            return 8;
+        case BasicKind::I16:
+        case BasicKind::U16:
+            return 16;
+        case BasicKind::I32:
+        case BasicKind::U32:
+        case BasicKind::F32:
+            return 32;
+        case BasicKind::I64:
+        case BasicKind::U64:
+        case BasicKind::F64:
+            return 64;
+    }
+    return 0;
+}
+
 bool kindHasResolvedLayout(Kind kind) {
     switch (kind) {
         case Kind::Alias:

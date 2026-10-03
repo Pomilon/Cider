@@ -153,7 +153,21 @@ target_link_libraries(lower_test PRIVATE cider_lower cider_check cider_parse cid
 target_include_directories(lower_test PRIVATE src)
 add_test(NAME lowering COMMAND lower_test)
 
+# --- The optimiser ---------------------------------------------------------------
+#
+# IR.md section 7: a pass may change the shape and not the meaning. The
+# structural check runs at the entry, before any pass (gate L4).
+
+add_library(cider_opt STATIC src/opt/structural.cpp src/opt/opt.cpp)
+target_link_libraries(cider_opt PUBLIC cider_ir cider_types)
+target_include_directories(cider_opt PUBLIC src)
+
+add_executable(opt_test tests/unit/opt_test.cpp)
+target_link_libraries(opt_test PRIVATE cider_opt cider_lower cider_check cider_parse cider_lexer)
+target_include_directories(opt_test PRIVATE src)
+add_test(NAME optimise COMMAND opt_test)
+
 # A gate that fails must fail the build, so nothing here is allowed to be
 # "informational".
-set_tests_properties(gates layout types lexer ast parser resolver checker lowering
+set_tests_properties(gates layout types lexer ast parser resolver checker lowering optimise
              PROPERTIES LABELS "gate")

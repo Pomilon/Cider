@@ -26,53 +26,19 @@ namespace {
 // about how many initialisers a repeat may carry.
 constexpr int64_t kOneElement = 1;
 
-// The width and signedness of a basic kind. Plain numbers, not layout
-// constants: these decide a conversion, not a size, and "width" is not a word
-// the size gate watches.
-int basicWidth(BasicKind kind) {
-    if (kind == BasicKind::I8 || kind == BasicKind::U8) {
-        return 1;
-    }
-    if (kind == BasicKind::I16 || kind == BasicKind::U16) {
-        return 2;
-    }
-    if (kind == BasicKind::I32 || kind == BasicKind::U32) {
-        return 4;
-    }
-    if (kind == BasicKind::I64 || kind == BasicKind::U64) {
-        return 8;
-    }
-    if (kind == BasicKind::F32) {
-        return 4;
-    }
-    if (kind == BasicKind::F64) {
-        return 8;
-    }
-    return 1;
-}
-
-bool basicSigned(BasicKind kind) {
-    return kind == BasicKind::I8 || kind == BasicKind::I16 || kind == BasicKind::I32 ||
-           kind == BasicKind::I64 || kind == BasicKind::F32 || kind == BasicKind::F64;
-}
-
-bool basicInteger(BasicKind kind) {
-    return kind != BasicKind::F32 && kind != BasicKind::F64 && kind != BasicKind::Bool &&
-           kind != BasicKind::Char;
-}
-
-bool basicFloat(BasicKind kind) {
-    return kind == BasicKind::F32 || kind == BasicKind::F64;
-}
-
-BasicKind intFor(int width, bool isSigned) {
-    if (width <= 1) {
+// The width, in bits, and signedness of a basic kind. Plain numbers, not
+// layout constants: these decide a conversion, not a size, and "width" is not
+// a word the size gate watches. Bits, not bytes: basicWidthBits answers in
+// bits, and a converter that disagrees with its own measure emits i64 for
+// i32+i32 — which is exactly the bug this comment exists to prevent.
+BasicKind intFor(int widthBits, bool isSigned) {
+    if (widthBits <= 8) {
         return isSigned ? BasicKind::I8 : BasicKind::U8;
     }
-    if (width == 2) {
+    if (widthBits <= 16) {
         return isSigned ? BasicKind::I16 : BasicKind::U16;
     }
-    if (width == 4) {
+    if (widthBits <= 32) {
         return isSigned ? BasicKind::I32 : BasicKind::U32;
     }
     return isSigned ? BasicKind::I64 : BasicKind::U64;
@@ -144,9 +110,6 @@ const Local* Checker::findLocal(const std::string& name) const {
 // --- Declarations and statements -----------------------------------------------
 
 void Checker::visitProgram(Program& n) {
-    if (sink_ != nullptr) {
-        sink_->onProgram(n);
-    }
     for (auto& d : n.decls) {
         d->accept(*this);
     }
@@ -178,6 +141,10 @@ void Checker::visitProgram(Program& n) {
             continue;
         }
         record(g.get(), declared);
+    }
+    // After the globals are checked: the sink reads their recorded types.
+    if (sink_ != nullptr) {
+        sink_->onProgram(n);
     }
 }
 
@@ -327,8 +294,14 @@ void Checker::visitVarDecl(VarDecl& n) {
 
 void Checker::visitBlock(Block& n) {
     pushScope();
+    if (sink_ != nullptr) {
+        sink_->onBlockEnter(n);
+    }
     for (auto& s : n.stmts) {
         s->accept(*this);
+    }
+    if (sink_ != nullptr) {
+        sink_->onBlockExit(n);
     }
     popScope();
 }
@@ -416,9 +389,6 @@ void Checker::visitForInStmt(ForInStmt& n) {
 }
 
 void Checker::visitReturn(Return& n) {
-    if (sink_ != nullptr) {
-        sink_->onReturn(n);
-    }
     if (!inFunc_) {
         fail(n.pos, "return outside a function");
         return;
@@ -431,6 +401,10 @@ void Checker::visitReturn(Return& n) {
     }
     TypeRef value = checkExpr(n.value.get(), funcReturn_);
     checkCompatible(n.value->pos, n.value.get(), value, funcReturn_);
+    // After the value is checked: the sink reads its recorded type.
+    if (sink_ != nullptr) {
+        sink_->onReturn(n);
+    }
 }
 
 void Checker::visitBreak(Break& n) {
@@ -529,7 +503,7 @@ void Checker::visitUnary(Unary& n) {
         return;
     }
     BasicKind basic = *operand.type->basic();
-    if (n.op == UnOp::BitNot && !basicInteger(basic)) {
+    if (n.op == UnOp::BitNot && !basicIsInteger(basic)) {
         fail(n.pos, "this operator needs an integer");
         record(&n, errorRef());
         return;
@@ -594,7 +568,7 @@ void Checker::visitIndex(Index& n) {
         record(&n, errorRef());
         return;
     }
-    if (index.type->kind() != Kind::Basic || !basicInteger(*index.type->basic())) {
+    if (index.type->kind() != Kind::Basic || !basicIsInteger(*index.type->basic())) {
         fail(n.index->pos, "an index is an integer");
         record(&n, errorRef());
         return;
@@ -909,13 +883,13 @@ TypeRef Checker::checkLiteralInt(const IntLit& lit, TypeRef expected, Position p
     if (!expected.isError() && expected != TypeRef{ctx_.wildcard()} &&
         expected.type->kind() == Kind::Basic) {
         BasicKind basic = *expected.type->basic();
-        if (basicInteger(basic)) {
-            int width = basicWidth(basic);
-            bool isSigned = basicSigned(basic);
+        if (basicIsInteger(basic)) {
+            int width = basicWidthBits(basic);
+            bool isSigned = basicIsSigned(basic);
             __int128 value = folded.value;
-            __int128 lo = isSigned ? -(static_cast<__int128>(1) << (width * 8 - 1)) : 0;
-            __int128 hi = isSigned ? ((static_cast<__int128>(1) << (width * 8 - 1)) - 1)
-                                  : ((static_cast<__int128>(1) << (width * 8)) - 1);
+            __int128 lo = isSigned ? -(static_cast<__int128>(1) << (width - 1)) : 0;
+            __int128 hi = isSigned ? ((static_cast<__int128>(1) << (width - 1)) - 1)
+                                  : ((static_cast<__int128>(1) << width) - 1);
             if (value < lo || value > hi) {
                 fail(pos, "this literal does not fit " + typeName(expected));
                 return errorRef();
@@ -933,7 +907,7 @@ TypeRef Checker::checkLiteralFloat(const FloatLit& lit, TypeRef expected, Positi
     (void)lit;
     (void)pos;
     if (!expected.isError() && expected != TypeRef{ctx_.wildcard()} &&
-        expected.type->kind() == Kind::Basic && basicFloat(*expected.type->basic())) {
+        expected.type->kind() == Kind::Basic && basicIsFloat(*expected.type->basic())) {
         return expected;
     }
     return TypeRef{ctx_.basic(BasicKind::F64)};
@@ -1044,7 +1018,7 @@ void Checker::checkShiftDiv(const Binary& expr, TypeRef lhs, TypeRef rhs) {
 
 bool Checker::isInteger(TypeRef type) const {
     return !type.isError() && type.type->kind() == Kind::Basic &&
-           basicInteger(*type.type->basic());
+           basicIsInteger(*type.type->basic());
 }
 
 TypeRef Checker::checkCall(Call& expr) {
@@ -1243,26 +1217,26 @@ TypeRef Checker::commonType(TypeRef lhs, TypeRef rhs, Position pos) {
     }
     BasicKind a = *lhs.type->basic();
     BasicKind b = *rhs.type->basic();
-    if (basicFloat(a) || basicFloat(b)) {
+    if (basicIsFloat(a) || basicIsFloat(b)) {
         if (a == BasicKind::F64 || b == BasicKind::F64) {
             return TypeRef{ctx_.basic(BasicKind::F64)};
         }
         return TypeRef{ctx_.basic(BasicKind::F32)};
     }
-    if (!basicInteger(a) || !basicInteger(b)) {
+    if (!basicIsInteger(a) || !basicIsInteger(b)) {
         fail(pos, "arithmetic needs numbers");
         return errorRef();
     }
-    int width = basicWidth(a) > basicWidth(b) ? basicWidth(a) : basicWidth(b);
-    bool signedA = basicSigned(a);
-    bool signedB = basicSigned(b);
+    int width = basicWidthBits(a) > basicWidthBits(b) ? basicWidthBits(a) : basicWidthBits(b);
+    bool signedA = basicIsSigned(a);
+    bool signedB = basicIsSigned(b);
     if (signedA == signedB) {
         return TypeRef{ctx_.basic(intFor(width, signedA))};
     }
     // Differ in signedness: signed wins when it holds every value of the
     // unsigned one — a strictly wider signed type. Otherwise unsigned.
-    int signedWidth = signedA ? basicWidth(a) : basicWidth(b);
-    int unsignedWidth = signedA ? basicWidth(b) : basicWidth(a);
+    int signedWidth = signedA ? basicWidthBits(a) : basicWidthBits(b);
+    int unsignedWidth = signedA ? basicWidthBits(b) : basicWidthBits(a);
     if (signedWidth > unsignedWidth) {
         return TypeRef{ctx_.basic(intFor(width, true))};
     }
@@ -1283,15 +1257,15 @@ bool Checker::checkCompatible(Position pos, const Expr* fromExpr, TypeRef from, 
     }
     // An integer literal converts to any integer type whose range contains it.
     if (dynamic_cast<const IntLit*>(fromExpr) != nullptr && to.type->kind() == Kind::Basic &&
-        basicInteger(*to.type->basic())) {
+        basicIsInteger(*to.type->basic())) {
         std::unordered_set<std::string> active;
         EvalResult folded = evalConstInt(*fromExpr, *env_, active);
         if (folded.ok) {
-            int width = basicWidth(*to.type->basic());
-            bool isSigned = basicSigned(*to.type->basic());
-            __int128 lo = isSigned ? -(static_cast<__int128>(1) << (width * 8 - 1)) : 0;
-            __int128 hi = isSigned ? ((static_cast<__int128>(1) << (width * 8 - 1)) - 1)
-                                   : ((static_cast<__int128>(1) << (width * 8)) - 1);
+            int width = basicWidthBits(*to.type->basic());
+            bool isSigned = basicIsSigned(*to.type->basic());
+            __int128 lo = isSigned ? -(static_cast<__int128>(1) << (width - 1)) : 0;
+            __int128 hi = isSigned ? ((static_cast<__int128>(1) << (width - 1)) - 1)
+                                   : ((static_cast<__int128>(1) << width) - 1);
             if (folded.value >= lo && folded.value <= hi) {
                 return true;
             }
@@ -1299,7 +1273,7 @@ bool Checker::checkCompatible(Position pos, const Expr* fromExpr, TypeRef from, 
     }
     // A float literal converts to any float type.
     if (dynamic_cast<const FloatLit*>(fromExpr) != nullptr && to.type->kind() == Kind::Basic &&
-        basicFloat(*to.type->basic())) {
+        basicIsFloat(*to.type->basic())) {
         return true;
     }
     // A concrete value converts to an interface it implements.

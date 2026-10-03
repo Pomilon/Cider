@@ -192,6 +192,10 @@ struct Block {
 struct Function {
     std::string name;
     Signature signature;
+    // One value per signature parameter, in order. Parameters are SSA values:
+    // still live, so they live in a register. The structural check treats
+    // these as defined, which is what "or is a function parameter" means.
+    std::vector<Value> params;
     bool isExtern = false;
     std::vector<Block> blocks;
     Position loc{"", 1, 1};

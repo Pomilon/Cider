@@ -39,6 +39,8 @@ class LowerSink {
 public:
     virtual ~LowerSink() = default;
     virtual void onProgram(Program& n) { (void)n; }
+    virtual void onBlockEnter(Block& n) { (void)n; }
+    virtual void onBlockExit(Block& n) { (void)n; }
     virtual void onFuncDecl(FuncDecl& n) { (void)n; }
     virtual void onVarDecl(VarDecl& n) { (void)n; }
     virtual void onReturn(Return& n) { (void)n; }

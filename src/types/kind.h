@@ -69,6 +69,15 @@ const char* kindName(Kind kind);
 // The human-readable name of a basic kind. Same rule.
 const char* basicKindName(BasicKind basic);
 
+// What a basic kind is, asked once here rather than re-derived by every
+// switch that needs it. Widths are in bits; layout.h owns byte sizes, and
+// bits are bytes times eight, which is arithmetic rather than a second
+// authority for a number.
+bool basicIsSigned(BasicKind basic);
+bool basicIsInteger(BasicKind basic);
+bool basicIsFloat(BasicKind basic);
+int basicWidthBits(BasicKind basic);
+
 // Whether a size is known for this kind. TYPES.md §3.2 requires sizeOf to be
 // total: Alias, TypeParam and Wildcard are unresolved by definition, so asking
 // for a size is a compile-time rejection rather than a default.
