@@ -181,7 +181,25 @@ target_link_libraries(codegen_test PRIVATE cider_codegen cider_opt cider_lower c
 target_include_directories(codegen_test PRIVATE src)
 add_test(NAME codegen COMMAND codegen_test)
 
+# --- The driver --------------------------------------------------------------------
+#
+# OUTPUT.md section 1: check, compile, ir and run. link and bundle refuse by
+# name. The top-level catch maps every failure to a diagnostic (gate L6).
+
+add_library(cider_driver STATIC src/driver/driver.cpp)
+target_link_libraries(cider_driver PUBLIC cider_codegen cider_opt cider_lower cider_check cider_parse cider_lexer)
+target_include_directories(cider_driver PUBLIC src)
+
+add_executable(cider src/driver/main.cpp)
+target_link_libraries(cider PRIVATE cider_driver)
+target_include_directories(cider PRIVATE src)
+
+add_executable(driver_test tests/unit/driver_test.cpp)
+target_link_libraries(driver_test PRIVATE cider_driver)
+target_include_directories(driver_test PRIVATE src)
+add_test(NAME driver COMMAND driver_test)
+
 # A gate that fails must fail the build, so nothing here is allowed to be
 # "informational".
-set_tests_properties(gates layout types lexer ast parser resolver checker lowering optimise codegen
+set_tests_properties(gates layout types lexer ast parser resolver checker lowering optimise codegen driver
              PROPERTIES LABELS "gate")

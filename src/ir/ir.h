@@ -222,6 +222,11 @@ struct Module {
     std::vector<Global> globals;
 };
 
+// A human-readable dump of one module, for the `ir` subcommand and for
+// debugging. Deterministic in the module: blocks and instructions in order,
+// values by id. Never parsed back — dumps are read by people, not compiled.
+std::string dumpModule(const Module& module);
+
 }  // namespace ir
 }  // namespace cider
 

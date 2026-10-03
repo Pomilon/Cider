@@ -96,5 +96,34 @@ const char* opName(Op op) {
     return "unreachable";
 }
 
+std::string dumpModule(const Module& module) {
+    std::string out = "module " + module.name + "\n";
+    for (const Global& global : module.globals) {
+        out += "global " + global.label + " = " + std::to_string(global.initial) + "\n";
+    }
+    for (const Function& fn : module.functions) {
+        out += "func " + fn.name + "\n";
+        for (const Block& block : fn.blocks) {
+            out += "block " + std::to_string(block.label) + "\n";
+            for (const Instr& instr : block.body) {
+                out += "  ";
+                for (const Value& result : instr.results) {
+                    out += "%" + std::to_string(result.id) + " = ";
+                }
+                out += opName(instr.op);
+                out += " " + std::string(irTypeName(instr.width));
+                for (const Value& operand : instr.operands) {
+                    out += " %" + std::to_string(operand.id);
+                }
+                if (!instr.callee.empty()) {
+                    out += " @" + instr.callee;
+                }
+                out += "\n";
+            }
+        }
+    }
+    return out;
+}
+
 }  // namespace ir
 }  // namespace cider

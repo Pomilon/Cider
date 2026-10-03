@@ -1,0 +1,229 @@
+// driver.cpp — the `cider` command behind a testable function.
+//
+// check: lex, parse, resolve and check; diagnostics name file, line and
+//   column, and success is quiet.
+// compile: check, then emit assembly to a file or standard output.
+// ir: check, then dump the module for people to read.
+// run: compile to a temporary file, assemble and link it, execute it, and
+//   answer its exit code.
+// link, bundle: refused by name. A pipeline stage that does not exist must say
+//   so rather than look like it worked.
+
+#include "driver/driver.h"
+
+#include <cstdio>
+#include <fstream>
+#include <sstream>
+#include <sys/wait.h>
+#include <unistd.h>
+
+#include "check/checker.h"
+#include "codegen/codegen.h"
+#include "lexer/lexer.h"
+#include "lower/lower.h"
+#include "opt/opt.h"
+#include "parse/parser.h"
+#include "types/context.h"
+
+namespace cider {
+namespace driver {
+
+namespace {
+
+struct Pipeline {
+    bool ok = false;
+    std::string file;
+    std::string diagnostic;
+    std::unique_ptr<TypeContext> types;
+    std::unique_ptr<Program> program;
+    std::unique_ptr<ir::Module> module;
+};
+
+std::string at(const Position& pos) {
+    return pos.file + ":" + std::to_string(pos.line) + ":" + std::to_string(pos.column);
+}
+
+bool runFront(const std::string& file, const std::string& text, Pipeline& pipe) {
+    pipe.file = file;
+    pipe.types = std::make_unique<TypeContext>();
+    Lexer lexer(file, text);
+    std::vector<Token> tokens = lexer.lex();
+    for (const LexError& error : lexer.errors()) {
+        pipe.diagnostic += at(error.pos) + ": " + error.message + "\n";
+    }
+    Parser parser(file, std::move(tokens));
+    pipe.program = parser.parse();
+    for (const ParseError& error : parser.errors()) {
+        pipe.diagnostic += at(error.pos) + ": " + error.message + "\n";
+    }
+    if (!pipe.diagnostic.empty()) {
+        return false;
+    }
+    resolve::Resolver resolver(*pipe.types);
+    if (!resolver.resolveProgram(*pipe.program, "main")) {
+        for (const resolve::ResolveError& error : resolver.errors()) {
+            pipe.diagnostic += at(error.pos) + ": " + error.message + "\n";
+        }
+        return false;
+    }
+    check::Checker checker(*pipe.types, resolver);
+    lower::Lowerer lowerer(*pipe.types, resolver, checker);
+    pipe.module = lowerer.lowerModule("main", *pipe.program);
+    if (pipe.module == nullptr) {
+        for (const check::CheckError& error : checker.errors()) {
+            pipe.diagnostic += at(error.pos) + ": " + error.message + "\n";
+        }
+        for (const check::CheckError& error : lowerer.errors()) {
+            pipe.diagnostic += at(error.pos) + ": " + error.message + "\n";
+        }
+        return false;
+    }
+    opt::OptResult result = opt::run(*pipe.module);
+    if (!result.ok) {
+        pipe.diagnostic += file + ": " + result.error + "\n";
+        return false;
+    }
+    pipe.ok = true;
+    return true;
+}
+
+std::string readFile(const std::string& path, bool& found) {
+    std::ifstream stream(path, std::ios::binary);
+    if (!stream) {
+        found = false;
+        return "";
+    }
+    found = true;
+    std::ostringstream text;
+    text << stream.rdbuf();
+    return text.str();
+}
+
+bool writeFile(const std::string& path, const std::string& text) {
+    std::ofstream stream(path, std::ios::binary | std::ios::trunc);
+    if (!stream) {
+        return false;
+    }
+    stream.write(text.data(), static_cast<std::streamsize>(text.size()));
+    return static_cast<bool>(stream);
+}
+
+int runBinary(const std::string& path) {
+    pid_t child = fork();
+    if (child == 0) {
+        execl(path.c_str(), path.c_str(), nullptr);
+        _exit(127);
+    }
+    int status = 0;
+    waitpid(child, &status, 0);
+    if (WIFSIGNALED(status)) {
+        return 128 + WTERMSIG(status);
+    }
+    if (!WIFEXITED(status)) {
+        return 127;
+    }
+    return WEXITSTATUS(status);
+}
+
+}  // namespace
+
+int runDriver(const std::vector<std::string>& args, std::string& out, std::string& err) {
+    if (args.empty()) {
+        err = "usage: cider <check|compile|ir|run|link|bundle> [options] <file>\n";
+        return 2;
+    }
+    std::string command = args[0];
+    if (command != "check" && command != "compile" && command != "ir" &&
+        command != "run" && command != "link" && command != "bundle") {
+        err = "unknown subcommand '" + command + "'\n";
+        return 2;
+    }
+    if (command == "link" || command == "bundle") {
+        err = command + " is not implemented yet\n";
+        return 2;
+    }
+    std::string target = "native";
+    std::string output;
+    std::string input;
+    for (uint64_t i = 1; i < static_cast<uint64_t>(args.size()); ++i) {
+        if (args[i] == "--target" && i + 1 < static_cast<uint64_t>(args.size())) {
+            target = args[++i];
+        } else if (args[i] == "-o" && i + 1 < static_cast<uint64_t>(args.size())) {
+            output = args[++i];
+        } else if (!args[i].empty() && args[i][0] == '-') {
+            err = "unknown flag '" + args[i] + "'\n";
+            return 2;
+        } else if (input.empty()) {
+            input = args[i];
+        } else {
+            err = "too many files\n";
+            return 2;
+        }
+    }
+    if (input.empty()) {
+        err = "no input file\n";
+        return 2;
+    }
+    if (target != "native") {
+        err = "target " + target + " is not emitted yet: native only in this slice\n";
+        return 2;
+    }
+    bool found = false;
+    std::string text = readFile(input, found);
+    if (!found) {
+        err = "cannot open '" + input + "'\n";
+        return 1;
+    }
+    Pipeline pipe;
+    if (!runFront(input, text, pipe)) {
+        err = pipe.diagnostic;
+        return 1;
+    }
+    if (command == "check") {
+        return 0;
+    }
+    if (command == "ir") {
+        out = ir::dumpModule(*pipe.module);
+        return 0;
+    }
+    codegen::EmitResult emitted = codegen::emitNative(*pipe.module);
+    if (!emitted.ok) {
+        err = at(emitted.pos) + ": " + emitted.error + "\n";
+        return 1;
+    }
+    if (command == "compile") {
+        if (output.empty()) {
+            out = emitted.text;
+            return 0;
+        }
+        if (!writeFile(output, emitted.text)) {
+            err = "cannot write '" + output + "'\n";
+            return 1;
+        }
+        return 0;
+    }
+    // run: assemble and link to temporaries, execute, answer the exit code.
+    char asmPath[] = "/tmp/cider_run_XXXXXX.s";
+    int asmFd = mkstemps(asmPath, 2);
+    if (asmFd < 0) {
+        err = "cannot create a temporary file\n";
+        return 1;
+    }
+    FILE* asmFile = fdopen(asmFd, "w");
+    fwrite(emitted.text.data(), 1, emitted.text.size(), asmFile);
+    fclose(asmFile);
+    std::string binPath = std::string(asmPath) + ".bin";
+    std::string build = "cc -o " + binPath + " " + asmPath + " 2>/dev/null";
+    bool built = system(build.c_str()) == 0;
+    unlink(asmPath);
+    if (!built) {
+        err = "assembling failed\n";
+        return 1;
+    }
+    int code = runBinary(binPath);
+    unlink(binPath.c_str());
+    return code;
+}
+
+}  // namespace driver
+}  // namespace cider

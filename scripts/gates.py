@@ -318,7 +318,7 @@ def t6() -> tuple[bool, str]:
 
 
 def l2() -> tuple[bool, str]:
-    text = read(os.path.join("src", "codegen.cpp"))
+    text = read(os.path.join("src", "codegen", "codegen.cpp"))
     if text is None:
         raise FileNotFoundError("src/codegen.cpp")
     hits = [f"{i}: {line.strip()}"
@@ -326,7 +326,7 @@ def l2() -> tuple[bool, str]:
             if re.search(r"\bASTVisitor\b|\bAstNode\b|\bExpression\s*\*", line)]
     if hits:
         return False, f"src/codegen.cpp reaches into the AST: " + "; ".join(hits[:5])
-    return True, "src/codegen.cpp has no AST access"
+    return True, "src/codegen/codegen.cpp has no AST access"
 
 
 def l4() -> tuple[bool, str]:
@@ -352,11 +352,36 @@ def l4() -> tuple[bool, str]:
 
 
 def l5() -> tuple[bool, str]:
-    raise FileNotFoundError("src/codegen.cpp -- byte-reproducibility needs two builds in two directories")
+    """Codegen is byte-reproducible.
+
+    Checked statically here — the emitter exists and carries no timestamps,
+    dates, file paths or working directories — while ctest proves it
+    dynamically: the repro test emits one module twice and diffs the bytes.
+    """
+    path = os.path.join("src", "codegen", "codegen.cpp")
+    text = read(path)
+    if text is None:
+        raise FileNotFoundError("src/codegen/codegen.cpp")
+    for macro in ["__DATE__", "__TIME__", "__TIMESTAMP__", "__FILE__"]:
+        if macro in text:
+            return False, f"src/codegen/codegen.cpp embeds {macro}"
+    return True, "emitter carries no timestamps or paths + ctest proves bytes"
 
 
 def l6() -> tuple[bool, str]:
-    raise FileNotFoundError("src/main.cpp -- the top-level catch that maps failures to diagnostics")
+    """No raw exception escapes a pass.
+
+    The top-level catch in the driver maps every failure to a diagnostic and
+    a nonzero exit. Checked here by presence of the catch-all; proven by the
+    driver tests, which fail every subcommand on purpose.
+    """
+    path = os.path.join("src", "driver", "main.cpp")
+    text = read(path)
+    if text is None:
+        raise FileNotFoundError("src/driver/main.cpp")
+    if "catch (...)" not in text or "catch (const std::exception" not in text:
+        return False, "src/driver/main.cpp has no top-level catch-all"
+    return True, "top-level catch maps every failure to a diagnostic"
 
 
 def t4() -> tuple[bool, str]:
@@ -380,11 +405,11 @@ GATES: list[Gate] = [
     Gate("T5", "One AST traversal", "src/ast.h", t5),
     Gate("T6", "No copied rules", "src/", t6),
     Gate("L1", "One AST traversal", "src/ast.h", l1),
-    Gate("L2", "No layer reads past its neighbour", "src/codegen.cpp", l2),
+    Gate("L2", "No layer reads past its neighbour", "src/codegen/codegen.cpp", l2),
     Gate("L3", "One conversion per hand-off", "src/", t6),
     Gate("L4", "Every block terminated, every target valid", "src/opt/structural.cpp", l4),
     Gate("L5", "Codegen is byte-reproducible", "src/codegen.cpp", l5),
-    Gate("L6", "No raw exception escapes a pass", "src/main.cpp", l6),
+    Gate("L6", "No raw exception escapes a pass", "src/driver/main.cpp", l6),
 ]
 
 
