@@ -85,6 +85,7 @@ const char* opName(Op op) {
         case Op::Load: return "load";
         case Op::Store: return "store";
         case Op::Alloca: return "alloca";
+        case Op::DataAddr: return "dataaddr";
         case Op::Extract: return "extract";
         case Op::Insert: return "insert";
         case Op::Gep: return "gep";
@@ -100,6 +101,9 @@ std::string dumpModule(const Module& module) {
     std::string out = "module " + module.name + "\n";
     for (const Global& global : module.globals) {
         out += "global " + global.label + " = " + std::to_string(global.initial) + "\n";
+    }
+    for (const Rodata& blob : module.rodata) {
+        out += "rodata " + blob.label + " = \"" + blob.bytes + "\"\n";
     }
     for (const Function& fn : module.functions) {
         out += "func " + fn.name + "\n";

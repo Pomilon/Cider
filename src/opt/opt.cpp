@@ -186,7 +186,9 @@ uint64_t deadCode(ir::Module& module) {
                         used.insert(operand.id);
                     }
                     for (const ir::Argument& arg : instr.arguments) {
-                        used.insert(arg.value.id);
+                        for (const ir::Value& word : arg.words) {
+                            used.insert(word.id);
+                        }
                     }
                     // A slot or a stored value is a use like any other: the
                     // address a load reads and the value a store writes keep

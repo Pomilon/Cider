@@ -80,7 +80,9 @@ void checkDefs(const ir::Function& fn, std::vector<StructuralError>& errors) {
                 use(block.label, operand.id);
             }
             for (const ir::Argument& arg : instr.arguments) {
-                use(block.label, arg.value.id);
+                for (const ir::Value& word : arg.words) {
+                    use(block.label, word.id);
+                }
             }
             for (const ir::Value& result : instr.results) {
                 // A slot comes into existence twice by design: once as a

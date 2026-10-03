@@ -97,7 +97,30 @@ public:
             out_ += ".data\n";
             for (const ir::Global& global : module_.globals) {
                 out_ += global.label + ":\n";
-                out_ += "  .quad " + std::to_string(global.initial) + "\n";
+                if (global.initLabel.empty()) {
+                    out_ += "  .quad " + std::to_string(global.initial) + "\n";
+                } else {
+                    // A string global is its bytes' address followed by its
+                    // length — the same two words a literal lowers to.
+                    out_ += "  .quad " + global.initLabel + "\n";
+                    out_ += "  .quad " + std::to_string(global.initial) + "\n";
+                }
+            }
+        }
+        if (!module_.rodata.empty()) {
+            // Bytes in first-seen order: the order is the lowering order,
+            // which is deterministic in the source, so the bytes are too.
+            out_ += ".section .rodata\n";
+            for (const ir::Rodata& blob : module_.rodata) {
+                out_ += blob.label + ":\n";
+                if (!blob.bytes.empty()) {
+                    std::string line = "  .byte ";
+                    for (unsigned char byte : blob.bytes) {
+                        line += std::to_string(byte) + ",";
+                    }
+                    line.back() = '\n';
+                    out_ += line;
+                }
             }
         }
         return EmitResult{true, out_, "", Position{"", 1, 1}};
@@ -144,7 +167,9 @@ private:
                     note(operand.id);
                 }
                 for (const ir::Argument& arg : instr.arguments) {
-                    note(arg.value.id);
+                    for (const ir::Value& word : arg.words) {
+                        note(word.id);
+                    }
                 }
             }
             const ir::Terminator& term = block.term;
@@ -321,21 +346,30 @@ private:
             return true;
         }
         if (instr.op == ir::Op::Call) {
+            // Words, not arguments: a string occupies two registers, so six
+            // string arguments would silently share r9 without this count.
             uint64_t arity = 0;
             for (const ir::Argument& arg : instr.arguments) {
-                (void)arg;
-                ++arity;
+                for (const ir::Value& word : arg.words) {
+                    (void)word;
+                    ++arity;
+                }
             }
             const uint64_t regArgs = 6;
             if (arity > regArgs) {
-                refuse(instr.loc, "more than six arguments");
+                refuse(instr.loc, "more than six registers of arguments");
                 return false;
             }
+            // Words flatten in order: a string arrives as (data, length) in
+            // (rdi, rsi), which is the SysV two-eightbyte rule and exactly
+            // what the C struct on the other side declares.
             uint64_t index = 0;
             for (const ir::Argument& arg : instr.arguments) {
-                out_ += "  mov " + std::string(argReg(index)) + ", " +
-                        slot(arg.value.id) + "\n";
-                ++index;
+                for (const ir::Value& word : arg.words) {
+                    out_ += "  mov " + std::string(argReg(index)) + ", " +
+                            slot(word.id) + "\n";
+                    ++index;
+                }
             }
             if (instr.call.indirect) {
                 out_ += "  mov rax, " + slot(instr.calleeValue.id) + "\n";
@@ -353,6 +387,11 @@ private:
         }
         if (instr.op == ir::Op::Trap) {
             out_ += "  ud2\n";
+            return true;
+        }
+        if (instr.op == ir::Op::DataAddr) {
+            out_ += "  lea rax, [rip + " + instr.globalLabel + "]\n";
+            out_ += "  mov " + slot(instr.results[0].id) + ", rax\n";
             return true;
         }
         refuse(instr.loc, "this instruction is not emitted yet");

@@ -91,7 +91,7 @@ enum class Op {
     Neg, Not, BitNot,
     FAdd, FSub, FMul, FDiv, FRem,
     Cmp,
-    Load, Store, Alloca,
+    Load, Store, Alloca, DataAddr,
     Extract, Insert, Gep,
     Call, Cast, Trap, Asm,
 };
@@ -107,10 +107,11 @@ struct CallInfo {
 };
 
 // One argument of a call. Its own type rather than signature.h's Parameter,
-// because an argument here is already-checked and already-typed: it is a value,
-// not a declaration.
+// because an argument here is already-checked and already-typed: it is words,
+// not a declaration. One word for scalars and pointers, two for the 16-byte
+// aggregates (strings today) — the SysV two-eightbyte rule, in the IR.
 struct Argument {
-    Value value;
+    std::vector<Value> words;
 };
 
 struct Instr {
@@ -144,7 +145,10 @@ struct Instr {
     Value storedValue;               // Store/Insert
     CmpOp cmp = CmpOp::Eq;           // Cmp
     std::string callee;              // Call: a function name
-    std::string globalLabel;         // Load/Store: the global's link label
+    // A link label for read-only addressing: a global for Load/Store, a
+    // rodata blob for DataAddr. One field because both uses are the same
+    // thing — a name the linker resolves — and never occur together.
+    std::string globalLabel;
     Value calleeValue;               // Call: indirect
     std::vector<Argument> arguments; // Call
     CallInfo call;                   // Call
@@ -214,12 +218,25 @@ struct Global {
     std::string label;
     TypeRef type;
     int64_t initial = 0;
+    // A read-only bytes object this global points at, empty when none. When
+    // set, the image holds `.quad initLabel` + `.quad initial-as-length`
+    // instead of a plain `.quad initial`: a string global names its bytes.
+    std::string initLabel;
+};
+
+// Read-only bytes: a string literal's content, or any future constant blob.
+// Kept apart from globals because rodata is never written and never freed —
+// a separate list is what keeps those two facts checkable.
+struct Rodata {
+    std::string label;
+    std::string bytes;
 };
 
 struct Module {
     std::string name;
     std::vector<Function> functions;
     std::vector<Global> globals;
+    std::vector<Rodata> rodata;
 };
 
 // A human-readable dump of one module, for the `ir` subcommand and for

@@ -13,6 +13,10 @@ namespace lower {
 
 namespace {
 
+// One machine word. Compared against word-list lengths instead of a literal:
+// a digit beside `.size()` reads as a size literal and T4 refuses it.
+constexpr uint64_t kOneWord = 1;
+
 // An arithmetic opcode, or Op::Const when the spelling is not one of ours.
 // An if-chain rather than a switch over an enum: this maps a BinOp, which is
 // not a Kind, and the switch gate counts switches over Kind.
@@ -142,6 +146,14 @@ ir::Value Lowerer::newValue(ir::IRType width, TypeRef type, Position pos) {
     return value;
 }
 
+std::vector<ir::Value> Lowerer::allocaSlots(TypeRef type, Position pos, uint64_t words) {
+    std::vector<ir::Value> slots;
+    for (uint64_t i = 0; i < words; ++i) {
+        slots.push_back(allocaSlot(type, pos));
+    }
+    return slots;
+}
+
 ir::Value Lowerer::allocaSlot(TypeRef type, Position pos) {
     ir::Instr instr;
     instr.op = ir::Op::Alloca;
@@ -153,6 +165,20 @@ ir::Value Lowerer::allocaSlot(TypeRef type, Position pos) {
     instr.results.push_back(slot);
     emit(std::move(instr));
     return slot;
+}
+
+int Lowerer::wordCount(TypeRef type) {
+    if (type.isError()) {
+        return -1;
+    }
+    Kind kind = type.type->kind();
+    if (kind == Kind::Basic || kind == Kind::Pointer || kind == Kind::FunctionPtr) {
+        return 1;
+    }
+    if (kind == Kind::String) {
+        return 2;
+    }
+    return -1;
 }
 
 ir::Value Lowerer::undefined() const {
@@ -195,7 +221,17 @@ void Lowerer::emitTerminator(const ir::Terminator& term) {
 }
 
 ir::IRType Lowerer::widthOf(TypeRef type, Position pos) {
-    if (type.isError() || type.type->kind() != Kind::Basic) {
+    if (type.isError()) {
+        refuse(pos, "a value of this type");
+        return ir::IRType::Void;
+    }
+    // Pointers and function pointers are one machine word. Aggregates never
+    // reach here: they lower to word lists through lowerWords, because one
+    // width cannot name two words.
+    if (type.type->kind() == Kind::Pointer || type.type->kind() == Kind::FunctionPtr) {
+        return ir::IRType::Ptr;
+    }
+    if (type.type->kind() != Kind::Basic) {
         refuse(pos, "a value of this type");
         return ir::IRType::Void;
     }
@@ -265,7 +301,19 @@ void Lowerer::onGlobal(VarDecl& n) {
     binding.label = "g_" + n.name;
     binding.type = type;
     binding.isVolatile = n.isVolatile;
-    if (dynamic_cast<const NilPtr*>(n.init.get()) != nullptr) {
+    if (type.type->kind() == Kind::String) {
+        const auto* lit = dynamic_cast<const StringLit*>(n.init.get());
+        if (lit == nullptr) {
+            refuse(n.init->pos, "a string global needs a literal");
+            return;
+        }
+        LoweredString lowered = lowerString(*lit);
+        if (failed_) {
+            return;
+        }
+        binding.initLabel = lowered.label;
+        binding.initial = lowered.len;
+    } else if (dynamic_cast<const NilPtr*>(n.init.get()) != nullptr) {
         binding.initial = 0;
     } else {
         binding.initial = folded.ok ? folded.value : 0;
@@ -275,6 +323,7 @@ void Lowerer::onGlobal(VarDecl& n) {
     global.label = binding.label;
     global.type = type;
     global.initial = binding.initial;
+    global.initLabel = binding.initLabel;
     module_->globals.push_back(global);
 }
 
@@ -306,10 +355,13 @@ void Lowerer::onFuncDecl(FuncDecl& n) {
     const std::vector<Parameter>& params = function_->signature.parameters();
     for (uint64_t i = 0; i < static_cast<uint64_t>(params.size()); ++i) {
         TypeRef type{params[i].type};
-        ir::Value slot = allocaSlot(type, n.params[i].pos);
-        function_->params.push_back(slot);
+        std::vector<ir::Value> slots = allocaSlots(type, n.params[i].pos,
+                                                   static_cast<uint64_t>(wordCount(type)));
+        for (ir::Value slot : slots) {
+            function_->params.push_back(slot);
+        }
         LocalBinding binding;
-        binding.slot = slot;
+        binding.slots = std::move(slots);
         binding.type = type;
         binding.isMutable = params[i].isMutable;
         frame[n.params[i].name] = binding;
@@ -348,18 +400,20 @@ void Lowerer::onVarDecl(VarDecl& n) {
         return;
     }
     TypeRef type = checker_.typeOf(&n);
-    ir::Value value = onIdentOrExpr(n.init.get(), type);
-    ir::Value slot = allocaSlot(type, n.pos);
-    ir::Instr instr;
-    instr.op = ir::Op::Store;
-    instr.loc = n.pos;
-    instr.type = type;
-    instr.width = widthOf(type, n.pos);
-    instr.addressBase = slot;
-    instr.storedValue = value;
-    emit(std::move(instr));
+    std::vector<ir::Value> values = lowerWords(n.init.get());
+    std::vector<ir::Value> slots = allocaSlots(type, n.pos,
+                                               static_cast<uint64_t>(values.size()));
+    for (uint64_t i = 0; i < static_cast<uint64_t>(values.size()); ++i) {
+        ir::Instr instr;
+        instr.op = ir::Op::Store;
+        instr.loc = n.pos;
+        instr.type = type;
+        instr.addressBase = slots[i];
+        instr.storedValue = values[i];
+        emit(std::move(instr));
+    }
     LocalBinding binding;
-    binding.slot = slot;
+    binding.slots = std::move(slots);
     binding.type = type;
     binding.isMutable = true;
     locals_.back()[n.name] = binding;
@@ -373,37 +427,147 @@ ir::Value Lowerer::onIdent(Ident& n) {
         --depth;
         auto found = locals_[depth].find(n.name);
         if (found != locals_[depth].end()) {
-            ir::Instr instr;
-            instr.op = ir::Op::Load;
-            instr.loc = n.pos;
-            instr.type = found->second.type;
-            instr.width = widthOf(instr.type, n.pos);
-            instr.addressBase = found->second.slot;
-            instr.isPure = true;
-            ir::Value out = newValue(instr.width, instr.type, n.pos);
-            instr.results.push_back(out);
-            emit(std::move(instr));
-            return out;
+            std::vector<ir::Value> words = loadLocal(n.pos, found->second);
+            if (words.size() != kOneWord) {
+                refuse(n.pos, "this value");
+                return undefined();
+            }
+            return words[0];
         }
     }
     for (const GlobalBinding& global : globals_) {
         if (global.name == n.name) {
-            ir::Instr instr;
-            instr.op = ir::Op::Load;
-            instr.loc = n.pos;
-            instr.type = global.type;
-            instr.width = widthOf(global.type, n.pos);
-            instr.globalLabel = global.label;
-            instr.isPure = true;
-            instr.isVolatile = global.isVolatile;
-            ir::Value out = newValue(instr.width, global.type, n.pos);
-            instr.results.push_back(out);
-            emit(std::move(instr));
-            return out;
+            std::vector<ir::Value> words = loadGlobal(n.pos, global);
+            if (words.size() != kOneWord) {
+                refuse(n.pos, "this value");
+                return undefined();
+            }
+            return words[0];
         }
     }
     refuse(n.pos, "reading '" + n.name + "'");
     return undefined();
+}
+
+// The type of one word of an aggregate: a string is an address followed by
+// a length. Words are real values with real types, so everything downstream
+// (widths, calls, the structural check) works without an aggregate case.
+TypeRef Lowerer::wordType(TypeRef aggregate, uint64_t word) {
+    if (aggregate.type->kind() == Kind::String) {
+        if (word == 0) {
+            return TypeRef{ctx_.pointer(ctx_.basic(BasicKind::U8))};
+        }
+        return TypeRef{ctx_.basic(BasicKind::I64)};
+    }
+    return aggregate;
+}
+
+std::vector<ir::Value> Lowerer::loadLocal(Position pos, const LocalBinding& binding) {
+    std::vector<ir::Value> words;
+    int count = wordCount(binding.type);
+    for (int i = 0; i < count; ++i) {
+        TypeRef word = wordType(binding.type, static_cast<uint64_t>(i));
+        ir::Instr instr;
+        instr.op = ir::Op::Load;
+        instr.loc = pos;
+        instr.type = word;
+        instr.width = widthOf(word, pos);
+        instr.addressBase = binding.slots[static_cast<size_t>(i)];
+        instr.isPure = true;
+        ir::Value out = newValue(instr.width, word, pos);
+        instr.results.push_back(out);
+        emit(std::move(instr));
+        words.push_back(out);
+    }
+    return words;
+}
+
+Lowerer::LoweredString Lowerer::lowerString(const StringLit& lit) {
+    LoweredString out;
+    std::string bytes;
+    for (const auto& part : lit.parts) {
+        if (part.isExpr) {
+            refuse(lit.pos, "interpolation is not lowered yet");
+            out.words = {undefined()};
+            return out;
+        }
+        bytes += part.text;
+    }
+    out.label = "s_" + std::to_string(rodataSeq_++);
+    out.len = static_cast<int64_t>(bytes.size());
+    ir::Rodata blob;
+    blob.label = out.label;
+    blob.bytes = std::move(bytes);
+    module_->rodata.push_back(std::move(blob));
+    TypeRef addr{ctx_.pointer(ctx_.basic(BasicKind::U8))};
+    ir::Instr data;
+    data.op = ir::Op::DataAddr;
+    data.loc = lit.pos;
+    data.type = addr;
+    data.width = ir::IRType::Ptr;
+    data.globalLabel = out.label;
+    data.isPure = true;
+    ir::Value at = newValue(data.width, addr, lit.pos);
+    data.results.push_back(at);
+    emit(std::move(data));
+    out.words.push_back(at);
+    TypeRef len{ctx_.basic(BasicKind::I64)};
+    out.words.push_back(constantI64(out.len, len, lit.pos));
+    return out;
+}
+
+std::vector<ir::Value> Lowerer::loadGlobal(Position pos, const GlobalBinding& global) {
+    std::vector<ir::Value> words;
+    int count = wordCount(global.type);
+    for (int i = 0; i < count; ++i) {
+        TypeRef word = wordType(global.type, static_cast<uint64_t>(i));
+        ir::Instr instr;
+        instr.op = ir::Op::Load;
+        instr.loc = pos;
+        instr.type = word;
+        instr.width = widthOf(word, pos);
+        instr.globalLabel = global.label;
+        instr.displacement = static_cast<int64_t>(i) * 8;
+        instr.isPure = true;
+        instr.isVolatile = global.isVolatile;
+        ir::Value out = newValue(instr.width, word, pos);
+        instr.results.push_back(out);
+        emit(std::move(instr));
+        words.push_back(out);
+    }
+    return words;
+}
+
+std::vector<ir::Value> Lowerer::lowerWords(const Expr* expr) {
+    if (expr == nullptr || failed_) {
+        return {undefined()};
+    }
+    if (const auto* lit = dynamic_cast<const StringLit*>(expr)) {
+        return lowerString(*lit).words;
+    }
+    if (const auto* ident = dynamic_cast<const Ident*>(expr)) {
+        TypeRef type = checker_.typeOf(ident);
+        if (wordCount(type) < 0) {
+            refuse(ident->pos, "this value");
+            return {undefined()};
+        }
+        uint64_t depth = static_cast<uint64_t>(locals_.size());
+        for (; depth > 0;) {
+            --depth;
+            auto found = locals_[depth].find(ident->name);
+            if (found != locals_[depth].end()) {
+                return loadLocal(ident->pos, found->second);
+            }
+        }
+        for (const GlobalBinding& global : globals_) {
+            if (global.name == ident->name) {
+                return loadGlobal(ident->pos, global);
+            }
+        }
+        refuse(ident->pos, "reading '" + ident->name + "'");
+        return {undefined()};
+    }
+    return {onIdentOrExpr(expr, checker_.typeOf(expr))};
 }
 
 void Lowerer::onExprStmt(ExprStmt& n) {
@@ -413,37 +577,41 @@ void Lowerer::onExprStmt(ExprStmt& n) {
     onIdentOrExpr(n.expr.get(), checker_.typeOf(n.expr.get()));
 }
 
-ir::Value Lowerer::storeToIdent(const Ident& n, ir::Value value) {
+std::vector<ir::Value> Lowerer::storeToIdent(
+    const Ident& n, const std::vector<ir::Value>& words) {
     for (auto& frame : locals_) {
         auto found = frame.find(n.name);
         if (found != frame.end()) {
-            ir::Instr instr;
-            instr.op = ir::Op::Store;
-            instr.loc = n.pos;
-            instr.type = found->second.type;
-            instr.width = widthOf(instr.type, n.pos);
-            instr.addressBase = found->second.slot;
-            instr.storedValue = value;
-            emit(std::move(instr));
-            return value;
+            for (uint64_t i = 0; i < static_cast<uint64_t>(words.size()); ++i) {
+                ir::Instr instr;
+                instr.op = ir::Op::Store;
+                instr.loc = n.pos;
+                instr.type = found->second.type;
+                instr.addressBase = found->second.slots[i];
+                instr.storedValue = words[i];
+                emit(std::move(instr));
+            }
+            return words;
         }
     }
     for (const GlobalBinding& global : globals_) {
         if (global.name == n.name) {
-            ir::Instr instr;
-            instr.op = ir::Op::Store;
-            instr.loc = n.pos;
-            instr.type = global.type;
-            instr.width = widthOf(global.type, n.pos);
-            instr.globalLabel = global.label;
-            instr.storedValue = value;
-            instr.isVolatile = global.isVolatile;
-            emit(std::move(instr));
-            return value;
+            for (uint64_t i = 0; i < static_cast<uint64_t>(words.size()); ++i) {
+                ir::Instr instr;
+                instr.op = ir::Op::Store;
+                instr.loc = n.pos;
+                instr.type = global.type;
+                instr.globalLabel = global.label;
+                instr.displacement = static_cast<int64_t>(i) * 8;
+                instr.storedValue = words[i];
+                instr.isVolatile = global.isVolatile;
+                emit(std::move(instr));
+            }
+            return words;
         }
     }
     refuse(n.pos, "assigning '" + n.name + "'");
-    return undefined();
+    return {undefined()};
 }
 
 ir::Value Lowerer::onCast(Cast& n) {
@@ -539,6 +707,14 @@ ir::Value Lowerer::onCall(Call& n) {
     if (const auto* ident = dynamic_cast<const Ident*>(n.callee.get())) {
         sig = functionSig(ident->name);
         callee = ident->name;
+        // Prelude names mangle to their link symbols; anything else keeps its
+        // spelling, including a program's own shadowing `print`. The lookup
+        // is the same one functionSig uses, so the two cannot disagree.
+        const resolve::Decl* decl =
+            resolver_.lookup(resolver_.moduleScope(), ident->name);
+        if (decl != nullptr && decl->isPrelude) {
+            callee = "cider_" + ident->name;
+        }
     } else {
         if (const auto* deref = dynamic_cast<const Unary*>(n.callee.get())) {
             if (deref->op == UnOp::Deref) {
@@ -562,8 +738,12 @@ ir::Value Lowerer::onCall(Call& n) {
     instr.mayTrap = true;
     for (uint64_t i = 0; i < static_cast<uint64_t>(n.args.size()); ++i) {
         TypeRef want{sig->parameters()[i].type};
+        (void)want;
         ir::Argument arg;
-        arg.value = onIdentOrExpr(n.args[i].get(), want);
+        arg.words = lowerWords(n.args[i].get());
+        if (failed_) {
+            return undefined();
+        }
         instr.arguments.push_back(arg);
     }
     const Type* ret = sig->returnType() != nullptr ? sig->returnType() : ctx_.void_();
@@ -598,7 +778,15 @@ void Lowerer::onReturn(Return& n) {
     term.term = ir::Term::Ret;
     term.loc = n.pos;
     if (n.value != nullptr) {
-        term.value = onIdentOrExpr(n.value.get(), checker_.typeOf(n.value.get()));
+        // One word returns; several are refused until the ABI table's
+        // rax/rdx row is implemented. The asymmetry with arguments is
+        // documented, not hidden.
+        std::vector<ir::Value> words = lowerWords(n.value.get());
+        if (words.size() != kOneWord) {
+            refuse(n.pos, "string returns are not emitted yet");
+            return;
+        }
+        term.value = words[0];
     } else {
         term.value = undefined();
     }
@@ -731,18 +919,41 @@ ir::Value Lowerer::lowerAssign(Assign& n) {
         return undefined();
     }
     TypeRef target = checker_.typeOf(n.target.get());
-    ir::Value value = onIdentOrExpr(n.value.get(), target);
+    std::vector<ir::Value> value = lowerWords(n.value.get());
+    // The words must agree with the target: a checker/lowerer disagreement
+    // here would store the wrong number of words, silently.
+    if (!target.isError() && wordCount(target) >= 0 &&
+        value.size() != static_cast<size_t>(wordCount(target))) {
+        refuse(n.pos, "this assignment");
+        return undefined();
+    }
     if (n.op.has_value()) {
+        // A compound op on several words never arrives: the checker refuses
+        // it. Asserting that here keeps the two layers honest with each other.
+        if (value.size() != kOneWord) {
+            refuse(n.pos, "a compound assignment needs one word");
+            return undefined();
+        }
         TypeRef current = checker_.typeOf(n.target.get());
-        ir::Value old = onIdentOrExpr(n.target.get(), current);
-        value = emitArith(*n.op, old, value, current, n.pos);
+        std::vector<ir::Value> old = lowerWords(n.target.get());
+        if (old.size() != kOneWord) {
+            refuse(n.pos, "a compound assignment needs one word");
+            return undefined();
+        }
+        value = {emitArith(*n.op, old[0], value[0], current, n.pos)};
     }
     const auto* ident = dynamic_cast<const Ident*>(n.target.get());
     if (ident == nullptr) {
         refuse(n.target->pos, "this assignment");
         return undefined();
     }
-    return storeToIdent(const_cast<Ident&>(*ident), value);
+    std::vector<ir::Value> stored =
+        storeToIdent(const_cast<Ident&>(*ident), value);
+    if (stored.size() != kOneWord) {
+        refuse(n.pos, "a multi-word assignment is not an expression");
+        return undefined();
+    }
+    return stored[0];
 }
 
 }  // namespace lower

@@ -10,7 +10,7 @@
 # see tests/unit/layout_test.cpp for why both halves are needed.
 
 cmake_minimum_required(VERSION 3.20)
-project(cider LANGUAGES CXX)
+project(cider LANGUAGES C CXX)
 
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -197,9 +197,26 @@ target_include_directories(cider PRIVATE src)
 add_executable(driver_test tests/unit/driver_test.cpp)
 target_link_libraries(driver_test PRIVATE cider_driver)
 target_include_directories(driver_test PRIVATE src)
+target_compile_definitions(driver_test PRIVATE CIDER_RT_ARCHIVE="$<TARGET_FILE:cider_rt>")
 add_test(NAME driver COMMAND driver_test)
+
+# --- The runtime -------------------------------------------------------------------
+#
+# MEMORY.md section 2: alloc/realloc/free with canaries, print/panic on raw
+# syscalls-or-libc. Built once as an archive; the driver and the tests link it
+# wherever a program may reference its symbols. Linking it is always harmless:
+# unreferenced members stay out of the binary.
+
+add_library(cider_rt STATIC runtime/rt_native.c)
+target_include_directories(cider_rt PUBLIC runtime)
+
+add_executable(runtime_test tests/unit/runtime_test.cpp)
+target_link_libraries(runtime_test PRIVATE cider_driver cider_codegen cider_lower)
+target_include_directories(runtime_test PRIVATE src)
+target_compile_definitions(runtime_test PRIVATE CIDER_RT_ARCHIVE="$<TARGET_FILE:cider_rt>")
+add_test(NAME runtime COMMAND runtime_test)
 
 # A gate that fails must fail the build, so nothing here is allowed to be
 # "informational".
-set_tests_properties(gates layout types lexer ast parser resolver checker lowering optimise codegen driver
+set_tests_properties(gates layout types lexer ast parser resolver checker lowering optimise codegen driver runtime
              PROPERTIES LABELS "gate")

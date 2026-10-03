@@ -12,6 +12,7 @@
 #include "driver/driver.h"
 
 #include <cstdio>
+#include <cstdlib>
 #include <fstream>
 #include <sstream>
 #include <sys/wait.h>
@@ -145,11 +146,14 @@ int runDriver(const std::vector<std::string>& args, std::string& out, std::strin
     std::string target = "native";
     std::string output;
     std::string input;
+    std::string rtPath;
     for (uint64_t i = 1; i < static_cast<uint64_t>(args.size()); ++i) {
         if (args[i] == "--target" && i + 1 < static_cast<uint64_t>(args.size())) {
             target = args[++i];
         } else if (args[i] == "-o" && i + 1 < static_cast<uint64_t>(args.size())) {
             output = args[++i];
+        } else if (args[i] == "--rt" && i + 1 < static_cast<uint64_t>(args.size())) {
+            rtPath = args[++i];
         } else if (!args[i].empty() && args[i][0] == '-') {
             err = "unknown flag '" + args[i] + "'\n";
             return 2;
@@ -212,8 +216,23 @@ int runDriver(const std::vector<std::string>& args, std::string& out, std::strin
     FILE* asmFile = fdopen(asmFd, "w");
     fwrite(emitted.text.data(), 1, emitted.text.size(), asmFile);
     fclose(asmFile);
+    // The runtime archive travels on every link: unreferenced members stay
+    // out of the binary, so linking it is always harmless. Discovery is a
+    // flag, then the environment; install-relative lookup belongs to
+    // packaging, which does not exist yet.
+    if (rtPath.empty()) {
+        const char* env = getenv("CIDER_RT");
+        if (env != nullptr && env[0] != 0) {
+            rtPath = env;
+        }
+    }
+    if (rtPath.empty()) {
+        err = "no runtime archive: pass --rt <libcider_rt.a> or set CIDER_RT\n";
+        return 1;
+    }
     std::string binPath = std::string(asmPath) + ".bin";
-    std::string build = "cc -o " + binPath + " " + asmPath + " 2>/dev/null";
+    std::string build =
+        "cc -o " + binPath + " " + asmPath + " " + rtPath + " 2>/dev/null";
     bool built = system(build.c_str()) == 0;
     unlink(asmPath);
     if (!built) {

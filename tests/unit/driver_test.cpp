@@ -96,8 +96,8 @@ void testCompileIr() {
 void testRun() {
     std::printf("run\n");
     std::string src = writeTemp("func main() -> int { return 41 + 1; }\n");
-    Result ran = run({"run", src});
-    check(ran.code == 42, "the program's answer is the exit code");
+    Result ran = run({"run", "--rt", CIDER_RT_ARCHIVE, src});
+    check(ran.code == 42, "the program's answer is the exit code " + ran.err);
     unlink(src.c_str());
 }
 

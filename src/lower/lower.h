@@ -38,7 +38,10 @@ namespace lower {
 // phi nodes, so every named place is memory and only temporaries are SSA.
 // This is MEMORY.md section 4, and it is what makes `while` correct.
 struct LocalBinding {
-    ir::Value slot;
+    // One slot id per word, in order. Scalars hold one; a string holds two.
+    // Separate ids rather than base-plus-index: nothing here may assume two
+    // allocations land consecutively.
+    std::vector<ir::Value> slots;
     TypeRef type;
     bool isMutable = false;
 };
@@ -48,6 +51,9 @@ struct GlobalBinding {
     std::string label;
     TypeRef type;
     int64_t initial = 0;
+    // A read-only bytes object this global points at, empty when none. Set
+    // for string globals, whose 16 bytes are (rodata address, length).
+    std::string initLabel;
     bool isVolatile = false;
 };
 
@@ -85,10 +91,33 @@ public:
     // rsp+id*8 is its address by construction, so loads and stores name it
     // through addressBase and the slot never needs materialising.
     ir::Value allocaSlot(TypeRef type, Position pos);
-    // Stores a value into the place an identifier names: a local slot gets a
-    // copy, a global gets a store. Anything else is refused, because fields
-    // and elements need aggregates and this slice has none.
-    ir::Value storeToIdent(const Ident& target, ir::Value value);
+    std::vector<ir::Value> allocaSlots(TypeRef type, Position pos, uint64_t words);
+    TypeRef wordType(TypeRef aggregate, uint64_t word);
+    std::vector<ir::Value> loadLocal(Position pos, const LocalBinding& binding);
+    std::vector<ir::Value> loadGlobal(Position pos, const GlobalBinding& global);
+    // A string literal answers its address, its length, and where its bytes
+    // live. Expression positions use the words; globals use the label and
+    // length for their image. One function so the two cannot disagree.
+    struct LoweredString {
+        std::vector<ir::Value> words;
+        std::string label;
+        int64_t len = 0;
+    };
+    LoweredString lowerString(const StringLit& lit);
+    // How many machine words a value occupies: one for scalars and pointers,
+    // two for the 16-byte aggregates (strings today). -1 for anything larger,
+    // which this slice does not lower.
+    int wordCount(TypeRef type);
+    // Lowers any expression to its words. Scalars answer one value; a string
+    // literal answers its address and length. Anything larger is refused.
+    std::vector<ir::Value> lowerWords(const Expr* expr);
+    // Stores every word into the place an identifier names: consecutive
+    // slots for a local, the label plus displacement for a global. Answers
+    // the stored words, so an assignment is still an expression. Anything
+    // else is refused, because fields and elements need aggregates and this
+    // slice has none.
+    std::vector<ir::Value> storeToIdent(const Ident& target,
+                                        const std::vector<ir::Value>& words);
     // One arithmetic operation, shared by Binary and compound assignment so
     // the two cannot disagree about what `+` emits.
     ir::Value emitArith(BinOp op, ir::Value a, ir::Value b, TypeRef result,
@@ -132,6 +161,7 @@ private:
     bool failed_ = false;
     uint32_t valueSeq_ = 0;
     uint32_t labelSeq_ = 0;
+    uint32_t rodataSeq_ = 0;
     uint32_t current_ = 0;
     bool terminated_ = false;
     std::vector<uint32_t> blockOrder_;
