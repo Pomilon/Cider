@@ -110,9 +110,9 @@ const Local* Checker::findLocal(const std::string& name) const {
 // --- Declarations and statements -----------------------------------------------
 
 void Checker::visitProgram(Program& n) {
-    for (auto& d : n.decls) {
-        d->accept(*this);
-    }
+    // Globals first: a global initialiser is constant or null, so nothing it
+    // needs is declared below it — and every function body may read a global,
+    // so their types must be recorded before any body walks.
     for (auto& g : n.globals) {
         TypeRef declared = resolver_.typeOf(g.get());
         if (declared.isError()) {
@@ -142,9 +142,13 @@ void Checker::visitProgram(Program& n) {
         }
         record(g.get(), declared);
     }
-    // After the globals are checked: the sink reads their recorded types.
+    // After the globals are checked: the sink reads their recorded types, and
+    // it runs before any function body so a global read lowers.
     if (sink_ != nullptr) {
         sink_->onProgram(n);
+    }
+    for (auto& d : n.decls) {
+        d->accept(*this);
     }
 }
 
@@ -386,6 +390,13 @@ void Checker::visitForInStmt(ForInStmt& n) {
     n.body->accept(*this);
     --loopDepth_;
     popScope();
+}
+
+void Checker::visitExprStmt(ExprStmt& n) {
+    checkExpr(n.expr.get(), TypeRef{ctx_.wildcard()});
+    if (sink_ != nullptr) {
+        sink_->onExprStmt(n);
+    }
 }
 
 void Checker::visitReturn(Return& n) {

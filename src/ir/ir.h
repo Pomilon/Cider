@@ -91,7 +91,7 @@ enum class Op {
     Neg, Not, BitNot,
     FAdd, FSub, FMul, FDiv, FRem,
     Cmp,
-    Load, Store,
+    Load, Store, Alloca,
     Extract, Insert, Gep,
     Call, Cast, Trap, Asm,
 };
@@ -144,6 +144,7 @@ struct Instr {
     Value storedValue;               // Store/Insert
     CmpOp cmp = CmpOp::Eq;           // Cmp
     std::string callee;              // Call: a function name
+    std::string globalLabel;         // Load/Store: the global's link label
     Value calleeValue;               // Call: indirect
     std::vector<Argument> arguments; // Call
     CallInfo call;                   // Call
@@ -206,10 +207,19 @@ struct Function {
     bool canThrow = false;
 };
 
+// A module global: its link label, its type, and its initial bytes. The
+// initial value is constant (FEATURES.md 7.3 allows nothing else), so there
+// is no startup code and no order problem — the image carries the bytes.
+struct Global {
+    std::string label;
+    TypeRef type;
+    int64_t initial = 0;
+};
+
 struct Module {
     std::string name;
     std::vector<Function> functions;
-    std::vector<std::string> globals;
+    std::vector<Global> globals;
 };
 
 }  // namespace ir

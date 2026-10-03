@@ -167,7 +167,21 @@ target_link_libraries(opt_test PRIVATE cider_opt cider_lower cider_check cider_p
 target_include_directories(opt_test PRIVATE src)
 add_test(NAME optimise COMMAND opt_test)
 
+# --- Codegen ---------------------------------------------------------------------
+#
+# LAYERS.md 3.7: checked IR to assembly. Reads the IR and the target, never the
+# AST (gate L2). Registers are not allocated: every value has a stack slot.
+
+add_library(cider_codegen STATIC src/codegen/codegen.cpp)
+target_link_libraries(cider_codegen PUBLIC cider_ir cider_types)
+target_include_directories(cider_codegen PUBLIC src)
+
+add_executable(codegen_test tests/unit/codegen_test.cpp)
+target_link_libraries(codegen_test PRIVATE cider_codegen cider_opt cider_lower cider_check cider_parse cider_lexer)
+target_include_directories(codegen_test PRIVATE src)
+add_test(NAME codegen COMMAND codegen_test)
+
 # A gate that fails must fail the build, so nothing here is allowed to be
 # "informational".
-set_tests_properties(gates layout types lexer ast parser resolver checker lowering optimise
+set_tests_properties(gates layout types lexer ast parser resolver checker lowering optimise codegen
              PROPERTIES LABELS "gate")

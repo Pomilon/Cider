@@ -142,6 +142,19 @@ ir::Value Lowerer::newValue(ir::IRType width, TypeRef type, Position pos) {
     return value;
 }
 
+ir::Value Lowerer::allocaSlot(TypeRef type, Position pos) {
+    ir::Instr instr;
+    instr.op = ir::Op::Alloca;
+    instr.loc = pos;
+    instr.type = TypeRef{ctx_.pointer(type.type)};
+    instr.width = ir::IRType::Ptr;
+    instr.isPure = false;
+    ir::Value slot = newValue(instr.width, instr.type, pos);
+    instr.results.push_back(slot);
+    emit(std::move(instr));
+    return slot;
+}
+
 ir::Value Lowerer::undefined() const {
     // No real value ever carries this id: valueSeq_ counts up from zero, so
     // the placeholder cannot collide with a definition the check looks for.
@@ -248,15 +261,21 @@ void Lowerer::onGlobal(VarDecl& n) {
     EvalEnv env = resolver_.evalEnv(resolver_.moduleScope());
     EvalResult folded = evalConstInt(*n.init, env, active);
     GlobalBinding binding;
-    binding.name = "g_" + n.name;
+    binding.name = n.name;
+    binding.label = "g_" + n.name;
     binding.type = type;
-    if (folded.ok) {
-        binding.initialText = std::to_string(folded.value);
+    binding.isVolatile = n.isVolatile;
+    if (dynamic_cast<const NilPtr*>(n.init.get()) != nullptr) {
+        binding.initial = 0;
     } else {
-        binding.initialText = "";
+        binding.initial = folded.ok ? folded.value : 0;
     }
     globals_.push_back(binding);
-    module_->globals.push_back(binding.name + " = " + binding.initialText);
+    ir::Global global;
+    global.label = binding.label;
+    global.type = type;
+    global.initial = binding.initial;
+    module_->globals.push_back(global);
 }
 
 void Lowerer::onFuncDecl(FuncDecl& n) {
@@ -279,20 +298,20 @@ void Lowerer::onFuncDecl(FuncDecl& n) {
     uint32_t entry = emitBlock(n.pos);
     startBlock(entry);
 
-    // Parameters are SSA values: still live, so they live in a register. A
-    // parameter whose address is taken becomes a slot, which is MEMORY.md §4's
-    // work and not this slice's.
+    // Parameters arrive in slots like every other named place: a parameter
+    // reassigned in a loop body is read across the back edge, so versions
+    // without phi nodes would read a stale one. The entry moves below fill
+    // the slots; codegen derives each address from its id.
     std::unordered_map<std::string, LocalBinding> frame;
     const std::vector<Parameter>& params = function_->signature.parameters();
     for (uint64_t i = 0; i < static_cast<uint64_t>(params.size()); ++i) {
+        TypeRef type{params[i].type};
+        ir::Value slot = allocaSlot(type, n.params[i].pos);
+        function_->params.push_back(slot);
         LocalBinding binding;
-        binding.kind = Binding::Value;
-        binding.type = TypeRef{params[i].type};
+        binding.slot = slot;
+        binding.type = type;
         binding.isMutable = params[i].isMutable;
-        binding.value.width = widthOf(binding.type, n.params[i].pos);
-        binding.value.type = binding.type;
-        binding.value.id = valueSeq_++;
-        function_->params.push_back(binding.value);
         frame[n.params[i].name] = binding;
     }
     locals_.push_back(std::move(frame));
@@ -330,11 +349,18 @@ void Lowerer::onVarDecl(VarDecl& n) {
     }
     TypeRef type = checker_.typeOf(&n);
     ir::Value value = onIdentOrExpr(n.init.get(), type);
+    ir::Value slot = allocaSlot(type, n.pos);
+    ir::Instr instr;
+    instr.op = ir::Op::Store;
+    instr.loc = n.pos;
+    instr.type = type;
+    instr.width = widthOf(type, n.pos);
+    instr.addressBase = slot;
+    instr.storedValue = value;
+    emit(std::move(instr));
     LocalBinding binding;
-    binding.kind = Binding::Value;
-    binding.value = value;
+    binding.slot = slot;
     binding.type = type;
-    binding.isMutable = true;
     binding.isMutable = true;
     locals_.back()[n.name] = binding;
 }
@@ -347,10 +373,76 @@ ir::Value Lowerer::onIdent(Ident& n) {
         --depth;
         auto found = locals_[depth].find(n.name);
         if (found != locals_[depth].end()) {
-            return found->second.value;
+            ir::Instr instr;
+            instr.op = ir::Op::Load;
+            instr.loc = n.pos;
+            instr.type = found->second.type;
+            instr.width = widthOf(instr.type, n.pos);
+            instr.addressBase = found->second.slot;
+            instr.isPure = true;
+            ir::Value out = newValue(instr.width, instr.type, n.pos);
+            instr.results.push_back(out);
+            emit(std::move(instr));
+            return out;
+        }
+    }
+    for (const GlobalBinding& global : globals_) {
+        if (global.name == n.name) {
+            ir::Instr instr;
+            instr.op = ir::Op::Load;
+            instr.loc = n.pos;
+            instr.type = global.type;
+            instr.width = widthOf(global.type, n.pos);
+            instr.globalLabel = global.label;
+            instr.isPure = true;
+            instr.isVolatile = global.isVolatile;
+            ir::Value out = newValue(instr.width, global.type, n.pos);
+            instr.results.push_back(out);
+            emit(std::move(instr));
+            return out;
         }
     }
     refuse(n.pos, "reading '" + n.name + "'");
+    return undefined();
+}
+
+void Lowerer::onExprStmt(ExprStmt& n) {
+    if (failed_ || !enabled_ || function_ == nullptr) {
+        return;
+    }
+    onIdentOrExpr(n.expr.get(), checker_.typeOf(n.expr.get()));
+}
+
+ir::Value Lowerer::storeToIdent(const Ident& n, ir::Value value) {
+    for (auto& frame : locals_) {
+        auto found = frame.find(n.name);
+        if (found != frame.end()) {
+            ir::Instr instr;
+            instr.op = ir::Op::Store;
+            instr.loc = n.pos;
+            instr.type = found->second.type;
+            instr.width = widthOf(instr.type, n.pos);
+            instr.addressBase = found->second.slot;
+            instr.storedValue = value;
+            emit(std::move(instr));
+            return value;
+        }
+    }
+    for (const GlobalBinding& global : globals_) {
+        if (global.name == n.name) {
+            ir::Instr instr;
+            instr.op = ir::Op::Store;
+            instr.loc = n.pos;
+            instr.type = global.type;
+            instr.width = widthOf(global.type, n.pos);
+            instr.globalLabel = global.label;
+            instr.storedValue = value;
+            instr.isVolatile = global.isVolatile;
+            emit(std::move(instr));
+            return value;
+        }
+    }
+    refuse(n.pos, "assigning '" + n.name + "'");
     return undefined();
 }
 
@@ -412,17 +504,26 @@ ir::Value Lowerer::onBinary(Binary& n) {
         refuse(n.pos, "this operator");
         return undefined();
     }
-    instr.op = op;
+    return emitArith(n.op, a, b, result, n.pos);
+}
+
+ir::Value Lowerer::emitArith(BinOp op, ir::Value a, ir::Value b, TypeRef result,
+                             Position pos) {
+    ir::Instr instr;
+    instr.loc = pos;
+    instr.type = result;
+    instr.width = widthOf(result, pos);
+    instr.op = arithOp(op);
     instr.isPure = true;
     instr.overflow = wrap_ ? ir::OverflowMode::Wrap : ir::OverflowMode::Undefined;
     // Division and remainder trap; nothing else in this set does. The flag is
     // what stops DCE deleting the check and LICM hoisting the divide.
-    if (op == ir::Op::Div || op == ir::Op::Rem) {
+    if (instr.op == ir::Op::Div || instr.op == ir::Op::Rem) {
         instr.mayTrap = true;
     }
     instr.operands.push_back(a);
     instr.operands.push_back(b);
-    ir::Value out = newValue(width, result, n.pos);
+    ir::Value out = newValue(instr.width, result, pos);
     instr.results.push_back(out);
     emit(std::move(instr));
     return out;
@@ -466,11 +567,17 @@ ir::Value Lowerer::onCall(Call& n) {
         instr.arguments.push_back(arg);
     }
     const Type* ret = sig->returnType() != nullptr ? sig->returnType() : ctx_.void_();
+    // Captured before the move below: emit() takes the instruction by value,
+    // so reading results after moving reads an emptied vector — which is how
+    // a call's result became the undefined placeholder.
+    bool hasResult = false;
+    ir::Value out;
     if (ret->kind() != Kind::Void) {
-        ir::Value out = newValue(widthOf(TypeRef{ret}, n.pos), TypeRef{ret}, n.pos);
+        out = newValue(widthOf(TypeRef{ret}, n.pos), TypeRef{ret}, n.pos);
         instr.results.push_back(out);
         instr.width = out.width;
         instr.type = out.type;
+        hasResult = true;
     } else {
         instr.width = ir::IRType::Void;
     }
@@ -480,7 +587,7 @@ ir::Value Lowerer::onCall(Call& n) {
         // rather than guessed by the optimiser.
         function_->canThrow = true;
     }
-    return instr.results.empty() ? undefined() : instr.results[0];
+    return hasResult ? out : undefined();
 }
 
 void Lowerer::onReturn(Return& n) {
@@ -612,8 +719,30 @@ ir::Value Lowerer::onIdentOrExpr(const Expr* expr, TypeRef expected) {
         TypeRef type = TypeRef{ctx_.pointer(ctx_.void_())};
         return constantI64(0, type, nil->pos);
     }
+    if (auto* assign = dynamic_cast<const Assign*>(expr)) {
+        return lowerAssign(const_cast<Assign&>(*assign));
+    }
     refuse(expr->pos, "this expression");
     return undefined();
+}
+
+ir::Value Lowerer::lowerAssign(Assign& n) {
+    if (failed_) {
+        return undefined();
+    }
+    TypeRef target = checker_.typeOf(n.target.get());
+    ir::Value value = onIdentOrExpr(n.value.get(), target);
+    if (n.op.has_value()) {
+        TypeRef current = checker_.typeOf(n.target.get());
+        ir::Value old = onIdentOrExpr(n.target.get(), current);
+        value = emitArith(*n.op, old, value, current, n.pos);
+    }
+    const auto* ident = dynamic_cast<const Ident*>(n.target.get());
+    if (ident == nullptr) {
+        refuse(n.target->pos, "this assignment");
+        return undefined();
+    }
+    return storeToIdent(const_cast<Ident&>(*ident), value);
 }
 
 }  // namespace lower

@@ -120,8 +120,8 @@ void testGlobal() {
     Lowered r = lower("var g: int = 42;\n");
     check(r.ok, "lowers: " + r.stage);
     check(r.module->globals.size() == 1, "one global");
-    check(r.module->globals[0].find('=') != std::string::npos,
-          "the global names its initial value");
+    check(r.module->globals[0].label == "g_g", "the link label");
+    check(r.module->globals[0].initial == 42, "the initial bytes");
 }
 
 // Arithmetic emits the documented op, with the documented flags.

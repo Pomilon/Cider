@@ -43,6 +43,9 @@ public:
     virtual void onBlockExit(Block& n) { (void)n; }
     virtual void onFuncDecl(FuncDecl& n) { (void)n; }
     virtual void onVarDecl(VarDecl& n) { (void)n; }
+    // An expression statement is evaluated for effect and its value dropped:
+    // calls and assignments live here, and without this hook they vanish.
+    virtual void onExprStmt(ExprStmt& n) { (void)n; }
     virtual void onReturn(Return& n) { (void)n; }
     virtual void onIf(IfStmt& n) { (void)n; }
     virtual void onWhile(WhileStmt& n) { (void)n; }
@@ -94,6 +97,7 @@ public:
     void visitWhileStmt(WhileStmt& n) override;
     void visitForStmt(ForStmt& n) override;
     void visitForInStmt(ForInStmt& n) override;
+    void visitExprStmt(ExprStmt& n) override;
     void visitReturn(Return& n) override;
     void visitBreak(Break& n) override;
     void visitContinue(Continue& n) override;

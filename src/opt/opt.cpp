@@ -188,6 +188,18 @@ uint64_t deadCode(ir::Module& module) {
                     for (const ir::Argument& arg : instr.arguments) {
                         used.insert(arg.value.id);
                     }
+                    // A slot or a stored value is a use like any other: the
+                    // address a load reads and the value a store writes keep
+                    // their definitions alive. Missing these deleted a store's
+                    // value out from under it.
+                    if (instr.op == ir::Op::Load || instr.op == ir::Op::Store ||
+                        instr.op == ir::Op::Extract || instr.op == ir::Op::Insert ||
+                        instr.op == ir::Op::Gep) {
+                        used.insert(instr.addressBase.id);
+                    }
+                    if (instr.op == ir::Op::Store || instr.op == ir::Op::Insert) {
+                        used.insert(instr.storedValue.id);
+                    }
                 }
                 const ir::Terminator& term = block.term;
                 if (term.value.has_value()) {
@@ -198,6 +210,17 @@ uint64_t deadCode(ir::Module& module) {
                 }
                 if (term.term == ir::Term::Switch) {
                     used.insert(term.switchValue.id);
+                }
+            }
+            // Slots no load reads: a store there changes nothing observable,
+            // unless volatile. Sound because nothing takes a slot's address in
+            // this slice, so no other path can observe the write.
+            std::unordered_set<uint32_t> readSlots;
+            for (const ir::Block& scan : fn.blocks) {
+                for (const ir::Instr& seen : scan.body) {
+                    if (seen.op == ir::Op::Load) {
+                        readSlots.insert(seen.addressBase.id);
+                    }
                 }
             }
             bool changed = false;
@@ -212,6 +235,15 @@ uint64_t deadCode(ir::Module& module) {
                     }
                     // Four reasons to keep a dead definition: it stores, it
                     // calls, it traps, or it is volatile. Each is one field.
+                    // A store joins them only when its slot is never read.
+                    bool deadStore = instr.op == ir::Op::Store && !instr.isVolatile &&
+                                     readSlots.find(instr.addressBase.id) ==
+                                         readSlots.end();
+                    if (deadStore) {
+                        ++removed;
+                        changed = true;
+                        continue;
+                    }
                     if (!live && instr.isPure && !instr.mayTrap && !instr.isVolatile &&
                         instr.op != ir::Op::Store && instr.op != ir::Op::Call &&
                         instr.op != ir::Op::Asm) {

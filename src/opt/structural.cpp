@@ -63,8 +63,10 @@ void checkDefs(const ir::Function& fn, std::vector<StructuralError>& errors) {
     // as its instruction appears. A use of an id with no definition is a pass
     // reading garbage; two definitions of one id is not SSA.
     std::unordered_set<uint32_t> defined;
+    std::unordered_set<uint32_t> slots;
     for (const ir::Value& param : fn.params) {
         defined.insert(param.id);
+        slots.insert(param.id);
     }
     auto use = [&](uint32_t block, uint32_t id) {
         if (defined.find(id) == defined.end() && id != 0xFFFFFFFFu) {
@@ -80,11 +82,13 @@ void checkDefs(const ir::Function& fn, std::vector<StructuralError>& errors) {
             for (const ir::Argument& arg : instr.arguments) {
                 use(block.label, arg.value.id);
             }
-            if (instr.op == ir::Op::Call && !instr.callee.empty()) {
-                continue;
-            }
             for (const ir::Value& result : instr.results) {
-                if (defined.find(result.id) != defined.end()) {
+                // A slot comes into existence twice by design: once as a
+                // function parameter and once as its Alloca, and both name
+                // the same id. Anything else defined twice is not SSA.
+                bool slot = instr.op == ir::Op::Alloca &&
+                            slots.find(result.id) != slots.end();
+                if (!slot && defined.find(result.id) != defined.end()) {
                     errors.push_back(
                         StructuralError{fn.name, block.label,
                                         "value %" + std::to_string(result.id) +

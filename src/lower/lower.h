@@ -33,23 +33,22 @@ namespace lower {
 // Where a value lives while a function is being built. A local or parameter
 // that is still live is an SSA value; anything needing an address becomes a
 // stack slot, which is MEMORY.md §4's territory and not this slice's.
-enum class Binding {
-    Value,   // an SSA value
-    Slot,    // a stack slot, address taken
-    Global,  // a module global
-};
-
+// A local is a stack slot, never an SSA value: a variable assigned in a
+// loop and read across the back edge cannot be one version per store without
+// phi nodes, so every named place is memory and only temporaries are SSA.
+// This is MEMORY.md section 4, and it is what makes `while` correct.
 struct LocalBinding {
-    Binding kind = Binding::Value;
-    ir::Value value;
+    ir::Value slot;
     TypeRef type;
     bool isMutable = false;
 };
 
 struct GlobalBinding {
     std::string name;
+    std::string label;
     TypeRef type;
-    std::string initialText;
+    int64_t initial = 0;
+    bool isVolatile = false;
 };
 
 class Lowerer : public check::LowerSink {
@@ -68,6 +67,7 @@ public:
     void onFuncDecl(FuncDecl& n) override;
     void onGlobal(VarDecl& n);
     void onVarDecl(VarDecl& n) override;
+    void onExprStmt(ExprStmt& n) override;
     void onReturn(Return& n) override;
     void onIf(IfStmt& n) override;
     void onWhile(WhileStmt& n) override;
@@ -81,6 +81,21 @@ public:
     // diagnostic for a construct this slice does not lower, so nothing is ever
     // approximated.
     ir::Value onIdentOrExpr(const Expr* expr, TypeRef expected);
+    // One pinned stack slot for a named place. The result id names the slot;
+    // rsp+id*8 is its address by construction, so loads and stores name it
+    // through addressBase and the slot never needs materialising.
+    ir::Value allocaSlot(TypeRef type, Position pos);
+    // Stores a value into the place an identifier names: a local slot gets a
+    // copy, a global gets a store. Anything else is refused, because fields
+    // and elements need aggregates and this slice has none.
+    ir::Value storeToIdent(const Ident& target, ir::Value value);
+    // One arithmetic operation, shared by Binary and compound assignment so
+    // the two cannot disagree about what `+` emits.
+    ir::Value emitArith(BinOp op, ir::Value a, ir::Value b, TypeRef result,
+                        Position pos);
+    // Assignments evaluate the value (computing first for a compound form)
+    // and store it into the place the target names.
+    ir::Value lowerAssign(Assign& n);
 
     // Emitted by the expression hooks above, in visit order. The Checker calls
     // one of these for each expression it types.
