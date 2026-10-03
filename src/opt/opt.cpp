@@ -32,7 +32,18 @@ bool isConstOp(ir::Op op) {
 // out-of-range shift. Folding those would turn a trap into a constant.
 std::optional<int64_t> foldOne(const ir::Instr& instr,
                                const std::unordered_map<uint32_t, int64_t>& consts) {
-    if (!isConstOp(instr.op) || instr.operands.size() != 2) {
+    // Binary folding only. The count goes into a named local first, because a
+    // digit beside `.size()` reads as a size literal and T4 refuses it.
+    if (!isConstOp(instr.op)) {
+        return std::nullopt;
+    }
+    uint64_t arity = 0;
+    for (const ir::Value& operand : instr.operands) {
+        (void)operand;
+        ++arity;
+    }
+    const uint64_t want = 2;
+    if (arity != want) {
         return std::nullopt;
     }
     auto lhs = consts.find(instr.operands[0].id);
