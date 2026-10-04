@@ -220,11 +220,28 @@ uint64_t deadCode(ir::Module& module) {
             // Gep, which reads an element its index chooses at runtime. Any
             // Gep in the function disables this rule for the whole function:
             // precise ranges need allocation sizes the IR does not carry yet.
+            // An Add result parked in an addressBase is the same hazard one
+            // operation over: the load names the sum, not the slots it was
+            // computed from, so the dead-store rule stays off for those too.
             bool indexed = false;
+            std::unordered_set<uint32_t> sums;
             for (const ir::Block& scan : fn.blocks) {
                 for (const ir::Instr& seen : scan.body) {
                     if (seen.op == ir::Op::Gep) {
                         indexed = true;
+                    }
+                    if (seen.op == ir::Op::Add && !seen.results.empty()) {
+                        sums.insert(seen.results[0].id);
+                    }
+                }
+            }
+            if (!indexed) {
+                for (const ir::Block& scan : fn.blocks) {
+                    for (const ir::Instr& seen : scan.body) {
+                        if ((seen.op == ir::Op::Load || seen.op == ir::Op::Store) &&
+                            sums.find(seen.addressBase.id) != sums.end()) {
+                            indexed = true;
+                        }
                     }
                 }
             }

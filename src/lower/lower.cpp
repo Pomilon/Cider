@@ -23,6 +23,12 @@ constexpr uint64_t kOneWord = 1;
 constexpr uint64_t kOneMember = 1;
 constexpr uint64_t kHasPrefixLen = 3;
 
+// A slice answers two words, pointer then length, and loadRange names them
+// in that order: the first word is the base address, the length follows.
+constexpr uint64_t kSliceWords = 2;
+constexpr uint64_t kFirstWord = 0;
+constexpr uint64_t kLenWord = 1;
+
 // An arithmetic opcode, or Op::Const when the spelling is not one of ours.
 // An if-chain rather than a switch over an enum: this maps a BinOp, which is
 // not a Kind, and the switch gate counts switches over Kind.
@@ -181,7 +187,7 @@ int Lowerer::wordCount(TypeRef type) {
     if (kind == Kind::Basic || kind == Kind::Pointer || kind == Kind::FunctionPtr) {
         return 1;
     }
-    if (kind == Kind::String) {
+    if (kind == Kind::String || kind == Kind::Slice) {
         return 2;
     }
     int64_t bytes = -1;
@@ -571,6 +577,12 @@ TypeRef Lowerer::wordType(TypeRef aggregate, uint64_t word) {
         }
         return TypeRef{ctx_.basic(BasicKind::I64)};
     }
+    if (aggregate.type->kind() == Kind::Slice) {
+        if (word == 0) {
+            return TypeRef{ctx_.pointer(aggregate.type->element())};
+        }
+        return TypeRef{ctx_.basic(BasicKind::I64)};
+    }
     if (aggregate.type->kind() == Kind::Struct ||
         aggregate.type->kind() == Kind::Array ||
         aggregate.type->kind() == Kind::Union) {
@@ -620,6 +632,12 @@ bool Lowerer::aggregateWord(int64_t bytes, ir::IRType& width, TypeRef& type) {  
 std::vector<ir::Value> Lowerer::loadRange(Position pos, const Place& place,
                                          TypeRef fieldType) {
     int64_t total = resolver_.nominalSize(fieldType.type);
+    if (total <= 0 && fieldType.type->kind() == Kind::Slice) {
+        // A slice is two words, pointer then length: the length is a
+        // runtime value, so no size table names it, and the words own it.
+        int64_t per = layout::kSizePointer;
+        total = static_cast<int64_t>(kSliceWords) * per;
+    }
     if (total <= 0) {
         refuse(pos, "this field layout is not lowered yet");
         return {undefined()};
@@ -670,11 +688,11 @@ std::vector<ir::Value> Lowerer::loadRange(Position pos, const Place& place,
                 refuse(pos, "this field layout is not lowered yet");
                 return {undefined()};
             }
-        } else if (fieldKind == Kind::String) {
-            // A string is an address word then a length word: each full
-            // word loads with its own type, the way a local string load
-            // types them. A partial take cannot name half a word, so it
-            // refuses rather than splits.
+        } else if (fieldKind == Kind::String || fieldKind == Kind::Slice) {
+            // A string is an address word then a length word, and a slice
+            // is a pointer word then a length word: each full word loads
+            // with its own type, the way a local load types them. A partial
+            // take cannot name half a word, so it refuses rather than splits.
             int64_t per = layout::kSizePointer;
             int64_t word = (cur - place.off) / per;
             if (take != per || (cur - place.off) % per != 0 || word < 0 ||
@@ -743,6 +761,11 @@ std::vector<ir::Value> Lowerer::loadRange(Position pos, const Place& place,
 void Lowerer::storeRange(Position pos, const Place& place,
                          const std::vector<ir::Value>& words, TypeRef fieldType) {
     int64_t total = resolver_.nominalSize(fieldType.type);
+    if (total <= 0 && fieldType.type->kind() == Kind::Slice) {
+        // Same two words as loads: pointer then length (see loadRange).
+        int64_t per = layout::kSizePointer;
+        total = static_cast<int64_t>(kSliceWords) * per;
+    }
     if (total <= 0) {
         refuse(pos, "this field layout is not lowered yet");
         return;
@@ -1079,6 +1102,10 @@ ir::Value Lowerer::emitTagCheck(Position pos, const Place& base, int64_t tagOff,
 }
 
 void Lowerer::emitTagTrap(Position pos, ir::Value ok) {
+    emitCheckTrap(pos, ok, ir::TrapReason::UnionTag);
+}
+
+void Lowerer::emitCheckTrap(Position pos, ir::Value ok, ir::TrapReason reason) {
     // The mismatch block traps; execution continues in a fresh block that
     // owns everything the caller emits next. Same shape as onIf's join, so
     // the optimizer and codegen meet nothing new.
@@ -1095,11 +1122,28 @@ void Lowerer::emitTagTrap(Position pos, ir::Value ok) {
     startBlock(trapLabel);
     ir::Terminator trap;
     trap.term = ir::Term::Trap;
-    trap.reason = ir::TrapReason::UnionTag;
+    trap.reason = reason;
     trap.loc = pos;
     emitTerminator(trap);
     sealBlock(trapLabel);
     startBlock(liveLabel);
+}
+
+ir::Value Lowerer::emitI64Cmp(Position pos, BinOp op, ir::Value a, ir::Value b) {
+    TypeRef boolean{ctx_.basic(BasicKind::Bool)};
+    ir::Instr cmp;
+    cmp.op = ir::Op::Cmp;
+    cmp.loc = pos;
+    cmp.type = boolean;
+    cmp.width = ir::IRType::Bool;
+    cmp.cmp = cmpFor(op, true);
+    cmp.isPure = true;
+    cmp.operands.push_back(a);
+    cmp.operands.push_back(b);
+    ir::Value out = newValue(cmp.width, boolean, pos);
+    cmp.results.push_back(out);
+    emit(std::move(cmp));
+    return out;
 }
 
 std::vector<ir::Value> Lowerer::lowerIndex(const Index& n) {
@@ -1109,6 +1153,10 @@ std::vector<ir::Value> Lowerer::lowerIndex(const Index& n) {
         return {undefined()};
     }
     TypeRef arrayType = base.type;
+    if (!arrayType.isError() && (arrayType.type->kind() == Kind::Slice ||
+                                 arrayType.type->kind() == Kind::String)) {
+        return lowerSliceIndex(n, base, arrayType);
+    }
     if (arrayType.isError() || arrayType.type->kind() != Kind::Array) {
         refuse(n.array->pos, "this index");
         return {undefined()};
@@ -1230,6 +1278,360 @@ void Lowerer::storeIndex(const Index& target, const std::vector<ir::Value>& word
         return;
     }
     refuse(target.pos, "this index");
+}
+
+// Folds one bound of a slice or index expression: the value when the
+// compiler names it, or nothing when it is a runtime value.
+bool Lowerer::foldBound(const Expr* expr, int64_t& value) {
+    std::unordered_set<std::string> active;
+    EvalEnv env = resolver_.evalEnv(resolver_.moduleScope());
+    EvalResult folded = evalConstInt(*expr, env, active);
+    if (!folded.ok) {
+        return false;
+    }
+    value = folded.value;
+    return true;
+}
+
+std::vector<ir::Value> Lowerer::lowerSlice(const SliceExpr& n) {
+    if (failed_) {
+        return {undefined()};
+    }
+    TypeRef baseType = checker_.typeOf(n.array.get());
+    Kind baseKind = baseType.isError() ? Kind::Error : baseType.type->kind();
+    if (baseKind != Kind::Array && baseKind != Kind::Slice && baseKind != Kind::String) {
+        refuse(n.array->pos, "this expression");
+        return {undefined()};
+    }
+    Place base;
+    if (!resolvePlace(n.array.get(), base)) {
+        refuse(n.array->pos, "this expression");
+        return {undefined()};
+    }
+    if (!base.global.empty()) {
+        refuse(n.array->pos, "this expression");
+        return {undefined()};
+    }
+    TypeRef element{ctx_.basic(BasicKind::U8)};
+    int64_t elemBytes = kOneMember;
+    if (baseKind != Kind::String) {
+        element = TypeRef{baseType.type->element()};
+        elemBytes = resolver_.nominalSize(element.type);
+    }
+    if (elemBytes <= 0) {
+        refuse(n.pos, "this expression");
+        return {undefined()};
+    }
+    TypeRef count{ctx_.basic(BasicKind::I64)};
+    int64_t loConst = 0;
+    int64_t hiConst = 0;
+    bool loFolded = foldBound(n.lo.get(), loConst);
+    bool hiFolded = foldBound(n.hi.get(), hiConst);
+    if (loFolded && loConst < 0) {
+        refuse(n.lo->pos, "a negative slice bound");
+        return {undefined()};
+    }
+    if (loFolded && hiFolded && hiConst < loConst) {
+        refuse(n.hi->pos, "a slice bound is out of range");
+        return {undefined()};
+    }
+    // The base length is a fact when the base is an array, a word otherwise.
+    ir::Value lenWord = undefined();
+    bool lenConst = false;
+    int64_t lenValue = 0;
+    if (baseKind == Kind::Array) {
+        std::optional<int64_t> extent = baseType.type->length();
+        if (!extent.has_value() || *extent < 0) {
+            refuse(n.array->pos, "this expression");
+            return {undefined()};
+        }
+        lenConst = true;
+        lenValue = *extent;
+        if (hiFolded && hiConst > lenValue) {
+            refuse(n.hi->pos, "a slice bound is out of range");
+            return {undefined()};
+        }
+        if (loFolded && loConst > lenValue) {
+            refuse(n.lo->pos, "a slice bound is out of range");
+            return {undefined()};
+        }
+        lenWord = constantI64(lenValue, count, n.array->pos);
+    } else {
+        std::vector<ir::Value> baseWords = loadRange(n.array->pos, base, baseType);
+        if (failed_ || baseWords.size() != kSliceWords) {
+            refuse(n.array->pos, "this expression");
+            return {undefined()};
+        }
+        lenWord = baseWords[kLenWord];
+    }
+    if (failed_) {
+        return {undefined()};
+    }
+    std::vector<ir::Value> loVals = loFolded
+        ? std::vector<ir::Value>{constantI64(loConst, count, n.lo->pos)}
+        : lowerWords(n.lo.get());
+    std::vector<ir::Value> hiVals = hiFolded
+        ? std::vector<ir::Value>{constantI64(hiConst, count, n.hi->pos)}
+        : lowerWords(n.hi.get());
+    if (failed_ || loVals.size() != kOneWord || hiVals.size() != kOneWord) {
+        refuse(n.pos, "this expression");
+        return {undefined()};
+    }
+    ir::Value loVal = loVals[kFirstWord];
+    ir::Value hiVal = hiVals[kFirstWord];
+    ir::Value zero = constantI64(0, count, n.pos);
+    if (failed_) {
+        return {undefined()};
+    }
+    // Every bound the compiler cannot prove emits its check: a low bound
+    // below zero, a high bound below the low one, a high bound past the
+    // base length. Proven bounds check nothing (SEMANTICS 8).
+    if (!loFolded) {
+        emitCheckTrap(n.lo->pos, emitI64Cmp(n.lo->pos, BinOp::Ge, loVal, zero),
+                      ir::TrapReason::IndexOutOfBounds);
+    }
+    if (!loFolded || !hiFolded) {
+        emitCheckTrap(n.pos, emitI64Cmp(n.pos, BinOp::Le, loVal, hiVal),
+                      ir::TrapReason::IndexOutOfBounds);
+    }
+    if (!hiFolded || !lenConst) {
+        emitCheckTrap(n.hi->pos, emitI64Cmp(n.hi->pos, BinOp::Le, hiVal, lenWord),
+                      ir::TrapReason::IndexOutOfBounds);
+    }
+    if (failed_) {
+        return {undefined()};
+    }
+    // The pointer is the base address advanced past the low bound. Array
+    // bases name slots; slice and string bases carry their pointer in the
+    // first word, so the advance is an addition, not a slot address.
+    TypeRef ptrType{ctx_.pointer(element.type)};
+    ir::Value ptr = undefined();
+    if (baseKind == Kind::Array) {
+        if (loFolded) {
+            int64_t per = layout::kSizePointer;
+            int64_t byteAddr = base.off + loConst * elemBytes;
+            uint64_t slotIdx = static_cast<uint64_t>(byteAddr / per);
+            if (slotIdx >= static_cast<uint64_t>(base.slots.size())) {
+                refuse(n.pos, "this expression");
+                return {undefined()};
+            }
+            int64_t intra = byteAddr % per;
+            ptr = computedBase(base.slots[slotIdx], intra, n.pos);
+            ptr.type = ptrType;
+        } else {
+            for (uint64_t i = 0; i < static_cast<uint64_t>(base.slots.size()); ++i) {
+                if (base.slots[i].id != base.slots[0].id + static_cast<uint32_t>(i)) {
+                    refuse(n.pos, "this expression");
+                    return {undefined()};
+                }
+            }
+            ir::Value scaled = loVal;
+            if (elemBytes != kOneMember) {
+                ir::Value stride = constantI64(elemBytes, count, n.lo->pos);
+                ir::Instr mul;
+                mul.op = ir::Op::Mul;
+                mul.loc = n.lo->pos;
+                mul.type = count;
+                mul.width = widthOf(count, n.lo->pos);
+                if (failed_) {
+                    return {undefined()};
+                }
+                mul.isPure = true;
+                mul.operands.push_back(loVal);
+                mul.operands.push_back(stride);
+                scaled = newValue(mul.width, count, n.lo->pos);
+                mul.results.push_back(scaled);
+                emit(std::move(mul));
+            }
+            ir::Instr gep;
+            gep.op = ir::Op::Gep;
+            gep.loc = n.pos;
+            gep.type = ptrType;
+            gep.width = ir::IRType::Ptr;
+            gep.addressBase = base.slots[0];
+            gep.displacement = base.off;
+            gep.isPure = true;
+            gep.operands.push_back(scaled);
+            ptr = newValue(gep.width, ptrType, n.pos);
+            gep.results.push_back(ptr);
+            emit(std::move(gep));
+        }
+    } else {
+        std::vector<ir::Value> baseWords = loadRange(n.array->pos, base, baseType);
+        if (failed_ || baseWords.size() != kSliceWords) {
+            refuse(n.array->pos, "this expression");
+            return {undefined()};
+        }
+        ir::Value basePtr = baseWords[kFirstWord];
+        int64_t byteDelta = loFolded ? loConst * elemBytes : 0;
+        if (loFolded && byteDelta == 0) {
+            ptr = basePtr;
+            ptr.type = ptrType;
+        } else {
+            ir::Value scaled = loFolded ? constantI64(byteDelta, count, n.lo->pos) : loVal;
+            if (!loFolded && elemBytes != kOneMember) {
+                ir::Value stride = constantI64(elemBytes, count, n.lo->pos);
+                ir::Instr mul;
+                mul.op = ir::Op::Mul;
+                mul.loc = n.lo->pos;
+                mul.type = count;
+                mul.width = widthOf(count, n.lo->pos);
+                if (failed_) {
+                    return {undefined()};
+                }
+                mul.isPure = true;
+                mul.operands.push_back(loVal);
+                mul.operands.push_back(stride);
+                scaled = newValue(mul.width, count, n.lo->pos);
+                mul.results.push_back(scaled);
+                emit(std::move(mul));
+            }
+            if (failed_) {
+                return {undefined()};
+            }
+            ir::Instr add;
+            add.op = ir::Op::Add;
+            add.loc = n.pos;
+            add.type = ptrType;
+            add.width = ir::IRType::Ptr;
+            add.isPure = true;
+            add.operands.push_back(basePtr);
+            add.operands.push_back(scaled);
+            ptr = newValue(add.width, ptrType, n.pos);
+            add.results.push_back(ptr);
+            emit(std::move(add));
+        }
+    }
+    if (failed_) {
+        return {undefined()};
+    }
+    ir::Value len = undefined();
+    if (loFolded && hiFolded) {
+        len = constantI64(hiConst - loConst, count, n.pos);
+    } else {
+        ir::Instr sub;
+        sub.op = ir::Op::Sub;
+        sub.loc = n.pos;
+        sub.type = count;
+        sub.width = widthOf(count, n.pos);
+        if (failed_) {
+            return {undefined()};
+        }
+        sub.isPure = true;
+        sub.operands.push_back(hiVal);
+        sub.operands.push_back(loVal);
+        len = newValue(sub.width, count, n.pos);
+        sub.results.push_back(len);
+        emit(std::move(sub));
+    }
+    if (failed_) {
+        return {undefined()};
+    }
+    return {ptr, len};
+}
+
+std::vector<ir::Value> Lowerer::lowerSliceIndex(const Index& n, const Place& base,
+                                               TypeRef baseType) {
+    Kind baseKind = baseType.type->kind();
+    TypeRef element{ctx_.basic(BasicKind::U8)};
+    int64_t elemBytes = kOneMember;
+    if (baseKind == Kind::Slice) {
+        element = TypeRef{baseType.type->element()};
+        elemBytes = resolver_.nominalSize(element.type);
+    }
+    if (elemBytes <= 0) {
+        refuse(n.pos, "this index");
+        return {undefined()};
+    }
+    if (!base.global.empty()) {
+        refuse(n.array->pos, "this index");
+        return {undefined()};
+    }
+    std::vector<ir::Value> baseWords = loadRange(n.array->pos, base, baseType);
+    if (failed_ || baseWords.size() != kSliceWords) {
+        refuse(n.array->pos, "this index");
+        return {undefined()};
+    }
+    ir::Value ptr = baseWords[kFirstWord];
+    ir::Value len = baseWords[kLenWord];
+    TypeRef count{ctx_.basic(BasicKind::I64)};
+    int64_t idxConst = 0;
+    bool idxFolded = foldBound(n.index.get(), idxConst);
+    if (idxFolded && idxConst < 0) {
+        refuse(n.index->pos, "a negative index");
+        return {undefined()};
+    }
+    std::vector<ir::Value> idxVals = idxFolded
+        ? std::vector<ir::Value>{constantI64(idxConst, count, n.index->pos)}
+        : lowerWords(n.index.get());
+    if (failed_ || idxVals.size() != kOneWord) {
+        refuse(n.index->pos, "this index");
+        return {undefined()};
+    }
+    ir::Value idx = idxVals[kFirstWord];
+    TypeRef ptrType{ctx_.pointer(element.type)};
+    ptr.type = ptrType;
+    // A slice length is always a runtime word, so the upper bound always
+    // checks; a folded index proves only the low bound (SEMANTICS 8).
+    if (!idxFolded) {
+        ir::Value zero = constantI64(0, count, n.index->pos);
+        if (failed_) {
+            return {undefined()};
+        }
+        emitCheckTrap(n.index->pos, emitI64Cmp(n.index->pos, BinOp::Ge, idx, zero),
+                      ir::TrapReason::IndexOutOfBounds);
+    }
+    emitCheckTrap(n.index->pos, emitI64Cmp(n.index->pos, BinOp::Lt, idx, len),
+                  ir::TrapReason::IndexOutOfBounds);
+    if (failed_) {
+        return {undefined()};
+    }
+    int64_t byteDelta = idxFolded ? idxConst * elemBytes : 0;
+    ir::Value at = ptr;
+    if (!idxFolded || byteDelta != 0) {
+        ir::Value scaled = idxFolded ? constantI64(byteDelta, count, n.index->pos) : idx;
+        if (!idxFolded && elemBytes != kOneMember) {
+            ir::Value stride = constantI64(elemBytes, count, n.index->pos);
+            ir::Instr mul;
+            mul.op = ir::Op::Mul;
+            mul.loc = n.index->pos;
+            mul.type = count;
+            mul.width = widthOf(count, n.index->pos);
+            if (failed_) {
+                return {undefined()};
+            }
+            mul.isPure = true;
+            mul.operands.push_back(idx);
+            mul.operands.push_back(stride);
+            scaled = newValue(mul.width, count, n.index->pos);
+            mul.results.push_back(scaled);
+            emit(std::move(mul));
+        }
+        if (failed_) {
+            return {undefined()};
+        }
+        ir::Instr add;
+        add.op = ir::Op::Add;
+        add.loc = n.pos;
+        add.type = ptrType;
+        add.width = ir::IRType::Ptr;
+        add.isPure = true;
+        add.operands.push_back(ptr);
+        add.operands.push_back(scaled);
+        at = newValue(add.width, ptrType, n.pos);
+        add.results.push_back(at);
+        emit(std::move(add));
+    }
+    if (failed_) {
+        return {undefined()};
+    }
+    // The address is computed; the value is one indirect load away.
+    Place indirect;
+    indirect.slots = {at};
+    indirect.type = element;
+    indirect.off = 0;
+    indirect.isVolatile = base.isVolatile;
+    return loadRange(n.pos, indirect, element);
 }
 
 std::vector<ir::Value> Lowerer::loadLocal(Position pos, const LocalBinding& binding) {
@@ -1401,6 +1803,9 @@ std::vector<ir::Value> Lowerer::lowerWords(const Expr* expr) {
     }
     if (dynamic_cast<const Index*>(expr) != nullptr) {
         return lowerIndex(static_cast<const Index&>(*expr));
+    }
+    if (dynamic_cast<const SliceExpr*>(expr) != nullptr) {
+        return lowerSlice(static_cast<const SliceExpr&>(*expr));
     }
     if (const auto* ident = dynamic_cast<const Ident*>(expr)) {
         TypeRef type = checker_.typeOf(ident);

@@ -366,6 +366,45 @@ void testUnion() {
     }
 }
 
+void testSlice() {
+    std::printf("slices create, guard, and trap\n");
+    Lowered r = lower(
+        "func main() -> int {\n"
+        "    var a: [int; 3] = new [int; 3] { 5, 6, 7 };\n"
+        "    var s: []int = a[0:2];\n"
+        "    return s[1];\n"
+        "}\n");
+    check(r.ok, "slice creation lowers");
+    if (r.ok) {
+        const cider::ir::Function* main = find(r.module.get(), "main");
+        check(main != nullptr, "main is emitted");
+        int traps = 0;
+        for (const cider::ir::Block& block : main->blocks) {
+            if (block.term.term == cider::ir::Term::Trap) {
+                ++traps;
+            }
+        }
+        // Proven bounds check nothing; the runtime index still guards
+        // against the runtime length.
+        check(traps == 1, "only the index guards");
+    }
+    Lowered bad = lower(
+        "func main() -> int {\n"
+        "    var a: [int; 3] = new [int; 3] { 5, 6, 7 };\n"
+        "    var s: []int = a[0:9];\n"
+        "    return s[0];\n"
+        "}\n");
+    check(!bad.ok && bad.stage == "lower", "a provable breach is refused");
+    Lowered sub = lower(
+        "func main() -> int {\n"
+        "    var a: [int; 4] = new [int; 4] { 1, 2, 3, 4 };\n"
+        "    var s: []int = a[0:4];\n"
+        "    var t: []int = s[1:3];\n"
+        "    return t[1];\n"
+        "}\n");
+    check(sub.ok, "a slice of a slice lowers");
+}
+
 void testNotYetLowered() {
     std::printf("unlowered constructs are refused\n");
     Lowered r = lower("func f(x: int) -> void { var s: string = \"v = {x}\"; }\n");
@@ -389,6 +428,7 @@ int main() {
     testStraddlingRead();
     testMultiWordAssign();
     testUnion();
+    testSlice();
     testNotYetLowered();
     std::printf("\n%d checks, %s\n", checks, failures == 0 ? "all passed" : "FAILURES");
     return failures == 0 ? 0 : 1;

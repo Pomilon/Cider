@@ -173,6 +173,25 @@ public:
     // block that the caller owns: instructions the caller emits next land
     // past the check, never on the trap path.
     void emitTagTrap(Position pos, ir::Value ok);
+    // Branches to a trap of the given reason when `ok` is false, continuing
+    // in a fresh block the caller owns. emitTagTrap is the union-tag shape
+    // of this; slice bounds use it with IndexOutOfBounds (SEMANTICS 8).
+    void emitCheckTrap(Position pos, ir::Value ok, ir::TrapReason reason);
+    // A signed i64 comparison answering one boolean word, for bounds checks
+    // the source types already fixed at i64 (SEMANTICS 2.3).
+    ir::Value emitI64Cmp(Position pos, BinOp op, ir::Value a, ir::Value b);
+    // A slice expression answers its two words, pointer then length: the
+    // base address advanced past the low bound, and high minus low. Bounds
+    // the compiler cannot prove emit runtime checks; provable violations
+    // refuse instead of trapping (SEMANTICS 8).
+    std::vector<ir::Value> lowerSlice(const SliceExpr& n);
+    // Folds one bound of a slice or index: true with the value when the
+    // compiler names it, false when it is a runtime value.
+    bool foldBound(const Expr* expr, int64_t& value);
+    // Reads one element through a slice or string base: the pointer plus a
+    // scaled index, guarded below by zero and above by the runtime length.
+    std::vector<ir::Value> lowerSliceIndex(const Index& n, const Place& base,
+                                           TypeRef baseType);
     std::vector<ir::Value> lowerNewStruct(const NewStruct& n);
     std::vector<ir::Value> lowerNewArray(const NewArray& n);
     std::vector<ir::Value> lowerField(const Field& n);

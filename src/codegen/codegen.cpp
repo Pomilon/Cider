@@ -282,11 +282,15 @@ private:
             ++index;
         }
 
-        computed_.clear();
+        slotIds_.clear();
         for (const ir::Block& block : fn.blocks) {
             for (const ir::Instr& instr : block.body) {
-                if (instr.op == ir::Op::Gep && !instr.results.empty()) {
-                    computed_.insert(instr.results[0].id);
+                // Only an alloca names slot storage: every other id that
+                // reaches an addressBase is a computed address (see the load
+                // and store paths), so the set collected here decides the
+                // branch, not a list of producer opcodes.
+                if (instr.op == ir::Op::Alloca && !instr.results.empty()) {
+                    slotIds_.insert(instr.results[0].id);
                 }
             }
         }
@@ -415,16 +419,20 @@ private:
             // A computed address lives in its slot first: the two-step read
             // through rax is what makes an indirect load one load too many
             // for a single instruction, and keeps every memory operand shaped
-            // the same way.
-            if (computed_.find(instr.addressBase.id) != computed_.end()) {
-                out_ += "  mov rax, " + slot(instr.addressBase.id) + "\n";
-                emitLoadMem(atAddr("rax", instr.displacement), instr.type, instr.width);
-            } else if (!instr.globalLabel.empty()) {
+            // the same way. Only an alloca id names a slot; any other id in
+            // an addressBase is an address the IR computed (Gep, address
+            // arithmetic, a loaded pointer), never slot storage, so it
+            // dereferences. Listing producer opcodes here sprouted a bug per
+            // slice; the alloca set closes the class.
+            if (!instr.globalLabel.empty()) {
                 emitLoadMem(atAddr("rip + " + instr.globalLabel, instr.displacement),
                             instr.type, instr.width);
-            } else {
+            } else if (slotIds_.find(instr.addressBase.id) != slotIds_.end()) {
                 std::string base = "rsp + " + std::to_string(instr.addressBase.id * 8);
                 emitLoadMem(atAddr(base, instr.displacement), instr.type, instr.width);
+            } else {
+                out_ += "  mov rax, " + slot(instr.addressBase.id) + "\n";
+                emitLoadMem(atAddr("rax", instr.displacement), instr.type, instr.width);
             }
             if (instr.width == ir::IRType::F32) {
                 out_ += "  movss " + slot(instr.results[0].id) + ", xmm0\n";
@@ -440,15 +448,15 @@ private:
             if (instr.width == ir::IRType::F32 || instr.width == ir::IRType::F64) {
                 out_ += "  movss xmm0, " + slot(instr.storedValue.id) + "\n";
             }
-            if (computed_.find(instr.addressBase.id) != computed_.end()) {
-                out_ += "  mov rcx, " + slot(instr.addressBase.id) + "\n";
-                emitStoreMem(atAddr("rcx", instr.displacement), instr.type, instr.width);
-            } else if (!instr.globalLabel.empty()) {
+            if (!instr.globalLabel.empty()) {
                 emitStoreMem(atAddr("rip + " + instr.globalLabel, instr.displacement),
                              instr.type, instr.width);
-            } else {
+            } else if (slotIds_.find(instr.addressBase.id) != slotIds_.end()) {
                 std::string base = "rsp + " + std::to_string(instr.addressBase.id * 8);
                 emitStoreMem(atAddr(base, instr.displacement), instr.type, instr.width);
+            } else {
+                out_ += "  mov rcx, " + slot(instr.addressBase.id) + "\n";
+                emitStoreMem(atAddr("rcx", instr.displacement), instr.type, instr.width);
             }
             return true;
         }
@@ -618,10 +626,10 @@ private:
 
 
     const ir::Module& module_;
-    // Gep-result ids in the function being emitted, derived fresh from its
-    // own instructions. A load or store through one of these reads an
-    // address first; through anything else it addresses a slot directly.
-    std::unordered_set<uint32_t> computed_;
+    // Alloca-result ids in the function being emitted: the only ids whose
+    // address is slot storage (rsp+id*8). Any other id in an addressBase is
+    // a computed address and dereferences.
+    std::unordered_set<uint32_t> slotIds_;
     std::string out_;
     bool failed_ = false;
     std::string error_;
