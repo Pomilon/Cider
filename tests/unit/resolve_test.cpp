@@ -234,6 +234,25 @@ void testNominalSize() {
     check(cyc.resolver->structSize(a->id) == -1, "a self-embedding struct has no size");
 }
 
+// A class value opens with its vptr word: one int field sits at offset 8
+// in a 16-byte object, and a class with bases has no size yet.
+void testClassSize() {
+    std::printf("class sizes reserve the vptr\n");
+    Resolved r = resolve(
+        "class Node { var v: int; }\n"
+        "class Base { var x: int; }\n"
+        "class Derived : Base { var y: int; }\n");
+    check(r.ok, "resolves");
+    const cider::resolve::Decl* node =
+        r.resolver->lookup(r.resolver->moduleScope(), "Node");
+    const cider::resolve::Decl* derived =
+        r.resolver->lookup(r.resolver->moduleScope(), "Derived");
+    check(r.resolver->classSize(node->id) == 16, "vptr plus one int is sixteen bytes");
+    check(r.resolver->fieldOffset(node->id, "v") == 8, "the field follows the vptr");
+    check(r.resolver->classSize(derived->id) == -1, "a derived class has no size yet");
+    check(r.resolver->fieldOffset(derived->id, "y") == -1, "a derived field has no offset yet");
+}
+
 }  // namespace
 
 int main() {
@@ -251,6 +270,7 @@ int main() {
     testGenericArity();
     testSpecialize();
     testNominalSize();
+    testClassSize();
     std::printf("\n%d checks, %s\n", checks, failures == 0 ? "all passed" : "FAILURES");
     return failures == 0 ? 0 : 1;
 }

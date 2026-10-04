@@ -163,6 +163,10 @@ public:
     // copies guess neighbor bytes.
     void constructStruct(const std::vector<ir::Value>& slots, const NewStruct& n);
     void constructArray(const std::vector<ir::Value>& slots, const NewArray& n);
+    // A class constructs its fields after a null vptr word; methods wire
+    // the vptr in a later slice. A class with bases is refused: inherited
+    // fields have no layout yet.
+    void constructClass(const std::vector<ir::Value>& slots, const NewStruct& n);
     // A union constructs its one live member at offset 0 and writes the
     // member's index to the tag after the payload (TYPES.md 4.6).
     void constructUnion(const std::vector<ir::Value>& slots, const NewStruct& n);

@@ -119,6 +119,18 @@ constexpr int64_t unionSize(int64_t maxMemberSize, int64_t maxMemberAlign) {
     return roundUp(unionTagOffset(maxMemberSize, maxMemberAlign) + kSizeUnionTag, maxMemberAlign);
 }
 
+// A class is one vptr word plus its own fields, rounded to the combined
+// alignment. Bases are not laid out here: a class with bases answers -1
+// from the resolver, and the lowerer refuses it, until inheritance lowers.
+// A class value opens with its vptr word at offset zero and fields follow,
+// so the slot is reserved from the first class slice and field offsets
+// never shift when methods wire the vptr later.
+constexpr int64_t classSize(int64_t fieldsSize, int64_t maxFieldAlign) {
+    const int64_t combined =
+        maxFieldAlign > kAlignPointer ? maxFieldAlign : kAlignPointer;
+    return roundUp(kSizePointer + fieldsSize, combined);
+}
+
 // A fixed array is N elements, each aligned to the element's alignment.
 constexpr int64_t arraySize(int64_t elementSize, int64_t count) {
     return elementSize * count;

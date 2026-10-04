@@ -87,6 +87,14 @@ public:
     // alignment, with no padding beyond that (TYPES.md 3.3). -1 when unknown.
     // Only structs: classes and interfaces are refused elsewhere.
     int64_t structSize(DeclId id) const;
+    // A class's total size: one vptr word, then its own fields in
+    // declaration order, rounded to the combined alignment (TYPES.md 4.2).
+    // -1 when unknown or when the class has bases: inherited fields are a
+    // later slice, and laying them out by guess would miscompile.
+    int64_t classSize(DeclId id) const;
+    // A class's alignment: the maximum of the vptr's and its fields'.
+    // -1 when unknown or when the class has bases.
+    int64_t classAlign(DeclId id) const;
     // A union member's index in declaration order: the tag value written on
     // construction and compared on a checked read (TYPES.md 4.6). -1 when
     // the union or the member is unknown.
@@ -99,11 +107,10 @@ public:
     // member. One function so the checker and the lowerer cannot disagree
     // about the spelling.
     std::string unionHasMember(DeclId id, const std::string& hasName) const;
-    // A type's size when the type may name a struct or union: plain types
-    // answer from the type itself, a struct or union answers from its
-    // declaration. -1 when unknown. Classes and interfaces are not sized
-    // here — their layouts belong to later slices, and a guess would
-    // miscompile.
+    // A type's size when the type may name a struct, class or union: plain
+    // types answer from the type itself, a nominal answers from its
+    // declaration. -1 when unknown. Interfaces are not sized here — their
+    // layouts belong to later slices, and a guess would miscompile.
     int64_t nominalSize(const Type* type) const;
     // The same recursion for alignment.
     int64_t nominalAlign(const Type* type) const;
@@ -176,6 +183,8 @@ private:
     int64_t nominalAlignImpl(const Type* type, std::unordered_set<std::string>& seen) const;
     int64_t structSizeImpl(DeclId id, std::unordered_set<std::string>& seen) const;
     int64_t structAlignImpl(DeclId id, std::unordered_set<std::string>& seen) const;
+    int64_t classSizeImpl(DeclId id, std::unordered_set<std::string>& seen) const;
+    int64_t classAlignImpl(DeclId id, std::unordered_set<std::string>& seen) const;
     // A union's payload is its widest member, every member at offset 0, the
     // tag after the payload padded to the payload's alignment (TYPES.md
     // 3.4a). Same visited-set rule as structs: recursive unions are -1.

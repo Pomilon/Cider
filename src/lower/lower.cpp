@@ -191,7 +191,7 @@ int Lowerer::wordCount(TypeRef type) {
         return 2;
     }
     int64_t bytes = -1;
-    if (kind == Kind::Array || kind == Kind::Union) {
+    if (kind == Kind::Array || kind == Kind::Union || kind == Kind::Class) {
         bytes = resolver_.nominalSize(type.type);
     } else if (kind == Kind::Struct) {
         std::optional<DeclId> id = type.type->decl();
@@ -244,7 +244,8 @@ bool Lowerer::resolvePlace(const Expr* expr, Place& out) {
             return false;
         }
         if (out.type.isError() || (out.type.type->kind() != Kind::Struct &&
-                                   out.type.type->kind() != Kind::Union)) {
+                                   out.type.type->kind() != Kind::Union &&
+                                   out.type.type->kind() != Kind::Class)) {
             return false;
         }
         std::optional<DeclId> id = out.type.type->decl();
@@ -585,6 +586,7 @@ TypeRef Lowerer::wordType(TypeRef aggregate, uint64_t word) {
     }
     if (aggregate.type->kind() == Kind::Struct ||
         aggregate.type->kind() == Kind::Array ||
+        aggregate.type->kind() == Kind::Class ||
         aggregate.type->kind() == Kind::Union) {
         return TypeRef{ctx_.basic(BasicKind::U64)};
     }
@@ -683,7 +685,7 @@ std::vector<ir::Value> Lowerer::loadRange(Position pos, const Place& place,
         TypeRef valueType = fieldType;
         Kind fieldKind = fieldType.type->kind();
         if (fieldKind == Kind::Struct || fieldKind == Kind::Array ||
-            fieldKind == Kind::Union) {
+            fieldKind == Kind::Class || fieldKind == Kind::Union) {
             if (!aggregateWord(take, width, valueType)) {
                 refuse(pos, "this field layout is not lowered yet");
                 return {undefined()};
@@ -809,6 +811,7 @@ void Lowerer::storeRange(Position pos, const Place& place,
         ir::IRType width;
         if (take == total && !(fieldType.type->kind() == Kind::Struct ||
                               fieldType.type->kind() == Kind::Array ||
+                              fieldType.type->kind() == Kind::Class ||
                               fieldType.type->kind() == Kind::Union)) {
             width = widthOf(fieldType, pos);
             if (failed_) {
@@ -1054,7 +1057,8 @@ std::vector<ir::Value> Lowerer::lowerField(const Field& n) {
         }
         return {answer};
     }
-    if (base.type.type->kind() != Kind::Struct) {
+    if (base.type.type->kind() != Kind::Struct &&
+        base.type.type->kind() != Kind::Class) {
         refuse(n.object->pos, "this field access");
         return {undefined()};
     }
@@ -1773,8 +1777,75 @@ std::vector<ir::Value> Lowerer::loadGlobal(Position pos, const GlobalBinding& gl
     return words;
 }
 
+void Lowerer::constructClass(const std::vector<ir::Value>& slots, const NewStruct& n) {
+    TypeRef classType = checker_.typeOf(&n);
+    if (classType.isError() || classType.type->kind() != Kind::Class) {
+        refuse(n.pos, "this construction");
+        return;
+    }
+    std::optional<DeclId> id = classType.type->decl();
+    if (!id.has_value()) {
+        refuse(n.pos, "this construction");
+        return;
+    }
+    if (!resolver_.classBases(*id).empty()) {
+        refuse(n.pos, "inheritance is not lowered yet");
+        return;
+    }
+    // Word zero is the vptr slot, null until methods wire it: the slot is
+    // reserved now so field offsets never shift later.
+    TypeRef vptr{ctx_.basic(BasicKind::U64)};
+    ir::Value null = constantI64(0, vptr, n.pos);
+    if (failed_) {
+        return;
+    }
+    Place atVptr;
+    atVptr.slots = slots;
+    atVptr.type = vptr;
+    atVptr.off = 0;
+    storeRange(n.pos, atVptr, {null}, vptr);
+    if (failed_) {
+        return;
+    }
+    Place base;
+    base.slots = slots;
+    base.type = classType;
+    for (const FieldInit& field : n.fields) {
+        int64_t fieldOff = resolver_.fieldOffset(*id, field.name);
+        TypeRef fieldType = resolver_.fieldType(*id, field.name);
+        if (fieldOff < 0 || fieldType.isError()) {
+            refuse(field.value->pos, "no such field");
+            return;
+        }
+        std::vector<ir::Value> value = lowerWords(field.value.get());
+        if (failed_) {
+            return;
+        }
+        Place at = base;
+        at.off = fieldOff;
+        at.type = fieldType;
+        storeRange(field.value->pos, at, value, fieldType);
+        if (failed_) {
+            return;
+        }
+    }
+}
 std::vector<ir::Value> Lowerer::lowerNewStruct(const NewStruct& n) {
     TypeRef structType = checker_.typeOf(&n);
+    if (!structType.isError() && structType.type->kind() == Kind::Class) {
+        // Inherited fields have no layout yet: the refusal names the gap
+        // before wordCount turns the -1 size into a generic construction
+        // refusal. constructClass asserts the same precondition.
+        std::optional<DeclId> id = structType.type->decl();
+        if (!id.has_value()) {
+            refuse(n.pos, "this construction");
+            return {undefined()};
+        }
+        if (!resolver_.classBases(*id).empty()) {
+            refuse(n.pos, "inheritance is not lowered yet");
+            return {undefined()};
+        }
+    }
     int count = wordCount(structType);
     if (count < 0) {
         refuse(n.pos, "this construction");
@@ -1782,11 +1853,14 @@ std::vector<ir::Value> Lowerer::lowerNewStruct(const NewStruct& n) {
     }
     std::vector<ir::Value> slots =
         allocaSlots(structType, n.pos, static_cast<uint64_t>(count));
-    // NewStruct builds a struct field by field or a union by its one live
-    // member plus tag; the checker guarantees which, so the branch reads
-    // the checked type rather than re-deriving it.
+    // NewStruct builds a struct field by field, a class after its vptr
+    // word, or a union by its one live member plus tag; the checker
+    // guarantees which, so the branch reads the checked type rather than
+    // re-deriving it.
     if (!structType.isError() && structType.type->kind() == Kind::Union) {
         constructUnion(slots, n);
+    } else if (!structType.isError() && structType.type->kind() == Kind::Class) {
+        constructClass(slots, n);
     } else {
         constructStruct(slots, n);
     }

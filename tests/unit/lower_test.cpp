@@ -417,6 +417,24 @@ void testSliceStore() {
     check(r.ok, "a slice store and len lower");
 }
 
+// A class value constructs like a struct with a leading vptr word: the
+// vptr is zero until methods are wired (T7), and fields follow it.
+void testClass() {
+    std::printf("class values lower\n");
+    Lowered r = lower(
+        "class Node { var v: int; }\n"
+        "func main() -> int {\n"
+        "    var n: Node = new Node { v: 7 };\n"
+        "    return n.v;\n"
+        "}\n");
+    check(r.ok, "class new lowers");
+    if (r.ok) {
+        const cider::ir::Function* main = find(r.module.get(), "main");
+        check(main != nullptr, "main is emitted");
+        check(countOp(*main, cider::ir::Op::Store) >= 2, "vptr and field are stored");
+    }
+}
+
 void testNotYetLowered() {
     std::printf("unlowered constructs are refused\n");
     Lowered r = lower("func f(x: int) -> void { var s: string = \"v = {x}\"; }\n");
@@ -442,6 +460,7 @@ int main() {
     testUnion();
     testSlice();
     testSliceStore();
+    testClass();
     testNotYetLowered();
     std::printf("\n%d checks, %s\n", checks, failures == 0 ? "all passed" : "FAILURES");
     return failures == 0 ? 0 : 1;

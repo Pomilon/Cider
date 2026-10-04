@@ -1425,8 +1425,24 @@ TypeRef Checker::checkField(Field& expr) {
         return errorRef();
     }
     if (kind == Kind::Class) {
-        fail(expr.pos, "deref first: a class reference has no fields");
-        return errorRef();
+        // A bare class value reads its fields through the resolver's field
+        // table. A method name answers the method's closure, which the
+        // lowerer refuses until methods lower. Pointer-to-class stays
+        // explicit: only (*c).f reaches here, never c.f.
+        std::optional<DeclId> id = object.type->decl();
+        if (!id.has_value()) {
+            return errorRef();
+        }
+        TypeRef member = resolver_.fieldType(*id, expr.name);
+        if (!member.isError()) {
+            return member;
+        }
+        const Signature* sig = resolver_.methodSig(*id, expr.name);
+        if (sig == nullptr) {
+            fail(expr.pos, "no such field");
+            return errorRef();
+        }
+        return TypeRef{ctx_.closure(*sig)};
     }
     if (kind == Kind::Slice || kind == Kind::String || kind == Kind::Array) {
         // The only member a sized value exposes is its element count; the

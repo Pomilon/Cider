@@ -118,12 +118,24 @@ int64_t Resolver::fieldOffset(DeclId id, const std::string& name) const {
     seen.insert(declKey(id));
     // Union members all begin at offset 0; the tag lives after the payload
     // (TYPES.md 3.4a) and is addressed by unionTagOffset, never here.
+    // A class value opens with its vptr word; fields follow it. A class
+    // with bases has no layout yet, so nothing has an offset.
+    bool afterVptr = false;
     if (const Decl* self = declById(id)) {
         if (self->nominal == Kind::Union) {
             return unionMemberIndex(id, name) >= 0 ? 0 : -1;
         }
+        if (self->nominal == Kind::Class) {
+            if (!classBases(id).empty()) {
+                return -1;
+            }
+            afterVptr = true;
+        }
     }
     int64_t at = 0;
+    if (afterVptr) {
+        at = layout::kSizePointer;
+    }
     for (const std::string& field : fieldNames(id)) {
         TypeRef type = fieldType(id, field);
         if (type.isError()) {
@@ -146,6 +158,18 @@ int64_t Resolver::fieldOffset(DeclId id, const std::string& name) const {
 int64_t Resolver::structSize(DeclId id) const {
     std::unordered_set<std::string> seen;
     return structSizeImpl(id, seen);
+}
+
+int64_t Resolver::classSize(DeclId id) const {
+    std::unordered_set<std::string> seen;
+    seen.insert(declKey(id));
+    return classSizeImpl(id, seen);
+}
+
+int64_t Resolver::classAlign(DeclId id) const {
+    std::unordered_set<std::string> seen;
+    seen.insert(declKey(id));
+    return classAlignImpl(id, seen);
 }
 
 int64_t Resolver::nominalSize(const Type* type) const {
@@ -192,6 +216,15 @@ int64_t Resolver::nominalSizeImpl(const Type* type,
         seen.erase(declKey(*id));
         return out;
     }
+    if (type->kind() == Kind::Class) {
+        std::optional<DeclId> id = type->decl();
+        if (!id.has_value() || !seen.insert(declKey(*id)).second) {
+            return -1;
+        }
+        int64_t out = classSizeImpl(*id, seen);
+        seen.erase(declKey(*id));
+        return out;
+    }
     return typeSize(type);
 }
 
@@ -218,6 +251,15 @@ int64_t Resolver::nominalAlignImpl(const Type* type,
             return -1;
         }
         int64_t out = unionAlignImpl(*id, seen);
+        seen.erase(declKey(*id));
+        return out;
+    }
+    if (type->kind() == Kind::Class) {
+        std::optional<DeclId> id = type->decl();
+        if (!id.has_value() || !seen.insert(declKey(*id)).second) {
+            return -1;
+        }
+        int64_t out = classAlignImpl(*id, seen);
         seen.erase(declKey(*id));
         return out;
     }
@@ -248,6 +290,55 @@ int64_t Resolver::structSizeImpl(DeclId id, std::unordered_set<std::string>& see
 
 int64_t Resolver::structAlignImpl(DeclId id, std::unordered_set<std::string>& seen) const {
     int64_t multiple = 1;
+    for (const std::string& field : fieldNames(id)) {
+        TypeRef type = fieldType(id, field);
+        if (type.isError()) {
+            return -1;
+        }
+        int64_t fieldMultiple = nominalAlignImpl(type.type, seen);
+        if (fieldMultiple <= 0) {
+            return -1;
+        }
+        if (fieldMultiple > multiple) {
+            multiple = fieldMultiple;
+        }
+    }
+    return multiple;
+}
+
+int64_t Resolver::classSizeImpl(DeclId id, std::unordered_set<std::string>& seen) const {
+    // Inherited fields belong to a later slice: a class with bases has no
+    // size here, and the lowerer refuses to construct it, rather than lay
+    // out half an object.
+    if (!classBases(id).empty()) {
+        return -1;
+    }
+    int64_t at = layout::kSizePointer;
+    int64_t multiple = layout::kAlignPointer;
+    for (const std::string& field : fieldNames(id)) {
+        TypeRef type = fieldType(id, field);
+        if (type.isError()) {
+            return -1;
+        }
+        int64_t fieldMultiple = nominalAlignImpl(type.type, seen);
+        int64_t bytes = nominalSizeImpl(type.type, seen);
+        if (fieldMultiple <= 0 || bytes < 0) {
+            return -1;
+        }
+        if (fieldMultiple > multiple) {
+            multiple = fieldMultiple;
+        }
+        at = layout::roundUp(at, fieldMultiple);
+        at += bytes;
+    }
+    return layout::classSize(at - layout::kSizePointer, multiple);
+}
+
+int64_t Resolver::classAlignImpl(DeclId id, std::unordered_set<std::string>& seen) const {
+    if (!classBases(id).empty()) {
+        return -1;
+    }
+    int64_t multiple = layout::kAlignPointer;
     for (const std::string& field : fieldNames(id)) {
         TypeRef type = fieldType(id, field);
         if (type.isError()) {
