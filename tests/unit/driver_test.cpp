@@ -60,6 +60,16 @@ void testCheck() {
     check(failed.err.find(bad) != std::string::npos, "and the file");
     unlink(good.c_str());
     unlink(bad.c_str());
+    // A resolve error raised from inside checking (bare generic in a body)
+    // still fails the build and names the rule, rather than vanishing.
+    std::string generic =
+        writeTemp("struct Box<T> { var v: T; }\n"
+                  "func main() -> int { var b: Box = new Box<int> { v: 1 }; return 0; }\n");
+    Result genericFailed = run({"check", generic});
+    check(genericFailed.code != 0, "a bare generic local fails check");
+    check(genericFailed.err.find("takes 1 arguments") != std::string::npos,
+          "the diagnostic names the arity");
+    unlink(generic.c_str());
 }
 
 // `compile` emits assembly; `ir` dumps the module.

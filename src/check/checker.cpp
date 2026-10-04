@@ -62,6 +62,151 @@ TypeRef Checker::typeOf(const Node* node) const {
     return resolver_.typeOf(node);
 }
 
+TypeRef Checker::resolveHere(const TypeExpr* spelling) {
+    // The resolver records the diagnostic; the checker records the failure.
+    // Without this, a use-site resolve error (bare generic in a body, bad
+    // arity in a local) leaves checkProgram reporting success while another
+    // layer holds the only error. One flag, no second message.
+    size_t before = resolver_.errors().size();
+    TypeRef out = substDeep(resolver_.resolveType(spelling, typeScope_));
+    if (resolver_.errors().size() != before) {
+        failed_ = true;
+    }
+    return out;
+}
+
+TypeRef Checker::substDeep(TypeRef type) {
+    if (type.isError() || !active_.has_value()) {
+        return type;
+    }
+    Kind kind = type.type->kind();
+    if (kind == Kind::TypeParam) {
+        const TypeParamPayload& payload =
+            std::get<TypeParamPayload>(type.type->payload());
+        if (payload.decl.module == active_->tmpl.module &&
+            payload.decl.index == active_->tmpl.index &&
+            payload.index < active_->args.size()) {
+            return substDeep(active_->args[payload.index]);
+        }
+        return type;
+    }
+    if (kind == Kind::Pointer) {
+        TypeRef inner = substDeep(TypeRef{type.type->pointee()});
+        if (inner.type == type.type->pointee()) {
+            return type;
+        }
+        return TypeRef{ctx_.pointer(inner.type)};
+    }
+    if (kind == Kind::Array) {
+        TypeRef inner = substDeep(TypeRef{type.type->element()});
+        std::optional<int64_t> length = type.type->length();
+        if (inner.type == type.type->element() || !length.has_value()) {
+            return inner.type == type.type->element() ? type : errorRef();
+        }
+        return TypeRef{ctx_.array(inner.type, *length)};
+    }
+    if (kind == Kind::Slice) {
+        TypeRef inner = substDeep(TypeRef{type.type->element()});
+        if (inner.type == type.type->element()) {
+            return type;
+        }
+        return TypeRef{ctx_.slice(inner.type)};
+    }
+    if (kind == Kind::Closure || kind == Kind::FunctionPtr) {
+        const Signature& sig = *type.type->signature();
+        std::vector<Parameter> params;
+        bool changed = false;
+        for (const Parameter& param : sig.parameters()) {
+            TypeRef sub = substDeep(TypeRef{param.type});
+            changed = changed || sub.type != param.type;
+            Parameter out;
+            out.type = sub.type;
+            out.isMutable = param.isMutable;
+            params.push_back(out);
+        }
+        TypeRef ret{sig.returnType()};
+        TypeRef subRet = ret.type == nullptr ? ret : substDeep(ret);
+        changed = changed || subRet.type != ret.type;
+        if (!changed) {
+            return type;
+        }
+        Signature rebuilt(std::move(params), subRet.type, sig.abi());
+        if (kind == Kind::Closure) {
+            return TypeRef{ctx_.closure(std::move(rebuilt))};
+        }
+        return TypeRef{ctx_.functionPtr(std::move(rebuilt))};
+    }
+    return type;
+}
+
+void Checker::walkMethodInst(DeclId spec, DeclId tmpl, const std::string& method) {
+    std::string key =
+        std::to_string(spec.module) + "." + std::to_string(spec.index) + "." + method;
+    if (walked_.find(key) != walked_.end()) {
+        return;
+    }
+    walked_.insert(key);
+    const resolve::Decl* tmplDecl = resolver_.declById(tmpl);
+    if (tmplDecl == nullptr) {
+        fail(Position{module_, 1, 1}, "checker bug: template is missing");
+        return;
+    }
+    auto spelling = methods_.find(tmplDecl->name + "." + method);
+    if (spelling == methods_.end()) {
+        fail(Position{module_, 1, 1}, "checker bug: template method is missing");
+        return;
+    }
+    auto origin = resolver_.instantiationOf(spec);
+    if (!origin.has_value()) {
+        fail(Position{module_, 1, 1}, "checker bug: specialization has no origin");
+        return;
+    }
+    auto structs = structs_.find(tmplDecl->name);
+    std::vector<std::string> names =
+        structs == structs_.end() ? std::vector<std::string>{} : structs->second->typeParams;
+    const resolve::Scope* scope = resolver_.typeParamScope(
+        moduleScope_, module_, names, tmpl, spelling->second->pos);
+    const resolve::Scope* savedScope = typeScope_;
+    typeScope_ = scope;
+    std::optional<ActiveInst> savedActive = active_;
+    active_ = ActiveInst{tmpl, origin->second, names};
+    const Signature* sig = resolver_.methodSig(spec, method);
+    if (sig == nullptr) {
+        fail(spelling->second->pos, "checker bug: specialized signature is missing");
+        typeScope_ = savedScope;
+        active_ = savedActive;
+        return;
+    }
+    pushScope();
+    const Type* obj = ctx_.nominal(tmplDecl->nominal, spec);
+    bindLocal("self", TypeRef{ctx_.pointer(obj)}, false, spelling->second->pos);
+    for (uint64_t i = 0; i < static_cast<uint64_t>(spelling->second->params.size()); ++i) {
+        bindLocal(spelling->second->params[i].name,
+                  TypeRef{sig->parameters()[i].type},
+                  spelling->second->params[i].isMutable,
+                  spelling->second->params[i].pos);
+    }
+    TypeRef savedRet = funcReturn_;
+    bool wasFunc = inFunc_;
+    const Type* ret = sig->returnType() != nullptr ? sig->returnType() : ctx_.void_();
+    funcReturn_ = TypeRef{ret};
+    inFunc_ = true;
+    LowerSink* savedSink = sink_;
+    sink_ = nullptr;
+    spelling->second->body->accept(*this);
+    sink_ = savedSink;
+    funcReturn_ = savedRet;
+    inFunc_ = wasFunc;
+    popScope();
+    typeScope_ = savedScope;
+    active_ = savedActive;
+}
+
+const FuncDecl* Checker::funcSpelling(const std::string& name) const {
+    auto found = funcs_.find(name);
+    return found == funcs_.end() ? nullptr : found->second;
+}
+
 bool Checker::checkProgram(Program& program, const std::string& module) {
     module_ = module;
     moduleScope_ = resolver_.scopeOf(module);
@@ -70,6 +215,23 @@ bool Checker::checkProgram(Program& program, const std::string& module) {
         return false;
     }
     env_ = std::make_unique<EvalEnv>(resolver_.evalEnv(moduleScope_));
+    typeScope_ = moduleScope_;
+    for (const std::unique_ptr<Decl>& decl : program.decls) {
+        if (const auto* fn = dynamic_cast<const FuncDecl*>(decl.get())) {
+            funcs_[fn->name] = fn;
+        }
+        if (const auto* sd = dynamic_cast<const StructDecl*>(decl.get())) {
+            structs_[sd->name] = sd;
+            for (const MethodDecl& method : sd->methods) {
+                methods_[sd->name + "." + method.name] = &method;
+            }
+        }
+        if (const auto* cd = dynamic_cast<const ClassDecl*>(decl.get())) {
+            for (const MethodDecl& method : cd->methods) {
+                methods_[cd->name + "." + method.name] = &method;
+            }
+        }
+    }
     visitProgram(program);
     return !failed_;
 }
@@ -193,7 +355,7 @@ void Checker::visitStructDecl(StructDecl& n) {
     }
     // Conformance: every interface method, present with the same signature.
     for (const std::unique_ptr<TypeExpr>& iface : n.interfaces) {
-        TypeRef t = resolver_.resolveType(iface.get(), moduleScope_);
+        TypeRef t = resolveHere(iface.get());
         if (t.isError() || t.type->kind() != Kind::Interface) {
             continue;
         }
@@ -281,7 +443,7 @@ void Checker::checkMethods(DeclId id, Kind kind, std::vector<MethodDecl>& method
 }
 
 void Checker::visitVarDecl(VarDecl& n) {
-    TypeRef declared = resolver_.resolveType(n.type.get(), moduleScope_);
+    TypeRef declared = resolveHere(n.type.get());
     if (declared.isError()) {
         return;
     }
@@ -524,7 +686,7 @@ void Checker::visitUnary(Unary& n) {
 
 void Checker::visitCast(Cast& n) {
     TypeRef from = checkExpr(n.expr.get(), TypeRef{ctx_.wildcard()});
-    TypeRef target = resolver_.resolveType(n.target.get(), moduleScope_);
+    TypeRef target = resolveHere(n.target.get());
     if (from.isError() || target.isError()) {
         record(&n, errorRef());
         return;
@@ -623,7 +785,7 @@ void Checker::visitNewStruct(NewStruct& n) {
 }
 
 void Checker::visitNewClass(NewClass& n) {
-    TypeRef target = resolver_.resolveType(n.type.get(), moduleScope_);
+    TypeRef target = resolveHere(n.type.get());
     if (target.isError()) {
         record(&n, errorRef());
         return;
@@ -689,7 +851,7 @@ void Checker::visitAssign(Assign& n) {
 }
 
 void Checker::visitSizeofType(SizeofType& n) {
-    TypeRef target = resolver_.resolveType(n.type.get(), moduleScope_);
+    TypeRef target = resolveHere(n.type.get());
     if (target.isError()) {
         record(&n, errorRef());
         return;
@@ -716,7 +878,7 @@ void Checker::bindPattern(Pattern& pat, TypeRef scrutinee) {
         return;
     }
     if (pat.kind == PatternKind::Type) {
-        TypeRef t = resolver_.resolveType(pat.type.get(), moduleScope_);
+        TypeRef t = resolveHere(pat.type.get());
         if (t.isError() || t.type->kind() != Kind::Struct) {
             return;
         }
@@ -735,11 +897,9 @@ void Checker::bindPattern(Pattern& pat, TypeRef scrutinee) {
         return;
     }
     if (pat.kind == PatternKind::Member) {
-        TypeRef t = resolver_.resolveType(
-            std::make_unique<NamedType>(pat.pos, "", pat.tag,
-                                        std::vector<std::unique_ptr<TypeExpr>>{})
-                .get(),
-            moduleScope_);
+        auto tagSpelling = std::make_unique<NamedType>(
+            pat.pos, "", pat.tag, std::vector<std::unique_ptr<TypeExpr>>{});
+        TypeRef t = resolveHere(tagSpelling.get());
         if (t.isError() || t.type->kind() != Kind::Union) {
             return;
         }
@@ -760,7 +920,7 @@ void Checker::bindSubPattern(Pattern& pat, TypeRef type) {
         return;
     }
     if (pat.kind == PatternKind::Type) {
-        TypeRef t = resolver_.resolveType(pat.type.get(), moduleScope_);
+        TypeRef t = resolveHere(pat.type.get());
         if (t.isError()) {
             return;
         }
@@ -934,6 +1094,10 @@ TypeRef Checker::checkIdent(Ident& expr) {
         return errorRef();
     }
     if (decl->kind == resolve::DeclKind::Func) {
+        if (decl->typeParams > 0) {
+            fail(expr.pos, "a generic function needs explicit arguments");
+            return errorRef();
+        }
         return TypeRef{ctx_.closure(decl->sig)};
     }
     if (decl->kind == resolve::DeclKind::Var || decl->kind == resolve::DeclKind::Const) {
@@ -1046,6 +1210,9 @@ TypeRef Checker::checkCall(Call& expr) {
         } else {
             const resolve::Decl* decl = resolver_.lookup(moduleScope_, ident->name);
             if (decl != nullptr && decl->kind == resolve::DeclKind::Func) {
+                if (decl->typeParams > 0) {
+                    return checkGenericCall(expr, decl);
+                }
                 sig = decl->sig;
                 hasSig = true;
             }
@@ -1088,11 +1255,86 @@ TypeRef Checker::checkCall(Call& expr) {
         TypeRef got = checkExpr(expr.args[i].get(), want);
         checkCompatible(expr.args[i]->pos, expr.args[i].get(), got, want);
     }
-    if (!expr.typeArgs.empty()) {
+    const Type* ret = sig.returnType() != nullptr ? sig.returnType() : ctx_.void_();
+    return TypeRef{ret};
+}
+
+TypeRef Checker::checkGenericCall(Call& expr, const resolve::Decl* decl) {
+    if (expr.typeArgs.empty()) {
         fail(expr.pos, "a generic call needs explicit arguments");
         return errorRef();
     }
-    const Type* ret = sig.returnType() != nullptr ? sig.returnType() : ctx_.void_();
+    std::vector<TypeRef> argTypes;
+    for (const std::unique_ptr<TypeExpr>& spelling : expr.typeArgs) {
+        TypeRef arg = resolveHere(spelling.get());
+        if (arg.isError()) {
+            return arg;
+        }
+        argTypes.push_back(arg);
+    }
+    if (argTypes.size() != decl->typeParams) {
+        fail(expr.pos, "wrong number of type arguments");
+        return errorRef();
+    }
+    std::optional<DeclId> spec = resolver_.instantiate(decl->id, argTypes, expr.pos);
+    if (!spec.has_value()) {
+        return errorRef();
+    }
+    const Signature* sig = resolver_.funcSig(*spec);
+    if (sig == nullptr) {
+        fail(expr.pos, "checker bug: specialization has no signature");
+        return errorRef();
+    }
+    if (expr.args.size() != sig->arity()) {
+        fail(expr.pos, "wrong number of arguments");
+        return errorRef();
+    }
+    for (uint64_t i = 0; i < static_cast<uint64_t>(expr.args.size()); ++i) {
+        TypeRef want{sig->parameters()[i].type};
+        TypeRef got = checkExpr(expr.args[i].get(), want);
+        checkCompatible(expr.args[i]->pos, expr.args[i].get(), got, want);
+    }
+    // Walk the template body once per specialization, with the arguments
+    // substituted and the sink detached: lowering generic bodies belongs to
+    // the next slice, and emitting under the template's name would collide.
+    std::string key =
+        std::to_string(spec->module) + "." + std::to_string(spec->index);
+    if (walked_.find(key) == walked_.end()) {
+        walked_.insert(key);
+        const FuncDecl* spelling = funcSpelling(decl->name);
+        if (spelling == nullptr) {
+            fail(expr.pos, "checker bug: template body is missing");
+            return errorRef();
+        }
+        const resolve::Scope* scope = resolver_.typeParamScope(
+            typeScope_, module_, spelling->typeParams, decl->id, expr.pos);
+        const resolve::Scope* savedScope = typeScope_;
+        typeScope_ = scope;
+        std::optional<ActiveInst> savedActive = active_;
+        active_ = ActiveInst{decl->id, argTypes, spelling->typeParams};
+        pushScope();
+        for (uint64_t i = 0; i < static_cast<uint64_t>(spelling->params.size()); ++i) {
+            bindLocal(spelling->params[i].name,
+                      TypeRef{sig->parameters()[i].type},
+                      spelling->params[i].isMutable, spelling->params[i].pos);
+        }
+        TypeRef savedRet = funcReturn_;
+        bool wasFunc = inFunc_;
+        const Type* ret =
+            sig->returnType() != nullptr ? sig->returnType() : ctx_.void_();
+        funcReturn_ = TypeRef{ret};
+        inFunc_ = true;
+        LowerSink* savedSink = sink_;
+        sink_ = nullptr;
+        spelling->body->accept(*this);
+        sink_ = savedSink;
+        funcReturn_ = savedRet;
+        inFunc_ = wasFunc;
+        popScope();
+        typeScope_ = savedScope;
+        active_ = savedActive;
+    }
+    const Type* ret = sig->returnType() != nullptr ? sig->returnType() : ctx_.void_();
     return TypeRef{ret};
 }
 
@@ -1116,11 +1358,28 @@ TypeRef Checker::checkField(Field& expr) {
             return errorRef();
         }
         TypeRef member = resolver_.fieldType(*id, expr.name);
-        if (member.isError()) {
+        if (!member.isError()) {
+            return member;
+        }
+        // Not a field: a method value. Non-generic methods were walked with
+        // their struct; a specialized one walks on first use here.
+        const Signature* sig = resolver_.methodSig(*id, expr.name);
+        if (sig == nullptr) {
             fail(expr.pos, "no such field");
             return errorRef();
         }
-        return member;
+        if (kind == Kind::Struct) {
+            auto origin = resolver_.instantiationOf(*id);
+            if (origin.has_value()) {
+                walkMethodInst(*id, origin->first, expr.name);
+                sig = resolver_.methodSig(*id, expr.name);
+                if (sig == nullptr) {
+                    fail(expr.pos, "checker bug: method vanished");
+                    return errorRef();
+                }
+            }
+        }
+        return TypeRef{ctx_.closure(*sig)};
     }
     if (kind == Kind::Interface) {
         std::optional<DeclId> id = object.type->decl();
@@ -1139,7 +1398,7 @@ TypeRef Checker::checkField(Field& expr) {
 }
 
 TypeRef Checker::checkNewStruct(NewStruct& expr) {
-    TypeRef target = resolver_.resolveType(expr.type.get(), moduleScope_);
+    TypeRef target = resolveHere(expr.type.get());
     if (target.isError()) {
         return errorRef();
     }
@@ -1186,7 +1445,7 @@ TypeRef Checker::checkNewStruct(NewStruct& expr) {
 }
 
 TypeRef Checker::checkNewArray(NewArray& expr) {
-    TypeRef element = resolver_.resolveType(expr.element.get(), moduleScope_);
+    TypeRef element = resolveHere(expr.element.get());
     if (element.isError()) {
         return errorRef();
     }

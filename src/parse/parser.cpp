@@ -1769,6 +1769,14 @@ std::unique_ptr<Expr> Parser::parsePrefix() {
             base = std::make_unique<Ident>(start, std::move(name));
             break;
         }
+        case TokenKind::KwSelf: {
+            // `self` is an ordinary name once parsed: the checker binds it
+            // as a local in every method, constructor and instantiated
+            // generic method body. One spelling, one lookup, no special node.
+            advance();
+            base = std::make_unique<Ident>(start, "self");
+            break;
+        }
         case TokenKind::LParen: {
             advance();
             base = parseExpr();

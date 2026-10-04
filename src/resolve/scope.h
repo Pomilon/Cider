@@ -44,6 +44,9 @@ struct Decl {
     const Expr* init = nullptr;
     // Type only: how many explicit arguments an instantiation takes.
     uint64_t typeParams = 0;
+    // The parameter names, in order, for templates that name them (aliases
+    // need them to bind arguments; structs and functions keep their AST).
+    std::vector<std::string> paramNames;
     // Type only: which nominal Kind (Struct, Class, Interface, Union, Enum).
     Kind nominal = Kind::Error;
     // Alias only: the spelling it names. Non-owning; the AST outlives use.

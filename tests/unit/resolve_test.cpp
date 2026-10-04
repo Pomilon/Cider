@@ -195,6 +195,23 @@ void testGenericArity() {
     check(!bad.ok, "missing arguments fail");
 }
 
+// An applied generic names a real specialization, not a placeholder.
+void testSpecialize() {
+    std::printf("applied generics specialize\n");
+    Resolved r = resolve(
+        "struct Box<T> { var v: T; }\n"
+        "var a: Box<int> = new Box<int> { v: 1 };\n"
+        "var b: Box<u8> = new Box<u8> { v: 2 };\n");
+    check(r.ok, "resolves");
+    const cider::resolve::Decl* ta =
+        r.resolver->lookup(r.resolver->moduleScope(), "a");
+    const cider::resolve::Decl* tb =
+        r.resolver->lookup(r.resolver->moduleScope(), "b");
+    check(ta->type.type->kind() == cider::Kind::Struct, "an applied generic is a struct");
+    check(!(ta->type == tb->type), "two arguments are two types");
+    check(cider::typeName(tb->type) != "?", "not the pending marker");
+}
+
 }  // namespace
 
 int main() {
@@ -210,6 +227,7 @@ int main() {
     testEnum();
     testPrelude();
     testGenericArity();
+    testSpecialize();
     std::printf("\n%d checks, %s\n", checks, failures == 0 ? "all passed" : "FAILURES");
     return failures == 0 ? 0 : 1;
 }

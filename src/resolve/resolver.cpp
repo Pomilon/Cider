@@ -43,6 +43,17 @@ Decl* Resolver::bind(const Scope* scope, DeclKind kind, const std::string& name,
     decl->name = name;
     decl->scope = scope;
     decl->pos = pos;
+    // Single owner of declaration ids: every Decl gets a fresh
+    // (module, index) here, so prelude entries, templates, globals and
+    // specializations can never share one. Callers that alias another
+    // declaration (from-imports) overwrite the id afterwards on purpose.
+    if (moduleIds_.find(scope->module) == moduleIds_.end()) {
+        uint64_t id = moduleIds_.size();
+        moduleIds_[scope->module] = static_cast<uint32_t>(id);
+        moduleNames_[static_cast<uint32_t>(id)] = scope->module;
+        nextIndex_[scope->module] = 0;
+    }
+    decl->id = DeclId{moduleIds_[scope->module], nextIndex_[scope->module]++};
     Decl* out = decl.get();
     decls_.push_back(std::move(decl));
     const_cast<Scope*>(scope)->bindings[name] = out;
@@ -202,6 +213,8 @@ bool Resolver::resolveProgram(Program& program, const std::string& module) {
     if (moduleIds_.find(module) == moduleIds_.end()) {
         uint64_t id = moduleIds_.size();
         moduleIds_[module] = static_cast<uint32_t>(id);
+        moduleNames_[static_cast<uint32_t>(id)] = module;
+        nextIndex_[module] = 0;
     }
     stack_.push_back(module);
     programOf_[module] = &program;
@@ -279,14 +292,12 @@ bool Resolver::resolveModule(const std::string& name) {
 
 void Resolver::declareModule(const std::string& module, Program& program,
                              const Scope* scope) {
-    uint32_t modId = moduleIds_[module];
-    uint64_t next = 0;
+    // Ids come from bind(), the single owner: no manual assignment here.
     for (const std::unique_ptr<cider::Decl>& decl : program.decls) {
         if (const auto* fn = dynamic_cast<const FuncDecl*>(decl.get())) {
             Decl* d = bind(scope, DeclKind::Func, fn->name, fn->pos);
             d->type = TypeRef{ctx_.wildcard()};
-            d->id = DeclId{modId, static_cast<uint32_t>(next)};
-            ++next;
+            d->typeParams = fn->typeParams.size();
             continue;
         }
         if (const auto* ext = dynamic_cast<const ExternFunc*>(decl.get())) {
@@ -321,7 +332,7 @@ void Resolver::declareModule(const std::string& module, Program& program,
         } else if (cd != nullptr) {
             name = cd->name;
             nominal = Kind::Class;
-            tps = 0;
+            tps = cd->typeParams.size();
         } else if (id != nullptr) {
             name = id->name;
             nominal = Kind::Interface;
@@ -336,15 +347,12 @@ void Resolver::declareModule(const std::string& module, Program& program,
             Decl* d = bind(scope, DeclKind::Alias, al->name, al->pos);
             d->type = TypeRef{ctx_.wildcard()};
             d->typeParams = al->typeParams.size();
+            d->paramNames = al->typeParams;
             d->aliasTarget = al->target.get();
-            d->id = DeclId{modId, static_cast<uint32_t>(next)};
-            ++next;
             continue;
         }
         Decl* d = bind(scope, DeclKind::Type, name, decl->pos);
         d->nominal = nominal;
-        d->id = DeclId{modId, static_cast<uint32_t>(next)};
-        ++next;
         d->typeParams = tps;
         d->type = TypeRef{ctx_.nominal(nominal, d->id)};
     }
@@ -641,15 +649,42 @@ TypeRef Resolver::resolveNamed(const NamedType* type, const Scope* scope) {
         return TypeRef{ctx_.typeParam(decl->templateId, decl->paramIndex)};
     }
     if (decl->kind == DeclKind::Alias) {
+        if (!type->args.empty() && type->args.size() != decl->typeParams) {
+            fail(type->pos,
+                 "'" + type->name + "' takes " + std::to_string(decl->typeParams) +
+                     " arguments");
+            return errorRef();
+        }
+        if (decl->typeParams > 0 && type->args.empty()) {
+            fail(type->pos, "'" + type->name + "' takes " +
+                                 std::to_string(decl->typeParams) + " arguments");
+            return errorRef();
+        }
         std::string qualified = home->module + "." + decl->name;
         if (aliasActive_.find(qualified) != aliasActive_.end()) {
             fail(type->pos, "type alias cycle: " + qualified);
             return errorRef();
         }
         aliasActive_.insert(qualified);
-        TypeRef target = resolveType(decl->aliasTarget, home);
+        const Scope* inner = home;
+        if (!decl->paramNames.empty()) {
+            inner = typeParamScope(home, home->module, decl->paramNames, decl->id,
+                                   type->pos);
+        }
+        TypeRef target = resolveType(decl->aliasTarget, inner);
         aliasActive_.erase(qualified);
-        return target;
+        if (target.isError() || type->args.empty()) {
+            return target;
+        }
+        std::vector<TypeRef> argTypes;
+        for (const std::unique_ptr<TypeExpr>& arg : type->args) {
+            TypeRef resolved = resolveType(arg.get(), scope);
+            if (resolved.isError()) {
+                return resolved;
+            }
+            argTypes.push_back(resolved);
+        }
+        return substitute(target, decl->id, argTypes, type->pos);
     }
     if (decl->kind != DeclKind::Type) {
         fail(type->pos, "'" + type->name + "' is not a type");
@@ -662,19 +697,256 @@ TypeRef Resolver::resolveNamed(const NamedType* type, const Scope* scope) {
                      " arguments");
             return errorRef();
         }
+        std::vector<TypeRef> argTypes;
         for (const std::unique_ptr<TypeExpr>& arg : type->args) {
             TypeRef resolved = resolveType(arg.get(), scope);
             if (resolved.isError()) {
                 return resolved;
             }
+            argTypes.push_back(resolved);
         }
-        return TypeRef{ctx_.wildcard()};
+        std::optional<DeclId> spec = instantiate(decl->id, argTypes, type->pos);
+        if (!spec.has_value()) {
+            return errorRef();
+        }
+        return TypeRef{ctx_.nominal(decl->nominal, *spec)};
     }
     if (!type->args.empty()) {
         fail(type->pos, "'" + type->name + "' takes no arguments");
         return errorRef();
     }
     return TypeRef{ctx_.nominal(decl->nominal, decl->id)};
+}
+
+namespace {
+
+// Self-applied templates name the depth instead of hanging: `Box<Box<T>>`
+// nests one level per application, and depth is the only honest bound.
+constexpr int kMaxInstDepth = 16;
+
+std::string specKey(DeclId tmpl, const std::vector<TypeRef>& args) {
+    std::string key =
+        std::to_string(tmpl.module) + "." + std::to_string(tmpl.index) + "<";
+    bool first = true;
+    for (TypeRef arg : args) {
+        if (!first) {
+            key += ",";
+        }
+        first = false;
+        key += typeName(arg);
+    }
+    return key + ">";
+}
+
+}  // namespace
+
+const Decl* Resolver::bindTypeParam(const Scope* scope, const std::string& name,
+                                      DeclId templateId, uint32_t index, Position pos) {
+    Decl* d = bind(scope, DeclKind::TypeParam, name, pos);
+    d->templateId = templateId;
+    d->paramIndex = index;
+    return d;
+}
+
+const Decl* Resolver::declById(DeclId id) const {
+    for (const std::unique_ptr<Decl>& decl : decls_) {
+        if (decl->id.module == id.module && decl->id.index == id.index) {
+            return decl.get();
+        }
+    }
+    return nullptr;
+}
+
+TypeRef Resolver::substitute(TypeRef type, DeclId tmpl, const std::vector<TypeRef>& args,
+                             Position pos) {
+    if (type.isError()) {
+        return type;
+    }
+    Kind kind = type.type->kind();
+    if (kind == Kind::TypeParam) {
+        const TypeParamPayload& payload = std::get<TypeParamPayload>(type.type->payload());
+        if (payload.decl.module == tmpl.module && payload.decl.index == tmpl.index &&
+            payload.index < args.size()) {
+            return substitute(args[payload.index], tmpl, args, pos);
+        }
+        return type;
+    }
+    if (kind == Kind::Pointer) {
+        const Type* inner = type.type->pointee();
+        TypeRef sub = substitute(TypeRef{inner}, tmpl, args, pos);
+        if (sub.isError()) {
+            return sub;
+        }
+        return TypeRef{ctx_.pointer(sub.type)};
+    }
+    if (kind == Kind::Array) {
+        const Type* inner = type.type->element();
+        TypeRef sub = substitute(TypeRef{inner}, tmpl, args, pos);
+        if (sub.isError()) {
+            return sub;
+        }
+        std::optional<int64_t> length = type.type->length();
+        if (!length.has_value()) {
+            return errorRef();
+        }
+        return TypeRef{ctx_.array(sub.type, *length)};
+    }
+    if (kind == Kind::Slice) {
+        const Type* inner = type.type->element();
+        TypeRef sub = substitute(TypeRef{inner}, tmpl, args, pos);
+        if (sub.isError()) {
+            return sub;
+        }
+        return TypeRef{ctx_.slice(sub.type)};
+    }
+    if (kind == Kind::Closure || kind == Kind::FunctionPtr) {
+        const Signature& sig = *type.type->signature();
+        Signature out = substSig(sig, tmpl, args, pos);
+        if (kind == Kind::Closure) {
+            return TypeRef{ctx_.closure(std::move(out))};
+        }
+        return TypeRef{ctx_.functionPtr(std::move(out))};
+    }
+    if (kind == Kind::Struct || kind == Kind::Class || kind == Kind::Interface ||
+        kind == Kind::Union || kind == Kind::Enum) {
+        std::optional<DeclId> id = type.type->decl();
+        if (!id.has_value()) {
+            return errorRef();
+        }
+        std::string key =
+            std::to_string(id->module) + "." + std::to_string(id->index);
+        auto origin = specOrigin_.find(key);
+        if (origin == specOrigin_.end()) {
+            return type;
+        }
+        std::vector<TypeRef> subArgs;
+        for (TypeRef arg : origin->second.second) {
+            TypeRef sub = substitute(arg, tmpl, args, pos);
+            if (sub.isError()) {
+                return sub;
+            }
+            subArgs.push_back(sub);
+        }
+        std::optional<DeclId> spec = instantiate(origin->second.first, subArgs, pos);
+        if (!spec.has_value()) {
+            return errorRef();
+        }
+        return TypeRef{ctx_.nominal(kind, *spec)};
+    }
+    return type;
+}
+
+Signature Resolver::substSig(const Signature& sig, DeclId tmpl,
+                             const std::vector<TypeRef>& args, Position pos) {
+    std::vector<Parameter> params;
+    for (const Parameter& param : sig.parameters()) {
+        TypeRef sub = substitute(TypeRef{param.type}, tmpl, args, pos);
+        Parameter out;
+        out.type = sub.isError() ? nullptr : sub.type;
+        out.isMutable = param.isMutable;
+        params.push_back(out);
+    }
+    const Type* ret = sig.returnType();
+    TypeRef subRet{ret};
+    if (ret != nullptr) {
+        subRet = substitute(TypeRef{ret}, tmpl, args, pos);
+    }
+    return Signature(std::move(params), subRet.isError() ? nullptr : subRet.type,
+                     sig.abi());
+}
+
+const Signature* Resolver::funcSig(DeclId id) const {
+    auto found = funcSigs_.find(std::to_string(id.module) + "." + std::to_string(id.index));
+    return found == funcSigs_.end() ? nullptr : &found->second;
+}
+
+std::optional<std::pair<DeclId, std::vector<TypeRef>>> Resolver::instantiationOf(
+    DeclId spec) const {
+    auto found = specOrigin_.find(std::to_string(spec.module) + "." +
+                                  std::to_string(spec.index));
+    if (found == specOrigin_.end()) {
+        return std::nullopt;
+    }
+    return found->second;
+}
+
+bool Resolver::isSpecialization(DeclId id) const {
+    return specOrigin_.find(std::to_string(id.module) + "." + std::to_string(id.index)) !=
+           specOrigin_.end();
+}
+
+std::optional<DeclId> Resolver::instantiate(DeclId tmpl, const std::vector<TypeRef>& args,
+                                            Position pos) {
+    std::string key = specKey(tmpl, args);
+    auto cached = specCache_.find(key);
+    if (cached != specCache_.end()) {
+        return cached->second;
+    }
+    if (instDepth_ >= kMaxInstDepth) {
+        fail(pos, "instantiation too deep");
+        return std::nullopt;
+    }
+    const Decl* templateDecl = declById(tmpl);
+    if (templateDecl == nullptr) {
+        fail(pos, "checker bug: template was never declared");
+        return std::nullopt;
+    }
+    auto modName = moduleNames_.find(tmpl.module);
+    if (modName == moduleNames_.end()) {
+        fail(pos, "checker bug: template module is unknown");
+        return std::nullopt;
+    }
+    DeclId id{tmpl.module, nextIndex_[modName->second]++};
+    // Cached before populating: a self-application re-enters here and must
+    // find this id rather than recurse forever.
+    specCache_[key] = id;
+    specOrigin_[std::to_string(id.module) + "." + std::to_string(id.index)] =
+        std::make_pair(tmpl, args);
+    ++instDepth_;
+    if (templateDecl->kind == DeclKind::Type &&
+        (templateDecl->nominal == Kind::Struct || templateDecl->nominal == Kind::Class)) {
+        std::string from = std::to_string(tmpl.module) + "." + std::to_string(tmpl.index);
+        std::string into = std::to_string(id.module) + "." + std::to_string(id.index);
+        for (const std::string& field : fieldNames(tmpl)) {
+            TypeRef member = fieldType(tmpl, field);
+            TypeRef sub = substitute(member, tmpl, args, pos);
+            if (!sub.isError()) {
+                fieldTypes_[into + "." + field] = sub;
+                fieldLists_[into].push_back(field);
+            }
+        }
+        for (const std::string& method : methodNames(tmpl)) {
+            const Signature* sig = methodSig(tmpl, method);
+            if (sig == nullptr) {
+                continue;
+            }
+            methodSigs_[into + "." + method] = substSig(*sig, tmpl, args, pos);
+            methodLists_[into].push_back(method);
+        }
+        // Bases substitute like members: a base recorded as nominal of an
+        // earlier specialization re-originates through specOrigin_ inside
+        // substitute, so `B<T>` becomes `B<int>` when C does.
+        auto bases = baseTable_.find(from);
+        if (bases != baseTable_.end()) {
+            for (DeclId baseId : bases->second) {
+                TypeRef sub = substitute(TypeRef{ctx_.nominal(Kind::Class, baseId)}, tmpl,
+                                         args, pos);
+                if (sub.isError()) {
+                    continue;
+                }
+                std::optional<DeclId> subId = sub.type->decl();
+                if (subId.has_value()) {
+                    baseTable_[into].push_back(*subId);
+                }
+            }
+        }
+    }
+    if (templateDecl->kind == DeclKind::Func) {
+        funcSigs_[std::to_string(id.module) + "." + std::to_string(id.index)] =
+            substSig(templateDecl->sig, tmpl, args, pos);
+    }
+    --instDepth_;
+    return id;
 }
 
 TypeRef Resolver::resolveSignature(const FuncSigType* type, const Scope* scope,

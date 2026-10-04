@@ -99,6 +99,40 @@ public:
     // function, called from two phases, never two rules.
     Signature buildSignature(const std::vector<Param>& params, const TypeExpr* returns,
                              const Scope* scope, bool& failed);
+    // Binds one type parameter into a scope, for the checker's generic body
+    // walks. The resolver owns every Decl; the checker borrows them.
+    const Decl* bindTypeParam(const Scope* scope, const std::string& name,
+                              DeclId templateId, uint32_t index, Position pos);
+    // A child scope for one generic instantiation's parameters. Public for
+    // the same reason: the checker walks template bodies under it.
+    const Scope* typeParamScope(const Scope* parent, const std::string& module,
+                                const std::vector<std::string>& names, DeclId templateId,
+                                Position pos);
+    // Specializes a template: struct, class, alias or function. Answers a
+    // fresh declaration id whose member tables carry substituted types, and
+    // caches it so one argument list means one specialization. Guards its own
+    // recursion: self-applied templates name the depth instead of hanging.
+    std::optional<DeclId> instantiate(DeclId tmpl, const std::vector<TypeRef>& args,
+                                    Position pos);
+    // A specialized function's substituted signature, by declaration id.
+    // Null when the id names no specialization this table holds.
+    const Signature* funcSig(DeclId id) const;
+    // Where a specialization came from: template id plus argument types.
+    // Empty when the id names no specialization this table holds.
+    std::optional<std::pair<DeclId, std::vector<TypeRef>>> instantiationOf(
+        DeclId spec) const;
+    // True when the declaration id names a template instantiation.
+    bool isSpecialization(DeclId id) const;
+    // The declaration for an id, by scan. The table is small and lookups are
+    // rare (templates and specializations only).
+    const Decl* declById(DeclId id) const;
+    // Replaces every TypeParam of one template with its argument types.
+    // Nominal specializations re-originate: `Box<T>` inside `C<T>` becomes
+    // `Box<int>` when C does, through specOrigin_ rather than spellings.
+    TypeRef substitute(TypeRef type, DeclId tmpl, const std::vector<TypeRef>& args,
+                       Position pos);
+    Signature substSig(const Signature& sig, DeclId tmpl,
+                       const std::vector<TypeRef>& args, Position pos);
 
 private:
     void fail(Position pos, const std::string& message);
@@ -116,9 +150,6 @@ private:
     Signature buildFuncSig(const std::vector<std::unique_ptr<TypeExpr>>& params,
                            const TypeExpr* returns, const Scope* scope, bool& failed);
     void bindPrelude(const Scope* scope, Position pos);
-    const Scope* typeParamScope(const Scope* parent, const std::string& module,
-                                const std::vector<std::string>& names, DeclId templateId,
-                                Position pos);
     static std::vector<const TypeExpr*> rawBases(const ClassDecl* decl);
     std::string qualify(const std::string& bare) const;
 
@@ -128,6 +159,19 @@ private:
     std::vector<std::unique_ptr<Scope>> scopes_;
     std::unordered_map<std::string, const Scope*> modules_;
     std::unordered_map<std::string, uint32_t> moduleIds_;
+    std::unordered_map<uint32_t, std::string> moduleNames_;
+    // Fresh declaration ids per module, shared by declarations and template
+    // specializations so the two can never collide.
+    std::unordered_map<std::string, uint32_t> nextIndex_;
+    // Where a specialization came from: template id plus argument types.
+    // Substitution composes through this table instead of re-resolving
+    // spellings the header pass no longer holds.
+    std::unordered_map<std::string, std::pair<DeclId, std::vector<TypeRef>>> specOrigin_;
+    // One argument list means one specialization.
+    std::unordered_map<std::string, DeclId> specCache_;
+    // Substituted signatures of specialized functions, by declaration id.
+    std::unordered_map<std::string, Signature> funcSigs_;
+    int instDepth_ = 0;
     std::unordered_map<std::string, std::unique_ptr<Program>> programs_;
     std::unordered_map<std::string, Program*> programOf_;
     std::unordered_map<const Node*, TypeRef> nodeTypes_;

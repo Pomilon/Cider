@@ -12,8 +12,10 @@
 #define CIDER_CHECK_CHECKER_H
 
 #include <memory>
+#include <optional>
 #include <string>
 #include <unordered_map>
+#include <unordered_set>
 #include <vector>
 
 #include "ast/ast.h"
@@ -158,11 +160,50 @@ private:
 
     // SEMANTICS.md §2.3: the common type of two operands, stated as a type.
     TypeRef commonType(TypeRef lhs, TypeRef rhs, Position pos);
+    // Resolves a spelling in the current type scope, then substitutes the
+    // active instantiation through it. Outside a generic body this is
+    // resolveType; inside one, `T` and `Box<T>` answer concrete types.
+    TypeRef resolveHere(const TypeExpr* spelling);
+    // Replaces TypeParam payloads of one template with its arguments.
+    // Anything else passes through unchanged (same pointer, no rebuild).
+    TypeRef substDeep(TypeRef type);
     // SEMANTICS.md §5.4: the six implicit conversions, and nothing else.
     bool checkCompatible(Position pos, const Expr* fromExpr, TypeRef from, TypeRef to);
+    // Checks a generic call: resolves arguments, instantiates, checks them
+    // against the substituted signature, and walks the template body once
+    // with the arguments substituted. Answers the substituted return type.
+    TypeRef checkGenericCall(Call& expr, const resolve::Decl* decl);
+    // Walks one specialized method body with its arguments substituted.
+    // No-op when this specialization already walked. Generic init bodies
+    // wait with the rest of init checking: construction checks arity and
+    // types through the tables, which is what this slice promises.
+    void walkMethodInst(DeclId spec, DeclId tmpl, const std::string& method);
+    // The template AST behind a function name, for instantiation walks.
+    const FuncDecl* funcSpelling(const std::string& name) const;
     bool implementsAll(DeclId concrete, DeclId iface, Position pos);
     bool isDerivedFrom(DeclId derived, DeclId base) const;
     bool castRowOk(TypeRef from, TypeRef to) const;
+
+    // Templates by name, for instantiation body walks. Non-owning; the
+    // Program outlives every use.
+    std::unordered_map<std::string, const FuncDecl*> funcs_;
+    std::unordered_map<std::string, const MethodDecl*> methods_;
+    std::unordered_map<std::string, const StructDecl*> structs_;
+    // The active generic instantiation, if any. Single frame: the AST has no
+    // nested generic functions, so one is enough.
+    struct ActiveInst {
+        DeclId tmpl;
+        std::vector<TypeRef> args;
+        std::vector<std::string> names;
+    };
+    std::optional<ActiveInst> active_;
+    // Instantiations already body-walked, by specialization key. A recursive
+    // call into the same instantiation checks against its signature without
+    // re-walking; anything else would loop the compiler on recursive code.
+    std::unordered_set<std::string> walked_;
+    // Types resolve here rather than at module scope during generic walks,
+    // where the template's parameters are bound.
+    const resolve::Scope* typeScope_ = nullptr;
 
     TypeContext& ctx_;
     resolve::Resolver& resolver_;

@@ -70,7 +70,15 @@ bool runFront(const std::string& file, const std::string& text, Pipeline& pipe) 
     check::Checker checker(*pipe.types, resolver);
     lower::Lowerer lowerer(*pipe.types, resolver, checker);
     pipe.module = lowerer.lowerModule("main", *pipe.program);
-    if (pipe.module == nullptr) {
+    // The checker calls back into the resolver (local spellings,
+    // instantiations), so resolve diagnostics can appear after the header
+    // pass succeeded. A successful resolve records none, so anything here
+    // is new and must fail the build rather than vanish.
+    bool resolveFailed = !resolver.errors().empty();
+    if (pipe.module == nullptr || resolveFailed) {
+        for (const resolve::ResolveError& error : resolver.errors()) {
+            pipe.diagnostic += at(error.pos) + ": " + error.message + "\n";
+        }
         for (const check::CheckError& error : checker.errors()) {
             pipe.diagnostic += at(error.pos) + ": " + error.message + "\n";
         }

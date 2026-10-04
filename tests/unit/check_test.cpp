@@ -143,6 +143,40 @@ void testControl() {
     check(!brk.ok && brk.stage == "check", "break outside a loop fails");
 }
 
+// A generic call checks its body with the arguments substituted.
+void testGenericCall() {
+    std::printf("generic calls substitute\n");
+    Checked good = check(
+        "func max<T>(a: T, b: T) -> T { return a > b ? a : b; }\n"
+        "func main() -> int { return max::<int>(3, 9); }\n");
+    check(good.ok, "checks: " + good.stage);
+    Checked bad = check(
+        "func max<T>(a: T, b: T) -> T { return a > b ? a : b; }\n"
+        "func main() -> int { return max::<int>(3, \"x\"); }\n");
+    check(!bad.ok && bad.stage == "check", "a wrong argument fails");
+    Checked bare = check(
+        "func max<T>(a: T, b: T) -> T { return a > b ? a : b; }\n"
+        "func main() -> int { return max; }\n");
+    check(!bare.ok && bare.stage == "check", "a bare generic name fails");
+}
+
+// A generic struct stores per-instantiation members; methods check too.
+void testGenericStruct() {
+    std::printf("generic structs specialize\n");
+    Checked good = check(
+        "struct Box<T> { var v: T; }\n"
+        "func main() -> int { var b: Box<int> = new Box<int> { v: 41 }; return b.v + 1; }\n");
+    check(good.ok, "checks: " + good.stage);
+    Checked method = check(
+        "struct Box<T> { var v: T; func get() -> T { return (*self).v; } }\n"
+        "func main() -> int { var b: Box<int> = new Box<int> { v: 41 }; return b.get(); }\n");
+    check(method.ok, "methods specialize: " + method.stage);
+    Checked bareLocal = check(
+        "struct Box<T> { var v: T; }\n"
+        "func main() -> int { var b: Box = new Box<int> { v: 1 }; return 0; }\n");
+    check(!bareLocal.ok && bareLocal.stage == "check", "a bare generic local fails");
+}
+
 }  // namespace
 
 int main() {
@@ -151,6 +185,8 @@ int main() {
     testNames();
     testCalls();
     testInterface();
+    testGenericCall();
+    testGenericStruct();
     testControl();
     std::printf("\n%d checks, %s\n", checks, failures == 0 ? "all passed" : "FAILURES");
     return failures == 0 ? 0 : 1;
