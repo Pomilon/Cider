@@ -318,6 +318,54 @@ void testMultiWordAssign() {
     check(r.ok, "element store lowers");
 }
 
+// A union constructs its one live member and writes the tag; a member read
+// checks the tag and traps on a mismatch, so the IR holds a Trap
+// terminator. hasM is the same check answered as a boolean, with no trap.
+void testUnion() {
+    std::printf("unions construct, check, and trap\n");
+    Lowered r = lower(
+        "union Value { var i: int; var s: string; }\n"
+        "func main() -> int {\n"
+        "    var v: Value = new Value { i: 42 };\n"
+        "    return v.i;\n"
+        "}\n");
+    check(r.ok, "union construction lowers");
+    if (r.ok) {
+        const cider::ir::Function* main = find(r.module.get(), "main");
+        check(main != nullptr, "main is emitted");
+        int traps = 0;
+        int conds = 0;
+        for (const cider::ir::Block& block : main->blocks) {
+            if (block.term.term == cider::ir::Term::Trap) {
+                ++traps;
+            }
+            if (block.term.term == cider::ir::Term::CondBr) {
+                ++conds;
+            }
+        }
+        check(traps == 1, "a tag mismatch traps");
+        check(conds >= 1, "the tag is branched on");
+    }
+    Lowered has = lower(
+        "union Value { var i: int; var s: string; }\n"
+        "func main() -> int {\n"
+        "    var v: Value = new Value { i: 1 };\n"
+        "    if (v.hasI()) { return 7; }\n"
+        "    return 0;\n"
+        "}\n");
+    check(has.ok, "hasM lowers");
+    if (has.ok) {
+        const cider::ir::Function* main = find(has.module.get(), "main");
+        int traps = 0;
+        for (const cider::ir::Block& block : main->blocks) {
+            if (block.term.term == cider::ir::Term::Trap) {
+                ++traps;
+            }
+        }
+        check(traps == 0, "asking never traps");
+    }
+}
+
 void testNotYetLowered() {
     std::printf("unlowered constructs are refused\n");
     Lowered r = lower("func f(x: int) -> void { var s: string = \"v = {x}\"; }\n");
@@ -340,6 +388,7 @@ int main() {
     testFieldOverIndex();
     testStraddlingRead();
     testMultiWordAssign();
+    testUnion();
     testNotYetLowered();
     std::printf("\n%d checks, %s\n", checks, failures == 0 ? "all passed" : "FAILURES");
     return failures == 0 ? 0 : 1;

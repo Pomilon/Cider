@@ -121,12 +121,23 @@ public:
     // A place something lives: local slots or one global label, plus a byte
     // offset into it for fields and elements. Nested field chains accumulate
     // the offset while the slots stay the base value's.
+    //
+    // A store through a union member also writes the union's tag: every union
+    // crossed on the way to the member records its tag offset (from the
+    // base) and the member's index, outermost first. A read ignores these;
+    // a store writes each tag after the payload, because a write sets the
+    // tag as a consequence (TYPES.md 4.6).
+    struct TagWrite {
+        int64_t off = 0;
+        int64_t index = 0;
+    };
     struct Place {
         std::vector<ir::Value> slots;
         std::string global;
         TypeRef type;
         int64_t off = 0;
         bool isVolatile = false;
+        std::vector<TagWrite> tagWrites;
     };
     // Names a place: identifiers, and field chains over them. Anything else
     // (a call result, arithmetic) has no address and is refused.
@@ -152,9 +163,23 @@ public:
     // copies guess neighbor bytes.
     void constructStruct(const std::vector<ir::Value>& slots, const NewStruct& n);
     void constructArray(const std::vector<ir::Value>& slots, const NewArray& n);
+    // A union constructs its one live member at offset 0 and writes the
+    // member's index to the tag after the payload (TYPES.md 4.6).
+    void constructUnion(const std::vector<ir::Value>& slots, const NewStruct& n);
+    // Loads a union's tag and compares it to the expected member index. The
+    // answer is one boolean word: true when the member is live.
+    ir::Value emitTagCheck(Position pos, const Place& base, int64_t tagOff, int64_t index);
+    // Branches to a union-tag trap when `ok` is false, continuing in a fresh
+    // block that the caller owns: instructions the caller emits next land
+    // past the check, never on the trap path.
+    void emitTagTrap(Position pos, ir::Value ok);
     std::vector<ir::Value> lowerNewStruct(const NewStruct& n);
     std::vector<ir::Value> lowerNewArray(const NewArray& n);
     std::vector<ir::Value> lowerField(const Field& n);
+    // A union member read checks the tag first: mismatch traps, and only the
+    // live member's bytes load (TYPES.md 4.6). The tag is never statically
+    // known here, so every read checks; static tracking is a later slice.
+    std::vector<ir::Value> lowerUnionField(const Field& n, const Place& base);
     std::vector<ir::Value> lowerIndex(const Index& n);
     void storeIndex(const Index& target, const std::vector<ir::Value>& words);
     // One arithmetic operation, shared by Binary and compound assignment so

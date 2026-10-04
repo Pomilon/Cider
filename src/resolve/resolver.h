@@ -83,15 +83,27 @@ public:
     // The byte offset of a field within its struct, laid out in declaration
     // order with each field aligned to its own alignment (TYPES.md 3.4). -1
     // when the struct, the field, or any size on the way there is unknown.
-    int64_t fieldOffset(DeclId id, const std::string& name) const;
-    // A struct's total size: fields plus padding, rounded to its own
+    int64_t fieldOffset(DeclId id, const std::string& name) const;    // A struct's total size: fields plus padding, rounded to its own
     // alignment, with no padding beyond that (TYPES.md 3.3). -1 when unknown.
-    // Only structs: classes, unions and interfaces are refused elsewhere.
+    // Only structs: classes and interfaces are refused elsewhere.
     int64_t structSize(DeclId id) const;
-    // A type's size when the type may name a struct: plain types answer from
-    // the type itself, a struct answers from its declaration. -1 when
-    // unknown. Classes, unions and interfaces are not sized here — their
-    // layouts belong to later slices, and a guess would miscompile.
+    // A union member's index in declaration order: the tag value written on
+    // construction and compared on a checked read (TYPES.md 4.6). -1 when
+    // the union or the member is unknown.
+    int64_t unionMemberIndex(DeclId id, const std::string& name) const;
+    // The byte offset of a union's tag: the payload padded to its own
+    // alignment (TYPES.md 3.4a, layout::unionTagOffset). -1 when unknown.
+    int64_t unionTagOffset(DeclId id) const;
+    // The member a hasM name asks about: "hasI" names member "i"
+    // (TYPES.md 4.6). Empty when the name is not a hasM spelling of a
+    // member. One function so the checker and the lowerer cannot disagree
+    // about the spelling.
+    std::string unionHasMember(DeclId id, const std::string& hasName) const;
+    // A type's size when the type may name a struct or union: plain types
+    // answer from the type itself, a struct or union answers from its
+    // declaration. -1 when unknown. Classes and interfaces are not sized
+    // here — their layouts belong to later slices, and a guess would
+    // miscompile.
     int64_t nominalSize(const Type* type) const;
     // The same recursion for alignment.
     int64_t nominalAlign(const Type* type) const;
@@ -164,6 +176,11 @@ private:
     int64_t nominalAlignImpl(const Type* type, std::unordered_set<std::string>& seen) const;
     int64_t structSizeImpl(DeclId id, std::unordered_set<std::string>& seen) const;
     int64_t structAlignImpl(DeclId id, std::unordered_set<std::string>& seen) const;
+    // A union's payload is its widest member, every member at offset 0, the
+    // tag after the payload padded to the payload's alignment (TYPES.md
+    // 3.4a). Same visited-set rule as structs: recursive unions are -1.
+    int64_t unionSizeImpl(DeclId id, std::unordered_set<std::string>& seen) const;
+    int64_t unionAlignImpl(DeclId id, std::unordered_set<std::string>& seen) const;
     static std::vector<const TypeExpr*> rawBases(const ClassDecl* decl);
     std::string qualify(const std::string& bare) const;
 

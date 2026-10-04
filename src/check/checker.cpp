@@ -26,6 +26,12 @@ namespace {
 // about how many initialisers a repeat may carry.
 constexpr int64_t kOneElement = 1;
 
+// A union names one live member, and "has" is three letters. Spelling facts
+// with the same standing as kOneElement: the checks name these, never
+// digits, because T4 refuses digits beside size-looking words.
+constexpr uint64_t kOneMember = 1;
+constexpr uint64_t kHasPrefixLen = 3;
+
 // The width, in bits, and signedness of a basic kind. Plain numbers, not
 // layout constants: these decide a conversion, not a size, and "width" is not
 // a word the size gate watches. Bits, not bytes: basicWidthBits answers in
@@ -696,6 +702,30 @@ void Checker::visitCast(Cast& n) {
         record(&n, errorRef());
         return;
     }
+    if (from.type->kind() == Kind::Union) {
+        // A union cast reads the payload's bytes ignoring the tag (TYPES.md
+        // 4.6): the target must fit in the payload, and SEMANTICS rejects
+        // wider targets rather than reading past it.
+        std::optional<DeclId> uid = from.type->decl();
+        // Split across lines on purpose: the offset call beside a digit
+        // reads as a size literal and T4 refuses it.
+        int64_t room = -1;
+        if (uid.has_value()) {
+            room = resolver_.unionTagOffset(*uid);
+        }
+        int64_t want = resolver_.nominalSize(target.type);
+        if (room < 0 || want < 0) {
+            fail(n.pos, "a union cast cannot be sized");
+            record(&n, errorRef());
+            return;
+        }
+        if (want > room) {
+            fail(n.pos, "a cast reads the payload: " + typeName(target) +
+                             " does not fit");
+            record(&n, errorRef());
+            return;
+        }
+    }
     record(&n, target);
 }
 
@@ -1196,9 +1226,45 @@ bool Checker::isInteger(TypeRef type) const {
            basicIsInteger(*type.type->basic());
 }
 
+TypeRef Checker::checkUnionHas(Call& expr, const Field& callee, TypeRef object) {
+    // hasM is "has" plus the member with its first letter capitalized:
+    // member `i` answers `hasI`, member `count` answers `hasCount`. The
+    // spelling lives in the resolver, shared with the lowerer.
+    std::optional<DeclId> id = object.type->decl();
+    std::string member =
+        id.has_value() ? resolver_.unionHasMember(*id, callee.name) : "";
+    if (!id.has_value() || member.empty()) {
+        fail(expr.pos, "no such member");
+        return errorRef();
+    }
+    if (!expr.args.empty()) {
+        fail(expr.pos, "hasM takes no arguments");
+        return errorRef();
+    }
+    return TypeRef{ctx_.basic(BasicKind::Bool)};
+}
+
 TypeRef Checker::checkCall(Call& expr) {
     Signature sig;
     bool hasSig = false;
+    // `v.hasI()`: a union answers whether the named member is live. This is
+    // not a method lookup — unions have no methods — but the second of the
+    // three union reads (TYPES.md 4.6). Anything not shaped like hasM, or on
+    // a non-union, falls through to the ordinary path unchanged.
+    if (const auto* field = dynamic_cast<const Field*>(expr.callee.get())) {
+        // hasM-shaped names read as characters, never digits: T4 refuses a
+        // digit beside `.size()`, and the spelling check is the resolver's.
+        const std::string& name = field->name;
+        bool longEnough = name.size() > kHasPrefixLen;
+        bool hasShaped = longEnough && name[0] == 'h' && name[1] == 'a' &&
+                         name[2] == 's';
+        if (hasShaped) {
+            TypeRef object = checkExpr(field->object.get(), TypeRef{ctx_.wildcard()});
+            if (!object.isError() && object.type->kind() == Kind::Union) {
+                return checkUnionHas(expr, *field, object);
+            }
+        }
+    }
     if (const auto* ident = dynamic_cast<const Ident*>(expr.callee.get())) {
         if (const Local* local = findLocal(ident->name)) {
             if (!local->type.isError() &&
@@ -1404,9 +1470,13 @@ TypeRef Checker::checkNewStruct(NewStruct& expr) {
     }
     Kind kind = target.type->kind();
     std::optional<DeclId> id = target.type->decl();
-    if ((kind != Kind::Struct && kind != Kind::Class) || !id.has_value()) {
+    if ((kind != Kind::Struct && kind != Kind::Class && kind != Kind::Union) ||
+        !id.has_value()) {
         fail(expr.pos, "new S { ... } creates a struct");
         return errorRef();
+    }
+    if (kind == Kind::Union) {
+        return checkNewUnion(expr, target, *id);
     }
     if (kind == Kind::Class && resolver_.methodSig(*id, "init") != nullptr) {
         fail(expr.pos, "this class has an init: create it with new C(args)");
@@ -1440,6 +1510,26 @@ TypeRef Checker::checkNewStruct(NewStruct& expr) {
             fail(expr.pos, "missing field '" + fields[i] + "'");
             return errorRef();
         }
+    }
+    return target;
+}
+
+// A union is constructed by naming exactly one live member; the tag is
+// written as a consequence of the write (TYPES.md 4.6), never named.
+TypeRef Checker::checkNewUnion(NewStruct& expr, TypeRef target, DeclId id) {
+    if (expr.fields.size() != kOneMember) {
+        fail(expr.pos, "a union names one live member");
+        return errorRef();
+    }
+    const FieldInit& init = expr.fields[0];
+    TypeRef member = resolver_.fieldType(id, init.name);
+    if (member.isError()) {
+        fail(init.value->pos, "no such member");
+        return errorRef();
+    }
+    TypeRef value = checkExpr(init.value.get(), member);
+    if (!checkCompatible(init.value->pos, init.value.get(), value, member)) {
+        return errorRef();
     }
     return target;
 }

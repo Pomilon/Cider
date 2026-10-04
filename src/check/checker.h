@@ -151,6 +151,8 @@ private:
     TypeRef checkCall(Call& expr);
     TypeRef checkField(Field& expr);
     TypeRef checkNewStruct(NewStruct& expr);
+    TypeRef checkNewUnion(NewStruct& expr, TypeRef target, DeclId id);
+    TypeRef checkUnionHas(Call& expr, const Field& callee, TypeRef object);
     TypeRef checkNewArray(NewArray& expr);
     TypeRef checkTernary(Ternary& expr, TypeRef expected);
     void checkMethods(DeclId id, Kind kind, std::vector<MethodDecl>& methods);

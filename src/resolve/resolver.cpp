@@ -7,6 +7,8 @@
 
 #include "resolve/resolver.h"
 
+#include <cctype>
+
 #include "layout.h"
 
 #include "types/context.h"
@@ -20,6 +22,15 @@ Resolver::Resolver(TypeContext& ctx, ModuleLoader load)
 void Resolver::fail(Position pos, const std::string& message) {
     errors_.push_back(ResolveError{pos, message});
     failed_ = true;
+}
+
+namespace {
+
+// The length of the "has" in a hasM name. A spelling fact, not a size: it
+// bounds a name check so three characters are subscriptable, and T4 refuses
+// digits beside size-looking words, so the number lives here.
+constexpr uint64_t kHasPrefixLen = 3;
+
 }
 
 const Scope* Resolver::makeScope(const Scope* parent, const std::string& module) {
@@ -105,6 +116,13 @@ int64_t Resolver::fieldOffset(DeclId id, const std::string& name) const {
     // beside them without reading as layout facts.
     std::unordered_set<std::string> seen;
     seen.insert(declKey(id));
+    // Union members all begin at offset 0; the tag lives after the payload
+    // (TYPES.md 3.4a) and is addressed by unionTagOffset, never here.
+    if (const Decl* self = declById(id)) {
+        if (self->nominal == Kind::Union) {
+            return unionMemberIndex(id, name) >= 0 ? 0 : -1;
+        }
+    }
     int64_t at = 0;
     for (const std::string& field : fieldNames(id)) {
         TypeRef type = fieldType(id, field);
@@ -165,6 +183,15 @@ int64_t Resolver::nominalSizeImpl(const Type* type,
         seen.erase(declKey(*id));
         return out;
     }
+    if (type->kind() == Kind::Union) {
+        std::optional<DeclId> id = type->decl();
+        if (!id.has_value() || !seen.insert(declKey(*id)).second) {
+            return -1;
+        }
+        int64_t out = unionSizeImpl(*id, seen);
+        seen.erase(declKey(*id));
+        return out;
+    }
     return typeSize(type);
 }
 
@@ -182,6 +209,15 @@ int64_t Resolver::nominalAlignImpl(const Type* type,
             return -1;
         }
         int64_t out = structAlignImpl(*id, seen);
+        seen.erase(declKey(*id));
+        return out;
+    }
+    if (type->kind() == Kind::Union) {
+        std::optional<DeclId> id = type->decl();
+        if (!id.has_value() || !seen.insert(declKey(*id)).second) {
+            return -1;
+        }
+        int64_t out = unionAlignImpl(*id, seen);
         seen.erase(declKey(*id));
         return out;
     }
@@ -226,6 +262,106 @@ int64_t Resolver::structAlignImpl(DeclId id, std::unordered_set<std::string>& se
         }
     }
     return multiple;
+}
+
+int64_t Resolver::unionSizeImpl(DeclId id, std::unordered_set<std::string>& seen) const {
+    int64_t widest = 0;
+    int64_t multiple = 1;
+    for (const std::string& member : fieldNames(id)) {
+        TypeRef type = fieldType(id, member);
+        if (type.isError()) {
+            return -1;
+        }
+        int64_t memberMultiple = nominalAlignImpl(type.type, seen);
+        int64_t bytes = nominalSizeImpl(type.type, seen);
+        if (memberMultiple <= 0 || bytes < 0) {
+            return -1;
+        }
+        if (memberMultiple > multiple) {
+            multiple = memberMultiple;
+        }
+        if (bytes > widest) {
+            widest = bytes;
+        }
+    }
+    return layout::unionSize(widest, multiple);
+}
+
+int64_t Resolver::unionAlignImpl(DeclId id, std::unordered_set<std::string>& seen) const {
+    int64_t multiple = 1;
+    for (const std::string& member : fieldNames(id)) {
+        TypeRef type = fieldType(id, member);
+        if (type.isError()) {
+            return -1;
+        }
+        int64_t memberMultiple = nominalAlignImpl(type.type, seen);
+        if (memberMultiple <= 0) {
+            return -1;
+        }
+        if (memberMultiple > multiple) {
+            multiple = memberMultiple;
+        }
+    }
+    return multiple;
+}
+
+int64_t Resolver::unionMemberIndex(DeclId id, const std::string& name) const {
+    const std::vector<std::string> members = fieldNames(id);
+    for (uint64_t i = 0; i < static_cast<uint64_t>(members.size()); ++i) {
+        if (members[i] == name) {
+            return static_cast<int64_t>(i);
+        }
+    }
+    return -1;
+}
+
+int64_t Resolver::unionTagOffset(DeclId id) const {
+    std::unordered_set<std::string> seen;
+    seen.insert(declKey(id));
+    int64_t widest = 0;
+    int64_t multiple = 1;
+    for (const std::string& member : fieldNames(id)) {
+        TypeRef type = fieldType(id, member);
+        if (type.isError()) {
+            return -1;
+        }
+        int64_t memberMultiple = nominalAlignImpl(type.type, seen);
+        int64_t bytes = nominalSizeImpl(type.type, seen);
+        if (memberMultiple <= 0 || bytes < 0) {
+            return -1;
+        }
+        if (memberMultiple > multiple) {
+            multiple = memberMultiple;
+        }
+        if (bytes > widest) {
+            widest = bytes;
+        }
+    }
+    return layout::unionTagOffset(widest, multiple);
+}
+
+std::string Resolver::unionHasMember(DeclId id, const std::string& hasName) const {
+    // hasM is "has" plus the member with its first letter capitalized, so
+    // the lookup lowercases it back; a member that starts uppercase spells
+    // itself and is tried second ("Count" is "hasCount" too). The length
+    // bound names the prefix, not a size: it guarantees three subscriptable
+    // characters, and the content check reads characters, never digits.
+    if (hasName.size() <= kHasPrefixLen) {
+        return "";
+    }
+    if (hasName[0] != 'h' || hasName[1] != 'a' || hasName[2] != 's') {
+        return "";
+    }
+    std::string member = hasName.substr(3);
+    member[0] = static_cast<char>(std::tolower(static_cast<unsigned char>(member[0])));
+    if (!fieldType(id, member).isError()) {
+        return member;
+    }
+    member[0] = static_cast<char>(std::toupper(static_cast<unsigned char>(member[0])));
+    if (!fieldType(id, member).isError()) {
+        return member;
+    }
+    return "";
 }
 
 std::vector<std::string> Resolver::fieldNames(DeclId id) const {

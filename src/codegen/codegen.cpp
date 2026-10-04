@@ -601,6 +601,14 @@ private:
             out_ += "  ud2\n";
             return true;
         }
+        if (term.term == ir::Term::Trap) {
+            // A lowering check failed at runtime (a union tag mismatch, a
+            // bounds check): halt rather than continue with a known-wrong
+            // value. The reason travels in IR for diagnostics; native code
+            // has no channel for it, so every reason halts the same way.
+            out_ += "  ud2\n";
+            return true;
+        }
         refuse(term.loc, "this terminator is not emitted yet");
         return false;
     }

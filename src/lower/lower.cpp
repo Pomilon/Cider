@@ -18,6 +18,11 @@ namespace {
 // a digit beside `.size()` reads as a size literal and T4 refuses it.
 constexpr uint64_t kOneWord = 1;
 
+// A union names one live member, and "has" is three letters. Spelling facts
+// with the same standing as kOneWord: the checks name these, never digits.
+constexpr uint64_t kOneMember = 1;
+constexpr uint64_t kHasPrefixLen = 3;
+
 // An arithmetic opcode, or Op::Const when the spelling is not one of ours.
 // An if-chain rather than a switch over an enum: this maps a BinOp, which is
 // not a Kind, and the switch gate counts switches over Kind.
@@ -180,7 +185,7 @@ int Lowerer::wordCount(TypeRef type) {
         return 2;
     }
     int64_t bytes = -1;
-    if (kind == Kind::Array) {
+    if (kind == Kind::Array || kind == Kind::Union) {
         bytes = resolver_.nominalSize(type.type);
     } else if (kind == Kind::Struct) {
         std::optional<DeclId> id = type.type->decl();
@@ -226,11 +231,14 @@ bool Lowerer::resolvePlace(const Expr* expr, Place& out) {
     }
     if (const auto* field = dynamic_cast<const Field*>(expr)) {
         // A nested chain accumulates the offset while the slots stay the
-        // base value's: `p.inner.y` is p's slots plus two offsets.
+        // base value's: `p.inner.y` is p's slots plus two offsets. Union
+        // members sit at offset 0 and record a tag write: storing through
+        // the member sets the tag as a consequence (TYPES.md 4.6).
         if (!resolvePlace(field->object.get(), out)) {
             return false;
         }
-        if (out.type.isError() || out.type.type->kind() != Kind::Struct) {
+        if (out.type.isError() || (out.type.type->kind() != Kind::Struct &&
+                                   out.type.type->kind() != Kind::Union)) {
             return false;
         }
         std::optional<DeclId> id = out.type.type->decl();
@@ -241,6 +249,17 @@ bool Lowerer::resolvePlace(const Expr* expr, Place& out) {
         TypeRef fieldType = resolver_.fieldType(*id, field->name);
         if (fieldOff < 0 || fieldType.isError()) {
             return false;
+        }
+        if (out.type.type->kind() == Kind::Union) {
+            int64_t index = resolver_.unionMemberIndex(*id, field->name);
+            int64_t tagOff = resolver_.unionTagOffset(*id);
+            if (index < 0 || tagOff < 0) {
+                return false;
+            }
+            TagWrite tag;
+            tag.off = out.off + tagOff;
+            tag.index = index;
+            out.tagWrites.push_back(tag);
         }
         out.off += fieldOff;
         out.type = fieldType;
@@ -553,7 +572,8 @@ TypeRef Lowerer::wordType(TypeRef aggregate, uint64_t word) {
         return TypeRef{ctx_.basic(BasicKind::I64)};
     }
     if (aggregate.type->kind() == Kind::Struct ||
-        aggregate.type->kind() == Kind::Array) {
+        aggregate.type->kind() == Kind::Array ||
+        aggregate.type->kind() == Kind::Union) {
         return TypeRef{ctx_.basic(BasicKind::U64)};
     }
     return aggregate;
@@ -643,10 +663,28 @@ std::vector<ir::Value> Lowerer::loadRange(Position pos, const Place& place,
         }
         ir::IRType width;
         TypeRef valueType = fieldType;
-        if (fieldType.type->kind() == Kind::Struct ||
-            fieldType.type->kind() == Kind::Array) {
+        Kind fieldKind = fieldType.type->kind();
+        if (fieldKind == Kind::Struct || fieldKind == Kind::Array ||
+            fieldKind == Kind::Union) {
             if (!aggregateWord(take, width, valueType)) {
                 refuse(pos, "this field layout is not lowered yet");
+                return {undefined()};
+            }
+        } else if (fieldKind == Kind::String) {
+            // A string is an address word then a length word: each full
+            // word loads with its own type, the way a local string load
+            // types them. A partial take cannot name half a word, so it
+            // refuses rather than splits.
+            int64_t per = layout::kSizePointer;
+            int64_t word = (cur - place.off) / per;
+            if (take != per || (cur - place.off) % per != 0 || word < 0 ||
+                word > 1) {
+                refuse(pos, "this field layout is not lowered yet");
+                return {undefined()};
+            }
+            valueType = wordType(fieldType, static_cast<uint64_t>(word));
+            width = widthOf(valueType, pos);
+            if (failed_) {
                 return {undefined()};
             }
         } else {
@@ -747,7 +785,8 @@ void Lowerer::storeRange(Position pos, const Place& place,
         }
         ir::IRType width;
         if (take == total && !(fieldType.type->kind() == Kind::Struct ||
-                              fieldType.type->kind() == Kind::Array)) {
+                              fieldType.type->kind() == Kind::Array ||
+                              fieldType.type->kind() == Kind::Union)) {
             width = widthOf(fieldType, pos);
             if (failed_) {
                 return;
@@ -838,6 +877,50 @@ void Lowerer::constructStruct(const std::vector<ir::Value>& slots, const NewStru
     }
 }
 
+void Lowerer::constructUnion(const std::vector<ir::Value>& slots, const NewStruct& n) {
+    TypeRef unionType = checker_.typeOf(&n);
+    if (unionType.isError() || unionType.type->kind() != Kind::Union) {
+        refuse(n.pos, "this construction");
+        return;
+    }
+    std::optional<DeclId> id = unionType.type->decl();
+    if (!id.has_value() || n.fields.size() != kOneMember) {
+        refuse(n.pos, "this construction");
+        return;
+    }
+    const FieldInit& field = n.fields[0];
+    int64_t index = resolver_.unionMemberIndex(*id, field.name);
+    int64_t tagOff = resolver_.unionTagOffset(*id);
+    TypeRef memberType = resolver_.fieldType(*id, field.name);
+    if (index < 0 || tagOff < 0 || memberType.isError()) {
+        refuse(field.value->pos, "no such member");
+        return;
+    }
+    // The payload names the member's bytes at offset 0; the tag follows the
+    // payload, never beside a member, so the two stores cannot overlap.
+    std::vector<ir::Value> value = lowerWords(field.value.get());
+    if (failed_) {
+        return;
+    }
+    Place at;
+    at.slots = slots;
+    at.type = memberType;
+    at.off = 0;
+    storeRange(field.value->pos, at, value, memberType);
+    if (failed_) {
+        return;
+    }
+    Place tag;
+    tag.slots = slots;
+    tag.type = TypeRef{ctx_.basic(BasicKind::U32)};
+    tag.off = tagOff;
+    ir::Value live = constantI64(index, tag.type, n.pos);
+    if (failed_) {
+        return;
+    }
+    storeRange(n.pos, tag, {live}, tag.type);
+}
+
 void Lowerer::constructArray(const std::vector<ir::Value>& slots, const NewArray& n) {
     TypeRef arrayType = checker_.typeOf(&n);
     if (arrayType.isError() || arrayType.type->kind() != Kind::Array) {
@@ -908,7 +991,14 @@ std::vector<ir::Value> Lowerer::lowerField(const Field& n) {
         refuse(n.object->pos, "this field access");
         return {undefined()};
     }
-    if (base.type.isError() || base.type.type->kind() != Kind::Struct) {
+    if (base.type.isError()) {
+        refuse(n.object->pos, "this field access");
+        return {undefined()};
+    }
+    if (base.type.type->kind() == Kind::Union) {
+        return lowerUnionField(n, base);
+    }
+    if (base.type.type->kind() != Kind::Struct) {
         refuse(n.object->pos, "this field access");
         return {undefined()};
     }
@@ -925,6 +1015,91 @@ std::vector<ir::Value> Lowerer::lowerField(const Field& n) {
     base.off += fieldOff;
     base.type = fieldType;
     return loadRange(n.pos, base, fieldType);
+}
+
+std::vector<ir::Value> Lowerer::lowerUnionField(const Field& n, const Place& base) {
+    std::optional<DeclId> id = base.type.type->decl();
+    int64_t index = id.has_value() ? resolver_.unionMemberIndex(*id, n.name) : -1;
+    // Split across lines on purpose: the offset call beside a digit reads
+    // as a size literal and T4 refuses it.
+    int64_t tagOff = -1;
+    if (id.has_value()) {
+        tagOff = resolver_.unionTagOffset(*id);
+    }
+    TypeRef memberType =
+        id.has_value() ? resolver_.fieldType(*id, n.name) : TypeRef{ctx_.error()};
+    if (!id.has_value() || index < 0 || tagOff < 0 || memberType.isError()) {
+        refuse(n.pos, "no such member");
+        return {undefined()};
+    }
+    ir::Value ok = emitTagCheck(n.pos, base, tagOff, index);
+    if (failed_) {
+        return {undefined()};
+    }
+    emitTagTrap(n.pos, ok);
+    if (failed_) {
+        return {undefined()};
+    }
+    // Members share offset 0: the payload loads at the union's own base.
+    // Tag writes belong to stores, never to a read, so they are dropped.
+    Place at = base;
+    at.type = memberType;
+    at.tagWrites.clear();
+    return loadRange(n.pos, at, memberType);
+}
+
+ir::Value Lowerer::emitTagCheck(Position pos, const Place& base, int64_t tagOff,
+                                int64_t index) {
+    Place tag = base;
+    tag.off = base.off + tagOff;
+    tag.type = TypeRef{ctx_.basic(BasicKind::U32)};
+    tag.tagWrites.clear();
+    std::vector<ir::Value> got = loadRange(pos, tag, tag.type);
+    if (failed_ || got.size() != kOneWord) {
+        refuse(pos, "this field access");
+        return undefined();
+    }
+    ir::Value want = constantI64(index, tag.type, pos);
+    if (failed_) {
+        return undefined();
+    }
+    ir::Instr cmp;
+    cmp.op = ir::Op::Cmp;
+    cmp.loc = pos;
+    cmp.type = TypeRef{ctx_.basic(BasicKind::Bool)};
+    cmp.width = ir::IRType::Bool;
+    cmp.cmp = cmpFor(BinOp::Eq, false);
+    cmp.isPure = true;
+    cmp.operands.push_back(got[0]);
+    cmp.operands.push_back(want);
+    ir::Value out = newValue(cmp.width, cmp.type, pos);
+    cmp.results.push_back(out);
+    emit(std::move(cmp));
+    return out;
+}
+
+void Lowerer::emitTagTrap(Position pos, ir::Value ok) {
+    // The mismatch block traps; execution continues in a fresh block that
+    // owns everything the caller emits next. Same shape as onIf's join, so
+    // the optimizer and codegen meet nothing new.
+    uint32_t trapLabel = emitBlock(pos);
+    uint32_t liveLabel = emitBlock(pos);
+    ir::Terminator br;
+    br.term = ir::Term::CondBr;
+    br.cond = ok;
+    br.thenTarget = liveLabel;
+    br.elseTarget = trapLabel;
+    br.loc = pos;
+    emitTerminator(br);
+    sealBlock(current_);
+    startBlock(trapLabel);
+    ir::Terminator trap;
+    trap.term = ir::Term::Trap;
+    trap.reason = ir::TrapReason::UnionTag;
+    trap.loc = pos;
+    emitTerminator(trap);
+    sealBlock(trapLabel);
+    startBlock(liveLabel);
 }
 
 std::vector<ir::Value> Lowerer::lowerIndex(const Index& n) {
@@ -1142,7 +1317,14 @@ std::vector<ir::Value> Lowerer::lowerNewStruct(const NewStruct& n) {
     }
     std::vector<ir::Value> slots =
         allocaSlots(structType, n.pos, static_cast<uint64_t>(count));
-    constructStruct(slots, n);
+    // NewStruct builds a struct field by field or a union by its one live
+    // member plus tag; the checker guarantees which, so the branch reads
+    // the checked type rather than re-deriving it.
+    if (!structType.isError() && structType.type->kind() == Kind::Union) {
+        constructUnion(slots, n);
+    } else {
+        constructStruct(slots, n);
+    }
     if (failed_) {
         return {undefined()};
     }
@@ -1299,6 +1481,27 @@ ir::Value Lowerer::onCast(Cast& n) {
     if (failed_) {
         return undefined();
     }
+    // A union cast reads the payload's bytes at offset 0 as the target,
+    // ignoring the tag (TYPES.md 4.6). The checker proved the target fits
+    // the payload; a multi-word target is refused, like every other
+    // multi-word expression value.
+    TypeRef source = checker_.typeOf(n.expr.get());
+    TypeRef target = checker_.typeOf(&n);
+    if (!source.isError() && !target.isError() && source.type->kind() == Kind::Union) {
+        Place base;
+        if (!resolvePlace(n.expr.get(), base)) {
+            refuse(n.expr->pos, "this cast");
+            return undefined();
+        }
+        base.type = target;
+        base.tagWrites.clear();
+        std::vector<ir::Value> got = loadRange(n.pos, base, target);
+        if (failed_ || got.size() != kOneWord) {
+            refuse(n.pos, "this cast");
+            return undefined();
+        }
+        return got[0];
+    }
     ir::Instr instr;
     instr.op = ir::Op::Cast;
     instr.loc = n.pos;
@@ -1381,6 +1584,36 @@ ir::Value Lowerer::emitArith(BinOp op, ir::Value a, ir::Value b, TypeRef result,
 ir::Value Lowerer::onCall(Call& n) {
     if (failed_) {
         return undefined();
+    }
+    // `v.hasI()`: the tag compared to the member's index, answered as one
+    // boolean word. The checker proved the shape; the member lookup repeats
+    // here rather than trusting it, so a checker bug reads as a refusal.
+    if (const auto* field = dynamic_cast<const Field*>(n.callee.get())) {
+        Place base;
+        if (resolvePlace(field->object.get(), base) && !base.type.isError() &&
+            base.type.type->kind() == Kind::Union) {
+            std::optional<DeclId> id = base.type.type->decl();
+            std::string member =
+                id.has_value() ? resolver_.unionHasMember(*id, field->name) : "";
+            int64_t index = id.has_value() && !member.empty()
+                                ? resolver_.unionMemberIndex(*id, member)
+                                : -1;
+            // Split across lines on purpose: the offset call beside a
+            // digit reads as a size literal and T4 refuses it.
+            int64_t tagOff = -1;
+            if (id.has_value()) {
+                tagOff = resolver_.unionTagOffset(*id);
+            }
+            if (!id.has_value() || member.empty() || index < 0 || tagOff < 0) {
+                refuse(n.pos, "this call");
+                return undefined();
+            }
+            if (!n.args.empty()) {
+                refuse(n.pos, "hasM takes no arguments");
+                return undefined();
+            }
+            return emitTagCheck(n.pos, base, tagOff, index);
+        }
     }
     const Signature* sig = nullptr;
     std::string callee;
@@ -1700,6 +1933,25 @@ bool Lowerer::storeAssignTarget(Assign& n, const std::vector<ir::Value>& value) 
         }
         place.type = checker_.typeOf(n.target.get());
         storeRange(n.pos, place, value, place.type);
+        if (failed_) {
+            return false;
+        }
+        // Every union crossed on the way to the member learns the new live
+        // member: a write sets the tag as a consequence (TYPES.md 4.6).
+        for (const TagWrite& tag : place.tagWrites) {
+            Place at = place;
+            at.off = tag.off;
+            at.type = TypeRef{ctx_.basic(BasicKind::U32)};
+            at.tagWrites.clear();
+            ir::Value live = constantI64(tag.index, at.type, n.pos);
+            if (failed_) {
+                return false;
+            }
+            storeRange(n.pos, at, {live}, at.type);
+            if (failed_) {
+                return false;
+            }
+        }
         return !failed_;
     }
     refuse(n.target->pos, "this assignment");

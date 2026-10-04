@@ -177,6 +177,36 @@ void testGenericStruct() {
     check(!bareLocal.ok && bareLocal.stage == "check", "a bare generic local fails");
 }
 
+// A union constructs by naming one live member; hasM asks about liveness;
+// a cast wider than the payload is rejected, not read past.
+void testUnions() {
+    std::printf("unions name one live member\n");
+    Checked good = check(
+        "union Value { var i: int; var s: string; }\n"
+        "func main() -> int { var v: Value = new Value { i: 42 }; return v.i; }\n");
+    check(good.ok, "checks: " + good.stage);
+    Checked two = check(
+        "union Value { var i: int; var s: string; }\n"
+        "func main() -> int { var v: Value = new Value { i: 1, s: \"x\" }; return 0; }\n");
+    check(!two.ok && two.stage == "check", "two members fail");
+    Checked member = check(
+        "union Value { var i: int; }\n"
+        "func main() -> int { var v: Value = new Value { z: 1 }; return 0; }\n");
+    check(!member.ok && member.stage == "check", "an unknown member fails");
+    Checked has = check(
+        "union Value { var i: int; var s: string; }\n"
+        "func main() -> int { var v: Value = new Value { i: 1 }; if (v.hasS()) { return 1; } return 0; }\n");
+    check(has.ok, "hasM checks: " + has.stage);
+    Checked hasBad = check(
+        "union Value { var i: int; }\n"
+        "func main() -> int { var v: Value = new Value { i: 1 }; return v.hasZ(); }\n");
+    check(!hasBad.ok && hasBad.stage == "check", "hasM of nothing fails");
+    Checked wide = check(
+        "union Small { var b: int; }\n"
+        "func main() -> int { var v: Small = new Small { b: 1 }; var s: string = v as string; return 0; }\n");
+    check(!wide.ok && wide.stage == "check", "a cast wider than the payload fails");
+}
+
 }  // namespace
 
 int main() {
@@ -187,6 +217,7 @@ int main() {
     testInterface();
     testGenericCall();
     testGenericStruct();
+    testUnions();
     testControl();
     std::printf("\n%d checks, %s\n", checks, failures == 0 ? "all passed" : "FAILURES");
     return failures == 0 ? 0 : 1;
