@@ -250,6 +250,25 @@ void testLoop() {
 // What is not lowered yet is refused, not approximated. Structs and arrays
 // lower now; what remains refused is named here. (Unions never reach the
 // lowerer at all: the checker refuses to construct one.)
+// A struct inside a struct constructs field by field: the inner `new`
+// builds its words, and the outer stores them at the field's offset.
+void testNestedConstruct() {
+    std::printf("nested construction lowers\n");
+    Lowered r = lower(
+        "struct Inner { var v: int; }\n"
+        "struct Outer { var i: Inner; var w: int; }\n"
+        "func main() -> int {\n"
+        "    var o: Outer = new Outer { i: new Inner { v: 5 }, w: 1 };\n"
+        "    return o.i.v;\n"
+        "}\n");
+    check(r.ok, "nested new lowers");
+    if (r.ok) {
+        const cider::ir::Function* main = find(r.module.get(), "main");
+        check(main != nullptr, "main is emitted");
+        check(countOp(*main, cider::ir::Op::Store) >= 4, "every field is stored");
+    }
+}
+
 void testNotYetLowered() {
     std::printf("unlowered constructs are refused\n");
     Lowered r = lower("func f(x: int) -> void { var s: string = \"v = {x}\"; }\n");
@@ -268,6 +287,7 @@ int main() {
     testSsa();
     testCalls();
     testLoop();
+    testNestedConstruct();
     testNotYetLowered();
     std::printf("\n%d checks, %s\n", checks, failures == 0 ? "all passed" : "FAILURES");
     return failures == 0 ? 0 : 1;

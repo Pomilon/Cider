@@ -212,6 +212,28 @@ void testSpecialize() {
     check(cider::typeName(tb->type) != "?", "not the pending marker");
 }
 
+// Nominal sizes recurse into member structs instead of answering -1, and a
+// struct naming itself answers -1 instead of hanging the resolver.
+void testNominalSize() {
+    std::printf("nominal sizes recurse\n");
+    Resolved r = resolve(
+        "struct Inner { var v: int; }\n"
+        "struct Outer { var i: Inner; var w: int; }\n");
+    check(r.ok, "resolves");
+    const cider::resolve::Decl* outer =
+        r.resolver->lookup(r.resolver->moduleScope(), "Outer");
+    const cider::resolve::Decl* inner =
+        r.resolver->lookup(r.resolver->moduleScope(), "Inner");
+    check(r.resolver->structSize(inner->id) == 4, "one int is four bytes");
+    check(r.resolver->structSize(outer->id) == 8, "nested struct packs flat");
+    check(r.resolver->fieldOffset(outer->id, "w") == 4, "second field follows the first");
+    check(r.resolver->nominalSize(outer->type.type) == 8, "nominal size sees the struct");
+    Resolved cyc = resolve("struct A { var a: A; }\n");
+    const cider::resolve::Decl* a =
+        cyc.resolver->lookup(cyc.resolver->moduleScope(), "A");
+    check(cyc.resolver->structSize(a->id) == -1, "a self-embedding struct has no size");
+}
+
 }  // namespace
 
 int main() {
@@ -228,6 +250,7 @@ int main() {
     testPrelude();
     testGenericArity();
     testSpecialize();
+    testNominalSize();
     std::printf("\n%d checks, %s\n", checks, failures == 0 ? "all passed" : "FAILURES");
     return failures == 0 ? 0 : 1;
 }

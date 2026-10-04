@@ -88,6 +88,13 @@ public:
     // alignment, with no padding beyond that (TYPES.md 3.3). -1 when unknown.
     // Only structs: classes, unions and interfaces are refused elsewhere.
     int64_t structSize(DeclId id) const;
+    // A type's size when the type may name a struct: plain types answer from
+    // the type itself, a struct answers from its declaration. -1 when
+    // unknown. Classes, unions and interfaces are not sized here — their
+    // layouts belong to later slices, and a guess would miscompile.
+    int64_t nominalSize(const Type* type) const;
+    // The same recursion for alignment.
+    int64_t nominalAlign(const Type* type) const;
     // A class's direct bases, as declaration ids. Empty when none.
     std::vector<DeclId> classBases(DeclId id) const;
     EvalEnv evalEnv(const Scope* scope);
@@ -150,6 +157,13 @@ private:
     Signature buildFuncSig(const std::vector<std::unique_ptr<TypeExpr>>& params,
                            const TypeExpr* returns, const Scope* scope, bool& failed);
     void bindPrelude(const Scope* scope, Position pos);
+    // Size/alignment with a visited set: a struct naming itself (directly or
+    // through friends) is -1, not a stack overflow. The checker rejects
+    // uninhabitable types; the resolver still must not hang if one arrives.
+    int64_t nominalSizeImpl(const Type* type, std::unordered_set<std::string>& seen) const;
+    int64_t nominalAlignImpl(const Type* type, std::unordered_set<std::string>& seen) const;
+    int64_t structSizeImpl(DeclId id, std::unordered_set<std::string>& seen) const;
+    int64_t structAlignImpl(DeclId id, std::unordered_set<std::string>& seen) const;
     static std::vector<const TypeExpr*> rawBases(const ClassDecl* decl);
     std::string qualify(const std::string& bare) const;
 

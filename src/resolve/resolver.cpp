@@ -103,14 +103,16 @@ int64_t Resolver::fieldOffset(DeclId id, const std::string& name) const {
     // `at` is a byte position, `bytes` a field extent, `multiple` an
     // alignment: none of them is a word T4 watches, so literals may sit
     // beside them without reading as layout facts.
+    std::unordered_set<std::string> seen;
+    seen.insert(declKey(id));
     int64_t at = 0;
     for (const std::string& field : fieldNames(id)) {
         TypeRef type = fieldType(id, field);
         if (type.isError()) {
             return -1;
         }
-        int64_t multiple = alignOf(type.type);
-        int64_t bytes = typeSize(type.type);
+        int64_t multiple = nominalAlignImpl(type.type, seen);
+        int64_t bytes = nominalSizeImpl(type.type, seen);
         if (multiple <= 0 || bytes < 0) {
             return -1;
         }
@@ -124,6 +126,69 @@ int64_t Resolver::fieldOffset(DeclId id, const std::string& name) const {
 }
 
 int64_t Resolver::structSize(DeclId id) const {
+    std::unordered_set<std::string> seen;
+    return structSizeImpl(id, seen);
+}
+
+int64_t Resolver::nominalSize(const Type* type) const {
+    std::unordered_set<std::string> seen;
+    return nominalSizeImpl(type, seen);
+}
+
+int64_t Resolver::nominalAlign(const Type* type) const {
+    std::unordered_set<std::string> seen;
+    return nominalAlignImpl(type, seen);
+}
+
+int64_t Resolver::nominalSizeImpl(const Type* type,
+                                  std::unordered_set<std::string>& seen) const {
+    if (type == nullptr || type->isError()) {
+        return -1;
+    }
+    if (type->kind() == Kind::Array) {
+        int64_t per = nominalSizeImpl(type->element(), seen);
+        if (per < 0) {
+            return -1;
+        }
+        std::optional<int64_t> len = type->length();
+        if (!len) {
+            return -1;
+        }
+        return per * *len;
+    }
+    if (type->kind() == Kind::Struct) {
+        std::optional<DeclId> id = type->decl();
+        if (!id.has_value() || !seen.insert(declKey(*id)).second) {
+            return -1;
+        }
+        int64_t out = structSizeImpl(*id, seen);
+        seen.erase(declKey(*id));
+        return out;
+    }
+    return typeSize(type);
+}
+
+int64_t Resolver::nominalAlignImpl(const Type* type,
+                                   std::unordered_set<std::string>& seen) const {
+    if (type == nullptr || type->isError()) {
+        return -1;
+    }
+    if (type->kind() == Kind::Array) {
+        return nominalAlignImpl(type->element(), seen);
+    }
+    if (type->kind() == Kind::Struct) {
+        std::optional<DeclId> id = type->decl();
+        if (!id.has_value() || !seen.insert(declKey(*id)).second) {
+            return -1;
+        }
+        int64_t out = structAlignImpl(*id, seen);
+        seen.erase(declKey(*id));
+        return out;
+    }
+    return alignOf(type);
+}
+
+int64_t Resolver::structSizeImpl(DeclId id, std::unordered_set<std::string>& seen) const {
     int64_t at = 0;
     int64_t multiple = 1;
     for (const std::string& field : fieldNames(id)) {
@@ -131,8 +196,8 @@ int64_t Resolver::structSize(DeclId id) const {
         if (type.isError()) {
             return -1;
         }
-        int64_t fieldMultiple = alignOf(type.type);
-        int64_t bytes = typeSize(type.type);
+        int64_t fieldMultiple = nominalAlignImpl(type.type, seen);
+        int64_t bytes = nominalSizeImpl(type.type, seen);
         if (fieldMultiple <= 0 || bytes < 0) {
             return -1;
         }
@@ -143,6 +208,24 @@ int64_t Resolver::structSize(DeclId id) const {
         at += bytes;
     }
     return layout::roundUp(at, multiple);
+}
+
+int64_t Resolver::structAlignImpl(DeclId id, std::unordered_set<std::string>& seen) const {
+    int64_t multiple = 1;
+    for (const std::string& field : fieldNames(id)) {
+        TypeRef type = fieldType(id, field);
+        if (type.isError()) {
+            return -1;
+        }
+        int64_t fieldMultiple = nominalAlignImpl(type.type, seen);
+        if (fieldMultiple <= 0) {
+            return -1;
+        }
+        if (fieldMultiple > multiple) {
+            multiple = fieldMultiple;
+        }
+    }
+    return multiple;
 }
 
 std::vector<std::string> Resolver::fieldNames(DeclId id) const {

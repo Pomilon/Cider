@@ -134,6 +134,12 @@ public:
     // One scalar load/store at a place plus offset. The bytes must sit inside
     // a single word; anything straddling words is refused, not split, because
     // a partial-word write that guessed its neighbors would corrupt them.
+    // A struct/array field that fits one word is addressed by offset and
+    // size, never by scalar type: the byte count names an unsigned width and
+    // the loaded value takes that width's type, so width and type never
+    // disagree downstream. Only whole widths exist; any other byte count
+    // refuses rather than splits.
+    bool aggregateWord(int64_t bytes, ir::IRType& width, TypeRef& type);
     std::vector<ir::Value> loadRange(Position pos, const Place& place, TypeRef fieldType);
     void storeRange(Position pos, const Place& place,
                     const std::vector<ir::Value>& words, TypeRef fieldType);

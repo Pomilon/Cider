@@ -181,7 +181,7 @@ int Lowerer::wordCount(TypeRef type) {
     }
     int64_t bytes = -1;
     if (kind == Kind::Array) {
-        bytes = typeSize(type.type);
+        bytes = resolver_.nominalSize(type.type);
     } else if (kind == Kind::Struct) {
         std::optional<DeclId> id = type.type->decl();
         if (id.has_value()) {
@@ -534,22 +534,52 @@ TypeRef Lowerer::wordType(TypeRef aggregate, uint64_t word) {
     return aggregate;
 }
 
+bool Lowerer::aggregateWord(int64_t bytes, ir::IRType& width, TypeRef& type) {
+    BasicKind kind;
+    if (bytes == layout::kSizeI8) {
+        width = ir::IRType::U8;
+        kind = BasicKind::U8;
+    } else if (bytes == layout::kSizeI16) {
+        width = ir::IRType::U16;
+        kind = BasicKind::U16;
+    } else if (bytes == layout::kSizeI32) {
+        width = ir::IRType::U32;
+        kind = BasicKind::U32;
+    } else if (bytes == layout::kSizePointer) {
+        width = ir::IRType::U64;
+        kind = BasicKind::U64;
+    } else {
+        return false;
+    }
+    type = TypeRef{ctx_.basic(kind)};
+    return true;
+}
+
 std::vector<ir::Value> Lowerer::loadRange(Position pos, const Place& place,
                                          TypeRef fieldType) {
-    int64_t bytes = typeSize(fieldType.type);
+    int64_t bytes = resolver_.nominalSize(fieldType.type);
     int64_t local = place.off % 8;
     if (bytes <= 0 || bytes > 8 || local + bytes > 8) {
         refuse(pos, "this field layout is not lowered yet");
         return {undefined()};
     }
-    ir::IRType width = widthOf(fieldType, pos);
-    if (failed_) {
-        return {undefined()};
+    ir::IRType width;
+    TypeRef valueType = fieldType;
+    if (fieldType.type->kind() == Kind::Struct || fieldType.type->kind() == Kind::Array) {
+        if (!aggregateWord(bytes, width, valueType)) {
+            refuse(pos, "this field layout is not lowered yet");
+            return {undefined()};
+        }
+    } else {
+        width = widthOf(fieldType, pos);
+        if (failed_) {
+            return {undefined()};
+        }
     }
     ir::Instr instr;
     instr.op = ir::Op::Load;
     instr.loc = pos;
-    instr.type = fieldType;
+    instr.type = valueType;
     instr.width = width;
     instr.displacement = local;
     instr.isPure = true;
@@ -564,7 +594,7 @@ std::vector<ir::Value> Lowerer::loadRange(Position pos, const Place& place,
         }
         instr.addressBase = place.slots[word];
     }
-    ir::Value out = newValue(instr.width, fieldType, pos);
+    ir::Value out = newValue(instr.width, valueType, pos);
     instr.results.push_back(out);
     emit(std::move(instr));
     return {out};
@@ -573,15 +603,25 @@ std::vector<ir::Value> Lowerer::loadRange(Position pos, const Place& place,
 void Lowerer::storeRange(Position pos, const Place& place,
                          const std::vector<ir::Value>& words, TypeRef fieldType) {
     if (words.size() == kOneWord) {
-        int64_t bytes = typeSize(fieldType.type);
+        int64_t bytes = resolver_.nominalSize(fieldType.type);
         int64_t local = place.off % 8;
         if (bytes <= 0 || bytes > 8 || local + bytes > 8) {
             refuse(pos, "this field layout is not lowered yet");
             return;
         }
-        ir::IRType width = widthOf(fieldType, pos);
-        if (failed_) {
-            return;
+        ir::IRType width;
+        if (fieldType.type->kind() == Kind::Struct ||
+            fieldType.type->kind() == Kind::Array) {
+            TypeRef wordType;
+            if (!aggregateWord(bytes, width, wordType)) {
+                refuse(pos, "this field layout is not lowered yet");
+                return;
+            }
+        } else {
+            width = widthOf(fieldType, pos);
+            if (failed_) {
+                return;
+            }
         }
         ir::Instr instr;
         instr.op = ir::Op::Store;
@@ -678,7 +718,7 @@ void Lowerer::constructArray(const std::vector<ir::Value>& slots, const NewArray
         return;
     }
     TypeRef element = TypeRef{arrayType.type->element()};
-    int64_t elemBytes = typeSize(element.type);
+    int64_t elemBytes = resolver_.nominalSize(element.type);
     if (elemBytes <= 0) {
         refuse(n.pos, "this construction");
         return;
@@ -772,7 +812,7 @@ std::vector<ir::Value> Lowerer::lowerIndex(const Index& n) {
         return {undefined()};
     }
     TypeRef element{arrayType.type->element()};
-    int64_t elemBytes = typeSize(element.type);
+    int64_t elemBytes = resolver_.nominalSize(element.type);
     if (elemBytes <= 0) {
         refuse(n.pos, "this index");
         return {undefined()};
@@ -869,7 +909,7 @@ void Lowerer::storeIndex(const Index& target, const std::vector<ir::Value>& word
         return;
     }
     TypeRef element{arrayType.type->element()};
-    int64_t elemBytes = typeSize(element.type);
+    int64_t elemBytes = resolver_.nominalSize(element.type);
     if (elemBytes <= 0) {
         refuse(target.pos, "this index");
         return;
