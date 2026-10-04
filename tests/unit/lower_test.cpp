@@ -269,6 +269,55 @@ void testNestedConstruct() {
     }
 }
 
+// A field over an element (`a[1].y`) resolves the element's address: the
+// base plus a folded index times the element size.
+void testFieldOverIndex() {
+    std::printf("field over index lowers\n");
+    Lowered r = lower(
+        "struct P { var x: int; var y: int; }\n"
+        "func main() -> int {\n"
+        "    var a: [P; 2] = new [P; 2] { new P { x: 1, y: 2 }, new P { x: 3, y: 4 } };\n"
+        "    return a[1].y;\n"
+        "}\n");
+    check(r.ok, "element field lowers");
+}
+
+// An 8-byte field at offset 4 straddles two slots: it reads through a
+// computed address, which names no slot and keeps both sides' stores alive.
+// Naming one slot would let the optimizer delete the other's store as dead.
+void testStraddlingRead() {
+    std::printf("straddling field reads go indirect\n");
+    Lowered r = lower(
+        "struct Big { var a: int; var b: int; }\n"
+        "struct Wrap { var w: int; var big: Big; }\n"
+        "func main() -> int {\n"
+        "    var x: Wrap = new Wrap { w: 1, big: new Big { a: 2, b: 3 } };\n"
+        "    var c: Big = x.big;\n"
+        "    return c.b;\n"
+        "}\n");
+    check(r.ok, "straddling read lowers");
+    if (r.ok) {
+        const cider::ir::Function* main = find(r.module.get(), "main");
+        check(main != nullptr && countOp(*main, cider::ir::Op::Gep) >= 1,
+              "the straddle uses a computed address");
+    }
+}
+
+// A statement assignment stores without answering a value, so several words
+// are fine; the tail store is exactly its bytes, never a full word over
+// the neighbor element.
+void testMultiWordAssign() {
+    std::printf("multi-word statement assignment lowers\n");
+    Lowered r = lower(
+        "struct T { var a: int; var b: int; var c: int; }\n"
+        "func main() -> int {\n"
+        "    var a: [T; 2] = new [T; 2] { new T { a: 1, b: 2, c: 3 }, new T { a: 4, b: 5, c: 6 } };\n"
+        "    a[0] = new T { a: 7, b: 8, c: 9 };\n"
+        "    return a[0].c;\n"
+        "}\n");
+    check(r.ok, "element store lowers");
+}
+
 void testNotYetLowered() {
     std::printf("unlowered constructs are refused\n");
     Lowered r = lower("func f(x: int) -> void { var s: string = \"v = {x}\"; }\n");
@@ -288,6 +337,9 @@ int main() {
     testCalls();
     testLoop();
     testNestedConstruct();
+    testFieldOverIndex();
+    testStraddlingRead();
+    testMultiWordAssign();
     testNotYetLowered();
     std::printf("\n%d checks, %s\n", checks, failures == 0 ? "all passed" : "FAILURES");
     return failures == 0 ? 0 : 1;

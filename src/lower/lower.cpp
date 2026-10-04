@@ -246,6 +246,31 @@ bool Lowerer::resolvePlace(const Expr* expr, Place& out) {
         out.type = fieldType;
         return true;
     }
+    if (const auto* index = dynamic_cast<const Index*>(expr)) {
+        // A field over an element (`a[1].y`) needs the element's address:
+        // the base plus a folded index times the element size. A computed
+        // index has no constant address, so it is not a place.
+        if (!resolvePlace(index->array.get(), out)) {
+            return false;
+        }
+        if (out.type.isError() || out.type.type->kind() != Kind::Array) {
+            return false;
+        }
+        TypeRef element{out.type.type->element()};
+        int64_t elemBytes = resolver_.nominalSize(element.type);
+        if (elemBytes <= 0) {
+            return false;
+        }
+        std::unordered_set<std::string> active;
+        EvalEnv env = resolver_.evalEnv(resolver_.moduleScope());
+        EvalResult folded = evalConstInt(*index->index, env, active);
+        if (!folded.ok || folded.value < 0) {
+            return false;
+        }
+        out.off += folded.value * elemBytes;
+        out.type = element;
+        return true;
+    }
     return false;
 }
 
@@ -534,8 +559,25 @@ TypeRef Lowerer::wordType(TypeRef aggregate, uint64_t word) {
     return aggregate;
 }
 
-bool Lowerer::aggregateWord(int64_t bytes, ir::IRType& width, TypeRef& type) {
-    BasicKind kind;
+ir::Value Lowerer::computedBase(ir::Value slot, int64_t byteOff, Position pos) {
+    TypeRef count{ctx_.basic(BasicKind::I64)};
+    ir::Value off = constantI64(byteOff, count, pos);
+    ir::Instr gep;
+    gep.op = ir::Op::Gep;
+    gep.loc = pos;
+    gep.type = TypeRef{ctx_.pointer(ctx_.basic(BasicKind::U8))};
+    gep.width = ir::IRType::Ptr;
+    gep.addressBase = slot;
+    gep.displacement = 0;
+    gep.isPure = true;
+    gep.operands.push_back(off);
+    ir::Value at = newValue(gep.width, gep.type, pos);
+    gep.results.push_back(at);
+    emit(std::move(gep));
+    return at;
+}
+
+bool Lowerer::aggregateWord(int64_t bytes, ir::IRType& width, TypeRef& type) {    BasicKind kind;
     if (bytes == layout::kSizeI8) {
         width = ir::IRType::U8;
         kind = BasicKind::U8;
@@ -557,69 +599,168 @@ bool Lowerer::aggregateWord(int64_t bytes, ir::IRType& width, TypeRef& type) {
 
 std::vector<ir::Value> Lowerer::loadRange(Position pos, const Place& place,
                                          TypeRef fieldType) {
-    int64_t bytes = resolver_.nominalSize(fieldType.type);
-    int64_t local = place.off % 8;
-    if (bytes <= 0 || bytes > 8 || local + bytes > 8) {
+    int64_t total = resolver_.nominalSize(fieldType.type);
+    if (total <= 0) {
         refuse(pos, "this field layout is not lowered yet");
         return {undefined()};
     }
-    ir::IRType width;
-    TypeRef valueType = fieldType;
-    if (fieldType.type->kind() == Kind::Struct || fieldType.type->kind() == Kind::Array) {
-        if (!aggregateWord(bytes, width, valueType)) {
+    if (place.isVolatile) {
+        // Volatile places keep the old rule: one word, no straddle. An
+        // unaligned volatile access could tear on real hardware, and a
+        // multi-word volatile access is a sequence the source never wrote.
+        int64_t local = place.off % layout::kSizePointer;
+        if (total > layout::kSizePointer ||
+            local + total > layout::kSizePointer) {
             refuse(pos, "this field layout is not lowered yet");
             return {undefined()};
         }
-    } else {
-        width = widthOf(fieldType, pos);
-        if (failed_) {
-            return {undefined()};
-        }
     }
-    ir::Instr instr;
-    instr.op = ir::Op::Load;
-    instr.loc = pos;
-    instr.type = valueType;
-    instr.width = width;
-    instr.displacement = local;
-    instr.isPure = true;
-    instr.isVolatile = place.isVolatile;
-    if (!place.global.empty()) {
-        instr.globalLabel = place.global;
-    } else {
-        uint64_t word = static_cast<uint64_t>(place.off / 8);
-        if (word >= place.slots.size()) {
-            refuse(pos, "this field layout is not lowered yet");
-            return {undefined()};
+    // Any (offset, size) reads as exact-size chunks: full words then the
+    // widest width the tail fits. x86 performs unaligned loads, so a chunk
+    // is exactly its bytes wherever it sits. Chunk i covers value bytes
+    // [8i, 8i+take), and every reader addresses values by offset and size,
+    // so the compaction from place bytes [off, off+total) to value bytes
+    // [0, total) is invisible downstream.
+    //
+    // A chunk inside one slot names that slot directly, which is precise:
+    // the optimizer sees exactly which store the load observes. A chunk
+    // straddling two slots must not name one of them: the optimizer would
+    // keep one side's store and delete the other's as dead, and the load
+    // would read half garbage. It goes through a computed address instead,
+    // which names no slot — and any computed address disables dead-store
+    // elimination for the whole function, so both sides survive.
+    std::vector<ir::Value> out;
+    int64_t remaining = total;
+    int64_t cur = place.off;
+    while (remaining > 0) {
+        int64_t take = layout::kSizeI8;
+        if (remaining >= layout::kSizePointer) {
+            take = layout::kSizePointer;
+        } else if (remaining >= layout::kSizeI32) {
+            take = layout::kSizeI32;
+        } else if (remaining >= layout::kSizeI16) {
+            take = layout::kSizeI16;
         }
-        instr.addressBase = place.slots[word];
+        ir::IRType width;
+        TypeRef valueType = fieldType;
+        if (fieldType.type->kind() == Kind::Struct ||
+            fieldType.type->kind() == Kind::Array) {
+            if (!aggregateWord(take, width, valueType)) {
+                refuse(pos, "this field layout is not lowered yet");
+                return {undefined()};
+            }
+        } else {
+            if (take != total) {
+                refuse(pos, "this field layout is not lowered yet");
+                return {undefined()};
+            }
+            width = widthOf(fieldType, pos);
+            if (failed_) {
+                return {undefined()};
+            }
+        }
+        ir::Instr instr;
+        instr.op = ir::Op::Load;
+        instr.loc = pos;
+        instr.type = valueType;
+        instr.width = width;
+        instr.isPure = true;
+        instr.isVolatile = place.isVolatile;
+        int64_t disp = cur % layout::kSizePointer;
+        if (!place.global.empty()) {
+            if (disp + take > layout::kSizePointer) {
+                refuse(pos, "this field layout is not lowered yet");
+                return {undefined()};
+            }
+            instr.globalLabel = place.global;
+            instr.displacement = cur;
+        } else {
+            uint64_t word = static_cast<uint64_t>(cur / layout::kSizePointer);
+            if (disp + take <= layout::kSizePointer) {
+                if (word >= place.slots.size()) {
+                    refuse(pos, "this field layout is not lowered yet");
+                    return {undefined()};
+                }
+                instr.addressBase = place.slots[word];
+                instr.displacement = disp;
+            } else {
+                if (place.slots.empty()) {
+                    refuse(pos, "this field layout is not lowered yet");
+                    return {undefined()};
+                }
+                instr.addressBase = computedBase(place.slots[0], cur, pos);
+                instr.displacement = 0;
+            }
+        }
+        ir::Value one = newValue(instr.width, valueType, pos);
+        instr.results.push_back(one);
+        emit(std::move(instr));
+        out.push_back(one);
+        remaining -= take;
+        cur += take;
     }
-    ir::Value out = newValue(instr.width, valueType, pos);
-    instr.results.push_back(out);
-    emit(std::move(instr));
-    return {out};
+    return out;
 }
 
 void Lowerer::storeRange(Position pos, const Place& place,
                          const std::vector<ir::Value>& words, TypeRef fieldType) {
-    if (words.size() == kOneWord) {
-        int64_t bytes = resolver_.nominalSize(fieldType.type);
-        int64_t local = place.off % 8;
-        if (bytes <= 0 || bytes > 8 || local + bytes > 8) {
-            refuse(pos, "this field layout is not lowered yet");
-            return;
-        }
-        ir::IRType width;
-        if (fieldType.type->kind() == Kind::Struct ||
-            fieldType.type->kind() == Kind::Array) {
-            TypeRef wordType;
-            if (!aggregateWord(bytes, width, wordType)) {
+    int64_t total = resolver_.nominalSize(fieldType.type);
+    if (total <= 0) {
+        refuse(pos, "this field layout is not lowered yet");
+        return;
+    }
+    // `per` holds the pointer width so no digit shares a line with a size
+    // word (T4): `bytes % per == 0` is the shape wordCount already uses.
+    int64_t per = layout::kSizePointer;
+    if (place.isVolatile) {
+        // Same conservatism as loads: volatile keeps the old rules.
+        if (words.size() == kOneWord) {
+            int64_t local = place.off % per;
+            if (total > per || local + total > per) {
                 refuse(pos, "this field layout is not lowered yet");
                 return;
             }
-        } else {
+        } else if (place.off % per != 0) {
+            refuse(pos, "this field layout is not lowered yet");
+            return;
+        }
+    }
+    // Mirror of the load chunks: word i stores value bytes [8i, 8i+take) at
+    // place bytes [off+8i, off+8i+take), each store exactly its bytes, so a
+    // short tail never overwrites the neighbor field a full-word store would
+    // clobber. The caller owes one word per chunk.
+    int64_t chunks = total / per + (total % per == 0 ? 0 : 1);
+    if (static_cast<int64_t>(words.size()) != chunks) {
+        refuse(pos, "this field layout is not lowered yet");
+        return;
+    }
+    int64_t remaining = total;
+    int64_t cur = place.off;
+    for (uint64_t i = 0; remaining > 0; ++i) {
+        int64_t take = layout::kSizeI8;
+        if (remaining >= layout::kSizePointer) {
+            take = layout::kSizePointer;
+        } else if (remaining >= layout::kSizeI32) {
+            take = layout::kSizeI32;
+        } else if (remaining >= layout::kSizeI16) {
+            take = layout::kSizeI16;
+        }
+        ir::IRType width;
+        if (take == total && !(fieldType.type->kind() == Kind::Struct ||
+                              fieldType.type->kind() == Kind::Array)) {
             width = widthOf(fieldType, pos);
             if (failed_) {
+                return;
+            }
+        } else if (take == layout::kSizePointer) {
+            width = widthOf(words[i].type, pos);
+            if (failed_) {
+                return;
+            }
+        } else {
+            TypeRef wordType;
+            if (!aggregateWord(take, width, wordType)) {
+                refuse(pos, "this field layout is not lowered yet");
                 return;
             }
         }
@@ -628,51 +769,37 @@ void Lowerer::storeRange(Position pos, const Place& place,
         instr.loc = pos;
         instr.type = fieldType;
         instr.width = width;
-        instr.displacement = local;
-        instr.storedValue = words[0];
+        instr.storedValue = words[i];
         instr.isVolatile = place.isVolatile;
+        int64_t disp = cur % layout::kSizePointer;
         if (!place.global.empty()) {
-            instr.globalLabel = place.global;
-        } else {
-            uint64_t word = static_cast<uint64_t>(place.off / 8);
-            if (word >= place.slots.size()) {
+            if (disp + take > layout::kSizePointer) {
                 refuse(pos, "this field layout is not lowered yet");
                 return;
             }
-            instr.addressBase = place.slots[word];
-        }
-        emit(std::move(instr));
-        return;
-    }
-    // Several words land word-aligned or not at all: an unaligned multi-word
-    // copy would guess the neighbor bytes at both ends.
-    if (place.off % 8 != 0) {
-        refuse(pos, "this field layout is not lowered yet");
-        return;
-    }
-    uint64_t first = static_cast<uint64_t>(place.off / 8);
-    if (first + words.size() > place.slots.size() && place.global.empty()) {
-        refuse(pos, "this field layout is not lowered yet");
-        return;
-    }
-    for (uint64_t i = 0; i < static_cast<uint64_t>(words.size()); ++i) {
-        ir::Instr instr;
-        instr.op = ir::Op::Store;
-        instr.loc = pos;
-        instr.type = words[i].type;
-        instr.width = widthOf(words[i].type, pos);
-        if (failed_) {
-            return;
-        }
-        instr.storedValue = words[i];
-        instr.isVolatile = place.isVolatile;
-        if (!place.global.empty()) {
             instr.globalLabel = place.global;
-            instr.displacement = place.off + static_cast<int64_t>(i) * 8;
+            instr.displacement = cur;
         } else {
-            instr.addressBase = place.slots[first + i];
+            if (disp + take <= layout::kSizePointer) {
+                uint64_t word = static_cast<uint64_t>(cur / layout::kSizePointer);
+                if (word >= place.slots.size()) {
+                    refuse(pos, "this field layout is not lowered yet");
+                    return;
+                }
+                instr.addressBase = place.slots[word];
+                instr.displacement = disp;
+            } else {
+                if (place.slots.empty()) {
+                    refuse(pos, "this field layout is not lowered yet");
+                    return;
+                }
+                instr.addressBase = computedBase(place.slots[0], cur, pos);
+                instr.displacement = 0;
+            }
         }
         emit(std::move(instr));
+        remaining -= take;
+        cur += take;
     }
 }
 
@@ -1122,6 +1249,12 @@ void Lowerer::onExprStmt(ExprStmt& n) {
     if (failed_ || !enabled_ || function_ == nullptr) {
         return;
     }
+    // A statement assignment stores and answers nothing: demanding one word
+    // here would refuse multi-word stores whose value nobody reads.
+    if (auto* assign = dynamic_cast<const Assign*>(n.expr.get())) {
+        lowerAssignStmt(const_cast<Assign&>(*assign));
+        return;
+    }
     onIdentOrExpr(n.expr.get(), checker_.typeOf(n.expr.get()));
 }
 
@@ -1510,39 +1643,67 @@ ir::Value Lowerer::lowerAssign(Assign& n) {
         }
         value = {emitArith(*n.op, old[0], value[0], current, n.pos)};
     }
-    if (const auto* ident = dynamic_cast<const Ident*>(n.target.get())) {
-        std::vector<ir::Value> stored =
-            storeToIdent(const_cast<Ident&>(*ident), value);
-        if (stored.size() != kOneWord) {
-            refuse(n.pos, "a multi-word assignment is not an expression");
-            return undefined();
+    if (!storeAssignTarget(n, value)) {
+        return undefined();
+    }
+    if (value.size() != kOneWord) {
+        refuse(n.pos, "a multi-word assignment is not an expression");
+        return undefined();
+    }
+    return value[0];
+}
+
+// The statement form: same stores, no value answered, so several words are
+// fine. An assignment nested in an expression still goes through
+// lowerAssign and refuses there.
+void Lowerer::lowerAssignStmt(Assign& n) {
+    if (failed_) {
+        return;
+    }
+    TypeRef target = checker_.typeOf(n.target.get());
+    std::vector<ir::Value> value = lowerWords(n.value.get());
+    if (!target.isError() && wordCount(target) >= 0 &&
+        value.size() != static_cast<size_t>(wordCount(target))) {
+        refuse(n.pos, "this assignment");
+        return;
+    }
+    if (n.op.has_value()) {
+        if (value.size() != kOneWord) {
+            refuse(n.pos, "a compound assignment needs one word");
+            return;
         }
-        return stored[0];
+        TypeRef current = checker_.typeOf(n.target.get());
+        std::vector<ir::Value> old = lowerWords(n.target.get());
+        if (old.size() != kOneWord) {
+            refuse(n.pos, "a compound assignment needs one word");
+            return;
+        }
+        value = {emitArith(*n.op, old[0], value[0], current, n.pos)};
+    }
+    storeAssignTarget(n, value);
+}
+
+bool Lowerer::storeAssignTarget(Assign& n, const std::vector<ir::Value>& value) {
+    if (const auto* ident = dynamic_cast<const Ident*>(n.target.get())) {
+        storeToIdent(const_cast<Ident&>(*ident), value);
+        return !failed_;
     }
     if (const auto* index = dynamic_cast<const Index*>(n.target.get())) {
         storeIndex(*index, value);
-        if (failed_ || value.size() != kOneWord) {
-            refuse(n.pos, "a multi-word assignment is not an expression");
-            return undefined();
-        }
-        return value[0];
+        return !failed_;
     }
     if (dynamic_cast<const Field*>(n.target.get()) != nullptr) {
         Place place;
         if (!resolvePlace(n.target.get(), place)) {
             refuse(n.target->pos, "this assignment");
-            return undefined();
+            return false;
         }
         place.type = checker_.typeOf(n.target.get());
         storeRange(n.pos, place, value, place.type);
-        if (failed_ || value.size() != kOneWord) {
-            refuse(n.pos, "a multi-word assignment is not an expression");
-            return undefined();
-        }
-        return value[0];
+        return !failed_;
     }
     refuse(n.target->pos, "this assignment");
-    return undefined();
+    return false;
 }
 
 }  // namespace lower

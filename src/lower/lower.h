@@ -140,6 +140,10 @@ public:
     // disagree downstream. Only whole widths exist; any other byte count
     // refuses rather than splits.
     bool aggregateWord(int64_t bytes, ir::IRType& width, TypeRef& type);
+    // A runtime address for slot bytes the slot grid cannot name: the slot
+    // base plus a constant byte offset, added at runtime. The result names
+    // no slot, so slot-precise optimizations treat it conservatively.
+    ir::Value computedBase(ir::Value slot, int64_t byteOff, Position pos);
     std::vector<ir::Value> loadRange(Position pos, const Place& place, TypeRef fieldType);
     void storeRange(Position pos, const Place& place,
                     const std::vector<ir::Value>& words, TypeRef fieldType);
@@ -160,6 +164,11 @@ public:
     // Assignments evaluate the value (computing first for a compound form)
     // and store it into the place the target names.
     ir::Value lowerAssign(Assign& n);
+    // The statement form stores without answering a value, so several words
+    // are fine where the expression form must refuse.
+    void lowerAssignStmt(Assign& n);
+    // The target stores shared by both forms. True when the store emitted.
+    bool storeAssignTarget(Assign& n, const std::vector<ir::Value>& value);
 
     // Emitted by the expression hooks above, in visit order. The Checker calls
     // one of these for each expression it types.
