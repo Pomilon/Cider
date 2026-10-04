@@ -441,6 +441,26 @@ void testNotYetLowered() {
     check(!r.ok && r.stage == "lower", "interpolation is not lowered yet");
 }
 
+// A method emits its own function under the owner's name, and a call site
+// reaches it with the receiver first.
+void testMethodCall() {
+    std::printf("method calls lower\n");
+    Lowered r = lower(
+        "class Counter { var v: int; func get() -> int { return (*self).v; } }\n"
+        "func main() -> int {\n"
+        "    var c: Counter = new Counter { v: 3 };\n"
+        "    return c.get();\n"
+        "}\n");
+    check(r.ok, "method call lowers");
+    if (r.ok) {
+        const cider::ir::Function* get = find(r.module.get(), "Counter__get");
+        check(get != nullptr, "method is emitted under the owner");
+        const cider::ir::Function* main = find(r.module.get(), "main");
+        check(main != nullptr && countOp(*main, cider::ir::Op::Call) == 1,
+              "main calls the method once");
+    }
+}
+
 }  // namespace
 
 int main() {
@@ -461,6 +481,7 @@ int main() {
     testSlice();
     testSliceStore();
     testClass();
+    testMethodCall();
     testNotYetLowered();
     std::printf("\n%d checks, %s\n", checks, failures == 0 ? "all passed" : "FAILURES");
     return failures == 0 ? 0 : 1;

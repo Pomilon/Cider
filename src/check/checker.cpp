@@ -412,7 +412,14 @@ void Checker::checkCtor(DeclId id, Kind kind, FuncDecl* ctor, bool isInit) {
         bool was = inFunc_;
         funcReturn_ = TypeRef{ret};
         inFunc_ = true;
-        ctor->body->accept(*this);
+        if (sink_ != nullptr) {
+            const resolve::Decl* owner = resolver_.declById(id);
+            std::string name = owner != nullptr ? owner->name : "";
+            sink_->onMethodDecl(name, isInit ? "init" : "deinit", ctor->params, *sig,
+                                TypeRef{ctx_.pointer(obj)}, *ctor->body);
+        } else {
+            ctor->body->accept(*this);
+        }
         funcReturn_ = savedRet;
         inFunc_ = was;
     }
@@ -441,7 +448,14 @@ void Checker::checkMethods(DeclId id, Kind kind, std::vector<MethodDecl>& method
         bool was = inFunc_;
         funcReturn_ = TypeRef{ret};
         inFunc_ = true;
-        method.body->accept(*this);
+        if (sink_ != nullptr) {
+            const resolve::Decl* owner = resolver_.declById(id);
+            std::string name = owner != nullptr ? owner->name : "";
+            sink_->onMethodDecl(name, method.name, method.params, *sig, TypeRef{self},
+                                *method.body);
+        } else {
+            method.body->accept(*this);
+        }
         funcReturn_ = saved;
         inFunc_ = was;
         popScope();

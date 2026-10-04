@@ -253,6 +253,19 @@ void testClassSize() {
     check(r.resolver->fieldOffset(derived->id, "y") == -1, "a derived field has no offset yet");
 }
 
+void testMethodInit() {
+    std::printf("init and deinit signatures are recorded\n");
+    Resolved r = resolve(
+        "class Counter { var v: int;\n"
+        " func init(n: int) { (*self).v = n; } }\n");
+    check(r.ok, "resolves");
+    const cider::resolve::Decl* counter =
+        r.resolver->lookup(r.resolver->moduleScope(), "Counter");
+    const cider::Signature* init = r.resolver->methodSig(counter->id, "init");
+    check(init != nullptr, "init has a signature");
+    check(init != nullptr && init->arity() == 1, "init takes one argument");
+}
+
 }  // namespace
 
 int main() {
@@ -271,6 +284,7 @@ int main() {
     testSpecialize();
     testNominalSize();
     testClassSize();
+    testMethodInit();
     std::printf("\n%d checks, %s\n", checks, failures == 0 ? "all passed" : "FAILURES");
     return failures == 0 ? 0 : 1;
 }

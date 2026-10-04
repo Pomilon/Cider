@@ -44,6 +44,19 @@ public:
     virtual void onBlockEnter(Block& n) { (void)n; }
     virtual void onBlockExit(Block& n) { (void)n; }
     virtual void onFuncDecl(FuncDecl& n) { (void)n; }
+    // A method or constructor body, emitted as its own function. The owner
+    // names the mangling; the signature holds the declared parameters and
+    // self arrives separately because no source spelling names it.
+    virtual void onMethodDecl(const std::string& owner, const std::string& name,
+                              const std::vector<Param>& params, const Signature& sig,
+                              TypeRef self, Block& body) {
+        (void)owner;
+        (void)name;
+        (void)params;
+        (void)sig;
+        (void)self;
+        (void)body;
+    }
     virtual void onVarDecl(VarDecl& n) { (void)n; }
     // An expression statement is evaluated for effect and its value dropped:
     // calls and assignments live here, and without this hook they vanish.

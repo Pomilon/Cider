@@ -138,6 +138,21 @@ void testControlForms() {
     check(ok, "parses");
 }
 
+// `func init` names the constructor: `init` lexes as a keyword, so the
+// method parser accepts it explicitly rather than as an identifier.
+void testMethodInit() {
+    std::printf("method init\n");
+    bool ok = false;
+    std::unique_ptr<cider::Program> program = parse(
+        "class Counter { var v: int; func init(n: int) { (*self).v = n; } }", ok);
+    check(ok, "parses");
+    const cider::ClassDecl& cls =
+        static_cast<const cider::ClassDecl&>(*program->decls[0]);
+    check(cls.init != nullptr, "constructor is stored as init");
+    check(cls.init->params.size() == 1, "one init parameter");
+    check(cls.methods.empty(), "no ordinary methods");
+}
+
 }  // namespace
 
 int main() {
@@ -149,6 +164,7 @@ int main() {
     testMissingInit();
     testGenericCall();
     testControlForms();
+    testMethodInit();
     std::printf("\n%d checks, %s\n", checks, failures == 0 ? "all passed" : "FAILURES");
     return failures == 0 ? 0 : 1;
 }

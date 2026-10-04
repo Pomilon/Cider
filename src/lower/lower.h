@@ -71,6 +71,9 @@ public:
     // --- called by the Checker during its walk, through check::LowerSink ---
     void onProgram(Program& n) override;
     void onFuncDecl(FuncDecl& n) override;
+    void onMethodDecl(const std::string& owner, const std::string& name,
+                      const std::vector<Param>& params, const Signature& sig,
+                      TypeRef self, Block& body) override;
     void onGlobal(VarDecl& n);
     void onVarDecl(VarDecl& n) override;
     void onExprStmt(ExprStmt& n) override;
@@ -138,6 +141,10 @@ public:
         int64_t off = 0;
         bool isVolatile = false;
         std::vector<TagWrite> tagWrites;
+        // Set when the object sits behind a loaded pointer: the address as
+        // a value, not a slot. Slot-precise logic must not read slots then.
+        bool hasIndirect = false;
+        ir::Value indirect;
     };
     // Names a place: identifiers, and field chains over them. Anything else
     // (a call result, arithmetic) has no address and is refused.
@@ -208,6 +215,7 @@ public:
                          TypeRef baseType, const std::vector<ir::Value>& words);
     std::vector<ir::Value> lowerNewStruct(const NewStruct& n);
     std::vector<ir::Value> lowerNewArray(const NewArray& n);
+    std::vector<ir::Value> lowerNewClass(const NewClass& n);
     std::vector<ir::Value> lowerField(const Field& n);
     // A union member read checks the tag first: mismatch traps, and only the
     // live member's bytes load (TYPES.md 4.6). The tag is never statically

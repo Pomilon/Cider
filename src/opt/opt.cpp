@@ -245,6 +245,32 @@ uint64_t deadCode(ir::Module& module) {
                     }
                 }
             }
+            // A loaded pointer, a call result, or any other computed address
+            // in an addressBase is the same hazard: the base names no slot,
+            // so no slot read proves the write unobserved. Heap stores are
+            // the case that bit: init writes through the allocator's pointer
+            // and nothing in the function loads through it.
+            std::unordered_set<uint32_t> slotIds;
+            for (const ir::Block& scan : fn.blocks) {
+                for (const ir::Instr& seen : scan.body) {
+                    if (seen.op == ir::Op::Alloca) {
+                        for (const ir::Value& result : seen.results) {
+                            slotIds.insert(result.id);
+                        }
+                    }
+                }
+            }
+            if (!indexed) {
+                for (const ir::Block& scan : fn.blocks) {
+                    for (const ir::Instr& seen : scan.body) {
+                        if ((seen.op == ir::Op::Load || seen.op == ir::Op::Store) &&
+                            seen.globalLabel.empty() &&
+                            slotIds.find(seen.addressBase.id) == slotIds.end()) {
+                            indexed = true;
+                        }
+                    }
+                }
+            }
             std::unordered_set<uint32_t> readSlots;
             for (const ir::Block& scan : fn.blocks) {
                 for (const ir::Instr& seen : scan.body) {

@@ -29,6 +29,10 @@ constexpr uint64_t kSliceWords = 2;
 constexpr uint64_t kFirstWord = 0;
 constexpr uint64_t kLenWord = 1;
 
+// A layout query with no answer: classSize/classAlign refuse with -1, and
+// the constant names that so no digit shares a line with the query.
+constexpr int64_t kNoExtent = -1;
+
 // An arithmetic opcode, or Op::Const when the spelling is not one of ours.
 // An if-chain rather than a switch over an enum: this maps a BinOp, which is
 // not a Kind, and the switch gate counts switches over Kind.
@@ -272,8 +276,31 @@ bool Lowerer::resolvePlace(const Expr* expr, Place& out) {
         out.type = fieldType;
         return true;
     }
-    if (const auto* index = dynamic_cast<const Index*>(expr)) {
-        // A field over an element (`a[1].y`) needs the element's address:
+    if (const auto* deref = dynamic_cast<const Unary*>(expr)) {
+        // `(*p).f`: the pointer lowers to one address word and everything
+        // addresses off it. Any pointer expression qualifies, not just a
+        // name — the word is the address however it was computed.
+        if (deref->op != UnOp::Deref) {
+            return false;
+        }
+        std::vector<ir::Value> ptr = lowerWords(deref->operand.get());
+        if (failed_ || ptr.size() != kOneWord) {
+            return false;
+        }
+        TypeRef pointee = checker_.typeOf(deref);
+        if (pointee.isError()) {
+            return false;
+        }
+        out.slots.clear();
+        out.global.clear();
+        out.type = pointee;
+        out.off = 0;
+        out.isVolatile = false;
+        out.hasIndirect = true;
+        out.indirect = ptr[0];
+        return true;
+    }
+    if (const auto* index = dynamic_cast<const Index*>(expr)) {        // A field over an element (`a[1].y`) needs the element's address:
         // the base plus a folded index times the element size. A computed
         // index has no constant address, so it is not a place.
         if (!resolvePlace(index->array.get(), out)) {
@@ -492,9 +519,90 @@ void Lowerer::onFuncDecl(FuncDecl& n) {
 
     ir::Terminator ret;
     ret.term = ir::Term::Ret;
-    ret.value = undefined();
+    // A void falloff answers nothing (see onReturn): only a value falloff
+    // keeps the placeholder, and the checker rejects those before lowering.
+    if (function_->signature.returnType() == nullptr ||
+        function_->signature.returnType()->kind() != Kind::Void) {
+        ret.value = undefined();
+    }
     ret.loc = n.pos;
     emitTerminator(ret);
+    function_ = nullptr;
+}
+
+void Lowerer::onMethodDecl(const std::string& owner, const std::string& name,
+                           const std::vector<Param>& params, const Signature& sig,
+                           TypeRef self, Block& body) {
+    if (failed_ || !enabled_) {
+        return;
+    }
+    // One function per method, statically dispatched: the mangled name is
+    // the link identity and the receiver rides as the first parameter, so a
+    // call site builds `owner__method(receiver, args...)`.
+    ir::Function fn;
+    fn.name = owner + "__" + name;
+    std::vector<Parameter> combined;
+    Parameter receiver;
+    receiver.type = self.type;
+    receiver.isMutable = false;
+    combined.push_back(receiver);
+    for (const Parameter& p : sig.parameters()) {
+        combined.push_back(p);
+    }
+    const Type* ret = sig.returnType() != nullptr ? sig.returnType() : ctx_.void_();
+    fn.signature = Signature(std::move(combined), ret, Abi::SysV);
+    fn.loc = body.pos;
+    function_ = &fn;
+    module_->functions.push_back(std::move(fn));
+    function_ = &module_->functions.back();
+
+    valueSeq_ = 0;
+    labelSeq_ = 0;
+    blockOrder_.clear();
+    locals_.clear();
+
+    uint32_t entry = emitBlock(body.pos);
+    startBlock(entry);
+
+    std::unordered_map<std::string, LocalBinding> frame;
+    std::vector<ir::Value> selfSlots = allocaSlots(self, body.pos,
+                                                   static_cast<uint64_t>(wordCount(self)));
+    for (ir::Value slot : selfSlots) {
+        function_->params.push_back(slot);
+    }
+    LocalBinding selfBinding;
+    selfBinding.slots = std::move(selfSlots);
+    selfBinding.type = self;
+    selfBinding.isMutable = false;
+    frame["self"] = selfBinding;
+    const std::vector<Parameter>& declared = function_->signature.parameters();
+    for (uint64_t i = 0; i < static_cast<uint64_t>(params.size()); ++i) {
+        TypeRef type{declared[i + 1].type};
+        std::vector<ir::Value> slots = allocaSlots(type, params[i].pos,
+                                                   static_cast<uint64_t>(wordCount(type)));
+        for (ir::Value slot : slots) {
+            function_->params.push_back(slot);
+        }
+        LocalBinding binding;
+        binding.slots = std::move(slots);
+        binding.type = type;
+        binding.isMutable = declared[i + 1].isMutable;
+        frame[params[i].name] = binding;
+    }
+    locals_.push_back(std::move(frame));
+
+    body.accept(checker_);
+    locals_.pop_back();
+
+    ir::Terminator mret;
+    mret.term = ir::Term::Ret;
+    // Same void-falloff rule as a free function (see onFuncDecl).
+    if (function_->signature.returnType() == nullptr ||
+        function_->signature.returnType()->kind() != Kind::Void) {
+        mret.value = undefined();
+    }
+    mret.loc = body.pos;
+    emitTerminator(mret);
     function_ = nullptr;
 }
 
@@ -725,7 +833,12 @@ std::vector<ir::Value> Lowerer::loadRange(Position pos, const Place& place,
         instr.isPure = true;
         instr.isVolatile = place.isVolatile;
         int64_t disp = cur % layout::kSizePointer;
-        if (!place.global.empty()) {
+        if (place.hasIndirect) {
+            // A loaded pointer dereferences with the accumulated offset:
+            // codegen reads any non-slot base as a computed address.
+            instr.addressBase = place.indirect;
+            instr.displacement = cur;
+        } else if (!place.global.empty()) {
             if (disp + take > layout::kSizePointer) {
                 refuse(pos, "this field layout is not lowered yet");
                 return {undefined()};
@@ -837,7 +950,10 @@ void Lowerer::storeRange(Position pos, const Place& place,
         instr.storedValue = words[i];
         instr.isVolatile = place.isVolatile;
         int64_t disp = cur % layout::kSizePointer;
-        if (!place.global.empty()) {
+        if (place.hasIndirect) {
+            instr.addressBase = place.indirect;
+            instr.displacement = cur;
+        } else if (!place.global.empty()) {
             if (disp + take > layout::kSizePointer) {
                 refuse(pos, "this field layout is not lowered yet");
                 return;
@@ -1888,6 +2004,73 @@ std::vector<ir::Value> Lowerer::lowerNewStruct(const NewStruct& n) {
     return words;
 }
 
+std::vector<ir::Value> Lowerer::lowerNewClass(const NewClass& n) {
+    // `new C(args)`: heap memory plus the constructor. The checker proved
+    // the target is a class with an init of matching arity; the size, the
+    // signature, and the owner name are re-derived here.
+    TypeRef ptrType = checker_.typeOf(&n);
+    if (ptrType.isError() || ptrType.type->kind() != Kind::Pointer) {
+        refuse(n.pos, "this construction");
+        return {undefined()};
+    }
+    const Type* obj = ptrType.type->pointee();
+    if (obj == nullptr || obj->kind() != Kind::Class) {
+        refuse(n.pos, "this construction");
+        return {undefined()};
+    }
+    std::optional<DeclId> id = obj->decl();
+    const resolve::Decl* owner = id.has_value() ? resolver_.declById(*id) : nullptr;
+    const Signature* init = id.has_value() ? resolver_.methodSig(*id, "init") : nullptr;
+    int64_t byteCount = kNoExtent;
+    int64_t stepTo = kNoExtent;
+    if (id.has_value()) {
+        byteCount = resolver_.classSize(*id);
+        stepTo = resolver_.classAlign(*id);
+    }
+    if (owner == nullptr || init == nullptr || byteCount <= 0 || stepTo <= 0) {
+        refuse(n.pos, "this construction");
+        return {undefined()};
+    }
+    TypeRef count{ctx_.basic(BasicKind::I64)};
+    ir::Instr alloc;
+    alloc.op = ir::Op::Call;
+    alloc.loc = n.pos;
+    alloc.callee = "cider_alloc";
+    alloc.mayTrap = true;
+    for (int64_t fixed : {byteCount, stepTo}) {
+        ir::Argument arg;
+        arg.words.push_back(constantI64(fixed, count, n.pos));
+        if (failed_) {
+            return {undefined()};
+        }
+        alloc.arguments.push_back(std::move(arg));
+    }
+    ir::Value at = newValue(ir::IRType::Ptr, ptrType, n.pos);
+    alloc.results.push_back(at);
+    alloc.width = ir::IRType::Ptr;
+    alloc.type = ptrType;
+    emit(std::move(alloc));
+    ir::Instr run;
+    run.op = ir::Op::Call;
+    run.loc = n.pos;
+    run.callee = owner->name + "__init";
+    run.mayTrap = true;
+    ir::Argument self;
+    self.words.push_back(at);
+    run.arguments.push_back(std::move(self));
+    for (uint64_t i = 0; i < static_cast<uint64_t>(n.args.size()); ++i) {
+        ir::Argument arg;
+        arg.words = lowerWords(n.args[i].get());
+        if (failed_) {
+            return {undefined()};
+        }
+        run.arguments.push_back(std::move(arg));
+    }
+    run.width = ir::IRType::Void;
+    emit(std::move(run));
+    return {at};
+}
+
 std::vector<ir::Value> Lowerer::lowerNewArray(const NewArray& n) {
     TypeRef arrayType = checker_.typeOf(&n);
     int count = wordCount(arrayType);
@@ -1934,6 +2117,9 @@ std::vector<ir::Value> Lowerer::lowerWords(const Expr* expr) {
     }
     if (dynamic_cast<const NewArray*>(expr) != nullptr) {
         return lowerNewArray(static_cast<const NewArray&>(*expr));
+    }
+    if (dynamic_cast<const NewClass*>(expr) != nullptr) {
+        return lowerNewClass(static_cast<const NewClass&>(*expr));
     }
     if (dynamic_cast<const Field*>(expr) != nullptr) {
         return lowerField(static_cast<const Field&>(*expr));
@@ -2160,6 +2346,61 @@ ir::Value Lowerer::onCall(Call& n) {
     const Signature* sig = nullptr;
     std::string callee;
     bool indirect = false;
+    std::vector<ir::Value> receiver;
+    if (const auto* field = dynamic_cast<const Field*>(n.callee.get())) {
+        // `c.m(args)`: the checker proved the field names a method, so this
+        // is a static call to the mangled name with the object's address
+        // first. Disjoint from the union path above: only values with
+        // methods reach here.
+        Place base;
+        if (resolvePlace(field->object.get(), base) && !base.type.isError() &&
+            (base.type.type->kind() == Kind::Class ||
+             base.type.type->kind() == Kind::Struct)) {
+            std::optional<DeclId> id = base.type.type->decl();
+            const resolve::Decl* owner =
+                id.has_value() ? resolver_.declById(*id) : nullptr;
+            const Signature* msig = id.has_value()
+                                        ? resolver_.methodSig(*id, field->name)
+                                        : nullptr;
+            if (owner == nullptr || msig == nullptr) {
+                refuse(n.pos, "this call");
+                return undefined();
+            }
+            callee = owner->name + "__" + field->name;
+            sig = msig;
+            if (base.slots.empty() && !base.hasIndirect) {
+                refuse(n.pos, "a method on a global is not lowered yet");
+                return undefined();
+            }
+            if (base.hasIndirect && base.off != 0) {
+                // A method on a field reached through a pointer: the object
+                // address is the loaded pointer plus the field offset, added
+                // the same way a slice advances its pointer.
+                TypeRef count{ctx_.basic(BasicKind::I64)};
+                TypeRef ptrType{ctx_.pointer(base.type.type)};
+                ir::Value step = constantI64(base.off, count, n.pos);
+                if (failed_) {
+                    return undefined();
+                }
+                ir::Instr add;
+                add.op = ir::Op::Add;
+                add.loc = n.pos;
+                add.type = ptrType;
+                add.width = ir::IRType::Ptr;
+                add.isPure = true;
+                add.operands.push_back(base.indirect);
+                add.operands.push_back(step);
+                ir::Value at = newValue(add.width, ptrType, n.pos);
+                add.results.push_back(at);
+                emit(std::move(add));
+                receiver.push_back(at);
+            } else if (base.hasIndirect) {
+                receiver.push_back(base.indirect);
+            } else {
+                receiver.push_back(computedBase(base.slots[0], base.off, n.pos));
+            }
+        }
+    }
     if (const auto* ident = dynamic_cast<const Ident*>(n.callee.get())) {
         sig = functionSig(ident->name);
         callee = ident->name;
@@ -2192,6 +2433,11 @@ ir::Value Lowerer::onCall(Call& n) {
     instr.callee = callee;
     instr.call.indirect = indirect;
     instr.mayTrap = true;
+    for (ir::Value word : receiver) {
+        ir::Argument arg;
+        arg.words.push_back(word);
+        instr.arguments.push_back(std::move(arg));
+    }
     for (uint64_t i = 0; i < static_cast<uint64_t>(n.args.size()); ++i) {
         TypeRef want{sig->parameters()[i].type};
         (void)want;
@@ -2244,7 +2490,10 @@ void Lowerer::onReturn(Return& n) {
         }
         term.value = words[0];
     } else {
-        term.value = undefined();
+        // A bare return answers nothing: nullopt, not the placeholder. The
+        // placeholder's id poisons the frame computation, which reads every
+        // value the function mentions.
+        term.value = std::nullopt;
     }
     emitTerminator(term);
 }

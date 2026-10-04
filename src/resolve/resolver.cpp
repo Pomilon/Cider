@@ -790,6 +790,24 @@ void Resolver::resolveDeclTypes(const std::string& module, Program& program,
                     methodLists_[key].push_back(method.name);
                 }
             }
+            // `init`/`deinit` parse to their own declarations, not methods,
+            // but everything downstream (checkCtor, `new C(args)`) looks them
+            // up as methods — so they are recorded as methods here.
+            const FuncDecl* ctors[2] = {cd->init.get(), cd->deinit.get()};
+            const char* names[2] = {"init", "deinit"};
+            for (int i = 0; i < 2; ++i) {
+                if (ctors[i] == nullptr || cself == nullptr) {
+                    continue;
+                }
+                bool failed = false;
+                Signature sig = buildSignature(ctors[i]->params,
+                                               ctors[i]->returns.get(), inner, failed);
+                if (!failed) {
+                    std::string key = declKey(cself->id);
+                    methodSigs_[key + "." + names[i]] = std::move(sig);
+                    methodLists_[key].push_back(names[i]);
+                }
+            }
             continue;
         }
         if (const auto* id = dynamic_cast<const InterfaceDecl*>(decl.get())) {

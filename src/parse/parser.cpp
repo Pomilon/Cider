@@ -434,7 +434,7 @@ MethodDecl Parser::parseMethod() {
         failHere("expected a method");
         return MethodDecl(start, "", {}, nullptr, nullptr, false);
     }
-    if (!check(TokenKind::Ident)) {
+    if (!check(TokenKind::Ident) && !check(TokenKind::KwInit)) {
         failHere("a method needs a name");
         return MethodDecl(start, "", {}, nullptr, nullptr, false);
     }
