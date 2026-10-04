@@ -100,12 +100,15 @@ int runCode(const std::string& text, bool& signaled) {
     fwrite(built.asmText.data(), 1, built.asmText.size(), asmFile);
     fclose(asmFile);
     std::string binPath = std::string(asmPath) + ".bin";
-    // Assembled with the shell, which is fine: assembling cannot trap. Run
-    // directly afterwards, because a signal death does not survive system() —
-    // sh dies by the same signal and the test would read 127 either way.
-    std::string command = "cc -o " + binPath + " " + asmPath + " 2>/dev/null";
+    // Assembled with the shell, which is fine: assembling cannot trap. The
+    // link is the sovereign one — as and ld, no libc, no runtime archive —
+    // because the text defines every symbol it references.
+    std::string objPath = std::string(asmPath) + ".o";
+    std::string command = "as -o " + objPath + " " + asmPath + " 2>/dev/null"
+        " && ld -nostdlib -e _start -o " + binPath + " " + objPath + " 2>/dev/null";
     if (system(command.c_str()) != 0) {
         unlink(asmPath);
+        unlink(objPath.c_str());
         return -1;
     }
     pid_t child = fork();
@@ -116,6 +119,7 @@ int runCode(const std::string& text, bool& signaled) {
     int status = 0;
     waitpid(child, &status, 0);
     unlink(asmPath);
+    unlink(objPath.c_str());
     unlink(binPath.c_str());
     if (WIFSIGNALED(status)) {
         signaled = true;
@@ -214,6 +218,25 @@ void testArray() {
           "element stores land");
 }
 
+// Pointers compare by identity and cast address-preservingly; the heap
+// helpers answer nilPtr on refusal and catch corruption loudly.
+void testPointerHeap() {
+    std::printf("pointers and the heap\n");
+    check(runQuiet("func main() -> int { var p: *int = alloc(8, 8) as *int; return (p != nilPtr) as int + 41; }\n") == 42,
+          "a fresh block is not nil");
+    check(runQuiet("func main() -> int { return (alloc(999999999999, 8) != nilPtr) as int; }\n") == 0,
+          "an oversized request refuses to nilPtr");
+    check(runQuiet("func main() -> int {\n"
+                   " var p: *int = alloc(16, 8) as *int;\n"
+                   " free(p);\n"
+                   " var q: *int = alloc(16, 8) as *int;\n"
+                   " free(q);\n"
+                   " return (q != nilPtr) as int + 41; }\n") == 42,
+          "freed memory is recycled by the free list");
+    check(runQuiet("func main() -> int { var p: *int = alloc(8, 8) as *int; free(p); free(p); return 0; }\n") == 134,
+          "a double free dies loudly with the heap code");
+}
+
 // The same module emitted twice is byte-identical, and carries no build path.
 void testRepro() {
     std::printf("byte reproducibility\n");
@@ -236,6 +259,7 @@ int main() {
     testGlobals();
     testStruct();
     testArray();
+    testPointerHeap();
     testTrap();
     testRepro();
     std::printf("\n%d checks, %s\n", checks, failures == 0 ? "all passed" : "FAILURES");

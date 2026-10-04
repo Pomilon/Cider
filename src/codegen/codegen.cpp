@@ -11,6 +11,7 @@
 #include "codegen/codegen.h"
 
 #include <unordered_set>
+#include <vector>
 
 namespace cider {
 namespace codegen {
@@ -95,6 +96,29 @@ public:
                 return EmitResult{false, "", error_, pos_};
             }
         }
+        // The entry point and the prelude helpers are emitted here, in this
+        // one place, because sovereignty is a property of the whole text: a
+        // program links with `ld` alone, no libc, no crt0, no archive.
+        std::vector<std::string> helpers = neededHelpers();
+        if (!emitEntry()) {
+            return EmitResult{false, "", error_, pos_};
+        }
+        for (const std::string& helper : helpers) {
+            if (!emitHelper(helper)) {
+                return EmitResult{false, "", error_, pos_};
+            }
+        }
+        bool heap = false;
+        bool panic = false;
+        for (const std::string& helper : helpers) {
+            if (helper == "cider_alloc" || helper == "cider_realloc" ||
+                helper == "cider_free") {
+                heap = true;
+            }
+            if (helper == "cider_panic") {
+                panic = true;
+            }
+        }
         if (!module_.globals.empty()) {
             out_ += ".data\n";
             for (const ir::Global& global : module_.globals) {
@@ -109,7 +133,16 @@ public:
                 }
             }
         }
-        if (!module_.rodata.empty()) {
+        if (heap) {
+            if (module_.globals.empty()) {
+                out_ += ".data\n";
+            }
+            // The allocator's two words of state: the free-list head and the
+            // bytes mapped so far. Zero-initialized images carry them.
+            out_ += "cider_fl_head:\n  .quad 0\n";
+            out_ += "cider_heap_total:\n  .quad 0\n";
+        }
+        if (!module_.rodata.empty() || panic || heap) {
             // Bytes in first-seen order: the order is the lowering order,
             // which is deterministic in the source, so the bytes are too.
             out_ += ".section .rodata\n";
@@ -124,11 +157,415 @@ public:
                     out_ += line;
                 }
             }
+            if (panic) {
+                out_ += "cider_panic_nl:\n  .byte 10\n";
+            }
+            if (heap) {
+                out_ += "cider_heap_msg:\n";
+                out_ += "  .byte 99,105,100,101,114,32,104,101,97,112,58,32,99,111,114,114,117,112,116,32,98,108,111,99,107,32,104,101,97,100,101,114,10\n";
+                out_ += "cider_heap_msg_end:\n";
+            }
         }
         return EmitResult{true, out_, "", Position{"", 1, 1}};
     }
 
 private:
+    // Prelude helpers the text actually references, in a fixed emission
+    // order so the bytes stay deterministic. A helper the module itself
+    // defines (the name is taken) is skipped: the program's own spelling
+    // wins, as FEATURES.md §7 promises for shadowing.
+    std::vector<std::string> neededHelpers() {
+        std::unordered_set<std::string> defined;
+        for (const ir::Function& fn : module_.functions) {
+            defined.insert(fn.name);
+        }
+        std::unordered_set<std::string> seen;
+        std::vector<std::string> order = {
+            "cider_print", "cider_panic", "cider_alloc", "cider_free",
+            "cider_realloc",
+        };
+        std::vector<std::string> out;
+        for (const ir::Function& fn : module_.functions) {
+            for (const ir::Block& block : fn.blocks) {
+                for (const ir::Instr& instr : block.body) {
+                    if (instr.op != ir::Op::Call) {
+                        continue;
+                    }
+                    if (defined.count(instr.callee) != 0) {
+                        continue;
+                    }
+                    if (seen.insert(instr.callee).second) {
+                        for (const std::string& candidate : order) {
+                            if (candidate == instr.callee) {
+                                out.push_back(candidate);
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        return out;
+    }
+
+    // The process entry. A program names its entry by defining `main` or
+    // `_start` (FEATURES.md §10); the kernel enters at `_start` either way.
+    // When only `main` exists this trampoline bridges the two worlds: it
+    // reads argc/argv where the kernel left them, calls main at the ABI's
+    // register positions, and exits with main's answer. No crt0 exists in
+    // the link, so this text is the only thing between the kernel and the
+    // program.
+    bool emitEntry() {
+        const ir::Function* mainFn = nullptr;
+        const ir::Function* startFn = nullptr;
+        for (const ir::Function& fn : module_.functions) {
+            if (fn.name == "main") {
+                mainFn = &fn;
+            }
+            if (fn.name == "_start") {
+                startFn = &fn;
+            }
+        }
+        if (mainFn != nullptr && startFn != nullptr) {
+            refuse(mainFn->loc, "the program defines both main and _start");
+            return false;
+        }
+        if (mainFn == nullptr && startFn == nullptr) {
+            refuse(Position{"", 1, 1}, "no entry function: define main or _start");
+            return false;
+        }
+        if (startFn != nullptr) {
+            if (!startFn->signature.parameters().empty()) {
+                refuse(startFn->loc, "_start takes no parameters");
+                return false;
+            }
+            return true;
+        }
+        uint64_t arity = mainFn->signature.arity();
+        if (arity > 2) {
+            refuse(mainFn->loc, "main takes at most two parameters");
+            return false;
+        }
+        const Type* ret = mainFn->signature.returnType();
+        if (ret == nullptr || ret->kind() != Kind::Basic ||
+            (*ret->basic() != BasicKind::I32 && *ret->basic() != BasicKind::I64)) {
+            refuse(mainFn->loc, "main must return int");
+            return false;
+        }
+        out_ += ".globl _start\n";
+        out_ += "_start:\n";
+        out_ += "  xor ebp, ebp\n";
+        if (arity >= 1) {
+            out_ += "  mov rdi, [rsp]\n";        // argc, where the kernel left it
+        }
+        if (arity >= 2) {
+            out_ += "  lea rsi, [rsp + 8]\n";    // argv, the array after argc
+        }
+        out_ += "  call main\n";
+        out_ += "  mov rdi, rax\n";
+        out_ += "  mov eax, 60\n";               // exit(main's answer)
+        out_ += "  syscall\n";
+        return true;
+    }
+
+    // One prelude helper, emitted as text only when referenced. Each one is
+    // raw syscalls: there is no libc behind this compiler, and no archive
+    // behind these symbols.
+    bool emitHelper(const std::string& name) {
+        if (emittedHelpers_.insert(name).second == false) {
+            return true;                         // already in the text once
+        }
+        if (name == "cider_print") {
+            // (data, length) in (rdi, rsi) — the two words a string lowers
+            // to. A non-positive length writes nothing.
+            out_ += "cider_print:\n";
+            out_ += "  test rsi, rsi\n";
+            out_ += "  jle .done\n";
+            out_ += "  mov rdx, rsi\n";
+            out_ += "  mov rsi, rdi\n";
+            out_ += "  mov eax, 1\n";
+            out_ += "  mov edi, 1\n";
+            out_ += "  syscall\n";
+            out_ += ".done:\n";
+            out_ += "  ret\n";
+            return true;
+        }
+        if (name == "cider_panic") {
+            // The message on stderr, a newline, then exit 134 — the code the
+            // VM answers for panic, so the two agree without a flag.
+            out_ += "cider_panic:\n";
+            out_ += "  test rsi, rsi\n";
+            out_ += "  jle .newline\n";
+            out_ += "  mov rdx, rsi\n";
+            out_ += "  mov rsi, rdi\n";
+            out_ += "  mov eax, 1\n";
+            out_ += "  mov edi, 2\n";
+            out_ += "  syscall\n";
+            out_ += ".newline:\n";
+            out_ += "  mov eax, 1\n";
+            out_ += "  mov edi, 2\n";
+            out_ += "  lea rsi, [rip + cider_panic_nl]\n";
+            out_ += "  mov edx, 1\n";
+            out_ += "  syscall\n";
+            out_ += "  mov eax, 60\n";
+            out_ += "  mov edi, 134\n";
+            out_ += "  syscall\n";
+            return true;
+        }
+        if (name == "cider_heap_fail") {
+            out_ += "cider_heap_fail:\n";
+            out_ += "  mov eax, 1\n";
+            out_ += "  mov edi, 2\n";
+            out_ += "  lea rsi, [rip + cider_heap_msg]\n";
+            // GAS intel syntax reads a bare symbol as a memory operand, so
+            // the length rides as the literal it is (the message above).
+            out_ += "  mov edx, 33\n";
+            out_ += "  syscall\n";
+            out_ += "  mov eax, 60\n";
+            out_ += "  mov edi, 134\n";
+            out_ += "  syscall\n";
+            return true;
+        }
+        if (name == "cider_alloc") {
+            return emitAlloc();
+        }
+        if (name == "cider_free") {
+            return emitFree();
+        }
+        if (name == "cider_realloc") {
+            return emitRealloc();
+        }
+        refuse(Position{"", 1, 1}, "unknown prelude helper '" + name + "'");
+        return false;
+    }
+
+    // The heap. A first-fit free list over anonymous mmap arenas; no libc.
+    //
+    // Block layout, offsets from the user pointer:
+    //   [-32] user bytes   [-24] block base   [-16] block bytes
+    //   [ -8] front canary [0..bytes) user    [bytes] rear canary
+    // A free block is its own list node: [0] block bytes, [8] next node.
+    //
+    // Refusals answer 0 (nilPtr): negative bytes, non-positive alignment, a
+    // non-power-of-two alignment above 16, or the heap cap. free(nilPtr) is
+    // a defined no-op. A broken canary or a cyclic free list dies loudly on
+    // stderr with exit 134 rather than continuing on corrupt memory.
+    bool emitAlloc() {
+        emitHelper("cider_heap_fail");
+        out_ += "cider_alloc:\n";
+        out_ += "  cmp rdi, 0\n";
+        out_ += "  jl .refuse\n";
+        out_ += "  cmp rsi, 0\n";
+        out_ += "  jle .refuse\n";
+        out_ += "  push rbx\n";
+        out_ += "  push rbp\n";
+        out_ += "  push r12\n";
+        out_ += "  push r13\n";
+        out_ += "  mov rbx, rdi\n";              // the user's byte count
+        out_ += "  cmp rsi, 16\n";
+        out_ += "  jge .maybePow\n";
+        out_ += "  mov rsi, 16\n";
+        out_ += ".maybePow:\n";
+        out_ += "  je .alignDone\n";
+        out_ += "  lea rdx, [rsi - 1]\n";
+        out_ += "  test rsi, rdx\n";
+        out_ += "  jnz .refusePop\n";            // above 16 must be a power of two
+        out_ += ".alignDone:\n";
+        out_ += "  mov r12, rsi\n";              // effective alignment
+        out_ += "  mov rbp, rbx\n";
+        out_ += "  add rbp, 40\n";               // header + rear canary + rounding headroom
+        out_ += "  jo .refusePop\n";
+        out_ += "  add rbp, 15\n";
+        out_ += "  and rbp, -16\n";
+        out_ += "  cmp r12, 16\n";
+        out_ += "  jle .needDone\n";
+        out_ += "  add rbp, r12\n";              // room to align the user pointer
+        out_ += "  jo .refusePop\n";
+        out_ += ".needDone:\n";
+        out_ += "  xor r13, r13\n";              // the node before the cursor
+        out_ += ".restart:\n";
+        out_ += "  mov r11, [rip + cider_fl_head]\n";
+        out_ += "  xor r8, r8\n";                // steps walked
+        out_ += ".search:\n";
+        out_ += "  test r11, r11\n";
+        out_ += "  jz .grow\n";
+        out_ += "  add r8, 1\n";
+        out_ += "  cmp r8, 65536\n";
+        out_ += "  ja cider_heap_fail\n";        // a cycle is corruption
+        out_ += "  mov rdx, [r11]\n";            // this block's byte count
+        out_ += "  cmp rdx, rbp\n";
+        out_ += "  jb .advance\n";
+        out_ += "  mov rax, rdx\n";
+        out_ += "  sub rax, rbp\n";
+        out_ += "  cmp rax, 48\n";
+        out_ += "  jb .unlink\n";                // tail too small to stand alone
+        out_ += "  lea r9, [r11 + rbp]\n";       // the tail node
+        out_ += "  mov [r9], rax\n";
+        out_ += "  mov rdx, [r11 + 8]\n";
+        out_ += "  mov [r9 + 8], rdx\n";
+        out_ += "  mov rcx, rbp\n";              // the front keeps `need` bytes
+        out_ += "  test r13, r13\n";
+        out_ += "  jz .splitHead\n";
+        out_ += "  mov [r13 + 8], r9\n";
+        out_ += "  jmp .carve\n";
+        out_ += ".splitHead:\n";
+        out_ += "  mov [rip + cider_fl_head], r9\n";
+        out_ += "  jmp .carve\n";
+        out_ += ".unlink:\n";
+        out_ += "  mov rcx, [r11]\n";            // the whole block goes out
+        out_ += "  mov rdx, [r11 + 8]\n";
+        out_ += "  test r13, r13\n";
+        out_ += "  jz .unlinkHead\n";
+        out_ += "  mov [r13 + 8], rdx\n";
+        out_ += "  jmp .carve\n";
+        out_ += ".unlinkHead:\n";
+        out_ += "  mov [rip + cider_fl_head], rdx\n";
+        out_ += "  jmp .carve\n";
+        out_ += ".advance:\n";
+        out_ += "  mov r13, r11\n";
+        out_ += "  mov r11, [r11 + 8]\n";
+        out_ += "  jmp .search\n";
+        out_ += ".grow:\n";
+        out_ += "  mov rdx, 1048576\n";          // one mebibyte at a time
+        out_ += "  lea rax, [rbp + 16]\n";
+        out_ += "  cmp rax, rdx\n";
+        out_ += "  jbe .haveLen\n";
+        out_ += "  mov rdx, rax\n";              // a request larger than one arena
+        out_ += ".haveLen:\n";
+        out_ += "  mov rax, [rip + cider_heap_total]\n";
+        out_ += "  add rax, rdx\n";
+        out_ += "  cmp rax, 1073741824\n";       // the whole heap stays under 1 GiB
+        out_ += "  ja .refusePop\n";
+        out_ += "  mov rsi, rdx\n";
+        out_ += "  mov rax, 9\n";                // mmap
+        out_ += "  xor rdi, rdi\n";
+        out_ += "  mov rdx, 3\n";                // PROT_READ | PROT_WRITE
+        out_ += "  mov r10, 34\n";               // MAP_PRIVATE | MAP_ANONYMOUS
+        out_ += "  mov r8, -1\n";
+        out_ += "  xor r9, r9\n";
+        out_ += "  syscall\n";
+        out_ += "  test rax, rax\n";
+        out_ += "  js .refusePop\n";
+        out_ += "  mov [rax], rsi\n";            // the arena starts as one node
+        out_ += "  mov rdx, [rip + cider_fl_head]\n";
+        out_ += "  mov [rax + 8], rdx\n";
+        out_ += "  mov [rip + cider_fl_head], rax\n";
+        out_ += "  add qword [rip + cider_heap_total], rsi\n";
+        out_ += "  jmp .restart\n";
+        out_ += ".carve:\n";
+        out_ += "  cmp r12, 16\n";
+        out_ += "  jg .alignedUser\n";
+        out_ += "  lea rax, [r11 + 32]\n";       // 32 keeps the user 16-aligned
+        out_ += "  jmp .haveUser\n";
+        out_ += ".alignedUser:\n";
+        out_ += "  lea rax, [r11 + r12 + 31]\n";
+        out_ += "  mov rdx, r12\n";
+        out_ += "  neg rdx\n";
+        out_ += "  and rax, rdx\n";
+        out_ += ".haveUser:\n";
+        out_ += "  mov [rax - 32], rbx\n";       // user bytes
+        out_ += "  mov [rax - 24], r11\n";       // block base
+        out_ += "  mov [rax - 16], rcx\n";       // block bytes
+        out_ += "  mov rdx, 0x9E3779B97F4A7C15\n";
+        out_ += "  mov [rax - 8], rdx\n";        // front canary
+        out_ += "  mov [rax + rbx], rdx\n";      // rear canary
+        out_ += "  pop r13\n";
+        out_ += "  pop r12\n";
+        out_ += "  pop rbp\n";
+        out_ += "  pop rbx\n";
+        out_ += "  ret\n";
+        out_ += ".refusePop:\n";
+        out_ += "  xor eax, eax\n";
+        out_ += "  pop r13\n";
+        out_ += "  pop r12\n";
+        out_ += "  pop rbp\n";
+        out_ += "  pop rbx\n";
+        out_ += ".refuse:\n";
+        out_ += "  xor eax, eax\n";
+        out_ += "  ret\n";
+        return true;
+    }
+
+    bool emitFree() {
+        emitHelper("cider_heap_fail");
+        out_ += "cider_free:\n";
+        out_ += "  test rdi, rdi\n";
+        out_ += "  jz .nothing\n";               // free(nilPtr) does nothing
+        out_ += "  push rbx\n";
+        out_ += "  mov rbx, rdi\n";
+        out_ += "  mov rax, 0x9E3779B97F4A7C15\n";
+        out_ += "  cmp [rbx - 8], rax\n";
+        out_ += "  jne cider_heap_fail\n";
+        out_ += "  mov rcx, [rbx - 32]\n";       // user bytes (header)
+        out_ += "  cmp [rbx + rcx], rax\n";
+        out_ += "  jne cider_heap_fail\n";
+        out_ += "  mov rdx, 0xDEADDEADDEADDEAD\n";
+        out_ += "  mov [rbx - 8], rdx\n";        // scrub: use-after-free reads dead
+        out_ += "  mov [rbx + rcx], rdx\n";
+        out_ += "  mov rax, [rbx - 24]\n";       // block base
+        out_ += "  mov rdx, [rbx - 16]\n";       // block bytes
+        out_ += "  mov [rax], rdx\n";
+        out_ += "  mov rcx, [rip + cider_fl_head]\n";
+        out_ += "  mov [rax + 8], rcx\n";
+        out_ += "  mov [rip + cider_fl_head], rax\n";
+        out_ += "  pop rbx\n";
+        out_ += ".nothing:\n";
+        out_ += "  ret\n";
+        return true;
+    }
+
+    bool emitRealloc() {
+        emitHelper("cider_heap_fail");
+        out_ += "cider_realloc:\n";
+        out_ += "  test rdi, rdi\n";
+        out_ += "  jnz .haveOld\n";
+        out_ += "  mov rdi, rsi\n";              // realloc(nilPtr, n) allocates
+        out_ += "  mov rsi, rdx\n";
+        out_ += "  jmp cider_alloc\n";
+        out_ += ".haveOld:\n";
+        out_ += "  cmp rsi, 0\n";
+        out_ += "  jge .sizeOk\n";
+        out_ += "  xor eax, eax\n";
+        out_ += "  ret\n";
+        out_ += ".sizeOk:\n";
+        out_ += "  push rbx\n";
+        out_ += "  push r12\n";
+        out_ += "  mov rbx, rdi\n";
+        out_ += "  mov r12, rsi\n";              // the new byte count
+        out_ += "  mov rax, 0x9E3779B97F4A7C15\n";
+        out_ += "  cmp [rbx - 8], rax\n";
+        out_ += "  jne cider_heap_fail\n";
+        out_ += "  mov rcx, [rbx - 32]\n";       // user bytes (header)
+        out_ += "  cmp [rbx + rcx], rax\n";
+        out_ += "  jne cider_heap_fail\n";
+        out_ += "  mov rdi, r12\n";
+        out_ += "  mov rsi, rdx\n";              // the alignment rides in rdx
+        out_ += "  call cider_alloc\n";
+        out_ += "  test rax, rax\n";
+        out_ += "  jz .keepOld\n";               // refusal leaves the old block owned
+        out_ += "  mov r9, rax\n";
+        out_ += "  mov rdx, [rbx]\n";            // old bytes
+        out_ += "  cmp rdx, r12\n";
+        out_ += "  jbe .haveCount\n";
+        out_ += "  mov rdx, r12\n";              // copy the shorter span
+        out_ += ".haveCount:\n";
+        out_ += "  test rdx, rdx\n";
+        out_ += "  jz .dropOld\n";
+        out_ += "  mov rsi, rbx\n";
+        out_ += "  mov rdi, r9\n";
+        out_ += "  mov rcx, rdx\n";
+        out_ += "  cld\n";
+        out_ += "  rep movsb\n";
+        out_ += ".dropOld:\n";
+        out_ += "  mov rdi, rbx\n";
+        out_ += "  call cider_free\n";
+        out_ += "  mov rax, r9\n";
+        out_ += ".keepOld:\n";
+        out_ += "  pop r12\n";
+        out_ += "  pop rbx\n";
+        out_ += "  ret\n";
+        return true;
+    }
+
     void refuse(Position pos, const std::string& what) {
         if (failed_) {
             return;
@@ -528,9 +965,11 @@ private:
         return false;
     }
 
-    // Integer casts only: same size is a move, narrowing truncates and
-    // re-extends, widening extends. Floats and address casts refuse with a
-    // diagnostic naming the gap rather than a wrong move.
+    // Integer and address casts: same size is a move, narrowing truncates
+    // and re-extends, widening extends. Pointers and function pointers are
+    // one 64-bit word, so ptr<->ptr is that move (SEMANTICS: address-
+    // preserving) and int<->ptr rides the same width logic. Floats refuse
+    // with a diagnostic naming the gap rather than a wrong move.
     bool emitCast(const ir::Instr& instr) {
         uint64_t sources = 0;
         for (const ir::Value& operand : instr.operands) {
@@ -544,32 +983,43 @@ private:
         }
         TypeRef from = instr.operands[0].type;
         TypeRef to = instr.type;
-        if (from.isError() || to.isError() || from.type->kind() != Kind::Basic ||
-            to.type->kind() != Kind::Basic) {
+        if (from.isError() || to.isError()) {
             refuse(instr.loc, "this cast is not emitted yet");
             return false;
         }
-        BasicKind a = *from.type->basic();
-        BasicKind b = *to.type->basic();
-        if (basicIsFloat(a) || basicIsFloat(b)) {
-            refuse(instr.loc, "float casts are not emitted yet");
-            return false;
+        bool fromPtr = from.type->kind() == Kind::Pointer ||
+                       from.type->kind() == Kind::FunctionPtr;
+        bool toPtr = to.type->kind() == Kind::Pointer ||
+                     to.type->kind() == Kind::FunctionPtr;
+        if (!fromPtr && !toPtr) {
+            if (from.type->kind() != Kind::Basic || to.type->kind() != Kind::Basic) {
+                refuse(instr.loc, "this cast is not emitted yet");
+                return false;
+            }
+            if (basicIsFloat(*from.type->basic()) || basicIsFloat(*to.type->basic())) {
+                refuse(instr.loc, "float casts are not emitted yet");
+                return false;
+            }
         }
-        int fromBits = basicWidthBits(a);
-        int toBits = basicWidthBits(b);
+        // A pointer participates as its machine width; everything else
+        // answers through the basic table.
+        int fromBits = fromPtr ? 64 : basicWidthBits(*from.type->basic());
+        int toBits = toPtr ? 64 : basicWidthBits(*to.type->basic());
+        bool signedTarget = !toPtr && to.type->kind() == Kind::Basic &&
+                            basicIsSigned(*to.type->basic());
         out_ += "  mov rax, " + slot(instr.operands[0].id) + "\n";
         if (fromBits == toBits) {
             out_ += "  mov " + slot(instr.results[0].id) + ", rax\n";
             return true;
         }
-        const char* move = basicIsSigned(b) ? "movsx" : "movzx";
+        const char* move = signedTarget ? "movsx" : "movzx";
         std::string reg = "rax";
         if (toBits == 8) {
             reg = std::string(move) + " rax, al";
         } else if (toBits == 16) {
             reg = std::string(move) + " rax, ax";
         } else if (toBits == 32) {
-            reg = basicIsSigned(b) ? "movsxd rax, eax" : "mov eax, eax";
+            reg = signedTarget ? "movsxd rax, eax" : "mov eax, eax";
         } else {
             reg = "mov rax, rax";
         }
@@ -630,6 +1080,7 @@ private:
     // address is slot storage (rsp+id*8). Any other id in an addressBase is
     // a computed address and dereferences.
     std::unordered_set<uint32_t> slotIds_;
+    std::unordered_set<std::string> emittedHelpers_;
     std::string out_;
     bool failed_ = false;
     std::string error_;

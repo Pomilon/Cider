@@ -1198,8 +1198,18 @@ TypeRef Checker::checkBinary(Binary& expr) {
         return boolean;
     }
     if (isEq || isRel) {
-        if (isRel && lhs.type->kind() == Kind::Pointer && rhs.type->kind() == Kind::Pointer) {
-            return TypeRef{ctx_.basic(BasicKind::Bool)};
+        if (lhs.type->kind() == Kind::Pointer && rhs.type->kind() == Kind::Pointer) {
+            // Pointers compare by identity (SEMANTICS §4): two spellings of
+            // one pointer type, or either side nilPtr — its spelling is
+            // *void, the sole null every *T accepts. Unrelated pointees
+            // reject rather than compare garbage.
+            if (lhs.type->pointee() == rhs.type->pointee() ||
+                lhs.type->pointee() == ctx_.void_() ||
+                rhs.type->pointee() == ctx_.void_()) {
+                return TypeRef{ctx_.basic(BasicKind::Bool)};
+            }
+            fail(expr.pos, "these pointer types cannot compare");
+            return errorRef();
         }
         TypeRef common = commonType(lhs, rhs, expr.pos);
         if (common.isError()) {

@@ -102,11 +102,13 @@ void testCompileIr() {
     unlink(asmPath);
 }
 
-// `run` answers the program's exit code.
+// `run` answers the program's exit code. The link is sovereign: nasm and
+// ld only, no runtime archive, so this test also proves the trampoline and
+// the helper emission assemble into a working binary.
 void testRun() {
     std::printf("run\n");
     std::string src = writeTemp("func main() -> int { return 41 + 1; }\n");
-    Result ran = run({"run", "--rt", CIDER_RT_ARCHIVE, src});
+    Result ran = run({"run", src});
     check(ran.code == 42, "the program's answer is the exit code " + ran.err);
     unlink(src.c_str());
 }
