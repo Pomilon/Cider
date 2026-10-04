@@ -80,6 +80,7 @@ public:
     void onReturn(Return& n) override;
     void onIf(IfStmt& n) override;
     void onWhile(WhileStmt& n) override;
+    void onDelete(DeleteStmt& n) override;
     void onBlockEnter(Block& n) override;
     void onBlockExit(Block& n) override;
     ir::Value onBinary(Binary& n);

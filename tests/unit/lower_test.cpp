@@ -461,6 +461,47 @@ void testMethodCall() {
     }
 }
 
+void testDelete() {
+    std::printf("delete lowers to deinit + free\n");
+    Lowered withDeinit = lower(
+        "class Box { var v: int; func init(x: int) { (*self).v = x; } "
+        "func deinit() { } }\n"
+        "func main() -> int {\n"
+        "    var b: *Box = new Box(3);\n"
+        "    delete b;\n"
+        "    return 5;\n"
+        "}\n");
+    check(withDeinit.ok, "delete with deinit lowers");
+    if (withDeinit.ok) {
+        const cider::ir::Function* main = find(withDeinit.module.get(), "main");
+        check(main != nullptr, "main exists");
+        // main calls cider_alloc, Box__init, Box__deinit, cider_free: four.
+        check(main != nullptr && countOp(*main, cider::ir::Op::Call) == 4,
+              "delete emits deinit and free after init");
+    }
+    Lowered bare = lower(
+        "class Box { var v: int; func init(x: int) { (*self).v = x; } }\n"
+        "func main() -> int {\n"
+        "    var b: *Box = new Box(3);\n"
+        "    delete b;\n"
+        "    return 5;\n"
+        "}\n");
+    check(bare.ok, "delete without deinit lowers");
+    if (bare.ok) {
+        const cider::ir::Function* main = find(bare.module.get(), "main");
+        check(main != nullptr && countOp(*main, cider::ir::Op::Call) == 3,
+              "no deinit means no deinit call, free alone");
+    }
+    Lowered bad = lower(
+        "func main() -> int {\n"
+        "    var x: int = 1;\n"
+        "    var p: *int = &x;\n"
+        "    delete p;\n"
+        "    return 0;\n"
+        "}\n");
+    check(!bad.ok, "delete on a non-class pointer is refused");
+}
+
 }  // namespace
 
 int main() {
@@ -482,6 +523,7 @@ int main() {
     testSliceStore();
     testClass();
     testMethodCall();
+    testDelete();
     testNotYetLowered();
     std::printf("\n%d checks, %s\n", checks, failures == 0 ? "all passed" : "FAILURES");
     return failures == 0 ? 0 : 1;

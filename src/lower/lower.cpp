@@ -2168,6 +2168,51 @@ void Lowerer::onExprStmt(ExprStmt& n) {
     onIdentOrExpr(n.expr.get(), checker_.typeOf(n.expr.get()));
 }
 
+void Lowerer::onDelete(DeleteStmt& n) {
+    if (failed_ || !enabled_ || function_ == nullptr) {
+        return;
+    }
+    // The pointer lowers to one address word however it was computed; the
+    // checker proved it points at a class.
+    std::vector<ir::Value> ptr = lowerWords(n.ptr.get());
+    if (failed_ || ptr.size() != kOneWord) {
+        return;
+    }
+    TypeRef ptrType = checker_.typeOf(n.ptr.get());
+    const Type* obj = ptrType.type->pointee();
+    std::optional<DeclId> id = obj->decl();
+    const resolve::Decl* owner = id.has_value() ? resolver_.declById(*id) : nullptr;
+    const Signature* dsig = id.has_value() ? resolver_.methodSig(*id, "deinit") : nullptr;
+    if (dsig != nullptr) {
+        // A declared deinit runs first, with the object address as the
+        // receiver — the same receiver-first shape onMethodDecl emits.
+        ir::Instr run;
+        run.op = ir::Op::Call;
+        run.loc = n.pos;
+        run.callee = owner->name + "__deinit";
+        run.mayTrap = true;
+        ir::Argument self;
+        self.words.push_back(ptr[0]);
+        run.arguments.push_back(std::move(self));
+        run.width = ir::IRType::Void;
+        emit(std::move(run));
+    }
+    // Then the storage goes back. Prelude names mangle to their link symbol
+    // exactly as onCall mangles them, and free(nilPtr) is a no-op by
+    // contract, so a nil delete frees nothing — the deinit above is the
+    // caller's problem, and dereferencing nil there already traps.
+    ir::Instr rel;
+    rel.op = ir::Op::Call;
+    rel.loc = n.pos;
+    rel.callee = "cider_free";
+    rel.mayTrap = true;
+    ir::Argument words;
+    words.words.push_back(ptr[0]);
+    rel.arguments.push_back(std::move(words));
+    rel.width = ir::IRType::Void;
+    emit(std::move(rel));
+}
+
 std::vector<ir::Value> Lowerer::storeToIdent(
     const Ident& n, const std::vector<ir::Value>& words) {
     for (auto& frame : locals_) {

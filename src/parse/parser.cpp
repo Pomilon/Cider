@@ -434,11 +434,20 @@ MethodDecl Parser::parseMethod() {
         failHere("expected a method");
         return MethodDecl(start, "", {}, nullptr, nullptr, false);
     }
-    if (!check(TokenKind::Ident) && !check(TokenKind::KwInit)) {
+    if (!check(TokenKind::Ident) && !check(TokenKind::KwInit) &&
+        !check(TokenKind::KwDeinit)) {
         failHere("a method needs a name");
         return MethodDecl(start, "", {}, nullptr, nullptr, false);
     }
+    TokenKind nameKind = peek().kind;
     std::string name = advance().text;
+    if (name.empty() &&
+        (nameKind == TokenKind::KwInit || nameKind == TokenKind::KwDeinit)) {
+        name = tokenName(nameKind);
+    }
+    if (check(TokenKind::KwInit) || check(TokenKind::KwDeinit)) {
+        failHere("an init or deinit needs a body");
+    }
     std::vector<Param> params = parseParams();
     std::unique_ptr<TypeExpr> returns = parseReturnType();
     if (!check(TokenKind::LBrace)) {

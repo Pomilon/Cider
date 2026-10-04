@@ -926,6 +926,22 @@ void Checker::visitMatchStmt(MatchStmt& n) {
     }
 }
 
+void Checker::visitDeleteStmt(DeleteStmt& n) {
+    TypeRef t = checkExpr(n.ptr.get(), TypeRef{ctx_.wildcard()});
+    if (t.isError()) {
+        return;
+    }
+    const Type* obj =
+        t.type->kind() == Kind::Pointer ? t.type->pointee() : nullptr;
+    if (obj == nullptr || obj->kind() != Kind::Class) {
+        fail(n.pos, "delete needs a class pointer");
+        return;
+    }
+    if (sink_ != nullptr) {
+        sink_->onDelete(n);
+    }
+}
+
 void Checker::bindPattern(Pattern& pat, TypeRef scrutinee) {
     if (pat.kind == PatternKind::Bind) {
         bindLocal(pat.name, scrutinee, false, pat.pos);

@@ -64,6 +64,9 @@ public:
     virtual void onReturn(Return& n) { (void)n; }
     virtual void onIf(IfStmt& n) { (void)n; }
     virtual void onWhile(WhileStmt& n) { (void)n; }
+    // `delete p;` frees a class object. Checked first (the pointer type is
+    // known), then lowered here.
+    virtual void onDelete(DeleteStmt& n) { (void)n; }
 };
 
 struct CheckError {
@@ -117,6 +120,7 @@ public:
     void visitBreak(Break& n) override;
     void visitContinue(Continue& n) override;
     void visitMatchStmt(MatchStmt& n) override;
+    void visitDeleteStmt(DeleteStmt& n) override;
 
     // Every expression records its type.
     void visitIntLit(IntLit& n) override;
