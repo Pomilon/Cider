@@ -207,6 +207,29 @@ void testUnions() {
     check(!wide.ok && wide.stage == "check", "a cast wider than the payload fails");
 }
 
+// Length reads the element count of sized values.
+void testLen() {
+    std::printf("len reads element counts\n");
+    Checked slice = check(
+        "func main() -> int {\n"
+        "    var a: [int; 3] = new [int; 3] { 1, 2, 3 };\n"
+        "    var s: []int = a[0:2];\n"
+        "    return s.len as int;\n"
+        "}\n");
+    check(slice.ok, "a slice has a length");
+    Checked array = check(
+        "func main() -> int {\n"
+        "    var a: [int; 3] = new [int; 3] { 1, 2, 3 };\n"
+        "    return a.len as int;\n"
+        "}\n");
+    check(array.ok, "an array has a length");
+    Checked string = check(
+        "func main() -> int { var s: string = \"hey\"; return s.len as int; }\n");
+    check(string.ok, "a string has a length");
+    Checked scalar = check("func main() -> int { var x: int = 3; return x.len; }\n");
+    check(!scalar.ok && scalar.stage == "check", "a scalar has no length");
+}
+
 }  // namespace
 
 int main() {
@@ -218,6 +241,7 @@ int main() {
     testGenericCall();
     testGenericStruct();
     testUnions();
+    testLen();
     testControl();
     std::printf("\n%d checks, %s\n", checks, failures == 0 ? "all passed" : "FAILURES");
     return failures == 0 ? 0 : 1;

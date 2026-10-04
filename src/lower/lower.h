@@ -192,6 +192,16 @@ public:
     // scaled index, guarded below by zero and above by the runtime length.
     std::vector<ir::Value> lowerSliceIndex(const Index& n, const Place& base,
                                            TypeRef baseType);
+    // Names the element's address through a slice or string base: guards
+    // first, then the pointer plus a scaled index. Shared by the read and
+    // the store so the two cannot disagree about what is in bounds.
+    bool sliceElementPlace(const Index& n, const Place& base, TypeRef baseType,
+                           TypeRef& element, Place& at);
+    // Writes one element through a slice base: the same guards and address
+    // as the read, then an indirect store. Strings never arrive here; the
+    // checker rejects their stores first.
+    void storeSliceIndex(const Index& target, const Place& base,
+                         TypeRef baseType, const std::vector<ir::Value>& words);
     std::vector<ir::Value> lowerNewStruct(const NewStruct& n);
     std::vector<ir::Value> lowerNewArray(const NewArray& n);
     std::vector<ir::Value> lowerField(const Field& n);

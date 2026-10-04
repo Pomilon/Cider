@@ -405,6 +405,18 @@ void testSlice() {
     check(sub.ok, "a slice of a slice lowers");
 }
 
+void testSliceStore() {
+    std::printf("slice stores guard, then write\n");
+    Lowered r = lower(
+        "func main() -> int {\n"
+        "    var a: [int; 3] = new [int; 3] { 5, 6, 7 };\n"
+        "    var s: []int = a[0:2];\n"
+        "    s[0] = 9;\n"
+        "    return s.len as int;\n"
+        "}\n");
+    check(r.ok, "a slice store and len lower");
+}
+
 void testNotYetLowered() {
     std::printf("unlowered constructs are refused\n");
     Lowered r = lower("func f(x: int) -> void { var s: string = \"v = {x}\"; }\n");
@@ -429,6 +441,7 @@ int main() {
     testMultiWordAssign();
     testUnion();
     testSlice();
+    testSliceStore();
     testNotYetLowered();
     std::printf("\n%d checks, %s\n", checks, failures == 0 ? "all passed" : "FAILURES");
     return failures == 0 ? 0 : 1;

@@ -860,6 +860,16 @@ void Checker::visitAssign(Assign& n) {
         record(&n, errorRef());
         return;
     }
+    if (const auto* index = dynamic_cast<const Index*>(n.target.get())) {
+        // Strings read through the slice path but never write: immutability
+        // is a checking rule, so the lowerer never meets a string store.
+        TypeRef base = typeOf(index->array.get());
+        if (!base.isError() && base.type->kind() == Kind::String) {
+            fail(n.target->pos, "strings are immutable");
+            record(&n, errorRef());
+            return;
+        }
+    }
     if (!n.op.has_value()) {
         TypeRef value = checkExpr(n.value.get(), target);
         checkCompatible(n.value->pos, n.value.get(), value, target);
@@ -1416,6 +1426,15 @@ TypeRef Checker::checkField(Field& expr) {
     }
     if (kind == Kind::Class) {
         fail(expr.pos, "deref first: a class reference has no fields");
+        return errorRef();
+    }
+    if (kind == Kind::Slice || kind == Kind::String || kind == Kind::Array) {
+        // The only member a sized value exposes is its element count; the
+        // checker names no other field so the lowerer never guesses one.
+        if (expr.name == "len") {
+            return TypeRef{ctx_.basic(BasicKind::I64)};
+        }
+        fail(expr.pos, "no such field");
         return errorRef();
     }
     if (kind == Kind::Struct || kind == Kind::Union) {
