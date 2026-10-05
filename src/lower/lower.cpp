@@ -2502,6 +2502,43 @@ std::vector<ir::Value> Lowerer::lowerAddrOf(const Unary& n) {
             }
         }
     }
+    if (n.op == UnOp::Addr) {
+        // `&x` on a value answers the address of its place: a direct
+        // place names a slot plus an offset, and an indirect place is
+        // already an address with an offset. Globals have no address
+        // materialization, so they keep the refusal they always had.
+        Place place;
+        if (resolvePlace(n.operand.get(), place) && place.global.empty()) {
+            TypeRef ptr = checker_.typeOf(&n);
+            if (!ptr.isError()) {
+                if (place.hasIndirect) {
+                    if (place.off == 0) {
+                        return {place.indirect};
+                    }
+                    TypeRef count{ctx_.basic(BasicKind::I64)};
+                    ir::Value delta = constantI64(place.off, count, n.pos);
+                    if (!failed_) {
+                        ir::Instr add;
+                        add.op = ir::Op::Add;
+                        add.loc = n.pos;
+                        add.type = ptr;
+                        add.width = ir::IRType::Ptr;
+                        add.isPure = true;
+                        add.operands.push_back(place.indirect);
+                        add.operands.push_back(delta);
+                        ir::Value at = newValue(add.width, ptr, n.pos);
+                        add.results.push_back(at);
+                        emit(std::move(add));
+                        return {at};
+                    }
+                    return {undefined()};
+                }
+                if (!place.slots.empty()) {
+                    return {computedBase(place.slots[0], place.off, n.pos)};
+                }
+            }
+        }
+    }
     refuse(n.pos, "this expression");
     return {undefined()};
 }
@@ -2535,6 +2572,24 @@ std::vector<ir::Value> Lowerer::lowerWords(const Expr* expr) {
         return lowerSlice(static_cast<const SliceExpr&>(*expr));
     }
     if (const auto* unary = dynamic_cast<const Unary*>(expr)) {
+        // `*p` as a value loads whatever the pointer addresses: the
+        // place machinery already resolves the dereference to an
+        // indirect place, so a read is one range load. Anything else
+        // unary answers an address or refuses inside lowerAddrOf.
+        if (unary->op == UnOp::Deref) {
+            Place place;
+            if (!resolvePlace(expr, place)) {
+                refuse(expr->pos, "this value");
+                return {undefined()};
+            }
+            TypeRef pointee = checker_.typeOf(expr);
+            if (pointee.isError()) {
+                refuse(expr->pos, "this value");
+                return {undefined()};
+            }
+            place.type = pointee;
+            return loadRange(expr->pos, place, pointee);
+        }
         return lowerAddrOf(*unary);
     }
     if (const auto* ident = dynamic_cast<const Ident*>(expr)) {
@@ -3168,6 +3223,16 @@ ir::Value Lowerer::onIdentOrExpr(const Expr* expr, TypeRef expected) {
         }
         return words[0];
     }
+    if (auto* unary = dynamic_cast<const Unary*>(expr)) {
+        if (unary->op == UnOp::Deref) {
+            std::vector<ir::Value> words = lowerWords(expr);
+            if (words.size() != kOneWord) {
+                refuse(expr->pos, "this expression");
+                return undefined();
+            }
+            return words[0];
+        }
+    }
     refuse(expr->pos, "this expression");
     return undefined();
 }
@@ -3262,6 +3327,40 @@ bool Lowerer::storeAssignTarget(Assign& n, const std::vector<ir::Value>& value) 
         }
         // Every union crossed on the way to the member learns the new live
         // member: a write sets the tag as a consequence (TYPES.md 4.6).
+        for (const TagWrite& tag : place.tagWrites) {
+            Place at = place;
+            at.off = tag.off;
+            at.type = TypeRef{ctx_.basic(BasicKind::U32)};
+            at.tagWrites.clear();
+            ir::Value live = constantI64(tag.index, at.type, n.pos);
+            if (failed_) {
+                return false;
+            }
+            storeRange(n.pos, at, {live}, at.type);
+            if (failed_) {
+                return false;
+            }
+        }
+        return !failed_;
+    }
+    if (const auto* deref = dynamic_cast<const Unary*>(n.target.get())) {
+        if (deref->op != UnOp::Deref) {
+            refuse(n.target->pos, "this assignment");
+            return false;
+        }
+        // `*p = v` stores through the pointer using the place the
+        // dereference resolves to: the union tag writes ride along,
+        // because a dereferenced union member retags too.
+        Place place;
+        if (!resolvePlace(n.target.get(), place)) {
+            refuse(n.target->pos, "this assignment");
+            return false;
+        }
+        place.type = checker_.typeOf(n.target.get());
+        storeRange(n.pos, place, value, place.type);
+        if (failed_) {
+            return false;
+        }
         for (const TagWrite& tag : place.tagWrites) {
             Place at = place;
             at.off = tag.off;

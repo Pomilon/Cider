@@ -435,6 +435,41 @@ void testClass() {
     }
 }
 
+void testAddrOf() {
+    std::printf("address-of lowers\n");
+    Lowered r = lower(
+        "func main() -> int {\n"
+        "    var x: int = 5;\n"
+        "    var p: *int = &x;\n"
+        "    return *p;\n"
+        "}\n");
+    check(r.ok, "address-of plus dereference lowers");
+    if (r.ok) {
+        const cider::ir::Function* main = find(r.module.get(), "main");
+        check(main != nullptr, "main exists");
+        check(firstOp(*main, cider::ir::Op::Gep) != nullptr,
+              "the address materializes as a gep");
+    }
+}
+
+void testDerefStore() {
+    std::printf("deref stores lower\n");
+    Lowered r = lower(
+        "func main() -> int {\n"
+        "    var x: int = 5;\n"
+        "    var p: *int = &x;\n"
+        "    *p = 41;\n"
+        "    return x;\n"
+        "}\n");
+    check(r.ok, "a store through a dereference lowers");
+    if (r.ok) {
+        const cider::ir::Function* main = find(r.module.get(), "main");
+        check(main != nullptr, "main exists");
+        check(firstOp(*main, cider::ir::Op::Store) != nullptr,
+              "the store reaches the indirect address");
+    }
+}
+
 void testNotYetLowered() {
     std::printf("unlowered constructs are refused\n");
     Lowered r = lower("func f(x: int) -> void { var s: string = \"v = {x}\"; }\n");
@@ -636,6 +671,8 @@ int main() {
     testClosure();
     testClosureNested();
     testClosureBareName();
+    testAddrOf();
+    testDerefStore();
     testNotYetLowered();
     std::printf("\n%d checks, %s\n", checks, failures == 0 ? "all passed" : "FAILURES");
     return failures == 0 ? 0 : 1;
