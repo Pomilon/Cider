@@ -913,6 +913,38 @@ void Checker::visitSizeofType(SizeofType& n) {
     record(&n, TypeRef{ctx_.basic(BasicKind::I64)});
 }
 
+void Checker::visitFuncLit(FuncLit& n) {
+    record(&n, checkFuncLit(n));
+}
+
+TypeRef Checker::checkFuncLit(FuncLit& lit) {
+    bool failed = false;
+    Signature sig = resolver_.buildSignature(lit.params, lit.returns.get(), moduleScope_, failed);
+    if (failed) {
+        return errorRef();
+    }
+    // The body is walked once per literal, like a named function's, but the
+    // scope only hides the literal's own parameters: enclosing names stay
+    // visible so a body can read them, and the literal records them for the
+    // lowerer through sink_->onFuncLit (which refuses to capture for now).
+    pushScope();
+    const std::vector<Parameter>& params = sig.parameters();
+    for (uint64_t i = 0; i < static_cast<uint64_t>(params.size()); ++i) {
+        bindLocal(lit.params[i].name, TypeRef{params[i].type}, params[i].isMutable,
+                  lit.params[i].pos);
+    }
+    const Type* ret = sig.returnType() != nullptr ? sig.returnType() : ctx_.void_();
+    TypeRef saved = funcReturn_;
+    bool was = inFunc_;
+    funcReturn_ = TypeRef{ret};
+    inFunc_ = true;
+    lit.body->accept(*this);
+    funcReturn_ = saved;
+    inFunc_ = was;
+    popScope();
+    return TypeRef{ctx_.closure(std::move(sig))};
+}
+
 void Checker::visitMatchStmt(MatchStmt& n) {
     TypeRef scrutinee = checkExpr(n.scrutinee.get(), TypeRef{ctx_.wildcard()});
     for (auto& arm : n.arms) {
@@ -1108,6 +1140,11 @@ TypeRef Checker::checkExpr(Expr* expr, TypeRef expected) {
     if (auto* sz = dynamic_cast<SizeofType*>(expr)) {
         visitSizeofType(*sz);
         return typeOf(sz);
+    }
+    if (auto* fun = dynamic_cast<FuncLit*>(expr)) {
+        TypeRef t = checkFuncLit(*fun);
+        record(fun, t);
+        return t;
     }
     fail(expr->pos, "checker bug: unhandled expression");
     return errorRef();

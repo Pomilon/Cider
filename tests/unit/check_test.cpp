@@ -207,6 +207,23 @@ void testUnions() {
     check(!wide.ok && wide.stage == "check", "a cast wider than the payload fails");
 }
 
+// A closure literal checks against its spelling, in its own scope.
+void testFuncLitChecks() {
+    std::printf("closure literals check\n");
+    Checked good = check(
+        "func main() -> int {\n"
+        "    var f: func(int) -> int = func(x: int) -> int { return x + 1; };\n"
+        "    return 0;\n"
+        "}\n");
+    check(good.ok, "a matching literal checks: " + good.stage);
+    Checked bad = check(
+        "func main() -> int {\n"
+        "    var f: func(int) -> int = func(x: int) -> int { return true; };\n"
+        "    return 0;\n"
+        "}\n");
+    check(!bad.ok && bad.stage == "check", "a mistyped body fails");
+}
+
 // Length reads the element count of sized values.
 void testLen() {
     std::printf("len reads element counts\n");
@@ -242,6 +259,7 @@ int main() {
     testGenericStruct();
     testUnions();
     testLen();
+    testFuncLitChecks();
     testControl();
     std::printf("\n%d checks, %s\n", checks, failures == 0 ? "all passed" : "FAILURES");
     return failures == 0 ? 0 : 1;

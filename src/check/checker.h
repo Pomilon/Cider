@@ -143,6 +143,8 @@ public:
     void visitNewArray(NewArray& n) override;
     void visitAssign(Assign& n) override;
     void visitSizeofType(SizeofType& n) override;
+    void visitFuncLit(FuncLit& n) override;
+    TypeRef checkFuncLit(FuncLit& lit);
 
 private:
     void fail(Position pos, const std::string& message);
