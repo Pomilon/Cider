@@ -510,9 +510,9 @@
   "class": "A"
  },
  "f64_ternary_width": {
-  "actual": "exit=1 stdout_len=0 stderr_len=676 first=\"tests/corpus/f64_ternary_width/main.cid:21:12: unknown type 'float'\"",
-  "blocker": "float-codegen (+ternary-lowering)",
-  "class": "D"
+  "actual": "compile rejection: the branches of a ternary match: f32 and f64",
+  "blocker": "mixed-type ternary arms (SEMANTICS: rejection, write the conversion in a branch)",
+  "class": "B"
  },
  "factorial": {
   "actual": "exit 120, empty stdout/stderr, matches expected.json byte-verbatim (no rewrite needed)",
@@ -1416,7 +1416,7 @@
  },
  "tern": {
   "actual": "blocked-A reclassified 2026-10-05: must pass once blocker lands; run exit 1: OUT: ERR:tests/corpus/tern/main.cid:9:7: arithmetic needs numbers\\ntests/corpus/tern/main.cid:3:16: not lowered yet: this expression\\n",
-  "blocker": "ternary-not-lowered (also bool-!/char-cmp gaps)",
+  "blocker": "char ==/!= (FEAT-046, needs spec ruling); ternary lowers",
   "class": "D"
  },
  "ternary": {

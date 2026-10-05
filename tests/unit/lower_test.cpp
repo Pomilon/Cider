@@ -941,6 +941,28 @@ void testShortCircuit() {
     check(condBrs >= 4, "each &&, ||, and if leaves a conditional branch");
 }
 
+void testTernary() {
+    std::printf("ternary lowers\n");
+    Lowered r = lower(
+        "func main() -> int {\n"
+        "    var pick: bool = true;\n"
+        "    var a: int = pick ? 3 : 4;\n"
+        "    return a;\n"
+        "}\n");
+    check(r.ok, "lowers: " + r.stage);
+    const cider::ir::Function* fn = find(r.module.get(), "main");
+    if (fn == nullptr) {
+        return;
+    }
+    uint32_t condBrs = 0;
+    for (const cider::ir::Block& block : fn->blocks) {
+        if (block.term.term == cider::ir::Term::CondBr) {
+            ++condBrs;
+        }
+    }
+    check(condBrs >= 1, "the ternary leaves a conditional branch");
+}
+
 void testBareReturn() {
     std::printf("bare return closes its block\n");
     Lowered r = lower(
@@ -999,6 +1021,7 @@ int main() {
     testForIn();
     testAsm();
     testShortCircuit();
+    testTernary();
     testRefuseKeepsScopes();
     testInterfaceParamRefused();
     testNotYetLowered();

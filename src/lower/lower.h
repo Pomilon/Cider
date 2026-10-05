@@ -109,6 +109,10 @@ public:
     // `&&` and `||` with short-circuit control flow: the deciding side
     // leaves its value in a cell, and only the taken arm writes the answer.
     ir::Value lowerShortCircuit(const Binary& n);
+    // `?:` with branch control flow: the checker proved both arms share one
+    // type, so each arm stores its words into the cell and the join loads
+    // them back. The untaken arm never evaluates (SEMANTICS: single-eval).
+    std::vector<ir::Value> lowerTernary(const Ternary& n);
     ir::Value onCall(Call& n);
     ir::Value onIdent(Ident& n);
     ir::Value onCast(Cast& n);

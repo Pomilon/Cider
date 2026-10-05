@@ -459,6 +459,23 @@ void testShortCircuit() {
           "a skipped side never traps");
 }
 
+void testTernary() {
+    std::printf("ternaries run\n");
+    check(runQuiet("func main() -> int {\n"
+                   "    var a: int = true ? 3 : 4;\n"
+                   "    var b: int = false ? 3 : 4;\n"
+                   "    return a * 10 + b;\n"
+                   "}\n") == 34,
+          "each arm answers its own value");
+    check(runQuiet("func main() -> int {\n"
+                   "    var z: int = 0;\n"
+                   "    var a: int = true ? 5 : 1 / z;\n"
+                   "    var b: int = false ? 1 / z : 6;\n"
+                   "    return a + b;\n"
+                   "}\n") == 11,
+          "an untaken arm never evaluates");
+}
+
 // A function pointer calls its target; a nil one dies by hardware trap.
 void testIndirectCall() {
     std::printf("indirect calls run\n");
@@ -656,6 +673,7 @@ int main() {
     testArith32();
     testIndirectCall();
     testShortCircuit();
+    testTernary();
     testFloat();
     testAsm();
     testTrap();

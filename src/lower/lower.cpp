@@ -3013,6 +3013,9 @@ std::vector<ir::Value> Lowerer::lowerWords(const Expr* expr) {
     if (dynamic_cast<const SliceExpr*>(expr) != nullptr) {
         return lowerSlice(static_cast<const SliceExpr&>(*expr));
     }
+    if (dynamic_cast<const Ternary*>(expr) != nullptr) {
+        return lowerTernary(static_cast<const Ternary&>(*expr));
+    }
     if (const auto* unary = dynamic_cast<const Unary*>(expr)) {
         // `*p` as a value loads whatever the pointer addresses: the
         // place machinery already resolves the dereference to an
@@ -3473,6 +3476,89 @@ ir::Value Lowerer::lowerShortCircuit(const Binary& n) {
     emit(std::move(load));
     if (failed_) {
         return undefined();
+    }
+    return out;
+}
+
+std::vector<ir::Value> Lowerer::lowerTernary(const Ternary& n) {
+    // The checker proved both arms share one type, so each arm stores its
+    // words into the cell and the join loads them back. The untaken arm
+    // never evaluates, so a trap there never fires. A void result keeps
+    // the control flow but needs no cell: both arms run for effect.
+    TypeRef result = checker_.typeOf(&n);
+    if (result.isError()) {
+        refuse(n.pos, "this expression");
+        return {undefined()};
+    }
+    int words = wordCount(result);
+    if (words < 0) {
+        refuse(n.pos, "this expression");
+        return {undefined()};
+    }
+    TypeRef boolean{ctx_.basic(BasicKind::Bool)};
+    ir::Value cond = onIdentOrExpr(n.cond.get(), boolean);
+    if (failed_) {
+        return {undefined()};
+    }
+    std::vector<ir::Value> cell;
+    if (words > 0) {
+        cell = allocaSlots(result, n.pos, static_cast<uint64_t>(words));
+    }
+    uint32_t thenLabel = emitBlock(n.pos);
+    uint32_t elseLabel = emitBlock(n.pos);
+    uint32_t joinLabel = emitBlock(n.pos);
+    ir::Terminator br;
+    br.term = ir::Term::CondBr;
+    br.cond = cond;
+    br.thenTarget = thenLabel;
+    br.elseTarget = elseLabel;
+    br.loc = n.pos;
+    emitTerminator(br);
+    sealBlock(current_);
+    Place at;
+    at.slots = cell;
+    at.type = result;
+    auto storeArm = [&](const Expr* arm) {
+        if (words == 0) {
+            lowerWords(arm);
+        } else {
+            std::vector<ir::Value> got = lowerWords(arm);
+            if (failed_) {
+                return;
+            }
+            if (static_cast<int>(got.size()) != words) {
+                refuse(arm->pos, "this expression");
+                return;
+            }
+            storeRange(arm->pos, at, got, result);
+        }
+        if (failed_) {
+            return;
+        }
+        ir::Terminator toJoin;
+        toJoin.term = ir::Term::Br;
+        toJoin.target = joinLabel;
+        toJoin.loc = n.pos;
+        emitTerminator(toJoin);
+        sealBlock(current_);
+    };
+    startBlock(thenLabel);
+    storeArm(n.then.get());
+    if (failed_) {
+        return {undefined()};
+    }
+    startBlock(elseLabel);
+    storeArm(n.els.get());
+    if (failed_) {
+        return {undefined()};
+    }
+    startBlock(joinLabel);
+    if (words == 0) {
+        return {};
+    }
+    std::vector<ir::Value> out = loadRange(n.pos, at, result);
+    if (failed_) {
+        return {undefined()};
     }
     return out;
 }
