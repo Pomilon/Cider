@@ -142,6 +142,8 @@ public:
     void visitContinue(Continue& n) override;
     void visitMatchStmt(MatchStmt& n) override;
     void visitDeleteStmt(DeleteStmt& n) override;
+    void visitThrowStmt(ThrowStmt& n) override;
+    void visitTryStmt(TryStmt& n) override;
 
     // Every expression records its type.
     void visitIntLit(IntLit& n) override;

@@ -1041,6 +1041,20 @@ void Checker::visitDeleteStmt(DeleteStmt& n) {
     }
 }
 
+void Checker::visitThrowStmt(ThrowStmt& n) {
+    // Exception transport (FEAT-041) does not exist yet: throwing must
+    // refuse here rather than check clean and vanish in lowering, which
+    // previously exited 0. The operand still checks so its errors report.
+    checkExpr(n.value.get(), TypeRef{ctx_.wildcard()});
+    fail(n.pos, "throw is not implemented yet");
+}
+
+void Checker::visitTryStmt(TryStmt& n) {
+    // Same shape as throw: handler bodies would lower inline with no
+    // unwind edges, so trying refuses until transport lands.
+    fail(n.pos, "try is not implemented yet");
+}
+
 void Checker::bindPattern(Pattern& pat, TypeRef scrutinee) {
     if (pat.kind == PatternKind::Bind) {
         bindLocal(pat.name, scrutinee, false, pat.pos);

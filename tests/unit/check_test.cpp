@@ -143,6 +143,14 @@ void testControl() {
     check(!brk.ok && brk.stage == "check", "break outside a loop fails");
 }
 
+void testThrowRefused() {
+    std::printf("unimplemented exceptions refuse loudly\n");
+    Checked th = check("func f() -> int { throw 42; return 0; }\n");
+    check(!th.ok && th.stage == "check", "throw refuses until transport lands");
+    Checked tr = check("func f() -> int { try { return 1; } catch { return 0; } }\n");
+    check(!tr.ok && tr.stage == "check", "try refuses until transport lands");
+}
+
 // A generic call checks its body with the arguments substituted.
 void testGenericCall() {
     std::printf("generic calls substitute\n");
@@ -280,6 +288,7 @@ int main() {
     testLen();
     testFuncLitChecks();
     testControl();
+    testThrowRefused();
     std::printf("\n%d checks, %s\n", checks, failures == 0 ? "all passed" : "FAILURES");
     return failures == 0 ? 0 : 1;
 }
