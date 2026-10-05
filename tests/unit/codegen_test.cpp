@@ -192,6 +192,34 @@ void testTrap() {
     check(signaled, "division by zero dies by signal");
 }
 
+// `&` on an element answers the element's address: stores through it land
+// in the sequence, and an out-of-range address traps like the read would.
+void testElementAddr() {
+    std::printf("element addresses\n");
+    check(runQuiet("func main() -> int {\n"
+                   "    var b: [u8; 4] = new [u8; 4] { 10, 20, 30, 40 };\n"
+                   "    var j: int = 2;\n"
+                   "    var p: *u8 = &b[j];\n"
+                   "    *p = 99;\n"
+                   "    return b[2] as int;\n"
+                   "}\n") == 99,
+          "a store through &b[j] lands");
+    check(runQuiet("func main() -> int {\n"
+                   "    var s: string = \"Hi\";\n"
+                   "    var p: *u8 = &s[1];\n"
+                   "    return *p as int;\n"
+                   "}\n") == 105,
+          "&s[1] reads the string byte");
+    bool signaled = false;
+    runCode("func main() -> int {\n"
+            "    var s: string = \"Hi\";\n"
+            "    var p: *u8 = &s[9];\n"
+            "    return *p as int;\n"
+            "}\n",
+            signaled);
+    check(signaled, "an out-of-range element address traps");
+}
+
 // Structs live in memory: construct, read fields, add them.
 void testStruct() {
     std::printf("structs\n");
@@ -598,6 +626,7 @@ int main() {
     testFloat();
     testAsm();
     testTrap();
+    testElementAddr();
     testRepro();
     std::printf("\n%d checks, %s\n", checks, failures == 0 ? "all passed" : "FAILURES");
     return failures == 0 ? 0 : 1;

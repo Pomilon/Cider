@@ -2793,6 +2793,119 @@ std::vector<ir::Value> Lowerer::lowerNewArray(const NewArray& n) {
     return words;
 }
 
+std::vector<ir::Value> Lowerer::lowerElementAddr(const Index& n) {
+    // The address the element lives at, for `&a[i]`: the read paths
+    // compute this address and immediately load through it, but an
+    // address-of stops at the address. Array bases ride Gep off the
+    // first slot; slice and string bases reuse the guarded advance the
+    // read path owns, so the checks cannot drift apart.
+    Place base;
+    if (!resolvePlace(n.array.get(), base) || !base.global.empty()) {
+        refuse(n.array->pos, "this expression");
+        return {undefined()};
+    }
+    TypeRef baseType = base.type;
+    if (baseType.isError()) {
+        refuse(n.array->pos, "this expression");
+        return {undefined()};
+    }
+    Kind kind = baseType.type->kind();
+    if (kind == Kind::Slice || kind == Kind::String) {
+        TypeRef element = TypeRef{ctx_.basic(BasicKind::U8)};
+        Place at;
+        if (!sliceElementPlace(n, base, baseType, element, at) || failed_) {
+            return {undefined()};
+        }
+        if (at.slots.empty() || at.off != 0) {
+            refuse(n.pos, "this expression");
+            return {undefined()};
+        }
+        return {at.slots[kFirstWord]};
+    }
+    if (kind != Kind::Array) {
+        refuse(n.array->pos, "this expression");
+        return {undefined()};
+    }
+    std::optional<int64_t> extent = baseType.type->length();
+    if (!extent.has_value() || *extent < 0) {
+        refuse(n.array->pos, "this expression");
+        return {undefined()};
+    }
+    TypeRef element{baseType.type->element()};
+    int64_t elemBytes = resolver_.nominalSize(element.type);
+    if (elemBytes <= 0) {
+        refuse(n.pos, "this expression");
+        return {undefined()};
+    }
+    std::unordered_set<std::string> active;
+    EvalEnv env = resolver_.evalEnv(resolver_.moduleScope());
+    EvalResult folded = evalConstInt(*n.index, env, active);
+    if (folded.ok) {
+        // A folded index is a slot offset the place machinery above
+        // already names: arriving here means that route failed, so
+        // refusing names the real gap instead of answering twice.
+        refuse(n.pos, "this expression");
+        return {undefined()};
+    }
+    std::vector<ir::Value> index = lowerWords(n.index.get());
+    if (failed_ || index.size() != kOneWord) {
+        refuse(n.index->pos, "this expression");
+        return {undefined()};
+    }
+    for (uint64_t i = 0; i < static_cast<uint64_t>(base.slots.size()); ++i) {
+        if (base.slots[i].id != base.slots[0].id + static_cast<uint32_t>(i)) {
+            refuse(n.pos, "this expression");
+            return {undefined()};
+        }
+    }
+    TypeRef count{ctx_.basic(BasicKind::I64)};
+    ir::Value zero = constantI64(0, count, n.index->pos);
+    ir::Value len = constantI64(*extent, count, n.array->pos);
+    if (failed_) {
+        return {undefined()};
+    }
+    emitCheckTrap(n.index->pos, emitI64Cmp(n.index->pos, BinOp::Ge, index[kFirstWord], zero),
+                  ir::TrapReason::IndexOutOfBounds);
+    emitCheckTrap(n.index->pos, emitI64Cmp(n.index->pos, BinOp::Lt, index[kFirstWord], len),
+                  ir::TrapReason::IndexOutOfBounds);
+    if (failed_) {
+        return {undefined()};
+    }
+    ir::Value byteOff = index[kFirstWord];
+    if (elemBytes != kOneMember) {
+        ir::Value stride = constantI64(elemBytes, count, n.index->pos);
+        ir::Instr mul;
+        mul.op = ir::Op::Mul;
+        mul.loc = n.index->pos;
+        mul.type = count;
+        mul.width = widthOf(count, n.index->pos);
+        if (failed_) {
+            return {undefined()};
+        }
+        mul.isPure = true;
+        mul.operands.push_back(index[kFirstWord]);
+        mul.operands.push_back(stride);
+        ir::Value scaled = newValue(mul.width, count, n.index->pos);
+        mul.results.push_back(scaled);
+        emit(std::move(mul));
+        byteOff = scaled;
+    }
+    TypeRef ptr{ctx_.pointer(element.type)};
+    ir::Instr gep;
+    gep.op = ir::Op::Gep;
+    gep.loc = n.pos;
+    gep.type = ptr;
+    gep.width = ir::IRType::Ptr;
+    gep.addressBase = base.slots[kFirstWord];
+    gep.displacement = base.off;
+    gep.isPure = true;
+    gep.operands.push_back(byteOff);
+    ir::Value at = newValue(gep.width, ptr, n.pos);
+    gep.results.push_back(at);
+    emit(std::move(gep));
+    return {at};
+}
+
 std::vector<ir::Value> Lowerer::lowerAddrOf(const Unary& n) {
     // `&f` where f names a plain function answers its code address: one
     // word holding the link address, for an indirect call to load. Every
@@ -2858,6 +2971,14 @@ std::vector<ir::Value> Lowerer::lowerAddrOf(const Unary& n) {
                     return {computedBase(place.slots[0], place.off, n.pos)};
                 }
             }
+        }
+        // `&a[i]` past what a place names answers the element's address
+        // directly: a computed array index, or any index into a slice or
+        // string, has no slot offset. The address carries the same bounds
+        // checks the read emits (SEMANTICS 8): an out-of-range address
+        // traps at the `&`, not at the later use.
+        if (const auto* index = dynamic_cast<const Index*>(n.operand.get())) {
+            return lowerElementAddr(*index);
         }
     }
     refuse(n.pos, "this expression");

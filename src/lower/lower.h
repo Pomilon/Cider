@@ -146,6 +146,7 @@ public:
     // `&f` where f names a plain function answers its code address as one
     // word. Every other address refuses: `&x` on values is FEAT-038.
     std::vector<ir::Value> lowerAddrOf(const Unary& n);
+    std::vector<ir::Value> lowerElementAddr(const Index& n);
     // Stores every word into the place an identifier names: consecutive
     // slots for a local, the label plus displacement for a global. Answers
     // the stored words, so an assignment is still an expression. Anything

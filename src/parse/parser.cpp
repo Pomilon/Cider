@@ -1395,6 +1395,7 @@ std::unique_ptr<Stmt> Parser::parseDefer() {
 std::unique_ptr<Stmt> Parser::parseReturn() {
     Position start = advance().pos;
     if (check(TokenKind::Semi) || check(TokenKind::RBrace)) {
+        match(TokenKind::Semi);
         return std::make_unique<Return>(start, nullptr);
     }
     std::unique_ptr<Expr> value = parseExpr();
