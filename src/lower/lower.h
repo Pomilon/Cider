@@ -113,6 +113,11 @@ public:
     // type, so each arm stores its words into the cell and the join loads
     // them back. The untaken arm never evaluates (SEMANTICS: single-eval).
     std::vector<ir::Value> lowerTernary(const Ternary& n);
+    // Prefix/postfix `++` / `--`: the checker proved the operand is an
+    // integer place, so the operand loads, steps by one through the same
+    // operation `+= 1` would emit, and stores back. Postfix answers the
+    // loaded words, prefix the stored one.
+    std::vector<ir::Value> lowerIncrDecr(const IncrDecr& n);
     ir::Value onCall(Call& n);
     ir::Value onIdent(Ident& n);
     ir::Value onCast(Cast& n);

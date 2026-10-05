@@ -212,6 +212,20 @@ struct Ternary : Expr {
     void accept(ASTVisitor& v) override;
 };
 
+// Prefix or postfix `++` / `--` on a place: `i++` answers the old value
+// and adds one, `++i` answers the new value. The operand is checked like
+// an assignment target and must be an integer; the update itself rides the
+// same operation the matching `+= 1` would emit, so overflow behaves like
+// `+` (undefined by default, wrapping under the experimental flag).
+struct IncrDecr : Expr {
+    bool isIncr;
+    bool isPrefix;
+    std::unique_ptr<Expr> operand;
+    IncrDecr(Position p, bool incr, bool prefix, std::unique_ptr<Expr> e)
+        : Expr(std::move(p)), isIncr(incr), isPrefix(prefix), operand(std::move(e)) {}
+    void accept(ASTVisitor& v) override;
+};
+
 struct Call : Expr {
     std::unique_ptr<Expr> callee;
     std::vector<std::unique_ptr<TypeExpr>> typeArgs;
@@ -710,6 +724,7 @@ struct ASTVisitor {
     virtual void visitUnary(Unary& n);
     virtual void visitCast(Cast& n);
     virtual void visitTernary(Ternary& n);
+    virtual void visitIncrDecr(IncrDecr& n);
     virtual void visitCall(Call& n);
     virtual void visitField(Field& n);
     virtual void visitIndex(Index& n);
@@ -778,6 +793,7 @@ inline void Binary::accept(ASTVisitor& v) { v.visitBinary(*this); }
 inline void Unary::accept(ASTVisitor& v) { v.visitUnary(*this); }
 inline void Cast::accept(ASTVisitor& v) { v.visitCast(*this); }
 inline void Ternary::accept(ASTVisitor& v) { v.visitTernary(*this); }
+inline void IncrDecr::accept(ASTVisitor& v) { v.visitIncrDecr(*this); }
 inline void Call::accept(ASTVisitor& v) { v.visitCall(*this); }
 inline void Field::accept(ASTVisitor& v) { v.visitField(*this); }
 inline void Index::accept(ASTVisitor& v) { v.visitIndex(*this); }
@@ -872,6 +888,7 @@ inline void ASTVisitor::visitTernary(Ternary& n) {
     n.then->accept(*this);
     n.els->accept(*this);
 }
+inline void ASTVisitor::visitIncrDecr(IncrDecr& n) { n.operand->accept(*this); }
 inline void ASTVisitor::visitCall(Call& n) {
     n.callee->accept(*this);
     for (auto& t : n.typeArgs) t->accept(*this);

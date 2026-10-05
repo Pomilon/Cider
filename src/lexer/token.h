@@ -56,6 +56,7 @@ enum class TokenKind {
     Plus, Minus, Star, Slash, Percent, Amp, Pipe, Caret, Tilde, Bang,
     Lt, Gt, Eq,
     AndAnd, OrOr, EqEq, BangEq, LtEq, GtEq, LtLt, GtGt,
+    PlusPlus, MinusMinus,
     PlusEq, MinusEq, StarEq, SlashEq, PercentEq,
     AmpEq, PipeEq, CaretEq, LtLtEq, GtGtEq,
     FatArrow, ColonColon, Ellipsis, Hash,

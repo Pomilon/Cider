@@ -1788,6 +1788,18 @@ std::unique_ptr<Expr> Parser::parsePrefix() {
         }
         return std::make_unique<Unary>(start, UnOp::Addr, std::move(operand));
     }
+    // Prefix `++` / `--` bind like the other unary operators, so `++*p`
+    // increments the pointee: the operand parses as a prefix expression,
+    // and the checker decides whether it is a place.
+    if (check(TokenKind::PlusPlus) || check(TokenKind::MinusMinus)) {
+        bool isIncr = peek().kind == TokenKind::PlusPlus;
+        advance();
+        std::unique_ptr<Expr> operand = parsePrefix();
+        if (operand == nullptr) {
+            return nullptr;
+        }
+        return std::make_unique<IncrDecr>(start, isIncr, true, std::move(operand));
+    }
     std::unique_ptr<Expr> base;
     switch (peek().kind) {
         case TokenKind::IntLit: {
@@ -1871,6 +1883,15 @@ std::unique_ptr<Expr> Parser::parsePrefix() {
 
 std::unique_ptr<Expr> Parser::parsePostfix(std::unique_ptr<Expr> base) {
     for (;;) {
+        // Postfix `++` / `--` bind at this level, so `*p++` is `*(p++)`
+        // and only `(*p)++` touches the pointee — the same rule C uses,
+        // and the checker rejects whatever is not a place either way.
+        if (check(TokenKind::PlusPlus) || check(TokenKind::MinusMinus)) {
+            bool isIncr = peek().kind == TokenKind::PlusPlus;
+            Position ppos = advance().pos;
+            base = std::make_unique<IncrDecr>(ppos, isIncr, false, std::move(base));
+            continue;
+        }
         if (match(TokenKind::Dot)) {
             if (!check(TokenKind::Ident)) {
                 failHere("expected a field name");

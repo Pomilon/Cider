@@ -111,6 +111,40 @@ void testMissingInit() {
     check(program->globals[0]->name == "good", "it is the second one");
 }
 
+// `++i` prefixes, `i++` postfixes, `*p++` is `*(p++)`, `a--b` is `(a--)-b`.
+void testIncrDecr() {
+    std::printf("increment and decrement\n");
+    bool ok = false;
+    std::unique_ptr<cider::Program> program = parse(
+        "func f() -> void { ++i; j--; --*p; (*q)++; a-- - b; }", ok);
+    check(ok, "parses");
+    const cider::FuncDecl& fn = static_cast<const cider::FuncDecl&>(*program->decls[0]);
+    const cider::IncrDecr& pre =
+        static_cast<const cider::IncrDecr&>(
+            *static_cast<const cider::ExprStmt&>(*fn.body->stmts[0]).expr);
+    check(pre.isIncr && pre.isPrefix, "++i is prefix increment");
+    const cider::IncrDecr& post =
+        static_cast<const cider::IncrDecr&>(
+            *static_cast<const cider::ExprStmt&>(*fn.body->stmts[1]).expr);
+    check(!post.isIncr && !post.isPrefix, "j-- is postfix decrement");
+    const cider::IncrDecr& through =
+        static_cast<const cider::IncrDecr&>(
+            *static_cast<const cider::ExprStmt&>(*fn.body->stmts[2]).expr);
+    check(through.isPrefix &&
+              dynamic_cast<const cider::Unary*>(through.operand.get()) != nullptr,
+          "--*p dereferences first");
+    const cider::IncrDecr& grouped =
+        static_cast<const cider::IncrDecr&>(
+            *static_cast<const cider::ExprStmt&>(*fn.body->stmts[3]).expr);
+    check(!grouped.isPrefix, "(*q)++ increments through the group");
+    const cider::Binary& rest =
+        static_cast<const cider::Binary&>(
+            *static_cast<const cider::ExprStmt&>(*fn.body->stmts[4]).expr);
+    check(rest.op == cider::BinOp::Sub &&
+              dynamic_cast<const cider::IncrDecr*>(rest.lhs.get()) != nullptr,
+          "a--b is (a--) - b");
+}
+
 // `max::<int>(3, 9)` carries its arguments on the call.
 void testGenericCall() {
     std::printf("explicit type arguments\n");
@@ -219,6 +253,7 @@ int main() {
     testControlForms();
     testMethodInit();
     testExportVar();
+    testIncrDecr();
     testAsm();
     std::printf("\n%d checks, %s\n", checks, failures == 0 ? "all passed" : "FAILURES");
     return failures == 0 ? 0 : 1;

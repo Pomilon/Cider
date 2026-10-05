@@ -225,10 +225,18 @@ Token Lexer::nextToken() {
             }
             break;
         case '+':
-            token.kind = match('=') ? TokenKind::PlusEq : TokenKind::Plus;
+            if (match('+')) {
+                token.kind = TokenKind::PlusPlus;
+            } else {
+                token.kind = match('=') ? TokenKind::PlusEq : TokenKind::Plus;
+            }
             break;
         case '-':
-            token.kind = match('=') ? TokenKind::MinusEq : TokenKind::Minus;
+            if (match('-')) {
+                token.kind = TokenKind::MinusMinus;
+            } else {
+                token.kind = match('=') ? TokenKind::MinusEq : TokenKind::Minus;
+            }
             break;
         case '*':
             token.kind = match('=') ? TokenKind::StarEq : TokenKind::Star;

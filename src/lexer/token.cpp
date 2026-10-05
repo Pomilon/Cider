@@ -112,6 +112,8 @@ const char* tokenName(TokenKind kind) {
         case TokenKind::GtEq: return ">=";
         case TokenKind::LtLt: return "<<";
         case TokenKind::GtGt: return ">>";
+        case TokenKind::PlusPlus: return "++";
+        case TokenKind::MinusMinus: return "--";
         case TokenKind::PlusEq: return "+=";
         case TokenKind::MinusEq: return "-=";
         case TokenKind::StarEq: return "*=";

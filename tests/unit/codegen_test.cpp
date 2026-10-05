@@ -194,6 +194,45 @@ void testTrap() {
 
 // `&` on an element answers the element's address: stores through it land
 // in the sequence, and an out-of-range address traps like the read would.
+// Prefix and postfix `++` / `--` read-modify-write their place: a
+// statement discards the value, postfix answers the old one, prefix the
+// new one, and all of them work through pointers and in for-steps.
+void testIncrDecr() {
+    std::printf("incdec runs\n");
+    check(runQuiet("func main() -> int {\n"
+                   "    var i: int = 0;\n"
+                   "    i++;\n"
+                   "    ++i;\n"
+                   "    i--;\n"
+                   "    --i;\n"
+                   "    ++i;\n"
+                   "    return i;\n"
+                   "}\n") == 1,
+          "statements net one up");
+    check(runQuiet("func main() -> int {\n"
+                   "    var i: int = 5;\n"
+                   "    var a: int = i++;\n"
+                   "    var b: int = ++i;\n"
+                   "    var c: int = i--;\n"
+                   "    var d: int = --i;\n"
+                   "    return a * 32 + b * 8 + c * 2 + d;\n"
+                   "}\n") == 235,
+          "postfix answers old, prefix answers new");
+    check(runQuiet("func bump(p: *int) { (*p)++; }\n"
+                   "func main() -> int {\n"
+                   "    var x: int = 41;\n"
+                   "    bump(&x);\n"
+                   "    return x;\n"
+                   "}\n") == 42,
+          "increments through a pointer");
+    check(runQuiet("func main() -> int {\n"
+                   "    var s: int = 0;\n"
+                   "    for (var i: int = 0; i < 10; i++) { s = s + 1; }\n"
+                   "    return s;\n"
+                   "}\n") == 10,
+          "a for-step can increment");
+}
+
 void testElementAddr() {
     std::printf("element addresses\n");
     check(runQuiet("func main() -> int {\n"
@@ -678,6 +717,7 @@ int main() {
     testAsm();
     testTrap();
     testElementAddr();
+    testIncrDecr();
     testRepro();
     std::printf("\n%d checks, %s\n", checks, failures == 0 ? "all passed" : "FAILURES");
     return failures == 0 ? 0 : 1;

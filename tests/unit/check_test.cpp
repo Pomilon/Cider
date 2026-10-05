@@ -309,6 +309,25 @@ void testAsm() {
     check(!bad.ok && bad.stage == "check", "an unbound placeholder fails");
 }
 
+// `++i` needs an integer place; floats and rvalues are rejected where used.
+void testIncrDecr() {
+    std::printf("increment and decrement check\n");
+    Checked good = check(
+        "func main() -> int {\n"
+        "    var i: int = 1;\n"
+        "    var p: *int = &i;\n"
+        "    ++i; i--; --(*p);\n"
+        "    return i;\n"
+        "}\n");
+    check(good.ok, "integer places check: " + good.stage);
+    Checked fp = check(
+        "func main() -> int { var f: f32 = 1.0; ++f; return 0; }\n");
+    check(!fp.ok && fp.stage == "check", "a float operand fails");
+    Checked rvalue = check(
+        "func main() -> int { var i: int = 1; ++(i + 1); return 0; }\n");
+    check(!rvalue.ok && rvalue.stage == "check", "an rvalue fails");
+}
+
 }  // namespace
 
 int main() {
@@ -321,6 +340,7 @@ int main() {
     testGenericStruct();
     testUnions();
     testFnAddr();
+    testIncrDecr();
     testAsm();
     testLen();
     testFuncLitChecks();

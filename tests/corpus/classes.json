@@ -330,9 +330,9 @@
   "class": "B"
  },
  "deref_incdec_pointee": {
-  "actual": "exit 1; tests/corpus/deref_incdec_pointee/main.cid:39:50: expected an expression; tests/corpus/deref_incdec_pointee/main.cid:40:44: expected an expression",
+  "actual": "deref_incdec_pointee/main.cid:145:13: a variable needs an initialiser",
   "blocker": "stdlib-imports",
-  "class": "D"
+  "class": "B"
  },
  "destructor": {
   "actual": "exit 1; tests/corpus/legacy/destructor/main.cid:6:10: a method needs a name; tests/corpus/legacy/destructor/main.cid:6:10: a class holds fields and methods",
@@ -785,9 +785,9 @@
   "class": "D"
  },
  "incdec": {
-  "actual": "exit 1; tests/corpus/legacy/incdec/main.cid:5:18: expected an expression",
-  "blocker": "incdec-operators (++x/--x unparseable) (+stdlib-imports)",
-  "class": "D"
+  "actual": "PASS: incdec rc=0",
+  "blocker": "none",
+  "class": "A"
  },
  "inline_basic": {
   "actual": "pass",
@@ -1130,9 +1130,9 @@
   "class": "D"
  },
  "phase0_stress": {
-  "actual": "exit 1; tests/corpus/legacy/phase0_stress/main.cid:61:18: expected an expression; tests/corpus/legacy/phase0_stress/main.cid:97:24: a variable needs an initialiser",
+  "actual": "phase0_stress/main.cid:97:24: a variable needs an initialiser",
   "blocker": "incdec-operators (+try-throw-catch, extern, enums, stdlib-imports)",
-  "class": "D"
+  "class": "B"
  },
  "phase1_stress": {
   "actual": "exit 1; tests/corpus/legacy/phase1_stress/main.cid:17:20: a variable needs an initialiser; tests/corpus/legacy/phase1_stress/main.cid:24:21: a variable needs an initialiser",

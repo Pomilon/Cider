@@ -3016,6 +3016,9 @@ std::vector<ir::Value> Lowerer::lowerWords(const Expr* expr) {
     if (dynamic_cast<const Ternary*>(expr) != nullptr) {
         return lowerTernary(static_cast<const Ternary&>(*expr));
     }
+    if (const auto* step = dynamic_cast<const IncrDecr*>(expr)) {
+        return lowerIncrDecr(*step);
+    }
     if (const auto* unary = dynamic_cast<const Unary*>(expr)) {
         // `*p` as a value loads whatever the pointer addresses: the
         // place machinery already resolves the dereference to an
@@ -3561,6 +3564,45 @@ std::vector<ir::Value> Lowerer::lowerTernary(const Ternary& n) {
         return {undefined()};
     }
     return out;
+}
+
+std::vector<ir::Value> Lowerer::lowerIncrDecr(const IncrDecr& n) {
+    TypeRef type = checker_.typeOf(&n);
+    if (type.isError()) {
+        refuse(n.pos, "this update");
+        return {undefined()};
+    }
+    Place place;
+    if (!resolvePlace(n.operand.get(), place)) {
+        refuse(n.operand->pos, "this update");
+        return {undefined()};
+    }
+    // Integers are one word; the guard refuses rather than stepping a
+    // wider value's first word and leaving the rest behind.
+    std::vector<ir::Value> old = loadRange(n.operand->pos, place, type);
+    if (failed_ || old.size() != kOneWord) {
+        refuse(n.operand->pos, "this update");
+        return {undefined()};
+    }
+    ir::Value one = constantI64(1, type, n.pos);
+    if (failed_) {
+        return {undefined()};
+    }
+    // The step rides emitArith, not a bare op: overflow behaves exactly
+    // like the matching `+` / `-`, including the experimental wrap flag.
+    ir::Value updated =
+        emitArith(n.isIncr ? BinOp::Add : BinOp::Sub, old[kFirstWord], one, type, n.pos);
+    if (failed_) {
+        return {undefined()};
+    }
+    storeRange(n.operand->pos, place, {updated}, type);
+    if (failed_) {
+        return {undefined()};
+    }
+    if (n.isPrefix) {
+        return {updated};
+    }
+    return old;
 }
 
 ir::Value Lowerer::emitArith(BinOp op, ir::Value a, ir::Value b, TypeRef result,
@@ -4468,6 +4510,16 @@ ir::Value Lowerer::onIdentOrExpr(const Expr* expr, TypeRef expected) {
             emit(std::move(instr));
             return out;
         }
+    }
+    // An increment answers one word — the checker proved an integer — so a
+    // scalar position reads it through the word path, like a dereference.
+    if (auto* step = dynamic_cast<const IncrDecr*>(expr)) {
+        std::vector<ir::Value> words = lowerIncrDecr(*step);
+        if (failed_ || words.size() != kOneWord) {
+            refuse(expr->pos, "this expression");
+            return undefined();
+        }
+        return words[0];
     }
     refuse(expr->pos, "this expression");
     return undefined();

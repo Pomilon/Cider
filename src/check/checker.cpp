@@ -1007,6 +1007,38 @@ void Checker::visitAssign(Assign& n) {
     record(&n, target);
 }
 
+void Checker::visitIncrDecr(IncrDecr& n) {
+    TypeRef operand = checkExpr(n.operand.get(), TypeRef{ctx_.wildcard()});
+    if (operand.isError()) {
+        record(&n, operand);
+        return;
+    }
+    // The operand updates in place, so it is checked like an assignment
+    // target: a place, never a string element, and an integer — the same
+    // widths `x += 1` would accept, minus the float `+=` allows. A float
+    // `++` hides a precision choice behind one character; `f += 1.0`
+    // writes it out.
+    if (!isPlace(n.operand.get())) {
+        fail(n.operand->pos, "cannot increment this");
+        record(&n, errorRef());
+        return;
+    }
+    if (const auto* index = dynamic_cast<const Index*>(n.operand.get())) {
+        TypeRef base = typeOf(index->array.get());
+        if (!base.isError() && base.type->kind() == Kind::String) {
+            fail(n.operand->pos, "strings are immutable");
+            record(&n, errorRef());
+            return;
+        }
+    }
+    if (operand.type->kind() != Kind::Basic || !basicIsInteger(*operand.type->basic())) {
+        fail(n.operand->pos, "this operator needs an integer");
+        record(&n, errorRef());
+        return;
+    }
+    record(&n, operand);
+}
+
 void Checker::visitSizeofType(SizeofType& n) {
     TypeRef target = resolveHere(n.type.get());
     if (target.isError()) {
@@ -1267,6 +1299,10 @@ TypeRef Checker::checkExpr(Expr* expr, TypeRef expected) {
     if (auto* unary = dynamic_cast<Unary*>(expr)) {
         visitUnary(*unary);
         return typeOf(unary);
+    }
+    if (auto* step = dynamic_cast<IncrDecr*>(expr)) {
+        visitIncrDecr(*step);
+        return typeOf(step);
     }
     if (auto* cast = dynamic_cast<Cast*>(expr)) {
         visitCast(*cast);

@@ -170,6 +170,7 @@ public:
     void visitUnary(Unary& n) override;
     void visitCast(Cast& n) override;
     void visitTernary(Ternary& n) override;
+    void visitIncrDecr(IncrDecr& n) override;
     void visitCall(Call& n) override;
     void visitField(Field& n) override;
     void visitIndex(Index& n) override;
