@@ -8,7 +8,7 @@ var g32: u32 = 0;       // @ 0x04 (align 4 pads 3 bytes)
 var g64: u64 = 0;       // @ 0x08
 var tail: u8 = 0;       // @ 0x10
 var g64b: u64 = 0;      // @ 0x18 (align 8 pads 7 bytes)
-var init: i32 = 42;     // .data, initialized path unchanged
+var initVal: i32 = 42;     // .data, initialized path unchanged
 
 func main() -> int {
   g8 = 0xF0;
@@ -21,6 +21,6 @@ func main() -> int {
   if (g64 != 0x1122334455667788) { return 3; }
   if (tail != 0x5A) { return 4; }
   if (g64b != 0x8877665544332211) { return 5; }
-  if (init != 42) { return 6; }
+  if (initVal != 42) { return 6; }
   return 0;
 }

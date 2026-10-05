@@ -30,12 +30,11 @@ TRAPPED = "<trapped by signal>"
 def outcome_of(proc):
     if proc.returncode is not None and proc.returncode < 0:
         return (TRAPPED, proc.stdout, proc.returncode)
-    # Trap normalization (OUTPUT.md differential gate): `cider run` reports a
-    # program killed by signal N as exit 128+N, so the signal arrives as a
-    # positive code. A class-A program never exits up here (no expectation
-    # in 129..192), so that band names a trap, not an exit status.
-    if proc.returncode is not None and 129 <= proc.returncode <= 192:
-        return (TRAPPED, proc.stdout, proc.returncode)
+    # Trap normalization (OUTPUT.md differential gate): `cider run` dies by
+    # the same signal that killed the program, so signal death arrives as a
+    # negative returncode and a legitimate high exit status (e.g. 150)
+    # stays an exit status. There is no band heuristic: the signal
+    # surviving is what names a trap, not a range of exit codes.
     return (proc.stdout, proc.stderr, proc.returncode)
 
 

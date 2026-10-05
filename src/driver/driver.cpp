@@ -13,6 +13,7 @@
 
 #include <cstdio>
 #include <cstdlib>
+#include <csignal>
 #include <fstream>
 #include <sstream>
 #include <sys/wait.h>
@@ -214,7 +215,14 @@ int runBinary(const std::string& path) {
     int status = 0;
     waitpid(child, &status, 0);
     if (WIFSIGNALED(status)) {
-        return 128 + WTERMSIG(status);
+        // A trapped program dies by the same signal, the way a shell
+        // re-raises: the death stays a death instead of becoming an exit
+        // code. Collapsing it to 128+N would steal every legitimate exit
+        // status in that band (a program may return 150), and the harness
+        // tells the two apart only when the signal survives (OUTPUT.md).
+        signal(WTERMSIG(status), SIG_DFL);
+        raise(WTERMSIG(status));
+        _exit(127);
     }
     if (!WIFEXITED(status)) {
         return 127;
