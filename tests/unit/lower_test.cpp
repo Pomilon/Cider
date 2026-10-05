@@ -70,11 +70,12 @@ Lowered lower(const std::string& text) {
         return out;
     }
     cider::lower::Lowerer lowerer(*out.types, *out.resolver, *out.checker);
-    out.module = lowerer.lowerModule("main", *out.program);
-    if (out.module == nullptr) {
+    if (!lowerer.lowerModule("main", *out.program)) {
+        out.module = nullptr;
         out.stage = "lower";
         return out;
     }
+    out.module = lowerer.takeModule();
     out.ok = true;
     return out;
 }

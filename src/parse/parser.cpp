@@ -245,6 +245,19 @@ std::unique_ptr<Program> Parser::parse() {
             }
             continue;
         }
+        if (check(TokenKind::KwExport) && peekAt(1).kind == TokenKind::KwVar) {
+            // `export` on a global is a marker only: every global binds
+            // cross-module already (no export enforcement exists), so the
+            // declaration parses as the plain global it is.
+            advance();
+            std::unique_ptr<VarDecl> global = parseGlobal();
+            if (global != nullptr) {
+                program->globals.push_back(std::move(global));
+            } else {
+                syncToDecl();
+            }
+            continue;
+        }
         uint64_t before = save();
         std::unique_ptr<Decl> decl = parseDecl();
         if (decl != nullptr) {

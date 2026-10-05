@@ -129,6 +129,9 @@ public:
     // unknown names here are a checker bug, not a program error, and are
     // reported as such.
     bool checkProgram(Program& program, const std::string& module);
+    // The module the last checkProgram walked: the lowerer names
+    // definitions by the module being walked, not the entry.
+    const std::string& module() const { return module_; }
 
     TypeRef typeOf(const Node* node) const;
     const std::vector<CheckError>& errors() const { return errors_; }
@@ -236,13 +239,16 @@ private:
     // types through the tables, which is what this slice promises.
     void walkMethodInst(DeclId spec, DeclId tmpl, const std::string& method);
     // The template AST behind a function name, for instantiation walks.
-    const FuncDecl* funcSpelling(const std::string& name) const;
+    // Keyed by module and name: two modules may template the same spelling.
+    const FuncDecl* funcSpelling(const std::string& module,
+                                 const std::string& name) const;
     bool implementsAll(DeclId concrete, DeclId iface, Position pos);
     bool isDerivedFrom(DeclId derived, DeclId base) const;
     bool castRowOk(TypeRef from, TypeRef to) const;
 
-    // Templates by name, for instantiation body walks. Non-owning; the
-    // Program outlives every use.
+    // Spellings by module and name: every checked module registers here,
+    // and a bare name would collide across modules. Non-owning; the
+    // Programs outlive every use.
     std::unordered_map<std::string, const FuncDecl*> funcs_;
     std::unordered_map<std::string, const MethodDecl*> methods_;
     std::unordered_map<std::string, const StructDecl*> structs_;

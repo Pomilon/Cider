@@ -155,6 +155,19 @@ void testMethodInit() {
 
 // `asm { "line" "line" }` joins the strings into one text with a newline
 // between them and records each `{placeholder}` body raw, suffix included.
+// `export var hits: int = 0;` lands in globals: every global binds
+// cross-module already (no export enforcement exists), so the marker is a
+// no-op there rather than a second global form.
+void testExportVar() {
+    std::printf("export var\n");
+    bool ok = false;
+    std::unique_ptr<cider::Program> program =
+        parse("export var hits: int = 0;\n", ok);
+    check(ok, "parses");
+    check(program->globals.size() == 1, "one global");
+    check(program->globals[0]->name == "hits", "the name survives");
+}
+
 void testAsm() {
     std::printf("asm blocks\n");
     bool ok = false;
@@ -205,6 +218,7 @@ int main() {
     testGenericCall();
     testControlForms();
     testMethodInit();
+    testExportVar();
     testAsm();
     std::printf("\n%d checks, %s\n", checks, failures == 0 ? "all passed" : "FAILURES");
     return failures == 0 ? 0 : 1;

@@ -1040,9 +1040,9 @@
   "class": "D"
  },
  "mod_ns_diamond": {
-  "actual": "cider run exit 1, stdout empty, stderr diagnostic: `da:1:1: cannot find module 'da'` (+ db, dc); driver has no module loader",
+  "actual": "cider run exit 0, stdout AB, stderr empty: qualified + from-import calls, extern putchar, diamond import twice",
   "blocker": "multi-file-imports",
-  "class": "D"
+  "class": "A"
  },
  "mod_ns_lastseg": {
   "actual": "cider run exit 1, stdout empty, stderr diagnostic: `main.cid:7:12: a variable needs an initialiser`; driver has no module loader",
@@ -1370,9 +1370,9 @@
   "class": "D"
  },
  "struct_literal_alias": {
-  "actual": "run exit 1: OUT: ERR:tests/corpus/struct_literal_alias/main.cid:20:33: expected ';'\\ntests/corpus/struct_literal_alias/main.cid:21:33: expected a declaration\\ntests/corpus/struct_literal_alias/main.cid:23:3: expected a decl",
-  "blocker": "multi-file-imports (bare T{...} literals would also need new per diff #6)",
-  "class": "A"
+  "actual": "v3 rejects v2 syntax loudly at parse (run exit 1: OUT: ERR:tests/corpus/struct_literal_alias/main.cid:20:33: expected ';'\\ntests/corpus/struct_literal_alias/m...)",
+  "blocker": "bare T{...} literals need new per diff #6 (also multi-file-imports)",
+  "class": "D"
  },
  "struct_param": {
   "actual": "blocked-A reclassified 2026-10-05: must pass once blocker lands; run exit 1: OUT: ERR:tests/corpus/struct_param/main.cid:23:13: a variable needs an initialiser\\ntests/corpus/struct_param/main.cid:26:15: a variable needs an initialiser\\ntests/corpus/struct_param/main.cid:28:15: a variable",
@@ -1385,14 +1385,14 @@
   "class": "D"
  },
  "struct_template_params": {
-  "actual": "run exit 1: OUT: ERR:tests/corpus/struct_template_params/main.cid:62:12: expected an expression\\ntests/corpus/struct_template_params/main.cid:91:12: expected an expression\\ntests/corpus/struct_template_params/main.cid:100:2",
+  "actual": "v3 rejects v2 syntax loudly at parse (run exit 1: OUT: ERR:tests/corpus/struct_template_params/main.cid:62:12: expected an expression\\ntests/corpus/struct_tem...)",
   "blocker": "generics-not-lowered (also multi-file-imports)",
-  "class": "A"
+  "class": "D"
  },
  "struct_type_import": {
-  "actual": "run exit 1: OUT: ERR:tests/corpus/struct_type_import/main.cid:12:16: expected ';'\\ntests/corpus/struct_type_import/main.cid:12:26: expected ';'\\n",
-  "blocker": "multi-file-imports (also stdlib-missing)",
-  "class": "A"
+  "actual": "v3 rejects v2 syntax loudly at parse (run exit 1: OUT: ERR:tests/corpus/struct_type_import/main.cid:12:16: expected ';'\\ntests/corpus/struct_type_import/main....)",
+  "blocker": "v2 type syntax at 12:16 (also stdlib-missing, multi-file-imports)",
+  "class": "D"
  },
  "syscall_efault_bounds": {
   "actual": "pass",
@@ -1530,9 +1530,9 @@
   "class": "B"
  },
  "virtual_aggregate_return": {
-  "actual": "run exit 1: OUT: ERR:tests/corpus/virtual_aggregate_return/main.cid:34:10: a method needs a name\\ntests/corpus/virtual_aggregate_return/main.cid:34:10: a class holds fields and methods\\ntests/corpus/virtual_aggregate_return",
-  "blocker": "multi-file-imports (also virtual-dispatch, destructors, stdlib-missing)",
-  "class": "A"
+  "actual": "v3 rejects v2 syntax loudly at parse (run exit 1: OUT: ERR:tests/corpus/virtual_aggregate_return/main.cid:34:10: a method needs a name\\ntests/corpus/virtual_a...)",
+  "blocker": "virtual-dispatch + destructors (also stdlib-missing, multi-file-imports)",
+  "class": "D"
  },
  "virtual_aggregate_return_width": {
   "actual": "blocked-A reclassified 2026-10-05: must pass once blocker lands; run exit 1: OUT: ERR:tests/corpus/virtual_aggregate_return_width/main.cid:55:16: a variable needs an initialiser\\ntests/corpus/virtual_aggregate_return_width/main.cid:64:18: a variable needs an initialiser\\ntests/corpus/vir",
@@ -1575,14 +1575,14 @@
   "class": "A"
  },
  "wide_global_load": {
-  "actual": "run exit 1: OUT: ERR:tests/corpus/wide_global_load/main.cid:28:22: expected ')'\\ntests/corpus/wide_global_load/main.cid:28:22: a function needs a body\\ntests/corpus/wide_global_load/main.cid:30:1: expected a declaration\\ntes",
-  "blocker": "multi-file-imports (also interface-boxing)",
-  "class": "A"
+  "actual": "v3 rejects v2 syntax loudly at parse (run exit 1: OUT: ERR:tests/corpus/wide_global_load/main.cid:28:22: expected ')'\\ntests/corpus/wide_global_load/main.cid:...)",
+  "blocker": "fn( types at 28:22 (also interface-boxing, multi-file-imports)",
+  "class": "D"
  },
  "wide_global_store": {
-  "actual": "run exit 1: OUT: ERR:tests/corpus/wide_global_store/main.cid:52:20: expected ')'\\ntests/corpus/wide_global_store/main.cid:52:20: a function needs a body\\ntests/corpus/wide_global_store/main.cid:54:1: expected a declaration\\n",
-  "blocker": "multi-file-imports (also interface-boxing)",
-  "class": "A"
+  "actual": "v3 rejects v2 syntax loudly at parse (run exit 1: OUT: ERR:tests/corpus/wide_global_store/main.cid:52:20: expected ')'\\ntests/corpus/wide_global_store/main.ci...)",
+  "blocker": "fn( types at 52:20 (also interface-boxing, multi-file-imports)",
+  "class": "D"
  },
  "wide_strings": {
   "actual": "blocked-A reclassified 2026-10-05: must pass once blocker lands; run exit 1: OUT: ERR:tests/corpus/wide_strings/main.cid:11:18: unknown escape\\ntests/corpus/wide_strings/main.cid:32:23: unknown escape\\ntests/corpus/wide_strings/main.cid:32:23: unknown escape\\ntests/corpus/wide_strings/mai",

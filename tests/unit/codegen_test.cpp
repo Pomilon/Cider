@@ -63,11 +63,12 @@ Built build(const std::string& text) {
     }
     auto checker = std::make_unique<cider::check::Checker>(*out.types, *resolver);
     cider::lower::Lowerer lowerer(*out.types, *resolver, *checker);
-    out.module = lowerer.lowerModule("main", *program);
-    if (out.module == nullptr) {
+    if (!lowerer.lowerModule("main", *program)) {
+        out.module = nullptr;
         out.stage = "lower";
         return out;
     }
+    out.module = lowerer.takeModule();
     cider::opt::OptResult result = cider::opt::run(*out.module);
     if (!result.ok) {
         out.stage = "opt:" + result.error;
@@ -235,6 +236,16 @@ void testPointerHeap() {
           "freed memory is recycled by the free list");
     check(runQuiet("func main() -> int { var p: *int = alloc(8, 8) as *int; free(p); free(p); return 0; }\n") == 134,
           "a double free dies loudly with the heap code");
+}
+
+void testExternPutchar() {
+    std::printf("extern putchar\n");
+    // Sovereign link has no libc: a called-but-undefined `putchar` emits a
+    // freestanding helper (one write syscall) instead of failing the link.
+    // Any other undefined extern still fails the link loudly.
+    check(runQuiet("extern func putchar(c: int) -> int;\n"
+                   "func main() -> int { return putchar(65); }\n") == 65,
+          "putchar answers the character");
 }
 
 void testBreakContinue() {
@@ -577,6 +588,7 @@ int main() {
     testStruct();
     testArray();
     testPointerHeap();
+    testExternPutchar();
     testBreakContinue();
     testForLoop();
     testForIn();

@@ -61,11 +61,12 @@ Piped pipe(const std::string& text) {
     }
     auto checker = std::make_unique<cider::check::Checker>(*out.types, *resolver);
     cider::lower::Lowerer lowerer(*out.types, *resolver, *checker);
-    out.module = lowerer.lowerModule("main", *program);
-    if (out.module == nullptr) {
+    if (!lowerer.lowerModule("main", *program)) {
+        out.module = nullptr;
         out.stage = "lower";
         return out;
     }
+    out.module = lowerer.takeModule();
     cider::opt::OptResult result = cider::opt::run(*out.module);
     if (!result.ok) {
         out.stage = "opt:" + result.error;

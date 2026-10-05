@@ -44,9 +44,47 @@ std::string at(const Position& pos) {
     return pos.file + ":" + std::to_string(pos.line) + ":" + std::to_string(pos.column);
 }
 
+std::string readFile(const std::string& path, bool& found);
+
 bool runFront(const std::string& file, const std::string& text, Pipeline& pipe) {
     pipe.file = file;
     pipe.types = std::make_unique<TypeContext>();
+    // Imports load beside the entry file: `import da;` reads `<dir>/da.cid`
+    // and parses it with the same front end, so a dependency's lex and
+    // parse diagnostics name its own file. A dotted name (`std.io`) has no
+    // library search behind it yet and fails loudly at resolve time. The
+    // program is returned even when broken: the parser recovers, downstream
+    // phases report only true cascades, and the recorded diagnostics fail
+    // the build before lowering runs.
+    std::string entryDir;
+    std::string::size_type slash = file.rfind('/');
+    if (slash != std::string::npos) {
+        entryDir = file.substr(0, slash);
+    }
+    std::string loadDiag;
+    resolve::Resolver::ModuleLoader load =
+        [&entryDir, &loadDiag](const std::string& name) -> std::unique_ptr<Program> {
+        if (name.find('.') != std::string::npos) {
+            return nullptr;
+        }
+        std::string path = entryDir.empty() ? name + ".cid" : entryDir + "/" + name + ".cid";
+        bool found = false;
+        std::string depText = readFile(path, found);
+        if (!found) {
+            return nullptr;
+        }
+        Lexer lexer(path, depText);
+        std::vector<Token> tokens = lexer.lex();
+        for (const LexError& error : lexer.errors()) {
+            loadDiag += at(error.pos) + ": " + error.message + "\n";
+        }
+        Parser parser(path, std::move(tokens));
+        std::unique_ptr<Program> program = parser.parse();
+        for (const ParseError& error : parser.errors()) {
+            loadDiag += at(error.pos) + ": " + error.message + "\n";
+        }
+        return program;
+    };
     Lexer lexer(file, text);
     std::vector<Token> tokens = lexer.lex();
     for (const LexError& error : lexer.errors()) {
@@ -60,8 +98,16 @@ bool runFront(const std::string& file, const std::string& text, Pipeline& pipe) 
     if (!pipe.diagnostic.empty()) {
         return false;
     }
-    resolve::Resolver resolver(*pipe.types);
+    resolve::Resolver resolver(*pipe.types, std::move(load));
     if (!resolver.resolveProgram(*pipe.program, "main")) {
+        for (const resolve::ResolveError& error : resolver.errors()) {
+            pipe.diagnostic += at(error.pos) + ": " + error.message + "\n";
+        }
+        pipe.diagnostic += loadDiag;
+        return false;
+    }
+    if (!loadDiag.empty()) {
+        pipe.diagnostic += loadDiag;
         for (const resolve::ResolveError& error : resolver.errors()) {
             pipe.diagnostic += at(error.pos) + ": " + error.message + "\n";
         }
@@ -69,7 +115,30 @@ bool runFront(const std::string& file, const std::string& text, Pipeline& pipe) 
     }
     check::Checker checker(*pipe.types, resolver);
     lower::Lowerer lowerer(*pipe.types, resolver, checker);
-    pipe.module = lowerer.lowerModule("main", *pipe.program);
+    // Every resolved module lowers into one IR module in resolve order, so
+    // link names mangle under their own module and rodata labels never
+    // collide. Emission order carries no semantics: calls resolve by link
+    // name, not by position.
+    bool lowered = false;
+    for (const std::string& module : resolver.moduleOrder()) {
+        Program* program =
+            module == "main" ? pipe.program.get() : resolver.programOf(module);
+        if (program == nullptr) {
+            pipe.diagnostic += "cannot lower missing module '" + module + "'\n";
+            return false;
+        }
+        if (module == "main") {
+            lowered = lowerer.lowerModule(module, *program);
+        } else {
+            lowered = lowerer.lowerInto(module, *program);
+        }
+        if (!lowered) {
+            break;
+        }
+    }
+    if (lowered) {
+        pipe.module = lowerer.takeModule();
+    }
     // The checker calls back into the resolver (local spellings,
     // instantiations), so resolve diagnostics can appear after the header
     // pass succeeded. A successful resolve records none, so anything here

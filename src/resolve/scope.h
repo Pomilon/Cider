@@ -39,6 +39,13 @@ struct Decl {
     const Scope* scope = nullptr;
     Position pos{"", 1, 1};
     bool isPrelude = false;
+    // Extern only: declared in Cider, defined by the linker. Calls keep
+    // the bare spelling on every backend (FEATURES §4.4): mangling one
+    // would point at a symbol nothing defines.
+    bool isExtern = false;
+    // Module only: the full dotted path the import named (`a.b` even when
+    // bound as `b`), so qualified uses find the defining scope.
+    std::string origin;
     // Const only: the initialiser, for evalConst. Non-owning; the AST
     // outlives every use the resolver makes of it.
     const Expr* init = nullptr;

@@ -157,7 +157,9 @@ void Checker::walkMethodInst(DeclId spec, DeclId tmpl, const std::string& method
         fail(Position{module_, 1, 1}, "checker bug: template is missing");
         return;
     }
-    auto spelling = methods_.find(tmplDecl->name + "." + method);
+    std::string home =
+        tmplDecl->scope != nullptr ? tmplDecl->scope->module : module_;
+    auto spelling = methods_.find(home + "." + tmplDecl->name + "." + method);
     if (spelling == methods_.end()) {
         fail(Position{module_, 1, 1}, "checker bug: template method is missing");
         return;
@@ -167,7 +169,9 @@ void Checker::walkMethodInst(DeclId spec, DeclId tmpl, const std::string& method
         fail(Position{module_, 1, 1}, "checker bug: specialization has no origin");
         return;
     }
-    auto structs = structs_.find(tmplDecl->name);
+    std::string homeStruct =
+        tmplDecl->scope != nullptr ? tmplDecl->scope->module : module_;
+    auto structs = structs_.find(homeStruct + "." + tmplDecl->name);
     std::vector<std::string> names =
         structs == structs_.end() ? std::vector<std::string>{} : structs->second->typeParams;
     const resolve::Scope* scope = resolver_.typeParamScope(
@@ -208,8 +212,9 @@ void Checker::walkMethodInst(DeclId spec, DeclId tmpl, const std::string& method
     active_ = savedActive;
 }
 
-const FuncDecl* Checker::funcSpelling(const std::string& name) const {
-    auto found = funcs_.find(name);
+const FuncDecl* Checker::funcSpelling(const std::string& module,
+                                    const std::string& name) const {
+    auto found = funcs_.find(module + "." + name);
     return found == funcs_.end() ? nullptr : found->second;
 }
 
@@ -224,17 +229,17 @@ bool Checker::checkProgram(Program& program, const std::string& module) {
     typeScope_ = moduleScope_;
     for (const std::unique_ptr<Decl>& decl : program.decls) {
         if (const auto* fn = dynamic_cast<const FuncDecl*>(decl.get())) {
-            funcs_[fn->name] = fn;
+            funcs_[module + "." + fn->name] = fn;
         }
         if (const auto* sd = dynamic_cast<const StructDecl*>(decl.get())) {
-            structs_[sd->name] = sd;
+            structs_[module + "." + sd->name] = sd;
             for (const MethodDecl& method : sd->methods) {
-                methods_[sd->name + "." + method.name] = &method;
+                methods_[module + "." + sd->name + "." + method.name] = &method;
             }
         }
         if (const auto* cd = dynamic_cast<const ClassDecl*>(decl.get())) {
             for (const MethodDecl& method : cd->methods) {
-                methods_[cd->name + "." + method.name] = &method;
+                methods_[module + "." + cd->name + "." + method.name] = &method;
             }
         }
     }
@@ -1628,6 +1633,37 @@ TypeRef Checker::checkCall(Call& expr) {
         }
     }
     if (!hasSig) {
+        // `da.aval(v)`: a call through a module qualifier resolves the
+        // member in the defining scope. Generics ride the same explicit-
+        // argument path as a bare spelling.
+        if (const auto* field = dynamic_cast<const Field*>(expr.callee.get())) {
+            if (const auto* ident =
+                    dynamic_cast<const Ident*>(field->object.get())) {
+                if (findLocal(ident->name) == nullptr) {
+                    const resolve::Decl* mod =
+                        resolver_.lookup(moduleScope_, ident->name);
+                    if (mod != nullptr &&
+                        mod->kind == resolve::DeclKind::Module) {
+                        const resolve::Scope* home =
+                            resolver_.scopeOf(mod->origin);
+                        const resolve::Decl* member =
+                            home != nullptr
+                                ? resolver_.lookup(home, field->name)
+                                : nullptr;
+                        if (member != nullptr &&
+                            member->kind == resolve::DeclKind::Func) {
+                            if (member->typeParams > 0) {
+                                return checkGenericCall(expr, member);
+                            }
+                            sig = member->sig;
+                            hasSig = true;
+                        }
+                    }
+                }
+            }
+        }
+    }
+    if (!hasSig) {
         TypeRef callee = checkExpr(expr.callee.get(), TypeRef{ctx_.wildcard()});
         if (callee.isError()) {
             return errorRef();
@@ -1710,7 +1746,12 @@ TypeRef Checker::checkGenericCall(Call& expr, const resolve::Decl* decl) {
         std::to_string(spec->module) + "." + std::to_string(spec->index);
     if (walked_.find(key) == walked_.end()) {
         walked_.insert(key);
-        const FuncDecl* spelling = funcSpelling(decl->name);
+        const resolve::Decl* homeDecl = resolver_.declById(decl->id);
+        std::string home =
+            homeDecl != nullptr && homeDecl->scope != nullptr
+                ? homeDecl->scope->module
+                : module_;
+        const FuncDecl* spelling = funcSpelling(home, decl->name);
         if (spelling == nullptr) {
             fail(expr.pos, "checker bug: template body is missing");
             return errorRef();
@@ -1748,6 +1789,39 @@ TypeRef Checker::checkGenericCall(Call& expr, const resolve::Decl* decl) {
 }
 
 TypeRef Checker::checkField(Field& expr) {
+    // `da.aval`: the qualifier names a module, so the member resolves in
+    // the defining scope, never in the current one. Functions answer their
+    // closure type like a bare spelling; globals answer their declared
+    // type. Anything else is not a member.
+    if (const auto* ident = dynamic_cast<const Ident*>(expr.object.get())) {
+        if (findLocal(ident->name) == nullptr) {
+            const resolve::Decl* mod =
+                resolver_.lookup(moduleScope_, ident->name);
+            if (mod != nullptr && mod->kind == resolve::DeclKind::Module) {
+                const resolve::Scope* home = resolver_.scopeOf(mod->origin);
+                const resolve::Decl* member =
+                    home != nullptr ? resolver_.lookup(home, expr.name) : nullptr;
+                if (member == nullptr) {
+                    fail(expr.pos, "'" + expr.name + "' is not exported by '" +
+                                          mod->origin + "'");
+                    return errorRef();
+                }
+                if (member->kind == resolve::DeclKind::Func) {
+                    if (member->typeParams > 0) {
+                        fail(expr.pos, "a generic function needs explicit arguments");
+                        return errorRef();
+                    }
+                    return TypeRef{ctx_.closure(member->sig)};
+                }
+                if (member->kind == resolve::DeclKind::Var ||
+                    member->kind == resolve::DeclKind::Const) {
+                    return member->type;
+                }
+                fail(expr.pos, "'" + expr.name + "' is not a value");
+                return errorRef();
+            }
+        }
+    }
     TypeRef object = checkExpr(expr.object.get(), TypeRef{ctx_.wildcard()});
     if (object.isError()) {
         return errorRef();

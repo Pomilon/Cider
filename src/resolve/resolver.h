@@ -52,6 +52,20 @@ public:
 
     // The entry module's scope: the first module resolveProgram ran on.
     const Scope* moduleScope() const { return entry_; }
+    // The entry module's name: definitions here keep their spellings, and
+    // every other module's link names mangle under their own.
+    std::string entryModule() const {
+        return entry_ != nullptr ? entry_->module : std::string();
+    }
+    // Every resolved module in the order it started: the entry first, then
+    // each import depth-first. The driver checks and lowers each in turn.
+    const std::vector<std::string>& moduleOrder() const { return order_; }
+    // The loaded program for a resolved module. Null when unknown: the
+    // entry program is the caller's, only imports are owned here.
+    Program* programOf(const std::string& module) const {
+        auto found = programOf_.find(module);
+        return found == programOf_.end() ? nullptr : found->second;
+    }
     const Scope* scopeOf(const std::string& module) const;
     const Decl* lookup(const Scope* scope, const std::string& name) const;
 
@@ -152,6 +166,14 @@ public:
     // The declaration for an id, by scan. The table is small and lookups are
     // rare (templates and specializations only).
     const Decl* declById(DeclId id) const;
+    // The link symbol a function declaration assembles under. The prelude
+    // keeps its C name (`cider_print`), an extern keeps its bare spelling
+    // (FEATURES §4.4: the linker defines it), an entry-module definition
+    // keeps its spelling, and every other module's definition mangles under
+    // its module (`b__aval` for `b`'s `aval`). One owner, one spelling:
+    // the checker and every lowerer call site ask here instead of building
+    // names locally.
+    std::string linkName(const Decl& decl) const;
     // Replaces every TypeParam of one template with its argument types.
     // Nominal specializations re-originate: `Box<T>` inside `C<T>` becomes
     // `Box<int>` when C does, through specOrigin_ rather than spellings.
@@ -225,6 +247,7 @@ private:
     std::unordered_map<std::string, std::vector<DeclId>> baseTable_;
     std::vector<std::string> stack_;
     std::vector<ResolveError> errors_;
+    std::vector<std::string> order_;
     const Scope* entry_ = nullptr;
     bool failed_ = false;
 };

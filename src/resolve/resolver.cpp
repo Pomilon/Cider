@@ -527,6 +527,7 @@ bool Resolver::resolveProgram(Program& program, const std::string& module) {
         nextIndex_[module] = 0;
     }
     stack_.push_back(module);
+    order_.push_back(module);
     programOf_[module] = &program;
     const Scope* scope = makeScope(nullptr, module);
     modules_[module] = scope;
@@ -557,6 +558,7 @@ bool Resolver::resolveProgram(Program& program, const std::string& module) {
                 alias->typeParams = target->typeParams;
                 alias->aliasTarget = target->aliasTarget;
                 alias->init = target->init;
+                alias->isExtern = target->isExtern;
                 if (target->kind == DeclKind::Const && target->init != nullptr) {
                     constInits_[module + "." + name] = target->init;
                 }
@@ -571,7 +573,7 @@ bool Resolver::resolveProgram(Program& program, const std::string& module) {
                 last = last.substr(dot + 1);
             }
             Decl* mod = bind(scope, DeclKind::Module, last, decl->pos);
-            (void)mod;
+            mod->origin = single->module;
         }
     }
     declareModule(module, program, scope);
@@ -603,31 +605,38 @@ bool Resolver::resolveModule(const std::string& name) {
 void Resolver::declareModule(const std::string& module, Program& program,
                              const Scope* scope) {
     // Ids come from bind(), the single owner: no manual assignment here.
+    // `export` marks visibility; it never changes what the declaration
+    // binds, so the wrapper comes off before the shape check.
     for (const std::unique_ptr<cider::Decl>& decl : program.decls) {
-        if (const auto* fn = dynamic_cast<const FuncDecl*>(decl.get())) {
+        const cider::Decl* unwrapped = decl.get();
+        if (const auto* exp = dynamic_cast<const ExportDecl*>(decl.get())) {
+            unwrapped = exp->decl.get();
+        }
+        if (const auto* fn = dynamic_cast<const FuncDecl*>(unwrapped)) {
             Decl* d = bind(scope, DeclKind::Func, fn->name, fn->pos);
             d->type = TypeRef{ctx_.wildcard()};
             d->typeParams = fn->typeParams.size();
             continue;
         }
-        if (const auto* ext = dynamic_cast<const ExternFunc*>(decl.get())) {
+        if (const auto* ext = dynamic_cast<const ExternFunc*>(unwrapped)) {
             Decl* d = bind(scope, DeclKind::Func, ext->name, ext->pos);
             d->type = TypeRef{ctx_.wildcard()};
+            d->isExtern = true;
             continue;
         }
-        if (const auto* cn = dynamic_cast<const ConstDecl*>(decl.get())) {
+        if (const auto* cn = dynamic_cast<const ConstDecl*>(unwrapped)) {
             Decl* d = bind(scope, DeclKind::Const, cn->name, cn->pos);
             d->type = TypeRef{ctx_.wildcard()};
             d->init = cn->init.get();
             constInits_[module + "." + cn->name] = cn->init.get();
             continue;
         }
-        const StructDecl* sd = dynamic_cast<const StructDecl*>(decl.get());
-        const ClassDecl* cd = dynamic_cast<const ClassDecl*>(decl.get());
-        const InterfaceDecl* id = dynamic_cast<const InterfaceDecl*>(decl.get());
-        const UnionDecl* ud = dynamic_cast<const UnionDecl*>(decl.get());
-        const EnumDecl* ed = dynamic_cast<const EnumDecl*>(decl.get());
-        const TypeAlias* al = dynamic_cast<const TypeAlias*>(decl.get());
+        const StructDecl* sd = dynamic_cast<const StructDecl*>(unwrapped);
+        const ClassDecl* cd = dynamic_cast<const ClassDecl*>(unwrapped);
+        const InterfaceDecl* id = dynamic_cast<const InterfaceDecl*>(unwrapped);
+        const UnionDecl* ud = dynamic_cast<const UnionDecl*>(unwrapped);
+        const EnumDecl* ed = dynamic_cast<const EnumDecl*>(unwrapped);
+        const TypeAlias* al = dynamic_cast<const TypeAlias*>(unwrapped);
         if (sd == nullptr && cd == nullptr && id == nullptr && ud == nullptr &&
             ed == nullptr && al == nullptr) {
             continue;
@@ -676,7 +685,11 @@ void Resolver::resolveDeclTypes(const std::string& module, Program& program,
                                 const Scope* scope) {
     EvalEnv env = evalEnv(scope);
     for (const std::unique_ptr<cider::Decl>& decl : program.decls) {
-        if (const auto* fn = dynamic_cast<const FuncDecl*>(decl.get())) {
+        const cider::Decl* unwrapped = decl.get();
+        if (const auto* exp = dynamic_cast<const ExportDecl*>(unwrapped)) {
+            unwrapped = exp->decl.get();
+        }
+        if (const auto* fn = dynamic_cast<const FuncDecl*>(unwrapped)) {
             const Decl* d = lookup(scope, fn->name);
             if (d == nullptr) {
                 continue;
@@ -690,7 +703,7 @@ void Resolver::resolveDeclTypes(const std::string& module, Program& program,
             const_cast<Decl*>(d)->sig = std::move(sig);
             continue;
         }
-        if (const auto* ext = dynamic_cast<const ExternFunc*>(decl.get())) {
+        if (const auto* ext = dynamic_cast<const ExternFunc*>(unwrapped)) {
             const Decl* d = lookup(scope, ext->name);
             if (d == nullptr) {
                 continue;
@@ -700,7 +713,7 @@ void Resolver::resolveDeclTypes(const std::string& module, Program& program,
             const_cast<Decl*>(d)->sig = std::move(sig);
             continue;
         }
-        if (const auto* cn = dynamic_cast<const ConstDecl*>(decl.get())) {
+        if (const auto* cn = dynamic_cast<const ConstDecl*>(unwrapped)) {
             if (cn->type != nullptr) {
                 TypeRef t = resolveType(cn->type.get(), scope);
                 const Decl* d = lookup(scope, cn->name);
@@ -715,7 +728,7 @@ void Resolver::resolveDeclTypes(const std::string& module, Program& program,
             }
             continue;
         }
-        if (const auto* sd = dynamic_cast<const StructDecl*>(decl.get())) {
+        if (const auto* sd = dynamic_cast<const StructDecl*>(unwrapped)) {
             const Decl* self = lookup(scope, sd->name);
             const Scope* inner = scope;
             if (!sd->typeParams.empty() && self != nullptr) {
@@ -748,7 +761,7 @@ void Resolver::resolveDeclTypes(const std::string& module, Program& program,
             }
             continue;
         }
-        if (const auto* cd = dynamic_cast<const ClassDecl*>(decl.get())) {
+        if (const auto* cd = dynamic_cast<const ClassDecl*>(unwrapped)) {
             const Decl* self = lookup(scope, cd->name);
             const Scope* inner = scope;
             if (!cd->typeParams.empty() && self != nullptr) {
@@ -810,7 +823,7 @@ void Resolver::resolveDeclTypes(const std::string& module, Program& program,
             }
             continue;
         }
-        if (const auto* id = dynamic_cast<const InterfaceDecl*>(decl.get())) {
+        if (const auto* id = dynamic_cast<const InterfaceDecl*>(unwrapped)) {
             const Decl* iself = lookup(scope, id->name);
             for (const MethodSig& method : id->methods) {
                 bool failed = false;
@@ -824,7 +837,7 @@ void Resolver::resolveDeclTypes(const std::string& module, Program& program,
             }
             continue;
         }
-        if (const auto* ud = dynamic_cast<const UnionDecl*>(decl.get())) {
+        if (const auto* ud = dynamic_cast<const UnionDecl*>(unwrapped)) {
             const Decl* uself = lookup(scope, ud->name);
             for (const FieldDecl& member : ud->members) {
                 TypeRef t = resolveType(member.type.get(), scope);
@@ -837,7 +850,7 @@ void Resolver::resolveDeclTypes(const std::string& module, Program& program,
             }
             continue;
         }
-        if (const auto* ed = dynamic_cast<const EnumDecl*>(decl.get())) {
+        if (const auto* ed = dynamic_cast<const EnumDecl*>(unwrapped)) {
             int64_t next = 0;
             bool first = true;
             for (const EnumMember& member : ed->members) {
@@ -861,7 +874,7 @@ void Resolver::resolveDeclTypes(const std::string& module, Program& program,
             }
             continue;
         }
-        if (const auto* al = dynamic_cast<const TypeAlias*>(decl.get())) {
+        if (const auto* al = dynamic_cast<const TypeAlias*>(unwrapped)) {
             const Decl* d = lookup(scope, al->name);
             const Scope* inner = scope;
             if (!al->typeParams.empty() && d != nullptr) {
@@ -1083,6 +1096,30 @@ const Decl* Resolver::declById(DeclId id) const {
         }
     }
     return nullptr;
+}
+
+std::string Resolver::linkName(const Decl& decl) const {
+    if (decl.isPrelude) {
+        return "cider_" + decl.name;
+    }
+    if (decl.isExtern) {
+        return decl.name;
+    }
+    // Decls bound in a function body have no link symbol; callers pass the
+    // module they looked the name up in. A null scope is entry-adjacent by
+    // construction (the prelude fallback), so bare is safe there too.
+    std::string home = decl.scope != nullptr ? decl.scope->module : entryModule();
+    if (home.empty() || home == entryModule()) {
+        return decl.name;
+    }
+    // Dots cannot survive the assembler: `a.b`'s `aval` links as `a__b__aval`.
+    std::string flat = home;
+    for (char& c : flat) {
+        if (c == '.') {
+            c = '_';
+        }
+    }
+    return flat + "__" + decl.name;
 }
 
 TypeRef Resolver::substitute(TypeRef type, DeclId tmpl, const std::vector<TypeRef>& args,

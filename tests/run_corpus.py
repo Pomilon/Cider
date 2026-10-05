@@ -9,9 +9,7 @@ Class comes from tests/corpus/classes.json (OUTPUT.md differential gate):
      (nonzero exit with stderr diagnostic, or death by signal)
   C  still rejected: v3 must fail, same class (check-time vs trap noted)
   D  no v2 repro / informational: run and report only, never fails the suite
-Multi-file programs need imports (unimplemented): harness skips them with
-reason `blocked-imports` until the driver loads modules.
-
+Multi-file programs run like any other: the driver loads sibling modules.
 Legs: only `native` exists (v3 `run` shells to as+ld -nostdlib).
 `vm-unopt`/`vm-opt` columns are accepted but reported as PENDING — there is
 no v3 interpreter yet (see ticket for the v3 VM). The schema is ready for it.
@@ -61,11 +59,6 @@ def main():
             d = os.path.join(CORPUS, "legacy", name)
         with open(os.path.join(d, "expected.json")) as fh:
             expected = json.load(fh)
-        siblings = [f for f in os.listdir(d)
-                    if f.endswith(".cid") and f != "main.cid"]
-        if siblings:
-            skipped.append((name, "blocked-imports"))
-            continue
         stdin_data = None
         if os.path.exists(os.path.join(d, "input.txt")):
             with open(os.path.join(d, "input.txt")) as fh:

@@ -113,6 +113,40 @@ void testRun() {
     unlink(src.c_str());
 }
 
+// A program spread over sibling modules checks and runs: the driver loads
+// each import beside the entry file, checks every module, and links every
+// function into one binary. A dotted import names the missing module.
+void testImports() {
+    std::printf("imports\n");
+    char dir[] = "/tmp/cider_imports_XXXXXX";
+    check(mkdtemp(dir) != nullptr, "a scratch directory exists");
+    std::string main = std::string(dir) + "/main.cid";
+    std::string dep = std::string(dir) + "/da.cid";
+    FILE* depFile = fopen(dep.c_str(), "w");
+    fwrite("export func aval() -> int { return 42; }\n", 1, 41, depFile);
+    fclose(depFile);
+    FILE* mainFile = fopen(main.c_str(), "w");
+    fwrite("import da;\nfunc main() -> int { return da.aval(); }\n", 1, 51,
+           mainFile);
+    fclose(mainFile);
+    Result ok = run({"check", main});
+    check(ok.code == 0, "sibling modules check: " + ok.err);
+    Result ran = run({"run", main});
+    check(ran.code == 42, "a qualified call answers across modules: " + ran.err);
+    std::string dotted = std::string(dir) + "/dot.cid";
+    FILE* dotFile = fopen(dotted.c_str(), "w");
+    fwrite("import std.io;\nfunc main() -> int { return 0; }\n", 1, 47, dotFile);
+    fclose(dotFile);
+    Result missing = run({"check", dotted});
+    check(missing.code != 0, "a dotted import without a library fails");
+    check(missing.err.find("std.io") != std::string::npos,
+          "naming the module");
+    unlink(main.c_str());
+    unlink(dep.c_str());
+    unlink(dotted.c_str());
+    rmdir(dir);
+}
+
 // A missing file, a bad target and a bad subcommand all name themselves.
 void testFailures() {
     std::printf("failures name themselves\n");
@@ -136,6 +170,7 @@ int main() {
     testCheck();
     testCompileIr();
     testRun();
+    testImports();
     testFailures();
     std::printf("\n%d checks, %s\n", checks, failures == 0 ? "all passed" : "FAILURES");
     return failures == 0 ? 0 : 1;

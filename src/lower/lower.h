@@ -49,6 +49,10 @@ struct LocalBinding {
 struct GlobalBinding {
     std::string name;
     std::string label;
+    // The module that defined it: two modules may define one name, and the
+    // label is what keeps them apart. Use sites resolve through the
+    // current module's scope, never by first match.
+    std::string module;
     TypeRef type;
     int64_t initial = 0;
     // A read-only bytes object this global points at, empty when none. Set
@@ -62,9 +66,17 @@ public:
     Lowerer(TypeContext& ctx, resolve::Resolver& resolver, check::Checker& checker);
 
     // Runs the checker's walk with this lowerer attached, so types are
-    // recorded and IR is emitted on the same visit. Returns the module, or null
-    // when the program failed any layer or hit a construct not yet lowered.
-    std::unique_ptr<ir::Module> lowerModule(const std::string& name, Program& program);
+    // recorded and IR is emitted on the same visit. True unless the program
+    // failed any layer or hit a construct not yet lowered. The module stays
+    // in the lowerer: lowerInto accumulates imports into it and takeModule
+    // moves it out when every module is in.
+    bool lowerModule(const std::string& name, Program& program);
+    // Lowers one more program into the module lowerModule started: imports
+    // first, entry last, so link names resolve in one IR module and rodata
+    // labels never collide. Returns false when this module failed.
+    bool lowerInto(const std::string& name, Program& program);
+    // Moves the accumulated module out. Null when nothing lowered.
+    std::unique_ptr<ir::Module> takeModule() { return std::move(module_); }
 
     const std::vector<check::CheckError>& errors() const { return errors_; }
 
@@ -340,6 +352,12 @@ private:
     // checker, so this stack can never underflow while locals_ can.
     std::vector<uint64_t> scopeMarks_;
     std::vector<GlobalBinding> globals_;
+    // The binding a bare global name means here: resolved through the
+    // current module's scope to the declaration's home module, never by
+    // whichever module lowered first. Null when no binding with that home
+    // exists yet (a module the walk has not reached is a loud refusal at
+    // the use, not a silent first match).
+    const GlobalBinding* findGlobal(const std::string& name);
     std::unordered_map<std::string, std::string> globalNames_;
     std::vector<check::CheckError> errors_;
     // Hidden closure functions, minted in first-sight order. The site that

@@ -117,13 +117,17 @@ void Lowerer::refuse(Position pos, const std::string& what) {
 
 // --- Entry point -------------------------------------------------------------
 
-std::unique_ptr<ir::Module> Lowerer::lowerModule(const std::string& name, Program& program) {
+bool Lowerer::lowerModule(const std::string& name, Program& program) {
     module_ = std::make_unique<ir::Module>();
     module_->name = name;
-    failed_ = false;
+    return lowerInto(name, program);
+}
+
+bool Lowerer::lowerInto(const std::string& name, Program& program) {
+    // No failed_ reset: one module accumulates every program, and a refusal
+    // anywhere fails the build. wrap_ is per file and every instruction the
+    // walk emits reads it.
     enabled_ = true;
-    // Before the walk, not in onProgram: the flag is per file and every
-    // instruction the walk emits reads it.
     wrap_ = program.wrap;
     checker_.setSink(this);
     // One walk: the checker visits each node once and calls into here as it
@@ -131,10 +135,7 @@ std::unique_ptr<ir::Module> Lowerer::lowerModule(const std::string& name, Progra
     bool checked = checker_.checkProgram(program, name);
     checker_.setSink(nullptr);
     enabled_ = false;
-    if (!checked || failed_) {
-        return nullptr;
-    }
-    return std::move(module_);
+    return checked && !failed_;
 }
 
 // --- Blocks and values ---------------------------------------------------------
@@ -254,15 +255,13 @@ bool Lowerer::resolvePlace(const Expr* expr, Place& out) {
                 return true;
             }
         }
-        for (const GlobalBinding& global : globals_) {
-            if (global.name == ident->name) {
-                out.slots.clear();
-                out.global = global.label;
-                out.type = global.type;
-                out.off = 0;
-                out.isVolatile = global.isVolatile;
-                return true;
-            }
+        if (const GlobalBinding* global = findGlobal(ident->name)) {
+            out.slots.clear();
+            out.global = global->label;
+            out.type = global->type;
+            out.off = 0;
+            out.isVolatile = global->isVolatile;
+            return true;
         }
         return false;
     }
@@ -596,7 +595,12 @@ ir::Value Lowerer::lowerNeg(const Unary& n) {
 }
 
 const Signature* Lowerer::functionSig(const std::string& name) const {
-    const resolve::Scope* scope = resolver_.moduleScope();
+    // The current module's scope, not the entry's: an import's body calls
+    // its own names, and a from-alias carries its target's signature.
+    const resolve::Scope* scope = resolver_.scopeOf(checker_.module());
+    if (scope == nullptr) {
+        return nullptr;
+    }
     const resolve::Decl* decl = resolver_.lookup(scope, name);
     if (decl == nullptr || decl->kind != resolve::DeclKind::Func) {
         return nullptr;
@@ -612,6 +616,31 @@ void Lowerer::onProgram(Program& n) {
     }
 }
 
+const GlobalBinding* Lowerer::findGlobal(const std::string& name) {
+    // A from-alias copies its target's id, so declById recovers the home
+    // module even for names bound in this module's scope by import.
+    std::string home = checker_.module();
+    const resolve::Scope* here = resolver_.scopeOf(home);
+    if (here != nullptr) {
+        const resolve::Decl* decl = resolver_.lookup(here, name);
+        if (decl != nullptr) {
+            const resolve::Decl* origin = resolver_.declById(decl->id);
+            const resolve::Decl* truth = origin != nullptr ? origin : decl;
+            if (truth->scope != nullptr &&
+                (truth->kind == resolve::DeclKind::Var ||
+                 truth->kind == resolve::DeclKind::Const)) {
+                home = truth->scope->module;
+            }
+        }
+    }
+    for (const GlobalBinding& global : globals_) {
+        if (global.name == name && global.module == home) {
+            return &global;
+        }
+    }
+    return nullptr;
+}
+
 void Lowerer::onGlobal(VarDecl& n) {
     if (failed_ || !enabled_) {
         return;
@@ -625,7 +654,19 @@ void Lowerer::onGlobal(VarDecl& n) {
     EvalResult folded = evalConstInt(*n.init, env, active);
     GlobalBinding binding;
     binding.name = n.name;
-    binding.label = "g_" + n.name;
+    binding.module = checker_.module();
+    // The label carries its module (`g_da__gval` for `da`'s `gval`, `g_x`
+    // for the entry's `x`), so two modules' same-named globals never share
+    // storage. Dots become underscores: a dot cannot survive the assembler.
+    std::string flat = binding.module;
+    for (char& c : flat) {
+        if (c == '.') {
+            c = '_';
+        }
+    }
+    binding.label = binding.module == resolver_.entryModule()
+                        ? "g_" + n.name
+                        : "g_" + flat + "__" + n.name;
     binding.type = type;
     binding.isVolatile = n.isVolatile;
     if (type.type->kind() == Kind::String) {
@@ -710,8 +751,15 @@ void Lowerer::onFuncDecl(FuncDecl& n) {
     if (failed_ || !enabled_ || !n.typeParams.empty()) {
         return;
     }
+    // The link name is the resolver's, not the spelling: an import's
+    // function mangles under its module (`b__aval`), the entry's keeps its
+    // spelling, and the prelude keeps its C name. Two modules defining one
+    // name therefore never collide in one IR module.
+    const resolve::Scope* here = resolver_.scopeOf(checker_.module());
+    const resolve::Decl* decl =
+        here != nullptr ? resolver_.lookup(here, n.name) : nullptr;
     ir::Function fn;
-    fn.name = n.name;
+    fn.name = decl != nullptr ? resolver_.linkName(*decl) : n.name;
     fn.signature = *functionSig(n.name);
     fn.loc = n.pos;
     function_ = &fn;
@@ -775,9 +823,18 @@ void Lowerer::onMethodDecl(const std::string& owner, const std::string& name,
     }
     // One function per method, statically dispatched: the mangled name is
     // the link identity and the receiver rides as the first parameter, so a
-    // call site builds `owner__method(receiver, args...)`.
+    // call site builds `owner__method(receiver, args...)`. The owner carries
+    // its module (`da__Box__get` for `da`'s `Box::get`), so two modules'
+    // same-named types never collide.
     ir::Function fn;
-    fn.name = owner + "__" + name;
+    const resolve::Scope* here = resolver_.scopeOf(checker_.module());
+    const resolve::Decl* ownerDecl =
+        here != nullptr ? resolver_.lookup(here, owner) : nullptr;
+    std::string linkOwner = owner;
+    if (ownerDecl != nullptr) {
+        linkOwner = resolver_.linkName(*ownerDecl);
+    }
+    fn.name = linkOwner + "__" + name;
     std::vector<Parameter> combined;
     Parameter receiver;
     receiver.type = self.type;
@@ -1055,15 +1112,13 @@ ir::Value Lowerer::onIdent(Ident& n) {
             return words[0];
         }
     }
-    for (const GlobalBinding& global : globals_) {
-        if (global.name == n.name) {
-            std::vector<ir::Value> words = loadGlobal(n.pos, global);
-            if (words.size() != kOneWord) {
-                refuse(n.pos, "this value");
-                return undefined();
-            }
-            return words[0];
+    if (const GlobalBinding* global = findGlobal(n.name)) {
+        std::vector<ir::Value> words = loadGlobal(n.pos, *global);
+        if (words.size() != kOneWord) {
+            refuse(n.pos, "this value");
+            return undefined();
         }
+        return words[0];
     }
     refuse(n.pos, "reading '" + n.name + "'");
     return undefined();
@@ -2872,26 +2927,22 @@ std::vector<ir::Value> Lowerer::lowerWords(const Expr* expr) {
                 return loadLocal(ident->pos, found->second);
             }
         }
-        for (const GlobalBinding& global : globals_) {
-            if (global.name == ident->name) {
-                return loadGlobal(ident->pos, global);
-            }
+        if (const GlobalBinding* global = findGlobal(ident->name)) {
+            return loadGlobal(ident->pos, *global);
         }
         // A bare function name in value position answers the closure pair:
         // a forwarder with the receiver-first shape plus a null captures
         // word, with no allocation. Prelude names mangle to their link
         // symbols, like calls do.
+        const resolve::Scope* here = resolver_.scopeOf(checker_.module());
         const resolve::Decl* decl =
-            resolver_.lookup(resolver_.moduleScope(), ident->name);
+            here != nullptr ? resolver_.lookup(here, ident->name) : nullptr;
         if (decl != nullptr && decl->kind == resolve::DeclKind::Func &&
             decl->typeParams == 0) {
             TypeRef type = checker_.typeOf(ident);
             if (!type.isError() && type.type->kind() == Kind::Closure &&
                 wordCount(type) == static_cast<int>(kClosureWords)) {
-                std::string link = ident->name;
-                if (decl->isPrelude) {
-                    link = "cider_" + ident->name;
-                }
+                std::string link = resolver_.linkName(*decl);
                 std::string fwd = forwardFunction(link, decl->sig, ident->pos);
                 if (failed_) {
                     return {undefined()};
@@ -2984,10 +3035,7 @@ void Lowerer::onAsmStmt(AsmStmt& n) {
         if (found) {
             continue;
         }
-        for (const GlobalBinding& global : globals_) {
-            if (global.name != base) {
-                continue;
-            }
+        if (const GlobalBinding* global = findGlobal(base)) {
             // A module variable placeholder is its address: DataAddr leaves
             // the address in a word, and codegen prints that word.
             TypeRef addr{ctx_.pointer(ctx_.basic(BasicKind::U8))};
@@ -2996,22 +3044,23 @@ void Lowerer::onAsmStmt(AsmStmt& n) {
             at.loc = n.pos;
             at.type = addr;
             at.width = ir::IRType::Ptr;
-            at.globalLabel = global.label;
+            at.globalLabel = global->label;
             at.isPure = true;
             ir::Value word = newValue(at.width, addr, n.pos);
             at.results.push_back(word);
             emit(std::move(at));
             instr.operands.push_back(word);
             found = true;
-            break;
+            continue;
         }
         if (found) {
             continue;
         }
+        const resolve::Scope* here = resolver_.scopeOf(checker_.module());
         const resolve::Decl* decl =
-            resolver_.lookup(resolver_.moduleScope(), base);
+            here != nullptr ? resolver_.lookup(here, base) : nullptr;
         if (decl != nullptr && decl->kind == resolve::DeclKind::Func) {
-            std::string link = decl->isPrelude ? "cider_" + base : base;
+            std::string link = resolver_.linkName(*decl);
             TypeRef fp{ctx_.functionPtr(decl->sig)};
             ir::Instr fn;
             fn.op = ir::Op::FnAddr;
@@ -3096,21 +3145,19 @@ std::vector<ir::Value> Lowerer::storeToIdent(
             return words;
         }
     }
-    for (const GlobalBinding& global : globals_) {
-        if (global.name == n.name) {
-            for (uint64_t i = 0; i < static_cast<uint64_t>(words.size()); ++i) {
-                ir::Instr instr;
-                instr.op = ir::Op::Store;
-                instr.loc = n.pos;
-                instr.type = global.type;
-                instr.globalLabel = global.label;
-                instr.displacement = static_cast<int64_t>(i) * 8;
-                instr.storedValue = words[i];
-                instr.isVolatile = global.isVolatile;
-                emit(std::move(instr));
-            }
-            return words;
+    if (const GlobalBinding* global = findGlobal(n.name)) {
+        for (uint64_t i = 0; i < static_cast<uint64_t>(words.size()); ++i) {
+            ir::Instr instr;
+            instr.op = ir::Op::Store;
+            instr.loc = n.pos;
+            instr.type = global->type;
+            instr.globalLabel = global->label;
+            instr.displacement = static_cast<int64_t>(i) * 8;
+            instr.storedValue = words[i];
+            instr.isVolatile = global->isVolatile;
+            emit(std::move(instr));
         }
+        return words;
     }
     refuse(n.pos, "assigning '" + n.name + "'");
     return {undefined()};
@@ -3398,7 +3445,7 @@ ir::Value Lowerer::onCall(Call& n) {
                 refuse(n.pos, "this call");
                 return undefined();
             }
-            callee = owner->name + "__" + field->name;
+            callee = resolver_.linkName(*owner) + "__" + field->name;
             sig = msig;
             if (base.slots.empty() && !base.hasIndirect) {
                 refuse(n.pos, "a method on a global is not lowered yet");
@@ -3436,13 +3483,19 @@ ir::Value Lowerer::onCall(Call& n) {
     if (const auto* ident = dynamic_cast<const Ident*>(n.callee.get())) {
         sig = functionSig(ident->name);
         callee = ident->name;
-        // Prelude names mangle to their link symbols; anything else keeps its
-        // spelling, including a program's own shadowing `print`. The lookup
-        // is the same one functionSig uses, so the two cannot disagree.
+        // The link name is the resolver's: entry keeps its spelling, an
+        // import's mangles under its module, the prelude keeps its C name.
+        // The lookup is the same one functionSig uses, so the two cannot
+        // disagree — including a program's own shadowing `print`.
+        const resolve::Scope* here = resolver_.scopeOf(checker_.module());
         const resolve::Decl* decl =
-            resolver_.lookup(resolver_.moduleScope(), ident->name);
-        if (decl != nullptr && decl->isPrelude) {
-            callee = "cider_" + ident->name;
+            here != nullptr ? resolver_.lookup(here, ident->name) : nullptr;
+        if (decl != nullptr) {
+            // A from-alias binds in this scope but means its target: the
+            // id survives the alias, so the link name mangles under the
+            // defining module, not the importing one.
+            const resolve::Decl* origin = resolver_.declById(decl->id);
+            callee = resolver_.linkName(origin != nullptr ? *origin : *decl);
         }
         if (sig == nullptr) {
             // A closure-typed local calls through its code word, with the
@@ -3492,6 +3545,48 @@ ir::Value Lowerer::onCall(Call& n) {
                     }
                     indirectCallee = target[0];
                 }
+            }
+        }
+    }
+    if (const auto* field = dynamic_cast<const Field*>(n.callee.get())) {
+        // `da.aval(args)`: the checker proved the object names a module and
+        // the field names its function, so this is a static call to the
+        // link name — mangled under the defining module. Generic functions
+        // refuse loudly: instantiations do not lower across modules yet.
+        if (const auto* mod = dynamic_cast<const Ident*>(field->object.get())) {
+            bool shadowed = false;
+            uint64_t depth = static_cast<uint64_t>(locals_.size());
+            for (; depth > 0;) {
+                --depth;
+                if (locals_[depth].find(mod->name) != locals_[depth].end()) {
+                    shadowed = true;
+                    break;
+                }
+            }
+            const resolve::Scope* here = resolver_.scopeOf(checker_.module());
+            const resolve::Decl* moduleDecl =
+                here != nullptr ? resolver_.lookup(here, mod->name) : nullptr;
+            if (!shadowed && moduleDecl != nullptr &&
+                moduleDecl->kind == resolve::DeclKind::Module) {
+                const resolve::Scope* home =
+                    resolver_.scopeOf(moduleDecl->origin);
+                const resolve::Decl* member =
+                    home != nullptr ? resolver_.lookup(home, field->name)
+                                    : nullptr;
+                if (member == nullptr ||
+                    member->kind != resolve::DeclKind::Func) {
+                    refuse(n.pos, "this call");
+                    return undefined();
+                }
+                if (member->typeParams > 0) {
+                    refuse(n.pos, "a generic call across modules");
+                    return undefined();
+                }
+                const resolve::Decl* origin =
+                    resolver_.declById(member->id);
+                sig = &member->sig;
+                callee = resolver_.linkName(origin != nullptr ? *origin
+                                                              : *member);
             }
         }
     }

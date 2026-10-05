@@ -187,7 +187,7 @@ private:
         std::unordered_set<std::string> seen;
         std::vector<std::string> order = {
             "cider_print", "cider_panic", "cider_alloc", "cider_free",
-            "cider_realloc",
+            "cider_realloc", "putchar",
         };
         std::vector<std::string> out;
         for (const ir::Function& fn : module_.functions) {
@@ -299,6 +299,23 @@ private:
             out_ += "  mov edi, 1\n";
             out_ += "  syscall\n";
             out_ += ".done:\n";
+            out_ += "  ret\n";
+            return true;
+        }
+        if (name == "putchar") {
+            // The one blessed extern: one `write` syscall of the low byte,
+            // answering the character (FEATURES §4.4 names syscalls through
+            // assembly; the freestanding link has no libc to provide this).
+            // A program defining its own `putchar` never reaches here, and
+            // any other undefined extern still fails the link loudly.
+            out_ += "putchar:\n";
+            out_ += "  push rdi\n";
+            out_ += "  mov eax, 1\n";
+            out_ += "  mov edi, 1\n";
+            out_ += "  mov rsi, rsp\n";
+            out_ += "  mov edx, 1\n";
+            out_ += "  syscall\n";
+            out_ += "  pop rax\n";
             out_ += "  ret\n";
             return true;
         }
