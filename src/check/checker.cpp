@@ -558,6 +558,10 @@ void Checker::visitForStmt(ForStmt& n) {
     n.body->accept(*this);
     --loopDepth_;
     popScope();
+    // Loop lowering does not exist yet: the body would vanish in lowering
+    // and run wrong silently, so for refuses here. Children still check
+    // above so their errors report.
+    fail(n.pos, "for is not implemented yet");
 }
 
 void Checker::visitForInStmt(ForInStmt& n) {
@@ -590,6 +594,8 @@ void Checker::visitForInStmt(ForInStmt& n) {
     n.body->accept(*this);
     --loopDepth_;
     popScope();
+    // Same shape as for: iteration lowering does not exist yet.
+    fail(n.pos, "for-in is not implemented yet");
 }
 
 void Checker::visitExprStmt(ExprStmt& n) {
@@ -1023,6 +1029,9 @@ void Checker::visitMatchStmt(MatchStmt& n) {
     if (n.fallback != nullptr) {
         n.fallback->accept(*this);
     }
+    // Arm dispatch lowering does not exist yet: the first arm ran
+    // unconditionally, so match refuses here. Arms still check above.
+    fail(n.pos, "match is not implemented yet");
 }
 
 void Checker::visitDeleteStmt(DeleteStmt& n) {

@@ -151,6 +151,16 @@ void testThrowRefused() {
     check(!tr.ok && tr.stage == "check", "try refuses until transport lands");
 }
 
+void testLoopMatchRefused() {
+    std::printf("unimplemented control flow refuses loudly\n");
+    Checked fo =
+        check("func f() -> int { var s: int = 0; for (var i: int = 0; i < 10; i = i + 1) { s = s + 1; } return s; }\n");
+    check(!fo.ok && fo.stage == "check", "for refuses until lowering lands");
+    Checked ma =
+        check("func f(x: int) -> int { match x { 1 => { return 10; } default => { return 30; } } }\n");
+    check(!ma.ok && ma.stage == "check", "match refuses until dispatch lands");
+}
+
 // A generic call checks its body with the arguments substituted.
 void testGenericCall() {
     std::printf("generic calls substitute\n");
@@ -289,6 +299,7 @@ int main() {
     testFuncLitChecks();
     testControl();
     testThrowRefused();
+    testLoopMatchRefused();
     std::printf("\n%d checks, %s\n", checks, failures == 0 ? "all passed" : "FAILURES");
     return failures == 0 ? 0 : 1;
 }
