@@ -636,8 +636,10 @@ void testFloat() {
 
 void testNotYetLowered() {
     std::printf("unlowered constructs are refused\n");
-    Lowered r = lower("func f(x: int) -> void { var s: string = \"v = {x}\"; }\n");
-    check(!r.ok && r.stage == "lower", "interpolation is not lowered yet");
+    Lowered r = lower(
+        "func f(a: [int; 3], j: int) -> void { a[j] = 1; }\n"
+        "func main() -> int { return 0; }\n");
+    check(!r.ok && r.stage == "lower", "a computed index store is not lowered yet");
 }
 
 void testRefuseKeepsScopes() {
@@ -987,6 +989,40 @@ void testBareReturn() {
     check(rets == 2, "the early bare return and the value return each close a block");
 }
 
+// Interpolation builds its string on the heap: the parts' bytes are
+// copied into one fresh buffer, so the value owns its storage.
+void testInterp() {
+    std::printf("interpolation allocates and joins\n");
+    Lowered r = lower(
+        "func main() -> int {\n"
+        "    var v: string = \"ab{12}c\";\n"
+        "    return v.len as int;\n"
+        "}\n");
+    check(r.ok, "lowers: " + r.stage);
+    const cider::ir::Function* fn = find(r.module.get(), "main");
+    if (fn == nullptr) {
+        return;
+    }
+    bool joins = false;
+    for (const cider::ir::Block& block : fn->blocks) {
+        for (const cider::ir::Instr& instr : block.body) {
+            if (instr.op == cider::ir::Op::Call && instr.callee == "cider_alloc") {
+                joins = true;
+            }
+        }
+    }
+    check(joins, "the parts join in a fresh buffer");
+    // A float has no buffer spelling yet: refusing loudly beats printing
+    // whatever the bits happen to look like.
+    Lowered noFloat = lower(
+        "func main() -> int {\n"
+        "    var x: f32 = 1.5;\n"
+        "    var v: string = \"{x}\";\n"
+        "    return v.len as int;\n"
+        "}\n");
+    check(!noFloat.ok, "a float part is refused");
+}
+
 }  // namespace
 
 int main() {
@@ -1022,6 +1058,7 @@ int main() {
     testAsm();
     testShortCircuit();
     testTernary();
+    testInterp();
     testRefuseKeepsScopes();
     testInterfaceParamRefused();
     testNotYetLowered();

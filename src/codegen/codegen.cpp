@@ -187,7 +187,8 @@ private:
         std::unordered_set<std::string> seen;
         std::vector<std::string> order = {
             "cider_print", "cider_panic", "cider_alloc", "cider_free",
-            "cider_realloc", "putchar",
+            "cider_realloc", "putchar", "cider_itoa_signed",
+            "cider_itoa_unsigned",
         };
         std::vector<std::string> out;
         for (const ir::Function& fn : module_.functions) {
@@ -316,6 +317,51 @@ private:
             out_ += "  mov edx, 1\n";
             out_ += "  syscall\n";
             out_ += "  pop rax\n";
+            out_ += "  ret\n";
+            return true;
+        }
+        if (name == "cider_itoa_signed" || name == "cider_itoa_unsigned") {
+            // Decimal into the caller's buffer: rdi answers the bytes, rsi
+            // the value, rax the count. The signed form prints a leading
+            // minus; both work the digits from the magnitude as an unsigned
+            // quantity, so INT64_MIN prints instead of trapping — the same
+            // rule printInt follows, because the language refuses to hide
+            // precision behind one character. Twenty bytes hold any 64-bit
+            // decimal; the caller owns the buffer.
+            bool isSigned = name == "cider_itoa_signed";
+            const std::string tag = isSigned ? "s" : "u";
+            out_ += name + ":\n";
+            out_ += "  push rbx\n";
+            out_ += "  sub rsp, 24\n";
+            out_ += "  mov rax, rsi\n";
+            out_ += "  xor ecx, ecx\n";
+            if (isSigned) {
+                out_ += "  test rax, rax\n";
+                out_ += "  jns .itoa_" + tag + "_digits\n";
+                out_ += "  mov byte ptr [rdi], 45\n";
+                out_ += "  inc rdi\n";
+                out_ += "  inc rcx\n";
+                out_ += "  neg rax\n";
+            }
+            out_ += ".itoa_" + tag + "_digits:\n";
+            out_ += "  xor edx, edx\n";
+            out_ += "  mov rbx, 10\n";
+            out_ += "  div rbx\n";
+            out_ += "  add dl, 48\n";
+            out_ += "  mov [rsp + rcx], dl\n";
+            out_ += "  inc rcx\n";
+            out_ += "  test rax, rax\n";
+            out_ += "  jnz .itoa_" + tag + "_digits\n";
+            out_ += "  mov rax, rcx\n";
+            out_ += ".itoa_" + tag + "_copy:\n";
+            out_ += "  dec rcx\n";
+            out_ += "  mov bl, [rsp + rcx]\n";
+            out_ += "  mov [rdi], bl\n";
+            out_ += "  inc rdi\n";
+            out_ += "  test rcx, rcx\n";
+            out_ += "  jnz .itoa_" + tag + "_copy\n";
+            out_ += "  add rsp, 24\n";
+            out_ += "  pop rbx\n";
             out_ += "  ret\n";
             return true;
         }

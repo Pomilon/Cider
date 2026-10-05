@@ -185,6 +185,40 @@ void testGlobals() {
 }
 
 // Division traps rather than answering.
+void testInterp() {
+    std::printf("interpolation builds the string\n");
+    bool sig = false;
+    check(runCode("func main() -> int {\n"
+                  "    var v: string = \"ab{12}c\";\n"
+                  "    return v.len as int;\n"
+                  "}\n", sig) == 5 && !sig,
+          "text and an integer join with the right length");
+    check(runCode("func main() -> int {\n"
+                  "    var v: string = \"ab{12}c\";\n"
+                  "    return v[2] as int * 100 + v[3] as int;\n"
+                  "}\n", sig) == (49 * 100 + 50) % 256 && !sig,
+          "the integer prints decimal");
+    check(runCode("func main() -> int {\n"
+                  "    var t: bool = true;\n"
+                  "    var v: string = \"v={t}!\";\n"
+                  "    return v.len as int * 100 + v[2] as int;\n"
+                  "}\n", sig) == (7 * 100 + 116) % 256 && !sig,
+          "a bool prints true");
+    check(runCode("func main() -> int {\n"
+                  "    var ch: char = '!';\n"
+                  "    var name: string = \"w\";\n"
+                  "    var v: string = \"{ch}{name}?\";\n"
+                  "    return v.len as int * 100 + v[0] as int;\n"
+                  "}\n", sig) == (3 * 100 + 33) % 256 && !sig,
+          "a char prints its byte beside a string");
+    check(runCode("func main() -> int {\n"
+                  "    var n: i64 = -7;\n"
+                  "    var v: string = \"{n}\";\n"
+                  "    return v.len as int * 100 + v[0] as int;\n"
+                  "}\n", sig) == (2 * 100 + 45) % 256 && !sig,
+          "a negative integer keeps its sign");
+}
+
 void testTrap() {
     std::printf("traps\n");
     bool signaled = false;
@@ -731,6 +765,7 @@ int main() {
     testIndirectCall();
     testShortCircuit();
     testTernary();
+    testInterp();
     testFloat();
     testAsm();
     testTrap();

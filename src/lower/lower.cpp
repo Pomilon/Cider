@@ -2297,6 +2297,16 @@ std::vector<ir::Value> Lowerer::loadLocal(Position pos, const LocalBinding& bind
 }
 
 Lowerer::LoweredString Lowerer::lowerString(const StringLit& lit) {
+    bool joined = false;
+    for (const auto& part : lit.parts) {
+        if (part.isExpr) {
+            joined = true;
+            break;
+        }
+    }
+    if (joined) {
+        return lowerInterp(lit);
+    }
     LoweredString out;
     std::string bytes;
     for (const auto& part : lit.parts) {
@@ -2327,6 +2337,414 @@ Lowerer::LoweredString Lowerer::lowerString(const StringLit& lit) {
     out.words.push_back(at);
     TypeRef len{ctx_.basic(BasicKind::I64)};
     out.words.push_back(constantI64(out.len, len, lit.pos));
+    return out;
+}
+
+// A text fragment's bytes in rodata, as the address/length pair every
+// interpolated part answers.
+Lowerer::PartBytes Lowerer::rodataPair(const std::string& text, Position pos) {
+    std::string label = "s_" + std::to_string(rodataSeq_++);
+    ir::Rodata blob;
+    blob.label = label;
+    blob.bytes = text;
+    module_->rodata.push_back(std::move(blob));
+    TypeRef addr{ctx_.pointer(ctx_.basic(BasicKind::U8))};
+    ir::Instr data;
+    data.op = ir::Op::DataAddr;
+    data.loc = pos;
+    data.type = addr;
+    data.width = ir::IRType::Ptr;
+    data.globalLabel = label;
+    data.isPure = true;
+    ir::Value at = newValue(data.width, addr, pos);
+    data.results.push_back(at);
+    emit(std::move(data));
+    TypeRef count{ctx_.basic(BasicKind::I64)};
+    PartBytes out;
+    out.ptr = at;
+    out.len = constantI64(static_cast<int64_t>(text.size()), count, pos);
+    return out;
+}
+
+// Copies `len` bytes from `src` to `dst`: an index slot, a head testing it
+// against the length, a body moving one byte. The addresses advance by
+// addition, the slice-advance idiom, so each side dereferences a computed
+// address the optimizer treats opaquely.
+void Lowerer::copyBytes(ir::Value dst, ir::Value src, ir::Value len, Position pos) {
+    TypeRef count{ctx_.basic(BasicKind::I64)};
+    TypeRef byteType{ctx_.basic(BasicKind::U8)};
+    TypeRef ptrType{ctx_.pointer(ctx_.basic(BasicKind::U8))};
+    ir::Value idxSlot = allocaSlot(count, pos);
+    if (failed_) {
+        return;
+    }
+    Place idxPlace;
+    idxPlace.slots = {idxSlot};
+    idxPlace.type = count;
+    storeRange(pos, idxPlace, {constantI64(0, count, pos)}, count);
+    if (failed_) {
+        return;
+    }
+    uint32_t headLabel = emitBlock(pos);
+    uint32_t bodyLabel = emitBlock(pos);
+    uint32_t exitLabel = emitBlock(pos);
+    ir::Terminator toHead;
+    toHead.term = ir::Term::Br;
+    toHead.target = headLabel;
+    toHead.loc = pos;
+    emitTerminator(toHead);
+    startBlock(headLabel);
+    std::vector<ir::Value> idxVals = loadRange(pos, idxPlace, count);
+    if (failed_ || idxVals.size() != kOneWord) {
+        refuse(pos, "this expression");
+        return;
+    }
+    ir::Terminator br;
+    br.term = ir::Term::CondBr;
+    br.cond = emitI64Cmp(pos, BinOp::Lt, idxVals[kFirstWord], len);
+    br.thenTarget = bodyLabel;
+    br.elseTarget = exitLabel;
+    br.loc = pos;
+    emitTerminator(br);
+    startBlock(bodyLabel);
+    ir::Value idx = loadRange(pos, idxPlace, count)[kFirstWord];
+    if (failed_) {
+        return;
+    }
+    auto advance = [&](ir::Value base) {
+        ir::Instr add;
+        add.op = ir::Op::Add;
+        add.loc = pos;
+        add.type = ptrType;
+        add.width = ir::IRType::Ptr;
+        add.isPure = true;
+        add.operands.push_back(base);
+        add.operands.push_back(idx);
+        ir::Value at = newValue(add.width, ptrType, pos);
+        add.results.push_back(at);
+        emit(std::move(add));
+        return at;
+    };
+    ir::Value from = advance(src);
+    ir::Value to = advance(dst);
+    if (failed_) {
+        return;
+    }
+    Place readAt;
+    readAt.slots = {from};
+    readAt.type = byteType;
+    std::vector<ir::Value> one = loadRange(pos, readAt, byteType);
+    if (failed_ || one.size() != kOneWord) {
+        refuse(pos, "this expression");
+        return;
+    }
+    Place writeAt;
+    writeAt.slots = {to};
+    writeAt.type = byteType;
+    storeRange(pos, writeAt, one, byteType);
+    if (failed_) {
+        return;
+    }
+    TypeRef oneType{ctx_.basic(BasicKind::I64)};
+    ir::Instr step;
+    step.op = ir::Op::Add;
+    step.loc = pos;
+    step.type = oneType;
+    step.width = ir::IRType::I64;
+    step.isPure = true;
+    step.operands.push_back(idx);
+    step.operands.push_back(constantI64(1, oneType, pos));
+    ir::Value next = newValue(step.width, oneType, pos);
+    step.results.push_back(next);
+    emit(std::move(step));
+    storeRange(pos, idxPlace, {next}, count);
+    if (failed_) {
+        return;
+    }
+    emitTerminator(toHead);
+    startBlock(exitLabel);
+}
+
+Lowerer::LoweredString Lowerer::lowerInterp(const StringLit& lit) {
+    // Every part answers an address and a length. Text answers rodata; a
+    // string answers its own words; a bool selects one of two rodata
+    // fragments through a branch, the ternary shape; a char stores one
+    // byte to scratch; an integer extends to 64 bits and converts through
+    // a decimal helper into scratch. Anything else refuses loudly.
+    TypeRef count{ctx_.basic(BasicKind::I64)};
+    TypeRef stringType{ctx_.string()};
+    std::vector<PartBytes> parts;
+    for (const auto& part : lit.parts) {
+        if (!part.isExpr) {
+            if (part.text.empty()) {
+                continue;
+            }
+            parts.push_back(rodataPair(part.text, lit.pos));
+            if (failed_) {
+                return LoweredString{};
+            }
+            continue;
+        }
+        if (part.expr == nullptr) {
+            refuse(lit.pos, "this interpolation");
+            return LoweredString{};
+        }
+        TypeRef type = checker_.typeOf(part.expr.get());
+        if (type.isError()) {
+            refuse(lit.pos, "this interpolation");
+            return LoweredString{};
+        }
+        if (type.type->kind() == Kind::String) {
+            std::vector<ir::Value> got = lowerWords(part.expr.get());
+            if (failed_ || got.size() != kSliceWords) {
+                refuse(part.expr->pos, "this interpolation");
+                return LoweredString{};
+            }
+            PartBytes out;
+            out.ptr = got[kFirstWord];
+            out.len = got[kLenWord];
+            parts.push_back(out);
+            continue;
+        }
+        if (type.type->kind() == Kind::Basic &&
+            type.type->basic().has_value() &&
+            *type.type->basic() == BasicKind::Bool) {
+            std::vector<ir::Value> got = lowerWords(part.expr.get());
+            if (failed_ || got.size() != kOneWord) {
+                refuse(part.expr->pos, "this interpolation");
+                return LoweredString{};
+            }
+            PartBytes yes = rodataPair("true", lit.pos);
+            PartBytes no = rodataPair("false", lit.pos);
+            if (failed_) {
+                return LoweredString{};
+            }
+            std::vector<ir::Value> cell = allocaSlots(stringType, lit.pos, kSliceWords);
+            if (failed_) {
+                return LoweredString{};
+            }
+            uint32_t yesLabel = emitBlock(lit.pos);
+            uint32_t noLabel = emitBlock(lit.pos);
+            uint32_t joinLabel = emitBlock(lit.pos);
+            ir::Terminator br;
+            br.term = ir::Term::CondBr;
+            br.cond = got[kFirstWord];
+            br.thenTarget = yesLabel;
+            br.elseTarget = noLabel;
+            br.loc = lit.pos;
+            emitTerminator(br);
+            Place at;
+            at.slots = cell;
+            at.type = stringType;
+            startBlock(yesLabel);
+            storeRange(lit.pos, at, {yes.ptr, yes.len}, stringType);
+            if (failed_) {
+                return LoweredString{};
+            }
+            ir::Terminator toJoin;
+            toJoin.term = ir::Term::Br;
+            toJoin.target = joinLabel;
+            toJoin.loc = lit.pos;
+            emitTerminator(toJoin);
+            startBlock(noLabel);
+            storeRange(lit.pos, at, {no.ptr, no.len}, stringType);
+            if (failed_) {
+                return LoweredString{};
+            }
+            emitTerminator(toJoin);
+            startBlock(joinLabel);
+            std::vector<ir::Value> joined = loadRange(lit.pos, at, stringType);
+            if (failed_ || joined.size() != kSliceWords) {
+                refuse(part.expr->pos, "this interpolation");
+                return LoweredString{};
+            }
+            PartBytes out;
+            out.ptr = joined[kFirstWord];
+            out.len = joined[kLenWord];
+            parts.push_back(out);
+            continue;
+        }
+        if (type.type->kind() == Kind::Basic &&
+            type.type->basic().has_value() &&
+            *type.type->basic() == BasicKind::Char) {
+            std::vector<ir::Value> got = lowerWords(part.expr.get());
+            if (failed_ || got.size() != kOneWord) {
+                refuse(part.expr->pos, "this interpolation");
+                return LoweredString{};
+            }
+            ir::Value slot = allocaSlot(type, lit.pos);
+            if (failed_) {
+                return LoweredString{};
+            }
+            Place at;
+            at.slots = {slot};
+            at.type = type;
+            storeRange(lit.pos, at, got, type);
+            if (failed_) {
+                return LoweredString{};
+            }
+            TypeRef ptrType{ctx_.pointer(ctx_.basic(BasicKind::U8))};
+            PartBytes out;
+            out.ptr = computedBase(slot, 0, lit.pos);
+            out.len = constantI64(1, count, lit.pos);
+            out.ptr.type = ptrType;
+            parts.push_back(out);
+            continue;
+        }
+        if (type.type->kind() == Kind::Basic &&
+            type.type->basic().has_value() && basicIsInteger(*type.type->basic())) {
+            BasicKind basic = *type.type->basic();
+            std::vector<ir::Value> got = lowerWords(part.expr.get());
+            if (failed_ || got.size() != kOneWord) {
+                refuse(part.expr->pos, "this interpolation");
+                return LoweredString{};
+            }
+            // The helper converts one 64-bit value, so the part widens
+            // first: a Cast carries the operand's type, which is what
+            // tells the backend to sign- or zero-extend.
+            TypeRef wide{ctx_.basic(BasicKind::I64)};
+            ir::Instr widen;
+            widen.op = ir::Op::Cast;
+            widen.loc = lit.pos;
+            widen.type = wide;
+            widen.width = ir::IRType::I64;
+            widen.operands.push_back(got[kFirstWord]);
+            ir::Value big = newValue(widen.width, wide, lit.pos);
+            widen.results.push_back(big);
+            emit(std::move(widen));
+            // Twenty bytes hold any 64-bit decimal; the third slot keeps
+            // the scratch word-aligned for whatever follows it.
+            std::vector<ir::Value> scratch = allocaSlots(wide, lit.pos, 3);
+            if (failed_) {
+                return LoweredString{};
+            }
+            ir::Value buf = computedBase(scratch[kFirstWord], 0, lit.pos);
+            if (failed_) {
+                return LoweredString{};
+            }
+            TypeRef ptrType{ctx_.pointer(ctx_.basic(BasicKind::U8))};
+            buf.type = ptrType;
+            ir::Instr call;
+            call.op = ir::Op::Call;
+            call.loc = lit.pos;
+            bool isSigned = basic == BasicKind::I8 || basic == BasicKind::I16 ||
+                            basic == BasicKind::I32 || basic == BasicKind::I64;
+            call.callee =
+                isSigned ? "cider_itoa_signed" : "cider_itoa_unsigned";
+            ir::Argument first;
+            first.words.push_back(buf);
+            call.arguments.push_back(std::move(first));
+            ir::Argument second;
+            second.words.push_back(big);
+            call.arguments.push_back(std::move(second));
+            ir::Value digits = newValue(ir::IRType::I64, count, lit.pos);
+            call.results.push_back(digits);
+            call.width = ir::IRType::I64;
+            call.type = count;
+            emit(std::move(call));
+            PartBytes out;
+            out.ptr = buf;
+            out.len = digits;
+            parts.push_back(out);
+            continue;
+        }
+        if (type.type->kind() == Kind::Basic && type.type->basic().has_value() &&
+            (*type.type->basic() == BasicKind::F32 ||
+             *type.type->basic() == BasicKind::F64)) {
+            refuse(part.expr->pos, "a float in interpolation is not lowered yet");
+            return LoweredString{};
+        }
+        refuse(part.expr->pos, "this interpolation");
+        return LoweredString{};
+    }
+    // The lengths sum to a total; one allocation answers the buffer; every
+    // part copies into it at the running offset. A zero total allocates
+    // zero bytes, which answers nil: every string consumer checks the
+    // length before touching the pointer, so nothing dereferences it.
+    ir::Value total = constantI64(0, count, lit.pos);
+    if (failed_) {
+        return LoweredString{};
+    }
+    for (const PartBytes& part : parts) {
+        ir::Instr add;
+        add.op = ir::Op::Add;
+        add.loc = lit.pos;
+        add.type = count;
+        add.width = ir::IRType::I64;
+        add.isPure = true;
+        add.operands.push_back(total);
+        add.operands.push_back(part.len);
+        ir::Value sum = newValue(add.width, count, lit.pos);
+        add.results.push_back(sum);
+        emit(std::move(add));
+        total = sum;
+    }
+    if (failed_) {
+        return LoweredString{};
+    }
+    ir::Instr alloc;
+    alloc.op = ir::Op::Call;
+    alloc.loc = lit.pos;
+    alloc.callee = "cider_alloc";
+    alloc.mayTrap = true;
+    {
+        ir::Argument bytes;
+        bytes.words.push_back(total);
+        alloc.arguments.push_back(std::move(bytes));
+        ir::Argument pad;
+        pad.words.push_back(constantI64(8, count, lit.pos));
+        alloc.arguments.push_back(std::move(pad));
+    }
+    if (failed_) {
+        return LoweredString{};
+    }
+    TypeRef ptrType{ctx_.pointer(ctx_.basic(BasicKind::U8))};
+    ir::Value buf = newValue(ir::IRType::Ptr, ptrType, lit.pos);
+    alloc.results.push_back(buf);
+    alloc.width = ir::IRType::Ptr;
+    alloc.type = ptrType;
+    emit(std::move(alloc));
+    ir::Value off = constantI64(0, count, lit.pos);
+    if (failed_) {
+        return LoweredString{};
+    }
+    for (const PartBytes& part : parts) {
+        ir::Instr add;
+        add.op = ir::Op::Add;
+        add.loc = lit.pos;
+        add.type = ptrType;
+        add.width = ir::IRType::Ptr;
+        add.isPure = true;
+        add.operands.push_back(buf);
+        add.operands.push_back(off);
+        ir::Value dst = newValue(add.width, ptrType, lit.pos);
+        add.results.push_back(dst);
+        emit(std::move(add));
+        if (failed_) {
+            return LoweredString{};
+        }
+        copyBytes(dst, part.ptr, part.len, lit.pos);
+        if (failed_) {
+            return LoweredString{};
+        }
+        ir::Instr bump;
+        bump.op = ir::Op::Add;
+        bump.loc = lit.pos;
+        bump.type = count;
+        bump.width = ir::IRType::I64;
+        bump.isPure = true;
+        bump.operands.push_back(off);
+        bump.operands.push_back(part.len);
+        ir::Value next = newValue(bump.width, count, lit.pos);
+        bump.results.push_back(next);
+        emit(std::move(bump));
+        off = next;
+    }
+    if (failed_) {
+        return LoweredString{};
+    }
+    LoweredString out;
+    out.words = {buf, total};
     return out;
 }
 

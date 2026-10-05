@@ -159,9 +159,9 @@
   "class": "A"
  },
  "brace_escape": {
-  "actual": "exit 1; tests/corpus/brace_escape/main.cid:7:22: unexpected character '\\'; tests/corpus/brace_escape/main.cid:7:24: unterminated string literal",
-  "blocker": "stdlib-imports",
-  "class": "D"
+  "actual": "matches expected.json exactly",
+  "blocker": "none",
+  "class": "A"
  },
  "bss_align_mixed": {
   "actual": "exit 1; tests/corpus/bss_align_mixed/main.cid:11:5: a variable needs a name; tests/corpus/bss_align_mixed/main.cid:24:7: expected an expression; 0x8877665544332211 exceeds i64 max",
@@ -884,9 +884,9 @@
   "class": "D"
  },
  "interp": {
-  "actual": "cider run exit 1, stdout empty, stderr diagnostic: `main.cid:9:19: expected an expression`",
-  "blocker": "stdlib-io + string-interpolation + asm-blocks",
-  "class": "D"
+  "actual": "matches expected.json exactly",
+  "blocker": "none",
+  "class": "A"
  },
  "irgen_return_type_stale": {
   "actual": "cider run exit 1, stdout empty, stderr diagnostic: `main.cid:103:12: a variable needs an initialiser` (+ `sizeof takes a type in parentheses`)",

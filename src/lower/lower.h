@@ -145,6 +145,21 @@ public:
         int64_t len = 0;
     };
     LoweredString lowerString(const StringLit& lit);
+    // An interpolation `"a{x}b"` builds its string on the heap: each part
+    // answers an address word and a length word, the lengths sum to a
+    // total, one cider_alloc answers the buffer, and every part's bytes
+    // copy into it in order. Text answers rodata; a string answers its
+    // words; a bool selects rodata through a branch; a char stores one
+    // byte to scratch; an integer converts through a decimal helper. A
+    // float refuses: no buffer spelling exists yet, and guessing one is
+    // exactly what the rewrite forbids.
+    struct PartBytes {
+        ir::Value ptr;
+        ir::Value len;
+    };
+    LoweredString lowerInterp(const StringLit& lit);
+    PartBytes rodataPair(const std::string& text, Position pos);
+    void copyBytes(ir::Value dst, ir::Value src, ir::Value len, Position pos);
     // How many machine words a value occupies: one for scalars and pointers,
     // two for the 16-byte aggregates (strings today). -1 for anything larger,
     // which this slice does not lower.
