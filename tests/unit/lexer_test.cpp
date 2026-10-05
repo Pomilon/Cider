@@ -119,6 +119,27 @@ void testStrings() {
     check(esc.lit.parts.size() == 1 && esc.lit.parts[0].text == "a{b", "an escaped brace is text");
 }
 
+// FEATURES §1.4: `{{` is a literal brace, a `{` that cannot open an
+// interpolation is literal, and `\xHH` names a byte. Anything else after
+// `\` or an unterminated interpolation is a diagnostic.
+void testBraces() {
+    std::printf("braces and hex escapes\n");
+    cider::Token doubled = only(lex("\"k1{{k2}}\""), "doubled braces");
+    check(doubled.kind == cider::TokenKind::StringLit, "still a string");
+    check(doubled.lit.parts.size() == 1 && !doubled.lit.parts[0].isExpr, "no interpolation");
+    check(doubled.lit.parts[0].text == "k1{k2}", "each pair is one brace");
+    cider::Token lone = only(lex("\"{\""), "lone open brace");
+    check(lone.kind == cider::TokenKind::StringLit, "still a string");
+    check(lone.lit.parts.size() == 1 && lone.lit.parts[0].text == "{", "a lone brace is text");
+    cider::Token hex = only(lex("\"a\\x7Bb\""), "hex escape");
+    check(hex.kind == cider::TokenKind::StringLit, "still a string");
+    check(hex.lit.parts.size() == 1 && hex.lit.parts[0].text == "a{b", "hex names the byte");
+    cider::Token badHex = only(lex("\"a\\xq\""), "bad hex escape");
+    check(badHex.kind == cider::TokenKind::Error, "a non-hex digit is an error");
+    cider::Token interp = only(lex("\"x = {y}\""), "real interpolation");
+    check(interp.lit.parts.size() == 2 && interp.lit.parts[1].isExpr, "a name still interpolates");
+}
+
 // The lexer does not fold unary minus: -128 is two tokens, and the parser folds.
 void testMinus() {
     std::printf("unary minus is two tokens here\n");
@@ -188,6 +209,7 @@ int main() {
     testFloats();
     testChars();
     testStrings();
+    testBraces();
     testMinus();
     testNoArrow();
     testOperators();

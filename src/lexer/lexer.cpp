@@ -392,7 +392,17 @@ Token Lexer::character() {
             fail(start, "unterminated character literal");
             return token;
         }
-        int escaped = escapeValue(advance());
+        int escaped = -1;
+        if (!atEnd() && peek() == 'x' && isHex(peekAt(1)) && isHex(peekAt(2))) {
+            advance();
+            int hi = advance();
+            int lo = advance();
+            hi = hi <= '9' ? hi - '0' : (hi <= 'F' ? hi - 'A' + 10 : hi - 'a' + 10);
+            lo = lo <= '9' ? lo - '0' : (lo <= 'F' ? lo - 'A' + 10 : lo - 'a' + 10);
+            escaped = hi * 16 + lo;
+        } else if (!atEnd() && peek() != 'x') {
+            escaped = escapeValue(advance());
+        }
         if (escaped < 0) {
             token.kind = TokenKind::Error;
             fail(start, "unknown escape");
@@ -455,6 +465,20 @@ Token Lexer::string() {
             Position brace{file_, line_, column_};
             advance();
             spelling += "{";
+            // FEATURES §1.4: `{{` is a literal brace, and a `{` that cannot
+            // open an interpolation (nothing after it but the closing
+            // quote, a newline, or the file) is literal too — no expression
+            // could start there, so there is nothing to guess about.
+            if (!atEnd() && peek() == '{') {
+                advance();
+                spelling += "{";
+                text.push_back('{');
+                continue;
+            }
+            if (atEnd() || peek() == '"' || peek() == '\n') {
+                text.push_back('{');
+                continue;
+            }
             uint64_t inner = cursor_;
             std::vector<Token> expr = braced(0);
             std::string innerText = source_.substr(inner, cursor_ - inner - 1);
@@ -469,6 +493,19 @@ Token Lexer::string() {
             token.lit.parts.push_back(std::move(part));
             continue;
         }
+        if (c == '}') {
+            // FEATURES §1.4: `}}` is a literal `}`, and a lone `}` was
+            // always literal — the closer only closes inside an
+            // interpolation, never in plain text.
+            advance();
+            spelling += "}";
+            if (!atEnd() && peek() == '}') {
+                advance();
+                spelling += "}";
+            }
+            text.push_back('}');
+            continue;
+        }
         if (c == '\\') {
             advance();
             spelling += "\\";
@@ -477,6 +514,38 @@ Token Lexer::string() {
             }
             char e = advance();
             spelling += e;
+            if (e == 'x') {
+                // FEATURES §1.4: exactly two hex digits name a byte; anything
+                // else is the same unknown-escape diagnostic as any other
+                // bad letter after a backslash.
+                auto digit = [](char h) -> int {
+                    if (h >= '0' && h <= '9') {
+                        return h - '0';
+                    }
+                    if (h >= 'a' && h <= 'f') {
+                        return h - 'a' + 10;
+                    }
+                    if (h >= 'A' && h <= 'F') {
+                        return h - 'A' + 10;
+                    }
+                    return -1;
+                };
+                int hi = !atEnd() ? digit(peek()) : -1;
+                int lo = (hi >= 0 && cursor_ + 1 < source_.size())
+                             ? digit(source_[cursor_ + 1])
+                             : -1;
+                if (hi < 0 || lo < 0) {
+                    token.kind = TokenKind::Error;
+                    fail(start, "unknown escape");
+                    continue;
+                }
+                spelling += peek();
+                spelling += source_[cursor_ + 1];
+                advance();
+                advance();
+                text.push_back(static_cast<char>(hi * 16 + lo));
+                continue;
+            }
             int escaped = escapeValue(e);
             if (escaped < 0) {
                 token.kind = TokenKind::Error;
