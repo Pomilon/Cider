@@ -174,6 +174,25 @@ std::vector<ir::Value> Lowerer::allocaSlots(TypeRef type, Position pos, uint64_t
     return slots;
 }
 
+std::vector<ir::Value> Lowerer::allocaFor(TypeRef type, Position pos) {
+    // Every slot count derived from a type passes through here, so a -1
+    // word count can never reach the unsigned loop above as eighteen
+    // quintillion slots (an interface-typed parameter did exactly that:
+    // wordCount has no Interface arm). Interface values need boxing the
+    // lowerer does not have yet, so they refuse by name; anything else
+    // unsized refuses as a value without storage.
+    if (!type.isError() && type.type->kind() == Kind::Interface) {
+        refuse(pos, "interface values are not lowered yet");
+        return {};
+    }
+    int needed = wordCount(type);
+    if (needed < 0) {
+        refuse(pos, "this value");
+        return {};
+    }
+    return allocaSlots(type, pos, static_cast<uint64_t>(needed));
+}
+
 ir::Value Lowerer::allocaSlot(TypeRef type, Position pos) {
     ir::Instr instr;
     instr.op = ir::Op::Alloca;
@@ -507,8 +526,10 @@ void Lowerer::onFuncDecl(FuncDecl& n) {
     const std::vector<Parameter>& params = function_->signature.parameters();
     for (uint64_t i = 0; i < static_cast<uint64_t>(params.size()); ++i) {
         TypeRef type{params[i].type};
-        std::vector<ir::Value> slots = allocaSlots(type, n.params[i].pos,
-                                                   static_cast<uint64_t>(wordCount(type)));
+        std::vector<ir::Value> slots = allocaFor(type, n.params[i].pos);
+        if (failed_) {
+            return;
+        }
         for (ir::Value slot : slots) {
             function_->params.push_back(slot);
         }
@@ -585,8 +606,10 @@ void Lowerer::onMethodDecl(const std::string& owner, const std::string& name,
     const std::vector<Parameter>& declared = function_->signature.parameters();
     for (uint64_t i = 0; i < static_cast<uint64_t>(params.size()); ++i) {
         TypeRef type{declared[i + 1].type};
-        std::vector<ir::Value> slots = allocaSlots(type, params[i].pos,
-                                                   static_cast<uint64_t>(wordCount(type)));
+        std::vector<ir::Value> slots = allocaFor(type, params[i].pos);
+        if (failed_) {
+            return;
+        }
         for (ir::Value slot : slots) {
             function_->params.push_back(slot);
         }
@@ -719,8 +742,10 @@ void Lowerer::onFuncLit(FuncLit& lit, const std::vector<check::Captured>& captur
         const std::vector<Parameter>& declared = function_->signature.parameters();
         for (uint64_t i = 0; i < static_cast<uint64_t>(lit.params.size()); ++i) {
             TypeRef type{declared[i + kOneWord].type};
-            std::vector<ir::Value> slots = allocaSlots(type, lit.params[i].pos,
-                                                       static_cast<uint64_t>(wordCount(type)));
+            std::vector<ir::Value> slots = allocaFor(type, lit.params[i].pos);
+            if (failed_) {
+                return;
+            }
             for (ir::Value slot : slots) {
                 function_->params.push_back(slot);
             }

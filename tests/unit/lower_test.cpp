@@ -470,6 +470,15 @@ void testDerefStore() {
     }
 }
 
+void testInterfaceParamRefused() {
+    std::printf("interface params are refused\n");
+    Lowered r = lower(
+        "interface Shape { func area() -> int; }\n"
+        "func get(s: Shape) -> int { return 0; }\n"
+        "func main() -> int { return 0; }\n");
+    check(!r.ok && r.stage == "lower", "an interface param refuses loudly");
+}
+
 void testNotYetLowered() {
     std::printf("unlowered constructs are refused\n");
     Lowered r = lower("func f(x: int) -> void { var s: string = \"v = {x}\"; }\n");
@@ -688,6 +697,7 @@ int main() {
     testAddrOf();
     testDerefStore();
     testRefuseKeepsScopes();
+    testInterfaceParamRefused();
     testNotYetLowered();
     std::printf("\n%d checks, %s\n", checks, failures == 0 ? "all passed" : "FAILURES");
     return failures == 0 ? 0 : 1;

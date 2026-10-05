@@ -101,6 +101,9 @@ public:
     // through addressBase and the slot never needs materialising.
     ir::Value allocaSlot(TypeRef type, Position pos);
     std::vector<ir::Value> allocaSlots(TypeRef type, Position pos, uint64_t words);
+    // The only path from a type to fresh slots: refuses interfaces and
+    // anything wordCount cannot size, so no caller casts a -1 count.
+    std::vector<ir::Value> allocaFor(TypeRef type, Position pos);
     TypeRef wordType(TypeRef aggregate, uint64_t word);
     std::vector<ir::Value> loadLocal(Position pos, const LocalBinding& binding);
     std::vector<ir::Value> loadGlobal(Position pos, const GlobalBinding& global);
