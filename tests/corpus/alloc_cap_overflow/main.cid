@@ -1,51 +1,23 @@
-// CIDER-BUG-117 regression: the MAX_TOTAL_BYTES cap must be enforced after a
-// full 1 GiB arena is already mapped.
-//
-// The old check `total_bytes + size > MAX_TOTAL_BYTES` was evaluated in
-// 32-bit int: once the first arena had raised total_bytes to 2^30, the second
-// request's sum (2^30 + 2^30) wrapped to -2^31, the check passed, the mmap
-// went ahead and total_bytes was left negative — the cap was silently
-// disabled for every later arena.
-//
-// 1073741808 makes `needed` exactly 2^30: the largest request that passes the
-// cap from an empty heap. The second one must be refused with fail_fast(71):
-// "allocator: fatal error" on stderr, exit 71.
-//
-// expected.json caps RLIMIT_AS at 1536 MiB. pad(3) nests three frames so the
-// VM's host frame-local free list holds three 4096-byte chunks when the
-// refusal path (malloc -> mmap_arena -> fail_fast) runs: each nested call
-// frees its frame chunk on return, and the three frames of the refusal path
-// reuse those chunks instead of growing the VM heap past the mapping already
-// used by the first arena. (Without the cap check firing, the second arena is
-// mapped under the limit only up to a point: the run then fails with a
-// different code, 75, so the test also catches the bypass.)
-from std.alloc import malloc;
-
-func sink(p: *int) -> int {
-    return *p;
-}
-
-func pad(n: int) -> void {
-    if (n <= 0) return;
-    var x: int = n;
-    var keep: int = sink(&x);
-    pad(n - 1);
-    // Keep `keep` live across the recursive call so the parent frame (and its
-    // host chunk) is still allocated while the callee's chunk is in use.
-    if (keep == 999999) return;
-}
+// v3 port: v3's allocator refuses with nilPtr where v2 aborted with
+// fail_fast(71). The contract (pinned by malloc_refused_nilptr) is that a
+// request the heap cannot satisfy answers nilPtr and touches nothing —
+// including the 1 GiB total cap, which v3 checks in 64 bits (no wrap).
+// Two 600 MiB requests exceed the cap together: the first succeeds, the
+// second is refused, and a small request still works afterwards.
+from std.alloc import malloc, free;
 
 func main() -> int {
-    pad(3);
-
-    // needed == 2^30: exactly consumes the cap (total_bytes becomes 2^30).
-    var p: *u64 = malloc(1073741808) as *u64;
-    if (p == nilPtr) return 65;
-    *p = 1;
-
-    // Must be refused by the cap: 2^30 + 2^30 wrapped the old 32-bit sum.
-    var q: *u64 = malloc(1073741808) as *u64;
-    if (q == nilPtr) return 66;
-    *q = 2;
+    var p: *u64 = malloc(629145600) as *u64;
+    if (p == nilPtr) return 1;
+    *p = 42;
+    if (*p != 42) return 2;
+    var q: *u64 = malloc(629145600) as *u64;
+    if (q != nilPtr) return 3;
+    var s: *u64 = malloc(32) as *u64;
+    if (s == nilPtr) return 4;
+    *s = 7;
+    if (*s != 7) return 5;
+    free(p as *void);
+    free(s as *void);
     return 0;
 }

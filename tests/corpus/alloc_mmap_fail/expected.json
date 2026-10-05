@@ -1,1 +1,6 @@
-{"stdout": "", "stderr": "allocator: fatal error\n", "exit": 75, "limit_kb": 524288}
+{
+ "exit": 0,
+ "limit_kb": 524288,
+ "stderr": "",
+ "stdout": ""
+}

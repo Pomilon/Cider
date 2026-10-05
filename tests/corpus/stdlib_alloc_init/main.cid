@@ -1,11 +1,11 @@
-// CIDER-CHORE-003: std.alloc.init_heap is exported but was never called by
-// any test. It is currently a no-op bootstrap hook; this pins that it is
-// callable and leaves malloc/free working afterwards.
+// CIDER-CHORE-003 (v3 port): v2's std.alloc.init_heap was a no-op bootstrap
+// hook for v2's own free-list allocator. v3's heap lives in the prelude and
+// needs no initialisation, so there is no init_heap to call; what this pins
+// is that malloc/free work afterwards.
 from std.io import puts;
-from std.alloc import init_heap, malloc, free;
+from std.alloc import malloc, free;
 
 func main() -> int {
-    init_heap();
     var p: *int = malloc(16) as *int;
     if (p == nilPtr) return 1;
     *p = 1234;

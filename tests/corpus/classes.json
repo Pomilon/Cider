@@ -55,19 +55,19 @@
   "class": "D"
  },
  "alloc": {
-  "actual": "exit 1; std.alloc:1:1: cannot find module 'std.alloc'",
+  "actual": "PASS run 2026-10-05",
   "blocker": "stdlib-imports",
-  "class": "D"
+  "class": "A"
  },
  "alloc_cap_overflow": {
-  "actual": "exit 1; tests/corpus/alloc_cap_overflow/main.cid:29:23: expected an expression; tests/corpus/alloc_cap_overflow/main.cid:35:31: expected an expression",
+  "actual": "PASS run 2026-10-05",
   "blocker": "stdlib-imports",
-  "class": "D"
+  "class": "A"
  },
  "alloc_mmap_fail": {
-  "actual": "exit 1; std.alloc:1:1: cannot find module 'std.alloc'",
+  "actual": "PASS run 2026-10-05",
   "blocker": "stdlib-imports",
-  "class": "D"
+  "class": "A"
  },
  "alloc_stress": {
   "actual": "exit 1; tests/corpus/legacy/alloc_stress/main.cid:48:5: expected an expression; tests/corpus/legacy/alloc_stress/main.cid:49:1: expected a declaration",
@@ -970,9 +970,9 @@
   "class": "D"
  },
  "malloc_refused_nilptr": {
-  "actual": "cider run exit 1, stdout empty, stderr diagnostic: `std.alloc:1:1: cannot find module 'std.alloc'`",
+  "actual": "PASS run 2026-10-05",
   "blocker": "stdlib-alloc",
-  "class": "D"
+  "class": "A"
  },
  "map_free_reuse": {
   "actual": "cider run exit 1, stdout empty, stderr diagnostic: `main.cid:15:16: a variable needs an initialiser` + `expected an expression` (generic calls)",
@@ -1275,9 +1275,9 @@
   "class": "D"
  },
  "stdlib_alloc_init": {
-  "actual": "blocked-A reclassified 2026-10-05: must pass once blocker lands; run exit 1: OUT: ERR:std.io:1:1: cannot find module 'std.io'\\nstd.alloc:1:1: cannot find module 'std.alloc'\\n",
+  "actual": "PASS run 2026-10-05",
   "blocker": "stdlib-missing (no std.* modules in v3; only prelude print/alloc/free/panic)",
-  "class": "D"
+  "class": "A"
  },
  "stdlib_fs_ops": {
   "actual": "blocked-A reclassified 2026-10-05: must pass once blocker lands; run exit 1: OUT: ERR:tests/corpus/stdlib_fs_ops/main.cid:33:24: a variable needs an initialiser\\n",

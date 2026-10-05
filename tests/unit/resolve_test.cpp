@@ -134,6 +134,35 @@ void testModules() {
     check(!r.ok, "b's error surfaces through main");
 }
 
+// `from prelude import free` names the implicit import (FEATURES §10.2:
+// the prelude IS an implicit `from prelude import ...`, so the explicit
+// form must mean the same thing). The alias keeps the prelude mark, or the
+// linker would look for a module-qualified symbol that is never emitted.
+void testPreludeImport() {
+    std::printf("the prelude can be named explicitly\n");
+    Resolved r = resolve("from prelude import free;\n");
+    check(r.ok, "resolves");
+    const cider::resolve::Decl* found = find(*r.resolver, "free");
+    check(found != nullptr && found->isPrelude, "the alias stays prelude");
+    Resolved bad = resolve("from prelude import nosuch;\n");
+    check(!bad.ok, "an unknown prelude name is rejected");
+    // The mark survives a second hop: m re-exports prelude free, main
+    // takes it from m.
+    cider::resolve::Resolver::ModuleLoader load = [](const std::string& name)
+        -> std::unique_ptr<cider::Program> {
+        if (name == "m") {
+            cider::Lexer lexer("m.cid", "from prelude import free;\n");
+            cider::Parser parser("m.cid", lexer.lex());
+            return parser.parse();
+        }
+        return nullptr;
+    };
+    Resolved hop = resolve("from m import free;\n", load);
+    check(hop.ok, "re-export resolves");
+    const cider::resolve::Decl* again = find(*hop.resolver, "free");
+    check(again != nullptr && again->isPrelude, "the mark survives the hop");
+}
+
 // An import cycle names the cycle instead of hanging.
 void testCycle() {
     std::printf("import cycles are rejected\n");
@@ -277,6 +306,7 @@ int main() {
     testFuncPtrClosure();
     testModules();
     testCycle();
+    testPreludeImport();
     testConstLength();
     testEnum();
     testPrelude();

@@ -1,0 +1,13 @@
+// Heap allocation: thin names over the prelude.
+//
+// The prelude owns the allocator (`alloc`/`realloc`/`free`, FEATURES §10.2);
+// this module exists so programs written against `std.alloc` keep their
+// imports. `free` is an explicit re-export of the prelude (`from prelude
+// import ...` names the implicit import): a wrapper defined here could not
+// call the prelude's `free` without calling itself.
+
+from prelude import alloc, free;
+
+export func malloc(size: i64) -> *void {
+    return alloc(size, 8);
+}

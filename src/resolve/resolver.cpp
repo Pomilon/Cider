@@ -545,6 +545,32 @@ bool Resolver::resolveProgram(Program& program, const std::string& module) {
     // against a module whose own headers already exist.
     for (const std::unique_ptr<cider::Decl>& decl : program.decls) {
         if (const auto* from = dynamic_cast<const FromImport*>(decl.get())) {
+            if (from->module == "prelude") {
+                // The prelude is an implicit `from prelude import ...` in
+                // every module (FEATURES §10.2), so the explicit form binds
+                // the module's own prelude entries: no file is loaded, and
+                // the alias keeps the prelude mark or the linker would
+                // look for a module-qualified symbol that is never emitted.
+                for (const std::string& name : from->names) {
+                    const Decl* target = lookup(scope, name);
+                    if (target == nullptr || !target->isPrelude) {
+                        fail(decl->pos, "'" + name +
+                                            "' is not exported by 'prelude'");
+                        continue;
+                    }
+                    Decl* alias = bind(scope, target->kind, name, decl->pos);
+                    alias->type = target->type;
+                    alias->sig = target->sig;
+                    alias->id = target->id;
+                    alias->nominal = target->nominal;
+                    alias->typeParams = target->typeParams;
+                    alias->aliasTarget = target->aliasTarget;
+                    alias->init = target->init;
+                    alias->isExtern = target->isExtern;
+                    alias->isPrelude = true;
+                }
+                continue;
+            }
             if (!resolveModule(from->module)) {
                 continue;
             }
@@ -565,6 +591,7 @@ bool Resolver::resolveProgram(Program& program, const std::string& module) {
                 alias->aliasTarget = target->aliasTarget;
                 alias->init = target->init;
                 alias->isExtern = target->isExtern;
+                alias->isPrelude = target->isPrelude;
                 if (target->kind == DeclKind::Const && target->init != nullptr) {
                     constInits_[module + "." + name] = target->init;
                 }

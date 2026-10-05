@@ -276,8 +276,30 @@ void testPointerHeap() {
           "a double free dies loudly with the heap code");
 }
 
-void testExternPutchar() {
-    std::printf("extern putchar\n");
+// The heap's total-byte write must use an explicit `qword ptr`: GAS
+// silently shifts a bare `qword [rip + label]` reference by 8 bytes, so
+// the 1 GiB cap never fired and every request mapped (found live: two
+// 900 MB maps, zero refusal). The text pin guards the exact site; the
+// corpus cap_overflow/mmap_fail programs pin the behavior.
+void testHeapCapText() {
+    std::printf("heap helpers name sizes explicitly\n");
+    Built built = build("func main() -> int {\n"
+                        "    var p: *void = alloc(8, 8);\n"
+                        "    if (p == nilPtr) { return 1; }\n"
+                        "    free(p);\n"
+                        "    return 0;\n"
+                        "}\n");
+    check(built.ok, "builds");
+    check(built.asmText.find("qword ptr [rip + cider_heap_total]") !=
+              std::string::npos,
+          "the total-byte write is explicit");
+    for (const char* bare : {"qword [", "dword [", "byte [", "word ["}) {
+        check(built.asmText.find(bare) == std::string::npos,
+              "no bare size names a memory operand");
+    }
+}
+
+void testExternPutchar() {    std::printf("extern putchar\n");
     // Sovereign link has no libc: a called-but-undefined `putchar` emits a
     // freestanding helper (one write syscall) instead of failing the link.
     // Any other undefined extern still fails the link loudly.
@@ -626,6 +648,7 @@ int main() {
     testStruct();
     testArray();
     testPointerHeap();
+    testHeapCapText();
     testExternPutchar();
     testBreakContinue();
     testForLoop();

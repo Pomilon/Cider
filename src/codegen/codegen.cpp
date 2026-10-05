@@ -479,7 +479,7 @@ private:
         out_ += "  mov rdx, [rip + cider_fl_head]\n";
         out_ += "  mov [rax + 8], rdx\n";
         out_ += "  mov [rip + cider_fl_head], rax\n";
-        out_ += "  add qword [rip + cider_heap_total], rsi\n";
+        out_ += "  add qword ptr [rip + cider_heap_total], rsi\n";
         out_ += "  jmp .restart\n";
         out_ += ".carve:\n";
         out_ += "  cmp r12, 16\n";

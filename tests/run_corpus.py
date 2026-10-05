@@ -39,15 +39,24 @@ def outcome_of(proc):
     return (proc.stdout, proc.stderr, proc.returncode)
 
 
-def run_native(path, stdin_data):
+def run_native(path, stdin_data, limit_kb=None):
     try:
         env = dict(os.environ)
         # The library tree ships with the compiler: dotted imports
         # (`std.io`) resolve to <root>/modules without ambient setup.
         env.setdefault("CIDER_LIB", os.path.join(ROOT, "modules"))
+        preexec = None
+        if limit_kb is not None:
+            import resource
+            cap = int(limit_kb) * 1024
+
+            def preexec():
+                resource.setrlimit(resource.RLIMIT_AS, (cap, cap))
+
         proc = subprocess.run(
             [CIDER, "run", path], input=stdin_data, env=env,
-            capture_output=True, text=True, timeout=60)
+            capture_output=True, text=True, timeout=60,
+            preexec_fn=preexec)
     except subprocess.TimeoutExpired:
         return ("<timeout>", "", "timeout")
     out, err, code = outcome_of(proc)
@@ -73,7 +82,8 @@ def main():
         if os.path.exists(os.path.join(d, "input.txt")):
             with open(os.path.join(d, "input.txt")) as fh:
                 stdin_data = fh.read()
-        out, err, code = run_native(os.path.join(d, "main.cid"), stdin_data)
+        out, err, code = run_native(os.path.join(d, "main.cid"), stdin_data,
+                                   expected.get("limit_kb"))
         if cls == "A":
             ok = (out == expected["stdout"] and err == expected["stderr"]
                   and code == expected["exit"])
