@@ -3438,6 +3438,17 @@ std::vector<ir::Value> Lowerer::lowerWords(const Expr* expr) {
         return lowerIncrDecr(*step);
     }
     if (const auto* unary = dynamic_cast<const Unary*>(expr)) {
+        // `!b` and `-x` answer one scalar word through the scalar path,
+        // which already lowers both: the address path below knows only
+        // `&` and `*`, and sending a logical or arithmetic unary there
+        // refuses a program the checker accepted.
+        if (unary->op == UnOp::Not || unary->op == UnOp::Neg) {
+            ir::Value single = onIdentOrExpr(expr, checker_.typeOf(expr));
+            if (failed_) {
+                return {undefined()};
+            }
+            return {single};
+        }
         // `*p` as a value loads whatever the pointer addresses: the
         // place machinery already resolves the dereference to an
         // indirect place, so a read is one range load. Anything else

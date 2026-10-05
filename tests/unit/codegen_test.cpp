@@ -550,6 +550,22 @@ void testShortCircuit() {
           "a skipped word side never traps");
 }
 
+void testBoolCompare() {
+    std::printf("bool equality runs\n");
+    check(runQuiet("var g: bool = false;\n"
+                   "func main() -> int {\n"
+                   "    g = !g;\n"
+                   "    if (g != true) { return 1; }\n"
+                   "    g = !g;\n"
+                   "    if (g != false) { return 2; }\n"
+                   "    var b: bool = true;\n"
+                   "    b = !b;\n"
+                   "    if (b != false) { return 3; }\n"
+                   "    return 0;\n"
+                   "}\n") == 0,
+          "negation and equality agree");
+}
+
 void testTernary() {
     std::printf("ternaries run\n");
     check(runQuiet("func main() -> int {\n"
@@ -764,6 +780,7 @@ int main() {
     testArith32();
     testIndirectCall();
     testShortCircuit();
+    testBoolCompare();
     testTernary();
     testInterp();
     testFloat();

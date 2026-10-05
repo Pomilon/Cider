@@ -328,6 +328,32 @@ void testIncrDecr() {
     check(!rvalue.ok && rvalue.stage == "check", "an rvalue fails");
 }
 
+// Bool equality compares values; ordering on bools has no meaning.
+void testBoolCompare() {
+    std::printf("bools compare for equality\n");
+    Checked good = check(
+        "func main() -> int {\n"
+        "    var b: bool = true;\n"
+        "    if (b == true && b != false) { return 1; }\n"
+        "    return 0;\n"
+        "}\n");
+    check(good.ok, "== and != on bools: " + good.stage);
+    Checked global = check(
+        "var g: bool = false;\n"
+        "func main() -> int {\n"
+        "    g = !g;\n"
+        "    if (g != true) { return 1; }\n"
+        "    return 0;\n"
+        "}\n");
+    check(global.ok, "a global bool negates and compares: " + global.stage);
+    Checked rel = check(
+        "func main() -> int { var b: bool = true < false; return 0; }\n");
+    check(!rel.ok && rel.stage == "check", "ordering on bools fails");
+    Checked mixed = check(
+        "func main() -> int { var b: bool = true == 1; return 0; }\n");
+    check(!mixed.ok && mixed.stage == "check", "bool == int fails");
+}
+
 }  // namespace
 
 int main() {
@@ -341,6 +367,7 @@ int main() {
     testUnions();
     testFnAddr();
     testIncrDecr();
+    testBoolCompare();
     testAsm();
     testLen();
     testFuncLitChecks();

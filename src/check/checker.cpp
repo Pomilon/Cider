@@ -1555,6 +1555,20 @@ TypeRef Checker::checkBinary(Binary& expr, TypeRef expected) {
         return boolean;
     }
     if (isEq || isRel) {
+        const bool lhsBool = lhs.type->kind() == Kind::Basic &&
+                             *lhs.type->basic() == BasicKind::Bool;
+        const bool rhsBool = rhs.type->kind() == Kind::Basic &&
+                             *rhs.type->basic() == BasicKind::Bool;
+        if (lhsBool || rhsBool) {
+            // Equality on bools compares values (SEMANTICS §4); ordering
+            // has no meaning, and a bool beside a non-bool is a mismatch
+            // the common type must never silently absorb.
+            if (isEq && lhsBool && rhsBool) {
+                return TypeRef{ctx_.basic(BasicKind::Bool)};
+            }
+            fail(expr.pos, "bools compare for equality only");
+            return errorRef();
+        }
         if (lhs.type->kind() == Kind::Pointer && rhs.type->kind() == Kind::Pointer) {
             // Pointers compare by identity (SEMANTICS §4): two spellings of
             // one pointer type, or either side nilPtr — its spelling is
