@@ -37,6 +37,16 @@ namespace check {
 // the checker does not depend on the layer that calls it: a static library
 // cannot include its own caller. Lowering implements this; the checker emits
 // through it while it walks.
+// One by-value capture of a closure literal: the name as the body spells it
+// and the type the enclosing scope gives it. The checker discovers these
+// while it walks the body; the lowerer lays them out behind the captures
+// word in first-read order.
+struct Captured {
+    std::string name;
+    TypeRef type;
+    Position pos;
+};
+
 class LowerSink {
 public:
     virtual ~LowerSink() = default;
@@ -67,6 +77,16 @@ public:
     // `delete p;` frees a class object. Checked first (the pointer type is
     // known), then lowered here.
     virtual void onDelete(DeleteStmt& n) { (void)n; }
+    // A closure literal, after its body checked. The captures are the
+    // enclosing locals the body reads, in first-read order; the signature
+    // holds the declared parameters. The lowerer emits the hidden function
+    // and answers the two-word value when it lowers the literal.
+    virtual void onFuncLit(FuncLit& lit, const std::vector<Captured>& captures,
+                           const Signature& sig) {
+        (void)lit;
+        (void)captures;
+        (void)sig;
+    }
 };
 
 struct CheckError {
@@ -103,6 +123,7 @@ public:
 
     TypeRef typeOf(const Node* node) const;
     const std::vector<CheckError>& errors() const { return errors_; }
+    size_t errorCount() const { return errors_.size(); }
 
     // Declarations and statements with rules.
     void visitProgram(Program& n) override;
@@ -156,6 +177,9 @@ private:
     void popScope();
     bool bindLocal(const std::string& name, TypeRef type, bool isMut, Position pos);
     const Local* findLocal(const std::string& name) const;
+    // The scope a name resolves in, or null. Closure capture discovery asks
+    // where a read binds rather than only what it binds to.
+    const LocalScope* scopeOf(const std::string& name) const;
 
     // Expressions. `expected` is the type the context demands, or a wildcard
     // when the expression must speak for itself (literals default from it).
@@ -236,6 +260,17 @@ private:
     std::unique_ptr<EvalEnv> env_;
     const LocalScope* current_ = nullptr;
     std::vector<std::unique_ptr<LocalScope>> scopes_;
+    // Closure literals being discovered, innermost last. A read that binds
+    // outside the innermost literal's own scope is that literal's capture.
+    struct LiteralFrame {
+        const LocalScope* own = nullptr;
+        std::vector<Captured> captures;
+    };
+    std::vector<LiteralFrame> litStack_;
+    // Literals already handed to the sink. The lowerer's hidden-function
+    // walk meets the same node again and must answer the type without
+    // re-walking, or delegation would recurse forever.
+    std::unordered_set<const FuncLit*> emitted_;
     TypeRef funcReturn_;
     bool inFunc_ = false;
     uint64_t loopDepth_ = 0;

@@ -28,6 +28,10 @@ constexpr uint64_t kHasPrefixLen = 3;
 constexpr uint64_t kSliceWords = 2;
 constexpr uint64_t kFirstWord = 0;
 constexpr uint64_t kLenWord = 1;
+// A closure answers two words, code then captures, in the same positions
+// a slice keeps base and length: the hidden function loads word zero, the
+// allocation behind word one.
+constexpr uint64_t kClosureWords = 2;
 
 // A layout query with no answer: classSize/classAlign refuse with -1, and
 // the constant names that so no digit shares a line with the query.
@@ -195,7 +199,8 @@ int Lowerer::wordCount(TypeRef type) {
         return 2;
     }
     int64_t bytes = -1;
-    if (kind == Kind::Array || kind == Kind::Union || kind == Kind::Class) {
+    if (kind == Kind::Array || kind == Kind::Union || kind == Kind::Class ||
+        kind == Kind::Closure) {
         bytes = resolver_.nominalSize(type.type);
     } else if (kind == Kind::Struct) {
         std::optional<DeclId> id = type.type->decl();
@@ -606,6 +611,149 @@ void Lowerer::onMethodDecl(const std::string& owner, const std::string& name,
     function_ = nullptr;
 }
 
+void Lowerer::onFuncLit(FuncLit& lit, const std::vector<check::Captured>& captures,
+                        const Signature& sig) {
+    if (failed_ || !enabled_) {
+        return;
+    }
+    // Minted before the body lowers: the site that lowers the literal reads
+    // its entry back for the code word and the capture layout.
+    std::string hidden = "closure_" + std::to_string(closureSeq_++);
+    ClosureSite site;
+    site.hidden = hidden;
+    site.captures = captures;
+    closures_[&lit] = site;
+
+    // The hidden body lowers as its own function while the enclosing state
+    // waits: the function pointer is an index, because pushing the hidden
+    // function can move the vector it points into.
+    int64_t savedFn = -1;
+    if (function_ != nullptr) {
+        savedFn =
+            static_cast<int64_t>(function_ - module_->functions.data());
+    }
+    uint32_t savedValues = valueSeq_;
+    uint32_t savedLabels = labelSeq_;
+    std::vector<uint32_t> savedBlocks = std::move(blockOrder_);
+    std::vector<std::unordered_map<std::string, LocalBinding>> savedLocals =
+        std::move(locals_);
+    uint32_t savedCurrent = current_;
+    bool savedTerminated = terminated_;
+
+    ir::Function fn;
+    fn.name = hidden;
+    TypeRef capPtr{ctx_.pointer(ctx_.basic(BasicKind::U8))};
+    std::vector<Parameter> combined;
+    Parameter receiver;
+    receiver.type = capPtr.type;
+    receiver.isMutable = false;
+    combined.push_back(receiver);
+    for (const Parameter& p : sig.parameters()) {
+        combined.push_back(p);
+    }
+    const Type* ret = sig.returnType() != nullptr ? sig.returnType() : ctx_.void_();
+    fn.signature = Signature(std::move(combined), ret, Abi::SysV);
+    fn.loc = lit.pos;
+    module_->functions.push_back(std::move(fn));
+    function_ = &module_->functions.back();
+
+    valueSeq_ = 0;
+    labelSeq_ = 0;
+    blockOrder_.clear();
+    locals_.clear();
+
+    uint32_t entry = emitBlock(lit.pos);
+    startBlock(entry);
+
+    std::unordered_map<std::string, LocalBinding> frame;
+    std::vector<ir::Value> capSlots = allocaSlots(capPtr, lit.pos, kOneWord);
+    for (ir::Value slot : capSlots) {
+        function_->params.push_back(slot);
+    }
+    LocalBinding capBinding;
+    capBinding.slots = std::move(capSlots);
+    capBinding.type = capPtr;
+    capBinding.isMutable = false;
+    std::vector<ir::Value> capAddr = loadLocal(lit.pos, capBinding);
+    if (!failed_ && capAddr.size() == kOneWord) {
+        int64_t off = 0;
+        for (const check::Captured& cap : captures) {
+            int64_t extent = resolver_.nominalSize(cap.type.type);
+            if (extent < 0) {
+                refuse(cap.pos, "this capture is not lowered yet");
+                break;
+            }
+            Place at;
+            at.hasIndirect = true;
+            at.indirect = capAddr[0];
+            at.off = off;
+            at.type = cap.type;
+            std::vector<ir::Value> words = loadRange(lit.pos, at, cap.type);
+            if (failed_) {
+                break;
+            }
+            std::vector<ir::Value> slots =
+                allocaSlots(cap.type, lit.pos,
+                            static_cast<uint64_t>(words.size()));
+            for (uint64_t i = 0; i < static_cast<uint64_t>(words.size()); ++i) {
+                ir::Instr keep;
+                keep.op = ir::Op::Store;
+                keep.loc = lit.pos;
+                keep.type = cap.type;
+                keep.addressBase = slots[i];
+                keep.storedValue = words[i];
+                emit(std::move(keep));
+            }
+            LocalBinding binding;
+            binding.slots = std::move(slots);
+            binding.type = cap.type;
+            binding.isMutable = true;
+            frame[cap.name] = binding;
+            off += extent;
+        }
+    }
+    if (!failed_) {
+        const std::vector<Parameter>& declared = function_->signature.parameters();
+        for (uint64_t i = 0; i < static_cast<uint64_t>(lit.params.size()); ++i) {
+            TypeRef type{declared[i + kOneWord].type};
+            std::vector<ir::Value> slots = allocaSlots(type, lit.params[i].pos,
+                                                       static_cast<uint64_t>(wordCount(type)));
+            for (ir::Value slot : slots) {
+                function_->params.push_back(slot);
+            }
+            LocalBinding binding;
+            binding.slots = std::move(slots);
+            binding.type = type;
+            binding.isMutable = declared[i + kOneWord].isMutable;
+            frame[lit.params[i].name] = binding;
+        }
+        locals_.push_back(std::move(frame));
+
+        lit.body->accept(checker_);
+        locals_.pop_back();
+
+        ir::Terminator fret;
+        fret.term = ir::Term::Ret;
+        // Same void-falloff rule as a free function (see onFuncDecl).
+        if (function_->signature.returnType() == nullptr ||
+            function_->signature.returnType()->kind() != Kind::Void) {
+            fret.value = undefined();
+        }
+        fret.loc = lit.pos;
+        emitTerminator(fret);
+    }
+    function_ = nullptr;
+
+    function_ =
+        savedFn >= 0 ? &module_->functions[static_cast<size_t>(savedFn)] : nullptr;
+    valueSeq_ = savedValues;
+    labelSeq_ = savedLabels;
+    blockOrder_ = std::move(savedBlocks);
+    locals_ = std::move(savedLocals);
+    current_ = savedCurrent;
+    terminated_ = savedTerminated;
+}
+
 void Lowerer::onBlockEnter(Block& n) {
     (void)n;
     if (failed_ || !enabled_ || function_ == nullptr) {
@@ -691,6 +839,15 @@ TypeRef Lowerer::wordType(TypeRef aggregate, uint64_t word) {
             return TypeRef{ctx_.pointer(aggregate.type->element())};
         }
         return TypeRef{ctx_.basic(BasicKind::I64)};
+    }
+    // A closure is a code word then a captures word: the code word carries
+    // the closure's own signature so an indirect call needs no second
+    // lookup, and the captures word is an untyped allocation address.
+    if (aggregate.type->kind() == Kind::Closure) {
+        if (word == 0) {
+            return TypeRef{ctx_.functionPtr(Signature(*aggregate.type->signature()))};
+        }
+        return TypeRef{ctx_.pointer(ctx_.basic(BasicKind::U8))};
     }
     if (aggregate.type->kind() == Kind::Struct ||
         aggregate.type->kind() == Kind::Array ||
@@ -798,11 +955,13 @@ std::vector<ir::Value> Lowerer::loadRange(Position pos, const Place& place,
                 refuse(pos, "this field layout is not lowered yet");
                 return {undefined()};
             }
-        } else if (fieldKind == Kind::String || fieldKind == Kind::Slice) {
-            // A string is an address word then a length word, and a slice
-            // is a pointer word then a length word: each full word loads
-            // with its own type, the way a local load types them. A partial
-            // take cannot name half a word, so it refuses rather than splits.
+        } else if (fieldKind == Kind::String || fieldKind == Kind::Slice ||
+                   fieldKind == Kind::Closure) {
+            // A string is an address word then a length word, a slice a
+            // pointer word then a length word, a closure a code word then
+            // a captures word: each full word loads with its own type, the
+            // way a local load types them. A partial take cannot name half
+            // a word, so it refuses rather than splits.
             int64_t per = layout::kSizePointer;
             int64_t word = (cur - place.off) / per;
             if (take != per || (cur - place.off) % per != 0 || word < 0 ||
@@ -1893,6 +2052,214 @@ std::vector<ir::Value> Lowerer::loadGlobal(Position pos, const GlobalBinding& gl
     return words;
 }
 
+std::string Lowerer::forwardFunction(const std::string& link, const Signature& sig,
+                                     Position pos) {
+    std::string hidden = "closure_" + std::to_string(closureSeq_++);
+    int64_t savedFn = -1;
+    if (function_ != nullptr) {
+        savedFn =
+            static_cast<int64_t>(function_ - module_->functions.data());
+    }
+    uint32_t savedValues = valueSeq_;
+    uint32_t savedLabels = labelSeq_;
+    std::vector<uint32_t> savedBlocks = std::move(blockOrder_);
+    std::vector<std::unordered_map<std::string, LocalBinding>> savedLocals =
+        std::move(locals_);
+    uint32_t savedCurrent = current_;
+    bool savedTerminated = terminated_;
+
+    ir::Function fn;
+    fn.name = hidden;
+    TypeRef capPtr{ctx_.pointer(ctx_.basic(BasicKind::U8))};
+    std::vector<Parameter> combined;
+    Parameter receiver;
+    receiver.type = capPtr.type;
+    receiver.isMutable = false;
+    combined.push_back(receiver);
+    for (const Parameter& p : sig.parameters()) {
+        combined.push_back(p);
+    }
+    const Type* ret = sig.returnType() != nullptr ? sig.returnType() : ctx_.void_();
+    fn.signature = Signature(std::move(combined), ret, Abi::SysV);
+    fn.loc = pos;
+    module_->functions.push_back(std::move(fn));
+    function_ = &module_->functions.back();
+
+    valueSeq_ = 0;
+    labelSeq_ = 0;
+    blockOrder_.clear();
+    locals_.clear();
+
+    uint32_t entry = emitBlock(pos);
+    startBlock(entry);
+
+    // The captures word has no use here: the target is a plain function.
+    // It stays a parameter so the call shape matches every other closure.
+    std::vector<ir::Value> capSlots = allocaSlots(capPtr, pos, kOneWord);
+    for (ir::Value slot : capSlots) {
+        function_->params.push_back(slot);
+    }
+    ir::Instr call;
+    call.op = ir::Op::Call;
+    call.loc = pos;
+    call.callee = link;
+    call.mayTrap = true;
+    const std::vector<Parameter>& declared = function_->signature.parameters();
+    for (uint64_t i = 0; i < static_cast<uint64_t>(sig.parameters().size()); ++i) {
+        TypeRef type{declared[i + kOneWord].type};
+        int count = wordCount(type);
+        if (count < 0) {
+            refuse(pos, "this call");
+            break;
+        }
+        std::vector<ir::Value> slots = allocaSlots(type, pos,
+                                                   static_cast<uint64_t>(count));
+        for (ir::Value slot : slots) {
+            function_->params.push_back(slot);
+        }
+        LocalBinding binding;
+        binding.slots = std::move(slots);
+        binding.type = type;
+        std::vector<ir::Value> words = loadLocal(pos, binding);
+        if (failed_) {
+            refuse(pos, "this call");
+            break;
+        }
+        ir::Argument arg;
+        arg.words = words;
+        call.arguments.push_back(std::move(arg));
+    }
+    if (!failed_) {
+        function_->canThrow = true;
+        ir::Terminator fret;
+        fret.term = ir::Term::Ret;
+        fret.loc = pos;
+        if (ret->kind() != Kind::Void) {
+            ir::Value out = newValue(widthOf(TypeRef{ret}, pos), TypeRef{ret}, pos);
+            if (!failed_) {
+                call.results.push_back(out);
+                call.width = out.width;
+                call.type = out.type;
+                fret.value = out;
+            }
+        } else {
+            call.width = ir::IRType::Void;
+            fret.value = std::nullopt;
+        }
+        if (!failed_) {
+            emit(std::move(call));
+            emitTerminator(fret);
+        }
+    }
+    function_ = nullptr;
+
+    function_ =
+        savedFn >= 0 ? &module_->functions[static_cast<size_t>(savedFn)] : nullptr;
+    valueSeq_ = savedValues;
+    labelSeq_ = savedLabels;
+    blockOrder_ = std::move(savedBlocks);
+    locals_ = std::move(savedLocals);
+    current_ = savedCurrent;
+    terminated_ = savedTerminated;
+    return hidden;
+}
+
+std::vector<ir::Value> Lowerer::lowerFuncLit(const FuncLit& lit) {
+    // The checker handed the hidden function over with the hook; without an
+    // entry the literal was never checked, and inventing one would lower an
+    // unchecked body.
+    auto found = closures_.find(&lit);
+    if (found == closures_.end()) {
+        refuse(lit.pos, "this expression");
+        return {undefined()};
+    }
+    const ClosureSite& site = found->second;
+    TypeRef closureType = checker_.typeOf(&lit);
+    if (closureType.isError() || closureType.type->kind() != Kind::Closure) {
+        refuse(lit.pos, "this expression");
+        return {undefined()};
+    }
+    TypeRef codeType = wordType(closureType, kFirstWord);
+    TypeRef capsType = wordType(closureType, kLenWord);
+    if (failed_) {
+        return {undefined()};
+    }
+    ir::Instr fn;
+    fn.op = ir::Op::FnAddr;
+    fn.loc = lit.pos;
+    fn.type = codeType;
+    fn.width = ir::IRType::Ptr;
+    fn.globalLabel = site.hidden;
+    fn.isPure = true;
+    ir::Value code = newValue(fn.width, codeType, lit.pos);
+    fn.results.push_back(code);
+    emit(std::move(fn));
+
+    ir::Value caps = constantI64(0, capsType, lit.pos);
+    if (failed_) {
+        return {undefined()};
+    }
+    if (!site.captures.empty()) {
+        int64_t per = layout::kSizePointer;
+        int64_t total = 0;
+        for (const check::Captured& cap : site.captures) {
+            int64_t extent = resolver_.nominalSize(cap.type.type);
+            if (extent < 0) {
+                refuse(cap.pos, "this capture is not lowered yet");
+                return {undefined()};
+            }
+            total += extent;
+        }
+        // One allocation behind the captures word, filled from the
+        // enclosing locals in first-read order — the same order the hidden
+        // function reads them back in.
+        TypeRef count{ctx_.basic(BasicKind::I64)};
+        ir::Instr alloc;
+        alloc.op = ir::Op::Call;
+        alloc.loc = lit.pos;
+        alloc.callee = "cider_alloc";
+        alloc.mayTrap = true;
+        for (int64_t fixed : {total, per}) {
+            ir::Argument arg;
+            arg.words.push_back(constantI64(fixed, count, lit.pos));
+            if (failed_) {
+                return {undefined()};
+            }
+            alloc.arguments.push_back(std::move(arg));
+        }
+        ir::Value at = newValue(ir::IRType::Ptr, capsType, lit.pos);
+        alloc.results.push_back(at);
+        alloc.width = ir::IRType::Ptr;
+        alloc.type = capsType;
+        emit(std::move(alloc));
+        caps = at;
+        int64_t off = 0;
+        for (const check::Captured& cap : site.captures) {
+            Ident name(lit.pos, cap.name);
+            Place base;
+            if (!resolvePlace(&name, base)) {
+                refuse(cap.pos, "this capture is not lowered yet");
+                return {undefined()};
+            }
+            std::vector<ir::Value> words = loadRange(lit.pos, base, cap.type);
+            if (failed_) {
+                return {undefined()};
+            }
+            Place dst;
+            dst.hasIndirect = true;
+            dst.indirect = caps;
+            dst.off = off;
+            dst.type = cap.type;
+            storeRange(lit.pos, dst, words, cap.type);
+            if (failed_) {
+                return {undefined()};
+            }
+            off += resolver_.nominalSize(cap.type.type);
+        }
+    }
+    return {code, caps};
+}
+
 void Lowerer::constructClass(const std::vector<ir::Value>& slots, const NewStruct& n) {
     TypeRef classType = checker_.typeOf(&n);
     if (classType.isError() || classType.type->kind() != Kind::Class) {
@@ -2155,6 +2522,9 @@ std::vector<ir::Value> Lowerer::lowerWords(const Expr* expr) {
     if (dynamic_cast<const NewClass*>(expr) != nullptr) {
         return lowerNewClass(static_cast<const NewClass&>(*expr));
     }
+    if (dynamic_cast<const FuncLit*>(expr) != nullptr) {
+        return lowerFuncLit(static_cast<const FuncLit&>(*expr));
+    }
     if (dynamic_cast<const Field*>(expr) != nullptr) {
         return lowerField(static_cast<const Field&>(*expr));
     }
@@ -2184,6 +2554,43 @@ std::vector<ir::Value> Lowerer::lowerWords(const Expr* expr) {
         for (const GlobalBinding& global : globals_) {
             if (global.name == ident->name) {
                 return loadGlobal(ident->pos, global);
+            }
+        }
+        // A bare function name in value position answers the closure pair:
+        // a forwarder with the receiver-first shape plus a null captures
+        // word, with no allocation. Prelude names mangle to their link
+        // symbols, like calls do.
+        const resolve::Decl* decl =
+            resolver_.lookup(resolver_.moduleScope(), ident->name);
+        if (decl != nullptr && decl->kind == resolve::DeclKind::Func &&
+            decl->typeParams == 0) {
+            TypeRef type = checker_.typeOf(ident);
+            if (!type.isError() && type.type->kind() == Kind::Closure &&
+                wordCount(type) == static_cast<int>(kClosureWords)) {
+                std::string link = ident->name;
+                if (decl->isPrelude) {
+                    link = "cider_" + ident->name;
+                }
+                std::string fwd = forwardFunction(link, decl->sig, ident->pos);
+                if (failed_) {
+                    return {undefined()};
+                }
+                ir::Instr fn;
+                fn.op = ir::Op::FnAddr;
+                fn.loc = ident->pos;
+                fn.type = wordType(type, kFirstWord);
+                fn.width = ir::IRType::Ptr;
+                fn.globalLabel = fwd;
+                fn.isPure = true;
+                ir::Value code = newValue(fn.width, fn.type, ident->pos);
+                fn.results.push_back(code);
+                emit(std::move(fn));
+                ir::Value caps =
+                    constantI64(0, wordType(type, kLenWord), ident->pos);
+                if (failed_) {
+                    return {undefined()};
+                }
+                return {code, caps};
             }
         }
         refuse(ident->pos, "reading '" + ident->name + "'");
@@ -2494,6 +2901,37 @@ ir::Value Lowerer::onCall(Call& n) {
             resolver_.lookup(resolver_.moduleScope(), ident->name);
         if (decl != nullptr && decl->isPrelude) {
             callee = "cider_" + ident->name;
+        }
+        if (sig == nullptr) {
+            // A closure-typed local calls through its code word, with the
+            // captures word riding as the receiver the hidden function
+            // expects first. A function name never arrives here:
+            // functionSig answers those above.
+            uint64_t depth = static_cast<uint64_t>(locals_.size());
+            for (; depth > 0;) {
+                --depth;
+                auto bound = locals_[depth].find(ident->name);
+
+                if (bound != locals_[depth].end() &&
+                    bound->second.type.type->kind() == Kind::Closure) {
+                    const Signature* csig = bound->second.type.type->signature();
+
+                    if (csig != nullptr) {
+                        std::vector<ir::Value> pair =
+                            loadLocal(n.pos, bound->second);
+
+                        if (failed_ || pair.size() != kClosureWords) {
+                            refuse(n.pos, "this call");
+                            return undefined();
+                        }
+                        sig = csig;
+                        indirect = true;
+                        indirectCallee = pair[kFirstWord];
+                        receiver.push_back(pair[kLenWord]);
+                    }
+                    break;
+                }
+            }
         }
     } else {
         if (const auto* deref = dynamic_cast<const Unary*>(n.callee.get())) {

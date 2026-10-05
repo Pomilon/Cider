@@ -83,6 +83,11 @@ public:
     void onDelete(DeleteStmt& n) override;
     void onBlockEnter(Block& n) override;
     void onBlockExit(Block& n) override;
+    // A closure literal, after its body checked. Emits the hidden function
+    // and records where, so lowering the literal itself answers the
+    // two-word value (code address, captures pointer).
+    void onFuncLit(FuncLit& lit, const std::vector<check::Captured>& captures,
+                   const Signature& sig) override;
     ir::Value onBinary(Binary& n);
     ir::Value onCall(Call& n);
     ir::Value onIdent(Ident& n);
@@ -220,6 +225,17 @@ public:
     std::vector<ir::Value> lowerNewStruct(const NewStruct& n);
     std::vector<ir::Value> lowerNewArray(const NewArray& n);
     std::vector<ir::Value> lowerNewClass(const NewClass& n);
+    // Answers a closure literal's two words: the hidden function's address
+    // and the captures allocation, filled from the enclosing locals. Never
+    // invents a layout; the checker hands the captures over with the hook.
+    std::vector<ir::Value> lowerFuncLit(const FuncLit& lit);
+    // A bare function name in value position answers a closure pair, but a
+    // plain function takes no receiver while every closure call passes one.
+    // The forwarder is a hidden function with the receiver-first shape that
+    // drops the captures word and calls through, so the call site stays
+    // uniform and never learns which kind of code it holds.
+    std::string forwardFunction(const std::string& link, const Signature& sig,
+                                Position pos);
     std::vector<ir::Value> lowerField(const Field& n);
     // A union member read checks the tag first: mismatch traps, and only the
     // live member's bytes load (TYPES.md 4.6). The tag is never statically
@@ -283,6 +299,14 @@ private:
     std::vector<GlobalBinding> globals_;
     std::unordered_map<std::string, std::string> globalNames_;
     std::vector<check::CheckError> errors_;
+    // Hidden closure functions, minted in first-sight order. The site that
+    // lowers a literal reads its entry back for the code word and layout.
+    struct ClosureSite {
+        std::string hidden;
+        std::vector<check::Captured> captures;
+    };
+    std::unordered_map<const FuncLit*, ClosureSite> closures_;
+    uint64_t closureSeq_ = 0;
 };
 
 }  // namespace lower

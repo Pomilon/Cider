@@ -275,6 +275,24 @@ const Local* Checker::findLocal(const std::string& name) const {
     return nullptr;
 }
 
+const LocalScope* Checker::scopeOf(const std::string& name) const {
+    for (const LocalScope* scope = current_; scope != nullptr; scope = scope->parent) {
+        if (scope->names.find(name) != scope->names.end()) {
+            return scope;
+        }
+    }
+    return nullptr;
+}
+
+bool withinScope(const LocalScope* scope, const LocalScope* root) {
+    for (const LocalScope* at = scope; at != nullptr; at = at->parent) {
+        if (at == root) {
+            return true;
+        }
+    }
+    return false;
+}
+
 // --- Declarations and statements -----------------------------------------------
 
 void Checker::visitProgram(Program& n) {
@@ -941,10 +959,18 @@ TypeRef Checker::checkFuncLit(FuncLit& lit) {
     if (failed) {
         return errorRef();
     }
+    if (emitted_.find(&lit) != emitted_.end()) {
+        // The lowerer's hidden-function walk meets the same node again: the
+        // types are recorded and the nested literals emitted, so answering
+        // the type without re-walking is the whole job. Re-delegating would
+        // emit the function twice.
+        return TypeRef{ctx_.closure(std::move(sig))};
+    }
     // The body is walked once per literal, like a named function's, but the
     // scope only hides the literal's own parameters: enclosing names stay
-    // visible so a body can read them, and the literal records them for the
-    // lowerer through sink_->onFuncLit (which refuses to capture for now).
+    // visible so a body can read them. Reads that bind outside the
+    // literal's own scope are its by-value captures, recorded for the
+    // lowerer in first-read order.
     pushScope();
     const std::vector<Parameter>& params = sig.parameters();
     for (uint64_t i = 0; i < static_cast<uint64_t>(params.size()); ++i) {
@@ -956,9 +982,32 @@ TypeRef Checker::checkFuncLit(FuncLit& lit) {
     bool was = inFunc_;
     funcReturn_ = TypeRef{ret};
     inFunc_ = true;
+    // The discovery walk runs with the sink detached, like a generic
+    // instantiation walk: nothing lowers yet, so the lowerer cannot meet a
+    // half-built literal, and errors here are the only copy — the lowering
+    // walk re-checks deterministically and reports nothing new.
+    litStack_.push_back(LiteralFrame{current_, {}});
+    LowerSink* savedSink = sink_;
+    sink_ = nullptr;
+    size_t before = errors_.size();
     lit.body->accept(*this);
+    size_t after = errors_.size();
+    sink_ = savedSink;
+    std::vector<Captured> captures = std::move(litStack_.back().captures);
+    litStack_.pop_back();
     funcReturn_ = saved;
     inFunc_ = was;
+    if (after != before) {
+        popScope();
+        return errorRef();
+    }
+    // The scope stays pushed through delegation: the lowerer's walk runs
+    // now, synchronously, and nested literals discover against these exact
+    // bindings. Siblings below never see it; the pop is below.
+    if (sink_ != nullptr) {
+        emitted_.insert(&lit);
+        sink_->onFuncLit(lit, captures, sig);
+    }
     popScope();
     return TypeRef{ctx_.closure(std::move(sig))};
 }
@@ -1211,6 +1260,41 @@ TypeRef Checker::checkLiteralFloat(const FloatLit& lit, TypeRef expected, Positi
 
 TypeRef Checker::checkIdent(Ident& expr) {
     if (const Local* local = findLocal(expr.name)) {
+        // A read that binds outside the innermost open literal is that
+        // literal's by-value capture — and every enclosing literal's too,
+        // up to the one that binds it. A nested literal's site lowers
+        // inside its parent's hidden function, where only the parent's
+        // own captures are materialised; without the transitive copy the
+        // nested site cannot resolve a name from two levels out. Block
+        // scopes inside a body bind within that literal's own scope, so
+        // they capture nothing.
+        if (!litStack_.empty()) {
+            const LocalScope* def = scopeOf(expr.name);
+            if (def != nullptr) {
+                for (uint64_t i = static_cast<uint64_t>(litStack_.size());
+                     i > 0;) {
+                    --i;
+                    if (withinScope(def, litStack_[i].own)) {
+                        break;
+                    }
+                    std::vector<Captured>& captures = litStack_[i].captures;
+                    bool known = false;
+                    for (const Captured& have : captures) {
+                        if (have.name == expr.name) {
+                            known = true;
+                            break;
+                        }
+                    }
+                    if (!known) {
+                        Captured take;
+                        take.name = expr.name;
+                        take.type = local->type;
+                        take.pos = expr.pos;
+                        captures.push_back(std::move(take));
+                    }
+                }
+            }
+        }
         return local->type;
     }
     const resolve::Decl* decl = resolver_.lookup(moduleScope_, expr.name);

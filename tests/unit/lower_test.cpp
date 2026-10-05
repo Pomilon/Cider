@@ -534,6 +534,82 @@ void testIndirect() {
     }
 }
 
+void testClosure() {
+    std::printf("closure literals lower\n");
+    Lowered r = lower(
+        "func main() -> int {\n"
+        "    var n: int = 10;\n"
+        "    var f: func(int) -> int = func(x: int) -> int { return x + n; };\n"
+        "    return f(4);\n"
+        "}\n");
+    check(r.ok, "a capturing closure lowers");
+    if (r.ok) {
+        const cider::ir::Function* hidden = nullptr;
+        for (const cider::ir::Function& fn : r.module->functions) {
+            if (fn.name != "main") {
+                hidden = &fn;
+            }
+        }
+        check(hidden != nullptr, "the literal becomes its own function");
+        const cider::ir::Function* main = find(r.module.get(), "main");
+        check(main != nullptr, "main exists");
+        bool indirectCall = false;
+        if (main != nullptr) {
+            for (const cider::ir::Block& block : main->blocks) {
+                for (const cider::ir::Instr& instr : block.body) {
+                    if (instr.op == cider::ir::Op::Call && instr.call.indirect) {
+                        indirectCall = true;
+                    }
+                }
+            }
+        }
+        check(indirectCall, "a bare closure call is indirect");
+    }
+}
+
+void testClosureNested() {
+    std::printf("nested closure captures are transitive\n");
+    Lowered r = lower(
+        "func main() -> int {\n"
+        "    var a: int = 1;\n"
+        "    var outer: func(int) -> int = func(x: int) -> int {\n"
+        "        var inner: func(int) -> int = func(y: int) -> int { return x + y + a; };\n"
+        "        return inner(100);\n"
+        "    };\n"
+        "    return outer(20);\n"
+        "}\n");
+    check(r.ok, "a nested closure lowers");
+    if (r.ok) {
+        uint64_t hidden = 0;
+        for (const cider::ir::Function& fn : r.module->functions) {
+            if (fn.name != "main") {
+                ++hidden;
+            }
+        }
+        check(hidden == 2, "each literal becomes its own function");
+    }
+}
+
+void testClosureBareName() {
+    std::printf("a bare function name answers a closure pair\n");
+    Lowered r = lower(
+        "func add(a: int, b: int) -> int { return a + b; }\n"
+        "func main() -> int {\n"
+        "    var f: func(int, int) -> int = add;\n"
+        "    return f(20, 22);\n"
+        "}\n");
+    check(r.ok, "a bare name lowers as a closure");
+    if (r.ok) {
+        // The forwarder drops the captures word: main, add, and one hidden.
+        uint64_t count = 0;
+        for (const cider::ir::Function& fn : r.module->functions) {
+            (void)fn;
+            ++count;
+        }
+        check(count == 3, "the name reference emits one forwarder");
+    }
+}
+
 }  // namespace
 
 int main() {
@@ -557,6 +633,9 @@ int main() {
     testMethodCall();
     testDelete();
     testIndirect();
+    testClosure();
+    testClosureNested();
+    testClosureBareName();
     testNotYetLowered();
     std::printf("\n%d checks, %s\n", checks, failures == 0 ? "all passed" : "FAILURES");
     return failures == 0 ? 0 : 1;
