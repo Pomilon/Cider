@@ -765,6 +765,11 @@ private:
         }
 
         slotIds_.clear();
+        // Value ids restart in every function, so a DataAddr label recorded
+        // for one function must never answer for another: main's string
+        // address once posed as writeAll's count slot, and the write failed
+        // silently with the syscall error ignored.
+        addrWords_.clear();
         for (const ir::Block& block : fn.blocks) {
             for (const ir::Instr& instr : block.body) {
                 // Only an alloca names slot storage: every other id that

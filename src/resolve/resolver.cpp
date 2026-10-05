@@ -46,8 +46,14 @@ Decl* Resolver::bind(const Scope* scope, DeclKind kind, const std::string& name,
                      Position pos) {
     auto found = scope->bindings.find(name);
     if (found != scope->bindings.end()) {
-        fail(pos, "duplicate declaration of '" + name + "'");
-        return const_cast<Decl*>(found->second);
+        // The prelude is an implicit `from prelude import ...` in every
+        // module (FEATURES §10.2): any spelling the program writes — its own
+        // declaration or a from-import — shadows it for that module instead
+        // of colliding with it. Anything else redeclaring is still an error.
+        if (!found->second->isPrelude) {
+            fail(pos, "duplicate declaration of '" + name + "'");
+            return const_cast<Decl*>(found->second);
+        }
     }
     auto decl = std::make_unique<Decl>();
     decl->kind = kind;

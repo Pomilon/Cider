@@ -659,6 +659,13 @@ void Checker::visitReturn(Return& n) {
     if (n.value == nullptr) {
         if (funcReturn_ != TypeRef{ctx_.void_()}) {
             fail(n.pos, "returning nothing from a function with a return type");
+            return;
+        }
+        // A bare return still leaves the function: the sink must close the
+        // block with Ret, or an `if (c) { return; }` arm falls through to
+        // the join and silently runs what follows it.
+        if (sink_ != nullptr) {
+            sink_->onReturn(n);
         }
         return;
     }

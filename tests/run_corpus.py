@@ -30,13 +30,23 @@ TRAPPED = "<trapped by signal>"
 def outcome_of(proc):
     if proc.returncode is not None and proc.returncode < 0:
         return (TRAPPED, proc.stdout, proc.returncode)
+    # Trap normalization (OUTPUT.md differential gate): `cider run` reports a
+    # program killed by signal N as exit 128+N, so the signal arrives as a
+    # positive code. A class-A program never exits up here (no expectation
+    # in 129..192), so that band names a trap, not an exit status.
+    if proc.returncode is not None and 129 <= proc.returncode <= 192:
+        return (TRAPPED, proc.stdout, proc.returncode)
     return (proc.stdout, proc.stderr, proc.returncode)
 
 
 def run_native(path, stdin_data):
     try:
+        env = dict(os.environ)
+        # The library tree ships with the compiler: dotted imports
+        # (`std.io`) resolve to <root>/modules without ambient setup.
+        env.setdefault("CIDER_LIB", os.path.join(ROOT, "modules"))
         proc = subprocess.run(
-            [CIDER, "run", path], input=stdin_data,
+            [CIDER, "run", path], input=stdin_data, env=env,
             capture_output=True, text=True, timeout=60)
     except subprocess.TimeoutExpired:
         return ("<timeout>", "", "timeout")

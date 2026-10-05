@@ -941,6 +941,30 @@ void testShortCircuit() {
     check(condBrs >= 4, "each &&, ||, and if leaves a conditional branch");
 }
 
+void testBareReturn() {
+    std::printf("bare return closes its block\n");
+    Lowered r = lower(
+        "func guard(v: int, z: int) {\n"
+        "    if (v == 0) { return; }\n"
+        "    var q: int = v / z;\n"
+        "}\n"
+        "func main() -> int { guard(0, 0); return 7; }\n");
+    check(r.ok, "lowers: " + r.stage);
+    const cider::ir::Function* fn = find(r.module.get(), "guard");
+    if (fn == nullptr) {
+        return;
+    }
+    // The then-arm's bare return must close its block with Ret: a branch
+    // to the join instead silently runs the divide that follows it.
+    uint32_t rets = 0;
+    for (const cider::ir::Block& block : fn->blocks) {
+        if (block.term.term == cider::ir::Term::Ret) {
+            ++rets;
+        }
+    }
+    check(rets == 2, "the early bare return and the value return each close a block");
+}
+
 }  // namespace
 
 int main() {
@@ -953,6 +977,7 @@ int main() {
     testSsa();
     testCalls();
     testLoop();
+    testBareReturn();
     testNestedConstruct();
     testFieldOverIndex();
     testStraddlingRead();

@@ -1,0 +1,132 @@
+// Standard I/O: print, printInt, printChar, puts, printFloat, printF64, exit.
+//
+// Every write goes through the `write` syscall directly: this module defines
+// `print`, which shadows the prelude inside this module, so calling the
+// prelude here would recurse. A string's bytes are reached through `&s[0]`
+// (an empty string has no byte zero, so it returns before touching it).
+// Buffer stores go through a slice (`buf[0:N]`), because a computed store
+// to an array is not lowered — only slice stores are (SEMANTICS §8).
+
+func writeAll(ptr: *u8, count: int) {
+    var fd: int = 1;
+    asm {
+        "mov rax, 1"
+        "mov rdi, {fd:q}"
+        "mov rsi, {ptr}"
+        "mov rdx, {count:q}"
+        "syscall"
+    }
+}
+
+export func print(s: string) {
+    if (s.len == 0) {
+        return;
+    }
+    var ptr: *u8 = &s[0];
+    var count: int = s.len as int;
+    writeAll(ptr, count);
+}
+
+export func puts(s: string) {
+    print(s);
+    print("\n");
+}
+
+export func printChar(c: char) {
+    var b: u8 = c as u8;
+    // A NUL builds an empty string: print returns without a syscall, so a
+    // NUL char writes nothing at all.
+    if (b == 0) {
+        return;
+    }
+    var buf: [u8; 1] = new [u8; 1] { b };
+    var ptr: *u8 = &buf[0];
+    var one: int = 1;
+    writeAll(ptr, one);
+}
+
+// Prints v with no INT_MIN trap: the digits are taken from the negative
+// value itself (`-(n % 10)`), so `0 - v` — undefined on INT_MIN — never runs.
+export func printInt(v: int) {
+    var buf: [u8; 12] = new [u8; 12] { [0, ...] };
+    var s: []u8 = buf[0:12];
+    var n: int = v;
+    var neg: int = 0;
+    if (n < 0) {
+        neg = 1;
+    }
+    var i: int = 11;
+    if (n == 0) {
+        s[11] = 48;
+    } else {
+        while (n != 0) {
+            var d: int = n % 10;
+            var digit: int = 48 + d;
+            if (neg == 1) {
+                digit = 48 - d;
+            }
+            s[i] = digit as u8;
+            i = i - 1;
+            n = n / 10;
+        }
+        i = i + 1;
+    }
+    if (neg == 1) {
+        i = i - 1;
+        s[i] = 45;
+    }
+    var start: *u8 = &s[i];
+    var count: int = 12 - i;
+    writeAll(start, count);
+}
+
+// Six digits after the point, truncated never rounded: the digits come off
+// least-significant first, so they fill the buffer right to left and the
+// buffer goes out in one write — a short fraction zero-pads on the left.
+func printScaled(whole: int, frac: int) {
+    printInt(whole);
+    print(".");
+    var tmp: [u8; 6] = new [u8; 6] { [0, ...] };
+    var t: []u8 = tmp[0:6];
+    var rest: int = frac;
+    var k: int = 0;
+    while (k < 6) {
+        var digit: int = rest % 10;
+        rest = rest / 10;
+        t[5 - k] = (48 + digit) as u8;
+        k = k + 1;
+    }
+    var p: *u8 = &t[0];
+    var six: int = 6;
+    writeAll(p, six);
+}
+
+export func printF64(f: f64) {
+    var v: f64 = f;
+    if (v < 0.0) {
+        print("-");
+        v = 0.0 - v;
+    }
+    var whole: int = v as int;
+    var frac: int = ((v - whole as f64) * 1000000.0) as int;
+    printScaled(whole, frac);
+}
+
+export func printFloat(f: float) {
+    var v: float = f;
+    if (v < 0.0) {
+        print("-");
+        v = 0.0 - v;
+    }
+    var whole: int = v as int;
+    var frac: int = ((v - whole as float) * 1000000.0) as int;
+    printScaled(whole, frac);
+}
+
+export func exit(code: int) {
+    asm {
+        "mov rax, 60"
+        "mov rdi, {code:q}"
+        "syscall"
+    }
+}

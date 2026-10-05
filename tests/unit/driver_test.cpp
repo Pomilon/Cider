@@ -138,10 +138,25 @@ void testImports() {
     FILE* dotFile = fopen(dotted.c_str(), "w");
     fwrite("import std.io;\nfunc main() -> int { return 0; }\n", 1, 47, dotFile);
     fclose(dotFile);
-    Result missing = run({"check", dotted});
-    check(missing.code != 0, "a dotted import without a library fails");
-    check(missing.err.find("std.io") != std::string::npos,
-          "naming the module");
+    Result dotCheck = run({"check", dotted});
+    // Hermetic without a library: the ambient environment may define
+    // CIDER_LIB (the corpus runner does), so clear it explicitly — the
+    // point under test is the loud failure, not the ambient lookup.
+    const char* saved = getenv("CIDER_LIB");
+    if (saved != nullptr) {
+        std::string keep = saved;
+        unsetenv("CIDER_LIB");
+        Result missing = run({"check", dotted});
+        setenv("CIDER_LIB", keep.c_str(), 1);
+        check(missing.code != 0, "a dotted import without a library fails");
+        check(missing.err.find("std.io") != std::string::npos,
+              "naming the module");
+    } else {
+        Result missing = run({"check", dotted});
+        check(missing.code != 0, "a dotted import without a library fails");
+        check(missing.err.find("std.io") != std::string::npos,
+              "naming the module");
+    }
     unlink(main.c_str());
     unlink(dep.c_str());
     unlink(dotted.c_str());
