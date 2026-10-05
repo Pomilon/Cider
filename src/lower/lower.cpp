@@ -4350,6 +4350,17 @@ ir::Value Lowerer::onIdentOrExpr(const Expr* expr, TypeRef expected) {
             }
             return words[0];
         }
+        // An address in a value position (a cast's operand, a call
+        // argument) lowers through the address path, which answers one
+        // word — the same single-answer rule as the dereference above.
+        if (unary->op == UnOp::Addr) {
+            std::vector<ir::Value> words = lowerAddrOf(*unary);
+            if (failed_ || words.size() != kOneWord) {
+                refuse(expr->pos, "this expression");
+                return undefined();
+            }
+            return words[0];
+        }
         if (unary->op == UnOp::Neg) {
             return lowerNeg(*unary);
         }

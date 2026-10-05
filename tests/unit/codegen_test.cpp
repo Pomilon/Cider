@@ -218,6 +218,16 @@ void testElementAddr() {
             "}\n",
             signaled);
     check(signaled, "an out-of-range element address traps");
+    // A cast over an address expression lowers the address first: `as`
+    // binds looser than `&`, so without parens this would read as the
+    // address of a cast, which the checker rejects.
+    check(runQuiet("func get(p: *u8) -> u8 { return *p; }\n"
+                   "func main() -> int {\n"
+                   "    var b: [u8; 2] = new [u8; 2] { 65, 66 };\n"
+                   "    var v: *void = (&b[1]) as *void;\n"
+                   "    return get(v as *u8) as int;\n"
+                   "}\n") == 66,
+          "a cast of &b[1] round-trips through *void");
 }
 
 // Structs live in memory: construct, read fields, add them.
