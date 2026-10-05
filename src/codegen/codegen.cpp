@@ -790,40 +790,143 @@ private:
             // 64-bit wraps naturally, so Wrap and Undefined emit the same
             // instruction: the mode travelled on the IR for the optimiser,
             // not for a second opcode here.
-            out_ += "  mov rax, " + slot(instr.operands[0].id) + "\n";
-            out_ += std::string("  ") + name + " rax, " + slot(instr.operands[1].id) + "\n";
+            // Sub-64-bit arithmetic computes at 64 bits and truncates:
+            // a 64-bit sum carries into bits the width does not own, so the
+            // result is narrowed with a sign-correct extension. Unsigned
+            // 32-bit needs no instruction (eax zeroes the top); signed and
+            // narrower widths extend explicitly. 8-bit multiply has no
+            // two-operand form, so it uses the implicit al/ax product.
+            bool narrow = instr.width == ir::IRType::I32 || instr.width == ir::IRType::U32 ||
+                          instr.width == ir::IRType::I16 || instr.width == ir::IRType::U16 ||
+                          instr.width == ir::IRType::I8 || instr.width == ir::IRType::U8;
+            bool isSigned = signedWidth(instr.width, instr.type);
+            bool isMul = instr.op == ir::Op::Mul;
+            bool byteMul = isMul && (instr.width == ir::IRType::I8 || instr.width == ir::IRType::U8);
+            if (byteMul) {
+                out_ += "  mov al, " + slot(instr.operands[0].id) + "\n";
+                out_ += std::string(isSigned ? "  imul byte ptr " : "  mul byte ptr ") +
+                        slot(instr.operands[1].id) + "\n";
+                out_ += std::string(isSigned ? "  movsx eax, ax\n" : "  movzx eax, ax\n");
+            } else {
+                out_ += "  mov rax, " + slot(instr.operands[0].id) + "\n";
+                out_ += std::string("  ") + name + " rax, " + slot(instr.operands[1].id) + "\n";
+                if (narrow) {
+                    if (instr.width == ir::IRType::I32 && isSigned) {
+                        out_ += "  movsxd rax, eax\n";
+                    } else if (instr.width == ir::IRType::I16) {
+                        out_ += std::string(isSigned ? "  movsx eax, ax\n" : "  movzx eax, ax\n");
+                    } else if (instr.width == ir::IRType::I8 || instr.width == ir::IRType::U8) {
+                        out_ += std::string(isSigned ? "  movsx eax, al\n" : "  movzx eax, al\n");
+                    }
+                }
+            }
             out_ += "  mov " + slot(instr.results[0].id) + ", rax\n";
             return true;
         }
         if (instr.op == ir::Op::Div || instr.op == ir::Op::Rem) {
-            // Signed divides sign-extend; unsigned ones zero the top instead.
-            // Either faults on a zero divisor, which is the defined trap.
-            out_ += "  mov rax, " + slot(instr.operands[0].id) + "\n";
-            if (signedWidth(instr.width, instr.type)) {
-                out_ += "  cqo\n";
-                out_ += "  idiv qword ptr " + slot(instr.operands[1].id) + "\n";
-            } else {
-                out_ += "  xor edx, edx\n";
-                out_ += "  div qword ptr " + slot(instr.operands[1].id) + "\n";
+            // Division runs at the operand width: a widened divide would
+            // miss the MIN/-1 fault the spec demands at the value's own
+            // width, so 32/16/8-bit use their own dividend/divisor forms
+            // and extend the quotient or remainder afterwards. Every form
+            // faults on a zero divisor, which is the defined trap.
+            bool isSigned = signedWidth(instr.width, instr.type);
+            bool wantQuotient = instr.op == ir::Op::Div;
+            if (instr.width == ir::IRType::I64 || instr.width == ir::IRType::U64) {
+                out_ += "  mov rax, " + slot(instr.operands[0].id) + "\n";
+                if (isSigned) {
+                    out_ += "  cqo\n";
+                    out_ += "  idiv qword ptr " + slot(instr.operands[1].id) + "\n";
+                } else {
+                    out_ += "  xor edx, edx\n";
+                    out_ += "  div qword ptr " + slot(instr.operands[1].id) + "\n";
+                }
+                if (wantQuotient) {
+                    out_ += "  mov " + slot(instr.results[0].id) + ", rax\n";
+                } else {
+                    out_ += "  mov " + slot(instr.results[0].id) + ", rdx\n";
+                }
+                return true;
             }
-            if (instr.op == ir::Op::Div) {
-                out_ += "  mov " + slot(instr.results[0].id) + ", rax\n";
-            } else {
-                out_ += "  mov " + slot(instr.results[0].id) + ", rdx\n";
+            if (instr.width == ir::IRType::I32 || instr.width == ir::IRType::U32) {
+                out_ += "  mov eax, " + slot(instr.operands[0].id) + "\n";
+                if (isSigned) {
+                    out_ += "  cdq\n";
+                    out_ += "  idiv dword ptr " + slot(instr.operands[1].id) + "\n";
+                    out_ += wantQuotient ? "  movsxd rax, eax\n" : "  movsxd rdx, edx\n";
+                } else {
+                    out_ += "  xor edx, edx\n";
+                    out_ += "  div dword ptr " + slot(instr.operands[1].id) + "\n";
+                }
+                if (wantQuotient) {
+                    out_ += "  mov " + slot(instr.results[0].id) + ", rax\n";
+                } else {
+                    out_ += "  mov " + slot(instr.results[0].id) + ", rdx\n";
+                }
+                return true;
             }
-            return true;
+            if (instr.width == ir::IRType::I16 || instr.width == ir::IRType::U16) {
+                out_ += "  mov ax, " + slot(instr.operands[0].id) + "\n";
+                if (isSigned) {
+                    out_ += "  cwd\n";
+                    out_ += "  idiv word ptr " + slot(instr.operands[1].id) + "\n";
+                    out_ += std::string(wantQuotient ? "  movsx eax, ax\n" : "  movsx edx, dx\n");
+                } else {
+                    out_ += "  xor dx, dx\n";
+                    out_ += "  div word ptr " + slot(instr.operands[1].id) + "\n";
+                    out_ += std::string(wantQuotient ? "  movzx eax, ax\n" : "  movzx edx, dx\n");
+                }
+                if (wantQuotient) {
+                    out_ += "  mov " + slot(instr.results[0].id) + ", rax\n";
+                } else {
+                    out_ += "  mov " + slot(instr.results[0].id) + ", rdx\n";
+                }
+                return true;
+            }
+            if (instr.width == ir::IRType::I8 || instr.width == ir::IRType::U8) {
+                out_ += "  mov al, " + slot(instr.operands[0].id) + "\n";
+                if (isSigned) {
+                    out_ += "  cbw\n";
+                    out_ += "  idiv byte ptr " + slot(instr.operands[1].id) + "\n";
+                    out_ += std::string(wantQuotient ? "  movsx eax, al\n" : "  movsx eax, ah\n");
+                    out_ += "  mov " + slot(instr.results[0].id) + ", rax\n";
+                } else {
+                    out_ += "  xor ah, ah\n";
+                    out_ += "  div byte ptr " + slot(instr.operands[1].id) + "\n";
+                    out_ += std::string(wantQuotient ? "  movzx eax, al\n" : "  movzx eax, ah\n");
+                    out_ += "  mov " + slot(instr.results[0].id) + ", rax\n";
+                }
+                return true;
+            }
+            refuse(instr.loc, "this division width is not emitted yet");
+            return false;
         }
         if (instr.op == ir::Op::Shl || instr.op == ir::Op::Shr) {
-            // The count lives in cl: x86 masks it to 5 or 6 bits itself,
-            // which is SEMANTICS §3's documented result, not an accident.
-            out_ += "  mov rax, " + slot(instr.operands[0].id) + "\n";
+            // The count lives in cl and the hardware masks it to the
+            // operand size (5 bits at 32 bits and below, 6 at 64), which
+            // is SEMANTICS §3's documented result — so the shift runs at
+            // the value's own width and narrow results extend afterwards.
+            bool isSigned = signedWidth(instr.width, instr.type);
+            const char* acc = "rax";
+            const char* ext = nullptr;
+            if (instr.width == ir::IRType::I32 || instr.width == ir::IRType::U32) {
+                acc = "eax";
+                ext = (instr.width == ir::IRType::I32) ? "movsxd rax, eax" : nullptr;
+            } else if (instr.width == ir::IRType::I16 || instr.width == ir::IRType::U16) {
+                acc = "ax";
+                ext = isSigned ? "movsx eax, ax" : "movzx eax, ax";
+            } else if (instr.width == ir::IRType::I8 || instr.width == ir::IRType::U8) {
+                acc = "al";
+                ext = isSigned ? "movsx eax, al" : "movzx eax, al";
+            }
+            out_ += std::string("  mov ") + acc + ", " + slot(instr.operands[0].id) + "\n";
             out_ += "  mov rcx, " + slot(instr.operands[1].id) + "\n";
-            if (instr.op == ir::Op::Shl) {
-                out_ += "  shl rax, cl\n";
-            } else if (signedWidth(instr.width, instr.type)) {
-                out_ += "  sar rax, cl\n";
-            } else {
-                out_ += "  shr rax, cl\n";
+            std::string op = "shl ";
+            if (instr.op == ir::Op::Shr) {
+                op = isSigned ? "sar " : "shr ";
+            }
+            out_ += "  " + op + acc + ", cl\n";
+            if (ext != nullptr) {
+                out_ += std::string("  ") + ext + "\n";
             }
             out_ += "  mov " + slot(instr.results[0].id) + ", rax\n";
             return true;

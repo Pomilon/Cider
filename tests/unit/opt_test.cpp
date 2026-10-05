@@ -262,12 +262,47 @@ void testPipelineRefuses() {
     check(!result.error.empty(), "with a reason");
 }
 
+// Narrow constants fold at their own width: `2000000000 + 2000000000`
+// is an i32 wrap, not an i64 sum, and a 32-bit MIN/-1 keeps its
+// division for the hardware trap instead of folding.
+void testFoldWidths() {
+    std::printf("narrow constants fold at their width\n");
+    Piped r = pipe("func f() -> int { return 2000000000 + 2000000000; }\n");
+    check(r.ok, "lowers and optimises: " + r.stage);
+    const cider::ir::Function* fn = find(r.module.get(), "f");
+    check(fn != nullptr, "the function is there");
+    if (fn != nullptr) {
+        check(countOp(*fn, cider::ir::Op::Add) == 0, "no add remains");
+        int64_t folded = 0;
+        bool seen = false;
+        for (const cider::ir::Block& block : fn->blocks) {
+            for (const cider::ir::Instr& instr : block.body) {
+                if (instr.op == cider::ir::Op::Const && !instr.results.empty()) {
+                    folded = instr.constantBits;
+                    seen = true;
+                }
+            }
+        }
+        check(seen && folded == -294967296, "the const wraps at 32 bits");
+    }
+    Piped t = pipe(
+        "func f(a: int) -> int {\n"
+        "    var m: int = -2147483648;\n"
+        "    return m / -1;\n"
+        "}\n");
+    check(t.ok, "lowers and optimises: " + t.stage);
+    const cider::ir::Function* div = find(t.module.get(), "f");
+    check(div != nullptr && countOp(*div, cider::ir::Op::Div) == 1,
+          "a 32-bit MIN/-1 keeps its division");
+}
+
 }  // namespace
 
 int main() {
     std::printf("opt_test — malformed IR is refused, passes preserve meaning\n\n");
     testWellFormed();
     testFold();
+    testFoldWidths();
     testDeadCode();
     testIndirectKept();
     testTrapKept();

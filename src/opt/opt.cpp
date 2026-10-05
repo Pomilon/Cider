@@ -57,6 +57,59 @@ std::optional<int64_t> foldOne(const ir::Instr& instr,
         return v >= static_cast<__int128>(INT64_MIN) &&
                v <= static_cast<__int128>(INT64_MAX);
     };
+    // A fold emulates the runtime operation at its own width: sub-64
+    // values wrap at their width (the corpus pins wrap on i32), so the
+    // inputs truncate first and the output truncates after. 64-bit and
+    // pointer widths keep the old refuse-on-overflow shape.
+    int bits = 0;
+    bool isSigned = true;
+    switch (instr.width) {
+        case ir::IRType::I8:
+            bits = 8;
+            break;
+        case ir::IRType::U8:
+            bits = 8;
+            isSigned = false;
+            break;
+        case ir::IRType::I16:
+            bits = 16;
+            break;
+        case ir::IRType::U16:
+            bits = 16;
+            isSigned = false;
+            break;
+        case ir::IRType::I32:
+            bits = 32;
+            break;
+        case ir::IRType::U32:
+            bits = 32;
+            isSigned = false;
+            break;
+        default:
+            break;
+    }
+    auto truncate = [](__int128 v, int toBits, bool toSigned) {
+        if (toBits <= 0 || toBits >= 64) {
+            return v;
+        }
+        unsigned __int128 mask =
+            (static_cast<unsigned __int128>(1) << toBits) - 1;
+        unsigned __int128 kept = static_cast<unsigned __int128>(v) & mask;
+        if (!toSigned) {
+            return static_cast<__int128>(kept);
+        }
+        unsigned __int128 sign =
+            static_cast<unsigned __int128>(1) << (toBits - 1);
+        if ((kept & sign) != 0) {
+            return static_cast<__int128>(
+                kept - (static_cast<unsigned __int128>(1) << toBits));
+        }
+        return static_cast<__int128>(kept);
+    };
+    if (bits > 0) {
+        a = truncate(a, bits, isSigned);
+        b = truncate(b, bits, isSigned);
+    }
     __int128 out = 0;
     bool done = false;
     if (instr.op == ir::Op::Cmp) {
@@ -110,10 +163,20 @@ std::optional<int64_t> foldOne(const ir::Instr& instr,
         if (b == 0) {
             return std::nullopt;
         }
-        if (a == static_cast<__int128>(INT64_MIN) && b == -1) {
-            return std::nullopt;
+        if (isSigned) {
+            __int128 minVal = bits > 0
+                ? -(static_cast<__int128>(1) << (bits - 1))
+                : static_cast<__int128>(INT64_MIN);
+            if (a == minVal && b == -1) {
+                return std::nullopt;
+            }
+            out = instr.op == ir::Op::Div ? a / b : a % b;
+        } else {
+            unsigned __int128 ua = static_cast<unsigned __int128>(a);
+            unsigned __int128 ub = static_cast<unsigned __int128>(b);
+            out = static_cast<__int128>(
+                instr.op == ir::Op::Div ? ua / ub : ua % ub);
         }
-        out = instr.op == ir::Op::Div ? a / b : a % b;
         done = true;
     } else if (instr.op == ir::Op::And) {
         out = a & b;
@@ -128,12 +191,23 @@ std::optional<int64_t> foldOne(const ir::Instr& instr,
         if (b < 0 || b >= 64) {
             return std::nullopt;
         }
-        if (instr.op == ir::Op::Shl) {
-            out = a << static_cast<int>(b);
+        // The hardware masks the count to the operand width; the fold
+        // uses the same mask so folded and executed shifts agree.
+        int64_t count = static_cast<int64_t>(b);
+        if (bits > 0 && bits <= 32) {
+            count &= 31;
         } else {
-            return static_cast<int64_t>(a >> static_cast<int>(b));
+            count &= 63;
+        }
+        if (instr.op == ir::Op::Shl) {
+            out = a << count;
+        } else {
+            return truncate(static_cast<int64_t>(a >> count), bits, isSigned);
         }
         done = true;
+    }
+    if (bits > 0) {
+        return truncate(out, bits, isSigned);
     }
     if (!done || !inRange(out)) {
         return std::nullopt;

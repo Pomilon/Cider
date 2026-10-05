@@ -237,6 +237,20 @@ void testPointerHeap() {
           "a double free dies loudly with the heap code");
 }
 
+void testArith32() {
+    std::printf("32-bit arithmetic wraps at 32 bits\n");
+    check(runQuiet("func main() -> int {\n"
+                   " var a: int = 2000000000;\n"
+                   " var b: int = 2000000000;\n"
+                   " var c: int = 2000000000;\n"
+                   " var d: int = 2000000000;\n"
+                   " var e: int = 2000000000;\n"
+                   " var f: int = 2000000000;\n"
+                   " var g: int = 2000000000;\n"
+                   " return (a + b + c + d + e + f + g) % 251; }\n") == 241,
+          "i32 sums wrap before the remainder");
+}
+
 // A function pointer calls its target; a nil one dies by hardware trap.
 void testIndirectCall() {
     std::printf("indirect calls run\n");
@@ -278,6 +292,7 @@ int main() {
     testStruct();
     testArray();
     testPointerHeap();
+    testArith32();
     testIndirectCall();
     testTrap();
     testRepro();
