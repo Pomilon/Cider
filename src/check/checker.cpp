@@ -612,11 +612,15 @@ void Checker::visitForInStmt(ForInStmt& n) {
         bindLocal(n.name, element, n.isMutable, n.pos);
     }
     ++loopDepth_;
-    n.body->accept(*this);
+    if (sink_ != nullptr) {
+        // The element binding lands here so the lowered body resolves it;
+        // onForIn re-accepts the body inside its own frame copy.
+        sink_->onForIn(n);
+    } else {
+        n.body->accept(*this);
+    }
     --loopDepth_;
     popScope();
-    // Same shape as for: iteration lowering does not exist yet.
-    fail(n.pos, "for-in is not implemented yet");
 }
 
 void Checker::visitExprStmt(ExprStmt& n) {

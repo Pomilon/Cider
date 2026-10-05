@@ -395,6 +395,48 @@ void testRepro() {
           "no build path leaks into the output");
 }
 
+void testForIn() {
+    std::printf("for-in runs\n");
+    // Array iteration reads every element in order.
+    check(runQuiet("func main() -> int {\n"
+                 "    var a: [int; 3] = new [int; 3] { 5, 6, 7 };\n"
+                 "    var s: int = 0;\n"
+                 "    for (var x in a) { s = s + x; }\n"
+                 "    return s;\n"
+                 "}\n") == 18,
+          "for-in over an array sums every element");
+    // A slice iterates its borrowed elements.
+    check(runQuiet("func main() -> int {\n"
+                 "    var a: [int; 4] = new [int; 4] { 1, 2, 3, 4 };\n"
+                 "    var s: []int = a[1:4];\n"
+                 "    var t: int = 0;\n"
+                 "    for (var x in s) { t = t + x; }\n"
+                 "    return t;\n"
+                 "}\n") == 9,
+          "for-in over a slice sums its elements");
+    // break leaves the iteration, continue skips to the next element.
+    check(runQuiet("func main() -> int {\n"
+                 "    var a: [int; 4] = new [int; 4] { 1, 2, 3, 4 };\n"
+                 "    var s: int = 0;\n"
+                 "    for (var x in a) {\n"
+                 "        if (x == 4) { break; }\n"
+                 "        s = s + x;\n"
+                 "    }\n"
+                 "    return s;\n"
+                 "}\n") == 6,
+          "break leaves for-in early");
+    check(runQuiet("func main() -> int {\n"
+                 "    var a: [int; 4] = new [int; 4] { 1, 2, 3, 4 };\n"
+                 "    var s: int = 0;\n"
+                 "    for (var x in a) {\n"
+                 "        if (x % 2 == 0) { continue; }\n"
+                 "        s = s + x;\n"
+                 "    }\n"
+                 "    return s;\n"
+                 "}\n") == 4,
+          "continue skips to the next element");
+}
+
 }  // namespace
 
 int main() {
@@ -408,6 +450,7 @@ int main() {
     testPointerHeap();
     testBreakContinue();
     testForLoop();
+    testForIn();
     testArith32();
     testIndirectCall();
     testTrap();

@@ -3334,6 +3334,252 @@ void Lowerer::onFor(ForStmt& n) {
     locals_.pop_back();
 }
 
+void Lowerer::onForIn(ForInStmt& n) {
+    if (failed_ || !enabled_ || function_ == nullptr) {
+        return;
+    }
+    // Arrays and slices iterate behind an index. The struct/class
+    // iter()/next() protocol has no lowering yet and refuses by name so
+    // the loop never disappears silently.
+    TypeRef seqType = checker_.typeOf(n.seq.get());
+    if (seqType.isError()) {
+        refuse(n.pos, "this iteration");
+        return;
+    }
+    Kind seqKind = seqType.type->kind();
+    if (seqKind != Kind::Array && seqKind != Kind::Slice) {
+        refuse(n.pos, "iterating this type");
+        return;
+    }
+    TypeRef element{seqType.type->element()};
+    int64_t elemBytes =
+        element.isError() ? 0 : resolver_.nominalSize(element.type);
+    if (element.isError() || elemBytes <= 0) {
+        refuse(n.pos, "this element");
+        return;
+    }
+    TypeRef count{ctx_.basic(BasicKind::I64)};
+    TypeRef ptrType{ctx_.pointer(element.type)};
+
+    // Base address and element count are answered once, before the loop:
+    // a slice lowers to its (pointer, length) pair, an array is a place
+    // plus a constant extent. Globals have no materialized address.
+    ir::Value base = undefined();
+    ir::Value lenValue = undefined();
+    if (seqKind == Kind::Slice) {
+        std::vector<ir::Value> pair = lowerWords(n.seq.get());
+        if (failed_ || pair.size() != kSliceWords) {
+            refuse(n.pos, "this iteration");
+            return;
+        }
+        base = pair[kFirstWord];
+        lenValue = pair[kLenWord];
+    } else {
+        Place basePlace;
+        if (!resolvePlace(n.seq.get(), basePlace) ||
+            !basePlace.global.empty()) {
+            refuse(n.pos, "this iteration");
+            return;
+        }
+        if (basePlace.hasIndirect) {
+            base = basePlace.indirect;
+            if (basePlace.off != 0) {
+                ir::Value delta = constantI64(basePlace.off, count, n.pos);
+                if (failed_) {
+                    return;
+                }
+                ir::Instr adjust;
+                adjust.op = ir::Op::Add;
+                adjust.loc = n.pos;
+                adjust.type = ptrType;
+                adjust.width = ir::IRType::Ptr;
+                adjust.isPure = true;
+                adjust.operands.push_back(base);
+                adjust.operands.push_back(delta);
+                ir::Value at = newValue(adjust.width, ptrType, n.pos);
+                adjust.results.push_back(at);
+                emit(std::move(adjust));
+                base = at;
+            }
+        } else if (!basePlace.slots.empty()) {
+            base = computedBase(basePlace.slots[0], basePlace.off, n.pos);
+        } else {
+            refuse(n.pos, "this iteration");
+            return;
+        }
+        std::optional<int64_t> extent = seqType.type->length();
+        if (!extent.has_value() || *extent < 0) {
+            refuse(n.pos, "this iteration");
+            return;
+        }
+        lenValue = constantI64(*extent, count, n.pos);
+    }
+    if (failed_) {
+        return;
+    }
+    base.type = ptrType;
+
+    // The index counts from zero; the element slot receives each visit.
+    ir::Value idxSlot = allocaSlot(count, n.pos);
+    ir::Value elemSlot = allocaSlot(element, n.pos);
+    if (failed_) {
+        return;
+    }
+    Place idxPlace;
+    idxPlace.slots = {idxSlot};
+    idxPlace.type = count;
+    storeRange(n.pos, idxPlace, {constantI64(0, count, n.pos)}, count);
+    if (failed_) {
+        return;
+    }
+
+    uint32_t headLabel = emitBlock(n.pos);
+    uint32_t bodyLabel = emitBlock(n.pos);
+    uint32_t stepLabel = emitBlock(n.pos);
+    uint32_t exitLabel = emitBlock(n.pos);
+
+    // The iteration variable binds in the loop's own frame, which the
+    // checker pushed a matching scope for before calling.
+    locals_.push_back({});
+    LocalBinding bind;
+    bind.slots = {elemSlot};
+    bind.type = element;
+    bind.isMutable = n.isMutable;
+    locals_.back()[n.name] = std::move(bind);
+
+    ir::Terminator toHead;
+    toHead.term = ir::Term::Br;
+    toHead.target = headLabel;
+    toHead.loc = n.pos;
+    emitTerminator(toHead);
+
+    startBlock(headLabel);
+    std::vector<ir::Value> now = loadRange(n.pos, idxPlace, count);
+    if (failed_ || now.size() != kOneWord) {
+        return;
+    }
+    ir::Value inBounds = emitI64Cmp(n.pos, BinOp::Lt, now[kFirstWord], lenValue);
+    if (failed_) {
+        return;
+    }
+    ir::Terminator cond;
+    cond.term = ir::Term::CondBr;
+    cond.cond = inBounds;
+    cond.thenTarget = bodyLabel;
+    cond.elseTarget = exitLabel;
+    cond.loc = n.pos;
+    emitTerminator(cond);
+
+    startBlock(bodyLabel);
+    {
+        // element address = base + index * stride (SEMANTICS 8).
+        ir::Value scaled = now[kFirstWord];
+        if (elemBytes != kOneMember) {
+            ir::Value stride = constantI64(elemBytes, count, n.pos);
+            if (failed_) {
+                return;
+            }
+            ir::Instr mul;
+            mul.op = ir::Op::Mul;
+            mul.loc = n.pos;
+            mul.type = count;
+            mul.width = widthOf(count, n.pos);
+            if (failed_) {
+                return;
+            }
+            mul.isPure = true;
+            mul.operands.push_back(now[kFirstWord]);
+            mul.operands.push_back(stride);
+            scaled = newValue(mul.width, count, n.pos);
+            mul.results.push_back(scaled);
+            emit(std::move(mul));
+        }
+        ir::Instr step;
+        step.op = ir::Op::Add;
+        step.loc = n.pos;
+        step.type = ptrType;
+        step.width = ir::IRType::Ptr;
+        step.isPure = true;
+        step.operands.push_back(base);
+        step.operands.push_back(scaled);
+        ir::Value addr = newValue(step.width, ptrType, n.pos);
+        step.results.push_back(addr);
+        emit(std::move(step));
+        if (failed_) {
+            return;
+        }
+        Place at;
+        at.slots = {addr};
+        at.type = element;
+        std::vector<ir::Value> words = loadRange(n.pos, at, element);
+        if (failed_) {
+            return;
+        }
+        Place elemPlace;
+        elemPlace.slots = {elemSlot};
+        elemPlace.type = element;
+        storeRange(n.pos, elemPlace, words, element);
+        if (failed_) {
+            return;
+        }
+    }
+
+    loops_.push_back(LoopTargets{stepLabel, exitLabel});
+    bool savedTerminated = terminated_;
+    terminated_ = false;
+    if (n.body != nullptr) {
+        n.body->accept(checker_);
+    }
+    loops_.pop_back();
+    if (!terminated_) {
+        ir::Terminator toStep;
+        toStep.term = ir::Term::Br;
+        toStep.target = stepLabel;
+        toStep.loc = n.pos;
+        emitTerminator(toStep);
+    }
+    terminated_ = savedTerminated;
+
+    startBlock(stepLabel);
+    {
+        std::vector<ir::Value> at = loadRange(n.pos, idxPlace, count);
+        if (failed_ || at.size() != kOneWord) {
+            return;
+        }
+        ir::Value one = constantI64(1, count, n.pos);
+        if (failed_) {
+            return;
+        }
+        ir::Instr bump;
+        bump.op = ir::Op::Add;
+        bump.loc = n.pos;
+        bump.type = count;
+        bump.width = widthOf(count, n.pos);
+        if (failed_) {
+            return;
+        }
+        bump.isPure = true;
+        bump.operands.push_back(at[kFirstWord]);
+        bump.operands.push_back(one);
+        ir::Value next = newValue(bump.width, count, n.pos);
+        bump.results.push_back(next);
+        emit(std::move(bump));
+        storeRange(n.pos, idxPlace, {next}, count);
+        if (failed_) {
+            return;
+        }
+    }
+    if (!terminated_) {
+        ir::Terminator back;
+        back.term = ir::Term::Br;
+        back.target = headLabel;
+        back.loc = n.pos;
+        emitTerminator(back);
+    }
+    startBlock(exitLabel);
+    locals_.pop_back();
+}
+
 ir::Value Lowerer::onIdentOrExpr(const Expr* expr, TypeRef expected) {
     (void)expected;
     if (expr == nullptr || failed_) {

@@ -160,7 +160,7 @@ void testLoopMatchRefused() {
     // for-in and match lowerings have not landed yet.
     Checked fi =
         check("func f(a: [int; 3]) -> int { var s: int = 0; for (var x in a) { s = s + x; } return s; }\n");
-    check(!fi.ok && fi.stage == "check", "for-in refuses until lowering lands");
+    check(fi.ok, "for-in checks now that lowering lands it");
     Checked ma =
         check("func f(x: int) -> int { match x { 1 => { return 10; } default => { return 30; } } }\n");
     check(!ma.ok && ma.stage == "check", "match refuses until dispatch lands");

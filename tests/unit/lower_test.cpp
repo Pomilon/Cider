@@ -774,6 +774,60 @@ void testClosureBareName() {
     }
 }
 
+void testForIn() {
+    std::printf("for-in lowers\n");
+    Lowered r = lower(
+        "func f(a: [int; 4]) -> int {\n"
+        "    var s: int = 0;\n"
+        "    for (var x in a) {\n"
+        "        s = s + x;\n"
+        "    }\n"
+        "    return s;\n"
+        "}\n");
+    check(r.ok, "a for-in loop lowers: " + r.stage);
+    const cider::ir::Function* fn = find(r.module.get(), "f");
+    if (fn == nullptr) {
+        return;
+    }
+    // Same shape as the for head: a condition block with two forward
+    // edges, a back edge to it, and no block left unterminated.
+    const cider::ir::Block* head = nullptr;
+    for (const cider::ir::Block& block : fn->blocks) {
+        if (block.term.term == cider::ir::Term::CondBr &&
+            block.term.thenTarget > block.label &&
+            block.term.elseTarget > block.label) {
+            head = &block;
+            break;
+        }
+    }
+    check(head != nullptr, "the bounds check block is the loop head");
+    bool toHead = false;
+    bool allTerminated = true;
+    for (const cider::ir::Block& block : fn->blocks) {
+        if (block.term.term == cider::ir::Term::Unreachable) {
+            allTerminated = false;
+        }
+        if (head != nullptr && block.label != head->label &&
+            block.term.term == cider::ir::Term::Br &&
+            block.term.target == head->label) {
+            toHead = true;
+        }
+    }
+    check(toHead, "the step jumps back to the head");
+    check(allTerminated, "no block falls off");
+    // Four-byte elements scale the index, so the address math leaves a
+    // multiply behind.
+    bool hasMul = false;
+    for (const cider::ir::Block& block : fn->blocks) {
+        for (const cider::ir::Instr& instr : block.body) {
+            if (instr.op == cider::ir::Op::Mul) {
+                hasMul = true;
+            }
+        }
+    }
+    check(hasMul, "the element stride scales the index");
+}
+
 }  // namespace
 
 int main() {
@@ -804,6 +858,7 @@ int main() {
     testDerefStore();
     testBreakContinue();
     testForLoop();
+    testForIn();
     testRefuseKeepsScopes();
     testInterfaceParamRefused();
     testNotYetLowered();
