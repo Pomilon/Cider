@@ -1,0 +1,39 @@
+from std.io import print, puts, exit;
+
+var side_effect_called: int = 0;
+
+func side_effect_false() -> bool {
+    side_effect_called = 1;
+    return false;
+}
+
+func side_effect_true() -> bool {
+    side_effect_called = 1;
+    return true;
+}
+
+func test_and_short_circuit() -> void {
+    side_effect_called = 0;
+    var result: bool = false && side_effect_false();
+    if (side_effect_called != 0) {
+        puts("FAIL: && short-circuit broken");
+        exit(1);
+    }
+    puts("PASS: && short-circuit");
+}
+
+func test_or_short_circuit() -> void {
+    side_effect_called = 0;
+    var result: bool = true || side_effect_true();
+    if (side_effect_called != 0) {
+        puts("FAIL: || short-circuit broken");
+        exit(1);
+    }
+    puts("PASS: || short-circuit");
+}
+
+func _start() -> void {
+    test_and_short_circuit();
+    test_or_short_circuit();
+    exit(0);
+}

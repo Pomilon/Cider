@@ -1,0 +1,58 @@
+var dtorCount: int = 0;
+
+class MyObj {
+    var id: int;
+
+    func ~MyObj() {
+        dtorCount = dtorCount + 1;
+    }
+}
+
+func testScopeExit() -> int {
+    var obj: MyObj;
+    obj.id = 42;
+    return 0;
+}
+
+func testReturnExit() -> int {
+    var obj: MyObj;
+    obj.id = 99;
+    return 0;
+}
+
+func testBlockExit() -> int {
+    {
+        var a: MyObj;
+        var b: MyObj;
+    }
+    return 0;
+}
+
+func testBreak() -> int {
+    var count: int = 0;
+    while (count < 5) {
+        var obj: MyObj;
+        obj.id = count;
+        count = count + 1;
+        if (count >= 3) { break; }
+    }
+    return 0;
+}
+
+func main() -> int {
+    if (dtorCount != 0) { return 1; }
+
+    var r1: int = testScopeExit();
+    if (dtorCount != 1) { return 2; }
+
+    var r2: int = testReturnExit();
+    if (dtorCount != 2) { return 3; }
+
+    var r3: int = testBlockExit();
+    if (dtorCount != 4) { return 4; }
+
+    var r4: int = testBreak();
+    if (dtorCount != 7) { return 5; }
+
+    return 0;
+}

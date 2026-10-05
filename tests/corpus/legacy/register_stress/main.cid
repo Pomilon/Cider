@@ -1,0 +1,37 @@
+from std.io import print, printInt, exit;
+
+func _start() -> void {
+    // Force spills by using more than available registers (approx 11)
+    var a: int = 1;
+    var b: int = 2;
+    var c: int = 3;
+    var d: int = 4;
+    var e: int = 5;
+    var f: int = 6;
+    var g: int = 7;
+    var h: int = 8;
+    var i: int = 9;
+    var j: int = 10;
+    var k: int = 11;
+    var l: int = 12;
+    var m: int = 13;
+    var n: int = 14;
+    var o: int = 15;
+    
+    print("Testing register pressure (spilling)...\n");
+    
+    var sum: int = a + b + c + d + e + f + g + h + i + j + k + l + m + n + o;
+    // 1+2+3+4+5+6+7+8+9+10+11+12+13+14+15 = (15*16)/2 = 120
+    
+    print("Sum: ");
+    printInt(sum);
+    print("\n");
+    
+    if (sum == 120) {
+        print("Register Stress Success!\n");
+        exit(0);
+    } else {
+        print("Register Stress Failure!\n");
+        exit(1);
+    }
+}

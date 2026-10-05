@@ -57,6 +57,8 @@ def main():
         entry = classes[name]
         cls = entry["class"]
         d = os.path.join(CORPUS, name)
+        if not os.path.isdir(d):
+            d = os.path.join(CORPUS, "legacy", name)
         with open(os.path.join(d, "expected.json")) as fh:
             expected = json.load(fh)
         siblings = [f for f in os.listdir(d)

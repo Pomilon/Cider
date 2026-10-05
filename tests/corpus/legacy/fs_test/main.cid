@@ -1,0 +1,59 @@
+from std.io import print, puts, strlen, exit;
+from std.fs import open, read, write, close, unlink, lseek, O_RDONLY, O_WRONLY, O_RDWR, O_CREAT, O_TRUNC;
+
+func _start() -> void {
+    var msg: string = "fs_test: starting...\n";
+    var p: char* = msg as char*;
+    var len: int = strlen(p);
+    write(1, msg as *void, len);
+
+    var fd: int = open("/tmp/cider_fs_test.txt", O_WRONLY | O_CREAT | O_TRUNC, 420);
+    if (fd < 0) {
+        puts("FAIL: open for write");
+        exit(1);
+    }
+    puts("fs_test: opened for write");
+
+    var data: string = "Hello from Cider fs module!\n";
+    p = data as char*;
+    len = strlen(p);
+    var written: int = write(fd, data as *void, len);
+    if (written != len) {
+        puts("FAIL: write count mismatch");
+        exit(1);
+    }
+    puts("fs_test: write ok");
+
+    if (close(fd) != 0) {
+        puts("FAIL: close after write");
+        exit(1);
+    }
+    puts("fs_test: close ok");
+
+    fd = open("/tmp/cider_fs_test.txt", O_RDONLY, 0);
+    if (fd < 0) {
+        puts("FAIL: open for read");
+        exit(1);
+    }
+
+    var buf: [char; 64];
+    var nread: int = read(fd, buf as *void, 64);
+    if (nread != len) {
+        puts("FAIL: read count mismatch");
+        exit(1);
+    }
+    puts("fs_test: read ok");
+
+    write(1, buf as *void, nread);
+
+    close(fd);
+
+    if (unlink("/tmp/cider_fs_test.txt") != 0) {
+        puts("FAIL: unlink");
+        exit(1);
+    }
+    puts("fs_test: unlink ok");
+
+    puts("PASS: fs_test");
+    exit(0);
+}

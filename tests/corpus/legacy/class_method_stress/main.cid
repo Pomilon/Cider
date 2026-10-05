@@ -1,0 +1,48 @@
+from std.io import puts, exit;
+
+class Counter {
+    var value: int;
+
+    func increment() -> void {
+        this.value = this.value + 1;
+    }
+
+    func getValue() -> int {
+        return this.value;
+    }
+}
+
+func test_basic_class() -> int {
+    var c: Counter;
+    c.value = 0;
+    c.increment();
+    c.increment();
+    c.increment();
+    if (c.getValue() != 3) { return 1; }
+    return 0;
+}
+
+func test_method_return() -> int {
+    var c: Counter;
+    c.value = 42;
+    if (c.getValue() != 42) { return 2; }
+    return 0;
+}
+
+func _start() {
+    var result: int = 0;
+
+    result = test_basic_class();
+    if (result != 0) { puts("FAIL: basic class\n"); exit(result); }
+
+    result = test_method_return();
+    if (result != 0) { puts("FAIL: method return\n"); exit(result); }
+
+    puts("PASS: class_method_stress\n");
+
+    asm {
+        "mov rax, 60"
+        "xor rdi, rdi"
+        "syscall"
+    }
+}

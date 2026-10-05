@@ -1,0 +1,20 @@
+var counter: u64 = 0;
+
+func bump() -> u64 {
+    counter = counter + 1;
+    return counter;
+}
+
+func _start() {
+    // Two identical-looking calls must BOTH execute (side effects).
+    var a: u64 = bump();
+    var b: u64 = bump();
+    if (a == 1 && b == 2) {
+        asm { "mov rax, 60" }
+        asm { "mov rdi, 42" }
+        asm { "syscall" }
+    }
+    asm { "mov rax, 60" }
+    asm { "mov rdi, 1" }
+    asm { "syscall" }
+}

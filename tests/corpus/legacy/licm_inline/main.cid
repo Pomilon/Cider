@@ -1,0 +1,21 @@
+func loop_with_constant(n: u64, base: u64) -> u64 {
+    var sum: u64 = 0;
+    var i: u64 = 0;
+    while (i < n) {
+        sum = sum + base;
+        i = i + 1;
+    }
+    return sum;
+}
+
+func _start() {
+    var result: u64 = loop_with_constant(50, 8);
+    if (result == 400) {
+        asm { "mov rax, 60" }
+        asm { "mov rdi, 42" }
+        asm { "syscall" }
+    }
+    asm { "mov rax, 60" }
+    asm { "mov rdi, 1" }
+    asm { "syscall" }
+}
