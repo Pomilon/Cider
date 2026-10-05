@@ -153,9 +153,14 @@ void testThrowRefused() {
 
 void testLoopMatchRefused() {
     std::printf("unimplemented control flow refuses loudly\n");
+    // Lowering landed for `for` (FEAT-042), so the pure-check path accepts it.
     Checked fo =
         check("func f() -> int { var s: int = 0; for (var i: int = 0; i < 10; i = i + 1) { s = s + 1; } return s; }\n");
-    check(!fo.ok && fo.stage == "check", "for refuses until lowering lands");
+    check(fo.ok, "for checks: " + fo.stage);
+    // for-in and match lowerings have not landed yet.
+    Checked fi =
+        check("func f(a: [int; 3]) -> int { var s: int = 0; for (var x in a) { s = s + x; } return s; }\n");
+    check(!fi.ok && fi.stage == "check", "for-in refuses until lowering lands");
     Checked ma =
         check("func f(x: int) -> int { match x { 1 => { return 10; } default => { return 30; } } }\n");
     check(!ma.ok && ma.stage == "check", "match refuses until dispatch lands");

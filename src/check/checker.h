@@ -79,6 +79,7 @@ public:
     virtual void onContinue(Continue& n) { (void)n; }
     virtual void onIf(IfStmt& n) { (void)n; }
     virtual void onWhile(WhileStmt& n) { (void)n; }
+    virtual void onFor(ForStmt& n) { (void)n; }
     // `delete p;` frees a class object. Checked first (the pointer type is
     // known), then lowered here.
     virtual void onDelete(DeleteStmt& n) { (void)n; }

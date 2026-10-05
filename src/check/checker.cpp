@@ -542,6 +542,31 @@ void Checker::visitWhileStmt(WhileStmt& n) {
 
 void Checker::visitForStmt(ForStmt& n) {
     pushScope();
+    if (sink_ != nullptr) {
+        // Init is checked here so the condition and step resolve against
+        // it, but not lowered: onFor re-accepts it inside the loop's own
+        // frame so the binding lands where the loop can see it.
+        LowerSink* saved = sink_;
+        sink_ = nullptr;
+        if (n.init != nullptr) {
+            n.init->accept(*this);
+        }
+        sink_ = saved;
+        if (n.cond != nullptr) {
+            TypeRef cond = checkExpr(n.cond.get(), TypeRef{ctx_.basic(BasicKind::Bool)});
+            if (!cond.isError() && cond != TypeRef{ctx_.basic(BasicKind::Bool)}) {
+                fail(n.cond->pos, "a condition is bool");
+            }
+        }
+        if (n.step != nullptr) {
+            checkExpr(n.step.get(), TypeRef{ctx_.wildcard()});
+        }
+        ++loopDepth_;
+        sink_->onFor(n);
+        --loopDepth_;
+        popScope();
+        return;
+    }
     if (n.init != nullptr) {
         n.init->accept(*this);
     }
@@ -558,10 +583,6 @@ void Checker::visitForStmt(ForStmt& n) {
     n.body->accept(*this);
     --loopDepth_;
     popScope();
-    // Loop lowering does not exist yet: the body would vanish in lowering
-    // and run wrong silently, so for refuses here. Children still check
-    // above so their errors report.
-    fail(n.pos, "for is not implemented yet");
 }
 
 void Checker::visitForInStmt(ForInStmt& n) {

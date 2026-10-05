@@ -297,6 +297,60 @@ void testBreakContinue() {
           "a return inside a loop leaves immediately");
 }
 
+void testForLoop() {
+    std::printf("for loops run\n");
+    check(runQuiet("func main() -> int {\n"
+                 "    var s: int = 0;\n"
+                 "    for (var i: int = 0; i < 10; i = i + 1) {\n"
+                 "        s = s + 1;\n"
+                 "    }\n"
+                 "    return s;\n"
+                 "}\n") == 10,
+          "a counting for runs its body once per iteration");
+    // The step expression runs even when the body leaves early: with a
+    // continue it is the only thing that advances the loop.
+    check(runQuiet("func main() -> int {\n"
+                 "    var s: int = 0;\n"
+                 "    for (var i: int = 0; i < 6; i = i + 1) {\n"
+                 "        if (i % 2 == 0) { continue; }\n"
+                 "        s = s + i;\n"
+                 "    }\n"
+                 "    return s;\n"
+                 "}\n") == 9,
+          "continue still advances the step");
+    check(runQuiet("func main() -> int {\n"
+                 "    var s: int = 0;\n"
+                 "    for (var i: int = 0; i < 20; i = i + 1) {\n"
+                 "        if (i == 4) { break; }\n"
+                 "        s = s + 1;\n"
+                 "    }\n"
+                 "    return s;\n"
+                 "}\n") == 4,
+          "break leaves the for loop");
+    // An absent condition loops forever; a program that wants that says so
+    // with `while (true)`, but the spelling must still terminate here, so
+    // this probe uses a condition that stops it.
+    check(runQuiet("func main() -> int {\n"
+                 "    var s: int = 0;\n"
+                 "    for (var i: int = 3; i > 0; i = i - 1) {\n"
+                 "        s = s + i;\n"
+                 "    }\n"
+                 "    return s;\n"
+                 "}\n") == 6,
+          "a descending for runs its body per iteration");
+    // Nested for loops: the inner loop runs to completion each time.
+    check(runQuiet("func main() -> int {\n"
+                 "    var s: int = 0;\n"
+                 "    for (var i: int = 0; i < 3; i = i + 1) {\n"
+                 "        for (var j: int = 0; j < 4; j = j + 1) {\n"
+                 "            s = s + 1;\n"
+                 "        }\n"
+                 "    }\n"
+                 "    return s;\n"
+                 "}\n") == 12,
+          "nested for loops run the inner loop per outer iteration");
+}
+
 void testArith32() {
     std::printf("32-bit arithmetic wraps at 32 bits\n");
     check(runQuiet("func main() -> int {\n"
@@ -353,6 +407,7 @@ int main() {
     testArray();
     testPointerHeap();
     testBreakContinue();
+    testForLoop();
     testArith32();
     testIndirectCall();
     testTrap();

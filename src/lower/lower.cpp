@@ -3247,6 +3247,93 @@ void Lowerer::onWhile(WhileStmt& n) {
     startBlock(exitLabel);
 }
 
+void Lowerer::onFor(ForStmt& n) {
+    if (failed_ || !enabled_ || function_ == nullptr) {
+        return;
+    }
+    // Four blocks: the condition, the body, the step, and the exit. The
+    // init statement runs once in the current block, then control reaches
+    // the head. `continue` jumps to the step so the loop still advances —
+    // that is what the step expression is for.
+    uint32_t headLabel = emitBlock(n.pos);
+    uint32_t bodyLabel = emitBlock(n.pos);
+    uint32_t stepLabel = emitBlock(n.pos);
+    uint32_t exitLabel = emitBlock(n.pos);
+
+    // The loop's own scope: init binds here and must outlive cond, body,
+    // and step. The checker pushed its matching scope before calling.
+    locals_.push_back({});
+    if (n.init != nullptr) {
+        // Re-accepted with the sink attached: checked above, lowered here.
+        n.init->accept(checker_);
+    }
+    if (failed_) {
+        return;
+    }
+    ir::Terminator toHead;
+    toHead.term = ir::Term::Br;
+    toHead.target = headLabel;
+    toHead.loc = n.pos;
+    emitTerminator(toHead);
+
+    startBlock(headLabel);
+    if (n.cond != nullptr) {
+        ir::Value cond = onIdentOrExpr(n.cond.get(), checker_.typeOf(n.cond.get()));
+        if (failed_) {
+            return;
+        }
+        ir::Terminator br;
+        br.term = ir::Term::CondBr;
+        br.cond = cond;
+        br.thenTarget = bodyLabel;
+        br.elseTarget = exitLabel;
+        br.loc = n.pos;
+        emitTerminator(br);
+    } else {
+        ir::Terminator br;
+        br.term = ir::Term::Br;
+        br.target = bodyLabel;
+        br.loc = n.pos;
+        emitTerminator(br);
+    }
+
+    startBlock(bodyLabel);
+    loops_.push_back(LoopTargets{stepLabel, exitLabel});
+    bool savedTerminated = terminated_;
+    terminated_ = false;
+    if (n.body != nullptr) {
+        n.body->accept(checker_);
+    }
+    loops_.pop_back();
+    // A body that ended in a jump (break, continue, return) closed its own
+    // block; one that fell through still needs the edge to the step.
+    if (!terminated_) {
+        ir::Terminator toStep;
+        toStep.term = ir::Term::Br;
+        toStep.target = stepLabel;
+        toStep.loc = n.pos;
+        emitTerminator(toStep);
+    }
+    terminated_ = savedTerminated;
+
+    startBlock(stepLabel);
+    if (n.step != nullptr) {
+        onIdentOrExpr(n.step.get(), checker_.typeOf(n.step.get()));
+        if (failed_) {
+            return;
+        }
+    }
+    if (!terminated_) {
+        ir::Terminator back;
+        back.term = ir::Term::Br;
+        back.target = headLabel;
+        back.loc = n.pos;
+        emitTerminator(back);
+    }
+    startBlock(exitLabel);
+    locals_.pop_back();
+}
+
 ir::Value Lowerer::onIdentOrExpr(const Expr* expr, TypeRef expected) {
     (void)expected;
     if (expr == nullptr || failed_) {

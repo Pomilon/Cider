@@ -479,6 +479,60 @@ void testInterfaceParamRefused() {
     check(!r.ok && r.stage == "lower", "an interface param refuses loudly");
 }
 
+void testForLoop() {
+    std::printf("for loops lower\n");
+    Lowered r = lower(
+        "func f(n: int) -> int {\n"
+        "    var s: int = 0;\n"
+        "    for (var i: int = 0; i < n; i = i + 1) {\n"
+        "        s = s + 1;\n"
+        "    }\n"
+        "    return s;\n"
+        "}\n");
+    check(r.ok, "a for loop lowers: " + r.stage);
+    const cider::ir::Function* fn = find(r.module.get(), "f");
+    if (fn == nullptr) {
+        return;
+    }
+    // The head carries the condition; its two forward edges are the body
+    // and the exit, and the step jumps back to it.
+    const cider::ir::Block* head = nullptr;
+    for (const cider::ir::Block& block : fn->blocks) {
+        if (block.term.term == cider::ir::Term::CondBr &&
+            block.term.thenTarget > block.label &&
+            block.term.elseTarget > block.label) {
+            head = &block;
+            break;
+        }
+    }
+    check(head != nullptr, "the condition block is the loop head");
+    bool toHead = false;
+    bool allTerminated = true;
+    for (const cider::ir::Block& block : fn->blocks) {
+        if (block.term.term == cider::ir::Term::Unreachable) {
+            allTerminated = false;
+        }
+        if (head != nullptr && block.label != head->label &&
+            block.term.term == cider::ir::Term::Br &&
+            block.term.target == head->label) {
+            toHead = true;
+        }
+    }
+    check(toHead, "the step jumps back to the head");
+    check(allTerminated, "no block falls off");
+    // The init declaration must reach the head's block order: the loop
+    // variable is assigned before the condition ever runs.
+    bool hasAdd = false;
+    for (const cider::ir::Block& block : fn->blocks) {
+        for (const cider::ir::Instr& instr : block.body) {
+            if (instr.op == cider::ir::Op::Add) {
+                hasAdd = true;
+            }
+        }
+    }
+    check(hasAdd, "the step expression lowered");
+}
+
 void testBreakContinue() {
     std::printf("break and continue lower\n");
     // The head is the one block a jump goes backwards to: the condition is
@@ -749,6 +803,7 @@ int main() {
     testAddrOf();
     testDerefStore();
     testBreakContinue();
+    testForLoop();
     testRefuseKeepsScopes();
     testInterfaceParamRefused();
     testNotYetLowered();
