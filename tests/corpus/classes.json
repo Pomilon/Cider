@@ -1,18 +1,18 @@
 {
  "aggregate_list_init": {
-  "actual": "exit 1; tests/corpus/aggregate_list_init/main.cid:16:25: expected ';'; tests/corpus/aggregate_list_init/main.cid:16:25: a class holds fields and methods",
-  "blocker": "stdlib-imports",
-  "class": "D"
+  "actual": "compile rejection: tests/corpus/aggregate_list_init/main.cid:16:25: expected ';' \u2014 field initializers (`var x: int = 5` in class body); v3 fills fields via new/init only",
+  "blocker": "none",
+  "class": "B"
  },
  "aggregate_ternary": {
-  "actual": "exit 1; tests/corpus/aggregate_ternary/main.cid:48:13: a variable needs an initialiser; tests/corpus/aggregate_ternary/main.cid:65:18: a variable needs an initialiser",
-  "blocker": "stdlib-imports",
-  "class": "D"
+  "actual": "compile rejection: tests/corpus/aggregate_ternary/main.cid:48:13: a variable needs an initialiser \u2014 uninitialised local `var p: P;` (FEATURES 8.3: always an error)",
+  "blocker": "none",
+  "class": "B"
  },
  "aggregate_zero_init": {
-  "actual": "exit 1; tests/corpus/aggregate_zero_init/main.cid:49:16: expected ';'; tests/corpus/aggregate_zero_init/main.cid:49:16: a class holds fields and methods",
-  "blocker": "stdlib-imports",
-  "class": "D"
+  "actual": "compile rejection: tests/corpus/aggregate_zero_init/main.cid:49:16: expected ';' \u2014 field initializer in struct/class body; v3 fills fields via new/init only",
+  "blocker": "none",
+  "class": "B"
  },
  "alias_array_literal": {
   "actual": "exit 1; tests/corpus/alias_array_literal/main.cid:16:18: expected an expression; tests/corpus/alias_array_literal/main.cid:17:25: expected an expression",
@@ -40,9 +40,9 @@
   "class": "D"
  },
  "alias_field": {
-  "actual": "exit 1; tests/corpus/alias_field/main.cid:15:11: a variable needs an initialiser; tests/corpus/alias_field/main.cid:30:12: a variable needs an initialiser",
-  "blocker": "stdlib-imports",
-  "class": "D"
+  "actual": "compile rejection: tests/corpus/alias_field/main.cid:15:11: a variable needs an initialiser \u2014 uninitialised local `var s: S;` (FEATURES 8.3: always an error)",
+  "blocker": "none",
+  "class": "B"
  },
  "alias_interface": {
   "actual": "exit 1; tests/corpus/alias_interface/main.cid:20:13: expected ';'; tests/corpus/alias_interface/main.cid:40:14: a variable needs an initialiser",
@@ -125,9 +125,9 @@
   "class": "D"
  },
  "base_alias_kinds": {
-  "actual": "exit 1; tests/corpus/base_alias_kinds/main.cid:10:15: expected ';'; tests/corpus/base_alias_kinds/main.cid:10:15: a class holds fields and methods",
-  "blocker": "stdlib-imports",
-  "class": "D"
+  "actual": "compile rejection: tests/corpus/base_alias_kinds/main.cid:10:15: expected ';' \u2014 field initializer in class body; v3 fills fields via new/init only",
+  "blocker": "none",
+  "class": "B"
  },
  "base_ctor_dtor_chain": {
   "actual": "exit 1; tests/corpus/base_ctor_dtor_chain/main.cid:36:16: expected ';'; tests/corpus/base_ctor_dtor_chain/main.cid:36:16: a class holds fields and methods",
@@ -175,24 +175,24 @@
   "class": "D"
  },
  "callee_branch_release_once": {
-  "actual": "exit 1; tests/corpus/callee_branch_release_once/main.cid:55:8: a method needs a name; tests/corpus/callee_branch_release_once/main.cid:55:8: a class holds fields and methods",
-  "blocker": "stdlib-imports",
-  "class": "D"
+  "actual": "compile rejection: tests/corpus/callee_branch_release_once/main.cid:55:8: a method needs a name \u2014 v2 destructor spelling `func ~Sq()`; v3 uses deinit (FEATURES 2.2/5.3)",
+  "blocker": "none",
+  "class": "B"
  },
  "citer": {
-  "actual": "exit 1; tests/corpus/citer/main.cid:9:20: a variable needs an initialiser; tests/corpus/citer/main.cid:25:17: a variable needs an initialiser",
-  "blocker": "stdlib-imports",
-  "class": "D"
+  "actual": "compile rejection: tests/corpus/citer/main.cid:9:20: a variable needs an initialiser \u2014 uninitialised local `var it: Counter;` (FEATURES 8.3: always an error)",
+  "blocker": "none",
+  "class": "B"
  },
  "class_field_init": {
-  "actual": "exit 1; tests/corpus/class_field_init/main.cid:13:17: expected ';'; tests/corpus/class_field_init/main.cid:13:17: a class holds fields and methods",
-  "blocker": "stdlib-imports",
-  "class": "D"
+  "actual": "compile rejection: tests/corpus/class_field_init/main.cid:13:17: expected ';' \u2014 field initializer in class body; v3 fills fields via new/init only",
+  "blocker": "none",
+  "class": "B"
  },
  "class_field_names": {
-  "actual": "exit 1; tests/corpus/class_field_names/main.cid:20:28: expected '{' or '(' after new; tests/corpus/class_field_names/main.cid:21:5: expected an expression",
-  "blocker": "stdlib-imports",
-  "class": "D"
+  "actual": "compile rejection: tests/corpus/class_field_names/main.cid:20:28: expected '{' or '(' after new \u2014 bare `new Alpha` + `->` member access; v3 requires new C{...}/C(args) and (*p).f (FEATURES 13/14.2)",
+  "blocker": "none",
+  "class": "B"
  },
  "class_method_stress": {
   "actual": "exit 1; tests/corpus/legacy/class_method_stress/main.cid:16:19: a variable needs an initialiser; tests/corpus/legacy/class_method_stress/main.cid:26:19: a variable needs an initialiser",
@@ -315,9 +315,9 @@
   "class": "D"
  },
  "deref_aggregate_copy": {
-  "actual": "exit 1; tests/corpus/deref_aggregate_copy/main.cid:42:9: a class needs a body; tests/corpus/deref_aggregate_copy/main.cid:43:13: a variable needs an initialiser",
-  "blocker": "stdlib-imports",
-  "class": "D"
+  "actual": "compile rejection: tests/corpus/deref_aggregate_copy/main.cid:42:9: a class needs a body \u2014 v2 `class W extends V`; v3 inheritance is `class B : A` (FEATURES 14.1)",
+  "blocker": "none",
+  "class": "B"
  },
  "deref_incdec_nil_compound": {
   "actual": "compiler SIGSEGV (exit 139) at check on `q != &x` comparison (probe d5 isolates it); the nil `(*p) += n` path itself checks clean and traps silently with SIGSEGV (probe d2); live compound-deref works (probe d4)",
@@ -340,9 +340,9 @@
   "class": "D"
  },
  "destructor_ownership": {
-  "actual": "exit 1; tests/corpus/destructor_ownership/main.cid:52:10: a method needs a name; tests/corpus/destructor_ownership/main.cid:52:10: a class holds fields and methods",
-  "blocker": "stdlib-imports",
-  "class": "D"
+  "actual": "compile rejection: tests/corpus/destructor_ownership/main.cid:52:10: a method needs a name \u2014 v2 destructor spelling `func ~D()`; v3 uses deinit (FEATURES 2.2/5.3)",
+  "blocker": "none",
+  "class": "B"
  },
  "div_min_neg1": {
   "actual": "exit 1; tests/corpus/div_min_neg1/main.cid:14:20: cannot use i32 as i64; tests/corpus/div_min_neg1/main.cid:15:25: unbound name 'neg64'; runtime MIN/-1 traps with silent SIGFPE (probe m1, exit 136)",
@@ -415,9 +415,9 @@
   "class": "D"
  },
  "embedded_class_destructors": {
-  "actual": "exit 1; tests/corpus/embedded_class_destructors/main.cid:28:10: a method needs a name; tests/corpus/embedded_class_destructors/main.cid:28:10: a class holds fields and methods",
-  "blocker": "stdlib-imports",
-  "class": "D"
+  "actual": "compile rejection: tests/corpus/embedded_class_destructors/main.cid:28:10: a method needs a name \u2014 v2 destructor spelling `func ~Dropper()`; v3 uses deinit (FEATURES 2.2/5.3)",
+  "blocker": "none",
+  "class": "B"
  },
  "embedded_class_init": {
   "actual": "exit=1 stdout_len=0 stderr_len=4924 first=\"tests/corpus/embedded_class_init/main.cid:12:16: expected ';'\"",
@@ -815,8 +815,8 @@
   "class": "A"
  },
  "inline_string_literal": {
-  "actual": "exit 1; std.io:1:1: cannot find module 'std.io'",
-  "blocker": "stdlib-imports",
+  "actual": "tests/corpus/legacy/inline_string_literal/main.cid:4:5: not lowered yet: string returns are not emitted yet",
+  "blocker": "multi-word string returns (FEAT-026)",
   "class": "D"
  },
  "int_wrap": {
@@ -1175,14 +1175,14 @@
   "class": "D"
  },
  "recursion_stress": {
-  "actual": "exit 1; std.io:1:1: cannot find module 'std.io'",
-  "blocker": "stdlib-imports",
-  "class": "D"
+  "actual": "exit 0; self-checked (Ackermann(3,3)=61); stub expected.json filled from verified output",
+  "blocker": "none",
+  "class": "A"
  },
  "register_stress": {
-  "actual": "exit 1; std.io:1:1: cannot find module 'std.io'",
-  "blocker": "stdlib-imports",
-  "class": "D"
+  "actual": "exit 0; self-checked (sum 1..15=120); stub expected.json filled from verified output",
+  "blocker": "none",
+  "class": "A"
  },
  "return_array_literal": {
   "actual": "cider run exit 1, stdout empty, stderr diagnostic: `main.cid:39:13: a variable needs an initialiser`",

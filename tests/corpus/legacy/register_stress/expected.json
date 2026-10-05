@@ -1,1 +1,5 @@
-{"stdout": "", "stderr": "", "exit": 0}
+{
+ "stdout": "Testing register pressure (spilling)...\nSum: 120\nRegister Stress Success!\n",
+ "stderr": "",
+ "exit": 0
+}
