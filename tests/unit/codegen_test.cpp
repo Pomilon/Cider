@@ -437,6 +437,66 @@ void testForIn() {
           "continue skips to the next element");
 }
 
+void testFloat() {
+    std::printf("float arithmetic runs\n");
+    // f64 multiply truncates to int: 1.5 * 2.5 = 3.75 -> 3.
+    check(runQuiet("func main() -> int {\n"
+                 "    var a: f64 = 1.5;\n"
+                 "    var b: f64 = 2.5;\n"
+                 "    var c: f64 = a * b;\n"
+                 "    return c as int;\n"
+                 "}\n") == 3,
+          "f64 multiply reaches its result");
+    // f32 add: 1.5 + 4.0 = 5.5 -> 5.
+    check(runQuiet("func main() -> int {\n"
+                 "    var a: f32 = 1.5;\n"
+                 "    var b: f32 = 4.0;\n"
+                 "    return (a + b) as int;\n"
+                 "}\n") == 5,
+          "f32 add reaches its result");
+    // Comparison orders the operands.
+    check(runQuiet("func main() -> int {\n"
+                 "    var a: f64 = 1.5;\n"
+                 "    var b: f64 = 2.5;\n"
+                 "    if (a < b) { return 1; }\n"
+                 "    return 0;\n"
+                 "}\n") == 1,
+          "float comparison orders operands");
+    // Floats travel in SSE registers across a call.
+    check(runQuiet("func addf(a: f64, b: f64) -> f64 { return a + b; }\n"
+                 "func main() -> int {\n"
+                 "    return addf(1.5, 2.25) as int;\n"
+                 "}\n") == 3,
+          "float arguments and results cross a call");
+    // int -> f64 -> int round trip: 7 + 0.5 = 7.5 -> 7.
+    check(runQuiet("func main() -> int {\n"
+                 "    var i: int = 7;\n"
+                 "    var f: f64 = i as f64;\n"
+                 "    var g: f64 = f + 0.5;\n"
+                 "    return g as int;\n"
+                 "}\n") == 7,
+          "int and float convert both ways");
+    // Unary minus on a variable: -3.5 truncated is -3, plus 4 lands on 1
+    // (exit codes are eight bits, so the assertion stays positive).
+    check(runQuiet("func main() -> int {\n"
+                 "    var x: f64 = 3.5;\n"
+                 "    return ((-x) as int) + 4;\n"
+                 "}\n") == 1,
+          "float negation flips the sign");
+    // IEEE division by zero answers NaN and never traps: 0.0/0.0 != itself.
+    check(runQuiet("func main() -> int {\n"
+                 "    var z: f64 = 0.0;\n"
+                 "    var n: f64 = z / z;\n"
+                 "    if (n == n) { return 9; }\n"
+                 "    return 1;\n"
+                 "}\n") == 1,
+          "float division by zero is NaN, not a trap");
+    // A float global keeps its bits in the image.
+    check(runQuiet("var g: f64 = 1.5;\n"
+                 "func main() -> int { return g as int; }\n") == 1,
+          "a float global reaches the binary");
+}
+
 }  // namespace
 
 int main() {
@@ -453,6 +513,7 @@ int main() {
     testForIn();
     testArith32();
     testIndirectCall();
+    testFloat();
     testTrap();
     testRepro();
     std::printf("\n%d checks, %s\n", checks, failures == 0 ? "all passed" : "FAILURES");

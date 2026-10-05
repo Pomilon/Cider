@@ -8,21 +8,21 @@ func double_it(a: int) -> float {
   return (a as float) * 2.0;
 }
 
-func pick(which: int) -> fn(int) -> float {
-  if (which == 0) { return half; }
-  return double_it;
+func pick(which: int) -> *func(int) -> float {
+  if (which == 0) { return &half; }
+  return &double_it;
 }
 
 func main() -> int {
-  var f: fn(int) -> float = half;
-  var x: float = f(4);
+  var f: *func(int) -> float = &half;
+  var x: float = (*f)(4);
   if (x != 2.0) { return 1; }
 
-  var g: fn(int) -> float = pick(1);
-  var y: float = g(5);
+  var g: *func(int) -> float = pick(1);
+  var y: float = (*g)(5);
   if (y != 10.0) { return 2; }
 
-  var z: float = g(1);
+  var z: float = (*g)(1);
   if (z != 2.0) { return 3; }
 
   return 0;

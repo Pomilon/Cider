@@ -45,8 +45,17 @@ EvalResult literalValue(uint8_t base, const std::string& digits, bool negative) 
         }
         return EvalResult{true, -static_cast<int64_t>(magnitude), ""};
     }
-    if (magnitude > static_cast<unsigned __int128>(static_cast<uint64_t>(INT64_MAX))) {
+    if (magnitude > static_cast<unsigned __int128>(UINT64_MAX)) {
         return fail("integer literal does not fit");
+    }
+    if (magnitude > static_cast<unsigned __int128>(static_cast<uint64_t>(INT64_MAX))) {
+        // u64 territory: the bits ride wrapped, flagged for the fit check
+        // that knows whether the context can hold them.
+        EvalResult out;
+        out.ok = true;
+        out.value = static_cast<int64_t>(static_cast<uint64_t>(magnitude));
+        out.big = true;
+        return out;
     }
     return EvalResult{true, static_cast<int64_t>(magnitude), ""};
 }

@@ -6,6 +6,9 @@
 
 #include "lower/lower.h"
 
+#include <cstring>
+#include <cstdlib>
+
 #include "layout.h"
 #include "types/context.h"
 
@@ -438,6 +441,160 @@ ir::Value Lowerer::constantI64(int64_t value, TypeRef type, Position pos) {
     return result;
 }
 
+void Lowerer::recordParamClasses() {
+    if (function_ == nullptr || failed_) {
+        return;
+    }
+    function_->paramClasses.clear();
+    const std::vector<Parameter>& params = function_->signature.parameters();
+    uint64_t total = 0;
+    for (const Parameter& p : params) {
+        TypeRef type{p.type};
+        if (type.type != nullptr && type.type->kind() == Kind::Basic &&
+            basicIsFloat(*type.type->basic())) {
+            // One word, one SSE class: a float parameter never splits.
+            function_->paramClasses.push_back(
+                *type.type->basic() == BasicKind::F32 ? ir::IRType::F32
+                                                      : ir::IRType::F64);
+            total += 1;
+            continue;
+        }
+        int words = wordCount(type);
+        if (words < 1) {
+            words = 1;
+        }
+        for (int w = 0; w < words; ++w) {
+            function_->paramClasses.push_back(ir::IRType::Void);
+            total += 1;
+        }
+    }
+    // The classes must cover every allocated slot: a mismatch means the
+    // walk disagrees with the slots, and a prologue reading a class it
+    // does not have would pull an argument from the wrong register.
+    if (total != static_cast<uint64_t>(function_->params.size())) {
+        refuse(function_->loc, "this function's parameter classes");
+    }
+}
+
+ir::Value Lowerer::constantFBits(uint64_t bits, TypeRef type, Position pos) {
+    ir::Instr instr;
+    instr.op = ir::Op::Const;
+    instr.width = widthOf(type, pos);
+    instr.type = type;
+    instr.loc = pos;
+    instr.isPure = true;
+    // The bits ride in `constantBits` the same way an integer value does:
+    // an f32 pattern zero-extends into the low word (the movss reader takes
+    // those four bytes) and an f64 pattern is the whole field. Const's
+    // materialisation — imm32 or movabs — already serves both.
+    instr.constantBits = static_cast<int64_t>(bits);
+    instr.constantText = std::to_string(bits);
+    ir::Value result = newValue(instr.width, type, pos);
+    instr.results.push_back(result);
+    emit(std::move(instr));
+    return result;
+}
+
+ir::Value Lowerer::lowerFloatLit(const FloatLit& lit) {
+    TypeRef type = checker_.typeOf(&lit);
+    if (type.isError() || type.type->kind() != Kind::Basic) {
+        refuse(lit.pos, "this constant");
+        return undefined();
+    }
+    BasicKind basic = *type.type->basic();
+    // Parse at the target width: the decimal reaches binary32 or binary64
+    // in one rounding, so an f32 literal is not rounded twice through f64.
+    if (basic == BasicKind::F32) {
+        float parsed = 0.0f;
+        try {
+            parsed = std::stof(lit.text);
+        } catch (...) {
+            refuse(lit.pos, "this constant");
+            return undefined();
+        }
+        if (lit.negative) {
+            parsed = -parsed;
+        }
+        uint32_t pattern = 0;
+        std::memcpy(&pattern, &parsed, sizeof pattern);
+        return constantFBits(pattern, type, lit.pos);
+    }
+    if (basic == BasicKind::F64) {
+        double parsed = 0.0;
+        try {
+            parsed = std::stod(lit.text);
+        } catch (...) {
+            refuse(lit.pos, "this constant");
+            return undefined();
+        }
+        if (lit.negative) {
+            parsed = -parsed;
+        }
+        uint64_t pattern = 0;
+        std::memcpy(&pattern, &parsed, sizeof pattern);
+        return constantFBits(pattern, type, lit.pos);
+    }
+    refuse(lit.pos, "this constant");
+    return undefined();
+}
+
+ir::Value Lowerer::widenFloat(ir::Value v, TypeRef from, TypeRef to,
+                              Position pos) {
+    if (from.isError() || to.isError() || from.type == nullptr ||
+        to.type == nullptr || from.type->kind() != Kind::Basic ||
+        to.type->kind() != Kind::Basic ||
+        !basicIsFloat(*to.type->basic())) {
+        return v;
+    }
+    const bool fromFloat = basicIsFloat(*from.type->basic());
+    if (fromFloat &&
+        basicWidthBits(*from.type->basic()) >= basicWidthBits(*to.type->basic())) {
+        return v;
+    }
+    ir::Instr cast;
+    cast.op = ir::Op::Cast;
+    cast.loc = pos;
+    cast.type = to;
+    cast.width = widthOf(to, pos);
+    cast.isPure = true;
+    cast.operands.push_back(v);
+    ir::Value out = newValue(cast.width, to, pos);
+    cast.results.push_back(out);
+    emit(std::move(cast));
+    return out;
+}
+
+ir::Value Lowerer::lowerNeg(const Unary& n) {
+    TypeRef type = checker_.typeOf(&n);
+    if (type.isError() || type.type->kind() != Kind::Basic) {
+        refuse(n.pos, "this operator");
+        return undefined();
+    }
+    BasicKind basic = *type.type->basic();
+    const bool fits =
+        (basic >= BasicKind::I8 && basic <= BasicKind::U64) ||
+        basic == BasicKind::F32 || basic == BasicKind::F64;
+    if (!fits) {
+        // Bool and char arithmetic are not a thing: refuse rather than
+        // subtract from their bits.
+        refuse(n.pos, "this operator");
+        return undefined();
+    }
+    ir::Value value = onIdentOrExpr(n.operand.get(), type);
+    if (failed_) {
+        return undefined();
+    }
+    if (basic == BasicKind::F32 || basic == BasicKind::F64) {
+        // `0.0 - x`: IEEE subtraction answers the negation, and -0.0 and
+        // NaN round-trip the way negation must.
+        uint64_t zero = 0;
+        return emitArith(BinOp::Sub, constantFBits(zero, type, n.pos), value,
+                         type, n.pos);
+    }
+    return emitArith(BinOp::Sub, constantI64(0, type, n.pos), value, type,
+                     n.pos);
+}
+
 const Signature* Lowerer::functionSig(const std::string& name) const {
     const resolve::Scope* scope = resolver_.moduleScope();
     const resolve::Decl* decl = resolver_.lookup(scope, name);
@@ -485,6 +642,58 @@ void Lowerer::onGlobal(VarDecl& n) {
         binding.initial = lowered.len;
     } else if (dynamic_cast<const NilPtr*>(n.init.get()) != nullptr) {
         binding.initial = 0;
+    } else if (type.type->kind() == Kind::Basic &&
+               basicIsFloat(*type.type->basic())) {
+        // A float global carries its IEEE bits in the image. The
+        // initialiser is either a literal — parsed at the global's own
+        // width — or an integer constant the checker folded, converted
+        // with the same rounding a cast would apply.
+        BasicKind basic = *type.type->basic();
+        if (basic == BasicKind::F32) {
+            float value = 0.0f;
+            const auto* lit = dynamic_cast<const FloatLit*>(n.init.get());
+            if (lit != nullptr) {
+                try {
+                    value = std::stof(lit->text);
+                } catch (...) {
+                    refuse(n.init->pos, "a float global needs a constant");
+                    return;
+                }
+                if (lit->negative) {
+                    value = -value;
+                }
+            } else if (folded.ok) {
+                value = static_cast<float>(folded.value);
+            } else {
+                refuse(n.init->pos, "a float global needs a constant");
+                return;
+            }
+            uint32_t pattern = 0;
+            std::memcpy(&pattern, &value, sizeof pattern);
+            binding.initial = static_cast<int64_t>(static_cast<uint64_t>(pattern));
+        } else {
+            double value = 0.0;
+            const auto* lit = dynamic_cast<const FloatLit*>(n.init.get());
+            if (lit != nullptr) {
+                try {
+                    value = std::stod(lit->text);
+                } catch (...) {
+                    refuse(n.init->pos, "a float global needs a constant");
+                    return;
+                }
+                if (lit->negative) {
+                    value = -value;
+                }
+            } else if (folded.ok) {
+                value = static_cast<double>(folded.value);
+            } else {
+                refuse(n.init->pos, "a float global needs a constant");
+                return;
+            }
+            uint64_t pattern = 0;
+            std::memcpy(&pattern, &value, sizeof pattern);
+            binding.initial = static_cast<int64_t>(pattern);
+        }
     } else {
         binding.initial = folded.ok ? folded.value : 0;
     }
@@ -539,6 +748,7 @@ void Lowerer::onFuncDecl(FuncDecl& n) {
         binding.isMutable = params[i].isMutable;
         frame[n.params[i].name] = binding;
     }
+    recordParamClasses();
     locals_.push_back(std::move(frame));
 
     n.body->accept(checker_);
@@ -619,6 +829,7 @@ void Lowerer::onMethodDecl(const std::string& owner, const std::string& name,
         binding.isMutable = declared[i + 1].isMutable;
         frame[params[i].name] = binding;
     }
+    recordParamClasses();
     locals_.push_back(std::move(frame));
 
     body.accept(checker_);
@@ -755,6 +966,7 @@ void Lowerer::onFuncLit(FuncLit& lit, const std::vector<check::Captured>& captur
             binding.isMutable = declared[i + kOneWord].isMutable;
             frame[lit.params[i].name] = binding;
         }
+        recordParamClasses();
         locals_.push_back(std::move(frame));
 
         lit.body->accept(checker_);
@@ -2161,8 +2373,18 @@ std::string Lowerer::forwardFunction(const std::string& link, const Signature& s
         }
         ir::Argument arg;
         arg.words = words;
+        // The trampoline forwards into the target's signature: a float
+        // parameter travels in its SSE class here too.
+        if (type.type != nullptr && type.type->kind() == Kind::Basic &&
+            basicIsFloat(*type.type->basic()) &&
+            arg.words.size() == static_cast<size_t>(kOneWord)) {
+            arg.width = *type.type->basic() == BasicKind::F32
+                            ? ir::IRType::F32
+                            : ir::IRType::F64;
+        }
         call.arguments.push_back(std::move(arg));
     }
+    recordParamClasses();
     if (!failed_) {
         function_->canThrow = true;
         ir::Terminator fret;
@@ -2464,6 +2686,16 @@ std::vector<ir::Value> Lowerer::lowerNewClass(const NewClass& n) {
         arg.words = lowerWords(n.args[i].get());
         if (failed_) {
             return {undefined()};
+        }
+        // Same SSE class rule as onCall: an init's float parameter takes
+        // an SSE register, decided by the checked argument type.
+        TypeRef argType = checker_.typeOf(n.args[i].get());
+        if (!argType.isError() && argType.type->kind() == Kind::Basic &&
+            basicIsFloat(*argType.type->basic()) &&
+            arg.words.size() == static_cast<size_t>(kOneWord)) {
+            arg.width = *argType.type->basic() == BasicKind::F32
+                            ? ir::IRType::F32
+                            : ir::IRType::F64;
         }
         run.arguments.push_back(std::move(arg));
     }
@@ -2831,6 +3063,33 @@ ir::Value Lowerer::onBinary(Binary& n) {
     ir::IRType width = widthOf(result, n.pos);
     ir::Value a = onIdentOrExpr(n.lhs.get(), lhs);
     ir::Value b = onIdentOrExpr(n.rhs.get(), rhs);
+    const bool lhsFloat = lhs.type->kind() == Kind::Basic &&
+                          basicIsFloat(*lhs.type->basic());
+    const bool rhsFloat = rhs.type->kind() == Kind::Basic &&
+                          basicIsFloat(*rhs.type->basic());
+    TypeRef floatTarget;
+    if (!result.isError() && result.type->kind() == Kind::Basic &&
+        basicIsFloat(*result.type->basic())) {
+        floatTarget = result;
+    } else if (lhsFloat && rhsFloat) {
+        floatTarget = lhsFloat && *lhs.type->basic() == BasicKind::F64
+                          ? lhs
+                          : ((*rhs.type->basic() == BasicKind::F64) ? rhs : lhs);
+    } else if (lhsFloat) {
+        floatTarget = lhs;
+    } else if (rhsFloat) {
+        floatTarget = rhs;
+    }
+    if (floatTarget.type != nullptr && !floatTarget.isError() &&
+        floatTarget.type->kind() == Kind::Basic &&
+        basicIsFloat(*floatTarget.type->basic())) {
+        // Float bits are bound to their width, so an f32 operand beside an
+        // f64 converts, and an integer operand beside a float converts too
+        // (SEMANTICS §2.3) — where two integer widths would ride the
+        // sign-extension every producer already keeps.
+        a = widenFloat(a, lhs, floatTarget, n.pos);
+        b = widenFloat(b, rhs, floatTarget, n.pos);
+    }
     ir::Instr instr;
     instr.loc = n.pos;
     instr.type = result;
@@ -2875,8 +3134,17 @@ ir::Value Lowerer::emitArith(BinOp op, ir::Value a, ir::Value b, TypeRef result,
     instr.isPure = true;
     instr.overflow = wrap_ ? ir::OverflowMode::Wrap : ir::OverflowMode::Undefined;
     // Division and remainder trap; nothing else in this set does. The flag is
-    // what stops DCE deleting the check and LICM hoisting the divide.
-    if (instr.op == ir::Op::Div || instr.op == ir::Op::Rem) {
+    // what stops DCE deleting the check and LICM hoisting the divide. Floats
+    // never trap on arithmetic: an f32/f64 divide answers inf or NaN (SEMANTICS
+    // §11), so a mayTrap flag here would lie to the passes, and a float
+    // remainder would need an fmod routine rather than the integer op.
+    const bool floatResult = instr.width == ir::IRType::F32 ||
+                             instr.width == ir::IRType::F64;
+    if (floatResult && instr.op == ir::Op::Rem) {
+        refuse(pos, "float remainder");
+        return undefined();
+    }
+    if ((instr.op == ir::Op::Div || instr.op == ir::Op::Rem) && !floatResult) {
         instr.mayTrap = true;
     }
     instr.operands.push_back(a);
@@ -3061,12 +3329,22 @@ ir::Value Lowerer::onCall(Call& n) {
         instr.arguments.push_back(std::move(arg));
     }
     for (uint64_t i = 0; i < static_cast<uint64_t>(n.args.size()); ++i) {
-        TypeRef want{sig->parameters()[i].type};
-        (void)want;
         ir::Argument arg;
         arg.words = lowerWords(n.args[i].get());
         if (failed_) {
             return undefined();
+        }
+        // A float argument rides one word in an SSE register (psABI). The
+        // checked type of the argument is the class: a literal is typed in
+        // the parameter's context, and any other expression had to match
+        // the parameter exactly, because no implicit narrowing exists.
+        TypeRef argType = checker_.typeOf(n.args[i].get());
+        if (!argType.isError() && argType.type->kind() == Kind::Basic &&
+            basicIsFloat(*argType.type->basic()) &&
+            arg.words.size() == static_cast<size_t>(kOneWord)) {
+            arg.width = *argType.type->basic() == BasicKind::F32
+                            ? ir::IRType::F32
+                            : ir::IRType::F64;
         }
         instr.arguments.push_back(arg);
     }
@@ -3606,7 +3884,26 @@ ir::Value Lowerer::onIdentOrExpr(const Expr* expr, TypeRef expected) {
             refuse(lit->pos, "this constant");
             return undefined();
         }
+        // A literal typed as a float by its context lowers as that float's
+        // bits — the integer value converted with the cast table's
+        // rounding, never the raw integer bits behind a float read.
+        if (!type.isError() && type.type->kind() == Kind::Basic &&
+            basicIsFloat(*type.type->basic())) {
+            if (*type.type->basic() == BasicKind::F32) {
+                float narrowed = static_cast<float>(static_cast<double>(folded.value));
+                uint32_t pattern = 0;
+                std::memcpy(&pattern, &narrowed, sizeof pattern);
+                return constantFBits(pattern, type, lit->pos);
+            }
+            double widened = static_cast<double>(folded.value);
+            uint64_t pattern = 0;
+            std::memcpy(&pattern, &widened, sizeof pattern);
+            return constantFBits(pattern, type, lit->pos);
+        }
         return constantI64(folded.value, type, lit->pos);
+    }
+    if (auto* lit = dynamic_cast<const FloatLit*>(expr)) {
+        return lowerFloatLit(*lit);
     }
     if (auto* lit = dynamic_cast<const CharLit*>(expr)) {
         return constantI64(static_cast<int64_t>(lit->value),
@@ -3652,6 +3949,27 @@ ir::Value Lowerer::onIdentOrExpr(const Expr* expr, TypeRef expected) {
             }
             return words[0];
         }
+        if (unary->op == UnOp::Neg) {
+            return lowerNeg(*unary);
+        }
+        if (unary->op == UnOp::Not) {
+            TypeRef type = checker_.typeOf(expr);
+            ir::Value value = onIdentOrExpr(unary->operand.get(), type);
+            if (failed_) {
+                return undefined();
+            }
+            ir::Instr instr;
+            instr.op = ir::Op::Not;
+            instr.loc = expr->pos;
+            instr.type = type;
+            instr.width = widthOf(type, expr->pos);
+            instr.isPure = true;
+            instr.operands.push_back(value);
+            ir::Value out = newValue(instr.width, type, expr->pos);
+            instr.results.push_back(out);
+            emit(std::move(instr));
+            return out;
+        }
     }
     refuse(expr->pos, "this expression");
     return undefined();
@@ -3670,20 +3988,8 @@ ir::Value Lowerer::lowerAssign(Assign& n) {
         refuse(n.pos, "this assignment");
         return undefined();
     }
-    if (n.op.has_value()) {
-        // A compound op on several words never arrives: the checker refuses
-        // it. Asserting that here keeps the two layers honest with each other.
-        if (value.size() != kOneWord) {
-            refuse(n.pos, "a compound assignment needs one word");
-            return undefined();
-        }
-        TypeRef current = checker_.typeOf(n.target.get());
-        std::vector<ir::Value> old = lowerWords(n.target.get());
-        if (old.size() != kOneWord) {
-            refuse(n.pos, "a compound assignment needs one word");
-            return undefined();
-        }
-        value = {emitArith(*n.op, old[0], value[0], current, n.pos)};
+    if (n.op.has_value() && !compoundValue(n, value)) {
+        return undefined();
     }
     if (!storeAssignTarget(n, value)) {
         return undefined();
@@ -3693,6 +3999,32 @@ ir::Value Lowerer::lowerAssign(Assign& n) {
         return undefined();
     }
     return value[0];
+}
+
+bool Lowerer::compoundValue(Assign& n, std::vector<ir::Value>& value) {
+    // A compound op on several words never arrives: the checker refuses
+    // it. Asserting that here keeps the two layers honest with each other.
+    if (value.size() != kOneWord) {
+        refuse(n.pos, "a compound assignment needs one word");
+        return false;
+    }
+    TypeRef current = checker_.typeOf(n.target.get());
+    std::vector<ir::Value> old = lowerWords(n.target.get());
+    if (old.size() != kOneWord) {
+        refuse(n.pos, "a compound assignment needs one word");
+        return false;
+    }
+    // The right-hand side converts to the target's float width first
+    // (SEMANTICS §2.3): `d64 += 1` adds a converted 1.0, never the
+    // integer's raw bits read as a double. One definition serves both
+    // the expression and statement paths, so the two cannot diverge.
+    if (!current.isError() && current.type->kind() == Kind::Basic &&
+        basicIsFloat(*current.type->basic())) {
+        value[0] = widenFloat(value[0], checker_.typeOf(n.value.get()),
+                              current, n.pos);
+    }
+    value = {emitArith(*n.op, old[0], value[0], current, n.pos)};
+    return !failed_;
 }
 
 // The statement form: same stores, no value answered, so several words are
@@ -3709,18 +4041,8 @@ void Lowerer::lowerAssignStmt(Assign& n) {
         refuse(n.pos, "this assignment");
         return;
     }
-    if (n.op.has_value()) {
-        if (value.size() != kOneWord) {
-            refuse(n.pos, "a compound assignment needs one word");
-            return;
-        }
-        TypeRef current = checker_.typeOf(n.target.get());
-        std::vector<ir::Value> old = lowerWords(n.target.get());
-        if (old.size() != kOneWord) {
-            refuse(n.pos, "a compound assignment needs one word");
-            return;
-        }
-        value = {emitArith(*n.op, old[0], value[0], current, n.pos)};
+    if (n.op.has_value() && !compoundValue(n, value)) {
+        return;
     }
     storeAssignTarget(n, value);
 }

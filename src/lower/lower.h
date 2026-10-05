@@ -280,6 +280,22 @@ private:
     void refuse(Position pos, const std::string& what);
     void emitTerminator(const ir::Terminator& term);
     ir::Value constantI64(int64_t value, TypeRef type, Position pos);
+    // Classify the register class of every parameter word once the slots
+    // are placed; the code generator reads it straight from the function.
+    void recordParamClasses();
+    // A float constant: the IEEE bits for the literal's own width, stored
+    // in `constantBits` exactly as an integer constant stores its value.
+    ir::Value constantFBits(uint64_t bits, TypeRef type, Position pos);
+    ir::Value lowerFloatLit(const FloatLit& lit);
+    ir::Value lowerNeg(const Unary& n);
+    // Usual float conversion (SEMANTICS §2.3): an integer or narrower
+    // float value converts to the target float width; anything else
+    // passes through unchanged.
+    ir::Value widenFloat(ir::Value v, TypeRef from, TypeRef to, Position pos);
+    // The compound operation shared by the expression and statement
+    // assignment paths (the right-hand side converts to the target's
+    // float width first); refuses in place on a malformed compound.
+    bool compoundValue(Assign& n, std::vector<ir::Value>& value);
     ir::IRType widthOf(TypeRef type, Position pos);
 
     uint32_t emitBlock(Position pos);

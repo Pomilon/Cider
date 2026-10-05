@@ -34,7 +34,7 @@ func main() -> int {
   var d3: f64 = 0.0;
   d3 += b;
   if (d3 != 200.0) { return 11; }
-  var neg: i8 = 0 - 100;
+  var neg: i8 = (0 - 100) as i8;
   var d4: f64 = 0.0;
   d4 += neg;
   if (d4 != 0.0 - 100.0) { return 12; }

@@ -112,6 +112,12 @@ struct CallInfo {
 // aggregates (strings today) — the SysV two-eightbyte rule, in the IR.
 struct Argument {
     std::vector<Value> words;
+    // SysV class of this argument: Void routes its words to integer
+    // registers, and F32/F64 route the argument's single word to an SSE
+    // register, exactly as the psABI classifies a float parameter. Set by
+    // lowering from the callee signature; the code generator trusts this
+    // rather than re-deriving types.
+    IRType width = IRType::Void;
 };
 
 struct Instr {
@@ -202,6 +208,13 @@ struct Function {
     // still live, so they live in a register. The structural check treats
     // these as defined, which is what "or is a function parameter" means.
     std::vector<Value> params;
+    // One entry per word in `params`, classifying the register the caller
+    // used: Void routes the word through an integer register, F32/F64 name
+    // the SSE register class of a float argument (psABI). The prologue
+    // cannot re-derive this from types alone without a word-count walk the
+    // code generator is forbidden to do (LAYERS §3.7), so lowering records
+    // it once, next to the slots it already allocates.
+    std::vector<IRType> paramClasses;
     bool isExtern = false;
     std::vector<Block> blocks;
     Position loc{"", 1, 1};

@@ -198,7 +198,7 @@ private:
     TypeRef checkIdent(Ident& expr);
     bool isPlace(const Expr* expr) const;
     bool isInteger(TypeRef type) const;
-    TypeRef checkBinary(Binary& expr);
+    TypeRef checkBinary(Binary& expr, TypeRef expected);
     void checkShiftDiv(const Binary& expr, TypeRef lhs, TypeRef rhs);
     TypeRef checkCall(Call& expr);
     TypeRef checkField(Field& expr);

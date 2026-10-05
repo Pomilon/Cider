@@ -319,8 +319,18 @@ void Checker::visitProgram(Program& n) {
         std::unordered_set<std::string> active;
         EvalResult folded = evalConstInt(*g->init, *env_, active);
         if (!folded.ok) {
-            fail(g->init->pos, "a global initialiser must be constant: " + folded.error);
-            continue;
+            // A float literal is a constant of its own kind: evalConstInt
+            // answers integers, so only a literal in a float-typed global
+            // gets past without a folded integer. Anything else is not a
+            // constant initialiser.
+            const auto* asFloat = dynamic_cast<const FloatLit*>(g->init.get());
+            const bool floatGlobal =
+                declared.type->kind() == Kind::Basic &&
+                basicIsFloat(*declared.type->basic());
+            if (asFloat == nullptr || !floatGlobal) {
+                fail(g->init->pos, "a global initialiser must be constant: " + folded.error);
+                continue;
+            }
         }
         TypeRef init = checkExpr(g->init.get(), declared);
         if (!checkCompatible(g->init->pos, g->init.get(), init, declared)) {
@@ -706,7 +716,7 @@ void Checker::visitIdent(Ident& n) {
 
 
 void Checker::visitBinary(Binary& n) {
-    record(&n, checkBinary(n));
+    record(&n, checkBinary(n, TypeRef{ctx_.wildcard()}));
 }
 
 void Checker::visitUnary(Unary& n) {
@@ -1207,7 +1217,7 @@ TypeRef Checker::checkExpr(Expr* expr, TypeRef expected) {
         return TypeRef{ctx_.string()};
     }
     if (auto* binary = dynamic_cast<Binary*>(expr)) {
-        TypeRef t = checkBinary(*binary);
+        TypeRef t = checkBinary(*binary, expected);
         record(binary, t);
         return t;
     }
@@ -1284,19 +1294,43 @@ TypeRef Checker::checkLiteralInt(const IntLit& lit, TypeRef expected, Position p
     if (!expected.isError() && expected != TypeRef{ctx_.wildcard()} &&
         expected.type->kind() == Kind::Basic) {
         BasicKind basic = *expected.type->basic();
+        if (basicIsFloat(basic)) {
+            // A literal in a float context is that float's value, not an
+            // integer that failed to fit (FEATURES §13 keeps literals out
+            // of the explicit-cast rule); the conversion rounding is the
+            // cast table's, applied when the literal lowers.
+            return expected;
+        }
         if (basicIsInteger(basic)) {
             int width = basicWidthBits(basic);
             bool isSigned = basicIsSigned(basic);
-            __int128 value = folded.value;
             __int128 lo = isSigned ? -(static_cast<__int128>(1) << (width - 1)) : 0;
             __int128 hi = isSigned ? ((static_cast<__int128>(1) << (width - 1)) - 1)
                                   : ((static_cast<__int128>(1) << width) - 1);
+            if (folded.big) {
+                // Bits above INT64_MAX fit an unsigned target wide enough
+                // and nothing else; the signed compare would read them as
+                // a negative number the source never wrote.
+                unsigned __int128 bits = static_cast<uint64_t>(folded.value);
+                if (isSigned ||
+                    bits > static_cast<unsigned __int128>(hi)) {
+                    fail(pos, "this literal does not fit " + typeName(expected));
+                    return errorRef();
+                }
+                return expected;
+            }
+            __int128 value = folded.value;
             if (value < lo || value > hi) {
                 fail(pos, "this literal does not fit " + typeName(expected));
                 return errorRef();
             }
             return expected;
         }
+    }
+    if (folded.big) {
+        // No context to fit against: the bits say u64, the one width that
+        // holds them, never a negative i32 the wrap would read as.
+        return TypeRef{ctx_.basic(BasicKind::U64)};
     }
     if (folded.value >= INT32_MIN && folded.value <= INT32_MAX) {
         return TypeRef{ctx_.basic(BasicKind::I32)};
@@ -1388,11 +1422,44 @@ bool Checker::isPlace(const Expr* expr) const {
     return false;
 }
 
-TypeRef Checker::checkBinary(Binary& expr) {
+TypeRef Checker::checkBinary(Binary& expr, TypeRef expected) {
     TypeRef lhs = checkExpr(expr.lhs.get(), TypeRef{ctx_.wildcard()});
     TypeRef rhs = checkExpr(expr.rhs.get(), TypeRef{ctx_.wildcard()});
     if (lhs.isError() || rhs.isError()) {
         return errorRef();
+    }
+    // The expectation of the whole expression reaches its literal operands
+    // first (FEATURES §13: literals adapt): `var x: float = 1.0 / 2.0` is
+    // an f32 division, and an f64 variable beside an f32 literal in an f64
+    // declaration widens the literal rather than dragging the variable.
+    const bool expectFloat =
+        !expected.isError() && expected.type != nullptr &&
+        expected.type->kind() == Kind::Basic &&
+        basicIsFloat(*expected.type->basic());
+    if (expectFloat) {
+        if (dynamic_cast<const FloatLit*>(expr.lhs.get()) != nullptr) {
+            lhs = checkExpr(expr.lhs.get(), expected);
+        }
+        if (dynamic_cast<const FloatLit*>(expr.rhs.get()) != nullptr) {
+            rhs = checkExpr(expr.rhs.get(), expected);
+        }
+    }
+    // A float literal in a binary operand takes the other side's float
+    // width (FEATURES §13: literals adapt as binary operands): `x != 0.3`
+    // beside an f32 compares at f32, never through f64 where the rounded
+    // float would compare unequal to the double it was written as. The
+    // re-check records the literal's type under the expectation, exactly
+    // as a declaration's expectation types it.
+    const auto* lhsLit = dynamic_cast<const FloatLit*>(expr.lhs.get());
+    const auto* rhsLit = dynamic_cast<const FloatLit*>(expr.rhs.get());
+    const bool lhsFloat = lhs.type->kind() == Kind::Basic &&
+                          basicIsFloat(*lhs.type->basic());
+    const bool rhsFloat = rhs.type->kind() == Kind::Basic &&
+                          basicIsFloat(*rhs.type->basic());
+    if (lhsLit != nullptr && rhsFloat) {
+        lhs = checkExpr(expr.lhs.get(), rhs);
+    } else if (rhsLit != nullptr && lhsFloat) {
+        rhs = checkExpr(expr.rhs.get(), lhs);
     }
     bool isBoolOp = expr.op == BinOp::AndAnd || expr.op == BinOp::OrOr;
     bool isEq = expr.op == BinOp::Eq || expr.op == BinOp::Ne;

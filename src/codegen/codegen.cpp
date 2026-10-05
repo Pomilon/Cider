@@ -18,6 +18,10 @@ namespace codegen {
 
 namespace {
 
+// A float argument occupies exactly one word; named here so the call
+// paths do not write the count beside a size query (T4).
+constexpr uint64_t kFloatWord = 1;
+
 const char* argReg(uint64_t i) {
     if (i == 0) {
         return "rdi";
@@ -714,17 +718,32 @@ private:
         out_ += "  sub rsp, " + std::to_string(span) + "\n";
 
         // Parameters arrive in registers (then stack); they live in slots
-        // from here on, like every other value.
-        uint64_t index = 0;
-        for (const ir::Value& param : fn.params) {
-            if (index < 6) {
-                out_ += "  mov " + slot(param.id) + ", " + argReg(index) + "\n";
-            } else {
-                uint64_t stackAt = 16 + (index - 6) * 8;
-                out_ += "  mov rax, [rbp + " + std::to_string(stackAt) + "]\n";
-                out_ += "  mov " + slot(param.id) + ", rax\n";
+        // from here on, like every other value. A float parameter comes in
+        // on its SSE register — the class lowering recorded per word — so
+        // the two counters mirror the caller's split exactly; an integer
+        // word past the sixth would arrive on the stack, which the caller
+        // refuses to send, so that branch stays a defensive reading.
+        uint64_t gpr = 0;
+        uint64_t sse = 0;
+        for (uint64_t w = 0; w < static_cast<uint64_t>(fn.params.size()); ++w) {
+            const ir::IRType cls = w < fn.paramClasses.size()
+                                       ? fn.paramClasses[w]
+                                       : ir::IRType::Void;
+            if (cls == ir::IRType::F32 || cls == ir::IRType::F64) {
+                const char* move = cls == ir::IRType::F32 ? "movss" : "movsd";
+                out_ += "  " + std::string(move) + " " + slot(fn.params[w].id) +
+                        ", xmm" + std::to_string(sse) + "\n";
+                ++sse;
+                continue;
             }
-            ++index;
+            if (gpr < 6) {
+                out_ += "  mov " + slot(fn.params[w].id) + ", " + argReg(gpr) + "\n";
+            } else {
+                uint64_t stackAt = 16 + (gpr - 6) * 8;
+                out_ += "  mov rax, [rbp + " + std::to_string(stackAt) + "]\n";
+                out_ += "  mov " + slot(fn.params[w].id) + ", rax\n";
+            }
+            ++gpr;
         }
 
         slotIds_.clear();
@@ -775,6 +794,30 @@ private:
         if (instr.op == ir::Op::Add || instr.op == ir::Op::Sub ||
             instr.op == ir::Op::And || instr.op == ir::Op::Or ||
             instr.op == ir::Op::Xor || instr.op == ir::Op::Mul) {
+            // Floats compute in xmm0 with the ss/sd opcode their width
+            // names; the integer shapes below would add bit patterns.
+            if (instr.width == ir::IRType::F32 || instr.width == ir::IRType::F64) {
+                if (instr.op == ir::Op::And || instr.op == ir::Op::Or ||
+                    instr.op == ir::Op::Xor) {
+                    refuse(instr.loc, "this float instruction is not emitted yet");
+                    return false;
+                }
+                const char* suffix =
+                    instr.width == ir::IRType::F32 ? "ss" : "sd";
+                const char* mnemonic = "add";
+                if (instr.op == ir::Op::Sub) {
+                    mnemonic = "sub";
+                } else if (instr.op == ir::Op::Mul) {
+                    mnemonic = "mul";
+                }
+                out_ += "  mov" + std::string(suffix) + " xmm0, " +
+                        slot(instr.operands[0].id) + "\n";
+                out_ += "  " + std::string(mnemonic) + suffix + " xmm0, " +
+                        slot(instr.operands[1].id) + "\n";
+                out_ += "  mov" + std::string(suffix) + " " +
+                        slot(instr.results[0].id) + ", xmm0\n";
+                return true;
+            }
             const char* name = "add";
             if (instr.op == ir::Op::Sub) {
                 name = "sub";
@@ -824,6 +867,24 @@ private:
             return true;
         }
         if (instr.op == ir::Op::Div || instr.op == ir::Op::Rem) {
+            // Float division answers inf or NaN and never faults, so it
+            // emits the plain SSE divide with no zero check; a float
+            // remainder would need an fmod routine rather than idiv.
+            if (instr.width == ir::IRType::F32 || instr.width == ir::IRType::F64) {
+                if (instr.op == ir::Op::Rem) {
+                    refuse(instr.loc, "float remainder is not emitted yet");
+                    return false;
+                }
+                const char* suffix =
+                    instr.width == ir::IRType::F32 ? "ss" : "sd";
+                out_ += "  mov" + std::string(suffix) + " xmm0, " +
+                        slot(instr.operands[0].id) + "\n";
+                out_ += "  div" + std::string(suffix) + " xmm0, " +
+                        slot(instr.operands[1].id) + "\n";
+                out_ += "  mov" + std::string(suffix) + " " +
+                        slot(instr.results[0].id) + ", xmm0\n";
+                return true;
+            }
             // Division runs at the operand width: a widened divide would
             // miss the MIN/-1 fault the spec demands at the value's own
             // width, so 32/16/8-bit use their own dividend/divisor forms
@@ -952,6 +1013,44 @@ private:
             return true;
         }
         if (instr.op == ir::Op::Cmp) {
+            // A float compare runs on xmm with ucomis, whose flags answer
+            // IEEE: unordered (NaN) must read false for < <= == >= > and
+            // true for !=, so the four flags need their parity guard —
+            // `sete` alone would call NaN equal, `setne` alone would call
+            // it different... and it is neither: == is false, != is true.
+            // The guard turns the parity bit into the missing half.
+            TypeRef left = instr.operands[0].type;
+            const bool floatCmp =
+                !left.isError() && left.type->kind() == Kind::Basic &&
+                basicIsFloat(*left.type->basic());
+            if (floatCmp) {
+                const bool single = *left.type->basic() == BasicKind::F32;
+                const char* suffix = single ? "ss" : "sd";
+                const char* setcc = setFor(instr.cmp);
+                out_ += "  mov" + std::string(suffix) + " xmm0, " +
+                        slot(instr.operands[0].id) + "\n";
+                out_ += "  ucomi" + std::string(suffix) + " xmm0, " +
+                        slot(instr.operands[1].id) + "\n";
+                out_ += std::string("  ") + setcc + " al\n";
+                const std::string name = setcc;
+                if (name == "setne") {
+                    // Unordered sets ZF, so setne reads false while !=
+                    // must read true; setp (parity set) ORs that case in.
+                    out_ += "  setp cl\n";
+                    out_ += "  or al, cl\n";
+                } else if (name == "sete" || name == "setl" ||
+                           name == "setle" || name == "setge" ||
+                           name == "setb" || name == "setbe") {
+                    // Unordered sets ZF (and CF), which would read these
+                    // true while every float relation with NaN is false;
+                    // setnp masks the unordered case out.
+                    out_ += "  setnp cl\n";
+                    out_ += "  and al, cl\n";
+                }
+                out_ += "  movzx rax, al\n";
+                out_ += "  mov " + slot(instr.results[0].id) + ", rax\n";
+                return true;
+            }
             out_ += "  mov rax, " + slot(instr.operands[0].id) + "\n";
             out_ += "  cmp rax, " + slot(instr.operands[1].id) + "\n";
             out_ += std::string("  ") + setFor(instr.cmp) + " al\n";
@@ -1024,25 +1123,52 @@ private:
             return true;
         }
         if (instr.op == ir::Op::Call) {
-            // Words, not arguments: a string occupies two registers, so six
-            // string arguments would silently share r9 without this count.
-            uint64_t arity = 0;
+            // Two register classes, counted separately: integer words take
+            // the six integer registers (a string occupies two, so six
+            // string arguments would silently share r9 without this count)
+            // and float arguments take an SSE register each, the SysV
+            // split. Both counts refuse before anything is emitted, so a
+            // refusal never leaves half a call staged.
+            uint64_t gpr = 0;
+            uint64_t sse = 0;
             for (const ir::Argument& arg : instr.arguments) {
-                for (const ir::Value& word : arg.words) {
-                    (void)word;
-                    ++arity;
+                const bool floatArg = arg.width == ir::IRType::F32 ||
+                                      arg.width == ir::IRType::F64;
+                if (floatArg) {
+                    sse += 1;
+                } else {
+                    gpr += static_cast<uint64_t>(arg.words.size());
                 }
             }
-            const uint64_t regArgs = 6;
-            if (arity > regArgs) {
+            const uint64_t kIntRegs = 6;
+            const uint64_t kSseRegs = 8;
+            if (gpr > kIntRegs) {
                 refuse(instr.loc, "more than six registers of arguments");
                 return false;
             }
-            // Words flatten in order: a string arrives as (data, length) in
-            // (rdi, rsi), which is the SysV two-eightbyte rule and exactly
-            // what the C struct on the other side declares.
+            if (sse > kSseRegs) {
+                refuse(instr.loc, "more than eight float arguments");
+                return false;
+            }
+            // Integer words flatten in order: a string arrives as (data,
+            // length) in (rdi, rsi), which is the SysV two-eightbyte rule
+            // and exactly what the C struct on the other side declares.
+            // A float argument loads its word into the next SSE register
+            // instead of consuming an integer one.
             uint64_t index = 0;
+            uint64_t sseIndex = 0;
             for (const ir::Argument& arg : instr.arguments) {
+                const bool floatArg = arg.width == ir::IRType::F32 ||
+                                      arg.width == ir::IRType::F64;
+                if (floatArg && arg.words.size() == kFloatWord) {
+                    const char* move =
+                        arg.width == ir::IRType::F32 ? "movss" : "movsd";
+                    out_ += "  " + std::string(move) + " xmm" +
+                            std::to_string(sseIndex) + ", " +
+                            slot(arg.words[0].id) + "\n";
+                    ++sseIndex;
+                    continue;
+                }
                 for (const ir::Value& word : arg.words) {
                     out_ += "  mov " + std::string(argReg(index)) + ", " +
                             slot(word.id) + "\n";
@@ -1056,7 +1182,13 @@ private:
                 out_ += "  call " + instr.callee + "\n";
             }
             if (!instr.results.empty()) {
-                out_ += "  mov " + slot(instr.results[0].id) + ", rax\n";
+                if (instr.width == ir::IRType::F32) {
+                    out_ += "  movss " + slot(instr.results[0].id) + ", xmm0\n";
+                } else if (instr.width == ir::IRType::F64) {
+                    out_ += "  movsd " + slot(instr.results[0].id) + ", xmm0\n";
+                } else {
+                    out_ += "  mov " + slot(instr.results[0].id) + ", rax\n";
+                }
             }
             return true;
         }
@@ -1107,15 +1239,108 @@ private:
                        from.type->kind() == Kind::FunctionPtr;
         bool toPtr = to.type->kind() == Kind::Pointer ||
                      to.type->kind() == Kind::FunctionPtr;
-        if (!fromPtr && !toPtr) {
-            if (from.type->kind() != Kind::Basic || to.type->kind() != Kind::Basic) {
+        bool fromFloat = from.type->kind() == Kind::Basic &&
+                         basicIsFloat(*from.type->basic());
+        bool toFloat = to.type->kind() == Kind::Basic &&
+                       basicIsFloat(*to.type->basic());
+        if (fromFloat || toFloat) {
+            if (fromPtr || toPtr) {
                 refuse(instr.loc, "this cast is not emitted yet");
                 return false;
             }
-            if (basicIsFloat(*from.type->basic()) || basicIsFloat(*to.type->basic())) {
-                refuse(instr.loc, "float casts are not emitted yet");
-                return false;
+            const int fromF = basicWidthBits(*from.type->basic());
+            const int toF = basicWidthBits(*to.type->basic());
+            if (fromFloat && toFloat) {
+                // Same width is a bit move; otherwise convert through xmm0.
+                out_ += "  mov rax, " + slot(instr.operands[0].id) + "\n";
+                if (fromF == toF) {
+                    out_ += "  mov " + slot(instr.results[0].id) + ", rax\n";
+                    return true;
+                }
+                if (*from.type->basic() == BasicKind::F32) {
+                    out_ += "  movss xmm0, " + slot(instr.operands[0].id) + "\n";
+                    out_ += "  cvtss2sd xmm0, xmm0\n";
+                    out_ += "  movsd " + slot(instr.results[0].id) + ", xmm0\n";
+                } else {
+                    out_ += "  movsd xmm0, " + slot(instr.operands[0].id) + "\n";
+                    out_ += "  cvtsd2ss xmm0, xmm0\n";
+                    out_ += "  movss " + slot(instr.results[0].id) + ", xmm0\n";
+                }
+                return true;
             }
+            if (fromFloat) {
+                // float -> int truncates. The convert runs at the target
+                // width when it has one (cvtt has no 8/16-bit form, so
+                // those go through r32 and narrow like an integer cast);
+                // an out-of-range value reads the processor's indefinite
+                // answer, which is the spec's undefined result, never a
+                // check. A u64 target rides the signed convert.
+                const bool from32 = *from.type->basic() == BasicKind::F32;
+                const char* cvt = from32 ? "cvttss2si" : "cvttsd2si";
+                const char* move = from32 ? "movss" : "movsd";
+                out_ += "  " + std::string(move) + " xmm0, " +
+                        slot(instr.operands[0].id) + "\n";
+                const bool signedTarget = basicIsSigned(*to.type->basic());
+                if (toF == 64) {
+                    out_ += "  " + std::string(cvt) + " rax, xmm0\n";
+                } else {
+                    out_ += "  " + std::string(cvt) + " eax, xmm0\n";
+                    if (toF == 32) {
+                        if (signedTarget) {
+                            out_ += "  movsxd rax, eax\n";
+                        }
+                    } else {
+                        const char* ext = signedTarget ? "movsx" : "movzx";
+                        if (toF == 8) {
+                            out_ += std::string("  ") + ext + " rax, al\n";
+                        } else {
+                            out_ += std::string("  ") + ext + " rax, ax\n";
+                        }
+                    }
+                }
+                out_ += "  mov " + slot(instr.results[0].id) + ", rax\n";
+                return true;
+            }
+            // int -> float: every integer producer keeps its value extended
+            // in rax, so the 64-bit convert answers in one instruction —
+            // except u64, where cvtsi2sd would read the high bit as a sign.
+            // Values at or above 2^63 convert (x >> 1) | (x & 1) and
+            // double, which rounds correctly (the sequence v2 verified on
+            // the same corpus).
+            const bool to32 = *to.type->basic() == BasicKind::F32;
+            const char* cvt = to32 ? "cvtsi2ss" : "cvtsi2sd";
+            const char* move = to32 ? "movss" : "movsd";
+            out_ += "  mov rax, " + slot(instr.operands[0].id) + "\n";
+            if (from.type->kind() == Kind::Basic &&
+                *from.type->basic() == BasicKind::U64) {
+                std::string lbl =
+                    ".Lu64cvt" + std::to_string(cvtLabelSeq_++);
+                out_ += "  test rax, rax\n";
+                out_ += "  js " + lbl + "\n";
+                out_ += "  " + std::string(cvt) + " xmm0, rax\n";
+                out_ += "  jmp " + lbl + "_done\n";
+                out_ += lbl + ":\n";
+                out_ += "  mov r11, rax\n";
+                out_ += "  shr r11, 1\n";
+                out_ += "  and eax, 1\n";
+                out_ += "  or r11, rax\n";
+                out_ += "  " + std::string(cvt) + " xmm0, r11\n";
+                out_ += std::string("  ") + (to32 ? "addss" : "addsd") +
+                        " xmm0, xmm0\n";
+                out_ += lbl + "_done:\n";
+                out_ += "  " + std::string(move) + " " +
+                        slot(instr.results[0].id) + ", xmm0\n";
+                return true;
+            }
+            out_ += "  " + std::string(cvt) + " xmm0, rax\n";
+            out_ += "  " + std::string(move) + " " +
+                    slot(instr.results[0].id) + ", xmm0\n";
+            return true;
+        }
+        if (!fromPtr && !toPtr &&
+            (from.type->kind() != Kind::Basic || to.type->kind() != Kind::Basic)) {
+            refuse(instr.loc, "this cast is not emitted yet");
+            return false;
         }
         // A pointer participates as its machine width; everything else
         // answers through the basic table.
@@ -1152,7 +1377,15 @@ private:
     bool emitTerm(const ir::Function& fn, const ir::Terminator& term) {
         if (term.term == ir::Term::Ret) {
             if (term.value.has_value() && term.value->id != 0xFFFFFFFFu) {
-                out_ += "  mov rax, " + slot(term.value->id) + "\n";
+                // Floats come home in xmm0 (SysV), integers in rax: the
+                // call site reads exactly this register back.
+                if (term.value->width == ir::IRType::F32) {
+                    out_ += "  movss xmm0, " + slot(term.value->id) + "\n";
+                } else if (term.value->width == ir::IRType::F64) {
+                    out_ += "  movsd xmm0, " + slot(term.value->id) + "\n";
+                } else {
+                    out_ += "  mov rax, " + slot(term.value->id) + "\n";
+                }
             }
             out_ += "  leave\n";
             out_ += "  ret\n";
@@ -1198,6 +1431,9 @@ private:
     std::unordered_set<uint32_t> slotIds_;
     std::unordered_set<std::string> emittedHelpers_;
     std::string out_;
+    // Unique suffix for u64-to-float conversion labels (int→float casts
+    // need a two-path sequence; see emitCast).
+    uint64_t cvtLabelSeq_ = 0;
     bool failed_ = false;
     std::string error_;
     Position pos_{"", 1, 1};

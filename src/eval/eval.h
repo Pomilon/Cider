@@ -53,6 +53,11 @@ struct EvalResult {
     bool ok = false;
     int64_t value = 0;
     std::string error;
+    // A positive literal above INT64_MAX (fits u64 only): `value` holds
+    // the wrapped bits, which are meaningful only when the context that
+    // reads them is unsigned. The checker's fit check is the one place
+    // that knows the context, so it is the one place that unwraps.
+    bool big = false;
 };
 
 // Folds an integer constant expression. `active` holds the qualified constants

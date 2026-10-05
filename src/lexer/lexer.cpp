@@ -60,7 +60,10 @@ const std::unordered_map<std::string, TokenKind>& keywords() {
         {"i64", TokenKind::KwI64}, {"u8", TokenKind::KwU8},
         {"u16", TokenKind::KwU16}, {"u32", TokenKind::KwU32},
         {"u64", TokenKind::KwU64}, {"f32", TokenKind::KwF32},
-        {"f64", TokenKind::KwF64}, {"bool", TokenKind::KwBool},
+        {"f64", TokenKind::KwF64},
+        // `float` is the f32 alias (TYPES.md §10): same token, same type,
+        // so nothing downstream ever sees a separate spelling.
+        {"float", TokenKind::KwF32}, {"bool", TokenKind::KwBool},
         {"char", TokenKind::KwChar}, {"byte", TokenKind::KwByte},
         {"string", TokenKind::KwString}, {"void", TokenKind::KwVoid},
     };

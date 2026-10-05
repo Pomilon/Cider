@@ -37,6 +37,17 @@ std::optional<int64_t> foldOne(const ir::Instr& instr,
     if (!isConstOp(instr.op)) {
         return std::nullopt;
     }
+    // Float arithmetic and float comparisons carry IEEE bits, not integers:
+    // folding them here would compare bit patterns as if they were numbers
+    // and answer a different truth. Leave them for the hardware.
+    if (instr.width == ir::IRType::F32 || instr.width == ir::IRType::F64) {
+        return std::nullopt;
+    }
+    if (!instr.operands.empty() && !instr.operands[0].type.isError() &&
+        instr.operands[0].type.type->kind() == Kind::Basic &&
+        basicIsFloat(*instr.operands[0].type.type->basic())) {
+        return std::nullopt;
+    }
     uint64_t arity = 0;
     for (const ir::Value& operand : instr.operands) {
         (void)operand;

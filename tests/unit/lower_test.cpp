@@ -585,6 +585,54 @@ void testBreakContinue() {
     check(allTerminated, "no block is left unterminated");
 }
 
+void testFloat() {
+    std::printf("float literals and arithmetic lower\n");
+    Lowered r = lower(
+        "func main() -> int {\n"
+        "    var a: f64 = 1.5;\n"
+        "    var b: f64 = a + 2.5;\n"
+        "    var d: f64 = a / b;\n"
+        "    return b as int;\n"
+        "}\n");
+    check(r.ok, "a float expression lowers");
+    if (r.ok) {
+        const cider::ir::Function* main = find(r.module.get(), "main");
+        check(main != nullptr, "main exists");
+        // 1.5 and 2.5 as IEEE754 binary64, the values the Const carries.
+        const int64_t oneAndAHalf = INT64_C(4609434218613702656);
+        const int64_t twoAndAHalf = INT64_C(4612811918334230528);
+        bool sawFirst = false;
+        bool sawSecond = false;
+        bool sawFloatAdd = false;
+        bool trappedDiv = false;
+        for (const cider::ir::Block& block : main->blocks) {
+            for (const cider::ir::Instr& instr : block.body) {
+                if (instr.op == cider::ir::Op::Const &&
+                    instr.constantBits == oneAndAHalf) {
+                    sawFirst = true;
+                }
+                if (instr.op == cider::ir::Op::Const &&
+                    instr.constantBits == twoAndAHalf) {
+                    sawSecond = true;
+                }
+                if (instr.op == cider::ir::Op::Add &&
+                    instr.width == cider::ir::IRType::F64) {
+                    sawFloatAdd = true;
+                }
+                if ((instr.op == cider::ir::Op::Div ||
+                     instr.op == cider::ir::Op::Rem) &&
+                    instr.width == cider::ir::IRType::F64 && instr.mayTrap) {
+                    trappedDiv = true;
+                }
+            }
+        }
+        check(sawFirst, "1.5 reaches the IR as binary64 bits");
+        check(sawSecond, "2.5 reaches the IR as binary64 bits");
+        check(sawFloatAdd, "the add carries the f64 width");
+        check(!trappedDiv, "float division is not marked as trapping");
+    }
+}
+
 void testNotYetLowered() {
     std::printf("unlowered constructs are refused\n");
     Lowered r = lower("func f(x: int) -> void { var s: string = \"v = {x}\"; }\n");
@@ -593,16 +641,16 @@ void testNotYetLowered() {
 
 void testRefuseKeepsScopes() {
     // A refusal inside a condition must not unbalance the scope stack:
-    // `!` has no lowering, so this refuses — but the function frame
-    // must survive the block exits instead of crashing the driver.
+    // a float remainder has no lowering, so this refuses — but the
+    // function frame must survive the block exits instead of crashing
+    // the driver.
     std::printf("a mid-block refusal keeps scopes balanced\n");
     Lowered r = lower(
         "func main() -> int {\n"
-        "    var b: bool = true;\n"
-        "    if (!b) { return 1; }\n"
+        "    if (1.5 % 0.5 != 0.0) { return 1; }\n"
         "    return 0;\n"
         "}\n");
-    check(!r.ok && r.stage == "lower", "negation in a condition is refused");
+    check(!r.ok && r.stage == "lower", "float remainder in a condition is refused");
 }
 
 // A method emits its own function under the owner's name, and a call site
@@ -862,6 +910,7 @@ int main() {
     testRefuseKeepsScopes();
     testInterfaceParamRefused();
     testNotYetLowered();
+    testFloat();
     std::printf("\n%d checks, %s\n", checks, failures == 0 ? "all passed" : "FAILURES");
     return failures == 0 ? 0 : 1;
 }

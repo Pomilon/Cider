@@ -450,14 +450,14 @@
   "class": "D"
  },
  "f32_arith_round": {
-  "actual": "SIGNALDeath sig=11 (compiler/runtime crash, no diagnostic)",
-  "blocker": "float-codegen (compiler SIGSEGV on f32 lowering)",
-  "class": "D"
+  "actual": "run exit 0: OUT: ERR:",
+  "blocker": "none",
+  "class": "A"
  },
  "f32_const_precision": {
-  "actual": "SIGNALDeath sig=7 (compiler/runtime crash, no diagnostic)",
-  "blocker": "float-codegen (compiler SIGBUS on f32 lowering)",
-  "class": "D"
+  "actual": "run exit 0: OUT: ERR:",
+  "blocker": "none",
+  "class": "A"
  },
  "f64_arith": {
   "actual": "exit=1 stdout_len=0 stderr_len=40 first=\"std.io:1:1: cannot find module 'std.io'\"",
@@ -465,14 +465,14 @@
   "class": "D"
  },
  "f64_compound_int": {
-  "actual": "exit=1 stdout_len=0 stderr_len=965 first=\"tests/corpus/f64_compound_int/main.cid:14:10: unknown type 'float'\"",
-  "blocker": "float-codegen (float/f32/f64 not lowered; unknown-type-float)",
-  "class": "D"
+  "actual": "run exit 0: OUT: ERR:",
+  "blocker": "none",
+  "class": "A"
  },
  "f64_convert": {
-  "actual": "exit=1 stdout_len=0 stderr_len=183 first=\"tests/corpus/f64_convert/main.cid:2:16: unknown type 'float'\"",
-  "blocker": "float-codegen",
-  "class": "D"
+  "actual": "run exit 0: OUT: ERR:",
+  "blocker": "none",
+  "class": "A"
  },
  "f64_convert_sites": {
   "actual": "exit=1 stdout_len=0 stderr_len=3078 first=\"tests/corpus/f64_convert_sites/main.cid:26:21: expected ';'\"",
@@ -485,9 +485,9 @@
   "class": "D"
  },
  "f64_global_store": {
-  "actual": "exit=1 stdout_len=0 stderr_len=65 first=\"tests/corpus/f64_global_store/main.cid:6:8: unknown type 'float'\"",
-  "blocker": "float-codegen",
-  "class": "D"
+  "actual": "run exit 0: OUT: ERR:",
+  "blocker": "none",
+  "class": "A"
  },
  "f64_global_wrap": {
   "actual": "exit=1 stdout_len=0 stderr_len=40 first=\"std.io:1:1: cannot find module 'std.io'\"",
@@ -495,9 +495,9 @@
   "class": "D"
  },
  "f64_int_convert": {
-  "actual": "exit=1 stdout_len=0 stderr_len=214 first='tests/corpus/f64_int_convert/main.cid:7:16: integer literal does not fit'",
-  "blocker": "float-codegen (int-to-float casts)",
-  "class": "D"
+  "actual": "run exit 0: OUT: ERR:",
+  "blocker": "none",
+  "class": "A"
  },
  "f64_neg_literal": {
   "actual": "exit=1 stdout_len=0 stderr_len=104 first=\"std.io:1:1: cannot find module 'std.io'\"",
@@ -525,24 +525,24 @@
   "class": "A"
  },
  "float_args": {
-  "actual": "exit=1 stdout_len=0 stderr_len=300 first=\"tests/corpus/float_args/main.cid:1:15: unknown type 'float'\"",
-  "blocker": "float-codegen",
-  "class": "D"
+  "actual": "run exit 0: OUT: ERR:",
+  "blocker": "none",
+  "class": "A"
  },
  "float_calls": {
-  "actual": "exit=1 stdout_len=0 stderr_len=246 first=\"tests/corpus/float_calls/main.cid:1:13: unknown type 'float'\"",
-  "blocker": "float-codegen",
-  "class": "D"
+  "actual": "run exit 0: OUT: ERR:",
+  "blocker": "none",
+  "class": "A"
  },
  "float_cast": {
-  "actual": "exit=1 stdout_len=0 stderr_len=473 first=\"tests/corpus/float_cast/main.cid:2:12: unknown type 'float'\"",
-  "blocker": "float-codegen (float-to-int casts)",
-  "class": "D"
+  "actual": "run exit 0: OUT: ERR:",
+  "blocker": "none",
+  "class": "A"
  },
  "float_cast_expr": {
-  "actual": "exit=1 stdout_len=0 stderr_len=130 first=\"tests/corpus/float_cast_expr/main.cid:7:30: unknown type 'float'\"",
-  "blocker": "float-codegen",
-  "class": "D"
+  "actual": "run exit 0: OUT: ERR:",
+  "blocker": "none",
+  "class": "A"
  },
  "float_sizeof_stress": {
   "actual": "exit 1; tests/corpus/legacy/float_sizeof_stress/main.cid:57:5: expected an expression; tests/corpus/legacy/float_sizeof_stress/main.cid:62:1: expected a declaration",
@@ -635,9 +635,9 @@
   "class": "A"
  },
  "fn_ptr_return_float": {
-  "actual": "exit=1 stdout_len=0 stderr_len=449 first='tests/corpus/fn_ptr_return_float/main.cid:11:28: a function needs a body'",
-  "blocker": "float-codegen",
-  "class": "D"
+  "actual": "run exit 0: OUT: ERR:",
+  "blocker": "none",
+  "class": "A"
  },
  "fn_ptr_struct": {
   "actual": "exit 0, empty stdout/stderr, matches expected.json verbatim after documented rewrites (diff #3 bare-fn to *func, &fn address, diff #4 (*f)() calls, diff #6/#7 new-literals for struct/array/uninit vars)",
@@ -720,9 +720,9 @@
   "class": "D"
  },
  "gvn_float_const": {
-  "actual": "exit=1 stdout_len=0 stderr_len=455 first=\"tests/corpus/gvn_float_const/main.cid:19:10: unknown type 'float'\"",
-  "blocker": "float-codegen",
-  "class": "D"
+  "actual": "run exit 0: OUT: ERR:",
+  "blocker": "none",
+  "class": "A"
  },
  "gvn_float_mov": {
   "actual": "exit 1; tests/corpus/legacy/gvn_float_mov/main.cid:6:9: expected an expression; tests/corpus/legacy/gvn_float_mov/main.cid:7:9: expected an expression",
@@ -1060,9 +1060,9 @@
   "class": "D"
  },
  "nan_compare": {
-  "actual": "cider run exit 1, stdout empty, stderr diagnostic: `main.cid:36:11: unknown type 'float'`",
-  "blocker": "float-codegen + float-type-alias + boolop-crash",
-  "class": "D"
+  "actual": "run exit 0: OUT: ERR:",
+  "blocker": "none",
+  "class": "A"
  },
  "narrow_sign": {
   "actual": "cider run exit 0, stdout/stderr empty \u2014 matches expected.json after rewrite",
