@@ -1,0 +1,78 @@
+// CIDER-BUG-118: the legitimate *void paths next to the rejected launder
+// (see the check_fn_cast_closure_void fixture). A closure object stored in
+// *void storage may be cast back to the closure spelling when the
+// representation inference can see the value is a closure:
+//   - a local *void initialized with / later assigned a closure,
+//   - a global *void assigned a closure,
+//   - a *void parameter whose call sites pass closures,
+//   - a copy chain through a second *void,
+//   - a closure -> *void -> fn(...) -> func(...) cast chain,
+//   - a fn(...) declaration initialized from a proven-closure *void (the
+//     declaration adopts the closure representation),
+//   - a direct nilPtr cast, which stays representation-neutral.
+// Raw fn pointers laundered through the same storage are rejected at compile
+// time; scalar nilPtr/*void casts are untouched.
+
+type Cb = func(int) -> int;
+type Handle = *void;
+
+func invoke(v: *void) -> int {
+  var f: func(int) -> int = v as func(int) -> int;
+  return f(21);
+}
+
+var gv: *void = nilPtr;
+
+func main() -> int {
+  var c: Cb = func(x: int) -> int { return x * 2; };
+
+  // Local *void -> closure cast.
+  var v1: *void = c;
+  var f1: func(int) -> int = v1 as func(int) -> int;
+  if (f1(21) != 42) return 1;
+
+  // Late assignment -> cast.
+  var v2: *void = nilPtr;
+  v2 = c;
+  var f2: func(int) -> int = v2 as func(int) -> int;
+  if (f2(21) != 42) return 2;
+
+  // Global *void -> cast.
+  gv = c;
+  var f3: func(int) -> int = gv as func(int) -> int;
+  if (f3(21) != 42) return 3;
+
+  // *void parameter with a closure argument -> cast inside the callee.
+  if (invoke(c as *void) != 42) return 4;
+
+  // Copy chain through a second *void.
+  var v4: *void = v1;
+  var f4: func(int) -> int = v4 as func(int) -> int;
+  if (f4(21) != 42) return 5;
+
+  // closure -> *void -> fn(...) -> func(...): the outer cast keeps the
+  // closure shape the inner one carried.
+  var k: fn(int) -> int = v1 as fn(int) -> int;
+  var f5: func(int) -> int = k as func(int) -> int;
+  if (f5(21) != 42) return 6;
+
+  // fn(...) declaration from a proven-closure *void.
+  var g: fn(int) -> int = v1;
+  if (g(21) != 42) return 7;
+
+  // A *void type alias carries the same provenance.
+  var h: Handle = c;
+  var f6: func(int) -> int = h as func(int) -> int;
+  if (f6(21) != 42) return 8;
+
+  // A void-pointer depth > 1 is still the untyped carrier.
+  var pp: **void = c;
+  var f7: func(int) -> int = pp as func(int) -> int;
+  if (f7(21) != 42) return 9;
+
+  // Direct nilPtr stays representation-neutral (a null closure value).
+  var fnil: func(int) -> int = nilPtr as func(int) -> int;
+  if (fnil != nilPtr) return 10;
+
+  return 0;
+}

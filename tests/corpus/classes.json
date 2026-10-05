@@ -1,0 +1,1232 @@
+{
+ "aggregate_list_init": {
+  "actual": "exit 1; tests/corpus/aggregate_list_init/main.cid:16:25: expected ';'; tests/corpus/aggregate_list_init/main.cid:16:25: a class holds fields and methods",
+  "blocker": "stdlib-imports",
+  "class": "D"
+ },
+ "aggregate_ternary": {
+  "actual": "exit 1; tests/corpus/aggregate_ternary/main.cid:48:13: a variable needs an initialiser; tests/corpus/aggregate_ternary/main.cid:65:18: a variable needs an initialiser",
+  "blocker": "stdlib-imports",
+  "class": "D"
+ },
+ "aggregate_zero_init": {
+  "actual": "exit 1; tests/corpus/aggregate_zero_init/main.cid:49:16: expected ';'; tests/corpus/aggregate_zero_init/main.cid:49:16: a class holds fields and methods",
+  "blocker": "stdlib-imports",
+  "class": "D"
+ },
+ "alias_array_literal": {
+  "actual": "exit 1; tests/corpus/alias_array_literal/main.cid:16:18: expected an expression; tests/corpus/alias_array_literal/main.cid:17:25: expected an expression",
+  "blocker": "global-array-init",
+  "class": "D"
+ },
+ "alias_array_slice": {
+  "actual": "exit 1; tests/corpus/alias_array_slice/main.cid:18:17: a variable needs an initialiser; tests/corpus/alias_array_slice/main.cid:32:18: expected an expression; slice lowering crashes compiler when reached (probe)",
+  "blocker": "slice-lowering",
+  "class": "D"
+ },
+ "alias_closure_pointer": {
+  "actual": "exit 1; tests/corpus/alias_closure_pointer/main.cid:59:1: expected a declaration; tests/corpus/alias_closure_pointer/main.cid:114:17: a variable needs an initialiser",
+  "blocker": "closures-repr",
+  "class": "D"
+ },
+ "alias_delete_destructors": {
+  "actual": "exit 1; tests/corpus/alias_delete_destructors/main.cid:37:10: a method needs a name; tests/corpus/alias_delete_destructors/main.cid:37:10: a class holds fields and methods",
+  "blocker": "multi-file imports",
+  "class": "D"
+ },
+ "alias_embedded_class_init": {
+  "actual": "exit 1; tests/corpus/alias_embedded_class_init/main.cid:14:16: expected ';'; tests/corpus/alias_embedded_class_init/main.cid:14:16: a class holds fields and methods",
+  "blocker": "multi-file imports",
+  "class": "D"
+ },
+ "alias_field": {
+  "actual": "exit 1; tests/corpus/alias_field/main.cid:15:11: a variable needs an initialiser; tests/corpus/alias_field/main.cid:30:12: a variable needs an initialiser",
+  "blocker": "stdlib-imports",
+  "class": "D"
+ },
+ "alias_interface": {
+  "actual": "exit 1; tests/corpus/alias_interface/main.cid:20:13: expected ';'; tests/corpus/alias_interface/main.cid:40:14: a variable needs an initialiser",
+  "blocker": "multi-file imports",
+  "class": "D"
+ },
+ "alias_visibility": {
+  "actual": "exit 1; tests/corpus/alias_visibility/main.cid:16:30: expected ';'; tests/corpus/alias_visibility/main.cid:17:32: expected ';'",
+  "blocker": "multi-file imports",
+  "class": "D"
+ },
+ "alloc": {
+  "actual": "exit 1; std.alloc:1:1: cannot find module 'std.alloc'",
+  "blocker": "stdlib-imports",
+  "class": "D"
+ },
+ "alloc_cap_overflow": {
+  "actual": "exit 1; tests/corpus/alloc_cap_overflow/main.cid:29:23: expected an expression; tests/corpus/alloc_cap_overflow/main.cid:35:31: expected an expression",
+  "blocker": "stdlib-imports",
+  "class": "D"
+ },
+ "alloc_mmap_fail": {
+  "actual": "exit 1; std.alloc:1:1: cannot find module 'std.alloc'",
+  "blocker": "stdlib-imports",
+  "class": "D"
+ },
+ "array_alias": {
+  "actual": "exit 1; tests/corpus/array_alias/main.cid:9:13: expected ';'; tests/corpus/array_alias/main.cid:14:11: a variable needs an initialiser",
+  "blocker": "fn keyword",
+  "class": "D"
+ },
+ "array_init": {
+  "actual": "exit 1; tests/corpus/array_init/main.cid:1:20: expected an expression; tests/corpus/array_init/main.cid:2:21: expected an expression",
+  "blocker": "global-array-init",
+  "class": "D"
+ },
+ "array_return": {
+  "actual": "exit 1; tests/corpus/array_return/main.cid:9:18: a variable needs an initialiser; tests/corpus/array_return/main.cid:16:42: expected ';'",
+  "blocker": "sret-array-return",
+  "class": "D"
+ },
+ "asm_spilled_operand": {
+  "actual": "exit 1; tests/corpus/asm_spilled_operand/main.cid:47:24: expected an expression; tests/corpus/asm_spilled_operand/main.cid:66:3: expected an expression",
+  "blocker": "asm blocks",
+  "class": "D"
+ },
+ "asm_spilled_operand_dispatch": {
+  "actual": "exit 1; tests/corpus/asm_spilled_operand_dispatch/main.cid:85:13: a variable needs an initialiser; tests/corpus/asm_spilled_operand_dispatch/main.cid:87:15: a variable needs an initialiser",
+  "blocker": "asm blocks",
+  "class": "D"
+ },
+ "asm_width": {
+  "actual": "exit 1; tests/corpus/asm_width/main.cid:3:3: expected an expression; tests/corpus/asm_width/main.cid:4:3: expected a declaration",
+  "blocker": "asm blocks",
+  "class": "D"
+ },
+ "async": {
+  "actual": "exit 1; tests/corpus/async/main.cid:3:8: expected a declaration; tests/corpus/async/main.cid:7:1: expected a declaration",
+  "blocker": "async-await-removed",
+  "class": "D"
+ },
+ "bare_template_control": {
+  "actual": "exit 1; tests/corpus/bare_template_control/main.cid:8:22: a variable needs an initialiser; tests/corpus/bare_template_control/main.cid:14:20: a variable needs an initialiser",
+  "blocker": "multi-file imports",
+  "class": "D"
+ },
+ "base_alias_kinds": {
+  "actual": "exit 1; tests/corpus/base_alias_kinds/main.cid:10:15: expected ';'; tests/corpus/base_alias_kinds/main.cid:10:15: a class holds fields and methods",
+  "blocker": "stdlib-imports",
+  "class": "D"
+ },
+ "base_ctor_dtor_chain": {
+  "actual": "exit 1; tests/corpus/base_ctor_dtor_chain/main.cid:36:16: expected ';'; tests/corpus/base_ctor_dtor_chain/main.cid:36:16: a class holds fields and methods",
+  "blocker": "multi-file imports",
+  "class": "D"
+ },
+ "bitfields": {
+  "actual": "exit 1; tests/corpus/bitfields/main.cid:9:15: a variable needs an initialiser; tests/corpus/bitfields/main.cid:14:19: expected an expression; secondary: int:3 bitfield decls",
+  "blocker": "asm blocks",
+  "class": "D"
+ },
+ "bitmask": {
+  "actual": "compiler crash at check (SIGABRT/SIGBUS heap corruption, 'free(): invalid pointer'); u64-max literal as arg crashes (probe x1), in var-init gives clean 'integer literal does not fit' (probe v1)",
+  "blocker": "u64-literals",
+  "class": "D"
+ },
+ "bool_not": {
+  "actual": "exit 1; tests/corpus/bool_not/main.cid:5:7: arithmetic needs numbers; tests/corpus/bool_not/main.cid:7:7: arithmetic needs numbers",
+  "blocker": "bool-not",
+  "class": "D"
+ },
+ "bool_word_ops": {
+  "actual": "exit 1; tests/corpus/bool_word_ops/main.cid:31:32: expected ')'; tests/corpus/bool_word_ops/main.cid:32:33: expected ')'",
+  "blocker": "stdlib-imports",
+  "class": "D"
+ },
+ "brace_escape": {
+  "actual": "exit 1; tests/corpus/brace_escape/main.cid:7:22: unexpected character '\\'; tests/corpus/brace_escape/main.cid:7:24: unterminated string literal",
+  "blocker": "stdlib-imports",
+  "class": "D"
+ },
+ "bss_align_mixed": {
+  "actual": "exit 1; tests/corpus/bss_align_mixed/main.cid:11:5: a variable needs a name; tests/corpus/bss_align_mixed/main.cid:24:7: expected an expression; 0x8877665544332211 exceeds i64 max",
+  "blocker": "u64-literals",
+  "class": "D"
+ },
+ "callee_branch_release_once": {
+  "actual": "exit 1; tests/corpus/callee_branch_release_once/main.cid:55:8: a method needs a name; tests/corpus/callee_branch_release_once/main.cid:55:8: a class holds fields and methods",
+  "blocker": "stdlib-imports",
+  "class": "D"
+ },
+ "citer": {
+  "actual": "exit 1; tests/corpus/citer/main.cid:9:20: a variable needs an initialiser; tests/corpus/citer/main.cid:25:17: a variable needs an initialiser",
+  "blocker": "stdlib-imports",
+  "class": "D"
+ },
+ "class_field_init": {
+  "actual": "exit 1; tests/corpus/class_field_init/main.cid:13:17: expected ';'; tests/corpus/class_field_init/main.cid:13:17: a class holds fields and methods",
+  "blocker": "stdlib-imports",
+  "class": "D"
+ },
+ "class_field_names": {
+  "actual": "exit 1; tests/corpus/class_field_names/main.cid:20:28: expected '{' or '(' after new; tests/corpus/class_field_names/main.cid:21:5: expected an expression",
+  "blocker": "stdlib-imports",
+  "class": "D"
+ },
+ "closure_array_store": {
+  "actual": "exit 1; tests/corpus/closure_array_store/main.cid:26:19: expected an expression; tests/corpus/closure_array_store/main.cid:32:20: expected an expression",
+  "blocker": "closures-repr",
+  "class": "D"
+ },
+ "closure_as_fn": {
+  "actual": "exit 1; tests/corpus/closure_as_fn/main.cid:18:13: expected ';'; tests/corpus/closure_as_fn/main.cid:37:19: expected ')'",
+  "blocker": "closures-repr",
+  "class": "D"
+ },
+ "closure_field_store": {
+  "actual": "exit 1; tests/corpus/closure_field_store/main.cid:21:19: expected ';'; tests/corpus/closure_field_store/main.cid:21:38: expected a declaration",
+  "blocker": "closures-repr",
+  "class": "D"
+ },
+ "closure_throw_capture": {
+  "actual": "exit 1; tests/corpus/closure_throw_capture/main.cid:18:17: a catch binds a name and a type; tests/corpus/closure_throw_capture/main.cid:21:9: expected ';'",
+  "blocker": "try-throw-catch",
+  "class": "D"
+ },
+ "closures": {
+  "actual": "exit 1; tests/corpus/closures/main.cid:10:19: expected an expression; tests/corpus/closures/main.cid:10:41: expected an expression; secondary: closure capture",
+  "blocker": "asm blocks",
+  "class": "D"
+ },
+ "const_init": {
+  "actual": "exit 0, stdout/stderr empty, matches expected.json byte-exact after documented rewrites (diff #8 explicit as casts on 9 globals incl (1 as u64)<<40; diff #9 width-explicit F comparison)",
+  "blocker": "none",
+  "class": "A"
+ },
+ "constructors": {
+  "actual": "exit 1; tests/corpus/constructors/main.cid:22:20: expected ';'; tests/corpus/constructors/main.cid:22:20: a class holds fields and methods",
+  "blocker": "multi-file imports",
+  "class": "D"
+ },
+ "crossmod_alias": {
+  "actual": "exit 1; tests/corpus/crossmod_alias/main.cid:7:12: a variable needs an initialiser; tests/corpus/crossmod_alias/main.cid:8:12: a variable needs an initialiser",
+  "blocker": "multi-file imports",
+  "class": "D"
+ },
+ "crossmod_iface_global_declorder": {
+  "actual": "exit 1; lib:1:1: cannot find module 'lib'; std.io:1:1: cannot find module 'std.io'",
+  "blocker": "multi-file imports",
+  "class": "D"
+ },
+ "crossmod_iface_global_fromstore": {
+  "actual": "exit 1; tests/corpus/crossmod_iface_global_fromstore/main.cid:106:14: a variable needs an initialiser; tests/corpus/crossmod_iface_global_fromstore/main.cid:111:13: a variable needs an initialiser",
+  "blocker": "multi-file imports",
+  "class": "D"
+ },
+ "crossmod_iface_global_store": {
+  "actual": "exit 1; tests/corpus/crossmod_iface_global_store/main.cid:53:14: expected ';'; tests/corpus/crossmod_iface_global_store/main.cid:54:14: expected ';'",
+  "blocker": "multi-file imports",
+  "class": "D"
+ },
+ "crossmod_iface_param": {
+  "actual": "exit 1; tests/corpus/crossmod_iface_param/main.cid:18:16: expected ';'; tests/corpus/crossmod_iface_param/main.cid:22:22: expected ')'",
+  "blocker": "multi-file imports",
+  "class": "D"
+ },
+ "crossmod_private_base": {
+  "actual": "exit 1; tests/corpus/crossmod_private_base/main.cid:32:14: expected ';'; tests/corpus/crossmod_private_base/main.cid:32:14: a class holds fields and methods",
+  "blocker": "multi-file imports",
+  "class": "D"
+ },
+ "crossmod_qualified_reexport": {
+  "actual": "exit 1; tests/corpus/crossmod_qualified_reexport/main.cid:9:13: expected ';'; tests/corpus/crossmod_qualified_reexport/main.cid:9:13: a struct holds fields and methods",
+  "blocker": "multi-file imports",
+  "class": "D"
+ },
+ "cyclic_alias_bare": {
+  "actual": "exit 1; tests/corpus/cyclic_alias_bare/main.cid:12:11: a variable needs an initialiser",
+  "blocker": "cyclic-alias",
+  "class": "D"
+ },
+ "cyclic_alias_mod": {
+  "actual": "exit 1; tests/corpus/cyclic_alias_mod/main.cid:7:13: a variable needs an initialiser",
+  "blocker": "multi-file imports",
+  "class": "D"
+ },
+ "cyclic_fn_alias": {
+  "actual": "exit 1; tests/corpus/cyclic_fn_alias/main.cid:5:12: expected ';'; v3 rejects even func-spelled recursion with 'type alias cycle' (probe aa2)",
+  "blocker": "recursive-alias",
+  "class": "D"
+ },
+ "defer_nested": {
+  "actual": "exit 1; tests/corpus/defer_nested/main.cid:41:39: expected an expression; tests/corpus/defer_nested/main.cid:41:39: expected ')'",
+  "blocker": "stdlib-imports",
+  "class": "D"
+ },
+ "defer_scopes": {
+  "actual": "exit 1; tests/corpus/defer_scopes/main.cid:36:36: expected an expression; tests/corpus/defer_scopes/main.cid:36:36: expected ')'",
+  "blocker": "stdlib-imports",
+  "class": "D"
+ },
+ "deref_aggregate_copy": {
+  "actual": "exit 1; tests/corpus/deref_aggregate_copy/main.cid:42:9: a class needs a body; tests/corpus/deref_aggregate_copy/main.cid:43:13: a variable needs an initialiser",
+  "blocker": "stdlib-imports",
+  "class": "D"
+ },
+ "deref_incdec_nil_compound": {
+  "actual": "compiler SIGSEGV (exit 139) at check on `q != &x` comparison (probe d5 isolates it); the nil `(*p) += n` path itself checks clean and traps silently with SIGSEGV (probe d2); live compound-deref works (probe d4)",
+  "blocker": "none",
+  "class": "B"
+ },
+ "deref_incdec_nil_increment": {
+  "actual": "exit 1; tests/corpus/deref_incdec_nil_increment/main.cid:15:50: expected an expression; tests/corpus/deref_incdec_nil_increment/main.cid:17:55: expected an expression; postfix ++/prefix -- on deref unparseable",
+  "blocker": "none",
+  "class": "B"
+ },
+ "deref_incdec_pointee": {
+  "actual": "exit 1; tests/corpus/deref_incdec_pointee/main.cid:39:50: expected an expression; tests/corpus/deref_incdec_pointee/main.cid:40:44: expected an expression",
+  "blocker": "stdlib-imports",
+  "class": "D"
+ },
+ "destructor_ownership": {
+  "actual": "exit 1; tests/corpus/destructor_ownership/main.cid:52:10: a method needs a name; tests/corpus/destructor_ownership/main.cid:52:10: a class holds fields and methods",
+  "blocker": "stdlib-imports",
+  "class": "D"
+ },
+ "div_min_neg1": {
+  "actual": "exit 1; tests/corpus/div_min_neg1/main.cid:14:20: cannot use i32 as i64; tests/corpus/div_min_neg1/main.cid:15:25: unbound name 'neg64'; runtime MIN/-1 traps with silent SIGFPE (probe m1, exit 136)",
+  "blocker": "none",
+  "class": "B"
+ },
+ "div_zero": {
+  "actual": "exit 1; tests/corpus/div_zero/main.cid:31:19: integer literal does not fit; tests/corpus/div_zero/main.cid:37:18: cannot use i32 as i16; literal 5/0 rejected at check by design ('division by zero', probe m2, diff #15); runtime div0 traps with silent SIGFPE (probe t1, exit 136)",
+  "blocker": "none",
+  "class": "B"
+ },
+ "dotted_base": {
+  "actual": "exit 1; tests/corpus/dotted_base/main.cid:16:9: a class needs a body; tests/corpus/dotted_base/main.cid:18:3: expected a declaration",
+  "blocker": "multi-file imports",
+  "class": "D"
+ },
+ "embedded_class_destructors": {
+  "actual": "exit 1; tests/corpus/embedded_class_destructors/main.cid:28:10: a method needs a name; tests/corpus/embedded_class_destructors/main.cid:28:10: a class holds fields and methods",
+  "blocker": "stdlib-imports",
+  "class": "D"
+ },
+ "embedded_class_init": {
+  "actual": "exit=1 stdout_len=0 stderr_len=4924 first=\"tests/corpus/embedded_class_init/main.cid:12:16: expected ';'\"",
+  "blocker": "class-field-initializers (+embedded-class-values, stdlib-import)",
+  "class": "D"
+ },
+ "enum_types": {
+  "actual": "exit=1 stdout_len=0 stderr_len=2211 first='tests/corpus/enum_types/main.cid:33:17: a variable needs an initialiser'",
+  "blocker": "enums (+multi-file-imports)",
+  "class": "D"
+ },
+ "exit7": {
+  "actual": "exit=1 stdout_len=0 stderr_len=112 first='tests/corpus/exit7/main.cid:2:3: expected an expression'",
+  "blocker": "asm-blocks (+void-main)",
+  "class": "D"
+ },
+ "export_visibility": {
+  "actual": "exit=1 stdout_len=0 stderr_len=237 first='tests/corpus/export_visibility/main.cid:10:13: a variable needs an initialiser'",
+  "blocker": "enums (+interface-boxing, multi-file-imports, stdlib-import)",
+  "class": "D"
+ },
+ "f32_arith_round": {
+  "actual": "SIGNALDeath sig=11 (compiler/runtime crash, no diagnostic)",
+  "blocker": "float-codegen (compiler SIGSEGV on f32 lowering)",
+  "class": "D"
+ },
+ "f32_const_precision": {
+  "actual": "SIGNALDeath sig=7 (compiler/runtime crash, no diagnostic)",
+  "blocker": "float-codegen (compiler SIGBUS on f32 lowering)",
+  "class": "D"
+ },
+ "f64_arith": {
+  "actual": "exit=1 stdout_len=0 stderr_len=40 first=\"std.io:1:1: cannot find module 'std.io'\"",
+  "blocker": "float-codegen (+stdlib-import)",
+  "class": "D"
+ },
+ "f64_compound_int": {
+  "actual": "exit=1 stdout_len=0 stderr_len=965 first=\"tests/corpus/f64_compound_int/main.cid:14:10: unknown type 'float'\"",
+  "blocker": "float-codegen (float/f32/f64 not lowered; unknown-type-float)",
+  "class": "D"
+ },
+ "f64_convert": {
+  "actual": "exit=1 stdout_len=0 stderr_len=183 first=\"tests/corpus/f64_convert/main.cid:2:16: unknown type 'float'\"",
+  "blocker": "float-codegen",
+  "class": "D"
+ },
+ "f64_convert_sites": {
+  "actual": "exit=1 stdout_len=0 stderr_len=3078 first=\"tests/corpus/f64_convert_sites/main.cid:26:21: expected ';'\"",
+  "blocker": "float-codegen (+interface-boxing)",
+  "class": "D"
+ },
+ "f64_global_init": {
+  "actual": "exit=1 stdout_len=0 stderr_len=136 first='tests/corpus/f64_global_init/main.cid:19:23: expected an expression'",
+  "blocker": "float-codegen (global float const-fold)",
+  "class": "D"
+ },
+ "f64_global_store": {
+  "actual": "exit=1 stdout_len=0 stderr_len=65 first=\"tests/corpus/f64_global_store/main.cid:6:8: unknown type 'float'\"",
+  "blocker": "float-codegen",
+  "class": "D"
+ },
+ "f64_global_wrap": {
+  "actual": "exit=1 stdout_len=0 stderr_len=40 first=\"std.io:1:1: cannot find module 'std.io'\"",
+  "blocker": "float-codegen (+stdlib-import)",
+  "class": "D"
+ },
+ "f64_int_convert": {
+  "actual": "exit=1 stdout_len=0 stderr_len=214 first='tests/corpus/f64_int_convert/main.cid:7:16: integer literal does not fit'",
+  "blocker": "float-codegen (int-to-float casts)",
+  "class": "D"
+ },
+ "f64_neg_literal": {
+  "actual": "exit=1 stdout_len=0 stderr_len=104 first=\"std.io:1:1: cannot find module 'std.io'\"",
+  "blocker": "float-codegen (+stdlib-import)",
+  "class": "D"
+ },
+ "f64_print": {
+  "actual": "exit=1 stdout_len=0 stderr_len=40 first=\"std.io:1:1: cannot find module 'std.io'\"",
+  "blocker": "float-codegen (+stdlib-import)",
+  "class": "D"
+ },
+ "f64_ternary_width": {
+  "actual": "exit=1 stdout_len=0 stderr_len=676 first=\"tests/corpus/f64_ternary_width/main.cid:21:12: unknown type 'float'\"",
+  "blocker": "float-codegen (+ternary-lowering)",
+  "class": "D"
+ },
+ "float_args": {
+  "actual": "exit=1 stdout_len=0 stderr_len=300 first=\"tests/corpus/float_args/main.cid:1:15: unknown type 'float'\"",
+  "blocker": "float-codegen",
+  "class": "D"
+ },
+ "float_calls": {
+  "actual": "exit=1 stdout_len=0 stderr_len=246 first=\"tests/corpus/float_calls/main.cid:1:13: unknown type 'float'\"",
+  "blocker": "float-codegen",
+  "class": "D"
+ },
+ "float_cast": {
+  "actual": "exit=1 stdout_len=0 stderr_len=473 first=\"tests/corpus/float_cast/main.cid:2:12: unknown type 'float'\"",
+  "blocker": "float-codegen (float-to-int casts)",
+  "class": "D"
+ },
+ "float_cast_expr": {
+  "actual": "exit=1 stdout_len=0 stderr_len=130 first=\"tests/corpus/float_cast_expr/main.cid:7:30: unknown type 'float'\"",
+  "blocker": "float-codegen",
+  "class": "D"
+ },
+ "fn_array_by_value": {
+  "actual": "exit=1 stdout_len=0 stderr_len=2473 first=\"tests/corpus/fn_array_by_value/main.cid:10:17: expected ';'\"",
+  "blocker": "by-value-array-params/sret (+stdlib-import, ternary-lowering)",
+  "class": "D"
+ },
+ "fn_array_cast": {
+  "actual": "exit=1 stdout_len=0 stderr_len=476 first=\"tests/corpus/fn_array_cast/main.cid:7:13: expected ';'\"",
+  "blocker": "fn-as-casts (+stdlib-import)",
+  "class": "D"
+ },
+ "fn_cast_closure_indirect_repr": {
+  "actual": "exit=1 stdout_len=0 stderr_len=661 first='tests/corpus/fn_cast_closure_indirect_repr/main.cid:27:14: a variable needs an initialiser'",
+  "blocker": "closures-repr-gaps (closure literals, *void provenance)",
+  "class": "D"
+ },
+ "fn_cast_closure_repr": {
+  "actual": "exit=1 stdout_len=0 stderr_len=510 first=\"tests/corpus/fn_cast_closure_repr/main.cid:30:28: expected ')'\"",
+  "blocker": "closures-repr-gaps (+float-codegen)",
+  "class": "D"
+ },
+ "fn_cast_closure_void_repr": {
+  "actual": "exit=1 stdout_len=0 stderr_len=174 first='tests/corpus/fn_cast_closure_void_repr/main.cid:55:12: a variable needs an initialiser'",
+  "blocker": "closures-repr-gaps",
+  "class": "D"
+ },
+ "fn_cast_compat": {
+  "actual": "exit=1 stdout_len=0 stderr_len=408 first=\"tests/corpus/fn_cast_compat/main.cid:14:13: expected ';'\"",
+  "blocker": "closures-repr-gaps (+msabi, fn-as-casts, stdlib-import)",
+  "class": "D"
+ },
+ "fn_interface_signature": {
+  "actual": "exit=1 stdout_len=0 stderr_len=2848 first='tests/corpus/fn_interface_signature/main.cid:31:1: expected a declaration'",
+  "blocker": "interface-boxing (+multi-file-imports, msabi, this-receiver)",
+  "class": "D"
+ },
+ "fn_ptr_array": {
+  "actual": "exit 0, empty stdout/stderr, matches expected.json verbatim after documented rewrites (diff #3 bare-fn to *func, &fn address, diff #4 (*f)() calls, diff #6/#7 new-literals for struct/array/uninit vars)",
+  "blocker": "none",
+  "class": "A"
+ },
+ "fn_ptr_callback": {
+  "actual": "exit 0, empty stdout/stderr, matches expected.json verbatim after documented rewrites (diff #3 bare-fn to *func, &fn address, diff #4 (*f)() calls, diff #6/#7 new-literals for struct/array/uninit vars)",
+  "blocker": "none",
+  "class": "A"
+ },
+ "fn_ptr_extern": {
+  "actual": "exit=1 stdout_len=0 stderr_len=74 first='tests/corpus/fn_ptr_extern/main.cid:4:12: a variable needs an initialiser'",
+  "blocker": "extern-calls-link (+*func-nil-compare compiler crash)",
+  "class": "D"
+ },
+ "fn_ptr_global": {
+  "actual": "exit=1 stdout_len=0 stderr_len=148 first='tests/corpus/fn_ptr_global/main.cid:4:10: a variable needs an initialiser'",
+  "blocker": "global-fn-address-const (global = &fn rejected as non-constant)",
+  "class": "D"
+ },
+ "fn_ptr_global_cast": {
+  "actual": "exit=1 stdout_len=0 stderr_len=79 first='tests/corpus/fn_ptr_global_cast/main.cid:8:10: a variable needs an initialiser'",
+  "blocker": "global-fn-address-const (+fn-as-casts)",
+  "class": "D"
+ },
+ "fn_ptr_local": {
+  "actual": "exit 0, empty stdout/stderr, matches expected.json verbatim after documented rewrites (diff #3 bare-fn to *func, &fn address, diff #4 (*f)() calls, diff #6/#7 new-literals for struct/array/uninit vars)",
+  "blocker": "none",
+  "class": "A"
+ },
+ "fn_ptr_nil": {
+  "actual": "exit=1 stdout_len=0 stderr_len=142 first='tests/corpus/fn_ptr_nil/main.cid:4:12: a variable needs an initialiser'",
+  "blocker": "*func-nil-compare compiler crash (SIGSEGV, no diagnostic)",
+  "class": "D"
+ },
+ "fn_ptr_return": {
+  "actual": "exit 0, empty stdout/stderr, matches expected.json verbatim after documented rewrites (diff #3 bare-fn to *func, &fn address, diff #4 (*f)() calls, diff #6/#7 new-literals for struct/array/uninit vars)",
+  "blocker": "none",
+  "class": "A"
+ },
+ "fn_ptr_return_float": {
+  "actual": "exit=1 stdout_len=0 stderr_len=449 first='tests/corpus/fn_ptr_return_float/main.cid:11:28: a function needs a body'",
+  "blocker": "float-codegen",
+  "class": "D"
+ },
+ "fn_ptr_struct": {
+  "actual": "exit 0, empty stdout/stderr, matches expected.json verbatim after documented rewrites (diff #3 bare-fn to *func, &fn address, diff #4 (*f)() calls, diff #6/#7 new-literals for struct/array/uninit vars)",
+  "blocker": "none",
+  "class": "A"
+ },
+ "fnptr_alias_chain": {
+  "actual": "exit=1 stdout_len=0 stderr_len=138 first=\"tests/corpus/fnptr_alias_chain/main.cid:5:17: expected ';'\"",
+  "blocker": "global-fn-address-const (global = &fn rejected as non-constant)",
+  "class": "D"
+ },
+ "forward_decl_bases": {
+  "actual": "exit=1 stdout_len=0 stderr_len=6521 first='tests/corpus/forward_decl_bases/main.cid:13:9: a class needs a body'",
+  "blocker": "inheritance-extends/override/virtual/this (+field-initializers, stdlib-import)",
+  "class": "D"
+ },
+ "forward_decl_fields": {
+  "actual": "exit=1 stdout_len=0 stderr_len=7909 first=\"tests/corpus/forward_decl_fields/main.cid:15:14: expected ';'\"",
+  "blocker": "class-field-initializers (+forward-decl-layout, stdlib-import)",
+  "class": "D"
+ },
+ "generic_compound_args": {
+  "actual": "exit=1 stdout_len=0 stderr_len=2914 first=\"tests/corpus/generic_compound_args/main.cid:39:20: expected ')'\"",
+  "blocker": "generic-bodies (+stdlib-import)",
+  "class": "D"
+ },
+ "global_decl_order": {
+  "actual": "exit=1 stdout_len=0 stderr_len=381 first='tests/corpus/global_decl_order/main.cid:51:13: expected an expression'",
+  "blocker": "multi-file-imports (+plusplus-operator, uninit-struct-globals, stdlib-import)",
+  "class": "D"
+ },
+ "global_fini_asm_exit": {
+  "actual": "exit=1 stdout_len=0 stderr_len=961 first='tests/corpus/global_fini_asm_exit/main.cid:25:10: a method needs a name'",
+  "blocker": "asm-blocks (+destructor-~D/delete, _start-entry, stdlib-import)",
+  "class": "D"
+ },
+ "global_fini_asm_exit_group": {
+  "actual": "exit=1 stdout_len=0 stderr_len=576 first='tests/corpus/global_fini_asm_exit_group/main.cid:17:10: a method needs a name'",
+  "blocker": "asm-blocks (+destructor-~D/delete, _start-entry)",
+  "class": "D"
+ },
+ "global_fini_extern_exit": {
+  "actual": "exit=1 stdout_len=0 stderr_len=320 first='tests/corpus/global_fini_extern_exit/main.cid:19:10: a method needs a name'",
+  "blocker": "destructor-~D/delete (+extern-calls, stdlib-import)",
+  "class": "D"
+ },
+ "global_fini_helper_exit": {
+  "actual": "exit=1 stdout_len=0 stderr_len=320 first='tests/corpus/global_fini_helper_exit/main.cid:18:10: a method needs a name'",
+  "blocker": "destructor-~D/delete (+stdlib-import)",
+  "class": "D"
+ },
+ "global_init_fold": {
+  "actual": "exit=1 stdout_len=0 stderr_len=216 first='tests/corpus/global_init_fold/main.cid:23:22: expected an expression'",
+  "blocker": "global-const-fold (+multi-file-imports, char-type, float-codegen, stdlib-import)",
+  "class": "D"
+ },
+ "global_narrow": {
+  "actual": "SIGNALDeath sig=7 (compiler/runtime crash, no diagnostic)",
+  "blocker": "bool-global-load compiler crash (SIGBUS, no diagnostic)",
+  "class": "D"
+ },
+ "gvn_float_const": {
+  "actual": "exit=1 stdout_len=0 stderr_len=455 first=\"tests/corpus/gvn_float_const/main.cid:19:10: unknown type 'float'\"",
+  "blocker": "float-codegen",
+  "class": "D"
+ },
+ "heap_delete_destructors": {
+  "actual": "exit=1 stdout_len=0 stderr_len=2567 first='tests/corpus/heap_delete_destructors/main.cid:18:10: a method needs a name'",
+  "blocker": "destructor-~D/delete (+embedded-class-values, stdlib-import)",
+  "class": "D"
+ },
+ "hello": {
+  "actual": "exit=1 stdout_len=0 stderr_len=225 first='tests/corpus/hello/main.cid:4:3: expected an expression'",
+  "blocker": "asm-blocks (+void-main)",
+  "class": "D"
+ },
+ "iface_aggregate_return_boxing": {
+  "actual": "exit=1 stdout_len=0 stderr_len=8960 first='tests/corpus/iface_aggregate_return_boxing/main.cid:77:8: a method needs a name'",
+  "blocker": "interface-boxing (+multi-file-imports)",
+  "class": "D"
+ },
+ "iface_array_return_boxing": {
+  "actual": "exit=1 stdout_len=0 stderr_len=3738 first='tests/corpus/iface_array_return_boxing/main.cid:59:8: a method needs a name'",
+  "blocker": "interface-boxing",
+  "class": "D"
+ },
+ "iface_box_ownership": {
+  "actual": "exit=1 stdout_len=0 stderr_len=1842 first='tests/corpus/iface_box_ownership/main.cid:44:8: a method needs a name'",
+  "blocker": "interface-boxing",
+  "class": "D"
+ },
+ "iface_decl_order": {
+  "actual": "exit=1 stdout_len=0 stderr_len=5265 first='tests/corpus/iface_decl_order/main.cid:60:10: a method needs a name'",
+  "blocker": "interface-boxing (+multi-file-imports)",
+  "class": "D"
+ },
+ "iface_global_implementor_return": {
+  "actual": "exit=1 stdout_len=0 stderr_len=2272 first='tests/corpus/iface_global_implementor_return/main.cid:73:8: a method needs a name'",
+  "blocker": "interface-boxing (+multi-file-imports)",
+  "class": "D"
+ },
+ "int_wrap": {
+  "actual": "cider run exit 108, stdout/stderr empty; expected exit 241 (IR is correct i32; native miscompiles)",
+  "blocker": "v3-codegen-bug: i32 arithmetic not truncated (silent wrong answer)",
+  "class": "D"
+ },
+ "interface_aggregate_discard": {
+  "actual": "exit=1 stdout_len=0 stderr_len=1991 first='tests/corpus/interface_aggregate_discard/main.cid:58:20: a variable needs an initialiser'",
+  "blocker": "interface-boxing (+for-lowering, delete)",
+  "class": "D"
+ },
+ "interface_aggregate_return": {
+  "actual": "exit=1 stdout_len=0 stderr_len=4016 first='tests/corpus/interface_aggregate_return/main.cid:94:20: a variable needs an initialiser'",
+  "blocker": "interface-boxing (+multi-file-imports, for-lowering, delete)",
+  "class": "D"
+ },
+ "interface_box_release": {
+  "actual": "exit=1 stdout_len=0 stderr_len=1038 first='tests/corpus/interface_box_release/main.cid:27:8: a method needs a name'",
+  "blocker": "interface-boxing (+delete)",
+  "class": "D"
+ },
+ "interface_call_args": {
+  "actual": "exit=1 stdout_len=0 stderr_len=2010 first=\"tests/corpus/interface_call_args/main.cid:32:18: expected ')'\"",
+  "blocker": "interface-boxing (+multi-file-imports)",
+  "class": "D"
+ },
+ "interface_element_list": {
+  "actual": "cider run exit 1, stdout empty, stderr diagnostic: parse errors in main.cid before module load (`22:22: expected ';'`); driver has no module loader",
+  "blocker": "multi-file-imports (+ interface-boxing, stdlib-io)",
+  "class": "D"
+ },
+ "interface_fields": {
+  "actual": "cider run exit 1, stdout empty, stderr diagnostic: `main.cid:62:14: a variable needs an initialiser`; driver has no module loader",
+  "blocker": "multi-file-imports (+ interface-boxing)",
+  "class": "D"
+ },
+ "interface_list_arg_return": {
+  "actual": "cider run exit 1, stdout empty, stderr diagnostic: `main.cid:72:16: a variable needs an initialiser`; driver has no module loader",
+  "blocker": "multi-file-imports (+ interface-boxing, stdlib-io)",
+  "class": "D"
+ },
+ "interface_projection": {
+  "actual": "cider run exit 1, stdout empty, stderr diagnostic: `main.cid:16:8: a method needs a name`",
+  "blocker": "destructors (~D syntax) + interface-params + this + uninit",
+  "class": "D"
+ },
+ "interface_reassign": {
+  "actual": "cider run exit 1, stdout empty, stderr diagnostic: `main.cid:23:14: a variable needs an initialiser`",
+  "blocker": "interface-boxing + this + uninit + ternary-lowering",
+  "class": "D"
+ },
+ "interface_returns": {
+  "actual": "cider run exit 1, stdout empty, stderr diagnostic: `main.cid:44:12: a variable needs an initialiser`; driver has no module loader",
+  "blocker": "multi-file-imports (+ interface-boxing)",
+  "class": "D"
+ },
+ "interface_store_lifetime": {
+  "actual": "cider run exit 1, stdout empty, stderr diagnostic: `main.cid:41:14: a variable needs an initialiser`",
+  "blocker": "interface-boxing + this + new-spelling + uninit",
+  "class": "D"
+ },
+ "interp": {
+  "actual": "cider run exit 1, stdout empty, stderr diagnostic: `main.cid:9:19: expected an expression`",
+  "blocker": "stdlib-io + string-interpolation + asm-blocks",
+  "class": "D"
+ },
+ "irgen_return_type_stale": {
+  "actual": "cider run exit 1, stdout empty, stderr diagnostic: `main.cid:103:12: a variable needs an initialiser` (+ `sizeof takes a type in parentheses`)",
+  "blocker": "stdlib-io + ternary-lowering + sizeof-expr + interface-dispatch",
+  "class": "D"
+ },
+ "legacy_func_type": {
+  "actual": "cider run exit 1, stdout empty, stderr diagnostic: `main.cid:52:20: a variable needs an initialiser`",
+  "blocker": "closure/fnptr-repr (bare func spelling) + float-codegen",
+  "class": "D"
+ },
+ "licm_sret_call": {
+  "actual": "cider run exit 1, stdout empty, stderr diagnostic: `main.cid:19:14: a variable needs an initialiser`",
+  "blocker": "for-lowering + interface-boxing + stdlib-io + uninit",
+  "class": "D"
+ },
+ "list_positions": {
+  "actual": "cider run exit 1, stdout empty, stderr diagnostic: `main.cid:56:31: expected ';'` (fn-typed struct field)",
+  "blocker": "stdlib-io + interface-boxing + bare-fn-spelling + bare-list-literals",
+  "class": "D"
+ },
+ "list_positions_crossmod": {
+  "actual": "cider run exit 1, stdout empty, stderr diagnostic: `main.cid:9:25: expected ';'`; driver has no module loader",
+  "blocker": "multi-file-imports (+ interface-boxing, stdlib-io)",
+  "class": "D"
+ },
+ "list_reassign": {
+  "actual": "cider run exit 1, stdout empty, stderr diagnostic: `main.cid:48:23: a variable needs an initialiser` (global arrays)",
+  "blocker": "stdlib-io + interface-boxing + bare-list-literals",
+  "class": "D"
+ },
+ "local_aggregates": {
+  "actual": "cider run exit 1, stdout empty, stderr diagnostic: `main.cid:21:26: expected ';'`; driver has no module loader",
+  "blocker": "multi-file-imports (+ interface-boxing, stdlib-io)",
+  "class": "D"
+ },
+ "loop_scope_destructors": {
+  "actual": "cider run exit 1, stdout empty, stderr diagnostic: `main.cid:21:10: a method needs a name` (~D syntax)",
+  "blocker": "for-lowering + destructors + stdlib-io",
+  "class": "D"
+ },
+ "malloc_frame_slot": {
+  "actual": "cider run exit 1, stdout empty, stderr diagnostic: `main.cid:50:17: a variable needs an initialiser`",
+  "blocker": "stdlib-alloc + for-lowering",
+  "class": "D"
+ },
+ "malloc_refused_nilptr": {
+  "actual": "cider run exit 1, stdout empty, stderr diagnostic: `std.alloc:1:1: cannot find module 'std.alloc'`",
+  "blocker": "stdlib-alloc",
+  "class": "D"
+ },
+ "map_free_reuse": {
+  "actual": "cider run exit 1, stdout empty, stderr diagnostic: `main.cid:15:16: a variable needs an initialiser` + `expected an expression` (generic calls)",
+  "blocker": "stdlib-map + generics",
+  "class": "D"
+ },
+ "map_new_oom": {
+  "actual": "cider run exit 1, stdout empty, stderr diagnostic: `main.cid:19:40: expected an expression` (generic new_map call); expected.json left verbatim (v2 oom exit 2)",
+  "blocker": "stdlib-map/generics (v3 cannot build; trap path unverifiable)",
+  "class": "B"
+ },
+ "map_remove": {
+  "actual": "cider run exit 1, stdout empty, stderr diagnostic: `main.cid:8:40: expected an expression` (generic new_map call)",
+  "blocker": "stdlib-map + generics",
+  "class": "D"
+ },
+ "match_strings": {
+  "actual": "cider run: SIGSEGV (exit 139), `timeout: dumped core`, no diagnostic (checker crashes on match with string return)",
+  "blocker": "match-lowering + string-compare + string-interp + checker-crash",
+  "class": "D"
+ },
+ "matchlist": {
+  "actual": "cider run exit 1, stdout empty, stderr diagnostic: `main.cid:2:17: expected an expression`",
+  "blocker": "match-lowering + for-lowering + asm-blocks + bare-array-literal",
+  "class": "D"
+ },
+ "member_struct_store": {
+  "actual": "cider run exit 1, stdout empty, stderr diagnostic: `main.cid:60:18: a variable needs an initialiser` (global struct)",
+  "blocker": "stdlib-io + generics + this + uninit",
+  "class": "D"
+ },
+ "method_array_return": {
+  "actual": "cider run exit 1, stdout empty, stderr diagnostic: `main.cid:38:24: a variable needs an initialiser`",
+  "blocker": "virtual/override-dispatch + bare-array-literals + uninit",
+  "class": "D"
+ },
+ "mixed_cmp": {
+  "actual": "cider run exit 1, stdout empty, stderr diagnostic: `std.alloc:1:1: cannot find module 'std.alloc'`",
+  "blocker": "stdlib-alloc (comparisons themselves are legal per SEMANTICS 2.3; would-be A)",
+  "class": "D"
+ },
+ "mixed_int": {
+  "actual": "cider run exit 0, stdout/stderr empty \u2014 matches expected.json after rewrite",
+  "blocker": "none (rewrote 3 implicit conversions to explicit `as` per diff #8)",
+  "class": "A"
+ },
+ "mixed_signed_cmp": {
+  "actual": "cider run: SIGSEGV (exit 135), no diagnostic",
+  "blocker": "boolop-checker-crash (!) + u64-decimal-literal-fit (semantics agree with SEMANTICS 2.3; would-be A)",
+  "class": "D"
+ },
+ "mmap_validation": {
+  "actual": "cider run exit 1, stdout empty, stderr diagnostic: `main.cid:11:5: expected an expression` (input.txt kept verbatim)",
+  "blocker": "asm-blocks",
+  "class": "D"
+ },
+ "mod_fn_value": {
+  "actual": "cider run exit 1, stdout empty, stderr diagnostic: `main.cid:6:10: a variable needs an initialiser`; driver has no module loader",
+  "blocker": "multi-file-imports (+ bare-fn-spelling, float)",
+  "class": "D"
+ },
+ "mod_ns_collision": {
+  "actual": "cider run exit 1, stdout empty, stderr diagnostic: `main.cid:14:27: expected ';'`; driver has no module loader",
+  "blocker": "multi-file-imports",
+  "class": "D"
+ },
+ "mod_ns_diamond": {
+  "actual": "cider run exit 1, stdout empty, stderr diagnostic: `da:1:1: cannot find module 'da'` (+ db, dc); driver has no module loader",
+  "blocker": "multi-file-imports",
+  "class": "D"
+ },
+ "mod_ns_lastseg": {
+  "actual": "cider run exit 1, stdout empty, stderr diagnostic: `main.cid:7:12: a variable needs an initialiser`; driver has no module loader",
+  "blocker": "multi-file-imports (a/util.cid + b/util.cid subdirs kept verbatim)",
+  "class": "D"
+ },
+ "mod_ns_vtable": {
+  "actual": "cider run exit 1, stdout empty, stderr diagnostic: `main.cid:10:13: a variable needs an initialiser`; driver has no module loader",
+  "blocker": "multi-file-imports (+ virtual-dispatch)",
+  "class": "D"
+ },
+ "module_qualified_template": {
+  "actual": "cider run exit 1, stdout empty, stderr diagnostic: `main.cid:11:19: expected ')'`; driver has no module loader",
+  "blocker": "multi-file-imports + generics",
+  "class": "D"
+ },
+ "nan_compare": {
+  "actual": "cider run exit 1, stdout empty, stderr diagnostic: `main.cid:36:11: unknown type 'float'`",
+  "blocker": "float-codegen + float-type-alias + boolop-crash",
+  "class": "D"
+ },
+ "narrow_sign": {
+  "actual": "cider run exit 0, stdout/stderr empty \u2014 matches expected.json after rewrite",
+  "blocker": "none (rewrote 4 return conversions to explicit `as` per diff #8)",
+  "class": "A"
+ },
+ "nasm_reserved_names": {
+  "actual": "cider run exit 1, stdout empty, stderr diagnostic: `main.cid:11:23: expected an expression` (bare `[1, 2, 3]` literal)",
+  "blocker": "for-lowering (bare-array-literal is rewritable per diff #6 but for-loop blocks)",
+  "class": "D"
+ },
+ "nested_arrays": {
+  "actual": "cider run exit 1, stdout empty, stderr diagnostic: `main.cid:6:20: a variable needs an initialiser`",
+  "blocker": "for/for-in-lowering + boolop-crash + uninit-globals",
+  "class": "D"
+ },
+ "nested_class_field_init": {
+  "actual": "cider run exit 1, stdout empty, stderr diagnostic: `main.cid:11:16: expected ';'` (field initializer in class body)",
+  "blocker": "class-field-init/inheritance + this + stdlib-io + delete",
+  "class": "D"
+ },
+ "nested_list_literals": {
+  "actual": "cider run exit 1, stdout empty, stderr diagnostic: `main.cid:33:22: expected ';'` (class field initializer)",
+  "blocker": "bare-nested-literals + interface-boxing + volatile + class-field-init + stdlib-io",
+  "class": "D"
+ },
+ "nested_template_args_control": {
+  "actual": "cider run exit 1, stdout empty, stderr diagnostic: `main.cid:13:17: expected ';'`; driver has no module loader",
+  "blocker": "multi-file-imports + generics",
+  "class": "D"
+ },
+ "nil_closure_call": {
+  "actual": "cider run exit 1, stdout empty, stderr diagnostic: `main.cid:40:32: a variable needs an initialiser`; expected.json left verbatim (v2 vm-error exit 2)",
+  "blocker": "bare-func closure spelling + uninit closure (v3 cannot build; trap path unverifiable)",
+  "class": "B"
+ },
+ "nil_fnptr_call": {
+  "actual": "cider run exit 1, stdout empty, stderr diagnostic: `main.cid:29:1: expected a declaration`; expected.json left verbatim (v2 vm-error exit 2)",
+  "blocker": "bare-fn spelling + msabi + virtual/override (v3 cannot build; trap path unverifiable)",
+  "class": "B"
+ },
+ "nil_iface_dispatch": {
+  "actual": "cider run exit 1, stdout empty, stderr diagnostic: `main.cid:32:16: a variable needs an initialiser`; expected.json left verbatim (v2 vm-error exit 2)",
+  "blocker": "interface-boxing + this + uninit iface (v3 cannot build; trap path unverifiable)",
+  "class": "B"
+ },
+ "nil_pointer_deref": {
+  "actual": "cider run exit 1, stdout empty, stderr diagnostic: `main.cid:32:15: a class needs a body`; expected.json left verbatim (v2 vm-error exit 2)",
+  "blocker": "virtual/override/extends + this (v3 cannot build; trap path unverifiable)",
+  "class": "B"
+ },
+ "override_sig_dispatch": {
+  "actual": "cider run exit 1, stdout empty, stderr diagnostic: `main.cid:18:11: a class needs a body` (extends clause)",
+  "blocker": "virtual/override/extends/super + stdlib-io + delete",
+  "class": "D"
+ },
+ "pointer_interface": {
+  "actual": "cider run exit 1, stdout empty, stderr diagnostic: `main.cid:33:26: expected an expression` (`p->area`, diff #1)",
+  "blocker": "interface-boxing + this + uninit",
+  "class": "D"
+ },
+ "print_int": {
+  "actual": "cider run exit 1, stdout empty, stderr diagnostic: `std.io:1:1: cannot find module 'std.io'`",
+  "blocker": "stdlib-io (printInt has no v3 prelude equivalent; hardcoding strings would delete behavior)",
+  "class": "D"
+ },
+ "ptr_array_index": {
+  "actual": "cider run exit 1, stdout empty, stderr diagnostic: `main.cid:46:10: a method needs a name` (~D syntax)",
+  "blocker": "stdlib-io/alloc + destructors + interface-boxing",
+  "class": "D"
+ },
+ "ptr_array_stride": {
+  "actual": "cider run exit 1, stdout empty, stderr diagnostic: `main.cid:33:10: a method needs a name` (~D syntax)",
+  "blocker": "stdlib-io/alloc + destructors",
+  "class": "D"
+ },
+ "qualified_interface": {
+  "actual": "cider run exit 1, stdout empty, stderr diagnostic: `main.cid:16:17: expected ';'`; driver has no module loader",
+  "blocker": "multi-file-imports (+ interface-boxing)",
+  "class": "D"
+ },
+ "qualified_struct_literal": {
+  "actual": "cider run exit 1, stdout empty, stderr diagnostic: `main.cid:10:24: expected ')'`; driver has no module loader",
+  "blocker": "multi-file-imports",
+  "class": "D"
+ },
+ "qualified_template_late_hooks": {
+  "actual": "cider run exit 1, stdout empty, stderr diagnostic: `main.cid:13:18: a variable needs an initialiser`; driver has no module loader",
+  "blocker": "multi-file-imports + generics",
+  "class": "D"
+ },
+ "return_array_literal": {
+  "actual": "cider run exit 1, stdout empty, stderr diagnostic: `main.cid:39:13: a variable needs an initialiser`",
+  "blocker": "interface-elements + this + bare-return-literals + uninit-globals",
+  "class": "D"
+ },
+ "shift_compound_assign": {
+  "actual": "cider run exit 1, stdout empty, stderr diagnostic: `main.cid:109:14: a variable needs an initialiser`",
+  "blocker": "for-lowering (+ u64-hex-literal-fit, bare-literal; <<= / >>= themselves check clean)",
+  "class": "D"
+ },
+ "shift_count_mask": {
+  "actual": "cider run exit 1, stdout empty, stderr diagnostic: `std.io:1:1: cannot find module 'std.io'` (constant `a << 33` sites would also force rejection per diff #16)",
+  "blocker": "const-shift-count-must-reject (diff #16) + stdlib-io",
+  "class": "B"
+ },
+ "shift_sign": {
+  "actual": "cider run: SIGSEGV (exit 139), no diagnostic",
+  "blocker": "checker-crash on i64-shift-compare error path + u64-hex-literal-fit + implicit-i64-init",
+  "class": "D"
+ },
+ "short_circuit_value": {
+  "actual": "cider run exit 1, stdout empty, stderr diagnostic: `std.io:1:1: cannot find module 'std.io'`",
+  "blocker": "stdlib-io + boolop-crash (&& / || crash the checker)",
+  "class": "D"
+ },
+ "sizeof_expr": {
+  "actual": "cider run exit 1, stdout empty, stderr diagnostic incl. the right reason: `sizeof takes a type in parentheses` (plus uninit-var errors)",
+  "blocker": "sizeof-expr-form-must-reject (diff #12) + generics + stdlib-io",
+  "class": "B"
+ },
+ "slice_copy": {
+  "actual": "cider run exit 1, stdout empty, stderr diagnostic: `main.cid:11:19: a variable needs an initialiser`",
+  "blocker": "for-in-lowering (uninit arrays are rewritable per diff #7 but for-in blocks)",
+  "class": "D"
+ },
+ "slot_reuse": {
+  "actual": "run exit 1: OUT: ERR:std.io:1:1: cannot find module 'std.io'\\n",
+  "blocker": "stdlib-missing (no std.* modules in v3; only prelude print/alloc/free/panic)",
+  "class": "A"
+ },
+ "solum": {
+  "actual": "run exit 1: OUT: ERR:tests/corpus/solum/main.cid:346:66: unterminated string literal\\ntests/corpus/solum/main.cid:765:36: unterminated string literal\\ntests/corpus/solum/main.cid:1122:62: invalid digit for base\\ntests/corpus",
+  "blocker": "stdlib-missing (also asm-blocks; v3 lexer rejects v2 string escapes)",
+  "class": "A"
+ },
+ "spec": {
+  "actual": "run exit 1: OUT: ERR:tests/corpus/spec/main.cid:6:10: a type parameter needs a name\\ntests/corpus/spec/main.cid:8:1: expected a declaration\\ntests/corpus/spec/main.cid:11:21: expected an expression\\ntests/corpus/spec/main.ci",
+  "blocker": "generics-not-lowered (also asm-blocks; explicit-specialization form)",
+  "class": "A"
+ },
+ "sret_expr_calls": {
+  "actual": "run exit 1: OUT: ERR:tests/corpus/sret_expr_calls/main.cid:32:16: expected ';'\\ntests/corpus/sret_expr_calls/main.cid:32:16: a class holds fields and methods\\ntests/corpus/sret_expr_calls/main.cid:33:5: expected '}'\\ntests/c",
+  "blocker": "stdlib-missing (also uninit-locals rejected, local classes)",
+  "class": "A"
+ },
+ "stale_handler_frame_exit": {
+  "actual": "run exit 1: OUT: ERR:tests/corpus/stale_handler_frame_exit/main.cid:21:13: a catch binds a name and a type\\ntests/corpus/stale_handler_frame_exit/main.cid:24:1: expected a declaration\\ntests/corpus/stale_handler_frame_exit/",
+  "blocker": "untyped-catch-removed (v2 trap exit 2 left verbatim; v3 rejects, never traps)",
+  "class": "B"
+ },
+ "stale_handler_still_catches": {
+  "actual": "run exit 1: OUT: ERR:tests/corpus/stale_handler_still_catches/main.cid:17:13: a catch binds a name and a type\\ntests/corpus/stale_handler_still_catches/main.cid:19:9: expected a declaration\\ntests/corpus/stale_handler_still",
+  "blocker": "untyped-catch-removed (diff #14; also throw-transport broken)",
+  "class": "A"
+ },
+ "stderr": {
+  "actual": "run exit 1: OUT: ERR:tests/corpus/stderr/main.cid:4:3: expected an expression\\ntests/corpus/stderr/main.cid:5:3: expected a declaration\\ntests/corpus/stderr/main.cid:5:46: expected a declaration\\ntests/corpus/stderr/main.cid",
+  "blocker": "asm-blocks",
+  "class": "A"
+ },
+ "stdio": {
+  "actual": "run exit 1: OUT: ERR:std.io:1:1: cannot find module 'std.io'\\n",
+  "blocker": "stdlib-missing (no std.* modules in v3; only prelude print/alloc/free/panic)",
+  "class": "A"
+ },
+ "stdlib_alloc_init": {
+  "actual": "run exit 1: OUT: ERR:std.io:1:1: cannot find module 'std.io'\\nstd.alloc:1:1: cannot find module 'std.alloc'\\n",
+  "blocker": "stdlib-missing (no std.* modules in v3; only prelude print/alloc/free/panic)",
+  "class": "A"
+ },
+ "stdlib_fs_ops": {
+  "actual": "run exit 1: OUT: ERR:tests/corpus/stdlib_fs_ops/main.cid:33:24: a variable needs an initialiser\\n",
+  "blocker": "stdlib-missing (no std.* modules in v3; only prelude print/alloc/free/panic)",
+  "class": "A"
+ },
+ "stdlib_io_printchar": {
+  "actual": "run exit 1: OUT: ERR:std.io:1:1: cannot find module 'std.io'\\n",
+  "blocker": "stdlib-missing (no std.* modules in v3; only prelude print/alloc/free/panic)",
+  "class": "A"
+ },
+ "stdlib_io_readall": {
+  "actual": "run exit 1: OUT: ERR:tests/corpus/stdlib_io_readall/main.cid:11:27: a variable needs an initialiser\\ntests/corpus/stdlib_io_readall/main.cid:12:16: a variable needs an initialiser\\n",
+  "blocker": "stdlib-missing (no std.* modules in v3; only prelude print/alloc/free/panic)",
+  "class": "A"
+ },
+ "stdlib_io_readline": {
+  "actual": "run exit 1: OUT: ERR:tests/corpus/stdlib_io_readline/main.cid:11:25: a variable needs an initialiser\\ntests/corpus/stdlib_io_readline/main.cid:12:16: a variable needs an initialiser\\ntests/corpus/stdlib_io_readline/main.cid",
+  "blocker": "stdlib-missing (no std.* modules in v3; only prelude print/alloc/free/panic)",
+  "class": "A"
+ },
+ "stdlib_map_ops": {
+  "actual": "run exit 1: OUT: ERR:tests/corpus/stdlib_map_ops/main.cid:11:40: expected an expression\\ntests/corpus/stdlib_map_ops/main.cid:12:17: expected an expression\\ntests/corpus/stdlib_map_ops/main.cid:13:17: expected an expression",
+  "blocker": "stdlib-missing (no std.* modules in v3; only prelude print/alloc/free/panic)",
+  "class": "A"
+ },
+ "stdlib_math_basic": {
+  "actual": "run exit 1: OUT: ERR:tests/corpus/stdlib_math_basic/main.cid:33:13: expected an expression\\ntests/corpus/stdlib_math_basic/main.cid:34:13: expected an expression\\ntests/corpus/stdlib_math_basic/main.cid:35:13: expected an e",
+  "blocker": "stdlib-missing (no std.* modules in v3; only prelude print/alloc/free/panic)",
+  "class": "A"
+ },
+ "stdlib_result_expect_fail": {
+  "actual": "run exit 1: OUT: ERR:tests/corpus/stdlib_result_expect_fail/main.cid:7:38: expected an expression\\ntests/corpus/stdlib_result_expect_fail/main.cid:8:25: expected an expression\\n",
+  "blocker": "stdlib-missing (no std.* modules in v3; only prelude print/alloc/free/panic)",
+  "class": "A"
+ },
+ "stdlib_result_ok": {
+  "actual": "run exit 1: OUT: ERR:tests/corpus/stdlib_result_ok/main.cid:13:28: expected an expression\\ntests/corpus/stdlib_result_ok/main.cid:14:15: expected an expression\\ntests/corpus/stdlib_result_ok/main.cid:18:37: expected an expr",
+  "blocker": "stdlib-missing (no std.* modules in v3; only prelude print/alloc/free/panic)",
+  "class": "A"
+ },
+ "stdlib_result_unwrap_fail": {
+  "actual": "run exit 1: OUT: ERR:tests/corpus/stdlib_result_unwrap_fail/main.cid:6:38: expected an expression\\ntests/corpus/stdlib_result_unwrap_fail/main.cid:7:25: expected an expression\\n",
+  "blocker": "stdlib-missing (no std.* modules in v3; only prelude print/alloc/free/panic)",
+  "class": "A"
+ },
+ "stdlib_string_ops": {
+  "actual": "run exit 1: OUT: ERR:tests/corpus/stdlib_string_ops/main.cid:7:10: a module needs a name\\ntests/corpus/stdlib_string_ops/main.cid:7:30: expected ';'\\ntests/corpus/stdlib_string_ops/main.cid:11:24: a variable needs an initia",
+  "blocker": "stdlib-missing (no std.* modules in v3; only prelude print/alloc/free/panic)",
+  "class": "A"
+ },
+ "stdlib_vector_ops": {
+  "actual": "run exit 1: OUT: ERR:tests/corpus/stdlib_vector_ops/main.cid:15:31: expected an expression\\ntests/corpus/stdlib_vector_ops/main.cid:16:17: expected an expression\\ntests/corpus/stdlib_vector_ops/main.cid:17:17: expected an e",
+  "blocker": "stdlib-missing (no std.* modules in v3; only prelude print/alloc/free/panic)",
+  "class": "A"
+ },
+ "str_escape": {
+  "actual": "run exit -6: OUT: ERR:free(): invalid pointer\\n SIGNAL",
+  "blocker": "compiler-crash: global string init rejected, indexing a global string aborts checker (SIGABRT heap corruption)",
+  "class": "A"
+ },
+ "str_ptr": {
+  "actual": "run exit 1: OUT: ERR:tests/corpus/str_ptr/main.cid:2:11: arithmetic needs numbers\\ntests/corpus/str_ptr/main.cid:2:18: not lowered yet: a value of this type\\n",
+  "blocker": "string-pointer-arithmetic rejected (s+n is interior-pointer op in v2)",
+  "class": "A"
+ },
+ "string_compare": {
+  "actual": "run exit 1: OUT: ERR:tests/corpus/string_compare/main.cid:5:3: not lowered yet: string returns are not emitted yet\\n",
+  "blocker": "string-ops-not-lowered (==/!=, interpolation, string returns)",
+  "class": "A"
+ },
+ "string_ordering": {
+  "actual": "run exit 1: OUT: ERR:tests/corpus/string_ordering/main.cid:135:7: unknown escape\\ntests/corpus/string_ordering/main.cid:135:7: unknown escape\\ntests/corpus/string_ordering/main.cid:136:9: unknown escape\\ntests/corpus/string_",
+  "blocker": "string-ordering-not-lowered (<,<=,>,>= on strings)",
+  "class": "A"
+ },
+ "struct_elem": {
+  "actual": "run exit 1: OUT: ERR:tests/corpus/struct_elem/main.cid:6:23: a variable needs an initialiser\\n",
+  "blocker": "array-element-store-not-lowered (also global array init, char casts)",
+  "class": "A"
+ },
+ "struct_element_store": {
+  "actual": "run exit 1: OUT: ERR:tests/corpus/struct_element_store/main.cid:31:13: a variable needs an initialiser\\ntests/corpus/struct_element_store/main.cid:37:13: a variable needs an initialiser\\ntests/corpus/struct_element_store/ma",
+  "blocker": "stdlib-missing (no std.* modules in v3; only prelude print/alloc/free/panic)",
+  "class": "A"
+ },
+ "struct_literal_alias": {
+  "actual": "run exit 1: OUT: ERR:tests/corpus/struct_literal_alias/main.cid:20:33: expected ';'\\ntests/corpus/struct_literal_alias/main.cid:21:33: expected a declaration\\ntests/corpus/struct_literal_alias/main.cid:23:3: expected a decl",
+  "blocker": "multi-file-imports (bare T{...} literals would also need new per diff #6)",
+  "class": "A"
+ },
+ "struct_param": {
+  "actual": "run exit 1: OUT: ERR:tests/corpus/struct_param/main.cid:23:13: a variable needs an initialiser\\ntests/corpus/struct_param/main.cid:26:15: a variable needs an initialiser\\ntests/corpus/struct_param/main.cid:28:15: a variable",
+  "blocker": "bool-ops-crash (persists after new-init rewrite; also uninit-rejected)",
+  "class": "A"
+ },
+ "struct_template_params": {
+  "actual": "run exit 1: OUT: ERR:tests/corpus/struct_template_params/main.cid:62:12: expected an expression\\ntests/corpus/struct_template_params/main.cid:91:12: expected an expression\\ntests/corpus/struct_template_params/main.cid:100:2",
+  "blocker": "generics-not-lowered (also multi-file-imports)",
+  "class": "A"
+ },
+ "struct_type_import": {
+  "actual": "run exit 1: OUT: ERR:tests/corpus/struct_type_import/main.cid:12:16: expected ';'\\ntests/corpus/struct_type_import/main.cid:12:26: expected ';'\\n",
+  "blocker": "multi-file-imports (also stdlib-missing)",
+  "class": "A"
+ },
+ "syscall_efault_bounds": {
+  "actual": "run exit 1: OUT: ERR:tests/corpus/syscall_efault_bounds/main.cid:9:5: expected an expression\\ntests/corpus/syscall_efault_bounds/main.cid:17:5: expected a declaration\\ntests/corpus/syscall_efault_bounds/main.cid:27:5: expec",
+  "blocker": "asm-blocks",
+  "class": "A"
+ },
+ "template_body_forms": {
+  "actual": "run exit 1: OUT: ERR:tests/corpus/template_body_forms/main.cid:14:36: expected '{' or '(' after new\\ntests/corpus/template_body_forms/main.cid:18:38: expected an expression\\ntests/corpus/template_body_forms/main.cid:21:47: ",
+  "blocker": "generics-not-lowered",
+  "class": "A"
+ },
+ "template_self_recursion_control": {
+  "actual": "run exit 1: OUT: ERR:tests/corpus/template_self_recursion_control/main.cid:38:13: expected ';'\\ntests/corpus/template_self_recursion_control/main.cid:38:13: a struct holds fields and methods\\ntests/corpus/template_self_recu",
+  "blocker": "generics-not-lowered",
+  "class": "A"
+ },
+ "tern": {
+  "actual": "run exit 1: OUT: ERR:tests/corpus/tern/main.cid:9:7: arithmetic needs numbers\\ntests/corpus/tern/main.cid:3:16: not lowered yet: this expression\\n",
+  "blocker": "ternary-not-lowered (also bool-!/char-cmp gaps)",
+  "class": "A"
+ },
+ "throw_across_frames": {
+  "actual": "run exit 1: OUT: ERR:tests/corpus/throw_across_frames/main.cid:19:13: a catch binds a name and a type\\ntests/corpus/throw_across_frames/main.cid:21:5: expected a declaration\\ntests/corpus/throw_across_frames/main.cid:23:5: ",
+  "blocker": "untyped-catch-removed (also throw-transport broken for caught values)",
+  "class": "A"
+ },
+ "throw_finalizer_gaps": {
+  "actual": "run exit 1: OUT: ERR:tests/corpus/throw_finalizer_gaps/main.cid:29:10: a method needs a name\\ntests/corpus/throw_finalizer_gaps/main.cid:29:10: a class holds fields and methods\\ntests/corpus/throw_finalizer_gaps/main.cid:31",
+  "blocker": "defer-destructors (also stdlib-missing, untyped-catch)",
+  "class": "A"
+ },
+ "throw_scope_finalizers": {
+  "actual": "run exit 1: OUT: ERR:tests/corpus/throw_scope_finalizers/main.cid:22:10: a method needs a name\\ntests/corpus/throw_scope_finalizers/main.cid:22:10: a class holds fields and methods\\ntests/corpus/throw_scope_finalizers/main.",
+  "blocker": "defer-destructors (also stdlib-missing, untyped-catch)",
+  "class": "A"
+ },
+ "transitive_pointee": {
+  "actual": "run exit 1: OUT: ERR:tests/corpus/transitive_pointee/main.cid:10:14: expected an expression\\n",
+  "blocker": "multi-file-imports (arrow also needs (*p).f per diff #1)",
+  "class": "A"
+ },
+ "u64div": {
+  "actual": "run exit 1: OUT: ERR:tests/corpus/u64div/main.cid:3:23: a variable needs an initialiser\\ntests/corpus/u64div/main.cid:8:9: expected an expression\\n",
+  "blocker": "array-element-store-not-lowered (also uninit-rejected)",
+  "class": "A"
+ },
+ "uncaught_rethrow": {
+  "actual": "run exit 1: OUT: ERR:tests/corpus/uncaught_rethrow/main.cid:10:13: a catch binds a name and a type\\ntests/corpus/uncaught_rethrow/main.cid:13:5: expected a declaration\\ntests/corpus/uncaught_rethrow/main.cid:14:1: expected ",
+  "blocker": "untyped-catch-removed (v2 trap exit 2 left verbatim; v3 rejects, never traps)",
+  "class": "B"
+ },
+ "uncaught_rethrow_finalizers": {
+  "actual": "run exit 1: OUT: ERR:tests/corpus/uncaught_rethrow_finalizers/main.cid:14:10: a method needs a name\\ntests/corpus/uncaught_rethrow_finalizers/main.cid:14:10: a class holds fields and methods\\ntests/corpus/uncaught_rethrow_f",
+  "blocker": "defer-destructors (v2 trap exit 2 left verbatim; also untyped-catch)",
+  "class": "B"
+ },
+ "uncaught_throw": {
+  "actual": "run exit 0: OUT: ERR:",
+  "blocker": "uncaught-throw-swallowed: v3 check+run exit 0, must trap (v2 exit 2 left verbatim)",
+  "class": "B"
+ },
+ "uncaught_throw_finalizers": {
+  "actual": "run exit 1: OUT: ERR:tests/corpus/uncaught_throw_finalizers/main.cid:19:10: a method needs a name\\ntests/corpus/uncaught_throw_finalizers/main.cid:19:10: a class holds fields and methods\\ntests/corpus/uncaught_throw_finaliz",
+  "blocker": "defer-destructors (v2 trap exit 2 left verbatim; also untyped-catch)",
+  "class": "B"
+ },
+ "uninit_locals_zero": {
+  "actual": "run exit 1: OUT: ERR:tests/corpus/uninit_locals_zero/main.cid:35:23: a variable needs an initialiser\\ntests/corpus/uninit_locals_zero/main.cid:44:23: a variable needs an initialiser\\ntests/corpus/uninit_locals_zero/main.cid",
+  "blocker": "none (v3 rejects var x:T per diff #7: loud refusal, gate passes)",
+  "class": "B"
+ },
+ "uninit_zero_policy": {
+  "actual": "run exit 1: OUT: ERR:tests/corpus/uninit_zero_policy/main.cid:119:5: expected an expression\\ntests/corpus/uninit_zero_policy/main.cid:130:5: expected a declaration\\ntests/corpus/uninit_zero_policy/main.cid:130:32: expected ",
+  "blocker": "none (v3 rejects var x:T per diff #7: loud refusal, gate passes)",
+  "class": "B"
+ },
+ "unwind_intermediate_frames": {
+  "actual": "run exit 1: OUT: ERR:tests/corpus/unwind_intermediate_frames/main.cid:42:10: a method needs a name\\ntests/corpus/unwind_intermediate_frames/main.cid:42:10: a class holds fields and methods\\ntests/corpus/unwind_intermediate_",
+  "blocker": "defer-destructors (also untyped-catch)",
+  "class": "A"
+ },
+ "unwind_intermediate_uncaught": {
+  "actual": "run exit 1: OUT: ERR:tests/corpus/unwind_intermediate_uncaught/main.cid:14:10: a method needs a name\\ntests/corpus/unwind_intermediate_uncaught/main.cid:14:10: a class holds fields and methods\\ntests/corpus/unwind_intermedi",
+  "blocker": "defer-destructors (v2 trap exit 2 left verbatim; also untyped-catch)",
+  "class": "B"
+ },
+ "vector_empty": {
+  "actual": "run exit 1: OUT: ERR:tests/corpus/vector_empty/main.cid:40:31: expected an expression\\ntests/corpus/vector_empty/main.cid:41:13: expected an expression\\ntests/corpus/vector_empty/main.cid:42:13: expected an expression\\ntests",
+  "blocker": "stdlib-missing (no std.* modules in v3; only prelude print/alloc/free/panic)",
+  "class": "A"
+ },
+ "vector_reserve_oom": {
+  "actual": "run exit 1: OUT: ERR:tests/corpus/vector_reserve_oom/main.cid:20:31: expected an expression\\ntests/corpus/vector_reserve_oom/main.cid:21:10: expected an expression\\ntests/corpus/vector_reserve_oom/main.cid:22:10: expected a",
+  "blocker": "stdlib-missing, OOM-message policy deleted by design (cannot verify silent trap)",
+  "class": "B"
+ },
+ "virtual_aggregate_return": {
+  "actual": "run exit 1: OUT: ERR:tests/corpus/virtual_aggregate_return/main.cid:34:10: a method needs a name\\ntests/corpus/virtual_aggregate_return/main.cid:34:10: a class holds fields and methods\\ntests/corpus/virtual_aggregate_return",
+  "blocker": "multi-file-imports (also virtual-dispatch, destructors, stdlib-missing)",
+  "class": "A"
+ },
+ "virtual_aggregate_return_width": {
+  "actual": "run exit 1: OUT: ERR:tests/corpus/virtual_aggregate_return_width/main.cid:55:16: a variable needs an initialiser\\ntests/corpus/virtual_aggregate_return_width/main.cid:64:18: a variable needs an initialiser\\ntests/corpus/vir",
+  "blocker": "virtual-aggregate-returns (also uninit-rejected)",
+  "class": "A"
+ },
+ "virtual_call_args": {
+  "actual": "run exit 1: OUT: ERR:tests/corpus/virtual_call_args/main.cid:35:26: expected ')'\\ntests/corpus/virtual_call_args/main.cid:35:26: a method needs a body\\ntests/corpus/virtual_call_args/main.cid:35:26: a class holds fields and",
+  "blocker": "virtual-interface (also float, fn-types, stdlib-missing)",
+  "class": "A"
+ },
+ "virtual_value_vptr": {
+  "actual": "run exit 1: OUT: ERR:tests/corpus/virtual_value_vptr/main.cid:25:9: a class needs a body\\ntests/corpus/virtual_value_vptr/main.cid:27:5: expected a declaration\\ntests/corpus/virtual_value_vptr/main.cid:28:5: expected a decl",
+  "blocker": "virtual-vptr (also stdlib-missing)",
+  "class": "A"
+ },
+ "volatile_aggregate_convert": {
+  "actual": "run exit 1: OUT: ERR:tests/corpus/volatile_aggregate_convert/main.cid:16:11: expected a type\\ntests/corpus/volatile_aggregate_convert/main.cid:18:25: a variable needs an initialiser\\ntests/corpus/volatile_aggregate_convert/",
+  "blocker": "volatile-qualifier-syntax (also interface; v3 rejects volatile Inner field type)",
+  "class": "A"
+ },
+ "volatile_counter": {
+  "actual": "run exit 1: OUT: ERR:tests/corpus/volatile_counter/main.cid:8:14: expected a type\\ntests/corpus/volatile_counter/main.cid:8:14: a function needs a body\\ntests/corpus/volatile_counter/main.cid:10:1: expected a declaration\\n",
+  "blocker": "volatile-syntax (v3 rejects volatile int* param spelling)",
+  "class": "A"
+ },
+ "vtable_plain_method": {
+  "actual": "run exit 1: OUT: ERR:tests/corpus/vtable_plain_method/main.cid:16:15: a class needs a body\\ntests/corpus/vtable_plain_method/main.cid:18:1: expected a declaration\\ntests/corpus/vtable_plain_method/main.cid:29:12: a class ne",
+  "blocker": "virtual-override (also stdlib-missing)",
+  "class": "A"
+ },
+ "wide_args": {
+  "actual": "run exit 0: OUT: ERR:",
+  "blocker": "none",
+  "class": "A"
+ },
+ "wide_global_load": {
+  "actual": "run exit 1: OUT: ERR:tests/corpus/wide_global_load/main.cid:28:22: expected ')'\\ntests/corpus/wide_global_load/main.cid:28:22: a function needs a body\\ntests/corpus/wide_global_load/main.cid:30:1: expected a declaration\\ntes",
+  "blocker": "multi-file-imports (also interface-boxing)",
+  "class": "A"
+ },
+ "wide_global_store": {
+  "actual": "run exit 1: OUT: ERR:tests/corpus/wide_global_store/main.cid:52:20: expected ')'\\ntests/corpus/wide_global_store/main.cid:52:20: a function needs a body\\ntests/corpus/wide_global_store/main.cid:54:1: expected a declaration\\n",
+  "blocker": "multi-file-imports (also interface-boxing)",
+  "class": "A"
+ },
+ "wide_strings": {
+  "actual": "run exit 1: OUT: ERR:tests/corpus/wide_strings/main.cid:11:18: unknown escape\\ntests/corpus/wide_strings/main.cid:32:23: unknown escape\\ntests/corpus/wide_strings/main.cid:32:23: unknown escape\\ntests/corpus/wide_strings/mai",
+  "blocker": "wide-string-literals (u\"..\" prefix, \\u escapes rejected)",
+  "class": "A"
+ },
+ "write_returns_count": {
+  "actual": "run exit 1: OUT: ERR:tests/corpus/write_returns_count/main.cid:9:18: a variable needs an initialiser\\ntests/corpus/write_returns_count/main.cid:10:18: a variable needs an initialiser\\n",
+  "blocker": "stdlib-missing (no std.* modules in v3; only prelude print/alloc/free/panic)",
+  "class": "A"
+ }
+}

@@ -1,0 +1,122 @@
+// CIDER-BUG-119: function-local struct/class declarations are supported.
+//
+// A local aggregate is an ordinary type scoped to the function/block that
+// declares it: fields, member access, nesting (including a field naming a
+// local type declared later in the same function scope), class field
+// initializers, plain/virtual methods, constructors, destructors and
+// module-scope interface satisfaction all work. Same-named local classes
+// in different functions mangle apart. Local templates are one shape that
+// stays unsupported and is rejected at the declaration (see
+// tests/fixtures/check_local_template.cid); a local aggregate shadowing an
+// enclosing type name is rejected too (see check_local_shadow.cid), because
+// local type identity is the bare written name.
+import lib;
+from std.io import print, printInt;
+
+var drops: int = 0;
+
+interface Shape { func area() -> int; }
+
+func pickA() -> int {
+    class P { var v: int = 3; func get() -> int { return this.v; } }
+    var p: P;
+    return p.get();
+}
+
+func pickB() -> int {
+    class P { var v: int = 20; func get() -> int { return this.v; } }
+    var p: P;
+    return p.get();
+}
+
+func main() -> int {
+    // Struct: fields, member access.
+    struct S { var x: int; var y: int; }
+    var s: S;
+    s.x = 5;
+    s.y = 7;
+    printInt(s.x + s.y);            // 12
+    print("\n");
+
+    // Nested local struct whose field names a later local declaration.
+    struct A { var b: B; }
+    struct B { var u: int; var v: int; }
+    var a: A;
+    a.b.u = 20;
+    a.b.v = 30;
+    printInt(a.b.u + a.b.v);        // 50
+    print("\n");
+
+    // Class: field initializer + plain method + constructor + destructor.
+    class C {
+        var v: int = 3;
+        func get() -> int { return this.v; }
+        func init(n: int) -> void { this.v = n; }
+    }
+    var c: C;
+    printInt(c.get());              // 3
+    print("\n");
+
+    {
+        class R {
+            var v: int = 1;
+            func ~R() -> void { drops = drops + 1; }
+        }
+        var r: R;
+        r.v = 2;
+    }
+    printInt(drops);                // 1: value local finalized at block exit
+    print("\n");
+
+    var cp: *C = new C(9);
+    printInt(cp->get());            // 9
+    print("\n");
+    delete cp;
+
+    // A local class value embedded in another local class.
+    class Inner { var w: int = 6; func get() -> int { return this.w; } }
+    class Outer { var i: Inner; func get() -> int { return this.i.get(); } }
+    var o: Outer;
+    printInt(o.get());              // 6
+    print("\n");
+
+    // Virtual dispatch inside a local hierarchy.
+    class Base { var tag: int = 0; virtual func who() -> int { return 1; } }
+    class Derived extends Base { override func who() -> int { return 2; } }
+    var d: *Derived = new Derived;
+    var b: *Base = d;
+    printInt(b->who());             // 2
+    print("\n");
+
+    // A local class can satisfy a module-scope interface.
+    class Sq { var side: int = 4; func area() -> int { return this.side * this.side; } }
+    var sq: Sq;
+    var sh: Shape = sq;
+    printInt(sh.area());            // 16
+    print("\n");
+
+    // Local aggregates declared inside an imported module's function body.
+    printInt(lib.localStruct());    // 6
+    print("\n");
+    printInt(lib.localClass());     // 8
+    print("\n");
+    printInt(lib.localSelfReturn());        // 4
+    print("\n");
+    printInt(lib.localVirtualDispatch());   // 2
+    print("\n");
+    printInt(lib.localIfaceDispatch());     // 25
+    print("\n");
+    printInt(lib.localExtendsModule());     // 12
+    print("\n");
+    printInt(lib.localDtor());              // 2
+    print("\n");
+
+    // Same-named local classes in two functions mangle apart.
+    printInt(pickA() + pickB());    // 23
+    print("\n");
+    printInt(lib.pickLibA() + lib.pickLibB());  // 7
+    print("\n");
+
+    print("local_aggregates_ok\n");
+    return 0;
+}

@@ -1,0 +1,10 @@
+// CIDER-BUG-168 negative control: the module half of the nested-argument
+// spellings. `LibWrap` and `LibOne` are both known, so nesting them (and
+// nesting the result again) stays silent.
+export struct LibWrap<T> {
+  var v: T;
+}
+
+export struct LibOne<A> {
+  var a: A;
+}

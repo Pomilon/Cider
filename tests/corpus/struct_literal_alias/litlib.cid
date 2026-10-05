@@ -1,0 +1,7 @@
+export struct Remote {
+  var value: int;
+}
+
+export type RemoteAlias = Remote;
+export type RemoteChain = RemoteAlias;
+export type ImportedAlias = RemoteChain;

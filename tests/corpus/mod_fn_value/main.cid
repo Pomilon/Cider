@@ -1,0 +1,16 @@
+// CIDER-BUG-023: `b.inc` used as a value used to type as *void, so a
+// global `= b.inc` initializer was rejected and indirect calls fell back
+// to the generic int-result path (wrong for f64 signatures).
+import b;
+
+var g: fn(int) -> int = b.inc;
+var h: fn(f64) -> f64 = b.half;
+
+func main() -> int {
+  if (g(4) != 5) { return 1; }
+  if ((h(10.0) as int) != 5) { return 2; }
+  var f: fn(int) -> int = b.inc;
+  if (f(6) != 7) { return 3; }
+  if ((b.inc)(4) != 5) { return 4; }
+  return 0;
+}

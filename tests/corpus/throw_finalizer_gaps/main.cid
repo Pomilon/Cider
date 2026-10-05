@@ -1,0 +1,71 @@
+// The two shapes CIDER-BUG-154 documented as unwinder gaps, pinned now
+// that CIDER-BUG-190 closed both. They used to be crash-free but lossy on
+// every backend (`drops` stayed 0), which is what this test used to assert;
+// the two landing pads close them, so `drops` is 2 and the trace is
+// `9,A;8,B;drops=2;`:
+//
+//   1. INTERMEDIATE FRAME (mid): main has the try, mid() has a class
+//      local but no try, deep() throws. The longjmp used to land
+//      directly in main's handler with mid()'s frame already gone, so
+//      `m` was never destroyed. mid()'s call site now carries a landing
+//      pad, which runs `m`'s finalizer and re-throws outward.
+//   2. HANDLER FRAME'S TRY BODY (the second try): the throw comes from a
+//      callee and lands in this frame's catch. The try body's exits used
+//      to be skipped, because the catch runs at the setjmp-time register
+//      state of the try's own _setjmp, before the try body's locals were
+//      addressed. The landing pad's _setjmp sits at the CALL, after
+//      every one of those addresses is live, so the same scope's exits
+//      run there and the catch still finds its registers intact.
+//
+// The general matrix (0/1/2/3 crossed frames, aggregates, interface-box
+// releases, defers, loops, nested try) is unwind_intermediate_frames; the
+// uncaught variant is unwind_intermediate_uncaught.
+from std.io import print, printInt;
+
+var drops: int = 0;
+
+class D {
+    var label: int;
+    func ~D() {
+        drops = drops + 1;
+        printInt(this.label);
+        print(",");
+    }
+}
+
+func deep() -> int {
+    throw 5;
+}
+
+func mid() -> int {
+    var m: D;
+    m.label = 9;
+    return deep();
+}
+
+func callee() -> int {
+    throw 4;
+}
+
+func main() -> int {
+    try {
+        mid();
+    } catch (e) {
+        print("A;");
+    }
+
+    try {
+        var d: D;
+        d.label = 8;
+        callee();
+        print("no;");
+    } catch (e) {
+        print("B;");
+    }
+
+    print("drops=");
+    printInt(drops);
+    print(";\n");
+    if (drops != 2) { return 1; }
+    return 0;
+}

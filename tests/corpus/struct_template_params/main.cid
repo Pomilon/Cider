@@ -1,0 +1,137 @@
+// CIDER-BUG-066: a struct template is instantiated from ANY type
+// annotation that names it, not only from a `var` declaration of the
+// instantiation.
+//
+// The single-position templates below are each named in exactly one
+// annotation position, with no variable declaration of their own
+// instantiation anywhere, so without the type-driven hook the type never
+// resolves. All three backends must agree on the result.
+//
+// Positions covered:
+//   1. parameter type, pointer (`*ParamOnly<int>`)
+//   2. return type (`RetOnly<int>`)
+//   3. struct field type (`FieldOnly<int>`)
+//   4. cast target (`*CastOnly<int>`)
+//   5. sizeof target (`SizeofOnly<char>`)
+//   6. new expression (`NewOnly<int>`)
+//   7. function-pointer signature (`fn(*FnSig<int>) -> int`)
+//   8. mixed field/cast/parameter/return (`Mixed<int>`)
+//   9. exported template named only in an imported signature, plus the
+//      from-import bare spelling (`LibBox<int>`)
+
+from lib import LibBox, libRead;
+
+struct ParamOnly<T> {
+  var v: T;
+}
+
+struct RetOnly<T> {
+  var v: T;
+}
+
+struct FieldOnly<T> {
+  var v: T;
+}
+
+struct CastOnly<T> {
+  var a: T;
+  var b: T;
+}
+
+struct SizeofOnly<T> {
+  var c: T;
+}
+
+struct NewOnly<T> {
+  var v: T;
+  var w: T;
+}
+
+struct FnSig<T> {
+  var v: T;
+}
+
+struct Mixed<T> {
+  var v: T;
+}
+
+// 1. Parameter-only: the instantiation is named in this pointer parameter
+// annotation and nowhere else in the program.
+func readParam(p: *ParamOnly<int>) -> int {
+  if (p == nilPtr) { return 41; }
+  return p->v;
+}
+
+// 2. Return-only: a value of the instantiation cannot be built without
+// naming the type a second time, so this function is defined but never
+// called. Its signature must still resolve and its body is still emitted.
+func makeRet() -> RetOnly<int> {
+  return makeRet();
+}
+
+// 3. Field-only: the instantiation appears on the field annotation only.
+struct FieldHolder {
+  var f: FieldOnly<int>;
+}
+
+// 8. Mixed: the same instantiation in a field, a cast, a parameter and a
+// return annotation.
+struct MixedHolder {
+  var m: Mixed<int>;
+}
+
+func echoMixed(p: *Mixed<int>) -> Mixed<int> {
+  return *p;
+}
+
+// 9. Main-side bare spelling of lib's exported template, named only in
+// this parameter annotation.
+func readBare(p: *LibBox<int>) -> int {
+  if (p == nilPtr) { return 42; }
+  return p->v;
+}
+
+func main() -> int {
+  // 1. The parameter annotation alone must have instantiated the struct.
+  if (readParam(nilPtr) != 41) { return 1; }
+
+  // 3. Writing through the field proves the enclosing holder layout used
+  // the instantiated size, not the unknown-nominal default.
+  var fh: FieldHolder;
+  fh.f.v = 40;
+  if (fh.f.v != 40) { return 3; }
+
+  // 4. Reinterpret two ints through a cast whose target is the only
+  // mention of the instantiation.
+  var arr: [int; 2];
+  arr[0] = 40;
+  arr[1] = 2;
+  var raw: *int = &arr[0];
+  if ((raw as *CastOnly<int>)->a != 40) { return 4; }
+  if ((raw as *CastOnly<int>)->b != 2) { return 5; }
+
+  // 5. `sizeof` must see the real layout: one char field is 1 byte.
+  if (sizeof(SizeofOnly<char>) != 1) { return 6; }
+
+  // 6. `new` alone names the instantiation; a fresh struct is zeroed.
+  if ((new NewOnly<int>)->v != 0) { return 7; }
+  if ((new NewOnly<int>)->w != 0) { return 8; }
+
+  // 7. The template lives only inside this `fn(...)` parameter signature.
+  var cb: fn(*FnSig<int>) -> int = nilPtr;
+  if (cb != nilPtr) { return 9; }
+
+  // 8. Mixed case, exercised end to end: the instantiation is named in a
+  // field, a cast, a parameter and a return annotation, never in a var.
+  var mh: MixedHolder;
+  mh.m.v = 12;
+  if (echoMixed(&mh.m as *Mixed<int>).v != 12) { return 10; }
+
+  // 9. `libRead` names LibBox<int> only in lib's exported signature; the
+  // import must have instantiated it. `readBare` resolves the bare
+  // from-import spelling in main's own signature.
+  if (libRead(nilPtr) != 55) { return 11; }
+  if (readBare(nilPtr) != 42) { return 12; }
+
+  return 0;
+}

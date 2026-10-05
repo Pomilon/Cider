@@ -1,0 +1,94 @@
+// CIDER-BUG-082 regression: an embedded class-value field is a nested
+// object, so constructing the outer value must run the INNER class's field
+// initializers too (local value, `new`, or a nested field), on all three
+// backends. Covers 2-level nesting, sibling fields of one class, inherited
+// and alias-typed inner classes, the zero default for fields without an
+// initializer, the constructor ordering (field initializers first), and a
+// value copy carrying the initialised state.
+from std.io import print, printInt;
+
+class Inner {
+    var x: int = 5;
+    var unset: int;            // no initializer: stays zero
+}
+
+class Mid {
+    var inner: Inner;
+    var m: int = 3;
+}
+
+class Top {
+    var mid: Mid;
+    var t: int = 1;
+}
+
+class DInner extends Inner {
+    var y: int = 7;
+}
+
+type IAlias = Inner;
+
+class Holder {
+    var d: DInner;
+    var alias: IAlias;
+}
+
+// Sibling embedded fields of the same class must both initialise.
+class Twins {
+    var a: Inner;
+    var b: Inner;
+}
+
+// A constructor observes the nested field initializers (they run before the
+// constructor body); a value instance never runs a constructor.
+class WithCtor {
+    var inner: Inner;
+    var seen: int = 0;
+    func init() -> void { this.seen = this.inner.x; }
+}
+
+func main() -> int {
+    var top: Top;
+    if (top.mid.inner.x != 5) return 1;
+    if (top.mid.inner.unset != 0) return 2;
+    if (top.mid.m != 3) return 3;
+    if (top.t != 1) return 4;
+
+    var heap: *Top = new Top;
+    if (heap->mid.inner.x != 5) return 5;
+    if (heap->mid.m != 3) return 6;
+
+    var holder: Holder;
+    if (holder.d.x != 5) return 7;
+    if (holder.d.y != 7) return 8;
+    if (holder.alias.x != 5) return 9;
+
+    var twins: Twins;
+    if (twins.a.x != 5) return 10;
+    if (twins.b.x != 5) return 11;
+
+    var ctor: *WithCtor = new WithCtor;
+    if (ctor->seen != 5) return 12;
+    var ctorVal: WithCtor;
+    if (ctorVal.seen != 0) return 13;      // value instances run no ctor
+
+    var copy: Top = top;
+    if (copy.mid.inner.x != 5) return 14;
+
+    printInt(top.mid.inner.x); print("\n");
+    printInt(top.mid.m); print("\n");
+    printInt(top.t); print("\n");
+    printInt(heap->mid.inner.x); print("\n");
+    printInt(holder.d.x); print("\n");
+    printInt(holder.d.y); print("\n");
+    printInt(holder.alias.x); print("\n");
+    printInt(twins.a.x + twins.b.x); print("\n");
+    printInt(ctor->seen); print("\n");
+    printInt(ctorVal.seen); print("\n");
+    printInt(copy.mid.inner.x); print("\n");
+    print("nested_class_field_init_ok\n");
+
+    delete heap;
+    delete ctor;
+    return 0;
+}

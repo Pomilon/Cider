@@ -1,0 +1,17 @@
+// CIDER-BUG-069 cross-module probe: an exported interface field in an
+// exported struct, reached through both a from-import alias and a
+// module-qualified global, must still be a 16-byte fat pointer.
+export interface Mark {
+  func value() -> int;
+}
+
+export class Ten {
+  func value() -> int { return 10; }
+}
+
+export struct Cell {
+  var id: int;
+  var mark: Mark;
+}
+
+export var shared: Cell;

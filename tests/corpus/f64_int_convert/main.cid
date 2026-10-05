@@ -1,0 +1,96 @@
+// CID-003 follow-up (I2): every integer width and signedness converts to
+// f64 (and f32) with the right value — i64 sources keep all 64 bits,
+// u32/u64 convert unsigned, narrow signed sources sign-extend. `as f64`
+// casts of each source must agree.
+func take64(x: f64) -> f64 { return x; }
+func giveU64() -> f64 {
+  var v: u64 = 18446744073709551615;
+  return v;
+}
+
+func main() -> int {
+  // i64 -> f64: the old codegen read eax only (5000000000 & 0xFFFFFFFF).
+  var big: i64 = 5000000000;
+  var d: f64 = big;
+  if (d != 5000000000.0) { return 1; }
+
+  // u32 literal -> f64 (3000000000 lands in U32; the store used to write
+  // integer bits into the f64 slot).
+  var u: f64 = 3000000000;
+  if (u != 3000000000.0) { return 2; }
+
+  // u32 variable -> f64.
+  var uv: u32 = 4000000000;
+  var u2: f64 = uv;
+  if (u2 != 4000000000.0) { return 3; }
+
+  // u8/u16 -> f64.
+  var b: u8 = 200;
+  var bf: f64 = b;
+  if (bf != 200.0) { return 4; }
+  var h: u16 = 60000;
+  var hf: f64 = h;
+  if (hf != 60000.0) { return 5; }
+
+  // u64 -> f64 (full 64-bit unsigned, not sign-interpreted).
+  var bigu: u64 = 18446744073709551615;
+  var bu: f64 = bigu;
+  if (bu != 18446744073709551615.0) { return 6; }
+
+  // i8/i16 negative -> f64 (sign extension).
+  var s: i8 = 0 - 100;
+  var sf: f64 = s;
+  if (sf != 0.0 - 100.0) { return 7; }
+  var m: i16 = 0 - 30000;
+  var mf: f64 = m;
+  if (mf != 0.0 - 30000.0) { return 8; }
+
+  // `as f64` casts of every source width.
+  if (big as f64 != 5000000000.0) { return 9; }
+  if (3000000000 as f64 != 3000000000.0) { return 10; }
+  if (uv as f64 != 4000000000.0) { return 11; }
+  if (b as f64 != 200.0) { return 12; }
+  if (h as f64 != 60000.0) { return 13; }
+  if (bigu as f64 != 18446744073709551615.0) { return 14; }
+  if (s as f64 != 0.0 - 100.0) { return 15; }
+
+  // 32-bit signed source sign-extends.
+  var neg: i32 = 0 - 5;
+  var nf: f64 = neg;
+  if (nf != 0.0 - 5.0) { return 16; }
+
+  // float targets convert too (an f32 store of integer bits printed 0).
+  var f32big: float = 3000000000;
+  if (f32big != 3000000000.0) { return 17; }
+  var f32u64: float = 16777217;
+  if (f32u64 != 16777216.0) { return 18; }
+
+  // Plain assignment and call/return conversions (convertValueToType).
+  var asn: f64 = 0.0;
+  asn = big;
+  if (asn != 5000000000.0) { return 19; }
+  asn = uv;
+  if (asn != 4000000000.0) { return 20; }
+  if (take64(bigu) != 18446744073709551615.0) { return 21; }
+  if (take64(big) != 5000000000.0) { return 22; }
+  if (giveU64() != 18446744073709551615.0) { return 23; }
+
+  // CID-003 follow-up (W5): a cast to a narrow type leaves the raw low
+  // bits in the register (the `and` lowering does not sign-normalize), so
+  // int->float must extend by the declared narrow type before converting.
+  // The VM converted the raw bits unsigned: i8 156 read 156.0, not -100.0.
+  var cast8: f64 = (0 - 100) as i8;
+  if (cast8 != 0.0 - 100.0) { return 24; }
+  var cast16: f64 = (300 - 20000) as i16;
+  if (cast16 != 0.0 - 19700.0) { return 25; }
+  var castu8: f64 = (0 - 100) as u8;
+  if (castu8 != 156.0) { return 26; }
+  var castu16: f64 = (0 - 100) as u16;
+  if (castu16 != 65436.0) { return 27; }
+  // f32 destinations use the same source normalization.
+  var castf8: float = (0 - 100) as i8;
+  if (castf8 != 0.0 - 100.0) { return 28; }
+  var castf16: float = (0 - 100) as i16;
+  if (castf16 != 0.0 - 100.0) { return 29; }
+  return 0;
+}

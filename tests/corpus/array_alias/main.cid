@@ -1,0 +1,26 @@
+// CIDER-BUG-019: `type X = [T; N]` fixed-array aliases must index, and
+// array elements whose type is a fn-alias (`[Cb; N]`) must load the
+// function pointer instead of using the slot address. Before the fix the
+// checker rejected `x[0]` ("non-array and non-pointer type X") and the
+// VM call through `arr[0]` died with "bad function id" (ir_gen called the
+// slot address without a LOAD).
+type X = [u16; 4];
+type Idx = int;
+type Cb = fn(Idx) -> int;
+
+func inc(x: int) -> int { return x + 1; }
+
+func main() -> int {
+  var x: X;
+  x[0] = 65;
+  x[1] = 66;
+  if (x[0] != 65) { return 1; }
+  if (x[1] != 66) { return 2; }
+
+  var arr: [Cb; 2];
+  arr[0] = inc;
+  arr[1] = inc;
+  if (arr[0](4) != 5) { return 3; }
+  if (arr[1](5) != 6) { return 4; }
+  return 0;
+}

@@ -1,0 +1,33 @@
+import litlib;
+from litlib import ImportedAlias;
+
+struct Leaf {
+  var value: int;
+}
+
+type LeafAlias = Leaf;
+type LeafChain = LeafAlias;
+
+struct Box {
+  var leaf: Leaf;
+  var values: [u16; 3];
+}
+
+type BoxAlias = Box;
+type BoxChain = BoxAlias;
+
+func main() -> int {
+  var local: BoxChain = BoxChain{
+    leaf: LeafChain{ value: 41 },
+    values: [5, 6, 7]
+  };
+  if (local.leaf.value != 41) { return 1; }
+  if (local.values[0] != 5 || local.values[1] != 6 || local.values[2] != 7) { return 2; }
+
+  var qualified: litlib.RemoteChain = litlib.RemoteChain{ value: 8 };
+  if (qualified.value != 8) { return 3; }
+
+  var imported: ImportedAlias = ImportedAlias{ value: 9 };
+  if (imported.value != 9) { return 4; }
+  return 0;
+}

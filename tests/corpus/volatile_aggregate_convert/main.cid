@@ -1,0 +1,124 @@
+// CIDER-BUG-167: `volatile` qualifies the object an access goes through,
+// not the value being stored. A plain aggregate may initialize/assign a
+// volatile-qualified destination and reading a volatile aggregate yields a
+// plain value, exactly like scalar and interface positions already accept
+// both spellings. Before the fix only the exact identity test applied to
+// aggregates, so `var v: volatile Inner = plain;` (and the field / literal /
+// parameter / return shapes below) stayed a type error while the aggregate
+// MEMCPY's destination-volatile flag was reachable only via the vptr stamp.
+//
+// Every accepted conversion is exercised end-to-end: the values must
+// survive through the volatile destination/source and both backends must
+// agree (the triple-differential harness checks VM-unopt, VM-opt, native).
+struct Inner { var a: int; var b: int; }
+struct VHolder { var inner: volatile Inner; var g: int; }
+struct PHolder { var inner: Inner; var g: int; }
+type VI = volatile Inner;
+
+var gvol: volatile Inner;
+var gplain: Inner;
+
+interface Shape { func area() -> int; }
+class Sq { var s: int; func area() -> int { return this.s * this.s; } }
+struct IHolder { var shape: volatile Shape; var tail: int; }
+
+func sumVolatile(x: volatile Inner) -> int { return x.a + x.b; }
+func sumPlain(x: Inner) -> int { return x.a + x.b; }
+
+func makeVolatile() -> volatile Inner {
+  var v: Inner;
+  v.a = 30;
+  v.b = 12;
+  return v;
+}
+
+func makePlain() -> Inner {
+  var v: Inner;
+  v.a = 5;
+  v.b = 6;
+  return v;
+}
+
+func main() -> int {
+  var plain: Inner;
+  plain.a = 3;
+  plain.b = 4;
+
+  // (1) plain aggregate -> volatile local (declaration and reassignment).
+  var vloc: volatile Inner = plain;
+  if (vloc.a != 3 || vloc.b != 4) { return 1; }
+  vloc = plain;
+  if (vloc.a + vloc.b != 7) { return 2; }
+  // A struct literal is a plain aggregate value too.
+  var vlit: volatile Inner = Inner{ a: 7, b: 8 };
+  if (vlit.a + vlit.b != 15) { return 22; }
+
+  // (2) volatile aggregate -> plain local (the read is the observable
+  // half; the value itself loses the qualifier).
+  var back: Inner = vloc;
+  if (back.a != 3 || back.b != 4) { return 3; }
+  var back2: Inner;
+  back2 = vloc;
+  if (back2.a + back2.b != 7) { return 4; }
+
+  // (3) plain -> volatile field: direct assignment and struct literal.
+  var h: VHolder;
+  h.inner = plain;
+  if (h.inner.a != 3 || h.inner.b != 4) { return 5; }
+  var lit: VHolder = VHolder{ inner: plain, g: 9 };
+  if (lit.inner.a + lit.inner.b + lit.g != 16) { return 6; }
+
+  // (4) volatile source -> plain struct-literal field / field assignment.
+  var pv: PHolder = PHolder{ inner: vloc, g: 1 };
+  if (pv.inner.a + pv.inner.b + pv.g != 8) { return 7; }
+  pv.inner = vloc;
+  if (pv.inner.a != 3) { return 8; }
+
+  // (5) alias spelling of the volatile aggregate (`type VI = volatile Inner`).
+  var av: VI = plain;
+  if (av.a + av.b != 7) { return 9; }
+  var aliased: PHolder = PHolder{ inner: av, g: 2 };
+  if (aliased.inner.b != 4) { return 10; }
+
+  // (6) volatile aggregate parameter and return positions.
+  if (sumVolatile(plain) != 7) { return 11; }
+  if (sumVolatile(vloc) != 7) { return 12; }
+  // A volatile aggregate read into a plain by-value parameter is a plain
+  // destination too (the caller-side source volatility is the documented
+  // CIDER-BUG-133 by-value-argument limitation; the value must still be
+  // exact).
+  if (sumPlain(vloc) != 7) { return 21; }
+  var rv: VI = makeVolatile();
+  if (rv.a + rv.b != 42) { return 13; }
+  var rp: Inner = makeVolatile();
+  if (rp.a != 30 || rp.b != 12) { return 14; }
+  var backv: VI = makePlain();
+  if (backv.a + backv.b != 11) { return 15; }
+
+  // (7) volatile array object and `[volatile T; N]` element spelling.
+  var arr: [int; 2] = [11, 22];
+  var varr: volatile [int; 2] = arr;
+  if (varr[0] + varr[1] != 33) { return 16; }
+  var arr2: [int; 2] = varr;
+  if (arr2[0] + arr2[1] != 33) { return 17; }
+  var earr: [volatile int; 2] = arr;
+  if (earr[0] + earr[1] != 33) { return 18; }
+
+  // (8) The interface field keeps its pre-existing acceptance (the fix must
+  // not disturb CIDER-BUG-069/146's path).
+  var sq: Sq;
+  sq.s = 6;
+  var ih: IHolder;
+  ih.shape = sq;
+  if (ih.shape.area() != 36) { return 19; }
+  var ilit: IHolder = IHolder{ shape: sq, tail: 4 };
+  if (ilit.shape.area() + ilit.tail != 40) { return 20; }
+
+  // (9) Module-global destination and source take the same conversion.
+  gvol = plain;
+  if (gvol.a + gvol.b != 7) { return 23; }
+  gplain = gvol;
+  if (gplain.a + gplain.b != 7) { return 24; }
+
+  return 0;
+}

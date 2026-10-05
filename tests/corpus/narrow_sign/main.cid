@@ -1,0 +1,22 @@
+func asInt(v: i8) -> int { return v as int; }
+func asUint(v: u8) -> int { return v as int; }
+func id8(y: int) -> i8 { return y as i8; }
+func id16(y: int) -> i16 { return y as i16; }
+func ret8() -> i8 { return -1; }
+func ret16() -> i16 { return -5; }
+
+func main() -> int {
+  if (asInt(-1) != -1) { return 1; }        // i8 arg -> int return
+  var y: int = -3;
+  if (id8(y) != -3) { return 2; }           // int var -> i8 return
+  if (id8(-3) != -3) { return 3; }          // int constant -> i8 return
+  if (id16(-5) != -5) { return 4; }         // int constant -> i16 return
+  if (asUint(255) != 255) { return 5; }     // u8 control
+  if (ret8() != -1) { return 6; }           // narrow constant return
+  if (ret16() != -5) { return 7; }
+  var neg: i8 = -7;                         // narrow constant declaration
+  if (neg != -7) { return 8; }
+  if (asInt(neg) != -7) { return 9; }       // narrow arg -> widening arg
+  if (asInt(id8(-9)) != -9) { return 10; }  // narrow call result -> int arg
+  return 0;
+}

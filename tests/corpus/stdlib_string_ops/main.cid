@@ -1,0 +1,99 @@
+// CIDER-CHORE-003: std.string coverage. Before this test none of strcpy,
+// strcat, strchr, memset, to_upper, to_lower, trim, parse_int or parse_float
+// had executable coverage (only strlen/strcmp were reached, via solum).
+// strcpy/strcat/trim are checked through strlen/strcmp and printed results,
+// because function pointers to the module would otherwise hide mismatches.
+from std.io import print, puts, printInt, printFloat;
+from std.string import strlen, strcmp, strcpy, strcat, strchr, memset, memcpy, to_upper, to_lower, trim, parse_int, parse_float;
+
+func main() -> int {
+    // strcpy returns dst and copies the terminator.
+    var src: [char; 32];
+    var dst: [char; 32];
+    strcpy(src as char*, "hello" as char*);
+    var ret: char* = strcpy(dst as char*, src as char*);
+    if (ret != (dst as char*)) return 1;
+    if (strlen(dst as char*) != 5) return 2;
+    if (strcmp(dst as char*, "hello" as char*) != 0) return 3;
+    print("strcpy="); puts(dst as string);
+
+    // strcat appends and re-terminates.
+    strcat(dst as char*, " world" as char*);
+    if (strcmp(dst as char*, "hello world" as char*) != 0) return 4;
+    puts(dst as string);
+
+    // strcmp orders by unsigned char code and returns 0 on equality.
+    if (strcmp("abc" as char*, "abd" as char*) >= 0) return 5;
+    if (strcmp("abd" as char*, "abc" as char*) <= 0) return 6;
+    if (strcmp("abc" as char*, "abc" as char*) != 0) return 7;
+
+    // strchr returns the first match; a miss returns nilPtr.
+    var hay: [char; 16];
+    strcpy(hay as char*, "hello" as char*);
+    var p: char* = strchr(hay as char*, 'l');
+    if (p == nilPtr) return 8;
+    if (p != (hay as char*) + 2) return 9;
+    if (*p != 'l') return 10;
+    if (strchr(hay as char*, 'z') != nilPtr) return 11;
+
+    // memset writes exactly num bytes; terminate manually to print it.
+    var raw: [char; 16];
+    memset(raw as *void, 65, 5);
+    raw[5] = 0 as char;
+    if (strcmp(raw as char*, "AAAAA" as char*) != 0) return 12;
+
+    // memcpy copies exact byte counts, including the terminator.
+    var copy: [char; 16];
+    memcpy(copy as *void, raw as *void, 6);
+    if (strcmp(copy as char*, "AAAAA" as char*) != 0) return 13;
+    memset(copy as *void, 0, 16);
+    memcpy(copy as *void, "xyz" as *void, 4);
+    if (strcmp(copy as char*, "xyz" as char*) != 0) return 14;
+
+    // to_upper/to_lower mutate in place, return the same pointer, and leave
+    // digits/punctuation alone.
+    var mixed: [char; 32];
+    strcpy(mixed as char*, "aBc DeF 123!" as char*);
+    p = to_upper(mixed as char*);
+    if (p != (mixed as char*)) return 15;
+    if (strcmp(mixed as char*, "ABC DEF 123!" as char*) != 0) return 16;
+    p = to_lower(mixed as char*);
+    if (strcmp(mixed as char*, "abc def 123!" as char*) != 0) return 17;
+    puts(mixed as string);
+
+    // trim skips leading whitespace and NULs trailing whitespace.
+    var padded: [char; 32];
+    strcpy(padded as char*, " \t\n trim me \r\n" as char*);
+    var trimmed: char* = trim(padded as char*);
+    if (strcmp(trimmed, "trim me" as char*) != 0) return 18;
+    if (strlen(trimmed) != 7) return 19;
+    puts(trimmed as string);
+
+    // all-whitespace and empty inputs trim to the empty string
+    var blank: [char; 8];
+    strcpy(blank as char*, "   " as char*);
+    if (strlen(trim(blank as char*)) != 0) return 20;
+    if (strlen(trim("" as char*)) != 0) return 21;
+
+    // parse_int: optional sign, stops at the first non-digit, no digits -> 0.
+    if (parse_int("42" as char*) != 42) return 22;
+    if (parse_int("-17" as char*) != -17) return 23;
+    if (parse_int("+9" as char*) != 9) return 24;
+    if (parse_int("123abc" as char*) != 123) return 25;
+    if (parse_int("" as char*) != 0) return 26;
+    if (parse_int("abc" as char*) != 0) return 27;
+    print("parse_int="); printInt(parse_int("-250" as char*)); puts("");
+
+    // parse_float: optional sign, missing integer part, truncates at junk.
+    if (parse_float("3.5" as char*) != 3.5) return 28;
+    if (parse_float("-2.25" as char*) != -2.25) return 29;
+    if (parse_float("+10" as char*) != 10.0) return 30;
+    if (parse_float(".5" as char*) != 0.5) return 31;
+    if (parse_float("-.25" as char*) != -0.25) return 32;
+    if (parse_float("1.5xyz" as char*) != 1.5) return 33;
+    if (parse_float("" as char*) != 0.0) return 34;
+    print("parse_float="); printFloat(parse_float("123.75" as char*)); puts("");
+
+    puts("string_ops ok");
+    return 0;
+}

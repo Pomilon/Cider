@@ -1,0 +1,136 @@
+// CIDER-FEAT-002: real enum types.
+//
+// `enum Color { ... }` declares a distinct int-backed nominal type
+// `Color`; the variants are module-scope constants whose type is the enum.
+// Access works bare (`RED` — the legacy spelling, still an int constant to
+// the old rules) and qualified (`Color.RED`, `lib.Shape.CIRCLE`). Enum
+// values flow implicitly to integer targets; integers require an explicit
+// `value as Color` cast. This program exercises the whole surface on all
+// three backends (VM unoptimized, VM optimized, native).
+import lib;
+
+enum Color { RED, GREEN, BLUE }
+
+struct Paint {
+    var c: Color;
+    var n: int;
+}
+
+func pick(c: Color) -> int {
+    if (c == Color.GREEN) { return 10; }
+    if (c == RED) { return 20; }
+    return 30;
+}
+
+func takeInt(v: int) -> int { return v + 1; }
+func same(c: Color) -> Color { return c; }
+
+// Enum aliases: `type A = Color` accepts the same variants, qualified
+// through the alias spelling, and flows like the enum itself.
+type LocalAlias = Color;
+
+// Global enum initializer folds to .data on every backend.
+var g_shape: lib.Shape = lib.Shape.TRIANGLE;
+
+func main() -> int {
+    // Qualified access, declaration, assignment, comparison.
+    var c: Color = Color.GREEN;
+    if (c != Color.GREEN) { return 1; }
+    c = Color.BLUE;
+    if (c != BLUE) { return 2; }
+    c = GREEN;
+
+    // Bare variants keep their legacy integer values.
+    var i: int = RED;
+    if (i != 0) { return 3; }
+    i = BLUE;
+    if (i != 2) { return 4; }
+
+    // enum -> int is implicit; int -> enum needs `as`.
+    var widened: int = c;
+    if (widened != 1) { return 5; }
+    if (takeInt(c) != 2) { return 6; }
+    var fromInt: Color = 2 as Color;
+    if (fromInt != Color.BLUE) { return 7; }
+    if (fromInt as int != 2) { return 8; }
+
+    // Comparisons against integers, both operand orders.
+    if (c != 1) { return 9; }
+    if (!(1 == c)) { return 10; }
+    if (!(c < 2)) { return 11; }
+
+    // Enum parameters and returns.
+    if (pick(Color.GREEN) != 10) { return 12; }
+    if (pick(RED) != 20) { return 13; }
+    if (pick(BLUE) != 30) { return 14; }
+    if ((same(Color.RED) as int) != 0) { return 15; }
+
+    // Struct fields, including copy through another enum value.
+    var p: Paint;
+    p.c = Color.RED;
+    p.n = 3;
+    if (p.c != Color.RED) { return 16; }
+    if (p.c as int != 0) { return 17; }
+    p.c = c;
+    if (p.c != GREEN) { return 18; }
+
+    // Fixed-size arrays of enum values.
+    var arr: [Color; 3];
+    arr[0] = Color.RED;
+    arr[1] = Color.GREEN;
+    arr[2] = Color.BLUE;
+    if (arr[2] != BLUE) { return 19; }
+    if ((arr[0] as int) + (arr[2] as int) != 2) { return 20; }
+
+    // Module-qualified enum: type spelling, qualified variant, bare
+    // exported variant, struct field, function parameter.
+    var s: lib.Shape = lib.Shape.SQUARE;
+    if (s != lib.Shape.SQUARE) { return 21; }
+    if (lib.Shape.CIRCLE as int != 0) { return 22; }
+    var bareShape: int = lib.CIRCLE;
+    if (bareShape != 0) { return 23; }
+    var w: lib.Tagged;
+    w.shape = lib.Shape.TRIANGLE;
+    if (w.shape as int != 2) { return 24; }
+    if (lib.shapeCode(lib.Shape.TRIANGLE) != 2) { return 25; }
+
+    // Match over enum values with bare, qualified and module-qualified
+    // patterns. (Exhaustiveness is an opt-in `--warn` diagnostic.)
+    var seen: int = 0;
+    var m: Color = Color.BLUE;
+    match (m) {
+        RED => { seen = 1; }
+        Color.GREEN => { seen = 2; }
+        BLUE => { seen = 3; }
+        default => { seen = 4; }
+    }
+    if (seen != 3) { return 26; }
+
+    var ms: lib.Shape = lib.Shape.CIRCLE;
+    match (ms) {
+        lib.Shape.CIRCLE => { seen = 5; }
+        lib.Shape.SQUARE => { seen = 6; }
+        lib.Shape.TRIANGLE => { seen = 7; }
+        default => { seen = 8; }
+    }
+    if (seen != 5) { return 27; }
+
+    // Global enum storage and its folded initializer.
+    if (g_shape != lib.Shape.TRIANGLE) { return 28; }
+    if (g_shape as int != 2) { return 29; }
+
+    // Enums are int-sized scalars.
+    if (sizeof(Color) != 4) { return 30; }
+    if (sizeof(lib.Shape) != 4) { return 31; }
+
+    // Enum aliases work as qualifiers and as types, in-module and across
+    // modules (`type A = Shape` inside lib roots its target in lib).
+    var la: LocalAlias = LocalAlias.GREEN;
+    if ((la as int) != 1) { return 32; }
+    if ((takeInt(la)) != 2) { return 33; }
+    var sa: lib.ShapeAlias = lib.ShapeAlias.SQUARE;
+    if ((sa as int) != 1) { return 34; }
+    if (sa != lib.Shape.SQUARE) { return 35; }
+
+    return 0;
+}

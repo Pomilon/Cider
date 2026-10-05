@@ -1,0 +1,112 @@
+// CIDER-BUG-113 regression: alias-declared fixed arrays of class values
+// (local and module-scope, direct aliases and alias chains) must run every
+// element's embedded field initializers recursively, exactly like the
+// direct [Inner; N] spelling; fields without an initializer stay zero.
+// Neighbor spelling-keyed predicates are pinned too: an alias-to-class
+// local zero-fills like the direct class spelling, and a struct literal's
+// explicit alias-declared array field copies its element bytes instead of
+// storing the source address over the following field. All three backends
+// (VM unopt, VM opt, native) must agree.
+from std.io import printInt, print;
+import xmod;
+
+class Inner {
+    var x: int = 5;
+    var unset: int;            // no initializer: stays zero
+}
+
+class Plain {
+    var a: int;                // no initializer: the alias spelling must
+    var b: int;                // still zero-fill like the direct one
+}
+
+struct Wrap {
+    var inner: Inner;
+    var pad: int;              // no initializer: stays zero
+}
+
+struct SPair {
+    var pair: Pair;
+    var other: [u8; 2];
+}
+
+type InnerArr = [Inner; 3];
+type InnerArrChain = InnerArr; // alias-of-alias
+type WrapArrChain = [Wrap; 2];
+type NestedArr = [[Inner; 2]; 2];
+
+type PlainAlias = Plain;
+type Pair = [u8; 2];
+
+// Module-scope equivalents go through the synthesized startup pass.
+var gArr: InnerArrChain;
+var gWrap: WrapArrChain;
+var gNested: NestedArr;
+var gMod: xmod.ModChain;
+
+func main() -> int {
+    // Local alias-declared fixed arrays of class values.
+    var a: InnerArr;
+    if (a[0].x != 5) return 1;
+    if (a[2].x != 5) return 2;
+    if (a[1].unset != 0) return 3;
+
+    var c: InnerArrChain;
+    if (c[0].x != 5) return 4;
+    if (c[2].x != 5) return 5;
+
+    var w: WrapArrChain;
+    if (w[0].inner.x != 5) return 6;
+    if (w[1].inner.x != 5) return 7;
+    if (w[1].pad != 0) return 8;
+
+    var n: NestedArr;
+    if (n[0][0].x != 5) return 9;
+    if (n[1][1].x != 5) return 10;
+
+    // Neighbor: alias-to-class locals zero-fill like the direct spelling.
+    var p: PlainAlias;
+    if (p.a != 0) return 11;
+    if (p.b != 0) return 12;
+
+    // Neighbor: a struct literal's explicit alias-array field copies the
+    // element bytes; the following field must not be clobbered.
+    var pair: Pair = [1, 2];
+    var s: SPair = SPair{pair: pair};
+    if (s.pair[0] != 1) return 13;
+    if (s.pair[1] != 2) return 14;
+    if (s.other[0] != 0) return 15;
+    if (s.other[1] != 0) return 16;
+
+    // Globals: the startup pass must see the resolved alias shape.
+    if (gArr[0].x != 5) return 17;
+    if (gArr[2].x != 5) return 18;
+    if (gArr[1].unset != 0) return 19;
+    if (gWrap[0].inner.x != 5) return 20;
+    if (gWrap[1].inner.x != 5) return 21;
+    if (gWrap[1].pad != 0) return 22;
+    if (gNested[1][0].x != 5) return 23;
+
+    // Cross-module aliases resolve in their defining module (local+global).
+    var m: xmod.ModArr;
+    if (m[0].x != 9) return 24;
+    if (m[1].unset != 0) return 25;
+    if (gMod[1].x != 9) return 26;
+    if (gMod[0].unset != 0) return 27;
+
+    printInt(a[0].x); print(",");
+    printInt(a[2].x); print(",");
+    printInt(c[1].x); print(",");
+    printInt(w[1].inner.x); print(",");
+    printInt(n[0][1].x); print(",");
+    printInt(p.a + p.b); print(",");
+    printInt(s.pair[0] + s.pair[1] + s.other[0] + s.other[1]); print(",");
+    printInt(gArr[1].x); print(",");
+    printInt(gArr[2].x); print(",");
+    printInt(gWrap[1].inner.x); print(",");
+    printInt(gNested[1][1].x); print(",");
+    printInt(m[1].x); print(",");
+    printInt(gMod[0].x); print("\n");
+    print("alias_embedded_class_init_ok\n");
+    return 0;
+}

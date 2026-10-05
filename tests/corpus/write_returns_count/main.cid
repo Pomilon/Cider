@@ -1,0 +1,20 @@
+// CIDER-BUG-076: the VM's write syscall used to leave rax at the syscall
+// number for fd 1/2, so write(1, ...) reported 1 instead of the byte count
+// that native returns. Pin the byte count for stdout, stderr, a zero-length
+// write, and the invalid-fd error value. The exit bits name the check that
+// failed.
+from std.fs import write;
+
+func main() -> int {
+    var out: char* = "vm-stdout\n";  // 10 bytes
+    var err: char* = "vm-err\n";     // 7 bytes
+
+    if (write(1, out as *void, 10) != 10) return 1;
+    if (write(2, err as *void, 7) != 7) return 2;
+    if (write(1, out as *void, 0) != 0) return 3;
+
+    // Invalid fd: raw syscalls return -EBADF (-9), not libc's -1.
+    if (write(-1, out as *void, 10) != -9) return 4;
+
+    return 0;
+}

@@ -1,0 +1,19 @@
+// CIDER-BUG-070: an exported interface used through a module-qualified
+// spelling from the importing program.
+export interface Shape {
+  func area() -> int;
+  func kind() -> int;
+}
+
+export class Sq {
+  var s: int;
+  func area() -> int { return this.s * this.s; }
+  func kind() -> int { return 1; }
+}
+
+export class Rect {
+  var w: int;
+  var h: int;
+  func area() -> int { return this.w * this.h; }
+  func kind() -> int { return 2; }
+}

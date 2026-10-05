@@ -1,0 +1,20 @@
+// CIDER-BUG-150: list-literal regression shared with the array-of-interface
+// callee used from another module.
+export interface Shape {
+  func area() -> int;
+  func kind() -> int;
+}
+
+export class Sq {
+  var side: int;
+  func area() -> int { return this.side * this.side; }
+  func kind() -> int { return 1; }
+}
+
+// Imported callee taking an array-of-interface parameter: the call site
+// must build each element's fat pointer (object address + the
+// interface/concrete vtable rooted in this defining module), exactly like
+// a declaration-site list.
+export func total(shapes: [Shape; 2]) -> int {
+  return shapes[0].area() + shapes[1].area();
+}

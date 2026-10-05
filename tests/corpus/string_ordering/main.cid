@@ -1,0 +1,160 @@
+// CIDER-ISS-012: `<`/`>`/`<=`/`>=` on two `string` values compare
+// contents lexicographically (strcmp sign), not addresses. nil sorts
+// before every non-nil string and is never dereferenced. Explicit
+// pointer types (`*u8`/`char*`) keep address ordering; same-spelling
+// literal pairs fold.
+func pick(s: string) -> string {
+  return s;
+}
+
+// CIDER-ISS-012 support: a multi-RET, loop-containing callee that the
+// inliner clones into a loop caller. Each cloned RET writes the call
+// destination (multi-defined register); LICM must not hoist any of them
+// to the preheader (see the multi-def guard in licm.h). The string
+// helpers have this shape, and so does this deterministic int pin.
+func rank(a: int) -> int {
+  var i: int = 0;
+  while (i < 4) {
+    if (i == a) { return i; }
+    i++;
+  }
+  return -1;
+}
+
+func main() -> int {
+  // Different literal spellings, both directions.
+  if (!("a" < "b")) { return 1; }
+  if (!("b" > "a")) { return 2; }
+  if ("a" > "b") { return 3; }
+  if ("b" < "a") { return 4; }
+  if (!("a" != "b")) { return 5; }
+
+  // A proper prefix sorts before its extension; differing characters
+  // decide by byte value.
+  if (!("ab" < "abc")) { return 6; }
+  if (!("abc" > "ab")) { return 7; }
+  if (!("abc" < "abd")) { return 8; }
+  if (!("abd" <= "abd")) { return 9; }
+  if (!("abd" >= "abc")) { return 10; }
+  if ("abc" < "abc") { return 11; }
+  if ("abc" > "abc") { return 12; }
+
+  // Empty string is a prefix of everything non-empty.
+  if (!("" < "a")) { return 13; }
+  if (!("a" > "")) { return 14; }
+  if (!("" <= "")) { return 15; }
+  if (!("" >= "")) { return 16; }
+  if (!("ab" <= "abc")) { return 17; }
+
+  // Equal contents through separate runtime values: neither < nor >.
+  var a: string = "hello";
+  var b: string = "hello";
+  var c: string = "world";
+  if (a < b) { return 18; }
+  if (a > b) { return 19; }
+  if (!(a <= b)) { return 20; }
+  if (!(a >= b)) { return 21; }
+  if (!(a < c)) { return 22; }
+  if (!(c > a)) { return 23; }
+  if (!(c >= a)) { return 24; }
+  if (!(a <= c)) { return 25; }
+
+  // Reassignment, parameters, returns and interpolation all run the
+  // same content comparison.
+  b = "world";
+  if (b <= a) { return 26; }
+  if (!(pick("aaa") < pick("aab"))) { return 27; }
+  var built: string = "v={a}";
+  if (!(built > "v=")) { return 28; }
+  if (!(built < "v>")) { return 29; }
+  if (built > "v>") { return 30; }
+  if (!(built >= "v=hello")) { return 31; }
+  if (!(built <= "v=hello")) { return 32; }
+
+  // nil vs string: nil sorts before every non-nil string, including "".
+  var n: string = nilPtr as string;
+  if (!(n < "x")) { return 33; }
+  if (!(n < "")) { return 34; }
+  if (n > "x") { return 35; }
+  if (!(n <= "x")) { return 36; }
+  if (!("x" > n)) { return 37; }
+  if (!("x" >= n)) { return 38; }
+  if (!(n <= n)) { return 39; }
+  if (!(n >= n)) { return 40; }
+  if (n < n) { return 41; }
+  if (n > n) { return 42; }
+  if (!("x" <= "x")) { return 43; }
+
+  // Explicit *u8 ordering is still an address comparison: a pointer is
+  // less than the same pointer advanced one byte (`p + 1`), even though
+  // content-wise "ello" would sort before "hello".
+  var p: *u8 = "hello";
+  var q: *u8 = p + 1;
+  if (!(p < q)) { return 44; }
+  if (!(q > p)) { return 45; }
+  if (q <= p) { return 46; }
+  if (!(p <= p)) { return 47; }
+  if (!(p >= p)) { return 48; }
+
+  // String interior pointers order by content, not address: "ello"
+  // sorts before "hello" ('e' < 'h') even though the address of s+1 is
+  // greater. An address-based compare would make both of these return.
+  var s: string = "hello";
+  if (!(s + 1 < s)) { return 49; }
+  if (s + 1 > s) { return 50; }
+  if (!(s + 1 < "i")) { return 51; }
+
+  // Ordering (and equality) inside a nested loop. Enough comparison call
+  // sites make the helpers inline-eligible; the inner loop + dynamic
+  // indices reproduce the inliner/LICM hazard: the inliner emits one
+  // `MOV callDest, retval` per cloned RET, and LICM must not hoist any of
+  // those multi-defined registers (a stale RET value made this loop
+  // compare garbage before the multi-def guard in licm.h).
+  var words: [string; 5] = ["alpha", "bravo", "charlie", "delta", "echo"];
+  var i: int = 0;
+  while (i < 5) {
+    var j: int = 0;
+    while (j < 5) {
+      var x: string = words[i];
+      var y: string = words[j];
+      var less: bool = x < y;
+      var greater: bool = x > y;
+      var eq: bool = x == y;
+      if (i < j && !less) { return 54; }
+      if (i > j && !greater) { return 55; }
+      if (i == j && !eq) { return 56; }
+      if (less && greater) { return 57; }
+      j++;
+    }
+    i++;
+  }
+
+  // Bytes compare as unsigned char like strcmp: the two bytes of UTF-8
+  // "é" (0xC3, 0xA9) sort after "z" (0x7A), not before it as signed
+  // bytes 0xC3 would.
+  if ("\xC3\xA9" < "z") { return 58; }
+  if (!("\xC3\xA9" > "z")) { return 59; }
+
+  // LICM multi-def pin: rank() is inlined at all these sites, so each
+  // cloned RET writes the same call-result register. The loop must still
+  // see per-iteration rank(k): rank(0..3) == k (not < 0), rank(4..7) == -1
+  // (< 0). t = 4 (loop) + 400 (the eight extra sites) = 404. Without the
+  // multi-def guard the hoisted RET value compares wrong and t != 404.
+  var t: int = 0;
+  var k: int = 0;
+  while (k < 8) {
+    if (rank(k) < 0) { t = t + 1; }
+    k++;
+  }
+  if (rank(0) < 0) { t = t + 100; }
+  if (rank(1) < 0) { t = t + 100; }
+  if (rank(2) < 0) { t = t + 100; }
+  if (rank(3) < 0) { t = t + 100; }
+  if (rank(4) < 0) { t = t + 100; }
+  if (rank(5) < 0) { t = t + 100; }
+  if (rank(6) < 0) { t = t + 100; }
+  if (rank(7) < 0) { t = t + 100; }
+  if (t != 404) { return 60; }
+
+  return 0;
+}

@@ -1,0 +1,31 @@
+// CID-003 follow-up (M1): F32 ADD/SUB/MUL/DIV must round each result
+// through float, like addss/subss/mulss/divss. The VM computed in double
+// and kept the unrounded sum, so `x + 0.1 != 0.4` was true on the VM only.
+// The large-value add/sub checks also cover the W1 residual: a float add
+// whose exact double result is not representable in f32 must round back to
+// the operand, and f64 arithmetic must stay double (check 8).
+func main() -> int {
+  // addss: 0.3f + 0.1f rounds to 0.4f; the exact double sum does not.
+  var x: float = 0.3;
+  if (x + 0.1 != 0.4) { return 1; }
+  var y: float = 0.7;
+  if (y + 0.1 != 0.8) { return 2; }
+  // addss/subss: 1.0e30f +/- 1.0f rounds back to 1.0e30f.
+  var a: float = 1.0e30;
+  var b: float = 1.0;
+  if (a + b != a) { return 3; }
+  if (a - b != a) { return 4; }
+  // mulss: 0.1f * 3.0f rounds to 0.3f.
+  var m: float = 0.1;
+  if (m * 3.0 != 0.3) { return 5; }
+  // divss: 0.3f / 3.0f rounds to 0.1f.
+  var q: float = 0.3;
+  if (q / 3.0 != 0.1) { return 6; }
+  // Overflow stays overflow: 3.0e38f + 3.0e38f is +inf.
+  var c: float = 3.0e38;
+  if (!(c + c > c)) { return 7; }
+  // F64 arithmetic must not be narrowed: 0.1 + 0.2 != 0.3 at f64.
+  var d: f64 = 0.1;
+  if (d + 0.2 == 0.3) { return 8; }
+  return 0;
+}

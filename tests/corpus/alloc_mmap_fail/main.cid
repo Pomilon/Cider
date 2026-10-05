@@ -1,0 +1,22 @@
+// CIDER-BUG-109 regression: a failed mmap inside std.alloc must be detected
+// instead of being treated as a successful arena.
+//
+// 1073741808 (1 GiB - 16) makes `needed` exactly 1 GiB: it passes the
+// MAX_TOTAL_BYTES cap at the boundary and is the largest request that
+// reaches mmap_arena's dedicated big-arena path. expected.json caps
+// RLIMIT_AS at 512 MiB for every path, so the mapping cannot be established:
+// the allocator must report fail_fast(75) on the VM (both IR paths) and
+// natively, byte-for-byte. Before the fix the negative errno was treated as
+// an address: the VM died with "store: negative address" and the native
+// binary segfaulted while writing the block header through the bad pointer.
+from std.alloc import malloc;
+
+func main() -> int {
+    var p: *void = malloc(1073741808);
+    // A clean nilPtr would be a different (silent) failure contract; the
+    // allocator is fail-fast by design (spec §9), so keep it observable.
+    if (p == nilPtr) return 66;
+    var q: *u64 = p as *u64;
+    *q = 42;
+    return 0;
+}

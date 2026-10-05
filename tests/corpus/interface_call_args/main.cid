@@ -1,0 +1,145 @@
+// CIDER-BUG-080: a call argument whose callee parameter is an interface
+// accepts any satisfying concrete value — a class/struct value, `new C(...)`
+// (constructor arguments applied), or a pointer to one — as well as another
+// interface value, exactly like a declaration-time assignment. The call
+// site materialises a 16-byte fat pointer (data + vtable) in a caller temp
+// and passes its address, the representation interface parameters already
+// use; the callee's by-value copy leaves the caller's object untouched.
+// The same rule covers class-method and interface-method parameters and
+// interface parameters of imported functions. `nilPtr` is deliberately not
+// accepted (its `*void` shape is not a struct/class value); see
+// tests/fixtures/check_iface_arg_misuse.cid.
+import lib;
+from lib import Shape, Sq, Rect, areaOf;
+
+// A main-file implementor of the imported interface, passed to the imported
+// function and to local interface positions.
+class Tri {
+  var b: int;
+  var h: int;
+  func init(bb: int, hh: int) -> void { this.b = bb; this.h = hh; }
+  func area() -> int { return this.b * this.h / 2; }
+  func kind() -> int { return 3; }
+}
+
+// Interface-typed parameter on a local free function (from-import spelling).
+func midsection(x: Shape) -> int { return x.area(); }
+
+// CIDER-BUG-080: interface-typed parameter on a class method, qualified
+// spelling. Returns kind*100 + area so a wrong dispatch is visible.
+class Holder {
+  var tag: int;
+  func use(x: lib.Shape) -> int { return x.kind() * 100 + x.area(); }
+}
+
+// CIDER-BUG-080: interface-typed parameter on a constructor.
+class Wrapper {
+  var inner: lib.Shape;
+  func init(x: lib.Shape) -> void { this.inner = x; }
+  func area() -> int { return this.inner.area(); }
+}
+
+// An interface method that itself takes an interface parameter; the
+// implementation is reached through vtable dispatch.
+interface Sink {
+  func add(x: Shape) -> int;
+}
+
+class Sum {
+  var total: int;
+  func init() -> void { this.total = 0; }
+  func add(x: Shape) -> int {
+    this.total = this.total + x.area();
+    return this.total;
+  }
+}
+
+// The callee retargets its own by-value copy; the caller's object must not
+// move and a later call must still see the original value.
+func retarget(x: Shape) -> int {
+  var r: Rect;
+  r.w = 6;
+  r.h = 7;
+  x = r;
+  return x.area();
+}
+
+// CIDER-BUG-080: an interface-typed parameter that survives template
+// substitution keeps the fat-pointer representation at the call site.
+func twice<T>(x: Shape, t: T) -> int { return x.area() * 2; }
+
+func main() -> int {
+  var sq: Sq;
+  sq.init(3);
+  var rc: Rect;
+  rc.init(2, 5);
+  var tri: Tri;
+  tri.init(6, 7);
+
+  // 1. Concrete value -> interface parameter (imported function, imported
+  //    concrete class).
+  if (areaOf(sq) != 9) { return 1; }
+  if (areaOf(rc) != 10) { return 2; }
+
+  // 2. `new C(...)` -> interface parameter: the constructor argument is
+  //    applied to the fresh object before the fat pointer is built.
+  if (areaOf(new Sq(4)) != 16) { return 3; }
+  if (areaOf(new Rect(3, 4)) != 12) { return 4; }
+
+  // 3. Two implementors plus a main-file implementor of the module
+  //    interface through the same parameter.
+  if (midsection(tri) != 21) { return 5; }
+  if (midsection(new Tri(4, 5)) != 10) { return 6; }
+
+  // 4. Interface value -> interface parameter (the pre-existing form).
+  var i: Shape = sq;
+  if (areaOf(i) != 9) { return 7; }
+  if (midsection(i) != 9) { return 8; }
+  i = rc;
+  if (areaOf(i) != 10) { return 9; }
+
+  // 5. Concrete pointer -> interface parameter.
+  var rp: Rect* = &rc;
+  if (areaOf(rp) != 10) { return 10; }
+
+  // 6. Class method with an interface parameter, concrete arguments.
+  var h: Holder;
+  if (h.use(sq) != 109) { return 11; }
+  if (h.use(rc) != 210) { return 12; }
+  if (h.use(new Sq(5)) != 125) { return 13; }
+  if (h.use(tri) != 321) { return 14; }
+
+  // 7. Constructor with an interface parameter.
+  var w: Wrapper* = new Wrapper(sq);
+  if (w.area() != 9) { return 15; }
+  var w2: Wrapper* = new Wrapper(new Rect(4, 5));
+  if (w2.area() != 20) { return 16; }
+
+  // 8. Interface method with an interface parameter, concrete arguments.
+  var sink: Sink = new Sum;
+  if (sink.add(sq) != 9) { return 17; }
+  if (sink.add(rc) != 19) { return 18; }
+  if (sink.add(new Sq(2)) != 23) { return 19; }
+
+  // 9. The caller's object is untouched by the callee's retargeting.
+  if (retarget(sq) != 42) { return 20; }
+  if (areaOf(sq) != 9) { return 21; }
+  if (h.use(sq) != 109) { return 22; }
+
+  // 10. Repeated calls in a loop keep the call-site temps independent.
+  var k: int = 0;
+  var acc: int = 0;
+  while (k < 3) {
+    if (k == 0) { acc = acc + areaOf(sq); }
+    else if (k == 1) { acc = acc + areaOf(rc); }
+    else { acc = acc + areaOf(new Sq(1)); }
+    k = k + 1;
+  }
+  if (acc != 20) { return 23; }
+
+  // 11. Interface parameter of a template instantiation.
+  if (twice<int>(sq, 7) != 18) { return 24; }
+  if (twice<int>(new Tri(6, 7), 0) != 42) { return 25; }
+
+  return 0;
+}

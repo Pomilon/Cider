@@ -1,0 +1,87 @@
+// CIDER-BUG-174: arrays of fn pointers are by-value aggregates. A by-value
+// parameter must copy the incoming array (memcpy), not store the incoming
+// pointer as a scalar value — before the fix `t[0](...)` loaded the
+// parameter slot's first word (the source address) and called it, aborting
+// the VM with "call: bad function id" and crashing native. By-value returns
+// use the same hidden-sret copy. Scalar fn pointers and fn-array indexing
+// stay unchanged.
+from std.io import printInt, print;
+
+type Table = [fn(int) -> int; 2];
+
+func one(x: int) -> int { return x + 1; }
+func two(x: int) -> int { return x * 2; }
+
+// Direct by-value parameter.
+func apply(t: [fn(int) -> int; 2]) -> int {
+  return t[0](1) + t[1](2);
+}
+
+// By-value parameter spelled through an alias.
+func applyAlias(t: Table) -> int {
+  return t[0](10) + t[1](10);
+}
+
+// By-value return through the hidden sret slot.
+func makeTable() -> [fn(int) -> int; 2] {
+  var t: [fn(int) -> int; 2] = [one, two];
+  return t;
+}
+
+func makeAlias() -> Table {
+  var t: Table = [two, one];
+  return t;
+}
+
+// By-value fn-array parameters also flow into an aggregate ternary merge.
+func pick(cond: bool, a: [fn(int) -> int; 2], b: [fn(int) -> int; 2]) -> int {
+  var t: [fn(int) -> int; 2] = cond ? a : b;
+  return t[0](3) + t[1](10);
+}
+
+// A struct carrying a fn-array field, itself passed by value.
+struct Holder {
+  var t: [fn(int) -> int; 2];
+}
+
+func applyHolder(h: Holder) -> int {
+  return h.t[0](1) + h.t[1](2);
+}
+
+func main() -> int {
+  var fs: [fn(int) -> int; 2] = [one, two];
+  if (apply(fs) != 2 + 4) { return 1; }
+  if (applyAlias(fs) != 11 + 20) { return 2; }
+
+  var made: [fn(int) -> int; 2] = makeTable();
+  if (made[0](5) != 6) { return 3; }
+  if (made[1](5) != 10) { return 4; }
+
+  var madeAlias: Table = makeAlias();
+  if (madeAlias[0](5) != 10) { return 5; }
+  if (madeAlias[1](5) != 6) { return 6; }
+
+  if (pick(true, fs, [two, one]) != 4 + 20) { return 7; }
+  if (pick(false, fs, [two, one]) != 6 + 11) { return 8; }
+
+  var h: Holder;
+  h.t[0] = one;
+  h.t[1] = two;
+  if (applyHolder(h) != 6) { return 9; }
+
+  // Copy semantics: a by-value local copy and the source array are
+  // independent; overwriting one callee copy does not touch the source.
+  var copy: [fn(int) -> int; 2] = fs;
+  copy[0] = two;
+  if (fs[0](1) != 2) { return 10; }
+  if (copy[0](1) != 2) { return 11; }
+
+  // Scalar fn pointers and per-index dispatch stay unchanged.
+  var s: fn(int) -> int = fs[1];
+  if (s(21) != 42) { return 12; }
+  if (fs[0](9) + fs[1](9) != 28) { return 13; }
+
+  printInt(apply(made));
+  print("\n");
+  return 0;
+}

@@ -1,0 +1,86 @@
+// CIDER-BUG-086: calls are memory clobbers for LICM.
+//
+// An aggregate (struct/interface) return uses a hidden sret pointer: the
+// caller passes a slot, the callee writes the result through it, and the
+// caller copies/loads the value back. The LICM passes (SSA and
+// post-deconstruction) treated CALL as if it wrote no memory, so the
+// dependent MEMCPY/LOADs were hoisted out of the loop and every iteration
+// re-read the first result. The same rule covers a callee writing through
+// a *T parameter. All three backends (VM --no-opt, optimized VM, native)
+// must print the per-iteration values.
+from std.io import printInt;
+
+struct Pair {
+  var a: int;
+  var b: int;
+}
+
+func makePair(n: int) -> Pair {
+  var p: Pair;
+  p.a = n;
+  p.b = n * 10;
+  return p;
+}
+
+interface Shape {
+  func area() -> int;
+}
+
+class Sq {
+  var s: int;
+  func init(s: int) -> void { this.s = s; }
+  func area() -> int { return this.s * this.s; }
+}
+
+class Maker {
+  var pad: int;
+  func make(v: int) -> Shape {
+    var c: Sq;
+    c.init(v);
+    return c;
+  }
+}
+
+func makeShape(v: int) -> Shape {
+  var c: Sq;
+  c.init(v);
+  return c;
+}
+
+func store(p: *int, v: int) -> void { *p = v; }
+
+func main() -> int {
+  // 1. Struct return: each iteration must copy fresh bytes out of the sret
+  //    slot (123 then 110220330 under the old hoist).
+  for (var i: int = 1; i <= 3; i = i + 1) {
+    var p: Pair = makePair(i);
+    printInt(p.a);
+    printInt(p.b);
+  }
+
+  // 2. Interface return: the fat pointer (data + vtable) comes back through
+  //    the same sret slot and is dispatched on after each iteration.
+  //    Hoisting the pair of words crashed the optimized VM on the vtable.
+  for (var i: int = 1; i <= 3; i = i + 1) {
+    var s: Shape = makeShape(i);
+    printInt(s.area());
+  }
+
+  // 3. Interface-returning method through vtable dispatch (VIRTUAL_CALL is
+  //    a clobber too).
+  var m: Maker;
+  for (var i: int = 1; i <= 3; i = i + 1) {
+    var s: Shape = m.make(i + 1);
+    printInt(s.area());
+  }
+
+  // 4. A callee writing through a pointer argument: the load of x feeding
+  //    the print must stay in the loop as well.
+  var x: int = 0;
+  for (var i: int = 1; i <= 3; i = i + 1) {
+    store(&x, i);
+    printInt(x);
+  }
+
+  return 0;
+}

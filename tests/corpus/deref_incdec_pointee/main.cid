@@ -1,0 +1,166 @@
+// CIDER-BUG-226 regression: `(*p)++` / `(*p)--` and the compound-assignment
+// family must read-modify-write the POINTEE, not the pointer slot that holds
+// it. The lowering asked the `*` operand for its address, and for a local,
+// param, global or field that is the pointer variable's own location, so
+// `(*p)++` emitted `p = p + 1` in the slot and `(*p) += n` emitted
+// `p = p + n`: the pointee never moved and the pointer walked off into
+// unowned memory. VM and native miscompiled identically, and the CIDER-BUG-219
+// nil guards skipped the shape entirely, because an assignment or inc/dec
+// target evaluates the `*` OPERAND and never reaches visit(UnaryExpr&) which
+// owns the check.
+//
+// Every value is printed, so all three backends (VM unopt, VM optimized,
+// native) are pinned to the same output, not merely to each other. The
+// read-modify-write is always checked three ways: the value the expression
+// yields, the pointee's new contents, and the pointer itself, which must still
+// be the address it was handed.
+//
+// The nil form of these shapes is pinned by the two sibling programs
+// deref_incdec_nil_increment and deref_incdec_nil_compound, one per lowering
+// path (the `++`/`--` read-modify-write and the assignment target). They cannot
+// live here: the guard's trap is a process-level diagnostic, so a program that
+// trips it can print nothing that earlier output is comparable against — a
+// user-defined `_nil_deref_fail` does resume the dereference, but through the
+// address the guard already captured, which is the nil one.
+from std.io import print, printInt, printF64;
+
+// bool -> int, so a pointer-identity check can be printed.
+func yes(b: bool) -> int { if (b) { return 1; } return 0; }
+
+// printInt takes an int, so a u64 is shown as its two 32-bit halves: that is
+// what pins the read-modify-write to the pointee's 64-bit width, since
+// `0xFFFFFFFF + 1` looks the same truncated or not.
+func printU64(v: u64) -> void { printInt(v >> 32); print(":"); printInt(v & 4294967295); }
+
+struct S { var f: *int; var tail: int; }   // pointer field with a neighbour
+struct SP { var p: *int; }
+
+// --- prefix/postfix ++ and -- ------------------------------------------------
+func postinc(p: *int) -> int { var r: int = (*p)++; return r * 1000 + *p; }
+func preinc(p: *int) -> int { var r: int = ++(*p); return r * 1000 + *p; }
+func postdec(p: *int) -> int { var r: int = (*p)--; return r * 1000 + *p; }
+func predec(p: *int) -> int { var r: int = --(*p); return r * 1000 + *p; }
+
+// --- one function per compound operator --------------------------------------
+func plus(p: *int, n: int) -> int { (*p) += n; return *p; }
+func minus(p: *int, n: int) -> int { (*p) -= n; return *p; }
+func times(p: *int, n: int) -> int { (*p) *= n; return *p; }
+func over(p: *int, n: int) -> int { (*p) /= n; return *p; }
+func rem(p: *int, n: int) -> int { (*p) %= n; return *p; }
+func bitAnd(p: *int, n: int) -> int { (*p) &= n; return *p; }
+func bitOr(p: *int, n: int) -> int { (*p) |= n; return *p; }
+func bitXor(p: *int, n: int) -> int { (*p) ^= n; return *p; }
+
+// --- the pointee's width drives the read-modify-write -----------------------
+func incU8(p: *u8) -> u8 { (*p)++; return *p; }
+func incU16(p: *u16) -> u16 { (*p)++; return *p; }
+func incU64(p: *u64) -> u64 { (*p)++; return *p; }
+func postU64(p: *u64) -> u64 { var r: u64 = (*p)--; return r; }
+func addU64(p: *u64, n: u64) -> u64 { (*p) += n; return *p; }
+func addF64(p: *f64, n: f64) -> f64 { (*p) += n; return *p; }
+
+// --- a volatile pointee stays a volatile read-modify-write ------------------
+func incVolatile(p: volatile int*) -> int { (*p)++; return *p; }
+
+// --- sibling target shapes: a deref of an element and of a field -----------
+func incElem(pp: **int, i: int) -> int { var r: int = (*pp[i])++; return r * 1000 + *pp[i]; }
+func decElem(pp: **int, i: int) -> int { var r: int = --(*pp[i]); return r * 1000 + *pp[i]; }
+func addElem(pp: **int, i: int, n: int) -> int { (*pp[i]) += n; return *pp[i]; }
+func incField(s: *S) -> int { var r: int = (*s.f)++; return r * 1000 + *s.f; }
+func addField(s: *S, n: int) -> int { (*s.f) += n; return *s.f; }
+func incFieldOfPtr(sp: *SP) -> int { (*sp.p)++; return *sp.p; }
+
+// --- a global pointee (the pointer's own address is a LABEL) ---------------
+var gcell: int = 40;
+var gptr: *int = nilPtr;
+func incGlobal() -> int { (*gptr)++; return *gptr; }
+func addGlobal(n: int) -> int { (*gptr) += n; return *gptr; }
+
+// --- the parenthesised plain store/read, the siblings of the shapes above ----
+func store(p: *int, v: int) -> int { (*p) = v; return *p; }
+func load(p: *int) -> int { return (*p); }
+
+func main() -> int {
+  // --- 1. prefix/postfix ++ and --, values pinned, pointer left intact -----
+  var x: int = 5;
+  var q: *int = &x;
+  print("postinc ");   printInt(postinc(q));   print(" x ");   printInt(x);
+  print(" p-is-cell ");  printInt(yes(q == &x));
+  print(" postinc ");  printInt(postinc(q));   print(" x ");   printInt(x);
+  print(" preinc ");   printInt(preinc(q));   print(" x ");   printInt(x);
+  print(" postdec ");  printInt(postdec(q));  print(" x ");   printInt(x);
+  print(" predec ");   printInt(predec(q));   print(" x ");   printInt(x);
+  print(" p-is-cell ");  printInt(yes(q == &x));
+  print("\n");
+
+  // --- 2. every compound operator through the deref -------------------------
+  x = 20;
+  print("plus ");    printInt(plus(q, 22));    print(" ");
+  printInt(minus(q, 2));  print(" ");
+  printInt(times(q, 2));  print(" ");
+  printInt(over(q, 3));   print(" ");
+  printInt(rem(q, 4));    print(" ");
+  printInt(bitAnd(q, 6)); print(" ");
+  printInt(bitOr(q, 5));  print(" ");
+  printInt(bitXor(q, 1)); print(" x ");   printInt(x);
+  print(" p-is-cell ");     printInt(yes(q == &x));
+  print("\n");
+
+  // --- 3. the pointee's width drives the read-modify-write ------------------
+  var b8: u8 = 254;
+  var w16: u16 = 65534;
+  var q64: u64 = 4294967295;      // +1 stays 2^32 only at 64 bits
+  var d64: u64 = 4294967296;   // a 32-bit subtract would wrap to 0 - 1
+  var s64: u64 = 1;
+  var f: f64 = 1.5;
+  print("u8 ");    printInt(incU8(&b8));
+  print(" u16 ");  printInt(incU16(&w16));
+  print(" u64 ");      printU64(incU64(&q64));
+  print(" u64post ");  printU64(postU64(&d64));  print(" d64 ");  printU64(d64);
+  print(" u64add ");   printU64(addU64(&s64, 4294967295));
+  print(" f64add "); printF64(addF64(&f, 2.25));
+  print("\n");
+
+  // --- 4. a volatile pointee -------------------------------------------------
+  var v: volatile int = 70;
+  print("volatile "); printInt(incVolatile(&v)); print(" v "); printInt(v);
+  print("\n");
+
+  // --- 5. sibling shapes: deref of an element, deref of a field -------------
+  var e0: int = 1; var e1: int = 2; var e2: int = 3;
+  var eps: [*int; 3];
+  eps[0] = &e0; eps[1] = &e1; eps[2] = &e2;
+  var ep: **int = &eps[0];
+  print("incElem ");  printInt(incElem(ep, 1));   print(" e1 ");  printInt(e1);
+  print(" decElem "); printInt(decElem(ep, 1));  print(" e1 ");  printInt(e1);
+  print(" addElem "); printInt(addElem(ep, 2, 10)); print(" e2 "); printInt(e2);
+  print(" e0 ");       printInt(e0);
+  print(" elem-is-cell "); printInt(yes(eps[1] == &e1));
+  print("\n");
+
+  var fc: int = 9;
+  var s: S;
+  s.f = &fc; s.tail = 111;
+  var pv: int = 100;
+  var sp: SP; sp.p = &pv;
+  print("incField "); printInt(incField(&s));      print(" fc ");  printInt(fc);
+  print(" addField "); printInt(addField(&s, 5)); print(" tail "); printInt(s.tail);
+  print(" field-is-cell "); printInt(yes(s.f == &fc));
+  print(" incFieldOfPtr "); printInt(incFieldOfPtr(&sp)); print(" pv "); printInt(pv);
+  print("\n");
+
+  // --- 6. a global pointee: the pointer's own address is a LABEL ------------
+  gptr = &gcell;
+  print("incGlobal "); printInt(incGlobal());    print(" gcell "); printInt(gcell);
+  print(" addGlobal "); printInt(addGlobal(4)); print(" gcell "); printInt(gcell);
+  print(" gptr-is-cell "); printInt(yes(gptr == &gcell));
+  print("\n");
+
+  // --- 7. the plain store/read siblings keep working ------------------------
+  var w: int = 0;
+  print("store "); printInt(store(&w, 42)); print(" load "); printInt(load(&w));
+  print("\n");
+
+  print("deref incdec pointee ok\n");
+  return 0;
+}

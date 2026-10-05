@@ -1,0 +1,178 @@
+// CIDER-BUG-062: HashMap deletion must not break probe chains.
+// Covers colliding keys, removal across collisions, reinsert, remove of a
+// missing key, growth with tombstones, churn, and len_map after operations.
+from std.map import HashMap, new_map, insert_map, get_map, contains_map, remove_map, len_map, free_map;
+
+func main() -> int {
+    // --- collisions: 1, 17, 33 all hash to the same slot at cap 16 ---
+    var m: HashMap<int, int> = new_map<int, int>();
+    insert_map<int, int>(&m, 1, 10);
+    insert_map<int, int>(&m, 17, 170);
+    insert_map<int, int>(&m, 33, 330);
+    if (len_map<int, int>(&m) != 3) { return 1; }
+    var p: *int = get_map<int, int>(&m, 33);
+    if (p == nilPtr || *p != 330) { return 2; }
+
+    // remove the head of the chain; keys inserted after it must stay reachable
+    if (!remove_map<int, int>(&m, 1)) { return 3; }
+    if (len_map<int, int>(&m) != 2) { return 4; }
+    p = get_map<int, int>(&m, 17);
+    if (p == nilPtr || *p != 170) { return 5; }
+    p = get_map<int, int>(&m, 33);
+    if (p == nilPtr || *p != 330) { return 6; }
+    if (contains_map<int, int>(&m, 1)) { return 7; }
+
+    // --- remove of a missing key: false, table unchanged ---
+    if (remove_map<int, int>(&m, 999)) { return 8; }
+    if (len_map<int, int>(&m) != 2) { return 9; }
+    if (contains_map<int, int>(&m, 999)) { return 10; }
+
+    // --- reinsert of a removed key, plus value replacement ---
+    insert_map<int, int>(&m, 1, 11);
+    if (len_map<int, int>(&m) != 3) { return 11; }
+    p = get_map<int, int>(&m, 1);
+    if (p == nilPtr || *p != 11) { return 12; }
+    insert_map<int, int>(&m, 17, 171);
+    if (len_map<int, int>(&m) != 3) { return 13; }
+    p = get_map<int, int>(&m, 17);
+    if (p == nilPtr || *p != 171) { return 14; }
+
+    // --- churn: remove/insert the same colliding keys repeatedly ---
+    var i: int = 0;
+    while (i < 50) {
+        if (!remove_map<int, int>(&m, 1)) { return 15; }
+        if (!remove_map<int, int>(&m, 17)) { return 16; }
+        if (!remove_map<int, int>(&m, 33)) { return 17; }
+        if (len_map<int, int>(&m) != 0) { return 18; }
+        insert_map<int, int>(&m, 1, i);
+        insert_map<int, int>(&m, 17, i + 1000);
+        insert_map<int, int>(&m, 33, i + 2000);
+        if (len_map<int, int>(&m) != 3) { return 19; }
+        p = get_map<int, int>(&m, 33);
+        if (p == nilPtr || *p != i + 2000) { return 20; }
+        i = i + 1;
+    }
+
+    // --- growth past 16 entries, then churn leaves tombstones behind ---
+    var big: HashMap<int, int> = new_map<int, int>();
+    i = 0;
+    while (i < 100) {
+        insert_map<int, int>(&big, i, i * 7);
+        i = i + 1;
+    }
+    if (len_map<int, int>(&big) != 100) { return 21; }
+
+    i = 0;
+    var removed: int = 0;
+    while (i < 100) {
+        if (i % 3 == 0) {
+            if (!remove_map<int, int>(&big, i)) { return 22; }
+            removed = removed + 1;
+        }
+        i = i + 1;
+    }
+    if (removed != 34) { return 23; }
+    if (len_map<int, int>(&big) != 66) { return 24; }
+    i = 0;
+    while (i < 100) {
+        if (i % 3 == 0) {
+            if (contains_map<int, int>(&big, i)) { return 25; }
+        } else {
+            p = get_map<int, int>(&big, i);
+            if (p == nilPtr || *p != i * 7) { return 26; }
+        }
+        i = i + 1;
+    }
+
+    // reinsert the removed keys while tombstones are present
+    i = 0;
+    while (i < 100) {
+        if (i % 3 == 0) {
+            insert_map<int, int>(&big, i, i * 7 + 1);
+        }
+        i = i + 1;
+    }
+    if (len_map<int, int>(&big) != 100) { return 27; }
+    i = 0;
+    while (i < 100) {
+        p = get_map<int, int>(&big, i);
+        if (p == nilPtr) { return 28; }
+        if (i % 3 == 0) {
+            if (*p != i * 7 + 1) { return 29; }
+        } else {
+            if (*p != i * 7) { return 30; }
+        }
+        i = i + 1;
+    }
+
+    // force a grow while tombstones exist: drop 10 keys, add 100 new ones
+    i = 0;
+    while (i < 100) {
+        if (i % 10 == 0) {
+            if (!remove_map<int, int>(&big, i)) { return 31; }
+        }
+        i = i + 1;
+    }
+    if (len_map<int, int>(&big) != 90) { return 32; }
+    i = 0;
+    while (i < 100) {
+        insert_map<int, int>(&big, 1000 + i, (1000 + i) * 3);
+        i = i + 1;
+    }
+    if (len_map<int, int>(&big) != 190) { return 33; }
+    i = 0;
+    while (i < 100) {
+        if (i % 10 == 0) {
+            if (contains_map<int, int>(&big, i)) { return 34; }
+        } else {
+            p = get_map<int, int>(&big, i);
+            if (p == nilPtr) { return 35; }
+            if (i % 3 == 0) {
+                if (*p != i * 7 + 1) { return 36; }
+            } else {
+                if (*p != i * 7) { return 37; }
+            }
+        }
+        p = get_map<int, int>(&big, 1000 + i);
+        if (p == nilPtr || *p != (1000 + i) * 3) { return 38; }
+        i = i + 1;
+    }
+
+    // --- remove everything; lookups then miss; reinsert still works ---
+    i = 0;
+    while (i < 100) {
+        if (i % 10 != 0) {
+            if (!remove_map<int, int>(&big, i)) { return 39; }
+        }
+        i = i + 1;
+    }
+    i = 0;
+    while (i < 100) {
+        if (!remove_map<int, int>(&big, 1000 + i)) { return 40; }
+        i = i + 1;
+    }
+    if (len_map<int, int>(&big) != 0) { return 41; }
+    if (contains_map<int, int>(&big, 42)) { return 42; }
+    if (contains_map<int, int>(&big, 1042)) { return 43; }
+
+    insert_map<int, int>(&big, 42, 4242);
+    if (len_map<int, int>(&big) != 1) { return 44; }
+    p = get_map<int, int>(&big, 42);
+    if (p == nilPtr || *p != 4242) { return 45; }
+
+    // replacement must not change len or key
+    insert_map<int, int>(&big, 42, 4343);
+    if (len_map<int, int>(&big) != 1) { return 46; }
+    p = get_map<int, int>(&big, 42);
+    if (p == nilPtr || *p != 4343) { return 47; }
+
+    // remove of a missing key in a table full of tombstones
+    if (remove_map<int, int>(&big, 777)) { return 48; }
+    if (len_map<int, int>(&big) != 1) { return 49; }
+    if (!remove_map<int, int>(&big, 42)) { return 50; }
+    if (len_map<int, int>(&big) != 0) { return 51; }
+
+    free_map<int, int>(&m);
+    free_map<int, int>(&big);
+    return 0;
+}

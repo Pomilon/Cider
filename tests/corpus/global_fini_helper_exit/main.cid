@@ -1,0 +1,33 @@
+// CIDER-BUG-178 regression: exiting through a helper does NOT run the
+// global fini.
+//
+// CIDER-BUG-137 runs the synthesized `_cider_global_fini` on every RET of
+// every entry, and CIDER-BUG-153 extends it to a terminal exit syscall the
+// compiler can see in the entry's OWN inline asm. The recognition is
+// deliberately entry-local: an exit syscall inside a function the entry
+// calls keeps this documented gap. So when `main` exits through a helper —
+// here a local wrapper around `std.io.exit`, two call hops from the raw
+// `mov rax, 60` / `syscall` — the module-scope global below is never
+// finalized. The exit status still propagates (5, proving the process left
+// via the helper and not by falling through to `return 0`).
+//
+// All three backends (VM unopt, VM optim, native): `run,`, exit 5, no `fini`.
+from std.io import print, exit;
+
+class D {
+    func ~D() {
+        print("fini");
+    }
+}
+
+var g: D;
+
+func halt(code: int) -> void {
+    exit(code);
+}
+
+func main() -> int {
+    print("run,");
+    halt(5);
+    return 0;
+}

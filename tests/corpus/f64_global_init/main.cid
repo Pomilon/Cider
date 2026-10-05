@@ -1,0 +1,57 @@
+// CID-003 follow-up (M3): global float initializers fold integer literals
+// and constant expressions into the declared width's IEEE-754 bits. Before
+// this, `var g: f64 = 5` and `var g: f64 = 1.0 + 2.0` silently read 0 from
+// .bss on every backend (only a bare float literal worked).
+var g_int: f64 = 5;
+var g_expr: f64 = 1.0 + 2.0;
+var g_f32: float = 7;
+// Mixed f32/f64: 16777217.0 is not representable in f32, so a wrong
+// narrowing of the f32 literal before the f64 add would print 16777216.
+var g_mixed: f64 = 16777217.0 + (0.0 as f64);
+// f32 arithmetic then widened: must match the local-variable path.
+var g_f32arith: f64 = 0.1 + 0.2;
+var g_intdiv: f64 = 5 / 2;
+var g_signeddiv: f64 = -7 / 2;
+var g_neg_int: f64 = -5;
+// Float-typed global arrays with integer constant elements (M3c): each
+// element converts to the element width's bits. Float literal elements
+// stay rejected by the checker (see the follow-up report).
+var g_arr: [f64; 2] = [1, 2];
+var f_arr: [float; 2] = [3, 4];
+// `as float` is a runtime f32 round (MOV), so the global must match the
+// local and must NOT be the raw parsed double.
+var g_cast: f64 = 0.1 as float;
+// CID-003 follow-up (W6): an aliased float global resolves through the
+// symbol table; its constant initializer still folds into the f64 slot
+// exactly like a direct declaration.
+type Real = f64;
+var g_alias: Real = 2.5;
+
+from std.io import printF64, printFloat, print;
+
+func main() -> int {
+  if (g_int != 5.0) { return 1; }
+  if (g_expr != 3.0) { return 2; }
+  if (g_f32 != 7.0) { return 3; }
+  if (g_mixed != 16777217.0) { return 4; }
+  var l_f32arith: f64 = 0.1 + 0.2;
+  if (g_f32arith != l_f32arith) { return 5; }
+  if (g_intdiv != 2.0) { return 6; }
+  if (g_signeddiv != -3.0) { return 7; }
+  if (g_neg_int != -5.0) { return 9; }
+  if (g_arr[0] != 1.0 || g_arr[1] != 2.0) { return 10; }
+  if (f_arr[0] != 3.0 || f_arr[1] != 4.0) { return 11; }
+  var l_cast: f64 = 0.1 as float;
+  if (g_cast != l_cast) { return 12; }
+  if (g_cast == 0.1) { return 13; }
+  if (g_alias != 2.5) { return 14; }
+  printF64(g_int); print("\n");
+  printF64(g_expr); print("\n");
+  printFloat(g_f32); print("\n");
+  printF64(g_mixed); print("\n");
+  printF64(g_signeddiv); print("\n");
+  printF64(g_arr[1]); print("\n");
+  printFloat(f_arr[0]); print("\n");
+  printF64(g_alias); print("\n");
+  return 0;
+}

@@ -1,0 +1,5 @@
+{
+  "stdout": "cells: 10,11,12\nguard: 123456789,123456789,123456789,123456789\ndtor: 12,11,10,\nneighbours: 80,81,82 / 90,91,92\nstride: 42,42,44,44\nstride guard: 123456789\nvalue: 1,2,3 dtor: 3,2,1,\nptr_array_stride_ok\n",
+  "stderr": "",
+  "exit": 0
+}

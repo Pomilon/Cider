@@ -1,0 +1,42 @@
+from std.alloc import malloc, free;
+
+func main() -> int {
+  var p: *int = malloc(32) as *int;
+  if (p == nilPtr) return 1;
+  *p = 42;
+
+  var q: *int = malloc(32) as *int;
+  if (q == nilPtr) return 2;
+  *q = 7;
+
+  free(p as *void);
+  var r: *int = malloc(32) as *int;
+  if (r == nilPtr) return 3;
+  *r = 99;
+  if (r != p) return 7;
+
+  var v: *int = malloc(64) as *int;
+  if (v == nilPtr) return 4;
+  *v = 5;
+
+  if (*r != 99) return 8;
+
+  free(q as *void);
+  free(r as *void);
+  free(v as *void);
+
+  var s: *int = malloc(128) as *int;
+  if (s == nilPtr) return 5;
+  *s = 1234;
+  free(s as *void);
+
+  // CIDER-BUG-109: a request above ARENA_SIZE takes the dedicated big-arena
+  // mmap path, whose successful result must still be a usable pointer.
+  var big: *u64 = malloc(2097152) as *u64;
+  if (big == nilPtr) return 9;
+  *big = 4242;
+  if (*big != 4242) return 10;
+  free(big as *void);
+
+  return 0;
+}

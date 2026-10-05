@@ -1,0 +1,18 @@
+// CIDER-BUG-043: member access on a pointee type that is only reachable
+// transitively must resolve from the defining module's symbol table.
+// Before the fix the IR generator emitted `load <ptr>, b` (a named load
+// lowered as a 32-bit load at offset 0), silently reading `a` (1) instead
+// of `b` (42) — or booting into garbage on the UEFI target.
+from m.defs import Holder, getHolder, setInner;
+from std.io import printInt, print;
+
+func readB(h: Holder) -> u32 {
+  return h.p->b;
+}
+
+func main() -> int {
+  setInner(1, 42);
+  var h: Holder = getHolder();
+  printInt(readB(h) as int); print("\n");
+  return 0;
+}

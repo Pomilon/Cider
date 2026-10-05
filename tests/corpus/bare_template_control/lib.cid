@@ -1,0 +1,5 @@
+// CIDER-BUG-134 positive control: the from-import target used bare in the
+// importing file's own annotations.
+export struct Imported<T> {
+  var v: T;
+}

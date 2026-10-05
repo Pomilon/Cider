@@ -1,0 +1,12 @@
+// CIDER-BUG-066 cross-module case: LibBox<int> is named only in this
+// exported function's parameter annotation, so collecting the module must
+// instantiate the exported template there — no variable declaration of the
+// instantiation exists anywhere.
+export struct LibBox<T> {
+  var v: T;
+}
+
+export func libRead(p: *LibBox<int>) -> int {
+  if (p == nilPtr) { return 55; }
+  return p->v;
+}

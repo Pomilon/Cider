@@ -1,0 +1,11 @@
+// CIDER-BUG-123: a base class in another module still takes part in the
+// constructor/destructor chain, and both mangle with THIS module's name
+// (the same module rule as every other class method, CID-020/021).
+export class CrossBase {
+    var m: int = 4;
+    func init() -> void {
+        print("CrossBase.init\n");
+        this.m = 44;
+    }
+    func ~CrossBase() { print("~CrossBase m="); printInt(this.m); print("\n"); }
+}

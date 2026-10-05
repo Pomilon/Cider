@@ -1,0 +1,185 @@
+// CIDER-BUG-120 regression: a class whose base is declared LATER (or
+// collected later) must inherit exactly as if the base had been declared
+// first — fields (offsets/initializers), methods, overrides/vtable dispatch,
+// constructors and destructors. Each case below mirrors a dependency-ordered
+// shape verified to produce the same output, and the harness requires all
+// three backends (VM unoptimized, VM optimized, native) to agree.
+from std.io import print, printInt;
+
+var drops: int = 0;
+
+// --- 1. Fields, inherited method, constructor, override and dispatch
+// through the base pointer. `Later` is declared after its subclass `A`.
+class A extends Later {
+    var x: int = 1;
+    func init(v: int) -> void { this.x = v; }
+    func g() -> int { return this.x; }
+    override func v() -> int { return super.v() + 5; }
+}
+
+class Later {
+    var y: int = 7;
+    func f() -> int { return this.y; }
+    virtual func v() -> int { return 10; }
+}
+
+// --- 2. Nested chain: every base is declared after its subclass, so the
+// whole Leaf -> Mid -> Root chain resolves only after collection.
+class Leaf extends Mid {
+    var l: int = 3;
+    override func tag() -> int { return 30; }
+}
+
+class Mid extends Root {
+    var m: int = 2;
+    override func tag() -> int { return 20; }
+}
+
+class Root {
+    var r: int = 1;
+    virtual func tag() -> int { return 10; }
+    func base() -> int { return this.r; }
+}
+
+// --- 3. A later base extending an earlier base: `P` extends the later `Q0`,
+// which extends the earlier `Q1`; the override binds Q1's vtable slot.
+class Q1 {
+    var q1: int = 4;
+    virtual func name() -> int { return 40; }
+}
+
+class P extends Q0 {
+    var p: int = 5;
+    override func name() -> int { return 50; }
+}
+
+class Q0 extends Q1 {
+    var q0: int = 6;
+}
+
+// --- 4. A class without virtuals of its own extends a forward virtual base:
+// the inherited vptr/vtable must still be reserved and used.
+class PlainChild extends VBase {
+    var pc: int = 8;
+}
+
+class VBase {
+    var vb: int = 2;
+    virtual func who() -> int { return 1; }
+}
+
+// --- 5. Destructor through the inherited layout: the base carries a
+// class-valued field with a destructor, and a `delete` on the (forward-base)
+// subclass runs its own destructor followed by the embedded class-valued
+// fields (CIDER-BUG-108); base-class destructors are still not invoked.
+class Dropper {
+    var label: int;
+    func ~Dropper() {
+        drops = drops + 1;
+        print("d");
+        printInt(this.label);
+        print(",");
+    }
+}
+
+class HolderKid extends Holder {
+    var own: int = 9;
+    func ~HolderKid() {
+        print("k,");
+    }
+}
+
+class Holder {
+    var d: Dropper;
+    var baseVal: int = 6;
+}
+
+// --- 6. Propagation: ParentT's base GParent is declared after ParentT, so
+// ParentT is rebuilt; ChildT copied ParentT at collection and must be
+// rebuilt too even though its own base name resolved back then.
+class ParentT extends GParent {
+    var pt: int = 12;
+    override func deep() -> int { return 120; }
+}
+
+class ChildT extends ParentT {
+    var ct: int = 13;
+    override func deep() -> int { return 130; }
+}
+
+class GParent {
+    var gp: int = 11;
+    virtual func deep() -> int { return 110; }
+}
+
+func main() -> int {
+    // 1: constructor + inherited field/method + override via sub and base.
+    var a: *A = new A(5);
+    printInt(a->x); print(",");        // 5
+    printInt(a->y); print(",");        // 7  inherited field
+    printInt(a->f()); print(",");      // 7  inherited method
+    printInt(a->g()); print(",");      // 5
+    printInt(a->v()); print(",");      // 15 override calling super
+    var bl: *Later = a;
+    printInt(bl->y); print(",");       // 7
+    printInt(bl->f()); print(",");     // 7
+    printInt(bl->v()); print("\n");    // 15 dispatch through base
+
+    // 2: nested forward chain, offsets and dispatch at every level.
+    var leaf: *Leaf = new Leaf;
+    var mid: *Mid = leaf;
+    var root: *Root = leaf;
+    printInt(leaf->l); print(",");     // 3
+    printInt(leaf->m); print(",");     // 2  inherited from Mid
+    printInt(leaf->r); print(",");     // 1  inherited from Root
+    printInt(leaf->tag()); print(","); // 30
+    printInt(mid->tag()); print(",");  // 30
+    printInt(root->tag()); print(","); // 30
+    printInt(root->base()); print(",");// 1
+    printInt(sizeof(Leaf)); print("\n");// 24 (vptr at the root + three ints)
+
+    // 3: later base over an earlier base.
+    var p: *P = new P;
+    var q: *Q1 = p;
+    printInt(p->p); print(",");        // 5
+    printInt(p->q0); print(",");       // 6  inherited from Q0
+    printInt(p->q1); print(",");       // 4  inherited from Q1
+    printInt(p->name()); print(",");   // 50
+    printInt(q->name()); print("\n");  // 50 dispatch through Q1
+
+    // 4: no own virtuals; vptr/vtable inherited from the forward base.
+    var pc: *PlainChild = new PlainChild;
+    var vb: *VBase = pc;
+    printInt(pc->pc); print(",");      // 8  own field after the base
+    printInt(pc->vb); print(",");      // 2
+    printInt(pc->who()); print(",");   // 1
+    printInt(vb->who()); print(",");   // 1
+    printInt(sizeof(PlainChild)); print("\n"); // 20 (16-byte base + 4)
+
+    // 5: the inherited class-valued field destroys at scope exit (after the
+    // subclass's own destructor); `delete` runs the subclass destructor and
+    // then the embedded Dropper (CIDER-BUG-108: base-class destructors are
+    // not auto-invoked).
+    {
+        var h: HolderKid;
+        h.d.label = 21;
+        h.own = 8;
+        printInt(h.baseVal); print(",");// 6 inherited field
+        printInt(h.own); print("\n");  // 8
+    }                                  // k,d21,
+    var d: *HolderKid = new HolderKid;
+    d->d.label = 31;
+    delete d;                          // k,d31,
+
+    // 6: rebuild propagation through a resolved-but-stale parent.
+    var c: *ChildT = new ChildT;
+    var gpp: *GParent = c;
+    printInt(c->ct); print(",");       // 13
+    printInt(c->pt); print(",");       // 12
+    printInt(c->gp); print(",");       // 11
+    printInt(gpp->deep()); print("\n");// 130
+
+    if (drops != 2) { return 1; }
+    print("forward_decl_bases_ok\n");
+    return 0;
+}

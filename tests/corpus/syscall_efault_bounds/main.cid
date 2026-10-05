@@ -1,0 +1,42 @@
+// CIDER-BUG-099: a write/read buffer outside the VM heap must fail with
+// -EFAULT like native rejects a bad user pointer. The VM used to read host
+// memory for negative offsets and to report EOF (0) for out-of-heap
+// buffers. The exit code names the check that failed.
+func main() -> int {
+    var ret: int = 0;
+
+    // write(1, (void*)-16, 4) -> -EFAULT
+    asm {
+        "mov rax, 1\n"
+        "mov rdi, 1\n"
+        "mov rsi, -16\n"
+        "mov rdx, 4\n"
+        "syscall\n"
+        "mov {ret}, eax\n"
+    }
+    if (ret != -14) return 1;
+
+    // read(0, (void*)-16, 4) -> -EFAULT
+    asm {
+        "mov rax, 0\n"
+        "mov rdi, 0\n"
+        "mov rsi, -16\n"
+        "mov rdx, 4\n"
+        "syscall\n"
+        "mov {ret}, eax\n"
+    }
+    if (ret != -14) return 2;
+
+    // read(0, (void*)1<<40, 4) -> -EFAULT, not EOF
+    asm {
+        "mov rax, 0\n"
+        "mov rdi, 0\n"
+        "mov rsi, 1099511627776\n"
+        "mov rdx, 4\n"
+        "syscall\n"
+        "mov {ret}, eax\n"
+    }
+    if (ret != -14) return 3;
+
+    return 0;
+}

@@ -1,0 +1,15 @@
+func add(a: int, b: int) -> int { return a + b; }
+func mul(a: int, b: int) -> int { return a * b; }
+
+func pick(which: int) -> *func(int, int) -> int {
+  if (which == 0) { return &add; }
+  return &mul;
+}
+
+func main() -> int {
+  var f: *func(int, int) -> int = pick(0);
+  if ((*f)(2, 3) != 5) { return 1; }
+  f = pick(1);
+  if ((*f)(2, 3) != 6) { return 2; }
+  return 0;
+}

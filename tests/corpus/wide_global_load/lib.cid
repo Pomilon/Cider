@@ -1,0 +1,40 @@
+// CIDER-BUG-245 module half: the interface, two implementors with
+// different tags AND different layouts, a 16-byte struct, and the
+// wide aggregate globals the entry file reads.
+//
+// `gShape` is the 16-byte interface fat pointer (data word + vtable
+// word); `gB` is a 16-byte struct (two i64 halves). Every read of one
+// must deliver all 16 bytes: the second word of the interface is the
+// vtable a dispatch needs, and the second half of the struct is `b`.
+export interface Shape {
+  func area() -> int;
+  func tag() -> int;
+}
+
+// First implementor.
+export class Box {
+  var v: int;
+  func area() -> int { return this.v * 2; }
+  func tag() -> int { return 7; }
+}
+
+// Second implementor with a DIFFERENT tag and layout, so a stale or
+// zeroed vtable word shows up as a wrong tag instead of passing
+// unnoticed.
+export class Pebble {
+  var w: int;
+  var pad: [u64; 4];
+  func area() -> int { return this.w + 1; }
+  func tag() -> int { return 9; }
+}
+
+// A 16-byte struct: two 8-byte halves.
+export struct Big {
+  var a: i64;
+  var b: i64;
+}
+
+export var gBox: Box;
+export var gPeb: Pebble;
+export var gShape: Shape;
+export var gB: Big;

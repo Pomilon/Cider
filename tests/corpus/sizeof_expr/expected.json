@@ -1,0 +1,1 @@
+{"stdout": "point=8 wide=20 int=4 arr=16 grid=6 row=2 iface=16 ptr=8\nliteral=4 char=1 string=8 fn=8 structliteral=8\nsizeofcall=4 sizeofgrow=12 sizeofnew=8 sizeofmethod=4\ncalls=0 total=32 precedence=104\nretstruct=8 rettype=8 retfield=4 retsum=12\n", "stderr": "", "exit": 0}

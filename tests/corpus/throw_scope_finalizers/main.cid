@@ -1,0 +1,119 @@
+// CIDER-BUG-154 regression: a throw runs the pending scope exits of the
+// frame it unwinds through — defers first, then destructors innermost-
+// first LIFO (the CIDER-BUG-088/108/137 order) — BEFORE the longjmp, while
+// every address register is still live. Covered here on all three
+// backends (VM unopt, VM optim, native):
+//   * the thrower's whole frame when it has no try of its own: by-value
+//     parameter copy, locals, embedded class values, by-value return
+//     temporaries and its defer;
+//   * a throw inside a try body: every scope above the try's entry depth
+//     (nested blocks included) dies before the catch runs, while the
+//     scopes below it survive to their normal exit;
+//   * the interrupted for-in iteration copy (CIDER-BUG-108).
+// NOT covered — pinned separately in throw_finalizer_gaps: scopes of
+// intermediate frames, and the handler frame's own try-body scope when
+// the throw comes from a callee.
+from std.io import print, printInt;
+
+var drops: int = 0;
+
+class D {
+    var label: int;
+    func ~D() {
+        drops = drops + 1;
+        printInt(this.label);
+        print(",");
+    }
+}
+
+struct SW { var d: D; }
+class Pair { var a: D; var b: D; }
+
+var arr: [D; 2];
+
+func mk(n: int) -> D {
+    var d: D;
+    d.label = n;
+    return d;
+}   // n: mk's own local, finalized on return
+
+// The thrower's frame dies whole — no try here, so the by-value parameter
+// copy, every local, the embedded values, the return temporary and the
+// defer all run before the jump.
+func thrower(x: D) -> int {
+    var local: D;
+    local.label = 20;
+    var q: D = mk(50);      // 50 on return; the copy temp and q die here
+    var s: SW;
+    s.d.label = 21;
+    var p: Pair;
+    p.a.label = 22;
+    p.b.label = 23;
+    x.label = 24;
+    defer { print("d1;"); }
+    throw 7;
+}
+
+// Same-frame unwind: everything above the try's entry depth runs before
+// the catch; the scope below it survives the jump.
+func sameFrame() -> void {
+    var outer: D;
+    outer.label = 1;
+    try {
+        var inner: D;
+        inner.label = 2;
+        var s: SW;
+        s.d.label = 3;
+        {
+            var blk: D;
+            blk.label = 4;
+            defer { print("d2;"); }
+            throw 9;        // unwinds the block scope, then the try body
+        }
+    } catch (e) {
+        print("caught;");
+    }
+    print("after;");
+}   // outer: 1, at the normal function exit after the catch
+
+// The interrupted iteration's copy finalizes with the unwinding throw;
+// the finished iteration's copy already died at its iteration end.
+func loopCopy() -> void {
+    try {
+        for (var x in arr) {
+            if (x.label == 2) { throw 11; }
+            print("go;");
+        }
+    } catch (e) {
+        print("caught2;");
+    }
+}
+
+func main() -> int {
+    arr[0].label = 1;
+    arr[1].label = 2;
+
+    sameFrame();
+    print("|");
+
+    // The temporary for mk(99) belongs to main's scope (outside the try),
+    // so it survives the callee's throw and dies with main.
+    var a: D = mk(99);
+    a.label = 99;
+    try {
+        thrower(a);
+    } catch (e) {
+        print("caught3;");
+    }
+    print("|");
+
+    loopCopy();
+    print("|drops=");
+    printInt(drops);
+    print(";\n");
+    // At this point: sameFrame 4 (4,3,2,1) + thrower 8 (50,23,22,21,50,
+    // 50,20,24) + the two iteration copies + mk(99)'s local. main's own
+    // two and arr's two (program exit) follow the return.
+    if (drops != 15) { return 1; }
+    return 0;
+}

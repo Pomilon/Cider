@@ -1,0 +1,209 @@
+// CIDER-BUG-165 regression: list literals in struct-literal fields and in
+// array-typed call arguments. Before the fix both positions were rejected
+// ("expected [u8; 2], got *int") because visit(ListExpr) infers every list
+// literal as the context-free flat `*T`; the checker and IR generator now
+// take the declaration-time path against the DECLARED array shape
+// (CIDER-BUG-163's emitListLiteralTemp), so the size/element checks,
+// aggregate copies, alias resolution, nested rows and interface elements
+// all apply in both positions — on all three backends (VM unopt, VM
+// optimized, native). Struct-literal fields store the materialised array
+// into the field (aggregate MEMCPY); an array-typed parameter receives the
+// materialised temp address and copies it like any by-value aggregate.
+from std.io import print, printInt;
+
+interface Shape {
+  func area() -> int;
+}
+
+class Sq {
+  var side: int;
+  func area() -> int { return this.side * this.side; }
+}
+
+class Rect {
+  var w: int; var h: int;
+  func area() -> int { return this.w * this.h; }
+}
+
+class Ctor {
+  var sum: int;
+  func init(a: [u8; 2]) { this.sum = a[0] + a[1]; }
+  func take(a: [[u8; 2]; 2]) -> int { return this.sum + a[0][0] + a[1][1]; }
+}
+
+interface Taker {
+  func take(a: [[u8; 2]; 2]) -> int;
+}
+
+class TakerImpl {
+  var base: int;
+  func take(a: [[u8; 2]; 2]) -> int { return this.base + a[0][1] + a[1][0]; }
+}
+
+struct Flat { var cells: [u8; 2]; var tag: u8; }
+struct Nested { var grid: [[u8; 2]; 2]; var tag: u8; }
+struct Deep { var cube: [[[u8; 2]; 2]; 2]; }
+struct Wrap { var inner: Flat; }
+type Row = [u8; 2];
+type Grid = [Row; 2];
+struct Aliased { var r: Row; var g: Grid; }
+struct P { var x: u8; var y: u8; }
+struct Agg { var rows: [P; 2]; }
+struct IfaceHolder { var shapes: [Shape; 2]; }
+type Shapes = [Shape; 2];
+struct IfaceAliasHolder { var shapes: Shapes; }
+struct IfaceGrid { var shapes: [[Shape; 2]; 2]; }
+struct FnHolder { var fns: [fn(int, int) -> int; 2]; }
+struct VolHolder { var v: volatile [u8; 2]; }
+
+func add(a: int, b: int) -> int { return a + b; }
+func sub(a: int, b: int) -> int { return a - b; }
+
+func flat(a: [u8; 2]) -> int { return a[0] + a[1]; }
+func nested(a: [[u8; 2]; 2]) -> int { return a[0][0] + a[1][1]; }
+func deep(a: [[[u8; 2]; 2]; 2]) -> int { return a[0][0][0] + a[1][1][1]; }
+func rowAlias(a: Row) -> int { return a[0] * 10 + a[1]; }
+func gridAlias(a: Grid) -> int { return a[0][1] * 10 + a[1][0]; }
+func pair(a: Row, b: Grid) -> int { return a[1] + b[0][0] + b[1][1]; }
+func structElems(ps: [P; 2]) -> int { return ps[0].x + ps[1].y; }
+func total(sh: [Shape; 2]) -> int { return sh[0].area() + sh[1].area(); }
+func totalAlias(sh: Shapes) -> int { return sh[0].area() + sh[1].area(); }
+func totalGrid(sh: [[Shape; 2]; 2]) -> int {
+  return sh[0][0].area() + sh[0][1].area() + sh[1][0].area() + sh[1][1].area();
+}
+func volatileParam(a: volatile [u8; 2]) -> int { return a[0] + a[1]; }
+func overwrite(a: [u8; 2]) -> int { a[0] = 99; return a[0]; }
+func sumFlat(x: Flat) -> int { return x.cells[0] + x.cells[1] + x.tag; }
+
+func makeFlat() -> Flat {
+  return Flat{cells: [41, 42], tag: 6};
+}
+
+func main() -> int {
+  // --- struct-literal fields ---
+  // Flat field: narrow elements pin the declared width (a word-sized
+  // materialisation used to overrun the 2-byte field).
+  var f: Flat = Flat{cells: [1, 2], tag: 9};
+  if (f.cells[0] != 1 || f.cells[1] != 2 || f.tag != 9) { return 1; }
+
+  // Nested rows in a field.
+  var n: Nested = Nested{grid: [[10, 11], [12, 13]], tag: 4};
+  if (n.grid[0][0] != 10 || n.grid[0][1] != 11 || n.grid[1][0] != 12 ||
+      n.grid[1][1] != 13 || n.tag != 4) { return 2; }
+
+  // 3-D field.
+  var d: Deep = Deep{cube: [[[1, 2], [3, 4]], [[5, 6], [7, 8]]]};
+  if (d.cube[0][1][1] != 4 || d.cube[1][0][0] != 5 || d.cube[1][1][1] != 8) { return 3; }
+
+  // Alias spellings: direct and composed row aliases.
+  var al: Aliased = Aliased{r: [21, 22], g: [[23, 24], [25, 26]]};
+  if (al.r[0] != 21 || al.g[0][1] != 24 || al.g[1][0] != 25) { return 4; }
+
+  // Aggregate (struct) elements are copied per element.
+  var ag: Agg = Agg{rows: [P{x: 31, y: 32}, P{x: 33, y: 34}]};
+  if (ag.rows[0].y != 32 || ag.rows[1].x != 33) { return 5; }
+
+  // Interface elements convert with the fat-pointer store.
+  var s1: Sq; s1.side = 3;
+  var r1: Rect; r1.w = 2; r1.h = 5;
+  var ih: IfaceHolder = IfaceHolder{shapes: [s1, r1]};
+  if (ih.shapes[0].area() != 9 || ih.shapes[1].area() != 10) { return 6; }
+
+  // Fn-pointer elements keep the raw code-pointer representation.
+  var fh: FnHolder = FnHolder{fns: [add, sub]};
+  if (fh.fns[0](2, 3) != 5 || fh.fns[1](2, 3) != -1) { return 7; }
+
+  // Volatile field: the store into the field stays observable.
+  var vh: VolHolder = VolHolder{v: [41, 42]};
+  if (vh.v[0] != 41 || vh.v[1] != 42) { return 8; }
+
+  // Omitted fields stay zeroed beside the materialised list field.
+  var z: Flat = Flat{cells: [51, 52]};
+  if (z.cells[1] != 52 || z.tag != 0) { return 9; }
+
+  // Copy independence: the field is a copy, not an alias of the temp.
+  var c1: Flat = Flat{cells: [61, 62], tag: 1};
+  var c2: Flat = c1;
+  c2.cells[0] = 99;
+  if (c1.cells[0] != 61 || c2.cells[0] != 99) { return 10; }
+
+  // The literal temp is stack-scoped: a struct literal with a list field
+  // as a call argument, an assignment RHS, a ternary arm, a list-literal
+  // element and a returned value.
+  if (sumFlat(Flat{cells: [71, 72], tag: 3}) != 146) { return 11; }
+  var asg: Flat;
+  asg = Flat{cells: [81, 82], tag: 4};
+  if (asg.cells[0] != 81 || asg.tag != 4) { return 12; }
+  var cond: bool = false;
+  var ter: Flat = cond ? Flat{cells: [1, 1], tag: 1} : Flat{cells: [91, 92], tag: 5};
+  if (ter.cells[1] != 92 || ter.tag != 5) { return 13; }
+  var arr: [Flat; 2] = [Flat{cells: [1, 2], tag: 1}, Flat{cells: [3, 4], tag: 2}];
+  if (arr[1].cells[0] != 3 || arr[0].tag != 1) { return 14; }
+  var mk: Flat = makeFlat();
+  if (mk.cells[0] != 41 || mk.cells[1] != 42 || mk.tag != 6) { return 15; }
+  var wr: Wrap = Wrap{inner: Flat{cells: [43, 44], tag: 7}};
+  if (wr.inner.cells[1] != 44 || wr.inner.tag != 7) { return 16; }
+
+  // --- array-typed call arguments ---
+  // Flat, nested and 3-D literals.
+  if (flat([101, 102]) != 203) { return 17; }
+  if (nested([[1, 2], [3, 4]]) != 5) { return 18; }
+  if (deep([[[1, 2], [3, 4]], [[5, 6], [7, 8]]]) != 9) { return 19; }
+  // Alias parameter spellings (direct and composed).
+  if (rowAlias([11, 12]) != 122) { return 20; }
+  if (gridAlias([[13, 14], [15, 16]]) != 155) { return 21; }
+  // Multiple array arguments in one call.
+  if (pair([21, 22], [[23, 24], [25, 26]]) != 71) { return 22; }
+  // Aggregate elements.
+  if (structElems([P{x: 1, y: 2}, P{x: 3, y: 4}]) != 5) { return 23; }
+  // Interface elements.
+  if (total([s1, r1]) != 19) { return 24; }
+  // Volatile parameter.
+  if (volatileParam([31, 32]) != 63) { return 25; }
+  // By-value semantics: the callee's write stays in its parameter copy.
+  if (overwrite([7, 8]) != 99) { return 26; }
+
+  // Class method with an array-typed parameter.
+  var ct: *Ctor = new Ctor([51, 52]);
+  if (ct.sum != 103) { return 27; }
+  if (ct.take([[1, 2], [3, 4]]) != 108) { return 28; }
+
+  // Interface method with an array-typed parameter (indirect dispatch).
+  var impl: TakerImpl; impl.base = 10;
+  var taker: Taker = impl;
+  if (taker.take([[1, 2], [3, 4]]) != 15) { return 29; }
+
+  // Constructor argument.
+  var ct2: *Ctor = new Ctor([61, 62]);
+  if (ct2.sum != 123) { return 30; }
+
+  // Interface-array alias and nested interface rows in both positions.
+  var iah: IfaceAliasHolder = IfaceAliasHolder{shapes: [s1, r1]};
+  if (iah.shapes[0].area() != 9 || iah.shapes[1].area() != 10) { return 31; }
+  var ig: IfaceGrid = IfaceGrid{shapes: [[s1, r1], [r1, s1]]};
+  if (ig.shapes[0][1].area() != 10 || ig.shapes[1][0].area() != 10) { return 32; }
+  if (totalAlias([s1, r1]) + totalGrid([[s1, r1], [r1, s1]]) != 57) { return 33; }
+
+  printInt(f.cells[0] + f.cells[1]); print(",");
+  printInt(n.grid[1][0] + n.tag); print(",");
+  printInt(d.cube[1][1][1] + al.r[0]); print(",");
+  printInt(ag.rows[0].x + ag.rows[1].y); print(",");
+  printInt(ih.shapes[0].area() + ih.shapes[1].area()); print(",");
+  printInt(fh.fns[0](1, 2) + fh.fns[1](1, 2)); print(",");
+  printInt(vh.v[0] + vh.v[1]); print(",");
+  printInt(z.tag + c1.cells[0]); print(",");
+  printInt(sumFlat(Flat{cells: [5, 6], tag: 7}) + asg.tag); print(",");
+  printInt(ter.cells[0] + arr[1].cells[1]); print(",");
+  printInt(mk.tag + wr.inner.tag); print(",");
+  printInt(flat([1, 2]) + nested([[3, 4], [5, 6]])); print(",");
+  printInt(deep([[[7, 8], [9, 10]], [[11, 12], [13, 14]]])); print(",");
+  printInt(rowAlias([15, 16]) + gridAlias([[17, 18], [19, 20]])); print(",");
+  printInt(pair([1, 2], [[3, 4], [5, 6]]) + structElems([P{x: 7, y: 8}, P{x: 9, y: 10}])); print(",");
+  printInt(total([s1, r1]) + volatileParam([21, 22])); print(",");
+  printInt(ct.sum + ct.take([[5, 6], [7, 8]])); print(",");
+  printInt(taker.take([[9, 10], [11, 12]]) + ct2.sum); print(",");
+  printInt(iah.shapes[1].area() + ig.shapes[1][0].area()); print(",");
+  printInt(totalAlias([s1, r1]) + totalGrid([[s1, r1], [r1, s1]])); print("\n");
+  print("list_positions_ok\n");
+  return 0;
+}

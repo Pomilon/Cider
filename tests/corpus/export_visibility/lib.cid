@@ -1,0 +1,38 @@
+// CIDER-BUG-060 positive module: every symbol in the exported API is usable
+// cross-module (qualified and from-import), while `hidden_double` stays
+// private and is reachable only from this module's own code.
+export type Score = int;
+
+export interface Valuable {
+  func value() -> int;
+}
+
+export class Item {
+  var amount: int;
+  func value() -> int { return this.amount; }
+}
+
+export struct Pair {
+  var a: int;
+  var b: int;
+}
+
+export enum Mode { OFF, ON }
+
+export const BASE: int = 30;
+export var calls: int = 0;
+
+func hidden_double(x: int) -> int { return x * 2; }
+
+export func scoreOf(a: int, b: int) -> Score {
+  calls = calls + 1;
+  return hidden_double(a) + b + BASE;
+}
+
+export func makeItem(amount: int) -> Item {
+  var it: Item;
+  it.amount = amount;
+  return it;
+}
+
+export func pairSum(p: Pair) -> int { return p.a + p.b; }

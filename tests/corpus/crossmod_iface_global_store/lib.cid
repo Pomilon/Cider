@@ -1,0 +1,59 @@
+// CIDER-BUG-230 module half: the interface, three implementors and the
+// interface-typed globals the entry file stores into by QUALIFIED name.
+//
+// `gIface`/`gQuiet`/`gSpot` are declared in an IMPORTED module and written
+// from the entry file as `lib.gIface = lib.gImpl;`. `seedIface` is the
+// control: the very same conversion written BARE, inside the module that
+// declares both sides, which the checker has always accepted.
+export interface ROther {
+  func o() -> int;
+  func tag() -> int;
+}
+
+// First implementor: its finalizer REPORTS, so the trace shows which object
+// was finalized and when.
+export class RImpl {
+  var v: int;
+  func o() -> int { return this.v; }
+  func tag() -> int { return 7; }
+  func ~RImpl() { print("A"); }
+}
+
+// A second implementor with a DIFFERENT tag, so a stale vtable left behind by
+// the previous store is visible as a wrong tag rather than a crash.
+export class RQuiet {
+  var s: int;
+  func o() -> int { return this.s; }
+  func tag() -> int { return 13; }
+  func ~RQuiet() { print("B"); }
+}
+
+// A third implementor whose methods are bigger, so its vtable entries differ
+// from the other two in more than one slot.
+export class RSpot {
+  var p: int;
+  var pad: [u64; 4];
+  func o() -> int { return this.p; }
+  func tag() -> int { return 21; }
+  func ~RSpot() { print("C"); }
+}
+
+export var rImpl: RImpl;
+export var rQuiet: RQuiet;
+export var rSpot: RSpot;
+
+// The interface-typed globals, declared BELOW the implementors they hold.
+export var gIface: ROther;
+export var gCopy: ROther;
+
+// The control: the bare spelling, in the module that declares both sides.
+export func seedIface() -> int {
+  gIface = rImpl;
+  return gIface.o();
+}
+
+// Reads the interface-typed global through a signature this module spells,
+// so the qualified store's result has to survive a cross-module call.
+export func peek() -> int {
+  return gIface.o() * 100 + gIface.tag();
+}

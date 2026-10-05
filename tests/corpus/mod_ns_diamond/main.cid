@@ -1,0 +1,14 @@
+import da;
+import db;
+import dc;
+from dc import putchar;
+
+func main() -> int {
+  if (da.aval() != 42) { return 1; }
+  if (db.bval() != 42) { return 2; }
+  if (da.abump() != 1) { return 3; }
+  if (db.bbump() != 2) { return 4; }
+  if (putchar(65) != 65) { return 5; }
+  if (dc.putchar(66) != 66) { return 6; }
+  return 0;
+}

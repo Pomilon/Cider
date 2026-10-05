@@ -1,0 +1,42 @@
+// CIDER-BUG-153 regression: the program-exit fini pass must run before an
+// entry's inline-asm exit syscall.
+//
+// CIDER-BUG-137 hangs the synthesized `_cider_global_fini` on every RET of
+// every entry (`main`/`_start`/`efi_main`). A native `_start` cannot return —
+// the kernel enters it with no return address — so bare-metal programs end
+// in an inline-asm exit syscall, and that path never reached the call; the
+// VM's `_start` return path did. The fix recognizes the exit syscall in the
+// entry's own asm and runs the fini before the exit sequence's register
+// setup, so all three backends destroy module-scope globals at program exit.
+//
+// This program uses the split three-asm idiom the rest of the suite uses:
+// `asm{"mov rax, 60"} asm{"mov rdi, 0"} asm{"syscall"}`. The fini call must
+// land before the `mov rax, 60` (a call there re-establishes the syscall
+// state after the destructors ran), and must run exactly once: the
+// destructor trace would show a duplicated pair otherwise.
+//
+// All three backends (VM unopt, VM optim, native): `run,2,1,` and exit 0.
+from std.io import print, printInt;
+
+var drops: int = 0;
+
+class D {
+    var label: int;
+    func ~D() {
+        drops = drops + 1;
+        printInt(this.label);
+        print(",");
+    }
+}
+
+// Module-scope globals with destructors finalize at program exit in reverse
+// construction order: g2 first, then g1.
+var g1: D;
+var g2: D;
+
+func _start() {
+    g1.label = 1;
+    g2.label = 2;
+    print("run,");
+    asm { "mov rax, 60" } asm { "mov rdi, 0" } asm { "syscall" }
+}

@@ -1,0 +1,68 @@
+// CID-003 follow-up (global wrap): an integer constant subexpression in a
+// float global initializer wraps at its operand/expression type exactly
+// like the equivalent local variable. The global folder used to evaluate
+// integer subexpressions at 64-bit width, so `(-3000000000)` (u32
+// negation) emitted 2^64 instead of 1294967296 and `3000000000 +
+// 3000000000` emitted 6e9 instead of the wrapped u32 sum.
+var g_neg32: f32 = (-3000000000);
+var g_neg64: f64 = (-3000000000);
+var g_add32: f64 = 3000000000 + 3000000000;
+var g_mul32: f32 = 3000000000 * 3;
+var g_sub32: f64 = 0 - 3000000000;
+var g_rshift: f64 = (-3000000000) >> 1;
+var g_div: f64 = (-3000000000) / 7;
+var g_mod: f64 = 3000000000 % 7;
+var g_u64neg: f64 = (-18446744073709551615);
+var g_u64wrap: f64 = 18446744073709551615 + 1;
+// Mixed i32/i64 operands widen to 64 bits (no wrap here): guards that the
+// per-type wrapping does not truncate a 64-bit peer.
+var g_mixed64: f64 = 16777217 + 5000000000;
+
+from std.io import printF64, print;
+
+func main() -> int {
+  // Local mirrors: every global must fold bit for bit like these.
+  var l_neg32: f32 = (-3000000000);
+  var l_neg64: f64 = (-3000000000);
+  var l_add32: f64 = 3000000000 + 3000000000;
+  var l_mul32: f32 = 3000000000 * 3;
+  var l_sub32: f64 = 0 - 3000000000;
+  var l_rshift: f64 = (-3000000000) >> 1;
+  var l_div: f64 = (-3000000000) / 7;
+  var l_mod: f64 = 3000000000 % 7;
+  var l_u64neg: f64 = (-18446744073709551615);
+  var l_u64wrap: f64 = 18446744073709551615 + 1;
+  var l_mixed64: f64 = 16777217 + 5000000000;
+
+  if (g_neg32 != l_neg32) { return 1; }
+  if (g_neg64 != l_neg64) { return 2; }
+  if (g_add32 != l_add32) { return 3; }
+  if (g_mul32 != l_mul32) { return 4; }
+  if (g_sub32 != l_sub32) { return 5; }
+  if (g_rshift != l_rshift) { return 6; }
+  if (g_div != l_div) { return 7; }
+  if (g_mod != l_mod) { return 8; }
+  if (g_u64neg != l_u64neg) { return 9; }
+  if (g_u64wrap != l_u64wrap) { return 10; }
+  if (g_mixed64 != l_mixed64) { return 11; }
+
+  // Absolute expected values (u32 negation/add/mul wrap, u64 wrap).
+  if (g_neg32 != 1294967296.0) { return 12; }
+  if (g_neg64 != 1294967296.0) { return 13; }
+  if (g_add32 != 1705032704.0) { return 14; }
+  if (g_mul32 != 410065408.0) { return 15; }
+  if (g_sub32 != 1294967296.0) { return 16; }
+  if (g_rshift != 647483648.0) { return 17; }
+  if (g_div != 184995328.0) { return 18; }
+  if (g_mod != 4.0) { return 19; }
+  if (g_u64neg != 1.0) { return 20; }
+  if (g_u64wrap != 0.0) { return 21; }
+  if (g_mixed64 != 5016777217.0) { return 22; }
+
+  printF64(g_neg64); print("\n");
+  printF64(g_add32); print("\n");
+  printF64(g_rshift); print("\n");
+  printF64(g_u64neg); print("\n");
+  printF64(g_mod); print("\n");
+  return 0;
+}

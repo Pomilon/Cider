@@ -1,0 +1,196 @@
+// CIDER-FEAT-007: `sizeof` measures an expression's type, not only a type.
+//
+// The parenthesized spelling `sizeof (T)` is unchanged; the operand form
+// `sizeof e` reports the size of e's TYPE and never evaluates e. The
+// result is the same compile-time constant the type form produces, so
+// every operand below is cross-checked against its `sizeof (T)` twin.
+//
+// The rule the IR dump pins: the operand is type-checked but NOT lowered,
+// so the side effects in `bump()` and `grow()` do not run and nothing is
+// allocated for `new`. Only the type form needs parentheses; the operand
+// form binds like a prefix operator, so `sizeof a + 1` is `sizeof a + 1`
+// and `sizeof f()` / `sizeof s.field` / `sizeof a[i]` keep the call,
+// field and index in the operand.
+from std.io import print, printInt;
+
+struct Point { var x: int; var y: int; }
+struct Wide { var a: int; var b: int; var c: int; var d: int; var e: int; }
+type Alias = Point;
+
+interface Shape {
+  func area() -> int;
+}
+
+class Sq {
+  var side: int;
+  func init(v: int) { this.side = v; }
+  func area() -> int { return this.side * this.side; }
+}
+
+// Counts its own calls: `sizeof bump()` must leave this at zero.
+var calls: int = 0;
+
+func bump() -> int {
+  calls = calls + 1;
+  return 7;
+}
+
+func grow() -> [int; 3] {
+  calls = calls + 1;
+  var a: [int; 3];
+  return a;
+}
+
+func wide() -> Wide {
+  var w: Wide;
+  return w;
+}
+
+func identity<T>(v: T) -> T { return v; }
+
+// A body that is nothing but a sizeof. The result is an int, so a return
+// site must not inherit the type of whatever was visited before it: with a
+// struct declaration ahead of these, the constant used to be boxed into an
+// aggregate return and read back as a pointer.
+func sizeOfPair() -> int { return sizeof(Point); }
+
+func retType() -> int { return sizeof(Point); }
+
+func retStruct() -> int { var p: Point; return sizeof p; }
+func retField() -> int { var p: Point; return sizeof p.x; }
+func retSum() -> int { var p: Point; return sizeof p + sizeof p.x; }
+func retOperandCall() -> int { return sizeOfPair(); }
+
+func main() -> int {
+  var i: int = 3;
+  var c: char = 'a';
+  var p: Point;
+  var al: Alias;
+  var w: Wide;
+  var arr: [int; 4];
+  var grid: [[u8; 2]; 3];
+  var pts: [Point; 2];
+  var ifaces: [Shape; 2];
+  var ptr: *int = &i;
+  var fnv: fn() -> int = bump;
+  var sl: string = "abcd";
+  var np: *Sq = new Sq(3);
+  var sq: Sq = *np;
+
+  // A struct value and a struct expression.
+  if (sizeof p != 8) { return 1; }
+  if (sizeof p.x != 4) { return 2; }
+  if (sizeof(Alias) != 8) { return 3; }         // alias spelling, same layout
+  if (sizeof al != sizeof(Alias)) { return 4; }
+  if (sizeof w != 20) { return 5; }
+  if (sizeof wide() != 20) { return 6; }      // call operand: struct return
+
+  // Scalars, pointers and the pointee.
+  if (sizeof i != 4) { return 7; }
+  if (sizeof c != 1) { return 8; }
+  if (sizeof ptr != 8) { return 9; }
+  if (sizeof *ptr != 4) { return 10; }
+  if (sizeof ptr + 0 != sizeof(*int)) { return 11; }
+
+  // Arrays: the whole value, an element, a row, a field, a struct element.
+  if (sizeof arr != 16) { return 12; }
+  if (sizeof arr[0] != 4) { return 13; }
+  if (sizeof grid != 6) { return 14; }
+  if (sizeof grid[0] != 2) { return 15; }     // a row is the inner array
+  if (sizeof grid[1][0] != 1) { return 16; }
+  if (sizeof pts != 16) { return 17; }
+  if (sizeof pts[1] != 8) { return 18; }
+  if (sizeof pts[0].y != 4) { return 19; }
+
+  // Interfaces: the 16-byte fat pointer, an element, and a dispatched call.
+  if (sizeof ifaces[0] != 16) { return 20; }
+  if (sizeof ifaces != 32) { return 21; }
+  if (sizeof np.area() != 4) { return 22; }
+  if (sizeof sl != sizeof(string)) { return 23; }
+  if (sizeof sl[0] != 1) { return 24; }       // a string element is a char
+
+  // Calls are measured, never run: no counter tick, no allocation.
+  if (sizeof bump() != 4) { return 25; }
+  if (sizeof grow() != 12) { return 26; }
+  if (sizeof identity(1) != 4) { return 27; }
+  // `new` is an expression producing a pointer, so the operand form
+  // measures the POINTER, not the object it would allocate.
+  if (sizeof new Sq(1) != sizeof(*Sq)) { return 28; }
+  if (calls != 0) { return 29; }
+
+  // Function values: a code pointer, whatever the signature.
+  if (sizeof fnv != 8) { return 30; }
+  if (sizeof bump != 8) { return 31; }
+  if (sizeof fnv != sizeof(fn() -> int)) { return 32; }
+
+  // Literals and constant operands fold to the same constants.
+  if (sizeof 42 != 4) { return 33; }
+  if (sizeof 'x' != 1) { return 34; }
+  if (sizeof true != 4) { return 35; }
+  if (sizeof "abcd" != 8) { return 36; }
+  if (sizeof [1, 2, 3] != 8) { return 37; }   // a list literal, not a type
+  if (sizeof Point{x: 1, y: 2} != 8) { return 38; }
+
+  // Prefix binding: postfix stays in the operand, a binary operator does not.
+  if (sizeof i + 100 != 104) { return 39; }
+  if (sizeof sizeof i != 4) { return 40; }
+  if (sizeof -i != 4) { return 41; }
+  if (sizeof np.side != 4) { return 42; }
+
+  // The parenthesized type form is untouched by any of the above.
+  if (sizeof(int) != 4 || sizeof(char) != 1 || sizeof(bool) != 4) { return 43; }
+  if (sizeof(Point) != 8 || sizeof(Wide) != 20) { return 44; }
+  if (sizeof([int; 4]) != 16 || sizeof([[u8; 2]; 3]) != 6) { return 45; }
+  if (sizeof(Shape) != 16 || sizeof(*int) != 8) { return 46; }
+  if (sizeof(fn(int) -> int) != 8 || sizeof(string) != 8) { return 47; }
+
+  // The result is a plain int, usable wherever a constant is.
+  var total: int = sizeof p + sizeof arr + sizeof ptr;
+  if (total != 32) { return 48; }
+  if (sizeof arr[sizeof i] != 4) { return 49; }   // operand used as an index
+
+  // An interface value in an array, dispatched after the measurements.
+  ifaces[0] = sq;
+  ifaces[1] = sq;
+  if (ifaces[1].area() != 9) { return 50; }
+
+  // A sizeof in return position: the value is an int, whatever the type
+  // visited before it was.
+  if (retStruct() != 8) { return 51; }
+  if (retType() != 8) { return 52; }
+  if (retField() != 4) { return 53; }
+  if (retOperandCall() != 8) { return 54; }
+  if (retSum() != 12) { return 55; }
+
+  // The sizes this program pins, printed for the expected-output file.
+  print("point="); printInt(sizeof p);
+  print(" wide="); printInt(sizeof w);
+  print(" int="); printInt(sizeof i);
+  print(" arr="); printInt(sizeof arr);
+  print(" grid="); printInt(sizeof grid);
+  print(" row="); printInt(sizeof grid[0]);
+  print(" iface="); printInt(sizeof ifaces[0]);
+  print(" ptr="); printInt(sizeof ptr);
+  print("\n");
+  print("literal="); printInt(sizeof 42);
+  print(" char="); printInt(sizeof 'x');
+  print(" string="); printInt(sizeof sl);
+  print(" fn="); printInt(sizeof fnv);
+  print(" structliteral="); printInt(sizeof Point{x: 1, y: 2});
+  print("\n");
+  print("sizeofcall="); printInt(sizeof bump());
+  print(" sizeofgrow="); printInt(sizeof grow());
+  print(" sizeofnew="); printInt(sizeof new Sq(1));
+  print(" sizeofmethod="); printInt(sizeof np.area());
+  print("\n");
+  print("calls="); printInt(calls);
+  print(" total="); printInt(total);
+  print(" precedence="); printInt(sizeof i + 100);
+  print("\n");
+  print("retstruct="); printInt(retStruct());
+  print(" rettype="); printInt(retType());
+  print(" retfield="); printInt(retField());
+  print(" retsum="); printInt(retSum());
+  print("\n");
+  return 0;
+}

@@ -1,0 +1,17 @@
+// CID-005/T7 fix round 2: a cyclic fn-type alias must terminate in
+// signature-alias resolution instead of overflowing the compiler stack.
+// Declaration, assignment, argument passing and an indirect call through
+// the alias compile and run on every backend.
+type F = fn(F) -> void;
+
+func noop(x: F) -> void { }
+func take(h: F) -> void { }
+
+func main() -> int {
+  var h: F = noop;
+  h = noop;
+  take(h);
+  take(noop);
+  h(noop);
+  return 0;
+}

@@ -1,0 +1,25 @@
+export interface Shape {
+  func area() -> int;
+  func kind() -> int;
+}
+
+export class Sq {
+  var s: int;
+  func init(v: int) -> void { this.s = v; }
+  func area() -> int { return this.s * this.s; }
+  func kind() -> int { return 1; }
+}
+
+export class Rect {
+  var w: int;
+  var h: int;
+  func init(a: int, b: int) -> void { this.w = a; this.h = b; }
+  func area() -> int { return this.w * this.h; }
+  func kind() -> int { return 2; }
+}
+
+// CIDER-BUG-080: the parameter is spelled with the module-local bare
+// interface name on purpose — callers may not import `Shape`, so the call
+// site must root the spelling in this defining module when it builds the
+// fat pointer's vtable label.
+export func areaOf(x: Shape) -> int { return x.area(); }

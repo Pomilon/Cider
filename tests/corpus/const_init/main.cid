@@ -1,0 +1,22 @@
+var A: u32 = (1 << 4) as u32;
+var B: u32 = (0x10 | 0x20) as u32;
+var C: u32 = (0x10 & 0x30) as u32;
+var D: u32 = (0x10 ^ 0x20) as u32;
+var E: u32 = (~0x10 & 0xFF) as u32;
+var F: u64 = (1 as u64) << 40;
+var G: u64 = ((1 << 4) + 2 * 3) as u64;
+var H: u32 = (100 / 4) as u32;
+var I: u32 = (100 % 7) as u32;
+
+func main() -> int {
+  if (A != 16) { return 1; }
+  if (B != 48) { return 2; }
+  if (C != 16) { return 3; }
+  if (D != 48) { return 4; }
+  if (E != 239) { return 5; }
+  if (F != ((1 as u64) << 40)) { return 6; }
+  if (G != 22) { return 7; }
+  if (H != 25) { return 8; }
+  if (I != 2) { return 9; }
+  return 0;
+}

@@ -1,0 +1,21 @@
+// CIDER-BUG-193 regression: std.map new_map must handle a nilPtr refusal
+// from std.alloc.malloc instead of clearing through nil.
+//
+// sizeof(Entry<int, Big>) is just over 64 MiB, so the initial bucket array
+// (16 entries) exceeds the 1 GiB malloc guard and is refused
+// deterministically WITHOUT allocating anything. Before the fix new_map
+// stored the nil array, set cap = 16, and died clearing entry 0 with a
+// misattributed `vm error: null pointer dereference`.
+//
+// The stdlib OOM policy (see std.alloc.oom): `vm error: out of memory` on
+// stderr, exit 2 -- identical on VM unoptimized, VM optimized, and native.
+from std.map import new_map;
+
+struct Big {
+    var pad: [u8; 67108865];
+}
+
+func main() -> int {
+    var m: HashMap<int, Big> = new_map<int, Big>();
+    return 65;
+}

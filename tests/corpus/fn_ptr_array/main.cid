@@ -1,0 +1,22 @@
+func add(a: int, b: int) -> int { return a + b; }
+func sub(a: int, b: int) -> int { return a - b; }
+func mul(a: int, b: int) -> int { return a * b; }
+
+func main() -> int {
+  var table: [*func(int, int) -> int; 3] = new [*func(int, int) -> int; 3] { &add, &sub, &mul };
+  var acc: int = 0;
+  var i: int = 0;
+  while (i < 3) {
+    acc = acc + (*table[i])(10, 2);
+    i = i + 1;
+  }
+  if (acc != 12 + 8 + 20) { return 1; }
+  // Per-index identity: the sum alone is permutation-insensitive
+  // ([mul, sub, add] also sums to 40), so pin each element.
+  if ((*table[0])(10, 2) != 12) { return 2; }
+  if ((*table[1])(10, 2) != 8) { return 3; }
+  if ((*table[2])(10, 2) != 20) { return 4; }
+  table[1] = &add;
+  if ((*table[1])(1, 2) != 3) { return 5; }
+  return 0;
+}

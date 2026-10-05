@@ -1,0 +1,93 @@
+// CIDER-BUG-058: integer division and modulo by zero are DEFINED as 0 on
+// both backends (the VM already yielded 0; native x86 div/idiv raised
+// #DE/SIGFPE). Zero divisors held in variables exercise the runtime
+// zero-divisor guard instead of the constant fast path; every integer
+// width (i8/u8/i16/u16/i32/u32/i64/u64) and both signedness variants of
+// / and % are checked, plus unsigned values above 2^63.
+func main() -> int {
+  // i32 (32-bit signed path, cdq/idiv)
+  var z: int = 0;
+  var a: int = 5;
+  if (a / z != 0) { return 1; }
+  if (a % z != 0) { return 2; }
+  var neg: int = 0 - 5;
+  if (neg / z != 0) { return 3; }
+  if (neg % z != 0) { return 4; }
+
+  // u32 (32-bit unsigned path, xor edx/div)
+  var zu32: u32 = 0;
+  var au32: u32 = 4000000000;
+  if (au32 / zu32 != 0) { return 5; }
+  if (au32 % zu32 != 0) { return 6; }
+
+  // i64 (64-bit signed path, cqo/idiv)
+  var z64: i64 = 0;
+  var a64: i64 = -9223372036854775807;
+  if (a64 / z64 != 0) { return 7; }
+  if (a64 % z64 != 0) { return 8; }
+
+  // u64 (64-bit unsigned path, xor edx/div) with a dividend above 2^63
+  var zu64: u64 = 0;
+  var au64: u64 = 18446744073709551615;
+  if (au64 / zu64 != 0) { return 9; }
+  if (au64 % zu64 != 0) { return 10; }
+
+  // i16 (narrow signed path)
+  var z16: i16 = 0;
+  var a16: i16 = 0 - 30000;
+  if (a16 / z16 != 0) { return 11; }
+  if (a16 % z16 != 0) { return 12; }
+
+  // u16 (narrow unsigned path)
+  var zu16: u16 = 0;
+  var au16: u16 = 65000;
+  if (au16 / zu16 != 0) { return 13; }
+  if (au16 % zu16 != 0) { return 14; }
+
+  // i8 (narrow signed path)
+  var z8: i8 = 0;
+  var a8: i8 = 0 - 120;
+  if (a8 / z8 != 0) { return 15; }
+  if (a8 % z8 != 0) { return 16; }
+
+  // u8 (narrow unsigned path)
+  var zu8: u8 = 0;
+  var au8: u8 = 250;
+  if (au8 / zu8 != 0) { return 17; }
+  if (au8 % zu8 != 0) { return 18; }
+
+  // A zero divisor produced by assignment (not a literal initializer).
+  var zz: int = 1;
+  zz = zz - 1;
+  var b: int = 7;
+  if (b / zz != 0) { return 19; }
+  if (b % zz != 0) { return 20; }
+
+  // Compound forms share the same IR operation.
+  var c: int = 7;
+  c /= zz;
+  if (c != 0) { return 21; }
+  c = 7;
+  c %= zz;
+  if (c != 0) { return 22; }
+
+  // A literal zero divisor (the AST folder refuses to fold it).
+  if (5 / 0 != 0) { return 23; }
+  if (5 % 0 != 0) { return 24; }
+
+  // Nonzero variable divisors still compute normally (guard is not a
+  // blanket zeroing of division).
+  var n: int = 3;
+  if (b / n != 2) { return 25; }
+  if (b % n != 1) { return 26; }
+  // A known-nonzero constant divisor keeps the unguarded fast path and
+  // still computes (AST folding does not see it: the dividend is a var).
+  if (b / 5 != 1) { return 27; }
+  if (b % 5 != 2) { return 28; }
+  var n64: u64 = 10;
+  var d64: u64 = 18446744073709551615;
+  if (d64 / n64 != 1844674407370955161) { return 29; }
+  if (d64 % n64 != 5) { return 30; }
+
+  return 0;
+}

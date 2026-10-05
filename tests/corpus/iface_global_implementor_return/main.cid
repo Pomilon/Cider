@@ -1,0 +1,252 @@
+// CIDER-BUG-221: a GLOBAL concrete implementor returned through an
+// interface-typed method must behave exactly like a local one — correct
+// vtable word, correct data word, no crash, and ownership that leaves the
+// global itself alone.
+//
+// Root cause (a COMPILER crash, so all three backends die alike and no VM
+// accounting is involved): ir_gen fills `globalValues_` — the table every
+// global reference resolves its storage label through — as a SIDE EFFECT of
+// walking the declarations in SOURCE order, while the collector's symbol
+// table already holds every one of them. A function written ABOVE a
+// module-scope `var` therefore resolved the name to a symbol with no storage
+// behind it. A scalar read reported "cannot resolve identifier" (a clean
+// diagnostic for a program the checker had accepted); an AGGREGATE one — a
+// struct, class, array or interface value, the shapes visit(IdentifierExpr)
+// presents by address — fell through to getAddress(), which re-ran the very
+// same visit with isAddress_ set, failed identically and recursed until the
+// stack died. The ticket's repro is the interface-typed shape of that:
+// `func other() -> Other { return gOther; }` with `var gOther: OImpl;` below
+// it.
+//
+// The fix declares a module's own variable STORAGE before any of its function
+// bodies is generated (predeclareModuleStorage), so declaration order stops
+// deciding whether a program lowers at all, and stops visit(IdentifierExpr)
+// from re-entering itself when an address cannot be resolved (which turns any
+// remaining way into that state into the existing reported reference instead
+// of a crash). The boxing rules are unchanged: a returned concrete VALUE is
+// copied into a heap box whose header carries the release thunk and the
+// ownership token (CIDER-BUG-184), so the caller's fat pointer names the box
+// and the global is never aliased, never released and finalized once at
+// program exit.
+//
+// Everything the returning code names is declared BELOW it, which is the
+// order the checker accepts and the order the compiler used to die on. Pins,
+// on all three backends (VM unoptimized, VM optimized, native):
+//   * the ticket's repro: a global concrete returned through an interface
+//     METHOD, dispatched after the callee returned, next to the local
+//     implementor control that always worked;
+//   * the same global reached through a field of a global struct, an
+//     interface-typed GLOBAL field, an element of a global array, and an
+//     alias spelling of both the interface and the implementor;
+//   * the fat pointer crossing more than one interface-typed sret slot, so
+//     the box is claimed exactly once by the outermost holder;
+//   * the sibling reads that shared the crash: a global aggregate passed by
+//     value, a store into a global's field, `&g`, and a whole-aggregate read
+//     of a class value and of a fixed array;
+//   * ownership: the global's own field is intact and readable after the call
+//     (the callee copied it, it did not consume it), the caller's release runs
+//     the boxed copy's destructor exactly once, and the global is finalized
+//     exactly once at program exit;
+//   * 200 calls through a helper whose finalizer only COUNTS, so nothing
+//     grows — the per-call accounting is checked, and the leak-free property
+//     is pinned by the VM accounting in tests/unit/vm_iface_aggregate_box_test.cpp;
+//   * the same shapes across a module boundary (lib.cid), where the
+//     implementor is declared before the class that returns it (the order that
+//     always worked) and below it (the order that used to crash).
+import lib;
+from std.io import print, printInt;
+
+var drops: int = 0;
+
+interface Other {
+  func o() -> int;
+  func tag() -> int;
+}
+
+// The implementor whose finalizer REPORTS, so the trace shows which object
+// was finalized and when.
+class OImpl {
+  var v: int;
+  var pad: [u64; 4];
+  func o() -> int { return this.v; }
+  func tag() -> int { return 1; }
+  func ~OImpl() { drops = drops + 1; print("G"); }
+}
+
+// A second implementor whose finalizer only COUNTS, so the 200-call loop does
+// not fill the expected trace with 200 letters. The exact count is checked.
+class Quiet {
+  var s: int;
+  func o() -> int { return this.s; }
+  func tag() -> int { return 2; }
+  func ~Quiet() { drops = drops + 1; }
+}
+
+// Alias spellings of the implementor and of the interface.
+type QImpl = Quiet;
+type OA = Other;
+
+// A global struct carrying a concrete implementor by value, so a global read
+// through a field is pinned too.
+struct Holder { var impl: OImpl; var tag: int; }
+
+// --- the shapes the returning code names, all declared BELOW it -----------
+
+class Early {
+  // The ticket's repro: a GLOBAL concrete implementor returned through an
+  // interface-typed method.
+  func viaGlobal() -> Other { return gImpl; }
+  // The control: the same method returning a LOCAL implementor, boxed per
+  // CIDER-BUG-184.
+  func viaLocal() -> Other {
+    var t: OImpl;
+    t.v = 3;
+    return t;
+  }
+  // A global concrete reached through a field of a global struct.
+  func viaField() -> Other { return gHolder.impl; }
+  // An interface-typed GLOBAL field: the value was converted once, at its own
+  // declaration site, and is only ever copied here.
+  func viaIfaceField() -> Other { return gIface; }
+  // An element of a global array of implementors.
+  func viaElem() -> Other { return gArr[1]; }
+  // Alias spellings on both ends.
+  func viaAlias() -> OA { return gImpl; }
+  func viaAliasImpl() -> Other { return gQuiet; }
+  // The fat pointer crossing more than one interface-typed sret slot.
+  func hop0() -> Other { return this.hop1(); }
+  func hop1() -> Other { return gImpl; }
+  // The sibling reads that shared the crash.
+  func take(h: Holder) -> int { return h.impl.v + h.tag; }
+  func viaArg() -> int { return this.take(gHolder); }
+  func storeField() -> int {
+    gHolder.tag = 6;
+    gImpl.pad[0] = 7;
+    return gHolder.tag;
+  }
+  func viaAddr() -> int {
+    var p: *OImpl = &gImpl;
+    return p.v;
+  }
+  func wholeClass() -> int { var c: OImpl = gImpl; return c.v; }
+  func wholeStruct() -> int { var h: Holder = gHolder; return h.tag; }
+  func wholeArray() -> int { var a: [int; 3] = gInts; return a[2]; }
+  // A scalar global read above its declaration, the shape that used to report
+  // a clean "cannot resolve identifier" instead of crashing.
+  func scalarAbove() -> int { return gScalar; }
+}
+
+// --- the globals, declared after every use above --------------------------
+
+var gImpl: OImpl;
+var gQuiet: QImpl;
+var gHolder: Holder;
+var gIface: Other;
+var gArr: [OImpl; 2];
+var gInts: [int; 3];
+var gScalar: int;
+
+func main() -> int {
+  gImpl.v = 42;
+  gHolder.impl.v = 11;
+  gHolder.tag = 12;
+  gArr[1].v = 13;
+  gInts[2] = 14;
+  gScalar = 15;
+  gIface = gImpl;
+
+  var e: Early;
+
+  // --- the ticket's repro -------------------------------------------------
+  var a: Other = e.viaGlobal();
+  if (a.o() != 42) { return 1; }
+  if (a.tag() != 1) { return 2; }
+  // The local control, unchanged by the fix.
+  var l: Other = e.viaLocal();
+  if (l.o() != 3 || l.tag() != 1) { return 3; }
+
+  // --- the other shapes of a global concrete ------------------------------
+  var f: Other = e.viaField();
+  if (f.o() != 11 || f.tag() != 1) { return 4; }
+  var g: Other = e.viaIfaceField();
+  if (g.o() != 42 || g.tag() != 1) { return 5; }
+  var el: Other = e.viaElem();
+  if (el.o() != 13 || el.tag() != 1) { return 6; }
+  var al: OA = e.viaAlias();
+  if (al.o() != 42) { return 7; }
+  gQuiet.s = 16;
+  var ai: Other = e.viaAliasImpl();
+  if (ai.o() != 16 || ai.tag() != 2) { return 8; }
+
+  // --- more than one frame ------------------------------------------------
+  var h: Other = e.hop0();
+  if (h.o() != 42 || h.tag() != 1) { return 9; }
+
+  // --- the sibling reads that shared the crash ----------------------------
+  if (e.viaArg() != 23) { return 10; }
+  if (e.storeField() != 6) { return 11; }
+  if (e.viaAddr() != 42) { return 12; }
+  if (e.wholeClass() != 42) { return 13; }
+  if (e.wholeStruct() != 6) { return 14; }
+  if (e.wholeArray() != 14) { return 15; }
+  if (e.scalarAbove() != 15) { return 16; }
+
+  // --- ownership ----------------------------------------------------------
+  // The callee copied the global into a box (CIDER-BUG-184), so the global
+  // itself is untouched by any of the calls above and still readable and
+  // writable; its own finalizer runs exactly once, at program exit.
+  if (gImpl.v != 42 || gArr[1].v != 13) { return 17; }
+  gImpl.v = 43;
+  if (gImpl.v != 43) { return 18; }
+  gImpl.v = 42;
+
+  // Each call above returned a box the CALLER owns, and each is released at
+  // the end of the enclosing scope — after its last use, so the trailing run
+  // of letters in the expected trace is those releases followed by the four
+  // module-scope OImpl globals' own finalization at program exit. Nothing has
+  // been finalized YET except the temporaries that died with their own scope:
+  // the callee local of viaLocal, the by-value Holder argument of take, and
+  // the whole-aggregate copies of wholeClass/wholeStruct.
+  print("drops_before_loop=");
+  printInt(drops); print("\n");
+
+  // 200 calls through a helper whose finalizer only counts, so dispatch
+  // staying valid and exactly one release per call are both pinned by the
+  // number below. The global it copies is untouched (nothing grows, and its
+  // own single finalization still comes at exit).
+  var k: int = 0;
+  while (k < 200) {
+    var q: Other = e.viaAliasImpl();
+    if (q.o() != 16 || q.tag() != 2) { return 19; }
+    k = k + 1;
+  }
+  print("drops_after_loop=");
+  printInt(drops); print("\n");
+
+  // --- across a module boundary (lib.cid) ---------------------------------
+  lib.rImpl.v = 42;
+  lib.rArr[1].v = 21;
+  lib.seedIface();
+  var later: lib.RLater;
+  var ri: lib.ROther = later.viaImpl();
+  if (ri.o() != 42 || ri.tag() != 7) { return 20; }
+  var ri2: lib.ROther = later.viaImpl();
+  if (ri2.o() != 42) { return 21; }
+  var ri3: lib.ROther = later.viaIface();
+  if (ri3.o() != 42) { return 22; }
+  var ri4: lib.ROther = later.viaElem();
+  if (ri4.o() != 21) { return 23; }
+  var ri5: lib.ROther = later.viaLocal();
+  if (ri5.o() != 3) { return 24; }
+  // The order that always worked, in the same module.
+  lib.rImplFirst.v = 24;
+  var first: lib.RFirst;
+  var rf: lib.ROther = first.other();
+  if (rf.o() != 24 || rf.tag() != 7) { return 25; }
+  // The imported module's global is a real object too: it took the value the
+  // entry file stored and handed back a dispatchable copy of it.
+  if (lib.rImpl.v != 42) { return 26; }
+
+  print("iface_global_implementor_return_ok\n");
+  return 0;
+}

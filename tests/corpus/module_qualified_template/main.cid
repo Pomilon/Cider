@@ -1,0 +1,112 @@
+// CIDER-BUG-073: module-qualified template instantiation `box.Box<int>`
+// must instantiate and behave exactly like the from-import bare spelling.
+// Positions covered: variable type, struct field, parameter, return type,
+// `new`, cast target, `sizeof`, array element, function-pointer signature
+// and non-int type arguments. All three backends must agree.
+import box;
+import wrap;
+from box import Box;
+from box import id;
+
+func readQ(p: *box.Box<int>) -> int { return p->v; }
+func readB(p: *Box<int>) -> int { return p->v; }
+
+struct Local {
+  var q: box.Box<char>;
+}
+
+func main() -> int {
+  // Variable declaration + field access through the qualified spelling.
+  var b: box.Box<int>;
+  b.v = 40;
+  b.tag = 1;
+  if (b.v + b.tag != 41) { return 1; }
+
+  // `new` on the qualified spelling, arrow access.
+  var p: *box.Box<int> = new box.Box<int>;
+  p->v = 2;
+  p->tag = 3;
+  if (p->v + p->tag != 5) { return 2; }
+
+  // Non-int type argument: char.
+  var c: box.Box<char>;
+  c.v = 'A';
+  if ((c.v as int) != 65) { return 3; }
+
+  // Struct field naming the qualified spelling, with a non-int argument.
+  var l: Local;
+  l.q.v = 'B';
+  if ((l.q.v as int) != 66) { return 4; }
+
+  // Multi-parameter template through the qualified spelling.
+  var pr: box.Pair<int, char>;
+  pr.a = 10;
+  pr.b = 'x';
+  if (pr.a + (pr.b as int) != 130) { return 5; }
+
+  // Qualified spellings in this file's parameter and return annotations.
+  if (readQ(p) != 2) { return 6; }
+  var rb: box.Box<int> = wrap.makeBox(9);
+  if (rb.v != 9 || rb.tag != 6) { return 7; }
+
+  // The module's own bare-spelling factory, accessed through a qualified
+  // pointer type.
+  var mb: *box.Box<int> = box.makeBox(7);
+  if (mb->v != 7 || mb->tag != 5) { return 8; }
+
+  // Qualified and bare spellings share one instantiation: assignment in
+  // both directions.
+  var shared: Box<int> = b;
+  if (readB(&shared) != 40) { return 9; }
+  if (readQ(&shared) != 40) { return 10; }
+
+  // Transitive module: wrap names box.Box<int> in its own signatures.
+  var h: wrap.Holder;
+  h.b.v = 12;
+  h.b.tag = 1;
+  h.p.a = 30;
+  h.p.b = '!';
+  if (wrap.readHolder(&h) != 12) { return 11; }
+  if (wrap.sumPair(&h.p) != 63) { return 12; }
+
+  // Cast target and sizeof resolve through the qualified spelling.
+  var arr: [int; 1];
+  arr[0] = 42;
+  var raw: *int = &arr[0];
+  if ((raw as *box.Box<int>)->v != 42) { return 13; }
+  if (sizeof(box.Box<int>) != 8) { return 14; }
+  if (sizeof(box.Box<char>) != 8) { return 15; }
+
+  // Array of a qualified instantiation.
+  var xs: [box.Box<int>; 2];
+  xs[0].v = 5;
+  xs[1].v = 6;
+  if (xs[0].v + xs[1].v != 11) { return 16; }
+
+  // Function-pointer signature naming the qualified instantiation.
+  var cb: fn(*box.Box<int>) -> int = nilPtr;
+  if (cb != nilPtr) { return 17; }
+
+  // CIDER-BUG-095: qualified function-template calls with explicit type
+  // arguments. The qualified and bare spellings share one instantiation
+  // (int and non-int type arguments alike).
+  var qi: int = box.id<int>(20);
+  var qc: char = box.id<char>('C');
+  var bc: char = id<char>(qc);
+  if (qi != 20 || (qc as int) != 67 || (bc as int) != 67) { return 18; }
+  if (id<int>(21) != 21) { return 19; }
+
+  // Qualified struct literal; identity with the bare literal both ways.
+  var ql: box.Box<int> = box.Box<int>{ v: 3, tag: 4 };
+  var bl: Box<int> = Box<int>{ v: 5, tag: 6 };
+  ql = bl;
+  bl = ql;
+  if (ql.v != 5 || ql.tag != 6 || bl.v != 5 || bl.tag != 6) { return 20; }
+
+  // Qualified spellings written in a module that imports box transitively.
+  if (wrap.readId(31) != 31) { return 21; }
+  var wl: box.Box<int> = wrap.makeLit(32);
+  if (wl.v != 32 || wl.tag != 9) { return 22; }
+
+  return 0;
+}

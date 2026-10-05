@@ -1,0 +1,18 @@
+// CID-003: storing a float constant into a global writes the IEEE-754 bit
+// pattern of the global's declared width. The VM used to force an I64
+// store for every global and write val.i, which is 0 for a float constant
+// (it carries only .f), so `g = 3.5` left the cell zeroed.
+var g: f64 = 2.5;
+var h: float = 1.5;
+var g_next: f64 = 0.0;
+
+func main() -> int {
+  if (g != 2.5) { return 1; }
+  g = 3.5;
+  if (g != 3.5) { return 2; }
+  h = 0.25;
+  if (h != 0.25) { return 3; }
+  g_next = 7.25;
+  if (g_next != 7.25) { return 4; }
+  return 0;
+}

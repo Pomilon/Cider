@@ -1,0 +1,18 @@
+// CIDER-BUG-175: non-template structs another module names through the
+// qualified literal spelling (`qlib.Holder{...}`), including array and
+// nested-struct fields.
+export struct Inner {
+  var v: int;
+}
+
+export struct Holder {
+  var x: int;
+  var cells: [int; 3];
+  var inner: Inner;
+}
+
+// The owner module's self-qualified spelling must resolve to the same
+// definitions the bare/from-import spelling names.
+export func makeHolder(n: int) -> Holder {
+  return qlib.Holder{ x: n, cells: [n, n + 1, n + 2], inner: qlib.Inner{ v: n * 10 } };
+}

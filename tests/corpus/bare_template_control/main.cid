@@ -1,0 +1,38 @@
+// CIDER-BUG-134 positive control: bare template spellings that name KNOWN
+// templates stay silent at the declaration. Covers a module-local template
+// used before its declaration (resolved by the collector's post-pass) and
+// a template reached through a from-import.
+from lib import Imported;
+
+func useForward() -> int {
+  var f: Forward<int>;
+  f.v = 41;
+  return f.v + 1;
+}
+
+func useLocal() -> int {
+  var l: Local<int>;
+  l.v = 7;
+  return l.v;
+}
+
+func useImported() -> int {
+  var i: Imported<int>;
+  i.v = 9;
+  return i.v;
+}
+
+struct Forward<T> {
+  var v: T;
+}
+
+struct Local<T> {
+  var v: T;
+}
+
+func main() -> int {
+  if (useForward() != 42) { return 1; }
+  if (useLocal() != 7) { return 2; }
+  if (useImported() != 9) { return 3; }
+  return 0;
+}

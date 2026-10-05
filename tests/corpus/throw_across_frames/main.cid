@@ -1,0 +1,124 @@
+// CIDER-BUG-053: exceptions must unwind across function-call boundaries and
+// land in the nearest enclosing try, on the VM (unopt/opt) and native.
+// Every check returns 0 (or a positive expected value) on success; any
+// failure propagates a nonzero exit code.
+
+func throwOne() -> int {
+    throw 11;
+}
+
+func throwTwo() -> int {
+    // The throw is raised two frames below the catcher.
+    return throwOne() + 100;
+}
+
+func catchOneFrame() -> int {
+    try {
+        var x: int = throwOne();
+        return 1;
+    } catch (e) {
+        if (e != 11) { return 2; }
+    }
+    // Execution continues after the catch.
+    return 0;
+}
+
+func catchTwoFrames() -> int {
+    try {
+        var x: int = throwTwo();
+        return 3;
+    } catch (e) {
+        if (e != 11) { return 4; }
+    }
+    return 0;
+}
+
+func precedingStatements() -> int {
+    var a: int = 5;
+    var b: int = 6;
+    try {
+        a = a + b;              // real work before the throw
+        if (a != 11) { return 5; }
+        throw a * 2;            // 22
+        return 6;
+    } catch (e) {
+        if (e != 22) { return 7; }
+        if (a != 11) { return 8; }
+    }
+    return 0;
+}
+
+func nestedTry() -> int {
+    var hits: int = 0;
+    try {
+        // The inner try catches first...
+        try {
+            throw 31;
+        } catch (e) {
+            if (e != 31) { return 9; }
+            hits = hits + 1;
+        }
+        // ...and a throw after it completed goes to the outer try.
+        throw 32;
+    } catch (e) {
+        if (e != 32) { return 10; }
+        hits = hits + 1;
+    }
+    return hits;
+}
+
+func rethrowFromCatch() -> int {
+    try {
+        try {
+            throw 61;
+        } catch (e) {
+            if (e != 61) { return 11; }
+            throw e + 1;        // rethrow: must reach the outer try
+        }
+    } catch (e2) {
+        if (e2 != 62) { return 12; }
+    }
+    return 0;
+}
+
+func returnFromTry() -> int {
+    try {
+        return 51;
+    } catch (e) {
+        return 52;
+    }
+}
+
+func afterCalleeTry() -> int {
+    try {
+        var x: int = returnFromTry();
+        if (x != 51) { return 13; }
+        // The callee's try is gone; this throw must reach this try.
+        throw 53;
+    } catch (e) {
+        if (e != 53) { return 14; }
+    }
+    return 0;
+}
+
+func continuation() -> int {
+    var after: int = 0;
+    try {
+        throw 41;
+    } catch (e) {
+        if (e != 41) { return 15; }
+    }
+    after = after + 1;
+    return after;
+}
+
+func main() -> int {
+    if (catchOneFrame() != 0) { return 1; }
+    if (catchTwoFrames() != 0) { return 2; }
+    if (precedingStatements() != 0) { return 3; }
+    if (nestedTry() != 2) { return 4; }
+    if (rethrowFromCatch() != 0) { return 5; }
+    if (afterCalleeTry() != 0) { return 6; }
+    if (continuation() != 1) { return 7; }
+    return 0;
+}

@@ -1,0 +1,241 @@
+// CIDER-BUG-077: interface-typed function and method returns.
+//
+// The returned value is the 16-byte fat pointer (data + vtable). It flows
+// through the same hidden-sret convention as by-value struct/array returns:
+// the caller allocates a 16-byte slot, passes its address first, and the
+// callee writes the fat pointer into it. The return position accepts:
+//   * an interface parameter/value (a fat-pointer copy),
+//   * a satisfying concrete class value (the object is BOXED — copied to a
+//     fresh heap slot so the caller's data pointer cannot address the dead
+//     callee frame),
+//   * a satisfying concrete pointer (the pointer becomes the data word).
+// The result is address-like: it can be assigned to an interface local,
+// dispatched on directly or after assignment, chained through another
+// interface-returning call, and passed as an interface argument.
+// `nilPtr` and mismatched interfaces are rejected by the shared interface
+// conversion rule (see tests/fixtures/check_iface_return_misuse.cid).
+import lib;
+
+interface Shape {
+  func area() -> int;
+  func kind() -> int;
+}
+
+class Sq {
+  var s: int;
+  func init(s: int) -> void { this.s = s; }
+  func area() -> int { return this.s * this.s; }
+  func kind() -> int { return 1; }
+}
+
+class Rect {
+  var w: int;
+  var h: int;
+  func init(w: int, h: int) -> void { this.w = w; this.h = h; }
+  func area() -> int { return this.w * this.h; }
+  func kind() -> int { return 2; }
+}
+
+// The identity case: return the interface parameter as-is.
+func id(x: Shape) -> Shape { return x; }
+
+// A satisfying concrete value: boxed at the return site.
+func makeSq(v: int) -> Shape {
+  var c: Sq;
+  c.init(v);
+  return c;
+}
+
+// A satisfying concrete pointer: becomes the fat pointer's data word.
+func makeRect(w: int, h: int) -> Shape {
+  var r: Rect* = new Rect(w, h);
+  return r;
+}
+
+// Chained returns: the result of another interface-returning call.
+func chain(v: int) -> Shape { return id(makeSq(v)); }
+func chain2(v: int) -> Shape { return id(id(makeSq(v))); }
+
+// Passing the returned value on as an interface argument.
+func areaOf(x: Shape) -> int { return x.area(); }
+
+// Recursion: every call gets its own caller slot.
+func pick(n: int) -> Shape {
+  if (n <= 0) { return makeSq(3); }
+  return pick(n - 1);
+}
+
+// A class method returning an interface (direct call).
+class Factory {
+  var base: int;
+  var inner: Sq;
+  func init(b: int) -> void { this.base = b; }
+  func mk(extra: int) -> Shape {
+    var c: Sq;
+    c.init(this.base + extra);
+    return c;
+  }
+  // A method returning another interface-returning call's result, and a
+  // method chaining through another method.
+  func mkFrom(v: int) -> Shape { return makeSq(v); }
+  func mkFrom2(v: int) -> Shape { return this.mkFrom(v); }
+  // A class-valued field returned as an interface is boxed like any other
+  // concrete value.
+  func wrap() -> Shape { return this.inner; }
+}
+
+// An interface method returning an interface (vtable dispatch): the
+// implementations are ordinary methods, emitted with the same sret
+// convention, and the dispatch site passes the caller slot.
+interface Maker {
+  func make(v: int) -> Shape;
+}
+
+class SqMaker {
+  var pad: int;
+  func make(v: int) -> Shape {
+    var c: Sq;
+    c.init(v);
+    return c;
+  }
+}
+
+class RectMaker {
+  var pad: int;
+  func make(v: int) -> Shape {
+    var r: Rect* = new Rect(v, v + 1);
+    return r;
+  }
+}
+
+// An imported interface in a return position: the qualified spelling keeps
+// the callee's module rooted at the call site.
+func mainMake(v: int) -> lib.Shape {
+  var c: Sq;
+  c.init(v);
+  return c;
+}
+
+// A class with an interface-typed field: a returned interface stored into
+// the field is a fat-pointer copy.
+class Box {
+  var sh: Shape;
+}
+
+// Reassigning the callee's own interface copy before returning it: the
+// caller's object and fat pointer must stay untouched.
+func retarget(x: Shape) -> Shape {
+  x = makeSq(11);
+  return x;
+}
+
+func main() -> int {
+  var sq: Sq;
+  sq.init(4);
+  var rc: Rect;
+  rc.init(2, 5);
+
+  // 1. Identity, both implementors.
+  var a: Shape = id(sq);
+  if (a.area() != 16) { return 1; }
+  var b: Shape = id(rc);
+  if (b.area() != 10) { return 2; }
+
+  // 2. Concrete value and concrete pointer returns.
+  var c: Shape = makeSq(5);
+  if (c.area() != 25 || c.kind() != 1) { return 3; }
+  var d: Shape = makeRect(3, 6);
+  if (d.area() != 18 || d.kind() != 2) { return 4; }
+
+  // 3. Chained returns, including a dispatch straight off the call.
+  var e: Shape = chain(6);
+  if (e.area() != 36) { return 5; }
+  var f: Shape = chain2(7);
+  if (f.area() != 49) { return 6; }
+  if (chain(8).area() != 64) { return 7; }
+
+  // 4. Assignment to a variable, then dispatch; reassignment to a second
+  //    implementor refreshes both words.
+  var g: Shape = sq;
+  g = makeSq(9);
+  if (g.area() != 81) { return 8; }
+  g = rc;
+  if (g.area() != 10 || g.kind() != 2) { return 9; }
+  g = makeRect(4, 5);
+  if (g.area() != 20) { return 10; }
+
+  // 5. Passing the returned value to another function.
+  if (areaOf(makeSq(8)) != 64) { return 11; }
+  if (areaOf(id(sq)) != 16) { return 12; }
+  if (areaOf(chain(2)) != 4) { return 13; }
+  if (id(makeSq(10)).area() != 100) { return 14; }
+
+  // 6. Two implementors flowing through the same return path.
+  var i: Shape = makeSq(2);
+  var j: Shape = makeRect(2, 3);
+  if (i.area() + j.area() != 10) { return 15; }
+  if (i.kind() * 10 + j.kind() != 12) { return 16; }
+
+  // 7. Recursion.
+  if (pick(0).area() != 9) { return 17; }
+  if (pick(5).area() != 9) { return 18; }
+
+  // 8. Class method returning an interface (direct call), including a
+  //    class-valued field.
+  var fac: Factory;
+  fac.init(10);
+  if (fac.mk(5).area() != 225) { return 19; }
+  if (fac.mk(0).area() != 100) { return 20; }
+  fac.inner.init(13);
+  if (fac.wrap().area() != 169) { return 21; }
+  if (fac.mkFrom(4).area() != 16) { return 37; }
+  if (fac.mkFrom2(5).area() != 25) { return 38; }
+
+  // 9. Interface method returning an interface (vtable dispatch), two
+  //    implementors, and the result passed on as an argument.
+  var sm: SqMaker;
+  var m1: Maker = sm;
+  if (m1.make(9).area() != 81) { return 22; }
+  var rm: RectMaker;
+  var m2: Maker = rm;
+  if (m2.make(4).area() != 20) { return 23; }
+  if (areaOf(m1.make(3)) != 9) { return 24; }
+
+  // 10. Returning a retargeted interface parameter; the caller is untouched.
+  if (retarget(sq).area() != 121) { return 25; }
+  if (sq.area() != 16) { return 26; }
+
+  // 11. Copying a returned interface into another variable keeps both valid.
+  var holder: Shape = makeSq(12);
+  var again: Shape = holder;
+  if (again.area() != 144 || holder.area() != 144) { return 27; }
+
+  // 12. Cross-module: imported functions returning an imported interface,
+  //     and a main-file implementor returned through a qualified type.
+  var q: lib.Shape = lib.id(lib.make(4));
+  if (q.area() != 16) { return 28; }
+  if (lib.areaOf(lib.make(5)) != 25) { return 29; }
+  if (lib.id(lib.make(6)).area() != 36) { return 30; }
+  var q2: lib.Shape = mainMake(6);
+  if (q2.area() != 36) { return 31; }
+  if (lib.areaOf(mainMake(8)) != 64) { return 32; }
+  var q3: lib.Shape = mainMake(2);
+  q3 = lib.make(3);
+  if (q3.area() != 9) { return 33; }
+
+  // 13. A returned interface stored into an interface-typed field (a
+  //     fat-pointer copy), then reassigned to a second implementor.
+  //     NOTE: calling an aggregate-returning function from inside a loop
+  //     body is a pre-existing PostLicm limitation (it hoists the sret
+  //     call's MEMCPY/LOADs out of the loop for struct returns too), so
+  //     the repeated-call coverage is unrolled rather than looped.
+  var bx: Box;
+  bx.sh = makeSq(3);
+  if (bx.sh.area() != 9) { return 34; }
+  bx.sh = makeRect(2, 7);
+  if (bx.sh.area() != 14) { return 35; }
+  bx.sh = makeSq(4);
+  if (bx.sh.area() != 16) { return 36; }
+
+  return 0;
+}

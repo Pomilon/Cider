@@ -1,0 +1,34 @@
+// CIDER-BUG-015: `type X = T` aliases must be transparent in the
+// member-access read path. Before the fix, scalar alias fields read the
+// low 32 bits of the field's ADDRESS, pointer alias fields compared
+// non-nil garbage, and alias-to-struct member access crashed the checker.
+type W = u64;
+type H = *void;
+struct Inner { var a: u32; var b: u32; }
+type IA = Inner;
+
+struct S { var w: W; var h: H; var i: IA; }
+
+from std.io import printInt, print;
+
+func main() -> int {
+  var s: S;
+  s.w = 5;
+  printInt(s.w as int); print("\n");
+
+  s.h = nilPtr;
+  if (s.h != nilPtr) return 1;
+  s.h = &s;
+  if (s.h == nilPtr) return 2;
+  if (s.h != &s) return 3;
+
+  s.i.a = 7;
+  s.i.b = 8;
+  printInt(s.i.a as int); print("\n");
+  printInt(s.i.b as int); print("\n");
+
+  var l: IA;
+  l.a = 9;
+  printInt(l.a as int); print("\n");
+  return 0;
+}

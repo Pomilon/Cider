@@ -1,0 +1,17 @@
+from std.io import printFloat, printF64, print, printInt;
+
+func main() -> int {
+  printF64(2.5); print("\n");
+  printF64(-1.25); print("\n");
+  printF64(1.2345678); print("\n");   // 7th digit truncates, never rounds
+  printF64(-0.0000001); print("\n");  // sign survives, fraction truncates to zero
+  printF64(-0.0); print("\n");        // -0.0 < 0.0 is false: no sign
+  printF64(0.0); print("\n");
+  printF64(10.0); print("\n");
+  printF64(16777217.0); print("\n");   // exact double, rounds in f32
+  var f: float = 16777217.0;           // implicit narrowing to 32 bits
+  printFloat(f); print("\n");
+  printFloat(1.5); print("\n");
+  printInt(7); print("\n");
+  return 0;
+}

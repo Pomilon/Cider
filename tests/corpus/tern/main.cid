@@ -1,0 +1,13 @@
+func main() -> int {
+  var x: int = 5;
+  var y: int = x > 3 ? 10 : 20;
+  if (y != 10) { return 1; }
+  var z: int = x < 3 ? 10 : 20;
+  if (z != 20) { return 2; }
+  var shift: bool = true;
+  var c: char = shift ? 'A' : 'a';
+  if (c != 'A') { return 3; }
+  var m: int = x < 10 ? (x > 3 ? 100 : 200) : 300;
+  if (m != 100) { return 4; }
+  return 0;
+}

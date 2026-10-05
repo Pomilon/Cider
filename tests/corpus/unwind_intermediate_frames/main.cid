@@ -1,0 +1,203 @@
+// CIDER-BUG-190: a throw raised in a callee must run the pending scope
+// exits of every frame it passes through on the way to the handler —
+// innermost frame first, and exactly the exits a `return` at the same
+// point would have run (defers first, then destructors, innermost first).
+// Before the fix the longjmp landed straight in the handler frame and the
+// crossed frames were already gone, so their destructors, defer bodies and
+// interface-box releases never ran.
+//
+// The frame crossing the throw carries a landing pad: a _setjmp installed
+// around the throwing-capable call, whose target runs the frame's pending
+// exits and re-throws outward. The cases below pin, on all three backends
+// (VM unoptimized, VM optimized, native):
+//
+//   one()    one crossed frame: a local, a struct and a class local with
+//            embedded class values, and a defer that reads a local — the
+//            full CIDER-BUG-154 exit order (defers first, then
+//            destructors, innermost first)
+//   f3()     three crossed frames, deepest local first (11, 12, 13)
+//   loopCase a call site inside a loop: the interrupted iteration's copy
+//            finalizes before the loop's own scopes (32, 31, 30, 20)
+//   phiCase  a call site whose result feeds a branch join, i.e. the block
+//            the landing splits carries a successor PHI
+//   boxFrame an interface-boxed local released at the landing
+//   twoCalls two throwing-capable call sites in one function, one per arm
+//   deferBranch
+//            a defer body with a branch and a loop, so the landing spans
+//            several blocks and its last one must branch to the re-throw
+//   fromCatch a throw from inside a catch body (the handler pointer was
+//            already restored, so the whole frame unwinds)
+//   handlerBody the handler frame's own try body, which the callee's throw
+//            reaches through the landing
+//   noExits  a frame with nothing pending at the call site: no landing is
+//            built, and the trace is the catch alone
+//   guard    the boundary: a scope that has ALREADY exited before the
+//            crossing is not finalized twice (drops stays 0 for it)
+from std.io import print, printInt;
+
+var drops: int = 0;
+
+class D {
+    var label: int;
+    func ~D() {
+        drops = drops + 1;
+        printInt(this.label);
+        print(",");
+    }
+}
+
+struct SW { var d: D; }
+class Pair { var a: D; var b: D; }
+
+interface Shape { func area() -> int; }
+class Sq {
+    var s: int;
+    var inner: D;
+    func area() -> int { return this.s * this.s; }
+    func ~Sq() {
+        drops = drops + 1;
+        print("S");
+        printInt(this.s);
+        print(",");
+    }
+}
+
+func makeSq(v: int) -> Shape {
+    var c: Sq;
+    c.s = v;
+    c.inner.label = v;
+    return c;
+}   // the callee's own Sq and inner D die here: S50,50,
+
+func boom() -> int { throw 7; }
+
+func one() -> int {
+    var a: D; a.label = 1;
+    var s: SW; s.d.label = 2;
+    var p: Pair; p.a.label = 3; p.b.label = 4;
+    // A defer body that READS a local: the landing's exit code is generated
+    // while the frame's scope is still live, so the read resolves to this
+    // frame's slot (42), not to a dead one.
+    var seen: int = 42;
+    defer { print("d"); printInt(seen); print(";"); }
+    return boom();
+}
+
+func f1() -> int { var a: D; a.label = 11; return boom(); }
+func f2() -> int { var b: D; b.label = 12; return f1(); }
+func f3() -> int { var c: D; c.label = 13; return f2(); }
+
+// A defer body that opens blocks of its own (a branch and a loop), so the
+// landing is a chain of blocks rather than one straight-line run, and its
+// last block has to branch to the re-throw rather than fall into it: the VM
+// ends a frame at a block whose last instruction is not a branch, where
+// codegen reads a fallthrough.
+func deferBranch(c: int) -> int {
+    var m: D; m.label = 5;
+    var seen: int = 6;
+    defer {
+        if (c > 0) { print("B"); printInt(seen); print(";"); }
+        var i: int = 0;
+        while (i < 2) { printInt(i); i = i + 1; }
+    }
+    return boom();
+}
+
+func loopCase() -> void {
+    var out: D; out.label = 20;
+    var i: int = 0;
+    while (i < 5) {
+        var it: D; it.label = 30 + i;
+        if (i == 2) { boom(); }
+        i = i + 1;
+    }
+}
+
+func phiCase(c: int) -> int {
+    var a: D; a.label = 40;
+    var v: int = 0;
+    if (c > 0) { v = boom(); } else { v = 9; }
+    return v;
+}
+
+func boxFrame() -> int {
+    var s: Shape = makeSq(50);
+    var a: D; a.label = 51;
+    var area: int = s.area();
+    return boom() + area;
+}
+
+func twoCalls(c: int) -> int {
+    var a: D; a.label = 60;
+    var x: int = 0;
+    if (c > 0) { x = boom(); } else { x = one(); }
+    return x;
+}
+
+func fromCatch() -> int {
+    var a: D; a.label = 80;
+    try { boom(); } catch (e) { var c: D; c.label = 81; return boom(); }
+    return 0;
+}
+
+func handlerBody() -> void {
+    try {
+        var d: D; d.label = 90;
+        boom();
+        print("no;");
+    } catch (e) { print("B;"); }
+}
+
+// Nothing pending at the call site: the landing would have no exit to run,
+// so none is built and the catch runs alone.
+func noExits() -> int {
+    var i: int = 0;
+    if (i == 0) { return boom(); }
+    return 1;
+}
+
+// The boundary, first half: the block that ends BEFORE the crossing has
+// already run its own exits, so the landing must not run them again.
+func guard() -> int {
+    var gone: D; gone.label = 95;
+    {
+        var inBlock: D; inBlock.label = 96;
+    }   // 96 finalizes here, at the block's normal exit
+    var kept: D; kept.label = 97;
+    return boom();   // 97 only
+}
+
+func main() -> int {
+    try { one(); } catch (e) { print("A;"); }
+    print("|");
+    try { f3(); } catch (e) { print("A3;"); }
+    print("|");
+    try { loopCase(); } catch (e) { print("L;"); }
+    print("|");
+    try { phiCase(1); } catch (e) { print("P;"); }
+    print("|");
+    try { boxFrame(); } catch (e) { print("X;"); }
+    print("|");
+    try { twoCalls(1); } catch (e) { print("T;"); }
+    print("|");
+    try { twoCalls(0); } catch (e) { print("T0;"); }
+    print("|");
+    try { deferBranch(1); } catch (e) { print("C;"); }
+    print("|");
+    try { fromCatch(); } catch (e) { print("C;"); }
+    print("|");
+    handlerBody();
+    print("|");
+    try { noExits(); } catch (e) { print("N;"); }
+    print("|");
+    var before: int = drops;
+    try { guard(); } catch (e) { print("G;"); }
+    // Three finalizers: 96 at the block's own exit, then the landing's 97
+    // and 95. A landing that replayed the closed block's scope would make
+    // it four.
+    if (drops - before != 3) { return 1; }
+    print("|drops=");
+    printInt(drops);
+    print(";\n");
+    return 0;
+}

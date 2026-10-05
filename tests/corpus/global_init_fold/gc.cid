@@ -1,0 +1,5 @@
+// CIDER-BUG-048: cross-module constant folding. MK2 references MK, which is
+// not exported at the use site's scope; the folded value must still resolve
+// in this module's scope.
+export const MK: int = 11;
+export const MK2: int = MK * 2;

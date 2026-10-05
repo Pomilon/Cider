@@ -1,0 +1,202 @@
+// CIDER-BUG-088 regression: an aggregate with embedded class-value
+// subobjects must run the embedded classes' destructors when it leaves
+// scope, exactly like a direct class-value local. The traversal mirrors the
+// CIDER-BUG-082/087 initializer recursion (class fields, struct fields and
+// fixed arrays of class/struct values), on all three backends (VM unopt,
+// VM optimized, native).
+//
+// Ordering documented and pinned by this test:
+//   * locals in a scope are destroyed in reverse declaration order (LIFO);
+//   * within one aggregate the class's own destructor runs first (its body
+//     may still read the subobjects), then every embedded class value in
+//     reverse declaration order, with array elements destroyed last-index
+//     first and nested aggregates recursing the same way. That is the exact
+//     reverse of construction (embedded initializers run in declaration
+//     order, then the class body).
+// Pointers, slices, interfaces and `new`/`delete` targets are out of scope
+// (the direct value case for them is unchanged).
+//
+// Each `Dropper` prints its label from its destructor, so the whole trace is
+// the destruction order. `drops` asserts the total count (no missing or
+// double finalizers).
+from std.io import print, printInt;
+
+var drops: int = 0;
+
+class Dropper {
+    var label: int;
+    func ~Dropper() {
+        drops = drops + 1;
+        printInt(this.label);
+        print(",");
+    }
+}
+
+// Direct class field (the ticket's shape: Outer embeds Inner, Outer has no
+// destructor of its own).
+class Pair {
+    var first: Dropper;
+    var second: Dropper;
+}
+
+// A class with its own destructor embedding class values: the body runs
+// before the members.
+class Holder {
+    var a: Dropper;
+    var b: Dropper;
+    func ~Holder() {
+        print("H,");
+    }
+}
+
+// Nested embedding: a class value inside a class value.
+class Nest {
+    var inner: Holder;
+    var tail: Dropper;
+}
+
+// Structs embed class values by value too.
+struct SWrap {
+    var d: Dropper;
+    var pad: int;              // no initializer: stays zero
+}
+
+// A struct nesting another struct and an array of class values.
+struct SNested {
+    var wrap: SWrap;
+    var arr: [Dropper; 2];
+}
+
+// An alias is the same class/struct value.
+type Alias = Dropper;
+type StructAlias = SWrap;
+
+// Own destructor only: the pre-existing direct-local behaviour (control).
+class Solo {
+    func ~Solo() {
+        print("S,");
+    }
+}
+
+func scopePair() -> void {
+    var p: Pair;
+    p.first.label = 1;
+    p.second.label = 2;
+}   // expected: 2,1,
+
+func scopeNest() -> void {
+    var n: Nest;
+    n.inner.a.label = 1;
+    n.inner.b.label = 2;
+    n.tail.label = 3;
+}   // expected: 3,H,2,1,  (tail, then Holder body, then inner members reversed)
+
+func scopeStruct() -> void {
+    var s: SWrap;
+    s.d.label = 4;
+}   // expected: 4,
+
+func scopeStructAlias() -> void {
+    var s: StructAlias;
+    s.d.label = 5;
+}   // expected: 5,
+
+func scopeSNested() -> void {
+    var s: SNested;
+    s.wrap.d.label = 6;
+    s.arr[0].label = 7;
+    s.arr[1].label = 8;
+}   // expected: 8,7,6,  (arr last-to-first, then wrap.d)
+
+func scopeArray() -> void {
+    var a: [Dropper; 3];
+    a[0].label = 9;
+    a[1].label = 10;
+    a[2].label = 11;
+}   // expected: 11,10,9,
+
+func scopeAlias() -> void {
+    var d: Alias;
+    d.label = 12;
+}   // expected: 12,
+
+func scopeLocals() -> void {
+    var x: Dropper;
+    x.label = 13;
+    var y: Dropper;
+    y.label = 14;
+}   // expected: 14,13,
+
+func scopeBlock() -> void {
+    {
+        var b: Pair;
+        b.first.label = 15;
+        b.second.label = 16;
+    }   // expected: 16,15, at block exit
+    var d: Dropper;
+    d.label = 17;
+}   // then: 17,
+
+func scopeReturn() -> int {
+    var p: Pair;
+    p.first.label = 18;
+    p.second.label = 19;
+    return 0;
+}   // expected: 19,18, before returning
+
+func scopeLoop() -> int {
+    var i: int = 0;
+    while (i < 2) {
+        var p: Pair;
+        p.first.label = 20 + i * 2;
+        p.second.label = 21 + i * 2;
+        i = i + 1;
+    }
+    return 0;
+}   // expected: 21,20,23,22, (each iteration's aggregate dies at its end)
+
+func scopeBreak() -> int {
+    var i: int = 0;
+    while (true) {
+        var p: Pair;
+        p.first.label = 24;
+        p.second.label = 25;
+        break;
+    }
+    return 0;
+}   // expected: 25,24,
+
+func scopeCopy() -> void {
+    // An aggregate initialized by a copy still owns its embedded subobjects.
+    var a: Pair;
+    a.first.label = 30;
+    a.second.label = 31;
+    var b: Pair = a;
+    b.first.label = 32;
+    b.second.label = 33;
+}   // expected: 33,32,31,30,
+
+func scopeSolo() -> void {
+    var s: Solo;
+}   // expected: S,
+
+func main() -> int {
+    scopePair();
+    scopeNest();
+    scopeStruct();
+    scopeStructAlias();
+    scopeSNested();
+    scopeArray();
+    scopeAlias();
+    scopeLocals();
+    scopeBlock();
+    scopeReturn();
+    scopeLoop();
+    scopeBreak();
+    scopeCopy();
+    scopeSolo();
+    print("\n");
+    if (drops != 31) { return 1; }
+    print("embedded_class_destructors_ok\n");
+    return 0;
+}

@@ -1,0 +1,289 @@
+// CIDER-BUG-202: the interface ELEMENTS of a returned fixed array get the
+// same boxing/ownership treatment a whole-value interface return already
+// had (CIDER-BUG-077/184).
+//
+// CIDER-BUG-077 boxes a concrete value at a whole-value interface RETURN,
+// because the frame address the fat pointer would name dies with the frame;
+// CIDER-BUG-184 gave that box a header (a type-erased release thunk plus an
+// ownership token) and made the box the CALLER's temporary, released after
+// its last use at the exit of the caller's enclosing scope. A returned array
+// had neither step: the sret copy moved the fat pointers verbatim, so an
+// element converted from a concrete value in the callee still pointed at
+// the callee's stack slot. Dispatch then read the dead slot — a nil frame
+// slot reads as a zeroed object — so `b[0].area()` returned 0 instead of 9.
+// Moving the implementor to a global made the repro work, which is what
+// identified the data word as the frame address.
+//
+// The return site now boxes every element the same way, in the caller's sret
+// slot (the storage that outlives the frame), and the call site claims each
+// box and releases it at its scope exit. Covered here on all three backends
+// (VM unopt, VM optimized, native):
+//
+//   * the ticket repro itself — a local implementor, dispatched after the
+//     callee returns, with a global implementor as the control that worked
+//     before the fix;
+//   * the release: the boxed copy's destructor runs at the caller's scope
+//     exit, after the last use, and NOT before it (the callee's own local
+//     finalizer runs at the callee's return, so `drops` counts both);
+//   * embedded finalizers inside the boxed value (own destructor first, then
+//     the class-valued field — CIDER-BUG-088 order);
+//   * several implementors in one array, distinguished through dispatch (a
+//     per-type box is selected from the element's own vtable word, so a wrong
+//     size or thunk fails visibly rather than silently);
+//   * nested rows (`[[Shape; 2]; 2]`), whose LEAVES are boxed, alias
+//     spellings of the array type, a return-position list literal, and a
+//     returned call result;
+//   * a pass-through array return and a parameter round-trip: one box,
+//     several caller temporaries, released exactly once by the last holder;
+//   * an element that is already a CIDER-BUG-184 box (from an inner
+//     interface-returning call) is handed over rather than re-boxed, and an
+//     element backed by a heap object is copied, not freed;
+//   * a zeroed, never-assigned element is left alone;
+//   * 200 calls in a loop: dispatch stays valid and nothing grows (the
+//     leak-free property is pinned by VM allocation accounting in
+//     tests/unit/vm_iface_box_test.cpp).
+from std.io import print, printInt;
+
+var drops: int = 0;
+
+interface Shape {
+  func area() -> int;
+  func kind() -> int;
+}
+
+class Sq {
+  var side: int;
+  var pad: [u64; 8];
+  func area() -> int { return this.side * this.side; }
+  func kind() -> int { return 1; }
+  func ~Sq() { drops = drops + 1; print("S"); }
+}
+
+class Rect {
+  var w: int;
+  var h: int;
+  func area() -> int { return this.w * this.h; }
+  func kind() -> int { return 2; }
+  func ~Rect() { drops = drops + 1; print("R"); }
+}
+
+// An embedded class value with its own finalizer: the box release must run
+// it too, own destructor first (CIDER-BUG-088 order). It counts SILENTLY —
+// the embedded finalizer's identity is pinned by the `label` read back in
+// main, so a 200-iteration loop does not fill the expected trace with its
+// output.
+class Dropper {
+  var label: int;
+  func ~Dropper() { drops = drops + 1; }
+}
+
+class Wrap {
+  var w: int;
+  var d: Dropper;
+  func area() -> int { return this.w; }
+  func kind() -> int { return 3; }
+  func ~Wrap() { drops = drops + 1; print("W"); }
+}
+
+type Rows = [[Shape; 2]; 2];
+type Alias = [Shape; 2];
+
+// --- the ticket repro -------------------------------------------------------
+
+func localImpl() -> [Shape; 1] {
+  var s: Sq; s.side = 3;
+  var i: Shape = s;
+  var a: [Shape; 1] = [i];
+  return a;
+}
+
+var g: Sq;
+
+// The control that already worked before the fix: the data word names a
+// global, not a frame slot.
+func globalImpl() -> [Shape; 1] {
+  g.side = 3;
+  var i: Shape = g;
+  var a: [Shape; 1] = [i];
+  return a;
+}
+
+// --- shapes -----------------------------------------------------------------
+
+func twoImpls() -> [Shape; 2] {
+  var a: Sq; a.side = 3;
+  var b: Rect; b.w = 4; b.h = 5;
+  var ia: Shape = a; var ib: Shape = b;
+  var r: [Shape; 2] = [ia, ib];
+  return r;
+}
+
+func nestedRows() -> Rows {
+  var a: Sq; a.side = 2;
+  var b: Sq; b.side = 3;
+  var ia: Shape = a; var ib: Shape = b;
+  var r: Rows = [[ia, ib], [ib, ia]];
+  return r;
+}
+
+func viaAlias() -> Alias {
+  var a: Rect; a.w = 6; a.h = 7;
+  var ia: Shape = a;
+  var r: Alias = [ia, ia];
+  return r;
+}
+
+func literal() -> [Shape; 2] {
+  var a: Sq; a.side = 5;
+  var ia: Shape = a;
+  return [ia, ia];
+}
+
+func forward() -> [Shape; 2] { return twoImpls(); }
+
+func pass(x: [Shape; 2]) -> [Shape; 2] { return x; }
+
+func withEmbedded() -> [Shape; 1] {
+  var w: Wrap; w.w = 11; w.d.label = 4;
+  var i: Shape = w;
+  var r: [Shape; 1] = [i];
+  return r;
+}
+
+func innerBox() -> Shape {
+  var a: Sq; a.side = 9;
+  return a;             // CIDER-BUG-184 whole-value box
+}
+
+func passIface(x: Shape) -> Shape { return x; }
+
+// An element that is ALREADY a box (from the inner call, through a
+// pass-through that adds a second holder) must be handed over, not re-boxed.
+func alreadyBoxed() -> [Shape; 1] {
+  var j: Shape = passIface(innerBox());
+  var r: [Shape; 1] = [j];
+  return r;
+}
+
+// A zeroed array: every element's data AND vtable word is 0.
+func zeroed() -> [Shape; 1] {
+  var r: [Shape; 1];
+  return r;
+}
+
+// A second implementor whose destructors only COUNT, so the expected trace
+// carries no 200-character run of letters for the loop in main; the
+// per-call accounting is what the assertions there check.
+class Counter {
+  var s: int;
+  var d: Dropper;
+  func area() -> int { return this.s; }
+  func kind() -> int { return 4; }
+  func ~Counter() { drops = drops + 1; }
+}
+
+// The release must run the boxed copy's OWN destructor and its embedded
+// finalizer (CIDER-BUG-088 order: own first, then the class-valued field).
+func embedded() -> [Shape; 1] {
+  var c: Counter; c.s = 12; c.d.label = 41;
+  var i: Shape = c;
+  var r: [Shape; 1] = [i];
+  return r;
+}
+
+// The loop's implementor: no letter output, just the counter.
+func loopImpl() -> [Shape; 1] {
+  var c: Counter; c.s = 9; c.d.label = 0;
+  var i: Shape = c;
+  var r: [Shape; 1] = [i];
+  return r;
+}
+
+// An element backed by a heap object: the box is a COPY, so the original
+// object is neither freed by the release nor aliased by it.
+func heapBacked() -> [Shape; 1] {
+  var p: *Sq = new Sq;
+  p.side = 8;
+  var i: Shape = p;
+  var r: [Shape; 1] = [i];
+  return r;
+}
+
+func main() -> int {
+  // The repro: a local implementor, dispatched after the callee returned.
+  var b: [Shape; 1] = localImpl();
+  if (b[0].area() != 9) { return 1; }
+  if (b[0].kind() != 1) { return 2; }
+
+  // The control, unchanged by the fix.
+  var g1: [Shape; 1] = globalImpl();
+  if (g1[0].area() != 9) { return 3; }
+
+  // Several implementors: the per-element box must pick the right size and
+  // thunk from the element's own vtable, or the dispatch is wrong.
+  var t: [Shape; 2] = twoImpls();
+  if (t[0].area() != 9 || t[1].area() != 20) { return 4; }
+  if (t[0].kind() != 1 || t[1].kind() != 2) { return 5; }
+
+  // Nested rows: the leaves are boxed, not the rows.
+  var n: Rows = nestedRows();
+  if (n[0][0].area() != 4 || n[0][1].area() != 9) { return 6; }
+  if (n[1][0].area() != 9 || n[1][1].area() != 4) { return 7; }
+
+  // Alias spelling of the array type.
+  var al: Alias = viaAlias();
+  if (al[0].area() != 42 || al[1].area() != 42) { return 8; }
+
+  // A list literal directly in return position.
+  var lt: [Shape; 2] = literal();
+  if (lt[0].area() != 25 || lt[1].area() != 25) { return 9; }
+
+  // A returned call result, and a pass-through with an extra holder.
+  var fw: [Shape; 2] = forward();
+  if (fw[0].area() != 9 || fw[1].area() != 20) { return 10; }
+  var pt: [Shape; 2] = pass(t);
+  if (pt[0].area() != 9 || pt[1].area() != 20) { return 11; }
+
+  // An already-boxed element and a heap-backed one.
+  var ab: [Shape; 1] = alreadyBoxed();
+  if (ab[0].area() != 81) { return 12; }
+  var hb: [Shape; 1] = heapBacked();
+  if (hb[0].area() != 64) { return 13; }
+
+  // A zeroed, never-assigned element is returned as it is: the return site
+  // must not read a type descriptor through an element with no vtable (that
+  // would load from address 0). The element is copied out, not dispatched
+  // through — a method call on a NIL interface is a pre-existing gap,
+  // independent of array returns: `var z: [Shape; 1]; z[0].kind()` fails
+  // the same way with no return involved at all, because a nil interface
+  // has no vtable and the method slot loads as a nil function pointer.
+  var zr: [Shape; 1] = zeroed();
+  var zi: Shape = zr[0];
+  if (twoImpls()[0].area() != 9) { return 14; }
+
+  // The box release must run the boxed copy's own destructor AND the
+  // embedded class value's finalizer, and only after the value's last use
+  // (the count is unchanged between the call and the last dispatch below).
+  print("drops_at_embed=");
+  printInt(drops); print("\n");
+  var em: [Shape; 1] = embedded();
+  if (em[0].area() != 12 || em[0].kind() != 4) { return 16; }
+  print("drops_after_embed=");
+  printInt(drops); print("\n");
+
+  // 200 calls through a helper whose finalizers only COUNT, so the expected
+  // trace carries no 200-character run of letters. Each call contributes
+  // its callee local's finalizer and its box's, so the total is exact; the
+  // leak itself is pinned by the VM accounting in vm_iface_box_test.cpp.
+  var k: int = 0;
+  while (k < 200) {
+    var d: [Shape; 1] = loopImpl();
+    if (d[0].area() != 9) { return 15; }
+    k = k + 1;
+  }
+  print("drops_after_loop=");
+  printInt(drops); print("\n");
+
+  print("iface_array_return_boxing_ok\n");
+  return 0;
+}

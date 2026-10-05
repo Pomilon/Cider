@@ -1,0 +1,11 @@
+// CIDER-BUG-135: an exported interface (and a concrete implementor of it)
+// used as list-element types from another module, exercising the dotted and
+// from-alias spellings of the interface at the list sites.
+export interface Shape {
+  func area() -> int;
+}
+
+export class Sq {
+  var side: int;
+  func area() -> int { return this.side * this.side; }
+}

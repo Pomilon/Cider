@@ -1,0 +1,5 @@
+{
+  "stdout": "postinc 5006 x 6 p-is-cell 1 postinc 6007 x 7 preinc 8008 x 8 postdec 8007 x 7 predec 6006 x 6 p-is-cell 1\nplus 42 40 80 26 2 2 7 6 x 6 p-is-cell 1\nu8 255 u16 65535 u64 1:0 u64post 1:0 d64 0:-1 u64add 1:0 f64add 3.750000\nvolatile 71 v 71\nincElem 2003 e1 3 decElem 2002 e1 2 addElem 13 e2 13 e0 1 elem-is-cell 1\nincField 9010 fc 10 addField 15 tail 111 field-is-cell 1 incFieldOfPtr 101 pv 101\nincGlobal 41 gcell 41 addGlobal 45 gcell 45 gptr-is-cell 1\nstore 42 load 42\nderef incdec pointee ok\n",
+  "stderr": "",
+  "exit": 0
+}

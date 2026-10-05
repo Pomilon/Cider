@@ -1,0 +1,26 @@
+// CID-003 follow-up (M2): unary minus on a float literal folds to a
+// negative float constant. `0.0 - 0.1` used to run at f32 and a later f64
+// context could only widen the f32 result, so `var b: f64 = -0.1` was not
+// the nearest double to -0.1.
+var b: f64 = -0.1;
+var c: f64 = 0.1;
+var nf: float = -0.1;
+
+from std.io import printF64, printFloat, print;
+
+func main() -> int {
+  if (b != -c) { return 1; }
+  if (b != -0.1) { return 2; }
+  if (b == c) { return 3; }
+  // Positive controls: the same shapes must keep working without an f64
+  // context, and the f32 fold must stay f32.
+  var p: f64 = 0.1;
+  if (p != c) { return 4; }
+  if (c != 0.1) { return 5; }
+  if (nf != -0.1) { return 6; }
+  if (b + c != 0.0) { return 7; }
+  printF64(b); print("\n");
+  printF64(c); print("\n");
+  printFloat(nf); print("\n");
+  return 0;
+}

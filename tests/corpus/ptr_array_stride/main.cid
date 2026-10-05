@@ -1,0 +1,166 @@
+// CIDER-BUG-199 runtime half: `a[i]` on a pointer to a fixed array must step
+// by the ELEMENT, and nothing else.
+//
+// Split from the checker half (ptr_array_index) on purpose: every statement
+// here compiles on the pre-fix compiler too, because `a[i].label` is a
+// member access whose result type the checker never looked at. So this
+// program isolates the MEMORY miscompile from the typing one — the pre-fix
+// index scaled by getTypeSize(whole array), so
+//
+//   * `a[1].label` and `a[2].label` were written at offsets 12 and 24 of a
+//     12-byte D[3] block, i.e. past the end of the allocation (element 2
+//     landed in the guard tail of the shared block below, and in a
+//     separately allocated neighbour when the block was exact);
+//   * `delete a` still ran its finalizers at sizeof(D) — offsets 0, 4, 8 —
+//     so it reported labels nobody had written and never saw the ones that
+//     had been written; the two walks disagreed about the same three
+//     elements;
+//   * `a + 1` stepped by the array size, so it never agreed with `&a[1]`.
+//
+// Each shape is checked through a *int view of the SAME allocation (stride
+// 4, the reference stride, with no pointer-to-array involved) and through a
+// separately allocated neighbour block, so a wrong stride is caught even
+// when the neighbouring bytes happen to be writable.
+//
+// All three backends (VM unopt, VM optimized, native) must agree.
+from std.io import print, printInt;
+from std.alloc import malloc, free;
+
+var drops: int = 0;
+
+class D {
+    var label: int;
+    func ~D() {
+        drops = drops + 1;
+        printInt(this.label);
+        print(",");
+    }
+}
+
+type D3 = [D; 3];
+
+const GUARD: int = 123456789;
+
+func peek(block: *int, i: int) -> int {
+    return block[i];
+}
+
+// A 32-byte block: three 4-byte D elements and a 16-byte guard tail, so an
+// over-stride store shows up in the guard instead of silently landing in
+// unrelated heap.
+func withGuard() -> *D3 {
+    var block: *int = malloc(32) as *int;
+    block[3] = GUARD;
+    block[4] = GUARD;
+    block[5] = GUARD;
+    block[6] = GUARD;
+    return block as *D3;
+}
+
+func guardOf(a: *D3) -> int {
+    return peek(a as *int, 3);
+}
+
+// The array VALUE spelling, in a scope of its own so its three destructors
+// run at scope exit.
+func valueScope() -> void {
+    var v: D3;
+    v[0].label = 1;
+    v[1].label = 2;
+    v[2].label = 3;
+    printInt(v[0].label); print(",");
+    printInt(v[1].label); print(",");
+    printInt(v[2].label);
+    print(" dtor: ");
+}
+
+func main() -> int {
+    // --- 1. content + guard tail in one allocation ---------------------
+    var a: *D3 = withGuard();
+    if (a == nilPtr) { return 1; }
+    a[0].label = 10;
+    a[1].label = 11;
+    a[2].label = 12;
+    print("cells: ");
+    printInt(a[0].label); print(",");
+    printInt(a[1].label); print(",");
+    printInt(a[2].label);
+    print("\n");
+    print("guard: ");
+    printInt(guardOf(a)); print(",");
+    printInt(peek(a as *int, 4)); print(",");
+    printInt(peek(a as *int, 5)); print(",");
+    printInt(peek(a as *int, 6));
+    print("\n");
+    // delete walks the SAME three elements at sizeof(D): the labels it
+    // reports must be the ones written, in reverse.
+    print("dtor: ");
+    delete a;
+    print("\n");
+    if (drops != 3) { return 2; }
+    drops = 0;
+
+    // --- 2. an exactly-sized block and a separately allocated neighbour --
+    var n1: *D3 = malloc(12) as *D3;
+    if (n1 == nilPtr) { return 3; }
+    var n2: *D3 = malloc(12) as *D3;
+    if (n2 == nilPtr) { return 4; }
+    n2[0].label = 90;
+    n2[1].label = 91;
+    n2[2].label = 92;
+    n1[0].label = 80;
+    n1[1].label = 81;
+    n1[2].label = 82;
+    print("neighbours: ");
+    printInt(n1[0].label); print(",");
+    printInt(n1[1].label); print(",");
+    printInt(n1[2].label);
+    print(" / ");
+    printInt(n2[0].label); print(",");
+    printInt(n2[1].label); print(",");
+    printInt(n2[2].label);
+    print("\n");
+    free(n1 as *void);
+    free(n2 as *void);
+
+    // --- 3. pointer arithmetic steps by the element ---------------------
+    // `at1` must be the same cell as `a[1]`: writing through it has to be
+    // visible in the indexed read and vice versa.
+    var b: *D3 = withGuard();
+    if (b == nilPtr) { return 5; }
+    // `b + 1` must be the same cell as `b[1]`, so a write through the
+    // arithmetic pointer is visible in the indexed read (and the other way
+    // round). With the array-sized stride these are different words.
+    var at1: *D3 = b + 1;
+    at1[0].label = 41;
+    b[1].label = 42;
+    var at2: *D3 = b + 2;
+    at2[0].label = 43;
+    b[2].label = 44;
+    print("stride: ");
+    printInt(b[1].label); print(",");   // 42: seen through the indexed read
+    printInt(at1[0].label); print(","); // 42: same cell
+    printInt(b[2].label); print(",");   // 44
+    printInt(at2[0].label);            // 44
+    print("\n");
+    if (b[1].label != 42 || at1[0].label != 42 ||
+        b[2].label != 44 || at2[0].label != 44) { return 6; }
+    print("stride guard: ");
+    printInt(guardOf(b));
+    print("\n");
+    if (guardOf(b) != GUARD) { return 7; }
+    free(b as *void);
+
+    // --- 4. the array VALUE spelling this ticket must not change -------
+    // A value-scoped array of the same three elements: its destructors run
+    // at scope exit at the same sizeof(D) stride, so the stack and the heap
+    // walks report alike.
+    print("value: ");
+    valueScope();
+    print("\n");
+    if (drops != 3) { return 8; }
+    drops = 0;
+
+    print("ptr_array_stride_ok\n");
+    return 0;
+}

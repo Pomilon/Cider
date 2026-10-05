@@ -1,0 +1,102 @@
+// CIDER-BUG-184: a concrete struct/class value returned as an interface is
+// boxed — the fat pointer's data word must not address the callee frame,
+// which dies on return. The box is the CALLER's own temporary: it is
+// released at the exit of the scope enclosing the call, with the
+// CIDER-BUG-088 finalizer order (own destructor first, embedded class
+// values in reverse construction order) and then the heap block goes back.
+// The concrete type is not statically known at the call site, so the release
+// is type-erased through a thunk the boxing return recorded in the box
+// header.
+//
+// The trace pins both scopes:
+//   * the callee's returned local finalizes at its own return, before the
+//     caller continues (S1,i11, then A ...);
+//   * the caller's box copy finalizes at the caller's scope exit, after the
+//     caller's later statements (the last three pairs, after the newline);
+//   * a pass-through chain (chain -> pass -> makeSq) transfers one box
+//     between interface returns and releases it exactly once;
+//   * a pointer source (makePtr) allocates no box and finalizes nothing;
+//   * a loop releases each iteration's box at the body's scope exit.
+// All three backends must agree byte for byte (run_tests).
+from std.io import print, printInt;
+
+var drops: int = 0;
+
+class Inner {
+  var n: int;
+  func ~Inner() {
+    drops = drops + 1;
+    print("i");
+    printInt(this.n);
+    print(",");
+  }
+}
+
+class Sq {
+  var s: int;
+  var inner: Inner;
+  func ~Sq() {
+    drops = drops + 1;
+    print("S");
+    printInt(this.s);
+    print(",");
+  }
+  func area() -> int { return this.s * this.s; }
+}
+
+interface Shape {
+  func area() -> int;
+}
+
+// Concrete value source: boxed at the return site.
+func makeSq(v: int) -> Shape {
+  var c: Sq;
+  c.s = v;
+  c.inner.n = v + 10;
+  return c;
+}
+
+// Pass-through: the box stays the caller's temporary.
+func pass(x: Shape) -> Shape { return x; }
+func chain(v: int) -> Shape { return pass(makeSq(v)); }
+
+// Pointer source: no box, no release. The heap object is the program's own
+// (`new` without `delete`), exactly as before this fix.
+func makePtr(v: int) -> Shape {
+  var p: *Sq = new Sq;
+  p->s = v;
+  p->inner.n = v + 20;
+  return p;
+}
+
+func main() -> int {
+  // 1. Two direct boxes. Each call's returned local finalizes at its own
+  //    return; the box copies finalize at main's exit in reverse order.
+  var a: Shape = makeSq(1);
+  print("A");
+  var b: Shape = makeSq(2);
+  print("B");
+  if (a.area() != 1 || b.area() != 4) { return 1; }
+
+  // 2. Chained pass-through: one box copy, released at main's exit.
+  var c: Shape = chain(3);
+  if (c.area() != 9) { return 2; }
+
+  // 3. Pointer source: no box, and no boxed finalizer either.
+  var p: Shape = makePtr(4);
+  if (p.area() != 16) { return 3; }
+  if (drops != 6) { return 4; }   // three callee locals
+
+  // 4. A box created inside a loop is released at each body's scope exit.
+  var i: int = 0;
+  while (i < 3) {
+    var s: Shape = makeSq(100 + i);
+    if (s.area() != (100 + i) * (100 + i)) { return 5; }
+    i = i + 1;
+  }
+  print("C");
+  if (drops != 18) { return 6; }  // + six (callee local + box copy per call)
+
+  print("\n");
+  return 0;
+}

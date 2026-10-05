@@ -1,0 +1,65 @@
+// CIDER-ISS-016: the frame-exit restore puts back the chain the frame was
+// ENTERED with, not a blanket null — a real try in the caller after a
+// callee registered and released a handler must still catch, on all three
+// backends (VM unopt, VM optim, native). Every check returns a distinct
+// nonzero exit code.
+//
+// stale_handler_frame_exit pins the other half: a throw with no try in
+// scope after such a callee is the defined uncaught path.
+from std.io import print;
+
+// Returns from inside the catch: the catch restores the enclosing handler,
+// and the return is a second frame exit that must leave the chain as the
+// frame found it.
+func retFromCatch() -> int {
+    try {
+        throw 7;
+    } catch (e) {
+        if (e != 7) { return 1; }
+        return 2;
+    }
+    return 3;
+}
+
+// The callee unwinds into the CALLER's handler, so the caller has a live
+// try across the call; the callee's own handler must not survive it.
+func retFromBody() -> int {
+    try {
+        return 4;
+    } catch (e) {
+        return 5;
+    }
+}
+
+func boom() -> int { throw 11; }
+
+func main() -> int {
+    if (retFromBody() != 4) { return 1; }
+    try {
+        boom();
+    } catch (e) {
+        if (e != 11) { return 2; }
+    }
+    // Second round: the chain is back to this try after the catch above,
+    // and a callee that returned out of its own try must not have moved it.
+    if (retFromCatch() != 2) { return 3; }
+    try {
+        boom();
+    } catch (e) {
+        if (e != 11) { return 4; }
+    }
+    // A third try after both callees: nested with the previous one, to
+    // catch a restore that installed the wrong value.
+    try {
+        try {
+            boom();
+        } catch (e) {
+            if (e != 11) { return 5; }
+            throw e + 1;
+        }
+    } catch (e2) {
+        if (e2 != 12) { return 6; }
+    }
+    print("catches;");
+    return 0;
+}

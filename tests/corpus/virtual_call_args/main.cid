@@ -1,0 +1,86 @@
+// CIDER-BUG-234 regression: VIRTUAL_CALL argument pushes must go through
+// pushArg, exactly like every other call site. The emitter pushed
+// `objPtr` and `getOperand(args[i])` raw, so a virtual-method argument
+// missed the four cases pushArg stages:
+//
+//   * a LABEL (function) argument: `push twice` assembles but pushes a
+//     32-bit address, which truncates any code address above 4 GiB; pushArg
+//     materialises the full 64 bits (`mov rax, twice` / `push rax`).
+//   * an xmm (float) argument: `push xmm15` is not an instruction, so NASM
+//     rejects the file outright ("invalid combination of opcode and
+//     operands") while the VM runs it fine.
+//   * a spilled narrow integer: the slot holds only the value's own bytes,
+//     so a raw qword push reads stale stack above it (the CIDER-BUG-239
+//     class); pushArg sign/zero-extends out of the slot first.
+//   * a wide immediate: `push 8589934591` warns and truncates to 32 bits,
+//     so the callee receives 0xFFFFFFFF instead of 0x1FFFFFFFF.
+//
+// What is pinned here, on all three backends:
+//   * a spilled `int` argument through a virtual call (fourteen live keeps
+//     hold their registers across the calls, so `v` lands in a spill slot),
+//     checked by value and by the smoke test's emission pin;
+//   * a float argument and result through an override;
+//   * a u64 argument wider than 32 bits, passed as an immediate;
+//   * a function argument (a label) plus an int argument in one call;
+//   * the keeps and the spilled value itself are undisturbed (a wrong push
+//     order or width shows up here, not just in the callee).
+from std.io import print;
+
+func twice(x: int) -> int { return x * 2; }
+
+class Base {
+  virtual func pick(x: int) -> int { return x; }
+  virtual func scaled(x: float) -> float { return x; }
+  virtual func wide(x: u64) -> u64 { return x; }
+  virtual func run(cb: fn(int) -> int, x: int) -> int { return cb(x); }
+}
+
+class Der extends Base {
+  var total: int;
+  func init() -> void { this.total = 1000; }
+  override func pick(x: int) -> int { return this.total + x; }
+  override func scaled(x: float) -> float { return x * 2.0; }
+  override func wide(x: u64) -> u64 { return x + 1; }
+  override func run(cb: fn(int) -> int, x: int) -> int { return cb(x) + 1; }
+}
+
+func main() -> int {
+  // More live values than the allocator's registers, all read after the
+  // calls so they stay live across them: this is what spills `v` below.
+  var keep0: int = 1;
+  var keep1: int = 2;
+  var keep2: int = 3;
+  var keep3: int = 4;
+  var keep4: int = 5;
+  var keep5: int = 6;
+  var keep6: int = 7;
+  var keep7: int = 8;
+  var keep8: int = 9;
+  var keep9: int = 10;
+  var keep10: int = 11;
+  var keep11: int = 12;
+  var keep12: int = 13;
+  var keep13: int = 14;
+
+  var v: int = 5;
+  var f: float = 1.5;
+  var d: *Der = new Der;
+  var b: *Base = d;
+
+  // Spilled narrow int through the vtable.
+  if (b->pick(v) != 1005) { return 1; }
+  // Float (xmm) argument and result through the vtable.
+  if (b->scaled(f) != 3.0) { return 2; }
+  // Wide immediate: must arrive whole, not truncated to 32 bits.
+  if (b->wide(0x1FFFFFFFF) != 0x200000000) { return 3; }
+  // Function (label) argument plus a narrow argument in one call.
+  if (b->run(twice, 21) != 43) { return 4; }
+
+  if (keep0 + keep1 + keep2 + keep3 + keep4 + keep5 + keep6 != 28) { return 5; }
+  if (keep7 + keep8 + keep9 + keep10 + keep11 + keep12 + keep13 != 77) { return 6; }
+  if (v != 5) { return 7; }
+  if (f != 1.5) { return 8; }
+
+  print("vcall_args_ok\n");
+  return 0;
+}

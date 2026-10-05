@@ -1,0 +1,15 @@
+// CIDER-BUG-070: a second module spells the interface it imports from lib
+// with the same module-qualified syntax. Both the parameter position and
+// the in-callee reassignment must dispatch, and the caller's fat pointer
+// must stay untouched (by-value parameter copy).
+import lib;
+
+export func kindOf(s: lib.Shape) -> int { return s.kind(); }
+
+export func retarget(s: lib.Shape) -> int {
+  var r: lib.Rect;
+  r.w = 6;
+  r.h = 7;
+  s = r;
+  return s.area();
+}
