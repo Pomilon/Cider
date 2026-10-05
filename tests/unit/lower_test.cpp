@@ -479,6 +479,58 @@ void testInterfaceParamRefused() {
     check(!r.ok && r.stage == "lower", "an interface param refuses loudly");
 }
 
+void testBreakContinue() {
+    std::printf("break and continue lower\n");
+    // The head is the one block a jump goes backwards to: the condition is
+    // re-evaluated there. `continue` must reach it and `break` must not.
+    Lowered r = lower(
+        "func f(n: int) -> void {\n"
+        "    var i: int = 0;\n"
+        "    while (i < n) {\n"
+        "        i = i + 1;\n"
+        "        if (i == 2) { continue; }\n"
+        "        if (i == 3) { break; }\n"
+        "    }\n"
+        "}\n");
+    check(r.ok, "break and continue lower: " + r.stage);
+    const cider::ir::Function* fn = find(r.module.get(), "f");
+    if (fn == nullptr) {
+        return;
+    }
+    // Block 1 carries the condition: its false edge is the loop exit and its
+    // true edge the body, so it is the head by construction, not by guess.
+    const cider::ir::Block* head = nullptr;
+    for (const cider::ir::Block& block : fn->blocks) {
+        if (block.term.term == cider::ir::Term::CondBr &&
+            block.term.thenTarget > block.label &&
+            block.term.elseTarget > block.label) {
+            head = &block;
+            break;
+        }
+    }
+    check(head != nullptr, "the condition block is the loop head");
+    bool toHead = false;
+    bool toExit = false;
+    bool allTerminated = true;
+    for (const cider::ir::Block& block : fn->blocks) {
+        if (block.term.term == cider::ir::Term::Unreachable) {
+            allTerminated = false;
+        }
+        if (head == nullptr || block.label == head->label) {
+            continue;
+        }
+        if (block.term.term == cider::ir::Term::Br && block.term.target == head->label) {
+            toHead = true;
+        }
+        if (block.term.term == cider::ir::Term::Br && block.term.target == head->term.elseTarget) {
+            toExit = true;
+        }
+    }
+    check(toHead, "continue jumps back to the loop head");
+    check(toExit, "break jumps forward to the loop exit");
+    check(allTerminated, "no block is left unterminated");
+}
+
 void testNotYetLowered() {
     std::printf("unlowered constructs are refused\n");
     Lowered r = lower("func f(x: int) -> void { var s: string = \"v = {x}\"; }\n");
@@ -696,6 +748,7 @@ int main() {
     testClosureBareName();
     testAddrOf();
     testDerefStore();
+    testBreakContinue();
     testRefuseKeepsScopes();
     testInterfaceParamRefused();
     testNotYetLowered();

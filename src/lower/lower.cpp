@@ -3138,6 +3138,13 @@ void Lowerer::onIf(IfStmt& n) {
     emitTerminator(br);
     sealBlock(current_);
 
+    // An arm that ended in a jump (return, break, continue) closed its own
+    // block; the branch to the join is then unreachable and emitTerminator
+    // drops it. Saving the flag keeps an arm's jump from closing the arm
+    // that follows it.
+    bool savedTerminated = terminated_;
+    terminated_ = false;
+
     startBlock(thenLabel);
     locals_.push_back({});
     n.then->accept(checker_);
@@ -3148,6 +3155,7 @@ void Lowerer::onIf(IfStmt& n) {
     toJoin.loc = n.pos;
     emitTerminator(toJoin);
 
+    terminated_ = false;
     startBlock(elseLabel);
     locals_.push_back({});
     if (n.els != nullptr) {
@@ -3156,7 +3164,42 @@ void Lowerer::onIf(IfStmt& n) {
     locals_.pop_back();
     emitTerminator(toJoin);
 
+    terminated_ = savedTerminated;
     startBlock(joinLabel);
+}
+
+void Lowerer::onBreak(Break& n) {
+    if (failed_ || !enabled_ || function_ == nullptr) {
+        return;
+    }
+    if (loops_.empty()) {
+        refuse(n.pos, "break");
+        return;
+    }
+    ir::Terminator br;
+    br.term = ir::Term::Br;
+    br.target = loops_.back().exit;
+    br.loc = n.pos;
+    emitTerminator(br);
+    // The block a break leaves is closed by the jump; anything the source
+    // put after it is unreachable and must not claim the same block.
+    terminated_ = true;
+}
+
+void Lowerer::onContinue(Continue& n) {
+    if (failed_ || !enabled_ || function_ == nullptr) {
+        return;
+    }
+    if (loops_.empty()) {
+        refuse(n.pos, "continue");
+        return;
+    }
+    ir::Terminator br;
+    br.term = ir::Term::Br;
+    br.target = loops_.back().head;
+    br.loc = n.pos;
+    emitTerminator(br);
+    terminated_ = true;
 }
 
 void Lowerer::onWhile(WhileStmt& n) {
@@ -3172,6 +3215,10 @@ void Lowerer::onWhile(WhileStmt& n) {
     toHead.target = headLabel;
     toHead.loc = n.pos;
     emitTerminator(toHead);
+
+    loops_.push_back(LoopTargets{headLabel, exitLabel});
+    bool savedTerminated = terminated_;
+    terminated_ = false;
 
     startBlock(headLabel);
     locals_.push_back({});
@@ -3189,8 +3236,14 @@ void Lowerer::onWhile(WhileStmt& n) {
     locals_.push_back({});
     n.body->accept(checker_);
     locals_.pop_back();
-    emitTerminator(toHead);
+    // A body that ended in a jump (break, continue, return) already closed
+    // its block; a body that fell off still needs the back edge.
+    if (!terminated_) {
+        emitTerminator(toHead);
+    }
 
+    loops_.pop_back();
+    terminated_ = savedTerminated;
     startBlock(exitLabel);
 }
 

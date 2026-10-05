@@ -72,6 +72,11 @@ public:
     // calls and assignments live here, and without this hook they vanish.
     virtual void onExprStmt(ExprStmt& n) { (void)n; }
     virtual void onReturn(Return& n) { (void)n; }
+    // `break` and `continue` leave the innermost loop: checked to be inside
+    // one, then lowered as jumps to its exit and its head. Without this hook
+    // they vanish and the loop runs to completion.
+    virtual void onBreak(Break& n) { (void)n; }
+    virtual void onContinue(Continue& n) { (void)n; }
     virtual void onIf(IfStmt& n) { (void)n; }
     virtual void onWhile(WhileStmt& n) { (void)n; }
     // `delete p;` frees a class object. Checked first (the pointer type is

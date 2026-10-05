@@ -627,12 +627,20 @@ void Checker::visitReturn(Return& n) {
 void Checker::visitBreak(Break& n) {
     if (loopDepth_ == 0) {
         fail(n.pos, "break outside a loop");
+        return;
+    }
+    if (sink_ != nullptr) {
+        sink_->onBreak(n);
     }
 }
 
 void Checker::visitContinue(Continue& n) {
     if (loopDepth_ == 0) {
         fail(n.pos, "continue outside a loop");
+        return;
+    }
+    if (sink_ != nullptr) {
+        sink_->onContinue(n);
     }
 }
 

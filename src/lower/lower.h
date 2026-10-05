@@ -78,6 +78,8 @@ public:
     void onVarDecl(VarDecl& n) override;
     void onExprStmt(ExprStmt& n) override;
     void onReturn(Return& n) override;
+    void onBreak(Break& n) override;
+    void onContinue(Continue& n) override;
     void onIf(IfStmt& n) override;
     void onWhile(WhileStmt& n) override;
     void onDelete(DeleteStmt& n) override;
@@ -294,6 +296,16 @@ private:
     bool failed_ = false;
     uint32_t valueSeq_ = 0;
     uint32_t labelSeq_ = 0;
+    // The innermost enclosing loop's two jump targets: `continue` goes to
+    // the head (the condition is re-evaluated), `break` to the exit. Nested
+    // loops push their own frame, so an inner break leaves only the inner
+    // loop. The checker already rejects a break outside every loop, so a
+    // jump with an empty stack is a lowerer bug and refuses.
+    struct LoopTargets {
+        uint32_t head;
+        uint32_t exit;
+    };
+    std::vector<LoopTargets> loops_;
     uint32_t rodataSeq_ = 0;
     uint32_t current_ = 0;
     bool terminated_ = false;

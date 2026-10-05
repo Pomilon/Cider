@@ -237,6 +237,66 @@ void testPointerHeap() {
           "a double free dies loudly with the heap code");
 }
 
+void testBreakContinue() {
+    std::printf("break and continue run\n");
+    // Counting i up to 10: 2 continues (no count), break at 3. Iterations that
+    // reach the count are 1 and 3 -> wait, 3 breaks, so only i=1 counted: 1.
+    check(runQuiet("func main() -> int {\n"
+                 "    var s: int = 0;\n"
+                 "    var i: int = 0;\n"
+                 "    while (i < 10) {\n"
+                 "        i = i + 1;\n"
+                 "        if (i == 2) { continue; }\n"
+                 "        if (i == 3) { break; }\n"
+                 "        s = s + 1;\n"
+                 "    }\n"
+                 "    return s;\n"
+                 "}\n") == 1,
+          "a continue skips the rest of the body, a break leaves the loop");
+    // A continue in a nested loop belongs to the inner loop only.
+    check(runQuiet("func main() -> int {\n"
+                 "    var s: int = 0;\n"
+                 "    var i: int = 0;\n"
+                 "    while (i < 3) {\n"
+                 "        i = i + 1;\n"
+                 "        var j: int = 0;\n"
+                 "        while (j < 5) {\n"
+                 "            j = j + 1;\n"
+                 "            if (j == 2) { break; }\n"
+                 "            s = s + 1;\n"
+                 "        }\n"
+                 "    }\n"
+                 "    return s;\n"
+                 "}\n") == 3,
+          "a break leaves only the innermost loop");
+    // A break inside an if inside a while must still leave the while: the
+    // join block after the if is unreachable, not a re-entry.
+    check(runQuiet("func main() -> int {\n"
+                 "    var s: int = 0;\n"
+                 "    var i: int = 0;\n"
+                 "    while (i < 4) {\n"
+                 "        i = i + 1;\n"
+                 "        if (i == 2) {\n"
+                 "            s = s + 10;\n"
+                 "            break;\n"
+                 "        }\n"
+                 "        s = s + 1;\n"
+                 "    }\n"
+                 "    return s;\n"
+                 "}\n") == 11,
+          "code after a break in an arm does not run");
+    // A return inside a loop closes its block; the join after it is dead.
+    check(runQuiet("func main() -> int {\n"
+                 "    var i: int = 0;\n"
+                 "    while (i < 5) {\n"
+                 "        i = i + 1;\n"
+                 "        if (i == 3) { return 7; }\n"
+                 "    }\n"
+                 "    return 9;\n"
+                 "}\n") == 7,
+          "a return inside a loop leaves immediately");
+}
+
 void testArith32() {
     std::printf("32-bit arithmetic wraps at 32 bits\n");
     check(runQuiet("func main() -> int {\n"
@@ -292,6 +352,7 @@ int main() {
     testStruct();
     testArray();
     testPointerHeap();
+    testBreakContinue();
     testArith32();
     testIndirectCall();
     testTrap();
