@@ -62,12 +62,14 @@ bool runFront(const std::string& file, const std::string& text, Pipeline& pipe) 
         entryDir = file.substr(0, slash);
     }
     std::string loadDiag;
-    resolve::Resolver::ModuleLoader load =
-        [&entryDir, &loadDiag](const std::string& name) -> std::unique_ptr<Program> {
-        if (name.find('.') != std::string::npos) {
-            return nullptr;
-        }
-        std::string path = entryDir.empty() ? name + ".cid" : entryDir + "/" + name + ".cid";
+    // Dotted names (`std.io`) resolve through the library, not the entry
+    // directory: CIDER_LIB names the tree root and dots become separators,
+    // so `std.io` reads `$CIDER_LIB/std/io.cid`. Without the variable a
+    // dotted import still fails loudly at resolve time. Plain names stay
+    // entry-relative (FEAT-047).
+    const char* libRoot = std::getenv("CIDER_LIB");
+    std::string lib = libRoot != nullptr ? libRoot : "";
+    auto loadFile = [&loadDiag](const std::string& path) -> std::unique_ptr<Program> {
         bool found = false;
         std::string depText = readFile(path, found);
         if (!found) {
@@ -84,6 +86,23 @@ bool runFront(const std::string& file, const std::string& text, Pipeline& pipe) 
             loadDiag += at(error.pos) + ": " + error.message + "\n";
         }
         return program;
+    };
+    resolve::Resolver::ModuleLoader load =
+        [&entryDir, &lib, &loadFile](const std::string& name) -> std::unique_ptr<Program> {
+        if (name.find('.') != std::string::npos) {
+            if (lib.empty()) {
+                return nullptr;
+            }
+            std::string rel = name;
+            auto dot = std::string::npos;
+            while ((dot = rel.find('.', dot == std::string::npos ? 0 : dot)) !=
+                   std::string::npos) {
+                rel[dot] = '/';
+            }
+            return loadFile(lib + "/" + rel + ".cid");
+        }
+        std::string path = entryDir.empty() ? name + ".cid" : entryDir + "/" + name + ".cid";
+        return loadFile(path);
     };
     Lexer lexer(file, text);
     std::vector<Token> tokens = lexer.lex();

@@ -6,6 +6,7 @@
 
 #include <cstdio>
 #include <string>
+#include <sys/stat.h>
 #include <unistd.h>
 
 #include "driver/driver.h"
@@ -147,6 +148,44 @@ void testImports() {
     rmdir(dir);
 }
 
+// A dotted import resolves through CIDER_LIB: <lib>/x/y.cid answers
+// `import x.y`. Without the variable the same import still fails loudly.
+void testLibSearch() {
+    std::printf("library search\n");
+    char lib[] = "/tmp/cider_lib_XXXXXX";
+    check(mkdtemp(lib) != nullptr, "a library directory exists");
+    std::string sub = std::string(lib) + "/x";
+    check(mkdir(sub.c_str(), 0700) == 0, "a library package exists");
+    std::string mod = sub + "/y.cid";
+    FILE* modFile = fopen(mod.c_str(), "w");
+    fwrite("export func mval() -> int { return 7; }\n", 1, 40, modFile);
+    fclose(modFile);
+    char dir[] = "/tmp/cider_libuse_XXXXXX";
+    check(mkdtemp(dir) != nullptr, "a scratch directory exists");
+    std::string main = std::string(dir) + "/main.cid";
+    FILE* mainFile = fopen(main.c_str(), "w");
+    fwrite("import x.y;\nfunc main() -> int { return y.mval(); }\n", 1, 52,
+           mainFile);
+    fclose(mainFile);
+    const char* saved = getenv("CIDER_LIB");
+    std::string keep = saved != nullptr ? saved : "";
+    setenv("CIDER_LIB", lib, 1);
+    Result ok = run({"check", main});
+    check(ok.code == 0, "a library module checks: " + ok.err);
+    Result ran = run({"run", main});
+    check(ran.code == 7, "a library call answers: " + ran.err);
+    if (saved != nullptr) {
+        setenv("CIDER_LIB", keep.c_str(), 1);
+    } else {
+        unsetenv("CIDER_LIB");
+    }
+    unlink(main.c_str());
+    unlink(mod.c_str());
+    rmdir(sub.c_str());
+    rmdir(lib);
+    rmdir(dir);
+}
+
 // A missing file, a bad target and a bad subcommand all name themselves.
 void testFailures() {
     std::printf("failures name themselves\n");
@@ -171,6 +210,7 @@ int main() {
     testCompileIr();
     testRun();
     testImports();
+    testLibSearch();
     testFailures();
     std::printf("\n%d checks, %s\n", checks, failures == 0 ? "all passed" : "FAILURES");
     return failures == 0 ? 0 : 1;
