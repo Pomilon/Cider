@@ -155,9 +155,8 @@
   "class": "D"
  },
  "bool_word_ops": {
-  "actual": "exit 1; tests/corpus/bool_word_ops/main.cid:31:32: expected ')'; tests/corpus/bool_word_ops/main.cid:32:33: expected ')'",
-  "blocker": "stdlib-imports",
-  "class": "D"
+  "blocker": "none",
+  "class": "A"
  },
  "brace_escape": {
   "actual": "exit 1; tests/corpus/brace_escape/main.cid:7:22: unexpected character '\\'; tests/corpus/brace_escape/main.cid:7:24: unterminated string literal",

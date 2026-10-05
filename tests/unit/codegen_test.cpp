@@ -496,6 +496,24 @@ void testShortCircuit() {
                    "    return 0;\n"
                    "}\n") == 9,
           "a skipped side never traps");
+    // The word spellings ride the same ops: truth, precedence, and the
+    // skipped side never evaluating (FEATURES §8.1).
+    check(runQuiet("func main() -> int {\n"
+                   "    var t: bool = true and true;\n"
+                   "    var f: bool = true and false;\n"
+                   "    var o: bool = false or true;\n"
+                   "    if (t and o and not f) { return 7; }\n"
+                   "    return 0;\n"
+                   "}\n") == 7,
+          "word truth tables agree");
+    check(runQuiet("func main() -> int {\n"
+                   "    var z: int = 0;\n"
+                   "    var a: bool = false and (1 / z == 0);\n"
+                   "    var b: bool = true or (1 / z == 0);\n"
+                   "    if (not a or b) { return 9; }\n"
+                   "    return 0;\n"
+                   "}\n") == 9,
+          "a skipped word side never traps");
 }
 
 void testTernary() {

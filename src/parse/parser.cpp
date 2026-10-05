@@ -88,12 +88,12 @@ bool tokenBinOp(TokenKind kind, BinOp& op, int& level) {
         level = LVL_EQ;
         return true;
     }
-    if (kind == TokenKind::AndAnd) {
+    if (kind == TokenKind::AndAnd || kind == TokenKind::KwAnd) {
         op = BinOp::AndAnd;
         level = LVL_ANDAND;
         return true;
     }
-    if (kind == TokenKind::OrOr) {
+    if (kind == TokenKind::OrOr || kind == TokenKind::KwOr) {
         op = BinOp::OrOr;
         level = LVL_OROR;
         return true;

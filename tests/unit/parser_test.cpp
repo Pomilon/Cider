@@ -56,6 +56,24 @@ void testPrecedence() {
     check(program->globals[0]->pos.column == 1, "position rides along");
 }
 
+// `and`/`or` are the word spellings of `&&`/`||`: same BinOp, so the check
+// and short-circuit layers never see a difference (FEATURES §8.1).
+void testWordLogic() {
+    std::printf("word logic\n");
+    bool ok = false;
+    std::unique_ptr<cider::Program> program = parse("var g: bool = a and b or c;", ok);
+    check(ok, "parses");
+    if (!ok || program->globals.empty()) {
+        return;
+    }
+    const cider::Binary& top =
+        static_cast<const cider::Binary&>(*program->globals[0]->init);
+    check(top.op == cider::BinOp::OrOr, "or loosest");
+    const cider::Binary& inner =
+        static_cast<const cider::Binary&>(*top.lhs);
+    check(inner.op == cider::BinOp::AndAnd, "and tighter");
+}
+
 // `as` binds looser than unary: `&x as *void` is `(&x) as *void`.
 void testAsBelowUnary() {
     std::printf("as below unary\n");
@@ -245,6 +263,7 @@ void testAsm() {
 int main() {
     std::printf("parser_test — syntax alone\n\n");
     testPrecedence();
+    testWordLogic();
     testAsBelowUnary();
     testMinusAndArrow();
     testCompound();
