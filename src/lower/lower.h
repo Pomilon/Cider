@@ -296,6 +296,12 @@ private:
     bool terminated_ = false;
     std::vector<uint32_t> blockOrder_;
     std::vector<std::unordered_map<std::string, LocalBinding>> locals_;
+    // One entry per entered block, recording the locals depth from before
+    // the block: the exit truncates to it, so a refusal mid-block (or a
+    // block entered already-failed) can neither leak frames nor steal the
+    // enclosing function's frame. Enter and exit are always paired by the
+    // checker, so this stack can never underflow while locals_ can.
+    std::vector<uint64_t> scopeMarks_;
     std::vector<GlobalBinding> globals_;
     std::unordered_map<std::string, std::string> globalNames_;
     std::vector<check::CheckError> errors_;

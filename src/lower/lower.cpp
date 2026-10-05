@@ -494,6 +494,7 @@ void Lowerer::onFuncDecl(FuncDecl& n) {
     labelSeq_ = 0;
     blockOrder_.clear();
     locals_.clear();
+    scopeMarks_.clear();
 
     uint32_t entry = emitBlock(n.pos);
     startBlock(entry);
@@ -565,6 +566,7 @@ void Lowerer::onMethodDecl(const std::string& owner, const std::string& name,
     labelSeq_ = 0;
     blockOrder_.clear();
     locals_.clear();
+    scopeMarks_.clear();
 
     uint32_t entry = emitBlock(body.pos);
     startBlock(entry);
@@ -661,6 +663,7 @@ void Lowerer::onFuncLit(FuncLit& lit, const std::vector<check::Captured>& captur
     labelSeq_ = 0;
     blockOrder_.clear();
     locals_.clear();
+    scopeMarks_.clear();
 
     uint32_t entry = emitBlock(lit.pos);
     startBlock(entry);
@@ -756,6 +759,7 @@ void Lowerer::onFuncLit(FuncLit& lit, const std::vector<check::Captured>& captur
 
 void Lowerer::onBlockEnter(Block& n) {
     (void)n;
+    scopeMarks_.push_back(static_cast<uint64_t>(locals_.size()));
     if (failed_ || !enabled_ || function_ == nullptr) {
         return;
     }
@@ -764,10 +768,14 @@ void Lowerer::onBlockEnter(Block& n) {
 
 void Lowerer::onBlockExit(Block& n) {
     (void)n;
-    if (locals_.empty()) {
+    if (scopeMarks_.empty()) {
         return;
     }
-    locals_.pop_back();
+    uint64_t mark = scopeMarks_.back();
+    scopeMarks_.pop_back();
+    while (static_cast<uint64_t>(locals_.size()) > mark) {
+        locals_.pop_back();
+    }
 }
 
 void Lowerer::onVarDecl(VarDecl& n) {
@@ -2089,6 +2097,7 @@ std::string Lowerer::forwardFunction(const std::string& link, const Signature& s
     labelSeq_ = 0;
     blockOrder_.clear();
     locals_.clear();
+    scopeMarks_.clear();
 
     uint32_t entry = emitBlock(pos);
     startBlock(entry);

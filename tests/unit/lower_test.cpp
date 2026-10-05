@@ -476,6 +476,20 @@ void testNotYetLowered() {
     check(!r.ok && r.stage == "lower", "interpolation is not lowered yet");
 }
 
+void testRefuseKeepsScopes() {
+    // A refusal inside a condition must not unbalance the scope stack:
+    // `!` has no lowering, so this refuses — but the function frame
+    // must survive the block exits instead of crashing the driver.
+    std::printf("a mid-block refusal keeps scopes balanced\n");
+    Lowered r = lower(
+        "func main() -> int {\n"
+        "    var b: bool = true;\n"
+        "    if (!b) { return 1; }\n"
+        "    return 0;\n"
+        "}\n");
+    check(!r.ok && r.stage == "lower", "negation in a condition is refused");
+}
+
 // A method emits its own function under the owner's name, and a call site
 // reaches it with the receiver first.
 void testMethodCall() {
@@ -673,6 +687,7 @@ int main() {
     testClosureBareName();
     testAddrOf();
     testDerefStore();
+    testRefuseKeepsScopes();
     testNotYetLowered();
     std::printf("\n%d checks, %s\n", checks, failures == 0 ? "all passed" : "FAILURES");
     return failures == 0 ? 0 : 1;
