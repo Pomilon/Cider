@@ -237,6 +237,24 @@ void testPointerHeap() {
           "a double free dies loudly with the heap code");
 }
 
+// A function pointer calls its target; a nil one dies by hardware trap.
+void testIndirectCall() {
+    std::printf("indirect calls run\n");
+    check(runQuiet("func add(a: int, b: int) -> int { return a + b; }\n"
+                   "func main() -> int {\n"
+                   "    var f: *func(int, int) -> int = &add;\n"
+                   "    return (*f)(20, 22);\n"
+                   "}\n") == 42,
+          "an indirect call reaches its target");
+    bool signaled = false;
+    runCode("func main() -> int {\n"
+            "    var f: *func(int) -> int = nilPtr;\n"
+            "    return (*f)(1);\n"
+            "}\n",
+            signaled);
+    check(signaled, "a nil indirect call traps");
+}
+
 // The same module emitted twice is byte-identical, and carries no build path.
 void testRepro() {
     std::printf("byte reproducibility\n");
@@ -260,6 +278,7 @@ int main() {
     testStruct();
     testArray();
     testPointerHeap();
+    testIndirectCall();
     testTrap();
     testRepro();
     std::printf("\n%d checks, %s\n", checks, failures == 0 ? "all passed" : "FAILURES");

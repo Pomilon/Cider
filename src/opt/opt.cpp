@@ -202,6 +202,13 @@ uint64_t deadCode(ir::Module& module) {
                     if (instr.op == ir::Op::Store || instr.op == ir::Op::Insert) {
                         used.insert(instr.storedValue.id);
                     }
+                    // An indirect call reads its target like an operand: the
+                    // address the call jumps to keeps its definition alive.
+                    // Missing this deleted the load, then the store, then
+                    // the address itself, and the call jumped to garbage.
+                    if (instr.op == ir::Op::Call && instr.call.indirect) {
+                        used.insert(instr.calleeValue.id);
+                    }
                 }
                 const ir::Terminator& term = block.term;
                 if (term.value.has_value()) {

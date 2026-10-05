@@ -188,15 +188,23 @@ private:
         for (const ir::Function& fn : module_.functions) {
             for (const ir::Block& block : fn.blocks) {
                 for (const ir::Instr& instr : block.body) {
-                    if (instr.op != ir::Op::Call) {
+                    // A helper is needed when a call names it or a function
+                    // address takes it: `&print` must emit `cider_print`
+                    // exactly as a call would.
+                    std::string wanted;
+                    if (instr.op == ir::Op::Call) {
+                        wanted = instr.callee;
+                    } else if (instr.op == ir::Op::FnAddr) {
+                        wanted = instr.globalLabel;
+                    } else {
                         continue;
                     }
-                    if (defined.count(instr.callee) != 0) {
+                    if (defined.count(wanted) != 0) {
                         continue;
                     }
-                    if (seen.insert(instr.callee).second) {
+                    if (seen.insert(wanted).second) {
                         for (const std::string& candidate : order) {
-                            if (candidate == instr.callee) {
+                            if (candidate == wanted) {
                                 out.push_back(candidate);
                             }
                         }
@@ -957,6 +965,11 @@ private:
             return true;
         }
         if (instr.op == ir::Op::DataAddr) {
+            out_ += "  lea rax, [rip + " + instr.globalLabel + "]\n";
+            out_ += "  mov " + slot(instr.results[0].id) + ", rax\n";
+            return true;
+        }
+        if (instr.op == ir::Op::FnAddr) {
             out_ += "  lea rax, [rip + " + instr.globalLabel + "]\n";
             out_ += "  mov " + slot(instr.results[0].id) + ", rax\n";
             return true;

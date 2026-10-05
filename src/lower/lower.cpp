@@ -2105,6 +2105,40 @@ std::vector<ir::Value> Lowerer::lowerNewArray(const NewArray& n) {
     return words;
 }
 
+std::vector<ir::Value> Lowerer::lowerAddrOf(const Unary& n) {
+    // `&f` where f names a plain function answers its code address: one
+    // word holding the link address, for an indirect call to load. Every
+    // other address refuses with the message it always refused with —
+    // `&x` on values is FEAT-038 and must not change shape here.
+    if (n.op == UnOp::Addr) {
+        if (const auto* ident = dynamic_cast<const Ident*>(n.operand.get())) {
+            const resolve::Decl* decl =
+                resolver_.lookup(resolver_.moduleScope(), ident->name);
+            if (decl != nullptr && decl->kind == resolve::DeclKind::Func &&
+                decl->typeParams == 0) {
+                std::string link = ident->name;
+                if (decl->isPrelude) {
+                    link = "cider_" + ident->name;
+                }
+                TypeRef ptr{ctx_.functionPtr(decl->sig)};
+                ir::Instr fn;
+                fn.op = ir::Op::FnAddr;
+                fn.loc = n.pos;
+                fn.type = ptr;
+                fn.width = ir::IRType::Ptr;
+                fn.globalLabel = link;
+                fn.isPure = true;
+                ir::Value at = newValue(fn.width, ptr, n.pos);
+                fn.results.push_back(at);
+                emit(std::move(fn));
+                return {at};
+            }
+        }
+    }
+    refuse(n.pos, "this expression");
+    return {undefined()};
+}
+
 std::vector<ir::Value> Lowerer::lowerWords(const Expr* expr) {
     if (expr == nullptr || failed_) {
         return {undefined()};
@@ -2129,6 +2163,9 @@ std::vector<ir::Value> Lowerer::lowerWords(const Expr* expr) {
     }
     if (dynamic_cast<const SliceExpr*>(expr) != nullptr) {
         return lowerSlice(static_cast<const SliceExpr&>(*expr));
+    }
+    if (const auto* unary = dynamic_cast<const Unary*>(expr)) {
+        return lowerAddrOf(*unary);
     }
     if (const auto* ident = dynamic_cast<const Ident*>(expr)) {
         TypeRef type = checker_.typeOf(ident);
@@ -2391,6 +2428,7 @@ ir::Value Lowerer::onCall(Call& n) {
     const Signature* sig = nullptr;
     std::string callee;
     bool indirect = false;
+    std::optional<ir::Value> indirectCallee;
     std::vector<ir::Value> receiver;
     if (const auto* field = dynamic_cast<const Field*>(n.callee.get())) {
         // `c.m(args)`: the checker proved the field names a method, so this
@@ -2464,6 +2502,15 @@ ir::Value Lowerer::onCall(Call& n) {
                 if (!inner.isError() && inner.type->kind() == Kind::FunctionPtr) {
                     sig = inner.type->signature();
                     indirect = true;
+                    // The callee word travels with the call: codegen must
+                    // never invent the target, so a missing word refuses
+                    // here rather than emitting a call to nowhere.
+                    std::vector<ir::Value> target = lowerWords(deref->operand.get());
+                    if (failed_ || target.size() != kOneWord) {
+                        refuse(n.pos, "this call");
+                        return undefined();
+                    }
+                    indirectCallee = target[0];
                 }
             }
         }
@@ -2477,6 +2524,9 @@ ir::Value Lowerer::onCall(Call& n) {
     instr.loc = n.pos;
     instr.callee = callee;
     instr.call.indirect = indirect;
+    if (indirectCallee.has_value()) {
+        instr.calleeValue = *indirectCallee;
+    }
     instr.mayTrap = true;
     for (ir::Value word : receiver) {
         ir::Argument arg;

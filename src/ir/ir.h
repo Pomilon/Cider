@@ -91,7 +91,7 @@ enum class Op {
     Neg, Not, BitNot,
     FAdd, FSub, FMul, FDiv, FRem,
     Cmp,
-    Load, Store, Alloca, DataAddr,
+    Load, Store, Alloca, DataAddr, FnAddr,
     Extract, Insert, Gep,
     Call, Cast, Trap, Asm,
 };
@@ -146,8 +146,9 @@ struct Instr {
     CmpOp cmp = CmpOp::Eq;           // Cmp
     std::string callee;              // Call: a function name
     // A link label for read-only addressing: a global for Load/Store, a
-    // rodata blob for DataAddr. One field because both uses are the same
-    // thing — a name the linker resolves — and never occur together.
+    // rodata blob for DataAddr, an emitted function for FnAddr. One field
+    // because all uses are the same thing — a name the linker resolves —
+    // and never occur together.
     std::string globalLabel;
     Value calleeValue;               // Call: indirect
     std::vector<Argument> arguments; // Call

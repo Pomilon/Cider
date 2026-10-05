@@ -86,6 +86,7 @@ const char* opName(Op op) {
         case Op::Store: return "store";
         case Op::Alloca: return "alloca";
         case Op::DataAddr: return "dataaddr";
+        case Op::FnAddr: return "fnaddr";
         case Op::Extract: return "extract";
         case Op::Insert: return "insert";
         case Op::Gep: return "gep";

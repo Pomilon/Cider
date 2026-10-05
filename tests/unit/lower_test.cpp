@@ -502,6 +502,38 @@ void testDelete() {
     check(!bad.ok, "delete on a non-class pointer is refused");
 }
 
+// A function address lowers to FnAddr, and an indirect call carries the
+// callee word with it — codegen must never invent the target.
+void testIndirect() {
+    std::printf("indirect calls lower\n");
+    Lowered r = lower(
+        "func add(a: int, b: int) -> int { return a + b; }\n"
+        "func main() -> int {\n"
+        "    var f: *func(int, int) -> int = &add;\n"
+        "    return (*f)(20, 22);\n"
+        "}\n");
+    check(r.ok, "indirect call lowers");
+    if (r.ok) {
+        const cider::ir::Function* main = find(r.module.get(), "main");
+        check(main != nullptr, "main exists");
+        const cider::ir::Instr* addr = firstOp(*main, cider::ir::Op::FnAddr);
+        check(addr != nullptr && addr->globalLabel == "add",
+              "function address names the function");
+        bool indirectCall = false;
+        bool calleeWired = false;
+        for (const cider::ir::Block& block : main->blocks) {
+            for (const cider::ir::Instr& instr : block.body) {
+                if (instr.op == cider::ir::Op::Call && instr.call.indirect) {
+                    indirectCall = true;
+                    calleeWired = instr.calleeValue.id != 0xFFFFFFFFu;
+                }
+            }
+        }
+        check(indirectCall, "the call is indirect");
+        check(calleeWired, "the callee word travels with the call");
+    }
+}
+
 }  // namespace
 
 int main() {
@@ -524,6 +556,7 @@ int main() {
     testClass();
     testMethodCall();
     testDelete();
+    testIndirect();
     testNotYetLowered();
     std::printf("\n%d checks, %s\n", checks, failures == 0 ? "all passed" : "FAILURES");
     return failures == 0 ? 0 : 1;

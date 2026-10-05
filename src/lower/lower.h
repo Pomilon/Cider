@@ -115,6 +115,9 @@ public:
     // Lowers any expression to its words. Scalars answer one value; a string
     // literal answers its address and length. Anything larger is refused.
     std::vector<ir::Value> lowerWords(const Expr* expr);
+    // `&f` where f names a plain function answers its code address as one
+    // word. Every other address refuses: `&x` on values is FEAT-038.
+    std::vector<ir::Value> lowerAddrOf(const Unary& n);
     // Stores every word into the place an identifier names: consecutive
     // slots for a local, the label plus displacement for a global. Answers
     // the stored words, so an assignment is still an expression. Anything

@@ -121,6 +121,26 @@ void testFold() {
     check(countOp(*fn, cider::ir::Op::Const) == 1, "one const remains");
 }
 
+// An indirect call keeps its callee chain: the address, the store, and the
+// load all survive, because the call reads its target like an operand.
+void testIndirectKept() {
+    std::printf("indirect callees survive\n");
+    Piped r = pipe(
+        "func add(a: int, b: int) -> int { return a + b; }\n"
+        "func main() -> int {\n"
+        "    var f: *func(int, int) -> int = &add;\n"
+        "    return (*f)(20, 22);\n"
+        "}\n");
+    check(r.ok, "lowers and optimises: " + r.stage);
+    const cider::ir::Function* fn = find(r.module.get(), "main");
+    check(fn != nullptr && countOp(*fn, cider::ir::Op::FnAddr) == 1,
+          "the address survives");
+    check(fn != nullptr && countOp(*fn, cider::ir::Op::Store) >= 1,
+          "the store survives");
+    check(fn != nullptr && countOp(*fn, cider::ir::Op::Load) >= 1,
+          "the load survives");
+}
+
 // An unused pure definition is deleted.
 void testDeadCode() {
     std::printf("dead code is deleted\n");
@@ -249,6 +269,7 @@ int main() {
     testWellFormed();
     testFold();
     testDeadCode();
+    testIndirectKept();
     testTrapKept();
     testDanglingTarget();
     testUndefinedOperand();

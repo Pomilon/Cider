@@ -687,6 +687,24 @@ void Checker::visitUnary(Unary& n) {
             record(&n, errorRef());
             return;
         }
+        if (const auto* ident = dynamic_cast<const Ident*>(n.operand.get())) {
+            if (findLocal(ident->name) == nullptr) {
+                const resolve::Decl* decl = resolver_.lookup(moduleScope_, ident->name);
+                // A plain function's address is its code address — the bare
+                // `*func` type (the star is the kind's own spelling, not a
+                // Pointer around it: the resolver collapses `*func(..)`
+                // to Kind::FunctionPtr). A bare `add` checks as a closure
+                // (the 16-byte value); `&add` is the 8-byte code address,
+                // the only way to form a `*func`. Generic functions never
+                // reach here: naming one without arguments is already an
+                // error above.
+                if (decl != nullptr && decl->kind == resolve::DeclKind::Func) {
+                    Signature sig = decl->sig;
+                    record(&n, TypeRef{ctx_.functionPtr(std::move(sig))});
+                    return;
+                }
+            }
+        }
         record(&n, TypeRef{ctx_.pointer(operand.type)});
         return;
     }

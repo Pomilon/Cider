@@ -247,6 +247,24 @@ void testLen() {
     check(!scalar.ok && scalar.stage == "check", "a scalar has no length");
 }
 
+// The address of a plain function is a function pointer, not a closure.
+void testFnAddr() {
+    std::printf("function addresses are function pointers\n");
+    Checked good = check(
+        "func add(a: int, b: int) -> int { return a + b; }\n"
+        "func main() -> int {\n"
+        "    var f: *func(int, int) -> int = &add;\n"
+        "    return (*f)(20, 22);\n"
+        "}\n");
+    check(good.ok, "address of a function binds to *func: " + good.stage);
+    Checked nilCall = check(
+        "func main() -> int {\n"
+        "    var f: *func(int) -> int = nilPtr;\n"
+        "    return (*f)(1);\n"
+        "}\n");
+    check(nilCall.ok, "nilPtr converts to *func: " + nilCall.stage);
+}
+
 }  // namespace
 
 int main() {
@@ -258,6 +276,7 @@ int main() {
     testGenericCall();
     testGenericStruct();
     testUnions();
+    testFnAddr();
     testLen();
     testFuncLitChecks();
     testControl();
