@@ -220,6 +220,34 @@ void testExportVar() {
     check(program->globals[0]->name == "hits", "the name survives");
 }
 
+void testDotQualifiedType() {
+    std::printf("dot-qualified types\n");
+    bool ok = false;
+    std::unique_ptr<cider::Program> program = parse("type V = da.S;\n", ok);
+    check(ok, "parses");
+    if (!ok) {
+        return;
+    }
+    const cider::TypeAlias* alias = nullptr;
+    for (const std::unique_ptr<cider::Decl>& decl : program->decls) {
+        if (const auto* al = dynamic_cast<const cider::TypeAlias*>(decl.get())) {
+            alias = al;
+        }
+    }
+    check(alias != nullptr, "the declaration is a TypeAlias");
+    if (alias == nullptr) {
+        return;
+    }
+    const auto* named =
+        dynamic_cast<const cider::NamedType*>(alias->target.get());
+    check(named != nullptr, "the target is a named type");
+    if (named == nullptr) {
+        return;
+    }
+    check(named->qualifier == "da", "the dot names the module");
+    check(named->name == "S", "the name after the dot survives");
+}
+
 void testAsm() {
     std::printf("asm blocks\n");
     bool ok = false;
@@ -272,6 +300,7 @@ int main() {
     testControlForms();
     testMethodInit();
     testExportVar();
+    testDotQualifiedType();
     testIncrDecr();
     testAsm();
     std::printf("\n%d checks, %s\n", checks, failures == 0 ? "all passed" : "FAILURES");

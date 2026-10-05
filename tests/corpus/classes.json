@@ -710,9 +710,9 @@
   "class": "D"
  },
  "global_narrow": {
-  "actual": "SIGNALDeath sig=7 (compiler/runtime crash, no diagnostic)",
-  "blocker": "bool-global-load compiler crash (SIGBUS, no diagnostic)",
-  "class": "D"
+  "actual": "exit 0, empty output",
+  "blocker": "-",
+  "class": "A"
  },
  "gvn_cross_block": {
   "actual": "pass",

@@ -5,6 +5,7 @@
 // the subcommand.
 
 #include <cstdio>
+#include <cstring>
 #include <string>
 #include <sys/stat.h>
 #include <unistd.h>
@@ -134,6 +135,26 @@ void testImports() {
     check(ok.code == 0, "sibling modules check: " + ok.err);
     Result ran = run({"run", main});
     check(ran.code == 42, "a qualified call answers across modules: " + ran.err);
+    std::string types = std::string(dir) + "/types.cid";
+    std::string tymain = std::string(dir) + "/tymain.cid";
+    FILE* typesFile = fopen(types.c_str(), "w");
+    const char* typesText = "export struct S { var v: int; }\n";
+    fwrite(typesText, 1, strlen(typesText), typesFile);
+    fclose(typesFile);
+    FILE* tymainFile = fopen(tymain.c_str(), "w");
+    const char* tymainText =
+        "import types;\n"
+        "type V = types.S;\n"
+        "func main() -> int {\n"
+        "    var x: V = new types.S { v: 9 };\n"
+        "    return x.v;\n"
+        "}\n";
+    fwrite(tymainText, 1, strlen(tymainText), tymainFile);
+    fclose(tymainFile);
+    Result tyCheck = run({"check", tymain});
+    check(tyCheck.code == 0, "a dot-qualified alias checks: " + tyCheck.err);
+    Result tyRun = run({"run", tymain});
+    check(tyRun.code == 9, "a dot-qualified value runs: " + tyRun.err);
     std::string dotted = std::string(dir) + "/dot.cid";
     FILE* dotFile = fopen(dotted.c_str(), "w");
     fwrite("import std.io;\nfunc main() -> int { return 0; }\n", 1, 47, dotFile);

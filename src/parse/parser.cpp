@@ -1565,7 +1565,13 @@ std::unique_ptr<TypeExpr> Parser::parsePrimaryType() {
             name = advance().text;
         } else {
             name = advance().text;
-            if (match(TokenKind::ColonColon)) {
+            // A qualifier may use either separator: `da.S` is the surface
+            // spelling (values and module paths both use the dot), while
+            // `da::S` stays accepted and both denote the canonical `da::S`
+            // (TYPES §2.3). In a type position an identifier followed by a
+            // dot can only be a qualification — there are no float
+            // literals here — so the two cannot be confused.
+            if (match(TokenKind::ColonColon) || match(TokenKind::Dot)) {
                 if (!check(TokenKind::Ident)) {
                     failHere("expected a type name");
                     return nullptr;
