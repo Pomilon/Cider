@@ -2933,6 +2933,107 @@ void Lowerer::onExprStmt(ExprStmt& n) {
     onIdentOrExpr(n.expr.get(), checker_.typeOf(n.expr.get()));
 }
 
+// One operand per `{placeholder}`: a local's storage slot (so substitution
+// reads or writes the value in place) or an address word for a module
+// variable or function. asmNames[i] pairs with operands[i], and codegen
+// substitutes operand i wherever `{name i}` appears (FEATURES §4.4).
+void Lowerer::onAsmStmt(AsmStmt& n) {
+    if (failed_ || !enabled_ || function_ == nullptr) {
+        return;
+    }
+    ir::Instr instr;
+    instr.op = ir::Op::Asm;
+    instr.loc = n.pos;
+    instr.asmText = n.text;
+    instr.asmNames = n.names;
+    for (const std::string& raw : n.names) {
+        std::string base = raw;
+        if (!base.empty() && base[0] == '*') {
+            base = base.substr(1);
+        }
+        std::string::size_type colon = base.find(':');
+        if (colon != std::string::npos) {
+            base = base.substr(0, colon);
+        }
+        bool found = false;
+        for (auto frame = locals_.rbegin();
+             frame != locals_.rend() && !found; ++frame) {
+            auto hit = frame->find(base);
+            if (hit == frame->end()) {
+                continue;
+            }
+            const LocalBinding& local = hit->second;
+            if (local.slots.empty()) {
+                continue;
+            }
+            // The operand is the storage, sized at the value's first word:
+            // a string placeholder reads its address word, a scalar reads
+            // or writes its own width.
+            TypeRef word = static_cast<uint64_t>(wordCount(local.type)) > kOneWord
+                               ? wordType(local.type, 0)
+                               : local.type;
+            ir::IRType width = widthOf(word, n.pos);
+            if (failed_) {
+                return;
+            }
+            ir::Value slot = local.slots[0];
+            slot.width = width;
+            instr.operands.push_back(slot);
+            found = true;
+        }
+        if (found) {
+            continue;
+        }
+        for (const GlobalBinding& global : globals_) {
+            if (global.name != base) {
+                continue;
+            }
+            // A module variable placeholder is its address: DataAddr leaves
+            // the address in a word, and codegen prints that word.
+            TypeRef addr{ctx_.pointer(ctx_.basic(BasicKind::U8))};
+            ir::Instr at;
+            at.op = ir::Op::DataAddr;
+            at.loc = n.pos;
+            at.type = addr;
+            at.width = ir::IRType::Ptr;
+            at.globalLabel = global.label;
+            at.isPure = true;
+            ir::Value word = newValue(at.width, addr, n.pos);
+            at.results.push_back(word);
+            emit(std::move(at));
+            instr.operands.push_back(word);
+            found = true;
+            break;
+        }
+        if (found) {
+            continue;
+        }
+        const resolve::Decl* decl =
+            resolver_.lookup(resolver_.moduleScope(), base);
+        if (decl != nullptr && decl->kind == resolve::DeclKind::Func) {
+            std::string link = decl->isPrelude ? "cider_" + base : base;
+            TypeRef fp{ctx_.functionPtr(decl->sig)};
+            ir::Instr fn;
+            fn.op = ir::Op::FnAddr;
+            fn.loc = n.pos;
+            fn.type = fp;
+            fn.width = ir::IRType::Ptr;
+            fn.globalLabel = link;
+            fn.isPure = true;
+            ir::Value word = newValue(fn.width, fp, n.pos);
+            fn.results.push_back(word);
+            emit(std::move(fn));
+            instr.operands.push_back(word);
+            found = true;
+        }
+        if (!found) {
+            refuse(n.pos, "an unbound asm placeholder");
+            return;
+        }
+    }
+    emit(std::move(instr));
+}
+
 void Lowerer::onDelete(DeleteStmt& n) {
     if (failed_ || !enabled_ || function_ == nullptr) {
         return;
@@ -3057,6 +3158,9 @@ ir::Value Lowerer::onBinary(Binary& n) {
     if (failed_) {
         return undefined();
     }
+    if (n.op == BinOp::AndAnd || n.op == BinOp::OrOr) {
+        return lowerShortCircuit(n);
+    }
     TypeRef lhs = checker_.typeOf(n.lhs.get());
     TypeRef rhs = checker_.typeOf(n.rhs.get());
     TypeRef result = checker_.typeOf(&n);
@@ -3122,6 +3226,87 @@ ir::Value Lowerer::onBinary(Binary& n) {
         return undefined();
     }
     return emitArith(n.op, a, b, result, n.pos);
+}
+
+ir::Value Lowerer::lowerShortCircuit(const Binary& n) {
+    // The checker proved both sides bool, so the answer is one bool word.
+    // Short-circuit is definitional (SEMANTICS): the skipped side never
+    // evaluates, and a trap there never fires. The cell holds the answer
+    // whichever arm writes it last; expressions cannot terminate a block,
+    // so both arms always fall through to the join.
+    const bool isAnd = n.op == BinOp::AndAnd;
+    TypeRef boolean{ctx_.basic(BasicKind::Bool)};
+    ir::Value cell = allocaSlot(boolean, n.pos);
+    ir::Value lhs = onIdentOrExpr(n.lhs.get(), boolean);
+    if (failed_) {
+        return undefined();
+    }
+    uint32_t rhsLabel = emitBlock(n.pos);
+    uint32_t shortLabel = emitBlock(n.pos);
+    uint32_t joinLabel = emitBlock(n.pos);
+    ir::Terminator br;
+    br.term = ir::Term::CondBr;
+    br.cond = lhs;
+    br.loc = n.pos;
+    if (isAnd) {
+        br.thenTarget = rhsLabel;
+        br.elseTarget = shortLabel;
+    } else {
+        br.thenTarget = shortLabel;
+        br.elseTarget = rhsLabel;
+    }
+    emitTerminator(br);
+    sealBlock(current_);
+    auto storeCell = [&](ir::Value value) {
+        ir::Instr instr;
+        instr.op = ir::Op::Store;
+        instr.loc = n.pos;
+        instr.type = boolean;
+        instr.width = widthOf(boolean, n.pos);
+        instr.addressBase = cell;
+        instr.storedValue = value;
+        emit(std::move(instr));
+    };
+    auto brToJoin = [&]() {
+        ir::Terminator toJoin;
+        toJoin.term = ir::Term::Br;
+        toJoin.target = joinLabel;
+        toJoin.loc = n.pos;
+        emitTerminator(toJoin);
+    };
+    startBlock(rhsLabel);
+    ir::Value rhs = onIdentOrExpr(n.rhs.get(), boolean);
+    if (failed_) {
+        return undefined();
+    }
+    storeCell(rhs);
+    if (failed_) {
+        return undefined();
+    }
+    brToJoin();
+    sealBlock(current_);
+    startBlock(shortLabel);
+    storeCell(constantI64(isAnd ? 0 : 1, boolean, n.pos));
+    if (failed_) {
+        return undefined();
+    }
+    brToJoin();
+    sealBlock(current_);
+    startBlock(joinLabel);
+    ir::Instr load;
+    load.op = ir::Op::Load;
+    load.loc = n.pos;
+    load.type = boolean;
+    load.width = widthOf(boolean, n.pos);
+    load.addressBase = cell;
+    load.isPure = true;
+    ir::Value out = newValue(load.width, boolean, n.pos);
+    load.results.push_back(out);
+    emit(std::move(load));
+    if (failed_) {
+        return undefined();
+    }
+    return out;
 }
 
 ir::Value Lowerer::emitArith(BinOp op, ir::Value a, ir::Value b, TypeRef result,

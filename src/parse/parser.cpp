@@ -1026,6 +1026,9 @@ std::unique_ptr<Stmt> Parser::parseStmt() {
     if (kind == TokenKind::KwDelete) {
         return parseDelete();
     }
+    if (kind == TokenKind::KwAsm) {
+        return parseAsm();
+    }
     if (kind == TokenKind::KwBreak) {
         Position start = advance().pos;
         if (!match(TokenKind::Semi)) {
@@ -1421,6 +1424,41 @@ std::unique_ptr<Stmt> Parser::parseDelete() {
         return nullptr;
     }
     return std::make_unique<DeleteStmt>(start, std::move(ptr));
+}
+
+// `asm { "line" "line" }` — the strings are the block's raw text, joined
+// with a newline between them, and each `{placeholder}` body is kept raw
+// (suffix and all) for the checker and codegen to resolve (FEATURES §4.4).
+std::unique_ptr<Stmt> Parser::parseAsm() {
+    Position start = advance().pos;
+    if (!check(TokenKind::LBrace)) {
+        failHere("expected '{' after 'asm'");
+        return nullptr;
+    }
+    advance();
+    std::string text;
+    std::vector<std::string> names;
+    while (check(TokenKind::StringLit)) {
+        const Token& tok = peek();
+        advance();
+        if (!text.empty()) {
+            text += "\n";
+        }
+        for (const StringPart& part : tok.lit.parts) {
+            if (part.isExpr) {
+                text += "{" + part.text + "}";
+                names.push_back(part.text);
+            } else {
+                text += part.text;
+            }
+        }
+    }
+    if (!check(TokenKind::RBrace)) {
+        failHere("expected '}' to close the asm block");
+        return nullptr;
+    }
+    advance();
+    return std::make_unique<AsmStmt>(start, std::move(text), std::move(names));
 }
 
 // --- Types -------------------------------------------------------------------

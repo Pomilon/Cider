@@ -109,6 +109,7 @@ private:
     std::unique_ptr<Stmt> parseReturn();
     std::unique_ptr<Stmt> parseThrow();
     std::unique_ptr<Stmt> parseDelete();
+    std::unique_ptr<Stmt> parseAsm();
 
     // Types. `parseType` is the full spelling; `parsePrimaryType` is one
     // without the leading `*`s, for positions where pointer depth is written

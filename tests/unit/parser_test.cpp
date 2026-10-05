@@ -153,6 +153,46 @@ void testMethodInit() {
     check(cls.methods.empty(), "no ordinary methods");
 }
 
+// `asm { "line" "line" }` joins the strings into one text with a newline
+// between them and records each `{placeholder}` body raw, suffix included.
+void testAsm() {
+    std::printf("asm blocks\n");
+    bool ok = false;
+    std::unique_ptr<cider::Program> program = parse(
+        "func f(sum: int) -> void {\n"
+        "    asm {\n"
+        "        \"mov rax, 60\"\n"
+        "        \"mov edi, {sum}\"\n"
+        "        \"mov {fd:q}, r15\"\n"
+        "        \"syscall\"\n"
+        "    }\n"
+        "}\n", ok);
+    check(ok, "parses");
+    if (!ok) {
+        return;
+    }
+    const cider::FuncDecl& fn =
+        static_cast<const cider::FuncDecl&>(*program->decls[0]);
+    const cider::AsmStmt* block = nullptr;
+    for (const std::unique_ptr<cider::Stmt>& stmt : fn.body->stmts) {
+        if (const auto* as = dynamic_cast<const cider::AsmStmt*>(stmt.get())) {
+            block = as;
+        }
+    }
+    check(block != nullptr, "the statement is an AsmStmt");
+    if (block == nullptr) {
+        return;
+    }
+    std::string joined = "lines join with newlines: got [" + block->text + "]";
+    check(block->text == "mov rax, 60\nmov edi, {sum}\nmov {fd:q}, r15\nsyscall",
+          joined.c_str());
+    check(block->names.size() == 2, "one name per placeholder");
+    if (block->names.size() == 2) {
+        check(block->names[0] == "sum", "a bare name is kept");
+        check(block->names[1] == "fd:q", "a width suffix stays raw");
+    }
+}
+
 }  // namespace
 
 int main() {
@@ -165,6 +205,7 @@ int main() {
     testGenericCall();
     testControlForms();
     testMethodInit();
+    testAsm();
     std::printf("\n%d checks, %s\n", checks, failures == 0 ? "all passed" : "FAILURES");
     return failures == 0 ? 0 : 1;
 }

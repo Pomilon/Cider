@@ -288,6 +288,27 @@ void testFnAddr() {
     check(nilCall.ok, "nilPtr converts to *func: " + nilCall.stage);
 }
 
+// Every `{placeholder}` in an asm block must name something in scope: a
+// local, a parameter, or a module-level declaration. Anything else fails
+// at check time with the name in the message.
+void testAsm() {
+    std::printf("asm placeholders resolve\n");
+    Checked good = check(
+        "var g: int = 5;\n"
+        "func main() -> int {\n"
+        "    var sum: int = 3;\n"
+        "    asm { \"mov edi, {sum}\" \"mov eax, {g}\" }\n"
+        "    return 0;\n"
+        "}\n");
+    check(good.ok, "bound placeholders check: " + good.stage);
+    Checked param = check(
+        "func f(count: int) -> void { asm { \"mov edi, {count}\" } }\n");
+    check(param.ok, "a parameter placeholder checks: " + param.stage);
+    Checked bad = check(
+        "func main() -> int { asm { \"mov edi, {nope}\" } return 0; }\n");
+    check(!bad.ok && bad.stage == "check", "an unbound placeholder fails");
+}
+
 }  // namespace
 
 int main() {
@@ -300,6 +321,7 @@ int main() {
     testGenericStruct();
     testUnions();
     testFnAddr();
+    testAsm();
     testLen();
     testFuncLitChecks();
     testControl();

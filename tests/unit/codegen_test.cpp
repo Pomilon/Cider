@@ -365,6 +365,29 @@ void testArith32() {
           "i32 sums wrap before the remainder");
 }
 
+// `&&` and `||` short-circuit: the skipped side never evaluates, so a
+// trapping rhs beside a deciding lhs is quiet (SEMANTICS: short-circuit is
+// definitional, and a skipped trap never fires).
+void testShortCircuit() {
+    std::printf("short circuits run\n");
+    check(runQuiet("func main() -> int {\n"
+                   "    var t: bool = true && true;\n"
+                   "    var f: bool = true && false;\n"
+                   "    var o: bool = false || true;\n"
+                   "    if (t && o && !f) { return 7; }\n"
+                   "    return 0;\n"
+                   "}\n") == 7,
+          "truth tables agree");
+    check(runQuiet("func main() -> int {\n"
+                   "    var z: int = 0;\n"
+                   "    var a: bool = false && (1 / z == 0);\n"
+                   "    var b: bool = true || (1 / z == 0);\n"
+                   "    if (!a && b) { return 9; }\n"
+                   "    return 0;\n"
+                   "}\n") == 9,
+          "a skipped side never traps");
+}
+
 // A function pointer calls its target; a nil one dies by hardware trap.
 void testIndirectCall() {
     std::printf("indirect calls run\n");
@@ -497,6 +520,52 @@ void testFloat() {
           "a float global reaches the binary");
 }
 
+// A program that exits through its own asm block: a local placeholder
+// feeds the exit code, a global placeholder feeds a buffer address.
+void testAsm() {
+    std::printf("asm runs\n");
+    bool sig = false;
+    check(runCode("func main() -> int {\n"
+                  "    var sum: int = 38;\n"
+                  "    asm { \"mov rax, 60\" \"mov edi, {sum}\" \"syscall\" }\n"
+                  "    return 0;\n"
+                  "}\n", sig) == 38 && !sig,
+          "a local placeholder reaches its value");
+    check(runCode("var g: string = \"H\";\n"
+                  "func main() -> int {\n"
+                  "    asm {\n"
+                  "        \"mov rax, {g}\"\n"
+                  "        \"movzx eax, byte ptr [rax]\"\n"
+                  "        \"mov edi, eax\"\n"
+                  "        \"mov rax, 60\"\n"
+                  "        \"syscall\"\n"
+                  "    }\n"
+                  "    return 0;\n"
+                  "}\n", sig) == 72 && !sig,
+          "a global placeholder is its address");
+    // Both operands of one template instruction are locals: with each
+    // placeholder an independent storage memory operand this assembles to a
+    // mem-to-mem `mov`, which the assembler rejects. Each placeholder must
+    // arrive in its own register instead (v2's staging, BUG-239, adapted:
+    // a callee-saved register held across the block and copied back).
+    check(runCode("func main() -> int {\n"
+                  "    var a: u64 = 0;\n"
+                  "    var b: u64 = 55;\n"
+                  "    asm { \"mov {a}, {b:q}\" }\n"
+                  "    return a as int;\n"
+                  "}\n", sig) == 55 && !sig,
+          "two local placeholders in one instruction");
+    // A block that writes a placeholder must leave the write where the rest
+    // of the function reads it (copy-back), at any suffix width.
+    check(runCode("func main() -> int {\n"
+                  "    var r: int = 0;\n"
+                  "    var s: u8 = 0;\n"
+                  "    asm { \"mov {r:q}, 42\" \"mov {s}, 7\" }\n"
+                  "    return r + s;\n"
+                  "}\n", sig) == 49 && !sig,
+          "writes through placeholders persist");
+}
+
 }  // namespace
 
 int main() {
@@ -513,7 +582,9 @@ int main() {
     testForIn();
     testArith32();
     testIndirectCall();
+    testShortCircuit();
     testFloat();
+    testAsm();
     testTrap();
     testRepro();
     std::printf("\n%d checks, %s\n", checks, failures == 0 ? "all passed" : "FAILURES");

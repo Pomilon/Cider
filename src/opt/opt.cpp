@@ -368,6 +368,13 @@ uint64_t deadCode(ir::Module& module) {
                 for (const ir::Instr& seen : scan.body) {
                     if (seen.op == ir::Op::Load) {
                         readSlots.insert(seen.addressBase.id);
+                    } else if (seen.op == ir::Op::Asm) {
+                        // The block's text reads every placeholder's
+                        // storage: a store it will load must not be
+                        // judged dead.
+                        for (const ir::Value& use : seen.operands) {
+                            readSlots.insert(use.id);
+                        }
                     }
                 }
             }

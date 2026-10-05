@@ -876,6 +876,70 @@ void testForIn() {
     check(hasMul, "the element stride scales the index");
 }
 
+// One asm instruction carries the joined text, one name per placeholder,
+// and one paired operand: a slot for a local, an address word for a global.
+void testAsm() {
+    std::printf("asm lowers\n");
+    Lowered r = lower(
+        "var g: int = 5;\n"
+        "func main() -> int {\n"
+        "    var sum: int = 3;\n"
+        "    asm { \"mov edi, {sum}\" \"mov eax, {g}\" }\n"
+        "    return 0;\n"
+        "}\n");
+    check(r.ok, "lowers: " + r.stage);
+    const cider::ir::Function* fn = find(r.module.get(), "main");
+    if (fn == nullptr) {
+        return;
+    }
+    const cider::ir::Instr* asmb = nullptr;
+    for (const cider::ir::Block& block : fn->blocks) {
+        for (const cider::ir::Instr& instr : block.body) {
+            if (instr.op == cider::ir::Op::Asm) {
+                asmb = &instr;
+            }
+        }
+    }
+    check(asmb != nullptr, "an asm instruction exists");
+    if (asmb == nullptr) {
+        return;
+    }
+    check(asmb->asmNames.size() == 2, "one name per placeholder");
+    check(asmb->operands.size() == asmb->asmNames.size(),
+          "one operand per placeholder");
+    check(asmb->asmText.find("mov edi, {sum}") != std::string::npos,
+          "the text keeps its placeholders");
+    check(asmb->asmText.find("mov eax, {g}") != std::string::npos,
+          "the second line survives");
+}
+
+void testShortCircuit() {
+    std::printf("short circuit lowers\n");
+    Lowered r = lower(
+        "func main() -> int {\n"
+        "    var a: bool = true;\n"
+        "    var b: bool = false;\n"
+        "    var c: bool = a && b;\n"
+        "    var d: bool = a || b;\n"
+        "    if (c) { return 1; }\n"
+        "    if (d) { return 2; }\n"
+        "    return 0;\n"
+        "}\n");
+    check(r.ok, "lowers: " + r.stage);
+    const cider::ir::Function* fn = find(r.module.get(), "main");
+    if (fn == nullptr) {
+        return;
+    }
+    uint32_t condBrs = 0;
+    for (const cider::ir::Block& block : fn->blocks) {
+        if (block.term.term == cider::ir::Term::CondBr) {
+            ++condBrs;
+        }
+    }
+    // Two short-circuits plus two ifs: every one branches on a condition.
+    check(condBrs >= 4, "each &&, ||, and if leaves a conditional branch");
+}
+
 }  // namespace
 
 int main() {
@@ -907,6 +971,8 @@ int main() {
     testBreakContinue();
     testForLoop();
     testForIn();
+    testAsm();
+    testShortCircuit();
     testRefuseKeepsScopes();
     testInterfaceParamRefused();
     testNotYetLowered();

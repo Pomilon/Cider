@@ -110,9 +110,9 @@
   "class": "D"
  },
  "asm_width": {
-  "actual": "exit 1; tests/corpus/asm_width/main.cid:3:3: expected an expression; tests/corpus/asm_width/main.cid:4:3: expected a declaration",
-  "blocker": "asm blocks",
-  "class": "D"
+  "actual": "pass",
+  "blocker": "none",
+  "class": "A"
  },
  "async": {
   "actual": "exit 1; tests/corpus/async/main.cid:3:8: expected a declaration; tests/corpus/async/main.cid:7:1: expected a declaration",
@@ -141,8 +141,8 @@
  },
  "bitmask": {
   "actual": "compiler crash at check (SIGABRT/SIGBUS heap corruption, 'free(): invalid pointer'); u64-max literal as arg crashes (probe x1), in var-init gives clean 'integer literal does not fit' (probe v1)",
-  "blocker": "u64-literals",
-  "class": "D"
+  "blocker": "",
+  "class": "A"
  },
  "bitwise": {
   "actual": "exit 1; tests/corpus/legacy/bitwise/main.cid:22:5: expected an expression; tests/corpus/legacy/bitwise/main.cid:27:1: expected a declaration",
@@ -715,9 +715,9 @@
   "class": "D"
  },
  "gvn_cross_block": {
-  "actual": "exit 1; tests/corpus/legacy/gvn_cross_block/main.cid:18:9: expected an expression; tests/corpus/legacy/gvn_cross_block/main.cid:19:9: expected an expression",
-  "blocker": "asm-blocks (+bool-and-lowering)",
-  "class": "D"
+  "actual": "pass",
+  "blocker": "none",
+  "class": "A"
  },
  "gvn_float_const": {
   "actual": "run exit 0: OUT: ERR:",
@@ -725,24 +725,24 @@
   "class": "A"
  },
  "gvn_float_mov": {
-  "actual": "exit 1; tests/corpus/legacy/gvn_float_mov/main.cid:6:9: expected an expression; tests/corpus/legacy/gvn_float_mov/main.cid:7:9: expected an expression",
-  "blocker": "asm-blocks (+float-codegen)",
-  "class": "D"
+  "actual": "pass",
+  "blocker": "none",
+  "class": "A"
  },
  "gvn_phi": {
-  "actual": "exit 1; tests/corpus/legacy/gvn_phi/main.cid:15:9: expected an expression; tests/corpus/legacy/gvn_phi/main.cid:16:9: expected an expression",
-  "blocker": "asm-blocks",
-  "class": "D"
+  "actual": "pass",
+  "blocker": "none",
+  "class": "A"
  },
  "gvn_side_effects": {
-  "actual": "exit 1; tests/corpus/legacy/gvn_side_effects/main.cid:13:9: expected an expression; tests/corpus/legacy/gvn_side_effects/main.cid:14:9: expected an expression",
-  "blocker": "asm-blocks",
-  "class": "D"
+  "actual": "pass",
+  "blocker": "none",
+  "class": "A"
  },
  "gvn_simple": {
-  "actual": "exit 1; tests/corpus/legacy/gvn_simple/main.cid:15:9: expected an expression; tests/corpus/legacy/gvn_simple/main.cid:16:9: expected an expression",
-  "blocker": "asm-blocks (+bool-and-lowering)",
-  "class": "D"
+  "actual": "pass",
+  "blocker": "none",
+  "class": "A"
  },
  "heap_delete_destructors": {
   "actual": "exit=1 stdout_len=0 stderr_len=2567 first='tests/corpus/heap_delete_destructors/main.cid:18:10: a method needs a name'",
@@ -790,29 +790,29 @@
   "class": "D"
  },
  "inline_basic": {
-  "actual": "exit 1; tests/corpus/legacy/inline_basic/main.cid:8:9: expected an expression; tests/corpus/legacy/inline_basic/main.cid:9:9: expected an expression",
-  "blocker": "asm-blocks",
-  "class": "D"
+  "actual": "pass",
+  "blocker": "none",
+  "class": "A"
  },
  "inline_multi_block": {
-  "actual": "exit 1; tests/corpus/legacy/inline_multi_block/main.cid:11:9: expected an expression; tests/corpus/legacy/inline_multi_block/main.cid:12:9: expected an expression",
-  "blocker": "asm-blocks",
-  "class": "D"
+  "actual": "pass",
+  "blocker": "none",
+  "class": "A"
  },
  "inline_recursion_direct": {
-  "actual": "exit 1; tests/corpus/legacy/inline_recursion_direct/main.cid:11:9: expected an expression; tests/corpus/legacy/inline_recursion_direct/main.cid:12:9: expected an expression",
-  "blocker": "asm-blocks",
-  "class": "D"
+  "actual": "pass",
+  "blocker": "none",
+  "class": "A"
  },
  "inline_recursion_mutual": {
-  "actual": "exit 1; tests/corpus/legacy/inline_recursion_mutual/main.cid:18:9: expected an expression; tests/corpus/legacy/inline_recursion_mutual/main.cid:19:9: expected an expression",
-  "blocker": "asm-blocks",
-  "class": "D"
+  "actual": "pass",
+  "blocker": "none",
+  "class": "A"
  },
  "inline_stress": {
-  "actual": "exit 1; tests/corpus/legacy/inline_stress/main.cid:36:21: expected an expression; tests/corpus/legacy/inline_stress/main.cid:36:43: expected an expression",
-  "blocker": "asm-blocks",
-  "class": "D"
+  "actual": "pass",
+  "blocker": "none",
+  "class": "A"
  },
  "inline_string_literal": {
   "actual": "exit 1; std.io:1:1: cannot find module 'std.io'",
@@ -821,8 +821,8 @@
  },
  "int_wrap": {
   "actual": "cider run exit 108, stdout/stderr empty; expected exit 241 (IR is correct i32; native miscompiles)",
-  "blocker": "v3-codegen-bug: i32 arithmetic not truncated (silent wrong answer)",
-  "class": "D"
+  "blocker": "",
+  "class": "A"
  },
  "interface": {
   "actual": "exit 1; tests/corpus/legacy/interface/main.cid:20:18: a variable needs an initialiser; tests/corpus/legacy/interface/main.cid:21:18: a variable needs an initialiser",
@@ -900,24 +900,24 @@
   "class": "D"
  },
  "licm_inline": {
-  "actual": "exit 1; tests/corpus/legacy/licm_inline/main.cid:14:9: expected an expression; tests/corpus/legacy/licm_inline/main.cid:15:9: expected an expression",
-  "blocker": "asm-blocks",
-  "class": "D"
+  "actual": "pass",
+  "blocker": "none",
+  "class": "A"
  },
  "licm_nested": {
-  "actual": "exit 1; tests/corpus/legacy/licm_nested/main.cid:15:9: expected an expression; tests/corpus/legacy/licm_nested/main.cid:16:9: expected an expression",
-  "blocker": "asm-blocks",
-  "class": "D"
+  "actual": "pass",
+  "blocker": "none",
+  "class": "A"
  },
  "licm_non_invariant": {
-  "actual": "exit 1; tests/corpus/legacy/licm_non_invariant/main.cid:10:9: expected an expression; tests/corpus/legacy/licm_non_invariant/main.cid:11:9: expected an expression",
-  "blocker": "asm-blocks",
-  "class": "D"
+  "actual": "pass",
+  "blocker": "none",
+  "class": "A"
  },
  "licm_simple": {
-  "actual": "exit 1; tests/corpus/legacy/licm_simple/main.cid:12:9: expected an expression; tests/corpus/legacy/licm_simple/main.cid:13:9: expected an expression",
-  "blocker": "asm-blocks",
-  "class": "D"
+  "actual": "pass",
+  "blocker": "none",
+  "class": "A"
  },
  "licm_sret_call": {
   "actual": "cider run exit 1, stdout empty, stderr diagnostic: `main.cid:19:14: a variable needs an initialiser`",
@@ -925,9 +925,9 @@
   "class": "D"
  },
  "licm_stress": {
-  "actual": "exit 1; tests/corpus/legacy/licm_stress/main.cid:55:22: expected an expression; tests/corpus/legacy/licm_stress/main.cid:55:44: expected an expression",
-  "blocker": "asm-blocks",
-  "class": "D"
+  "actual": "pass",
+  "blocker": "none",
+  "class": "A"
  },
  "linked_list": {
   "actual": "exit 1; tests/corpus/legacy/linked_list/main.cid:14:17: expected an expression; tests/corpus/legacy/linked_list/main.cid:15:17: expected an expression",
@@ -1025,9 +1025,9 @@
   "class": "D"
  },
  "mmap_validation": {
-  "actual": "cider run exit 1, stdout empty, stderr diagnostic: `main.cid:11:5: expected an expression` (input.txt kept verbatim)",
-  "blocker": "asm-blocks",
-  "class": "D"
+  "actual": "pass",
+  "blocker": "none",
+  "class": "A"
  },
  "mod_fn_value": {
   "actual": "cider run exit 1, stdout empty, stderr diagnostic: `main.cid:6:10: a variable needs an initialiser`; driver has no module loader",
@@ -1265,9 +1265,9 @@
   "class": "D"
  },
  "stderr": {
-  "actual": "blocked-A reclassified 2026-10-05: must pass once blocker lands; run exit 1: OUT: ERR:tests/corpus/stderr/main.cid:4:3: expected an expression\\ntests/corpus/stderr/main.cid:5:3: expected a declaration\\ntests/corpus/stderr/main.cid:5:46: expected a declaration\\ntests/corpus/stderr/main.cid",
-  "blocker": "asm-blocks",
-  "class": "D"
+  "actual": "pass",
+  "blocker": "none",
+  "class": "A"
  },
  "stdio": {
   "actual": "blocked-A reclassified 2026-10-05: must pass once blocker lands; run exit 1: OUT: ERR:std.io:1:1: cannot find module 'std.io'\\n",
@@ -1395,9 +1395,9 @@
   "class": "A"
  },
  "syscall_efault_bounds": {
-  "actual": "blocked-A reclassified 2026-10-05: must pass once blocker lands; run exit 1: OUT: ERR:tests/corpus/syscall_efault_bounds/main.cid:9:5: expected an expression\\ntests/corpus/syscall_efault_bounds/main.cid:17:5: expected a declaration\\ntests/corpus/syscall_efault_bounds/main.cid:27:5: expec",
-  "blocker": "asm-blocks",
-  "class": "D"
+  "actual": "pass",
+  "blocker": "none",
+  "class": "A"
  },
  "template": {
   "actual": "exit 1; tests/corpus/legacy/template/main.cid:21:27: expected an expression; tests/corpus/legacy/template/main.cid:30:27: expected an expression",
@@ -1465,9 +1465,9 @@
   "class": "D"
  },
  "type_alias": {
-  "actual": "exit 1; tests/corpus/legacy/type_alias/main.cid:6:5: expected an expression; tests/corpus/legacy/type_alias/main.cid:11:1: expected a declaration",
-  "blocker": "asm-blocks",
-  "class": "D"
+  "actual": "pass",
+  "blocker": "none",
+  "class": "A"
  },
  "u64div": {
   "actual": "blocked-A reclassified 2026-10-05: must pass once blocker lands; run exit 1: OUT: ERR:tests/corpus/u64div/main.cid:3:23: a variable needs an initialiser\\ntests/corpus/u64div/main.cid:8:9: expected an expression\\n",

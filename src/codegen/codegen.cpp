@@ -10,6 +10,7 @@
 
 #include "codegen/codegen.h"
 
+#include <unordered_map>
 #include <unordered_set>
 #include <vector>
 
@@ -1202,6 +1203,7 @@ private:
         if (instr.op == ir::Op::DataAddr) {
             out_ += "  lea rax, [rip + " + instr.globalLabel + "]\n";
             out_ += "  mov " + slot(instr.results[0].id) + ", rax\n";
+            addrWords_[instr.results[0].id] = instr.globalLabel;
             return true;
         }
         if (instr.op == ir::Op::FnAddr) {
@@ -1209,8 +1211,216 @@ private:
             out_ += "  mov " + slot(instr.results[0].id) + ", rax\n";
             return true;
         }
+        if (instr.op == ir::Op::Asm) {
+            emitAsm(instr);
+            return true;
+        }
         refuse(instr.loc, "this instruction is not emitted yet");
         return false;
+    }
+
+    // The size an asm placeholder asks for: a `{name:q}`-style suffix
+    // overrides, and plain `{name}` is the value's own width, always with
+    // an explicit PTR so both operands of the template stay unambiguous.
+    std::string asmSizeName(ir::IRType width, char forced) {
+        if (forced == 'b') {
+            return "BYTE PTR";
+        }
+        if (forced == 'w') {
+            return "WORD PTR";
+        }
+        if (forced == 'd') {
+            return "DWORD PTR";
+        }
+        if (forced == 'q') {
+            return "QWORD PTR";
+        }
+        if (width == ir::IRType::I8 || width == ir::IRType::U8 ||
+            width == ir::IRType::Bool) {
+            return "BYTE PTR";
+        }
+        if (width == ir::IRType::I16 || width == ir::IRType::U16) {
+            return "WORD PTR";
+        }
+        if (width == ir::IRType::I32 || width == ir::IRType::U32 ||
+            width == ir::IRType::F32) {
+            return "DWORD PTR";
+        }
+        return "QWORD PTR";
+    }
+
+    // The register-name form for a staged placeholder: the same width
+    // rules as asmSizeName, but the register's own spelling — `r12b` has
+    // no `PTR`, and `rbx` names `ebx` at 32 bits. A `{name:q}` suffix
+    // overrides; plain `{name}` is the value's own width (FEATURES §4.4).
+    std::string asmRegName(const std::string& stem, ir::IRType width, char forced) {
+        if (forced == 'q') {
+            return stem;
+        }
+        if (forced == 'd') {
+            return stem == "rbx" ? "ebx" : stem + "d";
+        }
+        if (forced == 'w') {
+            return stem == "rbx" ? "bx" : stem + "w";
+        }
+        if (forced == 'b') {
+            return stem == "rbx" ? "bl" : stem + "b";
+        }
+        if (width == ir::IRType::I8 || width == ir::IRType::U8 ||
+            width == ir::IRType::Bool) {
+            return stem == "rbx" ? "bl" : stem + "b";
+        }
+        if (width == ir::IRType::I16 || width == ir::IRType::U16) {
+            return stem == "rbx" ? "bx" : stem + "w";
+        }
+        if (width == ir::IRType::I32 || width == ir::IRType::U32) {
+            return stem == "rbx" ? "ebx" : stem + "d";
+        }
+        return stem;
+    }
+
+    // Substitutes every `{name}` in the block's text with the operand the
+    // lowerer paired with that name. A local, a parameter, or a function is
+    // STAGED in a callee-saved register: loaded at the value's own width
+    // before the block, named as a register inside it, and copied back to
+    // its storage afterwards, so a write through the placeholder lands
+    // where the rest of the function reads. Staging is what keeps a
+    // template with two local operands (`mov {a}, {b:q}`) assembling — v2
+    // staged each into a memory slot instead, and a mem-to-mem `mov` is
+    // rejected by this assembler. The block's own contract preserves
+    // callee-saved registers (FEATURES §4.4), so a conforming block leaves
+    // the staged value intact. A global stays `[rip + label]`: that is the
+    // global's value in its own storage, writable in place, with nothing
+    // held across the block.
+    void emitAsm(const ir::Instr& instr) {
+        // Callee-saved only: rbp is the frame pointer, and a caller-saved
+        // register is exactly what the block is promised to clobber.
+        static const char* const kPool[] = {"r12", "r13", "r14", "r15", "rbx"};
+        static constexpr uint32_t kStagedMax = 5;
+        static constexpr uint32_t kPair = 2;
+        struct Staged {
+            uint32_t id;
+            uint32_t regIndex;
+            ir::IRType width;
+        };
+        std::vector<Staged> staged;
+        std::unordered_map<uint32_t, uint32_t> stageOfId;
+        std::string text = instr.asmText;
+        // Classify and substitute first, refusing before any output so a
+        // refused block emits nothing half-formed.
+        std::vector<std::string> replacements(instr.asmNames.size());
+        for (uint32_t i = 0; i < instr.asmNames.size(); ++i) {
+            if (i >= instr.operands.size()) {
+                break;
+            }
+            const std::string& raw = instr.asmNames[i];
+            std::string probe = raw;
+            if (!probe.empty() && probe[0] == '*') {
+                probe = probe.substr(1);
+            }
+            char forced = 0;
+            std::string::size_type colon = probe.find(':');
+            if (colon != std::string::npos && colon + 1 < probe.size()) {
+                forced = probe[colon + 1];
+            }
+            const ir::IRType width = instr.operands[i].width;
+            if (width == ir::IRType::F32 || width == ir::IRType::F64) {
+                refuse(instr.loc, "a float asm placeholder");
+                return;
+            }
+            auto known = addrWords_.find(instr.operands[i].id);
+            if (known != addrWords_.end()) {
+                replacements[i] = asmSizeName(width, forced) +
+                                  " [rip + " + known->second + "]";
+                continue;
+            }
+            auto found = stageOfId.find(instr.operands[i].id);
+            uint32_t regIndex = 0;
+            if (found != stageOfId.end()) {
+                regIndex = found->second;
+            } else {
+                if (staged.size() >= kStagedMax) {
+                    refuse(instr.loc, "more placeholders than this block can stage");
+                    return;
+                }
+                regIndex = static_cast<uint32_t>(staged.size());
+                stageOfId[instr.operands[i].id] = regIndex;
+                staged.push_back(Staged{instr.operands[i].id, regIndex, width});
+            }
+            replacements[i] = asmRegName(kPool[regIndex], width, forced);
+        }
+        // Stage loads and copy-backs address the frame through rsp, and the
+        // pushes below move rsp, so every one of those addresses carries
+        // the same depth. An odd number of pushes would leave a call the
+        // block makes 8 bytes out of alignment, so rax pads the count —
+        // nothing is live in registers at a block boundary.
+        const uint32_t stagedCount = static_cast<uint32_t>(staged.size());
+        const bool padRax = stagedCount % kPair != 0;
+        const uint32_t pushes = stagedCount + (padRax ? 1u : 0u);
+        const uint32_t depth = pushes * 8u;
+        for (const Staged& s : staged) {
+            out_ += "  push " + std::string(kPool[s.regIndex]) + "\n";
+        }
+        if (padRax) {
+            out_ += "  push rax\n";
+        }
+        for (const Staged& s : staged) {
+            const std::string cell = "[rsp + " + std::to_string(s.id * 8 + depth) + "]";
+            const std::string reg64 = kPool[s.regIndex];
+            // The load widens per the declared type, so the register holds
+            // the value: a `u8` 7 reads as 7 at whatever width the block
+            // asks for, and an `i32` -5 reads as -5 (FEATURES §4.4
+            // substitutes local *values*, not raw cells).
+            switch (s.width) {
+                case ir::IRType::I8:
+                    out_ += "  movsx " + reg64 + ", byte ptr " + cell + "\n";
+                    break;
+                case ir::IRType::U8:
+                case ir::IRType::Bool:
+                    out_ += "  movzx " + reg64 + ", byte ptr " + cell + "\n";
+                    break;
+                case ir::IRType::I16:
+                    out_ += "  movsx " + reg64 + ", word ptr " + cell + "\n";
+                    break;
+                case ir::IRType::U16:
+                    out_ += "  movzx " + reg64 + ", word ptr " + cell + "\n";
+                    break;
+                case ir::IRType::I32:
+                    out_ += "  movsxd " + reg64 + ", dword ptr " + cell + "\n";
+                    break;
+                default:
+                    out_ += "  mov " + reg64 + ", qword ptr " + cell + "\n";
+                    break;
+            }
+        }
+        for (uint32_t i = 0; i < instr.asmNames.size(); ++i) {
+            if (i >= replacements.size() || i >= instr.operands.size()) {
+                break;
+            }
+            const std::string key = "{" + instr.asmNames[i] + "}";
+            auto at = std::string::size_type{};
+            while ((at = text.find(key, at)) != std::string::npos) {
+                text.replace(at, key.size(), replacements[i]);
+                at += replacements[i].size();
+            }
+        }
+        out_ += text;
+        out_ += "\n";
+        // Copy each staged register back at full width: a narrow store
+        // would leave the cell's other bytes undefined for any 64-bit
+        // reader, and the staged register already holds the widened value.
+        for (auto it = staged.rbegin(); it != staged.rend(); ++it) {
+            const std::string cell =
+                "[rsp + " + std::to_string(it->id * 8 + depth) + "]";
+            out_ += "  mov qword ptr " + cell + ", " +
+                    std::string(kPool[it->regIndex]) + "\n";
+        }
+        if (padRax) {
+            out_ += "  pop rax\n";
+        }
+        for (auto it = staged.rbegin(); it != staged.rend(); ++it) {
+            out_ += "  pop " + std::string(kPool[it->regIndex]) + "\n";
+        }
     }
 
     // Integer and address casts: same size is a move, narrowing truncates
@@ -1429,6 +1639,10 @@ private:
     // address is slot storage (rsp+id*8). Any other id in an addressBase is
     // a computed address and dereferences.
     std::unordered_set<uint32_t> slotIds_;
+    // Result id of a DataAddr word -> its label, so an asm placeholder
+    // paired with that word prints `[rip + label]` (the global's value)
+    // instead of the temporary holding the address.
+    std::unordered_map<uint32_t, std::string> addrWords_;
     std::unordered_set<std::string> emittedHelpers_;
     std::string out_;
     // Unique suffix for u64-to-float conversion labels (int→float casts

@@ -84,6 +84,8 @@ public:
     // `delete p;` frees a class object. Checked first (the pointer type is
     // known), then lowered here.
     virtual void onDelete(DeleteStmt& n) { (void)n; }
+    // An asm block, after every `{placeholder}` name resolved against scope.
+    virtual void onAsmStmt(AsmStmt& n) { (void)n; }
     // A closure literal, after its body checked. The captures are the
     // enclosing locals the body reads, in first-read order; the signature
     // holds the declared parameters. The lowerer emits the hidden function
@@ -149,6 +151,7 @@ public:
     void visitContinue(Continue& n) override;
     void visitMatchStmt(MatchStmt& n) override;
     void visitDeleteStmt(DeleteStmt& n) override;
+    void visitAsmStmt(AsmStmt& n) override;
     void visitThrowStmt(ThrowStmt& n) override;
     void visitTryStmt(TryStmt& n) override;
 

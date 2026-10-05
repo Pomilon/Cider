@@ -327,7 +327,13 @@ void Checker::visitProgram(Program& n) {
             const bool floatGlobal =
                 declared.type->kind() == Kind::Basic &&
                 basicIsFloat(*declared.type->basic());
-            if (asFloat == nullptr || !floatGlobal) {
+            // A string literal is bytes in the image: the lowerer already
+            // owns that case (rodata plus a two-word global), so the gate
+            // only has to not call it non-constant.
+            const auto* asString = dynamic_cast<const StringLit*>(g->init.get());
+            const bool stringGlobal = declared.type->kind() == Kind::String;
+            if ((asFloat == nullptr || !floatGlobal) &&
+                (asString == nullptr || !stringGlobal)) {
                 fail(g->init->pos, "a global initialiser must be constant: " + folded.error);
                 continue;
             }
@@ -1090,6 +1096,31 @@ void Checker::visitDeleteStmt(DeleteStmt& n) {
     }
     if (sink_ != nullptr) {
         sink_->onDelete(n);
+    }
+}
+
+// Every `{placeholder}` in an asm block must name a local, a parameter, or
+// a module-level declaration: the text is raw assembly the checker cannot
+// see into, so a typo'd name has to fail here (FEAT-035).
+void Checker::visitAsmStmt(AsmStmt& n) {
+    bool bound = true;
+    for (const std::string& raw : n.names) {
+        std::string base = raw;
+        if (!base.empty() && base[0] == '*') {
+            base = base.substr(1);
+        }
+        std::string::size_type colon = base.find(':');
+        if (colon != std::string::npos) {
+            base = base.substr(0, colon);
+        }
+        if (base.empty() || (findLocal(base) == nullptr &&
+                             resolver_.lookup(moduleScope_, base) == nullptr)) {
+            fail(n.pos, "asm placeholder '" + base + "' is unbound");
+            bound = false;
+        }
+    }
+    if (bound && sink_ != nullptr) {
+        sink_->onAsmStmt(n);
     }
 }
 

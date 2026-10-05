@@ -85,6 +85,7 @@ public:
     void onFor(ForStmt& n) override;
     void onForIn(ForInStmt& n) override;
     void onDelete(DeleteStmt& n) override;
+    void onAsmStmt(AsmStmt& n) override;
     void onBlockEnter(Block& n) override;
     void onBlockExit(Block& n) override;
     // A closure literal, after its body checked. Emits the hidden function
@@ -93,6 +94,9 @@ public:
     void onFuncLit(FuncLit& lit, const std::vector<check::Captured>& captures,
                    const Signature& sig) override;
     ir::Value onBinary(Binary& n);
+    // `&&` and `||` with short-circuit control flow: the deciding side
+    // leaves its value in a cell, and only the taken arm writes the answer.
+    ir::Value lowerShortCircuit(const Binary& n);
     ir::Value onCall(Call& n);
     ir::Value onIdent(Ident& n);
     ir::Value onCast(Cast& n);

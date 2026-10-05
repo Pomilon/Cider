@@ -110,7 +110,7 @@ func main() -> int {
     if (ret != 4) return 8;
 
     // The bytes landed in the freshly mapped region ("ABCD": 'A' == 65).
-    var q: char* = p as char*;
+    var q: *u8 = p as *u8;
     if (*q != 65) return 9;
     *q = 90;  // 'Z'
     if (*q != 90) return 10;
