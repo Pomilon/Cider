@@ -16,7 +16,7 @@
  },
  "alias_array_literal": {
   "actual": "exit 1; tests/corpus/alias_array_literal/main.cid:16:18: expected an expression; tests/corpus/alias_array_literal/main.cid:17:25: expected an expression",
-  "blocker": "global-array-init",
+  "blocker": "wide-strings + const-global-aggregates (u\"..\" unbuilt; nonzero global arrays land with this slice)",
   "class": "D"
  },
  "alias_array_slice": {
@@ -85,9 +85,9 @@
   "class": "D"
  },
  "array_init": {
-  "actual": "exit 1; tests/corpus/array_init/main.cid:1:20: expected an expression; tests/corpus/array_init/main.cid:2:21: expected an expression",
+  "actual": "exact stdout/stderr/exit match",
   "blocker": "global-array-init",
-  "class": "D"
+  "class": "A"
  },
  "array_return": {
   "actual": "exact stdout/stderr/exit match",

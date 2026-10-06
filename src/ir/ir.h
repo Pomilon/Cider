@@ -236,10 +236,12 @@ struct Global {
     // set, the image holds `.quad initLabel` + `.quad initial-as-length`
     // instead of a plain `.quad initial`: a string global names its bytes.
     std::string initLabel;
-    // Zeroed image words past the first: a zero-repeat array global holds
-    // this many `.quad 0` entries instead of one `.quad initial`. Zero
-    // means the scalar path (one `.quad initial`).
-    uint64_t zeroWords = 0;
+    // Image words for an aggregate global: one `.quad` per entry, in
+    // order, instead of one `.quad initial`. A zero-repeat global holds
+    // all zeros; a literal construction holds its bytes packed
+    // little-endian (FEATURES §8.3: every byte known, no startup code).
+    // Empty means the scalar path (one `.quad initial`).
+    std::vector<uint64_t> initWords;
 };
 
 // Read-only bytes: a string literal's content, or any future constant blob.

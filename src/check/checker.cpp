@@ -324,22 +324,18 @@ void Checker::visitProgram(Program& n) {
         std::unordered_set<std::string> active;
         EvalResult folded = evalConstInt(*g->init, *env_, active);
         if (!folded.ok) {
-            // A zero repeat names every byte (zero), so it is a constant
-            // a global may hold: the bytes are known and there is no
-            // startup code to order (FEATURES.md §8.3). Anything else
-            // constructed is not constant.
-            bool zeroGlobal = false;
-            if (const auto* initArray =
-                    dynamic_cast<const NewArray*>(g->init.get())) {
-                // Repeat with a zero filler: the normal checking below
-                // still enforces the types (literal adaptation for
-                // scalars, isZeroRepeat for aggregates), so the gate only
-                // has to recognise the all-bytes-known shape.
-                if (initArray->repeat && !initArray->inits.empty()) {
-                    EvalResult filler =
-                        evalConstInt(*initArray->inits[0], *env_, active);
-                    zeroGlobal = filler.ok && filler.value == 0;
-                }
+            // An aggregate construction whose every scalar leaf folds to
+            // an integer names every image byte, so a global may hold it:
+            // the bytes are known and there is no startup code to order
+            // (FEATURES.md §8.3). A zero repeat is the all-zero case of
+            // the same rule. Anything else constructed is not constant.
+            // The normal checking below still enforces the types
+            // (literal adaptation for scalars, isZeroRepeat for
+            // aggregates), so the gate only recognises the
+            // all-bytes-known shape.
+            bool constGlobal = false;
+            if (dynamic_cast<const NewArray*>(g->init.get()) != nullptr) {
+                constGlobal = constAggregateInit(*g->init);
             }
             // A float literal is a constant of its own kind: evalConstInt
             // answers integers, so only a literal in a float-typed global
@@ -354,7 +350,7 @@ void Checker::visitProgram(Program& n) {
             // only has to not call it non-constant.
             const auto* asString = dynamic_cast<const StringLit*>(g->init.get());
             const bool stringGlobal = declared.type->kind() == Kind::String;
-            if (!zeroGlobal && (asFloat == nullptr || !floatGlobal) &&
+            if (!constGlobal && (asFloat == nullptr || !floatGlobal) &&
                 (asString == nullptr || !stringGlobal)) {
                 fail(g->init->pos, "a global initialiser must be constant: " + folded.error);
                 continue;
@@ -2062,6 +2058,19 @@ bool Checker::isZeroRepeat(const Expr& filler, TypeRef element) {
     std::unordered_set<std::string> active;
     EvalResult folded = evalConstInt(*lit, *env_, active);
     return folded.ok && folded.value == 0;
+}
+
+bool Checker::constAggregateInit(const Expr& init) {
+    if (const auto* made = dynamic_cast<const NewArray*>(&init)) {
+        for (const auto& element : made->inits) {
+            if (!constAggregateInit(*element)) {
+                return false;
+            }
+        }
+        return !made->inits.empty();
+    }
+    std::unordered_set<std::string> active;
+    return evalConstInt(init, *env_, active).ok;
 }
 
 TypeRef Checker::checkNewArray(NewArray& expr) {    TypeRef element = resolveHere(expr.element.get());

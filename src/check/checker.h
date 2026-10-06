@@ -217,6 +217,11 @@ private:
     // `new [[u8; 2]; 3] { [0, ...] }` zeroes every scalar, so the filler
     // never checks against the element type.
     bool isZeroRepeat(const Expr& filler, TypeRef element);
+    // Every scalar leaf of an aggregate construction folds to an integer:
+    // `new [u8; 3] {1, 2, 3}` names every image byte, so a global may hold
+    // it with no startup code to order (FEATURES §8.3). The type checking
+    // below still enforces every element, so this only answers constness.
+    bool constAggregateInit(const Expr& init);
     TypeRef checkTernary(Ternary& expr, TypeRef expected);
     void checkMethods(DeclId id, Kind kind, std::vector<MethodDecl>& methods);
     void checkCtor(DeclId id, Kind kind, FuncDecl* ctor, bool isInit);

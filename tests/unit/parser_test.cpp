@@ -286,6 +286,31 @@ void testAsm() {
     }
 }
 
+// `new [u8; 2] {[5, 6]}` is the list-literal element form of `new`
+// (FEATURES §1.8): the bracketed elements are the initializers, exactly
+// as if written without the brackets. `[0, ...]` stays the repeat form.
+void testListLiteralNew() {
+    std::printf("list-literal new\n");
+    bool ok = false;
+    std::unique_ptr<cider::Program> program =
+        parse("var g: [u8; 2] = new [u8; 2] {[5, 6]};", ok);
+    check(ok, "parses");
+    if (program->globals.empty() || program->globals[0]->init == nullptr) {
+        return;
+    }
+    const cider::NewArray& made =
+        static_cast<const cider::NewArray&>(*program->globals[0]->init);
+    check(!made.repeat, "a bracketed list is not the repeat form");
+    check(made.inits.size() == 2, "both elements are initializers");
+    program = parse("var h: [u8; 3] = new [u8; 3] {[0, ...]};", ok);
+    check(ok, "the repeat form still parses");
+    if (!program->globals.empty() && program->globals[0]->init != nullptr) {
+        const cider::NewArray& rep =
+            static_cast<const cider::NewArray&>(*program->globals[0]->init);
+        check(rep.repeat, "ellipsis keeps the repeat form");
+    }
+}
+
 }  // namespace
 
 int main() {
@@ -303,6 +328,7 @@ int main() {
     testDotQualifiedType();
     testIncrDecr();
     testAsm();
+    testListLiteralNew();
     std::printf("\n%d checks, %s\n", checks, failures == 0 ? "all passed" : "FAILURES");
     return failures == 0 ? 0 : 1;
 }

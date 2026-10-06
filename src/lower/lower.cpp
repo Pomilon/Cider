@@ -8,6 +8,7 @@
 
 #include <cstring>
 #include <cstdlib>
+#include <functional>
 
 #include "layout.h"
 #include "types/context.h"
@@ -720,26 +721,28 @@ void Lowerer::onGlobal(VarDecl& n) {
         binding.initial = 0;
     } else if (type.type->kind() == Kind::Array &&
                dynamic_cast<const NewArray*>(n.init.get()) != nullptr) {
-        // A zero-repeat array global passed the checker's const gate, so
-        // the filler is zero and every image byte is known: the global
-        // holds one zeroed word per word the type spans.
+        // A const aggregate global passed the checker's gate, so every
+        // leaf folds and every image byte is known: the global holds one
+        // `.quad` per eight bytes, little-endian, zero-padded at the end.
         const auto* initArray = dynamic_cast<const NewArray*>(n.init.get());
-        bool zeroed = false;
-        if (initArray->repeat && !initArray->inits.empty()) {
-            EvalResult filler =
-                evalConstInt(*initArray->inits[0], env, active);
-            zeroed = filler.ok && filler.value == 0;
-        }
-        if (!zeroed) {
+        std::string bytes;
+        if (!globalInitBytes(*initArray, type, bytes) || bytes.empty()) {
             refuse(n.init->pos, "a global initialiser must be constant");
             return;
         }
-        int words = wordCount(type);
-        if (words <= 0) {
-            refuse(n.init->pos, "a global initialiser must be constant");
-            return;
+        size_t byteCount = bytes.size();
+        uint64_t quads = (static_cast<uint64_t>(byteCount) + 7u) / 8u;
+        for (uint64_t word = 0; word < quads; ++word) {
+            uint64_t quad = 0;
+            for (uint64_t byte = 0; byte < 8u; ++byte) {
+                uint64_t at = word * 8u + byte;
+                uint64_t bits = at < bytes.size()
+                                    ? static_cast<unsigned char>(bytes[at])
+                                    : 0u;
+                quad |= bits << (byte * 8);
+            }
+            binding.initWords.push_back(quad);
         }
-        binding.zeroWords = static_cast<uint64_t>(words);
     } else if (type.type->kind() == Kind::Basic &&
                basicIsFloat(*type.type->basic())) {
         // A float global carries its IEEE bits in the image. The
@@ -801,7 +804,7 @@ void Lowerer::onGlobal(VarDecl& n) {
     global.type = type;
     global.initial = binding.initial;
     global.initLabel = binding.initLabel;
-    global.zeroWords = binding.zeroWords;
+    global.initWords = binding.initWords;
     module_->globals.push_back(global);
 }
 
@@ -1674,6 +1677,82 @@ bool Lowerer::isZeroRepeatFiller(const Expr& filler, TypeRef element) {
     EvalEnv env = resolver_.evalEnv(resolver_.moduleScope());
     EvalResult folded = evalConstInt(*lit, env, active);
     return folded.ok && folded.value == 0;
+}
+
+bool Lowerer::globalInitBytes(const NewArray& init, TypeRef arrayType,
+                              std::string& bytes) {
+    std::optional<int64_t> extent = arrayType.type->length();
+    if (!extent.has_value() || *extent < 0) {
+        return false;
+    }
+    TypeRef element{arrayType.type->element()};
+    int64_t elemBytes = resolver_.nominalSize(element.type);
+    if (elemBytes <= 0) {
+        return false;
+    }
+    std::unordered_set<std::string> active;
+    EvalEnv env = resolver_.evalEnv(resolver_.moduleScope());
+    auto appendScalar = [&](const Expr& leaf, int64_t width) -> bool {
+        if (width <= 0) {
+            return false;
+        }
+        EvalResult folded = evalConstInt(leaf, env, active);
+        if (!folded.ok) {
+            return false;
+        }
+        uint64_t bits = static_cast<uint64_t>(folded.value);
+        for (int64_t byte = 0; byte < width; ++byte) {
+            bytes.push_back(static_cast<char>(bits & 0xFFu));
+            bits >>= 8;
+        }
+        return true;
+    };
+    // One element's worth of image bytes: a nested construction recurses,
+    // a scalar folds, and a scalar zero over an aggregate element is the
+    // all-zero case the zero-repeat rule owns (checker enforces the same).
+    std::function<bool(const Expr&, TypeRef)> appendElement =
+        [&](const Expr& leaf, TypeRef elemType) -> bool {
+        if (const auto* sub = dynamic_cast<const NewArray*>(&leaf)) {
+            if (elemType.type->kind() != Kind::Array) {
+                return false;
+            }
+            return globalInitBytes(*sub, elemType, bytes);
+        }
+        if (elemType.type->kind() == Kind::Array) {
+            int64_t total = resolver_.nominalSize(elemType.type);
+            if (total <= 0) {
+                return false;
+            }
+            EvalResult folded = evalConstInt(leaf, env, active);
+            if (!folded.ok || folded.value != 0) {
+                return false;
+            }
+            bytes.append(static_cast<size_t>(total), '\0');
+            return true;
+        }
+        return appendScalar(leaf, resolver_.nominalSize(elemType.type));
+    };
+    if (init.repeat) {
+        size_t fillers = init.inits.size();
+        if (fillers != 1) {
+            return false;
+        }
+        for (int64_t at = 0; at < *extent; ++at) {
+            if (!appendElement(*init.inits[0], element)) {
+                return false;
+            }
+        }
+        return true;
+    }
+    if (static_cast<int64_t>(init.inits.size()) != *extent) {
+        return false;
+    }
+    for (const auto& one : init.inits) {
+        if (!appendElement(*one, element)) {
+            return false;
+        }
+    }
+    return true;
 }
 
 void Lowerer::constructArray(const std::vector<ir::Value>& slots, const NewArray& n) {

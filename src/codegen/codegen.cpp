@@ -134,13 +134,13 @@ public:
             for (const ir::Global& global : module_.globals) {
                 out_ += global.label + ":\n";
                 if (global.initLabel.empty()) {
-                    if (global.zeroWords == 0) {
+                    if (global.initWords.empty()) {
                         out_ += "  .quad " + std::to_string(global.initial) + "\n";
                     } else {
-                        // A zeroed aggregate: one zero word per word the
-                        // type spans, so element stores land on image bytes.
-                        for (uint64_t word = 0; word < global.zeroWords; ++word) {
-                            out_ += "  .quad 0\n";
+                        // An aggregate global: one word per eight image
+                        // bytes, so element stores land on image bytes.
+                        for (uint64_t word : global.initWords) {
+                            out_ += "  .quad " + std::to_string(word) + "\n";
                         }
                     }
                 } else {

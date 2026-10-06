@@ -100,8 +100,13 @@ void testGlobalZero() {
     Checked explicitInit = check(
         "var g: [u8; 3] = new [u8; 3] {1, 2, 3};\n"
         "func main() -> int { return 0; }\n");
-    check(!explicitInit.ok && explicitInit.stage == "check",
-          "an explicit global array still needs a constant");
+    check(explicitInit.ok, "a literal global array checks: " + explicitInit.stage);
+    Checked runtimeInit = check(
+        "func f() -> u8 { return 1; }\n"
+        "var g: [u8; 2] = new [u8; 2] {f(), 8};\n"
+        "func main() -> int { return 0; }\n");
+    check(!runtimeInit.ok && runtimeInit.stage == "check",
+          "a runtime element still needs a constant");
 }
 
 // Names resolve through locals first, then the module scope.

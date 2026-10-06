@@ -2039,16 +2039,35 @@ std::unique_ptr<Expr> Parser::parseNew() {
                 failHere("expected ','");
                 return nullptr;
             }
-            if (!match(TokenKind::Ellipsis)) {
-                failHere("expected '...'");
-                return nullptr;
+            // `[0, ...]` is the repeat form; `[a, b, c]` is the same
+            // element list `{a, b, c}` would hold, brackets included
+            // (FEATURES §1.8). The comma decides nothing — what follows
+            // it does.
+            if (match(TokenKind::Ellipsis)) {
+                if (!match(TokenKind::RBracket)) {
+                    failHere("expected ']'");
+                    return nullptr;
+                }
+                inits.push_back(std::move(first));
+                repeat = true;
+            } else {
+                inits.push_back(std::move(first));
+                for (;;) {
+                    std::unique_ptr<Expr> init = parseExpr();
+                    if (init == nullptr) {
+                        return nullptr;
+                    }
+                    inits.push_back(std::move(init));
+                    if (match(TokenKind::Comma)) {
+                        continue;
+                    }
+                    break;
+                }
+                if (!match(TokenKind::RBracket)) {
+                    failHere("expected ']'");
+                    return nullptr;
+                }
             }
-            if (!match(TokenKind::RBracket)) {
-                failHere("expected ']'");
-                return nullptr;
-            }
-            inits.push_back(std::move(first));
-            repeat = true;
         } else if (!check(TokenKind::RBrace)) {
             for (;;) {
                 std::unique_ptr<Expr> init = parseExpr();

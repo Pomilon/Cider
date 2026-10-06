@@ -191,6 +191,15 @@ void testGlobals() {
                    "    return g[j] as int;\n"
                    "}\n") == 9,
           "a computed global store reads back");
+    // A literal construction names every image byte, so the global holds
+    // its values with no startup code (FEATURES §8.3): u8 packs four to a
+    // quad, u16 two, and narrow reads mask so padding is convention-safe.
+    check(runQuiet("var g: [u8; 4] = new [u8; 4] {10, 20, 30, 40};\n"
+                   "var w: [u16; 2] = new [u16; 2] {1000, 2000};\n"
+                   "func main() -> int {\n"
+                   "    return (g[0] as int) + (g[3] as int) + (w[1] as int);\n"
+                   "}\n") == (10 + 40 + 2000) % 256,
+          "a literal global array reads back");
 }
 
 // Division traps rather than answering.

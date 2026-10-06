@@ -668,7 +668,8 @@ void testGlobalZeroArray() {
     bool found = false;
     if (r.ok) {
         for (const auto& global : r.module->globals) {
-            if (global.label == "g_g" && global.zeroWords == 1) {
+            if (global.label == "g_g" && global.initWords.size() == 1 &&
+                global.initWords[0] == 0) {
                 found = true;
             }
         }

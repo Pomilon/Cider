@@ -55,9 +55,9 @@ struct GlobalBinding {
     std::string module;
     TypeRef type;
     int64_t initial = 0;
-    // Zeroed image words for a zero-repeat array global: the global holds
-    // this many `.quad 0` entries instead of one `.quad initial`.
-    uint64_t zeroWords = 0;
+    // Image words for an aggregate global: one `.quad` per entry instead
+    // of one `.quad initial`. Empty means the scalar path.
+    std::vector<uint64_t> initWords;
     // A read-only bytes object this global points at, empty when none. Set
     // for string globals, whose 16 bytes are (rodata address, length).
     std::string initLabel;
@@ -251,6 +251,11 @@ public:
     // Zero-repeat support for construction: a scalar-zero filler over an
     // aggregate element zeroes every scalar instead of lowering one value.
     bool isZeroRepeatFiller(const Expr& filler, TypeRef element);
+    // Image bytes for a const aggregate global: flattens a NewArray init
+    // into little-endian bytes (one element width per scalar leaf,
+    // recursing into nested constructions). Every leaf must fold; the
+    // checker's const gate owns that rule and this is its backstop.
+    bool globalInitBytes(const NewArray& init, TypeRef arrayType, std::string& bytes);
     // A class constructs its fields after a null vptr word; methods wire
     // the vptr in a later slice. A class with bases is refused: inherited
     // fields have no layout yet.
