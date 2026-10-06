@@ -938,6 +938,11 @@ private:
                 if (narrow) {
                     if (instr.width == ir::IRType::I32 && isSigned) {
                         out_ += "  movsxd rax, eax\n";
+                    } else if (instr.width == ir::IRType::U32) {
+                        // The op above ran 64 bits wide, so the low 32 must
+                        // be taken explicitly: writing eax zeroes the top,
+                        // which is the wrap the type promises.
+                        out_ += "  mov eax, eax\n";
                     } else if (instr.width == ir::IRType::I16) {
                         out_ += std::string(isSigned ? "  movsx eax, ax\n" : "  movzx eax, ax\n");
                     } else if (instr.width == ir::IRType::I8 || instr.width == ir::IRType::U8) {

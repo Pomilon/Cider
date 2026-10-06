@@ -809,7 +809,22 @@ void Lowerer::onGlobal(VarDecl& n) {
             binding.initial = static_cast<int64_t>(pattern);
         }
     } else {
-        binding.initial = folded.ok ? folded.value : 0;
+        // A folded integer names image bytes, so it is cut to the declared
+        // width here: without the cut a 64-bit fold stores bits the type
+        // does not own. The checker rejects an out-of-range fold unless
+        // wrap defines it, so the cut only ever keeps a wrap.
+        int64_t initial = folded.ok ? folded.value : 0;
+        if (folded.ok && type.type->kind() == Kind::Basic) {
+            const std::optional<BasicKind> basic = type.type->basic();
+            if (basic.has_value() && basicIsInteger(*basic) &&
+                basicWidthBits(*basic) < basicWidthBits(BasicKind::I64)) {
+                uint64_t kept = static_cast<uint64_t>(initial);
+                kept &= (kOneWord << static_cast<uint64_t>(basicWidthBits(*basic))) -
+                        kOneWord;
+                initial = static_cast<int64_t>(kept);
+            }
+        }
+        binding.initial = initial;
     }
     globals_.push_back(binding);
     ir::Global global;

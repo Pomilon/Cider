@@ -437,6 +437,23 @@ void testFloatGlobal() {
           "a runtime float still needs a constant");
 }
 
+void testGlobalConstWidth() {
+    // A folded integer names image bytes, so one that does not fit the
+    // declared width is provably overflowing and rejects — unless wrap
+    // defines the value, in which case the low bits are kept (SEMANTICS
+    // §2.3, FEATURES §11.5). A fitting fold always passes.
+    std::printf("global constants fit their width\n");
+    Checked fits = check(
+        "var g: u32 = (2000000000 as u32) + (1000000000 as u32);\n"
+        "func main() -> int { return 0; }\n");
+    check(fits.ok, "a fitting fold checks: " + fits.stage);
+    Checked overflows = check(
+        "var g: u32 = (3000000000 as u32) + (3000000000 as u32);\n"
+        "func main() -> int { return 0; }\n");
+    check(!overflows.ok && overflows.stage == "check",
+          "an overflowing fold rejects without wrap: " + overflows.stage);
+}
+
 void testRepeatZero() {
     // `new [T; N] { [0, ...] }` makes every element zero (FEATURES §14.2),
     // and zero reaches through nested arrays: the filler is the scalar
@@ -487,6 +504,7 @@ int main() {
     testNames();
     testGlobalZero();
     testFloatGlobal();
+    testGlobalConstWidth();
     testCalls();
     testInterface();
     testGenericCall();

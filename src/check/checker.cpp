@@ -371,6 +371,29 @@ void Checker::visitProgram(Program& n) {
         if (!checkCompatible(g->init->pos, g->init.get(), init, declared)) {
             continue;
         }
+        // A folded integer names image bytes: when it does not fit the
+        // declared width the program is provably overflowing, which rejects
+        // — unless wrap defines the value, in which case the lowerer keeps
+        // the low bits (SEMANTICS §2.3, FEATURES §11.5). Literals never
+        // reach here: their own range check fails first, above.
+        if (folded.ok && declared.type->kind() == Kind::Basic) {
+            const std::optional<BasicKind> basic = declared.type->basic();
+            if (basic.has_value() && basicIsInteger(*basic) &&
+                basicWidthBits(*basic) < basicWidthBits(BasicKind::I64) &&
+                dynamic_cast<const IntLit*>(g->init.get()) == nullptr) {
+                const int width = basicWidthBits(*basic);
+                const bool isSigned = basicIsSigned(*basic);
+                __int128 lo = isSigned ? -(static_cast<__int128>(1) << (width - 1)) : 0;
+                __int128 hi = isSigned ? ((static_cast<__int128>(1) << (width - 1)) - 1)
+                                       : ((static_cast<__int128>(1) << width) - 1);
+                if (folded.value < lo || folded.value > hi) {
+                    if (!n.wrap) {
+                        fail(g->init->pos, "a constant does not fit its type");
+                        continue;
+                    }
+                }
+            }
+        }
         record(g.get(), declared);
     }
     // After the globals are checked: the sink reads their recorded types, and

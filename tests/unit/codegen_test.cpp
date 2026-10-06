@@ -610,6 +610,23 @@ void testArith32() {
                    " var g: int = 2000000000;\n"
                    " return (a + b + c + d + e + f + g) % 251; }\n") == 241,
           "i32 sums wrap before the remainder");
+    // A u32 sum wraps at 32 bits too: the backend computes narrow results
+    // at 64 bits, so the low 32 must be taken explicitly — a full 64-bit
+    // store leaves 6000000000 where the type promises 1705032704.
+    check(runQuiet("# experimental(wrap)\n"
+                   "func main() -> int {\n"
+                   " var a: u32 = (3000000000 as u32) + (3000000000 as u32);\n"
+                   " if (a == 1705032704) { return 1; }\n"
+                   " return 0; }\n") == 1,
+          "u32 sums wrap before the comparison");
+    // A global folds the same sum at compile time: under wrap the image
+    // holds the low 32 bits, matching the local path exactly.
+    check(runQuiet("# experimental(wrap)\n"
+                   "var g: u32 = (3000000000 as u32) + (3000000000 as u32);\n"
+                   "func main() -> int {\n"
+                   " if (g == 1705032704) { return 1; }\n"
+                   " return 0; }\n") == 1,
+          "u32 global folds wrap before the comparison");
 }
 
 // `&&` and `||` short-circuit: the skipped side never evaluates, so a
