@@ -379,6 +379,23 @@ void testBoolCompare() {
     check(!mixed.ok && mixed.stage == "check", "bool == int fails");
 }
 
+void testCharCompare() {
+    std::printf("chars compare for equality\n");
+    Checked good = check(
+        "func main() -> int {\n"
+        "    var a: char = 'x';\n"
+        "    if (a == 'x' && a != 'y') { return 1; }\n"
+        "    return 0;\n"
+        "}\n");
+    check(good.ok, "== and != on chars: " + good.stage);
+    Checked rel = check(
+        "func main() -> int { var c: char = 'a' < 'b'; return 0; }\n");
+    check(!rel.ok && rel.stage == "check", "ordering on chars fails");
+    Checked mixed = check(
+        "func main() -> int { var c: char = 'a'; if (c == 97) { return 1; } return 0; }\n");
+    check(!mixed.ok && mixed.stage == "check", "char == int fails without as");
+}
+
 void testRepeatZero() {
     // `new [T; N] { [0, ...] }` makes every element zero (FEATURES §14.2),
     // and zero reaches through nested arrays: the filler is the scalar
@@ -436,6 +453,7 @@ int main() {
     testFnAddr();
     testIncrDecr();
     testBoolCompare();
+    testCharCompare();
     testRepeatZero();
     testSliceCopy();
     testAsm();

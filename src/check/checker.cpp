@@ -1582,6 +1582,21 @@ TypeRef Checker::checkBinary(Binary& expr, TypeRef expected) {
             fail(expr.pos, "bools compare for equality only");
             return errorRef();
         }
+        const bool lhsChar = lhs.type->kind() == Kind::Basic &&
+                             *lhs.type->basic() == BasicKind::Char;
+        const bool rhsChar = rhs.type->kind() == Kind::Basic &&
+                             *rhs.type->basic() == BasicKind::Char;
+        if (lhsChar || rhsChar) {
+            // Equality on chars compares byte values (SEMANTICS §4, the
+            // bool rule applied to the other 1-byte type): ordering has
+            // no meaning, and a char beside a non-char needs an explicit
+            // `as` — a bare 66 is an int, not a char (FEATURES §13).
+            if (isEq && lhsChar && rhsChar) {
+                return TypeRef{ctx_.basic(BasicKind::Bool)};
+            }
+            fail(expr.pos, "chars compare for equality only");
+            return errorRef();
+        }
         if (lhs.type->kind() == Kind::Pointer && rhs.type->kind() == Kind::Pointer) {
             // Pointers compare by identity (SEMANTICS §4): two spellings of
             // one pointer type, or either side nilPtr — its spelling is

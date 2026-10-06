@@ -669,6 +669,19 @@ void testBoolCompare() {
           "negation and equality agree");
 }
 
+void testCharCompare() {
+    std::printf("char equality runs\n");
+    check(runQuiet("func main() -> int {\n"
+                   "    var a: char = 'x';\n"
+                   "    if (a != 'x') { return 1; }\n"
+                   "    if (a == 'y') { return 2; }\n"
+                   "    var g: char = a;\n"
+                   "    if (g == 'x') { return 3; }\n"
+                   "    return 0;\n"
+                   "}\n") == 3,
+          "equality distinguishes char values");
+}
+
 void testBitNot() {
     std::printf("bitwise not runs\n");
     check(runQuiet("func main() -> int {\n"
@@ -978,6 +991,7 @@ int main() {
     testIndirectCall();
     testShortCircuit();
     testBoolCompare();
+    testCharCompare();
     testBitNot();
     testTernary();
     testInterp();

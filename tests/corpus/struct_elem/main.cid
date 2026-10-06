@@ -16,6 +16,6 @@ func main() -> int {
   g_tasks[0].state = 1;
   g_tasks[0].name[9] = 66 as char;
   if (g_tasks[0].state != 1) { return 2; }
-  if (g_tasks[0].name[9] != 66) { return 3; }
+  if (g_tasks[0].name[9] != (66 as char)) { return 3; }
   return 0;
 }
