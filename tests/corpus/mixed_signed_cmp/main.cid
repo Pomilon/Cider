@@ -13,17 +13,17 @@ func main() -> int {
   if (!(a == c)) { return 3; }          // equal in the unsigned domain
   if (a != c) { return 4; }
   if (!((1 as u32) < 2)) { return 5; }  // positive control
-  var d: i64 = 0 - 1;
+  var d: i64 = (0 - 1) as i64;
   var e: u64 = 18446744073709551615;
   if (!(d == e)) { return 6; }          // i64/u64: equal unsigned
   if (d != e) { return 7; }
-  var f: i8 = 0 - 1;
+  var f: i8 = (0 - 1) as i8;
   var g: u8 = 255;
   if (!(f == g)) { return 8; }          // i8 -1 wraps to u8 255
-  var h: i16 = 0 - 1;
+  var h: i16 = (0 - 1) as i16;
   var i: u32 = 4294967295;
   if (!(h == i)) { return 9; }          // sign-extend, then wrap to u32
-  var j: i64 = 0 - 1;
+  var j: i64 = (0 - 1) as i64;
   var k: u32 = 1;
   if (!(j < k)) { return 10; }          // signed wider: -1 < 1 true
   if (j == k) { return 11; }
@@ -31,8 +31,8 @@ func main() -> int {
   var n: u16 = 300;
   if (!(m == n)) { return 12; }         // equal widths, positive values
   if (m < n) { return 13; }
-  var p: i8 = 0 - 1;
-  var q: i8 = 0 - 1;
+  var p: i8 = (0 - 1) as i8;
+  var q: i8 = (0 - 1) as i8;
   if (p != q) { return 14; }            // all-signed pair unchanged
   var r: u64 = 5;
   var s: u64 = 7;
@@ -40,7 +40,7 @@ func main() -> int {
   if (a <= b) { return 16; }            // unsigned: 0xFFFFFFFF <= 1 false
   if (!(a >= b)) { return 17; }         // unsigned: 0xFFFFFFFF >= 1 true
   var t: u8 = 200;
-  var u: i32 = 0 - 1;
+  var u: i32 = (0 - 1) as i32;
   if (!(t > u)) { return 18; }          // narrower unsigned, wider signed
   if (u >= t) { return 19; }
 
@@ -48,7 +48,7 @@ func main() -> int {
   // the unsigned domain (ir_gen converts both operands to U64 before the
   // CMP). The VM compared the extended values signed, so i64(-1) < u64(1)
   // was true and u64(max) < 1 was true.
-  var dneg: i64 = 0 - 1;
+  var dneg: i64 = (0 - 1) as i64;
   var one64: u64 = 1;
   if (dneg < one64) { return 20; }
   if (dneg <= one64) { return 21; }

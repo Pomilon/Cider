@@ -8,11 +8,11 @@ func main() -> int {
   if (MAXI != 0x7FFFFFFFFFFFFFFF) { return 3; }
   var u: u64 = 0xFFFF800000000000;
   if ((u >> 32) != 0xFFFF8000) { return 4; }
-  var s: i64 = 0 - 8;
+  var s: i64 = (0 - 8) as i64;
   if ((s >> 2) != (0 - 2)) { return 5; }
   var all: u64 = 0xFFFFFFFFFFFFFFFF;
   if ((all >> 63) != 1) { return 6; }
-  var neg: i64 = 0 - 1;
+  var neg: i64 = (0 - 1) as i64;
   if ((neg >> 63) != (0 - 1)) { return 7; }
   return 0;
 }

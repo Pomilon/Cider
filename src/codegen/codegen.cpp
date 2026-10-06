@@ -1663,6 +1663,33 @@ private:
                             basicIsSigned(*to.type->basic());
         out_ += "  mov rax, " + slot(instr.operands[0].id) + "\n";
         if (fromBits == toBits) {
+            // Same width, different signedness: the cell keeps the
+            // source's extension, so re-extend through the target —
+            // i32(-1) `as` u32 reads 0xFFFFFFFF, not the sign-extended
+            // source cell. Pointers keep the plain move.
+            const bool fromInt = !fromPtr && from.type->kind() == Kind::Basic &&
+                                 from.type->basic().has_value() &&
+                                 basicIsInteger(*from.type->basic());
+            const bool toInt = !toPtr && to.type->kind() == Kind::Basic &&
+                               to.type->basic().has_value() &&
+                               basicIsInteger(*to.type->basic());
+            const bool crossSign = fromInt && toInt &&
+                                   (basicIsSigned(*from.type->basic()) !=
+                                    basicIsSigned(*to.type->basic()));
+            if (!crossSign) {
+                out_ += "  mov " + slot(instr.results[0].id) + ", rax\n";
+                return true;
+            }
+            if (toBits == 8) {
+                out_ += std::string(signedTarget ? "  movsx rax, al\n"
+                                                 : "  movzx rax, al\n");
+            } else if (toBits == 16) {
+                out_ += std::string(signedTarget ? "  movsx rax, ax\n"
+                                                 : "  movzx rax, ax\n");
+            } else if (toBits == 32) {
+                out_ += std::string(signedTarget ? "  movsxd rax, eax\n"
+                                                 : "  mov eax, eax\n");
+            }
             out_ += "  mov " + slot(instr.results[0].id) + ", rax\n";
             return true;
         }

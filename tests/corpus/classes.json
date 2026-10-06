@@ -460,9 +460,9 @@
   "class": "A"
  },
  "f64_arith": {
-  "actual": "exit=1 stdout_len=0 stderr_len=40 first=\"std.io:1:1: cannot find module 'std.io'\"",
+  "actual": "exact stdout/stderr/exit match",
   "blocker": "float-codegen (+stdlib-import)",
-  "class": "D"
+  "class": "A"
  },
  "f64_compound_int": {
   "actual": "run exit 0: OUT: ERR:",
@@ -545,9 +545,9 @@
   "class": "A"
  },
  "float_sizeof_stress": {
-  "actual": "exit 1; tests/corpus/legacy/float_sizeof_stress/main.cid:57:5: expected an expression; tests/corpus/legacy/float_sizeof_stress/main.cid:62:1: expected a declaration",
+  "actual": "exact stdout/stderr/exit match",
   "blocker": "float-codegen (+stdlib-imports, asm-blocks)",
-  "class": "D"
+  "class": "A"
  },
  "float_stress": {
   "actual": "passes exactly; stub expected.json filled with captured bytes (success-path self-check verified)",
@@ -1010,9 +1010,9 @@
   "class": "D"
  },
  "mixed_cmp": {
-  "actual": "cider run exit 1, stdout empty, stderr diagnostic: `std.alloc:1:1: cannot find module 'std.alloc'`",
+  "actual": "exact stdout/stderr/exit match",
   "blocker": "stdlib-alloc (comparisons themselves are legal per SEMANTICS 2.3; would-be A)",
-  "class": "D"
+  "class": "A"
  },
  "mixed_int": {
   "actual": "cider run exit 0, stdout/stderr empty \u2014 matches expected.json after rewrite",
@@ -1020,9 +1020,9 @@
   "class": "A"
  },
  "mixed_signed_cmp": {
-  "actual": "cider run: SIGSEGV (exit 135), no diagnostic",
+  "actual": "exact stdout/stderr/exit match",
   "blocker": "boolop-checker-crash (!) + u64-decimal-literal-fit (semantics agree with SEMANTICS 2.3; would-be A)",
-  "class": "D"
+  "class": "A"
  },
  "mmap_validation": {
   "actual": "pass",
@@ -1200,9 +1200,9 @@
   "class": "B"
  },
  "shift_sign": {
-  "actual": "cider run: SIGSEGV (exit 139), no diagnostic",
+  "actual": "exact stdout/stderr/exit match",
   "blocker": "checker-crash on i64-shift-compare error path + u64-hex-literal-fit + implicit-i64-init",
-  "class": "D"
+  "class": "A"
  },
  "short_circuit_value": {
   "actual": "passes under CIDER_LIB=modules via std/io.cid port",
@@ -1430,9 +1430,9 @@
   "class": "D"
  },
  "test_types": {
-  "actual": "exit 1; std.io:1:1: cannot find module 'std.io'",
+  "actual": "6:24: chars compare for equality only (char==byte equivalence is v2 semantics; v3 rules char a distinct type, no implicit comparison)",
   "blocker": "stdlib-imports (+char-byte-distinct diffs #9/#10)",
-  "class": "D"
+  "class": "B"
  },
  "test_vector": {
   "actual": "exit 1; tests/corpus/legacy/test_vector/main.cid:5:31: expected an expression; tests/corpus/legacy/test_vector/main.cid:6:10: expected an expression",

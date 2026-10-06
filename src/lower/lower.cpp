@@ -549,6 +549,27 @@ ir::Value Lowerer::lowerFloatLit(const FloatLit& lit) {
     return undefined();
 }
 
+ir::Value Lowerer::convertInt(ir::Value v, TypeRef from, TypeRef to,
+                             Position pos) {
+    if (failed_ || from.isError() || to.isError() || from == to) {
+        return v;
+    }
+    ir::Instr cast;
+    cast.op = ir::Op::Cast;
+    cast.loc = pos;
+    cast.type = to;
+    cast.width = widthOf(to, pos);
+    if (failed_) {
+        return v;
+    }
+    cast.isPure = true;
+    cast.operands.push_back(v);
+    ir::Value out = newValue(cast.width, to, pos);
+    cast.results.push_back(out);
+    emit(std::move(cast));
+    return out;
+}
+
 ir::Value Lowerer::widenFloat(ir::Value v, TypeRef from, TypeRef to,
                               Position pos) {
     if (from.isError() || to.isError() || from.type == nullptr ||
@@ -4467,15 +4488,31 @@ ir::Value Lowerer::onBinary(Binary& n) {
         instr.op = ir::Op::Cmp;
         instr.width = ir::IRType::Bool;
         instr.type = TypeRef{ctx_.basic(BasicKind::Bool)};
-        bool isSigned = true;
-        if (!result.isError() && result.type->kind() == Kind::Basic) {
-            isSigned = *result.type->basic() == BasicKind::I32 ||
-                       *result.type->basic() == BasicKind::I64;
-        }
-        if (!lhs.isError() && lhs.type->kind() == Kind::Basic) {
-            BasicKind common = *lhs.type->basic();
-            isSigned = common == BasicKind::I8 || common == BasicKind::I16 ||
-                       common == BasicKind::I32 || common == BasicKind::I64;
+        // The domain is the checker's common type (SEMANTICS §2.3), not
+        // the left operand's: `i32(-1) < u32(1)` compares unsigned. A
+        // float pair keeps the unsigned opcodes, whose flags are the ones
+        // ucomisd sets — the signed spellings read flags it leaves alone.
+        // Bool and pointer pairs never reach the common type (the checker
+        // decides those itself, and commonType would fail them loudly).
+        bool isSigned = false;
+        const bool lhsInt = !lhs.isError() && lhs.type->kind() == Kind::Basic &&
+                            lhs.type->basic().has_value() &&
+                            basicIsInteger(*lhs.type->basic());
+        const bool rhsInt = !rhs.isError() && rhs.type->kind() == Kind::Basic &&
+                            rhs.type->basic().has_value() &&
+                            basicIsInteger(*rhs.type->basic());
+        if (lhsInt && rhsInt) {
+            TypeRef common = checker_.commonType(lhs, rhs, n.pos);
+            if (!common.isError() && common.type->kind() == Kind::Basic &&
+                common.type->basic().has_value()) {
+                isSigned = basicIsSigned(*common.type->basic());
+                // Both sides convert to the common representation first:
+                // a 64-bit cell holding a sign-extended i32 is not the
+                // u32 the comparison promises, so comparing raw cells
+                // answers a different question (usually audibly, for ==).
+                a = convertInt(a, lhs, common, n.pos);
+                b = convertInt(b, rhs, common, n.pos);
+            }
         }
         instr.cmp = cmpFor(n.op, isSigned);
         instr.operands.push_back(a);

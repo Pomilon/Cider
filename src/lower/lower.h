@@ -389,6 +389,11 @@ private:
     // float value converts to the target float width; anything else
     // passes through unchanged.
     ir::Value widenFloat(ir::Value v, TypeRef from, TypeRef to, Position pos);
+    // Usual integer conversion (SEMANTICS §2.3): a value converts to the
+    // common type's representation — narrowing truncates, widening
+    // extends — so a comparison reads both sides in one domain. Same
+    // type passes through with no instruction.
+    ir::Value convertInt(ir::Value v, TypeRef from, TypeRef to, Position pos);
     // The compound operation shared by the expression and statement
     // assignment paths (the right-hand side converts to the target's
     // float width first); refuses in place on a malformed compound.

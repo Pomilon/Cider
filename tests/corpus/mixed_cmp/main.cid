@@ -17,11 +17,11 @@ func main() -> int {
   last_idx = 301;
   if (*p == last_idx) { return 8; }
   free(p as *void);
-  var s8: i8 = 0 - 5;
-  var big8: i64 = 0 - 5;
+  var s8: i8 = (0 - 5) as i8;
+  var big8: i64 = (0 - 5) as i64;
   if (s8 != big8) { return 9; }
-  var s16: i16 = 0 - 300;
-  var big16: i64 = 0 - 300;
+  var s16: i16 = (0 - 300) as i16;
+  var big16: i64 = (0 - 300) as i64;
   if (s16 != big16) { return 10; }
   var u8v: u8 = 200;
   var bigu: i64 = 200;

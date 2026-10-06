@@ -627,6 +627,31 @@ void testArith32() {
                    " if (g == 1705032704) { return 1; }\n"
                    " return 0; }\n") == 1,
           "u32 global folds wrap before the comparison");
+    // Mixed-sign pairs compare in the checker's common type (SEMANTICS
+    // §2.3: same width goes unsigned, a wider signed operand stays
+    // signed) — never in the left operand's type, which is what the v2
+    // backend did and what mixed_signed_cmp pins down.
+    check(runQuiet("func main() -> int {\n"
+                   " var a: i32 = (0 - 1) as i32;\n"
+                   " var b: u32 = 1;\n"
+                   " if (a < b) { return 1; }\n"
+                   " if (a <= b) { return 2; }\n"
+                   " if (b > a) { return 3; }\n"
+                   " return 0; }\n") == 0,
+          "i32(-1) beside u32 compares unsigned");
+    check(runQuiet("func main() -> int {\n"
+                   " var t: u8 = 200;\n"
+                   " var u: i32 = (0 - 1) as i32;\n"
+                   " if (t > u) { return 1; }\n"
+                   " return 0; }\n") == 1,
+          "a wider signed operand keeps the signed domain");
+    // Same-width cross-sign `as` normalizes the cell: i32(-1) `as` u32
+    // is 0xFFFFFFFF, not the sign-extended cell the source keeps.
+    check(runQuiet("func main() -> int {\n"
+                   " var u: u32 = ((0 - 1) as i32) as u32;\n"
+                   " if (u == 4294967295) { return 1; }\n"
+                   " return 0; }\n") == 1,
+          "i32(-1) as u32 reads all 32 low bits");
 }
 
 // `&&` and `||` short-circuit: the skipped side never evaluates, so a

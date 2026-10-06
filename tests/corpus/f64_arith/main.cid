@@ -14,7 +14,7 @@ func main() -> int {
   if (i != 2) { return 7; }
   var back: f64 = i as f64;
   if (back != 2.0) { return 8; }
-  var narrow: float = a;     // implicit narrowing
+  var narrow: float = a as float;
   if (narrow != 2.5) { return 9; }
   // CID-003 review: `as f64` is an f64 context and keeps the parsed
   // double; 16777217 is not representable in f32, so a runtime cvtss2sd

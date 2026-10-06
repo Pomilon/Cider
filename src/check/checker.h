@@ -137,6 +137,11 @@ public:
     const std::vector<CheckError>& errors() const { return errors_; }
     size_t errorCount() const { return errors_.size(); }
 
+    // SEMANTICS.md §2.3: the common type of two operands, stated as a type.
+    // Public so lowering emits a comparison in the same domain the checker
+    // proved — that domain must not be re-decided downstream.
+    TypeRef commonType(TypeRef lhs, TypeRef rhs, Position pos);
+
     // Declarations and statements with rules.
     void visitProgram(Program& n) override;
     void visitFuncDecl(FuncDecl& n) override;
@@ -229,7 +234,7 @@ private:
     void bindSubPattern(Pattern& pat, TypeRef type);
 
     // SEMANTICS.md §2.3: the common type of two operands, stated as a type.
-    TypeRef commonType(TypeRef lhs, TypeRef rhs, Position pos);
+    // (Public; declared beside typeOf. Lowering queries it for comparisons.)
     // Resolves a spelling in the current type scope, then substitutes the
     // active instantiation through it. Outside a generic body this is
     // resolveType; inside one, `T` and `Box<T>` answer concrete types.
