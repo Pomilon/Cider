@@ -984,6 +984,33 @@ void testClosure() {
           "a returned closure captures its environment");
 }
 
+// Two concretes through one interface prove dynamic dispatch: the call
+// answers per the value's own method, not the static type.
+void testInterface() {
+    std::printf("interface dispatch runs\n");
+    bool sig = false;
+    check(runCode("interface Shape {\n"
+                  "    func area() -> int;\n"
+                  "}\n"
+                  "struct Sq {\n"
+                  "    var s: int;\n"
+                  "    func area() -> int { return (*self).s; }\n"
+                  "}\n"
+                  "struct Rect {\n"
+                  "    var w: int;\n"
+                  "    var h: int;\n"
+                  "    func area() -> int { return (*self).w * (*self).h; }\n"
+                  "}\n"
+                  "func get(s: Shape) -> int { return s.area(); }\n"
+                  "func main() -> int {\n"
+                  "    var a: Sq = new Sq { s: 9 };\n"
+                  "    var b: Rect = new Rect { w: 3, h: 4 };\n"
+                  "    return get(a) + get(b);\n"
+                  "}\n",
+                  sig) == 21 && !sig,
+          "two concretes dispatch through one interface");
+}
+
 // The same module emitted twice is byte-identical, and carries no build path.
 void testMultiWordReturn() {
     std::printf("multi-word returns\n");
@@ -1297,6 +1324,7 @@ int main() {
     testArith32();
     testIndirectCall();
     testClosure();
+    testInterface();
     testShortCircuit();
     testBoolCompare();
     testCharCompare();
