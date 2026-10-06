@@ -826,19 +826,53 @@ std::unique_ptr<Decl> Parser::parseExternFunc() {
                                         std::move(returns), std::move(abi));
 }
 
+bool Parser::matchModuleSegment(std::string& out) {
+    if (check(TokenKind::Ident)) {
+        out = advance().text;
+        return true;
+    }
+    // A type spelling names no type in a module path: `string` in
+    // `std.string` is just the segment's name. Keywords carry no text,
+    // so the spelling comes from the token table (the parseMethod idiom).
+    switch (peek().kind) {
+        case TokenKind::KwInt:
+        case TokenKind::KwI8:
+        case TokenKind::KwI16:
+        case TokenKind::KwI32:
+        case TokenKind::KwI64:
+        case TokenKind::KwU8:
+        case TokenKind::KwU16:
+        case TokenKind::KwU32:
+        case TokenKind::KwU64:
+        case TokenKind::KwF32:
+        case TokenKind::KwF64:
+        case TokenKind::KwBool:
+        case TokenKind::KwChar:
+        case TokenKind::KwByte:
+        case TokenKind::KwString:
+        case TokenKind::KwVoid:
+            out = tokenName(peek().kind);
+            advance();
+            return true;
+        default:
+            return false;
+    }
+}
+
 std::unique_ptr<Decl> Parser::parseImport() {
     Position start = peek().pos;
     if (match(TokenKind::KwImport)) {
         std::string module;
         for (;;) {
-            if (!check(TokenKind::Ident)) {
+            std::string segment;
+            if (!matchModuleSegment(segment)) {
                 failHere("a module needs a name");
                 return nullptr;
             }
             if (!module.empty()) {
                 module += ".";
             }
-            module += advance().text;
+            module += segment;
             if (match(TokenKind::Dot)) {
                 continue;
             }
@@ -851,20 +885,17 @@ std::unique_ptr<Decl> Parser::parseImport() {
         return std::make_unique<ImportDecl>(start, std::move(module));
     }
     advance();
-    if (!check(TokenKind::Ident)) {
-        failHere("a module needs a name");
-        return nullptr;
-    }
     std::string module;
     for (;;) {
-        if (!check(TokenKind::Ident)) {
+        std::string segment;
+        if (!matchModuleSegment(segment)) {
             failHere("a module needs a name");
             return nullptr;
         }
         if (!module.empty()) {
             module += ".";
         }
-        module += advance().text;
+        module += segment;
         if (match(TokenKind::Dot)) {
             continue;
         }

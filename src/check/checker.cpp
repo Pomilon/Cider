@@ -2500,13 +2500,19 @@ bool Checker::checkCompatible(Position pos, const Expr* fromExpr, TypeRef from, 
     // A string literal converts to a byte pointer: the literal
     // materializes its own bytes, so word zero is their address. Only
     // the literal converts — a string variable beside a *u8 stays a
-    // mismatch, spelled `&s[0]`.
+    // mismatch, spelled `&s[0]`. A char is one byte, so *char rides the
+    // same rodata-lifetime justification as *u8 (FEATURES §1.4). *void
+    // accepts any address, so the literal's word zero converts there too.
     if (dynamic_cast<const StringLit*>(fromExpr) != nullptr &&
         to.type->kind() == Kind::Pointer) {
         TypeRef pointee{to.type->pointee()};
+        if (pointee.type->kind() == Kind::Void) {
+            return true;
+        }
         if (pointee.type->kind() == Kind::Basic) {
             BasicKind basic = *pointee.type->basic();
-            if (basic == BasicKind::U8 || basic == BasicKind::I8) {
+            if (basic == BasicKind::U8 || basic == BasicKind::I8 ||
+                basic == BasicKind::Char) {
                 return true;
             }
         }

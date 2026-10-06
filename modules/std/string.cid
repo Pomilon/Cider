@@ -1,0 +1,146 @@
+// Standard strings: strlen, strcmp, strcpy, strcat, strchr, memset,
+// memcpy, to_upper, to_lower, trim, parse_int, parse_float.
+//
+// Pointers are `*char` (v3 spells the pointee first). Ranges over
+// characters go through `(c as u8)` — char ordering is rejected
+// (FEATURES §8.1, FEAT-046), so the explicit cast is the spelling.
+// Callers reach array bytes through `&a[0]`; a string literal converts
+// to *char implicitly at declaration (FEATURES §1.4).
+
+export func strlen(s: *char) -> int {
+    var n: int = 0;
+    while (*(s + n) != (0 as char)) { n = n + 1; }
+    return n;
+}
+
+export func strcmp(a: *char, b: *char) -> int {
+    var i: int = 0;
+    while (true) {
+        var ca: char = *(a + i);
+        var cb: char = *(b + i);
+        if (ca != cb) { return (ca as i32) - (cb as i32); }
+        if (ca == (0 as char)) { return 0; }
+        i = i + 1;
+    }
+}
+
+export func strcpy(dst: *char, src: *char) -> *char {
+    var i: int = 0;
+    while (*(src + i) != (0 as char)) {
+        *(dst + i) = *(src + i);
+        i = i + 1;
+    }
+    *(dst + i) = (0 as char);
+    return dst;
+}
+
+export func strcat(dst: *char, src: *char) -> *char {
+    var dstlen: int = strlen(dst);
+    var i: int = 0;
+    while (*(src + i) != (0 as char)) {
+        *(dst + dstlen + i) = *(src + i);
+        i = i + 1;
+    }
+    *(dst + dstlen + i) = (0 as char);
+    return dst;
+}
+
+export func strchr(hay: *char, n: char) -> *char {
+    var p: *char = hay;
+    while (*p != (0 as char)) {
+        if (*p == n) { return p; }
+        p = p + 1;
+    }
+    return nilPtr;
+}
+
+export func memset(p: *void, v: int, n: int) -> *void {
+    var b: u8 = v as u8;
+    var i: int = 0;
+    while (i < n) {
+        *((p as *u8) + i) = b;
+        i = i + 1;
+    }
+    return p;
+}
+
+export func memcpy(dst: *void, src: *void, n: int) -> *void {
+    var d: *u8 = dst as *u8;
+    var s: *u8 = src as *u8;
+    var i: int = 0;
+    while (i < n) {
+        *(d + i) = *(s + i);
+        i = i + 1;
+    }
+    return dst;
+}
+
+export func to_upper(c: char) -> char {
+    var b: u8 = c as u8;
+    if (b >= 97 && b <= 122) { return ((b - 32) as char); }
+    return c;
+}
+
+export func to_lower(c: char) -> char {
+    var b: u8 = c as u8;
+    if (b >= 65 && b <= 90) { return ((b + 32) as char); }
+    return c;
+}
+
+export func trim(s: *char) -> *char {
+    var start: *char = s;
+    while (true) {
+        var b: u8 = (*start) as u8;
+        if (b != 32 && b != 9 && b != 10 && b != 13) { break; }
+        start = start + 1;
+    }
+    var len: int = strlen(start);
+    while (len > 0) {
+        var t: u8 = (*(start + len - 1)) as u8;
+        if (t != 32 && t != 9 && t != 10 && t != 13) { break; }
+        len = len - 1;
+    }
+    *(start + len) = (0 as char);
+    return start;
+}
+
+export func parse_int(s: *char) -> int {
+    var v: int = 0;
+    var i: int = 0;
+    var neg: bool = false;
+    if (*(s + i) == '-') { neg = true; i = i + 1; }
+    while (true) {
+        var b: u8 = (*(s + i)) as u8;
+        if (b < 48 || b > 57) { break; }
+        v = v * 10 + (b - 48);
+        i = i + 1;
+    }
+    if (neg) { return 0 - v; }
+    return v;
+}
+
+export func parse_float(s: *char) -> f64 {
+    var v: f64 = 0.0;
+    var i: int = 0;
+    var neg: bool = false;
+    if (*(s + i) == '-') { neg = true; i = i + 1; }
+    while (true) {
+        var b: u8 = (*(s + i)) as u8;
+        if (b < 48 || b > 57) { break; }
+        v = v * 10.0 + ((b - 48) as f64);
+        i = i + 1;
+    }
+    if (*(s + i) == '.') {
+        i = i + 1;
+        var scale: f64 = 10.0;
+        while (true) {
+            var b2: u8 = (*(s + i)) as u8;
+            if (b2 < 48 || b2 > 57) { break; }
+            v = v + ((b2 - 48) as f64) / scale;
+            scale = scale * 10.0;
+            i = i + 1;
+        }
+    }
+    if (neg) { return 0.0 - v; }
+    return v;
+}

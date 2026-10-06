@@ -88,6 +88,10 @@ private:
     std::unique_ptr<Decl> parseConstDecl();
     std::unique_ptr<Decl> parseExternFunc();
     std::unique_ptr<Decl> parseImport();
+    // One segment of a dotted module path: an identifier, or a type
+    // spelling (`string` in `std.string`). The path is not a type
+    // position, so the keyword is just a name there.
+    bool matchModuleSegment(std::string& out);
     std::unique_ptr<Decl> parseFini();
     // `# experimental(name)`. Returns false for an unknown behaviour, which is a
     // diagnostic naming it rather than a silent no-op.

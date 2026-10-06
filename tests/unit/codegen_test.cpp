@@ -475,6 +475,25 @@ void testHeapCapText() {
     }
 }
 
+// A string literal's rodata bytes end in a zero byte: `*char` code
+// reads to NUL (strlen), so the terminator is part of the literal, not
+// luck in the following bytes. The length word excludes it.
+void testLiteralNul() {
+    std::printf("literals are NUL-terminated\n");
+    Built built = build("func main() -> int {\n"
+                        "    var p: *char = \"hi\";\n"
+                        "    return (*p == \'h\') ? 1 : 0;\n"
+                        "}\n");
+    check(built.ok, "builds");
+    check(built.asmText.find(".byte 104,105,0") != std::string::npos,
+          "the rodata bytes end in zero");
+    check(runQuiet("func main() -> int {\n"
+                   "    var p: *char = \"hi\";\n"
+                   "    return (*(p + 2) == (0 as char)) ? 1 : 0;\n"
+                   "}\n") == 1,
+          "the byte past the end reads zero");
+}
+
 void testExternPutchar() {    std::printf("extern putchar\n");
     // Sovereign link has no libc: a called-but-undefined `putchar` emits a
     // freestanding helper (one write syscall) instead of failing the link.
@@ -1236,6 +1255,7 @@ int main() {
     testArray();
     testPointerHeap();
     testHeapCapText();
+    testLiteralNul();
     testExternPutchar();
     testBreakContinue();
     testForLoop();

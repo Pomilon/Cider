@@ -1325,9 +1325,9 @@
   "class": "D"
  },
  "stdlib_string_ops": {
-  "actual": "blocked-A reclassified 2026-10-05: must pass once blocker lands; run exit 1: OUT: ERR:tests/corpus/stdlib_string_ops/main.cid:7:10: a module needs a name\\ntests/corpus/stdlib_string_ops/main.cid:7:30: expected ';'\\ntests/corpus/stdlib_string_ops/main.cid:11:24: a variable needs an initia",
-  "blocker": "stdlib-missing (no std.* modules in v3; only prelude print/alloc/free/panic)",
-  "class": "D"
+  "actual": "exact stdout/stderr/exit match",
+  "blocker": "stdlib-string-port",
+  "class": "A"
  },
  "stdlib_test": {
   "actual": "tests/corpus/legacy/stdlib_test/main.cid:12:30: expected '{' or '(' after new",

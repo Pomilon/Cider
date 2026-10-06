@@ -34,16 +34,25 @@ constexpr uint64_t kFirstWord = 0;
 constexpr uint64_t kLenWord = 1;
 // A string literal answers the same pair, so its address is word zero:
 // a byte pointer beside a literal keeps that word and drops the length.
+// A char is one byte, so *char rides the same justification as *u8.
+// *void accepts any address, so the literal's word zero lands there too.
 bool isBytePointerTarget(const TypeRef& type) {
     if (type.isError() || type.type->kind() != Kind::Pointer) {
         return false;
     }
     TypeRef pointee{type.type->pointee()};
-    if (pointee.isError() || pointee.type->kind() != Kind::Basic) {
+    if (pointee.isError()) {
+        return false;
+    }
+    if (pointee.type->kind() == Kind::Void) {
+        return true;
+    }
+    if (pointee.type->kind() != Kind::Basic) {
         return false;
     }
     BasicKind basic = *pointee.type->basic();
-    return basic == BasicKind::U8 || basic == BasicKind::I8;
+    return basic == BasicKind::U8 || basic == BasicKind::I8 ||
+           basic == BasicKind::Char;
 }
 // A closure answers two words, code then captures, in the same positions
 // a slice keeps base and length: the hidden function loads word zero, the
@@ -3246,7 +3255,10 @@ Lowerer::LoweredString Lowerer::lowerString(const StringLit& lit) {
     out.len = static_cast<int64_t>(bytes.size());
     ir::Rodata blob;
     blob.label = out.label;
-    blob.bytes = std::move(bytes);
+    // Literals are NUL-terminated in rodata: `*char` code reads to zero
+    // (strlen), so the terminator is part of the literal. The length word
+    // excludes it — it counts the string's bytes, not its storage.
+    blob.bytes = bytes + '\0';
     module_->rodata.push_back(std::move(blob));
     TypeRef addr{ctx_.pointer(ctx_.basic(BasicKind::U8))};
     ir::Instr data;
@@ -3271,7 +3283,9 @@ Lowerer::PartBytes Lowerer::rodataPair(const std::string& text, Position pos) {
     std::string label = "s_" + std::to_string(rodataSeq_++);
     ir::Rodata blob;
     blob.label = label;
-    blob.bytes = text;
+    // Same NUL terminator as a plain literal: an interpolated fragment is
+    // read through the same `*char` idioms (FEATURES §1.4).
+    blob.bytes = text + '\0';
     module_->rodata.push_back(std::move(blob));
     TypeRef addr{ctx_.pointer(ctx_.basic(BasicKind::U8))};
     ir::Instr data;

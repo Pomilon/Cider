@@ -406,6 +406,27 @@ void testStringCompare() {
         "    return 0;\n"
         "}\n");
     check(good.ok, "== and != on strings: " + good.stage);
+    Checked litChar = check(
+        "func main() -> int {\n"
+        "    var p: *char = \"hi\";\n"
+        "    if (*p == 'h') { return 1; }\n"
+        "    return 0;\n"
+        "}\n");
+    check(litChar.ok, "a string literal converts to *char: " + litChar.stage);
+    Checked varChar = check(
+        "func main() -> int {\n"
+        "    var s: string = \"hi\";\n"
+        "    var p: *char = s;\n"
+        "    return 0;\n"
+        "}\n");
+    check(!varChar.ok && varChar.stage == "check",
+          "a string variable still needs &s[0] for *char");
+    Checked litVoid = check(
+        "func main() -> int {\n"
+        "    var v: *void = \"hi\";\n"
+        "    return 0;\n"
+        "}\n");
+    check(litVoid.ok, "a string literal converts to *void: " + litVoid.stage);
     Checked rel = check(
         "func main() -> int { var s: string = \"a\" < \"b\"; return 0; }\n");
     check(!rel.ok && rel.stage == "check", "ordering on strings fails");

@@ -313,6 +313,38 @@ void testListLiteralNew() {
 
 }  // namespace
 
+// A module path may name a segment `string` (or any other type spelling):
+// the path is not a type position, so the keyword is just a name there.
+// `from std.string import strlen;` must parse with module "std.string".
+void testModuleKeywords();
+void testModuleKeywords() {
+    std::printf("module keywords\n");
+    bool ok = false;
+    std::unique_ptr<cider::Program> program =
+        parse("from std.string import strlen;", ok);
+    check(ok, "a type keyword parses as a from-path segment");
+    for (const auto& decl : program->decls) {
+        const cider::FromImport* from =
+            dynamic_cast<const cider::FromImport*>(decl.get());
+        if (from == nullptr) {
+            continue;
+        }
+        check(from->module == "std.string", "the dotted path is kept");
+        check(from->names.size() == 1 && from->names[0] == "strlen",
+              "the imported name rides along");
+    }
+    program = parse("import std.string;", ok);
+    check(ok, "a type keyword parses as an import-path segment");
+    for (const auto& decl : program->decls) {
+        const cider::ImportDecl* imp =
+            dynamic_cast<const cider::ImportDecl*>(decl.get());
+        if (imp == nullptr) {
+            continue;
+        }
+        check(imp->module == "std.string", "the plain path is kept");
+    }
+}
+
 int main() {
     std::printf("parser_test — syntax alone\n\n");
     testPrecedence();
@@ -329,6 +361,7 @@ int main() {
     testIncrDecr();
     testAsm();
     testListLiteralNew();
+    testModuleKeywords();
     std::printf("\n%d checks, %s\n", checks, failures == 0 ? "all passed" : "FAILURES");
     return failures == 0 ? 0 : 1;
 }
