@@ -320,12 +320,12 @@
   "class": "B"
  },
  "deref_incdec_nil_compound": {
-  "actual": "compiler SIGSEGV (exit 139) at check on `q != &x` comparison (probe d5 isolates it); the nil `(*p) += n` path itself checks clean and traps silently with SIGSEGV (probe d2); live compound-deref works (probe d4)",
+  "actual": "rewrote uninit; live compound-assign forms pass, nil case traps silently via SIGSEGV (correct native fail-hard \u00a711.3, no emitted check); v2-text expectation (vm stderr + exit 2) not blessed",
   "blocker": "none",
   "class": "B"
  },
  "deref_incdec_nil_increment": {
-  "actual": "exit 1; tests/corpus/deref_incdec_nil_increment/main.cid:15:50: expected an expression; tests/corpus/deref_incdec_nil_increment/main.cid:17:55: expected an expression; postfix ++/prefix -- on deref unparseable",
+  "actual": "rewrote uninit eps with nilPtr init; live forms pass, nil (*p) traps silently via SIGSEGV (correct \u00a711.3); v2-text expectation (null pointer dereference + exit 2) not blessed",
   "blocker": "none",
   "class": "B"
  },
@@ -345,12 +345,12 @@
   "class": "B"
  },
  "div_min_neg1": {
-  "actual": "exit 1; tests/corpus/div_min_neg1/main.cid:14:20: cannot use i32 as i64; tests/corpus/div_min_neg1/main.cid:15:25: unbound name 'neg64'; runtime MIN/-1 traps with silent SIGFPE (probe m1, exit 136)",
+  "actual": "v2 defines MIN/-1 as 0 (extends div0 policy); v3 traps at operand width (SIGFPE rc=136 verified on i64 case, no widening, \u00a712 ruling 5) \u2014 unrewritable by definition",
   "blocker": "none",
   "class": "B"
  },
  "div_zero": {
-  "actual": "exit 1; tests/corpus/div_zero/main.cid:31:19: integer literal does not fit; tests/corpus/div_zero/main.cid:37:18: cannot use i32 as i16; literal 5/0 rejected at check by design ('division by zero', probe m2, diff #15); runtime div0 traps with silent SIGFPE (probe t1, exit 136)",
+  "actual": "v3 rejects provable division by zero at compile time (75:11/76:11 'division by zero', \u00a711.2) and traps runtime div0 via plain div; v2's defined-as-0 semantics (\u00a711.4: v2 emitted branches converting div0 into 0) is exactly what v3 forbids forever \u2014 unrewritable by definition",
   "blocker": "none",
   "class": "B"
  },
@@ -965,9 +965,9 @@
   "class": "B"
  },
  "malloc_frame_slot": {
-  "actual": "cider run exit 1, stdout empty, stderr diagnostic: `main.cid:50:17: a variable needs an initialiser`",
+  "actual": "exact stdout/stderr/exit match",
   "blocker": "stdlib-alloc + for-lowering",
-  "class": "D"
+  "class": "A"
  },
  "malloc_refused_nilptr": {
   "actual": "PASS run 2026-10-05",
