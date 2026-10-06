@@ -959,6 +959,17 @@ void Checker::visitIndex(Index& n) {
         record(&n, TypeRef{ctx_.basic(BasicKind::U8)});
         return;
     }
+    if (kind == Kind::Pointer) {
+        // `p[i]` is `*(p + i)` (SEMANTICS §8.2): the element of a pointer
+        // with a size. A void pointee has no element, so no *void answer.
+        if (base.type->pointee() == ctx_.void_()) {
+            fail(n.pos, "cannot index this type");
+            record(&n, errorRef());
+            return;
+        }
+        record(&n, TypeRef{base.type->pointee()});
+        return;
+    }
     fail(n.pos, "cannot index this type");
     record(&n, errorRef());
 }
@@ -1053,6 +1064,15 @@ void Checker::visitAssign(Assign& n) {
     TypeRef value = checkExpr(n.value.get(), TypeRef{ctx_.wildcard()});
     if (value.isError()) {
         record(&n, errorRef());
+        return;
+    }
+    // `p += n` is `p = p + n` (FEATURES §1.7): the same shapes the binary
+    // rule answers, with the target as the combined type. Anything else a
+    // pointer reaches falls below to the common type's loud rejection.
+    if (target.type->kind() == Kind::Pointer &&
+        target.type->pointee() != ctx_.void_() && isInteger(value) &&
+        (n.op == BinOp::Add || n.op == BinOp::Sub)) {
+        record(&n, target);
         return;
     }
     TypeRef combined = commonType(target, value, n.pos);
@@ -1693,6 +1713,30 @@ TypeRef Checker::checkBinary(Binary& expr, TypeRef expected) {
         }
         checkShiftDiv(expr, lhs, rhs);
         return commonType(lhs, rhs, expr.pos);
+    }
+    // FEATURES §1.7 / SEMANTICS §8.2: `p ± n` answers the same *T, scaled
+    // by the element's size; `p - q` over one *T answers an i64 count.
+    // A pointer whose pointee is void has no element size, so no *void
+    // arithmetic answers; anything else a non-Basic reaches falls below
+    // to the common type's loud rejection.
+    const bool lhsPtr = lhs.type->kind() == Kind::Pointer;
+    const bool rhsPtr = rhs.type->kind() == Kind::Pointer;
+    if (lhsPtr || rhsPtr) {
+        const bool lhsVoid = lhsPtr && lhs.type->pointee() == ctx_.void_();
+        const bool rhsVoid = rhsPtr && rhs.type->pointee() == ctx_.void_();
+        if (lhsPtr && !lhsVoid && isInteger(rhs) &&
+            (expr.op == BinOp::Add || expr.op == BinOp::Sub)) {
+            return lhs;
+        }
+        if (rhsPtr && !rhsVoid && isInteger(lhs) && expr.op == BinOp::Add) {
+            return rhs;
+        }
+        if (lhsPtr && rhsPtr && !lhsVoid && !rhsVoid && expr.op == BinOp::Sub &&
+            lhs.type->pointee() == rhs.type->pointee()) {
+            return TypeRef{ctx_.basic(BasicKind::I64)};
+        }
+        fail(expr.pos, "these pointer operands do not combine");
+        return errorRef();
     }
     TypeRef common = commonType(lhs, rhs, expr.pos);
     if (common.isError()) {

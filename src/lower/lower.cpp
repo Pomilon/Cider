@@ -583,6 +583,85 @@ ir::Value Lowerer::convertInt(ir::Value v, TypeRef from, TypeRef to,
     return out;
 }
 
+ir::Value Lowerer::lowerPointerArith(const Expr* lhsExpr, const Expr* rhsExpr,
+                                     TypeRef lhs, TypeRef rhs, TypeRef result,
+                                     BinOp op, Position pos) {
+    // FEATURES §1.7 / SEMANTICS §8.2: `p + n` and `p - n` advance by the
+    // count scaled to the element's size; `p - q` over one *T is the byte
+    // span divided back down to an element count. The checker already
+    // proved the shapes, the void cases, and the same-pointee rule, so
+    // this answers rather than re-decides.
+    const bool lhsPtr = lhs.type->kind() == Kind::Pointer;
+    const bool rhsPtr = rhs.type->kind() == Kind::Pointer;
+    TypeRef count{ctx_.basic(BasicKind::I64)};
+    if (lhsPtr && rhsPtr) {
+        ir::Value a = onIdentOrExpr(lhsExpr, lhs);
+        if (failed_) {
+            return undefined();
+        }
+        ir::Value b = onIdentOrExpr(rhsExpr, rhs);
+        if (failed_) {
+            return undefined();
+        }
+        ir::Value span = emitArith(BinOp::Sub, a, b, count, pos);
+        if (failed_) {
+            return undefined();
+        }
+        int64_t elemBytes = resolver_.nominalSize(lhs.type->pointee());
+        if (elemBytes <= 0) {
+            refuse(pos, "this pointer difference");
+            return undefined();
+        }
+        if (elemBytes == 1) {
+            return span;
+        }
+        return emitArith(BinOp::Div, span, constantI64(elemBytes, count, pos),
+                         count, pos);
+    }
+    const bool ptrFirst = lhsPtr;
+    TypeRef ptrType = ptrFirst ? lhs : rhs;
+    int64_t elemBytes = resolver_.nominalSize(ptrType.type->pointee());
+    if (elemBytes <= 0) {
+        refuse(pos, "this pointer arithmetic");
+        return undefined();
+    }
+    ir::Value base =
+        onIdentOrExpr(ptrFirst ? lhsExpr : rhsExpr, ptrType);
+    if (failed_) {
+        return undefined();
+    }
+    ir::Value step = onIdentOrExpr(ptrFirst ? rhsExpr : lhsExpr,
+                                   ptrFirst ? rhs : lhs);
+    if (failed_) {
+        return undefined();
+    }
+    // The count converts to i64 before scaling: a 32-bit stride product
+    // would wrap where the address arithmetic does not.
+    step = convertInt(step, ptrFirst ? rhs : lhs, count, pos);
+    if (failed_) {
+        return undefined();
+    }
+    if (elemBytes != 1) {
+        step = emitArith(BinOp::Mul, step, constantI64(elemBytes, count, pos),
+                         count, pos);
+        if (failed_) {
+            return undefined();
+        }
+    }
+    ir::Instr move;
+    move.op = op == BinOp::Add ? ir::Op::Add : ir::Op::Sub;
+    move.loc = pos;
+    move.type = result;
+    move.width = ir::IRType::Ptr;
+    move.isPure = true;
+    move.operands.push_back(base);
+    move.operands.push_back(step);
+    ir::Value at = newValue(move.width, result, pos);
+    move.results.push_back(at);
+    emit(std::move(move));
+    return at;
+}
+
 ir::Value Lowerer::widenFloat(ir::Value v, TypeRef from, TypeRef to,
                               Position pos) {
     if (from.isError() || to.isError() || from.type == nullptr ||
@@ -2356,6 +2435,68 @@ bool Lowerer::arrayElementPlace(const Index& n, const Place& base,
     return true;
 }
 
+bool Lowerer::pointerElementPlace(const Index& n, const Place& base,
+                                   TypeRef ptrType, const char* what,
+                                   Place& at) {
+    TypeRef pointee{ptrType.type->pointee()};
+    int64_t elemBytes = resolver_.nominalSize(pointee.type);
+    if (elemBytes <= 0) {
+        refuse(n.pos, what);
+        return false;
+    }
+    std::vector<ir::Value> held = loadRange(n.array->pos, base, ptrType);
+    if (failed_ || held.size() != kOneWord) {
+        refuse(n.array->pos, what);
+        return false;
+    }
+    std::vector<ir::Value> counted = lowerWords(n.index.get());
+    if (failed_ || counted.size() != kOneWord) {
+        refuse(n.index->pos, what);
+        return false;
+    }
+    TypeRef count{ctx_.basic(BasicKind::I64)};
+    ir::Value step = convertInt(counted[kFirstWord], checker_.typeOf(n.index.get()),
+                                count, n.index->pos);
+    if (failed_) {
+        return false;
+    }
+    ir::Value from = held[kFirstWord];
+    if (elemBytes != 1) {
+        ir::Value scaled =
+            emitArith(BinOp::Mul, step, constantI64(elemBytes, count, n.pos),
+                      count, n.pos);
+        if (failed_) {
+            return false;
+        }
+        step = scaled;
+    }
+    TypeRef addrType{ctx_.pointer(pointee.type)};
+    from.type = addrType;
+    step.type = addrType;
+    ir::Instr advance;
+    advance.op = ir::Op::Add;
+    advance.loc = n.pos;
+    advance.type = addrType;
+    advance.width = ir::IRType::Ptr;
+    advance.isPure = true;
+    advance.operands.push_back(from);
+    advance.operands.push_back(step);
+    ir::Value addr = newValue(advance.width, addrType, n.pos);
+    advance.results.push_back(addr);
+    emit(std::move(advance));
+    if (failed_) {
+        return false;
+    }
+    at.slots.clear();
+    at.global.clear();
+    at.type = pointee;
+    at.off = 0;
+    at.isVolatile = base.isVolatile;
+    at.hasIndirect = true;
+    at.indirect = addr;
+    return true;
+}
+
 bool Lowerer::arrayBase(const Expr* arrayExpr, const Index& n, Place& base,
                         TypeRef& arrayType, const char* what) {
     if (const auto* inner = dynamic_cast<const Index*>(arrayExpr)) {
@@ -2505,6 +2646,15 @@ std::vector<ir::Value> Lowerer::lowerIndex(const Index& n) {
                                  arrayType.type->kind() == Kind::String)) {
         return lowerSliceIndex(n, base, arrayType);
     }
+    if (!arrayType.isError() && arrayType.type->kind() == Kind::Pointer) {
+        // `p[i]` is `*(p + i)`: the pointer's word plus the scaled count,
+        // with no guard — a pointer names no extent (SEMANTICS §8.2).
+        Place at;
+        if (!pointerElementPlace(n, base, arrayType, "this index", at)) {
+            return {undefined()};
+        }
+        return loadRange(n.pos, at, at.type);
+    }
     if (arrayType.isError() || arrayType.type->kind() != Kind::Array) {
         refuse(n.array->pos, "this index");
         return {undefined()};
@@ -2563,6 +2713,14 @@ void Lowerer::storeIndex(const Index& target, const std::vector<ir::Value>& word
         // The checker rejects string stores first; the lowerer refuses rather
         // than writing read-only bytes.
         refuse(target.array->pos, "strings are immutable");
+        return;
+    }
+    if (!arrayType.isError() && arrayType.type->kind() == Kind::Pointer) {
+        Place at;
+        if (!pointerElementPlace(target, base, arrayType, "this index", at)) {
+            return;
+        }
+        storeRange(target.pos, at, words, at.type);
         return;
     }
     if (arrayType.isError() || arrayType.type->kind() != Kind::Array) {
@@ -3985,6 +4143,19 @@ std::vector<ir::Value> Lowerer::lowerElementAddr(const Index& n) {
         return {undefined()};
     }
     Kind kind = baseType.type->kind();
+    if (kind == Kind::Pointer) {
+        // `&p[i]` stops at the computed address, like the array route.
+        Place at;
+        if (!pointerElementPlace(n, base, baseType, "this expression", at) ||
+            failed_) {
+            return {undefined()};
+        }
+        if (!at.hasIndirect) {
+            refuse(n.pos, "this expression");
+            return {undefined()};
+        }
+        return {at.indirect};
+    }
     if (kind == Kind::Slice || kind == Kind::String) {
         TypeRef element = TypeRef{ctx_.basic(BasicKind::U8)};
         Place at;
@@ -4492,6 +4663,16 @@ ir::Value Lowerer::onBinary(Binary& n) {
           (lhs.type->kind() == Kind::String ||
            dynamic_cast<const NilPtr*>(n.lhs.get()) != nullptr)))) {
         return lowerStringEq(n);
+    }
+    // Pointer arithmetic answers in addresses, not numbers: `p + n`
+    // scales the count by the element's size and stays the same *T,
+    // while `p - q` over one *T counts elements (FEATURES §1.7).
+    if (!lhs.isError() && !rhs.isError() &&
+        (n.op == BinOp::Add || n.op == BinOp::Sub) &&
+        (lhs.type->kind() == Kind::Pointer ||
+         rhs.type->kind() == Kind::Pointer)) {
+        return lowerPointerArith(n.lhs.get(), n.rhs.get(), lhs, rhs, result, n.op,
+                                        n.pos);
     }
     ir::IRType width = widthOf(result, n.pos);
     ir::Value a = onIdentOrExpr(n.lhs.get(), lhs);
@@ -6034,6 +6215,19 @@ ir::Value Lowerer::onIdentOrExpr(const Expr* expr, TypeRef expected) {
         }
         return words[0];
     }
+    // A ternary in a scalar position (a binary operand, a call argument)
+    // reads through the word path and demands exactly one word, like a
+    // field: the checker types multi-word ternaries fine in value
+    // position, but a scalar reader has one slot for the answer.
+    if (dynamic_cast<const Ternary*>(expr) != nullptr) {
+        std::vector<ir::Value> words =
+            lowerTernary(static_cast<const Ternary&>(*expr));
+        if (failed_ || words.size() != kOneWord) {
+            refuse(expr->pos, "this expression");
+            return undefined();
+        }
+        return words[0];
+    }
     refuse(expr->pos, "this expression");
     return undefined();
 }
@@ -6085,6 +6279,15 @@ bool Lowerer::compoundValue(Assign& n, std::vector<ir::Value>& value) {
         basicIsFloat(*current.type->basic())) {
         value[0] = widenFloat(value[0], checker_.typeOf(n.value.get()),
                               current, n.pos);
+    }
+    if (!current.isError() && current.type->kind() == Kind::Pointer &&
+        (*n.op == BinOp::Add || *n.op == BinOp::Sub)) {
+        // `p += n` lowers as the binary it spells: the scaled advance,
+        // not raw integer bits added to an address.
+        TypeRef rhs = checker_.typeOf(n.value.get());
+        value = {lowerPointerArith(n.target.get(), n.value.get(), current,
+                                   rhs, current, *n.op, n.pos)};
+        return !failed_;
     }
     value = {emitArith(*n.op, old[0], value[0], current, n.pos)};
     return !failed_;

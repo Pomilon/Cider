@@ -312,6 +312,13 @@ public:
     // route owns those.
     bool arrayElementPlace(const Index& n, const Place& base,
                            TypeRef arrayType, const char* what, Place& at);
+    // The address of one pointed-at element: the pointer's word plus the
+    // scaled count, answered indirect with no guard — a pointer names no
+    // extent, so any address it computes is the program's own arithmetic
+    // (SEMANTICS §8.2), one-past-end and negatives included. Reads,
+    // stores, and address-of share it.
+    bool pointerElementPlace(const Index& n, const Place& base,
+                             TypeRef ptrType, const char* what, Place& at);
     // Names the base an index reads or stores through: a plain place for
     // a direct expression, or the inner element's address when the base
     // is itself an index (`m[i][j]` addresses past the i-th row). The
@@ -400,6 +407,9 @@ private:
     // extends — so a comparison reads both sides in one domain. Same
     // type passes through with no instruction.
     ir::Value convertInt(ir::Value v, TypeRef from, TypeRef to, Position pos);
+    ir::Value lowerPointerArith(const Expr* lhsExpr, const Expr* rhsExpr,
+                               TypeRef lhs, TypeRef rhs, TypeRef result,
+                               BinOp op, Position pos);
     // The compound operation shared by the expression and statement
     // assignment paths (the right-hand side converts to the target's
     // float width first); refuses in place on a malformed compound.

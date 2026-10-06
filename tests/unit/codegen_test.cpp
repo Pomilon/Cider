@@ -756,6 +756,32 @@ void testStringCompare() {
           "empty, null, and address strings behave");
 }
 
+void testPointerArith() {
+    std::printf("pointer arithmetic runs\n");
+    check(runQuiet("func main() -> int {\n"
+                   "    var b: [u8; 8] = new [u8; 8] {[0, ...]};\n"
+                   "    var p: *u8 = &b[0];\n"
+                   "    *(p + 2) = 7;\n"
+                   "    if (((*(2 + p)) as int) != 7) { return 6; }\n"
+                   "    var q: *u8 = p + 2;\n"
+                   "    var n: i64 = q - p;\n"
+                   "    var v: u8 = p[2];\n"
+                   "    p[1] = 9;\n"
+                   "    if (v != 7) { return 1; }\n"
+                   "    if ((n as int) != 2) { return 2; }\n"
+                   "    if ((b[2] as int) != 7) { return 3; }\n"
+                   "    if ((b[1] as int) != 9) { return 4; }\n"
+                   "    if ((*q as int) != 7) { return 5; }\n"
+                   "    p += 1;\n"
+                   "    *p = 11;\n"
+                   "    p -= 1;\n"
+                   "    if ((b[1] as int) != 11) { return 6; }\n"
+                   "    if ((*p as int) != 0) { return 7; }\n"
+                   "    return 0;\n"
+                   "}\n") == 0,
+          "p+n, n+p, p-q, p[i], and stores agree");
+}
+
 void testEnumValues() {
     std::printf("enumerators run as integers\n");
     check(runQuiet("enum Color { RED, GREEN, BLUE = 5 }\n"
@@ -798,6 +824,16 @@ void testTernary() {
                    "    return a + b;\n"
                    "}\n") == 11,
           "an untaken arm never evaluates");
+    // A ternary answers inside a larger expression (binary operands, call
+    // arguments): the scalar dispatcher must reach it, not only the
+    // statement-level path.
+    check(runQuiet("func id(x: int) -> int { return x; }\n"
+                   "func main() -> int {\n"
+                   "    var v: int = 7;\n"
+                   "    var a: int = v + (v > 0 ? 1 : 0);\n"
+                   "    return a + id(v > 0 ? 10 : 20);\n"
+                   "}\n") == 18,
+          "a ternary answers in scalar position");
 }
 
 // A function pointer calls its target; a nil one dies by hardware trap.
@@ -1133,6 +1169,7 @@ int main() {
     testBoolCompare();
     testCharCompare();
     testStringCompare();
+    testPointerArith();
     testEnumValues();
     testBitNot();
     testTernary();

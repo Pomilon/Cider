@@ -433,6 +433,45 @@ void testStringCompare() {
     check(!addrVar.ok && addrVar.stage == "check", "a string variable needs &s[0]");
 }
 
+void testPointerArith() {
+    std::printf("pointer arithmetic checks\n");
+    Checked add = check(
+        "func main() -> int {\n"
+        "    var b: [u8; 8] = new [u8; 8] {[0, ...]};\n"
+        "    var p: *u8 = &b[0];\n"
+        "    var q: *u8 = p + 2;\n"
+        "    var r: *u8 = 2 + p;\n"
+        "    var s: *u8 = q - 1;\n"
+        "    var n: i64 = q - p;\n"
+        "    return (n as int) + (s[0] as int) - (r[0] as int);\n"
+        "}\n");
+    check(add.ok, "p+n, n+p, p-n, p-q, p[i] check: " + add.stage);
+    Checked mix = check(
+        "func main() -> int { var p: *u8 = nilPtr; var q: *i32 = p + 1; return 0; }\n");
+    check(!mix.ok && mix.stage == "check", "cross-pointer + int fails");
+    Checked sub = check(
+        "func main() -> int { var a: *u8 = nilPtr; var b: *i32 = nilPtr; var n: i64 = a - b; return 0; }\n");
+    check(!sub.ok && sub.stage == "check", "different-pointee - fails");
+    Checked voidArith = check(
+        "func main() -> int { var p: *void = nilPtr; var q: *void = p + 1; return 0; }\n");
+    check(!voidArith.ok && voidArith.stage == "check", "*void arithmetic fails");
+    Checked mul = check(
+        "func main() -> int { var p: *u8 = nilPtr; var q: *u8 = p; return 0; }\n");
+    check(mul.ok, "plain pointer copy checks: " + mul.stage);
+    Checked intMinus = check(
+        "func main() -> int { var p: *u8 = nilPtr; var q: *u8 = 1 - p; return 0; }\n");
+    check(!intMinus.ok && intMinus.stage == "check", "int - ptr fails");
+    Checked compound = check(
+        "func main() -> int {\n"
+        "    var b: [u8; 4] = new [u8; 4] {[0, ...]};\n"
+        "    var p: *u8 = &b[0];\n"
+        "    p += 2;\n"
+        "    p -= 1;\n"
+        "    return 0;\n"
+        "}\n");
+    check(compound.ok, "p += n and p -= n check: " + compound.stage);
+}
+
 void testFloatGlobal() {
     // A float expression over constants names every image byte once
     // folded, so a float global may hold it (FEATURES §8.3): no startup
@@ -577,6 +616,7 @@ int main() {
     testBoolCompare();
     testCharCompare();
     testStringCompare();
+    testPointerArith();
     testRepeatZero();
     testSliceCopy();
     testAsm();
