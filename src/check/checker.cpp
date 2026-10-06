@@ -1939,6 +1939,25 @@ TypeRef Checker::checkField(Field& expr) {
                 fail(expr.pos, "'" + expr.name + "' is not a value");
                 return errorRef();
             }
+            // `Color.RED`: the qualifier names an enum type, so the member
+            // is an enumerator and denotes its integer value (TYPES §2.6).
+            // A bare `RED` stays unbound: enumerators never enter scope.
+            const resolve::Decl* named =
+                resolver_.lookup(moduleScope_, ident->name);
+            if (named != nullptr &&
+                named->kind == resolve::DeclKind::Type &&
+                named->nominal == Kind::Enum) {
+                std::string home = named->scope != nullptr
+                                       ? named->scope->module
+                                       : module_;
+                if (!resolver_.isEnumMember(home + "." + named->name,
+                                            expr.name)) {
+                    fail(expr.pos, "'" + expr.name + "' is not an enumerator of '" +
+                                      named->name + "'");
+                    return errorRef();
+                }
+                return TypeRef{ctx_.basic(BasicKind::I32)};
+            }
         }
     }
     TypeRef object = checkExpr(expr.object.get(), TypeRef{ctx_.wildcard()});

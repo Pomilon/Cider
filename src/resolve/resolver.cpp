@@ -496,6 +496,11 @@ int64_t Resolver::enumValue(const std::string& qualifiedType,
     return found == enumValues_.end() ? -1 : found->second;
 }
 
+bool Resolver::isEnumMember(const std::string& qualifiedType,
+                            const std::string& member) const {
+    return enumValues_.find(qualifiedType + "." + member) != enumValues_.end();
+}
+
 std::string Resolver::qualify(const std::string& bare) const {
     if (stack_.empty()) {
         return bare;

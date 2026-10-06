@@ -437,6 +437,30 @@ void testFloatGlobal() {
           "a runtime float still needs a constant");
 }
 
+void testEnumValues() {
+    std::printf("enumerators denote their integer values\n");
+    Checked good = check(
+        "enum Color { RED, GREEN, BLUE = 5 }\n"
+        "func main() -> int {\n"
+        "    var c: int = Color.RED;\n"
+        "    if (c != 0) { return 1; }\n"
+        "    c = Color.GREEN;\n"
+        "    if (c != 1) { return 2; }\n"
+        "    c = Color.BLUE;\n"
+        "    if (c != 5) { return 3; }\n"
+        "    return 0;\n"
+        "}\n");
+    check(good.ok, "qualified enumerators check: " + good.stage);
+    Checked unknown = check(
+        "enum Color { RED }\n"
+        "func main() -> int { var c: int = Color.NOPE; return c; }\n");
+    check(!unknown.ok && unknown.stage == "check", "unknown enumerator fails");
+    Checked bare = check(
+        "enum Color { RED }\n"
+        "func main() -> int { var c: int = RED; return c; }\n");
+    check(!bare.ok && bare.stage == "check", "bare enumerator stays unbound");
+}
+
 void testGlobalConstWidth() {
     // A folded integer names image bytes, so one that does not fit the
     // declared width is provably overflowing and rejects — unless wrap
@@ -504,6 +528,7 @@ int main() {
     testNames();
     testGlobalZero();
     testFloatGlobal();
+    testEnumValues();
     testGlobalConstWidth();
     testCalls();
     testInterface();

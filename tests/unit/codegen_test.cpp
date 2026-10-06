@@ -699,6 +699,21 @@ void testCharCompare() {
           "equality distinguishes char values");
 }
 
+void testEnumValues() {
+    std::printf("enumerators run as integers\n");
+    check(runQuiet("enum Color { RED, GREEN, BLUE = 5 }\n"
+                   "func main() -> int {\n"
+                   "    var c: int = Color.RED;\n"
+                   "    if (c != 0) { return 1; }\n"
+                   "    c = Color.GREEN;\n"
+                   "    if (c != 1) { return 2; }\n"
+                   "    c = Color.BLUE;\n"
+                   "    if (c != 5) { return 3; }\n"
+                   "    return c;\n"
+                   "}\n") == 5,
+          "enumerators sequence and honor explicit values");
+}
+
 void testBitNot() {
     std::printf("bitwise not runs\n");
     check(runQuiet("func main() -> int {\n"
@@ -1060,6 +1075,7 @@ int main() {
     testShortCircuit();
     testBoolCompare();
     testCharCompare();
+    testEnumValues();
     testBitNot();
     testTernary();
     testInterp();

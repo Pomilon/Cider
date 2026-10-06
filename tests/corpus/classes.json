@@ -425,9 +425,9 @@
   "class": "B"
  },
  "enum": {
-  "actual": "exit 1; std.io:1:1: cannot find module 'std.io'",
-  "blocker": "stdlib-imports (+enums)",
-  "class": "D"
+  "actual": "exact stdout/stderr/exit match",
+  "blocker": "done",
+  "class": "A"
  },
  "enum_types": {
   "actual": "exit=1 stdout_len=0 stderr_len=2211 first='tests/corpus/enum_types/main.cid:33:17: a variable needs an initialiser'",

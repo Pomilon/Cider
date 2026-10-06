@@ -1,14 +1,11 @@
-from std.io import puts, exit;
-
 enum Color { RED, GREEN, BLUE }
 
-func _start() {
-    var c: int = RED;
-    if (c != 0) { puts("FAIL: RED != 0"); exit(1); }
-    c = GREEN;
-    if (c != 1) { puts("FAIL: GREEN != 1"); exit(1); }
-    c = BLUE;
-    if (c != 2) { puts("FAIL: BLUE != 2"); exit(1); }
-    puts("PASS: enum");
-    exit(0);
+func main() -> int {
+    var c: int = Color.RED;
+    if (c != 0) { return 1; }
+    c = Color.GREEN;
+    if (c != 1) { return 2; }
+    c = Color.BLUE;
+    if (c != 2) { return 3; }
+    return 0;
 }

@@ -1890,6 +1890,44 @@ void Lowerer::constructArray(const std::vector<ir::Value>& slots, const NewArray
 }
 
 std::vector<ir::Value> Lowerer::lowerField(const Field& n) {
+    if (const auto* ident = dynamic_cast<const Ident*>(n.object.get())) {
+        // `Color.RED`: the checker answered the enumerator's integer type,
+        // so the value folds here to that same integer (TYPES §2.6). A
+        // local with the qualifier's name keeps its meaning: the checker
+        // only takes this branch when no local binds it.
+        bool shadowed = false;
+        for (auto frame = locals_.rbegin();
+             frame != locals_.rend() && !shadowed; ++frame) {
+            shadowed = frame->find(ident->name) != frame->end();
+        }
+        if (!shadowed) {
+            const resolve::Scope* here =
+                resolver_.scopeOf(checker_.module());
+            const resolve::Decl* named =
+                here != nullptr ? resolver_.lookup(here, ident->name)
+                                : nullptr;
+            if (named != nullptr &&
+                named->kind == resolve::DeclKind::Type &&
+                named->nominal == Kind::Enum) {
+                std::string home = named->scope != nullptr
+                                       ? named->scope->module
+                                       : checker_.module();
+                if (!resolver_.isEnumMember(home + "." + named->name,
+                                            n.name)) {
+                    refuse(n.pos, "this field access");
+                    return {undefined()};
+                }
+                int64_t value = resolver_.enumValue(home + "." + named->name,
+                                                    n.name);
+                TypeRef count{ctx_.basic(BasicKind::I32)};
+                ir::Value answer = constantI64(value, count, n.pos);
+                if (failed_) {
+                    return {undefined()};
+                }
+                return {answer};
+            }
+        }
+    }
     Place base;
     if (const auto* call = dynamic_cast<const Call*>(n.object.get())) {
         // A field of a call's answer (`greet().len`, `make().x`): the words

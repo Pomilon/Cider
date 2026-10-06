@@ -77,6 +77,9 @@ public:
     // An enumerator's value, assigned C-style (0, then previous plus one).
     // -1 when no such member exists.
     int64_t enumValue(const std::string& qualifiedType, const std::string& member) const;
+    // Whether the qualified enum type names that member (-1 is a legal
+    // value, so presence needs its own question).
+    bool isEnumMember(const std::string& qualifiedType, const std::string& member) const;
 
     // The resolved type of a node the header pass already answered (field and
     // parameter types, alias targets). The checker adds expression types to the
