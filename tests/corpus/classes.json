@@ -20,9 +20,9 @@
   "class": "D"
  },
  "alias_array_slice": {
-  "actual": "exit 1; tests/corpus/alias_array_slice/main.cid:18:17: a variable needs an initialiser; tests/corpus/alias_array_slice/main.cid:32:18: expected an expression; slice lowering crashes compiler when reached (probe)",
-  "blocker": "slice-lowering",
-  "class": "D"
+  "actual": "exit 0, exact",
+  "blocker": "-",
+  "class": "A"
  },
  "alias_closure_pointer": {
   "actual": "tests/corpus/alias_closure_pointer/main.cid:59:1: expected a declaration",
@@ -80,8 +80,8 @@
   "class": "D"
  },
  "array_alias": {
-  "actual": "exit 1; tests/corpus/array_alias/main.cid:9:13: expected ';'; tests/corpus/array_alias/main.cid:14:11: a variable needs an initialiser",
-  "blocker": "fn keyword",
+  "actual": "construction lowers (`new [Cb;2]{inc,inc}` with func() spelling); `arr[0](4)` call through element refuses 'this call' (closure call through place = T10)",
+  "blocker": "closure-call-place",
   "class": "D"
  },
  "array_init": {
@@ -90,9 +90,9 @@
   "class": "D"
  },
  "array_return": {
-  "actual": "exit 1; tests/corpus/array_return/main.cid:9:18: a variable needs an initialiser; tests/corpus/array_return/main.cid:16:42: expected ';'",
-  "blocker": "sret-array-return",
-  "class": "D"
+  "actual": "exit 0, exact",
+  "blocker": "-",
+  "class": "A"
  },
  "arrays": {
   "actual": "exact stdout/stderr/exit match after v3 rewrite (init + _start())",

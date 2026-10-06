@@ -2153,6 +2153,14 @@ bool Checker::checkCompatible(Position pos, const Expr* fromExpr, TypeRef from, 
         (to.type->kind() == Kind::Pointer || to.type->kind() == Kind::FunctionPtr)) {
         return true;
     }
+    // A slice copies into an array of the same element type: the copy
+    // checks the length where it happens, so a mismatch traps instead of
+    // truncating (SEMANTICS §5, slice-to-array row). Interned types make
+    // this a pointer comparison — same spelling is the same type.
+    if (from.type->kind() == Kind::Slice && to.type->kind() == Kind::Array &&
+        from.type->element() == to.type->element()) {
+        return true;
+    }
     // An integer literal converts to any integer type whose range contains it.
     if (dynamic_cast<const IntLit*>(fromExpr) != nullptr && to.type->kind() == Kind::Basic &&
         basicIsInteger(*to.type->basic())) {

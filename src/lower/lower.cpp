@@ -1112,6 +1112,35 @@ void Lowerer::onVarDecl(VarDecl& n) {
     }
     TypeRef type = checker_.typeOf(&n);
     std::vector<ir::Value> values = lowerWords(n.init.get());
+    TypeRef initType = checker_.typeOf(n.init.get());
+    if (!initType.isError() && !type.isError() &&
+        initType.type->kind() == Kind::Slice &&
+        type.type->kind() == Kind::Array) {
+        // A slice copies into the declared array: the length is checked
+        // at the copy, element by element, detaching from the source.
+        int slots = wordCount(type);
+        if (failed_ || slots < 0 || values.size() != kSliceWords) {
+            refuse(n.pos, "this declaration");
+            return;
+        }
+        std::vector<ir::Value> fresh =
+            allocaSlots(type, n.pos, static_cast<uint64_t>(slots));
+        Place dest;
+        dest.slots = fresh;
+        dest.type = type;
+        dest.off = 0;
+        dest.isVolatile = false;
+        if (!copySliceToArray(n.pos, values[kFirstWord], values[kLenWord],
+                              type, dest, "this declaration")) {
+            return;
+        }
+        LocalBinding binding;
+        binding.slots = std::move(fresh);
+        binding.type = type;
+        binding.isMutable = true;
+        locals_.back()[n.name] = binding;
+        return;
+    }
     std::vector<ir::Value> slots = allocaSlots(type, n.pos,
                                                static_cast<uint64_t>(values.size()));
     for (uint64_t i = 0; i < static_cast<uint64_t>(values.size()); ++i) {
@@ -1397,12 +1426,37 @@ void Lowerer::storeRange(Position pos, const Place& place,
     // Mirror of the load chunks: word i stores value bytes [8i, 8i+take) at
     // place bytes [off+8i, off+8i+take), each store exactly its bytes, so a
     // short tail never overwrites the neighbor field a full-word store would
-    // clobber. The caller owes one word per chunk.
-    int64_t chunks = total / per + (total % per == 0 ? 0 : 1);
-    if (static_cast<int64_t>(words.size()) != chunks) {
+    // clobber.
+    //
+    // Words arrive in one of two shapes. Chunk-shaped words (one per take,
+    // as whole-value loads produce) store in order. Value-shaped words (one
+    // per eight bytes, as expressions produce) are shaped here: a take
+    // starting past its word's low byte shifts the word down first, so a
+    // 3-byte value stores as 2+1 from one word instead of reading a second
+    // word that is not there. Logical shift on an unsigned word keeps the
+    // value's bytes low and zero-extends either way.
+    int64_t takes = 0;
+    for (int64_t left = total; left > 0;) {
+        if (left >= per) {
+            left -= per;
+        } else if (left >= layout::kSizeI32) {
+            left -= layout::kSizeI32;
+        } else if (left >= layout::kSizeI16) {
+            left -= layout::kSizeI16;
+        } else {
+            left -= layout::kSizeI8;
+        }
+        ++takes;
+    }
+    int64_t cells = total / per + (total % per == 0 ? 0 : 1);
+    bool chunked = static_cast<int64_t>(words.size()) == takes;
+    bool valued = static_cast<int64_t>(words.size()) == cells;
+    if (!chunked && !valued) {
         refuse(pos, "this field layout is not lowered yet");
         return;
     }
+    TypeRef wide{ctx_.basic(BasicKind::U64)};
+    TypeRef tally{ctx_.basic(BasicKind::I64)};
     int64_t remaining = total;
     int64_t cur = place.off;
     for (uint64_t i = 0; remaining > 0; ++i) {
@@ -1440,7 +1494,34 @@ void Lowerer::storeRange(Position pos, const Place& place,
         instr.loc = pos;
         instr.type = fieldType;
         instr.width = width;
-        instr.storedValue = words[i];
+        if (chunked) {
+            instr.storedValue = words[i];
+        } else {
+            // Value shape: the take reads value bytes [v, v+take), which
+            // sit inside exactly one word (takes never straddle). The low
+            // take uses the word whole; a higher one shifts it down first.
+            int64_t v = cur - place.off;
+            uint64_t word =
+                static_cast<uint64_t>(v / layout::kSizePointer);
+            int64_t sub = v % layout::kSizePointer;
+            if (word >= words.size()) {
+                refuse(pos, "this field layout is not lowered yet");
+                return;
+            }
+            instr.storedValue = words[word];
+            if (sub != 0) {
+                ir::Value by =
+                    constantI64(sub * layout::kSizeI8, tally, pos);
+                if (failed_) {
+                    return;
+                }
+                instr.storedValue =
+                    emitArith(BinOp::Shr, instr.storedValue, by, wide, pos);
+                if (failed_) {
+                    return;
+                }
+            }
+        }
         instr.isVolatile = place.isVolatile;
         int64_t disp = cur % layout::kSizePointer;
         if (place.hasIndirect) {
@@ -1593,6 +1674,9 @@ void Lowerer::constructArray(const std::vector<ir::Value>& slots, const NewArray
     }
     auto atByte = [&](int64_t byteOff, TypeRef fieldType, const std::vector<ir::Value>& words,
                       Position pos) {
+        // Element values arrive in value shape (one word per eight bytes);
+        // the range store shapes them into chunk stores itself, shifting a
+        // word down when a take starts past its low byte.
         Place at;
         at.slots = slots;
         at.type = fieldType;
@@ -2076,6 +2160,107 @@ bool Lowerer::arrayBase(const Expr* arrayExpr, const Index& n, Place& base,
     }
     arrayType = base.type;
     return true;
+}
+
+bool Lowerer::copySliceToArray(Position pos, ir::Value ptr, ir::Value len,
+                               TypeRef arrayType, const Place& dest,
+                               const char* what) {
+    std::optional<int64_t> extent = arrayType.type->length();
+    if (!extent.has_value() || *extent < 0) {
+        refuse(pos, what);
+        return false;
+    }
+    TypeRef element{arrayType.type->element()};
+    int64_t elemBytes = resolver_.nominalSize(element.type);
+    int wordsPer = wordCount(element);
+    if (elemBytes <= 0 || wordsPer < 0) {
+        refuse(pos, what);
+        return false;
+    }
+    if (dest.isVolatile) {
+        refuse(pos, what);
+        return false;
+    }
+    TypeRef count{ctx_.basic(BasicKind::I64)};
+    ir::Value want = constantI64(*extent, count, pos);
+    if (failed_) {
+        return false;
+    }
+    // The length is a runtime word, so the check always emits: a short
+    // slice traps here instead of leaving the tail undefined, and a long
+    // one never truncates silently (SEMANTICS §8).
+    emitCheckTrap(pos, emitI64Cmp(pos, BinOp::Eq, len, want),
+                  ir::TrapReason::IndexOutOfBounds);
+    if (failed_) {
+        return false;
+    }
+    TypeRef ptrType{ctx_.pointer(element.type)};
+    // Byte copy in the same chunks the stores use (full words, then the
+    // widest width the tail fits): each chunk loads indirectly from the
+    // slice's bytes, so the collected words match the store's chunking
+    // exactly instead of one word per element.
+    std::optional<int64_t> total = arrayType.type->kind() == Kind::Array
+        ? std::optional<int64_t>(resolver_.nominalSize(arrayType.type))
+        : std::nullopt;
+    if (!total.has_value() || *total <= 0) {
+        refuse(pos, what);
+        return false;
+    }
+    std::vector<ir::Value> got;
+    int64_t remaining = *total;
+    int64_t cur = 0;
+    while (remaining > 0) {
+        int64_t take = layout::kSizeI8;
+        if (remaining >= layout::kSizePointer) {
+            take = layout::kSizePointer;
+        } else if (remaining >= layout::kSizeI32) {
+            take = layout::kSizeI32;
+        } else if (remaining >= layout::kSizeI16) {
+            take = layout::kSizeI16;
+        }
+        ir::IRType width;
+        TypeRef chunk;
+        if (!aggregateWord(take, width, chunk)) {
+            refuse(pos, what);
+            return false;
+        }
+        ir::Value atAddr = ptr;
+        if (cur != 0) {
+            ir::Value delta = constantI64(cur, count, pos);
+            if (failed_) {
+                return false;
+            }
+            ir::Instr add;
+            add.op = ir::Op::Add;
+            add.loc = pos;
+            add.type = ptrType;
+            add.width = ir::IRType::Ptr;
+            add.isPure = true;
+            add.operands.push_back(ptr);
+            add.operands.push_back(delta);
+            atAddr = newValue(add.width, ptrType, pos);
+            add.results.push_back(atAddr);
+            emit(std::move(add));
+            if (failed_) {
+                return false;
+            }
+        }
+        Place at;
+        at.slots = {atAddr};
+        at.type = chunk;
+        at.off = 0;
+        at.isVolatile = false;
+        std::vector<ir::Value> words = loadRange(pos, at, chunk);
+        if (failed_ || words.size() != kOneWord) {
+            refuse(pos, what);
+            return false;
+        }
+        got.push_back(words[kFirstWord]);
+        remaining -= take;
+        cur += take;
+    }
+    storeRange(pos, dest, got, arrayType);
+    return !failed_;
 }
 
 std::vector<ir::Value> Lowerer::lowerIndex(const Index& n) {
@@ -5370,6 +5555,26 @@ void Lowerer::lowerAssignStmt(Assign& n) {
     }
     TypeRef target = checker_.typeOf(n.target.get());
     std::vector<ir::Value> value = lowerWords(n.value.get());
+    TypeRef valueType = checker_.typeOf(n.value.get());
+    if (!target.isError() && !valueType.isError() &&
+        valueType.type->kind() == Kind::Slice &&
+        target.type->kind() == Kind::Array) {
+        // Reassigning an array from a slice re-copies, length-checked:
+        // the array keeps its shape, the slice keeps its words.
+        if (failed_ || value.size() != kSliceWords) {
+            refuse(n.pos, "this assignment");
+            return;
+        }
+        Place dest;
+        if (!resolvePlace(n.target.get(), dest)) {
+            refuse(n.target->pos, "this assignment");
+            return;
+        }
+        dest.type = target;
+        copySliceToArray(n.pos, value[kFirstWord], value[kLenWord], target,
+                         dest, "this assignment");
+        return;
+    }
     if (!target.isError() && wordCount(target) >= 0 &&
         value.size() != static_cast<size_t>(wordCount(target))) {
         refuse(n.pos, "this assignment");

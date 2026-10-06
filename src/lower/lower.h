@@ -308,6 +308,12 @@ public:
     // slices and strings where they already route.
     bool arrayBase(const Expr* arrayExpr, const Index& n, Place& base,
                    TypeRef& arrayType, const char* what);
+    // Copies a slice's words into an array's place: the length is checked
+    // against the array's extent first, so a short slice traps instead of
+    // leaving the tail undefined (SEMANTICS §8). Elementwise through fresh
+    // addresses, then one store of the whole shape.
+    bool copySliceToArray(Position pos, ir::Value ptr, ir::Value len,
+                          TypeRef arrayType, const Place& dest, const char* what);
     std::vector<ir::Value> lowerNewStruct(const NewStruct& n);
     std::vector<ir::Value> lowerNewArray(const NewArray& n);
     std::vector<ir::Value> lowerNewClass(const NewClass& n);

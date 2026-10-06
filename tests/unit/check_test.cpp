@@ -394,6 +394,28 @@ void testRepeatZero() {
           "a nonzero repeat over an aggregate element fails");
 }
 
+void testSliceCopy() {
+    // A slice copies into an array of the same element type: the length
+    // is checked where the copy happens, so a mismatch traps instead of
+    // truncating (SEMANTICS §5, slice-to-array row).
+    std::printf("a slice copies into an array\n");
+    Checked same = check(
+        "func main() -> int {\n"
+        "    var a: [u8; 5] = new [u8; 5] { 10, 42, 43, 44, 50 };\n"
+        "    var s: [u8; 3] = a[1:4];\n"
+        "    return s[0] as int;\n"
+        "}\n");
+    check(same.ok, "a slice copies into a same-element array: " + same.stage);
+    Checked wide = check(
+        "func main() -> int {\n"
+        "    var a: [u8; 5] = new [u8; 5] { 10, 42, 43, 44, 50 };\n"
+        "    var s: [u16; 3] = a[1:4];\n"
+        "    return 0;\n"
+        "}\n");
+    check(!wide.ok && wide.stage == "check",
+          "a slice refuses a different element type");
+}
+
 }  // namespace
 
 int main() {
@@ -410,6 +432,7 @@ int main() {
     testIncrDecr();
     testBoolCompare();
     testRepeatZero();
+    testSliceCopy();
     testAsm();
     testLen();
     testFuncLitChecks();

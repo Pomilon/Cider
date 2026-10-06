@@ -744,6 +744,40 @@ void testMultiWordReturn() {
           "sizeof answers a nested array's bytes");
 }
 
+void testSliceCopy() {
+    // A slice copies into a same-element array: the length is checked at
+    // the copy, so a short slice traps instead of leaving garbage.
+    std::printf("a slice copies into an array\n");
+    bool sig = false;
+    check(runCode("type Row = [u8; 3];\n"
+                  "func main() -> int {\n"
+                  "    var a: [u8; 5] = new [u8; 5] { 10, 42, 43, 44, 50 };\n"
+                  "    var s: Row = a[1:4];\n"
+                  "    if (s[0] != 42 || s[2] != 44) { return 1; }\n"
+                  "    if (a[1] != 42 || a[3] != 44) { return 2; }\n"
+                  "    s[1] = 7;\n"
+                  "    if (s[1] != 7 || a[2] != 43) { return 3; }\n"
+                  "    return 0;\n"
+                  "}\n",
+                  sig) == 0 && !sig,
+          "a slice copies elementwise and detaches");
+    check(runCode("func main() -> int {\n"
+                  "    var a: [u8; 5] = new [u8; 5] { 10, 42, 43, 44, 50 };\n"
+                  "    var s: [u8; 3] = a[0:2];\n"
+                  "    return s[0] as int;\n"
+                  "}\n",
+                  sig) == -1 && sig,
+          "a short slice traps instead of truncating");
+    check(runCode("func main() -> int {\n"
+                  "    var a: [u8; 5] = new [u8; 5] { 10, 42, 43, 44, 50 };\n"
+                  "    var s: [u8; 3] = a[1:4];\n"
+                  "    s = a[2:5];\n"
+                  "    return s[0] as int;\n"
+                  "}\n",
+                  sig) == 43 && !sig,
+          "a slice reassigns an array");
+}
+
 void testRepro() {
     std::printf("byte reproducibility\n");
     Built first = build("func main() -> int { return 42; }\n");
@@ -933,6 +967,7 @@ int main() {
     testRepeatZero();
     testIncrDecr();
     testMultiWordReturn();
+    testSliceCopy();
     testRepro();
     std::printf("\n%d checks, %s\n", checks, failures == 0 ? "all passed" : "FAILURES");
     return failures == 0 ? 0 : 1;
