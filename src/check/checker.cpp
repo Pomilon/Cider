@@ -324,6 +324,23 @@ void Checker::visitProgram(Program& n) {
         std::unordered_set<std::string> active;
         EvalResult folded = evalConstInt(*g->init, *env_, active);
         if (!folded.ok) {
+            // A zero repeat names every byte (zero), so it is a constant
+            // a global may hold: the bytes are known and there is no
+            // startup code to order (FEATURES.md §8.3). Anything else
+            // constructed is not constant.
+            bool zeroGlobal = false;
+            if (const auto* initArray =
+                    dynamic_cast<const NewArray*>(g->init.get())) {
+                // Repeat with a zero filler: the normal checking below
+                // still enforces the types (literal adaptation for
+                // scalars, isZeroRepeat for aggregates), so the gate only
+                // has to recognise the all-bytes-known shape.
+                if (initArray->repeat && !initArray->inits.empty()) {
+                    EvalResult filler =
+                        evalConstInt(*initArray->inits[0], *env_, active);
+                    zeroGlobal = filler.ok && filler.value == 0;
+                }
+            }
             // A float literal is a constant of its own kind: evalConstInt
             // answers integers, so only a literal in a float-typed global
             // gets past without a folded integer. Anything else is not a
@@ -337,7 +354,7 @@ void Checker::visitProgram(Program& n) {
             // only has to not call it non-constant.
             const auto* asString = dynamic_cast<const StringLit*>(g->init.get());
             const bool stringGlobal = declared.type->kind() == Kind::String;
-            if ((asFloat == nullptr || !floatGlobal) &&
+            if (!zeroGlobal && (asFloat == nullptr || !floatGlobal) &&
                 (asString == nullptr || !stringGlobal)) {
                 fail(g->init->pos, "a global initialiser must be constant: " + folded.error);
                 continue;

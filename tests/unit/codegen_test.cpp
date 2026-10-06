@@ -182,6 +182,15 @@ void testGlobals() {
     std::printf("globals\n");
     check(runQuiet("var g: int = 40;\nfunc main() -> int { return g + 2; }\n") == 42,
           "a global reads back");
+    // A computed index on a global array addresses through the label, not
+    // a slot: the Gep base is a computed address value (see emitGep).
+    check(runQuiet("var g: [u8; 4] = new [u8; 4] {[0, ...]};\n"
+                   "func main() -> int {\n"
+                   "    var j: int = 2;\n"
+                   "    g[j] = 9;\n"
+                   "    return g[j] as int;\n"
+                   "}\n") == 9,
+          "a computed global store reads back");
 }
 
 // Division traps rather than answering.

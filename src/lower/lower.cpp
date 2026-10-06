@@ -690,6 +690,28 @@ void Lowerer::onGlobal(VarDecl& n) {
         binding.initial = lowered.len;
     } else if (dynamic_cast<const NilPtr*>(n.init.get()) != nullptr) {
         binding.initial = 0;
+    } else if (type.type->kind() == Kind::Array &&
+               dynamic_cast<const NewArray*>(n.init.get()) != nullptr) {
+        // A zero-repeat array global passed the checker's const gate, so
+        // the filler is zero and every image byte is known: the global
+        // holds one zeroed word per word the type spans.
+        const auto* initArray = dynamic_cast<const NewArray*>(n.init.get());
+        bool zeroed = false;
+        if (initArray->repeat && !initArray->inits.empty()) {
+            EvalResult filler =
+                evalConstInt(*initArray->inits[0], env, active);
+            zeroed = filler.ok && filler.value == 0;
+        }
+        if (!zeroed) {
+            refuse(n.init->pos, "a global initialiser must be constant");
+            return;
+        }
+        int words = wordCount(type);
+        if (words <= 0) {
+            refuse(n.init->pos, "a global initialiser must be constant");
+            return;
+        }
+        binding.zeroWords = static_cast<uint64_t>(words);
     } else if (type.type->kind() == Kind::Basic &&
                basicIsFloat(*type.type->basic())) {
         // A float global carries its IEEE bits in the image. The
@@ -751,6 +773,7 @@ void Lowerer::onGlobal(VarDecl& n) {
     global.type = type;
     global.initial = binding.initial;
     global.initLabel = binding.initLabel;
+    global.zeroWords = binding.zeroWords;
     module_->globals.push_back(global);
 }
 
@@ -1812,8 +1835,52 @@ bool Lowerer::arrayElementPlace(const Index& n, const Place& base,
         return false;
     }
     if (!base.global.empty()) {
-        refuse(n.pos, what);
-        return false;
+        // A global names a label, not slots: materialize its address once
+        // and let the rest of this path treat it as one computed word.
+        // The address is pure (a label never moves), so the optimizer
+        // keeps the same visibility it has for slot-derived bases.
+        TypeRef addrType{ctx_.pointer(element.type)};
+        ir::Instr data;
+        data.op = ir::Op::DataAddr;
+        data.loc = n.pos;
+        data.type = addrType;
+        data.width = ir::IRType::Ptr;
+        data.globalLabel = base.global;
+        data.isPure = true;
+        ir::Value atAddr = newValue(data.width, addrType, n.pos);
+        data.results.push_back(atAddr);
+        emit(std::move(data));
+        if (failed_) {
+            return false;
+        }
+        if (base.off != 0) {
+            TypeRef count{ctx_.basic(BasicKind::I64)};
+            ir::Value delta = constantI64(base.off, count, n.pos);
+            if (failed_) {
+                return false;
+            }
+            ir::Instr adjust;
+            adjust.op = ir::Op::Add;
+            adjust.loc = n.pos;
+            adjust.type = addrType;
+            adjust.width = ir::IRType::Ptr;
+            adjust.isPure = true;
+            adjust.operands.push_back(atAddr);
+            adjust.operands.push_back(delta);
+            ir::Value moved = newValue(adjust.width, addrType, n.pos);
+            adjust.results.push_back(moved);
+            emit(std::move(adjust));
+            if (failed_) {
+                return false;
+            }
+            atAddr = moved;
+        }
+        Place here;
+        here.slots = {atAddr};
+        here.type = base.type;
+        here.off = 0;
+        here.isVolatile = base.isVolatile;
+        return arrayElementPlace(n, here, arrayType, what, at);
     }
     std::unordered_set<std::string> active;
     EvalEnv env = resolver_.evalEnv(resolver_.moduleScope());
@@ -4640,12 +4707,50 @@ void Lowerer::onForIn(ForInStmt& n) {
         lenValue = pair[kLenWord];
     } else {
         Place basePlace;
-        if (!resolvePlace(n.seq.get(), basePlace) ||
-            !basePlace.global.empty()) {
+        if (!resolvePlace(n.seq.get(), basePlace)) {
             refuse(n.pos, "this iteration");
             return;
         }
-        if (basePlace.hasIndirect) {
+        if (!basePlace.global.empty()) {
+            // A global sequence iterates from its label: materialize the
+            // address once, then share the indirect path below.
+            TypeRef addrType{ctx_.pointer(element.type)};
+            ir::Instr data;
+            data.op = ir::Op::DataAddr;
+            data.loc = n.pos;
+            data.type = addrType;
+            data.width = ir::IRType::Ptr;
+            data.globalLabel = basePlace.global;
+            data.isPure = true;
+            ir::Value atAddr = newValue(data.width, addrType, n.pos);
+            data.results.push_back(atAddr);
+            emit(std::move(data));
+            if (failed_) {
+                return;
+            }
+            base = atAddr;
+            if (basePlace.off != 0) {
+                ir::Value delta = constantI64(basePlace.off, count, n.pos);
+                if (failed_) {
+                    return;
+                }
+                ir::Instr adjust;
+                adjust.op = ir::Op::Add;
+                adjust.loc = n.pos;
+                adjust.type = addrType;
+                adjust.width = ir::IRType::Ptr;
+                adjust.isPure = true;
+                adjust.operands.push_back(base);
+                adjust.operands.push_back(delta);
+                ir::Value at = newValue(adjust.width, addrType, n.pos);
+                adjust.results.push_back(at);
+                emit(std::move(adjust));
+                if (failed_) {
+                    return;
+                }
+                base = at;
+            }
+        } else if (basePlace.hasIndirect) {
             base = basePlace.indirect;
             if (basePlace.off != 0) {
                 ir::Value delta = constantI64(basePlace.off, count, n.pos);

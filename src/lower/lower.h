@@ -55,6 +55,9 @@ struct GlobalBinding {
     std::string module;
     TypeRef type;
     int64_t initial = 0;
+    // Zeroed image words for a zero-repeat array global: the global holds
+    // this many `.quad 0` entries instead of one `.quad initial`.
+    uint64_t zeroWords = 0;
     // A read-only bytes object this global points at, empty when none. Set
     // for string globals, whose 16 bytes are (rodata address, length).
     std::string initLabel;

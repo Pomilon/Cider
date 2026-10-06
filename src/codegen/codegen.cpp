@@ -129,7 +129,15 @@ public:
             for (const ir::Global& global : module_.globals) {
                 out_ += global.label + ":\n";
                 if (global.initLabel.empty()) {
-                    out_ += "  .quad " + std::to_string(global.initial) + "\n";
+                    if (global.zeroWords == 0) {
+                        out_ += "  .quad " + std::to_string(global.initial) + "\n";
+                    } else {
+                        // A zeroed aggregate: one zero word per word the
+                        // type spans, so element stores land on image bytes.
+                        for (uint64_t word = 0; word < global.zeroWords; ++word) {
+                            out_ += "  .quad 0\n";
+                        }
+                    }
                 } else {
                     // A string global is its bytes' address followed by its
                     // length — the same two words a literal lowers to.
@@ -1179,8 +1187,18 @@ private:
         if (instr.op == ir::Op::Gep) {
             // Base slot plus byte offset, added at runtime: the base id is a
             // compile-time constant, so the slot address folds into the lea.
-            out_ += "  lea rax, " + atAddr("rsp + " + std::to_string(instr.addressBase.id * 8),
-                                           instr.displacement) + "\n";
+            // A base that is not a slot holds a computed address as its
+            // value instead (a materialized global label, for example),
+            // and moves like every other computed address does.
+            if (slotIds_.count(instr.addressBase.id) != 0) {
+                out_ += "  lea rax, " + atAddr("rsp + " + std::to_string(instr.addressBase.id * 8),
+                                               instr.displacement) + "\n";
+            } else {
+                out_ += "  mov rax, " + slot(instr.addressBase.id) + "\n";
+                if (instr.displacement != 0) {
+                    out_ += "  add rax, " + std::to_string(instr.displacement) + "\n";
+                }
+            }
             out_ += "  mov rcx, " + slot(instr.operands[0].id) + "\n";
             out_ += "  add rax, rcx\n";
             out_ += "  mov " + slot(instr.results[0].id) + ", rax\n";

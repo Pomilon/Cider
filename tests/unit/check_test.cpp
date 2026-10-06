@@ -85,6 +85,26 @@ void testArithmetic() {
 }
 
 // Names resolve through locals first, then the module scope.
+void testGlobalZero() {
+    // A zero repeat names every byte (zero), so it is a constant a global
+    // may hold: no startup code, no order problem (FEATURES §8.3).
+    std::printf("a zero-filled array may live in a global\n");
+    Checked zero = check(
+        "var g: [u8; 3] = new [u8; 3] {[0, ...]};\n"
+        "func main() -> int { return g[0] as int; }\n");
+    check(zero.ok, "a zero-repeat global checks: " + zero.stage);
+    Checked nested = check(
+        "var g: [[u8; 2]; 2] = new [[u8; 2]; 2] {[0, ...]};\n"
+        "func main() -> int { return 0; }\n");
+    check(nested.ok, "a nested zero-repeat global checks: " + nested.stage);
+    Checked explicitInit = check(
+        "var g: [u8; 3] = new [u8; 3] {1, 2, 3};\n"
+        "func main() -> int { return 0; }\n");
+    check(!explicitInit.ok && explicitInit.stage == "check",
+          "an explicit global array still needs a constant");
+}
+
+// Names resolve through locals first, then the module scope.
 void testNames() {
     std::printf("names bind inside out\n");
     Checked good = check(
@@ -380,6 +400,7 @@ int main() {
     std::printf("check_test — well-typed programs check\n\n");
     testArithmetic();
     testNames();
+    testGlobalZero();
     testCalls();
     testInterface();
     testGenericCall();

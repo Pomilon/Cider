@@ -654,9 +654,29 @@ void testNotYetLowered() {
     check(condBrs >= 2, "the store carries both bounds checks");
 }
 
+void testGlobalZeroArray() {
+    // A zero-repeat global lowers to zeroed image words, and element
+    // access through the global label works like a local's slots.
+    std::printf("a zero-filled global array lowers\n");
+    Lowered r = lower(
+        "var g: [u8; 3] = new [u8; 3] {[0, ...]};\n"
+        "func main() -> int {\n"
+        "    g[1] = 7;\n"
+        "    return g[1] as int;\n"
+        "}\n");
+    check(r.ok, "global array element access lowers: " + r.stage);
+    bool found = false;
+    if (r.ok) {
+        for (const auto& global : r.module->globals) {
+            if (global.label == "g_g" && global.zeroWords == 1) {
+                found = true;
+            }
+        }
+    }
+    check(found, "the global carries one zeroed word");
+}
+
 void testFoldedBounds() {
-    // A folded index past the array's extent is provable at compile time,
-    // so it rejects (SEMANTICS §8) instead of reading a neighbour slot.
     std::printf("a folded past-end index rejects\n");
     Lowered read = lower(
         "func main() -> int {\n"
@@ -1100,6 +1120,7 @@ int main() {
     testInterfaceParamRefused();
     testNotYetLowered();
     testFoldedBounds();
+    testGlobalZeroArray();
     testFloat();
     std::printf("\n%d checks, %s\n", checks, failures == 0 ? "all passed" : "FAILURES");
     return failures == 0 ? 0 : 1;
