@@ -635,11 +635,23 @@ void testFloat() {
 }
 
 void testNotYetLowered() {
-    std::printf("unlowered constructs are refused\n");
+    std::printf("computed index stores lower with guards\n");
     Lowered r = lower(
         "func f(a: [int; 3], j: int) -> void { a[j] = 1; }\n"
         "func main() -> int { return 0; }\n");
-    check(!r.ok && r.stage == "lower", "a computed index store is not lowered yet");
+    check(r.ok, "a computed index store lowers now");
+    uint32_t condBrs = 0;
+    for (const auto& fn : r.module->functions) {
+        if (fn.name != "f") {
+            continue;
+        }
+        for (const auto& block : fn.blocks) {
+            if (block.term.term == cider::ir::Term::CondBr) {
+                ++condBrs;
+            }
+        }
+    }
+    check(condBrs >= 2, "the store carries both bounds checks");
 }
 
 void testRefuseKeepsScopes() {

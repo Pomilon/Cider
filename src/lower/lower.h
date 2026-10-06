@@ -270,6 +270,13 @@ public:
     // checker rejects their stores first.
     void storeSliceIndex(const Index& target, const Place& base,
                          TypeRef baseType, const std::vector<ir::Value>& words);
+    // The address of one array element for a COMPUTED index: base plus
+    // index times bytes, guarded both sides (SEMANTICS §8 checks every
+    // access). Reads, stores, and address-of share it so the guards
+    // cannot drift apart. Folded indexes never arrive: the direct slot
+    // route owns those.
+    bool arrayElementPlace(const Index& n, const Place& base,
+                           TypeRef arrayType, const char* what, Place& at);
     std::vector<ir::Value> lowerNewStruct(const NewStruct& n);
     std::vector<ir::Value> lowerNewArray(const NewArray& n);
     std::vector<ir::Value> lowerNewClass(const NewClass& n);

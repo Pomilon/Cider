@@ -303,6 +303,44 @@ void testElementAddr() {
           "a cast of &b[1] round-trips through *void");
 }
 
+void testComputedIndex() {
+    // A computed array index lowers on both sides with the same guards
+    // the address-of path owns: SEMANTICS §8 checks every access, so a
+    // read past the end traps instead of answering garbage (the old
+    // read path emitted no check at all).
+    std::printf("computed array indexes\n");
+    check(runQuiet("func main() -> int {\n"
+                   "    var a: [int; 4] = new [int; 4] { [0, ...] };\n"
+                   "    var j: int = 0;\n"
+                   "    while (j < 4) { a[j] = j * 10 + 1; j = j + 1; }\n"
+                   "    return a[0] + a[1] + a[2] + a[3];\n"
+                   "}\n") == 64,
+          "computed stores fill and folded reads answer");
+    check(runQuiet("func main() -> int {\n"
+                   "    var a: [int; 4] = new [int; 4] { 5, 6, 7, 8 };\n"
+                   "    var j: int = 3;\n"
+                   "    return a[j];\n"
+                   "}\n") == 8,
+          "a computed read answers the element");
+    bool signaled = false;
+    runCode("func main() -> int {\n"
+            "    var a: [int; 4] = new [int; 4] { 5, 6, 7, 8 };\n"
+            "    var j: int = 9;\n"
+            "    return a[j];\n"
+            "}\n",
+            signaled);
+    check(signaled, "a computed read past the end traps");
+    signaled = false;
+    runCode("func main() -> int {\n"
+            "    var a: [int; 4] = new [int; 4] { 5, 6, 7, 8 };\n"
+            "    var j: int = 9;\n"
+            "    a[j] = 1;\n"
+            "    return 0;\n"
+            "}\n",
+            signaled);
+    check(signaled, "a computed store past the end traps");
+}
+
 // Structs live in memory: construct, read fields, add them.
 void testStruct() {
     std::printf("structs\n");
@@ -787,6 +825,7 @@ int main() {
     testAsm();
     testTrap();
     testElementAddr();
+    testComputedIndex();
     testIncrDecr();
     testRepro();
     std::printf("\n%d checks, %s\n", checks, failures == 0 ? "all passed" : "FAILURES");
