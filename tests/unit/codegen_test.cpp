@@ -404,6 +404,25 @@ void testComputedIndex() {
     check(signaled, "a chained store past the inner end traps");
 }
 
+void testPointerField() {
+    // A field through a pointer element reads and writes the element,
+    // not a neighbour: the store lands at the element address plus the
+    // field offset, and the load is the field's own width.
+    std::printf("fields through pointer elements\n");
+    check(runQuiet("struct Pair { var lo: int; var hi: int; }\n"
+                   "func main() -> int {\n"
+                   "    var p: *Pair = alloc(16, 8) as *Pair;\n"
+                   "    var tmp: Pair = new Pair { lo: 11, hi: 22 };\n"
+                   "    p[0] = tmp;\n"
+                   "    p[0].lo = 33;\n"
+                   "    if (p[0].lo != 33) { return 1; }\n"
+                   "    if (p[0].hi != 22) { return 2; }\n"
+                   "    if (p[1].lo != 0) { return 3; }\n"
+                   "    return 0;\n"
+                   "}\n") == 0,
+          "a field store and read through a pointer index");
+}
+
 void testRepeatZero() {
     // A zero repeat reaches through nested arrays: every scalar is zero,
     // and a store into the zeroed shape reads back.
@@ -1293,6 +1312,7 @@ int main() {
     testTrap();
     testElementAddr();
     testComputedIndex();
+    testPointerField();
     testRepeatZero();
     testIncrDecr();
     testMultiWordReturn();

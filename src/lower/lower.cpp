@@ -293,12 +293,31 @@ bool Lowerer::resolvePlace(const Expr* expr, Place& out) {
         return false;
     }
     if (const auto* field = dynamic_cast<const Field*>(expr)) {
+        if (!resolvePlace(field->object.get(), out)) {
         // A nested chain accumulates the offset while the slots stay the
         // base value's: `p.inner.y` is p's slots plus two offsets. Union
         // members sit at offset 0 and record a tag write: storing through
         // the member sets the tag as a consequence (TYPES.md 4.6).
-        if (!resolvePlace(field->object.get(), out)) {
-            return false;
+            // A field over a pointer element (`p[0].lo`): the direct
+            // route only knows slots, but a pointer element has an
+            // address. Materialize it the way computed reads do, then
+            // take the field offset below. resolvePlace-Index is left
+            // untouched, so the array single-answer routes keep theirs.
+            const auto* elem = dynamic_cast<const Index*>(field->object.get());
+            if (elem == nullptr) {
+                return false;
+            }
+            TypeRef ptrType = checker_.typeOf(elem->array.get());
+            if (ptrType.isError() || ptrType.type->kind() != Kind::Pointer) {
+                return false;
+            }
+            Place base;
+            if (!resolvePlace(elem->array.get(), base)) {
+                return false;
+            }
+            if (!pointerElementPlace(*elem, base, ptrType, "this field access", out)) {
+                return false;
+            }
         }
         if (out.type.isError() || (out.type.type->kind() != Kind::Struct &&
                                    out.type.type->kind() != Kind::Union &&
@@ -2097,8 +2116,26 @@ std::vector<ir::Value> Lowerer::lowerField(const Field& n) {
         }
         base = std::move(scratch);
     } else if (!resolvePlace(n.object.get(), base)) {
-        refuse(n.object->pos, "this field access");
-        return {undefined()};
+        // A field of a pointer element (`p[0].lo`): the direct route only
+        // knows slots, but a pointer element has an address. Materialize
+        // it the way computed reads do, then read the field off it. The
+        // Field branch of resolvePlace carries the same fallback for the
+        // store path; both stay because each serves a different node.
+        const Index* elem = dynamic_cast<const Index*>(n.object.get());
+        TypeRef arrType = elem != nullptr
+            ? checker_.typeOf(elem->array.get())
+            : TypeRef{ctx_.error()};
+        if (elem == nullptr || arrType.isError() ||
+            arrType.type->kind() != Kind::Pointer) {
+            refuse(n.object->pos, "this field access");
+            return {undefined()};
+        }
+        Place base0;
+        if (!resolvePlace(elem->array.get(), base0) ||
+            !pointerElementPlace(*elem, base0, arrType,
+                                 "this field access", base)) {
+            return {undefined()};
+        }
     }
     if (base.type.isError()) {
         refuse(n.object->pos, "this field access");
