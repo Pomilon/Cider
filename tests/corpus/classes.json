@@ -255,8 +255,8 @@
   "class": "A"
  },
  "crossmod_iface_global_declorder": {
-  "actual": "exit 1; lib:1:1: cannot find module 'lib'; std.io:1:1: cannot find module 'std.io'",
-  "blocker": "multi-file imports",
+  "actual": "34:1: 'gEarly' is not exported by 'lib' (interface-typed export vars never bind: interfaces unbuilt)",
+  "blocker": "interface-boxing (interface decls + interface-typed globals + dispatch)",
   "class": "D"
  },
  "crossmod_iface_global_fromstore": {
@@ -1575,8 +1575,8 @@
   "class": "A"
  },
  "wide_global_load": {
-  "actual": "v3 rejects v2 syntax loudly at parse (run exit 1: OUT: ERR:tests/corpus/wide_global_load/main.cid:28:22: expected ')'\\ntests/corpus/wide_global_load/main.cid:...)",
-  "blocker": "fn( types at 28:22 (also interface-boxing, multi-file-imports)",
+  "actual": "26:1: 'gShape' is not exported by 'lib' (interface-typed export vars never bind: interfaces unbuilt)",
+  "blocker": "interface-boxing (also bare fn( types at 28:22)",
   "class": "D"
  },
  "wide_global_store": {
