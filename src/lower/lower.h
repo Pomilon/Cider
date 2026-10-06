@@ -376,6 +376,10 @@ private:
     ir::Value constantFBits(uint64_t bits, TypeRef type, Position pos);
     ir::Value lowerFloatLit(const FloatLit& lit);
     ir::Value lowerNeg(const Unary& n);
+    // Bitwise not on an integer: xor with all-ones at the operand width.
+    // The checker proved an integer, so the only question left is the
+    // width the xor truncates to — the operand's own.
+    ir::Value lowerBitNot(const Unary& n);
     // Usual float conversion (SEMANTICS §2.3): an integer or narrower
     // float value converts to the target float width; anything else
     // passes through unchanged.

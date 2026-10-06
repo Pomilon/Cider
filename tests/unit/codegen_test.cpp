@@ -660,6 +660,18 @@ void testBoolCompare() {
           "negation and equality agree");
 }
 
+void testBitNot() {
+    std::printf("bitwise not runs\n");
+    check(runQuiet("func main() -> int {\n"
+                   "    var e: int = 0;\n"
+                   "    if (~e != 0 - 1) { return 1; }\n"
+                   "    var b: u8 = 7;\n"
+                   "    if ((~b as int) != 248) { return 2; }\n"
+                   "    return 0;\n"
+                   "}\n") == 0,
+          "bitwise not inverts at the operand width");
+}
+
 void testTernary() {
     std::printf("ternaries run\n");
     check(runQuiet("func main() -> int {\n"
@@ -957,6 +969,7 @@ int main() {
     testIndirectCall();
     testShortCircuit();
     testBoolCompare();
+    testBitNot();
     testTernary();
     testInterp();
     testFloat();

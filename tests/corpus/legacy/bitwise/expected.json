@@ -1,1 +1,5 @@
-{"stdout": "", "stderr": "", "exit": 0}
+{
+ "exit": 0,
+ "stderr": "",
+ "stdout": "Testing Bitwise Operators...\nAND (Expected 0): 0\nOR (Expected 255): 255\nXOR (Expected 255): 255\nLSHIFT 4 (Expected 16): 16\nRSHIFT 2 (Expected 4): 4\nNOT 0 (Expected -1): -1\n"
+}

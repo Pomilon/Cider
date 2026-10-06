@@ -145,9 +145,9 @@
   "class": "A"
  },
  "bitwise": {
-  "actual": "exit 1; tests/corpus/legacy/bitwise/main.cid:22:5: expected an expression; tests/corpus/legacy/bitwise/main.cid:27:1: expected a declaration",
+  "actual": "exact stdout/stderr/exit match",
   "blocker": "asm-blocks (+stdlib-imports)",
-  "class": "D"
+  "class": "A"
  },
  "bool_not": {
   "actual": "exit 0, exact match",

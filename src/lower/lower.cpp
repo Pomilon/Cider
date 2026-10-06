@@ -574,6 +574,30 @@ ir::Value Lowerer::widenFloat(ir::Value v, TypeRef from, TypeRef to,
     return out;
 }
 
+ir::Value Lowerer::lowerBitNot(const Unary& n) {
+    TypeRef type = checker_.typeOf(&n);
+    if (type.isError() || type.type->kind() != Kind::Basic) {
+        refuse(n.pos, "this operator");
+        return undefined();
+    }
+    BasicKind basic = *type.type->basic();
+    if (!basicIsInteger(basic)) {
+        // Floats and bools have no bitwise complement: refuse rather
+        // than xor their encoding.
+        refuse(n.pos, "this operator");
+        return undefined();
+    }
+    ir::Value value = onIdentOrExpr(n.operand.get(), type);
+    if (failed_) {
+        return undefined();
+    }
+    // All-ones at any width inverts every bit the operand owns; the xor
+    // truncates to the operand width, so narrower types keep only their
+    // own inverted bits.
+    return emitArith(BinOp::Xor, value, constantI64(-1, type, n.pos), type,
+                     n.pos);
+}
+
 ir::Value Lowerer::lowerNeg(const Unary& n) {
     TypeRef type = checker_.typeOf(&n);
     if (type.isError() || type.type->kind() != Kind::Basic) {
@@ -3861,7 +3885,8 @@ std::vector<ir::Value> Lowerer::lowerWords(const Expr* expr) {
         // which already lowers both: the address path below knows only
         // `&` and `*`, and sending a logical or arithmetic unary there
         // refuses a program the checker accepted.
-        if (unary->op == UnOp::Not || unary->op == UnOp::Neg) {
+        if (unary->op == UnOp::Not || unary->op == UnOp::Neg ||
+            unary->op == UnOp::BitNot) {
             ir::Value single = onIdentOrExpr(expr, checker_.typeOf(expr));
             if (failed_) {
                 return {undefined()};
@@ -5460,6 +5485,9 @@ ir::Value Lowerer::onIdentOrExpr(const Expr* expr, TypeRef expected) {
         }
         if (unary->op == UnOp::Neg) {
             return lowerNeg(*unary);
+        }
+        if (unary->op == UnOp::BitNot) {
+            return lowerBitNot(*unary);
         }
         if (unary->op == UnOp::Not) {
             TypeRef type = checker_.typeOf(expr);
