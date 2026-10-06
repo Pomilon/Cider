@@ -1046,6 +1046,37 @@ void testBareReturn() {
     check(rets == 2, "the early bare return and the value return each close a block");
 }
 
+// A two-word return fills the terminator's word list: the register row
+// reads it back in order (rax, rdx), so the shape is pinned here, not
+// just observed through execution.
+void testMultiWordReturn() {
+    std::printf("multi-word returns fill Ret words\n");
+    Lowered r = lower(
+        "func make() -> [u64; 2] {\n"
+        "    var t: [u64; 2] = new [u64; 2] {1, 2};\n"
+        "    return t;\n"
+        "}\n"
+        "func main() -> int {\n"
+        "    var m: [u64; 2] = make();\n"
+        "    return (m[0] + m[1]) as int;\n"
+        "}\n");
+    check(r.ok, "lowers: " + r.stage);
+    const cider::ir::Function* make = find(r.module.get(), "make");
+    if (make == nullptr) {
+        return;
+    }
+    uint32_t words = 0;
+    for (const cider::ir::Block& block : make->blocks) {
+        if (block.term.term == cider::ir::Term::Ret) {
+            words += static_cast<uint32_t>(block.term.values.size());
+        }
+    }
+    check(words == 2, "the array return answers two words");
+    const cider::ir::Function* main = find(r.module.get(), "main");
+    check(main != nullptr && countOp(*main, cider::ir::Op::Call) == 1,
+          "the caller issues one call");
+}
+
 // Interpolation builds its string on the heap: the parts' bytes are
 // copied into one fresh buffer, so the value owns its storage.
 void testInterp() {
@@ -1122,6 +1153,7 @@ int main() {
     testFoldedBounds();
     testGlobalZeroArray();
     testFloat();
+    testMultiWordReturn();
     std::printf("\n%d checks, %s\n", checks, failures == 0 ? "all passed" : "FAILURES");
     return failures == 0 ? 0 : 1;
 }

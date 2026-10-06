@@ -666,6 +666,36 @@ void testIndirectCall() {
 }
 
 // The same module emitted twice is byte-identical, and carries no build path.
+void testMultiWordReturn() {
+    std::printf("multi-word returns\n");
+    bool sig = false;
+    // A two-word array comes home in rax/rdx (IR.md §6): both words
+    // survive the call boundary and read back in order.
+    check(runCode("func make_row() -> [u64; 2] {\n"
+                  "    var r: [u64; 2] = new [u64; 2] {11, 22};\n"
+                  "    return r;\n"
+                  "}\n"
+                  "func main() -> int {\n"
+                  "    var made: [u64; 2] = make_row();\n"
+                  "    return (made[0] + made[1]) as int;\n"
+                  "}\n",
+                  sig) == 33 &&
+              !sig,
+          "a two-word array return reads back whole");
+    // A string is two integer words (address, length): the same row.
+    check(runCode("func greet() -> string { return \"hi\"; }\n"
+                  "func main() -> int { return greet().len as int; }\n", sig) == 2 &&
+              !sig,
+          "a string return carries address and length");
+    // Three words exceed the register row: refused, not split.
+    Built big = build("func triple() -> [u64; 3] {\n"
+                      "    var t: [u64; 3] = new [u64; 3] {1, 2, 3};\n"
+                      "    return t;\n"
+                      "}\n"
+                      "func main() -> int { return 0; }\n");
+    check(!big.ok && big.stage == "lower", "a three-word return refuses");
+}
+
 void testRepro() {
     std::printf("byte reproducibility\n");
     Built first = build("func main() -> int { return 42; }\n");
@@ -854,6 +884,7 @@ int main() {
     testComputedIndex();
     testRepeatZero();
     testIncrDecr();
+    testMultiWordReturn();
     testRepro();
     std::printf("\n%d checks, %s\n", checks, failures == 0 ? "all passed" : "FAILURES");
     return failures == 0 ? 0 : 1;

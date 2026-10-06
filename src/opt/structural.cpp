@@ -113,8 +113,8 @@ void checkDefs(const ir::Function& fn, std::vector<StructuralError>& errors) {
             }
         }
         const ir::Terminator& term = block.term;
-        if (term.value.has_value()) {
-            use(block.label, term.value->id);
+        for (const ir::Value& word : term.values) {
+            use(block.label, word.id);
         }
         if (term.cond.has_value()) {
             use(block.label, term.cond->id);

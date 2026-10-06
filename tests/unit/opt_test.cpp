@@ -206,7 +206,7 @@ void testUndefinedOperand() {
     block.body.push_back(instr);
     cider::ir::Terminator term;
     term.term = cider::ir::Term::Ret;
-    term.value = result;
+    term.values.push_back(result);
     block.term = term;
     fn.blocks.push_back(block);
     module.functions.push_back(fn);

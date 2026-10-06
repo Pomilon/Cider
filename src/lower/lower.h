@@ -121,6 +121,20 @@ public:
     // operation `+= 1` would emit, and stores back. Postfix answers the
     // loaded words, prefix the stored one.
     std::vector<ir::Value> lowerIncrDecr(const IncrDecr& n);
+    // A call's answer words: one result value per word of the return type,
+    // filled into the instruction. Single-word calls keep the existing
+    // shape; a two-word integer return (a small array, a struct, a string)
+    // answers one value per word for the rax/rdx row (IR.md §6). Refuses
+    // when the row cannot carry the type: a float past the first word, or
+    // more than two words (the hidden-pointer row is not implemented).
+    std::vector<ir::Value> callResults(ir::Instr& call, const Type* ret,
+                                        Position pos);
+    // The register row carries two words: anything wider, or a float past
+    // the first word, refuses rather than misplacing a word (IR.md §6).
+    // Return statements validate through this; call results validate while
+    // building, so both producers enforce the same row.
+    bool returnWordsFit(const std::vector<ir::Value>& words, Position pos);
+    std::vector<ir::Value> lowerCallWords(Call& n);
     ir::Value onCall(Call& n);
     ir::Value onIdent(Ident& n);
     ir::Value onCast(Cast& n);

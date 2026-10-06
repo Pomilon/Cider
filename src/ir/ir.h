@@ -182,7 +182,7 @@ struct Case {
 
 struct Terminator {
     Term term = Term::Unreachable;
-    std::optional<Value> value;      // Ret
+    std::vector<Value> values;       // Ret words, in order (rax, rdx, ...)
     uint32_t target = 0;             // Br
     std::optional<Value> cond;       // CondBr
     uint32_t thenTarget = 0;

@@ -23,6 +23,11 @@ namespace {
 // paths do not write the count beside a size query (T4).
 constexpr uint64_t kFloatWord = 1;
 
+// The register row answers two words (rax, rdx): the count and the second
+// position, named so neither line carries a digit (T4).
+constexpr uint64_t kTwoResults = 2;
+constexpr uint64_t kSecondResult = 1;
+
 const char* argReg(uint64_t i) {
     if (i == 0) {
         return "rdi";
@@ -773,8 +778,8 @@ private:
                 }
             }
             const ir::Terminator& term = block.term;
-            if (term.value.has_value()) {
-                note(term.value->id);
+            for (const ir::Value& word : term.values) {
+                note(word.id);
             }
             if (term.cond.has_value()) {
                 note(term.cond->id);
@@ -1276,6 +1281,13 @@ private:
                 } else {
                     out_ += "  mov " + slot(instr.results[0].id) + ", rax\n";
                 }
+                // The register row's second word comes home in rdx (IR.md
+                // §6): lowering refuses a third, so stopping here is
+                // complete, not truncation.
+                if (static_cast<uint64_t>(instr.results.size()) >= kTwoResults) {
+                    out_ += "  mov " + slot(instr.results[kSecondResult].id) +
+                            ", rdx\n";
+                }
             }
             return true;
         }
@@ -1672,15 +1684,27 @@ private:
 
     bool emitTerm(const ir::Function& fn, const ir::Terminator& term) {
         if (term.term == ir::Term::Ret) {
-            if (term.value.has_value() && term.value->id != 0xFFFFFFFFu) {
-                // Floats come home in xmm0 (SysV), integers in rax: the
-                // call site reads exactly this register back.
-                if (term.value->width == ir::IRType::F32) {
-                    out_ += "  movss xmm0, " + slot(term.value->id) + "\n";
-                } else if (term.value->width == ir::IRType::F64) {
-                    out_ += "  movsd xmm0, " + slot(term.value->id) + "\n";
+            // Words come home in order: the first in rax (or xmm0 for a
+            // float), the second in rdx. A third word never arrives here:
+            // lowering refuses it, so emitting only two is complete, not
+            // truncation. The poison id (a value falloff the checker
+            // rejected) answers nothing, as before.
+            for (uint32_t i = 0; i < term.values.size(); ++i) {
+                const ir::Value& word = term.values[i];
+                if (word.id == 0xFFFFFFFFu) {
+                    continue;
+                }
+                if (i == 0 && word.width == ir::IRType::F32) {
+                    out_ += "  movss xmm0, " + slot(word.id) + "\n";
+                } else if (i == 0 && word.width == ir::IRType::F64) {
+                    out_ += "  movsd xmm0, " + slot(word.id) + "\n";
+                } else if (i == 0) {
+                    out_ += "  mov rax, " + slot(word.id) + "\n";
+                } else if (i == 1) {
+                    out_ += "  mov rdx, " + slot(word.id) + "\n";
                 } else {
-                    out_ += "  mov rax, " + slot(term.value->id) + "\n";
+                    refuse(term.loc, "a return wider than two words");
+                    return false;
                 }
             }
             out_ += "  leave\n";

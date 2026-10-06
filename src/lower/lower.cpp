@@ -36,6 +36,10 @@ constexpr uint64_t kLenWord = 1;
 // allocation behind word one.
 constexpr uint64_t kClosureWords = 2;
 
+// The register return row carries two words (rax, rdx): a third word needs
+// the hidden pointer (IR.md §6), so the count names that limit, not a digit.
+constexpr uint64_t kTwoWords = 2;
+
 // A layout query with no answer: classSize/classAlign refuse with -1, and
 // the constant names that so no digit shares a line with the query.
 constexpr int64_t kNoExtent = -1;
@@ -838,7 +842,7 @@ void Lowerer::onFuncDecl(FuncDecl& n) {
     // keeps the placeholder, and the checker rejects those before lowering.
     if (function_->signature.returnType() == nullptr ||
         function_->signature.returnType()->kind() != Kind::Void) {
-        ret.value = undefined();
+        ret.values.push_back(undefined());
     }
     ret.loc = n.pos;
     emitTerminator(ret);
@@ -927,7 +931,7 @@ void Lowerer::onMethodDecl(const std::string& owner, const std::string& name,
     // Same void-falloff rule as a free function (see onFuncDecl).
     if (function_->signature.returnType() == nullptr ||
         function_->signature.returnType()->kind() != Kind::Void) {
-        mret.value = undefined();
+        mret.values.push_back(undefined());
     }
     mret.loc = body.pos;
     emitTerminator(mret);
@@ -1064,7 +1068,7 @@ void Lowerer::onFuncLit(FuncLit& lit, const std::vector<check::Captured>& captur
         // Same void-falloff rule as a free function (see onFuncDecl).
         if (function_->signature.returnType() == nullptr ||
             function_->signature.returnType()->kind() != Kind::Void) {
-            fret.value = undefined();
+            fret.values.push_back(undefined());
         }
         fret.loc = lit.pos;
         emitTerminator(fret);
@@ -1650,7 +1654,39 @@ void Lowerer::constructArray(const std::vector<ir::Value>& slots, const NewArray
 
 std::vector<ir::Value> Lowerer::lowerField(const Field& n) {
     Place base;
-    if (!resolvePlace(n.object.get(), base)) {
+    if (const auto* call = dynamic_cast<const Call*>(n.object.get())) {
+        // A field of a call's answer (`greet().len`, `make().x`): the words
+        // have no address, so they spill to scratch slots first and the
+        // field reads from there like any other place.
+        TypeRef answer = checker_.typeOf(n.object.get());
+        if (answer.isError()) {
+            refuse(n.object->pos, "this field access");
+            return {undefined()};
+        }
+        std::vector<ir::Value> words =
+            lowerCallWords(const_cast<Call&>(*call));
+        if (failed_) {
+            return {undefined()};
+        }
+        if (words.size() != static_cast<size_t>(wordCount(answer)) ||
+            words.empty()) {
+            refuse(n.object->pos, "this field access");
+            return {undefined()};
+        }
+        std::vector<ir::Value> slots =
+            allocaSlots(answer, n.pos, static_cast<uint64_t>(words.size()));
+        if (failed_) {
+            return {undefined()};
+        }
+        Place scratch;
+        scratch.slots = slots;
+        scratch.type = answer;
+        storeRange(n.pos, scratch, words, answer);
+        if (failed_) {
+            return {undefined()};
+        }
+        base = std::move(scratch);
+    } else if (!resolvePlace(n.object.get(), base)) {
         refuse(n.object->pos, "this field access");
         return {undefined()};
     }
@@ -3029,16 +3065,12 @@ std::string Lowerer::forwardFunction(const std::string& link, const Signature& s
         fret.term = ir::Term::Ret;
         fret.loc = pos;
         if (ret->kind() != Kind::Void) {
-            ir::Value out = newValue(widthOf(TypeRef{ret}, pos), TypeRef{ret}, pos);
+            std::vector<ir::Value> answers = callResults(call, ret, pos);
             if (!failed_) {
-                call.results.push_back(out);
-                call.width = out.width;
-                call.type = out.type;
-                fret.value = out;
+                fret.values = std::move(answers);
             }
         } else {
             call.width = ir::IRType::Void;
-            fret.value = std::nullopt;
         }
         if (!failed_) {
             emit(std::move(call));
@@ -3532,6 +3564,11 @@ std::vector<ir::Value> Lowerer::lowerWords(const Expr* expr) {
     if (const auto* step = dynamic_cast<const IncrDecr*>(expr)) {
         return lowerIncrDecr(*step);
     }
+    // A call answers one value per word of its return type: the scalar
+    // path below would keep only the first, so calls dispatch here.
+    if (const auto* call = dynamic_cast<const Call*>(expr)) {
+        return lowerCallWords(const_cast<Call&>(*call));
+    }
     if (const auto* unary = dynamic_cast<const Unary*>(expr)) {
         // `!b` and `-x` answer one scalar word through the scalar path,
         // which already lowers both: the address path below knows only
@@ -3630,6 +3667,12 @@ void Lowerer::onExprStmt(ExprStmt& n) {
     // here would refuse multi-word stores whose value nobody reads.
     if (auto* assign = dynamic_cast<const Assign*>(n.expr.get())) {
         lowerAssignStmt(const_cast<Assign&>(*assign));
+        return;
+    }
+    // A call statement discards every answer word: demanding one word here
+    // would refuse a multi-word call whose value nobody reads.
+    if (auto* call = dynamic_cast<const Call*>(n.expr.get())) {
+        lowerCallWords(const_cast<Call&>(*call));
         return;
     }
     onIdentOrExpr(n.expr.get(), checker_.typeOf(n.expr.get()));
@@ -4160,9 +4203,64 @@ ir::Value Lowerer::emitArith(BinOp op, ir::Value a, ir::Value b, TypeRef result,
     return out;
 }
 
-ir::Value Lowerer::onCall(Call& n) {
+bool Lowerer::returnWordsFit(const std::vector<ir::Value>& words,
+                              Position pos) {
+    if (static_cast<uint64_t>(words.size()) > kTwoWords) {
+        refuse(pos, "a return wider than two words needs the hidden pointer");
+        return false;
+    }
+    for (uint64_t i = kOneWord; i < static_cast<uint64_t>(words.size()); ++i) {
+        if (words[i].width == ir::IRType::F32 ||
+            words[i].width == ir::IRType::F64) {
+            refuse(pos, "a float past the first return word");
+            return false;
+        }
+    }
+    return true;
+}
+
+std::vector<ir::Value> Lowerer::callResults(ir::Instr& call, const Type* ret,
+                                             Position pos) {    TypeRef retRef{ret};
+    if (ret->kind() == Kind::Void) {
+        call.width = ir::IRType::Void;
+        return {};
+    }
+    int count = wordCount(retRef);
+    if (count < 0) {
+        refuse(pos, "a value of this type");
+        return {};
+    }
+    std::vector<ir::Value> out;
+    for (uint64_t i = 0; i < static_cast<uint64_t>(count); ++i) {
+        TypeRef word = static_cast<uint64_t>(count) > kOneWord
+                           ? wordType(retRef, i)
+                           : retRef;
+        ir::IRType width = widthOf(word, pos);
+        if (failed_) {
+            return {};
+        }
+        // Each answer carries its word's type, not the aggregate's: one
+        // width cannot name two words (see widthOf), and consumers like
+        // storeRange read the value's type per chunk.
+        ir::Value answer = newValue(width, word, pos);
+        call.results.push_back(answer);
+        out.push_back(answer);
+    }
+    if (!returnWordsFit(out, pos)) {
+        return {};
+    }
+    if (out.empty()) {
+        refuse(pos, "a return with no words");
+        return {};
+    }
+    call.width = out[0].width;
+    call.type = out[0].type;
+    return out;
+}
+
+std::vector<ir::Value> Lowerer::lowerCallWords(Call& n) {
     if (failed_) {
-        return undefined();
+        return {undefined()};
     }
     // `v.hasI()`: the tag compared to the member's index, answered as one
     // boolean word. The checker proved the shape; the member lookup repeats
@@ -4185,13 +4283,13 @@ ir::Value Lowerer::onCall(Call& n) {
             }
             if (!id.has_value() || member.empty() || index < 0 || tagOff < 0) {
                 refuse(n.pos, "this call");
-                return undefined();
+                return {undefined()};
             }
             if (!n.args.empty()) {
                 refuse(n.pos, "hasM takes no arguments");
-                return undefined();
+                return {undefined()};
             }
-            return emitTagCheck(n.pos, base, tagOff, index);
+            return {emitTagCheck(n.pos, base, tagOff, index)};
         }
     }
     const Signature* sig = nullptr;
@@ -4216,13 +4314,13 @@ ir::Value Lowerer::onCall(Call& n) {
                                         : nullptr;
             if (owner == nullptr || msig == nullptr) {
                 refuse(n.pos, "this call");
-                return undefined();
+                return {undefined()};
             }
             callee = resolver_.linkName(*owner) + "__" + field->name;
             sig = msig;
             if (base.slots.empty() && !base.hasIndirect) {
                 refuse(n.pos, "a method on a global is not lowered yet");
-                return undefined();
+                return {undefined()};
             }
             if (base.hasIndirect && base.off != 0) {
                 // A method on a field reached through a pointer: the object
@@ -4232,7 +4330,7 @@ ir::Value Lowerer::onCall(Call& n) {
                 TypeRef ptrType{ctx_.pointer(base.type.type)};
                 ir::Value step = constantI64(base.off, count, n.pos);
                 if (failed_) {
-                    return undefined();
+                    return {undefined()};
                 }
                 ir::Instr add;
                 add.op = ir::Op::Add;
@@ -4290,7 +4388,7 @@ ir::Value Lowerer::onCall(Call& n) {
 
                         if (failed_ || pair.size() != kClosureWords) {
                             refuse(n.pos, "this call");
-                            return undefined();
+                            return {undefined()};
                         }
                         sig = csig;
                         indirect = true;
@@ -4314,7 +4412,7 @@ ir::Value Lowerer::onCall(Call& n) {
                     std::vector<ir::Value> target = lowerWords(deref->operand.get());
                     if (failed_ || target.size() != kOneWord) {
                         refuse(n.pos, "this call");
-                        return undefined();
+                        return {undefined()};
                     }
                     indirectCallee = target[0];
                 }
@@ -4349,11 +4447,11 @@ ir::Value Lowerer::onCall(Call& n) {
                 if (member == nullptr ||
                     member->kind != resolve::DeclKind::Func) {
                     refuse(n.pos, "this call");
-                    return undefined();
+                    return {undefined()};
                 }
                 if (member->typeParams > 0) {
                     refuse(n.pos, "a generic call across modules");
-                    return undefined();
+                    return {undefined()};
                 }
                 const resolve::Decl* origin =
                     resolver_.declById(member->id);
@@ -4365,7 +4463,7 @@ ir::Value Lowerer::onCall(Call& n) {
     }
     if (sig == nullptr) {
         refuse(n.pos, "this call");
-        return undefined();
+        return {undefined()};
     }
     ir::Instr instr;
     instr.op = ir::Op::Call;
@@ -4385,7 +4483,7 @@ ir::Value Lowerer::onCall(Call& n) {
         ir::Argument arg;
         arg.words = lowerWords(n.args[i].get());
         if (failed_) {
-            return undefined();
+            return {undefined()};
         }
         // A float argument rides one word in an SSE register (psABI). The
         // checked type of the argument is the class: a literal is typed in
@@ -4405,16 +4503,9 @@ ir::Value Lowerer::onCall(Call& n) {
     // Captured before the move below: emit() takes the instruction by value,
     // so reading results after moving reads an emptied vector — which is how
     // a call's result became the undefined placeholder.
-    bool hasResult = false;
-    ir::Value out;
-    if (ret->kind() != Kind::Void) {
-        out = newValue(widthOf(TypeRef{ret}, n.pos), TypeRef{ret}, n.pos);
-        instr.results.push_back(out);
-        instr.width = out.width;
-        instr.type = out.type;
-        hasResult = true;
-    } else {
-        instr.width = ir::IRType::Void;
+    std::vector<ir::Value> words = callResults(instr, ret, n.pos);
+    if (failed_) {
+        return {undefined()};
     }
     emit(std::move(instr));
     if (function_ != nullptr) {
@@ -4422,7 +4513,25 @@ ir::Value Lowerer::onCall(Call& n) {
         // rather than guessed by the optimiser.
         function_->canThrow = true;
     }
-    return hasResult ? out : undefined();
+    return words;
+}
+
+ir::Value Lowerer::onCall(Call& n) {
+    // The scalar path answers one word — or none, for a void call. A
+    // multi-word answer in a scalar position refuses rather than dropping
+    // every word past the first.
+    std::vector<ir::Value> words = lowerCallWords(n);
+    if (failed_) {
+        return undefined();
+    }
+    if (words.empty()) {
+        return undefined();
+    }
+    if (words.size() != kOneWord) {
+        refuse(n.pos, "a multi-word answer in a scalar position");
+        return undefined();
+    }
+    return words[kFirstWord];
 }
 
 void Lowerer::onReturn(Return& n) {
@@ -4433,20 +4542,21 @@ void Lowerer::onReturn(Return& n) {
     term.term = ir::Term::Ret;
     term.loc = n.pos;
     if (n.value != nullptr) {
-        // One word returns; several are refused until the ABI table's
-        // rax/rdx row is implemented. The asymmetry with arguments is
-        // documented, not hidden.
+        // Words come home in order (rax, rdx): one value per word of the
+        // answered type, through the same row calls read (IR.md §6). A
+        // wider answer refuses in callResults, so this never truncates.
         std::vector<ir::Value> words = lowerWords(n.value.get());
-        if (words.size() != kOneWord) {
-            refuse(n.pos, "string returns are not emitted yet");
+        if (failed_) {
             return;
         }
-        term.value = words[0];
+        if (!returnWordsFit(words, n.pos)) {
+            return;
+        }
+        term.values = std::move(words);
     } else {
-        // A bare return answers nothing: nullopt, not the placeholder. The
-        // placeholder's id poisons the frame computation, which reads every
-        // value the function mentions.
-        term.value = std::nullopt;
+        // A bare return answers nothing: an empty list, not the placeholder.
+        // The placeholder's id poisons the frame computation, which reads
+        // every value the function mentions.
     }
     emitTerminator(term);
 }

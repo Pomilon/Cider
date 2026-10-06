@@ -296,8 +296,8 @@ uint64_t deadCode(ir::Module& module) {
                     }
                 }
                 const ir::Terminator& term = block.term;
-                if (term.value.has_value()) {
-                    used.insert(term.value->id);
+                for (const ir::Value& word : term.values) {
+                    used.insert(word.id);
                 }
                 if (term.cond.has_value()) {
                     used.insert(term.cond->id);
