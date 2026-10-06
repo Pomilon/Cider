@@ -4,9 +4,7 @@ export struct Event {
 }
 
 export func make() -> Event {
-  var e: Event;
-  e.kind = 2;
-  e.extra = 20;
+  var e: Event = new Event { kind: 2, extra: 20 };
   return e;
 }
 

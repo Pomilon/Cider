@@ -35,9 +35,9 @@
   "class": "B"
  },
  "alias_embedded_class_init": {
-  "actual": "exit 1; tests/corpus/alias_embedded_class_init/main.cid:14:16: expected ';'; tests/corpus/alias_embedded_class_init/main.cid:14:16: a class holds fields and methods",
-  "blocker": "multi-file imports",
-  "class": "D"
+  "actual": "14:16: expected ';' + a class holds fields and methods (`var x: int = 5;` field initializer; v3 fills fields via new/init only, \u00a72.1a)",
+  "blocker": "v3-no-field-init",
+  "class": "B"
  },
  "alias_field": {
   "actual": "compile rejection: tests/corpus/alias_field/main.cid:15:11: a variable needs an initialiser \u2014 uninitialised local `var s: S;` (FEATURES 8.3: always an error)",
@@ -130,9 +130,9 @@
   "class": "B"
  },
  "base_ctor_dtor_chain": {
-  "actual": "exit 1; tests/corpus/base_ctor_dtor_chain/main.cid:36:16: expected ';'; tests/corpus/base_ctor_dtor_chain/main.cid:36:16: a class holds fields and methods",
-  "blocker": "multi-file imports",
-  "class": "D"
+  "actual": "36:16: expected ';' + a class holds fields and methods (`var r: int = 0;` field initializer; v3 \u00a72.1a)",
+  "blocker": "v3-no-field-init",
+  "class": "B"
  },
  "bitfields": {
   "actual": "exit 1; tests/corpus/bitfields/main.cid:9:15: a variable needs an initialiser; tests/corpus/bitfields/main.cid:14:19: expected an expression; secondary: int:3 bitfield decls",
@@ -205,14 +205,14 @@
   "class": "D"
  },
  "closure_as_fn": {
-  "actual": "exit 1; tests/corpus/closure_as_fn/main.cid:18:13: expected ';'; tests/corpus/closure_as_fn/main.cid:37:19: expected ')'",
-  "blocker": "closures-repr",
-  "class": "D"
+  "actual": "18:13: expected ';' (bare `fn(int)` spelling; v3 spells closure `func(int)->int` / fn-ptr `*func(int)->int` with no inference between representations \u2014 the test's subject)",
+  "blocker": "v2-fn-spelling",
+  "class": "B"
  },
  "closure_field_store": {
-  "actual": "exit 1; tests/corpus/closure_field_store/main.cid:21:19: expected ';'; tests/corpus/closure_field_store/main.cid:21:38: expected a declaration",
-  "blocker": "closures-repr",
-  "class": "D"
+  "actual": "21:19: expected ';' (bare `Ops{...}` literal + `p->cf` arrow calls + bare `o.cf(5)` closure calls; `->` removed in v3, \u00a713)",
+  "blocker": "v3-no-arrow",
+  "class": "B"
  },
  "closure_throw_capture": {
   "actual": "tests/corpus/closure_throw_capture/main.cid:18:17: a catch binds a name and a type",
@@ -240,9 +240,9 @@
   "class": "A"
  },
  "constructors": {
-  "actual": "exit 1; tests/corpus/constructors/main.cid:22:20: expected ';'; tests/corpus/constructors/main.cid:22:20: a class holds fields and methods",
-  "blocker": "multi-file imports",
-  "class": "D"
+  "actual": "22:20: expected ';' + a class holds fields and methods (`var value: int = 10;` field initializer; v3 \u00a72.1a)",
+  "blocker": "v3-no-field-init",
+  "class": "B"
  },
  "control_flow_stress": {
   "actual": "exact stdout/stderr/exit match",
@@ -275,9 +275,9 @@
   "class": "D"
  },
  "crossmod_private_base": {
-  "actual": "exit 1; tests/corpus/crossmod_private_base/main.cid:32:14: expected ';'; tests/corpus/crossmod_private_base/main.cid:32:14: a class holds fields and methods",
-  "blocker": "multi-file imports",
-  "class": "D"
+  "actual": "32:14: expected ';' + a class holds fields and methods (`var w: int = 7;` field initializer; v3 \u00a72.1a)",
+  "blocker": "v3-no-field-init",
+  "class": "B"
  },
  "crossmod_qualified_reexport": {
   "actual": "exit 1; tests/corpus/crossmod_qualified_reexport/main.cid:9:13: expected ';'; tests/corpus/crossmod_qualified_reexport/main.cid:9:13: a struct holds fields and methods",
@@ -295,9 +295,9 @@
   "class": "D"
  },
  "cyclic_fn_alias": {
-  "actual": "exit 1; tests/corpus/cyclic_fn_alias/main.cid:5:12: expected ';'; v3 rejects even func-spelled recursion with 'type alias cycle' (probe aa2)",
-  "blocker": "recursive-alias",
-  "class": "D"
+  "actual": "5:12: expected ';' (bare `fn(F)` spelling; v3 has no bare fn-ptr spelling, \u00a713)",
+  "blocker": "v2-fn-spelling",
+  "class": "B"
  },
  "deep_inheritance": {
   "actual": "tests/corpus/legacy/deep_inheritance/main.cid:4:9: a class needs a body",
@@ -420,9 +420,9 @@
   "class": "B"
  },
  "embedded_class_init": {
-  "actual": "exit=1 stdout_len=0 stderr_len=4924 first=\"tests/corpus/embedded_class_init/main.cid:12:16: expected ';'\"",
-  "blocker": "class-field-initializers (+embedded-class-values, stdlib-import)",
-  "class": "D"
+  "actual": "12:16: expected ';' + a class holds fields and methods (`var x: int = 5;` field initializer; v3 \u00a72.1a)",
+  "blocker": "v3-no-field-init",
+  "class": "B"
  },
  "enum": {
   "actual": "exit 1; std.io:1:1: cannot find module 'std.io'",
@@ -475,9 +475,9 @@
   "class": "A"
  },
  "f64_convert_sites": {
-  "actual": "exit=1 stdout_len=0 stderr_len=3078 first=\"tests/corpus/f64_convert_sites/main.cid:26:21: expected ';'\"",
-  "blocker": "float-codegen (+interface-boxing)",
-  "class": "D"
+  "actual": "26:21: expected ';' (bare `Pair{...}` literal + `new Doubler;` bare-new + `d->bias`/`d->scale` arrow access; `->` removed in v3, \u00a713)",
+  "blocker": "v3-no-arrow",
+  "class": "B"
  },
  "f64_global_init": {
   "actual": "exit=1 stdout_len=0 stderr_len=136 first='tests/corpus/f64_global_init/main.cid:19:23: expected an expression'",
@@ -555,14 +555,14 @@
   "class": "A"
  },
  "fn_array_by_value": {
-  "actual": "exit=1 stdout_len=0 stderr_len=2473 first=\"tests/corpus/fn_array_by_value/main.cid:10:17: expected ';'\"",
-  "blocker": "by-value-array-params/sret (+stdlib-import, ternary-lowering)",
-  "class": "D"
+  "actual": "10:17: expected ';' (bare `fn(int)` in `type Table = [fn(int) -> int; 2]`; no v3 counterpart for inferred-repr fn arrays)",
+  "blocker": "v2-fn-spelling",
+  "class": "B"
  },
  "fn_array_cast": {
-  "actual": "exit=1 stdout_len=0 stderr_len=476 first=\"tests/corpus/fn_array_cast/main.cid:7:13: expected ';'\"",
-  "blocker": "fn-as-casts (+stdlib-import)",
-  "class": "D"
+  "actual": "7:13: expected ';' (bare `fn(int)` spelling; v3 has no bare fn-ptr spelling, \u00a713)",
+  "blocker": "v2-fn-spelling",
+  "class": "B"
  },
  "fn_cast_closure_indirect_repr": {
   "actual": "exit=1 stdout_len=0 stderr_len=661 first='tests/corpus/fn_cast_closure_indirect_repr/main.cid:27:14: a variable needs an initialiser'",
@@ -580,9 +580,9 @@
   "class": "D"
  },
  "fn_cast_compat": {
-  "actual": "exit=1 stdout_len=0 stderr_len=408 first=\"tests/corpus/fn_cast_compat/main.cid:14:13: expected ';'\"",
-  "blocker": "closures-repr-gaps (+msabi, fn-as-casts, stdlib-import)",
-  "class": "D"
+  "actual": "14:13: expected ';' (bare `fn(int)` spelling; v3 has no bare fn-ptr spelling, \u00a713)",
+  "blocker": "v2-fn-spelling",
+  "class": "B"
  },
  "fn_interface_signature": {
   "actual": "tests/corpus/fn_interface_signature/main.cid:31:1: expected a declaration",
@@ -645,9 +645,9 @@
   "class": "A"
  },
  "fnptr_alias_chain": {
-  "actual": "exit=1 stdout_len=0 stderr_len=138 first=\"tests/corpus/fnptr_alias_chain/main.cid:5:17: expected ';'\"",
-  "blocker": "global-fn-address-const (global = &fn rejected as non-constant)",
-  "class": "D"
+  "actual": "5:17: expected ';' (bare `fn(int)` spelling; v3 has no bare fn-ptr spelling, \u00a713)",
+  "blocker": "v2-fn-spelling",
+  "class": "B"
  },
  "for_in": {
   "actual": "rewrite to v3 (init+entry) passes exact",
@@ -660,9 +660,9 @@
   "class": "B"
  },
  "forward_decl_fields": {
-  "actual": "exit=1 stdout_len=0 stderr_len=7909 first=\"tests/corpus/forward_decl_fields/main.cid:15:14: expected ';'\"",
-  "blocker": "class-field-initializers (+forward-decl-layout, stdlib-import)",
-  "class": "D"
+  "actual": "15:14: expected ';' + a class holds fields and methods (`var x: int = 1;` field initializer; v3 \u00a72.1a)",
+  "blocker": "v3-no-field-init",
+  "class": "B"
  },
  "foundations_test": {
   "actual": "tests/corpus/legacy/foundations_test/main.cid:5:15: a class needs a body",
@@ -950,9 +950,9 @@
   "class": "D"
  },
  "local_aggregates": {
-  "actual": "cider run exit 1, stdout empty, stderr diagnostic: `main.cid:21:26: expected ';'`; driver has no module loader",
-  "blocker": "multi-file-imports (+ interface-boxing, stdlib-io)",
-  "class": "D"
+  "actual": "21:26: expected ';' + a class holds fields and methods (`class P { var v: int = 3; ...}` field initializer; v3 \u00a72.1a)",
+  "blocker": "v3-no-field-init",
+  "class": "B"
  },
  "logical_ops": {
   "actual": "passes exactly; stub expected.json filled with captured bytes (success-path self-check verified)",
@@ -1035,9 +1035,9 @@
   "class": "D"
  },
  "mod_ns_collision": {
-  "actual": "cider run exit 1, stdout empty, stderr diagnostic: `main.cid:14:27: expected ';'`; driver has no module loader",
+  "actual": "exact stdout/stderr/exit match",
   "blocker": "multi-file-imports",
-  "class": "D"
+  "class": "A"
  },
  "mod_ns_diamond": {
   "actual": "cider run exit 0, stdout AB, stderr empty: qualified + from-import calls, extern putchar, diamond import twice",
@@ -1080,14 +1080,14 @@
   "class": "A"
  },
  "nested_class_field_init": {
-  "actual": "cider run exit 1, stdout empty, stderr diagnostic: `main.cid:11:16: expected ';'` (field initializer in class body)",
-  "blocker": "class-field-init/inheritance + this + stdlib-io + delete",
-  "class": "D"
+  "actual": "11:16: expected ';' + a class holds fields and methods (`var x: int = 5;` field initializer; v3 \u00a72.1a)",
+  "blocker": "v3-no-field-init",
+  "class": "B"
  },
  "nested_list_literals": {
-  "actual": "cider run exit 1, stdout empty, stderr diagnostic: `main.cid:33:22: expected ';'` (class field initializer)",
-  "blocker": "bare-nested-literals + interface-boxing + volatile + class-field-init + stdlib-io",
-  "class": "D"
+  "actual": "33:22: expected ';' + a class holds fields and methods (`class C { var x: int = 7; }` field initializer; v3 \u00a72.1a)",
+  "blocker": "v3-no-field-init",
+  "class": "B"
  },
  "nested_loops": {
   "actual": "rewrite to v3 (init+entry) passes exact",
@@ -1250,9 +1250,9 @@
   "class": "D"
  },
  "sret_expr_calls": {
-  "actual": "blocked-A reclassified 2026-10-05: must pass once blocker lands; run exit 1: OUT: ERR:tests/corpus/sret_expr_calls/main.cid:32:16: expected ';'\\ntests/corpus/sret_expr_calls/main.cid:32:16: a class holds fields and methods\\ntests/corpus/sret_expr_calls/main.cid:33:5: expected '}'\\ntests/c",
-  "blocker": "stdlib-missing (also uninit-locals rejected, local classes)",
-  "class": "D"
+  "actual": "32:16: expected ';' + a class holds fields and methods (`var v: int = 3;` field initializer; v3 \u00a72.1a)",
+  "blocker": "v3-no-field-init",
+  "class": "B"
  },
  "stale_handler_frame_exit": {
   "actual": "run exit 1: OUT: ERR:tests/corpus/stale_handler_frame_exit/main.cid:21:13: a catch binds a name and a type\\ntests/corpus/stale_handler_frame_exit/main.cid:24:1: expected a declaration\\ntests/corpus/stale_handler_frame_exit/",
