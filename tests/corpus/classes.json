@@ -490,9 +490,9 @@
   "class": "A"
  },
  "f64_global_wrap": {
-  "actual": "exit=1 stdout_len=0 stderr_len=40 first=\"std.io:1:1: cannot find module 'std.io'\"",
+  "actual": "exact stdout/stderr/exit match",
   "blocker": "float-codegen (+stdlib-import)",
-  "class": "D"
+  "class": "A"
  },
  "f64_int_convert": {
   "actual": "run exit 0: OUT: ERR:",

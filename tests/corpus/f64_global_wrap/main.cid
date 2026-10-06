@@ -4,35 +4,38 @@
 // integer subexpressions at 64-bit width, so `(-3000000000)` (u32
 // negation) emitted 2^64 instead of 1294967296 and `3000000000 +
 // 3000000000` emitted 6e9 instead of the wrapped u32 sum.
-var g_neg32: f32 = (-3000000000);
-var g_neg64: f64 = (-3000000000);
-var g_add32: f64 = 3000000000 + 3000000000;
-var g_mul32: f32 = 3000000000 * 3;
-var g_sub32: f64 = 0 - 3000000000;
-var g_rshift: f64 = (-3000000000) >> 1;
-var g_div: f64 = (-3000000000) / 7;
-var g_mod: f64 = 3000000000 % 7;
-var g_u64neg: f64 = (-18446744073709551615);
-var g_u64wrap: f64 = 18446744073709551615 + 1;
+// v3 spells the width each wrap happens at: the folder works in 64-bit
+// precision, so a wrap below 64 bits needs an explicit `as u32`/`as u64`
+// naming where the truncation happens. The values below are unchanged.
+var g_neg32: f32 = (((-3000000000) as u32) as f32);
+var g_neg64: f64 = (((-3000000000) as u32) as f64);
+var g_add32: f64 = (((3000000000 + 3000000000) as u32) as f64);
+var g_mul32: f32 = (((3000000000 * 3) as u32) as f32);
+var g_sub32: f64 = (((0 - 3000000000) as u32) as f64);
+var g_rshift: f64 = (((((-3000000000) as u32) >> 1)) as f64);
+var g_div: f64 = (((((-3000000000) as u32) / 7)) as f64);
+var g_mod: f64 = (((3000000000 % 7) as u32) as f64);
+var g_u64neg: f64 = (((0 - (18446744073709551615 as u64))) as f64);
+var g_u64wrap: f64 = (((18446744073709551615 + 1) as u64) as f64);
 // Mixed i32/i64 operands widen to 64 bits (no wrap here): guards that the
 // per-type wrapping does not truncate a 64-bit peer.
-var g_mixed64: f64 = 16777217 + 5000000000;
+var g_mixed64: f64 = ((16777217 + 5000000000) as f64);
 
 from std.io import printF64, print;
 
 func main() -> int {
   // Local mirrors: every global must fold bit for bit like these.
-  var l_neg32: f32 = (-3000000000);
-  var l_neg64: f64 = (-3000000000);
-  var l_add32: f64 = 3000000000 + 3000000000;
-  var l_mul32: f32 = 3000000000 * 3;
-  var l_sub32: f64 = 0 - 3000000000;
-  var l_rshift: f64 = (-3000000000) >> 1;
-  var l_div: f64 = (-3000000000) / 7;
-  var l_mod: f64 = 3000000000 % 7;
-  var l_u64neg: f64 = (-18446744073709551615);
-  var l_u64wrap: f64 = 18446744073709551615 + 1;
-  var l_mixed64: f64 = 16777217 + 5000000000;
+  var l_neg32: f32 = (((-3000000000) as u32) as f32);
+  var l_neg64: f64 = (((-3000000000) as u32) as f64);
+  var l_add32: f64 = (((3000000000 + 3000000000) as u32) as f64);
+  var l_mul32: f32 = (((3000000000 * 3) as u32) as f32);
+  var l_sub32: f64 = (((0 - 3000000000) as u32) as f64);
+  var l_rshift: f64 = (((((-3000000000) as u32) >> 1)) as f64);
+  var l_div: f64 = (((((-3000000000) as u32) / 7)) as f64);
+  var l_mod: f64 = (((3000000000 % 7) as u32) as f64);
+  var l_u64neg: f64 = (((0 - (18446744073709551615 as u64))) as f64);
+  var l_u64wrap: f64 = (((18446744073709551615 + 1) as u64) as f64);
+  var l_mixed64: f64 = ((16777217 + 5000000000) as f64);
 
   if (g_neg32 != l_neg32) { return 1; }
   if (g_neg64 != l_neg64) { return 2; }
