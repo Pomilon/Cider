@@ -1220,9 +1220,9 @@
   "class": "A"
  },
  "slice_copy": {
-  "actual": "cider run exit 1, stdout empty, stderr diagnostic: `main.cid:11:19: a variable needs an initialiser`",
+  "actual": "exact stdout/stderr/exit match",
   "blocker": "for-in-lowering (uninit arrays are rewritable per diff #7 but for-in blocks)",
-  "class": "D"
+  "class": "A"
  },
  "slot_reuse": {
   "actual": "passes under CIDER_LIB=modules via std/io.cid port",
