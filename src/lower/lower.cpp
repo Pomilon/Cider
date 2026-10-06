@@ -346,6 +346,13 @@ bool Lowerer::resolvePlace(const Expr* expr, Place& out) {
         if (!folded.ok || folded.value < 0) {
             return false;
         }
+        // Same provable case as the read and store paths: a folded index
+        // past the array's extent rejects instead of addressing a
+        // neighbour's field.
+        std::optional<int64_t> count = out.type.type->length();
+        if (count.has_value() && folded.value >= *count) {
+            return false;
+        }
         out.off += folded.value * elemBytes;
         out.type = element;
         return true;
@@ -1916,6 +1923,15 @@ std::vector<ir::Value> Lowerer::lowerIndex(const Index& n) {
             refuse(n.index->pos, "a negative index");
             return {undefined()};
         }
+        // A folded index beside a known extent is provable: past the end
+        // rejects at compile time (SEMANTICS §8) instead of reading a
+        // neighbour slot. The computed path traps the same case at
+        // runtime through the shared guarded helper below.
+        std::optional<int64_t> count = arrayType.type->length();
+        if (count.has_value() && folded.value >= *count) {
+            refuse(n.index->pos, "an index past the end");
+            return {undefined()};
+        }
         base.off += folded.value * elemBytes;
         base.type = element;
         return loadRange(n.pos, base, element);
@@ -1963,6 +1979,11 @@ void Lowerer::storeIndex(const Index& target, const std::vector<ir::Value>& word
     if (folded.ok) {
         if (folded.value < 0) {
             refuse(target.index->pos, "a negative index");
+            return;
+        }
+        std::optional<int64_t> count = arrayType.type->length();
+        if (count.has_value() && folded.value >= *count) {
+            refuse(target.index->pos, "an index past the end");
             return;
         }
         base.off += folded.value * elemBytes;

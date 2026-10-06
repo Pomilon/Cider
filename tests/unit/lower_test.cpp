@@ -654,6 +654,31 @@ void testNotYetLowered() {
     check(condBrs >= 2, "the store carries both bounds checks");
 }
 
+void testFoldedBounds() {
+    // A folded index past the array's extent is provable at compile time,
+    // so it rejects (SEMANTICS §8) instead of reading a neighbour slot.
+    std::printf("a folded past-end index rejects\n");
+    Lowered read = lower(
+        "func main() -> int {\n"
+        "    var a: [u8; 3] = new [u8; 3] {1, 2, 3};\n"
+        "    return a[5] as int;\n"
+        "}\n");
+    check(!read.ok, "a past-end folded read refuses");
+    Lowered store = lower(
+        "func main() -> int {\n"
+        "    var a: [u8; 3] = new [u8; 3] {1, 2, 3};\n"
+        "    a[5] = 9;\n"
+        "    return 0;\n"
+        "}\n");
+    check(!store.ok, "a past-end folded store refuses");
+    Lowered last = lower(
+        "func main() -> int {\n"
+        "    var a: [u8; 3] = new [u8; 3] {1, 2, 3};\n"
+        "    return a[2] as int;\n"
+        "}\n");
+    check(last.ok, "the last in-range element still lowers");
+}
+
 void testRefuseKeepsScopes() {
     // A refusal inside a condition must not unbalance the scope stack:
     // a float remainder has no lowering, so this refuses — but the
@@ -1074,6 +1099,7 @@ int main() {
     testRefuseKeepsScopes();
     testInterfaceParamRefused();
     testNotYetLowered();
+    testFoldedBounds();
     testFloat();
     std::printf("\n%d checks, %s\n", checks, failures == 0 ? "all passed" : "FAILURES");
     return failures == 0 ? 0 : 1;
