@@ -1245,9 +1245,9 @@
   "class": "B"
  },
  "spec": {
-  "actual": "blocked-A reclassified 2026-10-05: must pass once blocker lands; run exit 1: OUT: ERR:tests/corpus/spec/main.cid:6:10: a type parameter needs a name\\ntests/corpus/spec/main.cid:8:1: expected a declaration\\ntests/corpus/spec/main.cid:11:21: expected an expression\\ntests/corpus/spec/main.ci",
-  "blocker": "generics-not-lowered (also asm-blocks; explicit-specialization form)",
-  "class": "D"
+  "actual": "6:10: a type parameter needs a name (explicit specialization `func max<int>` has no v3 counterpart \u2014 \u00a73.1: every instantiation names args at USE, no specialization defs); deduced `max(3,5)` also rejected (no inference)",
+  "blocker": "v3-generics-model",
+  "class": "B"
  },
  "sret_expr_calls": {
   "actual": "32:16: expected ';' + a class holds fields and methods (`var v: int = 3;` field initializer; v3 \u00a72.1a)",
