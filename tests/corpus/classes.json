@@ -590,9 +590,9 @@
   "class": "B"
  },
  "fn_ptr": {
-  "actual": "exit 1; std.io:1:1: cannot find module 'std.io'",
-  "blocker": "stdlib-imports (+fnptr-repr diffs #3/#4: *void hold, f(v) call)",
-  "class": "D"
+  "actual": "exact stdout/stderr/exit match (rewritten: *void hold+f(v) call have no v3 counterpart \u2014 bare func values and *void laundering are not in the as-table; v3 spelling *func(int,int)->int + &add + (*fn)(5,3))",
+  "blocker": "rewritten",
+  "class": "A"
  },
  "fn_ptr_array": {
   "actual": "exit 0, empty stdout/stderr, matches expected.json verbatim after documented rewrites (diff #3 bare-fn to *func, &fn address, diff #4 (*f)() calls, diff #6/#7 new-literals for struct/array/uninit vars)",

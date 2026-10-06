@@ -1,16 +1,12 @@
-from std.io import puts, exit;
-
 func add(a: int, b: int) -> int {
     return a + b;
 }
 
-func _start() -> void {
-    var fn: *void = add;
-    var result: int = fn(5, 3);
+func main() -> int {
+    var fn: *func(int, int) -> int = &add;
+    var result: int = (*fn)(5, 3);
     if (result != 8) {
-        puts("FAIL: fn_ptr");
-        exit(1);
+        return 1;
     }
-    puts("PASS: fn_ptr");
-    exit(0);
+    return 0;
 }
