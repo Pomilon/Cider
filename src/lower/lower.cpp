@@ -1006,11 +1006,16 @@ void Lowerer::onFuncDecl(FuncDecl& n) {
 
     ir::Terminator ret;
     ret.term = ir::Term::Ret;
-    // A void falloff answers nothing (see onReturn): only a value falloff
-    // keeps the placeholder, and the checker rejects those before lowering.
+    // A void falloff answers nothing (see onReturn). A value falloff
+    // traps instead of answering: the placeholder id the old code pushed
+    // here poisoned the frame computation and crashed programs whose
+    // last statement closed every path (if/else, match). Reachable
+    // falloff is a checker rejection filed separately; the trap keeps
+    // it loud either way, never garbage.
     if (function_->signature.returnType() == nullptr ||
         function_->signature.returnType()->kind() != Kind::Void) {
-        ret.values.push_back(undefined());
+        ret.term = ir::Term::Trap;
+        ret.reason = ir::TrapReason::Explicit;
     }
     ret.loc = n.pos;
     emitTerminator(ret);
@@ -1096,10 +1101,11 @@ void Lowerer::onMethodDecl(const std::string& owner, const std::string& name,
 
     ir::Terminator mret;
     mret.term = ir::Term::Ret;
-    // Same void-falloff rule as a free function (see onFuncDecl).
+    // Same value-falloff trap as a free function (see onFuncDecl).
     if (function_->signature.returnType() == nullptr ||
         function_->signature.returnType()->kind() != Kind::Void) {
-        mret.values.push_back(undefined());
+        mret.term = ir::Term::Trap;
+        mret.reason = ir::TrapReason::Explicit;
     }
     mret.loc = body.pos;
     emitTerminator(mret);
@@ -1233,10 +1239,11 @@ void Lowerer::onFuncLit(FuncLit& lit, const std::vector<check::Captured>& captur
 
         ir::Terminator fret;
         fret.term = ir::Term::Ret;
-        // Same void-falloff rule as a free function (see onFuncDecl).
+        // Same value-falloff trap as a free function (see onFuncDecl).
         if (function_->signature.returnType() == nullptr ||
             function_->signature.returnType()->kind() != Kind::Void) {
-            fret.values.push_back(undefined());
+            fret.term = ir::Term::Trap;
+            fret.reason = ir::TrapReason::Explicit;
         }
         fret.loc = lit.pos;
         emitTerminator(fret);
@@ -4835,21 +4842,267 @@ ir::Value Lowerer::lowerShortCircuit(const Binary& n) {
     return out;
 }
 
-ir::Value Lowerer::lowerStringEq(const Binary& n) {
-    // The checker proved both sides strings, so equality is content:
-    // equal lengths, and either empty or equal bytes. The answer rides
-    // a cell like the short-circuit arms; each deciding edge writes it
-    // once and joins. A zero length takes the empty path before any
-    // byte is read, so a null string — (nil, 0) — never dereferences.
-    const bool isEq = n.op == BinOp::Eq;
+ir::Value Lowerer::lowerStringEqWords(std::vector<ir::Value> left,
+                                      std::vector<ir::Value> right,
+                                      Position pos, bool isEq) {
+    // String equality is content with one exception: a null string is
+    // the absence of a value, not zero bytes, so it equals only null.
+    // The null gate below decides both-null and either-null before the
+    // length check; non-null pairs take equal lengths plus equal bytes.
+    // The answer rides a cell like the short-circuit arms; each
+    // deciding edge writes it once and joins. A zero length takes the
+    // empty path before any byte is read, so no null address is touched.
     TypeRef boolean{ctx_.basic(BasicKind::Bool)};
     TypeRef count{ctx_.basic(BasicKind::I64)};
     TypeRef byteType{ctx_.basic(BasicKind::U8)};
     TypeRef ptrType{ctx_.pointer(ctx_.basic(BasicKind::U8))};
-    // Either side may be the null literal: it answers (nil, 0), which
-    // reads empty, so the length check below decides without touching
-    // the null address. Only the literal substitutes — the checker
-    // keeps a *void variable beside a string a mismatch.
+    ir::Value cell = allocaSlot(boolean, pos);
+    if (failed_) {
+        return undefined();
+    }
+    auto storeCell = [&](bool value) {
+        ir::Instr instr;
+        instr.op = ir::Op::Store;
+        instr.loc = pos;
+        instr.type = boolean;
+        instr.width = widthOf(boolean, pos);
+        instr.addressBase = cell;
+        instr.storedValue = constantI64(value ? 1 : 0, boolean, pos);
+        emit(std::move(instr));
+    };
+    uint32_t checkZeroLabel = emitBlock(pos);
+    uint32_t initLabel = emitBlock(pos);
+    uint32_t headLabel = emitBlock(pos);
+    uint32_t bodyLabel = emitBlock(pos);
+    uint32_t stepLabel = emitBlock(pos);
+    uint32_t trueLabel = emitBlock(pos);
+    uint32_t falseLabel = emitBlock(pos);
+    uint32_t joinLabel = emitBlock(pos);
+    uint32_t nullLeftLabel = emitBlock(pos);
+    uint32_t nullRightLabel = emitBlock(pos);
+    uint32_t lenLabel = emitBlock(pos);
+    auto brTo = [&](uint32_t target) {
+        ir::Terminator term;
+        term.term = ir::Term::Br;
+        term.target = target;
+        term.loc = pos;
+        emitTerminator(term);
+        sealBlock(current_);
+    };
+    // Null is distinct from empty: both null reads true, either null
+    // beside a value reads false, and only two values reach the length
+    // check. Eq on pointers is sign-free, so the plain comparator asks.
+    ir::Value nil = constantI64(0, ptrType, pos);
+    if (failed_) {
+        return undefined();
+    }
+    ir::Value nullLeft = emitI64Cmp(pos, BinOp::Eq, left[kFirstWord], nil);
+    ir::Value nullRight = emitI64Cmp(pos, BinOp::Eq, right[kFirstWord], nil);
+    if (failed_) {
+        return undefined();
+    }
+    emitTerminator([&] {
+        ir::Terminator br;
+        br.term = ir::Term::CondBr;
+        br.cond = nullLeft;
+        br.thenTarget = nullLeftLabel;
+        br.elseTarget = nullRightLabel;
+        br.loc = pos;
+        return br;
+    }());
+    sealBlock(current_);
+    startBlock(nullLeftLabel);
+    emitTerminator([&] {
+        ir::Terminator br;
+        br.term = ir::Term::CondBr;
+        br.cond = nullRight;
+        br.thenTarget = trueLabel;
+        br.elseTarget = falseLabel;
+        br.loc = pos;
+        return br;
+    }());
+    sealBlock(current_);
+    startBlock(nullRightLabel);
+    emitTerminator([&] {
+        ir::Terminator br;
+        br.term = ir::Term::CondBr;
+        br.cond = nullRight;
+        br.thenTarget = falseLabel;
+        br.elseTarget = lenLabel;
+        br.loc = pos;
+        return br;
+    }());
+    sealBlock(current_);
+    // Unequal lengths decide immediately; equal lengths need the bytes.
+    startBlock(lenLabel);
+    emitTerminator([&] {
+        ir::Terminator br;
+        br.term = ir::Term::CondBr;
+        br.cond = emitI64Cmp(pos, BinOp::Eq, left[kLenWord], right[kLenWord]);
+        br.thenTarget = checkZeroLabel;
+        br.elseTarget = falseLabel;
+        br.loc = pos;
+        return br;
+    }());
+    sealBlock(current_);
+    startBlock(falseLabel);
+    storeCell(!isEq);
+    if (failed_) {
+        return undefined();
+    }
+    brTo(joinLabel);
+    startBlock(checkZeroLabel);
+    ir::Value zero = constantI64(0, count, pos);
+    if (failed_) {
+        return undefined();
+    }
+    emitTerminator([&] {
+        ir::Terminator br;
+        br.term = ir::Term::CondBr;
+        br.cond = emitI64Cmp(pos, BinOp::Eq, left[kLenWord], zero);
+        br.thenTarget = trueLabel;
+        br.elseTarget = initLabel;
+        br.loc = pos;
+        return br;
+    }());
+    sealBlock(current_);
+    startBlock(trueLabel);
+    storeCell(isEq);
+    if (failed_) {
+        return undefined();
+    }
+    brTo(joinLabel);
+    // The index slot initializes on the only path that reaches the
+    // head: the empty path jumps straight to the join, so placing the
+    // slot here (instead of beside the head) keeps every head load
+    // reading a stored value.
+    startBlock(initLabel);
+    ir::Value idxSlot = allocaSlot(count, pos);
+    if (failed_) {
+        return undefined();
+    }
+    Place idxPlace;
+    idxPlace.slots = {idxSlot};
+    idxPlace.type = count;
+    storeRange(pos, idxPlace, {constantI64(0, count, pos)}, count);
+    if (failed_) {
+        return undefined();
+    }
+    brTo(headLabel);
+    // The byte loop: an index slot walks both buffers together, the
+    // first mismatch decides, exhaustion with no mismatch is equal.
+    startBlock(headLabel);
+    std::vector<ir::Value> idxVals = loadRange(pos, idxPlace, count);
+    if (failed_ || idxVals.size() != kOneWord) {
+        refuse(pos, "this expression");
+        return undefined();
+    }
+    emitTerminator([&] {
+        ir::Terminator br;
+        br.term = ir::Term::CondBr;
+        br.cond = emitI64Cmp(pos, BinOp::Lt, idxVals[kFirstWord], left[kLenWord]);
+        br.thenTarget = bodyLabel;
+        br.elseTarget = trueLabel;
+        br.loc = pos;
+        return br;
+    }());
+    sealBlock(current_);
+    startBlock(bodyLabel);
+    // The head's load parked one block back; reload the live index —
+    // every iteration reads what the last step stored.
+    std::vector<ir::Value> atVals = loadRange(pos, idxPlace, count);
+    if (failed_ || atVals.size() != kOneWord) {
+        refuse(pos, "this expression");
+        return undefined();
+    }
+    ir::Value at = atVals[kFirstWord];
+    auto advance = [&](ir::Value base) {
+        ir::Instr add;
+        add.op = ir::Op::Add;
+        add.loc = pos;
+        add.type = ptrType;
+        add.width = ir::IRType::Ptr;
+        add.isPure = true;
+        add.operands.push_back(base);
+        add.operands.push_back(at);
+        ir::Value moved = newValue(add.width, ptrType, pos);
+        add.results.push_back(moved);
+        emit(std::move(add));
+        return moved;
+    };
+    ir::Value fromLeft = advance(left[kFirstWord]);
+    ir::Value fromRight = advance(right[kFirstWord]);
+    if (failed_) {
+        return undefined();
+    }
+    Place readLeft;
+    readLeft.slots = {fromLeft};
+    readLeft.type = byteType;
+    std::vector<ir::Value> byteLeft = loadRange(pos, readLeft, byteType);
+    if (failed_ || byteLeft.size() != kOneWord) {
+        refuse(pos, "this expression");
+        return undefined();
+    }
+    Place readRight;
+    readRight.slots = {fromRight};
+    readRight.type = byteType;
+    std::vector<ir::Value> byteRight = loadRange(pos, readRight, byteType);
+    if (failed_ || byteRight.size() != kOneWord) {
+        refuse(pos, "this expression");
+        return undefined();
+    }
+    emitTerminator([&] {
+        ir::Terminator br;
+        br.term = ir::Term::CondBr;
+        br.cond = emitI64Cmp(pos, BinOp::Eq, byteLeft[kFirstWord],
+                             byteRight[kFirstWord]);
+        br.thenTarget = stepLabel;
+        br.elseTarget = falseLabel;
+        br.loc = pos;
+        return br;
+    }());
+    sealBlock(current_);
+    startBlock(stepLabel);
+    ir::Instr step;
+    step.op = ir::Op::Add;
+    step.loc = pos;
+    step.type = count;
+    step.width = ir::IRType::I64;
+    step.isPure = true;
+    step.operands.push_back(at);
+    step.operands.push_back(constantI64(1, count, pos));
+    ir::Value next = newValue(step.width, count, pos);
+    step.results.push_back(next);
+    emit(std::move(step));
+    storeRange(pos, idxPlace, {next}, count);
+    if (failed_) {
+        return undefined();
+    }
+    brTo(headLabel);
+    startBlock(joinLabel);
+    ir::Instr load;
+    load.op = ir::Op::Load;
+    load.loc = pos;
+    load.type = boolean;
+    load.width = widthOf(boolean, pos);
+    load.addressBase = cell;
+    load.isPure = true;
+    ir::Value out = newValue(load.width, boolean, pos);
+    load.results.push_back(out);
+    emit(std::move(load));
+    if (failed_) {
+        return undefined();
+    }
+    return out;
+}
+
+ir::Value Lowerer::lowerStringEq(const Binary& n) {
+    // Either side may be the null literal: it answers (nil, 0), and the
+    // words core decides null against null and null against a value
+    // before any length is read. Only the literal substitutes — the
+    // checker keeps a *void variable beside a string a mismatch.
+    TypeRef count{ctx_.basic(BasicKind::I64)};
+    TypeRef ptrType{ctx_.pointer(ctx_.basic(BasicKind::U8))};
     auto stringWords = [&](const Expr* side) {
         if (dynamic_cast<const NilPtr*>(side) != nullptr) {
             return std::vector<ir::Value>{constantI64(0, ptrType, side->pos),
@@ -4867,196 +5120,7 @@ ir::Value Lowerer::lowerStringEq(const Binary& n) {
         refuse(n.rhs->pos, "this expression");
         return undefined();
     }
-    ir::Value cell = allocaSlot(boolean, n.pos);
-    if (failed_) {
-        return undefined();
-    }
-    auto storeCell = [&](bool value) {
-        ir::Instr instr;
-        instr.op = ir::Op::Store;
-        instr.loc = n.pos;
-        instr.type = boolean;
-        instr.width = widthOf(boolean, n.pos);
-        instr.addressBase = cell;
-        instr.storedValue = constantI64(value ? 1 : 0, boolean, n.pos);
-        emit(std::move(instr));
-    };
-    uint32_t checkZeroLabel = emitBlock(n.pos);
-    uint32_t initLabel = emitBlock(n.pos);
-    uint32_t headLabel = emitBlock(n.pos);
-    uint32_t bodyLabel = emitBlock(n.pos);
-    uint32_t stepLabel = emitBlock(n.pos);
-    uint32_t trueLabel = emitBlock(n.pos);
-    uint32_t falseLabel = emitBlock(n.pos);
-    uint32_t joinLabel = emitBlock(n.pos);
-    auto brTo = [&](uint32_t target) {
-        ir::Terminator term;
-        term.term = ir::Term::Br;
-        term.target = target;
-        term.loc = n.pos;
-        emitTerminator(term);
-        sealBlock(current_);
-    };
-    // Unequal lengths decide immediately; equal lengths need the bytes.
-    emitTerminator([&] {
-        ir::Terminator br;
-        br.term = ir::Term::CondBr;
-        br.cond = emitI64Cmp(n.pos, BinOp::Eq, left[kLenWord], right[kLenWord]);
-        br.thenTarget = checkZeroLabel;
-        br.elseTarget = falseLabel;
-        br.loc = n.pos;
-        return br;
-    }());
-    sealBlock(current_);
-    startBlock(falseLabel);
-    storeCell(!isEq);
-    if (failed_) {
-        return undefined();
-    }
-    brTo(joinLabel);
-    startBlock(checkZeroLabel);
-    ir::Value zero = constantI64(0, count, n.pos);
-    if (failed_) {
-        return undefined();
-    }
-    emitTerminator([&] {
-        ir::Terminator br;
-        br.term = ir::Term::CondBr;
-        br.cond = emitI64Cmp(n.pos, BinOp::Eq, left[kLenWord], zero);
-        br.thenTarget = trueLabel;
-        br.elseTarget = initLabel;
-        br.loc = n.pos;
-        return br;
-    }());
-    sealBlock(current_);
-    startBlock(trueLabel);
-    storeCell(isEq);
-    if (failed_) {
-        return undefined();
-    }
-    brTo(joinLabel);
-    // The index slot initializes on the only path that reaches the
-    // head: the empty path jumps straight to the join, so placing the
-    // slot here (instead of beside the head) keeps every head load
-    // reading a stored value.
-    startBlock(initLabel);
-    ir::Value idxSlot = allocaSlot(count, n.pos);
-    if (failed_) {
-        return undefined();
-    }
-    Place idxPlace;
-    idxPlace.slots = {idxSlot};
-    idxPlace.type = count;
-    storeRange(n.pos, idxPlace, {constantI64(0, count, n.pos)}, count);
-    if (failed_) {
-        return undefined();
-    }
-    brTo(headLabel);
-    // The byte loop: an index slot walks both buffers together, the
-    // first mismatch decides, exhaustion with no mismatch is equal.
-    startBlock(headLabel);
-    std::vector<ir::Value> idxVals = loadRange(n.pos, idxPlace, count);
-    if (failed_ || idxVals.size() != kOneWord) {
-        refuse(n.pos, "this expression");
-        return undefined();
-    }
-    emitTerminator([&] {
-        ir::Terminator br;
-        br.term = ir::Term::CondBr;
-        br.cond = emitI64Cmp(n.pos, BinOp::Lt, idxVals[kFirstWord], left[kLenWord]);
-        br.thenTarget = bodyLabel;
-        br.elseTarget = trueLabel;
-        br.loc = n.pos;
-        return br;
-    }());
-    sealBlock(current_);
-    startBlock(bodyLabel);
-    // The head's load parked one block back; reload the live index —
-    // every iteration reads what the last step stored.
-    std::vector<ir::Value> atVals = loadRange(n.pos, idxPlace, count);
-    if (failed_ || atVals.size() != kOneWord) {
-        refuse(n.pos, "this expression");
-        return undefined();
-    }
-    ir::Value at = atVals[kFirstWord];
-    auto advance = [&](ir::Value base) {
-        ir::Instr add;
-        add.op = ir::Op::Add;
-        add.loc = n.pos;
-        add.type = ptrType;
-        add.width = ir::IRType::Ptr;
-        add.isPure = true;
-        add.operands.push_back(base);
-        add.operands.push_back(at);
-        ir::Value moved = newValue(add.width, ptrType, n.pos);
-        add.results.push_back(moved);
-        emit(std::move(add));
-        return moved;
-    };
-    ir::Value fromLeft = advance(left[kFirstWord]);
-    ir::Value fromRight = advance(right[kFirstWord]);
-    if (failed_) {
-        return undefined();
-    }
-    Place readLeft;
-    readLeft.slots = {fromLeft};
-    readLeft.type = byteType;
-    std::vector<ir::Value> byteLeft = loadRange(n.pos, readLeft, byteType);
-    if (failed_ || byteLeft.size() != kOneWord) {
-        refuse(n.pos, "this expression");
-        return undefined();
-    }
-    Place readRight;
-    readRight.slots = {fromRight};
-    readRight.type = byteType;
-    std::vector<ir::Value> byteRight = loadRange(n.pos, readRight, byteType);
-    if (failed_ || byteRight.size() != kOneWord) {
-        refuse(n.pos, "this expression");
-        return undefined();
-    }
-    emitTerminator([&] {
-        ir::Terminator br;
-        br.term = ir::Term::CondBr;
-        br.cond = emitI64Cmp(n.pos, BinOp::Eq, byteLeft[kFirstWord],
-                             byteRight[kFirstWord]);
-        br.thenTarget = stepLabel;
-        br.elseTarget = falseLabel;
-        br.loc = n.pos;
-        return br;
-    }());
-    sealBlock(current_);
-    startBlock(stepLabel);
-    ir::Instr step;
-    step.op = ir::Op::Add;
-    step.loc = n.pos;
-    step.type = count;
-    step.width = ir::IRType::I64;
-    step.isPure = true;
-    step.operands.push_back(at);
-    step.operands.push_back(constantI64(1, count, n.pos));
-    ir::Value next = newValue(step.width, count, n.pos);
-    step.results.push_back(next);
-    emit(std::move(step));
-    storeRange(n.pos, idxPlace, {next}, count);
-    if (failed_) {
-        return undefined();
-    }
-    brTo(headLabel);
-    startBlock(joinLabel);
-    ir::Instr load;
-    load.op = ir::Op::Load;
-    load.loc = n.pos;
-    load.type = boolean;
-    load.width = widthOf(boolean, n.pos);
-    load.addressBase = cell;
-    load.isPure = true;
-    ir::Value out = newValue(load.width, boolean, n.pos);
-    load.results.push_back(out);
-    emit(std::move(load));
-    if (failed_) {
-        return undefined();
-    }
-    return out;
+    return lowerStringEqWords(left, right, n.pos, n.op == BinOp::Eq);
 }
 
 std::vector<ir::Value> Lowerer::lowerTernary(const Ternary& n) {
@@ -5616,6 +5680,241 @@ void Lowerer::onIf(IfStmt& n) {
     locals_.pop_back();
     emitTerminator(toJoin);
 
+    terminated_ = savedTerminated;
+    startBlock(joinLabel);
+}
+
+void Lowerer::onMatch(MatchStmt& n) {
+    if (failed_ || !enabled_ || function_ == nullptr) {
+        return;
+    }
+    // The checker proved every arm compatible and the chain exhaustive
+    // (a default, or both bool constants), so the lowering only answers
+    // which arm: the scrutinee lowers once, each test branches to its
+    // body or the next test, and a taken body joins instead of falling
+    // through — the first match in source order wins. A break inside an
+    // arm needs no frame here: none is pushed, so it reaches the loop
+    // around the match untouched.
+    TypeRef scrutType = checker_.typeOf(n.scrutinee.get());
+    if (scrutType.isError()) {
+        refuse(n.pos, "this match");
+        return;
+    }
+    const bool scrutString = scrutType.type->kind() == Kind::String;
+    std::vector<ir::Value> scrut = lowerWords(n.scrutinee.get());
+    if (failed_) {
+        return;
+    }
+    const uint64_t want = scrutString ? kSliceWords : kOneWord;
+    if (scrut.size() != want) {
+        refuse(n.scrutinee->pos, "this match");
+        return;
+    }
+    const uint64_t armCount = static_cast<uint64_t>(n.arms.size());
+    std::vector<uint32_t> tests;
+    std::vector<uint32_t> bodies;
+    for (uint64_t i = 0; i < armCount; ++i) {
+        tests.push_back(emitBlock(n.pos));
+        bodies.push_back(emitBlock(n.pos));
+    }
+    uint32_t defaultLabel = emitBlock(n.pos);
+    uint32_t joinLabel = emitBlock(n.pos);
+    auto brTo = [&](uint32_t target) {
+        ir::Terminator term;
+        term.term = ir::Term::Br;
+        term.target = target;
+        term.loc = n.pos;
+        emitTerminator(term);
+        sealBlock(current_);
+    };
+    auto condTo = [&](ir::Value cond, uint32_t taken, uint32_t missed) {
+        ir::Terminator br;
+        br.term = ir::Term::CondBr;
+        br.cond = cond;
+        br.thenTarget = taken;
+        br.elseTarget = missed;
+        br.loc = n.pos;
+        emitTerminator(br);
+        sealBlock(current_);
+    };
+    // A bound name the lookups below find is a value comparison; one
+    // they miss binds fresh. Locals shadow globals, which shadow
+    // constants — the same order every other name read uses, and the
+    // same call the checker's resolveMatchValue makes: a name it finds
+    // must materialize here, never bind fresh over the real value.
+    auto boundWords = [&](const std::string& name,
+                          std::vector<ir::Value>& words) -> bool {
+        for (auto frame = locals_.rbegin(); frame != locals_.rend(); ++frame) {
+            auto found = frame->find(name);
+            if (found != frame->end()) {
+                words = loadLocal(n.pos, found->second);
+                return !failed_;
+            }
+        }
+        if (const GlobalBinding* global = findGlobal(name)) {
+            words = loadGlobal(n.pos, *global);
+            return !failed_;
+        }
+        const resolve::Scope* here = resolver_.scopeOf(checker_.module());
+        const resolve::Decl* decl =
+            here != nullptr ? resolver_.lookup(here, name) : nullptr;
+        if (decl != nullptr &&
+            (decl->kind == resolve::DeclKind::Var ||
+             decl->kind == resolve::DeclKind::Const)) {
+            // A variable global always lands in globals_ first; missing
+            // it here is a lowering gap, not a fresh name. A constant
+            // folds, or refuses loudly when it has no integer value.
+            if (decl->kind == resolve::DeclKind::Var) {
+                refuse(n.pos, "this pattern");
+                return false;
+            }
+            Ident probe(n.pos, name);
+            int64_t folded = 0;
+            if (!foldBound(&probe, folded)) {
+                refuse(n.pos, "this pattern");
+                return false;
+            }
+            TypeRef word{ctx_.basic(BasicKind::I64)};
+            words = {constantI64(folded, word, n.pos)};
+            return !failed_;
+        }
+        return false;
+    };
+    if (armCount == 0) {
+        brTo(defaultLabel);
+    } else {
+        brTo(tests[0]);
+    }
+    std::vector<std::string> fresh(armCount);
+    for (uint64_t i = 0; i < armCount; ++i) {
+        startBlock(tests[i]);
+        const uint32_t body = bodies[i];
+        const uint32_t next = i + 1 < armCount ? tests[i + 1] : defaultLabel;
+        const Pattern& pat = *n.arms[i]->pattern;
+        // A dead arm can never match: the checker proved the mismatch,
+        // so the test edge chains straight through with no comparison.
+        if (checker_.isDeadPattern(&pat)) {
+            brTo(next);
+            continue;
+        }
+        if (pat.kind == PatternKind::Wildcard) {
+            brTo(body);
+            continue;
+        }
+        if (pat.kind == PatternKind::Bind) {
+            std::vector<ir::Value> bound;
+            if (!boundWords(pat.name, bound)) {
+                if (failed_) {
+                    return;
+                }
+                fresh[i] = pat.name;
+                brTo(body);
+                continue;
+            }
+            if (bound.size() != want) {
+                refuse(n.pos, "this pattern");
+                return;
+            }
+            // Equality answers on the cells: every producer keeps the
+            // value's representation in its slot, so two cells holding
+            // the same value compare equal at any width both share.
+            if (scrutString) {
+                ir::Value eq = lowerStringEqWords(scrut, bound, n.pos, true);
+                if (failed_) {
+                    return;
+                }
+                condTo(eq, body, next);
+                continue;
+            }
+            condTo(emitI64Cmp(n.pos, BinOp::Eq, scrut[kFirstWord],
+                             bound[kFirstWord]),
+                   body, next);
+            continue;
+        }
+        if (pat.kind == PatternKind::Const) {
+            if (dynamic_cast<const StringLit*>(pat.value.get()) != nullptr) {
+                std::vector<ir::Value> wantWords = lowerWords(pat.value.get());
+                if (failed_ || wantWords.size() != kSliceWords) {
+                    refuse(pat.value->pos, "this pattern");
+                    return;
+                }
+                ir::Value eq =
+                    lowerStringEqWords(scrut, wantWords, n.pos, true);
+                if (failed_) {
+                    return;
+                }
+                condTo(eq, body, next);
+                continue;
+            }
+            if (dynamic_cast<const NilPtr*>(pat.value.get()) != nullptr) {
+                TypeRef ptrType{ctx_.pointer(ctx_.basic(BasicKind::U8))};
+                ir::Value nil = constantI64(0, ptrType, n.pos);
+                if (failed_) {
+                    return;
+                }
+                condTo(emitI64Cmp(n.pos, BinOp::Eq, scrut[kFirstWord], nil),
+                       body, next);
+                continue;
+            }
+            int64_t folded = 0;
+            if (!foldBound(pat.value.get(), folded)) {
+                refuse(pat.value->pos, "this pattern");
+                return;
+            }
+            TypeRef word{ctx_.basic(BasicKind::I64)};
+            ir::Value wantVal = constantI64(folded, word, n.pos);
+            if (failed_) {
+                return;
+            }
+            condTo(emitI64Cmp(n.pos, BinOp::Eq, scrut[kFirstWord], wantVal),
+                   body, next);
+            continue;
+        }
+        refuse(pat.pos, "this pattern");
+        return;
+    }
+    bool savedTerminated = terminated_;
+    for (uint64_t i = 0; i < armCount; ++i) {
+        startBlock(bodies[i]);
+        locals_.push_back({});
+        if (!fresh[i].empty()) {
+            // A fresh name binds the scrutinee's words in the arm's own
+            // frame, which dies with the arm — the same shape a variable
+            // declaration owns, minus the declaration.
+            std::vector<ir::Value> slots = allocaSlots(scrutType, n.pos, want);
+            Place dest;
+            dest.slots = slots;
+            dest.type = scrutType;
+            dest.off = 0;
+            dest.isVolatile = false;
+            storeRange(n.pos, dest, scrut, scrutType);
+            if (failed_) {
+                return;
+            }
+            LocalBinding bind;
+            bind.slots = std::move(slots);
+            bind.type = scrutType;
+            bind.isMutable = true;
+            locals_.back()[fresh[i]] = std::move(bind);
+        }
+        n.arms[i]->body->accept(checker_);
+        locals_.pop_back();
+        // A body that ended in a jump already closed its block; one that
+        // fell off still needs the edge to the join, and emitTerminator
+        // drops the unreachable one itself.
+        brTo(joinLabel);
+    }
+    startBlock(defaultLabel);
+    if (n.fallback != nullptr) {
+        locals_.push_back({});
+        n.fallback->accept(checker_);
+        locals_.pop_back();
+        brTo(joinLabel);
+    } else {
+        // Bool-exhaustive with no default: control proves one arm took,
+        // but the block still needs its terminator.
+        brTo(joinLabel);
+    }
     terminated_ = savedTerminated;
     startBlock(joinLabel);
 }

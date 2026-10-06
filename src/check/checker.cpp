@@ -1190,18 +1190,204 @@ TypeRef Checker::checkFuncLit(FuncLit& lit) {
 
 void Checker::visitMatchStmt(MatchStmt& n) {
     TypeRef scrutinee = checkExpr(n.scrutinee.get(), TypeRef{ctx_.wildcard()});
+    if (!scrutinee.isError()) {
+        for (auto& arm : n.arms) {
+            checkMatchPattern(*arm->pattern, scrutinee);
+        }
+        // Exhaustiveness is decided by the type, at compile time: a
+        // default arm, or both bool constants over a bool. Anything else
+        // is a rejection naming the statement, never a runtime miss.
+        bool exhaustive = n.fallback != nullptr;
+        if (!exhaustive && scrutinee.type->kind() == Kind::Basic &&
+            scrutinee.type->basic().has_value() &&
+            *scrutinee.type->basic() == BasicKind::Bool) {
+            bool hasTrue = false;
+            bool hasFalse = false;
+            for (auto& arm : n.arms) {
+                if (arm->pattern->kind != PatternKind::Const) {
+                    continue;
+                }
+                const auto* flag =
+                    dynamic_cast<const BoolLit*>(arm->pattern->value.get());
+                if (flag == nullptr) {
+                    continue;
+                }
+                if (flag->value) {
+                    hasTrue = true;
+                } else {
+                    hasFalse = true;
+                }
+            }
+            exhaustive = hasTrue && hasFalse;
+        }
+        if (!exhaustive) {
+            fail(n.pos, "match needs a default arm");
+        }
+    }
+    if (sink_ != nullptr) {
+        // Fresh bindings stay pushed while the lowerer walks the bodies:
+        // onMatch re-accepts each arm synchronously, so these scopes are
+        // alive for exactly the delegation (mirrors visitForInStmt, where
+        // the element binding outlives the sink call the same way).
+        for (auto& arm : n.arms) {
+            pushScope();
+            bindMatchFresh(*arm->pattern, scrutinee);
+        }
+        sink_->onMatch(n);
+        for (auto& arm : n.arms) {
+            (void)arm;
+            popScope();
+        }
+        return;
+    }
     for (auto& arm : n.arms) {
         pushScope();
-        bindPattern(*arm->pattern, scrutinee);
+        bindMatchFresh(*arm->pattern, scrutinee);
         arm->body->accept(*this);
         popScope();
     }
     if (n.fallback != nullptr) {
         n.fallback->accept(*this);
     }
-    // Arm dispatch lowering does not exist yet: the first arm ran
-    // unconditionally, so match refuses here. Arms still check above.
-    fail(n.pos, "match is not implemented yet");
+}
+
+bool Checker::resolveMatchValue(const std::string& name, TypeRef& bound) {
+    if (const Local* local = findLocal(name)) {
+        bound = local->type;
+        return true;
+    }
+    const resolve::Decl* decl = resolver_.lookup(moduleScope_, name);
+    if (decl == nullptr) {
+        return false;
+    }
+    if (decl->kind == resolve::DeclKind::Var ||
+        decl->kind == resolve::DeclKind::Const) {
+        bound = decl->type;
+        return true;
+    }
+    return false;
+}
+
+bool Checker::matchComparable(TypeRef scrutinee, TypeRef bound) {
+    if (scrutinee.isError() || bound.isError()) {
+        return false;
+    }
+    Kind sk = scrutinee.type->kind();
+    Kind bk = bound.type->kind();
+    if (sk == Kind::String && bk == Kind::String) {
+        return true;
+    }
+    if (sk == Kind::Pointer && bk == Kind::Pointer) {
+        return true;
+    }
+    if (sk == Kind::Basic && bk == Kind::Basic) {
+        auto s = scrutinee.type->basic();
+        auto b = bound.type->basic();
+        if (!s.has_value() || !b.has_value()) {
+            return false;
+        }
+        // Patterns stay strict: the same spelling on both sides. A bound
+        // i32 beside an i64 scrutinee is a loud mismatch, not a guess.
+        return *s == *b;
+    }
+    return false;
+}
+
+bool Checker::checkMatchConst(const Pattern& pat, TypeRef scrutinee) {
+    const Expr* value = pat.value.get();
+    // A mismatched pattern is dead, not wrong: it compiles and never
+    // matches, so control reaches the default (FEATURES §8.4). Only
+    // genuinely unlowerable shapes stay loud.
+    auto dead = [&] {
+        deadPatterns_.insert(&pat);
+        return true;
+    };
+    Kind sk = scrutinee.type->kind();
+    if (dynamic_cast<const NilPtr*>(value) != nullptr) {
+        if (sk != Kind::String && sk != Kind::Pointer) {
+            return dead();
+        }
+        return true;
+    }
+    if (dynamic_cast<const StringLit*>(value) != nullptr) {
+        if (sk != Kind::String) {
+            return dead();
+        }
+        return true;
+    }
+    if (dynamic_cast<const FloatLit*>(value) != nullptr) {
+        fail(value->pos, "this pattern is not supported yet");
+        return false;
+    }
+    if (sk == Kind::Enum) {
+        fail(value->pos, "this pattern is not supported yet");
+        return false;
+    }
+    if (sk != Kind::Basic) {
+        return dead();
+    }
+    auto b = scrutinee.type->basic();
+    if (!b.has_value()) {
+        fail(value->pos, "a constant pattern needs an integer, a bool, or a char");
+        return false;
+    }
+    // The constant keeps its own spelling beside the scrutinee's: a bool
+    // beside an int is a dead arm, not a 0/1 comparison.
+    if (*b == BasicKind::Bool && dynamic_cast<const BoolLit*>(value) == nullptr) {
+        return dead();
+    }
+    if (*b == BasicKind::Char && dynamic_cast<const CharLit*>(value) == nullptr) {
+        return dead();
+    }
+    if (basicIsInteger(*b) && dynamic_cast<const IntLit*>(value) == nullptr) {
+        return dead();
+    }
+    if (!basicIsInteger(*b) && *b != BasicKind::Bool && *b != BasicKind::Char) {
+        return dead();
+    }
+    std::unordered_set<std::string> active;
+    EvalResult folded = evalConstInt(*value, *env_, active);
+    if (!folded.ok) {
+        fail(value->pos, folded.error);
+        return false;
+    }
+    return true;
+}
+
+bool Checker::checkMatchPattern(const Pattern& pat, TypeRef scrutinee) {
+    switch (pat.kind) {
+        case PatternKind::Wildcard:
+            return true;
+        case PatternKind::Bind: {
+            TypeRef bound = errorRef();
+            if (resolveMatchValue(pat.name, bound) &&
+                !matchComparable(scrutinee, bound)) {
+                deadPatterns_.insert(&pat);
+            }
+            return true;
+        }
+        case PatternKind::Const:
+            return checkMatchConst(pat, scrutinee);
+        case PatternKind::Type:
+        case PatternKind::Member:
+            fail(pat.pos, "this pattern is not supported yet");
+            return false;
+    }
+    return false;
+}
+
+bool Checker::isDeadPattern(const Pattern* pat) const {
+    return deadPatterns_.count(pat) != 0;
+}
+
+void Checker::bindMatchFresh(const Pattern& pat, TypeRef scrutinee) {
+    if (pat.kind != PatternKind::Bind) {
+        return;
+    }
+    TypeRef bound = errorRef();
+    if (!resolveMatchValue(pat.name, bound)) {
+        bindLocal(pat.name, scrutinee, false, pat.pos);
+    }
 }
 
 void Checker::visitDeleteStmt(DeleteStmt& n) {

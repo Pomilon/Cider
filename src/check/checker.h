@@ -78,6 +78,10 @@ public:
     virtual void onBreak(Break& n) { (void)n; }
     virtual void onContinue(Continue& n) { (void)n; }
     virtual void onIf(IfStmt& n) { (void)n; }
+    // A match arm, after its pattern validated against the scrutinee type
+    // and exhaustiveness decided (a default arm, or both bool constants).
+    // Without this hook the first arm would run unconditionally.
+    virtual void onMatch(MatchStmt& n) { (void)n; }
     virtual void onWhile(WhileStmt& n) { (void)n; }
     virtual void onFor(ForStmt& n) { (void)n; }
     virtual void onForIn(ForInStmt& n) { (void)n; }
@@ -129,6 +133,9 @@ public:
     // unknown names here are a checker bug, not a program error, and are
     // reported as such.
     bool checkProgram(Program& program, const std::string& module);
+    // Whether the validator proved a match arm can never match (FEATURES
+    // §8.4 dead-pattern rule). The lowerer chains straight through those.
+    bool isDeadPattern(const Pattern* pat) const;
     // The module the last checkProgram walked: the lowerer names
     // definitions by the module being walked, not the entry.
     const std::string& module() const { return module_; }
@@ -232,6 +239,15 @@ private:
     void checkCtor(DeclId id, Kind kind, FuncDecl* ctor, bool isInit);
     void bindPattern(Pattern& pat, TypeRef scrutinee);
     void bindSubPattern(Pattern& pat, TypeRef type);
+    // Match validation (FEATURES §8.4): a pattern Name that resolves to a
+    // value in scope compares by that type's == (the Erlang rule); only an
+    // unresolvable name binds fresh. Classification never binds, so both
+    // the pure-mode walk and the sink-mode validation share it.
+    bool resolveMatchValue(const std::string& name, TypeRef& bound);
+    bool matchComparable(TypeRef scrutinee, TypeRef bound);
+    bool checkMatchConst(const Pattern& pat, TypeRef scrutinee);
+    bool checkMatchPattern(const Pattern& pat, TypeRef scrutinee);
+    void bindMatchFresh(const Pattern& pat, TypeRef scrutinee);
 
     // SEMANTICS.md §2.3: the common type of two operands, stated as a type.
     // (Public; declared beside typeOf. Lowering queries it for comparisons.)
@@ -304,6 +320,10 @@ private:
     // walk meets the same node again and must answer the type without
     // re-walking, or delegation would recurse forever.
     std::unordered_set<const FuncLit*> emitted_;
+    // Match arms the validator proved can never match (a type mismatch the
+    // corpus requires to compile and skip, FEATURES §8.4). The lowerer
+    // chains the test edge straight through them instead of comparing.
+    std::unordered_set<const Pattern*> deadPatterns_;
     TypeRef funcReturn_;
     bool inFunc_ = false;
     uint64_t loopDepth_ = 0;

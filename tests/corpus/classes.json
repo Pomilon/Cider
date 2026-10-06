@@ -990,9 +990,9 @@
   "class": "D"
  },
  "match_strings": {
-  "actual": "cider run: SIGSEGV (exit 139), `timeout: dumped core`, no diagnostic (checker crashes on match with string return)",
+  "actual": "exact stdout/stderr/exit match (as-is, rc=0)",
   "blocker": "match-lowering + string-compare + string-interp + checker-crash",
-  "class": "D"
+  "class": "A"
  },
  "matchlist": {
   "actual": "cider run exit 1, stdout empty, stderr diagnostic: `main.cid:2:17: expected an expression`",

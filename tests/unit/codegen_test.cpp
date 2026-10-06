@@ -743,8 +743,8 @@ void testStringCompare() {
                    "    var m: string = nilPtr as string;\n"
                    "    if (e != \"\") { return 1; }\n"
                    "    if (!(n == m)) { return 2; }\n"
-                   "    if (!(n == e)) { return 3; }\n"
-                   "    if (!(e == n)) { return 4; }\n"
+                   "    if (n == e) { return 3; }\n"
+                   "    if (e == n) { return 4; }\n"
                    "    if (n == \"x\") { return 5; }\n"
                    "    var p: *u8 = \"hi\";\n"
                    "    var q: *u8 = \"hi\";\n"
@@ -754,6 +754,68 @@ void testStringCompare() {
                    "    return 0;\n"
                    "}\n") == 0,
           "empty, null, and address strings behave");
+}
+
+// A match runs the first arm whose pattern fits and skips the rest.
+void testMatch() {
+    std::printf("matches run\n");
+    check(runQuiet("func main() -> int {\n"
+                   "    var c: int = 2;\n"
+                   "    match (c) { 1 => { return 10; } 2 => { return 20; } default => { return 30; } }\n"
+                   "}\n") == 20,
+          "a constant arm answers");
+    check(runQuiet("func main() -> int {\n"
+                   "    var c: int = 9;\n"
+                   "    match (c) { 1 => { return 10; } default => { return 30; } }\n"
+                   "}\n") == 30,
+          "the default answers when nothing matches");
+    check(runQuiet("func main() -> int {\n"
+                   "    match (1) { 1 => { return 10; } 1 => { return 20; } default => { return 30; } }\n"
+                   "}\n") == 10,
+          "the first matching arm wins");
+    check(runQuiet("func main() -> int {\n"
+                   "    match (7) { x => { return x + 1; } default => { return 0; } }\n"
+                   "}\n") == 8,
+          "a fresh name binds the value");
+    check(runQuiet("func main() -> int {\n"
+                   "    var v: int = 5;\n"
+                   "    var a: int = 0;\n"
+                   "    match (5) { v => { a = 1; } default => { a = 2; } }\n"
+                   "    match (6) { v => { a = a + 10; } default => { a = a + 20; } }\n"
+                   "    return a;\n"
+                   "}\n") == 21,
+          "a bound name compares by value");
+    check(runQuiet("func main() -> int {\n"
+                   "    var s: string = \"hi\";\n"
+                   "    match (s) { \"hi\" => { return 3; } default => { return 0; } }\n"
+                   "}\n") == 3,
+          "a string constant matches by content");
+    check(runQuiet("func main() -> int {\n"
+                   "    var n: string = nilPtr as string;\n"
+                   "    match (n) { \"\" => { return 41; } default => { return 0; } }\n"
+                   "}\n") == 0,
+          "null is not the empty string");
+    check(runQuiet("func main() -> int {\n"
+                   "    var b: [u8; 2] = new [u8; 2] {104, 105};\n"
+                   "    var p: *u8 = &b[0];\n"
+                   "    match (p) { \"hi\" => { return 44; } default => { return 0; } }\n"
+                   "}\n") == 0,
+          "a dead string pattern takes the default");
+    check(runQuiet("func main() -> int {\n"
+                   "    var b: bool = true;\n"
+                   "    match (b) { true => { return 1; } false => { return 2; } }\n"
+                   "}\n") == 1,
+          "a bool matches without a default");
+    check(runQuiet("func main() -> int {\n"
+                   "    var i: int = 0;\n"
+                   "    var n: int = 0;\n"
+                   "    while (i < 5) {\n"
+                   "        match (i) { 2 => { break; } default => { n = n + 1; } }\n"
+                   "        i = i + 1;\n"
+                   "    }\n"
+                   "    return n;\n"
+                   "}\n") == 2,
+          "break in an arm leaves the loop");
 }
 
 void testPointerArith() {
@@ -1169,6 +1231,7 @@ int main() {
     testBoolCompare();
     testCharCompare();
     testStringCompare();
+    testMatch();
     testPointerArith();
     testEnumValues();
     testBitNot();

@@ -188,7 +188,7 @@ void testLoopMatchRefused() {
     check(fi.ok, "for-in checks now that lowering lands it");
     Checked ma =
         check("func f(x: int) -> int { match x { 1 => { return 10; } default => { return 30; } } }\n");
-    check(!ma.ok && ma.stage == "check", "match refuses until dispatch lands");
+    check(ma.ok, "match checks now that dispatch lands it");
 }
 
 // A generic call checks its body with the arguments substituted.
@@ -433,6 +433,73 @@ void testStringCompare() {
     check(!addrVar.ok && addrVar.stage == "check", "a string variable needs &s[0]");
 }
 
+// A match dispatches on the first arm whose pattern fits: constants by
+// value, a bound name by its ==, a fresh name always, else the default.
+void testMatch() {
+    std::printf("matches check\n");
+    Checked good = check(
+        "func main() -> int {\n"
+        "    var c: int = 2;\n"
+        "    match (c) { 1 => { return 10; } 2 => { return 20; } default => { return 30; } }\n"
+        "}\n");
+    check(good.ok, "int constants with a default: " + good.stage);
+    Checked exhaustive = check(
+        "func main() -> int {\n"
+        "    var b: bool = true;\n"
+        "    match (b) { true => { return 1; } false => { return 2; } }\n"
+        "}\n");
+    check(exhaustive.ok, "true+false needs no default: " + exhaustive.stage);
+    Checked missing = check(
+        "func main() -> int {\n"
+        "    var b: bool = true;\n"
+        "    match (b) { true => { return 1; } }\n"
+        "}\n");
+    check(!missing.ok && missing.stage == "check", "a missing arm fails");
+    Checked noDefault = check(
+        "func main() -> int {\n"
+        "    var c: int = 2;\n"
+        "    match (c) { 1 => { return 10; } }\n"
+        "}\n");
+    check(!noDefault.ok && noDefault.stage == "check", "a missing default fails");
+    Checked value = check(
+        "func main() -> int {\n"
+        "    var v: int = 5;\n"
+        "    match (5) { v => { return 1; } default => { return 0; } }\n"
+        "}\n");
+    check(value.ok, "a bound name compares by value: " + value.stage);
+    Checked fresh = check(
+        "func main() -> int {\n"
+        "    match (7) { x => { return x; } default => { return 0; } }\n"
+        "}\n");
+    check(fresh.ok, "a fresh name binds: " + fresh.stage);
+    Checked strings = check(
+        "func main() -> int {\n"
+        "    var s: string = \"hi\";\n"
+        "    match (s) { \"hi\" => { return 3; } default => { return 0; } }\n"
+        "}\n");
+    check(strings.ok, "a string constant matches: " + strings.stage);
+    Checked mismatch = check(
+        "func main() -> int {\n"
+        "    var s: string = \"hi\";\n"
+        "    match (s) { 1 => { return 1; } default => { return 0; } }\n"
+        "}\n");
+    check(mismatch.ok, "an int pattern on a string is dead, not an error");
+    Checked typePat = check(
+        "struct P { var x: int; }\n"
+        "func main() -> int {\n"
+        "    var p: P = new P { x: 1 };\n"
+        "    match (p) { P { x: x } => { return x; } default => { return 0; } }\n"
+        "}\n");
+    check(!typePat.ok && typePat.stage == "check", "a type pattern is refused");
+    Checked inLoop = check(
+        "func main() -> int {\n"
+        "    var i: int = 0;\n"
+        "    while (i < 3) { match (i) { 1 => { break; } default => { i = i + 1; } } }\n"
+        "    return i;\n"
+        "}\n");
+    check(inLoop.ok, "break in an arm reaches the loop: " + inLoop.stage);
+}
+
 void testPointerArith() {
     std::printf("pointer arithmetic checks\n");
     Checked add = check(
@@ -616,6 +683,7 @@ int main() {
     testBoolCompare();
     testCharCompare();
     testStringCompare();
+    testMatch();
     testPointerArith();
     testRepeatZero();
     testSliceCopy();

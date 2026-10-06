@@ -96,6 +96,7 @@ public:
     void onBreak(Break& n) override;
     void onContinue(Continue& n) override;
     void onIf(IfStmt& n) override;
+    void onMatch(MatchStmt& n) override;
     void onWhile(WhileStmt& n) override;
     void onFor(ForStmt& n) override;
     void onForIn(ForInStmt& n) override;
@@ -118,6 +119,9 @@ public:
     // construction: a null string is (nil, 0), and a zero length takes
     // the empty path before any byte is read.
     ir::Value lowerStringEq(const Binary& n);
+    ir::Value lowerStringEqWords(std::vector<ir::Value> left,
+                                std::vector<ir::Value> right,
+                                Position pos, bool isEq);
     // `?:` with branch control flow: the checker proved both arms share one
     // type, so each arm stores its words into the cell and the join loads
     // them back. The untaken arm never evaluates (SEMANTICS: single-eval).
