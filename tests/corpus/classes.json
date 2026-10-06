@@ -1190,9 +1190,9 @@
   "class": "D"
  },
  "shift_compound_assign": {
-  "actual": "cider run exit 1, stdout empty, stderr diagnostic: `main.cid:109:14: a variable needs an initialiser`",
+  "actual": "exact stdout/stderr/exit match",
   "blocker": "for-lowering (+ u64-hex-literal-fit, bare-literal; <<= / >>= themselves check clean)",
-  "class": "D"
+  "class": "A"
  },
  "shift_count_mask": {
   "actual": "cider run exit 1, stdout empty, stderr diagnostic: `std.io:1:1: cannot find module 'std.io'` (constant `a << 33` sites would also force rejection per diff #16)",

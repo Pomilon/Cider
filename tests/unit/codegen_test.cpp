@@ -334,6 +334,21 @@ void testComputedIndex() {
                    "    return a[0] + a[1] + a[2] + a[3];\n"
                    "}\n") == 64,
           "computed stores fill and folded reads answer");
+    // A packed narrow element compares by its own bytes only: loading
+    // arr[1] as a full word would also read arr[2]'s bytes into the
+    // comparison, so materialising the neighbour must not change the
+    // answer (the old qword load failed this once the neighbour held
+    // a nonzero value).
+    check(runQuiet("func main() -> int {\n"
+                   "    var arr: [u32; 3] = new [u32; 3] {[1, 2, 3]};\n"
+                   "    arr[1] <<= 3;\n"
+                   "    var p: *u32 = &arr[2];\n"
+                   "    *p <<= 5;\n"
+                   "    if (arr[1] != 16) { return 32; }\n"
+                   "    if (arr[2] != 96) { return 33; }\n"
+                   "    return 0;\n"
+                   "}\n") == 0,
+          "a packed u32 compares without its neighbour's bytes");
     check(runQuiet("func main() -> int {\n"
                    "    var a: [int; 4] = new [int; 4] { 5, 6, 7, 8 };\n"
                    "    var j: int = 3;\n"

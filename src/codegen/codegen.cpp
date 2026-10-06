@@ -719,6 +719,15 @@ private:
             out_ += "  movsxd rax, DWORD PTR " + mem + "\n";
             return;
         }
+        if (width == ir::IRType::U32) {
+            // A zero-extending dword load: the cell holds the value in
+            // its low four bytes, and a qword load would also pick up
+            // whatever shares the slot (a packed array neighbour), so
+            // the neighbour's bytes would corrupt the comparison. A
+            // dword load through eax zeroes the top half by itself.
+            out_ += "  mov eax, DWORD PTR " + mem + "\n";
+            return;
+        }
         out_ += "  mov rax, " + mem + "\n";
     }
 
