@@ -195,9 +195,9 @@
   "class": "B"
  },
  "class_method_stress": {
-  "actual": "exit 1; tests/corpus/legacy/class_method_stress/main.cid:16:19: a variable needs an initialiser; tests/corpus/legacy/class_method_stress/main.cid:26:19: a variable needs an initialiser",
+  "actual": "exact stdout/stderr/exit match",
   "blocker": "classes (+uninit-locals diff #7, stdlib-imports, asm-blocks)",
-  "class": "D"
+  "class": "A"
  },
  "closure_array_store": {
   "actual": "exit 1; tests/corpus/closure_array_store/main.cid:26:19: expected an expression; tests/corpus/closure_array_store/main.cid:32:20: expected an expression",
