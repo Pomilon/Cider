@@ -1,5 +1,5 @@
-func _start() -> void {
-    var arr: [int; 5];
+func _start() {
+    var arr: [int; 5] = new [int; 5] {[0, ...]};
     arr[0] = 10;
     arr[1] = 20;
     arr[2] = 30;

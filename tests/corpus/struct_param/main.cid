@@ -20,16 +20,12 @@ func overlaps(a: Rect, b: Rect) -> bool {
 }
 
 func main() -> int {
-  var o: One;
-  o.v = 7;
+  var o: One = new One { v: 7 };
   if (getone(o) != 7) { return 1; }
-  var dr: Rect;
-  dr.x = 0; dr.y = 0; dr.w = 10; dr.h = 10;
-  var wt: Rect;
-  wt.x = 5; wt.y = 5; wt.w = 10; wt.h = 10;
+  var dr: Rect = new Rect { x: 0, y: 0, w: 10, h: 10 };
+  var wt: Rect = new Rect { x: 5, y: 5, w: 10, h: 10 };
   if (!overlaps(dr, wt)) { return 2; }
-  var far: Rect;
-  far.x = 50; far.y = 50; far.w = 5; far.h = 5;
+  var far: Rect = new Rect { x: 50, y: 50, w: 5, h: 5 };
   if (overlaps(dr, far)) { return 3; }
   o.v = 99;
   if (getone(o) != 99) { return 4; }

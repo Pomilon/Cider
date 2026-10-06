@@ -1,6 +1,6 @@
-func _start() -> void {
+func _start() {
     var size: int = 3;
-    var matrix: [int; 9]; // 3x3 flat array
+    var matrix: [int; 9] = new [int; 9] {[0, ...]}; // 3x3 flat array
     
     // Initialize to identity matrix
     for (var i: int = 0; i < size; i = i + 1) {

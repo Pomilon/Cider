@@ -1,10 +1,10 @@
 func main() -> int {
   var v: u64 = 3962574618;
-  var digits: [u8; 24];
+  var digits: [u8; 24] = new [u8; 24] {[0, ...]};
   var pos: int = 0;
   var temp: u64 = v;
   while (temp > 0) {
-    digits[pos] = (('0' as u8) + ((temp % 10) as u8)) as char;
+    digits[pos] = ('0' as u8) + ((temp % 10) as u8);
     pos++;
     temp /= 10;
   }
@@ -14,7 +14,7 @@ func main() -> int {
   var big: u64 = 18446744073709551615;
   if (big / 10 != 1844674407370955161) { return 4; }
   if (big % 10 != 5) { return 5; }
-  var s: i64 = 0 - 7;
+  var s: i64 = (0 - 7) as i64;
   if (s / 2 != -3) { return 6; }
   var u: u32 = 4000000000;
   if (u / 3 != 1333333333) { return 7; }

@@ -650,9 +650,9 @@
   "class": "D"
  },
  "for_in": {
-  "actual": "exit 1; tests/corpus/legacy/for_in/main.cid:2:22: a variable needs an initialiser; tests/corpus/legacy/for_in/main.cid:14:5: expected an expression",
-  "blocker": "asm-blocks (+uninit-arrays, for-in-lowering)",
-  "class": "D"
+  "actual": "rewrite to v3 (init+entry) passes exact",
+  "blocker": "none",
+  "class": "A"
  },
  "forward_decl_bases": {
   "actual": "tests/corpus/forward_decl_bases/main.cid:13:9: a class needs a body",
@@ -1090,9 +1090,9 @@
   "class": "D"
  },
  "nested_loops": {
-  "actual": "exit 1; tests/corpus/legacy/nested_loops/main.cid:3:25: a variable needs an initialiser; tests/corpus/legacy/nested_loops/main.cid:23:5: expected an expression",
-  "blocker": "asm-blocks (+uninit-arrays, C-style-for)",
-  "class": "D"
+  "actual": "rewrite to v3 (init+entry) passes exact",
+  "blocker": "none",
+  "class": "A"
  },
  "nested_template_args_control": {
   "actual": "cider run exit 1, stdout empty, stderr diagnostic: `main.cid:13:17: expected ';'`; driver has no module loader",
@@ -1360,8 +1360,8 @@
   "class": "D"
  },
  "struct_elem": {
-  "actual": "blocked-A reclassified 2026-10-05: must pass once blocker lands; run exit 1: OUT: ERR:tests/corpus/struct_elem/main.cid:6:23: a variable needs an initialiser\\n",
-  "blocker": "array-element-store-not-lowered (also global array init, char casts)",
+  "actual": "global aggregate init must be constant (6:26); char != int (19:7, FEAT-046); computed store through global struct array (11:5)",
+  "blocker": "global-aggregate-init + char-compare + global-computed-store",
   "class": "D"
  },
  "struct_element_store": {
@@ -1375,9 +1375,9 @@
   "class": "D"
  },
  "struct_param": {
-  "actual": "blocked-A reclassified 2026-10-05: must pass once blocker lands; run exit 1: OUT: ERR:tests/corpus/struct_param/main.cid:23:13: a variable needs an initialiser\\ntests/corpus/struct_param/main.cid:26:15: a variable needs an initialiser\\ntests/corpus/struct_param/main.cid:28:15: a variable",
-  "blocker": "bool-ops-crash (persists after new-init rewrite; also uninit-rejected)",
-  "class": "D"
+  "actual": "rewrite to v3 new-exprs passes exact",
+  "blocker": "none",
+  "class": "A"
  },
  "struct_ptr_stress": {
   "actual": "exit 1; tests/corpus/legacy/struct_ptr_stress/main.cid:20:19: a variable needs an initialiser; tests/corpus/legacy/struct_ptr_stress/main.cid:29:19: a variable needs an initialiser",
@@ -1470,9 +1470,9 @@
   "class": "A"
  },
  "u64div": {
-  "actual": "blocked-A reclassified 2026-10-05: must pass once blocker lands; run exit 1: OUT: ERR:tests/corpus/u64div/main.cid:3:23: a variable needs an initialiser\\ntests/corpus/u64div/main.cid:8:9: expected an expression\\n",
-  "blocker": "array-element-store-not-lowered (also uninit-rejected)",
-  "class": "D"
+  "actual": "rewrite to v3 (init+entry) passes exact",
+  "blocker": "none",
+  "class": "A"
  },
  "uncaught_rethrow": {
   "actual": "run exit 1: OUT: ERR:tests/corpus/uncaught_rethrow/main.cid:10:13: a catch binds a name and a type\\ntests/corpus/uncaught_rethrow/main.cid:13:5: expected a declaration\\ntests/corpus/uncaught_rethrow/main.cid:14:1: expected ",
@@ -1505,9 +1505,9 @@
   "class": "B"
  },
  "union": {
-  "actual": "exit 1; tests/corpus/legacy/union/main.cid:25:20: a variable needs an initialiser; tests/corpus/legacy/union/main.cid:38:24: a variable needs an initialiser",
-  "blocker": "unions (+uninit-locals, stdlib-imports, asm-blocks)",
-  "class": "D"
+  "actual": "25:20: a variable needs an initialiser (bare `var u: IntOrInt;`); program's untagged overlap reads (u.a/u.b without live-member construction) are rejected by v3 union semantics (\u00a72.5: exactly one live member via new)",
+  "blocker": "v3-union-model",
+  "class": "B"
  },
  "unwind_intermediate_frames": {
   "actual": "tests/corpus/unwind_intermediate_frames/main.cid:42:10: a method needs a name",
