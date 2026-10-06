@@ -2033,8 +2033,21 @@ TypeRef Checker::checkNewUnion(NewStruct& expr, TypeRef target, DeclId id) {
     return target;
 }
 
-TypeRef Checker::checkNewArray(NewArray& expr) {
-    TypeRef element = resolveHere(expr.element.get());
+bool Checker::isZeroRepeat(const Expr& filler, TypeRef element) {
+    Kind kind = element.type->kind();
+    if (kind != Kind::Array && kind != Kind::Struct && kind != Kind::Union) {
+        return false;
+    }
+    const auto* lit = dynamic_cast<const IntLit*>(&filler);
+    if (lit == nullptr) {
+        return false;
+    }
+    std::unordered_set<std::string> active;
+    EvalResult folded = evalConstInt(*lit, *env_, active);
+    return folded.ok && folded.value == 0;
+}
+
+TypeRef Checker::checkNewArray(NewArray& expr) {    TypeRef element = resolveHere(expr.element.get());
     if (element.isError()) {
         return errorRef();
     }
@@ -2056,6 +2069,15 @@ TypeRef Checker::checkNewArray(NewArray& expr) {
     if (!expr.repeat && written != count.value) {
         fail(expr.pos, "the element count must match the array type");
         return errorRef();
+    }
+    if (expr.repeat && isZeroRepeat(*expr.inits[0], element)) {
+        // `new [T; N] { [0, ...] }` makes every element zero, and zero
+        // reaches through nested arrays: the filler is the scalar zero,
+        // not an element-typed value, so no per-element check runs. The
+        // filler still checks (recording its type for the lowerer); only
+        // the compatibility check is skipped.
+        checkExpr(expr.inits[0].get(), element);
+        return TypeRef{ctx_.array(element.type, count.value)};
     }
     for (auto& init : expr.inits) {
         TypeRef value = checkExpr(init.get(), element);

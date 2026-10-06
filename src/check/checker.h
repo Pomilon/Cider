@@ -213,6 +213,10 @@ private:
     TypeRef checkNewUnion(NewStruct& expr, TypeRef target, DeclId id);
     TypeRef checkUnionHas(Call& expr, const Field& callee, TypeRef object);
     TypeRef checkNewArray(NewArray& expr);
+    // A repeat filler that is the scalar zero over an aggregate element:
+    // `new [[u8; 2]; 3] { [0, ...] }` zeroes every scalar, so the filler
+    // never checks against the element type.
+    bool isZeroRepeat(const Expr& filler, TypeRef element);
     TypeRef checkTernary(Ternary& expr, TypeRef expected);
     void checkMethods(DeclId id, Kind kind, std::vector<MethodDecl>& methods);
     void checkCtor(DeclId id, Kind kind, FuncDecl* ctor, bool isInit);

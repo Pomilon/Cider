@@ -1522,6 +1522,21 @@ void Lowerer::constructUnion(const std::vector<ir::Value>& slots, const NewStruc
     storeRange(n.pos, tag, {live}, tag.type);
 }
 
+bool Lowerer::isZeroRepeatFiller(const Expr& filler, TypeRef element) {
+    Kind kind = element.type->kind();
+    if (kind != Kind::Array && kind != Kind::Struct && kind != Kind::Union) {
+        return false;
+    }
+    const auto* lit = dynamic_cast<const IntLit*>(&filler);
+    if (lit == nullptr) {
+        return false;
+    }
+    std::unordered_set<std::string> active;
+    EvalEnv env = resolver_.evalEnv(resolver_.moduleScope());
+    EvalResult folded = evalConstInt(*lit, env, active);
+    return folded.ok && folded.value == 0;
+}
+
 void Lowerer::constructArray(const std::vector<ir::Value>& slots, const NewArray& n) {
     TypeRef arrayType = checker_.typeOf(&n);
     if (arrayType.isError() || arrayType.type->kind() != Kind::Array) {
@@ -1565,6 +1580,23 @@ void Lowerer::constructArray(const std::vector<ir::Value>& slots, const NewArray
         std::vector<ir::Value> one = lowerWords(n.inits[0].get());
         if (failed_) {
             return;
+        }
+        if (isZeroRepeatFiller(*n.inits[0], element)) {
+            // Zero reaches through: one zero word per element word, so a
+            // nested array fills with zeros instead of one element value.
+            int words = wordCount(element);
+            if (words < 0) {
+                refuse(n.pos, "this construction");
+                return;
+            }
+            one.clear();
+            for (int w = 0; w < words; ++w) {
+                one.push_back(constantI64(0, wordType(element, static_cast<uint64_t>(w)),
+                                          n.inits[0]->pos));
+                if (failed_) {
+                    return;
+                }
+            }
         }
         for (int64_t i = 0; i < count.value; ++i) {
             atByte(i * elemBytes, element, one, n.pos);

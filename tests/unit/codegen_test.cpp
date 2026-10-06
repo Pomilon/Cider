@@ -341,6 +341,23 @@ void testComputedIndex() {
     check(signaled, "a computed store past the end traps");
 }
 
+void testRepeatZero() {
+    // A zero repeat reaches through nested arrays: every scalar is zero,
+    // and a store into the zeroed shape reads back.
+    std::printf("zero repeat fills nested arrays\n");
+    check(runQuiet("func main() -> int {\n"
+                   "    var m: [[u8; 2]; 3] = new [[u8; 2]; 3] { [0, ...] };\n"
+                   "    return (m[2][1] as int) + (m[0][0] as int);\n"
+                   "}\n") == 0,
+          "a zeroed nested array reads zero");
+    check(runQuiet("func main() -> int {\n"
+                   "    var m: [[u8; 2]; 3] = new [[u8; 2]; 3] { [0, ...] };\n"
+                   "    m[1][0] = 41;\n"
+                   "    return m[1][0] as int;\n"
+                   "}\n") == 41,
+          "a store into the zeroed shape reads back");
+}
+
 // Structs live in memory: construct, read fields, add them.
 void testStruct() {
     std::printf("structs\n");
@@ -826,6 +843,7 @@ int main() {
     testTrap();
     testElementAddr();
     testComputedIndex();
+    testRepeatZero();
     testIncrDecr();
     testRepro();
     std::printf("\n%d checks, %s\n", checks, failures == 0 ? "all passed" : "FAILURES");

@@ -354,6 +354,26 @@ void testBoolCompare() {
     check(!mixed.ok && mixed.stage == "check", "bool == int fails");
 }
 
+void testRepeatZero() {
+    // `new [T; N] { [0, ...] }` makes every element zero (FEATURES §14.2),
+    // and zero reaches through nested arrays: the filler is the scalar
+    // zero, not an element-typed value.
+    std::printf("zero repeat fills nested arrays\n");
+    Checked nested = check(
+        "func main() -> int {\n"
+        "    var m: [[u8; 2]; 3] = new [[u8; 2]; 3] { [0, ...] };\n"
+        "    return m[2][1] as int;\n"
+        "}\n");
+    check(nested.ok, "zero repeat fills a nested array: " + nested.stage);
+    Checked nonzero = check(
+        "func main() -> int {\n"
+        "    var m: [[u8; 2]; 3] = new [[u8; 2]; 3] { [1, ...] };\n"
+        "    return 0;\n"
+        "}\n");
+    check(!nonzero.ok && nonzero.stage == "check",
+          "a nonzero repeat over an aggregate element fails");
+}
+
 }  // namespace
 
 int main() {
@@ -368,6 +388,7 @@ int main() {
     testFnAddr();
     testIncrDecr();
     testBoolCompare();
+    testRepeatZero();
     testAsm();
     testLen();
     testFuncLitChecks();

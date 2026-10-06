@@ -227,6 +227,9 @@ public:
     // copies guess neighbor bytes.
     void constructStruct(const std::vector<ir::Value>& slots, const NewStruct& n);
     void constructArray(const std::vector<ir::Value>& slots, const NewArray& n);
+    // Zero-repeat support for construction: a scalar-zero filler over an
+    // aggregate element zeroes every scalar instead of lowering one value.
+    bool isZeroRepeatFiller(const Expr& filler, TypeRef element);
     // A class constructs its fields after a null vptr word; methods wire
     // the vptr in a later slice. A class with bases is refused: inherited
     // fields have no layout yet.
