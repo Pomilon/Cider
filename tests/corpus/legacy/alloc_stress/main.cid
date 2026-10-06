@@ -1,49 +1,49 @@
-from std.io import puts, exit;
+from std.io import puts;
 from std.alloc import malloc, free;
 
-func _start() {
+func main() -> int {
     var a: *int = malloc(4) as *int;
-    if (a == 0) { puts("FAIL: malloc\n"); exit(1); }
+    if (a == nilPtr) { puts("FAIL: malloc\n"); return 1; }
     *a = 42;
-    if (*a != 42) { puts("FAIL: write\n"); exit(2); }
+    if (*a != 42) { puts("FAIL: write\n"); return 2; }
     free(a as *void);
 
     var b: *int = malloc(4) as *int;
-    if (b == 0) { puts("FAIL: malloc after free\n"); exit(3); }
+    if (b == nilPtr) { puts("FAIL: malloc after free\n"); return 3; }
     *b = 99;
-    if (*b != 99) { puts("FAIL: after free\n"); exit(4); }
+    if (*b != 99) { puts("FAIL: after free\n"); return 4; }
 
     var p0: *int = malloc(8) as *int;
-    if (p0 == 0) { puts("FAIL: p0\n"); exit(5); }
+    if (p0 == nilPtr) { puts("FAIL: p0\n"); return 5; }
     *p0 = 0;
     var p1: *int = malloc(8) as *int;
-    if (p1 == 0) { puts("FAIL: p1\n"); exit(6); }
+    if (p1 == nilPtr) { puts("FAIL: p1\n"); return 6; }
     *p1 = 100;
     var p2: *int = malloc(8) as *int;
-    if (p2 == 0) { puts("FAIL: p2\n"); exit(7); }
+    if (p2 == nilPtr) { puts("FAIL: p2\n"); return 7; }
     *p2 = 200;
     var p3: *int = malloc(8) as *int;
-    if (p3 == 0) { puts("FAIL: p3\n"); exit(8); }
+    if (p3 == nilPtr) { puts("FAIL: p3\n"); return 8; }
     *p3 = 300;
     var p4: *int = malloc(8) as *int;
-    if (p4 == 0) { puts("FAIL: p4\n"); exit(9); }
+    if (p4 == nilPtr) { puts("FAIL: p4\n"); return 9; }
     *p4 = 400;
 
-    if (*p0 != 0) { puts("FAIL: v0\n"); exit(10); }
-    if (*p1 != 100) { puts("FAIL: v1\n"); exit(11); }
-    if (*p2 != 200) { puts("FAIL: v2\n"); exit(12); }
-    if (*p3 != 300) { puts("FAIL: v3\n"); exit(13); }
-    if (*p4 != 400) { puts("FAIL: v4\n"); exit(14); }
+    if (*p0 != 0) { puts("FAIL: v0\n"); return 10; }
+    if (*p1 != 100) { puts("FAIL: v1\n"); return 11; }
+    if (*p2 != 200) { puts("FAIL: v2\n"); return 12; }
+    if (*p3 != 300) { puts("FAIL: v3\n"); return 13; }
+    if (*p4 != 400) { puts("FAIL: v4\n"); return 14; }
 
     free(p1 as *void);
     free(p3 as *void);
     free(p0 as *void);
 
     var c: *int = malloc(4) as *int;
-    if (c == 0) { puts("FAIL: reuse\n"); exit(15); }
+    if (c == nilPtr) { puts("FAIL: reuse\n"); return 15; }
     *c = 77;
-    if (*c != 77) { puts("FAIL: reuse verify\n"); exit(16); }
+    if (*c != 77) { puts("FAIL: reuse verify\n"); return 16; }
 
-    puts("PASS: alloc_stress\n");
-    asm { "mov rax, 60" "xor rdi, rdi" "syscall" }
+    puts("PASS: alloc_stress");
+    return 0;
 }
