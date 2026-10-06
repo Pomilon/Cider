@@ -5,7 +5,6 @@ import va;
 
 func main() -> int {
   var s: va.SAlias = va.makeS(7, 35);
-  var t: va.SAlias;
-  t = s;
+  var t: va.SAlias = s;
   return (t.x + t.y) as int;
 }

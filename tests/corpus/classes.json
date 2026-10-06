@@ -245,14 +245,14 @@
   "class": "D"
  },
  "control_flow_stress": {
-  "actual": "exit 1; tests/corpus/legacy/control_flow_stress/main.cid:90:22: a variable needs an initialiser; tests/corpus/legacy/control_flow_stress/main.cid:202:5: expected an expression",
+  "actual": "exact stdout/stderr/exit match",
   "blocker": "stdlib-imports (+uninit-arrays, asm-blocks)",
-  "class": "D"
+  "class": "A"
  },
  "crossmod_alias": {
-  "actual": "exit 1; tests/corpus/crossmod_alias/main.cid:7:12: a variable needs an initialiser; tests/corpus/crossmod_alias/main.cid:8:12: a variable needs an initialiser",
+  "actual": "exact stdout/stderr/exit match",
   "blocker": "multi-file imports",
-  "class": "D"
+  "class": "A"
  },
  "crossmod_iface_global_declorder": {
   "actual": "exit 1; lib:1:1: cannot find module 'lib'; std.io:1:1: cannot find module 'std.io'",

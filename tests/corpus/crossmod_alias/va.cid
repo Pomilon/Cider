@@ -11,8 +11,5 @@ export struct S {
 export type SAlias = S;
 
 export func makeS(x: u64, y: u64) -> SAlias {
-  var s: SAlias;
-  s.x = x;
-  s.y = y;
-  return s;
+  return new S { x: x, y: y };
 }
