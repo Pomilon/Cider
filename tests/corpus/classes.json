@@ -20,7 +20,7 @@
   "class": "D"
  },
  "alias_array_slice": {
-  "actual": "exit 0, exact",
+  "actual": "exact stdout/stderr/exit match",
   "blocker": "-",
   "class": "A"
  },
@@ -90,7 +90,7 @@
   "class": "D"
  },
  "array_return": {
-  "actual": "exit 0, exact",
+  "actual": "exact stdout/stderr/exit match",
   "blocker": "-",
   "class": "A"
  },
@@ -285,9 +285,9 @@
   "class": "D"
  },
  "cyclic_alias_bare": {
-  "actual": "exit 1; tests/corpus/cyclic_alias_bare/main.cid:12:11: a variable needs an initialiser",
+  "actual": "1:10: type alias cycle: main.B (true cycle A=B/B=A has no base type; v3 rejects at declaration)",
   "blocker": "cyclic-alias",
-  "class": "D"
+  "class": "B"
  },
  "cyclic_alias_mod": {
   "actual": "exit 1; tests/corpus/cyclic_alias_mod/main.cid:7:13: a variable needs an initialiser",
