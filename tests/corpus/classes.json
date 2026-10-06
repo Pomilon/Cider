@@ -75,9 +75,9 @@
   "class": "A"
  },
  "args": {
-  "actual": "exit 1; tests/corpus/legacy/args/main.cid:3:9: expected an expression; tests/corpus/legacy/args/main.cid:10:5: expected a declaration",
-  "blocker": "asm-blocks (+argv-entry)",
-  "class": "D"
+  "actual": "exact stdout/stderr/exit match",
+  "blocker": "argv-entry (v3 rewrite: main(argc:i64,argv:**char)->int, nilPtr guards, returns)",
+  "class": "A"
  },
  "array_alias": {
   "actual": "construction lowers (`new [Cb;2]{inc,inc}` with func() spelling); `arr[0](4)` call through element refuses 'this call' (closure call through place = T10)",

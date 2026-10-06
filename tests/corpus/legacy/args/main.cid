@@ -1,40 +1,20 @@
-func _start(argc: int, argv: **char) {
+func main(argc: i64, argv: **char) -> int {
     if (argc < 1) {
-        asm {
-            "mov rax, 60"
-            "mov rdi, 1"
-            "syscall"
-        }
+        return 1;
     }
 
-    if (argv[0] == 0) {
-        asm {
-            "mov rax, 60"
-            "mov rdi, 2"
-            "syscall"
-        }
+    if (argv[0] == nilPtr) {
+        return 2;
     }
 
     if (argc >= 3) {
-        if (argv[1] == 0) {
-            asm {
-                "mov rax, 60"
-                "mov rdi, 3"
-                "syscall"
-            }
+        if (argv[1] == nilPtr) {
+            return 3;
         }
-        if (argv[2] == 0) {
-            asm {
-                "mov rax, 60"
-                "mov rdi, 4"
-                "syscall"
-            }
+        if (argv[2] == nilPtr) {
+            return 4;
         }
     }
 
-    asm {
-        "mov rax, 60"
-        "xor rdi, rdi"
-        "syscall"
-    }
+    return 0;
 }
