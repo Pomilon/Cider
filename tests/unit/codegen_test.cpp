@@ -348,6 +348,36 @@ void testComputedIndex() {
             "}\n",
             signaled);
     check(signaled, "a computed store past the end traps");
+    // A chained index over a computed inner one addresses through the
+    // inner address: `m[i][j]` is the j-th element past the i-th row's
+    // address, with both bounds checked.
+    check(runQuiet("func main() -> int {\n"
+                   "    var z: [u8; 2] = new [u8; 2] {0, 0};\n"
+                   "    var m: [[u8; 2]; 3] = new [[u8; 2]; 3] {z, z, z};\n"
+                   "    var i: int = 1;\n"
+                   "    var j: int = 0;\n"
+                   "    m[i][j] = 7;\n"
+                   "    return (m[i][j] as int) + (m[2][1] as int);\n"
+                   "}\n") == 7,
+          "a chained store and read through a computed inner index");
+    check(runQuiet("func main() -> int {\n"
+                   "    var z: [u8; 2] = new [u8; 2] {0, 0};\n"
+                   "    var m: [[u8; 2]; 3] = new [[u8; 2]; 3] {z, z, z};\n"
+                   "    var i: int = 2;\n"
+                   "    m[i][1] = 5;\n"
+                   "    return (m[2][1] as int);\n"
+                   "}\n") == 5,
+          "a folded outer index advances a computed inner address");
+    signaled = false;
+    runCode("func main() -> int {\n"
+            "    var z: [u8; 2] = new [u8; 2] {0, 0};\n"
+            "    var m: [[u8; 2]; 3] = new [[u8; 2]; 3] {z, z, z};\n"
+            "    var i: int = 9;\n"
+            "    m[i][0] = 1;\n"
+            "    return 0;\n"
+            "}\n",
+            signaled);
+    check(signaled, "a chained store past the inner end traps");
 }
 
 void testRepeatZero() {
@@ -694,6 +724,24 @@ void testMultiWordReturn() {
                       "}\n"
                       "func main() -> int { return 0; }\n");
     check(!big.ok && big.stage == "lower", "a three-word return refuses");
+    // A one-word aggregate still answers its word's type, not the
+    // aggregate's: the scalar path cannot name a two-byte array's width.
+    check(runCode("func make_row() -> [u8; 2] {\n"
+                  "    var r: [u8; 2] = new [u8; 2] {11, 22};\n"
+                  "    return r;\n"
+                  "}\n"
+                  "func main() -> int {\n"
+                  "    var made: [u8; 2] = make_row();\n"
+                  "    return (made[0] as int) + (made[1] as int);\n"
+                  "}\n",
+                  sig) == 33 &&
+              !sig,
+          "a one-word array return reads back whole");
+    // `sizeof` is a compile-time byte count, including through nesting.
+    check(runQuiet("func main() -> int {\n"
+                   "    return sizeof([[u8; 2]; 3]) as int;\n"
+                   "}\n") == 6,
+          "sizeof answers a nested array's bytes");
 }
 
 void testRepro() {

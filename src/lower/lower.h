@@ -219,6 +219,10 @@ public:
         // a value, not a slot. Slot-precise logic must not read slots then.
         bool hasIndirect = false;
         ir::Value indirect;
+        // Set when slots[0] is a computed address rather than a slot: an
+        // answer from the shared guarded address. A folded index advances
+        // it with an Add; only a slot base takes a direct offset.
+        bool isAddress = false;
     };
     // Names a place: identifiers, and field chains over them. Anything else
     // (a call result, arithmetic) has no address and is refused.
@@ -297,6 +301,13 @@ public:
     // route owns those.
     bool arrayElementPlace(const Index& n, const Place& base,
                            TypeRef arrayType, const char* what, Place& at);
+    // Names the base an index reads or stores through: a plain place for
+    // a direct expression, or the inner element's address when the base
+    // is itself an index (`m[i][j]` addresses past the i-th row). The
+    // answer carries the base's own type, so the caller keeps routing
+    // slices and strings where they already route.
+    bool arrayBase(const Expr* arrayExpr, const Index& n, Place& base,
+                   TypeRef& arrayType, const char* what);
     std::vector<ir::Value> lowerNewStruct(const NewStruct& n);
     std::vector<ir::Value> lowerNewArray(const NewArray& n);
     std::vector<ir::Value> lowerNewClass(const NewClass& n);
@@ -318,6 +329,9 @@ public:
     std::vector<ir::Value> lowerUnionField(const Field& n, const Place& base);
     std::vector<ir::Value> lowerIndex(const Index& n);
     void storeIndex(const Index& target, const std::vector<ir::Value>& words);
+    // `sizeof(T)` is a compile-time byte count, answered as one I64 word.
+    // A type without a known size refuses rather than guessing.
+    std::vector<ir::Value> lowerSizeof(const SizeofType& n);
     // One arithmetic operation, shared by Binary and compound assignment so
     // the two cannot disagree about what `+` emits.
     ir::Value emitArith(BinOp op, ir::Value a, ir::Value b, TypeRef result,

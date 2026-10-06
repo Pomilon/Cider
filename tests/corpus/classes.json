@@ -1075,9 +1075,9 @@
   "class": "D"
  },
  "nested_arrays": {
-  "actual": "cider run exit 1, stdout empty, stderr diagnostic: `main.cid:6:20: a variable needs an initialiser`",
-  "blocker": "for/for-in-lowering + boolop-crash + uninit-globals",
-  "class": "D"
+  "actual": "exit 0, exact",
+  "blocker": "-",
+  "class": "A"
  },
  "nested_class_field_init": {
   "actual": "cider run exit 1, stdout empty, stderr diagnostic: `main.cid:11:16: expected ';'` (field initializer in class body)",

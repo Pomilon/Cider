@@ -1924,9 +1924,51 @@ bool Lowerer::arrayElementPlace(const Index& n, const Place& base,
     if (folded.ok) {
         // A folded index is a slot offset the direct route owns: arriving
         // here means that route failed, so refusing names the real gap
-        // instead of answering twice.
-        refuse(n.pos, what);
-        return false;
+        // instead of answering twice. An address base has no direct
+        // route, so the folded step advances it explicitly — with the
+        // same provable checks the slot route owns.
+        if (!base.isAddress) {
+            refuse(n.pos, what);
+            return false;
+        }
+        if (folded.value < 0) {
+            refuse(n.index->pos, "a negative index");
+            return false;
+        }
+        if (folded.value >= *extent) {
+            refuse(n.index->pos, "an index past the end");
+            return false;
+        }
+        if (base.slots.empty()) {
+            refuse(n.pos, what);
+            return false;
+        }
+        TypeRef count{ctx_.basic(BasicKind::I64)};
+        ir::Value delta = constantI64(folded.value * elemBytes, count, n.pos);
+        if (failed_) {
+            return false;
+        }
+        TypeRef ptr{ctx_.pointer(element.type)};
+        ir::Instr advance;
+        advance.op = ir::Op::Add;
+        advance.loc = n.pos;
+        advance.type = ptr;
+        advance.width = ir::IRType::Ptr;
+        advance.isPure = true;
+        advance.operands.push_back(base.slots[kFirstWord]);
+        advance.operands.push_back(delta);
+        ir::Value moved = newValue(advance.width, ptr, n.pos);
+        advance.results.push_back(moved);
+        emit(std::move(advance));
+        if (failed_) {
+            return false;
+        }
+        at.slots = {moved};
+        at.type = element;
+        at.off = 0;
+        at.isVolatile = base.isVolatile;
+        at.isAddress = true;
+        return true;
     }
     std::vector<ir::Value> index = lowerWords(n.index.get());
     if (failed_ || index.size() != kOneWord) {
@@ -1988,20 +2030,61 @@ bool Lowerer::arrayElementPlace(const Index& n, const Place& base,
         return false;
     }
     // The address is computed; the value is one indirect access away.
+    // Stays in slots form (not the indirect flag): a further index
+    // addresses past it with the same slot convention, and the code
+    // generator dereferences any base outside the slot set.
     at.slots = {addr};
     at.type = element;
     at.off = 0;
     at.isVolatile = base.isVolatile;
+    at.isAddress = true;
+    return true;
+}
+
+bool Lowerer::arrayBase(const Expr* arrayExpr, const Index& n, Place& base,
+                        TypeRef& arrayType, const char* what) {
+    if (const auto* inner = dynamic_cast<const Index*>(arrayExpr)) {
+        // `m[i][j]`: the outer index addresses past the inner element.
+        // A folded inner still belongs to the direct route, which answers
+        // slots; only a computed inner needs its address materialized.
+        // The place query stays quiet on failure, so trying it first and
+        // recursing after is safe.
+        if (resolvePlace(inner, base)) {
+            arrayType = base.type;
+            return true;
+        }
+        Place innerBase;
+        TypeRef innerArrayType;
+        if (!arrayBase(inner->array.get(), *inner, innerBase, innerArrayType, what)) {
+            return false;
+        }
+        if (innerArrayType.isError() ||
+            innerArrayType.type->kind() != Kind::Array) {
+            refuse(n.array->pos, what);
+            return false;
+        }
+        Place at;
+        if (!arrayElementPlace(*inner, innerBase, innerArrayType, what, at)) {
+            return false;
+        }
+        base = at;
+        arrayType = at.type;
+        return true;
+    }
+    if (!resolvePlace(arrayExpr, base)) {
+        return false;
+    }
+    arrayType = base.type;
     return true;
 }
 
 std::vector<ir::Value> Lowerer::lowerIndex(const Index& n) {
     Place base;
-    if (!resolvePlace(n.array.get(), base)) {
+    TypeRef arrayType;
+    if (!arrayBase(n.array.get(), n, base, arrayType, "this index")) {
         refuse(n.array->pos, "this index");
         return {undefined()};
     }
-    TypeRef arrayType = base.type;
     if (!arrayType.isError() && (arrayType.type->kind() == Kind::Slice ||
                                  arrayType.type->kind() == Kind::String)) {
         return lowerSliceIndex(n, base, arrayType);
@@ -2051,11 +2134,11 @@ std::vector<ir::Value> Lowerer::lowerIndex(const Index& n) {
 
 void Lowerer::storeIndex(const Index& target, const std::vector<ir::Value>& words) {
     Place base;
-    if (!resolvePlace(target.array.get(), base)) {
+    TypeRef arrayType;
+    if (!arrayBase(target.array.get(), target, base, arrayType, "this index")) {
         refuse(target.array->pos, "this index");
         return;
     }
-    TypeRef arrayType = base.type;
     if (!arrayType.isError() && arrayType.type->kind() == Kind::Slice) {
         storeSliceIndex(target, base, arrayType, words);
         return;
@@ -2114,6 +2197,21 @@ bool Lowerer::foldBound(const Expr* expr, int64_t& value) {
     }
     value = folded.value;
     return true;
+}
+
+std::vector<ir::Value> Lowerer::lowerSizeof(const SizeofType& n) {
+    TypeRef target = resolver_.resolveType(n.type.get(), resolver_.moduleScope());
+    if (target.isError()) {
+        refuse(n.pos, "this expression");
+        return {undefined()};
+    }
+    int64_t bytes = resolver_.nominalSize(target.type);
+    if (bytes < 0) {
+        refuse(n.pos, "this expression");
+        return {undefined()};
+    }
+    TypeRef count{ctx_.basic(BasicKind::I64)};
+    return {constantI64(bytes, count, n.pos)};
 }
 
 std::vector<ir::Value> Lowerer::lowerSlice(const SliceExpr& n) {
@@ -3415,11 +3513,12 @@ std::vector<ir::Value> Lowerer::lowerElementAddr(const Index& n) {
     // first slot; slice and string bases reuse the guarded advance the
     // read path owns, so the checks cannot drift apart.
     Place base;
-    if (!resolvePlace(n.array.get(), base) || !base.global.empty()) {
+    TypeRef baseType;
+    if (!arrayBase(n.array.get(), n, base, baseType, "this expression") ||
+        !base.global.empty()) {
         refuse(n.array->pos, "this expression");
         return {undefined()};
     }
-    TypeRef baseType = base.type;
     if (baseType.isError()) {
         refuse(n.array->pos, "this expression");
         return {undefined()};
@@ -3557,6 +3656,9 @@ std::vector<ir::Value> Lowerer::lowerWords(const Expr* expr) {
     }
     if (dynamic_cast<const SliceExpr*>(expr) != nullptr) {
         return lowerSlice(static_cast<const SliceExpr&>(*expr));
+    }
+    if (dynamic_cast<const SizeofType*>(expr) != nullptr) {
+        return lowerSizeof(static_cast<const SizeofType&>(*expr));
     }
     if (dynamic_cast<const Ternary*>(expr) != nullptr) {
         return lowerTernary(static_cast<const Ternary&>(*expr));
@@ -4232,9 +4334,11 @@ std::vector<ir::Value> Lowerer::callResults(ir::Instr& call, const Type* ret,
     }
     std::vector<ir::Value> out;
     for (uint64_t i = 0; i < static_cast<uint64_t>(count); ++i) {
-        TypeRef word = static_cast<uint64_t>(count) > kOneWord
-                           ? wordType(retRef, i)
-                           : retRef;
+        // Always the word's type, even when there is only one: a
+        // two-byte array's word is U16, and one width cannot name the
+        // aggregate (see widthOf). Consumers like storeRange read the
+        // value's type per chunk, and every narrow read masks.
+        TypeRef word = wordType(retRef, i);
         ir::IRType width = widthOf(word, pos);
         if (failed_) {
             return {};
@@ -5117,6 +5221,14 @@ ir::Value Lowerer::onIdentOrExpr(const Expr* expr, TypeRef expected) {
     if (auto* nil = dynamic_cast<const NilPtr*>(expr)) {
         TypeRef type = TypeRef{ctx_.pointer(ctx_.void_())};
         return constantI64(0, type, nil->pos);
+    }
+    if (auto* sz = dynamic_cast<const SizeofType*>(expr)) {
+        std::vector<ir::Value> words = lowerSizeof(*sz);
+        if (words.size() != kOneWord) {
+            refuse(expr->pos, "this expression");
+            return undefined();
+        }
+        return words[0];
     }
     if (auto* assign = dynamic_cast<const Assign*>(expr)) {
         return lowerAssign(const_cast<Assign&>(*assign));
