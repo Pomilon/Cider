@@ -931,6 +931,49 @@ void testFloat() {
     check(runQuiet("var g: f64 = 1.5;\n"
                  "func main() -> int { return g as int; }\n") == 1,
           "a float global reaches the binary");
+    // A folded float expression global matches the local path exactly:
+    // 1.0 + 2.0 is 3.0 in f64, and `(5 / 2) as f64` stays integer
+    // division (2) before the written conversion, never 2.5.
+    check(runQuiet("var g: f64 = 1.0 + 2.0;\n"
+                 "func main() -> int { return g as int; }\n") == 3,
+          "a float addition global folds");
+    check(runQuiet("var g: f64 = (5 / 2) as f64;\n"
+                 "func main() -> int { return g as int; }\n") == 2,
+          "an integer division global converts, not 2.5");
+    // Exit codes are 8 bits: -3 leaves as 253, 16777217 (= 0x1000001)
+    // leaves as 1. Both are compared in range instead.
+    check(runQuiet("var g: f64 = (-7 / 2) as f64;\n"
+                 "func main() -> int {\n"
+                 "    if ((g as int) != -3) { return 1; }\n"
+                 "    return 0;\n"
+                 "}\n") == 0,
+          "a signed division global converts");
+    // `(0.1 as float) as f64` rounds once to f32 in the image, exactly
+    // as the local path rounds it: the two must compare equal, and
+    // unequal to the unrounded double.
+    check(runQuiet("var g: f64 = (0.1 as float) as f64;\n"
+                 "func main() -> int {\n"
+                 "    var l: f64 = (0.1 as float) as f64;\n"
+                 "    if (g != l) { return 1; }\n"
+                 "    if (g == 0.1) { return 2; }\n"
+                 "    return 0;\n"
+                 "}\n") == 0,
+          "an as-float global rounds like the local path");
+    // 16777217 needs 25 bits: exact in f64, so the mixed add keeps it.
+    check(runQuiet("var g: f64 = 16777217.0 + (0.0 as f64);\n"
+                 "func main() -> int {\n"
+                 "    if ((g as int) != 16777217) { return 1; }\n"
+                 "    return 0;\n"
+                 "}\n") == 0,
+          "a mixed-width addition global keeps its value");
+    // Integer leaves in a float array convert at the element width:
+    // the image holds 1.0 and 2.0, never 1 and 2.
+    check(runQuiet("var g: [f64; 2] = new [f64; 2] { 1, 2 };\n"
+                 "func main() -> int {\n"
+                 "    if (g[0] != 1.0 || g[1] != 2.0) { return 1; }\n"
+                 "    return 0;\n"
+                 "}\n") == 0,
+          "a float array global converts its leaves");
 }
 
 // A program that exits through its own asm block: a local placeholder

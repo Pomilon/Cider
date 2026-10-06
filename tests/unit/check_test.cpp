@@ -396,6 +396,47 @@ void testCharCompare() {
     check(!mixed.ok && mixed.stage == "check", "char == int fails without as");
 }
 
+void testFloatGlobal() {
+    // A float expression over constants names every image byte once
+    // folded, so a float global may hold it (FEATURES §8.3): no startup
+    // code, no order problem. Integer subtrees keep integer semantics
+    // first — `5 / 2` is 2, then 2.0 — so the fold matches the local
+    // path exactly.
+    std::printf("float expressions fold into globals\n");
+    Checked arith = check(
+        "var g: f64 = 1.0 + 2.0;\n"
+        "func main() -> int { return g as int; }\n");
+    check(arith.ok, "a float addition global checks: " + arith.stage);
+    // An integer operation is not implicitly a float (§13: only literals
+    // and binary operands convert): the conversion is written `as f64`,
+    // and the fold keeps integer semantics first — `(5 / 2) as f64` is
+    // 2, then 2.0, never 2.5.
+    Checked intdiv = check(
+        "var g: f64 = (5 / 2) as f64;\n"
+        "func main() -> int { return g as int; }\n");
+    check(intdiv.ok, "an integer division global checks: " + intdiv.stage);
+    Checked barediv = check(
+        "var g: f64 = 5 / 2;\n"
+        "func main() -> int { return g as int; }\n");
+    check(!barediv.ok && barediv.stage == "check",
+          "a bare integer division is not a float: " + barediv.stage);
+    Checked cast = check(
+        "var g: f64 = (0.1 as float) as f64;\n"
+        "func main() -> int { return 0; }\n");
+    check(cast.ok, "an as-float global checks: " + cast.stage);
+    Checked barecast = check(
+        "var g: f64 = 0.1 as float;\n"
+        "func main() -> int { return 0; }\n");
+    check(!barecast.ok && barecast.stage == "check",
+          "a bare f32 is not implicitly an f64: " + barecast.stage);
+    Checked runtime = check(
+        "func f() -> f64 { return 1.0; }\n"
+        "var g: f64 = f() + 2.0;\n"
+        "func main() -> int { return 0; }\n");
+    check(!runtime.ok && runtime.stage == "check",
+          "a runtime float still needs a constant");
+}
+
 void testRepeatZero() {
     // `new [T; N] { [0, ...] }` makes every element zero (FEATURES §14.2),
     // and zero reaches through nested arrays: the filler is the scalar
@@ -445,6 +486,7 @@ int main() {
     testArithmetic();
     testNames();
     testGlobalZero();
+    testFloatGlobal();
     testCalls();
     testInterface();
     testGenericCall();

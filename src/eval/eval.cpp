@@ -264,4 +264,160 @@ EvalResult evalConstInt(const Expr& expr, EvalEnv& env,
     return fail("not a constant expression");
 }
 
+namespace {
+
+FloatResult floatFail(const std::string& error) {
+    return FloatResult{false, 0.0, error};
+}
+
+// A literal decimal in double: one rounding, the same one the local path
+// applies when it parses the literal at f64.
+FloatResult floatLiteral(const std::string& text, bool negative) {
+    double parsed = 0.0;
+    try {
+        parsed = std::stod(text);
+    } catch (...) {
+        return floatFail("not a float constant");
+    }
+    return FloatResult{true, negative ? -parsed : parsed, ""};
+}
+
+}  // namespace
+
+FloatResult evalConstFloat(const Expr& expr, EvalEnv& env,
+                           std::unordered_set<std::string>& active) {
+    if (const auto* lit = dynamic_cast<const FloatLit*>(&expr)) {
+        return floatLiteral(lit->text, lit->negative);
+    }
+    if (const auto* lit = dynamic_cast<const IntLit*>(&expr)) {
+        EvalResult magnitude = literalValue(lit->base, lit->digits, lit->negative);
+        if (!magnitude.ok || magnitude.big) {
+            return floatFail("not a float constant");
+        }
+        return FloatResult{true, static_cast<double>(magnitude.value), ""};
+    }
+    if (dynamic_cast<const CharLit*>(&expr) != nullptr ||
+        dynamic_cast<const BoolLit*>(&expr) != nullptr ||
+        dynamic_cast<const StringLit*>(&expr) != nullptr ||
+        dynamic_cast<const NilPtr*>(&expr) != nullptr) {
+        return floatFail("not a float constant");
+    }
+    if (const auto* ident = dynamic_cast<const Ident*>(&expr)) {
+        std::string qualified = env.qualify(ident->name);
+        if (active.find(qualified) != active.end()) {
+            return floatFail("constant cycle: " + qualified);
+        }
+        const Expr* init = env.constantInit(qualified);
+        if (init == nullptr) {
+            return floatFail(ident->name + " is not a constant");
+        }
+        active.insert(qualified);
+        FloatResult folded = evalConstFloat(*init, env, active);
+        if (!folded.ok) {
+            EvalResult asInt = evalConstInt(*init, env, active);
+            active.erase(qualified);
+            if (!asInt.ok || asInt.big) {
+                return floatFail(folded.error);
+            }
+            return FloatResult{true, static_cast<double>(asInt.value), ""};
+        }
+        active.erase(qualified);
+        return folded;
+    }
+    if (const auto* unary = dynamic_cast<const Unary*>(&expr)) {
+        // Integer semantics first: `-5` is the integer -5 (then -5.0),
+        // matching the local path where the unary binds before any
+        // conversion.
+        EvalResult asInt = evalConstInt(expr, env, active);
+        if (asInt.ok && !asInt.big) {
+            return FloatResult{true, static_cast<double>(asInt.value), ""};
+        }
+        if (unary->op != UnOp::Neg) {
+            return floatFail("not a float constant");
+        }
+        FloatResult inner = evalConstFloat(*unary->operand, env, active);
+        if (!inner.ok) {
+            return inner;
+        }
+        return FloatResult{true, -inner.value, ""};
+    }
+    if (const auto* binary = dynamic_cast<const Binary*>(&expr)) {
+        // Same integer-first rule as the unary case: `5 / 2` divides as
+        // integers (2, then 2.0) because both sides are integers, exactly
+        // as the local path types the operation before converting.
+        EvalResult asInt = evalConstInt(expr, env, active);
+        if (asInt.ok && !asInt.big) {
+            return FloatResult{true, static_cast<double>(asInt.value), ""};
+        }
+        if (binary->op != BinOp::Add && binary->op != BinOp::Sub &&
+            binary->op != BinOp::Mul && binary->op != BinOp::Div) {
+            return floatFail("not a float constant");
+        }
+        FloatResult lhs = evalConstFloat(*binary->lhs, env, active);
+        if (!lhs.ok) {
+            return lhs;
+        }
+        FloatResult rhs = evalConstFloat(*binary->rhs, env, active);
+        if (!rhs.ok) {
+            return rhs;
+        }
+        double out = 0.0;
+        switch (binary->op) {
+            case BinOp::Add:
+                out = lhs.value + rhs.value;
+                break;
+            case BinOp::Sub:
+                out = lhs.value - rhs.value;
+                break;
+            case BinOp::Mul:
+                out = lhs.value * rhs.value;
+                break;
+            default:
+                // Division is defined on floats (SEMANTICS): a zero divisor
+                // is the IEEE answer, not a refusal.
+                out = lhs.value / rhs.value;
+                break;
+        }
+        return FloatResult{true, out, ""};
+    }
+    if (const auto* ternary = dynamic_cast<const Ternary*>(&expr)) {
+        EvalResult cond = evalConstInt(*ternary->cond, env, active);
+        if (!cond.ok) {
+            return floatFail("not a float constant");
+        }
+        if (cond.value != 0) {
+            return evalConstFloat(*ternary->then, env, active);
+        }
+        return evalConstFloat(*ternary->els, env, active);
+    }
+    if (const auto* cast = dynamic_cast<const Cast*>(&expr)) {
+        TypeRef target = env.resolve(cast->target.get());
+        if (target.isError() || target.type->kind() != Kind::Basic) {
+            return floatFail("not a float constant");
+        }
+        std::optional<BasicKind> basic = target.type->basic();
+        if (!basic.has_value() || !basicIsFloat(*basic)) {
+            return floatFail("not a float constant");
+        }
+        EvalResult asInt = evalConstInt(*cast->expr, env, active);
+        double operand = 0.0;
+        if (asInt.ok && !asInt.big) {
+            operand = static_cast<double>(asInt.value);
+        } else {
+            FloatResult inner = evalConstFloat(*cast->expr, env, active);
+            if (!inner.ok) {
+                return inner;
+            }
+            operand = inner.value;
+        }
+        // An `as float` rounds once to binary32 here, in the image's bits:
+        // the global then matches the local path's runtime round exactly.
+        if (*basic == BasicKind::F32) {
+            operand = static_cast<double>(static_cast<float>(operand));
+        }
+        return FloatResult{true, operand, ""};
+    }
+    return floatFail("not a float constant");
+}
+
 }  // namespace cider

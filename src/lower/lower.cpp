@@ -748,8 +748,17 @@ void Lowerer::onGlobal(VarDecl& n) {
         // A float global carries its IEEE bits in the image. The
         // initialiser is either a literal — parsed at the global's own
         // width — or an integer constant the checker folded, converted
-        // with the same rounding a cast would apply.
+        // with the same rounding a cast would apply, or a float
+        // expression over constants, folded to a double with integer
+        // subtrees keeping integer semantics (`5 / 2` is 2, then 2.0).
         BasicKind basic = *type.type->basic();
+        FloatResult floatFolded{false, 0.0, ""};
+        {
+            const auto* probe = dynamic_cast<const FloatLit*>(n.init.get());
+            if (probe == nullptr && !folded.ok) {
+                floatFolded = evalConstFloat(*n.init, env, active);
+            }
+        }
         if (basic == BasicKind::F32) {
             float value = 0.0f;
             const auto* lit = dynamic_cast<const FloatLit*>(n.init.get());
@@ -763,6 +772,8 @@ void Lowerer::onGlobal(VarDecl& n) {
                 if (lit->negative) {
                     value = -value;
                 }
+            } else if (floatFolded.ok) {
+                value = static_cast<float>(floatFolded.value);
             } else if (folded.ok) {
                 value = static_cast<float>(folded.value);
             } else {
@@ -785,6 +796,8 @@ void Lowerer::onGlobal(VarDecl& n) {
                 if (lit->negative) {
                     value = -value;
                 }
+            } else if (floatFolded.ok) {
+                value = floatFolded.value;
             } else if (folded.ok) {
                 value = static_cast<double>(folded.value);
             } else {
@@ -1692,9 +1705,31 @@ bool Lowerer::globalInitBytes(const NewArray& init, TypeRef arrayType,
     }
     std::unordered_set<std::string> active;
     EvalEnv env = resolver_.evalEnv(resolver_.moduleScope());
-    auto appendScalar = [&](const Expr& leaf, int64_t width) -> bool {
+    auto appendScalar = [&](const Expr& leaf, int64_t width, TypeRef elemType) -> bool {
         if (width <= 0) {
             return false;
+        }
+        if (elemType.type->kind() == Kind::Basic &&
+            basicIsFloat(*elemType.type->basic())) {
+            // A float element converts the folded value at the element
+            // width, the same rounding a local initialisation applies:
+            // `new [f64; 2] { 1, 2 }` holds 1.0 and 2.0, not 1 and 2.
+            FloatResult asFloat = evalConstFloat(leaf, env, active);
+            if (!asFloat.ok) {
+                return false;
+            }
+            uint64_t bits = 0;
+            if (*elemType.type->basic() == BasicKind::F32) {
+                float narrowed = static_cast<float>(asFloat.value);
+                std::memcpy(&bits, &narrowed, sizeof narrowed);
+            } else {
+                std::memcpy(&bits, &asFloat.value, sizeof asFloat.value);
+            }
+            for (int64_t byte = 0; byte < width; ++byte) {
+                bytes.push_back(static_cast<char>(bits & 0xFFu));
+                bits >>= 8;
+            }
+            return true;
         }
         EvalResult folded = evalConstInt(leaf, env, active);
         if (!folded.ok) {
@@ -1730,7 +1765,7 @@ bool Lowerer::globalInitBytes(const NewArray& init, TypeRef arrayType,
             bytes.append(static_cast<size_t>(total), '\0');
             return true;
         }
-        return appendScalar(leaf, resolver_.nominalSize(elemType.type));
+        return appendScalar(leaf, resolver_.nominalSize(elemType.type), elemType);
     };
     if (init.repeat) {
         size_t fillers = init.inits.size();

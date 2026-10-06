@@ -60,6 +60,22 @@ struct EvalResult {
     bool big = false;
 };
 
+struct FloatResult {
+    bool ok = false;
+    double value = 0.0;
+    std::string error;
+};
+
+// Folds a float constant expression to a double. Integer subtrees fold
+// through evalConstInt first, so `5 / 2` is the integer 2 (then 2.0),
+// never 2.5: the fold matches what the local path computes. A Cast to a
+// float width rounds once to that width; anything without a float meaning
+// (calls, names that are not constants, comparisons) is an error naming
+// itself, never a guess. Division by zero folds to the IEEE answer —
+// float division is defined, so there is nothing to refuse.
+FloatResult evalConstFloat(const Expr& expr, EvalEnv& env,
+                           std::unordered_set<std::string>& active);
+
 // Folds an integer constant expression. `active` holds the qualified constants
 // already being folded above this call; a name that re-enters is a cycle and
 // is rejected naming it.

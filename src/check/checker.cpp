@@ -339,20 +339,31 @@ void Checker::visitProgram(Program& n) {
             }
             // A float literal is a constant of its own kind: evalConstInt
             // answers integers, so only a literal in a float-typed global
-            // gets past without a folded integer. Anything else is not a
-            // constant initialiser.
+            // gets past without a folded integer. A float expression over
+            // constants folds the same way (integer subtrees first, so
+            // `5 / 2` is 2, then 2.0): the image then matches the local
+            // path bit for bit. Anything else is not a constant
+            // initialiser.
             const auto* asFloat = dynamic_cast<const FloatLit*>(g->init.get());
             const bool floatGlobal =
                 declared.type->kind() == Kind::Basic &&
                 basicIsFloat(*declared.type->basic());
+            FloatResult floatFolded{false, 0.0, ""};
+            if (floatGlobal && asFloat == nullptr) {
+                floatFolded = evalConstFloat(*g->init, *env_, active);
+            }
             // A string literal is bytes in the image: the lowerer already
             // owns that case (rodata plus a two-word global), so the gate
             // only has to not call it non-constant.
             const auto* asString = dynamic_cast<const StringLit*>(g->init.get());
             const bool stringGlobal = declared.type->kind() == Kind::String;
             if (!constGlobal && (asFloat == nullptr || !floatGlobal) &&
+                !(floatGlobal && floatFolded.ok) &&
                 (asString == nullptr || !stringGlobal)) {
-                fail(g->init->pos, "a global initialiser must be constant: " + folded.error);
+                const std::string why =
+                    (floatGlobal && asFloat == nullptr) ? floatFolded.error
+                                                        : folded.error;
+                fail(g->init->pos, "a global initialiser must be constant: " + why);
                 continue;
             }
         }
