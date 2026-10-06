@@ -810,6 +810,14 @@ void testSliceCopy() {
                   "}\n",
                   sig) == 43 && !sig,
           "a slice reassigns an array");
+    // A string global indexes like a local: the global's address is
+    // materialized once and the element reads through it.
+    check(runCode("var g: string = \"abc\";\n"
+                  "func main() -> int {\n"
+                  "    return g[1] as int;\n"
+                  "}\n",
+                  sig) == 98 && !sig,
+          "a string global indexes");
 }
 
 void testRepro() {

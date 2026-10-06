@@ -100,9 +100,9 @@
   "class": "A"
  },
  "asm_spilled_operand": {
-  "actual": "exit 1; tests/corpus/asm_spilled_operand/main.cid:47:24: expected an expression; tests/corpus/asm_spilled_operand/main.cid:66:3: expected an expression",
+  "actual": "exact stdout/stderr/exit match",
   "blocker": "asm blocks",
-  "class": "D"
+  "class": "A"
  },
  "asm_spilled_operand_dispatch": {
   "actual": "exit 1; tests/corpus/asm_spilled_operand_dispatch/main.cid:85:13: a variable needs an initialiser; tests/corpus/asm_spilled_operand_dispatch/main.cid:87:15: a variable needs an initialiser",
@@ -170,9 +170,9 @@
   "class": "A"
  },
  "bst": {
-  "actual": "exit 1; tests/corpus/legacy/bst/main.cid:13:17: expected an expression; tests/corpus/legacy/bst/main.cid:14:17: expected an expression",
-  "blocker": "classes-this-arrow (+stdlib-imports, asm-blocks)",
-  "class": "D"
+  "actual": "13:17: expected an expression at `newNode->value` (the `->` operator is removed, \u00a713; field access through a pointer is `(*p).f`)",
+  "blocker": "v3-no-arrow",
+  "class": "B"
  },
  "callee_branch_release_once": {
   "actual": "compile rejection: tests/corpus/callee_branch_release_once/main.cid:55:8: a method needs a name \u2014 v2 destructor spelling `func ~Sq()`; v3 uses deinit (FEATURES 2.2/5.3)",
@@ -815,9 +815,9 @@
   "class": "A"
  },
  "inline_string_literal": {
-  "actual": "tests/corpus/legacy/inline_string_literal/main.cid:4:5: not lowered yet: string returns are not emitted yet",
-  "blocker": "multi-word string returns (FEAT-026)",
-  "class": "D"
+  "actual": "exact stdout/stderr/exit match",
+  "blocker": "stdlib-io",
+  "class": "A"
  },
  "int_wrap": {
   "actual": "cider run exit 108, stdout/stderr empty; expected exit 241 (IR is correct i32; native miscompiles)",
@@ -940,9 +940,9 @@
   "class": "D"
  },
  "list_positions_crossmod": {
-  "actual": "cider run exit 1, stdout empty, stderr diagnostic: `main.cid:9:25: expected ';'`; driver has no module loader",
-  "blocker": "multi-file-imports (+ interface-boxing, stdlib-io)",
-  "class": "D"
+  "actual": "9:25: expected ';' at bare `Holder{...}` literal (v3 requires `new` for every value, \u00a72.1a)",
+  "blocker": "v3-new-required",
+  "class": "B"
  },
  "list_reassign": {
   "actual": "cider run exit 1, stdout empty, stderr diagnostic: `main.cid:48:23: a variable needs an initialiser` (global arrays)",
@@ -1165,9 +1165,9 @@
   "class": "D"
  },
  "qualified_struct_literal": {
-  "actual": "cider run exit 1, stdout empty, stderr diagnostic: `main.cid:10:24: expected ')'`; driver has no module loader",
-  "blocker": "multi-file-imports",
-  "class": "D"
+  "actual": "15:21: expected ';' at bare `qlib.Holder{...}` literal (v3 requires `new` for every value, \u00a72.1a)",
+  "blocker": "v3-new-required",
+  "class": "B"
  },
  "qualified_template_late_hooks": {
   "actual": "cider run exit 1, stdout empty, stderr diagnostic: `main.cid:13:18: a variable needs an initialiser`; driver has no module loader",
@@ -1340,9 +1340,9 @@
   "class": "D"
  },
  "str_escape": {
-  "actual": "blocked-A reclassified 2026-10-05: must pass once blocker lands; run exit -6: OUT: ERR:free(): invalid pointer\\n SIGNAL",
+  "actual": "exact stdout/stderr/exit match",
   "blocker": "compiler-crash: global string init rejected, indexing a global string aborts checker (SIGABRT heap corruption)",
-  "class": "D"
+  "class": "A"
  },
  "str_ptr": {
   "actual": "blocked-A reclassified 2026-10-05: must pass once blocker lands; run exit 1: OUT: ERR:tests/corpus/str_ptr/main.cid:2:11: arithmetic needs numbers\\ntests/corpus/str_ptr/main.cid:2:18: not lowered yet: a value of this type\\n",
@@ -1415,9 +1415,9 @@
   "class": "D"
  },
  "tern": {
-  "actual": "blocked-A reclassified 2026-10-05: must pass once blocker lands; run exit 1: OUT: ERR:tests/corpus/tern/main.cid:9:7: arithmetic needs numbers\\ntests/corpus/tern/main.cid:3:16: not lowered yet: this expression\\n",
+  "actual": "exact stdout/stderr/exit match",
   "blocker": "char ==/!= (FEAT-046, needs spec ruling); ternary lowers",
-  "class": "D"
+  "class": "A"
  },
  "ternary": {
   "actual": "passes exactly; stub expected.json filled with captured bytes (success-path self-check verified)",

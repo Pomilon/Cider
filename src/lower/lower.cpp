@@ -2753,8 +2753,53 @@ bool Lowerer::sliceElementPlace(const Index& n, const Place& base,
         return false;
     }
     if (!base.global.empty()) {
-        refuse(n.array->pos, "this index");
-        return false;
+        // A global names a label, not slots: materialize its address once
+        // and let the rest of this path treat it as one computed word.
+        // The address is pure (a label never moves), so the optimizer
+        // keeps the same visibility it has for slot-derived bases.
+        TypeRef addrType{ctx_.pointer(element.type)};
+        ir::Instr data;
+        data.op = ir::Op::DataAddr;
+        data.loc = n.pos;
+        data.type = addrType;
+        data.width = ir::IRType::Ptr;
+        data.globalLabel = base.global;
+        data.isPure = true;
+        ir::Value atAddr = newValue(data.width, addrType, n.pos);
+        data.results.push_back(atAddr);
+        emit(std::move(data));
+        if (failed_) {
+            return false;
+        }
+        if (base.off != 0) {
+            TypeRef count{ctx_.basic(BasicKind::I64)};
+            ir::Value delta = constantI64(base.off, count, n.pos);
+            if (failed_) {
+                return false;
+            }
+            ir::Instr adjust;
+            adjust.op = ir::Op::Add;
+            adjust.loc = n.pos;
+            adjust.type = addrType;
+            adjust.width = ir::IRType::Ptr;
+            adjust.isPure = true;
+            adjust.operands.push_back(atAddr);
+            adjust.operands.push_back(delta);
+            ir::Value moved = newValue(adjust.width, addrType, n.pos);
+            adjust.results.push_back(moved);
+            emit(std::move(adjust));
+            if (failed_) {
+                return false;
+            }
+            atAddr = moved;
+        }
+        Place here;
+        here.hasIndirect = true;
+        here.indirect = atAddr;
+        here.type = base.type;
+        here.off = 0;
+        here.isVolatile = base.isVolatile;
+        return sliceElementPlace(n, here, baseType, element, at);
     }
     std::vector<ir::Value> baseWords = loadRange(n.array->pos, base, baseType);
     if (failed_ || baseWords.size() != kSliceWords) {

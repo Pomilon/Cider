@@ -44,10 +44,10 @@ func main() -> int {
   // placeholder's slot in stack the process inherited non-zero rather than in
   // the part the prologue zeroes (CIDER-BUG-220 zeroes only the ALLOCA region,
   // never the allocator's spill slots).
-  var pad: [u64; 40] = [0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+  var pad: [u64; 40] = new [u64; 40] {[0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
                         0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
                         0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
-                        0, 0, 0, 0, 0, 0, 0, 0, 0, 0];
+                        0, 0, 0, 0, 0, 0, 0, 0, 0, 0]};
   var keep0: int = 1;
   var keep1: int = 2;
   var keep2: int = 3;
