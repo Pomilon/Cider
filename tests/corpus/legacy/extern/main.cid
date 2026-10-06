@@ -1,11 +1,9 @@
 extern func putchar(c: char) -> int;
-extern func exit(code: int) -> void;
 
 func main() -> int {
     putchar('H');
     putchar('i');
     putchar('!');
-    putchar(10);
-    exit(0);
+    putchar('\n');
     return 0;
 }

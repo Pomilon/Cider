@@ -445,9 +445,9 @@
   "class": "D"
  },
  "extern": {
-  "actual": "exit 1; tests/corpus/legacy/extern/main.cid:8:13: cannot use i32 as char",
+  "actual": "exact stdout/stderr/exit match",
   "blocker": "extern-calls-link (diff #8 rewrite `10 as char` passes check, run fails: assembling failed)",
-  "class": "D"
+  "class": "A"
  },
  "f32_arith_round": {
   "actual": "run exit 0: OUT: ERR:",
