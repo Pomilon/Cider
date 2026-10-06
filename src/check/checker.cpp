@@ -1171,19 +1171,23 @@ TypeRef Checker::checkFuncLit(FuncLit& lit) {
     sink_ = savedSink;
     std::vector<Captured> captures = std::move(litStack_.back().captures);
     litStack_.pop_back();
-    funcReturn_ = saved;
-    inFunc_ = was;
     if (after != before) {
+        funcReturn_ = saved;
+        inFunc_ = was;
         popScope();
         return errorRef();
     }
-    // The scope stays pushed through delegation: the lowerer's walk runs
-    // now, synchronously, and nested literals discover against these exact
-    // bindings. Siblings below never see it; the pop is below.
+    // The scope and the return type stay in place through delegation: the
+    // lowerer's walk re-checks the body deterministically, and a return
+    // inside the literal answers the literal's type, not the enclosing
+    // function's. Restoring first re-binds inner returns to the outer
+    // type and rejects them loudly for the wrong reason.
     if (sink_ != nullptr) {
         emitted_.insert(&lit);
         sink_->onFuncLit(lit, captures, sig);
     }
+    funcReturn_ = saved;
+    inFunc_ = was;
     popScope();
     return TypeRef{ctx_.closure(std::move(sig))};
 }

@@ -916,6 +916,21 @@ void testIndirectCall() {
     check(signaled, "a nil indirect call traps");
 }
 
+// A closure literal returned from a function keeps the literal's own
+// return type while its body checks: the inner return answers int even
+// though the enclosing function answers a closure.
+void testClosure() {
+    std::printf("closures run\n");
+    check(runQuiet("func makeAdder(base: int) -> func(int) -> int {\n"
+                   "    return func(x: int) -> int { return x + base; };\n"
+                   "}\n"
+                   "func main() -> int {\n"
+                   "    var add10: func(int) -> int = makeAdder(10);\n"
+                   "    return add10(5);\n"
+                   "}\n") == 15,
+          "a returned closure captures its environment");
+}
+
 // The same module emitted twice is byte-identical, and carries no build path.
 void testMultiWordReturn() {
     std::printf("multi-word returns\n");
@@ -1227,6 +1242,7 @@ int main() {
     testForIn();
     testArith32();
     testIndirectCall();
+    testClosure();
     testShortCircuit();
     testBoolCompare();
     testCharCompare();

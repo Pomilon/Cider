@@ -220,9 +220,9 @@
   "class": "B"
  },
  "closures": {
-  "actual": "exit 1; tests/corpus/closures/main.cid:10:19: expected an expression; tests/corpus/closures/main.cid:10:41: expected an expression; secondary: closure capture",
+  "actual": "exact stdout/stderr/exit match (rc=0 as-is after closure funcReturn_ fix)",
   "blocker": "asm blocks",
-  "class": "D"
+  "class": "A"
  },
  "complex_stress": {
   "actual": "tests/corpus/legacy/complex_stress/main.cid:12:26: a class needs a body",
