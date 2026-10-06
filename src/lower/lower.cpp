@@ -32,6 +32,19 @@ constexpr uint64_t kHasPrefixLen = 3;
 constexpr uint64_t kSliceWords = 2;
 constexpr uint64_t kFirstWord = 0;
 constexpr uint64_t kLenWord = 1;
+// A string literal answers the same pair, so its address is word zero:
+// a byte pointer beside a literal keeps that word and drops the length.
+bool isBytePointerTarget(const TypeRef& type) {
+    if (type.isError() || type.type->kind() != Kind::Pointer) {
+        return false;
+    }
+    TypeRef pointee{type.type->pointee()};
+    if (pointee.isError() || pointee.type->kind() != Kind::Basic) {
+        return false;
+    }
+    BasicKind basic = *pointee.type->basic();
+    return basic == BasicKind::U8 || basic == BasicKind::I8;
+}
 // A closure answers two words, code then captures, in the same positions
 // a slice keeps base and length: the hidden function loads word zero, the
 // allocation behind word one.
@@ -1189,6 +1202,12 @@ void Lowerer::onVarDecl(VarDecl& n) {
     TypeRef type = checker_.typeOf(&n);
     std::vector<ir::Value> values = lowerWords(n.init.get());
     TypeRef initType = checker_.typeOf(n.init.get());
+    if (dynamic_cast<const StringLit*>(n.init.get()) != nullptr &&
+        isBytePointerTarget(type) && values.size() == kSliceWords) {
+        // A literal beside a byte pointer keeps its address and drops
+        // its length: the pointer holds one word, the pair holds two.
+        values = {values[kFirstWord]};
+    }
     if (!initType.isError() && !type.isError() &&
         initType.type->kind() == Kind::Slice &&
         type.type->kind() == Kind::Array) {
@@ -4201,6 +4220,20 @@ std::vector<ir::Value> Lowerer::lowerWords(const Expr* expr) {
         refuse(ident->pos, "reading '" + ident->name + "'");
         return {undefined()};
     }
+    if (auto* cast = dynamic_cast<const Cast*>(expr)) {
+        // The null string is (nil, 0): the operand answers one word but
+        // the target holds two, so the generic scalar cast below would
+        // leave the length unanswered. Only the literal converts — the
+        // checker keeps a *void variable beside a string a mismatch.
+        TypeRef target = checker_.typeOf(expr);
+        if (!target.isError() && target.type->kind() == Kind::String &&
+            dynamic_cast<const NilPtr*>(cast->expr.get()) != nullptr) {
+            TypeRef ptrType{ctx_.pointer(ctx_.basic(BasicKind::U8))};
+            TypeRef lenType{ctx_.basic(BasicKind::I64)};
+            return {constantI64(0, ptrType, expr->pos),
+                    constantI64(0, lenType, expr->pos)};
+        }
+    }
     return {onIdentOrExpr(expr, checker_.typeOf(expr))};
 }
 
@@ -4450,6 +4483,16 @@ ir::Value Lowerer::onBinary(Binary& n) {
     TypeRef lhs = checker_.typeOf(n.lhs.get());
     TypeRef rhs = checker_.typeOf(n.rhs.get());
     TypeRef result = checker_.typeOf(&n);
+    if ((n.op == BinOp::Eq || n.op == BinOp::Ne) && !lhs.isError() &&
+        !rhs.isError() &&
+        ((lhs.type->kind() == Kind::String &&
+          (rhs.type->kind() == Kind::String ||
+           dynamic_cast<const NilPtr*>(n.rhs.get()) != nullptr)) ||
+         (rhs.type->kind() == Kind::String &&
+          (lhs.type->kind() == Kind::String ||
+           dynamic_cast<const NilPtr*>(n.lhs.get()) != nullptr)))) {
+        return lowerStringEq(n);
+    }
     ir::IRType width = widthOf(result, n.pos);
     ir::Value a = onIdentOrExpr(n.lhs.get(), lhs);
     ir::Value b = onIdentOrExpr(n.rhs.get(), rhs);
@@ -4594,6 +4637,230 @@ ir::Value Lowerer::lowerShortCircuit(const Binary& n) {
     }
     brToJoin();
     sealBlock(current_);
+    startBlock(joinLabel);
+    ir::Instr load;
+    load.op = ir::Op::Load;
+    load.loc = n.pos;
+    load.type = boolean;
+    load.width = widthOf(boolean, n.pos);
+    load.addressBase = cell;
+    load.isPure = true;
+    ir::Value out = newValue(load.width, boolean, n.pos);
+    load.results.push_back(out);
+    emit(std::move(load));
+    if (failed_) {
+        return undefined();
+    }
+    return out;
+}
+
+ir::Value Lowerer::lowerStringEq(const Binary& n) {
+    // The checker proved both sides strings, so equality is content:
+    // equal lengths, and either empty or equal bytes. The answer rides
+    // a cell like the short-circuit arms; each deciding edge writes it
+    // once and joins. A zero length takes the empty path before any
+    // byte is read, so a null string — (nil, 0) — never dereferences.
+    const bool isEq = n.op == BinOp::Eq;
+    TypeRef boolean{ctx_.basic(BasicKind::Bool)};
+    TypeRef count{ctx_.basic(BasicKind::I64)};
+    TypeRef byteType{ctx_.basic(BasicKind::U8)};
+    TypeRef ptrType{ctx_.pointer(ctx_.basic(BasicKind::U8))};
+    // Either side may be the null literal: it answers (nil, 0), which
+    // reads empty, so the length check below decides without touching
+    // the null address. Only the literal substitutes — the checker
+    // keeps a *void variable beside a string a mismatch.
+    auto stringWords = [&](const Expr* side) {
+        if (dynamic_cast<const NilPtr*>(side) != nullptr) {
+            return std::vector<ir::Value>{constantI64(0, ptrType, side->pos),
+                                          constantI64(0, count, side->pos)};
+        }
+        return lowerWords(side);
+    };
+    std::vector<ir::Value> left = stringWords(n.lhs.get());
+    if (failed_ || left.size() != kSliceWords) {
+        refuse(n.lhs->pos, "this expression");
+        return undefined();
+    }
+    std::vector<ir::Value> right = stringWords(n.rhs.get());
+    if (failed_ || right.size() != kSliceWords) {
+        refuse(n.rhs->pos, "this expression");
+        return undefined();
+    }
+    ir::Value cell = allocaSlot(boolean, n.pos);
+    if (failed_) {
+        return undefined();
+    }
+    auto storeCell = [&](bool value) {
+        ir::Instr instr;
+        instr.op = ir::Op::Store;
+        instr.loc = n.pos;
+        instr.type = boolean;
+        instr.width = widthOf(boolean, n.pos);
+        instr.addressBase = cell;
+        instr.storedValue = constantI64(value ? 1 : 0, boolean, n.pos);
+        emit(std::move(instr));
+    };
+    uint32_t checkZeroLabel = emitBlock(n.pos);
+    uint32_t initLabel = emitBlock(n.pos);
+    uint32_t headLabel = emitBlock(n.pos);
+    uint32_t bodyLabel = emitBlock(n.pos);
+    uint32_t stepLabel = emitBlock(n.pos);
+    uint32_t trueLabel = emitBlock(n.pos);
+    uint32_t falseLabel = emitBlock(n.pos);
+    uint32_t joinLabel = emitBlock(n.pos);
+    auto brTo = [&](uint32_t target) {
+        ir::Terminator term;
+        term.term = ir::Term::Br;
+        term.target = target;
+        term.loc = n.pos;
+        emitTerminator(term);
+        sealBlock(current_);
+    };
+    // Unequal lengths decide immediately; equal lengths need the bytes.
+    emitTerminator([&] {
+        ir::Terminator br;
+        br.term = ir::Term::CondBr;
+        br.cond = emitI64Cmp(n.pos, BinOp::Eq, left[kLenWord], right[kLenWord]);
+        br.thenTarget = checkZeroLabel;
+        br.elseTarget = falseLabel;
+        br.loc = n.pos;
+        return br;
+    }());
+    sealBlock(current_);
+    startBlock(falseLabel);
+    storeCell(!isEq);
+    if (failed_) {
+        return undefined();
+    }
+    brTo(joinLabel);
+    startBlock(checkZeroLabel);
+    ir::Value zero = constantI64(0, count, n.pos);
+    if (failed_) {
+        return undefined();
+    }
+    emitTerminator([&] {
+        ir::Terminator br;
+        br.term = ir::Term::CondBr;
+        br.cond = emitI64Cmp(n.pos, BinOp::Eq, left[kLenWord], zero);
+        br.thenTarget = trueLabel;
+        br.elseTarget = initLabel;
+        br.loc = n.pos;
+        return br;
+    }());
+    sealBlock(current_);
+    startBlock(trueLabel);
+    storeCell(isEq);
+    if (failed_) {
+        return undefined();
+    }
+    brTo(joinLabel);
+    // The index slot initializes on the only path that reaches the
+    // head: the empty path jumps straight to the join, so placing the
+    // slot here (instead of beside the head) keeps every head load
+    // reading a stored value.
+    startBlock(initLabel);
+    ir::Value idxSlot = allocaSlot(count, n.pos);
+    if (failed_) {
+        return undefined();
+    }
+    Place idxPlace;
+    idxPlace.slots = {idxSlot};
+    idxPlace.type = count;
+    storeRange(n.pos, idxPlace, {constantI64(0, count, n.pos)}, count);
+    if (failed_) {
+        return undefined();
+    }
+    brTo(headLabel);
+    // The byte loop: an index slot walks both buffers together, the
+    // first mismatch decides, exhaustion with no mismatch is equal.
+    startBlock(headLabel);
+    std::vector<ir::Value> idxVals = loadRange(n.pos, idxPlace, count);
+    if (failed_ || idxVals.size() != kOneWord) {
+        refuse(n.pos, "this expression");
+        return undefined();
+    }
+    emitTerminator([&] {
+        ir::Terminator br;
+        br.term = ir::Term::CondBr;
+        br.cond = emitI64Cmp(n.pos, BinOp::Lt, idxVals[kFirstWord], left[kLenWord]);
+        br.thenTarget = bodyLabel;
+        br.elseTarget = trueLabel;
+        br.loc = n.pos;
+        return br;
+    }());
+    sealBlock(current_);
+    startBlock(bodyLabel);
+    // The head's load parked one block back; reload the live index —
+    // every iteration reads what the last step stored.
+    std::vector<ir::Value> atVals = loadRange(n.pos, idxPlace, count);
+    if (failed_ || atVals.size() != kOneWord) {
+        refuse(n.pos, "this expression");
+        return undefined();
+    }
+    ir::Value at = atVals[kFirstWord];
+    auto advance = [&](ir::Value base) {
+        ir::Instr add;
+        add.op = ir::Op::Add;
+        add.loc = n.pos;
+        add.type = ptrType;
+        add.width = ir::IRType::Ptr;
+        add.isPure = true;
+        add.operands.push_back(base);
+        add.operands.push_back(at);
+        ir::Value moved = newValue(add.width, ptrType, n.pos);
+        add.results.push_back(moved);
+        emit(std::move(add));
+        return moved;
+    };
+    ir::Value fromLeft = advance(left[kFirstWord]);
+    ir::Value fromRight = advance(right[kFirstWord]);
+    if (failed_) {
+        return undefined();
+    }
+    Place readLeft;
+    readLeft.slots = {fromLeft};
+    readLeft.type = byteType;
+    std::vector<ir::Value> byteLeft = loadRange(n.pos, readLeft, byteType);
+    if (failed_ || byteLeft.size() != kOneWord) {
+        refuse(n.pos, "this expression");
+        return undefined();
+    }
+    Place readRight;
+    readRight.slots = {fromRight};
+    readRight.type = byteType;
+    std::vector<ir::Value> byteRight = loadRange(n.pos, readRight, byteType);
+    if (failed_ || byteRight.size() != kOneWord) {
+        refuse(n.pos, "this expression");
+        return undefined();
+    }
+    emitTerminator([&] {
+        ir::Terminator br;
+        br.term = ir::Term::CondBr;
+        br.cond = emitI64Cmp(n.pos, BinOp::Eq, byteLeft[kFirstWord],
+                             byteRight[kFirstWord]);
+        br.thenTarget = stepLabel;
+        br.elseTarget = falseLabel;
+        br.loc = n.pos;
+        return br;
+    }());
+    sealBlock(current_);
+    startBlock(stepLabel);
+    ir::Instr step;
+    step.op = ir::Op::Add;
+    step.loc = n.pos;
+    step.type = count;
+    step.width = ir::IRType::I64;
+    step.isPure = true;
+    step.operands.push_back(at);
+    step.operands.push_back(constantI64(1, count, n.pos));
+    ir::Value next = newValue(step.width, count, n.pos);
+    step.results.push_back(next);
+    emit(std::move(step));
+    storeRange(n.pos, idxPlace, {next}, count);
+    if (failed_) {
+        return undefined();
+    }
+    brTo(headLabel);
     startBlock(joinLabel);
     ir::Instr load;
     load.op = ir::Op::Load;
@@ -5833,6 +6100,12 @@ void Lowerer::lowerAssignStmt(Assign& n) {
     TypeRef target = checker_.typeOf(n.target.get());
     std::vector<ir::Value> value = lowerWords(n.value.get());
     TypeRef valueType = checker_.typeOf(n.value.get());
+    if (dynamic_cast<const StringLit*>(n.value.get()) != nullptr &&
+        isBytePointerTarget(target) && value.size() == kSliceWords) {
+        // A literal beside a byte pointer keeps its address and drops
+        // its length, like the declaration path: one word, not two.
+        value = {value[kFirstWord]};
+    }
     if (!target.isError() && !valueType.isError() &&
         valueType.type->kind() == Kind::Slice &&
         target.type->kind() == Kind::Array) {

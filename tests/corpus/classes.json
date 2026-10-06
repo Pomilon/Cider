@@ -1350,9 +1350,9 @@
   "class": "D"
  },
  "string_compare": {
-  "actual": "blocked-A reclassified 2026-10-05: must pass once blocker lands; run exit 1: OUT: ERR:tests/corpus/string_compare/main.cid:5:3: not lowered yet: string returns are not emitted yet\\n",
+  "actual": "exact stdout/stderr/exit match",
   "blocker": "string-ops-not-lowered (==/!=, interpolation, string returns)",
-  "class": "D"
+  "class": "A"
  },
  "string_ordering": {
   "actual": "blocked-A reclassified 2026-10-05: must pass once blocker lands; run exit 1: OUT: ERR:tests/corpus/string_ordering/main.cid:135:7: unknown escape\\ntests/corpus/string_ordering/main.cid:135:7: unknown escape\\ntests/corpus/string_ordering/main.cid:136:9: unknown escape\\ntests/corpus/string_",

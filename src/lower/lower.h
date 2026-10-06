@@ -112,6 +112,12 @@ public:
     // `&&` and `||` with short-circuit control flow: the deciding side
     // leaves its value in a cell, and only the taken arm writes the answer.
     ir::Value lowerShortCircuit(const Binary& n);
+    // `==` / `!=` on strings: the checker proved both sides strings, so
+    // equality is content — equal lengths and (empty or equal bytes),
+    // answered through a cell like the short-circuit arms. nil-safe by
+    // construction: a null string is (nil, 0), and a zero length takes
+    // the empty path before any byte is read.
+    ir::Value lowerStringEq(const Binary& n);
     // `?:` with branch control flow: the checker proved both arms share one
     // type, so each arm stores its words into the cell and the join loads
     // them back. The untaken arm never evaluates (SEMANTICS: single-eval).

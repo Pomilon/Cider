@@ -724,6 +724,38 @@ void testCharCompare() {
           "equality distinguishes char values");
 }
 
+void testStringCompare() {
+    std::printf("string equality runs\n");
+    check(runQuiet("func main() -> int {\n"
+                   "    var a: string = \"ab\";\n"
+                   "    var b: string = \"ab\";\n"
+                   "    var c: string = \"ac\";\n"
+                   "    if (a != b) { return 1; }\n"
+                   "    if (a == c) { return 2; }\n"
+                   "    if (b == c) { return 3; }\n"
+                   "    if (a == \"ab\") { return 4; }\n"
+                   "    return 0;\n"
+                   "}\n") == 4,
+          "equality distinguishes string values");
+    check(runQuiet("func main() -> int {\n"
+                   "    var e: string = \"\";\n"
+                   "    var n: string = nilPtr as string;\n"
+                   "    var m: string = nilPtr as string;\n"
+                   "    if (e != \"\") { return 1; }\n"
+                   "    if (!(n == m)) { return 2; }\n"
+                   "    if (!(n == e)) { return 3; }\n"
+                   "    if (!(e == n)) { return 4; }\n"
+                   "    if (n == \"x\") { return 5; }\n"
+                   "    var p: *u8 = \"hi\";\n"
+                   "    var q: *u8 = \"hi\";\n"
+                   "    if (p == q) { return 6; }\n"
+                   "    var r: *u8 = p;\n"
+                   "    if (r != p) { return 7; }\n"
+                   "    return 0;\n"
+                   "}\n") == 0,
+          "empty, null, and address strings behave");
+}
+
 void testEnumValues() {
     std::printf("enumerators run as integers\n");
     check(runQuiet("enum Color { RED, GREEN, BLUE = 5 }\n"
@@ -1100,6 +1132,7 @@ int main() {
     testShortCircuit();
     testBoolCompare();
     testCharCompare();
+    testStringCompare();
     testEnumValues();
     testBitNot();
     testTernary();

@@ -861,6 +861,16 @@ void Checker::visitCast(Cast& n) {
         record(&n, errorRef());
         return;
     }
+    if (dynamic_cast<const NilPtr*>(n.expr.get()) != nullptr &&
+        target.type->kind() == Kind::String) {
+        // A null names no type, so it converts to a string the same way
+        // it converts to any pointer: the null string is (nil, 0), which
+        // reads empty and compares equal to another null without ever
+        // dereferencing. Only the literal converts — a *void variable
+        // beside a string stays a mismatch the source must spell.
+        record(&n, target);
+        return;
+    }
     if (!castRowOk(from, target)) {
         fail(n.pos, "no cast from " + typeName(from) + " to " + typeName(target));
         record(&n, errorRef());
@@ -1631,6 +1641,29 @@ TypeRef Checker::checkBinary(Binary& expr, TypeRef expected) {
             fail(expr.pos, "chars compare for equality only");
             return errorRef();
         }
+        const bool lhsString = lhs.type->kind() == Kind::String;
+        const bool rhsString = rhs.type->kind() == Kind::String;
+        if (lhsString || rhsString) {
+            // Equality on strings compares content (SEMANTICS §4, the
+            // same rule as the other value types): ordering has no
+            // meaning, and a string beside a non-string is a mismatch —
+            // identity through a *u8 needs spelling, not silence.
+            if (isEq && lhsString && rhsString) {
+                return TypeRef{ctx_.basic(BasicKind::Bool)};
+            }
+            // A null names no type, so it checks against a string the
+            // same way it checks against any pointer: the null string
+            // is empty, and the comparison below reads no bytes for
+            // one. Only the nilPtr literal — a *void variable beside a
+            // string stays a mismatch, like the cast rule.
+            const bool lhsNil = dynamic_cast<const NilPtr*>(expr.lhs.get()) != nullptr;
+            const bool rhsNil = dynamic_cast<const NilPtr*>(expr.rhs.get()) != nullptr;
+            if (isEq && ((lhsString && rhsNil) || (rhsString && lhsNil))) {
+                return TypeRef{ctx_.basic(BasicKind::Bool)};
+            }
+            fail(expr.pos, "strings compare for equality only");
+            return errorRef();
+        }
         if (lhs.type->kind() == Kind::Pointer && rhs.type->kind() == Kind::Pointer) {
             // Pointers compare by identity (SEMANTICS §4): two spellings of
             // one pointer type, or either side nilPtr — its spelling is
@@ -2229,6 +2262,20 @@ bool Checker::checkCompatible(Position pos, const Expr* fromExpr, TypeRef from, 
     if (dynamic_cast<const NilPtr*>(fromExpr) != nullptr &&
         (to.type->kind() == Kind::Pointer || to.type->kind() == Kind::FunctionPtr)) {
         return true;
+    }
+    // A string literal converts to a byte pointer: the literal
+    // materializes its own bytes, so word zero is their address. Only
+    // the literal converts — a string variable beside a *u8 stays a
+    // mismatch, spelled `&s[0]`.
+    if (dynamic_cast<const StringLit*>(fromExpr) != nullptr &&
+        to.type->kind() == Kind::Pointer) {
+        TypeRef pointee{to.type->pointee()};
+        if (pointee.type->kind() == Kind::Basic) {
+            BasicKind basic = *pointee.type->basic();
+            if (basic == BasicKind::U8 || basic == BasicKind::I8) {
+                return true;
+            }
+        }
     }
     // A slice copies into an array of the same element type: the copy
     // checks the length where it happens, so a mismatch traps instead of

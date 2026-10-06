@@ -396,6 +396,43 @@ void testCharCompare() {
     check(!mixed.ok && mixed.stage == "check", "char == int fails without as");
 }
 
+void testStringCompare() {
+    std::printf("strings compare for equality\n");
+    Checked good = check(
+        "func main() -> int {\n"
+        "    var a: string = \"ab\";\n"
+        "    var b: string = \"ab\";\n"
+        "    if (a == b && a != \"ac\") { return 1; }\n"
+        "    return 0;\n"
+        "}\n");
+    check(good.ok, "== and != on strings: " + good.stage);
+    Checked rel = check(
+        "func main() -> int { var s: string = \"a\" < \"b\"; return 0; }\n");
+    check(!rel.ok && rel.stage == "check", "ordering on strings fails");
+    Checked mixed = check(
+        "func main() -> int { var s: string = \"a\"; if (s == 1) { return 1; } return 0; }\n");
+    check(!mixed.ok && mixed.stage == "check", "string == int fails");
+    Checked nil = check(
+        "func main() -> int {\n"
+        "    var a: string = \"ab\";\n"
+        "    var n: string = nilPtr as string;\n"
+        "    if (a == nilPtr) { return 1; }\n"
+        "    if (n != nilPtr) { return 2; }\n"
+        "    if (!(n == n)) { return 3; }\n"
+        "    return 0;\n"
+        "}\n");
+    check(nil.ok, "a string checks against nilPtr: " + nil.stage);
+    Checked nilVar = check(
+        "func main() -> int { var p: *void = nilPtr; var s: string = \"a\"; if (s == p) { return 1; } return 0; }\n");
+    check(!nilVar.ok && nilVar.stage == "check", "string == *void variable fails");
+    Checked addr = check(
+        "func main() -> int { var p: *u8 = \"hi\"; return 0; }\n");
+    check(addr.ok, "a literal checks beside *u8: " + addr.stage);
+    Checked addrVar = check(
+        "func main() -> int { var s: string = \"hi\"; var p: *u8 = s; return 0; }\n");
+    check(!addrVar.ok && addrVar.stage == "check", "a string variable needs &s[0]");
+}
+
 void testFloatGlobal() {
     // A float expression over constants names every image byte once
     // folded, so a float global may hold it (FEATURES §8.3): no startup
@@ -539,6 +576,7 @@ int main() {
     testIncrDecr();
     testBoolCompare();
     testCharCompare();
+    testStringCompare();
     testRepeatZero();
     testSliceCopy();
     testAsm();
