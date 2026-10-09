@@ -1150,13 +1150,18 @@ void testMultiWordReturn() {
                   "func main() -> int { return greet().len as int; }\n", sig) == 2 &&
               !sig,
           "a string return carries address and length");
-    // Three words exceed the register row: refused, not split.
-    Built big = build("func triple() -> [u64; 3] {\n"
-                      "    var t: [u64; 3] = new [u64; 3] {1, 2, 3};\n"
-                      "    return t;\n"
-                      "}\n"
-                      "func main() -> int { return 0; }\n");
-    check(!big.ok && big.stage == "lower", "a three-word return refuses");
+    // Three words exceed the register row: they ride the hidden
+    // pointer instead of splitting.
+    check(runCode("func triple() -> [u64; 3] {\n"
+                  "    var t: [u64; 3] = new [u64; 3] {1, 2, 3};\n"
+                  "    return t;\n"
+                  "}\n"
+                  "func main() -> int {\n"
+                  "    var m: [u64; 3] = triple();\n"
+                  "    return (m[0] + m[1] + m[2]) as int;\n"
+                  "}\n",
+                  sig) == 6 && !sig,
+          "a three-word return comes home whole");
     // A one-word aggregate still answers its word's type, not the
     // aggregate's: the scalar path cannot name a two-byte array's width.
     check(runCode("func make_row() -> [u8; 2] {\n"
@@ -1175,6 +1180,27 @@ void testMultiWordReturn() {
                    "    return sizeof([[u8; 2]; 3]) as int;\n"
                    "}\n") == 6,
           "sizeof answers a nested array's bytes");
+}
+
+void testBigReturn() {
+    std::printf("wide returns ride a hidden pointer\n");
+    bool sig = false;
+    check(runCode("struct Big {\n"
+                  "    var a: int;\n"
+                  "    var b: int;\n"
+                  "    var c: int;\n"
+                  "    var d: int;\n"
+                  "    var e: int;\n"
+                  "}\n"
+                  "func make() -> Big {\n"
+                  "    return new Big { a: 1, b: 2, c: 3, d: 4, e: 5 };\n"
+                  "}\n"
+                  "func main() -> int {\n"
+                  "    var m: Big = make();\n"
+                  "    return m.a + m.b + m.c + m.d + m.e;\n"
+                  "}\n",
+                  sig) == 15 && !sig,
+          "a five-field answer comes home whole");
 }
 
 void testSliceCopy() {
@@ -1480,6 +1506,7 @@ int main() {
     testRepeatZero();
     testIncrDecr();
     testMultiWordReturn();
+    testBigReturn();
     testSliceCopy();
     testRepro();
     std::printf("\n%d checks, %s\n", checks, failures == 0 ? "all passed" : "FAILURES");

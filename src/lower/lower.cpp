@@ -453,6 +453,12 @@ std::string Lowerer::emitVTable(DeclId concrete, DeclId iface, Position pos) {
 
 std::string Lowerer::emitIfaceAdapter(DeclId concrete, const std::string& method,
                                       const Signature& sig, Position pos) {
+    if (needsSret(sig.returnType())) {
+        // An adapter normalizes the receiver; threading a hidden buffer
+        // address through it as well is a later slice.
+        refuse(pos, "a wide return through an interface adapter is not lowered yet");
+        return "";
+    }
     const resolve::Decl* owner = resolver_.declById(concrete);
     if (owner == nullptr) {
         refuse(pos, "this interface conversion");
@@ -678,6 +684,14 @@ std::vector<ir::Value> Lowerer::boxToInterface(std::vector<ir::Value> words,
     addr.results.push_back(table);
     emit(std::move(addr));
     return {words[kFirstWord], table};
+}
+
+bool Lowerer::needsSret(const Type* ret) {
+    if (ret == nullptr || ret->kind() == Kind::Void) {
+        return false;
+    }
+    TypeRef ref{ret};
+    return wordCount(ref) > static_cast<int>(kTwoWords);
 }
 
 bool Lowerer::resolvePlace(const Expr* expr, Place& out) {
@@ -1404,6 +1418,22 @@ void Lowerer::onFuncDecl(FuncDecl& n) {
     fn.name = decl != nullptr ? resolver_.linkName(*decl) : n.name;
     fn.signature = *functionSig(n.name);
     fn.loc = n.pos;
+    // A return wider than the register row travels through a
+    // caller-allocated buffer: the hidden address rides first (SysV
+    // sret), and the answer is stored there instead of the row.
+    if (needsSret(fn.signature.returnType())) {
+        TypeRef sretPtr{ctx_.pointer(ctx_.basic(BasicKind::U8))};
+        std::vector<Parameter> withSret;
+        Parameter hidden;
+        hidden.type = sretPtr.type;
+        hidden.isMutable = false;
+        withSret.push_back(hidden);
+        for (const Parameter& p : fn.signature.parameters()) {
+            withSret.push_back(p);
+        }
+        fn.signature = Signature(std::move(withSret), fn.signature.returnType(),
+                                 Abi::SysV);
+    }
     function_ = &fn;
     module_->functions.push_back(std::move(fn));
     function_ = &module_->functions.back();
@@ -1423,8 +1453,22 @@ void Lowerer::onFuncDecl(FuncDecl& n) {
     // the slots; codegen derives each address from its id.
     std::unordered_map<std::string, LocalBinding> frame;
     const std::vector<Parameter>& params = function_->signature.parameters();
-    for (uint64_t i = 0; i < static_cast<uint64_t>(params.size()); ++i) {
-        TypeRef type{params[i].type};
+    // The hidden address has no source spelling: its slot rides first
+    // and the source parameters follow shifted past it.
+    uint64_t shift = 0;
+    if (needsSret(function_->signature.returnType())) {
+        TypeRef sretPtr{ctx_.pointer(ctx_.basic(BasicKind::U8))};
+        std::vector<ir::Value> sretSlots = allocaSlots(sretPtr, n.pos, kOneWord);
+        if (failed_) {
+            return;
+        }
+        for (ir::Value slot : sretSlots) {
+            function_->params.push_back(slot);
+        }
+        shift = kOneWord;
+    }
+    for (uint64_t i = 0; i < static_cast<uint64_t>(n.params.size()); ++i) {
+        TypeRef type{params[i + shift].type};
         std::vector<ir::Value> slots = allocaFor(type, n.params[i].pos);
         if (failed_) {
             return;
@@ -1435,7 +1479,7 @@ void Lowerer::onFuncDecl(FuncDecl& n) {
         LocalBinding binding;
         binding.slots = std::move(slots);
         binding.type = type;
-        binding.isMutable = params[i].isMutable;
+        binding.isMutable = params[i + shift].isMutable;
         frame[n.params[i].name] = binding;
     }
     recordParamClasses();
@@ -1500,6 +1544,20 @@ void Lowerer::onMethodDecl(const std::string& owner, const std::string& name,
         combined.push_back(p);
     }
     const Type* ret = sig.returnType() != nullptr ? sig.returnType() : ctx_.void_();
+    if (needsSret(ret)) {
+        // The hidden buffer address rides before the receiver (SysV
+        // sret): prepended to the signature copy the frame walks below.
+        TypeRef sretPtr{ctx_.pointer(ctx_.basic(BasicKind::U8))};
+        std::vector<Parameter> withSret;
+        Parameter hidden;
+        hidden.type = sretPtr.type;
+        hidden.isMutable = false;
+        withSret.push_back(hidden);
+        for (const Parameter& p : combined) {
+            withSret.push_back(p);
+        }
+        combined = std::move(withSret);
+    }
     fn.signature = Signature(std::move(combined), ret, Abi::SysV);
     fn.loc = body.pos;
     function_ = &fn;
@@ -1516,6 +1574,20 @@ void Lowerer::onMethodDecl(const std::string& owner, const std::string& name,
     startBlock(entry);
 
     std::unordered_map<std::string, LocalBinding> frame;
+    // The hidden address has no source spelling: its slot rides first
+    // and the receiver follows shifted past it.
+    uint64_t shift = 0;
+    if (needsSret(ret)) {
+        TypeRef sretPtr{ctx_.pointer(ctx_.basic(BasicKind::U8))};
+        std::vector<ir::Value> sretSlots = allocaSlots(sretPtr, body.pos, kOneWord);
+        if (failed_) {
+            return;
+        }
+        for (ir::Value slot : sretSlots) {
+            function_->params.push_back(slot);
+        }
+        shift = kOneWord;
+    }
     std::vector<ir::Value> selfSlots = allocaSlots(self, body.pos,
                                                    static_cast<uint64_t>(wordCount(self)));
     for (ir::Value slot : selfSlots) {
@@ -1528,7 +1600,7 @@ void Lowerer::onMethodDecl(const std::string& owner, const std::string& name,
     frame["self"] = selfBinding;
     const std::vector<Parameter>& declared = function_->signature.parameters();
     for (uint64_t i = 0; i < static_cast<uint64_t>(params.size()); ++i) {
-        TypeRef type{declared[i + 1].type};
+        TypeRef type{declared[i + 1 + shift].type};
         std::vector<ir::Value> slots = allocaFor(type, params[i].pos);
         if (failed_) {
             return;
@@ -1539,7 +1611,7 @@ void Lowerer::onMethodDecl(const std::string& owner, const std::string& name,
         LocalBinding binding;
         binding.slots = std::move(slots);
         binding.type = type;
-        binding.isMutable = declared[i + 1].isMutable;
+        binding.isMutable = declared[i + 1 + shift].isMutable;
         frame[params[i].name] = binding;
     }
     recordParamClasses();
@@ -1608,6 +1680,20 @@ void Lowerer::onFuncLit(FuncLit& lit, const std::vector<check::Captured>& captur
         combined.push_back(p);
     }
     const Type* ret = sig.returnType() != nullptr ? sig.returnType() : ctx_.void_();
+    if (needsSret(ret)) {
+        // The hidden buffer address rides before the captures word
+        // (SysV sret), like every other hidden-first convention here.
+        TypeRef sretPtr{ctx_.pointer(ctx_.basic(BasicKind::U8))};
+        std::vector<Parameter> withSret;
+        Parameter hidden;
+        hidden.type = sretPtr.type;
+        hidden.isMutable = false;
+        withSret.push_back(hidden);
+        for (const Parameter& p : combined) {
+            withSret.push_back(p);
+        }
+        combined = std::move(withSret);
+    }
     fn.signature = Signature(std::move(combined), ret, Abi::SysV);
     fn.loc = lit.pos;
     module_->functions.push_back(std::move(fn));
@@ -1623,6 +1709,20 @@ void Lowerer::onFuncLit(FuncLit& lit, const std::vector<check::Captured>& captur
     startBlock(entry);
 
     std::unordered_map<std::string, LocalBinding> frame;
+    // The hidden address has no source spelling: its slot rides first
+    // and the captures word follows shifted past it.
+    uint64_t shift = 0;
+    if (needsSret(ret)) {
+        TypeRef sretPtr{ctx_.pointer(ctx_.basic(BasicKind::U8))};
+        std::vector<ir::Value> sretSlots = allocaSlots(sretPtr, lit.pos, kOneWord);
+        if (failed_) {
+            return;
+        }
+        for (ir::Value slot : sretSlots) {
+            function_->params.push_back(slot);
+        }
+        shift = kOneWord;
+    }
     std::vector<ir::Value> capSlots = allocaSlots(capPtr, lit.pos, kOneWord);
     for (ir::Value slot : capSlots) {
         function_->params.push_back(slot);
@@ -1672,7 +1772,7 @@ void Lowerer::onFuncLit(FuncLit& lit, const std::vector<check::Captured>& captur
     if (!failed_) {
         const std::vector<Parameter>& declared = function_->signature.parameters();
         for (uint64_t i = 0; i < static_cast<uint64_t>(lit.params.size()); ++i) {
-            TypeRef type{declared[i + kOneWord].type};
+            TypeRef type{declared[i + kOneWord + shift].type};
             std::vector<ir::Value> slots = allocaFor(type, lit.params[i].pos);
             if (failed_) {
                 return;
@@ -1683,7 +1783,7 @@ void Lowerer::onFuncLit(FuncLit& lit, const std::vector<check::Captured>& captur
             LocalBinding binding;
             binding.slots = std::move(slots);
             binding.type = type;
-            binding.isMutable = declared[i + kOneWord].isMutable;
+            binding.isMutable = declared[i + kOneWord + shift].isMutable;
             frame[lit.params[i].name] = binding;
         }
         recordParamClasses();
@@ -4269,6 +4369,12 @@ std::vector<ir::Value> Lowerer::loadGlobal(Position pos, const GlobalBinding& gl
 
 std::string Lowerer::forwardFunction(const std::string& link, const Signature& sig,
                                      Position pos) {
+    if (needsSret(sig.returnType())) {
+        // A forwarder drops its captures word and calls through; threading
+        // a hidden buffer address through both shapes is a later slice.
+        refuse(pos, "a wide return through a closure forwarder is not lowered yet");
+        return "";
+    }
     std::string hidden = "closure_" + std::to_string(closureSeq_++);
     int64_t savedFn = -1;
     if (function_ != nullptr) {
@@ -5979,6 +6085,62 @@ bool Lowerer::returnWordsFit(const std::vector<ir::Value>& words,
     return true;
 }
 
+std::vector<ir::Value> Lowerer::callSretSlots(ir::Instr& call, const Type* ret,
+                                              Position pos) {
+    // The caller allocates the answer slot and passes its address first
+    // (SysV sret). The slots must run consecutively for the callee's
+    // contiguous stores to land in them.
+    TypeRef retRef{ret};
+    int count = wordCount(retRef);
+    if (count < 0) {
+        refuse(pos, "a value of this type");
+        return {};
+    }
+    std::vector<ir::Value> slots =
+        allocaSlots(retRef, pos, static_cast<uint64_t>(count));
+    if (failed_) {
+        return {};
+    }
+    for (uint64_t i = 0; i < static_cast<uint64_t>(slots.size()); ++i) {
+        if (slots[i].id != slots[0].id + static_cast<uint32_t>(i)) {
+            refuse(pos, "this call");
+            return {};
+        }
+    }
+    ir::Argument first;
+    first.words.push_back(computedBase(slots[0], 0, pos));
+    if (failed_) {
+        return {};
+    }
+    call.arguments.insert(call.arguments.begin(), std::move(first));
+    return slots;
+}
+
+std::vector<ir::Value> Lowerer::callSretLoads(const std::vector<ir::Value>& slots,
+                                              const Type* ret, Position pos) {
+    TypeRef retRef{ret};
+    std::vector<ir::Value> out;
+    for (uint64_t i = 0; i < static_cast<uint64_t>(slots.size()); ++i) {
+        TypeRef word = wordType(retRef, i);
+        ir::IRType width = widthOf(word, pos);
+        if (failed_) {
+            return {};
+        }
+        ir::Instr load;
+        load.op = ir::Op::Load;
+        load.loc = pos;
+        load.type = word;
+        load.width = width;
+        load.addressBase = slots[i];
+        load.isPure = true;
+        ir::Value answer = newValue(width, word, pos);
+        load.results.push_back(answer);
+        emit(std::move(load));
+        out.push_back(answer);
+    }
+    return out;
+}
+
 std::vector<ir::Value> Lowerer::callResults(ir::Instr& call, const Type* ret,
                                              Position pos) {    TypeRef retRef{ret};
     if (ret->kind() == Kind::Void) {
@@ -6468,11 +6630,28 @@ std::vector<ir::Value> Lowerer::lowerCallWords(Call& n) {
     // Captured before the move below: emit() takes the instruction by value,
     // so reading results after moving reads an emptied vector — which is how
     // a call's result became the undefined placeholder.
-    std::vector<ir::Value> words = callResults(instr, ret, n.pos);
-    if (failed_) {
-        return {undefined()};
+    std::vector<ir::Value> words;
+    if (needsSret(ret)) {
+        // The answer slot precedes the call and its loads follow it:
+        // loads before the call would read unfilled slots.
+        std::vector<ir::Value> slots = callSretSlots(instr, ret, n.pos);
+        if (failed_) {
+            return {undefined()};
+        }
+        instr.width = ir::IRType::Void;
+        instr.type = TypeRef{ret};
+        emit(std::move(instr));
+        words = callSretLoads(slots, ret, n.pos);
+        if (failed_) {
+            return {undefined()};
+        }
+    } else {
+        words = callResults(instr, ret, n.pos);
+        if (failed_) {
+            return {undefined()};
+        }
+        emit(std::move(instr));
     }
-    emit(std::move(instr));
     if (function_ != nullptr) {
         // A call is mayTrap only if the callee can throw, which is known here
         // rather than guessed by the optimiser.
@@ -6523,10 +6702,45 @@ void Lowerer::onReturn(Return& n) {
         if (failed_) {
             return;
         }
-        if (!returnWordsFit(words, n.pos)) {
-            return;
+        if (needsSret(answered)) {
+            // Store the answer into the caller's buffer and return
+            // nothing: params[0] is the hidden address. The words land
+            // in order at its bytes, shaped by the store like any
+            // aggregate construction.
+            if (function_->params.empty()) {
+                refuse(n.pos, "this return");
+                return;
+            }
+            TypeRef sretPtr{ctx_.pointer(ctx_.basic(BasicKind::U8))};
+            ir::Instr load;
+            load.op = ir::Op::Load;
+            load.loc = n.pos;
+            load.type = sretPtr;
+            load.width = ir::IRType::Ptr;
+            load.addressBase = function_->params[kFirstWord];
+            load.isPure = true;
+            ir::Value buf = newValue(load.width, sretPtr, n.pos);
+            load.results.push_back(buf);
+            emit(std::move(load));
+            if (failed_) {
+                return;
+            }
+            Place at;
+            at.hasIndirect = true;
+            at.indirect = buf;
+            at.off = 0;
+            at.type = want;
+            at.isVolatile = false;
+            storeRange(n.pos, at, words, want);
+            if (failed_) {
+                return;
+            }
+        } else {
+            if (!returnWordsFit(words, n.pos)) {
+                return;
+            }
+            term.values = std::move(words);
         }
-        term.values = std::move(words);
     } else {
         // A bare return answers nothing: an empty list, not the placeholder.
         // The placeholder's id poisons the frame computation, which reads

@@ -145,6 +145,15 @@ public:
     // Return statements validate through this; call results validate while
     // building, so both producers enforce the same row.
     bool returnWordsFit(const std::vector<ir::Value>& words, Position pos);
+    // A caller-allocated answer slot for a hidden-pointer return: fresh
+    // consecutive slots plus the leading address argument. The answer
+    // loads come after the call itself (see callSretLoads), never before.
+    std::vector<ir::Value> callSretSlots(ir::Instr& call, const Type* ret,
+                                         Position pos);
+    // One load per answer word from a hidden-pointer slot row, emitted
+    // after the call that fills them.
+    std::vector<ir::Value> callSretLoads(const std::vector<ir::Value>& slots,
+                                         const Type* ret, Position pos);
     std::vector<ir::Value> lowerCallWords(Call& n);
     ir::Value onCall(Call& n);
     ir::Value onIdent(Ident& n);
@@ -200,6 +209,10 @@ public:
     // two for the 16-byte aggregates (strings today). -1 for anything larger,
     // which this slice does not lower.
     int wordCount(TypeRef type);
+    // Whether a return wider than the register row (IR.md §6) travels
+    // through a caller-allocated buffer whose address rides first (SysV
+    // sret): more words than the row carries, never void or unknown.
+    bool needsSret(const Type* ret);
     // Builds the 16-byte interface pair (TYPES.md §4.3) from a concrete
     // value's words: the data word carries the concrete bytes inline when
     // they fit one word, and the vtable word names the (concrete,
