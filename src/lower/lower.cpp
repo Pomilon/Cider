@@ -58,6 +58,93 @@ bool isBytePointerTarget(const TypeRef& type) {
 // a slice keeps base and length: the hidden function loads word zero, the
 // allocation behind word one.
 constexpr uint64_t kClosureWords = 2;
+
+// Whether lowering this expression can run an effect: calls, construction
+// that runs init, closures, assignment, and anything unlisted
+// (fail-closed). Pure address math, literals and names answer false.
+bool lowersImpure(const Expr* expr) {
+    if (expr == nullptr) {
+        return true;
+    }
+    if (dynamic_cast<const Call*>(expr) != nullptr ||
+        dynamic_cast<const NewClass*>(expr) != nullptr ||
+        dynamic_cast<const FuncLit*>(expr) != nullptr ||
+        dynamic_cast<const Assign*>(expr) != nullptr ||
+        dynamic_cast<const IncrDecr*>(expr) != nullptr ||
+        dynamic_cast<const StringLit*>(expr) != nullptr) {
+        return true;
+    }
+    if (const auto* un = dynamic_cast<const Unary*>(expr)) {
+        return lowersImpure(un->operand.get());
+    }
+    if (const auto* field = dynamic_cast<const Field*>(expr)) {
+        return lowersImpure(field->object.get());
+    }
+    if (const auto* index = dynamic_cast<const Index*>(expr)) {
+        return lowersImpure(index->array.get()) || lowersImpure(index->index.get());
+    }
+    if (const auto* slice = dynamic_cast<const SliceExpr*>(expr)) {
+        return lowersImpure(slice->array.get()) || lowersImpure(slice->lo.get()) ||
+               lowersImpure(slice->hi.get());
+    }
+    if (const auto* tern = dynamic_cast<const Ternary*>(expr)) {
+        return lowersImpure(tern->cond.get()) || lowersImpure(tern->then.get()) ||
+               lowersImpure(tern->els.get());
+    }
+    if (const auto* cast = dynamic_cast<const Cast*>(expr)) {
+        return lowersImpure(cast->expr.get());
+    }
+    if (const auto* binary = dynamic_cast<const Binary*>(expr)) {
+        return lowersImpure(binary->lhs.get()) || lowersImpure(binary->rhs.get());
+    }
+    if (const auto* built = dynamic_cast<const NewStruct*>(expr)) {
+        for (const FieldInit& field : built->fields) {
+            if (lowersImpure(field.value.get())) {
+                return true;
+            }
+        }
+        return false;
+    }
+    if (const auto* listed = dynamic_cast<const NewArray*>(expr)) {
+        for (const std::unique_ptr<Expr>& init : listed->inits) {
+            if (lowersImpure(init.get())) {
+                return true;
+            }
+        }
+        return false;
+    }
+    if (dynamic_cast<const Ident*>(expr) != nullptr ||
+        dynamic_cast<const IntLit*>(expr) != nullptr ||
+        dynamic_cast<const FloatLit*>(expr) != nullptr ||
+        dynamic_cast<const CharLit*>(expr) != nullptr ||
+        dynamic_cast<const BoolLit*>(expr) != nullptr ||
+        dynamic_cast<const NilPtr*>(expr) != nullptr ||
+        dynamic_cast<const SizeofType*>(expr) != nullptr) {
+        return false;
+    }
+    return true;
+}
+
+// Whether a failed place lookup may already have lowered an effect: only
+// dereference operands run inside resolvePlace, along the spine it visits
+// (field objects, index arrays — an index is only folded, never
+// lowered). Anything else resolvePlace never visits, so spilling
+// re-lowers it exactly once.
+bool placeMayHaveRun(const Expr* expr) {
+    if (const auto* un = dynamic_cast<const Unary*>(expr)) {
+        if (un->op == UnOp::Deref) {
+            return lowersImpure(un->operand.get());
+        }
+        return placeMayHaveRun(un->operand.get());
+    }
+    if (const auto* field = dynamic_cast<const Field*>(expr)) {
+        return placeMayHaveRun(field->object.get());
+    }
+    if (const auto* index = dynamic_cast<const Index*>(expr)) {
+        return placeMayHaveRun(index->array.get());
+    }
+    return false;
+}
 // An interface answers two words, data then vtable (TYPES.md §4.3): the
 // data word carries the concrete value inline, and the vtable word names
 // the (concrete, interface) table. Word zero is the data, word one the
@@ -1822,10 +1909,11 @@ std::vector<ir::Value> Lowerer::loadRange(Position pos, const Place& place,
                 return {undefined()};
             }
         } else if (fieldKind == Kind::String || fieldKind == Kind::Slice ||
-                   fieldKind == Kind::Closure) {
+                   fieldKind == Kind::Closure || fieldKind == Kind::Interface) {
             // A string is an address word then a length word, a slice a
             // pointer word then a length word, a closure a code word then
-            // a captures word: each full word loads with its own type, the
+            // a captures word, an interface a data word then a vtable
+            // word: each full word loads with its own type, the
             // way a local load types them. A partial take cannot name half
             // a word, so it refuses rather than splits.
             int64_t per = layout::kSizePointer;
@@ -1871,8 +1959,17 @@ std::vector<ir::Value> Lowerer::loadRange(Position pos, const Place& place,
             instr.globalLabel = place.global;
             instr.displacement = cur;
         } else {
-            uint64_t word = static_cast<uint64_t>(cur / layout::kSizePointer);
-            if (disp + take <= layout::kSizePointer) {
+            if (place.isAddress) {
+                // One computed address names every chunk: the address plus
+                // the chunk offset, read the way any non-slot base reads.
+                if (place.slots.empty()) {
+                    refuse(pos, "this field layout is not lowered yet");
+                    return {undefined()};
+                }
+                instr.addressBase = place.slots[kFirstWord];
+                instr.displacement = cur;
+            } else if (disp + take <= layout::kSizePointer) {
+                uint64_t word = static_cast<uint64_t>(cur / layout::kSizePointer);
                 if (word >= place.slots.size()) {
                     refuse(pos, "this field layout is not lowered yet");
                     return {undefined()};
@@ -2038,7 +2135,17 @@ void Lowerer::storeRange(Position pos, const Place& place,
             instr.globalLabel = place.global;
             instr.displacement = cur;
         } else {
-            if (disp + take <= layout::kSizePointer) {
+            if (place.isAddress) {
+                // One computed address names every chunk, like loads: the
+                // address plus the chunk offset, stored the way any
+                // non-slot base stores.
+                if (place.slots.empty()) {
+                    refuse(pos, "this field layout is not lowered yet");
+                    return;
+                }
+                instr.addressBase = place.slots[kFirstWord];
+                instr.displacement = cur;
+            } else if (disp + take <= layout::kSizePointer) {
                 uint64_t word = static_cast<uint64_t>(cur / layout::kSizePointer);
                 if (word >= place.slots.size()) {
                     refuse(pos, "this field layout is not lowered yet");
@@ -5729,10 +5836,15 @@ std::vector<ir::Value> Lowerer::lowerCallWords(Call& n) {
     // `v.hasI()`: the tag compared to the member's index, answered as one
     // boolean word. The checker proved the shape; the member lookup repeats
     // here rather than trusting it, so a checker bug reads as a refusal.
+    // One place lookup serves every Field-callee path below: the lookup
+    // can lower (deref receivers), so running it per path would run
+    // effects once per path instead of once.
+    Place base;
+    bool haveBase = false;
     if (const auto* field = dynamic_cast<const Field*>(n.callee.get())) {
-        Place base;
-        if (resolvePlace(field->object.get(), base) && !base.type.isError() &&
-            base.type.type->kind() == Kind::Union) {
+        haveBase =
+            resolvePlace(field->object.get(), base) && !base.type.isError();
+        if (haveBase && base.type.type->kind() == Kind::Union) {
             std::optional<DeclId> id = base.type.type->decl();
             std::string member =
                 id.has_value() ? resolver_.unionHasMember(*id, field->name) : "";
@@ -5766,8 +5878,7 @@ std::vector<ir::Value> Lowerer::lowerCallWords(Call& n) {
         // is a static call to the mangled name with the object's address
         // first. Disjoint from the union path above: only values with
         // methods reach here.
-        Place base;
-        if (resolvePlace(field->object.get(), base) && !base.type.isError() &&
+        if (haveBase &&
             (base.type.type->kind() == Kind::Class ||
              base.type.type->kind() == Kind::Struct)) {
             std::optional<DeclId> id = base.type.type->decl();
@@ -5821,8 +5932,55 @@ std::vector<ir::Value> Lowerer::lowerCallWords(Call& n) {
         // Disjoint from the class/struct path above: only an interface
         // value reaches here.
         Place iface;
-        if (resolvePlace(field->object.get(), iface) && !iface.type.isError() &&
-            iface.type.type->kind() == Kind::Interface) {
+        TypeRef objType = checker_.typeOf(field->object.get());
+        bool placed = haveBase && base.type.type->kind() == Kind::Interface;
+        if (placed) {
+            iface = base;
+        }
+        if (!placed && !failed_ && !objType.isError() &&
+            objType.type->kind() == Kind::Interface &&
+            !placeMayHaveRun(field->object.get())) {
+            // No direct place (a call answer, a computed index, a
+            // ternary): lower the pair and spill it to temps, then take
+            // the slots path below. Single evaluation: the shapes above
+            // emit nothing inside resolvePlace, so these words are the
+            // value's only lowering — and anything it may already have
+            // run refuses instead of running twice.
+            std::vector<ir::Value> words = lowerWords(field->object.get());
+            if (failed_) {
+                return {undefined()};
+            }
+            if (words.size() != kInterfaceWords) {
+                refuse(n.pos, "this call");
+                return {undefined()};
+            }
+            std::vector<ir::Value> temps = allocaFor(objType, field->object->pos);
+            if (failed_ || temps.size() != words.size()) {
+                if (!failed_) {
+                    refuse(n.pos, "this call");
+                }
+                return {undefined()};
+            }
+            for (uint64_t i = 0; i < static_cast<uint64_t>(words.size()); ++i) {
+                ir::Instr store;
+                store.op = ir::Op::Store;
+                store.loc = field->object->pos;
+                store.type = objType;
+                store.addressBase = temps[i];
+                store.storedValue = words[i];
+                emit(std::move(store));
+            }
+            iface.slots = std::move(temps);
+            iface.global.clear();
+            iface.type = objType;
+            iface.off = 0;
+            iface.isVolatile = false;
+            iface.tagWrites.clear();
+            iface.hasIndirect = false;
+            iface.isAddress = false;
+            placed = true;
+        }
+        if (placed) {
             std::optional<DeclId> ifaceId = iface.type.type->decl();
             const Signature* msig = ifaceId.has_value()
                                         ? resolver_.methodSig(*ifaceId, field->name)

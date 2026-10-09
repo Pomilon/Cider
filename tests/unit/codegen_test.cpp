@@ -1060,6 +1060,34 @@ void testInterfaceField() {
           "an interface field dispatches at its offset");
 }
 
+void testInterfaceDynIndex() {
+    std::printf("interface dynamic index dispatches\n");
+    bool sig = false;
+    check(runCode("interface Shape {\n"
+                  "    func area() -> int;\n"
+                  "}\n"
+                  "struct Sq {\n"
+                  "    var s: int;\n"
+                  "    func area() -> int { return (*self).s; }\n"
+                  "}\n"
+                  "struct Rect {\n"
+                  "    var w: int;\n"
+                  "    var h: int;\n"
+                  "    func area() -> int { return (*self).w * (*self).h; }\n"
+                  "}\n"
+                  "func pick(arr: [Shape; 2], k: int) -> int {\n"
+                  "    return arr[k].area();\n"
+                  "}\n"
+                  "func main() -> int {\n"
+                  "    var a: Sq = new Sq { s: 9 };\n"
+                  "    var b: Rect = new Rect { w: 3, h: 4 };\n"
+                  "    var arr: [Shape; 2] = new [Shape; 2] { a, b };\n"
+                  "    return pick(arr, 0) + pick(arr, 1);\n"
+                  "}\n",
+                  sig) == 21 && !sig,
+          "a computed element dispatches through its own vtable");
+}
+
 // The same module emitted twice is byte-identical, and carries no build path.
 void testMultiWordReturn() {
     std::printf("multi-word returns\n");
@@ -1376,6 +1404,7 @@ int main() {
     testInterface();
     testInterfaceClass();
     testInterfaceField();
+    testInterfaceDynIndex();
     testShortCircuit();
     testBoolCompare();
     testCharCompare();
