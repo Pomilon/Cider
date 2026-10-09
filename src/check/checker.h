@@ -238,6 +238,24 @@ private:
     TypeRef checkTernary(Ternary& expr, TypeRef expected);
     void checkMethods(DeclId id, Kind kind, std::vector<MethodDecl>& methods);
     void checkCtor(DeclId id, Kind kind, FuncDecl* ctor, bool isInit);
+    // TYPES.md §9 definite assignment for init bodies: the fields assigned
+    // on every path through a statement. Straight lines accumulate
+    // `(*self).f = ...`; branches intersect arms; loops contribute nothing
+    // (they may run zero times); anything opaque — calls, non-self-field
+    // stores, inline asm, closures relied on through calls — bails the
+    // whole check (status quo, never a false positive). Pure syntax, no
+    // walk state, so check and lowering modes share it.
+    struct InitAssign {
+        std::unordered_set<std::string> assigned;
+        bool bailed = false;
+    };
+    InitAssign assignedThrough(const Stmt* stmt, InitAssign state,
+                               const std::vector<std::string>& fields);
+    bool initExprOpaque(const Expr* expr);
+    bool isSelfFieldStore(const Expr* target, std::string& field);
+    void requireInitAssigned(Position pos, const std::vector<std::string>& fields,
+                             const InitAssign& state);
+    void checkInitAssign(DeclId id, const FuncDecl& ctor);
     void bindPattern(Pattern& pat, TypeRef scrutinee);
     void bindSubPattern(Pattern& pat, TypeRef type);
     // Match validation (FEATURES §8.4): a pattern Name that resolves to a

@@ -176,6 +176,33 @@ void testThrowRefused() {
     check(!tr.ok && tr.stage == "check", "try refuses until transport lands");
 }
 
+void testInitAssign() {
+    std::printf("init assigns every field\n");
+    Checked gap = check(
+        "class C { var x: int; var y: int;\n"
+        "    func init(v: int) -> void { (*self).x = v; } }\n"
+        "func main() -> int { return 0; }\n");
+    check(!gap.ok && gap.stage == "check", "an init leaving a field unassigned fails");
+    Checked whole = check(
+        "class C { var x: int; var y: int;\n"
+        "    func init(v: int) -> void { (*self).x = v; (*self).y = v; } }\n"
+        "func main() -> int { return 0; }\n");
+    check(whole.ok, "a full init checks: " + whole.stage);
+    Checked branch = check(
+        "class C { var x: int; var y: int;\n"
+        "    func init(v: int) -> void {\n"
+        "        if (v > 0) { (*self).x = v; } else { (*self).x = 0; }\n"
+        "        (*self).y = v; } }\n"
+        "func main() -> int { return 0; }\n");
+    check(branch.ok, "branches assigning every path check: " + branch.stage);
+    Checked half = check(
+        "class C { var x: int; var y: int;\n"
+        "    func init(v: int) -> void {\n"
+        "        if (v > 0) { (*self).x = v; (*self).y = v; } } }\n"
+        "func main() -> int { return 0; }\n");
+    check(!half.ok && half.stage == "check", "a half-assigned branch fails");
+}
+
 void testLoopMatchRefused() {
     std::printf("unimplemented control flow refuses loudly\n");
     // Lowering landed for `for` (FEAT-042), so the pure-check path accepts it.
@@ -713,6 +740,7 @@ int main() {
     testFuncLitChecks();
     testControl();
     testThrowRefused();
+    testInitAssign();
     testLoopMatchRefused();
     std::printf("\n%d checks, %s\n", checks, failures == 0 ? "all passed" : "FAILURES");
     return failures == 0 ? 0 : 1;

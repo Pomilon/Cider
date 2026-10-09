@@ -511,6 +511,294 @@ void Checker::checkCtor(DeclId id, Kind kind, FuncDecl* ctor, bool isInit) {
     }
     popScope();
     (void)saved;
+    if (isInit && sig != nullptr) {
+        checkInitAssign(id, *ctor);
+    }
+}
+
+bool Checker::initExprOpaque(const Expr* expr) {
+    if (expr == nullptr) {
+        return false;
+    }
+    // Anything that can run or reach beyond the statement: calls (a callee
+    // holding self could assign), construction that runs init, closures
+    // (assigned through only when called, which is itself a call), and
+    // anything unlisted (fail-closed). Reads, names and literals are
+    // transparent; stores are judged at the statement that owns them.
+    if (dynamic_cast<const Call*>(expr) != nullptr ||
+        dynamic_cast<const NewClass*>(expr) != nullptr ||
+        dynamic_cast<const FuncLit*>(expr) != nullptr) {
+        return true;
+    }
+    if (const auto* un = dynamic_cast<const Unary*>(expr)) {
+        return initExprOpaque(un->operand.get());
+    }
+    if (const auto* field = dynamic_cast<const Field*>(expr)) {
+        return initExprOpaque(field->object.get());
+    }
+    if (const auto* index = dynamic_cast<const Index*>(expr)) {
+        return initExprOpaque(index->array.get()) || initExprOpaque(index->index.get());
+    }
+    if (const auto* slice = dynamic_cast<const SliceExpr*>(expr)) {
+        return initExprOpaque(slice->array.get()) || initExprOpaque(slice->lo.get()) ||
+               initExprOpaque(slice->hi.get());
+    }
+    if (const auto* tern = dynamic_cast<const Ternary*>(expr)) {
+        return initExprOpaque(tern->cond.get()) || initExprOpaque(tern->then.get()) ||
+               initExprOpaque(tern->els.get());
+    }
+    if (const auto* cast = dynamic_cast<const Cast*>(expr)) {
+        return initExprOpaque(cast->expr.get());
+    }
+    if (const auto* binary = dynamic_cast<const Binary*>(expr)) {
+        return initExprOpaque(binary->lhs.get()) || initExprOpaque(binary->rhs.get());
+    }
+    if (dynamic_cast<const IncrDecr*>(expr) != nullptr) {
+        // A nested step bails: only a statement-level `(*self).f++`
+        // counts, and anything else relying on one is too tangled to
+        // credit without risking a wrongful rejection.
+        return true;
+    }
+    if (dynamic_cast<const Assign*>(expr) != nullptr) {
+        // Same for a nested assignment: the statement walker credits
+        // only top-level self-field stores.
+        return true;
+    }
+    if (const auto* built = dynamic_cast<const NewStruct*>(expr)) {
+        for (const FieldInit& field : built->fields) {
+            if (initExprOpaque(field.value.get())) {
+                return true;
+            }
+        }
+        return false;
+    }
+    if (const auto* listed = dynamic_cast<const NewArray*>(expr)) {
+        if (initExprOpaque(listed->length.get())) {
+            return true;
+        }
+        for (const std::unique_ptr<Expr>& init : listed->inits) {
+            if (initExprOpaque(init.get())) {
+                return true;
+            }
+        }
+        return false;
+    }
+    if (const auto* lit = dynamic_cast<const StringLit*>(expr)) {
+        // Interpolated parts evaluate: a call hiding in one bails like
+        // any other call.
+        for (const auto& part : lit->parts) {
+            if (part.isExpr && initExprOpaque(part.expr.get())) {
+                return true;
+            }
+        }
+        return false;
+    }
+    if (dynamic_cast<const Ident*>(expr) != nullptr ||
+        dynamic_cast<const IntLit*>(expr) != nullptr ||
+        dynamic_cast<const FloatLit*>(expr) != nullptr ||
+        dynamic_cast<const CharLit*>(expr) != nullptr ||
+        dynamic_cast<const BoolLit*>(expr) != nullptr ||
+        dynamic_cast<const NilPtr*>(expr) != nullptr ||
+        dynamic_cast<const SizeofType*>(expr) != nullptr) {
+        return false;
+    }
+    return true;
+}
+
+bool Checker::isSelfFieldStore(const Expr* target, std::string& field) {
+    // `(*self).f`: the only store the analysis credits. checkCtor binds
+    // `self` after the parameters, so the name always means the object
+    // under construction here.
+    const auto* into = dynamic_cast<const Field*>(target);
+    if (into == nullptr) {
+        return false;
+    }
+    const auto* deref = dynamic_cast<const Unary*>(into->object.get());
+    if (deref == nullptr || deref->op != UnOp::Deref) {
+        return false;
+    }
+    const auto* self = dynamic_cast<const Ident*>(deref->operand.get());
+    if (self == nullptr || self->name != "self") {
+        return false;
+    }
+    field = into->name;
+    return true;
+}
+
+void Checker::requireInitAssigned(Position pos, const std::vector<std::string>& fields,
+                                  const InitAssign& state) {
+    if (state.bailed) {
+        return;
+    }
+    for (const std::string& field : fields) {
+        if (state.assigned.find(field) == state.assigned.end()) {
+            fail(pos, "init does not assign '" + field + "'");
+            return;
+        }
+    }
+}
+
+Checker::InitAssign Checker::assignedThrough(const Stmt* stmt, InitAssign state,
+                                             const std::vector<std::string>& fields) {
+    if (stmt == nullptr) {
+        return state;
+    }
+    if (const auto* block = dynamic_cast<const Block*>(stmt)) {
+        for (const std::unique_ptr<Stmt>& s : block->stmts) {
+            state = assignedThrough(s.get(), state, fields);
+        }
+        return state;
+    }
+    if (const auto* expr = dynamic_cast<const ExprStmt*>(stmt)) {
+        if (const auto* assign = dynamic_cast<const Assign*>(expr->expr.get())) {
+            std::string field;
+            if (isSelfFieldStore(assign->target.get(), field)) {
+                state.assigned.insert(field);
+                if (initExprOpaque(assign->value.get())) {
+                    state.bailed = true;
+                }
+                return state;
+            }
+            state.bailed = true;
+            return state;
+        }
+        if (const auto* step = dynamic_cast<const IncrDecr*>(expr->expr.get())) {
+            std::string field;
+            if (isSelfFieldStore(step->operand.get(), field)) {
+                state.assigned.insert(field);
+                return state;
+            }
+            state.bailed = true;
+            return state;
+        }
+        if (initExprOpaque(expr->expr.get())) {
+            state.bailed = true;
+        }
+        return state;
+    }
+    if (const auto* decl = dynamic_cast<const VarDecl*>(stmt)) {
+        if (decl->init != nullptr && initExprOpaque(decl->init.get())) {
+            state.bailed = true;
+        }
+        return state;
+    }
+    if (const auto* iff = dynamic_cast<const IfStmt*>(stmt)) {
+        if (initExprOpaque(iff->cond.get())) {
+            state.bailed = true;
+        }
+        InitAssign thenState = assignedThrough(iff->then.get(), state, fields);
+        if (iff->els == nullptr) {
+            // No else: the skipped path assigns nothing, so only the
+            // entry set survives — but anything the arm ran still bails.
+            thenState.assigned = state.assigned;
+            return thenState;
+        }
+        InitAssign elseState = assignedThrough(iff->els.get(), state, fields);
+        InitAssign joined;
+        joined.bailed = thenState.bailed || elseState.bailed;
+        for (const std::string& field : thenState.assigned) {
+            if (elseState.assigned.find(field) != elseState.assigned.end()) {
+                joined.assigned.insert(field);
+            }
+        }
+        return joined;
+    }
+    if (const auto* loop = dynamic_cast<const WhileStmt*>(stmt)) {
+        if (initExprOpaque(loop->cond.get())) {
+            state.bailed = true;
+        }
+        InitAssign body = assignedThrough(loop->body.get(), state, fields);
+        // A loop may run zero times, so its adds never stand — but its
+        // returns were already checked and its effects still bail.
+        state.bailed = body.bailed;
+        return state;
+    }
+    if (const auto* loop = dynamic_cast<const ForStmt*>(stmt)) {
+        InitAssign head = state;
+        if (loop->init != nullptr) {
+            head = assignedThrough(loop->init.get(), head, fields);
+        }
+        if (loop->cond != nullptr && initExprOpaque(loop->cond.get())) {
+            head.bailed = true;
+        }
+        if (loop->step != nullptr && initExprOpaque(loop->step.get())) {
+            head.bailed = true;
+        }
+        InitAssign body = assignedThrough(loop->body.get(), head, fields);
+        head.bailed = body.bailed;
+        return head;
+    }
+    if (const auto* loop = dynamic_cast<const ForInStmt*>(stmt)) {
+        if (initExprOpaque(loop->seq.get())) {
+            state.bailed = true;
+        }
+        InitAssign body = assignedThrough(loop->body.get(), state, fields);
+        state.bailed = body.bailed;
+        return state;
+    }
+    if (const auto* match = dynamic_cast<const MatchStmt*>(stmt)) {
+        if (initExprOpaque(match->scrutinee.get())) {
+            state.bailed = true;
+        }
+        bool first = true;
+        InitAssign joined = state;
+        for (const std::unique_ptr<MatchArm>& arm : match->arms) {
+            InitAssign one = assignedThrough(arm->body.get(), state, fields);
+            if (first) {
+                joined = one;
+                first = false;
+            } else {
+                InitAssign narrower;
+                narrower.bailed = joined.bailed || one.bailed;
+                for (const std::string& field : joined.assigned) {
+                    if (one.assigned.find(field) != one.assigned.end()) {
+                        narrower.assigned.insert(field);
+                    }
+                }
+                joined = narrower;
+            }
+        }
+        if (match->fallback != nullptr) {
+            InitAssign last = assignedThrough(match->fallback.get(), state, fields);
+            InitAssign narrower;
+            narrower.bailed = joined.bailed || last.bailed;
+            for (const std::string& field : joined.assigned) {
+                if (last.assigned.find(field) != last.assigned.end()) {
+                    narrower.assigned.insert(field);
+                }
+            }
+            joined = narrower;
+        }
+        return joined;
+    }
+    if (const auto* ret = dynamic_cast<const Return*>(stmt)) {
+        // A path reaching a return with a field unassigned is rejected
+        // naming the field (TYPES.md §9.2); the set itself is unchanged.
+        requireInitAssigned(ret->pos, fields, state);
+        return state;
+    }
+    if (dynamic_cast<const Break*>(stmt) != nullptr ||
+        dynamic_cast<const Continue*>(stmt) != nullptr) {
+        return state;
+    }
+    // Anything else (delete, asm, throw, try, defer, unknown) bails: it
+    // may reach beyond the statement in ways syntax cannot show.
+    state.bailed = true;
+    return state;
+}
+
+void Checker::checkInitAssign(DeclId id, const FuncDecl& ctor) {
+    // TYPES.md §9.2: a path through init that reaches the end, or reaches
+    // a return, having left a field unassigned is a compile-time rejection
+    // naming the field. Runs over the body independent of the checking
+    // walk, so check and lowering modes share one analysis.
+    std::vector<std::string> fields = resolver_.fieldNames(id);
+    if (ctor.body == nullptr) {
+        return;
+    }
+    InitAssign state;
+    state = assignedThrough(ctor.body.get(), state, fields);
+    requireInitAssigned(ctor.body->pos, fields, state);
 }
 
 void Checker::checkMethods(DeclId id, Kind kind, std::vector<MethodDecl>& methods) {
