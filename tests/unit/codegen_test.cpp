@@ -1063,6 +1063,30 @@ void testTernary() {
                    "    return a + id(v > 0 ? 10 : 20);\n"
                    "}\n") == 18,
           "a ternary answers in scalar position");
+    // A ternary as a statement runs one void arm for effect: the
+    // statement path must reach the ternary, not only value positions.
+    check(runQuiet("func setFlag(p: *bool, v: bool) -> void { *p = v; return; }\n"
+                   "func main() -> int {\n"
+                   "    var flag: bool = false;\n"
+                   "    true ? setFlag(&flag, true) : setFlag(&flag, false);\n"
+                   "    if (flag) { return 1; }\n"
+                   "    return 0;\n"
+                   "}\n") == 1,
+          "a statement ternary runs the taken arm");
+    check(runQuiet("func setFlag(p: *bool, v: bool) -> void { *p = v; return; }\n"
+                   "func main() -> int {\n"
+                   "    var flag: bool = true;\n"
+                   "    false ? setFlag(&flag, true) : setFlag(&flag, false);\n"
+                   "    if (flag) { return 1; }\n"
+                   "    return 0;\n"
+                   "}\n") == 0,
+          "a statement ternary skips the untaken arm");
+    // A non-void ternary as a statement lowers and discards the answer.
+    check(runQuiet("func main() -> int {\n"
+                   "    true ? 1 : 2;\n"
+                   "    return 7;\n"
+                   "}\n") == 7,
+          "a discarded ternary answer still lowers");
 }
 
 // A function pointer calls its target; a nil one dies by hardware trap.

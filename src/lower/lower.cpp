@@ -5140,6 +5140,13 @@ void Lowerer::onExprStmt(ExprStmt& n) {
         lowerCallWords(const_cast<Call&>(*call));
         return;
     }
+    // A ternary statement runs one arm for effect and discards the answer:
+    // the scalar dispatcher below demands exactly one word, which refuses
+    // a void ternary the checker accepted.
+    if (auto* tern = dynamic_cast<const Ternary*>(n.expr.get())) {
+        lowerTernary(*tern);
+        return;
+    }
     onIdentOrExpr(n.expr.get(), checker_.typeOf(n.expr.get()));
 }
 
@@ -5928,7 +5935,13 @@ std::vector<ir::Value> Lowerer::lowerTernary(const Ternary& n) {
         refuse(n.pos, "this expression");
         return {undefined()};
     }
-    int words = wordCount(result);
+    // Void answers no words: wordCount has no void arm (it answers -1 for
+    // unknown layouts), so the void case stays explicit here rather than
+    // widening the shared count and its other callers.
+    int words = 0;
+    if (result.type->kind() != Kind::Void) {
+        words = wordCount(result);
+    }
     if (words < 0) {
         refuse(n.pos, "this expression");
         return {undefined()};
