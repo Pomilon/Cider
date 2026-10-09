@@ -764,6 +764,31 @@ void testBoolCompare() {
           "negation and equality agree");
 }
 
+void testNotInCondition() {
+    std::printf("bang-not in branch conditions runs\n");
+    // CIDER-BUG-275: `if (!b)` segfaulted the driver (rc=135, SIGBUS)
+    // while value-position `!b` refused cleanly. Both arms of the ticket
+    // repro must run, plus the while-condition shape.
+    check(runQuiet("func main() -> int {\n"
+                   "    var b: bool = true;\n"
+                   "    if (!b) { return 1; }\n"
+                   "    return 2;\n"
+                   "}\n") == 2,
+          "negated-true takes the else arm");
+    check(runQuiet("func main() -> int {\n"
+                   "    var b: bool = false;\n"
+                   "    if (!b) { return 1; }\n"
+                   "    return 2;\n"
+                   "}\n") == 1,
+          "negated-false takes the then arm");
+    check(runQuiet("func main() -> int {\n"
+                   "    var b: bool = false;\n"
+                   "    while (!b) { return 7; }\n"
+                   "    return 2;\n"
+                   "}\n") == 7,
+          "negated-false enters the loop");
+}
+
 void testCharCompare() {
     std::printf("char equality runs\n");
     check(runQuiet("func main() -> int {\n"
@@ -1604,6 +1629,7 @@ int main() {
     testStringAdd();
     testShortCircuit();
     testBoolCompare();
+    testNotInCondition();
     testCharCompare();
     testStringCompare();
     testMatch();
