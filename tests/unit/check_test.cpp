@@ -538,7 +538,83 @@ void testMatch() {
         "    var p: P = new P { x: 1 };\n"
         "    match (p) { P { x: x } => { return x; } default => { return 0; } }\n"
         "}\n");
-    check(!typePat.ok && typePat.stage == "check", "a type pattern is refused");
+    check(typePat.ok, "a type pattern binds its fields: " + typePat.stage);
+    Checked typeConst = check(
+        "struct P { var x: int; var y: int; }\n"
+        "func main() -> int {\n"
+        "    var p: P = new P { x: 1, y: 2 };\n"
+        "    match (p) { P { x: 1, y: 2 } => { return 10; } default => { return 0; } }\n"
+        "}\n");
+    check(typeConst.ok, "a struct pattern with constants checks: " + typeConst.stage);
+    Checked typeBind = check(
+        "struct P { var x: int; var y: int; }\n"
+        "func main() -> int {\n"
+        "    var p: P = new P { x: 1, y: 2 };\n"
+        "    match (p) { P { x: a, y: _ } => { return a; } default => { return 0; } }\n"
+        "}\n");
+    check(typeBind.ok, "a struct pattern binds fields: " + typeBind.stage);
+    Checked typePartial = check(
+        "struct P { var x: int; var y: int; }\n"
+        "func main() -> int {\n"
+        "    var p: P = new P { x: 1, y: 2 };\n"
+        "    match (p) { P { x: 1 } => { return 10; } default => { return 0; } }\n"
+        "}\n");
+    check(!typePartial.ok && typePartial.stage == "check",
+          "a struct pattern must list every field");
+    Checked typeNoField = check(
+        "struct P { var x: int; }\n"
+        "func main() -> int {\n"
+        "    var p: P = new P { x: 1 };\n"
+        "    match (p) { P { z: 1 } => { return 10; } default => { return 0; } }\n"
+        "}\n");
+    check(!typeNoField.ok && typeNoField.stage == "check",
+          "an unknown field in a pattern fails");
+    Checked typeNoType = check(
+        "struct P { var x: int; }\n"
+        "func main() -> int {\n"
+        "    var p: P = new P { x: 1 };\n"
+        "    match (p) { Q { x: 1 } => { return 10; } default => { return 0; } }\n"
+        "}\n");
+    check(!typeNoType.ok && typeNoType.stage == "check",
+          "an unknown type in a pattern fails");
+    Checked typeDead = check(
+        "struct P { var x: int; }\n"
+        "struct Q { var x: int; }\n"
+        "func main() -> int {\n"
+        "    var p: P = new P { x: 1 };\n"
+        "    match (p) { Q { x: 1 } => { return 10; } default => { return 0; } }\n"
+        "}\n");
+    check(typeDead.ok, "a pattern for another struct is dead, not an error");
+    Checked memberPat = check(
+        "union U { var a: int; var b: bool; }\n"
+        "func main() -> int {\n"
+        "    var u: U = new U { a: 7 };\n"
+        "    match (u) { U.a => { return 1; } default => { return 0; } }\n"
+        "}\n");
+    check(memberPat.ok, "a union member pattern checks: " + memberPat.stage);
+    Checked memberNoMember = check(
+        "union U { var a: int; }\n"
+        "func main() -> int {\n"
+        "    var u: U = new U { a: 7 };\n"
+        "    match (u) { U.z => { return 1; } default => { return 0; } }\n"
+        "}\n");
+    check(!memberNoMember.ok && memberNoMember.stage == "check",
+          "an unknown union member in a pattern fails");
+    Checked emptyPat = check(
+        "struct E {}\n"
+        "func main() -> int {\n"
+        "    var e: E = new E {};\n"
+        "    match (e) { E {} => { return 5; } default => { return 0; } }\n"
+        "}\n");
+    check(emptyPat.ok, "an empty struct takes an empty pattern: " + emptyPat.stage);
+    Checked emptyNonEmpty = check(
+        "struct P { var x: int; }\n"
+        "func main() -> int {\n"
+        "    var p: P = new P { x: 1 };\n"
+        "    match (p) { P {} => { return 5; } default => { return 0; } }\n"
+        "}\n");
+    check(!emptyNonEmpty.ok && emptyNonEmpty.stage == "check",
+          "an empty pattern on a non-empty struct fails");
     Checked inLoop = check(
         "func main() -> int {\n"
         "    var i: int = 0;\n"

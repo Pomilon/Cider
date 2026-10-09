@@ -304,6 +304,41 @@ public:
     std::vector<ir::Value> loadRange(Position pos, const Place& place, TypeRef fieldType);
     void storeRange(Position pos, const Place& place,
                     const std::vector<ir::Value>& words, TypeRef fieldType);
+    // A field a struct arm binds: name, type, and byte offset from the
+    // match's spill base. Tests record them; bodies materialize them.
+    struct MatchFieldBind {
+        std::string name;
+        TypeRef type;
+        int64_t off;
+    };
+    // True when a live arm reads the scrutinee by address (a struct or
+    // union pattern): bare values cannot answer field or tag tests.
+    bool matchNeedsSpill(const MatchStmt& n);
+    // A bound name's words for a value comparison (locals, then globals,
+    // then constants — the checker's resolveMatchValue order). Answers
+    // false with no failure when the name binds fresh instead.
+    bool matchBoundWords(const std::string& name, std::vector<ir::Value>& words,
+                         Position pos);
+    // One arm's test chain over the spill base: control reaches `body`
+    // only when every comparison holds, else `next`. Answers false after
+    // refusing. Struct fields recurse per field; member arms read the tag.
+    bool lowerMatchArmTest(const Pattern& pat, const Place& base, uint32_t body,
+                           uint32_t next, Position pos,
+                           std::vector<MatchFieldBind>& binds);
+    // One field's comparisons at its place: `pass` when all hold, `miss`
+    // on the first failure. Struct and member sub-patterns recurse above.
+    bool lowerMatchFieldTest(const Pattern& sub, const Place& at, uint32_t pass,
+                             uint32_t miss, Position pos,
+                             std::vector<MatchFieldBind>& binds);
+    // A constant against already-loaded words of its type: strings by
+    // content, nil against null, the rest by fold plus a first-word
+    // comparison. Branches taken/missed; refuses what cannot compare.
+    bool lowerMatchConstTest(const Expr* value, const std::vector<ir::Value>& words,
+                             uint32_t taken, uint32_t missed, Position pos);
+    // The test chains' edges: unconditional and conditional, sealing the
+    // block they leave like every other emitter.
+    void matchBrTo(uint32_t target, Position pos);
+    void matchCondTo(ir::Value cond, uint32_t taken, uint32_t missed, Position pos);
     // Construction into given slots, field by field (element by element). A
     // nested value lands word-aligned or is refused: unaligned multi-word
     // copies guess neighbor bytes.

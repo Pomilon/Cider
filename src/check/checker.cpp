@@ -1661,11 +1661,116 @@ bool Checker::checkMatchPattern(const Pattern& pat, TypeRef scrutinee) {
         case PatternKind::Const:
             return checkMatchConst(pat, scrutinee);
         case PatternKind::Type:
+            return checkMatchType(pat, scrutinee);
         case PatternKind::Member:
-            fail(pat.pos, "this pattern is not supported yet");
-            return false;
+            return checkMatchMember(pat, scrutinee);
     }
     return false;
+}
+
+bool Checker::checkMatchType(const Pattern& pat, TypeRef scrutinee) {
+    // A struct pattern names its type and lists every field (FEATURES
+    // §8.4): a missing field is a rejection, never a silent don't-care.
+    // A pattern for another type is dead, not wrong — it compiles and
+    // never matches — except over an interface, where the boxed value
+    // could hold the named struct at runtime and only a dynamic check
+    // could answer: refusing stays honest until that check lands.
+    TypeRef t = resolveHere(pat.type.get());
+    if (t.isError()) {
+        return false;
+    }
+    if (t.type->kind() != Kind::Struct) {
+        fail(pat.pos, "this pattern needs a struct type");
+        return false;
+    }
+    std::optional<DeclId> id = t.type->decl();
+    if (!id.has_value()) {
+        fail(pat.pos, "this pattern needs a struct type");
+        return false;
+    }
+    std::unordered_set<std::string> listed;
+    for (const FieldPat& field : pat.fields) {
+        if (!listed.insert(field.name).second) {
+            fail(field.pat->pos, "a struct pattern lists a field twice");
+            return false;
+        }
+        if (resolver_.fieldType(*id, field.name).isError()) {
+            fail(field.pat->pos, "no such field");
+            return false;
+        }
+    }
+    for (const std::string& name : resolver_.fieldNames(*id)) {
+        if (listed.count(name) == 0) {
+            fail(pat.pos, "a struct pattern lists every field");
+            return false;
+        }
+    }
+    if (scrutinee.type->kind() == Kind::Interface) {
+        fail(pat.pos, "this pattern is not supported yet");
+        return false;
+    }
+    bool same = false;
+    if (scrutinee.type->kind() == Kind::Struct) {
+        std::optional<DeclId> sid = scrutinee.type->decl();
+        same = sid.has_value() && sameDecl(*sid, *id);
+    }
+    if (!same) {
+        deadPatterns_.insert(&pat);
+    }
+    // Every field still classifies against its own type, so a constant
+    // of the wrong shape dies the same death a top-level one would —
+    // and a dead field sinks the whole arm with it.
+    bool ok = true;
+    for (const FieldPat& field : pat.fields) {
+        TypeRef member = resolver_.fieldType(*id, field.name);
+        if (member.isError() || !checkMatchPattern(*field.pat, member)) {
+            ok = false;
+            continue;
+        }
+        if (isDeadPattern(field.pat.get())) {
+            deadPatterns_.insert(&pat);
+        }
+    }
+    return ok;
+}
+
+bool Checker::checkMatchMember(const Pattern& pat, TypeRef scrutinee) {
+    // A member pattern names the live union member (FEATURES §8.4): the
+    // tag answers at runtime, so only the same union stays live. Any
+    // other shape can never hold that tag and dies; an interface could
+    // box the union, which still needs its dynamic check to land.
+    auto tagSpelling = std::make_unique<NamedType>(
+        pat.pos, "", pat.tag, std::vector<std::unique_ptr<TypeExpr>>{});
+    TypeRef t = resolveHere(tagSpelling.get());
+    if (t.isError()) {
+        return false;
+    }
+    if (t.type->kind() != Kind::Union) {
+        fail(pat.pos, "this pattern needs a union type");
+        return false;
+    }
+    std::optional<DeclId> id = t.type->decl();
+    if (!id.has_value()) {
+        fail(pat.pos, "this pattern needs a union type");
+        return false;
+    }
+    if (resolver_.fieldType(*id, pat.member).isError()) {
+        fail(pat.pos, "no such member");
+        return false;
+    }
+    if (scrutinee.type->kind() == Kind::Interface) {
+        fail(pat.pos, "this pattern is not supported yet");
+        return false;
+    }
+    bool same = false;
+    if (scrutinee.type->kind() == Kind::Union) {
+        std::optional<DeclId> sid = scrutinee.type->decl();
+        same = sid.has_value() && sameDecl(*sid, *id);
+    }
+    if (!same) {
+        deadPatterns_.insert(&pat);
+    }
+    return true;
 }
 
 bool Checker::isDeadPattern(const Pattern* pat) const {
@@ -1673,12 +1778,9 @@ bool Checker::isDeadPattern(const Pattern* pat) const {
 }
 
 void Checker::bindMatchFresh(const Pattern& pat, TypeRef scrutinee) {
-    if (pat.kind != PatternKind::Bind) {
-        return;
-    }
-    TypeRef bound = errorRef();
-    if (!resolveMatchValue(pat.name, bound)) {
-        bindLocal(pat.name, scrutinee, false, pat.pos);
+    if (pat.kind == PatternKind::Bind || pat.kind == PatternKind::Type ||
+        pat.kind == PatternKind::Member) {
+        bindPattern(pat, scrutinee);
     }
 }
 
@@ -1747,9 +1849,14 @@ void Checker::visitDeferStmt(DeferStmt& n) {
     fail(n.pos, "defer is not implemented yet");
 }
 
-void Checker::bindPattern(Pattern& pat, TypeRef scrutinee) {
+void Checker::bindPattern(const Pattern& pat, TypeRef scrutinee) {
+    // Silent by design: checkMatchPattern already reported every shape
+    // problem, so binding only introduces names, never a second error.
     if (pat.kind == PatternKind::Bind) {
-        bindLocal(pat.name, scrutinee, false, pat.pos);
+        TypeRef bound = errorRef();
+        if (!resolveMatchValue(pat.name, bound)) {
+            bindLocal(pat.name, scrutinee, false, pat.pos);
+        }
         return;
     }
     if (pat.kind == PatternKind::Type) {
@@ -1761,10 +1868,9 @@ void Checker::bindPattern(Pattern& pat, TypeRef scrutinee) {
         if (!id.has_value()) {
             return;
         }
-        for (FieldPat& field : pat.fields) {
+        for (const FieldPat& field : pat.fields) {
             TypeRef member = resolver_.fieldType(*id, field.name);
             if (member.isError()) {
-                fail(field.pat->pos, "no such field");
                 continue;
             }
             bindSubPattern(*field.pat, member);
@@ -1783,15 +1889,21 @@ void Checker::bindPattern(Pattern& pat, TypeRef scrutinee) {
             return;
         }
         if (resolver_.fieldType(*id, pat.member).isError()) {
-            fail(pat.pos, "no such member");
+            return;
         }
         return;
     }
 }
 
-void Checker::bindSubPattern(Pattern& pat, TypeRef type) {
+void Checker::bindSubPattern(const Pattern& pat, TypeRef type) {
     if (pat.kind == PatternKind::Bind) {
-        bindLocal(pat.name, type, false, pat.pos);
+        // The Erlang rule, one level down: a name already in scope
+        // compares by value (checkMatchPattern proved it comparable or
+        // marked the arm dead); only an unresolvable name binds fresh.
+        TypeRef bound = errorRef();
+        if (!resolveMatchValue(pat.name, bound)) {
+            bindLocal(pat.name, type, false, pat.pos);
+        }
         return;
     }
     if (pat.kind == PatternKind::Type) {
@@ -1803,10 +1915,9 @@ void Checker::bindSubPattern(Pattern& pat, TypeRef type) {
         if (!id.has_value()) {
             return;
         }
-        for (FieldPat& field : pat.fields) {
+        for (const FieldPat& field : pat.fields) {
             TypeRef member = resolver_.fieldType(*id, field.name);
             if (member.isError()) {
-                fail(field.pat->pos, "no such field");
                 continue;
             }
             bindSubPattern(*field.pat, member);

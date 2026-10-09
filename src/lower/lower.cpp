@@ -6821,6 +6821,262 @@ void Lowerer::onIf(IfStmt& n) {
     startBlock(joinLabel);
 }
 
+bool Lowerer::matchNeedsSpill(const MatchStmt& n) {
+    for (const auto& arm : n.arms) {
+        const Pattern& pat = *arm->pattern;
+        if (checker_.isDeadPattern(&pat)) {
+            continue;
+        }
+        if (pat.kind == PatternKind::Type || pat.kind == PatternKind::Member) {
+            return true;
+        }
+    }
+    return false;
+}
+
+bool Lowerer::matchBoundWords(const std::string& name, std::vector<ir::Value>& words,
+                              Position pos) {
+    for (auto frame = locals_.rbegin(); frame != locals_.rend(); ++frame) {
+        auto found = frame->find(name);
+        if (found != frame->end()) {
+            words = loadLocal(pos, found->second);
+            return !failed_;
+        }
+    }
+    if (const GlobalBinding* global = findGlobal(name)) {
+        words = loadGlobal(pos, *global);
+        return !failed_;
+    }
+    const resolve::Scope* here = resolver_.scopeOf(checker_.module());
+    const resolve::Decl* decl =
+        here != nullptr ? resolver_.lookup(here, name) : nullptr;
+    if (decl != nullptr &&
+        (decl->kind == resolve::DeclKind::Var ||
+         decl->kind == resolve::DeclKind::Const)) {
+        // A variable global always lands in globals_ first; missing it
+        // here is a lowering gap, not a fresh name. A constant folds, or
+        // refuses loudly when it has no integer value.
+        if (decl->kind == resolve::DeclKind::Var) {
+            refuse(pos, "this pattern");
+            return false;
+        }
+        Ident probe(pos, name);
+        int64_t folded = 0;
+        if (!foldBound(&probe, folded)) {
+            refuse(pos, "this pattern");
+            return false;
+        }
+        TypeRef word{ctx_.basic(BasicKind::I64)};
+        words = {constantI64(folded, word, pos)};
+        return !failed_;
+    }
+    return false;
+}
+
+void Lowerer::matchBrTo(uint32_t target, Position pos) {
+    ir::Terminator term;
+    term.term = ir::Term::Br;
+    term.target = target;
+    term.loc = pos;
+    emitTerminator(term);
+    sealBlock(current_);
+}
+
+void Lowerer::matchCondTo(ir::Value cond, uint32_t taken, uint32_t missed, Position pos) {
+    ir::Terminator br;
+    br.term = ir::Term::CondBr;
+    br.cond = cond;
+    br.thenTarget = taken;
+    br.elseTarget = missed;
+    br.loc = pos;
+    emitTerminator(br);
+    sealBlock(current_);
+}
+
+bool Lowerer::lowerMatchConstTest(const Expr* value,
+                                 const std::vector<ir::Value>& words,
+                                 uint32_t taken, uint32_t missed, Position pos) {
+    if (words.empty()) {
+        refuse(pos, "this pattern");
+        return false;
+    }
+    if (dynamic_cast<const StringLit*>(value) != nullptr) {
+        std::vector<ir::Value> wantWords = lowerWords(value);
+        if (failed_ || wantWords.size() != kSliceWords ||
+            words.size() != kSliceWords) {
+            refuse(pos, "this pattern");
+            return false;
+        }
+        ir::Value eq = lowerStringEqWords(words, wantWords, pos, true);
+        if (failed_) {
+            return false;
+        }
+        matchCondTo(eq, taken, missed, pos);
+        return !failed_;
+    }
+    if (dynamic_cast<const NilPtr*>(value) != nullptr) {
+        if (words.size() != kOneWord) {
+            refuse(pos, "this pattern");
+            return false;
+        }
+        TypeRef ptrType{ctx_.pointer(ctx_.basic(BasicKind::U8))};
+        ir::Value nil = constantI64(0, ptrType, pos);
+        if (failed_) {
+            return false;
+        }
+        matchCondTo(emitI64Cmp(pos, BinOp::Eq, words[kFirstWord], nil), taken,
+                    missed, pos);
+        return !failed_;
+    }
+    int64_t folded = 0;
+    if (!foldBound(value, folded)) {
+        refuse(pos, "this pattern");
+        return false;
+    }
+    TypeRef word{ctx_.basic(BasicKind::I64)};
+    ir::Value wantVal = constantI64(folded, word, pos);
+    if (failed_) {
+        return false;
+    }
+    matchCondTo(emitI64Cmp(pos, BinOp::Eq, words[kFirstWord], wantVal), taken,
+                missed, pos);
+    return !failed_;
+}
+
+bool Lowerer::lowerMatchFieldTest(const Pattern& sub, const Place& at, uint32_t pass,
+                                  uint32_t miss, Position pos,
+                                  std::vector<MatchFieldBind>& binds) {
+    if (sub.kind == PatternKind::Wildcard) {
+        matchBrTo(pass, pos);
+        return !failed_;
+    }
+    if (sub.kind == PatternKind::Bind) {
+        std::vector<ir::Value> bound;
+        if (!matchBoundWords(sub.name, bound, pos)) {
+            if (failed_) {
+                return false;
+            }
+            MatchFieldBind bind;
+            bind.name = sub.name;
+            bind.type = at.type;
+            bind.off = at.off;
+            binds.push_back(std::move(bind));
+            matchBrTo(pass, pos);
+            return !failed_;
+        }
+        // A bound name compares: strings by content, one word by value.
+        // Anything wider never passed the checker's comparability, so a
+        // size surprise here refuses instead of comparing half a value.
+        std::vector<ir::Value> got = loadRange(pos, at, at.type);
+        if (failed_) {
+            return false;
+        }
+        if (at.type.type->kind() == Kind::String) {
+            if (bound.size() != kSliceWords || got.size() != kSliceWords) {
+                refuse(pos, "this pattern");
+                return false;
+            }
+            ir::Value eq = lowerStringEqWords(got, bound, pos, true);
+            if (failed_) {
+                return false;
+            }
+            matchCondTo(eq, pass, miss, pos);
+            return !failed_;
+        }
+        if (bound.size() != kOneWord || got.size() != kOneWord) {
+            refuse(pos, "this pattern");
+            return false;
+        }
+        matchCondTo(emitI64Cmp(pos, BinOp::Eq, got[kFirstWord], bound[kFirstWord]),
+                    pass, miss, pos);
+        return !failed_;
+    }
+    if (sub.kind == PatternKind::Const) {
+        std::vector<ir::Value> got = loadRange(pos, at, at.type);
+        if (failed_) {
+            return false;
+        }
+        return lowerMatchConstTest(sub.value.get(), got, pass, miss, pos);
+    }
+    if (sub.kind == PatternKind::Type || sub.kind == PatternKind::Member) {
+        return lowerMatchArmTest(sub, at, pass, miss, pos, binds);
+    }
+    refuse(sub.pos, "this pattern");
+    return false;
+}
+
+bool Lowerer::lowerMatchArmTest(const Pattern& pat, const Place& base, uint32_t body,
+                                uint32_t next, Position pos,
+                                std::vector<MatchFieldBind>& binds) {
+    if (pat.kind == PatternKind::Member) {
+        // The checker proved the same union, so the tag answers: index
+        // and offset come from the resolver, never from a guess.
+        if (base.type.type->kind() != Kind::Union) {
+            refuse(pos, "this pattern");
+            return false;
+        }
+        std::optional<DeclId> id = base.type.type->decl();
+        // Split across lines on purpose: the offset call beside a digit
+        // reads as a size literal and T4 refuses it.
+        int64_t index =
+            id.has_value() ? resolver_.unionMemberIndex(*id, pat.member) : -1;
+        int64_t tagOff = -1;
+        if (id.has_value()) {
+            tagOff = resolver_.unionTagOffset(*id);
+        }
+        if (!id.has_value() || index < 0 || tagOff < 0) {
+            refuse(pos, "this pattern");
+            return false;
+        }
+        ir::Value ok = emitTagCheck(pos, base, tagOff, index);
+        if (failed_) {
+            return false;
+        }
+        matchCondTo(ok, body, next, pos);
+        return !failed_;
+    }
+    if (pat.kind != PatternKind::Type) {
+        refuse(pos, "this pattern");
+        return false;
+    }
+    if (base.type.type->kind() != Kind::Struct) {
+        refuse(pos, "this pattern");
+        return false;
+    }
+    std::optional<DeclId> id = base.type.type->decl();
+    if (!id.has_value()) {
+        refuse(pos, "this pattern");
+        return false;
+    }
+    // One block per field in order: a field with nothing to test still
+    // owns its link, so binds and wildcards thread through to the body.
+    const uint64_t fieldCount = static_cast<uint64_t>(pat.fields.size());
+    for (uint64_t j = 0; j < fieldCount; ++j) {
+        const FieldPat& field = pat.fields[j];
+        TypeRef fieldType = resolver_.fieldType(*id, field.name);
+        int64_t fieldOff = resolver_.fieldOffset(*id, field.name);
+        if (fieldType.isError() || fieldOff < 0) {
+            refuse(field.pat->pos, "no such field");
+            return false;
+        }
+        Place at = base;
+        at.off = base.off + fieldOff;
+        at.type = fieldType;
+        const bool last = j + 1 == fieldCount;
+        uint32_t pass = last ? body : emitBlock(pos);
+        if (!lowerMatchFieldTest(*field.pat, at, pass, next, pos, binds)) {
+            return false;
+        }
+        if (!last) {
+            startBlock(pass);
+        }
+    }
+    if (fieldCount == 0) {
+        matchBrTo(body, pos);
+    }
+    return !failed_;
+}
+
 void Lowerer::onMatch(MatchStmt& n) {
     if (failed_ || !enabled_ || function_ == nullptr) {
         return;
@@ -6842,7 +7098,19 @@ void Lowerer::onMatch(MatchStmt& n) {
     if (failed_) {
         return;
     }
-    const uint64_t want = scrutString ? kSliceWords : kOneWord;
+    // A struct or union scrutinee answers one value per word, like any
+    // other aggregate: the single-word row only fits scalars. Anything
+    // else keeps the old width, so existing arms never shift.
+    uint64_t want = scrutString ? kSliceWords : kOneWord;
+    if (!scrutString && (scrutType.type->kind() == Kind::Struct ||
+                         scrutType.type->kind() == Kind::Union)) {
+        int words = wordCount(scrutType);
+        if (words < 0) {
+            refuse(n.pos, "this match");
+            return;
+        }
+        want = static_cast<uint64_t>(words);
+    }
     if (scrut.size() != want) {
         refuse(n.scrutinee->pos, "this match");
         return;
@@ -6879,50 +7147,39 @@ void Lowerer::onMatch(MatchStmt& n) {
     // constants — the same order every other name read uses, and the
     // same call the checker's resolveMatchValue makes: a name it finds
     // must materialize here, never bind fresh over the real value.
-    auto boundWords = [&](const std::string& name,
-                          std::vector<ir::Value>& words) -> bool {
-        for (auto frame = locals_.rbegin(); frame != locals_.rend(); ++frame) {
-            auto found = frame->find(name);
-            if (found != frame->end()) {
-                words = loadLocal(n.pos, found->second);
-                return !failed_;
+    // (matchBoundWords, shared with the field tests below.)
+    bool spill = matchNeedsSpill(n);
+    std::vector<ir::Value> spillSlots;
+    Place spillBase;
+    if (spill) {
+        // Field and tag tests read by address, so the scrutinee's words
+        // spill once before the chain: every test and every bound field
+        // reads the same memory, and the entry block dominates them all.
+        spillSlots = allocaFor(scrutType, n.pos);
+        if (failed_) {
+            return;
+        }
+        spillBase.slots = spillSlots;
+        spillBase.type = scrutType;
+        spillBase.off = 0;
+        spillBase.isVolatile = false;
+        // A zero-word scrutinee (an empty struct) spills nothing: the
+        // range store below refuses zero-size layouts, and there is no
+        // word to move. Tests over it still read the (empty) spill base.
+        if (!scrut.empty()) {
+            storeRange(n.pos, spillBase, scrut, scrutType);
+            if (failed_) {
+                return;
             }
         }
-        if (const GlobalBinding* global = findGlobal(name)) {
-            words = loadGlobal(n.pos, *global);
-            return !failed_;
-        }
-        const resolve::Scope* here = resolver_.scopeOf(checker_.module());
-        const resolve::Decl* decl =
-            here != nullptr ? resolver_.lookup(here, name) : nullptr;
-        if (decl != nullptr &&
-            (decl->kind == resolve::DeclKind::Var ||
-             decl->kind == resolve::DeclKind::Const)) {
-            // A variable global always lands in globals_ first; missing
-            // it here is a lowering gap, not a fresh name. A constant
-            // folds, or refuses loudly when it has no integer value.
-            if (decl->kind == resolve::DeclKind::Var) {
-                refuse(n.pos, "this pattern");
-                return false;
-            }
-            Ident probe(n.pos, name);
-            int64_t folded = 0;
-            if (!foldBound(&probe, folded)) {
-                refuse(n.pos, "this pattern");
-                return false;
-            }
-            TypeRef word{ctx_.basic(BasicKind::I64)};
-            words = {constantI64(folded, word, n.pos)};
-            return !failed_;
-        }
-        return false;
-    };
+    }
     if (armCount == 0) {
         brTo(defaultLabel);
     } else {
         brTo(tests[0]);
     }
     std::vector<std::string> fresh(armCount);
+    std::vector<std::vector<MatchFieldBind>> armBinds(armCount);
     for (uint64_t i = 0; i < armCount; ++i) {
         startBlock(tests[i]);
         const uint32_t body = bodies[i];
@@ -6940,7 +7197,7 @@ void Lowerer::onMatch(MatchStmt& n) {
         }
         if (pat.kind == PatternKind::Bind) {
             std::vector<ir::Value> bound;
-            if (!boundWords(pat.name, bound)) {
+            if (!matchBoundWords(pat.name, bound, n.pos)) {
                 if (failed_) {
                     return;
                 }
@@ -7007,6 +7264,15 @@ void Lowerer::onMatch(MatchStmt& n) {
                    body, next);
             continue;
         }
+        if (pat.kind == PatternKind::Type || pat.kind == PatternKind::Member) {
+            // Dead arms chained through above; a live one owns the spill
+            // the checker proved addressable, and its field binds wait
+            // for the body below.
+            if (!lowerMatchArmTest(pat, spillBase, body, next, n.pos, armBinds[i])) {
+                return;
+            }
+            continue;
+        }
         refuse(pat.pos, "this pattern");
         return;
     }
@@ -7033,6 +7299,39 @@ void Lowerer::onMatch(MatchStmt& n) {
             bind.type = scrutType;
             bind.isMutable = true;
             locals_.back()[fresh[i]] = std::move(bind);
+        }
+        // A struct arm's bound fields materialize the same way: each owns
+        // fresh slots in the arm's frame, filled from the spill the test
+        // chain already proved, so the body reads locals, never memory
+        // the checker did not bind.
+        for (const MatchFieldBind& fieldBind : armBinds[i]) {
+            std::vector<ir::Value> fieldSlots = allocaFor(fieldBind.type, n.pos);
+            if (failed_) {
+                return;
+            }
+            Place from;
+            from.slots = spillSlots;
+            from.type = fieldBind.type;
+            from.off = fieldBind.off;
+            from.isVolatile = false;
+            std::vector<ir::Value> got = loadRange(n.pos, from, fieldBind.type);
+            if (failed_) {
+                return;
+            }
+            Place dest;
+            dest.slots = fieldSlots;
+            dest.type = fieldBind.type;
+            dest.off = 0;
+            dest.isVolatile = false;
+            storeRange(n.pos, dest, got, fieldBind.type);
+            if (failed_) {
+                return;
+            }
+            LocalBinding fieldLocal;
+            fieldLocal.slots = std::move(fieldSlots);
+            fieldLocal.type = fieldBind.type;
+            fieldLocal.isMutable = true;
+            locals_.back()[fieldBind.name] = std::move(fieldLocal);
         }
         n.arms[i]->body->accept(checker_);
         locals_.pop_back();

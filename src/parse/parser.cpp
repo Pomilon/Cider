@@ -1271,6 +1271,12 @@ Pattern Parser::parsePattern() {
         pattern.kind = PatternKind::Type;
         pattern.type = std::make_unique<NamedType>(start, "", std::move(first),
                                                    std::vector<std::unique_ptr<TypeExpr>>{});
+        // An empty struct lists all zero of its fields this way: the
+        // checker still proves the braces name an empty struct, so `E {}`
+        // only ever matches `E`.
+        if (match(TokenKind::RBrace)) {
+            return pattern;
+        }
         for (;;) {
             if (!check(TokenKind::Ident)) {
                 failHere("a field pattern needs a name");

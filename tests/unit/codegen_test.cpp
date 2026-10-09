@@ -869,6 +869,83 @@ void testMatch() {
                    "    return n;\n"
                    "}\n") == 2,
           "break in an arm leaves the loop");
+    check(runQuiet("struct P { var x: int; var y: int; }\n"
+                   "func main() -> int {\n"
+                   "    var p: P = new P { x: 1, y: 2 };\n"
+                   "    match (p) { P { x: 1, y: 2 } => { return 10; } default => { return 30; } }\n"
+                   "}\n") == 10,
+          "a struct pattern matches its constants");
+    check(runQuiet("struct P { var x: int; var y: int; }\n"
+                   "func main() -> int {\n"
+                   "    var p: P = new P { x: 1, y: 9 };\n"
+                   "    match (p) { P { x: 1, y: 2 } => { return 10; } default => { return 30; } }\n"
+                   "}\n") == 30,
+          "a mismatched field takes the default");
+    check(runQuiet("struct P { var x: int; var y: int; }\n"
+                   "func main() -> int {\n"
+                   "    var p: P = new P { x: 3, y: 4 };\n"
+                   "    match (p) { P { x: a, y: _ } => { return a * 10; } default => { return 0; } }\n"
+                   "}\n") == 30,
+          "a struct pattern binds its fields");
+    check(runQuiet("struct P { var x: int; }\n"
+                   "struct Q { var x: int; }\n"
+                   "func main() -> int {\n"
+                   "    var p: P = new P { x: 1 };\n"
+                   "    match (p) { Q { x: 1 } => { return 10; } default => { return 30; } }\n"
+                   "}\n") == 30,
+          "a dead struct pattern takes the default");
+    check(runQuiet("union U { var a: int; var b: bool; }\n"
+                   "func main() -> int {\n"
+                   "    var u: U = new U { a: 7 };\n"
+                   "    match (u) { U.a => { return 1; } U.b => { return 2; } default => { return 0; } }\n"
+                   "}\n") == 1,
+          "a union member pattern reads the tag");
+    check(runQuiet("union U { var a: int; var b: bool; }\n"
+                   "func main() -> int {\n"
+                   "    var u: U = new U { b: true };\n"
+                   "    match (u) { U.a => { return 1; } U.b => { return 2; } default => { return 0; } }\n"
+                   "}\n") == 2,
+          "the live member answers, not the first arm");
+    check(runQuiet("struct Inner { var x: int; }\n"
+                   "struct Outer { var inner: Inner; var y: int; }\n"
+                   "func main() -> int {\n"
+                   "    var o: Outer = new Outer { inner: new Inner { x: 5 }, y: 6 };\n"
+                   "    match (o) { Outer { inner: Inner { x: 5 }, y: _ } => { return 1; } default => { return 0; } }\n"
+                   "}\n") == 1,
+          "a nested struct pattern recurses");
+    check(runQuiet("struct S { var s: string; var n: int; }\n"
+                   "func main() -> int {\n"
+                   "    var v: S = new S { s: \"hi\", n: 4 };\n"
+                   "    match (v) { S { s: \"hi\", n: k } => { return k; } default => { return 0; } }\n"
+                   "}\n") == 4,
+          "a string field matches by content and binds beside it");
+    check(runQuiet("union U { var a: int; var b: bool; }\n"
+                   "struct P { var u: U; var n: int; }\n"
+                   "func main() -> int {\n"
+                   "    var p: P = new P { u: new U { b: true }, n: 3 };\n"
+                   "    match (p) { P { u: U.a, n: _ } => { return 1; } P { u: U.b, n: m } => { return m; } default => { return 0; } }\n"
+                   "}\n") == 3,
+          "a member sub-pattern reads the tag and binds beside it");
+    check(runQuiet("struct P { var x: int; var y: int; }\n"
+                   "func main() -> int {\n"
+                   "    var v: int = 1;\n"
+                   "    var p: P = new P { x: 1, y: 2 };\n"
+                   "    match (p) { P { x: v, y: _ } => { return 7; } default => { return 0; } }\n"
+                   "}\n") == 7,
+          "a bound name in a field compares by value");
+    check(runQuiet("struct P { var x: int; var y: int; }\n"
+                   "func main() -> int {\n"
+                   "    var v: int = 9;\n"
+                   "    var p: P = new P { x: 1, y: 2 };\n"
+                   "    match (p) { P { x: v, y: _ } => { return 7; } default => { return 0; } }\n"
+                   "}\n") == 0,
+          "a mismatched bound name takes the default");
+    check(runQuiet("struct E {}\n"
+                   "func main() -> int {\n"
+                   "    var e: E = new E {};\n"
+                   "    match (e) { E {} => { return 5; } default => { return 0; } }\n"
+                   "}\n") == 5,
+          "an empty struct matches its empty pattern");
 }
 
 void testPointerArith() {

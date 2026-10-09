@@ -256,8 +256,8 @@ private:
     void requireInitAssigned(Position pos, const std::vector<std::string>& fields,
                              const InitAssign& state);
     void checkInitAssign(DeclId id, const FuncDecl& ctor);
-    void bindPattern(Pattern& pat, TypeRef scrutinee);
-    void bindSubPattern(Pattern& pat, TypeRef type);
+    void bindPattern(const Pattern& pat, TypeRef scrutinee);
+    void bindSubPattern(const Pattern& pat, TypeRef type);
     // Match validation (FEATURES §8.4): a pattern Name that resolves to a
     // value in scope compares by that type's == (the Erlang rule); only an
     // unresolvable name binds fresh. Classification never binds, so both
@@ -266,6 +266,8 @@ private:
     bool matchComparable(TypeRef scrutinee, TypeRef bound);
     bool checkMatchConst(const Pattern& pat, TypeRef scrutinee);
     bool checkMatchPattern(const Pattern& pat, TypeRef scrutinee);
+    bool checkMatchType(const Pattern& pat, TypeRef scrutinee);
+    bool checkMatchMember(const Pattern& pat, TypeRef scrutinee);
     void bindMatchFresh(const Pattern& pat, TypeRef scrutinee);
 
     // SEMANTICS.md §2.3: the common type of two operands, stated as a type.
