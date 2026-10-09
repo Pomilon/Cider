@@ -1039,6 +1039,10 @@ void testBitNot() {
                    "    return 0;\n"
                    "}\n") == 0,
           "bitwise not inverts at the operand width");
+    check(runQuiet("func main() -> int { var b: byte = 6; return (b << 2) as int; }\n") == 24,
+          "a byte shifts");
+    check(runQuiet("func main() -> int { var c: char = 'a'; return ((c as u8) << 2) as int; }\n") == 132,
+          "a char shifts after an explicit as");
 }
 
 void testTernary() {

@@ -452,6 +452,12 @@ void testCharCompare() {
     Checked mixed = check(
         "func main() -> int { var c: char = 'a'; if (c == 97) { return 1; } return 0; }\n");
     check(!mixed.ok && mixed.stage == "check", "char == int fails without as");
+    Checked shift = check(
+        "func main() -> int { var c: char = 'a'; return c << 1; }\n");
+    check(!shift.ok && shift.stage == "check", "a char does not shift");
+    Checked byteShift = check(
+        "func main() -> int { var b: byte = 6; return b << 2; }\n");
+    check(byteShift.ok, "a byte shifts: " + byteShift.stage);
 }
 
 void testStringCompare() {
