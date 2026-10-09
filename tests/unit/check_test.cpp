@@ -153,6 +153,43 @@ void testInterface() {
         "struct Point { var x: int; var y: int; }\n"
         "func d(p: Point) -> Drawable { return p; }\n");
     check(!bad.ok && bad.stage == "check", "without draw it fails");
+    // CIDER-BUG-255: an aggregate in a scalar interface position must not
+    // bind its first element. v3 has no bare list literal, so the nearest
+    // shapes are an array literal and a slice, in declaration and argument
+    // position alike; all three are refused at check time.
+    Checked arrDecl = check(
+        "interface Shape { func area() -> int; }\n"
+        "class Rect { var w: int; var h: int;\n"
+        " func init(w: int, h: int) -> void { (*self).w = w; (*self).h = h; }\n"
+        " func area() -> int { return (*self).w * (*self).h; } }\n"
+        "func main() -> int {\n"
+        "    var r: *Rect = new Rect(3, 4);\n"
+        "    var i: Shape = new [*Rect; 2] {r, r};\n"
+        "    return 0;\n"
+        "}\n");
+    check(!arrDecl.ok && arrDecl.stage == "check", "an array is not a scalar interface");
+    Checked arrArg = check(
+        "interface Shape { func area() -> int; }\n"
+        "class Rect { var w: int; var h: int;\n"
+        " func init(w: int, h: int) -> void { (*self).w = w; (*self).h = h; }\n"
+        " func area() -> int { return (*self).w * (*self).h; } }\n"
+        "func get(s: Shape) -> int { return s.area(); }\n"
+        "func main() -> int {\n"
+        "    var r: *Rect = new Rect(3, 4);\n"
+        "    return get(new [*Rect; 2] {r, r});\n"
+        "}\n");
+    check(!arrArg.ok && arrArg.stage == "check", "an array argument is not a scalar interface");
+    Checked sliceArg = check(
+        "interface Shape { func area() -> int; }\n"
+        "class Rect { var w: int; var h: int;\n"
+        " func init(w: int, h: int) -> void { (*self).w = w; (*self).h = h; }\n"
+        " func area() -> int { return (*self).w * (*self).h; } }\n"
+        "func get(s: Shape) -> int { return s.area(); }\n"
+        "func main() -> int {\n"
+        "    var a: [*Rect; 2] = new [*Rect; 2] {new Rect(3, 4), new Rect(1, 2)};\n"
+        "    return get(a[0:2]);\n"
+        "}\n");
+    check(!sliceArg.ok && sliceArg.stage == "check", "a slice is not a scalar interface");
 }
 
 // Conditions are bool, and the branches of a ternary match.
