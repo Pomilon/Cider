@@ -776,16 +776,16 @@ void testFoldedBounds() {
 
 void testRefuseKeepsScopes() {
     // A refusal inside a condition must not unbalance the scope stack:
-    // a float remainder has no lowering, so this refuses — but the
-    // function frame must survive the block exits instead of crashing
-    // the driver.
+    // a past-end folded index refuses in lowering — but the function
+    // frame must survive the block exits instead of crashing the driver.
     std::printf("a mid-block refusal keeps scopes balanced\n");
     Lowered r = lower(
         "func main() -> int {\n"
-        "    if (1.5 % 0.5 != 0.0) { return 1; }\n"
+        "    var a: [u8; 3] = new [u8; 3] {1, 2, 3};\n"
+        "    if (a[5] == 1) { return 1; }\n"
         "    return 0;\n"
         "}\n");
-    check(!r.ok && r.stage == "lower", "float remainder in a condition is refused");
+    check(!r.ok && r.stage == "lower", "a past-end index in a condition is refused");
 }
 
 // A method emits its own function under the owner's name, and a call site

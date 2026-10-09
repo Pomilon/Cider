@@ -5880,14 +5880,12 @@ ir::Value Lowerer::emitArith(BinOp op, ir::Value a, ir::Value b, TypeRef result,
     // Division and remainder trap; nothing else in this set does. The flag is
     // what stops DCE deleting the check and LICM hoisting the divide. Floats
     // never trap on arithmetic: an f32/f64 divide answers inf or NaN (SEMANTICS
-    // §11), so a mayTrap flag here would lie to the passes, and a float
-    // remainder would need an fmod routine rather than the integer op.
+    // §11), so a mayTrap flag here would lie to the passes. A float
+    // remainder lowers to the x87 partial remainder the backend emits —
+    // exact, then rounded once to the result width — and a zero divisor
+    // answers NaN through the masked invalid operation, faulting nothing.
     const bool floatResult = instr.width == ir::IRType::F32 ||
                              instr.width == ir::IRType::F64;
-    if (floatResult && instr.op == ir::Op::Rem) {
-        refuse(pos, "float remainder");
-        return undefined();
-    }
     if ((instr.op == ir::Op::Div || instr.op == ir::Op::Rem) && !floatResult) {
         instr.mayTrap = true;
     }

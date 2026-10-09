@@ -1289,6 +1289,20 @@ void testFloat() {
                  "    return (a + b) as int;\n"
                  "}\n") == 5,
           "f32 add reaches its result");
+    // f32 remainder truncates the quotient: 5.5 % 2.0 = 1.5 -> 1.
+    check(runQuiet("func main() -> int {\n"
+                 "    var a: f32 = 5.5;\n"
+                 "    var b: f32 = 2.0;\n"
+                 "    return (a % b) as int;\n"
+                 "}\n") == 1,
+          "f32 remainder reaches its result");
+    // f64 remainder at wider range: 7.5 % 2.0 = 1.5 -> 1.
+    check(runQuiet("func main() -> int {\n"
+                 "    var a: f64 = 7.5;\n"
+                 "    var b: f64 = 2.0;\n"
+                 "    return (a % b) as int;\n"
+                 "}\n") == 1,
+          "f64 remainder reaches its result");
     // Comparison orders the operands.
     check(runQuiet("func main() -> int {\n"
                  "    var a: f64 = 1.5;\n"

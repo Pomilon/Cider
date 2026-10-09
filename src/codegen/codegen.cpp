@@ -970,12 +970,35 @@ private:
         }
         if (instr.op == ir::Op::Div || instr.op == ir::Op::Rem) {
             // Float division answers inf or NaN and never faults, so it
-            // emits the plain SSE divide with no zero check; a float
-            // remainder would need an fmod routine rather than idiv.
+            // emits the plain SSE divide with no zero check. SSE has no
+            // remainder, and the project links no libc to call fmod from,
+            // so a float remainder emits the x87 partial remainder: fprem
+            // truncates the quotient (C fmod semantics, not the IEEE
+            // round-to-nearest remainder) and C2 reports an incomplete
+            // reduction, so the loop repeats until exact. A zero divisor
+            // raises the masked invalid operation and answers NaN,
+            // matching fmod; nothing faults. The divisor loads first so
+            // it sits under the dividend, as fprem requires.
             if (instr.width == ir::IRType::F32 || instr.width == ir::IRType::F64) {
                 if (instr.op == ir::Op::Rem) {
-                    refuse(instr.loc, "float remainder is not emitted yet");
-                    return false;
+                    const char* mem =
+                        instr.width == ir::IRType::F32 ? "dword ptr " : "qword ptr ";
+                    std::string again =
+                        ".L_" + fn.name + "_fprem_" +
+                        std::to_string(instr.results[0].id);
+                    out_ += "  fld " + std::string(mem) +
+                            slot(instr.operands[1].id) + "\n";
+                    out_ += "  fld " + std::string(mem) +
+                            slot(instr.operands[0].id) + "\n";
+                    out_ += again + ":\n";
+                    out_ += "  fprem\n";
+                    out_ += "  fnstsw ax\n";
+                    out_ += "  test ah, 4\n";
+                    out_ += "  jnz " + again + "\n";
+                    out_ += "  fstp " + std::string(mem) +
+                            slot(instr.results[0].id) + "\n";
+                    out_ += "  fstp st(0)\n";
+                    return true;
                 }
                 const char* suffix =
                     instr.width == ir::IRType::F32 ? "ss" : "sd";
