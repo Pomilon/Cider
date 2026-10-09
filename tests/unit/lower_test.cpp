@@ -471,13 +471,43 @@ void testDerefStore() {
     }
 }
 
-void testInterfaceParamRefused() {
-    std::printf("interface params are refused\n");
+void testInterfaceParam() {
+    std::printf("interface params lower\n");
     Lowered r = lower(
         "interface Shape { func area() -> int; }\n"
-        "func get(s: Shape) -> int { return 0; }\n"
-        "func main() -> int { return 0; }\n");
-    check(!r.ok && r.stage == "lower", "an interface param refuses loudly");
+        "struct Sq { var s: int; func area() -> int { return (*self).s; } }\n"
+        "func get(s: Shape) -> int { return s.area(); }\n"
+        "func main() -> int {\n"
+        "    var a: Sq = new Sq { s: 9 };\n"
+        "    return get(a);\n"
+        "}\n");
+    check(r.ok, "an interface param lowers: " + r.stage);
+    if (!r.ok) {
+        return;
+    }
+    const cider::ir::Function* get = find(r.module.get(), "get");
+    check(get != nullptr, "the callee is there");
+    if (get == nullptr) {
+        return;
+    }
+    check(get->params.size() == 2, "data plus vtable ride as two words");
+    bool table = false;
+    for (const cider::ir::Global& global : r.module->globals) {
+        if (global.label == "Sq__vtable__Shape" && global.initLabels.size() == 1 &&
+            global.initLabels[0] == "Sq__area") {
+            table = true;
+        }
+    }
+    check(table, "one vtable names the concrete method in order");
+    int indirect = 0;
+    for (const cider::ir::Block& block : get->blocks) {
+        for (const cider::ir::Instr& instr : block.body) {
+            if (instr.op == cider::ir::Op::Call && instr.call.indirect) {
+                ++indirect;
+            }
+        }
+    }
+    check(indirect == 1, "dispatch calls through the vtable");
 }
 
 void testForLoop() {
@@ -1149,7 +1179,7 @@ int main() {
     testTernary();
     testInterp();
     testRefuseKeepsScopes();
-    testInterfaceParamRefused();
+    testInterfaceParam();
     testNotYetLowered();
     testFoldedBounds();
     testGlobalZeroArray();

@@ -133,7 +133,13 @@ public:
             out_ += ".data\n";
             for (const ir::Global& global : module_.globals) {
                 out_ += global.label + ":\n";
-                if (global.initLabel.empty()) {
+                if (!global.initLabels.empty()) {
+                    // A vtable: one link-time address per method, in
+                    // interface method order, resolved by the linker.
+                    for (const std::string& entry : global.initLabels) {
+                        out_ += "  .quad " + entry + "\n";
+                    }
+                } else if (global.initLabel.empty()) {
                     if (global.initWords.empty()) {
                         out_ += "  .quad " + std::to_string(global.initial) + "\n";
                     } else {

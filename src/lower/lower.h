@@ -22,6 +22,7 @@
 #include <memory>
 #include <string>
 #include <unordered_map>
+#include <unordered_set>
 #include <vector>
 
 #include "check/checker.h"
@@ -191,6 +192,22 @@ public:
     // two for the 16-byte aggregates (strings today). -1 for anything larger,
     // which this slice does not lower.
     int wordCount(TypeRef type);
+    // Builds the 16-byte interface pair (TYPES.md §4.3) from a concrete
+    // value's words: the data word carries the concrete bytes inline when
+    // they fit one word, and the vtable word names the (concrete,
+    // interface) table, emitted once per pair in interface method order.
+    // A value already of interface type passes through unchanged; a
+    // concrete that cannot live in the pair refuses loudly, never
+    // silently. Every implicit conversion site (call arguments, var
+    // declarations, assignments, returns) funnels through here, so the
+    // pair is built identically on every path.
+    std::vector<ir::Value> boxToInterface(std::vector<ir::Value> words,
+                                          TypeRef from, TypeRef to,
+                                          Position pos);
+    // Emits the vtable for one (concrete, interface) pair, once per label:
+    // one link-time function address per interface method, in the
+    // resolver's methodNames order. Answers the table's link label.
+    std::string emitVTable(DeclId concrete, DeclId iface, Position pos);
     // Lowers any expression to its words. Scalars answer one value; a string
     // literal answers its address and length. Anything larger is refused.
     std::vector<ir::Value> lowerWords(const Expr* expr);
@@ -474,6 +491,9 @@ private:
     };
     std::unordered_map<const FuncLit*, ClosureSite> closures_;
     uint64_t closureSeq_ = 0;
+    // Vtable labels already emitted into the module: one (concrete,
+    // interface) table is built once, however many conversions name it.
+    std::unordered_set<std::string> vtablesEmitted_;
 };
 
 }  // namespace lower

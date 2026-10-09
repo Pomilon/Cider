@@ -58,6 +58,12 @@ bool isBytePointerTarget(const TypeRef& type) {
 // a slice keeps base and length: the hidden function loads word zero, the
 // allocation behind word one.
 constexpr uint64_t kClosureWords = 2;
+// An interface answers two words, data then vtable (TYPES.md §4.3): the
+// data word carries the concrete value inline, and the vtable word names
+// the (concrete, interface) table. Word zero is the data, word one the
+// table, in the layout.h offset order.
+constexpr uint64_t kInterfaceWords = 2;
+constexpr uint64_t kVtableWord = 1;
 
 // The register return row carries two words (rax, rdx): a third word needs
 // the hidden pointer (IR.md §6), so the count names that limit, not a digit.
@@ -208,14 +214,9 @@ std::vector<ir::Value> Lowerer::allocaSlots(TypeRef type, Position pos, uint64_t
 std::vector<ir::Value> Lowerer::allocaFor(TypeRef type, Position pos) {
     // Every slot count derived from a type passes through here, so a -1
     // word count can never reach the unsigned loop above as eighteen
-    // quintillion slots (an interface-typed parameter did exactly that:
-    // wordCount has no Interface arm). Interface values need boxing the
-    // lowerer does not have yet, so they refuse by name; anything else
-    // unsized refuses as a value without storage.
-    if (!type.isError() && type.type->kind() == Kind::Interface) {
-        refuse(pos, "interface values are not lowered yet");
-        return {};
-    }
+    // quintillion slots. Interfaces size to two words (data plus vtable,
+    // TYPES.md §4.3) through wordCount like every other aggregate; anything
+    // else unsized refuses as a value without storage.
     int needed = wordCount(type);
     if (needed < 0) {
         refuse(pos, "this value");
@@ -245,7 +246,10 @@ int Lowerer::wordCount(TypeRef type) {
     if (kind == Kind::Basic || kind == Kind::Pointer || kind == Kind::FunctionPtr) {
         return 1;
     }
-    if (kind == Kind::String || kind == Kind::Slice) {
+    if (kind == Kind::String || kind == Kind::Slice || kind == Kind::Interface) {
+        // A string is address plus length, a slice pointer plus length, an
+        // interface data plus vtable: three pairs, each two words, each
+        // owned by layout.h (TYPES.md §3.1) rather than by this count.
         return 2;
     }
     int64_t bytes = -1;
@@ -266,6 +270,92 @@ int Lowerer::wordCount(TypeRef type) {
     // divisor comes from layout, not from a literal, for the usual reason.
     int64_t per = layout::kSizePointer;
     return static_cast<int>(bytes / per + (bytes % per == 0 ? 0 : 1));
+}
+
+std::string Lowerer::emitVTable(DeclId concrete, DeclId iface, Position pos) {
+    const resolve::Decl* owner = resolver_.declById(concrete);
+    const resolve::Decl* wanted = resolver_.declById(iface);
+    if (owner == nullptr || wanted == nullptr) {
+        refuse(pos, "this interface conversion");
+        return "";
+    }
+    // One table per pair, named under both link names so two modules'
+    // same-named types never share one: the entry module links bare.
+    std::string label =
+        resolver_.linkName(*owner) + "__vtable__" + resolver_.linkName(*wanted);
+    if (!vtablesEmitted_.insert(label).second) {
+        return label;
+    }
+    ir::Global table;
+    table.label = label;
+    table.type = TypeRef{ctx_.pointer(ctx_.basic(BasicKind::U8))};
+    for (const std::string& name : resolver_.methodNames(iface)) {
+        // The checker proved the concrete implements every method, so a
+        // miss here is a lowerer bug, not a program, and refuses as one.
+        if (resolver_.methodSig(concrete, name) == nullptr) {
+            refuse(pos, "this interface conversion");
+            return "";
+        }
+        // The method's static address, spelled exactly as a direct call
+        // spells it, so dispatch and direct calls name one function.
+        table.initLabels.push_back(resolver_.linkName(*owner) + "__" + name);
+    }
+    module_->globals.push_back(std::move(table));
+    return label;
+}
+
+std::vector<ir::Value> Lowerer::boxToInterface(std::vector<ir::Value> words,
+                                              TypeRef from, TypeRef to,
+                                              Position pos) {
+    if (failed_ || to.isError() || from.isError()) {
+        return words;
+    }
+    if (to.type->kind() != Kind::Interface) {
+        return words;
+    }
+    if (from.type->kind() == Kind::Interface) {
+        // Already a pair: the caller's word-count check enforces the two
+        // words, so passing through is exact, not approximate.
+        return words;
+    }
+    std::optional<DeclId> iface = to.type->decl();
+    if (!iface.has_value()) {
+        refuse(pos, "this interface conversion");
+        return {undefined()};
+    }
+    // Inline structs only: the data word holds the concrete bytes when
+    // they fit one word (TYPES.md §4.3). A wider struct needs a class box
+    // the programmer writes, and a class needs the pointer dispatch a
+    // later slice owns — both refuse by name, never by miscompile.
+    if (from.type->kind() != Kind::Struct ||
+        wordCount(from) != static_cast<int>(kOneWord) ||
+        words.size() != kOneWord) {
+        refuse(pos, from.type->kind() == Kind::Struct
+                          ? "a struct wider than one word in an interface: box it in a class"
+                          : "this interface conversion is not lowered yet");
+        return {undefined()};
+    }
+    std::optional<DeclId> concrete = from.type->decl();
+    if (!concrete.has_value()) {
+        refuse(pos, "this interface conversion");
+        return {undefined()};
+    }
+    std::string label = emitVTable(*concrete, *iface, pos);
+    if (failed_) {
+        return {undefined()};
+    }
+    TypeRef vtableType = wordType(to, kVtableWord);
+    ir::Instr addr;
+    addr.op = ir::Op::DataAddr;
+    addr.loc = pos;
+    addr.type = vtableType;
+    addr.width = ir::IRType::Ptr;
+    addr.globalLabel = label;
+    addr.isPure = true;
+    ir::Value table = newValue(addr.width, vtableType, pos);
+    addr.results.push_back(table);
+    emit(std::move(addr));
+    return {words[kFirstWord], table};
 }
 
 bool Lowerer::resolvePlace(const Expr* expr, Place& out) {
@@ -1350,6 +1440,12 @@ void Lowerer::onVarDecl(VarDecl& n) {
         locals_.back()[n.name] = binding;
         return;
     }
+    // A concrete value in an interface position boxes to the pair here, so
+    // the slots below hold data plus vtable, never bare concrete words.
+    values = boxToInterface(std::move(values), initType, type, n.pos);
+    if (failed_) {
+        return;
+    }
     std::vector<ir::Value> slots = allocaSlots(type, n.pos,
                                                static_cast<uint64_t>(values.size()));
     for (uint64_t i = 0; i < static_cast<uint64_t>(values.size()); ++i) {
@@ -1418,6 +1514,15 @@ TypeRef Lowerer::wordType(TypeRef aggregate, uint64_t word) {
     if (aggregate.type->kind() == Kind::Closure) {
         if (word == 0) {
             return TypeRef{ctx_.functionPtr(Signature(*aggregate.type->signature()))};
+        }
+        return TypeRef{ctx_.pointer(ctx_.basic(BasicKind::U8))};
+    }
+    // An interface is a data word then a vtable pointer (TYPES.md §4.3):
+    // the data word carries the concrete bytes inline, untyped past one
+    // word, and the vtable word is an address the linker resolves.
+    if (aggregate.type->kind() == Kind::Interface) {
+        if (word == kFirstWord) {
+            return TypeRef{ctx_.basic(BasicKind::U64)};
         }
         return TypeRef{ctx_.pointer(ctx_.basic(BasicKind::U8))};
     }
@@ -4132,6 +4237,20 @@ std::vector<ir::Value> Lowerer::lowerNewClass(const NewClass& n) {
         if (failed_) {
             return {undefined()};
         }
+        // A concrete argument for an interface parameter boxes like every
+        // other call's: the init's words must arrive as the pair.
+        if (init == nullptr ||
+            i >= static_cast<uint64_t>(init->parameters().size())) {
+            refuse(n.pos, "this construction");
+            return {undefined()};
+        }
+        TypeRef want{init->parameters()[static_cast<size_t>(i)].type};
+        arg.words = boxToInterface(std::move(arg.words),
+                                   checker_.typeOf(n.args[i].get()), want,
+                                   n.args[i]->pos);
+        if (failed_) {
+            return {undefined()};
+        }
         // Same SSE class rule as onCall: an init's float parameter takes
         // an SSE register, decided by the checked argument type.
         TypeRef argType = checker_.typeOf(n.args[i].get());
@@ -5476,6 +5595,123 @@ std::vector<ir::Value> Lowerer::lowerCallWords(Call& n) {
                 receiver.push_back(computedBase(base.slots[0], base.off, n.pos));
             }
         }
+        // `s.m(args)` through an interface: the vtable names the concrete
+        // method, and the data word's address rides as the receiver the
+        // static method expects first. Entries sit in the resolver's
+        // methodNames order, so the index is looked up, never re-derived.
+        // Disjoint from the class/struct path above: only an interface
+        // value reaches here.
+        Place iface;
+        if (resolvePlace(field->object.get(), iface) && !iface.type.isError() &&
+            iface.type.type->kind() == Kind::Interface) {
+            std::optional<DeclId> ifaceId = iface.type.type->decl();
+            const Signature* msig = ifaceId.has_value()
+                                        ? resolver_.methodSig(*ifaceId, field->name)
+                                        : nullptr;
+            if (!ifaceId.has_value() || msig == nullptr) {
+                refuse(n.pos, "this call");
+                return {undefined()};
+            }
+            int64_t index = -1;
+            std::vector<std::string> names = resolver_.methodNames(*ifaceId);
+            for (uint64_t k = 0; k < static_cast<uint64_t>(names.size()); ++k) {
+                if (names[k] == field->name) {
+                    index = static_cast<int64_t>(k);
+                    break;
+                }
+            }
+            if (index < 0) {
+                refuse(n.pos, "this call");
+                return {undefined()};
+            }
+            // A value behind a pointer, inside another aggregate, or naming
+            // a computed address has no direct slots: those dispatches
+            // refuse by name until their slice, rather than addressing the
+            // wrong words.
+            if (iface.hasIndirect || iface.isAddress || iface.off != 0) {
+                refuse(n.pos,
+                       "an interface method through a pointer or field is not lowered yet");
+                return {undefined()};
+            }
+            TypeRef vtableType = wordType(iface.type, kVtableWord);
+            ir::Value vtable;
+            ir::Value dataAddr;
+            if (!iface.global.empty()) {
+                // A module-level interface value: the vtable loads from the
+                // label's second word, and the label itself addresses the
+                // data (TYPES.md §3.1 offsets come from layout).
+                ir::Instr load;
+                load.op = ir::Op::Load;
+                load.loc = n.pos;
+                load.type = vtableType;
+                load.width = widthOf(vtableType, n.pos);
+                if (failed_) {
+                    return {undefined()};
+                }
+                load.globalLabel = iface.global;
+                load.displacement = layout::kOffsetInterfaceVtable;
+                load.isPure = true;
+                vtable = newValue(load.width, vtableType, n.pos);
+                load.results.push_back(vtable);
+                emit(std::move(load));
+                TypeRef addrType{ctx_.pointer(ctx_.basic(BasicKind::U8))};
+                ir::Instr at;
+                at.op = ir::Op::DataAddr;
+                at.loc = n.pos;
+                at.type = addrType;
+                at.width = ir::IRType::Ptr;
+                at.globalLabel = iface.global;
+                at.isPure = true;
+                dataAddr = newValue(at.width, addrType, n.pos);
+                at.results.push_back(dataAddr);
+                emit(std::move(at));
+            } else {
+                if (iface.slots.size() != kInterfaceWords) {
+                    refuse(n.pos, "this call");
+                    return {undefined()};
+                }
+                ir::Instr load;
+                load.op = ir::Op::Load;
+                load.loc = n.pos;
+                load.type = vtableType;
+                load.width = widthOf(vtableType, n.pos);
+                if (failed_) {
+                    return {undefined()};
+                }
+                load.addressBase = iface.slots[kVtableWord];
+                load.isPure = true;
+                vtable = newValue(load.width, vtableType, n.pos);
+                load.results.push_back(vtable);
+                emit(std::move(load));
+                dataAddr = computedBase(iface.slots[kFirstWord], 0, n.pos);
+            }
+            if (failed_) {
+                return {undefined()};
+            }
+            // The method's address rides in the vtable at its methodNames
+            // index, scaled by the pointer width from layout: one load,
+            // then an indirect call carrying the receiver first, under the
+            // same convention direct calls already use.
+            TypeRef entryType{ctx_.pointer(ctx_.basic(BasicKind::U8))};
+            ir::Instr entry;
+            entry.op = ir::Op::Load;
+            entry.loc = n.pos;
+            entry.type = entryType;
+            entry.width = ir::IRType::Ptr;
+            entry.addressBase = vtable;
+            entry.displacement = index * layout::kSizePointer;
+            entry.isPure = true;
+            ir::Value target = newValue(entry.width, entryType, n.pos);
+            entry.results.push_back(target);
+            emit(std::move(entry));
+            if (failed_) {
+                return {undefined()};
+            }
+            sig = msig;
+            indirect = true;
+            indirectCallee = target;
+            receiver.push_back(dataAddr);
+        }
     }
     if (const auto* ident = dynamic_cast<const Ident*>(n.callee.get())) {
         sig = functionSig(ident->name);
@@ -5611,6 +5847,21 @@ std::vector<ir::Value> Lowerer::lowerCallWords(Call& n) {
         if (failed_) {
             return {undefined()};
         }
+        // A concrete argument for an interface parameter boxes to the pair
+        // here, so the callee's two words arrive as two. The checker proved
+        // the arity, so a parameter miss here is a lowerer bug, not a
+        // program, and refuses as one.
+        if (i >= static_cast<uint64_t>(sig->parameters().size())) {
+            refuse(n.pos, "this call");
+            return {undefined()};
+        }
+        TypeRef want{sig->parameters()[static_cast<size_t>(i)].type};
+        arg.words = boxToInterface(std::move(arg.words),
+                                   checker_.typeOf(n.args[i].get()), want,
+                                   n.args[i]->pos);
+        if (failed_) {
+            return {undefined()};
+        }
         // A float argument rides one word in an SSE register (psABI). The
         // checked type of the argument is the class: a literal is typed in
         // the parameter's context, and any other expression had to match
@@ -5672,6 +5923,15 @@ void Lowerer::onReturn(Return& n) {
         // answered type, through the same row calls read (IR.md §6). A
         // wider answer refuses in callResults, so this never truncates.
         std::vector<ir::Value> words = lowerWords(n.value.get());
+        if (failed_) {
+            return;
+        }
+        // A concrete value returned as an interface boxes to the pair
+        // before the row check below, which then enforces two, not one.
+        const Type* answered = function_->signature.returnType();
+        TypeRef want{answered != nullptr ? answered : ctx_.void_()};
+        words = boxToInterface(std::move(words), checker_.typeOf(n.value.get()),
+                               want, n.pos);
         if (failed_) {
             return;
         }
@@ -6588,6 +6848,13 @@ ir::Value Lowerer::lowerAssign(Assign& n) {
     }
     TypeRef target = checker_.typeOf(n.target.get());
     std::vector<ir::Value> value = lowerWords(n.value.get());
+    // A concrete value assigned to an interface boxes to the pair before
+    // the word-count check below, which then enforces two, not one.
+    value = boxToInterface(std::move(value), checker_.typeOf(n.value.get()),
+                           target, n.pos);
+    if (failed_) {
+        return undefined();
+    }
     // The words must agree with the target: a checker/lowerer disagreement
     // here would store the wrong number of words, silently.
     if (!target.isError() && wordCount(target) >= 0 &&
@@ -6676,6 +6943,12 @@ void Lowerer::lowerAssignStmt(Assign& n) {
         dest.type = target;
         copySliceToArray(n.pos, value[kFirstWord], value[kLenWord], target,
                          dest, "this assignment");
+        return;
+    }
+    // A concrete value assigned to an interface boxes to the pair before
+    // the word-count check below, which then enforces two, not one.
+    value = boxToInterface(std::move(value), valueType, target, n.pos);
+    if (failed_) {
         return;
     }
     if (!target.isError() && wordCount(target) >= 0 &&

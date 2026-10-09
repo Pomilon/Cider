@@ -242,6 +242,12 @@ struct Global {
     // little-endian (FEATURES §8.3: every byte known, no startup code).
     // Empty means the scalar path (one `.quad initial`).
     std::vector<uint64_t> initWords;
+    // Link-time words for a vtable global: one `.quad <label>` per entry,
+    // in interface method order (TYPES.md §4.3). A label, not a number,
+    // because a function address is resolved by the linker, not folded
+    // by lowering. Empty means no link-time words; a vtable never mixes
+    // the two, so initWords stays empty beside this.
+    std::vector<std::string> initLabels;
 };
 
 // Read-only bytes: a string literal's content, or any future constant blob.
