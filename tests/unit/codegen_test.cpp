@@ -984,6 +984,19 @@ void testClosure() {
           "a returned closure captures its environment");
 }
 
+void testClosureElement() {
+    std::printf("closures in aggregates run\n");
+    bool sig = false;
+    check(runCode("func main() -> int {\n"
+                  "    var base: int = 10;\n"
+                  "    var add: func(int) -> int = func(v: int) -> int { return v + base; };\n"
+                  "    var cell: [func(int) -> int; 1] = new [func(int) -> int; 1] { add };\n"
+                  "    return cell[0](5);\n"
+                  "}\n",
+                  sig) == 15 && !sig,
+          "a closure called through an array element");
+}
+
 // Two concretes through one interface prove dynamic dispatch: the call
 // answers per the value's own method, not the static type.
 void testInterface() {
@@ -1481,6 +1494,7 @@ int main() {
     testArith32();
     testIndirectCall();
     testClosure();
+    testClosureElement();
     testInterface();
     testInterfaceClass();
     testInterfaceField();

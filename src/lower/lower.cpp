@@ -6574,6 +6574,27 @@ std::vector<ir::Value> Lowerer::lowerCallWords(Call& n) {
         }
     }
     if (sig == nullptr) {
+        // A closure-typed callee that names no local and no method (an
+        // array element, a call answer, a ternary arm): the value's two
+        // words ride as code plus captures, like a closure local's. The
+        // checker proved the type; Ident and Field shapes were claimed or
+        // refused above, so only other shapes arrive here.
+        TypeRef calleeType = checker_.typeOf(n.callee.get());
+        if (!failed_ && !calleeType.isError() &&
+            calleeType.type->kind() == Kind::Closure &&
+            dynamic_cast<const Ident*>(n.callee.get()) == nullptr &&
+            dynamic_cast<const Field*>(n.callee.get()) == nullptr) {
+            const Signature* csig = calleeType.type->signature();
+            std::vector<ir::Value> pair = lowerWords(n.callee.get());
+            if (!failed_ && csig != nullptr && pair.size() == kClosureWords) {
+                sig = csig;
+                indirect = true;
+                indirectCallee = pair[kFirstWord];
+                receiver.push_back(pair[kLenWord]);
+            }
+        }
+    }
+    if (sig == nullptr) {
         refuse(n.pos, "this call");
         return {undefined()};
     }
