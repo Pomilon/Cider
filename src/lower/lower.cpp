@@ -6240,43 +6240,47 @@ std::vector<ir::Value> Lowerer::lowerCallWords(Call& n) {
             const Signature* msig = id.has_value()
                                         ? resolver_.methodSig(*id, field->name)
                                         : nullptr;
-            if (owner == nullptr || msig == nullptr) {
+            if (owner == nullptr) {
                 refuse(n.pos, "this call");
                 return {undefined()};
             }
-            callee = resolver_.linkName(*owner) + "__" + field->name;
-            sig = msig;
-            if (base.slots.empty() && !base.hasIndirect) {
-                refuse(n.pos, "a method on a global is not lowered yet");
-                return {undefined()};
-            }
-            if (base.hasIndirect && base.off != 0) {
-                // A method on a field reached through a pointer: the object
-                // address is the loaded pointer plus the field offset, added
-                // the same way a slice advances its pointer.
-                TypeRef count{ctx_.basic(BasicKind::I64)};
-                TypeRef ptrType{ctx_.pointer(base.type.type)};
-                ir::Value step = constantI64(base.off, count, n.pos);
-                if (failed_) {
+            if (msig != nullptr) {
+                callee = resolver_.linkName(*owner) + "__" + field->name;
+                sig = msig;
+                if (base.slots.empty() && !base.hasIndirect) {
+                    refuse(n.pos, "a method on a global is not lowered yet");
                     return {undefined()};
                 }
-                ir::Instr add;
-                add.op = ir::Op::Add;
-                add.loc = n.pos;
-                add.type = ptrType;
-                add.width = ir::IRType::Ptr;
-                add.isPure = true;
-                add.operands.push_back(base.indirect);
-                add.operands.push_back(step);
-                ir::Value at = newValue(add.width, ptrType, n.pos);
-                add.results.push_back(at);
-                emit(std::move(add));
-                receiver.push_back(at);
-            } else if (base.hasIndirect) {
-                receiver.push_back(base.indirect);
-            } else {
-                receiver.push_back(computedBase(base.slots[0], base.off, n.pos));
+                if (base.hasIndirect && base.off != 0) {
+                    // A method on a field reached through a pointer: the object
+                    // address is the loaded pointer plus the field offset, added
+                    // the same way a slice advances its pointer.
+                    TypeRef count{ctx_.basic(BasicKind::I64)};
+                    TypeRef ptrType{ctx_.pointer(base.type.type)};
+                    ir::Value step = constantI64(base.off, count, n.pos);
+                    if (failed_) {
+                        return {undefined()};
+                    }
+                    ir::Instr add;
+                    add.op = ir::Op::Add;
+                    add.loc = n.pos;
+                    add.type = ptrType;
+                    add.width = ir::IRType::Ptr;
+                    add.isPure = true;
+                    add.operands.push_back(base.indirect);
+                    add.operands.push_back(step);
+                    ir::Value at = newValue(add.width, ptrType, n.pos);
+                    add.results.push_back(at);
+                    emit(std::move(add));
+                    receiver.push_back(at);
+                } else if (base.hasIndirect) {
+                    receiver.push_back(base.indirect);
+                } else {
+                    receiver.push_back(computedBase(base.slots[0], base.off, n.pos));
+                }
             }
+            // msig == null: a closure-valued field, not a method — the
+            // closure path below decides from the checked type.
         }
         // `s.m(args)` through an interface: the vtable names the concrete
         // method, and the data word's address rides as the receiver the
@@ -6574,16 +6578,15 @@ std::vector<ir::Value> Lowerer::lowerCallWords(Call& n) {
         }
     }
     if (sig == nullptr) {
-        // A closure-typed callee that names no local and no method (an
-        // array element, a call answer, a ternary arm): the value's two
-        // words ride as code plus captures, like a closure local's. The
-        // checker proved the type; Ident and Field shapes were claimed or
-        // refused above, so only other shapes arrive here.
+        // A closure-typed callee that names no local (an array element, a
+        // call answer, a ternary arm, a struct field holding a closure):
+        // the value's two words ride as code plus captures, like a closure
+        // local's. The checker proved the type; methods, module members and
+        // closure locals were claimed above, so only plain values arrive.
         TypeRef calleeType = checker_.typeOf(n.callee.get());
         if (!failed_ && !calleeType.isError() &&
             calleeType.type->kind() == Kind::Closure &&
-            dynamic_cast<const Ident*>(n.callee.get()) == nullptr &&
-            dynamic_cast<const Field*>(n.callee.get()) == nullptr) {
+            dynamic_cast<const Ident*>(n.callee.get()) == nullptr) {
             const Signature* csig = calleeType.type->signature();
             std::vector<ir::Value> pair = lowerWords(n.callee.get());
             if (!failed_ && csig != nullptr && pair.size() == kClosureWords) {

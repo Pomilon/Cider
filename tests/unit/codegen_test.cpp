@@ -995,6 +995,18 @@ void testClosureElement() {
                   "}\n",
                   sig) == 15 && !sig,
           "a closure called through an array element");
+    check(runCode("struct Holder {\n"
+                  "    var base: int;\n"
+                  "    var add: func(int) -> int;\n"
+                  "}\n"
+                  "func main() -> int {\n"
+                  "    var b: int = 10;\n"
+                  "    var mk: func(int) -> int = func(v: int) -> int { return v + b; };\n"
+                  "    var h: Holder = new Holder { base: 0, add: mk };\n"
+                  "    return h.add(5);\n"
+                  "}\n",
+                  sig) == 15 && !sig,
+          "a closure called through a struct field");
 }
 
 // Two concretes through one interface prove dynamic dispatch: the call
