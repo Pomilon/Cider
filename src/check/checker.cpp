@@ -1449,6 +1449,16 @@ void Checker::visitTryStmt(TryStmt& n) {
     fail(n.pos, "try is not implemented yet");
 }
 
+void Checker::visitDeferStmt(DeferStmt& n) {
+    // The default walk would run the body inline at the defer point;
+    // FEATURES §5.2 runs it at scope exit instead. Until scope-exit
+    // lowering lands, refusing is honest and inlining would be a silent
+    // miscompile (it returned the pre-defer value above). The body still
+    // checks so its own errors report.
+    n.stmt->accept(*this);
+    fail(n.pos, "defer is not implemented yet");
+}
+
 void Checker::bindPattern(Pattern& pat, TypeRef scrutinee) {
     if (pat.kind == PatternKind::Bind) {
         bindLocal(pat.name, scrutinee, false, pat.pos);
@@ -1926,6 +1936,17 @@ TypeRef Checker::checkBinary(Binary& expr, TypeRef expected) {
             return TypeRef{ctx_.basic(BasicKind::I64)};
         }
         fail(expr.pos, "these pointer operands do not combine");
+        return errorRef();
+    }
+    // SEMANTICS §8: `s1 + s2` is a new string with s1's bytes then
+    // s2's. Anything else beside a string refuses — a number is not a
+    // string, in either order, with no implicit conversion.
+    if (expr.op == BinOp::Add &&
+        (lhs.type->kind() == Kind::String || rhs.type->kind() == Kind::String)) {
+        if (lhs.type->kind() == Kind::String && rhs.type->kind() == Kind::String) {
+            return lhs;
+        }
+        fail(expr.pos, "a string concatenates only with a string");
         return errorRef();
     }
     TypeRef common = commonType(lhs, rhs, expr.pos);

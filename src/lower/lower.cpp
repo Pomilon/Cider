@@ -4056,24 +4056,30 @@ Lowerer::LoweredString Lowerer::lowerInterp(const StringLit& lit) {
         refuse(part.expr->pos, "this interpolation");
         return LoweredString{};
     }
+    return joinStrings(parts, lit.pos);
+}
+
+Lowerer::LoweredString Lowerer::joinStrings(const std::vector<PartBytes>& parts,
+                                            Position pos) {
     // The lengths sum to a total; one allocation answers the buffer; every
     // part copies into it at the running offset. A zero total allocates
     // zero bytes, which answers nil: every string consumer checks the
     // length before touching the pointer, so nothing dereferences it.
-    ir::Value total = constantI64(0, count, lit.pos);
+    TypeRef count{ctx_.basic(BasicKind::I64)};
+    ir::Value total = constantI64(0, count, pos);
     if (failed_) {
         return LoweredString{};
     }
     for (const PartBytes& part : parts) {
         ir::Instr add;
         add.op = ir::Op::Add;
-        add.loc = lit.pos;
+        add.loc = pos;
         add.type = count;
         add.width = ir::IRType::I64;
         add.isPure = true;
         add.operands.push_back(total);
         add.operands.push_back(part.len);
-        ir::Value sum = newValue(add.width, count, lit.pos);
+        ir::Value sum = newValue(add.width, count, pos);
         add.results.push_back(sum);
         emit(std::move(add));
         total = sum;
@@ -4083,7 +4089,7 @@ Lowerer::LoweredString Lowerer::lowerInterp(const StringLit& lit) {
     }
     ir::Instr alloc;
     alloc.op = ir::Op::Call;
-    alloc.loc = lit.pos;
+    alloc.loc = pos;
     alloc.callee = "cider_alloc";
     alloc.mayTrap = true;
     {
@@ -4091,50 +4097,50 @@ Lowerer::LoweredString Lowerer::lowerInterp(const StringLit& lit) {
         bytes.words.push_back(total);
         alloc.arguments.push_back(std::move(bytes));
         ir::Argument pad;
-        pad.words.push_back(constantI64(8, count, lit.pos));
+        pad.words.push_back(constantI64(8, count, pos));
         alloc.arguments.push_back(std::move(pad));
     }
     if (failed_) {
         return LoweredString{};
     }
     TypeRef ptrType{ctx_.pointer(ctx_.basic(BasicKind::U8))};
-    ir::Value buf = newValue(ir::IRType::Ptr, ptrType, lit.pos);
+    ir::Value buf = newValue(ir::IRType::Ptr, ptrType, pos);
     alloc.results.push_back(buf);
     alloc.width = ir::IRType::Ptr;
     alloc.type = ptrType;
     emit(std::move(alloc));
-    ir::Value off = constantI64(0, count, lit.pos);
+    ir::Value off = constantI64(0, count, pos);
     if (failed_) {
         return LoweredString{};
     }
     for (const PartBytes& part : parts) {
         ir::Instr add;
         add.op = ir::Op::Add;
-        add.loc = lit.pos;
+        add.loc = pos;
         add.type = ptrType;
         add.width = ir::IRType::Ptr;
         add.isPure = true;
         add.operands.push_back(buf);
         add.operands.push_back(off);
-        ir::Value dst = newValue(add.width, ptrType, lit.pos);
+        ir::Value dst = newValue(add.width, ptrType, pos);
         add.results.push_back(dst);
         emit(std::move(add));
         if (failed_) {
             return LoweredString{};
         }
-        copyBytes(dst, part.ptr, part.len, lit.pos);
+        copyBytes(dst, part.ptr, part.len, pos);
         if (failed_) {
             return LoweredString{};
         }
         ir::Instr bump;
         bump.op = ir::Op::Add;
-        bump.loc = lit.pos;
+        bump.loc = pos;
         bump.type = count;
         bump.width = ir::IRType::I64;
         bump.isPure = true;
         bump.operands.push_back(off);
         bump.operands.push_back(part.len);
-        ir::Value next = newValue(bump.width, count, lit.pos);
+        ir::Value next = newValue(bump.width, count, pos);
         bump.results.push_back(next);
         emit(std::move(bump));
         off = next;
@@ -4145,6 +4151,32 @@ Lowerer::LoweredString Lowerer::lowerInterp(const StringLit& lit) {
     LoweredString out;
     out.words = {buf, total};
     return out;
+}
+
+std::vector<ir::Value> Lowerer::lowerStringAdd(const Binary& n) {
+    // The checker proved both sides strings: each side lowers to exactly
+    // its address and length, and the shared join answers one buffer.
+    std::vector<ir::Value> left = lowerWords(n.lhs.get());
+    if (failed_ || left.size() != kSliceWords) {
+        if (!failed_) {
+            refuse(n.pos, "this concatenation");
+        }
+        return {undefined()};
+    }
+    std::vector<ir::Value> right = lowerWords(n.rhs.get());
+    if (failed_ || right.size() != kSliceWords) {
+        if (!failed_) {
+            refuse(n.pos, "this concatenation");
+        }
+        return {undefined()};
+    }
+    PartBytes first;
+    first.ptr = left[kFirstWord];
+    first.len = left[kLenWord];
+    PartBytes second;
+    second.ptr = right[kFirstWord];
+    second.len = right[kLenWord];
+    return joinStrings({first, second}, n.pos).words;
 }
 
 std::vector<ir::Value> Lowerer::loadGlobal(Position pos, const GlobalBinding& global) {
@@ -4800,6 +4832,15 @@ std::vector<ir::Value> Lowerer::lowerWords(const Expr* expr) {
     }
     if (const auto* step = dynamic_cast<const IncrDecr*>(expr)) {
         return lowerIncrDecr(*step);
+    }
+    // String concatenation answers two words, so it dispatches here like
+    // calls: the scalar path below would keep only the address. Anything
+    // else binary stays scalar, where widths decide.
+    if (const auto* add = dynamic_cast<const Binary*>(expr)) {
+        TypeRef type = checker_.typeOf(expr);
+        if (!type.isError() && type.type->kind() == Kind::String) {
+            return lowerStringAdd(*add);
+        }
     }
     // A call answers one value per word of its return type: the scalar
     // path below would keep only the first, so calls dispatch here.

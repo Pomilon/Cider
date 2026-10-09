@@ -186,6 +186,14 @@ public:
         ir::Value len;
     };
     LoweredString lowerInterp(const StringLit& lit);
+    // Joins address/length parts into one heap string: the lengths sum to
+    // a total, one cider_alloc answers the buffer, and every part's bytes
+    // copy into it at the running offset. Shared by interpolation (many
+    // parts) and concatenation (two), so the two build one buffer.
+    LoweredString joinStrings(const std::vector<PartBytes>& parts, Position pos);
+    // `s + t` answers the joined pair: the checker proved both sides
+    // strings, so each side lowers to exactly its address and length.
+    std::vector<ir::Value> lowerStringAdd(const Binary& n);
     PartBytes rodataPair(const std::string& text, Position pos);
     void copyBytes(ir::Value dst, ir::Value src, ir::Value len, Position pos);
     // How many machine words a value occupies: one for scalars and pointers,

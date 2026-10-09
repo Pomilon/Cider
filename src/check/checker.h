@@ -169,6 +169,7 @@ public:
     void visitAsmStmt(AsmStmt& n) override;
     void visitThrowStmt(ThrowStmt& n) override;
     void visitTryStmt(TryStmt& n) override;
+    void visitDeferStmt(DeferStmt& n) override;
 
     // Every expression records its type.
     void visitIntLit(IntLit& n) override;

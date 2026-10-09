@@ -1115,6 +1115,19 @@ void testInterfaceDowncast() {
           "a downcast reads back the concrete value");
 }
 
+void testStringAdd() {
+    std::printf("string concatenation runs\n");
+    bool sig = false;
+    check(runCode("func main() -> int {\n"
+                  "    var s: string = \"he\";\n"
+                  "    var t: string = \"llo\";\n"
+                  "    var u: string = s + t;\n"
+                  "    return u.len as int;\n"
+                  "}\n",
+                  sig) == 5 && !sig,
+          "two strings concatenate to one");
+}
+
 // The same module emitted twice is byte-identical, and carries no build path.
 void testMultiWordReturn() {
     std::printf("multi-word returns\n");
@@ -1433,6 +1446,7 @@ int main() {
     testInterfaceField();
     testInterfaceDynIndex();
     testInterfaceDowncast();
+    testStringAdd();
     testShortCircuit();
     testBoolCompare();
     testCharCompare();
