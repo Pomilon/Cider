@@ -510,6 +510,50 @@ void testInterfaceParam() {
     check(indirect == 1, "dispatch calls through the vtable");
 }
 
+void testInterfaceClassAdapter() {
+    std::printf("interface class entries adapt\n");
+    Lowered r = lower(
+        "interface Shape { func area() -> int; }\n"
+        "class Circle { var r: int;\n"
+        "    func init(r: int) -> void { (*self).r = r; }\n"
+        "    func area() -> int { return (*self).r * 2; } }\n"
+        "func get(s: Shape) -> int { return s.area(); }\n"
+        "func main() -> int {\n"
+        "    var c: *Circle = new Circle(5);\n"
+        "    return get(c);\n"
+        "}\n");
+    check(r.ok, "a class reference boxes: " + r.stage);
+    if (!r.ok) {
+        return;
+    }
+    bool table = false;
+    for (const cider::ir::Global& global : r.module->globals) {
+        if (global.label == "Circle__vtable__Shape" &&
+            global.initLabels.size() == 1 &&
+            global.initLabels[0] == "Circle__area__ifaceadapt") {
+            table = true;
+        }
+    }
+    check(table, "a class entry names the receiver adapter");
+    const cider::ir::Function* adapt =
+        find(r.module.get(), "Circle__area__ifaceadapt");
+    check(adapt != nullptr, "the adapter is emitted");
+    if (adapt == nullptr) {
+        return;
+    }
+    check(adapt->params.size() == 1, "the adapter takes the data address");
+    bool forwards = false;
+    for (const cider::ir::Block& block : adapt->blocks) {
+        for (const cider::ir::Instr& instr : block.body) {
+            if (instr.op == cider::ir::Op::Call && !instr.call.indirect &&
+                instr.callee == "Circle__area") {
+                forwards = true;
+            }
+        }
+    }
+    check(forwards, "the adapter tail-calls the method");
+}
+
 void testForLoop() {
     std::printf("for loops lower\n");
     Lowered r = lower(
@@ -1180,6 +1224,7 @@ int main() {
     testInterp();
     testRefuseKeepsScopes();
     testInterfaceParam();
+    testInterfaceClassAdapter();
     testNotYetLowered();
     testFoldedBounds();
     testGlobalZeroArray();
