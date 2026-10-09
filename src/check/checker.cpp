@@ -1512,6 +1512,33 @@ void Checker::visitMatchStmt(MatchStmt& n) {
             }
             exhaustive = hasTrue && hasFalse;
         }
+        if (!exhaustive && scrutinee.type->kind() == Kind::Union) {
+            std::optional<DeclId> sid = scrutinee.type->decl();
+            if (sid.has_value()) {
+                // A union with every member listed is exhaustive
+                // (FEATURES §8.4): only a live member arm for this same
+                // union covers, so a dead arm for another union counts
+                // for nothing and a duplicate counts once.
+                std::unordered_set<std::string> covered;
+                for (auto& arm : n.arms) {
+                    const Pattern& pat = *arm->pattern;
+                    if (pat.kind != PatternKind::Member || isDeadPattern(&pat)) {
+                        continue;
+                    }
+                    std::optional<DeclId> armId = matchMemberUnion(pat);
+                    if (armId.has_value() && sameDecl(*sid, *armId)) {
+                        covered.insert(pat.member);
+                    }
+                }
+                exhaustive = true;
+                for (const std::string& name : resolver_.fieldNames(*sid)) {
+                    if (covered.count(name) == 0) {
+                        exhaustive = false;
+                        break;
+                    }
+                }
+            }
+        }
         if (!exhaustive) {
             fail(n.pos, "match needs a default arm");
         }
@@ -1732,6 +1759,16 @@ bool Checker::checkMatchType(const Pattern& pat, TypeRef scrutinee) {
         }
     }
     return ok;
+}
+
+std::optional<DeclId> Checker::matchMemberUnion(const Pattern& pat) {
+    auto tagSpelling = std::make_unique<NamedType>(
+        pat.pos, "", pat.tag, std::vector<std::unique_ptr<TypeExpr>>{});
+    TypeRef t = resolveHere(tagSpelling.get());
+    if (t.isError() || t.type->kind() != Kind::Union) {
+        return std::nullopt;
+    }
+    return t.type->decl();
 }
 
 bool Checker::checkMatchMember(const Pattern& pat, TypeRef scrutinee) {

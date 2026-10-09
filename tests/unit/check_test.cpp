@@ -622,6 +622,37 @@ void testMatch() {
         "    return i;\n"
         "}\n");
     check(inLoop.ok, "break in an arm reaches the loop: " + inLoop.stage);
+    Checked unionCovered = check(
+        "union U { var a: int; var b: bool; }\n"
+        "func main() -> int {\n"
+        "    var u: U = new U { a: 7 };\n"
+        "    match (u) { U.a => { return 1; } U.b => { return 2; } }\n"
+        "}\n");
+    check(unionCovered.ok, "every union member listed needs no default: " + unionCovered.stage);
+    Checked unionMissing = check(
+        "union U { var a: int; var b: bool; }\n"
+        "func main() -> int {\n"
+        "    var u: U = new U { a: 7 };\n"
+        "    match (u) { U.a => { return 1; } }\n"
+        "}\n");
+    check(!unionMissing.ok && unionMissing.stage == "check",
+          "a missing union member needs a default");
+    Checked unionOther = check(
+        "union U { var a: int; var b: bool; }\n"
+        "union V { var a: int; }\n"
+        "func main() -> int {\n"
+        "    var u: U = new U { a: 7 };\n"
+        "    match (u) { U.a => { return 1; } V.a => { return 2; } }\n"
+        "}\n");
+    check(!unionOther.ok && unionOther.stage == "check",
+          "another union's member does not cover");
+    Checked unionSingle = check(
+        "union One { var a: int; }\n"
+        "func main() -> int {\n"
+        "    var u: One = new One { a: 7 };\n"
+        "    match (u) { One.a => { return 1; } }\n"
+        "}\n");
+    check(unionSingle.ok, "a one-member union needs one arm: " + unionSingle.stage);
 }
 
 void testPointerArith() {

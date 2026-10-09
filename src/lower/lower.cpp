@@ -7347,7 +7347,7 @@ void Lowerer::onMatch(MatchStmt& n) {
         locals_.pop_back();
         brTo(joinLabel);
     } else {
-        // Bool-exhaustive with no default: control proves one arm took,
+        // Exhaustive with no default: control proves one arm took,
         // so arriving here is a checker bug, not a join — trap loudly
         // instead of falling into whatever follows the match.
         ir::Terminator trap;

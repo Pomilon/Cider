@@ -906,6 +906,18 @@ void testMatch() {
                    "    match (u) { U.a => { return 1; } U.b => { return 2; } default => { return 0; } }\n"
                    "}\n") == 2,
           "the live member answers, not the first arm");
+    check(runQuiet("union U { var a: int; var b: bool; }\n"
+                   "func main() -> int {\n"
+                   "    var u: U = new U { a: 7 };\n"
+                   "    match (u) { U.a => { return 1; } U.b => { return 2; } }\n"
+                   "}\n") == 1,
+          "every union member listed needs no default");
+    check(runQuiet("union U { var a: int; var b: bool; }\n"
+                   "func main() -> int {\n"
+                   "    var u: U = new U { b: true };\n"
+                   "    match (u) { U.a => { return 1; } U.b => { return 2; } }\n"
+                   "}\n") == 2,
+          "the second member answers without a default");
     check(runQuiet("struct Inner { var x: int; }\n"
                    "struct Outer { var inner: Inner; var y: int; }\n"
                    "func main() -> int {\n"
