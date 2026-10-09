@@ -1011,6 +1011,31 @@ void testInterface() {
           "two concretes dispatch through one interface");
 }
 
+void testInterfaceClass() {
+    std::printf("interface class dispatch runs\n");
+    bool sig = false;
+    check(runCode("interface Shape {\n"
+                  "    func area() -> int;\n"
+                  "}\n"
+                  "struct Sq {\n"
+                  "    var s: int;\n"
+                  "    func area() -> int { return (*self).s; }\n"
+                  "}\n"
+                  "class Circle {\n"
+                  "    var r: int;\n"
+                  "    func init(r: int) -> void { (*self).r = r; }\n"
+                  "    func area() -> int { return (*self).r * 2; }\n"
+                  "}\n"
+                  "func get(s: Shape) -> int { return s.area(); }\n"
+                  "func main() -> int {\n"
+                  "    var a: Sq = new Sq { s: 9 };\n"
+                  "    var c: *Circle = new Circle(5);\n"
+                  "    return get(a) + get(c);\n"
+                  "}\n",
+                  sig) == 19 && !sig,
+          "a struct and a class dispatch through one interface");
+}
+
 // The same module emitted twice is byte-identical, and carries no build path.
 void testMultiWordReturn() {
     std::printf("multi-word returns\n");
@@ -1325,6 +1350,7 @@ int main() {
     testIndirectCall();
     testClosure();
     testInterface();
+    testInterfaceClass();
     testShortCircuit();
     testBoolCompare();
     testCharCompare();

@@ -292,16 +292,196 @@ std::string Lowerer::emitVTable(DeclId concrete, DeclId iface, Position pos) {
     for (const std::string& name : resolver_.methodNames(iface)) {
         // The checker proved the concrete implements every method, so a
         // miss here is a lowerer bug, not a program, and refuses as one.
-        if (resolver_.methodSig(concrete, name) == nullptr) {
+        const Signature* csig = resolver_.methodSig(concrete, name);
+        if (csig == nullptr) {
             refuse(pos, "this interface conversion");
             return "";
         }
-        // The method's static address, spelled exactly as a direct call
-        // spells it, so dispatch and direct calls name one function.
-        table.initLabels.push_back(resolver_.linkName(*owner) + "__" + name);
+        if (owner->nominal == Kind::Class) {
+            // A class entry normalizes the receiver through an adapter:
+            // the data word holds a reference, not inline bytes, so the
+            // method's static address would read the wrong receiver.
+            table.initLabels.push_back(emitIfaceAdapter(concrete, name, *csig, pos));
+            if (failed_) {
+                return "";
+            }
+        } else if (owner->nominal == Kind::Struct) {
+            // The method's static address, spelled exactly as a direct call
+            // spells it, so dispatch and direct calls name one function.
+            table.initLabels.push_back(resolver_.linkName(*owner) + "__" + name);
+        } else {
+            refuse(pos, "this interface conversion");
+            return "";
+        }
     }
     module_->globals.push_back(std::move(table));
     return label;
+}
+
+std::string Lowerer::emitIfaceAdapter(DeclId concrete, const std::string& method,
+                                      const Signature& sig, Position pos) {
+    const resolve::Decl* owner = resolver_.declById(concrete);
+    if (owner == nullptr) {
+        refuse(pos, "this interface conversion");
+        return "";
+    }
+    // One adapter per (class, method), named under the method's own link
+    // name so two modules' same-named types never share one. A source
+    // function already holding the name refuses below instead of being
+    // shadowed by generated text.
+    std::string hidden =
+        resolver_.linkName(*owner) + "__" + method + "__ifaceadapt";
+    if (!adaptersEmitted_.insert(hidden).second) {
+        return hidden;
+    }
+    for (const ir::Function& fn : module_->functions) {
+        if (fn.name == hidden) {
+            refuse(pos, "this interface conversion");
+            return "";
+        }
+    }
+    int64_t savedFn = -1;
+    if (function_ != nullptr) {
+        savedFn =
+            static_cast<int64_t>(function_ - module_->functions.data());
+    }
+    uint32_t savedValues = valueSeq_;
+    uint32_t savedLabels = labelSeq_;
+    std::vector<uint32_t> savedBlocks = std::move(blockOrder_);
+    std::vector<std::unordered_map<std::string, LocalBinding>> savedLocals =
+        std::move(locals_);
+    std::vector<uint64_t> savedMarks = std::move(scopeMarks_);
+    uint32_t savedCurrent = current_;
+    bool savedTerminated = terminated_;
+
+    ir::Function fn;
+    fn.name = hidden;
+    TypeRef dataPtr{ctx_.pointer(ctx_.basic(BasicKind::U8))};
+    std::vector<Parameter> combined;
+    Parameter receiver;
+    receiver.type = dataPtr.type;
+    receiver.isMutable = false;
+    combined.push_back(receiver);
+    for (const Parameter& p : sig.parameters()) {
+        combined.push_back(p);
+    }
+    const Type* ret = sig.returnType() != nullptr ? sig.returnType() : ctx_.void_();
+    fn.signature = Signature(std::move(combined), ret, Abi::SysV);
+    fn.loc = pos;
+    module_->functions.push_back(std::move(fn));
+    function_ = &module_->functions.back();
+
+    valueSeq_ = 0;
+    labelSeq_ = 0;
+    blockOrder_.clear();
+    locals_.clear();
+    scopeMarks_.clear();
+
+    uint32_t entry = emitBlock(pos);
+    startBlock(entry);
+
+    // The data word's address arrives first: the class reference it holds
+    // is the receiver the method expects, loaded here in two steps — the
+    // slot holds the address, and only a computed address dereferences.
+    std::vector<ir::Value> dataSlots = allocaSlots(dataPtr, pos, kOneWord);
+    for (ir::Value slot : dataSlots) {
+        function_->params.push_back(slot);
+    }
+    ir::Instr addr;
+    addr.op = ir::Op::Load;
+    addr.loc = pos;
+    addr.type = dataPtr;
+    addr.width = ir::IRType::Ptr;
+    addr.addressBase = dataSlots[kFirstWord];
+    addr.isPure = true;
+    ir::Value addrVal = newValue(addr.width, dataPtr, pos);
+    addr.results.push_back(addrVal);
+    emit(std::move(addr));
+    ir::Instr load;
+    load.op = ir::Op::Load;
+    load.loc = pos;
+    load.type = dataPtr;
+    load.width = ir::IRType::Ptr;
+    load.addressBase = addrVal;
+    load.isPure = true;
+    ir::Value self = newValue(load.width, dataPtr, pos);
+    load.results.push_back(self);
+    emit(std::move(load));
+    ir::Instr call;
+    call.op = ir::Op::Call;
+    call.loc = pos;
+    call.callee = resolver_.linkName(*owner) + "__" + method;
+    call.mayTrap = true;
+    {
+        ir::Argument selfArg;
+        selfArg.words.push_back(self);
+        call.arguments.push_back(std::move(selfArg));
+    }
+    const std::vector<Parameter>& declared = function_->signature.parameters();
+    for (uint64_t i = 0; i < static_cast<uint64_t>(sig.parameters().size()); ++i) {
+        TypeRef type{declared[i + kOneWord].type};
+        int count = wordCount(type);
+        if (count < 0) {
+            refuse(pos, "this interface conversion");
+            break;
+        }
+        std::vector<ir::Value> slots = allocaSlots(type, pos,
+                                                   static_cast<uint64_t>(count));
+        for (ir::Value slot : slots) {
+            function_->params.push_back(slot);
+        }
+        LocalBinding binding;
+        binding.slots = std::move(slots);
+        binding.type = type;
+        std::vector<ir::Value> words = loadLocal(pos, binding);
+        if (failed_) {
+            refuse(pos, "this interface conversion");
+            break;
+        }
+        ir::Argument arg;
+        arg.words = words;
+        // The adapter forwards into the method's signature: a float
+        // parameter travels in its SSE class here too.
+        if (type.type != nullptr && type.type->kind() == Kind::Basic &&
+            basicIsFloat(*type.type->basic()) &&
+            arg.words.size() == static_cast<size_t>(kOneWord)) {
+            arg.width = *type.type->basic() == BasicKind::F32
+                            ? ir::IRType::F32
+                            : ir::IRType::F64;
+        }
+        call.arguments.push_back(std::move(arg));
+    }
+    recordParamClasses();
+    if (!failed_) {
+        function_->canThrow = true;
+        ir::Terminator fret;
+        fret.term = ir::Term::Ret;
+        fret.loc = pos;
+        if (ret->kind() != Kind::Void) {
+            std::vector<ir::Value> answers = callResults(call, ret, pos);
+            if (!failed_) {
+                fret.values = std::move(answers);
+            }
+        } else {
+            call.width = ir::IRType::Void;
+        }
+        if (!failed_) {
+            emit(std::move(call));
+            emitTerminator(fret);
+        }
+    }
+    function_ = nullptr;
+
+    function_ =
+        savedFn >= 0 ? &module_->functions[static_cast<size_t>(savedFn)] : nullptr;
+    valueSeq_ = savedValues;
+    labelSeq_ = savedLabels;
+    blockOrder_ = std::move(savedBlocks);
+    locals_ = std::move(savedLocals);
+    scopeMarks_ = std::move(savedMarks);
+    current_ = savedCurrent;
+    terminated_ = savedTerminated;
+    return hidden;
 }
 
 std::vector<ir::Value> Lowerer::boxToInterface(std::vector<ir::Value> words,
@@ -323,19 +503,28 @@ std::vector<ir::Value> Lowerer::boxToInterface(std::vector<ir::Value> words,
         refuse(pos, "this interface conversion");
         return {undefined()};
     }
-    // Inline structs only: the data word holds the concrete bytes when
-    // they fit one word (TYPES.md §4.3). A wider struct needs a class box
-    // the programmer writes, and a class needs the pointer dispatch a
-    // later slice owns — both refuse by name, never by miscompile.
-    if (from.type->kind() != Kind::Struct ||
-        wordCount(from) != static_cast<int>(kOneWord) ||
-        words.size() != kOneWord) {
+    // The data word holds the concrete bytes inline when they fit one
+    // word (TYPES.md §4.3), or the class reference itself. A wider struct
+    // needs a class box the programmer writes — anything else refuses by
+    // name, never by miscompile.
+    std::optional<DeclId> concrete;
+    if (from.type->kind() == Kind::Pointer && from.type->pointee() != nullptr &&
+        from.type->pointee()->kind() == Kind::Class) {
+        if (words.size() != kOneWord) {
+            refuse(pos, "this interface conversion");
+            return {undefined()};
+        }
+        concrete = from.type->pointee()->decl();
+    } else if (from.type->kind() == Kind::Struct &&
+               wordCount(from) == static_cast<int>(kOneWord) &&
+               words.size() == kOneWord) {
+        concrete = from.type->decl();
+    } else {
         refuse(pos, from.type->kind() == Kind::Struct
                           ? "a struct wider than one word in an interface: box it in a class"
                           : "this interface conversion is not lowered yet");
         return {undefined()};
     }
-    std::optional<DeclId> concrete = from.type->decl();
     if (!concrete.has_value()) {
         refuse(pos, "this interface conversion");
         return {undefined()};

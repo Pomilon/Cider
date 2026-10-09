@@ -208,6 +208,13 @@ public:
     // one link-time function address per interface method, in the
     // resolver's methodNames order. Answers the table's link label.
     std::string emitVTable(DeclId concrete, DeclId iface, Position pos);
+    // Emits one receiver adapter for a class method reached through an
+    // interface: dispatch always passes the data word's address, so the
+    // adapter loads the class reference it holds and tail-calls the
+    // method. One adapter per (class, method), shared by every interface
+    // the class satisfies. Answers the adapter's link label.
+    std::string emitIfaceAdapter(DeclId concrete, const std::string& method,
+                                 const Signature& sig, Position pos);
     // Lowers any expression to its words. Scalars answer one value; a string
     // literal answers its address and length. Anything larger is refused.
     std::vector<ir::Value> lowerWords(const Expr* expr);
@@ -494,6 +501,9 @@ private:
     // Vtable labels already emitted into the module: one (concrete,
     // interface) table is built once, however many conversions name it.
     std::unordered_set<std::string> vtablesEmitted_;
+    // Receiver adapters already emitted: one (class, method) adapter is
+    // shared by every vtable that names it.
+    std::unordered_set<std::string> adaptersEmitted_;
 };
 
 }  // namespace lower

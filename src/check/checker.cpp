@@ -2557,6 +2557,20 @@ bool Checker::checkCompatible(Position pos, const Expr* fromExpr, TypeRef from, 
         }
         return false;
     }
+    // A class reference converts to an interface its class implements: the
+    // reference becomes the pair's data word (TYPES.md §4.3). Bare Class
+    // stays above — only a reference is a value a variable can hold.
+    if (to.type->kind() == Kind::Interface && from.type->kind() == Kind::Pointer &&
+        from.type->pointee() != nullptr &&
+        from.type->pointee()->kind() == Kind::Class) {
+        std::optional<DeclId> concrete = from.type->pointee()->decl();
+        std::optional<DeclId> iface = to.type->decl();
+        if (concrete.has_value() && iface.has_value() &&
+            implementsAll(*concrete, *iface, pos)) {
+            return true;
+        }
+        return false;
+    }
     // An upcast points at something that really is a Base.
     if (from.type->kind() == Kind::Pointer && to.type->kind() == Kind::Pointer) {
         const Type* fromPointee = from.type->pointee();
