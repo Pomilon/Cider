@@ -774,6 +774,29 @@ void testFoldedBounds() {
     check(last.ok, "the last in-range element still lowers");
 }
 
+void testValueFalloff() {
+    std::printf("value falloff refuses\n");
+    Lowered r = lower(
+        "func f(n: int) -> int {\n"
+        "    if (n > 0) { return 1; }\n"
+        "}\n"
+        "func main() -> int { return 0; }\n");
+    check(!r.ok && r.stage == "lower", "a value function that may fall off refuses");
+    Lowered both = lower(
+        "func f(n: int) -> int {\n"
+        "    if (n > 0) { return 1; } else { return 2; }\n"
+        "}\n"
+        "func main() -> int { return 0; }\n");
+    check(both.ok, "both arms returning lowers: " + both.stage);
+    Lowered loop = lower(
+        "func spin() -> int {\n"
+        "    while (true) {\n"
+        "    }\n"
+        "}\n"
+        "func main() -> int { return 0; }\n");
+    check(loop.ok, "a diverging loop needs no return: " + loop.stage);
+}
+
 void testRefuseKeepsScopes() {
     // A refusal inside a condition must not unbalance the scope stack:
     // a past-end folded index refuses in lowering — but the function
@@ -1223,6 +1246,7 @@ int main() {
     testTernary();
     testInterp();
     testRefuseKeepsScopes();
+    testValueFalloff();
     testInterfaceParam();
     testInterfaceClassAdapter();
     testNotYetLowered();

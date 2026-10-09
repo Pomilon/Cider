@@ -281,6 +281,52 @@ void Lowerer::sealBlock(uint32_t label) {
     (void)label;
 }
 
+bool Lowerer::falloffReachable(uint32_t target) {
+    if (function_ == nullptr || function_->blocks.empty() || blockOrder_.empty()) {
+        return true;
+    }
+    std::unordered_map<uint32_t, size_t> at;
+    size_t known = function_->blocks.size();
+    while (known > 0) {
+        --known;
+        at[function_->blocks[known].label] = known;
+    }
+    std::unordered_set<uint32_t> seen;
+    std::vector<uint32_t> stack{blockOrder_.front()};
+    while (!stack.empty()) {
+        uint32_t label = stack.back();
+        stack.pop_back();
+        if (label == target) {
+            return true;
+        }
+        if (!seen.insert(label).second) {
+            continue;
+        }
+        auto found = at.find(label);
+        if (found == at.end()) {
+            continue;
+        }
+        const ir::Terminator& term = function_->blocks[found->second].term;
+        switch (term.term) {
+            case ir::Term::Br: stack.push_back(term.target); break;
+            case ir::Term::CondBr:
+                stack.push_back(term.thenTarget);
+                stack.push_back(term.elseTarget);
+                break;
+            case ir::Term::Switch:
+                for (const ir::Case& arm : term.cases) {
+                    stack.push_back(arm.target);
+                }
+                stack.push_back(term.defaultTarget);
+                break;
+            case ir::Term::Ret: break;
+            case ir::Term::Trap: break;
+            case ir::Term::Unreachable: break;
+        }
+    }
+    return false;
+}
+
 ir::Value Lowerer::newValue(ir::IRType width, TypeRef type, Position pos) {
     ir::Value value;
     value.id = valueSeq_++;
@@ -1404,15 +1450,24 @@ void Lowerer::onFuncDecl(FuncDecl& n) {
     // traps instead of answering: the placeholder id the old code pushed
     // here poisoned the frame computation and crashed programs whose
     // last statement closed every path (if/else, match). Reachable
-    // falloff is a checker rejection filed separately; the trap keeps
-    // it loud either way, never garbage.
+    // falloff refuses just below, where the block graph is complete;
+    // the trap keeps an unreachable one loud either way, never garbage.
     if (function_->signature.returnType() == nullptr ||
         function_->signature.returnType()->kind() != Kind::Void) {
         ret.term = ir::Term::Trap;
         ret.reason = ir::TrapReason::Explicit;
     }
+    bool emittedFalloff = !terminated_;
     ret.loc = n.pos;
     emitTerminator(ret);
+    // BUG-277: every path through a value body returns or provably
+    // diverges. Reachability over terminator edges answers exactly —
+    // returns, breaks, loop exits and arm joins are all branches here —
+    // so a reachable falloff fails at compile time.
+    if (!failed_ && emittedFalloff && ret.term == ir::Term::Trap &&
+        falloffReachable(current_)) {
+        refuse(n.pos, "this function may fall off without returning");
+    }
     function_ = nullptr;
 }
 
@@ -1495,14 +1550,20 @@ void Lowerer::onMethodDecl(const std::string& owner, const std::string& name,
 
     ir::Terminator mret;
     mret.term = ir::Term::Ret;
-    // Same value-falloff trap as a free function (see onFuncDecl).
+    // Same value-falloff rule as a free function (see onFuncDecl): a
+    // reachable falloff refuses, an unreachable one stays a dead trap.
     if (function_->signature.returnType() == nullptr ||
         function_->signature.returnType()->kind() != Kind::Void) {
         mret.term = ir::Term::Trap;
         mret.reason = ir::TrapReason::Explicit;
     }
+    bool emittedFalloff = !terminated_;
     mret.loc = body.pos;
     emitTerminator(mret);
+    if (!failed_ && emittedFalloff && mret.term == ir::Term::Trap &&
+        falloffReachable(current_)) {
+        refuse(body.pos, "this function may fall off without returning");
+    }
     function_ = nullptr;
 }
 
@@ -1633,14 +1694,19 @@ void Lowerer::onFuncLit(FuncLit& lit, const std::vector<check::Captured>& captur
 
         ir::Terminator fret;
         fret.term = ir::Term::Ret;
-        // Same value-falloff trap as a free function (see onFuncDecl).
+        // Same value-falloff rule as a free function (see onFuncDecl).
         if (function_->signature.returnType() == nullptr ||
             function_->signature.returnType()->kind() != Kind::Void) {
             fret.term = ir::Term::Trap;
             fret.reason = ir::TrapReason::Explicit;
         }
+        bool emittedFalloff = !terminated_;
         fret.loc = lit.pos;
         emitTerminator(fret);
+        if (!failed_ && emittedFalloff && fret.term == ir::Term::Trap &&
+            falloffReachable(current_)) {
+            refuse(lit.pos, "this function may fall off without returning");
+        }
     }
     function_ = nullptr;
 
@@ -6745,8 +6811,14 @@ void Lowerer::onMatch(MatchStmt& n) {
         brTo(joinLabel);
     } else {
         // Bool-exhaustive with no default: control proves one arm took,
-        // but the block still needs its terminator.
-        brTo(joinLabel);
+        // so arriving here is a checker bug, not a join — trap loudly
+        // instead of falling into whatever follows the match.
+        ir::Terminator trap;
+        trap.term = ir::Term::Trap;
+        trap.reason = ir::TrapReason::Explicit;
+        trap.loc = n.pos;
+        emitTerminator(trap);
+        sealBlock(current_);
     }
     terminated_ = savedTerminated;
     startBlock(joinLabel);
@@ -6808,11 +6880,17 @@ void Lowerer::onWhile(WhileStmt& n) {
     locals_.push_back({});
     ir::Value cond = onIdentOrExpr(n.cond.get(), checker_.typeOf(n.cond.get()));
     locals_.pop_back();
+    // A literal-true condition never exits: the else edge targets the
+    // head itself rather than the exit, so the graph tells the truth —
+    // the exit stays reachable only through breaks. Anything else keeps
+    // the exit edge; an unprovable condition may still leave.
+    const auto* condLit = dynamic_cast<const BoolLit*>(n.cond.get());
+    const bool alwaysTrue = condLit != nullptr && condLit->value;
     ir::Terminator br;
     br.term = ir::Term::CondBr;
     br.cond = cond;
     br.thenTarget = bodyLabel;
-    br.elseTarget = exitLabel;
+    br.elseTarget = alwaysTrue ? headLabel : exitLabel;
     br.loc = n.pos;
     emitTerminator(br);
 

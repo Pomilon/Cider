@@ -427,6 +427,12 @@ public:
 private:
     void refuse(Position pos, const std::string& what);
     void emitTerminator(const ir::Terminator& term);
+    // Whether a block of the function under construction can run: a
+    // breadth-first walk over terminator edges from the entry block. A
+    // reachable falloff in a value function is a compile-time rejection
+    // (every path returns or provably diverges); an unreachable one is
+    // the dead join of diverged arms, refused by nothing.
+    bool falloffReachable(uint32_t target);
     ir::Value constantI64(int64_t value, TypeRef type, Position pos);
     // Classify the register class of every parameter word once the slots
     // are placed; the code generator reads it straight from the function.
