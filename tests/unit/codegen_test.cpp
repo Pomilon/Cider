@@ -449,6 +449,9 @@ void testStruct() {
     check(runQuiet("struct M { var tag: u8; var val: i32; }\n"
                    "func main() -> int { var m: M = new M { tag: 2, val: 40 }; return m.val + m.tag as int; }\n") == 42,
           "mixed widths respect padding");
+    check(runQuiet("struct A { var p: *A; var n: int; }\n"
+                   "func main() -> int { var q: *A = alloc(16, 8) as *A; return (q != nilPtr) as int; }\n") == 1,
+          "a pointer to self still declares and runs");
 }
 
 // Arrays live in memory too: constant and runtime indices, element stores.

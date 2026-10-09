@@ -282,6 +282,37 @@ void testUnions() {
     check(!wide.ok && wide.stage == "check", "a cast wider than the payload fails");
 }
 
+// A by-value cycle has no finite size: the declaration itself is refused,
+// while a pointer to self stays legal (the reference is 8 bytes).
+void testSelfEmbed() {
+    std::printf("self-embedding nominals are refused\n");
+    Checked self = check(
+        "struct A { var a: A; }\n"
+        "func main() -> int { return 0; }\n");
+    check(!self.ok && self.stage == "check", "a struct holding itself fails");
+    Checked mutual = check(
+        "struct A { var x: B; }\n"
+        "struct B { var y: A; }\n"
+        "func main() -> int { return 0; }\n");
+    check(!mutual.ok && mutual.stage == "check", "mutual embedding fails");
+    Checked arr = check(
+        "struct A { var xs: [A; 4]; }\n"
+        "func main() -> int { return 0; }\n");
+    check(!arr.ok && arr.stage == "check", "a self array fails");
+    Checked unionSelf = check(
+        "union U { var a: U; }\n"
+        "func main() -> int { return 0; }\n");
+    check(!unionSelf.ok && unionSelf.stage == "check", "a union holding itself fails");
+    Checked classSelf = check(
+        "class C { var c: C; }\n"
+        "func main() -> int { return 0; }\n");
+    check(!classSelf.ok && classSelf.stage == "check", "a class holding itself fails");
+    Checked ptr = check(
+        "struct A { var p: *A; var n: int; }\n"
+        "func main() -> int { return 0; }\n");
+    check(ptr.ok, "a pointer to self checks: " + ptr.stage);
+}
+
 // A closure literal checks against its spelling, in its own scope.
 void testFuncLitChecks() {
     std::printf("closure literals check\n");
@@ -833,6 +864,7 @@ int main() {
     testGenericCall();
     testGenericStruct();
     testUnions();
+    testSelfEmbed();
     testFnAddr();
     testIncrDecr();
     testBoolCompare();

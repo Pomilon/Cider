@@ -11,8 +11,10 @@
 #ifndef CIDER_CHECK_CHECKER_H
 #define CIDER_CHECK_CHECKER_H
 
+#include <cstdint>
 #include <memory>
 #include <optional>
+#include <set>
 #include <string>
 #include <unordered_map>
 #include <unordered_set>
@@ -154,6 +156,7 @@ public:
     void visitFuncDecl(FuncDecl& n) override;
     void visitStructDecl(StructDecl& n) override;
     void visitClassDecl(ClassDecl& n) override;
+    void visitUnionDecl(UnionDecl& n) override;
     void visitVarDecl(VarDecl& n) override;
     void visitBlock(Block& n) override;
     void visitIfStmt(IfStmt& n) override;
@@ -238,6 +241,16 @@ private:
     TypeRef checkTernary(Ternary& expr, TypeRef expected);
     void checkMethods(DeclId id, Kind kind, std::vector<MethodDecl>& methods);
     void checkCtor(DeclId id, Kind kind, FuncDecl* ctor, bool isInit);
+    // BUG-274: a by-value cycle has no finite size, so the declaration
+    // itself is refused. Only inline layouts embed — struct, union, class
+    // and array — while pointers, interfaces, strings, slices and scalars
+    // are fixed-size and stop the walk (`*A` stays legal).
+    void checkNoSelfEmbed(DeclId self, const std::string& kind,
+                          const std::string& declName,
+                          const std::vector<FieldDecl>& fields,
+                          const std::string& partWord);
+    bool typeEmbedsSelf(const Type* type, DeclId self,
+                        std::set<uint64_t>& seen) const;
     // TYPES.md §9 definite assignment for init bodies: the fields assigned
     // on every path through a statement. Straight lines accumulate
     // `(*self).f = ...`; branches intersect arms; loops contribute nothing

@@ -445,6 +445,7 @@ void Checker::visitStructDecl(StructDecl& n) {
         fail(n.pos, "checker bug: '" + n.name + "' was never resolved");
         return;
     }
+    checkNoSelfEmbed(self->id, "struct", n.name, n.fields, "field");
     // Conformance: every interface method, present with the same signature.
     for (const std::unique_ptr<TypeExpr>& iface : n.interfaces) {
         TypeRef t = resolveHere(iface.get());
@@ -468,9 +469,76 @@ void Checker::visitClassDecl(ClassDecl& n) {
         fail(n.pos, "checker bug: '" + n.name + "' was never resolved");
         return;
     }
+    checkNoSelfEmbed(self->id, "class", n.name, n.fields, "field");
     checkMethods(self->id, Kind::Class, n.methods);
     checkCtor(self->id, Kind::Class, n.init.get(), true);
     checkCtor(self->id, Kind::Class, n.deinit.get(), false);
+}
+
+void Checker::visitUnionDecl(UnionDecl& n) {
+    const resolve::Decl* self = resolver_.lookup(moduleScope_, n.name);
+    if (self == nullptr) {
+        fail(n.pos, "checker bug: '" + n.name + "' was never resolved");
+        return;
+    }
+    checkNoSelfEmbed(self->id, "union", n.name, n.members, "member");
+    // The default walk: each member's type expression, as before.
+    for (auto& m : n.members) {
+        m.accept(*this);
+    }
+}
+
+bool Checker::typeEmbedsSelf(const Type* type, DeclId self,
+                             std::set<uint64_t>& seen) const {
+    if (type == nullptr || type->isError()) {
+        return false;
+    }
+    if (type->kind() == Kind::Array) {
+        // A fixed repetition of inline values embeds what it repeats.
+        return typeEmbedsSelf(type->element(), self, seen);
+    }
+    if (type->kind() != Kind::Struct && type->kind() != Kind::Union &&
+        type->kind() != Kind::Class) {
+        return false;
+    }
+    std::optional<DeclId> id = type->decl();
+    if (!id.has_value()) {
+        return false;
+    }
+    if (sameDecl(*id, self)) {
+        return true;
+    }
+    uint64_t key = (static_cast<uint64_t>(id->module) << 32) | id->index;
+    if (!seen.insert(key).second) {
+        // Some other cycle, not one through self: finite or not, it is not
+        // this declaration's doing.
+        return false;
+    }
+    for (const std::string& field : resolver_.fieldNames(*id)) {
+        TypeRef nested = resolver_.fieldType(*id, field);
+        if (typeEmbedsSelf(nested.type, self, seen)) {
+            return true;
+        }
+    }
+    seen.erase(key);
+    return false;
+}
+
+void Checker::checkNoSelfEmbed(DeclId self, const std::string& kind,
+                               const std::string& declName,
+                               const std::vector<FieldDecl>& fields,
+                               const std::string& partWord) {
+    for (const FieldDecl& field : fields) {
+        TypeRef t = resolver_.fieldType(self, field.name);
+        if (t.isError()) {
+            continue;
+        }
+        std::set<uint64_t> seen;
+        if (typeEmbedsSelf(t.type, self, seen)) {
+            fail(field.pos, kind + " '" + declName + "' holds itself by value in " +
+                                partWord + " '" + field.name + "'");
+        }
+    }
 }
 
 void Checker::checkCtor(DeclId id, Kind kind, FuncDecl* ctor, bool isInit) {
