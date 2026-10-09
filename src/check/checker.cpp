@@ -2663,6 +2663,14 @@ bool Checker::castRowOk(TypeRef from, TypeRef to) const {
     if (a == Kind::Interface && (b == Kind::Class || b == Kind::Struct)) {
         return true;
     }
+    // An interface reads back as a class reference it holds, checked at
+    // runtime like the concrete types above: the data word already is
+    // the reference, so the check is the whole conversion.
+    if (a == Kind::Interface && b == Kind::Pointer &&
+        to.type->pointee() != nullptr &&
+        to.type->pointee()->kind() == Kind::Class) {
+        return true;
+    }
     // A base pointer reads back as a derived one, checked at runtime.
     if (a == Kind::Pointer && b == Kind::Pointer) {
         return true;

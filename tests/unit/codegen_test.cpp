@@ -1088,6 +1088,33 @@ void testInterfaceDynIndex() {
           "a computed element dispatches through its own vtable");
 }
 
+void testInterfaceDowncast() {
+    std::printf("interface downcasts read back\n");
+    bool sig = false;
+    check(runCode("interface Shape {\n"
+                  "    func area() -> int;\n"
+                  "}\n"
+                  "struct Sq {\n"
+                  "    var s: int;\n"
+                  "    func area() -> int { return (*self).s; }\n"
+                  "}\n"
+                  "struct Rect {\n"
+                  "    var w: int;\n"
+                  "    var h: int;\n"
+                  "    func area() -> int { return (*self).w * (*self).h; }\n"
+                  "}\n"
+                  "func main() -> int {\n"
+                  "    var a: Sq = new Sq { s: 9 };\n"
+                  "    var b: Rect = new Rect { w: 3, h: 4 };\n"
+                  "    var sa: Shape = a;\n"
+                  "    var sb: Shape = b;\n"
+                  "    var back: Sq = sa as Sq;\n"
+                  "    return back.s + sb.area();\n"
+                  "}\n",
+                  sig) == 21 && !sig,
+          "a downcast reads back the concrete value");
+}
+
 // The same module emitted twice is byte-identical, and carries no build path.
 void testMultiWordReturn() {
     std::printf("multi-word returns\n");
@@ -1405,6 +1432,7 @@ int main() {
     testInterfaceClass();
     testInterfaceField();
     testInterfaceDynIndex();
+    testInterfaceDowncast();
     testShortCircuit();
     testBoolCompare();
     testCharCompare();

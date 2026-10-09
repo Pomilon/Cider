@@ -5109,6 +5109,78 @@ std::vector<ir::Value> Lowerer::storeToIdent(
     return {undefined()};
 }
 
+std::vector<ir::Value> Lowerer::lowerInterfaceDowncast(const Cast& n, TypeRef source,
+                                                              TypeRef target) {
+    // `sh as Sq`: the pair's vtable must name the (target, interface)
+    // table, or the data word is another type's bytes. The comparison is
+    // the whole check — on a match the data word already holds the
+    // answer, inline or as the reference — and a mismatch traps
+    // (TYPES.md §4.3), never answered plausibly.
+    std::optional<DeclId> iface = source.type->decl();
+    if (!iface.has_value()) {
+        refuse(n.pos, "this cast");
+        return {undefined()};
+    }
+    std::optional<DeclId> concrete;
+    Kind tk = target.type->kind();
+    if (tk == Kind::Struct) {
+        // A wider struct can never sit in a pair: boxing refuses it at
+        // every construction site, so no vtable could name it. Provable
+        // statically, refused statically.
+        if (wordCount(target) != static_cast<int>(kOneWord)) {
+            refuse(n.pos, "a downcast wider than one word can never match");
+            return {undefined()};
+        }
+        concrete = target.type->decl();
+    } else if (tk == Kind::Pointer && target.type->pointee() != nullptr &&
+               target.type->pointee()->kind() == Kind::Class) {
+        concrete = target.type->pointee()->decl();
+    } else {
+        refuse(n.pos, "this cast");
+        return {undefined()};
+    }
+    if (!concrete.has_value()) {
+        refuse(n.pos, "this cast");
+        return {undefined()};
+    }
+    // The expected table: the same label boxing computes, so identity is
+    // pointer equality, for direct entries and adapters alike.
+    std::string label = emitVTable(*concrete, *iface, n.pos);
+    if (failed_) {
+        return {undefined()};
+    }
+    std::vector<ir::Value> words = lowerWords(n.expr.get());
+    if (failed_ || words.size() != kInterfaceWords) {
+        if (!failed_) {
+            refuse(n.pos, "this cast");
+        }
+        return {undefined()};
+    }
+    TypeRef vtableType = wordType(source, kVtableWord);
+    ir::Instr addr;
+    addr.op = ir::Op::DataAddr;
+    addr.loc = n.pos;
+    addr.type = vtableType;
+    addr.width = ir::IRType::Ptr;
+    addr.globalLabel = label;
+    addr.isPure = true;
+    ir::Value want = newValue(addr.width, vtableType, n.pos);
+    addr.results.push_back(want);
+    emit(std::move(addr));
+    if (failed_) {
+        return {undefined()};
+    }
+    ir::Value ok = emitI64Cmp(n.pos, BinOp::Eq, words[kVtableWord], want);
+    if (failed_) {
+        return {undefined()};
+    }
+    emitCheckTrap(n.pos, ok, ir::TrapReason::Downcast);
+    if (failed_) {
+        return {undefined()};
+    }
+    return {words[kFirstWord]};
+}
+
 ir::Value Lowerer::onCast(Cast& n) {
     if (failed_) {
         return undefined();
@@ -5119,6 +5191,20 @@ ir::Value Lowerer::onCast(Cast& n) {
     // multi-word expression value.
     TypeRef source = checker_.typeOf(n.expr.get());
     TypeRef target = checker_.typeOf(&n);
+    // An interface source reads back through the downcast path, never the
+    // scalar cast below: the vtable check owns the conversion, and a
+    // scalar cast would answer unchecked bytes.
+    if (!source.isError() && !target.isError() &&
+        source.type->kind() == Kind::Interface) {
+        std::vector<ir::Value> got = lowerInterfaceDowncast(n, source, target);
+        if (failed_ || got.size() != kOneWord) {
+            if (!failed_) {
+                refuse(n.pos, "this cast");
+            }
+            return undefined();
+        }
+        return got[0];
+    }
     if (!source.isError() && !target.isError() && source.type->kind() == Kind::Union) {
         Place base;
         if (!resolvePlace(n.expr.get(), base)) {

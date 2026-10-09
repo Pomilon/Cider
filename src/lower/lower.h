@@ -204,6 +204,12 @@ public:
     std::vector<ir::Value> boxToInterface(std::vector<ir::Value> words,
                                           TypeRef from, TypeRef to,
                                           Position pos);
+    // Reads an interface back as a concrete struct value or class
+    // reference (TYPES.md §4.3): the pair's vtable must name the
+    // (target, interface) table, or the data word is another type's
+    // bytes and the read traps. Anything else refuses.
+    std::vector<ir::Value> lowerInterfaceDowncast(const Cast& n, TypeRef source,
+                                                  TypeRef target);
     // Emits the vtable for one (concrete, interface) pair, once per label:
     // one link-time function address per interface method, in the
     // resolver's methodNames order. Answers the table's link label.
