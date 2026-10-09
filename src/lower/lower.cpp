@@ -2086,6 +2086,14 @@ void Lowerer::constructStruct(const std::vector<ir::Value>& slots, const NewStru
         if (failed_) {
             return;
         }
+        // A concrete value for an interface field boxes to the pair
+        // before the range store below, which then stores two words.
+        value = boxToInterface(std::move(value),
+                               checker_.typeOf(field.value.get()), fieldType,
+                               field.value->pos);
+        if (failed_) {
+            return;
+        }
         Place at = base;
         at.off = fieldOff;
         at.type = fieldType;
@@ -2300,6 +2308,13 @@ void Lowerer::constructArray(const std::vector<ir::Value>& slots, const NewArray
         if (failed_) {
             return;
         }
+        // A concrete filler for an interface array boxes once, then fills
+        // every element with the same pair.
+        one = boxToInterface(std::move(one), checker_.typeOf(n.inits[0].get()),
+                             element, n.inits[0]->pos);
+        if (failed_) {
+            return;
+        }
         if (isZeroRepeatFiller(*n.inits[0], element)) {
             // Zero reaches through: one zero word per element word, so a
             // nested array fills with zeros instead of one element value.
@@ -2327,6 +2342,13 @@ void Lowerer::constructArray(const std::vector<ir::Value>& slots, const NewArray
     }
     for (uint64_t i = 0; i < static_cast<uint64_t>(n.inits.size()); ++i) {
         std::vector<ir::Value> one = lowerWords(n.inits[i].get());
+        if (failed_) {
+            return;
+        }
+        // A concrete element for an interface array boxes to the pair
+        // before the range store below, like every other aggregate site.
+        one = boxToInterface(std::move(one), checker_.typeOf(n.inits[i].get()),
+                             element, n.inits[i]->pos);
         if (failed_) {
             return;
         }
@@ -4299,6 +4321,14 @@ void Lowerer::constructClass(const std::vector<ir::Value>& slots, const NewStruc
         if (failed_) {
             return;
         }
+        // A concrete value for an interface field boxes like the struct
+        // path: the class field holds the same pair.
+        value = boxToInterface(std::move(value),
+                               checker_.typeOf(field.value.get()), fieldType,
+                               field.value->pos);
+        if (failed_) {
+            return;
+        }
         Place at = base;
         at.off = fieldOff;
         at.type = fieldType;
@@ -5813,22 +5843,42 @@ std::vector<ir::Value> Lowerer::lowerCallWords(Call& n) {
                 refuse(n.pos, "this call");
                 return {undefined()};
             }
-            // A value behind a pointer, inside another aggregate, or naming
-            // a computed address has no direct slots: those dispatches
-            // refuse by name until their slice, rather than addressing the
-            // wrong words.
-            if (iface.hasIndirect || iface.isAddress || iface.off != 0) {
+            // A value naming a computed address has no direct slots: those
+            // dispatches refuse by name until their slice, rather than
+            // addressing the wrong words.
+            if (iface.isAddress) {
                 refuse(n.pos,
-                       "an interface method through a pointer or field is not lowered yet");
+                       "an interface method through a computed address is not lowered yet");
+                return {undefined()};
+            }
+            // The pair sits at the place's byte offset, in whole words: a
+            // local field, a global's member, or an address behind a
+            // pointer. A mid-word offset is a lowerer bug, not a program.
+            int64_t per = layout::kSizePointer;
+            if (iface.off < 0 || iface.off % per != 0) {
+                refuse(n.pos, "this call");
                 return {undefined()};
             }
             TypeRef vtableType = wordType(iface.type, kVtableWord);
             ir::Value vtable;
             ir::Value dataAddr;
             if (!iface.global.empty()) {
-                // A module-level interface value: the vtable loads from the
-                // label's second word, and the label itself addresses the
-                // data (TYPES.md §3.1 offsets come from layout).
+                // A method on a global names a label, not slots: global
+                // interface state has no constant form yet, so no such
+                // value can exist — this refuses until that slice lands,
+                // like the class/struct path refuses global methods.
+                refuse(n.pos,
+                       "an interface method on a global is not lowered yet");
+                return {undefined()};
+            } else if (iface.hasIndirect) {
+                // An address behind a pointer: advanced past the offset,
+                // with the vtable read through the pair it names.
+                dataAddr = iface.off == 0 ? iface.indirect
+                                          : computedBase(iface.indirect, iface.off,
+                                                         n.pos);
+                if (failed_) {
+                    return {undefined()};
+                }
                 ir::Instr load;
                 load.op = ir::Op::Load;
                 load.loc = n.pos;
@@ -5837,25 +5887,25 @@ std::vector<ir::Value> Lowerer::lowerCallWords(Call& n) {
                 if (failed_) {
                     return {undefined()};
                 }
-                load.globalLabel = iface.global;
+                load.addressBase = dataAddr;
                 load.displacement = layout::kOffsetInterfaceVtable;
                 load.isPure = true;
                 vtable = newValue(load.width, vtableType, n.pos);
                 load.results.push_back(vtable);
                 emit(std::move(load));
-                TypeRef addrType{ctx_.pointer(ctx_.basic(BasicKind::U8))};
-                ir::Instr at;
-                at.op = ir::Op::DataAddr;
-                at.loc = n.pos;
-                at.type = addrType;
-                at.width = ir::IRType::Ptr;
-                at.globalLabel = iface.global;
-                at.isPure = true;
-                dataAddr = newValue(at.width, addrType, n.pos);
-                at.results.push_back(dataAddr);
-                emit(std::move(at));
             } else {
-                if (iface.slots.size() != kInterfaceWords) {
+                // Direct slots, with the pair at the place's word offset:
+                // a bare value at word zero, a field deeper in. A place
+                // with no slots at all names a computed address instead.
+                if (iface.slots.empty()) {
+                    refuse(n.pos,
+                           "an interface method through a computed address is not lowered yet");
+                    return {undefined()};
+                }
+                uint64_t atWord =
+                    static_cast<uint64_t>(iface.off / per);
+                if (atWord + kVtableWord >=
+                    static_cast<uint64_t>(iface.slots.size())) {
                     refuse(n.pos, "this call");
                     return {undefined()};
                 }
@@ -5867,12 +5917,12 @@ std::vector<ir::Value> Lowerer::lowerCallWords(Call& n) {
                 if (failed_) {
                     return {undefined()};
                 }
-                load.addressBase = iface.slots[kVtableWord];
+                load.addressBase = iface.slots[atWord + kVtableWord];
                 load.isPure = true;
                 vtable = newValue(load.width, vtableType, n.pos);
                 load.results.push_back(vtable);
                 emit(std::move(load));
-                dataAddr = computedBase(iface.slots[kFirstWord], 0, n.pos);
+                dataAddr = computedBase(iface.slots[atWord], 0, n.pos);
             }
             if (failed_) {
                 return {undefined()};

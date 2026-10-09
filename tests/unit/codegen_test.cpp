@@ -1036,6 +1036,30 @@ void testInterfaceClass() {
           "a struct and a class dispatch through one interface");
 }
 
+void testInterfaceField() {
+    std::printf("interface fields dispatch\n");
+    bool sig = false;
+    check(runCode("interface Shape {\n"
+                  "    func area() -> int;\n"
+                  "}\n"
+                  "struct Sq {\n"
+                  "    var s: int;\n"
+                  "    func area() -> int { return (*self).s; }\n"
+                  "}\n"
+                  "struct Holder {\n"
+                  "    var id: int;\n"
+                  "    var shape: Shape;\n"
+                  "    var tail: int;\n"
+                  "}\n"
+                  "func main() -> int {\n"
+                  "    var a: Sq = new Sq { s: 9 };\n"
+                  "    var h: Holder = new Holder { id: 1, shape: a, tail: 2 };\n"
+                  "    return h.shape.area() + h.id + h.tail;\n"
+                  "}\n",
+                  sig) == 12 && !sig,
+          "an interface field dispatches at its offset");
+}
+
 // The same module emitted twice is byte-identical, and carries no build path.
 void testMultiWordReturn() {
     std::printf("multi-word returns\n");
@@ -1351,6 +1375,7 @@ int main() {
     testClosure();
     testInterface();
     testInterfaceClass();
+    testInterfaceField();
     testShortCircuit();
     testBoolCompare();
     testCharCompare();
