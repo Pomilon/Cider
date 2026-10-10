@@ -33,6 +33,10 @@ namespace driver {
 
 namespace {
 
+// How much pending input one read pulls: a chunk, not a byte at a time.
+constexpr uint64_t kPendingChunk = 4096;
+constexpr uint64_t kOneByte = 1;
+
 struct Pipeline {
     bool ok = false;
     std::string file;
@@ -47,6 +51,23 @@ std::string at(const Position& pos) {
 }
 
 std::string readFile(const std::string& path, bool& found);
+// The bytes a read from standard input answers on the interpreter leg.
+// The compiled leg's child inherits the same stream, so both see the same
+// bytes; a terminal has nothing pending to give, and reading it would wait
+// forever.
+std::string readPendingInput() {
+    if (isatty(0)) {
+        return "";
+    }
+    std::string text;
+    char chunk[kPendingChunk];
+    uint64_t taken = std::fread(chunk, kOneByte, sizeof(chunk), stdin);
+    while (taken > 0) {
+        text.append(chunk, static_cast<size_t>(taken));
+        taken = std::fread(chunk, kOneByte, sizeof(chunk), stdin);
+    }
+    return text;
+}
 
 bool runFront(const std::string& file, const std::string& text, Pipeline& pipe,
               bool noOpt) {
@@ -307,7 +328,7 @@ int runDriver(const std::vector<std::string>& args, std::string& out, std::strin
             err = "target vm is not emitted: an interpreter, not an emitter\n";
             return 2;
         }
-        vm::VmResult interpreted = vm::run(*pipe.module);
+        vm::VmResult interpreted = vm::run(*pipe.module, readPendingInput());
         if (!interpreted.ok) {
             err = at(interpreted.pos) + ": " + interpreted.error + "\n";
             return 1;

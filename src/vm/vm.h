@@ -34,8 +34,10 @@ struct VmResult {
     Position pos{"", 1, 1};
 };
 
-// Interprets main (or _start) of one lowered module with no arguments.
-VmResult run(const ir::Module& module);
+// Interprets main (or _start) of one lowered module, with the bytes a
+// read from standard input will answer.
+VmResult run(const ir::Module& module, const std::string& pendingInput);
+VmResult run(const ir::Module& module, const std::string& pendingInput);
 
 }  // namespace vm
 }  // namespace cider

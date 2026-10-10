@@ -68,6 +68,26 @@ constexpr int kSigIll = 4;
 // answer of whatever byte the frame happens to leave there.
 constexpr uint64_t kNullGuard = 4096;
 
+// The x86-64 the asm blocks a Cider program writes may use: the sixteen
+// general registers under their own names, the widths a narrow spelling
+// writes, and the errno values the syscalls answer.
+constexpr uint64_t kRegisterCount = 16;
+constexpr uint64_t kOneByte = 1;
+constexpr uint64_t kFourBytes = 4;
+constexpr uint64_t kExitRegister = 60;
+constexpr int64_t kErrFault = -14;
+constexpr int64_t kErrInval = -22;
+constexpr int64_t kErrNoMem = -12;
+constexpr int64_t kErrBadFd = -9;
+constexpr int64_t kErrNoSys = -38;
+constexpr uint64_t kSysRead = 0;
+constexpr uint64_t kSysWrite = 1;
+constexpr uint64_t kSysMmap = 9;
+constexpr uint64_t kExitGroup = 231;
+// How many placeholders a block may name, which is the count the emitter
+// stages into registers: a sixth has nowhere to go.
+constexpr uint64_t kStagedLimit = 5;
+
 // The largest value id the function defines, params included: ids are dense
 // from zero, so the id width is a word count.
 uint32_t topId(const Function& fn) {
@@ -170,7 +190,9 @@ uint64_t trimmedToWidth(int64_t bits, IRType width) {
 
 int64_t signExtend(uint64_t bits, uint64_t bytes) {
     uint64_t shift = kByteBits * (sizeof(uint64_t) - bytes);
-    return static_cast<int64_t>((bits << shift) >> shift);
+    // The shift back has to be arithmetic: shifting the unsigned word would
+    // leave the pattern's own width (a -1 in four bytes answers 4294967295).
+    return static_cast<int64_t>(static_cast<int64_t>(bits << shift) >> shift);
 }
 
 // One activation: a value-id map, the base of the region its allocas own,
@@ -179,6 +201,10 @@ int64_t signExtend(uint64_t bits, uint64_t bytes) {
 struct Frame {
     std::unordered_map<uint32_t, int64_t> slots;
     std::unordered_set<uint32_t> allocaIds;
+    // The general registers, which outlive one asm block and die with the
+    // function: a program writes a syscall as several blocks, and the
+    // model has to let them see each other's writes.
+    int64_t regs[kRegisterCount] = {};
     int64_t base = 0;
 };
 
@@ -192,9 +218,14 @@ struct Runner {
     // Link label to the address its bytes were laid down at, and link name
     // to the tag an indirect call resolves by.
     std::unordered_map<std::string, int64_t> labels;
+    std::unordered_map<uint32_t, std::string> addrWords;
     std::unordered_map<std::string, int64_t> functionTags;
     std::unordered_map<std::string, const Function*> functionsByName;
     std::unordered_map<int64_t, const Function*> functionsByTag;
+    // The bytes the pending input holds, and how far the program has read
+    // into them: a read syscall consumes from here and stops at the end.
+    std::string stdIn_;
+    uint64_t stdInAt_ = 0;
     // Every host hand-out lives from here to the end of memory, and remembers
     // its size so realloc copies and free validates.
     int64_t heapAt = 0;
@@ -234,6 +265,20 @@ struct Runner {
 
     void write(const Value& result, int64_t bits) {
         frames.back().slots[result.id] = bits;
+    }
+
+    // A value that names slot storage writes its own cell, because that is
+    // what the emitter's copy-back does; any other value is an ordinary
+    // register-style write. An asm block's placeholder is the same kind of
+    // name either way, so the split is the only question to ask.
+    bool writeBack(const Value& value, int64_t bits, Position pos) {
+        if (frames.back().allocaIds.find(value.id) !=
+            frames.back().allocaIds.end()) {
+            return storeBytes(cellAddress(value.id), layout::kSizePointer,
+                              static_cast<uint64_t>(bits), pos);
+        }
+        write(value, bits);
+        return true;
     }
 
     // The native frame covers every value id at rsp+id*8, and an alloca's
@@ -317,16 +362,391 @@ struct Runner {
         appendBytes(bytes, layout::kSizePointer);
     }
 
+    // The address a following append will land at: the byte offset the
+    // padding step rounds up to. A label recorded this way names the first
+    // byte of the next blob, which is what a load through the label reads.
+    int64_t nextAppendAt() const {
+        uint64_t remainder = memory.size() % layout::kSizePointer;
+        if (remainder == kZeroCell) {
+            return static_cast<int64_t>(memory.size());
+        }
+        return static_cast<int64_t>(memory.size() + layout::kSizePointer -
+                                    remainder);
+    }
+
     // True when the module holds a label's bytes: a rodata blob answers its
     // address, a global its own, and a vtable the tags of the functions its
     // entries name. Anything else names a label nothing laid down, which is
     // a lowering bug rather than a value.
+    // --- The asm blocks -----------------------------------------------------
+
+    // The sixteen general registers, named as the blocks spell them. A 32-
+    // or 8-bit spelling writes its own width and zeroes the rest of the
+    // register, which is what the hardware does, so a narrow move never
+    // leaves a stale upper half behind.
+    struct RegName {
+        const char* full;
+        const char* half;
+        const char* byte;
+    };
+    static constexpr RegName kRegs[kRegisterCount] = {
+        {"rax", "eax", "al"},   {"rcx", "ecx", "cl"},
+        {"rdx", "edx", "dl"},   {"rbx", "ebx", "bl"},
+        {"rsp", "esp", "spl"},  {"rbp", "ebp", "bpl"},
+        {"rsi", "esi", "sil"},  {"rdi", "edi", "dil"},
+        {"r8", "r8d", "r8b"},   {"r9", "r9d", "r9b"},
+        {"r10", "r10d", "r10b"}, {"r11", "r11d", "r11b"},
+        {"r12", "r12d", "r12b"}, {"r13", "r13d", "r13b"},
+        {"r14", "r14d", "r14b"}, {"r15", "r15d", "r15b"},
+    };
+
+    // The register a spelling names, and the width it writes: zero at a
+    // full register, four at the 32-bit spelling, one at the 8-bit one.
+    int regIndex(const std::string& name, uint64_t& width) const {
+        for (uint64_t i = 0; i < kRegisterCount; ++i) {
+            if (name == kRegs[i].full) {
+                width = kZeroCell;
+                return static_cast<int>(i);
+            }
+            if (name == kRegs[i].half) {
+                width = kFourBytes;
+                return static_cast<int>(i);
+            }
+            if (name == kRegs[i].byte) {
+                width = kOneByte;
+                return static_cast<int>(i);
+            }
+        }
+        return -1;
+    }
+
+    // A placeholder's value as the emitter stages it: the slot's own cell
+    // when the name is storage, the register-style word otherwise. A
+    // parameter is bound into its cell, so reading the cell is the only way
+    // to see the argument that arrived.
+    int64_t stageValue(const Value& operand, Position pos) {
+        if (frames.back().allocaIds.find(operand.id) !=
+            frames.back().allocaIds.end()) {
+            bool ok = false;
+            uint64_t bits = loadBytes(cellAddress(operand.id),
+                                      layout::kSizePointer, pos, ok);
+            if (!ok) {
+                return 0;
+            }
+            return static_cast<int64_t>(bits);
+        }
+        auto known = addrWords.find(operand.id);
+        if (known != addrWords.end()) {
+            auto at = labels.find(known->second);
+            if (at == labels.end()) {
+                return 0;
+            }
+            bool ok = false;
+            uint64_t bits = loadBytes(at->second, layout::kSizePointer,
+                                      pos, ok);
+            if (!ok) {
+                return 0;
+            }
+            return static_cast<int64_t>(bits);
+        }
+        return read(operand);
+    }
+
+    void regWrite(const std::string& name, int64_t* regs, int64_t bits) const {        uint64_t width = 0;
+        int index = regIndex(name, width);
+        if (index < 0) {
+            return;
+        }
+        uint64_t masked = static_cast<uint64_t>(bits);
+        if (width == kFourBytes) {
+            masked &= kLowFourBytes;
+        } else if (width == kOneByte) {
+            masked &= kByteMask;
+        }
+        regs[index] = static_cast<int64_t>(masked);
+    }
+
+    // The mapping the kernel answers: a write to one of the two standard
+    // streams lands in the run's own output, a buffer outside the program
+    // memory is a fault, anything else is the errno the call would return.
+    int64_t syscallWrite(int64_t fd, int64_t buffer, int64_t count) {
+        if (count == kZeroCell) {
+            return 0;
+        }
+        if (buffer < static_cast<int64_t>(kNullGuard) || count < 0 ||
+            static_cast<uint64_t>(buffer) + static_cast<uint64_t>(count) >
+                memory.size()) {
+            return kErrFault;
+        }
+        uint64_t begin = static_cast<uint64_t>(buffer);
+        uint64_t span = static_cast<uint64_t>(count);
+        if (fd == 1) {
+            out.stdoutText.append(
+                reinterpret_cast<const char*>(memory.data()) +
+                    static_cast<long>(begin),
+                span);
+            return count;
+        }
+        if (fd == 2) {
+            out.stderrText.append(
+                reinterpret_cast<const char*>(memory.data()) +
+                    static_cast<long>(begin),
+                span);
+            return count;
+        }
+        return kErrBadFd;
+    }
+
+    // A read answers the bytes the pending input holds and moves the
+    // cursor: a zero count reads nothing, a bad buffer faults, and the
+    // stream ends by answering less than was asked.
+    int64_t syscallRead(int64_t fd, int64_t buffer, int64_t count) {
+        if (count == kZeroCell) {
+            return 0;
+        }
+        if (fd != 0) {
+            return kErrBadFd;
+        }
+        uint64_t left = stdIn_.size() - stdInAt_;
+        if (left == kZeroPointer) {
+            // At end of input the read answers zero without touching the
+            // buffer, so even the nil pointer passes: only a negative one,
+            // which no access check admits, still faults. A buffer that
+            // would be read from, below, still refuses at its own check.
+            if (buffer < kZeroPointer || count < kZeroPointer) {
+                return kErrFault;
+            }
+            return 0;
+        }
+        if (buffer < static_cast<int64_t>(kNullGuard) || count < 0 ||
+            static_cast<uint64_t>(buffer) + static_cast<uint64_t>(count) >
+                memory.size()) {
+            return kErrFault;
+        }
+        uint64_t want = static_cast<uint64_t>(count);
+        uint64_t take = want < left ? want : left;
+        for (uint64_t i = 0; i < take; ++i) {
+            memory[static_cast<size_t>(buffer) + i] =
+                static_cast<uint8_t>(stdIn_[stdInAt_ + i]);
+        }
+        stdInAt_ += take;
+        return static_cast<int64_t>(take);
+    }
+
+    // mmap answers a fresh region or the errno the kernel would: a zero
+    // length is invalid, a length no address space would hold is out of
+    // memory, and a real one is rounded to a word so an aligned reader
+    // never straddles the region's end.
+    int64_t syscallMmap(int64_t length) {
+        if (length == kZeroCell) {
+            return kErrInval;
+        }
+        if (length < 0 || static_cast<uint64_t>(length) > kMemoryCap ||
+            memory.size() + static_cast<uint64_t>(length) > kMemoryCap) {
+            return kErrNoMem;
+        }
+        uint64_t span = static_cast<uint64_t>(length);
+        uint64_t slide = memory.size();
+        if (slide % layout::kSizePointer != kZeroCell) {
+            memory.insert(memory.end(),
+                          layout::kSizePointer -
+                              slide % layout::kSizePointer,
+                          kZeroCell);
+            slide = memory.size();
+        }
+        int64_t at = static_cast<int64_t>(slide);
+        memory.insert(memory.end(), span, kZeroCell);
+        return at;
+    }
+
+    void hostExit(int64_t code, const std::string& text) {
+        out.ok = true;
+        out.exitCode = static_cast<int>(code & kByteMask);
+        out.stderrText += text;
+        programDone = true;
+    }
+
+    static std::string trimSpaces(const std::string& line) {
+        uint64_t begin = 0;
+        uint64_t end = line.size();
+        while (begin < end && (line[begin] == ' ' || line[begin] == '\t')) {
+            ++begin;
+        }
+        while (end > begin && (line[end - 1] == ' ' || line[end - 1] == '\t')) {
+            --end;
+        }
+        return line.substr(static_cast<std::string::size_type>(begin),
+                           static_cast<std::string::size_type>(end - begin));
+    }
+
+    static bool parseSigned(const std::string& text, int64_t& out) {
+        if (text.empty()) {
+            return false;
+        }
+        bool negative = false;
+        uint64_t at = 0;
+        if (text[0] == '-') {
+            negative = true;
+            at = 1;
+        }
+        if (at >= text.size()) {
+            return false;
+        }
+        uint64_t value = 0;
+        for (; at < text.size(); ++at) {
+            if (text[at] < '0' || text[at] > '9') {
+                return false;
+            }
+            value = value * 10 + static_cast<uint64_t>(text[at] - '0');
+        }
+        uint64_t bits = negative ? (0 - value) : value;
+        out = static_cast<int64_t>(bits);
+        return true;
+    }
+
+    // A block is a closed set of moves and one syscall dispatcher over the
+    // interpreter's own registers and memory. Anything outside it refuses
+    // naming the line, because a block the interpreter half-ran would
+    // answer differently from the compiled one.
+    bool asmBlock(const Instr& instr) {
+        if (instr.asmNames.size() > kStagedLimit) {
+            return refuse(instr.loc,
+                          "more placeholders than this block can stage");
+        }
+        uint64_t named = static_cast<uint64_t>(instr.asmNames.size());
+        if (named > instr.operands.size()) {
+            named = static_cast<uint64_t>(instr.operands.size());
+        }
+        // The register file belongs to the running function, not to one
+        // block: a `mov rax, 60` in one statement and a `syscall` in the
+        // next must see each other's writes, which is why a program writes
+        // a syscall as several blocks in the first place.
+        int64_t* regs = frames.back().regs;
+        std::unordered_map<std::string, int64_t> held;
+        std::string text = instr.asmText;
+        for (uint64_t i = 0; i < named; ++i) {
+            const std::string key = "{" + instr.asmNames[i] + "}";
+            const std::string pseudo = "@" + std::to_string(i);
+            held[pseudo] = stageValue(instr.operands[i], instr.loc);
+            auto at = std::string::size_type{};
+            while ((at = text.find(key, at)) != std::string::npos) {
+                text.replace(at, key.size(), pseudo);
+                at += pseudo.size();
+            }
+        }
+        auto lookup = [&](const std::string& name, int64_t& bits) {
+            if (!name.empty() && name[0] == '@') {
+                auto found = held.find(name);
+                if (found == held.end()) {
+                    return false;
+                }
+                bits = found->second;
+                return true;
+            }
+            uint64_t width = 0;
+            int index = regIndex(name, width);
+            if (index < 0) {
+                return false;
+            }
+            bits = regs[index];
+            return true;
+        };
+        auto store = [&](const std::string& name, int64_t bits) {
+            if (!name.empty() && name[0] == '@') {
+                held[name] = bits;
+                return;
+            }
+            regWrite(name, regs, bits);
+        };
+        uint64_t at = 0;
+        while (at < text.size()) {
+            size_t eol = text.find('\n', static_cast<size_t>(at));
+            if (eol == std::string::npos) {
+                eol = text.size();
+            }
+            std::string line = trimSpaces(text.substr(
+                static_cast<size_t>(at), eol - static_cast<size_t>(at)));
+            at = eol + 1;
+            if (line.empty()) {
+                continue;
+            }
+            if (line == "syscall") {
+                int64_t result = 0;
+                bool handled = true;
+                switch (static_cast<uint64_t>(regs[0])) {
+                    case kSysRead:
+                        result = syscallRead(regs[7], regs[6], regs[2]);
+                        break;
+                    case kSysWrite:
+                        result = syscallWrite(regs[7], regs[6], regs[2]);
+                        break;
+                    case kSysMmap:
+                        result = syscallMmap(regs[6]);
+                        break;
+                    case kExitGroup:
+                    case kExitRegister:
+                        hostExit(regs[7], "");
+                        return true;
+                    default:
+                        handled = false;
+                        break;
+                }
+                if (!handled) {
+                    return refuse(instr.loc, "vm cannot run syscall " +
+                                                  std::to_string(regs[0]));
+                }
+                regs[0] = result;
+                continue;
+            }
+            std::string::size_type comma = line.find(',');
+            if (line.rfind("mov ", 0) == 0 && comma != std::string::npos) {
+                std::string target = trimSpaces(line.substr(4, comma - 4));
+                std::string source = trimSpaces(line.substr(comma + 1));
+                int64_t bits = 0;
+                if (lookup(source, bits) || parseSigned(source, bits)) {
+                    store(target, bits);
+                    continue;
+                }
+                return refuse(instr.loc, "vm cannot run this asm block: " + line);
+            }
+            if (line.rfind("xor ", 0) == 0 && comma != std::string::npos) {
+                std::string target = trimSpaces(line.substr(4, comma - 4));
+                std::string source = trimSpaces(line.substr(comma + 1));
+                int64_t left = 0;
+                int64_t right = 0;
+                if (!lookup(target, left) || !lookup(source, right)) {
+                    return refuse(instr.loc,
+                                  "vm cannot run this asm block: " + line);
+                }
+                store(target, left ^ right);
+                continue;
+            }
+            return refuse(instr.loc, "vm cannot run this asm block: " + line);
+        }
+        for (uint64_t i = 0; i < named; ++i) {
+            const std::string pseudo = "@" + std::to_string(i);
+            auto found = held.find(pseudo);
+            if (found == held.end()) {
+                continue;
+            }
+            if (!writeBack(instr.operands[i], found->second, instr.loc)) {
+                return false;
+            }
+        }
+        return true;
+    }
+
     bool addressOf(const Instr& instr) {
         auto found = labels.find(instr.globalLabel);
         if (found == labels.end()) {
             return refuse(instr.loc, "vm cannot address '" + instr.globalLabel + "'");
         }
         write(instr.results[0], found->second);
+        // A word the emitter could print as a memory reference: recorded so
+        // an asm placeholder staged from it reads the label's image, the way
+        // the compiled leg's memory operand does. Ids restart per function,
+        // so only the newest write for an id counts.
+        addrWords[instr.results[0].id] = instr.globalLabel;
         return true;
     }
 
@@ -672,13 +1092,16 @@ struct Runner {
         if (instr.width == ir::IRType::F32 || instr.width == ir::IRType::F64) {
             return refuse(instr.loc, "vm cannot run float shifts yet");
         }
-        uint64_t bits = narrowBits(instr.width);
         uint64_t count = static_cast<uint64_t>(read(instr.operands[1])) &
                          ((uint64_t{1} << shiftMaskBits(instr.width)) - 1);
         uint64_t value = trimmedToWidth(read(instr.operands[0]), instr.width);
         uint64_t answer = 0;
         if (instr.op == Op::Shl) {
-            answer = (value << count) & ((uint64_t{1} << bits) - 1);
+            // The mask has to come from trimmedToWidth: shifting a one by the
+            // width's own bit count is undefined, and answers a zero mask on
+            // every shape that asks for the whole word.
+            uint64_t shifted = value << count;
+            answer = trimmedToWidth(static_cast<int64_t>(shifted), instr.width);
         } else if (ir::signedWidth(instr.width, instr.type)) {
             int64_t extended = extendToWidth(read(instr.operands[0]), instr.width,
                                              instr.type);
@@ -1063,6 +1486,10 @@ struct Runner {
         Frame frame;
         frame.base = static_cast<int64_t>(memory.size());
         memory.resize(memory.size() + static_cast<size_t>(bytes), kZeroCell);
+        // A frame is never released, and the bump allocator hands memory out
+        // from the same flat span: unless the heap cursor steps over this
+        // region the next allocation writes into the live frame.
+        heapAt = static_cast<int64_t>(memory.size());
         // The emitter's prologue moves each argument word into its own slot,
         // where a load through the slot's id reads it back: the parameter's
         // value lives in the cell, not in a value register.
@@ -1079,6 +1506,7 @@ struct Runner {
         }
         // Only an alloca names slot storage; every other id that reaches an
         // addressBase is a computed address, so the set decides the branch.
+        addrWords.clear();
         for (const Block& block : fn.blocks) {
             for (const Instr& instr : block.body) {
                 if (instr.op == Op::Alloca && !instr.results.empty()) {
@@ -1108,9 +1536,20 @@ struct Runner {
             }
             const Block& block = fn.blocks[current];
             for (const Instr& instr : block.body) {
+                if (programDone) {
+                    // A host call inside the block ended the program: the
+                    // remaining instructions of this block never run, and
+                    // the run answers the exit the host named.
+                    return false;
+                }
                 if (!step(instr)) {
                     return false;
                 }
+            }
+            if (programDone) {
+                // The last instruction of the block ended the program: its
+                // terminator is nothing the program ever reaches.
+                return false;
             }
             const Terminator& term = block.term;
             switch (term.term) {
@@ -1412,9 +1851,13 @@ struct Runner {
             case Op::FRem:
             case Op::Extract:
             case Op::Insert:
-            case Op::Asm:
                 return refuse(instr.loc,
                               std::string("vm cannot run ") + opName(instr.op) + " yet");
+            case Op::Asm:
+                // The interpreter runs the block itself, over its own
+                // registers and memory, so a program that writes at the
+                // machine needs no toolchain on either leg.
+                return asmBlock(instr);
             case Op::Trap:
                 // The one instruction whose only meaning is a death: the
                 // emitter writes the same illegal instruction, so the
@@ -1427,8 +1870,9 @@ struct Runner {
 
 }  // namespace
 
-VmResult run(const ir::Module& module) {
+VmResult run(const ir::Module& module, const std::string& pendingInput) {
     Runner run;
+    run.stdIn_ = pendingInput;
     const Function* entry = nullptr;
     const Function* start = nullptr;
     for (const Function& fn : module.functions) {
@@ -1482,7 +1926,7 @@ VmResult run(const ir::Module& module) {
             static_cast<uint64_t>(blob.bytes.size()));
     }
     for (const Global& global : module.globals) {
-        size_t at = run.memory.size();
+        int64_t at = run.nextAppendAt();
         if (!global.initLabels.empty()) {
             // A vtable global is one word per entry, each the tag of the
             // entry's function.
@@ -1511,7 +1955,7 @@ VmResult run(const ir::Module& module) {
         } else {
             run.appendWord(static_cast<uint64_t>(global.initial));
         }
-        run.labels[global.label] = static_cast<int64_t>(at);
+        run.labels[global.label] = at;
     }
     // Everything the helpers hand out starts past the last global, and the
     // frames a call pushes grow from there: neither region rewinds, so an
