@@ -158,6 +158,67 @@ void testMemory() {
     check(gr.ok && gr.exitCode == 6, "a global reads and writes 6: " + gr.error);
 }
 
+// Float arithmetic compares and answers like the SSE forms: a remainder
+// follows C's fmod, a division of zero answers a NaN rather than trapping,
+// and a comparison with a NaN is false except for not-equals.
+void testFloats() {
+    std::printf("float arithmetic runs\n");
+    Lowered sum = lower("func main() -> int { return (1.5 + 0.25) as int; }\n");
+    check(sum.ok, "lowers: " + sum.stage);
+    cider::vm::VmResult sumr = cider::vm::run(*sum.module);
+    check(sumr.ok && sumr.exitCode == 1, "an addition converts: " + sumr.error);
+    Lowered mult = lower("func main() -> int { return (2.5 * 4.0) as int; }\n");
+    cider::vm::VmResult multr = cider::vm::run(*mult.module);
+    check(multr.ok && multr.exitCode == 10, "a multiplication converts: " + multr.error);
+    Lowered sub = lower("func main() -> int { return (5.5 - 2.25) as int; }\n");
+    cider::vm::VmResult subr = cider::vm::run(*sub.module);
+    check(subr.ok && subr.exitCode == 3, "a subtraction converts: " + subr.error);
+    Lowered div = lower("func main() -> int { return (7.5 / 2.5) as int; }\n");
+    cider::vm::VmResult divr = cider::vm::run(*div.module);
+    check(divr.ok && divr.exitCode == 3, "a division converts: " + divr.error);
+    Lowered rem = lower("func main() -> int { return (7.25 % 2.0) as int; }\n");
+    cider::vm::VmResult remr = cider::vm::run(*rem.module);
+    check(remr.ok && remr.exitCode == 1, "a remainder follows fmod: " + remr.error);
+    Lowered neg = lower("func main() -> int { return (-2.5 + 2.5) as int; }\n");
+    cider::vm::VmResult negr = cider::vm::run(*neg.module);
+    check(negr.ok && negr.exitCode == 0, "a negation converts: " + negr.error);
+    // A float field keeps every bit of the value, which is the shape whose
+    // native store lost the high half before it was fixed.
+    Lowered field = lower("struct P { var a: f64; }\n"
+                         "func main() -> int { var p: P = new P { a: 1.5 };"
+                         " return p.a as int; }\n");
+    check(field.ok, "a field program lowers: " + field.stage);
+    cider::vm::VmResult fieldr = cider::vm::run(*field.module);
+    check(fieldr.ok && fieldr.exitCode == 1, "a field holds its value: " + fieldr.error);
+    Lowered narrow = lower("struct N { var a: f32; }\n"
+                           "func main() -> int { var p: N = new N { a: 0.5 };"
+                           " return p.a as int; }\n");
+    cider::vm::VmResult narrowr = cider::vm::run(*narrow.module);
+    check(narrowr.ok && narrowr.exitCode == 0, "an f32 field reads back: " + narrowr.error);
+    // Comparison is ordered: a NaN fails every operator but not-equals.
+    Lowered cmp = lower("func main() -> int { if (1.5 < 2.5) { return 1; }"
+                       " return 0; }\n");
+    cider::vm::VmResult cmpr = cider::vm::run(*cmp.module);
+    check(cmpr.ok && cmpr.exitCode == 1, "a float orders: " + cmpr.error);
+    Lowered nan = lower("func main() -> int { var x: f64 = 0.0 / 0.0;"
+                       " if (x != x) { return 1; } return 0; }\n");
+    cider::vm::VmResult nanr = cider::vm::run(*nan.module);
+    check(nanr.ok && nanr.exitCode == 1, "a NaN fails equality: " + nanr.error);
+    Lowered nane = lower("func main() -> int { var x: f64 = 0.0 / 0.0;"
+                        " if (x == 1.0) { return 1; } return 0; }\n");
+    cider::vm::VmResult naner = cider::vm::run(*nane.module);
+    check(naner.ok && naner.exitCode == 0, "a NaN equals nothing: " + naner.error);
+    // A float crosses a call in a register-free model without losing bits.
+    Lowered call = lower("func twice(x: f64) -> f64 { return x * 2.0; }\n"
+                        "func main() -> int { return twice(3.0) as int; }\n");
+    cider::vm::VmResult callr = cider::vm::run(*call.module);
+    check(callr.ok && callr.exitCode == 6, "a float crosses a call: " + callr.error);
+    Lowered glob = lower("var g: f64 = 2.5;\n"
+                        "func main() -> int { g = g * 2.0; return g as int; }\n");
+    cider::vm::VmResult globr = cider::vm::run(*glob.module);
+    check(globr.ok && globr.exitCode == 5, "a global doubles: " + globr.error);
+}
+
 // Calls cross frames: arguments arrive, answers come back, and the caller's
 // own frame survives the callee's. A host helper writes bytes and exits.
 void testCalls() {
@@ -217,6 +278,7 @@ int main() {
     testControl();
     testArith();
     testMemory();
+    testFloats();
     testCalls();
     std::printf("\n%d checks, %s\n", checks, failures == 0 ? "all passed" : "FAILURES");
     return failures == 0 ? 0 : 1;

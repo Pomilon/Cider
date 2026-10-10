@@ -46,6 +46,11 @@ constexpr int64_t kFloatScale = 1000000;
 constexpr int64_t kLeastBound = 16;
 constexpr uint64_t kHeapCap = 1073741824ULL;
 constexpr uint64_t kMemoryCap = 4294967296ULL;
+// The low half of a word, which is what an f32 keeps in a register: the
+// wider form's upper bytes are the ones the narrower width discards.
+constexpr uint64_t kLowFourBytes = 0xFFFFFFFFULL;
+// How many bytes an f32 keeps, and how many a wider form does.
+constexpr uint64_t kFloat32Bytes = 4;
 constexpr int64_t kZeroPointer = 0;
 constexpr uint64_t kFrameLimit = 100000;
 
@@ -314,13 +319,63 @@ struct Runner {
         return found->second + instr.displacement;
     }
 
+    // The double whose bits the word holds: a float value is its own bit
+    // pattern everywhere a slot keeps it, the way a register would.
+    double bitsToDouble(int64_t bits) {
+        uint64_t raw = static_cast<uint64_t>(bits);
+        double out = 0.0;
+        std::memcpy(&out, &raw, sizeof(out));
+        return out;
+    }
+
+    // The single precision the narrower width reads back, with the high
+    // bits zeroed as a register's upper half would be.
+    int64_t doubleToFloatBits(double value) {
+        float narrowed = static_cast<float>(value);
+        uint32_t raw = 0;
+        std::memcpy(&raw, &narrowed, sizeof(raw));
+        return static_cast<int64_t>(static_cast<uint64_t>(raw));
+    }
+
+    int64_t floatBitsToWord(IRType width, double value) {
+        if (width == IRType::F32) {
+            return doubleToFloatBits(value);
+        }
+        uint64_t raw = 0;
+        std::memcpy(&raw, &value, sizeof(raw));
+        return static_cast<int64_t>(raw);
+    }
+
+    // The value a float word holds at the width the instruction names.
+    double wordToFloat(IRType width, int64_t bits) {
+        if (width == IRType::F32) {
+            uint32_t raw = static_cast<uint32_t>(static_cast<uint64_t>(bits) &
+                                                kLowFourBytes);
+            float out = 0.0F;
+            std::memcpy(&out, &raw, sizeof(out));
+            return static_cast<double>(out);
+        }
+        return bitsToDouble(bits);
+    }
+
     // Mirrors codegen's emitLoadMem: exactly the width's bytes, extended to
     // 64 bits the same way (signed types sign-extend, the rest zero-extend;
     // I32 sign-extends through eax like movsxd, U32 zeroes like a dword mov).
     bool load(Value result, TypeRef type, IRType width, int64_t address,
               Position pos) {
         if (widthIsFloat(width)) {
-            return refuse(pos, "vm cannot load floats yet");
+            // The SSE loads move a float's own bytes into a register, so the
+            // slot holds the bit pattern: an f32 keeps four bytes and an f64
+            // eight, and a load reads exactly those back as the value.
+            uint64_t count = width == IRType::F32 ? kFloat32Bytes
+                                                  : layout::kSizePointer;
+            bool ok = false;
+            uint64_t bits = loadBytes(address, count, pos, ok);
+            if (!ok) {
+                return refuse(pos, "vm address out of range");
+            }
+            write(result, static_cast<int64_t>(bits));
+            return true;
         }
         uint64_t count = widthBytes(width);
         if (count == 0) {
@@ -347,7 +402,12 @@ struct Runner {
     bool store(TypeRef type, IRType width, int64_t address, int64_t bits,
                Position pos) {
         if (widthIsFloat(width)) {
-            return refuse(pos, "vm cannot store floats yet");
+            // A store of a float writes the value's own bit pattern, at the
+            // width the instruction names: the register's whole upper half
+            // is what a later load reads back.
+            uint64_t count = width == IRType::F32 ? kFloat32Bytes
+                                                  : layout::kSizePointer;
+            return storeBytes(address, count, static_cast<uint64_t>(bits), pos);
         }
         uint64_t count = widthBytes(width);
         if (count == 0) {
@@ -360,8 +420,51 @@ struct Runner {
     bool compare(const Instr& instr) {
         const Value& lhs = instr.operands[0];
         const Value& rhs = instr.operands[1];
-        if (widthIsFloat(lhs.width) || widthIsFloat(rhs.width)) {
-            return refuse(instr.loc, "vm cannot compare floats yet");
+        bool floatPair = lhs.type.type != nullptr &&
+                        lhs.type.type->kind() == Kind::Basic &&
+                        basicIsFloat(*lhs.type.type->basic());
+        if (floatPair) {
+            // The compare spells the unsigned forms because ucomis's flags
+            // are the ones they read, so a NaN fails every operator but
+            // not-equals — which is what the C++ operators answer. The
+            // pair's own width decides how the words are read: it is the
+            // operand's, not the instruction's, which holds the answer.
+            ir::IRType pairWidth =
+                *lhs.type.type->basic() == BasicKind::F32 ? ir::IRType::F32
+                                                         : ir::IRType::F64;
+            double a = wordToFloat(pairWidth, read(lhs));
+            double b = wordToFloat(pairWidth, read(rhs));
+            bool answer = false;
+            switch (instr.cmp) {
+                case CmpOp::Eq:
+                    answer = a == b;
+                    break;
+                case CmpOp::Ne:
+                    answer = a != b;
+                    break;
+                // A float pair lowers to the unsigned spellings, because the
+                // flags ucomis leaves are the ones they read: the ordering
+                // is still IEEE ordered, and the parity guard makes a NaN
+                // answer false everywhere but not-equals.
+                case CmpOp::Lt:
+                case CmpOp::Ult:
+                    answer = a < b;
+                    break;
+                case CmpOp::Le:
+                case CmpOp::Ule:
+                    answer = a <= b;
+                    break;
+                case CmpOp::Gt:
+                case CmpOp::Ugt:
+                    answer = a > b;
+                    break;
+                case CmpOp::Ge:
+                case CmpOp::Uge:
+                    answer = a >= b;
+                    break;
+            }
+            write(instr.results[0], answer ? 1 : 0);
+            return true;
         }
         uint64_t count = widthBytes(lhs.width);
         if (count == 0 || count > 8) {
@@ -414,9 +517,28 @@ struct Runner {
     // what the emitter's post-operation extension does: a narrow sum wraps
     // because the width's own answer is what a later load reads.
     bool logic(const Instr& instr) {
-        if (instr.width == ir::IRType::F32 || instr.width == ir::IRType::F64) {
-            return refuse(instr.loc, std::string("vm cannot run ") +
-                                         opName(instr.op) + " on floats yet");
+        if (widthIsFloat(instr.width)) {
+            // A float rides the same opcodes as the integers, with its own
+            // SSE form: the arithmetic answers at the instruction's width
+            // and the answer is its own bit pattern.
+            double a = wordToFloat(instr.width, read(instr.operands[0]));
+            double b = wordToFloat(instr.width, read(instr.operands[1]));
+            double answer = 0.0;
+            switch (instr.op) {
+                case Op::Add:
+                    answer = a + b;
+                    break;
+                case Op::Sub:
+                    answer = a - b;
+                    break;
+                case Op::Mul:
+                    answer = a * b;
+                    break;
+                default:
+                    return refuse(instr.loc, "vm met an unknown logic instruction");
+            }
+            write(instr.results[0], floatBitsToWord(instr.width, answer));
+            return true;
         }
         int64_t a = read(instr.operands[0]);
         int64_t b = read(instr.operands[1]);
@@ -468,8 +590,15 @@ struct Runner {
     // remainder follows the dividend's sign, both by the hardware's
     // definition rather than a rule of the interpreter's own.
     bool divide(const Instr& instr) {
-        if (instr.width == ir::IRType::F32 || instr.width == ir::IRType::F64) {
-            return refuse(instr.loc, "vm cannot run float division yet");
+        if (widthIsFloat(instr.width)) {
+            // A float division never traps: a zero divisor answers an
+            // infinity, and the remainder answers a NaN — the SSE forms do
+            // not fault, so neither does the interpreter.
+            double a = wordToFloat(instr.width, read(instr.operands[0]));
+            double b = wordToFloat(instr.width, read(instr.operands[1]));
+            double answer = instr.op == Op::Div ? a / b : std::fmod(a, b);
+            write(instr.results[0], floatBitsToWord(instr.width, answer));
+            return true;
         }
         int64_t a = extendToWidth(read(instr.operands[0]), instr.width, instr.type);
         int64_t b = extendToWidth(read(instr.operands[1]), instr.width, instr.type);
@@ -1006,9 +1135,6 @@ struct Runner {
             return !t.isError() && t.type->kind() == Kind::Basic &&
                    basicIsFloat(*t.type->basic());
         };
-        if (isFloatType(from) || isFloatType(to)) {
-            return refuse(instr.loc, "vm cannot run float casts yet");
-        }
         bool fromPtr = from.type->kind() == Kind::Pointer ||
                        from.type->kind() == Kind::FunctionPtr;
         bool toPtr = to.type->kind() == Kind::Pointer ||
@@ -1065,6 +1191,62 @@ struct Runner {
             return static_cast<int64_t>(trimmedToWidth(
                 bits, widthFor(basicWidthBits(kind))));
         };
+        // A float on either side rides the SSE conversions: a float to an
+        // integer truncates toward zero, and out of range answers the
+        // processor's indefinite value; an integer to a float converts the
+        // sign-extended word, except a u64 whose magnitude the conversion
+        // cannot hold, which halves first and doubles the answer; and a
+        // float to a float widens or narrows by the target's own width.
+        if (isFloatType(from) || isFloatType(to)) {
+            auto floatWidthOf = [](TypeRef t) -> ir::IRType {
+                return *t.type->basic() == BasicKind::F32 ? ir::IRType::F32
+                                                         : ir::IRType::F64;
+            };
+            if (isFloatType(from) && isFloatType(to)) {
+                double value = wordToFloat(floatWidthOf(from),
+                                           read(instr.operands[0]));
+                write(instr.results[0],
+                      floatBitsToWord(floatWidthOf(to), value));
+                return true;
+            }
+            if (isFloatType(from)) {
+                double value = wordToFloat(floatWidthOf(from),
+                                          read(instr.operands[0]));
+                int64_t truncated = truncToI64(value);
+                if (toPtr) {
+                    write(instr.results[0], truncated);
+                    return true;
+                }
+                BasicKind kind = to.type->kind() == Kind::Enum
+                                    ? BasicKind::I32
+                                    : *to.type->basic();
+                write(instr.results[0], extendFor(kind, truncated));
+                return true;
+            }
+            double value = 0.0;
+            if (fromPtr) {
+                value = static_cast<double>(
+                    static_cast<uint64_t>(read(instr.operands[0])));
+            } else {
+                BasicKind kind = from.type->kind() == Kind::Enum
+                                    ? BasicKind::I32
+                                    : *from.type->basic();
+                int64_t word = extendFor(kind, read(instr.operands[0]));
+                if (kind == BasicKind::U64) {
+                    uint64_t raw = static_cast<uint64_t>(word);
+                    uint64_t halved = (raw >> 1) | (raw & 1);
+                    value = static_cast<double>(halved) * 2.0;
+                } else if (basicIsSigned(kind)) {
+                    value = static_cast<double>(word);
+                } else {
+                    value = static_cast<double>(static_cast<uint64_t>(word));
+                }
+            }
+            ir::IRType toWidth = isFloatType(to) ? floatWidthOf(to)
+                                                 : ir::IRType::F64;
+            write(instr.results[0], floatBitsToWord(toWidth, value));
+            return true;
+        }
         int64_t bits = read(instr.operands[0]);
         if (fromBits == toBits) {
             // Same width, different signedness: the source's extension is
