@@ -1284,8 +1284,13 @@ private:
         }
         if (instr.op == ir::Op::Store) {
             out_ += "  mov rax, " + slot(instr.storedValue.id) + "\n";
-            if (instr.width == ir::IRType::F32 || instr.width == ir::IRType::F64) {
+            // Each width has its own SSE move: a float store that read four
+            // bytes of a double would keep the low half of the bit pattern
+            // and answer with the wrong value, so the spellings differ.
+            if (instr.width == ir::IRType::F32) {
                 out_ += "  movss xmm0, " + slot(instr.storedValue.id) + "\n";
+            } else if (instr.width == ir::IRType::F64) {
+                out_ += "  movsd xmm0, " + slot(instr.storedValue.id) + "\n";
             }
             if (!instr.globalLabel.empty()) {
                 emitStoreMem(atAddr("rip + " + instr.globalLabel, instr.displacement),

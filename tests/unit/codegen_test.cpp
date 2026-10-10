@@ -1943,6 +1943,27 @@ void testFloat() {
                  "    return addf(1.5, 2.25) as int;\n"
                  "}\n") == 3,
           "float arguments and results cross a call");
+    // A float field stores its own width: a double written into a struct
+    // slot and read back must answer its value, not the low half of its
+    // bit pattern (movss where movsd was needed).
+    check(runQuiet("struct P { var a: f64; }\n"
+                 "func main() -> int {\n"
+                 "    var p: P = new P{ a: 1.5 };\n"
+                 "    return p.a as int;\n"
+                 "}\n") == 1,
+          "an f64 field keeps every bit of its pattern");
+    check(runQuiet("struct P { var a: i32; var b: f64; }\n"
+                 "func main() -> int {\n"
+                 "    var p: P = new P{ a: 3, b: 1.5 };\n"
+                 "    return p.a + (p.b as int);\n"
+                 "}\n") == 4,
+          "an f64 field beside an int field keeps both");
+    check(runQuiet("struct P { var a: f32; }\n"
+                 "func main() -> int {\n"
+                 "    var p: P = new P{ a: 2.5 };\n"
+                 "    return (p.a + 0.5) as int;\n"
+                 "}\n") == 3,
+          "an f32 field reads back at its own width");
     // int -> f64 -> int round trip: 7 + 0.5 = 7.5 -> 7.
     check(runQuiet("func main() -> int {\n"
                  "    var i: int = 7;\n"
