@@ -425,6 +425,9 @@ struct MatchArm : Node {
     // `p1 | p2 => body` lists every alternative but the first here: each
     // one is checked like its own arm, and the body runs when any fits.
     std::vector<std::unique_ptr<Pattern>> alts;
+    // `pat if cond => body` keeps the guard here, null without `if`: the
+    // pattern runs first, and a false guard falls to the next arm.
+    std::unique_ptr<Expr> guard;
     std::unique_ptr<Block> body;
     MatchArm(Position p, std::unique_ptr<Pattern> pat, std::unique_ptr<Block> b)
         : Node(std::move(p)), pattern(std::move(pat)), body(std::move(b)) {}
@@ -971,6 +974,9 @@ inline void ASTVisitor::visitPattern(Pattern& n) {
 }
 inline void ASTVisitor::visitMatchArm(MatchArm& n) {
     n.pattern->accept(*this);
+    if (n.guard != nullptr) {
+        n.guard->accept(*this);
+    }
     n.body->accept(*this);
 }
 inline void ASTVisitor::visitMatchStmt(MatchStmt& n) {

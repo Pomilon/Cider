@@ -1068,6 +1068,42 @@ void testMatch() {
           "an empty struct matches its empty pattern");
 }
 
+// A guard runs when the pattern fits: a false guard falls to the next arm,
+// and the guard reads the arm's bound names.
+void testGuard() {
+    std::printf("match guards run\n");
+    check(runQuiet("func main() -> int {\n"
+                   "    var flag: bool = true;\n"
+                   "    match (1) { 1 if flag => { return 7; } default => { return 0; } }\n"
+                   "}\n") == 7,
+          "a true guard takes the arm");
+    check(runQuiet("func main() -> int {\n"
+                   "    var flag: bool = false;\n"
+                   "    match (1) { 1 if flag => { return 7; } default => { return 0; } }\n"
+                   "}\n") == 0,
+          "a false guard falls to the default");
+    check(runQuiet("func main() -> int {\n"
+                   "    match (2) { x if x > 1 => { return 10; } default => { return 30; } }\n"
+                   "}\n") == 10,
+          "a guard reads the freshly bound name");
+    check(runQuiet("func main() -> int {\n"
+                   "    match (2) { x if x > 5 => { return 10; } default => { return 30; } }\n"
+                   "}\n") == 30,
+          "a failing guard over a bind falls through");
+    check(runQuiet("struct P { var x: int; var y: int; }\n"
+                   "func main() -> int {\n"
+                   "    var p: P = new P { x: 3, y: 4 };\n"
+                   "    match (p) { P { x: a, y: _ } if a > 2 => { return 1; } default => { return 0; } }\n"
+                   "}\n") == 1,
+          "a guard reads a bound field");
+    check(runQuiet("struct P { var x: int; var y: int; }\n"
+                   "func main() -> int {\n"
+                   "    var p: P = new P { x: 3, y: 4 };\n"
+                   "    match (p) { P { x: a, y: _ } if a > 9 => { return 1; } default => { return 0; } }\n"
+                   "}\n") == 0,
+          "a failing guard over a field falls through");
+}
+
 // An enumerator pattern compares the cell with the named case: the first
 // match in source order wins, a dead arm never fires, and every case
 // listed needs no default (FEATURES §8.4).
@@ -1921,6 +1957,7 @@ int main() {
     testCharCompare();
     testStringCompare();
     testMatch();
+    testGuard();
     testEnumMatch();
     testPointerArith();
     testEnumValues();

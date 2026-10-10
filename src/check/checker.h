@@ -293,6 +293,10 @@ private:
     // which alternative's value it would hold — so any alternative that
     // grows the scope fails here instead of binding half a meaning.
     void bindMatchArm(MatchArm& arm, TypeRef scrutinee);
+    // Checks the arm's `if` guard in the arm's scope, after the pattern's
+    // binds, so it reads bound names like the body does. A missing guard
+    // checks nothing; a present one must be a bool, like any condition.
+    void checkMatchGuard(MatchArm& arm);
     // Counts the names bound in the innermost scope: the before/after
     // answers the alternation rule above without naming any one shape.
     size_t localCount() const;

@@ -1345,6 +1345,15 @@ std::unique_ptr<Stmt> Parser::parseMatch() {
             Pattern alt = parsePattern();
             alts.push_back(std::make_unique<Pattern>(std::move(alt)));
         }
+        // A guard trails the alternatives: `if` never continues a
+        // pattern, so one here unambiguously opens the arm's condition.
+        std::unique_ptr<Expr> guard;
+        if (match(TokenKind::KwIf)) {
+            guard = parseExpr();
+            if (guard == nullptr) {
+                return nullptr;
+            }
+        }
         if (!match(TokenKind::FatArrow)) {
             failHere("expected '=>'");
             return nullptr;
@@ -1366,6 +1375,7 @@ std::unique_ptr<Stmt> Parser::parseMatch() {
         auto matchArm = std::make_unique<MatchArm>(
             apos, std::make_unique<Pattern>(std::move(pattern)), std::move(arm));
         matchArm->alts = std::move(alts);
+        matchArm->guard = std::move(guard);
         arms.push_back(std::move(matchArm));
     }
     if (!match(TokenKind::RBrace)) {

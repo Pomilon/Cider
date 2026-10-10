@@ -1605,6 +1605,12 @@ void Checker::visitMatchStmt(MatchStmt& n) {
             bool hasTrue = false;
             bool hasFalse = false;
             for (auto& arm : n.arms) {
+                // A guard may fail at runtime, so a guarded arm covers
+                // nothing: only a guard-free `true` and `false` close
+                // the bool.
+                if (arm->guard != nullptr) {
+                    continue;
+                }
                 // Every alternative covers on its own: `true | false`
                 // in one arm names both cases, as two arms would.
                 auto consider = [&](const Pattern& pat) {
@@ -1638,6 +1644,10 @@ void Checker::visitMatchStmt(MatchStmt& n) {
                 // for nothing and a duplicate counts once.
                 std::unordered_set<std::string> covered;
                 for (auto& arm : n.arms) {
+                    // Guards may fail, so a guarded arm covers no member.
+                    if (arm->guard != nullptr) {
+                        continue;
+                    }
                     auto consider = [&](const Pattern& pat) {
                         if (pat.kind != PatternKind::Member || isDeadPattern(&pat)) {
                             return;
@@ -1671,6 +1681,10 @@ void Checker::visitMatchStmt(MatchStmt& n) {
                 // never names a case, so only enumerator arms cover.
                 std::unordered_set<std::string> covered;
                 for (auto& arm : n.arms) {
+                    // Guards may fail, so a guarded arm covers no case.
+                    if (arm->guard != nullptr) {
+                        continue;
+                    }
                     auto consider = [&](const Pattern& pat) {
                         if (pat.kind != PatternKind::Member || isDeadPattern(&pat)) {
                             return;
@@ -1706,6 +1720,7 @@ void Checker::visitMatchStmt(MatchStmt& n) {
         for (auto& arm : n.arms) {
             pushScope();
             bindMatchArm(*arm, scrutinee);
+            checkMatchGuard(*arm);
         }
         sink_->onMatch(n);
         for (auto& arm : n.arms) {
@@ -1717,6 +1732,7 @@ void Checker::visitMatchStmt(MatchStmt& n) {
     for (auto& arm : n.arms) {
         pushScope();
         bindMatchArm(*arm, scrutinee);
+        checkMatchGuard(*arm);
         arm->body->accept(*this);
         popScope();
     }
@@ -2039,6 +2055,16 @@ void Checker::bindMatchArm(MatchArm& arm, TypeRef scrutinee) {
         if (localCount() != before) {
             fail(alt->pos, "an alternation arm binds no names");
         }
+    }
+}
+
+void Checker::checkMatchGuard(MatchArm& arm) {
+    if (arm.guard == nullptr) {
+        return;
+    }
+    TypeRef cond = checkExpr(arm.guard.get(), TypeRef{ctx_.basic(BasicKind::Bool)});
+    if (!cond.isError() && cond != TypeRef{ctx_.basic(BasicKind::Bool)}) {
+        fail(arm.guard->pos, "a guard is bool");
     }
 }
 

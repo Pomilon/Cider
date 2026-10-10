@@ -686,6 +686,45 @@ void testAlternation() {
     check(members.ok, "members alternate without a default: " + members.stage);
 }
 
+// A guard is a bool over the arm's scope: it runs when the pattern fits,
+// and a guarded arm never covers for exhaustiveness.
+void testGuard() {
+    std::printf("match guards check\n");
+    Checked good = check(
+        "func main() -> int {\n"
+        "    var c: int = 2;\n"
+        "    var flag: bool = true;\n"
+        "    match (c) { 1 if flag => { return 10; } default => { return 30; } }\n"
+        "}\n");
+    check(good.ok, "a bool guard checks: " + good.stage);
+    Checked bound = check(
+        "func main() -> int {\n"
+        "    match (2) { x if x > 1 => { return 10; } default => { return 30; } }\n"
+        "}\n");
+    check(bound.ok, "a guard reads the bound name: " + bound.stage);
+    Checked notBool = check(
+        "func main() -> int {\n"
+        "    match (2) { 1 if 7 => { return 10; } default => { return 30; } }\n"
+        "}\n");
+    check(!notBool.ok && notBool.stage == "check", "a non-bool guard fails");
+    Checked guardedBool = check(
+        "func main() -> int {\n"
+        "    var flag: bool = true;\n"
+        "    match (flag) { true if flag => { return 1; } false => { return 0; } }\n"
+        "}\n");
+    check(!guardedBool.ok && guardedBool.stage == "check",
+          "a guarded bool arm does not cover");
+    Checked guardedUnion = check(
+        "union U { var a: int; var b: int; }\n"
+        "func main() -> int {\n"
+        "    var u: U = new U { a: 1 };\n"
+        "    var flag: bool = true;\n"
+        "    match (u) { U.a if flag => { return 1; } U.b => { return 2; } }\n"
+        "}\n");
+    check(!guardedUnion.ok && guardedUnion.stage == "check",
+          "a guarded member does not cover");
+}
+
 // A match dispatches on the first arm whose pattern fits: constants by
 // value, a bound name by its ==, a fresh name always, else the default.
 void testMatch() {
@@ -1122,6 +1161,7 @@ int main() {
     testStringCompare();
     testMatch();
     testAlternation();
+    testGuard();
     testEnumMatch();
     testPointerArith();
     testRepeatZero();

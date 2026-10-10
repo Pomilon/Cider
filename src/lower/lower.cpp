@@ -7571,6 +7571,25 @@ void Lowerer::onMatch(MatchStmt& n) {
             fieldLocal.isMutable = true;
             locals_.back()[fieldBind.name] = std::move(fieldLocal);
         }
+        if (n.arms[i]->guard != nullptr) {
+            // A guard runs after the pattern fit, with the arm's binds
+            // materialized above: true enters the body, false falls to
+            // the next arm's test. The checker proved it a bool, so it
+            // answers one word; anything else is a lowerer bug, refused
+            // as one.
+            uint32_t guarded = emitBlock(n.pos);
+            std::vector<ir::Value> cond = lowerWords(n.arms[i]->guard.get());
+            if (failed_) {
+                return;
+            }
+            if (cond.size() != kOneWord) {
+                refuse(n.arms[i]->guard->pos, "this guard");
+                return;
+            }
+            uint32_t nextTest = i + 1 < armCount ? tests[i + 1] : defaultLabel;
+            condTo(cond[kFirstWord], guarded, nextTest);
+            startBlock(guarded);
+        }
         n.arms[i]->body->accept(checker_);
         locals_.pop_back();
         // A body that ended in a jump already closed its block; one that
