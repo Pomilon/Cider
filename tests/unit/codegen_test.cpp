@@ -160,6 +160,16 @@ void testCalls() {
     check(runQuiet("func f(n: int) -> int { if (n < 2) { return n; } return n; }\n"
                    "func main() -> int { return f(7) * 6; }\n") == 42,
           "a call inside an expression");
+    // CIDER-BUG-252 audit lock: narrow arguments arrive width-correct.
+    // v3 has no stack-spill call path (more than six arguments is a loud
+    // refusal), so the stale-upper-bytes class cannot occur; every narrow
+    // argument rides a register staged at its own width.
+    check(runQuiet("func take(a: u8, b: i16, c: bool) -> int { return (a as int) + (b as int) + (c as int); }\n"
+                   "func main() -> int { return take(200, -300, true); }\n") == 157,
+          "narrow arguments arrive intact");
+    check(runQuiet("func take(a: i8, b: u16, c: i16) -> int { return (a as int) + (b as int) + (c as int); }\n"
+                   "func main() -> int { return take(-5, 60000, -300); }\n") == 47,
+          "narrow arguments sign- and zero-extend");
 }
 
 // Both sides of a branch run, and loops go around.
