@@ -1,15 +1,18 @@
 // structural.cpp — gate L4, executable.
 //
 // "Every block terminated, every target valid" is checked at the boundary,
-// before any pass runs. Three properties, each naming what failed so the
+// before any pass runs. Four properties, each naming what failed so the
 // diagnostic points at the lowering bug rather than at the pass that tripped
 // over it:
 //
-//   1. every branch target names a block of the same function — a dangling
+//   1. every block has a terminator — a block still holding the default
+//      Unreachable is one the lowerer forgot to terminate, and codegen
+//      would trap on it at runtime instead of failing the compile
+//   2. every branch target names a block of the same function — a dangling
 //      target reads as a label defined later, or never
-//   2. every operand is defined before use, or is a function parameter —
+//   3. every operand is defined before use, or is a function parameter —
 //      otherwise a pass reads garbage
-//   3. every value is defined exactly once — otherwise SSA is a claim, and
+//   4. every value is defined exactly once — otherwise SSA is a claim, and
 //      two definitions of one id is the shape a miswired emitter makes
 //
 // What this deliberately does *not* assert: a block's immediate dominator is
@@ -25,6 +28,16 @@ namespace cider {
 namespace opt {
 
 namespace {
+
+void checkTerminated(const ir::Function& fn, std::vector<StructuralError>& errors) {
+    for (const ir::Block& block : fn.blocks) {
+        if (block.term.term == ir::Term::Unreachable) {
+            errors.push_back(StructuralError{
+                fn.name, block.label,
+                "block " + std::to_string(block.label) + " is unterminated"});
+        }
+    }
+}
 
 void checkTargets(const ir::Function& fn, const std::unordered_set<uint32_t>& labels,
                   std::vector<StructuralError>& errors) {
@@ -139,6 +152,7 @@ std::vector<StructuralError> checkModule(const ir::Module& module) {
             labels.insert(block.label);
         }
         checkTargets(fn, labels, errors);
+        checkTerminated(fn, errors);
         checkDefs(fn, errors);
     }
     return errors;
