@@ -314,6 +314,14 @@ int runDriver(const std::vector<std::string>& args, std::string& out, std::strin
         }
         out = interpreted.stdoutText;
         err = interpreted.stderrText;
+        if (interpreted.signal != 0) {
+            // The program died, the same death the compiled leg takes, and
+            // the harness reads a death by the signal's number: the bytes
+            // already written go out before the signal ends the process.
+            std::fflush(stdout);
+            std::fflush(stderr);
+            raise(interpreted.signal);
+        }
         return interpreted.exitCode;
     }
     codegen::EmitResult emitted = codegen::emitNative(*pipe.module);

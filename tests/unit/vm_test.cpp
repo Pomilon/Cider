@@ -132,7 +132,8 @@ void testArith() {
     check(wider.ok && wider.exitCode == 64, "an i16 sum wraps to 64: " + wider.error);
     Lowered zero = lower("func main() -> int { var z: int = 0; return 1 / z; }\n");
     cider::vm::VmResult zr = cider::vm::run(*zero.module);
-    check(!zr.ok, "a zero divisor is refused, not answered: " + zr.error);
+    check(zr.ok && zr.signal != 0,
+          "a zero divisor dies by signal, not by a refusal: " + zr.error);
 }
 
 // A computed index and a global both address memory the program does not
@@ -156,6 +157,65 @@ void testMemory() {
     check(glob.ok, "a global program lowers: " + glob.stage);
     cider::vm::VmResult gr = cider::vm::run(*glob.module);
     check(gr.ok && gr.exitCode == 6, "a global reads and writes 6: " + gr.error);
+}
+
+// Death is a death: a lowering check that fails at runtime kills the process
+// the way the emitter's ud2 does, and a divide fault answers the signal the
+// idiv form delivers, so the interpreter leg looks like the compiled leg.
+void testDeath() {
+    std::printf("traps and faults die like the machine\n");
+    // An index past the end lowers to a check branch into a trap block.
+    Lowered oob = lower("func main() -> int {\n"
+                        "    var a: [int; 2] = new [int; 2] {1, 2};\n"
+                        "    var i: int = 5;\n"
+                        "    return a[i];\n"
+                        "}\n");
+    check(oob.ok, "an out-of-bounds program lowers: " + oob.stage);
+    cider::vm::VmResult oobr = cider::vm::run(*oob.module);
+    check(oobr.ok && oobr.signal != 0,
+          "an out-of-bounds index dies by signal: " + oobr.error);
+    // A zero divisor faults at the instruction, not at the checker.
+    Lowered zero = lower("func d(n: int) -> int { return 8 / n; }\n"
+                         "func main() -> int { var z: int = 0; return d(z); }\n");
+    check(zero.ok, "a dividing program lowers: " + zero.stage);
+    cider::vm::VmResult zr = cider::vm::run(*zero.module);
+    check(zr.ok && zr.signal != 0,
+          "a divide of zero dies by signal: " + zr.error);
+    // The most negative value divided by minus one overflows the quotient.
+    Lowered over = lower("func d(n: int) -> int {\n"
+                         "    var v: int = 0 - 2147483647 - 1;\n"
+                         "    return v / n;\n"
+                         "}\n"
+                         "func main() -> int { return d(-1); }\n");
+    check(over.ok, "an overflowing program lowers: " + over.stage);
+    cider::vm::VmResult or_ = cider::vm::run(*over.module);
+    check(or_.ok && or_.signal != 0,
+          "a quotient that overflows dies by signal: " + or_.error);
+    // A null pointer read faults: the first page is not the machine's.
+    Lowered null = lower("var p: *int = nilPtr;\n"
+                         "func main() -> int { return *p; }\n");
+    check(null.ok, "a null program lowers: " + null.stage);
+    cider::vm::VmResult nr = cider::vm::run(*null.module);
+    check(nr.ok && nr.signal != 0,
+          "a null dereference dies by signal: " + nr.error);
+    // A union member read of a tag that was never written traps.
+    Lowered dead = lower("union U { var i: int; var s: string; }\n"
+                         "func main() -> int {\n"
+                         "    var u: U = new U { i: 3 };\n"
+                         "    var t: string = u.s;\n"
+                         "    return 0;\n"
+                         "}\n");
+    check(dead.ok, "a union program lowers: " + dead.stage);
+    cider::vm::VmResult dr = cider::vm::run(*dead.module);
+    check(dr.ok && dr.signal != 0,
+          "a dead union member dies by signal: " + dr.error);
+    // A name the interpreter does not host is a refusal, not a death.
+    Lowered bad = lower("extern func nothing(x: int) -> int;\n"
+                        "func main() -> int { return nothing(1); }\n");
+    check(bad.ok, "an extern program lowers: " + bad.stage);
+    cider::vm::VmResult br = cider::vm::run(*bad.module);
+    check(!br.ok && br.signal == 0,
+          "an unknown helper refuses instead of dying: " + br.error);
 }
 
 // Float arithmetic compares and answers like the SSE forms: a remainder
@@ -278,6 +338,7 @@ int main() {
     testControl();
     testArith();
     testMemory();
+    testDeath();
     testFloats();
     testCalls();
     std::printf("\n%d checks, %s\n", checks, failures == 0 ? "all passed" : "FAILURES");

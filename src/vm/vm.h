@@ -19,8 +19,15 @@ namespace cider {
 namespace vm {
 
 struct VmResult {
+    // ok is true once the interpreter reached a program end, whether the
+    // program exited with a code or died by a signal; ok is false only when
+    // the interpreter met IR it cannot run, which error names.
     bool ok = false;
     int exitCode = 0;
+    // Non-zero when the program died by that signal: the emitter's traps
+    // and divides fault on hardware, and a differential leg must show the
+    // same death rather than a refusal.
+    int signal = 0;
     std::string stdoutText;
     std::string stderrText;
     std::string error;

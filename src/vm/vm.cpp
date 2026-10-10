@@ -54,6 +54,20 @@ constexpr uint64_t kFloat32Bytes = 4;
 constexpr int64_t kZeroPointer = 0;
 constexpr uint64_t kFrameLimit = 100000;
 
+// The three ways a program dies on hardware, by the number the signal
+// carries: an illegal divide or an emitted trap, a divide by zero or a
+// quotient that does not fit, and a read or write outside its own memory.
+// The interpreter plays the same deaths out so a harness leg sees the same
+// signal the compiled program would die by.
+constexpr int kSigFault = 8;
+constexpr int kSigSegv = 11;
+constexpr int kSigIll = 4;
+
+// The first page is never mapped: a null pointer names address zero, and
+// reading there must be the fault hardware would raise rather than a silent
+// answer of whatever byte the frame happens to leave there.
+constexpr uint64_t kNullGuard = 4096;
+
 // The largest value id the function defines, params included: ids are dense
 // from zero, so the id width is a word count.
 uint32_t topId(const Function& fn) {
@@ -188,11 +202,25 @@ struct Runner {
     // A host hand exited the program: no further instruction may step, and
     // the answer is already in `out`.
     bool programDone = false;
+    // Set by an instruction that can only answer through a fault, so the
+    // run can end in a signal instead of a refusal.
+    int faulted = 0;
     uint64_t steps = 0;
 
     bool refuse(Position pos, const std::string& message) {
         out.error = message;
         out.pos = pos;
+        return false;
+    }
+
+    // The program died, the way the compiled one would: no diagnostic, a
+    // signal number, and the run over. Only an instruction the interpreter
+    // cannot execute refuses; a program it can run always ends in an exit or
+    // a death.
+    bool die(int signal) {
+        out.ok = true;
+        out.signal = signal;
+        programDone = true;
         return false;
     }
 
@@ -230,9 +258,13 @@ struct Runner {
     }
 
     uint64_t loadBytes(int64_t address, uint64_t count, Position pos, bool& ok) {
-        if (address < 0 || count > 8 ||
+        // Below the guard page, or past every byte laid down, is outside the
+        // program's memory: hardware faults there, and so does the
+        // interpreter, which reports the fault by the signal it records.
+        if (address < static_cast<int64_t>(kNullGuard) || count > 8 ||
             static_cast<uint64_t>(address) + count > memory.size()) {
             ok = false;
+            faulted = kSigSegv;
             return 0;
         }
         uint64_t bits = 0;
@@ -246,9 +278,9 @@ struct Runner {
     }
 
     bool storeBytes(int64_t address, uint64_t count, uint64_t bits, Position pos) {
-        if (address < 0 || count > 8 ||
+        if (address < static_cast<int64_t>(kNullGuard) || count > 8 ||
             static_cast<uint64_t>(address) + count > memory.size()) {
-            return refuse(pos, "vm address out of range");
+            return die(kSigSegv);
         }
         for (uint64_t i = 0; i < count; ++i) {
             memory[static_cast<size_t>(address) + i] =
@@ -372,7 +404,8 @@ struct Runner {
             bool ok = false;
             uint64_t bits = loadBytes(address, count, pos, ok);
             if (!ok) {
-                return refuse(pos, "vm address out of range");
+                return faulted != 0 ? die(faulted)
+                                    : refuse(pos, "vm address out of range");
             }
             write(result, static_cast<int64_t>(bits));
             return true;
@@ -384,7 +417,8 @@ struct Runner {
         bool ok = false;
         uint64_t bits = loadBytes(address, count, pos, ok);
         if (!ok) {
-            return refuse(pos, "vm address out of range");
+            return faulted != 0 ? die(faulted)
+                                : refuse(pos, "vm address out of range");
         }
         bool isSigned = false;
         if (!type.isError() && type.type->kind() == Kind::Basic &&
@@ -602,8 +636,12 @@ struct Runner {
         }
         int64_t a = extendToWidth(read(instr.operands[0]), instr.width, instr.type);
         int64_t b = extendToWidth(read(instr.operands[1]), instr.width, instr.type);
+        // The integer divide faults: a zero divisor, and a signed widest
+        // quotient divided by minus one, both take the hardware's divide
+        // error, and the interpreter dies the same death rather than
+        // answering a plausible value.
         if (b == 0) {
-            return refuse(instr.loc, "vm cannot divide by zero");
+            return die(kSigFault);
         }
         bool wantQuotient = instr.op == Op::Div;
         int64_t answer = 0;
@@ -613,7 +651,7 @@ struct Runner {
             int64_t least = extendToWidth(~uint64_t{0} << (narrowBits(instr.width) - 1),
                                           instr.width, instr.type);
             if (a == least && b == -1) {
-                return refuse(instr.loc, "this division overflows");
+                return die(kSigFault);
             }
             int64_t quotient = a / b;
             int64_t remainder = a % b;
@@ -1109,10 +1147,18 @@ struct Runner {
                     break;
                 }
                 case Term::Switch:
-                case Term::Trap:
-                case Term::Unreachable:
+                    // Nothing lowers a switch in this slice: the lowerer
+                    // spells every branch as an if chain, so the form is a
+                    // promise about IR the producer never emits. Refusing
+                    // names it rather than pretending an empty table runs.
                     refuse(term.loc, "vm cannot run this terminator yet");
                     return false;
+                case Term::Trap:
+                case Term::Unreachable:
+                    // A trap block, and a block provably unreached, both emit
+                    // the interpreter's own death: the compiled program takes
+                    // an illegal instruction, and so does this leg.
+                    return die(kSigIll);
             }
         }
     }
@@ -1366,10 +1412,14 @@ struct Runner {
             case Op::FRem:
             case Op::Extract:
             case Op::Insert:
-            case Op::Trap:
             case Op::Asm:
                 return refuse(instr.loc,
                               std::string("vm cannot run ") + opName(instr.op) + " yet");
+            case Op::Trap:
+                // The one instruction whose only meaning is a death: the
+                // emitter writes the same illegal instruction, so the
+                // interpreter dies rather than answering a value.
+                return die(kSigIll);
         }
         return refuse(instr.loc, "vm reached an unknown instruction");
     }
@@ -1408,11 +1458,12 @@ VmResult run(const ir::Module& module) {
     }
     // The frame covers every value id: each id owns one storage word, so
     // both an alloca cell and a scratch slot are addressable the moment
-    // they are defined.
+    // they are defined. The first page stays unmapped beneath it, so a null
+    // pointer names nothing.
     uint32_t top = topId(*fn);
     uint64_t words = frameWords(top);
     uint64_t bytes = words * layout::kSizePointer;
-    run.memory.assign(bytes, kZeroCell);
+    run.memory.assign(kNullGuard + bytes, kZeroCell);
     // A function link name names one address by tag: id zero is never a
     // function, so a tag of zero is the "no such function" answer a caller
     // cannot confuse with a real target.
