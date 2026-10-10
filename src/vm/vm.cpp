@@ -2,7 +2,9 @@
 
 #include "vm/vm.h"
 
+#include <cmath>
 #include <cstdint>
+#include <cstring>
 #include <unordered_map>
 #include <unordered_set>
 #include <vector>
@@ -26,6 +28,26 @@ constexpr uint64_t kByteBits = 8;
 constexpr uint64_t kByteMask = 0xFF;
 constexpr uint64_t kZeroCell = 0;
 constexpr uint64_t kOneCell = 1;
+constexpr uint64_t kTwoWords = 2;
+constexpr uint64_t kThreeWords = 3;
+
+// Digits, bytes and scales the host hand-outs replay: twenty hold any
+// 64-bit decimal, six fraction digits follow the point.
+constexpr uint64_t kMaxDigits = 20;
+constexpr uint64_t kFracCount = 6;
+constexpr uint64_t kZeroDigit = '0';
+constexpr uint64_t kMinusByte = '-';
+constexpr uint64_t kPointByte = '.';
+constexpr uint64_t kIntIndefinite = 0x8000000000000000ULL;
+constexpr int64_t kFloatScale = 1000000;
+
+// The allocator's own numbers: the smallest effective alignment, the cap a
+// refusal answers nil at, and the ceiling every byte of the run stays under.
+constexpr int64_t kLeastBound = 16;
+constexpr uint64_t kHeapCap = 1073741824ULL;
+constexpr uint64_t kMemoryCap = 4294967296ULL;
+constexpr int64_t kZeroPointer = 0;
+constexpr uint64_t kFrameLimit = 100000;
 
 // The largest value id the function defines, params included: ids are dense
 // from zero, so the id width is a word count.
@@ -132,18 +154,35 @@ int64_t signExtend(uint64_t bits, uint64_t bytes) {
     return static_cast<int64_t>((bits << shift) >> shift);
 }
 
+// One activation: a value-id map, the base of the region its allocas own,
+// and the ids those allocas name. Ids are per-function, so none of it can be
+// shared with a caller.
+struct Frame {
+    std::unordered_map<uint32_t, int64_t> slots;
+    std::unordered_set<uint32_t> allocaIds;
+    int64_t base = 0;
+};
+
 struct Runner {
     VmResult out;
     // The interpreter's own context, for the basic type a cast needs when it
     // answers a signedness question. It holds no program types.
     TypeContext ctx;
-    std::unordered_map<uint32_t, int64_t> slots;
+    std::vector<Frame> frames;
     std::vector<uint8_t> memory;
-    std::unordered_set<uint32_t> slotIds;
     // Link label to the address its bytes were laid down at, and link name
     // to the tag an indirect call resolves by.
     std::unordered_map<std::string, int64_t> labels;
     std::unordered_map<std::string, int64_t> functionTags;
+    std::unordered_map<std::string, const Function*> functionsByName;
+    std::unordered_map<int64_t, const Function*> functionsByTag;
+    // Every host hand-out lives from here to the end of memory, and remembers
+    // its size so realloc copies and free validates.
+    int64_t heapAt = 0;
+    std::unordered_map<int64_t, int64_t> heapBlocks;
+    // A host hand exited the program: no further instruction may step, and
+    // the answer is already in `out`.
+    bool programDone = false;
     uint64_t steps = 0;
 
     bool refuse(Position pos, const std::string& message) {
@@ -153,22 +192,36 @@ struct Runner {
     }
 
     int64_t read(const Value& value) {
-        auto found = slots.find(value.id);
-        if (found == slots.end()) {
+        auto found = frames.back().slots.find(value.id);
+        if (found == frames.back().slots.end()) {
             return 0;
         }
         return found->second;
     }
 
     void write(const Value& result, int64_t bits) {
-        slots[result.id] = bits;
+        frames.back().slots[result.id] = bits;
     }
 
     // The native frame covers every value id at rsp+id*8, and an alloca's
     // address names its own cell: the cell doubles as the storage. The
-    // interpreter keeps the same cells, so an address is an id times eight.
+    // interpreter keeps the same cells in the frame's own region, so an
+    // address is that region's base plus an id times eight.
     int64_t cellAddress(uint32_t id) {
-        return static_cast<int64_t>(id) * layout::kSizePointer;
+        return frames.back().base +
+               static_cast<int64_t>(id) * layout::kSizePointer;
+    }
+
+    // The address an instruction's base names: an alloca id is its own slot
+    // storage, and any other id holds a computed address as a value. The
+    // two never share an id, because ids restart per function and only an
+    // alloca contributes a slot.
+    int64_t baseAddress(const Value& base) {
+        if (frames.back().allocaIds.find(base.id) !=
+            frames.back().allocaIds.end()) {
+            return cellAddress(base.id);
+        }
+        return read(base);
     }
 
     uint64_t loadBytes(int64_t address, uint64_t count, Position pos, bool& ok) {
@@ -471,6 +524,470 @@ struct Runner {
         return true;
     }
 
+    // A hand exits the program from inside any call: the flag aborts every
+    // step and the run answers what the helper answered.
+    bool hostExit(int exitCode, const std::string& text) {
+        out.ok = true;
+        out.exitCode = exitCode;
+        out.stderrText += text;
+        programDone = true;
+        return true;
+    }
+
+    bool readBytes(int64_t address, uint64_t count, std::vector<uint8_t>& into,
+                   Position pos) {
+        if (address < 0 || count > memory.size() ||
+            static_cast<uint64_t>(address) > memory.size() - count) {
+            refuse(pos, "vm address out of range");
+            return false;
+        }
+        into.assign(memory.begin() + static_cast<size_t>(address),
+                    memory.begin() + static_cast<size_t>(address + count));
+        return true;
+    }
+
+    bool writeBytes(int64_t address, const std::vector<uint8_t>& bytes,
+                    Position pos) {
+        uint64_t captured = bytes.size();
+        if (address < 0 || captured > memory.size() ||
+            static_cast<uint64_t>(address) > memory.size() - captured) {
+            return refuse(pos, "vm address out of range");
+        }
+        for (uint64_t i = kZeroCell; i < captured; ++i) {
+            memory[static_cast<size_t>(address) + i] = bytes[i];
+        }
+        return true;
+    }
+
+    // Decimal into a caller's buffer, answering the byte count. The signed
+    // form prints a leading minus and both work the magnitude as unsigned,
+    // so the most negative value converts instead of wrapping.
+    int64_t formatDigits(int64_t buffer, int64_t value, bool isSigned,
+                         Position pos, bool& ok) {
+        bool negative = isSigned && value < 0;
+        uint64_t magnitude =
+            negative ? ~static_cast<uint64_t>(value) + 1
+                     : static_cast<uint64_t>(value);
+        uint8_t reversed[kMaxDigits];
+        uint64_t count = kZeroCell;
+        do {
+            reversed[count++] = static_cast<uint8_t>(kZeroDigit + magnitude % 10);
+            magnitude /= 10;
+        } while (magnitude != 0 && count < kMaxDigits);
+        std::vector<uint8_t> digits;
+        if (negative) {
+            digits.push_back(static_cast<uint8_t>(kMinusByte));
+        }
+        while (count > kZeroCell) {
+            digits.push_back(reversed[--count]);
+        }
+        ok = writeBytes(buffer, digits, pos);
+        return static_cast<int64_t>(digits.size());
+    }
+
+    // A truncating double-to-i64 convert: an out-of-range value answers the
+    // "integer indefinite" form instead of wrapping, which is what the
+    // emitter's convert answers and what the digit sequence replays.
+    int64_t truncToI64(double value) {
+        if (!(value >= -9223372036854775808.0 && value < 9223372036854775808.0)) {
+            return static_cast<int64_t>(kIntIndefinite);
+        }
+        return static_cast<int64_t>(value);
+    }
+
+    // printF64's shape rebuilt on the interpreter's own numbers: a sign when
+    // the value is below zero and not NaN, the whole digits, a point, six
+    // truncated fraction digits zero-padded on the left. Every step follows
+    // the emitter's sequence — the parity-guarded compare, the truncating
+    // converts, the six idiv digits — so edge values print what the helper
+    // prints. Thirty-two bytes hold the longest shape.
+    int64_t formatFloat(int64_t buffer, uint64_t bits, Position pos, bool& ok) {
+        double value = 0;
+        std::memcpy(&value, &bits, sizeof(double));
+        bool isNan = std::isnan(value);
+        bool negative = value < 0.0 && !isNan;
+        double magnitude = negative ? 0.0 - value : value;
+        std::vector<uint8_t> text;
+        if (negative) {
+            text.push_back(static_cast<uint8_t>(kMinusByte));
+        }
+        int64_t whole = truncToI64(magnitude);
+        int64_t ahead = 0;
+        bool wrote = false;
+        int64_t count = formatDigits(buffer, whole, true, pos, wrote);
+        if (!wrote) {
+            ok = false;
+            return 0;
+        }
+        ahead += count;
+        text.push_back(static_cast<uint8_t>(kPointByte));
+        int64_t scaled = truncToI64(
+            (magnitude - static_cast<double>(whole)) * kFloatScale);
+        uint8_t digits[kFracCount];
+        for (int64_t i = kZeroCell; i < static_cast<int64_t>(kFracCount); ++i) {
+            int64_t digit = scaled % 10;
+            scaled /= 10;
+            digits[kFracCount - 1 - static_cast<size_t>(i)] =
+                static_cast<uint8_t>(kZeroDigit + (digit < 0 ? -digit : digit));
+        }
+        // The helper writes the six fraction digits in two moves; the bytes
+        // that land in the buffer are the same six.
+        for (uint64_t i = kZeroCell; i < kFracCount; ++i) {
+            text.push_back(digits[i]);
+        }
+        if (!writeBytes(buffer + ahead, text, pos)) {
+            ok = false;
+            return 0;
+        }
+        ok = true;
+        return ahead + static_cast<int64_t>(text.size());
+    }
+
+    // The heap answers the allocator's refusals as nil, its corruption as
+    // exit 134, and every other block as zeroed bytes at an aligned address.
+    int64_t hostAlloc(int64_t bytes, int64_t align, Position pos) {
+        if (bytes < 0) {
+            return 0;
+        }
+        if (align <= kZeroPointer) {
+            return 0;
+        }
+        int64_t effective = align < kLeastBound ? kLeastBound : align;
+        if (effective > kLeastBound && (effective & (effective - 1)) != 0) {
+            return 0;
+        }
+        // Round the cursor up to the alignment, then answer a block that
+        // starts there: the bump cursor never rewinds, so a hand-out stays
+        // live for the rest of the run.
+        int64_t slide = heapAt + effective - 1;
+        if (slide < heapAt) {
+            return 0;
+        }
+        slide &= ~(effective - 1);
+        int64_t end = slide + bytes;
+        if (end < slide || static_cast<uint64_t>(end) > kHeapCap) {
+            return 0;
+        }
+        if (static_cast<uint64_t>(end) > memory.size()) {
+            if (static_cast<uint64_t>(end) > kMemoryCap) {
+                return 0;
+            }
+            memory.resize(static_cast<size_t>(end), kZeroCell);
+        }
+        heapBlocks[slide] = bytes;
+        if (end > heapAt) {
+            heapAt = end;
+        }
+        return slide;
+    }
+
+    bool hostFree(int64_t address, Position pos) {
+        if (address == kZeroPointer) {
+            return true;
+        }
+        auto found = heapBlocks.find(address);
+        if (found == heapBlocks.end()) {
+            return hostExit(134, "cider heap: corrupt block header\n");
+        }
+        heapBlocks.erase(found);
+        return true;
+    }
+
+    bool hostRealloc(int64_t address, int64_t bytes, int64_t align, Position pos,
+                     std::vector<Value>& results) {
+        if (bytes < 0) {
+            return true;
+        }
+        int64_t sized = hostAlloc(bytes, align, pos);
+        if (address == kZeroPointer) {
+            if (!results.empty()) {
+                write(results[0], sized);
+            }
+            return true;
+        }
+        auto found = heapBlocks.find(address);
+        if (found == heapBlocks.end()) {
+            return hostExit(134, "cider heap: corrupt block header\n");
+        }
+        int64_t oldBytes = found->second;
+        if (sized != kZeroPointer && oldBytes > kZeroPointer) {
+            int64_t wanted = oldBytes < bytes ? oldBytes : bytes;
+            std::vector<uint8_t> carried;
+            if (readBytes(address, static_cast<uint64_t>(oldBytes), carried, pos)) {
+                std::vector<uint8_t> keep(
+                    carried.begin(),
+                    carried.begin() + static_cast<size_t>(wanted));
+                if (!writeBytes(sized, keep, pos)) {
+                    return false;
+                }
+            }
+        }
+        if (!hostFree(address, pos)) {
+            return false;
+        }
+        if (!results.empty()) {
+            write(results[0], sized);
+        }
+        return true;
+    }
+
+    // A call to a body the module never laid down: the freestanding helpers
+    // the program names but does not define. Each one answers what its
+    // emitter does — bytes on the right stream, a count, a pointer, or the
+    // exit code a panic dies with.
+    bool hostCall(const std::string& name, const std::vector<int64_t>& args,
+                  Position pos, std::vector<Value>& results) {
+        if (name == "cider_print") {
+            if (args.size() < kTwoWords) {
+                return refuse(pos, "vm call passes too few words to print");
+            }
+            if (args[1] > 0) {
+                std::vector<uint8_t> carried;
+                if (!readBytes(args[0], static_cast<uint64_t>(args[1]), carried,
+                               pos)) {
+                    return false;
+                }
+                out.stdoutText.append(reinterpret_cast<const char*>(carried.data()),
+                                      carried.size());
+            }
+            return true;
+        }
+        if (name == "putchar") {
+            if (args.empty()) {
+                return refuse(pos, "vm call passes too few words to putchar");
+            }
+            out.stdoutText.push_back(static_cast<char>(args[0] & kByteMask));
+            return true;
+        }
+        if (name == "cider_itoa_signed" || name == "cider_itoa_unsigned") {
+            if (args.size() < kTwoWords) {
+                return refuse(pos, "vm call passes too few words to a converter");
+            }
+            bool wrote = false;
+            int64_t count = formatDigits(args[0], args[1],
+                                         name == "cider_itoa_signed", pos, wrote);
+            if (!wrote) {
+                return false;
+            }
+            if (!results.empty()) {
+                write(results[0], count);
+            }
+            return true;
+        }
+        if (name == "cider_ftoa") {
+            if (args.size() < kTwoWords) {
+                return refuse(pos, "vm call passes too few words to a converter");
+            }
+            bool wrote = false;
+            int64_t count = formatFloat(args[0], static_cast<uint64_t>(args[1]),
+                                        pos, wrote);
+            if (!wrote) {
+                return false;
+            }
+            if (!results.empty()) {
+                write(results[0], count);
+            }
+            return true;
+        }
+        if (name == "cider_panic") {
+            if (args.size() < kTwoWords) {
+                return refuse(pos, "vm call passes too few words to panic");
+            }
+            std::string text;
+            if (args[1] > 0) {
+                std::vector<uint8_t> carried;
+                if (!readBytes(args[0], static_cast<uint64_t>(args[1]), carried,
+                               pos)) {
+                    return false;
+                }
+                text.append(reinterpret_cast<const char*>(carried.data()),
+                            carried.size());
+            }
+            // A newline always follows, an empty message included.
+            return hostExit(134, text + "\n");
+        }
+        if (name == "cider_heap_fail") {
+            return hostExit(134, "cider heap: corrupt block header\n");
+        }
+        if (name == "cider_alloc") {
+            if (args.size() < kTwoWords) {
+                return refuse(pos, "vm call passes too few words to alloc");
+            }
+            int64_t answer = hostAlloc(args[0], args[1], pos);
+            if (!results.empty()) {
+                write(results[0], answer);
+            }
+            return true;
+        }
+        if (name == "cider_free") {
+            if (args.empty()) {
+                return refuse(pos, "vm call passes too few words to free");
+            }
+            return hostFree(args[0], pos);
+        }
+        if (name == "cider_realloc") {
+            if (args.size() < kThreeWords) {
+                return refuse(pos, "vm call passes too few words to realloc");
+            }
+            return hostRealloc(args[0], args[1], args[2], pos, results);
+        }
+        return refuse(pos, "vm cannot call '" + name + "' yet");
+    }
+
+    // A call runs a callee's body in a region of its own — ids restart at
+    // zero per function — or hands off to a helper, whichever the name
+    // answers. Arguments arrive in register order, results go back in it.
+    bool call(const Instr& instr, std::vector<Value>& results) {
+        std::vector<int64_t> args;
+        for (const Argument& arg : instr.arguments) {
+            for (const Value& word : arg.words) {
+                args.push_back(read(word));
+            }
+        }
+        const Function* target = nullptr;
+        if (instr.call.indirect) {
+            auto found = functionsByTag.find(read(instr.calleeValue));
+            if (found == functionsByTag.end()) {
+                return refuse(instr.loc, "vm cannot call this value");
+            }
+            target = found->second;
+        } else {
+            auto found = functionsByName.find(instr.callee);
+            if (found != functionsByName.end()) {
+                target = found->second;
+            }
+        }
+        if (target != nullptr && !target->blocks.empty()) {
+            if (args.size() != target->params.size()) {
+                return refuse(instr.loc, "vm call arguments do not match the callee");
+            }
+            std::vector<int64_t> answer;
+            if (!runFunction(*target, args, answer)) {
+                return false;
+            }
+            if (programDone) {
+                return false;
+            }
+            if (answer.size() != instr.results.size()) {
+                return refuse(instr.loc, "vm call answers with the wrong width");
+            }
+            uint64_t answered = static_cast<uint64_t>(answer.size());
+            for (uint64_t i = kZeroCell; i < answered; ++i) {
+                write(instr.results[i], answer[i]);
+            }
+            return true;
+        }
+        std::string name = target != nullptr ? target->name : instr.callee;
+        return hostCall(name, args, instr.loc, results);
+    }
+
+    // One activation of a function: a fresh region of cells zeroed, the
+    // parameters bound in order, then the blocks walked from the entry.
+    bool runFunction(const Function& fn, const std::vector<int64_t>& args,
+                     std::vector<int64_t>& values) {
+        if (frames.size() >= kFrameLimit) {
+            return refuse(fn.loc, "vm call depth exhausted");
+        }
+        uint32_t top = topId(fn);
+        uint64_t bytes = frameWords(top) * layout::kSizePointer;
+        if (bytes > kMemoryCap || memory.size() + bytes > kMemoryCap) {
+            return refuse(fn.loc, "vm memory exhausted");
+        }
+        Frame frame;
+        frame.base = static_cast<int64_t>(memory.size());
+        memory.resize(memory.size() + static_cast<size_t>(bytes), kZeroCell);
+        // The emitter's prologue moves each argument word into its own slot,
+        // where a load through the slot's id reads it back: the parameter's
+        // value lives in the cell, not in a value register.
+        uint64_t supplied = static_cast<uint64_t>(fn.params.size());
+        uint64_t arrived = static_cast<uint64_t>(args.size());
+        uint64_t bound = supplied < arrived ? supplied : arrived;
+        for (uint64_t i = kZeroCell; i < bound; ++i) {
+            if (!storeBytes(frame.base + static_cast<int64_t>(fn.params[i].id) *
+                                            layout::kSizePointer,
+                            layout::kSizePointer, static_cast<uint64_t>(args[i]),
+                            fn.loc)) {
+                return false;
+            }
+        }
+        // Only an alloca names slot storage; every other id that reaches an
+        // addressBase is a computed address, so the set decides the branch.
+        for (const Block& block : fn.blocks) {
+            for (const Instr& instr : block.body) {
+                if (instr.op == Op::Alloca && !instr.results.empty()) {
+                    frame.allocaIds.insert(instr.results[0].id);
+                }
+            }
+        }
+        frames.push_back(std::move(frame));
+        // The frame leaves with this call however it leaves: a return, a
+        // refusal, or a host exit all unwind the region.
+        struct Pop {
+            Runner& owner;
+            ~Pop() { owner.frames.pop_back(); }
+        } pop{*this};
+        std::unordered_map<uint32_t, size_t> blockAt;
+        for (const Block& block : fn.blocks) {
+            blockAt[block.label] = blockAt.size();
+        }
+        // The lowerer emits the entry block first, so the front of the list
+        // is the entry — the same assumption the emitter's _start
+        // trampoline makes when it falls into the function's first block.
+        size_t current = kZeroCell;
+        for (;;) {
+            if (++steps > kStepLimit) {
+                refuse(fn.loc, "vm step limit exhausted");
+                return false;
+            }
+            const Block& block = fn.blocks[current];
+            for (const Instr& instr : block.body) {
+                if (!step(instr)) {
+                    return false;
+                }
+            }
+            const Terminator& term = block.term;
+            switch (term.term) {
+                case Term::Ret: {
+                    for (const Value& value : term.values) {
+                        values.push_back(read(value));
+                    }
+                    return true;
+                }
+                case Term::Br: {
+                    auto found = blockAt.find(term.target);
+                    if (found == blockAt.end()) {
+                        refuse(term.loc, "vm branch names no block");
+                        return false;
+                    }
+                    current = found->second;
+                    break;
+                }
+                case Term::CondBr: {
+                    if (!term.cond.has_value()) {
+                        refuse(term.loc, "vm branch tests nothing");
+                        return false;
+                    }
+                    auto found = frames.back().slots.find(term.cond->id);
+                    int64_t tested =
+                        found == frames.back().slots.end() ? 0 : found->second;
+                    uint32_t label = tested != 0 ? term.thenTarget : term.elseTarget;
+                    auto at = blockAt.find(label);
+                    if (at == blockAt.end()) {
+                        refuse(term.loc, "vm branch names no block");
+                        return false;
+                    }
+                    current = at->second;
+                    break;
+                }
+                case Term::Switch:
+                case Term::Trap:
+                case Term::Unreachable:
+                    refuse(term.loc, "vm cannot run this terminator yet");
+                    return false;
+            }
+        }
+    }
+
     // An integer or address cast truncates, re-extends or widens, exactly as
     // the emitter's integer path does: a same-width cross-signedness cast
     // re-extends through the target, a narrow one truncates through the
@@ -608,14 +1125,19 @@ struct Runner {
                 write(instr.results[0], read(instr.operands[0]) == 0 ? 1 : 0);
                 return true;
             case Op::Alloca:
-                write(instr.results[0], cellAddress(instr.results[0].id));
+                // The slot's address is its id times eight by construction,
+                // and the emitter's prologue binds parameter ids before any
+                // block runs: neither writes a value here. Only the frame
+                // address matters, and a load or store through the slot
+                // finds it because the frame sized a cell for the id.
+                frames.back().allocaIds.insert(instr.results[0].id);
                 return true;
             case Op::Gep: {
                 // Base plus byte offset, plus a runtime index: a base that
                 // is a slot holds its own cell address, and a base that is
                 // a computed address holds that address instead, so both
                 // arrive as a value and add the same way.
-                int64_t base = read(instr.addressBase) + instr.displacement;
+                int64_t base = baseAddress(instr.addressBase) + instr.displacement;
                 if (!instr.operands.empty()) {
                     base += read(instr.operands[0]);
                 }
@@ -624,18 +1146,24 @@ struct Runner {
             }
             case Op::Load: {
                 int64_t base = instr.globalLabel.empty()
-                                   ? read(instr.addressBase) + instr.displacement
+                                   ? baseAddress(instr.addressBase) + instr.displacement
                                    : labelAddress(instr, instr.globalLabel);
                 return load(instr.results[0], instr.type, instr.width, base,
                             instr.loc);
             }
             case Op::Store: {
-                int64_t base = instr.globalLabel.empty()
-                                   ? read(instr.addressBase) + instr.displacement
-                                   : labelAddress(instr, instr.globalLabel);
                 IRType width = instr.storedValue.width;
-                return store(instr.type, width, base,
-                             read(instr.storedValue), instr.loc);
+                int64_t base = kZeroPointer;
+                if (!instr.globalLabel.empty()) {
+                    base = labelAddress(instr, instr.globalLabel);
+                } else {
+                    // The store's addressBase is the slot's own id when the
+                    // target is storage, and a computed address when it is
+                    // not: the same split the load makes.
+                    base = baseAddress(instr.addressBase) + instr.displacement;
+                }
+                return store(instr.type, width, base, read(instr.storedValue),
+                             instr.loc);
             }
             case Op::Cmp:
                 return compare(instr);
@@ -645,6 +1173,10 @@ struct Runner {
                 return addressOf(instr);
             case Op::FnAddr:
                 return tagOf(instr);
+            case Op::Call: {
+                std::vector<Value> mutableResults = instr.results;
+                return call(instr, mutableResults);
+            }
             case Op::FAdd:
             case Op::FSub:
             case Op::FMul:
@@ -652,7 +1184,6 @@ struct Runner {
             case Op::FRem:
             case Op::Extract:
             case Op::Insert:
-            case Op::Call:
             case Op::Trap:
             case Op::Asm:
                 return refuse(instr.loc,
@@ -704,7 +1235,10 @@ VmResult run(const ir::Module& module) {
     // function, so a tag of zero is the "no such function" answer a caller
     // cannot confuse with a real target.
     for (const Function& any : module.functions) {
-        run.functionTags[any.name] = static_cast<int64_t>(&any - module.functions.data()) + 1;
+        int64_t tag = static_cast<int64_t>(&any - module.functions.data()) + 1;
+        run.functionTags[any.name] = tag;
+        run.functionsByTag[tag] = &any;
+        run.functionsByName[any.name] = &any;
     }
     // The frame owns the low addresses, so the program's constants and
     // globals lay down after it and nothing the entry frame stores can
@@ -746,74 +1280,22 @@ VmResult run(const ir::Module& module) {
         }
         run.labels[global.label] = static_cast<int64_t>(at);
     }
-    std::unordered_map<uint32_t, size_t> blockAt;
-    for (const Block& block : fn->blocks) {
-        blockAt[block.label] = blockAt.size();
+    // Everything the helpers hand out starts past the last global, and the
+    // frames a call pushes grow from there: neither region rewinds, so an
+    // address stays live for the rest of the run.
+    run.heapAt = static_cast<int64_t>(run.memory.size());
+    std::vector<int64_t> noArgs;
+    std::vector<int64_t> answered;
+    if (!run.runFunction(*fn, noArgs, answered)) {
+        return run.out;
     }
-    // The lowerer emits the entry block first, so the front of the list is
-    // the entry — the same assumption the emitter's _start trampoline makes
-    // when it falls into the function's first block.
-    size_t current = kZeroCell;
-    for (;;) {
-        if (++run.steps > kStepLimit) {
-            run.refuse(fn->loc, "vm step limit exhausted");
-            return run.out;
-        }
-        const Block& block = fn->blocks[current];
-        for (const Instr& instr : block.body) {
-            if (!run.step(instr)) {
-                return run.out;
-            }
-        }
-        const Terminator& term = block.term;
-        switch (term.term) {
-            case Term::Ret: {
-                if (term.values.empty()) {
-                    run.out.ok = true;
-                    run.out.exitCode = 0;
-                    return run.out;
-                }
-                // The exit status answers the low bits of the program's
-                // value; the interpreter answers the same bits so the two
-                // legs compare without a normalising rule.
-                auto found = run.slots.find(term.values[0].id);
-                int64_t bits = found == run.slots.end() ? 0 : found->second;
-                run.out.ok = true;
-                run.out.exitCode = static_cast<int>(bits & kByteMask);
-                return run.out;
-            }
-            case Term::Br: {
-                auto found = blockAt.find(term.target);
-                if (found == blockAt.end()) {
-                    run.refuse(term.loc, "vm branch names no block");
-                    return run.out;
-                }
-                current = found->second;
-                break;
-            }
-            case Term::CondBr: {
-                if (!term.cond.has_value()) {
-                    run.refuse(term.loc, "vm branch tests nothing");
-                    return run.out;
-                }
-                auto found = run.slots.find(term.cond->id);
-                int64_t tested = found == run.slots.end() ? 0 : found->second;
-                uint32_t label = tested != 0 ? term.thenTarget : term.elseTarget;
-                auto at = blockAt.find(label);
-                if (at == blockAt.end()) {
-                    run.refuse(term.loc, "vm branch names no block");
-                    return run.out;
-                }
-                current = at->second;
-                break;
-            }
-            case Term::Switch:
-            case Term::Trap:
-            case Term::Unreachable:
-                run.refuse(term.loc, "vm cannot run this terminator yet");
-                return run.out;
-        }
+    if (run.programDone) {
+        return run.out;
     }
+    int64_t bits = answered.empty() ? 0 : answered[0];
+    run.out.ok = true;
+    run.out.exitCode = static_cast<int>(bits & kByteMask);
+    return run.out;
 }
 
 }  // namespace vm

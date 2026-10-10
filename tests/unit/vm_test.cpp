@@ -158,6 +158,57 @@ void testMemory() {
     check(gr.ok && gr.exitCode == 6, "a global reads and writes 6: " + gr.error);
 }
 
+// Calls cross frames: arguments arrive, answers come back, and the caller's
+// own frame survives the callee's. A host helper writes bytes and exits.
+void testCalls() {
+    std::printf("calls run\n");
+    Lowered add = lower("func add(a: int, b: int) -> int { return a + b; }\n"
+                        "func main() -> int { var t: int = 40;"
+                        " return add(t, add(1, 1)); }\n");
+    check(add.ok, "a call program lowers: " + add.stage);
+    cider::vm::VmResult ar = cider::vm::run(*add.module);
+    check(ar.ok && ar.exitCode == 42, "arguments arrive in the callee: " + ar.error);
+    Lowered rec = lower("func fib(n: int) -> int {"
+                        " if (n < 2) { return n; }"
+                        " return fib(n - 1) + fib(n - 2); }\n"
+                        "func main() -> int { return fib(10); }\n");
+    cider::vm::VmResult rr = cider::vm::run(*rec.module);
+    check(rr.ok && rr.exitCode == 55, "recursion answers fib(10): " + rr.error);
+    Lowered surv = lower("var g: int = 1;\n"
+                         "func bump() { g = g + 5; }\n"
+                         "func main() -> int { var t: int = 100; bump();"
+                         " var after: int = t + g; return after; }\n");
+    check(surv.ok, "a global-writing call lowers: " + surv.stage);
+    cider::vm::VmResult sr = cider::vm::run(*surv.module);
+    check(sr.ok && sr.exitCode == 106, "a caller frame survives a call: " + sr.error);
+    Lowered pr = lower("func main() -> int { print(\"hi\"); return 3; }\n");
+    check(pr.ok, "a printing call lowers: " + pr.stage);
+    cider::vm::VmResult prr = cider::vm::run(*pr.module);
+    check(prr.ok && prr.exitCode == 3, "a host call returns: " + prr.error);
+    check(prr.stdoutText == "hi", "print writes its bytes: " + prr.stdoutText);
+    Lowered ch = lower("extern func putchar(c: int) -> int;\n"
+                       "func main() -> int { putchar(33); return 0; }\n");
+    check(ch.ok, "putchar lowers: " + ch.stage);
+    cider::vm::VmResult chr = cider::vm::run(*ch.module);
+    check(chr.ok && chr.stdoutText == "!", "putchar writes one byte: " + chr.stdoutText);
+    Lowered pn = lower("func main() -> int { panic(\"boom\"); return 0; }\n");
+    check(pn.ok, "a panic lowers: " + pn.stage);
+    cider::vm::VmResult pnr = cider::vm::run(*pn.module);
+    check(pnr.ok && pnr.exitCode == 134, "panic exits 134: " + pnr.error);
+    check(pnr.stderrText == "boom\n", "panic writes its message: " + pnr.stderrText);
+    Lowered al = lower("func main() -> int { var p: *int = alloc(8, 8) as *int;"
+                       " *p = 42; return *p; }\n");
+    check(al.ok, "an allocating program lowers: " + al.stage);
+    cider::vm::VmResult alr = cider::vm::run(*al.module);
+    check(alr.ok && alr.exitCode == 42, "alloc hands out writable memory: " + alr.error);
+    Lowered ind = lower("func two() -> int { return 2; }\n"
+                        "func main() -> int {"
+                        " var f: func() -> int = two; return f() + 18; }\n");
+    check(ind.ok, "a closure call lowers: " + ind.stage);
+    cider::vm::VmResult indr = cider::vm::run(*ind.module);
+    check(indr.ok && indr.exitCode == 20, "an indirect call runs: " + indr.error);
+}
+
 }  // namespace
 
 int main() {
@@ -166,6 +217,7 @@ int main() {
     testControl();
     testArith();
     testMemory();
+    testCalls();
     std::printf("\n%d checks, %s\n", checks, failures == 0 ? "all passed" : "FAILURES");
     return failures == 0 ? 0 : 1;
 }
