@@ -141,6 +141,71 @@ int runQuiet(const std::string& text) {
     return code;
 }
 
+// Like runCode, but also captures the program's stderr into err.
+int runCapture(const std::string& text, bool& signaled, std::string& err) {
+    signaled = false;
+    err.clear();
+    Built built = build(text);
+    if (!built.ok) {
+        return -1;
+    }
+    char asmPath[] = "/tmp/cider_test_XXXXXX.s";
+    int asmFd = mkstemps(asmPath, 2);
+    if (asmFd < 0) {
+        return -1;
+    }
+    FILE* asmFile = fdopen(asmFd, "w");
+    fwrite(built.asmText.data(), 1, built.asmText.size(), asmFile);
+    fclose(asmFile);
+    std::string binPath = std::string(asmPath) + ".bin";
+    std::string objPath = std::string(asmPath) + ".o";
+    std::string command = "as -o " + objPath + " " + asmPath + " 2>/dev/null"
+        " && ld -nostdlib -e _start -o " + binPath + " " + objPath + " 2>/dev/null";
+    if (system(command.c_str()) != 0) {
+        unlink(asmPath);
+        unlink(objPath.c_str());
+        return -1;
+    }
+    int errPipe[2] = {-1, -1};
+    if (pipe(errPipe) != 0) {
+        unlink(asmPath);
+        unlink(objPath.c_str());
+        unlink(binPath.c_str());
+        return -1;
+    }
+    pid_t child = fork();
+    if (child == 0) {
+        dup2(errPipe[1], STDERR_FILENO);
+        close(errPipe[0]);
+        close(errPipe[1]);
+        execl(binPath.c_str(), binPath.c_str(), nullptr);
+        _exit(127);
+    }
+    close(errPipe[1]);
+    char chunk[256];
+    for (;;) {
+        ssize_t got = read(errPipe[0], chunk, sizeof(chunk));
+        if (got <= 0) {
+            break;
+        }
+        err.append(chunk, static_cast<size_t>(got));
+    }
+    close(errPipe[0]);
+    int status = 0;
+    waitpid(child, &status, 0);
+    unlink(asmPath);
+    unlink(objPath.c_str());
+    unlink(binPath.c_str());
+    if (WIFSIGNALED(status)) {
+        signaled = true;
+        return -1;
+    }
+    if (!WIFEXITED(status)) {
+        return -1;
+    }
+    return WEXITSTATUS(status);
+}
+
 // `main` returns its value as the exit code.
 void testExit() {
     std::printf("exit codes\n");
@@ -276,6 +341,19 @@ void testTrap() {
     bool signaled = false;
     runCode("func main() -> int { var z: int = 0; return 1 / z; }\n", signaled);
     check(signaled, "division by zero dies by signal");
+}
+
+// Panic ends the program end to end: the message lands on stderr and the
+// process answers the panic code.
+void testPanic() {
+    std::printf("panic ends the program\n");
+    bool signaled = false;
+    std::string err;
+    int code = runCapture("func main() -> int { panic(\"boom\"); return 0; }\n",
+                          signaled, err);
+    check(!signaled, "panic exits, it does not trap");
+    check(code == 134, "panic answers 134");
+    check(err == "boom\n", "panic writes its message to stderr");
 }
 
 // `&` on an element answers the element's address: stores through it land
@@ -2038,6 +2116,7 @@ int main() {
     testFloat();
     testAsm();
     testTrap();
+    testPanic();
     testElementAddr();
     testComputedIndex();
     testPointerField();
