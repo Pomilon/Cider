@@ -803,6 +803,82 @@ void testMatch() {
     check(unionSingle.ok, "a one-member union needs one arm: " + unionSingle.stage);
 }
 
+// An enumerator pattern names its case: `Color.RED` matches the RED value
+// of the same enum, any other shape beside an enum is dead, and every case
+// listed is exhaustive (FEATURES §8.4).
+void testEnumMatch() {
+    std::printf("enum member patterns check\n");
+    Checked good = check(
+        "enum Color { RED, GREEN }\n"
+        "func main() -> int {\n"
+        "    var c: Color = 0 as Color;\n"
+        "    match (c) { Color.RED => { return 1; } default => { return 0; } }\n"
+        "}\n");
+    check(good.ok, "an enum member pattern checks: " + good.stage);
+    Checked noMember = check(
+        "enum Color { RED, GREEN }\n"
+        "func main() -> int {\n"
+        "    var c: Color = 0 as Color;\n"
+        "    match (c) { Color.PURPLE => { return 1; } default => { return 0; } }\n"
+        "}\n");
+    check(!noMember.ok && noMember.stage == "check",
+          "an unknown enumerator in a pattern fails");
+    Checked otherEnum = check(
+        "enum Color { RED, GREEN }\n"
+        "enum Size { BIG, SMALL }\n"
+        "func main() -> int {\n"
+        "    var c: Color = 0 as Color;\n"
+        "    match (c) { Color.RED => { return 1; } Size.BIG => { return 2; } default => { return 0; } }\n"
+        "}\n");
+    check(otherEnum.ok, "another enum's case is dead, not an error");
+    Checked enumOnInt = check(
+        "enum Color { RED, GREEN }\n"
+        "func main() -> int {\n"
+        "    var c: int = 0;\n"
+        "    match (c) { Color.RED => { return 1; } default => { return 0; } }\n"
+        "}\n");
+    check(enumOnInt.ok, "an enum case on an int is dead, not an error");
+    Checked intOnEnum = check(
+        "enum Color { RED, GREEN }\n"
+        "func main() -> int {\n"
+        "    var c: Color = 0 as Color;\n"
+        "    match (c) { 0 => { return 1; } default => { return 0; } }\n"
+        "}\n");
+    check(intOnEnum.ok, "a raw number never names an enum case");
+    Checked structTag = check(
+        "struct P { var x: int; }\n"
+        "func main() -> int {\n"
+        "    var p: P = new P { x: 1 };\n"
+        "    match (p) { P.x => { return 1; } default => { return 0; } }\n"
+        "}\n");
+    check(!structTag.ok && structTag.stage == "check",
+          "a struct tag is not a member pattern");
+    Checked covered = check(
+        "enum Color { RED, GREEN }\n"
+        "func main() -> int {\n"
+        "    var c: Color = 0 as Color;\n"
+        "    match (c) { Color.RED => { return 1; } Color.GREEN => { return 2; } }\n"
+        "}\n");
+    check(covered.ok, "every case listed needs no default: " + covered.stage);
+    Checked missing = check(
+        "enum Color { RED, GREEN, BLUE = 5 }\n"
+        "func main() -> int {\n"
+        "    var c: Color = 0 as Color;\n"
+        "    match (c) { Color.RED => { return 1; } Color.GREEN => { return 2; } }\n"
+        "}\n");
+    check(!missing.ok && missing.stage == "check",
+          "a missing case needs a default");
+    Checked otherNoCover = check(
+        "enum Color { RED, GREEN }\n"
+        "enum Size { BIG, SMALL }\n"
+        "func main() -> int {\n"
+        "    var c: Color = 0 as Color;\n"
+        "    match (c) { Color.RED => { return 1; } Size.BIG => { return 2; } Size.SMALL => { return 3; } }\n"
+        "}\n");
+    check(!otherNoCover.ok && otherNoCover.stage == "check",
+          "another enum's cases do not cover");
+}
+
 void testPointerArith() {
     std::printf("pointer arithmetic checks\n");
     Checked add = check(
@@ -988,6 +1064,7 @@ int main() {
     testCharCompare();
     testStringCompare();
     testMatch();
+    testEnumMatch();
     testPointerArith();
     testRepeatZero();
     testSliceCopy();

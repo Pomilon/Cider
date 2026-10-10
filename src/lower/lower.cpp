@@ -7161,6 +7161,43 @@ bool Lowerer::lowerMatchArmTest(const Pattern& pat, const Place& base, uint32_t 
                                 uint32_t next, Position pos,
                                 std::vector<MatchFieldBind>& binds) {
     if (pat.kind == PatternKind::Member) {
+        if (base.type.type->kind() == Kind::Enum) {
+            // The checker proved the same enum and a known case, so the
+            // cell answers directly: no tag to read, just the named value
+            // beside the spilled word.
+            std::optional<DeclId> id = base.type.type->decl();
+            int64_t want = 0;
+            bool known = false;
+            if (id.has_value()) {
+                for (const auto& member : resolver_.enumMembers(*id)) {
+                    if (member.first == pat.member) {
+                        want = member.second;
+                        known = true;
+                        break;
+                    }
+                }
+            }
+            if (!known) {
+                refuse(pos, "this pattern");
+                return false;
+            }
+            std::vector<ir::Value> got = loadRange(pos, base, base.type);
+            if (failed_) {
+                return false;
+            }
+            if (got.size() != kOneWord) {
+                refuse(pos, "this pattern");
+                return false;
+            }
+            TypeRef word{ctx_.basic(BasicKind::I64)};
+            ir::Value wantVal = constantI64(want, word, pos);
+            if (failed_) {
+                return false;
+            }
+            matchCondTo(emitI64Cmp(pos, BinOp::Eq, got[kFirstWord], wantVal),
+                        body, next, pos);
+            return !failed_;
+        }
         // The checker proved the same union, so the tag answers: index
         // and offset come from the resolver, never from a guess.
         if (base.type.type->kind() != Kind::Union) {
@@ -7234,8 +7271,8 @@ void Lowerer::onMatch(MatchStmt& n) {
         return;
     }
     // The checker proved every arm compatible and the chain exhaustive
-    // (a default, or both bool constants), so the lowering only answers
-    // which arm: the scrutinee lowers once, each test branches to its
+    // (a default, or a finite cover over a bool, a union, or an enum),
+    // so the lowering only answers which arm: the scrutinee lowers once, each test branches to its
     // body or the next test, and a taken body joins instead of falling
     // through — the first match in source order wins. A break inside an
     // arm needs no frame here: none is pushed, so it reaches the loop

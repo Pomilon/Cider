@@ -1020,6 +1020,44 @@ void testMatch() {
           "an empty struct matches its empty pattern");
 }
 
+// An enumerator pattern compares the cell with the named case: the first
+// match in source order wins, a dead arm never fires, and every case
+// listed needs no default (FEATURES §8.4).
+void testEnumMatch() {
+    std::printf("enum member patterns run\n");
+    check(runQuiet("enum Color { RED, GREEN, BLUE = 5 }\n"
+                   "func main() -> int {\n"
+                   "    var c: Color = 1 as Color;\n"
+                   "    match (c) { Color.RED => { return 1; } Color.GREEN => { return 2; } Color.BLUE => { return 3; } default => { return 0; } }\n"
+                   "}\n") == 2,
+          "the named case answers");
+    check(runQuiet("enum Color { RED, GREEN, BLUE = 5 }\n"
+                   "func main() -> int {\n"
+                   "    var c: Color = 5 as Color;\n"
+                   "    match (c) { Color.RED => { return 1; } Color.GREEN => { return 2; } Color.BLUE => { return 3; } default => { return 0; } }\n"
+                   "}\n") == 3,
+          "an explicit enumerator value answers");
+    check(runQuiet("enum Color { RED, GREEN }\n"
+                   "enum Size { BIG, SMALL }\n"
+                   "func main() -> int {\n"
+                   "    var c: Color = 0 as Color;\n"
+                   "    match (c) { Size.BIG => { return 9; } Color.RED => { return 1; } default => { return 0; } }\n"
+                   "}\n") == 1,
+          "a dead arm never fires");
+    check(runQuiet("enum Color { RED, GREEN }\n"
+                   "func main() -> int {\n"
+                   "    var c: Color = 1 as Color;\n"
+                   "    match (c) { Color.RED => { return 1; } Color.GREEN => { return 2; } }\n"
+                   "}\n") == 2,
+          "every case listed needs no default at runtime");
+    check(runQuiet("enum Color { RED, GREEN }\n"
+                   "func main() -> int {\n"
+                   "    var c: Color = 1 as Color;\n"
+                   "    match (c) { 1 => { return 9; } default => { return 7; } }\n"
+                   "}\n") == 7,
+          "a raw number never names an enum case at runtime");
+}
+
 void testPointerArith() {
     std::printf("pointer arithmetic runs\n");
     check(runQuiet("func main() -> int {\n"
@@ -1825,6 +1863,7 @@ int main() {
     testCharCompare();
     testStringCompare();
     testMatch();
+    testEnumMatch();
     testPointerArith();
     testEnumValues();
     testEnumCast();

@@ -286,6 +286,7 @@ private:
     // classifier above already diagnosed those shapes, so the
     // exhaustiveness walk reuses the answer without doubling the error.
     std::optional<DeclId> matchMemberUnion(const Pattern& pat);
+    std::optional<DeclId> matchMemberEnum(const Pattern& pat);
     void bindMatchFresh(const Pattern& pat, TypeRef scrutinee);
 
     // SEMANTICS.md §2.3: the common type of two operands, stated as a type.

@@ -1592,8 +1592,9 @@ void Checker::visitMatchStmt(MatchStmt& n) {
             checkMatchPattern(*arm->pattern, scrutinee);
         }
         // Exhaustiveness is decided by the type, at compile time: a
-        // default arm, or both bool constants over a bool. Anything else
-        // is a rejection naming the statement, never a runtime miss.
+        // default arm, or a finite cover over a bool, a union, or an
+        // enum. Anything else is a rejection naming the statement, never
+        // a runtime miss.
         bool exhaustive = n.fallback != nullptr;
         if (!exhaustive && scrutinee.type->kind() == Kind::Basic &&
             scrutinee.type->basic().has_value() &&
@@ -1638,6 +1639,34 @@ void Checker::visitMatchStmt(MatchStmt& n) {
                 exhaustive = true;
                 for (const std::string& name : resolver_.fieldNames(*sid)) {
                     if (covered.count(name) == 0) {
+                        exhaustive = false;
+                        break;
+                    }
+                }
+            }
+        }
+        if (!exhaustive && scrutinee.type->kind() == Kind::Enum) {
+            std::optional<DeclId> sid = scrutinee.type->decl();
+            if (sid.has_value()) {
+                // An enumerator with every case listed is exhaustive
+                // (FEATURES §8.4): only a live case arm for this same
+                // enum covers, so a dead arm for another enum counts
+                // for nothing and a duplicate counts once. A raw number
+                // never names a case, so only enumerator arms cover.
+                std::unordered_set<std::string> covered;
+                for (auto& arm : n.arms) {
+                    const Pattern& pat = *arm->pattern;
+                    if (pat.kind != PatternKind::Member || isDeadPattern(&pat)) {
+                        continue;
+                    }
+                    std::optional<DeclId> armId = matchMemberEnum(pat);
+                    if (armId.has_value() && sameDecl(*sid, *armId)) {
+                        covered.insert(pat.member);
+                    }
+                }
+                exhaustive = true;
+                for (const auto& member : resolver_.enumMembers(*sid)) {
+                    if (covered.count(member.first) == 0) {
                         exhaustive = false;
                         break;
                     }
@@ -1744,8 +1773,10 @@ bool Checker::checkMatchConst(const Pattern& pat, TypeRef scrutinee) {
         return false;
     }
     if (sk == Kind::Enum) {
-        fail(value->pos, "this pattern is not supported yet");
-        return false;
+        // An enum answers only to its named cases: every other spelling
+        // beside an enum is dead the way an int beside a bool is. A float
+        // never reaches here — it stays loud above, unlowerable anywhere.
+        return dead();
     }
     if (sk != Kind::Basic) {
         return dead();
@@ -1876,25 +1907,62 @@ std::optional<DeclId> Checker::matchMemberUnion(const Pattern& pat) {
     return t.type->decl();
 }
 
+std::optional<DeclId> Checker::matchMemberEnum(const Pattern& pat) {
+    auto tagSpelling = std::make_unique<NamedType>(
+        pat.pos, "", pat.tag, std::vector<std::unique_ptr<TypeExpr>>{});
+    TypeRef t = resolveHere(tagSpelling.get());
+    if (t.isError() || t.type->kind() != Kind::Enum) {
+        return std::nullopt;
+    }
+    return t.type->decl();
+}
+
 bool Checker::checkMatchMember(const Pattern& pat, TypeRef scrutinee) {
-    // A member pattern names the live union member (FEATURES §8.4): the
-    // tag answers at runtime, so only the same union stays live. Any
-    // other shape can never hold that tag and dies; an interface could
-    // box the union, which still needs its dynamic check to land.
+    // A member pattern names the live union member or the enum case
+    // (FEATURES §8.4): the tag answers at runtime, so only the same union
+    // or the same enum stays live. Any other shape can never hold that tag
+    // and dies; an interface could box either, which still needs its
+    // dynamic check to land.
     auto tagSpelling = std::make_unique<NamedType>(
         pat.pos, "", pat.tag, std::vector<std::unique_ptr<TypeExpr>>{});
     TypeRef t = resolveHere(tagSpelling.get());
     if (t.isError()) {
         return false;
     }
-    if (t.type->kind() != Kind::Union) {
-        fail(pat.pos, "this pattern needs a union type");
+    if (t.type->kind() != Kind::Union && t.type->kind() != Kind::Enum) {
+        fail(pat.pos, "this pattern needs a union or an enum type");
         return false;
     }
     std::optional<DeclId> id = t.type->decl();
     if (!id.has_value()) {
-        fail(pat.pos, "this pattern needs a union type");
+        fail(pat.pos, "this pattern needs a union or an enum type");
         return false;
+    }
+    if (t.type->kind() == Kind::Enum) {
+        bool known = false;
+        for (const auto& member : resolver_.enumMembers(*id)) {
+            if (member.first == pat.member) {
+                known = true;
+                break;
+            }
+        }
+        if (!known) {
+            fail(pat.pos, "no such member");
+            return false;
+        }
+        if (scrutinee.type->kind() == Kind::Interface) {
+            fail(pat.pos, "this pattern is not supported yet");
+            return false;
+        }
+        bool same = false;
+        if (scrutinee.type->kind() == Kind::Enum) {
+            std::optional<DeclId> sid = scrutinee.type->decl();
+            same = sid.has_value() && sameDecl(*sid, *id);
+        }
+        if (!same) {
+            deadPatterns_.insert(&pat);
+        }
+        return true;
     }
     if (resolver_.fieldType(*id, pat.member).isError()) {
         fail(pat.pos, "no such member");
