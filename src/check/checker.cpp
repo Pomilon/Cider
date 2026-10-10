@@ -1019,11 +1019,48 @@ void Checker::visitForInStmt(ForInStmt& n) {
         } else if (kind == Kind::Struct || kind == Kind::Class) {
             std::optional<DeclId> id = seq.type->decl();
             if (id.has_value()) {
+                // The iteration protocol is two methods (FEATURES 8.2):
+                // iter() answers the iterator value once, next() takes a
+                // pointer to that same iterator and answers the next
+                // element or nilPtr. One without the other does not
+                // iterate, and next through any other pointer is not the
+                // protocol.
+                const Signature* iter = resolver_.methodSig(*id, "iter");
                 const Signature* next = resolver_.methodSig(*id, "next");
-                if (next != nullptr && next->arity() == 1 && next->returnType() != nullptr &&
-                    next->returnType()->kind() == Kind::Pointer) {
-                    element = TypeRef{next->returnType()->pointee()};
-                } else {
+                bool shapesOk = false;
+                if (iter != nullptr && next != nullptr && iter->arity() == 0 &&
+                    next->arity() == 1) {
+                    const Type* iterRet = iter->returnType();
+                    const Type* nextParam = next->parameters()[0].type;
+                    const Type* nextRet = next->returnType();
+                    if (iterRet != nullptr && nextParam != nullptr &&
+                        nextRet != nullptr &&
+                        (iterRet->kind() == Kind::Struct ||
+                         iterRet->kind() == Kind::Class ||
+                         iterRet->kind() == Kind::Union)) {
+                        std::optional<DeclId> iterId = iterRet->decl();
+                        const Type* held =
+                            nextParam->kind() == Kind::Pointer
+                                ? nextParam->pointee()
+                                : nullptr;
+                        const Type* elem =
+                            nextRet->kind() == Kind::Pointer
+                                ? nextRet->pointee()
+                                : nullptr;
+                        if (iterId.has_value() && held != nullptr &&
+                            !held->isError() && elem != nullptr &&
+                            !elem->isError() &&
+                            elem->kind() != Kind::Void) {
+                            std::optional<DeclId> heldId = held->decl();
+                            if (heldId.has_value() &&
+                                sameDecl(*iterId, *heldId)) {
+                                element = TypeRef{elem};
+                                shapesOk = true;
+                            }
+                        }
+                    }
+                }
+                if (!shapesOk) {
                     fail(n.seq->pos, "a for-in type provides iter() and next()");
                 }
             }

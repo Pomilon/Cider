@@ -6260,37 +6260,11 @@ std::vector<ir::Value> Lowerer::lowerCallWords(Call& n) {
             if (msig != nullptr) {
                 callee = resolver_.linkName(*owner) + "__" + field->name;
                 sig = msig;
-                if (base.slots.empty() && !base.hasIndirect) {
-                    refuse(n.pos, "a method on a global is not lowered yet");
+                ir::Value at;
+                if (!receiverAddress(base, n.pos, "this call", at)) {
                     return {undefined()};
                 }
-                if (base.hasIndirect && base.off != 0) {
-                    // A method on a field reached through a pointer: the object
-                    // address is the loaded pointer plus the field offset, added
-                    // the same way a slice advances its pointer.
-                    TypeRef count{ctx_.basic(BasicKind::I64)};
-                    TypeRef ptrType{ctx_.pointer(base.type.type)};
-                    ir::Value step = constantI64(base.off, count, n.pos);
-                    if (failed_) {
-                        return {undefined()};
-                    }
-                    ir::Instr add;
-                    add.op = ir::Op::Add;
-                    add.loc = n.pos;
-                    add.type = ptrType;
-                    add.width = ir::IRType::Ptr;
-                    add.isPure = true;
-                    add.operands.push_back(base.indirect);
-                    add.operands.push_back(step);
-                    ir::Value at = newValue(add.width, ptrType, n.pos);
-                    add.results.push_back(at);
-                    emit(std::move(add));
-                    receiver.push_back(at);
-                } else if (base.hasIndirect) {
-                    receiver.push_back(base.indirect);
-                } else {
-                    receiver.push_back(computedBase(base.slots[0], base.off, n.pos));
-                }
+                receiver.push_back(at);
             }
             // msig == null: a closure-valued field, not a method — the
             // closure path below decides from the checked type.
@@ -7546,19 +7520,75 @@ void Lowerer::onFor(ForStmt& n) {
     locals_.pop_back();
 }
 
+bool Lowerer::receiverAddress(const Place& base, Position pos, const char* what,
+                                ir::Value& out) {
+    if (failed_ || base.type.isError()) {
+        refuse(pos, what);
+        return false;
+    }
+    Kind kind = base.type.type->kind();
+    if (kind != Kind::Class && kind != Kind::Struct) {
+        refuse(pos, what);
+        return false;
+    }
+    if (base.slots.empty() && !base.hasIndirect) {
+        refuse(pos, "a method on a global is not lowered yet");
+        return false;
+    }
+    if (base.hasIndirect && base.off != 0) {
+        // A method on a field reached through a pointer: the object
+        // address is the loaded pointer plus the field offset, added
+        // the same way a slice advances its pointer.
+        TypeRef count{ctx_.basic(BasicKind::I64)};
+        TypeRef ptrType{ctx_.pointer(base.type.type)};
+        ir::Value step = constantI64(base.off, count, pos);
+        if (failed_) {
+            return false;
+        }
+        ir::Instr add;
+        add.op = ir::Op::Add;
+        add.loc = pos;
+        add.type = ptrType;
+        add.width = ir::IRType::Ptr;
+        add.isPure = true;
+        add.operands.push_back(base.indirect);
+        add.operands.push_back(step);
+        ir::Value at = newValue(add.width, ptrType, pos);
+        add.results.push_back(at);
+        emit(std::move(add));
+        out = at;
+        return !failed_;
+    }
+    if (base.hasIndirect) {
+        out = base.indirect;
+        return true;
+    }
+    out = computedBase(base.slots[0], base.off, pos);
+    return !failed_;
+}
+
 void Lowerer::onForIn(ForInStmt& n) {
     if (failed_ || !enabled_ || function_ == nullptr) {
         return;
     }
-    // Arrays and slices iterate behind an index. The struct/class
-    // iter()/next() protocol has no lowering yet and refuses by name so
-    // the loop never disappears silently.
+    // Arrays and slices iterate behind an index; a struct or class
+    // iterates through its iter()/next() protocol below. Anything else
+    // refuses by name so the loop never disappears silently.
     TypeRef seqType = checker_.typeOf(n.seq.get());
     if (seqType.isError()) {
         refuse(n.pos, "this iteration");
         return;
     }
     Kind seqKind = seqType.type->kind();
+    if (seqKind == Kind::Struct || seqKind == Kind::Class) {
+        std::optional<DeclId> id = seqType.type->decl();
+        if (!id.has_value()) {
+            refuse(n.pos, "this iteration");
+            return;
+        }
+        onForInProtocol(n, seqType, *id);
+        return;
+    }
     if (seqKind != Kind::Array && seqKind != Kind::Slice) {
         refuse(n.pos, "iterating this type");
         return;
@@ -7819,6 +7849,252 @@ void Lowerer::onForIn(ForInStmt& n) {
             return;
         }
     }
+    if (!terminated_) {
+        ir::Terminator back;
+        back.term = ir::Term::Br;
+        back.target = headLabel;
+        back.loc = n.pos;
+        emitTerminator(back);
+    }
+    startBlock(exitLabel);
+    locals_.pop_back();
+}
+
+void Lowerer::onForInProtocol(ForInStmt& n, TypeRef seqType, DeclId id) {
+    // A struct/class sequence iterates through its protocol: iter() runs
+    // once into a hidden slot, each head step calls next() with the
+    // slot's address, and a nil answer ends the loop (FEATURES 8.2). The
+    // checker proved the shapes (Checker::visitForInStmt); the lookups
+    // repeat here rather than trusting them, so a checker bug reads as
+    // a refusal. The body binds a fresh copy each step, so writing to x
+    // never reaches the sequence.
+    Kind seqKind = seqType.type->kind();
+    if (seqKind != Kind::Struct && seqKind != Kind::Class) {
+        refuse(n.pos, "this iteration");
+        return;
+    }
+    const resolve::Decl* owner = resolver_.declById(id);
+    const Signature* iter = resolver_.methodSig(id, "iter");
+    const Signature* next = resolver_.methodSig(id, "next");
+    if (owner == nullptr || iter == nullptr || next == nullptr ||
+        iter->arity() != 0 || next->arity() != 1) {
+        refuse(n.pos, "this iteration");
+        return;
+    }
+    const Type* iterRet = iter->returnType();
+    const Type* nextParam = next->parameters()[0].type;
+    const Type* nextRet = next->returnType();
+    bool shapesOk = iterRet != nullptr && nextParam != nullptr &&
+                    nextRet != nullptr &&
+                    (iterRet->kind() == Kind::Struct ||
+                     iterRet->kind() == Kind::Class ||
+                     iterRet->kind() == Kind::Union);
+    std::optional<DeclId> iterId;
+    const Type* elem = nullptr;
+    if (shapesOk) {
+        iterId = iterRet->decl();
+        elem = nextRet->kind() == Kind::Pointer ? nextRet->pointee() : nullptr;
+        const Type* held =
+            nextParam->kind() == Kind::Pointer ? nextParam->pointee() : nullptr;
+        std::optional<DeclId> heldId =
+            held != nullptr ? held->decl() : std::nullopt;
+        shapesOk = iterId.has_value() && elem != nullptr && !elem->isError() &&
+                   elem->kind() != Kind::Void && heldId.has_value() &&
+                   sameDecl(*iterId, *heldId);
+    }
+    if (!shapesOk) {
+        refuse(n.pos, "this iteration");
+        return;
+    }
+    TypeRef iterType{iterRet};
+    TypeRef elemType{elem};
+    int64_t elemBytes = resolver_.nominalSize(elemType.type);
+    if (elemBytes <= 0) {
+        refuse(n.pos, "this element");
+        return;
+    }
+    std::string link = resolver_.linkName(*owner);
+    Place seqPlace;
+    if (!resolvePlace(n.seq.get(), seqPlace)) {
+        refuse(n.pos, "this iteration");
+        return;
+    }
+    ir::Value recv;
+    if (!receiverAddress(seqPlace, n.pos, "this iteration", recv)) {
+        return;
+    }
+    if (failed_) {
+        return;
+    }
+    // iter() answers once, before the first step: the words land in the
+    // hidden slot whatever their width (rax/rdx row or caller buffer,
+    // through the same row calls read).
+    ir::Instr iterCall;
+    iterCall.op = ir::Op::Call;
+    iterCall.loc = n.pos;
+    iterCall.callee = link + "__iter";
+    iterCall.call.indirect = false;
+    iterCall.mayTrap = true;
+    {
+        ir::Argument self;
+        self.words.push_back(recv);
+        iterCall.arguments.push_back(std::move(self));
+    }
+    std::vector<ir::Value> itWords;
+    if (needsSret(iterRet)) {
+        std::vector<ir::Value> slots = callSretSlots(iterCall, iterRet, n.pos);
+        if (failed_) {
+            return;
+        }
+        iterCall.width = ir::IRType::Void;
+        iterCall.type = TypeRef{iterRet};
+        emit(std::move(iterCall));
+        itWords = callSretLoads(slots, iterRet, n.pos);
+        if (failed_) {
+            return;
+        }
+    } else {
+        itWords = callResults(iterCall, iterRet, n.pos);
+        if (failed_) {
+            return;
+        }
+        emit(std::move(iterCall));
+    }
+    if (function_ != nullptr) {
+        function_->canThrow = true;
+    }
+    // One slot per word: storeRange addresses word i through slots[i],
+    // so a single slot refuses past the first word (like any aggregate
+    // binding). An empty slot row names a stateless iterator or element
+    // the loop could never move, and refuses rather than addressing
+    // nothing.
+    std::vector<ir::Value> itSlots = allocaFor(iterType, n.pos);
+    if (failed_ || itSlots.empty()) {
+        if (!failed_) {
+            refuse(n.pos, "this iteration");
+        }
+        return;
+    }
+    Place itPlace;
+    itPlace.slots = itSlots;
+    itPlace.type = iterType;
+    storeRange(n.pos, itPlace, itWords, iterType);
+    if (failed_) {
+        return;
+    }
+    // The iterator's address and the element slot are loop-invariant:
+    // both are answered once, outside the blocks.
+    ir::Value itPtr = computedBase(itSlots[kFirstWord], 0, n.pos);
+    if (failed_) {
+        return;
+    }
+    std::vector<ir::Value> elemSlots = allocaFor(elemType, n.pos);
+    if (failed_ || elemSlots.empty()) {
+        if (!failed_) {
+            refuse(n.pos, "this element");
+        }
+        return;
+    }
+    uint32_t headLabel = emitBlock(n.pos);
+    uint32_t bodyLabel = emitBlock(n.pos);
+    uint32_t stepLabel = emitBlock(n.pos);
+    uint32_t exitLabel = emitBlock(n.pos);
+
+    // The iteration variable binds in the loop's own frame, which the
+    // checker pushed a matching scope for before calling.
+    locals_.push_back({});
+    LocalBinding bind;
+    bind.slots = elemSlots;
+    bind.type = elemType;
+    bind.isMutable = n.isMutable;
+    locals_.back()[n.name] = std::move(bind);
+
+    ir::Terminator toHead;
+    toHead.term = ir::Term::Br;
+    toHead.target = headLabel;
+    toHead.loc = n.pos;
+    emitTerminator(toHead);
+
+    startBlock(headLabel);
+    // p = seq.next(&it): the receiver rides first, as for a method call.
+    ir::Instr nextCall;
+    nextCall.op = ir::Op::Call;
+    nextCall.loc = n.pos;
+    nextCall.callee = link + "__next";
+    nextCall.call.indirect = false;
+    nextCall.mayTrap = true;
+    {
+        ir::Argument self;
+        self.words.push_back(recv);
+        nextCall.arguments.push_back(std::move(self));
+        ir::Argument it;
+        it.words.push_back(itPtr);
+        nextCall.arguments.push_back(std::move(it));
+    }
+    std::vector<ir::Value> answer = callResults(nextCall, nextRet, n.pos);
+    if (failed_) {
+        return;
+    }
+    emit(std::move(nextCall));
+    if (function_ != nullptr) {
+        function_->canThrow = true;
+    }
+    if (answer.size() != static_cast<size_t>(kOneWord)) {
+        refuse(n.pos, "this iteration");
+        return;
+    }
+    ir::Value done = emitI64Cmp(n.pos, BinOp::Eq, answer[kFirstWord],
+                                constantI64(0, TypeRef{nextRet}, n.pos));
+    if (failed_) {
+        return;
+    }
+    ir::Terminator cond;
+    cond.term = ir::Term::CondBr;
+    cond.cond = done;
+    cond.thenTarget = exitLabel;
+    cond.elseTarget = bodyLabel;
+    cond.loc = n.pos;
+    emitTerminator(cond);
+
+    startBlock(bodyLabel);
+    {
+        // The element is copied from the answered pointer into the
+        // frame slot: x is always a copy (FEATURES 8.2).
+        Place at;
+        at.hasIndirect = true;
+        at.indirect = answer[kFirstWord];
+        at.off = 0;
+        at.type = elemType;
+        std::vector<ir::Value> words = loadRange(n.pos, at, elemType);
+        if (failed_) {
+            return;
+        }
+        Place elemPlace;
+        elemPlace.slots = elemSlots;
+        elemPlace.type = elemType;
+        storeRange(n.pos, elemPlace, words, elemType);
+        if (failed_) {
+            return;
+        }
+    }
+
+    loops_.push_back(LoopTargets{stepLabel, exitLabel});
+    bool savedTerminated = terminated_;
+    terminated_ = false;
+    if (n.body != nullptr) {
+        n.body->accept(checker_);
+    }
+    loops_.pop_back();
+    if (!terminated_) {
+        ir::Terminator toStep;
+        toStep.term = ir::Term::Br;
+        toStep.target = stepLabel;
+        toStep.loc = n.pos;
+        emitTerminator(toStep);
+    }
+    terminated_ = savedTerminated;
+
+    startBlock(stepLabel);
     if (!terminated_) {
         ir::Terminator back;
         back.term = ir::Term::Br;

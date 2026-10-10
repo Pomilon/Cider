@@ -255,6 +255,80 @@ void testLoopMatchRefused() {
     check(ma.ok, "match checks now that dispatch lands it");
 }
 
+// A for-in sequence is an array, a slice, or a struct/class carrying the
+// iteration protocol: iter() answers the iterator value once, next() takes
+// a pointer to it and answers the next element or nilPtr (FEATURES 8.2).
+// One without the other does not iterate.
+void testForInProtocol() {
+    std::printf("for-in over iter/next pairs\n");
+    const char* pair =
+        "struct RIt { var cur: int; var end: int; var out: int; }\n"
+        "struct Rng { var lo: int; var hi: int;\n"
+        "    func iter() -> RIt { return new RIt { cur: (*self).lo, end: (*self).hi, out: 0 }; }\n"
+        "    func next(it: *RIt) -> *int {\n"
+        "        if ((*it).cur >= (*it).end) { return nilPtr; }\n"
+        "        (*it).out = (*it).cur;\n"
+        "        (*it).cur = (*it).cur + 1;\n"
+        "        return &((*it).out);\n"
+        "    }\n"
+        "}\n";
+    Checked good = check(
+        std::string(pair) +
+        "func main() -> int { var r: Rng = new Rng { lo: 0, hi: 3 }; var s: int = 0; for (var x in r) { s = s + x; } return s; }\n");
+    check(good.ok, "an iter/next pair checks: " + good.stage);
+    Checked noIter = check(
+        "struct Rng { var lo: int; var hi: int;\n"
+        "    func next(it: *Rng) -> *int { return nilPtr; }\n"
+        "}\n"
+        "func main() -> int { var r: Rng = new Rng { lo: 0, hi: 1 }; for (var x in r) { } return 0; }\n");
+    check(!noIter.ok && noIter.stage == "check", "next without iter fails");
+    Checked noNext = check(
+        "struct Rng { var lo: int;\n"
+        "    func iter() -> Rng { return new Rng { lo: (*self).lo }; }\n"
+        "}\n"
+        "func main() -> int { var r: Rng = new Rng { lo: 0 }; for (var x in r) { } return 0; }\n");
+    check(!noNext.ok && noNext.stage == "check", "iter without next fails");
+    Checked iterArg = check(
+        "struct Rng { var lo: int;\n"
+        "    func iter(n: int) -> Rng { return new Rng { lo: n }; }\n"
+        "    func next(it: *Rng) -> *int { return nilPtr; }\n"
+        "}\n"
+        "func main() -> int { var r: Rng = new Rng { lo: 0 }; for (var x in r) { } return 0; }\n");
+    check(!iterArg.ok && iterArg.stage == "check", "iter takes no arguments");
+    Checked iterInt = check(
+        "struct Rng { var lo: int; var hi: int;\n"
+        "    func iter() -> int { return (*self).lo; }\n"
+        "    func next(it: *int) -> *int { return nilPtr; }\n"
+        "}\n"
+        "func main() -> int { var r: Rng = new Rng { lo: 0, hi: 1 }; for (var x in r) { } return 0; }\n");
+    check(!iterInt.ok && iterInt.stage == "check", "iter answers a nominal iterator");
+    Checked nextVal = check(
+        "struct RIt { var cur: int; var end: int; }\n"
+        "struct Rng { var lo: int; var hi: int;\n"
+        "    func iter() -> RIt { return new RIt { cur: (*self).lo, end: (*self).hi }; }\n"
+        "    func next(it: RIt) -> *int { return nilPtr; }\n"
+        "}\n"
+        "func main() -> int { var r: Rng = new Rng { lo: 0, hi: 1 }; for (var x in r) { } return 0; }\n");
+    check(!nextVal.ok && nextVal.stage == "check", "next takes a pointer to the iterator");
+    Checked nextOther = check(
+        "struct RIt { var cur: int; var end: int; }\n"
+        "struct OIt { var cur: int; }\n"
+        "struct Rng { var lo: int; var hi: int;\n"
+        "    func iter() -> RIt { return new RIt { cur: (*self).lo, end: (*self).hi }; }\n"
+        "    func next(it: *OIt) -> *int { return nilPtr; }\n"
+        "}\n"
+        "func main() -> int { var r: Rng = new Rng { lo: 0, hi: 1 }; for (var x in r) { } return 0; }\n");
+    check(!nextOther.ok && nextOther.stage == "check", "next takes iter's own iterator");
+    Checked nextVoid = check(
+        "struct RIt { var cur: int; var end: int; }\n"
+        "struct Rng { var lo: int; var hi: int;\n"
+        "    func iter() -> RIt { return new RIt { cur: (*self).lo, end: (*self).hi }; }\n"
+        "    func next(it: *RIt) -> void { return; }\n"
+        "}\n"
+        "func main() -> int { var r: Rng = new Rng { lo: 0, hi: 1 }; for (var x in r) { } return 0; }\n");
+    check(!nextVoid.ok && nextVoid.stage == "check", "next answers an element pointer");
+}
+
 // A generic call checks its body with the arguments substituted.
 void testGenericCall() {
     std::printf("generic calls substitute\n");
@@ -922,6 +996,7 @@ int main() {
     testFuncLitChecks();
     testControl();
     testThrowRefused();
+    testForInProtocol();
     testInitAssign();
     testLoopMatchRefused();
     std::printf("\n%d checks, %s\n", checks, failures == 0 ? "all passed" : "FAILURES");

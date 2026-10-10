@@ -101,6 +101,7 @@ public:
     void onWhile(WhileStmt& n) override;
     void onFor(ForStmt& n) override;
     void onForIn(ForInStmt& n) override;
+    void onForInProtocol(ForInStmt& n, TypeRef seqType, DeclId id);
     void onDelete(DeleteStmt& n) override;
     void onAsmStmt(AsmStmt& n) override;
     void onBlockEnter(Block& n) override;
@@ -288,6 +289,13 @@ public:
     // Names a place: identifiers, and field chains over them. Anything else
     // (a call result, arithmetic) has no address and is refused.
     bool resolvePlace(const Expr* expr, Place& out);
+    // The address of a class/struct value as the receiver its static method
+    // expects first. Shared by method calls and the for-in protocol, so the
+    // two never disagree about what an object address is. Takes the resolved
+    // place rather than the expression: resolving twice could lower effects
+    // twice. `what` names the construct for the refusal.
+    bool receiverAddress(const Place& base, Position pos, const char* what,
+                         ir::Value& out);
     // One scalar load/store at a place plus offset. The bytes must sit inside
     // a single word; anything straddling words is refused, not split, because
     // a partial-word write that guessed its neighbors would corrupt them.

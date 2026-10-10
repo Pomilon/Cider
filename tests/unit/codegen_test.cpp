@@ -1466,6 +1466,46 @@ void testForIn() {
                  "    return s;\n"
                  "}\n") == 4,
           "continue skips to the next element");
+    // The iteration protocol: iter() answers a value once, next() takes a
+    // pointer to it and answers each element or nilPtr (FEATURES 8.2).
+    const char* range =
+        "struct RIt { var cur: int; var end: int; var out: int; }\n"
+        "struct Rng { var lo: int; var hi: int;\n"
+        "    func iter() -> RIt { return new RIt { cur: (*self).lo, end: (*self).hi, out: 0 }; }\n"
+        "    func next(it: *RIt) -> *int {\n"
+        "        if ((*it).cur >= (*it).end) { return nilPtr; }\n"
+        "        (*it).out = (*it).cur;\n"
+        "        (*it).cur = (*it).cur + 1;\n"
+        "        return &((*it).out);\n"
+        "    }\n"
+        "}\n";
+    check(runQuiet(std::string(range) +
+                 "func main() -> int {\n"
+                 "    var r: Rng = new Rng { lo: 0, hi: 3 };\n"
+                 "    var s: int = 0;\n"
+                 "    for (var x in r) { s = s + x; }\n"
+                 "    return s;\n"
+                 "}\n") == 3,
+          "for-in over iter/next sums every step");
+    check(runQuiet(std::string(range) +
+                 "func main() -> int {\n"
+                 "    var r: Rng = new Rng { lo: 1, hi: 6 };\n"
+                 "    var s: int = 0;\n"
+                 "    for (var x in r) {\n"
+                 "        if (x == 3) { break; }\n"
+                 "        s = s + x;\n"
+                 "    }\n"
+                 "    return s;\n"
+                 "}\n") == 3,
+          "break leaves a protocol loop early");
+    check(runQuiet(std::string(range) +
+                 "func main() -> int {\n"
+                 "    var r: Rng = new Rng { lo: 0, hi: 4 };\n"
+                 "    var s: int = 0;\n"
+                 "    for (x in r) { s = s + x; }\n"
+                 "    return s;\n"
+                 "}\n") == 6,
+          "a protocol loop binds immutably without var");
 }
 
 void testFloat() {
