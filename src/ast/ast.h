@@ -400,7 +400,7 @@ struct ForInStmt : Stmt {
 };
 
 enum class PatternKind {
-    Bind, Wildcard, Type, Const, Member,
+    Bind, Wildcard, Type, Const, Member, Range,
 };
 
 struct FieldPat {
@@ -414,6 +414,9 @@ struct Pattern : Node {
     std::unique_ptr<TypeExpr> type;
     std::vector<FieldPat> fields;
     std::unique_ptr<Expr> value;
+    // A range keeps its lower bound in `value` and its upper bound here:
+    // both are integer literals, and the arm matches when lo <= x <= hi.
+    std::unique_ptr<Expr> rangeHi;
     std::string tag;
     std::string member;
     explicit Pattern(Position p) : Node(std::move(p)) {}
@@ -971,6 +974,7 @@ inline void ASTVisitor::visitPattern(Pattern& n) {
     if (n.type != nullptr) n.type->accept(*this);
     for (auto& f : n.fields) f.pat->accept(*this);
     if (n.value != nullptr) n.value->accept(*this);
+    if (n.rangeHi != nullptr) n.rangeHi->accept(*this);
 }
 inline void ASTVisitor::visitMatchArm(MatchArm& n) {
     n.pattern->accept(*this);

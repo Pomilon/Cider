@@ -278,6 +278,7 @@ private:
     bool resolveMatchValue(const std::string& name, TypeRef& bound);
     bool matchComparable(TypeRef scrutinee, TypeRef bound);
     bool checkMatchConst(const Pattern& pat, TypeRef scrutinee);
+    bool checkMatchRange(const Pattern& pat, TypeRef scrutinee);
     bool checkMatchPattern(const Pattern& pat, TypeRef scrutinee);
     bool checkMatchType(const Pattern& pat, TypeRef scrutinee);
     bool checkMatchMember(const Pattern& pat, TypeRef scrutinee);

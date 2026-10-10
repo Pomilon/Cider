@@ -231,6 +231,47 @@ void testGuard() {
     check(bmatch.arms[0]->guard == nullptr, "no if means no guard");
 }
 
+// `0 ... 10` is one range pattern: both bounds stay on the arm as integer
+// literals, and anything else beside the dots is a parse refusal.
+void testRange() {
+    std::printf("range patterns\n");
+    bool ok = false;
+    std::unique_ptr<cider::Program> program = parse(
+        "func f(v: int) -> int { match v { 0 ... 10 => { return 1; } default => { return 0; } } }",
+        ok);
+    check(ok, "parses");
+    const cider::FuncDecl& fn = static_cast<const cider::FuncDecl&>(*program->decls[0]);
+    const cider::MatchStmt& match =
+        static_cast<const cider::MatchStmt&>(*fn.body->stmts[0]);
+    check(match.arms.size() == 1, "one arm");
+    check(match.arms[0]->pattern->kind == cider::PatternKind::Range, "a range pattern");
+    const cider::IntLit& lo =
+        static_cast<const cider::IntLit&>(*match.arms[0]->pattern->value);
+    const cider::IntLit& hi =
+        static_cast<const cider::IntLit&>(*match.arms[0]->pattern->rangeHi);
+    check(lo.digits == "0" && hi.digits == "10", "both bounds stay on the arm");
+    bool tight = false;
+    std::unique_ptr<cider::Program> nospace = parse(
+        "func f(v: int) -> int { match v { 0...10 => { return 1; } default => { return 0; } } }",
+        tight);
+    check(tight && nospace->decls.size() == 1, "no spaces needed around the dots");
+    bool floatBound = false;
+    parse(
+        "func f(v: int) -> int { match v { 1.5 ... 5 => { return 1; } default => { return 0; } }",
+        floatBound);
+    check(!floatBound, "a float bound parses nowhere");
+    bool charBound = false;
+    parse(
+        "func f(v: int) -> int { match v { 'a' ... 'z' => { return 1; } default => { return 0; } }",
+        charBound);
+    check(!charBound, "a char bound parses nowhere");
+    bool namedBound = false;
+    parse(
+        "func f(v: int) -> int { match v { LO ... 10 => { return 1; } default => { return 0; } }",
+        namedBound);
+    check(!namedBound, "a named bound parses nowhere");
+}
+
 // `func init` names the constructor: `init` lexes as a keyword, so the
 // method parser accepts it explicitly rather than as an identifier.
 void testMethodInit() {
@@ -398,6 +439,7 @@ int main() {
     testControlForms();
     testAlternation();
     testGuard();
+    testRange();
     testMethodInit();
     testExportVar();
     testDotQualifiedType();

@@ -240,8 +240,38 @@ void testInitAssign() {
     check(!half.ok && half.stage == "check", "a half-assigned branch fails");
 }
 
-void testLoopMatchRefused() {
-    std::printf("unimplemented control flow refuses loudly\n");
+// A range matches integers between two inclusive bounds: live over an
+// integer scrutinee, dead over anything else, and never exhaustive —
+// even `0 ... 10` names no finite case list, so the default stays
+// required. Only integer literals bound it; anything else is refused
+// where it is written.
+void testRange() {
+    std::printf("ranges match integers between two bounds\n");
+    Checked live = check(
+        "func f(x: int) -> int { match x { 0 ... 10 => { return 1; } default => { return 0; } } }\n");
+    check(live.ok, "an int range checks: " + live.stage);
+    Checked noDefault = check(
+        "func f(x: int) -> int { match x { 0 ... 10 => { return 1; } } }\n");
+    check(!noDefault.ok && noDefault.stage == "check", "a range still needs a default");
+    Checked overBool = check(
+        "func f(b: bool) -> int { match b { 0 ... 1 => { return 1; } default => { return 0; } } }\n");
+    check(overBool.ok, "a range over a bool is dead, not wrong: " + overBool.stage);
+    Checked overString = check(
+        "func f(s: string) -> int { match s { 0 ... 1 => { return 1; } default => { return 0; } } }\n");
+    check(overString.ok, "a range over a string is dead, not wrong: " + overString.stage);
+    Checked inverted = check(
+        "func f(x: int) -> int { match x { 10 ... 0 => { return 1; } default => { return 0; } } }\n");
+    check(inverted.ok, "an inverted range is dead, not wrong: " + inverted.stage);
+    Checked bigUnsigned = check(
+        "func f(x: u64) -> int { match x { 0 ... 18446744073709551615 => { return 1; } default => { return 0; } } }\n");
+    check(bigUnsigned.ok, "a full-width u64 range checks: " + bigUnsigned.stage);
+    Checked bigSigned = check(
+        "func f(x: i64) -> int { match x { 0 ... 18446744073709551615 => { return 1; } default => { return 0; } } }\n");
+    check(!bigSigned.ok && bigSigned.stage == "check",
+          "a u64-wide bound over a signed type fails");
+}
+
+void testLoopMatchRefused() {    std::printf("unimplemented control flow refuses loudly\n");
     // Lowering landed for `for` (FEAT-042), so the pure-check path accepts it.
     Checked fo =
         check("func f() -> int { var s: int = 0; for (var i: int = 0; i < 10; i = i + 1) { s = s + 1; } return s; }\n");
@@ -1175,6 +1205,7 @@ int main() {
     testForInProtocol();
     testInitAssign();
     testLoopMatchRefused();
+    testRange();
     std::printf("\n%d checks, %s\n", checks, failures == 0 ? "all passed" : "FAILURES");
     return failures == 0 ? 0 : 1;
 }

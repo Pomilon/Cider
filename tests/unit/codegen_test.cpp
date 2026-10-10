@@ -1104,6 +1104,43 @@ void testGuard() {
           "a failing guard over a field falls through");
 }
 
+// A range tests both bounds inclusive: below misses, above misses, the
+// edges take the arm, and the comparison widens instead of truncating —
+// a u8 255 is inside `0 ... 300`, and a negative i32 is outside `0 ...
+// 10`, because the cell converts to 64 bits before either comparison.
+void testRange() {
+    std::printf("range patterns run\n");
+    check(runQuiet("func main() -> int { match (5) { 0 ... 10 => { return 1; } default => { return 0; } } }\n") == 1,
+          "inside the range takes the arm");
+    check(runQuiet("func main() -> int { match (0) { 0 ... 10 => { return 1; } default => { return 0; } } }\n") == 1,
+          "the lower bound is inclusive");
+    check(runQuiet("func main() -> int { match (10) { 0 ... 10 => { return 1; } default => { return 0; } } }\n") == 1,
+          "the upper bound is inclusive");
+    check(runQuiet("func main() -> int { var x: int = 0 - 1; match (x) { 0 ... 10 => { return 1; } default => { return 0; } } }\n") == 0,
+          "below the range falls through");
+    check(runQuiet("func main() -> int { match (11) { 0 ... 10 => { return 1; } default => { return 0; } } }\n") == 0,
+          "above the range falls through");
+    check(runQuiet("func main() -> int { var x: u8 = 255; match (x) { 0 ... 300 => { return 1; } default => { return 0; } } }\n") == 1,
+          "an out-of-width bound still matches what fits");
+    check(runQuiet("func main() -> int { var x: i32 = 0 - 1; match (x) { 0 ... 10 => { return 1; } default => { return 0; } } }\n") == 0,
+          "a negative value misses, signed");
+    check(runQuiet("func main() -> int { var x: u64 = 18446744073709551615; match (x) { 0 ... 18446744073709551615 => { return 1; } default => { return 0; } } }\n") == 1,
+          "a full-width u64 range matches");
+    check(runQuiet("struct P { var x: int; }\n"
+                   "func main() -> int {\n"
+                   "    var p: P = new P { x: 2 };\n"
+                   "    match (p) { P { x: 1 ... 3 } => { return 1; } default => { return 0; } }\n"
+                   "}\n") == 1,
+          "a nested range tests the field");
+    check(runQuiet("func main() -> int { match (7) { 0 ... 5 | 7 => { return 1; } default => { return 0; } } }\n") == 1,
+          "a range alternates with a constant");
+    check(runQuiet("func main() -> int {\n"
+                   "    var ok: bool = true;\n"
+                   "    match (4) { 0 ... 10 if ok => { return 1; } default => { return 0; } }\n"
+                   "}\n") == 1,
+          "a guard still gates a range");
+}
+
 // An enumerator pattern compares the cell with the named case: the first
 // match in source order wins, a dead arm never fires, and every case
 // listed needs no default (FEATURES §8.4).
@@ -1958,6 +1995,7 @@ int main() {
     testStringCompare();
     testMatch();
     testGuard();
+    testRange();
     testEnumMatch();
     testPointerArith();
     testEnumValues();

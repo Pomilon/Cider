@@ -1846,6 +1846,47 @@ bool Checker::checkMatchConst(const Pattern& pat, TypeRef scrutinee) {
     return true;
 }
 
+bool Checker::checkMatchRange(const Pattern& pat, TypeRef scrutinee) {
+    // A range orders its scrutinee, so only an integer answers: every
+    // other shape is dead the way a mistyped constant is — it compiles
+    // and never matches, and an inverted range is empty for the same
+    // reason. A bound above INT64_MAX is meaningful only beside an
+    // unsigned type; beside a signed one the wrapped bits would read as
+    // a negative number the source never wrote, so it fails loudly like
+    // the literal fit check it mirrors.
+    auto dead = [&] {
+        deadPatterns_.insert(&pat);
+        return true;
+    };
+    std::unordered_set<std::string> active;
+    EvalResult lo = evalConstInt(*pat.value, *env_, active);
+    if (!lo.ok) {
+        fail(pat.value->pos, lo.error);
+        return false;
+    }
+    EvalResult hi = evalConstInt(*pat.rangeHi, *env_, active);
+    if (!hi.ok) {
+        fail(pat.rangeHi->pos, hi.error);
+        return false;
+    }
+    if (scrutinee.type->kind() != Kind::Basic || !scrutinee.type->basic().has_value() ||
+        !basicIsInteger(*scrutinee.type->basic())) {
+        return dead();
+    }
+    // Both bounds are non-negative literals, so the wrapped magnitude is
+    // exact with or without the big flag: there is no sign to lose.
+    uint64_t loMag = static_cast<uint64_t>(lo.value);
+    uint64_t hiMag = static_cast<uint64_t>(hi.value);
+    if (loMag > hiMag) {
+        return dead();
+    }
+    if ((lo.big || hi.big) && basicIsSigned(*scrutinee.type->basic())) {
+        fail(pat.rangeHi->pos, "this range bound does not fit " + typeName(scrutinee));
+        return false;
+    }
+    return true;
+}
+
 bool Checker::checkMatchPattern(const Pattern& pat, TypeRef scrutinee) {
     switch (pat.kind) {
         case PatternKind::Wildcard:
@@ -1860,6 +1901,8 @@ bool Checker::checkMatchPattern(const Pattern& pat, TypeRef scrutinee) {
         }
         case PatternKind::Const:
             return checkMatchConst(pat, scrutinee);
+        case PatternKind::Range:
+            return checkMatchRange(pat, scrutinee);
         case PatternKind::Type:
             return checkMatchType(pat, scrutinee);
         case PatternKind::Member:

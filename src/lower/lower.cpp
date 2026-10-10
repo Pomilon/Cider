@@ -7102,6 +7102,59 @@ bool Lowerer::lowerMatchConstTest(const Expr* value,
     return !failed_;
 }
 
+bool Lowerer::lowerMatchRangeTest(const std::vector<ir::Value>& words, TypeRef scrutinee,
+                                  int64_t lo, int64_t hi, uint32_t taken,
+                                  uint32_t missed, Position pos) {
+    if (words.empty() || scrutinee.isError() ||
+        scrutinee.type->kind() != Kind::Basic ||
+        !scrutinee.type->basic().has_value() ||
+        !basicIsInteger(*scrutinee.type->basic())) {
+        refuse(pos, "this pattern");
+        return false;
+    }
+    // The checker proved an integer scrutinee and bounds that fit its
+    // signedness, so widening first keeps the question asked: a u8 255
+    // beside hi 300 compares 255 <= 300, never a truncated 44, and a
+    // negative i32 stays below lo 0 instead of wrapping above it.
+    bool isSigned = basicIsSigned(*scrutinee.type->basic());
+    TypeRef wide{ctx_.basic(isSigned ? BasicKind::I64 : BasicKind::U64)};
+    ir::Value cell = convertInt(words[kFirstWord], scrutinee, wide, pos);
+    if (failed_) {
+        return false;
+    }
+    ir::Value loVal = constantI64(lo, wide, pos);
+    ir::Value hiVal = constantI64(hi, wide, pos);
+    if (failed_) {
+        return false;
+    }
+    TypeRef boolean{ctx_.basic(BasicKind::Bool)};
+    auto cmpTo = [&](BinOp op, ir::Value a, ir::Value b, uint32_t yes, uint32_t no) {
+        ir::Instr cmp;
+        cmp.op = ir::Op::Cmp;
+        cmp.loc = pos;
+        cmp.type = boolean;
+        cmp.width = ir::IRType::Bool;
+        cmp.cmp = cmpFor(op, isSigned);
+        cmp.isPure = true;
+        cmp.operands.push_back(a);
+        cmp.operands.push_back(b);
+        ir::Value out = newValue(cmp.width, boolean, pos);
+        cmp.results.push_back(out);
+        emit(std::move(cmp));
+        matchCondTo(out, yes, no, pos);
+    };
+    // Two links, not one: lo <= x lands mid, x <= hi lands the body,
+    // and either miss leaves the arm — the chain's shape, doubled.
+    uint32_t mid = emitBlock(pos);
+    cmpTo(BinOp::Ge, cell, loVal, mid, missed);
+    if (failed_) {
+        return false;
+    }
+    startBlock(mid);
+    cmpTo(BinOp::Le, cell, hiVal, taken, missed);
+    return !failed_;
+}
+
 bool Lowerer::lowerMatchFieldTest(const Pattern& sub, const Place& at, uint32_t pass,
                                   uint32_t miss, Position pos,
                                   std::vector<MatchFieldBind>& binds) {
@@ -7156,6 +7209,23 @@ bool Lowerer::lowerMatchFieldTest(const Pattern& sub, const Place& at, uint32_t 
             return false;
         }
         return lowerMatchConstTest(sub.value.get(), got, pass, miss, pos);
+    }
+    if (sub.kind == PatternKind::Range) {
+        std::vector<ir::Value> got = loadRange(pos, at, at.type);
+        if (failed_) {
+            return false;
+        }
+        if (got.size() != kOneWord) {
+            refuse(pos, "this pattern");
+            return false;
+        }
+        int64_t lo = 0;
+        int64_t hi = 0;
+        if (!foldBound(sub.value.get(), lo) || !foldBound(sub.rangeHi.get(), hi)) {
+            refuse(sub.value->pos, "this pattern");
+            return false;
+        }
+        return lowerMatchRangeTest(got, at.type, lo, hi, pass, miss, pos);
     }
     if (sub.kind == PatternKind::Type || sub.kind == PatternKind::Member) {
         return lowerMatchArmTest(sub, at, pass, miss, pos, binds);
@@ -7468,6 +7538,18 @@ void Lowerer::onMatch(MatchStmt& n) {
             condTo(emitI64Cmp(n.pos, BinOp::Eq, scrut[kFirstWord], wantVal),
                    body, next);
             return true;
+        }
+        if (pat.kind == PatternKind::Range) {
+            int64_t lo = 0;
+            int64_t hi = 0;
+            if (!foldBound(pat.value.get(), lo) || !foldBound(pat.rangeHi.get(), hi)) {
+                refuse(pat.value->pos, "this pattern");
+                return false;
+            }
+            // The chain proved the scrutinee one word; the helper proves
+            // the rest — an integer cell widened, then both bounds.
+            return lowerMatchRangeTest(scrut, scrutType, lo, hi, body, next,
+                                       n.pos);
         }
         if (pat.kind == PatternKind::Type || pat.kind == PatternKind::Member) {
             // Dead arms chained through above; a live one owns the spill

@@ -1249,6 +1249,19 @@ Pattern Parser::parsePattern() {
         peek().kind == TokenKind::KwNilPtr) {
         pattern.kind = PatternKind::Const;
         pattern.value = parsePrefix();
+        // `lo ... hi` is one range pattern, inclusive on both ends. Only
+        // integer literals bound it: a float, char, string, bool, or name
+        // beside the dots is refused here, where it is written, and a
+        // bound the dots never follow stays the constant it always was.
+        if (match(TokenKind::Ellipsis)) {
+            if (dynamic_cast<IntLit*>(pattern.value.get()) == nullptr ||
+                !check(TokenKind::IntLit)) {
+                failHere("a range bound is an integer");
+                return pattern;
+            }
+            pattern.kind = PatternKind::Range;
+            pattern.rangeHi = parsePrefix();
+        }
         return pattern;
     }
     if (!check(TokenKind::Ident)) {

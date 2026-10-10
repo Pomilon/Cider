@@ -347,6 +347,14 @@ public:
     // comparison. Branches taken/missed; refuses what cannot compare.
     bool lowerMatchConstTest(const Expr* value, const std::vector<ir::Value>& words,
                              uint32_t taken, uint32_t missed, Position pos);
+    // A range against already-loaded words of an integer type: the cell
+    // widens to 64 bits preserving sign, then lo <= x <= hi compares in
+    // 64 bits with the scrutinee's signedness — out-of-width bounds
+    // match what fits instead of truncating. Branches taken/missed;
+    // refuses what cannot compare.
+    bool lowerMatchRangeTest(const std::vector<ir::Value>& words, TypeRef scrutinee,
+                             int64_t lo, int64_t hi, uint32_t taken,
+                             uint32_t missed, Position pos);
     // The test chains' edges: unconditional and conditional, sealing the
     // block they leave like every other emitter.
     void matchBrTo(uint32_t target, Position pos);
