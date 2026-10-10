@@ -3055,7 +3055,18 @@ bool Lowerer::arrayElementPlace(const Index& n, const Place& base,
     gep.loc = n.pos;
     gep.type = ptr;
     gep.width = ir::IRType::Ptr;
-    gep.addressBase = base.slots[kFirstWord];
+    // An indirect base owns no slots by construction: its address is the
+    // loaded pointer value, and reading slots[0] answers past the end of
+    // an empty vector. The accumulated offset still applies on top.
+    if (base.hasIndirect) {
+        gep.addressBase = base.indirect;
+    } else {
+        if (base.slots.empty()) {
+            refuse(n.pos, what);
+            return false;
+        }
+        gep.addressBase = base.slots[kFirstWord];
+    }
     gep.displacement = base.off;
     gep.isPure = true;
     gep.operands.push_back(byteOff);

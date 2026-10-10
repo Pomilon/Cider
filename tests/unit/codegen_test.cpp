@@ -402,6 +402,38 @@ void testComputedIndex() {
             "}\n",
             signaled);
     check(signaled, "a chained store past the inner end traps");
+    // A computed index through a pointer dereference addresses off the
+    // loaded address: `(*p)[i]` is the i-th element past the pointer's
+    // value, with the same bounds check the slot route owns.
+    check(runQuiet("func at(p: *[int; 3], i: int) -> int { return (*p)[i]; }\n"
+                   "func main() -> int {\n"
+                   "    var a: [int; 3] = new [int; 3] { 4, 5, 6 };\n"
+                   "    return at(&a, 2);\n"
+                   "}\n") == 6,
+          "a computed read through a pointer answers the element");
+    check(runQuiet("struct S { var items: [int; 3]; }\n"
+                   "func at(q: *S, i: int) -> int { return (*q).items[i]; }\n"
+                   "func main() -> int {\n"
+                   "    var s: S = new S { items: new [int; 3] { 4, 5, 6 } };\n"
+                   "    return at(&s, 1);\n"
+                   "}\n") == 5,
+          "a computed read through a pointer field answers the element");
+    check(runQuiet("func set(p: *[int; 3], i: int, v: int) { (*p)[i] = v; }\n"
+                   "func main() -> int {\n"
+                   "    var a: [int; 3] = new [int; 3] { 4, 5, 6 };\n"
+                   "    var j: int = 1;\n"
+                   "    set(&a, j, 42);\n"
+                   "    return a[1];\n"
+                   "}\n") == 42,
+          "a computed store through a pointer lands");
+    signaled = false;
+    runCode("func at(p: *[int; 3], i: int) -> int { return (*p)[i]; }\n"
+            "func main() -> int {\n"
+            "    var a: [int; 3] = new [int; 3] { 4, 5, 6 };\n"
+            "    return at(&a, 9);\n"
+            "}\n",
+            signaled);
+    check(signaled, "a computed read past the end through a pointer traps");
 }
 
 void testPointerField() {
