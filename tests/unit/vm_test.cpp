@@ -84,11 +84,28 @@ void testExit() {
     check(opr.exitCode == 42, "the optimised answer is 42");
 }
 
+// Branches and loops run: if/else answers, while accumulates.
+void testControl() {
+    std::printf("branches and loops run\n");
+    Lowered unopt = lower("func main() -> int {\n"
+                          "    var t: int = 0;\n"
+                          "    var i: int = 1;\n"
+                          "    while (i <= 10) { t = t + i; i = i + 1; }\n"
+                          "    if (t == 55) { return 7; }\n"
+                          "    return 8;\n"
+                          "}\n");
+    check(unopt.ok, "lowers: " + unopt.stage);
+    cider::vm::VmResult unr = cider::vm::run(*unopt.module);
+    check(unr.ok, "runs unoptimised: " + unr.error);
+    check(unr.exitCode == 7, "the loop sums to the taken arm");
+}
+
 }  // namespace
 
 int main() {
     std::printf("vm_test — the interpreter answers\n\n");
     testExit();
+    testControl();
     std::printf("\n%d checks, %s\n", checks, failures == 0 ? "all passed" : "FAILURES");
     return failures == 0 ? 0 : 1;
 }
