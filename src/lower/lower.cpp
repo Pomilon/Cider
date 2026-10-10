@@ -3555,22 +3555,54 @@ std::vector<ir::Value> Lowerer::lowerSlice(const SliceExpr& n) {
     TypeRef ptrType{ctx_.pointer(element.type)};
     ir::Value ptr = undefined();
     if (baseKind == Kind::Array) {
+        // Slot-precise logic must not read slots then: an indirect base
+        // owns no slots by construction (BUG-278), so a base with
+        // neither slots nor an indirect address refuses instead of
+        // answering past the end of an empty vector.
+        if (!base.hasIndirect && base.slots.empty()) {
+            refuse(n.array->pos, "this expression");
+            return {undefined()};
+        }
         if (loFolded) {
-            int64_t per = layout::kSizePointer;
-            int64_t byteAddr = base.off + loConst * elemBytes;
-            uint64_t slotIdx = static_cast<uint64_t>(byteAddr / per);
-            if (slotIdx >= static_cast<uint64_t>(base.slots.size())) {
-                refuse(n.pos, "this expression");
-                return {undefined()};
-            }
-            int64_t intra = byteAddr % per;
-            ptr = computedBase(base.slots[slotIdx], intra, n.pos);
-            ptr.type = ptrType;
-        } else {
-            for (uint64_t i = 0; i < static_cast<uint64_t>(base.slots.size()); ++i) {
-                if (base.slots[i].id != base.slots[0].id + static_cast<uint32_t>(i)) {
+            int64_t byteDelta = loConst * elemBytes;
+            if (base.hasIndirect) {
+                // The base address is the loaded pointer value; the
+                // accumulated offset still applies on top, and the
+                // folded advance rides along as a constant operand
+                // (codegen reads operands[0] unconditionally).
+                ir::Instr gep;
+                gep.op = ir::Op::Gep;
+                gep.loc = n.pos;
+                gep.type = ptrType;
+                gep.width = ir::IRType::Ptr;
+                gep.addressBase = base.indirect;
+                gep.displacement = base.off;
+                gep.isPure = true;
+                gep.operands.push_back(constantI64(byteDelta, count, n.lo->pos));
+                ptr = newValue(gep.width, ptrType, n.pos);
+                gep.results.push_back(ptr);
+                emit(std::move(gep));
+            } else {
+                int64_t per = layout::kSizePointer;
+                int64_t byteAddr = base.off + byteDelta;
+                uint64_t slotIdx = static_cast<uint64_t>(byteAddr / per);
+                if (slotIdx >= static_cast<uint64_t>(base.slots.size())) {
                     refuse(n.pos, "this expression");
                     return {undefined()};
+                }
+                int64_t intra = byteAddr % per;
+                ptr = computedBase(base.slots[slotIdx], intra, n.pos);
+                ptr.type = ptrType;
+            }
+        } else {
+            // Consecutive slot ids are a direct-base fact: an indirect
+            // base has no slots to be consecutive.
+            if (!base.hasIndirect) {
+                for (uint64_t i = 0; i < static_cast<uint64_t>(base.slots.size()); ++i) {
+                    if (base.slots[i].id != base.slots[0].id + static_cast<uint32_t>(i)) {
+                        refuse(n.pos, "this expression");
+                        return {undefined()};
+                    }
                 }
             }
             ir::Value scaled = loVal;
@@ -3596,7 +3628,11 @@ std::vector<ir::Value> Lowerer::lowerSlice(const SliceExpr& n) {
             gep.loc = n.pos;
             gep.type = ptrType;
             gep.width = ir::IRType::Ptr;
-            gep.addressBase = base.slots[0];
+            if (base.hasIndirect) {
+                gep.addressBase = base.indirect;
+            } else {
+                gep.addressBase = base.slots[0];
+            }
             gep.displacement = base.off;
             gep.isPure = true;
             gep.operands.push_back(scaled);

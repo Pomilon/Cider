@@ -1437,6 +1437,46 @@ void testSliceCopy() {
                   "}\n",
                   sig) == 43 && !sig,
           "a slice reassigns an array");
+    // A slice through a pointer dereference addresses off the loaded
+    // address: `(*p)[0:2]` names the elements past the pointer's value,
+    // with the same bounds checks the slot route owns (BUG-279; the
+    // dynamic-index twin was BUG-278).
+    check(runQuiet("func at(p: *[int; 3]) -> int {\n"
+                   "    var s: []int = (*p)[0:2];\n"
+                   "    return s[1];\n"
+                   "}\n"
+                   "func main() -> int {\n"
+                   "    var a: [int; 3] = new [int; 3] { 4, 5, 6 };\n"
+                   "    return at(&a);\n"
+                   "}\n") == 5,
+          "a folded slice through a pointer answers the element");
+    check(runQuiet("struct S { var items: [int; 3]; }\n"
+                   "func get(q: *S, i: int) -> int { var s: []int = (*q).items[0:3]; return s[i]; }\n"
+                   "func main() -> int {\n"
+                   "    var s: S = new S { items: new [int; 3] { 4, 5, 6 } };\n"
+                   "    return get(&s, 2);\n"
+                   "}\n") == 6,
+          "a folded slice through a pointer field answers the element");
+    check(runQuiet("func at(p: *[int; 4], lo: int, hi: int) -> int {\n"
+                   "    var s: []int = (*p)[lo:hi];\n"
+                   "    return s[1];\n"
+                   "}\n"
+                   "func main() -> int {\n"
+                   "    var a: [int; 4] = new [int; 4] { 4, 5, 6, 7 };\n"
+                   "    return at(&a, 1, 3);\n"
+                   "}\n") == 6,
+          "a computed slice through a pointer answers the element");
+    sig = false;
+    check(runCode("func at(p: *[int; 3], l: int, h: int) -> int {\n"
+                  "    var s: []int = (*p)[l:h];\n"
+                  "    return s[0];\n"
+                  "}\n"
+                  "func main() -> int {\n"
+                  "    var a: [int; 3] = new [int; 3] { 4, 5, 6 };\n"
+                  "    return at(&a, 0, 9);\n"
+                  "}\n",
+                  sig) == -1 && sig,
+          "a slice past the end through a pointer traps");
     // A string global indexes like a local: the global's address is
     // materialized once and the element reads through it.
     check(runCode("var g: string = \"abc\";\n"
