@@ -503,6 +503,23 @@ void testAsm() {
     check(!bad.ok && bad.stage == "check", "an unbound placeholder fails");
 }
 
+// `delete` takes a class pointer: the checker constrains the operand
+// (FEAT-032), and the path lowers and runs.
+void testDelete() {
+    std::printf("delete needs a class pointer\n");
+    Checked good = check(
+        "class C { var x: int; func init(x: int) -> void { (*self).x = x; } }\n"
+        "func main() -> int { var p: *C = new C(1); delete p; return 0; }\n");
+    check(good.ok, "deleting a class pointer checks: " + good.stage);
+    Checked scalar = check(
+        "func main() -> int { var p: *int = alloc(8, 8) as *int; delete p; return 0; }\n");
+    check(!scalar.ok && scalar.stage == "check", "deleting a non-class pointer fails");
+    Checked nonptr = check("func main() -> int { var x: int = 3; delete x; return 0; }\n");
+    check(!nonptr.ok && nonptr.stage == "check", "deleting a non-pointer fails");
+    Checked nil = check("func main() -> int { delete nilPtr; return 0; }\n");
+    check(!nil.ok && nil.stage == "check", "deleting nil fails");
+}
+
 // `++i` needs an integer place; floats and rvalues are rejected where used.
 void testIncrDecr() {
     std::printf("increment and decrement check\n");
@@ -1069,6 +1086,7 @@ int main() {
     testRepeatZero();
     testSliceCopy();
     testAsm();
+    testDelete();
     testLen();
     testFuncLitChecks();
     testControl();

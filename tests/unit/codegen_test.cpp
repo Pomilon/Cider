@@ -521,6 +521,24 @@ void testPointerHeap() {
           "a double free dies loudly with the heap code");
 }
 
+// `delete` runs the deinit once, then releases the storage (FEATURES §5.3).
+void testDelete() {
+    std::printf("delete runs deinit, then releases\n");
+    bool sig = false;
+    check(runCode("var seen: int = 0;\n"
+                  "class C {\n"
+                  "    var x: int;\n"
+                  "    func init(x: int) -> void { (*self).x = x; }\n"
+                  "    func deinit() -> void { seen = (*self).x; }\n"
+                  "}\n"
+                  "func main() -> int {\n"
+                  "    var p: *C = new C(41);\n"
+                  "    delete p;\n"
+                  "    return seen + 1;\n"
+                  "}\n", sig) == 42 && !sig,
+          "a deleted object's deinit ran");
+}
+
 // The heap's total-byte write must use an explicit `qword ptr`: GAS
 // silently shifts a bare `qword [rip + label]` reference by 8 bytes, so
 // the 1 GiB cap never fired and every request mapped (found live: two
@@ -1828,6 +1846,15 @@ void testAsm() {
                   "    return r + s;\n"
                   "}\n", sig) == 49 && !sig,
           "writes through placeholders persist");
+    // A block is treated exactly like a call (FEATURES §4.4): values live
+    // across it survive whatever caller-saved registers it clobbers.
+    check(runCode("func main() -> int {\n"
+                  "    var a: int = 10;\n"
+                  "    var b: int = 20;\n"
+                  "    asm { \"mov eax, 999\" \"mov ecx, 888\" \"mov edx, 777\" }\n"
+                  "    return a + b;\n"
+                  "}\n", sig) == 30 && !sig,
+          "values live across a clobbering block survive");
 }
 
 }  // namespace
@@ -1841,6 +1868,7 @@ int main() {
     testStruct();
     testArray();
     testPointerHeap();
+    testDelete();
     testHeapCapText();
     testLiteralNul();
     testExternPutchar();
