@@ -327,6 +327,9 @@ void testForInProtocol() {
         "}\n"
         "func main() -> int { var r: Rng = new Rng { lo: 0, hi: 1 }; for (var x in r) { } return 0; }\n");
     check(!nextVoid.ok && nextVoid.stage == "check", "next answers an element pointer");
+    Checked ptrArray = check(
+        "func main() -> int { var a: [int; 3] = new [int; 3] {1, 2, 3}; var p: *[int; 3] = &a; var s: int = 0; for (var x in p) { s = s + x; } return s; }\n");
+    check(!ptrArray.ok && ptrArray.stage == "check", "a pointer to an array does not iterate");
 }
 
 // A generic call checks its body with the arguments substituted.
