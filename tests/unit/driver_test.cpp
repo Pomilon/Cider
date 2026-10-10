@@ -238,6 +238,18 @@ void testFailures() {
     unlink(src.c_str());
 }
 
+// The interpreter runs without a toolchain; there is nothing to emit for it.
+void testVmTarget() {
+    std::printf("the vm target interprets\n");
+    std::string src = writeTemp("func main() -> int { return 40 + 2; }\n");
+    Result runVm = run({"run", "--target", "vm", src});
+    check(runVm.code == 42, "run --target vm answers the exit code");
+    Result compileVm = run({"compile", "--target", "vm", src});
+    check(compileVm.code != 0, "compile --target vm fails");
+    check(compileVm.err.find("vm") != std::string::npos, "naming the target");
+    unlink(src.c_str());
+}
+
 }  // namespace
 
 int main() {
@@ -248,6 +260,7 @@ int main() {
     testImports();
     testLibSearch();
     testFailures();
+    testVmTarget();
     std::printf("\n%d checks, %s\n", checks, failures == 0 ? "all passed" : "FAILURES");
     return failures == 0 ? 0 : 1;
 }

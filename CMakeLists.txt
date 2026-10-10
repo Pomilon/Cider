@@ -167,6 +167,21 @@ target_link_libraries(opt_test PRIVATE cider_opt cider_lower cider_check cider_p
 target_include_directories(opt_test PRIVATE src)
 add_test(NAME optimise COMMAND opt_test)
 
+# --- The interpreter -----------------------------------------------------------
+#
+# OUTPUT.md §2: the vm legs run the IR with no toolchain. Reads the IR only,
+# under the same layer discipline as codegen — gate L2 names codegen because
+# the interpreter did not exist when it was written.
+
+add_library(cider_vm STATIC src/vm/vm.cpp)
+target_link_libraries(cider_vm PUBLIC cider_ir cider_types)
+target_include_directories(cider_vm PUBLIC src)
+
+add_executable(vm_test tests/unit/vm_test.cpp)
+target_link_libraries(vm_test PRIVATE cider_vm cider_opt cider_lower cider_check cider_parse cider_lexer)
+target_include_directories(vm_test PRIVATE src)
+add_test(NAME vm COMMAND vm_test)
+
 # --- Codegen ---------------------------------------------------------------------
 #
 # LAYERS.md 3.7: checked IR to assembly. Reads the IR and the target, never the
@@ -187,7 +202,7 @@ add_test(NAME codegen COMMAND codegen_test)
 # name. The top-level catch maps every failure to a diagnostic (gate L6).
 
 add_library(cider_driver STATIC src/driver/driver.cpp)
-target_link_libraries(cider_driver PUBLIC cider_codegen cider_opt cider_lower cider_check cider_parse cider_lexer)
+target_link_libraries(cider_driver PUBLIC cider_codegen cider_vm cider_opt cider_lower cider_check cider_parse cider_lexer)
 target_include_directories(cider_driver PUBLIC src)
 
 add_executable(cider src/driver/main.cpp)
@@ -201,5 +216,5 @@ add_test(NAME driver COMMAND driver_test)
 
 # A gate that fails must fail the build, so nothing here is allowed to be
 # "informational".
-set_tests_properties(gates layout types lexer ast parser resolver checker lowering optimise codegen driver
+set_tests_properties(gates layout types lexer ast parser resolver checker lowering optimise codegen vm driver
              PROPERTIES LABELS "gate")

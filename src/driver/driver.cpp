@@ -26,6 +26,7 @@
 #include "opt/opt.h"
 #include "parse/parser.h"
 #include "types/context.h"
+#include "vm/vm.h"
 
 namespace cider {
 namespace driver {
@@ -47,7 +48,8 @@ std::string at(const Position& pos) {
 
 std::string readFile(const std::string& path, bool& found);
 
-bool runFront(const std::string& file, const std::string& text, Pipeline& pipe) {
+bool runFront(const std::string& file, const std::string& text, Pipeline& pipe,
+              bool noOpt) {
     pipe.file = file;
     pipe.types = std::make_unique<TypeContext>();
     // Imports load beside the entry file: `import da;` reads `<dir>/da.cid`
@@ -176,7 +178,11 @@ bool runFront(const std::string& file, const std::string& text, Pipeline& pipe) 
         }
         return false;
     }
-    opt::OptResult result = opt::run(*pipe.module);
+    opt::OptResult result;
+    result.ok = true;
+    if (!noOpt) {
+        result = opt::run(*pipe.module);
+    }
     if (!result.ok) {
         pipe.diagnostic += file + ": " + result.error + "\n";
         return false;
@@ -250,9 +256,12 @@ int runDriver(const std::vector<std::string>& args, std::string& out, std::strin
     std::string target = "native";
     std::string output;
     std::string input;
+    bool noOpt = false;
     for (uint64_t i = 1; i < static_cast<uint64_t>(args.size()); ++i) {
         if (args[i] == "--target" && i + 1 < static_cast<uint64_t>(args.size())) {
             target = args[++i];
+        } else if (args[i] == "--no-opt") {
+            noOpt = true;
         } else if (args[i] == "-o" && i + 1 < static_cast<uint64_t>(args.size())) {
             output = args[++i];
         } else if (!args[i].empty() && args[i][0] == '-') {
@@ -269,7 +278,7 @@ int runDriver(const std::vector<std::string>& args, std::string& out, std::strin
         err = "no input file\n";
         return 2;
     }
-    if (target != "native") {
+    if (target != "native" && target != "vm") {
         err = "target " + target + " is not emitted yet: native only in this slice\n";
         return 2;
     }
@@ -280,7 +289,7 @@ int runDriver(const std::vector<std::string>& args, std::string& out, std::strin
         return 1;
     }
     Pipeline pipe;
-    if (!runFront(input, text, pipe)) {
+    if (!runFront(input, text, pipe, noOpt)) {
         err = pipe.diagnostic;
         return 1;
     }
@@ -290,6 +299,22 @@ int runDriver(const std::vector<std::string>& args, std::string& out, std::strin
     if (command == "ir") {
         out = ir::dumpModule(*pipe.module);
         return 0;
+    }
+    if (target == "vm") {
+        // An interpreter is not an emitter: there is no assembly to write,
+        // so compile names the target and refuses. Run interprets instead.
+        if (command == "compile") {
+            err = "target vm is not emitted: an interpreter, not an emitter\n";
+            return 2;
+        }
+        vm::VmResult interpreted = vm::run(*pipe.module);
+        if (!interpreted.ok) {
+            err = at(interpreted.pos) + ": " + interpreted.error + "\n";
+            return 1;
+        }
+        out = interpreted.stdoutText;
+        err = interpreted.stderrText;
+        return interpreted.exitCode;
     }
     codegen::EmitResult emitted = codegen::emitNative(*pipe.module);
     if (!emitted.ok) {
