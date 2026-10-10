@@ -288,6 +288,14 @@ private:
     std::optional<DeclId> matchMemberUnion(const Pattern& pat);
     std::optional<DeclId> matchMemberEnum(const Pattern& pat);
     void bindMatchFresh(const Pattern& pat, TypeRef scrutinee);
+    // Binds one arm's every alternative: the primary, then each `|` rest.
+    // An arm with alternatives binds no fresh names — the body cannot know
+    // which alternative's value it would hold — so any alternative that
+    // grows the scope fails here instead of binding half a meaning.
+    void bindMatchArm(MatchArm& arm, TypeRef scrutinee);
+    // Counts the names bound in the innermost scope: the before/after
+    // answers the alternation rule above without naming any one shape.
+    size_t localCount() const;
 
     // SEMANTICS.md §2.3: the common type of two operands, stated as a type.
     // (Public; declared beside typeOf. Lowering queries it for comparisons.)

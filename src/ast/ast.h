@@ -422,6 +422,9 @@ struct Pattern : Node {
 
 struct MatchArm : Node {
     std::unique_ptr<Pattern> pattern;
+    // `p1 | p2 => body` lists every alternative but the first here: each
+    // one is checked like its own arm, and the body runs when any fits.
+    std::vector<std::unique_ptr<Pattern>> alts;
     std::unique_ptr<Block> body;
     MatchArm(Position p, std::unique_ptr<Pattern> pat, std::unique_ptr<Block> b)
         : Node(std::move(p)), pattern(std::move(pat)), body(std::move(b)) {}

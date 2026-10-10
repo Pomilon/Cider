@@ -1340,6 +1340,11 @@ std::unique_ptr<Stmt> Parser::parseMatch() {
             continue;
         }
         Pattern pattern = parsePattern();
+        std::vector<std::unique_ptr<Pattern>> alts;
+        while (match(TokenKind::Pipe)) {
+            Pattern alt = parsePattern();
+            alts.push_back(std::make_unique<Pattern>(std::move(alt)));
+        }
         if (!match(TokenKind::FatArrow)) {
             failHere("expected '=>'");
             return nullptr;
@@ -1358,8 +1363,10 @@ std::unique_ptr<Stmt> Parser::parseMatch() {
             one.push_back(std::move(body));
             arm = std::make_unique<Block>(apos, std::move(one));
         }
-        arms.push_back(std::make_unique<MatchArm>(
-            apos, std::make_unique<Pattern>(std::move(pattern)), std::move(arm)));
+        auto matchArm = std::make_unique<MatchArm>(
+            apos, std::make_unique<Pattern>(std::move(pattern)), std::move(arm));
+        matchArm->alts = std::move(alts);
+        arms.push_back(std::move(matchArm));
     }
     if (!match(TokenKind::RBrace)) {
         failHere("expected '}'");

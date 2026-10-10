@@ -190,6 +190,22 @@ void testControlForms() {
     check(ok, "parses");
 }
 
+// `1 | 2 =>` is one arm with two alternatives: the bar separates patterns,
+// not arms, and the body belongs to all of them.
+void testAlternation() {
+    std::printf("alternation patterns\n");
+    bool ok = false;
+    std::unique_ptr<cider::Program> program = parse(
+        "func f(v: int) -> int { match v { 1 | 2 => { return 1; } default => { return 0; } } }",
+        ok);
+    check(ok, "parses");
+    const cider::FuncDecl& fn = static_cast<const cider::FuncDecl&>(*program->decls[0]);
+    const cider::MatchStmt& match =
+        static_cast<const cider::MatchStmt&>(*fn.body->stmts[0]);
+    check(match.arms.size() == 1, "one arm");
+    check(match.arms[0]->alts.size() == 1, "one extra alternative");
+}
+
 // `func init` names the constructor: `init` lexes as a keyword, so the
 // method parser accepts it explicitly rather than as an identifier.
 void testMethodInit() {
@@ -355,6 +371,7 @@ int main() {
     testMissingInit();
     testGenericCall();
     testControlForms();
+    testAlternation();
     testMethodInit();
     testExportVar();
     testDotQualifiedType();

@@ -649,6 +649,43 @@ void testStringCompare() {
     check(!addrVar.ok && addrVar.stage == "check", "a string variable needs &s[0]");
 }
 
+// One arm may list several alternatives: each is checked on its own, and
+// no alternative may bind a fresh name, because the body cannot know
+// which alternative's value it would hold.
+void testAlternation() {
+    std::printf("alternation patterns check\n");
+    Checked good = check(
+        "func main() -> int {\n"
+        "    var c: int = 2;\n"
+        "    match (c) { 1 | 2 => { return 10; } default => { return 30; } }\n"
+        "}\n");
+    check(good.ok, "constants alternate: " + good.stage);
+    Checked exhaustive = check(
+        "func main() -> int {\n"
+        "    var b: bool = true;\n"
+        "    match (b) { true | false => { return 1; } }\n"
+        "}\n");
+    check(exhaustive.ok, "an alternation covers without a default: " + exhaustive.stage);
+    Checked fresh = check(
+        "func main() -> int {\n"
+        "    match (7) { x | 1 => { return 1; } default => { return 0; } }\n"
+        "}\n");
+    check(!fresh.ok && fresh.stage == "check", "a fresh name in an alternation fails");
+    Checked compared = check(
+        "func main() -> int {\n"
+        "    var v: int = 5;\n"
+        "    match (5) { v | 6 => { return 1; } default => { return 0; } }\n"
+        "}\n");
+    check(compared.ok, "a bound name still compares: " + compared.stage);
+    Checked members = check(
+        "union U { var a: int; var b: int; }\n"
+        "func main() -> int {\n"
+        "    var u: U = new U { a: 1 };\n"
+        "    match (u) { U.a | U.b => { return 1; } }\n"
+        "}\n");
+    check(members.ok, "members alternate without a default: " + members.stage);
+}
+
 // A match dispatches on the first arm whose pattern fits: constants by
 // value, a bound name by its ==, a fresh name always, else the default.
 void testMatch() {
@@ -1084,6 +1121,7 @@ int main() {
     testCharCompare();
     testStringCompare();
     testMatch();
+    testAlternation();
     testEnumMatch();
     testPointerArith();
     testRepeatZero();

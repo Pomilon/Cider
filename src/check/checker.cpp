@@ -1590,6 +1590,9 @@ void Checker::visitMatchStmt(MatchStmt& n) {
     if (!scrutinee.isError()) {
         for (auto& arm : n.arms) {
             checkMatchPattern(*arm->pattern, scrutinee);
+            for (auto& alt : arm->alts) {
+                checkMatchPattern(*alt, scrutinee);
+            }
         }
         // Exhaustiveness is decided by the type, at compile time: a
         // default arm, or a finite cover over a bool, a union, or an
@@ -1602,18 +1605,26 @@ void Checker::visitMatchStmt(MatchStmt& n) {
             bool hasTrue = false;
             bool hasFalse = false;
             for (auto& arm : n.arms) {
-                if (arm->pattern->kind != PatternKind::Const) {
-                    continue;
-                }
-                const auto* flag =
-                    dynamic_cast<const BoolLit*>(arm->pattern->value.get());
-                if (flag == nullptr) {
-                    continue;
-                }
-                if (flag->value) {
-                    hasTrue = true;
-                } else {
-                    hasFalse = true;
+                // Every alternative covers on its own: `true | false`
+                // in one arm names both cases, as two arms would.
+                auto consider = [&](const Pattern& pat) {
+                    if (pat.kind != PatternKind::Const) {
+                        return;
+                    }
+                    const auto* flag =
+                        dynamic_cast<const BoolLit*>(pat.value.get());
+                    if (flag == nullptr) {
+                        return;
+                    }
+                    if (flag->value) {
+                        hasTrue = true;
+                    } else {
+                        hasFalse = true;
+                    }
+                };
+                consider(*arm->pattern);
+                for (auto& alt : arm->alts) {
+                    consider(*alt);
                 }
             }
             exhaustive = hasTrue && hasFalse;
@@ -1627,13 +1638,18 @@ void Checker::visitMatchStmt(MatchStmt& n) {
                 // for nothing and a duplicate counts once.
                 std::unordered_set<std::string> covered;
                 for (auto& arm : n.arms) {
-                    const Pattern& pat = *arm->pattern;
-                    if (pat.kind != PatternKind::Member || isDeadPattern(&pat)) {
-                        continue;
-                    }
-                    std::optional<DeclId> armId = matchMemberUnion(pat);
-                    if (armId.has_value() && sameDecl(*sid, *armId)) {
-                        covered.insert(pat.member);
+                    auto consider = [&](const Pattern& pat) {
+                        if (pat.kind != PatternKind::Member || isDeadPattern(&pat)) {
+                            return;
+                        }
+                        std::optional<DeclId> armId = matchMemberUnion(pat);
+                        if (armId.has_value() && sameDecl(*sid, *armId)) {
+                            covered.insert(pat.member);
+                        }
+                    };
+                    consider(*arm->pattern);
+                    for (auto& alt : arm->alts) {
+                        consider(*alt);
                     }
                 }
                 exhaustive = true;
@@ -1655,13 +1671,18 @@ void Checker::visitMatchStmt(MatchStmt& n) {
                 // never names a case, so only enumerator arms cover.
                 std::unordered_set<std::string> covered;
                 for (auto& arm : n.arms) {
-                    const Pattern& pat = *arm->pattern;
-                    if (pat.kind != PatternKind::Member || isDeadPattern(&pat)) {
-                        continue;
-                    }
-                    std::optional<DeclId> armId = matchMemberEnum(pat);
-                    if (armId.has_value() && sameDecl(*sid, *armId)) {
-                        covered.insert(pat.member);
+                    auto consider = [&](const Pattern& pat) {
+                        if (pat.kind != PatternKind::Member || isDeadPattern(&pat)) {
+                            return;
+                        }
+                        std::optional<DeclId> armId = matchMemberEnum(pat);
+                        if (armId.has_value() && sameDecl(*sid, *armId)) {
+                            covered.insert(pat.member);
+                        }
+                    };
+                    consider(*arm->pattern);
+                    for (auto& alt : arm->alts) {
+                        consider(*alt);
                     }
                 }
                 exhaustive = true;
@@ -1684,7 +1705,7 @@ void Checker::visitMatchStmt(MatchStmt& n) {
         // the element binding outlives the sink call the same way).
         for (auto& arm : n.arms) {
             pushScope();
-            bindMatchFresh(*arm->pattern, scrutinee);
+            bindMatchArm(*arm, scrutinee);
         }
         sink_->onMatch(n);
         for (auto& arm : n.arms) {
@@ -1695,7 +1716,7 @@ void Checker::visitMatchStmt(MatchStmt& n) {
     }
     for (auto& arm : n.arms) {
         pushScope();
-        bindMatchFresh(*arm->pattern, scrutinee);
+        bindMatchArm(*arm, scrutinee);
         arm->body->accept(*this);
         popScope();
     }
@@ -1991,6 +2012,33 @@ void Checker::bindMatchFresh(const Pattern& pat, TypeRef scrutinee) {
     if (pat.kind == PatternKind::Bind || pat.kind == PatternKind::Type ||
         pat.kind == PatternKind::Member) {
         bindPattern(pat, scrutinee);
+    }
+}
+
+size_t Checker::localCount() const {
+    return current_ == nullptr ? 0 : current_->names.size();
+}
+
+void Checker::bindMatchArm(MatchArm& arm, TypeRef scrutinee) {
+    // One alternative binding fresh is already the whole body owning the
+    // value; with several, no alternative may, so each one is measured
+    // on its own — the primary included, since `x | 1` breaks the body
+    // exactly as `1 | x` does.
+    if (arm.alts.empty()) {
+        bindMatchFresh(*arm.pattern, scrutinee);
+        return;
+    }
+    size_t before = localCount();
+    bindMatchFresh(*arm.pattern, scrutinee);
+    if (localCount() != before) {
+        fail(arm.pattern->pos, "an alternation arm binds no names");
+    }
+    for (auto& alt : arm.alts) {
+        before = localCount();
+        bindMatchFresh(*alt, scrutinee);
+        if (localCount() != before) {
+            fail(alt->pos, "an alternation arm binds no names");
+        }
     }
 }
 

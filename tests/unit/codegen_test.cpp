@@ -902,6 +902,26 @@ void testMatch() {
     std::printf("matches run\n");
     check(runQuiet("func main() -> int {\n"
                    "    var c: int = 2;\n"
+                   "    match (c) { 1 | 2 => { return 7; } default => { return 0; } }\n"
+                   "}\n") == 7,
+          "the second alternative answers");
+    check(runQuiet("func main() -> int {\n"
+                   "    var c: int = 1;\n"
+                   "    match (c) { 1 | 2 => { return 7; } default => { return 0; } }\n"
+                   "}\n") == 7,
+          "the first alternative answers");
+    check(runQuiet("func main() -> int {\n"
+                   "    var c: int = 9;\n"
+                   "    match (c) { 1 | 2 => { return 7; } default => { return 0; } }\n"
+                   "}\n") == 0,
+          "a miss takes the default");
+    check(runQuiet("func main() -> int {\n"
+                   "    var b: bool = false;\n"
+                   "    match (b) { true | false => { return 5; } }\n"
+                   "}\n") == 5,
+          "an alternation covers without a default");
+    check(runQuiet("func main() -> int {\n"
+                   "    var c: int = 2;\n"
                    "    match (c) { 1 => { return 10; } 2 => { return 20; } default => { return 30; } }\n"
                    "}\n") == 20,
           "a constant arm answers");

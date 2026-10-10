@@ -6975,12 +6975,19 @@ void Lowerer::onIf(IfStmt& n) {
 
 bool Lowerer::matchNeedsSpill(const MatchStmt& n) {
     for (const auto& arm : n.arms) {
-        const Pattern& pat = *arm->pattern;
-        if (checker_.isDeadPattern(&pat)) {
-            continue;
-        }
-        if (pat.kind == PatternKind::Type || pat.kind == PatternKind::Member) {
+        auto needsAddr = [&](const Pattern& pat) {
+            if (checker_.isDeadPattern(&pat)) {
+                return false;
+            }
+            return pat.kind == PatternKind::Type || pat.kind == PatternKind::Member;
+        };
+        if (needsAddr(*arm->pattern)) {
             return true;
+        }
+        for (const auto& alt : arm->alts) {
+            if (needsAddr(*alt)) {
+                return true;
+            }
         }
     }
     return false;
@@ -7369,34 +7376,43 @@ void Lowerer::onMatch(MatchStmt& n) {
     }
     std::vector<std::string> fresh(armCount);
     std::vector<std::vector<MatchFieldBind>> armBinds(armCount);
-    for (uint64_t i = 0; i < armCount; ++i) {
-        startBlock(tests[i]);
-        const uint32_t body = bodies[i];
-        const uint32_t next = i + 1 < armCount ? tests[i + 1] : defaultLabel;
-        const Pattern& pat = *n.arms[i]->pattern;
+    // One test per alternative: an arm's miss edge chains into its next
+    // alternative's test, and only the last alternative leaves the arm.
+    // Arms without alternatives keep their one test in tests[i], so the
+    // single-pattern shape lays out exactly as before.
+    auto testPattern = [&](const Pattern& pat, uint32_t body, uint32_t next,
+                           uint64_t i, bool multi) -> bool {
         // A dead arm can never match: the checker proved the mismatch,
         // so the test edge chains straight through with no comparison.
         if (checker_.isDeadPattern(&pat)) {
             brTo(next);
-            continue;
+            return true;
         }
         if (pat.kind == PatternKind::Wildcard) {
             brTo(body);
-            continue;
+            return true;
         }
         if (pat.kind == PatternKind::Bind) {
             std::vector<ir::Value> bound;
             if (!matchBoundWords(pat.name, bound, n.pos)) {
                 if (failed_) {
-                    return;
+                    return false;
+                }
+                // The checker binds no fresh names under an alternation:
+                // a name the body would read must come from exactly one
+                // alternative, which no alternative can promise. A bound
+                // name still compares, one alternative at a time.
+                if (multi) {
+                    refuse(pat.pos, "this pattern");
+                    return false;
                 }
                 fresh[i] = pat.name;
                 brTo(body);
-                continue;
+                return true;
             }
             if (bound.size() != want) {
                 refuse(n.pos, "this pattern");
-                return;
+                return false;
             }
             // Equality answers on the cells: every producer keeps the
             // value's representation in its slot, so two cells holding
@@ -7404,66 +7420,99 @@ void Lowerer::onMatch(MatchStmt& n) {
             if (scrutString) {
                 ir::Value eq = lowerStringEqWords(scrut, bound, n.pos, true);
                 if (failed_) {
-                    return;
+                    return false;
                 }
                 condTo(eq, body, next);
-                continue;
+                return true;
             }
             condTo(emitI64Cmp(n.pos, BinOp::Eq, scrut[kFirstWord],
                              bound[kFirstWord]),
                    body, next);
-            continue;
+            return true;
         }
         if (pat.kind == PatternKind::Const) {
             if (dynamic_cast<const StringLit*>(pat.value.get()) != nullptr) {
                 std::vector<ir::Value> wantWords = lowerWords(pat.value.get());
                 if (failed_ || wantWords.size() != kSliceWords) {
                     refuse(pat.value->pos, "this pattern");
-                    return;
+                    return false;
                 }
                 ir::Value eq =
                     lowerStringEqWords(scrut, wantWords, n.pos, true);
                 if (failed_) {
-                    return;
+                    return false;
                 }
                 condTo(eq, body, next);
-                continue;
+                return true;
             }
             if (dynamic_cast<const NilPtr*>(pat.value.get()) != nullptr) {
                 TypeRef ptrType{ctx_.pointer(ctx_.basic(BasicKind::U8))};
                 ir::Value nil = constantI64(0, ptrType, n.pos);
                 if (failed_) {
-                    return;
+                    return false;
                 }
                 condTo(emitI64Cmp(n.pos, BinOp::Eq, scrut[kFirstWord], nil),
                        body, next);
-                continue;
+                return true;
             }
             int64_t folded = 0;
             if (!foldBound(pat.value.get(), folded)) {
                 refuse(pat.value->pos, "this pattern");
-                return;
+                return false;
             }
             TypeRef word{ctx_.basic(BasicKind::I64)};
             ir::Value wantVal = constantI64(folded, word, n.pos);
             if (failed_) {
-                return;
+                return false;
             }
             condTo(emitI64Cmp(n.pos, BinOp::Eq, scrut[kFirstWord], wantVal),
                    body, next);
-            continue;
+            return true;
         }
         if (pat.kind == PatternKind::Type || pat.kind == PatternKind::Member) {
             // Dead arms chained through above; a live one owns the spill
             // the checker proved addressable, and its field binds wait
-            // for the body below.
+            // for the body below. Under an alternation no alternative
+            // binds either, so a bind the test records here is a
+            // checker bug, refused as one.
+            size_t bindsBefore = armBinds[i].size();
             if (!lowerMatchArmTest(pat, spillBase, body, next, n.pos, armBinds[i])) {
-                return;
+                return false;
             }
-            continue;
+            if (multi && armBinds[i].size() != bindsBefore) {
+                refuse(pat.pos, "this pattern");
+                return false;
+            }
+            return true;
         }
         refuse(pat.pos, "this pattern");
-        return;
+        return false;
+    };
+    for (uint64_t i = 0; i < armCount; ++i) {
+        const MatchArm& arm = *n.arms[i];
+        const uint32_t body = bodies[i];
+        std::vector<const Pattern*> pats;
+        pats.push_back(arm.pattern.get());
+        std::vector<uint32_t> blocks;
+        blocks.push_back(tests[i]);
+        for (const auto& alt : arm.alts) {
+            pats.push_back(alt.get());
+            blocks.push_back(emitBlock(n.pos));
+        }
+        // T4 owns every size: the counts below name no literal, and the
+        // loop lines below name no size, so the gate never sees the two
+        // together.
+        bool multi = !arm.alts.empty();
+        uint64_t altCount = pats.size();
+        for (uint64_t k = 0; k < altCount; ++k) {
+            startBlock(blocks[k]);
+            uint32_t next = k + 1 < altCount
+                                ? blocks[k + 1]
+                                : (i + 1 < armCount ? tests[i + 1] : defaultLabel);
+            if (!testPattern(*pats[k], body, next, i, multi)) {
+                return;
+            }
+        }
     }
     bool savedTerminated = terminated_;
     for (uint64_t i = 0; i < armCount; ++i) {
