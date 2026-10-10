@@ -47,20 +47,7 @@ const char* argReg(uint64_t i) {
     return "r9";
 }
 
-bool signedWidth(ir::IRType width, TypeRef type) {
-    if (width == ir::IRType::I8 || width == ir::IRType::I16 || width == ir::IRType::I32 ||
-        width == ir::IRType::I64) {
-        return true;
-    }
-    if (width == ir::IRType::U8 || width == ir::IRType::U16 || width == ir::IRType::U32 ||
-        width == ir::IRType::U64) {
-        return false;
-    }
-    if (type.isError() || type.type->kind() != Kind::Basic) {
-        return true;
-    }
-    return basicIsSigned(*type.type->basic());
-}
+bool calleeArg(std::string&, std::string&, const ir::Instr&) = delete;  // placeholder
 
 const char* setFor(ir::CmpOp cmp) {
     if (cmp == ir::CmpOp::Eq) {
@@ -1019,7 +1006,7 @@ private:
             bool narrow = instr.width == ir::IRType::I32 || instr.width == ir::IRType::U32 ||
                           instr.width == ir::IRType::I16 || instr.width == ir::IRType::U16 ||
                           instr.width == ir::IRType::I8 || instr.width == ir::IRType::U8;
-            bool isSigned = signedWidth(instr.width, instr.type);
+            bool isSigned = ir::signedWidth(instr.width, instr.type);
             bool isMul = instr.op == ir::Op::Mul;
             bool byteMul = isMul && (instr.width == ir::IRType::I8 || instr.width == ir::IRType::U8);
             if (byteMul) {
@@ -1095,7 +1082,7 @@ private:
             // width, so 32/16/8-bit use their own dividend/divisor forms
             // and extend the quotient or remainder afterwards. Every form
             // faults on a zero divisor, which is the defined trap.
-            bool isSigned = signedWidth(instr.width, instr.type);
+            bool isSigned = ir::signedWidth(instr.width, instr.type);
             bool wantQuotient = instr.op == ir::Op::Div;
             if (instr.width == ir::IRType::I64 || instr.width == ir::IRType::U64) {
                 out_ += "  mov rax, " + slot(instr.operands[0].id) + "\n";
@@ -1171,7 +1158,7 @@ private:
             // operand size (5 bits at 32 bits and below, 6 at 64), which
             // is SEMANTICS §3's documented result — so the shift runs at
             // the value's own width and narrow results extend afterwards.
-            bool isSigned = signedWidth(instr.width, instr.type);
+            bool isSigned = ir::signedWidth(instr.width, instr.type);
             const char* acc = "rax";
             const char* ext = nullptr;
             if (instr.width == ir::IRType::I32 || instr.width == ir::IRType::U32) {

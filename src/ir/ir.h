@@ -271,6 +271,26 @@ struct Module {
 // values by id. Never parsed back — dumps are read by people, not compiled.
 std::string dumpModule(const Module& module);
 
+// True when a value of this width and language type is signed. One rule,
+// consulted by the emitter and the interpreter alike, so an arithmetic
+// answer never depends on which leg produced it. A width that names no
+// signedness falls through to the language type, and a type that is not a
+// basic defaults to signed the way the rest of lowering does.
+inline bool signedWidth(IRType width, TypeRef type) {
+    if (width == IRType::I8 || width == IRType::I16 || width == IRType::I32 ||
+        width == IRType::I64) {
+        return true;
+    }
+    if (width == IRType::U8 || width == IRType::U16 || width == IRType::U32 ||
+        width == IRType::U64) {
+        return false;
+    }
+    if (type.isError() || type.type->kind() != Kind::Basic) {
+        return true;
+    }
+    return basicIsSigned(*type.type->basic());
+}
+
 }  // namespace ir
 }  // namespace cider
 
