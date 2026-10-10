@@ -73,6 +73,7 @@ enum class TrapReason {
     BitfieldOverflow,
     UnionTag,
     Downcast,
+    BadEnum,
     Null,
     Explicit,
 };

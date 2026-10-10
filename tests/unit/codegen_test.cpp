@@ -1061,6 +1061,55 @@ void testEnumValues() {
           "enumerators sequence and honor explicit values");
 }
 
+// An enum holds its underlying i32: casts both ways lower, and inventing
+// a value no enumerator names traps (FEATURES §2, enum ↔ int row).
+void testEnumCast() {
+    std::printf("enums cast to and from integers\n");
+    check(runQuiet("enum Color { RED, GREEN, BLUE = 5 }\n"
+                   "func main() -> int {\n"
+                   "    var c: Color = Color.GREEN as Color;\n"
+                   "    return c as int;\n"
+                   "}\n") == 1,
+          "an enumerator round-trips through its enum");
+    check(runQuiet("enum Color { RED, GREEN, BLUE = 5 }\n"
+                   "func main() -> int {\n"
+                   "    var c: Color = Color.BLUE as Color;\n"
+                   "    return c as int;\n"
+                   "}\n") == 5,
+          "an explicit enumerator value survives the cast");
+    check(runQuiet("enum Color { RED, GREEN, BLUE = 5 }\n"
+                   "func main() -> int {\n"
+                   "    var n: int = 1;\n"
+                   "    var c: Color = n as Color;\n"
+                   "    return c as int;\n"
+                   "}\n") == 1,
+          "a runtime integer naming an enumerator converts");
+    bool signaled = false;
+    runCode("enum Color { RED, GREEN, BLUE = 5 }\n"
+            "func main() -> int {\n"
+            "    var n: int = 7;\n"
+            "    var c: Color = n as Color;\n"
+            "    return 0;\n"
+            "}\n",
+            signaled);
+    check(signaled, "an undeclared enumerator value traps");
+    // Negative enumerators pin the cell canonical: every enum cell is a
+    // sign-extended i32, so -1 survives stores, loads and the way back.
+    check(runQuiet("enum Temp { NEG = 0 - 1, ZERO, POS = 5 }\n"
+                   "func main() -> int {\n"
+                   "    var t: Temp = Temp.NEG as Temp;\n"
+                   "    return (t as int) + 1;\n"
+                   "}\n") == 0,
+          "a negative enumerator round-trips");
+    check(runQuiet("enum Temp { NEG = 0 - 1, ZERO, POS = 5 }\n"
+                   "func main() -> int {\n"
+                   "    var n: int = 0 - 1;\n"
+                   "    var t: Temp = n as Temp;\n"
+                   "    return (t as int) + 1;\n"
+                   "}\n") == 0,
+          "a runtime -1 converts and reads back");
+}
+
 void testBitNot() {
     std::printf("bitwise not runs\n");
     check(runQuiet("func main() -> int {\n"
@@ -1778,6 +1827,7 @@ int main() {
     testMatch();
     testPointerArith();
     testEnumValues();
+    testEnumCast();
     testBitNot();
     testTernary();
     testInterp();

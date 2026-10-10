@@ -501,6 +501,14 @@ bool Resolver::isEnumMember(const std::string& qualifiedType,
     return enumValues_.find(qualifiedType + "." + member) != enumValues_.end();
 }
 
+std::vector<std::pair<std::string, int64_t>> Resolver::enumMembers(DeclId id) const {
+    auto ordered = enumOrder_.find(declKey(id));
+    if (ordered == enumOrder_.end()) {
+        return {};
+    }
+    return ordered->second;
+}
+
 std::string Resolver::qualify(const std::string& bare) const {
     if (stack_.empty()) {
         return bare;
@@ -891,6 +899,7 @@ void Resolver::resolveDeclTypes(const std::string& module, Program& program,
         if (const auto* ed = dynamic_cast<const EnumDecl*>(unwrapped)) {
             int64_t next = 0;
             bool first = true;
+            const Decl* eself = lookup(scope, ed->name);
             for (const EnumMember& member : ed->members) {
                 int64_t value = 0;
                 if (member.value != nullptr) {
@@ -909,6 +918,9 @@ void Resolver::resolveDeclTypes(const std::string& module, Program& program,
                 first = false;
                 next = value + 1;
                 enumValues_[module + "." + ed->name + "." + member.name] = value;
+                if (eself != nullptr) {
+                    enumOrder_[declKey(eself->id)].emplace_back(member.name, value);
+                }
             }
             continue;
         }

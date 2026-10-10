@@ -1590,6 +1590,16 @@ private:
                        from.type->kind() == Kind::FunctionPtr;
         bool toPtr = to.type->kind() == Kind::Pointer ||
                      to.type->kind() == Kind::FunctionPtr;
+        // basicOf answers the enum side as its underlying signed i32
+        // (FEATURES §2, enum ↔ int row). It is called only where the call
+        // sites already proved non-pointer scalar sides, so a pointer
+        // never meets the dereference.
+        auto basicOf = [](TypeRef t) -> BasicKind {
+            if (t.type->kind() == Kind::Enum) {
+                return BasicKind::I32;
+            }
+            return *t.type->basic();
+        };
         bool fromFloat = from.type->kind() == Kind::Basic &&
                          basicIsFloat(*from.type->basic());
         bool toFloat = to.type->kind() == Kind::Basic &&
@@ -1599,8 +1609,12 @@ private:
                 refuse(instr.loc, "this cast is not emitted yet");
                 return false;
             }
-            const int fromF = basicWidthBits(*from.type->basic());
-            const int toF = basicWidthBits(*to.type->basic());
+            // Past the pointer refuse both sides are scalar basics or an
+            // enum riding its underlying i32 (enum-to-float reaches here;
+            // float-to-enum never does — lowering diverts every enum
+            // target through the membership trap first).
+            const int fromF = basicWidthBits(basicOf(from));
+            const int toF = basicWidthBits(basicOf(to));
             if (fromFloat && toFloat) {
                 // Same width is a bit move; otherwise convert through xmm0.
                 out_ += "  mov rax, " + slot(instr.operands[0].id) + "\n";
@@ -1688,32 +1702,41 @@ private:
                     slot(instr.results[0].id) + ", xmm0\n";
             return true;
         }
+        // Scalar casts run on basics; an enum side rides its underlying
+        // i32 (int-to-enum already passed its membership trap at
+        // lowering). Anything else refuses.
+        auto scalarKind = [](Kind kind) {
+            return kind == Kind::Basic || kind == Kind::Enum;
+        };
         if (!fromPtr && !toPtr &&
-            (from.type->kind() != Kind::Basic || to.type->kind() != Kind::Basic)) {
+            (!scalarKind(from.type->kind()) || !scalarKind(to.type->kind()))) {
             refuse(instr.loc, "this cast is not emitted yet");
             return false;
         }
         // A pointer participates as its machine width; everything else
         // answers through the basic table.
-        int fromBits = fromPtr ? 64 : basicWidthBits(*from.type->basic());
-        int toBits = toPtr ? 64 : basicWidthBits(*to.type->basic());
-        bool signedTarget = !toPtr && to.type->kind() == Kind::Basic &&
-                            basicIsSigned(*to.type->basic());
+        int fromBits = fromPtr ? 64 : basicWidthBits(basicOf(from));
+        int toBits = toPtr ? 64 : basicWidthBits(basicOf(to));
+        bool signedTarget =
+            !toPtr &&
+            (to.type->kind() == Kind::Basic || to.type->kind() == Kind::Enum) &&
+            basicIsSigned(basicOf(to));
         out_ += "  mov rax, " + slot(instr.operands[0].id) + "\n";
         if (fromBits == toBits) {
             // Same width, different signedness: the cell keeps the
             // source's extension, so re-extend through the target —
             // i32(-1) `as` u32 reads 0xFFFFFFFF, not the sign-extended
             // source cell. Pointers keep the plain move.
-            const bool fromInt = !fromPtr && from.type->kind() == Kind::Basic &&
-                                 from.type->basic().has_value() &&
-                                 basicIsInteger(*from.type->basic());
-            const bool toInt = !toPtr && to.type->kind() == Kind::Basic &&
-                               to.type->basic().has_value() &&
-                               basicIsInteger(*to.type->basic());
+            const bool fromInt =
+                !fromPtr &&
+                (from.type->kind() == Kind::Basic || from.type->kind() == Kind::Enum) &&
+                basicIsInteger(basicOf(from));
+            const bool toInt =
+                !toPtr && (to.type->kind() == Kind::Basic || to.type->kind() == Kind::Enum) &&
+                basicIsInteger(basicOf(to));
             const bool crossSign = fromInt && toInt &&
-                                   (basicIsSigned(*from.type->basic()) !=
-                                    basicIsSigned(*to.type->basic()));
+                                   (basicIsSigned(basicOf(from)) !=
+                                    basicIsSigned(basicOf(to)));
             if (!crossSign) {
                 out_ += "  mov " + slot(instr.results[0].id) + ", rax\n";
                 return true;

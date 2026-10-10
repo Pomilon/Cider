@@ -232,6 +232,10 @@ public:
     // bytes and the read traps. Anything else refuses.
     std::vector<ir::Value> lowerInterfaceDowncast(const Cast& n, TypeRef source,
                                                   TypeRef target);
+    // An int-to-enum cast: the value must name a declared enumerator, and
+    // inventing one traps (FEATURES §2, enum ↔ int row). Answers the value
+    // retyped, after the membership check. Anything else refuses.
+    ir::Value lowerIntToEnum(const Cast& n, TypeRef source, TypeRef target);
     // Emits the vtable for one (concrete, interface) pair, once per label:
     // one link-time function address per interface method, in the
     // resolver's methodNames order. Answers the table's link label.

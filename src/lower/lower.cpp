@@ -387,7 +387,7 @@ int Lowerer::wordCount(TypeRef type) {
     }
     int64_t bytes = -1;
     if (kind == Kind::Array || kind == Kind::Union || kind == Kind::Class ||
-        kind == Kind::Closure) {
+        kind == Kind::Closure || kind == Kind::Enum) {
         bytes = resolver_.nominalSize(type.type);
     } else if (kind == Kind::Struct) {
         std::optional<DeclId> id = type.type->decl();
@@ -881,6 +881,13 @@ ir::IRType Lowerer::widthOf(TypeRef type, Position pos) {
     // width cannot name two words.
     if (type.type->kind() == Kind::Pointer || type.type->kind() == Kind::FunctionPtr) {
         return ir::IRType::Ptr;
+    }
+    // An enum rides its underlying i32 (FEATURES §2, enum ↔ int row):
+    // every enum value is one 4-byte word, so scalar plumbing (loads,
+    // stores, casts) treats it at I32 and the enumerator check owns the
+    // validity, never the width.
+    if (type.type->kind() == Kind::Enum) {
+        return ir::IRType::I32;
     }
     if (type.type->kind() != Kind::Basic) {
         refuse(pos, "a value of this type");
@@ -5448,6 +5455,113 @@ std::vector<ir::Value> Lowerer::lowerInterfaceDowncast(const Cast& n, TypeRef so
     return {words[kFirstWord]};
 }
 
+ir::Value Lowerer::lowerIntToEnum(const Cast& n, TypeRef source, TypeRef target) {
+    // int-to-enum is the checked direction (FEATURES §2, enum ↔ int row):
+    // the value must name a declared enumerator, and inventing one traps.
+    // The checker proved the widths match (the enum's 4 bytes), so the
+    // value lowers as-is and the membership test owns the conversion.
+    std::optional<DeclId> id = target.type->decl();
+    if (!id.has_value()) {
+        refuse(n.pos, "this cast");
+        return undefined();
+    }
+    std::vector<std::pair<std::string, int64_t>> members =
+        resolver_.enumMembers(*id);
+    if (members.empty()) {
+        refuse(n.pos, "this cast");
+        return undefined();
+    }
+    ir::Value from;
+    if (source.type->kind() == Kind::Union) {
+        // A union cast reads the payload's bytes at offset 0 (TYPES.md
+        // §4.6), and the membership test below still applies: an unchecked
+        // payload read would invent an enumerator silently.
+        Place base;
+        if (!resolvePlace(n.expr.get(), base)) {
+            refuse(n.expr->pos, "this cast");
+            return undefined();
+        }
+        base.type = target;
+        base.tagWrites.clear();
+        std::vector<ir::Value> got = loadRange(n.pos, base, target);
+        if (failed_ || got.size() != kOneWord) {
+            if (!failed_) {
+                refuse(n.pos, "this cast");
+            }
+            return undefined();
+        }
+        from = got[0];
+    } else {
+        from = onIdentOrExpr(n.expr.get(), source);
+        if (failed_) {
+            return undefined();
+        }
+    }
+    // One equality per enumerator, ORed: the checked value is a
+    // canonical i32 cell (sign-extended like every other i32), and every
+    // Eq answers 0/1 (codegen movzx), so the OR stays 0/1 and the trap
+    // reads it directly.
+    TypeRef i32{ctx_.basic(BasicKind::I32)};
+    TypeRef boolean{ctx_.basic(BasicKind::Bool)};
+    ir::Instr norm;
+    norm.op = ir::Op::Cast;
+    norm.loc = n.pos;
+    norm.type = i32;
+    norm.width = widthOf(i32, n.pos);
+    norm.operands.push_back(from);
+    ir::Value checked = newValue(norm.width, norm.type, n.pos);
+    norm.results.push_back(checked);
+    emit(std::move(norm));
+    if (failed_) {
+        return undefined();
+    }
+    bool first = true;
+    ir::Value ok;
+    for (const auto& member : members) {
+        ir::Value want = constantI64(member.second, i32, n.pos);
+        if (failed_) {
+            return undefined();
+        }
+        ir::Value same = emitI64Cmp(n.pos, BinOp::Eq, checked, want);
+        if (failed_) {
+            return undefined();
+        }
+        if (first) {
+            ok = same;
+            first = false;
+            continue;
+        }
+        ir::Instr both;
+        both.op = ir::Op::Or;
+        both.loc = n.pos;
+        both.type = boolean;
+        both.width = ir::IRType::Bool;
+        both.isPure = true;
+        both.operands.push_back(ok);
+        both.operands.push_back(same);
+        ok = newValue(both.width, both.type, n.pos);
+        both.results.push_back(ok);
+        emit(std::move(both));
+    }
+    emitCheckTrap(n.pos, ok, ir::TrapReason::BadEnum);
+    if (failed_) {
+        return undefined();
+    }
+    ir::Instr instr;
+    instr.op = ir::Op::Cast;
+    instr.loc = n.pos;
+    instr.type = target;
+    instr.width = widthOf(target, n.pos);
+    if (failed_) {
+        return undefined();
+    }
+    instr.operands.push_back(checked);
+    ir::Value result = newValue(instr.width, instr.type, n.pos);
+    instr.results.push_back(result);
+    emit(std::move(instr));
+    return result;
+}
+
 ir::Value Lowerer::onCast(Cast& n) {
     if (failed_) {
         return undefined();
@@ -5486,6 +5600,10 @@ ir::Value Lowerer::onCast(Cast& n) {
             return undefined();
         }
         return got[0];
+    }
+    if (!source.isError() && !target.isError() &&
+        target.type->kind() == Kind::Enum) {
+        return lowerIntToEnum(n, source, target);
     }
     ir::Instr instr;
     instr.op = ir::Op::Cast;

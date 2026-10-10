@@ -80,6 +80,12 @@ public:
     // Whether the qualified enum type names that member (-1 is a legal
     // value, so presence needs its own question).
     bool isEnumMember(const std::string& qualifiedType, const std::string& member) const;
+    // Every enumerator of one enum declaration, in declaration order with
+    // its value: the membership check an int-to-enum cast lowers and the
+    // case list enum exhaustiveness counts. Keyed by declaration, not by
+    // spelling, so two same-named enums never share one. Empty when the id
+    // names no enum this table holds.
+    std::vector<std::pair<std::string, int64_t>> enumMembers(DeclId id) const;
 
     // The resolved type of a node the header pass already answered (field and
     // parameter types, alias targets). The checker adds expression types to the
@@ -243,6 +249,7 @@ private:
     std::unordered_set<std::string> aliasActive_;
     std::unordered_map<std::string, const Expr*> constInits_;
     std::unordered_map<std::string, int64_t> enumValues_;
+    std::unordered_map<std::string, std::vector<std::pair<std::string, int64_t>>> enumOrder_;
     std::unordered_map<std::string, TypeRef> fieldTypes_;
     std::unordered_map<std::string, Signature> methodSigs_;
     std::unordered_map<std::string, std::vector<std::string>> methodLists_;
