@@ -4270,8 +4270,61 @@ Lowerer::LoweredString Lowerer::lowerInterp(const StringLit& lit) {
         if (type.type->kind() == Kind::Basic && type.type->basic().has_value() &&
             (*type.type->basic() == BasicKind::F32 ||
              *type.type->basic() == BasicKind::F64)) {
-            refuse(part.expr->pos, "a float in interpolation is not lowered yet");
-            return LoweredString{};
+            BasicKind basic = *type.type->basic();
+            std::vector<ir::Value> got = lowerWords(part.expr.get());
+            if (failed_ || got.size() != kOneWord) {
+                refuse(part.expr->pos, "this interpolation");
+                return LoweredString{};
+            }
+            // The helper converts one double, so a float widens first:
+            // the Cast carries the operand's type, which is what tells
+            // the backend to convert rather than re-read the bits.
+            ir::Value wide = got[kFirstWord];
+            if (basic == BasicKind::F32) {
+                TypeRef dbl{ctx_.basic(BasicKind::F64)};
+                ir::Instr grow;
+                grow.op = ir::Op::Cast;
+                grow.loc = lit.pos;
+                grow.type = dbl;
+                grow.width = ir::IRType::F64;
+                grow.operands.push_back(got[kFirstWord]);
+                wide = newValue(grow.width, dbl, lit.pos);
+                grow.results.push_back(wide);
+                emit(std::move(grow));
+            }
+            // Thirty-two bytes hold the longest float shape: a sign,
+            // nineteen whole digits, the point, six fraction digits.
+            std::vector<ir::Value> scratch = allocaSlots(count, lit.pos, 4);
+            if (failed_) {
+                return LoweredString{};
+            }
+            ir::Value buf = computedBase(scratch[kFirstWord], 0, lit.pos);
+            if (failed_) {
+                return LoweredString{};
+            }
+            TypeRef ptrType{ctx_.pointer(ctx_.basic(BasicKind::U8))};
+            buf.type = ptrType;
+            ir::Instr call;
+            call.op = ir::Op::Call;
+            call.loc = lit.pos;
+            call.callee = "cider_ftoa";
+            ir::Argument first;
+            first.words.push_back(buf);
+            call.arguments.push_back(std::move(first));
+            ir::Argument second;
+            second.words.push_back(wide);
+            second.width = ir::IRType::F64;
+            call.arguments.push_back(std::move(second));
+            ir::Value digits = newValue(ir::IRType::I64, count, lit.pos);
+            call.results.push_back(digits);
+            call.width = ir::IRType::I64;
+            call.type = count;
+            emit(std::move(call));
+            PartBytes out;
+            out.ptr = buf;
+            out.len = digits;
+            parts.push_back(out);
+            continue;
         }
         refuse(part.expr->pos, "this interpolation");
         return LoweredString{};

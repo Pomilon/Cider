@@ -1198,15 +1198,34 @@ void testInterp() {
         }
     }
     check(joins, "the parts join in a fresh buffer");
-    // A float has no buffer spelling yet: refusing loudly beats printing
-    // whatever the bits happen to look like.
-    Lowered noFloat = lower(
+    // A float prints through the ftoa helper: a widening cast when the
+    // part is a float, then a call naming cider_ftoa.
+    Lowered floats = lower(
         "func main() -> int {\n"
         "    var x: f32 = 1.5;\n"
         "    var v: string = \"{x}\";\n"
         "    return v.len as int;\n"
         "}\n");
-    check(!noFloat.ok, "a float part is refused");
+    check(floats.ok, "a float part lowers: " + floats.stage);
+    const cider::ir::Function* fmain = find(floats.module.get(), "main");
+    bool widens = false;
+    bool callsFtoa = false;
+    if (fmain != nullptr) {
+        for (const cider::ir::Block& block : fmain->blocks) {
+            for (const cider::ir::Instr& instr : block.body) {
+                if (instr.op == cider::ir::Op::Cast &&
+                    instr.width == cider::ir::IRType::F64) {
+                    widens = true;
+                }
+                if (instr.op == cider::ir::Op::Call &&
+                    instr.callee == "cider_ftoa") {
+                    callsFtoa = true;
+                }
+            }
+        }
+    }
+    check(widens, "the float widens to a double first");
+    check(callsFtoa, "the part converts through cider_ftoa");
 }
 
 }  // namespace

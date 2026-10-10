@@ -207,7 +207,7 @@ private:
         std::vector<std::string> order = {
             "cider_print", "cider_panic", "cider_alloc", "cider_free",
             "cider_realloc", "putchar", "cider_itoa_signed",
-            "cider_itoa_unsigned",
+            "cider_itoa_unsigned", "cider_ftoa",
         };
         std::vector<std::string> out;
         for (const ir::Function& fn : module_.functions) {
@@ -232,6 +232,13 @@ private:
                             if (candidate == wanted) {
                                 out.push_back(candidate);
                             }
+                        }
+                        // The float helper prints its whole part through the
+                        // signed helper: an IR scan never sees that inner
+                        // call, so the dependency rides explicitly here.
+                        if (wanted == "cider_ftoa" &&
+                            seen.insert("cider_itoa_signed").second) {
+                            out.push_back("cider_itoa_signed");
                         }
                     }
                 }
@@ -380,6 +387,79 @@ private:
             out_ += "  test rcx, rcx\n";
             out_ += "  jnz .itoa_" + tag + "_copy\n";
             out_ += "  add rsp, 24\n";
+            out_ += "  pop rbx\n";
+            out_ += "  ret\n";
+            return true;
+        }
+        if (name == "cider_ftoa") {
+            // A double into the caller's buffer: rdi answers the bytes,
+            // xmm0 the value, rax the count. The shape is printF64's
+            // (std.io), rebuilt in assembly so interpolation needs no
+            // module linked: a sign, the whole digits through
+            // cider_itoa_signed, a point, then six fraction digits,
+            // truncated never rounded, zero-padded on the left. Every
+            // operation matches the std.io sequence — the same compare
+            // with its parity guard, the same truncating converts — so
+            // edge values (including NaN and infinities) print exactly
+            // what printF64 prints. Thirty-two bytes hold the longest
+            // shape: a sign, nineteen whole digits, the point, six
+            // fraction digits; the caller owns the buffer.
+            out_ += "cider_ftoa:\n";
+            out_ += "  push rbx\n";
+            out_ += "  sub rsp, 48\n";
+            out_ += "  movsd [rsp + 16], xmm0\n";
+            out_ += "  mov qword ptr [rsp + 24], 0\n";
+            out_ += "  xorpd xmm1, xmm1\n";
+            out_ += "  ucomisd xmm0, xmm1\n";
+            out_ += "  setb al\n";
+            out_ += "  setnp cl\n";
+            out_ += "  and al, cl\n";
+            out_ += "  test al, al\n";
+            out_ += "  jz .ftoa_whole\n";
+            out_ += "  mov byte ptr [rdi], 45\n";
+            out_ += "  inc rdi\n";
+            out_ += "  mov qword ptr [rsp + 24], 1\n";
+            out_ += "  movsd xmm0, [rsp + 16]\n";
+            out_ += "  subsd xmm1, xmm0\n";
+            out_ += "  movsd xmm0, xmm1\n";
+            out_ += "  movsd [rsp + 16], xmm0\n";
+            out_ += ".ftoa_whole:\n";
+            out_ += "  cvttsd2si rax, xmm0\n";
+            out_ += "  mov [rsp], rax\n";
+            out_ += "  mov rsi, rax\n";
+            out_ += "  call cider_itoa_signed\n";
+            // The helper leaves rdi past the digits it wrote, so only
+            // the count still needs adding to the running total.
+            out_ += "  add [rsp + 24], rax\n";
+            out_ += "  mov byte ptr [rdi], 46\n";
+            out_ += "  inc rdi\n";
+            out_ += "  inc qword ptr [rsp + 24]\n";
+            out_ += "  cvtsi2sd xmm1, qword ptr [rsp]\n";
+            out_ += "  movsd xmm0, [rsp + 16]\n";
+            out_ += "  subsd xmm0, xmm1\n";
+            out_ += "  mov rax, 0x412E848000000000\n";
+            out_ += "  mov [rsp + 40], rax\n";
+            out_ += "  mulsd xmm0, [rsp + 40]\n";
+            out_ += "  cvttsd2si rax, xmm0\n";
+            out_ += "  mov [rsp + 8], rax\n";
+            out_ += "  mov rax, [rsp + 8]\n";
+            out_ += "  mov rbx, 10\n";
+            out_ += "  mov rcx, 6\n";
+            out_ += ".ftoa_frac:\n";
+            out_ += "  cqo\n";
+            out_ += "  idiv rbx\n";
+            out_ += "  add dl, 48\n";
+            out_ += "  mov [rsp + rcx + 31], dl\n";
+            out_ += "  dec rcx\n";
+            out_ += "  jnz .ftoa_frac\n";
+            out_ += "  mov eax, [rsp + 32]\n";
+            out_ += "  mov [rdi], eax\n";
+            out_ += "  mov ax, [rsp + 36]\n";
+            out_ += "  mov [rdi + 4], ax\n";
+            out_ += "  add rdi, 6\n";
+            out_ += "  add qword ptr [rsp + 24], 6\n";
+            out_ += "  mov rax, [rsp + 24]\n";
+            out_ += "  add rsp, 48\n";
             out_ += "  pop rbx\n";
             out_ += "  ret\n";
             return true;

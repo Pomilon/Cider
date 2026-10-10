@@ -245,6 +245,30 @@ void testInterp() {
                   "    return v.len as int * 100 + v[0] as int;\n"
                   "}\n", sig) == (2 * 100 + 45) % 256 && !sig,
           "a negative integer keeps its sign");
+    check(runCode("func main() -> int {\n"
+                  "    var f: f64 = 1.5;\n"
+                  "    var v: string = \"{f}\";\n"
+                  "    return v.len as int * 100 + v[0] as int;\n"
+                  "}\n", sig) == (8 * 100 + 49) % 256 && !sig,
+          "a float prints whole, point and six digits");
+    check(runCode("func main() -> int {\n"
+                  "    var f: f64 = 1.5;\n"
+                  "    var v: string = \"{f}\";\n"
+                  "    return v[1] as int * 100 + v[2] as int;\n"
+                  "}\n", sig) == (46 * 100 + 53) % 256 && !sig,
+          "the point and first fraction digit print");
+    check(runCode("func main() -> int {\n"
+                  "    var f: float = 0.5;\n"
+                  "    var v: string = \"f={f}\";\n"
+                  "    return v.len as int * 100 + v[2] as int;\n"
+                  "}\n", sig) == (10 * 100 + 48) % 256 && !sig,
+          "a float widens and zero-pads");
+    check(runCode("func main() -> int {\n"
+                  "    var f: f64 = -2.25;\n"
+                  "    var v: string = \"{f}\";\n"
+                  "    return v.len as int * 100 + v[0] as int;\n"
+                  "}\n", sig) == (9 * 100 + 45) % 256 && !sig,
+          "a negative float keeps its sign");
 }
 
 void testTrap() {
