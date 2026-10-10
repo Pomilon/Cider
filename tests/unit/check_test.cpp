@@ -1042,6 +1042,31 @@ void testPointerArith() {
         "    return 0;\n"
         "}\n");
     check(compound.ok, "p += n and p -= n check: " + compound.stage);
+    Checked addrDeref = check(
+        "func main() -> int {\n"
+        "    var x: int = 41;\n"
+        "    var p: *int = &x;\n"
+        "    var pp: **int = &p;\n"
+        "    var q: **int = &*pp;\n"
+        "    return **q;\n"
+        "}\n");
+    check(addrDeref.ok, "&*pp nets to **int: " + addrDeref.stage);
+    Checked addrDerefOne = check(
+        "func main() -> int {\n"
+        "    var x: int = 41;\n"
+        "    var p: *int = &x;\n"
+        "    var q: *int = &*p;\n"
+        "    return *q;\n"
+        "}\n");
+    check(addrDerefOne.ok, "&*p nets to *int: " + addrDerefOne.stage);
+    Checked addrDerefMix = check(
+        "func main() -> int {\n"
+        "    var x: int = 41;\n"
+        "    var p: *int = &x;\n"
+        "    var q: **int = &*p;\n"
+        "    return 0;\n"
+        "}\n");
+    check(!addrDerefMix.ok && addrDerefMix.stage == "check", "&*p is not **int");
 }
 
 void testFloatGlobal() {

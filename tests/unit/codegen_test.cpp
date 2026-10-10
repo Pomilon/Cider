@@ -527,6 +527,14 @@ void testPointerHeap() {
                    " free(q);\n"
                    " return (q != nilPtr) as int + 41; }\n") == 42,
           "freed memory is recycled by the free list");
+    check(runQuiet("func main() -> int {\n"
+                   "    var x: int = 41;\n"
+                   "    var p: *int = &x;\n"
+                   "    var pp: **int = &p;\n"
+                   "    var q: **int = &*pp;\n"
+                   "    return **q;\n"
+                   "}\n") == 41,
+          "address of a dereference nets one level and runs");
     check(runQuiet("func main() -> int { var p: *int = alloc(8, 8) as *int; free(p); free(p); return 0; }\n") == 134,
           "a double free dies loudly with the heap code");
 }
