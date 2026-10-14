@@ -255,9 +255,9 @@
   "class": "A"
  },
  "crossmod_iface_global_declorder": {
-  "actual": "34:1: 'gEarly' is not exported by 'lib' (interface-typed export vars never bind: interfaces unbuilt)",
+  "actual": "exact stdout/stderr/exit match on all 3 legs (ok+CBA trace, rc=0)",
   "blocker": "interface-boxing (interface decls + interface-typed globals + dispatch)",
-  "class": "D"
+  "class": "A"
  },
  "crossmod_iface_global_fromstore": {
   "actual": "exit 1; tests/corpus/crossmod_iface_global_fromstore/main.cid:106:14: a variable needs an initialiser; tests/corpus/crossmod_iface_global_fromstore/main.cid:111:13: a variable needs an initialiser",

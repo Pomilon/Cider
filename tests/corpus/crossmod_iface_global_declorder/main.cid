@@ -31,24 +31,27 @@
 // rejections that must survive for the forward-declared global.
 import lib;
 from std.io import print;
-from lib import gEarly, gAlias, gAfter, dOne, dTwo, dThree;
+from lib import gEarly, gAlias, gAfter, DOne, DTwo, DThree;
 
 // Neither the interface nor the aliases are from-imported here: every spelling
 // in this file is qualified, so the bare names the declarations carry (`DTag`,
 // `DWrap`, `DInner`) are not resolvable in this scope.
 
 func main() -> int {
-  dOne.v = 42;
-  dTwo.s = 17;
-  dThree.p = 5;
+  var dOne: *DOne = new DOne(0);
+  var dTwo: *DTwo = new DTwo(0);
+  var dThree: *DThree = new DThree(0);
+  (*dOne).v = 42;
+  (*dTwo).s = 17;
+  (*dThree).p = 5;
 
   // --- the qualified spelling, one global per declaration order ------------
-  lib.gEarly = lib.dOne;
+  lib.gEarly = dOne;
   if (lib.gEarly.o() != 42) { return 1; }
   if (lib.gEarly.tag() != 7) { return 2; }
-  lib.gAlias = lib.dTwo;
+  lib.gAlias = dTwo;
   if (lib.gAlias.o() != 17 || lib.gAlias.tag() != 13) { return 3; }
-  lib.gAfter = lib.dThree;
+  lib.gAfter = dThree;
   if (lib.gAfter.o() != 5 || lib.gAfter.tag() != 21) { return 4; }
 
   // --- the same three through a from-import ALIAS, in turn ----------------
@@ -104,15 +107,18 @@ func main() -> int {
   if (gAfter.o() != 42 || gAfter.tag() != 7) { return 28; }
 
   // --- ownership: the store aliased the value, it did not consume it ------
-  if (dOne.v != 42) { return 29; }
-  dOne.v = 43;
-  if (dOne.v != 43) { return 30; }
+  if ((*dOne).v != 42) { return 29; }
+  (*dOne).v = 43;
+  if ((*dOne).v != 43) { return 30; }
   if (gEarly.o() != 43) { return 31; }
-  dOne.v = 42;
+  (*dOne).v = 42;
 
   // The three implementor globals are finalized exactly once, at program exit
   // — the trace in expected.json. A store that consumed, cloned or
   // double-released its source would change it.
   print("crossmod_iface_global_declorder_ok\n");
+  delete dThree;
+  delete dTwo;
+  delete dOne;
   return 0;
 }
