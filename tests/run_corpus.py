@@ -28,11 +28,6 @@ CIDER = os.environ.get(
     "CIDER_BIN", os.path.join(ROOT, "build", "v3", "cider"))
 LEGS = ["native", "vm-unopt", "vm-opt"]
 TRAPPED = "<trapped by signal>"
-# An interpreter refusal is not a program result: it names the leg, so the
-# differential can report it without reading as a wrong answer.
-VMREFUSED = "<vm refused>"
-
-
 def outcome_of(proc):
     if proc.returncode is not None and proc.returncode < 0:
         return (TRAPPED, proc.stdout, proc.returncode)
@@ -82,7 +77,6 @@ def main():
     failures = []
     pending = []
     skipped = []
-    vm_refusals = []
     for name in names:
         entry = classes[name]
         cls = entry["class"]
@@ -103,32 +97,24 @@ def main():
                           expected.get("limit_kb"))
             out[leg], err[leg], code[leg] = got
         outcomes = dict((leg, (out[leg], err[leg], code[leg])) for leg in LEGS)
-        # A refusal names the interpreter, not the program: the driver
-        # answers exit 1 with the interpreter's own limit, which reads as
-        # an unreached feature rather than a wrong answer.
-        refused = [leg for leg in LEGS
-                   if leg.startswith("vm") and "vm " in err[leg]]
-        checked = dict((leg, value) for leg, value in outcomes.items()
-                       if leg not in refused)
-        if refused:
-            vm_refusals.append((name, refused))
+        # Every leg answers for itself: a VM refusal reads as that leg's
+        # own loud failure, so no leg is carved out of the verdict below.
         if cls == "A":
             ok = all(value == (expected["stdout"], expected["stderr"],
                                expected["exit"])
-                     for value in checked.values())
-            ok = ok and len(checked) == len(LEGS)
+                     for value in outcomes.values())
             # A trap in v3 is silent by design (diff #19): a program whose
             # v2 expectation names a vm-error line fails here loudly, which
             # is the signal to reclassify it B, not to bless the text.
             if not ok:
-                failures.append((name, checked, expected))
+                failures.append((name, outcomes, expected))
         elif cls in ("B", "C"):
             loud = code["native"] != 0 and (
                 err["native"] != "" or out["native"] == TRAPPED)
             # A class that native rejects loudly must not pass on a leg that
             # answers silently: the VM leg's answer is compared against
             # native's own, refusal included as the interpreter's limit.
-            for leg, value in checked.items():
+            for leg, value in outcomes.items():
                 if leg == "native":
                     continue
                 if value != (out["native"], err["native"], code["native"]):
@@ -147,11 +133,6 @@ def main():
     # the D class stays informational without printing every leg's text.
     for name, outcomes in pending:
         print("D    %s: native=%r" % (name, outcomes["native"]))
-    # A leg that refuses an instruction the others run is the interpreter's
-    # own limit, reported apart from the failures: the corpus cannot demand
-    # an opcode the VM has not reached yet, and silence would be worse.
-    for name, legs in vm_refusals:
-        print("VMREFUSED %s: %s" % (name, ", ".join(legs)))
     return 1 if failures else 0
 
 
