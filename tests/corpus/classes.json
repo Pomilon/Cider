@@ -1575,9 +1575,9 @@
   "class": "A"
  },
  "wide_global_load": {
-  "actual": "26:1: 'gShape' is not exported by 'lib' (interface-typed export vars never bind: interfaces unbuilt)",
+  "actual": "exact stdout/stderr/exit match",
   "blocker": "interface-boxing (also bare fn( types at 28:22)",
-  "class": "D"
+  "class": "A"
  },
  "wide_global_store": {
   "actual": "v3 rejects v2 syntax loudly at parse (run exit 1: OUT: ERR:tests/corpus/wide_global_store/main.cid:52:20: expected ')'\\ntests/corpus/wide_global_store/main.ci...)",

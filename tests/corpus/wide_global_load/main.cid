@@ -55,7 +55,7 @@ func main() -> int {
   var b: lib.Big = gB;
   if (b.a != 100) { return 5; }
   if (b.b != 7) { return 6; }
-  printInt(b.a * 100 + b.b);
+  printInt((b.a * 100 + b.b) as int);
 
   // --- by-value arguments ------------------------------------------------
   if (takeShape(gShape) != 427) { return 7; }

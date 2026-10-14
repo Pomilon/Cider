@@ -14,7 +14,7 @@ export interface Shape {
 // First implementor.
 export class Box {
   var v: int;
-  func area() -> int { return this.v * 2; }
+  func area() -> int { return (*self).v * 2; }
   func tag() -> int { return 7; }
 }
 
@@ -24,7 +24,7 @@ export class Box {
 export class Pebble {
   var w: int;
   var pad: [u64; 4];
-  func area() -> int { return this.w + 1; }
+  func area() -> int { return (*self).w + 1; }
   func tag() -> int { return 9; }
 }
 
@@ -34,7 +34,7 @@ export struct Big {
   var b: i64;
 }
 
-export var gBox: Box;
-export var gPeb: Pebble;
-export var gShape: Shape;
-export var gB: Big;
+export var gBox: Box = new Box { v: 0 };
+export var gPeb: Pebble = new Pebble { w: 0, pad: new [u64; 4] { 0, 0, 0, 0 } };
+export var gShape: Shape = nilPtr as Shape;
+export var gB: Big = new Big { a: 0, b: 0 };
