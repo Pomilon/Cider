@@ -1027,6 +1027,44 @@ void testStringCompare() {
           "empty, null, and address strings behave");
 }
 
+void testInterfaceNil() {
+    std::printf("null interfaces run\n");
+    check(runQuiet("interface Shape { func area() -> int; }\n"
+                   "struct Sq { var s: int; func area() -> int { return (*self).s; } }\n"
+                   "func main() -> int {\n"
+                   "    var n: Shape = nilPtr as Shape;\n"
+                   "    if (n == nilPtr) { return 1; }\n"
+                   "    return 0;\n"
+                   "}\n") == 1,
+          "a null interface equals nilPtr");
+    check(runQuiet("interface Shape { func area() -> int; }\n"
+                   "struct Sq { var s: int; func area() -> int { return (*self).s; } }\n"
+                   "func main() -> int {\n"
+                   "    var s: Sq = new Sq { s: 7 };\n"
+                   "    var i: Shape = s;\n"
+                   "    if (i == nilPtr) { return 2; }\n"
+                   "    if (i != nilPtr) { return i.area(); }\n"
+                   "    return 0;\n"
+                   "}\n") == 7,
+          "a boxed interface differs from nilPtr and dispatches");
+    check(runQuiet("interface Shape { func area() -> int; }\n"
+                   "var g: Shape = nilPtr as Shape;\n"
+                   "func main() -> int {\n"
+                   "    if (g == nilPtr) { return 1; }\n"
+                   "    return 0;\n"
+                   "}\n") == 1,
+          "a null interface global reads null");
+    check(runQuiet("interface Shape { func area() -> int; }\n"
+                   "struct Sq { var s: int; func area() -> int { return (*self).s; } }\n"
+                   "var g: Shape = nilPtr as Shape;\n"
+                   "func main() -> int {\n"
+                   "    var s: Sq = new Sq { s: 7 };\n"
+                   "    g = s;\n"
+                   "    return g.area();\n"
+                   "}\n") == 7,
+          "a stored interface global dispatches");
+}
+
 // A match runs the first arm whose pattern fits and skips the rest.
 void testMatch() {
     std::printf("matches run\n");
@@ -2144,6 +2182,7 @@ int main() {
     testNotInCondition();
     testCharCompare();
     testStringCompare();
+    testInterfaceNil();
     testMatch();
     testGuard();
     testRange();

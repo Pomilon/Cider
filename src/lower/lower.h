@@ -124,6 +124,11 @@ public:
     ir::Value lowerStringEqWords(std::vector<ir::Value> left,
                                 std::vector<ir::Value> right,
                                 Position pos, bool isEq);
+    // `==` / `!=` on an interface against nilPtr: the checker proved one
+    // side an interface and the other the nil literal, so nullity is the
+    // vtable word — a null interface is (nil, nil), and every box sets
+    // a real table, so vtable == 0 answers it with one comparison.
+    ir::Value lowerInterfaceEq(const Binary& n);
     // `?:` with branch control flow: the checker proved both arms share one
     // type, so each arm stores its words into the cell and the join loads
     // them back. The untaken arm never evaluates (SEMANTICS: single-eval).

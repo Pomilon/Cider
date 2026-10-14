@@ -688,6 +688,54 @@ void testStringCompare() {
     check(!addrVar.ok && addrVar.stage == "check", "a string variable needs &s[0]");
 }
 
+void testInterfaceNil() {
+    std::printf("null interfaces check\n");
+    Checked cast = check(
+        "interface Shape { func area() -> int; }\n"
+        "func main() -> int {\n"
+        "    var n: Shape = nilPtr as Shape;\n"
+        "    return 0;\n"
+        "}\n");
+    check(cast.ok, "nilPtr casts to an interface: " + cast.stage);
+    Checked cmp = check(
+        "interface Shape { func area() -> int; }\n"
+        "func main() -> int {\n"
+        "    var n: Shape = nilPtr as Shape;\n"
+        "    if (n == nilPtr) { return 1; }\n"
+        "    return 0;\n"
+        "}\n");
+    check(cmp.ok, "an interface checks against nilPtr: " + cmp.stage);
+    Checked rel = check(
+        "interface Shape { func area() -> int; }\n"
+        "func main() -> int { var n: Shape = nilPtr as Shape; return n < n; }\n");
+    check(!rel.ok && rel.stage == "check", "ordering on interfaces fails");
+    Checked mixed = check(
+        "interface Shape { func area() -> int; }\n"
+        "func main() -> int { var n: Shape = nilPtr as Shape; if (n == 1) { return 1; } return 0; }\n");
+    check(!mixed.ok && mixed.stage == "check", "interface == int fails");
+    Checked voidVar = check(
+        "interface Shape { func area() -> int; }\n"
+        "func main() -> int {\n"
+        "    var v: *void = nilPtr;\n"
+        "    var n: Shape = v as Shape;\n"
+        "    return 0;\n"
+        "}\n");
+    check(!voidVar.ok && voidVar.stage == "check",
+          "a *void variable does not cast to an interface");
+    Checked globalNil = check(
+        "interface Shape { func area() -> int; }\n"
+        "var g: Shape = nilPtr as Shape;\n"
+        "func main() -> int { return 0; }\n");
+    check(globalNil.ok, "a nil interface global is constant: " + globalNil.stage);
+    Checked globalLive = check(
+        "interface Shape { func area() -> int; }\n"
+        "struct Sq { var s: int; func area() -> int { return (*self).s; } }\n"
+        "var g: Shape = new Sq { s: 1 };\n"
+        "func main() -> int { return 0; }\n");
+    check(!globalLive.ok && globalLive.stage == "check",
+          "a live interface global is not constant");
+}
+
 // One arm may list several alternatives: each is checked on its own, and
 // no alternative may bind a fresh name, because the body cannot know
 // which alternative's value it would hold.
@@ -1223,6 +1271,7 @@ int main() {
     testBoolCompare();
     testCharCompare();
     testStringCompare();
+    testInterfaceNil();
     testMatch();
     testAlternation();
     testGuard();

@@ -1293,6 +1293,20 @@ void Lowerer::onGlobal(VarDecl& n) {
         binding.initial = lowered.len;
     } else if (dynamic_cast<const NilPtr*>(n.init.get()) != nullptr) {
         binding.initial = 0;
+    } else if (type.type->kind() == Kind::Interface) {
+        // `nilPtr as I`: the null interface is sixteen zero bytes — a
+        // null data word beside a null vtable word — the way a zero
+        // repeat holds zero bytes. The checker's gate lets only this one
+        // spelling through, so anything arriving here is sixteen zeros.
+        const auto* nilCast = dynamic_cast<const Cast*>(n.init.get());
+        if (nilCast == nullptr ||
+            dynamic_cast<const NilPtr*>(nilCast->expr.get()) == nullptr) {
+            refuse(n.init->pos, "an interface global needs `nilPtr as I`");
+            return;
+        }
+        for (uint64_t word = 0; word < kInterfaceWords; ++word) {
+            binding.initWords.push_back(0);
+        }
     } else if (type.type->kind() == Kind::Array &&
                dynamic_cast<const NewArray*>(n.init.get()) != nullptr) {
         // A const aggregate global passed the checker's gate, so every
@@ -5227,6 +5241,16 @@ std::vector<ir::Value> Lowerer::lowerWords(const Expr* expr) {
             return {constantI64(0, ptrType, expr->pos),
                     constantI64(0, lenType, expr->pos)};
         }
+        if (!target.isError() && target.type->kind() == Kind::Interface &&
+            dynamic_cast<const NilPtr*>(cast->expr.get()) != nullptr) {
+            // `nilPtr as I`: the null interface is two zero words — a
+            // null data word beside a null vtable word. Only the literal
+            // converts (the checker keeps a *void variable a mismatch):
+            // the width is what matters, so both words are addresses.
+            TypeRef addr{ctx_.pointer(ctx_.basic(BasicKind::U8))};
+            return {constantI64(0, addr, expr->pos),
+                    constantI64(0, addr, expr->pos)};
+        }
     }
     return {onIdentOrExpr(expr, checker_.typeOf(expr))};
 }
@@ -5691,6 +5715,14 @@ ir::Value Lowerer::onBinary(Binary& n) {
            dynamic_cast<const NilPtr*>(n.lhs.get()) != nullptr)))) {
         return lowerStringEq(n);
     }
+    if ((n.op == BinOp::Eq || n.op == BinOp::Ne) && !lhs.isError() &&
+        !rhs.isError() &&
+        ((lhs.type->kind() == Kind::Interface &&
+          dynamic_cast<const NilPtr*>(n.rhs.get()) != nullptr) ||
+         (rhs.type->kind() == Kind::Interface &&
+          dynamic_cast<const NilPtr*>(n.lhs.get()) != nullptr))) {
+        return lowerInterfaceEq(n);
+    }
     // Pointer arithmetic answers in addresses, not numbers: `p + n`
     // scales the count by the element's size and stays the same *T,
     // while `p - q` over one *T counts elements (FEATURES §1.7).
@@ -6113,6 +6145,40 @@ ir::Value Lowerer::lowerStringEqWords(std::vector<ir::Value> left,
     if (failed_) {
         return undefined();
     }
+    return out;
+}
+
+ir::Value Lowerer::lowerInterfaceEq(const Binary& n) {
+    // The checker proved one side an interface and the other the nil
+    // literal: nullity is the vtable word. A null interface is (nil,
+    // nil), and every box sets a real table, so the second word
+    // against zero answers it — Eq and Ne both, since Eq is
+    // sign-independent.
+    TypeRef lhs = checker_.typeOf(n.lhs.get());
+    const Expr* side = !lhs.isError() && lhs.type->kind() == Kind::Interface
+                           ? n.lhs.get()
+                           : n.rhs.get();
+    std::vector<ir::Value> words = lowerWords(side);
+    if (failed_ || words.size() != kInterfaceWords) {
+        refuse(n.pos, "this comparison");
+        return undefined();
+    }
+    TypeRef addr{ctx_.pointer(ctx_.basic(BasicKind::U8))};
+    ir::Value zero = constantI64(0, addr, n.pos);
+    if (failed_) {
+        return undefined();
+    }
+    ir::Instr cmp;
+    cmp.op = ir::Op::Cmp;
+    cmp.loc = n.pos;
+    cmp.type = checker_.typeOf(&n);
+    cmp.width = ir::IRType::Bool;
+    cmp.cmp = cmpFor(n.op, false);
+    cmp.operands.push_back(words[1]);
+    cmp.operands.push_back(zero);
+    ir::Value out = newValue(ir::IRType::Bool, cmp.type, n.pos);
+    cmp.results.push_back(out);
+    emit(std::move(cmp));
     return out;
 }
 
@@ -6583,14 +6649,45 @@ std::vector<ir::Value> Lowerer::lowerCallWords(Call& n) {
             ir::Value vtable;
             ir::Value dataAddr;
             if (!iface.global.empty()) {
-                // A method on a global names a label, not slots: global
-                // interface state has no constant form yet, so no such
-                // value can exist — this refuses until that slice lands,
-                // like the class/struct path refuses global methods.
-                refuse(n.pos,
-                       "an interface method on a global is not lowered yet");
-                return {undefined()};
-            } else if (iface.hasIndirect) {
+                // A method on a global names a label, not slots: load the
+                // pair into temps and take the slots path below — the same
+                // spill the computed-value path uses. A global interface
+                // holds sixteen laid-down bytes (null or a stored pair),
+                // so the load reads whole words, never a trap.
+                std::vector<ir::Value> words =
+                    loadRange(n.pos, iface, objType);
+                if (failed_ || words.size() != kInterfaceWords) {
+                    if (!failed_) {
+                        refuse(n.pos, "this call");
+                    }
+                    return {undefined()};
+                }
+                std::vector<ir::Value> temps =
+                    allocaFor(objType, field->object->pos);
+                if (failed_ || temps.size() != words.size()) {
+                    if (!failed_) {
+                        refuse(n.pos, "this call");
+                    }
+                    return {undefined()};
+                }
+                for (uint64_t i = 0; i < static_cast<uint64_t>(words.size()); ++i) {
+                    ir::Instr store;
+                    store.op = ir::Op::Store;
+                    store.loc = field->object->pos;
+                    store.type = objType;
+                    store.addressBase = temps[i];
+                    store.storedValue = words[i];
+                    emit(std::move(store));
+                }
+                iface.slots = std::move(temps);
+                iface.global.clear();
+                iface.off = 0;
+                iface.hasIndirect = false;
+                // Falls through to the direct-slots path below: the pair
+                // now sits in temps, so the vtable load and receiver use
+                // them like any other slotted value.
+            }
+            if (iface.hasIndirect) {
                 // An address behind a pointer: advanced past the offset,
                 // with the vtable read through the pair it names.
                 dataAddr = iface.off == 0 ? iface.indirect

@@ -337,6 +337,24 @@ void Checker::visitProgram(Program& n) {
             if (dynamic_cast<const NewArray*>(g->init.get()) != nullptr) {
                 constGlobal = constAggregateInit(*g->init);
             }
+            // `nilPtr as I`: the null interface is sixteen zero bytes in
+            // the image — a null data word beside a null vtable word — so
+            // it is constant the way a null pointer is. The target
+            // spelling must name an interface, and the declaration must be
+            // one: anything else falls through to the normal path, which
+            // fails it loudly. The normal checking below still enforces
+            // the types, so the gate only recognises the all-bytes-known
+            // shape.
+            if (const auto* nilCast = dynamic_cast<const Cast*>(g->init.get())) {
+                TypeRef spelled = resolver_.resolveType(nilCast->target.get(),
+                                                        resolver_.scopeOf(module_));
+                if (!spelled.isError() &&
+                    spelled.type->kind() == Kind::Interface &&
+                    declared.type->kind() == Kind::Interface &&
+                    dynamic_cast<const NilPtr*>(nilCast->expr.get()) != nullptr) {
+                    constGlobal = true;
+                }
+            }
             // A float literal is a constant of its own kind: evalConstInt
             // answers integers, so only a literal in a float-typed global
             // gets past without a folded integer. A float expression over
@@ -1275,6 +1293,15 @@ void Checker::visitCast(Cast& n) {
         // reads empty and compares equal to another null without ever
         // dereferencing. Only the literal converts — a *void variable
         // beside a string stays a mismatch the source must spell.
+        record(&n, target);
+        return;
+    }
+    if (dynamic_cast<const NilPtr*>(n.expr.get()) != nullptr &&
+        target.type->kind() == Kind::Interface) {
+        // A null names no interface either: the null interface is
+        // (nil, nil), whose vtable word answers every null check without
+        // ever dispatching. Only the literal converts — a *void variable
+        // beside an interface stays a mismatch the source must spell.
         record(&n, target);
         return;
     }
@@ -2622,6 +2649,21 @@ TypeRef Checker::checkBinary(Binary& expr, TypeRef expected) {
                 return TypeRef{ctx_.basic(BasicKind::Bool)};
             }
             fail(expr.pos, "strings compare for equality only");
+            return errorRef();
+        }
+        const bool lhsIface = lhs.type->kind() == Kind::Interface;
+        const bool rhsIface = rhs.type->kind() == Kind::Interface;
+        if (lhsIface || rhsIface) {
+            // Equality on an interface is a null check: a null interface
+            // carries no vtable, so it compares against nilPtr only.
+            // Anything else beside an interface is a mismatch the source
+            // must spell — dispatch first, compare after.
+            const bool lhsNil = dynamic_cast<const NilPtr*>(expr.lhs.get()) != nullptr;
+            const bool rhsNil = dynamic_cast<const NilPtr*>(expr.rhs.get()) != nullptr;
+            if (isEq && ((lhsIface && rhsNil) || (rhsIface && lhsNil))) {
+                return TypeRef{ctx_.basic(BasicKind::Bool)};
+            }
+            fail(expr.pos, "interfaces compare against nilPtr only");
             return errorRef();
         }
         if (lhs.type->kind() == Kind::Pointer && rhs.type->kind() == Kind::Pointer) {
