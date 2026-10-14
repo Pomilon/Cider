@@ -533,11 +533,13 @@ struct Runner {
         }
         uint64_t left = stdIn_.size() - stdInAt_;
         if (left == kZeroPointer) {
-            // At end of input the read answers zero without touching the
-            // buffer, so even the nil pointer passes: only a negative one,
-            // which no access check admits, still faults. A buffer that
-            // would be read from, below, still refuses at its own check.
-            if (buffer < kZeroPointer || count < kZeroPointer) {
+            // End of input answers zero, but only after the same buffer
+            // validation the read below would run: the machine faults a
+            // bad buffer before it ever reaches end-of-input.
+            if (buffer < static_cast<int64_t>(kNullGuard) || count < 0 ||
+                static_cast<uint64_t>(buffer) +
+                        static_cast<uint64_t>(count) >
+                    memory.size()) {
                 return kErrFault;
             }
             return 0;
@@ -651,12 +653,29 @@ struct Runner {
         for (uint64_t i = 0; i < named; ++i) {
             const std::string key = "{" + instr.asmNames[i] + "}";
             const std::string pseudo = "@" + std::to_string(i);
+            // A function placeholder has an address word but no laid-down
+            // label: the interpreter has no code address to hand out, so
+            // staging it would answer silent zero. Data addresses always
+            // hit: rodata and globals are all laid down, and DataAddr
+            // refuses first — so a miss here names a function value.
+            auto known = addrWords.find(instr.operands[i].id);
+            if (known != addrWords.end() &&
+                labels.find(known->second) == labels.end()) {
+                return refuse(instr.loc,
+                              "vm cannot stage a function value");
+            }
             held[pseudo] = stageValue(instr.operands[i], instr.loc);
             auto at = std::string::size_type{};
             while ((at = text.find(key, at)) != std::string::npos) {
                 text.replace(at, key.size(), pseudo);
                 at += pseudo.size();
             }
+        }
+        // A staged operand address can fault (past everything laid down):
+        // die on it the way loads do, instead of running the block on a
+        // staged zero.
+        if (faulted != 0) {
+            return die(faulted);
         }
         auto lookup = [&](const std::string& name, int64_t& bits) {
             if (!name.empty() && name[0] == '@') {
@@ -780,6 +799,11 @@ struct Runner {
             return refuse(instr.loc, "vm cannot address '" + instr.globalLabel + "'");
         }
         write(instr.results[0], found->second);
+        // A function word stages like a data word downstream: record it so
+        // an asm placeholder naming a function refuses in the staging loop
+        // instead of reading the tag as an address. Function names never
+        // land in labels, so the staging check tells the two apart.
+        addrWords[instr.results[0].id] = instr.globalLabel;
         return true;
     }
 
@@ -1375,6 +1399,13 @@ struct Runner {
     bool hostRealloc(int64_t address, int64_t bytes, int64_t align, Position pos,
                      std::vector<Value>& results) {
         if (bytes < 0) {
+            // A failed realloc keeps the old block live and answers nil,
+            // the way the machine answers NULL: writing the answer is the
+            // whole fix, because the slot otherwise keeps whatever a
+            // previous trip left in it.
+            if (!results.empty()) {
+                write(results[0], kZeroPointer);
+            }
             return true;
         }
         int64_t sized = hostAlloc(bytes, align, pos);

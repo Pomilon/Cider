@@ -356,6 +356,24 @@ void testCalls() {
     cider::vm::VmResult bigr = cider::vm::run(*big.module, "");
     check(bigr.ok && bigr.exitCode == 0,
           "an over-cap alloc answers nil: " + bigr.error);
+    // A failed realloc keeps the old block and answers nil: the second
+    // trip reuses the same result cell, so a missing write would leave
+    // the first trip's pointer behind instead of nil.
+    Lowered neg = lower("func main() -> int {\n"
+                        " var p: *u8 = alloc(16, 8) as *u8;\n"
+                        " var q: *u8 = p;\n"
+                        " var i: int = 0;\n"
+                        " while (i < 2) {\n"
+                        " var n: i64 = 16;\n"
+                        " if (i != 0) { n = (0 - 1) as i64; }\n"
+                        " q = realloc(q, n, 8) as *u8;\n"
+                        " i = i + 1; }\n"
+                        " if (q == nilPtr) { return 0; }\n"
+                        " return 1; }\n");
+    check(neg.ok, "a negative realloc lowers: " + neg.stage);
+    cider::vm::VmResult negr = cider::vm::run(*neg.module, "");
+    check(negr.ok && negr.exitCode == 0,
+          "a negative realloc answers nil: " + negr.error);
     Lowered dead = lower("func main() -> int { var p: *int = nilPtr;"
                          " return *p; }\n");
     cider::vm::VmResult deadr = cider::vm::run(*dead.module, "");
@@ -449,6 +467,19 @@ void testAsm() {
     cider::vm::VmResult badr = cider::vm::run(*bad.module, "");
     check(badr.ok && badr.stdoutText.empty(),
           "a write past the guard writes nothing: " + badr.error);
+    // End of input still validates the buffer first: the machine faults
+    // a bad buffer before it ever reaches end-of-input, so a nil buffer
+    // with a nonzero count answers EFAULT (-14), not success.
+    Lowered eofbad = lower("func main() -> int {"
+                           " var ret: i64 = 0;"
+                           " asm { \"mov rax, 0\" \"mov rdi, 0\" \"mov rsi, 0\""
+                           " \"mov rdx, 4\" \"syscall\" \"mov {ret:q}, rax\" }"
+                           " if (ret == (0 - 14)) { return 0; }"
+                           " return 1; }\n");
+    check(eofbad.ok, "an EOF bad-buffer read lowers: " + eofbad.stage);
+    cider::vm::VmResult eofbadr = cider::vm::run(*eofbad.module, "");
+    check(eofbadr.ok && eofbadr.exitCode == 0,
+          "an EOF bad-buffer read faults: " + eofbadr.error);
 
     Lowered wd = lower("func main() -> int { var out: u64 = 0;"
                        " asm { \"mov {out}, 42\" } return out as int; }\n");
@@ -462,6 +493,16 @@ void testAsm() {
     check(eg.ok, "a data section lowers: " + eg.stage);
     cider::vm::VmResult egr = cider::vm::run(*eg.module, "");
     check(!egr.ok, "a section directive refuses: " + egr.error);
+
+    // A function placeholder has an address word but no laid-down label:
+    // the interpreter has no code address to hand out, so staging it
+    // must refuse instead of answering silent zero.
+    Lowered fn = lower("func two() -> int { return 2; }\n"
+                       "func main() -> int {"
+                       " asm { \"mov rax, {two}\" } return 0; }\n");
+    check(fn.ok, "a function placeholder lowers: " + fn.stage);
+    cider::vm::VmResult fnr = cider::vm::run(*fn.module, "");
+    check(!fnr.ok, "a function placeholder refuses: " + fnr.error);
 }
 
 void testArgv() {
