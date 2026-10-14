@@ -546,7 +546,6 @@ bool Resolver::resolveProgram(Program& program, const std::string& module) {
         nextIndex_[module] = 0;
     }
     stack_.push_back(module);
-    order_.push_back(module);
     programOf_[module] = &program;
     const Scope* scope = makeScope(nullptr, module);
     modules_[module] = scope;
@@ -625,6 +624,10 @@ bool Resolver::resolveProgram(Program& program, const std::string& module) {
     declareModule(module, program, scope);
     resolveDeclTypes(module, program, scope);
     stack_.pop_back();
+    // Post-order: dependents lower after their dependencies, so every
+    // name a body uses is already registered when its module lowers.
+    // (Cycle detection reads the stack, never this list.)
+    order_.push_back(module);
     return !failed_;
 }
 

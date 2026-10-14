@@ -184,6 +184,40 @@ void testImports() {
     rmdir(dir);
 }
 
+// A from-imported global is usable by field: the dependency's globals
+// register before any dependent lowers, so a store through the alias
+// reaches the label instead of refusing on a missing binding.
+void testImportGlobal() {
+    std::printf("imported globals\n");
+    char dir[] = "/tmp/cider_impglob_XXXXXX";
+    check(mkdtemp(dir) != nullptr, "a scratch directory exists");
+    std::string dep = std::string(dir) + "/lib.cid";
+    FILE* depFile = fopen(dep.c_str(), "w");
+    const char* depText =
+        "export struct P { var x: int; }\n"
+        "export var gp: P = new P { x: 0 };\n";
+    fwrite(depText, 1, strlen(depText), depFile);
+    fclose(depFile);
+    std::string main = std::string(dir) + "/main.cid";
+    FILE* mainFile = fopen(main.c_str(), "w");
+    const char* mainText =
+        "from lib import gp;\n"
+        "func main() -> int {\n"
+        "    gp.x = 7;\n"
+        "    return gp.x;\n"
+        "}\n";
+    fwrite(mainText, 1, strlen(mainText), mainFile);
+    fclose(mainFile);
+    Result ok = run({"check", main});
+    check(ok.code == 0, "an imported global checks: " + ok.err);
+    Result ran = run({"run", main});
+    check(ran.code == 7,
+          "a store through an imported global reads back: " + ran.err);
+    unlink(main.c_str());
+    unlink(dep.c_str());
+    rmdir(dir);
+}
+
 // A dotted import resolves through CIDER_LIB: <lib>/x/y.cid answers
 // `import x.y`. Without the variable the same import still fails loudly.
 void testLibSearch() {
@@ -258,6 +292,7 @@ int main() {
     testCompileIr();
     testRun();
     testImports();
+    testImportGlobal();
     testLibSearch();
     testFailures();
     testVmTarget();

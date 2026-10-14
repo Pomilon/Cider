@@ -163,6 +163,10 @@ bool runFront(const std::string& file, const std::string& text, Pipeline& pipe,
     // collide. Emission order carries no semantics: calls resolve by link
     // name, not by position.
     bool lowered = false;
+    // The first module in order starts the IR module; the rest
+    // accumulate into it. Order is dependencies-first, so the first
+    // module is a leaf, not necessarily the entry.
+    bool first = true;
     for (const std::string& module : resolver.moduleOrder()) {
         Program* program =
             module == "main" ? pipe.program.get() : resolver.programOf(module);
@@ -170,8 +174,9 @@ bool runFront(const std::string& file, const std::string& text, Pipeline& pipe,
             pipe.diagnostic += "cannot lower missing module '" + module + "'\n";
             return false;
         }
-        if (module == "main") {
+        if (first) {
             lowered = lowerer.lowerModule(module, *program);
+            first = false;
         } else {
             lowered = lowerer.lowerInto(module, *program);
         }
