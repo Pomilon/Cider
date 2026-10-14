@@ -5080,7 +5080,7 @@ std::vector<ir::Value> Lowerer::lowerNewClass(const NewClass& n) {
     ir::Instr run;
     run.op = ir::Op::Call;
     run.loc = n.pos;
-    run.callee = owner->name + "__init";
+    run.callee = resolver_.linkName(*owner) + "__init";
     run.mayTrap = true;
     ir::Argument self;
     self.words.push_back(at);
@@ -5675,7 +5675,7 @@ void Lowerer::onDelete(DeleteStmt& n) {
         ir::Instr run;
         run.op = ir::Op::Call;
         run.loc = n.pos;
-        run.callee = owner->name + "__deinit";
+        run.callee = resolver_.linkName(*owner) + "__deinit";
         run.mayTrap = true;
         ir::Argument self;
         self.words.push_back(ptr[0]);
