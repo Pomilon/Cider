@@ -567,6 +567,26 @@ void testPointerField() {
           "a field store and read through a pointer index");
 }
 
+void testMethodGlobalStore() {
+    // A method's store to a global is observable outside the function, so
+    // the optimizer must keep it: the store names a label, not a slot,
+    // and no slot read can prove it dead.
+    std::printf("method stores to globals\n");
+    check(runQuiet("var fired: int = 0;\n"
+                   "class N {\n"
+                   "    var x: int;\n"
+                   "    func init(v: int) { (*self).x = v; }\n"
+                   "    func bump() -> int { fired = 7; return 7; }\n"
+                   "}\n"
+                   "func main() -> int {\n"
+                   "    var n: *N = new N(0);\n"
+                   "    var r: int = (*n).bump();\n"
+                   "    if (fired != 7) { return 1; }\n"
+                   "    return r;\n"
+                   "}\n") == 7,
+          "a method store to a global survives optimization");
+}
+
 void testRepeatZero() {
     // A zero repeat reaches through nested arrays: every scalar is zero,
     // and a store into the zeroed shape reads back.
@@ -2141,6 +2161,7 @@ int main() {
     testElementAddr();
     testComputedIndex();
     testPointerField();
+    testMethodGlobalStore();
     testRepeatZero();
     testIncrDecr();
     testMultiWordReturn();
