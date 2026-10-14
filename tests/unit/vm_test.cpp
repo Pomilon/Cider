@@ -345,6 +345,17 @@ void testCalls() {
     cider::vm::VmResult pastAllr = cider::vm::run(*pastAll.module, "");
     check(pastAllr.ok && pastAllr.signal != 0,
           "a past-everything read dies: " + pastAllr.error);
+    // Over the heap cap the hand-out is refused up front: the guest sees
+    // nil, the way a failed mmap answers nil, without ever reaching the
+    // host reservation.
+    Lowered big = lower("func main() -> int {\n"
+                        " var p: *u8 = alloc(2147483648, 8) as *u8;\n"
+                        " if (p == nilPtr) { return 0; }\n"
+                        " return 1; }\n");
+    check(big.ok, "an over-cap alloc lowers: " + big.stage);
+    cider::vm::VmResult bigr = cider::vm::run(*big.module, "");
+    check(bigr.ok && bigr.exitCode == 0,
+          "an over-cap alloc answers nil: " + bigr.error);
     Lowered dead = lower("func main() -> int { var p: *int = nilPtr;"
                          " return *p; }\n");
     cider::vm::VmResult deadr = cider::vm::run(*dead.module, "");

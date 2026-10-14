@@ -1315,7 +1315,15 @@ struct Runner {
             if (static_cast<uint64_t>(end) > kMemoryCap) {
                 return 0;
             }
-            memory.resize(static_cast<size_t>(end), kZeroCell);
+            try {
+                memory.resize(static_cast<size_t>(end), kZeroCell);
+            } catch (const std::bad_alloc&) {
+                // The host cannot back this hand-out (address-space cap):
+                // answer nil the way a failed mmap answers nil, and the
+                // guest's nil-handling runs. Only this reservation is
+                // caught; anything else still dies at run().
+                return 0;
+            }
         }
         heapBlocks[slide] = bytes;
         if (end > heapAt) {
@@ -1997,6 +2005,20 @@ static VmResult runProgram(const ir::Module& module,
                            const std::vector<std::string>& argv) {
     Runner run;
     run.stdIn_ = pendingInput;
+    // Lock in address space up front so later growth never relocates: a
+    // growth that must relocate while the old span is still alive needs
+    // twice the high-water mark transiently, which a capped host may not
+    // have contiguously. Capacity is unobservable, and a reservation
+    // commits nothing until touched, so no program-visible behavior
+    // changes. Halve down while the host refuses; when nothing fits,
+    // growth proceeds exactly as before.
+    for (int down = 0; down <= 5; ++down) {
+        try {
+            run.memory.reserve(kMemoryCap >> down);
+            break;
+        } catch (const std::bad_alloc&) {
+        }
+    }
     const Function* entry = nullptr;
     const Function* start = nullptr;
     for (const Function& fn : module.functions) {
