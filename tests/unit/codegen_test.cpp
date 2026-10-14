@@ -275,6 +275,18 @@ void testGlobals() {
                    "    return (g[0] as int) + (g[3] as int) + (w[1] as int);\n"
                    "}\n") == (10 + 40 + 2000) % 256,
           "a literal global array reads back");
+    // A const struct global holds its fields at the layout's offsets
+    // with no startup code: the image bytes match what `new` builds.
+    check(runQuiet("struct Point { var x: int; var y: int; }\n"
+                   "var g: Point = new Point { x: 3, y: 4 };\n"
+                   "func main() -> int { return g.x + g.y; }\n") == 7,
+          "a const struct global reads back");
+    // A const class global opens with a null vtable word the way `new`
+    // writes one, so its first field reads at word one, byte zero.
+    check(runQuiet("class Box { var v: int; }\n"
+                   "var g: Box = new Box { v: 5 };\n"
+                   "func main() -> int { return g.v; }\n") == 5,
+          "a const class global reads back");
 }
 
 // Division traps rather than answering.

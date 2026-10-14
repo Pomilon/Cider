@@ -394,6 +394,13 @@ public:
     // recursing into nested constructions). Every leaf must fold; the
     // checker's const gate owns that rule and this is its backstop.
     bool globalInitBytes(const NewArray& init, TypeRef arrayType, std::string& bytes);
+    // Folds a const struct or class value to image bytes: one field
+    // after another at the layout's offsets, zeros between and around
+    // them. A class opens with a null vtable word the way `new` writes
+    // one. Anything that is not a scalar, an array, or a nested value
+    // refuses loudly.
+    bool globalInitStructBytes(const NewStruct& made, TypeRef structType,
+                               std::string& bytes);
     // A class constructs its fields after a null vptr word; methods wire
     // the vptr in a later slice. A class with bases is refused: inherited
     // fields have no layout yet.

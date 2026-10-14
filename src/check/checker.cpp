@@ -334,7 +334,14 @@ void Checker::visitProgram(Program& n) {
             // aggregates), so the gate only recognises the
             // all-bytes-known shape.
             bool constGlobal = false;
-            if (dynamic_cast<const NewArray*>(g->init.get()) != nullptr) {
+            if (dynamic_cast<const NewArray*>(g->init.get()) != nullptr ||
+                (dynamic_cast<const NewStruct*>(g->init.get()) != nullptr &&
+                 (declared.type->kind() == Kind::Struct ||
+                  declared.type->kind() == Kind::Class))) {
+                // A struct value folds only into a struct or class
+                // global: an interface global holds a pair, which a bare
+                // value cannot build — that spelling stays refused below
+                // rather than accepted here and unbuildable later.
                 constGlobal = constAggregateInit(*g->init);
             }
             // `nilPtr as I`: the null interface is sixteen zero bytes in
@@ -3206,6 +3213,19 @@ bool Checker::constAggregateInit(const Expr& init) {
             }
         }
         return !made->inits.empty();
+    }
+    if (const auto* made = dynamic_cast<const NewStruct*>(&init)) {
+        // A struct or class value with every field constant folds to
+        // image bytes. Coverage is the checker's own rule elsewhere, so
+        // const-ness alone answers here; a paren-form `new C(args)`
+        // runs its constructor and is a different node that falls to
+        // the fold below, which fails it loudly.
+        for (const auto& field : made->fields) {
+            if (!constAggregateInit(*field.value)) {
+                return false;
+            }
+        }
+        return true;
     }
     std::unordered_set<std::string> active;
     return evalConstInt(init, *env_, active).ok;

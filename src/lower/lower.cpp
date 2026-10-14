@@ -1331,6 +1331,34 @@ void Lowerer::onGlobal(VarDecl& n) {
             }
             binding.initWords.push_back(quad);
         }
+    } else if ((type.type->kind() == Kind::Struct ||
+                type.type->kind() == Kind::Class) &&
+               dynamic_cast<const NewStruct*>(n.init.get()) != nullptr) {
+        // A const struct or class value folds to image bytes the way
+        // the array path folds elements: the checker's gate lets only
+        // all-constant fields through, so every byte is known. The
+        // conversion below turns image bytes into one `.quad` per
+        // eight bytes, little-endian with a zero-padded tail, so the
+        // path stays untouched.
+        const auto* initStruct = dynamic_cast<const NewStruct*>(n.init.get());
+        std::string bytes;
+        if (!globalInitStructBytes(*initStruct, type, bytes) || bytes.empty()) {
+            refuse(n.init->pos, "a global initialiser must be constant");
+            return;
+        }
+        size_t byteCount = bytes.size();
+        uint64_t quads = (static_cast<uint64_t>(byteCount) + 7u) / 8u;
+        for (uint64_t word = 0; word < quads; ++word) {
+            uint64_t quad = 0;
+            for (uint64_t byte = 0; byte < 8u; ++byte) {
+                uint64_t at = word * 8u + byte;
+                uint64_t bits = at < bytes.size()
+                                    ? static_cast<unsigned char>(bytes[at])
+                                    : 0u;
+                quad |= bits << (byte * 8);
+            }
+            binding.initWords.push_back(quad);
+        }
     } else if (type.type->kind() == Kind::Basic &&
                basicIsFloat(*type.type->basic())) {
         // A float global carries its IEEE bits in the image. The
@@ -2455,6 +2483,111 @@ bool Lowerer::isZeroRepeatFiller(const Expr& filler, TypeRef element) {
     EvalEnv env = resolver_.evalEnv(resolver_.moduleScope());
     EvalResult folded = evalConstInt(*lit, env, active);
     return folded.ok && folded.value == 0;
+}
+
+bool Lowerer::globalInitStructBytes(const NewStruct& made, TypeRef structType,
+                                        std::string& bytes) {
+    if (structType.isError()) {
+        return false;
+    }
+    std::optional<DeclId> id = structType.type->decl();
+    if (!id.has_value()) {
+        return false;
+    }
+    Kind kind = structType.type->kind();
+    if (kind != Kind::Struct && kind != Kind::Class) {
+        return false;
+    }
+    int64_t total = (kind == Kind::Class)
+                        ? resolver_.classSize(*id)
+                        : resolver_.nominalSize(structType.type);
+    if (total <= 0) {
+        return false;
+    }
+    std::unordered_set<std::string> active;
+    EvalEnv env = resolver_.evalEnv(resolver_.moduleScope());
+    auto foldScalar = [&](const Expr& leaf, TypeRef leafType,
+                          std::string& out) -> bool {
+        int64_t width = resolver_.nominalSize(leafType.type);
+        if (width <= 0) {
+            return false;
+        }
+        if (leafType.type->kind() == Kind::Basic &&
+            basicIsFloat(*leafType.type->basic())) {
+            FloatResult asFloat = evalConstFloat(leaf, env, active);
+            if (!asFloat.ok) {
+                return false;
+            }
+            uint64_t bits = 0;
+            if (*leafType.type->basic() == BasicKind::F32) {
+                float narrowed = static_cast<float>(asFloat.value);
+                std::memcpy(&bits, &narrowed, sizeof narrowed);
+            } else {
+                std::memcpy(&bits, &asFloat.value, sizeof asFloat.value);
+            }
+            for (int64_t byte = 0; byte < width; ++byte) {
+                out.push_back(static_cast<char>(bits & 0xFFu));
+                bits >>= 8;
+            }
+            return true;
+        }
+        EvalResult folded = evalConstInt(leaf, env, active);
+        if (!folded.ok) {
+            return false;
+        }
+        uint64_t bits = static_cast<uint64_t>(folded.value);
+        for (int64_t byte = 0; byte < width; ++byte) {
+            out.push_back(static_cast<char>(bits & 0xFFu));
+            bits >>= 8;
+        }
+        return true;
+    };
+    std::string image;
+    {
+        uint64_t want = static_cast<uint64_t>(total);
+        while (static_cast<uint64_t>(image.size()) != want) {
+            image.push_back('\0');
+        }
+    }
+    for (const auto& field : made.fields) {
+        if (field.value == nullptr) {
+            return false;
+        }
+        const Expr* sub = field.value.get();
+        TypeRef ftype = resolver_.fieldType(*id, field.name);
+        if (ftype.isError()) {
+            return false;
+        }
+        int64_t off = resolver_.fieldOffset(*id, field.name);
+        if (off < 0) {
+            return false;
+        }
+        std::string piece;
+        if (dynamic_cast<const NewArray*>(sub) != nullptr) {
+            if (!globalInitBytes(static_cast<const NewArray&>(*sub), ftype,
+                                 piece)) {
+                return false;
+            }
+        } else if (dynamic_cast<const NewStruct*>(sub) != nullptr) {
+            if (!globalInitStructBytes(static_cast<const NewStruct&>(*sub),
+                                       ftype, piece)) {
+                return false;
+            }
+        } else if (!foldScalar(*sub, ftype, piece)) {
+            return false;
+        }
+        uint64_t at = static_cast<uint64_t>(off);
+        uint64_t count = static_cast<uint64_t>(piece.size());
+        uint64_t span = static_cast<uint64_t>(total);
+        if (at + count > span) {
+            return false;
+        }
+        for (uint64_t i = 0; i < count; ++i) {
+            image[at + i] = piece[i];
+        }
+    }
+    bytes = std::move(image);
+    return true;
 }
 
 bool Lowerer::globalInitBytes(const NewArray& init, TypeRef arrayType,

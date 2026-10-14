@@ -109,6 +109,31 @@ void testGlobalZero() {
           "a runtime element still needs a constant");
 }
 
+void testGlobalStruct() {
+    // A struct value with every field constant folds to image bytes,
+    // so it may live in a global like an array can (FEATURES §8.3).
+    std::printf("a const struct may live in a global\n");
+    Checked good = check(
+        "struct Point { var x: int; var y: int; }\n"
+        "var g: Point = new Point { x: 3, y: 4 };\n"
+        "func main() -> int { return g.x; }\n");
+    check(good.ok, "a const struct global checks: " + good.stage);
+    Checked runtimeField = check(
+        "struct Point { var x: int; var y: int; }\n"
+        "func f() -> int { return 1; }\n"
+        "var g: Point = new Point { x: f(), y: 4 };\n"
+        "func main() -> int { return 0; }\n");
+    check(!runtimeField.ok && runtimeField.stage == "check",
+          "a runtime field still needs a constant");
+    Checked ctorCall = check(
+        "class Box { var v: int; }\n"
+        "func make(v: int) -> Box { return new Box { v: v }; }\n"
+        "var g: Box = make(1);\n"
+        "func main() -> int { return 0; }\n");
+    check(!ctorCall.ok && ctorCall.stage == "check",
+          "a call result still needs a constant");
+}
+
 // Names resolve through locals first, then the module scope.
 void testNames() {
     std::printf("names bind inside out\n");
@@ -1257,6 +1282,7 @@ int main() {
     testArithmetic();
     testNames();
     testGlobalZero();
+    testGlobalStruct();
     testFloatGlobal();
     testEnumValues();
     testGlobalConstWidth();
