@@ -218,6 +218,57 @@ void testImportGlobal() {
     rmdir(dir);
 }
 
+// A qualified global is usable by field: `lib.gq` resolves in the
+// defining scope to the same label a bare spelling would use.
+void testImportQualifiedGlobal() {
+    std::printf("qualified globals\n");
+    char dir[] = "/tmp/cider_impqglob_XXXXXX";
+    check(mkdtemp(dir) != nullptr, "a scratch directory exists");
+    std::string dep = std::string(dir) + "/lib.cid";
+    FILE* depFile = fopen(dep.c_str(), "w");
+    const char* depText =
+        "export struct Q { var y: int; }\n"
+        "export var gq: Q = new Q { y: 0 };\n";
+    fwrite(depText, 1, strlen(depText), depFile);
+    fclose(depFile);
+    std::string main = std::string(dir) + "/main.cid";
+    FILE* mainFile = fopen(main.c_str(), "w");
+    const char* mainText =
+        "import lib;\n"
+        "func main() -> int {\n"
+        "    lib.gq.y = 11;\n"
+        "    return lib.gq.y;\n"
+        "}\n";
+    fwrite(mainText, 1, strlen(mainText), mainFile);
+    fclose(mainFile);
+    Result ok = run({"check", main});
+    check(ok.code == 0, "a qualified global checks: " + ok.err);
+    Result ran = run({"run", main});
+    check(ran.code == 11,
+          "a store through a qualified global reads back: " + ran.err);
+    std::string main2 = std::string(dir) + "/main2.cid";
+    FILE* main2File = fopen(main2.c_str(), "w");
+    const char* main2Text =
+        "import lib;\n"
+        "from lib import Q;\n"
+        "func main() -> int {\n"
+        "    lib.gq.y = 5;\n"
+        "    var r: Q = lib.gq;\n"
+        "    return r.y;\n"
+        "}\n";
+    fwrite(main2Text, 1, strlen(main2Text), main2File);
+    fclose(main2File);
+    Result ok2 = run({"check", main2});
+    check(ok2.code == 0, "a bare qualified read checks: " + ok2.err);
+    Result ran2 = run({"run", main2});
+    check(ran2.code == 5,
+          "a bare qualified global reads back: " + ran2.err);
+    unlink(main2.c_str());
+    unlink(main.c_str());
+    unlink(dep.c_str());
+    rmdir(dir);
+}
+
 // A dotted import resolves through CIDER_LIB: <lib>/x/y.cid answers
 // `import x.y`. Without the variable the same import still fails loudly.
 void testLibSearch() {
@@ -293,6 +344,7 @@ int main() {
     testRun();
     testImports();
     testImportGlobal();
+    testImportQualifiedGlobal();
     testLibSearch();
     testFailures();
     testVmTarget();

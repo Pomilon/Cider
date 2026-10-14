@@ -605,6 +605,12 @@ private:
     // exists yet (a module the walk has not reached is a loud refusal at
     // the use, not a silent first match).
     const GlobalBinding* findGlobal(const std::string& name);
+    const GlobalBinding* findGlobalIn(const std::string& homeModule,
+                                      const std::string& name);
+    const GlobalBinding* resolveModuleGlobal(const std::string& modName,
+                                             const std::string& fieldName);
+    std::string globalLabel(const std::string& module,
+                            const std::string& name);
     std::unordered_map<std::string, std::string> globalNames_;
     std::vector<check::CheckError> errors_;
     // Hidden closure functions, minted in first-sight order. The site that

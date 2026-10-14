@@ -719,6 +719,22 @@ bool Lowerer::resolvePlace(const Expr* expr, Place& out) {
         return false;
     }
     if (const auto* field = dynamic_cast<const Field*>(expr)) {
+        // `lib.gB`: the object names a module, so the member resolves in
+        // the defining scope and the place is its global. Anything but a
+        // global variable falls through to the paths below (calls own
+        // their handling, types have no place). A miss stays quiet:
+        // callers refuse with the message that names their gap.
+        if (const auto* mod = dynamic_cast<const Ident*>(field->object.get())) {
+            if (const GlobalBinding* global =
+                    resolveModuleGlobal(mod->name, field->name)) {
+                out.slots.clear();
+                out.global = global->label;
+                out.type = global->type;
+                out.off = 0;
+                out.isVolatile = global->isVolatile;
+                return true;
+            }
+        }
         if (!resolvePlace(field->object.get(), out)) {
         // A nested chain accumulates the offset while the slots stay the
         // base value's: `p.inner.y` is p's slots plus two offsets. Union
@@ -1226,6 +1242,47 @@ void Lowerer::onProgram(Program& n) {
     }
 }
 
+const GlobalBinding* Lowerer::resolveModuleGlobal(
+    const std::string& modName, const std::string& fieldName) {
+    // A module-qualified spelling (`lib.gB`) names its home directly:
+    // locals shadow module names, the member resolves in the defining
+    // scope, and only a global variable has a place. Anything else
+    // answers null so callers fall through to their own paths.
+    uint64_t depth = static_cast<uint64_t>(locals_.size());
+    for (; depth > 0;) {
+        --depth;
+        if (locals_[depth].find(modName) != locals_[depth].end()) {
+            return nullptr;
+        }
+    }
+    const resolve::Scope* here = resolver_.scopeOf(checker_.module());
+    const resolve::Decl* moduleDecl =
+        here != nullptr ? resolver_.lookup(here, modName) : nullptr;
+    if (moduleDecl == nullptr ||
+        moduleDecl->kind != resolve::DeclKind::Module) {
+        return nullptr;
+    }
+    const resolve::Scope* home = resolver_.scopeOf(moduleDecl->origin);
+    const resolve::Decl* member =
+        home != nullptr ? resolver_.lookup(home, fieldName) : nullptr;
+    if (member == nullptr || member->kind != resolve::DeclKind::Var) {
+        return nullptr;
+    }
+    return findGlobalIn(moduleDecl->origin, fieldName);
+}
+
+const GlobalBinding* Lowerer::findGlobalIn(const std::string& homeModule,
+                                               const std::string& name) {
+    // A module-qualified spelling (`lib.gB`) names its home directly, so
+    // the scan skips findGlobal's decl-following prologue.
+    for (const GlobalBinding& global : globals_) {
+        if (global.name == name && global.module == homeModule) {
+            return &global;
+        }
+    }
+    return nullptr;
+}
+
 const GlobalBinding* Lowerer::findGlobal(const std::string& name) {
     // A from-alias copies its target's id, so declById recovers the home
     // module even for names bound in this module's scope by import.
@@ -1251,6 +1308,21 @@ const GlobalBinding* Lowerer::findGlobal(const std::string& name) {
     return nullptr;
 }
 
+std::string Lowerer::globalLabel(const std::string& module,
+                                   const std::string& name) {
+    // The label carries its module (`g_da__gval` for `da`'s `gval`, `g_x`
+    // for the entry's `x`), so two modules' same-named globals never share
+    // storage. Dots become underscores: a dot cannot survive the assembler.
+    std::string flat = module;
+    for (char& c : flat) {
+        if (c == '.') {
+            c = '_';
+        }
+    }
+    return module == resolver_.entryModule() ? "g_" + name
+                                             : "g_" + flat + "__" + name;
+}
+
 void Lowerer::onGlobal(VarDecl& n) {
     if (failed_ || !enabled_) {
         return;
@@ -1265,18 +1337,7 @@ void Lowerer::onGlobal(VarDecl& n) {
     GlobalBinding binding;
     binding.name = n.name;
     binding.module = checker_.module();
-    // The label carries its module (`g_da__gval` for `da`'s `gval`, `g_x`
-    // for the entry's `x`), so two modules' same-named globals never share
-    // storage. Dots become underscores: a dot cannot survive the assembler.
-    std::string flat = binding.module;
-    for (char& c : flat) {
-        if (c == '.') {
-            c = '_';
-        }
-    }
-    binding.label = binding.module == resolver_.entryModule()
-                        ? "g_" + n.name
-                        : "g_" + flat + "__" + n.name;
+    binding.label = globalLabel(binding.module, n.name);
     binding.type = type;
     binding.isVolatile = n.isVolatile;
     if (type.type->kind() == Kind::String) {
@@ -2787,6 +2848,15 @@ void Lowerer::constructArray(const std::vector<ir::Value>& slots, const NewArray
 }
 
 std::vector<ir::Value> Lowerer::lowerField(const Field& n) {
+    // `lib.gB`: the object names a module, so the member is a global in
+    // the defining scope. Load through the same global path a bare
+    // spelling uses; anything else falls through to the paths below.
+    if (const auto* ident = dynamic_cast<const Ident*>(n.object.get())) {
+        if (const GlobalBinding* global =
+                resolveModuleGlobal(ident->name, n.name)) {
+            return loadGlobal(n.pos, *global);
+        }
+    }
     if (const auto* ident = dynamic_cast<const Ident*>(n.object.get())) {
         // `Color.RED`: the checker answered the enumerator's integer type,
         // so the value folds here to that same integer (TYPES §2.6). A
