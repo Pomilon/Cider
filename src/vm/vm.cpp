@@ -5,6 +5,8 @@
 #include <cmath>
 #include <cstdint>
 #include <cstring>
+#include <exception>
+#include <new>
 #include <unordered_map>
 #include <unordered_set>
 #include <vector>
@@ -239,8 +241,13 @@ struct Runner {
     uint64_t steps = 0;
 
     bool refuse(Position pos, const std::string& message) {
+        out.ok = false;
         out.error = message;
         out.pos = pos;
+        // A refusal ends the run where it stands: without the flag the
+        // block loop walks on past the instruction that produced it, and
+        // the next terminator reads the half-built frame.
+        programDone = true;
         return false;
     }
 
@@ -303,11 +310,21 @@ struct Runner {
     }
 
     uint64_t loadBytes(int64_t address, uint64_t count, Position pos, bool& ok) {
-        // Below the guard page, or past every byte laid down, is outside the
-        // program's memory: hardware faults there, and so does the
-        // interpreter, which reports the fault by the signal it records.
-        if (address < static_cast<int64_t>(kNullGuard) || count > 8 ||
-            static_cast<uint64_t>(address) + count > memory.size()) {
+        // Below the guard page nothing is mapped, and hardware faults there;
+        // so does the interpreter, which reports the fault by the signal it
+        // records.
+        if (address < static_cast<int64_t>(kNullGuard) || count > layout::kSizePointer) {
+            ok = false;
+            faulted = kSigSegv;
+            return 0;
+        }
+        uint64_t end = static_cast<uint64_t>(address) + count;
+        // Every legitimate address is laid down before use: frames size
+        // all cells up front, hostAlloc grows with zero-fill at hand-out,
+        // globals are laid at load. Past the last laid-down byte there is
+        // no mapping, so the access is out of bounds and faults the way
+        // the machine would on an unmapped page.
+        if (end > kMemoryCap || end > memory.size()) {
             ok = false;
             faulted = kSigSegv;
             return 0;
@@ -323,8 +340,15 @@ struct Runner {
     }
 
     bool storeBytes(int64_t address, uint64_t count, uint64_t bits, Position pos) {
-        if (address < static_cast<int64_t>(kNullGuard) || count > 8 ||
-            static_cast<uint64_t>(address) + count > memory.size()) {
+        if (address < static_cast<int64_t>(kNullGuard) ||
+            count > layout::kSizePointer) {
+            return die(kSigSegv);
+        }
+        uint64_t end = static_cast<uint64_t>(address) + count;
+        // The same laid-down rule as a load: a store past the last
+        // laid-down byte has no mapping and faults instead of growing the
+        // address space from inside the program.
+        if (end > kMemoryCap || end > memory.size()) {
             return die(kSigSegv);
         }
         for (uint64_t i = 0; i < count; ++i) {
@@ -865,7 +889,11 @@ struct Runner {
         }
         uint64_t count = widthBytes(width);
         if (count == 0) {
-            return refuse(pos, "vm cannot store a void");
+            // A store that names no width writes the whole word: the
+            // emitter's flat move puts all eight bytes at the address, and
+            // the bytes beyond the aggregate's own size are the register's
+            // upper half, matching what the compiled leg stores.
+            count = layout::kSizePointer;
         }
         (void)type;
         return storeBytes(address, count, static_cast<uint64_t>(bits), pos);
@@ -1235,8 +1263,13 @@ struct Runner {
 
     // The heap answers the allocator's refusals as nil, its corruption as
     // exit 134, and every other block as zeroed bytes at an aligned address.
-    int64_t hostAlloc(int64_t bytes, int64_t align, Position pos) {
-        if (bytes < 0) {
+     // Freed blocks, in address order, so a block the program released
+     // comes back for the next request that fits. The bump cursor above the
+     // highest hand-out never rewinds, so a live block is never disturbed.
+     std::vector<std::pair<int64_t, int64_t>> freeList;
+
+     int64_t hostAlloc(int64_t bytes, int64_t align, Position pos) {
+        if (bytes < kZeroPointer) {
             return 0;
         }
         if (align <= kZeroPointer) {
@@ -1245,6 +1278,26 @@ struct Runner {
         int64_t effective = align < kLeastBound ? kLeastBound : align;
         if (effective > kLeastBound && (effective & (effective - 1)) != 0) {
             return 0;
+        }
+        // A freed block that fits is handed out again, the same address the
+        // program will compare against, and a remainder too small to be a
+        // block of its own stays whole inside the request.
+        for (uint64_t i = 0; i < static_cast<uint64_t>(freeList.size()); ++i) {
+            int64_t at = freeList[i].first;
+            int64_t span = freeList[i].second;
+            if (span < bytes) {
+                continue;
+            }
+            if (at % effective != kZeroCell) {
+                continue;
+            }
+            if (span - bytes >= layout::kSizePointer) {
+                freeList[i] = std::make_pair(at + bytes, span - bytes);
+            } else {
+                freeList.erase(freeList.begin() + static_cast<long>(i));
+            }
+            heapBlocks[at] = bytes;
+            return at;
         }
         // Round the cursor up to the alignment, then answer a block that
         // starts there: the bump cursor never rewinds, so a hand-out stays
@@ -1279,7 +1332,35 @@ struct Runner {
         if (found == heapBlocks.end()) {
             return hostExit(134, "cider heap: corrupt block header\n");
         }
+        // The block goes back on the list, beside a neighbour it is
+        // contiguous with, so a larger request can be served from the
+        // joined span rather than only from each piece.
+        int64_t span = found->second;
         heapBlocks.erase(found);
+        int64_t at = address;
+        for (uint64_t i = 0; i < static_cast<uint64_t>(freeList.size());) {
+            if (freeList[i].first + freeList[i].second == at) {
+                at = freeList[i].first;
+                span += freeList[i].second;
+                freeList.erase(freeList.begin() + static_cast<long>(i));
+                continue;
+            }
+            if (at + span == freeList[i].first) {
+                span += freeList[i].second;
+                freeList.erase(freeList.begin() + static_cast<long>(i));
+                continue;
+            }
+            ++i;
+        }
+        uint64_t spot = static_cast<uint64_t>(freeList.size());
+        for (uint64_t i = 0; i < static_cast<uint64_t>(freeList.size()); ++i) {
+            if (freeList[i].first > at) {
+                spot = i;
+                break;
+            }
+        }
+        freeList.insert(freeList.begin() + static_cast<long>(spot),
+                        std::make_pair(at, span));
         return true;
     }
 
@@ -1346,7 +1427,13 @@ struct Runner {
             if (args.empty()) {
                 return refuse(pos, "vm call passes too few words to putchar");
             }
-            out.stdoutText.push_back(static_cast<char>(args[0] & kByteMask));
+            int64_t written = args[0] & kByteMask;
+            out.stdoutText.push_back(static_cast<char>(written));
+            // The byte written is the answer, the way the C putchar
+            // contract's own return names the character echoed.
+            if (!results.empty()) {
+                write(results[0], written);
+            }
             return true;
         }
         if (name == "cider_itoa_signed" || name == "cider_itoa_unsigned") {
@@ -1448,7 +1535,12 @@ struct Runner {
             }
         }
         if (target != nullptr && !target->blocks.empty()) {
-            if (args.size() != target->params.size()) {
+            // The callee binds one word per parameter. A caller may stage
+            // MORE words than the callee names: a string literal arriving
+            // where a pointer is declared carries its length alongside the
+            // bytes, and the emitter leaves the extra word in a register
+            // nobody reads. A shortfall is the mismatch, never a surplus.
+            if (args.size() < target->params.size()) {
                 return refuse(instr.loc, "vm call arguments do not match the callee");
             }
             std::vector<int64_t> answer;
@@ -1656,25 +1748,42 @@ struct Runner {
         // The width's own register form, and the answer extended through
         // the target's signedness — one place, so a cast and an arithmetic
         // operation narrow the same way.
-        auto widthFor = [](int bits) {
+        // The width's own register form: a signed width answers signed, so
+        // the width itself carries the signedness and the extension follows
+        // it. Deriving the width from the bit count would throw that away —
+        // eight bits answer U8, whose extension answers unsigned — so the
+        // signed and unsigned forms are listed by name instead.
+        auto widthFor = [](BasicKind kind) {
+            int bits = basicWidthBits(kind);
+            if (!basicIsSigned(kind)) {
+                if (bits <= 8) {
+                    return ir::IRType::U8;
+                }
+                if (bits <= 16) {
+                    return ir::IRType::U16;
+                }
+                if (bits <= 32) {
+                    return ir::IRType::U32;
+                }
+                return ir::IRType::U64;
+            }
             if (bits <= 8) {
-                return ir::IRType::U8;
+                return ir::IRType::I8;
             }
             if (bits <= 16) {
-                return ir::IRType::U16;
+                return ir::IRType::I16;
             }
             if (bits <= 32) {
-                return ir::IRType::U32;
+                return ir::IRType::I32;
             }
-            return ir::IRType::U64;
+            return ir::IRType::I64;
         };
         auto extendFor = [&](BasicKind kind, int64_t bits) {
             TypeRef named{ctx.basic(kind)};
             if (basicIsSigned(kind)) {
-                return extendToWidth(bits, widthFor(basicWidthBits(kind)), named);
+                return extendToWidth(bits, widthFor(kind), named);
             }
-            return static_cast<int64_t>(trimmedToWidth(
-                bits, widthFor(basicWidthBits(kind))));
+            return static_cast<int64_t>(trimmedToWidth(bits, widthFor(kind)));
         };
         // A float on either side rides the SSE conversions: a float to an
         // integer truncates toward zero, and out of range answers the
@@ -1717,14 +1826,19 @@ struct Runner {
                                     ? BasicKind::I32
                                     : *from.type->basic();
                 int64_t word = extendFor(kind, read(instr.operands[0]));
-                if (kind == BasicKind::U64) {
-                    uint64_t raw = static_cast<uint64_t>(word);
+                uint64_t raw = static_cast<uint64_t>(word);
+                if (kind == BasicKind::U64 &&
+                    static_cast<int64_t>(raw) < kZeroPointer) {
+                    // Only a value whose high bit is set takes the halving
+                    // sequence: the convert instruction reads the bit as a
+                    // sign below, so the sequence halves the magnitude first
+                    // and doubles the answer back.
                     uint64_t halved = (raw >> 1) | (raw & 1);
                     value = static_cast<double>(halved) * 2.0;
                 } else if (basicIsSigned(kind)) {
                     value = static_cast<double>(word);
                 } else {
-                    value = static_cast<double>(static_cast<uint64_t>(word));
+                    value = static_cast<double>(raw);
                 }
             }
             ir::IRType toWidth = isFloatType(to) ? floatWidthOf(to)
@@ -1819,7 +1933,11 @@ struct Runner {
                             instr.loc);
             }
             case Op::Store: {
-                IRType width = instr.storedValue.width;
+                // The store names the width its own bytes occupy, and a
+                // chunk's width is its own even when the value it carries is
+                // wider: the value was read whole from the source's word, so
+                // reading ITS width would write every byte of it.
+                IRType width = instr.width;
                 int64_t base = kZeroPointer;
                 if (!instr.globalLabel.empty()) {
                     base = labelAddress(instr, instr.globalLabel);
@@ -1870,7 +1988,13 @@ struct Runner {
 
 }  // namespace
 
-VmResult run(const ir::Module& module, const std::string& pendingInput) {
+// The interpreter never lets an exception out. A growth reservation that
+// the host cannot back is a loud refusal naming the out-of-memory the
+// program would have met, so the harness sees a diagnostic and an exit
+// status rather than a C++ throw escaping the IR loop.
+static VmResult runProgram(const ir::Module& module,
+                           const std::string& pendingInput,
+                           const std::vector<std::string>& argv) {
     Runner run;
     run.stdIn_ = pendingInput;
     const Function* entry = nullptr;
@@ -1892,7 +2016,8 @@ VmResult run(const ir::Module& module, const std::string& pendingInput) {
         run.out.error = "no entry function: define main or _start";
         return run.out;
     }
-    if (fn->signature.arity() != 0) {
+    auto arity = fn->signature.arity();
+    if (arity != 0 && arity != 2) {
         run.refuse(fn->loc, "vm cannot pass arguments yet");
         return run.out;
     }
@@ -1961,9 +2086,33 @@ VmResult run(const ir::Module& module, const std::string& pendingInput) {
     // frames a call pushes grow from there: neither region rewinds, so an
     // address stays live for the rest of the run.
     run.heapAt = static_cast<int64_t>(run.memory.size());
-    std::vector<int64_t> noArgs;
+    // Program arguments lay down here, past the globals and below the entry
+    // frame: one NUL-terminated blob per string (a zero word follows its
+    // bytes, so even the default empty string has an address to point at),
+    // then the argv array holding one address per string. An empty vector
+    // still binds argc=1 with a non-nil argv[0], matching a bare exec.
+    std::vector<std::string> effective =
+        argv.empty() ? std::vector<std::string>{""} : argv;
+    const uint64_t kNulWord = 0;
+    std::vector<int64_t> argAddrs;
+    for (const std::string& word : effective) {
+        int64_t at = run.appendBytes(
+            reinterpret_cast<const uint8_t*>(word.data()),
+            static_cast<uint64_t>(word.size()));
+        run.appendWord(kNulWord);
+        argAddrs.push_back(at);
+    }
+    int64_t argvAddr = run.nextAppendAt();
+    for (int64_t at : argAddrs) {
+        run.appendWord(static_cast<uint64_t>(at));
+    }
+    std::vector<int64_t> entryArgs;
+    if (arity == 2) {
+        entryArgs.push_back(static_cast<int64_t>(effective.size()));
+        entryArgs.push_back(argvAddr);
+    }
     std::vector<int64_t> answered;
-    if (!run.runFunction(*fn, noArgs, answered)) {
+    if (!run.runFunction(*fn, entryArgs, answered)) {
         return run.out;
     }
     if (run.programDone) {
@@ -1973,6 +2122,28 @@ VmResult run(const ir::Module& module, const std::string& pendingInput) {
     run.out.ok = true;
     run.out.exitCode = static_cast<int>(bits & kByteMask);
     return run.out;
+}
+
+VmResult run(const ir::Module& module, const std::string& pendingInput,
+             const std::vector<std::string>& argv) {
+    try {
+        return runProgram(module, pendingInput, argv);
+    } catch (const std::bad_alloc&) {
+        // A reservation the host cannot back, named as the out-of-memory
+        // the program would have met rather than a C++ throw escaping the
+        // interpreter: the harness reads a diagnostic and an exit status.
+        VmResult refused;
+        refused.ok = false;
+        refused.error = "vm out of memory";
+        refused.pos = Position{"vm", kOneCell, kOneCell};
+        return refused;
+    } catch (const std::exception& e) {
+        VmResult refused;
+        refused.ok = false;
+        refused.error = std::string("vm internal error: ") + e.what();
+        refused.pos = Position{"vm", kOneCell, kOneCell};
+        return refused;
+    }
 }
 
 }  // namespace vm

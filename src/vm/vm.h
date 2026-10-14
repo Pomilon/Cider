@@ -12,6 +12,7 @@
 
 #include <cstdint>
 #include <string>
+#include <vector>
 
 #include "ir/ir.h"
 
@@ -35,9 +36,11 @@ struct VmResult {
 };
 
 // Interprets main (or _start) of one lowered module, with the bytes a
-// read from standard input will answer.
-VmResult run(const ir::Module& module, const std::string& pendingInput);
-VmResult run(const ir::Module& module, const std::string& pendingInput);
+// read from standard input will answer. Program arguments default to one
+// empty string, so a bare run binds argc=1 with a non-nil argv[0] the way
+// a bare native exec does; pass explicit strings to bind those instead.
+VmResult run(const ir::Module& module, const std::string& pendingInput,
+             const std::vector<std::string>& argv = {});
 
 }  // namespace vm
 }  // namespace cider

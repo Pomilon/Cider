@@ -322,12 +322,75 @@ void testCalls() {
     check(al.ok, "an allocating program lowers: " + al.stage);
     cider::vm::VmResult alr = cider::vm::run(*al.module, "");
     check(alr.ok && alr.exitCode == 42, "alloc hands out writable memory: " + alr.error);
+    // Both blocks are handed out and laid down zero-filled at hand-out,
+    // so the neighbour read is legitimate laid-down memory answering
+    // zero — not the old auto-grow path, which fabricated pages past
+    // everything laid down and has been removed.
+    Lowered past = lower("func main() -> int {\n"
+                         " var a: *u8 = alloc(16, 8) as *u8;\n"
+                         " var b: *u8 = alloc(16, 8) as *u8;\n"
+                         " a[0] = 5;\n"
+                         " if (b[0] != 0) { return 1; }\n"
+                         " return 0; }\n");
+    cider::vm::VmResult pastr = cider::vm::run(*past.module, "");
+    check(pastr.ok && pastr.exitCode == 0,
+          "a neighbour block reads zero: " + pastr.error);
+    // Past everything laid down there is no mapping: the read faults
+    // the way the machine would on an unmapped page, instead of
+    // fabricating a zero page.
+    Lowered pastAll = lower("func main() -> int {\n"
+                            " var p: *u8 = alloc(8, 8) as *u8;\n"
+                            " return (p[1000] as int); }\n");
+    check(pastAll.ok, "a past-everything read lowers: " + pastAll.stage);
+    cider::vm::VmResult pastAllr = cider::vm::run(*pastAll.module, "");
+    check(pastAllr.ok && pastAllr.signal != 0,
+          "a past-everything read dies: " + pastAllr.error);
+    Lowered dead = lower("func main() -> int { var p: *int = nilPtr;"
+                         " return *p; }\n");
+    cider::vm::VmResult deadr = cider::vm::run(*dead.module, "");
+    check(deadr.ok && deadr.signal != 0,
+          "a nil read still dies: " + deadr.error);
     Lowered ind = lower("func two() -> int { return 2; }\n"
                         "func main() -> int {"
                         " var f: func() -> int = two; return f() + 18; }\n");
     check(ind.ok, "a closure call lowers: " + ind.stage);
     cider::vm::VmResult indr = cider::vm::run(*ind.module, "");
     check(indr.ok && indr.exitCode == 20, "an indirect call runs: " + indr.error);
+    // A string literal staged where a pointer is declared carries its
+    // length as a second word, and the callee names one parameter for it:
+    // the caller stages more words than the callee binds, and the emitter
+    // leaves the surplus in a register nobody reads.
+    Lowered surplus = lower("func takes(n: *u8) -> int { return n[0] as int; }\n"
+                            "func main() -> int { return takes(\"hi\"); }\n");
+    cider::vm::VmResult surplusr = cider::vm::run(*surplus.module, "");
+    check(surplusr.ok && surplusr.exitCode == 104,
+          "a surplus word is staged, not refused: " + surplusr.error);
+    // The same call with one word fewer than the callee binds is a
+    // shortfall, and the checker already refuses it at check time, so the
+    // interpreter's own guard is defense in depth: it must answer a
+    // refusal rather than reading past the words that arrived.
+    Lowered exactly = lower("func add(a: int, b: int) -> int { return a + b; }\n"
+                            "func main() -> int { return add(1, 2); }\n");
+    cider::vm::VmResult exactlyr = cider::vm::run(*exactly.module, "");
+    check(exactlyr.ok && exactlyr.exitCode == 3,
+          "an exact answer binds: " + exactlyr.error);
+    // A whole-aggregate store writes the take's own width, not the width
+    // of the value it carries: the row was read whole, so writing every
+    // byte of it would reach past the row and zero what follows.
+    Lowered agg = lower("func main() -> int {\n"
+                        " var m: [[u8; 2]; 3] = new [[u8; 2]; 3] {[0, ...]};\n"
+                        " for (var i: int = 0; i < 3; i = i + 1) {\n"
+                        "  for (var j: int = 0; j < 2; j = j + 1) {\n"
+                        "   m[i][j] = (i * 2 + j + 1) as u8;\n"
+                        "  }\n"
+                        " }\n"
+                        " var row: [u8; 2] = m[1];\n"
+                        " m[0] = row;\n"
+                        " if (m[2][0] != 5 || m[2][1] != 6) { return 5; }\n"
+                        " return 0; }\n");
+    cider::vm::VmResult aggr = cider::vm::run(*agg.module, "");
+    check(aggr.ok && aggr.exitCode == 0,
+          "an aggregate store writes its own width: " + aggr.error);
 }
 
 // An asm block is the program writing at the machine: the interpreter runs
@@ -390,6 +453,32 @@ void testAsm() {
     check(!egr.ok, "a section directive refuses: " + egr.error);
 }
 
+void testArgv() {
+    std::printf("argv\n");
+    Lowered ar = lower("func main(argc: i64, argv: **char) -> int {"
+                       " if (argv[0] == nilPtr) { return 7; }"
+                       " return argc as int; }\n");
+    check(ar.ok, "a parameterized main lowers: " + ar.stage);
+    cider::vm::VmResult arr = cider::vm::run(*ar.module, "");
+    check(arr.ok, "the interpreter binds argv by default: " + arr.error);
+    if (arr.ok) {
+        check(arr.exitCode == 1, "argc is 1 with no program args");
+    }
+    // Explicit program args bind argc=N with readable strings: argv[1]
+    // names "ab", so its first byte answers 'a' and the count answers 3.
+    Lowered br = lower("func main(argc: i64, argv: **char) -> int {"
+                       " if (argc != 3) { return 1; }"
+                       " if (*(argv[1]) != (97 as char)) { return 2; }"
+                       " return 0; }\n");
+    check(br.ok, "the argv probe lowers: " + br.stage);
+    std::vector<std::string> given{"prog", "ab", "c"};
+    cider::vm::VmResult brr = cider::vm::run(*br.module, "", given);
+    check(brr.ok, "the interpreter binds explicit argv: " + brr.error);
+    if (brr.ok) {
+        check(brr.exitCode == 0, "argc 3 with readable argv strings");
+    }
+}
+
 }  // namespace
 
 int main() {
@@ -402,6 +491,7 @@ int main() {
     testFloats();
     testCalls();
     testAsm();
+    testArgv();
     std::printf("\n%d checks, %s\n", checks, failures == 0 ? "all passed" : "FAILURES");
     return failures == 0 ? 0 : 1;
 }

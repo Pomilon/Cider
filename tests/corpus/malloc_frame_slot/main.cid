@@ -109,7 +109,7 @@ func twoInOne() -> int {
 //    never written, so its two fields -- at the block's own tail, past the
 //    8-byte canary the allocator used to leave there -- must read 0.
 func aggTail() -> int {
-    var p: *Pair = malloc(16) as *Pair;
+    var p: *Pair = malloc(32) as *Pair;
     if (p == nilPtr) { return -1; }
     p[0].lo = 11;
     p[0].hi = 22;

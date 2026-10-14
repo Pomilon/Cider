@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""v3 corpus runner: differential harness, native leg live, VM legs stubbed.
+"""v3 corpus runner: differential harness across every leg.
 
 Per program (tests/corpus/<name>/): main.cid + expected.json
 {stdout, stderr, exit} (+ optional input.txt, sibling modules).
@@ -10,9 +10,12 @@ Class comes from tests/corpus/classes.json (OUTPUT.md differential gate):
   C  still rejected: v3 must fail, same class (check-time vs trap noted)
   D  no v2 repro / informational: run and report only, never fails the suite
 Multi-file programs run like any other: the driver loads sibling modules.
-Legs: only `native` exists (v3 `run` shells to as+ld -nostdlib).
-`vm-unopt`/`vm-opt` columns are accepted but reported as PENDING — there is
-no v3 interpreter yet (see ticket for the v3 VM). The schema is ready for it.
+Legs: `native` compiles and runs (v3 `run` shells to as+ld -nostdlib),
+`vm-unopt` interprets the module the lowerer produced, and `vm-opt` the same
+module after the optimiser. The two VM legs must agree with native: a death
+arrives as a negative returncode on every leg, which outcome_of() normalises
+to TRAPPED, and an interpreter refusal is reported as its own outcome
+rather than a silent mismatch.
 """
 import json
 import os
@@ -23,8 +26,11 @@ ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 CORPUS = os.path.join(ROOT, "tests", "corpus")
 CIDER = os.environ.get(
     "CIDER_BIN", os.path.join(ROOT, "build", "v3", "cider"))
-LEGS = ["native"]  # vm-unopt, vm-opt join when the interpreter lands
+LEGS = ["native", "vm-unopt", "vm-opt"]
 TRAPPED = "<trapped by signal>"
+# An interpreter refusal is not a program result: it names the leg, so the
+# differential can report it without reading as a wrong answer.
+VMREFUSED = "<vm refused>"
 
 
 def outcome_of(proc):
@@ -38,7 +44,15 @@ def outcome_of(proc):
     return (proc.stdout, proc.stderr, proc.returncode)
 
 
-def run_native(path, stdin_data, limit_kb=None):
+def run_leg(path, stdin_data, leg, limit_kb=None):
+    command = [CIDER, "run"]
+    if leg != "native":
+        # An interpreter is not an emitter: run interprets, and --no-opt
+        # skips the optimiser so the unoptimised module is the one run.
+        command += ["--target", "vm"]
+        if leg == "vm-unopt":
+            command += ["--no-opt"]
+    command.append(path)
     try:
         env = dict(os.environ)
         # The library tree ships with the compiler: dotted imports
@@ -53,13 +67,12 @@ def run_native(path, stdin_data, limit_kb=None):
                 resource.setrlimit(resource.RLIMIT_AS, (cap, cap))
 
         proc = subprocess.run(
-            [CIDER, "run", path], input=stdin_data, env=env,
+            command, input=stdin_data, env=env,
             capture_output=True, text=True, timeout=60,
             preexec_fn=preexec)
     except subprocess.TimeoutExpired:
         return ("<timeout>", "", "timeout")
-    out, err, code = outcome_of(proc)
-    return (out, err, code)
+    return outcome_of(proc)
 
 
 def main():
@@ -69,6 +82,7 @@ def main():
     failures = []
     pending = []
     skipped = []
+    vm_refusals = []
     for name in names:
         entry = classes[name]
         cls = entry["class"]
@@ -81,28 +95,63 @@ def main():
         if os.path.exists(os.path.join(d, "input.txt")):
             with open(os.path.join(d, "input.txt")) as fh:
                 stdin_data = fh.read()
-        out, err, code = run_native(os.path.join(d, "main.cid"), stdin_data,
-                                   expected.get("limit_kb"))
+        out = {}
+        err = {}
+        code = {}
+        for leg in LEGS:
+            got = run_leg(os.path.join(d, "main.cid"), stdin_data, leg,
+                          expected.get("limit_kb"))
+            out[leg], err[leg], code[leg] = got
+        outcomes = dict((leg, (out[leg], err[leg], code[leg])) for leg in LEGS)
+        # A refusal names the interpreter, not the program: the driver
+        # answers exit 1 with the interpreter's own limit, which reads as
+        # an unreached feature rather than a wrong answer.
+        refused = [leg for leg in LEGS
+                   if leg.startswith("vm") and "vm " in err[leg]]
+        checked = dict((leg, value) for leg, value in outcomes.items()
+                       if leg not in refused)
+        if refused:
+            vm_refusals.append((name, refused))
         if cls == "A":
-            ok = (out == expected["stdout"] and err == expected["stderr"]
-                  and code == expected["exit"])
+            ok = all(value == (expected["stdout"], expected["stderr"],
+                               expected["exit"])
+                     for value in checked.values())
+            ok = ok and len(checked) == len(LEGS)
             # A trap in v3 is silent by design (diff #19): a program whose
             # v2 expectation names a vm-error line fails here loudly, which
             # is the signal to reclassify it B, not to bless the text.
             if not ok:
-                failures.append((name, (out, err, code), expected))
+                failures.append((name, checked, expected))
         elif cls in ("B", "C"):
-            loud = (code != 0 and (err != "" or out == TRAPPED))
+            loud = code["native"] != 0 and (
+                err["native"] != "" or out["native"] == TRAPPED)
+            # A class that native rejects loudly must not pass on a leg that
+            # answers silently: the VM leg's answer is compared against
+            # native's own, refusal included as the interpreter's limit.
+            for leg, value in checked.items():
+                if leg == "native":
+                    continue
+                if value != (out["native"], err["native"], code["native"]):
+                    loud = False
             if not loud:
-                failures.append((name, (out, err, code), "expected loud failure"))
+                failures.append((name, outcomes, "expected loud failure"))
         elif cls == "D":
-            pending.append((name, (out, err, code)))
+            pending.append((name, outcomes))
     print("corpus: %d programs, %d failures, %d pending(D), %d skipped" % (
         len(names), len(failures), len(pending), len(skipped)))
     for name, reason in skipped:
         print("SKIP %s: %s" % (name, reason))
     for name, got, want in failures:
         print("FAIL %s: got=%r want=%r" % (name, got, want))
+    # A program carrying no v2 repro is reported with its native answer so
+    # the D class stays informational without printing every leg's text.
+    for name, outcomes in pending:
+        print("D    %s: native=%r" % (name, outcomes["native"]))
+    # A leg that refuses an instruction the others run is the interpreter's
+    # own limit, reported apart from the failures: the corpus cannot demand
+    # an opcode the VM has not reached yet, and silence would be worse.
+    for name, legs in vm_refusals:
+        print("VMREFUSED %s: %s" % (name, ", ".join(legs)))
     return 1 if failures else 0
 
 
