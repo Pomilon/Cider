@@ -695,6 +695,10 @@ bool Checker::isSelfFieldStore(const Expr* target, std::string& field) {
 
 void Checker::requireInitAssigned(Position pos, const std::vector<std::string>& fields,
                                   const InitAssign& state) {
+    if (state.unknownFlow) {
+        fail(pos, "init cannot be proven to assign every field");
+        return;
+    }
     if (state.bailed) {
         return;
     }
@@ -728,6 +732,7 @@ Checker::InitAssign Checker::assignedThrough(const Stmt* stmt, InitAssign state,
                 return state;
             }
             state.bailed = true;
+            state.unknownFlow = true;
             return state;
         }
         if (const auto* step = dynamic_cast<const IncrDecr*>(expr->expr.get())) {
@@ -737,10 +742,12 @@ Checker::InitAssign Checker::assignedThrough(const Stmt* stmt, InitAssign state,
                 return state;
             }
             state.bailed = true;
+            state.unknownFlow = true;
             return state;
         }
         if (initExprOpaque(expr->expr.get())) {
             state.bailed = true;
+            state.unknownFlow = true;
         }
         return state;
     }
@@ -764,6 +771,7 @@ Checker::InitAssign Checker::assignedThrough(const Stmt* stmt, InitAssign state,
         InitAssign elseState = assignedThrough(iff->els.get(), state, fields);
         InitAssign joined;
         joined.bailed = thenState.bailed || elseState.bailed;
+        joined.unknownFlow = thenState.unknownFlow || elseState.unknownFlow;
         for (const std::string& field : thenState.assigned) {
             if (elseState.assigned.find(field) != elseState.assigned.end()) {
                 joined.assigned.insert(field);
@@ -779,6 +787,7 @@ Checker::InitAssign Checker::assignedThrough(const Stmt* stmt, InitAssign state,
         // A loop may run zero times, so its adds never stand — but its
         // returns were already checked and its effects still bail.
         state.bailed = body.bailed;
+        state.unknownFlow = state.unknownFlow || body.unknownFlow;
         return state;
     }
     if (const auto* loop = dynamic_cast<const ForStmt*>(stmt)) {
@@ -794,6 +803,7 @@ Checker::InitAssign Checker::assignedThrough(const Stmt* stmt, InitAssign state,
         }
         InitAssign body = assignedThrough(loop->body.get(), head, fields);
         head.bailed = body.bailed;
+        head.unknownFlow = head.unknownFlow || body.unknownFlow;
         return head;
     }
     if (const auto* loop = dynamic_cast<const ForInStmt*>(stmt)) {
@@ -802,6 +812,7 @@ Checker::InitAssign Checker::assignedThrough(const Stmt* stmt, InitAssign state,
         }
         InitAssign body = assignedThrough(loop->body.get(), state, fields);
         state.bailed = body.bailed;
+        state.unknownFlow = state.unknownFlow || body.unknownFlow;
         return state;
     }
     if (const auto* match = dynamic_cast<const MatchStmt*>(stmt)) {
@@ -818,6 +829,7 @@ Checker::InitAssign Checker::assignedThrough(const Stmt* stmt, InitAssign state,
             } else {
                 InitAssign narrower;
                 narrower.bailed = joined.bailed || one.bailed;
+                narrower.unknownFlow = joined.unknownFlow || one.unknownFlow;
                 for (const std::string& field : joined.assigned) {
                     if (one.assigned.find(field) != one.assigned.end()) {
                         narrower.assigned.insert(field);
@@ -830,6 +842,7 @@ Checker::InitAssign Checker::assignedThrough(const Stmt* stmt, InitAssign state,
             InitAssign last = assignedThrough(match->fallback.get(), state, fields);
             InitAssign narrower;
             narrower.bailed = joined.bailed || last.bailed;
+            narrower.unknownFlow = joined.unknownFlow || last.unknownFlow;
             for (const std::string& field : joined.assigned) {
                 if (last.assigned.find(field) != last.assigned.end()) {
                     narrower.assigned.insert(field);
@@ -852,6 +865,7 @@ Checker::InitAssign Checker::assignedThrough(const Stmt* stmt, InitAssign state,
     // Anything else (delete, asm, throw, try, defer, unknown) bails: it
     // may reach beyond the statement in ways syntax cannot show.
     state.bailed = true;
+    state.unknownFlow = true;
     return state;
 }
 
@@ -3406,8 +3420,10 @@ bool Checker::castRowOk(TypeRef from, TypeRef to) const {
     if (a == Kind::Pointer && bNum) {
         return true;
     }
-    // An interface reads back as a concrete type, checked at runtime.
-    if (a == Kind::Interface && (b == Kind::Class || b == Kind::Struct)) {
+    // An interface reads back as a concrete struct, checked at runtime.
+    // A bare class is not a value type (TYPES §4.2: only `*C` is), so it
+    // is refused here; the pointer-to-class row below covers `*C`.
+    if (a == Kind::Interface && b == Kind::Struct) {
         return true;
     }
     // An interface reads back as a class reference it holds, checked at

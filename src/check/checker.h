@@ -254,13 +254,17 @@ private:
     // TYPES.md §9 definite assignment for init bodies: the fields assigned
     // on every path through a statement. Straight lines accumulate
     // `(*self).f = ...`; branches intersect arms; loops contribute nothing
-    // (they may run zero times); anything opaque — calls, non-self-field
-    // stores, inline asm, closures relied on through calls — bails the
-    // whole check (status quo, never a false positive). Pure syntax, no
-    // walk state, so check and lowering modes share it.
+    // (they may run zero times); value-opacity — calls inside values and
+    // conditions — bails the check but keeps the recorded stores, which
+    // stand on their own syntax. Statement-position unknowns — a call
+    // statement, a non-self store, asm, throw, try, defer, anything
+    // unlisted — set unknownFlow instead: they may assign fields
+    // invisibly, so an init containing one is refused, never assumed
+    // (TYPES.md §9.2: unprovable is rejected, not accepted).
     struct InitAssign {
         std::unordered_set<std::string> assigned;
         bool bailed = false;
+        bool unknownFlow = false;
     };
     InitAssign assignedThrough(const Stmt* stmt, InitAssign state,
                                const std::vector<std::string>& fields);

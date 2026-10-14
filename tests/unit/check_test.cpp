@@ -238,6 +238,15 @@ void testInitAssign() {
         "        if (v > 0) { (*self).x = v; (*self).y = v; } } }\n"
         "func main() -> int { return 0; }\n");
     check(!half.ok && half.stage == "check", "a half-assigned branch fails");
+    // A call inside init may assign fields invisibly — or not. The proof
+    // cannot see through it, so the init fails closed even when every
+    // field is stored beside the call (fail-hard: unprovable is refused).
+    Checked opaque = check(
+        "func touch() -> void { }\n"
+        "class C { var x: int;\n"
+        "    func init() -> void { touch(); (*self).x = 1; } }\n"
+        "func main() -> int { return 0; }\n");
+    check(!opaque.ok && opaque.stage == "check", "a call inside init fails the proof");
 }
 
 // A range matches integers between two inclusive bounds: live over an

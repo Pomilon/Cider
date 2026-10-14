@@ -1059,7 +1059,10 @@ private:
                             slot(instr.operands[0].id) + "\n";
                     out_ += again + ":\n";
                     out_ += "  fprem\n";
-                    out_ += "  fnstsw ax\n";
+                    // fstsw, not fnstsw: the store must wait for fprem to
+                    // finish, or the C2 read below can be stale and the
+                    // loop exits early with a partial remainder.
+                    out_ += "  fstsw ax\n";
                     out_ += "  test ah, 4\n";
                     out_ += "  jnz " + again + "\n";
                     out_ += "  fstp " + std::string(mem) +
