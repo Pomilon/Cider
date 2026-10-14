@@ -995,9 +995,9 @@
   "class": "A"
  },
  "matchlist": {
-  "actual": "cider run exit 1, stdout empty, stderr diagnostic: `main.cid:2:17: expected an expression`",
+  "actual": "exact stdout/stderr/exit match",
   "blocker": "match-lowering + for-lowering + asm-blocks + bare-array-literal",
-  "class": "D"
+  "class": "A"
  },
  "member_struct_store": {
   "actual": "cider run exit 1, stdout empty, stderr diagnostic: `main.cid:60:18: a variable needs an initialiser` (global struct)",
@@ -1355,9 +1355,9 @@
   "class": "A"
  },
  "string_ordering": {
-  "actual": "blocked-A reclassified 2026-10-05: must pass once blocker lands; run exit 1: OUT: ERR:tests/corpus/string_ordering/main.cid:135:7: unknown escape\\ntests/corpus/string_ordering/main.cid:135:7: unknown escape\\ntests/corpus/string_ordering/main.cid:136:9: unknown escape\\ntests/corpus/string_",
-  "blocker": "string-ordering-not-lowered (<,<=,>,>= on strings)",
-  "class": "D"
+  "actual": "113:28 bare [...] literal (v2; \u00a71.8 rejects) + terminal: string </> rejected by design ('strings compare for equality only', FEAT-028 equality-only; test_types\u2192B precedent) \u2014 nested-loop ordering subject has no v3 counterpart",
+  "blocker": "v3-string-ordering-rejected",
+  "class": "B"
  },
  "struct_elem": {
   "actual": "exact stdout/stderr/exit match",
@@ -1455,9 +1455,9 @@
   "class": "B"
  },
  "transitive_pointee": {
-  "actual": "blocked-A reclassified 2026-10-05: must pass once blocker lands; run exit 1: OUT: ERR:tests/corpus/transitive_pointee/main.cid:10:14: expected an expression\\n",
+  "actual": "exact stdout/stderr/exit match",
   "blocker": "multi-file-imports (arrow also needs (*p).f per diff #1)",
-  "class": "D"
+  "class": "A"
  },
  "trycatch": {
   "actual": "tests/corpus/legacy/trycatch/main.cid:6:13: a catch binds a name and a type",

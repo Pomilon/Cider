@@ -3,11 +3,11 @@
 // Before the fix the IR generator emitted `load <ptr>, b` (a named load
 // lowered as a 32-bit load at offset 0), silently reading `a` (1) instead
 // of `b` (42) — or booting into garbage on the UEFI target.
-from m.defs import Holder, getHolder, setInner;
+from defs import Holder, getHolder, setInner;
 from std.io import printInt, print;
 
 func readB(h: Holder) -> u32 {
-  return h.p->b;
+  return (*h.p).b;
 }
 
 func main() -> int {
