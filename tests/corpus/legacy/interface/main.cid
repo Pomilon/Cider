@@ -1,4 +1,4 @@
-from std.io import puts, exit;
+from std.io import puts;
 
 interface Drawable {
     func draw() -> void;
@@ -6,23 +6,23 @@ interface Drawable {
 
 class Circle {
     func draw() -> void {
-        puts("Circle\n");
+        puts("Circle");
     }
 }
 
 class Square {
     func draw() -> void {
-        puts("Square\n");
+        puts("Square");
     }
 }
 
-func _start() {
-    var c: Circle;
-    var s: Square;
-    var d1: Drawable = c;
-    var d2: Drawable = s;
+func main() -> int {
+    var c: Circle = new Circle { };
+    var s: Square = new Square { };
+    var d1: Drawable = &c;
+    var d2: Drawable = &s;
     d1.draw();
     d2.draw();
-    puts("PASS: interface\n");
-    asm { "mov rax, 60" "xor rdi, rdi" "syscall" }
+    puts("PASS: interface");
+    return 0;
 }

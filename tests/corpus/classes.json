@@ -825,9 +825,9 @@
   "class": "A"
  },
  "interface": {
-  "actual": "exit 1; tests/corpus/legacy/interface/main.cid:20:18: a variable needs an initialiser; tests/corpus/legacy/interface/main.cid:21:18: a variable needs an initialiser",
+  "actual": "exact stdout/stderr/exit match",
   "blocker": "interface-boxing (+uninit-locals, stdlib-imports, asm-blocks)",
-  "class": "D"
+  "class": "A"
  },
  "interface_aggregate_discard": {
   "actual": "exit=1 stdout_len=0 stderr_len=1991 first='tests/corpus/interface_aggregate_discard/main.cid:58:20: a variable needs an initialiser'",
