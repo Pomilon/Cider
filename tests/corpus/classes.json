@@ -1140,9 +1140,9 @@
   "class": "D"
  },
  "pointer_interface": {
-  "actual": "cider run exit 1, stdout empty, stderr diagnostic: `main.cid:33:26: expected an expression` (`p->area`, diff #1)",
+  "actual": "exact stdout/stderr/exit match on all three legs (native + vm + vm-unopt)",
   "blocker": "interface-boxing + this + uninit",
-  "class": "D"
+  "class": "A"
  },
  "print_int": {
   "actual": "passes under CIDER_LIB=modules via std/io.cid port",

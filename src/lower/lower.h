@@ -231,6 +231,22 @@ public:
     std::vector<ir::Value> boxToInterface(std::vector<ir::Value> words,
                                           TypeRef from, TypeRef to,
                                           Position pos);
+    // Answers the address of a value's place: a direct place folds to
+    // a computed base, an indirect place answers its pointer advanced
+    // past any offset, an index answers its element address, and a
+    // global answers its label. Quiet bool: callers refuse with the
+    // message that names their own gap.
+    bool addressOfValue(const Expr* expr, TypeRef ptr, Position pos,
+                        ir::Value& out);
+    // Boxes like boxToInterface, but a class value boxes by reference:
+    // the data word is the object's address, so the pair aliases the
+    // value instead of copying it. Anything without an addressable
+    // place refuses loudly; there is no address to name and inventing
+    // one would be a silent copy that breaks aliasing.
+    std::vector<ir::Value> boxClassOperand(const Expr* expr,
+                                           std::vector<ir::Value> words,
+                                           TypeRef from, TypeRef to,
+                                           Position pos);
     // Reads an interface back as a concrete struct value or class
     // reference (TYPES.md §4.3): the pair's vtable must name the
     // (target, interface) table, or the data word is another type's
@@ -256,7 +272,8 @@ public:
     // literal answers its address and length. Anything larger is refused.
     std::vector<ir::Value> lowerWords(const Expr* expr);
     // `&f` where f names a plain function answers its code address as one
-    // word. Every other address refuses: `&x` on values is FEAT-038.
+    // word; `&x` on a value answers its place through the shared helper
+    // (slots, indirect, index, or global label).
     std::vector<ir::Value> lowerAddrOf(const Unary& n);
     std::vector<ir::Value> lowerElementAddr(const Index& n);
     // Stores every word into the place an identifier names: consecutive

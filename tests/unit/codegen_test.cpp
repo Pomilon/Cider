@@ -567,6 +567,37 @@ void testPointerField() {
           "a field store and read through a pointer index");
 }
 
+void testClassBox() {
+    // A class value in an interface position boxes its address: the pair
+    // aliases the value, so dispatch reads the live object, and a store
+    // through a dereferenced class pointer re-boxes the pointed-to object.
+    std::printf("class values box by reference\n");
+    check(runQuiet("interface Shape { func area() -> int; }\n"
+                   "class Sq { var s: int;"
+                   " func area() -> int { return (*self).s * (*self).s; } }\n"
+                   "func main() -> int {\n"
+                   "    var a: Sq = new Sq { s: 9 };\n"
+                   "    var t: Shape = a;\n"
+                   "    return t.area();\n"
+                   "}\n") == 81,
+          "a class value boxes by reference");
+    check(runQuiet("interface Shape { func area() -> int; }\n"
+                   "class Rect { var w: int; var h: int;"
+                   " func area() -> int { return (*self).w * (*self).h; } }\n"
+                   "class Sq { var s: int;"
+                   " func area() -> int { return (*self).s * (*self).s; } }\n"
+                   "func main() -> int {\n"
+                   "    var r: Rect = new Rect { w: 2, h: 5 };\n"
+                   "    var s: Sq = new Sq { s: 1 };\n"
+                   "    var t: Shape = s;\n"
+                   "    var p: *Shape = &t;\n"
+                   "    var q: *Rect = &r;\n"
+                   "    *p = *q;\n"
+                   "    return t.area();\n"
+                   "}\n") == 10,
+          "a dereferenced class pointer re-boxes");
+}
+
 void testMethodGlobalStore() {
     // A method's store to a global is observable outside the function, so
     // the optimizer must keep it: the store names a label, not a slot,
@@ -2201,6 +2232,7 @@ int main() {
     testComputedIndex();
     testPointerField();
     testMethodGlobalStore();
+    testClassBox();
     testRepeatZero();
     testIncrDecr();
     testMultiWordReturn();

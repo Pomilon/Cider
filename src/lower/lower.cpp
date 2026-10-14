@@ -1905,7 +1905,7 @@ void Lowerer::onVarDecl(VarDecl& n) {
     }
     // A concrete value in an interface position boxes to the pair here, so
     // the slots below hold data plus vtable, never bare concrete words.
-    values = boxToInterface(std::move(values), initType, type, n.pos);
+    values = boxClassOperand(n.init.get(), std::move(values), initType, type, n.pos);
     if (failed_) {
         return;
     }
@@ -2382,9 +2382,9 @@ void Lowerer::constructStruct(const std::vector<ir::Value>& slots, const NewStru
         }
         // A concrete value for an interface field boxes to the pair
         // before the range store below, which then stores two words.
-        value = boxToInterface(std::move(value),
-                               checker_.typeOf(field.value.get()), fieldType,
-                               field.value->pos);
+        value = boxClassOperand(field.value.get(), std::move(value),
+                                  checker_.typeOf(field.value.get()), fieldType,
+                                  field.value->pos);
         if (failed_) {
             return;
         }
@@ -2604,8 +2604,8 @@ void Lowerer::constructArray(const std::vector<ir::Value>& slots, const NewArray
         }
         // A concrete filler for an interface array boxes once, then fills
         // every element with the same pair.
-        one = boxToInterface(std::move(one), checker_.typeOf(n.inits[0].get()),
-                             element, n.inits[0]->pos);
+        one = boxClassOperand(n.inits[0].get(), std::move(one), checker_.typeOf(n.inits[0].get()),
+                                element, n.inits[0]->pos);
         if (failed_) {
             return;
         }
@@ -2641,8 +2641,8 @@ void Lowerer::constructArray(const std::vector<ir::Value>& slots, const NewArray
         }
         // A concrete element for an interface array boxes to the pair
         // before the range store below, like every other aggregate site.
-        one = boxToInterface(std::move(one), checker_.typeOf(n.inits[i].get()),
-                             element, n.inits[i]->pos);
+        one = boxClassOperand(n.inits[i].get(), std::move(one), checker_.typeOf(n.inits[i].get()),
+                                element, n.inits[i]->pos);
         if (failed_) {
             return;
         }
@@ -4755,9 +4755,9 @@ void Lowerer::constructClass(const std::vector<ir::Value>& slots, const NewStruc
         }
         // A concrete value for an interface field boxes like the struct
         // path: the class field holds the same pair.
-        value = boxToInterface(std::move(value),
-                               checker_.typeOf(field.value.get()), fieldType,
-                               field.value->pos);
+        value = boxClassOperand(field.value.get(), std::move(value),
+                                  checker_.typeOf(field.value.get()), fieldType,
+                                  field.value->pos);
         if (failed_) {
             return;
         }
@@ -4896,9 +4896,9 @@ std::vector<ir::Value> Lowerer::lowerNewClass(const NewClass& n) {
             return {undefined()};
         }
         TypeRef want{init->parameters()[static_cast<size_t>(i)].type};
-        arg.words = boxToInterface(std::move(arg.words),
-                                   checker_.typeOf(n.args[i].get()), want,
-                                   n.args[i]->pos);
+        arg.words = boxClassOperand(n.args[i].get(), std::move(arg.words),
+                                      checker_.typeOf(n.args[i].get()), want,
+                                      n.args[i]->pos);
         if (failed_) {
             return {undefined()};
         }
@@ -5010,6 +5010,110 @@ std::vector<ir::Value> Lowerer::lowerElementAddr(const Index& n) {
     return {at.slots[kFirstWord]};
 }
 
+bool Lowerer::addressOfValue(const Expr* expr, TypeRef ptr, Position pos,
+                             ir::Value& out) {
+    Place place;
+    if (resolvePlace(expr, place)) {
+        if (!place.global.empty()) {
+            // A global's address is its label: link-time constant, no
+            // load. An offset past it advances the same way an indirect
+            // place advances.
+            ir::Instr data;
+            data.op = ir::Op::DataAddr;
+            data.loc = pos;
+            data.type = ptr;
+            data.width = ir::IRType::Ptr;
+            data.globalLabel = place.global;
+            data.isPure = true;
+            ir::Value at = newValue(data.width, ptr, pos);
+            data.results.push_back(at);
+            emit(std::move(data));
+            if (failed_) {
+                return false;
+            }
+            if (place.off == 0) {
+                out = at;
+                return true;
+            }
+            TypeRef count{ctx_.basic(BasicKind::I64)};
+            ir::Value delta = constantI64(place.off, count, pos);
+            if (failed_) {
+                return false;
+            }
+            ir::Instr add;
+            add.op = ir::Op::Add;
+            add.loc = pos;
+            add.type = ptr;
+            add.width = ir::IRType::Ptr;
+            add.isPure = true;
+            add.operands.push_back(at);
+            add.operands.push_back(delta);
+            ir::Value moved = newValue(add.width, ptr, pos);
+            add.results.push_back(moved);
+            emit(std::move(add));
+            if (failed_) {
+                return false;
+            }
+            out = moved;
+            return true;
+        }
+        if (place.hasIndirect) {
+            if (place.off == 0) {
+                out = place.indirect;
+                return true;
+            }
+            TypeRef count{ctx_.basic(BasicKind::I64)};
+            ir::Value delta = constantI64(place.off, count, pos);
+            if (!failed_) {
+                ir::Instr add;
+                add.op = ir::Op::Add;
+                add.loc = pos;
+                add.type = ptr;
+                add.width = ir::IRType::Ptr;
+                add.isPure = true;
+                add.operands.push_back(place.indirect);
+                add.operands.push_back(delta);
+                ir::Value at = newValue(add.width, ptr, pos);
+                add.results.push_back(at);
+                emit(std::move(add));
+                out = at;
+                return true;
+            }
+            return false;
+        }
+        if (!place.slots.empty()) {
+            out = computedBase(place.slots[0], place.off, pos);
+            return true;
+        }
+    }
+    if (const auto* index = dynamic_cast<const Index*>(expr)) {
+        std::vector<ir::Value> at = lowerElementAddr(*index);
+        if (failed_ || at.size() != kOneWord) {
+            return false;
+        }
+        out = at[0];
+        return true;
+    }
+    return false;
+}
+
+std::vector<ir::Value> Lowerer::boxClassOperand(
+    const Expr* expr, std::vector<ir::Value> words, TypeRef from, TypeRef to,
+    Position pos) {
+    if (!from.isError() && !to.isError() &&
+        to.type->kind() == Kind::Interface &&
+        from.type->kind() == Kind::Class) {
+        TypeRef ptr{ctx_.pointer(from.type)};
+        ir::Value at = undefined();
+        if (!addressOfValue(expr, ptr, pos, at) || failed_) {
+            refuse(pos, "this interface conversion is not lowered yet");
+            return {undefined()};
+        }
+        return boxToInterface({at}, ptr, to, pos);
+    }
+    return boxToInterface(std::move(words), from, to, pos);
+}
+
 std::vector<ir::Value> Lowerer::lowerAddrOf(const Unary& n) {
     // `&f` where f names a plain function answers its code address: one
     // word holding the link address, for an indirect call to load. Every
@@ -5041,49 +5145,16 @@ std::vector<ir::Value> Lowerer::lowerAddrOf(const Unary& n) {
         }
     }
     if (n.op == UnOp::Addr) {
-        // `&x` on a value answers the address of its place: a direct
-        // place names a slot plus an offset, and an indirect place is
-        // already an address with an offset. Globals have no address
-        // materialization, so they keep the refusal they always had.
-        Place place;
-        if (resolvePlace(n.operand.get(), place) && place.global.empty()) {
-            TypeRef ptr = checker_.typeOf(&n);
-            if (!ptr.isError()) {
-                if (place.hasIndirect) {
-                    if (place.off == 0) {
-                        return {place.indirect};
-                    }
-                    TypeRef count{ctx_.basic(BasicKind::I64)};
-                    ir::Value delta = constantI64(place.off, count, n.pos);
-                    if (!failed_) {
-                        ir::Instr add;
-                        add.op = ir::Op::Add;
-                        add.loc = n.pos;
-                        add.type = ptr;
-                        add.width = ir::IRType::Ptr;
-                        add.isPure = true;
-                        add.operands.push_back(place.indirect);
-                        add.operands.push_back(delta);
-                        ir::Value at = newValue(add.width, ptr, n.pos);
-                        add.results.push_back(at);
-                        emit(std::move(add));
-                        return {at};
-                    }
-                    return {undefined()};
-                }
-                if (!place.slots.empty()) {
-                    return {computedBase(place.slots[0], place.off, n.pos)};
-                }
-            }
+        // Value addresses share one helper with interface boxing: the
+        // place answers its address, whatever names it.
+        ir::Value at = undefined();
+        if (addressOfValue(n.operand.get(), checker_.typeOf(&n), n.pos, at)) {
+            return {at};
         }
-        // `&a[i]` past what a place names answers the element's address
-        // directly: a computed array index, or any index into a slice or
-        // string, has no slot offset. The address carries the same bounds
-        // checks the read emits (SEMANTICS 8): an out-of-range address
-        // traps at the `&`, not at the later use.
-        if (const auto* index = dynamic_cast<const Index*>(n.operand.get())) {
-            return lowerElementAddr(*index);
+        if (!failed_) {
+            refuse(n.pos, "this expression");
         }
+        return {undefined()};
     }
     refuse(n.pos, "this expression");
     return {undefined()};
@@ -6932,9 +7003,9 @@ std::vector<ir::Value> Lowerer::lowerCallWords(Call& n) {
             return {undefined()};
         }
         TypeRef want{sig->parameters()[static_cast<size_t>(i)].type};
-        arg.words = boxToInterface(std::move(arg.words),
-                                   checker_.typeOf(n.args[i].get()), want,
-                                   n.args[i]->pos);
+        arg.words = boxClassOperand(n.args[i].get(), std::move(arg.words),
+                                      checker_.typeOf(n.args[i].get()), want,
+                                      n.args[i]->pos);
         if (failed_) {
             return {undefined()};
         }
@@ -7023,8 +7094,8 @@ void Lowerer::onReturn(Return& n) {
         // before the row check below, which then enforces two, not one.
         const Type* answered = function_->signature.returnType();
         TypeRef want{answered != nullptr ? answered : ctx_.void_()};
-        words = boxToInterface(std::move(words), checker_.typeOf(n.value.get()),
-                               want, n.pos);
+        words = boxClassOperand(n.value.get(), std::move(words), checker_.typeOf(n.value.get()),
+                                  want, n.pos);
         if (failed_) {
             return;
         }
@@ -8778,8 +8849,8 @@ ir::Value Lowerer::lowerAssign(Assign& n) {
     std::vector<ir::Value> value = lowerWords(n.value.get());
     // A concrete value assigned to an interface boxes to the pair before
     // the word-count check below, which then enforces two, not one.
-    value = boxToInterface(std::move(value), checker_.typeOf(n.value.get()),
-                           target, n.pos);
+    value = boxClassOperand(n.value.get(), std::move(value), checker_.typeOf(n.value.get()),
+                              target, n.pos);
     if (failed_) {
         return undefined();
     }
@@ -8875,7 +8946,7 @@ void Lowerer::lowerAssignStmt(Assign& n) {
     }
     // A concrete value assigned to an interface boxes to the pair before
     // the word-count check below, which then enforces two, not one.
-    value = boxToInterface(std::move(value), valueType, target, n.pos);
+    value = boxClassOperand(n.value.get(), std::move(value), valueType, target, n.pos);
     if (failed_) {
         return;
     }
