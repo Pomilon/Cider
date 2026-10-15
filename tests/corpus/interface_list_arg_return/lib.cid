@@ -7,7 +7,7 @@ export interface Shape {
 
 export class Sq {
   var side: int;
-  func area() -> int { return this.side * this.side; }
+  func area() -> int { return (*self).side * (*self).side; }
   func kind() -> int { return 1; }
 }
 
