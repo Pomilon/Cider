@@ -2824,6 +2824,18 @@ bool Lowerer::globalInitBytes(const NewArray& init, TypeRef arrayType,
             bytes.append(static_cast<size_t>(total), '\0');
             return true;
         }
+        if (const auto* cast = dynamic_cast<const Cast*>(&leaf)) {
+            // `nilPtr as I` folds to sixteen zero bytes: the gate admits
+            // only this spelling for interface elements, so anything
+            // arriving here is null by construction.
+            if (dynamic_cast<const NilPtr*>(cast->expr.get()) != nullptr &&
+                elemType.type->kind() == Kind::Interface) {
+                bytes.append(static_cast<size_t>(kInterfaceWords) *
+                                 static_cast<size_t>(layout::kSizePointer),
+                             '\0');
+                return true;
+            }
+        }
         return appendScalar(leaf, resolver_.nominalSize(elemType.type), elemType);
     };
     if (init.repeat) {

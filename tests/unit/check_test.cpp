@@ -759,6 +759,11 @@ void testInterfaceNil() {
         "func main() -> int { return 0; }\n");
     check(!globalLive.ok && globalLive.stage == "check",
           "a live interface global is not constant");
+    Checked nullArray = check(
+        "interface Shape { func area() -> int; }\n"
+        "var g: [Shape; 2] = new [Shape; 2] { nilPtr as Shape, nilPtr as Shape };\n"
+        "func main() -> int { return 0; }\n");
+    check(nullArray.ok, "a null-interface array global checks: " + nullArray.stage);
 }
 
 // One arm may list several alternatives: each is checked on its own, and

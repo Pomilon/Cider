@@ -850,9 +850,9 @@
   "class": "D"
  },
  "interface_element_list": {
-  "actual": "cider run exit 1, stdout empty, stderr diagnostic: parse errors in main.cid before module load (`22:22: expected ';'`); driver has no module loader",
+  "actual": "exact stdout/stderr/exit match",
   "blocker": "multi-file-imports (+ interface-boxing, stdlib-io)",
-  "class": "D"
+  "class": "A"
  },
  "interface_fields": {
   "actual": "cider run exit 1, stdout empty, stderr diagnostic: `main.cid:62:14: a variable needs an initialiser`; driver has no module loader",

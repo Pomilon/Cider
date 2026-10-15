@@ -3263,6 +3263,19 @@ bool Checker::constAggregateInit(const Expr& init) {
         }
         return true;
     }
+    if (const auto* cast = dynamic_cast<const Cast*>(&init)) {
+        // `nilPtr as I` is constant (sixteen zero bytes in the image):
+        // the declaration site accepts the same null spelling for a
+        // whole interface global, so array elements accept it too.
+        if (dynamic_cast<const NilPtr*>(cast->expr.get()) != nullptr) {
+            TypeRef spelled = resolver_.resolveType(cast->target.get(),
+                                                     resolver_.scopeOf(module_));
+            if (!spelled.isError() &&
+                spelled.type->kind() == Kind::Interface) {
+                return true;
+            }
+        }
+    }
     std::unordered_set<std::string> active;
     if (evalConstInt(init, *env_, active).ok) {
         return true;

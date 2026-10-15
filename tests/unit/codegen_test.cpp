@@ -1114,6 +1114,13 @@ void testInterfaceNil() {
                    "    return g.area();\n"
                    "}\n") == 7,
           "a stored interface global dispatches");
+    check(runQuiet("interface Shape { func area() -> int; }\n"
+                   "var g: [Shape; 2] = new [Shape; 2] { nilPtr as Shape, nilPtr as Shape };\n"
+                   "func main() -> int {\n"
+                   "    if (g[0] == nilPtr) { return 1; }\n"
+                   "    return 0;\n"
+                   "}\n") == 1,
+          "a null interface array element reads null");
 }
 
 // A match runs the first arm whose pattern fits and skips the rest.
