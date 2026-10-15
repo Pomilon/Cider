@@ -1283,6 +1283,60 @@ const GlobalBinding* Lowerer::findGlobalIn(const std::string& homeModule,
     return nullptr;
 }
 
+bool Lowerer::foldModuleConst(const std::string& name, Position pos,
+                              std::vector<ir::Value>& out) {
+    // A module-level `const` names no storage: its uses fold the
+    // initialiser where read. The table carries both spellings — the
+    // defining module's own names and every from-alias — so one lookup
+    // in the current module covers every reachable spelling. A cycle
+    // refuses loudly instead of hanging: the checker rejects cyclic
+    // consts, but lowering keeps walking after check errors, so the
+    // guard is what stands between a rejected program and a hang.
+    static thread_local std::unordered_set<std::string> folding;
+    EvalEnv env = resolver_.evalEnv(resolver_.moduleScope());
+    const Expr* init =
+        env.constantInit(checker_.module() + "." + name);
+    if (init == nullptr) {
+        return false;
+    }
+    std::string key = checker_.module() + "." + name;
+    if (!folding.insert(key).second) {
+        refuse(pos, "cyclic const '" + name + "'");
+        out = {undefined()};
+        return true;
+    }
+    // A literal initialiser folds without asking the checker for its
+    // type: declaration order must not decide whether a use lowers, and
+    // the declared type (order-free through the resolver) is exactly
+    // what checking records. Compound initialisers still ride lowerWords
+    // below, which needs their recorded subtree types.
+    const resolve::Scope* here = resolver_.scopeOf(checker_.module());
+    const resolve::Decl* found =
+        here != nullptr ? resolver_.lookup(here, name) : nullptr;
+    const resolve::Decl* origin =
+        found != nullptr ? resolver_.declById(found->id) : nullptr;
+    const resolve::Decl* truth = origin != nullptr ? origin : found;
+    if (truth != nullptr && !truth->type.isError()) {
+        if (const auto* lit = dynamic_cast<const IntLit*>(init)) {
+            std::unordered_set<std::string> active;
+            EvalResult got = evalConstInt(*lit, env, active);
+            if (got.ok) {
+                out = {constantI64(got.value, truth->type, init->pos)};
+                folding.erase(key);
+                return true;
+            }
+        }
+        if (const auto* lit = dynamic_cast<const BoolLit*>(init)) {
+            out = {constantI64(lit->value ? 1 : 0, truth->type, init->pos)};
+            folding.erase(key);
+            return true;
+        }
+    }
+    out = lowerWords(init);
+    folding.erase(key);
+    return true;
+}
+
 const GlobalBinding* Lowerer::findGlobal(const std::string& name) {
     // A from-alias copies its target's id, so declById recovers the home
     // module even for names bound in this module's scope by import.
@@ -1333,7 +1387,45 @@ void Lowerer::onGlobal(VarDecl& n) {
     }
     std::unordered_set<std::string> active;
     EvalEnv env = resolver_.evalEnv(resolver_.moduleScope());
-    EvalResult folded = evalConstInt(*n.init, env, active);
+    // A `gc.MK2` spelling folds through the defining module: the table
+    // holds every module's consts, but a bare name only resolves in its
+    // own scope, so the member init folds in the home scope. Anything
+    // else falls through to the plain fold below, which refuses loudly.
+    EvalResult folded{false, 0, ""};
+    const Field* qualField =
+        dynamic_cast<const Field*>(n.init.get());
+    const Ident* qualMod =
+        qualField != nullptr
+            ? dynamic_cast<const Ident*>(qualField->object.get())
+            : nullptr;
+    const resolve::Decl* qualMember = nullptr;
+    const resolve::Scope* qualHome = nullptr;
+    if (qualMod != nullptr) {
+        const resolve::Scope* here = resolver_.moduleScope();
+        const resolve::Decl* modDecl =
+            here != nullptr
+                ? resolver_.lookup(here, qualMod->name)
+                : nullptr;
+        if (modDecl != nullptr &&
+            modDecl->kind == resolve::DeclKind::Module) {
+            qualHome = resolver_.scopeOf(modDecl->origin);
+            const resolve::Decl* target =
+                qualHome != nullptr
+                    ? resolver_.lookup(qualHome, qualField->name)
+                    : nullptr;
+            if (target != nullptr &&
+                target->kind == resolve::DeclKind::Const &&
+                target->init != nullptr) {
+                qualMember = target;
+            }
+        }
+    }
+    if (qualMember != nullptr && qualHome != nullptr) {
+        EvalEnv homeEnv = resolver_.evalEnv(qualHome);
+        folded = evalConstInt(*qualMember->init, homeEnv, active);
+    } else {
+        folded = evalConstInt(*n.init, env, active);
+    }
     GlobalBinding binding;
     binding.name = n.name;
     binding.module = checker_.module();
@@ -2039,6 +2131,14 @@ ir::Value Lowerer::onIdent(Ident& n) {
             return undefined();
         }
         return words[0];
+    }
+    std::vector<ir::Value> folded;
+    if (foldModuleConst(n.name, n.pos, folded)) {
+        if (folded.size() != kOneWord) {
+            refuse(n.pos, "this value");
+            return undefined();
+        }
+        return folded[0];
     }
     refuse(n.pos, "reading '" + n.name + "'");
     return undefined();
@@ -5463,6 +5563,10 @@ std::vector<ir::Value> Lowerer::lowerWords(const Expr* expr) {
         }
         if (const GlobalBinding* global = findGlobal(ident->name)) {
             return loadGlobal(ident->pos, *global);
+        }
+        std::vector<ir::Value> folded;
+        if (foldModuleConst(ident->name, ident->pos, folded)) {
+            return folded;
         }
         // A bare function name in value position answers the closure pair:
         // a forwarder with the receiver-first shape plus a null captures

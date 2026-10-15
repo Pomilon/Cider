@@ -605,6 +605,8 @@ private:
     // exists yet (a module the walk has not reached is a loud refusal at
     // the use, not a silent first match).
     const GlobalBinding* findGlobal(const std::string& name);
+    bool foldModuleConst(const std::string& name, Position pos,
+                         std::vector<ir::Value>& out);
     const GlobalBinding* findGlobalIn(const std::string& homeModule,
                                       const std::string& name);
     const GlobalBinding* resolveModuleGlobal(const std::string& modName,

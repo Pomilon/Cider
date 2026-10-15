@@ -269,6 +269,84 @@ void testImportQualifiedGlobal() {
     rmdir(dir);
 }
 
+// A module-level `const` has no storage: reads fold its initialiser
+// where used, including through another const.
+void testModuleConst() {
+    std::printf("module constants\n");
+    char dir[] = "/tmp/cider_modconst_XXXXXX";
+    check(mkdtemp(dir) != nullptr, "a scratch directory exists");
+    std::string main = std::string(dir) + "/main.cid";
+    FILE* mainFile = fopen(main.c_str(), "w");
+    const char* mainText =
+        "const C: int = 55;\n"
+        "const D: int = C + 2;\n"
+        "func main() -> int {\n"
+        "    return C + D - 100;\n"
+        "}\n";
+    fwrite(mainText, 1, strlen(mainText), mainFile);
+    fclose(mainFile);
+    Result ran = run({"run", main});
+    check(ran.code == 12,
+          "a module const reads back: " + ran.err);
+    // A use before the declaration lowers identically: literal leaves
+    // fold against the declared type instead of a recorded one.
+    std::string fwd = std::string(dir) + "/fwd.cid";
+    FILE* fwdFile = fopen(fwd.c_str(), "w");
+    const char* fwdText =
+        "func main() -> int { return C; }\n"
+        "const C: int = 55;\n";
+    fwrite(fwdText, 1, strlen(fwdText), fwdFile);
+    fclose(fwdFile);
+    Result fwdRan = run({"run", fwd});
+    check(fwdRan.code == 55,
+          "a forward const read lowers: " + fwdRan.err);
+    // A forward use of a compound initialiser still refuses loudly:
+    // its subtree types are recorded only when checking reaches it.
+    std::string fwdc = std::string(dir) + "/fwdc.cid";
+    FILE* fwdcFile = fopen(fwdc.c_str(), "w");
+    const char* fwdcText =
+        "func main() -> int { return D; }\n"
+        "const D: int = C + 2;\n"
+        "const C: int = 5;\n";
+    fwrite(fwdcText, 1, strlen(fwdcText), fwdcFile);
+    fclose(fwdcFile);
+    Result fwdcRan = run({"run", fwdc});
+    check(fwdcRan.code != 0,
+          "a forward compound const still refuses: " + fwdcRan.err);
+    unlink(fwdc.c_str());
+    unlink(fwd.c_str());
+    unlink(main.c_str());
+    rmdir(dir);
+}
+
+// A module-qualified const folds through its defining module in both
+// the checker gate and lowering: `lib.K` in a const position answers
+// the member init folded in the home scope.
+void testQualifiedConst() {
+    std::printf("qualified constants\n");
+    char dir[] = "/tmp/cider_qualconst_XXXXXX";
+    check(mkdtemp(dir) != nullptr, "a scratch directory exists");
+    std::string dep = std::string(dir) + "/lib.cid";
+    FILE* depFile = fopen(dep.c_str(), "w");
+    const char* depText = "export const K: int = 11;\n";
+    fwrite(depText, 1, strlen(depText), depFile);
+    fclose(depFile);
+    std::string main = std::string(dir) + "/main.cid";
+    FILE* mainFile = fopen(main.c_str(), "w");
+    const char* mainText =
+        "import lib;\n"
+        "var g: int = lib.K;\n"
+        "func main() -> int { return g * 2; }\n";
+    fwrite(mainText, 1, strlen(mainText), mainFile);
+    fclose(mainFile);
+    Result ran = run({"run", main});
+    check(ran.code == 22,
+          "a qualified const folds in a global: " + ran.err);
+    unlink(main.c_str());
+    unlink(dep.c_str());
+    rmdir(dir);
+}
+
 // A dotted import resolves through CIDER_LIB: <lib>/x/y.cid answers
 // `import x.y`. Without the variable the same import still fails loudly.
 void testLibSearch() {
@@ -345,6 +423,8 @@ int main() {
     testImports();
     testImportGlobal();
     testImportQualifiedGlobal();
+    testModuleConst();
+    testQualifiedConst();
     testLibSearch();
     testFailures();
     testVmTarget();

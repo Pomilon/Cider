@@ -322,7 +322,43 @@ void Checker::visitProgram(Program& n) {
             continue;
         }
         std::unordered_set<std::string> active;
-        EvalResult folded = evalConstInt(*g->init, *env_, active);
+        // `gc.MK2`: a module-qualified const folds through its defining
+        // module — the table holds every module's consts, but names inside
+        // only resolve in their own scope, so the fold runs there. Anything
+        // that is not a const member falls through and fails loudly below,
+        // exactly as an unresolvable name would.
+        EvalResult folded{false, 0, ""};
+        const Field* qualField =
+            dynamic_cast<const Field*>(g->init.get());
+        const Ident* qualMod =
+            qualField != nullptr
+                ? dynamic_cast<const Ident*>(qualField->object.get())
+                : nullptr;
+        const resolve::Decl* qualMember = nullptr;
+        const resolve::Scope* qualHome = nullptr;
+        if (qualMod != nullptr) {
+            const resolve::Decl* modDecl =
+                resolver_.lookup(moduleScope_, qualMod->name);
+            if (modDecl != nullptr &&
+                modDecl->kind == resolve::DeclKind::Module) {
+                qualHome = resolver_.scopeOf(modDecl->origin);
+                const resolve::Decl* target =
+                    qualHome != nullptr
+                        ? resolver_.lookup(qualHome, qualField->name)
+                        : nullptr;
+                if (target != nullptr &&
+                    target->kind == resolve::DeclKind::Const &&
+                    target->init != nullptr) {
+                    qualMember = target;
+                }
+            }
+        }
+        if (qualMember != nullptr && qualHome != nullptr) {
+            EvalEnv homeEnv = resolver_.evalEnv(qualHome);
+            folded = evalConstInt(*qualMember->init, homeEnv, active);
+        } else {
+            folded = evalConstInt(*g->init, *env_, active);
+        }
         if (!folded.ok) {
             // An aggregate construction whose every scalar leaf folds to
             // an integer names every image byte, so a global may hold it:
@@ -3228,7 +3264,13 @@ bool Checker::constAggregateInit(const Expr& init) {
         return true;
     }
     std::unordered_set<std::string> active;
-    return evalConstInt(init, *env_, active).ok;
+    if (evalConstInt(init, *env_, active).ok) {
+        return true;
+    }
+    // A float element folds to a double the same way: const-ness is
+    // folding to a number, and the emission already rounds float
+    // elements at width. Anything else stays refused below.
+    return evalConstFloat(init, *env_, active).ok;
 }
 
 TypeRef Checker::checkNewArray(NewArray& expr) {    TypeRef element = resolveHere(expr.element.get());
