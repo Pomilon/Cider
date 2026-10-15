@@ -1513,25 +1513,32 @@ void Lowerer::onGlobal(VarDecl& n) {
             binding.initWords.push_back(quad);
         }
     } else if (type.type->kind() == Kind::Closure &&
-               dynamic_cast<const Field*>(n.init.get()) != nullptr) {
-        // A module member function names link-time code: the global holds
-        // the code address beside empty captures, the same pair shape a
-        // local spelling lowers to. Anything else here refuses: the gate
-        // lets only this spelling through.
-        const auto* field = static_cast<const Field*>(n.init.get());
-        const auto* mod = dynamic_cast<const Ident*>(field->object.get());
-        const resolve::Scope* here = resolver_.moduleScope();
-        const resolve::Decl* moduleDecl =
-            (mod != nullptr && here != nullptr)
-                ? resolver_.lookup(here, mod->name)
-                : nullptr;
-        const resolve::Scope* home =
-            (moduleDecl != nullptr &&
-             moduleDecl->kind == resolve::DeclKind::Module)
-                ? resolver_.scopeOf(moduleDecl->origin)
-                : nullptr;
-        const resolve::Decl* member =
-            home != nullptr ? resolver_.lookup(home, field->name) : nullptr;
+               (dynamic_cast<const Field*>(n.init.get()) != nullptr ||
+                dynamic_cast<const Ident*>(n.init.get()) != nullptr)) {
+        // A function names link-time code: the global holds the code
+        // address beside empty captures, the same pair shape a local
+        // spelling lowers to. `b.inc` resolves through its module;
+        // a bare `dbl` resolves in the current one. Anything else here
+        // refuses: the gate lets only these spellings through.
+        const resolve::Decl* member = nullptr;
+        if (const auto* field = dynamic_cast<const Field*>(n.init.get())) {
+            const auto* mod = dynamic_cast<const Ident*>(field->object.get());
+            const resolve::Scope* here = resolver_.moduleScope();
+            const resolve::Decl* moduleDecl =
+                (mod != nullptr && here != nullptr)
+                    ? resolver_.lookup(here, mod->name)
+                    : nullptr;
+            const resolve::Scope* home =
+                (moduleDecl != nullptr &&
+                 moduleDecl->kind == resolve::DeclKind::Module)
+                    ? resolver_.scopeOf(moduleDecl->origin)
+                    : nullptr;
+            member = home != nullptr ? resolver_.lookup(home, field->name)
+                                     : nullptr;
+        } else if (const auto* ident =
+                       dynamic_cast<const Ident*>(n.init.get())) {
+            member = resolver_.lookup(resolver_.moduleScope(), ident->name);
+        }
         if (member == nullptr ||
             member->kind != resolve::DeclKind::Func ||
             member->typeParams != 0) {

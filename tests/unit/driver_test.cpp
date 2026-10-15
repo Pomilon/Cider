@@ -164,6 +164,7 @@ void testModFnValue() {
         "import b;\n"
         "var gg: func(int) -> int = b.inc;\n"
         "func dbl(x: int) -> int { return x * 2; }\n"
+        "var lo: func(int) -> int = dbl;\n"
         "var fg: *func(int) -> int = &dbl;\n"
         "var fh: *func(int) -> int = nilPtr;\n"
         "func main() -> int {\n"
@@ -173,6 +174,7 @@ void testModFnValue() {
         "    if (gg(4) != 5) { return 3; }\n"
         "    if ((*fg)(21) != 42) { return 4; }\n"
         "    if (fh != nilPtr) { return 5; }\n"
+        "    if (lo(21) != 42) { return 6; }\n"
         "    return 0;\n"
         "}\n";
     fwrite(mainText, 1, strlen(mainText), mainFile);

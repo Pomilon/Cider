@@ -895,9 +895,9 @@
   "class": "D"
  },
  "legacy_func_type": {
-  "actual": "cider run exit 1, stdout empty, stderr diagnostic: `main.cid:52:20: a variable needs an initialiser`",
+  "actual": "exact stdout/stderr/exit match",
   "blocker": "closure/fnptr-repr (bare func spelling) + float-codegen",
-  "class": "D"
+  "class": "A"
  },
  "licm_inline": {
   "actual": "pass",

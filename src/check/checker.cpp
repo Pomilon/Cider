@@ -414,6 +414,16 @@ void Checker::visitProgram(Program& n) {
                     }
                 }
             }
+            // A bare `dbl` names the same link-time code as `&dbl` for a
+            // closure global: the value is the forwarder pair either way.
+            if (!funcGlobal) {
+                if (const auto* ident = dynamic_cast<const Ident*>(g->init.get())) {
+                    const resolve::Decl* decl = resolver_.lookup(moduleScope_, ident->name);
+                    if (decl != nullptr && decl->kind == resolve::DeclKind::Func && decl->typeParams == 0) {
+                        funcGlobal = true;
+                    }
+                }
+            }
             // `nilPtr as I`: the null interface is sixteen zero bytes in
             // the image — a null data word beside a null vtable word — so
             // it is constant the way a null pointer is. The target
