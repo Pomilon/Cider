@@ -846,7 +846,7 @@
  },
  "interface_call_args": {
   "actual": "exit=1 stdout_len=0 stderr_len=2010 first=\"tests/corpus/interface_call_args/main.cid:32:18: expected ')'\"",
-  "blocker": "interface-boxing (+multi-file-imports)",
+  "blocker": "T11 generic-function lowering: twice<int> instantiations check but never emit bodies (only blocker for section 11; rest is new/init/this rewrites + turbofish impossible)",
   "class": "D"
  },
  "interface_element_list": {
@@ -1160,9 +1160,9 @@
   "class": "B"
  },
  "qualified_interface": {
-  "actual": "cider run exit 1, stdout empty, stderr diagnostic: `main.cid:16:17: expected ';'`; driver has no module loader",
+  "actual": "exact stdout/stderr/exit match",
   "blocker": "multi-file-imports (+ interface-boxing)",
-  "class": "D"
+  "class": "A"
  },
  "qualified_struct_literal": {
   "actual": "15:21: expected ';' at bare `qlib.Holder{...}` literal (v3 requires `new` for every value, \u00a72.1a)",
