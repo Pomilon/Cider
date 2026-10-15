@@ -120,9 +120,9 @@
   "class": "B"
  },
  "bare_template_control": {
-  "actual": "exit 1; tests/corpus/bare_template_control/main.cid:8:22: a variable needs an initialiser; tests/corpus/bare_template_control/main.cid:14:20: a variable needs an initialiser",
+  "actual": "exact stdout/stderr/exit match",
   "blocker": "multi-file imports",
-  "class": "D"
+  "class": "A"
  },
  "base_alias_kinds": {
   "actual": "compile rejection: tests/corpus/base_alias_kinds/main.cid:10:15: expected ';' \u2014 field initializer in class body; v3 fills fields via new/init only",
