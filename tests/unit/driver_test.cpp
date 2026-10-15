@@ -453,6 +453,46 @@ void testLibSearch() {
     rmdir(dir);
 }
 
+// A dotted import falls back to the entry directory: `import a.util`
+// beside `<dir>/a/util.cid` answers without CIDER_LIB. Library names
+// keep their priority, so `std.io` still answers from the library.
+void testSubdirImport() {
+    std::printf("subdirectory imports\n");
+    char dir[] = "/tmp/cider_subimp_XXXXXX";
+    check(mkdtemp(dir) != nullptr, "a scratch directory exists");
+    std::string sub = std::string(dir) + "/a";
+    check(mkdir(sub.c_str(), 0700) == 0, "a sibling package exists");
+    std::string mod = sub + "/util.cid";
+    FILE* modFile = fopen(mod.c_str(), "w");
+    const char* modText =
+        "export struct Box { var v: int; }\n"
+        "export func mval() -> int { return 9; }\n"
+        "export func bget(b: Box) -> int { return b.v; }\n";
+    fwrite(modText, 1, strlen(modText), modFile);
+    fclose(modFile);
+    std::string main = std::string(dir) + "/main.cid";
+    FILE* mainFile = fopen(main.c_str(), "w");
+    const char* mainText =
+        "import a.util;\n"
+        "from a.util import Box;\n"
+        "func main() -> int {\n"
+        "    if (util.mval() != 9) { return 1; }\n"
+        "    var b: util.Box = new Box { v: 9 };\n"
+        "    if (util.bget(b) != 9) { return 2; }\n"
+        "    return 0;\n"
+        "}\n";
+    fwrite(mainText, 1, strlen(mainText), mainFile);
+    fclose(mainFile);
+    Result ok = run({"check", main});
+    check(ok.code == 0, "a sibling module checks: " + ok.err);
+    Result ran = run({"run", main});
+    check(ran.code == 0, "a sibling call answers: code=" + std::to_string(ran.code) + " out=" + ran.out + " err=" + ran.err);
+    unlink(main.c_str());
+    unlink(mod.c_str());
+    rmdir(sub.c_str());
+    rmdir(dir);
+}
+
 // A missing file, a bad target and a bad subcommand all name themselves.
 void testFailures() {
     std::printf("failures name themselves\n");
@@ -496,6 +536,7 @@ int main() {
     testModuleConst();
     testQualifiedConst();
     testLibSearch();
+    testSubdirImport();
     testFailures();
     testVmTarget();
     std::printf("\n%d checks, %s\n", checks, failures == 0 ? "all passed" : "FAILURES");

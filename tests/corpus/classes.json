@@ -1045,9 +1045,9 @@
   "class": "A"
  },
  "mod_ns_lastseg": {
-  "actual": "cider run exit 1, stdout empty, stderr diagnostic: `main.cid:7:12: a variable needs an initialiser`; driver has no module loader",
+  "actual": "exact stdout/stderr/exit match",
   "blocker": "multi-file-imports (a/util.cid + b/util.cid subdirs kept verbatim)",
-  "class": "D"
+  "class": "A"
  },
  "mod_ns_vtable": {
   "actual": "cider run exit 1, stdout empty, stderr diagnostic: `main.cid:10:13: a variable needs an initialiser`; driver has no module loader",

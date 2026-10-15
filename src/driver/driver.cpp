@@ -114,16 +114,35 @@ bool runFront(const std::string& file, const std::string& text, Pipeline& pipe,
     resolve::Resolver::ModuleLoader load =
         [&entryDir, &lib, &loadFile](const std::string& name) -> std::unique_ptr<Program> {
         if (name.find('.') != std::string::npos) {
-            if (lib.empty()) {
-                return nullptr;
-            }
             std::string rel = name;
             auto dot = std::string::npos;
             while ((dot = rel.find('.', dot == std::string::npos ? 0 : dot)) !=
                    std::string::npos) {
                 rel[dot] = '/';
             }
-            return loadFile(lib + "/" + rel + ".cid");
+            // Library names keep their priority, so `std.io` still
+            // answers from the library. A miss falls back to the entry
+            // directory, where `import a.util` answers `<dir>/a/util.cid`.
+            if (!lib.empty()) {
+                std::unique_ptr<Program> found =
+                    loadFile(lib + "/" + rel + ".cid");
+                if (found != nullptr) {
+                    return found;
+                }
+            }
+            if (!entryDir.empty()) {
+                std::unique_ptr<Program> found =
+                    loadFile(entryDir + "/" + rel + ".cid");
+                if (found != nullptr) {
+                    return found;
+                }
+            } else {
+                std::unique_ptr<Program> found = loadFile(rel + ".cid");
+                if (found != nullptr) {
+                    return found;
+                }
+            }
+            return nullptr;
         }
         std::string path = entryDir.empty() ? name + ".cid" : entryDir + "/" + name + ".cid";
         return loadFile(path);

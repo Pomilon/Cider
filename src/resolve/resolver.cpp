@@ -1019,7 +1019,19 @@ TypeRef Resolver::resolveType(const TypeExpr* spelling, const Scope* scope) {
 TypeRef Resolver::resolveNamed(const NamedType* type, const Scope* scope) {
     const Scope* home = scope;
     if (!type->qualifier.empty()) {
-        home = scopeOf(type->qualifier);
+        // A qualifier names a module through its local binding when one
+        // is in scope (`util` for `import b.util`), or a full module
+        // path otherwise (`b.util`, `std.io`). Calls already resolve
+        // the binding first; types follow the same rule so `util.Foo`
+        // and `util.mval()` mean the same module.
+        home = nullptr;
+        const Decl* bound = lookup(scope, type->qualifier);
+        if (bound != nullptr && bound->kind == DeclKind::Module) {
+            home = scopeOf(bound->origin);
+        }
+        if (home == nullptr) {
+            home = scopeOf(type->qualifier);
+        }
         if (home == nullptr) {
             fail(type->pos, "unknown module '" + type->qualifier + "'");
             return errorRef();

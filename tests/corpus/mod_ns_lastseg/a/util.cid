@@ -3,8 +3,7 @@ export struct Foo {
 }
 
 export func amake() -> Foo {
-  var f: Foo;
-  f.x = 10;
+  var f: Foo = new Foo { x: 10 };
   return f;
 }
 
