@@ -1512,6 +1512,39 @@ void Lowerer::onGlobal(VarDecl& n) {
             }
             binding.initWords.push_back(quad);
         }
+    } else if (type.type->kind() == Kind::Closure &&
+               dynamic_cast<const Field*>(n.init.get()) != nullptr) {
+        // A module member function names link-time code: the global holds
+        // the code address beside empty captures, the same pair shape a
+        // local spelling lowers to. Anything else here refuses: the gate
+        // lets only this spelling through.
+        const auto* field = static_cast<const Field*>(n.init.get());
+        const auto* mod = dynamic_cast<const Ident*>(field->object.get());
+        const resolve::Scope* here = resolver_.moduleScope();
+        const resolve::Decl* moduleDecl =
+            (mod != nullptr && here != nullptr)
+                ? resolver_.lookup(here, mod->name)
+                : nullptr;
+        const resolve::Scope* home =
+            (moduleDecl != nullptr &&
+             moduleDecl->kind == resolve::DeclKind::Module)
+                ? resolver_.scopeOf(moduleDecl->origin)
+                : nullptr;
+        const resolve::Decl* member =
+            home != nullptr ? resolver_.lookup(home, field->name) : nullptr;
+        if (member == nullptr ||
+            member->kind != resolve::DeclKind::Func ||
+            member->typeParams != 0) {
+            refuse(n.init->pos, "a function global needs `mod.func`");
+            return;
+        }
+        std::string link = resolver_.linkName(*member);
+        std::string fwd = forwardFunction(link, member->sig, n.init->pos);
+        if (failed_) {
+            return;
+        }
+        binding.initLabel = fwd;
+        binding.initial = 0;
     } else if (type.type->kind() == Kind::Basic &&
                basicIsFloat(*type.type->basic())) {
         // A float global carries its IEEE bits in the image. The
@@ -2967,6 +3000,56 @@ std::vector<ir::Value> Lowerer::lowerField(const Field& n) {
         if (const GlobalBinding* global =
                 resolveModuleGlobal(ident->name, n.name)) {
             return loadGlobal(n.pos, *global);
+        }
+        // `b.inc`: the object names a module and the member names its
+        // function, so this answers the closure pair for that function:
+        // a forwarder with the receiver-first shape plus a null captures
+        // word, with no allocation. Locals shadow module names; generic
+        // functions and non-function members fall through below.
+        bool shadowed = false;
+        for (auto frame = locals_.rbegin();
+             frame != locals_.rend() && !shadowed; ++frame) {
+            shadowed = frame->find(ident->name) != frame->end();
+        }
+        const resolve::Scope* here = resolver_.scopeOf(checker_.module());
+        const resolve::Decl* moduleDecl =
+            here != nullptr ? resolver_.lookup(here, ident->name) : nullptr;
+        if (!shadowed && moduleDecl != nullptr &&
+            moduleDecl->kind == resolve::DeclKind::Module) {
+            const resolve::Scope* home =
+                resolver_.scopeOf(moduleDecl->origin);
+            const resolve::Decl* member =
+                home != nullptr ? resolver_.lookup(home, n.name) : nullptr;
+            if (member != nullptr &&
+                member->kind == resolve::DeclKind::Func &&
+                member->typeParams == 0) {
+                TypeRef type = checker_.typeOf(&n);
+                if (!type.isError() && type.type->kind() == Kind::Closure &&
+                    wordCount(type) == static_cast<int>(kClosureWords)) {
+                    std::string link = resolver_.linkName(*member);
+                    std::string fwd =
+                        forwardFunction(link, member->sig, n.pos);
+                    if (failed_) {
+                        return {undefined()};
+                    }
+                    ir::Instr fn;
+                    fn.op = ir::Op::FnAddr;
+                    fn.loc = n.pos;
+                    fn.type = wordType(type, kFirstWord);
+                    fn.width = ir::IRType::Ptr;
+                    fn.globalLabel = fwd;
+                    fn.isPure = true;
+                    ir::Value code = newValue(fn.width, fn.type, n.pos);
+                    fn.results.push_back(code);
+                    emit(std::move(fn));
+                    ir::Value caps =
+                        constantI64(0, wordType(type, kLenWord), n.pos);
+                    if (failed_) {
+                        return {undefined()};
+                    }
+                    return {code, caps};
+                }
+            }
         }
     }
     if (const auto* ident = dynamic_cast<const Ident*>(n.object.get())) {
@@ -7204,6 +7287,30 @@ std::vector<ir::Value> Lowerer::lowerCallWords(Call& n) {
                         receiver.push_back(pair[kLenWord]);
                     }
                     break;
+                }
+            }
+            if (sig == nullptr) {
+                // A closure-typed global calls through its stored code
+                // word, with the stored captures word riding as receiver.
+                // Locals keep priority above; anything else here falls
+                // through to the loud refusal below.
+                if (const GlobalBinding* global = findGlobal(ident->name)) {
+                    if (global->type.type->kind() == Kind::Closure) {
+                        const Signature* csig =
+                            global->type.type->signature();
+                        if (csig != nullptr) {
+                            std::vector<ir::Value> pair =
+                                loadGlobal(n.pos, *global);
+                            if (failed_ || pair.size() != kClosureWords) {
+                                refuse(n.pos, "this call");
+                                return {undefined()};
+                            }
+                            sig = csig;
+                            indirect = true;
+                            indirectCallee = pair[kFirstWord];
+                            receiver.push_back(pair[kLenWord]);
+                        }
+                    }
                 }
             }
         }

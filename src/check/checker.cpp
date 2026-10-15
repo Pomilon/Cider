@@ -380,6 +380,24 @@ void Checker::visitProgram(Program& n) {
                 // rather than accepted here and unbuildable later.
                 constGlobal = constAggregateInit(*g->init);
             }
+            // `b.inc`: a module-qualified function names its code
+            // address, which is a link-time constant — the lowerer
+            // materialises the closure pair, so the gate only
+            // recognises the spelling. Anything else falls through
+            // to fail loudly below.
+            bool funcGlobal = false;
+            if (const auto* field = dynamic_cast<const Field*>(g->init.get())) {
+                if (const auto* mod = dynamic_cast<const Ident*>(field->object.get())) {
+                    const resolve::Decl* modDecl = resolver_.lookup(moduleScope_, mod->name);
+                    if (modDecl != nullptr && modDecl->kind == resolve::DeclKind::Module) {
+                        const resolve::Scope* home = resolver_.scopeOf(modDecl->origin);
+                        const resolve::Decl* member = home != nullptr ? resolver_.lookup(home, field->name) : nullptr;
+                        if (member != nullptr && member->kind == resolve::DeclKind::Func && member->typeParams == 0) {
+                            funcGlobal = true;
+                        }
+                    }
+                }
+            }
             // `nilPtr as I`: the null interface is sixteen zero bytes in
             // the image — a null data word beside a null vtable word — so
             // it is constant the way a null pointer is. The target
@@ -418,7 +436,7 @@ void Checker::visitProgram(Program& n) {
             // only has to not call it non-constant.
             const auto* asString = dynamic_cast<const StringLit*>(g->init.get());
             const bool stringGlobal = declared.type->kind() == Kind::String;
-            if (!constGlobal && (asFloat == nullptr || !floatGlobal) &&
+            if (!constGlobal && !funcGlobal && (asFloat == nullptr || !floatGlobal) &&
                 !(floatGlobal && floatFolded.ok) &&
                 (asString == nullptr || !stringGlobal)) {
                 const std::string why =

@@ -148,6 +148,39 @@ void testImportAlias() {
     rmdir(dir);
 }
 
+void testModFnValue() {
+    std::printf("module function values\n");
+    char dir[] = "/tmp/cider_modfn_XXXXXX";
+    check(mkdtemp(dir) != nullptr, "a scratch directory exists");
+    std::string dep = std::string(dir) + "/b.cid";
+    FILE* depFile = fopen(dep.c_str(), "w");
+    const char* depText =
+        "export func inc(x: int) -> int { return x + 1; }\n";
+    fwrite(depText, 1, strlen(depText), depFile);
+    fclose(depFile);
+    std::string main = std::string(dir) + "/main.cid";
+    FILE* mainFile = fopen(main.c_str(), "w");
+    const char* mainText =
+        "import b;\n"
+        "var gg: func(int) -> int = b.inc;\n"
+        "func main() -> int {\n"
+        "    var g: func(int) -> int = b.inc;\n"
+        "    if (g(4) != 5) { return 1; }\n"
+        "    if ((b.inc)(4) != 5) { return 2; }\n"
+        "    if (gg(4) != 5) { return 3; }\n"
+        "    return 0;\n"
+        "}\n";
+    fwrite(mainText, 1, strlen(mainText), mainFile);
+    fclose(mainFile);
+    Result ok = run({"check", main});
+    check(ok.code == 0, "a module function value checks: " + ok.err);
+    Result ran = run({"run", main});
+    check(ran.code == 0, "a module function value calls: " + ran.err);
+    unlink(main.c_str());
+    unlink(dep.c_str());
+    rmdir(dir);
+}
+
 void testImports() {
     std::printf("imports\n");
     char dir[] = "/tmp/cider_imports_XXXXXX";
@@ -452,6 +485,7 @@ int main() {
     testRun();
     testImports();
     testImportAlias();
+    testModFnValue();
     testImportGlobal();
     testImportQualifiedGlobal();
     testModuleConst();

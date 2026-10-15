@@ -1030,9 +1030,9 @@
   "class": "A"
  },
  "mod_fn_value": {
-  "actual": "cider run exit 1, stdout empty, stderr diagnostic: `main.cid:6:10: a variable needs an initialiser`; driver has no module loader",
+  "actual": "exact stdout/stderr/exit match",
   "blocker": "multi-file-imports (+ bare-fn-spelling, float)",
-  "class": "D"
+  "class": "A"
  },
  "mod_ns_collision": {
   "actual": "exact stdout/stderr/exit match",
@@ -1590,8 +1590,8 @@
   "class": "D"
  },
  "write_returns_count": {
-  "actual": "blocked-A reclassified 2026-10-05: must pass once blocker lands; run exit 1: OUT: ERR:tests/corpus/write_returns_count/main.cid:9:18: a variable needs an initialiser\\ntests/corpus/write_returns_count/main.cid:10:18: a variable needs an initialiser\\n",
-  "blocker": "stdlib-missing (no std.* modules in v3; only prelude print/alloc/free/panic)",
+  "actual": "19:9: from std.fs import write \u2014 std.fs does not exist in v3 (only std.io/std.alloc/std.string ported).",
+  "blocker": "stdlib-fs-missing",
   "class": "D"
  }
 }
