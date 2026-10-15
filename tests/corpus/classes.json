@@ -1580,9 +1580,9 @@
   "class": "A"
  },
  "wide_global_store": {
-  "actual": "v3 rejects v2 syntax loudly at parse (run exit 1: OUT: ERR:tests/corpus/wide_global_store/main.cid:52:20: expected ')'\\ntests/corpus/wide_global_store/main.ci...)",
+  "actual": "exact stdout/stderr/exit match",
   "blocker": "fn( types at 52:20 (also interface-boxing, multi-file-imports)",
-  "class": "D"
+  "class": "A"
  },
  "wide_strings": {
   "actual": "blocked-A reclassified 2026-10-05: must pass once blocker lands; run exit 1: OUT: ERR:tests/corpus/wide_strings/main.cid:11:18: unknown escape\\ntests/corpus/wide_strings/main.cid:32:23: unknown escape\\ntests/corpus/wide_strings/main.cid:32:23: unknown escape\\ntests/corpus/wide_strings/mai",

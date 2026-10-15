@@ -16,7 +16,7 @@ export interface Shape {
 // First implementor.
 export class Box {
   var v: int;
-  func area() -> int { return this.v * 2; }
+  func area() -> int { return (*self).v * 2; }
   func tag() -> int { return 7; }
 }
 
@@ -25,7 +25,7 @@ export class Box {
 export class Pebble {
   var w: int;
   var pad: [u64; 4];
-  func area() -> int { return this.w + 1; }
+  func area() -> int { return (*self).w + 1; }
   func tag() -> int { return 9; }
 }
 
@@ -36,15 +36,15 @@ export struct Big {
 }
 
 // --- narrow globals, interleaved with the wide ones ----------------------
-export var gU8: u8;
-export var gBig1: Big;
-export var gBox: Box;
-export var gU16: u16;
-export var gShape1: Shape;
-export var gFlag: bool;
-export var gPeb: Pebble;
-export var gF32: float;
-export var gBig2: Big;
-export var gI32: i32;
-export var gShape2: Shape;
-export var gI64: i64;
+export var gU8: u8 = 0;
+export var gBig1: Big = new Big { a: 0, b: 0 };
+export var gBox: Box = new Box { v: 0 };
+export var gU16: u16 = 0;
+export var gShape1: Shape = nilPtr as Shape;
+export var gFlag: bool = false;
+export var gPeb: Pebble = new Pebble { w: 0, pad: new [u64; 4] { 0, 0, 0, 0 } };
+export var gF32: float = 0.0;
+export var gBig2: Big = new Big { a: 0, b: 0 };
+export var gI32: i32 = 0;
+export var gShape2: Shape = nilPtr as Shape;
+export var gI64: i64 = 0;

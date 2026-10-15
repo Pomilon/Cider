@@ -112,22 +112,22 @@ func main() -> int {
   gFlag = true;
   gF32 = 0.5;
   gI32 = 0 - 2;
-  gI64 = 0 - 3;
+  gI64 = (0 - 3) as i64;
 
   var bad: int = checkAll(1);
   if (bad != 0) { return bad; }
   bad = checkAllAliased(1);
   if (bad != 0) { return bad; }
   printInt(takeShape(gShape1));        // 427
-  printInt(takeBig(gBig1));            // 1112
+  printInt(takeBig(gBig1) as int);            // 1112
   printInt(takeShape(lib.gShape2));    // 319
-  printInt(takeBig(gBig2));            // 2122
+  printInt(takeBig(gBig2) as int);            // 2122
 
   // --- round 2: whole-value stores into both directions -------------------
   // Assign a struct and an interface by value, so each wide global is
   // rewritten as a value copy rather than field by field.
-  var localBig1: lib.Big = lib.Big{ a: 11, b: 12 };
-  var localBig2: lib.Big = lib.Big{ a: 21, b: 22 };
+  var localBig1: lib.Big = new lib.Big { a: 11, b: 12 };
+  var localBig2: lib.Big = new lib.Big { a: 21, b: 22 };
   var localShape: lib.Shape = gBox;
   var localPebble: lib.Shape = gPeb;
   gBig1 = localBig1;
@@ -138,7 +138,7 @@ func main() -> int {
   // wide globals it sits between, and vice versa.
   gU8 = 201;
   lib.gF32 = 0.5;
-  gI64 = 0 - 3;
+  gI64 = (0 - 3) as i64;
 
   bad = checkAll(2);
   if (bad != 0) { return bad; }
@@ -159,13 +159,13 @@ func main() -> int {
   if (gBig1.a != 11 || gBig1.b != 12) { return 33; }
 
   // --- the narrow globals themselves, printed -----------------------------
-  printInt(gU8);                        // 201
-  printInt(gU16);                       // 60001
+  printInt(gU8 as int);                        // 201
+  printInt(gU16 as int);                       // 60001
   if (gFlag) { printInt(1); } else { printInt(0); }
   printF64(gF32 as f64);                // 0.500000
   printInt(gI32);                       // -2
-  printInt(gI64);                       // -3
-  printInt(gBig1.a * 100 + gBig1.b);    // 1112
+  printInt(gI64 as int);                       // -3
+  printInt((gBig1.a * 100 + gBig1.b) as int);    // 1112
   printInt(gShape1.area() * 10 + gShape1.tag()); // 319
   return 0;
 }
