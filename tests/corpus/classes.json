@@ -1381,7 +1381,7 @@
  },
  "struct_ptr_stress": {
   "actual": "rewritten uninit arrays/structs; remaining failure: 12:12 'more than six registers of arguments' (test_many_params, 8 ints) \u2014 native codegen refuses >6 GPR words instead of spilling to the stack; VM passes",
-  "blocker": "codegen-stack-arguments (FEATURE-NEW): SysV stack args unimplemented; also points[i].f store/read through indexed-field places unlowered",
+  "blocker": "codegen-stack-arguments (SysV spill). Root-cause evidence (2026-10-15): v2 branch cider-v2 shows working spill (caller pushes args 7+ in reverse, callee reads [rbp+16]/[rbp+24], cleanup add rsp,(n-6)*8). v3 attempts found TWO defects: (1) scratch staging ids aliased live argument slots, self-clobbering during multi-word staging; (2) slot addresses appear to be resolved relative to a MOVING rsp (push cascades), so static slot(id) reads pick up shifted slots \u2014 needs an address model that tracks rsp at each read. See <tmp>/p7b.cid + p8.cid probes.",
   "class": "D"
  },
  "struct_template_params": {
