@@ -17,39 +17,33 @@ struct Polygon {
 }
 
 func test_many_fields() -> int {
-    var p: Point3D;
-    p.x = 10;
-    p.y = 20;
-    p.z = 30;
+    var p: Point3D = new Point3D { x: 10, y: 20, z: 30 };
     if (p.x + p.y + p.z != 60) { return 1; }
     return 0;
 }
 
 func test_nested_struct() -> int {
-    var line: Line;
-    line.start.x = 1;
-    line.start.y = 2;
-    line.start.z = 3;
-    line.end.x = 4;
-    line.end.y = 5;
-    line.end.z = 6;
+    var line: Line = new Line {
+        start: new Point3D { x: 1, y: 2, z: 3 },
+        end: new Point3D { x: 4, y: 5, z: 6 }
+    };
 
     if (line.start.x + line.end.z != 7) { return 1; }
     return 0;
 }
 
 func test_array_of_struct() -> int {
-    var poly: Polygon;
-    poly.count = 3;
-    poly.vertices[0].x = 0;
-    poly.vertices[0].y = 0;
-    poly.vertices[0].z = 0;
-    poly.vertices[1].x = 10;
-    poly.vertices[1].y = 0;
-    poly.vertices[1].z = 0;
-    poly.vertices[2].x = 0;
-    poly.vertices[2].y = 10;
-    poly.vertices[2].z = 0;
+    var poly: Polygon = new Polygon {
+        count: 3,
+        vertices: new [Point3D; 6] {
+            new Point3D { x: 0, y: 0, z: 0 },
+            new Point3D { x: 10, y: 0, z: 0 },
+            new Point3D { x: 0, y: 10, z: 0 },
+            new Point3D { x: 0, y: 0, z: 0 },
+            new Point3D { x: 0, y: 0, z: 0 },
+            new Point3D { x: 0, y: 0, z: 0 }
+        }
+    };
 
     if (poly.count != 3) { return 1; }
     if (poly.vertices[1].x != 10) { return 2; }
@@ -62,25 +56,30 @@ func test_array_of_struct() -> int {
 }
 
 func test_large_struct_array() -> int {
-    var points: [Point3D; 20];
+    var points: [Point3D; 20] = new [Point3D; 20] {
+        new Point3D { x: 0, y: 0, z: 0 }, new Point3D { x: 0, y: 0, z: 0 }, new Point3D { x: 0, y: 0, z: 0 }, new Point3D { x: 0, y: 0, z: 0 },
+        new Point3D { x: 0, y: 0, z: 0 }, new Point3D { x: 0, y: 0, z: 0 }, new Point3D { x: 0, y: 0, z: 0 }, new Point3D { x: 0, y: 0, z: 0 },
+        new Point3D { x: 0, y: 0, z: 0 }, new Point3D { x: 0, y: 0, z: 0 }, new Point3D { x: 0, y: 0, z: 0 }, new Point3D { x: 0, y: 0, z: 0 },
+        new Point3D { x: 0, y: 0, z: 0 }, new Point3D { x: 0, y: 0, z: 0 }, new Point3D { x: 0, y: 0, z: 0 }, new Point3D { x: 0, y: 0, z: 0 },
+        new Point3D { x: 0, y: 0, z: 0 }, new Point3D { x: 0, y: 0, z: 0 }, new Point3D { x: 0, y: 0, z: 0 }, new Point3D { x: 0, y: 0, z: 0 }
+    };
     var sum: int = 0;
     for (var i: int = 0; i < 20; i = i + 1) {
-        points[i].x = i;
-        points[i].y = i * 2;
-        points[i].z = i * 3;
+        var at: *Point3D = &points[i];
+        (*at).x = i;
+        (*at).y = i * 2;
+        (*at).z = i * 3;
     }
     for (var i: int = 0; i < 20; i = i + 1) {
-        sum = sum + points[i].x + points[i].y + points[i].z;
+        var at: *Point3D = &points[i];
+        sum = sum + (*at).x + (*at).y + (*at).z;
     }
     if (sum != 1140) { return 1; }
     return 0;
 }
 
 func test_struct_assignment() -> int {
-    var a: Point3D;
-    a.x = 111;
-    a.y = 222;
-    a.z = 333;
+    var a: Point3D = new Point3D { x: 111, y: 222, z: 333 };
 
     var b: Point3D = a;
     if (b.x != 111) { return 1; }

@@ -1051,7 +1051,7 @@
  },
  "mod_ns_vtable": {
   "actual": "cider run exit 1, stdout empty, stderr diagnostic: `main.cid:10:13: a variable needs an initialiser`; driver has no module loader",
-  "blocker": "multi-file-imports (+ virtual-dispatch)",
+  "blocker": "virtual-methods: v3 has no vtable dispatch for plain classes (only interfaces); a no-virtual rewrite would drop the subject",
   "class": "D"
  },
  "module_qualified_template": {
@@ -1380,8 +1380,8 @@
   "class": "A"
  },
  "struct_ptr_stress": {
-  "actual": "exit 1; tests/corpus/legacy/struct_ptr_stress/main.cid:20:19: a variable needs an initialiser; tests/corpus/legacy/struct_ptr_stress/main.cid:29:19: a variable needs an initialiser",
-  "blocker": "stdlib-imports (+uninit-structs, asm-blocks)",
+  "actual": "rewritten uninit arrays/structs; remaining failure: 12:12 'more than six registers of arguments' (test_many_params, 8 ints) \u2014 native codegen refuses >6 GPR words instead of spilling to the stack; VM passes",
+  "blocker": "codegen-stack-arguments (FEATURE-NEW): SysV stack args unimplemented; also points[i].f store/read through indexed-field places unlowered",
   "class": "D"
  },
  "struct_template_params": {
