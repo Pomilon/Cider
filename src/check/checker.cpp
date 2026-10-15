@@ -424,6 +424,28 @@ void Checker::visitProgram(Program& n) {
                     }
                 }
             }
+            // `&add as *void`: a cast of a function address to a void
+            // pointer is the same link-time constant. Anything else
+            // falls through to fail loudly below.
+            if (!funcGlobal) {
+                if (const auto* cast = dynamic_cast<const Cast*>(g->init.get())) {
+                    if (const auto* addr = dynamic_cast<const Unary*>(cast->expr.get())) {
+                        if (addr->op == UnOp::Addr) {
+                            if (const auto* ident = dynamic_cast<const Ident*>(addr->operand.get())) {
+                                const resolve::Decl* decl = resolver_.lookup(moduleScope_, ident->name);
+                                TypeRef target = resolver_.resolveType(cast->target.get(), resolver_.scopeOf(module_));
+                                if (decl != nullptr && decl->kind == resolve::DeclKind::Func && decl->typeParams == 0 &&
+                                    !target.isError() && target.type->kind() == Kind::Pointer &&
+                                    target.type->pointee() == ctx_.void_() &&
+                                    declared.type->kind() == Kind::Pointer &&
+                                    declared.type->pointee() == ctx_.void_()) {
+                                    funcGlobal = true;
+                                }
+                            }
+                        }
+                    }
+                }
+            }
             // `nilPtr as I`: the null interface is sixteen zero bytes in
             // the image — a null data word beside a null vtable word — so
             // it is constant the way a null pointer is. The target

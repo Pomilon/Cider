@@ -261,12 +261,12 @@
  },
  "crossmod_iface_global_fromstore": {
   "actual": "exit 1; tests/corpus/crossmod_iface_global_fromstore/main.cid:106:14: a variable needs an initialiser; tests/corpus/crossmod_iface_global_fromstore/main.cid:111:13: a variable needs an initialiser",
-  "blocker": "multi-file imports",
+  "blocker": "destructors/finalizers + closures-repr: methods on globals unlowered, bare-fn closure values (same family as global_store)",
   "class": "D"
  },
  "crossmod_iface_global_store": {
   "actual": "exit 1; tests/corpus/crossmod_iface_global_store/main.cid:53:14: expected ';'; tests/corpus/crossmod_iface_global_store/main.cid:54:14: expected ';'",
-  "blocker": "multi-file imports",
+  "blocker": "destructors/finalizers: methods on globals unlowered + exit-time finalizer traces unimplemented (qualified interface-global stores themselves work)",
   "class": "D"
  },
  "crossmod_iface_param": {
@@ -615,9 +615,9 @@
   "class": "A"
  },
  "fn_ptr_global_cast": {
-  "actual": "exit=1 stdout_len=0 stderr_len=79 first='tests/corpus/fn_ptr_global_cast/main.cid:8:10: a variable needs an initialiser'",
+  "actual": "exact stdout/stderr/exit match",
   "blocker": "global-fn-address-const (+fn-as-casts)",
-  "class": "D"
+  "class": "A"
  },
  "fn_ptr_local": {
   "actual": "exit 0, empty stdout/stderr, matches expected.json verbatim after documented rewrites (diff #3 bare-fn to *func, &fn address, diff #4 (*f)() calls, diff #6/#7 new-literals for struct/array/uninit vars)",

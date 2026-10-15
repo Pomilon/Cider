@@ -1569,6 +1569,27 @@ void Lowerer::onGlobal(VarDecl& n) {
             return;
         }
         binding.initLabels.push_back(resolver_.linkName(*decl));
+    } else if (type.type->kind() == Kind::Pointer &&
+               type.type->pointee() == ctx_.void_() &&
+               dynamic_cast<const Cast*>(n.init.get()) != nullptr) {
+        // `&add as *void`: the single word holds the function's link-time
+        // address. Anything else here refuses: the gate lets only this
+        // spelling through.
+        const auto* cast = static_cast<const Cast*>(n.init.get());
+        const auto* addr = dynamic_cast<const Unary*>(cast->expr.get());
+        const auto* ident = (addr != nullptr && addr->op == UnOp::Addr)
+                                ? dynamic_cast<const Ident*>(addr->operand.get())
+                                : nullptr;
+        const resolve::Decl* decl =
+            ident != nullptr
+                ? resolver_.lookup(resolver_.moduleScope(), ident->name)
+                : nullptr;
+        if (decl == nullptr ||
+            decl->kind != resolve::DeclKind::Func || decl->typeParams != 0) {
+            refuse(n.init->pos, "a function global needs `&func as *void`");
+            return;
+        }
+        binding.initLabels.push_back(resolver_.linkName(*decl));
     } else if (type.type->kind() == Kind::Basic &&
                basicIsFloat(*type.type->basic())) {
         // A float global carries its IEEE bits in the image. The

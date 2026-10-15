@@ -1580,6 +1580,18 @@ void testIndirectCall() {
     check(signaled, "a nil indirect call traps");
 }
 
+void testFnAddrGlobal() {
+    std::printf("function addresses fold into globals\n");
+    check(runQuiet("func add(a: int, b: int) -> int { return a + b; }\n"
+                   "var g: *void = &add as *void;\n"
+                   "func main() -> int {\n"
+                   "    if (g == nilPtr) { return 1; }\n"
+                   "    if (g != (&add as *void)) { return 2; }\n"
+                   "    return 0;\n"
+                   "}\n") == 0,
+          "a global holds a function address");
+}
+
 void testFnPtrCompare() {
     std::printf("function pointer comparison runs\n");
     check(runQuiet("func main() -> int {\n"
@@ -2279,6 +2291,7 @@ int main() {
     testForIn();
     testArith32();
     testIndirectCall();
+    testFnAddrGlobal();
     testFnPtrCompare();
     testClosure();
     testClosureElement();
