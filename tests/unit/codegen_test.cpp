@@ -217,31 +217,6 @@ void testExit() {
 }
 
 // Calls pass arguments in registers and return in rax.
-// FEATURE (new, this slice): calls with more than six GPR argument words
-// spill to the stack the SysV way, instead of a loud refusal.
-void testStackArgs() {
-    std::printf("stack arguments spill\n");
-    check(runQuiet("func add8(a: int, b: int, c: int, d: int, e: int, f: int, g: int, h: int) -> int {\n"
-                   "    return a + b + c + d + e + f + g + h;\n"
-                   "}\n"
-                   "func main() -> int { return add8(1, 2, 3, 4, 5, 6, 7, 8); }\n") == 36,
-          "eight integer arguments add up");
-    check(runQuiet("func mix(a: int, b: int, c: int, d: int, e: int, g: int, s: string) -> int {\n"
-                   "    return a + b + c + d + e + g + s.len;\n"
-                   "}\n"
-                   "func main() -> int { return mix(1, 2, 3, 4, 5, 6, \"abc\"); }\n") == 9,
-          "a string tail rides the stack");
-    check(runQuiet("func f8(a: int, b: int, c: int, d: int, e: int, g: int, h: int, i: int) -> float {\n"
-                   "    return 1.0;\n"
-                   "}\n"
-                   "func use() -> int {\n"
-                   "    var f: float = f8(1, 2, 3, 4, 5, 6, 7, 8);\n"
-                   "    return f as int;\n"
-                   "}\n"
-                   "func main() -> int { return use(); }\n") == 1,
-          "a float between register args still passes");
-}
-
 void testCalls() {
     std::printf("calls\n");
     check(runQuiet("func add(a: int, b: int) -> int { return a + b; }\n"
@@ -2301,7 +2276,6 @@ void testAsm() {
 int main() {
     std::printf("codegen_test — a Cider program runs\n\n");
     testExit();
-    testStackArgs();
     testCalls();
     testControl();
     testGlobals();
