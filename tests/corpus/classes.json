@@ -135,9 +135,9 @@
   "class": "B"
  },
  "bitfields": {
-  "actual": "exit 1; tests/corpus/bitfields/main.cid:9:15: a variable needs an initialiser; tests/corpus/bitfields/main.cid:14:19: expected an expression; secondary: int:3 bitfield decls",
+  "actual": "exact stdout/stderr/exit match",
   "blocker": "asm blocks",
-  "class": "D"
+  "class": "A"
  },
  "bitmask": {
   "actual": "compiler crash at check (SIGABRT/SIGBUS heap corruption, 'free(): invalid pointer'); u64-max literal as arg crashes (probe x1), in var-init gives clean 'integer literal does not fit' (probe v1)",
