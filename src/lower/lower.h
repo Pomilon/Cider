@@ -62,6 +62,10 @@ struct GlobalBinding {
     // A read-only bytes object this global points at, empty when none. Set
     // for string globals, whose 16 bytes are (rodata address, length).
     std::string initLabel;
+    // Link-time code addresses this global holds, one `.quad` per entry.
+    // Set for function-pointer globals, whose single word is the
+    // function's address. Empty means the scalar path.
+    std::vector<std::string> initLabels;
     bool isVolatile = false;
 };
 

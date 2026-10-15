@@ -398,6 +398,22 @@ void Checker::visitProgram(Program& n) {
                     }
                 }
             }
+            // `&dbl`: a same-module function names its code address,
+            // which is a link-time constant — the lowerer emits the
+            // address word, so the gate only recognises the spelling.
+            // Anything else falls through to fail loudly below.
+            if (!funcGlobal) {
+                if (const auto* addr = dynamic_cast<const Unary*>(g->init.get())) {
+                    if (addr->op == UnOp::Addr) {
+                        if (const auto* ident = dynamic_cast<const Ident*>(addr->operand.get())) {
+                            const resolve::Decl* decl = resolver_.lookup(moduleScope_, ident->name);
+                            if (decl != nullptr && decl->kind == resolve::DeclKind::Func && decl->typeParams == 0) {
+                                funcGlobal = true;
+                            }
+                        }
+                    }
+                }
+            }
             // `nilPtr as I`: the null interface is sixteen zero bytes in
             // the image — a null data word beside a null vtable word — so
             // it is constant the way a null pointer is. The target

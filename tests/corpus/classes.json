@@ -610,9 +610,9 @@
   "class": "A"
  },
  "fn_ptr_global": {
-  "actual": "exit=1 stdout_len=0 stderr_len=148 first='tests/corpus/fn_ptr_global/main.cid:4:10: a variable needs an initialiser'",
+  "actual": "exact stdout/stderr/exit match",
   "blocker": "global-fn-address-const (global = &fn rejected as non-constant)",
-  "class": "D"
+  "class": "A"
  },
  "fn_ptr_global_cast": {
   "actual": "exit=1 stdout_len=0 stderr_len=79 first='tests/corpus/fn_ptr_global_cast/main.cid:8:10: a variable needs an initialiser'",

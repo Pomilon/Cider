@@ -1545,6 +1545,23 @@ void Lowerer::onGlobal(VarDecl& n) {
         }
         binding.initLabel = fwd;
         binding.initial = 0;
+    } else if (type.type->kind() == Kind::FunctionPtr &&
+               dynamic_cast<const Unary*>(n.init.get()) != nullptr) {
+        // `&dbl`: the single word holds the function's link-time
+        // address. Anything else here refuses: the gate lets only
+        // this spelling through.
+        const auto* addr = static_cast<const Unary*>(n.init.get());
+        const auto* ident = dynamic_cast<const Ident*>(addr->operand.get());
+        const resolve::Decl* decl =
+            ident != nullptr
+                ? resolver_.lookup(resolver_.moduleScope(), ident->name)
+                : nullptr;
+        if (addr->op != UnOp::Addr || decl == nullptr ||
+            decl->kind != resolve::DeclKind::Func || decl->typeParams != 0) {
+            refuse(n.init->pos, "a function global needs `&func`");
+            return;
+        }
+        binding.initLabels.push_back(resolver_.linkName(*decl));
     } else if (type.type->kind() == Kind::Basic &&
                basicIsFloat(*type.type->basic())) {
         // A float global carries its IEEE bits in the image. The
@@ -1634,6 +1651,7 @@ void Lowerer::onGlobal(VarDecl& n) {
     global.type = type;
     global.initial = binding.initial;
     global.initLabel = binding.initLabel;
+    global.initLabels = binding.initLabels;
     global.initWords = binding.initWords;
     module_->globals.push_back(global);
 }
