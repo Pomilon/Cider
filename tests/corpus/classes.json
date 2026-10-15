@@ -870,9 +870,9 @@
   "class": "B"
  },
  "interface_reassign": {
-  "actual": "cider run exit 1, stdout empty, stderr diagnostic: `main.cid:23:14: a variable needs an initialiser`",
+  "actual": "exact stdout/stderr/exit match",
   "blocker": "interface-boxing + this + uninit + ternary-lowering",
-  "class": "D"
+  "class": "A"
  },
  "interface_returns": {
   "actual": "cider run exit 1, stdout empty, stderr diagnostic: `main.cid:44:12: a variable needs an initialiser`; driver has no module loader",
