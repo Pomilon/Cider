@@ -2487,7 +2487,7 @@ void Lowerer::storeRange(Position pos, const Place& place,
             instr.storedValue = words[word];
             if (sub != 0) {
                 ir::Value by =
-                    constantI64(sub * layout::kSizeI8, tally, pos);
+                    constantI64(sub * layout::kBitsPerByte, tally, pos);
                 if (failed_) {
                     return;
                 }

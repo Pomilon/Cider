@@ -604,6 +604,9 @@ bool Resolver::resolveProgram(Program& program, const std::string& module) {
                 alias->init = target->init;
                 alias->isExtern = target->isExtern;
                 alias->isPrelude = target->isPrelude;
+                if (alias->kind == DeclKind::Alias) {
+                    alias->homeModule = from->module;
+                }
                 if (target->kind == DeclKind::Const && target->init != nullptr) {
                     constInits_[module + "." + name] = target->init;
                 }
@@ -1061,8 +1064,17 @@ TypeRef Resolver::resolveNamed(const NamedType* type, const Scope* scope) {
         }
         aliasActive_.insert(qualified);
         const Scope* inner = home;
+        // A from-imported alias names its target in the defining
+        // module: answer it there, not in the use scope. Same-module
+        // aliases carry no home and resolve where they always did.
+        if (!decl->homeModule.empty()) {
+            const Scope* origin = scopeOf(decl->homeModule);
+            if (origin != nullptr) {
+                inner = origin;
+            }
+        }
         if (!decl->paramNames.empty()) {
-            inner = typeParamScope(home, home->module, decl->paramNames, decl->id,
+            inner = typeParamScope(inner, inner->module, decl->paramNames, decl->id,
                                    type->pos);
         }
         TypeRef target = resolveType(decl->aliasTarget, inner);

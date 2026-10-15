@@ -659,6 +659,14 @@ void testStruct() {
     check(runQuiet("struct A { var p: *A; var n: int; }\n"
                    "func main() -> int { var q: *A = alloc(16, 8) as *A; return (q != nilPtr) as int; }\n") == 1,
           "a pointer to self still declares and runs");
+    // An array field reads back every element, including ones past the
+    // first word: the take splitter shifts sub-word takes by bits.
+    check(runQuiet("struct Box { var leaf: int; var values: [u16; 3]; }\n"
+                   "func main() -> int {\n"
+                   "    var b: Box = new Box { leaf: 41, values: new [u16; 3] { 5, 6, 7 } };\n"
+                   "    return (b.values[2] as int);\n"
+                   "}\n") == 7,
+          "a struct array tail element reads back");
 }
 
 // Arrays live in memory too: constant and runtime indices, element stores.
@@ -2139,6 +2147,34 @@ void testFloat() {
 
 // A program that exits through its own asm block: a local placeholder
 // feeds the exit code, a global placeholder feeds a buffer address.
+void testRegisterEscape() {
+    std::printf("register-named functions escape\n");
+    bool sig = false;
+    // `cs` is a segment register: GAS rejects every textual reference
+    // to the bare spelling, so the emitter renames the symbol at every
+    // site that names it.
+    check(runCode("func cs() -> int { return 8; }\n"
+                  "func main() -> int { return cs(); }\n",
+                  sig) == 8 && !sig,
+          "a function named like a register still calls");
+    // `add` is only a mnemonic: GAS accepts it bare, so the emitter
+    // keeps the spelling instead of renaming every function.
+    check(runCode("func add(a: int, b: int) -> int { return a + b; }\n"
+                  "func main() -> int { return add(20, 22); }\n",
+                  sig) == 42 && !sig,
+          "a function named like a mnemonic keeps its spelling");
+    Built text = build("func cs() -> int { return 8; }\n"
+                       "func add(a: int, b: int) -> int { return a + b; }\n"
+                       "func main() -> int { return cs() + add(1, 1); }\n");
+    check(text.ok, "the escape program builds");
+    check(text.asmText.find("call cs_") != std::string::npos,
+          "a call names the escaped symbol");
+    check(text.asmText.find("cs_:") != std::string::npos,
+          "the definition names the escaped symbol");
+    check(text.asmText.find("call add") != std::string::npos,
+          "a mnemonic call keeps its spelling");
+}
+
 void testAsm() {
     std::printf("asm runs\n");
     bool sig = false;
@@ -2237,6 +2273,7 @@ int main() {
     testTernary();
     testInterp();
     testFloat();
+    testRegisterEscape();
     testAsm();
     testTrap();
     testPanic();

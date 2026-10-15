@@ -118,6 +118,36 @@ void testRun() {
 // A program spread over sibling modules checks and runs: the driver loads
 // each import beside the entry file, checks every module, and links every
 // function into one binary. A dotted import names the missing module.
+void testImportAlias() {
+    std::printf("imported aliases\n");
+    char dir[] = "/tmp/cider_impalias_XXXXXX";
+    check(mkdtemp(dir) != nullptr, "a scratch directory exists");
+    std::string lib = std::string(dir) + "/lib.cid";
+    FILE* libFile = fopen(lib.c_str(), "w");
+    const char* libText =
+        "export struct R { var v: int; }\n"
+        "export type A = R;\n";
+    fwrite(libText, 1, strlen(libText), libFile);
+    fclose(libFile);
+    std::string main = std::string(dir) + "/main.cid";
+    FILE* mainFile = fopen(main.c_str(), "w");
+    const char* mainText =
+        "from lib import A;\n"
+        "func main() -> int {\n"
+        "    var x: A = new A { v: 5 };\n"
+        "    return x.v;\n"
+        "}\n";
+    fwrite(mainText, 1, strlen(mainText), mainFile);
+    fclose(mainFile);
+    Result ok = run({"check", main});
+    check(ok.code == 0, "a from-imported alias checks: " + ok.err);
+    Result ran = run({"run", main});
+    check(ran.code == 5, "a from-imported alias constructs: " + ran.err);
+    unlink(main.c_str());
+    unlink(lib.c_str());
+    rmdir(dir);
+}
+
 void testImports() {
     std::printf("imports\n");
     char dir[] = "/tmp/cider_imports_XXXXXX";
@@ -421,6 +451,7 @@ int main() {
     testCompileIr();
     testRun();
     testImports();
+    testImportAlias();
     testImportGlobal();
     testImportQualifiedGlobal();
     testModuleConst();

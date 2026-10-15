@@ -58,6 +58,11 @@ struct Decl {
     Kind nominal = Kind::Error;
     // Alias only: the spelling it names. Non-owning; the AST outlives use.
     const TypeExpr* aliasTarget = nullptr;
+    // Alias only, from-import: the defining module the target lives in
+    // (`lib` for `from lib import A`). The resolver answers the target
+    // there, not in the use scope — target names mean the defining
+    // module's members. Empty for same-module aliases.
+    std::string homeModule;
     // TypeParam only: the template it belongs to, and its position in that
     // template's parameter list.
     DeclId templateId;

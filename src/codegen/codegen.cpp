@@ -870,8 +870,8 @@ private:
         uint32_t cells = top + 1;
         uint32_t span = (cells * 8 + 15) & ~15u;
 
-        out_ += ".globl " + fn.name + "\n";
-        out_ += fn.name + ":\n";
+        out_ += ".globl " + asmSafeName(fn.name) + "\n";
+        out_ += asmSafeName(fn.name) + ":\n";
         out_ += "  push rbp\n";
         out_ += "  mov rbp, rsp\n";
         out_ += "  sub rsp, " + std::to_string(span) + "\n";
@@ -1389,7 +1389,7 @@ private:
                 out_ += "  mov rax, " + slot(instr.calleeValue.id) + "\n";
                 out_ += "  call rax\n";
             } else {
-                out_ += "  call " + instr.callee + "\n";
+                out_ += "  call " + asmSafeName(instr.callee) + "\n";
             }
             if (!instr.results.empty()) {
                 if (instr.width == ir::IRType::F32) {
@@ -1417,13 +1417,13 @@ private:
             return true;
         }
         if (instr.op == ir::Op::DataAddr) {
-            out_ += "  lea rax, [rip + " + instr.globalLabel + "]\n";
+            out_ += "  lea rax, [rip + " + asmSafeName(instr.globalLabel) + "]\n";
             out_ += "  mov " + slot(instr.results[0].id) + ", rax\n";
-            addrWords_[instr.results[0].id] = instr.globalLabel;
+            addrWords_[instr.results[0].id] = asmSafeName(instr.globalLabel);
             return true;
         }
         if (instr.op == ir::Op::FnAddr) {
-            out_ += "  lea rax, [rip + " + instr.globalLabel + "]\n";
+            out_ += "  lea rax, [rip + " + asmSafeName(instr.globalLabel) + "]\n";
             out_ += "  mov " + slot(instr.results[0].id) + ", rax\n";
             return true;
         }
@@ -1438,6 +1438,61 @@ private:
     // The size an asm placeholder asks for: a `{name:q}`-style suffix
     // overrides, and plain `{name}` is the value's own width, always with
     // an explicit PTR so both operands of the template stay unambiguous.
+    // GAS parses certain spellings as registers in operand position
+    // (`call cs` reads the segment register, never the symbol): a
+    // function carrying one of those spellings is renamed at every site
+    // that prints it. All other spellings — instruction mnemonics like
+    // `add` included — print unchanged.
+    bool isMachineReg(const std::string& spelling) {
+        std::string low;
+        for (char c : spelling) {
+            low.push_back(c >= 'A' && c <= 'Z'
+                              ? static_cast<char>(c + ('a' - 'A'))
+                              : c);
+        }
+        static const char* const regs[] = {
+            "rax", "rbx", "rcx", "rdx", "rsi", "rdi", "rbp", "rsp",
+            "r8", "r9", "r10", "r11", "r12", "r13", "r14", "r15",
+            "eax", "ebx", "ecx", "edx", "esi", "edi", "ebp", "esp",
+            "r8d", "r9d", "r10d", "r11d", "r12d", "r13d", "r14d", "r15d",
+            "ax", "bx", "cx", "dx", "si", "di", "bp", "sp",
+            "r8w", "r9w", "r10w", "r11w", "r12w", "r13w", "r14w", "r15w",
+            "al", "bl", "cl", "dl", "sil", "dil", "bpl", "spl",
+            "r8b", "r9b", "r10b", "r11b", "r12b", "r13b", "r14b", "r15b",
+            "ah", "bh", "ch", "dh",
+            "rip", "eip",
+            "cs", "ds", "es", "ss", "fs", "gs",
+            "cr0", "cr1", "cr2", "cr3", "cr4", "cr5", "cr6", "cr7",
+            "cr8", "cr9", "cr10", "cr11", "cr12", "cr13", "cr14", "cr15",
+            "dr0", "dr1", "dr2", "dr3", "dr4", "dr5", "dr6", "dr7",
+            "dr8", "dr9", "dr10", "dr11", "dr12", "dr13", "dr14", "dr15",
+            "mm0", "mm1", "mm2", "mm3", "mm4", "mm5", "mm6", "mm7",
+            "st", "st0", "st1", "st2", "st3", "st4", "st5", "st6", "st7",
+            "xmm0", "xmm1", "xmm2", "xmm3", "xmm4", "xmm5", "xmm6", "xmm7",
+            "xmm8", "xmm9", "xmm10", "xmm11", "xmm12", "xmm13", "xmm14", "xmm15",
+            "xmm16", "xmm17", "xmm18", "xmm19", "xmm20", "xmm21", "xmm22", "xmm23",
+            "xmm24", "xmm25", "xmm26", "xmm27", "xmm28", "xmm29", "xmm30", "xmm31",
+            "ymm0", "ymm1", "ymm2", "ymm3", "ymm4", "ymm5", "ymm6", "ymm7",
+            "ymm8", "ymm9", "ymm10", "ymm11", "ymm12", "ymm13", "ymm14", "ymm15",
+            "ymm16", "ymm17", "ymm18", "ymm19", "ymm20", "ymm21", "ymm22", "ymm23",
+            "ymm24", "ymm25", "ymm26", "ymm27", "ymm28", "ymm29", "ymm30", "ymm31",
+            "zmm0", "zmm1", "zmm2", "zmm3", "zmm4", "zmm5", "zmm6", "zmm7",
+            "zmm8", "zmm9", "zmm10", "zmm11", "zmm12", "zmm13", "zmm14", "zmm15",
+            "zmm16", "zmm17", "zmm18", "zmm19", "zmm20", "zmm21", "zmm22", "zmm23",
+            "zmm24", "zmm25", "zmm26", "zmm27", "zmm28", "zmm29", "zmm30", "zmm31",
+            "k0", "k1", "k2", "k3", "k4", "k5", "k6", "k7",
+            "bnd0", "bnd1", "bnd2", "bnd3",
+        };
+        for (const char* reg : regs) {
+            if (low == reg) {
+                return true;
+            }
+        }
+        return false;
+    }
+    std::string asmSafeName(const std::string& spelling) {
+        return isMachineReg(spelling) ? spelling + "_" : spelling;
+    }
     std::string asmSizeName(ir::IRType width, char forced) {
         if (forced == 'b') {
             return "BYTE PTR";

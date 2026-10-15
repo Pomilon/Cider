@@ -1070,9 +1070,9 @@
   "class": "A"
  },
  "nasm_reserved_names": {
-  "actual": "cider run exit 1, stdout empty, stderr diagnostic: `main.cid:11:23: expected an expression` (bare `[1, 2, 3]` literal)",
+  "actual": "exact stdout/stderr/exit match",
   "blocker": "for-lowering (bare-array-literal is rewritable per diff #6 but for-loop blocks)",
-  "class": "D"
+  "class": "A"
  },
  "nested_arrays": {
   "actual": "exit 0, exact",
@@ -1370,9 +1370,9 @@
   "class": "D"
  },
  "struct_literal_alias": {
-  "actual": "v3 rejects v2 syntax loudly at parse (run exit 1: OUT: ERR:tests/corpus/struct_literal_alias/main.cid:20:33: expected ';'\\ntests/corpus/struct_literal_alias/m...)",
+  "actual": "exact stdout/stderr/exit match",
   "blocker": "bare T{...} literals need new per diff #6 (also multi-file-imports)",
-  "class": "D"
+  "class": "A"
  },
  "struct_param": {
   "actual": "rewrite to v3 new-exprs passes exact",
