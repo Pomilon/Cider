@@ -1352,10 +1352,14 @@ private:
             }
             const uint64_t kIntRegs = 6;
             const uint64_t kSseRegs = 8;
-            if (gpr > kIntRegs) {
-                refuse(instr.loc, "more than six registers of arguments");
-                return false;
-            }
+            // Integer words past the sixth register spill to the stack
+            // the SysV way: pushed in reverse order so the seventh
+            // argument ends up nearest the return address. The count
+            // comes out even here because the callee's own `push rbp`
+            // and the call's return address keep the total 16-aligned;
+            // a one-word tail is padded below.
+            const uint64_t stackWords = gpr > kIntRegs ? gpr - kIntRegs : 0;
+            const uint64_t stackPad = stackWords % 2;
             if (sse > kSseRegs) {
                 refuse(instr.loc, "more than eight float arguments");
                 return false;
@@ -1367,6 +1371,7 @@ private:
             // instead of consuming an integer one.
             uint64_t index = 0;
             uint64_t sseIndex = 0;
+            std::vector<const ir::Value*> spilled;
             for (const ir::Argument& arg : instr.arguments) {
                 const bool floatArg = arg.width == ir::IRType::F32 ||
                                       arg.width == ir::IRType::F64;
@@ -1380,16 +1385,65 @@ private:
                     continue;
                 }
                 for (const ir::Value& word : arg.words) {
-                    out_ += "  mov " + std::string(argReg(index)) + ", " +
-                            slot(word.id) + "\n";
+                    if (index < kIntRegs) {
+                        out_ += "  mov " + std::string(argReg(index)) + ", " +
+                                slot(word.id) + "\n";
+                    } else {
+                        spilled.push_back(&word);
+                    }
                     ++index;
                 }
+            }
+            // The words past the sixth register spill the SysV way: the
+            // seventh argument sits nearest the return address, so the
+            // spill pushes run backwards — the LAST spilled word goes down
+            // first — with a lone final word padded back to sixteen. Every
+            // spilled
+            // word lands in scratch first: a push moves rsp, and a static
+            // slot offset read after one reads the wrong slot, so the push
+            // phase only ever reads the scratch written under one fixed rsp.
+            if (stackWords != 0) {
+                // Stage, then push: a push moves rsp, and slot offsets are
+                // static, so the words for the spill land in scratch under
+                // one fixed rsp and the pushes only read that scratch. The
+                // last-staged word goes down first, which puts argument
+                // seven at the lowest address, the psABI's order.
+                uint64_t taken = (stackWords + stackPad) * 8;
+                out_ += "  sub rsp, " + std::to_string(taken) + "\n";
+                for (uint64_t at = 0; at < spilled.size(); ++at) {
+                    // A register mediates the copy: x86 moves one memory
+                    // operand per instruction, so the word reaches scratch
+                    // through rax. The taken bytes ADD to the slot offset,
+                    // so the reader still reaches the caller's slot after
+                    // this call's own sub.
+                    out_ += "  mov rax, " +
+                            atAddr("rsp + " +
+                                       std::to_string(spilled[at]->id * 8 +
+                                                      taken),
+                                   0) + "\n";
+                    out_ += "  mov " + slot(at) + ", rax\n";
+                }
+                if (stackPad != 0) {
+                    out_ += "  mov rax, 0\n";
+                    out_ += "  mov " + slot(spilled.size()) + ", rax\n";
+                }
+                for (uint64_t at = spilled.size() + stackPad; at > 0; --at) {
+                    out_ += "  push " + slot(at - 1) + "\n";
+                }
+            } else if (stackPad != 0) {
+                out_ += "  sub rsp, 8\n";
             }
             if (instr.call.indirect) {
                 out_ += "  mov rax, " + slot(instr.calleeValue.id) + "\n";
                 out_ += "  call rax\n";
             } else {
                 out_ += "  call " + asmSafeName(instr.callee) + "\n";
+            }
+            // The callee's answer is read before the stack moves back:
+            // the pops below only drop what this call pushed.
+            if (stackWords != 0 || stackPad != 0) {
+                uint64_t bytes = stackWords * 8 + stackPad * 8;
+                out_ += "  add rsp, " + std::to_string(bytes) + "\n";
             }
             if (!instr.results.empty()) {
                 if (instr.width == ir::IRType::F32) {
