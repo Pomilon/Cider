@@ -1390,9 +1390,9 @@
   "class": "D"
  },
  "struct_type_import": {
-  "actual": "v3 rejects v2 syntax loudly at parse (run exit 1: OUT: ERR:tests/corpus/struct_type_import/main.cid:12:16: expected ';'\\ntests/corpus/struct_type_import/main....)",
+  "actual": "exact stdout/stderr/exit match",
   "blocker": "v2 type syntax at 12:16 (also stdlib-missing, multi-file-imports)",
-  "class": "D"
+  "class": "A"
  },
  "syscall_efault_bounds": {
   "actual": "pass",
