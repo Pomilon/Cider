@@ -467,7 +467,9 @@ void testSubdirImport() {
     const char* modText =
         "export struct Box { var v: int; }\n"
         "export func mval() -> int { return 9; }\n"
-        "export func bget(b: Box) -> int { return b.v; }\n";
+        "export func bget(b: Box) -> int { return b.v; }\n"
+        "export enum Color { RED, GREEN, BLUE }\n"
+        "export type Alias = Color;\n";
     fwrite(modText, 1, strlen(modText), modFile);
     fclose(modFile);
     std::string main = std::string(dir) + "/main.cid";
@@ -479,6 +481,8 @@ void testSubdirImport() {
         "    if (util.mval() != 9) { return 1; }\n"
         "    var b: util.Box = new Box { v: 9 };\n"
         "    if (util.bget(b) != 9) { return 2; }\n"
+        "    var e: int = util.Alias.GREEN;\n"
+        "    if (e != 1) { return 3; }\n"
         "    return 0;\n"
         "}\n";
     fwrite(mainText, 1, strlen(mainText), mainFile);

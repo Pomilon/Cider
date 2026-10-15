@@ -3108,6 +3108,62 @@ std::vector<ir::Value> Lowerer::lowerField(const Field& n) {
             }
         }
     }
+    if (const auto* inner = dynamic_cast<const Field*>(n.object.get())) {
+        // `mid.Col.GREEN` folds to the enumerator's integer, mirroring
+        // the same-module spelling above. Anything else here refuses:
+        // the checker lets only this spelling through.
+        if (const auto* mod = dynamic_cast<const Ident*>(inner->object.get())) {
+            bool shadowed = false;
+            for (auto frame = locals_.rbegin();
+                 frame != locals_.rend() && !shadowed; ++frame) {
+                shadowed = frame->find(mod->name) != frame->end();
+            }
+            const resolve::Scope* here =
+                resolver_.scopeOf(checker_.module());
+            const resolve::Decl* modDecl =
+                here != nullptr ? resolver_.lookup(here, mod->name) : nullptr;
+            const resolve::Scope* home =
+                (modDecl != nullptr &&
+                 modDecl->kind == resolve::DeclKind::Module)
+                    ? resolver_.scopeOf(modDecl->origin)
+                    : nullptr;
+            const resolve::Decl* member =
+                home != nullptr ? resolver_.lookup(home, inner->name)
+                                : nullptr;
+            std::optional<DeclId> enumId;
+            if (!shadowed && member != nullptr &&
+                member->kind == resolve::DeclKind::Type &&
+                member->nominal == Kind::Enum) {
+                enumId = member->id;
+            } else if (!shadowed && member != nullptr &&
+                       member->kind == resolve::DeclKind::Alias &&
+                       member->aliasTarget != nullptr) {
+                TypeRef target =
+                    resolver_.resolveType(member->aliasTarget, home);
+                if (!target.isError() &&
+                    target.type->kind() == Kind::Enum) {
+                    enumId = target.type->decl();
+                }
+            }
+            if (enumId.has_value()) {
+                const resolve::Decl* named = resolver_.declById(*enumId);
+                if (named == nullptr || named->scope == nullptr ||
+                    !resolver_.isEnumMember(
+                        named->scope->module + "." + named->name, n.name)) {
+                    refuse(n.pos, "this field access");
+                    return {undefined()};
+                }
+                int64_t value = resolver_.enumValue(
+                    named->scope->module + "." + named->name, n.name);
+                TypeRef count{ctx_.basic(BasicKind::I32)};
+                ir::Value answer = constantI64(value, count, n.pos);
+                if (failed_) {
+                    return {undefined()};
+                }
+                return {answer};
+            }
+        }
+    }
     Place base;
     if (const auto* call = dynamic_cast<const Call*>(n.object.get())) {
         // A field of a call's answer (`greet().len`, `make().x`): the words

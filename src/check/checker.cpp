@@ -3136,6 +3136,58 @@ TypeRef Checker::checkField(Field& expr) {
             }
         }
     }
+    if (const auto* inner = dynamic_cast<const Field*>(expr.object.get())) {
+        // `mid.Col.GREEN`: the object names an enum through a module
+        // member — either the enum itself or an alias of it — so the
+        // field names one of its enumerators (TYPES §2.6). A bare
+        // `mid.Col` stays unbound: only the three-part spelling is a
+        // value, and anything else falls through to fail loudly below.
+        if (const auto* mod = dynamic_cast<const Ident*>(inner->object.get())) {
+            if (findLocal(mod->name) == nullptr) {
+                const resolve::Decl* modDecl =
+                    resolver_.lookup(moduleScope_, mod->name);
+                if (modDecl != nullptr &&
+                    modDecl->kind == resolve::DeclKind::Module) {
+                    const resolve::Scope* home =
+                        resolver_.scopeOf(modDecl->origin);
+                    const resolve::Decl* member =
+                        home != nullptr ? resolver_.lookup(home, inner->name)
+                                        : nullptr;
+                    TypeRef target;
+                    std::optional<DeclId> enumId;
+                    if (member != nullptr &&
+                        member->kind == resolve::DeclKind::Type &&
+                        member->nominal == Kind::Enum) {
+                        enumId = member->id;
+                    } else if (member != nullptr &&
+                               member->kind == resolve::DeclKind::Alias &&
+                               member->aliasTarget != nullptr) {
+                        target = resolver_.resolveType(member->aliasTarget, home);
+                        if (!target.isError() &&
+                            target.type->kind() == Kind::Enum) {
+                            enumId = target.type->decl();
+                        }
+                    }
+                    if (enumId.has_value()) {
+                        bool found = false;
+                        for (const auto& entry : resolver_.enumMembers(*enumId)) {
+                            if (entry.first == expr.name) {
+                                found = true;
+                                break;
+                            }
+                        }
+                        if (!found) {
+                            fail(expr.pos, "'" + expr.name +
+                                                  "' is not an enumerator of '" +
+                                                  inner->name + "'");
+                            return errorRef();
+                        }
+                        return TypeRef{ctx_.basic(BasicKind::I32)};
+                    }
+                }
+            }
+        }
+    }
     TypeRef object = checkExpr(expr.object.get(), TypeRef{ctx_.wildcard()});
     if (object.isError()) {
         return errorRef();

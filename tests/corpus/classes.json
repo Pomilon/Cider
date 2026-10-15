@@ -281,7 +281,7 @@
  },
  "crossmod_qualified_reexport": {
   "actual": "exit 1; tests/corpus/crossmod_qualified_reexport/main.cid:9:13: expected ';'; tests/corpus/crossmod_qualified_reexport/main.cid:9:13: a struct holds fields and methods",
-  "blocker": "multi-file imports",
+  "blocker": "enum-values: enum-typed struct fields reject i32 enumerators; enum-vs-enum comparison unimplemented (alias-enum qualifier itself now works)",
   "class": "D"
  },
  "cyclic_alias_bare": {
