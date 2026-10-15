@@ -1170,9 +1170,9 @@
   "class": "B"
  },
  "qualified_template_late_hooks": {
-  "actual": "cider run exit 1, stdout empty, stderr diagnostic: `main.cid:13:18: a variable needs an initialiser`; driver has no module loader",
+  "actual": "exact stdout/stderr/exit match",
   "blocker": "multi-file-imports + generics",
-  "class": "D"
+  "class": "A"
  },
  "recursion_stress": {
   "actual": "exit 0; self-checked (Ackermann(3,3)=61); stub expected.json filled from verified output",

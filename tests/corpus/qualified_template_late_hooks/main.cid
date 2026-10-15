@@ -10,12 +10,9 @@ func main() -> int {
   if (wrap.classFieldUsed() != 4) { return 5; }
   if (wrap.aliasUsed() != 9) { return 6; }
 
-  var r: late_lib.Triple<int>;
-  r.a = 1;
-  r.b = 2;
-  r.c = 3;
+  var r: late_lib.Triple<int> = new late_lib.Triple<int> { a: 1, b: 2, c: 3 };
   if (r.a + r.b + r.c != 6) { return 7; }
-  var _unused: late_lib.Triple<char>;
+  var _unused: late_lib.Triple<char> = new late_lib.Triple<char> { a: 'x', b: 'y', c: 'z' };
   if (sizeof(late_lib.Triple<int>) != 12) { return 8; }
   return 0;
 }
