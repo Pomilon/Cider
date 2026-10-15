@@ -860,9 +860,9 @@
   "class": "D"
  },
  "interface_list_arg_return": {
-  "actual": "cider run exit 1, stdout empty, stderr diagnostic: `main.cid:72:16: a variable needs an initialiser`; driver has no module loader",
+  "actual": "exact stdout/stderr/exit match",
   "blocker": "multi-file-imports (+ interface-boxing, stdlib-io)",
-  "class": "D"
+  "class": "A"
  },
  "interface_projection": {
   "actual": "tests/corpus/interface_projection/main.cid:16:8: a method needs a name",
