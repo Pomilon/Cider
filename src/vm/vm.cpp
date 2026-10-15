@@ -2122,13 +2122,20 @@ static VmResult runProgram(const ir::Module& module,
             }
         } else if (!global.initLabel.empty()) {
             // A string global names its bytes: the address of them, then the
-            // length, is the pair a string value reads.
+            // length, is the pair a string value reads. A closure global
+            // names its code instead: the forwarder's tag beside empty
+            // captures reads as the (code, caps) pair everywhere else.
             auto found = run.labels.find(global.initLabel);
-            if (found == run.labels.end()) {
-                run.refuse(fn->loc, "vm cannot address '" + global.initLabel + "'");
-                return run.out;
+            if (found != run.labels.end()) {
+                run.appendWord(static_cast<uint64_t>(found->second));
+            } else {
+                auto code = run.functionTags.find(global.initLabel);
+                if (code == run.functionTags.end()) {
+                    run.refuse(fn->loc, "vm cannot address '" + global.initLabel + "'");
+                    return run.out;
+                }
+                run.appendWord(static_cast<uint64_t>(code->second));
             }
-            run.appendWord(static_cast<uint64_t>(found->second));
             run.appendWord(static_cast<uint64_t>(global.initial));
         } else {
             run.appendWord(static_cast<uint64_t>(global.initial));
