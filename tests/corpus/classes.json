@@ -1365,9 +1365,9 @@
   "class": "A"
  },
  "struct_element_store": {
-  "actual": "blocked-A reclassified 2026-10-05: must pass once blocker lands; run exit 1: OUT: ERR:tests/corpus/struct_element_store/main.cid:31:13: a variable needs an initialiser\\ntests/corpus/struct_element_store/main.cid:37:13: a variable needs an initialiser\\ntests/corpus/struct_element_store/ma",
+  "actual": "exact stdout/stderr/exit match",
   "blocker": "stdlib-missing (no std.* modules in v3; only prelude print/alloc/free/panic)",
-  "class": "D"
+  "class": "A"
  },
  "struct_literal_alias": {
   "actual": "exact stdout/stderr/exit match",

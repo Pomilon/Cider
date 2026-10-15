@@ -5847,19 +5847,42 @@ std::vector<ir::Value> Lowerer::lowerWords(const Expr* expr) {
         return {undefined()};
     }
     if (auto* cast = dynamic_cast<const Cast*>(expr)) {
+        // An aggregate source and target of the same shape is a value
+        // copy, not a scalar conversion: the word count the target
+        // declares is the copy's width, and the scalar path below would
+        // answer only the first word. The checker already proved the
+        // shapes relate (identity or a named conversion), so a load of
+        // the operand's words is exact here.
+        TypeRef target = checker_.typeOf(cast);
+        if (!target.isError() &&
+            (target.type->kind() == Kind::Struct ||
+             target.type->kind() == Kind::Class ||
+             target.type->kind() == Kind::Array)) {
+
+            if (Place place; resolvePlace(cast->expr.get(), place)) {
+                place.type = target;
+                return loadRange(cast->pos, place, target);
+            }
+            std::vector<ir::Value> words =
+                lowerWords(cast->expr.get());
+            if (failed_) {
+                return {undefined()};
+            }
+            return words;
+        }
         // The null string is (nil, 0): the operand answers one word but
         // the target holds two, so the generic scalar cast below would
         // leave the length unanswered. Only the literal converts — the
         // checker keeps a *void variable beside a string a mismatch.
-        TypeRef target = checker_.typeOf(expr);
-        if (!target.isError() && target.type->kind() == Kind::String &&
+        TypeRef spelled = checker_.typeOf(expr);
+        if (!spelled.isError() && spelled.type->kind() == Kind::String &&
             dynamic_cast<const NilPtr*>(cast->expr.get()) != nullptr) {
             TypeRef ptrType{ctx_.pointer(ctx_.basic(BasicKind::U8))};
             TypeRef lenType{ctx_.basic(BasicKind::I64)};
             return {constantI64(0, ptrType, expr->pos),
                     constantI64(0, lenType, expr->pos)};
         }
-        if (!target.isError() && target.type->kind() == Kind::Interface &&
+        if (!spelled.isError() && spelled.type->kind() == Kind::Interface &&
             dynamic_cast<const NilPtr*>(cast->expr.get()) != nullptr) {
             // `nilPtr as I`: the null interface is two zero words — a
             // null data word beside a null vtable word. Only the literal
