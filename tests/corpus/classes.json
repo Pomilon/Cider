@@ -1590,8 +1590,8 @@
   "class": "D"
  },
  "write_returns_count": {
-  "actual": "19:9: from std.fs import write \u2014 std.fs does not exist in v3 (only std.io/std.alloc/std.string ported).",
+  "actual": "exact stdout/stderr/exit match",
   "blocker": "stdlib-fs-missing",
-  "class": "D"
+  "class": "A"
  }
 }
