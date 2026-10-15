@@ -831,6 +831,11 @@ private:
         out_ += "  mov " + mem + ", rax\n";
     }
 
+    // The first slot id past every value of the function being emitted:
+    // a call stages spilled argument words here, and because no IR value
+    // owns the id, staging cannot clobber the live word it copies from.
+    uint32_t scratchBase_ = 0;
+
     std::string labelFor(const std::string& fn, uint32_t label) const {
         return ".L_" + fn + "_" + std::to_string(label);
     }
@@ -868,6 +873,30 @@ private:
             }
         }
         uint32_t cells = top + 1;
+        scratchBase_ = cells;
+        // Reserve the spill stage for the widest call: past every live id,
+        // padded even, so `sub rsp` below covers the slots already.
+        uint64_t widest = 0;
+        for (const ir::Block& block : fn.blocks) {
+            for (const ir::Instr& instr : block.body) {
+                if (instr.op != ir::Op::Call) {
+                    continue;
+                }
+                uint64_t words = 0;
+                for (const ir::Argument& arg : instr.arguments) {
+                    words += static_cast<uint64_t>(arg.words.size());
+                }
+                if (words > widest) {
+                    widest = words;
+                }
+            }
+        }
+        const uint64_t kRegisterRow = 6;
+        if (widest > kRegisterRow) {
+            uint64_t stages = widest - kRegisterRow;
+            stages = (stages + 1) & ~static_cast<uint64_t>(1);
+            cells += static_cast<uint32_t>(stages);
+        }
         uint32_t span = (cells * 8 + 15) & ~15u;
 
         out_ += ".globl " + asmSafeName(fn.name) + "\n";
@@ -1352,10 +1381,14 @@ private:
             }
             const uint64_t kIntRegs = 6;
             const uint64_t kSseRegs = 8;
-            if (gpr > kIntRegs) {
-                refuse(instr.loc, "more than six registers of arguments");
-                return false;
-            }
+            // Integer words past the sixth register spill to the stack the
+            // SysV way: pushed in reverse, argument seven nearest the
+            // return address, with a lone final word padded to sixteen.
+            // Every spilled word stages in a fresh slot first, because a
+            // push moves rsp and a slot offset stands still; the stage is
+            // what the pushes read, under one fixed rsp.
+            const uint64_t stackWords = gpr > kIntRegs ? gpr - kIntRegs : 0;
+            const uint64_t stackPad = stackWords % 2;
             if (sse > kSseRegs) {
                 refuse(instr.loc, "more than eight float arguments");
                 return false;
@@ -1367,6 +1400,7 @@ private:
             // instead of consuming an integer one.
             uint64_t index = 0;
             uint64_t sseIndex = 0;
+            std::vector<const ir::Value*> spilled;
             for (const ir::Argument& arg : instr.arguments) {
                 const bool floatArg = arg.width == ir::IRType::F32 ||
                                       arg.width == ir::IRType::F64;
@@ -1380,9 +1414,43 @@ private:
                     continue;
                 }
                 for (const ir::Value& word : arg.words) {
-                    out_ += "  mov " + std::string(argReg(index)) + ", " +
-                            slot(word.id) + "\n";
+                    if (index < kIntRegs) {
+                        out_ += "  mov " + std::string(argReg(index)) + ", " +
+                                slot(word.id) + "\n";
+                    } else {
+                        spilled.push_back(&word);
+                    }
                     ++index;
+                }
+            }
+            if (stackWords != 0 || stackPad != 0) {
+                // The spill goes down as pushes and nothing else: the
+                // frame's slot offsets are static, so every read below
+                // sees rsp where the frame left it, and the only movement
+                // is the pushes themselves, which no slot read crosses.
+                // A lone final word pads the stack back to sixteen so the
+                // callee enters aligned.
+                // Every word is read into its register BEFORE the pushes
+                // start: `mov rax, [rsp + N]` recomputes its operand against
+                // the rsp the moment it runs, so a read that follows a push
+                // would take a word the push moved. A register per spilled
+                // word then pushes in reverse, argument seven landing
+                // nearest the return address.
+                // T4: the count a loop walks from is written as a name, not
+                // a literal beside a size word.
+                static constexpr uint64_t skipNone = 0;
+                static const char* const kSpillReg[] = {
+                    "rax", "r10", "r11", "r12", "r13", "r14", "r15"};
+                for (uint64_t at = 0; at < spilled.size(); ++at) {
+                    out_ += "  mov " + std::string(kSpillReg[at]) + ", " +
+                            slot(spilled[at]->id) + "\n";
+                }
+                if (stackPad != 0) {
+                    out_ += "  mov rax, 0\n";
+                    out_ += "  push rax\n";
+                }
+                for (uint64_t at = spilled.size(); at > skipNone; --at) {
+                    out_ += "  push " + std::string(kSpillReg[at - 1]) + "\n";
                 }
             }
             if (instr.call.indirect) {
@@ -1390,6 +1458,13 @@ private:
                 out_ += "  call rax\n";
             } else {
                 out_ += "  call " + asmSafeName(instr.callee) + "\n";
+            }
+            // The spill comes off the stack BEFORE the answer is stored:
+            // a slot offset stands still, and while the pushed words are
+            // still down there rsp names a different base for them.
+            if (stackWords != 0 || stackPad != 0) {
+                out_ += "  add rsp, " +
+                        std::to_string(stackWords * 8 + stackPad * 8) + "\n";
             }
             if (!instr.results.empty()) {
                 if (instr.width == ir::IRType::F32) {
