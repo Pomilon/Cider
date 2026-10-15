@@ -270,9 +270,9 @@
   "class": "D"
  },
  "crossmod_iface_param": {
-  "actual": "exit 1; tests/corpus/crossmod_iface_param/main.cid:18:16: expected ';'; tests/corpus/crossmod_iface_param/main.cid:22:22: expected ')'",
+  "actual": "exact stdout/stderr/exit match",
   "blocker": "multi-file imports",
-  "class": "D"
+  "class": "A"
  },
  "crossmod_private_base": {
   "actual": "32:14: expected ';' + a class holds fields and methods (`var w: int = 7;` field initializer; v3 \u00a72.1a)",
