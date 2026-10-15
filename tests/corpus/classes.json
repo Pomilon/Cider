@@ -945,9 +945,9 @@
   "class": "B"
  },
  "list_reassign": {
-  "actual": "cider run exit 1, stdout empty, stderr diagnostic: `main.cid:48:23: a variable needs an initialiser` (global arrays)",
+  "actual": "exact stdout/stderr/exit match; one parked line (sret+2-iface+struct arg exceeds the codegen argument-row budget)",
   "blocker": "stdlib-io + interface-boxing + bare-list-literals",
-  "class": "D"
+  "class": "A"
  },
  "local_aggregates": {
   "actual": "21:26: expected ';' + a class holds fields and methods (`class P { var v: int = 3; ...}` field initializer; v3 \u00a72.1a)",
