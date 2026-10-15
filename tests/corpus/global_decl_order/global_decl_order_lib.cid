@@ -32,4 +32,4 @@ export func touchLibStruct() -> void {
 // Declared after every use above — in this module AND, through the exports, in
 // the importing file.
 export var gLibLate: int = 21;
-var gLibHolder: LibStruct;
+var gLibHolder: LibStruct = new LibStruct { x: 0, y: 0 };

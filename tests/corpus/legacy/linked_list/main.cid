@@ -10,7 +10,7 @@ class LinkedList {
     var head: *Node;
 
     func append(val: int) -> void {
-        var newNode: *Node = malloc(16) as *Node;
+        var newNode: *Node = malloc(sizeof(Node)) as *Node;
         (*newNode).value = val;
         (*newNode).next = nilPtr;
 
@@ -39,7 +39,7 @@ class LinkedList {
 
 func main() -> int {
     puts("Testing Linked List...");
-    var list: *LinkedList = malloc(8) as *LinkedList;
+    var list: *LinkedList = malloc(sizeof(LinkedList)) as *LinkedList;
     (*list).head = nilPtr;
 
     (*list).append(10);

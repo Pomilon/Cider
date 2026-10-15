@@ -28,7 +28,7 @@ class SovereignAlloc {
 
 func main() -> int {
     puts("Testing Sovereign Allocator...");
-    var sa: *SovereignAlloc = malloc(8) as *SovereignAlloc;
+    var sa: *SovereignAlloc = malloc(sizeof(SovereignAlloc)) as *SovereignAlloc;
     (*sa).total_allocated = 0;
 
     var b1: *Block = (*sa).alloc_block(100);

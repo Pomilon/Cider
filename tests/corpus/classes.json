@@ -680,9 +680,9 @@
   "class": "B"
  },
  "global_decl_order": {
-  "actual": "exit=1 stdout_len=0 stderr_len=381 first='tests/corpus/global_decl_order/main.cid:51:13: expected an expression'",
+  "actual": "exact stdout/stderr/exit match",
   "blocker": "multi-file-imports (+plusplus-operator, uninit-struct-globals, stdlib-import)",
-  "class": "D"
+  "class": "A"
  },
  "global_fini_asm_exit": {
   "actual": "tests/corpus/global_fini_asm_exit/main.cid:25:10: a method needs a name",
@@ -705,9 +705,9 @@
   "class": "B"
  },
  "global_init_fold": {
-  "actual": "exit=1 stdout_len=0 stderr_len=216 first='tests/corpus/global_init_fold/main.cid:23:22: expected an expression'",
+  "actual": "exact stdout/stderr/exit match",
   "blocker": "global-const-fold (+multi-file-imports, char-type, float-codegen, stdlib-import)",
-  "class": "D"
+  "class": "A"
  },
  "global_narrow": {
   "actual": "exit 0, empty output",
