@@ -505,6 +505,72 @@ void testAsm() {
     check(!fnr.ok, "a function placeholder refuses: " + fnr.error);
 }
 
+// File syscalls reach host files: create, write, seek, read back,
+// close, and unlink, with errors answered the way native answers.
+void testFileSyscalls() {
+    std::printf("file syscalls run\n");
+    std::remove("/tmp/cider_vm_fs_test.txt");
+    Lowered fs = lower("func main() -> int {"
+                       " var path: string = \"/tmp/cider_vm_fs_test.txt\";"
+                       " var p: *u8 = &path[0];"
+                       " var fd: int = 0;"
+                       " asm { \"mov rax, 2\" \"mov rdi, {p}\" \"mov rsi, 577\""
+                       " \"mov rdx, 420\" \"syscall\" \"mov {fd}, eax\" }"
+                       " if (fd < 0) { return 1; }"
+                       " var msg: string = \"ABCD\";"
+                       " var mp: *u8 = &msg[0];"
+                       " var nw: int = 0;"
+                       " asm { \"mov rax, 1\" \"mov rdi, {fd}\""
+                       " \"mov rsi, {mp}\" \"mov rdx, 4\""
+                       " \"syscall\" \"mov {nw}, eax\" }"
+                       " if (nw != 4) { return 2; }"
+                       " var rc: int = 0;"
+                       " asm { \"mov rax, 3\" \"mov rdi, {fd}\""
+                       " \"syscall\" \"mov {rc}, eax\" }"
+                       " if (rc != 0) { return 3; }"
+                       " var fd2: int = 0;"
+                       " asm { \"mov rax, 2\" \"mov rdi, {p}\""
+                       " \"mov rsi, 0\" \"mov rdx, 0\""
+                       " \"syscall\" \"mov {fd2}, eax\" }"
+                       " if (fd2 < 0) { return 4; }"
+                       " var off: int = 0;"
+                       " asm { \"mov rax, 8\" \"mov rdi, {fd2}\""
+                       " \"mov rsi, 1\" \"mov rdx, 0\""
+                       " \"syscall\" \"mov {off}, eax\" }"
+                       " if (off != 1) { return 5; }"
+                       " var buf: [u8; 4] = new [u8; 4] { [0, ...] };"
+                       " var bp: *u8 = &buf[0];"
+                       " var nr: int = 0;"
+                       " asm { \"mov rax, 0\" \"mov rdi, {fd2}\""
+                       " \"mov rsi, {bp}\" \"mov rdx, 3\""
+                       " \"syscall\" \"mov {nr}, eax\" }"
+                       " if (nr != 3) { return 6; }"
+                       " if (buf[0] != 66) { return 7; }"
+                       " var rc2: int = 0;"
+                       " asm { \"mov rax, 3\" \"mov rdi, {fd2}\""
+                       " \"syscall\" \"mov {rc2}, eax\" }"
+                       " if (rc2 != 0) { return 8; }"
+                       " var ur: int = 0;"
+                       " asm { \"mov rax, 87\" \"mov rdi, {p}\""
+                       " \"syscall\" \"mov {ur}, eax\" }"
+                       " if (ur != 0) { return 9; }"
+                       " var fd3: int = 0;"
+                       " asm { \"mov rax, 2\" \"mov rdi, {p}\""
+                       " \"mov rsi, 0\" \"mov rdx, 0\""
+                       " \"syscall\" \"mov {fd3}, eax\" }"
+                       " if (fd3 >= 0) { return 10; }"
+                       " return 0; }\n");
+    check(fs.ok, "a file round-trip lowers: " + fs.stage);
+    cider::vm::VmResult fsr = cider::vm::run(*fs.module, "");
+    check(fsr.ok && fsr.exitCode == 0, "the round-trip answers: " +
+                                       fsr.error);
+    FILE* gone = fopen("/tmp/cider_vm_fs_test.txt", "r");
+    check(gone == nullptr, "unlink removed the file");
+    if (gone != nullptr) {
+        fclose(gone);
+    }
+}
+
 void testArgv() {
     std::printf("argv\n");
     Lowered ar = lower("func main(argc: i64, argv: **char) -> int {"
@@ -543,6 +609,7 @@ int main() {
     testFloats();
     testCalls();
     testAsm();
+    testFileSyscalls();
     testArgv();
     std::printf("\n%d checks, %s\n", checks, failures == 0 ? "all passed" : "FAILURES");
     return failures == 0 ? 0 : 1;

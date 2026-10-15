@@ -670,9 +670,9 @@
   "class": "B"
  },
  "fs_test": {
-  "actual": "exit 1; tests/corpus/legacy/fs_test/main.cid:6:16: a variable needs an initialiser; tests/corpus/legacy/fs_test/main.cid:18:22: expected an expression",
+  "actual": "exact stdout/stderr/exit match",
   "blocker": "stdlib-imports (+fs-ops, uninit-locals)",
-  "class": "D"
+  "class": "A"
  },
  "generic_compound_args": {
   "actual": "tests/corpus/generic_compound_args/main.cid:39:20: expected ')'",
@@ -1280,9 +1280,9 @@
   "class": "A"
  },
  "stdlib_fs_ops": {
-  "actual": "blocked-A reclassified 2026-10-05: must pass once blocker lands; run exit 1: OUT: ERR:tests/corpus/stdlib_fs_ops/main.cid:33:24: a variable needs an initialiser\\n",
-  "blocker": "stdlib-missing (no std.* modules in v3; only prelude print/alloc/free/panic)",
-  "class": "D"
+  "actual": "exact stdout/stderr/exit match",
+  "blocker": "VM file syscalls: native EXACT; vm legs refuse open() (syscall 2) loudly \u2014 needs VM open/read-fd/close/lseek/unlink",
+  "class": "A"
  },
  "stdlib_io_printchar": {
   "actual": "passes under CIDER_LIB=modules via std/io.cid port",

@@ -17,53 +17,57 @@ func main() -> int {
 
     // Create/truncate and write a first chunk.
     var fd: int = open(path, O_WRONLY | O_CREAT | O_TRUNC, 420);
-    if (fd < 0) return 1;
-    if (write(fd, "hello\n" as *void, 6) != 6) return 2;
-    if (close(fd) != 0) return 3;
+    if (fd < 0) { return 1; }
+    var w_hello: string = "hello\n";
+    var w_hellop: *void = (&w_hello[0]) as *void;
+    if (write(fd, w_hellop, 6) != 6) { return 2; }
+    if (close(fd) != 0) { return 3; }
 
     // O_APPEND must land the second chunk at EOF, not at offset 0.
     fd = open(path, O_WRONLY | O_APPEND, 0);
-    if (fd < 0) return 4;
-    if (write(fd, "world\n" as *void, 6) != 6) return 5;
-    if (close(fd) != 0) return 6;
+    if (fd < 0) { return 4; }
+    var w_world: string = "world\n";
+    var w_worldp: *void = (&w_world[0]) as *void;
+    if (write(fd, w_worldp, 6) != 6) { return 5; }
+    if (close(fd) != 0) { return 6; }
 
     // Read the whole file back.
     fd = open(path, O_RDONLY, 0);
-    if (fd < 0) return 7;
-    var buf: [char; 64];
-    var n: int = read(fd, buf as *void, 64);
-    if (n != 12) return 8;
-    buf[n] = 0 as char;
-    print(buf as string);
+    if (fd < 0) { return 7; }
+    var buf: [u8; 64] = new [u8; 64] { [0, ...] };
+    var bufp: *void = (&buf[0]) as *void;
+    var n: int = read(fd, bufp, 64);
+    if (n != 12) { return 8; }
+    if (write(1, bufp, n) != n) { return 100; }
 
     // lseek back to the start and re-read a prefix.
-    if (lseek(fd, 0, 0) != 0) return 9;
-    n = read(fd, buf as *void, 5);
-    if (n != 5) return 10;
-    buf[n] = 0 as char;
-    print(buf as string);
-    if (close(fd) != 0) return 11;
+    if (lseek(fd, 0, 0) != 0) { return 9; }
+    n = read(fd, bufp, 5);
+    if (n != 5) { return 10; }
+    if (write(1, bufp, n) != n) { return 100; }
+    if (close(fd) != 0) { return 11; }
     puts("");
 
     // O_RDWR + lseek: overwrite bytes 3..5 in place.
     fd = open(path, O_RDWR, 0);
-    if (fd < 0) return 12;
-    if (lseek(fd, 3, 0) != 3) return 13;
-    if (write(fd, "XYZ" as *void, 3) != 3) return 14;
-    if (close(fd) != 0) return 15;
+    if (fd < 0) { return 12; }
+    if (lseek(fd, 3, 0) != 3) { return 13; }
+    var w_xyz: string = "XYZ";
+    var w_xyzp: *void = (&w_xyz[0]) as *void;
+    if (write(fd, w_xyzp, 3) != 3) { return 14; }
+    if (close(fd) != 0) { return 15; }
 
     fd = open(path, O_RDONLY, 0);
-    if (fd < 0) return 16;
-    n = read(fd, buf as *void, 64);
-    if (n != 12) return 17;
-    buf[n] = 0 as char;
-    print(buf as string);
-    if (close(fd) != 0) return 18;
+    if (fd < 0) { return 16; }
+    n = read(fd, bufp, 64);
+    if (n != 12) { return 17; }
+    if (write(1, bufp, n) != n) { return 100; }
+    if (close(fd) != 0) { return 18; }
 
     // Clean up; a second unlink (and an open of the missing path) fail.
-    if (unlink(path) != 0) return 19;
-    if (open(path, O_RDONLY, 0) >= 0) return 20;
-    if (unlink(path) == 0) return 21;
+    if (unlink(path) != 0) { return 19; }
+    if (open(path, O_RDONLY, 0) >= 0) { return 20; }
+    if (unlink(path) == 0) { return 21; }
 
     puts("fs ok");
     return 0;

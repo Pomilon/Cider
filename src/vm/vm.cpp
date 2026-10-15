@@ -2,11 +2,14 @@
 
 #include "vm/vm.h"
 
+#include <cerrno>
 #include <cmath>
 #include <cstdint>
 #include <cstring>
 #include <exception>
+#include <fcntl.h>
 #include <new>
+#include <unistd.h>
 #include <unordered_map>
 #include <unordered_set>
 #include <vector>
@@ -84,7 +87,11 @@ constexpr int64_t kErrBadFd = -9;
 constexpr int64_t kErrNoSys = -38;
 constexpr uint64_t kSysRead = 0;
 constexpr uint64_t kSysWrite = 1;
+constexpr uint64_t kSysOpen = 2;
+constexpr uint64_t kSysClose = 3;
+constexpr uint64_t kSysLseek = 8;
 constexpr uint64_t kSysMmap = 9;
+constexpr uint64_t kSysUnlink = 87;
 constexpr uint64_t kExitGroup = 231;
 // How many placeholders a block may name, which is the count the emitter
 // stages into registers: a sixth has nowhere to go.
@@ -271,6 +278,11 @@ struct Runner {
     // into them: a read syscall consumes from here and stops at the end.
     std::string stdIn_;
     uint64_t stdInAt_ = 0;
+    // Host files this run opened, by the descriptor the program sees:
+    // zero through two stay the standard stream numbers, so real files
+    // start at three, and closing drops the row.
+    std::unordered_map<int64_t, int> openFiles_;
+    int64_t nextFileFd_ = 3;
     // Every host hand-out lives from here to the end of memory, and remembers
     // its size so realloc copies and free validates.
     int64_t heapAt = 0;
@@ -536,6 +548,84 @@ struct Runner {
     // The mapping the kernel answers: a write to one of the two standard
     // streams lands in the run's own output, a buffer outside the program
     // memory is a fault, anything else is the errno the call would return.
+    // A path in program memory runs to its NUL within a bounded scan: a
+    // missing terminator is a fault, never a host read of runaway bytes.
+    // The paths the tests use are short; the bound only stops the scan.
+    static constexpr uint64_t kPathScanLimit = 4096;
+    bool readPath(int64_t address, std::string& path) {
+        path.clear();
+        if (address < static_cast<int64_t>(kNullGuard)) {
+            return false;
+        }
+        uint64_t at = static_cast<uint64_t>(address);
+        for (uint64_t i = 0; i < kPathScanLimit; ++i) {
+            if (at >= memory.size()) {
+                return false;
+            }
+            char byte = static_cast<char>(memory[at]);
+            if (byte == '\0') {
+                return true;
+            }
+            path.push_back(byte);
+            ++at;
+        }
+        return false;
+    }
+
+    int64_t syscallOpen(int64_t pathAddr, int64_t flags, int64_t mode) {
+        std::string path;
+        if (!readPath(pathAddr, path)) {
+            return kErrFault;
+        }
+        int host = ::open(path.c_str(),
+                           static_cast<int>(flags),
+                           static_cast<unsigned int>(mode));
+        if (host < 0) {
+            return -static_cast<int64_t>(errno);
+        }
+        int64_t fd = nextFileFd_;
+        ++nextFileFd_;
+        openFiles_[fd] = host;
+        return fd;
+    }
+
+    int64_t syscallClose(int64_t fd) {
+        auto found = openFiles_.find(fd);
+        if (found == openFiles_.end()) {
+            return 0;
+        }
+        int host = found->second;
+        openFiles_.erase(found);
+        if (::close(host) != 0) {
+            return -static_cast<int64_t>(errno);
+        }
+        return 0;
+    }
+
+    int64_t syscallLseek(int64_t fd, int64_t offset, int64_t whence) {
+        auto found = openFiles_.find(fd);
+        if (found == openFiles_.end()) {
+            return kErrBadFd;
+        }
+        off_t at = ::lseek(found->second, static_cast<off_t>(offset),
+                           static_cast<int>(whence));
+        if (at == static_cast<off_t>(-1)) {
+            return -static_cast<int64_t>(errno);
+        }
+        return static_cast<int64_t>(at);
+    }
+
+    int64_t syscallUnlink(int64_t pathAddr) {
+        std::string path;
+        if (!readPath(pathAddr, path)) {
+            return kErrFault;
+        }
+        if (::unlink(path.c_str()) != 0) {
+            return -static_cast<int64_t>(errno);
+        }
+        return 0;
+    }
+
     int64_t syscallWrite(int64_t fd, int64_t buffer, int64_t count) {
         if (count == kZeroCell) {
             return 0;
@@ -561,7 +651,18 @@ struct Runner {
                 span);
             return count;
         }
-        return kErrBadFd;
+        auto found = openFiles_.find(fd);
+        if (found == openFiles_.end()) {
+            return kErrBadFd;
+        }
+        ssize_t wrote = ::write(found->second,
+                                memory.data() +
+                                    static_cast<size_t>(begin),
+                                span);
+        if (wrote < 0) {
+            return -static_cast<int64_t>(errno);
+        }
+        return static_cast<int64_t>(wrote);
     }
 
     // A read answers the bytes the pending input holds and moves the
@@ -572,7 +673,24 @@ struct Runner {
             return 0;
         }
         if (fd != 0) {
-            return kErrBadFd;
+            auto found = openFiles_.find(fd);
+            if (found == openFiles_.end()) {
+                return kErrBadFd;
+            }
+            if (buffer < static_cast<int64_t>(kNullGuard) || count < 0 ||
+                static_cast<uint64_t>(buffer) +
+                        static_cast<uint64_t>(count) >
+                    memory.size()) {
+                return kErrFault;
+            }
+            ssize_t got = ::read(found->second,
+                                 memory.data() +
+                                     static_cast<size_t>(buffer),
+                                 static_cast<size_t>(count));
+            if (got < 0) {
+                return -static_cast<int64_t>(errno);
+            }
+            return static_cast<int64_t>(got);
         }
         uint64_t left = stdIn_.size() - stdInAt_;
         if (left == kZeroPointer) {
@@ -765,6 +883,18 @@ struct Runner {
                         break;
                     case kSysWrite:
                         result = syscallWrite(regs[7], regs[6], regs[2]);
+                        break;
+                    case kSysOpen:
+                        result = syscallOpen(regs[7], regs[6], regs[2]);
+                        break;
+                    case kSysClose:
+                        result = syscallClose(regs[7]);
+                        break;
+                    case kSysLseek:
+                        result = syscallLseek(regs[7], regs[6], regs[2]);
+                        break;
+                    case kSysUnlink:
+                        result = syscallUnlink(regs[7]);
                         break;
                     case kSysMmap:
                         result = syscallMmap(regs[6]);
