@@ -880,9 +880,9 @@
   "class": "D"
  },
  "interface_store_lifetime": {
-  "actual": "cider run exit 1, stdout empty, stderr diagnostic: `main.cid:41:14: a variable needs an initialiser`",
+  "actual": "exact stdout/stderr/exit match",
   "blocker": "interface-boxing + this + new-spelling + uninit",
-  "class": "D"
+  "class": "A"
  },
  "interp": {
   "actual": "matches expected.json exactly",
