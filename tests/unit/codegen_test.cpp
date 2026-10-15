@@ -1580,6 +1580,30 @@ void testIndirectCall() {
     check(signaled, "a nil indirect call traps");
 }
 
+void testFnPtrCompare() {
+    std::printf("function pointer comparison runs\n");
+    check(runQuiet("func main() -> int {\n"
+                   "    var f: *func(int) -> int = nilPtr;\n"
+                   "    if (f == nilPtr) { return 1; }\n"
+                   "    return 0;\n"
+                   "}\n") == 1,
+          "a nil function pointer equals nilPtr");
+    check(runQuiet("func add(a: int, b: int) -> int { return a + b; }\n"
+                   "func sub(a: int, b: int) -> int { return a - b; }\n"
+                   "func main() -> int {\n"
+                   "    var f: *func(int, int) -> int = &add;\n"
+                   "    var g: *func(int, int) -> int = &sub;\n"
+                   "    var n: *func(int, int) -> int = nilPtr;\n"
+                   "    if (n != nilPtr) { return 1; }\n"
+                   "    if (f == nilPtr) { return 2; }\n"
+                   "    if (f != f) { return 3; }\n"
+                   "    if (f == g) { return 4; }\n"
+                   "    if (f != g) { return 5; }\n"
+                   "    return 0;\n"
+                   "}\n") == 5,
+          "non-nil function pointers compare by address");
+}
+
 // A closure literal returned from a function keeps the literal's own
 // return type while its body checks: the inner return answers int even
 // though the enclosing function answers a closure.
@@ -2255,6 +2279,7 @@ int main() {
     testForIn();
     testArith32();
     testIndirectCall();
+    testFnPtrCompare();
     testClosure();
     testClosureElement();
     testInterface();

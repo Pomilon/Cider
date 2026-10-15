@@ -655,6 +655,46 @@ void testCharCompare() {
     check(byteShift.ok, "a byte shifts: " + byteShift.stage);
 }
 
+void testFnPtrCompare() {
+    std::printf("function pointers compare for equality\n");
+    Checked good = check(
+        "func add(a: int, b: int) -> int { return a + b; }\n"
+        "func main() -> int {\n"
+        "    var f: *func(int, int) -> int = &add;\n"
+        "    if (f == nilPtr) { return 1; }\n"
+        "    if (f != nilPtr) { return 2; }\n"
+        "    return 0;\n"
+        "}\n");
+    check(good.ok, "== and != against nilPtr: " + good.stage);
+    Checked same = check(
+        "func add(a: int, b: int) -> int { return a + b; }\n"
+        "func main() -> int {\n"
+        "    var f: *func(int, int) -> int = &add;\n"
+        "    var g: *func(int, int) -> int = &add;\n"
+        "    if (f != g) { return 1; }\n"
+        "    return 0;\n"
+        "}\n");
+    check(same.ok, "same-signature function pointers compare: " + same.stage);
+    Checked mixed = check(
+        "func add(a: int, b: int) -> int { return a + b; }\n"
+        "func neg(a: int) -> int { return 0 - a; }\n"
+        "func main() -> int {\n"
+        "    var f: *func(int, int) -> int = &add;\n"
+        "    var g: *func(int) -> int = &neg;\n"
+        "    if (f == g) { return 1; }\n"
+        "    return 0;\n"
+        "}\n");
+    check(!mixed.ok && mixed.stage == "check", "different signatures fail");
+    Checked narrow = check(
+        "func add(a: int, b: int) -> int { return a + b; }\n"
+        "func main() -> int {\n"
+        "    var f: *func(int, int) -> int = &add;\n"
+        "    if (f == 0) { return 1; }\n"
+        "    return 0;\n"
+        "}\n");
+    check(!narrow.ok && narrow.stage == "check", "function pointer == int fails");
+}
+
 void testStringCompare() {
     std::printf("strings compare for equality\n");
     Checked good = check(
@@ -1301,6 +1341,7 @@ int main() {
     testIncrDecr();
     testBoolCompare();
     testCharCompare();
+    testFnPtrCompare();
     testStringCompare();
     testInterfaceNil();
     testMatch();

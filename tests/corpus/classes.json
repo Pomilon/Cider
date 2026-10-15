@@ -290,9 +290,9 @@
   "class": "B"
  },
  "cyclic_alias_mod": {
-  "actual": "exit 1; tests/corpus/cyclic_alias_mod/main.cid:7:13: a variable needs an initialiser",
+  "actual": "nsa.cid:3:17 type alias cycle: nsa.A; 4:10 type alias cycle: nsa.B (true A=B/B=A cycle, no base type; rejected at declaration like cyclic_alias_bare)",
   "blocker": "multi-file imports",
-  "class": "D"
+  "class": "B"
  },
  "cyclic_fn_alias": {
   "actual": "5:12: expected ';' (bare `fn(F)` spelling; v3 has no bare fn-ptr spelling, \u00a713)",
@@ -625,9 +625,9 @@
   "class": "A"
  },
  "fn_ptr_nil": {
-  "actual": "exit=1 stdout_len=0 stderr_len=142 first='tests/corpus/fn_ptr_nil/main.cid:4:12: a variable needs an initialiser'",
+  "actual": "exact stdout/stderr/exit match",
   "blocker": "*func-nil-compare compiler crash (SIGSEGV, no diagnostic)",
-  "class": "D"
+  "class": "A"
  },
  "fn_ptr_return": {
   "actual": "exit 0, empty stdout/stderr, matches expected.json verbatim after documented rewrites (diff #3 bare-fn to *func, &fn address, diff #4 (*f)() calls, diff #6/#7 new-literals for struct/array/uninit vars)",

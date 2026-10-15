@@ -2722,6 +2722,35 @@ TypeRef Checker::checkBinary(Binary& expr, TypeRef expected) {
             fail(expr.pos, "these pointer types cannot compare");
             return errorRef();
         }
+        if (lhs.type->kind() == Kind::FunctionPtr ||
+            rhs.type->kind() == Kind::FunctionPtr) {
+            // Function pointers compare by address (FEATURES §4.2):
+            // same-signature pairs, or either side nil — nilPtr spells
+            // *void, which every address accepts. Anything else beside
+            // a function pointer rejects rather than comparing garbage.
+            bool lhsVoid = lhs.type->kind() == Kind::Pointer &&
+                           lhs.type->pointee() == ctx_.void_();
+            bool rhsVoid = rhs.type->kind() == Kind::Pointer &&
+                           rhs.type->pointee() == ctx_.void_();
+            const Signature* l = lhs.type->kind() == Kind::FunctionPtr
+                                     ? lhs.type->signature()
+                                     : nullptr;
+            const Signature* r = rhs.type->kind() == Kind::FunctionPtr
+                                     ? rhs.type->signature()
+                                     : nullptr;
+            if (l != nullptr && r != nullptr) {
+                if (!sameSignature(*l, *r)) {
+                    fail(expr.pos, "these function pointer types cannot compare");
+                    return errorRef();
+                }
+                return TypeRef{ctx_.basic(BasicKind::Bool)};
+            }
+            if ((l != nullptr && rhsVoid) || (r != nullptr && lhsVoid)) {
+                return TypeRef{ctx_.basic(BasicKind::Bool)};
+            }
+            fail(expr.pos, "these function pointer types cannot compare");
+            return errorRef();
+        }
         TypeRef common = commonType(lhs, rhs, expr.pos);
         if (common.isError()) {
             return errorRef();
