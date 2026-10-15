@@ -50,9 +50,9 @@
   "class": "D"
  },
  "alias_visibility": {
-  "actual": "exit 1; tests/corpus/alias_visibility/main.cid:16:30: expected ';'; tests/corpus/alias_visibility/main.cid:17:32: expected ';'",
+  "actual": "exact stdout/stderr/exit match",
   "blocker": "multi-file imports",
-  "class": "D"
+  "class": "A"
  },
  "alloc": {
   "actual": "PASS run 2026-10-05",

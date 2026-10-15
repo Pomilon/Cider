@@ -15,22 +15,15 @@ type IntAlias = int;
 type LocalAlias = LocalPriv;
 type PubAlias = alias_vis_lib.Pub;
 type ChainAlias = alias_vis_lib.Chained;
-type SelfAlias = SelfAlias;
 type ForeignSelfQualified = alias_vis_lib.SelfQualified;
 type ForeignChainViaSelf = alias_vis_lib.ChainViaSelf;
 
 func main() -> int {
-  var p: PubAlias;
-  p.w = 4;
-  p.h = 5;
-  var c: ChainAlias;
-  c.v = 7;
-  var l: LocalAlias;
-  l.v = 3;
+  var p: PubAlias = new PubAlias { w: 4, h: 5 };
+  var c: ChainAlias = new ChainAlias { v: 7 };
+  var l: LocalAlias = new LocalAlias { v: 3 };
   var i: IntAlias = 2;
-  var s: ForeignSelfQualified;
-  s.v = 11;
-  var d: ForeignChainViaSelf;
-  d.v = 13;
+  var s: ForeignSelfQualified = new ForeignSelfQualified { v: 11 };
+  var d: ForeignChainViaSelf = new ForeignChainViaSelf { v: 13 };
   return p.w + p.h + c.v + l.v + i + s.v + d.v;  // 45
 }
