@@ -2915,6 +2915,21 @@ bool Lowerer::globalInitBytes(const NewArray& init, TypeRef arrayType,
                 return true;
             }
         }
+        if (const auto* sub = dynamic_cast<const NewStruct*>(&leaf)) {
+            // A struct or class element carries its fields' image bytes:
+            // the function answers the element's whole image, which
+            // appends to this one.
+            if (elemType.type->kind() != Kind::Struct &&
+                elemType.type->kind() != Kind::Class) {
+                return false;
+            }
+            std::string piece;
+            if (!globalInitStructBytes(*sub, elemType, piece)) {
+                return false;
+            }
+            bytes.append(piece.data(), piece.size());
+            return true;
+        }
         return appendScalar(leaf, resolver_.nominalSize(elemType.type), elemType);
     };
     if (init.repeat) {
