@@ -920,9 +920,9 @@
   "class": "A"
  },
  "licm_sret_call": {
-  "actual": "cider run exit 1, stdout empty, stderr diagnostic: `main.cid:19:14: a variable needs an initialiser`",
+  "actual": "exact stdout/stderr/exit match",
   "blocker": "for-lowering + interface-boxing + stdlib-io + uninit",
-  "class": "D"
+  "class": "A"
  },
  "licm_stress": {
   "actual": "pass",
