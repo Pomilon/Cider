@@ -115,6 +115,49 @@ uint64_t frameWords(uint32_t top) {
     return static_cast<uint64_t>(top) + kOneCell;
 }
 
+// Host helpers have no IR body, so no function tag: an address of one
+// answers a synthetic negative tag instead. Positives are index-plus-one
+// into the module's functions, zero is no-such-function, so negatives
+// cannot collide with either. The table is the hostCall list below.
+int64_t hostTagFor(const std::string& name) {
+    static const char* const hosts[] = {
+        "cider_print",         // -1
+        "putchar",             // -2
+        "cider_itoa_signed",   // -3
+        "cider_itoa_unsigned", // -4
+        "cider_ftoa",          // -5
+        "cider_panic",         // -6
+        "cider_heap_fail",     // -7
+        "cider_alloc",         // -8
+        "cider_free",          // -9
+        "cider_realloc",       // -10
+    };
+    static const int64_t count = 10;
+    for (int64_t i = 0; i < count; ++i) {
+        if (name == hosts[i]) {
+            return -i - 1;
+        }
+    }
+    return 0;
+}
+
+std::string hostNameForTag(int64_t tag) {
+    static const char* const hosts[] = {
+        "cider_print", "putchar", "cider_itoa_signed", "cider_itoa_unsigned",
+        "cider_ftoa", "cider_panic", "cider_heap_fail", "cider_alloc",
+        "cider_free", "cider_realloc",
+    };
+    static const int64_t count = 10;
+    if (tag >= 0) {
+        return "";
+    }
+    int64_t at = -tag - 1;
+    if (at >= count) {
+        return "";
+    }
+    return hosts[at];
+}
+
 uint64_t widthBytes(IRType width) {
     switch (width) {
         case IRType::I8:
@@ -795,10 +838,18 @@ struct Runner {
 
     bool tagOf(const Instr& instr) {
         auto found = functionTags.find(instr.globalLabel);
-        if (found == functionTags.end()) {
-            return refuse(instr.loc, "vm cannot address '" + instr.globalLabel + "'");
+        if (found != functionTags.end()) {
+            write(instr.results[0], found->second);
+        } else {
+            // A host helper has no IR body and owns no function tag: its
+            // address is the synthetic negative tag the indirect call
+            // hands back to hostCall. Anything else still refuses loudly.
+            int64_t host = hostTagFor(instr.globalLabel);
+            if (host == 0) {
+                return refuse(instr.loc, "vm cannot address '" + instr.globalLabel + "'");
+            }
+            write(instr.results[0], host);
         }
-        write(instr.results[0], found->second);
         // A function word stages like a data word downstream: record it so
         // an asm placeholder naming a function refuses in the staging loop
         // instead of reading the tag as an address. Function names never
@@ -1562,9 +1613,17 @@ struct Runner {
         }
         const Function* target = nullptr;
         if (instr.call.indirect) {
-            auto found = functionsByTag.find(read(instr.calleeValue));
+            int64_t tag = read(instr.calleeValue);
+            auto found = functionsByTag.find(tag);
             if (found == functionsByTag.end()) {
-                return refuse(instr.loc, "vm cannot call this value");
+                // A negative tag names a host helper, which has no IR
+                // body: hand its words to hostCall the way a direct call
+                // to the same name does.
+                std::string host = hostNameForTag(tag);
+                if (host.empty()) {
+                    return refuse(instr.loc, "vm cannot call this value");
+                }
+                return hostCall(host, args, instr.loc, results);
             }
             target = found->second;
         } else {
@@ -2130,11 +2189,16 @@ static VmResult runProgram(const ir::Module& module,
                 run.appendWord(static_cast<uint64_t>(found->second));
             } else {
                 auto code = run.functionTags.find(global.initLabel);
-                if (code == run.functionTags.end()) {
-                    run.refuse(fn->loc, "vm cannot address '" + global.initLabel + "'");
-                    return run.out;
+                if (code != run.functionTags.end()) {
+                    run.appendWord(static_cast<uint64_t>(code->second));
+                } else {
+                    int64_t host = hostTagFor(global.initLabel);
+                    if (host == 0) {
+                        run.refuse(fn->loc, "vm cannot address '" + global.initLabel + "'");
+                        return run.out;
+                    }
+                    run.appendWord(static_cast<uint64_t>(host));
                 }
-                run.appendWord(static_cast<uint64_t>(code->second));
             }
             run.appendWord(static_cast<uint64_t>(global.initial));
         } else {

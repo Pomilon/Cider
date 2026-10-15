@@ -605,9 +605,9 @@
   "class": "A"
  },
  "fn_ptr_extern": {
-  "actual": "exit=1 stdout_len=0 stderr_len=74 first='tests/corpus/fn_ptr_extern/main.cid:4:12: a variable needs an initialiser'",
+  "actual": "exact stdout/stderr/exit match",
   "blocker": "extern-calls-link (+*func-nil-compare compiler crash)",
-  "class": "D"
+  "class": "A"
  },
  "fn_ptr_global": {
   "actual": "exit=1 stdout_len=0 stderr_len=148 first='tests/corpus/fn_ptr_global/main.cid:4:10: a variable needs an initialiser'",
