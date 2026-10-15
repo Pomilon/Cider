@@ -930,9 +930,9 @@
   "class": "A"
  },
  "linked_list": {
-  "actual": "exit 1; tests/corpus/legacy/linked_list/main.cid:14:17: expected an expression; tests/corpus/legacy/linked_list/main.cid:15:17: expected an expression",
+  "actual": "exact stdout/stderr/exit match",
   "blocker": "classes-this-arrow (+stdlib-imports, asm-blocks)",
-  "class": "D"
+  "class": "A"
  },
  "list_positions": {
   "actual": "cider run exit 1, stdout empty, stderr diagnostic: `main.cid:56:31: expected ';'` (fn-typed struct field)",
@@ -1235,9 +1235,9 @@
   "class": "D"
  },
  "sovereign_alloc": {
-  "actual": "exit 1; tests/corpus/legacy/sovereign_alloc/main.cid:15:11: expected an expression; tests/corpus/legacy/sovereign_alloc/main.cid:16:11: expected an expression",
+  "actual": "exact stdout/stderr/exit match",
   "blocker": "arrow-access (+classes, stdlib-imports, asm-blocks)",
-  "class": "D"
+  "class": "A"
  },
  "sovereign_stability": {
   "actual": "tests/corpus/legacy/sovereign_stability/main.cid:12:19: a class needs a body",
