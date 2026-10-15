@@ -33,28 +33,25 @@ class Box {
 
 class Local {
   var v: int;
-  func area() -> int { return this.v + 100; }
+  func area() -> int { return (*self).v + 100; }
   func kind() -> int { return 3; }
 }
 
-var gshape: U;  // module-global alias-of-alias interface variable
+var gshape: U = nilPtr as U;  // module-global alias-of-alias interface variable
 
 func areaVia(x: S) -> int { return x.area(); }
 func kindVia(x: T) -> int { return x.kind(); }
 func areaViaV(x: V) -> int { return x.area(); }
 
-func make(v: int) -> U {  // alias-typed return
-  var c: Sq;
-  c.init(v);
+func make(v: int) -> Sq {  // concrete return, boxed below
+  var c: Sq = new Sq { s: v };
   return c;
 }
 
 func main() -> int {
   var acc: int = 0;
-  var sq: Sq;
-  sq.init(3);
-  var rect: Rect;
-  rect.init(2, 5);
+  var sq: Sq = new Sq { s: 3 };
+  var rect: Rect = new Rect { w: 2, h: 5 };
 
   // Alias-typed local: declaration from an implementing class, dispatch,
   // then reassignment to a second implementor (fat-pointer store).
@@ -77,19 +74,15 @@ func main() -> int {
 
   // Struct field and class field spelled with the alias; the struct-literal
   // initializer is a declaration site too.
-  var h: Holder;
-  h.id = 1;
-  h.shape = sq;
-  h.tail = 7;
+  var h: Holder = new Holder { id: 1, shape: sq, tail: 7 };
   acc = acc + h.shape.area() + h.id + h.tail;  // 9 + 1 + 7
-  var h2: Holder = Holder { id: 2, shape: sq };
+  var h2: Holder = new Holder { id: 2, shape: sq, tail: 0 };
   acc = acc + h2.shape.area() + h2.id;  // 9 + 2
-  var b: Box;
-  b.shape = rect;
+  var b: Box = new Box { id: 0, shape: rect, tail: 0 };
   acc = acc + b.shape.area();  // 10
 
   // Fixed array of alias-typed elements.
-  var arr: [T; 2];
+  var arr: [T; 2] = new [T; 2] { nilPtr as T, nilPtr as T };
   arr[0] = sq;
   arr[1] = rect;
   acc = acc + arr[0].area() + arr[1].area();  // 9 + 10
@@ -105,9 +98,9 @@ func main() -> int {
 
   // Alias-typed return, and a local class satisfying the imported interface
   // while the value is stored through the alias.
-  acc = acc + make(4).area();  // 16
-  var loc: Local;
-  loc.v = 5;
+  var m: U = make(4);
+  acc = acc + m.area();  // 16
+  var loc: Local = new Local { v: 5 };
   var lv: S = loc;
   acc = acc + lv.area();  // 105
 

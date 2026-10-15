@@ -5584,7 +5584,35 @@ std::vector<ir::Value> Lowerer::boxClassOperand(
         from.type->kind() == Kind::Class) {
         TypeRef ptr{ctx_.pointer(from.type)};
         ir::Value at = undefined();
-        if (!addressOfValue(expr, ptr, pos, at) || failed_) {
+        if (const auto* call = dynamic_cast<const Call*>(expr)) {
+            // A call result has no address: spill the answer words to a
+            // scratch slot in this frame, then box the slot's address.
+            // The slot outlives the conversion site, so the pair stays
+            // live as long as its scope does.
+            std::vector<ir::Value> spill =
+                lowerCallWords(const_cast<Call&>(*call));
+            if (failed_ || spill.empty() ||
+                spill.size() != static_cast<size_t>(wordCount(from))) {
+                refuse(pos, "this interface conversion is not lowered yet");
+                return {undefined()};
+            }
+            std::vector<ir::Value> slots = allocaSlots(
+                from, pos, static_cast<uint64_t>(spill.size()));
+            if (failed_) {
+                return {undefined()};
+            }
+            Place scratch;
+            scratch.slots = slots;
+            scratch.type = from;
+            storeRange(pos, scratch, spill, from);
+            if (failed_) {
+                return {undefined()};
+            }
+            at = computedBase(slots[0], 0, pos);
+            if (failed_) {
+                return {undefined()};
+            }
+        } else if (!addressOfValue(expr, ptr, pos, at) || failed_) {
             refuse(pos, "this interface conversion is not lowered yet");
             return {undefined()};
         }

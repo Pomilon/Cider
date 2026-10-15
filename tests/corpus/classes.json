@@ -45,9 +45,9 @@
   "class": "B"
  },
  "alias_interface": {
-  "actual": "exit 1; tests/corpus/alias_interface/main.cid:20:13: expected ';'; tests/corpus/alias_interface/main.cid:40:14: a variable needs an initialiser",
+  "actual": "exact stdout/stderr/exit match",
   "blocker": "multi-file imports",
-  "class": "D"
+  "class": "A"
  },
  "alias_visibility": {
   "actual": "exact stdout/stderr/exit match",
@@ -311,7 +311,7 @@
  },
  "defer_scopes": {
   "actual": "exit 1; tests/corpus/defer_scopes/main.cid:36:36: expected an expression; tests/corpus/defer_scopes/main.cid:36:36: expected ')'",
-  "blocker": "stdlib-imports",
+  "blocker": "defer-unimplemented: checker refuses every defer (scope-exit lowering absent); only other issue is one uninit array",
   "class": "D"
  },
  "deref_aggregate_copy": {

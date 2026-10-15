@@ -10,16 +10,14 @@ export interface Shape {
 
 export class Sq {
   var s: int;
-  func init(s: int) -> void { this.s = s; }
-  func area() -> int { return this.s * this.s; }
+  func area() -> int { return (*self).s * (*self).s; }
   func kind() -> int { return 1; }
 }
 
 export class Rect {
   var w: int;
   var h: int;
-  func init(w: int, h: int) -> void { this.w = w; this.h = h; }
-  func area() -> int { return this.w * this.h; }
+  func area() -> int { return (*self).w * (*self).h; }
   func kind() -> int { return 2; }
 }
 
