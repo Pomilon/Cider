@@ -52,12 +52,12 @@ func main() -> int {
 
   // closure -> *void -> fn(...) -> func(...): the outer cast keeps the
   // closure shape the inner one carried.
-  var k: fn(int) -> int = v1 as fn(int) -> int;
+  var k: *func(int) -> int = v1 as *func(int) -> int;
   var f5: func(int) -> int = k as func(int) -> int;
   if (f5(21) != 42) return 6;
 
   // fn(...) declaration from a proven-closure *void.
-  var g: fn(int) -> int = v1;
+  var g: *func(int) -> int = v1;
   if (g(21) != 42) return 7;
 
   // A *void type alias carries the same provenance.

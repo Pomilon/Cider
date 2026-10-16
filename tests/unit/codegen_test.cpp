@@ -62,6 +62,7 @@ Built build(const std::string& text) {
         return out;
     }
     auto checker = std::make_unique<cider::check::Checker>(*out.types, *resolver);
+    checker->prescanProvenance({"main"});
     cider::lower::Lowerer lowerer(*out.types, *resolver, *checker);
     if (!lowerer.lowerModule("main", *program)) {
         out.module = nullptr;

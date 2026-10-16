@@ -6464,6 +6464,35 @@ std::vector<ir::Value> Lowerer::boxClassOperand(
         from.type->kind() == Kind::Closure) {
         return {closureAddress(std::move(words), from, pos)};
     }
+    // Deeper carriers answer the same single address word.
+    if (!from.isError() && !to.isError() &&
+        to.type->kind() == Kind::Pointer && to.type->pointee() != nullptr &&
+        to.type->pointee()->kind() == Kind::Pointer &&
+        from.type->kind() == Kind::Closure) {
+        // Two levels: the pair spills for its address, and that address
+        // word spills again — the carrier names the slot holding the
+        // pair's address, so one dereference reaches the pair.
+        ir::Value inner = closureAddress(std::move(words), from, pos);
+        if (failed_) {
+            return {undefined()};
+        }
+        TypeRef voidPtr{ctx_.pointer(ctx_.void_())};
+        std::vector<ir::Value> slots =
+            allocaSlots(voidPtr, pos, kOneWord);
+        if (failed_) {
+            return {undefined()};
+        }
+        Place scratch;
+        scratch.slots = slots;
+        scratch.type = voidPtr;
+        scratch.off = 0;
+        scratch.isVolatile = false;
+        storeRange(pos, scratch, {inner}, voidPtr);
+        if (failed_) {
+            return {undefined()};
+        }
+        return {computedBase(slots[0], 0, pos)};
+    }
     return boxToInterface(std::move(words), from, to, pos);
 }
 
@@ -8555,6 +8584,43 @@ std::vector<ir::Value> Lowerer::lowerCallWords(Call& n) {
                 indirect = true;
                 indirectCallee = pair[kFirstWord];
                 receiver.push_back(pair[kLenWord]);
+            }
+        }
+    }
+    if (sig == nullptr) {
+        // A proven-closure fn spelling calls through the pair its address
+        // names: the declaration adopted the closure representation, so
+        // code plus captures ride like a closure local's. Anything else
+        // naming a bare fn spelling falls through to refuse below. The
+        // local's own binding carries the type (callee identifiers record
+        // no type of their own).
+        if (const auto* ident = dynamic_cast<const Ident*>(n.callee.get())) {
+            uint64_t depth = static_cast<uint64_t>(locals_.size());
+            for (; depth > 0;) {
+                --depth;
+                auto bound = locals_[depth].find(ident->name);
+                if (bound == locals_[depth].end()) {
+                    continue;
+                }
+                if (bound->second.type.type->kind() == Kind::FunctionPtr &&
+                    checker_.provOfName(ident->name) == check::Prov::Closure) {
+                    const Signature* csig =
+                        bound->second.type.type->signature();
+                    std::vector<ir::Value> held =
+                        loadLocal(n.pos, bound->second);
+                    if (!failed_ && csig != nullptr && held.size() == kOneWord) {
+                        TypeRef pairType{ctx_.closure(*csig)};
+                        std::vector<ir::Value> pair = loadClosurePair(
+                            held[kFirstWord], pairType, n.pos);
+                        if (!failed_ && pair.size() == kClosureWords) {
+                            sig = csig;
+                            indirect = true;
+                            indirectCallee = pair[kFirstWord];
+                            receiver.push_back(pair[kLenWord]);
+                        }
+                    }
+                }
+                break;
             }
         }
     }

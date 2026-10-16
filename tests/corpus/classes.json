@@ -575,9 +575,9 @@
   "class": "B"
  },
  "fn_cast_closure_void_repr": {
-  "actual": "exit=1 stdout_len=0 stderr_len=174 first='tests/corpus/fn_cast_closure_void_repr/main.cid:55:12: a variable needs an initialiser'",
+  "actual": "exact stdout/stderr/exit match",
   "blocker": "closures-repr (T10): closure<->*void conversions (implicit and as-cast) unimplemented; v3 has no provenance-tracked representation conversions",
-  "class": "D"
+  "class": "A"
  },
  "fn_cast_compat": {
   "actual": "14:13: expected ';' (bare `fn(int)` spelling; v3 has no bare fn-ptr spelling, \u00a713)",

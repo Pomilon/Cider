@@ -58,6 +58,9 @@ Checked check(const std::string& text) {
         return out;
     }
     out.checker = std::make_unique<cider::check::Checker>(*out.types, *out.resolver);
+    // Whole-program provenance before checking (single module here),
+    // mirroring the driver: callee bodies see caller proofs.
+    out.checker->prescanProvenance({"main"});
     out.ok = out.checker->checkProgram(*out.program, "main");
     if (!out.ok) {
         out.stage = "check";

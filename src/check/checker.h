@@ -181,6 +181,9 @@ public:
     // Every recorded generic call site and its spec, for the lowerer's
     // emission worklist. Checking already computed the transitive closure:
     // detached body walks still instantiate nested calls.
+    // Name provenance for the lowerer (call shapes): the same answer
+    // provOf gives an identifier, without needing its node.
+    Prov provOfName(const std::string& name) const;
     const std::map<std::pair<const Call*, std::string>, DeclId>& callSpecs() const {
         return callSpecs_;
     }
@@ -190,6 +193,10 @@ public:
     // already proven clean, so the deterministic re-walk reports nothing
     // new. No-op when the id names no function specialization.
     void walkSpecForEmit(DeclId spec);
+    // Collects call-site argument provenance for every function before
+    // any body checks (public: the driver runs it after resolving and
+    // before lowering every module).
+    void prescanProvenance(const std::vector<std::string>& modules);
 
     // SEMANTICS.md §2.3: the common type of two operands, stated as a type.
     // Public so lowering emits a comparison in the same domain the checker
@@ -435,6 +442,52 @@ private:
     // conservative across functions, exact within one).
     std::vector<std::unordered_map<std::string, Prov>> flowStack_;
     std::unordered_map<std::string, Prov> globalProv_;
+    // Global provenance inside the prescan only: seeded from declaration
+    // initializers, updated by stores in module order. Best-effort across
+    // modules (reads see earlier writes); exact within one function.
+    std::unordered_map<std::string, Prov> prescanGlobals_;
+    // Parameter provenance from the whole-program prescan below: a *void
+    // parameter is proven when every known call site passes a closure.
+    // Keyed by module, function and index; absent means unproven.
+    struct ParamSite {
+        bool seen = false;
+        bool allClosure = true;
+        bool allNeutral = true;
+    };
+    std::unordered_map<std::string, ParamSite> paramSites_;
+    // Set while a prescan round promotes any site.
+    bool prescanMoved_ = false;
+    // The module a prescan walk belongs to, for call-site resolution.
+    std::string prescanModule_;
+    // Reads the table above with the corpus rule: unanimous closure (or
+    // neutrality) proves, anything else (including no sites) refuses.
+    Prov paramProv(const std::string& key) const;
+    // One prescan round over all functions; true when any table moved.
+    bool prescanRound(const std::vector<std::string>& modules);
+    // Walks one function body for call sites, with function-local flow.
+    void prescanFunction(const std::string& mod, const FuncDecl& fn);
+    // Statement and expression walkers for the prescan: statements update
+    // the flow maps, every expression is scanned for calls.
+    void prescanStmt(const Stmt* stmt,
+                     std::vector<std::unordered_map<std::string, Prov>>& scopes,
+                     const std::unordered_map<std::string, bool>& closureParams);
+    void prescanExpr(const Expr* expr,
+                     std::vector<std::unordered_map<std::string, Prov>>& scopes,
+                     const std::unordered_map<std::string, bool>& closureParams);
+    // Merges a speculative copy back: only entries the walk left exactly
+    // as found survive, so zero-trip paths never prove.
+    void mergePrescan(std::unordered_map<std::string, Prov>& into,
+                      const std::unordered_map<std::string, Prov>& before);
+    // Syntactic provenance inside the prescan (no checker state): literals
+    // answer directly, names read the flow, casts preserve, calls and
+    // places read Raw (places arrive with the next slice).
+    Prov prescanArg(const Expr* expr,
+                    std::vector<std::unordered_map<std::string, Prov>>& scopes,
+                    const std::unordered_map<std::string, bool>& closureParams);
+    // Records one call site's argument against the callee's parameter.
+    void prescanSite(const std::string& mod, const Call& call,
+                     std::vector<std::unordered_map<std::string, Prov>>& scopes,
+                     const std::unordered_map<std::string, bool>& closureParams);
     // Closure literals being discovered, innermost last. A read that binds
     // outside the innermost literal's own scope is that literal's capture.
     struct LiteralFrame {

@@ -79,6 +79,439 @@ std::optional<DeclId> Checker::specOf(const Call* call,
                                      : std::optional<DeclId>(found->second);
 }
 
+Prov Checker::paramProv(const std::string& key) const {
+    auto found = paramSites_.find(key);
+    if (found == paramSites_.end() || !found->second.seen) {
+        return Prov::Raw;
+    }
+    if (found->second.allClosure) {
+        return Prov::Closure;
+    }
+    if (found->second.allNeutral) {
+        return Prov::Neutral;
+    }
+    return Prov::Raw;
+}
+
+void Checker::prescanProvenance(const std::vector<std::string>& modules) {
+    // Fixpoint over parameter sites: promotions only settle entries toward
+    // their final unanimous value, so an unchanged round ends it.
+    while (prescanRound(modules)) {
+    }
+}
+
+bool Checker::prescanRound(const std::vector<std::string>& modules) {
+    prescanMoved_ = false;
+    for (const std::string& mod : modules) {
+        Program* program = resolver_.programOf(mod);
+        if (program == nullptr) {
+            continue;
+        }
+        // Global initializers seed prescan globals (constants only in
+        // practice); stores during function walks update them in order.
+        for (const auto& decl : program->decls) {
+            const VarDecl* global = nullptr;
+            if (const auto* vd = dynamic_cast<const VarDecl*>(decl.get())) {
+                global = vd;
+            } else if (const auto* exp = dynamic_cast<const ExportDecl*>(decl.get())) {
+                global = dynamic_cast<const VarDecl*>(exp->decl.get());
+            }
+            if (global != nullptr && global->init != nullptr) {
+                if (dynamic_cast<const NilPtr*>(global->init.get()) != nullptr) {
+                    prescanGlobals_[global->name] = Prov::Neutral;
+                } else if (dynamic_cast<const FuncLit*>(global->init.get()) != nullptr) {
+                    prescanGlobals_[global->name] = Prov::Closure;
+                }
+            }
+        }
+        for (const auto& decl : program->decls) {
+            const FuncDecl* fn = nullptr;
+            if (const auto* direct = dynamic_cast<const FuncDecl*>(decl.get())) {
+                fn = direct;
+            } else if (const auto* exp = dynamic_cast<const ExportDecl*>(decl.get())) {
+                fn = dynamic_cast<const FuncDecl*>(exp->decl.get());
+            }
+            if (fn == nullptr || !fn->typeParams.empty() || fn->body == nullptr) {
+                continue;
+            }
+            prescanFunction(mod, *fn);
+        }
+    }
+    return prescanMoved_;
+}
+
+void Checker::prescanFunction(const std::string& mod, const FuncDecl& fn) {
+    prescanModule_ = mod;
+    // Closure-typed parameters prove by spelling (no call needed); the
+    // rest start Raw and earn proof from call sites below.
+    std::unordered_map<std::string, bool> closureParams;
+    const resolve::Scope* home = resolver_.scopeOf(mod);
+    for (const Param& param : fn.params) {
+        if (param.type != nullptr && home != nullptr) {
+            TypeRef spelled = resolver_.resolveType(param.type.get(), home);
+            if (!spelled.isError() &&
+                spelled.type->kind() == Kind::Closure) {
+                closureParams[param.name] = true;
+            }
+        }
+    }
+    std::vector<std::unordered_map<std::string, Prov>> scopes(1);
+    prescanStmt(fn.body.get(), scopes, closureParams);
+}
+
+Prov Checker::prescanArg(const Expr* expr,
+                          std::vector<std::unordered_map<std::string, Prov>>& scopes,
+                          const std::unordered_map<std::string, bool>& closureParams) {
+    if (expr == nullptr) {
+        return Prov::Raw;
+    }
+    if (dynamic_cast<const NilPtr*>(expr) != nullptr) {
+        return Prov::Neutral;
+    }
+    if (dynamic_cast<const FuncLit*>(expr) != nullptr) {
+        return Prov::Closure;
+    }
+    if (const auto* ident = dynamic_cast<const Ident*>(expr)) {
+        for (auto it = scopes.rbegin(); it != scopes.rend(); ++it) {
+            auto found = it->find(ident->name);
+            if (found != it->end()) {
+                return found->second;
+            }
+        }
+        auto global = prescanGlobals_.find(ident->name);
+        if (global != prescanGlobals_.end()) {
+            return global->second;
+        }
+        if (closureParams.find(ident->name) != closureParams.end()) {
+            return Prov::Closure;
+        }
+        return Prov::Raw;
+    }
+    if (const auto* cast = dynamic_cast<const Cast*>(expr)) {
+        // Casts preserve: a proven address stays proven through any
+        // spelling change, and an unproven one stays unproven.
+        return prescanArg(cast->expr.get(), scopes, closureParams);
+    }
+    return Prov::Raw;
+}
+
+void Checker::prescanSite(const std::string& mod, const Call& call,
+                            std::vector<std::unordered_map<std::string, Prov>>& scopes,
+                            const std::unordered_map<std::string, bool>& closureParams) {
+    // Only free-function callees name a parameter table: methods,
+    // generics and indirect calls contribute no sites (documented).
+    const resolve::Scope* home = resolver_.scopeOf(mod);
+    if (home == nullptr) {
+        return;
+    }
+    const resolve::Decl* decl = nullptr;
+    if (const auto* ident = dynamic_cast<const Ident*>(call.callee.get())) {
+        decl = resolver_.lookup(home, ident->name);
+    } else if (const auto* field = dynamic_cast<const Field*>(call.callee.get())) {
+        const auto* modName = dynamic_cast<const Ident*>(field->object.get());
+        if (modName == nullptr) {
+            return;
+        }
+        const resolve::Decl* moduleDecl = resolver_.lookup(home, modName->name);
+        if (moduleDecl == nullptr ||
+            moduleDecl->kind != resolve::DeclKind::Module) {
+            return;
+        }
+        const resolve::Scope* target = resolver_.scopeOf(moduleDecl->origin);
+        decl = target != nullptr ? resolver_.lookup(target, field->name) : nullptr;
+    } else {
+        return;
+    }
+    if (decl == nullptr || decl->kind != resolve::DeclKind::Func ||
+        decl->typeParams > 0 || decl->scope == nullptr) {
+        return;
+    }
+    std::string base =
+        decl->scope->module + "." + decl->name + "#";
+    for (uint64_t i = 0; i < static_cast<uint64_t>(call.args.size()); ++i) {
+        // Places and returns read Raw here (next slices); names, casts,
+        // literals and nil answer above.
+        std::string key =
+            base + std::to_string(static_cast<unsigned long long>(i));
+        Prov arg = prescanArg(call.args[i].get(), scopes, closureParams);
+        ParamSite& site = paramSites_[key];
+        bool keepC = site.allClosure && (arg == Prov::Closure);
+        bool keepN = site.allNeutral && (arg == Prov::Neutral);
+        if (!site.seen || keepC != site.allClosure || keepN != site.allNeutral) {
+            site.seen = true;
+            site.allClosure = keepC;
+            site.allNeutral = keepN;
+            prescanMoved_ = true;
+        }
+    }
+}
+
+void Checker::prescanStmt(const Stmt* stmt,
+                          std::vector<std::unordered_map<std::string, Prov>>& scopes,
+                          const std::unordered_map<std::string, bool>& closureParams) {
+    if (stmt == nullptr) {
+        return;
+    }
+    if (const auto* vd = dynamic_cast<const VarDecl*>(stmt)) {
+        if (vd->init != nullptr) {
+            // The module is unnamed here; prescanGlobals_ is keyed by
+            // plain name and only consulted for names no local flow owns,
+            // so collisions resolve toward Raw, never toward proof.
+            scopes.back()[vd->name] =
+                prescanArg(vd->init.get(), scopes, closureParams);
+        }
+        return;
+    }
+    if (const auto* es = dynamic_cast<const ExprStmt*>(stmt)) {
+        prescanExpr(es->expr.get(), scopes, closureParams);
+        return;
+    }
+    if (const auto* ret = dynamic_cast<const Return*>(stmt)) {
+        prescanExpr(ret->value.get(), scopes, closureParams);
+        return;
+    }
+    if (const auto* block = dynamic_cast<const Block*>(stmt)) {
+        scopes.emplace_back();
+        for (const auto& inner : block->stmts) {
+            prescanStmt(inner.get(), scopes, closureParams);
+        }
+        scopes.pop_back();
+        return;
+    }
+    if (const auto* defer = dynamic_cast<const DeferStmt*>(stmt)) {
+        // Exit-time values may exceed registration-time ones; walking in
+        // place under-proves (refuses) rather than over-proves.
+        prescanStmt(defer->stmt.get(), scopes, closureParams);
+        return;
+    }
+    if (const auto* cond = dynamic_cast<const IfStmt*>(stmt)) {
+        prescanExpr(cond->cond.get(), scopes, closureParams);
+        // Branches may disagree: keep what both prove, Raw otherwise. A
+        // name one branch never touches keeps the incoming value.
+        auto merge = [&](std::unordered_map<std::string, Prov> branch) {
+            for (const auto& [name, prov] : branch) {
+                auto base = scopes.back().find(name);
+                Prov before = base != scopes.back().end()
+                                  ? base->second
+                                  : Prov::Raw;
+                if (prov != before) {
+                    scopes.back()[name] = Prov::Raw;
+                } else {
+                    scopes.back()[name] = prov;
+                }
+            }
+        };
+        auto then = scopes.back();
+        prescanStmt(cond->then.get(), scopes, closureParams);
+        std::unordered_map<std::string, Prov> thenOut = scopes.back();
+        scopes.back() = then;
+        if (cond->els != nullptr) {
+            prescanStmt(cond->els.get(), scopes, closureParams);
+        }
+        std::unordered_map<std::string, Prov> elseOut = scopes.back();
+        scopes.back() = then;
+        merge(thenOut);
+        // Else-side: only demote where it disagrees with the merged value.
+        for (const auto& [name, prov] : elseOut) {
+            auto base = then.find(name);
+            Prov before = base != then.end() ? base->second : Prov::Raw;
+            if (prov != before) {
+                scopes.back()[name] = Prov::Raw;
+            } else if (scopes.back().find(name) == scopes.back().end()) {
+                scopes.back()[name] = prov;
+            }
+        }
+        return;
+    }
+    if (const auto* loop = dynamic_cast<const WhileStmt*>(stmt)) {
+        prescanExpr(loop->cond.get(), scopes, closureParams);
+        // One speculative pass on a copy: loop-carried writes stay
+        // unproven (a zero-trip loop runs nothing), but sites inside
+        // still record.
+        auto body = scopes.back();
+        std::vector<std::unordered_map<std::string, Prov>> inner{body};
+        prescanStmt(loop->body.get(), inner, closureParams);
+        mergePrescan(scopes.back(), body);
+        return;
+    }
+    if (const auto* loop = dynamic_cast<const ForStmt*>(stmt)) {
+        prescanStmt(loop->init.get(), scopes, closureParams);
+        prescanExpr(loop->cond.get(), scopes, closureParams);
+        prescanExpr(loop->step.get(), scopes, closureParams);
+        auto body = scopes.back();
+        std::vector<std::unordered_map<std::string, Prov>> inner{body};
+        prescanStmt(loop->body.get(), inner, closureParams);
+        mergePrescan(scopes.back(), body);
+        return;
+    }
+    if (const auto* loop = dynamic_cast<const ForInStmt*>(stmt)) {
+        prescanExpr(loop->seq.get(), scopes, closureParams);
+        auto body = scopes.back();
+        std::vector<std::unordered_map<std::string, Prov>> inner{body};
+        prescanStmt(loop->body.get(), inner, closureParams);
+        mergePrescan(scopes.back(), body);
+        return;
+    }
+    if (const auto* match = dynamic_cast<const MatchStmt*>(stmt)) {
+        prescanExpr(match->scrutinee.get(), scopes, closureParams);
+        // Arms run at most one: keep what every arm agrees on. Each arm
+        // still records its own sites.
+        bool first = true;
+        std::unordered_map<std::string, Prov> agreed;
+        auto takeArm = [&](const Block* body) {
+            if (body == nullptr) {
+                return;
+            }
+            auto copy = scopes.back();
+            std::vector<std::unordered_map<std::string, Prov>> inner{copy};
+            prescanStmt(body, inner, closureParams);
+            if (first) {
+                agreed = inner.back();
+                first = false;
+                return;
+            }
+            for (auto it = agreed.begin(); it != agreed.end();) {
+                auto found = inner.back().find(it->first);
+                if (found == inner.back().end() || found->second != it->second) {
+                    it = agreed.erase(it);
+                } else {
+                    ++it;
+                }
+            }
+        };
+        for (const auto& arm : match->arms) {
+            if (arm->guard != nullptr) {
+                prescanExpr(arm->guard.get(), scopes, closureParams);
+            }
+            takeArm(arm->body.get());
+        }
+        if (match->fallback != nullptr) {
+            takeArm(match->fallback.get());
+        }
+        if (!first) {
+            scopes.back() = agreed;
+        }
+        return;
+    }
+}
+
+void Checker::mergePrescan(std::unordered_map<std::string, Prov>& into,
+                           const std::unordered_map<std::string, Prov>& before) {
+    // Loop-carried writes stay unproven (see above): only entries the
+    // body left exactly as found survive.
+    for (auto it = into.begin(); it != into.end();) {
+        auto found = before.find(it->first);
+        if (found == before.end() || found->second != it->second) {
+            it = into.erase(it);
+        } else {
+            ++it;
+        }
+    }
+    for (const auto& [name, prov] : before) {
+        if (into.find(name) == into.end()) {
+            into[name] = prov;
+        }
+    }
+}
+
+void Checker::prescanExpr(const Expr* expr,
+                          std::vector<std::unordered_map<std::string, Prov>>& scopes,
+                          const std::unordered_map<std::string, bool>& closureParams) {
+    if (expr == nullptr) {
+        return;
+    }
+    // The module is recovered per call below; prescanSite resolves it.
+    if (const auto* call = dynamic_cast<const Call*>(expr)) {
+        prescanSite(prescanModule_, *call, scopes, closureParams);
+        for (const auto& arg : call->args) {
+            prescanExpr(arg.get(), scopes, closureParams);
+        }
+        return;
+    }
+    if (const auto* assign = dynamic_cast<const Assign*>(expr)) {
+        prescanExpr(assign->value.get(), scopes, closureParams);
+        if (const auto* ident = dynamic_cast<const Ident*>(assign->target.get())) {
+            if (!assign->op.has_value()) {
+                Prov proven = prescanArg(assign->value.get(), scopes, closureParams);
+                // A declared local takes it in flow; otherwise the name is
+                // a global and records persistently. Undeclared uses stay
+                // loud in checking; here they read Raw.
+                bool bound = false;
+                for (auto it = scopes.rbegin(); it != scopes.rend(); ++it) {
+                    if (it->find(ident->name) != it->end()) {
+                        bound = true;
+                        break;
+                    }
+                }
+                if (bound) {
+                    scopes.back()[ident->name] = proven;
+                } else {
+                    prescanGlobals_[ident->name] = proven;
+                }
+            }
+        } else {
+            prescanExpr(assign->target.get(), scopes, closureParams);
+        }
+        return;
+    }
+    if (const auto* binary = dynamic_cast<const Binary*>(expr)) {
+        prescanExpr(binary->lhs.get(), scopes, closureParams);
+        prescanExpr(binary->rhs.get(), scopes, closureParams);
+        return;
+    }
+    if (const auto* unary = dynamic_cast<const Unary*>(expr)) {
+        prescanExpr(unary->operand.get(), scopes, closureParams);
+        return;
+    }
+    if (const auto* cast = dynamic_cast<const Cast*>(expr)) {
+        prescanExpr(cast->expr.get(), scopes, closureParams);
+        return;
+    }
+    if (const auto* ternary = dynamic_cast<const Ternary*>(expr)) {
+        prescanExpr(ternary->cond.get(), scopes, closureParams);
+        prescanExpr(ternary->then.get(), scopes, closureParams);
+        prescanExpr(ternary->els.get(), scopes, closureParams);
+        return;
+    }
+    if (const auto* index = dynamic_cast<const Index*>(expr)) {
+        prescanExpr(index->array.get(), scopes, closureParams);
+        prescanExpr(index->index.get(), scopes, closureParams);
+        return;
+    }
+    if (const auto* field = dynamic_cast<const Field*>(expr)) {
+        prescanExpr(field->object.get(), scopes, closureParams);
+        return;
+    }
+    if (const auto* slice = dynamic_cast<const SliceExpr*>(expr)) {
+        prescanExpr(slice->array.get(), scopes, closureParams);
+        prescanExpr(slice->lo.get(), scopes, closureParams);
+        prescanExpr(slice->hi.get(), scopes, closureParams);
+        return;
+    }
+    if (const auto* inc = dynamic_cast<const IncrDecr*>(expr)) {
+        prescanExpr(inc->operand.get(), scopes, closureParams);
+        return;
+    }
+    if (const auto* news = dynamic_cast<const NewStruct*>(expr)) {
+        for (const auto& field : news->fields) {
+            prescanExpr(field.value.get(), scopes, closureParams);
+        }
+        return;
+    }
+    if (const auto* newa = dynamic_cast<const NewArray*>(expr)) {
+        for (const auto& init : newa->inits) {
+            prescanExpr(init.get(), scopes, closureParams);
+        }
+        return;
+    }
+    if (const auto* newc = dynamic_cast<const NewClass*>(expr)) {
+        for (const auto& arg : newc->args) {
+            prescanExpr(arg.get(), scopes, closureParams);
+        }
+        return;
+    }
+}
+
 TypeRef Checker::sizeofOperand(const SizeofType* node) const {
     auto found = sizeofOperands_.find(node);
     return found == sizeofOperands_.end() ? errorRef() : found->second;
@@ -347,27 +780,35 @@ Prov Checker::provOf(const Expr* expr) {
         return Prov::Closure;
     }
     if (const auto* ident = dynamic_cast<const Ident*>(expr)) {
-        for (auto it = flowStack_.rbegin(); it != flowStack_.rend(); ++it) {
-            auto found = it->find(ident->name);
-            if (found != it->end()) {
-                return found->second;
-            }
+        return provOfName(ident->name);
+    }
+    if (const auto* cast = dynamic_cast<const Cast*>(expr)) {
+        // Casts preserve: a proven address stays proven through any
+        // spelling change, and an unproven one stays unproven.
+        return provOf(cast->expr.get());
+    }
+    return Prov::Raw;
+}
+
+Prov Checker::provOfName(const std::string& name) const {
+    for (auto it = flowStack_.rbegin(); it != flowStack_.rend(); ++it) {
+        auto found = it->find(name);
+        if (found != it->end()) {
+            return found->second;
         }
-        auto global = globalProv_.find(ident->name);
-        if (global != globalProv_.end()) {
-            return global->second;
+    }
+    auto global = globalProv_.find(name);
+    if (global != globalProv_.end()) {
+        return global->second;
+    }
+    // Untracked names default by type: a closure-typed name is its own
+    // proof (nothing else inhabits the type), while carriers start Raw
+    // until a tracked store proves them.
+    if (const Local* local = findLocal(name)) {
+        if (!local->type.isError() &&
+            local->type.type->kind() == Kind::Closure) {
+            return Prov::Closure;
         }
-        // Untracked names default by type: a closure-typed name is its own
-        // proof (nothing else inhabits the type), while carriers start Raw
-        // until a tracked store proves them.
-        if (const Local* local = findLocal(ident->name)) {
-            if (!local->type.isError() &&
-                local->type.type->kind() == Kind::Closure) {
-                return Prov::Closure;
-            }
-            return Prov::Raw;
-        }
-        return Prov::Raw;
     }
     return Prov::Raw;
 }
@@ -691,6 +1132,14 @@ void Checker::visitFuncDecl(FuncDecl& n) {
     for (uint64_t i = 0; i < static_cast<uint64_t>(params.size()); ++i) {
         bindLocal(n.params[i].name, TypeRef{params[i].type}, params[i].isMutable,
                   n.params[i].pos);
+        // Prescan proofs seed the flow: a proven *void parameter reads
+        // proven from its first use, like any store would.
+        std::string key = module_ + "." + n.name + "#" +
+                          std::to_string(static_cast<unsigned long long>(i));
+        Prov proven = paramProv(key);
+        if (proven != Prov::Raw) {
+            recordFlow(n.params[i].name, proven);
+        }
     }
     TypeRef saved = funcReturn_;
     bool was = inFunc_;
@@ -1817,10 +2266,16 @@ void Checker::visitAssign(Assign& n) {
         TypeRef value = checkExpr(n.value.get(), target);
         checkCompatible(n.value->pos, n.value.get(), value, target);
         // A store proves its target: later reads answer what this value
-        // carried. Places beyond bare names (fields, elements, derefs)
-        // arrive with the next slice; names land now.
+        // carried. Globals record persistently (cleared per function);
+        // locals record in their scope. Places beyond bare names (fields,
+        // elements, derefs) arrive with the next slice; names land now.
         if (const auto* ident = dynamic_cast<const Ident*>(n.target.get())) {
-            recordFlow(ident->name, provOf(n.value.get()));
+            Prov proven = provOf(n.value.get());
+            if (findLocal(ident->name) != nullptr) {
+                recordFlow(ident->name, proven);
+            } else {
+                globalProv_[ident->name] = proven;
+            }
         }
         record(&n, target);
         return;
@@ -4089,6 +4544,23 @@ bool Checker::checkCompatible(Position pos, const Expr* fromExpr, TypeRef from, 
         }
         return true;
     }
+    // Deeper carriers (*void storage through another pointer) answer the
+    // same single address word the cast gate above shapes.
+    auto isDeepVoidPtr = [](const TypeRef& t) -> bool {
+        if (t.type->kind() == Kind::Pointer && t.type->pointee() != nullptr &&
+            t.type->pointee()->kind() == Kind::Pointer &&
+            t.type->pointee()->pointee() != nullptr) {
+            return t.type->pointee()->pointee()->kind() == Kind::Void;
+        }
+        return false;
+    };
+    if (from.type->kind() == Kind::Closure && isDeepVoidPtr(to)) {
+        if (provOf(fromExpr) != Prov::Closure) {
+            fail(pos, "only a closure converts to *void");
+            return false;
+        }
+        return true;
+    }
     // A proven-closure *void converts back to a closure spelling: the
     // address names the pair the store observed. An unproven carrier
     // refuses — reading a pair through it would be a guess. A null
@@ -4258,6 +4730,14 @@ bool Checker::castRowOk(TypeRef from, TypeRef to) const {
         return true;
     }
     if (a == Kind::Pointer && bNum) {
+        return true;
+    }
+    // A closure casts to a void pointer by address (provenance rides the
+    // type: only closure-typed spellings arrive here). Deeper carriers
+    // stay refused until lowering shapes them.
+    if (a == Kind::Closure && b == Kind::Pointer &&
+        to.type->pointee() != nullptr &&
+        to.type->pointee()->kind() == Kind::Void) {
         return true;
     }
     // An enum casts to and from any integer width: the value is the

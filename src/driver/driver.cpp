@@ -177,6 +177,10 @@ bool runFront(const std::string& file, const std::string& text, Pipeline& pipe,
     }
     check::Checker checker(*pipe.types, resolver);
     lower::Lowerer lowerer(*pipe.types, resolver, checker);
+    // Closure provenance runs before any body checks: callee bodies see
+    // caller proofs regardless of module order. Pure analysis — no
+    // diagnostics, no recorded types.
+    checker.prescanProvenance(resolver.moduleOrder());
     // Every resolved module lowers into one IR module in resolve order, so
     // link names mangle under their own module and rodata labels never
     // collide. Emission order carries no semantics: calls resolve by link
