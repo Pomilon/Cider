@@ -86,6 +86,12 @@ public:
     // spelling, so two same-named enums never share one. Empty when the id
     // names no enum this table holds.
     std::vector<std::pair<std::string, int64_t>> enumMembers(DeclId id) const;
+    // The single enum of this scope with that member, or null when none
+    // or several name it; `count` tells the two apart so diagnostics stay
+    // honest. Only enums declared in this module answer; imported ones
+    // keep their qualified spelling.
+    const Decl* lookupEnumMember(const Scope* scope, const std::string& member,
+                                 int& count) const;
 
     // The resolved type of a node the header pass already answered (field and
     // parameter types, alias targets). The checker adds expression types to the

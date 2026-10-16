@@ -484,7 +484,19 @@ void Checker::visitProgram(Program& n) {
             // only has to not call it non-constant.
             const auto* asString = dynamic_cast<const StringLit*>(g->init.get());
             const bool stringGlobal = declared.type->kind() == Kind::String;
-            if (!constGlobal && !funcGlobal && (asFloat == nullptr || !floatGlobal) &&
+            // An enumerator spelling is four known bytes in the image: the
+            // lowerer folds every spelling the expression checker accepts
+            // (bare, qualified, alias, module-qualified), so the gate only
+            // admits the shapes and the checking below validates them.
+            // Anything else constructed is not constant.
+            bool enumGlobal = false;
+            if (!constGlobal && declared.type->kind() == Kind::Enum &&
+                (dynamic_cast<const Ident*>(g->init.get()) != nullptr ||
+                 dynamic_cast<const Field*>(g->init.get()) != nullptr)) {
+                enumGlobal = true;
+            }
+            if (!constGlobal && !funcGlobal && !enumGlobal &&
+                (asFloat == nullptr || !floatGlobal) &&
                 !(floatGlobal && floatFolded.ok) &&
                 (asString == nullptr || !stringGlobal)) {
                 const std::string why =
@@ -1898,6 +1910,16 @@ bool Checker::resolveMatchValue(const std::string& name, TypeRef& bound) {
     }
     const resolve::Decl* decl = resolver_.lookup(moduleScope_, name);
     if (decl == nullptr) {
+        // A bare enumerator compares by value: exactly one enum in this
+        // module may own the name, or the name still binds fresh below.
+        // Imported enums keep their qualified spelling in patterns.
+        int owners = 0;
+        const resolve::Decl* owner =
+            resolver_.lookupEnumMember(moduleScope_, name, owners);
+        if (owner != nullptr) {
+            bound = TypeRef{ctx_.nominal(Kind::Enum, owner->id)};
+            return true;
+        }
         return false;
     }
     if (decl->kind == resolve::DeclKind::Var ||
@@ -1919,6 +1941,25 @@ bool Checker::matchComparable(TypeRef scrutinee, TypeRef bound) {
     }
     if (sk == Kind::Pointer && bk == Kind::Pointer) {
         return true;
+    }
+    // Enums compare by underlying value: the same enum, or either side
+    // an integer (TYPES §2.6). Different enums never compare; the arm
+    // dies instead of matching garbage.
+    if (sk == Kind::Enum || bk == Kind::Enum) {
+        auto idOf = [](const TypeRef& t) -> std::optional<DeclId> {
+            return t.type->kind() == Kind::Enum ? t.type->decl() : std::nullopt;
+        };
+        auto isInt = [](const TypeRef& t) -> bool {
+            return t.type->kind() == Kind::Basic &&
+                   basicIsInteger(*t.type->basic());
+        };
+        std::optional<DeclId> s = idOf(scrutinee);
+        std::optional<DeclId> b = idOf(bound);
+        if (s.has_value() && b.has_value()) {
+            return sameDecl(*s, *b);
+        }
+        return (s.has_value() && isInt(bound)) ||
+               (b.has_value() && isInt(scrutinee));
     }
     if (sk == Kind::Basic && bk == Kind::Basic) {
         auto s = scrutinee.type->basic();
@@ -2129,7 +2170,7 @@ bool Checker::checkMatchType(const Pattern& pat, TypeRef scrutinee) {
 
 std::optional<DeclId> Checker::matchMemberUnion(const Pattern& pat) {
     auto tagSpelling = std::make_unique<NamedType>(
-        pat.pos, "", pat.tag, std::vector<std::unique_ptr<TypeExpr>>{});
+        pat.pos, pat.mod, pat.tag, std::vector<std::unique_ptr<TypeExpr>>{});
     TypeRef t = resolveHere(tagSpelling.get());
     if (t.isError() || t.type->kind() != Kind::Union) {
         return std::nullopt;
@@ -2139,7 +2180,7 @@ std::optional<DeclId> Checker::matchMemberUnion(const Pattern& pat) {
 
 std::optional<DeclId> Checker::matchMemberEnum(const Pattern& pat) {
     auto tagSpelling = std::make_unique<NamedType>(
-        pat.pos, "", pat.tag, std::vector<std::unique_ptr<TypeExpr>>{});
+        pat.pos, pat.mod, pat.tag, std::vector<std::unique_ptr<TypeExpr>>{});
     TypeRef t = resolveHere(tagSpelling.get());
     if (t.isError() || t.type->kind() != Kind::Enum) {
         return std::nullopt;
@@ -2154,7 +2195,7 @@ bool Checker::checkMatchMember(const Pattern& pat, TypeRef scrutinee) {
     // and dies; an interface could box either, which still needs its
     // dynamic check to land.
     auto tagSpelling = std::make_unique<NamedType>(
-        pat.pos, "", pat.tag, std::vector<std::unique_ptr<TypeExpr>>{});
+        pat.pos, pat.mod, pat.tag, std::vector<std::unique_ptr<TypeExpr>>{});
     TypeRef t = resolveHere(tagSpelling.get());
     if (t.isError()) {
         return false;
@@ -2356,7 +2397,7 @@ void Checker::bindPattern(const Pattern& pat, TypeRef scrutinee) {
     }
     if (pat.kind == PatternKind::Member) {
         auto tagSpelling = std::make_unique<NamedType>(
-            pat.pos, "", pat.tag, std::vector<std::unique_ptr<TypeExpr>>{});
+            pat.pos, pat.mod, pat.tag, std::vector<std::unique_ptr<TypeExpr>>{});
         TypeRef t = resolveHere(tagSpelling.get());
         if (t.isError() || t.type->kind() != Kind::Union) {
             return;
@@ -2621,6 +2662,19 @@ TypeRef Checker::checkIdent(Ident& expr) {
     }
     const resolve::Decl* decl = resolver_.lookup(moduleScope_, expr.name);
     if (decl == nullptr) {
+        // A bare enumerator names its enum's member: exactly one enum in
+        // this module may claim it. Imported enums keep their qualified
+        // spelling.
+        int owners = 0;
+        const resolve::Decl* owner =
+            resolver_.lookupEnumMember(moduleScope_, expr.name, owners);
+        if (owner != nullptr) {
+            return TypeRef{ctx_.nominal(Kind::Enum, owner->id)};
+        }
+        if (owners > 1) {
+            fail(expr.pos, "ambiguous enumerator '" + expr.name + "'");
+            return errorRef();
+        }
         fail(expr.pos, "unbound name '" + expr.name + "'");
         return errorRef();
     }
@@ -2758,6 +2812,36 @@ TypeRef Checker::checkBinary(Binary& expr, TypeRef expected) {
                 return TypeRef{ctx_.basic(BasicKind::Bool)};
             }
             fail(expr.pos, "strings compare for equality only");
+            return errorRef();
+        }
+        const bool lhsEnum = lhs.type->kind() == Kind::Enum;
+        const bool rhsEnum = rhs.type->kind() == Kind::Enum;
+        if (lhsEnum || rhsEnum) {
+            // Enums compare by underlying value: two spellings of one
+            // enum, or either side an integer. Different enums never
+            // compare, and ordering answers the integer order.
+            auto enumId = [](const TypeRef& t) -> std::optional<DeclId> {
+                return t.type->kind() == Kind::Enum ? t.type->decl()
+                                                    : std::nullopt;
+            };
+            auto isInt = [](const TypeRef& t) -> bool {
+                return t.type->kind() == Kind::Basic &&
+                       basicIsInteger(*t.type->basic());
+            };
+            std::optional<DeclId> l = enumId(lhs);
+            std::optional<DeclId> r = enumId(rhs);
+            if (l.has_value() && r.has_value()) {
+                if (!sameDecl(*l, *r)) {
+                    fail(expr.pos, "these enum types cannot compare");
+                    return errorRef();
+                }
+                return TypeRef{ctx_.basic(BasicKind::Bool)};
+            }
+            if ((l.has_value() && isInt(rhs)) ||
+                (r.has_value() && isInt(lhs))) {
+                return TypeRef{ctx_.basic(BasicKind::Bool)};
+            }
+            fail(expr.pos, "an enum compares against its own type or an integer");
             return errorRef();
         }
         const bool lhsIface = lhs.type->kind() == Kind::Interface;
@@ -3129,6 +3213,42 @@ TypeRef Checker::checkField(Field& expr) {
                 const resolve::Decl* member =
                     home != nullptr ? resolver_.lookup(home, expr.name) : nullptr;
                 if (member == nullptr) {
+                    // A bare exported enumerator (`lib.CIRCLE`) names its
+                    // enum's member: exactly one enum in that module may
+                    // own it, or the name stays unexported. Direct members
+                    // already missed above, so this branch owns nothing
+                    // they could name.
+                    if (home != nullptr) {
+                        const resolve::Decl* owner = nullptr;
+                        int owners = 0;
+                        for (const auto& [name, decl] : home->bindings) {
+                            if (decl == nullptr ||
+                                decl->kind != resolve::DeclKind::Type ||
+                                decl->nominal != Kind::Enum) {
+                                continue;
+                            }
+                            bool found = false;
+                            for (const auto& entry :
+                                 resolver_.enumMembers(decl->id)) {
+                                if (entry.first == expr.name) {
+                                    found = true;
+                                    break;
+                                }
+                            }
+                            if (found) {
+                                ++owners;
+                                owner = decl;
+                            }
+                        }
+                        if (owner != nullptr && owners == 1) {
+                            return TypeRef{ctx_.nominal(Kind::Enum, owner->id)};
+                        }
+                        if (owners > 1) {
+                            fail(expr.pos, "ambiguous enumerator '" +
+                                              expr.name + "'");
+                            return errorRef();
+                        }
+                    }
                     fail(expr.pos, "'" + expr.name + "' is not exported by '" +
                                           mod->origin + "'");
                     return errorRef();
@@ -3164,7 +3284,39 @@ TypeRef Checker::checkField(Field& expr) {
                                       named->name + "'");
                     return errorRef();
                 }
-                return TypeRef{ctx_.basic(BasicKind::I32)};
+                // Enumerators check as their enum: conversions and
+                // equality key off the type, while lowering still flows
+                // the underlying i32 (see widthOf).
+                return TypeRef{ctx_.nominal(Kind::Enum, named->id)};
+            }
+            // `Shade.GREEN`: the qualifier aliases an enum, so the member
+            // is that enum's enumerator. The alias spells the same type
+            // the enum does; anything else here is not a value.
+            if (named != nullptr &&
+                named->kind == resolve::DeclKind::Alias &&
+                named->aliasTarget != nullptr) {
+                TypeRef target = resolver_.resolveType(named->aliasTarget,
+                                                        moduleScope_);
+                if (!target.isError() && target.type->kind() == Kind::Enum) {
+                    std::optional<DeclId> aliasId = target.type->decl();
+                    if (aliasId.has_value()) {
+                        bool found = false;
+                        for (const auto& entry :
+                             resolver_.enumMembers(*aliasId)) {
+                            if (entry.first == expr.name) {
+                                found = true;
+                                break;
+                            }
+                        }
+                        if (!found) {
+                            fail(expr.pos, "'" + expr.name +
+                                              "' is not an enumerator of '" +
+                                              ident->name + "'");
+                            return errorRef();
+                        }
+                        return TypeRef{ctx_.nominal(Kind::Enum, *aliasId)};
+                    }
+                }
             }
         }
     }
@@ -3214,7 +3366,10 @@ TypeRef Checker::checkField(Field& expr) {
                                                   inner->name + "'");
                             return errorRef();
                         }
-                        return TypeRef{ctx_.basic(BasicKind::I32)};
+                        // Enumerators check as their enum: conversions and
+                        // equality key off the type, while lowering still
+                        // flows the underlying i32 (see widthOf).
+                        return TypeRef{ctx_.nominal(Kind::Enum, *enumId)};
                     }
                 }
             }
@@ -3576,6 +3731,14 @@ bool Checker::checkCompatible(Position pos, const Expr* fromExpr, TypeRef from, 
         basicIsFloat(*to.type->basic())) {
         return true;
     }
+    // An enum value flows to any integer target as its underlying value
+    // (TYPES §2.6); the reverse needs an explicit `as`, so integers never
+    // land in an enum by accident. The width is the target's: an
+    // enumerator fits every integer spelling.
+    if (from.type->kind() == Kind::Enum && to.type->kind() == Kind::Basic &&
+        basicIsInteger(*to.type->basic())) {
+        return true;
+    }
     // A concrete value converts to an interface it implements.
     if (to.type->kind() == Kind::Interface &&
         (from.type->kind() == Kind::Struct || from.type->kind() == Kind::Class)) {
@@ -3687,6 +3850,18 @@ bool Checker::castRowOk(TypeRef from, TypeRef to) const {
         return true;
     }
     if (a == Kind::Pointer && bNum) {
+        return true;
+    }
+    // An enum casts to and from any integer width: the value is the
+    // underlying i32 widened or narrowed like any integer conversion,
+    // and the membership check the int-to-enum lowering emits guards
+    // the way in (TYPES §2.6). Same-width pairs already passed through
+    // the size rule below; this row owns the wide ones.
+    auto isIntKind = [](Kind k, const Type* t) -> bool {
+        return k == Kind::Basic && basicIsInteger(*t->basic());
+    };
+    if ((a == Kind::Enum && isIntKind(b, to.type)) ||
+        (isIntKind(a, from.type) && b == Kind::Enum)) {
         return true;
     }
     // An interface reads back as a concrete struct, checked at runtime.

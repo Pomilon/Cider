@@ -16,12 +16,12 @@ type N = mid.M;
 
 func main() -> int {
   var s: mid.M = mid.mk(6, 7);  // alias spelling, direct qualified call
-  var h: mid.Holder;            // direct spelling of the struct
+  var h: mid.Holder = new mid.Holder { s: mid.mk(0, 0), c: mid.Col.RED };
   h.s = mid.mkAlias(2, 3);      // alias return type through mid
   h.c = mid.Col.GREEN;          // alias-qualified enum variant
   if (h.c != mid.Col.GREEN) return 96;
 
-  var w: Wrapper;
+  var w: Wrapper = new Wrapper { m: mid.mk(0, 0), tag: 0 };
   w.m = s;                      // alias-typed field store
   w.tag = 1;
 

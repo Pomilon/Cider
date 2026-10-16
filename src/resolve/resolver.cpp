@@ -501,6 +501,29 @@ bool Resolver::isEnumMember(const std::string& qualifiedType,
     return enumValues_.find(qualifiedType + "." + member) != enumValues_.end();
 }
 
+const Decl* Resolver::lookupEnumMember(const Scope* scope,
+                                       const std::string& member,
+                                       int& count) const {
+    count = 0;
+    if (scope == nullptr) {
+        return nullptr;
+    }
+    const Decl* found = nullptr;
+    for (const auto& [name, decl] : scope->bindings) {
+        if (decl == nullptr || decl->kind != DeclKind::Type ||
+            decl->nominal != Kind::Enum) {
+            continue;
+        }
+        if (enumValues_.find(scope->module + "." + name + "." + member) ==
+            enumValues_.end()) {
+            continue;
+        }
+        ++count;
+        found = decl;
+    }
+    return count == 1 ? found : nullptr;
+}
+
 std::vector<std::pair<std::string, int64_t>> Resolver::enumMembers(DeclId id) const {
     auto ordered = enumOrder_.find(declKey(id));
     if (ordered == enumOrder_.end()) {

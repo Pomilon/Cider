@@ -14,7 +14,7 @@ export struct Holder {         // direct spellings in field types
 export type LocalHolder = Holder;  // bare alias of the local struct
 
 export func mk(w: u64, h: u64) -> qlib.Shape {  // direct return spelling
-  var s: qlib.Shape;                            // direct local spelling
+  var s: qlib.Shape = new qlib.Shape { w: 0, h: 0 };
   s.w = w;
   s.h = h;
   return s;

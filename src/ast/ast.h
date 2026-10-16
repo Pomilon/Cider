@@ -419,6 +419,9 @@ struct Pattern : Node {
     std::unique_ptr<Expr> rangeHi;
     std::string tag;
     std::string member;
+    // A module-qualified case (`lib.Shape.CIRCLE`) roots its type in
+    // another module: empty for the local `Tag.Member` spelling.
+    std::string mod;
     explicit Pattern(Position p) : Node(std::move(p)) {}
     void accept(ASTVisitor& v) override;
 };

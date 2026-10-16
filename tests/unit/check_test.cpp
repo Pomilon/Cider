@@ -137,6 +137,11 @@ void testGlobalStruct() {
         "var g: Box = new Box { p: nilPtr, q: nilPtr };\n"
         "func main() -> int { return 0; }\n");
     check(nilField.ok, "a nil pointer field is constant: " + nilField.stage);
+    Checked enumGlobal = check(
+        "enum Color { RED, GREEN }\n"
+        "var g: Color = Color.GREEN;\n"
+        "func main() -> int { return g as int; }\n");
+    check(enumGlobal.ok, "an enumerator folds into a global: " + enumGlobal.stage);
 }
 
 // Names resolve through locals first, then the module scope.
@@ -1095,6 +1100,13 @@ void testEnumMatch() {
         "    match (c) { Color.RED => { return 1; } default => { return 0; } }\n"
         "}\n");
     check(good.ok, "an enum member pattern checks: " + good.stage);
+    Checked bareArm = check(
+        "enum Color { RED, GREEN }\n"
+        "func main() -> int {\n"
+        "    var c: Color = 1 as Color;\n"
+        "    match (c) { RED => { return 1; } GREEN => { return 2; } default => { return 0; } }\n"
+        "}\n");
+    check(bareArm.ok, "a bare enumerator names its case: " + bareArm.stage);
     Checked noMember = check(
         "enum Color { RED, GREEN }\n"
         "func main() -> int {\n"
@@ -1285,7 +1297,38 @@ void testEnumValues() {
     Checked bare = check(
         "enum Color { RED }\n"
         "func main() -> int { var c: int = RED; return c; }\n");
-    check(!bare.ok && bare.stage == "check", "bare enumerator stays unbound");
+    check(bare.ok, "a bare enumerator resolves: " + bare.stage);
+    Checked ambiguous = check(
+        "enum A { SAME }\n"
+        "enum B { SAME }\n"
+        "func main() -> int { var c: int = SAME; return c; }\n");
+    check(!ambiguous.ok && ambiguous.stage == "check",
+          "an enumerator named by two enums stays unbound");
+    Checked enumToInt = check(
+        "enum Color { RED }\n"
+        "func take(v: int) -> int { return v; }\n"
+        "func main() -> int { var c: Color = Color.RED; return take(c); }\n");
+    check(enumToInt.ok, "an enum flows to an integer target: " + enumToInt.stage);
+    Checked intToEnum = check(
+        "enum Color { RED }\n"
+        "func main() -> int { var c: Color = 0; return 0; }\n");
+    check(!intToEnum.ok && intToEnum.stage == "check",
+          "an integer needs `as` for an enum target");
+    Checked sameEnum = check(
+        "enum Color { RED, GREEN }\n"
+        "func main() -> int { var c: Color = Color.RED; if (c == Color.GREEN) { return 1; } return 0; }\n");
+    check(sameEnum.ok, "one enum compares against itself: " + sameEnum.stage);
+    Checked crossEnum = check(
+        "enum A { X }\n"
+        "enum B { Y }\n"
+        "func main() -> int { var a: A = A.X; var b: B = B.Y; if (a == b) { return 1; } return 0; }\n");
+    check(!crossEnum.ok && crossEnum.stage == "check",
+          "two enums never compare");
+    Checked aliasQual = check(
+        "enum Color { RED, GREEN }\n"
+        "type Shade = Color;\n"
+        "func main() -> int { var c: Color = Shade.GREEN; return c as int; }\n");
+    check(aliasQual.ok, "an alias names its enum's variants: " + aliasQual.stage);
 }
 
 void testGlobalConstWidth() {

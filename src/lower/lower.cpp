@@ -1655,6 +1655,148 @@ void Lowerer::onGlobal(VarDecl& n) {
             std::memcpy(&pattern, &value, sizeof pattern);
             binding.initial = static_cast<int64_t>(pattern);
         }
+    } else if (type.type->kind() == Kind::Enum) {
+        // An enumerator spelling folds to its value: every spelling the
+        // checker accepts (bare, qualified, alias, module-qualified)
+        // resolves here to the member's integer. The gate admitted only
+        // these shapes and the checking validated them, so a miss here
+        // is a lowering gap, refused as one.
+        int64_t value = 0;
+        bool known = false;
+        const resolve::Scope* hereScope =
+            resolver_.scopeOf(checker_.module());
+        if (const auto* ident = dynamic_cast<const Ident*>(n.init.get())) {
+            int owners = 0;
+            const resolve::Decl* owner =
+                hereScope != nullptr
+                    ? resolver_.lookupEnumMember(hereScope, ident->name, owners)
+                    : nullptr;
+            if (owner != nullptr) {
+                std::string home = owner->scope != nullptr
+                                       ? owner->scope->module
+                                       : checker_.module();
+                value = resolver_.enumValue(home + "." + owner->name,
+                                            ident->name);
+                known = true;
+            }
+        } else if (const auto* field =
+                       dynamic_cast<const Field*>(n.init.get())) {
+            if (const auto* qual =
+                    dynamic_cast<const Ident*>(field->object.get())) {
+                bool shadowed = false;
+                for (auto frame = locals_.rbegin();
+                     frame != locals_.rend() && !shadowed; ++frame) {
+                    shadowed = frame->find(qual->name) != frame->end();
+                }
+                const resolve::Decl* qualDecl =
+                    !shadowed && hereScope != nullptr
+                        ? resolver_.lookup(hereScope, qual->name)
+                        : nullptr;
+                if (qualDecl != nullptr &&
+                    qualDecl->kind == resolve::DeclKind::Module) {
+                    const resolve::Scope* home =
+                        resolver_.scopeOf(qualDecl->origin);
+                    if (home != nullptr) {
+                        const resolve::Decl* direct =
+                            resolver_.lookup(home, field->name);
+                        if (direct == nullptr) {
+                            for (const auto& [ename, edecl] :
+                                 home->bindings) {
+                                if (edecl == nullptr ||
+                                    edecl->kind != resolve::DeclKind::Type ||
+                                    edecl->nominal != Kind::Enum) {
+                                    continue;
+                                }
+                                for (const auto& entry : resolver_.enumMembers(
+                                         edecl->id)) {
+                                    if (entry.first == field->name) {
+                                        value = entry.second;
+                                        known = true;
+                                        break;
+                                    }
+                                }
+                                if (known) {
+                                    break;
+                                }
+                            }
+                        }
+                    }
+                } else if (qualDecl != nullptr &&
+                           qualDecl->kind == resolve::DeclKind::Type &&
+                           qualDecl->nominal == Kind::Enum) {
+                    std::string home = qualDecl->scope != nullptr
+                                           ? qualDecl->scope->module
+                                           : checker_.module();
+                    value = resolver_.enumValue(
+                        home + "." + qualDecl->name, field->name);
+                    known = true;
+                } else if (qualDecl != nullptr &&
+                           qualDecl->kind == resolve::DeclKind::Alias &&
+                           qualDecl->aliasTarget != nullptr) {
+                    TypeRef target = resolver_.resolveType(
+                        qualDecl->aliasTarget, hereScope);
+                    if (!target.isError() &&
+                        target.type->kind() == Kind::Enum) {
+                        std::optional<DeclId> aliasId = target.type->decl();
+                        if (aliasId.has_value()) {
+                            for (const auto& entry :
+                                 resolver_.enumMembers(*aliasId)) {
+                                if (entry.first == field->name) {
+                                    value = entry.second;
+                                    known = true;
+                                    break;
+                                }
+                            }
+                        }
+                    }
+                }
+            } else if (const auto* inner =
+                           dynamic_cast<const Field*>(field->object.get())) {
+                const auto* mod =
+                    dynamic_cast<const Ident*>(inner->object.get());
+                const resolve::Decl* modDecl =
+                    (mod != nullptr && hereScope != nullptr)
+                        ? resolver_.lookup(hereScope, mod->name)
+                        : nullptr;
+                const resolve::Scope* home =
+                    (modDecl != nullptr &&
+                     modDecl->kind == resolve::DeclKind::Module)
+                        ? resolver_.scopeOf(modDecl->origin)
+                        : nullptr;
+                const resolve::Decl* member =
+                    home != nullptr ? resolver_.lookup(home, inner->name)
+                                    : nullptr;
+                std::optional<DeclId> enumId;
+                if (member != nullptr &&
+                    member->kind == resolve::DeclKind::Type &&
+                    member->nominal == Kind::Enum) {
+                    enumId = member->id;
+                } else if (member != nullptr &&
+                           member->kind == resolve::DeclKind::Alias &&
+                           member->aliasTarget != nullptr) {
+                    TypeRef target =
+                        resolver_.resolveType(member->aliasTarget, home);
+                    if (!target.isError() &&
+                        target.type->kind() == Kind::Enum) {
+                        enumId = target.type->decl();
+                    }
+                }
+                if (enumId.has_value()) {
+                    for (const auto& entry : resolver_.enumMembers(*enumId)) {
+                        if (entry.first == field->name) {
+                            value = entry.second;
+                            known = true;
+                            break;
+                        }
+                    }
+                }
+            }
+        }
+        if (!known) {
+            refuse(n.init->pos, "an enum global needs an enumerator");
+            return;
+        }
+        binding.initial = value;
     } else {
         // A folded integer names image bytes, so it is cut to the declared
         // width here: without the cut a 64-bit fold stores bits the type
@@ -2255,6 +2397,32 @@ ir::Value Lowerer::onIdent(Ident& n) {
             return undefined();
         }
         return folded[0];
+    }
+    // A bare enumerator folds to its value: the checker proved exactly
+    // one enum in this module owns the name, so the integer here is
+    // that member's value (TYPES §2.6). Locals, globals and module
+    // constants already answered above, so this branch owns nothing
+    // they could name.
+    TypeRef held = checker_.typeOf(&n);
+    if (!held.isError() && held.type->kind() == Kind::Enum) {
+        const resolve::Scope* here = resolver_.scopeOf(checker_.module());
+        int owners = 0;
+        const resolve::Decl* owner =
+            here != nullptr ? resolver_.lookupEnumMember(here, n.name, owners)
+                            : nullptr;
+        if (owner != nullptr) {
+            std::string home = owner->scope != nullptr
+                                   ? owner->scope->module
+                                   : checker_.module();
+            int64_t value =
+                resolver_.enumValue(home + "." + owner->name, n.name);
+            TypeRef count{ctx_.basic(BasicKind::I32)};
+            ir::Value answer = constantI64(value, count, n.pos);
+            if (failed_) {
+                return undefined();
+            }
+            return answer;
+        }
     }
     refuse(n.pos, "reading '" + n.name + "'");
     return undefined();
@@ -3206,6 +3374,38 @@ std::vector<ir::Value> Lowerer::lowerField(const Field& n) {
                     return {code, caps};
                 }
             }
+            // `lib.CIRCLE` folds like a bare enumerator rooted in that
+            // module: exactly one of its enums may own the name. Globals
+            // and functions already answered above, so this branch owns
+            // nothing they could name.
+            if (member == nullptr && home != nullptr) {
+                const resolve::Decl* owner = nullptr;
+                int64_t value = 0;
+                int owners = 0;
+                for (const auto& [name, decl] : home->bindings) {
+                    if (decl == nullptr ||
+                        decl->kind != resolve::DeclKind::Type ||
+                        decl->nominal != Kind::Enum) {
+                        continue;
+                    }
+                    for (const auto& entry : resolver_.enumMembers(decl->id)) {
+                        if (entry.first == n.name) {
+                            ++owners;
+                            owner = decl;
+                            value = entry.second;
+                            break;
+                        }
+                    }
+                }
+                if (owner != nullptr && owners == 1) {
+                    TypeRef count{ctx_.basic(BasicKind::I32)};
+                    ir::Value answer = constantI64(value, count, n.pos);
+                    if (failed_) {
+                        return {undefined()};
+                    }
+                    return {answer};
+                }
+            }
         }
     }
     if (const auto* ident = dynamic_cast<const Ident*>(n.object.get())) {
@@ -3243,6 +3443,43 @@ std::vector<ir::Value> Lowerer::lowerField(const Field& n) {
                     return {undefined()};
                 }
                 return {answer};
+            }
+            // `Shade.GREEN` folds like the enum it aliases: the checker
+            // proved the member, so the value here is that enumerator's.
+            if (named != nullptr &&
+                named->kind == resolve::DeclKind::Alias &&
+                named->aliasTarget != nullptr) {
+                const resolve::Scope* hereScope =
+                    resolver_.scopeOf(checker_.module());
+                TypeRef target = resolver_.resolveType(named->aliasTarget,
+                                                        hereScope);
+                if (!target.isError() &&
+                    target.type->kind() == Kind::Enum) {
+                    std::optional<DeclId> aliasId = target.type->decl();
+                    if (aliasId.has_value()) {
+                        int64_t value = 0;
+                        bool known = false;
+                        for (const auto& entry :
+                             resolver_.enumMembers(*aliasId)) {
+                            if (entry.first == n.name) {
+                                value = entry.second;
+                                known = true;
+                                break;
+                            }
+                        }
+                        if (!known) {
+                            refuse(n.pos, "this field access");
+                            return {undefined()};
+                        }
+                        TypeRef count{ctx_.basic(BasicKind::I32)};
+                        ir::Value answer =
+                            constantI64(value, count, n.pos);
+                        if (failed_) {
+                            return {undefined()};
+                        }
+                        return {answer};
+                    }
+                }
             }
         }
     }
@@ -5938,6 +6175,27 @@ std::vector<ir::Value> Lowerer::lowerWords(const Expr* expr) {
                 return {code, caps};
             }
         }
+        // A bare enumerator folds to its value: the checker proved exactly
+        // one enum in this module owns the name, so the integer here is
+        // that member's value (TYPES §2.6). Locals, globals, module
+        // constants and functions already answered above, so this branch
+        // owns nothing they could name.
+        if (!type.isError() && type.type->kind() == Kind::Enum) {
+            int owners = 0;
+            const resolve::Decl* owner =
+                here != nullptr
+                    ? resolver_.lookupEnumMember(here, ident->name, owners)
+                    : nullptr;
+            if (owner != nullptr) {
+                std::string home = owner->scope != nullptr
+                                       ? owner->scope->module
+                                       : checker_.module();
+                int64_t value =
+                    resolver_.enumValue(home + "." + owner->name, ident->name);
+                TypeRef count{ctx_.basic(BasicKind::I32)};
+                return {constantI64(value, count, ident->pos)};
+            }
+        }
         refuse(ident->pos, "reading '" + ident->name + "'");
         return {undefined()};
     }
@@ -7977,6 +8235,26 @@ bool Lowerer::matchBoundWords(const std::string& name, std::vector<ir::Value>& w
         TypeRef word{ctx_.basic(BasicKind::I64)};
         words = {constantI64(folded, word, pos)};
         return !failed_;
+    }
+    // A bare enumerator compares by value: the checker proved exactly one
+    // enum owns the name (or marked the arm dead), so the integer here is
+    // that member's value. Locals, globals, variables and constants
+    // already answered above, in the checker's order.
+    {
+        int owners = 0;
+        const resolve::Decl* owner =
+            here != nullptr ? resolver_.lookupEnumMember(here, name, owners)
+                            : nullptr;
+        if (owner != nullptr) {
+            std::string home = owner->scope != nullptr
+                                   ? owner->scope->module
+                                   : checker_.module();
+            int64_t value =
+                resolver_.enumValue(home + "." + owner->name, name);
+            TypeRef word{ctx_.basic(BasicKind::I64)};
+            words = {constantI64(value, word, pos)};
+            return !failed_;
+        }
     }
     return false;
 }

@@ -280,9 +280,9 @@
   "class": "B"
  },
  "crossmod_qualified_reexport": {
-  "actual": "exit 1; tests/corpus/crossmod_qualified_reexport/main.cid:9:13: expected ';'; tests/corpus/crossmod_qualified_reexport/main.cid:9:13: a struct holds fields and methods",
+  "actual": "exact stdout/stderr/exit match",
   "blocker": "enum-values: enum-typed struct fields reject i32 enumerators; enum-vs-enum comparison unimplemented (alias-enum qualifier itself now works)",
-  "class": "D"
+  "class": "A"
  },
  "cyclic_alias_bare": {
   "actual": "1:10: type alias cycle: main.B (true cycle A=B/B=A has no base type; v3 rejects at declaration)",
@@ -430,9 +430,9 @@
   "class": "A"
  },
  "enum_types": {
-  "actual": "exit=1 stdout_len=0 stderr_len=2211 first='tests/corpus/enum_types/main.cid:33:17: a variable needs an initialiser'",
+  "actual": "exact stdout/stderr/exit match",
   "blocker": "enums (+multi-file-imports)",
-  "class": "D"
+  "class": "A"
  },
  "exit7": {
   "actual": "passes exactly. rewritten to v3 entry main()->int (FEATURES 10.1); exit via syscall rdi=7, return 7 unreachable but required",

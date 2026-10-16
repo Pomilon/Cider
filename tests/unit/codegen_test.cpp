@@ -280,6 +280,10 @@ void testGlobals() {
     std::printf("globals\n");
     check(runQuiet("var g: int = 40;\nfunc main() -> int { return g + 2; }\n") == 42,
           "a global reads back");
+    check(runQuiet("enum Color { RED, GREEN }\n"
+                   "var g: Color = Color.GREEN;\n"
+                   "func main() -> int { return g as int; }\n") == 1,
+          "an enum global folds its enumerator");
     // An aggregate member past the first eight-byte line straddles it, so
     // the store and the read go through a computed address off the label
     // rather than the direct label-plus-offset form.
@@ -1461,6 +1465,12 @@ void testEnumMatch() {
                    "    match (c) { 1 => { return 9; } default => { return 7; } }\n"
                    "}\n") == 7,
           "a raw number never names an enum case at runtime");
+    check(runQuiet("enum Color { RED, GREEN, BLUE }\n"
+                   "func main() -> int {\n"
+                   "    var c: Color = 2 as Color;\n"
+                   "    match (c) { RED => { return 1; } Color.GREEN => { return 2; } BLUE => { return 3; } default => { return 0; } }\n"
+                   "}\n") == 3,
+          "bare enumerators compare by value");
 }
 
 void testPointerArith() {
@@ -1502,6 +1512,15 @@ void testEnumValues() {
                    "    return c;\n"
                    "}\n") == 5,
           "enumerators sequence and honor explicit values");
+    check(runQuiet("enum Color { RED, GREEN, BLUE = 5 }\n"
+                   "func main() -> int {\n"
+                   "    var c: Color = GREEN;\n"
+                   "    if ((c as int) != 1) { return 1; }\n"
+                   "    var i: int = BLUE;\n"
+                   "    if (i != 5) { return 2; }\n"
+                   "    return 0;\n"
+                   "}\n") == 0,
+          "bare enumerators lower to their values");
 }
 
 // An enum holds its underlying i32: casts both ways lower, and inventing
@@ -1551,6 +1570,17 @@ void testEnumCast() {
                    "    return (t as int) + 1;\n"
                    "}\n") == 0,
           "a runtime -1 converts and reads back");
+    check(runQuiet("enum Color { RED, GREEN, BLUE }\n"
+                   "func main() -> int {\n"
+                   "    var c: Color = Color.GREEN;\n"
+                   "    var w: u64 = c as u64;\n"
+                   "    if ((w as int) != 1) { return 1; }\n"
+                   "    var n: u64 = 2;\n"
+                   "    var d: Color = n as Color;\n"
+                   "    if ((d as int) != 2) { return 2; }\n"
+                   "    return 0;\n"
+                   "}\n") == 0,
+          "enums cast to and from wide integers");
 }
 
 void testBitNot() {

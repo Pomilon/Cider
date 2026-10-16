@@ -1277,6 +1277,18 @@ Pattern Parser::parsePattern() {
         pattern.kind = PatternKind::Member;
         pattern.tag = std::move(first);
         pattern.member = advance().text;
+        // A second dot roots the case in another module
+        // (`lib.Shape.CIRCLE`): the middle names the type, the last the
+        // case. Anything further is not a pattern.
+        if (match(TokenKind::Dot)) {
+            if (!check(TokenKind::Ident)) {
+                failHere("expected a member name");
+                return pattern;
+            }
+            pattern.mod = std::move(pattern.tag);
+            pattern.tag = std::move(pattern.member);
+            pattern.member = advance().text;
+        }
         return pattern;
     }
     if (check(TokenKind::LBrace)) {
