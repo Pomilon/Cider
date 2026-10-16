@@ -1398,6 +1398,59 @@ void testWideLit() {
           "a short array still fails");
 }
 
+void testClosureVoid() {
+    std::printf("closures round-trip through *void with provenance\n");
+    Checked good = check(
+        "func main() -> int {\n"
+        "    var c: func(int) -> int = func(x: int) -> int { return x * 2; };\n"
+        "    var v: *void = c;\n"
+        "    var f: func(int) -> int = v as func(int) -> int;\n"
+        "    return f(21);\n"
+        "}\n");
+    check(good.ok, "a proven closure casts back: " + good.stage);
+    Checked late = check(
+        "func main() -> int {\n"
+        "    var c: func(int) -> int = func(x: int) -> int { return x * 2; };\n"
+        "    var v: *void = nilPtr;\n"
+        "    v = c;\n"
+        "    var f: func(int) -> int = v as func(int) -> int;\n"
+        "    return f(21);\n"
+        "}\n");
+    check(late.ok, "a late assignment proves: " + late.stage);
+    Checked copy = check(
+        "func main() -> int {\n"
+        "    var c: func(int) -> int = func(x: int) -> int { return x * 2; };\n"
+        "    var v: *void = c;\n"
+        "    var w: *void = v;\n"
+        "    var f: func(int) -> int = w as func(int) -> int;\n"
+        "    return f(21);\n"
+        "}\n");
+    check(copy.ok, "a copy chain keeps provenance: " + copy.stage);
+    Checked nil = check(
+        "func main() -> int {\n"
+        "    var f: func(int) -> int = nilPtr as func(int) -> int;\n"
+        "    if (f != nilPtr) { return 1; }\n"
+        "    return 0;\n"
+        "}\n");
+    check(nil.ok, "nilPtr casts to a null closure: " + nil.stage);
+    Checked raw = check(
+        "func add(x: int) -> int { return x; }\n"
+        "func main() -> int {\n"
+        "    var p: *void = &add as *void;\n"
+        "    var f: func(int) -> int = p as func(int) -> int;\n"
+        "    return f(1);\n"
+        "}\n");
+    check(!raw.ok && raw.stage == "check", "a raw pointer never launders");
+    Checked unproven = check(
+        "func invoke(v: *void) -> int {\n"
+        "    var f: func(int) -> int = v as func(int) -> int;\n"
+        "    return f(21);\n"
+        "}\n"
+        "func main() -> int { return 0; }\n");
+    check(!unproven.ok && unproven.stage == "check",
+          "an unproven parameter refuses");
+}
+
 void testDefer() {
     std::printf("defer checks at scope exit\n");
     Checked good = check(
@@ -1498,6 +1551,7 @@ int main() {
     testEnumValues();
     testWideLit();
     testDefer();
+    testClosureVoid();
     testGlobalConstWidth();
     testCalls();
     testInterface();

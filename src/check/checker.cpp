@@ -315,11 +315,61 @@ const LocalScope* Checker::pushScope() {
     const LocalScope* out = scope.get();
     scopes_.push_back(std::move(scope));
     current_ = out;
+    flowStack_.push_back({});
     return out;
 }
 
 void Checker::popScope() {
     current_ = current_ != nullptr ? current_->parent : nullptr;
+    if (!flowStack_.empty()) {
+        flowStack_.pop_back();
+    }
+}
+
+void Checker::recordFlow(const std::string& name, Prov prov) {
+    if (flowStack_.empty()) {
+        return;
+    }
+    flowStack_.back()[name] = prov;
+}
+
+Prov Checker::provOf(const Expr* expr) {
+    if (expr == nullptr) {
+        return Prov::Raw;
+    }
+    // nilPtr is representation-neutral: it casts to the null value of any
+    // carrier spelling without proving anything about storage.
+    if (dynamic_cast<const NilPtr*>(expr) != nullptr) {
+        return Prov::Neutral;
+    }
+    // A closure literal is a closure object wherever it flows.
+    if (dynamic_cast<const FuncLit*>(expr) != nullptr) {
+        return Prov::Closure;
+    }
+    if (const auto* ident = dynamic_cast<const Ident*>(expr)) {
+        for (auto it = flowStack_.rbegin(); it != flowStack_.rend(); ++it) {
+            auto found = it->find(ident->name);
+            if (found != it->end()) {
+                return found->second;
+            }
+        }
+        auto global = globalProv_.find(ident->name);
+        if (global != globalProv_.end()) {
+            return global->second;
+        }
+        // Untracked names default by type: a closure-typed name is its own
+        // proof (nothing else inhabits the type), while carriers start Raw
+        // until a tracked store proves them.
+        if (const Local* local = findLocal(ident->name)) {
+            if (!local->type.isError() &&
+                local->type.type->kind() == Kind::Closure) {
+                return Prov::Closure;
+            }
+            return Prov::Raw;
+        }
+        return Prov::Raw;
+    }
+    return Prov::Raw;
 }
 
 bool Checker::bindLocal(const std::string& name, TypeRef type, bool isMut, Position pos) {
@@ -605,6 +655,11 @@ void Checker::visitProgram(Program& n) {
             }
         }
         record(g.get(), declared);
+        // A global's declaration proves its storage for later reads.
+        // Stores from function bodies update the same entry; functions
+        // clear it on entry, so a read sees only its own function's
+        // stores.
+        globalProv_[g->name] = provOf(g->init.get());
     }
     // After the globals are checked: the sink reads their recorded types, and
     // it runs before any function body so a global read lowers.
@@ -620,6 +675,11 @@ void Checker::visitFuncDecl(FuncDecl& n) {
     if (!n.typeParams.empty()) {
         return;
     }
+    // Globals read only their own function's stores: a callee cannot
+    // observe a caller's global writes before they happen, and checking
+    // runs callers after callees, so cross-function global flow refuses
+    // rather than guessing order.
+    globalProv_.clear();
     bool failed = false;
     Signature sig = resolver_.buildSignature(n.params, n.returns.get(), moduleScope_, failed);
     if (failed) {
@@ -1097,6 +1157,7 @@ void Checker::checkMethods(DeclId id, Kind kind, std::vector<MethodDecl>& method
     const Type* obj = ctx_.nominal(kind, id);
     const Type* self = ctx_.pointer(obj);
     for (MethodDecl& method : methods) {
+        globalProv_.clear();
         const Signature* sig = resolver_.methodSig(id, method.name);
         if (sig == nullptr) {
             fail(method.pos, "checker bug: signature missing");
@@ -1139,6 +1200,9 @@ void Checker::visitVarDecl(VarDecl& n) {
     }
     bindLocal(n.name, declared, true, n.pos);
     record(&n, declared);
+    // A declaration proves its storage: later reads of the name answer
+    // what this initializer carried.
+    recordFlow(n.name, provOf(n.init.get()));
     if (sink_ != nullptr) {
         sink_->onVarDecl(n);
     }
@@ -1527,6 +1591,44 @@ void Checker::visitCast(Cast& n) {
         record(&n, target);
         return;
     }
+    // Closure round trips gate on provenance before the shape table: a
+    // *void (or deeper carrier) holding a proven closure address casts to
+    // a closure spelling or a fn spelling, and nilPtr casts to the null
+    // closure value. Anything else holding the address refuses — reading
+    // a pair through it would be a guess. A closure casts to *void by
+    // address (checked below by shape).
+    auto isVoidCarrier = [](const TypeRef& t) -> bool {
+        if (t.type->kind() == Kind::Pointer && t.type->pointee() != nullptr) {
+            Kind inner = t.type->pointee()->kind();
+            return inner == Kind::Void || inner == Kind::Pointer;
+        }
+        return false;
+    };
+    bool toClosureSpelling =
+        target.type->kind() == Kind::Closure ||
+        target.type->kind() == Kind::FunctionPtr;
+    // A closure value casts onward by shape below; a fn spelling holding
+    // a proven closure still gates (it adopts the representation here).
+    bool fromClosureValue =
+        !from.isError() && from.type->kind() == Kind::Closure;
+    if (toClosureSpelling && !fromClosureValue && !from.isError()) {
+        if (dynamic_cast<const NilPtr*>(n.expr.get()) != nullptr) {
+            record(&n, target);
+            return;
+        }
+        // A fn spelling adopts here too: only a proven closure address
+        // answers as a pair, never a raw code pointer.
+        if (isVoidCarrier(from) || from.type->kind() == Kind::FunctionPtr) {
+            Prov proven = provOf(n.expr.get());
+            if (proven != Prov::Closure && proven != Prov::Neutral) {
+                fail(n.pos, "this *void is not proven to hold a closure");
+                record(&n, errorRef());
+                return;
+            }
+            record(&n, target);
+            return;
+        }
+    }
     if (!castRowOk(from, target)) {
         fail(n.pos, "no cast from " + typeName(from) + " to " + typeName(target));
         record(&n, errorRef());
@@ -1714,6 +1816,12 @@ void Checker::visitAssign(Assign& n) {
     if (!n.op.has_value()) {
         TypeRef value = checkExpr(n.value.get(), target);
         checkCompatible(n.value->pos, n.value.get(), value, target);
+        // A store proves its target: later reads answer what this value
+        // carried. Places beyond bare names (fields, elements, derefs)
+        // arrive with the next slice; names land now.
+        if (const auto* ident = dynamic_cast<const Ident*>(n.target.get())) {
+            recordFlow(ident->name, provOf(n.value.get()));
+        }
         record(&n, target);
         return;
     }
@@ -2997,6 +3105,21 @@ TypeRef Checker::checkBinary(Binary& expr, TypeRef expected) {
             fail(expr.pos, "interfaces compare against nilPtr only");
             return errorRef();
         }
+        const bool lhsClosure = lhs.type->kind() == Kind::Closure;
+        const bool rhsClosure = rhs.type->kind() == Kind::Closure;
+        if (lhsClosure || rhsClosure) {
+            // Equality on a closure is a null check: a null closure
+            // carries no code, so it compares against nilPtr only.
+            // Anything else beside a closure is a mismatch the source
+            // must spell — closures compare by address, not by value.
+            const bool lhsNil = dynamic_cast<const NilPtr*>(expr.lhs.get()) != nullptr;
+            const bool rhsNil = dynamic_cast<const NilPtr*>(expr.rhs.get()) != nullptr;
+            if (isEq && ((lhsClosure && rhsNil) || (rhsClosure && lhsNil))) {
+                return TypeRef{ctx_.basic(BasicKind::Bool)};
+            }
+            fail(expr.pos, "closures compare against nilPtr only");
+            return errorRef();
+        }
         if (lhs.type->kind() == Kind::Pointer && rhs.type->kind() == Kind::Pointer) {
             // Pointers compare by identity (SEMANTICS §4): two spellings of
             // one pointer type, or either side nilPtr — its spelling is
@@ -3907,6 +4030,11 @@ bool Checker::checkCompatible(Position pos, const Expr* fromExpr, TypeRef from, 
         (to.type->kind() == Kind::Pointer || to.type->kind() == Kind::FunctionPtr)) {
         return true;
     }
+    // A null converts to the null closure value, like nilPtr as func spells.
+    if (dynamic_cast<const NilPtr*>(fromExpr) != nullptr &&
+        to.type->kind() == Kind::Closure) {
+        return true;
+    }
     // A string literal converts to a byte pointer: the literal
     // materializes its own bytes, so word zero is their address. Only
     // the literal converts — a string variable beside a *u8 stays a
@@ -3942,6 +4070,45 @@ bool Checker::checkCompatible(Position pos, const Expr* fromExpr, TypeRef from, 
             *pointee.type->basic() == BasicKind::U16) {
             return true;
         }
+    }
+    // A closure converts to a void pointer by address: the literal
+    // materializes its own pair, so word zero is the pair's address. Only
+    // a proven closure converts — a raw code address beside a *void stays
+    // a mismatch, laundering refuses. *u8 rides the same address
+    // justification (the pair's bytes); anything else beside a *void from
+    // a closure stays unspelled.
+    auto isVoidPtr = [](const TypeRef& t) -> bool {
+        return t.type->kind() == Kind::Pointer &&
+               t.type->pointee() != nullptr &&
+               t.type->pointee()->kind() == Kind::Void;
+    };
+    if (from.type->kind() == Kind::Closure && isVoidPtr(to)) {
+        if (provOf(fromExpr) != Prov::Closure) {
+            fail(pos, "only a closure converts to *void");
+            return false;
+        }
+        return true;
+    }
+    // A proven-closure *void converts back to a closure spelling: the
+    // address names the pair the store observed. An unproven carrier
+    // refuses — reading a pair through it would be a guess. A null
+    // converts to the null closure value, like nilPtr as func spells.
+    if (isVoidPtr(from) && to.type->kind() == Kind::Closure) {
+        Prov proven = provOf(fromExpr);
+        if (proven != Prov::Closure && proven != Prov::Neutral) {
+            fail(pos, "this *void is not proven to hold a closure");
+            return false;
+        }
+        return true;
+    }
+    // A proven-closure *void adopts the fn spelling: the declaration
+    // carries the closure representation from here on.
+    if (isVoidPtr(from) && to.type->kind() == Kind::FunctionPtr) {
+        if (provOf(fromExpr) != Prov::Closure) {
+            fail(pos, "this *void is not proven to hold a closure");
+            return false;
+        }
+        return true;
     }
     // A slice copies into an array of the same element type: the copy
     // checks the length where it happens, so a mismatch traps instead of

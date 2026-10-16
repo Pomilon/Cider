@@ -1706,6 +1706,22 @@ void testDeferRun() {
           "defers run per iteration and on continue");
 }
 
+void testClosureVoidRun() {
+    std::printf("closures round-trip through *void at runtime\n");
+    check(runQuiet("func main() -> int {\n"
+                   "    var c: func(int) -> int = func(x: int) -> int { return x * 2; };\n"
+                   "    var v: *void = c;\n"
+                   "    var f: func(int) -> int = v as func(int) -> int;\n"
+                   "    if (f(21) != 42) { return 1; }\n"
+                   "    var w: *void = nilPtr;\n"
+                   "    w = c;\n"
+                   "    var g: func(int) -> int = w as func(int) -> int;\n"
+                   "    if (g(21) != 42) { return 2; }\n"
+                   "    return 0;\n"
+                   "}\n") == 0,
+          "proven carriers round-trip and run");
+}
+
 void testBitNot() {
     std::printf("bitwise not runs\n");
     check(runQuiet("func main() -> int {\n"
@@ -2529,6 +2545,7 @@ int main() {
     testGenericFn();
     testWideRun();
     testDeferRun();
+    testClosureVoidRun();
     testBitNot();
     testTernary();
     testInterp();

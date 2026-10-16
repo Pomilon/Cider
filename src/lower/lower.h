@@ -144,10 +144,22 @@ public:
     // vtable word — a null interface is (nil, nil), and every box sets
     // a real table, so vtable == 0 answers it with one comparison.
     ir::Value lowerInterfaceEq(const Binary& n);
+    // `==` / `!=` on a closure against nilPtr: nullity is the code word —
+    // a null closure is (nil, nil), and every closure literal sets real
+    // code, so code == 0 answers it with one comparison.
+    ir::Value lowerClosureEq(const Binary& n);
     // `?:` with branch control flow: the checker proved both arms share one
     // type, so each arm stores its words into the cell and the join loads
     // them back. The untaken arm never evaluates (SEMANTICS: single-eval).
     std::vector<ir::Value> lowerTernary(const Ternary& n);
+    // Closure round-trip materialization, shared by casts and implicit
+    // conversions: spill answers an address for a pair, load answers the
+    // pair an address names. The checker proved provenance; these only
+    // move the bytes.
+    ir::Value closureAddress(std::vector<ir::Value> pair, TypeRef closureType,
+                             Position pos);
+    std::vector<ir::Value> loadClosurePair(ir::Value addr, TypeRef closureType,
+                                            Position pos);
     // Prefix/postfix `++` / `--`: the checker proved the operand is an
     // integer place, so the operand loads, steps by one through the same
     // operation `+= 1` would emit, and stores back. Postfix answers the

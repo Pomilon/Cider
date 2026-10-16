@@ -6341,6 +6341,53 @@ bool Lowerer::addressOfValue(const Expr* expr, TypeRef ptr, Position pos,
     return false;
 }
 
+ir::Value Lowerer::closureAddress(std::vector<ir::Value> pair,
+                                   TypeRef closureType, Position pos) {
+    // A closure pair has no address: spill both words to scratch slots in
+    // this frame, then answer the slots' address. The slots outlive the
+    // conversion site, so the pair stays live as long as its scope does.
+    if (pair.size() != static_cast<size_t>(kClosureWords)) {
+        refuse(pos, "this conversion");
+        return undefined();
+    }
+    std::vector<ir::Value> slots = allocaSlots(
+        closureType, pos, static_cast<uint64_t>(pair.size()));
+    if (failed_) {
+        return undefined();
+    }
+    Place scratch;
+    scratch.slots = slots;
+    scratch.type = closureType;
+    scratch.off = 0;
+    scratch.isVolatile = false;
+    storeRange(pos, scratch, pair, closureType);
+    if (failed_) {
+        return undefined();
+    }
+    return computedBase(slots[0], 0, pos);
+}
+
+std::vector<ir::Value> Lowerer::loadClosurePair(ir::Value addr,
+                                                TypeRef closureType,
+                                                Position pos) {
+    // Reads the pair an address names: a proven-closure carrier holds the
+    // address of two words laid out code-then-captures.
+    Place at;
+    at.hasIndirect = true;
+    at.indirect = addr;
+    at.off = 0;
+    at.type = closureType;
+    at.isVolatile = false;
+    std::vector<ir::Value> pair = loadRange(pos, at, closureType);
+    if (failed_ || pair.size() != static_cast<size_t>(kClosureWords)) {
+        if (!failed_) {
+            refuse(pos, "this conversion");
+        }
+        return {undefined()};
+    }
+    return pair;
+}
+
 std::vector<ir::Value> Lowerer::boxClassOperand(
     const Expr* expr, std::vector<ir::Value> words, TypeRef from, TypeRef to,
     Position pos) {
@@ -6382,6 +6429,40 @@ std::vector<ir::Value> Lowerer::boxClassOperand(
             return {undefined()};
         }
         return boxToInterface({at}, ptr, to, pos);
+    }
+    // Closure round trips materialize here for every implicit site at
+    // once (declarations, assignments, arguments, returns, fields): the
+    // checker proved provenance, so mechanics never re-decide it. A pair
+    // spills for an address; an address loads for a pair; nilPtr answers
+    // the null pair; a *void adopting an fn spelling is already one word.
+    auto isVoidPtr = [](const TypeRef& t) -> bool {
+        return t.type->kind() == Kind::Pointer &&
+               t.type->pointee() != nullptr &&
+               t.type->pointee()->kind() == Kind::Void;
+    };
+    if (!from.isError() && !to.isError() &&
+        to.type->kind() == Kind::Closure) {
+        if (from.type->kind() == Kind::Closure) {
+            return words;
+        }
+        if (isVoidPtr(from)) {
+            if (words.size() != kOneWord) {
+                refuse(pos, "this conversion");
+                return {undefined()};
+            }
+            return loadClosurePair(words[kFirstWord], to, pos);
+        }
+        if (dynamic_cast<const NilPtr*>(expr) != nullptr) {
+            TypeRef code = wordType(to, kFirstWord);
+            TypeRef caps = wordType(to, kLenWord);
+            return {constantI64(0, code, pos), constantI64(0, caps, pos)};
+        }
+        refuse(pos, "this conversion");
+        return {undefined()};
+    }
+    if (!from.isError() && !to.isError() && isVoidPtr(to) &&
+        from.type->kind() == Kind::Closure) {
+        return {closureAddress(std::move(words), from, pos)};
     }
     return boxToInterface(std::move(words), from, to, pos);
 }
@@ -6613,7 +6694,52 @@ std::vector<ir::Value> Lowerer::lowerWords(const Expr* expr) {
         // answer only the first word. The checker already proved the
         // shapes relate (identity or a named conversion), so a load of
         // the operand's words is exact here.
+        // A closure target answers the pair, never a scalar cast: the
+        // checker gated provenance, so mechanics only move the bytes. A
+        // closure operand copies through; nilPtr answers the null pair; a
+        // carrier address loads the pair it names (one dereference first
+        // past depth one). Anything else here never passed the gate.
         TypeRef target = checker_.typeOf(cast);
+        if (!target.isError() && target.type->kind() == Kind::Closure) {
+            TypeRef source = checker_.typeOf(cast->expr.get());
+            if (!source.isError() && source.type->kind() == Kind::Closure) {
+                return lowerWords(cast->expr.get());
+            }
+            if (dynamic_cast<const NilPtr*>(cast->expr.get()) != nullptr) {
+                TypeRef code = wordType(target, kFirstWord);
+                TypeRef caps = wordType(target, kLenWord);
+                return {constantI64(0, code, cast->pos),
+                        constantI64(0, caps, cast->pos)};
+            }
+            std::vector<ir::Value> carrier = lowerWords(cast->expr.get());
+            if (failed_ || carrier.size() != kOneWord) {
+                if (!failed_) {
+                    refuse(cast->pos, "this cast");
+                }
+                return {undefined()};
+            }
+            ir::Value addr = carrier[kFirstWord];
+            if (!source.isError() && source.type->kind() == Kind::Pointer &&
+                source.type->pointee() != nullptr &&
+                source.type->pointee()->kind() == Kind::Pointer) {
+                TypeRef inner{source.type->pointee()};
+                Place slot;
+                slot.hasIndirect = true;
+                slot.indirect = addr;
+                slot.off = 0;
+                slot.type = inner;
+                slot.isVolatile = false;
+                std::vector<ir::Value> held = loadRange(cast->pos, slot, inner);
+                if (failed_ || held.size() != kOneWord) {
+                    if (!failed_) {
+                        refuse(cast->pos, "this cast");
+                    }
+                    return {undefined()};
+                }
+                addr = held[kFirstWord];
+            }
+            return loadClosurePair(addr, target, cast->pos);
+        }
         if (!target.isError() &&
             (target.type->kind() == Kind::Struct ||
              target.type->kind() == Kind::Class ||
@@ -7094,6 +7220,28 @@ ir::Value Lowerer::onCast(Cast& n) {
         target.type->kind() == Kind::Enum) {
         return lowerIntToEnum(n, source, target);
     }
+    // Closure round trips that narrow to one word lower here; wider
+    // answers belong to the words path below, which answers pairs. A
+    // closure spills for an address; anything else targeting a closure
+    // spelling in a scalar position refuses (no single word holds a
+    // pair). An fn spelling adopts through the scalar path untouched
+    // (one address word, already the right shape).
+    if (!source.isError() && !target.isError() &&
+        source.type->kind() == Kind::Closure &&
+        target.type->kind() == Kind::Pointer &&
+        target.type->pointee() != nullptr &&
+        target.type->pointee()->kind() == Kind::Void) {
+        std::vector<ir::Value> pair = lowerWords(n.expr.get());
+        if (failed_) {
+            return undefined();
+        }
+        return closureAddress(std::move(pair), source, n.pos);
+    }
+    if (!source.isError() && !target.isError() &&
+        target.type->kind() == Kind::Closure) {
+        refuse(n.pos, "this cast");
+        return undefined();
+    }
     ir::Instr instr;
     instr.op = ir::Op::Cast;
     instr.loc = n.pos;
@@ -7134,6 +7282,14 @@ ir::Value Lowerer::onBinary(Binary& n) {
          (rhs.type->kind() == Kind::Interface &&
           dynamic_cast<const NilPtr*>(n.lhs.get()) != nullptr))) {
         return lowerInterfaceEq(n);
+    }
+    if ((n.op == BinOp::Eq || n.op == BinOp::Ne) && !lhs.isError() &&
+        !rhs.isError() &&
+        ((lhs.type->kind() == Kind::Closure &&
+          dynamic_cast<const NilPtr*>(n.rhs.get()) != nullptr) ||
+         (rhs.type->kind() == Kind::Closure &&
+          dynamic_cast<const NilPtr*>(n.lhs.get()) != nullptr))) {
+        return lowerClosureEq(n);
     }
     // Pointer arithmetic answers in addresses, not numbers: `p + n`
     // scales the count by the element's size and stays the same *T,
@@ -7587,6 +7743,39 @@ ir::Value Lowerer::lowerInterfaceEq(const Binary& n) {
     cmp.width = ir::IRType::Bool;
     cmp.cmp = cmpFor(n.op, false);
     cmp.operands.push_back(words[1]);
+    cmp.operands.push_back(zero);
+    ir::Value out = newValue(ir::IRType::Bool, cmp.type, n.pos);
+    cmp.results.push_back(out);
+    emit(std::move(cmp));
+    return out;
+}
+
+ir::Value Lowerer::lowerClosureEq(const Binary& n) {
+    // The checker proved one side a closure and the other the nil
+    // literal: nullity is the code word. A null closure is (nil, nil),
+    // and every closure literal sets real code, so code == 0 answers it
+    // with one comparison — Eq and Ne both, since Eq is sign-independent.
+    TypeRef lhs = checker_.typeOf(n.lhs.get());
+    const Expr* side = !lhs.isError() && lhs.type->kind() == Kind::Closure
+                           ? n.lhs.get()
+                           : n.rhs.get();
+    std::vector<ir::Value> words = lowerWords(side);
+    if (failed_ || words.size() != kClosureWords) {
+        refuse(n.pos, "this comparison");
+        return undefined();
+    }
+    TypeRef addr{ctx_.pointer(ctx_.basic(BasicKind::U8))};
+    ir::Value zero = constantI64(0, addr, n.pos);
+    if (failed_) {
+        return undefined();
+    }
+    ir::Instr cmp;
+    cmp.op = ir::Op::Cmp;
+    cmp.loc = n.pos;
+    cmp.type = checker_.typeOf(&n);
+    cmp.width = ir::IRType::Bool;
+    cmp.cmp = cmpFor(n.op, false);
+    cmp.operands.push_back(words[kFirstWord]);
     cmp.operands.push_back(zero);
     ir::Value out = newValue(ir::IRType::Bool, cmp.type, n.pos);
     cmp.results.push_back(out);

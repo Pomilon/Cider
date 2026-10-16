@@ -135,6 +135,12 @@ struct LocalScope {
     std::unordered_map<std::string, Local> names;
 };
 
+// Provenance of address-carrying storage (T10): whether a pointer-sized
+// value known to hold a closure address may cast back to a closure
+// spelling. Raw accepts no such cast; Neutral (nilPtr) casts to the null
+// closure value. Anything unproven is Raw: laundering refuses loudly.
+enum class Prov { Raw, Closure, Neutral };
+
 class Checker : public ASTVisitor {
 public:
     Checker(TypeContext& ctx, resolve::Resolver& resolver);
@@ -258,6 +264,12 @@ private:
     TypeRef checkLiteralInt(const IntLit& lit, TypeRef expected, Position pos);
     TypeRef checkLiteralFloat(const FloatLit& lit, TypeRef expected, Position pos);
     TypeRef checkIdent(Ident& expr);
+    // The representation an expression carries for closure round trips:
+    // literals and tracked storage answer above, everything else is Raw.
+    Prov provOf(const Expr* expr);
+    // Records a local's provenance in the innermost scope; shadowing
+    // scopes hide it again on pop, like the names themselves.
+    void recordFlow(const std::string& name, Prov prov);
     bool isPlace(const Expr* expr) const;
     bool isInteger(TypeRef type) const;
     TypeRef checkBinary(Binary& expr, TypeRef expected);
@@ -416,6 +428,13 @@ private:
     std::unique_ptr<EvalEnv> env_;
     const LocalScope* current_ = nullptr;
     std::vector<std::unique_ptr<LocalScope>> scopes_;
+    // Provenance per local scope, parallel to the scopes above: pushed
+    // and popped with them, so shadowing hides outer entries the way it
+    // hides names. Globals persist in their own table, cleared on
+    // function entry (a read sees only stores from its own function:
+    // conservative across functions, exact within one).
+    std::vector<std::unordered_map<std::string, Prov>> flowStack_;
+    std::unordered_map<std::string, Prov> globalProv_;
     // Closure literals being discovered, innermost last. A read that binds
     // outside the innermost literal's own scope is that literal's capture.
     struct LiteralFrame {
