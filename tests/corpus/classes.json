@@ -845,8 +845,8 @@
   "class": "B"
  },
  "interface_call_args": {
-  "actual": "exit=1 stdout_len=0 stderr_len=2010 first=\"tests/corpus/interface_call_args/main.cid:32:18: expected ')'\"",
-  "blocker": "T11 generic-function lowering: twice<int> instantiations check but never emit bodies (only blocker for section 11; rest is new/init/this rewrites + turbofish impossible)",
+  "actual": "exit=1 first='60:14 a variable needs an initialiser' (+init-method calls 73/75/77 'expected a field name', Rect* postfix, new Sq(4) ctor values)",
+  "blocker": "class-values + interface-args: two-phase var+init() calls unparsesable (init is KwInit), uninit class values rejected, postfix Rect* has no v3 counterpart; T11 twice<T> over interface params needs this first",
   "class": "D"
  },
  "interface_element_list": {
@@ -1055,9 +1055,9 @@
   "class": "D"
  },
  "module_qualified_template": {
-  "actual": "cider run exit 1, stdout empty, stderr diagnostic: `main.cid:11:19: expected ')'`; driver has no module loader",
+  "actual": "exact stdout/stderr/exit match",
   "blocker": "T11 generic-function lowering: box.id<int>/id<char> calls check but never emit bodies (checks 18/19); rest is new/arrow/fn-spelling rewrites",
-  "class": "D"
+  "class": "A"
  },
  "nan_compare": {
   "actual": "run exit 0: OUT: ERR:",
@@ -1135,8 +1135,8 @@
   "class": "B"
  },
  "phase1_stress": {
-  "actual": "exit 1; tests/corpus/legacy/phase1_stress/main.cid:17:20: a variable needs an initialiser; tests/corpus/legacy/phase1_stress/main.cid:24:21: a variable needs an initialiser",
-  "blocker": "destructors + T11: scope-exit ~DtorObj finalization and generic triple<T> calls are the subjects",
+  "actual": "exit=1 first='17:20 a variable needs an initialiser' (union/struct/array uninit across 243-line stress file)",
+  "blocker": "destructors + T11: scope-exit ~DtorObj finalization and generic triple<T> calls are the substantive blocks; union/allocator sections need explicit-init rewrites once those land",
   "class": "D"
  },
  "pointer_interface": {

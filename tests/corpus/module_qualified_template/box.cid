@@ -19,8 +19,10 @@ export func id<T>(x: T) -> T {
 }
 
 export func makeBox(n: int) -> *Box<int> {
-  var b: *Box<int> = new Box<int>;
-  b->v = n;
-  b->tag = 5;
+  var b: *Box<int> = alloc(sizeof(Box<int>), 8) as *Box<int>;
+  (*b).v = 0;
+  (*b).tag = 0;
+  (*b).v = n;
+  (*b).tag = 5;
   return b;
 }

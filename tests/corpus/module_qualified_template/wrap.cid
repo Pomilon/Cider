@@ -10,26 +10,26 @@ export struct Holder {
 }
 
 export func readHolder(h: *Holder) -> int {
-  return h->b.v;
+  return (*h).b.v;
 }
 
 export func makeBox(n: int) -> box.Box<int> {
-  var b: box.Box<int>;
+  var b: box.Box<int> = new box.Box<int> { v: 0, tag: 0 };
   b.v = n;
   b.tag = 6;
   return b;
 }
 
 export func sumPair(p: *box.Pair<int, char>) -> int {
-  return p->a + (p->b as int);
+  return (*p).a + (((*p).b) as int);
 }
 
 // CIDER-BUG-095: qualified function-template call and struct literal from a
 // module that only ever spells box's template with an explicit qualifier.
 export func readId(n: int) -> int {
-  return box.id<int>(n);
+  return box.id::<int>(n);
 }
 
 export func makeLit(n: int) -> box.Box<int> {
-  return box.Box<int>{ v: n, tag: 9 };
+  return new box.Box<int> { v: n, tag: 9 };
 }
