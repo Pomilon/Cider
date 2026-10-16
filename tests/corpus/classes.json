@@ -836,7 +836,7 @@
  },
  "interface_aggregate_return": {
   "actual": "exit=1 stdout_len=0 stderr_len=4016 first='tests/corpus/interface_aggregate_return/main.cid:94:20: a variable needs an initialiser'",
-  "blocker": "interface-boxing (+multi-file-imports, for-lowering, delete)",
+  "blocker": "destructors/finalizers: oracle requires exit-time finalizer traces (D,1..4/DONE); v3 has no deinit-at-exit (same wall as discard companion)",
   "class": "D"
  },
  "interface_box_release": {
