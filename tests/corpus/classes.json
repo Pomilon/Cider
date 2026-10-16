@@ -440,9 +440,9 @@
   "class": "A"
  },
  "export_visibility": {
-  "actual": "exit=1 stdout_len=0 stderr_len=237 first='tests/corpus/export_visibility/main.cid:10:13: a variable needs an initialiser'",
+  "actual": "exact stdout/stderr/exit match",
   "blocker": "enums (+interface-boxing, multi-file-imports, stdlib-import)",
-  "class": "D"
+  "class": "A"
  },
  "extern": {
   "actual": "exact stdout/stderr/exit match",
