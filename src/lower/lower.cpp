@@ -2407,6 +2407,7 @@ void Lowerer::onFuncLit(FuncLit& lit, const std::vector<check::Captured>& captur
 void Lowerer::onBlockEnter(Block& n) {
     (void)n;
     scopeMarks_.push_back(static_cast<uint64_t>(locals_.size()));
+    deferFrames_.push_back({});
     if (failed_ || !enabled_ || function_ == nullptr) {
         return;
     }
@@ -2415,6 +2416,18 @@ void Lowerer::onBlockEnter(Block& n) {
 
 void Lowerer::onBlockExit(Block& n) {
     (void)n;
+    if (!deferFrames_.empty()) {
+        // A block left by jump (return, break, continue) already ran its
+        // defers at the jump; running them again here would execute a
+        // second copy on no dynamic path. Fall-through exits run here.
+        // Either way the frame pops: bookkeeping, not emission.
+        if (!terminated_) {
+            uint64_t top = static_cast<uint64_t>(deferFrames_.size());
+            --top;
+            runDefers(top);
+        }
+        deferFrames_.pop_back();
+    }
     if (scopeMarks_.empty()) {
         return;
     }
@@ -2422,6 +2435,45 @@ void Lowerer::onBlockExit(Block& n) {
     scopeMarks_.pop_back();
     while (static_cast<uint64_t>(locals_.size()) > mark) {
         locals_.pop_back();
+    }
+}
+
+void Lowerer::onDeferStmt(DeferStmt& n) {
+    if (failed_ || !enabled_ || function_ == nullptr) {
+        return;
+    }
+    // Registration records the shape (FEATURES §5.2): operands evaluate
+    // when the body runs at scope exit, so nothing lowers here.
+    if (deferFrames_.empty()) {
+        refuse(n.pos, "defer outside a function");
+        return;
+    }
+    deferFrames_.back().push_back(n.stmt.get());
+}
+
+void Lowerer::runDefers(uint64_t from) {
+    if (failed_ || !enabled_ || function_ == nullptr) {
+        return;
+    }
+    if (from > static_cast<uint64_t>(deferFrames_.size())) {
+        refuse(Position{"", 1, 1}, "defer scopes are unbalanced");
+        return;
+    }
+    // Bodies lower by re-walking, and re-walking pushes frames: holding a
+    // reference across an accept would dangle when the outer vector
+    // reallocates. Snapshot the pointers instead (pointees are AST-owned
+    // and stable); indexing re-reads the storage every time.
+    for (uint64_t i = static_cast<uint64_t>(deferFrames_.size()); i > from;) {
+        --i;
+        std::vector<Stmt*> bodies = deferFrames_[i];
+        uint64_t pending = static_cast<uint64_t>(bodies.size());
+        for (uint64_t j = pending; j > 0;) {
+            --j;
+            bodies[j]->accept(checker_);
+            if (failed_) {
+                return;
+            }
+        }
     }
 }
 
@@ -8529,6 +8581,9 @@ void Lowerer::onReturn(Return& n) {
         // The placeholder's id poisons the frame computation, which reads
         // every value the function mentions.
     }
+    // FEATURES §5.2: the value is already evaluated above; every pending
+    // defer runs now, innermost first, before control leaves.
+    runDefers(0);
     emitTerminator(term);
 }
 
@@ -9335,6 +9390,10 @@ void Lowerer::onBreak(Break& n) {
         refuse(n.pos, "break");
         return;
     }
+    // FEATURES §5.2: leaving runs every defer up to the loop body scope.
+    if (!loopMarks_.empty()) {
+        runDefers(loopMarks_.back());
+    }
     ir::Terminator br;
     br.term = ir::Term::Br;
     br.target = loops_.back().exit;
@@ -9352,6 +9411,9 @@ void Lowerer::onContinue(Continue& n) {
     if (loops_.empty()) {
         refuse(n.pos, "continue");
         return;
+    }
+    if (!loopMarks_.empty()) {
+        runDefers(loopMarks_.back());
     }
     ir::Terminator br;
     br.term = ir::Term::Br;
@@ -9376,6 +9438,11 @@ void Lowerer::onWhile(WhileStmt& n) {
     emitTerminator(toHead);
 
     loops_.push_back(LoopTargets{headLabel, exitLabel});
+    // A loop body is its own defer scope: per-iteration defers run at the
+    // latch, on break, and on continue (FEATURES §5.2). Block bodies push
+    // their own frame inside, leaving this one empty; bare bodies use it.
+    loopMarks_.push_back(static_cast<uint64_t>(deferFrames_.size()));
+    deferFrames_.push_back({});
     bool savedTerminated = terminated_;
     terminated_ = false;
 
@@ -9404,10 +9471,13 @@ void Lowerer::onWhile(WhileStmt& n) {
     // A body that ended in a jump (break, continue, return) already closed
     // its block; a body that fell off still needs the back edge.
     if (!terminated_) {
+        runDefers(loopMarks_.back());
         emitTerminator(toHead);
     }
 
     loops_.pop_back();
+    loopMarks_.pop_back();
+    deferFrames_.pop_back();
     terminated_ = savedTerminated;
     startBlock(exitLabel);
 }
@@ -9464,6 +9534,8 @@ void Lowerer::onFor(ForStmt& n) {
 
     startBlock(bodyLabel);
     loops_.push_back(LoopTargets{stepLabel, exitLabel});
+    loopMarks_.push_back(static_cast<uint64_t>(deferFrames_.size()));
+    deferFrames_.push_back({});
     bool savedTerminated = terminated_;
     terminated_ = false;
     if (n.body != nullptr) {
@@ -9784,6 +9856,8 @@ void Lowerer::onForIn(ForInStmt& n) {
     }
 
     loops_.push_back(LoopTargets{stepLabel, exitLabel});
+    loopMarks_.push_back(static_cast<uint64_t>(deferFrames_.size()));
+    deferFrames_.push_back({});
     bool savedTerminated = terminated_;
     terminated_ = false;
     if (n.body != nullptr) {
@@ -9795,8 +9869,11 @@ void Lowerer::onForIn(ForInStmt& n) {
         toStep.term = ir::Term::Br;
         toStep.target = stepLabel;
         toStep.loc = n.pos;
+        runDefers(loopMarks_.back());
         emitTerminator(toStep);
     }
+    loopMarks_.pop_back();
+    deferFrames_.pop_back();
     terminated_ = savedTerminated;
 
     startBlock(stepLabel);
@@ -10058,6 +10135,8 @@ void Lowerer::onForInProtocol(ForInStmt& n, TypeRef seqType, DeclId id) {
     }
 
     loops_.push_back(LoopTargets{stepLabel, exitLabel});
+    loopMarks_.push_back(static_cast<uint64_t>(deferFrames_.size()));
+    deferFrames_.push_back({});
     bool savedTerminated = terminated_;
     terminated_ = false;
     if (n.body != nullptr) {
@@ -10069,8 +10148,11 @@ void Lowerer::onForInProtocol(ForInStmt& n, TypeRef seqType, DeclId id) {
         toStep.term = ir::Term::Br;
         toStep.target = stepLabel;
         toStep.loc = n.pos;
+        runDefers(loopMarks_.back());
         emitTerminator(toStep);
     }
+    loopMarks_.pop_back();
+    deferFrames_.pop_back();
     terminated_ = savedTerminated;
 
     startBlock(stepLabel);

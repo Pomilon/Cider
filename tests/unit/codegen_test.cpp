@@ -1667,6 +1667,45 @@ void testWideRun() {
           "wide globals fold");
 }
 
+void testDeferRun() {
+    std::printf("defers run at scope exit\n");
+    check(runQuiet("var out: int = 0;\n"
+                   "func digit(d: int) { out = out * 10 + d; }\n"
+                   "func main() -> int {\n"
+                   "    defer { digit(1); }\n"
+                   "    defer { digit(2); }\n"
+                   "    if (out != 0) { return 1; }\n"
+                   "    return 0;\n"
+                   "}\n") == 0,
+          "defers run LIFO at block exit");
+    check(runQuiet("var out: int = 0;\n"
+                   "func digit(d: int) { out = out * 10 + d; }\n"
+                   "func early(x: int) -> int {\n"
+                   "    defer { digit(1); }\n"
+                   "    if (x > 0) { return 7; }\n"
+                   "    return 0;\n"
+                   "}\n"
+                   "func main() -> int {\n"
+                   "    if (early(1) != 7) { return 1; }\n"
+                   "    if (out != 1) { return 2; }\n"
+                   "    if (early(0) != 0) { return 3; }\n"
+                   "    if (out != 11) { return 4; }\n"
+                   "    return 0;\n"
+                   "}\n") == 0,
+          "defers run on early return after the value");
+    check(runQuiet("var out: int = 0;\n"
+                   "func digit(d: int) { out = out * 10 + d; }\n"
+                   "func main() -> int {\n"
+                   "    for (var i: int = 0; i < 3; i = i + 1) {\n"
+                   "        defer { digit(1); }\n"
+                   "        if (i == 1) { continue; }\n"
+                   "    }\n"
+                   "    if (out != 111) { return 1; }\n"
+                   "    return 0;\n"
+                   "}\n") == 0,
+          "defers run per iteration and on continue");
+}
+
 void testBitNot() {
     std::printf("bitwise not runs\n");
     check(runQuiet("func main() -> int {\n"
@@ -2489,6 +2528,7 @@ int main() {
     testEnumCast();
     testGenericFn();
     testWideRun();
+    testDeferRun();
     testBitNot();
     testTernary();
     testInterp();

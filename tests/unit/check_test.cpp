@@ -1398,6 +1398,36 @@ void testWideLit() {
           "a short array still fails");
 }
 
+void testDefer() {
+    std::printf("defer checks at scope exit\n");
+    Checked good = check(
+        "var out: int = 0;\n"
+        "func main() -> int {\n"
+        "    defer { out = 1; }\n"
+        "    return 0;\n"
+        "}\n");
+    check(good.ok, "a defer checks: " + good.stage);
+    Checked retIn = check(
+        "func main() -> int {\n"
+        "    defer { return 1; }\n"
+        "    return 0;\n"
+        "}\n");
+    check(!retIn.ok && retIn.stage == "check",
+          "a return inside a defer fails");
+    Checked brkIn = check(
+        "func main() -> int {\n"
+        "    while (true) { defer { break; } }\n"
+        "    return 0;\n"
+        "}\n");
+    check(!brkIn.ok && brkIn.stage == "check",
+          "a break inside a defer fails");
+    Checked global = check(
+        "defer { }\n"
+        "func main() -> int { return 0; }\n");
+    check(!global.ok && global.stage == "parse",
+          "a global defer fails");
+}
+
 void testGlobalConstWidth() {    // A folded integer names image bytes, so one that does not fit the
     // declared width is provably overflowing and rejects — unless wrap
     // defines the value, in which case the low bits are kept (SEMANTICS
@@ -1467,6 +1497,7 @@ int main() {
     testFloatGlobal();
     testEnumValues();
     testWideLit();
+    testDefer();
     testGlobalConstWidth();
     testCalls();
     testInterface();

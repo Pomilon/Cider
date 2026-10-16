@@ -1320,6 +1320,12 @@ void Checker::visitReturn(Return& n) {
         fail(n.pos, "return outside a function");
         return;
     }
+    // FEATURES §5.2: a return inside a defer would leave the scope twice
+    // and re-run every defer in it, including itself.
+    if (inDefer_ > 0) {
+        fail(n.pos, "return inside a defer");
+        return;
+    }
     if (n.value == nullptr) {
         if (funcReturn_ != TypeRef{ctx_.void_()}) {
             fail(n.pos, "returning nothing from a function with a return type");
@@ -1360,6 +1366,12 @@ void Checker::visitBreak(Break& n) {
         fail(n.pos, "break outside a loop");
         return;
     }
+    // FEATURES §5.2: a break inside a defer would leave the scope twice
+    // and re-run every defer in it, including itself.
+    if (inDefer_ > 0) {
+        fail(n.pos, "break inside a defer");
+        return;
+    }
     if (sink_ != nullptr) {
         sink_->onBreak(n);
     }
@@ -1368,6 +1380,10 @@ void Checker::visitBreak(Break& n) {
 void Checker::visitContinue(Continue& n) {
     if (loopDepth_ == 0) {
         fail(n.pos, "continue outside a loop");
+        return;
+    }
+    if (inDefer_ > 0) {
+        fail(n.pos, "continue inside a defer");
         return;
     }
     if (sink_ != nullptr) {
@@ -2444,13 +2460,30 @@ void Checker::visitTryStmt(TryStmt& n) {
 }
 
 void Checker::visitDeferStmt(DeferStmt& n) {
-    // The default walk would run the body inline at the defer point;
-    // FEATURES §5.2 runs it at scope exit instead. Until scope-exit
-    // lowering lands, refusing is honest and inlining would be a silent
-    // miscompile (it returned the pre-defer value above). The body still
-    // checks so its own errors report.
+    // A defer names no storage: without a function there is no scope exit
+    // to run it at, so it refuses where it is written.
+    if (!inFunc_) {
+        fail(n.pos, "defer outside a function");
+        return;
+    }
+    // FEATURES §5.2: the body runs at scope exit with exit-time values, so
+    // checking walks it in place (names resolve in the enclosing scope)
+    // while lowering replays it at every exit. The sink detaches for the
+    // check walk: attached, the body would lower inline at the defer point
+    // and run twice. Returns, breaks and continues inside refuse above
+    // through inDefer_.
+    ++inDefer_;
+    LowerSink* savedSink = sink_;
+    sink_ = nullptr;
     n.stmt->accept(*this);
-    fail(n.pos, "defer is not implemented yet");
+    sink_ = savedSink;
+    --inDefer_;
+    if (failed_) {
+        return;
+    }
+    if (sink_ != nullptr) {
+        sink_->onDeferStmt(n);
+    }
 }
 
 void Checker::bindPattern(const Pattern& pat, TypeRef scrutinee) {

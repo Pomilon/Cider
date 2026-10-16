@@ -90,6 +90,10 @@ public:
     // they vanish and the loop runs to completion.
     virtual void onBreak(Break& n) { (void)n; }
     virtual void onContinue(Continue& n) { (void)n; }
+    // A defer statement, after its body checked in the enclosing scope.
+    // The lowerer registers the body for every exit of the innermost
+    // open scope; nothing runs here.
+    virtual void onDeferStmt(DeferStmt& n) { (void)n; }
     virtual void onIf(IfStmt& n) { (void)n; }
     // A match arm, after its pattern validated against the scrutinee type
     // and exhaustiveness decided (a default arm, or both bool constants).
@@ -430,6 +434,9 @@ private:
     TypeRef funcReturn_;
     bool inFunc_ = false;
     uint64_t loopDepth_ = 0;
+    // Defer bodies being walked, for the exit-jump ban: a return, break or
+    // continue inside one would leave its scope twice.
+    int inDefer_ = 0;
     std::vector<CheckError> errors_;
     bool failed_ = false;
     LowerSink* sink_ = nullptr;

@@ -120,6 +120,7 @@ public:
     void onAsmStmt(AsmStmt& n) override;
     void onBlockEnter(Block& n) override;
     void onBlockExit(Block& n) override;
+    void onDeferStmt(DeferStmt& n) override;
     // A closure literal, after its body checked. Emits the hidden function
     // and records where, so lowering the literal itself answers the
     // two-word value (code address, captures pointer).
@@ -634,6 +635,19 @@ private:
         uint32_t exit;
     };
     std::vector<LoopTargets> loops_;
+    // Pending defer bodies per open block scope, innermost last; bodies
+    // within one scope run LIFO. A loop pushes a marker with the frame
+    // count at body entry, so break and continue run exactly the scopes
+    // they exit. Emission is inline at each exit point (no clearing: every
+    // static copy sits on its own dynamic path, and the copies after a
+    // jump are unreachable).
+    std::vector<std::vector<Stmt*>> deferFrames_;
+    std::vector<uint64_t> loopMarks_;
+    // Emits the pending bodies of frames [from, size): innermost scope
+    // first, LIFO within a scope (FEATURES §5.2). Bodies lower by
+    // re-walking, proven clean during checking; enclosing locals stay
+    // visible because frames pop only at block exits.
+    void runDefers(uint64_t from);
     uint32_t rodataSeq_ = 0;
     uint32_t current_ = 0;
     bool terminated_ = false;

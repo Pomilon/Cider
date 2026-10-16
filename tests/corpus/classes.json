@@ -310,9 +310,9 @@
   "class": "B"
  },
  "defer_scopes": {
-  "actual": "exit 1; tests/corpus/defer_scopes/main.cid:36:36: expected an expression; tests/corpus/defer_scopes/main.cid:36:36: expected ')'",
+  "actual": "exact stdout/stderr/exit match",
   "blocker": "defer-unimplemented: checker refuses every defer (scope-exit lowering absent); only other issue is one uninit array",
-  "class": "D"
+  "class": "A"
  },
  "deref_aggregate_copy": {
   "actual": "compile rejection: tests/corpus/deref_aggregate_copy/main.cid:42:9: a class needs a body \u2014 v2 `class W extends V`; v3 inheritance is `class B : A` (FEATURES 14.1)",
