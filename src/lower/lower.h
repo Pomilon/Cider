@@ -558,6 +558,15 @@ private:
     // key: one argument list means one body, and a recursive call into
     // the same spec references the pending symbol instead of looping.
     std::unordered_set<std::string> emittedSpecs_;
+    // The template home module while a spec body emits, empty otherwise.
+    // Bodies resolve names where they are defined, never where they are
+    // used from: the helpers below answer the home scope while set and
+    // the ordinary module scope while clear, so non-generic lowering
+    // cannot observe them.
+    std::string emitHome_;
+    std::string homeModule() const;
+    const resolve::Scope* homeScope() const;
+    const resolve::Scope* emitScope() const;
     // A float constant: the IEEE bits for the literal's own width, stored
     // in `constantBits` exactly as an integer constant stores its value.
     ir::Value constantFBits(uint64_t bits, TypeRef type, Position pos);

@@ -829,7 +829,7 @@ bool Lowerer::resolvePlace(const Expr* expr, Place& out) {
             return false;
         }
         std::unordered_set<std::string> active;
-        EvalEnv env = resolver_.evalEnv(resolver_.moduleScope());
+        EvalEnv env = resolver_.evalEnv(emitScope());
         EvalResult folded = evalConstInt(*index->index, env, active);
         if (!folded.ok || folded.value < 0) {
             return false;
@@ -1223,7 +1223,7 @@ ir::Value Lowerer::lowerNeg(const Unary& n) {
 const Signature* Lowerer::functionSig(const std::string& name) const {
     // The current module's scope, not the entry's: an import's body calls
     // its own names, and a from-alias carries its target's signature.
-    const resolve::Scope* scope = resolver_.scopeOf(checker_.module());
+    const resolve::Scope* scope = homeScope();
     if (scope == nullptr) {
         return nullptr;
     }
@@ -1255,7 +1255,7 @@ const GlobalBinding* Lowerer::resolveModuleGlobal(
             return nullptr;
         }
     }
-    const resolve::Scope* here = resolver_.scopeOf(checker_.module());
+    const resolve::Scope* here = homeScope();
     const resolve::Decl* moduleDecl =
         here != nullptr ? resolver_.lookup(here, modName) : nullptr;
     if (moduleDecl == nullptr ||
@@ -1293,13 +1293,13 @@ bool Lowerer::foldModuleConst(const std::string& name, Position pos,
     // consts, but lowering keeps walking after check errors, so the
     // guard is what stands between a rejected program and a hang.
     static thread_local std::unordered_set<std::string> folding;
-    EvalEnv env = resolver_.evalEnv(resolver_.moduleScope());
+    EvalEnv env = resolver_.evalEnv(emitScope());
     const Expr* init =
-        env.constantInit(checker_.module() + "." + name);
+        env.constantInit(homeModule() + "." + name);
     if (init == nullptr) {
         return false;
     }
-    std::string key = checker_.module() + "." + name;
+    std::string key = homeModule() + "." + name;
     if (!folding.insert(key).second) {
         refuse(pos, "cyclic const '" + name + "'");
         out = {undefined()};
@@ -1310,7 +1310,7 @@ bool Lowerer::foldModuleConst(const std::string& name, Position pos,
     // the declared type (order-free through the resolver) is exactly
     // what checking records. Compound initialisers still ride lowerWords
     // below, which needs their recorded subtree types.
-    const resolve::Scope* here = resolver_.scopeOf(checker_.module());
+    const resolve::Scope* here = homeScope();
     const resolve::Decl* found =
         here != nullptr ? resolver_.lookup(here, name) : nullptr;
     const resolve::Decl* origin =
@@ -1340,7 +1340,7 @@ bool Lowerer::foldModuleConst(const std::string& name, Position pos,
 const GlobalBinding* Lowerer::findGlobal(const std::string& name) {
     // A from-alias copies its target's id, so declById recovers the home
     // module even for names bound in this module's scope by import.
-    std::string home = checker_.module();
+    std::string home = homeModule();
     const resolve::Scope* here = resolver_.scopeOf(home);
     if (here != nullptr) {
         const resolve::Decl* decl = resolver_.lookup(here, name);
@@ -1386,7 +1386,7 @@ void Lowerer::onGlobal(VarDecl& n) {
         return;
     }
     std::unordered_set<std::string> active;
-    EvalEnv env = resolver_.evalEnv(resolver_.moduleScope());
+    EvalEnv env = resolver_.evalEnv(emitScope());
     // A `gc.MK2` spelling folds through the defining module: the table
     // holds every module's consts, but a bare name only resolves in its
     // own scope, so the member init folds in the home scope. Anything
@@ -1401,7 +1401,7 @@ void Lowerer::onGlobal(VarDecl& n) {
     const resolve::Decl* qualMember = nullptr;
     const resolve::Scope* qualHome = nullptr;
     if (qualMod != nullptr) {
-        const resolve::Scope* here = resolver_.moduleScope();
+        const resolve::Scope* here = emitScope();
         const resolve::Decl* modDecl =
             here != nullptr
                 ? resolver_.lookup(here, qualMod->name)
@@ -1523,7 +1523,7 @@ void Lowerer::onGlobal(VarDecl& n) {
         const resolve::Decl* member = nullptr;
         if (const auto* field = dynamic_cast<const Field*>(n.init.get())) {
             const auto* mod = dynamic_cast<const Ident*>(field->object.get());
-            const resolve::Scope* here = resolver_.moduleScope();
+            const resolve::Scope* here = emitScope();
             const resolve::Decl* moduleDecl =
                 (mod != nullptr && here != nullptr)
                     ? resolver_.lookup(here, mod->name)
@@ -1537,7 +1537,7 @@ void Lowerer::onGlobal(VarDecl& n) {
                                      : nullptr;
         } else if (const auto* ident =
                        dynamic_cast<const Ident*>(n.init.get())) {
-            member = resolver_.lookup(resolver_.moduleScope(), ident->name);
+            member = resolver_.lookup(emitScope(), ident->name);
         }
         if (member == nullptr ||
             member->kind != resolve::DeclKind::Func ||
@@ -1561,7 +1561,7 @@ void Lowerer::onGlobal(VarDecl& n) {
         const auto* ident = dynamic_cast<const Ident*>(addr->operand.get());
         const resolve::Decl* decl =
             ident != nullptr
-                ? resolver_.lookup(resolver_.moduleScope(), ident->name)
+                ? resolver_.lookup(emitScope(), ident->name)
                 : nullptr;
         if (addr->op != UnOp::Addr || decl == nullptr ||
             decl->kind != resolve::DeclKind::Func || decl->typeParams != 0) {
@@ -1582,7 +1582,7 @@ void Lowerer::onGlobal(VarDecl& n) {
                                 : nullptr;
         const resolve::Decl* decl =
             ident != nullptr
-                ? resolver_.lookup(resolver_.moduleScope(), ident->name)
+                ? resolver_.lookup(emitScope(), ident->name)
                 : nullptr;
         if (decl == nullptr ||
             decl->kind != resolve::DeclKind::Func || decl->typeParams != 0) {
@@ -1664,7 +1664,7 @@ void Lowerer::onGlobal(VarDecl& n) {
         int64_t value = 0;
         bool known = false;
         const resolve::Scope* hereScope =
-            resolver_.scopeOf(checker_.module());
+            homeScope();
         if (const auto* ident = dynamic_cast<const Ident*>(n.init.get())) {
             int owners = 0;
             const resolve::Decl* owner =
@@ -1674,7 +1674,7 @@ void Lowerer::onGlobal(VarDecl& n) {
             if (owner != nullptr) {
                 std::string home = owner->scope != nullptr
                                        ? owner->scope->module
-                                       : checker_.module();
+                                       : homeModule();
                 value = resolver_.enumValue(home + "." + owner->name,
                                             ident->name);
                 known = true;
@@ -1726,7 +1726,7 @@ void Lowerer::onGlobal(VarDecl& n) {
                            qualDecl->nominal == Kind::Enum) {
                     std::string home = qualDecl->scope != nullptr
                                            ? qualDecl->scope->module
-                                           : checker_.module();
+                                           : homeModule();
                     value = resolver_.enumValue(
                         home + "." + qualDecl->name, field->name);
                     known = true;
@@ -1834,7 +1834,7 @@ void Lowerer::onFuncDecl(FuncDecl& n) {
     // function mangles under its module (`b__aval`), the entry's keeps its
     // spelling, and the prelude keeps its C name. Two modules defining one
     // name therefore never collide in one IR module.
-    const resolve::Scope* here = resolver_.scopeOf(checker_.module());
+    const resolve::Scope* here = homeScope();
     const resolve::Decl* decl =
         here != nullptr ? resolver_.lookup(here, n.name) : nullptr;
     std::string link = decl != nullptr ? resolver_.linkName(*decl) : n.name;
@@ -1972,13 +1972,37 @@ void Lowerer::onSpecFunc(DeclId spec, const FuncDecl& spelling,
         refuse(spelling.pos, "this generic call");
         return;
     }
+    // Names below resolve in the template home: helpers, globals and
+    // constants mean what the defining module bound, as checking proved.
+    // Cleared before returning; bodies lower synchronously inside.
+    auto origin = resolver_.instantiationOf(spec);
+    const resolve::Decl* tmpl =
+        origin.has_value() ? resolver_.declById(origin->first) : nullptr;
+    emitHome_ = (tmpl != nullptr && tmpl->scope != nullptr)
+                    ? tmpl->scope->module
+                    : "";
     beginFuncFrame(link, sig, spelling.params, spelling.pos);
     if (failed_) {
+        emitHome_.clear();
         return;
     }
     spelling.body->accept(checker_);
+    emitHome_.clear();
     locals_.pop_back();
     endFuncFrame(spelling.pos);
+}
+
+std::string Lowerer::homeModule() const {
+    return emitHome_.empty() ? checker_.module() : emitHome_;
+}
+
+const resolve::Scope* Lowerer::homeScope() const {
+    return resolver_.scopeOf(homeModule());
+}
+
+const resolve::Scope* Lowerer::emitScope() const {
+    return emitHome_.empty() ? resolver_.moduleScope()
+                             : resolver_.scopeOf(emitHome_);
 }
 
 bool Lowerer::emitSpecBodies() {
@@ -2043,7 +2067,7 @@ void Lowerer::onMethodDecl(const std::string& owner, const std::string& name,
     // its module (`da__Box__get` for `da`'s `Box::get`), so two modules'
     // same-named types never collide.
     ir::Function fn;
-    const resolve::Scope* here = resolver_.scopeOf(checker_.module());
+    const resolve::Scope* here = homeScope();
     const resolve::Decl* ownerDecl =
         here != nullptr ? resolver_.lookup(here, owner) : nullptr;
     std::string linkOwner = owner;
@@ -2498,7 +2522,7 @@ ir::Value Lowerer::onIdent(Ident& n) {
     // they could name.
     TypeRef held = checker_.typeOf(&n);
     if (!held.isError() && held.type->kind() == Kind::Enum) {
-        const resolve::Scope* here = resolver_.scopeOf(checker_.module());
+        const resolve::Scope* here = homeScope();
         int owners = 0;
         const resolve::Decl* owner =
             here != nullptr ? resolver_.lookupEnumMember(here, n.name, owners)
@@ -2506,7 +2530,7 @@ ir::Value Lowerer::onIdent(Ident& n) {
         if (owner != nullptr) {
             std::string home = owner->scope != nullptr
                                    ? owner->scope->module
-                                   : checker_.module();
+                                   : homeModule();
             int64_t value =
                 resolver_.enumValue(home + "." + owner->name, n.name);
             TypeRef count{ctx_.basic(BasicKind::I32)};
@@ -3056,7 +3080,7 @@ bool Lowerer::isZeroRepeatFiller(const Expr& filler, TypeRef element) {
         return false;
     }
     std::unordered_set<std::string> active;
-    EvalEnv env = resolver_.evalEnv(resolver_.moduleScope());
+    EvalEnv env = resolver_.evalEnv(emitScope());
     EvalResult folded = evalConstInt(*lit, env, active);
     return folded.ok && folded.value == 0;
 }
@@ -3081,7 +3105,7 @@ bool Lowerer::globalInitStructBytes(const NewStruct& made, TypeRef structType,
         return false;
     }
     std::unordered_set<std::string> active;
-    EvalEnv env = resolver_.evalEnv(resolver_.moduleScope());
+    EvalEnv env = resolver_.evalEnv(emitScope());
     auto foldScalar = [&](const Expr& leaf, TypeRef leafType,
                           std::string& out) -> bool {
         int64_t width = resolver_.nominalSize(leafType.type);
@@ -3198,7 +3222,7 @@ bool Lowerer::globalInitBytes(const NewArray& init, TypeRef arrayType,
         return false;
     }
     std::unordered_set<std::string> active;
-    EvalEnv env = resolver_.evalEnv(resolver_.moduleScope());
+    EvalEnv env = resolver_.evalEnv(emitScope());
     auto appendScalar = [&](const Expr& leaf, int64_t width, TypeRef elemType) -> bool {
         if (width <= 0) {
             return false;
@@ -3348,7 +3372,7 @@ void Lowerer::constructArray(const std::vector<ir::Value>& slots, const NewArray
             return;
         }
         std::unordered_set<std::string> active;
-        EvalEnv env = resolver_.evalEnv(resolver_.moduleScope());
+        EvalEnv env = resolver_.evalEnv(emitScope());
         EvalResult count = evalConstInt(*n.length, env, active);
         if (!count.ok || count.value < 0) {
             refuse(n.length->pos, "an array length folds to a count");
@@ -3428,7 +3452,7 @@ std::vector<ir::Value> Lowerer::lowerField(const Field& n) {
              frame != locals_.rend() && !shadowed; ++frame) {
             shadowed = frame->find(ident->name) != frame->end();
         }
-        const resolve::Scope* here = resolver_.scopeOf(checker_.module());
+        const resolve::Scope* here = homeScope();
         const resolve::Decl* moduleDecl =
             here != nullptr ? resolver_.lookup(here, ident->name) : nullptr;
         if (!shadowed && moduleDecl != nullptr &&
@@ -3513,7 +3537,7 @@ std::vector<ir::Value> Lowerer::lowerField(const Field& n) {
         }
         if (!shadowed) {
             const resolve::Scope* here =
-                resolver_.scopeOf(checker_.module());
+                homeScope();
             const resolve::Decl* named =
                 here != nullptr ? resolver_.lookup(here, ident->name)
                                 : nullptr;
@@ -3522,7 +3546,7 @@ std::vector<ir::Value> Lowerer::lowerField(const Field& n) {
                 named->nominal == Kind::Enum) {
                 std::string home = named->scope != nullptr
                                        ? named->scope->module
-                                       : checker_.module();
+                                       : homeModule();
                 if (!resolver_.isEnumMember(home + "." + named->name,
                                             n.name)) {
                     refuse(n.pos, "this field access");
@@ -3543,7 +3567,7 @@ std::vector<ir::Value> Lowerer::lowerField(const Field& n) {
                 named->kind == resolve::DeclKind::Alias &&
                 named->aliasTarget != nullptr) {
                 const resolve::Scope* hereScope =
-                    resolver_.scopeOf(checker_.module());
+                    homeScope();
                 TypeRef target = resolver_.resolveType(named->aliasTarget,
                                                         hereScope);
                 if (!target.isError() &&
@@ -3587,7 +3611,7 @@ std::vector<ir::Value> Lowerer::lowerField(const Field& n) {
                 shadowed = frame->find(mod->name) != frame->end();
             }
             const resolve::Scope* here =
-                resolver_.scopeOf(checker_.module());
+                homeScope();
             const resolve::Decl* modDecl =
                 here != nullptr ? resolver_.lookup(here, mod->name) : nullptr;
             const resolve::Scope* home =
@@ -3916,7 +3940,7 @@ bool Lowerer::arrayElementPlace(const Index& n, const Place& base,
         return arrayElementPlace(n, here, arrayType, what, at);
     }
     std::unordered_set<std::string> active;
-    EvalEnv env = resolver_.evalEnv(resolver_.moduleScope());
+    EvalEnv env = resolver_.evalEnv(emitScope());
     EvalResult folded = evalConstInt(*n.index, env, active);
     if (folded.ok) {
         // A folded index is a slot offset the direct route owns: arriving
@@ -4280,7 +4304,7 @@ std::vector<ir::Value> Lowerer::lowerIndex(const Index& n) {
         return {undefined()};
     }
     std::unordered_set<std::string> active;
-    EvalEnv env = resolver_.evalEnv(resolver_.moduleScope());
+    EvalEnv env = resolver_.evalEnv(emitScope());
     EvalResult folded = evalConstInt(*n.index, env, active);
     if (folded.ok) {
         // A folded index is an offset the compiler names: no address
@@ -4348,7 +4372,7 @@ void Lowerer::storeIndex(const Index& target, const std::vector<ir::Value>& word
         return;
     }
     std::unordered_set<std::string> active;
-    EvalEnv env = resolver_.evalEnv(resolver_.moduleScope());
+    EvalEnv env = resolver_.evalEnv(emitScope());
     EvalResult folded = evalConstInt(*target.index, env, active);
     if (folded.ok) {
         if (folded.value < 0) {
@@ -4378,7 +4402,7 @@ void Lowerer::storeIndex(const Index& target, const std::vector<ir::Value>& word
 // compiler names it, or nothing when it is a runtime value.
 bool Lowerer::foldBound(const Expr* expr, int64_t& value) {
     std::unordered_set<std::string> active;
-    EvalEnv env = resolver_.evalEnv(resolver_.moduleScope());
+    EvalEnv env = resolver_.evalEnv(emitScope());
     EvalResult folded = evalConstInt(*expr, env, active);
     if (!folded.ok) {
         return false;
@@ -4388,7 +4412,15 @@ bool Lowerer::foldBound(const Expr* expr, int64_t& value) {
 }
 
 std::vector<ir::Value> Lowerer::lowerSizeof(const SizeofType& n) {
-    TypeRef target = resolver_.resolveType(n.type.get(), resolver_.moduleScope());
+    // Read the operand the checker recorded: inside a spec emission it
+    // names the substituted type, which re-resolving in module scope
+    // cannot answer past type parameters. Outside generics this is the
+    // same type the old path resolved.
+    TypeRef target = checker_.sizeofOperand(&n);
+    if (target.isError()) {
+        refuse(n.pos, "this expression");
+        return {undefined()};
+    }
     if (target.isError()) {
         refuse(n.pos, "this expression");
         return {undefined()};
@@ -6090,7 +6122,7 @@ std::vector<ir::Value> Lowerer::lowerAddrOf(const Unary& n) {
     if (n.op == UnOp::Addr) {
         if (const auto* ident = dynamic_cast<const Ident*>(n.operand.get())) {
             const resolve::Decl* decl =
-                resolver_.lookup(resolver_.moduleScope(), ident->name);
+                resolver_.lookup(emitScope(), ident->name);
             if (decl != nullptr && decl->kind == resolve::DeclKind::Func &&
                 decl->typeParams == 0) {
                 std::string link = ident->name;
@@ -6237,7 +6269,7 @@ std::vector<ir::Value> Lowerer::lowerWords(const Expr* expr) {
         // a forwarder with the receiver-first shape plus a null captures
         // word, with no allocation. Prelude names mangle to their link
         // symbols, like calls do.
-        const resolve::Scope* here = resolver_.scopeOf(checker_.module());
+        const resolve::Scope* here = homeScope();
         const resolve::Decl* decl =
             here != nullptr ? resolver_.lookup(here, ident->name) : nullptr;
         if (decl != nullptr && decl->kind == resolve::DeclKind::Func &&
@@ -6282,7 +6314,7 @@ std::vector<ir::Value> Lowerer::lowerWords(const Expr* expr) {
             if (owner != nullptr) {
                 std::string home = owner->scope != nullptr
                                        ? owner->scope->module
-                                       : checker_.module();
+                                       : homeModule();
                 int64_t value =
                     resolver_.enumValue(home + "." + owner->name, ident->name);
                 TypeRef count{ctx_.basic(BasicKind::I32)};
@@ -6440,7 +6472,7 @@ void Lowerer::onAsmStmt(AsmStmt& n) {
         if (found) {
             continue;
         }
-        const resolve::Scope* here = resolver_.scopeOf(checker_.module());
+        const resolve::Scope* here = homeScope();
         const resolve::Decl* decl =
             here != nullptr ? resolver_.lookup(here, base) : nullptr;
         if (decl != nullptr && decl->kind == resolve::DeclKind::Func) {
@@ -7878,7 +7910,7 @@ std::vector<ir::Value> Lowerer::lowerCallWords(Call& n) {
         // import's mangles under its module, the prelude keeps its C name.
         // The lookup is the same one functionSig uses, so the two cannot
         // disagree — including a program's own shadowing `print`.
-        const resolve::Scope* here = resolver_.scopeOf(checker_.module());
+        const resolve::Scope* here = homeScope();
         const resolve::Decl* decl =
             here != nullptr ? resolver_.lookup(here, ident->name) : nullptr;
         if (decl != nullptr) {
@@ -7979,7 +8011,7 @@ std::vector<ir::Value> Lowerer::lowerCallWords(Call& n) {
                     break;
                 }
             }
-            const resolve::Scope* here = resolver_.scopeOf(checker_.module());
+            const resolve::Scope* here = homeScope();
             const resolve::Decl* moduleDecl =
                 here != nullptr ? resolver_.lookup(here, mod->name) : nullptr;
             if (!shadowed && moduleDecl != nullptr &&
@@ -8340,7 +8372,7 @@ bool Lowerer::matchBoundWords(const std::string& name, std::vector<ir::Value>& w
         words = loadGlobal(pos, *global);
         return !failed_;
     }
-    const resolve::Scope* here = resolver_.scopeOf(checker_.module());
+    const resolve::Scope* here = homeScope();
     const resolve::Decl* decl =
         here != nullptr ? resolver_.lookup(here, name) : nullptr;
     if (decl != nullptr &&
@@ -8375,7 +8407,7 @@ bool Lowerer::matchBoundWords(const std::string& name, std::vector<ir::Value>& w
         if (owner != nullptr) {
             std::string home = owner->scope != nullptr
                                    ? owner->scope->module
-                                   : checker_.module();
+                                   : homeModule();
             int64_t value =
                 resolver_.enumValue(home + "." + owner->name, name);
             TypeRef word{ctx_.basic(BasicKind::I64)};
@@ -9831,7 +9863,7 @@ ir::Value Lowerer::onIdentOrExpr(const Expr* expr, TypeRef expected) {
     }
     if (auto* lit = dynamic_cast<const IntLit*>(expr)) {
         std::unordered_set<std::string> active;
-        EvalEnv env = resolver_.evalEnv(resolver_.moduleScope());
+        EvalEnv env = resolver_.evalEnv(emitScope());
         EvalResult folded = evalConstInt(*lit, env, active);
         TypeRef type = checker_.typeOf(expr);
         if (!folded.ok) {

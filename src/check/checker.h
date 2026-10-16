@@ -159,6 +159,10 @@ public:
     // when the call is not a generic instantiation. The lowerer resolves
     // generic callees through this table instead of re-deciding them.
     std::optional<DeclId> specOf(const Call* call) const;
+    // The operand type a sizeof spelled, by node. Recorded during checking
+    // with the active substitution applied, so spec emissions read the
+    // concrete type instead of re-resolving past type parameters.
+    TypeRef sizeofOperand(const SizeofType* node) const;
     // Every recorded generic call site and its spec, for the lowerer's
     // emission worklist. Checking already computed the transitive closure:
     // detached body walks still instantiate nested calls.
@@ -381,6 +385,8 @@ private:
     // Generic call sites and the specialization each instantiated, by site.
     // The lowerer resolves generic callees and enumerates used specs here.
     std::unordered_map<const Call*, DeclId> callSpecs_;
+    // Sizeof operand types by node, recorded with substitution applied.
+    std::unordered_map<const SizeofType*, TypeRef> sizeofOperands_;
     // Types resolve here rather than at module scope during generic walks,
     // where the template's parameters are bound.
     const resolve::Scope* typeScope_ = nullptr;

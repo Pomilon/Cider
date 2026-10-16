@@ -1,0 +1,65 @@
+// Result type: an ok value or an error, without exceptions.
+//
+// v3 port of the v2-final module. v2 spelled partial construction
+// (`var r: Result<T, E>;` plus field stores); v3 names every field, so a
+// fresh value starts byte-zeroed through a heap slot (freed before
+// return) and the known fields store over it. All-zero bytes are the
+// zero value of every Cider type, so the untouched field reads defined.
+from std.io import puts, exit;
+from std.string import memset;
+
+export struct Result<T, E> {
+    var is_ok: bool;
+    var value: T;
+    var error: E;
+}
+
+// A zeroed value of any type: all-zero bytes read as zero, false,
+// nilPtr, or all-zero aggregates for every spelling T can take.
+func zeroed<T>() -> T {
+    var slot: *T = alloc(sizeof(T), 8) as *T;
+    memset(slot as *void, 0, sizeof(T) as int);
+    var answer: T = *slot;
+    free(slot as *void);
+    return answer;
+}
+
+export func ok<T, E>(val: T) -> Result<T, E> {
+    var r: Result<T, E> = zeroed::<Result<T, E>>();
+    r.is_ok = true;
+    r.value = val;
+    return r;
+}
+
+export func err<T, E>(val: E) -> Result<T, E> {
+    var r: Result<T, E> = zeroed::<Result<T, E>>();
+    r.is_ok = false;
+    r.error = val;
+    return r;
+}
+
+export func is_ok<T, E>(r: *Result<T, E>) -> bool {
+    return (*r).is_ok;
+}
+
+export func is_err<T, E>(r: *Result<T, E>) -> bool {
+    return !(*r).is_ok;
+}
+
+export func unwrap<T, E>(r: *Result<T, E>) -> T {
+    if ((*r).is_ok) {
+        return (*r).value;
+    }
+    puts("unwrap failed on Err value");
+    exit(1);
+    return (*r).value;
+}
+
+export func expect<T, E>(r: *Result<T, E>, msg: string) -> T {
+    if ((*r).is_ok) {
+        return (*r).value;
+    }
+    puts(msg);
+    exit(1);
+    return (*r).value;
+}

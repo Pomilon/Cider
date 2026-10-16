@@ -74,6 +74,11 @@ std::optional<DeclId> Checker::specOf(const Call* call) const {
                                      : std::optional<DeclId>(found->second);
 }
 
+TypeRef Checker::sizeofOperand(const SizeofType* node) const {
+    auto found = sizeofOperands_.find(node);
+    return found == sizeofOperands_.end() ? errorRef() : found->second;
+}
+
 TypeRef Checker::resolveHere(const TypeExpr* spelling) {
     // The resolver records the diagnostic; the checker records the failure.
     // Without this, a use-site resolve error (bare generic in a body, bad
@@ -147,6 +152,43 @@ TypeRef Checker::substDeep(TypeRef type) {
             return TypeRef{ctx_.closure(std::move(rebuilt))};
         }
         return TypeRef{ctx_.functionPtr(std::move(rebuilt))};
+    }
+    if (kind == Kind::Struct || kind == Kind::Class || kind == Kind::Interface ||
+        kind == Kind::Union || kind == Kind::Enum) {
+        // A nested instantiation re-originates: `R<T, E>` inside `ok<T, E>`
+        // names the spec of bare parameters, but the body means the spec
+        // of this walk's arguments. Substitute the origin's arguments and
+        // re-instantiate, the way the resolver's own substitution does;
+        // an unchanged list keeps the same spec. A depth failure refuses
+        // instead of hanging (see the resolver's bound).
+        std::optional<DeclId> id = type.type->decl();
+        if (!id.has_value()) {
+            return errorRef();
+        }
+        std::optional<std::pair<DeclId, std::vector<TypeRef>>> origin =
+            resolver_.instantiationOf(*id);
+        if (!origin.has_value()) {
+            return type;
+        }
+        std::vector<TypeRef> subArgs;
+        bool changed = false;
+        for (TypeRef arg : origin->second) {
+            TypeRef sub = substDeep(arg);
+            if (sub.isError()) {
+                return sub;
+            }
+            changed = changed || sub.type != arg.type;
+            subArgs.push_back(sub);
+        }
+        if (!changed) {
+            return type;
+        }
+        std::optional<DeclId> spec = resolver_.instantiate(
+            origin->first, subArgs, Position{module_, 1, 1});
+        if (!spec.has_value()) {
+            return errorRef();
+        }
+        return TypeRef{ctx_.nominal(kind, *spec)};
     }
     return type;
 }
@@ -1690,6 +1732,7 @@ void Checker::visitSizeofType(SizeofType& n) {
         record(&n, errorRef());
         return;
     }
+    sizeofOperands_[&n] = target;
     record(&n, TypeRef{ctx_.basic(BasicKind::I64)});
 }
 
@@ -3181,10 +3224,19 @@ TypeRef Checker::checkGenericCall(Call& expr, const resolve::Decl* decl) {
             fail(expr.pos, "checker bug: template body is missing");
             return errorRef();
         }
+        // A template body names its defining module: helpers the body
+        // calls resolve there, never in the caller's module. Same-module
+        // calls pass their own scope back, so nothing changes for them.
+        const resolve::Scope* homeScope = resolver_.scopeOf(home);
         const resolve::Scope* scope = resolver_.typeParamScope(
-            typeScope_, module_, spelling->typeParams, decl->id, expr.pos);
+            homeScope != nullptr ? homeScope : typeScope_, module_,
+            spelling->typeParams, decl->id, expr.pos);
         const resolve::Scope* savedScope = typeScope_;
         typeScope_ = scope;
+        const resolve::Scope* savedModuleScope = moduleScope_;
+        if (homeScope != nullptr) {
+            moduleScope_ = homeScope;
+        }
         std::optional<ActiveInst> savedActive = active_;
         active_ = ActiveInst{decl->id, argTypes, spelling->typeParams};
         pushScope();
@@ -3207,6 +3259,7 @@ TypeRef Checker::checkGenericCall(Call& expr, const resolve::Decl* decl) {
         inFunc_ = wasFunc;
         popScope();
         typeScope_ = savedScope;
+        moduleScope_ = savedModuleScope;
         active_ = savedActive;
     }
     const Type* ret = sig->returnType() != nullptr ? sig->returnType() : ctx_.void_();
@@ -3239,10 +3292,18 @@ void Checker::walkSpecForEmit(DeclId spec) {
         fail(Position{module_, 1, 1}, "checker bug: template body is missing");
         return;
     }
+    // Home scopes, like the checking walk: helpers resolve in the
+    // defining module so emission answers what checking proved.
+    const resolve::Scope* homeScope = resolver_.scopeOf(home);
     const resolve::Scope* scope = resolver_.typeParamScope(
-        typeScope_, module_, spelling->typeParams, origin->first, spelling->pos);
+        homeScope != nullptr ? homeScope : typeScope_, module_,
+        spelling->typeParams, origin->first, spelling->pos);
     const resolve::Scope* savedScope = typeScope_;
     typeScope_ = scope;
+    const resolve::Scope* savedModuleScope = moduleScope_;
+    if (homeScope != nullptr) {
+        moduleScope_ = homeScope;
+    }
     std::optional<ActiveInst> savedActive = active_;
     active_ = ActiveInst{origin->first, origin->second, spelling->typeParams};
     pushScope();
@@ -3264,6 +3325,7 @@ void Checker::walkSpecForEmit(DeclId spec) {
     inFunc_ = wasFunc;
     popScope();
     typeScope_ = savedScope;
+    moduleScope_ = savedModuleScope;
     active_ = savedActive;
 }
 
