@@ -421,6 +421,31 @@ void testGenericCall() {
         "func max<T>(a: T, b: T) -> T { return a > b ? a : b; }\n"
         "func main() -> int { return max; }\n");
     check(!bare.ok && bare.stage == "check", "a bare generic name fails");
+    // The call records its spec for the lowerer: find the init call in
+    // main and ask the checker which specialization it instantiated.
+    Checked spec = check(
+        "func id<T>(x: T) -> T { return x; }\n"
+        "func main() -> int { var a: int = id::<int>(42); return a; }\n");
+    const cider::Call* specCall = nullptr;
+    if (spec.ok) {
+        for (const auto& decl : spec.program->decls) {
+            const auto* fn = dynamic_cast<const cider::FuncDecl*>(decl.get());
+            if (fn == nullptr || fn->name != "main" || fn->body == nullptr) {
+                continue;
+            }
+            for (const auto& stmt : fn->body->stmts) {
+                const auto* vd =
+                    dynamic_cast<const cider::VarDecl*>(stmt.get());
+                if (vd != nullptr && vd->init != nullptr) {
+                    specCall =
+                        dynamic_cast<const cider::Call*>(vd->init.get());
+                }
+            }
+        }
+    }
+    check(specCall != nullptr, "the init is a call");
+    check(specCall != nullptr && spec.checker->specOf(specCall).has_value(),
+          "a generic call records its spec");
 }
 
 // A generic struct stores per-instantiation members; methods check too.

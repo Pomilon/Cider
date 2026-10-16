@@ -145,6 +145,10 @@ public:
     TypeRef typeOf(const Node* node) const;
     const std::vector<CheckError>& errors() const { return errors_; }
     size_t errorCount() const { return errors_.size(); }
+    // The specialization a generic call instantiated, by call site. Empty
+    // when the call is not a generic instantiation. The lowerer resolves
+    // generic callees through this table instead of re-deciding them.
+    std::optional<DeclId> specOf(const Call* call) const;
 
     // SEMANTICS.md §2.3: the common type of two operands, stated as a type.
     // Public so lowering emits a comparison in the same domain the checker
@@ -352,6 +356,9 @@ private:
     // call into the same instantiation checks against its signature without
     // re-walking; anything else would loop the compiler on recursive code.
     std::unordered_set<std::string> walked_;
+    // Generic call sites and the specialization each instantiated, by site.
+    // The lowerer resolves generic callees and enumerates used specs here.
+    std::unordered_map<const Call*, DeclId> callSpecs_;
     // Types resolve here rather than at module scope during generic walks,
     // where the template's parameters are bound.
     const resolve::Scope* typeScope_ = nullptr;

@@ -68,6 +68,12 @@ TypeRef Checker::typeOf(const Node* node) const {
     return resolver_.typeOf(node);
 }
 
+std::optional<DeclId> Checker::specOf(const Call* call) const {
+    auto found = callSpecs_.find(call);
+    return found == callSpecs_.end() ? std::nullopt
+                                     : std::optional<DeclId>(found->second);
+}
+
 TypeRef Checker::resolveHere(const TypeExpr* spelling) {
     // The resolver records the diagnostic; the checker records the failure.
     // Without this, a use-site resolve error (bare generic in a body, bad
@@ -3136,6 +3142,7 @@ TypeRef Checker::checkGenericCall(Call& expr, const resolve::Decl* decl) {
     if (!spec.has_value()) {
         return errorRef();
     }
+    callSpecs_[&expr] = *spec;
     const Signature* sig = resolver_.funcSig(*spec);
     if (sig == nullptr) {
         fail(expr.pos, "checker bug: specialization has no signature");
