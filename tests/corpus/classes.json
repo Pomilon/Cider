@@ -1000,9 +1000,9 @@
   "class": "A"
  },
  "member_struct_store": {
-  "actual": "cider run exit 1, stdout empty, stderr diagnostic: `main.cid:60:18: a variable needs an initialiser` (global struct)",
+  "actual": "exact stdout/stderr/exit match",
   "blocker": "stdlib-io + generics + this + uninit",
-  "class": "D"
+  "class": "A"
  },
  "method_array_return": {
   "actual": "cider run exit 1, stdout empty, stderr diagnostic: `main.cid:38:24: a variable needs an initialiser`",

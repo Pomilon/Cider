@@ -280,6 +280,18 @@ void testGlobals() {
     std::printf("globals\n");
     check(runQuiet("var g: int = 40;\nfunc main() -> int { return g + 2; }\n") == 42,
           "a global reads back");
+    // An aggregate member past the first eight-byte line straddles it, so
+    // the store and the read go through a computed address off the label
+    // rather than the direct label-plus-offset form.
+    check(runQuiet("struct P { var a: int; var b: int; }\n"
+                   "struct Outer { var tail: int; var pair: P; }\n"
+                   "var g: Outer = new Outer { tail: 0, pair: new P { a: 0, b: 0 } };\n"
+                   "func main() -> int {\n"
+                   "    var q: P = new P { a: 62, b: 63 };\n"
+                   "    g.pair = q;\n"
+                   "    return g.pair.a + g.pair.b;\n"
+                   "}\n") == 125,
+          "a straddling global member stores and reads back");
     // A computed index on a global array addresses through the label, not
     // a slot: the Gep base is a computed address value (see emitGep).
     check(runQuiet("var g: [u8; 4] = new [u8; 4] {[0, ...]};\n"

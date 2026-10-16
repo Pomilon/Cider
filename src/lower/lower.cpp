@@ -2445,11 +2445,30 @@ std::vector<ir::Value> Lowerer::loadRange(Position pos, const Place& place,
             instr.displacement = cur;
         } else if (!place.global.empty()) {
             if (disp + take > layout::kSizePointer) {
-                refuse(pos, "this field layout is not lowered yet");
-                return {undefined()};
+                // A take straddling two eight-byte lines reads through a
+                // computed address, like the slot path below: the label
+                // plus the absolute offset names bytes the direct form
+                // cannot.
+                TypeRef addrType{ctx_.pointer(ctx_.basic(BasicKind::U8))};
+                ir::Instr lea;
+                lea.op = ir::Op::DataAddr;
+                lea.loc = pos;
+                lea.type = addrType;
+                lea.width = ir::IRType::Ptr;
+                lea.globalLabel = place.global;
+                lea.isPure = true;
+                ir::Value base = newValue(lea.width, addrType, pos);
+                lea.results.push_back(base);
+                emit(std::move(lea));
+                if (failed_) {
+                    return {undefined()};
+                }
+                instr.addressBase = base;
+                instr.displacement = cur;
+            } else {
+                instr.globalLabel = place.global;
+                instr.displacement = cur;
             }
-            instr.globalLabel = place.global;
-            instr.displacement = cur;
         } else {
             if (place.isAddress) {
                 // One computed address names every chunk: the address plus
@@ -2621,11 +2640,30 @@ void Lowerer::storeRange(Position pos, const Place& place,
             instr.displacement = cur;
         } else if (!place.global.empty()) {
             if (disp + take > layout::kSizePointer) {
-                refuse(pos, "this field layout is not lowered yet");
-                return;
+                // A take straddling two eight-byte lines stores through a
+                // computed address, like the slot path below: the label
+                // plus the absolute offset names bytes the direct form
+                // cannot.
+                TypeRef addrType{ctx_.pointer(ctx_.basic(BasicKind::U8))};
+                ir::Instr lea;
+                lea.op = ir::Op::DataAddr;
+                lea.loc = pos;
+                lea.type = addrType;
+                lea.width = ir::IRType::Ptr;
+                lea.globalLabel = place.global;
+                lea.isPure = true;
+                ir::Value base = newValue(lea.width, addrType, pos);
+                lea.results.push_back(base);
+                emit(std::move(lea));
+                if (failed_) {
+                    return;
+                }
+                instr.addressBase = base;
+                instr.displacement = cur;
+            } else {
+                instr.globalLabel = place.global;
+                instr.displacement = cur;
             }
-            instr.globalLabel = place.global;
-            instr.displacement = cur;
         } else {
             if (place.isAddress) {
                 // One computed address names every chunk, like loads: the
