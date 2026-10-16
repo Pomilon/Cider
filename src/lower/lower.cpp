@@ -2899,6 +2899,15 @@ bool Lowerer::globalInitStructBytes(const NewStruct& made, TypeRef structType,
             piece.append(static_cast<size_t>(kInterfaceWords) *
                              static_cast<size_t>(layout::kSizePointer),
                          '\0');
+        } else if (dynamic_cast<const NilPtr*>(sub) != nullptr) {
+            // A bare nil pointer fills its field with zeros: the width
+            // comes from the declared field type, which the gate already
+            // checked is a null-accepting shape.
+            int64_t width = resolver_.nominalSize(ftype.type);
+            if (width <= 0) {
+                return false;
+            }
+            piece.append(static_cast<size_t>(width), '\0');
         } else if (!foldScalar(*sub, ftype, piece)) {
             return false;
         }

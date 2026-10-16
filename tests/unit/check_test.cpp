@@ -132,6 +132,11 @@ void testGlobalStruct() {
         "func main() -> int { return 0; }\n");
     check(!ctorCall.ok && ctorCall.stage == "check",
           "a call result still needs a constant");
+    Checked nilField = check(
+        "struct Box { var p: *int; var q: *int; }\n"
+        "var g: Box = new Box { p: nilPtr, q: nilPtr };\n"
+        "func main() -> int { return 0; }\n");
+    check(nilField.ok, "a nil pointer field is constant: " + nilField.stage);
 }
 
 // Names resolve through locals first, then the module scope.

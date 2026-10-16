@@ -365,9 +365,9 @@
   "class": "B"
  },
  "ea_escape_global": {
-  "actual": "exit 1; tests/corpus/legacy/ea_escape_global/main.cid:7:15: a variable needs an initialiser; tests/corpus/legacy/ea_escape_global/main.cid:10:30: expected '{' or '(' after new",
+  "actual": "exact stdout/stderr/exit match",
   "blocker": "classes-new-delete (+stdlib-imports, asm-blocks)",
-  "class": "D"
+  "class": "A"
  },
  "ea_escape_return": {
   "actual": "tests/corpus/legacy/ea_escape_return/main.cid:8:30: expected '{' or '(' after new",
@@ -390,9 +390,9 @@
   "class": "A"
  },
  "ea_memcpy_global": {
-  "actual": "exit 1; tests/corpus/legacy/ea_memcpy_global/main.cid:12:14: a variable needs an initialiser; tests/corpus/legacy/ea_memcpy_global/main.cid:15:18: a variable needs an initialiser",
+  "actual": "exact stdout/stderr/exit match",
   "blocker": "classes-new-delete (+stdlib-imports, uninit-globals, asm-blocks)",
-  "class": "D"
+  "class": "A"
  },
  "ea_multi": {
   "actual": "tests/corpus/legacy/ea_multi/main.cid:8:30: expected '{' or '(' after new",
@@ -405,9 +405,9 @@
   "class": "B"
  },
  "ea_summary_escape": {
-  "actual": "exit 1; tests/corpus/legacy/ea_summary_escape/main.cid:7:19: a variable needs an initialiser; tests/corpus/legacy/ea_summary_escape/main.cid:15:30: expected '{' or '(' after new",
+  "actual": "exact stdout/stderr/exit match",
   "blocker": "classes-new-delete (+uninit-globals, asm-blocks)",
-  "class": "D"
+  "class": "A"
  },
  "ea_summary_safe": {
   "actual": "tests/corpus/legacy/ea_summary_safe/main.cid:11:30: expected '{' or '(' after new",

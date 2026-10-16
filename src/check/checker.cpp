@@ -3423,6 +3423,11 @@ bool Checker::constAggregateInit(const Expr& init) {
             }
         }
     }
+    // A bare nil pointer is the zero word whatever it fills: the emission
+    // writes the field's own width of zeros, so const-ness needs no type.
+    if (dynamic_cast<const NilPtr*>(&init) != nullptr) {
+        return true;
+    }
     std::unordered_set<std::string> active;
     if (evalConstInt(init, *env_, active).ok) {
         return true;
