@@ -1385,9 +1385,9 @@
   "class": "A"
  },
  "struct_template_params": {
-  "actual": "v3 rejects v2 syntax loudly at parse (run exit 1: OUT: ERR:tests/corpus/struct_template_params/main.cid:62:12: expected an expression\\ntests/corpus/struct_tem...)",
+  "actual": "exact stdout/stderr/exit match",
   "blocker": "generics-not-lowered (also multi-file-imports)",
-  "class": "D"
+  "class": "A"
  },
  "struct_type_import": {
   "actual": "exact stdout/stderr/exit match",
