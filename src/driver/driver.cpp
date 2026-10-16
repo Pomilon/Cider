@@ -203,6 +203,12 @@ bool runFront(const std::string& file, const std::string& text, Pipeline& pipe,
             break;
         }
     }
+    // Deferred monomorphization: cross-module specs are unknown while
+    // their home module lowers, so every used specialization emits here,
+    // once the resolver cache is complete.
+    if (lowered) {
+        lowered = lowerer.emitSpecBodies();
+    }
     if (lowered) {
         pipe.module = lowerer.takeModule();
     }

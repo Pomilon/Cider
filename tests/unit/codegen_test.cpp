@@ -68,6 +68,13 @@ Built build(const std::string& text) {
         out.stage = "lower";
         return out;
     }
+    // Deferred monomorphization, mirroring the driver: specs emit after
+    // all modules lower.
+    if (!lowerer.emitSpecBodies()) {
+        out.module = nullptr;
+        out.stage = "lower-spec";
+        return out;
+    }
     out.module = lowerer.takeModule();
     cider::opt::OptResult result = cider::opt::run(*out.module);
     if (!result.ok) {
@@ -1583,6 +1590,25 @@ void testEnumCast() {
           "enums cast to and from wide integers");
 }
 
+void testGenericFn() {
+    std::printf("generic functions monomorphize\n");
+    check(runQuiet("func id<T>(x: T) -> T { return x; }\n"
+                   "func main() -> int {\n"
+                   "    var a: int = id::<int>(42);\n"
+                   "    if (a != 42) { return 1; }\n"
+                   "    return 0;\n"
+                   "}\n") == 0,
+          "one spec runs");
+    check(runQuiet("func id<T>(x: T) -> T { return x; }\n"
+                   "func main() -> int {\n"
+                   "    var a: int = id::<int>(1);\n"
+                   "    var b: u64 = id::<u64>(2);\n"
+                   "    if ((a as u64) + b != 3) { return 1; }\n"
+                   "    return 0;\n"
+                   "}\n") == 0,
+          "two specs coexist");
+}
+
 void testBitNot() {
     std::printf("bitwise not runs\n");
     check(runQuiet("func main() -> int {\n"
@@ -2403,6 +2429,7 @@ int main() {
     testPointerArith();
     testEnumValues();
     testEnumCast();
+    testGenericFn();
     testBitNot();
     testTernary();
     testInterp();

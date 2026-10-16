@@ -85,12 +85,21 @@ public:
     bool lowerInto(const std::string& name, Program& program);
     // Moves the accumulated module out. Null when nothing lowered.
     std::unique_ptr<ir::Module> takeModule() { return std::move(module_); }
+    // Emits every used generic-function specialization once, after all
+    // modules lowered (cross-module specs are unknown while their home
+    // module lowers). Runs the checker's spec walks with this lowerer
+    // attached; nested specs enqueue through the same worklist, so
+    // generic-calls-generic terminates through the emitted-set. False
+    // when any body refuses.
+    bool emitSpecBodies();
 
     const std::vector<check::CheckError>& errors() const { return errors_; }
 
     // --- called by the Checker during its walk, through check::LowerSink ---
     void onProgram(Program& n) override;
     void onFuncDecl(FuncDecl& n) override;
+    void onSpecFunc(DeclId spec, const FuncDecl& spelling,
+                    const Signature& sig) override;
     void onMethodDecl(const std::string& owner, const std::string& name,
                       const std::vector<Param>& params, const Signature& sig,
                       TypeRef self, Block& body) override;
@@ -528,6 +537,13 @@ public:
 private:
     void refuse(Position pos, const std::string& what);
     void emitTerminator(const ir::Terminator& term);
+    // Shared function frame setup and teardown behind onFuncDecl and spec
+    // emissions, so the two cannot diverge (sret handling, slot layout,
+    // falloff rule). The caller lowers the body between the two and pops
+    // the frame exactly as onFuncDecl always has.
+    void beginFuncFrame(const std::string& link, const Signature& sig,
+                        const std::vector<Param>& params, Position pos);
+    void endFuncFrame(Position pos);
     // Whether a block of the function under construction can run: a
     // breadth-first walk over terminator edges from the entry block. A
     // reachable falloff in a value function is a compile-time rejection
@@ -538,6 +554,10 @@ private:
     // Classify the register class of every parameter word once the slots
     // are placed; the code generator reads it straight from the function.
     void recordParamClasses();
+    // Instantiated generic functions already emitted, by specialization
+    // key: one argument list means one body, and a recursive call into
+    // the same spec references the pending symbol instead of looping.
+    std::unordered_set<std::string> emittedSpecs_;
     // A float constant: the IEEE bits for the literal's own width, stored
     // in `constantBits` exactly as an integer constant stores its value.
     ir::Value constantFBits(uint64_t bits, TypeRef type, Position pos);

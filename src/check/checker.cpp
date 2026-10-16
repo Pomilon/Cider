@@ -3206,6 +3206,60 @@ TypeRef Checker::checkGenericCall(Call& expr, const resolve::Decl* decl) {
     return TypeRef{ret};
 }
 
+void Checker::walkSpecForEmit(DeclId spec) {
+    // The lowerer's emission walk: same setup as the checking walk above,
+    // but the sink stays attached so statements lower, and no walked_ gate
+    // (the lowerer emits each spec once; a recursive call into the same
+    // spec checks against its signature through walked_ without re-walking).
+    // Module and type scopes stay whatever the last module left: the
+    // checking walks ran under the caller's scopes too, so names resolve
+    // exactly as proven. The body was proven clean, so this re-walk
+    // reports nothing new — unless it is a lowering gap, failed loudly.
+    auto origin = resolver_.instantiationOf(spec);
+    if (!origin.has_value()) {
+        return;
+    }
+    const resolve::Decl* tmplDecl = resolver_.declById(origin->first);
+    if (tmplDecl == nullptr || tmplDecl->kind != resolve::DeclKind::Func) {
+        return;
+    }
+    std::string home = tmplDecl->scope != nullptr
+                           ? tmplDecl->scope->module
+                           : module_;
+    const FuncDecl* spelling = funcSpelling(home, tmplDecl->name);
+    const Signature* sig = resolver_.funcSig(spec);
+    if (spelling == nullptr || sig == nullptr) {
+        fail(Position{module_, 1, 1}, "checker bug: template body is missing");
+        return;
+    }
+    const resolve::Scope* scope = resolver_.typeParamScope(
+        typeScope_, module_, spelling->typeParams, origin->first, spelling->pos);
+    const resolve::Scope* savedScope = typeScope_;
+    typeScope_ = scope;
+    std::optional<ActiveInst> savedActive = active_;
+    active_ = ActiveInst{origin->first, origin->second, spelling->typeParams};
+    pushScope();
+    for (uint64_t i = 0; i < static_cast<uint64_t>(spelling->params.size()); ++i) {
+        bindLocal(spelling->params[i].name,
+                  TypeRef{sig->parameters()[i].type},
+                  spelling->params[i].isMutable, spelling->params[i].pos);
+    }
+    TypeRef savedRet = funcReturn_;
+    bool wasFunc = inFunc_;
+    const Type* ret =
+        sig->returnType() != nullptr ? sig->returnType() : ctx_.void_();
+    funcReturn_ = TypeRef{ret};
+    inFunc_ = true;
+    if (sink_ != nullptr) {
+        sink_->onSpecFunc(spec, *spelling, *sig);
+    }
+    funcReturn_ = savedRet;
+    inFunc_ = wasFunc;
+    popScope();
+    typeScope_ = savedScope;
+    active_ = savedActive;
+}
+
 TypeRef Checker::checkField(Field& expr) {
     // `da.aval`: the qualifier names a module, so the member resolves in
     // the defining scope, never in the current one. Functions answer their

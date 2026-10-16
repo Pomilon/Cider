@@ -1283,6 +1283,42 @@ std::string Resolver::linkName(const Decl& decl) const {
     return flat + "__" + decl.name;
 }
 
+std::string Resolver::specLinkName(DeclId spec) const {
+    auto origin = instantiationOf(spec);
+    if (!origin.has_value()) {
+        return "";
+    }
+    const Decl* tmpl = declById(origin->first);
+    if (tmpl == nullptr || tmpl->kind != DeclKind::Func) {
+        return "";
+    }
+    std::string home =
+        tmpl->scope != nullptr ? tmpl->scope->module : entryModule();
+    std::string flat = home;
+    for (char& c : flat) {
+        if (c != '_' && (c < 'a' || c > 'z') && (c < 'A' || c > 'Z') &&
+            (c < '0' || c > '9')) {
+            c = '_';
+        }
+    }
+    // Specs always mangle, even at entry: the bare name belongs to the
+    // template itself (which emits nothing), so `id` and `id__S__int`
+    // never collide.
+    std::string out = flat + "__" + tmpl->name + "__S";
+    for (TypeRef arg : origin->second) {
+        out += "__";
+        for (char c : typeName(arg)) {
+            if (c == '_' || (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') ||
+                (c >= '0' && c <= '9')) {
+                out += c;
+            } else {
+                out += '_';
+            }
+        }
+    }
+    return out;
+}
+
 TypeRef Resolver::substitute(TypeRef type, DeclId tmpl, const std::vector<TypeRef>& args,
                              Position pos) {
     if (type.isError()) {

@@ -189,6 +189,12 @@ public:
     // the checker and every lowerer call site ask here instead of building
     // names locally.
     std::string linkName(const Decl& decl) const;
+    // The link symbol for an instantiated generic function: the template's
+    // home module flattened, its name, then the sanitized argument type
+    // names (`id__S__int`, `box__id__S__int`). Specs own no Decl entries,
+    // so linkName cannot see them; every emitter and call site asks here
+    // instead. Empty when the id names no function specialization.
+    std::string specLinkName(DeclId spec) const;
     // Replaces every TypeParam of one template with its argument types.
     // Nominal specializations re-originate: `Box<T>` inside `C<T>` becomes
     // `Box<int>` when C does, through specOrigin_ rather than spellings.

@@ -56,6 +56,16 @@ public:
     virtual void onBlockEnter(Block& n) { (void)n; }
     virtual void onBlockExit(Block& n) { (void)n; }
     virtual void onFuncDecl(FuncDecl& n) { (void)n; }
+    // One instantiated generic function body, emitted under its own link
+    // name. The spelling holds parameter names and the template body; the
+    // signature holds the substituted parameter and return types. Fires
+    // from the checker's spec walk, never from the program walk.
+    virtual void onSpecFunc(DeclId spec, const FuncDecl& spelling,
+                            const Signature& sig) {
+        (void)spec;
+        (void)spelling;
+        (void)sig;
+    }
     // A method or constructor body, emitted as its own function. The owner
     // names the mangling; the signature holds the declared parameters and
     // self arrives separately because no source spelling names it.
@@ -149,6 +159,18 @@ public:
     // when the call is not a generic instantiation. The lowerer resolves
     // generic callees through this table instead of re-deciding them.
     std::optional<DeclId> specOf(const Call* call) const;
+    // Every recorded generic call site and its spec, for the lowerer's
+    // emission worklist. Checking already computed the transitive closure:
+    // detached body walks still instantiate nested calls.
+    const std::unordered_map<const Call*, DeclId>& callSpecs() const {
+        return callSpecs_;
+    }
+    // Re-walks one instantiated generic function body with the sink
+    // attached, so the lowerer emits it. Setup repeats the checking walk
+    // (type-param scope, substituted binds, return type); the body was
+    // already proven clean, so the deterministic re-walk reports nothing
+    // new. No-op when the id names no function specialization.
+    void walkSpecForEmit(DeclId spec);
 
     // SEMANTICS.md §2.3: the common type of two operands, stated as a type.
     // Public so lowering emits a comparison in the same domain the checker

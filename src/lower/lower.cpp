@@ -1837,10 +1837,29 @@ void Lowerer::onFuncDecl(FuncDecl& n) {
     const resolve::Scope* here = resolver_.scopeOf(checker_.module());
     const resolve::Decl* decl =
         here != nullptr ? resolver_.lookup(here, n.name) : nullptr;
+    std::string link = decl != nullptr ? resolver_.linkName(*decl) : n.name;
+    beginFuncFrame(link, *functionSig(n.name), n.params, n.pos);
+    if (failed_) {
+        return;
+    }
+
+    n.body->accept(checker_);
+    locals_.pop_back();
+
+    endFuncFrame(n.pos);
+}
+
+// A function frame for a known link name and signature: the shared setup
+// behind plain functions and spec emissions, so the two cannot diverge.
+// The signature's parameter types answer the slots; the spelling's names
+// answer the binds. The caller lowers the body between this and
+// endFuncFrame, then pops the frame exactly as below.
+void Lowerer::beginFuncFrame(const std::string& link, const Signature& sig,
+                             const std::vector<Param>& params, Position pos) {
     ir::Function fn;
-    fn.name = decl != nullptr ? resolver_.linkName(*decl) : n.name;
-    fn.signature = *functionSig(n.name);
-    fn.loc = n.pos;
+    fn.name = link;
+    fn.signature = sig;
+    fn.loc = pos;
     // A return wider than the register row travels through a
     // caller-allocated buffer: the hidden address rides first (SysV
     // sret), and the answer is stored there instead of the row.
@@ -1867,7 +1886,7 @@ void Lowerer::onFuncDecl(FuncDecl& n) {
     locals_.clear();
     scopeMarks_.clear();
 
-    uint32_t entry = emitBlock(n.pos);
+    uint32_t entry = emitBlock(pos);
     startBlock(entry);
 
     // Parameters arrive in slots like every other named place: a parameter
@@ -1875,13 +1894,13 @@ void Lowerer::onFuncDecl(FuncDecl& n) {
     // without phi nodes would read a stale one. The entry moves below fill
     // the slots; codegen derives each address from its id.
     std::unordered_map<std::string, LocalBinding> frame;
-    const std::vector<Parameter>& params = function_->signature.parameters();
+    const std::vector<Parameter>& sigParams = function_->signature.parameters();
     // The hidden address has no source spelling: its slot rides first
     // and the source parameters follow shifted past it.
     uint64_t shift = 0;
     if (needsSret(function_->signature.returnType())) {
         TypeRef sretPtr{ctx_.pointer(ctx_.basic(BasicKind::U8))};
-        std::vector<ir::Value> sretSlots = allocaSlots(sretPtr, n.pos, kOneWord);
+        std::vector<ir::Value> sretSlots = allocaSlots(sretPtr, pos, kOneWord);
         if (failed_) {
             return;
         }
@@ -1890,9 +1909,9 @@ void Lowerer::onFuncDecl(FuncDecl& n) {
         }
         shift = kOneWord;
     }
-    for (uint64_t i = 0; i < static_cast<uint64_t>(n.params.size()); ++i) {
-        TypeRef type{params[i + shift].type};
-        std::vector<ir::Value> slots = allocaFor(type, n.params[i].pos);
+    for (uint64_t i = 0; i < static_cast<uint64_t>(params.size()); ++i) {
+        TypeRef type{sigParams[i + shift].type};
+        std::vector<ir::Value> slots = allocaFor(type, params[i].pos);
         if (failed_) {
             return;
         }
@@ -1902,15 +1921,17 @@ void Lowerer::onFuncDecl(FuncDecl& n) {
         LocalBinding binding;
         binding.slots = std::move(slots);
         binding.type = type;
-        binding.isMutable = params[i + shift].isMutable;
-        frame[n.params[i].name] = binding;
+        binding.isMutable = sigParams[i + shift].isMutable;
+        frame[params[i].name] = binding;
     }
     recordParamClasses();
     locals_.push_back(std::move(frame));
+}
 
-    n.body->accept(checker_);
-    locals_.pop_back();
-
+// The shared function epilogue: reachable value-falloff refuses,
+// unreachable falloff traps, then the frame closes. Same tail onFuncDecl
+// always had; spec emissions close identically.
+void Lowerer::endFuncFrame(Position pos) {
     ir::Terminator ret;
     ret.term = ir::Term::Ret;
     // A void falloff answers nothing (see onReturn). A value falloff
@@ -1925,7 +1946,7 @@ void Lowerer::onFuncDecl(FuncDecl& n) {
         ret.reason = ir::TrapReason::Explicit;
     }
     bool emittedFalloff = !terminated_;
-    ret.loc = n.pos;
+    ret.loc = pos;
     emitTerminator(ret);
     // BUG-277: every path through a value body returns or provably
     // diverges. Reachability over terminator edges answers exactly —
@@ -1933,9 +1954,81 @@ void Lowerer::onFuncDecl(FuncDecl& n) {
     // so a reachable falloff fails at compile time.
     if (!failed_ && emittedFalloff && ret.term == ir::Term::Trap &&
         falloffReachable(current_)) {
-        refuse(n.pos, "this function may fall off without returning");
+        refuse(pos, "this function may fall off without returning");
     }
     function_ = nullptr;
+}
+
+void Lowerer::onSpecFunc(DeclId spec, const FuncDecl& spelling,
+                         const Signature& sig) {
+    if (failed_ || !enabled_) {
+        return;
+    }
+    // One body per specialization under its own link name, using the common
+    // frame setup. The checker bound the substituted params; the slots
+    // bind here.
+    std::string link = resolver_.specLinkName(spec);
+    if (link.empty()) {
+        refuse(spelling.pos, "this generic call");
+        return;
+    }
+    beginFuncFrame(link, sig, spelling.params, spelling.pos);
+    if (failed_) {
+        return;
+    }
+    spelling.body->accept(checker_);
+    locals_.pop_back();
+    endFuncFrame(spelling.pos);
+}
+
+bool Lowerer::emitSpecBodies() {
+    // Deferred monomorphization: every used function specialization gets
+    // one body, in any order (calls resolve by link name, not position).
+    // The checker's call table already holds the transitive closure, and
+    // emission walks record further nested calls through the same table,
+    // so the worklist drains until no unseen spec remains. Runs after all
+    // modules lowered: a cross-module spec is unknown while its home
+    // module lowers, but the resolver cache is complete here.
+    if (failed_ || module_ == nullptr) {
+        return !failed_;
+    }
+    checker_.setSink(this);
+    enabled_ = true;
+    auto specKey = [](DeclId id) -> std::string {
+        return std::to_string(id.module) + "." + std::to_string(id.index);
+    };
+    auto isFuncSpec = [&](DeclId id) -> bool {
+        auto origin = resolver_.instantiationOf(id);
+        if (!origin.has_value()) {
+            return false;
+        }
+        const resolve::Decl* tmpl = resolver_.declById(origin->first);
+        return tmpl != nullptr && tmpl->kind == resolve::DeclKind::Func;
+    };
+    for (;;) {
+        std::optional<DeclId> next;
+        for (const auto& [call, spec] : checker_.callSpecs()) {
+            (void)call;
+            if (!isFuncSpec(spec)) {
+                continue;
+            }
+            if (emittedSpecs_.find(specKey(spec)) == emittedSpecs_.end()) {
+                next = spec;
+                break;
+            }
+        }
+        if (!next.has_value()) {
+            break;
+        }
+        emittedSpecs_.insert(specKey(*next));
+        checker_.walkSpecForEmit(*next);
+        if (failed_) {
+            break;
+        }
+    }
+    checker_.setSink(nullptr);
+    enabled_ = false;
+    return !failed_;
 }
 
 void Lowerer::onMethodDecl(const std::string& owner, const std::string& name,
@@ -7764,8 +7857,23 @@ std::vector<ir::Value> Lowerer::lowerCallWords(Call& n) {
         }
     }
     if (const auto* ident = dynamic_cast<const Ident*>(n.callee.get())) {
-        sig = functionSig(ident->name);
-        callee = ident->name;
+        // A generic call answers its spec: the checker recorded which
+        // specialization each site instantiated, so the signature and the
+        // link name come from the spec, never the template. Plain calls
+        // keep the path below untouched.
+        std::optional<DeclId> callSpec = checker_.specOf(&n);
+        if (callSpec.has_value()) {
+            const Signature* specSig = resolver_.funcSig(*callSpec);
+            std::string specLink = resolver_.specLinkName(*callSpec);
+            if (specSig == nullptr || specLink.empty()) {
+                refuse(n.pos, "this call");
+                return {undefined()};
+            }
+            sig = specSig;
+            callee = specLink;
+        } else {
+            sig = functionSig(ident->name);
+            callee = ident->name;
         // The link name is the resolver's: entry keeps its spelling, an
         // import's mangles under its module, the prelude keeps its C name.
         // The lookup is the same one functionSig uses, so the two cannot
@@ -7833,6 +7941,7 @@ std::vector<ir::Value> Lowerer::lowerCallWords(Call& n) {
                         }
                     }
                 }
+            }
             }
         }
     } else {
