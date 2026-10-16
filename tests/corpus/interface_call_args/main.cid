@@ -138,8 +138,8 @@ func main() -> int {
   if (acc != 20) { return 23; }
 
   // 11. Interface parameter of a template instantiation.
-  if (twice<int>(sq, 7) != 18) { return 24; }
-  if (twice<int>(new Tri(6, 7), 0) != 42) { return 25; }
+  if (twice::<int>(sq, 7) != 18) { return 24; }
+  if (twice::<int>(new Tri(6, 7), 0) != 42) { return 25; }
 
   return 0;
 }

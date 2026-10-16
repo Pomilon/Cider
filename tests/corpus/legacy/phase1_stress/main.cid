@@ -127,7 +127,7 @@ struct Pair<T> {
 }
 
 func test_template_stress() -> int {
-    if (triple<int>(5) != 15) { return 1; }
+    if (triple::<int>(5) != 15) { return 1; }
     var p: Pair<int>;
     p.first = 10;
     p.second = 20;
@@ -198,7 +198,7 @@ func test_cross_feature() -> int {
     for (var i: int = 0; i < 5; i = i + 1) { sum = sum + arr[i].a; }
     if (sum != 10) { return 1; }
     // Template
-    if (triple<int>(5) != 15) { return 2; }
+    if (triple::<int>(5) != 15) { return 2; }
     return 0;
 }
 
