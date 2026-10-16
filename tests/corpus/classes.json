@@ -890,9 +890,9 @@
   "class": "A"
  },
  "irgen_return_type_stale": {
-  "actual": "cider run exit 1, stdout empty, stderr diagnostic: `main.cid:103:12: a variable needs an initialiser` (+ `sizeof takes a type in parentheses`)",
+  "actual": "exact stdout/stderr/exit match",
   "blocker": "stdlib-io + ternary-lowering + sizeof-expr + interface-dispatch",
-  "class": "D"
+  "class": "A"
  },
  "legacy_func_type": {
   "actual": "exact stdout/stderr/exit match",
