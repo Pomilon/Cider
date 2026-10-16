@@ -254,9 +254,8 @@ void Checker::prescanStmt(const Stmt* stmt,
     }
     if (const auto* vd = dynamic_cast<const VarDecl*>(stmt)) {
         if (vd->init != nullptr) {
-            // The module is unnamed here; prescanGlobals_ is keyed by
-            // plain name and only consulted for names no local flow owns,
-            // so collisions resolve toward Raw, never toward proof.
+            // Scan first (nested calls record their sites), then classify.
+            prescanExpr(vd->init.get(), scopes, closureParams);
             scopes.back()[vd->name] =
                 prescanArg(vd->init.get(), scopes, closureParams);
         }
@@ -749,6 +748,7 @@ const LocalScope* Checker::pushScope() {
     scopes_.push_back(std::move(scope));
     current_ = out;
     flowStack_.push_back({});
+    placeFlow_.push_back({});
     return out;
 }
 
@@ -756,6 +756,9 @@ void Checker::popScope() {
     current_ = current_ != nullptr ? current_->parent : nullptr;
     if (!flowStack_.empty()) {
         flowStack_.pop_back();
+    }
+    if (!placeFlow_.empty()) {
+        placeFlow_.pop_back();
     }
 }
 
@@ -787,7 +790,72 @@ Prov Checker::provOf(const Expr* expr) {
         // spelling change, and an unproven one stays unproven.
         return provOf(cast->expr.get());
     }
+    if (const auto* ternary = dynamic_cast<const Ternary*>(expr)) {
+        // Branches join: neutrality is transparent (a nil arm proves
+        // nothing either way), agreement keeps the value, anything else
+        // refuses by falling to Raw.
+        Prov then = provOf(ternary->then.get());
+        Prov els = provOf(ternary->els.get());
+        if (then == els) {
+            return then;
+        }
+        if (then == Prov::Neutral) {
+            return els;
+        }
+        if (els == Prov::Neutral) {
+            return then;
+        }
+        return Prov::Raw;
+    }
+    // Places answer their tracked chain, or Raw when no store proved it.
+    std::string key = placeKey(expr);
+    if (!key.empty()) {
+        for (auto it = placeFlow_.rbegin(); it != placeFlow_.rend(); ++it) {
+            auto found = it->find(key);
+            if (found != it->end()) {
+                return found->second;
+            }
+        }
+    }
     return Prov::Raw;
+}
+
+std::string Checker::placeKey(const Expr* expr) {
+    if (const auto* ident = dynamic_cast<const Ident*>(expr)) {
+        return "v:" + ident->name;
+    }
+    if (const auto* deref = dynamic_cast<const Unary*>(expr)) {
+        if (deref->op != UnOp::Deref) {
+            return "";
+        }
+        std::string inner = placeKey(deref->operand.get());
+        if (inner.empty()) {
+            return "";
+        }
+        return "d(" + inner + ")";
+    }
+    if (const auto* field = dynamic_cast<const Field*>(expr)) {
+        std::string inner = placeKey(field->object.get());
+        if (inner.empty()) {
+            return "";
+        }
+        return "f(" + inner + "," + field->name + ")";
+    }
+    if (const auto* index = dynamic_cast<const Index*>(expr)) {
+        std::string inner = placeKey(index->array.get());
+        if (inner.empty()) {
+            return "";
+        }
+        // Only a folded index names a cell: a computed index could name
+        // any element, so the whole Chain stays unproven.
+        std::unordered_set<std::string> active;
+        EvalResult folded = evalConstInt(*index->index, *env_, active);
+        if (!folded.ok) {
+            return "";
+        }
+        return "i(" + inner + "," + std::to_string(folded.value) + ")";
+    }
+    return "";
 }
 
 Prov Checker::provOfName(const std::string& name) const {
@@ -2053,6 +2121,16 @@ void Checker::visitCast(Cast& n) {
         }
         return false;
     };
+    // A byte view carries the same address a void carrier does: only a
+    // proven closure address answers as a pair through it.
+    auto isByteView = [](const TypeRef& t) -> bool {
+        if (t.type->kind() != Kind::Pointer || t.type->pointee() == nullptr) {
+            return false;
+        }
+        const Type* inner = t.type->pointee();
+        return inner->kind() == Kind::Basic && inner->basic().has_value() &&
+               *inner->basic() == BasicKind::U8;
+    };
     bool toClosureSpelling =
         target.type->kind() == Kind::Closure ||
         target.type->kind() == Kind::FunctionPtr;
@@ -2067,7 +2145,8 @@ void Checker::visitCast(Cast& n) {
         }
         // A fn spelling adopts here too: only a proven closure address
         // answers as a pair, never a raw code pointer.
-        if (isVoidCarrier(from) || from.type->kind() == Kind::FunctionPtr) {
+        if (isVoidCarrier(from) || isByteView(from) ||
+            from.type->kind() == Kind::FunctionPtr) {
             Prov proven = provOf(n.expr.get());
             if (proven != Prov::Closure && proven != Prov::Neutral) {
                 fail(n.pos, "this *void is not proven to hold a closure");
@@ -2266,15 +2345,19 @@ void Checker::visitAssign(Assign& n) {
         TypeRef value = checkExpr(n.value.get(), target);
         checkCompatible(n.value->pos, n.value.get(), value, target);
         // A store proves its target: later reads answer what this value
-        // carried. Globals record persistently (cleared per function);
-        // locals record in their scope. Places beyond bare names (fields,
-        // elements, derefs) arrive with the next slice; names land now.
+        // carried. Bare names record in their scope (globals persistently);
+        // other chains record by place key. Anything unkeyable stays Raw.
         if (const auto* ident = dynamic_cast<const Ident*>(n.target.get())) {
             Prov proven = provOf(n.value.get());
             if (findLocal(ident->name) != nullptr) {
                 recordFlow(ident->name, proven);
             } else {
                 globalProv_[ident->name] = proven;
+            }
+        } else {
+            std::string key = placeKey(n.target.get());
+            if (!key.empty() && !placeFlow_.empty()) {
+                placeFlow_.back()[key] = provOf(n.value.get());
             }
         }
         record(&n, target);
@@ -4733,11 +4816,17 @@ bool Checker::castRowOk(TypeRef from, TypeRef to) const {
         return true;
     }
     // A closure casts to a void pointer by address (provenance rides the
-    // type: only closure-typed spellings arrive here). Deeper carriers
-    // stay refused until lowering shapes them.
+    // type: only closure-typed spellings arrive here). A byte view spells
+    // the same address through *u8. Deeper carriers stay refused until
+    // lowering shapes them.
+    auto isU8Ptr = [](const Type* t) -> bool {
+        return t != nullptr && t->kind() == Kind::Basic &&
+               t->basic().has_value() && *t->basic() == BasicKind::U8;
+    };
     if (a == Kind::Closure && b == Kind::Pointer &&
         to.type->pointee() != nullptr &&
-        to.type->pointee()->kind() == Kind::Void) {
+        (to.type->pointee()->kind() == Kind::Void ||
+         isU8Ptr(to.type->pointee()))) {
         return true;
     }
     // An enum casts to and from any integer width: the value is the

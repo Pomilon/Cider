@@ -277,6 +277,9 @@ private:
     // Records a local's provenance in the innermost scope; shadowing
     // scopes hide it again on pop, like the names themselves.
     void recordFlow(const std::string& name, Prov prov);
+    // Names one syntactic storage chain for place flow, or empty when no
+    // chain proves (calls, literals beyond nil, unkeyable shapes).
+    std::string placeKey(const Expr* expr);
     bool isPlace(const Expr* expr) const;
     bool isInteger(TypeRef type) const;
     TypeRef checkBinary(Binary& expr, TypeRef expected);
@@ -442,6 +445,11 @@ private:
     // conservative across functions, exact within one).
     std::vector<std::unordered_map<std::string, Prov>> flowStack_;
     std::unordered_map<std::string, Prov> globalProv_;
+    // Provenance per place (fields, elements, derefs), parallel to the
+    // scopes above: same push/pop discipline, so shadowing behaves. Keys
+    // name the syntactic chain (`s.v` vs `(*ps).v` never merge: aliasing
+    // chains stay unproven, documented); unkeyable shapes read Raw.
+    std::vector<std::unordered_map<std::string, Prov>> placeFlow_;
     // Global provenance inside the prescan only: seeded from declaration
     // initializers, updated by stores in module order. Best-effort across
     // modules (reads see earlier writes); exact within one function.

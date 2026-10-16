@@ -1452,6 +1452,32 @@ void testClosureVoid() {
         "func main() -> int { return 0; }\n");
     check(!unproven.ok && unproven.stage == "check",
           "an unproven parameter refuses");
+    // Documented conservative limit: provenance tracks the syntactic
+    // chain, so reading through a different chain that aliases the same
+    // location at runtime stays unproven and refuses.
+    Checked crossChain = check(
+        "struct Slot { var v: *void; }\n"
+        "func main() -> int {\n"
+        "    var c: func(int) -> int = func(x: int) -> int { return x; };\n"
+        "    var s: Slot = new Slot { v: nilPtr };\n"
+        "    var ps: *Slot = &s;\n"
+        "    s.v = c;\n"
+        "    var f: func(int) -> int = (*ps).v as func(int) -> int;\n"
+        "    return f(1);\n"
+        "}\n");
+    check(!crossChain.ok && crossChain.stage == "check",
+          "a different aliasing chain stays unproven");
+    Checked computedIndex = check(
+        "func main() -> int {\n"
+        "    var c: func(int) -> int = func(x: int) -> int { return x; };\n"
+        "    var a: [*void; 2] = new [*void; 2] {nilPtr, nilPtr};\n"
+        "    var i: int = 0;\n"
+        "    a[0] = c;\n"
+        "    var f: func(int) -> int = a[i] as func(int) -> int;\n"
+        "    return f(1);\n"
+        "}\n");
+    check(!computedIndex.ok && computedIndex.stage == "check",
+          "a computed index stays unproven");
 }
 
 void testDefer() {

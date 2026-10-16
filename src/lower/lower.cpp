@@ -6445,17 +6445,19 @@ std::vector<ir::Value> Lowerer::boxClassOperand(
         if (from.type->kind() == Kind::Closure) {
             return words;
         }
+        // The null literal answers the null pair before any address load:
+        // its word is zero, not a storage address.
+        if (dynamic_cast<const NilPtr*>(expr) != nullptr) {
+            TypeRef code = wordType(to, kFirstWord);
+            TypeRef caps = wordType(to, kLenWord);
+            return {constantI64(0, code, pos), constantI64(0, caps, pos)};
+        }
         if (isVoidPtr(from)) {
             if (words.size() != kOneWord) {
                 refuse(pos, "this conversion");
                 return {undefined()};
             }
             return loadClosurePair(words[kFirstWord], to, pos);
-        }
-        if (dynamic_cast<const NilPtr*>(expr) != nullptr) {
-            TypeRef code = wordType(to, kFirstWord);
-            TypeRef caps = wordType(to, kLenWord);
-            return {constantI64(0, code, pos), constantI64(0, caps, pos)};
         }
         refuse(pos, "this conversion");
         return {undefined()};
@@ -7259,7 +7261,10 @@ ir::Value Lowerer::onCast(Cast& n) {
         source.type->kind() == Kind::Closure &&
         target.type->kind() == Kind::Pointer &&
         target.type->pointee() != nullptr &&
-        target.type->pointee()->kind() == Kind::Void) {
+        (target.type->pointee()->kind() == Kind::Void ||
+         (target.type->pointee()->kind() == Kind::Basic &&
+          target.type->pointee()->basic().has_value() &&
+          *target.type->pointee()->basic() == BasicKind::U8))) {
         std::vector<ir::Value> pair = lowerWords(n.expr.get());
         if (failed_) {
             return undefined();
