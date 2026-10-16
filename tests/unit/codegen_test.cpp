@@ -1618,6 +1618,14 @@ void testGenericFn() {
                    "    return 0;\n"
                    "}\n") == 0,
           "struct specs construct, size and point");
+    check(runQuiet("func id<T>(x: T) -> T { return x; }\n"
+                   "func wrap<T>(x: T) -> T { return id::<T>(x); }\n"
+                   "func main() -> int {\n"
+                   "    if (wrap::<int>(1) != 1) { return 1; }\n"
+                   "    if (wrap::<u64>(2) != 2) { return 2; }\n"
+                   "    return 0;\n"
+                   "}\n") == 0,
+          "nested specs keep their own args");
 }
 
 void testBitNot() {

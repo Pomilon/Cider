@@ -12,6 +12,7 @@
 #define CIDER_CHECK_CHECKER_H
 
 #include <cstdint>
+#include <map>
 #include <memory>
 #include <optional>
 #include <set>
@@ -155,10 +156,14 @@ public:
     TypeRef typeOf(const Node* node) const;
     const std::vector<CheckError>& errors() const { return errors_; }
     size_t errorCount() const { return errors_.size(); }
-    // The specialization a generic call instantiated, by call site. Empty
-    // when the call is not a generic instantiation. The lowerer resolves
-    // generic callees through this table instead of re-deciding them.
-    std::optional<DeclId> specOf(const Call* call) const;
+    // The specialization a generic call instantiated, by call site and
+    // recording context. Empty context while walking top-level code;
+    // otherwise the spec whose body walk recorded it. Template bodies are
+    // shared across specs, so one site records one spec per context; the
+    // lowerer resolves each site under its own context instead of
+    // trusting the last write (which order-dependent overwrites lose).
+    std::optional<DeclId> specOf(const Call* call,
+                                 const std::optional<DeclId>& ctx) const;
     // The operand type a sizeof spelled, by node. Recorded during checking
     // with the active substitution applied, so spec emissions read the
     // concrete type instead of re-resolving past type parameters.
@@ -166,7 +171,7 @@ public:
     // Every recorded generic call site and its spec, for the lowerer's
     // emission worklist. Checking already computed the transitive closure:
     // detached body walks still instantiate nested calls.
-    const std::unordered_map<const Call*, DeclId>& callSpecs() const {
+    const std::map<std::pair<const Call*, std::string>, DeclId>& callSpecs() const {
         return callSpecs_;
     }
     // Re-walks one instantiated generic function body with the sink
@@ -382,9 +387,15 @@ private:
     // call into the same instantiation checks against its signature without
     // re-walking; anything else would loop the compiler on recursive code.
     std::unordered_set<std::string> walked_;
-    // Generic call sites and the specialization each instantiated, by site.
-    // The lowerer resolves generic callees and enumerates used specs here.
-    std::unordered_map<const Call*, DeclId> callSpecs_;
+    // Generic call sites and the specialization each instantiated, keyed
+    // by site and recording context (the spec whose body walk recorded
+    // it, or empty at top level). One site keeps one spec per context so
+    // order-dependent overwrites cannot lose specializations.
+    std::map<std::pair<const Call*, std::string>, DeclId> callSpecs_;
+    // The spec whose body is walking, if any: the recording context for
+    // nested generic calls. Saved and restored like the active
+    // instantiation, for the same nesting reasons.
+    std::optional<DeclId> walkSpec_;
     // Sizeof operand types by node, recorded with substitution applied.
     std::unordered_map<const SizeofType*, TypeRef> sizeofOperands_;
     // Types resolve here rather than at module scope during generic walks,

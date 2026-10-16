@@ -1981,13 +1981,16 @@ void Lowerer::onSpecFunc(DeclId spec, const FuncDecl& spelling,
     emitHome_ = (tmpl != nullptr && tmpl->scope != nullptr)
                     ? tmpl->scope->module
                     : "";
+    emitSpec_ = spec;
     beginFuncFrame(link, sig, spelling.params, spelling.pos);
     if (failed_) {
         emitHome_.clear();
+        emitSpec_.reset();
         return;
     }
     spelling.body->accept(checker_);
     emitHome_.clear();
+    emitSpec_.reset();
     locals_.pop_back();
     endFuncFrame(spelling.pos);
 }
@@ -2031,15 +2034,16 @@ bool Lowerer::emitSpecBodies() {
     };
     for (;;) {
         std::optional<DeclId> next;
-        for (const auto& [call, spec] : checker_.callSpecs()) {
-            (void)call;
+        for (const auto& [site, spec] : checker_.callSpecs()) {
+            (void)site;
             if (!isFuncSpec(spec)) {
                 continue;
             }
-            if (emittedSpecs_.find(specKey(spec)) == emittedSpecs_.end()) {
-                next = spec;
-                break;
+            if (emittedSpecs_.find(specKey(spec)) != emittedSpecs_.end()) {
+                continue;
             }
+            next = spec;
+            break;
         }
         if (!next.has_value()) {
             break;
@@ -7893,7 +7897,7 @@ std::vector<ir::Value> Lowerer::lowerCallWords(Call& n) {
         // specialization each site instantiated, so the signature and the
         // link name come from the spec, never the template. Plain calls
         // keep the path below untouched.
-        std::optional<DeclId> callSpec = checker_.specOf(&n);
+        std::optional<DeclId> callSpec = checker_.specOf(&n, emitSpec_);
         if (callSpec.has_value()) {
             const Signature* specSig = resolver_.funcSig(*callSpec);
             std::string specLink = resolver_.specLinkName(*callSpec);
@@ -8030,7 +8034,7 @@ std::vector<ir::Value> Lowerer::lowerCallWords(Call& n) {
                 // which specialization this site instantiated, so the
                 // signature and link name come from the spec, never the
                 // template. Plain members keep the path below untouched.
-                std::optional<DeclId> memberSpec = checker_.specOf(&n);
+                std::optional<DeclId> memberSpec = checker_.specOf(&n, emitSpec_);
                 if (memberSpec.has_value()) {
                     const Signature* specSig =
                         resolver_.funcSig(*memberSpec);

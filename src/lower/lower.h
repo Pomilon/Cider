@@ -20,6 +20,7 @@
 #define CIDER_LOWER_LOWER_H
 
 #include <memory>
+#include <optional>
 #include <string>
 #include <unordered_map>
 #include <unordered_set>
@@ -564,6 +565,10 @@ private:
     // the ordinary module scope while clear, so non-generic lowering
     // cannot observe them.
     std::string emitHome_;
+    // The spec whose body is emitting, if any: the resolving context for
+    // nested generic calls. Tracks the checker's recording context so a
+    // shared template body answers each spec its own instantiation.
+    std::optional<DeclId> emitSpec_;
     std::string homeModule() const;
     const resolve::Scope* homeScope() const;
     const resolve::Scope* emitScope() const;

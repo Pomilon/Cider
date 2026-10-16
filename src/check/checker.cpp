@@ -68,8 +68,13 @@ TypeRef Checker::typeOf(const Node* node) const {
     return resolver_.typeOf(node);
 }
 
-std::optional<DeclId> Checker::specOf(const Call* call) const {
-    auto found = callSpecs_.find(call);
+std::optional<DeclId> Checker::specOf(const Call* call,
+                                              const std::optional<DeclId>& ctx) const {
+    std::string key;
+    if (ctx.has_value()) {
+        key = std::to_string(ctx->module) + "." + std::to_string(ctx->index);
+    }
+    auto found = callSpecs_.find(std::make_pair(call, key));
     return found == callSpecs_.end() ? std::nullopt
                                      : std::optional<DeclId>(found->second);
 }
@@ -3192,7 +3197,14 @@ TypeRef Checker::checkGenericCall(Call& expr, const resolve::Decl* decl) {
     if (!spec.has_value()) {
         return errorRef();
     }
-    callSpecs_[&expr] = *spec;
+    // Context-keyed: a shared template body records one spec per walking
+    // context, so a later walk for other arguments cannot clobber this one.
+    std::string ctxKey;
+    if (walkSpec_.has_value()) {
+        ctxKey = std::to_string(walkSpec_->module) + "." +
+                 std::to_string(walkSpec_->index);
+    }
+    callSpecs_[std::make_pair(&expr, ctxKey)] = *spec;
     const Signature* sig = resolver_.funcSig(*spec);
     if (sig == nullptr) {
         fail(expr.pos, "checker bug: specialization has no signature");
@@ -3239,6 +3251,8 @@ TypeRef Checker::checkGenericCall(Call& expr, const resolve::Decl* decl) {
         }
         std::optional<ActiveInst> savedActive = active_;
         active_ = ActiveInst{decl->id, argTypes, spelling->typeParams};
+        std::optional<DeclId> savedWalk = walkSpec_;
+        walkSpec_ = spec;
         pushScope();
         for (uint64_t i = 0; i < static_cast<uint64_t>(spelling->params.size()); ++i) {
             bindLocal(spelling->params[i].name,
@@ -3261,6 +3275,7 @@ TypeRef Checker::checkGenericCall(Call& expr, const resolve::Decl* decl) {
         typeScope_ = savedScope;
         moduleScope_ = savedModuleScope;
         active_ = savedActive;
+        walkSpec_ = savedWalk;
     }
     const Type* ret = sig->returnType() != nullptr ? sig->returnType() : ctx_.void_();
     return TypeRef{ret};
@@ -3306,6 +3321,8 @@ void Checker::walkSpecForEmit(DeclId spec) {
     }
     std::optional<ActiveInst> savedActive = active_;
     active_ = ActiveInst{origin->first, origin->second, spelling->typeParams};
+    std::optional<DeclId> savedWalk = walkSpec_;
+    walkSpec_ = spec;
     pushScope();
     for (uint64_t i = 0; i < static_cast<uint64_t>(spelling->params.size()); ++i) {
         bindLocal(spelling->params[i].name,
@@ -3327,6 +3344,7 @@ void Checker::walkSpecForEmit(DeclId spec) {
     typeScope_ = savedScope;
     moduleScope_ = savedModuleScope;
     active_ = savedActive;
+    walkSpec_ = savedWalk;
 }
 
 TypeRef Checker::checkField(Field& expr) {

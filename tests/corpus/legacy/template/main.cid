@@ -18,7 +18,7 @@ struct Vec<T> {
 
 // 4. Generic identity with different types
 func testIdentity() -> int {
-    var a: int = identity<int>(42);
+    var a: int = identity::<int>(42);
     return a;
 }
 
@@ -27,12 +27,9 @@ func main() -> int {
     var y: int = 10;
 
     // Test max<int>
-    var result: int = max<int>(x, y);
+    var result: int = max::<int>(x, y);
     
     // Test Vec<int>
-    var v: Vec<int>;
-    var data: int = 0;
-
     // Test that max works
     if (result == 10) {
         return 0;

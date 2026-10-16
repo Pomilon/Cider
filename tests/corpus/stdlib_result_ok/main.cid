@@ -10,37 +10,37 @@ from std.io import puts;
 from std.result import Result, ok, err, is_ok, is_err, unwrap, expect;
 
 func divide(a: int, b: int) -> Result<int, string> {
-    if (b == 0) return err<int, string>("division by zero");
-    return ok<int, string>(a / b);
+    if (b == 0) return err::<int, string>("division by zero");
+    return ok::<int, string>(a / b);
 }
 
 func main() -> int {
-    var r: Result<int, string> = ok<int, string>(42);
-    if (!is_ok<int, string>(&r)) return 1;
-    if (is_err<int, string>(&r)) return 2;
-    if (unwrap<int, string>(&r) != 42) return 3;
-    if (expect<int, string>(&r, "never used") != 42) return 4;
+    var r: Result<int, string> = ok::<int, string>(42);
+    if (!is_ok::<int, string>(&r)) return 1;
+    if (is_err::<int, string>(&r)) return 2;
+    if (unwrap::<int, string>(&r) != 42) return 3;
+    if (expect::<int, string>(&r, "never used") != 42) return 4;
     if (r.value != 42) return 5;
     if (!r.is_ok) return 6;
 
-    var e: Result<int, string> = err<int, string>("nope");
-    if (is_ok<int, string>(&e)) return 7;
-    if (!is_err<int, string>(&e)) return 8;
+    var e: Result<int, string> = err::<int, string>("nope");
+    if (is_ok::<int, string>(&e)) return 7;
+    if (!is_err::<int, string>(&e)) return 8;
     if (e.is_ok) return 9;
     if (e.error != "nope") return 10;
 
     var q: Result<int, string> = divide(10, 2);
-    if (unwrap<int, string>(&q) != 5) return 11;
+    if (unwrap::<int, string>(&q) != 5) return 11;
     q = divide(9, 0);
-    if (is_ok<int, string>(&q)) return 12;
+    if (is_ok::<int, string>(&q)) return 12;
     if (q.error != "division by zero") return 13;
 
     // second instantiation: float value, int error
-    var f: Result<float, int> = ok<float, int>(1.5);
-    if (!is_ok<float, int>(&f)) return 14;
-    if (unwrap<float, int>(&f) != 1.5) return 15;
-    f = err<float, int>(7);
-    if (is_ok<float, int>(&f)) return 16;
+    var f: Result<float, int> = ok::<float, int>(1.5);
+    if (!is_ok::<float, int>(&f)) return 14;
+    if (unwrap::<float, int>(&f) != 1.5) return 15;
+    f = err::<float, int>(7);
+    if (is_ok::<float, int>(&f)) return 16;
     if (f.error != 7) return 17;
 
     puts("result ok");

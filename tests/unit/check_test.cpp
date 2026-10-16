@@ -444,7 +444,8 @@ void testGenericCall() {
         }
     }
     check(specCall != nullptr, "the init is a call");
-    check(specCall != nullptr && spec.checker->specOf(specCall).has_value(),
+    check(specCall != nullptr &&
+              spec.checker->specOf(specCall, std::nullopt).has_value(),
           "a generic call records its spec");
 }
 

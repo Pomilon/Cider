@@ -3,7 +3,7 @@
 from std.result import Result, err, unwrap;
 
 func main() -> int {
-    var r: Result<int, string> = err<int, string>("missing");
-    var v: int = unwrap<int, string>(&r);
+    var r: Result<int, string> = err::<int, string>("missing");
+    var v: int = unwrap::<int, string>(&r);
     return v; // unreachable: unwrap exits 1 first
 }

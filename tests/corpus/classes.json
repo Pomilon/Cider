@@ -975,9 +975,9 @@
   "class": "A"
  },
  "map_free_reuse": {
-  "actual": "cider run exit 1, stdout empty, stderr diagnostic: `main.cid:15:16: a variable needs an initialiser` + `expected an expression` (generic calls)",
+  "actual": "exact stdout/stderr/exit match",
   "blocker": "T11 generic-function lowering (calls check but never emit bodies); std.io/alloc/string/fs ports already landed",
-  "class": "D"
+  "class": "A"
  },
  "map_new_oom": {
   "actual": "cider run exit 1, stdout empty, stderr diagnostic: `main.cid:19:40: expected an expression` (generic new_map call); expected.json left verbatim (v2 oom exit 2)",
@@ -985,9 +985,9 @@
   "class": "B"
  },
  "map_remove": {
-  "actual": "cider run exit 1, stdout empty, stderr diagnostic: `main.cid:8:40: expected an expression` (generic new_map call)",
+  "actual": "exact stdout/stderr/exit match",
   "blocker": "T11 generic-function lowering (calls check but never emit bodies); std.io/alloc/string/fs ports already landed",
-  "class": "D"
+  "class": "A"
  },
  "match_strings": {
   "actual": "exact stdout/stderr/exit match (as-is, rc=0)",
@@ -1300,29 +1300,29 @@
   "class": "D"
  },
  "stdlib_map_ops": {
-  "actual": "blocked-A reclassified 2026-10-05: must pass once blocker lands; run exit 1: OUT: ERR:tests/corpus/stdlib_map_ops/main.cid:11:40: expected an expression\\ntests/corpus/stdlib_map_ops/main.cid:12:17: expected an expression\\ntests/corpus/stdlib_map_ops/main.cid:13:17: expected an expression",
+  "actual": "exact stdout/stderr/exit match",
   "blocker": "T11 generic-function lowering (calls check but never emit bodies); std.io/alloc/string/fs ports already landed",
-  "class": "D"
+  "class": "A"
  },
  "stdlib_math_basic": {
-  "actual": "blocked-A reclassified 2026-10-05: must pass once blocker lands; run exit 1: OUT: ERR:tests/corpus/stdlib_math_basic/main.cid:33:13: expected an expression\\ntests/corpus/stdlib_math_basic/main.cid:34:13: expected an expression\\ntests/corpus/stdlib_math_basic/main.cid:35:13: expected an e",
+  "actual": "exact stdout/stderr/exit match",
   "blocker": "T11 generic-function lowering (calls check but never emit bodies); std.io/alloc/string/fs ports already landed",
-  "class": "D"
+  "class": "A"
  },
  "stdlib_result_expect_fail": {
-  "actual": "blocked-A reclassified 2026-10-05: must pass once blocker lands; run exit 1: OUT: ERR:tests/corpus/stdlib_result_expect_fail/main.cid:7:38: expected an expression\\ntests/corpus/stdlib_result_expect_fail/main.cid:8:25: expected an expression\\n",
+  "actual": "exact stdout/stderr/exit match",
   "blocker": "T11 generic-function lowering (calls check but never emit bodies); std.io/alloc/string/fs ports already landed",
-  "class": "D"
+  "class": "A"
  },
  "stdlib_result_ok": {
-  "actual": "blocked-A reclassified 2026-10-05: must pass once blocker lands; run exit 1: OUT: ERR:tests/corpus/stdlib_result_ok/main.cid:13:28: expected an expression\\ntests/corpus/stdlib_result_ok/main.cid:14:15: expected an expression\\ntests/corpus/stdlib_result_ok/main.cid:18:37: expected an expr",
+  "actual": "exact stdout/stderr/exit match",
   "blocker": "T11 generic-function lowering (calls check but never emit bodies); std.io/alloc/string/fs ports already landed",
-  "class": "D"
+  "class": "A"
  },
  "stdlib_result_unwrap_fail": {
-  "actual": "blocked-A reclassified 2026-10-05: must pass once blocker lands; run exit 1: OUT: ERR:tests/corpus/stdlib_result_unwrap_fail/main.cid:6:38: expected an expression\\ntests/corpus/stdlib_result_unwrap_fail/main.cid:7:25: expected an expression\\n",
+  "actual": "exact stdout/stderr/exit match",
   "blocker": "T11 generic-function lowering (calls check but never emit bodies); std.io/alloc/string/fs ports already landed",
-  "class": "D"
+  "class": "A"
  },
  "stdlib_string_ops": {
   "actual": "exact stdout/stderr/exit match",
@@ -1335,9 +1335,9 @@
   "class": "B"
  },
  "stdlib_vector_ops": {
-  "actual": "blocked-A reclassified 2026-10-05: must pass once blocker lands; run exit 1: OUT: ERR:tests/corpus/stdlib_vector_ops/main.cid:15:31: expected an expression\\ntests/corpus/stdlib_vector_ops/main.cid:16:17: expected an expression\\ntests/corpus/stdlib_vector_ops/main.cid:17:17: expected an e",
+  "actual": "exact stdout/stderr/exit match",
   "blocker": "T11 generic-function lowering (calls check but never emit bodies); std.io/alloc/string/fs ports already landed",
-  "class": "D"
+  "class": "A"
  },
  "str_escape": {
   "actual": "exact stdout/stderr/exit match",
@@ -1400,9 +1400,9 @@
   "class": "A"
  },
  "template": {
-  "actual": "exit 1; tests/corpus/legacy/template/main.cid:21:27: expected an expression; tests/corpus/legacy/template/main.cid:30:27: expected an expression",
+  "actual": "exact stdout/stderr/exit match",
   "blocker": "T11 generic-function lowering (calls check but never emit bodies); std.io/alloc/string/fs ports already landed",
-  "class": "D"
+  "class": "A"
  },
  "template_body_forms": {
   "actual": "tests/corpus/template_body_forms/main.cid:14:36: expected '{' or '(' after new",
@@ -1425,9 +1425,9 @@
   "class": "A"
  },
  "test_result": {
-  "actual": "exit 1; tests/corpus/legacy/test_result/main.cid:6:20: expected an expression; tests/corpus/legacy/test_result/main.cid:8:15: expected an expression",
+  "actual": "exact stdout/stderr/exit match",
   "blocker": "T11 generic-function lowering (calls check but never emit bodies); std.io/alloc/string/fs ports already landed",
-  "class": "D"
+  "class": "A"
  },
  "test_types": {
   "actual": "6:24: chars compare for equality only (char==byte equivalence is v2 semantics; v3 rules char a distinct type, no implicit comparison)",
@@ -1435,9 +1435,9 @@
   "class": "B"
  },
  "test_vector": {
-  "actual": "exit 1; tests/corpus/legacy/test_vector/main.cid:5:31: expected an expression; tests/corpus/legacy/test_vector/main.cid:6:10: expected an expression",
+  "actual": "exact stdout/stderr/exit match",
   "blocker": "T11 generic-function lowering (calls check but never emit bodies); std.io/alloc/string/fs ports already landed",
-  "class": "D"
+  "class": "A"
  },
  "throw_across_frames": {
   "actual": "tests/corpus/throw_across_frames/main.cid:19:13: a catch binds a name and a type",
@@ -1520,9 +1520,9 @@
   "class": "B"
  },
  "vector_empty": {
-  "actual": "blocked-A reclassified 2026-10-05: must pass once blocker lands; run exit 1: OUT: ERR:tests/corpus/vector_empty/main.cid:40:31: expected an expression\\ntests/corpus/vector_empty/main.cid:41:13: expected an expression\\ntests/corpus/vector_empty/main.cid:42:13: expected an expression\\ntests",
+  "actual": "exact stdout/stderr/exit match",
   "blocker": "T11 generic-function lowering (calls check but never emit bodies); std.io/alloc/string/fs ports already landed",
-  "class": "D"
+  "class": "A"
  },
  "vector_reserve_oom": {
   "actual": "run exit 1: OUT: ERR:tests/corpus/vector_reserve_oom/main.cid:20:31: expected an expression\\ntests/corpus/vector_reserve_oom/main.cid:21:10: expected an expression\\ntests/corpus/vector_reserve_oom/main.cid:22:10: expected a",
