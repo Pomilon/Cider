@@ -566,7 +566,7 @@
  },
  "fn_cast_closure_indirect_repr": {
   "actual": "exit=1 stdout_len=0 stderr_len=661 first='tests/corpus/fn_cast_closure_indirect_repr/main.cid:27:14: a variable needs an initialiser'",
-  "blocker": "closures-repr-gaps (closure literals, *void provenance)",
+  "blocker": "closures-repr (T10): closure<->*void conversions (implicit and as-cast) unimplemented; v3 has no provenance-tracked representation conversions",
   "class": "D"
  },
  "fn_cast_closure_repr": {
@@ -576,7 +576,7 @@
  },
  "fn_cast_closure_void_repr": {
   "actual": "exit=1 stdout_len=0 stderr_len=174 first='tests/corpus/fn_cast_closure_void_repr/main.cid:55:12: a variable needs an initialiser'",
-  "blocker": "closures-repr-gaps",
+  "blocker": "closures-repr (T10): closure<->*void conversions (implicit and as-cast) unimplemented; v3 has no provenance-tracked representation conversions",
   "class": "D"
  },
  "fn_cast_compat": {
