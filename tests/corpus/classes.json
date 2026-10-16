@@ -385,9 +385,9 @@
   "class": "B"
  },
  "ea_memcpy": {
-  "actual": "exit 1; tests/corpus/legacy/ea_memcpy/main.cid:11:18: a variable needs an initialiser; tests/corpus/legacy/ea_memcpy/main.cid:12:23: expected '{' or '(' after new",
+  "actual": "exact stdout/stderr/exit match",
   "blocker": "classes-new-delete (+asm-blocks)",
-  "class": "D"
+  "class": "A"
  },
  "ea_memcpy_global": {
   "actual": "exit 1; tests/corpus/legacy/ea_memcpy_global/main.cid:12:14: a variable needs an initialiser; tests/corpus/legacy/ea_memcpy_global/main.cid:15:18: a variable needs an initialiser",
