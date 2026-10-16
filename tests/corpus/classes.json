@@ -831,7 +831,7 @@
  },
  "interface_aggregate_discard": {
   "actual": "exit=1 stdout_len=0 stderr_len=1991 first='tests/corpus/interface_aggregate_discard/main.cid:58:20: a variable needs an initialiser'",
-  "blocker": "interface-boxing (+for-lowering, delete)",
+  "blocker": "destructors/finalizers: discarded Owned results + scope-unwind traces (D,1..5) required by oracle; v3 has no deinit-at-exit",
   "class": "D"
  },
  "interface_aggregate_return": {
