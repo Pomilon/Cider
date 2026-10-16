@@ -1056,7 +1056,7 @@
  },
  "module_qualified_template": {
   "actual": "cider run exit 1, stdout empty, stderr diagnostic: `main.cid:11:19: expected ')'`; driver has no module loader",
-  "blocker": "multi-file-imports + generics",
+  "blocker": "T11 generic-function lowering: box.id<int>/id<char> calls check but never emit bodies (checks 18/19); rest is new/arrow/fn-spelling rewrites",
   "class": "D"
  },
  "nan_compare": {
