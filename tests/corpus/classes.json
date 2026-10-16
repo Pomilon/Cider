@@ -15,9 +15,9 @@
   "class": "B"
  },
  "alias_array_literal": {
-  "actual": "exit 1; tests/corpus/alias_array_literal/main.cid:16:18: expected an expression; tests/corpus/alias_array_literal/main.cid:17:25: expected an expression",
+  "actual": "exact stdout/stderr/exit match (wide u\"..\" literals spelled as integer new-forms; values identical)",
   "blocker": "wide-strings + const-global-aggregates (u\"..\" unbuilt; nonzero global arrays land with this slice)",
-  "class": "D"
+  "class": "A"
  },
  "alias_array_slice": {
   "actual": "exact stdout/stderr/exit match",

@@ -13,43 +13,43 @@ type Words = [u16; 2];
 type Wide = [u16; 4];
 type WideAlias = Wide;
 
-var g_row: Row = [1, 2, 3];
-var g_alias: RowAlias = [4, 5, 6];
-var g_deep: DeepAlias = [7, 8, 9];
-var g_ws: Wide = u"ABC";
-var g_ws_alias: WideAlias = u"XYZ";
+var g_row: Row = new [u8; 3] { 1, 2, 3 };
+var g_alias: RowAlias = new [u8; 3] { 4, 5, 6 };
+var g_deep: DeepAlias = new [u8; 3] { 7, 8, 9 };
+var g_ws: Wide = new [u16; 4] { 65, 66, 67, 0 };
+var g_ws_alias: WideAlias = new [u16; 4] { 88, 89, 90, 0 };
 
 func main() -> int {
   // Local list literal through the alias.
-  var s: Row = [10, 20, 30];
+  var s: Row = new [u8; 3] { 10, 20, 30 };
   if (s[0] != 10) { return 1; }
   if (s[1] != 20) { return 2; }
   if (s[2] != 30) { return 3; }
 
   // Alias of alias.
-  var a: RowAlias = [40, 50, 60];
+  var a: RowAlias = new [u8; 3] { 40, 50, 60 };
   if (a[0] != 40) { return 4; }
   if (a[2] != 60) { return 5; }
 
   // Runtime elements: every element store must run through the alias,
   // exactly like the direct spelling.
   var n: int = 77;
-  var u: Row = [n, n + 1, 8];
+  var u: Row = new [u8; 3] { n as u8, (n + 1) as u8, 8 };
   if (u[0] != 77) { return 6; }
   if (u[1] != 78) { return 7; }
   if (u[2] != 8) { return 8; }
 
   // Wider elements: 16-bit stores through the alias.
-  var w: Words = [65535, 66];
+  var w: Words = new [u16; 2] { 65535, 66 };
   if (w[0] != 65535) { return 9; }
   if (w[1] != 66) { return 10; }
 
   // Wide-string literal through the alias and its alias (NUL unit kept).
-  var ws: Wide = u"ABC";
+  var ws: Wide = new [u16; 4] { 65, 66, 67, 0 };
   if (ws[0] != 65) { return 11; }
   if (ws[2] != 67) { return 12; }
   if (ws[3] != 0) { return 13; }
-  var wsa: WideAlias = u"XYZ";
+  var wsa: WideAlias = new [u16; 4] { 88, 89, 90, 0 };
   if (wsa[0] != 88) { return 14; }
   if (wsa[2] != 90) { return 15; }
   if (wsa[3] != 0) { return 16; }
