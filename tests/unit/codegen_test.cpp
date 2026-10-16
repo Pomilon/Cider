@@ -1153,6 +1153,14 @@ void testInterfaceNil() {
                    "}\n") == 7,
           "a stored interface global dispatches");
     check(runQuiet("interface Shape { func area() -> int; }\n"
+                   "struct Cell { var id: int; var mark: Shape; }\n"
+                   "var g: Cell = new Cell { id: 3, mark: nilPtr as Shape };\n"
+                   "func main() -> int {\n"
+                   "    if (g.mark == nilPtr) { return g.id; }\n"
+                   "    return 0;\n"
+                   "}\n") == 3,
+          "a null interface struct field folds into a global");
+    check(runQuiet("interface Shape { func area() -> int; }\n"
                    "var g: [Shape; 2] = new [Shape; 2] { nilPtr as Shape, nilPtr as Shape };\n"
                    "func main() -> int {\n"
                    "    if (g[0] == nilPtr) { return 1; }\n"

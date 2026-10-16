@@ -855,9 +855,9 @@
   "class": "A"
  },
  "interface_fields": {
-  "actual": "cider run exit 1, stdout empty, stderr diagnostic: `main.cid:62:14: a variable needs an initialiser`; driver has no module loader",
+  "actual": "exact stdout/stderr/exit match",
   "blocker": "multi-file-imports (+ interface-boxing)",
-  "class": "D"
+  "class": "A"
  },
  "interface_list_arg_return": {
   "actual": "exact stdout/stderr/exit match",
@@ -1006,7 +1006,7 @@
  },
  "method_array_return": {
   "actual": "cider run exit 1, stdout empty, stderr diagnostic: `main.cid:38:24: a variable needs an initialiser`",
-  "blocker": "virtual/override-dispatch + bare-array-literals + uninit",
+  "blocker": "virtual-methods: subject is virtual/override array returns with dynamic dispatch; v3 has no class vtables (only interfaces)",
   "class": "D"
  },
  "mixed_cmp": {

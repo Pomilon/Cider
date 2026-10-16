@@ -2850,6 +2850,17 @@ bool Lowerer::globalInitStructBytes(const NewStruct& made, TypeRef structType,
                                        ftype, piece)) {
                 return false;
             }
+        } else if (const auto* cast = dynamic_cast<const Cast*>(sub)) {
+            // `nilPtr as I` folds to sixteen zero bytes: the gate admits
+            // only this spelling for interface fields, so anything
+            // arriving here is null by construction.
+            if (dynamic_cast<const NilPtr*>(cast->expr.get()) == nullptr ||
+                ftype.type->kind() != Kind::Interface) {
+                return false;
+            }
+            piece.append(static_cast<size_t>(kInterfaceWords) *
+                             static_cast<size_t>(layout::kSizePointer),
+                         '\0');
         } else if (!foldScalar(*sub, ftype, piece)) {
             return false;
         }

@@ -14,4 +14,4 @@ export struct Cell {
   var mark: Mark;
 }
 
-export var shared: Cell;
+export var shared: Cell = new Cell { id: 0, mark: nilPtr as Mark };
