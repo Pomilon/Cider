@@ -1324,6 +1324,20 @@ void Checker::visitReturn(Return& n) {
     }
     TypeRef value = checkExpr(n.value.get(), funcReturn_);
     checkCompatible(n.value->pos, n.value.get(), value, funcReturn_);
+    // TYPES §4.3: a class value boxes by address, so returning a frame
+    // value (a local or parameter name) as an interface would dangle the
+    // dead frame. Small structs inline and stay legal; pointers and
+    // dereferences keep their owner's address under the usual pointer
+    // rules. Class values only spell as names today (bare construction is
+    // rejected, dereferences are Deref nodes), so a name here is
+    // provably frame-dead: heap-allocate or return the pointer instead.
+    if (!value.isError() && !funcReturn_.isError() &&
+        funcReturn_.type->kind() == Kind::Interface &&
+        value.type->kind() == Kind::Class &&
+        dynamic_cast<const Ident*>(n.value.get()) != nullptr) {
+        fail(n.value->pos,
+             "a class value cannot return as an interface: it would dangle");
+    }
     // After the value is checked: the sink reads its recorded type.
     if (sink_ != nullptr) {
         sink_->onReturn(n);

@@ -225,6 +225,23 @@ void testInterface() {
         "    return get(a[0:2]);\n"
         "}\n");
     check(!sliceArg.ok && sliceArg.stage == "check", "a slice is not a scalar interface");
+    // TYPES §4.3: a class value boxes by address, so returning one as an
+    // interface would dangle the dead frame. Small structs inline and stay
+    // legal (see above); class values refuse at the return site, where the
+    // escape happens. The pointer form stays the legal spelling.
+    Checked classValueReturn = check(
+        "interface Shape { func area() -> int; }\n"
+        "class Sq { var s: int;\n"
+        " func area() -> int { return (*self).s * (*self).s; } }\n"
+        "func f(c: Sq) -> Shape { return c; }\n");
+    check(!classValueReturn.ok && classValueReturn.stage == "check",
+          "a class value cannot return as an interface");
+    Checked classPtrReturn = check(
+        "interface Shape { func area() -> int; }\n"
+        "class Sq { var s: int;\n"
+        " func area() -> int { return (*self).s * (*self).s; } }\n"
+        "func f(c: *Sq) -> Shape { return c; }\n");
+    check(classPtrReturn.ok, "a class pointer returns as one: " + classPtrReturn.stage);
 }
 
 // Conditions are bool, and the branches of a ternary match.
