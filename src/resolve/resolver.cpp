@@ -1270,20 +1270,18 @@ TypeRef Resolver::substitute(TypeRef type, DeclId tmpl, const std::vector<TypeRe
         const TypeParamPayload& payload = std::get<TypeParamPayload>(type.type->payload());
         if (payload.decl.module == tmpl.module && payload.decl.index == tmpl.index &&
             payload.index < args.size()) {
-            // Identity substitution is a no-op: substituting T with T
-            // itself must answer T, or a self-referential field like
-            // `next: *Node<T>` recurses forever instantiating Node<T>.
+            // A bare parameter reference needs no substitution within this
+            // frame: if it names this template's parameter the mapping
+            // already selected it, and another template's parameter is an
+            // outer frame's business. Recursing here ping-pongs on
+            // param-to-param mappings (`Swapped<U, T>` swaps T and U
+            // forever) and segfaulted the compiler; returning the
+            // reference answers every case, including identity.
             const TypeRef& arg = args[payload.index];
             if (!arg.isError() && arg.type->kind() == Kind::TypeParam) {
-                const TypeParamPayload& inner =
-                    std::get<TypeParamPayload>(arg.type->payload());
-                if (inner.decl.module == payload.decl.module &&
-                    inner.decl.index == payload.decl.index &&
-                    inner.index == payload.index) {
-                    return type;
-                }
+                return arg;
             }
-            return substitute(args[payload.index], tmpl, args, pos);
+            return substitute(arg, tmpl, args, pos);
         }
         return type;
     }

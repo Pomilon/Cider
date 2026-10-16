@@ -1410,9 +1410,9 @@
   "class": "B"
  },
  "template_self_recursion_control": {
-  "actual": "blocked-A reclassified 2026-10-05: must pass once blocker lands; run exit 1: OUT: ERR:tests/corpus/template_self_recursion_control/main.cid:38:13: expected ';'\\ntests/corpus/template_self_recursion_control/main.cid:38:13: a struct holds fields and methods\\ntests/corpus/template_self_recu",
+  "actual": "exact stdout/stderr/exit match",
   "blocker": "generics-not-lowered",
-  "class": "D"
+  "class": "A"
  },
  "tern": {
   "actual": "exact stdout/stderr/exit match",
