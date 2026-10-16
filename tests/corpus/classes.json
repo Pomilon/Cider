@@ -1401,7 +1401,7 @@
  },
  "template": {
   "actual": "exit 1; tests/corpus/legacy/template/main.cid:21:27: expected an expression; tests/corpus/legacy/template/main.cid:30:27: expected an expression",
-  "blocker": "generics-not-lowered (explicit identity<int> call form is v3-correct)",
+  "blocker": "T11 generic-function lowering: identity<int>/max<int> calls check but never emit bodies",
   "class": "D"
  },
  "template_body_forms": {
