@@ -14,18 +14,18 @@ export interface ROther {
 // was finalized and when.
 export class RImpl {
   var v: int;
-  func o() -> int { return this.v; }
+  func o() -> int { return (*self).v; }
   func tag() -> int { return 7; }
-  func ~RImpl() { print("A"); }
+  func deinit() { print("A"); }
 }
 
 // A second implementor with a DIFFERENT tag, so a stale vtable left behind by
 // the previous store is visible as a wrong tag rather than a crash.
 export class RQuiet {
   var s: int;
-  func o() -> int { return this.s; }
+  func o() -> int { return (*self).s; }
   func tag() -> int { return 13; }
-  func ~RQuiet() { print("B"); }
+  func deinit() { print("B"); }
 }
 
 // A third implementor whose methods are bigger, so its vtable entries differ
@@ -33,18 +33,18 @@ export class RQuiet {
 export class RSpot {
   var p: int;
   var pad: [u64; 4];
-  func o() -> int { return this.p; }
+  func o() -> int { return (*self).p; }
   func tag() -> int { return 21; }
-  func ~RSpot() { print("C"); }
+  func deinit() { print("C"); }
 }
 
-export var rImpl: RImpl;
-export var rQuiet: RQuiet;
-export var rSpot: RSpot;
+export var rImpl: RImpl = new RImpl { v: 0 };
+export var rQuiet: RQuiet = new RQuiet { s: 0 };
+export var rSpot: RSpot = new RSpot { p: 0, pad: new [u64; 4] {[0, ...]} };
 
 // The interface-typed globals, declared BELOW the implementors they hold.
-export var gIface: ROther;
-export var gCopy: ROther;
+export var gIface: ROther = nilPtr as ROther;
+export var gCopy: ROther = nilPtr as ROther;
 
 // The control: the bare spelling, in the module that declares both sides.
 export func seedIface() -> int {

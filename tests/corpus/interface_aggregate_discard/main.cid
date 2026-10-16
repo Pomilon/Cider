@@ -47,25 +47,23 @@ interface Maker {
 
 class Sq {
     var s: int;
-    func init(x: int) -> void { this.s = x; }
-    func area() -> int { return this.s * this.s; }
+    func init(x: int) { (*self).s = x; }
+    func area() -> int { return (*self).s * (*self).s; }
+    func deinit() { drops = drops + 1; }
 }
 
 class MakerA {
     var pad: int;
-    func init(p: int) -> void { this.pad = p; }
+    func init(p: int) { (*self).pad = p; }
     func makePair(n: int) -> Pair {
-        var r: Pair;
-        r.a = n;
-        r.b = n + this.pad;
+        var r: Pair = new Pair { a: n, b: n + (*self).pad };
         return r;
     }
-    func makeRow(n: int) -> Row { return [n, n + this.pad]; }
-    func makeNested(n: int) -> [[int; 2]; 2] { return [[n, n + 1], [n + 2, n + this.pad]]; }
-    func makeCells(n: int) -> [int; 2] { return [n, n + this.pad]; }
+    func makeRow(n: int) -> Row { return new [int; 2] {n, n + (*self).pad}; }
+    func makeNested(n: int) -> [[int; 2]; 2] { return new [[int; 2]; 2] { new [int; 2] {n, n + 1}, new [int; 2] {n + 2, n + (*self).pad} }; }
+    func makeCells(n: int) -> [int; 2] { return new [int; 2] {n, n + (*self).pad}; }
     func makeShape() -> Shape {
-        var sq: Sq;
-        sq.init(this.pad);
+        var sq: *Sq = new Sq((*self).pad);
         return sq;
     }
     func twice(n: int) -> int { return n * 2; }
@@ -73,33 +71,29 @@ class MakerA {
 
 class MakerB {
     var pad: int;
-    func init(p: int) -> void { this.pad = p; }
+    func init(p: int) { (*self).pad = p; }
     func makePair(n: int) -> Pair {
-        var r: Pair;
-        r.a = n * 100;
-        r.b = n * 100 + this.pad;
+        var r: Pair = new Pair { a: n * 100, b: n * 100 + (*self).pad };
         return r;
     }
-    func makeRow(n: int) -> Row { return [n * 100, n * 100 + this.pad]; }
-    func makeNested(n: int) -> [[int; 2]; 2] { return [[n * 100, n * 101], [n * 102, n * 100 + this.pad]]; }
-    func makeCells(n: int) -> [int; 2] { return [n * 100, n * 100 + this.pad]; }
+    func makeRow(n: int) -> Row { return new [int; 2] {n * 100, n * 100 + (*self).pad}; }
+    func makeNested(n: int) -> [[int; 2]; 2] { return new [[int; 2]; 2] { new [int; 2] {n * 100, n * 101}, new [int; 2] {n * 102, n * 100 + (*self).pad} }; }
+    func makeCells(n: int) -> [int; 2] { return new [int; 2] {n * 100, n * 100 + (*self).pad}; }
     func makeShape() -> Shape {
-        var sq: Sq;
-        sq.init(this.pad + 1);
+        var sq: *Sq = new Sq((*self).pad + 1);
         return sq;
     }
-    func twice(n: int) -> int { return n * 2 + this.pad; }
+    func twice(n: int) -> int { return n * 2 + (*self).pad; }
 }
 
 var drops: int = 0;
 
 class Owned {
     var tag: int;
-    func init(t: int) -> void { this.tag = t; }
-    func ~Owned() {
+    func deinit() {
         drops = drops + 1;
         print("D,");
-        printInt(this.tag);
+        printInt((*self).tag);
         print(",");
     }
 }
@@ -109,9 +103,9 @@ interface Factory {
 }
 
 class OwnedFactory {
+    func init() { }
     func make(t: int) -> Owned {
-        var o: Owned;
-        o.init(t);
+        var o: Owned = new Owned { tag: t };
         return o;
     }
 }
@@ -125,10 +119,8 @@ func churn(n: int) -> int {
 }
 
 func main() -> int {
-    var a: MakerA;
-    a.init(1);
-    var b: MakerB;
-    b.init(2);
+    var a: *MakerA = new MakerA(1);
+    var b: *MakerB = new MakerB(2);
     var ma: Maker = a;
     var mb: Maker = b;
 
@@ -184,8 +176,8 @@ func main() -> int {
     // slot must still be finalized, exactly like a direct non-virtual call.
     // No result is bound to a typed destination anywhere in this program, so
     // the unfixed compiler type-checks it and then miscompiles.
-    var fac: OwnedFactory;
-    var fp: *OwnedFactory = &fac;
+    var fac: *OwnedFactory = new OwnedFactory();
+    var fp: *OwnedFactory = fac;
     var f: Factory = fp;
     drops = 0;
     f.make(1);
@@ -193,12 +185,19 @@ func main() -> int {
     f.make(3);
     f.make(4);
     f.make(5);
+    // Discarded value results finalize nothing: without delete there is
+    // no deinit (FEATURES §5.3). The counter proves it.
     print("drops=");
     printInt(drops);
     print("\n");
-    if (drops == 0) { return 7; }
+    if (drops != 0) { return 7; }
+    // Explicit delete runs deinit deterministically, once per object.
+    var h1: *Sq = new Sq(101);
+    var h2: *Sq = new Sq(102);
+    delete h1;
+    if (drops != 1) { return 8; }
+    delete h2;
+    if (drops != 2) { return 9; }
 
     return 0;
-    // f's scope then unwinds: the remaining Owned values print their drops
-    // here, after the counted ones above.
 }

@@ -91,7 +91,7 @@ func main() -> int {
   // A qualified store of a concrete VALUE (the frame-slot shape), an alias
   // spelling of the interface holding a copy of the result, and an
   // alias-spelled concrete stored back through the qualified spelling.
-  var local: QA;
+  var local: QA = new lib.RImpl { v: 0 };
   local.v = 8;
   lib.gIface = local;
   var aliased: QI = lib.gIface;

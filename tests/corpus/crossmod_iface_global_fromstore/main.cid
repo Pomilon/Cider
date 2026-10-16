@@ -108,7 +108,7 @@ func main() -> int {
   if (gIface.o() != 42 || gIface.tag() != 7) { return 12; }
 
   // --- an interface-typed FIELD, reached through the same global ---------
-  var h: lib.Holder;
+  var h: lib.Holder = new lib.Holder { inner: nilPtr as lib.RTag, pad: 0 };
   h.inner = rGamma;
   if (h.inner.o() != 5 || h.inner.tag() != 21) { return 13; }
   h.inner = rAlpha;
@@ -127,7 +127,7 @@ func main() -> int {
   if (got.o() != 42 || got.tag() != 7) { return 19; }
 
   // --- reassignment of a LOCAL interface variable from a concrete value ---
-  var local: lib.RTag;
+  var local: lib.RTag = nilPtr as lib.RTag;
   local = rBeta;
   if (local.o() != 17 || local.tag() != 13) { return 20; }
   local = rAlpha;
@@ -140,7 +140,7 @@ func main() -> int {
   // the parameter off the address path, so its vtable word was read from
   // 8 bytes past the slot. The value here is a CONCRETE one, so the call site
   // has to build the fat pointer from the declared parameter type.
-  var c: fn(lib.RTag) -> int = func(z: lib.RTag) -> int { return z.o() * 2 + z.tag(); };
+  var c: func(lib.RTag) -> int = func(z: lib.RTag) -> int { return z.o() * 2 + z.tag(); };
   if (c(rAlpha) != 91) { return 22; }
   if (c(rGamma) != 31) { return 23; }
   if (c(gIface) != 91) { return 24; }

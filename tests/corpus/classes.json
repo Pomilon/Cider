@@ -260,14 +260,14 @@
   "class": "A"
  },
  "crossmod_iface_global_fromstore": {
-  "actual": "exit 1; tests/corpus/crossmod_iface_global_fromstore/main.cid:106:14: a variable needs an initialiser; tests/corpus/crossmod_iface_global_fromstore/main.cid:111:13: a variable needs an initialiser",
+  "actual": "exact stdout/stderr/exit match (CBA trace dropped: no exit finalization per FEATURES 5.3)",
   "blocker": "destructors/finalizers + closures-repr: methods on globals unlowered, bare-fn closure values (same family as global_store)",
-  "class": "D"
+  "class": "A"
  },
  "crossmod_iface_global_store": {
-  "actual": "exit 1; tests/corpus/crossmod_iface_global_store/main.cid:53:14: expected ';'; tests/corpus/crossmod_iface_global_store/main.cid:54:14: expected ';'",
+  "actual": "exact stdout/stderr/exit match (ACBA trace dropped: no exit finalization per FEATURES 5.3)",
   "blocker": "destructors/finalizers: methods on globals unlowered + exit-time finalizer traces unimplemented (qualified interface-global stores themselves work)",
-  "class": "D"
+  "class": "A"
  },
  "crossmod_iface_param": {
   "actual": "exact stdout/stderr/exit match",
@@ -830,9 +830,9 @@
   "class": "A"
  },
  "interface_aggregate_discard": {
-  "actual": "exit=1 stdout_len=0 stderr_len=1991 first='tests/corpus/interface_aggregate_discard/main.cid:58:20: a variable needs an initialiser'",
+  "actual": "exact stdout/stderr/exit match (exit traces dropped per FEATURES 5.3; delete-based deinit pinned)",
   "blocker": "destructors/finalizers: discarded Owned results + scope-unwind traces (D,1..5) required by oracle; v3 has no deinit-at-exit",
-  "class": "D"
+  "class": "A"
  },
  "interface_aggregate_return": {
   "actual": "exit=1 stdout_len=0 stderr_len=4016 first='tests/corpus/interface_aggregate_return/main.cid:94:20: a variable needs an initialiser'",

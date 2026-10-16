@@ -24,18 +24,18 @@ export interface RTag {
 // was finalized and when.
 export class RAlpha {
   var v: int;
-  func o() -> int { return this.v; }
+  func o() -> int { return (*self).v; }
   func tag() -> int { return 7; }
-  func ~RAlpha() { print("A"); }
+  func deinit() { print("A"); }
 }
 
 // A second implementor with a DIFFERENT tag, so a stale vtable left behind by
 // the previous store is visible as a wrong tag rather than a crash.
 export class RBeta {
   var s: int;
-  func o() -> int { return this.s; }
+  func o() -> int { return (*self).s; }
   func tag() -> int { return 13; }
-  func ~RBeta() { print("B"); }
+  func deinit() { print("B"); }
 }
 
 // A third implementor whose methods are bigger, so its vtable entries differ
@@ -44,18 +44,18 @@ export class RBeta {
 export class RGamma {
   var p: int;
   var pad: [u64; 4];
-  func o() -> int { return this.p; }
+  func o() -> int { return (*self).p; }
   func tag() -> int { return 21; }
-  func ~RGamma() { print("C"); }
+  func deinit() { print("C"); }
 }
 
-export var rAlpha: RAlpha;
-export var rBeta: RBeta;
-export var rGamma: RGamma;
+export var rAlpha: RAlpha = new RAlpha { v: 0 };
+export var rBeta: RBeta = new RBeta { s: 0 };
+export var rGamma: RGamma = new RGamma { p: 0, pad: new [u64; 4] {[0, ...]} };
 
 // The interface-typed globals, declared BELOW the implementors they hold.
-export var gIface: RTag;
-export var gCopy: RTag;
+export var gIface: RTag = nilPtr as RTag;
+export var gCopy: RTag = nilPtr as RTag;
 
 // An interface-typed field and an array of interfaces, so the from-alias
 // recovery is exercised where the slot is not a module global.
@@ -64,7 +64,7 @@ export struct Holder {
   var pad: int;
 }
 
-export var gArr: [RTag; 2];
+export var gArr: [RTag; 2] = new [RTag; 2] {nilPtr as RTag, nilPtr as RTag};
 
 // The interface named in THIS module's own signatures, so a value reached
 // through a from-alias has to survive the crossing in both directions.
@@ -83,4 +83,4 @@ export func seedIface() -> int {
 }
 
 // Not exported: a `from`-import may not name it at all (CIDER-BUG-060).
-var hidden: RTag;
+var hidden: RTag = nilPtr as RTag;
