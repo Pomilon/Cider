@@ -105,9 +105,9 @@
   "class": "A"
  },
  "asm_spilled_operand_dispatch": {
-  "actual": "exit 1; tests/corpus/asm_spilled_operand_dispatch/main.cid:85:13: a variable needs an initialiser; tests/corpus/asm_spilled_operand_dispatch/main.cid:87:15: a variable needs an initialiser",
+  "actual": "exact stdout/stderr/exit match",
   "blocker": "asm blocks",
-  "class": "D"
+  "class": "A"
  },
  "asm_width": {
   "actual": "pass",

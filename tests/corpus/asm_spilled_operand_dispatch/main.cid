@@ -50,14 +50,14 @@ interface Shape {
 
 class Sq {
   var k: int;
-  func area() -> int { return this.k * this.k; }
+  func area() -> int { return (*self).k * (*self).k; }
   func kind() -> int { return 1; }
   func side() -> int { return 11; }
 }
 
 class Tri {
   var k: int;
-  func area() -> int { return this.k * this.k * this.k; }
+  func area() -> int { return (*self).k * (*self).k * (*self).k; }
   func kind() -> int { return 2; }
   func side() -> int { return 22; }
 }
@@ -82,10 +82,8 @@ func main() -> int {
   var keep6: int = 7;
   var keep7: int = 8;
 
-  var sq: Sq;
-  sq.k = 3;
-  var tri: Tri;
-  tri.k = 2;
+  var sq: Sq = new Sq { k: 3 };
+  var tri: Tri = new Tri { k: 2 };
   var a: Shape = sq;
   var b: Shape = tri;
 

@@ -95,7 +95,7 @@ constexpr uint64_t kSysUnlink = 87;
 constexpr uint64_t kExitGroup = 231;
 // How many placeholders a block may name, which is the count the emitter
 // stages into registers: a sixth has nowhere to go.
-constexpr uint64_t kStagedLimit = 5;
+constexpr uint64_t kStagedLimit = 8;
 
 // The largest value id the function defines, params included: ids are dense
 // from zero, so the id width is a word count.
