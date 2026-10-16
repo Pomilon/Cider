@@ -428,6 +428,28 @@ void testGenericStruct() {
         "struct Box<T> { var v: T; }\n"
         "func main() -> int { var b: Box = new Box<int> { v: 1 }; return 0; }\n");
     check(!bareLocal.ok && bareLocal.stage == "check", "a bare generic local fails");
+    // A self-pointer field (`next: *Node<T>`) substitutes T with T on the
+    // way through: identity substitution is a no-op, not an infinite
+    // recursion (which used to segfault the compiler instead of checking).
+    Checked selfPtr = check(
+        "struct Node<T> { var v: T; var next: *Node<T>; }\n"
+        "func main() -> int {\n"
+        "    var node: Node<int> = new Node<int> { v: 11, next: nilPtr };\n"
+        "    return node.v;\n"
+        "}\n");
+    check(selfPtr.ok, "a generic self-pointer checks: " + selfPtr.stage);
+    // An alias can name a nested instantiation before either struct is
+    // declared: member recording precedes all instantiation, so
+    // declaration order never poisons a spec with empty fields.
+    Checked fwdAlias = check(
+        "type Bare1 = Wrap<One<int>>;\n"
+        "struct Wrap<T> { var v: T; }\n"
+        "struct One<A> { var a: A; }\n"
+        "func main() -> int {\n"
+        "    var w: Bare1 = new Wrap<One<int>> { v: new One<int> { a: 1 } };\n"
+        "    return w.v.a;\n"
+        "}\n");
+    check(fwdAlias.ok, "a forward alias checks: " + fwdAlias.stage);
 }
 
 // A union constructs by naming one live member; hasM asks about liveness;

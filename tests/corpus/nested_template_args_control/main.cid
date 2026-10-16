@@ -61,61 +61,48 @@ struct Node<T> {
 }
 
 func sumBare1() -> int {
-  var w: Bare1;
-  w.v.a = 1;
+  var w: Bare1 = new Wrap<One<int>> { v: new One<int> { a: 1 } };
   return w.v.a;
 }
 
 func sumBare2() -> int {
-  var w: Bare2;
-  w.v.a.x = 2;
-  w.v.a.y = 3;
+  var w: Bare2 = new Wrap<One<Pair<int, int>>> { v: new One<Pair<int, int>> { a: new Pair<int, int> { x: 2, y: 3 } } };
   return w.v.a.x + w.v.a.y;
 }
 
 func sumBare3() -> int {
-  var w: Bare3;
-  w.v.v.v = 4;
+  var w: Bare3 = new Wrap<Wrap<Wrap<int>>> { v: new Wrap<Wrap<int>> { v: new Wrap<int> { v: 4 } } };
   return w.v.v.v;
 }
 
 func sumQual1() -> int {
-  var w: Qual1;
-  w.v.a = 5;
+  var w: Qual1 = new lib.LibWrap<lib.LibOne<int>> { v: new lib.LibOne<int> { a: 5 } };
   return w.v.a;
 }
 
 func sumQual2() -> int {
-  var w: Qual2;
-  w.v.v.a = 6;
+  var w: Qual2 = new lib.LibWrap<lib.LibWrap<lib.LibOne<int>>> { v: new lib.LibWrap<lib.LibOne<int>> { v: new lib.LibOne<int> { a: 6 } } };
   return w.v.v.a;
 }
 
 func sumViaAlias() -> int {
-  var w: ViaAlias;
-  w.v.x = 7;
-  w.v.y = 8;
+  var w: ViaAlias = new Wrap<IntPair> { v: new Pair<int, int> { x: 7, y: 8 } };
   return w.v.x + w.v.y;
 }
 
 func sumForward() -> int {
-  var w: ForwardNested;
-  w.v.v = 9;
+  var w: ForwardNested = new Wrap<Forward<int>> { v: new Forward<int> { v: 9 } };
   return w.v.v;
 }
 
 func sumRecursive() -> int {
-  var w: Recursive;
-  var node: Node<int>;
-  node.v = 11;
-  w.v.v = 10;
-  w.v.next = &node;
-  return w.v.v + w.v.next.v;
+  var node: Node<int> = new Node<int> { v: 11, next: nilPtr };
+  var w: Recursive = new Wrap<Node<int>> { v: new Node<int> { v: 10, next: &node } };
+  return w.v.v + (*w.v.next).v;
 }
 
 func sumPhantom() -> int {
-  var t: Phantom;
-  t.n = 12;
+  var t: Phantom = new Tag<One<int>> { n: 12 };
   return t.n;
 }
 

@@ -1095,9 +1095,9 @@
   "class": "A"
  },
  "nested_template_args_control": {
-  "actual": "cider run exit 1, stdout empty, stderr diagnostic: `main.cid:13:17: expected ';'`; driver has no module loader",
+  "actual": "exact stdout/stderr/exit match",
   "blocker": "multi-file-imports + generics",
-  "class": "D"
+  "class": "A"
  },
  "nil_closure_call": {
   "actual": "cider run exit 1, stdout empty, stderr diagnostic: `main.cid:40:32: a variable needs an initialiser`; expected.json left verbatim (v2 vm-error exit 2)",

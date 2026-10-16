@@ -736,6 +736,61 @@ void Resolver::declareModule(const std::string& module, Program& program,
 void Resolver::resolveDeclTypes(const std::string& module, Program& program,
                                 const Scope* scope) {
     EvalEnv env = evalEnv(scope);
+    // Member recording precedes every instantiation: an alias, signature
+    // or global can name `Wrap<One<int>>` before either struct is
+    // declared, and instantiating against unrecorded fields caches an
+    // empty, poisoned spec. Recording all struct/class fields first makes
+    // declaration order irrelevant for instantiation. (A field whose own
+    // type names a later template still needs order today; that deeper
+    // forward reference is a separate limitation, not a silent rule.)
+    std::unordered_set<std::string> fieldsDone;
+    for (const std::unique_ptr<cider::Decl>& decl : program.decls) {
+        const cider::Decl* unwrapped = decl.get();
+        if (const auto* exp = dynamic_cast<const ExportDecl*>(unwrapped)) {
+            unwrapped = exp->decl.get();
+        }
+        const StructDecl* sdn = dynamic_cast<const StructDecl*>(unwrapped);
+        const ClassDecl* cdn = dynamic_cast<const ClassDecl*>(unwrapped);
+        if (sdn == nullptr && cdn == nullptr) {
+            continue;
+        }
+        const Decl* self = nullptr;
+        const Scope* inner = scope;
+        std::string name;
+        if (sdn != nullptr) {
+            self = lookup(scope, sdn->name);
+            name = sdn->name;
+            if (!sdn->typeParams.empty() && self != nullptr) {
+                inner = typeParamScope(scope, module, sdn->typeParams, self->id,
+                                       sdn->pos);
+            }
+        } else {
+            self = lookup(scope, cdn->name);
+            name = cdn->name;
+            if (!cdn->typeParams.empty() && self != nullptr) {
+                inner = typeParamScope(scope, module, cdn->typeParams, self->id,
+                                       cdn->pos);
+            }
+        }
+        if (self == nullptr) {
+            continue;
+        }
+        std::string fkey = declKey(self->id);
+        if (fieldsDone.find(fkey) != fieldsDone.end()) {
+            continue;
+        }
+        fieldsDone.insert(fkey);
+        const std::vector<FieldDecl>& fields =
+            sdn != nullptr ? sdn->fields : cdn->fields;
+        for (const FieldDecl& field : fields) {
+            TypeRef t = resolveType(field.type.get(), inner);
+            nodeTypes_[&field] = t;
+            if (!t.isError()) {
+                fieldTypes_[fkey + "." + field.name] = t;
+                fieldLists_[fkey].push_back(field.name);
+            }
+        }
+    }
     for (const std::unique_ptr<cider::Decl>& decl : program.decls) {
         const cider::Decl* unwrapped = decl.get();
         if (const auto* exp = dynamic_cast<const ExportDecl*>(unwrapped)) {
@@ -789,7 +844,10 @@ void Resolver::resolveDeclTypes(const std::string& module, Program& program,
             for (const FieldDecl& field : sd->fields) {
                 TypeRef t = resolveType(field.type.get(), inner);
                 nodeTypes_[&field] = t;
-                if (self != nullptr && !t.isError()) {
+                // Fields were already recorded by the pre-pass above; the
+                // guard keeps the member lists exactly-once.
+                if (self != nullptr && !t.isError() &&
+                    fieldsDone.find(declKey(self->id)) == fieldsDone.end()) {
                     std::string fkey = declKey(self->id);
                     fieldTypes_[fkey + "." + field.name] = t;
                     fieldLists_[fkey].push_back(field.name);
@@ -839,7 +897,10 @@ void Resolver::resolveDeclTypes(const std::string& module, Program& program,
             for (const FieldDecl& field : cd->fields) {
                 TypeRef t = resolveType(field.type.get(), inner);
                 nodeTypes_[&field] = t;
-                if (cself != nullptr && !t.isError()) {
+                // Fields were already recorded by the pre-pass above; the
+                // guard keeps the member lists exactly-once.
+                if (cself != nullptr && !t.isError() &&
+                    fieldsDone.find(declKey(cself->id)) == fieldsDone.end()) {
                     std::string fkey = declKey(cself->id);
                     fieldTypes_[fkey + "." + field.name] = t;
                     fieldLists_[fkey].push_back(field.name);
@@ -1209,6 +1270,19 @@ TypeRef Resolver::substitute(TypeRef type, DeclId tmpl, const std::vector<TypeRe
         const TypeParamPayload& payload = std::get<TypeParamPayload>(type.type->payload());
         if (payload.decl.module == tmpl.module && payload.decl.index == tmpl.index &&
             payload.index < args.size()) {
+            // Identity substitution is a no-op: substituting T with T
+            // itself must answer T, or a self-referential field like
+            // `next: *Node<T>` recurses forever instantiating Node<T>.
+            const TypeRef& arg = args[payload.index];
+            if (!arg.isError() && arg.type->kind() == Kind::TypeParam) {
+                const TypeParamPayload& inner =
+                    std::get<TypeParamPayload>(arg.type->payload());
+                if (inner.decl.module == payload.decl.module &&
+                    inner.decl.index == payload.decl.index &&
+                    inner.index == payload.index) {
+                    return type;
+                }
+            }
             return substitute(args[payload.index], tmpl, args, pos);
         }
         return type;
