@@ -1607,6 +1607,17 @@ void testGenericFn() {
                    "    return 0;\n"
                    "}\n") == 0,
           "two specs coexist");
+    check(runQuiet("struct Box<T> { var v: T; var tag: int; }\n"
+                   "func main() -> int {\n"
+                   "    var b: Box<int> = new Box<int> { v: 40, tag: 1 };\n"
+                   "    if (b.v + b.tag != 41) { return 1; }\n"
+                   "    if (sizeof(Box<int>) != 8) { return 2; }\n"
+                   "    var p: *Box<int> = alloc(sizeof(Box<int>), 8) as *Box<int>;\n"
+                   "    (*p).v = 7;\n"
+                   "    if (((*p).v as int) != 7) { return 3; }\n"
+                   "    return 0;\n"
+                   "}\n") == 0,
+          "struct specs construct, size and point");
 }
 
 void testBitNot() {
