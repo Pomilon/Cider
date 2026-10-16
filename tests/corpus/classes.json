@@ -936,7 +936,7 @@
  },
  "list_positions": {
   "actual": "cider run exit 1, stdout empty, stderr diagnostic: `main.cid:56:31: expected ';'` (fn-typed struct field)",
-  "blocker": "stdlib-io + interface-boxing + bare-fn-spelling + bare-list-literals",
+  "blocker": "FEAT-049 volatile-qualified types: volatile array fields/params/call-args are the test subject (checks 25 + prints); bare fn-typed struct field also needs *func rewrite once volatile lands",
   "class": "D"
  },
  "list_positions_crossmod": {
