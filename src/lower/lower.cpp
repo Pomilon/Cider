@@ -7994,15 +7994,33 @@ std::vector<ir::Value> Lowerer::lowerCallWords(Call& n) {
                     refuse(n.pos, "this call");
                     return {undefined()};
                 }
-                if (member->typeParams > 0) {
-                    refuse(n.pos, "a generic call across modules");
-                    return {undefined()};
+                // A generic member answers its spec: the checker recorded
+                // which specialization this site instantiated, so the
+                // signature and link name come from the spec, never the
+                // template. Plain members keep the path below untouched.
+                std::optional<DeclId> memberSpec = checker_.specOf(&n);
+                if (memberSpec.has_value()) {
+                    const Signature* specSig =
+                        resolver_.funcSig(*memberSpec);
+                    std::string specLink =
+                        resolver_.specLinkName(*memberSpec);
+                    if (specSig == nullptr || specLink.empty()) {
+                        refuse(n.pos, "this call");
+                        return {undefined()};
+                    }
+                    sig = specSig;
+                    callee = specLink;
+                } else {
+                    if (member->typeParams > 0) {
+                        refuse(n.pos, "a generic call across modules");
+                        return {undefined()};
+                    }
+                    const resolve::Decl* origin =
+                        resolver_.declById(member->id);
+                    sig = &member->sig;
+                    callee = resolver_.linkName(origin != nullptr ? *origin
+                                                                  : *member);
                 }
-                const resolve::Decl* origin =
-                    resolver_.declById(member->id);
-                sig = &member->sig;
-                callee = resolver_.linkName(origin != nullptr ? *origin
-                                                              : *member);
             }
         }
     }

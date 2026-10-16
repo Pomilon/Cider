@@ -234,16 +234,23 @@ bool Checker::checkProgram(Program& program, const std::string& module) {
     env_ = std::make_unique<EvalEnv>(resolver_.evalEnv(moduleScope_));
     typeScope_ = moduleScope_;
     for (const std::unique_ptr<Decl>& decl : program.decls) {
-        if (const auto* fn = dynamic_cast<const FuncDecl*>(decl.get())) {
+        // Export wraps the spelling: unwrap it so exported templates
+        // register their bodies like local ones do. Visit order already
+        // sees through the wrapper; only this table missed it.
+        const Decl* inner = decl.get();
+        if (const auto* exp = dynamic_cast<const ExportDecl*>(inner)) {
+            inner = exp->decl.get();
+        }
+        if (const auto* fn = dynamic_cast<const FuncDecl*>(inner)) {
             funcs_[module + "." + fn->name] = fn;
         }
-        if (const auto* sd = dynamic_cast<const StructDecl*>(decl.get())) {
+        if (const auto* sd = dynamic_cast<const StructDecl*>(inner)) {
             structs_[module + "." + sd->name] = sd;
             for (const MethodDecl& method : sd->methods) {
                 methods_[module + "." + sd->name + "." + method.name] = &method;
             }
         }
-        if (const auto* cd = dynamic_cast<const ClassDecl*>(decl.get())) {
+        if (const auto* cd = dynamic_cast<const ClassDecl*>(inner)) {
             for (const MethodDecl& method : cd->methods) {
                 methods_[module + "." + cd->name + "." + method.name] = &method;
             }
