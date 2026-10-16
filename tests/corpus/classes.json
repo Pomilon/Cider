@@ -80,9 +80,9 @@
   "class": "A"
  },
  "array_alias": {
-  "actual": "construction lowers (`new [Cb;2]{inc,inc}` with func() spelling); `arr[0](4)` call through element refuses 'this call' (closure call through place = T10)",
+  "actual": "exact stdout/stderr/exit match",
   "blocker": "closure-call-place",
-  "class": "D"
+  "class": "A"
  },
  "array_init": {
   "actual": "exact stdout/stderr/exit match",
