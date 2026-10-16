@@ -16,6 +16,8 @@ const char* tokenName(TokenKind kind) {
         case TokenKind::FloatLit: return "float literal";
         case TokenKind::CharLit: return "character literal";
         case TokenKind::StringLit: return "string literal";
+        case TokenKind::WideStringLit: return "wide string literal";
+        case TokenKind::WideCharLit: return "wide character literal";
         case TokenKind::KwFunc: return "func";
         case TokenKind::KwExtern: return "extern";
         case TokenKind::KwStruct: return "struct";

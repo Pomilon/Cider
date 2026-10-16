@@ -202,6 +202,15 @@ public:
         int64_t len = 0;
     };
     LoweredString lowerString(const StringLit& lit);
+    // The rodata address of a wide literal's units: appended zero unit
+    // included, little-endian pairs. One blob per occurrence, like narrow
+    // strings; array positions read words instead (see wideWords).
+    ir::Value wideRodata(const WideLit& lit);
+    std::string wideBlob(const WideLit& lit);
+    // One constant word per unit plus the NUL terminator, for array
+    // positions ([u16; N] declarations, same-shape casts). The checker
+    // proved the count fits, so a mismatch here refuses as a lowerer bug.
+    std::vector<ir::Value> wideWords(const WideLit& lit);
     // An interpolation `"a{x}b"` builds its string on the heap: each part
     // answers an address word and a length word, the lengths sum to a
     // total, one cider_alloc answers the buffer, and every part's bytes

@@ -1585,9 +1585,9 @@
   "class": "A"
  },
  "wide_strings": {
-  "actual": "blocked-A reclassified 2026-10-05: must pass once blocker lands; run exit 1: OUT: ERR:tests/corpus/wide_strings/main.cid:11:18: unknown escape\\ntests/corpus/wide_strings/main.cid:32:23: unknown escape\\ntests/corpus/wide_strings/main.cid:32:23: unknown escape\\ntests/corpus/wide_strings/mai",
+  "actual": "exact stdout/stderr/exit match",
   "blocker": "wide-string-literals (u\"..\" prefix, \\u escapes rejected)",
-  "class": "D"
+  "class": "A"
  },
  "write_returns_count": {
   "actual": "exact stdout/stderr/exit match",

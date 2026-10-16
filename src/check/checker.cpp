@@ -555,7 +555,18 @@ void Checker::visitProgram(Program& n) {
                  dynamic_cast<const Field*>(g->init.get()) != nullptr)) {
                 enumGlobal = true;
             }
-            if (!constGlobal && !funcGlobal && !enumGlobal &&
+            // A wide literal is known image bytes (units plus the NUL unit)
+            // or a rodata address: the lowerer folds both spellings, so
+            // the gate only admits the shape and the checking below
+            // validates the fit.
+            bool wideGlobal = false;
+            if (!constGlobal &&
+                dynamic_cast<const WideLit*>(g->init.get()) != nullptr &&
+                (declared.type->kind() == Kind::Array ||
+                 declared.type->kind() == Kind::Pointer)) {
+                wideGlobal = true;
+            }
+            if (!constGlobal && !funcGlobal && !enumGlobal && !wideGlobal &&
                 (asFloat == nullptr || !floatGlobal) &&
                 !(floatGlobal && floatFolded.ok) &&
                 (asString == nullptr || !stringGlobal)) {
@@ -2560,6 +2571,25 @@ TypeRef Checker::checkExpr(Expr* expr, TypeRef expected) {
         record(string, TypeRef{ctx_.string()});
         return TypeRef{ctx_.string()};
     }
+    if (auto* wide = dynamic_cast<WideLit*>(expr)) {
+        // N units plus the NUL terminator: the array spelling that fits
+        // exactly. Pointer positions convert through checkCompatible.
+        const Type* elem = ctx_.basic(BasicKind::U16);
+        size_t units = wide->units.size();
+        int64_t cells = static_cast<int64_t>(units) + 1;
+        TypeRef t{ctx_.array(elem, cells)};
+        record(wide, t);
+        return t;
+    }
+    if (auto* wideChar = dynamic_cast<WideChar*>(expr)) {
+        if (wideChar->value > 0xFFFF) {
+            fail(wideChar->pos, "a wide character holds exactly one unit");
+            record(wideChar, errorRef());
+            return errorRef();
+        }
+        record(wideChar, TypeRef{ctx_.basic(BasicKind::U16)});
+        return TypeRef{ctx_.basic(BasicKind::U16)};
+    }
     if (auto* binary = dynamic_cast<Binary*>(expr)) {
         TypeRef t = checkBinary(*binary, expected);
         record(binary, t);
@@ -3862,6 +3892,22 @@ bool Checker::checkCompatible(Position pos, const Expr* fromExpr, TypeRef from, 
                 basic == BasicKind::Char) {
                 return true;
             }
+        }
+    }
+    // A wide literal converts to a u16 pointer: the literal materializes
+    // its own units in rodata, so word zero is their address. Only the
+    // literal converts — a [u16; N] variable beside a *u16 stays a
+    // mismatch, spelled `&a[0]`. *void accepts any address, so the
+    // literal's word zero converts there too.
+    if (dynamic_cast<const WideLit*>(fromExpr) != nullptr &&
+        to.type->kind() == Kind::Pointer) {
+        TypeRef pointee{to.type->pointee()};
+        if (pointee.type->kind() == Kind::Void) {
+            return true;
+        }
+        if (pointee.type->kind() == Kind::Basic &&
+            *pointee.type->basic() == BasicKind::U16) {
+            return true;
         }
     }
     // A slice copies into an array of the same element type: the copy

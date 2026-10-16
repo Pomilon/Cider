@@ -1444,6 +1444,46 @@ void Lowerer::onGlobal(VarDecl& n) {
         }
         binding.initLabel = lowered.label;
         binding.initial = lowered.len;
+    } else if (const auto* wide = dynamic_cast<const WideLit*>(n.init.get())) {
+        // A wide literal folds to known image bytes: units little-endian
+        // plus one zero unit. An array global holds the bytes inline (one
+        // quad per eight, zero-padded tail); a pointer global names a
+        // rodata blob. The gate admitted only these two shapes, and the
+        // checking proved the fit.
+        if (type.type->kind() == Kind::Array) {
+            std::string bytes;
+            for (uint16_t unit : wide->units) {
+                bytes.push_back(static_cast<char>(unit & 0xFF));
+                bytes.push_back(static_cast<char>((unit >> 8) & 0xFF));
+            }
+            bytes.push_back('\0');
+            bytes.push_back('\0');
+            int64_t want = resolver_.nominalSize(type.type);
+            if (want < 0 ||
+                bytes.size() != static_cast<size_t>(want)) {
+                refuse(n.init->pos, "a global initialiser must be constant");
+                return;
+            }
+            size_t byteCount = bytes.size();
+            uint64_t quads = (static_cast<uint64_t>(byteCount) + 7u) / 8u;
+            for (uint64_t word = 0; word < quads; ++word) {
+                uint64_t quad = 0;
+                for (uint64_t byte = 0; byte < 8u; ++byte) {
+                    uint64_t at = word * 8u + byte;
+                    uint64_t bits = at < bytes.size()
+                                        ? static_cast<unsigned char>(bytes[at])
+                                        : 0u;
+                    quad |= bits << (byte * 8);
+                }
+                binding.initWords.push_back(quad);
+            }
+        } else if (type.type->kind() == Kind::Pointer) {
+            binding.initLabel = wideBlob(*wide);
+            binding.initial = 0;
+        } else {
+            refuse(n.init->pos, "a global initialiser must be constant");
+            return;
+        }
     } else if (dynamic_cast<const NilPtr*>(n.init.get()) != nullptr) {
         binding.initial = 0;
     } else if (type.type->kind() == Kind::Interface) {
@@ -2390,7 +2430,23 @@ void Lowerer::onVarDecl(VarDecl& n) {
         return;
     }
     TypeRef type = checker_.typeOf(&n);
-    std::vector<ir::Value> values = lowerWords(n.init.get());
+    std::vector<ir::Value> values;
+    if (const auto* wide = dynamic_cast<const WideLit*>(n.init.get())) {
+        // Array positions read the units as words (the checker proved the
+        // count fits); pointer positions read the rodata address through
+        // the ordinary path below. Anything else here refuses: the checker
+        // lets only these shapes through.
+        if (!type.isError() && type.type->kind() == Kind::Array) {
+            values = wideWords(*wide);
+            if (failed_) {
+                return;
+            }
+        } else {
+            values = lowerWords(n.init.get());
+        }
+    } else {
+        values = lowerWords(n.init.get());
+    }
     TypeRef initType = checker_.typeOf(n.init.get());
     if (dynamic_cast<const StringLit*>(n.init.get()) != nullptr &&
         isBytePointerTarget(type) && values.size() == kSliceWords) {
@@ -4280,7 +4336,20 @@ bool Lowerer::copySliceToArray(Position pos, ir::Value ptr, ir::Value len,
 std::vector<ir::Value> Lowerer::lowerIndex(const Index& n) {
     Place base;
     TypeRef arrayType;
-    if (!arrayBase(n.array.get(), n, base, arrayType, "this index")) {
+    if (const auto* wide = dynamic_cast<const WideLit*>(n.array.get())) {
+        // A literal names rodata, not slots: the guarded array path below
+        // reads through the blob's label with global-array semantics, so
+        // folded proofs and runtime guards both apply unchanged.
+        arrayType = checker_.typeOf(n.array.get());
+        if (arrayType.isError() || arrayType.type->kind() != Kind::Array) {
+            refuse(n.array->pos, "this index");
+            return {undefined()};
+        }
+        base.global = wideBlob(*wide);
+        base.off = 0;
+        base.type = arrayType;
+        base.isVolatile = false;
+    } else if (!arrayBase(n.array.get(), n, base, arrayType, "this index")) {
         refuse(n.array->pos, "this index");
         return {undefined()};
     }
@@ -4972,6 +5041,89 @@ Lowerer::PartBytes Lowerer::rodataPair(const std::string& text, Position pos) {
     PartBytes out;
     out.ptr = at;
     out.len = constantI64(static_cast<int64_t>(text.size()), count, pos);
+    return out;
+}
+
+ir::Value Lowerer::wideRodata(const WideLit& lit) {
+    std::string label = wideBlob(lit);
+    TypeRef addr{ctx_.pointer(ctx_.basic(BasicKind::U16))};
+    ir::Instr data;
+    data.op = ir::Op::DataAddr;
+    data.loc = lit.pos;
+    data.type = addr;
+    data.width = ir::IRType::Ptr;
+    data.globalLabel = label;
+    data.isPure = true;
+    ir::Value at = newValue(data.width, addr, lit.pos);
+    data.results.push_back(at);
+    emit(std::move(data));
+    if (failed_) {
+        return undefined();
+    }
+    return at;
+}
+
+std::string Lowerer::wideBlob(const WideLit& lit) {
+    // Units lay out little-endian with one zero unit past the end: `*u16`
+    // reads run to zero, and `*char` reads run to NUL for the same reason.
+    // The length word counts units, never the terminator.
+    std::string bytes;
+    for (uint16_t unit : lit.units) {
+        bytes.push_back(static_cast<char>(unit & 0xFF));
+        bytes.push_back(static_cast<char>((unit >> 8) & 0xFF));
+    }
+    bytes.push_back('\0');
+    bytes.push_back('\0');
+    std::string label = "w_" + std::to_string(rodataSeq_++);
+    ir::Rodata blob;
+    blob.label = label;
+    blob.bytes = std::move(bytes);
+    module_->rodata.push_back(std::move(blob));
+    return label;
+}
+
+std::vector<ir::Value> Lowerer::wideWords(const WideLit& lit) {
+    // Take-packed constants: the same greedy 8/4/2/1 split storeRange and
+    // loadRange use, so these words store and compare with the shape array
+    // construction answers. One unit is two bytes little-endian, plus one
+    // zero unit past the end.
+    std::string bytes;
+    for (uint16_t unit : lit.units) {
+        bytes.push_back(static_cast<char>(unit & 0xFF));
+        bytes.push_back(static_cast<char>((unit >> 8) & 0xFF));
+    }
+    bytes.push_back('\0');
+    bytes.push_back('\0');
+    int64_t per = layout::kSizePointer;
+    std::vector<ir::Value> out;
+    uint64_t at = 0;
+    while (at < bytes.size()) {
+        int64_t left = static_cast<int64_t>(bytes.size() - at);
+        int64_t take = layout::kSizeI8;
+        BasicKind kind = BasicKind::U8;
+        if (left >= per) {
+            take = per;
+            kind = BasicKind::U64;
+        } else if (left >= layout::kSizeI32) {
+            take = layout::kSizeI32;
+            kind = BasicKind::U32;
+        } else if (left >= layout::kSizeI16) {
+            take = layout::kSizeI16;
+            kind = BasicKind::U16;
+        }
+        uint64_t word = 0;
+        for (int64_t byte = 0; byte < take; ++byte) {
+            uint64_t bits =
+                static_cast<unsigned char>(bytes[at + static_cast<size_t>(byte)]);
+            word |= bits << (byte * 8);
+        }
+        at += static_cast<size_t>(take);
+        out.push_back(constantI64(static_cast<int64_t>(word),
+                                  TypeRef{ctx_.basic(kind)}, lit.pos));
+        if (failed_) {
+            return {undefined()};
+        }
+    }
     return out;
 }
 
@@ -5937,8 +6089,72 @@ std::vector<ir::Value> Lowerer::lowerElementAddr(const Index& n) {
     // read path owns, so the checks cannot drift apart.
     Place base;
     TypeRef baseType;
-    if (!arrayBase(n.array.get(), n, base, baseType, "this expression") ||
-        !base.global.empty()) {
+    if (const auto* wide = dynamic_cast<const WideLit*>(n.array.get())) {
+        // A literal names rodata: a folded index is a label plus a scaled
+        // offset, proven against the unit count like the read path proves
+        // it. Anything computed rides the shared guarded address below.
+        std::unordered_set<std::string> active;
+        EvalEnv env = resolver_.evalEnv(emitScope());
+        EvalResult folded = evalConstInt(*n.index, env, active);
+        if (folded.ok) {
+            if (folded.value < 0) {
+                refuse(n.index->pos, "a negative index");
+                return {undefined()};
+            }
+            if (folded.value >
+                static_cast<int64_t>(wide->units.size())) {
+                refuse(n.index->pos, "an index past the end");
+                return {undefined()};
+            }
+            TypeRef u16{ctx_.basic(BasicKind::U16)};
+            TypeRef addrType{ctx_.pointer(u16.type)};
+            ir::Instr data;
+            data.op = ir::Op::DataAddr;
+            data.loc = n.pos;
+            data.type = addrType;
+            data.width = ir::IRType::Ptr;
+            data.globalLabel = wideBlob(*wide);
+            data.isPure = true;
+            ir::Value atAddr = newValue(data.width, addrType, n.pos);
+            data.results.push_back(atAddr);
+            emit(std::move(data));
+            if (failed_) {
+                return {undefined()};
+            }
+            TypeRef count{ctx_.basic(BasicKind::I64)};
+            int64_t elemBytes = resolver_.nominalSize(u16.type);
+            ir::Value delta =
+                constantI64(folded.value * elemBytes, count, n.pos);
+            if (failed_) {
+                return {undefined()};
+            }
+            ir::Instr advance;
+            advance.op = ir::Op::Add;
+            advance.loc = n.pos;
+            advance.type = addrType;
+            advance.width = ir::IRType::Ptr;
+            advance.isPure = true;
+            advance.operands.push_back(atAddr);
+            advance.operands.push_back(delta);
+            ir::Value moved = newValue(advance.width, addrType, n.pos);
+            advance.results.push_back(moved);
+            emit(std::move(advance));
+            if (failed_) {
+                return {undefined()};
+            }
+            return {moved};
+        }
+        baseType = checker_.typeOf(n.array.get());
+        if (baseType.isError() || baseType.type->kind() != Kind::Array) {
+            refuse(n.array->pos, "this expression");
+            return {undefined()};
+        }
+        base.global = wideBlob(*wide);
+        base.off = 0;
+        base.type = baseType;
+        base.isVolatile = false;
+    } else if (!arrayBase(n.array.get(), n, base, baseType, "this expression") ||
+               !base.global.empty()) {
         refuse(n.array->pos, "this expression");
         return {undefined()};
     }
@@ -6171,6 +6387,16 @@ std::vector<ir::Value> Lowerer::lowerWords(const Expr* expr) {
     if (const auto* lit = dynamic_cast<const StringLit*>(expr)) {
         return lowerString(*lit).words;
     }
+    if (const auto* wide = dynamic_cast<const WideLit*>(expr)) {
+        // Pointer shape: the rodata address. Array positions (declarations
+        // of [u16; N], same-shape casts) read wideWords instead, through
+        // their own branches, so one node answers both spellings.
+        return {wideRodata(*wide)};
+    }
+    if (const auto* wideChar = dynamic_cast<const WideChar*>(expr)) {
+        TypeRef one{ctx_.basic(BasicKind::U16)};
+        return {constantI64(wideChar->value, one, wideChar->pos)};
+    }
     if (dynamic_cast<const NewStruct*>(expr) != nullptr) {
         return lowerNewStruct(static_cast<const NewStruct&>(*expr));
     }
@@ -6344,6 +6570,17 @@ std::vector<ir::Value> Lowerer::lowerWords(const Expr* expr) {
             if (Place place; resolvePlace(cast->expr.get(), place)) {
                 place.type = target;
                 return loadRange(cast->pos, place, target);
+            }
+            // A wide literal casts by value: its words are the array, so
+            // no address is ever read. Anything else here answers through
+            // lowerWords below.
+            if (const auto* wide =
+                    dynamic_cast<const WideLit*>(cast->expr.get())) {
+                std::vector<ir::Value> words = wideWords(*wide);
+                if (failed_) {
+                    return {undefined()};
+                }
+                return words;
             }
             std::vector<ir::Value> words =
                 lowerWords(cast->expr.get());

@@ -1628,6 +1628,45 @@ void testGenericFn() {
           "nested specs keep their own args");
 }
 
+void testWideRun() {
+    std::printf("wide literals run as u16 data\n");
+    check(runQuiet("func main() -> int {\n"
+                   "    var s: [u16; 3] = u\"AB\";\n"
+                   "    if (s[0] != 65) { return 1; }\n"
+                   "    if (s[1] != 66) { return 2; }\n"
+                   "    if (s[2] != 0) { return 3; }\n"
+                   "    return 0;\n"
+                   "}\n") == 0,
+          "a wide literal fills its array");
+    check(runQuiet("func take(p: *u16) -> int { return p[0] as int; }\n"
+                   "func main() -> int {\n"
+                   "    if (take(u\"Y\") != 89) { return 1; }\n"
+                   "    var c: u16 = u'Z';\n"
+                   "    if ((c as int) != 90) { return 2; }\n"
+                   "    return 0;\n"
+                   "}\n") == 0,
+          "wide pointers and characters read back");
+    check(runQuiet("func main() -> int {\n"
+                   "    if (u\"X\"[0] != 88) { return 1; }\n"
+                   "    var q: *u16 = &u\"QR\"[0];\n"
+                   "    if (q[1] != 82) { return 2; }\n"
+                   "    if (q[2] != 0) { return 3; }\n"
+                   "    var cs: [u16; 3] = u\"AB\" as [u16; 3];\n"
+                   "    if (cs[1] != 66) { return 4; }\n"
+                   "    return 0;\n"
+                   "}\n") == 0,
+          "wide indexing, addresses and casts");
+    check(runQuiet("var wg: [u16; 3] = u\"GH\";\n"
+                   "var wp: *u16 = u\"IJ\";\n"
+                   "func main() -> int {\n"
+                   "    if (wg[1] != 72) { return 1; }\n"
+                   "    if (wg[2] != 0) { return 2; }\n"
+                   "    if (wp[0] != 73) { return 3; }\n"
+                   "    return 0;\n"
+                   "}\n") == 0,
+          "wide globals fold");
+}
+
 void testBitNot() {
     std::printf("bitwise not runs\n");
     check(runQuiet("func main() -> int {\n"
@@ -2449,6 +2488,7 @@ int main() {
     testEnumValues();
     testEnumCast();
     testGenericFn();
+    testWideRun();
     testBitNot();
     testTernary();
     testInterp();

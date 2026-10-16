@@ -38,6 +38,8 @@ enum class TokenKind {
     FloatLit, // `3.14`, `1.0e-9` — text in Literal, no type
     CharLit,  // `'x'` — a code point in Literal
     StringLit,// `"text"`, `"x = {e}"` — parts in Literal
+    WideStringLit,// `u"AB"` — UTF-16 units in Literal, no interpolation
+    WideCharLit, // `u'Z'` — a code point in Literal, typed u16
 
     KwFunc, KwExtern, KwStruct, KwClass, KwInterface, KwUnion, KwEnum,
     KwVar, KwConst, KwType, KwImport, KwFrom, KwExport, KwReturn,
@@ -80,6 +82,7 @@ struct Literal {
     std::string floatDigits;      // FloatLit: exact text
     uint32_t charValue = 0;       // CharLit: the code point
     std::vector<StringPart> parts;// StringLit: text and expression fragments
+    std::vector<uint16_t> wideUnits;  // WideStringLit: decoded UTF-16 units
 };
 
 struct Token {

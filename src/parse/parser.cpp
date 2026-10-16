@@ -1907,6 +1907,16 @@ std::unique_ptr<Expr> Parser::parsePrefix() {
             base = parseStringParts(lit);
             break;
         }
+        case TokenKind::WideStringLit: {
+            const Token& lit = advance();
+            base = std::make_unique<WideLit>(start, lit.lit.wideUnits);
+            break;
+        }
+        case TokenKind::WideCharLit: {
+            const Token& lit = advance();
+            base = std::make_unique<WideChar>(start, lit.lit.charValue);
+            break;
+        }
         case TokenKind::KwTrue: {
             advance();
             base = std::make_unique<BoolLit>(start, true);

@@ -180,6 +180,18 @@ Token Lexer::nextToken() {
             advance();
         }
         token.text = source_.substr(begin, cursor_ - begin);
+        // A `u` glued to a quote opens a wide literal (`u"AB"`, `u'Z'`):
+        // anything else keeps the ordinary identifier path, so a lone `u`
+        // or `u` before a space stays a name.
+        if (token.text == "u" && (peek() == '"' || peek() == '\'')) {
+            char quote = peek();
+            cursor_ = begin;
+            column_ = start.column;
+            if (quote == '"') {
+                return wideString();
+            }
+            return wideChar();
+        }
         auto found = keywords().find(token.text);
         token.kind = found == keywords().end() ? TokenKind::Ident : found->second;
         return token;
@@ -565,8 +577,303 @@ Token Lexer::string() {
     return token;
 }
 
-std::vector<Token> Lexer::braced(int depth) {
-    std::vector<Token> out;
+Token Lexer::wideString() {
+    Position start{file_, line_, column_};
+    Token token;
+    token.kind = TokenKind::WideStringLit;
+    token.pos = start;
+    advance();  // the u
+    advance();  // the opening quote
+    std::string spelling = "u\"";
+    auto digit = [](char h) -> int {
+        if (h >= '0' && h <= '9') {
+            return h - '0';
+        }
+        if (h >= 'a' && h <= 'f') {
+            return h - 'a' + 10;
+        }
+        if (h >= 'A' && h <= 'F') {
+            return h - 'A' + 10;
+        }
+        return -1;
+    };
+    // One UTF-8 sequence becomes one code point (astral planes arrive as a
+    // surrogate pair, the only honest UTF-16 spelling of them). Anything
+    // that is not well-formed UTF-8 is a diagnostic, never a guess.
+    auto pushUtf8 = [&](unsigned char first) -> bool {
+        uint32_t point = 0;
+        int rest = 0;
+        if ((first & 0xE0) == 0xC0) {
+            point = first & 0x1F;
+            rest = 1;
+        } else if ((first & 0xF0) == 0xE0) {
+            point = first & 0x0F;
+            rest = 2;
+        } else if ((first & 0xF8) == 0xF0) {
+            point = first & 0x07;
+            rest = 3;
+        } else {
+            return false;
+        }
+        spelling += static_cast<char>(first);
+        for (int i = 0; i < rest; ++i) {
+            if (atEnd() || (peek() & 0xC0) != 0x80) {
+                return false;
+            }
+            unsigned char cont =
+                static_cast<unsigned char>(advance());
+            spelling += static_cast<char>(cont);
+            point = (point << 6) | (cont & 0x3F);
+        }
+        if (point > 0x10FFFF || (rest == 1 && point < 0x80) ||
+            (rest == 2 && point < 0x800) || (rest == 3 && point < 0x10000) ||
+            (point >= 0xD800 && point <= 0xDFFF)) {
+            return false;
+        }
+        if (point < 0x10000) {
+            token.lit.wideUnits.push_back(static_cast<uint16_t>(point));
+        } else {
+            point -= 0x10000;
+            token.lit.wideUnits.push_back(
+                static_cast<uint16_t>(0xD800 + (point >> 10)));
+            token.lit.wideUnits.push_back(
+                static_cast<uint16_t>(0xDC00 + (point & 0x3FF)));
+        }
+        return true;
+    };
+    auto failHere = [&](const std::string& message) {
+        token.kind = TokenKind::Error;
+        fail(start, message);
+    };
+    for (;;) {
+        if (atEnd() || peek() == '\n') {
+            failHere("unterminated string literal");
+            token.text = spelling;
+            return token;
+        }
+        char c = peek();
+        if (c == '"') {
+            advance();
+            spelling += "\"";
+            token.text = spelling;
+            return token;
+        }
+        if (c == '{') {
+            advance();
+            spelling += "{";
+            // `{{` spells one brace; narrow strings use the same two
+            // characters for it. A lone `{` would interpolate, which wide
+            // literals do not do.
+            if (!atEnd() && peek() == '{') {
+                advance();
+                spelling += "{";
+                token.lit.wideUnits.push_back('{');
+                continue;
+            }
+            failHere("wide strings do not interpolate");
+            continue;
+        }
+        if (c == '}') {
+            // `}}` spells one `}`, and a lone `}` was always literal —
+            // the same rule narrow strings follow.
+            advance();
+            spelling += "}";
+            if (!atEnd() && peek() == '}') {
+                advance();
+                spelling += "}";
+            }
+            token.lit.wideUnits.push_back('}');
+            continue;
+        }
+        if (c == '\\') {
+            advance();
+            spelling += "\\";
+            if (atEnd()) {
+                break;
+            }
+            char e = advance();
+            spelling += e;
+            if (e == 'x') {
+                int hi = !atEnd() ? digit(peek()) : -1;
+                int lo = (hi >= 0 && cursor_ + 1 < source_.size())
+                             ? digit(source_[cursor_ + 1])
+                             : -1;
+                if (hi < 0 || lo < 0) {
+                    failHere("unknown escape");
+                    continue;
+                }
+                spelling += peek();
+                spelling += source_[cursor_ + 1];
+                advance();
+                advance();
+                token.lit.wideUnits.push_back(
+                    static_cast<uint16_t>(hi * 16 + lo));
+                continue;
+            }
+            if (e == 'u') {
+                // `\uHHHH` names one raw unit: even a lone surrogate
+                // passes through unpaired and unvalidated past four hex
+                // digits, so UTF-16 round-trips exactly.
+                uint32_t unit = 0;
+                for (int i = 0; i < 4; ++i) {
+                    if (atEnd()) {
+                        unit = 0xFFFFFFFF;
+                        break;
+                    }
+                    int d = digit(peek());
+                    if (d < 0) {
+                        unit = 0xFFFFFFFF;
+                        break;
+                    }
+                    spelling += peek();
+                    advance();
+                    unit = unit * 16 + static_cast<uint32_t>(d);
+                }
+                if (unit > 0xFFFF) {
+                    failHere("unknown escape");
+                    continue;
+                }
+                token.lit.wideUnits.push_back(static_cast<uint16_t>(unit));
+                continue;
+            }
+            int escaped = escapeValue(e);
+            if (escaped < 0) {
+                failHere("unknown escape");
+                continue;
+            }
+            token.lit.wideUnits.push_back(static_cast<uint16_t>(escaped));
+            continue;
+        }
+        if (static_cast<unsigned char>(c) < 0x80) {
+            advance();
+            spelling += c;
+            token.lit.wideUnits.push_back(static_cast<uint16_t>(
+                static_cast<unsigned char>(c)));
+            continue;
+        }
+        unsigned char first = static_cast<unsigned char>(advance());
+        if (!pushUtf8(first)) {
+            failHere("invalid UTF-8 in wide string");
+            continue;
+        }
+    }
+    failHere("unterminated string literal");
+    token.text = spelling;
+    return token;
+}
+
+Token Lexer::wideChar() {
+    Position start{file_, line_, column_};
+    Token token;
+    token.kind = TokenKind::WideCharLit;
+    token.pos = start;
+    advance();  // the u
+    advance();  // the opening quote
+    if (atEnd() || peek() == '\n') {
+        token.kind = TokenKind::Error;
+        fail(start, "unterminated character literal");
+        return token;
+    }
+    uint32_t value = 0;
+    bool have = false;
+    char c = advance();
+    if (c == '\\') {
+        if (atEnd()) {
+            token.kind = TokenKind::Error;
+            fail(start, "unterminated character literal");
+            return token;
+        }
+        int escaped = -1;
+        if (peek() == 'x' && isHex(peekAt(1)) && isHex(peekAt(2))) {
+            advance();
+            int hi = advance();
+            int lo = advance();
+            hi = hi <= '9' ? hi - '0' : (hi <= 'F' ? hi - 'A' + 10 : hi - 'a' + 10);
+            lo = lo <= '9' ? lo - '0' : (lo <= 'F' ? lo - 'A' + 10 : lo - 'a' + 10);
+            escaped = hi * 16 + lo;
+        } else if (peek() == 'u' && isHex(peekAt(1)) && isHex(peekAt(2)) &&
+                   isHex(peekAt(3)) && isHex(peekAt(4))) {
+            advance();
+            uint32_t unit = 0;
+            for (int i = 0; i < 4; ++i) {
+                char h = advance();
+                unit = unit * 16 +
+                       static_cast<uint32_t>(h <= '9' ? h - '0'
+                                             : (h <= 'F' ? h - 'A' + 10
+                                                        : h - 'a' + 10));
+            }
+            escaped = static_cast<int>(unit);
+        } else if (!atEnd() && peek() != 'u') {
+            escaped = escapeValue(advance());
+        }
+        if (escaped < 0) {
+            token.kind = TokenKind::Error;
+            fail(start, "unknown escape");
+            while (!atEnd() && peek() != '\'' && peek() != '\n') {
+                advance();
+            }
+            if (!atEnd() && peek() == '\'') {
+                advance();
+            }
+            return token;
+        }
+        value = static_cast<uint32_t>(escaped);
+        have = true;
+    } else if (static_cast<unsigned char>(c) < 0x80) {
+        value = static_cast<uint32_t>(static_cast<unsigned char>(c));
+        have = true;
+    } else {
+        // A multibyte source character decodes like any wide unit, but the
+        // literal holds exactly one: astral planes do not fit a u16.
+        unsigned char first = static_cast<unsigned char>(c);
+        uint32_t point = 0;
+        int rest = (first & 0xE0) == 0xC0   ? 1
+                   : (first & 0xF0) == 0xE0 ? 2
+                   : (first & 0xF8) == 0xF0 ? 3
+                                            : -1;
+        bool valid = rest > 0;
+        point = first & (rest == 1   ? 0x1F
+                         : rest == 2 ? 0x0F
+                                     : 0x07);
+        for (int i = 0; valid && i < rest; ++i) {
+            if (atEnd() || (peek() & 0xC0) != 0x80) {
+                valid = false;
+                break;
+            }
+            point = (point << 6) |
+                    (static_cast<unsigned char>(advance()) & 0x3F);
+        }
+        if (valid && (point > 0xFFFF || (rest == 1 && point < 0x80) ||
+                      (rest == 2 && point < 0x800) ||
+                      (point >= 0xD800 && point <= 0xDFFF))) {
+            valid = false;
+        }
+        if (!valid) {
+            token.kind = TokenKind::Error;
+            fail(start, "invalid UTF-8 in wide string");
+            return token;
+        }
+        value = point;
+        have = true;
+    }
+    if (!have || !match('\'')) {
+        token.kind = TokenKind::Error;
+        fail(start, "a wide character holds exactly one unit");
+        return token;
+    }
+    if (value > 0xFFFF) {
+        token.kind = TokenKind::Error;
+        fail(start, "a wide character holds exactly one unit");
+        return token;
+    }
+    token.text = std::string("u'") +
+                 (value < 128 ? std::string(1, static_cast<char>(value)) : "?") +
+                 "'";
+    token.lit.charValue = value;
+    return token;
+}
+
+std::vector<Token> Lexer::braced(int depth) {    std::vector<Token> out;
     for (;;) {
         skipSpaceAndComments();
         if (atEnd()) {

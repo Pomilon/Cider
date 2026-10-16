@@ -1374,8 +1374,31 @@ void testEnumValues() {
     check(aliasQual.ok, "an alias names its enum's variants: " + aliasQual.stage);
 }
 
-void testGlobalConstWidth() {
-    // A folded integer names image bytes, so one that does not fit the
+void testWideLit() {
+    std::printf("wide literals check against u16 shapes\n");
+    Checked arr = check(
+        "func main() -> int {\n"
+        "    var s: [u16; 3] = u\"AB\";\n"
+        "    return s[0] as int;\n"
+        "}\n");
+    check(arr.ok, "a wide literal fills its array: " + arr.stage);
+    Checked ptr = check(
+        "func take(p: *u16) -> int { return p[0] as int; }\n"
+        "func main() -> int { return take(u\"Y\"); }\n");
+    check(ptr.ok, "a wide literal answers a u16 pointer: " + ptr.stage);
+    Checked ch = check(
+        "func main() -> int { var c: u16 = u'Z'; return c as int; }\n");
+    check(ch.ok, "a wide character is a u16: " + ch.stage);
+    Checked badLen = check(
+        "func main() -> int {\n"
+        "    var s: [u16; 2] = u\"AB\";\n"
+        "    return 0;\n"
+        "}\n");
+    check(!badLen.ok && badLen.stage == "check",
+          "a short array still fails");
+}
+
+void testGlobalConstWidth() {    // A folded integer names image bytes, so one that does not fit the
     // declared width is provably overflowing and rejects — unless wrap
     // defines the value, in which case the low bits are kept (SEMANTICS
     // §2.3, FEATURES §11.5). A fitting fold always passes.
@@ -1443,6 +1466,7 @@ int main() {
     testGlobalStruct();
     testFloatGlobal();
     testEnumValues();
+    testWideLit();
     testGlobalConstWidth();
     testCalls();
     testInterface();

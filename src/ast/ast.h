@@ -158,6 +158,23 @@ struct StringLit : Expr {
     void accept(ASTVisitor& v) override;
 };
 
+// A wide string literal (`u"AB"`): decoded UTF-16 units without the
+// terminator. No interpolation — the lexer rejects a lone `{` — so the
+// units are the whole value and lowering appends one zero unit.
+struct WideLit : Expr {
+    std::vector<uint16_t> units;
+    WideLit(Position p, std::vector<uint16_t> us)
+        : Expr(std::move(p)), units(std::move(us)) {}
+    void accept(ASTVisitor& v) override;
+};
+
+// A wide character literal (`u'Z'`): one code point, typed u16.
+struct WideChar : Expr {
+    uint32_t value;
+    WideChar(Position p, uint32_t v) : Expr(std::move(p)), value(v) {}
+    void accept(ASTVisitor& v) override;
+};
+
 struct BoolLit : Expr {
     bool value;
     BoolLit(Position p, bool v) : Expr(std::move(p)), value(v) {}
@@ -729,6 +746,8 @@ struct ASTVisitor {
     virtual void visitFloatLit(FloatLit& n);
     virtual void visitCharLit(CharLit& n);
     virtual void visitStringLit(StringLit& n);
+    virtual void visitWideLit(WideLit& n);
+    virtual void visitWideChar(WideChar& n);
     virtual void visitBoolLit(BoolLit& n);
     virtual void visitNilPtr(NilPtr& n);
     virtual void visitIdent(Ident& n);
@@ -798,6 +817,8 @@ inline void IntLit::accept(ASTVisitor& v) { v.visitIntLit(*this); }
 inline void FloatLit::accept(ASTVisitor& v) { v.visitFloatLit(*this); }
 inline void CharLit::accept(ASTVisitor& v) { v.visitCharLit(*this); }
 inline void StringLit::accept(ASTVisitor& v) { v.visitStringLit(*this); }
+inline void WideLit::accept(ASTVisitor& v) { v.visitWideLit(*this); }
+inline void WideChar::accept(ASTVisitor& v) { v.visitWideChar(*this); }
 inline void BoolLit::accept(ASTVisitor& v) { v.visitBoolLit(*this); }
 inline void NilPtr::accept(ASTVisitor& v) { v.visitNilPtr(*this); }
 inline void Ident::accept(ASTVisitor& v) { v.visitIdent(*this); }
@@ -878,6 +899,8 @@ inline void ASTVisitor::visitFuncSigType(FuncSigType& n) {
 inline void ASTVisitor::visitIntLit(IntLit&) {}
 inline void ASTVisitor::visitFloatLit(FloatLit&) {}
 inline void ASTVisitor::visitCharLit(CharLit&) {}
+inline void ASTVisitor::visitWideLit(WideLit&) {}
+inline void ASTVisitor::visitWideChar(WideChar&) {}
 inline void ASTVisitor::visitStringLit(StringLit& n) {
     for (auto& part : n.parts) {
         if (part.isExpr && part.expr != nullptr) part.expr->accept(*this);
