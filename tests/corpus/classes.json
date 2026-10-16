@@ -876,7 +876,7 @@
  },
  "interface_returns": {
   "actual": "cider run exit 1, stdout empty, stderr diagnostic: `main.cid:44:12: a variable needs an initialiser`; driver has no module loader",
-  "blocker": "multi-file-imports (+ interface-boxing)",
+  "blocker": "interface-value-returns: v2 heap-boxed callee-local class values on return; v3 boxes by address so they dangle (proven garbage); pointer-returns are sound. Needs heap-boxing rule or may-dangle diagnostic (language-design decision)",
   "class": "D"
  },
  "interface_store_lifetime": {
