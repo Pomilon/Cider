@@ -976,7 +976,7 @@
  },
  "map_free_reuse": {
   "actual": "cider run exit 1, stdout empty, stderr diagnostic: `main.cid:15:16: a variable needs an initialiser` + `expected an expression` (generic calls)",
-  "blocker": "stdlib-map + generics",
+  "blocker": "T11 generic-function lowering (calls check but never emit bodies); std.io/alloc/string/fs ports already landed",
   "class": "D"
  },
  "map_new_oom": {
@@ -986,7 +986,7 @@
  },
  "map_remove": {
   "actual": "cider run exit 1, stdout empty, stderr diagnostic: `main.cid:8:40: expected an expression` (generic new_map call)",
-  "blocker": "stdlib-map + generics",
+  "blocker": "T11 generic-function lowering (calls check but never emit bodies); std.io/alloc/string/fs ports already landed",
   "class": "D"
  },
  "match_strings": {
@@ -1136,7 +1136,7 @@
  },
  "phase1_stress": {
   "actual": "exit 1; tests/corpus/legacy/phase1_stress/main.cid:17:20: a variable needs an initialiser; tests/corpus/legacy/phase1_stress/main.cid:24:21: a variable needs an initialiser",
-  "blocker": "asm-blocks (+classes, interfaces, generics, unions, stdlib-imports)",
+  "blocker": "destructors + T11: scope-exit ~DtorObj finalization and generic triple<T> calls are the subjects",
   "class": "D"
  },
  "pointer_interface": {
@@ -1231,7 +1231,7 @@
  },
  "solum": {
   "actual": "blocked-A reclassified 2026-10-05: must pass once blocker lands; run exit 1: OUT: ERR:tests/corpus/solum/main.cid:346:66: unterminated string literal\\ntests/corpus/solum/main.cid:765:36: unterminated string literal\\ntests/corpus/solum/main.cid:1122:62: invalid digit for base\\ntests/corpus",
-  "blocker": "stdlib-missing (also asm-blocks; v3 lexer rejects v2 string escapes)",
+  "blocker": "string-model: 1147-line app needs char* arithmetic, as char* casts, and v2 escapes (str_ptr B precedent); not a quick rewrite",
   "class": "D"
  },
  "sovereign_alloc": {
@@ -1301,27 +1301,27 @@
  },
  "stdlib_map_ops": {
   "actual": "blocked-A reclassified 2026-10-05: must pass once blocker lands; run exit 1: OUT: ERR:tests/corpus/stdlib_map_ops/main.cid:11:40: expected an expression\\ntests/corpus/stdlib_map_ops/main.cid:12:17: expected an expression\\ntests/corpus/stdlib_map_ops/main.cid:13:17: expected an expression",
-  "blocker": "stdlib-missing (no std.* modules in v3; only prelude print/alloc/free/panic)",
+  "blocker": "T11 generic-function lowering (calls check but never emit bodies); std.io/alloc/string/fs ports already landed",
   "class": "D"
  },
  "stdlib_math_basic": {
   "actual": "blocked-A reclassified 2026-10-05: must pass once blocker lands; run exit 1: OUT: ERR:tests/corpus/stdlib_math_basic/main.cid:33:13: expected an expression\\ntests/corpus/stdlib_math_basic/main.cid:34:13: expected an expression\\ntests/corpus/stdlib_math_basic/main.cid:35:13: expected an e",
-  "blocker": "stdlib-missing (no std.* modules in v3; only prelude print/alloc/free/panic)",
+  "blocker": "T11 generic-function lowering (calls check but never emit bodies); std.io/alloc/string/fs ports already landed",
   "class": "D"
  },
  "stdlib_result_expect_fail": {
   "actual": "blocked-A reclassified 2026-10-05: must pass once blocker lands; run exit 1: OUT: ERR:tests/corpus/stdlib_result_expect_fail/main.cid:7:38: expected an expression\\ntests/corpus/stdlib_result_expect_fail/main.cid:8:25: expected an expression\\n",
-  "blocker": "stdlib-missing (no std.* modules in v3; only prelude print/alloc/free/panic)",
+  "blocker": "T11 generic-function lowering (calls check but never emit bodies); std.io/alloc/string/fs ports already landed",
   "class": "D"
  },
  "stdlib_result_ok": {
   "actual": "blocked-A reclassified 2026-10-05: must pass once blocker lands; run exit 1: OUT: ERR:tests/corpus/stdlib_result_ok/main.cid:13:28: expected an expression\\ntests/corpus/stdlib_result_ok/main.cid:14:15: expected an expression\\ntests/corpus/stdlib_result_ok/main.cid:18:37: expected an expr",
-  "blocker": "stdlib-missing (no std.* modules in v3; only prelude print/alloc/free/panic)",
+  "blocker": "T11 generic-function lowering (calls check but never emit bodies); std.io/alloc/string/fs ports already landed",
   "class": "D"
  },
  "stdlib_result_unwrap_fail": {
   "actual": "blocked-A reclassified 2026-10-05: must pass once blocker lands; run exit 1: OUT: ERR:tests/corpus/stdlib_result_unwrap_fail/main.cid:6:38: expected an expression\\ntests/corpus/stdlib_result_unwrap_fail/main.cid:7:25: expected an expression\\n",
-  "blocker": "stdlib-missing (no std.* modules in v3; only prelude print/alloc/free/panic)",
+  "blocker": "T11 generic-function lowering (calls check but never emit bodies); std.io/alloc/string/fs ports already landed",
   "class": "D"
  },
  "stdlib_string_ops": {
@@ -1336,7 +1336,7 @@
  },
  "stdlib_vector_ops": {
   "actual": "blocked-A reclassified 2026-10-05: must pass once blocker lands; run exit 1: OUT: ERR:tests/corpus/stdlib_vector_ops/main.cid:15:31: expected an expression\\ntests/corpus/stdlib_vector_ops/main.cid:16:17: expected an expression\\ntests/corpus/stdlib_vector_ops/main.cid:17:17: expected an e",
-  "blocker": "stdlib-missing (no std.* modules in v3; only prelude print/alloc/free/panic)",
+  "blocker": "T11 generic-function lowering (calls check but never emit bodies); std.io/alloc/string/fs ports already landed",
   "class": "D"
  },
  "str_escape": {
@@ -1401,7 +1401,7 @@
  },
  "template": {
   "actual": "exit 1; tests/corpus/legacy/template/main.cid:21:27: expected an expression; tests/corpus/legacy/template/main.cid:30:27: expected an expression",
-  "blocker": "T11 generic-function lowering: identity<int>/max<int> calls check but never emit bodies",
+  "blocker": "T11 generic-function lowering (calls check but never emit bodies); std.io/alloc/string/fs ports already landed",
   "class": "D"
  },
  "template_body_forms": {
@@ -1426,7 +1426,7 @@
  },
  "test_result": {
   "actual": "exit 1; tests/corpus/legacy/test_result/main.cid:6:20: expected an expression; tests/corpus/legacy/test_result/main.cid:8:15: expected an expression",
-  "blocker": "generics-result-types (+stdlib-imports, asm-blocks)",
+  "blocker": "T11 generic-function lowering (calls check but never emit bodies); std.io/alloc/string/fs ports already landed",
   "class": "D"
  },
  "test_types": {
@@ -1436,7 +1436,7 @@
  },
  "test_vector": {
   "actual": "exit 1; tests/corpus/legacy/test_vector/main.cid:5:31: expected an expression; tests/corpus/legacy/test_vector/main.cid:6:10: expected an expression",
-  "blocker": "generics (+stdlib-imports, asm-blocks)",
+  "blocker": "T11 generic-function lowering (calls check but never emit bodies); std.io/alloc/string/fs ports already landed",
   "class": "D"
  },
  "throw_across_frames": {
@@ -1521,7 +1521,7 @@
  },
  "vector_empty": {
   "actual": "blocked-A reclassified 2026-10-05: must pass once blocker lands; run exit 1: OUT: ERR:tests/corpus/vector_empty/main.cid:40:31: expected an expression\\ntests/corpus/vector_empty/main.cid:41:13: expected an expression\\ntests/corpus/vector_empty/main.cid:42:13: expected an expression\\ntests",
-  "blocker": "stdlib-missing (no std.* modules in v3; only prelude print/alloc/free/panic)",
+  "blocker": "T11 generic-function lowering (calls check but never emit bodies); std.io/alloc/string/fs ports already landed",
   "class": "D"
  },
  "vector_reserve_oom": {
