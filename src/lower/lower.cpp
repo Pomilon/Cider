@@ -2169,6 +2169,43 @@ void Lowerer::onVarDecl(VarDecl& n) {
     if (failed_) {
         return;
     }
+    // Takes pack byte-contiguously: a narrow take shares its slot with the
+    // next take's bytes, the way construction and every read address them.
+    // Storing one take per slot would spread them, and a later packed read
+    // would take padding for payload. storeRange owns both the chunked
+    // shape these values arrive in and the valued shape calls answer, so
+    // aggregates route through it; every other kind keeps its word stores.
+    Kind kind = !type.isError() ? type.type->kind() : Kind::Error;
+    if (!values.empty() &&
+        (kind == Kind::Struct || kind == Kind::Array ||
+         kind == Kind::Class || kind == Kind::Union)) {
+        int count = wordCount(type);
+        if (count < 0) {
+            refuse(n.pos, "this declaration");
+            return;
+        }
+        uint64_t cells = static_cast<uint64_t>(count);
+        std::vector<ir::Value> slots =
+            allocaSlots(type, n.pos, cells);
+        if (failed_) {
+            return;
+        }
+        Place dest;
+        dest.slots = slots;
+        dest.type = type;
+        dest.off = 0;
+        dest.isVolatile = false;
+        storeRange(n.pos, dest, values, type);
+        if (failed_) {
+            return;
+        }
+        LocalBinding binding;
+        binding.slots = std::move(slots);
+        binding.type = type;
+        binding.isMutable = true;
+        locals_.back()[n.name] = binding;
+        return;
+    }
     std::vector<ir::Value> slots = allocaSlots(type, n.pos,
                                                static_cast<uint64_t>(values.size()));
     for (uint64_t i = 0; i < static_cast<uint64_t>(values.size()); ++i) {
@@ -7602,6 +7639,45 @@ std::vector<ir::Value> Lowerer::lowerCallWords(Call& n) {
                                       n.args[i]->pos);
         if (failed_) {
             return {undefined()};
+        }
+        // Aggregate arguments travel packed: element loads answer one
+        // take per slot, but the callee binds packed words, so the takes
+        // are stored contiguously and reloaded as the parameter's words.
+        // storeRange owns both the chunked shape takes arrive in and the
+        // valued shape calls answer; a load of the packed cells is what
+        // the callee's slots then observe.
+        Kind argKind =
+            !want.isError() ? want.type->kind() : Kind::Error;
+        if (!arg.words.empty() && !want.isError() &&
+            (argKind == Kind::Struct || argKind == Kind::Array ||
+             argKind == Kind::Class || argKind == Kind::Union)) {
+            int count = wordCount(want);
+            if (count < 0) {
+                refuse(n.args[i]->pos, "this call");
+                return {undefined()};
+            }
+            uint64_t cells = static_cast<uint64_t>(count);
+            std::vector<ir::Value> temps =
+                allocaSlots(want, n.args[i]->pos, cells);
+            if (failed_) {
+                return {undefined()};
+            }
+            Place pack;
+            pack.slots = temps;
+            pack.type = want;
+            pack.off = 0;
+            pack.isVolatile = false;
+            storeRange(n.args[i]->pos, pack, arg.words, want);
+            if (failed_) {
+                return {undefined()};
+            }
+            LocalBinding packed;
+            packed.slots = std::move(temps);
+            packed.type = want;
+            arg.words = loadLocal(n.args[i]->pos, packed);
+            if (failed_) {
+                return {undefined()};
+            }
         }
         // A float argument rides one word in an SSE register (psABI). The
         // checked type of the argument is the class: a literal is typed in

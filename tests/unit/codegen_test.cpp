@@ -697,6 +697,21 @@ void testArray() {
     std::printf("arrays\n");
     check(runQuiet("func main() -> int { var a: [u8; 3] = new [u8; 3] { 7, 8, 9 }; return a[0] + a[1] + a[2] as int; }\n") == 24,
           "constant indices read back");
+    // Narrow takes pack byte-contiguously across value boundaries: an
+    // element copy and an element passed straight to a call must read
+    // back every byte, not just the first take.
+    check(runQuiet("func main() -> int {\n"
+                   "    var na: [[u8; 3]; 2] = new [[u8; 3]; 2] { new [u8; 3] { 7, 8, 9 }, new [u8; 3] { 10, 11, 12 } };\n"
+                   "    var row: [u8; 3] = na[0];\n"
+                   "    return row[2] as int;\n"
+                   "}\n") == 9,
+          "an element copy keeps its tail bytes");
+    check(runQuiet("func sumRow(a: [u8; 3]) -> int { return (a[0] as int) + (a[1] as int) + (a[2] as int); }\n"
+                   "func main() -> int {\n"
+                   "    var na: [[u8; 3]; 2] = new [[u8; 3]; 2] { new [u8; 3] { 7, 8, 9 }, new [u8; 3] { 10, 11, 12 } };\n"
+                   "    return sumRow(na[0]);\n"
+                   "}\n") == 24,
+          "an element passed to a call keeps its tail bytes");
     check(runQuiet("func main() -> int {\n"
                    " var a: [i32; 5] = new [i32; 5] { 1, 2, 3, 4, 5 };\n"
                    " var s: int = 0;\n"
