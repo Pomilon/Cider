@@ -1005,9 +1005,9 @@
   "class": "A"
  },
  "method_array_return": {
-  "actual": "cider run exit 1, stdout empty, stderr diagnostic: `main.cid:38:24: a variable needs an initialiser`",
+  "actual": "exact stdout/stderr/exit match (v3 conventions: sret for wide answers, register path for one/two words; v2 spellings and heap-copy comments dropped)",
   "blocker": "virtual-methods: subject is virtual/override array returns with dynamic dispatch; v3 has no class vtables (only interfaces)",
-  "class": "D"
+  "class": "A"
  },
  "mixed_cmp": {
   "actual": "exact stdout/stderr/exit match",
