@@ -1316,6 +1316,12 @@ void testPointerArith() {
     check(alias.ok, "nil is nilPtr: " + alias.stage);
 }
 
+void testThisKeyword() {
+    std::printf("this and self are synonyms\n");
+    Checked t = check("class C { var x: int; func get() -> int { return (*this).x; } } func main() -> int { return 0; }");
+    check(t.ok, "(*this).x checks in a method: " + t.stage);
+}
+
 void testArrowMember() {
     std::printf("arrow member access checks\n");
     Checked arrow = check("struct S { var x: int; } func f(p: *S) -> int { return p->x; } func main() -> int { return 0; }");
@@ -1644,6 +1650,7 @@ int main() {
     testEnumMatch();
     testPointerArith();
     testArrowMember();
+    testThisKeyword();
     testRepeatZero();
     testSliceCopy();
     testAsm();

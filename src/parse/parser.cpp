@@ -1954,10 +1954,12 @@ std::unique_ptr<Expr> Parser::parsePrefix() {
             base = std::make_unique<Ident>(start, std::move(name));
             break;
         }
-        case TokenKind::KwSelf: {
-            // `self` is an ordinary name once parsed: the checker binds it
-            // as a local in every method, constructor and instantiated
-            // generic method body. One spelling, one lookup, no special node.
+        case TokenKind::KwSelf:
+        case TokenKind::KwThis: {
+            // `self` and `this` are ordinary names once parsed: the checker
+            // binds `self` as a local in every method, constructor and
+            // instantiated generic method body. `this` is the same receiver
+            // under its v2 spelling, so it lands on the same name.
             advance();
             base = std::make_unique<Ident>(start, "self");
             break;

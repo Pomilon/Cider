@@ -51,7 +51,7 @@ const std::unordered_map<std::string, TokenKind>& keywords() {
         {"throw", TokenKind::KwThrow}, {"delete", TokenKind::KwDelete},
         {"new", TokenKind::KwNew}, {"as", TokenKind::KwAs},
         {"and", TokenKind::KwAnd}, {"or", TokenKind::KwOr},
-        {"not", TokenKind::KwNot}, {"self", TokenKind::KwSelf},
+        {"not", TokenKind::KwNot}, {"self", TokenKind::KwSelf}, {"this", TokenKind::KwThis},
         {"super", TokenKind::KwSuper}, {"init", TokenKind::KwInit},
         {"deinit", TokenKind::KwDeinit}, {"virtual", TokenKind::KwVirtual},
         {"private", TokenKind::KwPrivate}, {"public", TokenKind::KwPublic},

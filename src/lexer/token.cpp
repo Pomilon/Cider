@@ -51,6 +51,7 @@ const char* tokenName(TokenKind kind) {
         case TokenKind::KwAnd: return "and";
         case TokenKind::KwOr: return "or";
         case TokenKind::KwNot: return "not";
+        case TokenKind::KwThis: return "this";
         case TokenKind::KwSelf: return "self";
         case TokenKind::KwSuper: return "super";
         case TokenKind::KwInit: return "init";
