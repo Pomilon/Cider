@@ -1535,9 +1535,9 @@
   "class": "B"
  },
  "virtual_aggregate_return_width": {
-  "actual": "blocked-A reclassified 2026-10-05: must pass once blocker lands; run exit 1: OUT: ERR:tests/corpus/virtual_aggregate_return_width/main.cid:55:16: a variable needs an initialiser\\ntests/corpus/virtual_aggregate_return_width/main.cid:64:18: a variable needs an initialiser\\ntests/corpus/vir",
+  "actual": "exact stdout/stderr/exit match (v3 sret/register conventions; pointer-to-array reads spell (*p)[i])",
   "blocker": "virtual-methods: subject is virtual/override aggregate returns with heap-copy ABI; v3 has no class vtables (only interfaces)",
-  "class": "D"
+  "class": "A"
  },
  "virtual_call_args": {
   "actual": "tests/corpus/virtual_call_args/main.cid:35:26: expected ')'",
