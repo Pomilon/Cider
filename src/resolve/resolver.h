@@ -109,6 +109,11 @@ public:
     // Every field or member name of a struct, class or union, in declaration
     // order. Empty for anything else.
     std::vector<std::string> fieldNames(DeclId id) const;
+    // A class's whole chain's fields in physical order (bases first), which
+    // is also the set a `new C { ... }` literal must name. Structs and
+    // unions answer their own names; a chain the layout cannot name answers
+    // empty and construction refuses.
+    std::vector<std::string> chainFieldNames(DeclId id) const;
     // The byte offset of a field within its struct, laid out in declaration
     // order with each field aligned to its own alignment (TYPES.md 3.4). -1
     // when the struct, the field, or any size on the way there is unknown.

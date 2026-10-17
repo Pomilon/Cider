@@ -1257,6 +1257,7 @@ void Checker::visitClassDecl(ClassDecl& n) {
         return;
     }
     checkNoSelfEmbed(self->id, "class", n.name, n.fields, "field");
+    checkOverrides(*self, n);
     checkMethods(self->id, Kind::Class, n.methods);
     checkCtor(self->id, Kind::Class, n.init.get(), true);
     checkCtor(self->id, Kind::Class, n.deinit.get(), false);
@@ -1668,6 +1669,28 @@ void Checker::checkInitAssign(DeclId id, const FuncDecl& ctor) {
     InitAssign state;
     state = assignedThrough(ctor.body.get(), state, fields);
     requireInitAssigned(ctor.body->pos, fields, state);
+}
+
+void Checker::checkOverrides(const resolve::Decl& self, const ClassDecl& n) {
+    for (const MethodDecl& method : n.methods) {
+        const Signature* own = resolver_.methodSig(self.id, method.name);
+        for (DeclId baseId : resolver_.classBases(self.id)) {
+            const Signature* baseSig = resolver_.methodSig(baseId, method.name);
+            if (baseSig == nullptr) {
+                continue;
+            }
+            if (resolver_.virtualIndexOf(baseId, method.name) < 0) {
+                fail(method.pos, "a method with a base signature that is not " +
+                                     std::string("virtual is neither an override nor a shadow: '") +
+                                     method.name + "'");
+                continue;
+            }
+            if (own != nullptr && !sameSignature(*own, *baseSig)) {
+                fail(method.pos, "'" + method.name +
+                                     "' overrides with an incompatible signature");
+            }
+        }
+    }
 }
 
 void Checker::checkMethods(DeclId id, Kind kind, std::vector<MethodDecl>& methods) {
@@ -4363,7 +4386,7 @@ TypeRef Checker::checkNewStruct(NewStruct& expr) {
         fail(expr.pos, "this class has an init: create it with new C(args)");
         return errorRef();
     }
-    std::vector<std::string> fields = resolver_.fieldNames(*id);
+    std::vector<std::string> fields = resolver_.chainFieldNames(*id);
     if (expr.fields.size() != fields.size()) {
         fail(expr.pos, "every field is named, exactly once");
         return errorRef();

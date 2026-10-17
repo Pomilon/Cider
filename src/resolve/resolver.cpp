@@ -545,6 +545,15 @@ std::vector<std::string> Resolver::fieldNames(DeclId id) const {
     return found->second;
 }
 
+std::vector<std::string> Resolver::chainFieldNames(DeclId id) const {
+    std::unordered_set<std::string> seen;
+    std::vector<std::string> out;
+    if (!chainFieldsImpl(id, seen, out)) {
+        return {};
+    }
+    return out;
+}
+
 const Signature* Resolver::methodSig(DeclId id, const std::string& name) const {
     auto found = methodSigs_.find(declKey(id) + "." + name);
     if (found != methodSigs_.end()) {

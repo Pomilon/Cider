@@ -665,6 +665,38 @@ void testDelete() {
     check(!nil.ok && nil.stage == "check", "deleting nil fails");
 }
 
+// A redeclaration of a base method: an override when the base slot is
+// virtual and the signature agrees; an error otherwise (SEMANTICS 10).
+void testOverrides() {
+    std::printf("override rules check\n");
+    Checked good = check(
+        "class Base {\n"
+        "    var id: int;\n"
+        "    virtual func noise() -> int { return 11; }\n"
+        "}\n"
+        "class Derived : Base {\n"
+        "    func noise() -> int { return 22; }\n"
+        "}\n"
+        "func main() -> int {\n"
+        "    var d: Derived = new Derived { id: 1 };\n"
+        "    var bp: *Base = &d;\n"
+        "    return (*bp).noise();\n"
+        "}\n");
+    check(good.ok, "an override of a virtual slot checks: " + good.stage);
+    Checked notVirtual = check(
+        "class Base { var id: int; func noise() -> int { return 11; } }\n"
+        "class Derived : Base { func noise() -> int { return 22; } }\n"
+        "func main() -> int { return 0; }\n");
+    check(!notVirtual.ok && notVirtual.stage == "check",
+          "redeclaring a non-virtual base method fails");
+    Checked badSig = check(
+        "class Base { var id: int; virtual func noise() -> int { return 11; } }\n"
+        "class Derived : Base { func noise(x: int) -> int { return 22; } }\n"
+        "func main() -> int { return 0; }\n");
+    check(!badSig.ok && badSig.stage == "check",
+          "an incompatible override signature fails");
+}
+
 // `++i` needs an integer place; floats and rvalues are rejected where used.
 void testIncrDecr() {
     std::printf("increment and decrement check\n");
@@ -1604,6 +1636,7 @@ int main() {
     testSliceCopy();
     testAsm();
     testDelete();
+    testOverrides();
     testLen();
     testFuncLitChecks();
     testControl();

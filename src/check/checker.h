@@ -301,6 +301,10 @@ private:
     bool constAggregateInit(const Expr& init);
     TypeRef checkTernary(Ternary& expr, TypeRef expected);
     void checkMethods(DeclId id, Kind kind, std::vector<MethodDecl>& methods);
+    // A redeclaration of a base method is an override when the base's slot
+    // is virtual — with a compatible signature — and an error otherwise
+    // (SEMANTICS 10: neither an override nor a shadow exists).
+    void checkOverrides(const resolve::Decl& self, const ClassDecl& n);
     void checkCtor(DeclId id, Kind kind, FuncDecl* ctor, bool isInit);
     // BUG-274: a by-value cycle has no finite size, so the declaration
     // itself is refused. Only inline layouts embed — struct, union, class
