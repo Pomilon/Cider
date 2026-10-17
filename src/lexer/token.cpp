@@ -126,6 +126,7 @@ const char* tokenName(TokenKind kind) {
         case TokenKind::CaretEq: return "^=";
         case TokenKind::LtLtEq: return "<<=";
         case TokenKind::GtGtEq: return ">>=";
+        case TokenKind::Arrow: return "->";
         case TokenKind::FatArrow: return "=>";
         case TokenKind::ColonColon: return "::";
         case TokenKind::Ellipsis: return "...";

@@ -244,7 +244,9 @@ Token Lexer::nextToken() {
             }
             break;
         case '-':
-            if (match('-')) {
+            if (match('>')) {
+                token.kind = TokenKind::Arrow;
+            } else if (match('-')) {
                 token.kind = TokenKind::MinusMinus;
             } else {
                 token.kind = match('=') ? TokenKind::MinusEq : TokenKind::Minus;

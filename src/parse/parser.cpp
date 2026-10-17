@@ -407,15 +407,9 @@ std::vector<Param> Parser::parseParams() {
     return params;
 }
 
-// A return type is Minus followed by Gt — the spelling `->`, which lexes as
-// two tokens because the member-access arrow does not exist.
+// A return type is spelled `->` and lexes as one Arrow token.
 std::unique_ptr<TypeExpr> Parser::parseReturnType() {
-    if (!check(TokenKind::Minus)) {
-        return nullptr;
-    }
-    advance();
-    if (!match(TokenKind::Gt)) {
-        failHere("expected '>' after '-'");
+    if (!match(TokenKind::Arrow)) {
         return nullptr;
     }
     // `-> volatile T` is accepted for the same reason a parameter's
@@ -2019,6 +2013,20 @@ std::unique_ptr<Expr> Parser::parsePostfix(std::unique_ptr<Expr> base) {
             std::string name = advance().text;
             (void)fpos;
             base = std::make_unique<Field>(base->pos, std::move(base), std::move(name));
+            continue;
+        }
+        // `p->f` desugars to `(*p).f`: one deref, then the member.
+        if (match(TokenKind::Arrow)) {
+            if (!check(TokenKind::Ident)) {
+                failHere("expected a field name");
+                return nullptr;
+            }
+            std::string name = advance().text;
+            Position bpos = base->pos;
+            base = std::make_unique<Field>(
+                bpos,
+                std::make_unique<Unary>(bpos, UnOp::Deref, std::move(base)),
+                std::move(name));
             continue;
         }
         // `max::<int>(...)`: explicit arguments need the `::`, which is what

@@ -191,13 +191,12 @@ void testMinus() {
     check(tokens[1].kind == cider::TokenKind::IntLit, "then the literal");
 }
 
-// `->` does not exist: it lexes as two tokens, and the parser rejects it.
-void testNoArrow() {
-    std::printf("there is no arrow\n");
+// `->` is one Arrow token.
+void testArrowToken() {
+    std::printf("the arrow token\n");
     std::vector<cider::Token> tokens = lex("p->f");
-    check(tokens.size() == 5, "p, minus, greater, f, End");
-    check(tokens[1].kind == cider::TokenKind::Minus, "a minus, not an arrow");
-    check(tokens[2].kind == cider::TokenKind::Gt, "then a >");
+    check(tokens.size() == 4, "p, arrow, f, End");
+    check(tokens[1].kind == cider::TokenKind::Arrow, "the arrow is one token");
 }
 
 // Multi-character operators lex longest-first.
@@ -253,7 +252,7 @@ int main() {
     testStrings();
     testBraces();
     testMinus();
-    testNoArrow();
+    testArrowToken();
     testOperators();
     testWide();
     testCommentsLinesErrors();

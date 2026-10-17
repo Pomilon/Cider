@@ -9,7 +9,7 @@ class BSTNode {
 
 func insert(root: *BSTNode, val: int) -> *BSTNode {
     if (root == nilPtr) {
-        var newNode: *BSTNode = malloc(24) as *BSTNode;
+        var newNode: *BSTNode = malloc(sizeof(BSTNode) as i64) as *BSTNode;
         newNode->value = val;
         newNode->left = nilPtr;
         newNode->right = nilPtr;

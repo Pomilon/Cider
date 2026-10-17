@@ -170,9 +170,9 @@
   "class": "A"
  },
  "bst": {
-  "actual": "13:17: expected an expression at `newNode->value` (the `->` operator is removed, \u00a713; field access through a pointer is `(*p).f`)",
+  "actual": "exact stdout/stderr/exit triple match; -> member access (Unified Standard 4.2) cleared the old rejection; node malloc now sizeof(BSTNode) (v3 classes carry an 8-byte vptr)",
   "blocker": "v3-no-arrow",
-  "class": "B"
+  "class": "A"
  },
  "callee_branch_release_once": {
   "actual": "compile rejection: tests/corpus/callee_branch_release_once/main.cid:55:8: a method needs a name \u2014 v2 destructor spelling `func ~Sq()`; v3 uses deinit (FEATURES 2.2/5.3)",

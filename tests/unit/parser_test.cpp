@@ -95,9 +95,9 @@ void testMinusAndArrow() {
     const cider::IntLit& lit =
         static_cast<const cider::IntLit&>(*program->globals[0]->init);
     check(lit.negative && lit.digits == "128", "one negative literal");
-    bool ok2 = true;
+    bool ok2 = false;
     parse("func f(p: *Point) -> int { return p->x; }", ok2);
-    check(!ok2, "p->x is rejected");
+    check(ok2, "p->x parses");
 }
 
 // `a += b` is one Assign carrying its operator; `a = b` carries none.

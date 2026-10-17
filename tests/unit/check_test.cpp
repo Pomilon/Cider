@@ -1313,6 +1313,14 @@ void testPointerArith() {
     check(!addrDerefMix.ok && addrDerefMix.stage == "check", "&*p is not **int");
 }
 
+void testArrowMember() {
+    std::printf("arrow member access checks\n");
+    Checked arrow = check("struct S { var x: int; } func f(p: *S) -> int { return p->x; } func main() -> int { return 0; }");
+    check(arrow.ok, "p->x checks like (*p).x: " + arrow.stage);
+    Checked dot = check("struct S { var x: int; } func f(p: *S) -> int { return p.x; } func main() -> int { return 0; }");
+    check(!dot.ok && dot.stage == "check", "p.x on a pointer stays rejected");
+}
+
 void testFloatGlobal() {
     // A float expression over constants names every image byte once
     // folded, so a float global may hold it (FEATURES §8.3): no startup
@@ -1632,6 +1640,7 @@ int main() {
     testGuard();
     testEnumMatch();
     testPointerArith();
+    testArrowMember();
     testRepeatZero();
     testSliceCopy();
     testAsm();
