@@ -5,16 +5,16 @@ export interface Shape {
 
 export class Sq {
   var s: int;
-  func init(v: int) -> void { this.s = v; }
-  func area() -> int { return this.s * this.s; }
+  func init(v: int) { (*self).s = v; }
+  func area() -> int { return (*self).s * (*self).s; }
   func kind() -> int { return 1; }
 }
 
 export class Rect {
   var w: int;
   var h: int;
-  func init(a: int, b: int) -> void { this.w = a; this.h = b; }
-  func area() -> int { return this.w * this.h; }
+  func init(a: int, b: int) { (*self).w = a; (*self).h = b; }
+  func area() -> int { return (*self).w * (*self).h; }
   func kind() -> int { return 2; }
 }
 

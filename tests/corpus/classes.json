@@ -845,9 +845,9 @@
   "class": "B"
  },
  "interface_call_args": {
-  "actual": "exit=1 first='60:14 a variable needs an initialiser' (+init-method calls 73/75/77 'expected a field name', Rect* postfix, new Sq(4) ctor values)",
+  "actual": "exact stdout/stderr/exit match (v3 spellings: init-based heap construction, *Rect prefix, (*w).area())",
   "blocker": "class-values + interface-args: two-phase var+init() calls unparsesable (init is KwInit), uninit class values rejected, postfix Rect* has no v3 counterpart; T11 twice<T> over interface params needs this first",
-  "class": "D"
+  "class": "A"
  },
  "interface_element_list": {
   "actual": "exact stdout/stderr/exit match",
