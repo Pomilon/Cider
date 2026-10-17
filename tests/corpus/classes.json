@@ -1430,7 +1430,7 @@
   "class": "A"
  },
  "test_types": {
-  "actual": "6:24: chars compare for equality only (char==byte equivalence is v2 semantics; v3 rules char a distinct type, no implicit comparison)",
+  "actual": "6:24: a char compares with a char, not a number (char stays a distinct 1-byte type; v2 char==byte equivalence remains rejected)",
   "blocker": "stdlib-imports (+char-byte-distinct diffs #9/#10)",
   "class": "B"
  },

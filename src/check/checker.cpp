@@ -3650,14 +3650,13 @@ TypeRef Checker::checkBinary(Binary& expr, TypeRef expected) {
         const bool rhsChar = rhs.type->kind() == Kind::Basic &&
                              *rhs.type->basic() == BasicKind::Char;
         if (lhsChar || rhsChar) {
-            // Equality on chars compares byte values (SEMANTICS §4, the
-            // bool rule applied to the other 1-byte type): ordering has
-            // no meaning, and a char beside a non-char needs an explicit
-            // `as` — a bare 66 is an int, not a char (FEATURES §13).
-            if (isEq && lhsChar && rhsChar) {
+            // Chars compare by byte value: equality and ordering alike
+            // (Unified Standard 2.3). A char beside a non-char still
+            // needs an explicit `as` — a bare 66 is an int, not a char.
+            if (lhsChar && rhsChar) {
                 return TypeRef{ctx_.basic(BasicKind::Bool)};
             }
-            fail(expr.pos, "chars compare for equality only");
+            fail(expr.pos, "a char compares with a char, not a number");
             return errorRef();
         }
         const bool lhsString = lhs.type->kind() == Kind::String;
@@ -3836,6 +3835,15 @@ TypeRef Checker::checkBinary(Binary& expr, TypeRef expected) {
         }
         fail(expr.pos, "a string concatenates only with a string");
         return errorRef();
+    }
+    // Unified Standard 2.3: char beside char stays char through + and -,
+    // so `c - 'a' + 'A'` is char all the way and needs no casts.
+    const bool lhsCh = lhs.type->kind() == Kind::Basic &&
+                       *lhs.type->basic() == BasicKind::Char;
+    const bool rhsCh = rhs.type->kind() == Kind::Basic &&
+                       *rhs.type->basic() == BasicKind::Char;
+    if (lhsCh && rhsCh && (expr.op == BinOp::Add || expr.op == BinOp::Sub)) {
+        return lhs;
     }
     TypeRef common = commonType(lhs, rhs, expr.pos);
     if (common.isError()) {

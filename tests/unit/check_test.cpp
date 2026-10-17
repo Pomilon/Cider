@@ -752,8 +752,8 @@ void testCharCompare() {
         "}\n");
     check(good.ok, "== and != on chars: " + good.stage);
     Checked rel = check(
-        "func main() -> int { var c: char = 'a' < 'b'; return 0; }\n");
-    check(!rel.ok && rel.stage == "check", "ordering on chars fails");
+        "func main() -> int { if ('a' < 'b') { return 1; } return 0; }\n");
+    check(rel.ok, "ordering on chars checks: " + rel.stage);
     Checked mixed = check(
         "func main() -> int { var c: char = 'a'; if (c == 97) { return 1; } return 0; }\n");
     check(!mixed.ok && mixed.stage == "check", "char == int fails without as");
@@ -1324,6 +1324,14 @@ void testUninit() {
     check(!r.ok && r.stage == "check", "uninit is refused as a value");
 }
 
+void testCharArith() {
+    std::printf("char arithmetic\n");
+    Checked up = check(
+        "func up(c: char) -> char { if (c >= 'a' && c <= 'z') { return c - 'a' + 'A'; } return c; }\n"
+        "func main() -> int { return 0; }\n");
+    check(up.ok, "range compare and char math check: " + up.stage);
+}
+
 void testFiniRefusal() {
     std::printf("fini refuses loudly\n");
     Checked f = check("fini { } func main() -> int { return 0; }");
@@ -1665,6 +1673,7 @@ int main() {
     testPointerArith();
     testArrowMember();
     testFiniRefusal();
+    testCharArith();
     testUninit();
     testThisKeyword();
     testRepeatZero();
