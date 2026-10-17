@@ -387,6 +387,10 @@ std::vector<Param> Parser::parseParams() {
             failHere("a parameter needs a type");
             return params;
         }
+        // A parameter may spell `volatile T`: qualification is an access
+        // property of declarations, and the value semantics are the same
+        // either way.
+        (void)match(TokenKind::KwVolatile);
         std::unique_ptr<TypeExpr> type = parseType();
         if (type == nullptr) {
             return params;
@@ -414,6 +418,9 @@ std::unique_ptr<TypeExpr> Parser::parseReturnType() {
         failHere("expected '>' after '-'");
         return nullptr;
     }
+    // `-> volatile T` is accepted for the same reason a parameter's
+    // spelling is: the qualifier describes access, not the value.
+    (void)match(TokenKind::KwVolatile);
     return parseType();
 }
 
@@ -1558,6 +1565,10 @@ std::unique_ptr<Stmt> Parser::parseAsm() {
 
 std::unique_ptr<TypeExpr> Parser::parseType() {
     Position start = peek().pos;
+    // A leading `volatile` before a whole type (`type VI = volatile T`,
+    // `[volatile T; N]`): qualification is an access property, so the
+    // spelling is accepted wherever a type is.
+    (void)match(TokenKind::KwVolatile);
     uint64_t depth = 0;
     while (match(TokenKind::Star)) {
         ++depth;

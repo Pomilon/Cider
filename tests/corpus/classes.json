@@ -1555,9 +1555,9 @@
   "class": "B"
  },
  "volatile_aggregate_convert": {
-  "actual": "blocked-A reclassified 2026-10-05: must pass once blocker lands; run exit 1: OUT: ERR:tests/corpus/volatile_aggregate_convert/main.cid:16:11: expected a type\\ntests/corpus/volatile_aggregate_convert/main.cid:18:25: a variable needs an initialiser\\ntests/corpus/volatile_aggregate_convert/",
+  "actual": "exact stdout/stderr/exit match (volatile accepted in param/return/alias/array-element positions; values exact)",
   "blocker": "FEAT-049 volatile-qualified types (volatile fields/params/alias/returns)",
-  "class": "D"
+  "class": "A"
  },
  "volatile_counter": {
   "actual": "exact stdout/stderr/exit match (exit 15 proves the volatile loads were not hoisted)",
