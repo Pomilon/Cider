@@ -6,15 +6,17 @@
 from std.fs import write;
 
 func main() -> int {
-    var out: char* = "vm-stdout\n";  // 10 bytes
-    var err: char* = "vm-err\n";     // 7 bytes
+    var out: string = "vm-stdout\n";  // 10 bytes
+    var err: string = "vm-err\n";     // 7 bytes
+    var outp: *void = (&out[0]) as *void;
+    var errp: *void = (&err[0]) as *void;
 
-    if (write(1, out as *void, 10) != 10) return 1;
-    if (write(2, err as *void, 7) != 7) return 2;
-    if (write(1, out as *void, 0) != 0) return 3;
+    if (write(1, outp, 10) != 10) { return 1; }
+    if (write(2, errp, 7) != 7) { return 2; }
+    if (write(1, outp, 0) != 0) { return 3; }
 
     // Invalid fd: raw syscalls return -EBADF (-9), not libc's -1.
-    if (write(-1, out as *void, 10) != -9) return 4;
+    if (write(0 - 1, outp, 10) != 0 - 9) { return 4; }
 
     return 0;
 }

@@ -1,66 +1,66 @@
 from std.io import puts, exit, printInt;
-from std.vector import new_vec, push, pop, get, len_vec, insert, remove, clear;
+from std.vector import Vec, new_vec, push, pop, get, len_vec, insert, remove, clear;
 
 func test_push_pop() -> int {
-    var v: Vec<int> = new_vec<int>();
-    push<int>(&v, 10);
-    push<int>(&v, 20);
-    push<int>(&v, 30);
-    if (len_vec<int>(&v) != 3) { return 1; }
+    var v: Vec<int> = new_vec::<int>();
+    push::<int>(&v, 10);
+    push::<int>(&v, 20);
+    push::<int>(&v, 30);
+    if (len_vec::<int>(&v) != 3) { return 1; }
 
-    var val: int = pop<int>(&v);
+    var val: int = pop::<int>(&v);
     if (val != 30) { return 2; }
-    val = pop<int>(&v);
+    val = pop::<int>(&v);
     if (val != 20) { return 3; }
-    val = pop<int>(&v);
+    val = pop::<int>(&v);
     if (val != 10) { return 4; }
-    if (len_vec<int>(&v) != 0) { return 5; }
+    if (len_vec::<int>(&v) != 0) { return 5; }
     return 0;
 }
 
 func test_get() -> int {
-    var v: Vec<int> = new_vec<int>();
-    push<int>(&v, 100);
-    push<int>(&v, 200);
-    var p: *int = get<int>(&v, 0);
+    var v: Vec<int> = new_vec::<int>();
+    push::<int>(&v, 100);
+    push::<int>(&v, 200);
+    var p: *int = get::<int>(&v, 0);
     if (*p != 100) { return 1; }
-    p = get<int>(&v, 1);
+    p = get::<int>(&v, 1);
     if (*p != 200) { return 2; }
-    p = get<int>(&v, 5);
+    p = get::<int>(&v, 5);
     if (p != nilPtr) { return 3; }
-    p = get<int>(&v, -1);
+    p = get::<int>(&v, -1);
     if (p != nilPtr) { return 4; }
     return 0;
 }
 
 func test_insert_remove() -> int {
-    var v: Vec<int> = new_vec<int>();
-    push<int>(&v, 1);
-    push<int>(&v, 3);
-    insert<int>(&v, 1, 2);
-    if (len_vec<int>(&v) != 3) { return 1; }
-    var p: *int = get<int>(&v, 1);
+    var v: Vec<int> = new_vec::<int>();
+    push::<int>(&v, 1);
+    push::<int>(&v, 3);
+    insert::<int>(&v, 1, 2);
+    if (len_vec::<int>(&v) != 3) { return 1; }
+    var p: *int = get::<int>(&v, 1);
     if (*p != 2) { return 2; }
 
-    var val: int = remove<int>(&v, 1);
+    var val: int = remove::<int>(&v, 1);
     if (val != 2) { return 3; }
-    if (len_vec<int>(&v) != 2) { return 4; }
-    p = get<int>(&v, 1);
+    if (len_vec::<int>(&v) != 2) { return 4; }
+    p = get::<int>(&v, 1);
     if (*p != 3) { return 5; }
     return 0;
 }
 
 func test_growth() -> int {
-    var v: Vec<int> = new_vec<int>();
+    var v: Vec<int> = new_vec::<int>();
     var i: int = 0;
     while (i < 100) {
-        push<int>(&v, i);
+        push::<int>(&v, i);
         i = i + 1;
     }
-    if (len_vec<int>(&v) != 100) { return 1; }
+    if (len_vec::<int>(&v) != 100) { return 1; }
     i = 0;
     while (i < 100) {
-        var p: *int = get<int>(&v, i);
+        var p: *int = get::<int>(&v, i);
         if (*p != i) { return 2; }
         i = i + 1;
     }
@@ -68,11 +68,11 @@ func test_growth() -> int {
 }
 
 func test_clear() -> int {
-    var v: Vec<int> = new_vec<int>();
-    push<int>(&v, 1);
-    push<int>(&v, 2);
-    clear<int>(&v);
-    if (len_vec<int>(&v) != 0) { return 1; }
+    var v: Vec<int> = new_vec::<int>();
+    push::<int>(&v, 1);
+    push::<int>(&v, 2);
+    clear::<int>(&v);
+    if (len_vec::<int>(&v) != 0) { return 1; }
     return 0;
 }
 

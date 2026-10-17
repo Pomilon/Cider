@@ -7,5 +7,5 @@ from shapes import Param;
 
 export class Mid {
   var tag: int;
-  func draw(p: Param) -> int { return p.v * 10000 + this.tag; }
+  func draw(p: Param) -> int { return p.v * 10000 + (*self).tag; }
 }

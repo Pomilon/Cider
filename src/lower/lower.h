@@ -20,8 +20,10 @@
 #define CIDER_LOWER_LOWER_H
 
 #include <memory>
+#include <optional>
 #include <string>
 #include <unordered_map>
+#include <unordered_set>
 #include <vector>
 
 #include "check/checker.h"
@@ -61,6 +63,10 @@ struct GlobalBinding {
     // A read-only bytes object this global points at, empty when none. Set
     // for string globals, whose 16 bytes are (rodata address, length).
     std::string initLabel;
+    // Link-time code addresses this global holds, one `.quad` per entry.
+    // Set for function-pointer globals, whose single word is the
+    // function's address. Empty means the scalar path.
+    std::vector<std::string> initLabels;
     bool isVolatile = false;
 };
 
@@ -80,12 +86,21 @@ public:
     bool lowerInto(const std::string& name, Program& program);
     // Moves the accumulated module out. Null when nothing lowered.
     std::unique_ptr<ir::Module> takeModule() { return std::move(module_); }
+    // Emits every used generic-function specialization once, after all
+    // modules lowered (cross-module specs are unknown while their home
+    // module lowers). Runs the checker's spec walks with this lowerer
+    // attached; nested specs enqueue through the same worklist, so
+    // generic-calls-generic terminates through the emitted-set. False
+    // when any body refuses.
+    bool emitSpecBodies();
 
     const std::vector<check::CheckError>& errors() const { return errors_; }
 
     // --- called by the Checker during its walk, through check::LowerSink ---
     void onProgram(Program& n) override;
     void onFuncDecl(FuncDecl& n) override;
+    void onSpecFunc(DeclId spec, const FuncDecl& spelling,
+                    const Signature& sig) override;
     void onMethodDecl(const std::string& owner, const std::string& name,
                       const std::vector<Param>& params, const Signature& sig,
                       TypeRef self, Block& body) override;
@@ -100,10 +115,12 @@ public:
     void onWhile(WhileStmt& n) override;
     void onFor(ForStmt& n) override;
     void onForIn(ForInStmt& n) override;
+    void onForInProtocol(ForInStmt& n, TypeRef seqType, DeclId id);
     void onDelete(DeleteStmt& n) override;
     void onAsmStmt(AsmStmt& n) override;
     void onBlockEnter(Block& n) override;
     void onBlockExit(Block& n) override;
+    void onDeferStmt(DeferStmt& n) override;
     // A closure literal, after its body checked. Emits the hidden function
     // and records where, so lowering the literal itself answers the
     // two-word value (code address, captures pointer).
@@ -122,10 +139,27 @@ public:
     ir::Value lowerStringEqWords(std::vector<ir::Value> left,
                                 std::vector<ir::Value> right,
                                 Position pos, bool isEq);
+    // `==` / `!=` on an interface against nilPtr: the checker proved one
+    // side an interface and the other the nil literal, so nullity is the
+    // vtable word — a null interface is (nil, nil), and every box sets
+    // a real table, so vtable == 0 answers it with one comparison.
+    ir::Value lowerInterfaceEq(const Binary& n);
+    // `==` / `!=` on a closure against nilPtr: nullity is the code word —
+    // a null closure is (nil, nil), and every closure literal sets real
+    // code, so code == 0 answers it with one comparison.
+    ir::Value lowerClosureEq(const Binary& n);
     // `?:` with branch control flow: the checker proved both arms share one
     // type, so each arm stores its words into the cell and the join loads
     // them back. The untaken arm never evaluates (SEMANTICS: single-eval).
     std::vector<ir::Value> lowerTernary(const Ternary& n);
+    // Closure round-trip materialization, shared by casts and implicit
+    // conversions: spill answers an address for a pair, load answers the
+    // pair an address names. The checker proved provenance; these only
+    // move the bytes.
+    ir::Value closureAddress(std::vector<ir::Value> pair, TypeRef closureType,
+                             Position pos);
+    std::vector<ir::Value> loadClosurePair(ir::Value addr, TypeRef closureType,
+                                            Position pos);
     // Prefix/postfix `++` / `--`: the checker proved the operand is an
     // integer place, so the operand loads, steps by one through the same
     // operation `+= 1` would emit, and stores back. Postfix answers the
@@ -144,6 +178,15 @@ public:
     // Return statements validate through this; call results validate while
     // building, so both producers enforce the same row.
     bool returnWordsFit(const std::vector<ir::Value>& words, Position pos);
+    // A caller-allocated answer slot for a hidden-pointer return: fresh
+    // consecutive slots plus the leading address argument. The answer
+    // loads come after the call itself (see callSretLoads), never before.
+    std::vector<ir::Value> callSretSlots(ir::Instr& call, const Type* ret,
+                                         Position pos);
+    // One load per answer word from a hidden-pointer slot row, emitted
+    // after the call that fills them.
+    std::vector<ir::Value> callSretLoads(const std::vector<ir::Value>& slots,
+                                         const Type* ret, Position pos);
     std::vector<ir::Value> lowerCallWords(Call& n);
     ir::Value onCall(Call& n);
     ir::Value onIdent(Ident& n);
@@ -172,6 +215,15 @@ public:
         int64_t len = 0;
     };
     LoweredString lowerString(const StringLit& lit);
+    // The rodata address of a wide literal's units: appended zero unit
+    // included, little-endian pairs. One blob per occurrence, like narrow
+    // strings; array positions read words instead (see wideWords).
+    ir::Value wideRodata(const WideLit& lit);
+    std::string wideBlob(const WideLit& lit);
+    // One constant word per unit plus the NUL terminator, for array
+    // positions ([u16; N] declarations, same-shape casts). The checker
+    // proved the count fits, so a mismatch here refuses as a lowerer bug.
+    std::vector<ir::Value> wideWords(const WideLit& lit);
     // An interpolation `"a{x}b"` builds its string on the heap: each part
     // answers an address word and a length word, the lengths sum to a
     // total, one cider_alloc answers the buffer, and every part's bytes
@@ -185,17 +237,84 @@ public:
         ir::Value len;
     };
     LoweredString lowerInterp(const StringLit& lit);
+    // Joins address/length parts into one heap string: the lengths sum to
+    // a total, one cider_alloc answers the buffer, and every part's bytes
+    // copy into it at the running offset. Shared by interpolation (many
+    // parts) and concatenation (two), so the two build one buffer.
+    LoweredString joinStrings(const std::vector<PartBytes>& parts, Position pos);
+    // `s + t` answers the joined pair: the checker proved both sides
+    // strings, so each side lowers to exactly its address and length.
+    std::vector<ir::Value> lowerStringAdd(const Binary& n);
     PartBytes rodataPair(const std::string& text, Position pos);
     void copyBytes(ir::Value dst, ir::Value src, ir::Value len, Position pos);
     // How many machine words a value occupies: one for scalars and pointers,
     // two for the 16-byte aggregates (strings today). -1 for anything larger,
     // which this slice does not lower.
     int wordCount(TypeRef type);
+    // Whether a return wider than the register row (IR.md §6) travels
+    // through a caller-allocated buffer whose address rides first (SysV
+    // sret): more words than the row carries, never void or unknown.
+    bool needsSret(const Type* ret);
+    // Builds the 16-byte interface pair (TYPES.md §4.3) from a concrete
+    // value's words: the data word carries the concrete bytes inline when
+    // they fit one word, and the vtable word names the (concrete,
+    // interface) table, emitted once per pair in interface method order.
+    // A value already of interface type passes through unchanged; a
+    // concrete that cannot live in the pair refuses loudly, never
+    // silently. Every implicit conversion site (call arguments, var
+    // declarations, assignments, returns) funnels through here, so the
+    // pair is built identically on every path.
+    std::vector<ir::Value> boxToInterface(std::vector<ir::Value> words,
+                                          TypeRef from, TypeRef to,
+                                          Position pos);
+    // Answers the address of a value's place: a direct place folds to
+    // a computed base, an indirect place answers its pointer advanced
+    // past any offset, an index answers its element address, and a
+    // global answers its label. Quiet bool: callers refuse with the
+    // message that names their own gap.
+    bool addressOfValue(const Expr* expr, TypeRef ptr, Position pos,
+                        ir::Value& out);
+    // Boxes like boxToInterface, but a class value boxes by reference:
+    // the data word is the object's address, so the pair aliases the
+    // value instead of copying it. Anything without an addressable
+    // place refuses loudly; there is no address to name and inventing
+    // one would be a silent copy that breaks aliasing.
+    std::vector<ir::Value> boxClassOperand(const Expr* expr,
+                                           std::vector<ir::Value> words,
+                                           TypeRef from, TypeRef to,
+                                           Position pos);
+    // Reads an interface back as a concrete struct value or class
+    // reference (TYPES.md §4.3): the pair's vtable must name the
+    // (target, interface) table, or the data word is another type's
+    // bytes and the read traps. Anything else refuses.
+    std::vector<ir::Value> lowerInterfaceDowncast(const Cast& n, TypeRef source,
+                                                  TypeRef target);
+    // An int-to-enum cast: the value must name a declared enumerator, and
+    // inventing one traps (FEATURES §2, enum ↔ int row). Answers the value
+    // retyped, after the membership check. Anything else refuses.
+    ir::Value lowerIntToEnum(const Cast& n, TypeRef source, TypeRef target);
+    // Emits the vtable for one (concrete, interface) pair, once per label:
+    // one link-time function address per interface method, in the
+    // resolver's methodNames order. Answers the table's link label.
+    std::string emitVTable(DeclId concrete, DeclId iface, Position pos);
+    // The virtual slots of a class as one module global (FEATURES 2.3): the
+    // table's entry i holds the address of the method that owns slot i for
+    // this concrete type — its own override, or the declarer's function for
+    // an inherited slot. A class never virtualized answers "".
+    std::string emitClassVTable(DeclId concrete, Position pos);
+    // Emits one receiver adapter for a class method reached through an
+    // interface: dispatch always passes the data word's address, so the
+    // adapter loads the class reference it holds and tail-calls the
+    // method. One adapter per (class, method), shared by every interface
+    // the class satisfies. Answers the adapter's link label.
+    std::string emitIfaceAdapter(DeclId concrete, const std::string& method,
+                                 const Signature& sig, Position pos);
     // Lowers any expression to its words. Scalars answer one value; a string
     // literal answers its address and length. Anything larger is refused.
     std::vector<ir::Value> lowerWords(const Expr* expr);
     // `&f` where f names a plain function answers its code address as one
-    // word. Every other address refuses: `&x` on values is FEAT-038.
+    // word; `&x` on a value answers its place through the shared helper
+    // (slots, indirect, index, or global label).
     std::vector<ir::Value> lowerAddrOf(const Unary& n);
     std::vector<ir::Value> lowerElementAddr(const Index& n);
     // Stores every word into the place an identifier names: consecutive
@@ -237,6 +356,13 @@ public:
     // Names a place: identifiers, and field chains over them. Anything else
     // (a call result, arithmetic) has no address and is refused.
     bool resolvePlace(const Expr* expr, Place& out);
+    // The address of a class/struct value as the receiver its static method
+    // expects first. Shared by method calls and the for-in protocol, so the
+    // two never disagree about what an object address is. Takes the resolved
+    // place rather than the expression: resolving twice could lower effects
+    // twice. `what` names the construct for the refusal.
+    bool receiverAddress(const Place& base, Position pos, const char* what,
+                         ir::Value& out);
     // One scalar load/store at a place plus offset. The bytes must sit inside
     // a single word; anything straddling words is refused, not split, because
     // a partial-word write that guessed its neighbors would corrupt them.
@@ -253,6 +379,49 @@ public:
     std::vector<ir::Value> loadRange(Position pos, const Place& place, TypeRef fieldType);
     void storeRange(Position pos, const Place& place,
                     const std::vector<ir::Value>& words, TypeRef fieldType);
+    // A field a struct arm binds: name, type, and byte offset from the
+    // match's spill base. Tests record them; bodies materialize them.
+    struct MatchFieldBind {
+        std::string name;
+        TypeRef type;
+        int64_t off;
+    };
+    // True when a live arm reads the scrutinee by address (a struct or
+    // union pattern): bare values cannot answer field or tag tests.
+    bool matchNeedsSpill(const MatchStmt& n);
+    // A bound name's words for a value comparison (locals, then globals,
+    // then constants — the checker's resolveMatchValue order). Answers
+    // false with no failure when the name binds fresh instead.
+    bool matchBoundWords(const std::string& name, std::vector<ir::Value>& words,
+                         Position pos);
+    // One arm's test chain over the spill base: control reaches `body`
+    // only when every comparison holds, else `next`. Answers false after
+    // refusing. Struct fields recurse per field; member arms read the tag.
+    bool lowerMatchArmTest(const Pattern& pat, const Place& base, uint32_t body,
+                           uint32_t next, Position pos,
+                           std::vector<MatchFieldBind>& binds);
+    // One field's comparisons at its place: `pass` when all hold, `miss`
+    // on the first failure. Struct and member sub-patterns recurse above.
+    bool lowerMatchFieldTest(const Pattern& sub, const Place& at, uint32_t pass,
+                             uint32_t miss, Position pos,
+                             std::vector<MatchFieldBind>& binds);
+    // A constant against already-loaded words of its type: strings by
+    // content, nil against null, the rest by fold plus a first-word
+    // comparison. Branches taken/missed; refuses what cannot compare.
+    bool lowerMatchConstTest(const Expr* value, const std::vector<ir::Value>& words,
+                             uint32_t taken, uint32_t missed, Position pos);
+    // A range against already-loaded words of an integer type: the cell
+    // widens to 64 bits preserving sign, then lo <= x <= hi compares in
+    // 64 bits with the scrutinee's signedness — out-of-width bounds
+    // match what fits instead of truncating. Branches taken/missed;
+    // refuses what cannot compare.
+    bool lowerMatchRangeTest(const std::vector<ir::Value>& words, TypeRef scrutinee,
+                             int64_t lo, int64_t hi, uint32_t taken,
+                             uint32_t missed, Position pos);
+    // The test chains' edges: unconditional and conditional, sealing the
+    // block they leave like every other emitter.
+    void matchBrTo(uint32_t target, Position pos);
+    void matchCondTo(ir::Value cond, uint32_t taken, uint32_t missed, Position pos);
     // Construction into given slots, field by field (element by element). A
     // nested value lands word-aligned or is refused: unaligned multi-word
     // copies guess neighbor bytes.
@@ -266,6 +435,13 @@ public:
     // recursing into nested constructions). Every leaf must fold; the
     // checker's const gate owns that rule and this is its backstop.
     bool globalInitBytes(const NewArray& init, TypeRef arrayType, std::string& bytes);
+    // Folds a const struct or class value to image bytes: one field
+    // after another at the layout's offsets, zeros between and around
+    // them. A class opens with a null vtable word the way `new` writes
+    // one. Anything that is not a scalar, an array, or a nested value
+    // refuses loudly.
+    bool globalInitStructBytes(const NewStruct& made, TypeRef structType,
+                               std::string& bytes);
     // A class constructs its fields after a null vptr word; methods wire
     // the vptr in a later slice. A class with bases is refused: inherited
     // fields have no layout yet.
@@ -389,10 +565,40 @@ public:
 private:
     void refuse(Position pos, const std::string& what);
     void emitTerminator(const ir::Terminator& term);
+    // Shared function frame setup and teardown behind onFuncDecl and spec
+    // emissions, so the two cannot diverge (sret handling, slot layout,
+    // falloff rule). The caller lowers the body between the two and pops
+    // the frame exactly as onFuncDecl always has.
+    void beginFuncFrame(const std::string& link, const Signature& sig,
+                        const std::vector<Param>& params, Position pos);
+    void endFuncFrame(Position pos);
+    // Whether a block of the function under construction can run: a
+    // breadth-first walk over terminator edges from the entry block. A
+    // reachable falloff in a value function is a compile-time rejection
+    // (every path returns or provably diverges); an unreachable one is
+    // the dead join of diverged arms, refused by nothing.
+    bool falloffReachable(uint32_t target);
     ir::Value constantI64(int64_t value, TypeRef type, Position pos);
     // Classify the register class of every parameter word once the slots
     // are placed; the code generator reads it straight from the function.
     void recordParamClasses();
+    // Instantiated generic functions already emitted, by specialization
+    // key: one argument list means one body, and a recursive call into
+    // the same spec references the pending symbol instead of looping.
+    std::unordered_set<std::string> emittedSpecs_;
+    // The template home module while a spec body emits, empty otherwise.
+    // Bodies resolve names where they are defined, never where they are
+    // used from: the helpers below answer the home scope while set and
+    // the ordinary module scope while clear, so non-generic lowering
+    // cannot observe them.
+    std::string emitHome_;
+    // The spec whose body is emitting, if any: the resolving context for
+    // nested generic calls. Tracks the checker's recording context so a
+    // shared template body answers each spec its own instantiation.
+    std::optional<DeclId> emitSpec_;
+    std::string homeModule() const;
+    const resolve::Scope* homeScope() const;
+    const resolve::Scope* emitScope() const;
     // A float constant: the IEEE bits for the literal's own width, stored
     // in `constantBits` exactly as an integer constant stores its value.
     ir::Value constantFBits(uint64_t bits, TypeRef type, Position pos);
@@ -446,6 +652,19 @@ private:
         uint32_t exit;
     };
     std::vector<LoopTargets> loops_;
+    // Pending defer bodies per open block scope, innermost last; bodies
+    // within one scope run LIFO. A loop pushes a marker with the frame
+    // count at body entry, so break and continue run exactly the scopes
+    // they exit. Emission is inline at each exit point (no clearing: every
+    // static copy sits on its own dynamic path, and the copies after a
+    // jump are unreachable).
+    std::vector<std::vector<Stmt*>> deferFrames_;
+    std::vector<uint64_t> loopMarks_;
+    // Emits the pending bodies of frames [from, size): innermost scope
+    // first, LIFO within a scope (FEATURES §5.2). Bodies lower by
+    // re-walking, proven clean during checking; enclosing locals stay
+    // visible because frames pop only at block exits.
+    void runDefers(uint64_t from);
     uint32_t rodataSeq_ = 0;
     uint32_t current_ = 0;
     bool terminated_ = false;
@@ -464,6 +683,14 @@ private:
     // exists yet (a module the walk has not reached is a loud refusal at
     // the use, not a silent first match).
     const GlobalBinding* findGlobal(const std::string& name);
+    bool foldModuleConst(const std::string& name, Position pos,
+                         std::vector<ir::Value>& out);
+    const GlobalBinding* findGlobalIn(const std::string& homeModule,
+                                      const std::string& name);
+    const GlobalBinding* resolveModuleGlobal(const std::string& modName,
+                                             const std::string& fieldName);
+    std::string globalLabel(const std::string& module,
+                            const std::string& name);
     std::unordered_map<std::string, std::string> globalNames_;
     std::vector<check::CheckError> errors_;
     // Hidden closure functions, minted in first-sight order. The site that
@@ -474,6 +701,14 @@ private:
     };
     std::unordered_map<const FuncLit*, ClosureSite> closures_;
     uint64_t closureSeq_ = 0;
+    // Vtable labels already emitted into the module: one (concrete,
+    // interface) table is built once, however many conversions name it.
+    std::unordered_set<std::string> vtablesEmitted_;
+    // One class vtable per concrete type, emitted once under its own label.
+    std::unordered_set<std::string> classVtablesEmitted_;
+    // Receiver adapters already emitted: one (class, method) adapter is
+    // shared by every vtable that names it.
+    std::unordered_set<std::string> adaptersEmitted_;
 };
 
 }  // namespace lower

@@ -13,20 +13,22 @@ struct WithUnion {
 }
 
 func test_union_stress() -> int {
-    // Overlap verification
-    var u: IntOrInt;
+    // Overlap verification. v3 unions are tagged (TYPES 3.4a): the tag
+    // names the live member, so a read under the other member's name
+    // faults. Same-type overlap coverage goes through the documented
+    // raw-bytes row instead (union as int reads the payload, tag
+    // ignored, TYPES 4.6) — the bytes are the same bytes.
+    var u: IntOrInt = new IntOrInt { a: 0 };
     u.a = 42;
     if (u.a != 42) { return 1; }
-    if (u.b != 42) { return 2; }
+    if ((u as int) != 42) { return 2; }
     u.b = 99;
-    if (u.a != 99) { return 3; }
+    if ((u as int) != 99) { return 3; }
     // Struct containing union
-    var w: WithUnion;
-    w.tag = 1;
-    w.data.a = 42;
+    var w: WithUnion = new WithUnion { tag: 1, data: new IntOrInt { a: 42 } };
     if (w.data.a != 42) { return 4; }
     // Array of unions
-    var arr: [IntOrInt; 5];
+    var arr: [IntOrInt; 5] = new [IntOrInt; 5] {[new IntOrInt { a: 0 }, ...]};
     for (var i: int = 0; i < 5; i = i + 1) {
         arr[i].a = i * 100;
     }
@@ -35,8 +37,8 @@ func test_union_stress() -> int {
         sum = sum + arr[i].a;
     }
     if (sum != 1000) { return 5; }
-    // sizeof
-    if (sizeof(IntOrInt) != 4) { return 6; }
+    // sizeof: the tagged layout answers payload + tag (TYPES 3.4a)
+    if (sizeof(IntOrInt) != 8) { return 6; }
     return 0;
 }
 
@@ -44,18 +46,17 @@ func test_union_stress() -> int {
 func test_alloc_stress_extended() -> int {
     // Individual allocations
     var p0: *void = malloc(8) as *void;
-    if (p0 == 0) { return 1; }
+    if (p0 == nilPtr) { return 1; }
     var p1: *void = malloc(8) as *void;
-    if (p1 == 0) { return 1; }
+    if (p1 == nilPtr) { return 1; }
     var p2: *void = malloc(8) as *void;
-    if (p2 == 0) { return 1; }
+    if (p2 == nilPtr) { return 1; }
     // Array of pointers
-    var ptrs: [*void; 3];
-    ptrs[0] = p0;
+    var ptrs: [*void; 3] = new [*void; 3] {p0, p1, p2};
     ptrs[1] = p1;
     ptrs[2] = p2;
-    if (ptrs[0] == 0) { return 1; }
-    if (ptrs[1] == 0) { return 1; }
+    if (ptrs[0] == nilPtr) { return 1; }
+    if (ptrs[1] == nilPtr) { return 1; }
     // Free through array
     free(ptrs[0]);
     free(ptrs[1]);
@@ -81,8 +82,8 @@ class Multiplier {
 }
 
 func test_interface_stress() -> int {
-    var a: Adder;
-    var m: Multiplier;
+    var a: Adder = new Adder { };
+    var m: Multiplier = new Multiplier { };
     var c1: Calculator = a;
     var c2: Calculator = m;
     if (c1.compute(5) != 15) { return 1; }
@@ -91,10 +92,13 @@ func test_interface_stress() -> int {
 }
 
 // ===== DESTRUCTOR STRESS =====
+// v3 finalizes only on delete (FEATURES 5.3): v2's scope-exit ~DtorObj
+// becomes an explicit delete at the end of each scope. The counts stay
+// exactly the ones the scope-unwind model produced.
 var dtor_total: int = 0;
 
 class DtorObj {
-    func ~DtorObj() {
+    func deinit() {
         dtor_total = dtor_total + 1;
     }
 }
@@ -103,14 +107,17 @@ func test_dtor_stress() -> int {
     dtor_total = 0;
     // Single object scope
     {
-        var a: DtorObj;
+        var a: *DtorObj = alloc(sizeof(DtorObj) as i64, 8) as *DtorObj;
+        delete a;
     }
     if (dtor_total != 1) { return 1; }
     // Multiple objects in same scope
     dtor_total = 0;
     {
-        var a: DtorObj;
-        var b: DtorObj;
+        var a: *DtorObj = alloc(sizeof(DtorObj) as i64, 8) as *DtorObj;
+        var b: *DtorObj = alloc(sizeof(DtorObj) as i64, 8) as *DtorObj;
+        delete b;
+        delete a;
     }
     if (dtor_total != 2) { return 2; }
     return 0;
@@ -127,17 +134,15 @@ struct Pair<T> {
 }
 
 func test_template_stress() -> int {
-    if (triple<int>(5) != 15) { return 1; }
-    var p: Pair<int>;
-    p.first = 10;
-    p.second = 20;
+    if (triple::<int>(5) != 15) { return 1; }
+    var p: Pair<int> = new Pair<int> { first: 10, second: 20 };
     if (p.first + p.second != 30) { return 2; }
     return 0;
 }
 
 // ===== SLICE STRESS =====
 func test_slice_stress() -> int {
-    var arr: [int; 10];
+    var arr: [int; 10] = new [int; 10] {[0, ...]};
     for (var i: int = 0; i < 10; i = i + 1) {
         arr[i] = i * 10;
     }
@@ -166,7 +171,7 @@ func test_slice_stress() -> int {
 
 // ===== FOR-IN STRESS =====
 func test_forin_stress() -> int {
-    var arr: [int; 10];
+    var arr: [int; 10] = new [int; 10] {[0, ...]};
     for (var i: int = 0; i < 10; i = i + 1) { arr[i] = i; }
     // Basic sum
     var sum: int = 0;
@@ -192,13 +197,13 @@ func test_forin_stress() -> int {
 // ===== CROSS-FEATURE STRESS =====
 func test_cross_feature() -> int {
     // Union + for-in
-    var arr: [IntOrInt; 5];
+    var arr: [IntOrInt; 5] = new [IntOrInt; 5] {[new IntOrInt { a: 0 }, ...]};
     for (var i: int = 0; i < 5; i = i + 1) { arr[i].a = i; }
     var sum: int = 0;
     for (var i: int = 0; i < 5; i = i + 1) { sum = sum + arr[i].a; }
     if (sum != 10) { return 1; }
     // Template
-    if (triple<int>(5) != 15) { return 2; }
+    if (triple::<int>(5) != 15) { return 2; }
     return 0;
 }
 

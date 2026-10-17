@@ -17,8 +17,8 @@ from lib import Shape, Sq, Rect, areaOf;
 class Tri {
   var b: int;
   var h: int;
-  func init(bb: int, hh: int) -> void { this.b = bb; this.h = hh; }
-  func area() -> int { return this.b * this.h / 2; }
+  func init(bb: int, hh: int) { (*self).b = bb; (*self).h = hh; }
+  func area() -> int { return (*self).b * (*self).h / 2; }
   func kind() -> int { return 3; }
 }
 
@@ -35,8 +35,8 @@ class Holder {
 // CIDER-BUG-080: interface-typed parameter on a constructor.
 class Wrapper {
   var inner: lib.Shape;
-  func init(x: lib.Shape) -> void { this.inner = x; }
-  func area() -> int { return this.inner.area(); }
+  func init(x: lib.Shape) { (*self).inner = x; }
+  func area() -> int { return (*self).inner.area(); }
 }
 
 // An interface method that itself takes an interface parameter; the
@@ -47,19 +47,17 @@ interface Sink {
 
 class Sum {
   var total: int;
-  func init() -> void { this.total = 0; }
+  func init() { (*self).total = 0; }
   func add(x: Shape) -> int {
-    this.total = this.total + x.area();
-    return this.total;
+    (*self).total = (*self).total + x.area();
+    return (*self).total;
   }
 }
 
 // The callee retargets its own by-value copy; the caller's object must not
 // move and a later call must still see the original value.
 func retarget(x: Shape) -> int {
-  var r: Rect;
-  r.w = 6;
-  r.h = 7;
+  var r: *Rect = new Rect(6, 7);
   x = r;
   return x.area();
 }
@@ -69,12 +67,9 @@ func retarget(x: Shape) -> int {
 func twice<T>(x: Shape, t: T) -> int { return x.area() * 2; }
 
 func main() -> int {
-  var sq: Sq;
-  sq.init(3);
-  var rc: Rect;
-  rc.init(2, 5);
-  var tri: Tri;
-  tri.init(6, 7);
+  var sq: *Sq = new Sq(3);
+  var rc: *Rect = new Rect(2, 5);
+  var tri: *Tri = new Tri(6, 7);
 
   // 1. Concrete value -> interface parameter (imported function, imported
   //    concrete class).
@@ -99,24 +94,24 @@ func main() -> int {
   if (areaOf(i) != 10) { return 9; }
 
   // 5. Concrete pointer -> interface parameter.
-  var rp: Rect* = &rc;
+  var rp: *Rect = rc;
   if (areaOf(rp) != 10) { return 10; }
 
   // 6. Class method with an interface parameter, concrete arguments.
-  var h: Holder;
+  var h: Holder = new Holder { tag: 1 };
   if (h.use(sq) != 109) { return 11; }
   if (h.use(rc) != 210) { return 12; }
   if (h.use(new Sq(5)) != 125) { return 13; }
   if (h.use(tri) != 321) { return 14; }
 
   // 7. Constructor with an interface parameter.
-  var w: Wrapper* = new Wrapper(sq);
-  if (w.area() != 9) { return 15; }
-  var w2: Wrapper* = new Wrapper(new Rect(4, 5));
-  if (w2.area() != 20) { return 16; }
+  var w: *Wrapper = new Wrapper(sq);
+  if ((*w).area() != 9) { return 15; }
+  var w2: *Wrapper = new Wrapper(new Rect(4, 5));
+  if ((*w2).area() != 20) { return 16; }
 
   // 8. Interface method with an interface parameter, concrete arguments.
-  var sink: Sink = new Sum;
+  var sink: Sink = new Sum();
   if (sink.add(sq) != 9) { return 17; }
   if (sink.add(rc) != 19) { return 18; }
   if (sink.add(new Sq(2)) != 23) { return 19; }
@@ -138,8 +133,8 @@ func main() -> int {
   if (acc != 20) { return 23; }
 
   // 11. Interface parameter of a template instantiation.
-  if (twice<int>(sq, 7) != 18) { return 24; }
-  if (twice<int>(new Tri(6, 7), 0) != 42) { return 25; }
+  if (twice::<int>(sq, 7) != 18) { return 24; }
+  if (twice::<int>(new Tri(6, 7), 0) != 42) { return 25; }
 
   return 0;
 }

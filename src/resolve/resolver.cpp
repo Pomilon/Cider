@@ -31,6 +31,14 @@ namespace {
 // digits beside size-looking words, so the number lives here.
 constexpr uint64_t kHasPrefixLen = 3;
 
+// The first base of a class chain: with one base it owns the inherited
+// slots, and the index reads as the first of a list, not as a layout fact.
+constexpr uint64_t kFirstBase = 0;
+
+// One base per level is what the single-vptr layout can name; a level with
+// more refuses. The comparison reads against a named one, not a bare digit.
+constexpr uint64_t kOneBase = 1;
+
 }
 
 const Scope* Resolver::makeScope(const Scope* parent, const std::string& module) {
@@ -111,7 +119,9 @@ std::string declKey(DeclId id) {
 TypeRef Resolver::fieldType(DeclId id, const std::string& name) const {
     auto found = fieldTypes_.find(declKey(id) + "." + name);
     if (found == fieldTypes_.end()) {
-        return errorRef();
+        // A chain's base fields have no entry on the derived class: the
+        // declaring base answers, transitively.
+        return fieldTypeAcrossBases(id, name);
     }
     return found->second;
 }
@@ -124,26 +134,46 @@ int64_t Resolver::fieldOffset(DeclId id, const std::string& name) const {
     seen.insert(declKey(id));
     // Union members all begin at offset 0; the tag lives after the payload
     // (TYPES.md 3.4a) and is addressed by unionTagOffset, never here.
-    // A class value opens with its vptr word; fields follow it. A class
-    // with bases has no layout yet, so nothing has an offset.
+    // A class value opens with its vptr word; fields follow it, a chain's
+    // bases most-base first (FEATURES 2.2).
     bool afterVptr = false;
     if (const Decl* self = declById(id)) {
         if (self->nominal == Kind::Union) {
             return unionMemberIndex(id, name) >= 0 ? 0 : -1;
         }
         if (self->nominal == Kind::Class) {
-            if (!classBases(id).empty()) {
-                return -1;
-            }
             afterVptr = true;
         }
+    }
+    std::vector<std::string> fields;
+    if (afterVptr) {
+        std::unordered_set<std::string> chainSeen;
+        if (!chainFieldsImpl(id, chainSeen, fields)) {
+            return -1;
+        }
+    } else {
+        fields = fieldNames(id);
+    }
+    int64_t matches = 0;
+    for (const std::string& field : fields) {
+        if (field == name) {
+            ++matches;
+        }
+    }
+    // One name, one offset: a field repeated across a chain would answer
+    // two addresses for one spelling, which is an ambiguity, not a layout.
+    if (matches > 1) {
+        return -1;
     }
     int64_t at = 0;
     if (afterVptr) {
         at = layout::kSizePointer;
     }
-    for (const std::string& field : fieldNames(id)) {
+    for (const std::string& field : fields) {
         TypeRef type = fieldType(id, field);
+        if (type.isError() && afterVptr) {
+            type = fieldTypeAcrossBases(id, field);
+        }
         if (type.isError()) {
             return -1;
         }
@@ -159,6 +189,44 @@ int64_t Resolver::fieldOffset(DeclId id, const std::string& name) const {
         at += bytes;
     }
     return -1;
+}
+
+TypeRef Resolver::fieldTypeAcrossBases(DeclId id, const std::string& name) const {
+    std::vector<DeclId> frontier = classBases(id);
+    while (!frontier.empty()) {
+        DeclId next = frontier.back();
+        frontier.pop_back();
+        TypeRef found = fieldType(next, name);
+        if (!found.isError()) {
+            return found;
+        }
+        for (DeclId parent : classBases(next)) {
+            frontier.push_back(parent);
+        }
+    }
+    return errorRef();
+}
+
+bool Resolver::chainFieldsImpl(DeclId id, std::unordered_set<std::string>& seen,
+                               std::vector<std::string>& out) const {
+    if (!seen.insert(declKey(id)).second) {
+        return false;
+    }
+    std::vector<DeclId> bases = classBases(id);
+    if (bases.size() > kOneBase) {
+        // Several bases at one level would need per-subobject vtprs; with
+        // one vptr word the layout cannot name them, so nothing lays out.
+        return false;
+    }
+    for (DeclId base : bases) {
+        if (!chainFieldsImpl(base, seen, out)) {
+            return false;
+        }
+    }
+    for (const std::string& field : fieldNames(id)) {
+        out.push_back(field);
+    }
+    return true;
 }
 
 int64_t Resolver::structSize(DeclId id) const {
@@ -313,15 +381,19 @@ int64_t Resolver::structAlignImpl(DeclId id, std::unordered_set<std::string>& se
 }
 
 int64_t Resolver::classSizeImpl(DeclId id, std::unordered_set<std::string>& seen) const {
-    // Inherited fields belong to a later slice: a class with bases has no
-    // size here, and the lowerer refuses to construct it, rather than lay
-    // out half an object.
-    if (!classBases(id).empty()) {
-        return -1;
+    // A chain lays out after one vptr word: bases most-base first, then
+    // the class's own fields (FEATURES 2.2). Several bases at one level
+    // have no layout yet, so the walk refuses.
+    std::vector<std::string> fields;
+    {
+        std::unordered_set<std::string> chainSeen;
+        if (!chainFieldsImpl(id, chainSeen, fields)) {
+            return -1;
+        }
     }
     int64_t at = layout::kSizePointer;
     int64_t multiple = layout::kAlignPointer;
-    for (const std::string& field : fieldNames(id)) {
+    for (const std::string& field : fields) {
         TypeRef type = fieldType(id, field);
         if (type.isError()) {
             return -1;
@@ -341,11 +413,15 @@ int64_t Resolver::classSizeImpl(DeclId id, std::unordered_set<std::string>& seen
 }
 
 int64_t Resolver::classAlignImpl(DeclId id, std::unordered_set<std::string>& seen) const {
-    if (!classBases(id).empty()) {
-        return -1;
+    std::vector<std::string> fields;
+    {
+        std::unordered_set<std::string> chainSeen;
+        if (!chainFieldsImpl(id, chainSeen, fields)) {
+            return -1;
+        }
     }
     int64_t multiple = layout::kAlignPointer;
-    for (const std::string& field : fieldNames(id)) {
+    for (const std::string& field : fields) {
         TypeRef type = fieldType(id, field);
         if (type.isError()) {
             return -1;
@@ -469,9 +545,29 @@ std::vector<std::string> Resolver::fieldNames(DeclId id) const {
     return found->second;
 }
 
+std::vector<std::string> Resolver::chainFieldNames(DeclId id) const {
+    std::unordered_set<std::string> seen;
+    std::vector<std::string> out;
+    if (!chainFieldsImpl(id, seen, out)) {
+        return {};
+    }
+    return out;
+}
+
 const Signature* Resolver::methodSig(DeclId id, const std::string& name) const {
     auto found = methodSigs_.find(declKey(id) + "." + name);
-    return found == methodSigs_.end() ? nullptr : &found->second;
+    if (found != methodSigs_.end()) {
+        return &found->second;
+    }
+    // An inherited method has no entry on the derived class: the chain
+    // answers, so receivers typed as a derived class see base methods.
+    for (DeclId base : classBases(id)) {
+        const Signature* inherited = methodSig(base, name);
+        if (inherited != nullptr) {
+            return inherited;
+        }
+    }
+    return nullptr;
 }
 
 std::vector<std::string> Resolver::methodNames(DeclId id) const {
@@ -490,6 +586,63 @@ std::vector<DeclId> Resolver::classBases(DeclId id) const {
     return found->second;
 }
 
+std::vector<std::string> Resolver::virtualNames(DeclId id) const {
+    std::vector<DeclId> bases = classBases(id);
+    if (bases.size() > kOneBase) {
+        // Several bases at one level compose no slot list yet; callers see
+        // an empty table and refuse rather than dispatch through half one.
+        return {};
+    }
+    std::vector<std::string> out;
+    if (!bases.empty()) {
+        // One base at a level owns every inherited slot; its list is the
+        // prefix of this class's (a multiple-base level answered above).
+        out = virtualNames(bases[kFirstBase]);
+    }
+    std::string key = declKey(id);
+    for (const std::string& name : methodNames(id)) {
+        bool inBase = false;
+        for (const std::string& slot : out) {
+            if (slot == name) {
+                inBase = true;
+                break;
+            }
+        }
+        if (inBase) {
+            continue;
+        }
+        auto flag = methodVirtual_.find(key + "." + name);
+        if (flag != methodVirtual_.end() && flag->second) {
+            out.push_back(name);
+        }
+    }
+    return out;
+}
+
+int64_t Resolver::virtualIndexOf(DeclId id, const std::string& name) const {
+    const std::vector<std::string> slots = virtualNames(id);
+    for (uint64_t i = 0; i < static_cast<uint64_t>(slots.size()); ++i) {
+        if (slots[i] == name) {
+            return static_cast<int64_t>(i);
+        }
+    }
+    return -1;
+}
+
+std::optional<DeclId> Resolver::methodHome(DeclId id,
+                                           const std::string& name) const {
+    if (methodSigs_.find(declKey(id) + "." + name) != methodSigs_.end()) {
+        return id;
+    }
+    for (DeclId base : classBases(id)) {
+        std::optional<DeclId> found = methodHome(base, name);
+        if (found.has_value()) {
+            return found;
+        }
+    }
+    return std::nullopt;
+}
+
 int64_t Resolver::enumValue(const std::string& qualifiedType,
                             const std::string& member) const {
     auto found = enumValues_.find(qualifiedType + "." + member);
@@ -499,6 +652,37 @@ int64_t Resolver::enumValue(const std::string& qualifiedType,
 bool Resolver::isEnumMember(const std::string& qualifiedType,
                             const std::string& member) const {
     return enumValues_.find(qualifiedType + "." + member) != enumValues_.end();
+}
+
+const Decl* Resolver::lookupEnumMember(const Scope* scope,
+                                       const std::string& member,
+                                       int& count) const {
+    count = 0;
+    if (scope == nullptr) {
+        return nullptr;
+    }
+    const Decl* found = nullptr;
+    for (const auto& [name, decl] : scope->bindings) {
+        if (decl == nullptr || decl->kind != DeclKind::Type ||
+            decl->nominal != Kind::Enum) {
+            continue;
+        }
+        if (enumValues_.find(scope->module + "." + name + "." + member) ==
+            enumValues_.end()) {
+            continue;
+        }
+        ++count;
+        found = decl;
+    }
+    return count == 1 ? found : nullptr;
+}
+
+std::vector<std::pair<std::string, int64_t>> Resolver::enumMembers(DeclId id) const {
+    auto ordered = enumOrder_.find(declKey(id));
+    if (ordered == enumOrder_.end()) {
+        return {};
+    }
+    return ordered->second;
 }
 
 std::string Resolver::qualify(const std::string& bare) const {
@@ -538,7 +722,6 @@ bool Resolver::resolveProgram(Program& program, const std::string& module) {
         nextIndex_[module] = 0;
     }
     stack_.push_back(module);
-    order_.push_back(module);
     programOf_[module] = &program;
     const Scope* scope = makeScope(nullptr, module);
     modules_[module] = scope;
@@ -597,6 +780,9 @@ bool Resolver::resolveProgram(Program& program, const std::string& module) {
                 alias->init = target->init;
                 alias->isExtern = target->isExtern;
                 alias->isPrelude = target->isPrelude;
+                if (alias->kind == DeclKind::Alias) {
+                    alias->homeModule = from->module;
+                }
                 if (target->kind == DeclKind::Const && target->init != nullptr) {
                     constInits_[module + "." + name] = target->init;
                 }
@@ -617,6 +803,10 @@ bool Resolver::resolveProgram(Program& program, const std::string& module) {
     declareModule(module, program, scope);
     resolveDeclTypes(module, program, scope);
     stack_.pop_back();
+    // Post-order: dependents lower after their dependencies, so every
+    // name a body uses is already registered when its module lowers.
+    // (Cycle detection reads the stack, never this list.)
+    order_.push_back(module);
     return !failed_;
 }
 
@@ -722,6 +912,61 @@ void Resolver::declareModule(const std::string& module, Program& program,
 void Resolver::resolveDeclTypes(const std::string& module, Program& program,
                                 const Scope* scope) {
     EvalEnv env = evalEnv(scope);
+    // Member recording precedes every instantiation: an alias, signature
+    // or global can name `Wrap<One<int>>` before either struct is
+    // declared, and instantiating against unrecorded fields caches an
+    // empty, poisoned spec. Recording all struct/class fields first makes
+    // declaration order irrelevant for instantiation. (A field whose own
+    // type names a later template still needs order today; that deeper
+    // forward reference is a separate limitation, not a silent rule.)
+    std::unordered_set<std::string> fieldsDone;
+    for (const std::unique_ptr<cider::Decl>& decl : program.decls) {
+        const cider::Decl* unwrapped = decl.get();
+        if (const auto* exp = dynamic_cast<const ExportDecl*>(unwrapped)) {
+            unwrapped = exp->decl.get();
+        }
+        const StructDecl* sdn = dynamic_cast<const StructDecl*>(unwrapped);
+        const ClassDecl* cdn = dynamic_cast<const ClassDecl*>(unwrapped);
+        if (sdn == nullptr && cdn == nullptr) {
+            continue;
+        }
+        const Decl* self = nullptr;
+        const Scope* inner = scope;
+        std::string name;
+        if (sdn != nullptr) {
+            self = lookup(scope, sdn->name);
+            name = sdn->name;
+            if (!sdn->typeParams.empty() && self != nullptr) {
+                inner = typeParamScope(scope, module, sdn->typeParams, self->id,
+                                       sdn->pos);
+            }
+        } else {
+            self = lookup(scope, cdn->name);
+            name = cdn->name;
+            if (!cdn->typeParams.empty() && self != nullptr) {
+                inner = typeParamScope(scope, module, cdn->typeParams, self->id,
+                                       cdn->pos);
+            }
+        }
+        if (self == nullptr) {
+            continue;
+        }
+        std::string fkey = declKey(self->id);
+        if (fieldsDone.find(fkey) != fieldsDone.end()) {
+            continue;
+        }
+        fieldsDone.insert(fkey);
+        const std::vector<FieldDecl>& fields =
+            sdn != nullptr ? sdn->fields : cdn->fields;
+        for (const FieldDecl& field : fields) {
+            TypeRef t = resolveType(field.type.get(), inner);
+            nodeTypes_[&field] = t;
+            if (!t.isError()) {
+                fieldTypes_[fkey + "." + field.name] = t;
+                fieldLists_[fkey].push_back(field.name);
+            }
+        }
+    }
     for (const std::unique_ptr<cider::Decl>& decl : program.decls) {
         const cider::Decl* unwrapped = decl.get();
         if (const auto* exp = dynamic_cast<const ExportDecl*>(unwrapped)) {
@@ -775,7 +1020,10 @@ void Resolver::resolveDeclTypes(const std::string& module, Program& program,
             for (const FieldDecl& field : sd->fields) {
                 TypeRef t = resolveType(field.type.get(), inner);
                 nodeTypes_[&field] = t;
-                if (self != nullptr && !t.isError()) {
+                // Fields were already recorded by the pre-pass above; the
+                // guard keeps the member lists exactly-once.
+                if (self != nullptr && !t.isError() &&
+                    fieldsDone.find(declKey(self->id)) == fieldsDone.end()) {
                     std::string fkey = declKey(self->id);
                     fieldTypes_[fkey + "." + field.name] = t;
                     fieldLists_[fkey].push_back(field.name);
@@ -825,7 +1073,10 @@ void Resolver::resolveDeclTypes(const std::string& module, Program& program,
             for (const FieldDecl& field : cd->fields) {
                 TypeRef t = resolveType(field.type.get(), inner);
                 nodeTypes_[&field] = t;
-                if (cself != nullptr && !t.isError()) {
+                // Fields were already recorded by the pre-pass above; the
+                // guard keeps the member lists exactly-once.
+                if (cself != nullptr && !t.isError() &&
+                    fieldsDone.find(declKey(cself->id)) == fieldsDone.end()) {
                     std::string fkey = declKey(cself->id);
                     fieldTypes_[fkey + "." + field.name] = t;
                     fieldLists_[fkey].push_back(field.name);
@@ -839,6 +1090,7 @@ void Resolver::resolveDeclTypes(const std::string& module, Program& program,
                     std::string key = declKey(cself->id);
                     methodSigs_[key + "." + method.name] = std::move(sig);
                     methodLists_[key].push_back(method.name);
+                    methodVirtual_[key + "." + method.name] = method.isVirtual;
                 }
             }
             // `init`/`deinit` parse to their own declarations, not methods,
@@ -891,6 +1143,7 @@ void Resolver::resolveDeclTypes(const std::string& module, Program& program,
         if (const auto* ed = dynamic_cast<const EnumDecl*>(unwrapped)) {
             int64_t next = 0;
             bool first = true;
+            const Decl* eself = lookup(scope, ed->name);
             for (const EnumMember& member : ed->members) {
                 int64_t value = 0;
                 if (member.value != nullptr) {
@@ -909,6 +1162,9 @@ void Resolver::resolveDeclTypes(const std::string& module, Program& program,
                 first = false;
                 next = value + 1;
                 enumValues_[module + "." + ed->name + "." + member.name] = value;
+                if (eself != nullptr) {
+                    enumOrder_[declKey(eself->id)].emplace_back(member.name, value);
+                }
             }
             continue;
         }
@@ -1001,7 +1257,19 @@ TypeRef Resolver::resolveType(const TypeExpr* spelling, const Scope* scope) {
 TypeRef Resolver::resolveNamed(const NamedType* type, const Scope* scope) {
     const Scope* home = scope;
     if (!type->qualifier.empty()) {
-        home = scopeOf(type->qualifier);
+        // A qualifier names a module through its local binding when one
+        // is in scope (`util` for `import b.util`), or a full module
+        // path otherwise (`b.util`, `std.io`). Calls already resolve
+        // the binding first; types follow the same rule so `util.Foo`
+        // and `util.mval()` mean the same module.
+        home = nullptr;
+        const Decl* bound = lookup(scope, type->qualifier);
+        if (bound != nullptr && bound->kind == DeclKind::Module) {
+            home = scopeOf(bound->origin);
+        }
+        if (home == nullptr) {
+            home = scopeOf(type->qualifier);
+        }
         if (home == nullptr) {
             fail(type->pos, "unknown module '" + type->qualifier + "'");
             return errorRef();
@@ -1046,8 +1314,17 @@ TypeRef Resolver::resolveNamed(const NamedType* type, const Scope* scope) {
         }
         aliasActive_.insert(qualified);
         const Scope* inner = home;
+        // A from-imported alias names its target in the defining
+        // module: answer it there, not in the use scope. Same-module
+        // aliases carry no home and resolve where they always did.
+        if (!decl->homeModule.empty()) {
+            const Scope* origin = scopeOf(decl->homeModule);
+            if (origin != nullptr) {
+                inner = origin;
+            }
+        }
         if (!decl->paramNames.empty()) {
-            inner = typeParamScope(home, home->module, decl->paramNames, decl->id,
+            inner = typeParamScope(inner, inner->module, decl->paramNames, decl->id,
                                    type->pos);
         }
         TypeRef target = resolveType(decl->aliasTarget, inner);
@@ -1160,6 +1437,42 @@ std::string Resolver::linkName(const Decl& decl) const {
     return flat + "__" + decl.name;
 }
 
+std::string Resolver::specLinkName(DeclId spec) const {
+    auto origin = instantiationOf(spec);
+    if (!origin.has_value()) {
+        return "";
+    }
+    const Decl* tmpl = declById(origin->first);
+    if (tmpl == nullptr || tmpl->kind != DeclKind::Func) {
+        return "";
+    }
+    std::string home =
+        tmpl->scope != nullptr ? tmpl->scope->module : entryModule();
+    std::string flat = home;
+    for (char& c : flat) {
+        if (c != '_' && (c < 'a' || c > 'z') && (c < 'A' || c > 'Z') &&
+            (c < '0' || c > '9')) {
+            c = '_';
+        }
+    }
+    // Specs always mangle, even at entry: the bare name belongs to the
+    // template itself (which emits nothing), so `id` and `id__S__int`
+    // never collide.
+    std::string out = flat + "__" + tmpl->name + "__S";
+    for (TypeRef arg : origin->second) {
+        out += "__";
+        for (char c : typeName(arg)) {
+            if (c == '_' || (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') ||
+                (c >= '0' && c <= '9')) {
+                out += c;
+            } else {
+                out += '_';
+            }
+        }
+    }
+    return out;
+}
+
 TypeRef Resolver::substitute(TypeRef type, DeclId tmpl, const std::vector<TypeRef>& args,
                              Position pos) {
     if (type.isError()) {
@@ -1170,7 +1483,18 @@ TypeRef Resolver::substitute(TypeRef type, DeclId tmpl, const std::vector<TypeRe
         const TypeParamPayload& payload = std::get<TypeParamPayload>(type.type->payload());
         if (payload.decl.module == tmpl.module && payload.decl.index == tmpl.index &&
             payload.index < args.size()) {
-            return substitute(args[payload.index], tmpl, args, pos);
+            // A bare parameter reference needs no substitution within this
+            // frame: if it names this template's parameter the mapping
+            // already selected it, and another template's parameter is an
+            // outer frame's business. Recursing here ping-pongs on
+            // param-to-param mappings (`Swapped<U, T>` swaps T and U
+            // forever) and segfaulted the compiler; returning the
+            // reference answers every case, including identity.
+            const TypeRef& arg = args[payload.index];
+            if (!arg.isError() && arg.type->kind() == Kind::TypeParam) {
+                return arg;
+            }
+            return substitute(arg, tmpl, args, pos);
         }
         return type;
     }

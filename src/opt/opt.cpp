@@ -391,8 +391,13 @@ uint64_t deadCode(ir::Module& module) {
                     // Four reasons to keep a dead definition: it stores, it
                     // calls, it traps, or it is volatile. Each is one field.
                     // A store joins them only when its slot is never read.
+                    // A store through a label is never dead at function
+                    // scope: the global escapes to every other function and
+                    // module, so no slot read can prove it unread. (Its
+                    // address names a label, not a slot.)
                     bool deadStore = !indexed && instr.op == ir::Op::Store &&
                                      !instr.isVolatile &&
+                                     instr.globalLabel.empty() &&
                                      readSlots.find(instr.addressBase.id) ==
                                          readSlots.end();
                     if (deadStore) {

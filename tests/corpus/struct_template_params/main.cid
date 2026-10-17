@@ -59,7 +59,7 @@ struct Mixed<T> {
 // annotation and nowhere else in the program.
 func readParam(p: *ParamOnly<int>) -> int {
   if (p == nilPtr) { return 41; }
-  return p->v;
+  return (*p).v;
 }
 
 // 2. Return-only: a value of the instantiation cannot be built without
@@ -88,7 +88,7 @@ func echoMixed(p: *Mixed<int>) -> Mixed<int> {
 // this parameter annotation.
 func readBare(p: *LibBox<int>) -> int {
   if (p == nilPtr) { return 42; }
-  return p->v;
+  return (*p).v;
 }
 
 func main() -> int {
@@ -97,33 +97,32 @@ func main() -> int {
 
   // 3. Writing through the field proves the enclosing holder layout used
   // the instantiated size, not the unknown-nominal default.
-  var fh: FieldHolder;
+  var fh: FieldHolder = new FieldHolder { f: new FieldOnly<int> { v: 0 } };
   fh.f.v = 40;
   if (fh.f.v != 40) { return 3; }
 
   // 4. Reinterpret two ints through a cast whose target is the only
   // mention of the instantiation.
-  var arr: [int; 2];
-  arr[0] = 40;
-  arr[1] = 2;
+  var arr: [int; 2] = new [int; 2] { 40, 2 };
   var raw: *int = &arr[0];
-  if ((raw as *CastOnly<int>)->a != 40) { return 4; }
-  if ((raw as *CastOnly<int>)->b != 2) { return 5; }
+  if ((*(raw as *CastOnly<int>)).a != 40) { return 4; }
+  if ((*(raw as *CastOnly<int>)).b != 2) { return 5; }
 
   // 5. `sizeof` must see the real layout: one char field is 1 byte.
   if (sizeof(SizeofOnly<char>) != 1) { return 6; }
 
   // 6. `new` alone names the instantiation; a fresh struct is zeroed.
-  if ((new NewOnly<int>)->v != 0) { return 7; }
-  if ((new NewOnly<int>)->w != 0) { return 8; }
+  var fresh: NewOnly<int> = new NewOnly<int> { v: 0, w: 0 };
+  if (fresh.v != 0) { return 7; }
+  if (fresh.w != 0) { return 8; }
 
   // 7. The template lives only inside this `fn(...)` parameter signature.
-  var cb: fn(*FnSig<int>) -> int = nilPtr;
+  var cb: *func(*FnSig<int>) -> int = nilPtr;
   if (cb != nilPtr) { return 9; }
 
   // 8. Mixed case, exercised end to end: the instantiation is named in a
   // field, a cast, a parameter and a return annotation, never in a var.
-  var mh: MixedHolder;
+  var mh: MixedHolder = new MixedHolder { m: new Mixed<int> { v: 0 } };
   mh.m.v = 12;
   if (echoMixed(&mh.m as *Mixed<int>).v != 12) { return 10; }
 

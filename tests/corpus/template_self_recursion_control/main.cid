@@ -35,7 +35,7 @@ struct Swapped<T, U> {
 
 struct FnSelf<T> {
   var v: T;
-  var cb: fn(*FnSelf<T>) -> int;
+  var cb: *func(*FnSelf<T>) -> int;
 }
 
 struct ArrSelf<T> {
@@ -47,37 +47,29 @@ type N2 = Node<Node<int>>;
 type AB = A<int>;
 
 func useNode(n: *Node<int>) -> int {
-  return n->v;
+  return (*n).v;
 }
 
 func main() -> int {
-  var a: Node<int>;
-  var b: Node<int>;
-  a.v = 10;
-  b.v = 20;
+  var a: Node<int> = new Node<int> { v: 10, next: nilPtr };
+  var b: Node<int> = new Node<int> { v: 20, next: nilPtr };
   a.next = &b;
-  var total: int = a.v + a.next.v;
-  var m: AB;
-  m.v = 1;
-  m.b.v = 2;
+  var total: int = a.v + (*a.next).v;
+  var m: AB = new A<int> { v: 1, b: new B<int> { v: 2, a: nilPtr } };
   total = total + m.v + m.b.v;
-  var h: HasBoxed;
-  h.w.v.v = 4;
+  var h: HasBoxed = new HasBoxed { w: new Box<Box<int>> { v: new Box<int> { v: 4 } } };
   total = total + h.w.v.v;
-  var s: Swapped<int, int>;
-  s.first = 5;
-  s.other.second = 6;
-  total = total + s.first + s.other.second;
-  var n2: N2;
-  n2.v.v = 7;
+  // Swapped<U, T> by value never bottoms out (like ArrSelf above):
+  // infinitely sized and unconstructible; the declaration still pins
+  // that the guard accepts the permuted self-mention.
+  var n2: N2 = new Node<Node<int>> { v: new Node<int> { v: 7, next: nilPtr }, next: nilPtr };
   total = total + n2.v.v;
-  var f: FnSelf<int>;
-  f.v = 8;
+  var f: FnSelf<int> = new FnSelf<int> { v: 8, cb: nilPtr };
   total = total + f.v;
-  var ar: ArrSelf<int>;
-  ar.v = 9;
-  total = total + ar.v;
+  // ArrSelf<int> holds [ArrSelf<int>; 2] by value: infinitely sized and
+  // unconstructible in principle, so its runtime line is dropped while the
+  // declaration above still pins that the guard accepts the shape.
   total = total + useNode(&a);
-  if (total != 82) { return 1; }
+  if (total != 62) { return 1; }
   return 0;
 }

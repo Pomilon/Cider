@@ -9,36 +9,36 @@
 // Both now return a defined zero T (0 for int) on every backend, which the
 // assertions below check.
 from std.io import puts;
-from std.vector import new_vec, push, pop, get, len_vec, cap_vec, reserve, insert, remove, clear, free_vec;
+from std.vector import Vec, new_vec, push, pop, get, len_vec, cap_vec, reserve, insert, remove, clear, free_vec;
 
 func main() -> int {
-    var v: Vec<int> = new_vec<int>();
-    if (len_vec<int>(&v) != 0) return 1;
-    if (cap_vec<int>(&v) != 0) return 2;
+    var v: Vec<int> = new_vec::<int>();
+    if (len_vec::<int>(&v) != 0) return 1;
+    if (cap_vec::<int>(&v) != 0) return 2;
     if (v.data != nilPtr) return 3;
 
     // Empty pop: defined zero result; len must not change.
-    var zero_pop: int = pop<int>(&v);
-    if (zero_pop != 0 || len_vec<int>(&v) != 0) return 4;
+    var zero_pop: int = pop::<int>(&v);
+    if (zero_pop != 0 || len_vec::<int>(&v) != 0) return 4;
 
     // First growth clamps to INITIAL_CAP even though cap*2 was 0.
-    push<int>(&v, 0);
-    if (cap_vec<int>(&v) != 8) return 5;
-    if (len_vec<int>(&v) != 1) return 6;
+    push::<int>(&v, 0);
+    if (cap_vec::<int>(&v) != 8) return 5;
+    if (len_vec::<int>(&v) != 1) return 6;
 
     // Fill exactly to capacity: no growth yet.
     var i: int = 1;
-    while (i < 8) { push<int>(&v, i * 10); i = i + 1; }
-    if (len_vec<int>(&v) != 8) return 7;
-    if (cap_vec<int>(&v) != 8) return 8;
+    while (i < 8) { push::<int>(&v, i * 10); i = i + 1; }
+    if (len_vec::<int>(&v) != 8) return 7;
+    if (cap_vec::<int>(&v) != 8) return 8;
 
     // One past capacity doubles it, preserving every element.
-    push<int>(&v, 80);
-    if (len_vec<int>(&v) != 9) return 9;
-    if (cap_vec<int>(&v) != 16) return 10;
+    push::<int>(&v, 80);
+    if (len_vec::<int>(&v) != 9) return 9;
+    if (cap_vec::<int>(&v) != 16) return 10;
     i = 0;
     while (i < 9) {
-        var p: *int = get<int>(&v, i);
+        var p: *int = get::<int>(&v, i);
         if (p == nilPtr) return 11;
         if (*p != i * 10) return 12;
         i = i + 1;
@@ -46,71 +46,71 @@ func main() -> int {
 
     // reserve jumps straight to n, preserves data, and is a no-op when
     // n <= cap.
-    reserve<int>(&v, 100);
-    if (cap_vec<int>(&v) != 100) return 13;
-    if (len_vec<int>(&v) != 9) return 14;
-    if (*get<int>(&v, 8) != 80) return 15;
-    reserve<int>(&v, 50);
-    if (cap_vec<int>(&v) != 100) return 16;
+    reserve::<int>(&v, 100);
+    if (cap_vec::<int>(&v) != 100) return 13;
+    if (len_vec::<int>(&v) != 9) return 14;
+    if (*get::<int>(&v, 8) != 80) return 15;
+    reserve::<int>(&v, 50);
+    if (cap_vec::<int>(&v) != 100) return 16;
 
     // reserve on a fresh vector allocates without changing len.
-    var w: Vec<int> = new_vec<int>();
-    reserve<int>(&w, 4);
-    if (cap_vec<int>(&w) != 4) return 17;
-    if (len_vec<int>(&w) != 0) return 18;
-    push<int>(&w, 1);
-    if (len_vec<int>(&w) != 1) return 19;
-    if (*get<int>(&w, 0) != 1) return 20;
+    var w: Vec<int> = new_vec::<int>();
+    reserve::<int>(&w, 4);
+    if (cap_vec::<int>(&w) != 4) return 17;
+    if (len_vec::<int>(&w) != 0) return 18;
+    push::<int>(&w, 1);
+    if (len_vec::<int>(&w) != 1) return 19;
+    if (*get::<int>(&w, 0) != 1) return 20;
 
     // insert at capacity grows (subject to the INITIAL_CAP clamp) and shifts.
-    var x: Vec<int> = new_vec<int>();
-    reserve<int>(&x, 2);
-    push<int>(&x, 1);
-    push<int>(&x, 2);
-    if (cap_vec<int>(&x) != 2) return 21;
-    insert<int>(&x, 1, 99);
-    if (len_vec<int>(&x) != 3) return 22;
-    if (cap_vec<int>(&x) != 8) return 23; // grow clamps 4 up to INITIAL_CAP
-    if (*get<int>(&x, 0) != 1) return 24;
-    if (*get<int>(&x, 1) != 99) return 25;
-    if (*get<int>(&x, 2) != 2) return 26;
+    var x: Vec<int> = new_vec::<int>();
+    reserve::<int>(&x, 2);
+    push::<int>(&x, 1);
+    push::<int>(&x, 2);
+    if (cap_vec::<int>(&x) != 2) return 21;
+    insert::<int>(&x, 1, 99);
+    if (len_vec::<int>(&x) != 3) return 22;
+    if (cap_vec::<int>(&x) != 8) return 23; // grow clamps 4 up to INITIAL_CAP
+    if (*get::<int>(&x, 0) != 1) return 24;
+    if (*get::<int>(&x, 1) != 99) return 25;
+    if (*get::<int>(&x, 2) != 2) return 26;
 
     // Out-of-range insert is a no-op; out-of-range remove returns the
     // defined zero T and must leave the vector untouched.
-    insert<int>(&x, -1, 7);
-    insert<int>(&x, 5, 7);
-    if (len_vec<int>(&x) != 3) return 27;
-    var zero_remove: int = remove<int>(&x, 5);
-    if (zero_remove != 0 || len_vec<int>(&x) != 3) return 28;
-    if (get<int>(&x, 3) != nilPtr) return 29;
+    insert::<int>(&x, -1, 7);
+    insert::<int>(&x, 5, 7);
+    if (len_vec::<int>(&x) != 3) return 27;
+    var zero_remove: int = remove::<int>(&x, 5);
+    if (zero_remove != 0 || len_vec::<int>(&x) != 3) return 28;
+    if (get::<int>(&x, 3) != nilPtr) return 29;
 
     // Valid remove returns the element and shifts the tail down.
-    if (remove<int>(&x, 0) != 1) return 30;
-    if (len_vec<int>(&x) != 2) return 31;
-    if (*get<int>(&x, 0) != 99) return 32;
-    if (pop<int>(&x) != 2) return 33;
-    if (pop<int>(&x) != 99) return 34;
+    if (remove::<int>(&x, 0) != 1) return 30;
+    if (len_vec::<int>(&x) != 2) return 31;
+    if (*get::<int>(&x, 0) != 99) return 32;
+    if (pop::<int>(&x) != 2) return 33;
+    if (pop::<int>(&x) != 99) return 34;
 
     // clear keeps the allocation; the next push reuses it.
-    clear<int>(&w);
-    if (len_vec<int>(&w) != 0) return 35;
-    if (cap_vec<int>(&w) != 4) return 36;
-    push<int>(&w, 5);
-    if (cap_vec<int>(&w) != 4) return 37;
-    if (*get<int>(&w, 0) != 5) return 38;
+    clear::<int>(&w);
+    if (len_vec::<int>(&w) != 0) return 35;
+    if (cap_vec::<int>(&w) != 4) return 36;
+    push::<int>(&w, 5);
+    if (cap_vec::<int>(&w) != 4) return 37;
+    if (*get::<int>(&w, 0) != 5) return 38;
 
     // free_vec resets data/len/cap and the vector stays reusable.
-    free_vec<int>(&w);
+    free_vec::<int>(&w);
     if (w.data != nilPtr) return 39;
-    if (len_vec<int>(&w) != 0) return 40;
-    if (cap_vec<int>(&w) != 0) return 41;
-    push<int>(&w, 42);
-    if (cap_vec<int>(&w) != 8) return 42;
-    if (*get<int>(&w, 0) != 42) return 43;
+    if (len_vec::<int>(&w) != 0) return 40;
+    if (cap_vec::<int>(&w) != 0) return 41;
+    push::<int>(&w, 42);
+    if (cap_vec::<int>(&w) != 8) return 42;
+    if (*get::<int>(&w, 0) != 42) return 43;
 
-    free_vec<int>(&v);
-    free_vec<int>(&x);
-    free_vec<int>(&w);
+    free_vec::<int>(&v);
+    free_vec::<int>(&x);
+    free_vec::<int>(&w);
     puts("vector ok");
     return 0;
 }

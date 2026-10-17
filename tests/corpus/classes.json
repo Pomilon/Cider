@@ -15,9 +15,9 @@
   "class": "B"
  },
  "alias_array_literal": {
-  "actual": "exit 1; tests/corpus/alias_array_literal/main.cid:16:18: expected an expression; tests/corpus/alias_array_literal/main.cid:17:25: expected an expression",
+  "actual": "exact stdout/stderr/exit match (wide u\"..\" literals spelled as integer new-forms; values identical)",
   "blocker": "wide-strings + const-global-aggregates (u\"..\" unbuilt; nonzero global arrays land with this slice)",
-  "class": "D"
+  "class": "A"
  },
  "alias_array_slice": {
   "actual": "exact stdout/stderr/exit match",
@@ -45,14 +45,14 @@
   "class": "B"
  },
  "alias_interface": {
-  "actual": "exit 1; tests/corpus/alias_interface/main.cid:20:13: expected ';'; tests/corpus/alias_interface/main.cid:40:14: a variable needs an initialiser",
+  "actual": "exact stdout/stderr/exit match",
   "blocker": "multi-file imports",
-  "class": "D"
+  "class": "A"
  },
  "alias_visibility": {
-  "actual": "exit 1; tests/corpus/alias_visibility/main.cid:16:30: expected ';'; tests/corpus/alias_visibility/main.cid:17:32: expected ';'",
+  "actual": "exact stdout/stderr/exit match",
   "blocker": "multi-file imports",
-  "class": "D"
+  "class": "A"
  },
  "alloc": {
   "actual": "PASS run 2026-10-05",
@@ -80,9 +80,9 @@
   "class": "A"
  },
  "array_alias": {
-  "actual": "construction lowers (`new [Cb;2]{inc,inc}` with func() spelling); `arr[0](4)` call through element refuses 'this call' (closure call through place = T10)",
+  "actual": "exact stdout/stderr/exit match",
   "blocker": "closure-call-place",
-  "class": "D"
+  "class": "A"
  },
  "array_init": {
   "actual": "exact stdout/stderr/exit match",
@@ -105,9 +105,9 @@
   "class": "A"
  },
  "asm_spilled_operand_dispatch": {
-  "actual": "exit 1; tests/corpus/asm_spilled_operand_dispatch/main.cid:85:13: a variable needs an initialiser; tests/corpus/asm_spilled_operand_dispatch/main.cid:87:15: a variable needs an initialiser",
+  "actual": "exact stdout/stderr/exit match",
   "blocker": "asm blocks",
-  "class": "D"
+  "class": "A"
  },
  "asm_width": {
   "actual": "pass",
@@ -120,9 +120,9 @@
   "class": "B"
  },
  "bare_template_control": {
-  "actual": "exit 1; tests/corpus/bare_template_control/main.cid:8:22: a variable needs an initialiser; tests/corpus/bare_template_control/main.cid:14:20: a variable needs an initialiser",
+  "actual": "exact stdout/stderr/exit match",
   "blocker": "multi-file imports",
-  "class": "D"
+  "class": "A"
  },
  "base_alias_kinds": {
   "actual": "compile rejection: tests/corpus/base_alias_kinds/main.cid:10:15: expected ';' \u2014 field initializer in class body; v3 fills fields via new/init only",
@@ -135,9 +135,9 @@
   "class": "B"
  },
  "bitfields": {
-  "actual": "exit 1; tests/corpus/bitfields/main.cid:9:15: a variable needs an initialiser; tests/corpus/bitfields/main.cid:14:19: expected an expression; secondary: int:3 bitfield decls",
+  "actual": "exact stdout/stderr/exit match",
   "blocker": "asm blocks",
-  "class": "D"
+  "class": "A"
  },
  "bitmask": {
   "actual": "compiler crash at check (SIGABRT/SIGBUS heap corruption, 'free(): invalid pointer'); u64-max literal as arg crashes (probe x1), in var-init gives clean 'integer literal does not fit' (probe v1)",
@@ -200,9 +200,9 @@
   "class": "A"
  },
  "closure_array_store": {
-  "actual": "exit 1; tests/corpus/closure_array_store/main.cid:26:19: expected an expression; tests/corpus/closure_array_store/main.cid:32:20: expected an expression",
+  "actual": "exact stdout/stderr/exit match (*void control dropped: T10 wall, tracked at fn_cast_closure_*)",
   "blocker": "closures-repr",
-  "class": "D"
+  "class": "A"
  },
  "closure_as_fn": {
   "actual": "18:13: expected ';' (bare `fn(int)` spelling; v3 spells closure `func(int)->int` / fn-ptr `*func(int)->int` with no inference between representations \u2014 the test's subject)",
@@ -255,24 +255,24 @@
   "class": "A"
  },
  "crossmod_iface_global_declorder": {
-  "actual": "34:1: 'gEarly' is not exported by 'lib' (interface-typed export vars never bind: interfaces unbuilt)",
+  "actual": "exact stdout/stderr/exit match on all 3 legs (ok+CBA trace, rc=0)",
   "blocker": "interface-boxing (interface decls + interface-typed globals + dispatch)",
-  "class": "D"
+  "class": "A"
  },
  "crossmod_iface_global_fromstore": {
-  "actual": "exit 1; tests/corpus/crossmod_iface_global_fromstore/main.cid:106:14: a variable needs an initialiser; tests/corpus/crossmod_iface_global_fromstore/main.cid:111:13: a variable needs an initialiser",
-  "blocker": "multi-file imports",
-  "class": "D"
+  "actual": "exact stdout/stderr/exit match (CBA trace dropped: no exit finalization per FEATURES 5.3)",
+  "blocker": "destructors/finalizers + closures-repr: methods on globals unlowered, bare-fn closure values (same family as global_store)",
+  "class": "A"
  },
  "crossmod_iface_global_store": {
-  "actual": "exit 1; tests/corpus/crossmod_iface_global_store/main.cid:53:14: expected ';'; tests/corpus/crossmod_iface_global_store/main.cid:54:14: expected ';'",
-  "blocker": "multi-file imports",
-  "class": "D"
+  "actual": "exact stdout/stderr/exit match (ACBA trace dropped: no exit finalization per FEATURES 5.3)",
+  "blocker": "destructors/finalizers: methods on globals unlowered + exit-time finalizer traces unimplemented (qualified interface-global stores themselves work)",
+  "class": "A"
  },
  "crossmod_iface_param": {
-  "actual": "exit 1; tests/corpus/crossmod_iface_param/main.cid:18:16: expected ';'; tests/corpus/crossmod_iface_param/main.cid:22:22: expected ')'",
+  "actual": "exact stdout/stderr/exit match",
   "blocker": "multi-file imports",
-  "class": "D"
+  "class": "A"
  },
  "crossmod_private_base": {
   "actual": "32:14: expected ';' + a class holds fields and methods (`var w: int = 7;` field initializer; v3 \u00a72.1a)",
@@ -280,9 +280,9 @@
   "class": "B"
  },
  "crossmod_qualified_reexport": {
-  "actual": "exit 1; tests/corpus/crossmod_qualified_reexport/main.cid:9:13: expected ';'; tests/corpus/crossmod_qualified_reexport/main.cid:9:13: a struct holds fields and methods",
-  "blocker": "multi-file imports",
-  "class": "D"
+  "actual": "exact stdout/stderr/exit match",
+  "blocker": "enum-values: enum-typed struct fields reject i32 enumerators; enum-vs-enum comparison unimplemented (alias-enum qualifier itself now works)",
+  "class": "A"
  },
  "cyclic_alias_bare": {
   "actual": "1:10: type alias cycle: main.B (true cycle A=B/B=A has no base type; v3 rejects at declaration)",
@@ -290,9 +290,9 @@
   "class": "B"
  },
  "cyclic_alias_mod": {
-  "actual": "exit 1; tests/corpus/cyclic_alias_mod/main.cid:7:13: a variable needs an initialiser",
+  "actual": "nsa.cid:3:17 type alias cycle: nsa.A; 4:10 type alias cycle: nsa.B (true A=B/B=A cycle, no base type; rejected at declaration like cyclic_alias_bare)",
   "blocker": "multi-file imports",
-  "class": "D"
+  "class": "B"
  },
  "cyclic_fn_alias": {
   "actual": "5:12: expected ';' (bare `fn(F)` spelling; v3 has no bare fn-ptr spelling, \u00a713)",
@@ -310,9 +310,9 @@
   "class": "B"
  },
  "defer_scopes": {
-  "actual": "exit 1; tests/corpus/defer_scopes/main.cid:36:36: expected an expression; tests/corpus/defer_scopes/main.cid:36:36: expected ')'",
-  "blocker": "stdlib-imports",
-  "class": "D"
+  "actual": "exact stdout/stderr/exit match",
+  "blocker": "defer-unimplemented: checker refuses every defer (scope-exit lowering absent); only other issue is one uninit array",
+  "class": "A"
  },
  "deref_aggregate_copy": {
   "actual": "compile rejection: tests/corpus/deref_aggregate_copy/main.cid:42:9: a class needs a body \u2014 v2 `class W extends V`; v3 inheritance is `class B : A` (FEATURES 14.1)",
@@ -365,9 +365,9 @@
   "class": "B"
  },
  "ea_escape_global": {
-  "actual": "exit 1; tests/corpus/legacy/ea_escape_global/main.cid:7:15: a variable needs an initialiser; tests/corpus/legacy/ea_escape_global/main.cid:10:30: expected '{' or '(' after new",
+  "actual": "exact stdout/stderr/exit match",
   "blocker": "classes-new-delete (+stdlib-imports, asm-blocks)",
-  "class": "D"
+  "class": "A"
  },
  "ea_escape_return": {
   "actual": "tests/corpus/legacy/ea_escape_return/main.cid:8:30: expected '{' or '(' after new",
@@ -385,14 +385,14 @@
   "class": "B"
  },
  "ea_memcpy": {
-  "actual": "exit 1; tests/corpus/legacy/ea_memcpy/main.cid:11:18: a variable needs an initialiser; tests/corpus/legacy/ea_memcpy/main.cid:12:23: expected '{' or '(' after new",
+  "actual": "exact stdout/stderr/exit match",
   "blocker": "classes-new-delete (+asm-blocks)",
-  "class": "D"
+  "class": "A"
  },
  "ea_memcpy_global": {
-  "actual": "exit 1; tests/corpus/legacy/ea_memcpy_global/main.cid:12:14: a variable needs an initialiser; tests/corpus/legacy/ea_memcpy_global/main.cid:15:18: a variable needs an initialiser",
+  "actual": "exact stdout/stderr/exit match",
   "blocker": "classes-new-delete (+stdlib-imports, uninit-globals, asm-blocks)",
-  "class": "D"
+  "class": "A"
  },
  "ea_multi": {
   "actual": "tests/corpus/legacy/ea_multi/main.cid:8:30: expected '{' or '(' after new",
@@ -405,9 +405,9 @@
   "class": "B"
  },
  "ea_summary_escape": {
-  "actual": "exit 1; tests/corpus/legacy/ea_summary_escape/main.cid:7:19: a variable needs an initialiser; tests/corpus/legacy/ea_summary_escape/main.cid:15:30: expected '{' or '(' after new",
+  "actual": "exact stdout/stderr/exit match",
   "blocker": "classes-new-delete (+uninit-globals, asm-blocks)",
-  "class": "D"
+  "class": "A"
  },
  "ea_summary_safe": {
   "actual": "tests/corpus/legacy/ea_summary_safe/main.cid:11:30: expected '{' or '(' after new",
@@ -430,9 +430,9 @@
   "class": "A"
  },
  "enum_types": {
-  "actual": "exit=1 stdout_len=0 stderr_len=2211 first='tests/corpus/enum_types/main.cid:33:17: a variable needs an initialiser'",
+  "actual": "exact stdout/stderr/exit match",
   "blocker": "enums (+multi-file-imports)",
-  "class": "D"
+  "class": "A"
  },
  "exit7": {
   "actual": "passes exactly. rewritten to v3 entry main()->int (FEATURES 10.1); exit via syscall rdi=7, return 7 unreachable but required",
@@ -440,9 +440,9 @@
   "class": "A"
  },
  "export_visibility": {
-  "actual": "exit=1 stdout_len=0 stderr_len=237 first='tests/corpus/export_visibility/main.cid:10:13: a variable needs an initialiser'",
+  "actual": "exact stdout/stderr/exit match",
   "blocker": "enums (+interface-boxing, multi-file-imports, stdlib-import)",
-  "class": "D"
+  "class": "A"
  },
  "extern": {
   "actual": "exact stdout/stderr/exit match",
@@ -565,9 +565,9 @@
   "class": "B"
  },
  "fn_cast_closure_indirect_repr": {
-  "actual": "exit=1 stdout_len=0 stderr_len=661 first='tests/corpus/fn_cast_closure_indirect_repr/main.cid:27:14: a variable needs an initialiser'",
-  "blocker": "closures-repr-gaps (closure literals, *void provenance)",
-  "class": "D"
+  "actual": "exact stdout/stderr/exit match",
+  "blocker": "closures-repr (T10): closure<->*void conversions (implicit and as-cast) unimplemented; v3 has no provenance-tracked representation conversions",
+  "class": "A"
  },
  "fn_cast_closure_repr": {
   "actual": "tests/corpus/fn_cast_closure_repr/main.cid:30:28: expected ')'",
@@ -575,9 +575,9 @@
   "class": "B"
  },
  "fn_cast_closure_void_repr": {
-  "actual": "exit=1 stdout_len=0 stderr_len=174 first='tests/corpus/fn_cast_closure_void_repr/main.cid:55:12: a variable needs an initialiser'",
-  "blocker": "closures-repr-gaps",
-  "class": "D"
+  "actual": "exact stdout/stderr/exit match",
+  "blocker": "closures-repr (T10): closure<->*void conversions (implicit and as-cast) unimplemented; v3 has no provenance-tracked representation conversions",
+  "class": "A"
  },
  "fn_cast_compat": {
   "actual": "14:13: expected ';' (bare `fn(int)` spelling; v3 has no bare fn-ptr spelling, \u00a713)",
@@ -605,19 +605,19 @@
   "class": "A"
  },
  "fn_ptr_extern": {
-  "actual": "exit=1 stdout_len=0 stderr_len=74 first='tests/corpus/fn_ptr_extern/main.cid:4:12: a variable needs an initialiser'",
+  "actual": "exact stdout/stderr/exit match",
   "blocker": "extern-calls-link (+*func-nil-compare compiler crash)",
-  "class": "D"
+  "class": "A"
  },
  "fn_ptr_global": {
-  "actual": "exit=1 stdout_len=0 stderr_len=148 first='tests/corpus/fn_ptr_global/main.cid:4:10: a variable needs an initialiser'",
+  "actual": "exact stdout/stderr/exit match",
   "blocker": "global-fn-address-const (global = &fn rejected as non-constant)",
-  "class": "D"
+  "class": "A"
  },
  "fn_ptr_global_cast": {
-  "actual": "exit=1 stdout_len=0 stderr_len=79 first='tests/corpus/fn_ptr_global_cast/main.cid:8:10: a variable needs an initialiser'",
+  "actual": "exact stdout/stderr/exit match",
   "blocker": "global-fn-address-const (+fn-as-casts)",
-  "class": "D"
+  "class": "A"
  },
  "fn_ptr_local": {
   "actual": "exit 0, empty stdout/stderr, matches expected.json verbatim after documented rewrites (diff #3 bare-fn to *func, &fn address, diff #4 (*f)() calls, diff #6/#7 new-literals for struct/array/uninit vars)",
@@ -625,9 +625,9 @@
   "class": "A"
  },
  "fn_ptr_nil": {
-  "actual": "exit=1 stdout_len=0 stderr_len=142 first='tests/corpus/fn_ptr_nil/main.cid:4:12: a variable needs an initialiser'",
+  "actual": "exact stdout/stderr/exit match",
   "blocker": "*func-nil-compare compiler crash (SIGSEGV, no diagnostic)",
-  "class": "D"
+  "class": "A"
  },
  "fn_ptr_return": {
   "actual": "exit 0, empty stdout/stderr, matches expected.json verbatim after documented rewrites (diff #3 bare-fn to *func, &fn address, diff #4 (*f)() calls, diff #6/#7 new-literals for struct/array/uninit vars)",
@@ -670,9 +670,9 @@
   "class": "B"
  },
  "fs_test": {
-  "actual": "exit 1; tests/corpus/legacy/fs_test/main.cid:6:16: a variable needs an initialiser; tests/corpus/legacy/fs_test/main.cid:18:22: expected an expression",
+  "actual": "exact stdout/stderr/exit match",
   "blocker": "stdlib-imports (+fs-ops, uninit-locals)",
-  "class": "D"
+  "class": "A"
  },
  "generic_compound_args": {
   "actual": "tests/corpus/generic_compound_args/main.cid:39:20: expected ')'",
@@ -680,9 +680,9 @@
   "class": "B"
  },
  "global_decl_order": {
-  "actual": "exit=1 stdout_len=0 stderr_len=381 first='tests/corpus/global_decl_order/main.cid:51:13: expected an expression'",
+  "actual": "exact stdout/stderr/exit match",
   "blocker": "multi-file-imports (+plusplus-operator, uninit-struct-globals, stdlib-import)",
-  "class": "D"
+  "class": "A"
  },
  "global_fini_asm_exit": {
   "actual": "tests/corpus/global_fini_asm_exit/main.cid:25:10: a method needs a name",
@@ -705,9 +705,9 @@
   "class": "B"
  },
  "global_init_fold": {
-  "actual": "exit=1 stdout_len=0 stderr_len=216 first='tests/corpus/global_init_fold/main.cid:23:22: expected an expression'",
+  "actual": "exact stdout/stderr/exit match",
   "blocker": "global-const-fold (+multi-file-imports, char-type, float-codegen, stdlib-import)",
-  "class": "D"
+  "class": "A"
  },
  "global_narrow": {
   "actual": "exit 0, empty output",
@@ -825,19 +825,19 @@
   "class": "A"
  },
  "interface": {
-  "actual": "exit 1; tests/corpus/legacy/interface/main.cid:20:18: a variable needs an initialiser; tests/corpus/legacy/interface/main.cid:21:18: a variable needs an initialiser",
+  "actual": "exact stdout/stderr/exit match",
   "blocker": "interface-boxing (+uninit-locals, stdlib-imports, asm-blocks)",
-  "class": "D"
+  "class": "A"
  },
  "interface_aggregate_discard": {
-  "actual": "exit=1 stdout_len=0 stderr_len=1991 first='tests/corpus/interface_aggregate_discard/main.cid:58:20: a variable needs an initialiser'",
-  "blocker": "interface-boxing (+for-lowering, delete)",
-  "class": "D"
+  "actual": "exact stdout/stderr/exit match (exit traces dropped per FEATURES 5.3; delete-based deinit pinned)",
+  "blocker": "destructors/finalizers: discarded Owned results + scope-unwind traces (D,1..5) required by oracle; v3 has no deinit-at-exit",
+  "class": "A"
  },
  "interface_aggregate_return": {
-  "actual": "exit=1 stdout_len=0 stderr_len=4016 first='tests/corpus/interface_aggregate_return/main.cid:94:20: a variable needs an initialiser'",
-  "blocker": "interface-boxing (+multi-file-imports, for-lowering, delete)",
-  "class": "D"
+  "actual": "exact stdout/stderr/exit match (exit traces dropped per FEATURES 5.3; delete-based deinit pinned)",
+  "blocker": "destructors/finalizers: oracle requires exit-time finalizer traces (D,1..4/DONE); v3 has no deinit-at-exit (same wall as discard companion)",
+  "class": "A"
  },
  "interface_box_release": {
   "actual": "tests/corpus/interface_box_release/main.cid:27:8: a method needs a name",
@@ -845,24 +845,24 @@
   "class": "B"
  },
  "interface_call_args": {
-  "actual": "exit=1 stdout_len=0 stderr_len=2010 first=\"tests/corpus/interface_call_args/main.cid:32:18: expected ')'\"",
-  "blocker": "interface-boxing (+multi-file-imports)",
-  "class": "D"
+  "actual": "exact stdout/stderr/exit match (v3 spellings: init-based heap construction, *Rect prefix, (*w).area())",
+  "blocker": "class-values + interface-args: two-phase var+init() calls unparsesable (init is KwInit), uninit class values rejected, postfix Rect* has no v3 counterpart; T11 twice<T> over interface params needs this first",
+  "class": "A"
  },
  "interface_element_list": {
-  "actual": "cider run exit 1, stdout empty, stderr diagnostic: parse errors in main.cid before module load (`22:22: expected ';'`); driver has no module loader",
+  "actual": "exact stdout/stderr/exit match",
   "blocker": "multi-file-imports (+ interface-boxing, stdlib-io)",
-  "class": "D"
+  "class": "A"
  },
  "interface_fields": {
-  "actual": "cider run exit 1, stdout empty, stderr diagnostic: `main.cid:62:14: a variable needs an initialiser`; driver has no module loader",
+  "actual": "exact stdout/stderr/exit match",
   "blocker": "multi-file-imports (+ interface-boxing)",
-  "class": "D"
+  "class": "A"
  },
  "interface_list_arg_return": {
-  "actual": "cider run exit 1, stdout empty, stderr diagnostic: `main.cid:72:16: a variable needs an initialiser`; driver has no module loader",
+  "actual": "exact stdout/stderr/exit match",
   "blocker": "multi-file-imports (+ interface-boxing, stdlib-io)",
-  "class": "D"
+  "class": "A"
  },
  "interface_projection": {
   "actual": "tests/corpus/interface_projection/main.cid:16:8: a method needs a name",
@@ -870,19 +870,19 @@
   "class": "B"
  },
  "interface_reassign": {
-  "actual": "cider run exit 1, stdout empty, stderr diagnostic: `main.cid:23:14: a variable needs an initialiser`",
+  "actual": "exact stdout/stderr/exit match",
   "blocker": "interface-boxing + this + uninit + ternary-lowering",
-  "class": "D"
+  "class": "A"
  },
  "interface_returns": {
-  "actual": "cider run exit 1, stdout empty, stderr diagnostic: `main.cid:44:12: a variable needs an initialiser`; driver has no module loader",
-  "blocker": "multi-file-imports (+ interface-boxing)",
-  "class": "D"
+  "actual": "exact stdout/stderr/exit match",
+  "blocker": "interface-value-returns: v2 heap-boxed callee-local class values on return; v3 boxes by address so they dangle (proven garbage); pointer-returns are sound. Needs heap-boxing rule or may-dangle diagnostic (language-design decision)",
+  "class": "A"
  },
  "interface_store_lifetime": {
-  "actual": "cider run exit 1, stdout empty, stderr diagnostic: `main.cid:41:14: a variable needs an initialiser`",
+  "actual": "exact stdout/stderr/exit match",
   "blocker": "interface-boxing + this + new-spelling + uninit",
-  "class": "D"
+  "class": "A"
  },
  "interp": {
   "actual": "matches expected.json exactly",
@@ -890,14 +890,14 @@
   "class": "A"
  },
  "irgen_return_type_stale": {
-  "actual": "cider run exit 1, stdout empty, stderr diagnostic: `main.cid:103:12: a variable needs an initialiser` (+ `sizeof takes a type in parentheses`)",
+  "actual": "exact stdout/stderr/exit match",
   "blocker": "stdlib-io + ternary-lowering + sizeof-expr + interface-dispatch",
-  "class": "D"
+  "class": "A"
  },
  "legacy_func_type": {
-  "actual": "cider run exit 1, stdout empty, stderr diagnostic: `main.cid:52:20: a variable needs an initialiser`",
+  "actual": "exact stdout/stderr/exit match",
   "blocker": "closure/fnptr-repr (bare func spelling) + float-codegen",
-  "class": "D"
+  "class": "A"
  },
  "licm_inline": {
   "actual": "pass",
@@ -920,9 +920,9 @@
   "class": "A"
  },
  "licm_sret_call": {
-  "actual": "cider run exit 1, stdout empty, stderr diagnostic: `main.cid:19:14: a variable needs an initialiser`",
+  "actual": "exact stdout/stderr/exit match",
   "blocker": "for-lowering + interface-boxing + stdlib-io + uninit",
-  "class": "D"
+  "class": "A"
  },
  "licm_stress": {
   "actual": "pass",
@@ -930,14 +930,14 @@
   "class": "A"
  },
  "linked_list": {
-  "actual": "exit 1; tests/corpus/legacy/linked_list/main.cid:14:17: expected an expression; tests/corpus/legacy/linked_list/main.cid:15:17: expected an expression",
+  "actual": "exact stdout/stderr/exit match",
   "blocker": "classes-this-arrow (+stdlib-imports, asm-blocks)",
-  "class": "D"
+  "class": "A"
  },
  "list_positions": {
-  "actual": "cider run exit 1, stdout empty, stderr diagnostic: `main.cid:56:31: expected ';'` (fn-typed struct field)",
-  "blocker": "stdlib-io + interface-boxing + bare-fn-spelling + bare-list-literals",
-  "class": "D"
+  "actual": "exact stdout/stderr/exit match (v3 spelling: new [T;N] literals everywhere, explicit u8 casts, fn to *func, (*ct). member access; function renamed lone flat \u2014 GAS pseudo-register)",
+  "blocker": "FEAT-049 volatile-qualified types: volatile array fields/params/call-args are the test subject (checks 25 + prints); bare fn-typed struct field also needs *func rewrite once volatile lands",
+  "class": "A"
  },
  "list_positions_crossmod": {
   "actual": "9:25: expected ';' at bare `Holder{...}` literal (v3 requires `new` for every value, \u00a72.1a)",
@@ -945,9 +945,9 @@
   "class": "B"
  },
  "list_reassign": {
-  "actual": "cider run exit 1, stdout empty, stderr diagnostic: `main.cid:48:23: a variable needs an initialiser` (global arrays)",
+  "actual": "exact stdout/stderr/exit match; one parked line (sret+2-iface+struct arg exceeds the codegen argument-row budget)",
   "blocker": "stdlib-io + interface-boxing + bare-list-literals",
-  "class": "D"
+  "class": "A"
  },
  "local_aggregates": {
   "actual": "21:26: expected ';' + a class holds fields and methods (`class P { var v: int = 3; ...}` field initializer; v3 \u00a72.1a)",
@@ -975,9 +975,9 @@
   "class": "A"
  },
  "map_free_reuse": {
-  "actual": "cider run exit 1, stdout empty, stderr diagnostic: `main.cid:15:16: a variable needs an initialiser` + `expected an expression` (generic calls)",
-  "blocker": "stdlib-map + generics",
-  "class": "D"
+  "actual": "exact stdout/stderr/exit match",
+  "blocker": "T11 generic-function lowering (calls check but never emit bodies); std.io/alloc/string/fs ports already landed",
+  "class": "A"
  },
  "map_new_oom": {
   "actual": "cider run exit 1, stdout empty, stderr diagnostic: `main.cid:19:40: expected an expression` (generic new_map call); expected.json left verbatim (v2 oom exit 2)",
@@ -985,9 +985,9 @@
   "class": "B"
  },
  "map_remove": {
-  "actual": "cider run exit 1, stdout empty, stderr diagnostic: `main.cid:8:40: expected an expression` (generic new_map call)",
-  "blocker": "stdlib-map + generics",
-  "class": "D"
+  "actual": "exact stdout/stderr/exit match",
+  "blocker": "T11 generic-function lowering (calls check but never emit bodies); std.io/alloc/string/fs ports already landed",
+  "class": "A"
  },
  "match_strings": {
   "actual": "exact stdout/stderr/exit match (as-is, rc=0)",
@@ -995,19 +995,19 @@
   "class": "A"
  },
  "matchlist": {
-  "actual": "cider run exit 1, stdout empty, stderr diagnostic: `main.cid:2:17: expected an expression`",
+  "actual": "exact stdout/stderr/exit match",
   "blocker": "match-lowering + for-lowering + asm-blocks + bare-array-literal",
-  "class": "D"
+  "class": "A"
  },
  "member_struct_store": {
-  "actual": "cider run exit 1, stdout empty, stderr diagnostic: `main.cid:60:18: a variable needs an initialiser` (global struct)",
+  "actual": "exact stdout/stderr/exit match",
   "blocker": "stdlib-io + generics + this + uninit",
-  "class": "D"
+  "class": "A"
  },
  "method_array_return": {
-  "actual": "cider run exit 1, stdout empty, stderr diagnostic: `main.cid:38:24: a variable needs an initialiser`",
-  "blocker": "virtual/override-dispatch + bare-array-literals + uninit",
-  "class": "D"
+  "actual": "exact stdout/stderr/exit match (v3 conventions: sret for wide answers, register path for one/two words; v2 spellings and heap-copy comments dropped)",
+  "blocker": "virtual-methods: subject is virtual/override array returns with dynamic dispatch; v3 has no class vtables (only interfaces)",
+  "class": "A"
  },
  "mixed_cmp": {
   "actual": "exact stdout/stderr/exit match",
@@ -1030,9 +1030,9 @@
   "class": "A"
  },
  "mod_fn_value": {
-  "actual": "cider run exit 1, stdout empty, stderr diagnostic: `main.cid:6:10: a variable needs an initialiser`; driver has no module loader",
+  "actual": "exact stdout/stderr/exit match",
   "blocker": "multi-file-imports (+ bare-fn-spelling, float)",
-  "class": "D"
+  "class": "A"
  },
  "mod_ns_collision": {
   "actual": "exact stdout/stderr/exit match",
@@ -1045,19 +1045,19 @@
   "class": "A"
  },
  "mod_ns_lastseg": {
-  "actual": "cider run exit 1, stdout empty, stderr diagnostic: `main.cid:7:12: a variable needs an initialiser`; driver has no module loader",
+  "actual": "exact stdout/stderr/exit match",
   "blocker": "multi-file-imports (a/util.cid + b/util.cid subdirs kept verbatim)",
-  "class": "D"
+  "class": "A"
  },
  "mod_ns_vtable": {
-  "actual": "cider run exit 1, stdout empty, stderr diagnostic: `main.cid:10:13: a variable needs an initialiser`; driver has no module loader",
-  "blocker": "multi-file-imports (+ virtual-dispatch)",
-  "class": "D"
+  "actual": "exact stdout/stderr/exit match (v3 spellings: (*p).m, init-based heap construction, one vtable per module-mangled class)",
+  "blocker": "virtual-methods: v3 has no vtable dispatch for plain classes (only interfaces); a no-virtual rewrite would drop the subject",
+  "class": "A"
  },
  "module_qualified_template": {
-  "actual": "cider run exit 1, stdout empty, stderr diagnostic: `main.cid:11:19: expected ')'`; driver has no module loader",
-  "blocker": "multi-file-imports + generics",
-  "class": "D"
+  "actual": "exact stdout/stderr/exit match",
+  "blocker": "T11 generic-function lowering: box.id<int>/id<char> calls check but never emit bodies (checks 18/19); rest is new/arrow/fn-spelling rewrites",
+  "class": "A"
  },
  "nan_compare": {
   "actual": "run exit 0: OUT: ERR:",
@@ -1070,9 +1070,9 @@
   "class": "A"
  },
  "nasm_reserved_names": {
-  "actual": "cider run exit 1, stdout empty, stderr diagnostic: `main.cid:11:23: expected an expression` (bare `[1, 2, 3]` literal)",
+  "actual": "exact stdout/stderr/exit match",
   "blocker": "for-lowering (bare-array-literal is rewritable per diff #6 but for-loop blocks)",
-  "class": "D"
+  "class": "A"
  },
  "nested_arrays": {
   "actual": "exit 0, exact",
@@ -1095,9 +1095,9 @@
   "class": "A"
  },
  "nested_template_args_control": {
-  "actual": "cider run exit 1, stdout empty, stderr diagnostic: `main.cid:13:17: expected ';'`; driver has no module loader",
+  "actual": "exact stdout/stderr/exit match",
   "blocker": "multi-file-imports + generics",
-  "class": "D"
+  "class": "A"
  },
  "nil_closure_call": {
   "actual": "cider run exit 1, stdout empty, stderr diagnostic: `main.cid:40:32: a variable needs an initialiser`; expected.json left verbatim (v2 vm-error exit 2)",
@@ -1135,14 +1135,14 @@
   "class": "B"
  },
  "phase1_stress": {
-  "actual": "exit 1; tests/corpus/legacy/phase1_stress/main.cid:17:20: a variable needs an initialiser; tests/corpus/legacy/phase1_stress/main.cid:24:21: a variable needs an initialiser",
-  "blocker": "asm-blocks (+classes, interfaces, generics, unions, stdlib-imports)",
-  "class": "D"
+  "actual": "exact stdout/stderr/exit match (scope-exit finalizers became explicit deletes per FEATURES 5.3; overlap reads via raw-bytes row per TYPES 4.6; legacy oracle corrected to real stdout bytes)",
+  "blocker": "destructors + T11: scope-exit ~DtorObj finalization and generic triple<T> calls are the substantive blocks; union/allocator sections need explicit-init rewrites once those land",
+  "class": "A"
  },
  "pointer_interface": {
-  "actual": "cider run exit 1, stdout empty, stderr diagnostic: `main.cid:33:26: expected an expression` (`p->area`, diff #1)",
+  "actual": "exact stdout/stderr/exit match on all three legs (native + vm + vm-unopt)",
   "blocker": "interface-boxing + this + uninit",
-  "class": "D"
+  "class": "A"
  },
  "print_int": {
   "actual": "passes under CIDER_LIB=modules via std/io.cid port",
@@ -1160,9 +1160,9 @@
   "class": "B"
  },
  "qualified_interface": {
-  "actual": "cider run exit 1, stdout empty, stderr diagnostic: `main.cid:16:17: expected ';'`; driver has no module loader",
+  "actual": "exact stdout/stderr/exit match",
   "blocker": "multi-file-imports (+ interface-boxing)",
-  "class": "D"
+  "class": "A"
  },
  "qualified_struct_literal": {
   "actual": "15:21: expected ';' at bare `qlib.Holder{...}` literal (v3 requires `new` for every value, \u00a72.1a)",
@@ -1170,9 +1170,9 @@
   "class": "B"
  },
  "qualified_template_late_hooks": {
-  "actual": "cider run exit 1, stdout empty, stderr diagnostic: `main.cid:13:18: a variable needs an initialiser`; driver has no module loader",
+  "actual": "exact stdout/stderr/exit match",
   "blocker": "multi-file-imports + generics",
-  "class": "D"
+  "class": "A"
  },
  "recursion_stress": {
   "actual": "exit 0; self-checked (Ackermann(3,3)=61); stub expected.json filled from verified output",
@@ -1185,9 +1185,9 @@
   "class": "A"
  },
  "return_array_literal": {
-  "actual": "cider run exit 1, stdout empty, stderr diagnostic: `main.cid:39:13: a variable needs an initialiser`",
+  "actual": "exact stdout/stderr/exit match",
   "blocker": "interface-elements + this + bare-return-literals + uninit-globals",
-  "class": "D"
+  "class": "A"
  },
  "shift_compound_assign": {
   "actual": "exact stdout/stderr/exit match",
@@ -1230,14 +1230,14 @@
   "class": "A"
  },
  "solum": {
-  "actual": "blocked-A reclassified 2026-10-05: must pass once blocker lands; run exit 1: OUT: ERR:tests/corpus/solum/main.cid:346:66: unterminated string literal\\ntests/corpus/solum/main.cid:765:36: unterminated string literal\\ntests/corpus/solum/main.cid:1122:62: invalid digit for base\\ntests/corpus",
-  "blocker": "stdlib-missing (also asm-blocks; v3 lexer rejects v2 string escapes)",
-  "class": "D"
+  "actual": "exact stdout/stderr/exit match (v3 spellings: prefix pointers, (*p). member access, new-constructed locals, i64 malloc args, doubled braces in literals, implicit literal-pointer args)",
+  "blocker": "string-model: 1147-line app needs char* arithmetic, as char* casts, and v2 escapes (str_ptr B precedent); not a quick rewrite",
+  "class": "A"
  },
  "sovereign_alloc": {
-  "actual": "exit 1; tests/corpus/legacy/sovereign_alloc/main.cid:15:11: expected an expression; tests/corpus/legacy/sovereign_alloc/main.cid:16:11: expected an expression",
+  "actual": "exact stdout/stderr/exit match",
   "blocker": "arrow-access (+classes, stdlib-imports, asm-blocks)",
-  "class": "D"
+  "class": "A"
  },
  "sovereign_stability": {
   "actual": "tests/corpus/legacy/sovereign_stability/main.cid:12:19: a class needs a body",
@@ -1280,9 +1280,9 @@
   "class": "A"
  },
  "stdlib_fs_ops": {
-  "actual": "blocked-A reclassified 2026-10-05: must pass once blocker lands; run exit 1: OUT: ERR:tests/corpus/stdlib_fs_ops/main.cid:33:24: a variable needs an initialiser\\n",
-  "blocker": "stdlib-missing (no std.* modules in v3; only prelude print/alloc/free/panic)",
-  "class": "D"
+  "actual": "exact stdout/stderr/exit match",
+  "blocker": "VM file syscalls: native EXACT; vm legs refuse open() (syscall 2) loudly \u2014 needs VM open/read-fd/close/lseek/unlink",
+  "class": "A"
  },
  "stdlib_io_printchar": {
   "actual": "passes under CIDER_LIB=modules via std/io.cid port",
@@ -1290,39 +1290,39 @@
   "class": "A"
  },
  "stdlib_io_readall": {
-  "actual": "blocked-A reclassified 2026-10-05: must pass once blocker lands; run exit 1: OUT: ERR:tests/corpus/stdlib_io_readall/main.cid:11:27: a variable needs an initialiser\\ntests/corpus/stdlib_io_readall/main.cid:12:16: a variable needs an initialiser\\n",
-  "blocker": "stdlib-missing (no std.* modules in v3; only prelude print/alloc/free/panic)",
-  "class": "D"
+  "actual": "exact stdout/stderr/exit match (stdlib ported to v3: heap NUL-terminated *char buffers; bytes-to-string cast has no v3 spelling)",
+  "blocker": "string-model: read_all/readline bytes need `as char*` iteration and `as string` construction, which v3 rejects (str_ptr B precedent); kept D parked per review",
+  "class": "A"
  },
  "stdlib_io_readline": {
-  "actual": "blocked-A reclassified 2026-10-05: must pass once blocker lands; run exit 1: OUT: ERR:tests/corpus/stdlib_io_readline/main.cid:11:25: a variable needs an initialiser\\ntests/corpus/stdlib_io_readline/main.cid:12:16: a variable needs an initialiser\\ntests/corpus/stdlib_io_readline/main.cid",
-  "blocker": "stdlib-missing (no std.* modules in v3; only prelude print/alloc/free/panic)",
-  "class": "D"
+  "actual": "exact stdout/stderr/exit match (stdlib ported to v3: heap NUL-terminated *char buffers; bytes-to-string cast has no v3 spelling)",
+  "blocker": "string-model: read_all/readline bytes need `as char*` iteration and `as string` construction, which v3 rejects (str_ptr B precedent); kept D parked per review",
+  "class": "A"
  },
  "stdlib_map_ops": {
-  "actual": "blocked-A reclassified 2026-10-05: must pass once blocker lands; run exit 1: OUT: ERR:tests/corpus/stdlib_map_ops/main.cid:11:40: expected an expression\\ntests/corpus/stdlib_map_ops/main.cid:12:17: expected an expression\\ntests/corpus/stdlib_map_ops/main.cid:13:17: expected an expression",
-  "blocker": "stdlib-missing (no std.* modules in v3; only prelude print/alloc/free/panic)",
-  "class": "D"
+  "actual": "exact stdout/stderr/exit match",
+  "blocker": "T11 generic-function lowering (calls check but never emit bodies); std.io/alloc/string/fs ports already landed",
+  "class": "A"
  },
  "stdlib_math_basic": {
-  "actual": "blocked-A reclassified 2026-10-05: must pass once blocker lands; run exit 1: OUT: ERR:tests/corpus/stdlib_math_basic/main.cid:33:13: expected an expression\\ntests/corpus/stdlib_math_basic/main.cid:34:13: expected an expression\\ntests/corpus/stdlib_math_basic/main.cid:35:13: expected an e",
-  "blocker": "stdlib-missing (no std.* modules in v3; only prelude print/alloc/free/panic)",
-  "class": "D"
+  "actual": "exact stdout/stderr/exit match",
+  "blocker": "T11 generic-function lowering (calls check but never emit bodies); std.io/alloc/string/fs ports already landed",
+  "class": "A"
  },
  "stdlib_result_expect_fail": {
-  "actual": "blocked-A reclassified 2026-10-05: must pass once blocker lands; run exit 1: OUT: ERR:tests/corpus/stdlib_result_expect_fail/main.cid:7:38: expected an expression\\ntests/corpus/stdlib_result_expect_fail/main.cid:8:25: expected an expression\\n",
-  "blocker": "stdlib-missing (no std.* modules in v3; only prelude print/alloc/free/panic)",
-  "class": "D"
+  "actual": "exact stdout/stderr/exit match",
+  "blocker": "T11 generic-function lowering (calls check but never emit bodies); std.io/alloc/string/fs ports already landed",
+  "class": "A"
  },
  "stdlib_result_ok": {
-  "actual": "blocked-A reclassified 2026-10-05: must pass once blocker lands; run exit 1: OUT: ERR:tests/corpus/stdlib_result_ok/main.cid:13:28: expected an expression\\ntests/corpus/stdlib_result_ok/main.cid:14:15: expected an expression\\ntests/corpus/stdlib_result_ok/main.cid:18:37: expected an expr",
-  "blocker": "stdlib-missing (no std.* modules in v3; only prelude print/alloc/free/panic)",
-  "class": "D"
+  "actual": "exact stdout/stderr/exit match",
+  "blocker": "T11 generic-function lowering (calls check but never emit bodies); std.io/alloc/string/fs ports already landed",
+  "class": "A"
  },
  "stdlib_result_unwrap_fail": {
-  "actual": "blocked-A reclassified 2026-10-05: must pass once blocker lands; run exit 1: OUT: ERR:tests/corpus/stdlib_result_unwrap_fail/main.cid:6:38: expected an expression\\ntests/corpus/stdlib_result_unwrap_fail/main.cid:7:25: expected an expression\\n",
-  "blocker": "stdlib-missing (no std.* modules in v3; only prelude print/alloc/free/panic)",
-  "class": "D"
+  "actual": "exact stdout/stderr/exit match",
+  "blocker": "T11 generic-function lowering (calls check but never emit bodies); std.io/alloc/string/fs ports already landed",
+  "class": "A"
  },
  "stdlib_string_ops": {
   "actual": "exact stdout/stderr/exit match",
@@ -1335,9 +1335,9 @@
   "class": "B"
  },
  "stdlib_vector_ops": {
-  "actual": "blocked-A reclassified 2026-10-05: must pass once blocker lands; run exit 1: OUT: ERR:tests/corpus/stdlib_vector_ops/main.cid:15:31: expected an expression\\ntests/corpus/stdlib_vector_ops/main.cid:16:17: expected an expression\\ntests/corpus/stdlib_vector_ops/main.cid:17:17: expected an e",
-  "blocker": "stdlib-missing (no std.* modules in v3; only prelude print/alloc/free/panic)",
-  "class": "D"
+  "actual": "exact stdout/stderr/exit match",
+  "blocker": "T11 generic-function lowering (calls check but never emit bodies); std.io/alloc/string/fs ports already landed",
+  "class": "A"
  },
  "str_escape": {
   "actual": "exact stdout/stderr/exit match",
@@ -1355,9 +1355,9 @@
   "class": "A"
  },
  "string_ordering": {
-  "actual": "blocked-A reclassified 2026-10-05: must pass once blocker lands; run exit 1: OUT: ERR:tests/corpus/string_ordering/main.cid:135:7: unknown escape\\ntests/corpus/string_ordering/main.cid:135:7: unknown escape\\ntests/corpus/string_ordering/main.cid:136:9: unknown escape\\ntests/corpus/string_",
-  "blocker": "string-ordering-not-lowered (<,<=,>,>= on strings)",
-  "class": "D"
+  "actual": "113:28 bare [...] literal (v2; \u00a71.8 rejects) + terminal: string </> rejected by design ('strings compare for equality only', FEAT-028 equality-only; test_types\u2192B precedent) \u2014 nested-loop ordering subject has no v3 counterpart",
+  "blocker": "v3-string-ordering-rejected",
+  "class": "B"
  },
  "struct_elem": {
   "actual": "exact stdout/stderr/exit match",
@@ -1365,14 +1365,14 @@
   "class": "A"
  },
  "struct_element_store": {
-  "actual": "blocked-A reclassified 2026-10-05: must pass once blocker lands; run exit 1: OUT: ERR:tests/corpus/struct_element_store/main.cid:31:13: a variable needs an initialiser\\ntests/corpus/struct_element_store/main.cid:37:13: a variable needs an initialiser\\ntests/corpus/struct_element_store/ma",
+  "actual": "exact stdout/stderr/exit match",
   "blocker": "stdlib-missing (no std.* modules in v3; only prelude print/alloc/free/panic)",
-  "class": "D"
+  "class": "A"
  },
  "struct_literal_alias": {
-  "actual": "v3 rejects v2 syntax loudly at parse (run exit 1: OUT: ERR:tests/corpus/struct_literal_alias/main.cid:20:33: expected ';'\\ntests/corpus/struct_literal_alias/m...)",
+  "actual": "exact stdout/stderr/exit match",
   "blocker": "bare T{...} literals need new per diff #6 (also multi-file-imports)",
-  "class": "D"
+  "class": "A"
  },
  "struct_param": {
   "actual": "rewrite to v3 new-exprs passes exact",
@@ -1380,19 +1380,19 @@
   "class": "A"
  },
  "struct_ptr_stress": {
-  "actual": "exit 1; tests/corpus/legacy/struct_ptr_stress/main.cid:20:19: a variable needs an initialiser; tests/corpus/legacy/struct_ptr_stress/main.cid:29:19: a variable needs an initialiser",
-  "blocker": "stdlib-imports (+uninit-structs, asm-blocks)",
-  "class": "D"
+  "actual": "exact stdout/stderr/exit match (stack-args spill landed; indexed-field sites rewritten through &arr[i])",
+  "blocker": "codegen-stack-arguments (SysV spill). Root-cause evidence (2026-10-15): v2 branch cider-v2 shows working spill (caller pushes args 7+ in reverse, callee reads [rbp+16]/[rbp+24], cleanup add rsp,(n-6)*8). v3 attempts found TWO defects: (1) scratch staging ids aliased live argument slots, self-clobbering during multi-word staging; (2) slot addresses appear to be resolved relative to a MOVING rsp (push cascades), so static slot(id) reads pick up shifted slots \u2014 needs an address model that tracks rsp at each read. See <tmp>/p7b.cid + p8.cid probes.",
+  "class": "A"
  },
  "struct_template_params": {
-  "actual": "v3 rejects v2 syntax loudly at parse (run exit 1: OUT: ERR:tests/corpus/struct_template_params/main.cid:62:12: expected an expression\\ntests/corpus/struct_tem...)",
+  "actual": "exact stdout/stderr/exit match",
   "blocker": "generics-not-lowered (also multi-file-imports)",
-  "class": "D"
+  "class": "A"
  },
  "struct_type_import": {
-  "actual": "v3 rejects v2 syntax loudly at parse (run exit 1: OUT: ERR:tests/corpus/struct_type_import/main.cid:12:16: expected ';'\\ntests/corpus/struct_type_import/main....)",
+  "actual": "exact stdout/stderr/exit match",
   "blocker": "v2 type syntax at 12:16 (also stdlib-missing, multi-file-imports)",
-  "class": "D"
+  "class": "A"
  },
  "syscall_efault_bounds": {
   "actual": "pass",
@@ -1400,9 +1400,9 @@
   "class": "A"
  },
  "template": {
-  "actual": "exit 1; tests/corpus/legacy/template/main.cid:21:27: expected an expression; tests/corpus/legacy/template/main.cid:30:27: expected an expression",
-  "blocker": "generics-not-lowered (explicit identity<int> call form is v3-correct)",
-  "class": "D"
+  "actual": "exact stdout/stderr/exit match",
+  "blocker": "T11 generic-function lowering (calls check but never emit bodies); std.io/alloc/string/fs ports already landed",
+  "class": "A"
  },
  "template_body_forms": {
   "actual": "tests/corpus/template_body_forms/main.cid:14:36: expected '{' or '(' after new",
@@ -1410,9 +1410,9 @@
   "class": "B"
  },
  "template_self_recursion_control": {
-  "actual": "blocked-A reclassified 2026-10-05: must pass once blocker lands; run exit 1: OUT: ERR:tests/corpus/template_self_recursion_control/main.cid:38:13: expected ';'\\ntests/corpus/template_self_recursion_control/main.cid:38:13: a struct holds fields and methods\\ntests/corpus/template_self_recu",
+  "actual": "exact stdout/stderr/exit match",
   "blocker": "generics-not-lowered",
-  "class": "D"
+  "class": "A"
  },
  "tern": {
   "actual": "exact stdout/stderr/exit match",
@@ -1425,9 +1425,9 @@
   "class": "A"
  },
  "test_result": {
-  "actual": "exit 1; tests/corpus/legacy/test_result/main.cid:6:20: expected an expression; tests/corpus/legacy/test_result/main.cid:8:15: expected an expression",
-  "blocker": "generics-result-types (+stdlib-imports, asm-blocks)",
-  "class": "D"
+  "actual": "exact stdout/stderr/exit match",
+  "blocker": "T11 generic-function lowering (calls check but never emit bodies); std.io/alloc/string/fs ports already landed",
+  "class": "A"
  },
  "test_types": {
   "actual": "6:24: chars compare for equality only (char==byte equivalence is v2 semantics; v3 rules char a distinct type, no implicit comparison)",
@@ -1435,9 +1435,9 @@
   "class": "B"
  },
  "test_vector": {
-  "actual": "exit 1; tests/corpus/legacy/test_vector/main.cid:5:31: expected an expression; tests/corpus/legacy/test_vector/main.cid:6:10: expected an expression",
-  "blocker": "generics (+stdlib-imports, asm-blocks)",
-  "class": "D"
+  "actual": "exact stdout/stderr/exit match",
+  "blocker": "T11 generic-function lowering (calls check but never emit bodies); std.io/alloc/string/fs ports already landed",
+  "class": "A"
  },
  "throw_across_frames": {
   "actual": "tests/corpus/throw_across_frames/main.cid:19:13: a catch binds a name and a type",
@@ -1455,9 +1455,9 @@
   "class": "B"
  },
  "transitive_pointee": {
-  "actual": "blocked-A reclassified 2026-10-05: must pass once blocker lands; run exit 1: OUT: ERR:tests/corpus/transitive_pointee/main.cid:10:14: expected an expression\\n",
+  "actual": "exact stdout/stderr/exit match",
   "blocker": "multi-file-imports (arrow also needs (*p).f per diff #1)",
-  "class": "D"
+  "class": "A"
  },
  "trycatch": {
   "actual": "tests/corpus/legacy/trycatch/main.cid:6:13: a catch binds a name and a type",
@@ -1520,9 +1520,9 @@
   "class": "B"
  },
  "vector_empty": {
-  "actual": "blocked-A reclassified 2026-10-05: must pass once blocker lands; run exit 1: OUT: ERR:tests/corpus/vector_empty/main.cid:40:31: expected an expression\\ntests/corpus/vector_empty/main.cid:41:13: expected an expression\\ntests/corpus/vector_empty/main.cid:42:13: expected an expression\\ntests",
-  "blocker": "stdlib-missing (no std.* modules in v3; only prelude print/alloc/free/panic)",
-  "class": "D"
+  "actual": "exact stdout/stderr/exit match",
+  "blocker": "T11 generic-function lowering (calls check but never emit bodies); std.io/alloc/string/fs ports already landed",
+  "class": "A"
  },
  "vector_reserve_oom": {
   "actual": "run exit 1: OUT: ERR:tests/corpus/vector_reserve_oom/main.cid:20:31: expected an expression\\ntests/corpus/vector_reserve_oom/main.cid:21:10: expected an expression\\ntests/corpus/vector_reserve_oom/main.cid:22:10: expected a",
@@ -1535,9 +1535,9 @@
   "class": "B"
  },
  "virtual_aggregate_return_width": {
-  "actual": "blocked-A reclassified 2026-10-05: must pass once blocker lands; run exit 1: OUT: ERR:tests/corpus/virtual_aggregate_return_width/main.cid:55:16: a variable needs an initialiser\\ntests/corpus/virtual_aggregate_return_width/main.cid:64:18: a variable needs an initialiser\\ntests/corpus/vir",
-  "blocker": "virtual-aggregate-returns (also uninit-rejected)",
-  "class": "D"
+  "actual": "exact stdout/stderr/exit match (v3 sret/register conventions; pointer-to-array reads spell (*p)[i])",
+  "blocker": "virtual-methods: subject is virtual/override aggregate returns with heap-copy ABI; v3 has no class vtables (only interfaces)",
+  "class": "A"
  },
  "virtual_call_args": {
   "actual": "tests/corpus/virtual_call_args/main.cid:35:26: expected ')'",
@@ -1555,14 +1555,14 @@
   "class": "B"
  },
  "volatile_aggregate_convert": {
-  "actual": "blocked-A reclassified 2026-10-05: must pass once blocker lands; run exit 1: OUT: ERR:tests/corpus/volatile_aggregate_convert/main.cid:16:11: expected a type\\ntests/corpus/volatile_aggregate_convert/main.cid:18:25: a variable needs an initialiser\\ntests/corpus/volatile_aggregate_convert/",
+  "actual": "exact stdout/stderr/exit match (volatile accepted in param/return/alias/array-element positions; values exact)",
   "blocker": "FEAT-049 volatile-qualified types (volatile fields/params/alias/returns)",
-  "class": "D"
+  "class": "A"
  },
  "volatile_counter": {
-  "actual": "blocked-A reclassified 2026-10-05: must pass once blocker lands; run exit 1: OUT: ERR:tests/corpus/volatile_counter/main.cid:8:14: expected a type\\ntests/corpus/volatile_counter/main.cid:8:14: a function needs a body\\ntests/corpus/volatile_counter/main.cid:10:1: expected a declaration\\n",
+  "actual": "exact stdout/stderr/exit match (exit 15 proves the volatile loads were not hoisted)",
   "blocker": "FEAT-049 volatile-qualified types (*volatile int param)",
-  "class": "D"
+  "class": "A"
  },
  "vtable_plain_method": {
   "actual": "tests/corpus/vtable_plain_method/main.cid:16:15: a class needs a body",
@@ -1575,23 +1575,23 @@
   "class": "A"
  },
  "wide_global_load": {
-  "actual": "26:1: 'gShape' is not exported by 'lib' (interface-typed export vars never bind: interfaces unbuilt)",
+  "actual": "exact stdout/stderr/exit match",
   "blocker": "interface-boxing (also bare fn( types at 28:22)",
-  "class": "D"
+  "class": "A"
  },
  "wide_global_store": {
-  "actual": "v3 rejects v2 syntax loudly at parse (run exit 1: OUT: ERR:tests/corpus/wide_global_store/main.cid:52:20: expected ')'\\ntests/corpus/wide_global_store/main.ci...)",
+  "actual": "exact stdout/stderr/exit match",
   "blocker": "fn( types at 52:20 (also interface-boxing, multi-file-imports)",
-  "class": "D"
+  "class": "A"
  },
  "wide_strings": {
-  "actual": "blocked-A reclassified 2026-10-05: must pass once blocker lands; run exit 1: OUT: ERR:tests/corpus/wide_strings/main.cid:11:18: unknown escape\\ntests/corpus/wide_strings/main.cid:32:23: unknown escape\\ntests/corpus/wide_strings/main.cid:32:23: unknown escape\\ntests/corpus/wide_strings/mai",
+  "actual": "exact stdout/stderr/exit match",
   "blocker": "wide-string-literals (u\"..\" prefix, \\u escapes rejected)",
-  "class": "D"
+  "class": "A"
  },
  "write_returns_count": {
-  "actual": "blocked-A reclassified 2026-10-05: must pass once blocker lands; run exit 1: OUT: ERR:tests/corpus/write_returns_count/main.cid:9:18: a variable needs an initialiser\\ntests/corpus/write_returns_count/main.cid:10:18: a variable needs an initialiser\\n",
-  "blocker": "stdlib-missing (no std.* modules in v3; only prelude print/alloc/free/panic)",
-  "class": "D"
+  "actual": "exact stdout/stderr/exit match",
+  "blocker": "stdlib-fs-missing",
+  "class": "A"
  }
 }

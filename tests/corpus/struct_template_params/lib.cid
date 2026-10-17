@@ -8,5 +8,5 @@ export struct LibBox<T> {
 
 export func libRead(p: *LibBox<int>) -> int {
   if (p == nilPtr) { return 55; }
-  return p->v;
+  return (*p).v;
 }

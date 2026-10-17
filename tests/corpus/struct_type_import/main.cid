@@ -4,12 +4,12 @@ from std.io import printInt, print;
 
 func main() -> int {
   setstack(42);
-  printInt(getstack()); print("\n");
-  printInt(g_percpu.kernel_stack); print("\n");
+  printInt(getstack() as int); print("\n");
+  printInt((g_percpu.kernel_stack) as int); print("\n");
   g_percpu.user_stack = 7;
-  printInt(g_percpu.user_stack); print("\n");
-  printInt(lib.g_percpu.kernel_stack); print("\n");
-  var arr: [lib.PerCpu; 2];
+  printInt((g_percpu.user_stack) as int); print("\n");
+  printInt((lib.g_percpu.kernel_stack) as int); print("\n");
+  var arr: [lib.PerCpu; 2] = new [lib.PerCpu; 2] { new lib.PerCpu { kernel_stack: 0, user_stack: 0 }, new lib.PerCpu { kernel_stack: 0, user_stack: 0 } };
   set_entry(&arr[0], 0, 11);
   printInt(get_entry(&arr[0], 0) as int); print("\n");
   return 0;

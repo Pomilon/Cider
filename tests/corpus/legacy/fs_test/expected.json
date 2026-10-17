@@ -1,1 +1,5 @@
-{"stdout": "", "stderr": "", "exit": 0}
+{
+  "stdout": "fs_test: starting...\nfs_test: opened for write\nfs_test: write ok\nfs_test: close ok\nfs_test: read ok\nHello from Cider fs module!\nfs_test: unlink ok\nPASS: fs_test\n",
+  "stderr": "",
+  "exit": 0
+}

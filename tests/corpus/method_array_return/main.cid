@@ -35,50 +35,36 @@ type Row = [int; 2];
 
 class Base {
     virtual func make() -> [int; 2] {
-        var a: [int; 2];
-        a[0] = 11;
-        a[1] = 12;
+        var a: [int; 2] = new [int; 2] {11, 12};
         return a;
     }
-    virtual func lit() -> [int; 2] { return [21, 22]; }
-    virtual func alias() -> Row { return [23, 24]; }
-    virtual func nested() -> [[int; 2]; 2] { return [[31, 32], [33, 34]]; }
+    virtual func lit() -> [int; 2] { return new [int; 2] {21, 22}; }
+    virtual func alias() -> Row { return new [int; 2] {23, 24}; }
+    virtual func nested() -> [[int; 2]; 2] { return new [[int; 2]; 2] { new [int; 2] {31, 32}, new [int; 2] {33, 34} }; }
     virtual func cells() -> [Cell; 2] {
-        var a: [Cell; 2];
-        a[0].v = 41;
-        a[1].v = 42;
-        return a;
+        return new [Cell; 2] { new Cell { v: 41 }, new Cell { v: 42 } };
     }
     // Virtual struct return: already on the heap path before the fix; kept
     // so the aggregate convention stays pinned on both kinds.
     virtual func makePair() -> Pair {
-        var p: Pair;
-        p.a = 51;
-        p.b = 52;
+        var p: Pair = new Pair { a: 51, b: 52 };
         return p;
     }
 }
 
-class Derived extends Base {
-    override func make() -> [int; 2] {
-        var a: [int; 2];
-        a[0] = 13;
-        a[1] = 14;
+class Derived : Base {
+    func make() -> [int; 2] {
+        var a: [int; 2] = new [int; 2] {13, 14};
         return a;
     }
-    override func lit() -> [int; 2] { return [22, 24]; }
-    override func alias() -> Row { return [24, 26]; }
-    override func nested() -> [[int; 2]; 2] { return [[32, 34], [36, 38]]; }
-    override func cells() -> [Cell; 2] {
-        var a: [Cell; 2];
-        a[0].v = 43;
-        a[1].v = 44;
-        return a;
+    func lit() -> [int; 2] { return new [int; 2] {22, 24}; }
+    func alias() -> Row { return new [int; 2] {24, 26}; }
+    func nested() -> [[int; 2]; 2] { return new [[int; 2]; 2] { new [int; 2] {32, 34}, new [int; 2] {36, 38} }; }
+    func cells() -> [Cell; 2] {
+        return new [Cell; 2] { new Cell { v: 43 }, new Cell { v: 44 } };
     }
-    override func makePair() -> Pair {
-        var p: Pair;
-        p.a = 53;
-        p.b = 54;
+    func makePair() -> Pair {
+        var p: Pair = new Pair { a: 53, b: 54 };
         return p;
     }
 }
@@ -86,17 +72,13 @@ class Derived extends Base {
 // A free-function array return and a non-virtual method array return both
 // keep the unchanged sret path; they bracket the virtual case.
 func freeMake() -> [int; 2] {
-    var a: [int; 2];
-    a[0] = 91;
-    a[1] = 92;
+    var a: [int; 2] = new [int; 2] {91, 92};
     return a;
 }
 
 class Plain {
     func make() -> [int; 2] {
-        var a: [int; 2];
-        a[0] = 93;
-        a[1] = 94;
+        var a: [int; 2] = new [int; 2] {93, 94};
         return a;
     }
 }
@@ -105,14 +87,12 @@ class Plain {
 // so a non-copy return is caught rather than accidentally reading the
 // values the callee happened to leave behind.
 func churn() -> int {
-    var a: [Cell; 2];
-    a[0].v = 1;
-    a[1].v = 2;
+    var a: [Cell; 2] = new [Cell; 2] { new Cell { v: 1 }, new Cell { v: 2 } };
     return a[0].v + a[1].v;
 }
 
 func main() -> int {
-    var d: Derived;
+    var d: Derived = new Derived { };
     var bp: *Base = &d;
 
     // --- unchanged shapes -------------------------------------------------
@@ -120,61 +100,61 @@ func main() -> int {
     if (f[0] != 91) { return 101; }
     if (f[1] != 92) { return 102; }
 
-    var pl: Plain;
+    var pl: Plain = new Plain { };
     var pm: [int; 2] = pl.make();
     if (pm[0] != 93) { return 103; }
     if (pm[1] != 94) { return 104; }
 
     // --- virtual array return, read after the frame was churned ---------
-    var m1: [int; 2] = bp->make();
+    var m1: [int; 2] = (*bp).make();
     churn();
     if (m1[0] != 13) { return 1; }
     if (m1[1] != 14) { return 2; }
 
     // --- the same call again: each result is its own heap copy ----------
-    var m2: [int; 2] = bp->make();
+    var m2: [int; 2] = (*bp).make();
     churn();
     if (m2[0] != 13) { return 3; }
     if (m2[1] != 14) { return 4; }
     if (m1[0] != 13 || m1[1] != 14) { return 5; }
 
     // --- assignment into an already-declared variable -------------------
-    var m3: [int; 2];
-    m3 = bp->make();
+    var m3: [int; 2] = new [int; 2] {[0, ...]};
+    m3 = (*bp).make();
     if (m3[0] != 13) { return 6; }
     if (m3[1] != 14) { return 7; }
 
     // --- list-literal, alias-spelled and nested virtual returns ---------
-    var m4: [int; 2] = bp->lit();
+    var m4: [int; 2] = (*bp).lit();
     if (m4[0] != 22) { return 8; }
     if (m4[1] != 24) { return 9; }
 
-    var r1: Row = bp->alias();
+    var r1: Row = (*bp).alias();
     if (r1[0] != 24) { return 10; }
     if (r1[1] != 26) { return 11; }
 
-    var n: [[int; 2]; 2] = bp->nested();
+    var n: [[int; 2]; 2] = (*bp).nested();
     if (n[0][0] != 32) { return 12; }
     if (n[0][1] != 34) { return 13; }
     if (n[1][0] != 36) { return 14; }
     if (n[1][1] != 38) { return 15; }
 
     // --- array of class values ------------------------------------------
-    var c: [Cell; 2] = bp->cells();
+    var c: [Cell; 2] = (*bp).cells();
     if (c[0].v != 43) { return 16; }
     if (c[1].v != 44) { return 17; }
 
     // --- result consumed directly as an index source --------------------
-    if (bp->make()[0] != 13) { return 18; }
-    if (bp->make()[1] != 14) { return 19; }
+    if ((*bp).make()[0] != 13) { return 18; }
+    if ((*bp).make()[1] != 14) { return 19; }
 
     // --- discarded results: the bare temporaries the heap copy is for ---
-    bp->make();
-    bp->nested();
-    bp->cells();
+    (*bp).make();
+    (*bp).nested();
+    (*bp).cells();
 
     // --- virtual STRUCT return: unchanged, still content-checked -------
-    var p: Pair = bp->makePair();
+    var p: Pair = (*bp).makePair();
     if (p.a != 53) { return 20; }
     if (p.b != 54) { return 21; }
 

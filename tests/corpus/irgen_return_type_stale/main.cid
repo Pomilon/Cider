@@ -38,7 +38,7 @@ from std.io import print, printInt;
 // This is the exact shape of the original miscompile: `ret 4` must stay
 // `ret 4`, not become a malloc + memcpy + ret of a pointer.
 struct Pt { var x: int; var y: int; var z: int; }
-func retType() -> int { return sizeof(int); }
+func retType() -> int { return sizeof(int) as int; }
 
 // --- position 2: the first function after an interface declaration ---
 // The interface is a 16-byte fat-pointer aggregate, so this covers the other
@@ -51,8 +51,8 @@ func retIface() -> int { return 4; }
 // --- position 3: the first function after a class declaration ---
 class Sq {
   var side: int;
-  func init(v: int) { this.side = v; }
-  func area() -> int { return this.side * this.side; }
+  func init(v: int) { (*self).side = v; }
+  func area() -> int { return (*self).side * (*self).side; }
 }
 func retClass() -> int { return 4; }
 
@@ -61,7 +61,7 @@ func retClass() -> int { return 4; }
 struct Wide { var a: int; var b: int; var c: int; var d: int; var e: int; }
 // sizeof of the poisoning type itself: 12, so a stale `int` would be as
 // wrong as the reverse.
-func retStruct() -> int { return sizeof(Pt); }
+func retStruct() -> int { return sizeof(Pt) as int; }
 // A binary result (visit(BinaryExpr)), a negation (visit(UnaryExpr)) and a
 // ternary arm (visit(TernaryExpr)) all rebuild their own type.
 func retSum() -> int { return 0 + 4; }
@@ -79,10 +79,10 @@ func retNested() -> int { return inner(); }
 // sizeof as a call argument, where the callee parameter's declared width
 // drives the conversion.
 func id(x: int) -> int { return x; }
-func retArg() -> int { return id(sizeof(int)); }
+func retArg() -> int { return id(sizeof(int) as int); }
 // A var-declaration initializer, the other context that reads the type of
 // the value it just built.
-func retLocal() -> int { var v: int = sizeof(int); return v; }
+func retLocal() -> int { var v: int = sizeof(int) as int; return v; }
 
 func main() -> int {
   // Each check returns a distinct code so a failure names its position.
@@ -100,10 +100,10 @@ func main() -> int {
 
   // The aggregate positions still work when a value IS expected, so the fix
   // is not "stop typing aggregates" but "type the value that was produced".
-  var p: Pt;
-  if (sizeof p != 12) { return 12; }
-  var w: Wide;
-  if (sizeof w != 20) { return 13; }
+  var p: Pt = new Pt { x: 0, y: 0, z: 0 };
+  if (sizeof(Pt) != 12) { return 12; }
+  var w: Wide = new Wide { a: 0, b: 0, c: 0, d: 0, e: 0 };
+  if (sizeof(Wide) != 20) { return 13; }
   var sh: Shape = new Sq(5);
   if (sh.area() != 25) { return 14; }
 

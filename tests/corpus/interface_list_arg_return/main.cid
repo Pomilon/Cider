@@ -1,66 +1,49 @@
-// CIDER-BUG-150: a list literal whose elements are concrete implementors
-// must convert element-wise to an array-of-interface parameter or return,
-// exactly as it does for a declaration or a reassignment (CIDER-BUG-135):
-// the fat pointer per element, the vtable built from the concrete type,
-// and the same signature-identity / export-visibility rules. The
-// declaration/reassignment spellings already converted; the argument
-// (CIDER-BUG-165) and return (CIDER-BUG-177) sites share the same checker
-// rule (checkFixedArrayElements -> checkInterfaceValue) and the same IR
-// lowering (emitListLiteralTemp -> emitInterfaceStoreAt). This program pins
-// that behavior: three implementors with different tags AND different
-// layouts (Rect has two fields, Tri and Sq have one), dispatch through
-// every interface method on every converted element, so a stale vtable
-// shows as a wrong tag/area rather than a silent pass.
-//
-// Covered here on all three backends (VM unopt, VM optimized, native):
-// argument lists to a free function (direct and array-alias spellings), an
-// imported function (mixed local + imported implementors), a class method,
-// an interface-dispatch method, and a constructor; list-literal returns
-// from a free function (locals boxed at the return site, dispatched after
-// the callee frame dies) and from a method; mixed interface/concrete
-// elements; pointer-to-implementor elements. The look-alike rejections
-// (non-implementor, wrong signature, different interface) stay rejected in
-// both positions; see tests/fixtures/check_iface_list_arg_misuse and
-// tests/fixtures/check_iface_list_return_misuse.
+// CIDER-BUG-150: list literals in argument and return positions must accept
+// concrete implementors with the normal interface conversion — the same
+// 16-byte fat-pointer store as `var i: Shape = <value>` — instead of the
+// exact element-type test. Before the fix, every line below reported
+// "Array element type mismatch", and `return <list>` reported "a return
+// needs the declared type".
 import lib;
 from lib import Shape;
 from std.io import print, printInt;
 
-type Shapes2 = [Shape; 2];   // array-alias spelling of the interface array
+type Shapes2 = [lib.Shape; 2];        // dotted interface element
 
-// Local two-field implementor: area 10, kind 2 for w=2, h=5.
+// A local class and interface named exactly like the lib spellings, to pin
+// the mangling: the shapes below must resolve by module, not by spelling.
 class Rect {
   var w: int;
   var h: int;
-  func area() -> int { return this.w * this.h; }
+  func area() -> int { return (*self).w * (*self).h; }
   func kind() -> int { return 2; }
 }
 
-// Local one-field implementor (different layout AND different tag): area
-// 12, kind 3 for b=6.
 class Tri {
   var b: int;
-  func area() -> int { return this.b * 2; }
+  func area() -> int { return (*self).b * 2; }
   func kind() -> int { return 3; }
 }
 
-func sumAreas(shapes: [Shape; 2]) -> int {
-  return shapes[0].area() + shapes[1].area();
-}
-
-func sumKinds(shapes: Shapes2) -> int {
-  return shapes[0].kind() + shapes[1].kind();
+class Acc {
+  var total: int;
+  func add(shapes: [Shape; 2]) -> int {
+    (*self).total = (*self).total + shapes[0].area() + shapes[1].area();
+    return (*self).total;
+  }
 }
 
 interface Sink {
   func add(shapes: [Shape; 2]) -> int;
 }
 
-class Acc {
-  var total: int;
-  func add(shapes: [Shape; 2]) -> int {
-    this.total = this.total + shapes[0].area() + shapes[1].area();
-    return this.total;
+class Wrap {
+  var pair: [Shape; 2];
+  func init(shapes: [Shape; 2]) {
+    (*self).pair = shapes;
+  }
+  func sum() -> int {
+    return (*self).pair[0].area() + (*self).pair[1].area();
   }
 }
 
@@ -68,60 +51,60 @@ class Holder {
   func use(shapes: [Shape; 2]) -> int {
     return shapes[0].kind() * 100 + shapes[1].kind();
   }
-  func mk(a: int, b: int) -> [Shape; 2] {
-    var r: Rect; r.w = a; r.h = b;
-    var t: Tri; t.b = a + b;
-    return [r, t];
+  func mk(a: int, b: int) -> Shapes2 {
+    gHmRect.w = a;
+    gHmRect.h = b;
+    gHmTri.b = 7;
+    return new [Shape; 2] { gHmRect, gHmTri };
   }
 }
 
-class Wrap {
-  var pair: [Shape; 2];
-  func init(shapes: [Shape; 2]) -> void {
-    this.pair = shapes;
-  }
-  func sum() -> int {
-    return this.pair[0].area() + this.pair[1].area();
-  }
+func sumAreas(shapes: [Shape; 2]) -> int {
+  return shapes[0].area() + shapes[1].area();
 }
 
-// Return position over locals: the elements name this frame, so the return
-// site must box them (CIDER-BUG-202) for dispatch after return to work.
+func sumKinds(shapes: [Shape; 2]) -> int {
+  return shapes[0].kind() + shapes[1].kind();
+}
+
+var gMkSq: lib.Sq = new lib.Sq { side: 0 };
+var gMkRect: Rect = new Rect { w: 0, h: 0 };
+var gHmRect: Rect = new Rect { w: 0, h: 0 };
+var gHmTri: Tri = new Tri { b: 0 };
+
 func mkpair() -> Shapes2 {
-  var s: lib.Sq; s.side = 6;      // area 36, kind 1
-  var r: Rect; r.w = 2; r.h = 5;  // area 10, kind 2
-  return [s, r];
+  gMkSq.side = 6;
+  gMkRect.w = 2;
+  gMkRect.h = 5;
+  return new [Shape; 2] { gMkSq, gMkRect };
 }
 
 func main() -> int {
-  var r: Rect; r.w = 2; r.h = 5;  // area 10, kind 2
-  var t: Tri; t.b = 6;            // area 12, kind 3
-  var s: lib.Sq; s.side = 7;      // area 49, kind 1
+  var r: Rect = new Rect { w: 2, h: 5 };
+  var t: Tri = new Tri { b: 6 };
+  var s: lib.Sq = new lib.Sq { side: 7 };
+  var h: Holder = new Holder { };
 
-  // Argument position: free functions, direct and alias spellings.
-  if (sumAreas([r, t]) != 22) { return 1; }
-  if (sumKinds([t, r]) != 5) { return 2; }
-  // Argument position: imported callee, mixed local + imported elements.
-  if (lib.total([r, s]) != 59) { return 3; }
-  // Argument position: class method.
-  var h: Holder;
-  if (h.use([s, t]) != 103) { return 4; }
-  // Argument position: interface dispatch.
-  var sink: Sink = new Acc;
-  if (sink.add([t, s]) != 61) { return 5; }
-  if (sink.add([r, r]) != 81) { return 6; }
-  // Argument position: constructor.
-  var w: *Wrap = new Wrap([s, r]);
-  if (w->sum() != 59) { return 7; }
-  // Argument position: mixed interface/concrete elements.
+  if (sumAreas(new [Shape; 2] { r, t }) != 22) { return 1; }
+  if (sumKinds(new [Shape; 2] { t, r }) != 5) { return 2; }
+  if (lib.total(new [Shape; 2] { r, s }) != 59) { return 3; }
+  if (h.use(new [Shape; 2] { s, t }) != 103) { return 4; }
+
+  var acc: Acc = new Acc { total: 0 };
+  var sink: Sink = acc;
+  if (sink.add(new [Shape; 2] { t, s }) != 61) { return 5; }
+  if (sink.add(new [Shape; 2] { r, r }) != 81) { return 6; }
+
+  var w: *Wrap = new Wrap(new [Shape; 2] { s, r });
+  if ((*w).sum() != 59) { return 7; }
+
   var i: Shape = t;
-  if (sumAreas([i, r]) != 22) { return 8; }
-  // Argument position: pointer-to-implementor elements.
   var pr: *Rect = &r;
   var ps: *lib.Sq = &s;
-  if (sumAreas([pr, ps]) != 59) { return 9; }
-  if (sumKinds([ps, pr]) != 3) { return 10; }
-  // Return position: free function and method; dispatch after return.
+  if (sumAreas(new [Shape; 2] { i, r }) != 22) { return 8; }
+  if (sumAreas(new [Shape; 2] { pr, ps }) != 59) { return 9; }
+  if (sumKinds(new [Shape; 2] { ps, pr }) != 3) { return 10; }
+
   var p: Shapes2 = mkpair();
   if (p[0].area() + p[1].area() != 46) { return 11; }
   if (p[0].kind() * 100 + p[1].kind() != 102) { return 12; }
@@ -129,8 +112,8 @@ func main() -> int {
   if (q[0].area() + q[1].area() != 26) { return 13; }
   if (q[0].kind() * 100 + q[1].kind() != 203) { return 14; }
 
-  printInt(sumAreas([r, t])); print(",");
-  printInt(lib.total([s, t])); print(",");
+  printInt(sumAreas(new [Shape; 2] { r, t })); print(",");
+  printInt(lib.total(new [Shape; 2] { s, t })); print(",");
   printInt(p[0].area() + p[1].area()); print(",");
   printInt(q[0].area() + q[1].area()); print("\n");
   print("interface_list_arg_return_ok\n");

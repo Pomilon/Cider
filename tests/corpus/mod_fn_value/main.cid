@@ -3,13 +3,13 @@
 // to the generic int-result path (wrong for f64 signatures).
 import b;
 
-var g: fn(int) -> int = b.inc;
-var h: fn(f64) -> f64 = b.half;
+var g: func(int) -> int = b.inc;
+var h: func(f64) -> f64 = b.half;
 
 func main() -> int {
   if (g(4) != 5) { return 1; }
   if ((h(10.0) as int) != 5) { return 2; }
-  var f: fn(int) -> int = b.inc;
+  var f: func(int) -> int = b.inc;
   if (f(6) != 7) { return 3; }
   if ((b.inc)(4) != 5) { return 4; }
   return 0;

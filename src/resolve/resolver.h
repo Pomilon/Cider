@@ -80,6 +80,18 @@ public:
     // Whether the qualified enum type names that member (-1 is a legal
     // value, so presence needs its own question).
     bool isEnumMember(const std::string& qualifiedType, const std::string& member) const;
+    // Every enumerator of one enum declaration, in declaration order with
+    // its value: the membership check an int-to-enum cast lowers and the
+    // case list enum exhaustiveness counts. Keyed by declaration, not by
+    // spelling, so two same-named enums never share one. Empty when the id
+    // names no enum this table holds.
+    std::vector<std::pair<std::string, int64_t>> enumMembers(DeclId id) const;
+    // The single enum of this scope with that member, or null when none
+    // or several name it; `count` tells the two apart so diagnostics stay
+    // honest. Only enums declared in this module answer; imported ones
+    // keep their qualified spelling.
+    const Decl* lookupEnumMember(const Scope* scope, const std::string& member,
+                                 int& count) const;
 
     // The resolved type of a node the header pass already answered (field and
     // parameter types, alias targets). The checker adds expression types to the
@@ -97,6 +109,11 @@ public:
     // Every field or member name of a struct, class or union, in declaration
     // order. Empty for anything else.
     std::vector<std::string> fieldNames(DeclId id) const;
+    // A class's whole chain's fields in physical order (bases first), which
+    // is also the set a `new C { ... }` literal must name. Structs and
+    // unions answer their own names; a chain the layout cannot name answers
+    // empty and construction refuses.
+    std::vector<std::string> chainFieldNames(DeclId id) const;
     // The byte offset of a field within its struct, laid out in declaration
     // order with each field aligned to its own alignment (TYPES.md 3.4). -1
     // when the struct, the field, or any size on the way there is unknown.
@@ -133,6 +150,18 @@ public:
     int64_t nominalAlign(const Type* type) const;
     // A class's direct bases, as declaration ids. Empty when none.
     std::vector<DeclId> classBases(DeclId id) const;
+    // The virtual slots of a class, base-first: an override keeps its base
+    // slot, a new `virtual` appends (FEATURES 2.3). Computed lazily from
+    // the declaration flags, so declaration order inside a module cannot
+    // matter. A chain with several bases at one level has no vtable yet
+    // and answers empty; a name that is not virtual answers -1 from the
+    // index.
+    std::vector<std::string> virtualNames(DeclId id) const;
+    int64_t virtualIndexOf(DeclId id, const std::string& name) const;
+    // The class that declares the method, walking the chain: a virtual call
+    // and a static call both spell the declarer's link name for inherited
+    // slots, and the override's class answers for its own redeclaration.
+    std::optional<DeclId> methodHome(DeclId id, const std::string& name) const;
     EvalEnv evalEnv(const Scope* scope);
 
     const std::vector<ResolveError>& errors() const { return errors_; }
@@ -177,6 +206,12 @@ public:
     // the checker and every lowerer call site ask here instead of building
     // names locally.
     std::string linkName(const Decl& decl) const;
+    // The link symbol for an instantiated generic function: the template's
+    // home module flattened, its name, then the sanitized argument type
+    // names (`id__S__int`, `box__id__S__int`). Specs own no Decl entries,
+    // so linkName cannot see them; every emitter and call site asks here
+    // instead. Empty when the id names no function specialization.
+    std::string specLinkName(DeclId spec) const;
     // Replaces every TypeParam of one template with its argument types.
     // Nominal specializations re-originate: `Box<T>` inside `C<T>` becomes
     // `Box<int>` when C does, through specOrigin_ rather than spellings.
@@ -210,6 +245,15 @@ private:
     int64_t structAlignImpl(DeclId id, std::unordered_set<std::string>& seen) const;
     int64_t classSizeImpl(DeclId id, std::unordered_set<std::string>& seen) const;
     int64_t classAlignImpl(DeclId id, std::unordered_set<std::string>& seen) const;
+    // The physical field order of a class with bases: most-base first, then
+    // each class's own fields (FEATURES 2.2). A chain with several bases at
+    // one level has no layout yet, so the walk answers false and the size
+    // queries refuse rather than lay out half an object.
+    bool chainFieldsImpl(DeclId id, std::unordered_set<std::string>& seen,
+                         std::vector<std::string>& out) const;
+    // A field declared by a base: the chain walk names it, but fieldType
+    // only holds a class's own fields, so the declaring class answers.
+    TypeRef fieldTypeAcrossBases(DeclId id, const std::string& name) const;
     // A union's payload is its widest member, every member at offset 0, the
     // tag after the payload padded to the payload's alignment (TYPES.md
     // 3.4a). Same visited-set rule as structs: recursive unions are -1.
@@ -243,9 +287,14 @@ private:
     std::unordered_set<std::string> aliasActive_;
     std::unordered_map<std::string, const Expr*> constInits_;
     std::unordered_map<std::string, int64_t> enumValues_;
+    std::unordered_map<std::string, std::vector<std::pair<std::string, int64_t>>> enumOrder_;
     std::unordered_map<std::string, TypeRef> fieldTypes_;
     std::unordered_map<std::string, Signature> methodSigs_;
     std::unordered_map<std::string, std::vector<std::string>> methodLists_;
+    // Declared methods that carry `virtual`; the composed slot list is
+    // virtualNames', and an override needs no entry here (it inherits its
+    // base slot by name).
+    std::unordered_map<std::string, bool> methodVirtual_;
     std::unordered_map<std::string, std::vector<std::string>> fieldLists_;
     std::unordered_map<std::string, std::vector<DeclId>> baseTable_;
     std::vector<std::string> stack_;

@@ -11,3 +11,27 @@ from prelude import alloc, free;
 export func malloc(size: i64) -> *void {
     return alloc(size, 8);
 }
+
+// Out-of-memory policy: `vm error: out of memory` on stderr, exit 2 —
+// the same line and code the VM reports for host-side OOM, so all three
+// backends agree byte-for-byte. Self-contained asm (no std.io import):
+// the allocator sits below I/O in the layering.
+export func oom() {
+    var msg: string = "vm error: out of memory\n";
+    var ptr: *u8 = &msg[0];
+    var count: int = msg.len as int;
+    var fd: int = 2;
+    asm {
+        "mov rax, 1"
+        "mov rdi, {fd:q}"
+        "mov rsi, {ptr}"
+        "mov rdx, {count:q}"
+        "syscall"
+    }
+    var code: int = 2;
+    asm {
+        "mov rax, 60"
+        "mov rdi, {code:q}"
+        "syscall"
+    }
+}

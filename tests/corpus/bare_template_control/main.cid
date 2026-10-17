@@ -5,20 +5,17 @@
 from lib import Imported;
 
 func useForward() -> int {
-  var f: Forward<int>;
-  f.v = 41;
+  var f: Forward<int> = new Forward<int> { v: 41 };
   return f.v + 1;
 }
 
 func useLocal() -> int {
-  var l: Local<int>;
-  l.v = 7;
+  var l: Local<int> = new Local<int> { v: 7 };
   return l.v;
 }
 
 func useImported() -> int {
-  var i: Imported<int>;
-  i.v = 9;
+  var i: Imported<int> = new Imported<int> { v: 9 };
   return i.v;
 }
 

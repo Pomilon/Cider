@@ -19,17 +19,17 @@ type P = shapes.Param;   // alias spelling of the very same type
 
 class Dotted {
   var tag: int;
-  func draw(p: shapes.Param) -> int { return p.v * 10 + this.tag; }
+  func draw(p: shapes.Param) -> int { return p.v * 10 + (*self).tag; }
 }
 
 class Bare {
   var tag: int;
-  func draw(p: Param) -> int { return p.v * 100 + this.tag; }
+  func draw(p: Param) -> int { return p.v * 100 + (*self).tag; }
 }
 
 class Aliased {
   var tag: int;
-  func draw(p: P) -> int { return p.v * 1000 + this.tag; }
+  func draw(p: P) -> int { return p.v * 1000 + (*self).tag; }
 }
 
 // Interface parameter position: a concrete value from any of the three
@@ -38,12 +38,9 @@ class Aliased {
 func drawVia(s: Shape, p: Param) -> int { return s.draw(p); }
 
 func main() -> int {
-  var d: Dotted;
-  d.tag = 1;
-  var b: Bare;
-  b.tag = 2;
-  var a: Aliased;
-  a.tag = 3;
+  var d: Dotted = new Dotted { tag: 1 };
+  var b: Bare = new Bare { tag: 2 };
+  var a: Aliased = new Aliased { tag: 3 };
 
   // Declaration-time conversion, then dispatch through each implementor.
   var s: Shape = d;
@@ -59,8 +56,7 @@ func main() -> int {
 
   // The from-import of another module: bare `Param` in mid.cid still names
   // shapes.Param, so mid.Mid satisfies the interface too.
-  var m: mid.Mid;
-  m.tag = 4;
+  var m: mid.Mid = new mid.Mid { tag: 4 };
   s = m;
   if (s.draw(make(4)) != 40004) { return 5; }
   s = d;

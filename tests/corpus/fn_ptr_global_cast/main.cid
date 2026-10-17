@@ -4,12 +4,12 @@
 // the fn-target spelling was rejected outright.
 func add(a: int, b: int) -> int { return a + b; }
 
-var g: *void = add as *void;
-var h: fn(int, int) -> int = add as fn(int, int) -> int;
+var g: *void = &add as *void;
+var h: *func(int, int) -> int = &add;
 
 func main() -> int {
   if (g == nilPtr) { return 1; }
-  if (h(2, 3) != 5) { return 2; }
-  if (g != (add as *void)) { return 3; }
+  if ((*h)(2, 3) != 5) { return 2; }
+  if (g != (&add as *void)) { return 3; }
   return 0;
 }

@@ -73,6 +73,7 @@ enum class TrapReason {
     BitfieldOverflow,
     UnionTag,
     Downcast,
+    BadEnum,
     Null,
     Explicit,
 };
@@ -242,6 +243,12 @@ struct Global {
     // little-endian (FEATURES §8.3: every byte known, no startup code).
     // Empty means the scalar path (one `.quad initial`).
     std::vector<uint64_t> initWords;
+    // Link-time words for a vtable global: one `.quad <label>` per entry,
+    // in interface method order (TYPES.md §4.3). A label, not a number,
+    // because a function address is resolved by the linker, not folded
+    // by lowering. Empty means no link-time words; a vtable never mixes
+    // the two, so initWords stays empty beside this.
+    std::vector<std::string> initLabels;
 };
 
 // Read-only bytes: a string literal's content, or any future constant blob.
@@ -263,6 +270,26 @@ struct Module {
 // debugging. Deterministic in the module: blocks and instructions in order,
 // values by id. Never parsed back — dumps are read by people, not compiled.
 std::string dumpModule(const Module& module);
+
+// True when a value of this width and language type is signed. One rule,
+// consulted by the emitter and the interpreter alike, so an arithmetic
+// answer never depends on which leg produced it. A width that names no
+// signedness falls through to the language type, and a type that is not a
+// basic defaults to signed the way the rest of lowering does.
+inline bool signedWidth(IRType width, TypeRef type) {
+    if (width == IRType::I8 || width == IRType::I16 || width == IRType::I32 ||
+        width == IRType::I64) {
+        return true;
+    }
+    if (width == IRType::U8 || width == IRType::U16 || width == IRType::U32 ||
+        width == IRType::U64) {
+        return false;
+    }
+    if (type.isError() || type.type->kind() != Kind::Basic) {
+        return true;
+    }
+    return basicIsSigned(*type.type->basic());
+}
 
 }  // namespace ir
 }  // namespace cider

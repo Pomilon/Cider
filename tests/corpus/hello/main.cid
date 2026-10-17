@@ -3,4 +3,5 @@ var msg: string = "Hello, world!\n";
 func main() -> int {
   asm { "mov rax, 1" "mov rdi, 1" "mov rsi, {msg}" "mov rdx, 14" "syscall" }
   asm { "mov rax, 60" "mov rdi, 0" "syscall" }
+  return 0;
 }

@@ -62,10 +62,18 @@ Built build(const std::string& text) {
         return out;
     }
     auto checker = std::make_unique<cider::check::Checker>(*out.types, *resolver);
+    checker->prescanProvenance({"main"});
     cider::lower::Lowerer lowerer(*out.types, *resolver, *checker);
     if (!lowerer.lowerModule("main", *program)) {
         out.module = nullptr;
         out.stage = "lower";
+        return out;
+    }
+    // Deferred monomorphization, mirroring the driver: specs emit after
+    // all modules lower.
+    if (!lowerer.emitSpecBodies()) {
+        out.module = nullptr;
+        out.stage = "lower-spec";
         return out;
     }
     out.module = lowerer.takeModule();
@@ -141,6 +149,71 @@ int runQuiet(const std::string& text) {
     return code;
 }
 
+// Like runCode, but also captures the program's stderr into err.
+int runCapture(const std::string& text, bool& signaled, std::string& err) {
+    signaled = false;
+    err.clear();
+    Built built = build(text);
+    if (!built.ok) {
+        return -1;
+    }
+    char asmPath[] = "/tmp/cider_test_XXXXXX.s";
+    int asmFd = mkstemps(asmPath, 2);
+    if (asmFd < 0) {
+        return -1;
+    }
+    FILE* asmFile = fdopen(asmFd, "w");
+    fwrite(built.asmText.data(), 1, built.asmText.size(), asmFile);
+    fclose(asmFile);
+    std::string binPath = std::string(asmPath) + ".bin";
+    std::string objPath = std::string(asmPath) + ".o";
+    std::string command = "as -o " + objPath + " " + asmPath + " 2>/dev/null"
+        " && ld -nostdlib -e _start -o " + binPath + " " + objPath + " 2>/dev/null";
+    if (system(command.c_str()) != 0) {
+        unlink(asmPath);
+        unlink(objPath.c_str());
+        return -1;
+    }
+    int errPipe[2] = {-1, -1};
+    if (pipe(errPipe) != 0) {
+        unlink(asmPath);
+        unlink(objPath.c_str());
+        unlink(binPath.c_str());
+        return -1;
+    }
+    pid_t child = fork();
+    if (child == 0) {
+        dup2(errPipe[1], STDERR_FILENO);
+        close(errPipe[0]);
+        close(errPipe[1]);
+        execl(binPath.c_str(), binPath.c_str(), nullptr);
+        _exit(127);
+    }
+    close(errPipe[1]);
+    char chunk[256];
+    for (;;) {
+        ssize_t got = read(errPipe[0], chunk, sizeof(chunk));
+        if (got <= 0) {
+            break;
+        }
+        err.append(chunk, static_cast<size_t>(got));
+    }
+    close(errPipe[0]);
+    int status = 0;
+    waitpid(child, &status, 0);
+    unlink(asmPath);
+    unlink(objPath.c_str());
+    unlink(binPath.c_str());
+    if (WIFSIGNALED(status)) {
+        signaled = true;
+        return -1;
+    }
+    if (!WIFEXITED(status)) {
+        return -1;
+    }
+    return WEXITSTATUS(status);
+}
+
 // `main` returns its value as the exit code.
 void testExit() {
     std::printf("exit codes\n");
@@ -152,6 +225,29 @@ void testExit() {
 }
 
 // Calls pass arguments in registers and return in rax.
+void testStackArgs() {
+    std::printf("stack arguments spill\n");
+    check(runQuiet("func add8(a: int, b: int, c: int, d: int, e: int, f: int, g: int, h: int) -> int {\n"
+                   "    return a + b + c + d + e + f + g + h;\n"
+                   "}\n"
+                   "func main() -> int { return add8(1, 2, 3, 4, 5, 6, 7, 8); }\n") == 36,
+          "eight integer arguments add up");
+    check(runQuiet("func mix(a: int, b: int, c: int, d: int, e: int, g: int, s: string) -> int {\n"
+                   "    return a + b + c + d + e + g + s.len as int;\n"
+                   "}\n"
+                   "func main() -> int { return mix(1, 2, 3, 4, 5, 6, \"abc\"); }\n") == 24,
+          "a string tail rides the stack");
+    check(runQuiet("func f8(a: int, b: int, c: int, d: int, e: int, g: int, h: int, i: int) -> float {\n"
+                   "    return 1.0;\n"
+                   "}\n"
+                   "func use() -> int {\n"
+                   "    var f: float = f8(1, 2, 3, 4, 5, 6, 7, 8);\n"
+                   "    return f as int;\n"
+                   "}\n"
+                   "func main() -> int { return use(); }\n") == 1,
+          "a float between register args still passes");
+}
+
 void testCalls() {
     std::printf("calls\n");
     check(runQuiet("func add(a: int, b: int) -> int { return a + b; }\n"
@@ -160,6 +256,16 @@ void testCalls() {
     check(runQuiet("func f(n: int) -> int { if (n < 2) { return n; } return n; }\n"
                    "func main() -> int { return f(7) * 6; }\n") == 42,
           "a call inside an expression");
+    // CIDER-BUG-252 audit lock: narrow arguments arrive width-correct.
+    // v3 has no stack-spill call path (more than six arguments is a loud
+    // refusal), so the stale-upper-bytes class cannot occur; every narrow
+    // argument rides a register staged at its own width.
+    check(runQuiet("func take(a: u8, b: i16, c: bool) -> int { return (a as int) + (b as int) + (c as int); }\n"
+                   "func main() -> int { return take(200, -300, true); }\n") == 157,
+          "narrow arguments arrive intact");
+    check(runQuiet("func take(a: i8, b: u16, c: i16) -> int { return (a as int) + (b as int) + (c as int); }\n"
+                   "func main() -> int { return take(-5, 60000, -300); }\n") == 47,
+          "narrow arguments sign- and zero-extend");
 }
 
 // Both sides of a branch run, and loops go around.
@@ -182,6 +288,22 @@ void testGlobals() {
     std::printf("globals\n");
     check(runQuiet("var g: int = 40;\nfunc main() -> int { return g + 2; }\n") == 42,
           "a global reads back");
+    check(runQuiet("enum Color { RED, GREEN }\n"
+                   "var g: Color = Color.GREEN;\n"
+                   "func main() -> int { return g as int; }\n") == 1,
+          "an enum global folds its enumerator");
+    // An aggregate member past the first eight-byte line straddles it, so
+    // the store and the read go through a computed address off the label
+    // rather than the direct label-plus-offset form.
+    check(runQuiet("struct P { var a: int; var b: int; }\n"
+                   "struct Outer { var tail: int; var pair: P; }\n"
+                   "var g: Outer = new Outer { tail: 0, pair: new P { a: 0, b: 0 } };\n"
+                   "func main() -> int {\n"
+                   "    var q: P = new P { a: 62, b: 63 };\n"
+                   "    g.pair = q;\n"
+                   "    return g.pair.a + g.pair.b;\n"
+                   "}\n") == 125,
+          "a straddling global member stores and reads back");
     // A computed index on a global array addresses through the label, not
     // a slot: the Gep base is a computed address value (see emitGep).
     check(runQuiet("var g: [u8; 4] = new [u8; 4] {[0, ...]};\n"
@@ -200,6 +322,18 @@ void testGlobals() {
                    "    return (g[0] as int) + (g[3] as int) + (w[1] as int);\n"
                    "}\n") == (10 + 40 + 2000) % 256,
           "a literal global array reads back");
+    // A const struct global holds its fields at the layout's offsets
+    // with no startup code: the image bytes match what `new` builds.
+    check(runQuiet("struct Point { var x: int; var y: int; }\n"
+                   "var g: Point = new Point { x: 3, y: 4 };\n"
+                   "func main() -> int { return g.x + g.y; }\n") == 7,
+          "a const struct global reads back");
+    // A const class global opens with a null vtable word the way `new`
+    // writes one, so its first field reads at word one, byte zero.
+    check(runQuiet("class Box { var v: int; }\n"
+                   "var g: Box = new Box { v: 5 };\n"
+                   "func main() -> int { return g.v; }\n") == 5,
+          "a const class global reads back");
 }
 
 // Division traps rather than answering.
@@ -235,6 +369,30 @@ void testInterp() {
                   "    return v.len as int * 100 + v[0] as int;\n"
                   "}\n", sig) == (2 * 100 + 45) % 256 && !sig,
           "a negative integer keeps its sign");
+    check(runCode("func main() -> int {\n"
+                  "    var f: f64 = 1.5;\n"
+                  "    var v: string = \"{f}\";\n"
+                  "    return v.len as int * 100 + v[0] as int;\n"
+                  "}\n", sig) == (8 * 100 + 49) % 256 && !sig,
+          "a float prints whole, point and six digits");
+    check(runCode("func main() -> int {\n"
+                  "    var f: f64 = 1.5;\n"
+                  "    var v: string = \"{f}\";\n"
+                  "    return v[1] as int * 100 + v[2] as int;\n"
+                  "}\n", sig) == (46 * 100 + 53) % 256 && !sig,
+          "the point and first fraction digit print");
+    check(runCode("func main() -> int {\n"
+                  "    var f: float = 0.5;\n"
+                  "    var v: string = \"f={f}\";\n"
+                  "    return v.len as int * 100 + v[2] as int;\n"
+                  "}\n", sig) == (10 * 100 + 48) % 256 && !sig,
+          "a float widens and zero-pads");
+    check(runCode("func main() -> int {\n"
+                  "    var f: f64 = -2.25;\n"
+                  "    var v: string = \"{f}\";\n"
+                  "    return v.len as int * 100 + v[0] as int;\n"
+                  "}\n", sig) == (9 * 100 + 45) % 256 && !sig,
+          "a negative float keeps its sign");
 }
 
 void testTrap() {
@@ -242,6 +400,19 @@ void testTrap() {
     bool signaled = false;
     runCode("func main() -> int { var z: int = 0; return 1 / z; }\n", signaled);
     check(signaled, "division by zero dies by signal");
+}
+
+// Panic ends the program end to end: the message lands on stderr and the
+// process answers the panic code.
+void testPanic() {
+    std::printf("panic ends the program\n");
+    bool signaled = false;
+    std::string err;
+    int code = runCapture("func main() -> int { panic(\"boom\"); return 0; }\n",
+                          signaled, err);
+    check(!signaled, "panic exits, it does not trap");
+    check(code == 134, "panic answers 134");
+    check(err == "boom\n", "panic writes its message to stderr");
 }
 
 // `&` on an element answers the element's address: stores through it land
@@ -402,6 +573,38 @@ void testComputedIndex() {
             "}\n",
             signaled);
     check(signaled, "a chained store past the inner end traps");
+    // A computed index through a pointer dereference addresses off the
+    // loaded address: `(*p)[i]` is the i-th element past the pointer's
+    // value, with the same bounds check the slot route owns.
+    check(runQuiet("func at(p: *[int; 3], i: int) -> int { return (*p)[i]; }\n"
+                   "func main() -> int {\n"
+                   "    var a: [int; 3] = new [int; 3] { 4, 5, 6 };\n"
+                   "    return at(&a, 2);\n"
+                   "}\n") == 6,
+          "a computed read through a pointer answers the element");
+    check(runQuiet("struct S { var items: [int; 3]; }\n"
+                   "func at(q: *S, i: int) -> int { return (*q).items[i]; }\n"
+                   "func main() -> int {\n"
+                   "    var s: S = new S { items: new [int; 3] { 4, 5, 6 } };\n"
+                   "    return at(&s, 1);\n"
+                   "}\n") == 5,
+          "a computed read through a pointer field answers the element");
+    check(runQuiet("func set(p: *[int; 3], i: int, v: int) { (*p)[i] = v; }\n"
+                   "func main() -> int {\n"
+                   "    var a: [int; 3] = new [int; 3] { 4, 5, 6 };\n"
+                   "    var j: int = 1;\n"
+                   "    set(&a, j, 42);\n"
+                   "    return a[1];\n"
+                   "}\n") == 42,
+          "a computed store through a pointer lands");
+    signaled = false;
+    runCode("func at(p: *[int; 3], i: int) -> int { return (*p)[i]; }\n"
+            "func main() -> int {\n"
+            "    var a: [int; 3] = new [int; 3] { 4, 5, 6 };\n"
+            "    return at(&a, 9);\n"
+            "}\n",
+            signaled);
+    check(signaled, "a computed read past the end through a pointer traps");
 }
 
 void testPointerField() {
@@ -421,6 +624,57 @@ void testPointerField() {
                    "    return 0;\n"
                    "}\n") == 0,
           "a field store and read through a pointer index");
+}
+
+void testClassBox() {
+    // A class value in an interface position boxes its address: the pair
+    // aliases the value, so dispatch reads the live object, and a store
+    // through a dereferenced class pointer re-boxes the pointed-to object.
+    std::printf("class values box by reference\n");
+    check(runQuiet("interface Shape { func area() -> int; }\n"
+                   "class Sq { var s: int;"
+                   " func area() -> int { return (*self).s * (*self).s; } }\n"
+                   "func main() -> int {\n"
+                   "    var a: Sq = new Sq { s: 9 };\n"
+                   "    var t: Shape = a;\n"
+                   "    return t.area();\n"
+                   "}\n") == 81,
+          "a class value boxes by reference");
+    check(runQuiet("interface Shape { func area() -> int; }\n"
+                   "class Rect { var w: int; var h: int;"
+                   " func area() -> int { return (*self).w * (*self).h; } }\n"
+                   "class Sq { var s: int;"
+                   " func area() -> int { return (*self).s * (*self).s; } }\n"
+                   "func main() -> int {\n"
+                   "    var r: Rect = new Rect { w: 2, h: 5 };\n"
+                   "    var s: Sq = new Sq { s: 1 };\n"
+                   "    var t: Shape = s;\n"
+                   "    var p: *Shape = &t;\n"
+                   "    var q: *Rect = &r;\n"
+                   "    *p = *q;\n"
+                   "    return t.area();\n"
+                   "}\n") == 10,
+          "a dereferenced class pointer re-boxes");
+}
+
+void testMethodGlobalStore() {
+    // A method's store to a global is observable outside the function, so
+    // the optimizer must keep it: the store names a label, not a slot,
+    // and no slot read can prove it dead.
+    std::printf("method stores to globals\n");
+    check(runQuiet("var fired: int = 0;\n"
+                   "class N {\n"
+                   "    var x: int;\n"
+                   "    func init(v: int) { (*self).x = v; }\n"
+                   "    func bump() -> int { fired = 7; return 7; }\n"
+                   "}\n"
+                   "func main() -> int {\n"
+                   "    var n: *N = new N(0);\n"
+                   "    var r: int = (*n).bump();\n"
+                   "    if (fired != 7) { return 1; }\n"
+                   "    return r;\n"
+                   "}\n") == 7,
+          "a method store to a global survives optimization");
 }
 
 void testRepeatZero() {
@@ -449,6 +703,17 @@ void testStruct() {
     check(runQuiet("struct M { var tag: u8; var val: i32; }\n"
                    "func main() -> int { var m: M = new M { tag: 2, val: 40 }; return m.val + m.tag as int; }\n") == 42,
           "mixed widths respect padding");
+    check(runQuiet("struct A { var p: *A; var n: int; }\n"
+                   "func main() -> int { var q: *A = alloc(16, 8) as *A; return (q != nilPtr) as int; }\n") == 1,
+          "a pointer to self still declares and runs");
+    // An array field reads back every element, including ones past the
+    // first word: the take splitter shifts sub-word takes by bits.
+    check(runQuiet("struct Box { var leaf: int; var values: [u16; 3]; }\n"
+                   "func main() -> int {\n"
+                   "    var b: Box = new Box { leaf: 41, values: new [u16; 3] { 5, 6, 7 } };\n"
+                   "    return (b.values[2] as int);\n"
+                   "}\n") == 7,
+          "a struct array tail element reads back");
 }
 
 // Arrays live in memory too: constant and runtime indices, element stores.
@@ -456,6 +721,21 @@ void testArray() {
     std::printf("arrays\n");
     check(runQuiet("func main() -> int { var a: [u8; 3] = new [u8; 3] { 7, 8, 9 }; return a[0] + a[1] + a[2] as int; }\n") == 24,
           "constant indices read back");
+    // Narrow takes pack byte-contiguously across value boundaries: an
+    // element copy and an element passed straight to a call must read
+    // back every byte, not just the first take.
+    check(runQuiet("func main() -> int {\n"
+                   "    var na: [[u8; 3]; 2] = new [[u8; 3]; 2] { new [u8; 3] { 7, 8, 9 }, new [u8; 3] { 10, 11, 12 } };\n"
+                   "    var row: [u8; 3] = na[0];\n"
+                   "    return row[2] as int;\n"
+                   "}\n") == 9,
+          "an element copy keeps its tail bytes");
+    check(runQuiet("func sumRow(a: [u8; 3]) -> int { return (a[0] as int) + (a[1] as int) + (a[2] as int); }\n"
+                   "func main() -> int {\n"
+                   "    var na: [[u8; 3]; 2] = new [[u8; 3]; 2] { new [u8; 3] { 7, 8, 9 }, new [u8; 3] { 10, 11, 12 } };\n"
+                   "    return sumRow(na[0]);\n"
+                   "}\n") == 24,
+          "an element passed to a call keeps its tail bytes");
     check(runQuiet("func main() -> int {\n"
                    " var a: [i32; 5] = new [i32; 5] { 1, 2, 3, 4, 5 };\n"
                    " var s: int = 0;\n"
@@ -482,8 +762,34 @@ void testPointerHeap() {
                    " free(q);\n"
                    " return (q != nilPtr) as int + 41; }\n") == 42,
           "freed memory is recycled by the free list");
+    check(runQuiet("func main() -> int {\n"
+                   "    var x: int = 41;\n"
+                   "    var p: *int = &x;\n"
+                   "    var pp: **int = &p;\n"
+                   "    var q: **int = &*pp;\n"
+                   "    return **q;\n"
+                   "}\n") == 41,
+          "address of a dereference nets one level and runs");
     check(runQuiet("func main() -> int { var p: *int = alloc(8, 8) as *int; free(p); free(p); return 0; }\n") == 134,
           "a double free dies loudly with the heap code");
+}
+
+// `delete` runs the deinit once, then releases the storage (FEATURES §5.3).
+void testDelete() {
+    std::printf("delete runs deinit, then releases\n");
+    bool sig = false;
+    check(runCode("var seen: int = 0;\n"
+                  "class C {\n"
+                  "    var x: int;\n"
+                  "    func init(x: int) -> void { (*self).x = x; }\n"
+                  "    func deinit() -> void { seen = (*self).x; }\n"
+                  "}\n"
+                  "func main() -> int {\n"
+                  "    var p: *C = new C(41);\n"
+                  "    delete p;\n"
+                  "    return seen + 1;\n"
+                  "}\n", sig) == 42 && !sig,
+          "a deleted object's deinit ran");
 }
 
 // The heap's total-byte write must use an explicit `qword ptr`: GAS
@@ -764,6 +1070,31 @@ void testBoolCompare() {
           "negation and equality agree");
 }
 
+void testNotInCondition() {
+    std::printf("bang-not in branch conditions runs\n");
+    // CIDER-BUG-275: `if (!b)` segfaulted the driver (rc=135, SIGBUS)
+    // while value-position `!b` refused cleanly. Both arms of the ticket
+    // repro must run, plus the while-condition shape.
+    check(runQuiet("func main() -> int {\n"
+                   "    var b: bool = true;\n"
+                   "    if (!b) { return 1; }\n"
+                   "    return 2;\n"
+                   "}\n") == 2,
+          "negated-true takes the else arm");
+    check(runQuiet("func main() -> int {\n"
+                   "    var b: bool = false;\n"
+                   "    if (!b) { return 1; }\n"
+                   "    return 2;\n"
+                   "}\n") == 1,
+          "negated-false takes the then arm");
+    check(runQuiet("func main() -> int {\n"
+                   "    var b: bool = false;\n"
+                   "    while (!b) { return 7; }\n"
+                   "    return 2;\n"
+                   "}\n") == 7,
+          "negated-false enters the loop");
+}
+
 void testCharCompare() {
     std::printf("char equality runs\n");
     check(runQuiet("func main() -> int {\n"
@@ -809,9 +1140,82 @@ void testStringCompare() {
           "empty, null, and address strings behave");
 }
 
+void testInterfaceNil() {
+    std::printf("null interfaces run\n");
+    check(runQuiet("interface Shape { func area() -> int; }\n"
+                   "struct Sq { var s: int; func area() -> int { return (*self).s; } }\n"
+                   "func main() -> int {\n"
+                   "    var n: Shape = nilPtr as Shape;\n"
+                   "    if (n == nilPtr) { return 1; }\n"
+                   "    return 0;\n"
+                   "}\n") == 1,
+          "a null interface equals nilPtr");
+    check(runQuiet("interface Shape { func area() -> int; }\n"
+                   "struct Sq { var s: int; func area() -> int { return (*self).s; } }\n"
+                   "func main() -> int {\n"
+                   "    var s: Sq = new Sq { s: 7 };\n"
+                   "    var i: Shape = s;\n"
+                   "    if (i == nilPtr) { return 2; }\n"
+                   "    if (i != nilPtr) { return i.area(); }\n"
+                   "    return 0;\n"
+                   "}\n") == 7,
+          "a boxed interface differs from nilPtr and dispatches");
+    check(runQuiet("interface Shape { func area() -> int; }\n"
+                   "var g: Shape = nilPtr as Shape;\n"
+                   "func main() -> int {\n"
+                   "    if (g == nilPtr) { return 1; }\n"
+                   "    return 0;\n"
+                   "}\n") == 1,
+          "a null interface global reads null");
+    check(runQuiet("interface Shape { func area() -> int; }\n"
+                   "struct Sq { var s: int; func area() -> int { return (*self).s; } }\n"
+                   "var g: Shape = nilPtr as Shape;\n"
+                   "func main() -> int {\n"
+                   "    var s: Sq = new Sq { s: 7 };\n"
+                   "    g = s;\n"
+                   "    return g.area();\n"
+                   "}\n") == 7,
+          "a stored interface global dispatches");
+    check(runQuiet("interface Shape { func area() -> int; }\n"
+                   "struct Cell { var id: int; var mark: Shape; }\n"
+                   "var g: Cell = new Cell { id: 3, mark: nilPtr as Shape };\n"
+                   "func main() -> int {\n"
+                   "    if (g.mark == nilPtr) { return g.id; }\n"
+                   "    return 0;\n"
+                   "}\n") == 3,
+          "a null interface struct field folds into a global");
+    check(runQuiet("interface Shape { func area() -> int; }\n"
+                   "var g: [Shape; 2] = new [Shape; 2] { nilPtr as Shape, nilPtr as Shape };\n"
+                   "func main() -> int {\n"
+                   "    if (g[0] == nilPtr) { return 1; }\n"
+                   "    return 0;\n"
+                   "}\n") == 1,
+          "a null interface array element reads null");
+}
+
 // A match runs the first arm whose pattern fits and skips the rest.
 void testMatch() {
     std::printf("matches run\n");
+    check(runQuiet("func main() -> int {\n"
+                   "    var c: int = 2;\n"
+                   "    match (c) { 1 | 2 => { return 7; } default => { return 0; } }\n"
+                   "}\n") == 7,
+          "the second alternative answers");
+    check(runQuiet("func main() -> int {\n"
+                   "    var c: int = 1;\n"
+                   "    match (c) { 1 | 2 => { return 7; } default => { return 0; } }\n"
+                   "}\n") == 7,
+          "the first alternative answers");
+    check(runQuiet("func main() -> int {\n"
+                   "    var c: int = 9;\n"
+                   "    match (c) { 1 | 2 => { return 7; } default => { return 0; } }\n"
+                   "}\n") == 0,
+          "a miss takes the default");
+    check(runQuiet("func main() -> int {\n"
+                   "    var b: bool = false;\n"
+                   "    match (b) { true | false => { return 5; } }\n"
+                   "}\n") == 5,
+          "an alternation covers without a default");
     check(runQuiet("func main() -> int {\n"
                    "    var c: int = 2;\n"
                    "    match (c) { 1 => { return 10; } 2 => { return 20; } default => { return 30; } }\n"
@@ -869,6 +1273,212 @@ void testMatch() {
                    "    return n;\n"
                    "}\n") == 2,
           "break in an arm leaves the loop");
+    check(runQuiet("struct P { var x: int; var y: int; }\n"
+                   "func main() -> int {\n"
+                   "    var p: P = new P { x: 1, y: 2 };\n"
+                   "    match (p) { P { x: 1, y: 2 } => { return 10; } default => { return 30; } }\n"
+                   "}\n") == 10,
+          "a struct pattern matches its constants");
+    check(runQuiet("struct P { var x: int; var y: int; }\n"
+                   "func main() -> int {\n"
+                   "    var p: P = new P { x: 1, y: 9 };\n"
+                   "    match (p) { P { x: 1, y: 2 } => { return 10; } default => { return 30; } }\n"
+                   "}\n") == 30,
+          "a mismatched field takes the default");
+    check(runQuiet("struct P { var x: int; var y: int; }\n"
+                   "func main() -> int {\n"
+                   "    var p: P = new P { x: 3, y: 4 };\n"
+                   "    match (p) { P { x: a, y: _ } => { return a * 10; } default => { return 0; } }\n"
+                   "}\n") == 30,
+          "a struct pattern binds its fields");
+    check(runQuiet("struct P { var x: int; }\n"
+                   "struct Q { var x: int; }\n"
+                   "func main() -> int {\n"
+                   "    var p: P = new P { x: 1 };\n"
+                   "    match (p) { Q { x: 1 } => { return 10; } default => { return 30; } }\n"
+                   "}\n") == 30,
+          "a dead struct pattern takes the default");
+    check(runQuiet("union U { var a: int; var b: bool; }\n"
+                   "func main() -> int {\n"
+                   "    var u: U = new U { a: 7 };\n"
+                   "    match (u) { U.a => { return 1; } U.b => { return 2; } default => { return 0; } }\n"
+                   "}\n") == 1,
+          "a union member pattern reads the tag");
+    check(runQuiet("union U { var a: int; var b: bool; }\n"
+                   "func main() -> int {\n"
+                   "    var u: U = new U { b: true };\n"
+                   "    match (u) { U.a => { return 1; } U.b => { return 2; } default => { return 0; } }\n"
+                   "}\n") == 2,
+          "the live member answers, not the first arm");
+    check(runQuiet("union U { var a: int; var b: bool; }\n"
+                   "func main() -> int {\n"
+                   "    var u: U = new U { a: 7 };\n"
+                   "    match (u) { U.a => { return 1; } U.b => { return 2; } }\n"
+                   "}\n") == 1,
+          "every union member listed needs no default");
+    check(runQuiet("union U { var a: int; var b: bool; }\n"
+                   "func main() -> int {\n"
+                   "    var u: U = new U { b: true };\n"
+                   "    match (u) { U.a => { return 1; } U.b => { return 2; } }\n"
+                   "}\n") == 2,
+          "the second member answers without a default");
+    check(runQuiet("struct Inner { var x: int; }\n"
+                   "struct Outer { var inner: Inner; var y: int; }\n"
+                   "func main() -> int {\n"
+                   "    var o: Outer = new Outer { inner: new Inner { x: 5 }, y: 6 };\n"
+                   "    match (o) { Outer { inner: Inner { x: 5 }, y: _ } => { return 1; } default => { return 0; } }\n"
+                   "}\n") == 1,
+          "a nested struct pattern recurses");
+    check(runQuiet("struct S { var s: string; var n: int; }\n"
+                   "func main() -> int {\n"
+                   "    var v: S = new S { s: \"hi\", n: 4 };\n"
+                   "    match (v) { S { s: \"hi\", n: k } => { return k; } default => { return 0; } }\n"
+                   "}\n") == 4,
+          "a string field matches by content and binds beside it");
+    check(runQuiet("union U { var a: int; var b: bool; }\n"
+                   "struct P { var u: U; var n: int; }\n"
+                   "func main() -> int {\n"
+                   "    var p: P = new P { u: new U { b: true }, n: 3 };\n"
+                   "    match (p) { P { u: U.a, n: _ } => { return 1; } P { u: U.b, n: m } => { return m; } default => { return 0; } }\n"
+                   "}\n") == 3,
+          "a member sub-pattern reads the tag and binds beside it");
+    check(runQuiet("struct P { var x: int; var y: int; }\n"
+                   "func main() -> int {\n"
+                   "    var v: int = 1;\n"
+                   "    var p: P = new P { x: 1, y: 2 };\n"
+                   "    match (p) { P { x: v, y: _ } => { return 7; } default => { return 0; } }\n"
+                   "}\n") == 7,
+          "a bound name in a field compares by value");
+    check(runQuiet("struct P { var x: int; var y: int; }\n"
+                   "func main() -> int {\n"
+                   "    var v: int = 9;\n"
+                   "    var p: P = new P { x: 1, y: 2 };\n"
+                   "    match (p) { P { x: v, y: _ } => { return 7; } default => { return 0; } }\n"
+                   "}\n") == 0,
+          "a mismatched bound name takes the default");
+    check(runQuiet("struct E {}\n"
+                   "func main() -> int {\n"
+                   "    var e: E = new E {};\n"
+                   "    match (e) { E {} => { return 5; } default => { return 0; } }\n"
+                   "}\n") == 5,
+          "an empty struct matches its empty pattern");
+}
+
+// A guard runs when the pattern fits: a false guard falls to the next arm,
+// and the guard reads the arm's bound names.
+void testGuard() {
+    std::printf("match guards run\n");
+    check(runQuiet("func main() -> int {\n"
+                   "    var flag: bool = true;\n"
+                   "    match (1) { 1 if flag => { return 7; } default => { return 0; } }\n"
+                   "}\n") == 7,
+          "a true guard takes the arm");
+    check(runQuiet("func main() -> int {\n"
+                   "    var flag: bool = false;\n"
+                   "    match (1) { 1 if flag => { return 7; } default => { return 0; } }\n"
+                   "}\n") == 0,
+          "a false guard falls to the default");
+    check(runQuiet("func main() -> int {\n"
+                   "    match (2) { x if x > 1 => { return 10; } default => { return 30; } }\n"
+                   "}\n") == 10,
+          "a guard reads the freshly bound name");
+    check(runQuiet("func main() -> int {\n"
+                   "    match (2) { x if x > 5 => { return 10; } default => { return 30; } }\n"
+                   "}\n") == 30,
+          "a failing guard over a bind falls through");
+    check(runQuiet("struct P { var x: int; var y: int; }\n"
+                   "func main() -> int {\n"
+                   "    var p: P = new P { x: 3, y: 4 };\n"
+                   "    match (p) { P { x: a, y: _ } if a > 2 => { return 1; } default => { return 0; } }\n"
+                   "}\n") == 1,
+          "a guard reads a bound field");
+    check(runQuiet("struct P { var x: int; var y: int; }\n"
+                   "func main() -> int {\n"
+                   "    var p: P = new P { x: 3, y: 4 };\n"
+                   "    match (p) { P { x: a, y: _ } if a > 9 => { return 1; } default => { return 0; } }\n"
+                   "}\n") == 0,
+          "a failing guard over a field falls through");
+}
+
+// A range tests both bounds inclusive: below misses, above misses, the
+// edges take the arm, and the comparison widens instead of truncating —
+// a u8 255 is inside `0 ... 300`, and a negative i32 is outside `0 ...
+// 10`, because the cell converts to 64 bits before either comparison.
+void testRange() {
+    std::printf("range patterns run\n");
+    check(runQuiet("func main() -> int { match (5) { 0 ... 10 => { return 1; } default => { return 0; } } }\n") == 1,
+          "inside the range takes the arm");
+    check(runQuiet("func main() -> int { match (0) { 0 ... 10 => { return 1; } default => { return 0; } } }\n") == 1,
+          "the lower bound is inclusive");
+    check(runQuiet("func main() -> int { match (10) { 0 ... 10 => { return 1; } default => { return 0; } } }\n") == 1,
+          "the upper bound is inclusive");
+    check(runQuiet("func main() -> int { var x: int = 0 - 1; match (x) { 0 ... 10 => { return 1; } default => { return 0; } } }\n") == 0,
+          "below the range falls through");
+    check(runQuiet("func main() -> int { match (11) { 0 ... 10 => { return 1; } default => { return 0; } } }\n") == 0,
+          "above the range falls through");
+    check(runQuiet("func main() -> int { var x: u8 = 255; match (x) { 0 ... 300 => { return 1; } default => { return 0; } } }\n") == 1,
+          "an out-of-width bound still matches what fits");
+    check(runQuiet("func main() -> int { var x: i32 = 0 - 1; match (x) { 0 ... 10 => { return 1; } default => { return 0; } } }\n") == 0,
+          "a negative value misses, signed");
+    check(runQuiet("func main() -> int { var x: u64 = 18446744073709551615; match (x) { 0 ... 18446744073709551615 => { return 1; } default => { return 0; } } }\n") == 1,
+          "a full-width u64 range matches");
+    check(runQuiet("struct P { var x: int; }\n"
+                   "func main() -> int {\n"
+                   "    var p: P = new P { x: 2 };\n"
+                   "    match (p) { P { x: 1 ... 3 } => { return 1; } default => { return 0; } }\n"
+                   "}\n") == 1,
+          "a nested range tests the field");
+    check(runQuiet("func main() -> int { match (7) { 0 ... 5 | 7 => { return 1; } default => { return 0; } } }\n") == 1,
+          "a range alternates with a constant");
+    check(runQuiet("func main() -> int {\n"
+                   "    var ok: bool = true;\n"
+                   "    match (4) { 0 ... 10 if ok => { return 1; } default => { return 0; } }\n"
+                   "}\n") == 1,
+          "a guard still gates a range");
+}
+
+// An enumerator pattern compares the cell with the named case: the first
+// match in source order wins, a dead arm never fires, and every case
+// listed needs no default (FEATURES §8.4).
+void testEnumMatch() {
+    std::printf("enum member patterns run\n");
+    check(runQuiet("enum Color { RED, GREEN, BLUE = 5 }\n"
+                   "func main() -> int {\n"
+                   "    var c: Color = 1 as Color;\n"
+                   "    match (c) { Color.RED => { return 1; } Color.GREEN => { return 2; } Color.BLUE => { return 3; } default => { return 0; } }\n"
+                   "}\n") == 2,
+          "the named case answers");
+    check(runQuiet("enum Color { RED, GREEN, BLUE = 5 }\n"
+                   "func main() -> int {\n"
+                   "    var c: Color = 5 as Color;\n"
+                   "    match (c) { Color.RED => { return 1; } Color.GREEN => { return 2; } Color.BLUE => { return 3; } default => { return 0; } }\n"
+                   "}\n") == 3,
+          "an explicit enumerator value answers");
+    check(runQuiet("enum Color { RED, GREEN }\n"
+                   "enum Size { BIG, SMALL }\n"
+                   "func main() -> int {\n"
+                   "    var c: Color = 0 as Color;\n"
+                   "    match (c) { Size.BIG => { return 9; } Color.RED => { return 1; } default => { return 0; } }\n"
+                   "}\n") == 1,
+          "a dead arm never fires");
+    check(runQuiet("enum Color { RED, GREEN }\n"
+                   "func main() -> int {\n"
+                   "    var c: Color = 1 as Color;\n"
+                   "    match (c) { Color.RED => { return 1; } Color.GREEN => { return 2; } }\n"
+                   "}\n") == 2,
+          "every case listed needs no default at runtime");
+    check(runQuiet("enum Color { RED, GREEN }\n"
+                   "func main() -> int {\n"
+                   "    var c: Color = 1 as Color;\n"
+                   "    match (c) { 1 => { return 9; } default => { return 7; } }\n"
+                   "}\n") == 7,
+          "a raw number never names an enum case at runtime");
+    check(runQuiet("enum Color { RED, GREEN, BLUE }\n"
+                   "func main() -> int {\n"
+                   "    var c: Color = 2 as Color;\n"
+                   "    match (c) { RED => { return 1; } Color.GREEN => { return 2; } BLUE => { return 3; } default => { return 0; } }\n"
+                   "}\n") == 3,
+          "bare enumerators compare by value");
 }
 
 void testPointerArith() {
@@ -910,6 +1520,207 @@ void testEnumValues() {
                    "    return c;\n"
                    "}\n") == 5,
           "enumerators sequence and honor explicit values");
+    check(runQuiet("enum Color { RED, GREEN, BLUE = 5 }\n"
+                   "func main() -> int {\n"
+                   "    var c: Color = GREEN;\n"
+                   "    if ((c as int) != 1) { return 1; }\n"
+                   "    var i: int = BLUE;\n"
+                   "    if (i != 5) { return 2; }\n"
+                   "    return 0;\n"
+                   "}\n") == 0,
+          "bare enumerators lower to their values");
+}
+
+// An enum holds its underlying i32: casts both ways lower, and inventing
+// a value no enumerator names traps (FEATURES §2, enum ↔ int row).
+void testEnumCast() {
+    std::printf("enums cast to and from integers\n");
+    check(runQuiet("enum Color { RED, GREEN, BLUE = 5 }\n"
+                   "func main() -> int {\n"
+                   "    var c: Color = Color.GREEN as Color;\n"
+                   "    return c as int;\n"
+                   "}\n") == 1,
+          "an enumerator round-trips through its enum");
+    check(runQuiet("enum Color { RED, GREEN, BLUE = 5 }\n"
+                   "func main() -> int {\n"
+                   "    var c: Color = Color.BLUE as Color;\n"
+                   "    return c as int;\n"
+                   "}\n") == 5,
+          "an explicit enumerator value survives the cast");
+    check(runQuiet("enum Color { RED, GREEN, BLUE = 5 }\n"
+                   "func main() -> int {\n"
+                   "    var n: int = 1;\n"
+                   "    var c: Color = n as Color;\n"
+                   "    return c as int;\n"
+                   "}\n") == 1,
+          "a runtime integer naming an enumerator converts");
+    bool signaled = false;
+    runCode("enum Color { RED, GREEN, BLUE = 5 }\n"
+            "func main() -> int {\n"
+            "    var n: int = 7;\n"
+            "    var c: Color = n as Color;\n"
+            "    return 0;\n"
+            "}\n",
+            signaled);
+    check(signaled, "an undeclared enumerator value traps");
+    // Negative enumerators pin the cell canonical: every enum cell is a
+    // sign-extended i32, so -1 survives stores, loads and the way back.
+    check(runQuiet("enum Temp { NEG = 0 - 1, ZERO, POS = 5 }\n"
+                   "func main() -> int {\n"
+                   "    var t: Temp = Temp.NEG as Temp;\n"
+                   "    return (t as int) + 1;\n"
+                   "}\n") == 0,
+          "a negative enumerator round-trips");
+    check(runQuiet("enum Temp { NEG = 0 - 1, ZERO, POS = 5 }\n"
+                   "func main() -> int {\n"
+                   "    var n: int = 0 - 1;\n"
+                   "    var t: Temp = n as Temp;\n"
+                   "    return (t as int) + 1;\n"
+                   "}\n") == 0,
+          "a runtime -1 converts and reads back");
+    check(runQuiet("enum Color { RED, GREEN, BLUE }\n"
+                   "func main() -> int {\n"
+                   "    var c: Color = Color.GREEN;\n"
+                   "    var w: u64 = c as u64;\n"
+                   "    if ((w as int) != 1) { return 1; }\n"
+                   "    var n: u64 = 2;\n"
+                   "    var d: Color = n as Color;\n"
+                   "    if ((d as int) != 2) { return 2; }\n"
+                   "    return 0;\n"
+                   "}\n") == 0,
+          "enums cast to and from wide integers");
+}
+
+void testGenericFn() {
+    std::printf("generic functions monomorphize\n");
+    check(runQuiet("func id<T>(x: T) -> T { return x; }\n"
+                   "func main() -> int {\n"
+                   "    var a: int = id::<int>(42);\n"
+                   "    if (a != 42) { return 1; }\n"
+                   "    return 0;\n"
+                   "}\n") == 0,
+          "one spec runs");
+    check(runQuiet("func id<T>(x: T) -> T { return x; }\n"
+                   "func main() -> int {\n"
+                   "    var a: int = id::<int>(1);\n"
+                   "    var b: u64 = id::<u64>(2);\n"
+                   "    if ((a as u64) + b != 3) { return 1; }\n"
+                   "    return 0;\n"
+                   "}\n") == 0,
+          "two specs coexist");
+    check(runQuiet("struct Box<T> { var v: T; var tag: int; }\n"
+                   "func main() -> int {\n"
+                   "    var b: Box<int> = new Box<int> { v: 40, tag: 1 };\n"
+                   "    if (b.v + b.tag != 41) { return 1; }\n"
+                   "    if (sizeof(Box<int>) != 8) { return 2; }\n"
+                   "    var p: *Box<int> = alloc(sizeof(Box<int>), 8) as *Box<int>;\n"
+                   "    (*p).v = 7;\n"
+                   "    if (((*p).v as int) != 7) { return 3; }\n"
+                   "    return 0;\n"
+                   "}\n") == 0,
+          "struct specs construct, size and point");
+    check(runQuiet("func id<T>(x: T) -> T { return x; }\n"
+                   "func wrap<T>(x: T) -> T { return id::<T>(x); }\n"
+                   "func main() -> int {\n"
+                   "    if (wrap::<int>(1) != 1) { return 1; }\n"
+                   "    if (wrap::<u64>(2) != 2) { return 2; }\n"
+                   "    return 0;\n"
+                   "}\n") == 0,
+          "nested specs keep their own args");
+}
+
+void testWideRun() {
+    std::printf("wide literals run as u16 data\n");
+    check(runQuiet("func main() -> int {\n"
+                   "    var s: [u16; 3] = u\"AB\";\n"
+                   "    if (s[0] != 65) { return 1; }\n"
+                   "    if (s[1] != 66) { return 2; }\n"
+                   "    if (s[2] != 0) { return 3; }\n"
+                   "    return 0;\n"
+                   "}\n") == 0,
+          "a wide literal fills its array");
+    check(runQuiet("func take(p: *u16) -> int { return p[0] as int; }\n"
+                   "func main() -> int {\n"
+                   "    if (take(u\"Y\") != 89) { return 1; }\n"
+                   "    var c: u16 = u'Z';\n"
+                   "    if ((c as int) != 90) { return 2; }\n"
+                   "    return 0;\n"
+                   "}\n") == 0,
+          "wide pointers and characters read back");
+    check(runQuiet("func main() -> int {\n"
+                   "    if (u\"X\"[0] != 88) { return 1; }\n"
+                   "    var q: *u16 = &u\"QR\"[0];\n"
+                   "    if (q[1] != 82) { return 2; }\n"
+                   "    if (q[2] != 0) { return 3; }\n"
+                   "    var cs: [u16; 3] = u\"AB\" as [u16; 3];\n"
+                   "    if (cs[1] != 66) { return 4; }\n"
+                   "    return 0;\n"
+                   "}\n") == 0,
+          "wide indexing, addresses and casts");
+    check(runQuiet("var wg: [u16; 3] = u\"GH\";\n"
+                   "var wp: *u16 = u\"IJ\";\n"
+                   "func main() -> int {\n"
+                   "    if (wg[1] != 72) { return 1; }\n"
+                   "    if (wg[2] != 0) { return 2; }\n"
+                   "    if (wp[0] != 73) { return 3; }\n"
+                   "    return 0;\n"
+                   "}\n") == 0,
+          "wide globals fold");
+}
+
+void testDeferRun() {
+    std::printf("defers run at scope exit\n");
+    check(runQuiet("var out: int = 0;\n"
+                   "func digit(d: int) { out = out * 10 + d; }\n"
+                   "func main() -> int {\n"
+                   "    defer { digit(1); }\n"
+                   "    defer { digit(2); }\n"
+                   "    if (out != 0) { return 1; }\n"
+                   "    return 0;\n"
+                   "}\n") == 0,
+          "defers run LIFO at block exit");
+    check(runQuiet("var out: int = 0;\n"
+                   "func digit(d: int) { out = out * 10 + d; }\n"
+                   "func early(x: int) -> int {\n"
+                   "    defer { digit(1); }\n"
+                   "    if (x > 0) { return 7; }\n"
+                   "    return 0;\n"
+                   "}\n"
+                   "func main() -> int {\n"
+                   "    if (early(1) != 7) { return 1; }\n"
+                   "    if (out != 1) { return 2; }\n"
+                   "    if (early(0) != 0) { return 3; }\n"
+                   "    if (out != 11) { return 4; }\n"
+                   "    return 0;\n"
+                   "}\n") == 0,
+          "defers run on early return after the value");
+    check(runQuiet("var out: int = 0;\n"
+                   "func digit(d: int) { out = out * 10 + d; }\n"
+                   "func main() -> int {\n"
+                   "    for (var i: int = 0; i < 3; i = i + 1) {\n"
+                   "        defer { digit(1); }\n"
+                   "        if (i == 1) { continue; }\n"
+                   "    }\n"
+                   "    if (out != 111) { return 1; }\n"
+                   "    return 0;\n"
+                   "}\n") == 0,
+          "defers run per iteration and on continue");
+}
+
+void testClosureVoidRun() {
+    std::printf("closures round-trip through *void at runtime\n");
+    check(runQuiet("func main() -> int {\n"
+                   "    var c: func(int) -> int = func(x: int) -> int { return x * 2; };\n"
+                   "    var v: *void = c;\n"
+                   "    var f: func(int) -> int = v as func(int) -> int;\n"
+                   "    if (f(21) != 42) { return 1; }\n"
+                   "    var w: *void = nilPtr;\n"
+                   "    w = c;\n"
+                   "    var g: func(int) -> int = w as func(int) -> int;\n"
+                   "    if (g(21) != 42) { return 2; }\n"
+                   "    return 0;\n"
+                   "}\n") == 0,
+          "proven carriers round-trip and run");
 }
 
 void testBitNot() {
@@ -922,6 +1733,10 @@ void testBitNot() {
                    "    return 0;\n"
                    "}\n") == 0,
           "bitwise not inverts at the operand width");
+    check(runQuiet("func main() -> int { var b: byte = 6; return (b << 2) as int; }\n") == 24,
+          "a byte shifts");
+    check(runQuiet("func main() -> int { var c: char = 'a'; return ((c as u8) << 2) as int; }\n") == 132,
+          "a char shifts after an explicit as");
 }
 
 void testTernary() {
@@ -949,6 +1764,30 @@ void testTernary() {
                    "    return a + id(v > 0 ? 10 : 20);\n"
                    "}\n") == 18,
           "a ternary answers in scalar position");
+    // A ternary as a statement runs one void arm for effect: the
+    // statement path must reach the ternary, not only value positions.
+    check(runQuiet("func setFlag(p: *bool, v: bool) -> void { *p = v; return; }\n"
+                   "func main() -> int {\n"
+                   "    var flag: bool = false;\n"
+                   "    true ? setFlag(&flag, true) : setFlag(&flag, false);\n"
+                   "    if (flag) { return 1; }\n"
+                   "    return 0;\n"
+                   "}\n") == 1,
+          "a statement ternary runs the taken arm");
+    check(runQuiet("func setFlag(p: *bool, v: bool) -> void { *p = v; return; }\n"
+                   "func main() -> int {\n"
+                   "    var flag: bool = true;\n"
+                   "    false ? setFlag(&flag, true) : setFlag(&flag, false);\n"
+                   "    if (flag) { return 1; }\n"
+                   "    return 0;\n"
+                   "}\n") == 0,
+          "a statement ternary skips the untaken arm");
+    // A non-void ternary as a statement lowers and discards the answer.
+    check(runQuiet("func main() -> int {\n"
+                   "    true ? 1 : 2;\n"
+                   "    return 7;\n"
+                   "}\n") == 7,
+          "a discarded ternary answer still lowers");
 }
 
 // A function pointer calls its target; a nil one dies by hardware trap.
@@ -969,6 +1808,42 @@ void testIndirectCall() {
     check(signaled, "a nil indirect call traps");
 }
 
+void testFnAddrGlobal() {
+    std::printf("function addresses fold into globals\n");
+    check(runQuiet("func add(a: int, b: int) -> int { return a + b; }\n"
+                   "var g: *void = &add as *void;\n"
+                   "func main() -> int {\n"
+                   "    if (g == nilPtr) { return 1; }\n"
+                   "    if (g != (&add as *void)) { return 2; }\n"
+                   "    return 0;\n"
+                   "}\n") == 0,
+          "a global holds a function address");
+}
+
+void testFnPtrCompare() {
+    std::printf("function pointer comparison runs\n");
+    check(runQuiet("func main() -> int {\n"
+                   "    var f: *func(int) -> int = nilPtr;\n"
+                   "    if (f == nilPtr) { return 1; }\n"
+                   "    return 0;\n"
+                   "}\n") == 1,
+          "a nil function pointer equals nilPtr");
+    check(runQuiet("func add(a: int, b: int) -> int { return a + b; }\n"
+                   "func sub(a: int, b: int) -> int { return a - b; }\n"
+                   "func main() -> int {\n"
+                   "    var f: *func(int, int) -> int = &add;\n"
+                   "    var g: *func(int, int) -> int = &sub;\n"
+                   "    var n: *func(int, int) -> int = nilPtr;\n"
+                   "    if (n != nilPtr) { return 1; }\n"
+                   "    if (f == nilPtr) { return 2; }\n"
+                   "    if (f != f) { return 3; }\n"
+                   "    if (f == g) { return 4; }\n"
+                   "    if (f != g) { return 5; }\n"
+                   "    return 0;\n"
+                   "}\n") == 5,
+          "non-nil function pointers compare by address");
+}
+
 // A closure literal returned from a function keeps the literal's own
 // return type while its body checks: the inner return answers int even
 // though the enclosing function answers a closure.
@@ -982,6 +1857,31 @@ void testClosure() {
                    "    return add10(5);\n"
                    "}\n") == 15,
           "a returned closure captures its environment");
+}
+
+void testClosureElement() {
+    std::printf("closures in aggregates run\n");
+    bool sig = false;
+    check(runCode("func main() -> int {\n"
+                  "    var base: int = 10;\n"
+                  "    var add: func(int) -> int = func(v: int) -> int { return v + base; };\n"
+                  "    var cell: [func(int) -> int; 1] = new [func(int) -> int; 1] { add };\n"
+                  "    return cell[0](5);\n"
+                  "}\n",
+                  sig) == 15 && !sig,
+          "a closure called through an array element");
+    check(runCode("struct Holder {\n"
+                  "    var base: int;\n"
+                  "    var add: func(int) -> int;\n"
+                  "}\n"
+                  "func main() -> int {\n"
+                  "    var b: int = 10;\n"
+                  "    var mk: func(int) -> int = func(v: int) -> int { return v + b; };\n"
+                  "    var h: Holder = new Holder { base: 0, add: mk };\n"
+                  "    return h.add(5);\n"
+                  "}\n",
+                  sig) == 15 && !sig,
+          "a closure called through a struct field");
 }
 
 // Two concretes through one interface prove dynamic dispatch: the call
@@ -1011,6 +1911,155 @@ void testInterface() {
           "two concretes dispatch through one interface");
 }
 
+void testInterfaceClass() {
+    std::printf("interface class dispatch runs\n");
+    bool sig = false;
+    check(runCode("interface Shape {\n"
+                  "    func area() -> int;\n"
+                  "}\n"
+                  "struct Sq {\n"
+                  "    var s: int;\n"
+                  "    func area() -> int { return (*self).s; }\n"
+                  "}\n"
+                  "class Circle {\n"
+                  "    var r: int;\n"
+                  "    func init(r: int) -> void { (*self).r = r; }\n"
+                  "    func area() -> int { return (*self).r * 2; }\n"
+                  "}\n"
+                  "func get(s: Shape) -> int { return s.area(); }\n"
+                  "func main() -> int {\n"
+                  "    var a: Sq = new Sq { s: 9 };\n"
+                  "    var c: *Circle = new Circle(5);\n"
+                  "    return get(a) + get(c);\n"
+                  "}\n",
+                  sig) == 19 && !sig,
+          "a struct and a class dispatch through one interface");
+}
+
+void testInterfaceWideReturn() {
+    std::printf("interface wide returns thread the sret buffer\n");
+    bool sig = false;
+    // A return wider than two words travels through the hidden buffer
+    // (SysV sret). The adapter must forward that buffer; the class
+    // receiver normalizes and the answer lands in the caller's slot.
+    check(runCode("class Cell { var v: int; }\n"
+                  "interface Maker {\n"
+                  "    func makeCells(n: int) -> [Cell; 2];\n"
+                  "}\n"
+                  "class A {\n"
+                  "    var pad: int;\n"
+                  "    func init(p: int) { (*self).pad = p; }\n"
+                  "    func makeCells(n: int) -> [Cell; 2] {\n"
+                  "        return new [Cell; 2] { new Cell { v: n }, new Cell { v: n + (*self).pad } };\n"
+                  "    }\n"
+                  "}\n"
+                  "func main() -> int {\n"
+                  "    var a: *A = new A(2);\n"
+                  "    var m: Maker = a;\n"
+                  "    var cells: [Cell; 2] = m.makeCells(4);\n"
+                  "    if (cells[0].v != 4 || cells[1].v != 6) { return 90; }\n"
+                  "    cells[0].v = 55;\n"
+                  "    var again: [Cell; 2] = m.makeCells(4);\n"
+                  "    if (cells[0].v != 55 || again[0].v != 4) { return 91; }\n"
+                  "    m.makeCells(9);\n"
+                  "    return again[1].v * 10 + cells[1].v;\n"
+                  "}\n",
+                  sig) == 66 && !sig,
+          "a wide return crosses the interface adapter");
+}
+
+void testInterfaceField() {
+    std::printf("interface fields dispatch\n");
+    bool sig = false;
+    check(runCode("interface Shape {\n"
+                  "    func area() -> int;\n"
+                  "}\n"
+                  "struct Sq {\n"
+                  "    var s: int;\n"
+                  "    func area() -> int { return (*self).s; }\n"
+                  "}\n"
+                  "struct Holder {\n"
+                  "    var id: int;\n"
+                  "    var shape: Shape;\n"
+                  "    var tail: int;\n"
+                  "}\n"
+                  "func main() -> int {\n"
+                  "    var a: Sq = new Sq { s: 9 };\n"
+                  "    var h: Holder = new Holder { id: 1, shape: a, tail: 2 };\n"
+                  "    return h.shape.area() + h.id + h.tail;\n"
+                  "}\n",
+                  sig) == 12 && !sig,
+          "an interface field dispatches at its offset");
+}
+
+void testInterfaceDynIndex() {
+    std::printf("interface dynamic index dispatches\n");
+    bool sig = false;
+    check(runCode("interface Shape {\n"
+                  "    func area() -> int;\n"
+                  "}\n"
+                  "struct Sq {\n"
+                  "    var s: int;\n"
+                  "    func area() -> int { return (*self).s; }\n"
+                  "}\n"
+                  "struct Rect {\n"
+                  "    var w: int;\n"
+                  "    var h: int;\n"
+                  "    func area() -> int { return (*self).w * (*self).h; }\n"
+                  "}\n"
+                  "func pick(arr: [Shape; 2], k: int) -> int {\n"
+                  "    return arr[k].area();\n"
+                  "}\n"
+                  "func main() -> int {\n"
+                  "    var a: Sq = new Sq { s: 9 };\n"
+                  "    var b: Rect = new Rect { w: 3, h: 4 };\n"
+                  "    var arr: [Shape; 2] = new [Shape; 2] { a, b };\n"
+                  "    return pick(arr, 0) + pick(arr, 1);\n"
+                  "}\n",
+                  sig) == 21 && !sig,
+          "a computed element dispatches through its own vtable");
+}
+
+void testInterfaceDowncast() {
+    std::printf("interface downcasts read back\n");
+    bool sig = false;
+    check(runCode("interface Shape {\n"
+                  "    func area() -> int;\n"
+                  "}\n"
+                  "struct Sq {\n"
+                  "    var s: int;\n"
+                  "    func area() -> int { return (*self).s; }\n"
+                  "}\n"
+                  "struct Rect {\n"
+                  "    var w: int;\n"
+                  "    var h: int;\n"
+                  "    func area() -> int { return (*self).w * (*self).h; }\n"
+                  "}\n"
+                  "func main() -> int {\n"
+                  "    var a: Sq = new Sq { s: 9 };\n"
+                  "    var b: Rect = new Rect { w: 3, h: 4 };\n"
+                  "    var sa: Shape = a;\n"
+                  "    var sb: Shape = b;\n"
+                  "    var back: Sq = sa as Sq;\n"
+                  "    return back.s + sb.area();\n"
+                  "}\n",
+                  sig) == 21 && !sig,
+          "a downcast reads back the concrete value");
+}
+
+void testStringAdd() {
+    std::printf("string concatenation runs\n");
+    bool sig = false;
+    check(runCode("func main() -> int {\n"
+                  "    var s: string = \"he\";\n"
+                  "    var t: string = \"llo\";\n"
+                  "    var u: string = s + t;\n"
+                  "    return u.len as int;\n"
+                  "}\n",
+                  sig) == 5 && !sig,
+          "two strings concatenate to one");
+}
+
 // The same module emitted twice is byte-identical, and carries no build path.
 void testMultiWordReturn() {
     std::printf("multi-word returns\n");
@@ -1033,13 +2082,18 @@ void testMultiWordReturn() {
                   "func main() -> int { return greet().len as int; }\n", sig) == 2 &&
               !sig,
           "a string return carries address and length");
-    // Three words exceed the register row: refused, not split.
-    Built big = build("func triple() -> [u64; 3] {\n"
-                      "    var t: [u64; 3] = new [u64; 3] {1, 2, 3};\n"
-                      "    return t;\n"
-                      "}\n"
-                      "func main() -> int { return 0; }\n");
-    check(!big.ok && big.stage == "lower", "a three-word return refuses");
+    // Three words exceed the register row: they ride the hidden
+    // pointer instead of splitting.
+    check(runCode("func triple() -> [u64; 3] {\n"
+                  "    var t: [u64; 3] = new [u64; 3] {1, 2, 3};\n"
+                  "    return t;\n"
+                  "}\n"
+                  "func main() -> int {\n"
+                  "    var m: [u64; 3] = triple();\n"
+                  "    return (m[0] + m[1] + m[2]) as int;\n"
+                  "}\n",
+                  sig) == 6 && !sig,
+          "a three-word return comes home whole");
     // A one-word aggregate still answers its word's type, not the
     // aggregate's: the scalar path cannot name a two-byte array's width.
     check(runCode("func make_row() -> [u8; 2] {\n"
@@ -1058,6 +2112,27 @@ void testMultiWordReturn() {
                    "    return sizeof([[u8; 2]; 3]) as int;\n"
                    "}\n") == 6,
           "sizeof answers a nested array's bytes");
+}
+
+void testBigReturn() {
+    std::printf("wide returns ride a hidden pointer\n");
+    bool sig = false;
+    check(runCode("struct Big {\n"
+                  "    var a: int;\n"
+                  "    var b: int;\n"
+                  "    var c: int;\n"
+                  "    var d: int;\n"
+                  "    var e: int;\n"
+                  "}\n"
+                  "func make() -> Big {\n"
+                  "    return new Big { a: 1, b: 2, c: 3, d: 4, e: 5 };\n"
+                  "}\n"
+                  "func main() -> int {\n"
+                  "    var m: Big = make();\n"
+                  "    return m.a + m.b + m.c + m.d + m.e;\n"
+                  "}\n",
+                  sig) == 15 && !sig,
+          "a five-field answer comes home whole");
 }
 
 void testSliceCopy() {
@@ -1092,6 +2167,46 @@ void testSliceCopy() {
                   "}\n",
                   sig) == 43 && !sig,
           "a slice reassigns an array");
+    // A slice through a pointer dereference addresses off the loaded
+    // address: `(*p)[0:2]` names the elements past the pointer's value,
+    // with the same bounds checks the slot route owns (BUG-279; the
+    // dynamic-index twin was BUG-278).
+    check(runQuiet("func at(p: *[int; 3]) -> int {\n"
+                   "    var s: []int = (*p)[0:2];\n"
+                   "    return s[1];\n"
+                   "}\n"
+                   "func main() -> int {\n"
+                   "    var a: [int; 3] = new [int; 3] { 4, 5, 6 };\n"
+                   "    return at(&a);\n"
+                   "}\n") == 5,
+          "a folded slice through a pointer answers the element");
+    check(runQuiet("struct S { var items: [int; 3]; }\n"
+                   "func get(q: *S, i: int) -> int { var s: []int = (*q).items[0:3]; return s[i]; }\n"
+                   "func main() -> int {\n"
+                   "    var s: S = new S { items: new [int; 3] { 4, 5, 6 } };\n"
+                   "    return get(&s, 2);\n"
+                   "}\n") == 6,
+          "a folded slice through a pointer field answers the element");
+    check(runQuiet("func at(p: *[int; 4], lo: int, hi: int) -> int {\n"
+                   "    var s: []int = (*p)[lo:hi];\n"
+                   "    return s[1];\n"
+                   "}\n"
+                   "func main() -> int {\n"
+                   "    var a: [int; 4] = new [int; 4] { 4, 5, 6, 7 };\n"
+                   "    return at(&a, 1, 3);\n"
+                   "}\n") == 6,
+          "a computed slice through a pointer answers the element");
+    sig = false;
+    check(runCode("func at(p: *[int; 3], l: int, h: int) -> int {\n"
+                  "    var s: []int = (*p)[l:h];\n"
+                  "    return s[0];\n"
+                  "}\n"
+                  "func main() -> int {\n"
+                  "    var a: [int; 3] = new [int; 3] { 4, 5, 6 };\n"
+                  "    return at(&a, 0, 9);\n"
+                  "}\n",
+                  sig) == -1 && sig,
+          "a slice past the end through a pointer traps");
     // A string global indexes like a local: the global's address is
     // materialized once and the element reads through it.
     check(runCode("var g: string = \"abc\";\n"
@@ -1153,6 +2268,46 @@ void testForIn() {
                  "    return s;\n"
                  "}\n") == 4,
           "continue skips to the next element");
+    // The iteration protocol: iter() answers a value once, next() takes a
+    // pointer to it and answers each element or nilPtr (FEATURES 8.2).
+    const char* range =
+        "struct RIt { var cur: int; var end: int; var out: int; }\n"
+        "struct Rng { var lo: int; var hi: int;\n"
+        "    func iter() -> RIt { return new RIt { cur: (*self).lo, end: (*self).hi, out: 0 }; }\n"
+        "    func next(it: *RIt) -> *int {\n"
+        "        if ((*it).cur >= (*it).end) { return nilPtr; }\n"
+        "        (*it).out = (*it).cur;\n"
+        "        (*it).cur = (*it).cur + 1;\n"
+        "        return &((*it).out);\n"
+        "    }\n"
+        "}\n";
+    check(runQuiet(std::string(range) +
+                 "func main() -> int {\n"
+                 "    var r: Rng = new Rng { lo: 0, hi: 3 };\n"
+                 "    var s: int = 0;\n"
+                 "    for (var x in r) { s = s + x; }\n"
+                 "    return s;\n"
+                 "}\n") == 3,
+          "for-in over iter/next sums every step");
+    check(runQuiet(std::string(range) +
+                 "func main() -> int {\n"
+                 "    var r: Rng = new Rng { lo: 1, hi: 6 };\n"
+                 "    var s: int = 0;\n"
+                 "    for (var x in r) {\n"
+                 "        if (x == 3) { break; }\n"
+                 "        s = s + x;\n"
+                 "    }\n"
+                 "    return s;\n"
+                 "}\n") == 3,
+          "break leaves a protocol loop early");
+    check(runQuiet(std::string(range) +
+                 "func main() -> int {\n"
+                 "    var r: Rng = new Rng { lo: 0, hi: 4 };\n"
+                 "    var s: int = 0;\n"
+                 "    for (x in r) { s = s + x; }\n"
+                 "    return s;\n"
+                 "}\n") == 6,
+          "a protocol loop binds immutably without var");
 }
 
 void testFloat() {
@@ -1172,6 +2327,20 @@ void testFloat() {
                  "    return (a + b) as int;\n"
                  "}\n") == 5,
           "f32 add reaches its result");
+    // f32 remainder truncates the quotient: 5.5 % 2.0 = 1.5 -> 1.
+    check(runQuiet("func main() -> int {\n"
+                 "    var a: f32 = 5.5;\n"
+                 "    var b: f32 = 2.0;\n"
+                 "    return (a % b) as int;\n"
+                 "}\n") == 1,
+          "f32 remainder reaches its result");
+    // f64 remainder at wider range: 7.5 % 2.0 = 1.5 -> 1.
+    check(runQuiet("func main() -> int {\n"
+                 "    var a: f64 = 7.5;\n"
+                 "    var b: f64 = 2.0;\n"
+                 "    return (a % b) as int;\n"
+                 "}\n") == 1,
+          "f64 remainder reaches its result");
     // Comparison orders the operands.
     check(runQuiet("func main() -> int {\n"
                  "    var a: f64 = 1.5;\n"
@@ -1186,6 +2355,27 @@ void testFloat() {
                  "    return addf(1.5, 2.25) as int;\n"
                  "}\n") == 3,
           "float arguments and results cross a call");
+    // A float field stores its own width: a double written into a struct
+    // slot and read back must answer its value, not the low half of its
+    // bit pattern (movss where movsd was needed).
+    check(runQuiet("struct P { var a: f64; }\n"
+                 "func main() -> int {\n"
+                 "    var p: P = new P{ a: 1.5 };\n"
+                 "    return p.a as int;\n"
+                 "}\n") == 1,
+          "an f64 field keeps every bit of its pattern");
+    check(runQuiet("struct P { var a: i32; var b: f64; }\n"
+                 "func main() -> int {\n"
+                 "    var p: P = new P{ a: 3, b: 1.5 };\n"
+                 "    return p.a + (p.b as int);\n"
+                 "}\n") == 4,
+          "an f64 field beside an int field keeps both");
+    check(runQuiet("struct P { var a: f32; }\n"
+                 "func main() -> int {\n"
+                 "    var p: P = new P{ a: 2.5 };\n"
+                 "    return (p.a + 0.5) as int;\n"
+                 "}\n") == 3,
+          "an f32 field reads back at its own width");
     // int -> f64 -> int round trip: 7 + 0.5 = 7.5 -> 7.
     check(runQuiet("func main() -> int {\n"
                  "    var i: int = 7;\n"
@@ -1260,6 +2450,34 @@ void testFloat() {
 
 // A program that exits through its own asm block: a local placeholder
 // feeds the exit code, a global placeholder feeds a buffer address.
+void testRegisterEscape() {
+    std::printf("register-named functions escape\n");
+    bool sig = false;
+    // `cs` is a segment register: GAS rejects every textual reference
+    // to the bare spelling, so the emitter renames the symbol at every
+    // site that names it.
+    check(runCode("func cs() -> int { return 8; }\n"
+                  "func main() -> int { return cs(); }\n",
+                  sig) == 8 && !sig,
+          "a function named like a register still calls");
+    // `add` is only a mnemonic: GAS accepts it bare, so the emitter
+    // keeps the spelling instead of renaming every function.
+    check(runCode("func add(a: int, b: int) -> int { return a + b; }\n"
+                  "func main() -> int { return add(20, 22); }\n",
+                  sig) == 42 && !sig,
+          "a function named like a mnemonic keeps its spelling");
+    Built text = build("func cs() -> int { return 8; }\n"
+                       "func add(a: int, b: int) -> int { return a + b; }\n"
+                       "func main() -> int { return cs() + add(1, 1); }\n");
+    check(text.ok, "the escape program builds");
+    check(text.asmText.find("call cs_") != std::string::npos,
+          "a call names the escaped symbol");
+    check(text.asmText.find("cs_:") != std::string::npos,
+          "the definition names the escaped symbol");
+    check(text.asmText.find("call add") != std::string::npos,
+          "a mnemonic call keeps its spelling");
+}
+
 void testAsm() {
     std::printf("asm runs\n");
     bool sig = false;
@@ -1302,6 +2520,15 @@ void testAsm() {
                   "    return r + s;\n"
                   "}\n", sig) == 49 && !sig,
           "writes through placeholders persist");
+    // A block is treated exactly like a call (FEATURES §4.4): values live
+    // across it survive whatever caller-saved registers it clobbers.
+    check(runCode("func main() -> int {\n"
+                  "    var a: int = 10;\n"
+                  "    var b: int = 20;\n"
+                  "    asm { \"mov eax, 999\" \"mov ecx, 888\" \"mov edx, 777\" }\n"
+                  "    return a + b;\n"
+                  "}\n", sig) == 30 && !sig,
+          "values live across a clobbering block survive");
 }
 
 }  // namespace
@@ -1309,12 +2536,14 @@ void testAsm() {
 int main() {
     std::printf("codegen_test — a Cider program runs\n\n");
     testExit();
+    testStackArgs();
     testCalls();
     testControl();
     testGlobals();
     testStruct();
     testArray();
     testPointerHeap();
+    testDelete();
     testHeapCapText();
     testLiteralNul();
     testExternPutchar();
@@ -1323,27 +2552,51 @@ int main() {
     testForIn();
     testArith32();
     testIndirectCall();
+    testFnAddrGlobal();
+    testFnPtrCompare();
     testClosure();
+    testClosureElement();
     testInterface();
+    testInterfaceClass();
+    testInterfaceWideReturn();
+    testInterfaceField();
+    testInterfaceDynIndex();
+    testInterfaceDowncast();
+    testStringAdd();
     testShortCircuit();
     testBoolCompare();
+    testNotInCondition();
     testCharCompare();
     testStringCompare();
+    testInterfaceNil();
     testMatch();
+    testGuard();
+    testRange();
+    testEnumMatch();
     testPointerArith();
     testEnumValues();
+    testEnumCast();
+    testGenericFn();
+    testWideRun();
+    testDeferRun();
+    testClosureVoidRun();
     testBitNot();
     testTernary();
     testInterp();
     testFloat();
+    testRegisterEscape();
     testAsm();
     testTrap();
+    testPanic();
     testElementAddr();
     testComputedIndex();
     testPointerField();
+    testMethodGlobalStore();
+    testClassBox();
     testRepeatZero();
     testIncrDecr();
     testMultiWordReturn();
+    testBigReturn();
     testSliceCopy();
     testRepro();
     std::printf("\n%d checks, %s\n", checks, failures == 0 ? "all passed" : "FAILURES");

@@ -68,6 +68,454 @@ TypeRef Checker::typeOf(const Node* node) const {
     return resolver_.typeOf(node);
 }
 
+std::optional<DeclId> Checker::specOf(const Call* call,
+                                              const std::optional<DeclId>& ctx) const {
+    std::string key;
+    if (ctx.has_value()) {
+        key = std::to_string(ctx->module) + "." + std::to_string(ctx->index);
+    }
+    auto found = callSpecs_.find(std::make_pair(call, key));
+    return found == callSpecs_.end() ? std::nullopt
+                                     : std::optional<DeclId>(found->second);
+}
+
+Prov Checker::paramProv(const std::string& key) const {
+    auto found = paramSites_.find(key);
+    if (found == paramSites_.end() || !found->second.seen) {
+        return Prov::Raw;
+    }
+    if (found->second.allClosure) {
+        return Prov::Closure;
+    }
+    if (found->second.allNeutral) {
+        return Prov::Neutral;
+    }
+    return Prov::Raw;
+}
+
+void Checker::prescanProvenance(const std::vector<std::string>& modules) {
+    // Fixpoint over parameter sites: promotions only settle entries toward
+    // their final unanimous value, so an unchanged round ends it.
+    while (prescanRound(modules)) {
+    }
+}
+
+bool Checker::prescanRound(const std::vector<std::string>& modules) {
+    prescanMoved_ = false;
+    for (const std::string& mod : modules) {
+        Program* program = resolver_.programOf(mod);
+        if (program == nullptr) {
+            continue;
+        }
+        // Global initializers seed prescan globals (constants only in
+        // practice); stores during function walks update them in order.
+        for (const auto& decl : program->decls) {
+            const VarDecl* global = nullptr;
+            if (const auto* vd = dynamic_cast<const VarDecl*>(decl.get())) {
+                global = vd;
+            } else if (const auto* exp = dynamic_cast<const ExportDecl*>(decl.get())) {
+                global = dynamic_cast<const VarDecl*>(exp->decl.get());
+            }
+            if (global != nullptr && global->init != nullptr) {
+                if (dynamic_cast<const NilPtr*>(global->init.get()) != nullptr) {
+                    prescanGlobals_[global->name] = Prov::Neutral;
+                } else if (dynamic_cast<const FuncLit*>(global->init.get()) != nullptr) {
+                    prescanGlobals_[global->name] = Prov::Closure;
+                }
+            }
+        }
+        for (const auto& decl : program->decls) {
+            const FuncDecl* fn = nullptr;
+            if (const auto* direct = dynamic_cast<const FuncDecl*>(decl.get())) {
+                fn = direct;
+            } else if (const auto* exp = dynamic_cast<const ExportDecl*>(decl.get())) {
+                fn = dynamic_cast<const FuncDecl*>(exp->decl.get());
+            }
+            if (fn == nullptr || !fn->typeParams.empty() || fn->body == nullptr) {
+                continue;
+            }
+            prescanFunction(mod, *fn);
+        }
+    }
+    return prescanMoved_;
+}
+
+void Checker::prescanFunction(const std::string& mod, const FuncDecl& fn) {
+    prescanModule_ = mod;
+    // Closure-typed parameters prove by spelling (no call needed); the
+    // rest start Raw and earn proof from call sites below.
+    std::unordered_map<std::string, bool> closureParams;
+    const resolve::Scope* home = resolver_.scopeOf(mod);
+    for (const Param& param : fn.params) {
+        if (param.type != nullptr && home != nullptr) {
+            TypeRef spelled = resolver_.resolveType(param.type.get(), home);
+            if (!spelled.isError() &&
+                spelled.type->kind() == Kind::Closure) {
+                closureParams[param.name] = true;
+            }
+        }
+    }
+    std::vector<std::unordered_map<std::string, Prov>> scopes(1);
+    prescanStmt(fn.body.get(), scopes, closureParams);
+}
+
+Prov Checker::prescanArg(const Expr* expr,
+                          std::vector<std::unordered_map<std::string, Prov>>& scopes,
+                          const std::unordered_map<std::string, bool>& closureParams) {
+    if (expr == nullptr) {
+        return Prov::Raw;
+    }
+    if (dynamic_cast<const NilPtr*>(expr) != nullptr) {
+        return Prov::Neutral;
+    }
+    if (dynamic_cast<const FuncLit*>(expr) != nullptr) {
+        return Prov::Closure;
+    }
+    if (const auto* ident = dynamic_cast<const Ident*>(expr)) {
+        for (auto it = scopes.rbegin(); it != scopes.rend(); ++it) {
+            auto found = it->find(ident->name);
+            if (found != it->end()) {
+                return found->second;
+            }
+        }
+        auto global = prescanGlobals_.find(ident->name);
+        if (global != prescanGlobals_.end()) {
+            return global->second;
+        }
+        if (closureParams.find(ident->name) != closureParams.end()) {
+            return Prov::Closure;
+        }
+        return Prov::Raw;
+    }
+    if (const auto* cast = dynamic_cast<const Cast*>(expr)) {
+        // Casts preserve: a proven address stays proven through any
+        // spelling change, and an unproven one stays unproven.
+        return prescanArg(cast->expr.get(), scopes, closureParams);
+    }
+    return Prov::Raw;
+}
+
+void Checker::prescanSite(const std::string& mod, const Call& call,
+                            std::vector<std::unordered_map<std::string, Prov>>& scopes,
+                            const std::unordered_map<std::string, bool>& closureParams) {
+    // Only free-function callees name a parameter table: methods,
+    // generics and indirect calls contribute no sites (documented).
+    const resolve::Scope* home = resolver_.scopeOf(mod);
+    if (home == nullptr) {
+        return;
+    }
+    const resolve::Decl* decl = nullptr;
+    if (const auto* ident = dynamic_cast<const Ident*>(call.callee.get())) {
+        decl = resolver_.lookup(home, ident->name);
+    } else if (const auto* field = dynamic_cast<const Field*>(call.callee.get())) {
+        const auto* modName = dynamic_cast<const Ident*>(field->object.get());
+        if (modName == nullptr) {
+            return;
+        }
+        const resolve::Decl* moduleDecl = resolver_.lookup(home, modName->name);
+        if (moduleDecl == nullptr ||
+            moduleDecl->kind != resolve::DeclKind::Module) {
+            return;
+        }
+        const resolve::Scope* target = resolver_.scopeOf(moduleDecl->origin);
+        decl = target != nullptr ? resolver_.lookup(target, field->name) : nullptr;
+    } else {
+        return;
+    }
+    if (decl == nullptr || decl->kind != resolve::DeclKind::Func ||
+        decl->typeParams > 0 || decl->scope == nullptr) {
+        return;
+    }
+    std::string base =
+        decl->scope->module + "." + decl->name + "#";
+    for (uint64_t i = 0; i < static_cast<uint64_t>(call.args.size()); ++i) {
+        // Places and returns read Raw here (next slices); names, casts,
+        // literals and nil answer above.
+        std::string key =
+            base + std::to_string(static_cast<unsigned long long>(i));
+        Prov arg = prescanArg(call.args[i].get(), scopes, closureParams);
+        ParamSite& site = paramSites_[key];
+        bool keepC = site.allClosure && (arg == Prov::Closure);
+        bool keepN = site.allNeutral && (arg == Prov::Neutral);
+        if (!site.seen || keepC != site.allClosure || keepN != site.allNeutral) {
+            site.seen = true;
+            site.allClosure = keepC;
+            site.allNeutral = keepN;
+            prescanMoved_ = true;
+        }
+    }
+}
+
+void Checker::prescanStmt(const Stmt* stmt,
+                          std::vector<std::unordered_map<std::string, Prov>>& scopes,
+                          const std::unordered_map<std::string, bool>& closureParams) {
+    if (stmt == nullptr) {
+        return;
+    }
+    if (const auto* vd = dynamic_cast<const VarDecl*>(stmt)) {
+        if (vd->init != nullptr) {
+            // Scan first (nested calls record their sites), then classify.
+            prescanExpr(vd->init.get(), scopes, closureParams);
+            scopes.back()[vd->name] =
+                prescanArg(vd->init.get(), scopes, closureParams);
+        }
+        return;
+    }
+    if (const auto* es = dynamic_cast<const ExprStmt*>(stmt)) {
+        prescanExpr(es->expr.get(), scopes, closureParams);
+        return;
+    }
+    if (const auto* ret = dynamic_cast<const Return*>(stmt)) {
+        prescanExpr(ret->value.get(), scopes, closureParams);
+        return;
+    }
+    if (const auto* block = dynamic_cast<const Block*>(stmt)) {
+        scopes.emplace_back();
+        for (const auto& inner : block->stmts) {
+            prescanStmt(inner.get(), scopes, closureParams);
+        }
+        scopes.pop_back();
+        return;
+    }
+    if (const auto* defer = dynamic_cast<const DeferStmt*>(stmt)) {
+        // Exit-time values may exceed registration-time ones; walking in
+        // place under-proves (refuses) rather than over-proves.
+        prescanStmt(defer->stmt.get(), scopes, closureParams);
+        return;
+    }
+    if (const auto* cond = dynamic_cast<const IfStmt*>(stmt)) {
+        prescanExpr(cond->cond.get(), scopes, closureParams);
+        // Branches may disagree: keep what both prove, Raw otherwise. A
+        // name one branch never touches keeps the incoming value.
+        auto merge = [&](std::unordered_map<std::string, Prov> branch) {
+            for (const auto& [name, prov] : branch) {
+                auto base = scopes.back().find(name);
+                Prov before = base != scopes.back().end()
+                                  ? base->second
+                                  : Prov::Raw;
+                if (prov != before) {
+                    scopes.back()[name] = Prov::Raw;
+                } else {
+                    scopes.back()[name] = prov;
+                }
+            }
+        };
+        auto then = scopes.back();
+        prescanStmt(cond->then.get(), scopes, closureParams);
+        std::unordered_map<std::string, Prov> thenOut = scopes.back();
+        scopes.back() = then;
+        if (cond->els != nullptr) {
+            prescanStmt(cond->els.get(), scopes, closureParams);
+        }
+        std::unordered_map<std::string, Prov> elseOut = scopes.back();
+        scopes.back() = then;
+        merge(thenOut);
+        // Else-side: only demote where it disagrees with the merged value.
+        for (const auto& [name, prov] : elseOut) {
+            auto base = then.find(name);
+            Prov before = base != then.end() ? base->second : Prov::Raw;
+            if (prov != before) {
+                scopes.back()[name] = Prov::Raw;
+            } else if (scopes.back().find(name) == scopes.back().end()) {
+                scopes.back()[name] = prov;
+            }
+        }
+        return;
+    }
+    if (const auto* loop = dynamic_cast<const WhileStmt*>(stmt)) {
+        prescanExpr(loop->cond.get(), scopes, closureParams);
+        // One speculative pass on a copy: loop-carried writes stay
+        // unproven (a zero-trip loop runs nothing), but sites inside
+        // still record.
+        auto body = scopes.back();
+        std::vector<std::unordered_map<std::string, Prov>> inner{body};
+        prescanStmt(loop->body.get(), inner, closureParams);
+        mergePrescan(scopes.back(), body);
+        return;
+    }
+    if (const auto* loop = dynamic_cast<const ForStmt*>(stmt)) {
+        prescanStmt(loop->init.get(), scopes, closureParams);
+        prescanExpr(loop->cond.get(), scopes, closureParams);
+        prescanExpr(loop->step.get(), scopes, closureParams);
+        auto body = scopes.back();
+        std::vector<std::unordered_map<std::string, Prov>> inner{body};
+        prescanStmt(loop->body.get(), inner, closureParams);
+        mergePrescan(scopes.back(), body);
+        return;
+    }
+    if (const auto* loop = dynamic_cast<const ForInStmt*>(stmt)) {
+        prescanExpr(loop->seq.get(), scopes, closureParams);
+        auto body = scopes.back();
+        std::vector<std::unordered_map<std::string, Prov>> inner{body};
+        prescanStmt(loop->body.get(), inner, closureParams);
+        mergePrescan(scopes.back(), body);
+        return;
+    }
+    if (const auto* match = dynamic_cast<const MatchStmt*>(stmt)) {
+        prescanExpr(match->scrutinee.get(), scopes, closureParams);
+        // Arms run at most one: keep what every arm agrees on. Each arm
+        // still records its own sites.
+        bool first = true;
+        std::unordered_map<std::string, Prov> agreed;
+        auto takeArm = [&](const Block* body) {
+            if (body == nullptr) {
+                return;
+            }
+            auto copy = scopes.back();
+            std::vector<std::unordered_map<std::string, Prov>> inner{copy};
+            prescanStmt(body, inner, closureParams);
+            if (first) {
+                agreed = inner.back();
+                first = false;
+                return;
+            }
+            for (auto it = agreed.begin(); it != agreed.end();) {
+                auto found = inner.back().find(it->first);
+                if (found == inner.back().end() || found->second != it->second) {
+                    it = agreed.erase(it);
+                } else {
+                    ++it;
+                }
+            }
+        };
+        for (const auto& arm : match->arms) {
+            if (arm->guard != nullptr) {
+                prescanExpr(arm->guard.get(), scopes, closureParams);
+            }
+            takeArm(arm->body.get());
+        }
+        if (match->fallback != nullptr) {
+            takeArm(match->fallback.get());
+        }
+        if (!first) {
+            scopes.back() = agreed;
+        }
+        return;
+    }
+}
+
+void Checker::mergePrescan(std::unordered_map<std::string, Prov>& into,
+                           const std::unordered_map<std::string, Prov>& before) {
+    // Loop-carried writes stay unproven (see above): only entries the
+    // body left exactly as found survive.
+    for (auto it = into.begin(); it != into.end();) {
+        auto found = before.find(it->first);
+        if (found == before.end() || found->second != it->second) {
+            it = into.erase(it);
+        } else {
+            ++it;
+        }
+    }
+    for (const auto& [name, prov] : before) {
+        if (into.find(name) == into.end()) {
+            into[name] = prov;
+        }
+    }
+}
+
+void Checker::prescanExpr(const Expr* expr,
+                          std::vector<std::unordered_map<std::string, Prov>>& scopes,
+                          const std::unordered_map<std::string, bool>& closureParams) {
+    if (expr == nullptr) {
+        return;
+    }
+    // The module is recovered per call below; prescanSite resolves it.
+    if (const auto* call = dynamic_cast<const Call*>(expr)) {
+        prescanSite(prescanModule_, *call, scopes, closureParams);
+        for (const auto& arg : call->args) {
+            prescanExpr(arg.get(), scopes, closureParams);
+        }
+        return;
+    }
+    if (const auto* assign = dynamic_cast<const Assign*>(expr)) {
+        prescanExpr(assign->value.get(), scopes, closureParams);
+        if (const auto* ident = dynamic_cast<const Ident*>(assign->target.get())) {
+            if (!assign->op.has_value()) {
+                Prov proven = prescanArg(assign->value.get(), scopes, closureParams);
+                // A declared local takes it in flow; otherwise the name is
+                // a global and records persistently. Undeclared uses stay
+                // loud in checking; here they read Raw.
+                bool bound = false;
+                for (auto it = scopes.rbegin(); it != scopes.rend(); ++it) {
+                    if (it->find(ident->name) != it->end()) {
+                        bound = true;
+                        break;
+                    }
+                }
+                if (bound) {
+                    scopes.back()[ident->name] = proven;
+                } else {
+                    prescanGlobals_[ident->name] = proven;
+                }
+            }
+        } else {
+            prescanExpr(assign->target.get(), scopes, closureParams);
+        }
+        return;
+    }
+    if (const auto* binary = dynamic_cast<const Binary*>(expr)) {
+        prescanExpr(binary->lhs.get(), scopes, closureParams);
+        prescanExpr(binary->rhs.get(), scopes, closureParams);
+        return;
+    }
+    if (const auto* unary = dynamic_cast<const Unary*>(expr)) {
+        prescanExpr(unary->operand.get(), scopes, closureParams);
+        return;
+    }
+    if (const auto* cast = dynamic_cast<const Cast*>(expr)) {
+        prescanExpr(cast->expr.get(), scopes, closureParams);
+        return;
+    }
+    if (const auto* ternary = dynamic_cast<const Ternary*>(expr)) {
+        prescanExpr(ternary->cond.get(), scopes, closureParams);
+        prescanExpr(ternary->then.get(), scopes, closureParams);
+        prescanExpr(ternary->els.get(), scopes, closureParams);
+        return;
+    }
+    if (const auto* index = dynamic_cast<const Index*>(expr)) {
+        prescanExpr(index->array.get(), scopes, closureParams);
+        prescanExpr(index->index.get(), scopes, closureParams);
+        return;
+    }
+    if (const auto* field = dynamic_cast<const Field*>(expr)) {
+        prescanExpr(field->object.get(), scopes, closureParams);
+        return;
+    }
+    if (const auto* slice = dynamic_cast<const SliceExpr*>(expr)) {
+        prescanExpr(slice->array.get(), scopes, closureParams);
+        prescanExpr(slice->lo.get(), scopes, closureParams);
+        prescanExpr(slice->hi.get(), scopes, closureParams);
+        return;
+    }
+    if (const auto* inc = dynamic_cast<const IncrDecr*>(expr)) {
+        prescanExpr(inc->operand.get(), scopes, closureParams);
+        return;
+    }
+    if (const auto* news = dynamic_cast<const NewStruct*>(expr)) {
+        for (const auto& field : news->fields) {
+            prescanExpr(field.value.get(), scopes, closureParams);
+        }
+        return;
+    }
+    if (const auto* newa = dynamic_cast<const NewArray*>(expr)) {
+        for (const auto& init : newa->inits) {
+            prescanExpr(init.get(), scopes, closureParams);
+        }
+        return;
+    }
+    if (const auto* newc = dynamic_cast<const NewClass*>(expr)) {
+        for (const auto& arg : newc->args) {
+            prescanExpr(arg.get(), scopes, closureParams);
+        }
+        return;
+    }
+}
+
+TypeRef Checker::sizeofOperand(const SizeofType* node) const {
+    auto found = sizeofOperands_.find(node);
+    return found == sizeofOperands_.end() ? errorRef() : found->second;
+}
+
 TypeRef Checker::resolveHere(const TypeExpr* spelling) {
     // The resolver records the diagnostic; the checker records the failure.
     // Without this, a use-site resolve error (bare generic in a body, bad
@@ -141,6 +589,43 @@ TypeRef Checker::substDeep(TypeRef type) {
             return TypeRef{ctx_.closure(std::move(rebuilt))};
         }
         return TypeRef{ctx_.functionPtr(std::move(rebuilt))};
+    }
+    if (kind == Kind::Struct || kind == Kind::Class || kind == Kind::Interface ||
+        kind == Kind::Union || kind == Kind::Enum) {
+        // A nested instantiation re-originates: `R<T, E>` inside `ok<T, E>`
+        // names the spec of bare parameters, but the body means the spec
+        // of this walk's arguments. Substitute the origin's arguments and
+        // re-instantiate, the way the resolver's own substitution does;
+        // an unchanged list keeps the same spec. A depth failure refuses
+        // instead of hanging (see the resolver's bound).
+        std::optional<DeclId> id = type.type->decl();
+        if (!id.has_value()) {
+            return errorRef();
+        }
+        std::optional<std::pair<DeclId, std::vector<TypeRef>>> origin =
+            resolver_.instantiationOf(*id);
+        if (!origin.has_value()) {
+            return type;
+        }
+        std::vector<TypeRef> subArgs;
+        bool changed = false;
+        for (TypeRef arg : origin->second) {
+            TypeRef sub = substDeep(arg);
+            if (sub.isError()) {
+                return sub;
+            }
+            changed = changed || sub.type != arg.type;
+            subArgs.push_back(sub);
+        }
+        if (!changed) {
+            return type;
+        }
+        std::optional<DeclId> spec = resolver_.instantiate(
+            origin->first, subArgs, Position{module_, 1, 1});
+        if (!spec.has_value()) {
+            return errorRef();
+        }
+        return TypeRef{ctx_.nominal(kind, *spec)};
     }
     return type;
 }
@@ -228,16 +713,23 @@ bool Checker::checkProgram(Program& program, const std::string& module) {
     env_ = std::make_unique<EvalEnv>(resolver_.evalEnv(moduleScope_));
     typeScope_ = moduleScope_;
     for (const std::unique_ptr<Decl>& decl : program.decls) {
-        if (const auto* fn = dynamic_cast<const FuncDecl*>(decl.get())) {
+        // Export wraps the spelling: unwrap it so exported templates
+        // register their bodies like local ones do. Visit order already
+        // sees through the wrapper; only this table missed it.
+        const Decl* inner = decl.get();
+        if (const auto* exp = dynamic_cast<const ExportDecl*>(inner)) {
+            inner = exp->decl.get();
+        }
+        if (const auto* fn = dynamic_cast<const FuncDecl*>(inner)) {
             funcs_[module + "." + fn->name] = fn;
         }
-        if (const auto* sd = dynamic_cast<const StructDecl*>(decl.get())) {
+        if (const auto* sd = dynamic_cast<const StructDecl*>(inner)) {
             structs_[module + "." + sd->name] = sd;
             for (const MethodDecl& method : sd->methods) {
                 methods_[module + "." + sd->name + "." + method.name] = &method;
             }
         }
-        if (const auto* cd = dynamic_cast<const ClassDecl*>(decl.get())) {
+        if (const auto* cd = dynamic_cast<const ClassDecl*>(inner)) {
             for (const MethodDecl& method : cd->methods) {
                 methods_[module + "." + cd->name + "." + method.name] = &method;
             }
@@ -255,11 +747,158 @@ const LocalScope* Checker::pushScope() {
     const LocalScope* out = scope.get();
     scopes_.push_back(std::move(scope));
     current_ = out;
+    flowStack_.push_back({});
+    placeFlow_.push_back({});
+    volatilePtrs_.push_back({});
     return out;
+}
+
+// A declaration spelled `*volatile T` marks its name so derefs through it
+// are volatile accesses; anything else is silent.
+void Checker::noteVolatilePointer(const std::string& name, const TypeExpr* type) {
+    const auto* ptr = dynamic_cast<const PointerType*>(type);
+    if (ptr == nullptr || !ptr->pointeeVolatile) {
+        return;
+    }
+    if (!volatilePtrs_.empty()) {
+        volatilePtrs_.back().insert(name);
+    }
+}
+
+bool Checker::placeIsVolatile(const Expr* expr) const {
+    return expr != nullptr && volatilePlaces_.find(expr) != volatilePlaces_.end();
 }
 
 void Checker::popScope() {
     current_ = current_ != nullptr ? current_->parent : nullptr;
+    if (!flowStack_.empty()) {
+        flowStack_.pop_back();
+    }
+    if (!placeFlow_.empty()) {
+        placeFlow_.pop_back();
+    }
+    if (!volatilePtrs_.empty()) {
+        volatilePtrs_.pop_back();
+    }
+}
+
+void Checker::recordFlow(const std::string& name, Prov prov) {
+    if (flowStack_.empty()) {
+        return;
+    }
+    flowStack_.back()[name] = prov;
+}
+
+Prov Checker::provOf(const Expr* expr) {
+    if (expr == nullptr) {
+        return Prov::Raw;
+    }
+    // nilPtr is representation-neutral: it casts to the null value of any
+    // carrier spelling without proving anything about storage.
+    if (dynamic_cast<const NilPtr*>(expr) != nullptr) {
+        return Prov::Neutral;
+    }
+    // A closure literal is a closure object wherever it flows.
+    if (dynamic_cast<const FuncLit*>(expr) != nullptr) {
+        return Prov::Closure;
+    }
+    if (const auto* ident = dynamic_cast<const Ident*>(expr)) {
+        return provOfName(ident->name);
+    }
+    if (const auto* cast = dynamic_cast<const Cast*>(expr)) {
+        // Casts preserve: a proven address stays proven through any
+        // spelling change, and an unproven one stays unproven.
+        return provOf(cast->expr.get());
+    }
+    if (const auto* ternary = dynamic_cast<const Ternary*>(expr)) {
+        // Branches join: neutrality is transparent (a nil arm proves
+        // nothing either way), agreement keeps the value, anything else
+        // refuses by falling to Raw.
+        Prov then = provOf(ternary->then.get());
+        Prov els = provOf(ternary->els.get());
+        if (then == els) {
+            return then;
+        }
+        if (then == Prov::Neutral) {
+            return els;
+        }
+        if (els == Prov::Neutral) {
+            return then;
+        }
+        return Prov::Raw;
+    }
+    // Places answer their tracked chain, or Raw when no store proved it.
+    std::string key = placeKey(expr);
+    if (!key.empty()) {
+        for (auto it = placeFlow_.rbegin(); it != placeFlow_.rend(); ++it) {
+            auto found = it->find(key);
+            if (found != it->end()) {
+                return found->second;
+            }
+        }
+    }
+    return Prov::Raw;
+}
+
+std::string Checker::placeKey(const Expr* expr) {
+    if (const auto* ident = dynamic_cast<const Ident*>(expr)) {
+        return "v:" + ident->name;
+    }
+    if (const auto* deref = dynamic_cast<const Unary*>(expr)) {
+        if (deref->op != UnOp::Deref) {
+            return "";
+        }
+        std::string inner = placeKey(deref->operand.get());
+        if (inner.empty()) {
+            return "";
+        }
+        return "d(" + inner + ")";
+    }
+    if (const auto* field = dynamic_cast<const Field*>(expr)) {
+        std::string inner = placeKey(field->object.get());
+        if (inner.empty()) {
+            return "";
+        }
+        return "f(" + inner + "," + field->name + ")";
+    }
+    if (const auto* index = dynamic_cast<const Index*>(expr)) {
+        std::string inner = placeKey(index->array.get());
+        if (inner.empty()) {
+            return "";
+        }
+        // Only a folded index names a cell: a computed index could name
+        // any element, so the whole Chain stays unproven.
+        std::unordered_set<std::string> active;
+        EvalResult folded = evalConstInt(*index->index, *env_, active);
+        if (!folded.ok) {
+            return "";
+        }
+        return "i(" + inner + "," + std::to_string(folded.value) + ")";
+    }
+    return "";
+}
+
+Prov Checker::provOfName(const std::string& name) const {
+    for (auto it = flowStack_.rbegin(); it != flowStack_.rend(); ++it) {
+        auto found = it->find(name);
+        if (found != it->end()) {
+            return found->second;
+        }
+    }
+    auto global = globalProv_.find(name);
+    if (global != globalProv_.end()) {
+        return global->second;
+    }
+    // Untracked names default by type: a closure-typed name is its own
+    // proof (nothing else inhabits the type), while carriers start Raw
+    // until a tracked store proves them.
+    if (const Local* local = findLocal(name)) {
+        if (!local->type.isError() &&
+            local->type.type->kind() == Kind::Closure) {
+            return Prov::Closure;
+        }
+    }
+    return Prov::Raw;
 }
 
 bool Checker::bindLocal(const std::string& name, TypeRef type, bool isMut, Position pos) {
@@ -322,7 +961,43 @@ void Checker::visitProgram(Program& n) {
             continue;
         }
         std::unordered_set<std::string> active;
-        EvalResult folded = evalConstInt(*g->init, *env_, active);
+        // `gc.MK2`: a module-qualified const folds through its defining
+        // module — the table holds every module's consts, but names inside
+        // only resolve in their own scope, so the fold runs there. Anything
+        // that is not a const member falls through and fails loudly below,
+        // exactly as an unresolvable name would.
+        EvalResult folded{false, 0, ""};
+        const Field* qualField =
+            dynamic_cast<const Field*>(g->init.get());
+        const Ident* qualMod =
+            qualField != nullptr
+                ? dynamic_cast<const Ident*>(qualField->object.get())
+                : nullptr;
+        const resolve::Decl* qualMember = nullptr;
+        const resolve::Scope* qualHome = nullptr;
+        if (qualMod != nullptr) {
+            const resolve::Decl* modDecl =
+                resolver_.lookup(moduleScope_, qualMod->name);
+            if (modDecl != nullptr &&
+                modDecl->kind == resolve::DeclKind::Module) {
+                qualHome = resolver_.scopeOf(modDecl->origin);
+                const resolve::Decl* target =
+                    qualHome != nullptr
+                        ? resolver_.lookup(qualHome, qualField->name)
+                        : nullptr;
+                if (target != nullptr &&
+                    target->kind == resolve::DeclKind::Const &&
+                    target->init != nullptr) {
+                    qualMember = target;
+                }
+            }
+        }
+        if (qualMember != nullptr && qualHome != nullptr) {
+            EvalEnv homeEnv = resolver_.evalEnv(qualHome);
+            folded = evalConstInt(*qualMember->init, homeEnv, active);
+        } else {
+            folded = evalConstInt(*g->init, *env_, active);
+        }
         if (!folded.ok) {
             // An aggregate construction whose every scalar leaf folds to
             // an integer names every image byte, so a global may hold it:
@@ -334,8 +1009,99 @@ void Checker::visitProgram(Program& n) {
             // aggregates), so the gate only recognises the
             // all-bytes-known shape.
             bool constGlobal = false;
-            if (dynamic_cast<const NewArray*>(g->init.get()) != nullptr) {
+            if (dynamic_cast<const NewArray*>(g->init.get()) != nullptr ||
+                (dynamic_cast<const NewStruct*>(g->init.get()) != nullptr &&
+                 (declared.type->kind() == Kind::Struct ||
+                  declared.type->kind() == Kind::Class))) {
+                // A struct value folds only into a struct or class
+                // global: an interface global holds a pair, which a bare
+                // value cannot build — that spelling stays refused below
+                // rather than accepted here and unbuildable later.
                 constGlobal = constAggregateInit(*g->init);
+            }
+            // `b.inc`: a module-qualified function names its code
+            // address, which is a link-time constant — the lowerer
+            // materialises the closure pair, so the gate only
+            // recognises the spelling. Anything else falls through
+            // to fail loudly below.
+            bool funcGlobal = false;
+            if (const auto* field = dynamic_cast<const Field*>(g->init.get())) {
+                if (const auto* mod = dynamic_cast<const Ident*>(field->object.get())) {
+                    const resolve::Decl* modDecl = resolver_.lookup(moduleScope_, mod->name);
+                    if (modDecl != nullptr && modDecl->kind == resolve::DeclKind::Module) {
+                        const resolve::Scope* home = resolver_.scopeOf(modDecl->origin);
+                        const resolve::Decl* member = home != nullptr ? resolver_.lookup(home, field->name) : nullptr;
+                        if (member != nullptr && member->kind == resolve::DeclKind::Func && member->typeParams == 0) {
+                            funcGlobal = true;
+                        }
+                    }
+                }
+            }
+            // `&dbl`: a same-module function names its code address,
+            // which is a link-time constant — the lowerer emits the
+            // address word, so the gate only recognises the spelling.
+            // Anything else falls through to fail loudly below.
+            if (!funcGlobal) {
+                if (const auto* addr = dynamic_cast<const Unary*>(g->init.get())) {
+                    if (addr->op == UnOp::Addr) {
+                        if (const auto* ident = dynamic_cast<const Ident*>(addr->operand.get())) {
+                            const resolve::Decl* decl = resolver_.lookup(moduleScope_, ident->name);
+                            if (decl != nullptr && decl->kind == resolve::DeclKind::Func && decl->typeParams == 0) {
+                                funcGlobal = true;
+                            }
+                        }
+                    }
+                }
+            }
+            // A bare `dbl` names the same link-time code as `&dbl` for a
+            // closure global: the value is the forwarder pair either way.
+            if (!funcGlobal) {
+                if (const auto* ident = dynamic_cast<const Ident*>(g->init.get())) {
+                    const resolve::Decl* decl = resolver_.lookup(moduleScope_, ident->name);
+                    if (decl != nullptr && decl->kind == resolve::DeclKind::Func && decl->typeParams == 0) {
+                        funcGlobal = true;
+                    }
+                }
+            }
+            // `&add as *void`: a cast of a function address to a void
+            // pointer is the same link-time constant. Anything else
+            // falls through to fail loudly below.
+            if (!funcGlobal) {
+                if (const auto* cast = dynamic_cast<const Cast*>(g->init.get())) {
+                    if (const auto* addr = dynamic_cast<const Unary*>(cast->expr.get())) {
+                        if (addr->op == UnOp::Addr) {
+                            if (const auto* ident = dynamic_cast<const Ident*>(addr->operand.get())) {
+                                const resolve::Decl* decl = resolver_.lookup(moduleScope_, ident->name);
+                                TypeRef target = resolver_.resolveType(cast->target.get(), resolver_.scopeOf(module_));
+                                if (decl != nullptr && decl->kind == resolve::DeclKind::Func && decl->typeParams == 0 &&
+                                    !target.isError() && target.type->kind() == Kind::Pointer &&
+                                    target.type->pointee() == ctx_.void_() &&
+                                    declared.type->kind() == Kind::Pointer &&
+                                    declared.type->pointee() == ctx_.void_()) {
+                                    funcGlobal = true;
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+            // `nilPtr as I`: the null interface is sixteen zero bytes in
+            // the image — a null data word beside a null vtable word — so
+            // it is constant the way a null pointer is. The target
+            // spelling must name an interface, and the declaration must be
+            // one: anything else falls through to the normal path, which
+            // fails it loudly. The normal checking below still enforces
+            // the types, so the gate only recognises the all-bytes-known
+            // shape.
+            if (const auto* nilCast = dynamic_cast<const Cast*>(g->init.get())) {
+                TypeRef spelled = resolver_.resolveType(nilCast->target.get(),
+                                                        resolver_.scopeOf(module_));
+                if (!spelled.isError() &&
+                    spelled.type->kind() == Kind::Interface &&
+                    declared.type->kind() == Kind::Interface &&
+                    dynamic_cast<const NilPtr*>(nilCast->expr.get()) != nullptr) {
+                    constGlobal = true;
+                }
             }
             // A float literal is a constant of its own kind: evalConstInt
             // answers integers, so only a literal in a float-typed global
@@ -357,7 +1123,30 @@ void Checker::visitProgram(Program& n) {
             // only has to not call it non-constant.
             const auto* asString = dynamic_cast<const StringLit*>(g->init.get());
             const bool stringGlobal = declared.type->kind() == Kind::String;
-            if (!constGlobal && (asFloat == nullptr || !floatGlobal) &&
+            // An enumerator spelling is four known bytes in the image: the
+            // lowerer folds every spelling the expression checker accepts
+            // (bare, qualified, alias, module-qualified), so the gate only
+            // admits the shapes and the checking below validates them.
+            // Anything else constructed is not constant.
+            bool enumGlobal = false;
+            if (!constGlobal && declared.type->kind() == Kind::Enum &&
+                (dynamic_cast<const Ident*>(g->init.get()) != nullptr ||
+                 dynamic_cast<const Field*>(g->init.get()) != nullptr)) {
+                enumGlobal = true;
+            }
+            // A wide literal is known image bytes (units plus the NUL unit)
+            // or a rodata address: the lowerer folds both spellings, so
+            // the gate only admits the shape and the checking below
+            // validates the fit.
+            bool wideGlobal = false;
+            if (!constGlobal &&
+                dynamic_cast<const WideLit*>(g->init.get()) != nullptr &&
+                (declared.type->kind() == Kind::Array ||
+                 declared.type->kind() == Kind::Pointer)) {
+                wideGlobal = true;
+            }
+            if (!constGlobal && !funcGlobal && !enumGlobal && !wideGlobal &&
+                (asFloat == nullptr || !floatGlobal) &&
                 !(floatGlobal && floatFolded.ok) &&
                 (asString == nullptr || !stringGlobal)) {
                 const std::string why =
@@ -395,6 +1184,11 @@ void Checker::visitProgram(Program& n) {
             }
         }
         record(g.get(), declared);
+        // A global's declaration proves its storage for later reads.
+        // Stores from function bodies update the same entry; functions
+        // clear it on entry, so a read sees only its own function's
+        // stores.
+        globalProv_[g->name] = provOf(g->init.get());
     }
     // After the globals are checked: the sink reads their recorded types, and
     // it runs before any function body so a global read lowers.
@@ -410,6 +1204,11 @@ void Checker::visitFuncDecl(FuncDecl& n) {
     if (!n.typeParams.empty()) {
         return;
     }
+    // Globals read only their own function's stores: a callee cannot
+    // observe a caller's global writes before they happen, and checking
+    // runs callers after callees, so cross-function global flow refuses
+    // rather than guessing order.
+    globalProv_.clear();
     bool failed = false;
     Signature sig = resolver_.buildSignature(n.params, n.returns.get(), moduleScope_, failed);
     if (failed) {
@@ -421,6 +1220,14 @@ void Checker::visitFuncDecl(FuncDecl& n) {
     for (uint64_t i = 0; i < static_cast<uint64_t>(params.size()); ++i) {
         bindLocal(n.params[i].name, TypeRef{params[i].type}, params[i].isMutable,
                   n.params[i].pos);
+        // Prescan proofs seed the flow: a proven *void parameter reads
+        // proven from its first use, like any store would.
+        std::string key = module_ + "." + n.name + "#" +
+                          std::to_string(static_cast<unsigned long long>(i));
+        Prov proven = paramProv(key);
+        if (proven != Prov::Raw) {
+            recordFlow(n.params[i].name, proven);
+        }
     }
     TypeRef saved = funcReturn_;
     bool was = inFunc_;
@@ -445,6 +1252,7 @@ void Checker::visitStructDecl(StructDecl& n) {
         fail(n.pos, "checker bug: '" + n.name + "' was never resolved");
         return;
     }
+    checkNoSelfEmbed(self->id, "struct", n.name, n.fields, "field");
     // Conformance: every interface method, present with the same signature.
     for (const std::unique_ptr<TypeExpr>& iface : n.interfaces) {
         TypeRef t = resolveHere(iface.get());
@@ -468,9 +1276,77 @@ void Checker::visitClassDecl(ClassDecl& n) {
         fail(n.pos, "checker bug: '" + n.name + "' was never resolved");
         return;
     }
+    checkNoSelfEmbed(self->id, "class", n.name, n.fields, "field");
+    checkOverrides(*self, n);
     checkMethods(self->id, Kind::Class, n.methods);
     checkCtor(self->id, Kind::Class, n.init.get(), true);
     checkCtor(self->id, Kind::Class, n.deinit.get(), false);
+}
+
+void Checker::visitUnionDecl(UnionDecl& n) {
+    const resolve::Decl* self = resolver_.lookup(moduleScope_, n.name);
+    if (self == nullptr) {
+        fail(n.pos, "checker bug: '" + n.name + "' was never resolved");
+        return;
+    }
+    checkNoSelfEmbed(self->id, "union", n.name, n.members, "member");
+    // The default walk: each member's type expression, as before.
+    for (auto& m : n.members) {
+        m.accept(*this);
+    }
+}
+
+bool Checker::typeEmbedsSelf(const Type* type, DeclId self,
+                             std::set<uint64_t>& seen) const {
+    if (type == nullptr || type->isError()) {
+        return false;
+    }
+    if (type->kind() == Kind::Array) {
+        // A fixed repetition of inline values embeds what it repeats.
+        return typeEmbedsSelf(type->element(), self, seen);
+    }
+    if (type->kind() != Kind::Struct && type->kind() != Kind::Union &&
+        type->kind() != Kind::Class) {
+        return false;
+    }
+    std::optional<DeclId> id = type->decl();
+    if (!id.has_value()) {
+        return false;
+    }
+    if (sameDecl(*id, self)) {
+        return true;
+    }
+    uint64_t key = (static_cast<uint64_t>(id->module) << 32) | id->index;
+    if (!seen.insert(key).second) {
+        // Some other cycle, not one through self: finite or not, it is not
+        // this declaration's doing.
+        return false;
+    }
+    for (const std::string& field : resolver_.fieldNames(*id)) {
+        TypeRef nested = resolver_.fieldType(*id, field);
+        if (typeEmbedsSelf(nested.type, self, seen)) {
+            return true;
+        }
+    }
+    seen.erase(key);
+    return false;
+}
+
+void Checker::checkNoSelfEmbed(DeclId self, const std::string& kind,
+                               const std::string& declName,
+                               const std::vector<FieldDecl>& fields,
+                               const std::string& partWord) {
+    for (const FieldDecl& field : fields) {
+        TypeRef t = resolver_.fieldType(self, field.name);
+        if (t.isError()) {
+            continue;
+        }
+        std::set<uint64_t> seen;
+        if (typeEmbedsSelf(t.type, self, seen)) {
+            fail(field.pos, kind + " '" + declName + "' holds itself by value in " +
+                                partWord + " '" + field.name + "'");
+        }
+    }
 }
 
 void Checker::checkCtor(DeclId id, Kind kind, FuncDecl* ctor, bool isInit) {
@@ -511,12 +1387,337 @@ void Checker::checkCtor(DeclId id, Kind kind, FuncDecl* ctor, bool isInit) {
     }
     popScope();
     (void)saved;
+    if (isInit && sig != nullptr) {
+        checkInitAssign(id, *ctor);
+    }
+}
+
+bool Checker::initExprOpaque(const Expr* expr) {
+    if (expr == nullptr) {
+        return false;
+    }
+    // Anything that can run or reach beyond the statement: calls (a callee
+    // holding self could assign), construction that runs init, closures
+    // (assigned through only when called, which is itself a call), and
+    // anything unlisted (fail-closed). Reads, names and literals are
+    // transparent; stores are judged at the statement that owns them.
+    if (dynamic_cast<const Call*>(expr) != nullptr ||
+        dynamic_cast<const NewClass*>(expr) != nullptr ||
+        dynamic_cast<const FuncLit*>(expr) != nullptr) {
+        return true;
+    }
+    if (const auto* un = dynamic_cast<const Unary*>(expr)) {
+        return initExprOpaque(un->operand.get());
+    }
+    if (const auto* field = dynamic_cast<const Field*>(expr)) {
+        return initExprOpaque(field->object.get());
+    }
+    if (const auto* index = dynamic_cast<const Index*>(expr)) {
+        return initExprOpaque(index->array.get()) || initExprOpaque(index->index.get());
+    }
+    if (const auto* slice = dynamic_cast<const SliceExpr*>(expr)) {
+        return initExprOpaque(slice->array.get()) || initExprOpaque(slice->lo.get()) ||
+               initExprOpaque(slice->hi.get());
+    }
+    if (const auto* tern = dynamic_cast<const Ternary*>(expr)) {
+        return initExprOpaque(tern->cond.get()) || initExprOpaque(tern->then.get()) ||
+               initExprOpaque(tern->els.get());
+    }
+    if (const auto* cast = dynamic_cast<const Cast*>(expr)) {
+        return initExprOpaque(cast->expr.get());
+    }
+    if (const auto* binary = dynamic_cast<const Binary*>(expr)) {
+        return initExprOpaque(binary->lhs.get()) || initExprOpaque(binary->rhs.get());
+    }
+    if (dynamic_cast<const IncrDecr*>(expr) != nullptr) {
+        // A nested step bails: only a statement-level `(*self).f++`
+        // counts, and anything else relying on one is too tangled to
+        // credit without risking a wrongful rejection.
+        return true;
+    }
+    if (dynamic_cast<const Assign*>(expr) != nullptr) {
+        // Same for a nested assignment: the statement walker credits
+        // only top-level self-field stores.
+        return true;
+    }
+    if (const auto* built = dynamic_cast<const NewStruct*>(expr)) {
+        for (const FieldInit& field : built->fields) {
+            if (initExprOpaque(field.value.get())) {
+                return true;
+            }
+        }
+        return false;
+    }
+    if (const auto* listed = dynamic_cast<const NewArray*>(expr)) {
+        if (initExprOpaque(listed->length.get())) {
+            return true;
+        }
+        for (const std::unique_ptr<Expr>& init : listed->inits) {
+            if (initExprOpaque(init.get())) {
+                return true;
+            }
+        }
+        return false;
+    }
+    if (const auto* lit = dynamic_cast<const StringLit*>(expr)) {
+        // Interpolated parts evaluate: a call hiding in one bails like
+        // any other call.
+        for (const auto& part : lit->parts) {
+            if (part.isExpr && initExprOpaque(part.expr.get())) {
+                return true;
+            }
+        }
+        return false;
+    }
+    if (dynamic_cast<const Ident*>(expr) != nullptr ||
+        dynamic_cast<const IntLit*>(expr) != nullptr ||
+        dynamic_cast<const FloatLit*>(expr) != nullptr ||
+        dynamic_cast<const CharLit*>(expr) != nullptr ||
+        dynamic_cast<const BoolLit*>(expr) != nullptr ||
+        dynamic_cast<const NilPtr*>(expr) != nullptr ||
+        dynamic_cast<const SizeofType*>(expr) != nullptr) {
+        return false;
+    }
+    return true;
+}
+
+bool Checker::isSelfFieldStore(const Expr* target, std::string& field) {
+    // `(*self).f`: the only store the analysis credits. checkCtor binds
+    // `self` after the parameters, so the name always means the object
+    // under construction here.
+    const auto* into = dynamic_cast<const Field*>(target);
+    if (into == nullptr) {
+        return false;
+    }
+    const auto* deref = dynamic_cast<const Unary*>(into->object.get());
+    if (deref == nullptr || deref->op != UnOp::Deref) {
+        return false;
+    }
+    const auto* self = dynamic_cast<const Ident*>(deref->operand.get());
+    if (self == nullptr || self->name != "self") {
+        return false;
+    }
+    field = into->name;
+    return true;
+}
+
+void Checker::requireInitAssigned(Position pos, const std::vector<std::string>& fields,
+                                  const InitAssign& state) {
+    if (state.unknownFlow) {
+        fail(pos, "init cannot be proven to assign every field");
+        return;
+    }
+    if (state.bailed) {
+        return;
+    }
+    for (const std::string& field : fields) {
+        if (state.assigned.find(field) == state.assigned.end()) {
+            fail(pos, "init does not assign '" + field + "'");
+            return;
+        }
+    }
+}
+
+Checker::InitAssign Checker::assignedThrough(const Stmt* stmt, InitAssign state,
+                                             const std::vector<std::string>& fields) {
+    if (stmt == nullptr) {
+        return state;
+    }
+    if (const auto* block = dynamic_cast<const Block*>(stmt)) {
+        for (const std::unique_ptr<Stmt>& s : block->stmts) {
+            state = assignedThrough(s.get(), state, fields);
+        }
+        return state;
+    }
+    if (const auto* expr = dynamic_cast<const ExprStmt*>(stmt)) {
+        if (const auto* assign = dynamic_cast<const Assign*>(expr->expr.get())) {
+            std::string field;
+            if (isSelfFieldStore(assign->target.get(), field)) {
+                state.assigned.insert(field);
+                if (initExprOpaque(assign->value.get())) {
+                    state.bailed = true;
+                }
+                return state;
+            }
+            state.bailed = true;
+            state.unknownFlow = true;
+            return state;
+        }
+        if (const auto* step = dynamic_cast<const IncrDecr*>(expr->expr.get())) {
+            std::string field;
+            if (isSelfFieldStore(step->operand.get(), field)) {
+                state.assigned.insert(field);
+                return state;
+            }
+            state.bailed = true;
+            state.unknownFlow = true;
+            return state;
+        }
+        if (initExprOpaque(expr->expr.get())) {
+            state.bailed = true;
+            state.unknownFlow = true;
+        }
+        return state;
+    }
+    if (const auto* decl = dynamic_cast<const VarDecl*>(stmt)) {
+        if (decl->init != nullptr && initExprOpaque(decl->init.get())) {
+            state.bailed = true;
+        }
+        return state;
+    }
+    if (const auto* iff = dynamic_cast<const IfStmt*>(stmt)) {
+        if (initExprOpaque(iff->cond.get())) {
+            state.bailed = true;
+        }
+        InitAssign thenState = assignedThrough(iff->then.get(), state, fields);
+        if (iff->els == nullptr) {
+            // No else: the skipped path assigns nothing, so only the
+            // entry set survives — but anything the arm ran still bails.
+            thenState.assigned = state.assigned;
+            return thenState;
+        }
+        InitAssign elseState = assignedThrough(iff->els.get(), state, fields);
+        InitAssign joined;
+        joined.bailed = thenState.bailed || elseState.bailed;
+        joined.unknownFlow = thenState.unknownFlow || elseState.unknownFlow;
+        for (const std::string& field : thenState.assigned) {
+            if (elseState.assigned.find(field) != elseState.assigned.end()) {
+                joined.assigned.insert(field);
+            }
+        }
+        return joined;
+    }
+    if (const auto* loop = dynamic_cast<const WhileStmt*>(stmt)) {
+        if (initExprOpaque(loop->cond.get())) {
+            state.bailed = true;
+        }
+        InitAssign body = assignedThrough(loop->body.get(), state, fields);
+        // A loop may run zero times, so its adds never stand — but its
+        // returns were already checked and its effects still bail.
+        state.bailed = body.bailed;
+        state.unknownFlow = state.unknownFlow || body.unknownFlow;
+        return state;
+    }
+    if (const auto* loop = dynamic_cast<const ForStmt*>(stmt)) {
+        InitAssign head = state;
+        if (loop->init != nullptr) {
+            head = assignedThrough(loop->init.get(), head, fields);
+        }
+        if (loop->cond != nullptr && initExprOpaque(loop->cond.get())) {
+            head.bailed = true;
+        }
+        if (loop->step != nullptr && initExprOpaque(loop->step.get())) {
+            head.bailed = true;
+        }
+        InitAssign body = assignedThrough(loop->body.get(), head, fields);
+        head.bailed = body.bailed;
+        head.unknownFlow = head.unknownFlow || body.unknownFlow;
+        return head;
+    }
+    if (const auto* loop = dynamic_cast<const ForInStmt*>(stmt)) {
+        if (initExprOpaque(loop->seq.get())) {
+            state.bailed = true;
+        }
+        InitAssign body = assignedThrough(loop->body.get(), state, fields);
+        state.bailed = body.bailed;
+        state.unknownFlow = state.unknownFlow || body.unknownFlow;
+        return state;
+    }
+    if (const auto* match = dynamic_cast<const MatchStmt*>(stmt)) {
+        if (initExprOpaque(match->scrutinee.get())) {
+            state.bailed = true;
+        }
+        bool first = true;
+        InitAssign joined = state;
+        for (const std::unique_ptr<MatchArm>& arm : match->arms) {
+            InitAssign one = assignedThrough(arm->body.get(), state, fields);
+            if (first) {
+                joined = one;
+                first = false;
+            } else {
+                InitAssign narrower;
+                narrower.bailed = joined.bailed || one.bailed;
+                narrower.unknownFlow = joined.unknownFlow || one.unknownFlow;
+                for (const std::string& field : joined.assigned) {
+                    if (one.assigned.find(field) != one.assigned.end()) {
+                        narrower.assigned.insert(field);
+                    }
+                }
+                joined = narrower;
+            }
+        }
+        if (match->fallback != nullptr) {
+            InitAssign last = assignedThrough(match->fallback.get(), state, fields);
+            InitAssign narrower;
+            narrower.bailed = joined.bailed || last.bailed;
+            narrower.unknownFlow = joined.unknownFlow || last.unknownFlow;
+            for (const std::string& field : joined.assigned) {
+                if (last.assigned.find(field) != last.assigned.end()) {
+                    narrower.assigned.insert(field);
+                }
+            }
+            joined = narrower;
+        }
+        return joined;
+    }
+    if (const auto* ret = dynamic_cast<const Return*>(stmt)) {
+        // A path reaching a return with a field unassigned is rejected
+        // naming the field (TYPES.md §9.2); the set itself is unchanged.
+        requireInitAssigned(ret->pos, fields, state);
+        return state;
+    }
+    if (dynamic_cast<const Break*>(stmt) != nullptr ||
+        dynamic_cast<const Continue*>(stmt) != nullptr) {
+        return state;
+    }
+    // Anything else (delete, asm, throw, try, defer, unknown) bails: it
+    // may reach beyond the statement in ways syntax cannot show.
+    state.bailed = true;
+    state.unknownFlow = true;
+    return state;
+}
+
+void Checker::checkInitAssign(DeclId id, const FuncDecl& ctor) {
+    // TYPES.md §9.2: a path through init that reaches the end, or reaches
+    // a return, having left a field unassigned is a compile-time rejection
+    // naming the field. Runs over the body independent of the checking
+    // walk, so check and lowering modes share one analysis.
+    std::vector<std::string> fields = resolver_.fieldNames(id);
+    if (ctor.body == nullptr) {
+        return;
+    }
+    InitAssign state;
+    state = assignedThrough(ctor.body.get(), state, fields);
+    requireInitAssigned(ctor.body->pos, fields, state);
+}
+
+void Checker::checkOverrides(const resolve::Decl& self, const ClassDecl& n) {
+    for (const MethodDecl& method : n.methods) {
+        const Signature* own = resolver_.methodSig(self.id, method.name);
+        for (DeclId baseId : resolver_.classBases(self.id)) {
+            const Signature* baseSig = resolver_.methodSig(baseId, method.name);
+            if (baseSig == nullptr) {
+                continue;
+            }
+            if (resolver_.virtualIndexOf(baseId, method.name) < 0) {
+                fail(method.pos, "a method with a base signature that is not " +
+                                     std::string("virtual is neither an override nor a shadow: '") +
+                                     method.name + "'");
+                continue;
+            }
+            if (own != nullptr && !sameSignature(*own, *baseSig)) {
+                fail(method.pos, "'" + method.name +
+                                     "' overrides with an incompatible signature");
+            }
+        }
+    }
 }
 
 void Checker::checkMethods(DeclId id, Kind kind, std::vector<MethodDecl>& methods) {
     const Type* obj = ctx_.nominal(kind, id);
     const Type* self = ctx_.pointer(obj);
     for (MethodDecl& method : methods) {
+        globalProv_.clear();
         const Signature* sig = resolver_.methodSig(id, method.name);
         if (sig == nullptr) {
             fail(method.pos, "checker bug: signature missing");
@@ -528,6 +1729,8 @@ void Checker::checkMethods(DeclId id, Kind kind, std::vector<MethodDecl>& method
         for (uint64_t i = 0; i < static_cast<uint64_t>(declared.size()); ++i) {
             bindLocal(method.params[i].name, TypeRef{declared[i].type},
                       declared[i].isMutable, method.params[i].pos);
+            noteVolatilePointer(method.params[i].name,
+                                method.params[i].type.get());
         }
         const Type* ret = sig->returnType() != nullptr ? sig->returnType() : ctx_.void_();
         TypeRef saved = funcReturn_;
@@ -558,7 +1761,11 @@ void Checker::visitVarDecl(VarDecl& n) {
         return;
     }
     bindLocal(n.name, declared, true, n.pos);
+    noteVolatilePointer(n.name, n.type.get());
     record(&n, declared);
+    // A declaration proves its storage: later reads of the name answer
+    // what this initializer carried.
+    recordFlow(n.name, provOf(n.init.get()));
     if (sink_ != nullptr) {
         sink_->onVarDecl(n);
     }
@@ -663,11 +1870,48 @@ void Checker::visitForInStmt(ForInStmt& n) {
         } else if (kind == Kind::Struct || kind == Kind::Class) {
             std::optional<DeclId> id = seq.type->decl();
             if (id.has_value()) {
+                // The iteration protocol is two methods (FEATURES 8.2):
+                // iter() answers the iterator value once, next() takes a
+                // pointer to that same iterator and answers the next
+                // element or nilPtr. One without the other does not
+                // iterate, and next through any other pointer is not the
+                // protocol.
+                const Signature* iter = resolver_.methodSig(*id, "iter");
                 const Signature* next = resolver_.methodSig(*id, "next");
-                if (next != nullptr && next->arity() == 1 && next->returnType() != nullptr &&
-                    next->returnType()->kind() == Kind::Pointer) {
-                    element = TypeRef{next->returnType()->pointee()};
-                } else {
+                bool shapesOk = false;
+                if (iter != nullptr && next != nullptr && iter->arity() == 0 &&
+                    next->arity() == 1) {
+                    const Type* iterRet = iter->returnType();
+                    const Type* nextParam = next->parameters()[0].type;
+                    const Type* nextRet = next->returnType();
+                    if (iterRet != nullptr && nextParam != nullptr &&
+                        nextRet != nullptr &&
+                        (iterRet->kind() == Kind::Struct ||
+                         iterRet->kind() == Kind::Class ||
+                         iterRet->kind() == Kind::Union)) {
+                        std::optional<DeclId> iterId = iterRet->decl();
+                        const Type* held =
+                            nextParam->kind() == Kind::Pointer
+                                ? nextParam->pointee()
+                                : nullptr;
+                        const Type* elem =
+                            nextRet->kind() == Kind::Pointer
+                                ? nextRet->pointee()
+                                : nullptr;
+                        if (iterId.has_value() && held != nullptr &&
+                            !held->isError() && elem != nullptr &&
+                            !elem->isError() &&
+                            elem->kind() != Kind::Void) {
+                            std::optional<DeclId> heldId = held->decl();
+                            if (heldId.has_value() &&
+                                sameDecl(*iterId, *heldId)) {
+                                element = TypeRef{elem};
+                                shapesOk = true;
+                            }
+                        }
+                    }
+                }
+                if (!shapesOk) {
                     fail(n.seq->pos, "a for-in type provides iter() and next()");
                 }
             }
@@ -703,6 +1947,12 @@ void Checker::visitReturn(Return& n) {
         fail(n.pos, "return outside a function");
         return;
     }
+    // FEATURES §5.2: a return inside a defer would leave the scope twice
+    // and re-run every defer in it, including itself.
+    if (inDefer_ > 0) {
+        fail(n.pos, "return inside a defer");
+        return;
+    }
     if (n.value == nullptr) {
         if (funcReturn_ != TypeRef{ctx_.void_()}) {
             fail(n.pos, "returning nothing from a function with a return type");
@@ -718,6 +1968,20 @@ void Checker::visitReturn(Return& n) {
     }
     TypeRef value = checkExpr(n.value.get(), funcReturn_);
     checkCompatible(n.value->pos, n.value.get(), value, funcReturn_);
+    // TYPES §4.3: a class value boxes by address, so returning a frame
+    // value (a local or parameter name) as an interface would dangle the
+    // dead frame. Small structs inline and stay legal; pointers and
+    // dereferences keep their owner's address under the usual pointer
+    // rules. Class values only spell as names today (bare construction is
+    // rejected, dereferences are Deref nodes), so a name here is
+    // provably frame-dead: heap-allocate or return the pointer instead.
+    if (!value.isError() && !funcReturn_.isError() &&
+        funcReturn_.type->kind() == Kind::Interface &&
+        value.type->kind() == Kind::Class &&
+        dynamic_cast<const Ident*>(n.value.get()) != nullptr) {
+        fail(n.value->pos,
+             "a class value cannot return as an interface: it would dangle");
+    }
     // After the value is checked: the sink reads its recorded type.
     if (sink_ != nullptr) {
         sink_->onReturn(n);
@@ -729,6 +1993,12 @@ void Checker::visitBreak(Break& n) {
         fail(n.pos, "break outside a loop");
         return;
     }
+    // FEATURES §5.2: a break inside a defer would leave the scope twice
+    // and re-run every defer in it, including itself.
+    if (inDefer_ > 0) {
+        fail(n.pos, "break inside a defer");
+        return;
+    }
     if (sink_ != nullptr) {
         sink_->onBreak(n);
     }
@@ -737,6 +2007,10 @@ void Checker::visitBreak(Break& n) {
 void Checker::visitContinue(Continue& n) {
     if (loopDepth_ == 0) {
         fail(n.pos, "continue outside a loop");
+        return;
+    }
+    if (inDefer_ > 0) {
+        fail(n.pos, "continue inside a defer");
         return;
     }
     if (sink_ != nullptr) {
@@ -810,6 +2084,16 @@ void Checker::visitUnary(Unary& n) {
             record(&n, operand);
             return;
         }
+        // A deref through a `*volatile T` name is a volatile access.
+        if (const auto* src = dynamic_cast<const Ident*>(n.operand.get())) {
+            for (auto frame = volatilePtrs_.rbegin();
+                 frame != volatilePtrs_.rend(); ++frame) {
+                if (frame->find(src->name) != frame->end()) {
+                    volatilePlaces_.insert(&n);
+                    break;
+                }
+            }
+        }
         record(&n, TypeRef{operand.type->pointee()});
         return;
     }
@@ -870,6 +2154,64 @@ void Checker::visitCast(Cast& n) {
         // beside a string stays a mismatch the source must spell.
         record(&n, target);
         return;
+    }
+    if (dynamic_cast<const NilPtr*>(n.expr.get()) != nullptr &&
+        target.type->kind() == Kind::Interface) {
+        // A null names no interface either: the null interface is
+        // (nil, nil), whose vtable word answers every null check without
+        // ever dispatching. Only the literal converts — a *void variable
+        // beside an interface stays a mismatch the source must spell.
+        record(&n, target);
+        return;
+    }
+    // Closure round trips gate on provenance before the shape table: a
+    // *void (or deeper carrier) holding a proven closure address casts to
+    // a closure spelling or a fn spelling, and nilPtr casts to the null
+    // closure value. Anything else holding the address refuses — reading
+    // a pair through it would be a guess. A closure casts to *void by
+    // address (checked below by shape).
+    auto isVoidCarrier = [](const TypeRef& t) -> bool {
+        if (t.type->kind() == Kind::Pointer && t.type->pointee() != nullptr) {
+            Kind inner = t.type->pointee()->kind();
+            return inner == Kind::Void || inner == Kind::Pointer;
+        }
+        return false;
+    };
+    // A byte view carries the same address a void carrier does: only a
+    // proven closure address answers as a pair through it.
+    auto isByteView = [](const TypeRef& t) -> bool {
+        if (t.type->kind() != Kind::Pointer || t.type->pointee() == nullptr) {
+            return false;
+        }
+        const Type* inner = t.type->pointee();
+        return inner->kind() == Kind::Basic && inner->basic().has_value() &&
+               *inner->basic() == BasicKind::U8;
+    };
+    bool toClosureSpelling =
+        target.type->kind() == Kind::Closure ||
+        target.type->kind() == Kind::FunctionPtr;
+    // A closure value casts onward by shape below; a fn spelling holding
+    // a proven closure still gates (it adopts the representation here).
+    bool fromClosureValue =
+        !from.isError() && from.type->kind() == Kind::Closure;
+    if (toClosureSpelling && !fromClosureValue && !from.isError()) {
+        if (dynamic_cast<const NilPtr*>(n.expr.get()) != nullptr) {
+            record(&n, target);
+            return;
+        }
+        // A fn spelling adopts here too: only a proven closure address
+        // answers as a pair, never a raw code pointer.
+        if (isVoidCarrier(from) || isByteView(from) ||
+            from.type->kind() == Kind::FunctionPtr) {
+            Prov proven = provOf(n.expr.get());
+            if (proven != Prov::Closure && proven != Prov::Neutral) {
+                fail(n.pos, "this *void is not proven to hold a closure");
+                record(&n, errorRef());
+                return;
+            }
+            record(&n, target);
+            return;
+        }
     }
     if (!castRowOk(from, target)) {
         fail(n.pos, "no cast from " + typeName(from) + " to " + typeName(target));
@@ -1058,6 +2400,22 @@ void Checker::visitAssign(Assign& n) {
     if (!n.op.has_value()) {
         TypeRef value = checkExpr(n.value.get(), target);
         checkCompatible(n.value->pos, n.value.get(), value, target);
+        // A store proves its target: later reads answer what this value
+        // carried. Bare names record in their scope (globals persistently);
+        // other chains record by place key. Anything unkeyable stays Raw.
+        if (const auto* ident = dynamic_cast<const Ident*>(n.target.get())) {
+            Prov proven = provOf(n.value.get());
+            if (findLocal(ident->name) != nullptr) {
+                recordFlow(ident->name, proven);
+            } else {
+                globalProv_[ident->name] = proven;
+            }
+        } else {
+            std::string key = placeKey(n.target.get());
+            if (!key.empty() && !placeFlow_.empty()) {
+                placeFlow_.back()[key] = provOf(n.value.get());
+            }
+        }
         record(&n, target);
         return;
     }
@@ -1122,6 +2480,7 @@ void Checker::visitSizeofType(SizeofType& n) {
         record(&n, errorRef());
         return;
     }
+    sizeofOperands_[&n] = target;
     record(&n, TypeRef{ctx_.basic(BasicKind::I64)});
 }
 
@@ -1197,10 +2556,14 @@ void Checker::visitMatchStmt(MatchStmt& n) {
     if (!scrutinee.isError()) {
         for (auto& arm : n.arms) {
             checkMatchPattern(*arm->pattern, scrutinee);
+            for (auto& alt : arm->alts) {
+                checkMatchPattern(*alt, scrutinee);
+            }
         }
         // Exhaustiveness is decided by the type, at compile time: a
-        // default arm, or both bool constants over a bool. Anything else
-        // is a rejection naming the statement, never a runtime miss.
+        // default arm, or a finite cover over a bool, a union, or an
+        // enum. Anything else is a rejection naming the statement, never
+        // a runtime miss.
         bool exhaustive = n.fallback != nullptr;
         if (!exhaustive && scrutinee.type->kind() == Kind::Basic &&
             scrutinee.type->basic().has_value() &&
@@ -1208,21 +2571,108 @@ void Checker::visitMatchStmt(MatchStmt& n) {
             bool hasTrue = false;
             bool hasFalse = false;
             for (auto& arm : n.arms) {
-                if (arm->pattern->kind != PatternKind::Const) {
+                // A guard may fail at runtime, so a guarded arm covers
+                // nothing: only a guard-free `true` and `false` close
+                // the bool.
+                if (arm->guard != nullptr) {
                     continue;
                 }
-                const auto* flag =
-                    dynamic_cast<const BoolLit*>(arm->pattern->value.get());
-                if (flag == nullptr) {
-                    continue;
-                }
-                if (flag->value) {
-                    hasTrue = true;
-                } else {
-                    hasFalse = true;
+                // Every alternative covers on its own: `true | false`
+                // in one arm names both cases, as two arms would.
+                auto consider = [&](const Pattern& pat) {
+                    if (pat.kind != PatternKind::Const) {
+                        return;
+                    }
+                    const auto* flag =
+                        dynamic_cast<const BoolLit*>(pat.value.get());
+                    if (flag == nullptr) {
+                        return;
+                    }
+                    if (flag->value) {
+                        hasTrue = true;
+                    } else {
+                        hasFalse = true;
+                    }
+                };
+                consider(*arm->pattern);
+                for (auto& alt : arm->alts) {
+                    consider(*alt);
                 }
             }
             exhaustive = hasTrue && hasFalse;
+        }
+        if (!exhaustive && scrutinee.type->kind() == Kind::Union) {
+            std::optional<DeclId> sid = scrutinee.type->decl();
+            if (sid.has_value()) {
+                // A union with every member listed is exhaustive
+                // (FEATURES §8.4): only a live member arm for this same
+                // union covers, so a dead arm for another union counts
+                // for nothing and a duplicate counts once.
+                std::unordered_set<std::string> covered;
+                for (auto& arm : n.arms) {
+                    // Guards may fail, so a guarded arm covers no member.
+                    if (arm->guard != nullptr) {
+                        continue;
+                    }
+                    auto consider = [&](const Pattern& pat) {
+                        if (pat.kind != PatternKind::Member || isDeadPattern(&pat)) {
+                            return;
+                        }
+                        std::optional<DeclId> armId = matchMemberUnion(pat);
+                        if (armId.has_value() && sameDecl(*sid, *armId)) {
+                            covered.insert(pat.member);
+                        }
+                    };
+                    consider(*arm->pattern);
+                    for (auto& alt : arm->alts) {
+                        consider(*alt);
+                    }
+                }
+                exhaustive = true;
+                for (const std::string& name : resolver_.fieldNames(*sid)) {
+                    if (covered.count(name) == 0) {
+                        exhaustive = false;
+                        break;
+                    }
+                }
+            }
+        }
+        if (!exhaustive && scrutinee.type->kind() == Kind::Enum) {
+            std::optional<DeclId> sid = scrutinee.type->decl();
+            if (sid.has_value()) {
+                // An enumerator with every case listed is exhaustive
+                // (FEATURES §8.4): only a live case arm for this same
+                // enum covers, so a dead arm for another enum counts
+                // for nothing and a duplicate counts once. A raw number
+                // never names a case, so only enumerator arms cover.
+                std::unordered_set<std::string> covered;
+                for (auto& arm : n.arms) {
+                    // Guards may fail, so a guarded arm covers no case.
+                    if (arm->guard != nullptr) {
+                        continue;
+                    }
+                    auto consider = [&](const Pattern& pat) {
+                        if (pat.kind != PatternKind::Member || isDeadPattern(&pat)) {
+                            return;
+                        }
+                        std::optional<DeclId> armId = matchMemberEnum(pat);
+                        if (armId.has_value() && sameDecl(*sid, *armId)) {
+                            covered.insert(pat.member);
+                        }
+                    };
+                    consider(*arm->pattern);
+                    for (auto& alt : arm->alts) {
+                        consider(*alt);
+                    }
+                }
+                exhaustive = true;
+                for (const auto& member : resolver_.enumMembers(*sid)) {
+                    if (covered.count(member.first) == 0) {
+                        exhaustive = false;
+                        break;
+                    }
+                }
+            }
         }
         if (!exhaustive) {
             fail(n.pos, "match needs a default arm");
@@ -1235,7 +2685,8 @@ void Checker::visitMatchStmt(MatchStmt& n) {
         // the element binding outlives the sink call the same way).
         for (auto& arm : n.arms) {
             pushScope();
-            bindMatchFresh(*arm->pattern, scrutinee);
+            bindMatchArm(*arm, scrutinee);
+            checkMatchGuard(*arm);
         }
         sink_->onMatch(n);
         for (auto& arm : n.arms) {
@@ -1246,7 +2697,8 @@ void Checker::visitMatchStmt(MatchStmt& n) {
     }
     for (auto& arm : n.arms) {
         pushScope();
-        bindMatchFresh(*arm->pattern, scrutinee);
+        bindMatchArm(*arm, scrutinee);
+        checkMatchGuard(*arm);
         arm->body->accept(*this);
         popScope();
     }
@@ -1262,6 +2714,16 @@ bool Checker::resolveMatchValue(const std::string& name, TypeRef& bound) {
     }
     const resolve::Decl* decl = resolver_.lookup(moduleScope_, name);
     if (decl == nullptr) {
+        // A bare enumerator compares by value: exactly one enum in this
+        // module may own the name, or the name still binds fresh below.
+        // Imported enums keep their qualified spelling in patterns.
+        int owners = 0;
+        const resolve::Decl* owner =
+            resolver_.lookupEnumMember(moduleScope_, name, owners);
+        if (owner != nullptr) {
+            bound = TypeRef{ctx_.nominal(Kind::Enum, owner->id)};
+            return true;
+        }
         return false;
     }
     if (decl->kind == resolve::DeclKind::Var ||
@@ -1283,6 +2745,25 @@ bool Checker::matchComparable(TypeRef scrutinee, TypeRef bound) {
     }
     if (sk == Kind::Pointer && bk == Kind::Pointer) {
         return true;
+    }
+    // Enums compare by underlying value: the same enum, or either side
+    // an integer (TYPES §2.6). Different enums never compare; the arm
+    // dies instead of matching garbage.
+    if (sk == Kind::Enum || bk == Kind::Enum) {
+        auto idOf = [](const TypeRef& t) -> std::optional<DeclId> {
+            return t.type->kind() == Kind::Enum ? t.type->decl() : std::nullopt;
+        };
+        auto isInt = [](const TypeRef& t) -> bool {
+            return t.type->kind() == Kind::Basic &&
+                   basicIsInteger(*t.type->basic());
+        };
+        std::optional<DeclId> s = idOf(scrutinee);
+        std::optional<DeclId> b = idOf(bound);
+        if (s.has_value() && b.has_value()) {
+            return sameDecl(*s, *b);
+        }
+        return (s.has_value() && isInt(bound)) ||
+               (b.has_value() && isInt(scrutinee));
     }
     if (sk == Kind::Basic && bk == Kind::Basic) {
         auto s = scrutinee.type->basic();
@@ -1324,8 +2805,10 @@ bool Checker::checkMatchConst(const Pattern& pat, TypeRef scrutinee) {
         return false;
     }
     if (sk == Kind::Enum) {
-        fail(value->pos, "this pattern is not supported yet");
-        return false;
+        // An enum answers only to its named cases: every other spelling
+        // beside an enum is dead the way an int beside a bool is. A float
+        // never reaches here — it stays loud above, unlowerable anywhere.
+        return dead();
     }
     if (sk != Kind::Basic) {
         return dead();
@@ -1358,6 +2841,47 @@ bool Checker::checkMatchConst(const Pattern& pat, TypeRef scrutinee) {
     return true;
 }
 
+bool Checker::checkMatchRange(const Pattern& pat, TypeRef scrutinee) {
+    // A range orders its scrutinee, so only an integer answers: every
+    // other shape is dead the way a mistyped constant is — it compiles
+    // and never matches, and an inverted range is empty for the same
+    // reason. A bound above INT64_MAX is meaningful only beside an
+    // unsigned type; beside a signed one the wrapped bits would read as
+    // a negative number the source never wrote, so it fails loudly like
+    // the literal fit check it mirrors.
+    auto dead = [&] {
+        deadPatterns_.insert(&pat);
+        return true;
+    };
+    std::unordered_set<std::string> active;
+    EvalResult lo = evalConstInt(*pat.value, *env_, active);
+    if (!lo.ok) {
+        fail(pat.value->pos, lo.error);
+        return false;
+    }
+    EvalResult hi = evalConstInt(*pat.rangeHi, *env_, active);
+    if (!hi.ok) {
+        fail(pat.rangeHi->pos, hi.error);
+        return false;
+    }
+    if (scrutinee.type->kind() != Kind::Basic || !scrutinee.type->basic().has_value() ||
+        !basicIsInteger(*scrutinee.type->basic())) {
+        return dead();
+    }
+    // Both bounds are non-negative literals, so the wrapped magnitude is
+    // exact with or without the big flag: there is no sign to lose.
+    uint64_t loMag = static_cast<uint64_t>(lo.value);
+    uint64_t hiMag = static_cast<uint64_t>(hi.value);
+    if (loMag > hiMag) {
+        return dead();
+    }
+    if ((lo.big || hi.big) && basicIsSigned(*scrutinee.type->basic())) {
+        fail(pat.rangeHi->pos, "this range bound does not fit " + typeName(scrutinee));
+        return false;
+    }
+    return true;
+}
+
 bool Checker::checkMatchPattern(const Pattern& pat, TypeRef scrutinee) {
     switch (pat.kind) {
         case PatternKind::Wildcard:
@@ -1372,12 +2896,166 @@ bool Checker::checkMatchPattern(const Pattern& pat, TypeRef scrutinee) {
         }
         case PatternKind::Const:
             return checkMatchConst(pat, scrutinee);
+        case PatternKind::Range:
+            return checkMatchRange(pat, scrutinee);
         case PatternKind::Type:
+            return checkMatchType(pat, scrutinee);
         case PatternKind::Member:
-            fail(pat.pos, "this pattern is not supported yet");
-            return false;
+            return checkMatchMember(pat, scrutinee);
     }
     return false;
+}
+
+bool Checker::checkMatchType(const Pattern& pat, TypeRef scrutinee) {
+    // A struct pattern names its type and lists every field (FEATURES
+    // §8.4): a missing field is a rejection, never a silent don't-care.
+    // A pattern for another type is dead, not wrong — it compiles and
+    // never matches — except over an interface, where the boxed value
+    // could hold the named struct at runtime and only a dynamic check
+    // could answer: refusing stays honest until that check lands.
+    TypeRef t = resolveHere(pat.type.get());
+    if (t.isError()) {
+        return false;
+    }
+    if (t.type->kind() != Kind::Struct) {
+        fail(pat.pos, "this pattern needs a struct type");
+        return false;
+    }
+    std::optional<DeclId> id = t.type->decl();
+    if (!id.has_value()) {
+        fail(pat.pos, "this pattern needs a struct type");
+        return false;
+    }
+    std::unordered_set<std::string> listed;
+    for (const FieldPat& field : pat.fields) {
+        if (!listed.insert(field.name).second) {
+            fail(field.pat->pos, "a struct pattern lists a field twice");
+            return false;
+        }
+        if (resolver_.fieldType(*id, field.name).isError()) {
+            fail(field.pat->pos, "no such field");
+            return false;
+        }
+    }
+    for (const std::string& name : resolver_.fieldNames(*id)) {
+        if (listed.count(name) == 0) {
+            fail(pat.pos, "a struct pattern lists every field");
+            return false;
+        }
+    }
+    if (scrutinee.type->kind() == Kind::Interface) {
+        fail(pat.pos, "this pattern is not supported yet");
+        return false;
+    }
+    bool same = false;
+    if (scrutinee.type->kind() == Kind::Struct) {
+        std::optional<DeclId> sid = scrutinee.type->decl();
+        same = sid.has_value() && sameDecl(*sid, *id);
+    }
+    if (!same) {
+        deadPatterns_.insert(&pat);
+    }
+    // Every field still classifies against its own type, so a constant
+    // of the wrong shape dies the same death a top-level one would —
+    // and a dead field sinks the whole arm with it.
+    bool ok = true;
+    for (const FieldPat& field : pat.fields) {
+        TypeRef member = resolver_.fieldType(*id, field.name);
+        if (member.isError() || !checkMatchPattern(*field.pat, member)) {
+            ok = false;
+            continue;
+        }
+        if (isDeadPattern(field.pat.get())) {
+            deadPatterns_.insert(&pat);
+        }
+    }
+    return ok;
+}
+
+std::optional<DeclId> Checker::matchMemberUnion(const Pattern& pat) {
+    auto tagSpelling = std::make_unique<NamedType>(
+        pat.pos, pat.mod, pat.tag, std::vector<std::unique_ptr<TypeExpr>>{});
+    TypeRef t = resolveHere(tagSpelling.get());
+    if (t.isError() || t.type->kind() != Kind::Union) {
+        return std::nullopt;
+    }
+    return t.type->decl();
+}
+
+std::optional<DeclId> Checker::matchMemberEnum(const Pattern& pat) {
+    auto tagSpelling = std::make_unique<NamedType>(
+        pat.pos, pat.mod, pat.tag, std::vector<std::unique_ptr<TypeExpr>>{});
+    TypeRef t = resolveHere(tagSpelling.get());
+    if (t.isError() || t.type->kind() != Kind::Enum) {
+        return std::nullopt;
+    }
+    return t.type->decl();
+}
+
+bool Checker::checkMatchMember(const Pattern& pat, TypeRef scrutinee) {
+    // A member pattern names the live union member or the enum case
+    // (FEATURES §8.4): the tag answers at runtime, so only the same union
+    // or the same enum stays live. Any other shape can never hold that tag
+    // and dies; an interface could box either, which still needs its
+    // dynamic check to land.
+    auto tagSpelling = std::make_unique<NamedType>(
+        pat.pos, pat.mod, pat.tag, std::vector<std::unique_ptr<TypeExpr>>{});
+    TypeRef t = resolveHere(tagSpelling.get());
+    if (t.isError()) {
+        return false;
+    }
+    if (t.type->kind() != Kind::Union && t.type->kind() != Kind::Enum) {
+        fail(pat.pos, "this pattern needs a union or an enum type");
+        return false;
+    }
+    std::optional<DeclId> id = t.type->decl();
+    if (!id.has_value()) {
+        fail(pat.pos, "this pattern needs a union or an enum type");
+        return false;
+    }
+    if (t.type->kind() == Kind::Enum) {
+        bool known = false;
+        for (const auto& member : resolver_.enumMembers(*id)) {
+            if (member.first == pat.member) {
+                known = true;
+                break;
+            }
+        }
+        if (!known) {
+            fail(pat.pos, "no such member");
+            return false;
+        }
+        if (scrutinee.type->kind() == Kind::Interface) {
+            fail(pat.pos, "this pattern is not supported yet");
+            return false;
+        }
+        bool same = false;
+        if (scrutinee.type->kind() == Kind::Enum) {
+            std::optional<DeclId> sid = scrutinee.type->decl();
+            same = sid.has_value() && sameDecl(*sid, *id);
+        }
+        if (!same) {
+            deadPatterns_.insert(&pat);
+        }
+        return true;
+    }
+    if (resolver_.fieldType(*id, pat.member).isError()) {
+        fail(pat.pos, "no such member");
+        return false;
+    }
+    if (scrutinee.type->kind() == Kind::Interface) {
+        fail(pat.pos, "this pattern is not supported yet");
+        return false;
+    }
+    bool same = false;
+    if (scrutinee.type->kind() == Kind::Union) {
+        std::optional<DeclId> sid = scrutinee.type->decl();
+        same = sid.has_value() && sameDecl(*sid, *id);
+    }
+    if (!same) {
+        deadPatterns_.insert(&pat);
+    }
+    return true;
 }
 
 bool Checker::isDeadPattern(const Pattern* pat) const {
@@ -1385,12 +3063,46 @@ bool Checker::isDeadPattern(const Pattern* pat) const {
 }
 
 void Checker::bindMatchFresh(const Pattern& pat, TypeRef scrutinee) {
-    if (pat.kind != PatternKind::Bind) {
+    if (pat.kind == PatternKind::Bind || pat.kind == PatternKind::Type ||
+        pat.kind == PatternKind::Member) {
+        bindPattern(pat, scrutinee);
+    }
+}
+
+size_t Checker::localCount() const {
+    return current_ == nullptr ? 0 : current_->names.size();
+}
+
+void Checker::bindMatchArm(MatchArm& arm, TypeRef scrutinee) {
+    // One alternative binding fresh is already the whole body owning the
+    // value; with several, no alternative may, so each one is measured
+    // on its own — the primary included, since `x | 1` breaks the body
+    // exactly as `1 | x` does.
+    if (arm.alts.empty()) {
+        bindMatchFresh(*arm.pattern, scrutinee);
         return;
     }
-    TypeRef bound = errorRef();
-    if (!resolveMatchValue(pat.name, bound)) {
-        bindLocal(pat.name, scrutinee, false, pat.pos);
+    size_t before = localCount();
+    bindMatchFresh(*arm.pattern, scrutinee);
+    if (localCount() != before) {
+        fail(arm.pattern->pos, "an alternation arm binds no names");
+    }
+    for (auto& alt : arm.alts) {
+        before = localCount();
+        bindMatchFresh(*alt, scrutinee);
+        if (localCount() != before) {
+            fail(alt->pos, "an alternation arm binds no names");
+        }
+    }
+}
+
+void Checker::checkMatchGuard(MatchArm& arm) {
+    if (arm.guard == nullptr) {
+        return;
+    }
+    TypeRef cond = checkExpr(arm.guard.get(), TypeRef{ctx_.basic(BasicKind::Bool)});
+    if (!cond.isError() && cond != TypeRef{ctx_.basic(BasicKind::Bool)}) {
+        fail(arm.guard->pos, "a guard is bool");
     }
 }
 
@@ -1449,9 +3161,41 @@ void Checker::visitTryStmt(TryStmt& n) {
     fail(n.pos, "try is not implemented yet");
 }
 
-void Checker::bindPattern(Pattern& pat, TypeRef scrutinee) {
+void Checker::visitDeferStmt(DeferStmt& n) {
+    // A defer names no storage: without a function there is no scope exit
+    // to run it at, so it refuses where it is written.
+    if (!inFunc_) {
+        fail(n.pos, "defer outside a function");
+        return;
+    }
+    // FEATURES §5.2: the body runs at scope exit with exit-time values, so
+    // checking walks it in place (names resolve in the enclosing scope)
+    // while lowering replays it at every exit. The sink detaches for the
+    // check walk: attached, the body would lower inline at the defer point
+    // and run twice. Returns, breaks and continues inside refuse above
+    // through inDefer_.
+    ++inDefer_;
+    LowerSink* savedSink = sink_;
+    sink_ = nullptr;
+    n.stmt->accept(*this);
+    sink_ = savedSink;
+    --inDefer_;
+    if (failed_) {
+        return;
+    }
+    if (sink_ != nullptr) {
+        sink_->onDeferStmt(n);
+    }
+}
+
+void Checker::bindPattern(const Pattern& pat, TypeRef scrutinee) {
+    // Silent by design: checkMatchPattern already reported every shape
+    // problem, so binding only introduces names, never a second error.
     if (pat.kind == PatternKind::Bind) {
-        bindLocal(pat.name, scrutinee, false, pat.pos);
+        TypeRef bound = errorRef();
+        if (!resolveMatchValue(pat.name, bound)) {
+            bindLocal(pat.name, scrutinee, false, pat.pos);
+        }
         return;
     }
     if (pat.kind == PatternKind::Type) {
@@ -1463,10 +3207,9 @@ void Checker::bindPattern(Pattern& pat, TypeRef scrutinee) {
         if (!id.has_value()) {
             return;
         }
-        for (FieldPat& field : pat.fields) {
+        for (const FieldPat& field : pat.fields) {
             TypeRef member = resolver_.fieldType(*id, field.name);
             if (member.isError()) {
-                fail(field.pat->pos, "no such field");
                 continue;
             }
             bindSubPattern(*field.pat, member);
@@ -1475,7 +3218,7 @@ void Checker::bindPattern(Pattern& pat, TypeRef scrutinee) {
     }
     if (pat.kind == PatternKind::Member) {
         auto tagSpelling = std::make_unique<NamedType>(
-            pat.pos, "", pat.tag, std::vector<std::unique_ptr<TypeExpr>>{});
+            pat.pos, pat.mod, pat.tag, std::vector<std::unique_ptr<TypeExpr>>{});
         TypeRef t = resolveHere(tagSpelling.get());
         if (t.isError() || t.type->kind() != Kind::Union) {
             return;
@@ -1485,15 +3228,21 @@ void Checker::bindPattern(Pattern& pat, TypeRef scrutinee) {
             return;
         }
         if (resolver_.fieldType(*id, pat.member).isError()) {
-            fail(pat.pos, "no such member");
+            return;
         }
         return;
     }
 }
 
-void Checker::bindSubPattern(Pattern& pat, TypeRef type) {
+void Checker::bindSubPattern(const Pattern& pat, TypeRef type) {
     if (pat.kind == PatternKind::Bind) {
-        bindLocal(pat.name, type, false, pat.pos);
+        // The Erlang rule, one level down: a name already in scope
+        // compares by value (checkMatchPattern proved it comparable or
+        // marked the arm dead); only an unresolvable name binds fresh.
+        TypeRef bound = errorRef();
+        if (!resolveMatchValue(pat.name, bound)) {
+            bindLocal(pat.name, type, false, pat.pos);
+        }
         return;
     }
     if (pat.kind == PatternKind::Type) {
@@ -1505,10 +3254,9 @@ void Checker::bindSubPattern(Pattern& pat, TypeRef type) {
         if (!id.has_value()) {
             return;
         }
-        for (FieldPat& field : pat.fields) {
+        for (const FieldPat& field : pat.fields) {
             TypeRef member = resolver_.fieldType(*id, field.name);
             if (member.isError()) {
-                fail(field.pat->pos, "no such field");
                 continue;
             }
             bindSubPattern(*field.pat, member);
@@ -1557,6 +3305,25 @@ TypeRef Checker::checkExpr(Expr* expr, TypeRef expected) {
         }
         record(string, TypeRef{ctx_.string()});
         return TypeRef{ctx_.string()};
+    }
+    if (auto* wide = dynamic_cast<WideLit*>(expr)) {
+        // N units plus the NUL terminator: the array spelling that fits
+        // exactly. Pointer positions convert through checkCompatible.
+        const Type* elem = ctx_.basic(BasicKind::U16);
+        size_t units = wide->units.size();
+        int64_t cells = static_cast<int64_t>(units) + 1;
+        TypeRef t{ctx_.array(elem, cells)};
+        record(wide, t);
+        return t;
+    }
+    if (auto* wideChar = dynamic_cast<WideChar*>(expr)) {
+        if (wideChar->value > 0xFFFF) {
+            fail(wideChar->pos, "a wide character holds exactly one unit");
+            record(wideChar, errorRef());
+            return errorRef();
+        }
+        record(wideChar, TypeRef{ctx_.basic(BasicKind::U16)});
+        return TypeRef{ctx_.basic(BasicKind::U16)};
     }
     if (auto* binary = dynamic_cast<Binary*>(expr)) {
         TypeRef t = checkBinary(*binary, expected);
@@ -1735,6 +3502,19 @@ TypeRef Checker::checkIdent(Ident& expr) {
     }
     const resolve::Decl* decl = resolver_.lookup(moduleScope_, expr.name);
     if (decl == nullptr) {
+        // A bare enumerator names its enum's member: exactly one enum in
+        // this module may claim it. Imported enums keep their qualified
+        // spelling.
+        int owners = 0;
+        const resolve::Decl* owner =
+            resolver_.lookupEnumMember(moduleScope_, expr.name, owners);
+        if (owner != nullptr) {
+            return TypeRef{ctx_.nominal(Kind::Enum, owner->id)};
+        }
+        if (owners > 1) {
+            fail(expr.pos, "ambiguous enumerator '" + expr.name + "'");
+            return errorRef();
+        }
         fail(expr.pos, "unbound name '" + expr.name + "'");
         return errorRef();
     }
@@ -1874,6 +3654,66 @@ TypeRef Checker::checkBinary(Binary& expr, TypeRef expected) {
             fail(expr.pos, "strings compare for equality only");
             return errorRef();
         }
+        const bool lhsEnum = lhs.type->kind() == Kind::Enum;
+        const bool rhsEnum = rhs.type->kind() == Kind::Enum;
+        if (lhsEnum || rhsEnum) {
+            // Enums compare by underlying value: two spellings of one
+            // enum, or either side an integer. Different enums never
+            // compare, and ordering answers the integer order.
+            auto enumId = [](const TypeRef& t) -> std::optional<DeclId> {
+                return t.type->kind() == Kind::Enum ? t.type->decl()
+                                                    : std::nullopt;
+            };
+            auto isInt = [](const TypeRef& t) -> bool {
+                return t.type->kind() == Kind::Basic &&
+                       basicIsInteger(*t.type->basic());
+            };
+            std::optional<DeclId> l = enumId(lhs);
+            std::optional<DeclId> r = enumId(rhs);
+            if (l.has_value() && r.has_value()) {
+                if (!sameDecl(*l, *r)) {
+                    fail(expr.pos, "these enum types cannot compare");
+                    return errorRef();
+                }
+                return TypeRef{ctx_.basic(BasicKind::Bool)};
+            }
+            if ((l.has_value() && isInt(rhs)) ||
+                (r.has_value() && isInt(lhs))) {
+                return TypeRef{ctx_.basic(BasicKind::Bool)};
+            }
+            fail(expr.pos, "an enum compares against its own type or an integer");
+            return errorRef();
+        }
+        const bool lhsIface = lhs.type->kind() == Kind::Interface;
+        const bool rhsIface = rhs.type->kind() == Kind::Interface;
+        if (lhsIface || rhsIface) {
+            // Equality on an interface is a null check: a null interface
+            // carries no vtable, so it compares against nilPtr only.
+            // Anything else beside an interface is a mismatch the source
+            // must spell — dispatch first, compare after.
+            const bool lhsNil = dynamic_cast<const NilPtr*>(expr.lhs.get()) != nullptr;
+            const bool rhsNil = dynamic_cast<const NilPtr*>(expr.rhs.get()) != nullptr;
+            if (isEq && ((lhsIface && rhsNil) || (rhsIface && lhsNil))) {
+                return TypeRef{ctx_.basic(BasicKind::Bool)};
+            }
+            fail(expr.pos, "interfaces compare against nilPtr only");
+            return errorRef();
+        }
+        const bool lhsClosure = lhs.type->kind() == Kind::Closure;
+        const bool rhsClosure = rhs.type->kind() == Kind::Closure;
+        if (lhsClosure || rhsClosure) {
+            // Equality on a closure is a null check: a null closure
+            // carries no code, so it compares against nilPtr only.
+            // Anything else beside a closure is a mismatch the source
+            // must spell — closures compare by address, not by value.
+            const bool lhsNil = dynamic_cast<const NilPtr*>(expr.lhs.get()) != nullptr;
+            const bool rhsNil = dynamic_cast<const NilPtr*>(expr.rhs.get()) != nullptr;
+            if (isEq && ((lhsClosure && rhsNil) || (rhsClosure && lhsNil))) {
+                return TypeRef{ctx_.basic(BasicKind::Bool)};
+            }
+            fail(expr.pos, "closures compare against nilPtr only");
+            return errorRef();
+        }
         if (lhs.type->kind() == Kind::Pointer && rhs.type->kind() == Kind::Pointer) {
             // Pointers compare by identity (SEMANTICS §4): two spellings of
             // one pointer type, or either side nilPtr — its spelling is
@@ -1885,6 +3725,35 @@ TypeRef Checker::checkBinary(Binary& expr, TypeRef expected) {
                 return TypeRef{ctx_.basic(BasicKind::Bool)};
             }
             fail(expr.pos, "these pointer types cannot compare");
+            return errorRef();
+        }
+        if (lhs.type->kind() == Kind::FunctionPtr ||
+            rhs.type->kind() == Kind::FunctionPtr) {
+            // Function pointers compare by address (FEATURES §4.2):
+            // same-signature pairs, or either side nil — nilPtr spells
+            // *void, which every address accepts. Anything else beside
+            // a function pointer rejects rather than comparing garbage.
+            bool lhsVoid = lhs.type->kind() == Kind::Pointer &&
+                           lhs.type->pointee() == ctx_.void_();
+            bool rhsVoid = rhs.type->kind() == Kind::Pointer &&
+                           rhs.type->pointee() == ctx_.void_();
+            const Signature* l = lhs.type->kind() == Kind::FunctionPtr
+                                     ? lhs.type->signature()
+                                     : nullptr;
+            const Signature* r = rhs.type->kind() == Kind::FunctionPtr
+                                     ? rhs.type->signature()
+                                     : nullptr;
+            if (l != nullptr && r != nullptr) {
+                if (!sameSignature(*l, *r)) {
+                    fail(expr.pos, "these function pointer types cannot compare");
+                    return errorRef();
+                }
+                return TypeRef{ctx_.basic(BasicKind::Bool)};
+            }
+            if ((l != nullptr && rhsVoid) || (r != nullptr && lhsVoid)) {
+                return TypeRef{ctx_.basic(BasicKind::Bool)};
+            }
+            fail(expr.pos, "these function pointer types cannot compare");
             return errorRef();
         }
         TypeRef common = commonType(lhs, rhs, expr.pos);
@@ -1926,6 +3795,17 @@ TypeRef Checker::checkBinary(Binary& expr, TypeRef expected) {
             return TypeRef{ctx_.basic(BasicKind::I64)};
         }
         fail(expr.pos, "these pointer operands do not combine");
+        return errorRef();
+    }
+    // SEMANTICS §8: `s1 + s2` is a new string with s1's bytes then
+    // s2's. Anything else beside a string refuses — a number is not a
+    // string, in either order, with no implicit conversion.
+    if (expr.op == BinOp::Add &&
+        (lhs.type->kind() == Kind::String || rhs.type->kind() == Kind::String)) {
+        if (lhs.type->kind() == Kind::String && rhs.type->kind() == Kind::String) {
+            return lhs;
+        }
+        fail(expr.pos, "a string concatenates only with a string");
         return errorRef();
     }
     TypeRef common = commonType(lhs, rhs, expr.pos);
@@ -2111,6 +3991,14 @@ TypeRef Checker::checkGenericCall(Call& expr, const resolve::Decl* decl) {
     if (!spec.has_value()) {
         return errorRef();
     }
+    // Context-keyed: a shared template body records one spec per walking
+    // context, so a later walk for other arguments cannot clobber this one.
+    std::string ctxKey;
+    if (walkSpec_.has_value()) {
+        ctxKey = std::to_string(walkSpec_->module) + "." +
+                 std::to_string(walkSpec_->index);
+    }
+    callSpecs_[std::make_pair(&expr, ctxKey)] = *spec;
     const Signature* sig = resolver_.funcSig(*spec);
     if (sig == nullptr) {
         fail(expr.pos, "checker bug: specialization has no signature");
@@ -2142,12 +4030,23 @@ TypeRef Checker::checkGenericCall(Call& expr, const resolve::Decl* decl) {
             fail(expr.pos, "checker bug: template body is missing");
             return errorRef();
         }
+        // A template body names its defining module: helpers the body
+        // calls resolve there, never in the caller's module. Same-module
+        // calls pass their own scope back, so nothing changes for them.
+        const resolve::Scope* homeScope = resolver_.scopeOf(home);
         const resolve::Scope* scope = resolver_.typeParamScope(
-            typeScope_, module_, spelling->typeParams, decl->id, expr.pos);
+            homeScope != nullptr ? homeScope : typeScope_, module_,
+            spelling->typeParams, decl->id, expr.pos);
         const resolve::Scope* savedScope = typeScope_;
         typeScope_ = scope;
+        const resolve::Scope* savedModuleScope = moduleScope_;
+        if (homeScope != nullptr) {
+            moduleScope_ = homeScope;
+        }
         std::optional<ActiveInst> savedActive = active_;
         active_ = ActiveInst{decl->id, argTypes, spelling->typeParams};
+        std::optional<DeclId> savedWalk = walkSpec_;
+        walkSpec_ = spec;
         pushScope();
         for (uint64_t i = 0; i < static_cast<uint64_t>(spelling->params.size()); ++i) {
             bindLocal(spelling->params[i].name,
@@ -2168,10 +4067,78 @@ TypeRef Checker::checkGenericCall(Call& expr, const resolve::Decl* decl) {
         inFunc_ = wasFunc;
         popScope();
         typeScope_ = savedScope;
+        moduleScope_ = savedModuleScope;
         active_ = savedActive;
+        walkSpec_ = savedWalk;
     }
     const Type* ret = sig->returnType() != nullptr ? sig->returnType() : ctx_.void_();
     return TypeRef{ret};
+}
+
+void Checker::walkSpecForEmit(DeclId spec) {
+    // The lowerer's emission walk: same setup as the checking walk above,
+    // but the sink stays attached so statements lower, and no walked_ gate
+    // (the lowerer emits each spec once; a recursive call into the same
+    // spec checks against its signature through walked_ without re-walking).
+    // Module and type scopes stay whatever the last module left: the
+    // checking walks ran under the caller's scopes too, so names resolve
+    // exactly as proven. The body was proven clean, so this re-walk
+    // reports nothing new — unless it is a lowering gap, failed loudly.
+    auto origin = resolver_.instantiationOf(spec);
+    if (!origin.has_value()) {
+        return;
+    }
+    const resolve::Decl* tmplDecl = resolver_.declById(origin->first);
+    if (tmplDecl == nullptr || tmplDecl->kind != resolve::DeclKind::Func) {
+        return;
+    }
+    std::string home = tmplDecl->scope != nullptr
+                           ? tmplDecl->scope->module
+                           : module_;
+    const FuncDecl* spelling = funcSpelling(home, tmplDecl->name);
+    const Signature* sig = resolver_.funcSig(spec);
+    if (spelling == nullptr || sig == nullptr) {
+        fail(Position{module_, 1, 1}, "checker bug: template body is missing");
+        return;
+    }
+    // Home scopes, like the checking walk: helpers resolve in the
+    // defining module so emission answers what checking proved.
+    const resolve::Scope* homeScope = resolver_.scopeOf(home);
+    const resolve::Scope* scope = resolver_.typeParamScope(
+        homeScope != nullptr ? homeScope : typeScope_, module_,
+        spelling->typeParams, origin->first, spelling->pos);
+    const resolve::Scope* savedScope = typeScope_;
+    typeScope_ = scope;
+    const resolve::Scope* savedModuleScope = moduleScope_;
+    if (homeScope != nullptr) {
+        moduleScope_ = homeScope;
+    }
+    std::optional<ActiveInst> savedActive = active_;
+    active_ = ActiveInst{origin->first, origin->second, spelling->typeParams};
+    std::optional<DeclId> savedWalk = walkSpec_;
+    walkSpec_ = spec;
+    pushScope();
+    for (uint64_t i = 0; i < static_cast<uint64_t>(spelling->params.size()); ++i) {
+        bindLocal(spelling->params[i].name,
+                  TypeRef{sig->parameters()[i].type},
+                  spelling->params[i].isMutable, spelling->params[i].pos);
+    }
+    TypeRef savedRet = funcReturn_;
+    bool wasFunc = inFunc_;
+    const Type* ret =
+        sig->returnType() != nullptr ? sig->returnType() : ctx_.void_();
+    funcReturn_ = TypeRef{ret};
+    inFunc_ = true;
+    if (sink_ != nullptr) {
+        sink_->onSpecFunc(spec, *spelling, *sig);
+    }
+    funcReturn_ = savedRet;
+    inFunc_ = wasFunc;
+    popScope();
+    typeScope_ = savedScope;
+    moduleScope_ = savedModuleScope;
+    active_ = savedActive;
+    walkSpec_ = savedWalk;
 }
 
 TypeRef Checker::checkField(Field& expr) {
@@ -2188,6 +4155,42 @@ TypeRef Checker::checkField(Field& expr) {
                 const resolve::Decl* member =
                     home != nullptr ? resolver_.lookup(home, expr.name) : nullptr;
                 if (member == nullptr) {
+                    // A bare exported enumerator (`lib.CIRCLE`) names its
+                    // enum's member: exactly one enum in that module may
+                    // own it, or the name stays unexported. Direct members
+                    // already missed above, so this branch owns nothing
+                    // they could name.
+                    if (home != nullptr) {
+                        const resolve::Decl* owner = nullptr;
+                        int owners = 0;
+                        for (const auto& [name, decl] : home->bindings) {
+                            if (decl == nullptr ||
+                                decl->kind != resolve::DeclKind::Type ||
+                                decl->nominal != Kind::Enum) {
+                                continue;
+                            }
+                            bool found = false;
+                            for (const auto& entry :
+                                 resolver_.enumMembers(decl->id)) {
+                                if (entry.first == expr.name) {
+                                    found = true;
+                                    break;
+                                }
+                            }
+                            if (found) {
+                                ++owners;
+                                owner = decl;
+                            }
+                        }
+                        if (owner != nullptr && owners == 1) {
+                            return TypeRef{ctx_.nominal(Kind::Enum, owner->id)};
+                        }
+                        if (owners > 1) {
+                            fail(expr.pos, "ambiguous enumerator '" +
+                                              expr.name + "'");
+                            return errorRef();
+                        }
+                    }
                     fail(expr.pos, "'" + expr.name + "' is not exported by '" +
                                           mod->origin + "'");
                     return errorRef();
@@ -2223,7 +4226,94 @@ TypeRef Checker::checkField(Field& expr) {
                                       named->name + "'");
                     return errorRef();
                 }
-                return TypeRef{ctx_.basic(BasicKind::I32)};
+                // Enumerators check as their enum: conversions and
+                // equality key off the type, while lowering still flows
+                // the underlying i32 (see widthOf).
+                return TypeRef{ctx_.nominal(Kind::Enum, named->id)};
+            }
+            // `Shade.GREEN`: the qualifier aliases an enum, so the member
+            // is that enum's enumerator. The alias spells the same type
+            // the enum does; anything else here is not a value.
+            if (named != nullptr &&
+                named->kind == resolve::DeclKind::Alias &&
+                named->aliasTarget != nullptr) {
+                TypeRef target = resolver_.resolveType(named->aliasTarget,
+                                                        moduleScope_);
+                if (!target.isError() && target.type->kind() == Kind::Enum) {
+                    std::optional<DeclId> aliasId = target.type->decl();
+                    if (aliasId.has_value()) {
+                        bool found = false;
+                        for (const auto& entry :
+                             resolver_.enumMembers(*aliasId)) {
+                            if (entry.first == expr.name) {
+                                found = true;
+                                break;
+                            }
+                        }
+                        if (!found) {
+                            fail(expr.pos, "'" + expr.name +
+                                              "' is not an enumerator of '" +
+                                              ident->name + "'");
+                            return errorRef();
+                        }
+                        return TypeRef{ctx_.nominal(Kind::Enum, *aliasId)};
+                    }
+                }
+            }
+        }
+    }
+    if (const auto* inner = dynamic_cast<const Field*>(expr.object.get())) {
+        // `mid.Col.GREEN`: the object names an enum through a module
+        // member — either the enum itself or an alias of it — so the
+        // field names one of its enumerators (TYPES §2.6). A bare
+        // `mid.Col` stays unbound: only the three-part spelling is a
+        // value, and anything else falls through to fail loudly below.
+        if (const auto* mod = dynamic_cast<const Ident*>(inner->object.get())) {
+            if (findLocal(mod->name) == nullptr) {
+                const resolve::Decl* modDecl =
+                    resolver_.lookup(moduleScope_, mod->name);
+                if (modDecl != nullptr &&
+                    modDecl->kind == resolve::DeclKind::Module) {
+                    const resolve::Scope* home =
+                        resolver_.scopeOf(modDecl->origin);
+                    const resolve::Decl* member =
+                        home != nullptr ? resolver_.lookup(home, inner->name)
+                                        : nullptr;
+                    TypeRef target;
+                    std::optional<DeclId> enumId;
+                    if (member != nullptr &&
+                        member->kind == resolve::DeclKind::Type &&
+                        member->nominal == Kind::Enum) {
+                        enumId = member->id;
+                    } else if (member != nullptr &&
+                               member->kind == resolve::DeclKind::Alias &&
+                               member->aliasTarget != nullptr) {
+                        target = resolver_.resolveType(member->aliasTarget, home);
+                        if (!target.isError() &&
+                            target.type->kind() == Kind::Enum) {
+                            enumId = target.type->decl();
+                        }
+                    }
+                    if (enumId.has_value()) {
+                        bool found = false;
+                        for (const auto& entry : resolver_.enumMembers(*enumId)) {
+                            if (entry.first == expr.name) {
+                                found = true;
+                                break;
+                            }
+                        }
+                        if (!found) {
+                            fail(expr.pos, "'" + expr.name +
+                                                  "' is not an enumerator of '" +
+                                                  inner->name + "'");
+                            return errorRef();
+                        }
+                        // Enumerators check as their enum: conversions and
+                        // equality key off the type, while lowering still
+                        // flows the underlying i32 (see widthOf).
+                        return TypeRef{ctx_.nominal(Kind::Enum, *enumId)};
+                    }
+                }
             }
         }
     }
@@ -2329,7 +4419,7 @@ TypeRef Checker::checkNewStruct(NewStruct& expr) {
         fail(expr.pos, "this class has an init: create it with new C(args)");
         return errorRef();
     }
-    std::vector<std::string> fields = resolver_.fieldNames(*id);
+    std::vector<std::string> fields = resolver_.chainFieldNames(*id);
     if (expr.fields.size() != fields.size()) {
         fail(expr.pos, "every field is named, exactly once");
         return errorRef();
@@ -2404,8 +4494,45 @@ bool Checker::constAggregateInit(const Expr& init) {
         }
         return !made->inits.empty();
     }
+    if (const auto* made = dynamic_cast<const NewStruct*>(&init)) {
+        // A struct or class value with every field constant folds to
+        // image bytes. Coverage is the checker's own rule elsewhere, so
+        // const-ness alone answers here; a paren-form `new C(args)`
+        // runs its constructor and is a different node that falls to
+        // the fold below, which fails it loudly.
+        for (const auto& field : made->fields) {
+            if (!constAggregateInit(*field.value)) {
+                return false;
+            }
+        }
+        return true;
+    }
+    if (const auto* cast = dynamic_cast<const Cast*>(&init)) {
+        // `nilPtr as I` is constant (sixteen zero bytes in the image):
+        // the declaration site accepts the same null spelling for a
+        // whole interface global, so array elements accept it too.
+        if (dynamic_cast<const NilPtr*>(cast->expr.get()) != nullptr) {
+            TypeRef spelled = resolver_.resolveType(cast->target.get(),
+                                                     resolver_.scopeOf(module_));
+            if (!spelled.isError() &&
+                spelled.type->kind() == Kind::Interface) {
+                return true;
+            }
+        }
+    }
+    // A bare nil pointer is the zero word whatever it fills: the emission
+    // writes the field's own width of zeros, so const-ness needs no type.
+    if (dynamic_cast<const NilPtr*>(&init) != nullptr) {
+        return true;
+    }
     std::unordered_set<std::string> active;
-    return evalConstInt(init, *env_, active).ok;
+    if (evalConstInt(init, *env_, active).ok) {
+        return true;
+    }
+    // A float element folds to a double the same way: const-ness is
+    // folding to a number, and the emission already rounds float
+    // elements at width. Anything else stays refused below.
+    return evalConstFloat(init, *env_, active).ok;
 }
 
 TypeRef Checker::checkNewArray(NewArray& expr) {    TypeRef element = resolveHere(expr.element.get());
@@ -2497,6 +4624,11 @@ bool Checker::checkCompatible(Position pos, const Expr* fromExpr, TypeRef from, 
         (to.type->kind() == Kind::Pointer || to.type->kind() == Kind::FunctionPtr)) {
         return true;
     }
+    // A null converts to the null closure value, like nilPtr as func spells.
+    if (dynamic_cast<const NilPtr*>(fromExpr) != nullptr &&
+        to.type->kind() == Kind::Closure) {
+        return true;
+    }
     // A string literal converts to a byte pointer: the literal
     // materializes its own bytes, so word zero is their address. Only
     // the literal converts — a string variable beside a *u8 stays a
@@ -2516,6 +4648,78 @@ bool Checker::checkCompatible(Position pos, const Expr* fromExpr, TypeRef from, 
                 return true;
             }
         }
+    }
+    // A wide literal converts to a u16 pointer: the literal materializes
+    // its own units in rodata, so word zero is their address. Only the
+    // literal converts — a [u16; N] variable beside a *u16 stays a
+    // mismatch, spelled `&a[0]`. *void accepts any address, so the
+    // literal's word zero converts there too.
+    if (dynamic_cast<const WideLit*>(fromExpr) != nullptr &&
+        to.type->kind() == Kind::Pointer) {
+        TypeRef pointee{to.type->pointee()};
+        if (pointee.type->kind() == Kind::Void) {
+            return true;
+        }
+        if (pointee.type->kind() == Kind::Basic &&
+            *pointee.type->basic() == BasicKind::U16) {
+            return true;
+        }
+    }
+    // A closure converts to a void pointer by address: the literal
+    // materializes its own pair, so word zero is the pair's address. Only
+    // a proven closure converts — a raw code address beside a *void stays
+    // a mismatch, laundering refuses. *u8 rides the same address
+    // justification (the pair's bytes); anything else beside a *void from
+    // a closure stays unspelled.
+    auto isVoidPtr = [](const TypeRef& t) -> bool {
+        return t.type->kind() == Kind::Pointer &&
+               t.type->pointee() != nullptr &&
+               t.type->pointee()->kind() == Kind::Void;
+    };
+    if (from.type->kind() == Kind::Closure && isVoidPtr(to)) {
+        if (provOf(fromExpr) != Prov::Closure) {
+            fail(pos, "only a closure converts to *void");
+            return false;
+        }
+        return true;
+    }
+    // Deeper carriers (*void storage through another pointer) answer the
+    // same single address word the cast gate above shapes.
+    auto isDeepVoidPtr = [](const TypeRef& t) -> bool {
+        if (t.type->kind() == Kind::Pointer && t.type->pointee() != nullptr &&
+            t.type->pointee()->kind() == Kind::Pointer &&
+            t.type->pointee()->pointee() != nullptr) {
+            return t.type->pointee()->pointee()->kind() == Kind::Void;
+        }
+        return false;
+    };
+    if (from.type->kind() == Kind::Closure && isDeepVoidPtr(to)) {
+        if (provOf(fromExpr) != Prov::Closure) {
+            fail(pos, "only a closure converts to *void");
+            return false;
+        }
+        return true;
+    }
+    // A proven-closure *void converts back to a closure spelling: the
+    // address names the pair the store observed. An unproven carrier
+    // refuses — reading a pair through it would be a guess. A null
+    // converts to the null closure value, like nilPtr as func spells.
+    if (isVoidPtr(from) && to.type->kind() == Kind::Closure) {
+        Prov proven = provOf(fromExpr);
+        if (proven != Prov::Closure && proven != Prov::Neutral) {
+            fail(pos, "this *void is not proven to hold a closure");
+            return false;
+        }
+        return true;
+    }
+    // A proven-closure *void adopts the fn spelling: the declaration
+    // carries the closure representation from here on.
+    if (isVoidPtr(from) && to.type->kind() == Kind::FunctionPtr) {
+        if (provOf(fromExpr) != Prov::Closure) {
+            fail(pos, "this *void is not proven to hold a closure");
+            return false;
+        }
+        return true;
     }
     // A slice copies into an array of the same element type: the copy
     // checks the length where it happens, so a mismatch traps instead of
@@ -2546,10 +4750,32 @@ bool Checker::checkCompatible(Position pos, const Expr* fromExpr, TypeRef from, 
         basicIsFloat(*to.type->basic())) {
         return true;
     }
+    // An enum value flows to any integer target as its underlying value
+    // (TYPES §2.6); the reverse needs an explicit `as`, so integers never
+    // land in an enum by accident. The width is the target's: an
+    // enumerator fits every integer spelling.
+    if (from.type->kind() == Kind::Enum && to.type->kind() == Kind::Basic &&
+        basicIsInteger(*to.type->basic())) {
+        return true;
+    }
     // A concrete value converts to an interface it implements.
     if (to.type->kind() == Kind::Interface &&
         (from.type->kind() == Kind::Struct || from.type->kind() == Kind::Class)) {
         std::optional<DeclId> concrete = from.type->decl();
+        std::optional<DeclId> iface = to.type->decl();
+        if (concrete.has_value() && iface.has_value() &&
+            implementsAll(*concrete, *iface, pos)) {
+            return true;
+        }
+        return false;
+    }
+    // A class reference converts to an interface its class implements: the
+    // reference becomes the pair's data word (TYPES.md §4.3). Bare Class
+    // stays above — only a reference is a value a variable can hold.
+    if (to.type->kind() == Kind::Interface && from.type->kind() == Kind::Pointer &&
+        from.type->pointee() != nullptr &&
+        from.type->pointee()->kind() == Kind::Class) {
+        std::optional<DeclId> concrete = from.type->pointee()->decl();
         std::optional<DeclId> iface = to.type->decl();
         if (concrete.has_value() && iface.has_value() &&
             implementsAll(*concrete, *iface, pos)) {
@@ -2645,8 +4871,44 @@ bool Checker::castRowOk(TypeRef from, TypeRef to) const {
     if (a == Kind::Pointer && bNum) {
         return true;
     }
-    // An interface reads back as a concrete type, checked at runtime.
-    if (a == Kind::Interface && (b == Kind::Class || b == Kind::Struct)) {
+    // A closure casts to a void pointer by address (provenance rides the
+    // type: only closure-typed spellings arrive here). A byte view spells
+    // the same address through *u8. Deeper carriers stay refused until
+    // lowering shapes them.
+    auto isU8Ptr = [](const Type* t) -> bool {
+        return t != nullptr && t->kind() == Kind::Basic &&
+               t->basic().has_value() && *t->basic() == BasicKind::U8;
+    };
+    if (a == Kind::Closure && b == Kind::Pointer &&
+        to.type->pointee() != nullptr &&
+        (to.type->pointee()->kind() == Kind::Void ||
+         isU8Ptr(to.type->pointee()))) {
+        return true;
+    }
+    // An enum casts to and from any integer width: the value is the
+    // underlying i32 widened or narrowed like any integer conversion,
+    // and the membership check the int-to-enum lowering emits guards
+    // the way in (TYPES §2.6). Same-width pairs already passed through
+    // the size rule below; this row owns the wide ones.
+    auto isIntKind = [](Kind k, const Type* t) -> bool {
+        return k == Kind::Basic && basicIsInteger(*t->basic());
+    };
+    if ((a == Kind::Enum && isIntKind(b, to.type)) ||
+        (isIntKind(a, from.type) && b == Kind::Enum)) {
+        return true;
+    }
+    // An interface reads back as a concrete struct, checked at runtime.
+    // A bare class is not a value type (TYPES §4.2: only `*C` is), so it
+    // is refused here; the pointer-to-class row below covers `*C`.
+    if (a == Kind::Interface && b == Kind::Struct) {
+        return true;
+    }
+    // An interface reads back as a class reference it holds, checked at
+    // runtime like the concrete types above: the data word already is
+    // the reference, so the check is the whole conversion.
+    if (a == Kind::Interface && b == Kind::Pointer &&
+        to.type->pointee() != nullptr &&
+        to.type->pointee()->kind() == Kind::Class) {
         return true;
     }
     // A base pointer reads back as a derived one, checked at runtime.

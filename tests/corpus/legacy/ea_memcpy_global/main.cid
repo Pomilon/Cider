@@ -9,20 +9,14 @@ class Box {
     var q: *Point;
 }
 
-var gbox: Box;
+var gbox: Box = new Box { p: nilPtr, q: nilPtr };
 
-func _start() {
-    var box1: Box;
-    box1.p = new Point;    // taints box1's slot
+func main() -> int {
+    var np: *Point = malloc(sizeof(Point)) as *Point;
+    var box1: Box = new Box { p: np, q: nilPtr };
     gbox = box1;           // MEMCPY into a GLOBAL — the pointer escapes
-    box1.p.x = 42;
-    var r: int = gbox.p.x;
-    if (r == 42) {
-        asm { "mov rax, 60" }
-        asm { "mov rdi, 42" }
-        asm { "syscall" }
-    }
-    asm { "mov rax, 60" }
-    asm { "mov rdi, 1" }
-    asm { "syscall" }
+    (*box1.p).x = 42;
+    var r: int = (*gbox.p).x;
+    if (r == 42) { return 42; }
+    return 1;
 }

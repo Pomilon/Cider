@@ -1,9 +1,9 @@
 extern func putchar(c: int) -> int;
 
 func main() -> int {
-  var p: fn(int) -> int = putchar;
+  var p: *func(int) -> int = &putchar;
   if (p == nilPtr) { return 1; }
-  p(65);
-  p(10);
+  (*p)(65);
+  (*p)(10);
   return 0;
 }

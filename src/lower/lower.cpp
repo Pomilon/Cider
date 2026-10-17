@@ -59,6 +59,99 @@ bool isBytePointerTarget(const TypeRef& type) {
 // allocation behind word one.
 constexpr uint64_t kClosureWords = 2;
 
+// Whether lowering this expression can run an effect: calls, construction
+// that runs init, closures, assignment, and anything unlisted
+// (fail-closed). Pure address math, literals and names answer false.
+bool lowersImpure(const Expr* expr) {
+    if (expr == nullptr) {
+        return true;
+    }
+    if (dynamic_cast<const Call*>(expr) != nullptr ||
+        dynamic_cast<const NewClass*>(expr) != nullptr ||
+        dynamic_cast<const FuncLit*>(expr) != nullptr ||
+        dynamic_cast<const Assign*>(expr) != nullptr ||
+        dynamic_cast<const IncrDecr*>(expr) != nullptr ||
+        dynamic_cast<const StringLit*>(expr) != nullptr) {
+        return true;
+    }
+    if (const auto* un = dynamic_cast<const Unary*>(expr)) {
+        return lowersImpure(un->operand.get());
+    }
+    if (const auto* field = dynamic_cast<const Field*>(expr)) {
+        return lowersImpure(field->object.get());
+    }
+    if (const auto* index = dynamic_cast<const Index*>(expr)) {
+        return lowersImpure(index->array.get()) || lowersImpure(index->index.get());
+    }
+    if (const auto* slice = dynamic_cast<const SliceExpr*>(expr)) {
+        return lowersImpure(slice->array.get()) || lowersImpure(slice->lo.get()) ||
+               lowersImpure(slice->hi.get());
+    }
+    if (const auto* tern = dynamic_cast<const Ternary*>(expr)) {
+        return lowersImpure(tern->cond.get()) || lowersImpure(tern->then.get()) ||
+               lowersImpure(tern->els.get());
+    }
+    if (const auto* cast = dynamic_cast<const Cast*>(expr)) {
+        return lowersImpure(cast->expr.get());
+    }
+    if (const auto* binary = dynamic_cast<const Binary*>(expr)) {
+        return lowersImpure(binary->lhs.get()) || lowersImpure(binary->rhs.get());
+    }
+    if (const auto* built = dynamic_cast<const NewStruct*>(expr)) {
+        for (const FieldInit& field : built->fields) {
+            if (lowersImpure(field.value.get())) {
+                return true;
+            }
+        }
+        return false;
+    }
+    if (const auto* listed = dynamic_cast<const NewArray*>(expr)) {
+        for (const std::unique_ptr<Expr>& init : listed->inits) {
+            if (lowersImpure(init.get())) {
+                return true;
+            }
+        }
+        return false;
+    }
+    if (dynamic_cast<const Ident*>(expr) != nullptr ||
+        dynamic_cast<const IntLit*>(expr) != nullptr ||
+        dynamic_cast<const FloatLit*>(expr) != nullptr ||
+        dynamic_cast<const CharLit*>(expr) != nullptr ||
+        dynamic_cast<const BoolLit*>(expr) != nullptr ||
+        dynamic_cast<const NilPtr*>(expr) != nullptr ||
+        dynamic_cast<const SizeofType*>(expr) != nullptr) {
+        return false;
+    }
+    return true;
+}
+
+// Whether a failed place lookup may already have lowered an effect: only
+// dereference operands run inside resolvePlace, along the spine it visits
+// (field objects, index arrays — an index is only folded, never
+// lowered). Anything else resolvePlace never visits, so spilling
+// re-lowers it exactly once.
+bool placeMayHaveRun(const Expr* expr) {
+    if (const auto* un = dynamic_cast<const Unary*>(expr)) {
+        if (un->op == UnOp::Deref) {
+            return lowersImpure(un->operand.get());
+        }
+        return placeMayHaveRun(un->operand.get());
+    }
+    if (const auto* field = dynamic_cast<const Field*>(expr)) {
+        return placeMayHaveRun(field->object.get());
+    }
+    if (const auto* index = dynamic_cast<const Index*>(expr)) {
+        return placeMayHaveRun(index->array.get());
+    }
+    return false;
+}
+// An interface answers two words, data then vtable (TYPES.md §4.3): the
+// data word carries the concrete value inline, and the vtable word names
+// the (concrete, interface) table. Word zero is the data, word one the
+// table, in the layout.h offset order.
+constexpr uint64_t kInterfaceWords = 2;
+constexpr uint64_t kVtableWord = 1;
+
 // The register return row carries two words (rax, rdx): a third word needs
 // the hidden pointer (IR.md §6), so the count names that limit, not a digit.
 constexpr uint64_t kTwoWords = 2;
@@ -188,6 +281,52 @@ void Lowerer::sealBlock(uint32_t label) {
     (void)label;
 }
 
+bool Lowerer::falloffReachable(uint32_t target) {
+    if (function_ == nullptr || function_->blocks.empty() || blockOrder_.empty()) {
+        return true;
+    }
+    std::unordered_map<uint32_t, size_t> at;
+    size_t known = function_->blocks.size();
+    while (known > 0) {
+        --known;
+        at[function_->blocks[known].label] = known;
+    }
+    std::unordered_set<uint32_t> seen;
+    std::vector<uint32_t> stack{blockOrder_.front()};
+    while (!stack.empty()) {
+        uint32_t label = stack.back();
+        stack.pop_back();
+        if (label == target) {
+            return true;
+        }
+        if (!seen.insert(label).second) {
+            continue;
+        }
+        auto found = at.find(label);
+        if (found == at.end()) {
+            continue;
+        }
+        const ir::Terminator& term = function_->blocks[found->second].term;
+        switch (term.term) {
+            case ir::Term::Br: stack.push_back(term.target); break;
+            case ir::Term::CondBr:
+                stack.push_back(term.thenTarget);
+                stack.push_back(term.elseTarget);
+                break;
+            case ir::Term::Switch:
+                for (const ir::Case& arm : term.cases) {
+                    stack.push_back(arm.target);
+                }
+                stack.push_back(term.defaultTarget);
+                break;
+            case ir::Term::Ret: break;
+            case ir::Term::Trap: break;
+            case ir::Term::Unreachable: break;
+        }
+    }
+    return false;
+}
+
 ir::Value Lowerer::newValue(ir::IRType width, TypeRef type, Position pos) {
     ir::Value value;
     value.id = valueSeq_++;
@@ -208,14 +347,9 @@ std::vector<ir::Value> Lowerer::allocaSlots(TypeRef type, Position pos, uint64_t
 std::vector<ir::Value> Lowerer::allocaFor(TypeRef type, Position pos) {
     // Every slot count derived from a type passes through here, so a -1
     // word count can never reach the unsigned loop above as eighteen
-    // quintillion slots (an interface-typed parameter did exactly that:
-    // wordCount has no Interface arm). Interface values need boxing the
-    // lowerer does not have yet, so they refuse by name; anything else
-    // unsized refuses as a value without storage.
-    if (!type.isError() && type.type->kind() == Kind::Interface) {
-        refuse(pos, "interface values are not lowered yet");
-        return {};
-    }
+    // quintillion slots. Interfaces size to two words (data plus vtable,
+    // TYPES.md §4.3) through wordCount like every other aggregate; anything
+    // else unsized refuses as a value without storage.
     int needed = wordCount(type);
     if (needed < 0) {
         refuse(pos, "this value");
@@ -245,12 +379,15 @@ int Lowerer::wordCount(TypeRef type) {
     if (kind == Kind::Basic || kind == Kind::Pointer || kind == Kind::FunctionPtr) {
         return 1;
     }
-    if (kind == Kind::String || kind == Kind::Slice) {
+    if (kind == Kind::String || kind == Kind::Slice || kind == Kind::Interface) {
+        // A string is address plus length, a slice pointer plus length, an
+        // interface data plus vtable: three pairs, each two words, each
+        // owned by layout.h (TYPES.md §3.1) rather than by this count.
         return 2;
     }
     int64_t bytes = -1;
     if (kind == Kind::Array || kind == Kind::Union || kind == Kind::Class ||
-        kind == Kind::Closure) {
+        kind == Kind::Closure || kind == Kind::Enum) {
         bytes = resolver_.nominalSize(type.type);
     } else if (kind == Kind::Struct) {
         std::optional<DeclId> id = type.type->decl();
@@ -266,6 +403,370 @@ int Lowerer::wordCount(TypeRef type) {
     // divisor comes from layout, not from a literal, for the usual reason.
     int64_t per = layout::kSizePointer;
     return static_cast<int>(bytes / per + (bytes % per == 0 ? 0 : 1));
+}
+
+std::string Lowerer::emitClassVTable(DeclId concrete, Position pos) {
+    const resolve::Decl* owner = resolver_.declById(concrete);
+    if (owner == nullptr) {
+        refuse(pos, "this construction");
+        return "";
+    }
+    std::string label = "vtable_" + resolver_.linkName(*owner);
+    if (classVtablesEmitted_.insert(label).second) {
+        ir::Global table;
+        table.label = label;
+        table.type = TypeRef{ctx_.pointer(ctx_.basic(BasicKind::U8))};
+        for (const std::string& name : resolver_.virtualNames(concrete)) {
+            // The slot's function is the method's static address for this
+            // concrete type: the override's own function where the chain
+            // redeclares the name, the declarer's otherwise. A class
+            // receiver is already the address its method expects, so no
+            // adapter rides here.
+            std::optional<DeclId> home = resolver_.methodHome(concrete, name);
+            const resolve::Decl* declarer =
+                home.has_value() ? resolver_.declById(*home) : nullptr;
+            if (declarer == nullptr) {
+                refuse(pos, "this construction");
+                return "";
+            }
+            table.initLabels.push_back(resolver_.linkName(*declarer) + "__" + name);
+        }
+        module_->globals.push_back(std::move(table));
+    }
+    return label;
+}
+
+std::string Lowerer::emitVTable(DeclId concrete, DeclId iface, Position pos) {
+    const resolve::Decl* owner = resolver_.declById(concrete);
+    const resolve::Decl* wanted = resolver_.declById(iface);
+    if (owner == nullptr || wanted == nullptr) {
+        refuse(pos, "this interface conversion");
+        return "";
+    }
+    // One table per pair, named under both link names so two modules'
+    // same-named types never share one: the entry module links bare.
+    std::string label =
+        resolver_.linkName(*owner) + "__vtable__" + resolver_.linkName(*wanted);
+    if (!vtablesEmitted_.insert(label).second) {
+        return label;
+    }
+    ir::Global table;
+    table.label = label;
+    table.type = TypeRef{ctx_.pointer(ctx_.basic(BasicKind::U8))};
+    for (const std::string& name : resolver_.methodNames(iface)) {
+        // The checker proved the concrete implements every method, so a
+        // miss here is a lowerer bug, not a program, and refuses as one.
+        const Signature* csig = resolver_.methodSig(concrete, name);
+        if (csig == nullptr) {
+            refuse(pos, "this interface conversion");
+            return "";
+        }
+        if (owner->nominal == Kind::Class) {
+            // A class entry normalizes the receiver through an adapter:
+            // the data word holds a reference, not inline bytes, so the
+            // method's static address would read the wrong receiver.
+            table.initLabels.push_back(emitIfaceAdapter(concrete, name, *csig, pos));
+            if (failed_) {
+                return "";
+            }
+        } else if (owner->nominal == Kind::Struct) {
+            // The method's static address, spelled exactly as a direct call
+            // spells it, so dispatch and direct calls name one function.
+            table.initLabels.push_back(resolver_.linkName(*owner) + "__" + name);
+        } else {
+            refuse(pos, "this interface conversion");
+            return "";
+        }
+    }
+    module_->globals.push_back(std::move(table));
+    return label;
+}
+
+std::string Lowerer::emitIfaceAdapter(DeclId concrete, const std::string& method,
+                                      const Signature& sig, Position pos) {
+    const resolve::Decl* owner = resolver_.declById(concrete);
+    if (owner == nullptr) {
+        refuse(pos, "this interface conversion");
+        return "";
+    }
+    // One adapter per (class, method), named under the method's own link
+    // name so two modules' same-named types never share one. A source
+    // function already holding the name refuses below instead of being
+    // shadowed by generated text.
+    std::string hidden =
+        resolver_.linkName(*owner) + "__" + method + "__ifaceadapt";
+    if (!adaptersEmitted_.insert(hidden).second) {
+        return hidden;
+    }
+    for (const ir::Function& fn : module_->functions) {
+        if (fn.name == hidden) {
+            refuse(pos, "this interface conversion");
+            return "";
+        }
+    }
+    int64_t savedFn = -1;
+    if (function_ != nullptr) {
+        savedFn =
+            static_cast<int64_t>(function_ - module_->functions.data());
+    }
+    uint32_t savedValues = valueSeq_;
+    uint32_t savedLabels = labelSeq_;
+    std::vector<uint32_t> savedBlocks = std::move(blockOrder_);
+    std::vector<std::unordered_map<std::string, LocalBinding>> savedLocals =
+        std::move(locals_);
+    std::vector<uint64_t> savedMarks = std::move(scopeMarks_);
+    uint32_t savedCurrent = current_;
+    bool savedTerminated = terminated_;
+
+    ir::Function fn;
+    fn.name = hidden;
+    TypeRef dataPtr{ctx_.pointer(ctx_.basic(BasicKind::U8))};
+    const Type* ret = sig.returnType() != nullptr ? sig.returnType() : ctx_.void_();
+    std::vector<Parameter> combined;
+    uint64_t sretShift = 0;
+    if (needsSret(ret)) {
+        // A wide answer threads the caller's buffer address ahead of the
+        // data word (SysV sret), exactly as the method's own signature
+        // spells it; the dispatch call site fills the same position.
+        Parameter buffer;
+        buffer.type = dataPtr.type;
+        buffer.isMutable = false;
+        combined.push_back(buffer);
+        sretShift = kOneWord;
+    }
+    Parameter receiver;
+    receiver.type = dataPtr.type;
+    receiver.isMutable = false;
+    combined.push_back(receiver);
+    for (const Parameter& p : sig.parameters()) {
+        combined.push_back(p);
+    }
+    fn.signature = Signature(std::move(combined), ret, Abi::SysV);
+    fn.loc = pos;
+    module_->functions.push_back(std::move(fn));
+    function_ = &module_->functions.back();
+
+    valueSeq_ = 0;
+    labelSeq_ = 0;
+    blockOrder_.clear();
+    locals_.clear();
+    scopeMarks_.clear();
+
+    uint32_t entry = emitBlock(pos);
+    startBlock(entry);
+
+    // The hidden buffer address has no source spelling: its slot rides
+    // first and everything downstream shifts past it.
+    if (needsSret(ret)) {
+        std::vector<ir::Value> bufferSlots =
+            allocaSlots(dataPtr, pos, kOneWord);
+        if (failed_) {
+            return "";
+        }
+        for (ir::Value slot : bufferSlots) {
+            function_->params.push_back(slot);
+        }
+    }
+    // The data word's address arrives first: the class reference it holds
+    // is the receiver the method expects, loaded here in two steps — the
+    // slot holds the address, and only a computed address dereferences.
+    std::vector<ir::Value> dataSlots = allocaSlots(dataPtr, pos, kOneWord);
+    for (ir::Value slot : dataSlots) {
+        function_->params.push_back(slot);
+    }
+    ir::Instr addr;
+    addr.op = ir::Op::Load;
+    addr.loc = pos;
+    addr.type = dataPtr;
+    addr.width = ir::IRType::Ptr;
+    addr.addressBase = dataSlots[kFirstWord];
+    addr.isPure = true;
+    ir::Value addrVal = newValue(addr.width, dataPtr, pos);
+    addr.results.push_back(addrVal);
+    emit(std::move(addr));
+    ir::Instr load;
+    load.op = ir::Op::Load;
+    load.loc = pos;
+    load.type = dataPtr;
+    load.width = ir::IRType::Ptr;
+    load.addressBase = addrVal;
+    load.isPure = true;
+    ir::Value self = newValue(load.width, dataPtr, pos);
+    load.results.push_back(self);
+    emit(std::move(load));
+    ir::Instr call;
+    call.op = ir::Op::Call;
+    call.loc = pos;
+    call.callee = resolver_.linkName(*owner) + "__" + method;
+    call.mayTrap = true;
+    if (needsSret(ret)) {
+        // The buffer forwards exactly as the direct call spelled it: the
+        // same address rides first, so the method's stores land in the
+        // caller's slot and nothing comes back in registers.
+        ir::Instr loadBuf;
+        loadBuf.op = ir::Op::Load;
+        loadBuf.loc = pos;
+        loadBuf.type = dataPtr;
+        loadBuf.width = ir::IRType::Ptr;
+        loadBuf.addressBase = function_->params[kFirstWord];
+        loadBuf.isPure = true;
+        ir::Value buf = newValue(loadBuf.width, dataPtr, pos);
+        loadBuf.results.push_back(buf);
+        emit(std::move(loadBuf));
+        if (failed_) {
+            return "";
+        }
+        ir::Argument first;
+        first.words.push_back(buf);
+        call.arguments.push_back(std::move(first));
+    }
+    {
+        ir::Argument selfArg;
+        selfArg.words.push_back(self);
+        call.arguments.push_back(std::move(selfArg));
+    }
+    const std::vector<Parameter>& declared = function_->signature.parameters();
+    for (uint64_t i = 0; i < static_cast<uint64_t>(sig.parameters().size()); ++i) {
+        TypeRef type{declared[i + kOneWord + sretShift].type};
+        int count = wordCount(type);
+        if (count < 0) {
+            refuse(pos, "this interface conversion");
+            break;
+        }
+        std::vector<ir::Value> slots = allocaSlots(type, pos,
+                                                   static_cast<uint64_t>(count));
+        for (ir::Value slot : slots) {
+            function_->params.push_back(slot);
+        }
+        LocalBinding binding;
+        binding.slots = std::move(slots);
+        binding.type = type;
+        std::vector<ir::Value> words = loadLocal(pos, binding);
+        if (failed_) {
+            refuse(pos, "this interface conversion");
+            break;
+        }
+        ir::Argument arg;
+        arg.words = words;
+        // The adapter forwards into the method's signature: a float
+        // parameter travels in its SSE class here too.
+        if (type.type != nullptr && type.type->kind() == Kind::Basic &&
+            basicIsFloat(*type.type->basic()) &&
+            arg.words.size() == static_cast<size_t>(kOneWord)) {
+            arg.width = *type.type->basic() == BasicKind::F32
+                            ? ir::IRType::F32
+                            : ir::IRType::F64;
+        }
+        call.arguments.push_back(std::move(arg));
+    }
+    recordParamClasses();
+    if (!failed_) {
+        function_->canThrow = true;
+        ir::Terminator fret;
+        fret.term = ir::Term::Ret;
+        fret.loc = pos;
+        if (needsSret(ret)) {
+            // The method stored its answer into the caller's buffer
+            // through the forwarded address: nothing rides back in
+            // registers.
+            call.width = ir::IRType::Void;
+            call.type = TypeRef{ret};
+        } else if (ret->kind() != Kind::Void) {
+            std::vector<ir::Value> answers = callResults(call, ret, pos);
+            if (!failed_) {
+                fret.values = std::move(answers);
+            }
+        } else {
+            call.width = ir::IRType::Void;
+        }
+        if (!failed_) {
+            emit(std::move(call));
+            emitTerminator(fret);
+        }
+    }
+    function_ = nullptr;
+
+    function_ =
+        savedFn >= 0 ? &module_->functions[static_cast<size_t>(savedFn)] : nullptr;
+    valueSeq_ = savedValues;
+    labelSeq_ = savedLabels;
+    blockOrder_ = std::move(savedBlocks);
+    locals_ = std::move(savedLocals);
+    scopeMarks_ = std::move(savedMarks);
+    current_ = savedCurrent;
+    terminated_ = savedTerminated;
+    return hidden;
+}
+
+std::vector<ir::Value> Lowerer::boxToInterface(std::vector<ir::Value> words,
+                                              TypeRef from, TypeRef to,
+                                              Position pos) {
+    if (failed_ || to.isError() || from.isError()) {
+        return words;
+    }
+    if (to.type->kind() != Kind::Interface) {
+        return words;
+    }
+    if (from.type->kind() == Kind::Interface) {
+        // Already a pair: the caller's word-count check enforces the two
+        // words, so passing through is exact, not approximate.
+        return words;
+    }
+    std::optional<DeclId> iface = to.type->decl();
+    if (!iface.has_value()) {
+        refuse(pos, "this interface conversion");
+        return {undefined()};
+    }
+    // The data word holds the concrete bytes inline when they fit one
+    // word (TYPES.md §4.3), or the class reference itself. A wider struct
+    // needs a class box the programmer writes — anything else refuses by
+    // name, never by miscompile.
+    std::optional<DeclId> concrete;
+    if (from.type->kind() == Kind::Pointer && from.type->pointee() != nullptr &&
+        from.type->pointee()->kind() == Kind::Class) {
+        if (words.size() != kOneWord) {
+            refuse(pos, "this interface conversion");
+            return {undefined()};
+        }
+        concrete = from.type->pointee()->decl();
+    } else if (from.type->kind() == Kind::Struct &&
+               wordCount(from) == static_cast<int>(kOneWord) &&
+               words.size() == kOneWord) {
+        concrete = from.type->decl();
+    } else {
+        refuse(pos, from.type->kind() == Kind::Struct
+                          ? "a struct wider than one word in an interface: box it in a class"
+                          : "this interface conversion is not lowered yet");
+        return {undefined()};
+    }
+    if (!concrete.has_value()) {
+        refuse(pos, "this interface conversion");
+        return {undefined()};
+    }
+    std::string label = emitVTable(*concrete, *iface, pos);
+    if (failed_) {
+        return {undefined()};
+    }
+    TypeRef vtableType = wordType(to, kVtableWord);
+    ir::Instr addr;
+    addr.op = ir::Op::DataAddr;
+    addr.loc = pos;
+    addr.type = vtableType;
+    addr.width = ir::IRType::Ptr;
+    addr.globalLabel = label;
+    addr.isPure = true;
+    ir::Value table = newValue(addr.width, vtableType, pos);
+    addr.results.push_back(table);
+    emit(std::move(addr));
+    return {words[kFirstWord], table};
+}
+
+bool Lowerer::needsSret(const Type* ret) {
+    if (ret == nullptr || ret->kind() == Kind::Void) {
+        return false;
+    }
+    TypeRef ref{ret};
+    return wordCount(ref) > static_cast<int>(kTwoWords);
 }
 
 bool Lowerer::resolvePlace(const Expr* expr, Place& out) {
@@ -293,29 +794,56 @@ bool Lowerer::resolvePlace(const Expr* expr, Place& out) {
         return false;
     }
     if (const auto* field = dynamic_cast<const Field*>(expr)) {
+        // `lib.gB`: the object names a module, so the member resolves in
+        // the defining scope and the place is its global. Anything but a
+        // global variable falls through to the paths below (calls own
+        // their handling, types have no place). A miss stays quiet:
+        // callers refuse with the message that names their gap.
+        if (const auto* mod = dynamic_cast<const Ident*>(field->object.get())) {
+            if (const GlobalBinding* global =
+                    resolveModuleGlobal(mod->name, field->name)) {
+                out.slots.clear();
+                out.global = global->label;
+                out.type = global->type;
+                out.off = 0;
+                out.isVolatile = global->isVolatile;
+                return true;
+            }
+        }
         if (!resolvePlace(field->object.get(), out)) {
         // A nested chain accumulates the offset while the slots stay the
         // base value's: `p.inner.y` is p's slots plus two offsets. Union
         // members sit at offset 0 and record a tag write: storing through
         // the member sets the tag as a consequence (TYPES.md 4.6).
-            // A field over a pointer element (`p[0].lo`): the direct
-            // route only knows slots, but a pointer element has an
-            // address. Materialize it the way computed reads do, then
-            // take the field offset below. resolvePlace-Index is left
-            // untouched, so the array single-answer routes keep theirs.
+            // A field over a pointer element (`p[0].lo`) or over a
+            // computed array element (`arr[i].x`): the direct route only
+            // knows slots, but both have an address — the shared guarded
+            // helper materializes each, lowering the index once, and the
+            // field offset below applies either way. The read path
+            // (lowerField) carries the same fallback; both stay because
+            // each serves a different node.
             const auto* elem = dynamic_cast<const Index*>(field->object.get());
-            if (elem == nullptr) {
+            TypeRef arrType = elem != nullptr
+                ? checker_.typeOf(elem->array.get())
+                : TypeRef{ctx_.error()};
+            if (elem == nullptr || arrType.isError()) {
                 return false;
             }
-            TypeRef ptrType = checker_.typeOf(elem->array.get());
-            if (ptrType.isError() || ptrType.type->kind() != Kind::Pointer) {
+            Kind inner = arrType.type->kind();
+            if (inner != Kind::Pointer && inner != Kind::Array) {
                 return false;
             }
             Place base;
             if (!resolvePlace(elem->array.get(), base)) {
                 return false;
             }
-            if (!pointerElementPlace(*elem, base, ptrType, "this field access", out)) {
+            if (inner == Kind::Pointer) {
+                if (!pointerElementPlace(*elem, base, arrType,
+                                         "this field access", out)) {
+                    return false;
+                }
+            } else if (!arrayElementPlace(*elem, base, arrType,
+                                          "this field access", out)) {
                 return false;
             }
         }
@@ -367,7 +895,9 @@ bool Lowerer::resolvePlace(const Expr* expr, Place& out) {
         out.global.clear();
         out.type = pointee;
         out.off = 0;
-        out.isVolatile = false;
+        // A deref the checker saw through a `*volatile T` name is a
+        // volatile access: the loads and stores it feeds carry the mark.
+        out.isVolatile = checker_.placeIsVolatile(expr);
         out.hasIndirect = true;
         out.indirect = ptr[0];
         return true;
@@ -387,7 +917,7 @@ bool Lowerer::resolvePlace(const Expr* expr, Place& out) {
             return false;
         }
         std::unordered_set<std::string> active;
-        EvalEnv env = resolver_.evalEnv(resolver_.moduleScope());
+        EvalEnv env = resolver_.evalEnv(emitScope());
         EvalResult folded = evalConstInt(*index->index, env, active);
         if (!folded.ok || folded.value < 0) {
             return false;
@@ -455,6 +985,13 @@ ir::IRType Lowerer::widthOf(TypeRef type, Position pos) {
     // width cannot name two words.
     if (type.type->kind() == Kind::Pointer || type.type->kind() == Kind::FunctionPtr) {
         return ir::IRType::Ptr;
+    }
+    // An enum rides its underlying i32 (FEATURES §2, enum ↔ int row):
+    // every enum value is one 4-byte word, so scalar plumbing (loads,
+    // stores, casts) treats it at I32 and the enumerator check owns the
+    // validity, never the width.
+    if (type.type->kind() == Kind::Enum) {
+        return ir::IRType::I32;
     }
     if (type.type->kind() != Kind::Basic) {
         refuse(pos, "a value of this type");
@@ -774,7 +1311,7 @@ ir::Value Lowerer::lowerNeg(const Unary& n) {
 const Signature* Lowerer::functionSig(const std::string& name) const {
     // The current module's scope, not the entry's: an import's body calls
     // its own names, and a from-alias carries its target's signature.
-    const resolve::Scope* scope = resolver_.scopeOf(checker_.module());
+    const resolve::Scope* scope = homeScope();
     if (scope == nullptr) {
         return nullptr;
     }
@@ -793,10 +1330,105 @@ void Lowerer::onProgram(Program& n) {
     }
 }
 
+const GlobalBinding* Lowerer::resolveModuleGlobal(
+    const std::string& modName, const std::string& fieldName) {
+    // A module-qualified spelling (`lib.gB`) names its home directly:
+    // locals shadow module names, the member resolves in the defining
+    // scope, and only a global variable has a place. Anything else
+    // answers null so callers fall through to their own paths.
+    uint64_t depth = static_cast<uint64_t>(locals_.size());
+    for (; depth > 0;) {
+        --depth;
+        if (locals_[depth].find(modName) != locals_[depth].end()) {
+            return nullptr;
+        }
+    }
+    const resolve::Scope* here = homeScope();
+    const resolve::Decl* moduleDecl =
+        here != nullptr ? resolver_.lookup(here, modName) : nullptr;
+    if (moduleDecl == nullptr ||
+        moduleDecl->kind != resolve::DeclKind::Module) {
+        return nullptr;
+    }
+    const resolve::Scope* home = resolver_.scopeOf(moduleDecl->origin);
+    const resolve::Decl* member =
+        home != nullptr ? resolver_.lookup(home, fieldName) : nullptr;
+    if (member == nullptr || member->kind != resolve::DeclKind::Var) {
+        return nullptr;
+    }
+    return findGlobalIn(moduleDecl->origin, fieldName);
+}
+
+const GlobalBinding* Lowerer::findGlobalIn(const std::string& homeModule,
+                                               const std::string& name) {
+    // A module-qualified spelling (`lib.gB`) names its home directly, so
+    // the scan skips findGlobal's decl-following prologue.
+    for (const GlobalBinding& global : globals_) {
+        if (global.name == name && global.module == homeModule) {
+            return &global;
+        }
+    }
+    return nullptr;
+}
+
+bool Lowerer::foldModuleConst(const std::string& name, Position pos,
+                              std::vector<ir::Value>& out) {
+    // A module-level `const` names no storage: its uses fold the
+    // initialiser where read. The table carries both spellings — the
+    // defining module's own names and every from-alias — so one lookup
+    // in the current module covers every reachable spelling. A cycle
+    // refuses loudly instead of hanging: the checker rejects cyclic
+    // consts, but lowering keeps walking after check errors, so the
+    // guard is what stands between a rejected program and a hang.
+    static thread_local std::unordered_set<std::string> folding;
+    EvalEnv env = resolver_.evalEnv(emitScope());
+    const Expr* init =
+        env.constantInit(homeModule() + "." + name);
+    if (init == nullptr) {
+        return false;
+    }
+    std::string key = homeModule() + "." + name;
+    if (!folding.insert(key).second) {
+        refuse(pos, "cyclic const '" + name + "'");
+        out = {undefined()};
+        return true;
+    }
+    // A literal initialiser folds without asking the checker for its
+    // type: declaration order must not decide whether a use lowers, and
+    // the declared type (order-free through the resolver) is exactly
+    // what checking records. Compound initialisers still ride lowerWords
+    // below, which needs their recorded subtree types.
+    const resolve::Scope* here = homeScope();
+    const resolve::Decl* found =
+        here != nullptr ? resolver_.lookup(here, name) : nullptr;
+    const resolve::Decl* origin =
+        found != nullptr ? resolver_.declById(found->id) : nullptr;
+    const resolve::Decl* truth = origin != nullptr ? origin : found;
+    if (truth != nullptr && !truth->type.isError()) {
+        if (const auto* lit = dynamic_cast<const IntLit*>(init)) {
+            std::unordered_set<std::string> active;
+            EvalResult got = evalConstInt(*lit, env, active);
+            if (got.ok) {
+                out = {constantI64(got.value, truth->type, init->pos)};
+                folding.erase(key);
+                return true;
+            }
+        }
+        if (const auto* lit = dynamic_cast<const BoolLit*>(init)) {
+            out = {constantI64(lit->value ? 1 : 0, truth->type, init->pos)};
+            folding.erase(key);
+            return true;
+        }
+    }
+    out = lowerWords(init);
+    folding.erase(key);
+    return true;
+}
+
 const GlobalBinding* Lowerer::findGlobal(const std::string& name) {
     // A from-alias copies its target's id, so declById recovers the home
     // module even for names bound in this module's scope by import.
-    std::string home = checker_.module();
+    std::string home = homeModule();
     const resolve::Scope* here = resolver_.scopeOf(home);
     if (here != nullptr) {
         const resolve::Decl* decl = resolver_.lookup(here, name);
@@ -818,6 +1450,21 @@ const GlobalBinding* Lowerer::findGlobal(const std::string& name) {
     return nullptr;
 }
 
+std::string Lowerer::globalLabel(const std::string& module,
+                                   const std::string& name) {
+    // The label carries its module (`g_da__gval` for `da`'s `gval`, `g_x`
+    // for the entry's `x`), so two modules' same-named globals never share
+    // storage. Dots become underscores: a dot cannot survive the assembler.
+    std::string flat = module;
+    for (char& c : flat) {
+        if (c == '.') {
+            c = '_';
+        }
+    }
+    return module == resolver_.entryModule() ? "g_" + name
+                                             : "g_" + flat + "__" + name;
+}
+
 void Lowerer::onGlobal(VarDecl& n) {
     if (failed_ || !enabled_) {
         return;
@@ -827,23 +1474,50 @@ void Lowerer::onGlobal(VarDecl& n) {
         return;
     }
     std::unordered_set<std::string> active;
-    EvalEnv env = resolver_.evalEnv(resolver_.moduleScope());
-    EvalResult folded = evalConstInt(*n.init, env, active);
+    EvalEnv env = resolver_.evalEnv(emitScope());
+    // A `gc.MK2` spelling folds through the defining module: the table
+    // holds every module's consts, but a bare name only resolves in its
+    // own scope, so the member init folds in the home scope. Anything
+    // else falls through to the plain fold below, which refuses loudly.
+    EvalResult folded{false, 0, ""};
+    const Field* qualField =
+        dynamic_cast<const Field*>(n.init.get());
+    const Ident* qualMod =
+        qualField != nullptr
+            ? dynamic_cast<const Ident*>(qualField->object.get())
+            : nullptr;
+    const resolve::Decl* qualMember = nullptr;
+    const resolve::Scope* qualHome = nullptr;
+    if (qualMod != nullptr) {
+        const resolve::Scope* here = emitScope();
+        const resolve::Decl* modDecl =
+            here != nullptr
+                ? resolver_.lookup(here, qualMod->name)
+                : nullptr;
+        if (modDecl != nullptr &&
+            modDecl->kind == resolve::DeclKind::Module) {
+            qualHome = resolver_.scopeOf(modDecl->origin);
+            const resolve::Decl* target =
+                qualHome != nullptr
+                    ? resolver_.lookup(qualHome, qualField->name)
+                    : nullptr;
+            if (target != nullptr &&
+                target->kind == resolve::DeclKind::Const &&
+                target->init != nullptr) {
+                qualMember = target;
+            }
+        }
+    }
+    if (qualMember != nullptr && qualHome != nullptr) {
+        EvalEnv homeEnv = resolver_.evalEnv(qualHome);
+        folded = evalConstInt(*qualMember->init, homeEnv, active);
+    } else {
+        folded = evalConstInt(*n.init, env, active);
+    }
     GlobalBinding binding;
     binding.name = n.name;
     binding.module = checker_.module();
-    // The label carries its module (`g_da__gval` for `da`'s `gval`, `g_x`
-    // for the entry's `x`), so two modules' same-named globals never share
-    // storage. Dots become underscores: a dot cannot survive the assembler.
-    std::string flat = binding.module;
-    for (char& c : flat) {
-        if (c == '.') {
-            c = '_';
-        }
-    }
-    binding.label = binding.module == resolver_.entryModule()
-                        ? "g_" + n.name
-                        : "g_" + flat + "__" + n.name;
+    binding.label = globalLabel(binding.module, n.name);
     binding.type = type;
     binding.isVolatile = n.isVolatile;
     if (type.type->kind() == Kind::String) {
@@ -858,8 +1532,62 @@ void Lowerer::onGlobal(VarDecl& n) {
         }
         binding.initLabel = lowered.label;
         binding.initial = lowered.len;
+    } else if (const auto* wide = dynamic_cast<const WideLit*>(n.init.get())) {
+        // A wide literal folds to known image bytes: units little-endian
+        // plus one zero unit. An array global holds the bytes inline (one
+        // quad per eight, zero-padded tail); a pointer global names a
+        // rodata blob. The gate admitted only these two shapes, and the
+        // checking proved the fit.
+        if (type.type->kind() == Kind::Array) {
+            std::string bytes;
+            for (uint16_t unit : wide->units) {
+                bytes.push_back(static_cast<char>(unit & 0xFF));
+                bytes.push_back(static_cast<char>((unit >> 8) & 0xFF));
+            }
+            bytes.push_back('\0');
+            bytes.push_back('\0');
+            int64_t want = resolver_.nominalSize(type.type);
+            if (want < 0 ||
+                bytes.size() != static_cast<size_t>(want)) {
+                refuse(n.init->pos, "a global initialiser must be constant");
+                return;
+            }
+            size_t byteCount = bytes.size();
+            uint64_t quads = (static_cast<uint64_t>(byteCount) + 7u) / 8u;
+            for (uint64_t word = 0; word < quads; ++word) {
+                uint64_t quad = 0;
+                for (uint64_t byte = 0; byte < 8u; ++byte) {
+                    uint64_t at = word * 8u + byte;
+                    uint64_t bits = at < bytes.size()
+                                        ? static_cast<unsigned char>(bytes[at])
+                                        : 0u;
+                    quad |= bits << (byte * 8);
+                }
+                binding.initWords.push_back(quad);
+            }
+        } else if (type.type->kind() == Kind::Pointer) {
+            binding.initLabel = wideBlob(*wide);
+            binding.initial = 0;
+        } else {
+            refuse(n.init->pos, "a global initialiser must be constant");
+            return;
+        }
     } else if (dynamic_cast<const NilPtr*>(n.init.get()) != nullptr) {
         binding.initial = 0;
+    } else if (type.type->kind() == Kind::Interface) {
+        // `nilPtr as I`: the null interface is sixteen zero bytes — a
+        // null data word beside a null vtable word — the way a zero
+        // repeat holds zero bytes. The checker's gate lets only this one
+        // spelling through, so anything arriving here is sixteen zeros.
+        const auto* nilCast = dynamic_cast<const Cast*>(n.init.get());
+        if (nilCast == nullptr ||
+            dynamic_cast<const NilPtr*>(nilCast->expr.get()) == nullptr) {
+            refuse(n.init->pos, "an interface global needs `nilPtr as I`");
+            return;
+        }
+        for (uint64_t word = 0; word < kInterfaceWords; ++word) {
+            binding.initWords.push_back(0);
+        }
     } else if (type.type->kind() == Kind::Array &&
                dynamic_cast<const NewArray*>(n.init.get()) != nullptr) {
         // A const aggregate global passed the checker's gate, so every
@@ -884,6 +1612,112 @@ void Lowerer::onGlobal(VarDecl& n) {
             }
             binding.initWords.push_back(quad);
         }
+    } else if ((type.type->kind() == Kind::Struct ||
+                type.type->kind() == Kind::Class) &&
+               dynamic_cast<const NewStruct*>(n.init.get()) != nullptr) {
+        // A const struct or class value folds to image bytes the way
+        // the array path folds elements: the checker's gate lets only
+        // all-constant fields through, so every byte is known. The
+        // conversion below turns image bytes into one `.quad` per
+        // eight bytes, little-endian with a zero-padded tail, so the
+        // path stays untouched.
+        const auto* initStruct = dynamic_cast<const NewStruct*>(n.init.get());
+        std::string bytes;
+        if (!globalInitStructBytes(*initStruct, type, bytes) || bytes.empty()) {
+            refuse(n.init->pos, "a global initialiser must be constant");
+            return;
+        }
+        size_t byteCount = bytes.size();
+        uint64_t quads = (static_cast<uint64_t>(byteCount) + 7u) / 8u;
+        for (uint64_t word = 0; word < quads; ++word) {
+            uint64_t quad = 0;
+            for (uint64_t byte = 0; byte < 8u; ++byte) {
+                uint64_t at = word * 8u + byte;
+                uint64_t bits = at < bytes.size()
+                                    ? static_cast<unsigned char>(bytes[at])
+                                    : 0u;
+                quad |= bits << (byte * 8);
+            }
+            binding.initWords.push_back(quad);
+        }
+    } else if (type.type->kind() == Kind::Closure &&
+               (dynamic_cast<const Field*>(n.init.get()) != nullptr ||
+                dynamic_cast<const Ident*>(n.init.get()) != nullptr)) {
+        // A function names link-time code: the global holds the code
+        // address beside empty captures, the same pair shape a local
+        // spelling lowers to. `b.inc` resolves through its module;
+        // a bare `dbl` resolves in the current one. Anything else here
+        // refuses: the gate lets only these spellings through.
+        const resolve::Decl* member = nullptr;
+        if (const auto* field = dynamic_cast<const Field*>(n.init.get())) {
+            const auto* mod = dynamic_cast<const Ident*>(field->object.get());
+            const resolve::Scope* here = emitScope();
+            const resolve::Decl* moduleDecl =
+                (mod != nullptr && here != nullptr)
+                    ? resolver_.lookup(here, mod->name)
+                    : nullptr;
+            const resolve::Scope* home =
+                (moduleDecl != nullptr &&
+                 moduleDecl->kind == resolve::DeclKind::Module)
+                    ? resolver_.scopeOf(moduleDecl->origin)
+                    : nullptr;
+            member = home != nullptr ? resolver_.lookup(home, field->name)
+                                     : nullptr;
+        } else if (const auto* ident =
+                       dynamic_cast<const Ident*>(n.init.get())) {
+            member = resolver_.lookup(emitScope(), ident->name);
+        }
+        if (member == nullptr ||
+            member->kind != resolve::DeclKind::Func ||
+            member->typeParams != 0) {
+            refuse(n.init->pos, "a function global needs `mod.func`");
+            return;
+        }
+        std::string link = resolver_.linkName(*member);
+        std::string fwd = forwardFunction(link, member->sig, n.init->pos);
+        if (failed_) {
+            return;
+        }
+        binding.initLabel = fwd;
+        binding.initial = 0;
+    } else if (type.type->kind() == Kind::FunctionPtr &&
+               dynamic_cast<const Unary*>(n.init.get()) != nullptr) {
+        // `&dbl`: the single word holds the function's link-time
+        // address. Anything else here refuses: the gate lets only
+        // this spelling through.
+        const auto* addr = static_cast<const Unary*>(n.init.get());
+        const auto* ident = dynamic_cast<const Ident*>(addr->operand.get());
+        const resolve::Decl* decl =
+            ident != nullptr
+                ? resolver_.lookup(emitScope(), ident->name)
+                : nullptr;
+        if (addr->op != UnOp::Addr || decl == nullptr ||
+            decl->kind != resolve::DeclKind::Func || decl->typeParams != 0) {
+            refuse(n.init->pos, "a function global needs `&func`");
+            return;
+        }
+        binding.initLabels.push_back(resolver_.linkName(*decl));
+    } else if (type.type->kind() == Kind::Pointer &&
+               type.type->pointee() == ctx_.void_() &&
+               dynamic_cast<const Cast*>(n.init.get()) != nullptr) {
+        // `&add as *void`: the single word holds the function's link-time
+        // address. Anything else here refuses: the gate lets only this
+        // spelling through.
+        const auto* cast = static_cast<const Cast*>(n.init.get());
+        const auto* addr = dynamic_cast<const Unary*>(cast->expr.get());
+        const auto* ident = (addr != nullptr && addr->op == UnOp::Addr)
+                                ? dynamic_cast<const Ident*>(addr->operand.get())
+                                : nullptr;
+        const resolve::Decl* decl =
+            ident != nullptr
+                ? resolver_.lookup(emitScope(), ident->name)
+                : nullptr;
+        if (decl == nullptr ||
+            decl->kind != resolve::DeclKind::Func || decl->typeParams != 0) {
+            refuse(n.init->pos, "a function global needs `&func as *void`");
+            return;
+        }
+        binding.initLabels.push_back(resolver_.linkName(*decl));
     } else if (type.type->kind() == Kind::Basic &&
                basicIsFloat(*type.type->basic())) {
         // A float global carries its IEEE bits in the image. The
@@ -949,6 +1783,148 @@ void Lowerer::onGlobal(VarDecl& n) {
             std::memcpy(&pattern, &value, sizeof pattern);
             binding.initial = static_cast<int64_t>(pattern);
         }
+    } else if (type.type->kind() == Kind::Enum) {
+        // An enumerator spelling folds to its value: every spelling the
+        // checker accepts (bare, qualified, alias, module-qualified)
+        // resolves here to the member's integer. The gate admitted only
+        // these shapes and the checking validated them, so a miss here
+        // is a lowering gap, refused as one.
+        int64_t value = 0;
+        bool known = false;
+        const resolve::Scope* hereScope =
+            homeScope();
+        if (const auto* ident = dynamic_cast<const Ident*>(n.init.get())) {
+            int owners = 0;
+            const resolve::Decl* owner =
+                hereScope != nullptr
+                    ? resolver_.lookupEnumMember(hereScope, ident->name, owners)
+                    : nullptr;
+            if (owner != nullptr) {
+                std::string home = owner->scope != nullptr
+                                       ? owner->scope->module
+                                       : homeModule();
+                value = resolver_.enumValue(home + "." + owner->name,
+                                            ident->name);
+                known = true;
+            }
+        } else if (const auto* field =
+                       dynamic_cast<const Field*>(n.init.get())) {
+            if (const auto* qual =
+                    dynamic_cast<const Ident*>(field->object.get())) {
+                bool shadowed = false;
+                for (auto frame = locals_.rbegin();
+                     frame != locals_.rend() && !shadowed; ++frame) {
+                    shadowed = frame->find(qual->name) != frame->end();
+                }
+                const resolve::Decl* qualDecl =
+                    !shadowed && hereScope != nullptr
+                        ? resolver_.lookup(hereScope, qual->name)
+                        : nullptr;
+                if (qualDecl != nullptr &&
+                    qualDecl->kind == resolve::DeclKind::Module) {
+                    const resolve::Scope* home =
+                        resolver_.scopeOf(qualDecl->origin);
+                    if (home != nullptr) {
+                        const resolve::Decl* direct =
+                            resolver_.lookup(home, field->name);
+                        if (direct == nullptr) {
+                            for (const auto& [ename, edecl] :
+                                 home->bindings) {
+                                if (edecl == nullptr ||
+                                    edecl->kind != resolve::DeclKind::Type ||
+                                    edecl->nominal != Kind::Enum) {
+                                    continue;
+                                }
+                                for (const auto& entry : resolver_.enumMembers(
+                                         edecl->id)) {
+                                    if (entry.first == field->name) {
+                                        value = entry.second;
+                                        known = true;
+                                        break;
+                                    }
+                                }
+                                if (known) {
+                                    break;
+                                }
+                            }
+                        }
+                    }
+                } else if (qualDecl != nullptr &&
+                           qualDecl->kind == resolve::DeclKind::Type &&
+                           qualDecl->nominal == Kind::Enum) {
+                    std::string home = qualDecl->scope != nullptr
+                                           ? qualDecl->scope->module
+                                           : homeModule();
+                    value = resolver_.enumValue(
+                        home + "." + qualDecl->name, field->name);
+                    known = true;
+                } else if (qualDecl != nullptr &&
+                           qualDecl->kind == resolve::DeclKind::Alias &&
+                           qualDecl->aliasTarget != nullptr) {
+                    TypeRef target = resolver_.resolveType(
+                        qualDecl->aliasTarget, hereScope);
+                    if (!target.isError() &&
+                        target.type->kind() == Kind::Enum) {
+                        std::optional<DeclId> aliasId = target.type->decl();
+                        if (aliasId.has_value()) {
+                            for (const auto& entry :
+                                 resolver_.enumMembers(*aliasId)) {
+                                if (entry.first == field->name) {
+                                    value = entry.second;
+                                    known = true;
+                                    break;
+                                }
+                            }
+                        }
+                    }
+                }
+            } else if (const auto* inner =
+                           dynamic_cast<const Field*>(field->object.get())) {
+                const auto* mod =
+                    dynamic_cast<const Ident*>(inner->object.get());
+                const resolve::Decl* modDecl =
+                    (mod != nullptr && hereScope != nullptr)
+                        ? resolver_.lookup(hereScope, mod->name)
+                        : nullptr;
+                const resolve::Scope* home =
+                    (modDecl != nullptr &&
+                     modDecl->kind == resolve::DeclKind::Module)
+                        ? resolver_.scopeOf(modDecl->origin)
+                        : nullptr;
+                const resolve::Decl* member =
+                    home != nullptr ? resolver_.lookup(home, inner->name)
+                                    : nullptr;
+                std::optional<DeclId> enumId;
+                if (member != nullptr &&
+                    member->kind == resolve::DeclKind::Type &&
+                    member->nominal == Kind::Enum) {
+                    enumId = member->id;
+                } else if (member != nullptr &&
+                           member->kind == resolve::DeclKind::Alias &&
+                           member->aliasTarget != nullptr) {
+                    TypeRef target =
+                        resolver_.resolveType(member->aliasTarget, home);
+                    if (!target.isError() &&
+                        target.type->kind() == Kind::Enum) {
+                        enumId = target.type->decl();
+                    }
+                }
+                if (enumId.has_value()) {
+                    for (const auto& entry : resolver_.enumMembers(*enumId)) {
+                        if (entry.first == field->name) {
+                            value = entry.second;
+                            known = true;
+                            break;
+                        }
+                    }
+                }
+            }
+        }
+        if (!known) {
+            refuse(n.init->pos, "an enum global needs an enumerator");
+            return;
+        }
+        binding.initial = value;
     } else {
         // A folded integer names image bytes, so it is cut to the declared
         // width here: without the cut a 64-bit fold stores bits the type
@@ -973,6 +1949,7 @@ void Lowerer::onGlobal(VarDecl& n) {
     global.type = type;
     global.initial = binding.initial;
     global.initLabel = binding.initLabel;
+    global.initLabels = binding.initLabels;
     global.initWords = binding.initWords;
     module_->globals.push_back(global);
 }
@@ -985,13 +1962,48 @@ void Lowerer::onFuncDecl(FuncDecl& n) {
     // function mangles under its module (`b__aval`), the entry's keeps its
     // spelling, and the prelude keeps its C name. Two modules defining one
     // name therefore never collide in one IR module.
-    const resolve::Scope* here = resolver_.scopeOf(checker_.module());
+    const resolve::Scope* here = homeScope();
     const resolve::Decl* decl =
         here != nullptr ? resolver_.lookup(here, n.name) : nullptr;
+    std::string link = decl != nullptr ? resolver_.linkName(*decl) : n.name;
+    beginFuncFrame(link, *functionSig(n.name), n.params, n.pos);
+    if (failed_) {
+        return;
+    }
+
+    n.body->accept(checker_);
+    locals_.pop_back();
+
+    endFuncFrame(n.pos);
+}
+
+// A function frame for a known link name and signature: the shared setup
+// behind plain functions and spec emissions, so the two cannot diverge.
+// The signature's parameter types answer the slots; the spelling's names
+// answer the binds. The caller lowers the body between this and
+// endFuncFrame, then pops the frame exactly as below.
+void Lowerer::beginFuncFrame(const std::string& link, const Signature& sig,
+                             const std::vector<Param>& params, Position pos) {
     ir::Function fn;
-    fn.name = decl != nullptr ? resolver_.linkName(*decl) : n.name;
-    fn.signature = *functionSig(n.name);
-    fn.loc = n.pos;
+    fn.name = link;
+    fn.signature = sig;
+    fn.loc = pos;
+    // A return wider than the register row travels through a
+    // caller-allocated buffer: the hidden address rides first (SysV
+    // sret), and the answer is stored there instead of the row.
+    if (needsSret(fn.signature.returnType())) {
+        TypeRef sretPtr{ctx_.pointer(ctx_.basic(BasicKind::U8))};
+        std::vector<Parameter> withSret;
+        Parameter hidden;
+        hidden.type = sretPtr.type;
+        hidden.isMutable = false;
+        withSret.push_back(hidden);
+        for (const Parameter& p : fn.signature.parameters()) {
+            withSret.push_back(p);
+        }
+        fn.signature = Signature(std::move(withSret), fn.signature.returnType(),
+                                 Abi::SysV);
+    }
     function_ = &fn;
     module_->functions.push_back(std::move(fn));
     function_ = &module_->functions.back();
@@ -1002,7 +2014,7 @@ void Lowerer::onFuncDecl(FuncDecl& n) {
     locals_.clear();
     scopeMarks_.clear();
 
-    uint32_t entry = emitBlock(n.pos);
+    uint32_t entry = emitBlock(pos);
     startBlock(entry);
 
     // Parameters arrive in slots like every other named place: a parameter
@@ -1010,10 +2022,24 @@ void Lowerer::onFuncDecl(FuncDecl& n) {
     // without phi nodes would read a stale one. The entry moves below fill
     // the slots; codegen derives each address from its id.
     std::unordered_map<std::string, LocalBinding> frame;
-    const std::vector<Parameter>& params = function_->signature.parameters();
+    const std::vector<Parameter>& sigParams = function_->signature.parameters();
+    // The hidden address has no source spelling: its slot rides first
+    // and the source parameters follow shifted past it.
+    uint64_t shift = 0;
+    if (needsSret(function_->signature.returnType())) {
+        TypeRef sretPtr{ctx_.pointer(ctx_.basic(BasicKind::U8))};
+        std::vector<ir::Value> sretSlots = allocaSlots(sretPtr, pos, kOneWord);
+        if (failed_) {
+            return;
+        }
+        for (ir::Value slot : sretSlots) {
+            function_->params.push_back(slot);
+        }
+        shift = kOneWord;
+    }
     for (uint64_t i = 0; i < static_cast<uint64_t>(params.size()); ++i) {
-        TypeRef type{params[i].type};
-        std::vector<ir::Value> slots = allocaFor(type, n.params[i].pos);
+        TypeRef type{sigParams[i + shift].type};
+        std::vector<ir::Value> slots = allocaFor(type, params[i].pos);
         if (failed_) {
             return;
         }
@@ -1023,31 +2049,142 @@ void Lowerer::onFuncDecl(FuncDecl& n) {
         LocalBinding binding;
         binding.slots = std::move(slots);
         binding.type = type;
-        binding.isMutable = params[i].isMutable;
-        frame[n.params[i].name] = binding;
+        binding.isMutable = sigParams[i + shift].isMutable;
+        frame[params[i].name] = binding;
     }
     recordParamClasses();
     locals_.push_back(std::move(frame));
+}
 
-    n.body->accept(checker_);
-    locals_.pop_back();
-
+// The shared function epilogue: reachable value-falloff refuses,
+// unreachable falloff traps, then the frame closes. Same tail onFuncDecl
+// always had; spec emissions close identically.
+void Lowerer::endFuncFrame(Position pos) {
     ir::Terminator ret;
     ret.term = ir::Term::Ret;
     // A void falloff answers nothing (see onReturn). A value falloff
     // traps instead of answering: the placeholder id the old code pushed
     // here poisoned the frame computation and crashed programs whose
     // last statement closed every path (if/else, match). Reachable
-    // falloff is a checker rejection filed separately; the trap keeps
-    // it loud either way, never garbage.
+    // falloff refuses just below, where the block graph is complete;
+    // the trap keeps an unreachable one loud either way, never garbage.
     if (function_->signature.returnType() == nullptr ||
         function_->signature.returnType()->kind() != Kind::Void) {
         ret.term = ir::Term::Trap;
         ret.reason = ir::TrapReason::Explicit;
     }
-    ret.loc = n.pos;
+    bool emittedFalloff = !terminated_;
+    ret.loc = pos;
     emitTerminator(ret);
+    // BUG-277: every path through a value body returns or provably
+    // diverges. Reachability over terminator edges answers exactly —
+    // returns, breaks, loop exits and arm joins are all branches here —
+    // so a reachable falloff fails at compile time.
+    if (!failed_ && emittedFalloff && ret.term == ir::Term::Trap &&
+        falloffReachable(current_)) {
+        refuse(pos, "this function may fall off without returning");
+    }
     function_ = nullptr;
+}
+
+void Lowerer::onSpecFunc(DeclId spec, const FuncDecl& spelling,
+                         const Signature& sig) {
+    if (failed_ || !enabled_) {
+        return;
+    }
+    // One body per specialization under its own link name, using the common
+    // frame setup. The checker bound the substituted params; the slots
+    // bind here.
+    std::string link = resolver_.specLinkName(spec);
+    if (link.empty()) {
+        refuse(spelling.pos, "this generic call");
+        return;
+    }
+    // Names below resolve in the template home: helpers, globals and
+    // constants mean what the defining module bound, as checking proved.
+    // Cleared before returning; bodies lower synchronously inside.
+    auto origin = resolver_.instantiationOf(spec);
+    const resolve::Decl* tmpl =
+        origin.has_value() ? resolver_.declById(origin->first) : nullptr;
+    emitHome_ = (tmpl != nullptr && tmpl->scope != nullptr)
+                    ? tmpl->scope->module
+                    : "";
+    emitSpec_ = spec;
+    beginFuncFrame(link, sig, spelling.params, spelling.pos);
+    if (failed_) {
+        emitHome_.clear();
+        emitSpec_.reset();
+        return;
+    }
+    spelling.body->accept(checker_);
+    emitHome_.clear();
+    emitSpec_.reset();
+    locals_.pop_back();
+    endFuncFrame(spelling.pos);
+}
+
+std::string Lowerer::homeModule() const {
+    return emitHome_.empty() ? checker_.module() : emitHome_;
+}
+
+const resolve::Scope* Lowerer::homeScope() const {
+    return resolver_.scopeOf(homeModule());
+}
+
+const resolve::Scope* Lowerer::emitScope() const {
+    return emitHome_.empty() ? resolver_.moduleScope()
+                             : resolver_.scopeOf(emitHome_);
+}
+
+bool Lowerer::emitSpecBodies() {
+    // Deferred monomorphization: every used function specialization gets
+    // one body, in any order (calls resolve by link name, not position).
+    // The checker's call table already holds the transitive closure, and
+    // emission walks record further nested calls through the same table,
+    // so the worklist drains until no unseen spec remains. Runs after all
+    // modules lowered: a cross-module spec is unknown while its home
+    // module lowers, but the resolver cache is complete here.
+    if (failed_ || module_ == nullptr) {
+        return !failed_;
+    }
+    checker_.setSink(this);
+    enabled_ = true;
+    auto specKey = [](DeclId id) -> std::string {
+        return std::to_string(id.module) + "." + std::to_string(id.index);
+    };
+    auto isFuncSpec = [&](DeclId id) -> bool {
+        auto origin = resolver_.instantiationOf(id);
+        if (!origin.has_value()) {
+            return false;
+        }
+        const resolve::Decl* tmpl = resolver_.declById(origin->first);
+        return tmpl != nullptr && tmpl->kind == resolve::DeclKind::Func;
+    };
+    for (;;) {
+        std::optional<DeclId> next;
+        for (const auto& [site, spec] : checker_.callSpecs()) {
+            (void)site;
+            if (!isFuncSpec(spec)) {
+                continue;
+            }
+            if (emittedSpecs_.find(specKey(spec)) != emittedSpecs_.end()) {
+                continue;
+            }
+            next = spec;
+            break;
+        }
+        if (!next.has_value()) {
+            break;
+        }
+        emittedSpecs_.insert(specKey(*next));
+        checker_.walkSpecForEmit(*next);
+        if (failed_) {
+            break;
+        }
+    }
+    checker_.setSink(nullptr);
+    enabled_ = false;
+    return !failed_;
 }
 
 void Lowerer::onMethodDecl(const std::string& owner, const std::string& name,
@@ -1062,7 +2199,7 @@ void Lowerer::onMethodDecl(const std::string& owner, const std::string& name,
     // its module (`da__Box__get` for `da`'s `Box::get`), so two modules'
     // same-named types never collide.
     ir::Function fn;
-    const resolve::Scope* here = resolver_.scopeOf(checker_.module());
+    const resolve::Scope* here = homeScope();
     const resolve::Decl* ownerDecl =
         here != nullptr ? resolver_.lookup(here, owner) : nullptr;
     std::string linkOwner = owner;
@@ -1079,6 +2216,20 @@ void Lowerer::onMethodDecl(const std::string& owner, const std::string& name,
         combined.push_back(p);
     }
     const Type* ret = sig.returnType() != nullptr ? sig.returnType() : ctx_.void_();
+    if (needsSret(ret)) {
+        // The hidden buffer address rides before the receiver (SysV
+        // sret): prepended to the signature copy the frame walks below.
+        TypeRef sretPtr{ctx_.pointer(ctx_.basic(BasicKind::U8))};
+        std::vector<Parameter> withSret;
+        Parameter hidden;
+        hidden.type = sretPtr.type;
+        hidden.isMutable = false;
+        withSret.push_back(hidden);
+        for (const Parameter& p : combined) {
+            withSret.push_back(p);
+        }
+        combined = std::move(withSret);
+    }
     fn.signature = Signature(std::move(combined), ret, Abi::SysV);
     fn.loc = body.pos;
     function_ = &fn;
@@ -1095,6 +2246,20 @@ void Lowerer::onMethodDecl(const std::string& owner, const std::string& name,
     startBlock(entry);
 
     std::unordered_map<std::string, LocalBinding> frame;
+    // The hidden address has no source spelling: its slot rides first
+    // and the receiver follows shifted past it.
+    uint64_t shift = 0;
+    if (needsSret(ret)) {
+        TypeRef sretPtr{ctx_.pointer(ctx_.basic(BasicKind::U8))};
+        std::vector<ir::Value> sretSlots = allocaSlots(sretPtr, body.pos, kOneWord);
+        if (failed_) {
+            return;
+        }
+        for (ir::Value slot : sretSlots) {
+            function_->params.push_back(slot);
+        }
+        shift = kOneWord;
+    }
     std::vector<ir::Value> selfSlots = allocaSlots(self, body.pos,
                                                    static_cast<uint64_t>(wordCount(self)));
     for (ir::Value slot : selfSlots) {
@@ -1107,7 +2272,7 @@ void Lowerer::onMethodDecl(const std::string& owner, const std::string& name,
     frame["self"] = selfBinding;
     const std::vector<Parameter>& declared = function_->signature.parameters();
     for (uint64_t i = 0; i < static_cast<uint64_t>(params.size()); ++i) {
-        TypeRef type{declared[i + 1].type};
+        TypeRef type{declared[i + 1 + shift].type};
         std::vector<ir::Value> slots = allocaFor(type, params[i].pos);
         if (failed_) {
             return;
@@ -1118,7 +2283,7 @@ void Lowerer::onMethodDecl(const std::string& owner, const std::string& name,
         LocalBinding binding;
         binding.slots = std::move(slots);
         binding.type = type;
-        binding.isMutable = declared[i + 1].isMutable;
+        binding.isMutable = declared[i + 1 + shift].isMutable;
         frame[params[i].name] = binding;
     }
     recordParamClasses();
@@ -1129,14 +2294,20 @@ void Lowerer::onMethodDecl(const std::string& owner, const std::string& name,
 
     ir::Terminator mret;
     mret.term = ir::Term::Ret;
-    // Same value-falloff trap as a free function (see onFuncDecl).
+    // Same value-falloff rule as a free function (see onFuncDecl): a
+    // reachable falloff refuses, an unreachable one stays a dead trap.
     if (function_->signature.returnType() == nullptr ||
         function_->signature.returnType()->kind() != Kind::Void) {
         mret.term = ir::Term::Trap;
         mret.reason = ir::TrapReason::Explicit;
     }
+    bool emittedFalloff = !terminated_;
     mret.loc = body.pos;
     emitTerminator(mret);
+    if (!failed_ && emittedFalloff && mret.term == ir::Term::Trap &&
+        falloffReachable(current_)) {
+        refuse(body.pos, "this function may fall off without returning");
+    }
     function_ = nullptr;
 }
 
@@ -1181,6 +2352,20 @@ void Lowerer::onFuncLit(FuncLit& lit, const std::vector<check::Captured>& captur
         combined.push_back(p);
     }
     const Type* ret = sig.returnType() != nullptr ? sig.returnType() : ctx_.void_();
+    if (needsSret(ret)) {
+        // The hidden buffer address rides before the captures word
+        // (SysV sret), like every other hidden-first convention here.
+        TypeRef sretPtr{ctx_.pointer(ctx_.basic(BasicKind::U8))};
+        std::vector<Parameter> withSret;
+        Parameter hidden;
+        hidden.type = sretPtr.type;
+        hidden.isMutable = false;
+        withSret.push_back(hidden);
+        for (const Parameter& p : combined) {
+            withSret.push_back(p);
+        }
+        combined = std::move(withSret);
+    }
     fn.signature = Signature(std::move(combined), ret, Abi::SysV);
     fn.loc = lit.pos;
     module_->functions.push_back(std::move(fn));
@@ -1196,6 +2381,20 @@ void Lowerer::onFuncLit(FuncLit& lit, const std::vector<check::Captured>& captur
     startBlock(entry);
 
     std::unordered_map<std::string, LocalBinding> frame;
+    // The hidden address has no source spelling: its slot rides first
+    // and the captures word follows shifted past it.
+    uint64_t shift = 0;
+    if (needsSret(ret)) {
+        TypeRef sretPtr{ctx_.pointer(ctx_.basic(BasicKind::U8))};
+        std::vector<ir::Value> sretSlots = allocaSlots(sretPtr, lit.pos, kOneWord);
+        if (failed_) {
+            return;
+        }
+        for (ir::Value slot : sretSlots) {
+            function_->params.push_back(slot);
+        }
+        shift = kOneWord;
+    }
     std::vector<ir::Value> capSlots = allocaSlots(capPtr, lit.pos, kOneWord);
     for (ir::Value slot : capSlots) {
         function_->params.push_back(slot);
@@ -1245,7 +2444,7 @@ void Lowerer::onFuncLit(FuncLit& lit, const std::vector<check::Captured>& captur
     if (!failed_) {
         const std::vector<Parameter>& declared = function_->signature.parameters();
         for (uint64_t i = 0; i < static_cast<uint64_t>(lit.params.size()); ++i) {
-            TypeRef type{declared[i + kOneWord].type};
+            TypeRef type{declared[i + kOneWord + shift].type};
             std::vector<ir::Value> slots = allocaFor(type, lit.params[i].pos);
             if (failed_) {
                 return;
@@ -1256,7 +2455,7 @@ void Lowerer::onFuncLit(FuncLit& lit, const std::vector<check::Captured>& captur
             LocalBinding binding;
             binding.slots = std::move(slots);
             binding.type = type;
-            binding.isMutable = declared[i + kOneWord].isMutable;
+            binding.isMutable = declared[i + kOneWord + shift].isMutable;
             frame[lit.params[i].name] = binding;
         }
         recordParamClasses();
@@ -1267,14 +2466,19 @@ void Lowerer::onFuncLit(FuncLit& lit, const std::vector<check::Captured>& captur
 
         ir::Terminator fret;
         fret.term = ir::Term::Ret;
-        // Same value-falloff trap as a free function (see onFuncDecl).
+        // Same value-falloff rule as a free function (see onFuncDecl).
         if (function_->signature.returnType() == nullptr ||
             function_->signature.returnType()->kind() != Kind::Void) {
             fret.term = ir::Term::Trap;
             fret.reason = ir::TrapReason::Explicit;
         }
+        bool emittedFalloff = !terminated_;
         fret.loc = lit.pos;
         emitTerminator(fret);
+        if (!failed_ && emittedFalloff && fret.term == ir::Term::Trap &&
+            falloffReachable(current_)) {
+            refuse(lit.pos, "this function may fall off without returning");
+        }
     }
     function_ = nullptr;
 
@@ -1291,6 +2495,7 @@ void Lowerer::onFuncLit(FuncLit& lit, const std::vector<check::Captured>& captur
 void Lowerer::onBlockEnter(Block& n) {
     (void)n;
     scopeMarks_.push_back(static_cast<uint64_t>(locals_.size()));
+    deferFrames_.push_back({});
     if (failed_ || !enabled_ || function_ == nullptr) {
         return;
     }
@@ -1299,6 +2504,18 @@ void Lowerer::onBlockEnter(Block& n) {
 
 void Lowerer::onBlockExit(Block& n) {
     (void)n;
+    if (!deferFrames_.empty()) {
+        // A block left by jump (return, break, continue) already ran its
+        // defers at the jump; running them again here would execute a
+        // second copy on no dynamic path. Fall-through exits run here.
+        // Either way the frame pops: bookkeeping, not emission.
+        if (!terminated_) {
+            uint64_t top = static_cast<uint64_t>(deferFrames_.size());
+            --top;
+            runDefers(top);
+        }
+        deferFrames_.pop_back();
+    }
     if (scopeMarks_.empty()) {
         return;
     }
@@ -1309,12 +2526,67 @@ void Lowerer::onBlockExit(Block& n) {
     }
 }
 
+void Lowerer::onDeferStmt(DeferStmt& n) {
+    if (failed_ || !enabled_ || function_ == nullptr) {
+        return;
+    }
+    // Registration records the shape (FEATURES §5.2): operands evaluate
+    // when the body runs at scope exit, so nothing lowers here.
+    if (deferFrames_.empty()) {
+        refuse(n.pos, "defer outside a function");
+        return;
+    }
+    deferFrames_.back().push_back(n.stmt.get());
+}
+
+void Lowerer::runDefers(uint64_t from) {
+    if (failed_ || !enabled_ || function_ == nullptr) {
+        return;
+    }
+    if (from > static_cast<uint64_t>(deferFrames_.size())) {
+        refuse(Position{"", 1, 1}, "defer scopes are unbalanced");
+        return;
+    }
+    // Bodies lower by re-walking, and re-walking pushes frames: holding a
+    // reference across an accept would dangle when the outer vector
+    // reallocates. Snapshot the pointers instead (pointees are AST-owned
+    // and stable); indexing re-reads the storage every time.
+    for (uint64_t i = static_cast<uint64_t>(deferFrames_.size()); i > from;) {
+        --i;
+        std::vector<Stmt*> bodies = deferFrames_[i];
+        uint64_t pending = static_cast<uint64_t>(bodies.size());
+        for (uint64_t j = pending; j > 0;) {
+            --j;
+            bodies[j]->accept(checker_);
+            if (failed_) {
+                return;
+            }
+        }
+    }
+}
+
 void Lowerer::onVarDecl(VarDecl& n) {
     if (failed_ || !enabled_ || function_ == nullptr || locals_.empty()) {
         return;
     }
     TypeRef type = checker_.typeOf(&n);
-    std::vector<ir::Value> values = lowerWords(n.init.get());
+    std::vector<ir::Value> values;
+    if (const auto* wide = dynamic_cast<const WideLit*>(n.init.get())) {
+        // Array positions read the units as words (the checker proved the
+        // count fits); pointer positions read the rodata address through
+        // the ordinary path below. Anything else here refuses: the checker
+        // lets only these shapes through.
+        if (!type.isError() && type.type->kind() == Kind::Array) {
+            values = wideWords(*wide);
+            if (failed_) {
+                return;
+            }
+        } else {
+            values = lowerWords(n.init.get());
+        }
+    } else {
+        values = lowerWords(n.init.get());
+    }
     TypeRef initType = checker_.typeOf(n.init.get());
     if (dynamic_cast<const StringLit*>(n.init.get()) != nullptr &&
         isBytePointerTarget(type) && values.size() == kSliceWords) {
@@ -1345,6 +2617,49 @@ void Lowerer::onVarDecl(VarDecl& n) {
         }
         LocalBinding binding;
         binding.slots = std::move(fresh);
+        binding.type = type;
+        binding.isMutable = true;
+        locals_.back()[n.name] = binding;
+        return;
+    }
+    // A concrete value in an interface position boxes to the pair here, so
+    // the slots below hold data plus vtable, never bare concrete words.
+    values = boxClassOperand(n.init.get(), std::move(values), initType, type, n.pos);
+    if (failed_) {
+        return;
+    }
+    // Takes pack byte-contiguously: a narrow take shares its slot with the
+    // next take's bytes, the way construction and every read address them.
+    // Storing one take per slot would spread them, and a later packed read
+    // would take padding for payload. storeRange owns both the chunked
+    // shape these values arrive in and the valued shape calls answer, so
+    // aggregates route through it; every other kind keeps its word stores.
+    Kind kind = !type.isError() ? type.type->kind() : Kind::Error;
+    if (!values.empty() &&
+        (kind == Kind::Struct || kind == Kind::Array ||
+         kind == Kind::Class || kind == Kind::Union)) {
+        int count = wordCount(type);
+        if (count < 0) {
+            refuse(n.pos, "this declaration");
+            return;
+        }
+        uint64_t cells = static_cast<uint64_t>(count);
+        std::vector<ir::Value> slots =
+            allocaSlots(type, n.pos, cells);
+        if (failed_) {
+            return;
+        }
+        Place dest;
+        dest.slots = slots;
+        dest.type = type;
+        dest.off = 0;
+        dest.isVolatile = false;
+        storeRange(n.pos, dest, values, type);
+        if (failed_) {
+            return;
+        }
+        LocalBinding binding;
+        binding.slots = std::move(slots);
         binding.type = type;
         binding.isMutable = true;
         locals_.back()[n.name] = binding;
@@ -1392,6 +2707,40 @@ ir::Value Lowerer::onIdent(Ident& n) {
         }
         return words[0];
     }
+    std::vector<ir::Value> folded;
+    if (foldModuleConst(n.name, n.pos, folded)) {
+        if (folded.size() != kOneWord) {
+            refuse(n.pos, "this value");
+            return undefined();
+        }
+        return folded[0];
+    }
+    // A bare enumerator folds to its value: the checker proved exactly
+    // one enum in this module owns the name, so the integer here is
+    // that member's value (TYPES §2.6). Locals, globals and module
+    // constants already answered above, so this branch owns nothing
+    // they could name.
+    TypeRef held = checker_.typeOf(&n);
+    if (!held.isError() && held.type->kind() == Kind::Enum) {
+        const resolve::Scope* here = homeScope();
+        int owners = 0;
+        const resolve::Decl* owner =
+            here != nullptr ? resolver_.lookupEnumMember(here, n.name, owners)
+                            : nullptr;
+        if (owner != nullptr) {
+            std::string home = owner->scope != nullptr
+                                   ? owner->scope->module
+                                   : homeModule();
+            int64_t value =
+                resolver_.enumValue(home + "." + owner->name, n.name);
+            TypeRef count{ctx_.basic(BasicKind::I32)};
+            ir::Value answer = constantI64(value, count, n.pos);
+            if (failed_) {
+                return undefined();
+            }
+            return answer;
+        }
+    }
     refuse(n.pos, "reading '" + n.name + "'");
     return undefined();
 }
@@ -1418,6 +2767,15 @@ TypeRef Lowerer::wordType(TypeRef aggregate, uint64_t word) {
     if (aggregate.type->kind() == Kind::Closure) {
         if (word == 0) {
             return TypeRef{ctx_.functionPtr(Signature(*aggregate.type->signature()))};
+        }
+        return TypeRef{ctx_.pointer(ctx_.basic(BasicKind::U8))};
+    }
+    // An interface is a data word then a vtable pointer (TYPES.md §4.3):
+    // the data word carries the concrete bytes inline, untyped past one
+    // word, and the vtable word is an address the linker resolves.
+    if (aggregate.type->kind() == Kind::Interface) {
+        if (word == kFirstWord) {
+            return TypeRef{ctx_.basic(BasicKind::U64)};
         }
         return TypeRef{ctx_.pointer(ctx_.basic(BasicKind::U8))};
     }
@@ -1528,10 +2886,11 @@ std::vector<ir::Value> Lowerer::loadRange(Position pos, const Place& place,
                 return {undefined()};
             }
         } else if (fieldKind == Kind::String || fieldKind == Kind::Slice ||
-                   fieldKind == Kind::Closure) {
+                   fieldKind == Kind::Closure || fieldKind == Kind::Interface) {
             // A string is an address word then a length word, a slice a
             // pointer word then a length word, a closure a code word then
-            // a captures word: each full word loads with its own type, the
+            // a captures word, an interface a data word then a vtable
+            // word: each full word loads with its own type, the
             // way a local load types them. A partial take cannot name half
             // a word, so it refuses rather than splits.
             int64_t per = layout::kSizePointer;
@@ -1571,14 +2930,42 @@ std::vector<ir::Value> Lowerer::loadRange(Position pos, const Place& place,
             instr.displacement = cur;
         } else if (!place.global.empty()) {
             if (disp + take > layout::kSizePointer) {
-                refuse(pos, "this field layout is not lowered yet");
-                return {undefined()};
+                // A take straddling two eight-byte lines reads through a
+                // computed address, like the slot path below: the label
+                // plus the absolute offset names bytes the direct form
+                // cannot.
+                TypeRef addrType{ctx_.pointer(ctx_.basic(BasicKind::U8))};
+                ir::Instr lea;
+                lea.op = ir::Op::DataAddr;
+                lea.loc = pos;
+                lea.type = addrType;
+                lea.width = ir::IRType::Ptr;
+                lea.globalLabel = place.global;
+                lea.isPure = true;
+                ir::Value base = newValue(lea.width, addrType, pos);
+                lea.results.push_back(base);
+                emit(std::move(lea));
+                if (failed_) {
+                    return {undefined()};
+                }
+                instr.addressBase = base;
+                instr.displacement = cur;
+            } else {
+                instr.globalLabel = place.global;
+                instr.displacement = cur;
             }
-            instr.globalLabel = place.global;
-            instr.displacement = cur;
         } else {
-            uint64_t word = static_cast<uint64_t>(cur / layout::kSizePointer);
-            if (disp + take <= layout::kSizePointer) {
+            if (place.isAddress) {
+                // One computed address names every chunk: the address plus
+                // the chunk offset, read the way any non-slot base reads.
+                if (place.slots.empty()) {
+                    refuse(pos, "this field layout is not lowered yet");
+                    return {undefined()};
+                }
+                instr.addressBase = place.slots[kFirstWord];
+                instr.displacement = cur;
+            } else if (disp + take <= layout::kSizePointer) {
+                uint64_t word = static_cast<uint64_t>(cur / layout::kSizePointer);
                 if (word >= place.slots.size()) {
                     refuse(pos, "this field layout is not lowered yet");
                     return {undefined()};
@@ -1720,7 +3107,7 @@ void Lowerer::storeRange(Position pos, const Place& place,
             instr.storedValue = words[word];
             if (sub != 0) {
                 ir::Value by =
-                    constantI64(sub * layout::kSizeI8, tally, pos);
+                    constantI64(sub * layout::kBitsPerByte, tally, pos);
                 if (failed_) {
                     return;
                 }
@@ -1738,13 +3125,42 @@ void Lowerer::storeRange(Position pos, const Place& place,
             instr.displacement = cur;
         } else if (!place.global.empty()) {
             if (disp + take > layout::kSizePointer) {
-                refuse(pos, "this field layout is not lowered yet");
-                return;
+                // A take straddling two eight-byte lines stores through a
+                // computed address, like the slot path below: the label
+                // plus the absolute offset names bytes the direct form
+                // cannot.
+                TypeRef addrType{ctx_.pointer(ctx_.basic(BasicKind::U8))};
+                ir::Instr lea;
+                lea.op = ir::Op::DataAddr;
+                lea.loc = pos;
+                lea.type = addrType;
+                lea.width = ir::IRType::Ptr;
+                lea.globalLabel = place.global;
+                lea.isPure = true;
+                ir::Value base = newValue(lea.width, addrType, pos);
+                lea.results.push_back(base);
+                emit(std::move(lea));
+                if (failed_) {
+                    return;
+                }
+                instr.addressBase = base;
+                instr.displacement = cur;
+            } else {
+                instr.globalLabel = place.global;
+                instr.displacement = cur;
             }
-            instr.globalLabel = place.global;
-            instr.displacement = cur;
         } else {
-            if (disp + take <= layout::kSizePointer) {
+            if (place.isAddress) {
+                // One computed address names every chunk, like loads: the
+                // address plus the chunk offset, stored the way any
+                // non-slot base stores.
+                if (place.slots.empty()) {
+                    refuse(pos, "this field layout is not lowered yet");
+                    return;
+                }
+                instr.addressBase = place.slots[kFirstWord];
+                instr.displacement = cur;
+            } else if (disp + take <= layout::kSizePointer) {
                 uint64_t word = static_cast<uint64_t>(cur / layout::kSizePointer);
                 if (word >= place.slots.size()) {
                     refuse(pos, "this field layout is not lowered yet");
@@ -1789,6 +3205,14 @@ void Lowerer::constructStruct(const std::vector<ir::Value>& slots, const NewStru
             return;
         }
         std::vector<ir::Value> value = lowerWords(field.value.get());
+        if (failed_) {
+            return;
+        }
+        // A concrete value for an interface field boxes to the pair
+        // before the range store below, which then stores two words.
+        value = boxClassOperand(field.value.get(), std::move(value),
+                                  checker_.typeOf(field.value.get()), fieldType,
+                                  field.value->pos);
         if (failed_) {
             return;
         }
@@ -1856,9 +3280,134 @@ bool Lowerer::isZeroRepeatFiller(const Expr& filler, TypeRef element) {
         return false;
     }
     std::unordered_set<std::string> active;
-    EvalEnv env = resolver_.evalEnv(resolver_.moduleScope());
+    EvalEnv env = resolver_.evalEnv(emitScope());
     EvalResult folded = evalConstInt(*lit, env, active);
     return folded.ok && folded.value == 0;
+}
+
+bool Lowerer::globalInitStructBytes(const NewStruct& made, TypeRef structType,
+                                        std::string& bytes) {
+    if (structType.isError()) {
+        return false;
+    }
+    std::optional<DeclId> id = structType.type->decl();
+    if (!id.has_value()) {
+        return false;
+    }
+    Kind kind = structType.type->kind();
+    if (kind != Kind::Struct && kind != Kind::Class) {
+        return false;
+    }
+    int64_t total = (kind == Kind::Class)
+                        ? resolver_.classSize(*id)
+                        : resolver_.nominalSize(structType.type);
+    if (total <= 0) {
+        return false;
+    }
+    std::unordered_set<std::string> active;
+    EvalEnv env = resolver_.evalEnv(emitScope());
+    auto foldScalar = [&](const Expr& leaf, TypeRef leafType,
+                          std::string& out) -> bool {
+        int64_t width = resolver_.nominalSize(leafType.type);
+        if (width <= 0) {
+            return false;
+        }
+        if (leafType.type->kind() == Kind::Basic &&
+            basicIsFloat(*leafType.type->basic())) {
+            FloatResult asFloat = evalConstFloat(leaf, env, active);
+            if (!asFloat.ok) {
+                return false;
+            }
+            uint64_t bits = 0;
+            if (*leafType.type->basic() == BasicKind::F32) {
+                float narrowed = static_cast<float>(asFloat.value);
+                std::memcpy(&bits, &narrowed, sizeof narrowed);
+            } else {
+                std::memcpy(&bits, &asFloat.value, sizeof asFloat.value);
+            }
+            for (int64_t byte = 0; byte < width; ++byte) {
+                out.push_back(static_cast<char>(bits & 0xFFu));
+                bits >>= 8;
+            }
+            return true;
+        }
+        EvalResult folded = evalConstInt(leaf, env, active);
+        if (!folded.ok) {
+            return false;
+        }
+        uint64_t bits = static_cast<uint64_t>(folded.value);
+        for (int64_t byte = 0; byte < width; ++byte) {
+            out.push_back(static_cast<char>(bits & 0xFFu));
+            bits >>= 8;
+        }
+        return true;
+    };
+    std::string image;
+    {
+        uint64_t want = static_cast<uint64_t>(total);
+        while (static_cast<uint64_t>(image.size()) != want) {
+            image.push_back('\0');
+        }
+    }
+    for (const auto& field : made.fields) {
+        if (field.value == nullptr) {
+            return false;
+        }
+        const Expr* sub = field.value.get();
+        TypeRef ftype = resolver_.fieldType(*id, field.name);
+        if (ftype.isError()) {
+            return false;
+        }
+        int64_t off = resolver_.fieldOffset(*id, field.name);
+        if (off < 0) {
+            return false;
+        }
+        std::string piece;
+        if (dynamic_cast<const NewArray*>(sub) != nullptr) {
+            if (!globalInitBytes(static_cast<const NewArray&>(*sub), ftype,
+                                 piece)) {
+                return false;
+            }
+        } else if (dynamic_cast<const NewStruct*>(sub) != nullptr) {
+            if (!globalInitStructBytes(static_cast<const NewStruct&>(*sub),
+                                       ftype, piece)) {
+                return false;
+            }
+        } else if (const auto* cast = dynamic_cast<const Cast*>(sub)) {
+            // `nilPtr as I` folds to sixteen zero bytes: the gate admits
+            // only this spelling for interface fields, so anything
+            // arriving here is null by construction.
+            if (dynamic_cast<const NilPtr*>(cast->expr.get()) == nullptr ||
+                ftype.type->kind() != Kind::Interface) {
+                return false;
+            }
+            piece.append(static_cast<size_t>(kInterfaceWords) *
+                             static_cast<size_t>(layout::kSizePointer),
+                         '\0');
+        } else if (dynamic_cast<const NilPtr*>(sub) != nullptr) {
+            // A bare nil pointer fills its field with zeros: the width
+            // comes from the declared field type, which the gate already
+            // checked is a null-accepting shape.
+            int64_t width = resolver_.nominalSize(ftype.type);
+            if (width <= 0) {
+                return false;
+            }
+            piece.append(static_cast<size_t>(width), '\0');
+        } else if (!foldScalar(*sub, ftype, piece)) {
+            return false;
+        }
+        uint64_t at = static_cast<uint64_t>(off);
+        uint64_t count = static_cast<uint64_t>(piece.size());
+        uint64_t span = static_cast<uint64_t>(total);
+        if (at + count > span) {
+            return false;
+        }
+        for (uint64_t i = 0; i < count; ++i) {
+            image[at + i] = piece[i];
+        }
+    }
+    bytes = std::move(image);
+    return true;
 }
 
 bool Lowerer::globalInitBytes(const NewArray& init, TypeRef arrayType,
@@ -1873,7 +3422,7 @@ bool Lowerer::globalInitBytes(const NewArray& init, TypeRef arrayType,
         return false;
     }
     std::unordered_set<std::string> active;
-    EvalEnv env = resolver_.evalEnv(resolver_.moduleScope());
+    EvalEnv env = resolver_.evalEnv(emitScope());
     auto appendScalar = [&](const Expr& leaf, int64_t width, TypeRef elemType) -> bool {
         if (width <= 0) {
             return false;
@@ -1932,6 +3481,33 @@ bool Lowerer::globalInitBytes(const NewArray& init, TypeRef arrayType,
                 return false;
             }
             bytes.append(static_cast<size_t>(total), '\0');
+            return true;
+        }
+        if (const auto* cast = dynamic_cast<const Cast*>(&leaf)) {
+            // `nilPtr as I` folds to sixteen zero bytes: the gate admits
+            // only this spelling for interface elements, so anything
+            // arriving here is null by construction.
+            if (dynamic_cast<const NilPtr*>(cast->expr.get()) != nullptr &&
+                elemType.type->kind() == Kind::Interface) {
+                bytes.append(static_cast<size_t>(kInterfaceWords) *
+                                 static_cast<size_t>(layout::kSizePointer),
+                             '\0');
+                return true;
+            }
+        }
+        if (const auto* sub = dynamic_cast<const NewStruct*>(&leaf)) {
+            // A struct or class element carries its fields' image bytes:
+            // the function answers the element's whole image, which
+            // appends to this one.
+            if (elemType.type->kind() != Kind::Struct &&
+                elemType.type->kind() != Kind::Class) {
+                return false;
+            }
+            std::string piece;
+            if (!globalInitStructBytes(*sub, elemType, piece)) {
+                return false;
+            }
+            bytes.append(piece.data(), piece.size());
             return true;
         }
         return appendScalar(leaf, resolver_.nominalSize(elemType.type), elemType);
@@ -1996,13 +3572,20 @@ void Lowerer::constructArray(const std::vector<ir::Value>& slots, const NewArray
             return;
         }
         std::unordered_set<std::string> active;
-        EvalEnv env = resolver_.evalEnv(resolver_.moduleScope());
+        EvalEnv env = resolver_.evalEnv(emitScope());
         EvalResult count = evalConstInt(*n.length, env, active);
         if (!count.ok || count.value < 0) {
             refuse(n.length->pos, "an array length folds to a count");
             return;
         }
         std::vector<ir::Value> one = lowerWords(n.inits[0].get());
+        if (failed_) {
+            return;
+        }
+        // A concrete filler for an interface array boxes once, then fills
+        // every element with the same pair.
+        one = boxClassOperand(n.inits[0].get(), std::move(one), checker_.typeOf(n.inits[0].get()),
+                                element, n.inits[0]->pos);
         if (failed_) {
             return;
         }
@@ -2036,6 +3619,13 @@ void Lowerer::constructArray(const std::vector<ir::Value>& slots, const NewArray
         if (failed_) {
             return;
         }
+        // A concrete element for an interface array boxes to the pair
+        // before the range store below, like every other aggregate site.
+        one = boxClassOperand(n.inits[i].get(), std::move(one), checker_.typeOf(n.inits[i].get()),
+                                element, n.inits[i]->pos);
+        if (failed_) {
+            return;
+        }
         atByte(static_cast<int64_t>(i) * elemBytes, element, one, n.inits[i]->pos);
         if (failed_) {
             return;
@@ -2044,6 +3634,97 @@ void Lowerer::constructArray(const std::vector<ir::Value>& slots, const NewArray
 }
 
 std::vector<ir::Value> Lowerer::lowerField(const Field& n) {
+    // `lib.gB`: the object names a module, so the member is a global in
+    // the defining scope. Load through the same global path a bare
+    // spelling uses; anything else falls through to the paths below.
+    if (const auto* ident = dynamic_cast<const Ident*>(n.object.get())) {
+        if (const GlobalBinding* global =
+                resolveModuleGlobal(ident->name, n.name)) {
+            return loadGlobal(n.pos, *global);
+        }
+        // `b.inc`: the object names a module and the member names its
+        // function, so this answers the closure pair for that function:
+        // a forwarder with the receiver-first shape plus a null captures
+        // word, with no allocation. Locals shadow module names; generic
+        // functions and non-function members fall through below.
+        bool shadowed = false;
+        for (auto frame = locals_.rbegin();
+             frame != locals_.rend() && !shadowed; ++frame) {
+            shadowed = frame->find(ident->name) != frame->end();
+        }
+        const resolve::Scope* here = homeScope();
+        const resolve::Decl* moduleDecl =
+            here != nullptr ? resolver_.lookup(here, ident->name) : nullptr;
+        if (!shadowed && moduleDecl != nullptr &&
+            moduleDecl->kind == resolve::DeclKind::Module) {
+            const resolve::Scope* home =
+                resolver_.scopeOf(moduleDecl->origin);
+            const resolve::Decl* member =
+                home != nullptr ? resolver_.lookup(home, n.name) : nullptr;
+            if (member != nullptr &&
+                member->kind == resolve::DeclKind::Func &&
+                member->typeParams == 0) {
+                TypeRef type = checker_.typeOf(&n);
+                if (!type.isError() && type.type->kind() == Kind::Closure &&
+                    wordCount(type) == static_cast<int>(kClosureWords)) {
+                    std::string link = resolver_.linkName(*member);
+                    std::string fwd =
+                        forwardFunction(link, member->sig, n.pos);
+                    if (failed_) {
+                        return {undefined()};
+                    }
+                    ir::Instr fn;
+                    fn.op = ir::Op::FnAddr;
+                    fn.loc = n.pos;
+                    fn.type = wordType(type, kFirstWord);
+                    fn.width = ir::IRType::Ptr;
+                    fn.globalLabel = fwd;
+                    fn.isPure = true;
+                    ir::Value code = newValue(fn.width, fn.type, n.pos);
+                    fn.results.push_back(code);
+                    emit(std::move(fn));
+                    ir::Value caps =
+                        constantI64(0, wordType(type, kLenWord), n.pos);
+                    if (failed_) {
+                        return {undefined()};
+                    }
+                    return {code, caps};
+                }
+            }
+            // `lib.CIRCLE` folds like a bare enumerator rooted in that
+            // module: exactly one of its enums may own the name. Globals
+            // and functions already answered above, so this branch owns
+            // nothing they could name.
+            if (member == nullptr && home != nullptr) {
+                const resolve::Decl* owner = nullptr;
+                int64_t value = 0;
+                int owners = 0;
+                for (const auto& [name, decl] : home->bindings) {
+                    if (decl == nullptr ||
+                        decl->kind != resolve::DeclKind::Type ||
+                        decl->nominal != Kind::Enum) {
+                        continue;
+                    }
+                    for (const auto& entry : resolver_.enumMembers(decl->id)) {
+                        if (entry.first == n.name) {
+                            ++owners;
+                            owner = decl;
+                            value = entry.second;
+                            break;
+                        }
+                    }
+                }
+                if (owner != nullptr && owners == 1) {
+                    TypeRef count{ctx_.basic(BasicKind::I32)};
+                    ir::Value answer = constantI64(value, count, n.pos);
+                    if (failed_) {
+                        return {undefined()};
+                    }
+                    return {answer};
+                }
+            }
+        }
+    }
     if (const auto* ident = dynamic_cast<const Ident*>(n.object.get())) {
         // `Color.RED`: the checker answered the enumerator's integer type,
         // so the value folds here to that same integer (TYPES §2.6). A
@@ -2056,7 +3737,7 @@ std::vector<ir::Value> Lowerer::lowerField(const Field& n) {
         }
         if (!shadowed) {
             const resolve::Scope* here =
-                resolver_.scopeOf(checker_.module());
+                homeScope();
             const resolve::Decl* named =
                 here != nullptr ? resolver_.lookup(here, ident->name)
                                 : nullptr;
@@ -2065,7 +3746,7 @@ std::vector<ir::Value> Lowerer::lowerField(const Field& n) {
                 named->nominal == Kind::Enum) {
                 std::string home = named->scope != nullptr
                                        ? named->scope->module
-                                       : checker_.module();
+                                       : homeModule();
                 if (!resolver_.isEnumMember(home + "." + named->name,
                                             n.name)) {
                     refuse(n.pos, "this field access");
@@ -2073,6 +3754,99 @@ std::vector<ir::Value> Lowerer::lowerField(const Field& n) {
                 }
                 int64_t value = resolver_.enumValue(home + "." + named->name,
                                                     n.name);
+                TypeRef count{ctx_.basic(BasicKind::I32)};
+                ir::Value answer = constantI64(value, count, n.pos);
+                if (failed_) {
+                    return {undefined()};
+                }
+                return {answer};
+            }
+            // `Shade.GREEN` folds like the enum it aliases: the checker
+            // proved the member, so the value here is that enumerator's.
+            if (named != nullptr &&
+                named->kind == resolve::DeclKind::Alias &&
+                named->aliasTarget != nullptr) {
+                const resolve::Scope* hereScope =
+                    homeScope();
+                TypeRef target = resolver_.resolveType(named->aliasTarget,
+                                                        hereScope);
+                if (!target.isError() &&
+                    target.type->kind() == Kind::Enum) {
+                    std::optional<DeclId> aliasId = target.type->decl();
+                    if (aliasId.has_value()) {
+                        int64_t value = 0;
+                        bool known = false;
+                        for (const auto& entry :
+                             resolver_.enumMembers(*aliasId)) {
+                            if (entry.first == n.name) {
+                                value = entry.second;
+                                known = true;
+                                break;
+                            }
+                        }
+                        if (!known) {
+                            refuse(n.pos, "this field access");
+                            return {undefined()};
+                        }
+                        TypeRef count{ctx_.basic(BasicKind::I32)};
+                        ir::Value answer =
+                            constantI64(value, count, n.pos);
+                        if (failed_) {
+                            return {undefined()};
+                        }
+                        return {answer};
+                    }
+                }
+            }
+        }
+    }
+    if (const auto* inner = dynamic_cast<const Field*>(n.object.get())) {
+        // `mid.Col.GREEN` folds to the enumerator's integer, mirroring
+        // the same-module spelling above. Anything else here refuses:
+        // the checker lets only this spelling through.
+        if (const auto* mod = dynamic_cast<const Ident*>(inner->object.get())) {
+            bool shadowed = false;
+            for (auto frame = locals_.rbegin();
+                 frame != locals_.rend() && !shadowed; ++frame) {
+                shadowed = frame->find(mod->name) != frame->end();
+            }
+            const resolve::Scope* here =
+                homeScope();
+            const resolve::Decl* modDecl =
+                here != nullptr ? resolver_.lookup(here, mod->name) : nullptr;
+            const resolve::Scope* home =
+                (modDecl != nullptr &&
+                 modDecl->kind == resolve::DeclKind::Module)
+                    ? resolver_.scopeOf(modDecl->origin)
+                    : nullptr;
+            const resolve::Decl* member =
+                home != nullptr ? resolver_.lookup(home, inner->name)
+                                : nullptr;
+            std::optional<DeclId> enumId;
+            if (!shadowed && member != nullptr &&
+                member->kind == resolve::DeclKind::Type &&
+                member->nominal == Kind::Enum) {
+                enumId = member->id;
+            } else if (!shadowed && member != nullptr &&
+                       member->kind == resolve::DeclKind::Alias &&
+                       member->aliasTarget != nullptr) {
+                TypeRef target =
+                    resolver_.resolveType(member->aliasTarget, home);
+                if (!target.isError() &&
+                    target.type->kind() == Kind::Enum) {
+                    enumId = target.type->decl();
+                }
+            }
+            if (enumId.has_value()) {
+                const resolve::Decl* named = resolver_.declById(*enumId);
+                if (named == nullptr || named->scope == nullptr ||
+                    !resolver_.isEnumMember(
+                        named->scope->module + "." + named->name, n.name)) {
+                    refuse(n.pos, "this field access");
+                    return {undefined()};
+                }
+                int64_t value = resolver_.enumValue(
+                    named->scope->module + "." + named->name, n.name);
                 TypeRef count{ctx_.basic(BasicKind::I32)};
                 ir::Value answer = constantI64(value, count, n.pos);
                 if (failed_) {
@@ -2116,24 +3890,37 @@ std::vector<ir::Value> Lowerer::lowerField(const Field& n) {
         }
         base = std::move(scratch);
     } else if (!resolvePlace(n.object.get(), base)) {
-        // A field of a pointer element (`p[0].lo`): the direct route only
-        // knows slots, but a pointer element has an address. Materialize
-        // it the way computed reads do, then read the field off it. The
-        // Field branch of resolvePlace carries the same fallback for the
-        // store path; both stay because each serves a different node.
+        // A field of a pointer element (`p[0].lo`) or of a computed array
+        // element (`arr[i].x`): the direct route only knows slots, but both
+        // have an address — the shared guarded helper materializes each,
+        // lowering the index once. The Field branch of resolvePlace
+        // carries the same fallback for the store path; both stay because
+        // each serves a different node.
         const Index* elem = dynamic_cast<const Index*>(n.object.get());
         TypeRef arrType = elem != nullptr
             ? checker_.typeOf(elem->array.get())
             : TypeRef{ctx_.error()};
-        if (elem == nullptr || arrType.isError() ||
-            arrType.type->kind() != Kind::Pointer) {
+        if (elem == nullptr || arrType.isError()) {
+            refuse(n.object->pos, "this field access");
+            return {undefined()};
+        }
+        Kind inner = arrType.type->kind();
+        if (inner != Kind::Pointer && inner != Kind::Array) {
             refuse(n.object->pos, "this field access");
             return {undefined()};
         }
         Place base0;
-        if (!resolvePlace(elem->array.get(), base0) ||
-            !pointerElementPlace(*elem, base0, arrType,
-                                 "this field access", base)) {
+        if (!resolvePlace(elem->array.get(), base0)) {
+            refuse(n.object->pos, "this field access");
+            return {undefined()};
+        }
+        if (inner == Kind::Pointer) {
+            if (!pointerElementPlace(*elem, base0, arrType,
+                                     "this field access", base)) {
+                return {undefined()};
+            }
+        } else if (!arrayElementPlace(*elem, base0, arrType,
+                                      "this field access", base)) {
             return {undefined()};
         }
     }
@@ -2366,7 +4153,7 @@ bool Lowerer::arrayElementPlace(const Index& n, const Place& base,
         return arrayElementPlace(n, here, arrayType, what, at);
     }
     std::unordered_set<std::string> active;
-    EvalEnv env = resolver_.evalEnv(resolver_.moduleScope());
+    EvalEnv env = resolver_.evalEnv(emitScope());
     EvalResult folded = evalConstInt(*n.index, env, active);
     if (folded.ok) {
         // A folded index is a slot offset the direct route owns: arriving
@@ -2466,7 +4253,18 @@ bool Lowerer::arrayElementPlace(const Index& n, const Place& base,
     gep.loc = n.pos;
     gep.type = ptr;
     gep.width = ir::IRType::Ptr;
-    gep.addressBase = base.slots[kFirstWord];
+    // An indirect base owns no slots by construction: its address is the
+    // loaded pointer value, and reading slots[0] answers past the end of
+    // an empty vector. The accumulated offset still applies on top.
+    if (base.hasIndirect) {
+        gep.addressBase = base.indirect;
+    } else {
+        if (base.slots.empty()) {
+            refuse(n.pos, what);
+            return false;
+        }
+        gep.addressBase = base.slots[kFirstWord];
+    }
     gep.displacement = base.off;
     gep.isPure = true;
     gep.operands.push_back(byteOff);
@@ -2581,7 +4379,43 @@ bool Lowerer::arrayBase(const Expr* arrayExpr, const Index& n, Place& base,
         return true;
     }
     if (!resolvePlace(arrayExpr, base)) {
-        return false;
+        // An index into a call's answer (`makeRow(9)[1]`): the words have
+        // no address, so they spill to scratch slots first and the index
+        // reads from there like any other place (the field path over a
+        // call answer carries the same fallback for reads).
+        const auto* call = dynamic_cast<const Call*>(arrayExpr);
+        if (call == nullptr) {
+            return false;
+        }
+        TypeRef answer = checker_.typeOf(arrayExpr);
+        if (answer.isError()) {
+            return false;
+        }
+        std::vector<ir::Value> words =
+            lowerCallWords(const_cast<Call&>(*call));
+        if (failed_) {
+            return false;
+        }
+        if (words.empty() ||
+            words.size() != static_cast<size_t>(wordCount(answer))) {
+            refuse(n.pos, what);
+            return false;
+        }
+        std::vector<ir::Value> slots =
+            allocaSlots(answer, n.pos, static_cast<uint64_t>(words.size()));
+        if (failed_) {
+            return false;
+        }
+        Place scratch;
+        scratch.slots = slots;
+        scratch.type = answer;
+        storeRange(n.pos, scratch, words, answer);
+        if (failed_) {
+            return false;
+        }
+        base = std::move(scratch);
+        arrayType = answer;
+        return true;
     }
     arrayType = base.type;
     return true;
@@ -2691,7 +4525,20 @@ bool Lowerer::copySliceToArray(Position pos, ir::Value ptr, ir::Value len,
 std::vector<ir::Value> Lowerer::lowerIndex(const Index& n) {
     Place base;
     TypeRef arrayType;
-    if (!arrayBase(n.array.get(), n, base, arrayType, "this index")) {
+    if (const auto* wide = dynamic_cast<const WideLit*>(n.array.get())) {
+        // A literal names rodata, not slots: the guarded array path below
+        // reads through the blob's label with global-array semantics, so
+        // folded proofs and runtime guards both apply unchanged.
+        arrayType = checker_.typeOf(n.array.get());
+        if (arrayType.isError() || arrayType.type->kind() != Kind::Array) {
+            refuse(n.array->pos, "this index");
+            return {undefined()};
+        }
+        base.global = wideBlob(*wide);
+        base.off = 0;
+        base.type = arrayType;
+        base.isVolatile = false;
+    } else if (!arrayBase(n.array.get(), n, base, arrayType, "this index")) {
         refuse(n.array->pos, "this index");
         return {undefined()};
     }
@@ -2719,7 +4566,7 @@ std::vector<ir::Value> Lowerer::lowerIndex(const Index& n) {
         return {undefined()};
     }
     std::unordered_set<std::string> active;
-    EvalEnv env = resolver_.evalEnv(resolver_.moduleScope());
+    EvalEnv env = resolver_.evalEnv(emitScope());
     EvalResult folded = evalConstInt(*n.index, env, active);
     if (folded.ok) {
         // A folded index is an offset the compiler names: no address
@@ -2787,7 +4634,7 @@ void Lowerer::storeIndex(const Index& target, const std::vector<ir::Value>& word
         return;
     }
     std::unordered_set<std::string> active;
-    EvalEnv env = resolver_.evalEnv(resolver_.moduleScope());
+    EvalEnv env = resolver_.evalEnv(emitScope());
     EvalResult folded = evalConstInt(*target.index, env, active);
     if (folded.ok) {
         if (folded.value < 0) {
@@ -2817,7 +4664,7 @@ void Lowerer::storeIndex(const Index& target, const std::vector<ir::Value>& word
 // compiler names it, or nothing when it is a runtime value.
 bool Lowerer::foldBound(const Expr* expr, int64_t& value) {
     std::unordered_set<std::string> active;
-    EvalEnv env = resolver_.evalEnv(resolver_.moduleScope());
+    EvalEnv env = resolver_.evalEnv(emitScope());
     EvalResult folded = evalConstInt(*expr, env, active);
     if (!folded.ok) {
         return false;
@@ -2827,7 +4674,15 @@ bool Lowerer::foldBound(const Expr* expr, int64_t& value) {
 }
 
 std::vector<ir::Value> Lowerer::lowerSizeof(const SizeofType& n) {
-    TypeRef target = resolver_.resolveType(n.type.get(), resolver_.moduleScope());
+    // Read the operand the checker recorded: inside a spec emission it
+    // names the substituted type, which re-resolving in module scope
+    // cannot answer past type parameters. Outside generics this is the
+    // same type the old path resolved.
+    TypeRef target = checker_.sizeofOperand(&n);
+    if (target.isError()) {
+        refuse(n.pos, "this expression");
+        return {undefined()};
+    }
     if (target.isError()) {
         refuse(n.pos, "this expression");
         return {undefined()};
@@ -2955,22 +4810,54 @@ std::vector<ir::Value> Lowerer::lowerSlice(const SliceExpr& n) {
     TypeRef ptrType{ctx_.pointer(element.type)};
     ir::Value ptr = undefined();
     if (baseKind == Kind::Array) {
+        // Slot-precise logic must not read slots then: an indirect base
+        // owns no slots by construction (BUG-278), so a base with
+        // neither slots nor an indirect address refuses instead of
+        // answering past the end of an empty vector.
+        if (!base.hasIndirect && base.slots.empty()) {
+            refuse(n.array->pos, "this expression");
+            return {undefined()};
+        }
         if (loFolded) {
-            int64_t per = layout::kSizePointer;
-            int64_t byteAddr = base.off + loConst * elemBytes;
-            uint64_t slotIdx = static_cast<uint64_t>(byteAddr / per);
-            if (slotIdx >= static_cast<uint64_t>(base.slots.size())) {
-                refuse(n.pos, "this expression");
-                return {undefined()};
-            }
-            int64_t intra = byteAddr % per;
-            ptr = computedBase(base.slots[slotIdx], intra, n.pos);
-            ptr.type = ptrType;
-        } else {
-            for (uint64_t i = 0; i < static_cast<uint64_t>(base.slots.size()); ++i) {
-                if (base.slots[i].id != base.slots[0].id + static_cast<uint32_t>(i)) {
+            int64_t byteDelta = loConst * elemBytes;
+            if (base.hasIndirect) {
+                // The base address is the loaded pointer value; the
+                // accumulated offset still applies on top, and the
+                // folded advance rides along as a constant operand
+                // (codegen reads operands[0] unconditionally).
+                ir::Instr gep;
+                gep.op = ir::Op::Gep;
+                gep.loc = n.pos;
+                gep.type = ptrType;
+                gep.width = ir::IRType::Ptr;
+                gep.addressBase = base.indirect;
+                gep.displacement = base.off;
+                gep.isPure = true;
+                gep.operands.push_back(constantI64(byteDelta, count, n.lo->pos));
+                ptr = newValue(gep.width, ptrType, n.pos);
+                gep.results.push_back(ptr);
+                emit(std::move(gep));
+            } else {
+                int64_t per = layout::kSizePointer;
+                int64_t byteAddr = base.off + byteDelta;
+                uint64_t slotIdx = static_cast<uint64_t>(byteAddr / per);
+                if (slotIdx >= static_cast<uint64_t>(base.slots.size())) {
                     refuse(n.pos, "this expression");
                     return {undefined()};
+                }
+                int64_t intra = byteAddr % per;
+                ptr = computedBase(base.slots[slotIdx], intra, n.pos);
+                ptr.type = ptrType;
+            }
+        } else {
+            // Consecutive slot ids are a direct-base fact: an indirect
+            // base has no slots to be consecutive.
+            if (!base.hasIndirect) {
+                for (uint64_t i = 0; i < static_cast<uint64_t>(base.slots.size()); ++i) {
+                    if (base.slots[i].id != base.slots[0].id + static_cast<uint32_t>(i)) {
+                        refuse(n.pos, "this expression");
+                        return {undefined()};
+                    }
                 }
             }
             ir::Value scaled = loVal;
@@ -2996,7 +4883,11 @@ std::vector<ir::Value> Lowerer::lowerSlice(const SliceExpr& n) {
             gep.loc = n.pos;
             gep.type = ptrType;
             gep.width = ir::IRType::Ptr;
-            gep.addressBase = base.slots[0];
+            if (base.hasIndirect) {
+                gep.addressBase = base.indirect;
+            } else {
+                gep.addressBase = base.slots[0];
+            }
             gep.displacement = base.off;
             gep.isPure = true;
             gep.operands.push_back(scaled);
@@ -3342,6 +5233,89 @@ Lowerer::PartBytes Lowerer::rodataPair(const std::string& text, Position pos) {
     return out;
 }
 
+ir::Value Lowerer::wideRodata(const WideLit& lit) {
+    std::string label = wideBlob(lit);
+    TypeRef addr{ctx_.pointer(ctx_.basic(BasicKind::U16))};
+    ir::Instr data;
+    data.op = ir::Op::DataAddr;
+    data.loc = lit.pos;
+    data.type = addr;
+    data.width = ir::IRType::Ptr;
+    data.globalLabel = label;
+    data.isPure = true;
+    ir::Value at = newValue(data.width, addr, lit.pos);
+    data.results.push_back(at);
+    emit(std::move(data));
+    if (failed_) {
+        return undefined();
+    }
+    return at;
+}
+
+std::string Lowerer::wideBlob(const WideLit& lit) {
+    // Units lay out little-endian with one zero unit past the end: `*u16`
+    // reads run to zero, and `*char` reads run to NUL for the same reason.
+    // The length word counts units, never the terminator.
+    std::string bytes;
+    for (uint16_t unit : lit.units) {
+        bytes.push_back(static_cast<char>(unit & 0xFF));
+        bytes.push_back(static_cast<char>((unit >> 8) & 0xFF));
+    }
+    bytes.push_back('\0');
+    bytes.push_back('\0');
+    std::string label = "w_" + std::to_string(rodataSeq_++);
+    ir::Rodata blob;
+    blob.label = label;
+    blob.bytes = std::move(bytes);
+    module_->rodata.push_back(std::move(blob));
+    return label;
+}
+
+std::vector<ir::Value> Lowerer::wideWords(const WideLit& lit) {
+    // Take-packed constants: the same greedy 8/4/2/1 split storeRange and
+    // loadRange use, so these words store and compare with the shape array
+    // construction answers. One unit is two bytes little-endian, plus one
+    // zero unit past the end.
+    std::string bytes;
+    for (uint16_t unit : lit.units) {
+        bytes.push_back(static_cast<char>(unit & 0xFF));
+        bytes.push_back(static_cast<char>((unit >> 8) & 0xFF));
+    }
+    bytes.push_back('\0');
+    bytes.push_back('\0');
+    int64_t per = layout::kSizePointer;
+    std::vector<ir::Value> out;
+    uint64_t at = 0;
+    while (at < bytes.size()) {
+        int64_t left = static_cast<int64_t>(bytes.size() - at);
+        int64_t take = layout::kSizeI8;
+        BasicKind kind = BasicKind::U8;
+        if (left >= per) {
+            take = per;
+            kind = BasicKind::U64;
+        } else if (left >= layout::kSizeI32) {
+            take = layout::kSizeI32;
+            kind = BasicKind::U32;
+        } else if (left >= layout::kSizeI16) {
+            take = layout::kSizeI16;
+            kind = BasicKind::U16;
+        }
+        uint64_t word = 0;
+        for (int64_t byte = 0; byte < take; ++byte) {
+            uint64_t bits =
+                static_cast<unsigned char>(bytes[at + static_cast<size_t>(byte)]);
+            word |= bits << (byte * 8);
+        }
+        at += static_cast<size_t>(take);
+        out.push_back(constantI64(static_cast<int64_t>(word),
+                                  TypeRef{ctx_.basic(kind)}, lit.pos));
+        if (failed_) {
+            return {undefined()};
+        }
+    }
+    return out;
+}
+
 // Copies `len` bytes from `src` to `dst`: an index slot, a head testing it
 // against the length, a body moving one byte. The addresses advance by
 // addition, the slice-advance idiom, so each side dereferences a computed
@@ -3627,30 +5601,89 @@ Lowerer::LoweredString Lowerer::lowerInterp(const StringLit& lit) {
         if (type.type->kind() == Kind::Basic && type.type->basic().has_value() &&
             (*type.type->basic() == BasicKind::F32 ||
              *type.type->basic() == BasicKind::F64)) {
-            refuse(part.expr->pos, "a float in interpolation is not lowered yet");
-            return LoweredString{};
+            BasicKind basic = *type.type->basic();
+            std::vector<ir::Value> got = lowerWords(part.expr.get());
+            if (failed_ || got.size() != kOneWord) {
+                refuse(part.expr->pos, "this interpolation");
+                return LoweredString{};
+            }
+            // The helper converts one double, so a float widens first:
+            // the Cast carries the operand's type, which is what tells
+            // the backend to convert rather than re-read the bits.
+            ir::Value wide = got[kFirstWord];
+            if (basic == BasicKind::F32) {
+                TypeRef dbl{ctx_.basic(BasicKind::F64)};
+                ir::Instr grow;
+                grow.op = ir::Op::Cast;
+                grow.loc = lit.pos;
+                grow.type = dbl;
+                grow.width = ir::IRType::F64;
+                grow.operands.push_back(got[kFirstWord]);
+                wide = newValue(grow.width, dbl, lit.pos);
+                grow.results.push_back(wide);
+                emit(std::move(grow));
+            }
+            // Thirty-two bytes hold the longest float shape: a sign,
+            // nineteen whole digits, the point, six fraction digits.
+            std::vector<ir::Value> scratch = allocaSlots(count, lit.pos, 4);
+            if (failed_) {
+                return LoweredString{};
+            }
+            ir::Value buf = computedBase(scratch[kFirstWord], 0, lit.pos);
+            if (failed_) {
+                return LoweredString{};
+            }
+            TypeRef ptrType{ctx_.pointer(ctx_.basic(BasicKind::U8))};
+            buf.type = ptrType;
+            ir::Instr call;
+            call.op = ir::Op::Call;
+            call.loc = lit.pos;
+            call.callee = "cider_ftoa";
+            ir::Argument first;
+            first.words.push_back(buf);
+            call.arguments.push_back(std::move(first));
+            ir::Argument second;
+            second.words.push_back(wide);
+            second.width = ir::IRType::F64;
+            call.arguments.push_back(std::move(second));
+            ir::Value digits = newValue(ir::IRType::I64, count, lit.pos);
+            call.results.push_back(digits);
+            call.width = ir::IRType::I64;
+            call.type = count;
+            emit(std::move(call));
+            PartBytes out;
+            out.ptr = buf;
+            out.len = digits;
+            parts.push_back(out);
+            continue;
         }
         refuse(part.expr->pos, "this interpolation");
         return LoweredString{};
     }
+    return joinStrings(parts, lit.pos);
+}
+
+Lowerer::LoweredString Lowerer::joinStrings(const std::vector<PartBytes>& parts,
+                                            Position pos) {
     // The lengths sum to a total; one allocation answers the buffer; every
     // part copies into it at the running offset. A zero total allocates
     // zero bytes, which answers nil: every string consumer checks the
     // length before touching the pointer, so nothing dereferences it.
-    ir::Value total = constantI64(0, count, lit.pos);
+    TypeRef count{ctx_.basic(BasicKind::I64)};
+    ir::Value total = constantI64(0, count, pos);
     if (failed_) {
         return LoweredString{};
     }
     for (const PartBytes& part : parts) {
         ir::Instr add;
         add.op = ir::Op::Add;
-        add.loc = lit.pos;
+        add.loc = pos;
         add.type = count;
         add.width = ir::IRType::I64;
         add.isPure = true;
         add.operands.push_back(total);
         add.operands.push_back(part.len);
-        ir::Value sum = newValue(add.width, count, lit.pos);
+        ir::Value sum = newValue(add.width, count, pos);
         add.results.push_back(sum);
         emit(std::move(add));
         total = sum;
@@ -3660,7 +5693,7 @@ Lowerer::LoweredString Lowerer::lowerInterp(const StringLit& lit) {
     }
     ir::Instr alloc;
     alloc.op = ir::Op::Call;
-    alloc.loc = lit.pos;
+    alloc.loc = pos;
     alloc.callee = "cider_alloc";
     alloc.mayTrap = true;
     {
@@ -3668,50 +5701,50 @@ Lowerer::LoweredString Lowerer::lowerInterp(const StringLit& lit) {
         bytes.words.push_back(total);
         alloc.arguments.push_back(std::move(bytes));
         ir::Argument pad;
-        pad.words.push_back(constantI64(8, count, lit.pos));
+        pad.words.push_back(constantI64(8, count, pos));
         alloc.arguments.push_back(std::move(pad));
     }
     if (failed_) {
         return LoweredString{};
     }
     TypeRef ptrType{ctx_.pointer(ctx_.basic(BasicKind::U8))};
-    ir::Value buf = newValue(ir::IRType::Ptr, ptrType, lit.pos);
+    ir::Value buf = newValue(ir::IRType::Ptr, ptrType, pos);
     alloc.results.push_back(buf);
     alloc.width = ir::IRType::Ptr;
     alloc.type = ptrType;
     emit(std::move(alloc));
-    ir::Value off = constantI64(0, count, lit.pos);
+    ir::Value off = constantI64(0, count, pos);
     if (failed_) {
         return LoweredString{};
     }
     for (const PartBytes& part : parts) {
         ir::Instr add;
         add.op = ir::Op::Add;
-        add.loc = lit.pos;
+        add.loc = pos;
         add.type = ptrType;
         add.width = ir::IRType::Ptr;
         add.isPure = true;
         add.operands.push_back(buf);
         add.operands.push_back(off);
-        ir::Value dst = newValue(add.width, ptrType, lit.pos);
+        ir::Value dst = newValue(add.width, ptrType, pos);
         add.results.push_back(dst);
         emit(std::move(add));
         if (failed_) {
             return LoweredString{};
         }
-        copyBytes(dst, part.ptr, part.len, lit.pos);
+        copyBytes(dst, part.ptr, part.len, pos);
         if (failed_) {
             return LoweredString{};
         }
         ir::Instr bump;
         bump.op = ir::Op::Add;
-        bump.loc = lit.pos;
+        bump.loc = pos;
         bump.type = count;
         bump.width = ir::IRType::I64;
         bump.isPure = true;
         bump.operands.push_back(off);
         bump.operands.push_back(part.len);
-        ir::Value next = newValue(bump.width, count, lit.pos);
+        ir::Value next = newValue(bump.width, count, pos);
         bump.results.push_back(next);
         emit(std::move(bump));
         off = next;
@@ -3722,6 +5755,32 @@ Lowerer::LoweredString Lowerer::lowerInterp(const StringLit& lit) {
     LoweredString out;
     out.words = {buf, total};
     return out;
+}
+
+std::vector<ir::Value> Lowerer::lowerStringAdd(const Binary& n) {
+    // The checker proved both sides strings: each side lowers to exactly
+    // its address and length, and the shared join answers one buffer.
+    std::vector<ir::Value> left = lowerWords(n.lhs.get());
+    if (failed_ || left.size() != kSliceWords) {
+        if (!failed_) {
+            refuse(n.pos, "this concatenation");
+        }
+        return {undefined()};
+    }
+    std::vector<ir::Value> right = lowerWords(n.rhs.get());
+    if (failed_ || right.size() != kSliceWords) {
+        if (!failed_) {
+            refuse(n.pos, "this concatenation");
+        }
+        return {undefined()};
+    }
+    PartBytes first;
+    first.ptr = left[kFirstWord];
+    first.len = left[kLenWord];
+    PartBytes second;
+    second.ptr = right[kFirstWord];
+    second.len = right[kLenWord];
+    return joinStrings({first, second}, n.pos).words;
 }
 
 std::vector<ir::Value> Lowerer::loadGlobal(Position pos, const GlobalBinding& global) {
@@ -3748,6 +5807,12 @@ std::vector<ir::Value> Lowerer::loadGlobal(Position pos, const GlobalBinding& gl
 
 std::string Lowerer::forwardFunction(const std::string& link, const Signature& sig,
                                      Position pos) {
+    if (needsSret(sig.returnType())) {
+        // A forwarder drops its captures word and calls through; threading
+        // a hidden buffer address through both shapes is a later slice.
+        refuse(pos, "a wide return through a closure forwarder is not lowered yet");
+        return "";
+    }
     std::string hidden = "closure_" + std::to_string(closureSeq_++);
     int64_t savedFn = -1;
     if (function_ != nullptr) {
@@ -3972,22 +6037,39 @@ void Lowerer::constructClass(const std::vector<ir::Value>& slots, const NewStruc
         refuse(n.pos, "this construction");
         return;
     }
-    if (!resolver_.classBases(*id).empty()) {
-        refuse(n.pos, "inheritance is not lowered yet");
-        return;
-    }
-    // Word zero is the vptr slot, null until methods wire it: the slot is
-    // reserved now so field offsets never shift later.
+    // Word zero is the vptr slot (FEATURES 2.2): the concrete type's vtable
+    // address when the class has virtual slots, null otherwise — the slot
+    // stays reserved either way, so field offsets never shift.
     TypeRef vptr{ctx_.basic(BasicKind::U64)};
-    ir::Value null = constantI64(0, vptr, n.pos);
+    ir::Value vptrWord = constantI64(0, vptr, n.pos);
     if (failed_) {
         return;
+    }
+    if (!resolver_.virtualNames(*id).empty()) {
+        std::string table = emitClassVTable(*id, n.pos);
+        if (failed_ || table.empty()) {
+            return;
+        }
+        TypeRef tablePtr{ctx_.pointer(ctx_.basic(BasicKind::U8))};
+        ir::Instr data;
+        data.op = ir::Op::DataAddr;
+        data.loc = n.pos;
+        data.type = tablePtr;
+        data.width = ir::IRType::Ptr;
+        data.globalLabel = table;
+        data.isPure = true;
+        vptrWord = newValue(data.width, tablePtr, n.pos);
+        data.results.push_back(vptrWord);
+        emit(std::move(data));
+        if (failed_) {
+            return;
+        }
     }
     Place atVptr;
     atVptr.slots = slots;
     atVptr.type = vptr;
     atVptr.off = 0;
-    storeRange(n.pos, atVptr, {null}, vptr);
+    storeRange(n.pos, atVptr, {vptrWord}, vptr);
     if (failed_) {
         return;
     }
@@ -4005,6 +6087,14 @@ void Lowerer::constructClass(const std::vector<ir::Value>& slots, const NewStruc
         if (failed_) {
             return;
         }
+        // A concrete value for an interface field boxes like the struct
+        // path: the class field holds the same pair.
+        value = boxClassOperand(field.value.get(), std::move(value),
+                                  checker_.typeOf(field.value.get()), fieldType,
+                                  field.value->pos);
+        if (failed_) {
+            return;
+        }
         Place at = base;
         at.off = fieldOff;
         at.type = fieldType;
@@ -4017,16 +6107,13 @@ void Lowerer::constructClass(const std::vector<ir::Value>& slots, const NewStruc
 std::vector<ir::Value> Lowerer::lowerNewStruct(const NewStruct& n) {
     TypeRef structType = checker_.typeOf(&n);
     if (!structType.isError() && structType.type->kind() == Kind::Class) {
-        // Inherited fields have no layout yet: the refusal names the gap
-        // before wordCount turns the -1 size into a generic construction
-        // refusal. constructClass asserts the same precondition.
+        // The class check below owns construction: a chain's fields lay
+        // out through the resolver, and constructClass stores the vtable
+        // word. A missing declaration still refuses before wordCount turns
+        // a -1 size into a generic construction refusal.
         std::optional<DeclId> id = structType.type->decl();
         if (!id.has_value()) {
             refuse(n.pos, "this construction");
-            return {undefined()};
-        }
-        if (!resolver_.classBases(*id).empty()) {
-            refuse(n.pos, "inheritance is not lowered yet");
             return {undefined()};
         }
     }
@@ -4118,10 +6205,44 @@ std::vector<ir::Value> Lowerer::lowerNewClass(const NewClass& n) {
     alloc.width = ir::IRType::Ptr;
     alloc.type = ptrType;
     emit(std::move(alloc));
+    if (failed_) {
+        return {undefined()};
+    }
+    // A virtual class's vptr lands before init runs, so a method call in
+    // the init body dispatches through the concrete type's table.
+    if (!resolver_.virtualNames(*id).empty()) {
+        std::string table = emitClassVTable(*id, n.pos);
+        if (failed_ || table.empty()) {
+            return {undefined()};
+        }
+        TypeRef tablePtr{ctx_.pointer(ctx_.basic(BasicKind::U8))};
+        ir::Instr data;
+        data.op = ir::Op::DataAddr;
+        data.loc = n.pos;
+        data.type = tablePtr;
+        data.width = ir::IRType::Ptr;
+        data.globalLabel = table;
+        data.isPure = true;
+        ir::Value tableWord = newValue(data.width, tablePtr, n.pos);
+        data.results.push_back(tableWord);
+        emit(std::move(data));
+        if (failed_) {
+            return {undefined()};
+        }
+        Place slot;
+        slot.hasIndirect = true;
+        slot.indirect = at;
+        slot.off = 0;
+        slot.type = TypeRef{ctx_.basic(BasicKind::U64)};
+        storeRange(n.pos, slot, {tableWord}, slot.type);
+        if (failed_) {
+            return {undefined()};
+        }
+    }
     ir::Instr run;
     run.op = ir::Op::Call;
     run.loc = n.pos;
-    run.callee = owner->name + "__init";
+    run.callee = resolver_.linkName(*owner) + "__init";
     run.mayTrap = true;
     ir::Argument self;
     self.words.push_back(at);
@@ -4129,6 +6250,20 @@ std::vector<ir::Value> Lowerer::lowerNewClass(const NewClass& n) {
     for (uint64_t i = 0; i < static_cast<uint64_t>(n.args.size()); ++i) {
         ir::Argument arg;
         arg.words = lowerWords(n.args[i].get());
+        if (failed_) {
+            return {undefined()};
+        }
+        // A concrete argument for an interface parameter boxes like every
+        // other call's: the init's words must arrive as the pair.
+        if (init == nullptr ||
+            i >= static_cast<uint64_t>(init->parameters().size())) {
+            refuse(n.pos, "this construction");
+            return {undefined()};
+        }
+        TypeRef want{init->parameters()[static_cast<size_t>(i)].type};
+        arg.words = boxClassOperand(n.args[i].get(), std::move(arg.words),
+                                      checker_.typeOf(n.args[i].get()), want,
+                                      n.args[i]->pos);
         if (failed_) {
             return {undefined()};
         }
@@ -4191,8 +6326,72 @@ std::vector<ir::Value> Lowerer::lowerElementAddr(const Index& n) {
     // read path owns, so the checks cannot drift apart.
     Place base;
     TypeRef baseType;
-    if (!arrayBase(n.array.get(), n, base, baseType, "this expression") ||
-        !base.global.empty()) {
+    if (const auto* wide = dynamic_cast<const WideLit*>(n.array.get())) {
+        // A literal names rodata: a folded index is a label plus a scaled
+        // offset, proven against the unit count like the read path proves
+        // it. Anything computed rides the shared guarded address below.
+        std::unordered_set<std::string> active;
+        EvalEnv env = resolver_.evalEnv(emitScope());
+        EvalResult folded = evalConstInt(*n.index, env, active);
+        if (folded.ok) {
+            if (folded.value < 0) {
+                refuse(n.index->pos, "a negative index");
+                return {undefined()};
+            }
+            if (folded.value >
+                static_cast<int64_t>(wide->units.size())) {
+                refuse(n.index->pos, "an index past the end");
+                return {undefined()};
+            }
+            TypeRef u16{ctx_.basic(BasicKind::U16)};
+            TypeRef addrType{ctx_.pointer(u16.type)};
+            ir::Instr data;
+            data.op = ir::Op::DataAddr;
+            data.loc = n.pos;
+            data.type = addrType;
+            data.width = ir::IRType::Ptr;
+            data.globalLabel = wideBlob(*wide);
+            data.isPure = true;
+            ir::Value atAddr = newValue(data.width, addrType, n.pos);
+            data.results.push_back(atAddr);
+            emit(std::move(data));
+            if (failed_) {
+                return {undefined()};
+            }
+            TypeRef count{ctx_.basic(BasicKind::I64)};
+            int64_t elemBytes = resolver_.nominalSize(u16.type);
+            ir::Value delta =
+                constantI64(folded.value * elemBytes, count, n.pos);
+            if (failed_) {
+                return {undefined()};
+            }
+            ir::Instr advance;
+            advance.op = ir::Op::Add;
+            advance.loc = n.pos;
+            advance.type = addrType;
+            advance.width = ir::IRType::Ptr;
+            advance.isPure = true;
+            advance.operands.push_back(atAddr);
+            advance.operands.push_back(delta);
+            ir::Value moved = newValue(advance.width, addrType, n.pos);
+            advance.results.push_back(moved);
+            emit(std::move(advance));
+            if (failed_) {
+                return {undefined()};
+            }
+            return {moved};
+        }
+        baseType = checker_.typeOf(n.array.get());
+        if (baseType.isError() || baseType.type->kind() != Kind::Array) {
+            refuse(n.array->pos, "this expression");
+            return {undefined()};
+        }
+        base.global = wideBlob(*wide);
+        base.off = 0;
+        base.type = baseType;
+        base.isVolatile = false;
+    } else if (!arrayBase(n.array.get(), n, base, baseType, "this expression") ||
+               !base.global.empty()) {
         refuse(n.array->pos, "this expression");
         return {undefined()};
     }
@@ -4240,6 +6439,250 @@ std::vector<ir::Value> Lowerer::lowerElementAddr(const Index& n) {
     return {at.slots[kFirstWord]};
 }
 
+bool Lowerer::addressOfValue(const Expr* expr, TypeRef ptr, Position pos,
+                             ir::Value& out) {
+    Place place;
+    if (resolvePlace(expr, place)) {
+        if (!place.global.empty()) {
+            // A global's address is its label: link-time constant, no
+            // load. An offset past it advances the same way an indirect
+            // place advances.
+            ir::Instr data;
+            data.op = ir::Op::DataAddr;
+            data.loc = pos;
+            data.type = ptr;
+            data.width = ir::IRType::Ptr;
+            data.globalLabel = place.global;
+            data.isPure = true;
+            ir::Value at = newValue(data.width, ptr, pos);
+            data.results.push_back(at);
+            emit(std::move(data));
+            if (failed_) {
+                return false;
+            }
+            if (place.off == 0) {
+                out = at;
+                return true;
+            }
+            TypeRef count{ctx_.basic(BasicKind::I64)};
+            ir::Value delta = constantI64(place.off, count, pos);
+            if (failed_) {
+                return false;
+            }
+            ir::Instr add;
+            add.op = ir::Op::Add;
+            add.loc = pos;
+            add.type = ptr;
+            add.width = ir::IRType::Ptr;
+            add.isPure = true;
+            add.operands.push_back(at);
+            add.operands.push_back(delta);
+            ir::Value moved = newValue(add.width, ptr, pos);
+            add.results.push_back(moved);
+            emit(std::move(add));
+            if (failed_) {
+                return false;
+            }
+            out = moved;
+            return true;
+        }
+        if (place.hasIndirect) {
+            if (place.off == 0) {
+                out = place.indirect;
+                return true;
+            }
+            TypeRef count{ctx_.basic(BasicKind::I64)};
+            ir::Value delta = constantI64(place.off, count, pos);
+            if (!failed_) {
+                ir::Instr add;
+                add.op = ir::Op::Add;
+                add.loc = pos;
+                add.type = ptr;
+                add.width = ir::IRType::Ptr;
+                add.isPure = true;
+                add.operands.push_back(place.indirect);
+                add.operands.push_back(delta);
+                ir::Value at = newValue(add.width, ptr, pos);
+                add.results.push_back(at);
+                emit(std::move(add));
+                out = at;
+                return true;
+            }
+            return false;
+        }
+        if (!place.slots.empty()) {
+            out = computedBase(place.slots[0], place.off, pos);
+            return true;
+        }
+    }
+    if (const auto* index = dynamic_cast<const Index*>(expr)) {
+        std::vector<ir::Value> at = lowerElementAddr(*index);
+        if (failed_ || at.size() != kOneWord) {
+            return false;
+        }
+        out = at[0];
+        return true;
+    }
+    return false;
+}
+
+ir::Value Lowerer::closureAddress(std::vector<ir::Value> pair,
+                                   TypeRef closureType, Position pos) {
+    // A closure pair has no address: spill both words to scratch slots in
+    // this frame, then answer the slots' address. The slots outlive the
+    // conversion site, so the pair stays live as long as its scope does.
+    if (pair.size() != static_cast<size_t>(kClosureWords)) {
+        refuse(pos, "this conversion");
+        return undefined();
+    }
+    std::vector<ir::Value> slots = allocaSlots(
+        closureType, pos, static_cast<uint64_t>(pair.size()));
+    if (failed_) {
+        return undefined();
+    }
+    Place scratch;
+    scratch.slots = slots;
+    scratch.type = closureType;
+    scratch.off = 0;
+    scratch.isVolatile = false;
+    storeRange(pos, scratch, pair, closureType);
+    if (failed_) {
+        return undefined();
+    }
+    return computedBase(slots[0], 0, pos);
+}
+
+std::vector<ir::Value> Lowerer::loadClosurePair(ir::Value addr,
+                                                TypeRef closureType,
+                                                Position pos) {
+    // Reads the pair an address names: a proven-closure carrier holds the
+    // address of two words laid out code-then-captures.
+    Place at;
+    at.hasIndirect = true;
+    at.indirect = addr;
+    at.off = 0;
+    at.type = closureType;
+    at.isVolatile = false;
+    std::vector<ir::Value> pair = loadRange(pos, at, closureType);
+    if (failed_ || pair.size() != static_cast<size_t>(kClosureWords)) {
+        if (!failed_) {
+            refuse(pos, "this conversion");
+        }
+        return {undefined()};
+    }
+    return pair;
+}
+
+std::vector<ir::Value> Lowerer::boxClassOperand(
+    const Expr* expr, std::vector<ir::Value> words, TypeRef from, TypeRef to,
+    Position pos) {
+    if (!from.isError() && !to.isError() &&
+        to.type->kind() == Kind::Interface &&
+        from.type->kind() == Kind::Class) {
+        TypeRef ptr{ctx_.pointer(from.type)};
+        ir::Value at = undefined();
+        if (const auto* call = dynamic_cast<const Call*>(expr)) {
+            // A call result has no address: spill the answer words to a
+            // scratch slot in this frame, then box the slot's address.
+            // The slot outlives the conversion site, so the pair stays
+            // live as long as its scope does.
+            std::vector<ir::Value> spill =
+                lowerCallWords(const_cast<Call&>(*call));
+            if (failed_ || spill.empty() ||
+                spill.size() != static_cast<size_t>(wordCount(from))) {
+                refuse(pos, "this interface conversion is not lowered yet");
+                return {undefined()};
+            }
+            std::vector<ir::Value> slots = allocaSlots(
+                from, pos, static_cast<uint64_t>(spill.size()));
+            if (failed_) {
+                return {undefined()};
+            }
+            Place scratch;
+            scratch.slots = slots;
+            scratch.type = from;
+            storeRange(pos, scratch, spill, from);
+            if (failed_) {
+                return {undefined()};
+            }
+            at = computedBase(slots[0], 0, pos);
+            if (failed_) {
+                return {undefined()};
+            }
+        } else if (!addressOfValue(expr, ptr, pos, at) || failed_) {
+            refuse(pos, "this interface conversion is not lowered yet");
+            return {undefined()};
+        }
+        return boxToInterface({at}, ptr, to, pos);
+    }
+    // Closure round trips materialize here for every implicit site at
+    // once (declarations, assignments, arguments, returns, fields): the
+    // checker proved provenance, so mechanics never re-decide it. A pair
+    // spills for an address; an address loads for a pair; nilPtr answers
+    // the null pair; a *void adopting an fn spelling is already one word.
+    auto isVoidPtr = [](const TypeRef& t) -> bool {
+        return t.type->kind() == Kind::Pointer &&
+               t.type->pointee() != nullptr &&
+               t.type->pointee()->kind() == Kind::Void;
+    };
+    if (!from.isError() && !to.isError() &&
+        to.type->kind() == Kind::Closure) {
+        if (from.type->kind() == Kind::Closure) {
+            return words;
+        }
+        // The null literal answers the null pair before any address load:
+        // its word is zero, not a storage address.
+        if (dynamic_cast<const NilPtr*>(expr) != nullptr) {
+            TypeRef code = wordType(to, kFirstWord);
+            TypeRef caps = wordType(to, kLenWord);
+            return {constantI64(0, code, pos), constantI64(0, caps, pos)};
+        }
+        if (isVoidPtr(from)) {
+            if (words.size() != kOneWord) {
+                refuse(pos, "this conversion");
+                return {undefined()};
+            }
+            return loadClosurePair(words[kFirstWord], to, pos);
+        }
+        refuse(pos, "this conversion");
+        return {undefined()};
+    }
+    if (!from.isError() && !to.isError() && isVoidPtr(to) &&
+        from.type->kind() == Kind::Closure) {
+        return {closureAddress(std::move(words), from, pos)};
+    }
+    // Deeper carriers answer the same single address word.
+    if (!from.isError() && !to.isError() &&
+        to.type->kind() == Kind::Pointer && to.type->pointee() != nullptr &&
+        to.type->pointee()->kind() == Kind::Pointer &&
+        from.type->kind() == Kind::Closure) {
+        // Two levels: the pair spills for its address, and that address
+        // word spills again — the carrier names the slot holding the
+        // pair's address, so one dereference reaches the pair.
+        ir::Value inner = closureAddress(std::move(words), from, pos);
+        if (failed_) {
+            return {undefined()};
+        }
+        TypeRef voidPtr{ctx_.pointer(ctx_.void_())};
+        std::vector<ir::Value> slots =
+            allocaSlots(voidPtr, pos, kOneWord);
+        if (failed_) {
+            return {undefined()};
+        }
+        Place scratch;
+        scratch.slots = slots;
+        scratch.type = voidPtr;
+        scratch.off = 0;
+        scratch.isVolatile = false;
+        storeRange(pos, scratch, {inner}, voidPtr);
+        if (failed_) {
+            return {undefined()};
+        }
+        return {computedBase(slots[0], 0, pos)};
+    }
+    return boxToInterface(std::move(words), from, to, pos);
+}
+
 std::vector<ir::Value> Lowerer::lowerAddrOf(const Unary& n) {
     // `&f` where f names a plain function answers its code address: one
     // word holding the link address, for an indirect call to load. Every
@@ -4248,7 +6691,7 @@ std::vector<ir::Value> Lowerer::lowerAddrOf(const Unary& n) {
     if (n.op == UnOp::Addr) {
         if (const auto* ident = dynamic_cast<const Ident*>(n.operand.get())) {
             const resolve::Decl* decl =
-                resolver_.lookup(resolver_.moduleScope(), ident->name);
+                resolver_.lookup(emitScope(), ident->name);
             if (decl != nullptr && decl->kind == resolve::DeclKind::Func &&
                 decl->typeParams == 0) {
                 std::string link = ident->name;
@@ -4271,49 +6714,16 @@ std::vector<ir::Value> Lowerer::lowerAddrOf(const Unary& n) {
         }
     }
     if (n.op == UnOp::Addr) {
-        // `&x` on a value answers the address of its place: a direct
-        // place names a slot plus an offset, and an indirect place is
-        // already an address with an offset. Globals have no address
-        // materialization, so they keep the refusal they always had.
-        Place place;
-        if (resolvePlace(n.operand.get(), place) && place.global.empty()) {
-            TypeRef ptr = checker_.typeOf(&n);
-            if (!ptr.isError()) {
-                if (place.hasIndirect) {
-                    if (place.off == 0) {
-                        return {place.indirect};
-                    }
-                    TypeRef count{ctx_.basic(BasicKind::I64)};
-                    ir::Value delta = constantI64(place.off, count, n.pos);
-                    if (!failed_) {
-                        ir::Instr add;
-                        add.op = ir::Op::Add;
-                        add.loc = n.pos;
-                        add.type = ptr;
-                        add.width = ir::IRType::Ptr;
-                        add.isPure = true;
-                        add.operands.push_back(place.indirect);
-                        add.operands.push_back(delta);
-                        ir::Value at = newValue(add.width, ptr, n.pos);
-                        add.results.push_back(at);
-                        emit(std::move(add));
-                        return {at};
-                    }
-                    return {undefined()};
-                }
-                if (!place.slots.empty()) {
-                    return {computedBase(place.slots[0], place.off, n.pos)};
-                }
-            }
+        // Value addresses share one helper with interface boxing: the
+        // place answers its address, whatever names it.
+        ir::Value at = undefined();
+        if (addressOfValue(n.operand.get(), checker_.typeOf(&n), n.pos, at)) {
+            return {at};
         }
-        // `&a[i]` past what a place names answers the element's address
-        // directly: a computed array index, or any index into a slice or
-        // string, has no slot offset. The address carries the same bounds
-        // checks the read emits (SEMANTICS 8): an out-of-range address
-        // traps at the `&`, not at the later use.
-        if (const auto* index = dynamic_cast<const Index*>(n.operand.get())) {
-            return lowerElementAddr(*index);
+        if (!failed_) {
+            refuse(n.pos, "this expression");
         }
+        return {undefined()};
     }
     refuse(n.pos, "this expression");
     return {undefined()};
@@ -4325,6 +6735,16 @@ std::vector<ir::Value> Lowerer::lowerWords(const Expr* expr) {
     }
     if (const auto* lit = dynamic_cast<const StringLit*>(expr)) {
         return lowerString(*lit).words;
+    }
+    if (const auto* wide = dynamic_cast<const WideLit*>(expr)) {
+        // Pointer shape: the rodata address. Array positions (declarations
+        // of [u16; N], same-shape casts) read wideWords instead, through
+        // their own branches, so one node answers both spellings.
+        return {wideRodata(*wide)};
+    }
+    if (const auto* wideChar = dynamic_cast<const WideChar*>(expr)) {
+        TypeRef one{ctx_.basic(BasicKind::U16)};
+        return {constantI64(wideChar->value, one, wideChar->pos)};
     }
     if (dynamic_cast<const NewStruct*>(expr) != nullptr) {
         return lowerNewStruct(static_cast<const NewStruct&>(*expr));
@@ -4355,6 +6775,15 @@ std::vector<ir::Value> Lowerer::lowerWords(const Expr* expr) {
     }
     if (const auto* step = dynamic_cast<const IncrDecr*>(expr)) {
         return lowerIncrDecr(*step);
+    }
+    // String concatenation answers two words, so it dispatches here like
+    // calls: the scalar path below would keep only the address. Anything
+    // else binary stays scalar, where widths decide.
+    if (const auto* add = dynamic_cast<const Binary*>(expr)) {
+        TypeRef type = checker_.typeOf(expr);
+        if (!type.isError() && type.type->kind() == Kind::String) {
+            return lowerStringAdd(*add);
+        }
     }
     // A call answers one value per word of its return type: the scalar
     // path below would keep only the first, so calls dispatch here.
@@ -4411,11 +6840,15 @@ std::vector<ir::Value> Lowerer::lowerWords(const Expr* expr) {
         if (const GlobalBinding* global = findGlobal(ident->name)) {
             return loadGlobal(ident->pos, *global);
         }
+        std::vector<ir::Value> folded;
+        if (foldModuleConst(ident->name, ident->pos, folded)) {
+            return folded;
+        }
         // A bare function name in value position answers the closure pair:
         // a forwarder with the receiver-first shape plus a null captures
         // word, with no allocation. Prelude names mangle to their link
         // symbols, like calls do.
-        const resolve::Scope* here = resolver_.scopeOf(checker_.module());
+        const resolve::Scope* here = homeScope();
         const resolve::Decl* decl =
             here != nullptr ? resolver_.lookup(here, ident->name) : nullptr;
         if (decl != nullptr && decl->kind == resolve::DeclKind::Func &&
@@ -4446,21 +6879,131 @@ std::vector<ir::Value> Lowerer::lowerWords(const Expr* expr) {
                 return {code, caps};
             }
         }
+        // A bare enumerator folds to its value: the checker proved exactly
+        // one enum in this module owns the name, so the integer here is
+        // that member's value (TYPES §2.6). Locals, globals, module
+        // constants and functions already answered above, so this branch
+        // owns nothing they could name.
+        if (!type.isError() && type.type->kind() == Kind::Enum) {
+            int owners = 0;
+            const resolve::Decl* owner =
+                here != nullptr
+                    ? resolver_.lookupEnumMember(here, ident->name, owners)
+                    : nullptr;
+            if (owner != nullptr) {
+                std::string home = owner->scope != nullptr
+                                       ? owner->scope->module
+                                       : homeModule();
+                int64_t value =
+                    resolver_.enumValue(home + "." + owner->name, ident->name);
+                TypeRef count{ctx_.basic(BasicKind::I32)};
+                return {constantI64(value, count, ident->pos)};
+            }
+        }
         refuse(ident->pos, "reading '" + ident->name + "'");
         return {undefined()};
     }
     if (auto* cast = dynamic_cast<const Cast*>(expr)) {
+        // An aggregate source and target of the same shape is a value
+        // copy, not a scalar conversion: the word count the target
+        // declares is the copy's width, and the scalar path below would
+        // answer only the first word. The checker already proved the
+        // shapes relate (identity or a named conversion), so a load of
+        // the operand's words is exact here.
+        // A closure target answers the pair, never a scalar cast: the
+        // checker gated provenance, so mechanics only move the bytes. A
+        // closure operand copies through; nilPtr answers the null pair; a
+        // carrier address loads the pair it names (one dereference first
+        // past depth one). Anything else here never passed the gate.
+        TypeRef target = checker_.typeOf(cast);
+        if (!target.isError() && target.type->kind() == Kind::Closure) {
+            TypeRef source = checker_.typeOf(cast->expr.get());
+            if (!source.isError() && source.type->kind() == Kind::Closure) {
+                return lowerWords(cast->expr.get());
+            }
+            if (dynamic_cast<const NilPtr*>(cast->expr.get()) != nullptr) {
+                TypeRef code = wordType(target, kFirstWord);
+                TypeRef caps = wordType(target, kLenWord);
+                return {constantI64(0, code, cast->pos),
+                        constantI64(0, caps, cast->pos)};
+            }
+            std::vector<ir::Value> carrier = lowerWords(cast->expr.get());
+            if (failed_ || carrier.size() != kOneWord) {
+                if (!failed_) {
+                    refuse(cast->pos, "this cast");
+                }
+                return {undefined()};
+            }
+            ir::Value addr = carrier[kFirstWord];
+            if (!source.isError() && source.type->kind() == Kind::Pointer &&
+                source.type->pointee() != nullptr &&
+                source.type->pointee()->kind() == Kind::Pointer) {
+                TypeRef inner{source.type->pointee()};
+                Place slot;
+                slot.hasIndirect = true;
+                slot.indirect = addr;
+                slot.off = 0;
+                slot.type = inner;
+                slot.isVolatile = false;
+                std::vector<ir::Value> held = loadRange(cast->pos, slot, inner);
+                if (failed_ || held.size() != kOneWord) {
+                    if (!failed_) {
+                        refuse(cast->pos, "this cast");
+                    }
+                    return {undefined()};
+                }
+                addr = held[kFirstWord];
+            }
+            return loadClosurePair(addr, target, cast->pos);
+        }
+        if (!target.isError() &&
+            (target.type->kind() == Kind::Struct ||
+             target.type->kind() == Kind::Class ||
+             target.type->kind() == Kind::Array)) {
+
+            if (Place place; resolvePlace(cast->expr.get(), place)) {
+                place.type = target;
+                return loadRange(cast->pos, place, target);
+            }
+            // A wide literal casts by value: its words are the array, so
+            // no address is ever read. Anything else here answers through
+            // lowerWords below.
+            if (const auto* wide =
+                    dynamic_cast<const WideLit*>(cast->expr.get())) {
+                std::vector<ir::Value> words = wideWords(*wide);
+                if (failed_) {
+                    return {undefined()};
+                }
+                return words;
+            }
+            std::vector<ir::Value> words =
+                lowerWords(cast->expr.get());
+            if (failed_) {
+                return {undefined()};
+            }
+            return words;
+        }
         // The null string is (nil, 0): the operand answers one word but
         // the target holds two, so the generic scalar cast below would
         // leave the length unanswered. Only the literal converts — the
         // checker keeps a *void variable beside a string a mismatch.
-        TypeRef target = checker_.typeOf(expr);
-        if (!target.isError() && target.type->kind() == Kind::String &&
+        TypeRef spelled = checker_.typeOf(expr);
+        if (!spelled.isError() && spelled.type->kind() == Kind::String &&
             dynamic_cast<const NilPtr*>(cast->expr.get()) != nullptr) {
             TypeRef ptrType{ctx_.pointer(ctx_.basic(BasicKind::U8))};
             TypeRef lenType{ctx_.basic(BasicKind::I64)};
             return {constantI64(0, ptrType, expr->pos),
                     constantI64(0, lenType, expr->pos)};
+        }
+        if (!spelled.isError() && spelled.type->kind() == Kind::Interface &&
+            dynamic_cast<const NilPtr*>(cast->expr.get()) != nullptr) {
+            // `nilPtr as I`: the null interface is two zero words — a
+            // null data word beside a null vtable word. Only the literal
+            // converts (the checker keeps a *void variable a mismatch):
+            // the width is what matters, so both words are addresses.
+            TypeRef addr{ctx_.pointer(ctx_.basic(BasicKind::U8))};
+            return {constantI64(0, addr, expr->pos),
+                    constantI64(0, addr, expr->pos)};
         }
     }
     return {onIdentOrExpr(expr, checker_.typeOf(expr))};
@@ -4480,6 +7023,13 @@ void Lowerer::onExprStmt(ExprStmt& n) {
     // would refuse a multi-word call whose value nobody reads.
     if (auto* call = dynamic_cast<const Call*>(n.expr.get())) {
         lowerCallWords(const_cast<Call&>(*call));
+        return;
+    }
+    // A ternary statement runs one arm for effect and discards the answer:
+    // the scalar dispatcher below demands exactly one word, which refuses
+    // a void ternary the checker accepted.
+    if (auto* tern = dynamic_cast<const Ternary*>(n.expr.get())) {
+        lowerTernary(*tern);
         return;
     }
     onIdentOrExpr(n.expr.get(), checker_.typeOf(n.expr.get()));
@@ -4557,7 +7107,7 @@ void Lowerer::onAsmStmt(AsmStmt& n) {
         if (found) {
             continue;
         }
-        const resolve::Scope* here = resolver_.scopeOf(checker_.module());
+        const resolve::Scope* here = homeScope();
         const resolve::Decl* decl =
             here != nullptr ? resolver_.lookup(here, base) : nullptr;
         if (decl != nullptr && decl->kind == resolve::DeclKind::Func) {
@@ -4605,7 +7155,7 @@ void Lowerer::onDelete(DeleteStmt& n) {
         ir::Instr run;
         run.op = ir::Op::Call;
         run.loc = n.pos;
-        run.callee = owner->name + "__deinit";
+        run.callee = resolver_.linkName(*owner) + "__deinit";
         run.mayTrap = true;
         ir::Argument self;
         self.words.push_back(ptr[0]);
@@ -4664,6 +7214,185 @@ std::vector<ir::Value> Lowerer::storeToIdent(
     return {undefined()};
 }
 
+std::vector<ir::Value> Lowerer::lowerInterfaceDowncast(const Cast& n, TypeRef source,
+                                                              TypeRef target) {
+    // `sh as Sq`: the pair's vtable must name the (target, interface)
+    // table, or the data word is another type's bytes. The comparison is
+    // the whole check — on a match the data word already holds the
+    // answer, inline or as the reference — and a mismatch traps
+    // (TYPES.md §4.3), never answered plausibly.
+    std::optional<DeclId> iface = source.type->decl();
+    if (!iface.has_value()) {
+        refuse(n.pos, "this cast");
+        return {undefined()};
+    }
+    std::optional<DeclId> concrete;
+    Kind tk = target.type->kind();
+    if (tk == Kind::Struct) {
+        // A wider struct can never sit in a pair: boxing refuses it at
+        // every construction site, so no vtable could name it. Provable
+        // statically, refused statically.
+        if (wordCount(target) != static_cast<int>(kOneWord)) {
+            refuse(n.pos, "a downcast wider than one word can never match");
+            return {undefined()};
+        }
+        concrete = target.type->decl();
+    } else if (tk == Kind::Pointer && target.type->pointee() != nullptr &&
+               target.type->pointee()->kind() == Kind::Class) {
+        concrete = target.type->pointee()->decl();
+    } else {
+        refuse(n.pos, "this cast");
+        return {undefined()};
+    }
+    if (!concrete.has_value()) {
+        refuse(n.pos, "this cast");
+        return {undefined()};
+    }
+    // The expected table: the same label boxing computes, so identity is
+    // pointer equality, for direct entries and adapters alike.
+    std::string label = emitVTable(*concrete, *iface, n.pos);
+    if (failed_) {
+        return {undefined()};
+    }
+    std::vector<ir::Value> words = lowerWords(n.expr.get());
+    if (failed_ || words.size() != kInterfaceWords) {
+        if (!failed_) {
+            refuse(n.pos, "this cast");
+        }
+        return {undefined()};
+    }
+    TypeRef vtableType = wordType(source, kVtableWord);
+    ir::Instr addr;
+    addr.op = ir::Op::DataAddr;
+    addr.loc = n.pos;
+    addr.type = vtableType;
+    addr.width = ir::IRType::Ptr;
+    addr.globalLabel = label;
+    addr.isPure = true;
+    ir::Value want = newValue(addr.width, vtableType, n.pos);
+    addr.results.push_back(want);
+    emit(std::move(addr));
+    if (failed_) {
+        return {undefined()};
+    }
+    ir::Value ok = emitI64Cmp(n.pos, BinOp::Eq, words[kVtableWord], want);
+    if (failed_) {
+        return {undefined()};
+    }
+    emitCheckTrap(n.pos, ok, ir::TrapReason::Downcast);
+    if (failed_) {
+        return {undefined()};
+    }
+    return {words[kFirstWord]};
+}
+
+ir::Value Lowerer::lowerIntToEnum(const Cast& n, TypeRef source, TypeRef target) {
+    // int-to-enum is the checked direction (FEATURES §2, enum ↔ int row):
+    // the value must name a declared enumerator, and inventing one traps.
+    // The checker proved the widths match (the enum's 4 bytes), so the
+    // value lowers as-is and the membership test owns the conversion.
+    std::optional<DeclId> id = target.type->decl();
+    if (!id.has_value()) {
+        refuse(n.pos, "this cast");
+        return undefined();
+    }
+    std::vector<std::pair<std::string, int64_t>> members =
+        resolver_.enumMembers(*id);
+    if (members.empty()) {
+        refuse(n.pos, "this cast");
+        return undefined();
+    }
+    ir::Value from;
+    if (source.type->kind() == Kind::Union) {
+        // A union cast reads the payload's bytes at offset 0 (TYPES.md
+        // §4.6), and the membership test below still applies: an unchecked
+        // payload read would invent an enumerator silently.
+        Place base;
+        if (!resolvePlace(n.expr.get(), base)) {
+            refuse(n.expr->pos, "this cast");
+            return undefined();
+        }
+        base.type = target;
+        base.tagWrites.clear();
+        std::vector<ir::Value> got = loadRange(n.pos, base, target);
+        if (failed_ || got.size() != kOneWord) {
+            if (!failed_) {
+                refuse(n.pos, "this cast");
+            }
+            return undefined();
+        }
+        from = got[0];
+    } else {
+        from = onIdentOrExpr(n.expr.get(), source);
+        if (failed_) {
+            return undefined();
+        }
+    }
+    // One equality per enumerator, ORed: the checked value is a
+    // canonical i32 cell (sign-extended like every other i32), and every
+    // Eq answers 0/1 (codegen movzx), so the OR stays 0/1 and the trap
+    // reads it directly.
+    TypeRef i32{ctx_.basic(BasicKind::I32)};
+    TypeRef boolean{ctx_.basic(BasicKind::Bool)};
+    ir::Instr norm;
+    norm.op = ir::Op::Cast;
+    norm.loc = n.pos;
+    norm.type = i32;
+    norm.width = widthOf(i32, n.pos);
+    norm.operands.push_back(from);
+    ir::Value checked = newValue(norm.width, norm.type, n.pos);
+    norm.results.push_back(checked);
+    emit(std::move(norm));
+    if (failed_) {
+        return undefined();
+    }
+    bool first = true;
+    ir::Value ok;
+    for (const auto& member : members) {
+        ir::Value want = constantI64(member.second, i32, n.pos);
+        if (failed_) {
+            return undefined();
+        }
+        ir::Value same = emitI64Cmp(n.pos, BinOp::Eq, checked, want);
+        if (failed_) {
+            return undefined();
+        }
+        if (first) {
+            ok = same;
+            first = false;
+            continue;
+        }
+        ir::Instr both;
+        both.op = ir::Op::Or;
+        both.loc = n.pos;
+        both.type = boolean;
+        both.width = ir::IRType::Bool;
+        both.isPure = true;
+        both.operands.push_back(ok);
+        both.operands.push_back(same);
+        ok = newValue(both.width, both.type, n.pos);
+        both.results.push_back(ok);
+        emit(std::move(both));
+    }
+    emitCheckTrap(n.pos, ok, ir::TrapReason::BadEnum);
+    if (failed_) {
+        return undefined();
+    }
+    ir::Instr instr;
+    instr.op = ir::Op::Cast;
+    instr.loc = n.pos;
+    instr.type = target;
+    instr.width = widthOf(target, n.pos);
+    if (failed_) {
+        return undefined();
+    }
+    instr.operands.push_back(checked);
+    ir::Value result = newValue(instr.width, instr.type, n.pos);
+    instr.results.push_back(result);
+    emit(std::move(instr));
+    return result;
+}
+
 ir::Value Lowerer::onCast(Cast& n) {
     if (failed_) {
         return undefined();
@@ -4674,6 +7403,20 @@ ir::Value Lowerer::onCast(Cast& n) {
     // multi-word expression value.
     TypeRef source = checker_.typeOf(n.expr.get());
     TypeRef target = checker_.typeOf(&n);
+    // An interface source reads back through the downcast path, never the
+    // scalar cast below: the vtable check owns the conversion, and a
+    // scalar cast would answer unchecked bytes.
+    if (!source.isError() && !target.isError() &&
+        source.type->kind() == Kind::Interface) {
+        std::vector<ir::Value> got = lowerInterfaceDowncast(n, source, target);
+        if (failed_ || got.size() != kOneWord) {
+            if (!failed_) {
+                refuse(n.pos, "this cast");
+            }
+            return undefined();
+        }
+        return got[0];
+    }
     if (!source.isError() && !target.isError() && source.type->kind() == Kind::Union) {
         Place base;
         if (!resolvePlace(n.expr.get(), base)) {
@@ -4688,6 +7431,35 @@ ir::Value Lowerer::onCast(Cast& n) {
             return undefined();
         }
         return got[0];
+    }
+    if (!source.isError() && !target.isError() &&
+        target.type->kind() == Kind::Enum) {
+        return lowerIntToEnum(n, source, target);
+    }
+    // Closure round trips that narrow to one word lower here; wider
+    // answers belong to the words path below, which answers pairs. A
+    // closure spills for an address; anything else targeting a closure
+    // spelling in a scalar position refuses (no single word holds a
+    // pair). An fn spelling adopts through the scalar path untouched
+    // (one address word, already the right shape).
+    if (!source.isError() && !target.isError() &&
+        source.type->kind() == Kind::Closure &&
+        target.type->kind() == Kind::Pointer &&
+        target.type->pointee() != nullptr &&
+        (target.type->pointee()->kind() == Kind::Void ||
+         (target.type->pointee()->kind() == Kind::Basic &&
+          target.type->pointee()->basic().has_value() &&
+          *target.type->pointee()->basic() == BasicKind::U8))) {
+        std::vector<ir::Value> pair = lowerWords(n.expr.get());
+        if (failed_) {
+            return undefined();
+        }
+        return closureAddress(std::move(pair), source, n.pos);
+    }
+    if (!source.isError() && !target.isError() &&
+        target.type->kind() == Kind::Closure) {
+        refuse(n.pos, "this cast");
+        return undefined();
     }
     ir::Instr instr;
     instr.op = ir::Op::Cast;
@@ -4721,6 +7493,22 @@ ir::Value Lowerer::onBinary(Binary& n) {
           (lhs.type->kind() == Kind::String ||
            dynamic_cast<const NilPtr*>(n.lhs.get()) != nullptr)))) {
         return lowerStringEq(n);
+    }
+    if ((n.op == BinOp::Eq || n.op == BinOp::Ne) && !lhs.isError() &&
+        !rhs.isError() &&
+        ((lhs.type->kind() == Kind::Interface &&
+          dynamic_cast<const NilPtr*>(n.rhs.get()) != nullptr) ||
+         (rhs.type->kind() == Kind::Interface &&
+          dynamic_cast<const NilPtr*>(n.lhs.get()) != nullptr))) {
+        return lowerInterfaceEq(n);
+    }
+    if ((n.op == BinOp::Eq || n.op == BinOp::Ne) && !lhs.isError() &&
+        !rhs.isError() &&
+        ((lhs.type->kind() == Kind::Closure &&
+          dynamic_cast<const NilPtr*>(n.rhs.get()) != nullptr) ||
+         (rhs.type->kind() == Kind::Closure &&
+          dynamic_cast<const NilPtr*>(n.lhs.get()) != nullptr))) {
+        return lowerClosureEq(n);
     }
     // Pointer arithmetic answers in addresses, not numbers: `p + n`
     // scales the count by the element's size and stays the same *T,
@@ -5147,6 +7935,73 @@ ir::Value Lowerer::lowerStringEqWords(std::vector<ir::Value> left,
     return out;
 }
 
+ir::Value Lowerer::lowerInterfaceEq(const Binary& n) {
+    // The checker proved one side an interface and the other the nil
+    // literal: nullity is the vtable word. A null interface is (nil,
+    // nil), and every box sets a real table, so the second word
+    // against zero answers it — Eq and Ne both, since Eq is
+    // sign-independent.
+    TypeRef lhs = checker_.typeOf(n.lhs.get());
+    const Expr* side = !lhs.isError() && lhs.type->kind() == Kind::Interface
+                           ? n.lhs.get()
+                           : n.rhs.get();
+    std::vector<ir::Value> words = lowerWords(side);
+    if (failed_ || words.size() != kInterfaceWords) {
+        refuse(n.pos, "this comparison");
+        return undefined();
+    }
+    TypeRef addr{ctx_.pointer(ctx_.basic(BasicKind::U8))};
+    ir::Value zero = constantI64(0, addr, n.pos);
+    if (failed_) {
+        return undefined();
+    }
+    ir::Instr cmp;
+    cmp.op = ir::Op::Cmp;
+    cmp.loc = n.pos;
+    cmp.type = checker_.typeOf(&n);
+    cmp.width = ir::IRType::Bool;
+    cmp.cmp = cmpFor(n.op, false);
+    cmp.operands.push_back(words[1]);
+    cmp.operands.push_back(zero);
+    ir::Value out = newValue(ir::IRType::Bool, cmp.type, n.pos);
+    cmp.results.push_back(out);
+    emit(std::move(cmp));
+    return out;
+}
+
+ir::Value Lowerer::lowerClosureEq(const Binary& n) {
+    // The checker proved one side a closure and the other the nil
+    // literal: nullity is the code word. A null closure is (nil, nil),
+    // and every closure literal sets real code, so code == 0 answers it
+    // with one comparison — Eq and Ne both, since Eq is sign-independent.
+    TypeRef lhs = checker_.typeOf(n.lhs.get());
+    const Expr* side = !lhs.isError() && lhs.type->kind() == Kind::Closure
+                           ? n.lhs.get()
+                           : n.rhs.get();
+    std::vector<ir::Value> words = lowerWords(side);
+    if (failed_ || words.size() != kClosureWords) {
+        refuse(n.pos, "this comparison");
+        return undefined();
+    }
+    TypeRef addr{ctx_.pointer(ctx_.basic(BasicKind::U8))};
+    ir::Value zero = constantI64(0, addr, n.pos);
+    if (failed_) {
+        return undefined();
+    }
+    ir::Instr cmp;
+    cmp.op = ir::Op::Cmp;
+    cmp.loc = n.pos;
+    cmp.type = checker_.typeOf(&n);
+    cmp.width = ir::IRType::Bool;
+    cmp.cmp = cmpFor(n.op, false);
+    cmp.operands.push_back(words[kFirstWord]);
+    cmp.operands.push_back(zero);
+    ir::Value out = newValue(ir::IRType::Bool, cmp.type, n.pos);
+    cmp.results.push_back(out);
+    emit(std::move(cmp));
+    return out;
+}
+
 ir::Value Lowerer::lowerStringEq(const Binary& n) {
     // Either side may be the null literal: it answers (nil, 0), and the
     // words core decides null against null and null against a value
@@ -5184,7 +8039,13 @@ std::vector<ir::Value> Lowerer::lowerTernary(const Ternary& n) {
         refuse(n.pos, "this expression");
         return {undefined()};
     }
-    int words = wordCount(result);
+    // Void answers no words: wordCount has no void arm (it answers -1 for
+    // unknown layouts), so the void case stays explicit here rather than
+    // widening the shared count and its other callers.
+    int words = 0;
+    if (result.type->kind() != Kind::Void) {
+        words = wordCount(result);
+    }
     if (words < 0) {
         refuse(n.pos, "this expression");
         return {undefined()};
@@ -5308,14 +8169,12 @@ ir::Value Lowerer::emitArith(BinOp op, ir::Value a, ir::Value b, TypeRef result,
     // Division and remainder trap; nothing else in this set does. The flag is
     // what stops DCE deleting the check and LICM hoisting the divide. Floats
     // never trap on arithmetic: an f32/f64 divide answers inf or NaN (SEMANTICS
-    // §11), so a mayTrap flag here would lie to the passes, and a float
-    // remainder would need an fmod routine rather than the integer op.
+    // §11), so a mayTrap flag here would lie to the passes. A float
+    // remainder lowers to the x87 partial remainder the backend emits —
+    // exact, then rounded once to the result width — and a zero divisor
+    // answers NaN through the masked invalid operation, faulting nothing.
     const bool floatResult = instr.width == ir::IRType::F32 ||
                              instr.width == ir::IRType::F64;
-    if (floatResult && instr.op == ir::Op::Rem) {
-        refuse(pos, "float remainder");
-        return undefined();
-    }
     if ((instr.op == ir::Op::Div || instr.op == ir::Op::Rem) && !floatResult) {
         instr.mayTrap = true;
     }
@@ -5341,6 +8200,62 @@ bool Lowerer::returnWordsFit(const std::vector<ir::Value>& words,
         }
     }
     return true;
+}
+
+std::vector<ir::Value> Lowerer::callSretSlots(ir::Instr& call, const Type* ret,
+                                              Position pos) {
+    // The caller allocates the answer slot and passes its address first
+    // (SysV sret). The slots must run consecutively for the callee's
+    // contiguous stores to land in them.
+    TypeRef retRef{ret};
+    int count = wordCount(retRef);
+    if (count < 0) {
+        refuse(pos, "a value of this type");
+        return {};
+    }
+    std::vector<ir::Value> slots =
+        allocaSlots(retRef, pos, static_cast<uint64_t>(count));
+    if (failed_) {
+        return {};
+    }
+    for (uint64_t i = 0; i < static_cast<uint64_t>(slots.size()); ++i) {
+        if (slots[i].id != slots[0].id + static_cast<uint32_t>(i)) {
+            refuse(pos, "this call");
+            return {};
+        }
+    }
+    ir::Argument first;
+    first.words.push_back(computedBase(slots[0], 0, pos));
+    if (failed_) {
+        return {};
+    }
+    call.arguments.insert(call.arguments.begin(), std::move(first));
+    return slots;
+}
+
+std::vector<ir::Value> Lowerer::callSretLoads(const std::vector<ir::Value>& slots,
+                                              const Type* ret, Position pos) {
+    TypeRef retRef{ret};
+    std::vector<ir::Value> out;
+    for (uint64_t i = 0; i < static_cast<uint64_t>(slots.size()); ++i) {
+        TypeRef word = wordType(retRef, i);
+        ir::IRType width = widthOf(word, pos);
+        if (failed_) {
+            return {};
+        }
+        ir::Instr load;
+        load.op = ir::Op::Load;
+        load.loc = pos;
+        load.type = word;
+        load.width = width;
+        load.addressBase = slots[i];
+        load.isPure = true;
+        ir::Value answer = newValue(width, word, pos);
+        load.results.push_back(answer);
+        emit(std::move(load));
+        out.push_back(answer);
+    }
+    return out;
 }
 
 std::vector<ir::Value> Lowerer::callResults(ir::Instr& call, const Type* ret,
@@ -5391,10 +8306,15 @@ std::vector<ir::Value> Lowerer::lowerCallWords(Call& n) {
     // `v.hasI()`: the tag compared to the member's index, answered as one
     // boolean word. The checker proved the shape; the member lookup repeats
     // here rather than trusting it, so a checker bug reads as a refusal.
+    // One place lookup serves every Field-callee path below: the lookup
+    // can lower (deref receivers), so running it per path would run
+    // effects once per path instead of once.
+    Place base;
+    bool haveBase = false;
     if (const auto* field = dynamic_cast<const Field*>(n.callee.get())) {
-        Place base;
-        if (resolvePlace(field->object.get(), base) && !base.type.isError() &&
-            base.type.type->kind() == Kind::Union) {
+        haveBase =
+            resolvePlace(field->object.get(), base) && !base.type.isError();
+        if (haveBase && base.type.type->kind() == Kind::Union) {
             std::optional<DeclId> id = base.type.type->decl();
             std::string member =
                 id.has_value() ? resolver_.unionHasMember(*id, field->name) : "";
@@ -5428,8 +8348,7 @@ std::vector<ir::Value> Lowerer::lowerCallWords(Call& n) {
         // is a static call to the mangled name with the object's address
         // first. Disjoint from the union path above: only values with
         // methods reach here.
-        Place base;
-        if (resolvePlace(field->object.get(), base) && !base.type.isError() &&
+        if (haveBase &&
             (base.type.type->kind() == Kind::Class ||
              base.type.type->kind() == Kind::Struct)) {
             std::optional<DeclId> id = base.type.type->decl();
@@ -5438,53 +8357,333 @@ std::vector<ir::Value> Lowerer::lowerCallWords(Call& n) {
             const Signature* msig = id.has_value()
                                         ? resolver_.methodSig(*id, field->name)
                                         : nullptr;
-            if (owner == nullptr || msig == nullptr) {
+            if (owner == nullptr) {
                 refuse(n.pos, "this call");
                 return {undefined()};
             }
-            callee = resolver_.linkName(*owner) + "__" + field->name;
-            sig = msig;
-            if (base.slots.empty() && !base.hasIndirect) {
-                refuse(n.pos, "a method on a global is not lowered yet");
+            if (msig != nullptr) {
+                ir::Value at;
+                if (!receiverAddress(base, n.pos, "this call", at)) {
+                    return {undefined()};
+                }
+                receiver.push_back(at);
+                sig = msig;
+                int64_t slot = id.has_value()
+                                   ? resolver_.virtualIndexOf(*id, field->name)
+                                   : -1;
+                if (slot >= 0) {
+                    // A virtual method dispatches through the object's vptr
+                    // word: slot `slot` of the concrete type's table names
+                    // the override the dynamic type chose (FEATURES 2.3).
+                    // The object's address rides as the receiver the table's
+                    // function already expects — no adapter, because both
+                    // sides are methods of a class.
+                    TypeRef word{ctx_.pointer(ctx_.basic(BasicKind::U8))};
+                    ir::Instr loadV;
+                    loadV.op = ir::Op::Load;
+                    loadV.loc = n.pos;
+                    loadV.type = word;
+                    loadV.width = ir::IRType::Ptr;
+                    loadV.addressBase = at;
+                    loadV.isPure = true;
+                    ir::Value table = newValue(loadV.width, word, n.pos);
+                    loadV.results.push_back(table);
+                    emit(std::move(loadV));
+                    if (failed_) {
+                        return {undefined()};
+                    }
+                    TypeRef count{ctx_.basic(BasicKind::I64)};
+                    ir::Value delta = constantI64(slot * layout::kSizePointer,
+                                                  count, n.pos);
+                    if (failed_) {
+                        return {undefined()};
+                    }
+                    ir::Instr step;
+                    step.op = ir::Op::Add;
+                    step.loc = n.pos;
+                    step.type = word;
+                    step.width = ir::IRType::Ptr;
+                    step.isPure = true;
+                    step.operands.push_back(table);
+                    step.operands.push_back(delta);
+                    ir::Value slotAt = newValue(step.width, word, n.pos);
+                    step.results.push_back(slotAt);
+                    emit(std::move(step));
+                    if (failed_) {
+                        return {undefined()};
+                    }
+                    ir::Instr loadF;
+                    loadF.op = ir::Op::Load;
+                    loadF.loc = n.pos;
+                    loadF.type = word;
+                    loadF.width = ir::IRType::Ptr;
+                    loadF.addressBase = slotAt;
+                    loadF.isPure = true;
+                    ir::Value fn = newValue(loadF.width, word, n.pos);
+                    loadF.results.push_back(fn);
+                    emit(std::move(loadF));
+                    if (failed_) {
+                        return {undefined()};
+                    }
+                    indirect = true;
+                    indirectCallee = fn;
+                } else {
+                    // A plain method resolves statically to its declarer's
+                    // function: an inherited method spells its base's name.
+                    std::optional<DeclId> home =
+                        id.has_value() ? resolver_.methodHome(*id, field->name)
+                                       : std::nullopt;
+                    const resolve::Decl* declarer =
+                        home.has_value() ? resolver_.declById(*home) : owner;
+                    if (declarer == nullptr) {
+                        refuse(n.pos, "this call");
+                        return {undefined()};
+                    }
+                    callee = resolver_.linkName(*declarer) + "__" + field->name;
+                }
+            }
+            // msig == null: a closure-valued field, not a method — the
+            // closure path below decides from the checked type.
+        }
+        // `s.m(args)` through an interface: the vtable names the concrete
+        // method, and the data word's address rides as the receiver the
+        // static method expects first. Entries sit in the resolver's
+        // methodNames order, so the index is looked up, never re-derived.
+        // Disjoint from the class/struct path above: only an interface
+        // value reaches here.
+        Place iface;
+        TypeRef objType = checker_.typeOf(field->object.get());
+        bool placed = haveBase && base.type.type->kind() == Kind::Interface;
+        if (placed) {
+            iface = base;
+        }
+        if (!placed && !failed_ && !objType.isError() &&
+            objType.type->kind() == Kind::Interface &&
+            !placeMayHaveRun(field->object.get())) {
+            // No direct place (a call answer, a computed index, a
+            // ternary): lower the pair and spill it to temps, then take
+            // the slots path below. Single evaluation: the shapes above
+            // emit nothing inside resolvePlace, so these words are the
+            // value's only lowering — and anything it may already have
+            // run refuses instead of running twice.
+            std::vector<ir::Value> words = lowerWords(field->object.get());
+            if (failed_) {
                 return {undefined()};
             }
-            if (base.hasIndirect && base.off != 0) {
-                // A method on a field reached through a pointer: the object
-                // address is the loaded pointer plus the field offset, added
-                // the same way a slice advances its pointer.
-                TypeRef count{ctx_.basic(BasicKind::I64)};
-                TypeRef ptrType{ctx_.pointer(base.type.type)};
-                ir::Value step = constantI64(base.off, count, n.pos);
+            if (words.size() != kInterfaceWords) {
+                refuse(n.pos, "this call");
+                return {undefined()};
+            }
+            std::vector<ir::Value> temps = allocaFor(objType, field->object->pos);
+            if (failed_ || temps.size() != words.size()) {
+                if (!failed_) {
+                    refuse(n.pos, "this call");
+                }
+                return {undefined()};
+            }
+            for (uint64_t i = 0; i < static_cast<uint64_t>(words.size()); ++i) {
+                ir::Instr store;
+                store.op = ir::Op::Store;
+                store.loc = field->object->pos;
+                store.type = objType;
+                store.addressBase = temps[i];
+                store.storedValue = words[i];
+                emit(std::move(store));
+            }
+            iface.slots = std::move(temps);
+            iface.global.clear();
+            iface.type = objType;
+            iface.off = 0;
+            iface.isVolatile = false;
+            iface.tagWrites.clear();
+            iface.hasIndirect = false;
+            iface.isAddress = false;
+            placed = true;
+        }
+        if (placed) {
+            std::optional<DeclId> ifaceId = iface.type.type->decl();
+            const Signature* msig = ifaceId.has_value()
+                                        ? resolver_.methodSig(*ifaceId, field->name)
+                                        : nullptr;
+            if (!ifaceId.has_value() || msig == nullptr) {
+                refuse(n.pos, "this call");
+                return {undefined()};
+            }
+            int64_t index = -1;
+            std::vector<std::string> names = resolver_.methodNames(*ifaceId);
+            for (uint64_t k = 0; k < static_cast<uint64_t>(names.size()); ++k) {
+                if (names[k] == field->name) {
+                    index = static_cast<int64_t>(k);
+                    break;
+                }
+            }
+            if (index < 0) {
+                refuse(n.pos, "this call");
+                return {undefined()};
+            }
+            // A value naming a computed address has no direct slots: those
+            // dispatches refuse by name until their slice, rather than
+            // addressing the wrong words.
+            if (iface.isAddress) {
+                refuse(n.pos,
+                       "an interface method through a computed address is not lowered yet");
+                return {undefined()};
+            }
+            // The pair sits at the place's byte offset, in whole words: a
+            // local field, a global's member, or an address behind a
+            // pointer. A mid-word offset is a lowerer bug, not a program.
+            int64_t per = layout::kSizePointer;
+            if (iface.off < 0 || iface.off % per != 0) {
+                refuse(n.pos, "this call");
+                return {undefined()};
+            }
+            TypeRef vtableType = wordType(iface.type, kVtableWord);
+            ir::Value vtable;
+            ir::Value dataAddr;
+            if (!iface.global.empty()) {
+                // A method on a global names a label, not slots: load the
+                // pair into temps and take the slots path below — the same
+                // spill the computed-value path uses. A global interface
+                // holds sixteen laid-down bytes (null or a stored pair),
+                // so the load reads whole words, never a trap.
+                std::vector<ir::Value> words =
+                    loadRange(n.pos, iface, objType);
+                if (failed_ || words.size() != kInterfaceWords) {
+                    if (!failed_) {
+                        refuse(n.pos, "this call");
+                    }
+                    return {undefined()};
+                }
+                std::vector<ir::Value> temps =
+                    allocaFor(objType, field->object->pos);
+                if (failed_ || temps.size() != words.size()) {
+                    if (!failed_) {
+                        refuse(n.pos, "this call");
+                    }
+                    return {undefined()};
+                }
+                for (uint64_t i = 0; i < static_cast<uint64_t>(words.size()); ++i) {
+                    ir::Instr store;
+                    store.op = ir::Op::Store;
+                    store.loc = field->object->pos;
+                    store.type = objType;
+                    store.addressBase = temps[i];
+                    store.storedValue = words[i];
+                    emit(std::move(store));
+                }
+                iface.slots = std::move(temps);
+                iface.global.clear();
+                iface.off = 0;
+                iface.hasIndirect = false;
+                // Falls through to the direct-slots path below: the pair
+                // now sits in temps, so the vtable load and receiver use
+                // them like any other slotted value.
+            }
+            if (iface.hasIndirect) {
+                // An address behind a pointer: advanced past the offset,
+                // with the vtable read through the pair it names.
+                dataAddr = iface.off == 0 ? iface.indirect
+                                          : computedBase(iface.indirect, iface.off,
+                                                         n.pos);
                 if (failed_) {
                     return {undefined()};
                 }
-                ir::Instr add;
-                add.op = ir::Op::Add;
-                add.loc = n.pos;
-                add.type = ptrType;
-                add.width = ir::IRType::Ptr;
-                add.isPure = true;
-                add.operands.push_back(base.indirect);
-                add.operands.push_back(step);
-                ir::Value at = newValue(add.width, ptrType, n.pos);
-                add.results.push_back(at);
-                emit(std::move(add));
-                receiver.push_back(at);
-            } else if (base.hasIndirect) {
-                receiver.push_back(base.indirect);
+                ir::Instr load;
+                load.op = ir::Op::Load;
+                load.loc = n.pos;
+                load.type = vtableType;
+                load.width = widthOf(vtableType, n.pos);
+                if (failed_) {
+                    return {undefined()};
+                }
+                load.addressBase = dataAddr;
+                load.displacement = layout::kOffsetInterfaceVtable;
+                load.isPure = true;
+                vtable = newValue(load.width, vtableType, n.pos);
+                load.results.push_back(vtable);
+                emit(std::move(load));
             } else {
-                receiver.push_back(computedBase(base.slots[0], base.off, n.pos));
+                // Direct slots, with the pair at the place's word offset:
+                // a bare value at word zero, a field deeper in. A place
+                // with no slots at all names a computed address instead.
+                if (iface.slots.empty()) {
+                    refuse(n.pos,
+                           "an interface method through a computed address is not lowered yet");
+                    return {undefined()};
+                }
+                uint64_t atWord =
+                    static_cast<uint64_t>(iface.off / per);
+                if (atWord + kVtableWord >=
+                    static_cast<uint64_t>(iface.slots.size())) {
+                    refuse(n.pos, "this call");
+                    return {undefined()};
+                }
+                ir::Instr load;
+                load.op = ir::Op::Load;
+                load.loc = n.pos;
+                load.type = vtableType;
+                load.width = widthOf(vtableType, n.pos);
+                if (failed_) {
+                    return {undefined()};
+                }
+                load.addressBase = iface.slots[atWord + kVtableWord];
+                load.isPure = true;
+                vtable = newValue(load.width, vtableType, n.pos);
+                load.results.push_back(vtable);
+                emit(std::move(load));
+                dataAddr = computedBase(iface.slots[atWord], 0, n.pos);
             }
+            if (failed_) {
+                return {undefined()};
+            }
+            // The method's address rides in the vtable at its methodNames
+            // index, scaled by the pointer width from layout: one load,
+            // then an indirect call carrying the receiver first, under the
+            // same convention direct calls already use.
+            TypeRef entryType{ctx_.pointer(ctx_.basic(BasicKind::U8))};
+            ir::Instr entry;
+            entry.op = ir::Op::Load;
+            entry.loc = n.pos;
+            entry.type = entryType;
+            entry.width = ir::IRType::Ptr;
+            entry.addressBase = vtable;
+            entry.displacement = index * layout::kSizePointer;
+            entry.isPure = true;
+            ir::Value target = newValue(entry.width, entryType, n.pos);
+            entry.results.push_back(target);
+            emit(std::move(entry));
+            if (failed_) {
+                return {undefined()};
+            }
+            sig = msig;
+            indirect = true;
+            indirectCallee = target;
+            receiver.push_back(dataAddr);
         }
     }
     if (const auto* ident = dynamic_cast<const Ident*>(n.callee.get())) {
-        sig = functionSig(ident->name);
-        callee = ident->name;
+        // A generic call answers its spec: the checker recorded which
+        // specialization each site instantiated, so the signature and the
+        // link name come from the spec, never the template. Plain calls
+        // keep the path below untouched.
+        std::optional<DeclId> callSpec = checker_.specOf(&n, emitSpec_);
+        if (callSpec.has_value()) {
+            const Signature* specSig = resolver_.funcSig(*callSpec);
+            std::string specLink = resolver_.specLinkName(*callSpec);
+            if (specSig == nullptr || specLink.empty()) {
+                refuse(n.pos, "this call");
+                return {undefined()};
+            }
+            sig = specSig;
+            callee = specLink;
+        } else {
+            sig = functionSig(ident->name);
+            callee = ident->name;
         // The link name is the resolver's: entry keeps its spelling, an
         // import's mangles under its module, the prelude keeps its C name.
         // The lookup is the same one functionSig uses, so the two cannot
         // disagree — including a program's own shadowing `print`.
-        const resolve::Scope* here = resolver_.scopeOf(checker_.module());
+        const resolve::Scope* here = homeScope();
         const resolve::Decl* decl =
             here != nullptr ? resolver_.lookup(here, ident->name) : nullptr;
         if (decl != nullptr) {
@@ -5524,6 +8723,31 @@ std::vector<ir::Value> Lowerer::lowerCallWords(Call& n) {
                     break;
                 }
             }
+            if (sig == nullptr) {
+                // A closure-typed global calls through its stored code
+                // word, with the stored captures word riding as receiver.
+                // Locals keep priority above; anything else here falls
+                // through to the loud refusal below.
+                if (const GlobalBinding* global = findGlobal(ident->name)) {
+                    if (global->type.type->kind() == Kind::Closure) {
+                        const Signature* csig =
+                            global->type.type->signature();
+                        if (csig != nullptr) {
+                            std::vector<ir::Value> pair =
+                                loadGlobal(n.pos, *global);
+                            if (failed_ || pair.size() != kClosureWords) {
+                                refuse(n.pos, "this call");
+                                return {undefined()};
+                            }
+                            sig = csig;
+                            indirect = true;
+                            indirectCallee = pair[kFirstWord];
+                            receiver.push_back(pair[kLenWord]);
+                        }
+                    }
+                }
+            }
+            }
         }
     } else {
         if (const auto* deref = dynamic_cast<const Unary*>(n.callee.get())) {
@@ -5544,6 +8768,22 @@ std::vector<ir::Value> Lowerer::lowerCallWords(Call& n) {
                 }
             }
         }
+        if (sig == nullptr) {
+            // A function pointer read from a place — an element of an
+            // array of *func, a member — calls through its loaded word.
+            TypeRef calleeType = checker_.typeOf(n.callee.get());
+            if (!failed_ && !calleeType.isError() &&
+                calleeType.type->kind() == Kind::FunctionPtr) {
+                sig = calleeType.type->signature();
+                indirect = true;
+                std::vector<ir::Value> target = lowerWords(n.callee.get());
+                if (failed_ || target.size() != kOneWord) {
+                    refuse(n.pos, "this call");
+                    return {undefined()};
+                }
+                indirectCallee = target[0];
+            }
+        }
     }
     if (const auto* field = dynamic_cast<const Field*>(n.callee.get())) {
         // `da.aval(args)`: the checker proved the object names a module and
@@ -5560,7 +8800,7 @@ std::vector<ir::Value> Lowerer::lowerCallWords(Call& n) {
                     break;
                 }
             }
-            const resolve::Scope* here = resolver_.scopeOf(checker_.module());
+            const resolve::Scope* here = homeScope();
             const resolve::Decl* moduleDecl =
                 here != nullptr ? resolver_.lookup(here, mod->name) : nullptr;
             if (!shadowed && moduleDecl != nullptr &&
@@ -5575,15 +8815,90 @@ std::vector<ir::Value> Lowerer::lowerCallWords(Call& n) {
                     refuse(n.pos, "this call");
                     return {undefined()};
                 }
-                if (member->typeParams > 0) {
-                    refuse(n.pos, "a generic call across modules");
-                    return {undefined()};
+                // A generic member answers its spec: the checker recorded
+                // which specialization this site instantiated, so the
+                // signature and link name come from the spec, never the
+                // template. Plain members keep the path below untouched.
+                std::optional<DeclId> memberSpec = checker_.specOf(&n, emitSpec_);
+                if (memberSpec.has_value()) {
+                    const Signature* specSig =
+                        resolver_.funcSig(*memberSpec);
+                    std::string specLink =
+                        resolver_.specLinkName(*memberSpec);
+                    if (specSig == nullptr || specLink.empty()) {
+                        refuse(n.pos, "this call");
+                        return {undefined()};
+                    }
+                    sig = specSig;
+                    callee = specLink;
+                } else {
+                    if (member->typeParams > 0) {
+                        refuse(n.pos, "a generic call across modules");
+                        return {undefined()};
+                    }
+                    const resolve::Decl* origin =
+                        resolver_.declById(member->id);
+                    sig = &member->sig;
+                    callee = resolver_.linkName(origin != nullptr ? *origin
+                                                                  : *member);
                 }
-                const resolve::Decl* origin =
-                    resolver_.declById(member->id);
-                sig = &member->sig;
-                callee = resolver_.linkName(origin != nullptr ? *origin
-                                                              : *member);
+            }
+        }
+    }
+    if (sig == nullptr) {
+        // A closure-typed callee that names no local (an array element, a
+        // call answer, a ternary arm, a struct field holding a closure):
+        // the value's two words ride as code plus captures, like a closure
+        // local's. The checker proved the type; methods, module members and
+        // closure locals were claimed above, so only plain values arrive.
+        TypeRef calleeType = checker_.typeOf(n.callee.get());
+        if (!failed_ && !calleeType.isError() &&
+            calleeType.type->kind() == Kind::Closure &&
+            dynamic_cast<const Ident*>(n.callee.get()) == nullptr) {
+            const Signature* csig = calleeType.type->signature();
+            std::vector<ir::Value> pair = lowerWords(n.callee.get());
+            if (!failed_ && csig != nullptr && pair.size() == kClosureWords) {
+                sig = csig;
+                indirect = true;
+                indirectCallee = pair[kFirstWord];
+                receiver.push_back(pair[kLenWord]);
+            }
+        }
+    }
+    if (sig == nullptr) {
+        // A proven-closure fn spelling calls through the pair its address
+        // names: the declaration adopted the closure representation, so
+        // code plus captures ride like a closure local's. Anything else
+        // naming a bare fn spelling falls through to refuse below. The
+        // local's own binding carries the type (callee identifiers record
+        // no type of their own).
+        if (const auto* ident = dynamic_cast<const Ident*>(n.callee.get())) {
+            uint64_t depth = static_cast<uint64_t>(locals_.size());
+            for (; depth > 0;) {
+                --depth;
+                auto bound = locals_[depth].find(ident->name);
+                if (bound == locals_[depth].end()) {
+                    continue;
+                }
+                if (bound->second.type.type->kind() == Kind::FunctionPtr &&
+                    checker_.provOfName(ident->name) == check::Prov::Closure) {
+                    const Signature* csig =
+                        bound->second.type.type->signature();
+                    std::vector<ir::Value> held =
+                        loadLocal(n.pos, bound->second);
+                    if (!failed_ && csig != nullptr && held.size() == kOneWord) {
+                        TypeRef pairType{ctx_.closure(*csig)};
+                        std::vector<ir::Value> pair = loadClosurePair(
+                            held[kFirstWord], pairType, n.pos);
+                        if (!failed_ && pair.size() == kClosureWords) {
+                            sig = csig;
+                            indirect = true;
+                            indirectCallee = pair[kFirstWord];
+                            receiver.push_back(pair[kLenWord]);
+                        }
+                    }
+                }
+                break;
             }
         }
     }
@@ -5611,6 +8926,60 @@ std::vector<ir::Value> Lowerer::lowerCallWords(Call& n) {
         if (failed_) {
             return {undefined()};
         }
+        // A concrete argument for an interface parameter boxes to the pair
+        // here, so the callee's two words arrive as two. The checker proved
+        // the arity, so a parameter miss here is a lowerer bug, not a
+        // program, and refuses as one.
+        if (i >= static_cast<uint64_t>(sig->parameters().size())) {
+            refuse(n.pos, "this call");
+            return {undefined()};
+        }
+        TypeRef want{sig->parameters()[static_cast<size_t>(i)].type};
+        arg.words = boxClassOperand(n.args[i].get(), std::move(arg.words),
+                                      checker_.typeOf(n.args[i].get()), want,
+                                      n.args[i]->pos);
+        if (failed_) {
+            return {undefined()};
+        }
+        // Aggregate arguments travel packed: element loads answer one
+        // take per slot, but the callee binds packed words, so the takes
+        // are stored contiguously and reloaded as the parameter's words.
+        // storeRange owns both the chunked shape takes arrive in and the
+        // valued shape calls answer; a load of the packed cells is what
+        // the callee's slots then observe.
+        Kind argKind =
+            !want.isError() ? want.type->kind() : Kind::Error;
+        if (!arg.words.empty() && !want.isError() &&
+            (argKind == Kind::Struct || argKind == Kind::Array ||
+             argKind == Kind::Class || argKind == Kind::Union)) {
+            int count = wordCount(want);
+            if (count < 0) {
+                refuse(n.args[i]->pos, "this call");
+                return {undefined()};
+            }
+            uint64_t cells = static_cast<uint64_t>(count);
+            std::vector<ir::Value> temps =
+                allocaSlots(want, n.args[i]->pos, cells);
+            if (failed_) {
+                return {undefined()};
+            }
+            Place pack;
+            pack.slots = temps;
+            pack.type = want;
+            pack.off = 0;
+            pack.isVolatile = false;
+            storeRange(n.args[i]->pos, pack, arg.words, want);
+            if (failed_) {
+                return {undefined()};
+            }
+            LocalBinding packed;
+            packed.slots = std::move(temps);
+            packed.type = want;
+            arg.words = loadLocal(n.args[i]->pos, packed);
+            if (failed_) {
+                return {undefined()};
+            }
+        }
         // A float argument rides one word in an SSE register (psABI). The
         // checked type of the argument is the class: a literal is typed in
         // the parameter's context, and any other expression had to match
@@ -5629,11 +8998,28 @@ std::vector<ir::Value> Lowerer::lowerCallWords(Call& n) {
     // Captured before the move below: emit() takes the instruction by value,
     // so reading results after moving reads an emptied vector — which is how
     // a call's result became the undefined placeholder.
-    std::vector<ir::Value> words = callResults(instr, ret, n.pos);
-    if (failed_) {
-        return {undefined()};
+    std::vector<ir::Value> words;
+    if (needsSret(ret)) {
+        // The answer slot precedes the call and its loads follow it:
+        // loads before the call would read unfilled slots.
+        std::vector<ir::Value> slots = callSretSlots(instr, ret, n.pos);
+        if (failed_) {
+            return {undefined()};
+        }
+        instr.width = ir::IRType::Void;
+        instr.type = TypeRef{ret};
+        emit(std::move(instr));
+        words = callSretLoads(slots, ret, n.pos);
+        if (failed_) {
+            return {undefined()};
+        }
+    } else {
+        words = callResults(instr, ret, n.pos);
+        if (failed_) {
+            return {undefined()};
+        }
+        emit(std::move(instr));
     }
-    emit(std::move(instr));
     if (function_ != nullptr) {
         // A call is mayTrap only if the callee can throw, which is known here
         // rather than guessed by the optimiser.
@@ -5675,15 +9061,62 @@ void Lowerer::onReturn(Return& n) {
         if (failed_) {
             return;
         }
-        if (!returnWordsFit(words, n.pos)) {
+        // A concrete value returned as an interface boxes to the pair
+        // before the row check below, which then enforces two, not one.
+        const Type* answered = function_->signature.returnType();
+        TypeRef want{answered != nullptr ? answered : ctx_.void_()};
+        words = boxClassOperand(n.value.get(), std::move(words), checker_.typeOf(n.value.get()),
+                                  want, n.pos);
+        if (failed_) {
             return;
         }
-        term.values = std::move(words);
+        if (needsSret(answered)) {
+            // Store the answer into the caller's buffer and return
+            // nothing: params[0] is the hidden address. The words land
+            // in order at its bytes, shaped by the store like any
+            // aggregate construction.
+            if (function_->params.empty()) {
+                refuse(n.pos, "this return");
+                return;
+            }
+            TypeRef sretPtr{ctx_.pointer(ctx_.basic(BasicKind::U8))};
+            ir::Instr load;
+            load.op = ir::Op::Load;
+            load.loc = n.pos;
+            load.type = sretPtr;
+            load.width = ir::IRType::Ptr;
+            load.addressBase = function_->params[kFirstWord];
+            load.isPure = true;
+            ir::Value buf = newValue(load.width, sretPtr, n.pos);
+            load.results.push_back(buf);
+            emit(std::move(load));
+            if (failed_) {
+                return;
+            }
+            Place at;
+            at.hasIndirect = true;
+            at.indirect = buf;
+            at.off = 0;
+            at.type = want;
+            at.isVolatile = false;
+            storeRange(n.pos, at, words, want);
+            if (failed_) {
+                return;
+            }
+        } else {
+            if (!returnWordsFit(words, n.pos)) {
+                return;
+            }
+            term.values = std::move(words);
+        }
     } else {
         // A bare return answers nothing: an empty list, not the placeholder.
         // The placeholder's id poisons the frame computation, which reads
         // every value the function mentions.
     }
+    // FEATURES §5.2: the value is already evaluated above; every pending
+    // defer runs now, innermost first, before control leaves.
+    runDefers(0);
     emitTerminator(term);
 }
 
@@ -5735,13 +9168,403 @@ void Lowerer::onIf(IfStmt& n) {
     startBlock(joinLabel);
 }
 
+bool Lowerer::matchNeedsSpill(const MatchStmt& n) {
+    for (const auto& arm : n.arms) {
+        auto needsAddr = [&](const Pattern& pat) {
+            if (checker_.isDeadPattern(&pat)) {
+                return false;
+            }
+            return pat.kind == PatternKind::Type || pat.kind == PatternKind::Member;
+        };
+        if (needsAddr(*arm->pattern)) {
+            return true;
+        }
+        for (const auto& alt : arm->alts) {
+            if (needsAddr(*alt)) {
+                return true;
+            }
+        }
+    }
+    return false;
+}
+
+bool Lowerer::matchBoundWords(const std::string& name, std::vector<ir::Value>& words,
+                              Position pos) {
+    for (auto frame = locals_.rbegin(); frame != locals_.rend(); ++frame) {
+        auto found = frame->find(name);
+        if (found != frame->end()) {
+            words = loadLocal(pos, found->second);
+            return !failed_;
+        }
+    }
+    if (const GlobalBinding* global = findGlobal(name)) {
+        words = loadGlobal(pos, *global);
+        return !failed_;
+    }
+    const resolve::Scope* here = homeScope();
+    const resolve::Decl* decl =
+        here != nullptr ? resolver_.lookup(here, name) : nullptr;
+    if (decl != nullptr &&
+        (decl->kind == resolve::DeclKind::Var ||
+         decl->kind == resolve::DeclKind::Const)) {
+        // A variable global always lands in globals_ first; missing it
+        // here is a lowering gap, not a fresh name. A constant folds, or
+        // refuses loudly when it has no integer value.
+        if (decl->kind == resolve::DeclKind::Var) {
+            refuse(pos, "this pattern");
+            return false;
+        }
+        Ident probe(pos, name);
+        int64_t folded = 0;
+        if (!foldBound(&probe, folded)) {
+            refuse(pos, "this pattern");
+            return false;
+        }
+        TypeRef word{ctx_.basic(BasicKind::I64)};
+        words = {constantI64(folded, word, pos)};
+        return !failed_;
+    }
+    // A bare enumerator compares by value: the checker proved exactly one
+    // enum owns the name (or marked the arm dead), so the integer here is
+    // that member's value. Locals, globals, variables and constants
+    // already answered above, in the checker's order.
+    {
+        int owners = 0;
+        const resolve::Decl* owner =
+            here != nullptr ? resolver_.lookupEnumMember(here, name, owners)
+                            : nullptr;
+        if (owner != nullptr) {
+            std::string home = owner->scope != nullptr
+                                   ? owner->scope->module
+                                   : homeModule();
+            int64_t value =
+                resolver_.enumValue(home + "." + owner->name, name);
+            TypeRef word{ctx_.basic(BasicKind::I64)};
+            words = {constantI64(value, word, pos)};
+            return !failed_;
+        }
+    }
+    return false;
+}
+
+void Lowerer::matchBrTo(uint32_t target, Position pos) {
+    ir::Terminator term;
+    term.term = ir::Term::Br;
+    term.target = target;
+    term.loc = pos;
+    emitTerminator(term);
+    sealBlock(current_);
+}
+
+void Lowerer::matchCondTo(ir::Value cond, uint32_t taken, uint32_t missed, Position pos) {
+    ir::Terminator br;
+    br.term = ir::Term::CondBr;
+    br.cond = cond;
+    br.thenTarget = taken;
+    br.elseTarget = missed;
+    br.loc = pos;
+    emitTerminator(br);
+    sealBlock(current_);
+}
+
+bool Lowerer::lowerMatchConstTest(const Expr* value,
+                                 const std::vector<ir::Value>& words,
+                                 uint32_t taken, uint32_t missed, Position pos) {
+    if (words.empty()) {
+        refuse(pos, "this pattern");
+        return false;
+    }
+    if (dynamic_cast<const StringLit*>(value) != nullptr) {
+        std::vector<ir::Value> wantWords = lowerWords(value);
+        if (failed_ || wantWords.size() != kSliceWords ||
+            words.size() != kSliceWords) {
+            refuse(pos, "this pattern");
+            return false;
+        }
+        ir::Value eq = lowerStringEqWords(words, wantWords, pos, true);
+        if (failed_) {
+            return false;
+        }
+        matchCondTo(eq, taken, missed, pos);
+        return !failed_;
+    }
+    if (dynamic_cast<const NilPtr*>(value) != nullptr) {
+        if (words.size() != kOneWord) {
+            refuse(pos, "this pattern");
+            return false;
+        }
+        TypeRef ptrType{ctx_.pointer(ctx_.basic(BasicKind::U8))};
+        ir::Value nil = constantI64(0, ptrType, pos);
+        if (failed_) {
+            return false;
+        }
+        matchCondTo(emitI64Cmp(pos, BinOp::Eq, words[kFirstWord], nil), taken,
+                    missed, pos);
+        return !failed_;
+    }
+    int64_t folded = 0;
+    if (!foldBound(value, folded)) {
+        refuse(pos, "this pattern");
+        return false;
+    }
+    TypeRef word{ctx_.basic(BasicKind::I64)};
+    ir::Value wantVal = constantI64(folded, word, pos);
+    if (failed_) {
+        return false;
+    }
+    matchCondTo(emitI64Cmp(pos, BinOp::Eq, words[kFirstWord], wantVal), taken,
+                missed, pos);
+    return !failed_;
+}
+
+bool Lowerer::lowerMatchRangeTest(const std::vector<ir::Value>& words, TypeRef scrutinee,
+                                  int64_t lo, int64_t hi, uint32_t taken,
+                                  uint32_t missed, Position pos) {
+    if (words.empty() || scrutinee.isError() ||
+        scrutinee.type->kind() != Kind::Basic ||
+        !scrutinee.type->basic().has_value() ||
+        !basicIsInteger(*scrutinee.type->basic())) {
+        refuse(pos, "this pattern");
+        return false;
+    }
+    // The checker proved an integer scrutinee and bounds that fit its
+    // signedness, so widening first keeps the question asked: a u8 255
+    // beside hi 300 compares 255 <= 300, never a truncated 44, and a
+    // negative i32 stays below lo 0 instead of wrapping above it.
+    bool isSigned = basicIsSigned(*scrutinee.type->basic());
+    TypeRef wide{ctx_.basic(isSigned ? BasicKind::I64 : BasicKind::U64)};
+    ir::Value cell = convertInt(words[kFirstWord], scrutinee, wide, pos);
+    if (failed_) {
+        return false;
+    }
+    ir::Value loVal = constantI64(lo, wide, pos);
+    ir::Value hiVal = constantI64(hi, wide, pos);
+    if (failed_) {
+        return false;
+    }
+    TypeRef boolean{ctx_.basic(BasicKind::Bool)};
+    auto cmpTo = [&](BinOp op, ir::Value a, ir::Value b, uint32_t yes, uint32_t no) {
+        ir::Instr cmp;
+        cmp.op = ir::Op::Cmp;
+        cmp.loc = pos;
+        cmp.type = boolean;
+        cmp.width = ir::IRType::Bool;
+        cmp.cmp = cmpFor(op, isSigned);
+        cmp.isPure = true;
+        cmp.operands.push_back(a);
+        cmp.operands.push_back(b);
+        ir::Value out = newValue(cmp.width, boolean, pos);
+        cmp.results.push_back(out);
+        emit(std::move(cmp));
+        matchCondTo(out, yes, no, pos);
+    };
+    // Two links, not one: lo <= x lands mid, x <= hi lands the body,
+    // and either miss leaves the arm — the chain's shape, doubled.
+    uint32_t mid = emitBlock(pos);
+    cmpTo(BinOp::Ge, cell, loVal, mid, missed);
+    if (failed_) {
+        return false;
+    }
+    startBlock(mid);
+    cmpTo(BinOp::Le, cell, hiVal, taken, missed);
+    return !failed_;
+}
+
+bool Lowerer::lowerMatchFieldTest(const Pattern& sub, const Place& at, uint32_t pass,
+                                  uint32_t miss, Position pos,
+                                  std::vector<MatchFieldBind>& binds) {
+    if (sub.kind == PatternKind::Wildcard) {
+        matchBrTo(pass, pos);
+        return !failed_;
+    }
+    if (sub.kind == PatternKind::Bind) {
+        std::vector<ir::Value> bound;
+        if (!matchBoundWords(sub.name, bound, pos)) {
+            if (failed_) {
+                return false;
+            }
+            MatchFieldBind bind;
+            bind.name = sub.name;
+            bind.type = at.type;
+            bind.off = at.off;
+            binds.push_back(std::move(bind));
+            matchBrTo(pass, pos);
+            return !failed_;
+        }
+        // A bound name compares: strings by content, one word by value.
+        // Anything wider never passed the checker's comparability, so a
+        // size surprise here refuses instead of comparing half a value.
+        std::vector<ir::Value> got = loadRange(pos, at, at.type);
+        if (failed_) {
+            return false;
+        }
+        if (at.type.type->kind() == Kind::String) {
+            if (bound.size() != kSliceWords || got.size() != kSliceWords) {
+                refuse(pos, "this pattern");
+                return false;
+            }
+            ir::Value eq = lowerStringEqWords(got, bound, pos, true);
+            if (failed_) {
+                return false;
+            }
+            matchCondTo(eq, pass, miss, pos);
+            return !failed_;
+        }
+        if (bound.size() != kOneWord || got.size() != kOneWord) {
+            refuse(pos, "this pattern");
+            return false;
+        }
+        matchCondTo(emitI64Cmp(pos, BinOp::Eq, got[kFirstWord], bound[kFirstWord]),
+                    pass, miss, pos);
+        return !failed_;
+    }
+    if (sub.kind == PatternKind::Const) {
+        std::vector<ir::Value> got = loadRange(pos, at, at.type);
+        if (failed_) {
+            return false;
+        }
+        return lowerMatchConstTest(sub.value.get(), got, pass, miss, pos);
+    }
+    if (sub.kind == PatternKind::Range) {
+        std::vector<ir::Value> got = loadRange(pos, at, at.type);
+        if (failed_) {
+            return false;
+        }
+        if (got.size() != kOneWord) {
+            refuse(pos, "this pattern");
+            return false;
+        }
+        int64_t lo = 0;
+        int64_t hi = 0;
+        if (!foldBound(sub.value.get(), lo) || !foldBound(sub.rangeHi.get(), hi)) {
+            refuse(sub.value->pos, "this pattern");
+            return false;
+        }
+        return lowerMatchRangeTest(got, at.type, lo, hi, pass, miss, pos);
+    }
+    if (sub.kind == PatternKind::Type || sub.kind == PatternKind::Member) {
+        return lowerMatchArmTest(sub, at, pass, miss, pos, binds);
+    }
+    refuse(sub.pos, "this pattern");
+    return false;
+}
+
+bool Lowerer::lowerMatchArmTest(const Pattern& pat, const Place& base, uint32_t body,
+                                uint32_t next, Position pos,
+                                std::vector<MatchFieldBind>& binds) {
+    if (pat.kind == PatternKind::Member) {
+        if (base.type.type->kind() == Kind::Enum) {
+            // The checker proved the same enum and a known case, so the
+            // cell answers directly: no tag to read, just the named value
+            // beside the spilled word.
+            std::optional<DeclId> id = base.type.type->decl();
+            int64_t want = 0;
+            bool known = false;
+            if (id.has_value()) {
+                for (const auto& member : resolver_.enumMembers(*id)) {
+                    if (member.first == pat.member) {
+                        want = member.second;
+                        known = true;
+                        break;
+                    }
+                }
+            }
+            if (!known) {
+                refuse(pos, "this pattern");
+                return false;
+            }
+            std::vector<ir::Value> got = loadRange(pos, base, base.type);
+            if (failed_) {
+                return false;
+            }
+            if (got.size() != kOneWord) {
+                refuse(pos, "this pattern");
+                return false;
+            }
+            TypeRef word{ctx_.basic(BasicKind::I64)};
+            ir::Value wantVal = constantI64(want, word, pos);
+            if (failed_) {
+                return false;
+            }
+            matchCondTo(emitI64Cmp(pos, BinOp::Eq, got[kFirstWord], wantVal),
+                        body, next, pos);
+            return !failed_;
+        }
+        // The checker proved the same union, so the tag answers: index
+        // and offset come from the resolver, never from a guess.
+        if (base.type.type->kind() != Kind::Union) {
+            refuse(pos, "this pattern");
+            return false;
+        }
+        std::optional<DeclId> id = base.type.type->decl();
+        // Split across lines on purpose: the offset call beside a digit
+        // reads as a size literal and T4 refuses it.
+        int64_t index =
+            id.has_value() ? resolver_.unionMemberIndex(*id, pat.member) : -1;
+        int64_t tagOff = -1;
+        if (id.has_value()) {
+            tagOff = resolver_.unionTagOffset(*id);
+        }
+        if (!id.has_value() || index < 0 || tagOff < 0) {
+            refuse(pos, "this pattern");
+            return false;
+        }
+        ir::Value ok = emitTagCheck(pos, base, tagOff, index);
+        if (failed_) {
+            return false;
+        }
+        matchCondTo(ok, body, next, pos);
+        return !failed_;
+    }
+    if (pat.kind != PatternKind::Type) {
+        refuse(pos, "this pattern");
+        return false;
+    }
+    if (base.type.type->kind() != Kind::Struct) {
+        refuse(pos, "this pattern");
+        return false;
+    }
+    std::optional<DeclId> id = base.type.type->decl();
+    if (!id.has_value()) {
+        refuse(pos, "this pattern");
+        return false;
+    }
+    // One block per field in order: a field with nothing to test still
+    // owns its link, so binds and wildcards thread through to the body.
+    const uint64_t fieldCount = static_cast<uint64_t>(pat.fields.size());
+    for (uint64_t j = 0; j < fieldCount; ++j) {
+        const FieldPat& field = pat.fields[j];
+        TypeRef fieldType = resolver_.fieldType(*id, field.name);
+        int64_t fieldOff = resolver_.fieldOffset(*id, field.name);
+        if (fieldType.isError() || fieldOff < 0) {
+            refuse(field.pat->pos, "no such field");
+            return false;
+        }
+        Place at = base;
+        at.off = base.off + fieldOff;
+        at.type = fieldType;
+        const bool last = j + 1 == fieldCount;
+        uint32_t pass = last ? body : emitBlock(pos);
+        if (!lowerMatchFieldTest(*field.pat, at, pass, next, pos, binds)) {
+            return false;
+        }
+        if (!last) {
+            startBlock(pass);
+        }
+    }
+    if (fieldCount == 0) {
+        matchBrTo(body, pos);
+    }
+    return !failed_;
+}
+
 void Lowerer::onMatch(MatchStmt& n) {
     if (failed_ || !enabled_ || function_ == nullptr) {
         return;
     }
     // The checker proved every arm compatible and the chain exhaustive
-    // (a default, or both bool constants), so the lowering only answers
-    // which arm: the scrutinee lowers once, each test branches to its
+    // (a default, or a finite cover over a bool, a union, or an enum),
+    // so the lowering only answers which arm: the scrutinee lowers once, each test branches to its
     // body or the next test, and a taken body joins instead of falling
     // through — the first match in source order wins. A break inside an
     // arm needs no frame here: none is pushed, so it reaches the loop
@@ -5756,7 +9579,19 @@ void Lowerer::onMatch(MatchStmt& n) {
     if (failed_) {
         return;
     }
-    const uint64_t want = scrutString ? kSliceWords : kOneWord;
+    // A struct or union scrutinee answers one value per word, like any
+    // other aggregate: the single-word row only fits scalars. Anything
+    // else keeps the old width, so existing arms never shift.
+    uint64_t want = scrutString ? kSliceWords : kOneWord;
+    if (!scrutString && (scrutType.type->kind() == Kind::Struct ||
+                         scrutType.type->kind() == Kind::Union)) {
+        int words = wordCount(scrutType);
+        if (words < 0) {
+            refuse(n.pos, "this match");
+            return;
+        }
+        want = static_cast<uint64_t>(words);
+    }
     if (scrut.size() != want) {
         refuse(n.scrutinee->pos, "this match");
         return;
@@ -5793,78 +9628,76 @@ void Lowerer::onMatch(MatchStmt& n) {
     // constants — the same order every other name read uses, and the
     // same call the checker's resolveMatchValue makes: a name it finds
     // must materialize here, never bind fresh over the real value.
-    auto boundWords = [&](const std::string& name,
-                          std::vector<ir::Value>& words) -> bool {
-        for (auto frame = locals_.rbegin(); frame != locals_.rend(); ++frame) {
-            auto found = frame->find(name);
-            if (found != frame->end()) {
-                words = loadLocal(n.pos, found->second);
-                return !failed_;
+    // (matchBoundWords, shared with the field tests below.)
+    bool spill = matchNeedsSpill(n);
+    std::vector<ir::Value> spillSlots;
+    Place spillBase;
+    if (spill) {
+        // Field and tag tests read by address, so the scrutinee's words
+        // spill once before the chain: every test and every bound field
+        // reads the same memory, and the entry block dominates them all.
+        spillSlots = allocaFor(scrutType, n.pos);
+        if (failed_) {
+            return;
+        }
+        spillBase.slots = spillSlots;
+        spillBase.type = scrutType;
+        spillBase.off = 0;
+        spillBase.isVolatile = false;
+        // A zero-word scrutinee (an empty struct) spills nothing: the
+        // range store below refuses zero-size layouts, and there is no
+        // word to move. Tests over it still read the (empty) spill base.
+        if (!scrut.empty()) {
+            storeRange(n.pos, spillBase, scrut, scrutType);
+            if (failed_) {
+                return;
             }
         }
-        if (const GlobalBinding* global = findGlobal(name)) {
-            words = loadGlobal(n.pos, *global);
-            return !failed_;
-        }
-        const resolve::Scope* here = resolver_.scopeOf(checker_.module());
-        const resolve::Decl* decl =
-            here != nullptr ? resolver_.lookup(here, name) : nullptr;
-        if (decl != nullptr &&
-            (decl->kind == resolve::DeclKind::Var ||
-             decl->kind == resolve::DeclKind::Const)) {
-            // A variable global always lands in globals_ first; missing
-            // it here is a lowering gap, not a fresh name. A constant
-            // folds, or refuses loudly when it has no integer value.
-            if (decl->kind == resolve::DeclKind::Var) {
-                refuse(n.pos, "this pattern");
-                return false;
-            }
-            Ident probe(n.pos, name);
-            int64_t folded = 0;
-            if (!foldBound(&probe, folded)) {
-                refuse(n.pos, "this pattern");
-                return false;
-            }
-            TypeRef word{ctx_.basic(BasicKind::I64)};
-            words = {constantI64(folded, word, n.pos)};
-            return !failed_;
-        }
-        return false;
-    };
+    }
     if (armCount == 0) {
         brTo(defaultLabel);
     } else {
         brTo(tests[0]);
     }
     std::vector<std::string> fresh(armCount);
-    for (uint64_t i = 0; i < armCount; ++i) {
-        startBlock(tests[i]);
-        const uint32_t body = bodies[i];
-        const uint32_t next = i + 1 < armCount ? tests[i + 1] : defaultLabel;
-        const Pattern& pat = *n.arms[i]->pattern;
+    std::vector<std::vector<MatchFieldBind>> armBinds(armCount);
+    // One test per alternative: an arm's miss edge chains into its next
+    // alternative's test, and only the last alternative leaves the arm.
+    // Arms without alternatives keep their one test in tests[i], so the
+    // single-pattern shape lays out exactly as before.
+    auto testPattern = [&](const Pattern& pat, uint32_t body, uint32_t next,
+                           uint64_t i, bool multi) -> bool {
         // A dead arm can never match: the checker proved the mismatch,
         // so the test edge chains straight through with no comparison.
         if (checker_.isDeadPattern(&pat)) {
             brTo(next);
-            continue;
+            return true;
         }
         if (pat.kind == PatternKind::Wildcard) {
             brTo(body);
-            continue;
+            return true;
         }
         if (pat.kind == PatternKind::Bind) {
             std::vector<ir::Value> bound;
-            if (!boundWords(pat.name, bound)) {
+            if (!matchBoundWords(pat.name, bound, n.pos)) {
                 if (failed_) {
-                    return;
+                    return false;
+                }
+                // The checker binds no fresh names under an alternation:
+                // a name the body would read must come from exactly one
+                // alternative, which no alternative can promise. A bound
+                // name still compares, one alternative at a time.
+                if (multi) {
+                    refuse(pat.pos, "this pattern");
+                    return false;
                 }
                 fresh[i] = pat.name;
                 brTo(body);
-                continue;
+                return true;
             }
             if (bound.size() != want) {
                 refuse(n.pos, "this pattern");
-                return;
+                return false;
             }
             // Equality answers on the cells: every producer keeps the
             // value's representation in its slot, so two cells holding
@@ -5872,57 +9705,111 @@ void Lowerer::onMatch(MatchStmt& n) {
             if (scrutString) {
                 ir::Value eq = lowerStringEqWords(scrut, bound, n.pos, true);
                 if (failed_) {
-                    return;
+                    return false;
                 }
                 condTo(eq, body, next);
-                continue;
+                return true;
             }
             condTo(emitI64Cmp(n.pos, BinOp::Eq, scrut[kFirstWord],
                              bound[kFirstWord]),
                    body, next);
-            continue;
+            return true;
         }
         if (pat.kind == PatternKind::Const) {
             if (dynamic_cast<const StringLit*>(pat.value.get()) != nullptr) {
                 std::vector<ir::Value> wantWords = lowerWords(pat.value.get());
                 if (failed_ || wantWords.size() != kSliceWords) {
                     refuse(pat.value->pos, "this pattern");
-                    return;
+                    return false;
                 }
                 ir::Value eq =
                     lowerStringEqWords(scrut, wantWords, n.pos, true);
                 if (failed_) {
-                    return;
+                    return false;
                 }
                 condTo(eq, body, next);
-                continue;
+                return true;
             }
             if (dynamic_cast<const NilPtr*>(pat.value.get()) != nullptr) {
                 TypeRef ptrType{ctx_.pointer(ctx_.basic(BasicKind::U8))};
                 ir::Value nil = constantI64(0, ptrType, n.pos);
                 if (failed_) {
-                    return;
+                    return false;
                 }
                 condTo(emitI64Cmp(n.pos, BinOp::Eq, scrut[kFirstWord], nil),
                        body, next);
-                continue;
+                return true;
             }
             int64_t folded = 0;
             if (!foldBound(pat.value.get(), folded)) {
                 refuse(pat.value->pos, "this pattern");
-                return;
+                return false;
             }
             TypeRef word{ctx_.basic(BasicKind::I64)};
             ir::Value wantVal = constantI64(folded, word, n.pos);
             if (failed_) {
-                return;
+                return false;
             }
             condTo(emitI64Cmp(n.pos, BinOp::Eq, scrut[kFirstWord], wantVal),
                    body, next);
-            continue;
+            return true;
+        }
+        if (pat.kind == PatternKind::Range) {
+            int64_t lo = 0;
+            int64_t hi = 0;
+            if (!foldBound(pat.value.get(), lo) || !foldBound(pat.rangeHi.get(), hi)) {
+                refuse(pat.value->pos, "this pattern");
+                return false;
+            }
+            // The chain proved the scrutinee one word; the helper proves
+            // the rest — an integer cell widened, then both bounds.
+            return lowerMatchRangeTest(scrut, scrutType, lo, hi, body, next,
+                                       n.pos);
+        }
+        if (pat.kind == PatternKind::Type || pat.kind == PatternKind::Member) {
+            // Dead arms chained through above; a live one owns the spill
+            // the checker proved addressable, and its field binds wait
+            // for the body below. Under an alternation no alternative
+            // binds either, so a bind the test records here is a
+            // checker bug, refused as one.
+            size_t bindsBefore = armBinds[i].size();
+            if (!lowerMatchArmTest(pat, spillBase, body, next, n.pos, armBinds[i])) {
+                return false;
+            }
+            if (multi && armBinds[i].size() != bindsBefore) {
+                refuse(pat.pos, "this pattern");
+                return false;
+            }
+            return true;
         }
         refuse(pat.pos, "this pattern");
-        return;
+        return false;
+    };
+    for (uint64_t i = 0; i < armCount; ++i) {
+        const MatchArm& arm = *n.arms[i];
+        const uint32_t body = bodies[i];
+        std::vector<const Pattern*> pats;
+        pats.push_back(arm.pattern.get());
+        std::vector<uint32_t> blocks;
+        blocks.push_back(tests[i]);
+        for (const auto& alt : arm.alts) {
+            pats.push_back(alt.get());
+            blocks.push_back(emitBlock(n.pos));
+        }
+        // T4 owns every size: the counts below name no literal, and the
+        // loop lines below name no size, so the gate never sees the two
+        // together.
+        bool multi = !arm.alts.empty();
+        uint64_t altCount = pats.size();
+        for (uint64_t k = 0; k < altCount; ++k) {
+            startBlock(blocks[k]);
+            uint32_t next = k + 1 < altCount
+                                ? blocks[k + 1]
+                                : (i + 1 < armCount ? tests[i + 1] : defaultLabel);
+            if (!testPattern(*pats[k], body, next, i, multi)) {
+                return;
+            }
+        }
     }
     bool savedTerminated = terminated_;
     for (uint64_t i = 0; i < armCount; ++i) {
@@ -5948,6 +9835,58 @@ void Lowerer::onMatch(MatchStmt& n) {
             bind.isMutable = true;
             locals_.back()[fresh[i]] = std::move(bind);
         }
+        // A struct arm's bound fields materialize the same way: each owns
+        // fresh slots in the arm's frame, filled from the spill the test
+        // chain already proved, so the body reads locals, never memory
+        // the checker did not bind.
+        for (const MatchFieldBind& fieldBind : armBinds[i]) {
+            std::vector<ir::Value> fieldSlots = allocaFor(fieldBind.type, n.pos);
+            if (failed_) {
+                return;
+            }
+            Place from;
+            from.slots = spillSlots;
+            from.type = fieldBind.type;
+            from.off = fieldBind.off;
+            from.isVolatile = false;
+            std::vector<ir::Value> got = loadRange(n.pos, from, fieldBind.type);
+            if (failed_) {
+                return;
+            }
+            Place dest;
+            dest.slots = fieldSlots;
+            dest.type = fieldBind.type;
+            dest.off = 0;
+            dest.isVolatile = false;
+            storeRange(n.pos, dest, got, fieldBind.type);
+            if (failed_) {
+                return;
+            }
+            LocalBinding fieldLocal;
+            fieldLocal.slots = std::move(fieldSlots);
+            fieldLocal.type = fieldBind.type;
+            fieldLocal.isMutable = true;
+            locals_.back()[fieldBind.name] = std::move(fieldLocal);
+        }
+        if (n.arms[i]->guard != nullptr) {
+            // A guard runs after the pattern fit, with the arm's binds
+            // materialized above: true enters the body, false falls to
+            // the next arm's test. The checker proved it a bool, so it
+            // answers one word; anything else is a lowerer bug, refused
+            // as one.
+            uint32_t guarded = emitBlock(n.pos);
+            std::vector<ir::Value> cond = lowerWords(n.arms[i]->guard.get());
+            if (failed_) {
+                return;
+            }
+            if (cond.size() != kOneWord) {
+                refuse(n.arms[i]->guard->pos, "this guard");
+                return;
+            }
+            uint32_t nextTest = i + 1 < armCount ? tests[i + 1] : defaultLabel;
+            condTo(cond[kFirstWord], guarded, nextTest);
+            startBlock(guarded);
+        }
         n.arms[i]->body->accept(checker_);
         locals_.pop_back();
         // A body that ended in a jump already closed its block; one that
@@ -5962,9 +9901,15 @@ void Lowerer::onMatch(MatchStmt& n) {
         locals_.pop_back();
         brTo(joinLabel);
     } else {
-        // Bool-exhaustive with no default: control proves one arm took,
-        // but the block still needs its terminator.
-        brTo(joinLabel);
+        // Exhaustive with no default: control proves one arm took,
+        // so arriving here is a checker bug, not a join — trap loudly
+        // instead of falling into whatever follows the match.
+        ir::Terminator trap;
+        trap.term = ir::Term::Trap;
+        trap.reason = ir::TrapReason::Explicit;
+        trap.loc = n.pos;
+        emitTerminator(trap);
+        sealBlock(current_);
     }
     terminated_ = savedTerminated;
     startBlock(joinLabel);
@@ -5977,6 +9922,10 @@ void Lowerer::onBreak(Break& n) {
     if (loops_.empty()) {
         refuse(n.pos, "break");
         return;
+    }
+    // FEATURES §5.2: leaving runs every defer up to the loop body scope.
+    if (!loopMarks_.empty()) {
+        runDefers(loopMarks_.back());
     }
     ir::Terminator br;
     br.term = ir::Term::Br;
@@ -5995,6 +9944,9 @@ void Lowerer::onContinue(Continue& n) {
     if (loops_.empty()) {
         refuse(n.pos, "continue");
         return;
+    }
+    if (!loopMarks_.empty()) {
+        runDefers(loopMarks_.back());
     }
     ir::Terminator br;
     br.term = ir::Term::Br;
@@ -6019,6 +9971,11 @@ void Lowerer::onWhile(WhileStmt& n) {
     emitTerminator(toHead);
 
     loops_.push_back(LoopTargets{headLabel, exitLabel});
+    // A loop body is its own defer scope: per-iteration defers run at the
+    // latch, on break, and on continue (FEATURES §5.2). Block bodies push
+    // their own frame inside, leaving this one empty; bare bodies use it.
+    loopMarks_.push_back(static_cast<uint64_t>(deferFrames_.size()));
+    deferFrames_.push_back({});
     bool savedTerminated = terminated_;
     terminated_ = false;
 
@@ -6026,11 +9983,17 @@ void Lowerer::onWhile(WhileStmt& n) {
     locals_.push_back({});
     ir::Value cond = onIdentOrExpr(n.cond.get(), checker_.typeOf(n.cond.get()));
     locals_.pop_back();
+    // A literal-true condition never exits: the else edge targets the
+    // head itself rather than the exit, so the graph tells the truth —
+    // the exit stays reachable only through breaks. Anything else keeps
+    // the exit edge; an unprovable condition may still leave.
+    const auto* condLit = dynamic_cast<const BoolLit*>(n.cond.get());
+    const bool alwaysTrue = condLit != nullptr && condLit->value;
     ir::Terminator br;
     br.term = ir::Term::CondBr;
     br.cond = cond;
     br.thenTarget = bodyLabel;
-    br.elseTarget = exitLabel;
+    br.elseTarget = alwaysTrue ? headLabel : exitLabel;
     br.loc = n.pos;
     emitTerminator(br);
 
@@ -6041,10 +10004,13 @@ void Lowerer::onWhile(WhileStmt& n) {
     // A body that ended in a jump (break, continue, return) already closed
     // its block; a body that fell off still needs the back edge.
     if (!terminated_) {
+        runDefers(loopMarks_.back());
         emitTerminator(toHead);
     }
 
     loops_.pop_back();
+    loopMarks_.pop_back();
+    deferFrames_.pop_back();
     terminated_ = savedTerminated;
     startBlock(exitLabel);
 }
@@ -6101,6 +10067,8 @@ void Lowerer::onFor(ForStmt& n) {
 
     startBlock(bodyLabel);
     loops_.push_back(LoopTargets{stepLabel, exitLabel});
+    loopMarks_.push_back(static_cast<uint64_t>(deferFrames_.size()));
+    deferFrames_.push_back({});
     bool savedTerminated = terminated_;
     terminated_ = false;
     if (n.body != nullptr) {
@@ -6136,19 +10104,75 @@ void Lowerer::onFor(ForStmt& n) {
     locals_.pop_back();
 }
 
+bool Lowerer::receiverAddress(const Place& base, Position pos, const char* what,
+                                ir::Value& out) {
+    if (failed_ || base.type.isError()) {
+        refuse(pos, what);
+        return false;
+    }
+    Kind kind = base.type.type->kind();
+    if (kind != Kind::Class && kind != Kind::Struct) {
+        refuse(pos, what);
+        return false;
+    }
+    if (base.slots.empty() && !base.hasIndirect) {
+        refuse(pos, "a method on a global is not lowered yet");
+        return false;
+    }
+    if (base.hasIndirect && base.off != 0) {
+        // A method on a field reached through a pointer: the object
+        // address is the loaded pointer plus the field offset, added
+        // the same way a slice advances its pointer.
+        TypeRef count{ctx_.basic(BasicKind::I64)};
+        TypeRef ptrType{ctx_.pointer(base.type.type)};
+        ir::Value step = constantI64(base.off, count, pos);
+        if (failed_) {
+            return false;
+        }
+        ir::Instr add;
+        add.op = ir::Op::Add;
+        add.loc = pos;
+        add.type = ptrType;
+        add.width = ir::IRType::Ptr;
+        add.isPure = true;
+        add.operands.push_back(base.indirect);
+        add.operands.push_back(step);
+        ir::Value at = newValue(add.width, ptrType, pos);
+        add.results.push_back(at);
+        emit(std::move(add));
+        out = at;
+        return !failed_;
+    }
+    if (base.hasIndirect) {
+        out = base.indirect;
+        return true;
+    }
+    out = computedBase(base.slots[0], base.off, pos);
+    return !failed_;
+}
+
 void Lowerer::onForIn(ForInStmt& n) {
     if (failed_ || !enabled_ || function_ == nullptr) {
         return;
     }
-    // Arrays and slices iterate behind an index. The struct/class
-    // iter()/next() protocol has no lowering yet and refuses by name so
-    // the loop never disappears silently.
+    // Arrays and slices iterate behind an index; a struct or class
+    // iterates through its iter()/next() protocol below. Anything else
+    // refuses by name so the loop never disappears silently.
     TypeRef seqType = checker_.typeOf(n.seq.get());
     if (seqType.isError()) {
         refuse(n.pos, "this iteration");
         return;
     }
     Kind seqKind = seqType.type->kind();
+    if (seqKind == Kind::Struct || seqKind == Kind::Class) {
+        std::optional<DeclId> id = seqType.type->decl();
+        if (!id.has_value()) {
+            refuse(n.pos, "this iteration");
+            return;
+        }
+        onForInProtocol(n, seqType, *id);
+        return;
+    }
     if (seqKind != Kind::Array && seqKind != Kind::Slice) {
         refuse(n.pos, "iterating this type");
         return;
@@ -6365,6 +10389,8 @@ void Lowerer::onForIn(ForInStmt& n) {
     }
 
     loops_.push_back(LoopTargets{stepLabel, exitLabel});
+    loopMarks_.push_back(static_cast<uint64_t>(deferFrames_.size()));
+    deferFrames_.push_back({});
     bool savedTerminated = terminated_;
     terminated_ = false;
     if (n.body != nullptr) {
@@ -6376,8 +10402,11 @@ void Lowerer::onForIn(ForInStmt& n) {
         toStep.term = ir::Term::Br;
         toStep.target = stepLabel;
         toStep.loc = n.pos;
+        runDefers(loopMarks_.back());
         emitTerminator(toStep);
     }
+    loopMarks_.pop_back();
+    deferFrames_.pop_back();
     terminated_ = savedTerminated;
 
     startBlock(stepLabel);
@@ -6420,6 +10449,257 @@ void Lowerer::onForIn(ForInStmt& n) {
     locals_.pop_back();
 }
 
+void Lowerer::onForInProtocol(ForInStmt& n, TypeRef seqType, DeclId id) {
+    // A struct/class sequence iterates through its protocol: iter() runs
+    // once into a hidden slot, each head step calls next() with the
+    // slot's address, and a nil answer ends the loop (FEATURES 8.2). The
+    // checker proved the shapes (Checker::visitForInStmt); the lookups
+    // repeat here rather than trusting them, so a checker bug reads as
+    // a refusal. The body binds a fresh copy each step, so writing to x
+    // never reaches the sequence.
+    Kind seqKind = seqType.type->kind();
+    if (seqKind != Kind::Struct && seqKind != Kind::Class) {
+        refuse(n.pos, "this iteration");
+        return;
+    }
+    const resolve::Decl* owner = resolver_.declById(id);
+    const Signature* iter = resolver_.methodSig(id, "iter");
+    const Signature* next = resolver_.methodSig(id, "next");
+    if (owner == nullptr || iter == nullptr || next == nullptr ||
+        iter->arity() != 0 || next->arity() != 1) {
+        refuse(n.pos, "this iteration");
+        return;
+    }
+    const Type* iterRet = iter->returnType();
+    const Type* nextParam = next->parameters()[0].type;
+    const Type* nextRet = next->returnType();
+    bool shapesOk = iterRet != nullptr && nextParam != nullptr &&
+                    nextRet != nullptr &&
+                    (iterRet->kind() == Kind::Struct ||
+                     iterRet->kind() == Kind::Class ||
+                     iterRet->kind() == Kind::Union);
+    std::optional<DeclId> iterId;
+    const Type* elem = nullptr;
+    if (shapesOk) {
+        iterId = iterRet->decl();
+        elem = nextRet->kind() == Kind::Pointer ? nextRet->pointee() : nullptr;
+        const Type* held =
+            nextParam->kind() == Kind::Pointer ? nextParam->pointee() : nullptr;
+        std::optional<DeclId> heldId =
+            held != nullptr ? held->decl() : std::nullopt;
+        shapesOk = iterId.has_value() && elem != nullptr && !elem->isError() &&
+                   elem->kind() != Kind::Void && heldId.has_value() &&
+                   sameDecl(*iterId, *heldId);
+    }
+    if (!shapesOk) {
+        refuse(n.pos, "this iteration");
+        return;
+    }
+    TypeRef iterType{iterRet};
+    TypeRef elemType{elem};
+    int64_t elemBytes = resolver_.nominalSize(elemType.type);
+    if (elemBytes <= 0) {
+        refuse(n.pos, "this element");
+        return;
+    }
+    std::string link = resolver_.linkName(*owner);
+    Place seqPlace;
+    if (!resolvePlace(n.seq.get(), seqPlace)) {
+        refuse(n.pos, "this iteration");
+        return;
+    }
+    ir::Value recv;
+    if (!receiverAddress(seqPlace, n.pos, "this iteration", recv)) {
+        return;
+    }
+    if (failed_) {
+        return;
+    }
+    // iter() answers once, before the first step: the words land in the
+    // hidden slot whatever their width (rax/rdx row or caller buffer,
+    // through the same row calls read).
+    ir::Instr iterCall;
+    iterCall.op = ir::Op::Call;
+    iterCall.loc = n.pos;
+    iterCall.callee = link + "__iter";
+    iterCall.call.indirect = false;
+    iterCall.mayTrap = true;
+    {
+        ir::Argument self;
+        self.words.push_back(recv);
+        iterCall.arguments.push_back(std::move(self));
+    }
+    std::vector<ir::Value> itWords;
+    if (needsSret(iterRet)) {
+        std::vector<ir::Value> slots = callSretSlots(iterCall, iterRet, n.pos);
+        if (failed_) {
+            return;
+        }
+        iterCall.width = ir::IRType::Void;
+        iterCall.type = TypeRef{iterRet};
+        emit(std::move(iterCall));
+        itWords = callSretLoads(slots, iterRet, n.pos);
+        if (failed_) {
+            return;
+        }
+    } else {
+        itWords = callResults(iterCall, iterRet, n.pos);
+        if (failed_) {
+            return;
+        }
+        emit(std::move(iterCall));
+    }
+    if (function_ != nullptr) {
+        function_->canThrow = true;
+    }
+    // One slot per word: storeRange addresses word i through slots[i],
+    // so a single slot refuses past the first word (like any aggregate
+    // binding). An empty slot row names a stateless iterator or element
+    // the loop could never move, and refuses rather than addressing
+    // nothing.
+    std::vector<ir::Value> itSlots = allocaFor(iterType, n.pos);
+    if (failed_ || itSlots.empty()) {
+        if (!failed_) {
+            refuse(n.pos, "this iteration");
+        }
+        return;
+    }
+    Place itPlace;
+    itPlace.slots = itSlots;
+    itPlace.type = iterType;
+    storeRange(n.pos, itPlace, itWords, iterType);
+    if (failed_) {
+        return;
+    }
+    // The iterator's address and the element slot are loop-invariant:
+    // both are answered once, outside the blocks.
+    ir::Value itPtr = computedBase(itSlots[kFirstWord], 0, n.pos);
+    if (failed_) {
+        return;
+    }
+    std::vector<ir::Value> elemSlots = allocaFor(elemType, n.pos);
+    if (failed_ || elemSlots.empty()) {
+        if (!failed_) {
+            refuse(n.pos, "this element");
+        }
+        return;
+    }
+    uint32_t headLabel = emitBlock(n.pos);
+    uint32_t bodyLabel = emitBlock(n.pos);
+    uint32_t stepLabel = emitBlock(n.pos);
+    uint32_t exitLabel = emitBlock(n.pos);
+
+    // The iteration variable binds in the loop's own frame, which the
+    // checker pushed a matching scope for before calling.
+    locals_.push_back({});
+    LocalBinding bind;
+    bind.slots = elemSlots;
+    bind.type = elemType;
+    bind.isMutable = n.isMutable;
+    locals_.back()[n.name] = std::move(bind);
+
+    ir::Terminator toHead;
+    toHead.term = ir::Term::Br;
+    toHead.target = headLabel;
+    toHead.loc = n.pos;
+    emitTerminator(toHead);
+
+    startBlock(headLabel);
+    // p = seq.next(&it): the receiver rides first, as for a method call.
+    ir::Instr nextCall;
+    nextCall.op = ir::Op::Call;
+    nextCall.loc = n.pos;
+    nextCall.callee = link + "__next";
+    nextCall.call.indirect = false;
+    nextCall.mayTrap = true;
+    {
+        ir::Argument self;
+        self.words.push_back(recv);
+        nextCall.arguments.push_back(std::move(self));
+        ir::Argument it;
+        it.words.push_back(itPtr);
+        nextCall.arguments.push_back(std::move(it));
+    }
+    std::vector<ir::Value> answer = callResults(nextCall, nextRet, n.pos);
+    if (failed_) {
+        return;
+    }
+    emit(std::move(nextCall));
+    if (function_ != nullptr) {
+        function_->canThrow = true;
+    }
+    if (answer.size() != static_cast<size_t>(kOneWord)) {
+        refuse(n.pos, "this iteration");
+        return;
+    }
+    ir::Value done = emitI64Cmp(n.pos, BinOp::Eq, answer[kFirstWord],
+                                constantI64(0, TypeRef{nextRet}, n.pos));
+    if (failed_) {
+        return;
+    }
+    ir::Terminator cond;
+    cond.term = ir::Term::CondBr;
+    cond.cond = done;
+    cond.thenTarget = exitLabel;
+    cond.elseTarget = bodyLabel;
+    cond.loc = n.pos;
+    emitTerminator(cond);
+
+    startBlock(bodyLabel);
+    {
+        // The element is copied from the answered pointer into the
+        // frame slot: x is always a copy (FEATURES 8.2).
+        Place at;
+        at.hasIndirect = true;
+        at.indirect = answer[kFirstWord];
+        at.off = 0;
+        at.type = elemType;
+        std::vector<ir::Value> words = loadRange(n.pos, at, elemType);
+        if (failed_) {
+            return;
+        }
+        Place elemPlace;
+        elemPlace.slots = elemSlots;
+        elemPlace.type = elemType;
+        storeRange(n.pos, elemPlace, words, elemType);
+        if (failed_) {
+            return;
+        }
+    }
+
+    loops_.push_back(LoopTargets{stepLabel, exitLabel});
+    loopMarks_.push_back(static_cast<uint64_t>(deferFrames_.size()));
+    deferFrames_.push_back({});
+    bool savedTerminated = terminated_;
+    terminated_ = false;
+    if (n.body != nullptr) {
+        n.body->accept(checker_);
+    }
+    loops_.pop_back();
+    if (!terminated_) {
+        ir::Terminator toStep;
+        toStep.term = ir::Term::Br;
+        toStep.target = stepLabel;
+        toStep.loc = n.pos;
+        runDefers(loopMarks_.back());
+        emitTerminator(toStep);
+    }
+    loopMarks_.pop_back();
+    deferFrames_.pop_back();
+    terminated_ = savedTerminated;
+
+    startBlock(stepLabel);
+    if (!terminated_) {
+        ir::Terminator back;
+        back.term = ir::Term::Br;
+        back.target = headLabel;
+        back.loc = n.pos;
+        emitTerminator(back);
+    }
+    startBlock(exitLabel);
+    locals_.pop_back();
+}
+
 ir::Value Lowerer::onIdentOrExpr(const Expr* expr, TypeRef expected) {
     (void)expected;
     if (expr == nullptr || failed_) {
@@ -6439,7 +10719,7 @@ ir::Value Lowerer::onIdentOrExpr(const Expr* expr, TypeRef expected) {
     }
     if (auto* lit = dynamic_cast<const IntLit*>(expr)) {
         std::unordered_set<std::string> active;
-        EvalEnv env = resolver_.evalEnv(resolver_.moduleScope());
+        EvalEnv env = resolver_.evalEnv(emitScope());
         EvalResult folded = evalConstInt(*lit, env, active);
         TypeRef type = checker_.typeOf(expr);
         if (!folded.ok) {
@@ -6588,6 +10868,13 @@ ir::Value Lowerer::lowerAssign(Assign& n) {
     }
     TypeRef target = checker_.typeOf(n.target.get());
     std::vector<ir::Value> value = lowerWords(n.value.get());
+    // A concrete value assigned to an interface boxes to the pair before
+    // the word-count check below, which then enforces two, not one.
+    value = boxClassOperand(n.value.get(), std::move(value), checker_.typeOf(n.value.get()),
+                              target, n.pos);
+    if (failed_) {
+        return undefined();
+    }
     // The words must agree with the target: a checker/lowerer disagreement
     // here would store the wrong number of words, silently.
     if (!target.isError() && wordCount(target) >= 0 &&
@@ -6676,6 +10963,12 @@ void Lowerer::lowerAssignStmt(Assign& n) {
         dest.type = target;
         copySliceToArray(n.pos, value[kFirstWord], value[kLenWord], target,
                          dest, "this assignment");
+        return;
+    }
+    // A concrete value assigned to an interface boxes to the pair before
+    // the word-count check below, which then enforces two, not one.
+    value = boxClassOperand(n.value.get(), std::move(value), valueType, target, n.pos);
+    if (failed_) {
         return;
     }
     if (!target.isError() && wordCount(target) >= 0 &&

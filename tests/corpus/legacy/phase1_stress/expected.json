@@ -1,1 +1,5 @@
-{"stdout": "", "stderr": "", "exit": 0}
+{
+ "exit": 0,
+ "stderr": "",
+ "stdout": "union...\n\nalloc...\n\ninterface...\n\ndtor...\n\ntemplate...\n\nslice...\n\nfor-in...\n\ncross...\n\nPASS: phase1_stress\n\n"
+}

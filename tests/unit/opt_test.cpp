@@ -181,6 +181,25 @@ void testDanglingTarget() {
           "naming the missing block");
 }
 
+// A block with no terminator names its block: the default Terminator is
+// Unreachable, which is also the shape a lowering bug makes when it forgets
+// to terminate a block (gate L4, BUG-260).
+void testUnterminatedBlock() {
+    std::printf("unterminated blocks name their block\n");
+    cider::ir::Module module;
+    module.name = "bad";
+    cider::ir::Function fn;
+    fn.name = "f";
+    cider::ir::Block block;
+    block.label = 3;
+    fn.blocks.push_back(block);
+    module.functions.push_back(fn);
+    std::vector<cider::opt::StructuralError> errors = cider::opt::checkModule(module);
+    check(errors.size() == 1, "one diagnostic");
+    check(!errors.empty() && errors[0].message.find("3") != std::string::npos,
+          "naming the unterminated block");
+}
+
 // An operand with no definition names the value.
 void testUndefinedOperand() {
     std::printf("undefined operands name the value\n");
@@ -308,6 +327,7 @@ int main() {
     testIndirectKept();
     testTrapKept();
     testDanglingTarget();
+    testUnterminatedBlock();
     testUndefinedOperand();
     testDoubleDefine();
     testPipelineRefuses();

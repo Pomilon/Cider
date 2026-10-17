@@ -6,11 +6,7 @@ struct Flags {
 }
 
 func _start() {
-  var f: Flags;
-  f.a = 5;
-  f.b = 17;
-  f.c = true;
-  f.d = 99;
+  var f: Flags = new Flags { a: 5, b: 17, c: true, d: 99 };
   if (f.a != 5) { asm { "mov rax, 60" } asm { "mov rdi, 1" } asm { "syscall" } }
   if (f.b != 17) { asm { "mov rax, 60" } asm { "mov rdi, 2" } asm { "syscall" } }
   if (f.c != true) { asm { "mov rax, 60" } asm { "mov rdi, 3" } asm { "syscall" } }

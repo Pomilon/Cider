@@ -8,7 +8,7 @@ var gs: int = 7;               // segment register
 var ss: u32 = 5;               // segment register
 var bp: u8 = 9;                // 16-bit register
 var align: int = 11;           // NASM directive
-var qword: [int; 3] = [1, 2, 3];  // reserved-named array global
+var qword: [int; 3] = new [int; 3] {1, 2, 3};  // reserved-named array global
 
 // Reserved function name (also a register): escaped at definition and call.
 func cs(a: int) -> int { return a + gs; }
@@ -18,7 +18,7 @@ func cs(a: int) -> int { return a + gs; }
 func add(a: int, b: int) -> int { return a + b; }
 
 func sumGlobals() -> int {
-  return gs + ss + bp + align;
+  return (gs + ss + bp + align) as int;
 }
 
 func main() -> int {

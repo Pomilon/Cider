@@ -118,6 +118,76 @@ void testRun() {
 // A program spread over sibling modules checks and runs: the driver loads
 // each import beside the entry file, checks every module, and links every
 // function into one binary. A dotted import names the missing module.
+void testImportAlias() {
+    std::printf("imported aliases\n");
+    char dir[] = "/tmp/cider_impalias_XXXXXX";
+    check(mkdtemp(dir) != nullptr, "a scratch directory exists");
+    std::string lib = std::string(dir) + "/lib.cid";
+    FILE* libFile = fopen(lib.c_str(), "w");
+    const char* libText =
+        "export struct R { var v: int; }\n"
+        "export type A = R;\n";
+    fwrite(libText, 1, strlen(libText), libFile);
+    fclose(libFile);
+    std::string main = std::string(dir) + "/main.cid";
+    FILE* mainFile = fopen(main.c_str(), "w");
+    const char* mainText =
+        "from lib import A;\n"
+        "func main() -> int {\n"
+        "    var x: A = new A { v: 5 };\n"
+        "    return x.v;\n"
+        "}\n";
+    fwrite(mainText, 1, strlen(mainText), mainFile);
+    fclose(mainFile);
+    Result ok = run({"check", main});
+    check(ok.code == 0, "a from-imported alias checks: " + ok.err);
+    Result ran = run({"run", main});
+    check(ran.code == 5, "a from-imported alias constructs: " + ran.err);
+    unlink(main.c_str());
+    unlink(lib.c_str());
+    rmdir(dir);
+}
+
+void testModFnValue() {
+    std::printf("module function values\n");
+    char dir[] = "/tmp/cider_modfn_XXXXXX";
+    check(mkdtemp(dir) != nullptr, "a scratch directory exists");
+    std::string dep = std::string(dir) + "/b.cid";
+    FILE* depFile = fopen(dep.c_str(), "w");
+    const char* depText =
+        "export func inc(x: int) -> int { return x + 1; }\n";
+    fwrite(depText, 1, strlen(depText), depFile);
+    fclose(depFile);
+    std::string main = std::string(dir) + "/main.cid";
+    FILE* mainFile = fopen(main.c_str(), "w");
+    const char* mainText =
+        "import b;\n"
+        "var gg: func(int) -> int = b.inc;\n"
+        "func dbl(x: int) -> int { return x * 2; }\n"
+        "var lo: func(int) -> int = dbl;\n"
+        "var fg: *func(int) -> int = &dbl;\n"
+        "var fh: *func(int) -> int = nilPtr;\n"
+        "func main() -> int {\n"
+        "    var g: func(int) -> int = b.inc;\n"
+        "    if (g(4) != 5) { return 1; }\n"
+        "    if ((b.inc)(4) != 5) { return 2; }\n"
+        "    if (gg(4) != 5) { return 3; }\n"
+        "    if ((*fg)(21) != 42) { return 4; }\n"
+        "    if (fh != nilPtr) { return 5; }\n"
+        "    if (lo(21) != 42) { return 6; }\n"
+        "    return 0;\n"
+        "}\n";
+    fwrite(mainText, 1, strlen(mainText), mainFile);
+    fclose(mainFile);
+    Result ok = run({"check", main});
+    check(ok.code == 0, "a module function value checks: " + ok.err);
+    Result ran = run({"run", main});
+    check(ran.code == 0, "a module function value calls: " + ran.err);
+    unlink(main.c_str());
+    unlink(dep.c_str());
+    rmdir(dir);
+}
+
 void testImports() {
     std::printf("imports\n");
     char dir[] = "/tmp/cider_imports_XXXXXX";
@@ -184,6 +254,169 @@ void testImports() {
     rmdir(dir);
 }
 
+// A from-imported global is usable by field: the dependency's globals
+// register before any dependent lowers, so a store through the alias
+// reaches the label instead of refusing on a missing binding.
+void testImportGlobal() {
+    std::printf("imported globals\n");
+    char dir[] = "/tmp/cider_impglob_XXXXXX";
+    check(mkdtemp(dir) != nullptr, "a scratch directory exists");
+    std::string dep = std::string(dir) + "/lib.cid";
+    FILE* depFile = fopen(dep.c_str(), "w");
+    const char* depText =
+        "export struct P { var x: int; }\n"
+        "export var gp: P = new P { x: 0 };\n";
+    fwrite(depText, 1, strlen(depText), depFile);
+    fclose(depFile);
+    std::string main = std::string(dir) + "/main.cid";
+    FILE* mainFile = fopen(main.c_str(), "w");
+    const char* mainText =
+        "from lib import gp;\n"
+        "func main() -> int {\n"
+        "    gp.x = 7;\n"
+        "    return gp.x;\n"
+        "}\n";
+    fwrite(mainText, 1, strlen(mainText), mainFile);
+    fclose(mainFile);
+    Result ok = run({"check", main});
+    check(ok.code == 0, "an imported global checks: " + ok.err);
+    Result ran = run({"run", main});
+    check(ran.code == 7,
+          "a store through an imported global reads back: " + ran.err);
+    unlink(main.c_str());
+    unlink(dep.c_str());
+    rmdir(dir);
+}
+
+// A qualified global is usable by field: `lib.gq` resolves in the
+// defining scope to the same label a bare spelling would use.
+void testImportQualifiedGlobal() {
+    std::printf("qualified globals\n");
+    char dir[] = "/tmp/cider_impqglob_XXXXXX";
+    check(mkdtemp(dir) != nullptr, "a scratch directory exists");
+    std::string dep = std::string(dir) + "/lib.cid";
+    FILE* depFile = fopen(dep.c_str(), "w");
+    const char* depText =
+        "export struct Q { var y: int; }\n"
+        "export var gq: Q = new Q { y: 0 };\n";
+    fwrite(depText, 1, strlen(depText), depFile);
+    fclose(depFile);
+    std::string main = std::string(dir) + "/main.cid";
+    FILE* mainFile = fopen(main.c_str(), "w");
+    const char* mainText =
+        "import lib;\n"
+        "func main() -> int {\n"
+        "    lib.gq.y = 11;\n"
+        "    return lib.gq.y;\n"
+        "}\n";
+    fwrite(mainText, 1, strlen(mainText), mainFile);
+    fclose(mainFile);
+    Result ok = run({"check", main});
+    check(ok.code == 0, "a qualified global checks: " + ok.err);
+    Result ran = run({"run", main});
+    check(ran.code == 11,
+          "a store through a qualified global reads back: " + ran.err);
+    std::string main2 = std::string(dir) + "/main2.cid";
+    FILE* main2File = fopen(main2.c_str(), "w");
+    const char* main2Text =
+        "import lib;\n"
+        "from lib import Q;\n"
+        "func main() -> int {\n"
+        "    lib.gq.y = 5;\n"
+        "    var r: Q = lib.gq;\n"
+        "    return r.y;\n"
+        "}\n";
+    fwrite(main2Text, 1, strlen(main2Text), main2File);
+    fclose(main2File);
+    Result ok2 = run({"check", main2});
+    check(ok2.code == 0, "a bare qualified read checks: " + ok2.err);
+    Result ran2 = run({"run", main2});
+    check(ran2.code == 5,
+          "a bare qualified global reads back: " + ran2.err);
+    unlink(main2.c_str());
+    unlink(main.c_str());
+    unlink(dep.c_str());
+    rmdir(dir);
+}
+
+// A module-level `const` has no storage: reads fold its initialiser
+// where used, including through another const.
+void testModuleConst() {
+    std::printf("module constants\n");
+    char dir[] = "/tmp/cider_modconst_XXXXXX";
+    check(mkdtemp(dir) != nullptr, "a scratch directory exists");
+    std::string main = std::string(dir) + "/main.cid";
+    FILE* mainFile = fopen(main.c_str(), "w");
+    const char* mainText =
+        "const C: int = 55;\n"
+        "const D: int = C + 2;\n"
+        "func main() -> int {\n"
+        "    return C + D - 100;\n"
+        "}\n";
+    fwrite(mainText, 1, strlen(mainText), mainFile);
+    fclose(mainFile);
+    Result ran = run({"run", main});
+    check(ran.code == 12,
+          "a module const reads back: " + ran.err);
+    // A use before the declaration lowers identically: literal leaves
+    // fold against the declared type instead of a recorded one.
+    std::string fwd = std::string(dir) + "/fwd.cid";
+    FILE* fwdFile = fopen(fwd.c_str(), "w");
+    const char* fwdText =
+        "func main() -> int { return C; }\n"
+        "const C: int = 55;\n";
+    fwrite(fwdText, 1, strlen(fwdText), fwdFile);
+    fclose(fwdFile);
+    Result fwdRan = run({"run", fwd});
+    check(fwdRan.code == 55,
+          "a forward const read lowers: " + fwdRan.err);
+    // A forward use of a compound initialiser still refuses loudly:
+    // its subtree types are recorded only when checking reaches it.
+    std::string fwdc = std::string(dir) + "/fwdc.cid";
+    FILE* fwdcFile = fopen(fwdc.c_str(), "w");
+    const char* fwdcText =
+        "func main() -> int { return D; }\n"
+        "const D: int = C + 2;\n"
+        "const C: int = 5;\n";
+    fwrite(fwdcText, 1, strlen(fwdcText), fwdcFile);
+    fclose(fwdcFile);
+    Result fwdcRan = run({"run", fwdc});
+    check(fwdcRan.code != 0,
+          "a forward compound const still refuses: " + fwdcRan.err);
+    unlink(fwdc.c_str());
+    unlink(fwd.c_str());
+    unlink(main.c_str());
+    rmdir(dir);
+}
+
+// A module-qualified const folds through its defining module in both
+// the checker gate and lowering: `lib.K` in a const position answers
+// the member init folded in the home scope.
+void testQualifiedConst() {
+    std::printf("qualified constants\n");
+    char dir[] = "/tmp/cider_qualconst_XXXXXX";
+    check(mkdtemp(dir) != nullptr, "a scratch directory exists");
+    std::string dep = std::string(dir) + "/lib.cid";
+    FILE* depFile = fopen(dep.c_str(), "w");
+    const char* depText = "export const K: int = 11;\n";
+    fwrite(depText, 1, strlen(depText), depFile);
+    fclose(depFile);
+    std::string main = std::string(dir) + "/main.cid";
+    FILE* mainFile = fopen(main.c_str(), "w");
+    const char* mainText =
+        "import lib;\n"
+        "var g: int = lib.K;\n"
+        "func main() -> int { return g * 2; }\n";
+    fwrite(mainText, 1, strlen(mainText), mainFile);
+    fclose(mainFile);
+    Result ran = run({"run", main});
+    check(ran.code == 22,
+          "a qualified const folds in a global: " + ran.err);
+    unlink(main.c_str());
+    unlink(dep.c_str());
+    rmdir(dir);
+}
+
 // A dotted import resolves through CIDER_LIB: <lib>/x/y.cid answers
 // `import x.y`. Without the variable the same import still fails loudly.
 void testLibSearch() {
@@ -222,6 +455,50 @@ void testLibSearch() {
     rmdir(dir);
 }
 
+// A dotted import falls back to the entry directory: `import a.util`
+// beside `<dir>/a/util.cid` answers without CIDER_LIB. Library names
+// keep their priority, so `std.io` still answers from the library.
+void testSubdirImport() {
+    std::printf("subdirectory imports\n");
+    char dir[] = "/tmp/cider_subimp_XXXXXX";
+    check(mkdtemp(dir) != nullptr, "a scratch directory exists");
+    std::string sub = std::string(dir) + "/a";
+    check(mkdir(sub.c_str(), 0700) == 0, "a sibling package exists");
+    std::string mod = sub + "/util.cid";
+    FILE* modFile = fopen(mod.c_str(), "w");
+    const char* modText =
+        "export struct Box { var v: int; }\n"
+        "export func mval() -> int { return 9; }\n"
+        "export func bget(b: Box) -> int { return b.v; }\n"
+        "export enum Color { RED, GREEN, BLUE }\n"
+        "export type Alias = Color;\n";
+    fwrite(modText, 1, strlen(modText), modFile);
+    fclose(modFile);
+    std::string main = std::string(dir) + "/main.cid";
+    FILE* mainFile = fopen(main.c_str(), "w");
+    const char* mainText =
+        "import a.util;\n"
+        "from a.util import Box;\n"
+        "func main() -> int {\n"
+        "    if (util.mval() != 9) { return 1; }\n"
+        "    var b: util.Box = new Box { v: 9 };\n"
+        "    if (util.bget(b) != 9) { return 2; }\n"
+        "    var e: int = util.Alias.GREEN;\n"
+        "    if (e != 1) { return 3; }\n"
+        "    return 0;\n"
+        "}\n";
+    fwrite(mainText, 1, strlen(mainText), mainFile);
+    fclose(mainFile);
+    Result ok = run({"check", main});
+    check(ok.code == 0, "a sibling module checks: " + ok.err);
+    Result ran = run({"run", main});
+    check(ran.code == 0, "a sibling call answers: code=" + std::to_string(ran.code) + " out=" + ran.out + " err=" + ran.err);
+    unlink(main.c_str());
+    unlink(mod.c_str());
+    rmdir(sub.c_str());
+    rmdir(dir);
+}
+
 // A missing file, a bad target and a bad subcommand all name themselves.
 void testFailures() {
     std::printf("failures name themselves\n");
@@ -238,6 +515,18 @@ void testFailures() {
     unlink(src.c_str());
 }
 
+// The interpreter runs without a toolchain; there is nothing to emit for it.
+void testVmTarget() {
+    std::printf("the vm target interprets\n");
+    std::string src = writeTemp("func main() -> int { return 40 + 2; }\n");
+    Result runVm = run({"run", "--target", "vm", src});
+    check(runVm.code == 42, "run --target vm answers the exit code");
+    Result compileVm = run({"compile", "--target", "vm", src});
+    check(compileVm.code != 0, "compile --target vm fails");
+    check(compileVm.err.find("vm") != std::string::npos, "naming the target");
+    unlink(src.c_str());
+}
+
 }  // namespace
 
 int main() {
@@ -246,8 +535,16 @@ int main() {
     testCompileIr();
     testRun();
     testImports();
+    testImportAlias();
+    testModFnValue();
+    testImportGlobal();
+    testImportQualifiedGlobal();
+    testModuleConst();
+    testQualifiedConst();
     testLibSearch();
+    testSubdirImport();
     testFailures();
+    testVmTarget();
     std::printf("\n%d checks, %s\n", checks, failures == 0 ? "all passed" : "FAILURES");
     return failures == 0 ? 0 : 1;
 }

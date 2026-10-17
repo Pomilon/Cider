@@ -13,22 +13,22 @@ var g_derived: int = DERIVED;
 var g_forward: int = LATER;  // declared below: folds order-independently
 const LATER: int = 42;
 var g_neg: int = -BASE;
-var g_expr: u64 = (BASE << 40) + 7;
+var g_expr: u64 = ((BASE as u64) << 40) + 7;
 var g_bool: bool = true;
 var g_bool_f: bool = false;
 var g_char: char = 'A';
 var g_byte: byte = 200;
 var g_alias: int = MK2;              // from-import const chain (MK2 = MK * 2)
 var g_dotted: int = gc.MK2;          // module-qualified const
-var g_arr: [u8; 3] = [BASE, MK, 9];  // const elements in a global array
-var g_farr: [f64; 2] = [BASE, 4];    // float array element from a const
+var g_arr: [u8; 3] = new [u8; 3] { (BASE as u8), (MK as u8), 9 };  // const elements in a global array
+var g_farr: [f64; 2] = new [f64; 2] { (BASE as f64), (4 as f64) };    // float array element from a const
 var g_cast: u64 = MK as u64;         // const inside a cast
 const FLAG: bool = true;
 var g_cbool: bool = FLAG;            // bool const reference
 var g_np: *int = nilPtr;
-var g_str: char* = "ok";
 
 func main() -> int {
+  var lstr: *char = "ok";
   if (g_base != 5) { return 1; }
   if (g_derived != 11) { return 2; }
   if (g_forward != 42) { return 3; }
@@ -43,7 +43,7 @@ func main() -> int {
   if (g_cast != 11) { return 14; }
   if (g_cbool != true) { return 15; }
   if (g_np != nilPtr) { return 11; }
-  if (g_str[0] != 'o' || g_str[1] != 'k') { return 12; }
+  if ((lstr[0] as char) != 'o' || (lstr[1] as char) != 'k') { return 12; }
 
   printInt(g_base); print(",");
   printInt(g_derived); print(",");

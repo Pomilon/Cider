@@ -7,15 +7,14 @@ export interface Shape {
 
 export class Sq {
   var s: int;
-  func init(s: int) -> void { this.s = s; }
-  func area() -> int { return this.s * this.s; }
+  func init(s: int) { (*self).s = s; }
+  func area() -> int { return (*self).s * (*self).s; }
 }
 
 export func id(x: Shape) -> Shape { return x; }
 
 export func make(v: int) -> Shape {
-  var c: Sq;
-  c.init(v);
+  var c: *Sq = new Sq(v);
   return c;
 }
 

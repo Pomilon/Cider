@@ -9,7 +9,7 @@ export interface Valuable {
 
 export class Item {
   var amount: int;
-  func value() -> int { return this.amount; }
+  func value() -> int { return (*self).amount; }
 }
 
 export struct Pair {
@@ -30,8 +30,7 @@ export func scoreOf(a: int, b: int) -> Score {
 }
 
 export func makeItem(amount: int) -> Item {
-  var it: Item;
-  it.amount = amount;
+  var it: Item = new Item { amount: amount };
   return it;
 }
 

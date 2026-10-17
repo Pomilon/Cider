@@ -47,20 +47,7 @@ const char* argReg(uint64_t i) {
     return "r9";
 }
 
-bool signedWidth(ir::IRType width, TypeRef type) {
-    if (width == ir::IRType::I8 || width == ir::IRType::I16 || width == ir::IRType::I32 ||
-        width == ir::IRType::I64) {
-        return true;
-    }
-    if (width == ir::IRType::U8 || width == ir::IRType::U16 || width == ir::IRType::U32 ||
-        width == ir::IRType::U64) {
-        return false;
-    }
-    if (type.isError() || type.type->kind() != Kind::Basic) {
-        return true;
-    }
-    return basicIsSigned(*type.type->basic());
-}
+bool calleeArg(std::string&, std::string&, const ir::Instr&) = delete;  // placeholder
 
 const char* setFor(ir::CmpOp cmp) {
     if (cmp == ir::CmpOp::Eq) {
@@ -133,7 +120,13 @@ public:
             out_ += ".data\n";
             for (const ir::Global& global : module_.globals) {
                 out_ += global.label + ":\n";
-                if (global.initLabel.empty()) {
+                if (!global.initLabels.empty()) {
+                    // A vtable: one link-time address per method, in
+                    // interface method order, resolved by the linker.
+                    for (const std::string& entry : global.initLabels) {
+                        out_ += "  .quad " + entry + "\n";
+                    }
+                } else if (global.initLabel.empty()) {
                     if (global.initWords.empty()) {
                         out_ += "  .quad " + std::to_string(global.initial) + "\n";
                     } else {
@@ -201,7 +194,7 @@ private:
         std::vector<std::string> order = {
             "cider_print", "cider_panic", "cider_alloc", "cider_free",
             "cider_realloc", "putchar", "cider_itoa_signed",
-            "cider_itoa_unsigned",
+            "cider_itoa_unsigned", "cider_ftoa",
         };
         std::vector<std::string> out;
         for (const ir::Function& fn : module_.functions) {
@@ -226,6 +219,13 @@ private:
                             if (candidate == wanted) {
                                 out.push_back(candidate);
                             }
+                        }
+                        // The float helper prints its whole part through the
+                        // signed helper: an IR scan never sees that inner
+                        // call, so the dependency rides explicitly here.
+                        if (wanted == "cider_ftoa" &&
+                            seen.insert("cider_itoa_signed").second) {
+                            out.push_back("cider_itoa_signed");
                         }
                     }
                 }
@@ -374,6 +374,79 @@ private:
             out_ += "  test rcx, rcx\n";
             out_ += "  jnz .itoa_" + tag + "_copy\n";
             out_ += "  add rsp, 24\n";
+            out_ += "  pop rbx\n";
+            out_ += "  ret\n";
+            return true;
+        }
+        if (name == "cider_ftoa") {
+            // A double into the caller's buffer: rdi answers the bytes,
+            // xmm0 the value, rax the count. The shape is printF64's
+            // (std.io), rebuilt in assembly so interpolation needs no
+            // module linked: a sign, the whole digits through
+            // cider_itoa_signed, a point, then six fraction digits,
+            // truncated never rounded, zero-padded on the left. Every
+            // operation matches the std.io sequence — the same compare
+            // with its parity guard, the same truncating converts — so
+            // edge values (including NaN and infinities) print exactly
+            // what printF64 prints. Thirty-two bytes hold the longest
+            // shape: a sign, nineteen whole digits, the point, six
+            // fraction digits; the caller owns the buffer.
+            out_ += "cider_ftoa:\n";
+            out_ += "  push rbx\n";
+            out_ += "  sub rsp, 48\n";
+            out_ += "  movsd [rsp + 16], xmm0\n";
+            out_ += "  mov qword ptr [rsp + 24], 0\n";
+            out_ += "  xorpd xmm1, xmm1\n";
+            out_ += "  ucomisd xmm0, xmm1\n";
+            out_ += "  setb al\n";
+            out_ += "  setnp cl\n";
+            out_ += "  and al, cl\n";
+            out_ += "  test al, al\n";
+            out_ += "  jz .ftoa_whole\n";
+            out_ += "  mov byte ptr [rdi], 45\n";
+            out_ += "  inc rdi\n";
+            out_ += "  mov qword ptr [rsp + 24], 1\n";
+            out_ += "  movsd xmm0, [rsp + 16]\n";
+            out_ += "  subsd xmm1, xmm0\n";
+            out_ += "  movsd xmm0, xmm1\n";
+            out_ += "  movsd [rsp + 16], xmm0\n";
+            out_ += ".ftoa_whole:\n";
+            out_ += "  cvttsd2si rax, xmm0\n";
+            out_ += "  mov [rsp], rax\n";
+            out_ += "  mov rsi, rax\n";
+            out_ += "  call cider_itoa_signed\n";
+            // The helper leaves rdi past the digits it wrote, so only
+            // the count still needs adding to the running total.
+            out_ += "  add [rsp + 24], rax\n";
+            out_ += "  mov byte ptr [rdi], 46\n";
+            out_ += "  inc rdi\n";
+            out_ += "  inc qword ptr [rsp + 24]\n";
+            out_ += "  cvtsi2sd xmm1, qword ptr [rsp]\n";
+            out_ += "  movsd xmm0, [rsp + 16]\n";
+            out_ += "  subsd xmm0, xmm1\n";
+            out_ += "  mov rax, 0x412E848000000000\n";
+            out_ += "  mov [rsp + 40], rax\n";
+            out_ += "  mulsd xmm0, [rsp + 40]\n";
+            out_ += "  cvttsd2si rax, xmm0\n";
+            out_ += "  mov [rsp + 8], rax\n";
+            out_ += "  mov rax, [rsp + 8]\n";
+            out_ += "  mov rbx, 10\n";
+            out_ += "  mov rcx, 6\n";
+            out_ += ".ftoa_frac:\n";
+            out_ += "  cqo\n";
+            out_ += "  idiv rbx\n";
+            out_ += "  add dl, 48\n";
+            out_ += "  mov [rsp + rcx + 31], dl\n";
+            out_ += "  dec rcx\n";
+            out_ += "  jnz .ftoa_frac\n";
+            out_ += "  mov eax, [rsp + 32]\n";
+            out_ += "  mov [rdi], eax\n";
+            out_ += "  mov ax, [rsp + 36]\n";
+            out_ += "  mov [rdi + 4], ax\n";
+            out_ += "  add rdi, 6\n";
+            out_ += "  add qword ptr [rsp + 24], 6\n";
+            out_ += "  mov rax, [rsp + 24]\n";
+            out_ += "  add rsp, 48\n";
             out_ += "  pop rbx\n";
             out_ += "  ret\n";
             return true;
@@ -758,6 +831,11 @@ private:
         out_ += "  mov " + mem + ", rax\n";
     }
 
+    // The first slot id past every value of the function being emitted:
+    // a call stages spilled argument words here, and because no IR value
+    // owns the id, staging cannot clobber the live word it copies from.
+    uint32_t scratchBase_ = 0;
+
     std::string labelFor(const std::string& fn, uint32_t label) const {
         return ".L_" + fn + "_" + std::to_string(label);
     }
@@ -795,10 +873,34 @@ private:
             }
         }
         uint32_t cells = top + 1;
+        scratchBase_ = cells;
+        // Reserve the spill stage for the widest call: past every live id,
+        // padded even, so `sub rsp` below covers the slots already.
+        uint64_t widest = 0;
+        for (const ir::Block& block : fn.blocks) {
+            for (const ir::Instr& instr : block.body) {
+                if (instr.op != ir::Op::Call) {
+                    continue;
+                }
+                uint64_t words = 0;
+                for (const ir::Argument& arg : instr.arguments) {
+                    words += static_cast<uint64_t>(arg.words.size());
+                }
+                if (words > widest) {
+                    widest = words;
+                }
+            }
+        }
+        const uint64_t kRegisterRow = 6;
+        if (widest > kRegisterRow) {
+            uint64_t stages = widest - kRegisterRow;
+            stages = (stages + 1) & ~static_cast<uint64_t>(1);
+            cells += static_cast<uint32_t>(stages);
+        }
         uint32_t span = (cells * 8 + 15) & ~15u;
 
-        out_ += ".globl " + fn.name + "\n";
-        out_ += fn.name + ":\n";
+        out_ += ".globl " + asmSafeName(fn.name) + "\n";
+        out_ += asmSafeName(fn.name) + ":\n";
         out_ += "  push rbp\n";
         out_ += "  mov rbp, rsp\n";
         out_ += "  sub rsp, " + std::to_string(span) + "\n";
@@ -933,7 +1035,7 @@ private:
             bool narrow = instr.width == ir::IRType::I32 || instr.width == ir::IRType::U32 ||
                           instr.width == ir::IRType::I16 || instr.width == ir::IRType::U16 ||
                           instr.width == ir::IRType::I8 || instr.width == ir::IRType::U8;
-            bool isSigned = signedWidth(instr.width, instr.type);
+            bool isSigned = ir::signedWidth(instr.width, instr.type);
             bool isMul = instr.op == ir::Op::Mul;
             bool byteMul = isMul && (instr.width == ir::IRType::I8 || instr.width == ir::IRType::U8);
             if (byteMul) {
@@ -964,12 +1066,38 @@ private:
         }
         if (instr.op == ir::Op::Div || instr.op == ir::Op::Rem) {
             // Float division answers inf or NaN and never faults, so it
-            // emits the plain SSE divide with no zero check; a float
-            // remainder would need an fmod routine rather than idiv.
+            // emits the plain SSE divide with no zero check. SSE has no
+            // remainder, and the project links no libc to call fmod from,
+            // so a float remainder emits the x87 partial remainder: fprem
+            // truncates the quotient (C fmod semantics, not the IEEE
+            // round-to-nearest remainder) and C2 reports an incomplete
+            // reduction, so the loop repeats until exact. A zero divisor
+            // raises the masked invalid operation and answers NaN,
+            // matching fmod; nothing faults. The divisor loads first so
+            // it sits under the dividend, as fprem requires.
             if (instr.width == ir::IRType::F32 || instr.width == ir::IRType::F64) {
                 if (instr.op == ir::Op::Rem) {
-                    refuse(instr.loc, "float remainder is not emitted yet");
-                    return false;
+                    const char* mem =
+                        instr.width == ir::IRType::F32 ? "dword ptr " : "qword ptr ";
+                    std::string again =
+                        ".L_" + fn.name + "_fprem_" +
+                        std::to_string(instr.results[0].id);
+                    out_ += "  fld " + std::string(mem) +
+                            slot(instr.operands[1].id) + "\n";
+                    out_ += "  fld " + std::string(mem) +
+                            slot(instr.operands[0].id) + "\n";
+                    out_ += again + ":\n";
+                    out_ += "  fprem\n";
+                    // fstsw, not fnstsw: the store must wait for fprem to
+                    // finish, or the C2 read below can be stale and the
+                    // loop exits early with a partial remainder.
+                    out_ += "  fstsw ax\n";
+                    out_ += "  test ah, 4\n";
+                    out_ += "  jnz " + again + "\n";
+                    out_ += "  fstp " + std::string(mem) +
+                            slot(instr.results[0].id) + "\n";
+                    out_ += "  fstp st(0)\n";
+                    return true;
                 }
                 const char* suffix =
                     instr.width == ir::IRType::F32 ? "ss" : "sd";
@@ -986,7 +1114,7 @@ private:
             // width, so 32/16/8-bit use their own dividend/divisor forms
             // and extend the quotient or remainder afterwards. Every form
             // faults on a zero divisor, which is the defined trap.
-            bool isSigned = signedWidth(instr.width, instr.type);
+            bool isSigned = ir::signedWidth(instr.width, instr.type);
             bool wantQuotient = instr.op == ir::Op::Div;
             if (instr.width == ir::IRType::I64 || instr.width == ir::IRType::U64) {
                 out_ += "  mov rax, " + slot(instr.operands[0].id) + "\n";
@@ -1062,7 +1190,7 @@ private:
             // operand size (5 bits at 32 bits and below, 6 at 64), which
             // is SEMANTICS §3's documented result — so the shift runs at
             // the value's own width and narrow results extend afterwards.
-            bool isSigned = signedWidth(instr.width, instr.type);
+            bool isSigned = ir::signedWidth(instr.width, instr.type);
             const char* acc = "rax";
             const char* ext = nullptr;
             if (instr.width == ir::IRType::I32 || instr.width == ir::IRType::U32) {
@@ -1188,8 +1316,13 @@ private:
         }
         if (instr.op == ir::Op::Store) {
             out_ += "  mov rax, " + slot(instr.storedValue.id) + "\n";
-            if (instr.width == ir::IRType::F32 || instr.width == ir::IRType::F64) {
+            // Each width has its own SSE move: a float store that read four
+            // bytes of a double would keep the low half of the bit pattern
+            // and answer with the wrong value, so the spellings differ.
+            if (instr.width == ir::IRType::F32) {
                 out_ += "  movss xmm0, " + slot(instr.storedValue.id) + "\n";
+            } else if (instr.width == ir::IRType::F64) {
+                out_ += "  movsd xmm0, " + slot(instr.storedValue.id) + "\n";
             }
             if (!instr.globalLabel.empty()) {
                 emitStoreMem(atAddr("rip + " + instr.globalLabel, instr.displacement),
@@ -1248,10 +1381,14 @@ private:
             }
             const uint64_t kIntRegs = 6;
             const uint64_t kSseRegs = 8;
-            if (gpr > kIntRegs) {
-                refuse(instr.loc, "more than six registers of arguments");
-                return false;
-            }
+            // Integer words past the sixth register spill to the stack the
+            // SysV way: pushed in reverse, argument seven nearest the
+            // return address, with a lone final word padded to sixteen.
+            // Every spilled word stages in a fresh slot first, because a
+            // push moves rsp and a slot offset stands still; the stage is
+            // what the pushes read, under one fixed rsp.
+            const uint64_t stackWords = gpr > kIntRegs ? gpr - kIntRegs : 0;
+            const uint64_t stackPad = stackWords % 2;
             if (sse > kSseRegs) {
                 refuse(instr.loc, "more than eight float arguments");
                 return false;
@@ -1263,6 +1400,7 @@ private:
             // instead of consuming an integer one.
             uint64_t index = 0;
             uint64_t sseIndex = 0;
+            std::vector<const ir::Value*> spilled;
             for (const ir::Argument& arg : instr.arguments) {
                 const bool floatArg = arg.width == ir::IRType::F32 ||
                                       arg.width == ir::IRType::F64;
@@ -1276,16 +1414,57 @@ private:
                     continue;
                 }
                 for (const ir::Value& word : arg.words) {
-                    out_ += "  mov " + std::string(argReg(index)) + ", " +
-                            slot(word.id) + "\n";
+                    if (index < kIntRegs) {
+                        out_ += "  mov " + std::string(argReg(index)) + ", " +
+                                slot(word.id) + "\n";
+                    } else {
+                        spilled.push_back(&word);
+                    }
                     ++index;
+                }
+            }
+            if (stackWords != 0 || stackPad != 0) {
+                // The spill goes down as pushes and nothing else: the
+                // frame's slot offsets are static, so every read below
+                // sees rsp where the frame left it, and the only movement
+                // is the pushes themselves, which no slot read crosses.
+                // A lone final word pads the stack back to sixteen so the
+                // callee enters aligned.
+                // Every word is read into its register BEFORE the pushes
+                // start: `mov rax, [rsp + N]` recomputes its operand against
+                // the rsp the moment it runs, so a read that follows a push
+                // would take a word the push moved. A register per spilled
+                // word then pushes in reverse, argument seven landing
+                // nearest the return address.
+                // T4: the count a loop walks from is written as a name, not
+                // a literal beside a size word.
+                static constexpr uint64_t skipNone = 0;
+                static const char* const kSpillReg[] = {
+                    "rax", "r10", "r11", "r12", "r13", "r14", "r15"};
+                for (uint64_t at = 0; at < spilled.size(); ++at) {
+                    out_ += "  mov " + std::string(kSpillReg[at]) + ", " +
+                            slot(spilled[at]->id) + "\n";
+                }
+                if (stackPad != 0) {
+                    out_ += "  mov rax, 0\n";
+                    out_ += "  push rax\n";
+                }
+                for (uint64_t at = spilled.size(); at > skipNone; --at) {
+                    out_ += "  push " + std::string(kSpillReg[at - 1]) + "\n";
                 }
             }
             if (instr.call.indirect) {
                 out_ += "  mov rax, " + slot(instr.calleeValue.id) + "\n";
                 out_ += "  call rax\n";
             } else {
-                out_ += "  call " + instr.callee + "\n";
+                out_ += "  call " + asmSafeName(instr.callee) + "\n";
+            }
+            // The spill comes off the stack BEFORE the answer is stored:
+            // a slot offset stands still, and while the pushed words are
+            // still down there rsp names a different base for them.
+            if (stackWords != 0 || stackPad != 0) {
+                out_ += "  add rsp, " +
+                        std::to_string(stackWords * 8 + stackPad * 8) + "\n";
             }
             if (!instr.results.empty()) {
                 if (instr.width == ir::IRType::F32) {
@@ -1313,13 +1492,13 @@ private:
             return true;
         }
         if (instr.op == ir::Op::DataAddr) {
-            out_ += "  lea rax, [rip + " + instr.globalLabel + "]\n";
+            out_ += "  lea rax, [rip + " + asmSafeName(instr.globalLabel) + "]\n";
             out_ += "  mov " + slot(instr.results[0].id) + ", rax\n";
-            addrWords_[instr.results[0].id] = instr.globalLabel;
+            addrWords_[instr.results[0].id] = asmSafeName(instr.globalLabel);
             return true;
         }
         if (instr.op == ir::Op::FnAddr) {
-            out_ += "  lea rax, [rip + " + instr.globalLabel + "]\n";
+            out_ += "  lea rax, [rip + " + asmSafeName(instr.globalLabel) + "]\n";
             out_ += "  mov " + slot(instr.results[0].id) + ", rax\n";
             return true;
         }
@@ -1334,6 +1513,61 @@ private:
     // The size an asm placeholder asks for: a `{name:q}`-style suffix
     // overrides, and plain `{name}` is the value's own width, always with
     // an explicit PTR so both operands of the template stay unambiguous.
+    // GAS parses certain spellings as registers in operand position
+    // (`call cs` reads the segment register, never the symbol): a
+    // function carrying one of those spellings is renamed at every site
+    // that prints it. All other spellings — instruction mnemonics like
+    // `add` included — print unchanged.
+    bool isMachineReg(const std::string& spelling) {
+        std::string low;
+        for (char c : spelling) {
+            low.push_back(c >= 'A' && c <= 'Z'
+                              ? static_cast<char>(c + ('a' - 'A'))
+                              : c);
+        }
+        static const char* const regs[] = {
+            "rax", "rbx", "rcx", "rdx", "rsi", "rdi", "rbp", "rsp",
+            "r8", "r9", "r10", "r11", "r12", "r13", "r14", "r15",
+            "eax", "ebx", "ecx", "edx", "esi", "edi", "ebp", "esp",
+            "r8d", "r9d", "r10d", "r11d", "r12d", "r13d", "r14d", "r15d",
+            "ax", "bx", "cx", "dx", "si", "di", "bp", "sp",
+            "r8w", "r9w", "r10w", "r11w", "r12w", "r13w", "r14w", "r15w",
+            "al", "bl", "cl", "dl", "sil", "dil", "bpl", "spl",
+            "r8b", "r9b", "r10b", "r11b", "r12b", "r13b", "r14b", "r15b",
+            "ah", "bh", "ch", "dh",
+            "rip", "eip",
+            "cs", "ds", "es", "ss", "fs", "gs",
+            "cr0", "cr1", "cr2", "cr3", "cr4", "cr5", "cr6", "cr7",
+            "cr8", "cr9", "cr10", "cr11", "cr12", "cr13", "cr14", "cr15",
+            "dr0", "dr1", "dr2", "dr3", "dr4", "dr5", "dr6", "dr7",
+            "dr8", "dr9", "dr10", "dr11", "dr12", "dr13", "dr14", "dr15",
+            "mm0", "mm1", "mm2", "mm3", "mm4", "mm5", "mm6", "mm7",
+            "st", "st0", "st1", "st2", "st3", "st4", "st5", "st6", "st7",
+            "xmm0", "xmm1", "xmm2", "xmm3", "xmm4", "xmm5", "xmm6", "xmm7",
+            "xmm8", "xmm9", "xmm10", "xmm11", "xmm12", "xmm13", "xmm14", "xmm15",
+            "xmm16", "xmm17", "xmm18", "xmm19", "xmm20", "xmm21", "xmm22", "xmm23",
+            "xmm24", "xmm25", "xmm26", "xmm27", "xmm28", "xmm29", "xmm30", "xmm31",
+            "ymm0", "ymm1", "ymm2", "ymm3", "ymm4", "ymm5", "ymm6", "ymm7",
+            "ymm8", "ymm9", "ymm10", "ymm11", "ymm12", "ymm13", "ymm14", "ymm15",
+            "ymm16", "ymm17", "ymm18", "ymm19", "ymm20", "ymm21", "ymm22", "ymm23",
+            "ymm24", "ymm25", "ymm26", "ymm27", "ymm28", "ymm29", "ymm30", "ymm31",
+            "zmm0", "zmm1", "zmm2", "zmm3", "zmm4", "zmm5", "zmm6", "zmm7",
+            "zmm8", "zmm9", "zmm10", "zmm11", "zmm12", "zmm13", "zmm14", "zmm15",
+            "zmm16", "zmm17", "zmm18", "zmm19", "zmm20", "zmm21", "zmm22", "zmm23",
+            "zmm24", "zmm25", "zmm26", "zmm27", "zmm28", "zmm29", "zmm30", "zmm31",
+            "k0", "k1", "k2", "k3", "k4", "k5", "k6", "k7",
+            "bnd0", "bnd1", "bnd2", "bnd3",
+        };
+        for (const char* reg : regs) {
+            if (low == reg) {
+                return true;
+            }
+        }
+        return false;
+    }
+    std::string asmSafeName(const std::string& spelling) {
+        return isMachineReg(spelling) ? spelling + "_" : spelling;
+    }
     std::string asmSizeName(ir::IRType width, char forced) {
         if (forced == 'b') {
             return "BYTE PTR";
@@ -1561,6 +1795,16 @@ private:
                        from.type->kind() == Kind::FunctionPtr;
         bool toPtr = to.type->kind() == Kind::Pointer ||
                      to.type->kind() == Kind::FunctionPtr;
+        // basicOf answers the enum side as its underlying signed i32
+        // (FEATURES §2, enum ↔ int row). It is called only where the call
+        // sites already proved non-pointer scalar sides, so a pointer
+        // never meets the dereference.
+        auto basicOf = [](TypeRef t) -> BasicKind {
+            if (t.type->kind() == Kind::Enum) {
+                return BasicKind::I32;
+            }
+            return *t.type->basic();
+        };
         bool fromFloat = from.type->kind() == Kind::Basic &&
                          basicIsFloat(*from.type->basic());
         bool toFloat = to.type->kind() == Kind::Basic &&
@@ -1570,8 +1814,12 @@ private:
                 refuse(instr.loc, "this cast is not emitted yet");
                 return false;
             }
-            const int fromF = basicWidthBits(*from.type->basic());
-            const int toF = basicWidthBits(*to.type->basic());
+            // Past the pointer refuse both sides are scalar basics or an
+            // enum riding its underlying i32 (enum-to-float reaches here;
+            // float-to-enum never does — lowering diverts every enum
+            // target through the membership trap first).
+            const int fromF = basicWidthBits(basicOf(from));
+            const int toF = basicWidthBits(basicOf(to));
             if (fromFloat && toFloat) {
                 // Same width is a bit move; otherwise convert through xmm0.
                 out_ += "  mov rax, " + slot(instr.operands[0].id) + "\n";
@@ -1659,32 +1907,41 @@ private:
                     slot(instr.results[0].id) + ", xmm0\n";
             return true;
         }
+        // Scalar casts run on basics; an enum side rides its underlying
+        // i32 (int-to-enum already passed its membership trap at
+        // lowering). Anything else refuses.
+        auto scalarKind = [](Kind kind) {
+            return kind == Kind::Basic || kind == Kind::Enum;
+        };
         if (!fromPtr && !toPtr &&
-            (from.type->kind() != Kind::Basic || to.type->kind() != Kind::Basic)) {
+            (!scalarKind(from.type->kind()) || !scalarKind(to.type->kind()))) {
             refuse(instr.loc, "this cast is not emitted yet");
             return false;
         }
         // A pointer participates as its machine width; everything else
         // answers through the basic table.
-        int fromBits = fromPtr ? 64 : basicWidthBits(*from.type->basic());
-        int toBits = toPtr ? 64 : basicWidthBits(*to.type->basic());
-        bool signedTarget = !toPtr && to.type->kind() == Kind::Basic &&
-                            basicIsSigned(*to.type->basic());
+        int fromBits = fromPtr ? 64 : basicWidthBits(basicOf(from));
+        int toBits = toPtr ? 64 : basicWidthBits(basicOf(to));
+        bool signedTarget =
+            !toPtr &&
+            (to.type->kind() == Kind::Basic || to.type->kind() == Kind::Enum) &&
+            basicIsSigned(basicOf(to));
         out_ += "  mov rax, " + slot(instr.operands[0].id) + "\n";
         if (fromBits == toBits) {
             // Same width, different signedness: the cell keeps the
             // source's extension, so re-extend through the target —
             // i32(-1) `as` u32 reads 0xFFFFFFFF, not the sign-extended
             // source cell. Pointers keep the plain move.
-            const bool fromInt = !fromPtr && from.type->kind() == Kind::Basic &&
-                                 from.type->basic().has_value() &&
-                                 basicIsInteger(*from.type->basic());
-            const bool toInt = !toPtr && to.type->kind() == Kind::Basic &&
-                               to.type->basic().has_value() &&
-                               basicIsInteger(*to.type->basic());
+            const bool fromInt =
+                !fromPtr &&
+                (from.type->kind() == Kind::Basic || from.type->kind() == Kind::Enum) &&
+                basicIsInteger(basicOf(from));
+            const bool toInt =
+                !toPtr && (to.type->kind() == Kind::Basic || to.type->kind() == Kind::Enum) &&
+                basicIsInteger(basicOf(to));
             const bool crossSign = fromInt && toInt &&
-                                   (basicIsSigned(*from.type->basic()) !=
-                                    basicIsSigned(*to.type->basic()));
+                                   (basicIsSigned(basicOf(from)) !=
+                                    basicIsSigned(basicOf(to)));
             if (!crossSign) {
                 out_ += "  mov " + slot(instr.results[0].id) + ", rax\n";
                 return true;

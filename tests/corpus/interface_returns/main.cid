@@ -23,16 +23,16 @@ interface Shape {
 
 class Sq {
   var s: int;
-  func init(s: int) -> void { this.s = s; }
-  func area() -> int { return this.s * this.s; }
+  func init(s: int) { (*self).s = s; }
+  func area() -> int { return (*self).s * (*self).s; }
   func kind() -> int { return 1; }
 }
 
 class Rect {
   var w: int;
   var h: int;
-  func init(w: int, h: int) -> void { this.w = w; this.h = h; }
-  func area() -> int { return this.w * this.h; }
+  func init(w: int, h: int) { (*self).w = w; (*self).h = h; }
+  func area() -> int { return (*self).w * (*self).h; }
   func kind() -> int { return 2; }
 }
 
@@ -41,14 +41,13 @@ func id(x: Shape) -> Shape { return x; }
 
 // A satisfying concrete value: boxed at the return site.
 func makeSq(v: int) -> Shape {
-  var c: Sq;
-  c.init(v);
+  var c: *Sq = new Sq(v);
   return c;
 }
 
 // A satisfying concrete pointer: becomes the fat pointer's data word.
 func makeRect(w: int, h: int) -> Shape {
-  var r: Rect* = new Rect(w, h);
+  var r: *Rect = new Rect(w, h);
   return r;
 }
 
@@ -68,20 +67,22 @@ func pick(n: int) -> Shape {
 // A class method returning an interface (direct call).
 class Factory {
   var base: int;
-  var inner: Sq;
-  func init(b: int) -> void { this.base = b; }
+  var inner: *Sq;
+  func init(b: int) {
+    (*self).base = b;
+    (*self).inner = new Sq(b);
+  }
   func mk(extra: int) -> Shape {
-    var c: Sq;
-    c.init(this.base + extra);
+    var c: *Sq = new Sq((*self).base + extra);
     return c;
   }
   // A method returning another interface-returning call's result, and a
   // method chaining through another method.
   func mkFrom(v: int) -> Shape { return makeSq(v); }
-  func mkFrom2(v: int) -> Shape { return this.mkFrom(v); }
+  func mkFrom2(v: int) -> Shape { return (*self).mkFrom(v); }
   // A class-valued field returned as an interface is boxed like any other
   // concrete value.
-  func wrap() -> Shape { return this.inner; }
+  func wrap() -> Shape { return (*self).inner; }
 }
 
 // An interface method returning an interface (vtable dispatch): the
@@ -94,8 +95,7 @@ interface Maker {
 class SqMaker {
   var pad: int;
   func make(v: int) -> Shape {
-    var c: Sq;
-    c.init(v);
+    var c: *Sq = new Sq(v);
     return c;
   }
 }
@@ -103,7 +103,7 @@ class SqMaker {
 class RectMaker {
   var pad: int;
   func make(v: int) -> Shape {
-    var r: Rect* = new Rect(v, v + 1);
+    var r: *Rect = new Rect(v, v + 1);
     return r;
   }
 }
@@ -111,8 +111,7 @@ class RectMaker {
 // An imported interface in a return position: the qualified spelling keeps
 // the callee's module rooted at the call site.
 func mainMake(v: int) -> lib.Shape {
-  var c: Sq;
-  c.init(v);
+  var c: *Sq = new Sq(v);
   return c;
 }
 
@@ -130,10 +129,8 @@ func retarget(x: Shape) -> Shape {
 }
 
 func main() -> int {
-  var sq: Sq;
-  sq.init(4);
-  var rc: Rect;
-  rc.init(2, 5);
+  var sq: *Sq = new Sq(4);
+  var rc: *Rect = new Rect(2, 5);
 
   // 1. Identity, both implementors.
   var a: Shape = id(sq);
@@ -182,28 +179,27 @@ func main() -> int {
 
   // 8. Class method returning an interface (direct call), including a
   //    class-valued field.
-  var fac: Factory;
-  fac.init(10);
-  if (fac.mk(5).area() != 225) { return 19; }
-  if (fac.mk(0).area() != 100) { return 20; }
-  fac.inner.init(13);
-  if (fac.wrap().area() != 169) { return 21; }
-  if (fac.mkFrom(4).area() != 16) { return 37; }
-  if (fac.mkFrom2(5).area() != 25) { return 38; }
+  var fac: *Factory = new Factory(10);
+  if ((*fac).mk(5).area() != 225) { return 19; }
+  if ((*fac).mk(0).area() != 100) { return 20; }
+  (*fac).inner = new Sq(13);
+  if ((*fac).wrap().area() != 169) { return 21; }
+  if ((*fac).mkFrom(4).area() != 16) { return 37; }
+  if ((*fac).mkFrom2(5).area() != 25) { return 38; }
 
   // 9. Interface method returning an interface (vtable dispatch), two
   //    implementors, and the result passed on as an argument.
-  var sm: SqMaker;
+  var sm: SqMaker = new SqMaker { pad: 0 };
   var m1: Maker = sm;
   if (m1.make(9).area() != 81) { return 22; }
-  var rm: RectMaker;
+  var rm: RectMaker = new RectMaker { pad: 0 };
   var m2: Maker = rm;
   if (m2.make(4).area() != 20) { return 23; }
   if (areaOf(m1.make(3)) != 9) { return 24; }
 
   // 10. Returning a retargeted interface parameter; the caller is untouched.
   if (retarget(sq).area() != 121) { return 25; }
-  if (sq.area() != 16) { return 26; }
+  if ((*sq).area() != 16) { return 26; }
 
   // 11. Copying a returned interface into another variable keeps both valid.
   var holder: Shape = makeSq(12);
@@ -229,7 +225,7 @@ func main() -> int {
   //     body is a pre-existing PostLicm limitation (it hoists the sret
   //     call's MEMCPY/LOADs out of the loop for struct returns too), so
   //     the repeated-call coverage is unrolled rather than looped.
-  var bx: Box;
+  var bx: Box = new Box { sh: nilPtr as Shape };
   bx.sh = makeSq(3);
   if (bx.sh.area() != 9) { return 34; }
   bx.sh = makeRect(2, 7);

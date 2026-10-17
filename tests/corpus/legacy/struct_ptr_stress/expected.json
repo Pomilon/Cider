@@ -1,1 +1,5 @@
-{"stdout": "", "stderr": "", "exit": 0}
+{
+  "stdout": "PASS: struct_ptr_stress\n\n",
+  "stderr": "",
+  "exit": 0
+}

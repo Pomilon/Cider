@@ -387,6 +387,10 @@ std::vector<Param> Parser::parseParams() {
             failHere("a parameter needs a type");
             return params;
         }
+        // A parameter may spell `volatile T`: qualification is an access
+        // property of declarations, and the value semantics are the same
+        // either way.
+        (void)match(TokenKind::KwVolatile);
         std::unique_ptr<TypeExpr> type = parseType();
         if (type == nullptr) {
             return params;
@@ -414,6 +418,9 @@ std::unique_ptr<TypeExpr> Parser::parseReturnType() {
         failHere("expected '>' after '-'");
         return nullptr;
     }
+    // `-> volatile T` is accepted for the same reason a parameter's
+    // spelling is: the qualifier describes access, not the value.
+    (void)match(TokenKind::KwVolatile);
     return parseType();
 }
 
@@ -1249,6 +1256,19 @@ Pattern Parser::parsePattern() {
         peek().kind == TokenKind::KwNilPtr) {
         pattern.kind = PatternKind::Const;
         pattern.value = parsePrefix();
+        // `lo ... hi` is one range pattern, inclusive on both ends. Only
+        // integer literals bound it: a float, char, string, bool, or name
+        // beside the dots is refused here, where it is written, and a
+        // bound the dots never follow stays the constant it always was.
+        if (match(TokenKind::Ellipsis)) {
+            if (dynamic_cast<IntLit*>(pattern.value.get()) == nullptr ||
+                !check(TokenKind::IntLit)) {
+                failHere("a range bound is an integer");
+                return pattern;
+            }
+            pattern.kind = PatternKind::Range;
+            pattern.rangeHi = parsePrefix();
+        }
         return pattern;
     }
     if (!check(TokenKind::Ident)) {
@@ -1264,6 +1284,18 @@ Pattern Parser::parsePattern() {
         pattern.kind = PatternKind::Member;
         pattern.tag = std::move(first);
         pattern.member = advance().text;
+        // A second dot roots the case in another module
+        // (`lib.Shape.CIRCLE`): the middle names the type, the last the
+        // case. Anything further is not a pattern.
+        if (match(TokenKind::Dot)) {
+            if (!check(TokenKind::Ident)) {
+                failHere("expected a member name");
+                return pattern;
+            }
+            pattern.mod = std::move(pattern.tag);
+            pattern.tag = std::move(pattern.member);
+            pattern.member = advance().text;
+        }
         return pattern;
     }
     if (check(TokenKind::LBrace)) {
@@ -1271,6 +1303,12 @@ Pattern Parser::parsePattern() {
         pattern.kind = PatternKind::Type;
         pattern.type = std::make_unique<NamedType>(start, "", std::move(first),
                                                    std::vector<std::unique_ptr<TypeExpr>>{});
+        // An empty struct lists all zero of its fields this way: the
+        // checker still proves the braces name an empty struct, so `E {}`
+        // only ever matches `E`.
+        if (match(TokenKind::RBrace)) {
+            return pattern;
+        }
         for (;;) {
             if (!check(TokenKind::Ident)) {
                 failHere("a field pattern needs a name");
@@ -1334,6 +1372,20 @@ std::unique_ptr<Stmt> Parser::parseMatch() {
             continue;
         }
         Pattern pattern = parsePattern();
+        std::vector<std::unique_ptr<Pattern>> alts;
+        while (match(TokenKind::Pipe)) {
+            Pattern alt = parsePattern();
+            alts.push_back(std::make_unique<Pattern>(std::move(alt)));
+        }
+        // A guard trails the alternatives: `if` never continues a
+        // pattern, so one here unambiguously opens the arm's condition.
+        std::unique_ptr<Expr> guard;
+        if (match(TokenKind::KwIf)) {
+            guard = parseExpr();
+            if (guard == nullptr) {
+                return nullptr;
+            }
+        }
         if (!match(TokenKind::FatArrow)) {
             failHere("expected '=>'");
             return nullptr;
@@ -1352,8 +1404,11 @@ std::unique_ptr<Stmt> Parser::parseMatch() {
             one.push_back(std::move(body));
             arm = std::make_unique<Block>(apos, std::move(one));
         }
-        arms.push_back(std::make_unique<MatchArm>(
-            apos, std::make_unique<Pattern>(std::move(pattern)), std::move(arm)));
+        auto matchArm = std::make_unique<MatchArm>(
+            apos, std::make_unique<Pattern>(std::move(pattern)), std::move(arm));
+        matchArm->alts = std::move(alts);
+        matchArm->guard = std::move(guard);
+        arms.push_back(std::move(matchArm));
     }
     if (!match(TokenKind::RBrace)) {
         failHere("expected '}'");
@@ -1510,18 +1565,34 @@ std::unique_ptr<Stmt> Parser::parseAsm() {
 
 std::unique_ptr<TypeExpr> Parser::parseType() {
     Position start = peek().pos;
+    // A leading `volatile` before a whole type (`type VI = volatile T`,
+    // `[volatile T; N]`): qualification is an access property, so the
+    // spelling is accepted wherever a type is.
+    (void)match(TokenKind::KwVolatile);
     uint64_t depth = 0;
     while (match(TokenKind::Star)) {
         ++depth;
+    }
+    // `*volatile T`: the innermost pointer reads and writes its pointee
+    // volatile (FEATURES §1.1c spells the mark before the pointee).
+    bool pointeeVolatile = false;
+    if (depth > 0 && match(TokenKind::KwVolatile)) {
+        pointeeVolatile = true;
     }
     std::unique_ptr<TypeExpr> type = parsePrimaryType();
     if (type == nullptr) {
         return nullptr;
     }
     (void)start;
+    bool innermost = true;
     while (depth > 0) {
         Position ppos = type->pos;
-        type = std::make_unique<PointerType>(ppos, std::move(type));
+        auto ptr = std::make_unique<PointerType>(ppos, std::move(type));
+        if (innermost && pointeeVolatile) {
+            ptr->pointeeVolatile = true;
+        }
+        innermost = false;
+        type = std::move(ptr);
         --depth;
     }
     return type;
@@ -1857,6 +1928,16 @@ std::unique_ptr<Expr> Parser::parsePrefix() {
         case TokenKind::StringLit: {
             Token lit = advance();
             base = parseStringParts(lit);
+            break;
+        }
+        case TokenKind::WideStringLit: {
+            const Token& lit = advance();
+            base = std::make_unique<WideLit>(start, lit.lit.wideUnits);
+            break;
+        }
+        case TokenKind::WideCharLit: {
+            const Token& lit = advance();
+            base = std::make_unique<WideChar>(start, lit.lit.charValue);
             break;
         }
         case TokenKind::KwTrue: {

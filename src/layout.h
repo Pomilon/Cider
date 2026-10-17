@@ -35,6 +35,11 @@ constexpr int64_t kSizeI64 = 8;
 constexpr int64_t kSizeF32 = 4;
 constexpr int64_t kSizeF64 = 8;
 
+// Shifts count bits while offsets count bytes: the factor between them
+// lives here, beside the sizes, so no site multiplies by a bare digit
+// or mistakes a byte count for a bit count.
+constexpr int64_t kBitsPerByte = 8;
+
 // A `bool` is one byte and holds 0 or 1. One byte rather than a bit: a bitfield
 // is the construct for packing, and a one-byte bool keeps every load and store
 // of it the same width as every other scalar.

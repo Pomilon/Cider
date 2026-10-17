@@ -1,1 +1,5 @@
-{"stdout": "crossmod_iface_global_store_ok\nACBA", "stderr": "", "exit": 0}
+{
+ "exit": 0,
+ "stderr": "",
+ "stdout": "crossmod_iface_global_store_ok\n"
+}

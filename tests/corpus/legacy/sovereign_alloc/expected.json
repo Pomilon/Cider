@@ -1,1 +1,5 @@
-{"stdout": "", "stderr": "", "exit": 0}
+{
+ "exit": 0,
+ "stderr": "",
+ "stdout": "Testing Sovereign Allocator...\nTotal Sovereign Bytes: 672\nBlock 1 Size: 100\nBlock 2 Size: 200\nBlock 3 Size: 300\n"
+}

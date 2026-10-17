@@ -25,10 +25,10 @@
 from std.io import print;
 
 // --- declared BEFORE the interface -----------------------------------------
-export var gEarly: DTag;
+export var gEarly: DTag = nilPtr as DTag;
 
 // --- declared before its alias chain, which is declared after the interface -
-export var gAlias: DWrap;
+export var gAlias: DWrap = nilPtr as DWrap;
 export type DWrap = DInner;
 export type DInner = DTag;
 
@@ -38,24 +38,26 @@ export interface DTag {
 }
 
 // The control: declared after the interface, the order the eager pass handles.
-export var gAfter: DTag;
+export var gAfter: DTag = nilPtr as DTag;
 
 // First implementor: its finalizer REPORTS, so the trace shows which object
 // was finalized and when.
 export class DOne {
   var v: int;
-  func o() -> int { return this.v; }
+  func init(x: int) { (*self).v = x; }
+  func o() -> int { return (*self).v; }
   func tag() -> int { return 7; }
-  func ~DOne() { print("A"); }
+  func deinit() { print("A"); }
 }
 
 // A second implementor with a DIFFERENT tag, so a stale vtable left behind by
 // the previous store is visible as a wrong tag rather than a crash.
 export class DTwo {
   var s: int;
-  func o() -> int { return this.s; }
+  func init(x: int) { (*self).s = x; }
+  func o() -> int { return (*self).s; }
   func tag() -> int { return 13; }
-  func ~DTwo() { print("B"); }
+  func deinit() { print("B"); }
 }
 
 // A third implementor whose methods are bigger and whose object is larger, so
@@ -63,29 +65,33 @@ export class DTwo {
 export class DThree {
   var p: int;
   var pad: [u64; 4];
-  func o() -> int { return this.p; }
+  func init(x: int) { (*self).p = x; (*self).pad = new [u64; 4] { 0, 0, 0, 0 }; }
+  func o() -> int { return (*self).p; }
   func tag() -> int { return 21; }
-  func ~DThree() { print("C"); }
+  func deinit() { print("C"); }
 }
 
-export var dOne: DOne;
-export var dTwo: DTwo;
-export var dThree: DThree;
 
 // The bare controls, inside the module that declares both sides: what the
 // qualified and aliased spellings must agree with.
 export func seedEarly() -> int {
-  gEarly = dOne;
+  var d: *DOne = new DOne(0);
+  (*d).v = 42;
+  gEarly = d;
   return gEarly.o();
 }
 
 export func seedAlias() -> int {
-  gAlias = dTwo;
+  var d: *DTwo = new DTwo(0);
+  (*d).s = 17;
+  gAlias = d;
   return gAlias.o();
 }
 
 export func seedAfter() -> int {
-  gAfter = dThree;
+  var d: *DThree = new DThree(0);
+  (*d).p = 5;
+  gAfter = d;
   return gAfter.o();
 }
 
@@ -98,4 +104,4 @@ export func peekAfter() -> int { return gAfter.o() * 100 + gAfter.tag(); }
 export func takesTag(x: DTag) -> int { return x.o() * 10 + x.tag(); }
 
 // Not exported: no spelling may reach it (CIDER-BUG-060).
-var hidden: DTag;
+var hidden: DTag = nilPtr as DTag;

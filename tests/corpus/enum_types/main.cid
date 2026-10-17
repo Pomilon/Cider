@@ -66,7 +66,7 @@ func main() -> int {
     if ((same(Color.RED) as int) != 0) { return 15; }
 
     // Struct fields, including copy through another enum value.
-    var p: Paint;
+    var p: Paint = new Paint { c: Color.BLUE, n: 0 };
     p.c = Color.RED;
     p.n = 3;
     if (p.c != Color.RED) { return 16; }
@@ -75,7 +75,7 @@ func main() -> int {
     if (p.c != GREEN) { return 18; }
 
     // Fixed-size arrays of enum values.
-    var arr: [Color; 3];
+    var arr: [Color; 3] = new [Color; 3] {Color.RED, Color.RED, Color.RED};
     arr[0] = Color.RED;
     arr[1] = Color.GREEN;
     arr[2] = Color.BLUE;
@@ -89,7 +89,7 @@ func main() -> int {
     if (lib.Shape.CIRCLE as int != 0) { return 22; }
     var bareShape: int = lib.CIRCLE;
     if (bareShape != 0) { return 23; }
-    var w: lib.Tagged;
+    var w: lib.Tagged = new lib.Tagged { shape: lib.Shape.CIRCLE };
     w.shape = lib.Shape.TRIANGLE;
     if (w.shape as int != 2) { return 24; }
     if (lib.shapeCode(lib.Shape.TRIANGLE) != 2) { return 25; }

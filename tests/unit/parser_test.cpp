@@ -190,6 +190,88 @@ void testControlForms() {
     check(ok, "parses");
 }
 
+// `1 | 2 =>` is one arm with two alternatives: the bar separates patterns,
+// not arms, and the body belongs to all of them.
+void testAlternation() {
+    std::printf("alternation patterns\n");
+    bool ok = false;
+    std::unique_ptr<cider::Program> program = parse(
+        "func f(v: int) -> int { match v { 1 | 2 => { return 1; } default => { return 0; } } }",
+        ok);
+    check(ok, "parses");
+    const cider::FuncDecl& fn = static_cast<const cider::FuncDecl&>(*program->decls[0]);
+    const cider::MatchStmt& match =
+        static_cast<const cider::MatchStmt&>(*fn.body->stmts[0]);
+    check(match.arms.size() == 1, "one arm");
+    check(match.arms[0]->alts.size() == 1, "one extra alternative");
+}
+
+// A guard trails the alternatives: `1 if c => ...` keeps the condition on
+// the arm, and an arm without `if` keeps a null guard.
+void testGuard() {
+    std::printf("match guards\n");
+    bool ok = false;
+    std::unique_ptr<cider::Program> program = parse(
+        "func f(v: int, c: bool) -> int { match v { 1 if c => { return 1; } default => { return 0; } } }",
+        ok);
+    check(ok, "parses");
+    const cider::FuncDecl& fn = static_cast<const cider::FuncDecl&>(*program->decls[0]);
+    const cider::MatchStmt& match =
+        static_cast<const cider::MatchStmt&>(*fn.body->stmts[0]);
+    check(match.arms.size() == 1, "one arm");
+    check(match.arms[0]->guard != nullptr, "the guard is kept");
+    bool plain = false;
+    std::unique_ptr<cider::Program> bare = parse(
+        "func f(v: int) -> int { match v { 1 => { return 1; } default => { return 0; } } }",
+        plain);
+    check(plain, "parses");
+    const cider::FuncDecl& bfn = static_cast<const cider::FuncDecl&>(*bare->decls[0]);
+    const cider::MatchStmt& bmatch =
+        static_cast<const cider::MatchStmt&>(*bfn.body->stmts[0]);
+    check(bmatch.arms[0]->guard == nullptr, "no if means no guard");
+}
+
+// `0 ... 10` is one range pattern: both bounds stay on the arm as integer
+// literals, and anything else beside the dots is a parse refusal.
+void testRange() {
+    std::printf("range patterns\n");
+    bool ok = false;
+    std::unique_ptr<cider::Program> program = parse(
+        "func f(v: int) -> int { match v { 0 ... 10 => { return 1; } default => { return 0; } } }",
+        ok);
+    check(ok, "parses");
+    const cider::FuncDecl& fn = static_cast<const cider::FuncDecl&>(*program->decls[0]);
+    const cider::MatchStmt& match =
+        static_cast<const cider::MatchStmt&>(*fn.body->stmts[0]);
+    check(match.arms.size() == 1, "one arm");
+    check(match.arms[0]->pattern->kind == cider::PatternKind::Range, "a range pattern");
+    const cider::IntLit& lo =
+        static_cast<const cider::IntLit&>(*match.arms[0]->pattern->value);
+    const cider::IntLit& hi =
+        static_cast<const cider::IntLit&>(*match.arms[0]->pattern->rangeHi);
+    check(lo.digits == "0" && hi.digits == "10", "both bounds stay on the arm");
+    bool tight = false;
+    std::unique_ptr<cider::Program> nospace = parse(
+        "func f(v: int) -> int { match v { 0...10 => { return 1; } default => { return 0; } } }",
+        tight);
+    check(tight && nospace->decls.size() == 1, "no spaces needed around the dots");
+    bool floatBound = false;
+    parse(
+        "func f(v: int) -> int { match v { 1.5 ... 5 => { return 1; } default => { return 0; } }",
+        floatBound);
+    check(!floatBound, "a float bound parses nowhere");
+    bool charBound = false;
+    parse(
+        "func f(v: int) -> int { match v { 'a' ... 'z' => { return 1; } default => { return 0; } }",
+        charBound);
+    check(!charBound, "a char bound parses nowhere");
+    bool namedBound = false;
+    parse(
+        "func f(v: int) -> int { match v { LO ... 10 => { return 1; } default => { return 0; } }",
+        namedBound);
+    check(!namedBound, "a named bound parses nowhere");
+}
+
 // `func init` names the constructor: `init` lexes as a keyword, so the
 // method parser accepts it explicitly rather than as an identifier.
 void testMethodInit() {
@@ -355,6 +437,9 @@ int main() {
     testMissingInit();
     testGenericCall();
     testControlForms();
+    testAlternation();
+    testGuard();
+    testRange();
     testMethodInit();
     testExportVar();
     testDotQualifiedType();

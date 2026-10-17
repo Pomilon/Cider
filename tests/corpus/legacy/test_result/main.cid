@@ -1,47 +1,47 @@
 from std.io import puts, exit, printInt;
-from std.result import ok, err, is_ok, is_err, unwrap, expect;
+from std.result import Result, ok, err, is_ok, is_err, unwrap, expect;
 
 func divide(a: int, b: int) -> Result<int, string> {
     if (b == 0) {
-        return err<int, string>("division by zero");
+        return err::<int, string>("division by zero");
     }
-    return ok<int, string>(a / b);
+    return ok::<int, string>(a / b);
 }
 
 func test_ok() -> int {
-    var r: Result<int, string> = ok<int, string>(42);
-    if (!is_ok<int, string>(&r)) { return 1; }
-    if (is_err<int, string>(&r)) { return 2; }
+    var r: Result<int, string> = ok::<int, string>(42);
+    if (!is_ok::<int, string>(&r)) { return 1; }
+    if (is_err::<int, string>(&r)) { return 2; }
     if (r.value != 42) { return 3; }
     return 0;
 }
 
 func test_err() -> int {
-    var r: Result<int, string> = err<int, string>("fail");
-    if (is_ok<int, string>(&r)) { return 1; }
-    if (!is_err<int, string>(&r)) { return 2; }
+    var r: Result<int, string> = err::<int, string>("fail");
+    if (is_ok::<int, string>(&r)) { return 1; }
+    if (!is_err::<int, string>(&r)) { return 2; }
     return 0;
 }
 
 func test_unwrap() -> int {
-    var r: Result<int, string> = ok<int, string>(42);
-    var val: int = unwrap<int, string>(&r);
+    var r: Result<int, string> = ok::<int, string>(42);
+    var val: int = unwrap::<int, string>(&r);
     if (val != 42) { return 1; }
     return 0;
 }
 
 func test_divide() -> int {
     var r: Result<int, string> = divide(10, 2);
-    if (unwrap<int, string>(&r) != 5) { return 1; }
+    if (unwrap::<int, string>(&r) != 5) { return 1; }
 
     r = divide(10, 0);
-    if (is_ok<int, string>(&r)) { return 2; }
+    if (is_ok::<int, string>(&r)) { return 2; }
     return 0;
 }
 
 func test_expect() -> int {
-    var r: Result<int, string> = ok<int, string>(42);
-    var val: int = expect<int, string>(&r, "should be ok");
+    var r: Result<int, string> = ok::<int, string>(42);
+    var val: int = expect::<int, string>(&r, "should be ok");
     if (val != 42) { return 1; }
     return 0;
 }

@@ -53,6 +53,7 @@ const char* trapReasonName(TrapReason reason) {
         case TrapReason::BitfieldOverflow: return "bitfield_overflow";
         case TrapReason::UnionTag: return "union_tag";
         case TrapReason::Downcast: return "downcast";
+        case TrapReason::BadEnum: return "bad_enum";
         case TrapReason::Null: return "null";
         case TrapReason::Explicit: return "explicit";
     }

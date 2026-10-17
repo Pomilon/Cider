@@ -11,8 +11,11 @@
 #ifndef CIDER_CHECK_CHECKER_H
 #define CIDER_CHECK_CHECKER_H
 
+#include <cstdint>
+#include <map>
 #include <memory>
 #include <optional>
+#include <set>
 #include <string>
 #include <unordered_map>
 #include <unordered_set>
@@ -54,6 +57,16 @@ public:
     virtual void onBlockEnter(Block& n) { (void)n; }
     virtual void onBlockExit(Block& n) { (void)n; }
     virtual void onFuncDecl(FuncDecl& n) { (void)n; }
+    // One instantiated generic function body, emitted under its own link
+    // name. The spelling holds parameter names and the template body; the
+    // signature holds the substituted parameter and return types. Fires
+    // from the checker's spec walk, never from the program walk.
+    virtual void onSpecFunc(DeclId spec, const FuncDecl& spelling,
+                            const Signature& sig) {
+        (void)spec;
+        (void)spelling;
+        (void)sig;
+    }
     // A method or constructor body, emitted as its own function. The owner
     // names the mangling; the signature holds the declared parameters and
     // self arrives separately because no source spelling names it.
@@ -77,6 +90,10 @@ public:
     // they vanish and the loop runs to completion.
     virtual void onBreak(Break& n) { (void)n; }
     virtual void onContinue(Continue& n) { (void)n; }
+    // A defer statement, after its body checked in the enclosing scope.
+    // The lowerer registers the body for every exit of the innermost
+    // open scope; nothing runs here.
+    virtual void onDeferStmt(DeferStmt& n) { (void)n; }
     virtual void onIf(IfStmt& n) { (void)n; }
     // A match arm, after its pattern validated against the scrutinee type
     // and exhaustiveness decided (a default arm, or both bool constants).
@@ -118,6 +135,12 @@ struct LocalScope {
     std::unordered_map<std::string, Local> names;
 };
 
+// Provenance of address-carrying storage (T10): whether a pointer-sized
+// value known to hold a closure address may cast back to a closure
+// spelling. Raw accepts no such cast; Neutral (nilPtr) casts to the null
+// closure value. Anything unproven is Raw: laundering refuses loudly.
+enum class Prov { Raw, Closure, Neutral };
+
 class Checker : public ASTVisitor {
 public:
     Checker(TypeContext& ctx, resolve::Resolver& resolver);
@@ -143,6 +166,44 @@ public:
     TypeRef typeOf(const Node* node) const;
     const std::vector<CheckError>& errors() const { return errors_; }
     size_t errorCount() const { return errors_.size(); }
+    // The specialization a generic call instantiated, by call site and
+    // recording context. Empty context while walking top-level code;
+    // otherwise the spec whose body walk recorded it. Template bodies are
+    // shared across specs, so one site records one spec per context; the
+    // lowerer resolves each site under its own context instead of
+    // trusting the last write (which order-dependent overwrites lose).
+    std::optional<DeclId> specOf(const Call* call,
+                                 const std::optional<DeclId>& ctx) const;
+    // The operand type a sizeof spelled, by node. Recorded during checking
+    // with the active substitution applied, so spec emissions read the
+    // concrete type instead of re-resolving past type parameters.
+    TypeRef sizeofOperand(const SizeofType* node) const;
+    // Every recorded generic call site and its spec, for the lowerer's
+    // emission worklist. Checking already computed the transitive closure:
+    // detached body walks still instantiate nested calls.
+    // Name provenance for the lowerer (call shapes): the same answer
+    // provOf gives an identifier, without needing its node.
+    Prov provOfName(const std::string& name) const;
+    // Whether the checker saw this expression as a volatile place: a
+    // deref through a `*volatile T` name. The lowerer marks the loads and
+    // stores it emits through the place with this answer.
+    bool placeIsVolatile(const Expr* expr) const;
+    // Names a declaration `*volatile T` so derefs through it are volatile
+    // places; silent for every other spelling.
+    void noteVolatilePointer(const std::string& name, const TypeExpr* type);
+    const std::map<std::pair<const Call*, std::string>, DeclId>& callSpecs() const {
+        return callSpecs_;
+    }
+    // Re-walks one instantiated generic function body with the sink
+    // attached, so the lowerer emits it. Setup repeats the checking walk
+    // (type-param scope, substituted binds, return type); the body was
+    // already proven clean, so the deterministic re-walk reports nothing
+    // new. No-op when the id names no function specialization.
+    void walkSpecForEmit(DeclId spec);
+    // Collects call-site argument provenance for every function before
+    // any body checks (public: the driver runs it after resolving and
+    // before lowering every module).
+    void prescanProvenance(const std::vector<std::string>& modules);
 
     // SEMANTICS.md §2.3: the common type of two operands, stated as a type.
     // Public so lowering emits a comparison in the same domain the checker
@@ -154,6 +215,7 @@ public:
     void visitFuncDecl(FuncDecl& n) override;
     void visitStructDecl(StructDecl& n) override;
     void visitClassDecl(ClassDecl& n) override;
+    void visitUnionDecl(UnionDecl& n) override;
     void visitVarDecl(VarDecl& n) override;
     void visitBlock(Block& n) override;
     void visitIfStmt(IfStmt& n) override;
@@ -169,6 +231,7 @@ public:
     void visitAsmStmt(AsmStmt& n) override;
     void visitThrowStmt(ThrowStmt& n) override;
     void visitTryStmt(TryStmt& n) override;
+    void visitDeferStmt(DeferStmt& n) override;
 
     // Every expression records its type.
     void visitIntLit(IntLit& n) override;
@@ -215,6 +278,15 @@ private:
     TypeRef checkLiteralInt(const IntLit& lit, TypeRef expected, Position pos);
     TypeRef checkLiteralFloat(const FloatLit& lit, TypeRef expected, Position pos);
     TypeRef checkIdent(Ident& expr);
+    // The representation an expression carries for closure round trips:
+    // literals and tracked storage answer above, everything else is Raw.
+    Prov provOf(const Expr* expr);
+    // Records a local's provenance in the innermost scope; shadowing
+    // scopes hide it again on pop, like the names themselves.
+    void recordFlow(const std::string& name, Prov prov);
+    // Names one syntactic storage chain for place flow, or empty when no
+    // chain proves (calls, literals beyond nil, unkeyable shapes).
+    std::string placeKey(const Expr* expr);
     bool isPlace(const Expr* expr) const;
     bool isInteger(TypeRef type) const;
     TypeRef checkBinary(Binary& expr, TypeRef expected);
@@ -236,9 +308,45 @@ private:
     bool constAggregateInit(const Expr& init);
     TypeRef checkTernary(Ternary& expr, TypeRef expected);
     void checkMethods(DeclId id, Kind kind, std::vector<MethodDecl>& methods);
+    // A redeclaration of a base method is an override when the base's slot
+    // is virtual — with a compatible signature — and an error otherwise
+    // (SEMANTICS 10: neither an override nor a shadow exists).
+    void checkOverrides(const resolve::Decl& self, const ClassDecl& n);
     void checkCtor(DeclId id, Kind kind, FuncDecl* ctor, bool isInit);
-    void bindPattern(Pattern& pat, TypeRef scrutinee);
-    void bindSubPattern(Pattern& pat, TypeRef type);
+    // BUG-274: a by-value cycle has no finite size, so the declaration
+    // itself is refused. Only inline layouts embed — struct, union, class
+    // and array — while pointers, interfaces, strings, slices and scalars
+    // are fixed-size and stop the walk (`*A` stays legal).
+    void checkNoSelfEmbed(DeclId self, const std::string& kind,
+                          const std::string& declName,
+                          const std::vector<FieldDecl>& fields,
+                          const std::string& partWord);
+    bool typeEmbedsSelf(const Type* type, DeclId self,
+                        std::set<uint64_t>& seen) const;
+    // TYPES.md §9 definite assignment for init bodies: the fields assigned
+    // on every path through a statement. Straight lines accumulate
+    // `(*self).f = ...`; branches intersect arms; loops contribute nothing
+    // (they may run zero times); value-opacity — calls inside values and
+    // conditions — bails the check but keeps the recorded stores, which
+    // stand on their own syntax. Statement-position unknowns — a call
+    // statement, a non-self store, asm, throw, try, defer, anything
+    // unlisted — set unknownFlow instead: they may assign fields
+    // invisibly, so an init containing one is refused, never assumed
+    // (TYPES.md §9.2: unprovable is rejected, not accepted).
+    struct InitAssign {
+        std::unordered_set<std::string> assigned;
+        bool bailed = false;
+        bool unknownFlow = false;
+    };
+    InitAssign assignedThrough(const Stmt* stmt, InitAssign state,
+                               const std::vector<std::string>& fields);
+    bool initExprOpaque(const Expr* expr);
+    bool isSelfFieldStore(const Expr* target, std::string& field);
+    void requireInitAssigned(Position pos, const std::vector<std::string>& fields,
+                             const InitAssign& state);
+    void checkInitAssign(DeclId id, const FuncDecl& ctor);
+    void bindPattern(const Pattern& pat, TypeRef scrutinee);
+    void bindSubPattern(const Pattern& pat, TypeRef type);
     // Match validation (FEATURES §8.4): a pattern Name that resolves to a
     // value in scope compares by that type's == (the Erlang rule); only an
     // unresolvable name binds fresh. Classification never binds, so both
@@ -246,8 +354,29 @@ private:
     bool resolveMatchValue(const std::string& name, TypeRef& bound);
     bool matchComparable(TypeRef scrutinee, TypeRef bound);
     bool checkMatchConst(const Pattern& pat, TypeRef scrutinee);
+    bool checkMatchRange(const Pattern& pat, TypeRef scrutinee);
     bool checkMatchPattern(const Pattern& pat, TypeRef scrutinee);
+    bool checkMatchType(const Pattern& pat, TypeRef scrutinee);
+    bool checkMatchMember(const Pattern& pat, TypeRef scrutinee);
+    // Resolves a member pattern's tag to its union declaration, or nothing
+    // when the tag is unknown or not a union. Never fails itself: the
+    // classifier above already diagnosed those shapes, so the
+    // exhaustiveness walk reuses the answer without doubling the error.
+    std::optional<DeclId> matchMemberUnion(const Pattern& pat);
+    std::optional<DeclId> matchMemberEnum(const Pattern& pat);
     void bindMatchFresh(const Pattern& pat, TypeRef scrutinee);
+    // Binds one arm's every alternative: the primary, then each `|` rest.
+    // An arm with alternatives binds no fresh names — the body cannot know
+    // which alternative's value it would hold — so any alternative that
+    // grows the scope fails here instead of binding half a meaning.
+    void bindMatchArm(MatchArm& arm, TypeRef scrutinee);
+    // Checks the arm's `if` guard in the arm's scope, after the pattern's
+    // binds, so it reads bound names like the body does. A missing guard
+    // checks nothing; a present one must be a bool, like any condition.
+    void checkMatchGuard(MatchArm& arm);
+    // Counts the names bound in the innermost scope: the before/after
+    // answers the alternation rule above without naming any one shape.
+    size_t localCount() const;
 
     // SEMANTICS.md §2.3: the common type of two operands, stated as a type.
     // (Public; declared beside typeOf. Lowering queries it for comparisons.)
@@ -295,6 +424,17 @@ private:
     // call into the same instantiation checks against its signature without
     // re-walking; anything else would loop the compiler on recursive code.
     std::unordered_set<std::string> walked_;
+    // Generic call sites and the specialization each instantiated, keyed
+    // by site and recording context (the spec whose body walk recorded
+    // it, or empty at top level). One site keeps one spec per context so
+    // order-dependent overwrites cannot lose specializations.
+    std::map<std::pair<const Call*, std::string>, DeclId> callSpecs_;
+    // The spec whose body is walking, if any: the recording context for
+    // nested generic calls. Saved and restored like the active
+    // instantiation, for the same nesting reasons.
+    std::optional<DeclId> walkSpec_;
+    // Sizeof operand types by node, recorded with substitution applied.
+    std::unordered_map<const SizeofType*, TypeRef> sizeofOperands_;
     // Types resolve here rather than at module scope during generic walks,
     // where the template's parameters are bound.
     const resolve::Scope* typeScope_ = nullptr;
@@ -309,6 +449,69 @@ private:
     std::unique_ptr<EvalEnv> env_;
     const LocalScope* current_ = nullptr;
     std::vector<std::unique_ptr<LocalScope>> scopes_;
+    // Provenance per local scope, parallel to the scopes above: pushed
+    // and popped with them, so shadowing hides outer entries the way it
+    // hides names. Globals persist in their own table, cleared on
+    // function entry (a read sees only stores from its own function:
+    // conservative across functions, exact within one).
+    std::vector<std::unordered_map<std::string, Prov>> flowStack_;
+    std::unordered_map<std::string, Prov> globalProv_;
+    // Provenance per place (fields, elements, derefs), parallel to the
+    // scopes above: same push/pop discipline, so shadowing behaves. Keys
+    // name the syntactic chain (`s.v` vs `(*ps).v` never merge: aliasing
+    // chains stay unproven, documented); unkeyable shapes read Raw.
+    std::vector<std::unordered_map<std::string, Prov>> placeFlow_;
+    // Names declared as `*volatile T`, per scope: a deref through one is a
+    // volatile access (FEATURES §1.1c), and the lowerer asks which deref
+    // expressions the checker saw that way.
+    std::vector<std::unordered_set<std::string>> volatilePtrs_;
+    std::unordered_set<const Expr*> volatilePlaces_;
+    // Global provenance inside the prescan only: seeded from declaration
+    // initializers, updated by stores in module order. Best-effort across
+    // modules (reads see earlier writes); exact within one function.
+    std::unordered_map<std::string, Prov> prescanGlobals_;
+    // Parameter provenance from the whole-program prescan below: a *void
+    // parameter is proven when every known call site passes a closure.
+    // Keyed by module, function and index; absent means unproven.
+    struct ParamSite {
+        bool seen = false;
+        bool allClosure = true;
+        bool allNeutral = true;
+    };
+    std::unordered_map<std::string, ParamSite> paramSites_;
+    // Set while a prescan round promotes any site.
+    bool prescanMoved_ = false;
+    // The module a prescan walk belongs to, for call-site resolution.
+    std::string prescanModule_;
+    // Reads the table above with the corpus rule: unanimous closure (or
+    // neutrality) proves, anything else (including no sites) refuses.
+    Prov paramProv(const std::string& key) const;
+    // One prescan round over all functions; true when any table moved.
+    bool prescanRound(const std::vector<std::string>& modules);
+    // Walks one function body for call sites, with function-local flow.
+    void prescanFunction(const std::string& mod, const FuncDecl& fn);
+    // Statement and expression walkers for the prescan: statements update
+    // the flow maps, every expression is scanned for calls.
+    void prescanStmt(const Stmt* stmt,
+                     std::vector<std::unordered_map<std::string, Prov>>& scopes,
+                     const std::unordered_map<std::string, bool>& closureParams);
+    void prescanExpr(const Expr* expr,
+                     std::vector<std::unordered_map<std::string, Prov>>& scopes,
+                     const std::unordered_map<std::string, bool>& closureParams);
+    // Merges a speculative copy back: only entries the walk left exactly
+    // as found survive, so zero-trip paths never prove.
+    void mergePrescan(std::unordered_map<std::string, Prov>& into,
+                      const std::unordered_map<std::string, Prov>& before);
+    // Syntactic provenance inside the prescan (no checker state): literals
+    // answer directly, names read the flow, casts preserve, calls and
+    // places read Raw (places arrive with the next slice).
+    Prov prescanArg(const Expr* expr,
+                    std::vector<std::unordered_map<std::string, Prov>>& scopes,
+                    const std::unordered_map<std::string, bool>& closureParams);
+    // Records one call site's argument against the callee's parameter.
+    void prescanSite(const std::string& mod, const Call& call,
+                     std::vector<std::unordered_map<std::string, Prov>>& scopes,
+                     const std::unordered_map<std::string, bool>& closureParams);
     // Closure literals being discovered, innermost last. A read that binds
     // outside the innermost literal's own scope is that literal's capture.
     struct LiteralFrame {
@@ -327,6 +530,9 @@ private:
     TypeRef funcReturn_;
     bool inFunc_ = false;
     uint64_t loopDepth_ = 0;
+    // Defer bodies being walked, for the exit-jump ban: a return, break or
+    // continue inside one would leave its scope twice.
+    int inDefer_ = 0;
     std::vector<CheckError> errors_;
     bool failed_ = false;
     LowerSink* sink_ = nullptr;

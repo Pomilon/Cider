@@ -140,6 +140,48 @@ void testBraces() {
     check(interp.lit.parts.size() == 2 && interp.lit.parts[1].isExpr, "a name still interpolates");
 }
 
+// Wide literals decode to UTF-16 units: `u"AB"` is two units, `\uXXXX`
+// names one raw unit (even a lone surrogate — no pairing, no validation
+// past four hex digits), UTF-8 source encodes, and `{{`/`}}` spell braces.
+// A lone `{` would interpolate, which wide literals do not do, so it is a
+// diagnostic rather than a guess.
+void testWide() {
+    std::printf("wide literals decode to units\n");
+    cider::Token s = only(lex("u\"AB\""), "u\"AB\"");
+    check(s.kind == cider::TokenKind::WideStringLit, "a wide string");
+    check(s.lit.wideUnits.size() == 2 && s.lit.wideUnits[0] == 65 &&
+              s.lit.wideUnits[1] == 66,
+          "AB is 65, 66");
+    cider::Token esc = only(lex("u\"C\\u0044\""), "u escape");
+    check(esc.kind == cider::TokenKind::WideStringLit, "still wide");
+    check(esc.lit.wideUnits.size() == 2 && esc.lit.wideUnits[1] == 68,
+          "\\u0044 is 68");
+    cider::Token surr = only(lex("u\"\\uD83D\\uDE00\""), "surrogates");
+    check(surr.lit.wideUnits.size() == 2 && surr.lit.wideUnits[0] == 0xD83D &&
+              surr.lit.wideUnits[1] == 0xDE00,
+          "surrogates pass through raw");
+    cider::Token utf = only(lex("u\"\xc3\xa9\""), "utf-8 source");
+    check(utf.lit.wideUnits.size() == 1 && utf.lit.wideUnits[0] == 0xE9,
+          "U+00E9 encodes as one unit");
+    cider::Token c = only(lex("u'Z'"), "u'Z'");
+    check(c.kind == cider::TokenKind::WideCharLit, "a wide character");
+    check(c.lit.charValue == 90, "Z is 90");
+    cider::Token brace = only(lex("u\"a{{b}}\""), "doubled braces");
+    check(brace.lit.wideUnits.size() == 4 && brace.lit.wideUnits[1] == '{' &&
+              brace.lit.wideUnits[3] == '}',
+          "each pair is one brace");
+    cider::Lexer interp("test.cid", "u\"{e}\"");
+    std::vector<cider::Token> iout = interp.lex();
+    check(!interp.errors().empty(), "an interpolation is a diagnostic");
+    check(iout[0].kind == cider::TokenKind::Error, "and an Error token");
+    cider::Lexer badEsc("test.cid", "u\"\\q\"");
+    badEsc.lex();
+    check(!badEsc.errors().empty(), "a bad escape is a diagnostic");
+    std::vector<cider::Token> bare = lex("u");
+    check(bare.size() == 2 && bare[0].kind == cider::TokenKind::Ident,
+          "a lone u stays an identifier");
+}
+
 // The lexer does not fold unary minus: -128 is two tokens, and the parser folds.
 void testMinus() {
     std::printf("unary minus is two tokens here\n");
@@ -213,6 +255,7 @@ int main() {
     testMinus();
     testNoArrow();
     testOperators();
+    testWide();
     testCommentsLinesErrors();
     std::printf("\n%d checks, %s\n", checks, failures == 0 ? "all passed" : "FAILURES");
     return failures == 0 ? 0 : 1;

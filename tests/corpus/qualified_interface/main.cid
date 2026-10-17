@@ -24,8 +24,8 @@ class Box {
 }
 
 // A module-global interface variable with a qualified type.
-var gshape: lib.Shape;
-var grect: lib.Rect;
+var gshape: lib.Shape = nilPtr as lib.Shape;
+var grect: lib.Rect = new lib.Rect { w: 0, h: 0 };
 
 // Qualified interface parameter. CIDER-BUG-080 accepts concrete values at
 // call boundaries too, for both spellings; this test keeps to
@@ -40,11 +40,8 @@ func areaViaBare(x: Shape) -> int {
 }
 
 func main() -> int {
-  var sq: lib.Sq;
-  sq.s = 3;
-  var rect: lib.Rect;
-  rect.w = 2;
-  rect.h = 5;
+  var sq: lib.Sq = new lib.Sq { s: 3 };
+  var rect: lib.Rect = new lib.Rect { w: 2, h: 5 };
 
   // --- qualified declaration, initialization and dispatch ---
   var sh: lib.Shape = sq;
@@ -59,27 +56,24 @@ func main() -> int {
   if (sh.area() != 9) { return 5; }
 
   // --- declaration without an initializer, then assignment ---
-  var sh2: lib.Shape;
+  var sh2: lib.Shape = nilPtr as lib.Shape;
   sh2 = rect;
   if (sh2.area() != 10) { return 6; }
   sh2 = sh;
   if (sh2.area() != 9) { return 7; }
 
   // --- pointer-to-class values retarget like declaration-time assignment ---
-  var rp: lib.Rect* = &rect;
+  var rp: *lib.Rect = &rect;
   sh = rp;
   if (sh.area() != 10) { return 8; }
-  var hp: *lib.Rect = new lib.Rect;
-  hp->w = 3;
-  hp->h = 4;
+  var hp: *lib.Rect = alloc(sizeof(lib.Rect), 8) as *lib.Rect;
+  (*hp).w = 3;
+  (*hp).h = 4;
   sh = hp;
   if (sh.area() != 12) { return 9; }
 
   // --- qualified interface field in a struct (16-byte store) ---
-  var h: Holder;
-  h.id = 7;
-  h.tail = 9;
-  h.shape = sq;
+  var h: Holder = new Holder { id: 7, shape: sq, tail: 9 };
   if (h.id != 7) { return 10; }
   if (h.tail != 9) { return 11; }
   if (h.shape.area() != 9) { return 12; }
@@ -90,31 +84,28 @@ func main() -> int {
   if (h.tail != 9) { return 16; }
 
   // Struct literal with a qualified interface field.
-  var lit: Holder = Holder{id: 11, shape: rect, tail: 13};
+  var lit: Holder = new Holder { id: 11, shape: rect, tail: 13 };
   if (lit.id != 11) { return 17; }
   if (lit.tail != 13) { return 18; }
   if (lit.shape.area() != 10) { return 19; }
 
   // --- qualified interface field in a class (value and heap) ---
-  var b: Box;
-  b.id = 21;
-  b.tail = 23;
-  b.shape = rect;
+  var b: Box = new Box { id: 21, shape: rect, tail: 23 };
   if (b.shape.area() != 10) { return 20; }
   b.shape = sq;
   if (b.shape.kind() != 1) { return 21; }
   if (b.id != 21) { return 22; }
   if (b.tail != 23) { return 23; }
-  var bp: *Box = new Box;
-  bp->id = 31;
-  bp->tail = 33;
-  bp->shape = sq;
-  if (bp->shape.area() != 9) { return 24; }
-  bp->shape = rect;
-  if (bp->shape.area() != 10) { return 25; }
+  var bp: *Box = alloc(sizeof(Box), 8) as *Box;
+  (*bp).id = 31;
+  (*bp).tail = 33;
+  (*bp).shape = sq;
+  if ((*bp).shape.area() != 9) { return 24; }
+  (*bp).shape = rect;
+  if ((*bp).shape.area() != 10) { return 25; }
 
   // --- array of qualified interface values (16-byte stride) ---
-  var arr: [lib.Shape; 2];
+  var arr: [lib.Shape; 2] = new [lib.Shape; 2] { nilPtr as lib.Shape, nilPtr as lib.Shape };
   arr[0] = sq;
   arr[1] = rect;
   if (arr[0].area() != 9) { return 26; }

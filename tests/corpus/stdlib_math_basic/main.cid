@@ -30,33 +30,33 @@ func main() -> int {
     if (f != 0.0) return 7;
 
     // min/max/clamp instantiated at int.
-    if (min<int>(3, 4) != 3) return 8;
-    if (min<int>(4, 3) != 3) return 9;
-    if (max<int>(-1, 5) != 5) return 10;
-    if (max<int>(5, -1) != 5) return 11;
-    if (clamp<int>(10, 0, 5) != 5) return 12;
-    if (clamp<int>(-3, 0, 5) != 0) return 13;
-    if (clamp<int>(3, 0, 5) != 3) return 14;
+    if (min::<int>(3, 4) != 3) return 8;
+    if (min::<int>(4, 3) != 3) return 9;
+    if (max::<int>(-1, 5) != 5) return 10;
+    if (max::<int>(5, -1) != 5) return 11;
+    if (clamp::<int>(10, 0, 5) != 5) return 12;
+    if (clamp::<int>(-3, 0, 5) != 0) return 13;
+    if (clamp::<int>(3, 0, 5) != 3) return 14;
 
     // ... and at float.
     var lo: float = 0.0;
     var hi: float = 1.0;
-    if (clamp<float>(2.5, lo, hi) != 1.0) return 15;
-    if (clamp<float>(-2.5, lo, hi) != 0.0) return 16;
-    if (clamp<float>(0.25, lo, hi) != 0.25) return 17;
-    if (min<float>(1.5, 0.5) != 0.5) return 18;
-    if (max<float>(1.5, 0.5) != 1.5) return 19;
+    if (clamp::<float>(2.5, lo, hi) != 1.0) return 15;
+    if (clamp::<float>(-2.5, lo, hi) != 0.0) return 16;
+    if (clamp::<float>(0.25, lo, hi) != 0.25) return 17;
+    if (min::<float>(1.5, 0.5) != 0.5) return 18;
+    if (max::<float>(1.5, 0.5) != 1.5) return 19;
 
     print("abs(-7)="); printInt(abs(-7)); puts("");
     print("fabs(-2.5)="); printFloat(fabs(-2.5)); puts("");
-    print("min(3,4)="); printInt(min<int>(3, 4)); puts("");
-    print("max(-1,5)="); printInt(max<int>(-1, 5)); puts("");
-    print("clamp(10,0,5)="); printInt(clamp<int>(10, 0, 5)); puts("");
-    print("clamp(-3,0,5)="); printInt(clamp<int>(-3, 0, 5)); puts("");
-    print("clamp(3,0,5)="); printInt(clamp<int>(3, 0, 5)); puts("");
-    print("min_f="); printFloat(min<float>(1.5, 0.5)); puts("");
-    print("max_f="); printFloat(max<float>(1.5, 0.5)); puts("");
-    print("clamp_f="); printFloat(clamp<float>(2.5, lo, hi)); puts("");
+    print("min(3,4)="); printInt(min::<int>(3, 4)); puts("");
+    print("max(-1,5)="); printInt(max::<int>(-1, 5)); puts("");
+    print("clamp(10,0,5)="); printInt(clamp::<int>(10, 0, 5)); puts("");
+    print("clamp(-3,0,5)="); printInt(clamp::<int>(-3, 0, 5)); puts("");
+    print("clamp(3,0,5)="); printInt(clamp::<int>(3, 0, 5)); puts("");
+    print("min_f="); printFloat(min::<float>(1.5, 0.5)); puts("");
+    print("max_f="); printFloat(max::<float>(1.5, 0.5)); puts("");
+    print("clamp_f="); printFloat(clamp::<float>(2.5, lo, hi)); puts("");
     puts("math ok");
     return 0;
 }

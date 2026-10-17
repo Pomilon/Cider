@@ -4,7 +4,7 @@
 from std.result import Result, err, expect;
 
 func main() -> int {
-    var r: Result<int, string> = err<int, string>("missing value");
-    var v: int = expect<int, string>(&r, "expect failed: missing value");
+    var r: Result<int, string> = err::<int, string>("missing value");
+    var v: int = expect::<int, string>(&r, "expect failed: missing value");
     return v; // unreachable: expect exits 1 first
 }

@@ -123,6 +123,68 @@ export func printFloat(f: float) {
     printScaled(whole, frac);
 }
 
+// Reads up to `count` bytes from stdin into `buf`; answers the byte count
+// (0 at end of input). A thin read(0) syscall, spelled the same way the
+// write calls are.
+export func read_stdin(buf: *u8, count: int) -> int {
+    var ret: int = 0;
+    asm {
+        "mov rax, 0\n"
+        "mov rdi, 0\n"
+        "mov rsi, {buf:q}\n"
+        "mov edx, {count}\n"
+        "syscall\n"
+        "mov {ret}, eax\n"
+    }
+    return ret;
+}
+
+// One line from stdin as a NUL-terminated HEAP buffer (the bytes leak like
+// every string, MEMORY 3.4): the newline is stripped, and end of input
+// answers an empty buffer. v2 returned a stack buffer whose pointer died
+// on return; a heap buffer is the v3-correct shape.
+export func read_line() -> *char {
+    var buf: *char = alloc(4096, 8) as *char;
+    var n: int = read_stdin(buf as *u8, 4096);
+    if (n <= 0) {
+        buf[0] = 0 as char;
+        return buf;
+    }
+    var i: int = 0;
+    while (i < n) {
+        if (buf[i] == 10 as char) {
+            buf[i] = 0 as char;
+            return buf;
+        }
+        i = i + 1;
+    }
+    if (n < 4096) {
+        buf[n] = 0 as char;
+    } else {
+        buf[4095] = 0 as char;
+    }
+    return buf;
+}
+
+// Every byte until end of input as a NUL-terminated heap buffer.
+export func read_all() -> *char {
+    var buf: *char = alloc(4096, 8) as *char;
+    var total: int = 0;
+    while (total < 4096) {
+        var n: int = read_stdin((buf + total) as *u8, 4096 - total);
+        if (n <= 0) {
+            break;
+        }
+        total = total + n;
+    }
+    if (total < 4096) {
+        buf[total] = 0 as char;
+    } else {
+        buf[4095] = 0 as char;
+    }
+    return buf;
+}
+
 export func exit(code: int) {
     asm {
         "mov rax, 60"

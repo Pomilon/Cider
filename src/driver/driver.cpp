@@ -26,11 +26,16 @@
 #include "opt/opt.h"
 #include "parse/parser.h"
 #include "types/context.h"
+#include "vm/vm.h"
 
 namespace cider {
 namespace driver {
 
 namespace {
+
+// How much pending input one read pulls: a chunk, not a byte at a time.
+constexpr uint64_t kPendingChunk = 4096;
+constexpr uint64_t kOneByte = 1;
 
 struct Pipeline {
     bool ok = false;
@@ -46,8 +51,26 @@ std::string at(const Position& pos) {
 }
 
 std::string readFile(const std::string& path, bool& found);
+// The bytes a read from standard input answers on the interpreter leg.
+// The compiled leg's child inherits the same stream, so both see the same
+// bytes; a terminal has nothing pending to give, and reading it would wait
+// forever.
+std::string readPendingInput() {
+    if (isatty(0)) {
+        return "";
+    }
+    std::string text;
+    char chunk[kPendingChunk];
+    uint64_t taken = std::fread(chunk, kOneByte, sizeof(chunk), stdin);
+    while (taken > 0) {
+        text.append(chunk, static_cast<size_t>(taken));
+        taken = std::fread(chunk, kOneByte, sizeof(chunk), stdin);
+    }
+    return text;
+}
 
-bool runFront(const std::string& file, const std::string& text, Pipeline& pipe) {
+bool runFront(const std::string& file, const std::string& text, Pipeline& pipe,
+              bool noOpt) {
     pipe.file = file;
     pipe.types = std::make_unique<TypeContext>();
     // Imports load beside the entry file: `import da;` reads `<dir>/da.cid`
@@ -91,16 +114,35 @@ bool runFront(const std::string& file, const std::string& text, Pipeline& pipe) 
     resolve::Resolver::ModuleLoader load =
         [&entryDir, &lib, &loadFile](const std::string& name) -> std::unique_ptr<Program> {
         if (name.find('.') != std::string::npos) {
-            if (lib.empty()) {
-                return nullptr;
-            }
             std::string rel = name;
             auto dot = std::string::npos;
             while ((dot = rel.find('.', dot == std::string::npos ? 0 : dot)) !=
                    std::string::npos) {
                 rel[dot] = '/';
             }
-            return loadFile(lib + "/" + rel + ".cid");
+            // Library names keep their priority, so `std.io` still
+            // answers from the library. A miss falls back to the entry
+            // directory, where `import a.util` answers `<dir>/a/util.cid`.
+            if (!lib.empty()) {
+                std::unique_ptr<Program> found =
+                    loadFile(lib + "/" + rel + ".cid");
+                if (found != nullptr) {
+                    return found;
+                }
+            }
+            if (!entryDir.empty()) {
+                std::unique_ptr<Program> found =
+                    loadFile(entryDir + "/" + rel + ".cid");
+                if (found != nullptr) {
+                    return found;
+                }
+            } else {
+                std::unique_ptr<Program> found = loadFile(rel + ".cid");
+                if (found != nullptr) {
+                    return found;
+                }
+            }
+            return nullptr;
         }
         std::string path = entryDir.empty() ? name + ".cid" : entryDir + "/" + name + ".cid";
         return loadFile(path);
@@ -135,11 +177,19 @@ bool runFront(const std::string& file, const std::string& text, Pipeline& pipe) 
     }
     check::Checker checker(*pipe.types, resolver);
     lower::Lowerer lowerer(*pipe.types, resolver, checker);
+    // Closure provenance runs before any body checks: callee bodies see
+    // caller proofs regardless of module order. Pure analysis — no
+    // diagnostics, no recorded types.
+    checker.prescanProvenance(resolver.moduleOrder());
     // Every resolved module lowers into one IR module in resolve order, so
     // link names mangle under their own module and rodata labels never
     // collide. Emission order carries no semantics: calls resolve by link
     // name, not by position.
     bool lowered = false;
+    // The first module in order starts the IR module; the rest
+    // accumulate into it. Order is dependencies-first, so the first
+    // module is a leaf, not necessarily the entry.
+    bool first = true;
     for (const std::string& module : resolver.moduleOrder()) {
         Program* program =
             module == "main" ? pipe.program.get() : resolver.programOf(module);
@@ -147,14 +197,21 @@ bool runFront(const std::string& file, const std::string& text, Pipeline& pipe) 
             pipe.diagnostic += "cannot lower missing module '" + module + "'\n";
             return false;
         }
-        if (module == "main") {
+        if (first) {
             lowered = lowerer.lowerModule(module, *program);
+            first = false;
         } else {
             lowered = lowerer.lowerInto(module, *program);
         }
         if (!lowered) {
             break;
         }
+    }
+    // Deferred monomorphization: cross-module specs are unknown while
+    // their home module lowers, so every used specialization emits here,
+    // once the resolver cache is complete.
+    if (lowered) {
+        lowered = lowerer.emitSpecBodies();
     }
     if (lowered) {
         pipe.module = lowerer.takeModule();
@@ -176,7 +233,11 @@ bool runFront(const std::string& file, const std::string& text, Pipeline& pipe) 
         }
         return false;
     }
-    opt::OptResult result = opt::run(*pipe.module);
+    opt::OptResult result;
+    result.ok = true;
+    if (!noOpt) {
+        result = opt::run(*pipe.module);
+    }
     if (!result.ok) {
         pipe.diagnostic += file + ": " + result.error + "\n";
         return false;
@@ -250,9 +311,12 @@ int runDriver(const std::vector<std::string>& args, std::string& out, std::strin
     std::string target = "native";
     std::string output;
     std::string input;
+    bool noOpt = false;
     for (uint64_t i = 1; i < static_cast<uint64_t>(args.size()); ++i) {
         if (args[i] == "--target" && i + 1 < static_cast<uint64_t>(args.size())) {
             target = args[++i];
+        } else if (args[i] == "--no-opt") {
+            noOpt = true;
         } else if (args[i] == "-o" && i + 1 < static_cast<uint64_t>(args.size())) {
             output = args[++i];
         } else if (!args[i].empty() && args[i][0] == '-') {
@@ -269,7 +333,7 @@ int runDriver(const std::vector<std::string>& args, std::string& out, std::strin
         err = "no input file\n";
         return 2;
     }
-    if (target != "native") {
+    if (target != "native" && target != "vm") {
         err = "target " + target + " is not emitted yet: native only in this slice\n";
         return 2;
     }
@@ -280,7 +344,7 @@ int runDriver(const std::vector<std::string>& args, std::string& out, std::strin
         return 1;
     }
     Pipeline pipe;
-    if (!runFront(input, text, pipe)) {
+    if (!runFront(input, text, pipe, noOpt)) {
         err = pipe.diagnostic;
         return 1;
     }
@@ -290,6 +354,30 @@ int runDriver(const std::vector<std::string>& args, std::string& out, std::strin
     if (command == "ir") {
         out = ir::dumpModule(*pipe.module);
         return 0;
+    }
+    if (target == "vm") {
+        // An interpreter is not an emitter: there is no assembly to write,
+        // so compile names the target and refuses. Run interprets instead.
+        if (command == "compile") {
+            err = "target vm is not emitted: an interpreter, not an emitter\n";
+            return 2;
+        }
+        vm::VmResult interpreted = vm::run(*pipe.module, readPendingInput());
+        if (!interpreted.ok) {
+            err = at(interpreted.pos) + ": " + interpreted.error + "\n";
+            return 1;
+        }
+        out = interpreted.stdoutText;
+        err = interpreted.stderrText;
+        if (interpreted.signal != 0) {
+            // The program died, the same death the compiled leg takes, and
+            // the harness reads a death by the signal's number: the bytes
+            // already written go out before the signal ends the process.
+            std::fflush(stdout);
+            std::fflush(stderr);
+            raise(interpreted.signal);
+        }
+        return interpreted.exitCode;
     }
     codegen::EmitResult emitted = codegen::emitNative(*pipe.module);
     if (!emitted.ok) {

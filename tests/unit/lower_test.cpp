@@ -471,13 +471,87 @@ void testDerefStore() {
     }
 }
 
-void testInterfaceParamRefused() {
-    std::printf("interface params are refused\n");
+void testInterfaceParam() {
+    std::printf("interface params lower\n");
     Lowered r = lower(
         "interface Shape { func area() -> int; }\n"
-        "func get(s: Shape) -> int { return 0; }\n"
-        "func main() -> int { return 0; }\n");
-    check(!r.ok && r.stage == "lower", "an interface param refuses loudly");
+        "struct Sq { var s: int; func area() -> int { return (*self).s; } }\n"
+        "func get(s: Shape) -> int { return s.area(); }\n"
+        "func main() -> int {\n"
+        "    var a: Sq = new Sq { s: 9 };\n"
+        "    return get(a);\n"
+        "}\n");
+    check(r.ok, "an interface param lowers: " + r.stage);
+    if (!r.ok) {
+        return;
+    }
+    const cider::ir::Function* get = find(r.module.get(), "get");
+    check(get != nullptr, "the callee is there");
+    if (get == nullptr) {
+        return;
+    }
+    check(get->params.size() == 2, "data plus vtable ride as two words");
+    bool table = false;
+    for (const cider::ir::Global& global : r.module->globals) {
+        if (global.label == "Sq__vtable__Shape" && global.initLabels.size() == 1 &&
+            global.initLabels[0] == "Sq__area") {
+            table = true;
+        }
+    }
+    check(table, "one vtable names the concrete method in order");
+    int indirect = 0;
+    for (const cider::ir::Block& block : get->blocks) {
+        for (const cider::ir::Instr& instr : block.body) {
+            if (instr.op == cider::ir::Op::Call && instr.call.indirect) {
+                ++indirect;
+            }
+        }
+    }
+    check(indirect == 1, "dispatch calls through the vtable");
+}
+
+void testInterfaceClassAdapter() {
+    std::printf("interface class entries adapt\n");
+    Lowered r = lower(
+        "interface Shape { func area() -> int; }\n"
+        "class Circle { var r: int;\n"
+        "    func init(r: int) -> void { (*self).r = r; }\n"
+        "    func area() -> int { return (*self).r * 2; } }\n"
+        "func get(s: Shape) -> int { return s.area(); }\n"
+        "func main() -> int {\n"
+        "    var c: *Circle = new Circle(5);\n"
+        "    return get(c);\n"
+        "}\n");
+    check(r.ok, "a class reference boxes: " + r.stage);
+    if (!r.ok) {
+        return;
+    }
+    bool table = false;
+    for (const cider::ir::Global& global : r.module->globals) {
+        if (global.label == "Circle__vtable__Shape" &&
+            global.initLabels.size() == 1 &&
+            global.initLabels[0] == "Circle__area__ifaceadapt") {
+            table = true;
+        }
+    }
+    check(table, "a class entry names the receiver adapter");
+    const cider::ir::Function* adapt =
+        find(r.module.get(), "Circle__area__ifaceadapt");
+    check(adapt != nullptr, "the adapter is emitted");
+    if (adapt == nullptr) {
+        return;
+    }
+    check(adapt->params.size() == 1, "the adapter takes the data address");
+    bool forwards = false;
+    for (const cider::ir::Block& block : adapt->blocks) {
+        for (const cider::ir::Instr& instr : block.body) {
+            if (instr.op == cider::ir::Op::Call && !instr.call.indirect &&
+                instr.callee == "Circle__area") {
+                forwards = true;
+            }
+        }
+    }
+    check(forwards, "the adapter tail-calls the method");
 }
 
 void testForLoop() {
@@ -700,18 +774,41 @@ void testFoldedBounds() {
     check(last.ok, "the last in-range element still lowers");
 }
 
+void testValueFalloff() {
+    std::printf("value falloff refuses\n");
+    Lowered r = lower(
+        "func f(n: int) -> int {\n"
+        "    if (n > 0) { return 1; }\n"
+        "}\n"
+        "func main() -> int { return 0; }\n");
+    check(!r.ok && r.stage == "lower", "a value function that may fall off refuses");
+    Lowered both = lower(
+        "func f(n: int) -> int {\n"
+        "    if (n > 0) { return 1; } else { return 2; }\n"
+        "}\n"
+        "func main() -> int { return 0; }\n");
+    check(both.ok, "both arms returning lowers: " + both.stage);
+    Lowered loop = lower(
+        "func spin() -> int {\n"
+        "    while (true) {\n"
+        "    }\n"
+        "}\n"
+        "func main() -> int { return 0; }\n");
+    check(loop.ok, "a diverging loop needs no return: " + loop.stage);
+}
+
 void testRefuseKeepsScopes() {
     // A refusal inside a condition must not unbalance the scope stack:
-    // a float remainder has no lowering, so this refuses — but the
-    // function frame must survive the block exits instead of crashing
-    // the driver.
+    // a past-end folded index refuses in lowering — but the function
+    // frame must survive the block exits instead of crashing the driver.
     std::printf("a mid-block refusal keeps scopes balanced\n");
     Lowered r = lower(
         "func main() -> int {\n"
-        "    if (1.5 % 0.5 != 0.0) { return 1; }\n"
+        "    var a: [u8; 3] = new [u8; 3] {1, 2, 3};\n"
+        "    if (a[5] == 1) { return 1; }\n"
         "    return 0;\n"
         "}\n");
-    check(!r.ok && r.stage == "lower", "float remainder in a condition is refused");
+    check(!r.ok && r.stage == "lower", "a past-end index in a condition is refused");
 }
 
 // A method emits its own function under the owner's name, and a call site
@@ -1101,15 +1198,34 @@ void testInterp() {
         }
     }
     check(joins, "the parts join in a fresh buffer");
-    // A float has no buffer spelling yet: refusing loudly beats printing
-    // whatever the bits happen to look like.
-    Lowered noFloat = lower(
+    // A float prints through the ftoa helper: a widening cast when the
+    // part is a float, then a call naming cider_ftoa.
+    Lowered floats = lower(
         "func main() -> int {\n"
         "    var x: f32 = 1.5;\n"
         "    var v: string = \"{x}\";\n"
         "    return v.len as int;\n"
         "}\n");
-    check(!noFloat.ok, "a float part is refused");
+    check(floats.ok, "a float part lowers: " + floats.stage);
+    const cider::ir::Function* fmain = find(floats.module.get(), "main");
+    bool widens = false;
+    bool callsFtoa = false;
+    if (fmain != nullptr) {
+        for (const cider::ir::Block& block : fmain->blocks) {
+            for (const cider::ir::Instr& instr : block.body) {
+                if (instr.op == cider::ir::Op::Cast &&
+                    instr.width == cider::ir::IRType::F64) {
+                    widens = true;
+                }
+                if (instr.op == cider::ir::Op::Call &&
+                    instr.callee == "cider_ftoa") {
+                    callsFtoa = true;
+                }
+            }
+        }
+    }
+    check(widens, "the float widens to a double first");
+    check(callsFtoa, "the part converts through cider_ftoa");
 }
 
 }  // namespace
@@ -1149,7 +1265,9 @@ int main() {
     testTernary();
     testInterp();
     testRefuseKeepsScopes();
-    testInterfaceParamRefused();
+    testValueFalloff();
+    testInterfaceParam();
+    testInterfaceClassAdapter();
     testNotYetLowered();
     testFoldedBounds();
     testGlobalZeroArray();

@@ -50,6 +50,11 @@ private:
     Token number();
     Token character();
     Token string();
+    // Wide literals: `u"AB"` decodes to UTF-16 units, `u'Z'` to one code
+    // point. No interpolation — a lone `{` is a diagnostic, `{{` spells a
+    // brace; narrow strings give the pair the identical meaning.
+    Token wideString();
+    Token wideChar();
     // Lexes the tokens of one `{...}` interpolation, stopping after the
     // closing brace. The caller records the spelling; these are the meaning.
     std::vector<Token> braced(int depth);
