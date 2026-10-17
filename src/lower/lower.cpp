@@ -8768,6 +8768,22 @@ std::vector<ir::Value> Lowerer::lowerCallWords(Call& n) {
                 }
             }
         }
+        if (sig == nullptr) {
+            // A function pointer read from a place — an element of an
+            // array of *func, a member — calls through its loaded word.
+            TypeRef calleeType = checker_.typeOf(n.callee.get());
+            if (!failed_ && !calleeType.isError() &&
+                calleeType.type->kind() == Kind::FunctionPtr) {
+                sig = calleeType.type->signature();
+                indirect = true;
+                std::vector<ir::Value> target = lowerWords(n.callee.get());
+                if (failed_ || target.size() != kOneWord) {
+                    refuse(n.pos, "this call");
+                    return {undefined()};
+                }
+                indirectCallee = target[0];
+            }
+        }
     }
     if (const auto* field = dynamic_cast<const Field*>(n.callee.get())) {
         // `da.aval(args)`: the checker proved the object names a module and

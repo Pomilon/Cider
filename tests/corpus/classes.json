@@ -935,9 +935,9 @@
   "class": "A"
  },
  "list_positions": {
-  "actual": "cider run exit 1, stdout empty, stderr diagnostic: `main.cid:56:31: expected ';'` (fn-typed struct field)",
+  "actual": "exact stdout/stderr/exit match (v3 spelling: new [T;N] literals everywhere, explicit u8 casts, fn to *func, (*ct). member access; function renamed lone flat \u2014 GAS pseudo-register)",
   "blocker": "FEAT-049 volatile-qualified types: volatile array fields/params/call-args are the test subject (checks 25 + prints); bare fn-typed struct field also needs *func rewrite once volatile lands",
-  "class": "D"
+  "class": "A"
  },
  "list_positions_crossmod": {
   "actual": "9:25: expected ';' at bare `Holder{...}` literal (v3 requires `new` for every value, \u00a72.1a)",
