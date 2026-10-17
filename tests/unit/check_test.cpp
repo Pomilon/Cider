@@ -1311,6 +1311,9 @@ void testPointerArith() {
         "    return 0;\n"
         "}\n");
     check(!addrDerefMix.ok && addrDerefMix.stage == "check", "&*p is not **int");
+    Checked alias = check(
+        "func main() -> int { var p: *char = nil; var q: *char = nilPtr; if (p != q) { return 1; } return 0; }\n");
+    check(alias.ok, "nil is nilPtr: " + alias.stage);
 }
 
 void testArrowMember() {
