@@ -5,7 +5,7 @@
 // fresh value starts byte-zeroed through a heap slot (freed before
 // return) and the known fields store over it. All-zero bytes are the
 // zero value of every Cider type, so the untouched field reads defined.
-from std.io import puts, exit;
+from std.io import print, puts, exit;
 from std.string import memset;
 
 export struct Result<T, E> {
@@ -59,7 +59,8 @@ export func expect<T, E>(r: *Result<T, E>, msg: string) -> T {
     if ((*r).is_ok) {
         return (*r).value;
     }
-    puts(msg);
+    print(msg);
+    print("\n");
     exit(1);
     return (*r).value;
 }

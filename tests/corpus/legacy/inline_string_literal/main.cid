@@ -1,4 +1,4 @@
-from std.io import puts, exit;
+from std.io import print, exit;
 
 func pass_it(s: string) -> string {
     return s;
@@ -6,6 +6,7 @@ func pass_it(s: string) -> string {
 
 func _start() {
     var msg: string = pass_it("hello from inline\n");
-    puts(msg);
+    print(msg);
+    print("\n");
     exit(0);
 }

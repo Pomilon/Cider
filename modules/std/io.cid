@@ -27,8 +27,14 @@ export func print(s: string) {
     writeAll(ptr, count);
 }
 
-export func puts(s: string) {
-    print(s);
+// C-ABI byte-pointer output: writes the bytes up to the NUL terminator,
+// then a newline. String slices use `print` instead.
+export func puts(s: *char) {
+    var n: int = 0;
+    while (s[n] != 0 as char) {
+        n = n + 1;
+    }
+    writeAll(s as *u8, n);
     print("\n");
 }
 
