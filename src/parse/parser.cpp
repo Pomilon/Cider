@@ -419,7 +419,8 @@ std::unique_ptr<TypeExpr> Parser::parseReturnType() {
 }
 
 FieldDecl Parser::parseField() {
-    Position start = advance().pos;
+    Position start = peek().pos;
+    (void)match(TokenKind::KwVar);
     FieldDecl field(start, "", nullptr, nullptr, false);
     if (!check(TokenKind::Ident)) {
         failHere("a field needs a name");
@@ -520,7 +521,8 @@ std::unique_ptr<Decl> Parser::parseStructDecl(bool) {
     std::vector<FieldDecl> fields;
     std::vector<MethodDecl> methods;
     while (!check(TokenKind::RBrace) && !atEnd()) {
-        if (check(TokenKind::KwVar)) {
+        if (check(TokenKind::KwVar) ||
+            (check(TokenKind::Ident) && peekAt(1).kind == TokenKind::Colon)) {
             fields.push_back(parseField());
         } else if (check(TokenKind::KwVirtual) || check(TokenKind::KwFunc)) {
             methods.push_back(parseMethod());
@@ -587,7 +589,8 @@ std::unique_ptr<Decl> Parser::parseClassDecl(bool) {
     std::unique_ptr<FuncDecl> init;
     std::unique_ptr<FuncDecl> deinit;
     while (!check(TokenKind::RBrace) && !atEnd()) {
-        if (check(TokenKind::KwVar)) {
+        if (check(TokenKind::KwVar) ||
+            (check(TokenKind::Ident) && peekAt(1).kind == TokenKind::Colon)) {
             fields.push_back(parseField());
             continue;
         }
@@ -683,7 +686,8 @@ std::unique_ptr<Decl> Parser::parseUnionDecl(bool) {
     }
     std::vector<FieldDecl> members;
     while (!check(TokenKind::RBrace) && !atEnd()) {
-        if (!check(TokenKind::KwVar)) {
+        if (!check(TokenKind::KwVar) &&
+            !(check(TokenKind::Ident) && peekAt(1).kind == TokenKind::Colon)) {
             failHere("a union holds member declarations");
             syncToStmt();
             break;

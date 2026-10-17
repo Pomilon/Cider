@@ -101,6 +101,22 @@ void testMinusAndArrow() {
 }
 
 // `a += b` is one Assign carrying its operator; `a = b` carries none.
+void testCleanFields() {
+    std::printf("clean struct fields\n");
+    bool ok = false;
+    parse("struct S { x: int; }", ok);
+    check(ok, "a field needs no var");
+    bool ok2 = false;
+    parse("struct S { var x: int; }", ok2);
+    check(ok2, "var stays accepted");
+    bool ok3 = false;
+    parse("class C { v: int; }", ok3);
+    check(ok3, "a class field needs no var");
+    bool ok4 = false;
+    parse("union U { a: int; }", ok4);
+    check(ok4, "a union member needs no var");
+}
+
 void testCompound() {
     std::printf("compound assignment\n");
     bool ok = false;
@@ -433,6 +449,7 @@ int main() {
     testWordLogic();
     testAsBelowUnary();
     testMinusAndArrow();
+    testCleanFields();
     testCompound();
     testMissingInit();
     testGenericCall();
