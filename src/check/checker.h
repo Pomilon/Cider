@@ -232,6 +232,7 @@ public:
     void visitThrowStmt(ThrowStmt& n) override;
     void visitTryStmt(TryStmt& n) override;
     void visitDeferStmt(DeferStmt& n) override;
+    void visitFiniDecl(FiniDecl& n) override;
 
     // Every expression records its type.
     void visitIntLit(IntLit& n) override;

@@ -1316,6 +1316,12 @@ void testPointerArith() {
     check(alias.ok, "nil is nilPtr: " + alias.stage);
 }
 
+void testFiniRefusal() {
+    std::printf("fini refuses loudly\n");
+    Checked f = check("fini { } func main() -> int { return 0; }");
+    check(!f.ok && f.stage == "check", "a fini block is refused until implemented");
+}
+
 void testThisKeyword() {
     std::printf("this and self are synonyms\n");
     Checked t = check("class C { var x: int; func get() -> int { return (*this).x; } } func main() -> int { return 0; }");
@@ -1650,6 +1656,7 @@ int main() {
     testEnumMatch();
     testPointerArith();
     testArrowMember();
+    testFiniRefusal();
     testThisKeyword();
     testRepeatZero();
     testSliceCopy();

@@ -3161,6 +3161,12 @@ void Checker::visitTryStmt(TryStmt& n) {
     fail(n.pos, "try is not implemented yet");
 }
 
+void Checker::visitFiniDecl(FiniDecl& n) {
+    // Unified Standard 7.10 gives fini blocks exit-time execution; nothing
+    // implements that yet, and a silently ignored block hides the gap.
+    fail(n.pos, "a fini block is not executed yet");
+}
+
 void Checker::visitDeferStmt(DeferStmt& n) {
     // A defer names no storage: without a function there is no scope exit
     // to run it at, so it refuses where it is written.
