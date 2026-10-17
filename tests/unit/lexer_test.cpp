@@ -82,6 +82,11 @@ void testIntegers() {
     check(bin.lit.intDigits == "1010", "binary digits");
     cider::Token big = only(lex("9000000000"), "9000000000");
     check(big.lit.intDigits == "9000000000", "a u64 literal survives the lexer intact");
+    cider::Token oct = only(lex("0o755"), "0o755");
+    check(oct.lit.intBase == 8, "octal base");
+    check(oct.lit.intDigits == "755", "octal digits");
+    cider::Token badOct = only(lex("0o8"), "0o8");
+    check(badOct.kind == cider::TokenKind::Error, "8 is not an octal digit");
 }
 
 // A float literal keeps its exact text and gets no type here either.

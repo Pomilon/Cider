@@ -25,6 +25,10 @@ bool isHex(char c) {
     return isDigit(c) || (c >= 'a' && c <= 'f') || (c >= 'A' && c <= 'F');
 }
 
+bool isOct(char c) {
+    return c >= '0' && c <= '7';
+}
+
 bool isBin(char c) {
     return c == '0' || c == '1';
 }
@@ -328,6 +332,10 @@ Token Lexer::number() {
         base = 2;
         advance();
         advance();
+    } else if (peek() == '0' && (peekAt(1) == 'o' || peekAt(1) == 'O')) {
+        base = 8;
+        advance();
+        advance();
     }
     uint64_t digitsBegin = cursor_;
     while (!atEnd() && (isHex(peek()) || peek() == '_')) {
@@ -342,7 +350,8 @@ Token Lexer::number() {
     }
     bool valid = !digits.empty();
     for (char d : digits) {
-        bool ok = base == 16 ? isHex(d) : (base == 2 ? isBin(d) : isDigit(d));
+        bool ok = base == 16 ? isHex(d)
+                             : (base == 2 ? isBin(d) : (base == 8 ? isOct(d) : isDigit(d)));
         if (!ok) {
             valid = false;
         }
