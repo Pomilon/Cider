@@ -1290,14 +1290,14 @@
   "class": "A"
  },
  "stdlib_io_readall": {
-  "actual": "exit=1 first='a variable needs an initialiser' (then string<->char* casts)",
+  "actual": "exact stdout/stderr/exit match (stdlib ported to v3: heap NUL-terminated *char buffers; bytes-to-string cast has no v3 spelling)",
   "blocker": "string-model: read_all/readline bytes need `as char*` iteration and `as string` construction, which v3 rejects (str_ptr B precedent); kept D parked per review",
-  "class": "D"
+  "class": "A"
  },
  "stdlib_io_readline": {
-  "actual": "exit=1 first='a variable needs an initialiser' (then string<->char* casts)",
+  "actual": "exact stdout/stderr/exit match (stdlib ported to v3: heap NUL-terminated *char buffers; bytes-to-string cast has no v3 spelling)",
   "blocker": "string-model: read_all/readline bytes need `as char*` iteration and `as string` construction, which v3 rejects (str_ptr B precedent); kept D parked per review",
-  "class": "D"
+  "class": "A"
  },
  "stdlib_map_ops": {
   "actual": "exact stdout/stderr/exit match",
