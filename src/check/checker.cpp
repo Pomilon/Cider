@@ -1756,6 +1756,18 @@ void Checker::visitVarDecl(VarDecl& n) {
     if (declared.isError()) {
         return;
     }
+    if (dynamic_cast<UninitExpr*>(n.init.get()) != nullptr) {
+        // Unified Standard 3.2: the storage exists, nothing initializes it.
+        record(n.init.get(), declared);
+        bindLocal(n.name, declared, true, n.pos);
+        noteVolatilePointer(n.name, n.type.get());
+        record(&n, declared);
+        recordFlow(n.name, Prov::Raw);
+        if (sink_ != nullptr) {
+            sink_->onVarDecl(n);
+        }
+        return;
+    }
     TypeRef init = checkExpr(n.init.get(), declared);
     if (!checkCompatible(n.init->pos, n.init.get(), init, declared)) {
         return;
@@ -2047,6 +2059,13 @@ void Checker::visitBoolLit(BoolLit& n) {
 
 void Checker::visitNilPtr(NilPtr& n) {
     record(&n, TypeRef{ctx_.pointer(ctx_.void_())});
+}
+
+void Checker::visitUninitExpr(UninitExpr& n) {
+    // Unified Standard 3.2: `uninit` is a declaration's opt-out, not a
+    // value. visitVarDecl lets it through by name; anywhere else it fails.
+    fail(n.pos, "uninit is only allowed as a variable's initializer");
+    record(&n, TypeRef{ctx_.error()});
 }
 
 void Checker::visitIdent(Ident& n) {
@@ -3397,6 +3416,10 @@ TypeRef Checker::checkExpr(Expr* expr, TypeRef expected) {
         TypeRef t = checkFuncLit(*fun);
         record(fun, t);
         return t;
+    }
+    if (auto* un = dynamic_cast<UninitExpr*>(expr)) {
+        visitUninitExpr(*un);
+        return typeOf(un);
     }
     fail(expr->pos, "checker bug: unhandled expression");
     return errorRef();

@@ -241,6 +241,7 @@ public:
     void visitStringLit(StringLit& n) override;
     void visitBoolLit(BoolLit& n) override;
     void visitNilPtr(NilPtr& n) override;
+    void visitUninitExpr(UninitExpr& n) override;
     void visitIdent(Ident& n) override;
     void visitBinary(Binary& n) override;
     void visitUnary(Unary& n) override;

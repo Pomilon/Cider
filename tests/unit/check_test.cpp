@@ -1316,6 +1316,14 @@ void testPointerArith() {
     check(alias.ok, "nil is nilPtr: " + alias.stage);
 }
 
+void testUninit() {
+    std::printf("= uninit declarations\n");
+    Checked u = check("func f() { var p: *u8 = uninit; }");
+    check(u.ok, "a declared uninit pointer checks: " + u.stage);
+    Checked r = check("func f() -> *u8 { return uninit; }");
+    check(!r.ok && r.stage == "check", "uninit is refused as a value");
+}
+
 void testFiniRefusal() {
     std::printf("fini refuses loudly\n");
     Checked f = check("fini { } func main() -> int { return 0; }");
@@ -1657,6 +1665,7 @@ int main() {
     testPointerArith();
     testArrowMember();
     testFiniRefusal();
+    testUninit();
     testThisKeyword();
     testRepeatZero();
     testSliceCopy();

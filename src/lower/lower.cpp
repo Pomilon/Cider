@@ -2569,6 +2569,24 @@ void Lowerer::onVarDecl(VarDecl& n) {
     if (failed_ || !enabled_ || function_ == nullptr || locals_.empty()) {
         return;
     }
+    if (dynamic_cast<const UninitExpr*>(n.init.get()) != nullptr) {
+        // `= uninit;`: the storage exists, nothing is stored into it.
+        TypeRef type = checker_.typeOf(&n);
+        if (type.isError()) {
+            return;
+        }
+        int slots = wordCount(type);
+        if (failed_ || slots < 0) {
+            refuse(n.pos, "this declaration");
+            return;
+        }
+        LocalBinding binding;
+        binding.slots = allocaSlots(type, n.pos, static_cast<uint64_t>(slots));
+        binding.type = type;
+        binding.isMutable = true;
+        locals_.back()[n.name] = binding;
+        return;
+    }
     TypeRef type = checker_.typeOf(&n);
     std::vector<ir::Value> values;
     if (const auto* wide = dynamic_cast<const WideLit*>(n.init.get())) {

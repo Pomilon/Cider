@@ -1949,6 +1949,11 @@ std::unique_ptr<Expr> Parser::parsePrefix() {
             base = std::make_unique<NilPtr>(start);
             break;
         }
+        case TokenKind::KwUninit: {
+            advance();
+            base = std::make_unique<UninitExpr>(start);
+            break;
+        }
         case TokenKind::Ident: {
             std::string name = advance().text;
             base = std::make_unique<Ident>(start, std::move(name));
