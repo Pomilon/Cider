@@ -6203,6 +6203,40 @@ std::vector<ir::Value> Lowerer::lowerNewClass(const NewClass& n) {
     alloc.width = ir::IRType::Ptr;
     alloc.type = ptrType;
     emit(std::move(alloc));
+    if (failed_) {
+        return {undefined()};
+    }
+    // A virtual class's vptr lands before init runs, so a method call in
+    // the init body dispatches through the concrete type's table.
+    if (!resolver_.virtualNames(*id).empty()) {
+        std::string table = emitClassVTable(*id, n.pos);
+        if (failed_ || table.empty()) {
+            return {undefined()};
+        }
+        TypeRef tablePtr{ctx_.pointer(ctx_.basic(BasicKind::U8))};
+        ir::Instr data;
+        data.op = ir::Op::DataAddr;
+        data.loc = n.pos;
+        data.type = tablePtr;
+        data.width = ir::IRType::Ptr;
+        data.globalLabel = table;
+        data.isPure = true;
+        ir::Value tableWord = newValue(data.width, tablePtr, n.pos);
+        data.results.push_back(tableWord);
+        emit(std::move(data));
+        if (failed_) {
+            return {undefined()};
+        }
+        Place slot;
+        slot.hasIndirect = true;
+        slot.indirect = at;
+        slot.off = 0;
+        slot.type = TypeRef{ctx_.basic(BasicKind::U64)};
+        storeRange(n.pos, slot, {tableWord}, slot.type);
+        if (failed_) {
+            return {undefined()};
+        }
+    }
     ir::Instr run;
     run.op = ir::Op::Call;
     run.loc = n.pos;

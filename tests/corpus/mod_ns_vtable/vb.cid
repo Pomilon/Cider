@@ -1,10 +1,10 @@
 export class Animal {
   var extra: int;
+  func init(e: int) { (*self).extra = e; }
   virtual func noise() -> int { return 22; }
 }
 
 export func make() -> *Animal {
-  var a: *Animal = new Animal;
-  a->extra = 2;
+  var a: *Animal = new Animal(2);
   return a;
 }

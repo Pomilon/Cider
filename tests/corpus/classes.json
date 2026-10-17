@@ -1050,9 +1050,9 @@
   "class": "A"
  },
  "mod_ns_vtable": {
-  "actual": "cider run exit 1, stdout empty, stderr diagnostic: `main.cid:10:13: a variable needs an initialiser`; driver has no module loader",
+  "actual": "exact stdout/stderr/exit match (v3 spellings: (*p).m, init-based heap construction, one vtable per module-mangled class)",
   "blocker": "virtual-methods: v3 has no vtable dispatch for plain classes (only interfaces); a no-virtual rewrite would drop the subject",
-  "class": "D"
+  "class": "A"
  },
  "module_qualified_template": {
   "actual": "exact stdout/stderr/exit match",
