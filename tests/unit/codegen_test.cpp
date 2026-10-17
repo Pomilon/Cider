@@ -1936,6 +1936,38 @@ void testInterfaceClass() {
           "a struct and a class dispatch through one interface");
 }
 
+void testInterfaceWideReturn() {
+    std::printf("interface wide returns thread the sret buffer\n");
+    bool sig = false;
+    // A return wider than two words travels through the hidden buffer
+    // (SysV sret). The adapter must forward that buffer; the class
+    // receiver normalizes and the answer lands in the caller's slot.
+    check(runCode("class Cell { var v: int; }\n"
+                  "interface Maker {\n"
+                  "    func makeCells(n: int) -> [Cell; 2];\n"
+                  "}\n"
+                  "class A {\n"
+                  "    var pad: int;\n"
+                  "    func init(p: int) { (*self).pad = p; }\n"
+                  "    func makeCells(n: int) -> [Cell; 2] {\n"
+                  "        return new [Cell; 2] { new Cell { v: n }, new Cell { v: n + (*self).pad } };\n"
+                  "    }\n"
+                  "}\n"
+                  "func main() -> int {\n"
+                  "    var a: *A = new A(2);\n"
+                  "    var m: Maker = a;\n"
+                  "    var cells: [Cell; 2] = m.makeCells(4);\n"
+                  "    if (cells[0].v != 4 || cells[1].v != 6) { return 90; }\n"
+                  "    cells[0].v = 55;\n"
+                  "    var again: [Cell; 2] = m.makeCells(4);\n"
+                  "    if (cells[0].v != 55 || again[0].v != 4) { return 91; }\n"
+                  "    m.makeCells(9);\n"
+                  "    return again[1].v * 10 + cells[1].v;\n"
+                  "}\n",
+                  sig) == 66 && !sig,
+          "a wide return crosses the interface adapter");
+}
+
 void testInterfaceField() {
     std::printf("interface fields dispatch\n");
     bool sig = false;
@@ -2526,6 +2558,7 @@ int main() {
     testClosureElement();
     testInterface();
     testInterfaceClass();
+    testInterfaceWideReturn();
     testInterfaceField();
     testInterfaceDynIndex();
     testInterfaceDowncast();

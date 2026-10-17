@@ -453,12 +453,6 @@ std::string Lowerer::emitVTable(DeclId concrete, DeclId iface, Position pos) {
 
 std::string Lowerer::emitIfaceAdapter(DeclId concrete, const std::string& method,
                                       const Signature& sig, Position pos) {
-    if (needsSret(sig.returnType())) {
-        // An adapter normalizes the receiver; threading a hidden buffer
-        // address through it as well is a later slice.
-        refuse(pos, "a wide return through an interface adapter is not lowered yet");
-        return "";
-    }
     const resolve::Decl* owner = resolver_.declById(concrete);
     if (owner == nullptr) {
         refuse(pos, "this interface conversion");
@@ -496,7 +490,19 @@ std::string Lowerer::emitIfaceAdapter(DeclId concrete, const std::string& method
     ir::Function fn;
     fn.name = hidden;
     TypeRef dataPtr{ctx_.pointer(ctx_.basic(BasicKind::U8))};
+    const Type* ret = sig.returnType() != nullptr ? sig.returnType() : ctx_.void_();
     std::vector<Parameter> combined;
+    uint64_t sretShift = 0;
+    if (needsSret(ret)) {
+        // A wide answer threads the caller's buffer address ahead of the
+        // data word (SysV sret), exactly as the method's own signature
+        // spells it; the dispatch call site fills the same position.
+        Parameter buffer;
+        buffer.type = dataPtr.type;
+        buffer.isMutable = false;
+        combined.push_back(buffer);
+        sretShift = kOneWord;
+    }
     Parameter receiver;
     receiver.type = dataPtr.type;
     receiver.isMutable = false;
@@ -504,7 +510,6 @@ std::string Lowerer::emitIfaceAdapter(DeclId concrete, const std::string& method
     for (const Parameter& p : sig.parameters()) {
         combined.push_back(p);
     }
-    const Type* ret = sig.returnType() != nullptr ? sig.returnType() : ctx_.void_();
     fn.signature = Signature(std::move(combined), ret, Abi::SysV);
     fn.loc = pos;
     module_->functions.push_back(std::move(fn));
@@ -519,6 +524,18 @@ std::string Lowerer::emitIfaceAdapter(DeclId concrete, const std::string& method
     uint32_t entry = emitBlock(pos);
     startBlock(entry);
 
+    // The hidden buffer address has no source spelling: its slot rides
+    // first and everything downstream shifts past it.
+    if (needsSret(ret)) {
+        std::vector<ir::Value> bufferSlots =
+            allocaSlots(dataPtr, pos, kOneWord);
+        if (failed_) {
+            return "";
+        }
+        for (ir::Value slot : bufferSlots) {
+            function_->params.push_back(slot);
+        }
+    }
     // The data word's address arrives first: the class reference it holds
     // is the receiver the method expects, loaded here in two steps — the
     // slot holds the address, and only a computed address dereferences.
@@ -551,6 +568,27 @@ std::string Lowerer::emitIfaceAdapter(DeclId concrete, const std::string& method
     call.loc = pos;
     call.callee = resolver_.linkName(*owner) + "__" + method;
     call.mayTrap = true;
+    if (needsSret(ret)) {
+        // The buffer forwards exactly as the direct call spelled it: the
+        // same address rides first, so the method's stores land in the
+        // caller's slot and nothing comes back in registers.
+        ir::Instr loadBuf;
+        loadBuf.op = ir::Op::Load;
+        loadBuf.loc = pos;
+        loadBuf.type = dataPtr;
+        loadBuf.width = ir::IRType::Ptr;
+        loadBuf.addressBase = function_->params[kFirstWord];
+        loadBuf.isPure = true;
+        ir::Value buf = newValue(loadBuf.width, dataPtr, pos);
+        loadBuf.results.push_back(buf);
+        emit(std::move(loadBuf));
+        if (failed_) {
+            return "";
+        }
+        ir::Argument first;
+        first.words.push_back(buf);
+        call.arguments.push_back(std::move(first));
+    }
     {
         ir::Argument selfArg;
         selfArg.words.push_back(self);
@@ -558,7 +596,7 @@ std::string Lowerer::emitIfaceAdapter(DeclId concrete, const std::string& method
     }
     const std::vector<Parameter>& declared = function_->signature.parameters();
     for (uint64_t i = 0; i < static_cast<uint64_t>(sig.parameters().size()); ++i) {
-        TypeRef type{declared[i + kOneWord].type};
+        TypeRef type{declared[i + kOneWord + sretShift].type};
         int count = wordCount(type);
         if (count < 0) {
             refuse(pos, "this interface conversion");
@@ -596,7 +634,13 @@ std::string Lowerer::emitIfaceAdapter(DeclId concrete, const std::string& method
         ir::Terminator fret;
         fret.term = ir::Term::Ret;
         fret.loc = pos;
-        if (ret->kind() != Kind::Void) {
+        if (needsSret(ret)) {
+            // The method stored its answer into the caller's buffer
+            // through the forwarded address: nothing rides back in
+            // registers.
+            call.width = ir::IRType::Void;
+            call.type = TypeRef{ret};
+        } else if (ret->kind() != Kind::Void) {
             std::vector<ir::Value> answers = callResults(call, ret, pos);
             if (!failed_) {
                 fret.values = std::move(answers);
@@ -4278,7 +4322,43 @@ bool Lowerer::arrayBase(const Expr* arrayExpr, const Index& n, Place& base,
         return true;
     }
     if (!resolvePlace(arrayExpr, base)) {
-        return false;
+        // An index into a call's answer (`makeRow(9)[1]`): the words have
+        // no address, so they spill to scratch slots first and the index
+        // reads from there like any other place (the field path over a
+        // call answer carries the same fallback for reads).
+        const auto* call = dynamic_cast<const Call*>(arrayExpr);
+        if (call == nullptr) {
+            return false;
+        }
+        TypeRef answer = checker_.typeOf(arrayExpr);
+        if (answer.isError()) {
+            return false;
+        }
+        std::vector<ir::Value> words =
+            lowerCallWords(const_cast<Call&>(*call));
+        if (failed_) {
+            return false;
+        }
+        if (words.empty() ||
+            words.size() != static_cast<size_t>(wordCount(answer))) {
+            refuse(n.pos, what);
+            return false;
+        }
+        std::vector<ir::Value> slots =
+            allocaSlots(answer, n.pos, static_cast<uint64_t>(words.size()));
+        if (failed_) {
+            return false;
+        }
+        Place scratch;
+        scratch.slots = slots;
+        scratch.type = answer;
+        storeRange(n.pos, scratch, words, answer);
+        if (failed_) {
+            return false;
+        }
+        base = std::move(scratch);
+        arrayType = answer;
+        return true;
     }
     arrayType = base.type;
     return true;

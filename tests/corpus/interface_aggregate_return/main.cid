@@ -37,8 +37,8 @@
 //     declared-shape argument path (CIDER-BUG-165) on the same lowering
 //   * an interface-typed return and a scalar return, the shapes that already
 //     worked, stay pinned too
-//   * a class result carrying a destructor, so the caller-owned slot is
-//     finalized at scope exit exactly like a direct sret call
+//   * a class result carrying a destructor, checked on both dispatch paths
+//     under v3's delete-only model (no implicit finalization)
 //   * the aggregate type and the interface declared in an IMPORTED module,
 //     dispatched from here, so the slot size and the result spelling are
 //     rooted in the callee's module and not in the caller's view
@@ -54,7 +54,6 @@ struct Pair {
 
 class Cell {
     var v: int;
-    func init(x: int) -> void { this.v = x; }
 }
 
 type Row = [int; 2];
@@ -83,45 +82,36 @@ interface Maker {
 
 class Sq {
     var s: int;
-    func init(x: int) -> void { this.s = x; }
-    func area() -> int { return this.s * this.s; }
+    func init(x: int) { (*self).s = x; }
+    func area() -> int { return (*self).s * (*self).s; }
 }
 
 class MakerA {
     var pad: int;
-    func init(p: int) -> void { this.pad = p; }
+    func init(p: int) { (*self).pad = p; }
     func makePair(n: int) -> Pair {
-        var r: Pair;
-        r.a = n;
-        r.b = n + this.pad;
+        var r: Pair = new Pair { a: n, b: n + (*self).pad };
         return r;
     }
     func makeCell(n: int) -> Cell {
-        var c: Cell;
-        c.init(n * 10 + this.pad);
+        var c: Cell = new Cell { v: n * 10 + (*self).pad };
         return c;
     }
     func makeRow(n: int) -> Row {
-        return [n, n + this.pad];
+        return new [int; 2] {n, n + (*self).pad};
     }
     func makeNested(n: int) -> [[int; 2]; 2] {
-        return [[n, n + 1], [n + 2, n + this.pad]];
+        return new [[int; 2]; 2] { new [int; 2] {n, n + 1}, new [int; 2] {n + 2, n + (*self).pad} };
     }
     func makeCells(n: int) -> [Cell; 2] {
-        var r: [Cell; 2];
-        r[0].init(n);
-        r[1].init(n + this.pad);
-        return r;
+        return new [Cell; 2] { new Cell { v: n }, new Cell { v: n + (*self).pad } };
     }
     func mix(n: int, p: Pair) -> Pair {
-        var r: Pair;
-        r.a = p.a + n;
-        r.b = p.b + this.pad;
+        var r: Pair = new Pair { a: p.a + n, b: p.b + (*self).pad };
         return r;
     }
     func makeShape() -> Shape {
-        var sq: Sq;
-        sq.init(this.pad);
+        var sq: *Sq = new Sq((*self).pad);
         return sq;
     }
     func twice(n: int) -> int { return n * 2; }
@@ -129,56 +119,47 @@ class MakerA {
 
 class MakerB {
     var pad: int;
-    func init(p: int) -> void { this.pad = p; }
+    func init(p: int) { (*self).pad = p; }
     func makePair(n: int) -> Pair {
-        var r: Pair;
-        r.a = n * 100;
-        r.b = n * 100 + this.pad;
+        var r: Pair = new Pair { a: n * 100, b: n * 100 + (*self).pad };
         return r;
     }
     func makeCell(n: int) -> Cell {
-        var c: Cell;
-        c.init(n * 10 + this.pad);
+        var c: Cell = new Cell { v: n * 10 + (*self).pad };
         return c;
     }
     func makeRow(n: int) -> Row {
-        return [n * 100, n * 100 + this.pad];
+        return new [int; 2] {n * 100, n * 100 + (*self).pad};
     }
     func makeNested(n: int) -> [[int; 2]; 2] {
-        return [[n * 100, n * 101], [n * 102, n * 100 + this.pad]];
+        return new [[int; 2]; 2] { new [int; 2] {n * 100, n * 101}, new [int; 2] {n * 102, n * 100 + (*self).pad} };
     }
     func makeCells(n: int) -> [Cell; 2] {
-        var r: [Cell; 2];
-        r[0].init(n * 100);
-        r[1].init(n * 100 + this.pad);
-        return r;
+        return new [Cell; 2] { new Cell { v: n * 100 }, new Cell { v: n * 100 + (*self).pad } };
     }
     func mix(n: int, p: Pair) -> Pair {
-        var r: Pair;
-        r.a = p.a + n * 100;
-        r.b = p.b + this.pad;
+        var r: Pair = new Pair { a: p.a + n * 100, b: p.b + (*self).pad };
         return r;
     }
     func makeShape() -> Shape {
-        var sq: Sq;
-        sq.init(this.pad + 1);
+        var sq: *Sq = new Sq((*self).pad + 1);
         return sq;
     }
-    func twice(n: int) -> int { return n * 2 + this.pad; }
+    func twice(n: int) -> int { return n * 2 + (*self).pad; }
 }
 
-// A destructor-bearing class result: the caller's slot is its own copy and is
-// finalized at the enclosing scope exit, exactly like a direct sret call
-// (CIDER-BUG-137).
+// A destructor-bearing class result under v3's delete-only model
+// (FEATURES §5.3): value results are inert copies and deinit fires only on
+// an explicit delete. Section 12 checks the interface and direct paths
+// agree and pins the delete trace.
 var drops: int = 0;
 
 class Owned {
     var tag: int;
-    func init(t: int) -> void { this.tag = t; }
-    func ~Owned() {
+    func deinit() {
         drops = drops + 1;
         print("D,");
-        printInt(this.tag);
+        printInt((*self).tag);
         print(",");
     }
 }
@@ -188,28 +169,27 @@ interface Factory {
 }
 
 class OwnedFactory {
+    func init() { }
     func make(t: int) -> Owned {
-        var o: Owned;
-        o.init(t);
+        var o: Owned = new Owned { tag: t };
         return o;
     }
 }
 
-// A destructor-bearing class result. The interface dispatch must produce the
-// SAME ownership trace as the direct non-virtual method call, which is the
-// path that already worked: both lower the callee with the hidden sret
-// convention, so the caller's slot is its own copy and is finalized on the
-// same schedule (CIDER-BUG-137). Asserting equality between the two paths
-// pins the fix without freezing a lifetime model of its own. Each helper
-// runs the same four-call sequence and reports the drop count its own scope
-// observed at exit.
+// A destructor-bearing class result. Under v3 both paths answer the same
+// inert copy: interface dispatch goes through the sret-shaped adapter and
+// the direct call through the method's own sret convention, and neither
+// finalizes (deinit runs only on delete, FEATURES §5.3). Asserting equality
+// between the two paths pins the shapes without freezing a lifetime model
+// of its own. Each helper runs the same four-call sequence and reports the
+// drop count its own scope observed.
 func dropsViaDirect(f: *OwnedFactory) -> int {
-    var a: Owned = f->make(1);
-    var b: Owned = f->make(2);
+    var a: Owned = (*f).make(1);
+    var b: Owned = (*f).make(2);
     a.tag = 11;
     if (a.tag != 11 || b.tag != 2) { return 1000; }
-    f->make(3);
-    f->make(4);
+    (*f).make(3);
+    (*f).make(4);
     print("DONE,");
     return drops;
 }
@@ -237,10 +217,8 @@ func churn(n: int) -> int {
 }
 
 func main() -> int {
-    var a: MakerA;
-    a.init(1);
-    var b: MakerB;
-    b.init(2);
+    var a: *MakerA = new MakerA(1);
+    var b: *MakerB = new MakerB(2);
     var ma: Maker = a;
     var mb: Maker = b;
 
@@ -290,9 +268,7 @@ func main() -> int {
 
     // 7. A by-value aggregate argument alongside the aggregate return: the
     //    hidden slot must sit between the method address and `this`.
-    var arg: Pair;
-    arg.a = 10;
-    arg.b = 20;
+    var arg: Pair = new Pair { a: 10, b: 20 };
     var mx: Pair = ma.mix(1, arg);
     if (mx.a != 11 || mx.b != 21) { return 15; }
     var mxb: Pair = mb.mix(1, arg);
@@ -329,17 +305,17 @@ func main() -> int {
     if (ma.twice(21) != 42) { return 25; }
     if (mb.twice(21) != 44) { return 26; }
 
-    // 11. A list literal as an argument, next to an aggregate return.
-    var mix2: Pair = ma.mix(1, [3, 4]);
+    // 11. A constructed aggregate as an argument, next to an aggregate
+    //     return (v2's list-literal coercion is spelled with `new` in v3).
+    var mix2: Pair = ma.mix(1, new Pair { a: 3, b: 4 });
     if (mix2.a != 4 || mix2.b != 5) { return 27; }
 
-    // 12. A destructor-bearing class result through the interface must
-    //     finalize its caller-owned slot exactly like the direct
-    //     non-virtual method call does. Both helpers run the same sequence;
-    //     their drop counts (and the trace printed just before each) must
-    //     agree, and the values must be right on both paths.
-    var fac: OwnedFactory;
-    var fp: *OwnedFactory = &fac;
+    // 12. A destructor-bearing class result through the interface is an
+    //     inert copy like every other value result: neither path finalizes
+    //     (deinit runs only on delete, FEATURES §5.3). Both helpers run the
+    //     same sequence; their drop counts must agree, and the values must
+    //     be right on both paths.
+    var fp: *OwnedFactory = new OwnedFactory();
     drops = 0;
     var nDirect: int = dropsViaDirect(fp);
     print("D:");
@@ -351,17 +327,23 @@ func main() -> int {
     printInt(nIface);
     print(";");
     if (nDirect != nIface) { return 28; }
-    // The trace is only meaningful if the drops really happened: a path that
-    // leaked or double-freed would land on 0 or an inflated count.
-    if (nDirect == 0) { return 29; }
+    // Neither path may finalize implicitly: a scope-exit finalizer would
+    // inflate this to 8 (four calls per helper, two helpers).
+    if (nDirect != 0) { return 29; }
+    // Explicit delete runs deinit deterministically, once per object, with
+    // the right tag.
+    drops = 0;
+    var heap: *Owned = alloc(sizeof(Owned) as i64, 8) as *Owned;
+    (*heap).tag = 7;
+    delete heap;
+    if (drops != 1) { return 37; }
 
     // 13. Cross-module: the aggregate type AND the interface are declared in
     //     lib, and the dispatch happens here. The slot must be sized with
     //     lib's `Remote` / `RemoteRow` layouts, and the result must present
     //     the callee-module spelling so the field / index accesses below
     //     resolve at all.
-    var ri: lib.RemoteImpl;
-    ri.init(3);
+    var ri: *lib.RemoteImpl = new lib.RemoteImpl(3);
     var rm: lib.RemoteMaker = ri;
     var rp: lib.Remote = rm.pair(4);
     if (rp.lo != 4 || rp.hi != 7) { return 30; }
