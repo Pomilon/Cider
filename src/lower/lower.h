@@ -297,6 +297,11 @@ public:
     // one link-time function address per interface method, in the
     // resolver's methodNames order. Answers the table's link label.
     std::string emitVTable(DeclId concrete, DeclId iface, Position pos);
+    // The virtual slots of a class as one module global (FEATURES 2.3): the
+    // table's entry i holds the address of the method that owns slot i for
+    // this concrete type — its own override, or the declarer's function for
+    // an inherited slot. A class never virtualized answers "".
+    std::string emitClassVTable(DeclId concrete, Position pos);
     // Emits one receiver adapter for a class method reached through an
     // interface: dispatch always passes the data word's address, so the
     // adapter loads the class reference it holds and tail-calls the
@@ -699,6 +704,8 @@ private:
     // Vtable labels already emitted into the module: one (concrete,
     // interface) table is built once, however many conversions name it.
     std::unordered_set<std::string> vtablesEmitted_;
+    // One class vtable per concrete type, emitted once under its own label.
+    std::unordered_set<std::string> classVtablesEmitted_;
     // Receiver adapters already emitted: one (class, method) adapter is
     // shared by every vtable that names it.
     std::unordered_set<std::string> adaptersEmitted_;

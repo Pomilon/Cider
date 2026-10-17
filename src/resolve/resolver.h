@@ -145,6 +145,18 @@ public:
     int64_t nominalAlign(const Type* type) const;
     // A class's direct bases, as declaration ids. Empty when none.
     std::vector<DeclId> classBases(DeclId id) const;
+    // The virtual slots of a class, base-first: an override keeps its base
+    // slot, a new `virtual` appends (FEATURES 2.3). Computed lazily from
+    // the declaration flags, so declaration order inside a module cannot
+    // matter. A chain with several bases at one level has no vtable yet
+    // and answers empty; a name that is not virtual answers -1 from the
+    // index.
+    std::vector<std::string> virtualNames(DeclId id) const;
+    int64_t virtualIndexOf(DeclId id, const std::string& name) const;
+    // The class that declares the method, walking the chain: a virtual call
+    // and a static call both spell the declarer's link name for inherited
+    // slots, and the override's class answers for its own redeclaration.
+    std::optional<DeclId> methodHome(DeclId id, const std::string& name) const;
     EvalEnv evalEnv(const Scope* scope);
 
     const std::vector<ResolveError>& errors() const { return errors_; }
@@ -228,6 +240,15 @@ private:
     int64_t structAlignImpl(DeclId id, std::unordered_set<std::string>& seen) const;
     int64_t classSizeImpl(DeclId id, std::unordered_set<std::string>& seen) const;
     int64_t classAlignImpl(DeclId id, std::unordered_set<std::string>& seen) const;
+    // The physical field order of a class with bases: most-base first, then
+    // each class's own fields (FEATURES 2.2). A chain with several bases at
+    // one level has no layout yet, so the walk answers false and the size
+    // queries refuse rather than lay out half an object.
+    bool chainFieldsImpl(DeclId id, std::unordered_set<std::string>& seen,
+                         std::vector<std::string>& out) const;
+    // A field declared by a base: the chain walk names it, but fieldType
+    // only holds a class's own fields, so the declaring class answers.
+    TypeRef fieldTypeAcrossBases(DeclId id, const std::string& name) const;
     // A union's payload is its widest member, every member at offset 0, the
     // tag after the payload padded to the payload's alignment (TYPES.md
     // 3.4a). Same visited-set rule as structs: recursive unions are -1.
@@ -265,6 +286,10 @@ private:
     std::unordered_map<std::string, TypeRef> fieldTypes_;
     std::unordered_map<std::string, Signature> methodSigs_;
     std::unordered_map<std::string, std::vector<std::string>> methodLists_;
+    // Declared methods that carry `virtual`; the composed slot list is
+    // virtualNames', and an override needs no entry here (it inherits its
+    // base slot by name).
+    std::unordered_map<std::string, bool> methodVirtual_;
     std::unordered_map<std::string, std::vector<std::string>> fieldLists_;
     std::unordered_map<std::string, std::vector<DeclId>> baseTable_;
     std::vector<std::string> stack_;

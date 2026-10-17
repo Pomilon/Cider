@@ -264,7 +264,8 @@ void testNominalSize() {
 }
 
 // A class value opens with its vptr word: one int field sits at offset 8
-// in a 16-byte object, and a class with bases has no size yet.
+// in a 16-byte object, and a derived class lays its chain out after the
+// same single vptr word, most-base first (FEATURES 2.2).
 void testClassSize() {
     std::printf("class sizes reserve the vptr\n");
     Resolved r = resolve(
@@ -278,8 +279,9 @@ void testClassSize() {
         r.resolver->lookup(r.resolver->moduleScope(), "Derived");
     check(r.resolver->classSize(node->id) == 16, "vptr plus one int is sixteen bytes");
     check(r.resolver->fieldOffset(node->id, "v") == 8, "the field follows the vptr");
-    check(r.resolver->classSize(derived->id) == -1, "a derived class has no size yet");
-    check(r.resolver->fieldOffset(derived->id, "y") == -1, "a derived field has no offset yet");
+    check(r.resolver->classSize(derived->id) == 16, "a chain packs after the one vptr");
+    check(r.resolver->fieldOffset(derived->id, "x") == 8, "the base field follows the vptr");
+    check(r.resolver->fieldOffset(derived->id, "y") == 12, "the own field follows the base");
 }
 
 void testMethodInit() {

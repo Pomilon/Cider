@@ -405,6 +405,37 @@ int Lowerer::wordCount(TypeRef type) {
     return static_cast<int>(bytes / per + (bytes % per == 0 ? 0 : 1));
 }
 
+std::string Lowerer::emitClassVTable(DeclId concrete, Position pos) {
+    const resolve::Decl* owner = resolver_.declById(concrete);
+    if (owner == nullptr) {
+        refuse(pos, "this construction");
+        return "";
+    }
+    std::string label = "vtable_" + resolver_.linkName(*owner);
+    if (classVtablesEmitted_.insert(label).second) {
+        ir::Global table;
+        table.label = label;
+        table.type = TypeRef{ctx_.pointer(ctx_.basic(BasicKind::U8))};
+        for (const std::string& name : resolver_.virtualNames(concrete)) {
+            // The slot's function is the method's static address for this
+            // concrete type: the override's own function where the chain
+            // redeclares the name, the declarer's otherwise. A class
+            // receiver is already the address its method expects, so no
+            // adapter rides here.
+            std::optional<DeclId> home = resolver_.methodHome(concrete, name);
+            const resolve::Decl* declarer =
+                home.has_value() ? resolver_.declById(*home) : nullptr;
+            if (declarer == nullptr) {
+                refuse(pos, "this construction");
+                return "";
+            }
+            table.initLabels.push_back(resolver_.linkName(*declarer) + "__" + name);
+        }
+        module_->globals.push_back(std::move(table));
+    }
+    return label;
+}
+
 std::string Lowerer::emitVTable(DeclId concrete, DeclId iface, Position pos) {
     const resolve::Decl* owner = resolver_.declById(concrete);
     const resolve::Decl* wanted = resolver_.declById(iface);
@@ -6004,22 +6035,39 @@ void Lowerer::constructClass(const std::vector<ir::Value>& slots, const NewStruc
         refuse(n.pos, "this construction");
         return;
     }
-    if (!resolver_.classBases(*id).empty()) {
-        refuse(n.pos, "inheritance is not lowered yet");
-        return;
-    }
-    // Word zero is the vptr slot, null until methods wire it: the slot is
-    // reserved now so field offsets never shift later.
+    // Word zero is the vptr slot (FEATURES 2.2): the concrete type's vtable
+    // address when the class has virtual slots, null otherwise — the slot
+    // stays reserved either way, so field offsets never shift.
     TypeRef vptr{ctx_.basic(BasicKind::U64)};
-    ir::Value null = constantI64(0, vptr, n.pos);
+    ir::Value vptrWord = constantI64(0, vptr, n.pos);
     if (failed_) {
         return;
+    }
+    if (!resolver_.virtualNames(*id).empty()) {
+        std::string table = emitClassVTable(*id, n.pos);
+        if (failed_ || table.empty()) {
+            return;
+        }
+        TypeRef tablePtr{ctx_.pointer(ctx_.basic(BasicKind::U8))};
+        ir::Instr data;
+        data.op = ir::Op::DataAddr;
+        data.loc = n.pos;
+        data.type = tablePtr;
+        data.width = ir::IRType::Ptr;
+        data.globalLabel = table;
+        data.isPure = true;
+        vptrWord = newValue(data.width, tablePtr, n.pos);
+        data.results.push_back(vptrWord);
+        emit(std::move(data));
+        if (failed_) {
+            return;
+        }
     }
     Place atVptr;
     atVptr.slots = slots;
     atVptr.type = vptr;
     atVptr.off = 0;
-    storeRange(n.pos, atVptr, {null}, vptr);
+    storeRange(n.pos, atVptr, {vptrWord}, vptr);
     if (failed_) {
         return;
     }
@@ -6057,16 +6105,13 @@ void Lowerer::constructClass(const std::vector<ir::Value>& slots, const NewStruc
 std::vector<ir::Value> Lowerer::lowerNewStruct(const NewStruct& n) {
     TypeRef structType = checker_.typeOf(&n);
     if (!structType.isError() && structType.type->kind() == Kind::Class) {
-        // Inherited fields have no layout yet: the refusal names the gap
-        // before wordCount turns the -1 size into a generic construction
-        // refusal. constructClass asserts the same precondition.
+        // The class check below owns construction: a chain's fields lay
+        // out through the resolver, and constructClass stores the vtable
+        // word. A missing declaration still refuses before wordCount turns
+        // a -1 size into a generic construction refusal.
         std::optional<DeclId> id = structType.type->decl();
         if (!id.has_value()) {
             refuse(n.pos, "this construction");
-            return {undefined()};
-        }
-        if (!resolver_.classBases(*id).empty()) {
-            refuse(n.pos, "inheritance is not lowered yet");
             return {undefined()};
         }
     }
@@ -8281,13 +8326,85 @@ std::vector<ir::Value> Lowerer::lowerCallWords(Call& n) {
                 return {undefined()};
             }
             if (msig != nullptr) {
-                callee = resolver_.linkName(*owner) + "__" + field->name;
-                sig = msig;
                 ir::Value at;
                 if (!receiverAddress(base, n.pos, "this call", at)) {
                     return {undefined()};
                 }
                 receiver.push_back(at);
+                sig = msig;
+                int64_t slot = id.has_value()
+                                   ? resolver_.virtualIndexOf(*id, field->name)
+                                   : -1;
+                if (slot >= 0) {
+                    // A virtual method dispatches through the object's vptr
+                    // word: slot `slot` of the concrete type's table names
+                    // the override the dynamic type chose (FEATURES 2.3).
+                    // The object's address rides as the receiver the table's
+                    // function already expects — no adapter, because both
+                    // sides are methods of a class.
+                    TypeRef word{ctx_.pointer(ctx_.basic(BasicKind::U8))};
+                    ir::Instr loadV;
+                    loadV.op = ir::Op::Load;
+                    loadV.loc = n.pos;
+                    loadV.type = word;
+                    loadV.width = ir::IRType::Ptr;
+                    loadV.addressBase = at;
+                    loadV.isPure = true;
+                    ir::Value table = newValue(loadV.width, word, n.pos);
+                    loadV.results.push_back(table);
+                    emit(std::move(loadV));
+                    if (failed_) {
+                        return {undefined()};
+                    }
+                    TypeRef count{ctx_.basic(BasicKind::I64)};
+                    ir::Value delta = constantI64(slot * layout::kSizePointer,
+                                                  count, n.pos);
+                    if (failed_) {
+                        return {undefined()};
+                    }
+                    ir::Instr step;
+                    step.op = ir::Op::Add;
+                    step.loc = n.pos;
+                    step.type = word;
+                    step.width = ir::IRType::Ptr;
+                    step.isPure = true;
+                    step.operands.push_back(table);
+                    step.operands.push_back(delta);
+                    ir::Value slotAt = newValue(step.width, word, n.pos);
+                    step.results.push_back(slotAt);
+                    emit(std::move(step));
+                    if (failed_) {
+                        return {undefined()};
+                    }
+                    ir::Instr loadF;
+                    loadF.op = ir::Op::Load;
+                    loadF.loc = n.pos;
+                    loadF.type = word;
+                    loadF.width = ir::IRType::Ptr;
+                    loadF.addressBase = slotAt;
+                    loadF.isPure = true;
+                    ir::Value fn = newValue(loadF.width, word, n.pos);
+                    loadF.results.push_back(fn);
+                    emit(std::move(loadF));
+                    if (failed_) {
+                        return {undefined()};
+                    }
+                    indirect = true;
+                    indirectCallee = fn;
+                } else {
+                    // A plain method resolves statically to its declarer's
+                    // function: an inherited method spells its base's name.
+                    std::optional<DeclId> home =
+                        id.has_value() ? resolver_.methodHome(*id, field->name)
+                                       : std::nullopt;
+                    const resolve::Decl* declarer =
+                        home.has_value() ? resolver_.declById(*home) : owner;
+                    if (declarer == nullptr) {
+                        refuse(n.pos, "this call");
+                        return {undefined()};
+                    }
+                    callee = resolver_.linkName(*declarer) + "__" + field->name;
+                }
             }
             // msig == null: a closure-valued field, not a method — the
             // closure path below decides from the checked type.
