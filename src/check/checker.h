@@ -184,6 +184,13 @@ public:
     // Name provenance for the lowerer (call shapes): the same answer
     // provOf gives an identifier, without needing its node.
     Prov provOfName(const std::string& name) const;
+    // Whether the checker saw this expression as a volatile place: a
+    // deref through a `*volatile T` name. The lowerer marks the loads and
+    // stores it emits through the place with this answer.
+    bool placeIsVolatile(const Expr* expr) const;
+    // Names a declaration `*volatile T` so derefs through it are volatile
+    // places; silent for every other spelling.
+    void noteVolatilePointer(const std::string& name, const TypeExpr* type);
     const std::map<std::pair<const Call*, std::string>, DeclId>& callSpecs() const {
         return callSpecs_;
     }
@@ -454,6 +461,11 @@ private:
     // name the syntactic chain (`s.v` vs `(*ps).v` never merge: aliasing
     // chains stay unproven, documented); unkeyable shapes read Raw.
     std::vector<std::unordered_map<std::string, Prov>> placeFlow_;
+    // Names declared as `*volatile T`, per scope: a deref through one is a
+    // volatile access (FEATURES §1.1c), and the lowerer asks which deref
+    // expressions the checker saw that way.
+    std::vector<std::unordered_set<std::string>> volatilePtrs_;
+    std::unordered_set<const Expr*> volatilePlaces_;
     // Global provenance inside the prescan only: seeded from declaration
     // initializers, updated by stores in module order. Best-effort across
     // modules (reads see earlier writes); exact within one function.

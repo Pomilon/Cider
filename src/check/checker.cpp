@@ -749,7 +749,24 @@ const LocalScope* Checker::pushScope() {
     current_ = out;
     flowStack_.push_back({});
     placeFlow_.push_back({});
+    volatilePtrs_.push_back({});
     return out;
+}
+
+// A declaration spelled `*volatile T` marks its name so derefs through it
+// are volatile accesses; anything else is silent.
+void Checker::noteVolatilePointer(const std::string& name, const TypeExpr* type) {
+    const auto* ptr = dynamic_cast<const PointerType*>(type);
+    if (ptr == nullptr || !ptr->pointeeVolatile) {
+        return;
+    }
+    if (!volatilePtrs_.empty()) {
+        volatilePtrs_.back().insert(name);
+    }
+}
+
+bool Checker::placeIsVolatile(const Expr* expr) const {
+    return expr != nullptr && volatilePlaces_.find(expr) != volatilePlaces_.end();
 }
 
 void Checker::popScope() {
@@ -759,6 +776,9 @@ void Checker::popScope() {
     }
     if (!placeFlow_.empty()) {
         placeFlow_.pop_back();
+    }
+    if (!volatilePtrs_.empty()) {
+        volatilePtrs_.pop_back();
     }
 }
 
@@ -1709,6 +1729,8 @@ void Checker::checkMethods(DeclId id, Kind kind, std::vector<MethodDecl>& method
         for (uint64_t i = 0; i < static_cast<uint64_t>(declared.size()); ++i) {
             bindLocal(method.params[i].name, TypeRef{declared[i].type},
                       declared[i].isMutable, method.params[i].pos);
+            noteVolatilePointer(method.params[i].name,
+                                method.params[i].type.get());
         }
         const Type* ret = sig->returnType() != nullptr ? sig->returnType() : ctx_.void_();
         TypeRef saved = funcReturn_;
@@ -1739,6 +1761,7 @@ void Checker::visitVarDecl(VarDecl& n) {
         return;
     }
     bindLocal(n.name, declared, true, n.pos);
+    noteVolatilePointer(n.name, n.type.get());
     record(&n, declared);
     // A declaration proves its storage: later reads of the name answer
     // what this initializer carried.
@@ -2060,6 +2083,16 @@ void Checker::visitUnary(Unary& n) {
         if (kind == Kind::FunctionPtr) {
             record(&n, operand);
             return;
+        }
+        // A deref through a `*volatile T` name is a volatile access.
+        if (const auto* src = dynamic_cast<const Ident*>(n.operand.get())) {
+            for (auto frame = volatilePtrs_.rbegin();
+                 frame != volatilePtrs_.rend(); ++frame) {
+                if (frame->find(src->name) != frame->end()) {
+                    volatilePlaces_.insert(&n);
+                    break;
+                }
+            }
         }
         record(&n, TypeRef{operand.type->pointee()});
         return;

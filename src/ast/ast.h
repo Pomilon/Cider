@@ -75,6 +75,11 @@ struct BasicType : TypeExpr {
 
 struct PointerType : TypeExpr {
     std::unique_ptr<TypeExpr> pointee;
+    // `*volatile T`: the pointee's memory is accessed volatile through
+    // this pointer (FEATURES §1.1c). The mark rides the spelling; the
+    // resolved Type stays one type, because volatility describes access,
+    // not the value.
+    bool pointeeVolatile = false;
     PointerType(Position p, std::unique_ptr<TypeExpr> e)
         : TypeExpr(std::move(p)), pointee(std::move(e)) {}
     void accept(ASTVisitor& v) override;

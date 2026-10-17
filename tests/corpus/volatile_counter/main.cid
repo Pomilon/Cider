@@ -5,7 +5,7 @@
 // `total` would stay 0 and the program would exit 0 instead of 15.
 var ticks: volatile int = 0;
 
-func bump(p: volatile int*) -> void {
+func bump(p: *volatile int) {
   *p = *p + 1;
 }
 

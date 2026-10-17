@@ -1560,9 +1560,9 @@
   "class": "D"
  },
  "volatile_counter": {
-  "actual": "blocked-A reclassified 2026-10-05: must pass once blocker lands; run exit 1: OUT: ERR:tests/corpus/volatile_counter/main.cid:8:14: expected a type\\ntests/corpus/volatile_counter/main.cid:8:14: a function needs a body\\ntests/corpus/volatile_counter/main.cid:10:1: expected a declaration\\n",
+  "actual": "exact stdout/stderr/exit match (exit 15 proves the volatile loads were not hoisted)",
   "blocker": "FEAT-049 volatile-qualified types (*volatile int param)",
-  "class": "D"
+  "class": "A"
  },
  "vtable_plain_method": {
   "actual": "tests/corpus/vtable_plain_method/main.cid:16:15: a class needs a body",

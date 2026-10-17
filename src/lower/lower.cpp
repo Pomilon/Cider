@@ -895,7 +895,9 @@ bool Lowerer::resolvePlace(const Expr* expr, Place& out) {
         out.global.clear();
         out.type = pointee;
         out.off = 0;
-        out.isVolatile = false;
+        // A deref the checker saw through a `*volatile T` name is a
+        // volatile access: the loads and stores it feeds carry the mark.
+        out.isVolatile = checker_.placeIsVolatile(expr);
         out.hasIndirect = true;
         out.indirect = ptr[0];
         return true;

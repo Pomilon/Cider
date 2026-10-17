@@ -1562,14 +1562,26 @@ std::unique_ptr<TypeExpr> Parser::parseType() {
     while (match(TokenKind::Star)) {
         ++depth;
     }
+    // `*volatile T`: the innermost pointer reads and writes its pointee
+    // volatile (FEATURES §1.1c spells the mark before the pointee).
+    bool pointeeVolatile = false;
+    if (depth > 0 && match(TokenKind::KwVolatile)) {
+        pointeeVolatile = true;
+    }
     std::unique_ptr<TypeExpr> type = parsePrimaryType();
     if (type == nullptr) {
         return nullptr;
     }
     (void)start;
+    bool innermost = true;
     while (depth > 0) {
         Position ppos = type->pos;
-        type = std::make_unique<PointerType>(ppos, std::move(type));
+        auto ptr = std::make_unique<PointerType>(ppos, std::move(type));
+        if (innermost && pointeeVolatile) {
+            ptr->pointeeVolatile = true;
+        }
+        innermost = false;
+        type = std::move(ptr);
         --depth;
     }
     return type;
