@@ -1135,9 +1135,9 @@
   "class": "B"
  },
  "phase1_stress": {
-  "actual": "exit=1 first='17:20 a variable needs an initialiser' (union/struct/array uninit across 243-line stress file)",
+  "actual": "exact stdout/stderr/exit match (scope-exit finalizers became explicit deletes per FEATURES 5.3; overlap reads via raw-bytes row per TYPES 4.6; legacy oracle corrected to real stdout bytes)",
   "blocker": "destructors + T11: scope-exit ~DtorObj finalization and generic triple<T> calls are the substantive blocks; union/allocator sections need explicit-init rewrites once those land",
-  "class": "D"
+  "class": "A"
  },
  "pointer_interface": {
   "actual": "exact stdout/stderr/exit match on all three legs (native + vm + vm-unopt)",
