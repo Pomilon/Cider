@@ -3497,11 +3497,15 @@ TypeRef Checker::checkLiteralInt(const IntLit& lit, TypeRef expected, Position p
 }
 
 TypeRef Checker::checkLiteralFloat(const FloatLit& lit, TypeRef expected, Position pos) {
-    (void)lit;
     (void)pos;
     if (!expected.isError() && expected != TypeRef{ctx_.wildcard()} &&
         expected.type->kind() == Kind::Basic && basicIsFloat(*expected.type->basic())) {
         return expected;
+    }
+    // `3.14f` names f32 on its own; a bare float literal stays f64
+    // (Unified Standard 2.2).
+    if (lit.narrow) {
+        return TypeRef{ctx_.basic(BasicKind::F32)};
     }
     return TypeRef{ctx_.basic(BasicKind::F64)};
 }

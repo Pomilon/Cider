@@ -1324,6 +1324,14 @@ void testUninit() {
     check(!r.ok && r.stage == "check", "uninit is refused as a value");
 }
 
+void testFloatSuffix() {
+    std::printf("float suffix\n");
+    Checked f = check("func main() -> int { var x: float = 3.14f; return 0; }");
+    check(f.ok, "3.14f as float: " + f.stage);
+    Checked w = check("func main() -> int { var x: f64 = 3.14f; return 0; }");
+    check(w.ok, "3.14f adapts to f64: " + w.stage);
+}
+
 void testBitcast() {
     std::printf("@bitcast(T, x)\n");
     Checked ok = check("func main() -> int { var u: u64 = @bitcast(u64, 1.0); return 0; }");
@@ -1683,6 +1691,7 @@ int main() {
     testFiniRefusal();
     testCharArith();
     testBitcast();
+    testFloatSuffix();
     testUninit();
     testThisKeyword();
     testRepeatZero();

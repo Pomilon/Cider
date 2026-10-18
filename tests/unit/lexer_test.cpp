@@ -97,6 +97,10 @@ void testFloats() {
     check(f.lit.floatDigits == "3.14", "exact text");
     cider::Token e = only(lex("1.0e-9"), "1.0e-9");
     check(e.lit.floatDigits == "1.0e-9", "exponent kept");
+    cider::Token suf = only(lex("3.14f"), "3.14f");
+    check(suf.kind == cider::TokenKind::FloatLit, "a float suffix");
+    check(suf.lit.floatDigits == "3.14", "the suffix is not part of the digits");
+    check(suf.lit.floatNarrow, "and it asks for f32");
 }
 
 // Characters decode to a code point; an escape is one character.

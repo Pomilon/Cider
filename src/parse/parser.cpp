@@ -1858,7 +1858,7 @@ std::unique_ptr<Expr> Parser::parsePrefix() {
         }
         if (check(TokenKind::FloatLit)) {
             const Token& lit = advance();
-            return std::make_unique<FloatLit>(start, lit.lit.floatDigits, true);
+            return std::make_unique<FloatLit>(start, lit.lit.floatDigits, true, lit.lit.floatNarrow);
         }
         std::unique_ptr<Expr> operand = parsePrefix();
         if (operand == nullptr) {
@@ -1915,7 +1915,7 @@ std::unique_ptr<Expr> Parser::parsePrefix() {
         }
         case TokenKind::FloatLit: {
             const Token& lit = advance();
-            base = std::make_unique<FloatLit>(start, lit.lit.floatDigits, false);
+            base = std::make_unique<FloatLit>(start, lit.lit.floatDigits, false, lit.lit.floatNarrow);
             break;
         }
         case TokenKind::CharLit: {

@@ -80,6 +80,7 @@ struct Literal {
     uint8_t intBase = 0;          // IntLit: 2, 10 or 16
     std::string intDigits;        // IntLit: canonical digits, no `_`, no prefix
     std::string floatDigits;      // FloatLit: exact text
+    bool floatNarrow = false;     // FloatLit: 1.5f asks for f32
     uint32_t charValue = 0;       // CharLit: the code point
     std::vector<StringPart> parts;// StringLit: text and expression fragments
     std::vector<uint16_t> wideUnits;  // WideStringLit: decoded UTF-16 units

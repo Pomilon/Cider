@@ -374,16 +374,22 @@ Token Lexer::number() {
                 advance();
             }
         }
+        bool narrow = false;
+        if (!atEnd() && (peek() == 'f' || peek() == 'F')) {
+            advance();
+            narrow = true;
+        }
         std::string spelling = source_.substr(begin, cursor_ - begin);
         std::string clean;
         for (char d : spelling) {
-            if (d != '_') {
+            if (d != '_' && d != 'f' && d != 'F') {
                 clean.push_back(d);
             }
         }
         token.kind = TokenKind::FloatLit;
         token.text = spelling;
         token.lit.floatDigits = clean;
+        token.lit.floatNarrow = narrow;
         return token;
     }
     token.text = source_.substr(begin, cursor_ - begin);

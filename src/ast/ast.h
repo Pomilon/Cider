@@ -139,8 +139,9 @@ struct IntLit : Expr {
 struct FloatLit : Expr {
     std::string text;
     bool negative;
-    FloatLit(Position p, std::string t, bool neg)
-        : Expr(std::move(p)), text(std::move(t)), negative(neg) {}
+    bool narrow = false;
+    FloatLit(Position p, std::string t, bool neg, bool narrowFlag = false)
+        : Expr(std::move(p)), text(std::move(t)), negative(neg), narrow(narrowFlag) {}
     void accept(ASTVisitor& v) override;
 };
 
