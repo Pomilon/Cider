@@ -1695,6 +1695,7 @@ void Checker::checkInitAssign(DeclId id, const FuncDecl& ctor) {
 void Checker::checkOverrides(const resolve::Decl& self, const ClassDecl& n) {
     for (const MethodDecl& method : n.methods) {
         const Signature* own = resolver_.methodSig(self.id, method.name);
+        bool sawBaseVirtual = false;
         for (DeclId baseId : resolver_.classBases(self.id)) {
             const Signature* baseSig = resolver_.methodSig(baseId, method.name);
             if (baseSig == nullptr) {
@@ -1706,10 +1707,15 @@ void Checker::checkOverrides(const resolve::Decl& self, const ClassDecl& n) {
                                      method.name + "'");
                 continue;
             }
+            sawBaseVirtual = true;
             if (own != nullptr && !sameSignature(*own, *baseSig)) {
                 fail(method.pos, "'" + method.name +
                                      "' overrides with an incompatible signature");
             }
+        }
+        if (method.isOverride && !sawBaseVirtual) {
+            fail(method.pos, "'" + method.name +
+                                 "' overrides but no base declares a virtual of that name");
         }
     }
 }

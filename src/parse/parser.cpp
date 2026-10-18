@@ -444,6 +444,7 @@ FieldDecl Parser::parseField() {
 
 MethodDecl Parser::parseMethod() {
     Position start = peek().pos;
+    bool isOverride = match(TokenKind::KwOverride);
     bool isVirtual = match(TokenKind::KwVirtual);
     if (!match(TokenKind::KwFunc)) {
         failHere("expected a method");
@@ -471,8 +472,10 @@ MethodDecl Parser::parseMethod() {
                           nullptr, isVirtual);
     }
     std::unique_ptr<Stmt> body = parseBlock();
-    return MethodDecl(start, std::move(name), std::move(params), std::move(returns),
-                      std::unique_ptr<Block>(static_cast<Block*>(body.release())), isVirtual);
+    MethodDecl out(start, std::move(name), std::move(params), std::move(returns),
+                   std::unique_ptr<Block>(static_cast<Block*>(body.release())), isVirtual);
+    out.isOverride = isOverride;
+    return out;
 }
 
 std::unique_ptr<Decl> Parser::parseStructDecl(bool) {
@@ -524,7 +527,8 @@ std::unique_ptr<Decl> Parser::parseStructDecl(bool) {
         if (check(TokenKind::KwVar) ||
             (check(TokenKind::Ident) && peekAt(1).kind == TokenKind::Colon)) {
             fields.push_back(parseField());
-        } else if (check(TokenKind::KwVirtual) || check(TokenKind::KwFunc)) {
+        } else if (check(TokenKind::KwVirtual) || check(TokenKind::KwFunc) ||
+                   check(TokenKind::KwOverride)) {
             methods.push_back(parseMethod());
         } else {
             failHere("a struct holds fields and methods");
@@ -594,7 +598,8 @@ std::unique_ptr<Decl> Parser::parseClassDecl(bool) {
             fields.push_back(parseField());
             continue;
         }
-        if (check(TokenKind::KwVirtual) || check(TokenKind::KwFunc)) {
+        if (check(TokenKind::KwVirtual) || check(TokenKind::KwFunc) ||
+            check(TokenKind::KwOverride)) {
             MethodDecl method = parseMethod();
             if ((method.name == "init" || method.name == "deinit") &&
                 method.body != nullptr) {

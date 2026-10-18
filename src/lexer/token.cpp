@@ -54,6 +54,7 @@ const char* tokenName(TokenKind kind) {
         case TokenKind::KwThis: return "this";
         case TokenKind::KwSelf: return "self";
         case TokenKind::KwSuper: return "super";
+        case TokenKind::KwOverride: return "override";
         case TokenKind::KwInit: return "init";
         case TokenKind::KwDeinit: return "deinit";
         case TokenKind::KwVirtual: return "virtual";

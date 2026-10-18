@@ -567,6 +567,7 @@ struct MethodDecl : Node {
     std::unique_ptr<TypeExpr> returns;
     std::unique_ptr<Block> body;
     bool isVirtual;
+    bool isOverride = false;
     MethodDecl(Position p, std::string n, std::vector<Param> ps,
                std::unique_ptr<TypeExpr> r, std::unique_ptr<Block> b, bool virt)
         : Node(std::move(p)), name(std::move(n)), params(std::move(ps)),

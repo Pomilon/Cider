@@ -547,6 +547,31 @@ void testUnions() {
 
 // A by-value cycle has no finite size: the declaration itself is refused,
 // while a pointer to self stays legal (the reference is 8 bytes).
+void testOverride() {
+    std::printf("the override keyword\n");
+    Checked good = check(
+        "class Base { var v: int; virtual func f() -> int { return 1; } }\n"
+        "class Derived : Base { override func f() -> int { return 2; } }\n"
+        "func main() -> int { return 0; }\n");
+    check(good.ok, "override over a virtual checks: " + good.stage);
+    Checked bare = check(
+        "class Base { var v: int; virtual func f() -> int { return 1; } }\n"
+        "class Derived : Base { func f() -> int { return 2; } }\n"
+        "func main() -> int { return 0; }\n");
+    check(bare.ok, "an implicit override still checks: " + bare.stage);
+    Checked noBase = check(
+        "class Derived { var v: int; override func f() -> int { return 2; } }\n"
+        "func main() -> int { return 0; }\n");
+    check(!noBase.ok && noBase.stage == "check",
+          "override without a base virtual fails: " + noBase.stage);
+    Checked shadow = check(
+        "class Base { var v: int; virtual func f() -> int { return 1; } }\n"
+        "class Mid : Base { }\n"
+        "class Derived : Mid { override func f() -> int { return 2; } }\n"
+        "func main() -> int { return 0; }\n");
+    check(shadow.ok, "override through an indirect base checks: " + shadow.stage);
+}
+
 void testSelfEmbed() {
     std::printf("self-embedding nominals are refused\n");
     Checked self = check(
@@ -1702,6 +1727,7 @@ int main() {
     testGenericStruct();
     testUnions();
     testSelfEmbed();
+    testOverride();
     testFnAddr();
     testIncrDecr();
     testBoolCompare();
