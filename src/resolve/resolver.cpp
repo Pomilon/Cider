@@ -139,6 +139,7 @@ int64_t Resolver::fieldOffset(DeclId id, const std::string& name) const {
     // virtual slots to name (Unified Standard 4.8.5).
     bool classChain = false;
     bool afterVptr = false;
+    bool packedStruct = false;
     if (const Decl* self = declById(id)) {
         if (self->nominal == Kind::Union) {
             return unionMemberIndex(id, name) >= 0 ? 0 : -1;
@@ -146,6 +147,9 @@ int64_t Resolver::fieldOffset(DeclId id, const std::string& name) const {
         if (self->nominal == Kind::Class) {
             classChain = true;
             afterVptr = !virtualNames(id).empty();
+        }
+        if (self->nominal == Kind::Struct && self->packed) {
+            packedStruct = true;
         }
     }
     std::vector<std::string> fields;
@@ -185,7 +189,9 @@ int64_t Resolver::fieldOffset(DeclId id, const std::string& name) const {
         if (multiple <= 0 || bytes < 0) {
             return -1;
         }
-        at = layout::roundUp(at, multiple);
+        if (!packedStruct) {
+            at = layout::roundUp(at, multiple);
+        }
         if (field == name) {
             return at;
         }
@@ -344,6 +350,8 @@ int64_t Resolver::nominalAlignImpl(const Type* type,
 }
 
 int64_t Resolver::structSizeImpl(DeclId id, std::unordered_set<std::string>& seen) const {
+    const Decl* self = declById(id);
+    const bool packed = self != nullptr && self->packed;
     int64_t at = 0;
     int64_t multiple = 1;
     for (const std::string& field : fieldNames(id)) {
@@ -359,13 +367,24 @@ int64_t Resolver::structSizeImpl(DeclId id, std::unordered_set<std::string>& see
         if (fieldMultiple > multiple) {
             multiple = fieldMultiple;
         }
-        at = layout::roundUp(at, fieldMultiple);
+        if (!packed) {
+            at = layout::roundUp(at, fieldMultiple);
+        }
         at += bytes;
+    }
+    if (packed) {
+        // 4.5: no padding is the point; the size is the raw sum.
+        return at;
     }
     return layout::roundUp(at, multiple);
 }
 
 int64_t Resolver::structAlignImpl(DeclId id, std::unordered_set<std::string>& seen) const {
+    const Decl* self = declById(id);
+    if (self != nullptr && self->packed) {
+        // 4.5: a byte-exact layout aligns to one.
+        return 1;
+    }
     int64_t multiple = 1;
     for (const std::string& field : fieldNames(id)) {
         TypeRef type = fieldType(id, field);
@@ -918,6 +937,7 @@ void Resolver::declareModule(const std::string& module, Program& program,
         Decl* d = bind(scope, DeclKind::Type, name, decl->pos);
         d->nominal = nominal;
         d->typeParams = tps;
+        d->packed = sd != nullptr && sd->packed;
         d->type = TypeRef{ctx_.nominal(nominal, d->id)};
     }
     for (const std::unique_ptr<VarDecl>& global : program.globals) {

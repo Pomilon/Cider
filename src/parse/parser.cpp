@@ -274,6 +274,25 @@ std::unique_ptr<Program> Parser::parse() {
 
 std::unique_ptr<Decl> Parser::parseDecl() {
     TokenKind kind = peek().kind;
+    if (kind == TokenKind::At) {
+        // 4.5: `@packed struct` — the only declaration-level use of `@`.
+        advance();
+        if (!check(TokenKind::Ident) || peek().text != "packed") {
+            failHere("expected 'packed' after '@' in a declaration");
+            return nullptr;
+        }
+        advance();
+        if (!check(TokenKind::KwStruct)) {
+            failHere("'@packed' applies to struct declarations only");
+            return nullptr;
+        }
+        std::unique_ptr<Decl> decl = parseStructDecl(false);
+        if (decl == nullptr) {
+            return nullptr;
+        }
+        static_cast<StructDecl*>(decl.get())->packed = true;
+        return decl;
+    }
     if (kind == TokenKind::KwFunc) {
         return parseFuncDecl(false);
     }

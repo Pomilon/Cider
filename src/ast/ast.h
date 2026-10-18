@@ -613,6 +613,8 @@ struct StructDecl : Decl {
     std::vector<std::unique_ptr<TypeExpr>> interfaces;
     std::vector<FieldDecl> fields;
     std::vector<MethodDecl> methods;
+    // 4.5: a @packed struct drops every padding byte between its fields.
+    bool packed = false;
     StructDecl(Position p, std::string n, std::vector<std::string> tps,
                std::vector<std::unique_ptr<TypeExpr>> ifs, std::vector<FieldDecl> f,
                std::vector<MethodDecl> m)

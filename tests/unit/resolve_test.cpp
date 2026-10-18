@@ -305,6 +305,55 @@ void testClassSize() {
     check(r.resolver->classAlign(vderived->id) == 8, "a virtual chain keeps the vptr alignment");
 }
 
+// 4.5: a @packed struct drops every padding byte; an unpacked twin keeps
+// natural alignment. The nested u32 proves the packed alignment is one:
+// the field after the header sits at the raw byte offset.
+void testPackedStruct() {
+    std::printf("packed structs drop padding\n");
+    Resolved r = resolve(
+        "@packed struct EthernetHeader {\n"
+        "  dest_mac: [u8; 6];\n"
+        "  src_mac: [u8; 6];\n"
+        "  ethertype: u16;\n"
+        "}\n"
+        "struct EthernetLoose {\n"
+        "  tag: u8;\n"
+        "  ethertype: u16;\n"
+        "  dest_mac: [u8; 6];\n"
+        "}\n"
+        "@packed struct LoosePacked {\n"
+        "  tag: u8;\n"
+        "  ethertype: u16;\n"
+        "  dest_mac: [u8; 6];\n"
+        "}\n"
+        "@packed struct WithHeader {\n"
+        "  var tag: u8;\n"
+        "  var eth: EthernetHeader;\n"
+        "  var word: u32;\n"
+        "}\n");
+    check(r.ok, "resolves");
+    if (!r.ok) {
+        return;
+    }
+    const cider::resolve::Decl* packed =
+        r.resolver->lookup(r.resolver->moduleScope(), "EthernetHeader");
+    const cider::resolve::Decl* loose =
+        r.resolver->lookup(r.resolver->moduleScope(), "EthernetLoose");
+    const cider::resolve::Decl* outer =
+        r.resolver->lookup(r.resolver->moduleScope(), "WithHeader");
+    const cider::resolve::Decl* tight =
+        r.resolver->lookup(r.resolver->moduleScope(), "LoosePacked");
+    check(r.resolver->structSize(packed->id) == 14, "a packed struct is its raw sum");
+    check(r.resolver->fieldOffset(packed->id, "ethertype") == 12, "packed fields sit byte-exact");
+    check(r.resolver->structSize(loose->id) == 10, "an unpacked struct keeps padding");
+    check(r.resolver->fieldOffset(loose->id, "ethertype") == 2, "an unpacked field follows its alignment");
+    check(r.resolver->structSize(tight->id) == 9, "the packed twin drops the pad byte");
+    check(r.resolver->fieldOffset(tight->id, "ethertype") == 1, "the packed twin has no pad byte");
+    check(r.resolver->fieldOffset(outer->id, "eth") == 1, "a packed member aligns to one");
+    check(r.resolver->fieldOffset(outer->id, "word") == 15, "the packed container packs the tail");
+    check(r.resolver->structSize(outer->id) == 19, "the packed container sums raw extents");
+}
+
 void testMethodInit() {
     std::printf("init and deinit signatures are recorded\n");
     Resolved r = resolve(
@@ -337,6 +386,7 @@ int main() {
     testSpecialize();
     testNominalSize();
     testClassSize();
+    testPackedStruct();
     testMethodInit();
     std::printf("\n%d checks, %s\n", checks, failures == 0 ? "all passed" : "FAILURES");
     return failures == 0 ? 0 : 1;

@@ -56,6 +56,8 @@ struct Decl {
     std::vector<std::string> paramNames;
     // Type only: which nominal Kind (Struct, Class, Interface, Union, Enum).
     Kind nominal = Kind::Error;
+    // Struct only: 4.5's @packed spelling — no padding between fields.
+    bool packed = false;
     // Alias only: the spelling it names. Non-owning; the AST outlives use.
     const TypeExpr* aliasTarget = nullptr;
     // Alias only, from-import: the defining module the target lives in
