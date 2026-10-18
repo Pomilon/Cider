@@ -1324,6 +1324,18 @@ void testUninit() {
     check(!r.ok && r.stage == "check", "uninit is refused as a value");
 }
 
+void testAddrCasts() {
+    std::printf("universal address casts\n");
+    Checked mem = check("func main() -> int { var p: *u16 = 0xB8000 as *u16; return 0; }");
+    check(mem.ok, "a physical address casts to *u16: " + mem.stage);
+    Checked rt = check("func add(a: int, b: int) -> int { return a + b; }\n"
+                       "func main() -> int {\n"
+                       "  var addr: u64 = (&add) as u64;\n"
+                       "  var fp: *func(int, int) -> int = addr as *func(int, int) -> int;\n"
+                       "  return fp(2, 3) - 5;\n}\n");
+    check(rt.ok, "a symbol address round-trips to a call: " + rt.stage);
+}
+
 void testFloatSuffix() {
     std::printf("float suffix\n");
     Checked f = check("func main() -> int { var x: float = 3.14f; return 0; }");
@@ -1691,6 +1703,7 @@ int main() {
     testFiniRefusal();
     testCharArith();
     testBitcast();
+    testAddrCasts();
     testFloatSuffix();
     testUninit();
     testThisKeyword();

@@ -8909,8 +8909,19 @@ std::vector<ir::Value> Lowerer::lowerCallWords(Call& n) {
                 if (bound == locals_[depth].end()) {
                     continue;
                 }
-                if (bound->second.type.type->kind() == Kind::FunctionPtr &&
-                    checker_.provOfName(ident->name) == check::Prov::Closure) {
+                if (bound->second.type.type->kind() == Kind::FunctionPtr) {
+                    if (checker_.provOfName(ident->name) != check::Prov::Closure) {
+                        const Signature* rawSig =
+                            bound->second.type.type->signature();
+                        std::vector<ir::Value> rawHeld =
+                            loadLocal(n.pos, bound->second);
+                        if (!failed_ && rawSig != nullptr &&
+                            rawHeld.size() == kOneWord) {
+                            sig = rawSig;
+                            indirect = true;
+                            indirectCallee = rawHeld[kFirstWord];
+                        }
+                    } else {
                     const Signature* csig =
                         bound->second.type.type->signature();
                     std::vector<ir::Value> held =
@@ -8925,6 +8936,7 @@ std::vector<ir::Value> Lowerer::lowerCallWords(Call& n) {
                             indirectCallee = pair[kFirstWord];
                             receiver.push_back(pair[kLenWord]);
                         }
+                    }
                     }
                 }
                 break;
