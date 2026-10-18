@@ -1337,7 +1337,10 @@ Pattern Parser::parsePattern() {
 
 std::unique_ptr<Stmt> Parser::parseMatch() {
     Position start = advance().pos;
+    bool savedNoLit = noStructLit_;
+    noStructLit_ = true;
     std::unique_ptr<Expr> scrutinee = parseExpr();
+    noStructLit_ = savedNoLit;
     if (scrutinee == nullptr) {
         return nullptr;
     }
@@ -1992,6 +1995,16 @@ std::unique_ptr<Expr> Parser::parsePrefix() {
         }
         case TokenKind::Ident: {
             std::string name = advance().text;
+            if (check(TokenKind::LBrace) && !noStructLit_) {
+                advance();
+                std::vector<std::unique_ptr<TypeExpr>> noArgs;
+                auto named = std::make_unique<NamedType>(start, "", name, std::move(noArgs));
+                base = parseStructLiteral(std::move(named), start);
+                if (base == nullptr) {
+                    return nullptr;
+                }
+                break;
+            }
             base = std::make_unique<Ident>(start, std::move(name));
             break;
         }
@@ -2175,6 +2188,39 @@ std::unique_ptr<Expr> Parser::parsePostfix(std::unique_ptr<Expr> base) {
     }
 }
 
+std::unique_ptr<Expr> Parser::parseStructLiteral(std::unique_ptr<TypeExpr> type,
+                                                 Position start) {
+    std::vector<FieldInit> fields;
+    if (!check(TokenKind::RBrace)) {
+        for (;;) {
+            if (!check(TokenKind::Ident)) {
+                failHere("a field needs a name");
+                return nullptr;
+            }
+            FieldInit field;
+            field.name = advance().text;
+            if (!match(TokenKind::Colon)) {
+                failHere("expected ':'");
+                return nullptr;
+            }
+            field.value = parseExpr();
+            if (field.value == nullptr) {
+                return nullptr;
+            }
+            fields.push_back(std::move(field));
+            if (match(TokenKind::Comma)) {
+                continue;
+            }
+            break;
+        }
+    }
+    if (!match(TokenKind::RBrace)) {
+        failHere("expected '}'");
+        return nullptr;
+    }
+    return std::make_unique<NewStruct>(start, std::move(type), std::move(fields));
+}
+
 std::unique_ptr<Expr> Parser::parseNew() {
     Position start = advance().pos;
     if (check(TokenKind::LBracket)) {
@@ -2257,36 +2303,13 @@ std::unique_ptr<Expr> Parser::parseNew() {
     if (type == nullptr) {
         return nullptr;
     }
-    if (match(TokenKind::LBrace)) {
-        std::vector<FieldInit> fields;
-        if (!check(TokenKind::RBrace)) {
-            for (;;) {
-                if (!check(TokenKind::Ident)) {
-                    failHere("a field needs a name");
-                    return nullptr;
-                }
-                FieldInit field;
-                field.name = advance().text;
-                if (!match(TokenKind::Colon)) {
-                    failHere("expected ':'");
-                    return nullptr;
-                }
-                field.value = parseExpr();
-                if (field.value == nullptr) {
-                    return nullptr;
-                }
-                fields.push_back(std::move(field));
-                if (match(TokenKind::Comma)) {
-                    continue;
-                }
-                break;
-            }
+    if (check(TokenKind::LBrace)) {
+        advance();
+        std::unique_ptr<Expr> lit = parseStructLiteral(std::move(type), start);
+        if (lit != nullptr) {
+            static_cast<NewStruct*>(lit.get())->heap = true;
         }
-        if (!match(TokenKind::RBrace)) {
-            failHere("expected '}'");
-            return nullptr;
-        }
-        return std::make_unique<NewStruct>(start, std::move(type), std::move(fields));
+        return lit;
     }
     if (match(TokenKind::LParen)) {
         std::vector<std::unique_ptr<Expr>> args;

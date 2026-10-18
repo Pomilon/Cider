@@ -300,6 +300,7 @@ struct FieldInit {
 struct NewStruct : Expr {
     std::unique_ptr<TypeExpr> type;
     std::vector<FieldInit> fields;
+    bool heap = false;
     NewStruct(Position p, std::unique_ptr<TypeExpr> t, std::vector<FieldInit> f)
         : Expr(std::move(p)), type(std::move(t)), fields(std::move(f)) {}
     void accept(ASTVisitor& v) override;

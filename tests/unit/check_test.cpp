@@ -1324,6 +1324,14 @@ void testUninit() {
     check(!r.ok && r.stage == "check", "uninit is refused as a value");
 }
 
+void testBareLiteral() {
+    std::printf("bare struct literals\n");
+    Checked v = check("struct S { x: int; } func main() -> int { var s: S = S { x: 3 }; return s.x - 3; }");
+    check(v.ok, "a bare literal is a stack value: " + v.stage);
+    Checked m = check("func main() -> int { var flag: bool = true; match flag { true => { return 0; } default => { return 1; } } }");
+    check(m.ok, "a match scrutinee is not a literal head: " + m.stage);
+}
+
 void testAddrCasts() {
     std::printf("universal address casts\n");
     Checked mem = check("func main() -> int { var p: *u16 = 0xB8000 as *u16; return 0; }");
@@ -1704,6 +1712,7 @@ int main() {
     testCharArith();
     testBitcast();
     testAddrCasts();
+    testBareLiteral();
     testFloatSuffix();
     testUninit();
     testThisKeyword();

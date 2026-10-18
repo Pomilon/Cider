@@ -100,6 +100,8 @@ private:
     std::unique_ptr<TypeExpr> parseReturnType();
     FieldDecl parseField();
     MethodDecl parseMethod();
+    std::unique_ptr<Expr> parseStructLiteral(std::unique_ptr<TypeExpr> type,
+                                            Position start);
     std::unique_ptr<Stmt> parseStmt();
     std::unique_ptr<Stmt> parseBlock();
     std::unique_ptr<VarDecl> parseVarDecl();
@@ -136,6 +138,9 @@ private:
     std::unique_ptr<Expr> parseBraced(const std::vector<Token>& tokens, Position pos);
 
     std::string file_;
+    // A bare `T { ... }` literal is refused where a `{` follows an
+    // expression that cannot be a literal head (a match scrutinee).
+    bool noStructLit_ = false;
     std::vector<Token> tokens_;
     uint64_t cursor_ = 0;
     std::vector<ParseError> errors_;
