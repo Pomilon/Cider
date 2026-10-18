@@ -680,6 +680,9 @@ private:
     // enclosing function's frame. Enter and exit are always paired by the
     // checker, so this stack can never underflow while locals_ can.
     std::vector<uint64_t> scopeMarks_;
+    // The DeclId of the method being lowered, so `super.m(...)` resolves
+    // the base declarer statically (Unified Standard 4.8.3).
+    std::optional<DeclId> currentMethodOwner_;
     std::vector<GlobalBinding> globals_;
     // The binding a bare global name means here: resolved through the
     // current module's scope to the declaration's home module, never by

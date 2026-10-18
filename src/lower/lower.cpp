@@ -2212,6 +2212,22 @@ void Lowerer::onMethodDecl(const std::string& owner, const std::string& name,
     const resolve::Scope* here = homeScope();
     const resolve::Decl* ownerDecl =
         here != nullptr ? resolver_.lookup(here, owner) : nullptr;
+    // The owner rides as the current method so `super.m(...)` inside the
+    // body resolves the base declarer; the guard restores the outer
+    // method on every exit, including refusals.
+    struct OwnerGuard {
+        std::optional<DeclId>& slot;
+        std::optional<DeclId> prev;
+        OwnerGuard(std::optional<DeclId>& s, std::optional<DeclId> v)
+            : slot(s), prev(s) {
+            slot = v;
+        }
+        ~OwnerGuard() { slot = prev; }
+    };
+    OwnerGuard ownerGuard(currentMethodOwner_,
+                           ownerDecl != nullptr
+                               ? std::optional<DeclId>(ownerDecl->id)
+                               : std::nullopt);
     std::string linkOwner = owner;
     if (ownerDecl != nullptr) {
         linkOwner = resolver_.linkName(*ownerDecl);
@@ -6936,6 +6952,17 @@ std::vector<ir::Value> Lowerer::lowerAddrOf(const Unary& n) {
 }
 
 std::vector<ir::Value> Lowerer::lowerWords(const Expr* expr) {
+    if (const auto* sup = dynamic_cast<const Super*>(expr)) {
+        // The receiver this method already has: the `self` local.
+        for (auto frame = locals_.rbegin(); frame != locals_.rend(); ++frame) {
+            auto it = frame->find("self");
+            if (it != frame->end()) {
+                return loadLocal(sup->pos, it->second);
+            }
+        }
+        refuse(expr->pos, "super outside a method");
+        return {undefined()};
+    }
     if (expr == nullptr || failed_) {
         return {undefined()};
     }
@@ -8532,7 +8559,11 @@ std::vector<ir::Value> Lowerer::lowerCallWords(Call& n) {
     Place base;
     bool haveBase = false;
     if (const auto* field = dynamic_cast<const Field*>(n.callee.get())) {
-        haveBase =
+        // `super` is not a place; resolving it would refuse. The super
+        // branch below resolves the base method statically and reads the
+        // receiver straight from the `self` local.
+        bool isSuper = dynamic_cast<const Super*>(field->object.get()) != nullptr;
+        haveBase = !isSuper &&
             resolvePlace(field->object.get(), base) && !base.type.isError();
         if (haveBase && base.type.type->kind() == Kind::Union) {
             std::optional<DeclId> id = base.type.type->decl();
@@ -8568,7 +8599,37 @@ std::vector<ir::Value> Lowerer::lowerCallWords(Call& n) {
         // is a static call to the mangled name with the object's address
         // first. Disjoint from the union path above: only values with
         // methods reach here.
-        if (haveBase &&
+        if (dynamic_cast<const Super*>(field->object.get()) != nullptr) {
+            // `super.m(args)`: the base's own function, resolved
+            // statically — never the override, never a vtable slot.
+            const Signature* baseSig = nullptr;
+            std::optional<DeclId> baseHome;
+            if (currentMethodOwner_.has_value()) {
+                for (DeclId baseId : resolver_.classBases(*currentMethodOwner_)) {
+                    baseSig = resolver_.methodSig(baseId, field->name);
+                    if (baseSig != nullptr) {
+                        baseHome = resolver_.methodHome(baseId, field->name);
+                        break;
+                    }
+                }
+            }
+            const resolve::Decl* baseDecl =
+                baseHome.has_value() ? resolver_.declById(*baseHome) : nullptr;
+            if (baseDecl == nullptr || baseSig == nullptr) {
+                refuse(n.pos, "this call");
+                return {undefined()};
+            }
+            std::vector<ir::Value> selfWords = lowerWords(field->object.get());
+            if (failed_ || selfWords.size() != kOneWord) {
+                if (!failed_) {
+                    refuse(n.pos, "this call");
+                }
+                return {undefined()};
+            }
+            receiver.push_back(selfWords[0]);
+            sig = baseSig;
+            callee = resolver_.linkName(*baseDecl) + "__" + field->name;
+        } else if (haveBase &&
             (base.type.type->kind() == Kind::Class ||
              base.type.type->kind() == Kind::Struct)) {
             std::optional<DeclId> id = base.type.type->decl();

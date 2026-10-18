@@ -1966,6 +1966,11 @@ std::unique_ptr<Expr> Parser::parsePrefix() {
             base = std::make_unique<UninitExpr>(start);
             break;
         }
+        case TokenKind::KwSuper: {
+            advance();
+            base = std::make_unique<Super>(start);
+            break;
+        }
         case TokenKind::At: {
             advance();
             if (!check(TokenKind::Ident) || peek().text != "bitcast") {

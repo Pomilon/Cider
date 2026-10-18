@@ -547,6 +547,27 @@ void testUnions() {
 
 // A by-value cycle has no finite size: the declaration itself is refused,
 // while a pointer to self stays legal (the reference is 8 bytes).
+void testSuperCall() {
+    std::printf("super.method calls\n");
+    Checked good = check(
+        "class Base { var v: int; func get() -> int { return (*self).v; } }\n"
+        "class Derived : Base {\n"
+        "    func get2() -> int { return super.get() + 1; } }\n"
+        "func main() -> int { return 0; }\n");
+    check(good.ok, "super.m checks: " + good.stage);
+    Checked noMethod = check(
+        "class Base { var v: int; }\n"
+        "class Derived : Base {\n"
+        "    func get2() -> int { return super.nope(); } }\n"
+        "func main() -> int { return 0; }\n");
+    check(!noMethod.ok && noMethod.stage == "check",
+          "super.m without a base method fails");
+    Checked noBase = check(
+        "class Solo { var v: int; func f() -> int { return super.g(); } }\n"
+        "func main() -> int { return 0; }\n");
+    check(!noBase.ok && noBase.stage == "check", "super in a baseless class fails");
+}
+
 void testOverride() {
     std::printf("the override keyword\n");
     Checked good = check(
@@ -1728,6 +1749,7 @@ int main() {
     testUnions();
     testSelfEmbed();
     testOverride();
+    testSuperCall();
     testFnAddr();
     testIncrDecr();
     testBoolCompare();

@@ -197,6 +197,14 @@ struct UninitExpr : Expr {
     void accept(ASTVisitor& v) override;
 };
 
+// The receiver inside a derived method: the same object, resolved at the
+// BASE of the chain (Unified Standard 4.8.3). Only legal in a method of a
+// class that has a base.
+struct Super : Expr {
+    using Expr::Expr;
+    void accept(ASTVisitor& v) override;
+};
+
 struct Ident : Expr {
     std::string name;
     Ident(Position p, std::string n) : Expr(std::move(p)), name(std::move(n)) {}
@@ -776,6 +784,7 @@ struct ASTVisitor {
     virtual void visitBoolLit(BoolLit& n);
     virtual void visitNilPtr(NilPtr& n);
     virtual void visitUninitExpr(UninitExpr& n);
+    virtual void visitSuper(Super& n);
     virtual void visitIdent(Ident& n);
     virtual void visitBinary(Binary& n);
     virtual void visitUnary(Unary& n);
@@ -849,6 +858,7 @@ inline void WideChar::accept(ASTVisitor& v) { v.visitWideChar(*this); }
 inline void BoolLit::accept(ASTVisitor& v) { v.visitBoolLit(*this); }
 inline void NilPtr::accept(ASTVisitor& v) { v.visitNilPtr(*this); }
 inline void UninitExpr::accept(ASTVisitor& v) { v.visitUninitExpr(*this); }
+inline void Super::accept(ASTVisitor& v) { v.visitSuper(*this); }
 inline void Ident::accept(ASTVisitor& v) { v.visitIdent(*this); }
 inline void Binary::accept(ASTVisitor& v) { v.visitBinary(*this); }
 inline void Unary::accept(ASTVisitor& v) { v.visitUnary(*this); }
@@ -938,6 +948,7 @@ inline void ASTVisitor::visitStringLit(StringLit& n) {
 inline void ASTVisitor::visitBoolLit(BoolLit&) {}
 inline void ASTVisitor::visitNilPtr(NilPtr&) {}
 inline void ASTVisitor::visitUninitExpr(UninitExpr&) {}
+inline void ASTVisitor::visitSuper(Super&) {}
 inline void ASTVisitor::visitIdent(Ident&) {}
 inline void ASTVisitor::visitBinary(Binary& n) {
     n.lhs->accept(*this);

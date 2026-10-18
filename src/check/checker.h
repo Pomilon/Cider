@@ -242,6 +242,7 @@ public:
     void visitBoolLit(BoolLit& n) override;
     void visitNilPtr(NilPtr& n) override;
     void visitUninitExpr(UninitExpr& n) override;
+    void visitSuper(Super& n) override;
     void visitIdent(Ident& n) override;
     void visitBinary(Binary& n) override;
     void visitUnary(Unary& n) override;
@@ -533,6 +534,10 @@ private:
     std::unordered_set<const Pattern*> deadPatterns_;
     TypeRef funcReturn_;
     bool inFunc_ = false;
+    // The class and self type of the method body being walked, so
+    // `super` resolves against the right base (Unified Standard 4.8.3).
+    std::optional<DeclId> currentClass_;
+    TypeRef currentSelf_;
     uint64_t loopDepth_ = 0;
     // Defer bodies being walked, for the exit-jump ban: a return, break or
     // continue inside one would leave its scope twice.

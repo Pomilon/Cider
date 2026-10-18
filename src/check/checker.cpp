@@ -1742,8 +1742,12 @@ void Checker::checkMethods(DeclId id, Kind kind, std::vector<MethodDecl>& method
         const Type* ret = sig->returnType() != nullptr ? sig->returnType() : ctx_.void_();
         TypeRef saved = funcReturn_;
         bool was = inFunc_;
+        std::optional<DeclId> savedClass = currentClass_;
+        TypeRef savedSelf = currentSelf_;
         funcReturn_ = TypeRef{ret};
         inFunc_ = true;
+        currentClass_ = id;
+        currentSelf_ = TypeRef{self};
         if (sink_ != nullptr) {
             const resolve::Decl* owner = resolver_.declById(id);
             std::string name = owner != nullptr ? owner->name : "";
@@ -1754,6 +1758,8 @@ void Checker::checkMethods(DeclId id, Kind kind, std::vector<MethodDecl>& method
         }
         funcReturn_ = saved;
         inFunc_ = was;
+        currentClass_ = savedClass;
+        currentSelf_ = savedSelf;
         popScope();
     }
 }
@@ -2073,6 +2079,20 @@ void Checker::visitUninitExpr(UninitExpr& n) {
     // value. visitVarDecl lets it through by name; anywhere else it fails.
     fail(n.pos, "uninit is only allowed as a variable's initializer");
     record(&n, TypeRef{ctx_.error()});
+}
+
+void Checker::visitSuper(Super& n) {
+    if (!inFunc_ || !currentClass_.has_value()) {
+        fail(n.pos, "super is only a receiver inside a method");
+        record(&n, errorRef());
+        return;
+    }
+    if (resolver_.classBases(*currentClass_).empty()) {
+        fail(n.pos, "super needs a base class");
+        record(&n, errorRef());
+        return;
+    }
+    record(&n, currentSelf_);
 }
 
 void Checker::visitIdent(Ident& n) {
@@ -3952,6 +3972,40 @@ TypeRef Checker::checkCall(Call& expr) {
             if (!object.isError() && object.type->kind() == Kind::Union) {
                 return checkUnionHas(expr, *field, object);
             }
+        }
+    }
+    // `super.m(args)`: the base's method, resolved statically — never the
+    // derived override and never a vtable slot (Unified Standard 4.8.3).
+    if (const auto* field = dynamic_cast<const Field*>(expr.callee.get())) {
+        if (dynamic_cast<const Super*>(field->object.get()) != nullptr) {
+            if (!currentClass_.has_value()) {
+                fail(expr.pos, "super is only a receiver inside a method");
+                return errorRef();
+            }
+            const Signature* baseSig = nullptr;
+            for (DeclId baseId : resolver_.classBases(*currentClass_)) {
+                baseSig = resolver_.methodSig(baseId, field->name);
+                if (baseSig != nullptr) {
+                    break;
+                }
+            }
+            if (baseSig == nullptr) {
+                fail(expr.pos, "no base declares a method named '" + field->name + "'");
+                return errorRef();
+            }
+            record(field, TypeRef{ctx_.closure(*baseSig)});
+            if (expr.args.size() != baseSig->arity()) {
+                fail(expr.pos, "wrong number of arguments");
+                return errorRef();
+            }
+            for (uint64_t i = 0; i < static_cast<uint64_t>(expr.args.size()); ++i) {
+                TypeRef want{baseSig->parameters()[i].type};
+                TypeRef got = checkExpr(expr.args[i].get(), want);
+                checkCompatible(expr.args[i]->pos, expr.args[i].get(), got, want);
+            }
+            const Type* ret =
+                baseSig->returnType() != nullptr ? baseSig->returnType() : ctx_.void_();
+            return TypeRef{ret};
         }
     }
     if (const auto* ident = dynamic_cast<const Ident*>(expr.callee.get())) {
