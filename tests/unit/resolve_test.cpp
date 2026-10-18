@@ -354,6 +354,45 @@ void testPackedStruct() {
     check(r.resolver->structSize(outer->id) == 19, "the packed container sums raw extents");
 }
 
+// 4.1: bitfields pack into storage units of their declared type, earliest
+// field at the low bits; a base-type change or a full unit opens a new one.
+void testBitfields() {
+    std::printf("bitfields pack into storage units\n");
+    Resolved r = resolve(
+        "struct Flags {\n"
+        "  a: int:3;\n"
+        "  b: int:5;\n"
+        "  c: bool:1;\n"
+        "  d: int;\n"
+        "}\n"
+        "struct Split {\n"
+        "  x: u32:30;\n"
+        "  y: u32:5;\n"
+        "}\n");
+    check(r.ok, "resolves");
+    if (!r.ok) {
+        return;
+    }
+    const cider::resolve::Decl* flags =
+        r.resolver->lookup(r.resolver->moduleScope(), "Flags");
+    const cider::resolve::Decl* split =
+        r.resolver->lookup(r.resolver->moduleScope(), "Split");
+    int64_t bit = -1;
+    int64_t width = -1;
+    check(r.resolver->structSize(flags->id) == 12, "two units and the tail pack to twelve");
+    check(r.resolver->fieldOffset(flags->id, "a") == 0, "the first unit opens the struct");
+    check(r.resolver->fieldOffset(flags->id, "b") == 0, "the second bitfield shares the unit");
+    check(r.resolver->fieldOffset(flags->id, "c") == 4, "a new base type opens a new unit");
+    check(r.resolver->fieldOffset(flags->id, "d") == 8, "the plain field follows the units");
+    check(r.resolver->bitField(flags->id, "a", bit, width) && bit == 0 && width == 3,
+          "a takes the low three bits");
+    check(r.resolver->bitField(flags->id, "b", bit, width) && bit == 3 && width == 5,
+          "b follows a in the same unit");
+    check(!r.resolver->bitField(flags->id, "d", bit, width), "a plain field is not a bitfield");
+    check(r.resolver->structSize(split->id) == 8, "a full unit pushes the next field up");
+    check(r.resolver->fieldOffset(split->id, "y") == 4, "the overflow field opens a second unit");
+}
+
 void testMethodInit() {
     std::printf("init and deinit signatures are recorded\n");
     Resolved r = resolve(
@@ -387,6 +426,7 @@ int main() {
     testNominalSize();
     testClassSize();
     testPackedStruct();
+    testBitfields();
     testMethodInit();
     std::printf("\n%d checks, %s\n", checks, failures == 0 ? "all passed" : "FAILURES");
     return failures == 0 ? 0 : 1;

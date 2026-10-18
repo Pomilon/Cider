@@ -139,7 +139,6 @@ int64_t Resolver::fieldOffset(DeclId id, const std::string& name) const {
     // virtual slots to name (Unified Standard 4.8.5).
     bool classChain = false;
     bool afterVptr = false;
-    bool packedStruct = false;
     if (const Decl* self = declById(id)) {
         if (self->nominal == Kind::Union) {
             return unionMemberIndex(id, name) >= 0 ? 0 : -1;
@@ -148,8 +147,22 @@ int64_t Resolver::fieldOffset(DeclId id, const std::string& name) const {
             classChain = true;
             afterVptr = !virtualNames(id).empty();
         }
-        if (self->nominal == Kind::Struct && self->packed) {
-            packedStruct = true;
+        if (self->nominal == Kind::Struct) {
+            // 4.1/4.5: one walk answers offsets, bit units and packing.
+            std::unordered_set<std::string> structSeen;
+            structSeen.insert(declKey(id));
+            std::vector<StructSlot> slots;
+            int64_t total = 0;
+            int64_t multiple = 0;
+            if (!structSlots(id, structSeen, slots, total, multiple)) {
+                return -1;
+            }
+            for (const StructSlot& slot : slots) {
+                if (slot.name == name) {
+                    return slot.at;
+                }
+            }
+            return -1;
         }
     }
     std::vector<std::string> fields;
@@ -189,9 +202,7 @@ int64_t Resolver::fieldOffset(DeclId id, const std::string& name) const {
         if (multiple <= 0 || bytes < 0) {
             return -1;
         }
-        if (!packedStruct) {
-            at = layout::roundUp(at, multiple);
-        }
+        at = layout::roundUp(at, multiple);
         if (field == name) {
             return at;
         }
@@ -349,55 +360,98 @@ int64_t Resolver::nominalAlignImpl(const Type* type,
     return alignOf(type);
 }
 
-int64_t Resolver::structSizeImpl(DeclId id, std::unordered_set<std::string>& seen) const {
+bool Resolver::structSlots(DeclId id, std::unordered_set<std::string>& seen,
+                           std::vector<StructSlot>& slots, int64_t& total,
+                           int64_t& align) const {
     const Decl* self = declById(id);
     const bool packed = self != nullptr && self->packed;
+    const std::string key = declKey(id);
     int64_t at = 0;
     int64_t multiple = 1;
+    bool unitOpen = false;
+    int64_t unitBytes = 0;
+    int64_t unitAt = 0;
+    int64_t unitBits = 0;
     for (const std::string& field : fieldNames(id)) {
         TypeRef type = fieldType(id, field);
         if (type.isError()) {
-            return -1;
+            return false;
         }
-        int64_t fieldMultiple = nominalAlignImpl(type.type, seen);
         int64_t bytes = nominalSizeImpl(type.type, seen);
-        if (fieldMultiple <= 0 || bytes < 0) {
-            return -1;
+        int64_t fieldMultiple = nominalAlignImpl(type.type, seen);
+        if (bytes < 0 || fieldMultiple <= 0) {
+            return false;
         }
-        if (fieldMultiple > multiple) {
-            multiple = fieldMultiple;
+        auto bits = fieldBits_.find(key + "." + field);
+        if (bits != fieldBits_.end()) {
+            int64_t width = bits->second;
+            int64_t baseBits = bytes * layout::kBitsPerByte;
+            if (width <= 0 || width > baseBits) {
+                // 4.1: a width the declared unit cannot hold refuses.
+                return false;
+            }
+            const bool shares =
+                unitOpen && unitBytes == bytes && unitBits + width <= baseBits;
+            if (!shares) {
+                if (!packed) {
+                    at = layout::roundUp(at, fieldMultiple);
+                }
+                unitAt = at;
+                at += bytes;
+                unitBits = 0;
+                unitOpen = true;
+                unitBytes = bytes;
+            }
+            if (fieldMultiple > multiple) {
+                multiple = fieldMultiple;
+            }
+            StructSlot slot;
+            slot.name = field;
+            slot.at = unitAt;
+            slot.bitAt = unitBits;
+            slot.width = width;
+            slots.push_back(std::move(slot));
+            unitBits += width;
+            continue;
         }
+        unitOpen = false;
         if (!packed) {
             at = layout::roundUp(at, fieldMultiple);
         }
-        at += bytes;
-    }
-    if (packed) {
-        // 4.5: no padding is the point; the size is the raw sum.
-        return at;
-    }
-    return layout::roundUp(at, multiple);
-}
-
-int64_t Resolver::structAlignImpl(DeclId id, std::unordered_set<std::string>& seen) const {
-    const Decl* self = declById(id);
-    if (self != nullptr && self->packed) {
-        // 4.5: a byte-exact layout aligns to one.
-        return 1;
-    }
-    int64_t multiple = 1;
-    for (const std::string& field : fieldNames(id)) {
-        TypeRef type = fieldType(id, field);
-        if (type.isError()) {
-            return -1;
-        }
-        int64_t fieldMultiple = nominalAlignImpl(type.type, seen);
-        if (fieldMultiple <= 0) {
-            return -1;
-        }
         if (fieldMultiple > multiple) {
             multiple = fieldMultiple;
         }
+        StructSlot slot;
+        slot.name = field;
+        slot.at = at;
+        slot.bytes = bytes;
+        slots.push_back(std::move(slot));
+        at += bytes;
+    }
+    total = packed ? at : layout::roundUp(at, multiple);
+    if (packed) {
+        multiple = 1;
+    }
+    align = multiple;
+    return true;
+}
+
+int64_t Resolver::structSizeImpl(DeclId id, std::unordered_set<std::string>& seen) const {
+    std::vector<StructSlot> slots;
+    int64_t total = 0;
+    int64_t multiple = 0;
+    if (!structSlots(id, seen, slots, total, multiple)) {
+        return -1;
+    }
+    return total;
+}
+
+int64_t Resolver::structAlignImpl(DeclId id, std::unordered_set<std::string>& seen) const {
+    std::vector<StructSlot> slots;
+    int64_t total = 0;
+    int64_t multiple = 0;
+    if (!structSlots(id, seen, slots, total, multiple)) {
+        return -1;
     }
     return multiple;
 }
@@ -415,6 +469,14 @@ int64_t Resolver::classSizeImpl(DeclId id, std::unordered_set<std::string>& seen
         }
     }
     const bool headed = !virtualNames(id).empty();
+    const std::string classKey = declKey(id);
+    for (const std::string& field : fields) {
+        if (fieldBits_.find(classKey + "." + field) != fieldBits_.end()) {
+            // 4.1: class bitfields are not lowered yet; refuse by size
+            // rather than laying the bits out as plain fields.
+            return -1;
+        }
+    }
     int64_t at = 0;
     int64_t multiple = 1;
     if (headed) {
@@ -473,10 +535,39 @@ int64_t Resolver::classAlignImpl(DeclId id, std::unordered_set<std::string>& see
     return multiple;
 }
 
+bool Resolver::bitField(DeclId id, const std::string& name, int64_t& bitOffset,
+                        int64_t& width) const {
+    const Decl* self = declById(id);
+    if (self == nullptr || self->nominal != Kind::Struct) {
+        return false;
+    }
+    std::unordered_set<std::string> seen;
+    seen.insert(declKey(id));
+    std::vector<StructSlot> slots;
+    int64_t total = 0;
+    int64_t multiple = 0;
+    if (!structSlots(id, seen, slots, total, multiple)) {
+        return false;
+    }
+    for (const StructSlot& slot : slots) {
+        if (slot.name == name && slot.bitAt >= 0) {
+            bitOffset = slot.bitAt;
+            width = slot.width;
+            return true;
+        }
+    }
+    return false;
+}
+
 int64_t Resolver::unionSizeImpl(DeclId id, std::unordered_set<std::string>& seen) const {
     int64_t widest = 0;
     int64_t multiple = 1;
+    const std::string unionKey = declKey(id);
     for (const std::string& member : fieldNames(id)) {
+        if (fieldBits_.find(unionKey + "." + member) != fieldBits_.end()) {
+            // 4.1: union bitfields are not lowered yet; refuse loudly.
+            return -1;
+        }
         TypeRef type = fieldType(id, member);
         if (type.isError()) {
             return -1;
@@ -1001,6 +1092,11 @@ void Resolver::resolveDeclTypes(const std::string& module, Program& program,
             if (!t.isError()) {
                 fieldTypes_[fkey + "." + field.name] = t;
                 fieldLists_[fkey].push_back(field.name);
+            }
+            if (field.bitWidth != nullptr) {
+                std::unordered_set<std::string> active;
+                EvalResult bits = evalConstInt(*field.bitWidth, env, active);
+                fieldBits_[fkey + "." + field.name] = bits.ok ? bits.value : -1;
             }
         }
     }

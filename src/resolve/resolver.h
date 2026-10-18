@@ -121,14 +121,20 @@ public:
     // alignment, with no padding beyond that (TYPES.md 3.3). -1 when unknown.
     // Only structs: classes and interfaces are refused elsewhere.
     int64_t structSize(DeclId id) const;
-    // A class's total size: one vptr word, then its own fields in
-    // declaration order, rounded to the combined alignment (TYPES.md 4.2).
-    // -1 when unknown or when the class has bases: inherited fields are a
-    // later slice, and laying them out by guess would miscompile.
+    // A class's total size: its chain's fields in most-base-first order,
+    // with the leading vptr word only when the chain has virtual slots
+    // (4.8.5), rounded to the combined alignment (TYPES.md 4.2). -1 when
+    // the chain is unsized (several bases at one level, unknown fields).
     int64_t classSize(DeclId id) const;
-    // A class's alignment: the maximum of the vptr's and its fields'.
+    // A class's alignment: the maximum of its vptr word (only when the
+    // chain has virtual slots, 4.8.5) and its fields'.
     // -1 when unknown or when the class has bases.
     int64_t classAlign(DeclId id) const;
+    // 4.1: a bitfield's position inside its storage unit — the unit's byte
+    // offset comes from fieldOffset; this answers the bit offset and width.
+    // False when the field is not a bitfield or the name is unknown.
+    bool bitField(DeclId id, const std::string& name, int64_t& bitOffset,
+                  int64_t& width) const;
     // A union member's index in declaration order: the tag value written on
     // construction and compared on a checked read (TYPES.md 4.6). -1 when
     // the union or the member is unknown.
@@ -242,6 +248,19 @@ private:
     int64_t nominalSizeImpl(const Type* type, std::unordered_set<std::string>& seen) const;
     int64_t nominalAlignImpl(const Type* type, std::unordered_set<std::string>& seen) const;
     int64_t structSizeImpl(DeclId id, std::unordered_set<std::string>& seen) const;
+    // 4.1: one walk owns a struct's storage layout — sizes, alignment,
+    // field offsets and bit slots all read from it, so the rules cannot
+    // drift apart. `slots` are in declaration order.
+    struct StructSlot {
+        std::string name;
+        int64_t at = 0;
+        int64_t bytes = 0;
+        int64_t bitAt = -1;
+        int64_t width = 0;
+    };
+    bool structSlots(DeclId id, std::unordered_set<std::string>& seen,
+                     std::vector<StructSlot>& slots, int64_t& total,
+                     int64_t& align) const;
     int64_t structAlignImpl(DeclId id, std::unordered_set<std::string>& seen) const;
     int64_t classSizeImpl(DeclId id, std::unordered_set<std::string>& seen) const;
     int64_t classAlignImpl(DeclId id, std::unordered_set<std::string>& seen) const;
@@ -296,6 +315,9 @@ private:
     // base slot by name).
     std::unordered_map<std::string, bool> methodVirtual_;
     std::unordered_map<std::string, std::vector<std::string>> fieldLists_;
+    // 4.1: a field's declared bit width ("a: int:3" — 3). Absent means a
+    // plain field; -1 means the width expression did not fold.
+    std::unordered_map<std::string, int64_t> fieldBits_;
     std::unordered_map<std::string, std::vector<DeclId>> baseTable_;
     std::vector<std::string> stack_;
     std::vector<ResolveError> errors_;

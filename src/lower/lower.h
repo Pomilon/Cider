@@ -377,6 +377,20 @@ public:
     // no slot, so slot-precise optimizations treat it conservatively.
     ir::Value computedBase(ir::Value slot, int64_t byteOff, Position pos);
     std::vector<ir::Value> loadRange(Position pos, const Place& place, TypeRef fieldType);
+    // 4.1: a bitfield read shifts its unit down and masks to the width; a
+    // write rebuilds the unit around the new bits. One pair of helpers so
+    // every access site tells the same story.
+    bool loadBitField(Position pos, const Place& unit, TypeRef unitType,
+                      int64_t bitOff, int64_t width, ir::Value& out);
+    bool storeBitField(Position pos, const Place& unit, TypeRef unitType,
+                       int64_t bitOff, int64_t width, const ir::Value& value);
+    // One literal field's store: a bitfield zeroes its unit once and
+    // read-modify-writes; a plain field takes the range store. Shared by
+    // struct and class construction so the two cannot drift.
+    bool storeFieldInit(Position pos, const Place& base, int64_t fieldOff,
+                        TypeRef fieldType, DeclId id, const std::string& name,
+                        std::unordered_set<int64_t>& unitsZeroed,
+                        std::vector<ir::Value>& value);
     void storeRange(Position pos, const Place& place,
                     const std::vector<ir::Value>& words, TypeRef fieldType);
     // A field a struct arm binds: name, type, and byte offset from the

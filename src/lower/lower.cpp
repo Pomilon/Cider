@@ -3227,6 +3227,40 @@ void Lowerer::storeRange(Position pos, const Place& place,
     }
 }
 
+bool Lowerer::storeFieldInit(Position pos, const Place& base, int64_t fieldOff,
+                             TypeRef fieldType, DeclId id,
+                             const std::string& name,
+                             std::unordered_set<int64_t>& unitsZeroed,
+                             std::vector<ir::Value>& value) {
+    Place at = base;
+    at.off = fieldOff;
+    at.type = fieldType;
+    int64_t bitOff = -1;
+    int64_t bitWidth = 0;
+    if (resolver_.bitField(id, name, bitOff, bitWidth)) {
+        if (unitsZeroed.find(fieldOff) == unitsZeroed.end()) {
+            // 4.1: the unit reads before its first write in this literal
+            // must not see uninitialized bytes.
+            ir::Value zero = constantI64(0, fieldType, pos);
+            if (failed_) {
+                return false;
+            }
+            storeRange(pos, at, {zero}, fieldType);
+            if (failed_) {
+                return false;
+            }
+            unitsZeroed.insert(fieldOff);
+        }
+        if (value.size() != static_cast<size_t>(kOneWord) ||
+            !storeBitField(pos, at, fieldType, bitOff, bitWidth, value[0])) {
+            return false;
+        }
+        return true;
+    }
+    storeRange(pos, at, value, fieldType);
+    return !failed_;
+}
+
 void Lowerer::constructStruct(const Place& baseIn, TypeRef structType,
                               const NewStruct& n) {
     if (structType.isError() || structType.type->kind() != Kind::Struct) {
@@ -3240,6 +3274,7 @@ void Lowerer::constructStruct(const Place& baseIn, TypeRef structType,
     }
     Place base = baseIn;
     base.type = structType;
+    std::unordered_set<int64_t> unitsZeroed;
     for (const FieldInit& field : n.fields) {
         int64_t fieldOff = resolver_.fieldOffset(*id, field.name);
         TypeRef fieldType = resolver_.fieldType(*id, field.name);
@@ -3259,11 +3294,9 @@ void Lowerer::constructStruct(const Place& baseIn, TypeRef structType,
         if (failed_) {
             return;
         }
-        Place at = base;
-        at.off = fieldOff;
-        at.type = fieldType;
-        storeRange(field.value->pos, at, value, fieldType);
-        if (failed_) {
+        if (!storeFieldInit(field.value->pos, base, fieldOff, fieldType, *id,
+                            field.name, unitsZeroed, value)) {
+            refuse(field.value->pos, "this construction");
             return;
         }
     }
@@ -3402,6 +3435,14 @@ bool Lowerer::globalInitStructBytes(const NewStruct& made, TypeRef structType,
         }
         int64_t off = resolver_.fieldOffset(*id, field.name);
         if (off < 0) {
+            return false;
+        }
+        int64_t bitOff = -1;
+        int64_t bitWidth = 0;
+        if (resolver_.bitField(*id, field.name, bitOff, bitWidth)) {
+            // 4.1: the constant image assembles whole bytes per field; a
+            // bitfield would need bit-wise assembly that does not exist
+            // yet, and a wrong image is worse than a refusal.
             return false;
         }
         std::string piece;
@@ -3687,6 +3728,87 @@ void Lowerer::constructArray(const Place& baseIn, TypeRef arrayType,
             return;
         }
     }
+}
+
+bool Lowerer::storeBitField(Position pos, const Place& unit, TypeRef unitType,
+                            int64_t bitOff, int64_t width, const ir::Value& value) {
+    int64_t unitBits = resolver_.nominalSize(unitType.type);
+    if (unitBits < 0) {
+        return false;
+    }
+    if (bitOff == 0 && width == unitBits) {
+        storeRange(pos, unit, {value}, unitType);
+        return !failed_;
+    }
+    std::vector<ir::Value> words = loadRange(pos, unit, unitType);
+    if (failed_ || words.size() != static_cast<size_t>(kOneWord)) {
+        return false;
+    }
+    const uint64_t widthMask = (uint64_t{1} << width) - 1;
+    const uint64_t fieldMask = widthMask << bitOff;
+    TypeRef count{ctx_.basic(BasicKind::I64)};
+    ir::Value kept = words[0];
+    if (~fieldMask != 0) {
+        kept = emitArith(BinOp::And, kept,
+                         constantI64(static_cast<int64_t>(~fieldMask), count, pos),
+                         unitType, pos);
+        if (failed_) {
+            return false;
+        }
+    }
+    ir::Value insert = value;
+    if (widthMask != ~uint64_t{0}) {
+        insert = emitArith(BinOp::And, insert,
+                           constantI64(static_cast<int64_t>(widthMask), count, pos),
+                           unitType, pos);
+        if (failed_) {
+            return false;
+        }
+    }
+    if (bitOff > 0) {
+        insert = emitArith(BinOp::Shl, insert, constantI64(bitOff, count, pos),
+                           unitType, pos);
+        if (failed_) {
+            return false;
+        }
+    }
+    ir::Value combined = emitArith(BinOp::Or, kept, insert, unitType, pos);
+    if (failed_) {
+        return false;
+    }
+    storeRange(pos, unit, {combined}, unitType);
+    return !failed_;
+}
+
+bool Lowerer::loadBitField(Position pos, const Place& unit, TypeRef unitType,
+                           int64_t bitOff, int64_t width, ir::Value& out) {
+    std::vector<ir::Value> words = loadRange(pos, unit, unitType);
+    if (failed_ || words.size() != static_cast<size_t>(kOneWord)) {
+        return false;
+    }
+    int64_t unitBits = resolver_.nominalSize(unitType.type);
+    if (unitBits < 0) {
+        return false;
+    }
+    TypeRef count{ctx_.basic(BasicKind::I64)};
+    ir::Value value = words[0];
+    if (bitOff > 0) {
+        value = emitArith(BinOp::Shr, value, constantI64(bitOff, count, pos),
+                          unitType, pos);
+        if (failed_) {
+            return false;
+        }
+    }
+    if (width < unitBits) {
+        const int64_t mask = (static_cast<int64_t>(1) << width) - 1;
+        value = emitArith(BinOp::And, value, constantI64(mask, count, pos),
+                          unitType, pos);
+        if (failed_) {
+            return false;
+        }
+    }
+    out = value;
+    return true;
 }
 
 std::vector<ir::Value> Lowerer::lowerField(const Field& n) {
@@ -4037,6 +4159,16 @@ std::vector<ir::Value> Lowerer::lowerField(const Field& n) {
     }
     base.off += fieldOff;
     base.type = fieldType;
+    int64_t bitOff = -1;
+    int64_t bitWidth = 0;
+    if (resolver_.bitField(*id, n.name, bitOff, bitWidth)) {
+        ir::Value answer = undefined();
+        if (!loadBitField(n.pos, base, fieldType, bitOff, bitWidth, answer)) {
+            refuse(n.pos, "this field access");
+            return {undefined()};
+        }
+        return {answer};
+    }
     return loadRange(n.pos, base, fieldType);
 }
 
@@ -6130,6 +6262,7 @@ void Lowerer::constructClass(const Place& baseIn, TypeRef objType,
     }
     Place base = baseIn;
     base.type = classType;
+    std::unordered_set<int64_t> unitsZeroed;
     for (const FieldInit& field : n.fields) {
         int64_t fieldOff = resolver_.fieldOffset(*id, field.name);
         TypeRef fieldType = resolver_.fieldType(*id, field.name);
@@ -6149,11 +6282,9 @@ void Lowerer::constructClass(const Place& baseIn, TypeRef objType,
         if (failed_) {
             return;
         }
-        Place at = base;
-        at.off = fieldOff;
-        at.type = fieldType;
-        storeRange(field.value->pos, at, value, fieldType);
-        if (failed_) {
+        if (!storeFieldInit(field.value->pos, base, fieldOff, fieldType, *id,
+                            field.name, unitsZeroed, value)) {
+            refuse(field.value->pos, "this construction");
             return;
         }
     }
@@ -11283,13 +11414,29 @@ bool Lowerer::storeAssignTarget(Assign& n, const std::vector<ir::Value>& value) 
         storeIndex(*index, value);
         return !failed_;
     }
-    if (dynamic_cast<const Field*>(n.target.get()) != nullptr) {
+    if (const auto* field = dynamic_cast<const Field*>(n.target.get())) {
         Place place;
         if (!resolvePlace(n.target.get(), place)) {
             refuse(n.target->pos, "this assignment");
             return false;
         }
         place.type = checker_.typeOf(n.target.get());
+        std::optional<DeclId> unitOf;
+        TypeRef owner = checker_.typeOf(field->object.get());
+        if (!owner.isError()) {
+            unitOf = owner.type->decl();
+        }
+        int64_t bitOff = -1;
+        int64_t bitWidth = 0;
+        if (unitOf.has_value() && !value.empty() &&
+            resolver_.bitField(*unitOf, field->name, bitOff, bitWidth)) {
+            if (!storeBitField(n.pos, place, place.type, bitOff, bitWidth,
+                               value[0])) {
+                refuse(n.target->pos, "this assignment");
+                return false;
+            }
+            return !failed_;
+        }
         storeRange(n.pos, place, value, place.type);
         if (failed_) {
             return false;
