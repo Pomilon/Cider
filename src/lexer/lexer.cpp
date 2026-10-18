@@ -228,6 +228,7 @@ Token Lexer::nextToken() {
         case '?': token.kind = TokenKind::Question; break;
         case '~': token.kind = TokenKind::Tilde; break;
         case '#': token.kind = TokenKind::Hash; break;
+        case '@': token.kind = TokenKind::At; break;
         case ':':
             token.kind = match(':') ? TokenKind::ColonColon : TokenKind::Colon;
             break;

@@ -1958,6 +1958,38 @@ std::unique_ptr<Expr> Parser::parsePrefix() {
             base = std::make_unique<UninitExpr>(start);
             break;
         }
+        case TokenKind::At: {
+            advance();
+            if (!check(TokenKind::Ident) || peek().text != "bitcast") {
+                failHere("expected 'bitcast' after '@'");
+                return nullptr;
+            }
+            advance();
+            if (!match(TokenKind::LParen)) {
+                failHere("expected '(' after '@bitcast'");
+                return nullptr;
+            }
+            std::unique_ptr<TypeExpr> bcTarget = parseType();
+            if (bcTarget == nullptr) {
+                return nullptr;
+            }
+            if (!match(TokenKind::Comma)) {
+                failHere("expected ',' in '@bitcast(Type, value)'");
+                return nullptr;
+            }
+            std::unique_ptr<Expr> bcValue = parseExpr();
+            if (bcValue == nullptr) {
+                return nullptr;
+            }
+            if (!match(TokenKind::RParen)) {
+                failHere("expected ')'");
+                return nullptr;
+            }
+            auto bc = std::make_unique<Cast>(start, std::move(bcValue), std::move(bcTarget));
+            bc->raw = true;
+            base = std::move(bc);
+            break;
+        }
         case TokenKind::Ident: {
             std::string name = advance().text;
             base = std::make_unique<Ident>(start, std::move(name));

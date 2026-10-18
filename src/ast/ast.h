@@ -224,6 +224,7 @@ struct Unary : Expr {
 struct Cast : Expr {
     std::unique_ptr<Expr> expr;
     std::unique_ptr<TypeExpr> target;
+    bool raw = false;
     Cast(Position p, std::unique_ptr<Expr> e, std::unique_ptr<TypeExpr> t)
         : Expr(std::move(p)), expr(std::move(e)), target(std::move(t)) {}
     void accept(ASTVisitor& v) override;

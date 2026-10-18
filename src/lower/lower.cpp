@@ -7421,6 +7421,17 @@ ir::Value Lowerer::onCast(Cast& n) {
     // multi-word expression value.
     TypeRef source = checker_.typeOf(n.expr.get());
     TypeRef target = checker_.typeOf(&n);
+    // `@bitcast(T, x)`: the operand's bits answer as T unchanged.
+    if (n.raw) {
+        std::vector<ir::Value> got = lowerWords(n.expr.get());
+        if (failed_ || got.size() != kOneWord) {
+            if (!failed_) {
+                refuse(n.pos, "this bitcast");
+            }
+            return undefined();
+        }
+        return got[0];
+    }
     // An interface source reads back through the downcast path, never the
     // scalar cast below: the vtable check owns the conversion, and a
     // scalar cast would answer unchecked bytes.

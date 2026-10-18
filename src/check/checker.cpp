@@ -2164,6 +2164,22 @@ void Checker::visitCast(Cast& n) {
         record(&n, errorRef());
         return;
     }
+    if (n.raw) {
+        // `@bitcast(T, x)`: bits move unchanged, never a numeric
+        // conversion; both sides are basics of one width (13.5).
+        std::optional<BasicKind> bf =
+            from.type->kind() == Kind::Basic ? from.type->basic() : std::nullopt;
+        std::optional<BasicKind> bt =
+            target.type->kind() == Kind::Basic ? target.type->basic() : std::nullopt;
+        if (!bf.has_value() || !bt.has_value() ||
+            basicWidthBits(*bf) != basicWidthBits(*bt)) {
+            fail(n.pos, "@bitcast needs equal-width scalar types");
+            record(&n, errorRef());
+            return;
+        }
+        record(&n, target);
+        return;
+    }
     if (dynamic_cast<const NilPtr*>(n.expr.get()) != nullptr &&
         target.type->kind() == Kind::String) {
         // A null names no type, so it converts to a string the same way

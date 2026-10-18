@@ -1324,6 +1324,14 @@ void testUninit() {
     check(!r.ok && r.stage == "check", "uninit is refused as a value");
 }
 
+void testBitcast() {
+    std::printf("@bitcast(T, x)\n");
+    Checked ok = check("func main() -> int { var u: u64 = @bitcast(u64, 1.0); return 0; }");
+    check(ok.ok, "@bitcast(u64, 1.0) checks: " + ok.stage);
+    Checked bad = check("func main() -> int { var u: u32 = @bitcast(u32, 1.0); return 0; }");
+    check(!bad.ok && bad.stage == "check", "a size mismatch fails");
+}
+
 void testCharArith() {
     std::printf("char arithmetic\n");
     Checked up = check(
@@ -1674,6 +1682,7 @@ int main() {
     testArrowMember();
     testFiniRefusal();
     testCharArith();
+    testBitcast();
     testUninit();
     testThisKeyword();
     testRepeatZero();

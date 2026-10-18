@@ -61,7 +61,7 @@ enum class TokenKind {
     PlusPlus, MinusMinus,
     PlusEq, MinusEq, StarEq, SlashEq, PercentEq,
     AmpEq, PipeEq, CaretEq, LtLtEq, GtGtEq,
-    Arrow, FatArrow, ColonColon, Ellipsis, Hash,
+    Arrow, FatArrow, ColonColon, Ellipsis, Hash, At,
 };
 
 // One fragment of a string literal. Text parts hold bytes; expression parts

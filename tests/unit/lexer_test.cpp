@@ -241,8 +241,9 @@ void testCommentsLinesErrors() {
     check(out[0].kind == cider::TokenKind::Error, "and an Error token, not a dropped one");
     check(bad.errors()[0].pos.line == 1, "at its position");
     cider::Lexer at("test.cid", "@");
-    at.lex();
-    check(!at.errors().empty(), "@ is a diagnostic");
+    std::vector<cider::Token> atOut = at.lex();
+    check(at.errors().empty(), "@ is a token now");
+    check(atOut[0].kind == cider::TokenKind::At, "the At token");
 }
 
 }  // namespace
