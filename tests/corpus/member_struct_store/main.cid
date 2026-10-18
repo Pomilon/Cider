@@ -57,7 +57,7 @@ struct AliasHolderP { var p: PAlias; var tail: int; }
 struct Box<T> { var v: T; var tag: int; }
 
 // A module-level global holder and a class method writing through `this`.
-var gOuter: Outer = new Outer { inner: new Q { a: 0 }, pair: new P { a: 0, b: 0 }, big: new R { a: 0, b: 0, c: 0, d: 0 }, mid: new Mid { p: new P { a: 0, b: 0 }, q: new Q { a: 0 } }, tail: 0 };
+var gOuter: Outer = Outer { inner: Q { a: 0 }, pair: P { a: 0, b: 0 }, big: R { a: 0, b: 0, c: 0, d: 0 }, mid: Mid { p: P { a: 0, b: 0 }, q: Q { a: 0 } }, tail: 0 };
 
 class CWidget {
     var q: Q;
@@ -71,27 +71,27 @@ class CWidget {
 }
 
 func mkQ(x: int) -> Q {
-    return new Q { a: x };
+    return Q { a: x };
 }
 
 func mkP(x: int, y: int) -> P {
-    return new P { a: x, b: y };
+    return P { a: x, b: y };
 }
 
 func mkR(a: int, b: int, c: int, d: int) -> R {
-    return new R { a: a, b: b, c: c, d: d };
+    return R { a: a, b: b, c: c, d: d };
 }
 
 func mkMid(p: P, q: Q) -> Mid {
-    return new Mid { p: p, q: q };
+    return Mid { p: p, q: q };
 }
 
 func main() -> int {
     // Source values for every RHS shape.
-    var i: Q = new Q { a: 9 };
-    var p: P = new P { a: 11, b: 22 };
-    var r: R = new R { a: 1, b: 2, c: 3, d: 4 };
-    var src: Outer = new Outer { inner: i, pair: p, big: r, mid: mkMid(p, i), tail: 313 };
+    var i: Q = Q { a: 9 };
+    var p: P = P { a: 11, b: 22 };
+    var r: R = R { a: 1, b: 2, c: 3, d: 4 };
+    var src: Outer = Outer { inner: i, pair: p, big: r, mid: mkMid(p, i), tail: 313 };
 
     // --- `o->field = s`: pointer member target, 4 / 8 / 16 bytes ---
     var o: *Outer = alloc(sizeof(Outer), 8) as *Outer;
@@ -122,7 +122,7 @@ func main() -> int {
     (*o).inner = src.inner;
     if ((*o).inner.a != 9) return 10;
     // RHS from an element read and from an `as` cast.
-    var parr: [P; 2] = new [P; 2] { new P { a: 0, b: 0 }, new P { a: 0, b: 0 } };
+    var parr: [P; 2] = [ P { a: 0, b: 0 }, P { a: 0, b: 0 } ];
     parr[1] = mkP(77, 88);
     (*o).pair = parr[1];
     if ((*o).pair.a != 77 || (*o).pair.b != 88) return 11;
@@ -135,7 +135,7 @@ func main() -> int {
     if ((*o).inner.a != 9) return 14;
 
     // --- `o.field = s`: value-class member target, 4 / 8 / 16 bytes ---
-    var vo: COuter = new COuter { inner: new Q { a: 0 }, pair: new P { a: 0, b: 0 }, big: new R { a: 0, b: 0, c: 0, d: 0 }, mid: new Mid { p: new P { a: 0, b: 0 }, q: new Q { a: 0 } }, tail: 0 };
+    var vo: COuter = COuter { inner: Q { a: 0 }, pair: P { a: 0, b: 0 }, big: R { a: 0, b: 0, c: 0, d: 0 }, mid: Mid { p: P { a: 0, b: 0 }, q: Q { a: 0 } }, tail: 0 };
     vo.pair = mkP(101, 102);
     vo.big = mkR(201, 202, 203, 204);
     vo.tail = 999;
@@ -153,7 +153,7 @@ func main() -> int {
     if (vo.mid.p.a != 11 || vo.mid.p.b != 22 || vo.mid.q.a != 9) return 21;
 
     // --- nested member chains (`l1.l2.q = s`) ---
-    var l1: L1 = new L1 { l2: new L2 { q: new Q { a: 0 }, tag: 222 }, pad: 111 };
+    var l1: L1 = L1 { l2: L2 { q: Q { a: 0 }, tag: 222 }, pad: 111 };
     l1.l2.q = i;
     if (l1.l2.q.a != 9) return 22;
     if (l1.l2.tag != 222 || l1.pad != 111) return 23;
@@ -164,34 +164,34 @@ func main() -> int {
     if (l1.l2.q.a != 9) return 25;
 
     // --- struct literals with struct-typed fields (4 / 8 / 16 bytes) ---
-    var litR: R = new R { a: 8, b: 9, c: 10, d: 11 };
-    var litMid: Mid = new Mid { p: p, q: i };
+    var litR: R = R { a: 8, b: 9, c: 10, d: 11 };
+    var litMid: Mid = Mid { p: p, q: i };
     if (litMid.p.a != 11 || litMid.p.b != 22 || litMid.q.a != 9) return 26;
-    var lit: Outer = new Outer { inner: i, pair: p, big: r, mid: litMid, tail: 44 };
+    var lit: Outer = Outer { inner: i, pair: p, big: r, mid: litMid, tail: 44 };
     if (lit.inner.a != 9) return 27;
     if (lit.pair.a != 11 || lit.pair.b != 22) return 28;
     if (lit.big.a != 1 || lit.big.b != 2 || lit.big.c != 3 || lit.big.d != 4) return 29;
     if (lit.mid.p.a != 11 || lit.mid.q.a != 9 || lit.tail != 44) return 30;
     // Literal RHS shapes: call return, nested literal, field read.
-    var lit2: Outer = new Outer { inner: mkQ(13), pair: mkP(14, 15), big: mkR(16, 17, 18, 19), mid: litMid, tail: 45 };
+    var lit2: Outer = Outer { inner: mkQ(13), pair: mkP(14, 15), big: mkR(16, 17, 18, 19), mid: litMid, tail: 45 };
     if (lit2.inner.a != 13) return 31;
     if (lit2.pair.a != 14 || lit2.pair.b != 15) return 32;
     if (lit2.big.c != 18 || lit2.big.d != 19) return 33;
     if (lit2.mid.p.b != 22 || lit2.mid.q.a != 9 || lit2.tail != 45) return 34;
-    var lit3: Outer = new Outer { inner: lit.inner, pair: src.pair, big: lit2.big, mid: litMid, tail: 46 };
+    var lit3: Outer = Outer { inner: lit.inner, pair: src.pair, big: lit2.big, mid: litMid, tail: 46 };
     if (lit3.inner.a != 9) return 35;
     if (lit3.pair.a != 11 || lit3.pair.b != 22) return 36;
     if (lit3.big.a != 16 || lit3.big.d != 19) return 37;
     if (lit3.mid.q.a != 9 || lit3.tail != 46) return 38;
     // Nested struct literal in a struct literal field.
-    var lit4: Mid = new Mid { p: new P { a: 21, b: 22 }, q: new Q { a: 23 } };
-    var lit5: Outer = new Outer { inner: lit4.q, pair: lit4.p, big: litR, mid: lit4, tail: 47 };
+    var lit4: Mid = Mid { p: P { a: 21, b: 22 }, q: Q { a: 23 } };
+    var lit5: Outer = Outer { inner: lit4.q, pair: lit4.p, big: litR, mid: lit4, tail: 47 };
     if (lit5.pair.a != 21 || lit5.pair.b != 22) return 39;
     if (lit5.inner.a != 23 || lit5.mid.q.a != 23) return 40;
     if (lit5.big.d != 11 || lit5.tail != 47) return 41;
 
     // --- array-element member targets (`arr[i].field = s`) ---
-    var arr: [Outer; 3] = new [Outer; 3] { new Outer { inner: new Q { a: 0 }, pair: new P { a: 0, b: 0 }, big: new R { a: 0, b: 0, c: 0, d: 0 }, mid: new Mid { p: new P { a: 0, b: 0 }, q: new Q { a: 0 } }, tail: 0 }, new Outer { inner: new Q { a: 0 }, pair: new P { a: 0, b: 0 }, big: new R { a: 0, b: 0, c: 0, d: 0 }, mid: new Mid { p: new P { a: 0, b: 0 }, q: new Q { a: 0 } }, tail: 0 }, new Outer { inner: new Q { a: 0 }, pair: new P { a: 0, b: 0 }, big: new R { a: 0, b: 0, c: 0, d: 0 }, mid: new Mid { p: new P { a: 0, b: 0 }, q: new Q { a: 0 } }, tail: 0 } };
+    var arr: [Outer; 3] = [ Outer { inner: Q { a: 0 }, pair: P { a: 0, b: 0 }, big: R { a: 0, b: 0, c: 0, d: 0 }, mid: Mid { p: P { a: 0, b: 0 }, q: Q { a: 0 } }, tail: 0 }, Outer { inner: Q { a: 0 }, pair: P { a: 0, b: 0 }, big: R { a: 0, b: 0, c: 0, d: 0 }, mid: Mid { p: P { a: 0, b: 0 }, q: Q { a: 0 } }, tail: 0 }, Outer { inner: Q { a: 0 }, pair: P { a: 0, b: 0 }, big: R { a: 0, b: 0, c: 0, d: 0 }, mid: Mid { p: P { a: 0, b: 0 }, q: Q { a: 0 } }, tail: 0 } ];
     arr[0].pair = mkP(101, 102);
     arr[0].inner = i;
     if (arr[0].inner.a != 9) return 42;
@@ -204,7 +204,7 @@ func main() -> int {
     arr[1].mid = mkMid(p, i);
     if (arr[1].mid.p.b != 22 || arr[1].mid.q.a != 9) return 46;
     // nested chain through an array element target
-    var lm: [L1; 2] = new [L1; 2] { new L1 { l2: new L2 { q: new Q { a: 0 }, tag: 0 }, pad: 0 }, new L1 { l2: new L2 { q: new Q { a: 0 }, tag: 0 }, pad: 0 } };
+    var lm: [L1; 2] = [ L1 { l2: L2 { q: Q { a: 0 }, tag: 0 }, pad: 0 }, L1 { l2: L2 { q: Q { a: 0 }, tag: 0 }, pad: 0 } ];
     lm[1].pad = 333;
     lm[1].l2.q = i;
     if (lm[1].l2.q.a != 9) return 47;
@@ -220,25 +220,25 @@ func main() -> int {
     if (arr[2].pair.a != 77 || arr[2].pair.b != 88) return 51;
 
     // --- alias-typed struct fields: store and literal ---
-    var ah: AliasHolder = new AliasHolder { q: new Q { a: 0 }, tail: 55 };
+    var ah: AliasHolder = AliasHolder { q: Q { a: 0 }, tail: 55 };
     ah.q = i;
     if (ah.q.a != 9 || ah.tail != 55) return 52;
     ah.q = mkQ(56);
     if (ah.q.a != 56 || ah.tail != 55) return 53;
-    var ahLit: AliasHolder = new AliasHolder { q: i, tail: 57 };
+    var ahLit: AliasHolder = AliasHolder { q: i, tail: 57 };
     if (ahLit.q.a != 9 || ahLit.tail != 57) return 54;
-    var ahp: AliasHolderP = new AliasHolderP { p: new P { a: 0, b: 0 }, tail: 65 };
+    var ahp: AliasHolderP = AliasHolderP { p: P { a: 0, b: 0 }, tail: 65 };
     ahp.p = p;
     if (ahp.p.a != 11 || ahp.p.b != 22 || ahp.tail != 65) return 55;
 
     // --- generic structs with by-value struct fields ---
-    var bx: Box<Q> = new Box<Q> { v: new Q { a: 0 }, tag: 58 };
+    var bx: Box<Q> = Box<Q> { v: Q { a: 0 }, tag: 58 };
     bx.v = i;
     if (bx.v.a != 9 || bx.tag != 58) return 56;
-    var bxp: Box<P> = new Box<P> { v: new P { a: 0, b: 0 }, tag: 59 };
+    var bxp: Box<P> = Box<P> { v: P { a: 0, b: 0 }, tag: 59 };
     bxp.v = p;
     if (bxp.v.a != 11 || bxp.v.b != 22 || bxp.tag != 59) return 57;
-    var bxLit: Box<Q> = new Box<Q> { v: i, tag: 60 };
+    var bxLit: Box<Q> = Box<Q> { v: i, tag: 60 };
     if (bxLit.v.a != 9 || bxLit.tag != 60) return 58;
 
     // --- module-level global holder ---
@@ -249,7 +249,7 @@ func main() -> int {
     if (gOuter.pair.a != 62 || gOuter.pair.b != 63) return 60;
 
     // --- `this.field = s` inside a class method ---
-    var cw: CWidget = new CWidget { q: new Q { a: 0 }, tail: 64 };
+    var cw: CWidget = CWidget { q: Q { a: 0 }, tail: 64 };
     cw.setQ(i);
     var cgot: Q = cw.getQ();
     if (cgot.a != 9 || cw.q.a != 9 || cw.tail != 64) return 61;

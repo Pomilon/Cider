@@ -65,7 +65,7 @@ export class DTwo {
 export class DThree {
   var p: int;
   var pad: [u64; 4];
-  func init(x: int) { (*self).p = x; (*self).pad = new [u64; 4] { 0, 0, 0, 0 }; }
+  func init(x: int) { (*self).p = x; (*self).pad = [ 0, 0, 0, 0 ]; }
   func o() -> int { return (*self).p; }
   func tag() -> int { return 21; }
   func deinit() { print("C"); }

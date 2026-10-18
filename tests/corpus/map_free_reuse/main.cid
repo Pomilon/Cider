@@ -120,7 +120,7 @@ func main() -> int {
     print("reuse_len="); printInt(len_map::<int, int>(&m)); puts("");
 
     // --- a map that was never new_map'd has cap == 0 too ---
-    var fresh: HashMap<int, int> = new HashMap<int, int> { entries: nilPtr, cap: 0, len: 0, tombstones: 0 };
+    var fresh: HashMap<int, int> = HashMap<int, int> { entries: nilPtr, cap: 0, len: 0, tombstones: 0 };
     insert_map::<int, int>(&fresh, 5, 55);
     if (len_map::<int, int>(&fresh) != 1) { return 29; }
     p = get_map::<int, int>(&fresh, 5);

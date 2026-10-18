@@ -319,10 +319,21 @@ struct NewArray : Expr {
     std::unique_ptr<Expr> length;
     std::vector<std::unique_ptr<Expr>> inits;
     bool repeat;
+    bool heap;
     NewArray(Position p, std::unique_ptr<TypeExpr> e, std::unique_ptr<Expr> n,
-             std::vector<std::unique_ptr<Expr>> i, bool r)
+             std::vector<std::unique_ptr<Expr>> i, bool r, bool h = false)
         : Expr(std::move(p)), element(std::move(e)), length(std::move(n)),
-          inits(std::move(i)), repeat(r) {}
+          inits(std::move(i)), repeat(r), heap(h) {}
+    void accept(ASTVisitor& v) override;
+};
+
+// `[a, b, c]` or `[x, ...]` — a bare value array literal
+// (Unified Standard 6.3). The declared type supplies element and count.
+struct ArrayLit : Expr {
+    std::vector<std::unique_ptr<Expr>> inits;
+    bool repeat;
+    ArrayLit(Position p, std::vector<std::unique_ptr<Expr>> i, bool r)
+        : Expr(std::move(p)), inits(std::move(i)), repeat(r) {}
     void accept(ASTVisitor& v) override;
 };
 
@@ -777,6 +788,7 @@ struct ASTVisitor {
     virtual void visitNewStruct(NewStruct& n);
     virtual void visitNewClass(NewClass& n);
     virtual void visitNewArray(NewArray& n);
+    virtual void visitArrayLit(ArrayLit& n);
     virtual void visitAssign(Assign& n);
     virtual void visitSizeofType(SizeofType& n);
     virtual void visitFuncLit(FuncLit& n);
@@ -849,6 +861,7 @@ inline void SliceExpr::accept(ASTVisitor& v) { v.visitSliceExpr(*this); }
 inline void NewStruct::accept(ASTVisitor& v) { v.visitNewStruct(*this); }
 inline void NewClass::accept(ASTVisitor& v) { v.visitNewClass(*this); }
 inline void NewArray::accept(ASTVisitor& v) { v.visitNewArray(*this); }
+inline void ArrayLit::accept(ASTVisitor& v) { v.visitArrayLit(*this); }
 inline void Assign::accept(ASTVisitor& v) { v.visitAssign(*this); }
 inline void SizeofType::accept(ASTVisitor& v) { v.visitSizeofType(*this); }
 inline void FuncLit::accept(ASTVisitor& v) { v.visitFuncLit(*this); }
@@ -966,6 +979,9 @@ inline void ASTVisitor::visitNewClass(NewClass& n) {
 inline void ASTVisitor::visitNewArray(NewArray& n) {
     n.element->accept(*this);
     if (n.length != nullptr) n.length->accept(*this);
+    for (auto& i : n.inits) i->accept(*this);
+}
+inline void ASTVisitor::visitArrayLit(ArrayLit& n) {
     for (auto& i : n.inits) i->accept(*this);
 }
 inline void ASTVisitor::visitSizeofType(SizeofType& n) { n.type->accept(*this); }

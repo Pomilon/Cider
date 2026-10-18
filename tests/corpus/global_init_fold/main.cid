@@ -20,8 +20,8 @@ var g_char: char = 'A';
 var g_byte: byte = 200;
 var g_alias: int = MK2;              // from-import const chain (MK2 = MK * 2)
 var g_dotted: int = gc.MK2;          // module-qualified const
-var g_arr: [u8; 3] = new [u8; 3] { (BASE as u8), (MK as u8), 9 };  // const elements in a global array
-var g_farr: [f64; 2] = new [f64; 2] { (BASE as f64), (4 as f64) };    // float array element from a const
+var g_arr: [u8; 3] = [ (BASE as u8), (MK as u8), 9 ];  // const elements in a global array
+var g_farr: [f64; 2] = [ (BASE as f64), (4 as f64) ];    // float array element from a const
 var g_cast: u64 = MK as u64;         // const inside a cast
 const FLAG: bool = true;
 var g_cbool: bool = FLAG;            // bool const reference

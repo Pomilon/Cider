@@ -13,6 +13,6 @@ export interface Shape {
 }
 
 export func make(v: int) -> Param {
-  var p: Param = new Param { v: v };
+  var p: Param = Param { v: v };
   return p;
 }

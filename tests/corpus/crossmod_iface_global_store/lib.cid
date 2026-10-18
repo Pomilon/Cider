@@ -38,9 +38,9 @@ export class RSpot {
   func deinit() { print("C"); }
 }
 
-export var rImpl: RImpl = new RImpl { v: 0 };
-export var rQuiet: RQuiet = new RQuiet { s: 0 };
-export var rSpot: RSpot = new RSpot { p: 0, pad: new [u64; 4] {[0, ...]} };
+export var rImpl: RImpl = RImpl { v: 0 };
+export var rQuiet: RQuiet = RQuiet { s: 0 };
+export var rSpot: RSpot = RSpot { p: 0, pad: [0, ...] };
 
 // The interface-typed globals, declared BELOW the implementors they hold.
 export var gIface: ROther = nilPtr as ROther;

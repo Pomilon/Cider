@@ -36,7 +36,7 @@ func _start() {
         exit(1);
     }
 
-    var buf: [u8; 64] = new [u8; 64] { [0, ...] };
+    var buf: [u8; 64] = [0, ...];
     var bufp: *void = (&buf[0]) as *void;
     var nread: int = read(fd, bufp, 64);
     if (nread != len) {

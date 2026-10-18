@@ -41,8 +41,8 @@ func sharedPtr() -> *Shape {
 }
 
 func main() -> int {
-  var a: Sq = new Sq { s: 3 };
-  var r: Rect = new Rect { w: 2, h: 5 };
+  var a: Sq = Sq { s: 3 };
+  var r: Rect = Rect { w: 2, h: 5 };
 
   var t: Shape = a;
   var p: *Shape = &t;
@@ -53,7 +53,7 @@ func main() -> int {
   if (areaThrough(p) != 18) { return 3; }
 
   // A concrete class value assigned through the deref points at the value.
-  var b: Sq = new Sq { s: 4 };
+  var b: Sq = Sq { s: 4 };
   *p = b;
   if (t.area() != 16) { return 4; }
 

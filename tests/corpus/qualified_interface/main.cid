@@ -25,7 +25,7 @@ class Box {
 
 // A module-global interface variable with a qualified type.
 var gshape: lib.Shape = nilPtr as lib.Shape;
-var grect: lib.Rect = new lib.Rect { w: 0, h: 0 };
+var grect: lib.Rect = lib.Rect { w: 0, h: 0 };
 
 // Qualified interface parameter. CIDER-BUG-080 accepts concrete values at
 // call boundaries too, for both spellings; this test keeps to
@@ -40,8 +40,8 @@ func areaViaBare(x: Shape) -> int {
 }
 
 func main() -> int {
-  var sq: lib.Sq = new lib.Sq { s: 3 };
-  var rect: lib.Rect = new lib.Rect { w: 2, h: 5 };
+  var sq: lib.Sq = lib.Sq { s: 3 };
+  var rect: lib.Rect = lib.Rect { w: 2, h: 5 };
 
   // --- qualified declaration, initialization and dispatch ---
   var sh: lib.Shape = sq;
@@ -73,7 +73,7 @@ func main() -> int {
   if (sh.area() != 12) { return 9; }
 
   // --- qualified interface field in a struct (16-byte store) ---
-  var h: Holder = new Holder { id: 7, shape: sq, tail: 9 };
+  var h: Holder = Holder { id: 7, shape: sq, tail: 9 };
   if (h.id != 7) { return 10; }
   if (h.tail != 9) { return 11; }
   if (h.shape.area() != 9) { return 12; }
@@ -84,13 +84,13 @@ func main() -> int {
   if (h.tail != 9) { return 16; }
 
   // Struct literal with a qualified interface field.
-  var lit: Holder = new Holder { id: 11, shape: rect, tail: 13 };
+  var lit: Holder = Holder { id: 11, shape: rect, tail: 13 };
   if (lit.id != 11) { return 17; }
   if (lit.tail != 13) { return 18; }
   if (lit.shape.area() != 10) { return 19; }
 
   // --- qualified interface field in a class (value and heap) ---
-  var b: Box = new Box { id: 21, shape: rect, tail: 23 };
+  var b: Box = Box { id: 21, shape: rect, tail: 23 };
   if (b.shape.area() != 10) { return 20; }
   b.shape = sq;
   if (b.shape.kind() != 1) { return 21; }
@@ -105,7 +105,7 @@ func main() -> int {
   if ((*bp).shape.area() != 10) { return 25; }
 
   // --- array of qualified interface values (16-byte stride) ---
-  var arr: [lib.Shape; 2] = new [lib.Shape; 2] { nilPtr as lib.Shape, nilPtr as lib.Shape };
+  var arr: [lib.Shape; 2] = [ nilPtr as lib.Shape, nilPtr as lib.Shape ];
   arr[0] = sq;
   arr[1] = rect;
   if (arr[0].area() != 9) { return 26; }

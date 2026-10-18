@@ -6,16 +6,16 @@
 type X = [u16; 3];
 
 func fromLocal() -> [u16; 3] {
-  var a: [u16; 3] = new [u16; 3] {65, 66, 0};
+  var a: [u16; 3] = [65, 66, 0];
   a[0] = 65;
   a[1] = 66;
   a[2] = 0;
   return a;
 }
 
-func fromLiteral() -> [u16; 3] { return new [u16; 3] {65, 66, 0}; }
+func fromLiteral() -> [u16; 3] { return [65, 66, 0]; }
 
-func fromAlias() -> X { return new [u16; 3] {65, 66, 0}; }
+func fromAlias() -> X { return [65, 66, 0]; }
 
 func sum(a: [u16; 3]) -> int { return (a[0] + a[1] + a[2]) as int; }
 
@@ -36,6 +36,6 @@ func main() -> int {
   if (c[2] != 0) { return 9; }
 
   if (sum(a) != 131) { return 10; }
-  if (sum(new [u16; 3] {65, 66, 0}) != 131) { return 11; }
+  if (sum([65, 66, 0]) != 131) { return 11; }
   return 0;
 }

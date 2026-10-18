@@ -255,6 +255,7 @@ public:
     void visitNewStruct(NewStruct& n) override;
     void visitNewClass(NewClass& n) override;
     void visitNewArray(NewArray& n) override;
+    void visitArrayLit(ArrayLit& n) override;
     void visitAssign(Assign& n) override;
     void visitSizeofType(SizeofType& n) override;
     void visitFuncLit(FuncLit& n) override;
@@ -299,6 +300,7 @@ private:
     TypeRef checkNewUnion(NewStruct& expr, TypeRef target, DeclId id);
     TypeRef checkUnionHas(Call& expr, const Field& callee, TypeRef object);
     TypeRef checkNewArray(NewArray& expr);
+    TypeRef checkArrayLit(ArrayLit& expr, TypeRef declared);
     // A repeat filler that is the scalar zero over an aggregate element:
     // `new [[u8; 2]; 3] { [0, ...] }` zeroes every scalar, so the filler
     // never checks against the element type.

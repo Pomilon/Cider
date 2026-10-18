@@ -38,7 +38,7 @@ func retargetPtr(p: *Shape, r: *Rect) {
 // Value source local to this frame: the interface and `r` die together, so
 // the aliased address is live for every read inside the function.
 func localRoundTrip() -> int {
-  var r: Rect = new Rect { w: 6, h: 7 };
+  var r: Rect = Rect { w: 6, h: 7 };
   var s: Shape = r;
   return s.area();
 }
@@ -53,7 +53,7 @@ func heapArea() -> int {
 }
 
 func main() -> int {
-  var r: Rect = new Rect { w: 2, h: 5 };
+  var r: Rect = Rect { w: 2, h: 5 };
   var rp: *Rect = &r;
 
   // Pointer-derived interface aliases the live local.
@@ -68,7 +68,7 @@ func main() -> int {
   // `&local` pointer target: a value store through it is same-frame.
   var u: Shape = r;
   var pu: *Shape = &u;
-  var other: Rect = new Rect { w: 8, h: 9 };
+  var other: Rect = Rect { w: 8, h: 9 };
   *pu = other;
   if (u.area() != 72) { return 3; }
   pu[0] = rp;
@@ -89,7 +89,7 @@ func main() -> int {
   var k: int = 0;
   var acc: int = 0;
   while (k < 3) {
-    var step: Rect = new Rect { w: k + 1, h: 2 };
+    var step: Rect = Rect { w: k + 1, h: 2 };
     var si: Shape = step;
     acc = acc + si.area();
     k = k + 1;

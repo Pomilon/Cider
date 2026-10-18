@@ -1165,9 +1165,9 @@
   "class": "A"
  },
  "qualified_struct_literal": {
-  "actual": "15:21: expected ';' at bare `qlib.Holder{...}` literal (v3 requires `new` for every value, \u00a72.1a)",
-  "blocker": "v3-new-required",
-  "class": "B"
+  "actual": "exact stdout/stderr/exit match",
+  "blocker": "multi-file-imports",
+  "class": "A"
  },
  "qualified_template_late_hooks": {
   "actual": "exact stdout/stderr/exit match",

@@ -51,20 +51,20 @@ func useNode(n: *Node<int>) -> int {
 }
 
 func main() -> int {
-  var a: Node<int> = new Node<int> { v: 10, next: nilPtr };
-  var b: Node<int> = new Node<int> { v: 20, next: nilPtr };
+  var a: Node<int> = Node<int> { v: 10, next: nilPtr };
+  var b: Node<int> = Node<int> { v: 20, next: nilPtr };
   a.next = &b;
   var total: int = a.v + (*a.next).v;
-  var m: AB = new A<int> { v: 1, b: new B<int> { v: 2, a: nilPtr } };
+  var m: AB = A<int> { v: 1, b: B<int> { v: 2, a: nilPtr } };
   total = total + m.v + m.b.v;
-  var h: HasBoxed = new HasBoxed { w: new Box<Box<int>> { v: new Box<int> { v: 4 } } };
+  var h: HasBoxed = HasBoxed { w: Box<Box<int>> { v: Box<int> { v: 4 } } };
   total = total + h.w.v.v;
   // Swapped<U, T> by value never bottoms out (like ArrSelf above):
   // infinitely sized and unconstructible; the declaration still pins
   // that the guard accepts the permuted self-mention.
-  var n2: N2 = new Node<Node<int>> { v: new Node<int> { v: 7, next: nilPtr }, next: nilPtr };
+  var n2: N2 = Node<Node<int>> { v: Node<int> { v: 7, next: nilPtr }, next: nilPtr };
   total = total + n2.v.v;
-  var f: FnSelf<int> = new FnSelf<int> { v: 8, cb: nilPtr };
+  var f: FnSelf<int> = FnSelf<int> { v: 8, cb: nilPtr };
   total = total + f.v;
   // ArrSelf<int> holds [ArrSelf<int>; 2] by value: infinitely sized and
   // unconstructible in principle, so its runtime line is dropped while the

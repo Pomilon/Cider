@@ -100,9 +100,9 @@ func main() -> int {
 
   // The aggregate positions still work when a value IS expected, so the fix
   // is not "stop typing aggregates" but "type the value that was produced".
-  var p: Pt = new Pt { x: 0, y: 0, z: 0 };
+  var p: Pt = Pt { x: 0, y: 0, z: 0 };
   if (sizeof(Pt) != 12) { return 12; }
-  var w: Wide = new Wide { a: 0, b: 0, c: 0, d: 0, e: 0 };
+  var w: Wide = Wide { a: 0, b: 0, c: 0, d: 0, e: 0 };
   if (sizeof(Wide) != 20) { return 13; }
   var sh: Shape = new Sq(5);
   if (sh.area() != 25) { return 14; }

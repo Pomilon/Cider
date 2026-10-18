@@ -425,8 +425,10 @@ public:
     // Construction into given slots, field by field (element by element). A
     // nested value lands word-aligned or is refused: unaligned multi-word
     // copies guess neighbor bytes.
-    void constructStruct(const std::vector<ir::Value>& slots, const NewStruct& n);
-    void constructArray(const std::vector<ir::Value>& slots, const NewArray& n);
+    void constructStruct(const Place& base, TypeRef objType, const NewStruct& n);
+    void constructArray(const Place& baseIn, TypeRef arrayType,
+                    const std::vector<std::unique_ptr<Expr>>& inits, bool repeat,
+                    int64_t count, Position pos);
     // Zero-repeat support for construction: a scalar-zero filler over an
     // aggregate element zeroes every scalar instead of lowering one value.
     bool isZeroRepeatFiller(const Expr& filler, TypeRef element);
@@ -434,7 +436,8 @@ public:
     // into little-endian bytes (one element width per scalar leaf,
     // recursing into nested constructions). Every leaf must fold; the
     // checker's const gate owns that rule and this is its backstop.
-    bool globalInitBytes(const NewArray& init, TypeRef arrayType, std::string& bytes);
+    bool globalInitBytes(const std::vector<std::unique_ptr<Expr>>& inits,
+                         bool repeat, TypeRef arrayType, std::string& bytes);
     // Folds a const struct or class value to image bytes: one field
     // after another at the layout's offsets, zeros between and around
     // them. A class opens with a null vtable word the way `new` writes
@@ -445,10 +448,10 @@ public:
     // A class constructs its fields after a null vptr word; methods wire
     // the vptr in a later slice. A class with bases is refused: inherited
     // fields have no layout yet.
-    void constructClass(const std::vector<ir::Value>& slots, const NewStruct& n);
+    void constructClass(const Place& base, TypeRef objType, const NewStruct& n);
     // A union constructs its one live member at offset 0 and writes the
     // member's index to the tag after the payload (TYPES.md 4.6).
-    void constructUnion(const std::vector<ir::Value>& slots, const NewStruct& n);
+    void constructUnion(const Place& base, TypeRef objType, const NewStruct& n);
     // Loads a union's tag and compares it to the expected member index. The
     // answer is one boolean word: true when the member is live.
     ir::Value emitTagCheck(Position pos, const Place& base, int64_t tagOff, int64_t index);
@@ -514,6 +517,7 @@ public:
                           TypeRef arrayType, const Place& dest, const char* what);
     std::vector<ir::Value> lowerNewStruct(const NewStruct& n);
     std::vector<ir::Value> lowerNewArray(const NewArray& n);
+    std::vector<ir::Value> lowerArrayLit(const ArrayLit& n);
     std::vector<ir::Value> lowerNewClass(const NewClass& n);
     // Answers a closure literal's two words: the hidden function's address
     // and the captures allocation, filled from the enclosing locals. Never

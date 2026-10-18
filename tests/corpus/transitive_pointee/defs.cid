@@ -9,7 +9,7 @@ export struct Holder {
   var p: *Inner;
 }
 
-export var g_inner: Inner = new Inner { a: 0, b: 0 };
+export var g_inner: Inner = Inner { a: 0, b: 0 };
 
 export func setInner(a: u32, b: u32) -> void {
   g_inner.a = a;
@@ -17,7 +17,7 @@ export func setInner(a: u32, b: u32) -> void {
 }
 
 export func getHolder() -> Holder {
-  var h: Holder = new Holder { p: nilPtr };
+  var h: Holder = Holder { p: nilPtr };
   h.p = &g_inner;
   return h;
 }

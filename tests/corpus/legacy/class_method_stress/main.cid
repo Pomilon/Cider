@@ -13,7 +13,7 @@ class Counter {
 }
 
 func test_basic_class() -> int {
-    var c: Counter = new Counter { value: 0 };
+    var c: Counter = Counter { value: 0 };
     c.increment();
     c.increment();
     c.increment();
@@ -22,7 +22,7 @@ func test_basic_class() -> int {
 }
 
 func test_method_return() -> int {
-    var c: Counter = new Counter { value: 42 };
+    var c: Counter = Counter { value: 42 };
     if (c.getValue() != 42) { return 2; }
     return 0;
 }

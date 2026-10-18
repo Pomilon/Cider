@@ -52,7 +52,7 @@ class Base {
   // would fold away: the subject of the program is the CALLER's handling of the
   // result, not the callee's body.
   virtual func wide(n: int) -> Wide {
-    var a: Wide = new [i32; 20000] {[0, ...]};
+    var a: Wide = [0, ...];
     if (n < 0) { return a; }
     a[0] = 11;
     a[19999] = 12;
@@ -61,15 +61,15 @@ class Base {
   // The narrow-element return: one byte of the returned address is all the
   // defective typing kept.
   virtual func narrow() -> Narrow {
-    var b: Narrow = new [u8; 4] {1, 2, 3, 4};
+    var b: Narrow = [1, 2, 3, 4];
     return b;
   }
   virtual func row() -> Row {
-    var r: Row = new [i64; 4] {21, 22, 23, 24};
+    var r: Row = [21, 22, 23, 24];
     return r;
   }
   virtual func nested() -> Two {
-    var t: Two = new [[i64; 2]; 2] { new [i64; 2] {31, 32}, new [i64; 2] {33, 34} };
+    var t: Two = [ [31, 32], [33, 34] ];
     return t;
   }
   virtual func scalar(n: int) -> int { return n * 3; }
@@ -77,22 +77,22 @@ class Base {
 
 class Derived : Base {
   func wide(n: int) -> Wide {
-    var a: Wide = new [i32; 20000] {[0, ...]};
+    var a: Wide = [0, ...];
     if (n < 0) { return a; }
     a[0] = 13;
     a[19999] = 14;
     return a;
   }
   func narrow() -> Narrow {
-    var b: Narrow = new [u8; 4] {5, 6, 7, 8};
+    var b: Narrow = [5, 6, 7, 8];
     return b;
   }
   func row() -> Row {
-    var r: Row = new [i64; 4] {31, 32, 33, 34};
+    var r: Row = [31, 32, 33, 34];
     return r;
   }
   func nested() -> Two {
-    var t: Two = new [[i64; 2]; 2] { new [i64; 2] {41, 42}, new [i64; 2] {43, 44} };
+    var t: Two = [ [41, 42], [43, 44] ];
     return t;
   }
   func scalar(n: int) -> int { return n * 5; }
@@ -102,14 +102,14 @@ class Derived : Base {
 // a missing copy is caught instead of accidentally reading what the callee
 // happened to leave behind.
 func churn(n: int) -> int {
-  var a: [i64; 8] = new [i64; 8] {[0, ...]};
+  var a: [i64; 8] = [0, ...];
   for (var i: int = 0; i < 8; i = i + 1) { a[i] = i as i64; }
   if (n <= 0) { return (a[0] + a[7]) as int; }
   return (a[1] + (churn(n - 1) as i64)) as int;
 }
 
 func main() -> int {
-  var d: Derived = new Derived { };
+  var d: Derived = Derived { };
   var bp: *Base = &d;
 
   // The narrow-element return, content-checked at both ends. Before the fix the
@@ -135,7 +135,7 @@ func main() -> int {
 
   // Assignment into an already-declared variable: the pointer travels from the
   // call's result register into the target through a plain aggregate copy.
-  var w3: Wide = new [i32; 20000] {[0, ...]};
+  var w3: Wide = [0, ...];
   w3 = (*bp).wide(1);
   if (w3[0] != 13 || w3[19999] != 14) { return 7; }
 

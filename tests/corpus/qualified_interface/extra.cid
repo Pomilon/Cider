@@ -7,7 +7,7 @@ import lib;
 export func kindOf(s: lib.Shape) -> int { return s.kind(); }
 
 export func retarget(var s: lib.Shape) -> int {
-  var r: lib.Rect = new lib.Rect { w: 6, h: 7 };
+  var r: lib.Rect = lib.Rect { w: 6, h: 7 };
   s = r;
   return s.area();
 }

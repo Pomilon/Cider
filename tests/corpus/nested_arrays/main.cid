@@ -3,8 +3,8 @@
 // (`var row: [u8; 2] = m[1];` and `m[0] = row;`), for-in over the outer
 // and a middle dimension, sizeof of the array and of a row, address-of an
 // element, passing/returning rows, and a struct field with a nested array.
-var g: [[u8; 2]; 3] = new [[u8; 2]; 3] {[0, ...]};
-var cube: [[[u16; 2]; 2]; 2] = new [[[u16; 2]; 2]; 2] {[0, ...]};
+var g: [[u8; 2]; 3] = [0, ...];
+var cube: [[[u16; 2]; 2]; 2] = [0, ...];
 
 // Alias spellings of nested arrays: a direct alias and a composed
 // `[Row; N]` alias (the flat representation used to drop the outer
@@ -24,7 +24,7 @@ func row_sum(row: [u8; 2]) -> int {
 }
 
 func make_row() -> [u8; 2] {
-  var r: [u8; 2] = new [u8; 2] {11, 22};
+  var r: [u8; 2] = [11, 22];
   return r;
 }
 
@@ -36,7 +36,7 @@ func main() -> int {
   if (g[0][0] != 1 || g[1][1] != 4 || g[2][0] != 5) { return 1; }
 
   // Local 2-D: write both dimensions through loop variables.
-  var m: [[u8; 2]; 3] = new [[u8; 2]; 3] {[0, ...]};
+  var m: [[u8; 2]; 3] = [0, ...];
   for (var i: int = 0; i < 3; i = i + 1) {
     for (var j: int = 0; j < 2; j = j + 1) {
       m[i][j] = (i * 2 + j + 1) as u8;
@@ -91,16 +91,16 @@ func main() -> int {
   if (inner != 42) { return 15; }
 
   // Struct field with a nested array.
-  var z2: [u8; 2] = new [u8; 2] {0, 0};
-  var gr: Grid = new Grid { cells: new [[u8; 2]; 2] {z2, z2}, tag: 0 as u8 };
+  var z2: [u8; 2] = [0, 0];
+  var gr: Grid = Grid { cells: [z2, z2], tag: 0 as u8 };
   gr.cells[1][1] = 77;
   gr.tag = 5;
   if (gr.cells[1][1] != 77 || gr.tag != 5) { return 16; }
   if (sizeof(Grid) != 5) { return 17; }
 
   // Alias spellings: `Rows = [Row; 3]` must keep the outer dimension.
-  var zr: Row = new [u8; 2] {0, 0};
-  var rs: Rows = new [Row; 3] {zr, zr, zr};
+  var zr: Row = [0, 0];
+  var rs: Rows = [zr, zr, zr];
   rs[0] = row;
   rs[1][0] = 1; rs[1][1] = 2;
   rs[2][0] = 5; rs[2][1] = 6;

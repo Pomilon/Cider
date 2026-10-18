@@ -2039,6 +2039,36 @@ std::unique_ptr<Expr> Parser::parsePrefix() {
         case TokenKind::KwFunc:
             base = parseFuncLit();
             break;
+        case TokenKind::LBracket: {
+            advance();
+            std::vector<std::unique_ptr<Expr>> inits;
+            bool repeat = false;
+            if (!check(TokenKind::RBracket)) {
+                for (;;) {
+                    inits.push_back(parseExpr());
+                    if (inits.back() == nullptr) {
+                        return nullptr;
+                    }
+                    if (match(TokenKind::Comma)) {
+                        if (match(TokenKind::Ellipsis)) {
+                            repeat = true;
+                            break;
+                        }
+                        if (check(TokenKind::RBracket)) {
+                            break;
+                        }
+                        continue;
+                    }
+                    break;
+                }
+            }
+            if (!match(TokenKind::RBracket)) {
+                failHere("expected ']'");
+                return nullptr;
+            }
+            base = std::make_unique<ArrayLit>(start, std::move(inits), repeat);
+            break;
+        }
         default:
             failHere("expected an expression");
             return nullptr;
@@ -2051,6 +2081,107 @@ std::unique_ptr<Expr> Parser::parsePrefix() {
 
 std::unique_ptr<Expr> Parser::parsePostfix(std::unique_ptr<Expr> base) {
     for (;;) {
+        // `lib.Type { ... }`: a qualified aggregate literal (Unified
+        // Standard 5.1). The name chain built so far is the type spelling.
+        if (check(TokenKind::LBrace) && !noStructLit_) {
+            std::unique_ptr<NamedType> named;
+            if (const auto* id = dynamic_cast<const Ident*>(base.get())) {
+                std::vector<std::unique_ptr<TypeExpr>> noArgs;
+                named = std::make_unique<NamedType>(id->pos, "", id->name,
+                                                    std::move(noArgs));
+            } else if (const auto* fld = dynamic_cast<const Field*>(base.get())) {
+                const auto* obj = dynamic_cast<const Ident*>(fld->object.get());
+                if (obj != nullptr) {
+                    std::vector<std::unique_ptr<TypeExpr>> noArgs;
+                    named = std::make_unique<NamedType>(fld->pos, obj->name,
+                                                        fld->name, std::move(noArgs));
+                }
+            }
+            if (named != nullptr) {
+                advance();
+                base = parseStructLiteral(std::move(named), base->pos);
+                if (base == nullptr) {
+                    return nullptr;
+                }
+                continue;
+            }
+        }
+        // `Vec<T> { ... }`: a generic bare literal (Unified Standard 5.1).
+        // The `<` opens type arguments only when its balanced `>` is
+        // immediately followed by `{`; `a < b` stays a comparison.
+        bool namedBase = dynamic_cast<const Ident*>(base.get()) != nullptr ||
+            (dynamic_cast<const Field*>(base.get()) != nullptr &&
+             dynamic_cast<const Ident*>(
+                 static_cast<const Field*>(base.get())->object.get()) != nullptr);
+        if (check(TokenKind::Lt) && !noStructLit_ && namedBase) {
+            uint32_t depth = 0, off = 0;
+            bool shaped = false;
+            for (; off < 32; ++off) {
+                TokenKind k = peekAt(off).kind;
+                if (k == TokenKind::Lt) {
+                    ++depth;
+                } else if (k == TokenKind::Gt) {
+                    --depth;
+                    if (depth == 0) {
+                        shaped = peekAt(off + 1).kind == TokenKind::LBrace;
+                        break;
+                    }
+                } else if (k == TokenKind::GtGt) {
+                    if (depth < 2) {
+                        break;
+                    }
+                    depth -= 2;
+                    if (depth == 0) {
+                        shaped = peekAt(off + 1).kind == TokenKind::LBrace;
+                        break;
+                    }
+                } else if (k == TokenKind::End) {
+                    break;
+                }
+            }
+            if (shaped) {
+                advance();
+                std::vector<std::unique_ptr<TypeExpr>> args;
+                if (!check(TokenKind::Gt)) {
+                    for (;;) {
+                        std::unique_ptr<TypeExpr> a = parseType();
+                        if (a == nullptr) {
+                            return nullptr;
+                        }
+                        args.push_back(std::move(a));
+                        if (match(TokenKind::Comma)) {
+                            continue;
+                        }
+                        break;
+                    }
+                }
+                if (!matchGt()) {
+                    failHere("expected '>'");
+                    return nullptr;
+                }
+                if (!match(TokenKind::LBrace)) {
+                    failHere("expected '{'");
+                    return nullptr;
+                }
+                std::vector<std::unique_ptr<TypeExpr>> noArgs;
+                std::unique_ptr<NamedType> gname;
+                if (const auto* gident = dynamic_cast<const Ident*>(base.get())) {
+                    gname = std::make_unique<NamedType>(gident->pos, "", gident->name,
+                                                        std::move(noArgs));
+                } else {
+                    const auto* gfld = static_cast<const Field*>(base.get());
+                    const auto* gobj = static_cast<const Ident*>(gfld->object.get());
+                    gname = std::make_unique<NamedType>(gfld->pos, gobj->name,
+                                                        gfld->name, std::move(noArgs));
+                }
+                gname->args = std::move(args);
+                base = parseStructLiteral(std::move(gname), base->pos);
+                if (base == nullptr) {
+                    return nullptr;
+                }
+                continue;
+            }
+        }
         // Postfix `++` / `--` bind at this level, so `*p++` is `*(p++)`
         // and only `(*p)++` touches the pointee — the same rule C uses,
         // and the checker rejects whatever is not a place either way.
@@ -2297,7 +2428,7 @@ std::unique_ptr<Expr> Parser::parseNew() {
         std::unique_ptr<Expr> length = std::move(raw->length);
         std::unique_ptr<TypeExpr> element = std::move(raw->element);
         return std::make_unique<NewArray>(start, std::move(element), std::move(length),
-                                          std::move(inits), repeat);
+                                          std::move(inits), repeat, true);
     }
     std::unique_ptr<TypeExpr> type = parsePrimaryType();
     if (type == nullptr) {

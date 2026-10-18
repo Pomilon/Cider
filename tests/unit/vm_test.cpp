@@ -141,13 +141,13 @@ void testArith() {
 void testMemory() {
     std::printf("computed addressing runs\n");
     Lowered unopt = lower(
-        "func main() -> int { var xs: [int; 4] = new [int; 4] {10, 20, 30, 40};"
+        "func main() -> int { var xs: [int; 4] = [10, 20, 30, 40];"
         " var i: int = 2; return xs[i] as int; }\n");
     check(unopt.ok, "lowers: " + unopt.stage);
     cider::vm::VmResult unr = cider::vm::run(*unopt.module, "");
     check(unr.ok && unr.exitCode == 30, "a computed index reads 30: " + unr.error);
     Lowered sum = lower(
-        "func main() -> int { var xs: [int; 4] = new [int; 4] {10, 20, 30, 40};"
+        "func main() -> int { var xs: [int; 4] = [10, 20, 30, 40];"
         " var s: int = 0; var i: int = 0;"
         " while (i < 4) { s = s + xs[i]; i = i + 1; } return s; }\n");
     cider::vm::VmResult sr = cider::vm::run(*sum.module, "");
@@ -166,7 +166,7 @@ void testDeath() {
     std::printf("traps and faults die like the machine\n");
     // An index past the end lowers to a check branch into a trap block.
     Lowered oob = lower("func main() -> int {\n"
-                        "    var a: [int; 2] = new [int; 2] {1, 2};\n"
+                        "    var a: [int; 2] = [1, 2];\n"
                         "    var i: int = 5;\n"
                         "    return a[i];\n"
                         "}\n");
@@ -201,7 +201,7 @@ void testDeath() {
     // A union member read of a tag that was never written traps.
     Lowered dead = lower("union U { var i: int; var s: string; }\n"
                          "func main() -> int {\n"
-                         "    var u: U = new U { i: 3 };\n"
+                         "    var u: U = U { i: 3 };\n"
                          "    var t: string = u.s;\n"
                          "    return 0;\n"
                          "}\n");
@@ -245,13 +245,13 @@ void testFloats() {
     // A float field keeps every bit of the value, which is the shape whose
     // native store lost the high half before it was fixed.
     Lowered field = lower("struct P { var a: f64; }\n"
-                         "func main() -> int { var p: P = new P { a: 1.5 };"
+                         "func main() -> int { var p: P = P { a: 1.5 };"
                          " return p.a as int; }\n");
     check(field.ok, "a field program lowers: " + field.stage);
     cider::vm::VmResult fieldr = cider::vm::run(*field.module, "");
     check(fieldr.ok && fieldr.exitCode == 1, "a field holds its value: " + fieldr.error);
     Lowered narrow = lower("struct N { var a: f32; }\n"
-                           "func main() -> int { var p: N = new N { a: 0.5 };"
+                           "func main() -> int { var p: N = N { a: 0.5 };"
                            " return p.a as int; }\n");
     cider::vm::VmResult narrowr = cider::vm::run(*narrow.module, "");
     check(narrowr.ok && narrowr.exitCode == 0, "an f32 field reads back: " + narrowr.error);
@@ -407,7 +407,7 @@ void testCalls() {
     // of the value it carries: the row was read whole, so writing every
     // byte of it would reach past the row and zero what follows.
     Lowered agg = lower("func main() -> int {\n"
-                        " var m: [[u8; 2]; 3] = new [[u8; 2]; 3] {[0, ...]};\n"
+                        " var m: [[u8; 2]; 3] = [[0, ...], [0, ...], [0, ...]];\n"
                         " for (var i: int = 0; i < 3; i = i + 1) {\n"
                         "  for (var j: int = 0; j < 2; j = j + 1) {\n"
                         "   m[i][j] = (i * 2 + j + 1) as u8;\n"
@@ -538,7 +538,7 @@ void testFileSyscalls() {
                        " \"mov rsi, 1\" \"mov rdx, 0\""
                        " \"syscall\" \"mov {off}, eax\" }"
                        " if (off != 1) { return 5; }"
-                       " var buf: [u8; 4] = new [u8; 4] { [0, ...] };"
+                       " var buf: [u8; 4] = [0, ...];"
                        " var bp: *u8 = &buf[0];"
                        " var nr: int = 0;"
                        " asm { \"mov rax, 0\" \"mov rdi, {fd2}\""

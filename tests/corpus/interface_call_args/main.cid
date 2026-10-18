@@ -98,7 +98,7 @@ func main() -> int {
   if (areaOf(rp) != 10) { return 10; }
 
   // 6. Class method with an interface parameter, concrete arguments.
-  var h: Holder = new Holder { tag: 1 };
+  var h: Holder = Holder { tag: 1 };
   if (h.use(sq) != 109) { return 11; }
   if (h.use(rc) != 210) { return 12; }
   if (h.use(new Sq(5)) != 125) { return 13; }

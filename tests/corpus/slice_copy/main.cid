@@ -8,7 +8,7 @@ struct Pair {
 }
 
 func main() -> int {
-    var a: [u8; 5] = new [u8; 5] {10, 42, 43, 44, 50};
+    var a: [u8; 5] = [10, 42, 43, 44, 50];
 
     // Middle slice into a matching-size array at declaration time.
     var s: [u8; 3] = a[1:4];
@@ -32,18 +32,18 @@ func main() -> int {
     if (t[2] != 50) { return 10; }
 
     // Assignment into an existing array (no initializer) copies too.
-    var u: [u8; 3] = new [u8; 3] {[0, ...]};
+    var u: [u8; 3] = [0, ...];
     u = a[1:4];
     if (u[0] != 42) { return 11; }
     if (u[1] != 43) { return 12; }
     if (u[2] != 44) { return 13; }
 
     // Wider elements: the copy must use the target's element width.
-    var b: [int; 4] = new [int; 4] {100, 200, 300, 400};
+    var b: [int; 4] = [100, 200, 300, 400];
     var bi: [int; 2] = b[1:3];
     if (bi[0] != 200) { return 14; }
     if (bi[1] != 300) { return 15; }
-    var bj: [int; 2] = new [int; 2] {[0, ...]};
+    var bj: [int; 2] = [0, ...];
     bj = b[2:4];
     if (bj[0] != 300) { return 16; }
     if (bj[1] != 400) { return 17; }
@@ -60,7 +60,7 @@ func main() -> int {
 
     // Assignment into an array element (nested fixed arrays): the element
     // slot is the copy target.
-    var rows: [[u8; 2]; 3] = new [[u8; 2]; 3] {[0, ...]};
+    var rows: [[u8; 2]; 3] = [0, ...];
     rows[0] = a[0:2];
     rows[2] = a[3:5];
     if (rows[0][0] != 10) { return 21; }
@@ -94,7 +94,7 @@ func main() -> int {
     if (tsum != 94) { return 28; }
 
     // A nested-array source steps by the inner element's size.
-    var m: [[u8; 2]; 4] = new [[u8; 2]; 4] {[0, ...]};
+    var m: [[u8; 2]; 4] = [0, ...];
     m[0][0] = 1; m[0][1] = 2;
     m[1][0] = 3; m[1][1] = 4;
     m[2][0] = 5; m[2][1] = 6;
@@ -106,7 +106,7 @@ func main() -> int {
     if (r[1][1] != 6) { return 32; }
 
     // A struct member array is an assignment target too.
-    var p: Pair = new Pair { arr: new [u8; 2] {0, 0} };
+    var p: Pair = Pair { arr: [0, 0] };
     p.arr = a[0:2];
     if (p.arr[0] != 10) { return 33; }
     if (p.arr[1] != 42) { return 34; }

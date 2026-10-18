@@ -7,13 +7,13 @@ func add(a: int, b: int) -> int { return a + b; }
 func mul(a: int, b: int) -> int { return a * b; }
 
 func main() -> int {
-  var o: Ops = new Ops { op: &add, bias: 0 };
+  var o: Ops = Ops { op: &add, bias: 0 };
   o.op = &add;
   o.bias = 1;
   if ((*o.op)(2, 3) + o.bias != 6) { return 1; }
   o.op = &mul;
   if ((*o.op)(2, 3) + o.bias != 7) { return 2; }
-  var o2: Ops = new Ops { op: &add, bias: 0 };
+  var o2: Ops = Ops { op: &add, bias: 0 };
   o2.op = &add;
   o2.bias = 0;
   if ((*o2.op)(4, 4) != 8) { return 3; }

@@ -59,7 +59,7 @@ func areaOf(h: Holder) -> int {
 // Callee retargets its own by-value copy; the caller's fat pointer must not
 // be disturbed (the whole struct, including the interface field, is copied).
 func retargeted(var h: Holder) -> int {
-  var r: Rect = new Rect { w: 6, h: 7 };
+  var r: Rect = Rect { w: 6, h: 7 };
   h.shape = r;
   return h.shape.area();
 }
@@ -73,11 +73,11 @@ func areaViaPtr(p: *Holder) -> int {
 }
 
 func main() -> int {
-  var c: Sq = new Sq { s: 3 };
-  var r: Rect = new Rect { w: 2, h: 5 };
+  var c: Sq = Sq { s: 3 };
+  var r: Rect = Rect { w: 2, h: 5 };
 
   // --- struct interface field: assign, neighbours intact, dispatch ---
-  var h: Holder = new Holder { id: 7, shape: c, tail: 9 };
+  var h: Holder = Holder { id: 7, shape: c, tail: 9 };
   if (h.id != 7) { return 1; }
   if (h.tail != 9) { return 2; }
   if (h.shape.area() != 9) { return 3; }
@@ -94,7 +94,7 @@ func main() -> int {
   if (h.shape.kind() != 1) { return 8; }
 
   // --- struct literal initializes an interface field ---
-  var lit: Holder = new Holder { id: 11, shape: r, tail: 13 };
+  var lit: Holder = Holder { id: 11, shape: r, tail: 13 };
   if (lit.id != 11) { return 9; }
   if (lit.tail != 13) { return 10; }
   if (lit.shape.area() != 10) { return 11; }
@@ -131,7 +131,7 @@ func main() -> int {
   if (h.shape.area() != 9) { return 27; } // field untouched by local reassign
 
   // --- class interface field (value-class local) ---
-  var b: Box = new Box { id: 21, shape: r, tail: 23 };
+  var b: Box = Box { id: 21, shape: r, tail: 23 };
   if (b.id != 21) { return 28; }
   if (b.tail != 23) { return 29; }
   if (b.shape.area() != 10) { return 30; }
@@ -152,7 +152,7 @@ func main() -> int {
   if ((*bp).shape.kind() != 1) { return 37; }
 
   // --- array of interfaces (local, 16-byte stride) ---
-  var arr: [Shape; 2] = new [Shape; 2] { nilPtr as Shape, nilPtr as Shape };
+  var arr: [Shape; 2] = [ nilPtr as Shape, nilPtr as Shape ];
   arr[0] = c;
   arr[1] = r;
   if (arr[0].area() != 9) { return 38; }
@@ -164,7 +164,7 @@ func main() -> int {
   if (arr[0].kind() != 2) { return 42; }
 
   // --- array of interfaces as a struct field ---
-  var pn: Panel = new Panel { shapes: new [Shape; 2] { nilPtr as Shape, nilPtr as Shape }, tag: 41 };
+  var pn: Panel = Panel { shapes: [ nilPtr as Shape, nilPtr as Shape ], tag: 41 };
   pn.shapes[0] = c;
   pn.shapes[1] = r;
   if (pn.tag != 41) { return 43; }
@@ -176,7 +176,7 @@ func main() -> int {
   if (pn.tag != 41) { return 48; }
 
   // --- two adjacent fat pointers: no overlap, field-to-field copy ---
-  var tw: Twin = new Twin { first: c, second: r };
+  var tw: Twin = Twin { first: c, second: r };
   if (tw.first.area() != 9) { return 49; }
   if (tw.second.area() != 10) { return 50; }
   tw.first = tw.second;
@@ -190,7 +190,7 @@ func main() -> int {
   if (tw.second.area() != 9) { return 56; }
 
   // --- nested struct: copying the outer struct copies the inner fat pointer ---
-  var w: Wrap = new Wrap { pad: 5, inner: h };
+  var w: Wrap = Wrap { pad: 5, inner: h };
   if (w.pad != 5) { return 57; }
   if (w.inner.shape.area() != 9) { return 58; }
   var wcopy: Wrap = w;
@@ -200,7 +200,7 @@ func main() -> int {
   if (w.inner.shape.area() != 9) { return 61; } // nested source untouched
 
   // --- cross-module: interface field of a module-global struct ---
-  var ten: Ten = new Ten { };
+  var ten: Ten = Ten { };
   lib.shared.id = 63;
   lib.shared.mark = ten;
   if (lib.shared.id != 63) { return 62; }

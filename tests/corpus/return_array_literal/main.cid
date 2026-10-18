@@ -36,49 +36,49 @@ class Sq {
 // valid after the callee's frame dies (returning an array whose element
 // data word is a dead frame slot is a separate, pre-existing gap), and so
 // the two rows are distinct objects.
-var g_s1: Sq = new Sq { side: 0 };
-var g_s2: Sq = new Sq { side: 0 };
+var g_s1: Sq = Sq { side: 0 };
+var g_s2: Sq = Sq { side: 0 };
 
 // --- flat scalar rows -------------------------------------------------------
 
-func ints() -> [int; 2] { return new [int; 2] { 1, 2 }; }
+func ints() -> [int; 2] { return [ 1, 2 ]; }
 
-func zero() -> [int; 3] { return new [int; 3] { 0, 0, 0 }; }
+func zero() -> [int; 3] { return [ 0, 0, 0 ]; }
 
-func runtimeElems(n: int) -> [int; 3] { return new [int; 3] { n, n + 1, n * 2 }; }
+func runtimeElems(n: int) -> [int; 3] { return [ n, n + 1, n * 2 ]; }
 
 // --- narrow and wide element widths -----------------------------------------
 
-func bytes() -> [u8; 3] { return new [u8; 3] { 1, 2, 255 }; }
+func bytes() -> [u8; 3] { return [ 1, 2, 255 ]; }
 
-func words() -> Words { return new [u16; 3] { 1, 2, 65535 }; }
+func words() -> Words { return [ 1, 2, 65535 ]; }
 
 // --- alias spellings --------------------------------------------------------
 
-func viaAlias() -> Row { return new [u8; 3] { 10, 20, 30 }; }
+func viaAlias() -> Row { return [ 10, 20, 30 ]; }
 
-func viaAliasOfAlias() -> DeepAlias { return new [u8; 3] { 40, 50, 60 }; }
+func viaAliasOfAlias() -> DeepAlias { return [ 40, 50, 60 ]; }
 
-func viaWideAlias() -> Wide { return new [u16; 4] { 1, 2, 3, 4 }; }
+func viaWideAlias() -> Wide { return [ 1, 2, 3, 4 ]; }
 
 // --- nested rows ------------------------------------------------------------
 
-func nested() -> [[int; 2]; 2] { return new [[int; 2]; 2] { new [int; 2] { 1, 2 }, new [int; 2] { 3, 4 } }; }
+func nested() -> [[int; 2]; 2] { return [ [ 1, 2 ], [ 3, 4 ] ]; }
 
-func nestedAlias() -> Rows { return new [Row; 2] { new [u8; 3] { 7, 8, 9 }, new [u8; 3] { 10, 11, 12 } }; }
+func nestedAlias() -> Rows { return [ [ 7, 8, 9 ], [ 10, 11, 12 ] ]; }
 
 // --- by-value aggregate elements (class / struct) ---------------------------
 
 func structs() -> [S8; 2] {
-  var p: S8 = new S8 { a: 11, b: 22 };
-  var q: S8 = new S8 { a: 33, b: 44 };
-  return new [S8; 2] { p, q };
+  var p: S8 = S8 { a: 11, b: 22 };
+  var q: S8 = S8 { a: 33, b: 44 };
+  return [ p, q ];
 }
 
 func classes() -> [C16; 2] {
-  var p: C16 = new C16 { a: 1, b: 2, c: 3, d: 4 };
-  var q: C16 = new C16 { a: 5, b: 6, c: 7, d: 8 };
-  return new [C16; 2] { p, q };
+  var p: C16 = C16 { a: 1, b: 2, c: 3, d: 4 };
+  var q: C16 = C16 { a: 5, b: 6, c: 7, d: 8 };
+  return [ p, q ];
 }
 
 // --- fn-pointer elements ----------------------------------------------------
@@ -86,7 +86,7 @@ func classes() -> [C16; 2] {
 func inc(x: int) -> int { return x + 1; }
 func dbl(x: int) -> int { return x * 2; }
 
-func fns() -> [*func(int) -> int; 2] { return new [*func(int) -> int; 2] { &inc, &dbl }; }
+func fns() -> [*func(int) -> int; 2] { return [ &inc, &dbl ]; }
 
 // --- interface elements -----------------------------------------------------
 
@@ -95,7 +95,7 @@ func shapes() -> [Shape; 2] {
   g_s2.side = 4;
   var i1: Shape = g_s1;
   var i2: Shape = g_s2;
-  return new [Shape; 2] { i1, i2 };
+  return [ i1, i2 ];
 }
 
 // --- helpers ----------------------------------------------------------------

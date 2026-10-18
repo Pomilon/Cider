@@ -86,7 +86,7 @@ func main() -> int {
 
     // One defer run per foreach iteration.
     out = 0;
-    var a: [int; 3] = new [int; 3] {0, 0, 0};
+    var a: [int; 3] = [0, 0, 0];
     a[0] = 10;
     a[1] = 20;
     a[2] = 30;

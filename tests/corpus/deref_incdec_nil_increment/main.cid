@@ -28,7 +28,7 @@ func main() -> int {
   if (q != &x) { return 105; }
 
   var e: int = 7;
-  var eps: [*int; 1] = new [*int; 1] {nilPtr};
+  var eps: [*int; 1] = [nilPtr];
   eps[0] = &e;
   var ep: **int = &eps[0];
   if (incElemLive(ep, 0) != 8) { return 106; }

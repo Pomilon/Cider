@@ -27,21 +27,21 @@ struct N { var inner: R; var tag: int; }                      // 16-byte struct 
 struct Pair<A, B> { var first: A; var second: B; }            // generic, 8 bytes here
 
 func mkQ(x: int) -> Q {
-    return new Q { a: x };
+    return Q { a: x };
 }
 
 func mkP(x: int, y: int) -> P {
-    return new P { a: x, b: y };
+    return P { a: x, b: y };
 }
 
 func mkR(a: int, b: int, c: int, d: int) -> R {
-    return new R { a: a, b: b, c: c, d: d };
+    return R { a: a, b: b, c: c, d: d };
 }
 
 func main() -> int {
     // --- 4-byte struct: local, call-return and element RHS ---
-    var q: Q = new Q { a: 7 };
-    var qa: [Q; 3] = new [Q; 3] { new Q { a: 0 }, new Q { a: 0 }, new Q { a: 0 } };
+    var q: Q = Q { a: 7 };
+    var qa: [Q; 3] = [ Q { a: 0 }, Q { a: 0 }, Q { a: 0 } ];
     qa[0] = q;
     if (qa[0].a != 7) return 1;
     qa[1] = mkQ(9);
@@ -50,8 +50,8 @@ func main() -> int {
     if (qa[2].a != 7) return 3;
 
     // --- exactly 8 bytes: array index, every RHS shape ---
-    var p: P = new P { a: 11, b: 22 };
-    var arr: [P; 4] = new [P; 4] { new P { a: 0, b: 0 }, new P { a: 0, b: 0 }, new P { a: 0, b: 0 }, new P { a: 0, b: 0 } };
+    var p: P = P { a: 11, b: 22 };
+    var arr: [P; 4] = [ P { a: 0, b: 0 }, P { a: 0, b: 0 }, P { a: 0, b: 0 }, P { a: 0, b: 0 } ];
     arr[0] = p;
     if (arr[0].a != 11 || arr[0].b != 22) return 4;
     arr[1] = mkP(33, 44);
@@ -62,15 +62,15 @@ func main() -> int {
     if (arr[3].a != 11 || arr[3].b != 22) return 7;
 
     // --- 16 bytes: local and call-return RHS ---
-    var r: R = new R { a: 1, b: 2, c: 3, d: 4 };
-    var ra: [R; 2] = new [R; 2] { new R { a: 0, b: 0, c: 0, d: 0 }, new R { a: 0, b: 0, c: 0, d: 0 } };
+    var r: R = R { a: 1, b: 2, c: 3, d: 4 };
+    var ra: [R; 2] = [ R { a: 0, b: 0, c: 0, d: 0 }, R { a: 0, b: 0, c: 0, d: 0 } ];
     ra[0] = r;
     if (ra[0].a != 1 || ra[0].b != 2 || ra[0].c != 3 || ra[0].d != 4) return 8;
     ra[1] = mkR(5, 6, 7, 8);
     if (ra[1].a != 5 || ra[1].b != 6 || ra[1].c != 7 || ra[1].d != 8) return 9;
 
     // --- pointer element store (`pp[0] = s`, pp: *P) ---
-    var pl: P = new P { a: 0, b: 0 };
+    var pl: P = P { a: 0, b: 0 };
     var pp: *P = &pl;
     pp[0] = p;
     if (pl.a != 11 || pl.b != 22) return 10;
@@ -78,21 +78,21 @@ func main() -> int {
     if (pp[0].a != 55 || pp[0].b != 66) return 11;
 
     // --- nested array-of-struct element (RHS from local, then call) ---
-    var nested: [[P; 2]; 2] = new [[P; 2]; 2] { new [P; 2] { new P { a: 0, b: 0 }, new P { a: 0, b: 0 } }, new [P; 2] { new P { a: 0, b: 0 }, new P { a: 0, b: 0 } } };
+    var nested: [[P; 2]; 2] = [ [ P { a: 0, b: 0 }, P { a: 0, b: 0 } ], [ P { a: 0, b: 0 }, P { a: 0, b: 0 } ] ];
     nested[1][0] = p;
     if (nested[1][0].a != 11 || nested[1][0].b != 22) return 12;
     nested[0][1] = mkP(77, 88);
     if (nested[0][1].a != 77 || nested[0][1].b != 88) return 13;
 
     // --- 20-byte struct holding an array of 8-byte structs ---
-    var two: [P; 2] = new [P; 2] { new P { a: 0, b: 0 }, new P { a: 0, b: 0 } };
+    var two: [P; 2] = [ P { a: 0, b: 0 }, P { a: 0, b: 0 } ];
     two[0] = p;
     two[1] = mkP(33, 44);
-    var w: W = new W { ps: new [P; 2] { new P { a: 0, b: 0 }, new P { a: 0, b: 0 } }, tag: 0 };
+    var w: W = W { ps: [ P { a: 0, b: 0 }, P { a: 0, b: 0 } ], tag: 0 };
     w.ps = two;
     w.tag = 5;
     if (w.ps[0].a != 11 || w.ps[1].b != 44 || w.tag != 5) return 14;
-    var wa: [W; 2] = new [W; 2] { new W { ps: new [P; 2] { new P { a: 0, b: 0 }, new P { a: 0, b: 0 } }, tag: 0 }, new W { ps: new [P; 2] { new P { a: 0, b: 0 }, new P { a: 0, b: 0 } }, tag: 0 } };
+    var wa: [W; 2] = [ W { ps: [ P { a: 0, b: 0 }, P { a: 0, b: 0 } ], tag: 0 }, W { ps: [ P { a: 0, b: 0 }, P { a: 0, b: 0 } ], tag: 0 } ];
     wa[1] = w;
     if (wa[1].ps[0].a != 11 || wa[1].ps[1].a != 33 || wa[1].ps[1].b != 44) return 15;
     if (wa[1].tag != 5) return 16;
@@ -103,10 +103,10 @@ func main() -> int {
     if (wa[0].ps[0].a != 33 || wa[0].ps[0].b != 44) return 18;
 
     // --- >8-byte inner struct through a struct field and an element ---
-    var n: N = new N { inner: new R { a: 0, b: 0, c: 0, d: 0 }, tag: 0 };
+    var n: N = N { inner: R { a: 0, b: 0, c: 0, d: 0 }, tag: 0 };
     n.inner = mkR(10, 20, 30, 40);
     n.tag = 41;
-    var na: [N; 2] = new [N; 2] { new N { inner: new R { a: 0, b: 0, c: 0, d: 0 }, tag: 0 }, new N { inner: new R { a: 0, b: 0, c: 0, d: 0 }, tag: 0 } };
+    var na: [N; 2] = [ N { inner: R { a: 0, b: 0, c: 0, d: 0 }, tag: 0 }, N { inner: R { a: 0, b: 0, c: 0, d: 0 }, tag: 0 } ];
     na[1] = n;
     if (na[1].inner.a != 10 || na[1].inner.b != 20) return 19;
     if (na[1].inner.c != 30 || na[1].inner.d != 40 || na[1].tag != 41) return 20;

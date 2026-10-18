@@ -3,7 +3,7 @@ export struct Event {
 }
 
 export func make() -> Event {
-  var e: Event = new Event { kind: 1 };
+  var e: Event = Event { kind: 1 };
   return e;
 }
 

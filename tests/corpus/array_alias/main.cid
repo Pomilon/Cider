@@ -11,13 +11,13 @@ type Cb = *func(int) -> int;
 func inc(x: int) -> int { return x + 1; }
 
 func main() -> int {
-  var x: X = new [u16; 4] { 0, 0, 0, 0 };
+  var x: X = [ 0, 0, 0, 0 ];
   x[0] = 65;
   x[1] = 66;
   if (x[0] != 65) { return 1; }
   if (x[1] != 66) { return 2; }
 
-  var arr: [Cb; 2] = new [Cb; 2] { &inc, &inc };
+  var arr: [Cb; 2] = [ &inc, &inc ];
   var f0: Cb = arr[0];
   var f1: Cb = arr[1];
   if ((*f0)(4) != 5) { return 3; }

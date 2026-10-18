@@ -297,16 +297,16 @@ void testGlobals() {
     // rather than the direct label-plus-offset form.
     check(runQuiet("struct P { var a: int; var b: int; }\n"
                    "struct Outer { var tail: int; var pair: P; }\n"
-                   "var g: Outer = new Outer { tail: 0, pair: new P { a: 0, b: 0 } };\n"
+                   "var g: Outer = Outer { tail: 0, pair: P { a: 0, b: 0 } };\n"
                    "func main() -> int {\n"
-                   "    var q: P = new P { a: 62, b: 63 };\n"
+                   "    var q: P = P { a: 62, b: 63 };\n"
                    "    g.pair = q;\n"
                    "    return g.pair.a + g.pair.b;\n"
                    "}\n") == 125,
           "a straddling global member stores and reads back");
     // A computed index on a global array addresses through the label, not
     // a slot: the Gep base is a computed address value (see emitGep).
-    check(runQuiet("var g: [u8; 4] = new [u8; 4] {[0, ...]};\n"
+    check(runQuiet("var g: [u8; 4] = [0, ...];\n"
                    "func main() -> int {\n"
                    "    var j: int = 2;\n"
                    "    g[j] = 9;\n"
@@ -316,8 +316,8 @@ void testGlobals() {
     // A literal construction names every image byte, so the global holds
     // its values with no startup code (FEATURES §8.3): u8 packs four to a
     // quad, u16 two, and narrow reads mask so padding is convention-safe.
-    check(runQuiet("var g: [u8; 4] = new [u8; 4] {10, 20, 30, 40};\n"
-                   "var w: [u16; 2] = new [u16; 2] {1000, 2000};\n"
+    check(runQuiet("var g: [u8; 4] = [10, 20, 30, 40];\n"
+                   "var w: [u16; 2] = [1000, 2000];\n"
                    "func main() -> int {\n"
                    "    return (g[0] as int) + (g[3] as int) + (w[1] as int);\n"
                    "}\n") == (10 + 40 + 2000) % 256,
@@ -325,13 +325,13 @@ void testGlobals() {
     // A const struct global holds its fields at the layout's offsets
     // with no startup code: the image bytes match what `new` builds.
     check(runQuiet("struct Point { var x: int; var y: int; }\n"
-                   "var g: Point = new Point { x: 3, y: 4 };\n"
+                   "var g: Point = Point { x: 3, y: 4 };\n"
                    "func main() -> int { return g.x + g.y; }\n") == 7,
           "a const struct global reads back");
     // A const class global opens with a null vtable word the way `new`
     // writes one, so its first field reads at word one, byte zero.
     check(runQuiet("class Box { var v: int; }\n"
-                   "var g: Box = new Box { v: 5 };\n"
+                   "var g: Box = Box { v: 5 };\n"
                    "func main() -> int { return g.v; }\n") == 5,
           "a const class global reads back");
 }
@@ -459,7 +459,7 @@ void testIncrDecr() {
 void testElementAddr() {
     std::printf("element addresses\n");
     check(runQuiet("func main() -> int {\n"
-                   "    var b: [u8; 4] = new [u8; 4] { 10, 20, 30, 40 };\n"
+                   "    var b: [u8; 4] = [ 10, 20, 30, 40 ];\n"
                    "    var j: int = 2;\n"
                    "    var p: *u8 = &b[j];\n"
                    "    *p = 99;\n"
@@ -485,7 +485,7 @@ void testElementAddr() {
     // address of a cast, which the checker rejects.
     check(runQuiet("func get(p: *u8) -> u8 { return *p; }\n"
                    "func main() -> int {\n"
-                   "    var b: [u8; 2] = new [u8; 2] { 65, 66 };\n"
+                   "    var b: [u8; 2] = [ 65, 66 ];\n"
                    "    var v: *void = (&b[1]) as *void;\n"
                    "    return get(v as *u8) as int;\n"
                    "}\n") == 66,
@@ -499,7 +499,7 @@ void testComputedIndex() {
     // read path emitted no check at all).
     std::printf("computed array indexes\n");
     check(runQuiet("func main() -> int {\n"
-                   "    var a: [int; 4] = new [int; 4] { [0, ...] };\n"
+                   "    var a: [int; 4] = [0, ...];\n"
                    "    var j: int = 0;\n"
                    "    while (j < 4) { a[j] = j * 10 + 1; j = j + 1; }\n"
                    "    return a[0] + a[1] + a[2] + a[3];\n"
@@ -511,7 +511,7 @@ void testComputedIndex() {
     // answer (the old qword load failed this once the neighbour held
     // a nonzero value).
     check(runQuiet("func main() -> int {\n"
-                   "    var arr: [u32; 3] = new [u32; 3] {[1, 2, 3]};\n"
+                   "    var arr: [u32; 3] = [1, 2, 3];\n"
                    "    arr[1] <<= 3;\n"
                    "    var p: *u32 = &arr[2];\n"
                    "    *p <<= 5;\n"
@@ -521,14 +521,14 @@ void testComputedIndex() {
                    "}\n") == 0,
           "a packed u32 compares without its neighbour's bytes");
     check(runQuiet("func main() -> int {\n"
-                   "    var a: [int; 4] = new [int; 4] { 5, 6, 7, 8 };\n"
+                   "    var a: [int; 4] = [ 5, 6, 7, 8 ];\n"
                    "    var j: int = 3;\n"
                    "    return a[j];\n"
                    "}\n") == 8,
           "a computed read answers the element");
     bool signaled = false;
     runCode("func main() -> int {\n"
-            "    var a: [int; 4] = new [int; 4] { 5, 6, 7, 8 };\n"
+            "    var a: [int; 4] = [ 5, 6, 7, 8 ];\n"
             "    var j: int = 9;\n"
             "    return a[j];\n"
             "}\n",
@@ -536,7 +536,7 @@ void testComputedIndex() {
     check(signaled, "a computed read past the end traps");
     signaled = false;
     runCode("func main() -> int {\n"
-            "    var a: [int; 4] = new [int; 4] { 5, 6, 7, 8 };\n"
+            "    var a: [int; 4] = [ 5, 6, 7, 8 ];\n"
             "    var j: int = 9;\n"
             "    a[j] = 1;\n"
             "    return 0;\n"
@@ -547,8 +547,8 @@ void testComputedIndex() {
     // inner address: `m[i][j]` is the j-th element past the i-th row's
     // address, with both bounds checked.
     check(runQuiet("func main() -> int {\n"
-                   "    var z: [u8; 2] = new [u8; 2] {0, 0};\n"
-                   "    var m: [[u8; 2]; 3] = new [[u8; 2]; 3] {z, z, z};\n"
+                   "    var z: [u8; 2] = [0, 0];\n"
+                   "    var m: [[u8; 2]; 3] = [z, z, z];\n"
                    "    var i: int = 1;\n"
                    "    var j: int = 0;\n"
                    "    m[i][j] = 7;\n"
@@ -556,8 +556,8 @@ void testComputedIndex() {
                    "}\n") == 7,
           "a chained store and read through a computed inner index");
     check(runQuiet("func main() -> int {\n"
-                   "    var z: [u8; 2] = new [u8; 2] {0, 0};\n"
-                   "    var m: [[u8; 2]; 3] = new [[u8; 2]; 3] {z, z, z};\n"
+                   "    var z: [u8; 2] = [0, 0];\n"
+                   "    var m: [[u8; 2]; 3] = [z, z, z];\n"
                    "    var i: int = 2;\n"
                    "    m[i][1] = 5;\n"
                    "    return (m[2][1] as int);\n"
@@ -565,8 +565,8 @@ void testComputedIndex() {
           "a folded outer index advances a computed inner address");
     signaled = false;
     runCode("func main() -> int {\n"
-            "    var z: [u8; 2] = new [u8; 2] {0, 0};\n"
-            "    var m: [[u8; 2]; 3] = new [[u8; 2]; 3] {z, z, z};\n"
+            "    var z: [u8; 2] = [0, 0];\n"
+            "    var m: [[u8; 2]; 3] = [z, z, z];\n"
             "    var i: int = 9;\n"
             "    m[i][0] = 1;\n"
             "    return 0;\n"
@@ -578,20 +578,20 @@ void testComputedIndex() {
     // value, with the same bounds check the slot route owns.
     check(runQuiet("func at(p: *[int; 3], i: int) -> int { return (*p)[i]; }\n"
                    "func main() -> int {\n"
-                   "    var a: [int; 3] = new [int; 3] { 4, 5, 6 };\n"
+                   "    var a: [int; 3] = [ 4, 5, 6 ];\n"
                    "    return at(&a, 2);\n"
                    "}\n") == 6,
           "a computed read through a pointer answers the element");
     check(runQuiet("struct S { var items: [int; 3]; }\n"
                    "func at(q: *S, i: int) -> int { return (*q).items[i]; }\n"
                    "func main() -> int {\n"
-                   "    var s: S = new S { items: new [int; 3] { 4, 5, 6 } };\n"
+                   "    var s: S = S { items: [ 4, 5, 6 ] };\n"
                    "    return at(&s, 1);\n"
                    "}\n") == 5,
           "a computed read through a pointer field answers the element");
     check(runQuiet("func set(p: *[int; 3], i: int, v: int) { (*p)[i] = v; }\n"
                    "func main() -> int {\n"
-                   "    var a: [int; 3] = new [int; 3] { 4, 5, 6 };\n"
+                   "    var a: [int; 3] = [ 4, 5, 6 ];\n"
                    "    var j: int = 1;\n"
                    "    set(&a, j, 42);\n"
                    "    return a[1];\n"
@@ -600,7 +600,7 @@ void testComputedIndex() {
     signaled = false;
     runCode("func at(p: *[int; 3], i: int) -> int { return (*p)[i]; }\n"
             "func main() -> int {\n"
-            "    var a: [int; 3] = new [int; 3] { 4, 5, 6 };\n"
+            "    var a: [int; 3] = [ 4, 5, 6 ];\n"
             "    return at(&a, 9);\n"
             "}\n",
             signaled);
@@ -615,7 +615,7 @@ void testPointerField() {
     check(runQuiet("struct Pair { var lo: int; var hi: int; }\n"
                    "func main() -> int {\n"
                    "    var p: *Pair = alloc(16, 8) as *Pair;\n"
-                   "    var tmp: Pair = new Pair { lo: 11, hi: 22 };\n"
+                   "    var tmp: Pair = Pair { lo: 11, hi: 22 };\n"
                    "    p[0] = tmp;\n"
                    "    p[0].lo = 33;\n"
                    "    if (p[0].lo != 33) { return 1; }\n"
@@ -635,7 +635,7 @@ void testClassBox() {
                    "class Sq { var s: int;"
                    " func area() -> int { return (*self).s * (*self).s; } }\n"
                    "func main() -> int {\n"
-                   "    var a: Sq = new Sq { s: 9 };\n"
+                   "    var a: Sq = Sq { s: 9 };\n"
                    "    var t: Shape = a;\n"
                    "    return t.area();\n"
                    "}\n") == 81,
@@ -646,8 +646,8 @@ void testClassBox() {
                    "class Sq { var s: int;"
                    " func area() -> int { return (*self).s * (*self).s; } }\n"
                    "func main() -> int {\n"
-                   "    var r: Rect = new Rect { w: 2, h: 5 };\n"
-                   "    var s: Sq = new Sq { s: 1 };\n"
+                   "    var r: Rect = Rect { w: 2, h: 5 };\n"
+                   "    var s: Sq = Sq { s: 1 };\n"
                    "    var t: Shape = s;\n"
                    "    var p: *Shape = &t;\n"
                    "    var q: *Rect = &r;\n"
@@ -682,12 +682,12 @@ void testRepeatZero() {
     // and a store into the zeroed shape reads back.
     std::printf("zero repeat fills nested arrays\n");
     check(runQuiet("func main() -> int {\n"
-                   "    var m: [[u8; 2]; 3] = new [[u8; 2]; 3] { [0, ...] };\n"
+                   "    var m: [[u8; 2]; 3] = [[0, ...], [0, ...], [0, ...]];\n"
                    "    return (m[2][1] as int) + (m[0][0] as int);\n"
                    "}\n") == 0,
           "a zeroed nested array reads zero");
     check(runQuiet("func main() -> int {\n"
-                   "    var m: [[u8; 2]; 3] = new [[u8; 2]; 3] { [0, ...] };\n"
+                   "    var m: [[u8; 2]; 3] = [[0, ...], [0, ...], [0, ...]];\n"
                    "    m[1][0] = 41;\n"
                    "    return m[1][0] as int;\n"
                    "}\n") == 41,
@@ -698,10 +698,10 @@ void testRepeatZero() {
 void testStruct() {
     std::printf("structs\n");
     check(runQuiet("struct P { var x: int; var y: int; }\n"
-                   "func main() -> int { var p: P = new P { x: 40, y: 2 }; return p.x + p.y; }\n") == 42,
+                   "func main() -> int { var p: P = P { x: 40, y: 2 }; return p.x + p.y; }\n") == 42,
           "two fields add up");
     check(runQuiet("struct M { var tag: u8; var val: i32; }\n"
-                   "func main() -> int { var m: M = new M { tag: 2, val: 40 }; return m.val + m.tag as int; }\n") == 42,
+                   "func main() -> int { var m: M = M { tag: 2, val: 40 }; return m.val + m.tag as int; }\n") == 42,
           "mixed widths respect padding");
     check(runQuiet("struct A { var p: *A; var n: int; }\n"
                    "func main() -> int { var q: *A = alloc(16, 8) as *A; return (q != nilPtr) as int; }\n") == 1,
@@ -710,7 +710,7 @@ void testStruct() {
     // first word: the take splitter shifts sub-word takes by bits.
     check(runQuiet("struct Box { var leaf: int; var values: [u16; 3]; }\n"
                    "func main() -> int {\n"
-                   "    var b: Box = new Box { leaf: 41, values: new [u16; 3] { 5, 6, 7 } };\n"
+                   "    var b: Box = Box { leaf: 41, values: [ 5, 6, 7 ] };\n"
                    "    return (b.values[2] as int);\n"
                    "}\n") == 7,
           "a struct array tail element reads back");
@@ -719,31 +719,31 @@ void testStruct() {
 // Arrays live in memory too: constant and runtime indices, element stores.
 void testArray() {
     std::printf("arrays\n");
-    check(runQuiet("func main() -> int { var a: [u8; 3] = new [u8; 3] { 7, 8, 9 }; return a[0] + a[1] + a[2] as int; }\n") == 24,
+    check(runQuiet("func main() -> int { var a: [u8; 3] = [ 7, 8, 9 ]; return a[0] + a[1] + a[2] as int; }\n") == 24,
           "constant indices read back");
     // Narrow takes pack byte-contiguously across value boundaries: an
     // element copy and an element passed straight to a call must read
     // back every byte, not just the first take.
     check(runQuiet("func main() -> int {\n"
-                   "    var na: [[u8; 3]; 2] = new [[u8; 3]; 2] { new [u8; 3] { 7, 8, 9 }, new [u8; 3] { 10, 11, 12 } };\n"
+                   "    var na: [[u8; 3]; 2] = [[7, 8, 9], [10, 11, 12]];\n"
                    "    var row: [u8; 3] = na[0];\n"
                    "    return row[2] as int;\n"
                    "}\n") == 9,
           "an element copy keeps its tail bytes");
     check(runQuiet("func sumRow(a: [u8; 3]) -> int { return (a[0] as int) + (a[1] as int) + (a[2] as int); }\n"
                    "func main() -> int {\n"
-                   "    var na: [[u8; 3]; 2] = new [[u8; 3]; 2] { new [u8; 3] { 7, 8, 9 }, new [u8; 3] { 10, 11, 12 } };\n"
+                   "    var na: [[u8; 3]; 2] = [[7, 8, 9], [10, 11, 12]];\n"
                    "    return sumRow(na[0]);\n"
                    "}\n") == 24,
           "an element passed to a call keeps its tail bytes");
     check(runQuiet("func main() -> int {\n"
-                   " var a: [i32; 5] = new [i32; 5] { 1, 2, 3, 4, 5 };\n"
+                   " var a: [i32; 5] = [ 1, 2, 3, 4, 5 ];\n"
                    " var s: int = 0;\n"
                    " var i: int = 0;\n"
                    " while (i < 5) { s = s + a[i]; i = i + 1; }\n"
                    " return s; }\n") == 15,
           "a runtime index walks the array");
-    check(runQuiet("func main() -> int { var a: [u8; 2] = new [u8; 2] { [0, ...] }; a[1] = 40; return a[0] + a[1] as int; }\n") == 40,
+    check(runQuiet("func main() -> int { var a: [u8; 2] = [0, ...]; a[1] = 40; return a[0] + a[1] as int; }\n") == 40,
           "element stores land");
 }
 
@@ -1153,7 +1153,7 @@ void testInterfaceNil() {
     check(runQuiet("interface Shape { func area() -> int; }\n"
                    "struct Sq { var s: int; func area() -> int { return (*self).s; } }\n"
                    "func main() -> int {\n"
-                   "    var s: Sq = new Sq { s: 7 };\n"
+                   "    var s: Sq = Sq { s: 7 };\n"
                    "    var i: Shape = s;\n"
                    "    if (i == nilPtr) { return 2; }\n"
                    "    if (i != nilPtr) { return i.area(); }\n"
@@ -1171,21 +1171,21 @@ void testInterfaceNil() {
                    "struct Sq { var s: int; func area() -> int { return (*self).s; } }\n"
                    "var g: Shape = nilPtr as Shape;\n"
                    "func main() -> int {\n"
-                   "    var s: Sq = new Sq { s: 7 };\n"
+                   "    var s: Sq = Sq { s: 7 };\n"
                    "    g = s;\n"
                    "    return g.area();\n"
                    "}\n") == 7,
           "a stored interface global dispatches");
     check(runQuiet("interface Shape { func area() -> int; }\n"
                    "struct Cell { var id: int; var mark: Shape; }\n"
-                   "var g: Cell = new Cell { id: 3, mark: nilPtr as Shape };\n"
+                   "var g: Cell = Cell { id: 3, mark: nilPtr as Shape };\n"
                    "func main() -> int {\n"
                    "    if (g.mark == nilPtr) { return g.id; }\n"
                    "    return 0;\n"
                    "}\n") == 3,
           "a null interface struct field folds into a global");
     check(runQuiet("interface Shape { func area() -> int; }\n"
-                   "var g: [Shape; 2] = new [Shape; 2] { nilPtr as Shape, nilPtr as Shape };\n"
+                   "var g: [Shape; 2] = [ nilPtr as Shape, nilPtr as Shape ];\n"
                    "func main() -> int {\n"
                    "    if (g[0] == nilPtr) { return 1; }\n"
                    "    return 0;\n"
@@ -1253,7 +1253,7 @@ void testMatch() {
                    "}\n") == 0,
           "null is not the empty string");
     check(runQuiet("func main() -> int {\n"
-                   "    var b: [u8; 2] = new [u8; 2] {104, 105};\n"
+                   "    var b: [u8; 2] = [104, 105];\n"
                    "    var p: *u8 = &b[0];\n"
                    "    match (p) { \"hi\" => { return 44; } default => { return 0; } }\n"
                    "}\n") == 0,
@@ -1275,90 +1275,90 @@ void testMatch() {
           "break in an arm leaves the loop");
     check(runQuiet("struct P { var x: int; var y: int; }\n"
                    "func main() -> int {\n"
-                   "    var p: P = new P { x: 1, y: 2 };\n"
+                   "    var p: P = P { x: 1, y: 2 };\n"
                    "    match (p) { P { x: 1, y: 2 } => { return 10; } default => { return 30; } }\n"
                    "}\n") == 10,
           "a struct pattern matches its constants");
     check(runQuiet("struct P { var x: int; var y: int; }\n"
                    "func main() -> int {\n"
-                   "    var p: P = new P { x: 1, y: 9 };\n"
+                   "    var p: P = P { x: 1, y: 9 };\n"
                    "    match (p) { P { x: 1, y: 2 } => { return 10; } default => { return 30; } }\n"
                    "}\n") == 30,
           "a mismatched field takes the default");
     check(runQuiet("struct P { var x: int; var y: int; }\n"
                    "func main() -> int {\n"
-                   "    var p: P = new P { x: 3, y: 4 };\n"
+                   "    var p: P = P { x: 3, y: 4 };\n"
                    "    match (p) { P { x: a, y: _ } => { return a * 10; } default => { return 0; } }\n"
                    "}\n") == 30,
           "a struct pattern binds its fields");
     check(runQuiet("struct P { var x: int; }\n"
                    "struct Q { var x: int; }\n"
                    "func main() -> int {\n"
-                   "    var p: P = new P { x: 1 };\n"
+                   "    var p: P = P { x: 1 };\n"
                    "    match (p) { Q { x: 1 } => { return 10; } default => { return 30; } }\n"
                    "}\n") == 30,
           "a dead struct pattern takes the default");
     check(runQuiet("union U { var a: int; var b: bool; }\n"
                    "func main() -> int {\n"
-                   "    var u: U = new U { a: 7 };\n"
+                   "    var u: U = U { a: 7 };\n"
                    "    match (u) { U.a => { return 1; } U.b => { return 2; } default => { return 0; } }\n"
                    "}\n") == 1,
           "a union member pattern reads the tag");
     check(runQuiet("union U { var a: int; var b: bool; }\n"
                    "func main() -> int {\n"
-                   "    var u: U = new U { b: true };\n"
+                   "    var u: U = U { b: true };\n"
                    "    match (u) { U.a => { return 1; } U.b => { return 2; } default => { return 0; } }\n"
                    "}\n") == 2,
           "the live member answers, not the first arm");
     check(runQuiet("union U { var a: int; var b: bool; }\n"
                    "func main() -> int {\n"
-                   "    var u: U = new U { a: 7 };\n"
+                   "    var u: U = U { a: 7 };\n"
                    "    match (u) { U.a => { return 1; } U.b => { return 2; } }\n"
                    "}\n") == 1,
           "every union member listed needs no default");
     check(runQuiet("union U { var a: int; var b: bool; }\n"
                    "func main() -> int {\n"
-                   "    var u: U = new U { b: true };\n"
+                   "    var u: U = U { b: true };\n"
                    "    match (u) { U.a => { return 1; } U.b => { return 2; } }\n"
                    "}\n") == 2,
           "the second member answers without a default");
     check(runQuiet("struct Inner { var x: int; }\n"
                    "struct Outer { var inner: Inner; var y: int; }\n"
                    "func main() -> int {\n"
-                   "    var o: Outer = new Outer { inner: new Inner { x: 5 }, y: 6 };\n"
+                   "    var o: Outer = Outer { inner: Inner { x: 5 }, y: 6 };\n"
                    "    match (o) { Outer { inner: Inner { x: 5 }, y: _ } => { return 1; } default => { return 0; } }\n"
                    "}\n") == 1,
           "a nested struct pattern recurses");
     check(runQuiet("struct S { var s: string; var n: int; }\n"
                    "func main() -> int {\n"
-                   "    var v: S = new S { s: \"hi\", n: 4 };\n"
+                   "    var v: S = S { s: \"hi\", n: 4 };\n"
                    "    match (v) { S { s: \"hi\", n: k } => { return k; } default => { return 0; } }\n"
                    "}\n") == 4,
           "a string field matches by content and binds beside it");
     check(runQuiet("union U { var a: int; var b: bool; }\n"
                    "struct P { var u: U; var n: int; }\n"
                    "func main() -> int {\n"
-                   "    var p: P = new P { u: new U { b: true }, n: 3 };\n"
+                   "    var p: P = P { u: new U { b: true }, n: 3 };\n"
                    "    match (p) { P { u: U.a, n: _ } => { return 1; } P { u: U.b, n: m } => { return m; } default => { return 0; } }\n"
                    "}\n") == 3,
           "a member sub-pattern reads the tag and binds beside it");
     check(runQuiet("struct P { var x: int; var y: int; }\n"
                    "func main() -> int {\n"
                    "    var v: int = 1;\n"
-                   "    var p: P = new P { x: 1, y: 2 };\n"
+                   "    var p: P = P { x: 1, y: 2 };\n"
                    "    match (p) { P { x: v, y: _ } => { return 7; } default => { return 0; } }\n"
                    "}\n") == 7,
           "a bound name in a field compares by value");
     check(runQuiet("struct P { var x: int; var y: int; }\n"
                    "func main() -> int {\n"
                    "    var v: int = 9;\n"
-                   "    var p: P = new P { x: 1, y: 2 };\n"
+                   "    var p: P = P { x: 1, y: 2 };\n"
                    "    match (p) { P { x: v, y: _ } => { return 7; } default => { return 0; } }\n"
                    "}\n") == 0,
           "a mismatched bound name takes the default");
     check(runQuiet("struct E {}\n"
                    "func main() -> int {\n"
-                   "    var e: E = new E {};\n"
+                   "    var e: E = E {};\n"
                    "    match (e) { E {} => { return 5; } default => { return 0; } }\n"
                    "}\n") == 5,
           "an empty struct matches its empty pattern");
@@ -1388,13 +1388,13 @@ void testGuard() {
           "a failing guard over a bind falls through");
     check(runQuiet("struct P { var x: int; var y: int; }\n"
                    "func main() -> int {\n"
-                   "    var p: P = new P { x: 3, y: 4 };\n"
+                   "    var p: P = P { x: 3, y: 4 };\n"
                    "    match (p) { P { x: a, y: _ } if a > 2 => { return 1; } default => { return 0; } }\n"
                    "}\n") == 1,
           "a guard reads a bound field");
     check(runQuiet("struct P { var x: int; var y: int; }\n"
                    "func main() -> int {\n"
-                   "    var p: P = new P { x: 3, y: 4 };\n"
+                   "    var p: P = P { x: 3, y: 4 };\n"
                    "    match (p) { P { x: a, y: _ } if a > 9 => { return 1; } default => { return 0; } }\n"
                    "}\n") == 0,
           "a failing guard over a field falls through");
@@ -1424,7 +1424,7 @@ void testRange() {
           "a full-width u64 range matches");
     check(runQuiet("struct P { var x: int; }\n"
                    "func main() -> int {\n"
-                   "    var p: P = new P { x: 2 };\n"
+                   "    var p: P = P { x: 2 };\n"
                    "    match (p) { P { x: 1 ... 3 } => { return 1; } default => { return 0; } }\n"
                    "}\n") == 1,
           "a nested range tests the field");
@@ -1484,7 +1484,7 @@ void testEnumMatch() {
 void testPointerArith() {
     std::printf("pointer arithmetic runs\n");
     check(runQuiet("func main() -> int {\n"
-                   "    var b: [u8; 8] = new [u8; 8] {[0, ...]};\n"
+                   "    var b: [u8; 8] = [0, ...];\n"
                    "    var p: *u8 = &b[0];\n"
                    "    *(p + 2) = 7;\n"
                    "    if (((*(2 + p)) as int) != 7) { return 6; }\n"
@@ -1610,7 +1610,7 @@ void testGenericFn() {
           "two specs coexist");
     check(runQuiet("struct Box<T> { var v: T; var tag: int; }\n"
                    "func main() -> int {\n"
-                   "    var b: Box<int> = new Box<int> { v: 40, tag: 1 };\n"
+                   "    var b: Box<int> = Box<int> { v: 40, tag: 1 };\n"
                    "    if (b.v + b.tag != 41) { return 1; }\n"
                    "    if (sizeof(Box<int>) != 8) { return 2; }\n"
                    "    var p: *Box<int> = alloc(sizeof(Box<int>), 8) as *Box<int>;\n"
@@ -1865,7 +1865,7 @@ void testClosureElement() {
     check(runCode("func main() -> int {\n"
                   "    var base: int = 10;\n"
                   "    var add: func(int) -> int = func(v: int) -> int { return v + base; };\n"
-                  "    var cell: [func(int) -> int; 1] = new [func(int) -> int; 1] { add };\n"
+                  "    var cell: [func(int) -> int; 1] = [ add ];\n"
                   "    return cell[0](5);\n"
                   "}\n",
                   sig) == 15 && !sig,
@@ -1877,7 +1877,7 @@ void testClosureElement() {
                   "func main() -> int {\n"
                   "    var b: int = 10;\n"
                   "    var mk: func(int) -> int = func(v: int) -> int { return v + b; };\n"
-                  "    var h: Holder = new Holder { base: 0, add: mk };\n"
+                  "    var h: Holder = Holder { base: 0, add: mk };\n"
                   "    return h.add(5);\n"
                   "}\n",
                   sig) == 15 && !sig,
@@ -1903,8 +1903,8 @@ void testInterface() {
                   "}\n"
                   "func get(s: Shape) -> int { return s.area(); }\n"
                   "func main() -> int {\n"
-                  "    var a: Sq = new Sq { s: 9 };\n"
-                  "    var b: Rect = new Rect { w: 3, h: 4 };\n"
+                  "    var a: Sq = Sq { s: 9 };\n"
+                  "    var b: Rect = Rect { w: 3, h: 4 };\n"
                   "    return get(a) + get(b);\n"
                   "}\n",
                   sig) == 21 && !sig,
@@ -1928,7 +1928,7 @@ void testInterfaceClass() {
                   "}\n"
                   "func get(s: Shape) -> int { return s.area(); }\n"
                   "func main() -> int {\n"
-                  "    var a: Sq = new Sq { s: 9 };\n"
+                  "    var a: Sq = Sq { s: 9 };\n"
                   "    var c: *Circle = new Circle(5);\n"
                   "    return get(a) + get(c);\n"
                   "}\n",
@@ -1950,7 +1950,7 @@ void testInterfaceWideReturn() {
                   "    var pad: int;\n"
                   "    func init(p: int) { (*self).pad = p; }\n"
                   "    func makeCells(n: int) -> [Cell; 2] {\n"
-                  "        return new [Cell; 2] { new Cell { v: n }, new Cell { v: n + (*self).pad } };\n"
+                  "        return [Cell { v: n }, Cell { v: n + (*self).pad }];\n"
                   "    }\n"
                   "}\n"
                   "func main() -> int {\n"
@@ -1984,8 +1984,8 @@ void testInterfaceField() {
                   "    var tail: int;\n"
                   "}\n"
                   "func main() -> int {\n"
-                  "    var a: Sq = new Sq { s: 9 };\n"
-                  "    var h: Holder = new Holder { id: 1, shape: a, tail: 2 };\n"
+                  "    var a: Sq = Sq { s: 9 };\n"
+                  "    var h: Holder = Holder { id: 1, shape: a, tail: 2 };\n"
                   "    return h.shape.area() + h.id + h.tail;\n"
                   "}\n",
                   sig) == 12 && !sig,
@@ -2011,9 +2011,9 @@ void testInterfaceDynIndex() {
                   "    return arr[k].area();\n"
                   "}\n"
                   "func main() -> int {\n"
-                  "    var a: Sq = new Sq { s: 9 };\n"
-                  "    var b: Rect = new Rect { w: 3, h: 4 };\n"
-                  "    var arr: [Shape; 2] = new [Shape; 2] { a, b };\n"
+                  "    var a: Sq = Sq { s: 9 };\n"
+                  "    var b: Rect = Rect { w: 3, h: 4 };\n"
+                  "    var arr: [Shape; 2] = [ a, b ];\n"
                   "    return pick(arr, 0) + pick(arr, 1);\n"
                   "}\n",
                   sig) == 21 && !sig,
@@ -2036,8 +2036,8 @@ void testInterfaceDowncast() {
                   "    func area() -> int { return (*self).w * (*self).h; }\n"
                   "}\n"
                   "func main() -> int {\n"
-                  "    var a: Sq = new Sq { s: 9 };\n"
-                  "    var b: Rect = new Rect { w: 3, h: 4 };\n"
+                  "    var a: Sq = Sq { s: 9 };\n"
+                  "    var b: Rect = Rect { w: 3, h: 4 };\n"
                   "    var sa: Shape = a;\n"
                   "    var sb: Shape = b;\n"
                   "    var back: Sq = sa as Sq;\n"
@@ -2067,7 +2067,7 @@ void testMultiWordReturn() {
     // A two-word array comes home in rax/rdx (IR.md §6): both words
     // survive the call boundary and read back in order.
     check(runCode("func make_row() -> [u64; 2] {\n"
-                  "    var r: [u64; 2] = new [u64; 2] {11, 22};\n"
+                  "    var r: [u64; 2] = [11, 22];\n"
                   "    return r;\n"
                   "}\n"
                   "func main() -> int {\n"
@@ -2085,7 +2085,7 @@ void testMultiWordReturn() {
     // Three words exceed the register row: they ride the hidden
     // pointer instead of splitting.
     check(runCode("func triple() -> [u64; 3] {\n"
-                  "    var t: [u64; 3] = new [u64; 3] {1, 2, 3};\n"
+                  "    var t: [u64; 3] = [1, 2, 3];\n"
                   "    return t;\n"
                   "}\n"
                   "func main() -> int {\n"
@@ -2097,7 +2097,7 @@ void testMultiWordReturn() {
     // A one-word aggregate still answers its word's type, not the
     // aggregate's: the scalar path cannot name a two-byte array's width.
     check(runCode("func make_row() -> [u8; 2] {\n"
-                  "    var r: [u8; 2] = new [u8; 2] {11, 22};\n"
+                  "    var r: [u8; 2] = [11, 22];\n"
                   "    return r;\n"
                   "}\n"
                   "func main() -> int {\n"
@@ -2125,7 +2125,7 @@ void testBigReturn() {
                   "    var e: int;\n"
                   "}\n"
                   "func make() -> Big {\n"
-                  "    return new Big { a: 1, b: 2, c: 3, d: 4, e: 5 };\n"
+                  "    return Big { a: 1, b: 2, c: 3, d: 4, e: 5 };\n"
                   "}\n"
                   "func main() -> int {\n"
                   "    var m: Big = make();\n"
@@ -2142,7 +2142,7 @@ void testSliceCopy() {
     bool sig = false;
     check(runCode("type Row = [u8; 3];\n"
                   "func main() -> int {\n"
-                  "    var a: [u8; 5] = new [u8; 5] { 10, 42, 43, 44, 50 };\n"
+                  "    var a: [u8; 5] = [ 10, 42, 43, 44, 50 ];\n"
                   "    var s: Row = a[1:4];\n"
                   "    if (s[0] != 42 || s[2] != 44) { return 1; }\n"
                   "    if (a[1] != 42 || a[3] != 44) { return 2; }\n"
@@ -2153,14 +2153,14 @@ void testSliceCopy() {
                   sig) == 0 && !sig,
           "a slice copies elementwise and detaches");
     check(runCode("func main() -> int {\n"
-                  "    var a: [u8; 5] = new [u8; 5] { 10, 42, 43, 44, 50 };\n"
+                  "    var a: [u8; 5] = [ 10, 42, 43, 44, 50 ];\n"
                   "    var s: [u8; 3] = a[0:2];\n"
                   "    return s[0] as int;\n"
                   "}\n",
                   sig) == -1 && sig,
           "a short slice traps instead of truncating");
     check(runCode("func main() -> int {\n"
-                  "    var a: [u8; 5] = new [u8; 5] { 10, 42, 43, 44, 50 };\n"
+                  "    var a: [u8; 5] = [ 10, 42, 43, 44, 50 ];\n"
                   "    var s: [u8; 3] = a[1:4];\n"
                   "    s = a[2:5];\n"
                   "    return s[0] as int;\n"
@@ -2176,14 +2176,14 @@ void testSliceCopy() {
                    "    return s[1];\n"
                    "}\n"
                    "func main() -> int {\n"
-                   "    var a: [int; 3] = new [int; 3] { 4, 5, 6 };\n"
+                   "    var a: [int; 3] = [ 4, 5, 6 ];\n"
                    "    return at(&a);\n"
                    "}\n") == 5,
           "a folded slice through a pointer answers the element");
     check(runQuiet("struct S { var items: [int; 3]; }\n"
                    "func get(q: *S, i: int) -> int { var s: []int = (*q).items[0:3]; return s[i]; }\n"
                    "func main() -> int {\n"
-                   "    var s: S = new S { items: new [int; 3] { 4, 5, 6 } };\n"
+                   "    var s: S = S { items: [ 4, 5, 6 ] };\n"
                    "    return get(&s, 2);\n"
                    "}\n") == 6,
           "a folded slice through a pointer field answers the element");
@@ -2192,7 +2192,7 @@ void testSliceCopy() {
                    "    return s[1];\n"
                    "}\n"
                    "func main() -> int {\n"
-                   "    var a: [int; 4] = new [int; 4] { 4, 5, 6, 7 };\n"
+                   "    var a: [int; 4] = [ 4, 5, 6, 7 ];\n"
                    "    return at(&a, 1, 3);\n"
                    "}\n") == 6,
           "a computed slice through a pointer answers the element");
@@ -2202,7 +2202,7 @@ void testSliceCopy() {
                   "    return s[0];\n"
                   "}\n"
                   "func main() -> int {\n"
-                  "    var a: [int; 3] = new [int; 3] { 4, 5, 6 };\n"
+                  "    var a: [int; 3] = [ 4, 5, 6 ];\n"
                   "    return at(&a, 0, 9);\n"
                   "}\n",
                   sig) == -1 && sig,
@@ -2232,7 +2232,7 @@ void testForIn() {
     std::printf("for-in runs\n");
     // Array iteration reads every element in order.
     check(runQuiet("func main() -> int {\n"
-                 "    var a: [int; 3] = new [int; 3] { 5, 6, 7 };\n"
+                 "    var a: [int; 3] = [ 5, 6, 7 ];\n"
                  "    var s: int = 0;\n"
                  "    for (var x in a) { s = s + x; }\n"
                  "    return s;\n"
@@ -2240,7 +2240,7 @@ void testForIn() {
           "for-in over an array sums every element");
     // A slice iterates its borrowed elements.
     check(runQuiet("func main() -> int {\n"
-                 "    var a: [int; 4] = new [int; 4] { 1, 2, 3, 4 };\n"
+                 "    var a: [int; 4] = [ 1, 2, 3, 4 ];\n"
                  "    var s: []int = a[1:4];\n"
                  "    var t: int = 0;\n"
                  "    for (var x in s) { t = t + x; }\n"
@@ -2249,7 +2249,7 @@ void testForIn() {
           "for-in over a slice sums its elements");
     // break leaves the iteration, continue skips to the next element.
     check(runQuiet("func main() -> int {\n"
-                 "    var a: [int; 4] = new [int; 4] { 1, 2, 3, 4 };\n"
+                 "    var a: [int; 4] = [ 1, 2, 3, 4 ];\n"
                  "    var s: int = 0;\n"
                  "    for (var x in a) {\n"
                  "        if (x == 4) { break; }\n"
@@ -2259,7 +2259,7 @@ void testForIn() {
                  "}\n") == 6,
           "break leaves for-in early");
     check(runQuiet("func main() -> int {\n"
-                 "    var a: [int; 4] = new [int; 4] { 1, 2, 3, 4 };\n"
+                 "    var a: [int; 4] = [ 1, 2, 3, 4 ];\n"
                  "    var s: int = 0;\n"
                  "    for (var x in a) {\n"
                  "        if (x % 2 == 0) { continue; }\n"
@@ -2273,7 +2273,7 @@ void testForIn() {
     const char* range =
         "struct RIt { var cur: int; var end: int; var out: int; }\n"
         "struct Rng { var lo: int; var hi: int;\n"
-        "    func iter() -> RIt { return new RIt { cur: (*self).lo, end: (*self).hi, out: 0 }; }\n"
+        "    func iter() -> RIt { return RIt { cur: (*self).lo, end: (*self).hi, out: 0 }; }\n"
         "    func next(it: *RIt) -> *int {\n"
         "        if ((*it).cur >= (*it).end) { return nilPtr; }\n"
         "        (*it).out = (*it).cur;\n"
@@ -2283,7 +2283,7 @@ void testForIn() {
         "}\n";
     check(runQuiet(std::string(range) +
                  "func main() -> int {\n"
-                 "    var r: Rng = new Rng { lo: 0, hi: 3 };\n"
+                 "    var r: Rng = Rng { lo: 0, hi: 3 };\n"
                  "    var s: int = 0;\n"
                  "    for (var x in r) { s = s + x; }\n"
                  "    return s;\n"
@@ -2291,7 +2291,7 @@ void testForIn() {
           "for-in over iter/next sums every step");
     check(runQuiet(std::string(range) +
                  "func main() -> int {\n"
-                 "    var r: Rng = new Rng { lo: 1, hi: 6 };\n"
+                 "    var r: Rng = Rng { lo: 1, hi: 6 };\n"
                  "    var s: int = 0;\n"
                  "    for (var x in r) {\n"
                  "        if (x == 3) { break; }\n"
@@ -2302,7 +2302,7 @@ void testForIn() {
           "break leaves a protocol loop early");
     check(runQuiet(std::string(range) +
                  "func main() -> int {\n"
-                 "    var r: Rng = new Rng { lo: 0, hi: 4 };\n"
+                 "    var r: Rng = Rng { lo: 0, hi: 4 };\n"
                  "    var s: int = 0;\n"
                  "    for (x in r) { s = s + x; }\n"
                  "    return s;\n"
@@ -2360,19 +2360,19 @@ void testFloat() {
     // bit pattern (movss where movsd was needed).
     check(runQuiet("struct P { var a: f64; }\n"
                  "func main() -> int {\n"
-                 "    var p: P = new P{ a: 1.5 };\n"
+                 "    var p: P = P{ a: 1.5 };\n"
                  "    return p.a as int;\n"
                  "}\n") == 1,
           "an f64 field keeps every bit of its pattern");
     check(runQuiet("struct P { var a: i32; var b: f64; }\n"
                  "func main() -> int {\n"
-                 "    var p: P = new P{ a: 3, b: 1.5 };\n"
+                 "    var p: P = P{ a: 3, b: 1.5 };\n"
                  "    return p.a + (p.b as int);\n"
                  "}\n") == 4,
           "an f64 field beside an int field keeps both");
     check(runQuiet("struct P { var a: f32; }\n"
                  "func main() -> int {\n"
-                 "    var p: P = new P{ a: 2.5 };\n"
+                 "    var p: P = P{ a: 2.5 };\n"
                  "    return (p.a + 0.5) as int;\n"
                  "}\n") == 3,
           "an f32 field reads back at its own width");
@@ -2440,7 +2440,7 @@ void testFloat() {
           "a mixed-width addition global keeps its value");
     // Integer leaves in a float array convert at the element width:
     // the image holds 1.0 and 2.0, never 1 and 2.
-    check(runQuiet("var g: [f64; 2] = new [f64; 2] { 1, 2 };\n"
+    check(runQuiet("var g: [f64; 2] = [ 1, 2 ];\n"
                  "func main() -> int {\n"
                  "    if (g[0] != 1.0 || g[1] != 2.0) { return 1; }\n"
                  "    return 0;\n"

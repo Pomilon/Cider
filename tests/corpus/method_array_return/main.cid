@@ -35,36 +35,36 @@ type Row = [int; 2];
 
 class Base {
     virtual func make() -> [int; 2] {
-        var a: [int; 2] = new [int; 2] {11, 12};
+        var a: [int; 2] = [11, 12];
         return a;
     }
-    virtual func lit() -> [int; 2] { return new [int; 2] {21, 22}; }
-    virtual func alias() -> Row { return new [int; 2] {23, 24}; }
-    virtual func nested() -> [[int; 2]; 2] { return new [[int; 2]; 2] { new [int; 2] {31, 32}, new [int; 2] {33, 34} }; }
+    virtual func lit() -> [int; 2] { return [21, 22]; }
+    virtual func alias() -> Row { return [23, 24]; }
+    virtual func nested() -> [[int; 2]; 2] { return [ [31, 32], [33, 34] ]; }
     virtual func cells() -> [Cell; 2] {
-        return new [Cell; 2] { new Cell { v: 41 }, new Cell { v: 42 } };
+        return [ Cell { v: 41 }, Cell { v: 42 } ];
     }
     // Virtual struct return: already on the heap path before the fix; kept
     // so the aggregate convention stays pinned on both kinds.
     virtual func makePair() -> Pair {
-        var p: Pair = new Pair { a: 51, b: 52 };
+        var p: Pair = Pair { a: 51, b: 52 };
         return p;
     }
 }
 
 class Derived : Base {
     func make() -> [int; 2] {
-        var a: [int; 2] = new [int; 2] {13, 14};
+        var a: [int; 2] = [13, 14];
         return a;
     }
-    func lit() -> [int; 2] { return new [int; 2] {22, 24}; }
-    func alias() -> Row { return new [int; 2] {24, 26}; }
-    func nested() -> [[int; 2]; 2] { return new [[int; 2]; 2] { new [int; 2] {32, 34}, new [int; 2] {36, 38} }; }
+    func lit() -> [int; 2] { return [22, 24]; }
+    func alias() -> Row { return [24, 26]; }
+    func nested() -> [[int; 2]; 2] { return [ [32, 34], [36, 38] ]; }
     func cells() -> [Cell; 2] {
-        return new [Cell; 2] { new Cell { v: 43 }, new Cell { v: 44 } };
+        return [ Cell { v: 43 }, Cell { v: 44 } ];
     }
     func makePair() -> Pair {
-        var p: Pair = new Pair { a: 53, b: 54 };
+        var p: Pair = Pair { a: 53, b: 54 };
         return p;
     }
 }
@@ -72,13 +72,13 @@ class Derived : Base {
 // A free-function array return and a non-virtual method array return both
 // keep the unchanged sret path; they bracket the virtual case.
 func freeMake() -> [int; 2] {
-    var a: [int; 2] = new [int; 2] {91, 92};
+    var a: [int; 2] = [91, 92];
     return a;
 }
 
 class Plain {
     func make() -> [int; 2] {
-        var a: [int; 2] = new [int; 2] {93, 94};
+        var a: [int; 2] = [93, 94];
         return a;
     }
 }
@@ -87,12 +87,12 @@ class Plain {
 // so a non-copy return is caught rather than accidentally reading the
 // values the callee happened to leave behind.
 func churn() -> int {
-    var a: [Cell; 2] = new [Cell; 2] { new Cell { v: 1 }, new Cell { v: 2 } };
+    var a: [Cell; 2] = [ Cell { v: 1 }, Cell { v: 2 } ];
     return a[0].v + a[1].v;
 }
 
 func main() -> int {
-    var d: Derived = new Derived { };
+    var d: Derived = Derived { };
     var bp: *Base = &d;
 
     // --- unchanged shapes -------------------------------------------------
@@ -100,7 +100,7 @@ func main() -> int {
     if (f[0] != 91) { return 101; }
     if (f[1] != 92) { return 102; }
 
-    var pl: Plain = new Plain { };
+    var pl: Plain = Plain { };
     var pm: [int; 2] = pl.make();
     if (pm[0] != 93) { return 103; }
     if (pm[1] != 94) { return 104; }
@@ -119,7 +119,7 @@ func main() -> int {
     if (m1[0] != 13 || m1[1] != 14) { return 5; }
 
     // --- assignment into an already-declared variable -------------------
-    var m3: [int; 2] = new [int; 2] {[0, ...]};
+    var m3: [int; 2] = [0, ...];
     m3 = (*bp).make();
     if (m3[0] != 13) { return 6; }
     if (m3[1] != 14) { return 7; }

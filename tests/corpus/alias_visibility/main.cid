@@ -19,11 +19,11 @@ type ForeignSelfQualified = alias_vis_lib.SelfQualified;
 type ForeignChainViaSelf = alias_vis_lib.ChainViaSelf;
 
 func main() -> int {
-  var p: PubAlias = new PubAlias { w: 4, h: 5 };
-  var c: ChainAlias = new ChainAlias { v: 7 };
-  var l: LocalAlias = new LocalAlias { v: 3 };
+  var p: PubAlias = PubAlias { w: 4, h: 5 };
+  var c: ChainAlias = ChainAlias { v: 7 };
+  var l: LocalAlias = LocalAlias { v: 3 };
   var i: IntAlias = 2;
-  var s: ForeignSelfQualified = new ForeignSelfQualified { v: 11 };
-  var d: ForeignChainViaSelf = new ForeignChainViaSelf { v: 13 };
+  var s: ForeignSelfQualified = ForeignSelfQualified { v: 11 };
+  var d: ForeignChainViaSelf = ForeignChainViaSelf { v: 13 };
   return p.w + p.h + c.v + l.v + i + s.v + d.v;  // 45
 }

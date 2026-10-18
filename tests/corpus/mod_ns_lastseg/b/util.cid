@@ -3,7 +3,7 @@ export struct Foo {
 }
 
 export func bmake() -> Foo {
-  var f: Foo = new Foo { x: 20 };
+  var f: Foo = Foo { x: 20 };
   return f;
 }
 

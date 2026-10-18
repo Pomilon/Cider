@@ -3,7 +3,7 @@ struct Task {
   var state: u64;
 }
 
-var g_tasks: [Task; 4] = new [Task; 4] {[0, ...]};
+var g_tasks: [Task; 4] = [0, ...];
 
 func main() -> int {
   var i: int = 0;

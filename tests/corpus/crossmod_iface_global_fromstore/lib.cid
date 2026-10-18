@@ -49,9 +49,9 @@ export class RGamma {
   func deinit() { print("C"); }
 }
 
-export var rAlpha: RAlpha = new RAlpha { v: 0 };
-export var rBeta: RBeta = new RBeta { s: 0 };
-export var rGamma: RGamma = new RGamma { p: 0, pad: new [u64; 4] {[0, ...]} };
+export var rAlpha: RAlpha = RAlpha { v: 0 };
+export var rBeta: RBeta = RBeta { s: 0 };
+export var rGamma: RGamma = RGamma { p: 0, pad: [0, ...] };
 
 // The interface-typed globals, declared BELOW the implementors they hold.
 export var gIface: RTag = nilPtr as RTag;
@@ -64,7 +64,7 @@ export struct Holder {
   var pad: int;
 }
 
-export var gArr: [RTag; 2] = new [RTag; 2] {nilPtr as RTag, nilPtr as RTag};
+export var gArr: [RTag; 2] = [nilPtr as RTag, nilPtr as RTag];
 
 // The interface named in THIS module's own signatures, so a value reached
 // through a from-alias has to survive the crossing in both directions.

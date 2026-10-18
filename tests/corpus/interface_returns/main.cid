@@ -189,10 +189,10 @@ func main() -> int {
 
   // 9. Interface method returning an interface (vtable dispatch), two
   //    implementors, and the result passed on as an argument.
-  var sm: SqMaker = new SqMaker { pad: 0 };
+  var sm: SqMaker = SqMaker { pad: 0 };
   var m1: Maker = sm;
   if (m1.make(9).area() != 81) { return 22; }
-  var rm: RectMaker = new RectMaker { pad: 0 };
+  var rm: RectMaker = RectMaker { pad: 0 };
   var m2: Maker = rm;
   if (m2.make(4).area() != 20) { return 23; }
   if (areaOf(m1.make(3)) != 9) { return 24; }
@@ -225,7 +225,7 @@ func main() -> int {
   //     body is a pre-existing PostLicm limitation (it hoists the sret
   //     call's MEMCPY/LOADs out of the loop for struct returns too), so
   //     the repeated-call coverage is unrolled rather than looped.
-  var bx: Box = new Box { sh: nilPtr as Shape };
+  var bx: Box = Box { sh: nilPtr as Shape };
   bx.sh = makeSq(3);
   if (bx.sh.area() != 9) { return 34; }
   bx.sh = makeRect(2, 7);

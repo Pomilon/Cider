@@ -1010,6 +1010,7 @@ void Checker::visitProgram(Program& n) {
             // all-bytes-known shape.
             bool constGlobal = false;
             if (dynamic_cast<const NewArray*>(g->init.get()) != nullptr ||
+                dynamic_cast<const ArrayLit*>(g->init.get()) != nullptr ||
                 (dynamic_cast<const NewStruct*>(g->init.get()) != nullptr &&
                  (declared.type->kind() == Kind::Struct ||
                   declared.type->kind() == Kind::Class))) {
@@ -2411,6 +2412,12 @@ void Checker::visitNewArray(NewArray& n) {
     record(&n, checkNewArray(n));
 }
 
+void Checker::visitArrayLit(ArrayLit& n) {
+    // The real check reaches ArrayLit through checkExpr with the declared
+    // type (visitVarDecl's init path); a bare walk has nothing to answer.
+    (void)n;
+}
+
 void Checker::visitAssign(Assign& n) {
     TypeRef target = checkExpr(n.target.get(), TypeRef{ctx_.wildcard()});
     if (target.isError()) {
@@ -3418,6 +3425,11 @@ TypeRef Checker::checkExpr(Expr* expr, TypeRef expected) {
     if (auto* newa = dynamic_cast<NewArray*>(expr)) {
         TypeRef t = checkNewArray(*newa);
         record(newa, t);
+        return t;
+    }
+    if (auto* alit = dynamic_cast<ArrayLit*>(expr)) {
+        TypeRef t = checkArrayLit(*alit, expected);
+        record(alit, t);
         return t;
     }
     if (auto* assign = dynamic_cast<Assign*>(expr)) {
@@ -4505,6 +4517,11 @@ TypeRef Checker::checkNewStruct(NewStruct& expr) {
             return errorRef();
         }
     }
+    // Honest `new` (Unified Standard 5): a paren or `new` form allocates on
+    // the heap and answers `*T`. A bare literal is the stack value.
+    if (expr.heap) {
+        return TypeRef{ctx_.pointer(target.type)};
+    }
     return target;
 }
 
@@ -4550,6 +4567,14 @@ bool Checker::constAggregateInit(const Expr& init) {
             }
         }
         return !made->inits.empty();
+    }
+    if (const auto* lit = dynamic_cast<const ArrayLit*>(&init)) {
+        for (const auto& element : lit->inits) {
+            if (!constAggregateInit(*element)) {
+                return false;
+            }
+        }
+        return !lit->inits.empty();
     }
     if (const auto* made = dynamic_cast<const NewStruct*>(&init)) {
         // A struct or class value with every field constant folds to
@@ -4628,7 +4653,52 @@ TypeRef Checker::checkNewArray(NewArray& expr) {    TypeRef element = resolveHer
         TypeRef value = checkExpr(init.get(), element);
         checkCompatible(init->pos, init.get(), value, element);
     }
-    return TypeRef{ctx_.array(element.type, count.value)};
+    TypeRef arr = TypeRef{ctx_.array(element.type, count.value)};
+    if (expr.heap) {
+        return TypeRef{ctx_.pointer(arr.type)};
+    }
+    return arr;
+}
+
+// A bare array literal `[a, b, c]` (or spread `[0, ...]`) answers the
+// declared array type — never a heap pointer. The declared type owns the
+// element type and the count; the literal only supplies the values.
+TypeRef Checker::checkArrayLit(ArrayLit& expr, TypeRef declared) {
+    if (declared.isError() || declared.type->kind() != Kind::Array) {
+        fail(expr.pos, "an array literal needs a declared array type");
+        return errorRef();
+    }
+    TypeRef element{declared.type->element()};
+    if (element.isError()) {
+        return errorRef();
+    }
+    std::optional<int64_t> declared_count = declared.type->length();
+    if (!declared_count.has_value()) {
+        fail(expr.pos, "an array literal needs a fixed declared length");
+        return errorRef();
+    }
+    int64_t count = *declared_count;
+    const int64_t written = static_cast<int64_t>(expr.inits.size());
+    if (expr.repeat && written != kOneElement) {
+        fail(expr.pos, "a spread fills from exactly one element");
+        return errorRef();
+    }
+    if (!expr.repeat && written != count) {
+        fail(expr.pos, "the element count must match the array type");
+        return errorRef();
+    }
+    if (expr.repeat) {
+        // The spread's filler still checks (recording its type for the
+        // lowerer); the compatibility check runs per-element in the
+        // lowerer, since the scalar zero is not an element-typed value.
+        checkExpr(expr.inits[0].get(), element);
+        return declared;
+    }
+    for (auto& init : expr.inits) {
+        TypeRef value = checkExpr(init.get(), element);
+        checkCompatible(init->pos, init.get(), value, element);
+    }
+    return declared;
 }
 
 // --- Conversions ---------------------------------------------------------------

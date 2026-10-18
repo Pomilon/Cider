@@ -11,7 +11,7 @@ struct Holder {
 }
 
 func shadowed() -> int {
-  var nsa: Holder = new Holder{tag: 9};
+  var nsa: Holder = Holder {tag: 9};
   return nsa.tag;
 }
 
@@ -19,7 +19,7 @@ func main() -> int {
   if (nsa.describe(nsa.make()) != 1) { return 1; }
   if (nsb.describe(nsb.make()) != 22) { return 2; }
   if (nsb.describe(make()) != 22) { return 3; }
-  var e: Event = new Event{tag: 7};
+  var e: Event = Event {tag: 7};
   if (e.tag != 7) { return 4; }
   if (shadowed() != 9) { return 5; }
   var ea: nsa.Event = nsa.make();

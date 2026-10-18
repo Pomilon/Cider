@@ -1,5 +1,5 @@
 func _start() {
-    var arr: [int; 3] = new [int; 3] { [0, ...] };
+    var arr: [int; 3] = [0, ...];
     arr[0] = 10;
     arr[1] = 20;
     arr[2] = 30;

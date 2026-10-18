@@ -6,17 +6,17 @@
 // and diagnose nothing for this valid program.
 
 export func bodyUsed() -> int {
-  var x: late_lib.Triple<int> = new late_lib.Triple<int> { a: 10, b: 0, c: 32 };
+  var x: late_lib.Triple<int> = late_lib.Triple<int> { a: 10, b: 0, c: 32 };
   return x.a + x.c;
 }
 
 export func bodyUnused() -> int {
-  var x: late_lib.Triple<char> = new late_lib.Triple<char> { a: 'a', b: 'b', c: 'c' };
+  var x: late_lib.Triple<char> = late_lib.Triple<char> { a: 'a', b: 'b', c: 'c' };
   return 1;
 }
 
 export func bodyBareUsed() -> int {
-  var x: Triple<int> = new Triple<int> { a: 0, b: 0, c: 7 };  // from-import spelling, bound below
+  var x: Triple<int> = Triple<int> { a: 0, b: 0, c: 7 };  // from-import spelling, bound below
   return x.c;
 }
 
@@ -31,17 +31,17 @@ export class Counter {
 export type Alias = late_lib.Triple<int>;
 
 export func fieldUsed() -> int {
-  var h: Holder = new Holder { f: new late_lib.Triple<char> { a: 'x', b: 'x', c: 'A' } };
+  var h: Holder = Holder { f: late_lib.Triple<char> { a: 'x', b: 'x', c: 'A' } };
   return h.f.c as int;
 }
 
 export func classFieldUsed() -> int {
-  var c: Counter = new Counter { f: new late_lib.Triple<int> { a: 0, b: 4, c: 0 } };
+  var c: Counter = Counter { f: late_lib.Triple<int> { a: 0, b: 4, c: 0 } };
   return c.f.b;
 }
 
 export func aliasUsed() -> int {
-  var a: Alias = new Alias { a: 0, b: 9, c: 0 };
+  var a: Alias = Alias { a: 0, b: 9, c: 0 };
   return a.b;
 }
 

@@ -24,7 +24,7 @@ func main() -> int {
   var c: Cb = func(x: int) -> int { return x * 2; };
 
   // *void field: store then cast back, directly and through a pointer.
-  var s: Slot = new Slot { v: nilPtr, cb: nilPtr as func(int) -> int };
+  var s: Slot = Slot { v: nilPtr, cb: nilPtr as func(int) -> int };
   s.v = c;
   var f1: func(int) -> int = s.v as func(int) -> int;
   if (f1(21) != 42) return 1;
@@ -37,7 +37,7 @@ func main() -> int {
   if (f3(21) != 42) return 3;
 
   // *void array element.
-  var a: [*void; 2] = new [*void; 2] {nilPtr, nilPtr};
+  var a: [*void; 2] = [nilPtr, nilPtr];
   a[0] = c;
   var f4: func(int) -> int = a[0] as func(int) -> int;
   if (f4(21) != 42) return 4;
@@ -70,7 +70,7 @@ func main() -> int {
   // by struct literal.
   s.cb = v;
   if (s.cb(21) != 42) return 11;
-  var s2: Slot = new Slot { v: c, cb: c };
+  var s2: Slot = Slot { v: c, cb: c };
   if (s2.cb(21) != 42) return 12;
 
   // A nil ternary branch stays representation-neutral.

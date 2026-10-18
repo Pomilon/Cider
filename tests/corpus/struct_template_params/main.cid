@@ -97,13 +97,13 @@ func main() -> int {
 
   // 3. Writing through the field proves the enclosing holder layout used
   // the instantiated size, not the unknown-nominal default.
-  var fh: FieldHolder = new FieldHolder { f: new FieldOnly<int> { v: 0 } };
+  var fh: FieldHolder = FieldHolder { f: FieldOnly<int> { v: 0 } };
   fh.f.v = 40;
   if (fh.f.v != 40) { return 3; }
 
   // 4. Reinterpret two ints through a cast whose target is the only
   // mention of the instantiation.
-  var arr: [int; 2] = new [int; 2] { 40, 2 };
+  var arr: [int; 2] = [ 40, 2 ];
   var raw: *int = &arr[0];
   if ((*(raw as *CastOnly<int>)).a != 40) { return 4; }
   if ((*(raw as *CastOnly<int>)).b != 2) { return 5; }
@@ -112,7 +112,7 @@ func main() -> int {
   if (sizeof(SizeofOnly<char>) != 1) { return 6; }
 
   // 6. `new` alone names the instantiation; a fresh struct is zeroed.
-  var fresh: NewOnly<int> = new NewOnly<int> { v: 0, w: 0 };
+  var fresh: NewOnly<int> = NewOnly<int> { v: 0, w: 0 };
   if (fresh.v != 0) { return 7; }
   if (fresh.w != 0) { return 8; }
 
@@ -122,7 +122,7 @@ func main() -> int {
 
   // 8. Mixed case, exercised end to end: the instantiation is named in a
   // field, a cast, a parameter and a return annotation, never in a var.
-  var mh: MixedHolder = new MixedHolder { m: new Mixed<int> { v: 0 } };
+  var mh: MixedHolder = MixedHolder { m: Mixed<int> { v: 0 } };
   mh.m.v = 12;
   if (echoMixed(&mh.m as *Mixed<int>).v != 12) { return 10; }
 

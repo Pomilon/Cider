@@ -1,5 +1,5 @@
 export struct PerCpu { var kernel_stack: u64; var user_stack: u64; }
-export var g_percpu: PerCpu = new PerCpu { kernel_stack: 0, user_stack: 0 };
+export var g_percpu: PerCpu = PerCpu { kernel_stack: 0, user_stack: 0 };
 export func setstack(v: u64) -> void { g_percpu.kernel_stack = v; }
 export func getstack() -> u64 { return g_percpu.kernel_stack; }
 export func set_entry(entries: *PerCpu, num: int, v: u64) -> void { entries[num].kernel_stack = v; }

@@ -30,7 +30,7 @@ export func scoreOf(a: int, b: int) -> Score {
 }
 
 export func makeItem(amount: int) -> Item {
-  var it: Item = new Item { amount: amount };
+  var it: Item = Item { amount: amount };
   return it;
 }
 

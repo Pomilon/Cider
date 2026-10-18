@@ -15,7 +15,7 @@ func main() -> int {
   var m: int = lib.Mode.ON;               // qualified enum variant
 
   // Exported struct type + function, struct built locally.
-  var p: Pair = new Pair { a: 5, b: 6 };
+  var p: Pair = Pair { a: 5, b: 6 };
   var ps: int = pairSum(p);               // 11
 
   // Exported class value; exported interface implemented by it.

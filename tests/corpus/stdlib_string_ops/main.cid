@@ -11,8 +11,8 @@ func puts_cstr(s: *char) {
 }
 
 func main() -> int {
-  var src: [char; 32] = new [char; 32] {[(0 as char), ...]};
-  var dst: [char; 32] = new [char; 32] {[(0 as char), ...]};
+  var src: [char; 32] = [(0 as char), ...];
+  var dst: [char; 32] = [(0 as char), ...];
   strcpy(&src[0], "hello");
   var ret: *char = strcpy(&dst[0], &src[0]);
   if (ret != &dst[0]) { return 1; }
@@ -26,7 +26,7 @@ func main() -> int {
   if (strcmp(&dst[0], "hello world") != 0) { return 5; }
   puts_cstr(&dst[0]);
   // to_upper / to_lower on a mixed buffer
-  var mixed: [char; 32] = new [char; 32] {[(0 as char), ...]};
+  var mixed: [char; 32] = [(0 as char), ...];
   strcpy(&mixed[0], "abc DEF 123!");
   var k: int = 0;
   while (k < 12) {
@@ -37,7 +37,7 @@ func main() -> int {
   if (strcmp(&mixed[0], "abc def 123!") != 0) { return 6; }
   puts_cstr(&mixed[0]);
   // strchr
-  var hay: [char; 32] = new [char; 32] {[(0 as char), ...]};
+  var hay: [char; 32] = [(0 as char), ...];
   strcpy(&hay[0], "abcabc");
   var p: *char = strchr(&hay[0], 'b');
   var hayp: *char = &hay[0];
@@ -45,35 +45,35 @@ func main() -> int {
   p = strchr(&hay[0], 'z');
   if (p != nilPtr) { return 8; }
   // memset / memcpy
-  var raw: [char; 32] = new [char; 32] {[(0 as char), ...]};
+  var raw: [char; 32] = [(0 as char), ...];
   memset(&raw[0], 65, 5);
   raw[5] = 0 as char;
   if (strcmp(&raw[0], "AAAAA") != 0) { return 9; }
-  var copy: [char; 32] = new [char; 32] {[(0 as char), ...]};
+  var copy: [char; 32] = [(0 as char), ...];
   memcpy(&copy[0], "xyz", 4);
   if (strcmp(&copy[0], "xyz") != 0) { return 10; }
   // trim
-  var padded: [char; 32] = new [char; 32] {[(0 as char), ...]};
+  var padded: [char; 32] = [(0 as char), ...];
   strcpy(&padded[0], "   trim me   ");
   var trimmed: *char = trim(&padded[0]);
   if (strcmp(trimmed, "trim me") != 0) { return 11; }
   puts_cstr(trimmed);
   // parse_int / parse_float
-  var neg: [char; 32] = new [char; 32] {[(0 as char), ...]};
+  var neg: [char; 32] = [(0 as char), ...];
   strcpy(&neg[0], "-250");
   var num: int = parse_int(&neg[0]);
   if (num != -250) { return 12; }
   print("parse_int=");
   printInt(num);
   puts("");
-  var fsrc: [char; 32] = new [char; 32] {[(0 as char), ...]};
+  var fsrc: [char; 32] = [(0 as char), ...];
   strcpy(&fsrc[0], "123.75");
   var fval: f64 = parse_float(&fsrc[0]);
   print("parse_float=");
   printF64(fval);
   puts("");
   // to_lower on blank
-  var blank: [char; 32] = new [char; 32] {[(0 as char), ...]};
+  var blank: [char; 32] = [(0 as char), ...];
   strcpy(&blank[0], "QW");
   *( &blank[0] + 0) = to_lower(*( &blank[0] + 0));
   *( &blank[0] + 1) = to_lower(*( &blank[0] + 1));

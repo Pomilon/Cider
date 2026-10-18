@@ -34,7 +34,7 @@ export struct Big {
   var b: i64;
 }
 
-export var gBox: Box = new Box { v: 0 };
-export var gPeb: Pebble = new Pebble { w: 0, pad: new [u64; 4] { 0, 0, 0, 0 } };
+export var gBox: Box = Box { v: 0 };
+export var gPeb: Pebble = Pebble { w: 0, pad: [ 0, 0, 0, 0 ] };
 export var gShape: Shape = nilPtr as Shape;
-export var gB: Big = new Big { a: 0, b: 0 };
+export var gB: Big = Big { a: 0, b: 0 };

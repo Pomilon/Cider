@@ -50,7 +50,7 @@ export func new_map<K, V>() -> HashMap<K, V> {
     if (fresh == nilPtr) {
         oom();
     }
-    var m: HashMap<K, V> = new HashMap<K, V> { entries: fresh, cap: MAP_INITIAL_CAP, len: 0, tombstones: 0 };
+    var m: HashMap<K, V> = HashMap<K, V> { entries: fresh, cap: MAP_INITIAL_CAP, len: 0, tombstones: 0 };
     var i: int = 0;
     while (i < MAP_INITIAL_CAP) {
         fresh[i].occupied = false;

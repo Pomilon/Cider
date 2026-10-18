@@ -18,17 +18,17 @@ func test_union_stress() -> int {
     // faults. Same-type overlap coverage goes through the documented
     // raw-bytes row instead (union as int reads the payload, tag
     // ignored, TYPES 4.6) — the bytes are the same bytes.
-    var u: IntOrInt = new IntOrInt { a: 0 };
+    var u: IntOrInt = IntOrInt { a: 0 };
     u.a = 42;
     if (u.a != 42) { return 1; }
     if ((u as int) != 42) { return 2; }
     u.b = 99;
     if ((u as int) != 99) { return 3; }
     // Struct containing union
-    var w: WithUnion = new WithUnion { tag: 1, data: new IntOrInt { a: 42 } };
+    var w: WithUnion = WithUnion { tag: 1, data: IntOrInt { a: 42 } };
     if (w.data.a != 42) { return 4; }
     // Array of unions
-    var arr: [IntOrInt; 5] = new [IntOrInt; 5] {[new IntOrInt { a: 0 }, ...]};
+    var arr: [IntOrInt; 5] = [IntOrInt { a: 0 }, ...];
     for (var i: int = 0; i < 5; i = i + 1) {
         arr[i].a = i * 100;
     }
@@ -52,7 +52,7 @@ func test_alloc_stress_extended() -> int {
     var p2: *void = malloc(8) as *void;
     if (p2 == nilPtr) { return 1; }
     // Array of pointers
-    var ptrs: [*void; 3] = new [*void; 3] {p0, p1, p2};
+    var ptrs: [*void; 3] = [p0, p1, p2];
     ptrs[1] = p1;
     ptrs[2] = p2;
     if (ptrs[0] == nilPtr) { return 1; }
@@ -82,8 +82,8 @@ class Multiplier {
 }
 
 func test_interface_stress() -> int {
-    var a: Adder = new Adder { };
-    var m: Multiplier = new Multiplier { };
+    var a: Adder = Adder { };
+    var m: Multiplier = Multiplier { };
     var c1: Calculator = a;
     var c2: Calculator = m;
     if (c1.compute(5) != 15) { return 1; }
@@ -135,14 +135,14 @@ struct Pair<T> {
 
 func test_template_stress() -> int {
     if (triple::<int>(5) != 15) { return 1; }
-    var p: Pair<int> = new Pair<int> { first: 10, second: 20 };
+    var p: Pair<int> = Pair<int> { first: 10, second: 20 };
     if (p.first + p.second != 30) { return 2; }
     return 0;
 }
 
 // ===== SLICE STRESS =====
 func test_slice_stress() -> int {
-    var arr: [int; 10] = new [int; 10] {[0, ...]};
+    var arr: [int; 10] = [0, ...];
     for (var i: int = 0; i < 10; i = i + 1) {
         arr[i] = i * 10;
     }
@@ -171,7 +171,7 @@ func test_slice_stress() -> int {
 
 // ===== FOR-IN STRESS =====
 func test_forin_stress() -> int {
-    var arr: [int; 10] = new [int; 10] {[0, ...]};
+    var arr: [int; 10] = [0, ...];
     for (var i: int = 0; i < 10; i = i + 1) { arr[i] = i; }
     // Basic sum
     var sum: int = 0;
@@ -197,7 +197,7 @@ func test_forin_stress() -> int {
 // ===== CROSS-FEATURE STRESS =====
 func test_cross_feature() -> int {
     // Union + for-in
-    var arr: [IntOrInt; 5] = new [IntOrInt; 5] {[new IntOrInt { a: 0 }, ...]};
+    var arr: [IntOrInt; 5] = [IntOrInt { a: 0 }, ...];
     for (var i: int = 0; i < 5; i = i + 1) { arr[i].a = i; }
     var sum: int = 0;
     for (var i: int = 0; i < 5; i = i + 1) { sum = sum + arr[i].a; }

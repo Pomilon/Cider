@@ -126,8 +126,8 @@ func main() -> int {
   // --- round 2: whole-value stores into both directions -------------------
   // Assign a struct and an interface by value, so each wide global is
   // rewritten as a value copy rather than field by field.
-  var localBig1: lib.Big = new lib.Big { a: 11, b: 12 };
-  var localBig2: lib.Big = new lib.Big { a: 21, b: 22 };
+  var localBig1: lib.Big = lib.Big { a: 11, b: 12 };
+  var localBig2: lib.Big = lib.Big { a: 21, b: 22 };
   var localShape: lib.Shape = gBox;
   var localPebble: lib.Shape = gPeb;
   gBig1 = localBig1;

@@ -56,12 +56,12 @@ class MakerA {
     var pad: int;
     func init(p: int) { (*self).pad = p; }
     func makePair(n: int) -> Pair {
-        var r: Pair = new Pair { a: n, b: n + (*self).pad };
+        var r: Pair = Pair { a: n, b: n + (*self).pad };
         return r;
     }
-    func makeRow(n: int) -> Row { return new [int; 2] {n, n + (*self).pad}; }
-    func makeNested(n: int) -> [[int; 2]; 2] { return new [[int; 2]; 2] { new [int; 2] {n, n + 1}, new [int; 2] {n + 2, n + (*self).pad} }; }
-    func makeCells(n: int) -> [int; 2] { return new [int; 2] {n, n + (*self).pad}; }
+    func makeRow(n: int) -> Row { return [n, n + (*self).pad]; }
+    func makeNested(n: int) -> [[int; 2]; 2] { return [ [n, n + 1], [n + 2, n + (*self).pad] ]; }
+    func makeCells(n: int) -> [int; 2] { return [n, n + (*self).pad]; }
     func makeShape() -> Shape {
         var sq: *Sq = new Sq((*self).pad);
         return sq;
@@ -73,12 +73,12 @@ class MakerB {
     var pad: int;
     func init(p: int) { (*self).pad = p; }
     func makePair(n: int) -> Pair {
-        var r: Pair = new Pair { a: n * 100, b: n * 100 + (*self).pad };
+        var r: Pair = Pair { a: n * 100, b: n * 100 + (*self).pad };
         return r;
     }
-    func makeRow(n: int) -> Row { return new [int; 2] {n * 100, n * 100 + (*self).pad}; }
-    func makeNested(n: int) -> [[int; 2]; 2] { return new [[int; 2]; 2] { new [int; 2] {n * 100, n * 101}, new [int; 2] {n * 102, n * 100 + (*self).pad} }; }
-    func makeCells(n: int) -> [int; 2] { return new [int; 2] {n * 100, n * 100 + (*self).pad}; }
+    func makeRow(n: int) -> Row { return [n * 100, n * 100 + (*self).pad]; }
+    func makeNested(n: int) -> [[int; 2]; 2] { return [ [n * 100, n * 101], [n * 102, n * 100 + (*self).pad] ]; }
+    func makeCells(n: int) -> [int; 2] { return [n * 100, n * 100 + (*self).pad]; }
     func makeShape() -> Shape {
         var sq: *Sq = new Sq((*self).pad + 1);
         return sq;
@@ -105,7 +105,7 @@ interface Factory {
 class OwnedFactory {
     func init() { }
     func make(t: int) -> Owned {
-        var o: Owned = new Owned { tag: t };
+        var o: Owned = Owned { tag: t };
         return o;
     }
 }

@@ -259,7 +259,7 @@ void testNestedConstruct() {
         "struct Inner { var v: int; }\n"
         "struct Outer { var i: Inner; var w: int; }\n"
         "func main() -> int {\n"
-        "    var o: Outer = new Outer { i: new Inner { v: 5 }, w: 1 };\n"
+        "    var o: Outer = Outer { i: Inner { v: 5 }, w: 1 };\n"
         "    return o.i.v;\n"
         "}\n");
     check(r.ok, "nested new lowers");
@@ -277,7 +277,7 @@ void testFieldOverIndex() {
     Lowered r = lower(
         "struct P { var x: int; var y: int; }\n"
         "func main() -> int {\n"
-        "    var a: [P; 2] = new [P; 2] { new P { x: 1, y: 2 }, new P { x: 3, y: 4 } };\n"
+        "    var a: [P; 2] = [P { x: 1, y: 2 }, P { x: 3, y: 4 }];\n"
         "    return a[1].y;\n"
         "}\n");
     check(r.ok, "element field lowers");
@@ -292,7 +292,7 @@ void testStraddlingRead() {
         "struct Big { var a: int; var b: int; }\n"
         "struct Wrap { var w: int; var big: Big; }\n"
         "func main() -> int {\n"
-        "    var x: Wrap = new Wrap { w: 1, big: new Big { a: 2, b: 3 } };\n"
+        "    var x: Wrap = Wrap { w: 1, big: Big { a: 2, b: 3 } };\n"
         "    var c: Big = x.big;\n"
         "    return c.b;\n"
         "}\n");
@@ -312,8 +312,8 @@ void testMultiWordAssign() {
     Lowered r = lower(
         "struct T { var a: int; var b: int; var c: int; }\n"
         "func main() -> int {\n"
-        "    var a: [T; 2] = new [T; 2] { new T { a: 1, b: 2, c: 3 }, new T { a: 4, b: 5, c: 6 } };\n"
-        "    a[0] = new T { a: 7, b: 8, c: 9 };\n"
+        "    var a: [T; 2] = [T { a: 1, b: 2, c: 3 }, T { a: 4, b: 5, c: 6 }];\n"
+        "    a[0] = T { a: 7, b: 8, c: 9 };\n"
         "    return a[0].c;\n"
         "}\n");
     check(r.ok, "element store lowers");
@@ -327,7 +327,7 @@ void testUnion() {
     Lowered r = lower(
         "union Value { var i: int; var s: string; }\n"
         "func main() -> int {\n"
-        "    var v: Value = new Value { i: 42 };\n"
+        "    var v: Value = Value { i: 42 };\n"
         "    return v.i;\n"
         "}\n");
     check(r.ok, "union construction lowers");
@@ -350,7 +350,7 @@ void testUnion() {
     Lowered has = lower(
         "union Value { var i: int; var s: string; }\n"
         "func main() -> int {\n"
-        "    var v: Value = new Value { i: 1 };\n"
+        "    var v: Value = Value { i: 1 };\n"
         "    if (v.hasI()) { return 7; }\n"
         "    return 0;\n"
         "}\n");
@@ -371,7 +371,7 @@ void testSlice() {
     std::printf("slices create, guard, and trap\n");
     Lowered r = lower(
         "func main() -> int {\n"
-        "    var a: [int; 3] = new [int; 3] { 5, 6, 7 };\n"
+        "    var a: [int; 3] = [5, 6, 7];\n"
         "    var s: []int = a[0:2];\n"
         "    return s[1];\n"
         "}\n");
@@ -391,14 +391,14 @@ void testSlice() {
     }
     Lowered bad = lower(
         "func main() -> int {\n"
-        "    var a: [int; 3] = new [int; 3] { 5, 6, 7 };\n"
+        "    var a: [int; 3] = [5, 6, 7];\n"
         "    var s: []int = a[0:9];\n"
         "    return s[0];\n"
         "}\n");
     check(!bad.ok && bad.stage == "lower", "a provable breach is refused");
     Lowered sub = lower(
         "func main() -> int {\n"
-        "    var a: [int; 4] = new [int; 4] { 1, 2, 3, 4 };\n"
+        "    var a: [int; 4] = [1, 2, 3, 4];\n"
         "    var s: []int = a[0:4];\n"
         "    var t: []int = s[1:3];\n"
         "    return t[1];\n"
@@ -410,7 +410,7 @@ void testSliceStore() {
     std::printf("slice stores guard, then write\n");
     Lowered r = lower(
         "func main() -> int {\n"
-        "    var a: [int; 3] = new [int; 3] { 5, 6, 7 };\n"
+        "    var a: [int; 3] = [5, 6, 7];\n"
         "    var s: []int = a[0:2];\n"
         "    s[0] = 9;\n"
         "    return s.len as int;\n"
@@ -425,7 +425,7 @@ void testClass() {
     Lowered r = lower(
         "class Node { var v: int; }\n"
         "func main() -> int {\n"
-        "    var n: Node = new Node { v: 7 };\n"
+        "    var n: Node = Node { v: 7 };\n"
         "    return n.v;\n"
         "}\n");
     check(r.ok, "class new lowers");
@@ -478,7 +478,7 @@ void testInterfaceParam() {
         "struct Sq { var s: int; func area() -> int { return (*self).s; } }\n"
         "func get(s: Shape) -> int { return s.area(); }\n"
         "func main() -> int {\n"
-        "    var a: Sq = new Sq { s: 9 };\n"
+        "    var a: Sq = Sq { s: 9 };\n"
         "    return get(a);\n"
         "}\n");
     check(r.ok, "an interface param lowers: " + r.stage);
@@ -733,7 +733,7 @@ void testGlobalZeroArray() {
     // access through the global label works like a local's slots.
     std::printf("a zero-filled global array lowers\n");
     Lowered r = lower(
-        "var g: [u8; 3] = new [u8; 3] {[0, ...]};\n"
+        "var g: [u8; 3] = [0, ...];\n"
         "func main() -> int {\n"
         "    g[1] = 7;\n"
         "    return g[1] as int;\n"
@@ -755,20 +755,20 @@ void testFoldedBounds() {
     std::printf("a folded past-end index rejects\n");
     Lowered read = lower(
         "func main() -> int {\n"
-        "    var a: [u8; 3] = new [u8; 3] {1, 2, 3};\n"
+        "    var a: [u8; 3] = [1, 2, 3];\n"
         "    return a[5] as int;\n"
         "}\n");
     check(!read.ok, "a past-end folded read refuses");
     Lowered store = lower(
         "func main() -> int {\n"
-        "    var a: [u8; 3] = new [u8; 3] {1, 2, 3};\n"
+        "    var a: [u8; 3] = [1, 2, 3];\n"
         "    a[5] = 9;\n"
         "    return 0;\n"
         "}\n");
     check(!store.ok, "a past-end folded store refuses");
     Lowered last = lower(
         "func main() -> int {\n"
-        "    var a: [u8; 3] = new [u8; 3] {1, 2, 3};\n"
+        "    var a: [u8; 3] = [1, 2, 3];\n"
         "    return a[2] as int;\n"
         "}\n");
     check(last.ok, "the last in-range element still lowers");
@@ -804,7 +804,7 @@ void testRefuseKeepsScopes() {
     std::printf("a mid-block refusal keeps scopes balanced\n");
     Lowered r = lower(
         "func main() -> int {\n"
-        "    var a: [u8; 3] = new [u8; 3] {1, 2, 3};\n"
+        "    var a: [u8; 3] = [1, 2, 3];\n"
         "    if (a[5] == 1) { return 1; }\n"
         "    return 0;\n"
         "}\n");
@@ -818,7 +818,7 @@ void testMethodCall() {
     Lowered r = lower(
         "class Counter { var v: int; func get() -> int { return (*self).v; } }\n"
         "func main() -> int {\n"
-        "    var c: Counter = new Counter { v: 3 };\n"
+        "    var c: Counter = Counter { v: 3 };\n"
         "    return c.get();\n"
         "}\n");
     check(r.ok, "method call lowers");
@@ -1151,7 +1151,7 @@ void testMultiWordReturn() {
     std::printf("multi-word returns fill Ret words\n");
     Lowered r = lower(
         "func make() -> [u64; 2] {\n"
-        "    var t: [u64; 2] = new [u64; 2] {1, 2};\n"
+        "    var t: [u64; 2] = [1, 2];\n"
         "    return t;\n"
         "}\n"
         "func main() -> int {\n"

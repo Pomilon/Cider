@@ -17,8 +17,8 @@ class Square {
 }
 
 func main() -> int {
-    var c: Circle = new Circle { };
-    var s: Square = new Square { };
+    var c: Circle = Circle { };
+    var s: Square = Square { };
     var d1: Drawable = &c;
     var d2: Drawable = &s;
     d1.draw();

@@ -34,7 +34,7 @@ func main() -> int {
     // Read the whole file back.
     fd = open(path, O_RDONLY, 0);
     if (fd < 0) { return 7; }
-    var buf: [u8; 64] = new [u8; 64] { [0, ...] };
+    var buf: [u8; 64] = [0, ...];
     var bufp: *void = (&buf[0]) as *void;
     var n: int = read(fd, bufp, 64);
     if (n != 12) { return 8; }

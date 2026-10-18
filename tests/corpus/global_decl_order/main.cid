@@ -180,7 +180,7 @@ func main() -> int {
 var gReadLate: int = 42;
 var gBumpLate: int = 10;
 const gConstLate: int = 55;
-var gArrLate: [int; 4] = new [int; 4] {1, 2, 3, 4};
+var gArrLate: [int; 4] = [1, 2, 3, 4];
 
 // Struct types declared after the functions that use globals OF those types:
 // the layout comes from the collector (which has seen every declaration), the
@@ -189,11 +189,11 @@ struct PointLate {
   var x: int;
   var y: int;
 }
-var gPointLate: PointLate = new PointLate { x: 0, y: 0 };
+var gPointLate: PointLate = PointLate { x: 0, y: 0 };
 
 struct DerivedLate {
   var x: int;
 }
-var gDerivedLate: DerivedLate = new DerivedLate { x: 0 };
+var gDerivedLate: DerivedLate = DerivedLate { x: 0 };
 
-var gLibStruct: LibStruct = new LibStruct { x: 0, y: 0 };
+var gLibStruct: LibStruct = LibStruct { x: 0, y: 0 };

@@ -45,7 +45,7 @@ export func printChar(c: char) {
     if (b == 0) {
         return;
     }
-    var buf: [u8; 1] = new [u8; 1] { b };
+    var buf: [u8; 1] = [ b ];
     var ptr: *u8 = &buf[0];
     var one: int = 1;
     writeAll(ptr, one);
@@ -54,7 +54,7 @@ export func printChar(c: char) {
 // Prints v with no INT_MIN trap: the digits are taken from the negative
 // value itself (`-(n % 10)`), so `0 - v` — undefined on INT_MIN — never runs.
 export func printInt(v: int) {
-    var buf: [u8; 12] = new [u8; 12] { [0, ...] };
+    var buf: [u8; 12] = [0, ...];
     var s: []u8 = buf[0:12];
     var n: int = v;
     var neg: int = 0;
@@ -92,7 +92,7 @@ export func printInt(v: int) {
 func printScaled(whole: int, frac: int) {
     printInt(whole);
     print(".");
-    var tmp: [u8; 6] = new [u8; 6] { [0, ...] };
+    var tmp: [u8; 6] = [0, ...];
     var t: []u8 = tmp[0:6];
     var rest: int = frac;
     var k: int = 0;

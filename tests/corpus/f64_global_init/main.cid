@@ -16,8 +16,8 @@ var g_neg_int: f64 = -5;
 // Float-typed global arrays with integer constant elements (M3c): each
 // element converts to the element width's bits. Float literal elements
 // stay rejected by the checker (see the follow-up report).
-var g_arr: [f64; 2] = new [f64; 2] { 1, 2 };
-var f_arr: [float; 2] = new [float; 2] { 3, 4 };
+var g_arr: [f64; 2] = [ 1, 2 ];
+var f_arr: [float; 2] = [ 3, 4 ];
 // `as float` is a runtime f32 round (MOV), so the global must match the
 // local and must NOT be the raw parsed double.
 var g_cast: f64 = (0.1 as float) as f64;

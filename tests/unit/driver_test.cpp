@@ -134,7 +134,7 @@ void testImportAlias() {
     const char* mainText =
         "from lib import A;\n"
         "func main() -> int {\n"
-        "    var x: A = new A { v: 5 };\n"
+        "    var x: A = A { v: 5 };\n"
         "    return x.v;\n"
         "}\n";
     fwrite(mainText, 1, strlen(mainText), mainFile);
@@ -216,7 +216,7 @@ void testImports() {
         "import types;\n"
         "type V = types.S;\n"
         "func main() -> int {\n"
-        "    var x: V = new types.S { v: 9 };\n"
+        "    var x: V = types.S { v: 9 };\n"
         "    return x.v;\n"
         "}\n";
     fwrite(tymainText, 1, strlen(tymainText), tymainFile);
@@ -265,7 +265,7 @@ void testImportGlobal() {
     FILE* depFile = fopen(dep.c_str(), "w");
     const char* depText =
         "export struct P { var x: int; }\n"
-        "export var gp: P = new P { x: 0 };\n";
+        "export var gp: P = P { x: 0 };\n";
     fwrite(depText, 1, strlen(depText), depFile);
     fclose(depFile);
     std::string main = std::string(dir) + "/main.cid";
@@ -298,7 +298,7 @@ void testImportQualifiedGlobal() {
     FILE* depFile = fopen(dep.c_str(), "w");
     const char* depText =
         "export struct Q { var y: int; }\n"
-        "export var gq: Q = new Q { y: 0 };\n";
+        "export var gq: Q = Q { y: 0 };\n";
     fwrite(depText, 1, strlen(depText), depFile);
     fclose(depFile);
     std::string main = std::string(dir) + "/main.cid";
@@ -481,7 +481,7 @@ void testSubdirImport() {
         "from a.util import Box;\n"
         "func main() -> int {\n"
         "    if (util.mval() != 9) { return 1; }\n"
-        "    var b: util.Box = new Box { v: 9 };\n"
+        "    var b: util.Box = Box { v: 9 };\n"
         "    if (util.bget(b) != 9) { return 2; }\n"
         "    var e: int = util.Alias.GREEN;\n"
         "    if (e != 1) { return 3; }\n"

@@ -20,14 +20,14 @@ class Rect {
 // CIDER-BUG-054: an interface parameter is an interface variable too —
 // reassigning it must not disturb the caller's fat pointer (by-value).
 func areaAfterRetarget(var x: Shape) -> int {
-  var r: Rect = new Rect { w: 6, h: 7 };
+  var r: Rect = Rect { w: 6, h: 7 };
   x = r;
   return x.area();
 }
 
 func main() -> int {
-  var a: Sq = new Sq { s: 3 };
-  var r: Rect = new Rect { w: 2, h: 5 };
+  var a: Sq = Sq { s: 3 };
+  var r: Rect = Rect { w: 2, h: 5 };
 
   // Declaration-time assignment still works.
   var i: Shape = a;

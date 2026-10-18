@@ -1589,13 +1589,23 @@ void Lowerer::onGlobal(VarDecl& n) {
             binding.initWords.push_back(0);
         }
     } else if (type.type->kind() == Kind::Array &&
-               dynamic_cast<const NewArray*>(n.init.get()) != nullptr) {
+               (dynamic_cast<const NewArray*>(n.init.get()) != nullptr ||
+                dynamic_cast<const ArrayLit*>(n.init.get()) != nullptr)) {
         // A const aggregate global passed the checker's gate, so every
         // leaf folds and every image byte is known: the global holds one
         // `.quad` per eight bytes, little-endian, zero-padded at the end.
-        const auto* initArray = dynamic_cast<const NewArray*>(n.init.get());
         std::string bytes;
-        if (!globalInitBytes(*initArray, type, bytes) || bytes.empty()) {
+        bool foldedBytes = false;
+        if (const auto* initArray =
+                dynamic_cast<const NewArray*>(n.init.get())) {
+            foldedBytes =
+                globalInitBytes(initArray->inits, initArray->repeat, type, bytes);
+        } else {
+            const auto* lit = dynamic_cast<const ArrayLit*>(n.init.get());
+            foldedBytes =
+                globalInitBytes(lit->inits, lit->repeat, type, bytes);
+        }
+        if (!foldedBytes || bytes.empty()) {
             refuse(n.init->pos, "a global initialiser must be constant");
             return;
         }
@@ -3201,8 +3211,8 @@ void Lowerer::storeRange(Position pos, const Place& place,
     }
 }
 
-void Lowerer::constructStruct(const std::vector<ir::Value>& slots, const NewStruct& n) {
-    TypeRef structType = checker_.typeOf(&n);
+void Lowerer::constructStruct(const Place& baseIn, TypeRef structType,
+                              const NewStruct& n) {
     if (structType.isError() || structType.type->kind() != Kind::Struct) {
         refuse(n.pos, "this construction");
         return;
@@ -3212,8 +3222,7 @@ void Lowerer::constructStruct(const std::vector<ir::Value>& slots, const NewStru
         refuse(n.pos, "this construction");
         return;
     }
-    Place base;
-    base.slots = slots;
+    Place base = baseIn;
     base.type = structType;
     for (const FieldInit& field : n.fields) {
         int64_t fieldOff = resolver_.fieldOffset(*id, field.name);
@@ -3244,8 +3253,9 @@ void Lowerer::constructStruct(const std::vector<ir::Value>& slots, const NewStru
     }
 }
 
-void Lowerer::constructUnion(const std::vector<ir::Value>& slots, const NewStruct& n) {
-    TypeRef unionType = checker_.typeOf(&n);
+void Lowerer::constructUnion(const Place& baseIn, TypeRef objType,
+                             const NewStruct& n) {
+    TypeRef unionType = objType;
     if (unionType.isError() || unionType.type->kind() != Kind::Union) {
         refuse(n.pos, "this construction");
         return;
@@ -3269,16 +3279,14 @@ void Lowerer::constructUnion(const std::vector<ir::Value>& slots, const NewStruc
     if (failed_) {
         return;
     }
-    Place at;
-    at.slots = slots;
+    Place at = baseIn;
     at.type = memberType;
     at.off = 0;
     storeRange(field.value->pos, at, value, memberType);
     if (failed_) {
         return;
     }
-    Place tag;
-    tag.slots = slots;
+    Place tag = baseIn;
     tag.type = TypeRef{ctx_.basic(BasicKind::U32)};
     tag.off = tagOff;
     ir::Value live = constantI64(index, tag.type, n.pos);
@@ -3382,8 +3390,13 @@ bool Lowerer::globalInitStructBytes(const NewStruct& made, TypeRef structType,
         }
         std::string piece;
         if (dynamic_cast<const NewArray*>(sub) != nullptr) {
-            if (!globalInitBytes(static_cast<const NewArray&>(*sub), ftype,
-                                 piece)) {
+            const auto& arr = static_cast<const NewArray&>(*sub);
+            if (!globalInitBytes(arr.inits, arr.repeat, ftype, piece)) {
+                return false;
+            }
+        } else if (dynamic_cast<const ArrayLit*>(sub) != nullptr) {
+            const auto& lit = static_cast<const ArrayLit&>(*sub);
+            if (!globalInitBytes(lit.inits, lit.repeat, ftype, piece)) {
                 return false;
             }
         } else if (dynamic_cast<const NewStruct*>(sub) != nullptr) {
@@ -3428,7 +3441,8 @@ bool Lowerer::globalInitStructBytes(const NewStruct& made, TypeRef structType,
     return true;
 }
 
-bool Lowerer::globalInitBytes(const NewArray& init, TypeRef arrayType,
+bool Lowerer::globalInitBytes(const std::vector<std::unique_ptr<Expr>>& inits,
+                              bool repeat, TypeRef arrayType,
                               std::string& bytes) {
     std::optional<int64_t> extent = arrayType.type->length();
     if (!extent.has_value() || *extent < 0) {
@@ -3487,7 +3501,13 @@ bool Lowerer::globalInitBytes(const NewArray& init, TypeRef arrayType,
             if (elemType.type->kind() != Kind::Array) {
                 return false;
             }
-            return globalInitBytes(*sub, elemType, bytes);
+            return globalInitBytes(sub->inits, sub->repeat, elemType, bytes);
+        }
+        if (const auto* sub = dynamic_cast<const ArrayLit*>(&leaf)) {
+            if (elemType.type->kind() != Kind::Array) {
+                return false;
+            }
+            return globalInitBytes(sub->inits, sub->repeat, elemType, bytes);
         }
         if (elemType.type->kind() == Kind::Array) {
             int64_t total = resolver_.nominalSize(elemType.type);
@@ -3530,22 +3550,22 @@ bool Lowerer::globalInitBytes(const NewArray& init, TypeRef arrayType,
         }
         return appendScalar(leaf, resolver_.nominalSize(elemType.type), elemType);
     };
-    if (init.repeat) {
-        size_t fillers = init.inits.size();
+    if (repeat) {
+        size_t fillers = inits.size();
         if (fillers != 1) {
             return false;
         }
         for (int64_t at = 0; at < *extent; ++at) {
-            if (!appendElement(*init.inits[0], element)) {
+            if (!appendElement(*inits[0], element)) {
                 return false;
             }
         }
         return true;
     }
-    if (static_cast<int64_t>(init.inits.size()) != *extent) {
+    if (static_cast<int64_t>(inits.size()) != *extent) {
         return false;
     }
-    for (const auto& one : init.inits) {
+    for (const auto& one : inits) {
         if (!appendElement(*one, element)) {
             return false;
         }
@@ -3553,98 +3573,100 @@ bool Lowerer::globalInitBytes(const NewArray& init, TypeRef arrayType,
     return true;
 }
 
-void Lowerer::constructArray(const std::vector<ir::Value>& slots, const NewArray& n) {
-    TypeRef arrayType = checker_.typeOf(&n);
+void Lowerer::constructArray(const Place& baseIn, TypeRef arrayType,
+                             const std::vector<std::unique_ptr<Expr>>& inits,
+                             bool repeat, int64_t count, Position pos) {
     if (arrayType.isError() || arrayType.type->kind() != Kind::Array) {
-        refuse(n.pos, "this construction");
+        refuse(pos, "this construction");
         return;
     }
     TypeRef element = TypeRef{arrayType.type->element()};
     int64_t elemBytes = resolver_.nominalSize(element.type);
     if (elemBytes <= 0) {
-        refuse(n.pos, "this construction");
+        refuse(pos, "this construction");
         return;
     }
-    // Contiguity is checked, not assumed: the slots vector is only a base for
-    // address arithmetic when its ids run consecutively.
-    for (uint64_t i = 0; i < static_cast<uint64_t>(slots.size()); ++i) {
-        if (slots[i].id != slots[0].id + static_cast<uint32_t>(i)) {
-            refuse(n.pos, "this construction");
-            return;
+    Place base = baseIn;
+    base.type = arrayType;
+    // Contiguity is checked, not assumed: only a slot base may rely on
+    // consecutive ids for address arithmetic. An indirect or address base
+    // already holds the one address every store steps off.
+    if (!base.hasIndirect && !base.isAddress) {
+        for (uint64_t i = 0; i < static_cast<uint64_t>(base.slots.size()); ++i) {
+            if (base.slots[i].id != base.slots[0].id + static_cast<uint32_t>(i)) {
+                refuse(pos, "this construction");
+                return;
+            }
         }
     }
     auto atByte = [&](int64_t byteOff, TypeRef fieldType, const std::vector<ir::Value>& words,
-                      Position pos) {
+                      Position here) {
         // Element values arrive in value shape (one word per eight bytes);
         // the range store shapes them into chunk stores itself, shifting a
         // word down when a take starts past its low byte.
-        Place at;
-        at.slots = slots;
+        Place at = base;
         at.type = fieldType;
         at.off = byteOff;
-        storeRange(pos, at, words, fieldType);
+        storeRange(here, at, words, fieldType);
     };
-    if (n.repeat) {
-        if (n.inits.size() != kOneWord) {
-            refuse(n.pos, "a repeat fills from exactly one element");
+    if (repeat) {
+        if (inits.size() != kOneWord) {
+            refuse(pos, "a repeat fills from exactly one element");
             return;
         }
-        std::unordered_set<std::string> active;
-        EvalEnv env = resolver_.evalEnv(emitScope());
-        EvalResult count = evalConstInt(*n.length, env, active);
-        if (!count.ok || count.value < 0) {
-            refuse(n.length->pos, "an array length folds to a count");
+        if (count < 0) {
+            refuse(pos, "an array length folds to a count");
             return;
         }
-        std::vector<ir::Value> one = lowerWords(n.inits[0].get());
+        std::vector<ir::Value> one = lowerWords(inits[0].get());
         if (failed_) {
             return;
         }
         // A concrete filler for an interface array boxes once, then fills
         // every element with the same pair.
-        one = boxClassOperand(n.inits[0].get(), std::move(one), checker_.typeOf(n.inits[0].get()),
-                                element, n.inits[0]->pos);
+        one = boxClassOperand(inits[0].get(), std::move(one), checker_.typeOf(inits[0].get()),
+                                element, pos);
         if (failed_) {
             return;
         }
-        if (isZeroRepeatFiller(*n.inits[0], element)) {
+        if (isZeroRepeatFiller(*inits[0], element)) {
             // Zero reaches through: one zero word per element word, so a
             // nested array fills with zeros instead of one element value.
             int words = wordCount(element);
             if (words < 0) {
-                refuse(n.pos, "this construction");
+                refuse(pos, "this construction");
                 return;
             }
             one.clear();
             for (int w = 0; w < words; ++w) {
                 one.push_back(constantI64(0, wordType(element, static_cast<uint64_t>(w)),
-                                          n.inits[0]->pos));
+                                          pos));
                 if (failed_) {
                     return;
                 }
             }
         }
-        for (int64_t i = 0; i < count.value; ++i) {
-            atByte(i * elemBytes, element, one, n.pos);
+        for (int64_t i = 0; i < count; ++i) {
+            atByte(i * elemBytes, element, one, pos);
             if (failed_) {
                 return;
             }
         }
         return;
     }
-    for (uint64_t i = 0; i < static_cast<uint64_t>(n.inits.size()); ++i) {
-        std::vector<ir::Value> one = lowerWords(n.inits[i].get());
+    for (uint64_t i = 0; i < static_cast<uint64_t>(inits.size()); ++i) {
+        std::vector<ir::Value> one = lowerWords(inits[i].get());
         if (failed_) {
             return;
         }
         // A concrete element for an interface array boxes to the pair
         // before the range store below, like every other aggregate site.
-        one = boxClassOperand(n.inits[i].get(), std::move(one), checker_.typeOf(n.inits[i].get()),
-                                element, n.inits[i]->pos);
+        one = boxClassOperand(inits[i].get(), std::move(one), checker_.typeOf(inits[i].get()),
+                                element, pos);
         if (failed_) {
             return;
         }
-        atByte(static_cast<int64_t>(i) * elemBytes, element, one, n.inits[i]->pos);
+        atByte(static_cast<int64_t>(i) * elemBytes, element, one, pos);
         if (failed_) {
             return;
         }
@@ -6044,8 +6066,9 @@ std::vector<ir::Value> Lowerer::lowerFuncLit(const FuncLit& lit) {
     return {code, caps};
 }
 
-void Lowerer::constructClass(const std::vector<ir::Value>& slots, const NewStruct& n) {
-    TypeRef classType = checker_.typeOf(&n);
+void Lowerer::constructClass(const Place& baseIn, TypeRef objType,
+                             const NewStruct& n) {
+    TypeRef classType = objType;
     if (classType.isError() || classType.type->kind() != Kind::Class) {
         refuse(n.pos, "this construction");
         return;
@@ -6083,16 +6106,14 @@ void Lowerer::constructClass(const std::vector<ir::Value>& slots, const NewStruc
             return;
         }
     }
-    Place atVptr;
-    atVptr.slots = slots;
+    Place atVptr = baseIn;
     atVptr.type = vptr;
     atVptr.off = 0;
     storeRange(n.pos, atVptr, {vptrWord}, vptr);
     if (failed_) {
         return;
     }
-    Place base;
-    base.slots = slots;
+    Place base = baseIn;
     base.type = classType;
     for (const FieldInit& field : n.fields) {
         int64_t fieldOff = resolver_.fieldOffset(*id, field.name);
@@ -6123,7 +6144,13 @@ void Lowerer::constructClass(const std::vector<ir::Value>& slots, const NewStruc
     }
 }
 std::vector<ir::Value> Lowerer::lowerNewStruct(const NewStruct& n) {
-    TypeRef structType = checker_.typeOf(&n);
+    TypeRef made = checker_.typeOf(&n);
+    if (made.isError()) {
+        refuse(n.pos, "this construction");
+        return {undefined()};
+    }
+    bool heap = made.type->kind() == Kind::Pointer;
+    TypeRef structType = heap ? TypeRef{made.type->pointee()} : made;
     if (!structType.isError() && structType.type->kind() == Kind::Class) {
         // The class check below owns construction: a chain's fields lay
         // out through the resolver, and constructClass stores the vtable
@@ -6135,23 +6162,78 @@ std::vector<ir::Value> Lowerer::lowerNewStruct(const NewStruct& n) {
             return {undefined()};
         }
     }
+    std::vector<ir::Value> slots;
+    Place base;
+    if (heap) {
+        std::optional<DeclId> id = structType.type->decl();
+        int64_t bytes = kNoExtent;
+        int64_t stepTo = kNoExtent;
+        if (id.has_value()) {
+            if (structType.type->kind() == Kind::Class) {
+                bytes = resolver_.classSize(*id);
+                stepTo = resolver_.classAlign(*id);
+            } else {
+                bytes = resolver_.structSize(*id);
+                stepTo = layout::kSizePointer;
+            }
+        }
+        if (bytes <= 0 || stepTo <= 0) {
+            refuse(n.pos, "this construction");
+            return {undefined()};
+        }
+        TypeRef word{ctx_.basic(BasicKind::I64)};
+        ir::Instr alloc;
+        alloc.op = ir::Op::Call;
+        alloc.loc = n.pos;
+        alloc.callee = "cider_alloc";
+        alloc.mayTrap = true;
+        for (int64_t fixed : {bytes, stepTo}) {
+            ir::Argument arg;
+            arg.words.push_back(constantI64(fixed, word, n.pos));
+            if (failed_) {
+                return {undefined()};
+            }
+            alloc.arguments.push_back(std::move(arg));
+        }
+        ir::Value at = newValue(ir::IRType::Ptr, made, n.pos);
+        alloc.results.push_back(at);
+        alloc.width = ir::IRType::Ptr;
+        alloc.type = made;
+        emit(std::move(alloc));
+        if (failed_) {
+            return {undefined()};
+        }
+        base.hasIndirect = true;
+        base.indirect = at;
+        base.type = structType;
+        base.off = 0;
+        if (structType.type->kind() == Kind::Union) {
+            constructUnion(base, structType, n);
+        } else if (structType.type->kind() == Kind::Class) {
+            constructClass(base, structType, n);
+        } else {
+            constructStruct(base, structType, n);
+        }
+        if (failed_) {
+            return {undefined()};
+        }
+        return {at};
+    }
     int count = wordCount(structType);
     if (count < 0) {
         refuse(n.pos, "this construction");
         return {undefined()};
     }
-    std::vector<ir::Value> slots =
-        allocaSlots(structType, n.pos, static_cast<uint64_t>(count));
-    // NewStruct builds a struct field by field, a class after its vptr
-    // word, or a union by its one live member plus tag; the checker
-    // guarantees which, so the branch reads the checked type rather than
-    // re-deriving it.
+    slots = allocaSlots(structType, n.pos, static_cast<uint64_t>(count));
+    base.slots = slots;
+    base.type = structType;
+    base.off = 0;
     if (!structType.isError() && structType.type->kind() == Kind::Union) {
-        constructUnion(slots, n);
+        constructUnion(base, structType, n);
     } else if (!structType.isError() && structType.type->kind() == Kind::Class) {
-        constructClass(slots, n);
+        constructClass(base, structType, n);
     } else {
-        constructStruct(slots, n);
+        constructStruct(base, structType, n);
     }
     if (failed_) {
         return {undefined()};
@@ -6159,6 +6241,53 @@ std::vector<ir::Value> Lowerer::lowerNewStruct(const NewStruct& n) {
     std::vector<ir::Value> words;
     for (int i = 0; i < count; ++i) {
         TypeRef word = wordType(structType, static_cast<uint64_t>(i));
+        ir::Instr instr;
+        instr.op = ir::Op::Load;
+        instr.loc = n.pos;
+        instr.type = word;
+        instr.width = widthOf(word, n.pos);
+        if (failed_) {
+            return {undefined()};
+        }
+        instr.addressBase = slots[static_cast<size_t>(i)];
+        instr.isPure = true;
+        ir::Value out = newValue(instr.width, word, n.pos);
+        instr.results.push_back(out);
+        emit(std::move(instr));
+        words.push_back(out);
+    }
+    return words;
+}
+
+std::vector<ir::Value> Lowerer::lowerArrayLit(const ArrayLit& n) {
+    // `[a, b]` / `[0, ...]`: a stack value array. The declared type owns
+    // the element type, the count and the shape of the answer words.
+    TypeRef arrayType = checker_.typeOf(&n);
+    if (arrayType.isError() || arrayType.type->kind() != Kind::Array) {
+        refuse(n.pos, "this construction");
+        return {undefined()};
+    }
+    std::optional<int64_t> len = arrayType.type->length();
+    if (!len.has_value()) {
+        refuse(n.pos, "this construction");
+        return {undefined()};
+    }
+    int count = wordCount(arrayType);
+    if (count < 0) {
+        refuse(n.pos, "this construction");
+        return {undefined()};
+    }
+    std::vector<ir::Value> slots =
+        allocaSlots(arrayType, n.pos, static_cast<uint64_t>(count));
+    Place slotBase;
+    slotBase.slots = slots;
+    constructArray(slotBase, arrayType, n.inits, n.repeat, *len, n.pos);
+    if (failed_) {
+        return {undefined()};
+    }
+    std::vector<ir::Value> words;
+    for (int i = 0; i < count; ++i) {
+        TypeRef word = wordType(arrayType, static_cast<uint64_t>(i));
         ir::Instr instr;
         instr.op = ir::Op::Load;
         instr.loc = n.pos;
@@ -6304,20 +6433,79 @@ std::vector<ir::Value> Lowerer::lowerNewClass(const NewClass& n) {
 
 std::vector<ir::Value> Lowerer::lowerNewArray(const NewArray& n) {
     TypeRef arrayType = checker_.typeOf(&n);
-    int count = wordCount(arrayType);
+    bool heap = arrayType.type->kind() == Kind::Pointer;
+    TypeRef made = heap ? TypeRef{arrayType.type->pointee()} : arrayType;
+    int count = wordCount(made);
     if (count < 0) {
         refuse(n.pos, "this construction");
         return {undefined()};
     }
+    if (heap) {
+        std::optional<DeclId> id = made.type->decl();
+        int64_t bytes = kNoExtent;
+        int64_t stepTo = kNoExtent;
+        if (id.has_value()) {
+            bytes = resolver_.structSize(*id);
+            stepTo = layout::kSizePointer;
+        }
+        if (bytes <= 0 || stepTo <= 0) {
+            refuse(n.pos, "this construction");
+            return {undefined()};
+        }
+        TypeRef word{ctx_.basic(BasicKind::I64)};
+        ir::Instr alloc;
+        alloc.op = ir::Op::Call;
+        alloc.loc = n.pos;
+        alloc.callee = "cider_alloc";
+        alloc.mayTrap = true;
+        for (int64_t fixed : {bytes, stepTo}) {
+            ir::Argument arg;
+            arg.words.push_back(constantI64(fixed, word, n.pos));
+            if (failed_) {
+                return {undefined()};
+            }
+            alloc.arguments.push_back(std::move(arg));
+        }
+        ir::Value at = newValue(ir::IRType::Ptr, arrayType, n.pos);
+        alloc.results.push_back(at);
+        alloc.width = ir::IRType::Ptr;
+        alloc.type = arrayType;
+        emit(std::move(alloc));
+        if (failed_) {
+            return {undefined()};
+        }
+        std::optional<int64_t> len = made.type->length();
+        if (!len.has_value()) {
+            refuse(n.pos, "this construction");
+            return {undefined()};
+        }
+        Place base;
+        base.hasIndirect = true;
+        base.indirect = at;
+        base.type = made;
+        base.off = 0;
+        constructArray(base, made, n.inits, n.repeat, *len, n.pos);
+        if (failed_) {
+            return {undefined()};
+        }
+        return {at};
+    }
     std::vector<ir::Value> slots =
-        allocaSlots(arrayType, n.pos, static_cast<uint64_t>(count));
-    constructArray(slots, n);
+        allocaSlots(made, n.pos, static_cast<uint64_t>(count));
+    Place slotBase;
+    slotBase.slots = slots;
+    std::optional<int64_t> vlen = made.type->length();
+    if (!vlen.has_value()) {
+        refuse(n.pos, "this construction");
+        return {undefined()};
+    }
+    constructArray(slotBase, made, n.inits, n.repeat, *vlen, n.pos);
     if (failed_) {
         return {undefined()};
     }
     std::vector<ir::Value> words;
     for (int i = 0; i < count; ++i) {
-        TypeRef word = wordType(arrayType, static_cast<uint64_t>(i));
+        TypeRef word = wordType(made, static_cast<uint64_t>(i));
         ir::Instr instr;
         instr.op = ir::Op::Load;
         instr.loc = n.pos;
@@ -6769,6 +6957,9 @@ std::vector<ir::Value> Lowerer::lowerWords(const Expr* expr) {
     }
     if (dynamic_cast<const NewArray*>(expr) != nullptr) {
         return lowerNewArray(static_cast<const NewArray&>(*expr));
+    }
+    if (dynamic_cast<const ArrayLit*>(expr) != nullptr) {
+        return lowerArrayLit(static_cast<const ArrayLit&>(*expr));
     }
     if (dynamic_cast<const NewClass*>(expr) != nullptr) {
         return lowerNewClass(static_cast<const NewClass&>(*expr));

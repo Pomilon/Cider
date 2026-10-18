@@ -93,23 +93,30 @@ void testGlobalZero() {
     // may hold: no startup code, no order problem (FEATURES §8.3).
     std::printf("a zero-filled array may live in a global\n");
     Checked zero = check(
-        "var g: [u8; 3] = new [u8; 3] {[0, ...]};\n"
+        "var g: [u8; 3] = [0, ...];\n"
         "func main() -> int { return g[0] as int; }\n");
     check(zero.ok, "a zero-repeat global checks: " + zero.stage);
     Checked nested = check(
-        "var g: [[u8; 2]; 2] = new [[u8; 2]; 2] {[0, ...]};\n"
+        "var g: [[u8; 2]; 2] = [[0, ...], [0, ...]];\n"
         "func main() -> int { return 0; }\n");
     check(nested.ok, "a nested zero-repeat global checks: " + nested.stage);
     Checked explicitInit = check(
-        "var g: [u8; 3] = new [u8; 3] {1, 2, 3};\n"
+        "var g: [u8; 3] = [1, 2, 3];\n"
         "func main() -> int { return 0; }\n");
     check(explicitInit.ok, "a literal global array checks: " + explicitInit.stage);
     Checked runtimeInit = check(
         "func f() -> u8 { return 1; }\n"
-        "var g: [u8; 2] = new [u8; 2] {f(), 8};\n"
+        "var g: [u8; 2] = [f(), 8];\n"
         "func main() -> int { return 0; }\n");
     check(!runtimeInit.ok && runtimeInit.stage == "check",
           "a runtime element still needs a constant");
+    // Honest new (Unified Standard 5): `new [T; N] { … }` is a heap value,
+    // and a heap allocation is not a constant, so a global refuses it.
+    Checked heapGlobal = check(
+        "var g: [u8; 3] = new [u8; 3] {[0, ...]};\n"
+        "func main() -> int { return 0; }\n");
+    check(!heapGlobal.ok && heapGlobal.stage == "check",
+          "a heap array is refused as a global initialiser: " + heapGlobal.stage);
 }
 
 void testGlobalStruct() {
@@ -118,13 +125,13 @@ void testGlobalStruct() {
     std::printf("a const struct may live in a global\n");
     Checked good = check(
         "struct Point { var x: int; var y: int; }\n"
-        "var g: Point = new Point { x: 3, y: 4 };\n"
+        "var g: Point = Point { x: 3, y: 4 };\n"
         "func main() -> int { return g.x; }\n");
     check(good.ok, "a const struct global checks: " + good.stage);
     Checked runtimeField = check(
         "struct Point { var x: int; var y: int; }\n"
         "func f() -> int { return 1; }\n"
-        "var g: Point = new Point { x: f(), y: 4 };\n"
+        "var g: Point = Point { x: f(), y: 4 };\n"
         "func main() -> int { return 0; }\n");
     check(!runtimeField.ok && runtimeField.stage == "check",
           "a runtime field still needs a constant");
@@ -137,7 +144,7 @@ void testGlobalStruct() {
           "a call result still needs a constant");
     Checked nilField = check(
         "struct Box { var p: *int; var q: *int; }\n"
-        "var g: Box = new Box { p: nilPtr, q: nilPtr };\n"
+        "var g: Box = Box { p: nilPtr, q: nilPtr };\n"
         "func main() -> int { return 0; }\n");
     check(nilField.ok, "a nil pointer field is constant: " + nilField.stage);
     Checked enumGlobal = check(
@@ -224,7 +231,7 @@ void testInterface() {
         " func area() -> int { return (*self).w * (*self).h; } }\n"
         "func get(s: Shape) -> int { return s.area(); }\n"
         "func main() -> int {\n"
-        "    var a: [*Rect; 2] = new [*Rect; 2] {new Rect(3, 4), new Rect(1, 2)};\n"
+        "    var a: [*Rect; 2] = [new Rect(3, 4), new Rect(1, 2)];\n"
         "    return get(a[0:2]);\n"
         "}\n");
     check(!sliceArg.ok && sliceArg.stage == "check", "a slice is not a scalar interface");
@@ -358,7 +365,7 @@ void testForInProtocol() {
     const char* pair =
         "struct RIt { var cur: int; var end: int; var out: int; }\n"
         "struct Rng { var lo: int; var hi: int;\n"
-        "    func iter() -> RIt { return new RIt { cur: (*self).lo, end: (*self).hi, out: 0 }; }\n"
+        "    func iter() -> RIt { return RIt { cur: (*self).lo, end: (*self).hi, out: 0 }; }\n"
         "    func next(it: *RIt) -> *int {\n"
         "        if ((*it).cur >= (*it).end) { return nilPtr; }\n"
         "        (*it).out = (*it).cur;\n"
@@ -368,61 +375,61 @@ void testForInProtocol() {
         "}\n";
     Checked good = check(
         std::string(pair) +
-        "func main() -> int { var r: Rng = new Rng { lo: 0, hi: 3 }; var s: int = 0; for (var x in r) { s = s + x; } return s; }\n");
+        "func main() -> int { var r: Rng = Rng { lo: 0, hi: 3 }; var s: int = 0; for (var x in r) { s = s + x; } return s; }\n");
     check(good.ok, "an iter/next pair checks: " + good.stage);
     Checked noIter = check(
         "struct Rng { var lo: int; var hi: int;\n"
         "    func next(it: *Rng) -> *int { return nilPtr; }\n"
         "}\n"
-        "func main() -> int { var r: Rng = new Rng { lo: 0, hi: 1 }; for (var x in r) { } return 0; }\n");
+        "func main() -> int { var r: Rng = Rng { lo: 0, hi: 1 }; for (var x in r) { } return 0; }\n");
     check(!noIter.ok && noIter.stage == "check", "next without iter fails");
     Checked noNext = check(
         "struct Rng { var lo: int;\n"
-        "    func iter() -> Rng { return new Rng { lo: (*self).lo }; }\n"
+        "    func iter() -> Rng { return Rng { lo: (*self).lo }; }\n"
         "}\n"
-        "func main() -> int { var r: Rng = new Rng { lo: 0 }; for (var x in r) { } return 0; }\n");
+        "func main() -> int { var r: Rng = Rng { lo: 0 }; for (var x in r) { } return 0; }\n");
     check(!noNext.ok && noNext.stage == "check", "iter without next fails");
     Checked iterArg = check(
         "struct Rng { var lo: int;\n"
-        "    func iter(n: int) -> Rng { return new Rng { lo: n }; }\n"
+        "    func iter(n: int) -> Rng { return Rng { lo: n }; }\n"
         "    func next(it: *Rng) -> *int { return nilPtr; }\n"
         "}\n"
-        "func main() -> int { var r: Rng = new Rng { lo: 0 }; for (var x in r) { } return 0; }\n");
+        "func main() -> int { var r: Rng = Rng { lo: 0 }; for (var x in r) { } return 0; }\n");
     check(!iterArg.ok && iterArg.stage == "check", "iter takes no arguments");
     Checked iterInt = check(
         "struct Rng { var lo: int; var hi: int;\n"
         "    func iter() -> int { return (*self).lo; }\n"
         "    func next(it: *int) -> *int { return nilPtr; }\n"
         "}\n"
-        "func main() -> int { var r: Rng = new Rng { lo: 0, hi: 1 }; for (var x in r) { } return 0; }\n");
+        "func main() -> int { var r: Rng = Rng { lo: 0, hi: 1 }; for (var x in r) { } return 0; }\n");
     check(!iterInt.ok && iterInt.stage == "check", "iter answers a nominal iterator");
     Checked nextVal = check(
         "struct RIt { var cur: int; var end: int; }\n"
         "struct Rng { var lo: int; var hi: int;\n"
-        "    func iter() -> RIt { return new RIt { cur: (*self).lo, end: (*self).hi }; }\n"
+        "    func iter() -> RIt { return RIt { cur: (*self).lo, end: (*self).hi }; }\n"
         "    func next(it: RIt) -> *int { return nilPtr; }\n"
         "}\n"
-        "func main() -> int { var r: Rng = new Rng { lo: 0, hi: 1 }; for (var x in r) { } return 0; }\n");
+        "func main() -> int { var r: Rng = Rng { lo: 0, hi: 1 }; for (var x in r) { } return 0; }\n");
     check(!nextVal.ok && nextVal.stage == "check", "next takes a pointer to the iterator");
     Checked nextOther = check(
         "struct RIt { var cur: int; var end: int; }\n"
         "struct OIt { var cur: int; }\n"
         "struct Rng { var lo: int; var hi: int;\n"
-        "    func iter() -> RIt { return new RIt { cur: (*self).lo, end: (*self).hi }; }\n"
+        "    func iter() -> RIt { return RIt { cur: (*self).lo, end: (*self).hi }; }\n"
         "    func next(it: *OIt) -> *int { return nilPtr; }\n"
         "}\n"
-        "func main() -> int { var r: Rng = new Rng { lo: 0, hi: 1 }; for (var x in r) { } return 0; }\n");
+        "func main() -> int { var r: Rng = Rng { lo: 0, hi: 1 }; for (var x in r) { } return 0; }\n");
     check(!nextOther.ok && nextOther.stage == "check", "next takes iter's own iterator");
     Checked nextVoid = check(
         "struct RIt { var cur: int; var end: int; }\n"
         "struct Rng { var lo: int; var hi: int;\n"
-        "    func iter() -> RIt { return new RIt { cur: (*self).lo, end: (*self).hi }; }\n"
+        "    func iter() -> RIt { return RIt { cur: (*self).lo, end: (*self).hi }; }\n"
         "    func next(it: *RIt) -> void { return; }\n"
         "}\n"
-        "func main() -> int { var r: Rng = new Rng { lo: 0, hi: 1 }; for (var x in r) { } return 0; }\n");
+        "func main() -> int { var r: Rng = Rng { lo: 0, hi: 1 }; for (var x in r) { } return 0; }\n");
     check(!nextVoid.ok && nextVoid.stage == "check", "next answers an element pointer");
     Checked ptrArray = check(
-        "func main() -> int { var a: [int; 3] = new [int; 3] {1, 2, 3}; var p: *[int; 3] = &a; var s: int = 0; for (var x in p) { s = s + x; } return s; }\n");
+        "func main() -> int { var a: [int; 3] = [1, 2, 3]; var p: *[int; 3] = &a; var s: int = 0; for (var x in p) { s = s + x; } return s; }\n");
     check(!ptrArray.ok && ptrArray.stage == "check", "a pointer to an array does not iterate");
 }
 
@@ -474,15 +481,15 @@ void testGenericStruct() {
     std::printf("generic structs specialize\n");
     Checked good = check(
         "struct Box<T> { var v: T; }\n"
-        "func main() -> int { var b: Box<int> = new Box<int> { v: 41 }; return b.v + 1; }\n");
+        "func main() -> int { var b: Box<int> = Box<int> { v: 41 }; return b.v + 1; }\n");
     check(good.ok, "checks: " + good.stage);
     Checked method = check(
         "struct Box<T> { var v: T; func get() -> T { return (*self).v; } }\n"
-        "func main() -> int { var b: Box<int> = new Box<int> { v: 41 }; return b.get(); }\n");
+        "func main() -> int { var b: Box<int> = Box<int> { v: 41 }; return b.get(); }\n");
     check(method.ok, "methods specialize: " + method.stage);
     Checked bareLocal = check(
         "struct Box<T> { var v: T; }\n"
-        "func main() -> int { var b: Box = new Box<int> { v: 1 }; return 0; }\n");
+        "func main() -> int { var b: Box = Box<int> { v: 1 }; return 0; }\n");
     check(!bareLocal.ok && bareLocal.stage == "check", "a bare generic local fails");
     // A self-pointer field (`next: *Node<T>`) substitutes T with T on the
     // way through: identity substitution is a no-op, not an infinite
@@ -490,7 +497,7 @@ void testGenericStruct() {
     Checked selfPtr = check(
         "struct Node<T> { var v: T; var next: *Node<T>; }\n"
         "func main() -> int {\n"
-        "    var node: Node<int> = new Node<int> { v: 11, next: nilPtr };\n"
+        "    var node: Node<int> = Node<int> { v: 11, next: nilPtr };\n"
         "    return node.v;\n"
         "}\n");
     check(selfPtr.ok, "a generic self-pointer checks: " + selfPtr.stage);
@@ -502,7 +509,7 @@ void testGenericStruct() {
         "struct Wrap<T> { var v: T; }\n"
         "struct One<A> { var a: A; }\n"
         "func main() -> int {\n"
-        "    var w: Bare1 = new Wrap<One<int>> { v: new One<int> { a: 1 } };\n"
+        "    var w: Bare1 = Wrap<One<int>> { v: One<int> { a: 1 } };\n"
         "    return w.v.a;\n"
         "}\n");
     check(fwdAlias.ok, "a forward alias checks: " + fwdAlias.stage);
@@ -514,27 +521,27 @@ void testUnions() {
     std::printf("unions name one live member\n");
     Checked good = check(
         "union Value { var i: int; var s: string; }\n"
-        "func main() -> int { var v: Value = new Value { i: 42 }; return v.i; }\n");
+        "func main() -> int { var v: Value = Value { i: 42 }; return v.i; }\n");
     check(good.ok, "checks: " + good.stage);
     Checked two = check(
         "union Value { var i: int; var s: string; }\n"
-        "func main() -> int { var v: Value = new Value { i: 1, s: \"x\" }; return 0; }\n");
+        "func main() -> int { var v: Value = Value { i: 1, s: \"x\" }; return 0; }\n");
     check(!two.ok && two.stage == "check", "two members fail");
     Checked member = check(
         "union Value { var i: int; }\n"
-        "func main() -> int { var v: Value = new Value { z: 1 }; return 0; }\n");
+        "func main() -> int { var v: Value = Value { z: 1 }; return 0; }\n");
     check(!member.ok && member.stage == "check", "an unknown member fails");
     Checked has = check(
         "union Value { var i: int; var s: string; }\n"
-        "func main() -> int { var v: Value = new Value { i: 1 }; if (v.hasS()) { return 1; } return 0; }\n");
+        "func main() -> int { var v: Value = Value { i: 1 }; if (v.hasS()) { return 1; } return 0; }\n");
     check(has.ok, "hasM checks: " + has.stage);
     Checked hasBad = check(
         "union Value { var i: int; }\n"
-        "func main() -> int { var v: Value = new Value { i: 1 }; return v.hasZ(); }\n");
+        "func main() -> int { var v: Value = Value { i: 1 }; return v.hasZ(); }\n");
     check(!hasBad.ok && hasBad.stage == "check", "hasM of nothing fails");
     Checked wide = check(
         "union Small { var b: int; }\n"
-        "func main() -> int { var v: Small = new Small { b: 1 }; var s: string = v as string; return 0; }\n");
+        "func main() -> int { var v: Small = Small { b: 1 }; var s: string = v as string; return 0; }\n");
     check(!wide.ok && wide.stage == "check", "a cast wider than the payload fails");
 }
 
@@ -591,14 +598,14 @@ void testLen() {
     std::printf("len reads element counts\n");
     Checked slice = check(
         "func main() -> int {\n"
-        "    var a: [int; 3] = new [int; 3] { 1, 2, 3 };\n"
+        "    var a: [int; 3] = [ 1, 2, 3 ];\n"
         "    var s: []int = a[0:2];\n"
         "    return s.len as int;\n"
         "}\n");
     check(slice.ok, "a slice has a length");
     Checked array = check(
         "func main() -> int {\n"
-        "    var a: [int; 3] = new [int; 3] { 1, 2, 3 };\n"
+        "    var a: [int; 3] = [ 1, 2, 3 ];\n"
         "    return a.len as int;\n"
         "}\n");
     check(array.ok, "an array has a length");
@@ -678,7 +685,7 @@ void testOverrides() {
         "    func noise() -> int { return 22; }\n"
         "}\n"
         "func main() -> int {\n"
-        "    var d: Derived = new Derived { id: 1 };\n"
+        "    var d: Derived = Derived { id: 1 };\n"
         "    var bp: *Base = &d;\n"
         "    return (*bp).noise();\n"
         "}\n");
@@ -905,13 +912,13 @@ void testInterfaceNil() {
     Checked globalLive = check(
         "interface Shape { func area() -> int; }\n"
         "struct Sq { var s: int; func area() -> int { return (*self).s; } }\n"
-        "var g: Shape = new Sq { s: 1 };\n"
+        "var g: Shape = Sq { s: 1 };\n"
         "func main() -> int { return 0; }\n");
     check(!globalLive.ok && globalLive.stage == "check",
           "a live interface global is not constant");
     Checked nullArray = check(
         "interface Shape { func area() -> int; }\n"
-        "var g: [Shape; 2] = new [Shape; 2] { nilPtr as Shape, nilPtr as Shape };\n"
+        "var g: [Shape; 2] = [nilPtr as Shape, nilPtr as Shape];\n"
         "func main() -> int { return 0; }\n");
     check(nullArray.ok, "a null-interface array global checks: " + nullArray.stage);
 }
@@ -947,7 +954,7 @@ void testAlternation() {
     Checked members = check(
         "union U { var a: int; var b: int; }\n"
         "func main() -> int {\n"
-        "    var u: U = new U { a: 1 };\n"
+        "    var u: U = U { a: 1 };\n"
         "    match (u) { U.a | U.b => { return 1; } }\n"
         "}\n");
     check(members.ok, "members alternate without a default: " + members.stage);
@@ -984,7 +991,7 @@ void testGuard() {
     Checked guardedUnion = check(
         "union U { var a: int; var b: int; }\n"
         "func main() -> int {\n"
-        "    var u: U = new U { a: 1 };\n"
+        "    var u: U = U { a: 1 };\n"
         "    var flag: bool = true;\n"
         "    match (u) { U.a if flag => { return 1; } U.b => { return 2; } }\n"
         "}\n");
@@ -1046,28 +1053,28 @@ void testMatch() {
     Checked typePat = check(
         "struct P { var x: int; }\n"
         "func main() -> int {\n"
-        "    var p: P = new P { x: 1 };\n"
+        "    var p: P = P { x: 1 };\n"
         "    match (p) { P { x: x } => { return x; } default => { return 0; } }\n"
         "}\n");
     check(typePat.ok, "a type pattern binds its fields: " + typePat.stage);
     Checked typeConst = check(
         "struct P { var x: int; var y: int; }\n"
         "func main() -> int {\n"
-        "    var p: P = new P { x: 1, y: 2 };\n"
+        "    var p: P = P { x: 1, y: 2 };\n"
         "    match (p) { P { x: 1, y: 2 } => { return 10; } default => { return 0; } }\n"
         "}\n");
     check(typeConst.ok, "a struct pattern with constants checks: " + typeConst.stage);
     Checked typeBind = check(
         "struct P { var x: int; var y: int; }\n"
         "func main() -> int {\n"
-        "    var p: P = new P { x: 1, y: 2 };\n"
+        "    var p: P = P { x: 1, y: 2 };\n"
         "    match (p) { P { x: a, y: _ } => { return a; } default => { return 0; } }\n"
         "}\n");
     check(typeBind.ok, "a struct pattern binds fields: " + typeBind.stage);
     Checked typePartial = check(
         "struct P { var x: int; var y: int; }\n"
         "func main() -> int {\n"
-        "    var p: P = new P { x: 1, y: 2 };\n"
+        "    var p: P = P { x: 1, y: 2 };\n"
         "    match (p) { P { x: 1 } => { return 10; } default => { return 0; } }\n"
         "}\n");
     check(!typePartial.ok && typePartial.stage == "check",
@@ -1075,7 +1082,7 @@ void testMatch() {
     Checked typeNoField = check(
         "struct P { var x: int; }\n"
         "func main() -> int {\n"
-        "    var p: P = new P { x: 1 };\n"
+        "    var p: P = P { x: 1 };\n"
         "    match (p) { P { z: 1 } => { return 10; } default => { return 0; } }\n"
         "}\n");
     check(!typeNoField.ok && typeNoField.stage == "check",
@@ -1083,7 +1090,7 @@ void testMatch() {
     Checked typeNoType = check(
         "struct P { var x: int; }\n"
         "func main() -> int {\n"
-        "    var p: P = new P { x: 1 };\n"
+        "    var p: P = P { x: 1 };\n"
         "    match (p) { Q { x: 1 } => { return 10; } default => { return 0; } }\n"
         "}\n");
     check(!typeNoType.ok && typeNoType.stage == "check",
@@ -1092,21 +1099,21 @@ void testMatch() {
         "struct P { var x: int; }\n"
         "struct Q { var x: int; }\n"
         "func main() -> int {\n"
-        "    var p: P = new P { x: 1 };\n"
+        "    var p: P = P { x: 1 };\n"
         "    match (p) { Q { x: 1 } => { return 10; } default => { return 0; } }\n"
         "}\n");
     check(typeDead.ok, "a pattern for another struct is dead, not an error");
     Checked memberPat = check(
         "union U { var a: int; var b: bool; }\n"
         "func main() -> int {\n"
-        "    var u: U = new U { a: 7 };\n"
+        "    var u: U = U { a: 7 };\n"
         "    match (u) { U.a => { return 1; } default => { return 0; } }\n"
         "}\n");
     check(memberPat.ok, "a union member pattern checks: " + memberPat.stage);
     Checked memberNoMember = check(
         "union U { var a: int; }\n"
         "func main() -> int {\n"
-        "    var u: U = new U { a: 7 };\n"
+        "    var u: U = U { a: 7 };\n"
         "    match (u) { U.z => { return 1; } default => { return 0; } }\n"
         "}\n");
     check(!memberNoMember.ok && memberNoMember.stage == "check",
@@ -1114,14 +1121,14 @@ void testMatch() {
     Checked emptyPat = check(
         "struct E {}\n"
         "func main() -> int {\n"
-        "    var e: E = new E {};\n"
+        "    var e: E = E {};\n"
         "    match (e) { E {} => { return 5; } default => { return 0; } }\n"
         "}\n");
     check(emptyPat.ok, "an empty struct takes an empty pattern: " + emptyPat.stage);
     Checked emptyNonEmpty = check(
         "struct P { var x: int; }\n"
         "func main() -> int {\n"
-        "    var p: P = new P { x: 1 };\n"
+        "    var p: P = P { x: 1 };\n"
         "    match (p) { P {} => { return 5; } default => { return 0; } }\n"
         "}\n");
     check(!emptyNonEmpty.ok && emptyNonEmpty.stage == "check",
@@ -1136,14 +1143,14 @@ void testMatch() {
     Checked unionCovered = check(
         "union U { var a: int; var b: bool; }\n"
         "func main() -> int {\n"
-        "    var u: U = new U { a: 7 };\n"
+        "    var u: U = U { a: 7 };\n"
         "    match (u) { U.a => { return 1; } U.b => { return 2; } }\n"
         "}\n");
     check(unionCovered.ok, "every union member listed needs no default: " + unionCovered.stage);
     Checked unionMissing = check(
         "union U { var a: int; var b: bool; }\n"
         "func main() -> int {\n"
-        "    var u: U = new U { a: 7 };\n"
+        "    var u: U = U { a: 7 };\n"
         "    match (u) { U.a => { return 1; } }\n"
         "}\n");
     check(!unionMissing.ok && unionMissing.stage == "check",
@@ -1152,7 +1159,7 @@ void testMatch() {
         "union U { var a: int; var b: bool; }\n"
         "union V { var a: int; }\n"
         "func main() -> int {\n"
-        "    var u: U = new U { a: 7 };\n"
+        "    var u: U = U { a: 7 };\n"
         "    match (u) { U.a => { return 1; } V.a => { return 2; } }\n"
         "}\n");
     check(!unionOther.ok && unionOther.stage == "check",
@@ -1160,7 +1167,7 @@ void testMatch() {
     Checked unionSingle = check(
         "union One { var a: int; }\n"
         "func main() -> int {\n"
-        "    var u: One = new One { a: 7 };\n"
+        "    var u: One = One { a: 7 };\n"
         "    match (u) { One.a => { return 1; } }\n"
         "}\n");
     check(unionSingle.ok, "a one-member union needs one arm: " + unionSingle.stage);
@@ -1218,7 +1225,7 @@ void testEnumMatch() {
     Checked structTag = check(
         "struct P { var x: int; }\n"
         "func main() -> int {\n"
-        "    var p: P = new P { x: 1 };\n"
+        "    var p: P = P { x: 1 };\n"
         "    match (p) { P.x => { return 1; } default => { return 0; } }\n"
         "}\n");
     check(!structTag.ok && structTag.stage == "check",
@@ -1253,7 +1260,7 @@ void testPointerArith() {
     std::printf("pointer arithmetic checks\n");
     Checked add = check(
         "func main() -> int {\n"
-        "    var b: [u8; 8] = new [u8; 8] {[0, ...]};\n"
+        "    var b: [u8; 8] = [0, ...];\n"
         "    var p: *u8 = &b[0];\n"
         "    var q: *u8 = p + 2;\n"
         "    var r: *u8 = 2 + p;\n"
@@ -1279,7 +1286,7 @@ void testPointerArith() {
     check(!intMinus.ok && intMinus.stage == "check", "int - ptr fails");
     Checked compound = check(
         "func main() -> int {\n"
-        "    var b: [u8; 4] = new [u8; 4] {[0, ...]};\n"
+        "    var b: [u8; 4] = [0, ...];\n"
         "    var p: *u8 = &b[0];\n"
         "    p += 2;\n"
         "    p -= 1;\n"
@@ -1566,7 +1573,7 @@ void testClosureVoid() {
         "struct Slot { var v: *void; }\n"
         "func main() -> int {\n"
         "    var c: func(int) -> int = func(x: int) -> int { return x; };\n"
-        "    var s: Slot = new Slot { v: nilPtr };\n"
+        "    var s: Slot = Slot { v: nilPtr };\n"
         "    var ps: *Slot = &s;\n"
         "    s.v = c;\n"
         "    var f: func(int) -> int = (*ps).v as func(int) -> int;\n"
@@ -1577,7 +1584,7 @@ void testClosureVoid() {
     Checked computedIndex = check(
         "func main() -> int {\n"
         "    var c: func(int) -> int = func(x: int) -> int { return x; };\n"
-        "    var a: [*void; 2] = new [*void; 2] {nilPtr, nilPtr};\n"
+        "    var a: [*void; 2] = [nilPtr, nilPtr];\n"
         "    var i: int = 0;\n"
         "    a[0] = c;\n"
         "    var f: func(int) -> int = a[i] as func(int) -> int;\n"
@@ -1660,14 +1667,14 @@ void testSliceCopy() {
     std::printf("a slice copies into an array\n");
     Checked same = check(
         "func main() -> int {\n"
-        "    var a: [u8; 5] = new [u8; 5] { 10, 42, 43, 44, 50 };\n"
+        "    var a: [u8; 5] = [10, 42, 43, 44, 50];\n"
         "    var s: [u8; 3] = a[1:4];\n"
         "    return s[0] as int;\n"
         "}\n");
     check(same.ok, "a slice copies into a same-element array: " + same.stage);
     Checked wide = check(
         "func main() -> int {\n"
-        "    var a: [u8; 5] = new [u8; 5] { 10, 42, 43, 44, 50 };\n"
+        "    var a: [u8; 5] = [10, 42, 43, 44, 50];\n"
         "    var s: [u16; 3] = a[1:4];\n"
         "    return 0;\n"
         "}\n");

@@ -90,24 +90,24 @@ class MakerA {
     var pad: int;
     func init(p: int) { (*self).pad = p; }
     func makePair(n: int) -> Pair {
-        var r: Pair = new Pair { a: n, b: n + (*self).pad };
+        var r: Pair = Pair { a: n, b: n + (*self).pad };
         return r;
     }
     func makeCell(n: int) -> Cell {
-        var c: Cell = new Cell { v: n * 10 + (*self).pad };
+        var c: Cell = Cell { v: n * 10 + (*self).pad };
         return c;
     }
     func makeRow(n: int) -> Row {
-        return new [int; 2] {n, n + (*self).pad};
+        return [n, n + (*self).pad];
     }
     func makeNested(n: int) -> [[int; 2]; 2] {
-        return new [[int; 2]; 2] { new [int; 2] {n, n + 1}, new [int; 2] {n + 2, n + (*self).pad} };
+        return [ [n, n + 1], [n + 2, n + (*self).pad] ];
     }
     func makeCells(n: int) -> [Cell; 2] {
-        return new [Cell; 2] { new Cell { v: n }, new Cell { v: n + (*self).pad } };
+        return [ Cell { v: n }, Cell { v: n + (*self).pad } ];
     }
     func mix(n: int, p: Pair) -> Pair {
-        var r: Pair = new Pair { a: p.a + n, b: p.b + (*self).pad };
+        var r: Pair = Pair { a: p.a + n, b: p.b + (*self).pad };
         return r;
     }
     func makeShape() -> Shape {
@@ -121,24 +121,24 @@ class MakerB {
     var pad: int;
     func init(p: int) { (*self).pad = p; }
     func makePair(n: int) -> Pair {
-        var r: Pair = new Pair { a: n * 100, b: n * 100 + (*self).pad };
+        var r: Pair = Pair { a: n * 100, b: n * 100 + (*self).pad };
         return r;
     }
     func makeCell(n: int) -> Cell {
-        var c: Cell = new Cell { v: n * 10 + (*self).pad };
+        var c: Cell = Cell { v: n * 10 + (*self).pad };
         return c;
     }
     func makeRow(n: int) -> Row {
-        return new [int; 2] {n * 100, n * 100 + (*self).pad};
+        return [n * 100, n * 100 + (*self).pad];
     }
     func makeNested(n: int) -> [[int; 2]; 2] {
-        return new [[int; 2]; 2] { new [int; 2] {n * 100, n * 101}, new [int; 2] {n * 102, n * 100 + (*self).pad} };
+        return [ [n * 100, n * 101], [n * 102, n * 100 + (*self).pad] ];
     }
     func makeCells(n: int) -> [Cell; 2] {
-        return new [Cell; 2] { new Cell { v: n * 100 }, new Cell { v: n * 100 + (*self).pad } };
+        return [ Cell { v: n * 100 }, Cell { v: n * 100 + (*self).pad } ];
     }
     func mix(n: int, p: Pair) -> Pair {
-        var r: Pair = new Pair { a: p.a + n * 100, b: p.b + (*self).pad };
+        var r: Pair = Pair { a: p.a + n * 100, b: p.b + (*self).pad };
         return r;
     }
     func makeShape() -> Shape {
@@ -171,7 +171,7 @@ interface Factory {
 class OwnedFactory {
     func init() { }
     func make(t: int) -> Owned {
-        var o: Owned = new Owned { tag: t };
+        var o: Owned = Owned { tag: t };
         return o;
     }
 }
@@ -268,7 +268,7 @@ func main() -> int {
 
     // 7. A by-value aggregate argument alongside the aggregate return: the
     //    hidden slot must sit between the method address and `this`.
-    var arg: Pair = new Pair { a: 10, b: 20 };
+    var arg: Pair = Pair { a: 10, b: 20 };
     var mx: Pair = ma.mix(1, arg);
     if (mx.a != 11 || mx.b != 21) { return 15; }
     var mxb: Pair = mb.mix(1, arg);
@@ -307,7 +307,7 @@ func main() -> int {
 
     // 11. A constructed aggregate as an argument, next to an aggregate
     //     return (v2's list-literal coercion is spelled with `new` in v3).
-    var mix2: Pair = ma.mix(1, new Pair { a: 3, b: 4 });
+    var mix2: Pair = ma.mix(1, Pair { a: 3, b: 4 });
     if (mix2.a != 4 || mix2.b != 5) { return 27; }
 
     // 12. A destructor-bearing class result through the interface is an

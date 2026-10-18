@@ -55,7 +55,7 @@ class Holder {
     gHmRect.w = a;
     gHmRect.h = b;
     gHmTri.b = 7;
-    return new [Shape; 2] { gHmRect, gHmTri };
+    return [ gHmRect, gHmTri ];
   }
 }
 
@@ -67,43 +67,43 @@ func sumKinds(shapes: [Shape; 2]) -> int {
   return shapes[0].kind() + shapes[1].kind();
 }
 
-var gMkSq: lib.Sq = new lib.Sq { side: 0 };
-var gMkRect: Rect = new Rect { w: 0, h: 0 };
-var gHmRect: Rect = new Rect { w: 0, h: 0 };
-var gHmTri: Tri = new Tri { b: 0 };
+var gMkSq: lib.Sq = lib.Sq { side: 0 };
+var gMkRect: Rect = Rect { w: 0, h: 0 };
+var gHmRect: Rect = Rect { w: 0, h: 0 };
+var gHmTri: Tri = Tri { b: 0 };
 
 func mkpair() -> Shapes2 {
   gMkSq.side = 6;
   gMkRect.w = 2;
   gMkRect.h = 5;
-  return new [Shape; 2] { gMkSq, gMkRect };
+  return [ gMkSq, gMkRect ];
 }
 
 func main() -> int {
-  var r: Rect = new Rect { w: 2, h: 5 };
-  var t: Tri = new Tri { b: 6 };
-  var s: lib.Sq = new lib.Sq { side: 7 };
-  var h: Holder = new Holder { };
+  var r: Rect = Rect { w: 2, h: 5 };
+  var t: Tri = Tri { b: 6 };
+  var s: lib.Sq = lib.Sq { side: 7 };
+  var h: Holder = Holder { };
 
-  if (sumAreas(new [Shape; 2] { r, t }) != 22) { return 1; }
-  if (sumKinds(new [Shape; 2] { t, r }) != 5) { return 2; }
-  if (lib.total(new [Shape; 2] { r, s }) != 59) { return 3; }
-  if (h.use(new [Shape; 2] { s, t }) != 103) { return 4; }
+  if (sumAreas([ r, t ]) != 22) { return 1; }
+  if (sumKinds([ t, r ]) != 5) { return 2; }
+  if (lib.total([ r, s ]) != 59) { return 3; }
+  if (h.use([ s, t ]) != 103) { return 4; }
 
-  var acc: Acc = new Acc { total: 0 };
+  var acc: Acc = Acc { total: 0 };
   var sink: Sink = acc;
-  if (sink.add(new [Shape; 2] { t, s }) != 61) { return 5; }
-  if (sink.add(new [Shape; 2] { r, r }) != 81) { return 6; }
+  if (sink.add([ t, s ]) != 61) { return 5; }
+  if (sink.add([ r, r ]) != 81) { return 6; }
 
-  var w: *Wrap = new Wrap(new [Shape; 2] { s, r });
+  var w: *Wrap = new Wrap([ s, r ]);
   if ((*w).sum() != 59) { return 7; }
 
   var i: Shape = t;
   var pr: *Rect = &r;
   var ps: *lib.Sq = &s;
-  if (sumAreas(new [Shape; 2] { i, r }) != 22) { return 8; }
-  if (sumAreas(new [Shape; 2] { pr, ps }) != 59) { return 9; }
-  if (sumKinds(new [Shape; 2] { ps, pr }) != 3) { return 10; }
+  if (sumAreas([ i, r ]) != 22) { return 8; }
+  if (sumAreas([ pr, ps ]) != 59) { return 9; }
+  if (sumKinds([ ps, pr ]) != 3) { return 10; }
 
   var p: Shapes2 = mkpair();
   if (p[0].area() + p[1].area() != 46) { return 11; }
@@ -112,8 +112,8 @@ func main() -> int {
   if (q[0].area() + q[1].area() != 26) { return 13; }
   if (q[0].kind() * 100 + q[1].kind() != 203) { return 14; }
 
-  printInt(sumAreas(new [Shape; 2] { r, t })); print(",");
-  printInt(lib.total(new [Shape; 2] { s, t })); print(",");
+  printInt(sumAreas([ r, t ])); print(",");
+  printInt(lib.total([ s, t ])); print(",");
   printInt(p[0].area() + p[1].area()); print(",");
   printInt(q[0].area() + q[1].area()); print("\n");
   print("interface_list_arg_return_ok\n");

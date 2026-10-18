@@ -108,7 +108,7 @@ func main() -> int {
   if (gIface.o() != 42 || gIface.tag() != 7) { return 12; }
 
   // --- an interface-typed FIELD, reached through the same global ---------
-  var h: lib.Holder = new lib.Holder { inner: nilPtr as lib.RTag, pad: 0 };
+  var h: lib.Holder = lib.Holder { inner: nilPtr as lib.RTag, pad: 0 };
   h.inner = rGamma;
   if (h.inner.o() != 5 || h.inner.tag() != 21) { return 13; }
   h.inner = rAlpha;

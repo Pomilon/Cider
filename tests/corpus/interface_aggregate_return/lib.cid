@@ -24,10 +24,10 @@ export class RemoteImpl {
     var pad: int;
     func init(p: int) { (*self).pad = p; }
     func pair(n: int) -> Remote {
-        var r: Remote = new Remote { lo: n, hi: n + (*self).pad };
+        var r: Remote = Remote { lo: n, hi: n + (*self).pad };
         return r;
     }
-    func row(n: int) -> RemoteRow { return new [int; 2] {n, n + (*self).pad}; }
+    func row(n: int) -> RemoteRow { return [n, n + (*self).pad]; }
     func shape() -> RemoteShape {
         var sq: *RemoteSq = new RemoteSq((*self).pad);
         return sq;

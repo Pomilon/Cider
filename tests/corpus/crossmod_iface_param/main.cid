@@ -38,9 +38,9 @@ class Aliased {
 func drawVia(s: Shape, p: Param) -> int { return s.draw(p); }
 
 func main() -> int {
-  var d: Dotted = new Dotted { tag: 1 };
-  var b: Bare = new Bare { tag: 2 };
-  var a: Aliased = new Aliased { tag: 3 };
+  var d: Dotted = Dotted { tag: 1 };
+  var b: Bare = Bare { tag: 2 };
+  var a: Aliased = Aliased { tag: 3 };
 
   // Declaration-time conversion, then dispatch through each implementor.
   var s: Shape = d;
@@ -56,7 +56,7 @@ func main() -> int {
 
   // The from-import of another module: bare `Param` in mid.cid still names
   // shapes.Param, so mid.Mid satisfies the interface too.
-  var m: mid.Mid = new mid.Mid { tag: 4 };
+  var m: mid.Mid = mid.Mid { tag: 4 };
   s = m;
   if (s.draw(make(4)) != 40004) { return 5; }
   s = d;

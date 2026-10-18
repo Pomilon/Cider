@@ -37,14 +37,14 @@ export struct Big {
 
 // --- narrow globals, interleaved with the wide ones ----------------------
 export var gU8: u8 = 0;
-export var gBig1: Big = new Big { a: 0, b: 0 };
-export var gBox: Box = new Box { v: 0 };
+export var gBig1: Big = Big { a: 0, b: 0 };
+export var gBox: Box = Box { v: 0 };
 export var gU16: u16 = 0;
 export var gShape1: Shape = nilPtr as Shape;
 export var gFlag: bool = false;
-export var gPeb: Pebble = new Pebble { w: 0, pad: new [u64; 4] { 0, 0, 0, 0 } };
+export var gPeb: Pebble = Pebble { w: 0, pad: [ 0, 0, 0, 0 ] };
 export var gF32: float = 0.0;
-export var gBig2: Big = new Big { a: 0, b: 0 };
+export var gBig2: Big = Big { a: 0, b: 0 };
 export var gI32: i32 = 0;
 export var gShape2: Shape = nilPtr as Shape;
 export var gI64: i64 = 0;

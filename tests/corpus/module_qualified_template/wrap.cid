@@ -14,7 +14,7 @@ export func readHolder(h: *Holder) -> int {
 }
 
 export func makeBox(n: int) -> box.Box<int> {
-  var b: box.Box<int> = new box.Box<int> { v: 0, tag: 0 };
+  var b: box.Box<int> = box.Box<int> { v: 0, tag: 0 };
   b.v = n;
   b.tag = 6;
   return b;
@@ -31,5 +31,5 @@ export func readId(n: int) -> int {
 }
 
 export func makeLit(n: int) -> box.Box<int> {
-  return new box.Box<int> { v: n, tag: 9 };
+  return box.Box<int> { v: n, tag: 9 };
 }
