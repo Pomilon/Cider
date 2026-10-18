@@ -111,6 +111,18 @@ constexpr int64_t structSize(int64_t membersSize, int64_t maxMemberAlign) {
     return roundUp(membersSize, maxMemberAlign);
 }
 
+// A header-less class with no fields still needs an address of its own,
+// so it occupies the smallest extent a transfer names: one byte. The
+// exact-size chunks of loadRange/storeRange move that byte without
+// touching a neighbor (Unified Standard 4.8.5; empty-object rule).
+constexpr int64_t kSizeEmptyClass = 1;
+
+constexpr int64_t classSizePlain(int64_t fieldsSize, int64_t maxFieldAlign) {
+    const int64_t extent =
+        fieldsSize > kSizeEmptyClass ? fieldsSize : kSizeEmptyClass;
+    return roundUp(extent, maxFieldAlign);
+}
+
 // A union's payload is as wide as its widest member, every member at offset 0,
 // and the tag sits immediately after the payload padded to the payload's
 // alignment. TYPES.md §3.4a. Worked through for `union Value { int; float;
@@ -124,12 +136,11 @@ constexpr int64_t unionSize(int64_t maxMemberSize, int64_t maxMemberAlign) {
     return roundUp(unionTagOffset(maxMemberSize, maxMemberAlign) + kSizeUnionTag, maxMemberAlign);
 }
 
-// A class is one vptr word plus its own fields, rounded to the combined
-// alignment. Bases are not laid out here: a class with bases answers -1
-// from the resolver, and the lowerer refuses it, until inheritance lowers.
-// A class value opens with its vptr word at offset zero and fields follow,
-// so the slot is reserved from the first class slice and field offsets
-// never shift when methods wire the vptr later.
+// A class whose chain has virtual slots is one vptr word plus its fields,
+// rounded to the combined alignment (Unified Standard 4.8.5); a class with
+// no virtual slot has no header and sizes by classSizePlain. Bases are not
+// laid out here: the resolver walks the chain, most-base first, and passes
+// the fields' span, refusing a multi-base level before this point.
 constexpr int64_t classSize(int64_t fieldsSize, int64_t maxFieldAlign) {
     const int64_t combined =
         maxFieldAlign > kAlignPointer ? maxFieldAlign : kAlignPointer;

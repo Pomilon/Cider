@@ -134,19 +134,22 @@ int64_t Resolver::fieldOffset(DeclId id, const std::string& name) const {
     seen.insert(declKey(id));
     // Union members all begin at offset 0; the tag lives after the payload
     // (TYPES.md 3.4a) and is addressed by unionTagOffset, never here.
-    // A class value opens with its vptr word; fields follow it, a chain's
-    // bases most-base first (FEATURES 2.2).
+    // A class value's fields are its chain, bases most-base first
+    // (FEATURES 2.2); the chain opens with a vptr word only when it has
+    // virtual slots to name (Unified Standard 4.8.5).
+    bool classChain = false;
     bool afterVptr = false;
     if (const Decl* self = declById(id)) {
         if (self->nominal == Kind::Union) {
             return unionMemberIndex(id, name) >= 0 ? 0 : -1;
         }
         if (self->nominal == Kind::Class) {
-            afterVptr = true;
+            classChain = true;
+            afterVptr = !virtualNames(id).empty();
         }
     }
     std::vector<std::string> fields;
-    if (afterVptr) {
+    if (classChain) {
         std::unordered_set<std::string> chainSeen;
         if (!chainFieldsImpl(id, chainSeen, fields)) {
             return -1;
@@ -171,7 +174,7 @@ int64_t Resolver::fieldOffset(DeclId id, const std::string& name) const {
     }
     for (const std::string& field : fields) {
         TypeRef type = fieldType(id, field);
-        if (type.isError() && afterVptr) {
+        if (type.isError() && classChain) {
             type = fieldTypeAcrossBases(id, field);
         }
         if (type.isError()) {
@@ -381,9 +384,10 @@ int64_t Resolver::structAlignImpl(DeclId id, std::unordered_set<std::string>& se
 }
 
 int64_t Resolver::classSizeImpl(DeclId id, std::unordered_set<std::string>& seen) const {
-    // A chain lays out after one vptr word: bases most-base first, then
-    // the class's own fields (FEATURES 2.2). Several bases at one level
-    // have no layout yet, so the walk refuses.
+    // A chain lays out bases most-base first, then the class's own fields
+    // (FEATURES 2.2). Several bases at one level have no layout yet, so
+    // the walk refuses. Under 4.8.5 only a chain with a virtual slot
+    // carries the vptr word; a chain without one sizes by classSizePlain.
     std::vector<std::string> fields;
     {
         std::unordered_set<std::string> chainSeen;
@@ -391,8 +395,13 @@ int64_t Resolver::classSizeImpl(DeclId id, std::unordered_set<std::string>& seen
             return -1;
         }
     }
-    int64_t at = layout::kSizePointer;
-    int64_t multiple = layout::kAlignPointer;
+    const bool headed = !virtualNames(id).empty();
+    int64_t at = 0;
+    int64_t multiple = 1;
+    if (headed) {
+        at = layout::kSizePointer;
+        multiple = layout::kAlignPointer;
+    }
     for (const std::string& field : fields) {
         TypeRef type = fieldType(id, field);
         if (type.isError()) {
@@ -409,7 +418,10 @@ int64_t Resolver::classSizeImpl(DeclId id, std::unordered_set<std::string>& seen
         at = layout::roundUp(at, fieldMultiple);
         at += bytes;
     }
-    return layout::classSize(at - layout::kSizePointer, multiple);
+    if (headed) {
+        return layout::classSize(at - layout::kSizePointer, multiple);
+    }
+    return layout::classSizePlain(at, multiple);
 }
 
 int64_t Resolver::classAlignImpl(DeclId id, std::unordered_set<std::string>& seen) const {
@@ -420,7 +432,12 @@ int64_t Resolver::classAlignImpl(DeclId id, std::unordered_set<std::string>& see
             return -1;
         }
     }
-    int64_t multiple = layout::kAlignPointer;
+    // 4.8.5: only a virtual chain carries the pointer alignment of its
+    // vptr word; a concrete chain aligns as its fields do.
+    int64_t multiple = 1;
+    if (!virtualNames(id).empty()) {
+        multiple = layout::kAlignPointer;
+    }
     for (const std::string& field : fields) {
         TypeRef type = fieldType(id, field);
         if (type.isError()) {

@@ -6094,15 +6094,14 @@ void Lowerer::constructClass(const Place& baseIn, TypeRef objType,
         refuse(n.pos, "this construction");
         return;
     }
-    // Word zero is the vptr slot (FEATURES 2.2): the concrete type's vtable
-    // address when the class has virtual slots, null otherwise — the slot
-    // stays reserved either way, so field offsets never shift.
-    TypeRef vptr{ctx_.basic(BasicKind::U64)};
-    ir::Value vptrWord = constantI64(0, vptr, n.pos);
-    if (failed_) {
-        return;
-    }
+    // 4.8.5: the vptr word exists only when the chain carries virtual
+    // slots; a concrete-only class opens at its first field.
     if (!resolver_.virtualNames(*id).empty()) {
+        TypeRef vptr{ctx_.basic(BasicKind::U64)};
+        ir::Value vptrWord = constantI64(0, vptr, n.pos);
+        if (failed_) {
+            return;
+        }
         std::string table = emitClassVTable(*id, n.pos);
         if (failed_ || table.empty()) {
             return;
@@ -6121,13 +6120,13 @@ void Lowerer::constructClass(const Place& baseIn, TypeRef objType,
         if (failed_) {
             return;
         }
-    }
-    Place atVptr = baseIn;
-    atVptr.type = vptr;
-    atVptr.off = 0;
-    storeRange(n.pos, atVptr, {vptrWord}, vptr);
-    if (failed_) {
-        return;
+        Place atVptr = baseIn;
+        atVptr.type = vptr;
+        atVptr.off = 0;
+        storeRange(n.pos, atVptr, {vptrWord}, vptr);
+        if (failed_) {
+            return;
+        }
     }
     Place base = baseIn;
     base.type = classType;

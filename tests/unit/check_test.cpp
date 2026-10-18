@@ -568,6 +568,19 @@ void testSuperCall() {
     check(!noBase.ok && noBase.stage == "check", "super in a baseless class fails");
 }
 
+void testConditionalVptr() {
+    std::printf("conditional vptr\n");
+    Checked sizes = check(
+        "class Plain { var a: int; var b: int; }\n"
+        "class Virt { var a: int; var b: int; virtual func f() -> int { return 1; } }\n"
+        "func main() -> int { return ((sizeof(Virt) - sizeof(Plain)) as int) - 8; }\n");
+    check(sizes.ok, "a virtual class is one word larger: " + sizes.stage);
+    Checked flat = check(
+        "class Plain { var a: int; }\n"
+        "func main() -> int { var p: Plain = Plain { a: 5 }; return p.a - 5; }\n");
+    check(flat.ok, "a concrete-only class constructs: " + flat.stage);
+}
+
 void testOverride() {
     std::printf("the override keyword\n");
     Checked good = check(
@@ -1749,6 +1762,7 @@ int main() {
     testUnions();
     testSelfEmbed();
     testOverride();
+    testConditionalVptr();
     testSuperCall();
     testFnAddr();
     testIncrDecr();

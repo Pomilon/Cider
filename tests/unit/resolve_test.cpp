@@ -263,25 +263,46 @@ void testNominalSize() {
     check(cyc.resolver->structSize(a->id) == -1, "a self-embedding struct has no size");
 }
 
-// A class value opens with its vptr word: one int field sits at offset 8
-// in a 16-byte object, and a derived class lays its chain out after the
-// same single vptr word, most-base first (FEATURES 2.2).
+// Under 4.8.5 the vptr word exists only when the chain has virtual slots:
+// a concrete-only class opens at offset 0, and a virtual class reserves
+// the leading word.
 void testClassSize() {
-    std::printf("class sizes reserve the vptr\n");
+    std::printf("class sizes reserve the vptr only when virtual\n");
     Resolved r = resolve(
         "class Node { var v: int; }\n"
+        "class Empty { }\n"
         "class Base { var x: int; }\n"
-        "class Derived : Base { var y: int; }\n");
+        "class Derived : Base { var y: int; }\n"
+        "class VNode { var v: int; virtual func f() -> int { return 1; } }\n"
+        "class VBase { var x: int; virtual func f() -> int { return 1; } }\n"
+        "class VDerived : VBase { var y: int; }\n");
     check(r.ok, "resolves");
     const cider::resolve::Decl* node =
         r.resolver->lookup(r.resolver->moduleScope(), "Node");
     const cider::resolve::Decl* derived =
         r.resolver->lookup(r.resolver->moduleScope(), "Derived");
-    check(r.resolver->classSize(node->id) == 16, "vptr plus one int is sixteen bytes");
-    check(r.resolver->fieldOffset(node->id, "v") == 8, "the field follows the vptr");
-    check(r.resolver->classSize(derived->id) == 16, "a chain packs after the one vptr");
-    check(r.resolver->fieldOffset(derived->id, "x") == 8, "the base field follows the vptr");
-    check(r.resolver->fieldOffset(derived->id, "y") == 12, "the own field follows the base");
+    const cider::resolve::Decl* vnode =
+        r.resolver->lookup(r.resolver->moduleScope(), "VNode");
+    const cider::resolve::Decl* vderived =
+        r.resolver->lookup(r.resolver->moduleScope(), "VDerived");
+    check(r.resolver->classSize(node->id) == 4, "a concrete class is just its fields");
+    check(r.resolver->fieldOffset(node->id, "v") == 0, "the field opens the object");
+    const cider::resolve::Decl* empty =
+        r.resolver->lookup(r.resolver->moduleScope(), "Empty");
+    check(r.resolver->classSize(empty->id) == 1, "an empty concrete class occupies one byte");
+    check(r.resolver->classAlign(empty->id) == 1, "an empty concrete class aligns to its byte");
+    check(r.resolver->classSize(derived->id) == 8, "a concrete chain has no header");
+    check(r.resolver->fieldOffset(derived->id, "x") == 0, "the base field is first");
+    check(r.resolver->fieldOffset(derived->id, "y") == 4, "the own field follows");
+    check(r.resolver->classSize(vnode->id) == 16, "vptr plus one int is sixteen bytes");
+    check(r.resolver->fieldOffset(vnode->id, "v") == 8, "the field follows the vptr");
+    check(r.resolver->classSize(vderived->id) == 16, "a virtual chain packs after the vptr");
+    check(r.resolver->fieldOffset(vderived->id, "x") == 8, "the base field follows the vptr");
+    check(r.resolver->fieldOffset(vderived->id, "y") == 12, "the own field follows the base");
+    check(r.resolver->classAlign(node->id) == 4, "a concrete class aligns to its fields");
+    check(r.resolver->classAlign(derived->id) == 4, "a concrete chain aligns to its fields");
+    check(r.resolver->classAlign(vnode->id) == 8, "a virtual class aligns to the vptr");
+    check(r.resolver->classAlign(vderived->id) == 8, "a virtual chain keeps the vptr alignment");
 }
 
 void testMethodInit() {
