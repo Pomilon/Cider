@@ -18,7 +18,7 @@ export func malloc(size: i64) -> *void {
 // the allocator sits below I/O in the layering.
 export func oom() {
     var msg: string = "vm error: out of memory\n";
-    var ptr: *u8 = &msg[0];
+    var ptr: *u8 = &msg[0] as *u8;
     var count: int = msg.len as int;
     var fd: int = 2;
     asm {

@@ -16,7 +16,7 @@ export func open(filename: string, flags: int, mode: int) -> int {
     if (filename.len == 0) {
         return 0 - 2;
     }
-    var path: *u8 = &filename[0];
+    var path: *u8 = &filename[0] as *u8;
     var fl: int = flags;
     var md: int = mode;
     var ret: int = 0;
@@ -95,7 +95,7 @@ export func unlink(pathname: string) -> int {
     if (pathname.len == 0) {
         return 0 - 2;
     }
-    var path: *u8 = &pathname[0];
+    var path: *u8 = &pathname[0] as *u8;
     var ret: int = 0;
     asm {
         "mov rax, 87\n"

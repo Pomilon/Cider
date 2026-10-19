@@ -929,6 +929,41 @@ void testStringCompare() {
     check(!addrVar.ok && addrVar.stage == "check", "a string variable needs &s[0]");
 }
 
+// 2.4 / 6.2: a string's element is a char, so &s[0] is the byte pointer a
+// C callee takes; len is an int on strings, slices and arrays.
+void testStringBytes() {
+    std::printf("string byte pointers and int len\n");
+    Checked addr = check(
+        "func take(p: *char) -> int { return *p as int; }\n"
+        "func main() -> int {\n"
+        "    var s: string = \"hi\";\n"
+        "    var p: *char = &s[0];\n"
+        "    return take(p);\n"
+        "}\n");
+    check(addr.ok, "&s[0] is a *char: " + addr.stage);
+    Checked elem = check(
+        "func main() -> int {\n"
+        "    var s: string = \"hi\";\n"
+        "    var c: char = s[0];\n"
+        "    return c as int;\n"
+        "}\n");
+    check(elem.ok, "a string's element is a char: " + elem.stage);
+    Checked len = check(
+        "func main() -> int {\n"
+        "    var s: string = \"hi\";\n"
+        "    var a: [u8; 3] = [1, 2, 3];\n"
+        "    var sl: []u8 = a[0:2];\n"
+        "    var length: int = s.len;\n"
+        "    var bytes: int = a.len;\n"
+        "    var part: int = sl.len;\n"
+        "    return length + bytes + part;\n"
+        "}\n");
+    check(len.ok, "len is an int on string, array and slice: " + len.stage);
+    Checked wide = check(
+        "func main() -> int { var s: string = \"hi\"; var n: u64 = s.len; return 0; }\n");
+    check(!wide.ok && wide.stage == "check", "len is not a u64");
+}
+
 void testInterfaceNil() {
     std::printf("null interfaces check\n");
     Checked cast = check(
@@ -1789,6 +1824,7 @@ int main() {
     testCharCompare();
     testFnPtrCompare();
     testStringCompare();
+    testStringBytes();
     testInterfaceNil();
     testMatch();
     testAlternation();

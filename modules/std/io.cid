@@ -22,7 +22,7 @@ export func print(s: string) {
     if (s.len == 0) {
         return;
     }
-    var ptr: *u8 = &s[0];
+    var ptr: *u8 = &s[0] as *u8;
     var count: int = s.len as int;
     writeAll(ptr, count);
 }

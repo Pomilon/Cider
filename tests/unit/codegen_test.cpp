@@ -468,14 +468,14 @@ void testElementAddr() {
           "a store through &b[j] lands");
     check(runQuiet("func main() -> int {\n"
                    "    var s: string = \"Hi\";\n"
-                   "    var p: *u8 = &s[1];\n"
+                   "    var p: *u8 = &s[1] as *u8;\n"
                    "    return *p as int;\n"
                    "}\n") == 105,
           "&s[1] reads the string byte");
     bool signaled = false;
     runCode("func main() -> int {\n"
             "    var s: string = \"Hi\";\n"
-            "    var p: *u8 = &s[9];\n"
+            "    var p: *u8 = &s[9] as *u8;\n"
             "    return *p as int;\n"
             "}\n",
             signaled);

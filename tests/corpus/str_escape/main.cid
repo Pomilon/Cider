@@ -3,14 +3,14 @@ var path: string = "a\\b";
 var quote: string = "say \"hi\"";
 
 func main() -> int {
-  if (greeting[2] != 39) { return 1; }
-  if (path[1] != 92) { return 2; }
-  if (quote[4] != 34) { return 3; }
+  if (greeting[2] != 39 as char) { return 1; }
+  if (path[1] != 92 as char) { return 2; }
+  if (quote[4] != 34 as char) { return 3; }
   var local: string = "a\"b\\c";
-  if (local[1] != 34) { return 4; }
-  if (local[3] != 92) { return 5; }
-  if (local[4] != 99) { return 6; }
+  if (local[1] != 34 as char) { return 4; }
+  if (local[3] != 92 as char) { return 5; }
+  if (local[4] != 99 as char) { return 6; }
   var tick: string = "x'y";
-  if (tick[1] != 39) { return 7; }
+  if (tick[1] != 39 as char) { return 7; }
   return 0;
 }

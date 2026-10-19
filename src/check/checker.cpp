@@ -2369,7 +2369,10 @@ void Checker::visitIndex(Index& n) {
         return;
     }
     if (kind == Kind::String) {
-        record(&n, TypeRef{ctx_.basic(BasicKind::U8)});
+        // 2.4: a string's element is a char, so `&s[0]` is the *char a C
+        // callee takes. It is still one byte; only the interpretation differs
+        // from a byte buffer's u8.
+        record(&n, TypeRef{ctx_.basic(BasicKind::Char)});
         return;
     }
     if (kind == Kind::Pointer) {
@@ -4487,8 +4490,9 @@ TypeRef Checker::checkField(Field& expr) {
     if (kind == Kind::Slice || kind == Kind::String || kind == Kind::Array) {
         // The only member a sized value exposes is its element count; the
         // checker names no other field so the lowerer never guesses one.
+        // 2.4 / 6.2: the field is an int, the Standard's `len` spelling.
         if (expr.name == "len") {
-            return TypeRef{ctx_.basic(BasicKind::I64)};
+            return TypeRef{ctx_.basic(BasicKind::I32)};
         }
         fail(expr.pos, "no such field");
         return errorRef();

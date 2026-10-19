@@ -4135,7 +4135,7 @@ std::vector<ir::Value> Lowerer::lowerField(const Field& n) {
             refuse(n.object->pos, "this field access");
             return {undefined()};
         }
-        TypeRef count{ctx_.basic(BasicKind::I64)};
+        TypeRef count{ctx_.basic(BasicKind::I32)};
         ir::Value answer = constantI64(*extent, count, n.pos);
         if (failed_) {
             return {undefined()};
@@ -5162,6 +5162,11 @@ bool Lowerer::sliceElementPlace(const Index& n, const Place& base,
     Kind baseKind = baseType.type->kind();
     element = TypeRef{ctx_.basic(BasicKind::U8)};
     int64_t elemBytes = kOneMember;
+    if (baseKind == Kind::String) {
+        // 2.4: a string's element is a char, one byte like a u8 but the
+        // interpretation the checker names.
+        element = TypeRef{ctx_.basic(BasicKind::Char)};
+    }
     if (baseKind == Kind::Slice) {
         element = TypeRef{baseType.type->element()};
         elemBytes = resolver_.nominalSize(element.type);

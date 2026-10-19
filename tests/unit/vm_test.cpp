@@ -441,7 +441,7 @@ void testAsm() {
                        " \"mov rsi, {ptr}\" \"mov rdx, {count:q}\""
                        " \"syscall\" } }\n"
                        "func main() -> int { var s: string = \"hi\\n\";"
-                       " var p: *u8 = &s[0]; writeAll(p, 3);"
+                       " var p: *u8 = &s[0] as *u8; writeAll(p, 3);"
                        " asm { \"mov rax, 60\" \"mov rdi, 7\" \"syscall\" }"
                        " return 0; }\n");
     check(wr.ok, "a writing block lowers: " + wr.stage);
@@ -512,13 +512,13 @@ void testFileSyscalls() {
     std::remove("/tmp/cider_vm_fs_test.txt");
     Lowered fs = lower("func main() -> int {"
                        " var path: string = \"/tmp/cider_vm_fs_test.txt\";"
-                       " var p: *u8 = &path[0];"
+                       " var p: *u8 = &path[0] as *u8;"
                        " var fd: int = 0;"
                        " asm { \"mov rax, 2\" \"mov rdi, {p}\" \"mov rsi, 577\""
                        " \"mov rdx, 420\" \"syscall\" \"mov {fd}, eax\" }"
                        " if (fd < 0) { return 1; }"
                        " var msg: string = \"ABCD\";"
-                       " var mp: *u8 = &msg[0];"
+                       " var mp: *u8 = &msg[0] as *u8;"
                        " var nw: int = 0;"
                        " asm { \"mov rax, 1\" \"mov rdi, {fd}\""
                        " \"mov rsi, {mp}\" \"mov rdx, 4\""
