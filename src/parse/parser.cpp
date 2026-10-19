@@ -464,8 +464,13 @@ std::unique_ptr<TypeExpr> Parser::parseReturnType() {
 
 FieldDecl Parser::parseField() {
     Position start = peek().pos;
+    // 4.8.4: `public` is the default; both spellings are accepted so a
+    // declaration can state its intent.
+    bool isPrivate = match(TokenKind::KwPrivate);
+    (void)match(TokenKind::KwPublic);
     (void)match(TokenKind::KwVar);
     FieldDecl field(start, "", nullptr, nullptr, false);
+    field.isPrivate = isPrivate;
     if (!check(TokenKind::Ident)) {
         failHere("a field needs a name");
         return field;
@@ -568,7 +573,15 @@ std::unique_ptr<Decl> Parser::parseStructDecl(bool) {
     std::vector<FieldDecl> fields;
     std::vector<MethodDecl> methods;
     while (!check(TokenKind::RBrace) && !atEnd()) {
-        if (check(TokenKind::KwVar) ||
+        if (check(TokenKind::KwPrivate) || check(TokenKind::KwPublic)) {
+            TokenKind after = peekAt(1).kind;
+            if (after == TokenKind::KwFunc || after == TokenKind::KwVirtual ||
+                after == TokenKind::KwOverride) {
+                failHere("visibility on a method is not implemented yet");
+                break;
+            }
+            fields.push_back(parseField());
+        } else if (check(TokenKind::KwVar) ||
             (check(TokenKind::Ident) && peekAt(1).kind == TokenKind::Colon)) {
             fields.push_back(parseField());
         } else if (check(TokenKind::KwVirtual) || check(TokenKind::KwFunc) ||
@@ -637,6 +650,16 @@ std::unique_ptr<Decl> Parser::parseClassDecl(bool) {
     std::unique_ptr<FuncDecl> init;
     std::unique_ptr<FuncDecl> deinit;
     while (!check(TokenKind::RBrace) && !atEnd()) {
+        if (check(TokenKind::KwPrivate) || check(TokenKind::KwPublic)) {
+            TokenKind after = peekAt(1).kind;
+            if (after == TokenKind::KwFunc || after == TokenKind::KwVirtual ||
+                after == TokenKind::KwOverride) {
+                failHere("visibility on a method is not implemented yet");
+                break;
+            }
+            fields.push_back(parseField());
+            continue;
+        }
         if (check(TokenKind::KwVar) ||
             (check(TokenKind::Ident) && peekAt(1).kind == TokenKind::Colon)) {
             fields.push_back(parseField());

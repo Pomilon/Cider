@@ -101,6 +101,10 @@ public:
     // A field or member type by owning declaration and name. Error when no
     // such field exists.
     TypeRef fieldType(DeclId id, const std::string& name) const;
+    // 4.8.4: a field's visibility and the module that declares it. Both
+    // walk bases the way fieldType does; the declaring base answers.
+    bool fieldIsPrivate(DeclId id, const std::string& name) const;
+    std::string fieldModule(DeclId id, const std::string& name) const;
     // A method signature by owning declaration and name. Null when absent.
     const Signature* methodSig(DeclId id, const std::string& name) const;
     // Every method name of a struct, class or interface, in declaration
@@ -277,6 +281,9 @@ private:
     // A field declared by a base: the chain walk names it, but fieldType
     // only holds a class's own fields, so the declaring class answers.
     TypeRef fieldTypeAcrossBases(DeclId id, const std::string& name) const;
+    // The class in the chain that declares the field; none when no base
+    // does. Visibility and the home module both hang off this owner.
+    std::optional<DeclId> fieldOwner(DeclId id, const std::string& name) const;
     // A union's payload is its widest member, every member at offset 0, the
     // tag after the payload padded to the payload's alignment (TYPES.md
     // 3.4a). Same visited-set rule as structs: recursive unions are -1.
@@ -312,6 +319,8 @@ private:
     std::unordered_map<std::string, int64_t> enumValues_;
     std::unordered_map<std::string, std::vector<std::pair<std::string, int64_t>>> enumOrder_;
     std::unordered_map<std::string, TypeRef> fieldTypes_;
+    // 4.8.4: only private fields get an entry; public is the default.
+    std::unordered_set<std::string> privateFields_;
     std::unordered_map<std::string, Signature> methodSigs_;
     std::unordered_map<std::string, std::vector<std::string>> methodLists_;
     // Declared methods that carry `virtual`; the composed slot list is

@@ -227,6 +227,51 @@ TypeRef Resolver::fieldTypeAcrossBases(DeclId id, const std::string& name) const
     return errorRef();
 }
 
+std::optional<DeclId> Resolver::fieldOwner(DeclId id,
+                                           const std::string& name) const {
+    if (fieldTypes_.find(declKey(id) + "." + name) != fieldTypes_.end()) {
+        return id;
+    }
+    std::unordered_set<std::string> seen;
+    seen.insert(declKey(id));
+    std::vector<DeclId> frontier = classBases(id);
+    while (!frontier.empty()) {
+        DeclId next = frontier.back();
+        frontier.pop_back();
+        if (!seen.insert(declKey(next)).second) {
+            continue;
+        }
+        if (fieldTypes_.find(declKey(next) + "." + name) != fieldTypes_.end()) {
+            return next;
+        }
+        for (DeclId parent : classBases(next)) {
+            frontier.push_back(parent);
+        }
+    }
+    return std::nullopt;
+}
+
+bool Resolver::fieldIsPrivate(DeclId id, const std::string& name) const {
+    std::optional<DeclId> owner = fieldOwner(id, name);
+    if (!owner.has_value()) {
+        return false;
+    }
+    return privateFields_.find(declKey(*owner) + "." + name) !=
+           privateFields_.end();
+}
+
+std::string Resolver::fieldModule(DeclId id, const std::string& name) const {
+    std::optional<DeclId> owner = fieldOwner(id, name);
+    if (!owner.has_value()) {
+        return std::string();
+    }
+    const Decl* decl = declById(*owner);
+    if (decl == nullptr || decl->scope == nullptr) {
+        return entryModule();
+    }
+    return decl->scope->module;
+}
+
 bool Resolver::chainFieldsImpl(DeclId id, std::unordered_set<std::string>& seen,
                                std::vector<std::string>& out) const {
     if (!seen.insert(declKey(id)).second) {
@@ -1092,6 +1137,9 @@ void Resolver::resolveDeclTypes(const std::string& module, Program& program,
             if (!t.isError()) {
                 fieldTypes_[fkey + "." + field.name] = t;
                 fieldLists_[fkey].push_back(field.name);
+                if (field.isPrivate) {
+                    privateFields_.insert(fkey + "." + field.name);
+                }
             }
             if (field.bitWidth != nullptr) {
                 std::unordered_set<std::string> active;
@@ -1162,6 +1210,9 @@ void Resolver::resolveDeclTypes(const std::string& module, Program& program,
                     std::string fkey = declKey(self->id);
                     fieldTypes_[fkey + "." + field.name] = t;
                     fieldLists_[fkey].push_back(field.name);
+                    if (field.isPrivate) {
+                        privateFields_.insert(fkey + "." + field.name);
+                    }
                 }
             }
             for (const auto& iface : sd->interfaces) {
@@ -1215,6 +1266,9 @@ void Resolver::resolveDeclTypes(const std::string& module, Program& program,
                     std::string fkey = declKey(cself->id);
                     fieldTypes_[fkey + "." + field.name] = t;
                     fieldLists_[fkey].push_back(field.name);
+                    if (field.isPrivate) {
+                        privateFields_.insert(fkey + "." + field.name);
+                    }
                 }
             }
             for (const MethodDecl& method : cd->methods) {
@@ -1271,6 +1325,9 @@ void Resolver::resolveDeclTypes(const std::string& module, Program& program,
                     std::string fkey = declKey(uself->id);
                     fieldTypes_[fkey + "." + member.name] = t;
                     fieldLists_[fkey].push_back(member.name);
+                    if (member.isPrivate) {
+                        privateFields_.insert(fkey + "." + member.name);
+                    }
                 }
             }
             continue;
@@ -1775,6 +1832,9 @@ std::optional<DeclId> Resolver::instantiate(DeclId tmpl, const std::vector<TypeR
             if (!sub.isError()) {
                 fieldTypes_[into + "." + field] = sub;
                 fieldLists_[into].push_back(field);
+                if (fieldIsPrivate(tmpl, field)) {
+                    privateFields_.insert(into + "." + field);
+                }
             }
         }
         for (const std::string& method : methodNames(tmpl)) {

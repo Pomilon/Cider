@@ -302,6 +302,9 @@ private:
     void checkShiftDiv(const Binary& expr, TypeRef lhs, TypeRef rhs);
     TypeRef checkCall(Call& expr);
     TypeRef checkField(Field& expr);
+    // 4.8.4: a private field is visible strictly within the module that
+    // declares its class or struct. Fails and answers false elsewhere.
+    bool fieldVisible(DeclId id, const std::string& name, Position pos);
     TypeRef checkNewStruct(NewStruct& expr);
     TypeRef checkNewUnion(NewStruct& expr, TypeRef target, DeclId id);
     TypeRef checkUnionHas(Call& expr, const Field& callee, TypeRef object);

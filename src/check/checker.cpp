@@ -4349,6 +4349,21 @@ void Checker::walkSpecForEmit(DeclId spec) {
     walkSpec_ = savedWalk;
 }
 
+bool Checker::fieldVisible(DeclId id, const std::string& name, Position pos) {
+    // 4.8.4: public is the default; the resolver only marks private
+    // fields. The home module is the declaring class's, so an inherited
+    // field answers its base's module rather than the derived one's.
+    if (!resolver_.fieldIsPrivate(id, name)) {
+        return true;
+    }
+    std::string home = resolver_.fieldModule(id, name);
+    if (home == module_) {
+        return true;
+    }
+    fail(pos, "'" + name + "' is private to module '" + home + "'");
+    return false;
+}
+
 TypeRef Checker::checkField(Field& expr) {
     // `da.aval`: the qualifier names a module, so the member resolves in
     // the defining scope, never in the current one. Functions answer their
@@ -4545,6 +4560,9 @@ TypeRef Checker::checkField(Field& expr) {
         }
         TypeRef member = resolver_.fieldType(*id, expr.name);
         if (!member.isError()) {
+            if (!fieldVisible(*id, expr.name, expr.pos)) {
+                return errorRef();
+            }
             return member;
         }
         const Signature* sig = resolver_.methodSig(*id, expr.name);
@@ -4571,6 +4589,9 @@ TypeRef Checker::checkField(Field& expr) {
         }
         TypeRef member = resolver_.fieldType(*id, expr.name);
         if (!member.isError()) {
+            if (!fieldVisible(*id, expr.name, expr.pos)) {
+                return errorRef();
+            }
             return member;
         }
         // Not a field: a method value. Non-generic methods were walked with
@@ -4639,6 +4660,9 @@ TypeRef Checker::checkNewStruct(NewStruct& expr) {
             fail(init.value->pos, "no such field");
             return errorRef();
         }
+        if (!fieldVisible(*id, init.name, init.value->pos)) {
+            return errorRef();
+        }
         TypeRef value = checkExpr(init.value.get(), field);
         if (!checkCompatible(init.value->pos, init.value.get(), value, field)) {
             return errorRef();
@@ -4676,6 +4700,9 @@ TypeRef Checker::checkNewUnion(NewStruct& expr, TypeRef target, DeclId id) {
     TypeRef member = resolver_.fieldType(id, init.name);
     if (member.isError()) {
         fail(init.value->pos, "no such member");
+        return errorRef();
+    }
+    if (!fieldVisible(id, init.name, init.value->pos)) {
         return errorRef();
     }
     TypeRef value = checkExpr(init.value.get(), member);

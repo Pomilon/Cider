@@ -575,10 +575,13 @@ struct FieldDecl : Node {
     std::unique_ptr<TypeExpr> type;
     std::unique_ptr<Expr> bitWidth;
     bool isVolatile;
+    // 4.8.4: public is the default; `private` restricts every read and
+    // store of the field to the module that declares its class or struct.
+    bool isPrivate = false;
     FieldDecl(Position p, std::string n, std::unique_ptr<TypeExpr> t,
-              std::unique_ptr<Expr> w, bool vol)
+              std::unique_ptr<Expr> w, bool vol, bool priv = false)
         : Node(std::move(p)), name(std::move(n)), type(std::move(t)),
-          bitWidth(std::move(w)), isVolatile(vol) {}
+          bitWidth(std::move(w)), isVolatile(vol), isPrivate(priv) {}
     void accept(ASTVisitor& v) override;
 };
 

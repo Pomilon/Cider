@@ -37,7 +37,8 @@ struct Checked {
     std::unique_ptr<cider::check::Checker> checker;
 };
 
-Checked check(const std::string& text) {
+Checked check(const std::string& text,
+              cider::resolve::Resolver::ModuleLoader load = nullptr) {
     Checked out;
     out.types = std::make_unique<cider::TypeContext>();
     cider::Lexer lexer("test.cid", text);
@@ -52,7 +53,8 @@ Checked check(const std::string& text) {
         out.stage = "parse";
         return out;
     }
-    out.resolver = std::make_unique<cider::resolve::Resolver>(*out.types);
+    out.resolver = std::make_unique<cider::resolve::Resolver>(*out.types,
+                                                             std::move(load));
     if (!out.resolver->resolveProgram(*out.program, "main")) {
         out.stage = "resolve";
         return out;
@@ -1024,6 +1026,71 @@ void testTypedForIn() {
 
 // 7.10: a fini block checks like a function body; it has no answer, and a
 // return inside would leave it half-run.
+// 4.8.4: fields are public by default; `private` restricts every read and
+// store to the module that declares the class or struct.
+void testPrivateFields() {
+    std::printf("private and public fields\n");
+    Checked same = check(
+        "struct Box { private secret: int; var shown: int; }\n"
+        "func main() -> int {\n"
+        "    var b: Box = Box { secret: 1, shown: 2 };\n"
+        "    b.secret = 3;\n"
+        "    return b.secret + b.shown;\n"
+        "}\n");
+    check(same.ok, "a private field is visible in its module: " + same.stage);
+
+    cider::resolve::Resolver::ModuleLoader load = [](const std::string& name)
+        -> std::unique_ptr<cider::Program> {
+        if (name != "lib") {
+            return nullptr;
+        }
+        cider::Lexer lexer(
+            "lib.cid",
+            "export struct Box { private secret: int; var shown: int; }\n"
+            "export func make(v: int) -> Box {\n"
+            "    return Box { secret: v, shown: v };\n"
+            "}\n");
+        cider::Parser parser("lib.cid", lexer.lex());
+        return parser.parse();
+    };
+    Checked hidden = check(
+        "import lib;\n"
+        "func main() -> int {\n"
+        "    var b: lib.Box = lib.make(1);\n"
+        "    return b.secret;\n"
+        "}\n",
+        load);
+    check(!hidden.ok && hidden.stage == "check",
+          "a cross-module private read refuses");
+    Checked store = check(
+        "import lib;\n"
+        "func main() -> int {\n"
+        "    var b: lib.Box = lib.make(1);\n"
+        "    b.secret = 4;\n"
+        "    return 0;\n"
+        "}\n",
+        load);
+    check(!store.ok && store.stage == "check",
+          "a cross-module private store refuses");
+    Checked open = check(
+        "import lib;\n"
+        "func main() -> int {\n"
+        "    var b: lib.Box = lib.make(1);\n"
+        "    return b.shown;\n"
+        "}\n",
+        load);
+    check(open.ok, "a cross-module public read checks: " + open.stage);
+    Checked literal = check(
+        "import lib;\n"
+        "func main() -> int {\n"
+        "    var b: lib.Box = lib.Box { secret: 1, shown: 2 };\n"
+        "    return 0;\n"
+        "}\n",
+        load);
+    check(!literal.ok && literal.stage == "check",
+          "a cross-module literal naming a private field refuses");
+}
+
 // 7.6: `_` is the default arm. 7.2: increment is a statement, never a
 // value, so the only legal positions are a whole expression statement and
 // a C-style for step.
@@ -1938,6 +2005,7 @@ int main() {
     testStringBytes();
     testAlignof();
     testTypedForIn();
+    testPrivateFields();
     testWildcardAndIncrement();
     testFini();
     testInterfaceNil();
