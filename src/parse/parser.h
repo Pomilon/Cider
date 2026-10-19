@@ -122,6 +122,9 @@ private:
     // by the caller.
     std::unique_ptr<TypeExpr> parseType();
     std::unique_ptr<TypeExpr> parsePrimaryType();
+    // 8.4: the `func(...) -> T` body, shared by the plain spelling and the
+    // `msabi`/`sysv`-marked one.
+    std::unique_ptr<TypeExpr> parseFuncSig();
 
     // Expressions, Pratt-parsed. Levels run tight (150) to loose (10); the
     // table in FEATURES.md §8.1a is stated loosest-first, this engine runs

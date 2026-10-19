@@ -274,6 +274,31 @@ std::unique_ptr<Program> Parser::parse() {
 
 std::unique_ptr<Decl> Parser::parseDecl() {
     TokenKind kind = peek().kind;
+    // 8.4: `msabi func`, `sysv func`, `msabi extern func` — the convention is
+    // stated before the declaration it applies to.
+    if (kind == TokenKind::Ident &&
+        (peek().text == "msabi" || peek().text == "sysv")) {
+        std::string abi = peek().text;
+        advance();
+        if (check(TokenKind::KwFunc)) {
+            std::unique_ptr<Decl> decl = parseFuncDecl(false);
+            if (decl == nullptr) {
+                return nullptr;
+            }
+            static_cast<FuncDecl*>(decl.get())->abi = std::move(abi);
+            return decl;
+        }
+        if (check(TokenKind::KwExtern)) {
+            std::unique_ptr<Decl> decl = parseExternFunc();
+            if (decl == nullptr) {
+                return nullptr;
+            }
+            static_cast<ExternFunc*>(decl.get())->abi = std::move(abi);
+            return decl;
+        }
+        failHere("a calling convention before a declaration applies to 'func' or 'extern'");
+        return nullptr;
+    }
     if (kind == TokenKind::At) {
         // 4.5: `@packed struct` — the only declaration-level use of `@`.
         advance();
@@ -1626,6 +1651,19 @@ std::unique_ptr<TypeExpr> Parser::parseType() {
 std::unique_ptr<TypeExpr> Parser::parsePrimaryType() {
     Position start = peek().pos;
     TokenKind kind = peek().kind;
+    // 8.4: `*msabi func(...) -> T` — the mark rides the function pointer type
+    // so a call through it picks the same row the callee was built for.
+    if (kind == TokenKind::Ident && peekAt(1).kind == TokenKind::KwFunc &&
+        (peek().text == "msabi" || peek().text == "sysv")) {
+        std::string abi = peek().text;
+        advance();
+        std::unique_ptr<TypeExpr> sig = parseFuncSig();
+        if (sig == nullptr) {
+            return nullptr;
+        }
+        static_cast<FuncSigType*>(sig.get())->abi = abi;
+        return sig;
+    }
     if (kind == TokenKind::KwInt) {
         advance();
         return std::make_unique<BasicType>(start, BasicKind::I32);
@@ -1767,34 +1805,45 @@ std::unique_ptr<TypeExpr> Parser::parsePrimaryType() {
         return std::make_unique<ArrayType>(start, std::move(element), std::move(length));
     }
     if (kind == TokenKind::KwFunc) {
-        advance();
-        if (!match(TokenKind::LParen)) {
-            failHere("expected '('");
-            return nullptr;
-        }
-        std::vector<std::unique_ptr<TypeExpr>> params;
-        if (!check(TokenKind::RParen)) {
-            for (;;) {
-                std::unique_ptr<TypeExpr> param = parseType();
-                if (param == nullptr) {
-                    return nullptr;
-                }
-                params.push_back(std::move(param));
-                if (match(TokenKind::Comma)) {
-                    continue;
-                }
-                break;
-            }
-        }
-        if (!match(TokenKind::RParen)) {
-            failHere("expected ')'");
-            return nullptr;
-        }
-        std::unique_ptr<TypeExpr> returns = parseReturnType();
-        return std::make_unique<FuncSigType>(start, std::move(params), std::move(returns));
+        return parseFuncSig();
     }
     failHere("expected a type");
     return nullptr;
+}
+
+std::unique_ptr<TypeExpr> Parser::parseFuncSig() {
+    Position start = advance().pos;
+    if (!match(TokenKind::LParen)) {
+        failHere("expected '('");
+        return nullptr;
+    }
+    std::vector<std::unique_ptr<TypeExpr>> params;
+    if (!check(TokenKind::RParen)) {
+        for (;;) {
+            // The Standard's fn-type spellings name their parameters
+            // (`*func(code: int) -> bool`); a name carries no meaning in a
+            // type, so it parses and is dropped.
+            if (check(TokenKind::Ident) && peekAt(1).kind == TokenKind::Colon) {
+                advance();
+                advance();
+            }
+            std::unique_ptr<TypeExpr> param = parseType();
+            if (param == nullptr) {
+                return nullptr;
+            }
+            params.push_back(std::move(param));
+            if (match(TokenKind::Comma)) {
+                continue;
+            }
+            break;
+        }
+    }
+    if (!match(TokenKind::RParen)) {
+        failHere("expected ')'");
+        return nullptr;
+    }
+    std::unique_ptr<TypeExpr> returns = parseReturnType();
+    return std::make_unique<FuncSigType>(start, std::move(params), std::move(returns));
 }
 // --- Expressions -------------------------------------------------------------
 

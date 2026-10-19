@@ -176,7 +176,7 @@ public:
     // checker rebuilds function signatures with it when walking bodies — one
     // function, called from two phases, never two rules.
     Signature buildSignature(const std::vector<Param>& params, const TypeExpr* returns,
-                             const Scope* scope, bool& failed);
+                             const Scope* scope, bool& failed, Abi abi = Abi::SysV);
     // Binds one type parameter into a scope, for the checker's generic body
     // walks. The resolver owns every Decl; the checker borrows them.
     const Decl* bindTypeParam(const Scope* scope, const std::string& name,
@@ -228,6 +228,9 @@ public:
 
 private:
     void fail(Position pos, const std::string& message);
+    // 8.4: maps an `msabi`/`sysv` spelling to its Abi. An unknown spelling is
+    // an error, never a silent default.
+    Abi abiOf(const std::string& spelling, bool& failed, Position pos);
     const Scope* makeScope(const Scope* parent, const std::string& module);
     Decl* bind(const Scope* scope, DeclKind kind, const std::string& name, Position pos);
     bool resolveModule(const std::string& name);
@@ -240,7 +243,8 @@ private:
     // rules.
     void buildMethodSig(const MethodDecl& method, const Scope* scope, bool& failed);
     Signature buildFuncSig(const std::vector<std::unique_ptr<TypeExpr>>& params,
-                           const TypeExpr* returns, const Scope* scope, bool& failed);
+                           const TypeExpr* returns, const Scope* scope, bool& failed,
+                           Abi abi = Abi::SysV);
     void bindPrelude(const Scope* scope, Position pos);
     // Size/alignment with a visited set: a struct naming itself (directly or
     // through friends) is -1, not a stack overflow. The checker rejects

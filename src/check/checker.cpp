@@ -2261,10 +2261,19 @@ void Checker::visitCast(Cast& n) {
             record(&n, target);
             return;
         }
+        // One function pointer casts to another by its single code word: the
+        // row check below owns that pair, and 8.4 blesses an explicit cast
+        // across conventions. Adopting the pair (a closure target) still
+        // needs proven provenance, and so does any cast out of a void
+        // carrier or byte view.
+        const bool pointerToPointer =
+            from.type->kind() == Kind::FunctionPtr &&
+            target.type->kind() == Kind::FunctionPtr;
         // A fn spelling adopts here too: only a proven closure address
         // answers as a pair, never a raw code pointer.
-        if (isVoidCarrier(from) || isByteView(from) ||
-            from.type->kind() == Kind::FunctionPtr) {
+        if (!pointerToPointer &&
+            (isVoidCarrier(from) || isByteView(from) ||
+             from.type->kind() == Kind::FunctionPtr)) {
             Prov proven = provOf(n.expr.get());
             if (proven != Prov::Closure && proven != Prov::Neutral) {
                 fail(n.pos, "this *void is not proven to hold a closure");

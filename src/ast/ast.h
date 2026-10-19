@@ -119,6 +119,8 @@ struct NamedType : TypeExpr {
 struct FuncSigType : TypeExpr {
     std::vector<std::unique_ptr<TypeExpr>> params;
     std::unique_ptr<TypeExpr> returns;
+    // 8.4: "msabi"/"sysv"; empty means the platform default (SysV).
+    std::string abi;
     FuncSigType(Position p, std::vector<std::unique_ptr<TypeExpr>> ps,
                 std::unique_ptr<TypeExpr> r)
         : TypeExpr(std::move(p)), params(std::move(ps)), returns(std::move(r)) {}
@@ -600,6 +602,8 @@ struct FuncDecl : Decl {
     std::vector<Param> params;
     std::unique_ptr<TypeExpr> returns;
     std::unique_ptr<Block> body;
+    // 8.4: "msabi"/"sysv"; empty means the platform default (SysV).
+    std::string abi;
     FuncDecl(Position p, std::string n, std::vector<std::string> tps,
              std::vector<Param> ps, std::unique_ptr<TypeExpr> r, std::unique_ptr<Block> b)
         : Decl(std::move(p)), name(std::move(n)), typeParams(std::move(tps)),

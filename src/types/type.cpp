@@ -103,7 +103,13 @@ TypeRef errorRef() {
 namespace {
 
 std::string sigText(const Signature& sig, bool isPointer) {
-    std::string out = isPointer ? "*func(" : "func(";
+    std::string out = isPointer ? "*" : "";
+    // 8.4: the convention is part of the type's name, so two signatures that
+    // differ only in ABI never print as the same spelling.
+    if (sig.abi() == Abi::MsAbi) {
+        out += "msabi ";
+    }
+    out += "func(";
     bool first = true;
     for (const Parameter& param : sig.parameters()) {
         if (!first) {

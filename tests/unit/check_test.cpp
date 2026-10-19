@@ -1410,6 +1410,25 @@ void testAddrCasts() {
     check(rt.ok, "a symbol address round-trips to a call: " + rt.stage);
 }
 
+// 8.4: conventions are strictly incompatible types; an explicit cast is the
+// one bridge the Standard blesses, and it must check.
+void testAbiCasts() {
+    std::printf("abi compatibility and explicit casts\n");
+    Checked assign = check(
+        "msabi func f(x: int) -> int { return x; }\n"
+        "func main() -> int {\n"
+        "  var p: *sysv func(int) -> int = &f;\n"
+        "  return 0;\n}\n");
+    check(!assign.ok && assign.stage == "check",
+          "assigning msabi to a sysv pointer fails");
+    Checked cast = check(
+        "msabi func f(x: int) -> int { return x; }\n"
+        "func main() -> int {\n"
+        "  var p: *sysv func(int) -> int = &f as *sysv func(int) -> int;\n"
+        "  return p(3);\n}\n");
+    check(cast.ok, "an explicit cast crosses conventions: " + cast.stage);
+}
+
 void testFloatSuffix() {
     std::printf("float suffix\n");
     Checked f = check("func main() -> int { var x: float = 3.14f; return 0; }");
@@ -1781,6 +1800,7 @@ int main() {
     testCharArith();
     testBitcast();
     testAddrCasts();
+    testAbiCasts();
     testBareLiteral();
     testFloatSuffix();
     testUninit();

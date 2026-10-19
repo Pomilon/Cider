@@ -2012,7 +2012,7 @@ void Lowerer::beginFuncFrame(const std::string& link, const Signature& sig,
             withSret.push_back(p);
         }
         fn.signature = Signature(std::move(withSret), fn.signature.returnType(),
-                                 Abi::SysV);
+                                 fn.signature.abi());
     }
     function_ = &fn;
     module_->functions.push_back(std::move(fn));
@@ -9334,6 +9334,7 @@ std::vector<ir::Value> Lowerer::lowerCallWords(Call& n) {
     instr.loc = n.pos;
     instr.callee = callee;
     instr.call.indirect = indirect;
+    instr.call.msabi = sig->abi() == Abi::MsAbi;
     if (indirectCallee.has_value()) {
         instr.calleeValue = *indirectCallee;
     }

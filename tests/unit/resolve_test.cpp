@@ -393,6 +393,44 @@ void testBitfields() {
     check(r.resolver->fieldOffset(split->id, "y") == 4, "the overflow field opens a second unit");
 }
 
+// 8.4: the msabi/sysv spellings ride the signature and the function
+// pointer type, so calls, externs and fn-ptr values agree on a row.
+void testAbiSpellings() {
+    std::printf("abi spellings ride signatures\n");
+    Resolved r = resolve(
+        "msabi func ms(x: int) -> int { return x; }\n"
+        "sysv func sv(x: int) -> int { return x; }\n"
+        "msabi extern func ef(x: int) -> int;\n"
+        "var g: *msabi func(x: int) -> int = nilPtr;\n");
+    check(r.ok, "resolves");
+    if (!r.ok) {
+        return;
+    }
+    const cider::resolve::Decl* ms =
+        r.resolver->lookup(r.resolver->moduleScope(), "ms");
+    const cider::resolve::Decl* sv =
+        r.resolver->lookup(r.resolver->moduleScope(), "sv");
+    const cider::resolve::Decl* ef =
+        r.resolver->lookup(r.resolver->moduleScope(), "ef");
+    const cider::resolve::Decl* g =
+        r.resolver->lookup(r.resolver->moduleScope(), "g");
+    check(ms != nullptr && ms->sig.abi() == cider::Abi::MsAbi,
+          "a msabi function carries the ABI");
+    check(sv != nullptr && sv->sig.abi() == cider::Abi::SysV,
+          "a sysv function stays on SysV");
+    check(ef != nullptr && ef->sig.abi() == cider::Abi::MsAbi,
+          "a msabi extern carries the ABI");
+    check(g != nullptr && !g->type.isError() &&
+              g->type.type->kind() == cider::Kind::FunctionPtr &&
+              g->type.type->signature() != nullptr &&
+              g->type.type->signature()->abi() == cider::Abi::MsAbi,
+          "a msabi function pointer type carries the ABI");
+    const std::string spelled =
+        g != nullptr && !g->type.isError() ? cider::typeName(g->type) : "";
+    check(spelled.find("msabi") != std::string::npos,
+          "the ABI shows in the type's name");
+}
+
 void testMethodInit() {
     std::printf("init and deinit signatures are recorded\n");
     Resolved r = resolve(
@@ -427,6 +465,7 @@ int main() {
     testClassSize();
     testPackedStruct();
     testBitfields();
+    testAbiSpellings();
     testMethodInit();
     std::printf("\n%d checks, %s\n", checks, failures == 0 ? "all passed" : "FAILURES");
     return failures == 0 ? 0 : 1;

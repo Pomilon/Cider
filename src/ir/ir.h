@@ -104,6 +104,10 @@ const char* opName(Op op);
 // branch to a block the programmer named (IR.md §5).
 struct CallInfo {
     bool indirect = false;
+    // 8.4: the callee's convention, so a call into or out of msabi code picks
+    // the matching argument row and shadow space. Set by the lowerer from the
+    // resolved signature; the VM reads words, not registers, and ignores it.
+    bool msabi = false;
     std::optional<uint32_t> landingPad;
 };
 

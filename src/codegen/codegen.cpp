@@ -47,6 +47,29 @@ const char* argReg(uint64_t i) {
     return "r9";
 }
 
+// 8.4: the Microsoft x64 row. Integer words answer rcx, rdx, r8 and r9, and
+// the caller reserves 32 bytes of shadow space above the return address, so
+// the first word past the row sits at [rbp + 16 + 32 + (word - 4) * 8] in a
+// callee that has pushed rbp.
+const char* argRegMs(uint64_t i) {
+    if (i == 0) {
+        return "rcx";
+    }
+    if (i == 1) {
+        return "rdx";
+    }
+    if (i == 2) {
+        return "r8";
+    }
+    return "r9";
+}
+
+constexpr uint64_t kSysVIntRegs = 6;
+constexpr uint64_t kMsabiIntRegs = 4;
+constexpr uint64_t kSysVSseRegs = 8;
+constexpr uint64_t kMsabiSseRegs = 4;
+constexpr uint64_t kShadowBytes = 32;
+
 bool calleeArg(std::string&, std::string&, const ir::Instr&) = delete;  // placeholder
 
 const char* setFor(ir::CmpOp cmp) {
@@ -278,16 +301,28 @@ private:
             refuse(mainFn->loc, "main must return int");
             return false;
         }
+        // 8.4: the shim is main's caller, so it follows main's convention:
+        // argc and argv answer the first two argument words of that row.
+        const bool ms = mainFn->signature.abi() == Abi::MsAbi;
         out_ += ".globl _start\n";
         out_ += "_start:\n";
         out_ += "  xor ebp, ebp\n";
         if (arity >= 1) {
-            out_ += "  mov rdi, [rsp]\n";        // argc, where the kernel left it
+            // argc, where the kernel left it.
+            out_ += std::string(ms ? "  mov rcx, [rsp]\n" : "  mov rdi, [rsp]\n");
         }
         if (arity >= 2) {
-            out_ += "  lea rsi, [rsp + 8]\n";    // argv, the array after argc
+            // argv, the array after argc.
+            out_ += std::string(ms ? "  lea rdx, [rsp + 8]\n"
+                                   : "  lea rsi, [rsp + 8]\n");
+        }
+        if (ms) {
+            out_ += "  sub rsp, " + std::to_string(kShadowBytes) + "\n";
         }
         out_ += "  call main\n";
+        if (ms) {
+            out_ += "  add rsp, " + std::to_string(kShadowBytes) + "\n";
+        }
         out_ += "  mov rdi, rax\n";
         out_ += "  mov eax, 60\n";               // exit(main's answer)
         out_ += "  syscall\n";
@@ -909,8 +944,42 @@ private:
         // from here on, like every other value. A float parameter comes in
         // on its SSE register — the class lowering recorded per word — so
         // the two counters mirror the caller's split exactly; an integer
-        // word past the sixth would arrive on the stack, which the caller
+        // word past the row would arrive on the stack, which the caller
         // refuses to send, so that branch stays a defensive reading.
+        //
+        // 8.4: the row follows the function's own convention. An msabi
+        // function reads rcx, rdx, r8 and r9, and a word past that row sits
+        // above the caller's 32-byte shadow space.
+        const bool ms = fn.signature.abi() == Abi::MsAbi;
+        const uint64_t intRegs = ms ? kMsabiIntRegs : kSysVIntRegs;
+        const char* (*row)(uint64_t) = ms ? argRegMs : argReg;
+        if (ms) {
+            bool sawFloat = false;
+            bool sawInt = false;
+            uint64_t floats = 0;
+            for (uint64_t w = 0; w < static_cast<uint64_t>(fn.params.size()); ++w) {
+                const ir::IRType cls = w < fn.paramClasses.size()
+                                           ? fn.paramClasses[w]
+                                           : ir::IRType::Void;
+                if (cls == ir::IRType::F32 || cls == ir::IRType::F64) {
+                    sawFloat = true;
+                    ++floats;
+                } else {
+                    sawInt = true;
+                }
+            }
+            // Windows places a float by its argument position and an integer
+            // by its own; the IR flattens arguments to words, so a mixed
+            // signature cannot be read faithfully yet.
+            if (sawFloat && sawInt) {
+                refuse(fn.loc, "an msabi function mixing float and integer parameters");
+                return false;
+            }
+            if (floats > kMsabiSseRegs) {
+                refuse(fn.loc, "more than four float parameters in an msabi function");
+                return false;
+            }
+        }
         uint64_t gpr = 0;
         uint64_t sse = 0;
         for (uint64_t w = 0; w < static_cast<uint64_t>(fn.params.size()); ++w) {
@@ -924,10 +993,11 @@ private:
                 ++sse;
                 continue;
             }
-            if (gpr < 6) {
-                out_ += "  mov " + slot(fn.params[w].id) + ", " + argReg(gpr) + "\n";
+            if (gpr < intRegs) {
+                out_ += "  mov " + slot(fn.params[w].id) + ", " + row(gpr) + "\n";
             } else {
-                uint64_t stackAt = 16 + (gpr - 6) * 8;
+                uint64_t stackAt = 16 + (ms ? kShadowBytes : 0) +
+                                   (gpr - intRegs) * 8;
                 out_ += "  mov rax, [rbp + " + std::to_string(stackAt) + "]\n";
                 out_ += "  mov " + slot(fn.params[w].id) + ", rax\n";
             }
@@ -1379,8 +1449,13 @@ private:
                     gpr += static_cast<uint64_t>(arg.words.size());
                 }
             }
-            const uint64_t kIntRegs = 6;
-            const uint64_t kSseRegs = 8;
+            // 8.4: an msabi call takes four integer registers and reserves
+            // 32 bytes of shadow space for the callee; a sysv call takes six
+            // and reserves none.
+            const bool ms = instr.call.msabi;
+            const uint64_t kIntRegs = ms ? kMsabiIntRegs : kSysVIntRegs;
+            const uint64_t kSseRegs = ms ? kMsabiSseRegs : kSysVSseRegs;
+            const char* (*row)(uint64_t) = ms ? argRegMs : argReg;
             // Integer words past the sixth register spill to the stack the
             // SysV way: pushed in reverse, argument seven nearest the
             // return address, with a lone final word padded to sixteen.
@@ -1390,8 +1465,29 @@ private:
             const uint64_t stackWords = gpr > kIntRegs ? gpr - kIntRegs : 0;
             const uint64_t stackPad = stackWords % 2;
             if (sse > kSseRegs) {
-                refuse(instr.loc, "more than eight float arguments");
+                refuse(instr.loc, ms ? "more than four float arguments to an msabi call"
+                                     : "more than eight float arguments");
                 return false;
+            }
+            if (ms) {
+                bool sawFloat = false;
+                bool sawInt = false;
+                for (const ir::Argument& arg : instr.arguments) {
+                    const bool floatArg = arg.width == ir::IRType::F32 ||
+                                          arg.width == ir::IRType::F64;
+                    if (floatArg) {
+                        sawFloat = true;
+                    } else {
+                        sawInt = true;
+                    }
+                }
+                // Windows places a float by its argument position and an
+                // integer by its own; the IR flattens arguments to words, so
+                // a mixed call cannot be placed faithfully yet.
+                if (sawFloat && sawInt) {
+                    refuse(instr.loc, "a msabi call mixing float and integer arguments");
+                    return false;
+                }
             }
             // Integer words flatten in order: a string arrives as (data,
             // length) in (rdi, rsi), which is the SysV two-eightbyte rule
@@ -1415,13 +1511,21 @@ private:
                 }
                 for (const ir::Value& word : arg.words) {
                     if (index < kIntRegs) {
-                        out_ += "  mov " + std::string(argReg(index)) + ", " +
+                        out_ += "  mov " + std::string(row(index)) + ", " +
                                 slot(word.id) + "\n";
                     } else {
                         spilled.push_back(&word);
                     }
                     ++index;
                 }
+            }
+            // An indirect callee names a slot, and slot offsets read against
+            // rsp: the address is taken before any push or shadow moves rsp.
+            // rax then holds it through the pushes, so it is not also a
+            // staging register below.
+            const uint64_t stageBase = instr.call.indirect ? 1 : 0;
+            if (instr.call.indirect) {
+                out_ += "  mov rax, " + slot(instr.calleeValue.id) + "\n";
             }
             if (stackWords != 0 || stackPad != 0) {
                 // The spill goes down as pushes and nothing else: the
@@ -1439,22 +1543,34 @@ private:
                 // T4: the count a loop walks from is written as a name, not
                 // a literal beside a size word.
                 static constexpr uint64_t skipNone = 0;
-                static const char* const kSpillReg[] = {
+                // The row's extent is written once and names the array.
+                static constexpr uint64_t kSpillRegs = 7;
+                static const char* const kSpillReg[kSpillRegs] = {
                     "rax", "r10", "r11", "r12", "r13", "r14", "r15"};
+                if (spilled.size() + stageBase > kSpillRegs) {
+                    refuse(instr.loc, "more argument words than the spill stage holds");
+                    return false;
+                }
                 for (uint64_t at = 0; at < spilled.size(); ++at) {
-                    out_ += "  mov " + std::string(kSpillReg[at]) + ", " +
+                    out_ += "  mov " + std::string(kSpillReg[at + stageBase]) + ", " +
                             slot(spilled[at]->id) + "\n";
                 }
                 if (stackPad != 0) {
-                    out_ += "  mov rax, 0\n";
-                    out_ += "  push rax\n";
+                    // An immediate, not rax: rax may hold the staged spill or
+                    // the indirect callee, and a pad push must clobber neither.
+                    out_ += "  push 0\n";
                 }
                 for (uint64_t at = spilled.size(); at > skipNone; --at) {
-                    out_ += "  push " + std::string(kSpillReg[at - 1]) + "\n";
+                    out_ += "  push " + std::string(kSpillReg[at - 1 + stageBase]) + "\n";
                 }
             }
+            // 8.4: the caller owns the callee's 32 bytes of shadow space. It
+            // goes down after the pushes so the spilled words sit above it,
+            // where an msabi callee reads its fifth word.
+            if (ms) {
+                out_ += "  sub rsp, " + std::to_string(kShadowBytes) + "\n";
+            }
             if (instr.call.indirect) {
-                out_ += "  mov rax, " + slot(instr.calleeValue.id) + "\n";
                 out_ += "  call rax\n";
             } else {
                 out_ += "  call " + asmSafeName(instr.callee) + "\n";
@@ -1462,9 +1578,10 @@ private:
             // The spill comes off the stack BEFORE the answer is stored:
             // a slot offset stands still, and while the pushed words are
             // still down there rsp names a different base for them.
-            if (stackWords != 0 || stackPad != 0) {
+            if (stackWords != 0 || stackPad != 0 || ms) {
                 out_ += "  add rsp, " +
-                        std::to_string(stackWords * 8 + stackPad * 8) + "\n";
+                        std::to_string(stackWords * 8 + stackPad * 8 +
+                                       (ms ? kShadowBytes : 0)) + "\n";
             }
             if (!instr.results.empty()) {
                 if (instr.width == ir::IRType::F32) {

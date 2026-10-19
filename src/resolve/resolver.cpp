@@ -1115,7 +1115,8 @@ void Resolver::resolveDeclTypes(const std::string& module, Program& program,
                 inner = typeParamScope(scope, module, fn->typeParams, d->id, fn->pos);
             }
             bool failed = false;
-            Signature sig = buildSignature(fn->params, fn->returns.get(), inner, failed);
+            Signature sig = buildSignature(fn->params, fn->returns.get(), inner, failed,
+                                           abiOf(fn->abi, failed, fn->pos));
             const_cast<Decl*>(d)->sig = std::move(sig);
             continue;
         }
@@ -1125,7 +1126,8 @@ void Resolver::resolveDeclTypes(const std::string& module, Program& program,
                 continue;
             }
             bool failed = false;
-            Signature sig = buildSignature(ext->params, ext->returns.get(), scope, failed);
+            Signature sig = buildSignature(ext->params, ext->returns.get(), scope, failed,
+                                           abiOf(ext->abi, failed, ext->pos));
             const_cast<Decl*>(d)->sig = std::move(sig);
             continue;
         }
@@ -1812,7 +1814,8 @@ std::optional<DeclId> Resolver::instantiate(DeclId tmpl, const std::vector<TypeR
 TypeRef Resolver::resolveSignature(const FuncSigType* type, const Scope* scope,
                                   bool inPointer) {
     bool failed = false;
-    Signature sig = buildFuncSig(type->params, type->returns.get(), scope, failed);
+    Signature sig = buildFuncSig(type->params, type->returns.get(), scope, failed,
+                                 abiOf(type->abi, failed, type->pos));
     if (failed) {
         return errorRef();
     }
@@ -1822,9 +1825,21 @@ TypeRef Resolver::resolveSignature(const FuncSigType* type, const Scope* scope,
     return TypeRef{ctx_.closure(std::move(sig))};
 }
 
+Abi Resolver::abiOf(const std::string& spelling, bool& failed, Position pos) {
+    if (spelling.empty() || spelling == "sysv") {
+        return Abi::SysV;
+    }
+    if (spelling == "msabi") {
+        return Abi::MsAbi;
+    }
+    fail(pos, "unknown calling convention '" + spelling + "'");
+    failed = true;
+    return Abi::SysV;
+}
+
 Signature Resolver::buildSignature(const std::vector<Param>& params,
                                    const TypeExpr* returns, const Scope* scope,
-                                   bool& failed) {
+                                   bool& failed, Abi abi) {
     std::vector<Parameter> out;
     for (const Param& param : params) {
         TypeRef t = resolveType(param.type.get(), scope);
@@ -1846,7 +1861,7 @@ Signature Resolver::buildSignature(const std::vector<Param>& params,
             ret = t.type;
         }
     }
-    return Signature(std::move(out), ret, Abi::SysV);
+    return Signature(std::move(out), ret, abi);
 }
 
 void Resolver::buildMethodSig(const MethodDecl& method, const Scope* scope, bool& failed) {
@@ -1856,7 +1871,7 @@ void Resolver::buildMethodSig(const MethodDecl& method, const Scope* scope, bool
 
 Signature Resolver::buildFuncSig(const std::vector<std::unique_ptr<TypeExpr>>& params,
                                  const TypeExpr* returns, const Scope* scope,
-                                 bool& failed) {
+                                 bool& failed, Abi abi) {
     std::vector<Parameter> out;
     for (const std::unique_ptr<TypeExpr>& param : params) {
         TypeRef t = resolveType(param.get(), scope);
@@ -1877,7 +1892,7 @@ Signature Resolver::buildFuncSig(const std::vector<std::unique_ptr<TypeExpr>>& p
             ret = t.type;
         }
     }
-    return Signature(std::move(out), ret, Abi::SysV);
+    return Signature(std::move(out), ret, abi);
 }
 
 const Scope* Resolver::typeParamScope(const Scope* parent, const std::string& module,
