@@ -1206,11 +1206,41 @@ std::unique_ptr<Stmt> Parser::parseFor() {
         failHere("expected '('");
         return nullptr;
     }
-    // `for (var x in xs)` and `for (x in xs)` against the C-style form. One
-    // lookahead decision, then commit — the only save/restore in the parser.
+    // `for (var x in xs)`, `for (x in xs)` and the Standard's annotated
+    // `for (var b: u8 in xs)` against the C-style form. One lookahead
+    // decision, then commit — the only save/restore in the parser. The
+    // annotation is the one place the two spellings share a prefix
+    // (`var x: T`), so a `: T` that no `in` follows restores and reparses
+    // as the C-style head.
     uint64_t saved = save();
     bool isVar = match(TokenKind::KwVar);
-    if (check(TokenKind::Ident) && peekAt(1).kind == TokenKind::KwIn) {
+    std::unique_ptr<TypeExpr> annotation;
+    if (check(TokenKind::Ident) && peekAt(1).kind == TokenKind::Colon) {
+        std::string name = advance().text;
+        advance();
+        annotation = parseType();
+        if (annotation == nullptr) {
+            return nullptr;
+        }
+        if (match(TokenKind::KwIn)) {
+            std::unique_ptr<Expr> seq = parseExpr();
+            if (seq == nullptr) {
+                return nullptr;
+            }
+            if (!match(TokenKind::RParen)) {
+                failHere("expected ')'");
+                return nullptr;
+            }
+            std::unique_ptr<Stmt> body = parseStmt();
+            if (body == nullptr) {
+                return nullptr;
+            }
+            return std::make_unique<ForInStmt>(start, isVar, std::move(name),
+                                               std::move(seq), std::move(body),
+                                               std::move(annotation));
+        }
+        restore(saved);
+    } else if (check(TokenKind::Ident) && peekAt(1).kind == TokenKind::KwIn) {
         std::string name = advance().text;
         advance();
         std::unique_ptr<Expr> seq = parseExpr();
@@ -2114,6 +2144,9 @@ std::unique_ptr<Expr> Parser::parsePrefix() {
         case TokenKind::KwSizeof:
             base = parseSizeof();
             break;
+        case TokenKind::KwAlignof:
+            base = parseAlignof();
+            break;
         case TokenKind::KwFunc:
             base = parseFuncLit();
             break;
@@ -2560,6 +2593,23 @@ std::unique_ptr<Expr> Parser::parseSizeof() {
         return nullptr;
     }
     return std::make_unique<SizeofType>(start, std::move(type));
+}
+
+std::unique_ptr<Expr> Parser::parseAlignof() {
+    Position start = advance().pos;
+    if (!match(TokenKind::LParen)) {
+        failHere("alignof takes a type in parentheses");
+        return nullptr;
+    }
+    std::unique_ptr<TypeExpr> type = parseType();
+    if (type == nullptr) {
+        return nullptr;
+    }
+    if (!match(TokenKind::RParen)) {
+        failHere("expected ')'");
+        return nullptr;
+    }
+    return std::make_unique<AlignofType>(start, std::move(type));
 }
 
 std::unique_ptr<Expr> Parser::parseFuncLit() {

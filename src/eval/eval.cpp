@@ -255,11 +255,23 @@ EvalResult evalConstInt(const Expr& expr, EvalEnv& env,
         if (target.isError()) {
             return fail("not a constant expression");
         }
-        int64_t bytes = typeSize(target.type);
+        int64_t bytes = env.sizeOf ? env.sizeOf(target.type) : typeSize(target.type);
         if (bytes < 0) {
             return fail("type has no size");
         }
         return EvalResult{true, bytes, ""};
+    }
+    if (const auto* al = dynamic_cast<const AlignofType*>(&expr)) {
+        TypeRef target = env.resolve(al->type.get());
+        if (target.isError()) {
+            return fail("not a constant expression");
+        }
+        int64_t unit =
+            env.alignOf ? env.alignOf(target.type) : alignOf(target.type);
+        if (unit < 0) {
+            return fail("type has no alignment");
+        }
+        return EvalResult{true, unit, ""};
     }
     return fail("not a constant expression");
 }

@@ -354,6 +354,14 @@ struct SizeofType : Expr {
     void accept(ASTVisitor& v) override;
 };
 
+// `alignof(T)` — the alignment as a compile-time integer (Standard 11).
+struct AlignofType : Expr {
+    std::unique_ptr<TypeExpr> type;
+    AlignofType(Position p, std::unique_ptr<TypeExpr> t)
+        : Expr(std::move(p)), type(std::move(t)) {}
+    void accept(ASTVisitor& v) override;
+};
+
 struct Assign : Expr {
     std::unique_ptr<Expr> target;
     std::optional<BinOp> op;
@@ -443,10 +451,13 @@ struct ForInStmt : Stmt {
     std::string name;
     std::unique_ptr<Expr> seq;
     std::unique_ptr<Stmt> body;
+    // The Standard's optional annotation (`for (var b: u8 in xs)`); null
+    // when the element's own type names the variable.
+    std::unique_ptr<TypeExpr> annotation;
     ForInStmt(Position p, bool m, std::string n, std::unique_ptr<Expr> s,
-              std::unique_ptr<Stmt> b)
+              std::unique_ptr<Stmt> b, std::unique_ptr<TypeExpr> a = nullptr)
         : Stmt(std::move(p)), isMutable(m), name(std::move(n)), seq(std::move(s)),
-          body(std::move(b)) {}
+          body(std::move(b)), annotation(std::move(a)) {}
     void accept(ASTVisitor& v) override;
 };
 
@@ -807,6 +818,7 @@ struct ASTVisitor {
     virtual void visitArrayLit(ArrayLit& n);
     virtual void visitAssign(Assign& n);
     virtual void visitSizeofType(SizeofType& n);
+    virtual void visitAlignofType(AlignofType& n);
     virtual void visitFuncLit(FuncLit& n);
     virtual void visitDeclStmt(DeclStmt& n);
     virtual void visitExportDecl(ExportDecl& n);
@@ -1003,6 +1015,8 @@ inline void ASTVisitor::visitArrayLit(ArrayLit& n) {
     for (auto& i : n.inits) i->accept(*this);
 }
 inline void ASTVisitor::visitSizeofType(SizeofType& n) { n.type->accept(*this); }
+inline void AlignofType::accept(ASTVisitor& v) { v.visitAlignofType(*this); }
+inline void ASTVisitor::visitAlignofType(AlignofType& n) { n.type->accept(*this); }
 inline void ASTVisitor::visitAssign(Assign& n) {
     n.target->accept(*this);
     n.value->accept(*this);

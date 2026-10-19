@@ -516,6 +516,11 @@ TypeRef Checker::sizeofOperand(const SizeofType* node) const {
     return found == sizeofOperands_.end() ? errorRef() : found->second;
 }
 
+TypeRef Checker::alignofOperand(const AlignofType* node) const {
+    auto found = alignofOperands_.find(node);
+    return found == alignofOperands_.end() ? errorRef() : found->second;
+}
+
 TypeRef Checker::resolveHere(const TypeExpr* spelling) {
     // The resolver records the diagnostic; the checker records the failure.
     // Without this, a use-site resolve error (bare generic in a body, bad
@@ -1945,6 +1950,14 @@ void Checker::visitForInStmt(ForInStmt& n) {
         }
     }
     pushScope();
+    if (n.annotation != nullptr && !element.isError()) {
+        TypeRef annotated = resolveHere(n.annotation.get());
+        if (!annotated.isError() && annotated.type != element.type) {
+            fail(n.annotation->pos,
+                 "the loop variable is " + typeName(element) + ", not " +
+                     typeName(annotated));
+        }
+    }
     if (!element.isError()) {
         bindLocal(n.name, element, n.isMutable, n.pos);
     }
@@ -2561,6 +2574,16 @@ void Checker::visitSizeofType(SizeofType& n) {
         return;
     }
     sizeofOperands_[&n] = target;
+    record(&n, TypeRef{ctx_.basic(BasicKind::I64)});
+}
+
+void Checker::visitAlignofType(AlignofType& n) {
+    TypeRef target = resolveHere(n.type.get());
+    if (target.isError()) {
+        record(&n, errorRef());
+        return;
+    }
+    alignofOperands_[&n] = target;
     record(&n, TypeRef{ctx_.basic(BasicKind::I64)});
 }
 
@@ -3477,6 +3500,10 @@ TypeRef Checker::checkExpr(Expr* expr, TypeRef expected) {
     if (auto* sz = dynamic_cast<SizeofType*>(expr)) {
         visitSizeofType(*sz);
         return typeOf(sz);
+    }
+    if (auto* al = dynamic_cast<AlignofType*>(expr)) {
+        visitAlignofType(*al);
+        return typeOf(al);
     }
     if (auto* fun = dynamic_cast<FuncLit*>(expr)) {
         TypeRef t = checkFuncLit(*fun);
@@ -4929,9 +4956,15 @@ bool Checker::checkCompatible(Position pos, const Expr* fromExpr, TypeRef from, 
         from.type->element() == to.type->element()) {
         return true;
     }
-    // An integer literal converts to any integer type whose range contains it.
-    if (dynamic_cast<const IntLit*>(fromExpr) != nullptr && to.type->kind() == Kind::Basic &&
-        basicIsInteger(*to.type->basic())) {
+    // A compile-time integer constant converts to any integer type whose
+    // range contains it: a literal, a named constant, a size, an alignment
+    // and arithmetic over them bind by value (Standard 11's
+    // `var node_bytes: u64 = sizeof(Node);` needs exactly this). A value
+    // that is not constant converts nothing — an `int` variable beside a u8
+    // stays the mismatch it is.
+    if (from.type->kind() == Kind::Basic &&
+        basicIsInteger(*from.type->basic()) &&
+        to.type->kind() == Kind::Basic && basicIsInteger(*to.type->basic())) {
         std::unordered_set<std::string> active;
         EvalResult folded = evalConstInt(*fromExpr, *env_, active);
         if (folded.ok) {

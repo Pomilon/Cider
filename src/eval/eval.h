@@ -12,9 +12,9 @@
 // never reads a value that is not a constant: a name that is not a `const` is
 // an error, not a zero.
 //
-// The environment is three callables, so the resolver, the checker and the
-// optimiser each supply their own const table and their own resolver without
-// this file depending on any of them.
+// The environment is the callables below, so the resolver, the checker and
+// the optimiser each supply their own const table and their own resolver
+// without this file depending on any of them.
 
 #ifndef CIDER_EVAL_EVAL_H
 #define CIDER_EVAL_EVAL_H
@@ -47,6 +47,11 @@ struct EvalEnv {
     std::function<TypeRef(const TypeExpr* spelling)> resolve;
     // Qualifies a bare name in the current module (`x` -> `mod.x`).
     std::function<std::string(const std::string& bare)> qualify;
+    // A resolved type's size and alignment, for `sizeof` and `alignof`
+    // folding: the layout owner answers nominal kinds too, where the static
+    // helpers cannot (TYPES §3). Null falls back to those helpers.
+    std::function<int64_t(const Type*)> sizeOf;
+    std::function<int64_t(const Type*)> alignOf;
 };
 
 struct EvalResult {

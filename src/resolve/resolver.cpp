@@ -1944,6 +1944,12 @@ EvalEnv Resolver::evalEnv(const Scope* scope) {
     env.qualify = [scope](const std::string& bare) -> std::string {
         return scope->module + "." + bare;
     };
+    env.sizeOf = [this](const Type* type) -> int64_t {
+        return nominalSize(type);
+    };
+    env.alignOf = [this](const Type* type) -> int64_t {
+        return nominalAlign(type);
+    };
     return env;
 }
 

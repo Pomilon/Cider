@@ -47,7 +47,7 @@ enum class TokenKind {
     KwBreak, KwContinue, KwDefer, KwTry, KwCatch, KwThrow,
     KwDelete, KwNew, KwAs, KwAnd, KwOr, KwNot,
     KwSelf, KwThis, KwSuper, KwOverride, KwInit, KwDeinit, KwVirtual, KwPrivate, KwPublic,
-    KwTrue, KwFalse, KwNilPtr, KwUninit, KwFini, KwSizeof, KwAsm, KwVolatile, KwExperimental,
+    KwTrue, KwFalse, KwNilPtr, KwUninit, KwFini, KwSizeof, KwAlignof, KwAsm, KwVolatile, KwExperimental,
 
     KwInt, KwI8, KwI16, KwI32, KwI64,
     KwU8, KwU16, KwU32, KwU64,

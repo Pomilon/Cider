@@ -2114,6 +2114,30 @@ void testMultiWordReturn() {
           "sizeof answers a nested array's bytes");
 }
 
+// 11: alignof is the layout owner's alignment as a compile-time integer.
+void testAlignof() {
+    std::printf("alignof values\n");
+    check(runQuiet("func main() -> int { return alignof(int) as int; }\n") == 4,
+          "alignof(int) is 4");
+    check(runQuiet("struct Node { var x: int; var y: i64; }\n"
+                   "func main() -> int {\n"
+                   "    return (alignof(Node) as int) * 10 +"
+                   " (sizeof(Node) as int);\n"
+                   "}\n") == 96,
+          "alignof(Node) is 8 and sizeof(Node) is 16");
+    check(runQuiet("struct Row { var a: u8; }\n"
+                   "func main() -> int {\n"
+                   "    var grid: [Row; 3] = uninit;\n"
+                   "    return alignof([Row; 3]) as int;\n"
+                   "}\n") == 1,
+          "alignof of an array is its element's");
+    check(runQuiet("func main() -> int {\n"
+                   "    var a: [u32; 4] = uninit;\n"
+                   "    return alignof([u32; 4]) as int;\n"
+                   "}\n") == 4,
+          "alignof of a u32 array is 4");
+}
+
 void testBigReturn() {
     std::printf("wide returns ride a hidden pointer\n");
     bool sig = false;
@@ -2597,6 +2621,7 @@ int main() {
     testIncrDecr();
     testMultiWordReturn();
     testBigReturn();
+    testAlignof();
     testSliceCopy();
     testRepro();
     std::printf("\n%d checks, %s\n", checks, failures == 0 ? "all passed" : "FAILURES");

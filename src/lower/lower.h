@@ -554,6 +554,7 @@ public:
     // `sizeof(T)` is a compile-time byte count, answered as one I64 word.
     // A type without a known size refuses rather than guessing.
     std::vector<ir::Value> lowerSizeof(const SizeofType& n);
+    std::vector<ir::Value> lowerAlignof(const AlignofType& n);
     // One arithmetic operation, shared by Binary and compound assignment so
     // the two cannot disagree about what `+` emits.
     ir::Value emitArith(BinOp op, ir::Value a, ir::Value b, TypeRef result,

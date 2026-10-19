@@ -178,6 +178,7 @@ public:
     // with the active substitution applied, so spec emissions read the
     // concrete type instead of re-resolving past type parameters.
     TypeRef sizeofOperand(const SizeofType* node) const;
+    TypeRef alignofOperand(const AlignofType* node) const;
     // Every recorded generic call site and its spec, for the lowerer's
     // emission worklist. Checking already computed the transitive closure:
     // detached body walks still instantiate nested calls.
@@ -259,6 +260,7 @@ public:
     void visitArrayLit(ArrayLit& n) override;
     void visitAssign(Assign& n) override;
     void visitSizeofType(SizeofType& n) override;
+    void visitAlignofType(AlignofType& n) override;
     void visitFuncLit(FuncLit& n) override;
     TypeRef checkFuncLit(FuncLit& lit);
 
@@ -440,6 +442,7 @@ private:
     std::optional<DeclId> walkSpec_;
     // Sizeof operand types by node, recorded with substitution applied.
     std::unordered_map<const SizeofType*, TypeRef> sizeofOperands_;
+    std::unordered_map<const AlignofType*, TypeRef> alignofOperands_;
     // Types resolve here rather than at module scope during generic walks,
     // where the template's parameters are bound.
     const resolve::Scope* typeScope_ = nullptr;

@@ -135,6 +135,7 @@ private:
     std::unique_ptr<Expr> parsePostfix(std::unique_ptr<Expr> base);
     std::unique_ptr<Expr> parseNew();
     std::unique_ptr<Expr> parseSizeof();
+    std::unique_ptr<Expr> parseAlignof();
     std::unique_ptr<Expr> parseFuncLit();
     std::unique_ptr<Expr> parseStringParts(const Token& token);
     // Parses one expression out of already-lexed interpolation tokens.

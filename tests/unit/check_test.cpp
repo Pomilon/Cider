@@ -964,6 +964,64 @@ void testStringBytes() {
     check(!wide.ok && wide.stage == "check", "len is not a u64");
 }
 
+// 11: sizeof and alignof are compile-time integers; a constant of any
+// integer type converts to an integer type whose range contains it.
+void testAlignof() {
+    std::printf("alignof and constant conversion\n");
+    Checked al = check(
+        "struct Node { var x: int; var y: i64; }\n"
+        "func main() -> int {\n"
+        "    var bytes: u64 = sizeof(Node);\n"
+        "    var align: u64 = alignof(Node);\n"
+        "    var askew: int = alignof(Node) + sizeof(int);\n"
+        "    return 0;\n"
+        "}\n");
+    check(al.ok, "sizeof and alignof bind to u64 and int: " + al.stage);
+    Checked exact = check(
+        "struct Node { var x: int; var y: i64; }\n"
+        "func main() -> int {\n"
+        "    var a: [u8; alignof(Node)] = uninit;\n"
+        "    return a.len;\n"
+        "}\n");
+    check(exact.ok, "an alignment answers an array bound: " + exact.stage);
+    Checked narrowed = check(
+        "func main() -> int { var b: u8 = 300; return 0; }\n");
+    check(!narrowed.ok && narrowed.stage == "check",
+          "a constant past the target's range still fails");
+    Checked live = check(
+        "func main() -> int { var n: int = 3; var b: u8 = n; return 0; }\n");
+    check(!live.ok && live.stage == "check",
+          "a variable still does not convert");
+}
+
+// 8: the Standard's annotated loop variable is the sequence's element.
+void testTypedForIn() {
+    std::printf("typed for..in\n");
+    Checked ok = check(
+        "func main() -> int {\n"
+        "    var a: [u8; 3] = [1, 2, 3];\n"
+        "    var total: u8 = 0;\n"
+        "    for (var b: u8 in a) { total = total + b; }\n"
+        "    return total as int;\n"
+        "}\n");
+    check(ok.ok, "a typed loop variable is the element: " + ok.stage);
+    Checked bad = check(
+        "func main() -> int {\n"
+        "    var a: [u8; 3] = [1, 2, 3];\n"
+        "    for (var b: i32 in a) { b = b; }\n"
+        "    return 0;\n"
+        "}\n");
+    check(!bad.ok && bad.stage == "check",
+          "a loop variable of another type fails");
+    Checked cstyle = check(
+        "func main() -> int {\n"
+        "    var t: int = 0;\n"
+        "    for (var i: int = 0; i < 3; i = i + 1) { t = t + i; }\n"
+        "    return t;\n"
+        "}\n");
+    check(cstyle.ok, "the C-style head still parses: " + cstyle.stage);
+}
+
 void testInterfaceNil() {
     std::printf("null interfaces check\n");
     Checked cast = check(
@@ -1825,6 +1883,8 @@ int main() {
     testFnPtrCompare();
     testStringCompare();
     testStringBytes();
+    testAlignof();
+    testTypedForIn();
     testInterfaceNil();
     testMatch();
     testAlternation();
