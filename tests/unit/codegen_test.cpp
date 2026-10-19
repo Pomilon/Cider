@@ -440,6 +440,19 @@ void testIncrDecr() {
                    "    return i;\n"
                    "}\n") == 6,
           "standalone increments update in place");
+    check(runQuiet("class Shape {\n"
+                   "    var sides: int;\n"
+                   "    func init(s: int) { this->sides = s; }\n"
+                   "}\n"
+                   "class Square : Shape {\n"
+                   "    var w: int;\n"
+                   "    func init(s: int, w: int) { super_init(s); this->w = w; }\n"
+                   "}\n"
+                   "func main() -> int {\n"
+                   "    var q: *Square = new Square(4, 5);\n"
+                   "    return q->sides * 10 + q->w;\n"
+                   "}\n") == 45,
+          "super_init runs the base constructor");
     check(runQuiet("func bump(p: *int) { (*p)++; }\n"
                    "func main() -> int {\n"
                    "    var x: int = 41;\n"

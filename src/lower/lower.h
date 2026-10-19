@@ -539,6 +539,9 @@ public:
     std::vector<ir::Value> lowerNewArray(const NewArray& n);
     std::vector<ir::Value> lowerArrayLit(const ArrayLit& n);
     std::vector<ir::Value> lowerNewClass(const NewClass& n);
+    // `super_init(args)`: the direct base's init on this receiver, emitted
+    // as one call statement (Unified Standard 4.8.3).
+    std::vector<ir::Value> lowerSuperInit(const SuperInit& n);
     // Answers a closure literal's two words: the hidden function's address
     // and the captures allocation, filled from the enclosing locals. Never
     // invents a layout; the checker hands the captures over with the hook.

@@ -597,6 +597,33 @@ void testArgv() {
     }
 }
 
+// super_init calls the base constructor on the same receiver (4.8.3), and
+// both legs of the VM agree on the result.
+void testSuperInit() {
+    std::printf("super_init runs on both legs\n");
+    Lowered unopt = lower("class Shape {\n"
+                          "    var sides: int;\n"
+                          "    func init(s: int) { this->sides = s; }\n"
+                          "}\n"
+                          "class Square : Shape {\n"
+                          "    var w: int;\n"
+                          "    func init(s: int, w: int) { super_init(s); this->w = w; }\n"
+                          "}\n"
+                          "func main() -> int {\n"
+                          "    var q: *Square = new Square(4, 5);\n"
+                          "    return q->sides * 10 + q->w;\n"
+                          "}\n");
+    check(unopt.ok, "lowers: " + unopt.stage);
+    cider::vm::VmResult unr = cider::vm::run(*unopt.module, "");
+    check(unr.ok && unr.exitCode == 45,
+          "the unoptimised chain answers 45: " + unr.error);
+    cider::opt::OptResult ores = cider::opt::run(*unopt.module);
+    check(ores.ok, "optimises: " + ores.error);
+    cider::vm::VmResult opr = cider::vm::run(*unopt.module, "");
+    check(opr.ok && opr.exitCode == 45,
+          "the optimised chain answers 45: " + opr.error);
+}
+
 }  // namespace
 
 int main() {
@@ -611,6 +638,7 @@ int main() {
     testAsm();
     testFileSyscalls();
     testArgv();
+    testSuperInit();
     std::printf("\n%d checks, %s\n", checks, failures == 0 ? "all passed" : "FAILURES");
     return failures == 0 ? 0 : 1;
 }

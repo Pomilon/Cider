@@ -247,6 +247,7 @@ public:
     void visitNilPtr(NilPtr& n) override;
     void visitUninitExpr(UninitExpr& n) override;
     void visitSuper(Super& n) override;
+    void visitSuperInit(SuperInit& n) override;
     void visitIdent(Ident& n) override;
     void visitBinary(Binary& n) override;
     void visitUnary(Unary& n) override;
@@ -546,6 +547,9 @@ private:
     // 7.10: inside a fini block the storage checks like a function body,
     // but a return would leave the finalizer half-run, so it refuses.
     bool inFini_ = false;
+    // 4.8.3: an init body may call `super_init(...)`; anywhere else the
+    // spelling is an ordinary name.
+    bool inInit_ = false;
     // 7.2: the one expression (a whole statement or a C-style for step)
     // where a stand-alone `++`/`--` is legal. Null everywhere else, so an
     // embedded increment refuses.

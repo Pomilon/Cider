@@ -1091,6 +1091,63 @@ void testPrivateFields() {
           "a cross-module literal naming a private field refuses");
 }
 
+void testSuperInit() {
+    std::printf("super_init base constructor calls\n");
+    Checked chain = check(
+        "class Shape {\n"
+        "    var sides: int;\n"
+        "    func init(s: int) { this->sides = s; }\n"
+        "}\n"
+        "class Square : Shape {\n"
+        "    var w: int;\n"
+        "    func init(s: int, w: int) { super_init(s); this->w = w; }\n"
+        "}\n"
+        "func main() -> int {\n"
+        "    var q: *Square = new Square(4, 5);\n"
+        "    return q->sides * 100 + q->w;\n"
+        "}\n");
+    check(chain.ok, "a super_init chain checks: " + chain.stage);
+    Checked badArg = check(
+        "class Shape {\n"
+        "    var sides: int;\n"
+        "    func init(s: int) { this->sides = s; }\n"
+        "}\n"
+        "class Square : Shape {\n"
+        "    var w: int;\n"
+        "    func init() { super_init(\"four\"); this->w = 1; }\n"
+        "}\n"
+        "func main() -> int { return 0; }\n");
+    check(!badArg.ok && badArg.stage == "check",
+          "a super_init argument mismatch refuses");
+    Checked outside = check(
+        "class Shape { var sides: int; func init(s: int) { this->sides = s; } }\n"
+        "class Square : Shape {\n"
+        "    var w: int;\n"
+        "    func poke() { super_init(1); }\n"
+        "    func init() { this->w = 1; }\n"
+        "}\n"
+        "func main() -> int { return 0; }\n");
+    check(!outside.ok && outside.stage == "check",
+          "super_init outside init refuses");
+    Checked noBase = check(
+        "class Lone {\n"
+        "    var a: int;\n"
+        "    func init() { super_init(); this->a = 1; }\n"
+        "}\n"
+        "func main() -> int { return 0; }\n");
+    check(!noBase.ok && noBase.stage == "check",
+          "super_init without a base refuses");
+    Checked noInit = check(
+        "class Plain { var a: int; }\n"
+        "class Kid : Plain {\n"
+        "    var b: int;\n"
+        "    func init() { super_init(); this->b = 1; }\n"
+        "}\n"
+        "func main() -> int { return 0; }\n");
+    check(!noInit.ok && noInit.stage == "check",
+          "super_init without a base init refuses");
+}
+
 // 7.6: `_` is the default arm. 7.2: increment is a statement, never a
 // value, so the only legal positions are a whole expression statement and
 // a C-style for step.
@@ -2006,6 +2063,7 @@ int main() {
     testAlignof();
     testTypedForIn();
     testPrivateFields();
+    testSuperInit();
     testWildcardAndIncrement();
     testFini();
     testInterfaceNil();

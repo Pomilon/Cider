@@ -2427,6 +2427,14 @@ std::unique_ptr<Expr> Parser::parsePostfix(std::unique_ptr<Expr> base) {
                 failHere("expected ')'");
                 return nullptr;
             }
+            // `super_init(args)` is the base constructor call (Standard
+            // 4.8.3), a contextual spelling: the name is ordinary anywhere
+            // but directly called.
+            const auto* callee = dynamic_cast<const Ident*>(base.get());
+            if (callee != nullptr && callee->name == "super_init") {
+                base = std::make_unique<SuperInit>(cpos, std::move(args));
+                continue;
+            }
             base = std::make_unique<Call>(cpos, std::move(base),
                                           std::vector<std::unique_ptr<TypeExpr>>{},
                                           std::move(args));

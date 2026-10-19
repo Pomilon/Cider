@@ -509,6 +509,12 @@ void Checker::prescanExpr(const Expr* expr,
         }
         return;
     }
+    if (const auto* si = dynamic_cast<const SuperInit*>(expr)) {
+        for (const auto& arg : si->args) {
+            prescanExpr(arg.get(), scopes, closureParams);
+        }
+        return;
+    }
 }
 
 TypeRef Checker::sizeofOperand(const SizeofType* node) const {
@@ -1378,6 +1384,13 @@ void Checker::checkCtor(DeclId id, Kind kind, FuncDecl* ctor, bool isInit) {
         const Type* ret = sig->returnType() != nullptr ? sig->returnType() : ctx_.void_();
         TypeRef savedRet = funcReturn_;
         bool was = inFunc_;
+        std::optional<DeclId> savedClass = currentClass_;
+        bool wasInit = inInit_;
+        // The constructor walks as a method of its class: `self` names the
+        // object and, for init, `super_init` may name the base (4.8.3).
+        currentClass_ = id;
+        currentSelf_ = TypeRef{ctx_.pointer(obj)};
+        inInit_ = isInit;
         funcReturn_ = TypeRef{ret};
         inFunc_ = true;
         if (sink_ != nullptr) {
@@ -1390,6 +1403,8 @@ void Checker::checkCtor(DeclId id, Kind kind, FuncDecl* ctor, bool isInit) {
         }
         funcReturn_ = savedRet;
         inFunc_ = was;
+        currentClass_ = savedClass;
+        inInit_ = wasInit;
     }
     popScope();
     (void)saved;
@@ -1557,6 +1572,12 @@ Checker::InitAssign Checker::assignedThrough(const Stmt* stmt, InitAssign state,
             }
             state.bailed = true;
             state.unknownFlow = true;
+            return state;
+        }
+        if (dynamic_cast<const SuperInit*>(expr->expr.get()) != nullptr) {
+            // The base constructor runs against the base's fields and
+            // cannot name this class's own fields, so coverage is
+            // unaffected and the call is not opaque (Standard 4.8.3).
             return state;
         }
         if (initExprOpaque(expr->expr.get())) {
@@ -2124,6 +2145,45 @@ void Checker::visitSuper(Super& n) {
         return;
     }
     record(&n, currentSelf_);
+}
+
+void Checker::visitSuperInit(SuperInit& n) {
+    // Unified Standard 4.8.3: `super_init(args)` runs the direct base's
+    // constructor on this object. It is meaningful only inside an init of
+    // a class that has exactly one base with an init.
+    if (!inInit_ || !currentClass_.has_value()) {
+        fail(n.pos, "super_init is only usable inside an init body");
+        record(&n, errorRef());
+        return;
+    }
+    const std::vector<DeclId> bases = resolver_.classBases(*currentClass_);
+    if (bases.empty()) {
+        fail(n.pos, "this class has no base class for super_init");
+        record(&n, errorRef());
+        return;
+    }
+    if (bases.begin() + 1 != bases.end()) {
+        fail(n.pos, "super_init is not lowered for several base classes");
+        record(&n, errorRef());
+        return;
+    }
+    const Signature* init = resolver_.methodSig(bases[0], "init");
+    if (init == nullptr) {
+        fail(n.pos, "the base class has no init");
+        record(&n, errorRef());
+        return;
+    }
+    if (n.args.size() != init->arity()) {
+        fail(n.pos, "wrong number of arguments");
+        record(&n, errorRef());
+        return;
+    }
+    for (uint64_t i = 0; i < static_cast<uint64_t>(n.args.size()); ++i) {
+        TypeRef want{init->parameters()[i].type};
+        TypeRef got = checkExpr(n.args[i].get(), want);
+        checkCompatible(n.args[i]->pos, n.args[i].get(), got, want);
+    }
+    record(&n, TypeRef{ctx_.void_()});
 }
 
 void Checker::visitIdent(Ident& n) {
@@ -3553,6 +3613,10 @@ TypeRef Checker::checkExpr(Expr* expr, TypeRef expected) {
     if (auto* un = dynamic_cast<UninitExpr*>(expr)) {
         visitUninitExpr(*un);
         return typeOf(un);
+    }
+    if (auto* si = dynamic_cast<SuperInit*>(expr)) {
+        visitSuperInit(*si);
+        return typeOf(si);
     }
     fail(expr->pos, "checker bug: unhandled expression");
     return errorRef();

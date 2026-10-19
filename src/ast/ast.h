@@ -207,6 +207,17 @@ struct Super : Expr {
     void accept(ASTVisitor& v) override;
 };
 
+// `super_init(args)` inside an init body: the base class constructor runs
+// on the same receiver (Unified Standard 4.8.3). Spelled contextually: an
+// identifier `super_init` directly called is this node, anywhere else it
+// is an ordinary name.
+struct SuperInit : Expr {
+    std::vector<std::unique_ptr<Expr>> args;
+    SuperInit(Position p, std::vector<std::unique_ptr<Expr>> a)
+        : Expr(std::move(p)), args(std::move(a)) {}
+    void accept(ASTVisitor& v) override;
+};
+
 struct Ident : Expr {
     std::string name;
     Ident(Position p, std::string n) : Expr(std::move(p)), name(std::move(n)) {}
@@ -805,6 +816,7 @@ struct ASTVisitor {
     virtual void visitNilPtr(NilPtr& n);
     virtual void visitUninitExpr(UninitExpr& n);
     virtual void visitSuper(Super& n);
+    virtual void visitSuperInit(SuperInit& n);
     virtual void visitIdent(Ident& n);
     virtual void visitBinary(Binary& n);
     virtual void visitUnary(Unary& n);
@@ -880,6 +892,7 @@ inline void BoolLit::accept(ASTVisitor& v) { v.visitBoolLit(*this); }
 inline void NilPtr::accept(ASTVisitor& v) { v.visitNilPtr(*this); }
 inline void UninitExpr::accept(ASTVisitor& v) { v.visitUninitExpr(*this); }
 inline void Super::accept(ASTVisitor& v) { v.visitSuper(*this); }
+inline void SuperInit::accept(ASTVisitor& v) { v.visitSuperInit(*this); }
 inline void Ident::accept(ASTVisitor& v) { v.visitIdent(*this); }
 inline void Binary::accept(ASTVisitor& v) { v.visitBinary(*this); }
 inline void Unary::accept(ASTVisitor& v) { v.visitUnary(*this); }
@@ -970,6 +983,9 @@ inline void ASTVisitor::visitBoolLit(BoolLit&) {}
 inline void ASTVisitor::visitNilPtr(NilPtr&) {}
 inline void ASTVisitor::visitUninitExpr(UninitExpr&) {}
 inline void ASTVisitor::visitSuper(Super&) {}
+inline void ASTVisitor::visitSuperInit(SuperInit& n) {
+    for (auto& a : n.args) a->accept(*this);
+}
 inline void ASTVisitor::visitIdent(Ident&) {}
 inline void ASTVisitor::visitBinary(Binary& n) {
     n.lhs->accept(*this);

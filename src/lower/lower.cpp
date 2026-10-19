@@ -6664,6 +6664,86 @@ std::vector<ir::Value> Lowerer::lowerNewClass(const NewClass& n) {
     return {at};
 }
 
+std::vector<ir::Value> Lowerer::lowerSuperInit(const SuperInit& n) {
+    // `super_init(args)`: the direct base's constructor on this object
+    // (Unified Standard 4.8.3). The checker proved the context and the
+    // arguments; the base, its init and the receiver are re-derived here.
+    if (!currentMethodOwner_.has_value()) {
+        refuse(n.pos, "super_init outside a method");
+        return {undefined()};
+    }
+    const std::vector<DeclId> bases = resolver_.classBases(*currentMethodOwner_);
+    if (bases.empty() || bases.begin() + 1 != bases.end()) {
+        refuse(n.pos, "super_init without one base class");
+        return {undefined()};
+    }
+    const resolve::Decl* owner = resolver_.declById(bases[0]);
+    const Signature* init = resolver_.methodSig(bases[0], "init");
+    if (owner == nullptr || init == nullptr) {
+        refuse(n.pos, "super_init without a base init");
+        return {undefined()};
+    }
+    ir::Value self;
+    bool foundSelf = false;
+    for (auto frame = locals_.rbegin();
+         frame != locals_.rend() && !foundSelf; ++frame) {
+        auto it = frame->find("self");
+        if (it != frame->end()) {
+            std::vector<ir::Value> words = loadLocal(n.pos, it->second);
+            if (!words.empty()) {
+                self = words[0];
+                foundSelf = true;
+            }
+        }
+    }
+    if (!foundSelf) {
+        refuse(n.pos, "super_init outside a method");
+        return {undefined()};
+    }
+    ir::Instr run;
+    run.op = ir::Op::Call;
+    run.loc = n.pos;
+    run.callee = resolver_.linkName(*owner) + "__init";
+    run.mayTrap = true;
+    ir::Argument receiver;
+    receiver.words.push_back(self);
+    run.arguments.push_back(std::move(receiver));
+    for (uint64_t i = 0; i < static_cast<uint64_t>(n.args.size()); ++i) {
+        ir::Argument arg;
+        arg.words = lowerWords(n.args[i].get());
+        if (failed_) {
+            return {undefined()};
+        }
+        if (i >= static_cast<uint64_t>(init->parameters().size())) {
+            refuse(n.pos, "this super_init");
+            return {undefined()};
+        }
+        // A concrete argument for an interface parameter boxes like every
+        // other call's: the init's words must arrive as the pair.
+        TypeRef want{init->parameters()[static_cast<size_t>(i)].type};
+        arg.words = boxClassOperand(n.args[i].get(), std::move(arg.words),
+                                    checker_.typeOf(n.args[i].get()), want,
+                                    n.args[i]->pos);
+        if (failed_) {
+            return {undefined()};
+        }
+        // Same SSE class rule as onCall: an init's float parameter takes
+        // an SSE register, decided by the checked argument type.
+        TypeRef argType = checker_.typeOf(n.args[i].get());
+        if (!argType.isError() && argType.type->kind() == Kind::Basic &&
+            basicIsFloat(*argType.type->basic()) &&
+            arg.words.size() == static_cast<size_t>(kOneWord)) {
+            arg.width = *argType.type->basic() == BasicKind::F32
+                            ? ir::IRType::F32
+                            : ir::IRType::F64;
+        }
+        run.arguments.push_back(std::move(arg));
+    }
+    run.width = ir::IRType::Void;
+    emit(std::move(run));
+    return {};
+}
+
 std::vector<ir::Value> Lowerer::lowerNewArray(const NewArray& n) {
     TypeRef arrayType = checker_.typeOf(&n);
     bool heap = arrayType.type->kind() == Kind::Pointer;
@@ -7208,6 +7288,9 @@ std::vector<ir::Value> Lowerer::lowerWords(const Expr* expr) {
     if (dynamic_cast<const NewClass*>(expr) != nullptr) {
         return lowerNewClass(static_cast<const NewClass&>(*expr));
     }
+    if (dynamic_cast<const SuperInit*>(expr) != nullptr) {
+        return lowerSuperInit(static_cast<const SuperInit&>(*expr));
+    }
     if (dynamic_cast<const FuncLit*>(expr) != nullptr) {
         return lowerFuncLit(static_cast<const FuncLit&>(*expr));
     }
@@ -7486,6 +7569,12 @@ void Lowerer::onExprStmt(ExprStmt& n) {
     // a void ternary the checker accepted.
     if (auto* tern = dynamic_cast<const Ternary*>(n.expr.get())) {
         lowerTernary(*tern);
+        return;
+    }
+    // `super_init(args);` is a call for effect, like the ternary above:
+    // the scalar dispatcher demands a value word it does not have.
+    if (auto* si = dynamic_cast<const SuperInit*>(n.expr.get())) {
+        lowerSuperInit(*si);
         return;
     }
     onIdentOrExpr(n.expr.get(), checker_.typeOf(n.expr.get()));
