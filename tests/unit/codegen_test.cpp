@@ -434,13 +434,12 @@ void testIncrDecr() {
           "statements net one up");
     check(runQuiet("func main() -> int {\n"
                    "    var i: int = 5;\n"
-                   "    var a: int = i++;\n"
-                   "    var b: int = ++i;\n"
-                   "    var c: int = i--;\n"
-                   "    var d: int = --i;\n"
-                   "    return a * 32 + b * 8 + c * 2 + d;\n"
-                   "}\n") == 235,
-          "postfix answers old, prefix answers new");
+                   "    i++;\n"
+                   "    i++;\n"
+                   "    i--;\n"
+                   "    return i;\n"
+                   "}\n") == 6,
+          "standalone increments update in place");
     check(runQuiet("func bump(p: *int) { (*p)++; }\n"
                    "func main() -> int {\n"
                    "    var x: int = 41;\n"

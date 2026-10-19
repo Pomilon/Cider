@@ -1431,7 +1431,16 @@ std::unique_ptr<Stmt> Parser::parseMatch() {
     std::unique_ptr<Block> fallback;
     while (!check(TokenKind::RBrace) && !atEnd()) {
         Position apos = peek().pos;
-        if (match(TokenKind::KwDefault)) {
+        // `_` is the Standard's wildcard spelling of the default arm. A
+        // guard after it (`_ if cond`) is a real pattern, so only the bare
+        // form is the default.
+        bool isDefault = match(TokenKind::KwDefault);
+        if (!isDefault && check(TokenKind::Ident) && peek().text == "_" &&
+            peekAt(1).kind == TokenKind::FatArrow) {
+            advance();
+            isDefault = true;
+        }
+        if (isDefault) {
             if (!match(TokenKind::FatArrow)) {
                 failHere("expected '=>'");
                 return nullptr;

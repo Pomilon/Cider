@@ -1864,7 +1864,12 @@ void Checker::visitForStmt(ForStmt& n) {
             }
         }
         if (n.step != nullptr) {
+            const Expr* savedStep = statementExpr_;
+            statementExpr_ = dynamic_cast<IncrDecr*>(n.step.get()) != nullptr
+                                 ? n.step.get()
+                                 : nullptr;
             checkExpr(n.step.get(), TypeRef{ctx_.wildcard()});
+            statementExpr_ = savedStep;
         }
         ++loopDepth_;
         sink_->onFor(n);
@@ -1882,7 +1887,12 @@ void Checker::visitForStmt(ForStmt& n) {
         }
     }
     if (n.step != nullptr) {
+        const Expr* savedStep = statementExpr_;
+        statementExpr_ = dynamic_cast<IncrDecr*>(n.step.get()) != nullptr
+                             ? n.step.get()
+                             : nullptr;
         checkExpr(n.step.get(), TypeRef{ctx_.wildcard()});
+        statementExpr_ = savedStep;
     }
     ++loopDepth_;
     n.body->accept(*this);
@@ -1974,7 +1984,11 @@ void Checker::visitForInStmt(ForInStmt& n) {
 }
 
 void Checker::visitExprStmt(ExprStmt& n) {
+    const Expr* saved = statementExpr_;
+    statementExpr_ =
+        dynamic_cast<IncrDecr*>(n.expr.get()) != nullptr ? n.expr.get() : nullptr;
     checkExpr(n.expr.get(), TypeRef{ctx_.wildcard()});
+    statementExpr_ = saved;
     if (sink_ != nullptr) {
         sink_->onExprStmt(n);
     }
@@ -2540,6 +2554,14 @@ void Checker::visitAssign(Assign& n) {
 }
 
 void Checker::visitIncrDecr(IncrDecr& n) {
+    // 7.2: the Go model makes ++/-- statements. A whole statement or a
+    // C-style for step is the whole of what the Standard blesses; a value
+    // position would hide a store inside a read.
+    if (statementExpr_ != &n) {
+        fail(n.pos, "increment and decrement are statements, not expressions");
+        record(&n, errorRef());
+        return;
+    }
     TypeRef operand = checkExpr(n.operand.get(), TypeRef{ctx_.wildcard()});
     if (operand.isError()) {
         record(&n, operand);

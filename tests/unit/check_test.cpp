@@ -1024,6 +1024,43 @@ void testTypedForIn() {
 
 // 7.10: a fini block checks like a function body; it has no answer, and a
 // return inside would leave it half-run.
+// 7.6: `_` is the default arm. 7.2: increment is a statement, never a
+// value, so the only legal positions are a whole expression statement and
+// a C-style for step.
+void testWildcardAndIncrement() {
+    std::printf("match wildcard and standalone increment\n");
+    Checked wild = check(
+        "func main() -> int {\n"
+        "  var x: int = 5;\n"
+        "  match (x) {\n"
+        "    0 | 1 => { return 1; }\n"
+        "    2 ... 9 => { return 2; }\n"
+        "    _ => { return 3; }\n"
+        "  }\n"
+        "  return 0;\n"
+        "}\n");
+    check(wild.ok, "the _ arm is the default: " + wild.stage);
+    Checked standalone = check(
+        "func main() -> int { var i: int = 0; i++; i--; return i; }\n");
+    check(standalone.ok, "a standalone increment checks: " + standalone.stage);
+    Checked step = check(
+        "func main() -> int {\n"
+        "  var t: int = 0;\n"
+        "  for (var i: int = 0; i < 3; i++) { t = t + i; }\n"
+        "  return t;\n"
+        "}\n");
+    check(step.ok, "a for-step increment checks: " + step.stage);
+    Checked embedded = check(
+        "func main() -> int { var x: int = 3; var y: int = x++; return y; }\n");
+    check(!embedded.ok && embedded.stage == "check",
+          "an increment inside a value refuses");
+    Checked nested = check(
+        "func f(x: int) -> int { return x; }\n"
+        "func main() -> int { var x: int = 3; return f(x++); }\n");
+    check(!nested.ok && nested.stage == "check",
+          "an increment inside an argument refuses");
+}
+
 void testFini() {
     std::printf("fini blocks\n");
     Checked ok = check(
@@ -1901,6 +1938,7 @@ int main() {
     testStringBytes();
     testAlignof();
     testTypedForIn();
+    testWildcardAndIncrement();
     testFini();
     testInterfaceNil();
     testMatch();

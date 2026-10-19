@@ -543,6 +543,10 @@ private:
     // 7.10: inside a fini block the storage checks like a function body,
     // but a return would leave the finalizer half-run, so it refuses.
     bool inFini_ = false;
+    // 7.2: the one expression (a whole statement or a C-style for step)
+    // where a stand-alone `++`/`--` is legal. Null everywhere else, so an
+    // embedded increment refuses.
+    const Expr* statementExpr_ = nullptr;
     // The class and self type of the method body being walked, so
     // `super` resolves against the right base (Unified Standard 4.8.3).
     std::optional<DeclId> currentClass_;

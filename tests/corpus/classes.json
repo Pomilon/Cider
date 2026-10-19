@@ -785,9 +785,9 @@
   "class": "B"
  },
  "incdec": {
-  "actual": "PASS: incdec rc=0",
-  "blocker": "none",
-  "class": "A"
+  "actual": "Standard 7.2 purges expression increments (`var y: int = ++x;` now refuses: increment and decrement are statements, not expressions); the program tests the removed form",
+  "blocker": "expression increments purged [B-terminal]",
+  "class": "B"
  },
  "inline_basic": {
   "actual": "pass",
