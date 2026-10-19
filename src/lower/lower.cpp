@@ -418,12 +418,25 @@ std::string Lowerer::emitClassVTable(DeclId concrete, Position pos) {
         table.label = label;
         table.type = TypeRef{ctx_.pointer(ctx_.basic(BasicKind::U8))};
         for (const std::string& name : resolver_.virtualNames(concrete)) {
+            std::optional<DeclId> home = resolver_.methodHome(concrete, name);
+            if (name == "deinit") {
+                // 4.8.3: the destructor slot names the chain entry for the
+                // concrete type — the no-op stub when no class in the
+                // chain declares deinit — so delete dispatches uniformly
+                // through every table.
+                table.initLabels.push_back(home.has_value()
+                                               ? emitDestroyChain(*home, pos)
+                                               : emitDeinitNone(pos));
+                if (failed_) {
+                    return "";
+                }
+                continue;
+            }
             // The slot's function is the method's static address for this
             // concrete type: the override's own function where the chain
             // redeclares the name, the declarer's otherwise. A class
             // receiver is already the address its method expects, so no
             // adapter rides here.
-            std::optional<DeclId> home = resolver_.methodHome(concrete, name);
             const resolve::Decl* declarer =
                 home.has_value() ? resolver_.declById(*home) : nullptr;
             if (declarer == nullptr) {
@@ -434,6 +447,202 @@ std::string Lowerer::emitClassVTable(DeclId concrete, Position pos) {
         }
         module_->globals.push_back(std::move(table));
     }
+    return label;
+}
+
+std::string Lowerer::emitDestroyChain(DeclId declarer, Position pos) {
+    const resolve::Decl* owner = resolver_.declById(declarer);
+    if (owner == nullptr) {
+        refuse(pos, "this deletion");
+        return "";
+    }
+    std::string label = resolver_.linkName(*owner) + "__destroy";
+    if (!destroyChains_.insert(label).second) {
+        return label;
+    }
+    for (const ir::Function& fn : module_->functions) {
+        if (fn.name == label) {
+            refuse(pos, "this deletion");
+            return "";
+        }
+    }
+    // The base chain must exist before this function is pushed: a nested
+    // emission would move module_->functions out from under function_.
+    std::string baseLabel;
+    for (DeclId base : resolver_.classBases(declarer)) {
+        std::optional<DeclId> above = resolver_.methodHome(base, "deinit");
+        if (above.has_value()) {
+            baseLabel = emitDestroyChain(*above, pos);
+            if (failed_) {
+                return "";
+            }
+            break;
+        }
+    }
+
+    int64_t savedFn = -1;
+    if (function_ != nullptr) {
+        savedFn =
+            static_cast<int64_t>(function_ - module_->functions.data());
+    }
+    uint32_t savedValues = valueSeq_;
+    uint32_t savedLabels = labelSeq_;
+    std::vector<uint32_t> savedBlocks = std::move(blockOrder_);
+    std::vector<std::unordered_map<std::string, LocalBinding>> savedLocals =
+        std::move(locals_);
+    std::vector<uint64_t> savedMarks = std::move(scopeMarks_);
+    uint32_t savedCurrent = current_;
+    bool savedTerminated = terminated_;
+
+    ir::Function fn;
+    fn.name = label;
+    TypeRef selfType{ctx_.pointer(ctx_.basic(BasicKind::U8))};
+    Parameter self;
+    self.type = selfType.type;
+    self.isMutable = false;
+    fn.signature = Signature({self}, ctx_.void_(), Abi::SysV);
+    fn.loc = pos;
+    module_->functions.push_back(std::move(fn));
+    function_ = &module_->functions.back();
+
+    valueSeq_ = 0;
+    labelSeq_ = 0;
+    blockOrder_.clear();
+    locals_.clear();
+    scopeMarks_.clear();
+
+    uint32_t entry = emitBlock(pos);
+    startBlock(entry);
+    std::vector<ir::Value> selfSlots = allocaSlots(selfType, pos, kOneWord);
+    for (ir::Value slot : selfSlots) {
+        function_->params.push_back(slot);
+    }
+    ir::Instr load;
+    load.op = ir::Op::Load;
+    load.loc = pos;
+    load.type = selfType;
+    load.width = ir::IRType::Ptr;
+    load.addressBase = selfSlots[kFirstWord];
+    load.isPure = true;
+    ir::Value selfVal = newValue(load.width, selfType, pos);
+    load.results.push_back(selfVal);
+    emit(std::move(load));
+    if (!failed_) {
+        // The class's own destructor runs first, exactly as the Standard's
+        // `delete s` runs Circle.deinit before Shape.deinit.
+        ir::Instr call;
+        call.op = ir::Op::Call;
+        call.loc = pos;
+        call.callee = resolver_.linkName(*owner) + "__deinit";
+        call.mayTrap = true;
+        ir::Argument selfArg;
+        selfArg.words.push_back(selfVal);
+        call.arguments.push_back(std::move(selfArg));
+        call.width = ir::IRType::Void;
+        emit(std::move(call));
+    }
+    if (!failed_ && !baseLabel.empty()) {
+        // Then the nearest base declarer's chain, which walks further up
+        // the same way.
+        ir::Instr up;
+        up.op = ir::Op::Call;
+        up.loc = pos;
+        up.callee = baseLabel;
+        up.mayTrap = true;
+        ir::Argument upArg;
+        upArg.words.push_back(selfVal);
+        up.arguments.push_back(std::move(upArg));
+        up.width = ir::IRType::Void;
+        emit(std::move(up));
+    }
+    recordParamClasses();
+    if (!failed_) {
+        function_->canThrow = true;
+        ir::Terminator fret;
+        fret.term = ir::Term::Ret;
+        fret.loc = pos;
+        emitTerminator(fret);
+    }
+    function_ = nullptr;
+    function_ =
+        savedFn >= 0 ? &module_->functions[static_cast<size_t>(savedFn)] : nullptr;
+    valueSeq_ = savedValues;
+    labelSeq_ = savedLabels;
+    blockOrder_ = std::move(savedBlocks);
+    locals_ = std::move(savedLocals);
+    scopeMarks_ = std::move(savedMarks);
+    current_ = savedCurrent;
+    terminated_ = savedTerminated;
+    return label;
+}
+
+std::string Lowerer::emitDeinitNone(Position pos) {
+    std::string label = "cider_deinit_none";
+    if (noopDeinitEmitted_) {
+        return label;
+    }
+    for (const ir::Function& fn : module_->functions) {
+        if (fn.name == label) {
+            refuse(pos, "this deletion");
+            return "";
+        }
+    }
+    noopDeinitEmitted_ = true;
+
+    int64_t savedFn = -1;
+    if (function_ != nullptr) {
+        savedFn =
+            static_cast<int64_t>(function_ - module_->functions.data());
+    }
+    uint32_t savedValues = valueSeq_;
+    uint32_t savedLabels = labelSeq_;
+    std::vector<uint32_t> savedBlocks = std::move(blockOrder_);
+    std::vector<std::unordered_map<std::string, LocalBinding>> savedLocals =
+        std::move(locals_);
+    std::vector<uint64_t> savedMarks = std::move(scopeMarks_);
+    uint32_t savedCurrent = current_;
+    bool savedTerminated = terminated_;
+
+    ir::Function fn;
+    fn.name = label;
+    TypeRef selfType{ctx_.pointer(ctx_.basic(BasicKind::U8))};
+    Parameter self;
+    self.type = selfType.type;
+    self.isMutable = false;
+    fn.signature = Signature({self}, ctx_.void_(), Abi::SysV);
+    fn.loc = pos;
+    module_->functions.push_back(std::move(fn));
+    function_ = &module_->functions.back();
+
+    valueSeq_ = 0;
+    labelSeq_ = 0;
+    blockOrder_.clear();
+    locals_.clear();
+    scopeMarks_.clear();
+
+    uint32_t entry = emitBlock(pos);
+    startBlock(entry);
+    std::vector<ir::Value> selfSlots = allocaSlots(selfType, pos, kOneWord);
+    for (ir::Value slot : selfSlots) {
+        function_->params.push_back(slot);
+    }
+    recordParamClasses();
+    if (!failed_) {
+        ir::Terminator fret;
+        fret.term = ir::Term::Ret;
+        fret.loc = pos;
+        emitTerminator(fret);
+    }
+    function_ = nullptr;
+    function_ =
+        savedFn >= 0 ? &module_->functions[static_cast<size_t>(savedFn)] : nullptr;
+    valueSeq_ = savedValues;
+    labelSeq_ = savedLabels;
+    blockOrder_ = std::move(savedBlocks);
+    locals_ = std::move(savedLocals);
+    scopeMarks_ = std::move(savedMarks);
+    current_ = savedCurrent;
+    terminated_ = savedTerminated;
     return label;
 }
 
@@ -7692,21 +7901,87 @@ void Lowerer::onDelete(DeleteStmt& n) {
     TypeRef ptrType = checker_.typeOf(n.ptr.get());
     const Type* obj = ptrType.type->pointee();
     std::optional<DeclId> id = obj->decl();
-    const resolve::Decl* owner = id.has_value() ? resolver_.declById(*id) : nullptr;
-    const Signature* dsig = id.has_value() ? resolver_.methodSig(*id, "deinit") : nullptr;
-    if (dsig != nullptr) {
-        // A declared deinit runs first, with the object address as the
-        // receiver — the same receiver-first shape onMethodDecl emits.
-        ir::Instr run;
-        run.op = ir::Op::Call;
-        run.loc = n.pos;
-        run.callee = resolver_.linkName(*owner) + "__deinit";
-        run.mayTrap = true;
-        ir::Argument self;
-        self.words.push_back(ptr[0]);
-        run.arguments.push_back(std::move(self));
-        run.width = ir::IRType::Void;
-        emit(std::move(run));
+    if (id.has_value() && !resolver_.virtualNames(*id).empty()) {
+        // 4.8.3: a hierarchy that dispatches methods answers delete
+        // polymorphically. Slot zero names the chain entry the dynamic
+        // type chose, so `delete base_ptr` runs the derived destructor
+        // (then every base, through the chain) exactly as a virtual call
+        // runs the override.
+        int64_t slot = resolver_.virtualIndexOf(*id, "deinit");
+        if (slot >= 0) {
+            TypeRef word{ctx_.pointer(ctx_.basic(BasicKind::U8))};
+            ir::Instr loadV;
+            loadV.op = ir::Op::Load;
+            loadV.loc = n.pos;
+            loadV.type = word;
+            loadV.width = ir::IRType::Ptr;
+            loadV.addressBase = ptr[kFirstWord];
+            loadV.isPure = true;
+            ir::Value table = newValue(loadV.width, word, n.pos);
+            loadV.results.push_back(table);
+            emit(std::move(loadV));
+            if (!failed_) {
+                TypeRef count{ctx_.basic(BasicKind::I64)};
+                ir::Value delta =
+                    constantI64(slot * layout::kSizePointer, count, n.pos);
+                ir::Instr step;
+                step.op = ir::Op::Add;
+                step.loc = n.pos;
+                step.type = word;
+                step.width = ir::IRType::Ptr;
+                step.isPure = true;
+                step.operands.push_back(table);
+                step.operands.push_back(delta);
+                ir::Value slotAt = newValue(step.width, word, n.pos);
+                step.results.push_back(slotAt);
+                emit(std::move(step));
+                if (!failed_) {
+                    ir::Instr loadF;
+                    loadF.op = ir::Op::Load;
+                    loadF.loc = n.pos;
+                    loadF.type = word;
+                    loadF.width = ir::IRType::Ptr;
+                    loadF.addressBase = slotAt;
+                    loadF.isPure = true;
+                    ir::Value entry = newValue(loadF.width, word, n.pos);
+                    loadF.results.push_back(entry);
+                    emit(std::move(loadF));
+                    if (!failed_) {
+                        ir::Instr run;
+                        run.op = ir::Op::Call;
+                        run.loc = n.pos;
+                        run.call.indirect = true;
+                        run.calleeValue = entry;
+                        run.mayTrap = true;
+                        ir::Argument self;
+                        self.words.push_back(ptr[kFirstWord]);
+                        run.arguments.push_back(std::move(self));
+                        run.width = ir::IRType::Void;
+                        emit(std::move(run));
+                    }
+                }
+            }
+        }
+    } else if (id.has_value()) {
+        const Signature* dsig = resolver_.methodSig(*id, "deinit");
+        std::optional<DeclId> home = resolver_.methodHome(*id, "deinit");
+        if (dsig != nullptr && home.has_value()) {
+            // A chain with no table still runs derived-first: the entry is
+            // the nearest declarer's own function, which walks the bases.
+            std::string callee = emitDestroyChain(*home, n.pos);
+            if (!failed_ && !callee.empty()) {
+                ir::Instr run;
+                run.op = ir::Op::Call;
+                run.loc = n.pos;
+                run.callee = callee;
+                run.mayTrap = true;
+                ir::Argument self;
+                self.words.push_back(ptr[kFirstWord]);
+                run.arguments.push_back(std::move(self));
+                run.width = ir::IRType::Void;
+                emit(std::move(run));
+            }
+        }
     }
     // Then the storage goes back. Prelude names mangle to their link symbol
     // exactly as onCall mangles them, and free(nilPtr) is a no-op by

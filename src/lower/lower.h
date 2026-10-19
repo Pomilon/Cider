@@ -306,8 +306,19 @@ public:
     // The virtual slots of a class as one module global (FEATURES 2.3): the
     // table's entry i holds the address of the method that owns slot i for
     // this concrete type — its own override, or the declarer's function for
-    // an inherited slot. A class never virtualized answers "".
+    // an inherited slot. Slot zero is the destructor chain entry (4.8.3),
+    // the no-op stub when the chain declares no deinit. A class never
+    // virtualized answers "".
     std::string emitClassVTable(DeclId concrete, Position pos);
+    // 4.8.3: one declaring class's destructor chain as a generated
+    // `X__destroy` function — its own deinit, then the nearest base
+    // declarer's chain. Every delete site enters a chain, so the derived
+    // destructor runs first and each base follows. Answers the label.
+    std::string emitDestroyChain(DeclId declarer, Position pos);
+    // The shared no-op destructor a virtual hierarchy's table names when no
+    // class in the chain declares deinit: delete still dispatches
+    // uniformly, and the empty body says exactly that.
+    std::string emitDeinitNone(Position pos);
     // Emits one receiver adapter for a class method reached through an
     // interface: dispatch always passes the data word's address, so the
     // adapter loads the class reference it holds and tail-calls the
@@ -748,6 +759,11 @@ private:
     std::unordered_set<std::string> vtablesEmitted_;
     // One class vtable per concrete type, emitted once under its own label.
     std::unordered_set<std::string> classVtablesEmitted_;
+    // Destructor chains already emitted: one per declaring class, shared by
+    // every delete site and every table slot that names it.
+    std::unordered_set<std::string> destroyChains_;
+    // The no-op destructor stub is emitted at most once per program.
+    bool noopDeinitEmitted_ = false;
     // Receiver adapters already emitted: one (class, method) adapter is
     // shared by every vtable that names it.
     std::unordered_set<std::string> adaptersEmitted_;

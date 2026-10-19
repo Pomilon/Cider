@@ -165,7 +165,8 @@ public:
     // the declaration flags, so declaration order inside a module cannot
     // matter. A chain with several bases at one level has no vtable yet
     // and answers empty; a name that is not virtual answers -1 from the
-    // index.
+    // index. A non-empty list gains the destructor slot first (4.8.3), so
+    // `delete` through a base pointer dispatches like any virtual call.
     std::vector<std::string> virtualNames(DeclId id) const;
     int64_t virtualIndexOf(DeclId id, const std::string& name) const;
     // The class that declares the method, walking the chain: a virtual call
@@ -242,6 +243,10 @@ private:
     void resolveDeclTypes(const std::string& name, Program& program, const Scope* scope);
     TypeRef resolveNamed(const NamedType* type, const Scope* scope);
     TypeRef resolveSignature(const FuncSigType* type, const Scope* scope, bool inPointer);
+    // The slot list before the destructor rides: base-first class virtuals
+    // only, so a chain with no user virtuals answers empty and forms no
+    // table at all.
+    std::vector<std::string> virtualSlots(DeclId id) const;
     // Validates one method's signature. The checker rebuilds it with this same
     // function when it walks the body — one function, called twice, never two
     // rules.

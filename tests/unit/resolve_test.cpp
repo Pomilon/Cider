@@ -446,6 +446,36 @@ void testMethodInit() {
 
 }  // namespace
 
+// 4.8.3: a virtual hierarchy's table carries the destructor slot first, so
+// delete can dispatch through slot zero; user virtuals keep their order
+// after it, and a chain with no virtuals forms no table at all.
+void testDeleteSlot() {
+    std::printf("virtual slots carry the destructor first\n");
+    Resolved r = resolve("class Shape {\n"
+                         "    var w: int;\n"
+                         "    virtual func area() -> int { return this->w; }\n"
+                         "    func init() { this->w = 1; }\n"
+                         "}\n"
+                         "class Circle : Shape {\n"
+                         "    override func area() -> int { return this->w; }\n"
+                         "}\n");
+    check(r.ok, "resolves");
+    const cider::resolve::Decl* shape = find(*r.resolver, "Shape");
+    const cider::resolve::Decl* circle = find(*r.resolver, "Circle");
+    std::vector<std::string> slots = r.resolver->virtualNames(shape->id);
+    std::vector<std::string> want{"deinit", "area"};
+    check(slots == want, "deinit rides slot zero");
+    check(r.resolver->virtualIndexOf(circle->id, "area") == 1,
+          "the inherited override keeps the shifted slot");
+    Resolved plain = resolve("class Data {\n"
+                             "    var a: int;\n"
+                             "    func init() { this->a = 1; }\n"
+                             "}\n");
+    check(plain.ok, "a plain class resolves");
+    check(plain.resolver->virtualNames(find(*plain.resolver, "Data")->id).empty(),
+          "a chain with no virtuals keeps no table");
+}
+
 int main() {
     std::printf("resolve_test — names bind, or the program is rejected\n\n");
     testGlobals();
@@ -467,6 +497,7 @@ int main() {
     testBitfields();
     testAbiSpellings();
     testMethodInit();
+    testDeleteSlot();
     std::printf("\n%d checks, %s\n", checks, failures == 0 ? "all passed" : "FAILURES");
     return failures == 0 ? 0 : 1;
 }

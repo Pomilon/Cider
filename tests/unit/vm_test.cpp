@@ -624,6 +624,40 @@ void testSuperInit() {
           "the optimised chain answers 45: " + opr.error);
 }
 
+// 4.8.3: delete runs the destructor chain, and a hierarchy that carries a
+// table starts it dynamically — both legs of the VM agree.
+void testPolymorphicDelete() {
+    std::printf("polymorphic delete on both legs\n");
+    Lowered unopt = lower("var trace: int = 0;\n"
+                          "class Shape {\n"
+                          "    var w: int;\n"
+                          "    func init(w: int) { this->w = w; }\n"
+                          "    virtual func area() -> int { return this->w; }\n"
+                          "    func deinit() { trace = trace * 10 + 2; }\n"
+                          "}\n"
+                          "class Square : Shape {\n"
+                          "    var sides: int;\n"
+                          "    func init(w: int, s: int) { super_init(w); this->sides = s; }\n"
+                          "    override func area() -> int { return this->w * this->sides; }\n"
+                          "    func deinit() { trace = trace * 10 + 1; }\n"
+                          "}\n"
+                          "func main() -> int {\n"
+                          "    var q: *Square = new Square(4, 5);\n"
+                          "    var s: *Shape = q as *Shape;\n"
+                          "    delete s;\n"
+                          "    return trace;\n"
+                          "}\n");
+    check(unopt.ok, "lowers: " + unopt.stage);
+    cider::vm::VmResult unr = cider::vm::run(*unopt.module, "");
+    check(unr.ok && unr.exitCode == 12,
+          "the unoptimised chain answers 12: " + unr.error);
+    cider::opt::OptResult ores = cider::opt::run(*unopt.module);
+    check(ores.ok, "optimises: " + ores.error);
+    cider::vm::VmResult opr = cider::vm::run(*unopt.module, "");
+    check(opr.ok && opr.exitCode == 12,
+          "the optimised chain answers 12: " + opr.error);
+}
+
 }  // namespace
 
 int main() {
@@ -639,6 +673,7 @@ int main() {
     testFileSyscalls();
     testArgv();
     testSuperInit();
+    testPolymorphicDelete();
     std::printf("\n%d checks, %s\n", checks, failures == 0 ? "all passed" : "FAILURES");
     return failures == 0 ? 0 : 1;
 }

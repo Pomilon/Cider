@@ -759,6 +759,19 @@ std::vector<DeclId> Resolver::classBases(DeclId id) const {
 }
 
 std::vector<std::string> Resolver::virtualNames(DeclId id) const {
+    std::vector<std::string> out = virtualSlots(id);
+    if (!out.empty()) {
+        // 4.8.3: a hierarchy that dispatches methods through a table
+        // answers delete polymorphically too, so the destructor's chain
+        // entry rides the first slot of every table. A chain with no
+        // deinit anywhere keeps the slot for a no-op stub; a chain with
+        // no virtuals never forms a table, so delete stays static there.
+        out.insert(out.begin(), "deinit");
+    }
+    return out;
+}
+
+std::vector<std::string> Resolver::virtualSlots(DeclId id) const {
     std::vector<DeclId> bases = classBases(id);
     if (bases.size() > kOneBase) {
         // Several bases at one level compose no slot list yet; callers see
@@ -769,7 +782,7 @@ std::vector<std::string> Resolver::virtualNames(DeclId id) const {
     if (!bases.empty()) {
         // One base at a level owns every inherited slot; its list is the
         // prefix of this class's (a multiple-base level answered above).
-        out = virtualNames(bases[kFirstBase]);
+        out = virtualSlots(bases[kFirstBase]);
     }
     std::string key = declKey(id);
     for (const std::string& name : methodNames(id)) {
