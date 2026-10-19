@@ -589,6 +589,9 @@ struct FieldDecl : Node {
     // 4.8.4: public is the default; `private` restricts every read and
     // store of the field to the module that declares its class or struct.
     bool isPrivate = false;
+    // v2 CIDER-BUG-049: an optional default runs at every construction
+    // before the constructor body, so an aggregate may omit the field.
+    std::unique_ptr<Expr> init;
     FieldDecl(Position p, std::string n, std::unique_ptr<TypeExpr> t,
               std::unique_ptr<Expr> w, bool vol, bool priv = false)
         : Node(std::move(p)), name(std::move(n)), type(std::move(t)),
@@ -1112,7 +1115,15 @@ inline void ASTVisitor::visitThrowStmt(ThrowStmt& n) {
 inline void ASTVisitor::visitDeleteStmt(DeleteStmt& n) { n.ptr->accept(*this); }
 inline void ASTVisitor::visitAsmStmt(AsmStmt&) {}
 inline void ASTVisitor::visitParam(Param& n) { n.type->accept(*this); }
-inline void ASTVisitor::visitFieldDecl(FieldDecl& n) { n.type->accept(*this); }
+inline void ASTVisitor::visitFieldDecl(FieldDecl& n) {
+    n.type->accept(*this);
+    if (n.bitWidth != nullptr) {
+        n.bitWidth->accept(*this);
+    }
+    if (n.init != nullptr) {
+        n.init->accept(*this);
+    }
+}
 inline void ASTVisitor::visitMethodDecl(MethodDecl& n) {
     for (auto& p : n.params) p.accept(*this);
     if (n.returns != nullptr) n.returns->accept(*this);

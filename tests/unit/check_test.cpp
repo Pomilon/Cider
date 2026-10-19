@@ -1196,6 +1196,45 @@ void testMultipleBases() {
           "a later headed base refuses");
 }
 
+// CIDER-BUG-049: a field may spell a default. Defaults run for every
+// construction before the constructor or literal stores, and a defaulted
+// field is exempt from the constructor's assignment proof.
+void testFieldDefaults() {
+    std::printf("field default initializers\n");
+    Checked omitted = check(
+        "class C { var x: int = 3; var y: int; }\n"
+        "func main() -> int { var c: C = C { y: 5 }; return c.x + c.y; }\n");
+    check(omitted.ok, "a defaulted field may be omitted: " + omitted.stage);
+    Checked missing = check(
+        "class C { var x: int = 3; var y: int; }\n"
+        "func main() -> int { var c: C = C { x: 1 }; return c.y; }\n");
+    check(!missing.ok && missing.stage == "check",
+          "a field without a default is still required");
+    Checked twice = check(
+        "class C { var x: int = 3; var y: int; }\n"
+        "func main() -> int {\n"
+        "    var c: C = C { x: 1, x: 2, y: 3 };\n"
+        "    return c.x;\n"
+        "}\n");
+    check(!twice.ok && twice.stage == "check",
+          "a field named twice refuses");
+    Checked exempt = check(
+        "class C { var x: int = 3; var y: int; func init() { this->y = 5; } }\n"
+        "func main() -> int { var c: *C = new C(); return c->x; }\n");
+    check(exempt.ok,
+          "a default exempts the field from init coverage: " + exempt.stage);
+    Checked mistyped = check(
+        "class C { var x: int = \"three\"; }\n"
+        "func main() -> int { return 0; }\n");
+    check(!mistyped.ok && mistyped.stage == "check",
+          "a mistyped default refuses");
+    Checked global = check(
+        "const K: int = 7;\n"
+        "class C { var x: int = K; }\n"
+        "func main() -> int { var c: C = C { }; return c.x; }\n");
+    check(global.ok, "a default may name a constant: " + global.stage);
+}
+
 // 7.6: `_` is the default arm. 7.2: increment is a statement, never a
 // value, so the only legal positions are a whole expression statement and
 // a C-style for step.
@@ -2113,6 +2152,7 @@ int main() {
     testPrivateFields();
     testSuperInit();
     testMultipleBases();
+    testFieldDefaults();
     testWildcardAndIncrement();
     testFini();
     testInterfaceNil();

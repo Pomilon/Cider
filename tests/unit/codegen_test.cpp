@@ -2625,6 +2625,31 @@ void testAsm() {
           "values live across a clobbering block survive");
 }
 
+// CIDER-BUG-049: defaults fill every construction before a constructor or
+// a literal store can overwrite them.
+void testFieldDefaults() {
+    std::printf("field defaults run before stores\n");
+    check(runQuiet("class P {\n"
+                   "    var x: int = 3;\n"
+                   "    var y: int = 4;\n"
+                   "    func sum() -> int { return this->x * 10 + this->y; }\n"
+                   "}\n"
+                   "class Q {\n"
+                   "    var x: int = 3;\n"
+                   "    var y: int;\n"
+                   "    func init() { this->y = 9; }\n"
+                   "    func sum() -> int { return this->x * 10 + this->y; }\n"
+                   "}\n"
+                   "func main() -> int {\n"
+                   "    var a: *P = new P { };\n"
+                   "    var b: *P = new P { x: 9 };\n"
+                   "    var c: P = uninit;\n"
+                   "    var q: *Q = new Q();\n"
+                   "    return a->sum() + b->sum() + c.sum() + q->sum();\n"
+                   "}\n") == 201,
+          "defaults fill omitted fields, stores win, inits leave them");
+}
+
 }  // namespace
 
 int main() {
@@ -2693,6 +2718,7 @@ int main() {
     testBigReturn();
     testAlignof();
     testSliceCopy();
+    testFieldDefaults();
     testRepro();
     std::printf("\n%d checks, %s\n", checks, failures == 0 ? "all passed" : "FAILURES");
     return failures == 0 ? 0 : 1;

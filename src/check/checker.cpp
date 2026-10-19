@@ -1265,6 +1265,7 @@ void Checker::visitStructDecl(StructDecl& n) {
         return;
     }
     checkNoSelfEmbed(self->id, "struct", n.name, n.fields, "field");
+    checkFieldDefaults(self->id, n.fields);
     // Conformance: every interface method, present with the same signature.
     for (const std::unique_ptr<TypeExpr>& iface : n.interfaces) {
         TypeRef t = resolveHere(iface.get());
@@ -1310,6 +1311,7 @@ void Checker::visitClassDecl(ClassDecl& n) {
         }
     }
     checkNoSelfEmbed(self->id, "class", n.name, n.fields, "field");
+    checkFieldDefaults(self->id, n.fields);
     checkOverrides(*self, n);
     checkMethods(self->id, Kind::Class, n.methods);
     checkCtor(self->id, Kind::Class, n.init.get(), true);
@@ -1323,8 +1325,13 @@ void Checker::visitUnionDecl(UnionDecl& n) {
         return;
     }
     checkNoSelfEmbed(self->id, "union", n.name, n.members, "member");
-    // The default walk: each member's type expression, as before.
+    // The default walk: each member's type expression, as before. v2
+    // CIDER-BUG-049 defaults have no single member to belong to, so a
+    // defaulted union member refuses by name.
     for (auto& m : n.members) {
+        if (m.init != nullptr) {
+            fail(m.init->pos, "a union member cannot carry a default");
+        }
         m.accept(*this);
     }
 }
@@ -1725,12 +1732,33 @@ Checker::InitAssign Checker::assignedThrough(const Stmt* stmt, InitAssign state,
     return state;
 }
 
+void Checker::checkFieldDefaults(DeclId id, const std::vector<FieldDecl>& fields) {
+    for (const FieldDecl& field : fields) {
+        if (field.init == nullptr) {
+            continue;
+        }
+        TypeRef want = resolver_.fieldType(id, field.name);
+        if (want.isError()) {
+            continue;
+        }
+        TypeRef got = checkExpr(field.init.get(), want);
+        checkCompatible(field.init->pos, field.init.get(), got, want);
+    }
+}
+
 void Checker::checkInitAssign(DeclId id, const FuncDecl& ctor) {
     // TYPES.md §9.2: a path through init that reaches the end, or reaches
     // a return, having left a field unassigned is a compile-time rejection
     // naming the field. Runs over the body independent of the checking
     // walk, so check and lowering modes share one analysis.
-    std::vector<std::string> fields = resolver_.fieldNames(id);
+    std::vector<std::string> fields;
+    for (const std::string& name : resolver_.fieldNames(id)) {
+        // v2 CIDER-BUG-049: a defaulted field is exempt from the proof:
+        // its default runs before the constructor body either way.
+        if (resolver_.fieldDefault(id, name) == nullptr) {
+            fields.push_back(name);
+        }
+    }
     if (ctor.body == nullptr) {
         return;
     }
@@ -4787,14 +4815,17 @@ TypeRef Checker::checkNewStruct(NewStruct& expr) {
         return errorRef();
     }
     std::vector<std::string> fields = resolver_.chainFieldNames(*id);
-    if (expr.fields.size() != fields.size()) {
-        fail(expr.pos, "every field is named, exactly once");
-        return errorRef();
-    }
+    std::unordered_set<std::string> named;
     for (const FieldInit& init : expr.fields) {
         TypeRef field = resolver_.fieldType(*id, init.name);
         if (field.isError()) {
             fail(init.value->pos, "no such field");
+            return errorRef();
+        }
+        // v2 CIDER-BUG-049: one name, one store; a repeated name would
+        // quietly overwrite the store before it.
+        if (!named.insert(init.name).second) {
+            fail(init.value->pos, "field '" + init.name + "' is named twice");
             return errorRef();
         }
         if (!fieldVisible(*id, init.name, init.value->pos)) {
@@ -4805,16 +4836,13 @@ TypeRef Checker::checkNewStruct(NewStruct& expr) {
             return errorRef();
         }
     }
-    for (uint64_t i = 0; i < static_cast<uint64_t>(fields.size()); ++i) {
-        bool named = false;
-        for (const FieldInit& init : expr.fields) {
-            if (init.name == fields[i]) {
-                named = true;
-                break;
-            }
+    for (const std::string& name : fields) {
+        // A defaulted field may be left out: its default runs first.
+        if (resolver_.fieldDefault(*id, name) != nullptr) {
+            continue;
         }
-        if (!named) {
-            fail(expr.pos, "missing field '" + fields[i] + "'");
+        if (named.find(name) == named.end()) {
+            fail(expr.pos, "missing field '" + name + "'");
             return errorRef();
         }
     }

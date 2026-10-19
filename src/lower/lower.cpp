@@ -2928,6 +2928,15 @@ void Lowerer::onVarDecl(VarDecl& n) {
         binding.type = type;
         binding.isMutable = true;
         locals_.back()[n.name] = binding;
+        // CIDER-BUG-049: a value of a default-bearing class or struct
+        // starts its defaults even without a constructor call.
+        if (type.type->kind() == Kind::Class || type.type->kind() == Kind::Struct) {
+            Place base;
+            base.slots = binding.slots;
+            base.type = type;
+            base.off = 0;
+            emitFieldDefaults(base, type, n.pos);
+        }
         return;
     }
     TypeRef type = checker_.typeOf(&n);
@@ -3578,6 +3587,46 @@ bool Lowerer::storeFieldInit(Position pos, const Place& base, int64_t fieldOff,
     return !failed_;
 }
 
+void Lowerer::emitFieldDefaults(const Place& baseIn, TypeRef objType,
+                                Position pos) {
+    if (objType.isError()) {
+        return;
+    }
+    std::optional<DeclId> id = objType.type->decl();
+    if (!id.has_value()) {
+        return;
+    }
+    Place base = baseIn;
+    base.type = objType;
+    std::unordered_set<int64_t> unitsZeroed;
+    for (const std::string& name : resolver_.chainFieldNames(*id)) {
+        const Expr* dflt = resolver_.fieldDefault(*id, name);
+        if (dflt == nullptr) {
+            continue;
+        }
+        int64_t fieldOff = resolver_.fieldOffset(*id, name);
+        TypeRef fieldType = resolver_.fieldType(*id, name);
+        if (fieldOff < 0 || fieldType.isError()) {
+            refuse(pos, "this default");
+            return;
+        }
+        std::vector<ir::Value> value = lowerWords(dflt);
+        if (failed_) {
+            return;
+        }
+        value = boxClassOperand(dflt, std::move(value), checker_.typeOf(dflt),
+                                fieldType, pos);
+        if (failed_) {
+            return;
+        }
+        if (!storeFieldInit(pos, base, fieldOff, fieldType, *id, name,
+                            unitsZeroed, value)) {
+            refuse(pos, "this default");
+            return;
+        }
+    }
+}
+
 void Lowerer::constructStruct(const Place& baseIn, TypeRef structType,
                               const NewStruct& n) {
     if (structType.isError() || structType.type->kind() != Kind::Struct) {
@@ -3591,6 +3640,10 @@ void Lowerer::constructStruct(const Place& baseIn, TypeRef structType,
     }
     Place base = baseIn;
     base.type = structType;
+    emitFieldDefaults(base, structType, n.pos);
+    if (failed_) {
+        return;
+    }
     std::unordered_set<int64_t> unitsZeroed;
     for (const FieldInit& field : n.fields) {
         int64_t fieldOff = resolver_.fieldOffset(*id, field.name);
@@ -6595,6 +6648,10 @@ void Lowerer::constructClass(const Place& baseIn, TypeRef objType,
     }
     Place base = baseIn;
     base.type = classType;
+    emitFieldDefaults(base, classType, n.pos);
+    if (failed_) {
+        return;
+    }
     std::unordered_set<int64_t> unitsZeroed;
     for (const FieldInit& field : n.fields) {
         int64_t fieldOff = resolver_.fieldOffset(*id, field.name);
@@ -6864,6 +6921,16 @@ std::vector<ir::Value> Lowerer::lowerNewClass(const NewClass& n) {
         if (failed_) {
             return {undefined()};
         }
+    }
+    // CIDER-BUG-049: defaults land before the constructor body, so the
+    // body's own stores overwrite them exactly as a literal's would.
+    Place defaults;
+    defaults.hasIndirect = true;
+    defaults.indirect = at;
+    defaults.off = 0;
+    emitFieldDefaults(defaults, TypeRef{obj}, n.pos);
+    if (failed_) {
+        return {undefined()};
     }
     ir::Instr run;
     run.op = ir::Op::Call;

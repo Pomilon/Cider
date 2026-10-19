@@ -485,6 +485,11 @@ FieldDecl Parser::parseField() {
     if (match(TokenKind::Colon)) {
         field.bitWidth = parseExpr();
     }
+    // v2 CIDER-BUG-049: a field may carry a default, run at every
+    // construction so an aggregate can leave it out.
+    if (match(TokenKind::Eq)) {
+        field.init = parseExpr();
+    }
     if (!match(TokenKind::Semi)) {
         failHere("expected ';'");
     }

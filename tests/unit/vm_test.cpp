@@ -712,6 +712,39 @@ void testNilFnptrCall() {
           "the optimised call dies by SIGSEGV: " + opr.error);
 }
 
+// CIDER-BUG-049: defaults fill every construction before a constructor or
+// a literal store can overwrite them.
+void testFieldDefaults() {
+    std::printf("field defaults on both legs\n");
+    Lowered def = lower("class P {\n"
+                        "    var x: int = 3;\n"
+                        "    var y: int = 4;\n"
+                        "    func sum() -> int { return this->x * 10 + this->y; }\n"
+                        "}\n"
+                        "class Q {\n"
+                        "    var x: int = 3;\n"
+                        "    var y: int;\n"
+                        "    func init() { this->y = 9; }\n"
+                        "    func sum() -> int { return this->x * 10 + this->y; }\n"
+                        "}\n"
+                        "func main() -> int {\n"
+                        "    var a: *P = new P { };\n"
+                        "    var b: *P = new P { x: 9 };\n"
+                        "    var c: P = uninit;\n"
+                        "    var q: *Q = new Q();\n"
+                        "    return a->sum() + b->sum() + c.sum() + q->sum();\n"
+                        "}\n");
+    check(def.ok, "a defaulted program lowers: " + def.stage);
+    cider::vm::VmResult unr = cider::vm::run(*def.module, "");
+    check(unr.ok && unr.exitCode == 201,
+          "the unoptimised defaults answer 201: " + unr.error);
+    cider::opt::OptResult ores = cider::opt::run(*def.module);
+    check(ores.ok, "optimises: " + ores.error);
+    cider::vm::VmResult opr = cider::vm::run(*def.module, "");
+    check(opr.ok && opr.exitCode == 201,
+          "the optimised defaults answer 201: " + opr.error);
+}
+
 }  // namespace
 
 int main() {
@@ -730,6 +763,7 @@ int main() {
     testPolymorphicDelete();
     testMultipleBases();
     testNilFnptrCall();
+    testFieldDefaults();
     std::printf("\n%d checks, %s\n", checks, failures == 0 ? "all passed" : "FAILURES");
     return failures == 0 ? 0 : 1;
 }

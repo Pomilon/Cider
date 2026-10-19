@@ -266,6 +266,22 @@ std::string Resolver::fieldModule(DeclId id, const std::string& name) const {
     return decl->scope->module;
 }
 
+const Expr* Resolver::fieldDefault(DeclId id, const std::string& name) const {
+    auto found = fieldDefaultExprs_.find(declKey(id) + "." + name);
+    if (found != fieldDefaultExprs_.end()) {
+        return found->second;
+    }
+    // A chain's base fields keep their own defaults: the declaring base
+    // answers, transitively, like fieldType.
+    for (DeclId base : classBases(id)) {
+        const Expr* dflt = fieldDefault(base, name);
+        if (dflt != nullptr) {
+            return dflt;
+        }
+    }
+    return nullptr;
+}
+
 bool Resolver::chainFieldsImpl(DeclId id, std::unordered_set<std::string>& seen,
                                std::vector<std::string>& out) const {
     if (!seen.insert(declKey(id)).second) {
@@ -1273,6 +1289,9 @@ void Resolver::resolveDeclTypes(const std::string& module, Program& program,
             if (!t.isError()) {
                 fieldTypes_[fkey + "." + field.name] = t;
                 fieldLists_[fkey].push_back(field.name);
+                if (field.init != nullptr) {
+                    fieldDefaultExprs_[fkey + "." + field.name] = field.init.get();
+                }
                 if (field.isPrivate) {
                     privateFields_.insert(fkey + "." + field.name);
                 }
@@ -1346,6 +1365,10 @@ void Resolver::resolveDeclTypes(const std::string& module, Program& program,
                     std::string fkey = declKey(self->id);
                     fieldTypes_[fkey + "." + field.name] = t;
                     fieldLists_[fkey].push_back(field.name);
+                    if (field.init != nullptr) {
+                        fieldDefaultExprs_[fkey + "." + field.name] =
+                            field.init.get();
+                    }
                     if (field.isPrivate) {
                         privateFields_.insert(fkey + "." + field.name);
                     }
@@ -1402,6 +1425,10 @@ void Resolver::resolveDeclTypes(const std::string& module, Program& program,
                     std::string fkey = declKey(cself->id);
                     fieldTypes_[fkey + "." + field.name] = t;
                     fieldLists_[fkey].push_back(field.name);
+                    if (field.init != nullptr) {
+                        fieldDefaultExprs_[fkey + "." + field.name] =
+                            field.init.get();
+                    }
                     if (field.isPrivate) {
                         privateFields_.insert(fkey + "." + field.name);
                     }
@@ -1461,6 +1488,10 @@ void Resolver::resolveDeclTypes(const std::string& module, Program& program,
                     std::string fkey = declKey(uself->id);
                     fieldTypes_[fkey + "." + member.name] = t;
                     fieldLists_[fkey].push_back(member.name);
+                    if (member.init != nullptr) {
+                        fieldDefaultExprs_[fkey + "." + member.name] =
+                            member.init.get();
+                    }
                     if (member.isPrivate) {
                         privateFields_.insert(fkey + "." + member.name);
                     }
@@ -1968,6 +1999,10 @@ std::optional<DeclId> Resolver::instantiate(DeclId tmpl, const std::vector<TypeR
             if (!sub.isError()) {
                 fieldTypes_[into + "." + field] = sub;
                 fieldLists_[into].push_back(field);
+                const Expr* dflt = fieldDefault(tmpl, field);
+                if (dflt != nullptr) {
+                    fieldDefaultExprs_[into + "." + field] = dflt;
+                }
                 if (fieldIsPrivate(tmpl, field)) {
                     privateFields_.insert(into + "." + field);
                 }

@@ -408,6 +408,10 @@ public:
                         TypeRef fieldType, DeclId id, const std::string& name,
                         std::unordered_set<int64_t>& unitsZeroed,
                         std::vector<ir::Value>& value);
+    // CIDER-BUG-049: every construction runs the fields that carry a
+    // default, in layout order, before the constructor body or the
+    // literal's own stores, so a later store wins.
+    void emitFieldDefaults(const Place& base, TypeRef objType, Position pos);
     void storeRange(Position pos, const Place& place,
                     const std::vector<ir::Value>& words, TypeRef fieldType);
     // A field a struct arm binds: name, type, and byte offset from the

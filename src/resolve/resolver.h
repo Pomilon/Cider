@@ -105,6 +105,10 @@ public:
     // walk bases the way fieldType does; the declaring base answers.
     bool fieldIsPrivate(DeclId id, const std::string& name) const;
     std::string fieldModule(DeclId id, const std::string& name) const;
+    // v2 CIDER-BUG-049: a field's default expression, or null when the
+    // field carries none. Walks bases the way fieldType does; the
+    // declaring base answers with its own spelling.
+    const Expr* fieldDefault(DeclId id, const std::string& name) const;
     // A method signature by owning declaration and name. Null when absent.
     const Signature* methodSig(DeclId id, const std::string& name) const;
     // Every method name of a struct, class or interface, in declaration
@@ -369,6 +373,8 @@ private:
     std::unordered_map<std::string, int64_t> enumValues_;
     std::unordered_map<std::string, std::vector<std::pair<std::string, int64_t>>> enumOrder_;
     std::unordered_map<std::string, TypeRef> fieldTypes_;
+    // v2 CIDER-BUG-049: field defaults by owning declaration and name.
+    std::unordered_map<std::string, const Expr*> fieldDefaultExprs_;
     // 4.8.4: only private fields get an entry; public is the default.
     std::unordered_set<std::string> privateFields_;
     std::unordered_map<std::string, Signature> methodSigs_;
