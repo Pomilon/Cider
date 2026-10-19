@@ -1,4 +1,4 @@
-// CIDER-BUG-085: a `fn(I) -> int` type spelling and the signature of a
+// CIDER-BUG-085: a `*func(I) -> int` type spelling and the signature of a
 // matching named function are the same type, whether the interface flag
 // came from the AST spelling or from the resolved symbol signature. Before
 // the fix the checker compared an AST-derived spelling (interface nested in
@@ -9,6 +9,14 @@
 // The fn values are called with interface arguments, so a wrong flag would
 // pass an 8-byte raw value where a 16-byte fat pointer is expected (or the
 // reverse) and change the result or crash on any of the three backends.
+//
+// Migrated to the Unified Standard: `fn(I) -> int` spells
+// `*func(I) -> int`; a named function becomes a value with `&name`; a
+// `msabi fn(...)` spelling becomes `*msabi func(...)`; interface values are
+// made from class pointers (`var x: I = a;`) and classes are allocated with
+// `new`; closures keep the value spelling `func(...) -> int`. The dotted and
+// from-imported `&lib.areaOf` / `&areaOf` spellings also exercise the
+// function-address typing and label fix that landed with this migration.
 import lib;
 from lib import Shape, Sq, areaOf;
 
@@ -16,22 +24,22 @@ interface I { func v() -> int; }
 
 class A {
   var k: int;
-  func init(x: int) -> void { this.k = x; }
-  func v() -> int { return this.k; }
+  func init(x: int) { this->k = x; }
+  func v() -> int { return this->k; }
 }
 
 class B {
   var k: int;
-  func init(x: int) -> void { this.k = x; }
-  func v() -> int { return this.k * 10; }
+  func init(x: int) { this->k = x; }
+  func v() -> int { return this->k * 10; }
 }
 
-// Named functions with the exact `fn(I) -> int` shape.
+// Named functions with the exact `*func(I) -> int` shape.
 func valueOf(x: I) -> int { return x.v(); }
 msabi func valueOfMs(x: I) -> int { return x.v() + 1; }
 
-// A function returning a `fn(I) -> int` value.
-func pick() -> fn(I) -> int { return valueOf; }
+// A function returning a `*func(I) -> int` value.
+func pick() -> *func(I) -> int { return &valueOf; }
 
 // CIDER-BUG-085: the same unresolved-flag mismatch applied to a bare
 // interface in a return type spelling. Returning the interface value itself
@@ -39,84 +47,81 @@ func pick() -> fn(I) -> int { return valueOf; }
 // declaration "Cannot assign non-struct/class type to interface 'I'".
 func ident(x: I) -> I { return x; }
 
-// Nested signature: the outer fn takes a `fn(I) -> int` plus an `I`.
-func apply2(f: fn(I) -> int, x: I) -> int { return f(x) * 2; }
+// Nested signature: the outer fn takes a `*func(I) -> int` plus an `I`.
+func apply2(f: *func(I) -> int, x: I) -> int { return f(x) * 2; }
 
 // msabi counterpart, for the ABI-marked spelling.
-msabi func applyMs(f: msabi fn(I) -> int, x: I) -> int { return f(x); }
+msabi func applyMs(f: *msabi func(I) -> int, x: I) -> int { return f(x); }
 
-// A `fn(I) -> int` parameter; callers pass named functions and fn-typed
+// A `*func(I) -> int` parameter; callers pass named functions and fn-typed
 // variables through it, and the argument's interface is dispatched inside.
-func callThrough(f: fn(I) -> int, x: I) -> int { return f(x); }
+func callThrough(f: *func(I) -> int, x: I) -> int { return f(x); }
 
 // Alias spelling of the same type.
-type Callback = fn(I) -> int;
+type Callback = *func(I) -> int;
 
 // Global of the fn type, initialized with a named function.
-var globalCb: fn(I) -> int = valueOf;
+var globalCb: *func(I) -> int = &valueOf;
 
 func main() -> int {
-  var a: A;
-  a.init(3);
-  var b: B;
-  b.init(4);
+  var a: *A = new A(3);
+  var b: *B = new B(4);
   var x: I = a;
   var y: I = b;
 
   // 1. A variable of the fn type assigned a named function; dispatch
   //    through two different interface values.
-  var f: fn(I) -> int = valueOf;
+  var f: *func(I) -> int = &valueOf;
   if (f(x) != 3) { return 1; }
   if (f(y) != 40) { return 2; }
 
-  // 2. Passing the named function and the variable through a `fn(I) -> int`
-  //    parameter.
-  if (callThrough(valueOf, x) != 3) { return 3; }
+  // 2. Passing the named function and the variable through a
+  //    `*func(I) -> int` parameter.
+  if (callThrough(&valueOf, x) != 3) { return 3; }
   if (callThrough(f, y) != 40) { return 4; }
 
-  // 3. Returning `fn(I) -> int` from a function; declaration and
+  // 3. Returning `*func(I) -> int` from a function; declaration and
   //    reassignment.
-  var g: fn(I) -> int = pick();
+  var g: *func(I) -> int = pick();
   if (g(x) != 3) { return 5; }
   f = pick();
   if (f(y) != 40) { return 6; }
 
-  // 4. Nested signature `fn(fn(I) -> int, I) -> int`.
-  var nested: fn(fn(I) -> int, I) -> int = apply2;
-  if (nested(valueOf, x) != 6) { return 7; }
+  // 4. Nested signature `*func(*func(I) -> int, I) -> int`.
+  var nested: *func(*func(I) -> int, I) -> int = &apply2;
+  if (nested(&valueOf, x) != 6) { return 7; }
   if (nested(f, y) != 80) { return 8; }
 
   // 5. msabi-marked spelling: the ABI marker is part of the identity and
   //    dispatch through the interface parameter still works.
-  var m: msabi fn(I) -> int = valueOfMs;
+  var m: *msabi func(I) -> int = &valueOfMs;
   if (m(x) != 4) { return 9; }
-  var nestedMs: msabi fn(msabi fn(I) -> int, I) -> int = applyMs;
-  if (nestedMs(valueOfMs, y) != 41) { return 10; }
+  var nestedMs: *msabi func(*msabi func(I) -> int, I) -> int = &applyMs;
+  if (nestedMs(&valueOfMs, y) != 41) { return 10; }
 
   // 6. Global variable and `type` alias spelling.
   if (globalCb(x) != 3) { return 11; }
-  var cb: Callback = valueOf;
+  var cb: Callback = &valueOf;
   if (cb(y) != 40) { return 12; }
 
   // 7. Imported interface and imported function: dotted and from-import
   //    spellings, with a concrete value converted to the fn's interface
   //    parameter at the indirect call site.
-  var sq: Sq;
-  sq.init(5);
-  var af: fn(lib.Shape) -> int = lib.areaOf;
+  var sq: *Sq = new Sq(5);
+  var af: *func(lib.Shape) -> int = &lib.areaOf;
   if (af(sq) != 25) { return 13; }
-  var af2: fn(Shape) -> int = areaOf;
+  var af2: *func(Shape) -> int = &areaOf;
   if (af2(sq) != 25) { return 14; }
 
   // 8. Closure representations (CIDER-BUG-063/068) with an interface
   //    parameter: a closure literal, a `func(...)` declaration initialized
-  //    with a plain named function, and a `fn(...)` declaration initialized
-  //    with a closure object.
+  //    with a plain named function, and a closure value whose call
+  //    dispatches through the captured interface argument.
   var c: func(I) -> int = func(z: I) -> int { return z.v() + 100; };
   if (c(x) != 103) { return 15; }
   var c2: func(I) -> int = valueOf;
   if (c2(y) != 40) { return 16; }
-  var f2: fn(I) -> int = func(z: I) -> int { return z.v() + 200; };
+  var f2: func(I) -> int = func(z: I) -> int { return z.v() + 200; };
   if (f2(x) != 203) { return 17; }
 
   // 9. Interface return type spelling: `-> I` resolves the flag on the

@@ -7459,10 +7459,12 @@ std::vector<ir::Value> Lowerer::lowerAddrOf(const Unary& n) {
                 resolver_.lookup(emitScope(), ident->name);
             if (decl != nullptr && decl->kind == resolve::DeclKind::Func &&
                 decl->typeParams == 0) {
-                std::string link = ident->name;
-                if (decl->isPrelude) {
-                    link = "cider_" + ident->name;
-                }
+                // A from-import copies the target's id but lives in the
+                // entry scope, so mangling the alias would name a local.
+                // The defining declaration carries the home module.
+                const resolve::Decl* defining = resolver_.declById(decl->id);
+                std::string link = resolver_.linkName(
+                    defining != nullptr ? *defining : *decl);
                 TypeRef ptr{ctx_.functionPtr(decl->sig)};
                 ir::Instr fn;
                 fn.op = ir::Op::FnAddr;
@@ -7475,6 +7477,36 @@ std::vector<ir::Value> Lowerer::lowerAddrOf(const Unary& n) {
                 fn.results.push_back(at);
                 emit(std::move(fn));
                 return {at};
+            }
+        }
+        if (const auto* field = dynamic_cast<const Field*>(n.operand.get())) {
+            // `&lib.areaOf`: the qualifier names a module, so the member is
+            // that module's plain function and its address mangles under
+            // the module, like every cross-module definition.
+            const auto* qualifier = dynamic_cast<const Ident*>(field->object.get());
+            if (qualifier != nullptr) {
+                const resolve::Decl* mod =
+                    resolver_.lookup(emitScope(), qualifier->name);
+                if (mod != nullptr && mod->kind == resolve::DeclKind::Module) {
+                    const resolve::Scope* home = resolver_.scopeOf(mod->origin);
+                    const resolve::Decl* member =
+                        home != nullptr ? resolver_.lookup(home, field->name) : nullptr;
+                    if (member != nullptr && member->kind == resolve::DeclKind::Func &&
+                        member->typeParams == 0) {
+                        TypeRef ptr{ctx_.functionPtr(member->sig)};
+                        ir::Instr fn;
+                        fn.op = ir::Op::FnAddr;
+                        fn.loc = n.pos;
+                        fn.type = ptr;
+                        fn.width = ir::IRType::Ptr;
+                        fn.globalLabel = resolver_.linkName(*member);
+                        fn.isPure = true;
+                        ir::Value at = newValue(fn.width, ptr, n.pos);
+                        fn.results.push_back(at);
+                        emit(std::move(fn));
+                        return {at};
+                    }
+                }
             }
         }
     }
@@ -9744,6 +9776,40 @@ std::vector<ir::Value> Lowerer::lowerCallWords(Call& n) {
                             indirect = true;
                             indirectCallee = pair[kFirstWord];
                             receiver.push_back(pair[kLenWord]);
+                        }
+                    }
+                }
+                if (sig == nullptr) {
+                    // A global raw fn value calls through its one word; a
+                    // global whose provenance is a closure instead loads
+                    // the pair that word addresses.
+                    if (const GlobalBinding* global = findGlobal(ident->name)) {
+                        if (global->type.type->kind() == Kind::FunctionPtr) {
+                            const Signature* rawSig =
+                                global->type.type->signature();
+                            std::vector<ir::Value> held =
+                                loadGlobal(n.pos, *global);
+                            if (!failed_ && rawSig != nullptr &&
+                                held.size() == kOneWord) {
+                                if (checker_.provOfName(ident->name) ==
+                                    check::Prov::Closure) {
+                                    TypeRef pairType{ctx_.closure(*rawSig)};
+                                    std::vector<ir::Value> pair =
+                                        loadClosurePair(held[kFirstWord],
+                                                        pairType, n.pos);
+                                    if (!failed_ &&
+                                        pair.size() == kClosureWords) {
+                                        sig = rawSig;
+                                        indirect = true;
+                                        indirectCallee = pair[kFirstWord];
+                                        receiver.push_back(pair[kLenWord]);
+                                    }
+                                } else {
+                                    sig = rawSig;
+                                    indirect = true;
+                                    indirectCallee = held[kFirstWord];
+                                }
+                            }
                         }
                     }
                 }

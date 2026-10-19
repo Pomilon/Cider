@@ -1,124 +1,101 @@
-// CIDER-BUG-225: a call through a nil function pointer is a defined runtime
-// error on every backend, never a raw signal. The general case left open after
-// CIDER-BUG-211 (nil interface) and CIDER-BUG-219 (nil pointer):
+// CIDER-BUG-225: a call through a nil function pointer. v2 made this a
+// defined runtime error on every backend (`vm error: call: nil function
+// pointer`, exit 2) guarded by its own `_nil_fnptr_fail` routine, separate
+// from the nil-deref guard because the CALL is what failed, not a read.
 //
-//   var g: fn(int) -> int = nilPtr;
-//   g(3);
-//
-// The VM caught the zero callee only by accident, in doCall's 1-based-id
-// convention (module function values start at 1, so 0 is nilPtr), and reported
-// `vm error: call: nil function pointer`; native x86 executed `call r11` with
-// r11 = 0 and died with SIGSEGV and NO OUTPUT at all (exit 139). Nothing is
-// read through a nil function pointer, so no address-level test can close this
-// the way one closed the CIDER-BUG-219 `p[1]` hole: the callee is ENTERED, so
-// the only sound place to look is the callee value itself, immediately before
-// the CALL. That is what ir-gen now does, routing every indirect call to a new
-// `_nil_fnptr_fail` runtime routine — its OWN pseudo-builtin, not
-// CIDER-BUG-219's `_nil_deref_fail`, because this is a distinct message
-// family: the call is what failed, not a dereference.
-//
-// Expected on all three paths (VM unopt, VM opt, native):
-//   stderr = "vm error: call: nil function pointer\n", exit = 2.
+// v3 does not define runtime error text (diff #19): a fault is a silent
+// signal. A nil callee is the null function pointer, so the machine enters
+// address zero and dies by SIGSEGV; the interpreter raises the same signal
+// instead of refusing with a diagnostic. All three legs therefore agree on
+// no output and the same death, which is why this program stays B-terminal:
+// expected.json keeps the v2 text verbatim and is NOT blessed.
 //
 // Every live (non-nil) form below runs FIRST and must keep working, so the
-// guard is pinned as costing a not-taken branch and nothing more. The program
-// then exits non-zero with NO diagnostic, so a regression that lets a nil call
-// through cannot accidentally match the expected output.
+// nil case cannot hide a broken call path. Each check returns a distinct
+// code (102-120), and the program ends by calling a nil function pointer.
+//
+// v2 spellings migrated to v3: `fn(int) -> int` -> `*func(int) -> int`
+// (the raw function-pointer spelling; `func(...)` values are closures),
+// `extends` -> `:`, `hp.g` -> `hp->g`, bare function names -> `&name`,
+// and locals/fields/globals that used to rely on closure slots now name
+// the pointer spelling explicitly.
+type Cb = *func(int) -> int;
+
 func dbl(x: int) -> int { return x * 2; }
 func inc(x: int) -> int { return x + 1; }
 msabi func dblMs(x: int) -> int { return x + 20; }
 
-type Cb = fn(int) -> int;
+struct Holder { g: *func(int) -> int; }
 
-class Holder { var g: fn(int) -> int; }
 class Base { virtual func kind(x: int) -> int { return x; } }
-class Derived extends Base { override func kind(x: int) -> int { return x + 100; } }
+class Derived : Base { override func kind(x: int) -> int { return x + 100; } }
 
-var globalNil: fn(int) -> int = nilPtr;
-var globalLive: fn(int) -> int = dbl;
+var globalNil: *func(int) -> int = nilPtr;
+var globalLive: *func(int) -> int = &dbl;
 
-func viaParam(g: fn(int) -> int, x: int) -> int { return g(x); }
-func pick(b: bool) -> fn(int) -> int { if (b) { return dbl; } return nilPtr; }
+func viaParam(g: *func(int) -> int, x: int) -> int { return g(x); }
+func pick(b: bool) -> *func(int) -> int { if (b) { return &dbl; } return nilPtr; }
 func makeAdder(base: int) -> func(int) -> int {
   return func(x: int) -> int { return x + base; };
 }
 
 func main() -> int {
-  // ---- the live path, on every shape the guard is attached to -------------
-  if (dbl(3) != 6) { return 101; }
-
-  // 1. A local `fn` value, the shape the guard's reproducer uses.
-  var g: fn(int) -> int = dbl;
+  // 1. A local raw function value, called by name and through a loop.
+  var g: *func(int) -> int = &dbl;
   if (g(3) != 6) { return 102; }
-  g = inc;
+  g = &inc;
   if (g(3) != 4) { return 103; }
-  // A live call through a value the guard tests as non-nil, in a loop: the
-  // branch is per-call and must stay a not-taken branch.
   var acc: int = 0;
   var i: int = 0;
-  while (i < 20) {
-    acc = acc + g(1);
-    i = i + 1;
-  }
-  if (acc != 40) { return 104; }   // g is inc by now: 20 * inc(1)
+  while (i < 20) { acc = acc + g(1); i = i + 1; }
+  if (acc != 40) { return 104; }
 
-  // 2. An alias spelling (`type Cb = fn(int) -> int`) carries the alias name in
-  //    its TypeInfo, so it resolves through a different spelling of the same
-  //    shape; the guard must be on the resolved value.
-  var a: Cb = dbl;
+  // 2. An alias of the pointer spelling.
+  var a: Cb = &dbl;
   if (a(5) != 10) { return 105; }
 
-  // 3. A parameter: the call happens in a callee, not at the point the value
-  //    was written.
-  if (viaParam(dbl, 4) != 8) { return 106; }
+  // 3. A parameter carrying the pointer.
+  if (viaParam(&dbl, 4) != 8) { return 106; }
 
-  // 4. A class field and a pointer-to-class field, and an array element —
-  //    the routes a nil value also travels (see the smoke test).
-  var h: Holder;
-  h.g = inc;
+  // 4. A struct field, reached by value and through a pointer.
+  var h: Holder = uninit;
+  h.g = &inc;
   if (h.g(3) != 4) { return 107; }
   var hp: *Holder = &h;
-  if (hp.g(3) != 4) { return 108; }
-  var arr: [fn(int) -> int; 2];
-  arr[0] = dbl;
-  arr[1] = inc;
+  if (hp->g(3) != 4) { return 108; }
+
+  // 5. An array element.
+  var arr: [*func(int) -> int; 2] = uninit;
+  arr[0] = &dbl;
+  arr[1] = &inc;
   if (arr[0](3) != 6) { return 109; }
   if (arr[1](3) != 4) { return 110; }
 
-  // 5. A value returned by a function, both arms live.
-  if (pick(true)(3) != 6) { return 111; }
+  // 6. A value returned from a call.
+  var picked: *func(int) -> int = pick(true);
+  if (picked(3) != 6) { return 111; }
 
-  // 6. A module-scope global, the shape CIDER-BUG-228 made order-independent.
+  // 7. A module-scope global, live and nil.
   if (globalLive(3) != 6) { return 112; }
   if (globalNil != nilPtr) { return 113; }
 
-  // 7. A `msabi fn` value: the guard is on the callee, so it is placed on the
-  //    MS-convention route too, not just the SysV one.
-  var m: msabi fn(int) -> int = dblMs;
+  // 8. The msabi convention on a raw function value.
+  var m: *msabi func(int) -> int = &dblMs;
   if (m(3) != 23) { return 114; }
 
-  // 8. A closure: the guard sits on the LOADED callable slot, not on the
-  //    closure object, so a live closure call is untouched.
+  // 9. A closure value keeps its own spelling and pair representation.
   var add10: func(int) -> int = makeAdder(10);
   if (add10(5) != 15) { return 115; }
-  var add100: func(int) -> int = makeAdder(100);
-  if (add100(5) != 105) { return 116; }
 
-  // 9. A virtual method call is a different dispatch route (CIDER-BUG-219
-  //    guards its nil receiver) and must be unaffected: a live receiver runs
-  //    the override, a base-typed value the base.
-  var derived: Derived;
-  if (derived.kind(3) != 103) { return 117; }
-  var base: Base;
-  if (base.kind(3) != 3) { return 118; }
-
-  // 10. Comparing a live callee against nilPtr is unaffected by the guard.
+  // 10. A virtual method through a base pointer, and nil comparison.
+  var derived: *Derived = new Derived { };
+  if (derived->kind(3) != 103) { return 117; }
+  var base: *Base = new Base { };
+  if (base->kind(3) != 3) { return 118; }
   if (g == nilPtr) { return 119; }
   if (nilPtr != nilPtr) { return 120; }
 
-  // ---- the nil path: the first one below reports and exits ---------------
-  var nilFn: fn(int) -> int = nilPtr;
-
-  // The ticket's reproducer verbatim.
+  // The nil call: no output, SIGSEGV on every leg.
+  var nilFn: *func(int) -> int = nilPtr;
   return nilFn(3);
 }

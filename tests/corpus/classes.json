@@ -25,9 +25,9 @@
   "class": "A"
  },
  "alias_closure_pointer": {
-  "actual": "tests/corpus/alias_closure_pointer/main.cid:59:1: expected a declaration",
-  "blocker": "closures-repr [B-terminal]",
-  "class": "B"
+  "actual": "pass (migrated: alias levels of *func(...) agree in every position; the v2 closure-slot family was dropped as a v3 refusal)",
+  "blocker": "none",
+  "class": "A"
  },
  "alias_delete_destructors": {
   "actual": "tests/corpus/alias_delete_destructors/main.cid:37:10: a method needs a name",
@@ -580,14 +580,14 @@
   "class": "A"
  },
  "fn_cast_compat": {
-  "actual": "14:13: expected ';' (bare `fn(int)` spelling; v3 has no bare fn-ptr spelling, \u00a713)",
-  "blocker": "v2-fn-spelling",
-  "class": "B"
+  "actual": "pass (migrated to v3 *func(...) spellings; closure-to-pointer cast dropped as a principled refusal)",
+  "blocker": "none",
+  "class": "A"
  },
  "fn_interface_signature": {
-  "actual": "tests/corpus/fn_interface_signature/main.cid:31:1: expected a declaration",
-  "blocker": "interface-boxing (+multi-file-imports, msabi, this-receiver) [B-terminal]",
-  "class": "B"
+  "actual": "migrated to v3: `fn(...)` spells `*func(...)`, named functions become values with `&name`, interface values come from class pointers, closures keep the `func(...)` value spelling; the dotted and from-imported `&lib.areaOf` / `&areaOf` spellings also pin the function-address typing and label fix; all three legs exit 0",
+  "blocker": "none",
+  "class": "A"
  },
  "fn_ptr": {
   "actual": "exact stdout/stderr/exit match (rewritten: *void hold+f(v) call have no v3 counterpart \u2014 bare func values and *void laundering are not in the as-table; v3 spelling *func(int,int)->int + &add + (*fn)(5,3))",
@@ -1105,8 +1105,8 @@
   "class": "B"
  },
  "nil_fnptr_call": {
-  "actual": "cider run exit 1, stdout empty, stderr diagnostic: `main.cid:29:1: expected a declaration`; expected.json left verbatim (v2 vm-error exit 2)",
-  "blocker": "bare-fn spelling + msabi + virtual/override (v3 cannot build; trap path unverifiable)",
+  "actual": "migrated to v3: every live shape checks and runs (local, alias, parameter, field, pointer-to-field, array, returned, global, msabi, closure, virtual); the final nil call traps silently by SIGSEGV (rc 139) identically on native and both VM legs; expected.json left verbatim (v2 vm-error exit 2, not blessed)",
+  "blocker": "v3 traps nil calls silently (diff #19); v2 vm-error text not blessed",
   "class": "B"
  },
  "nil_iface_dispatch": {

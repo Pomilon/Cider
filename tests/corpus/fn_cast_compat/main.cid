@@ -1,43 +1,46 @@
-// CIDER-BUG-074: a cast to a fn(...) type with the exact same signature
-// keeps working and stays callable with the target's spelling. Pinned three
-// ways (VM unopt, VM opt, native):
-//   - a named function cast to the direct fn(...) spelling,
+// A cast to a *func(...) type with the exact same signature keeps working
+// and stays callable with the target's spelling. Pinned three ways (VM
+// unopt, VM opt, native):
+//   - a named function's address cast to the direct *func(...) spelling,
 //   - the same cast through a `type` alias, with aliased nested
 //     parameter/return spellings,
-//   - a fn(...) variable cast to an alias spelling,
-//   - a closure object (func(...) spelling) cast to the raw fn(...)
-//     spelling: the unchecked cast keeps the closure runtime shape, so the
-//     call still goes through the closure path (CIDER-BUG-068),
+//   - a *func(...) variable cast to an alias spelling,
+//   - a closure object (func(...) spelling) called through its own shape,
 //   - the msabi spelling, cast with a matching msabi source.
+//
+// The v2 program also cast a closure object (CIDER-BUG-068's runtime shape)
+// to the raw fn(...) pointer spelling and called it through that. v3 keeps
+// the two shapes distinct — func(...) is a callable value, *func(...) a
+// pointer to one — so that cast is a principled refusal now and the line
+// was dropped instead of being blessed.
 from std.io import print, printInt;
 
-type Cb = fn(int) -> int;
+type Cb = *func(int) -> int;
 type MyInt = int;
-type AliasCb = fn(MyInt) -> MyInt;
+type AliasCb = *func(MyInt) -> MyInt;
 
 func inc(x: int) -> int { return x + 1; }
 msabi func incMs(x: int) -> int { return x + 2; }
 
 func main() -> int {
   // Direct identical signature.
-  var f: fn(int) -> int = inc as fn(int) -> int;
+  var f: *func(int) -> int = &inc;
   printInt(f(41)); print("\n");
 
   // Alias target (nested alias spellings resolve before comparison).
-  var g: AliasCb = inc as AliasCb;
+  var g: AliasCb = &inc as AliasCb;
   printInt(g(9)); print("\n");
 
-  // A fn(...) value cast to the alias spelling.
+  // A *func(...) value cast to the alias spelling.
   var h: Cb = f as Cb;
   printInt(h(1)); print("\n");
 
-  // A closure object cast to fn(...): same signature, closure call path.
+  // A closure object, called through its own spelling.
   var c: func(int) -> int = func(x: int) -> int { return x * 2; };
-  var k: fn(int) -> int = c as fn(int) -> int;
-  printInt(k(21)); print("\n");
+  printInt(c(21)); print("\n");
 
   // Compatible msabi cast.
-  var m: msabi fn(int) -> int = incMs as msabi fn(int) -> int;
+  var m: *msabi func(int) -> int = &incMs as *msabi func(int) -> int;
   printInt(m(40)); print("\n");
 
   return 0;

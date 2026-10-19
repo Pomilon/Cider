@@ -691,6 +691,27 @@ void testMultipleBases() {
           "the optimised shape answers 57: " + opr.error);
 }
 
+void testNilFnptrCall() {
+    std::printf("a nil function pointer dies like the machine\n");
+    Lowered none = lower(
+        "func dbl(x: int) -> int { return x * 2; }\n"
+        "func main() -> int {\n"
+        "    var g: *func(int) -> int = &dbl;\n"
+        "    if (g(3) != 6) { return 1; }\n"
+        "    g = nilPtr;\n"
+        "    return g(3);\n"
+        "}\n");
+    check(none.ok, "a nil-callee program lowers: " + none.stage);
+    cider::vm::VmResult unr = cider::vm::run(*none.module, "");
+    check(unr.ok && unr.signal == 11,
+          "the unoptimised call dies by SIGSEGV: " + unr.error);
+    cider::opt::OptResult ores = cider::opt::run(*none.module);
+    check(ores.ok, "optimises: " + ores.error);
+    cider::vm::VmResult opr = cider::vm::run(*none.module, "");
+    check(opr.ok && opr.signal == 11,
+          "the optimised call dies by SIGSEGV: " + opr.error);
+}
+
 }  // namespace
 
 int main() {
@@ -708,6 +729,7 @@ int main() {
     testSuperInit();
     testPolymorphicDelete();
     testMultipleBases();
+    testNilFnptrCall();
     std::printf("\n%d checks, %s\n", checks, failures == 0 ? "all passed" : "FAILURES");
     return failures == 0 ? 0 : 1;
 }

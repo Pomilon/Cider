@@ -1,15 +1,20 @@
-// CIDER-BUG-085: an imported fn(...) spelling whose parameter is an
-// imported interface must match the imported function's collected
-// signature (the canonical `lib::Shape` nominal is the same on both
-// sides, and both carry the fat-pointer flag).
+// CIDER-BUG-085, library side: an imported `*func(...)` spelling whose
+// parameter is an imported interface must match the imported function's
+// collected signature. The canonical `lib::Shape` nominal is the same on
+// both sides, and both carry the fat-pointer flag, so `&lib.areaOf` and
+// `&areaOf` accept the same `*func(lib.Shape) -> int` spelling.
+//
+// Migrated to the Unified Standard: `fn(...)` spells `*func(...)`, `init`
+// keeps its bare `-> void` result implicit, and fields are reached through
+// `this->`.
 export interface Shape {
   func area() -> int;
 }
 
 export class Sq {
   var side: int;
-  func init(v: int) -> void { this.side = v; }
-  func area() -> int { return this.side * this.side; }
+  func init(v: int) { this->side = v; }
+  func area() -> int { return this->side * this->side; }
 }
 
 export func areaOf(x: Shape) -> int { return x.area(); }

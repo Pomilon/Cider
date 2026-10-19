@@ -2286,6 +2286,32 @@ void Checker::visitUnary(Unary& n) {
                 }
             }
         }
+        if (const auto* field = dynamic_cast<const Field*>(n.operand.get())) {
+            // `&lib.areaOf`: the qualifier names a module, so the member is
+            // a plain function of that module. Its address is the same bare
+            // code address a local `&name` answers, not a pointer around
+            // the closure spelling a field read would give.
+            const auto* qualifier = dynamic_cast<const Ident*>(field->object.get());
+            if (qualifier != nullptr && findLocal(qualifier->name) == nullptr) {
+                const resolve::Decl* mod =
+                    resolver_.lookup(moduleScope_, qualifier->name);
+                if (mod != nullptr && mod->kind == resolve::DeclKind::Module) {
+                    const resolve::Scope* home = resolver_.scopeOf(mod->origin);
+                    const resolve::Decl* member =
+                        home != nullptr ? resolver_.lookup(home, field->name) : nullptr;
+                    if (member != nullptr && member->kind == resolve::DeclKind::Func) {
+                        if (member->typeParams > 0) {
+                            fail(n.pos, "a generic function needs explicit arguments");
+                            record(&n, errorRef());
+                            return;
+                        }
+                        Signature sig = member->sig;
+                        record(&n, TypeRef{ctx_.functionPtr(std::move(sig))});
+                        return;
+                    }
+                }
+            }
+        }
         record(&n, TypeRef{ctx_.pointer(operand.type)});
         return;
     }

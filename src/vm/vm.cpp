@@ -1751,6 +1751,12 @@ struct Runner {
         const Function* target = nullptr;
         if (instr.call.indirect) {
             int64_t tag = read(instr.calleeValue);
+            if (tag == kZeroPointer) {
+                // A nil callee is the null function pointer: the machine
+                // would enter address zero and fault, so the interpreter
+                // dies by the same signal rather than refusing loudly.
+                return die(kSigSegv);
+            }
             auto found = functionsByTag.find(tag);
             if (found == functionsByTag.end()) {
                 // A negative tag names a host helper, which has no IR
