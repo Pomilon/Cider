@@ -131,9 +131,24 @@ public:
     // the chain is unsized (several bases at one level, unknown fields).
     int64_t classSize(DeclId id) const;
     // A class's alignment: the maximum of its vptr word (only when the
-    // chain has virtual slots, 4.8.5) and its fields'.
-    // -1 when unknown or when the class has bases.
+    // chain has virtual slots, 4.8.5) and its fields' and bases'.
+    // -1 when unknown.
     int64_t classAlign(DeclId id) const;
+    // 4.8: the offset of a base subobject inside a derived object's layout,
+    // composed through every path. Null when `base` is not an ancestor or
+    // the path is ambiguous (two subobjects spell one name).
+    std::optional<int64_t> baseOffset(DeclId derived, DeclId base) const;
+    // 4.8: the byte adjustment a class-pointer conversion needs. A derived
+    // pointer to a base adds the base's offset; a base pointer to a derived
+    // subtracts it; an unrelated pair answers null (a plain reinterpreting
+    // cast). Ambiguity answers null too: two subobjects would need a choice.
+    std::optional<int64_t> classCastAdjust(DeclId from, DeclId to) const;
+    // True when `base` is reachable through more than one base path.
+    bool baseAmbiguous(DeclId derived, DeclId base) const;
+    // 4.8: a name two bases both provide is an ambiguity, not a pick. An
+    // own declaration hides every base's, so it is never ambiguous.
+    bool methodAmbiguous(DeclId id, const std::string& name) const;
+    bool fieldAmbiguous(DeclId id, const std::string& name) const;
     // 4.1: a bitfield's position inside its storage unit — the unit's byte
     // offset comes from fieldOffset; this answers the bit offset and width.
     // False when the field is not a bitfield or the name is unknown.
@@ -277,10 +292,40 @@ private:
     int64_t structAlignImpl(DeclId id, std::unordered_set<std::string>& seen) const;
     int64_t classSizeImpl(DeclId id, std::unordered_set<std::string>& seen) const;
     int64_t classAlignImpl(DeclId id, std::unordered_set<std::string>& seen) const;
+    // 4.8: one walk owns a class's layout. Bases lay out in declaration
+    // order, each at its own alignment; the first base shares the object's
+    // vptr word when both carry tables, and otherwise starts after it. A
+    // class's own fields follow its bases. `slots` are absolute offsets in
+    // this class's view, each naming the class that declares it.
+    struct ClassSlot {
+        DeclId owner;
+        std::string name;
+        TypeRef type;
+        int64_t at = 0;
+    };
+    struct ClassLayout {
+        std::vector<ClassSlot> slots;
+        std::vector<std::pair<DeclId, int64_t>> bases;
+        int64_t multiple = 1;
+        // The last byte the class's own fields occupy, before the final
+        // rounding: a base subobject ends here in its parent's layout, so a
+        // single base keeps the flat chain's packing (4.8).
+        int64_t packed = 0;
+        int64_t bytes = 0;
+    };
+    std::optional<ClassLayout> classLayoutImpl(
+        DeclId id, std::unordered_set<std::string>& seen) const;
+    // Walks every base path to `base`, summing offsets and counting paths.
+    bool baseRelationImpl(DeclId derived, DeclId base, int64_t& at,
+                          int& paths) const;
+    int fieldPathsImpl(DeclId id, const std::string& name,
+                       std::vector<std::string>& path) const;
+    int methodPathsImpl(DeclId id, const std::string& name,
+                        std::vector<std::string>& path) const;
     // The physical field order of a class with bases: most-base first, then
-    // each class's own fields (FEATURES 2.2). A chain with several bases at
-    // one level has no layout yet, so the walk answers false and the size
-    // queries refuse rather than lay out half an object.
+    // each class's own fields (FEATURES 2.2). A chain the layout cannot
+    // name answers false and the size queries refuse rather than lay out
+    // half an object.
     bool chainFieldsImpl(DeclId id, std::unordered_set<std::string>& seen,
                          std::vector<std::string>& out) const;
     // A field declared by a base: the chain walk names it, but fieldType

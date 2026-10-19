@@ -1148,6 +1148,54 @@ void testSuperInit() {
           "super_init without a base init refuses");
 }
 
+// 4.8: several bases lay out one after another. A name two bases provide
+// refuses by name instead of picking one, `super` names a single base, and
+// only the first base may carry the table.
+void testMultipleBases() {
+    std::printf("several bases refuse ambiguous names\n");
+    Checked ambiguousMethod = check(
+        "class L { var v: int; func pick() -> int { return this->v; } }\n"
+        "class R { var w: int; func pick() -> int { return this->w; } }\n"
+        "class D : L, R { var d: int; }\n"
+        "func main() -> int {\n"
+        "    var x: D = D { v: 1, w: 2, d: 3 };\n"
+        "    return x.pick();\n"
+        "}\n");
+    check(!ambiguousMethod.ok && ambiguousMethod.stage == "check",
+          "a method two bases provide refuses");
+    Checked ambiguousField = check(
+        "class L { var v: int; }\n"
+        "class R { var v: int; }\n"
+        "class D : L, R { var d: int; func init() { this->d = 1; } }\n"
+        "func main() -> int { var x: *D = new D(); return x->v; }\n");
+    check(!ambiguousField.ok && ambiguousField.stage == "check",
+          "a field two bases provide refuses");
+    Checked superTwo = check(
+        "class L { var v: int; func f() -> int { return this->v; } }\n"
+        "class R { var w: int; func f() -> int { return this->w; } }\n"
+        "class D : L, R {\n"
+        "    var d: int;\n"
+        "    func init() { this->d = 1; }\n"
+        "    func g() -> int { return super.f(); }\n"
+        "}\n"
+        "func main() -> int { var x: *D = new D(); return x->g(); }\n");
+    check(!superTwo.ok && superTwo.stage == "check",
+          "super with several bases refuses");
+    Checked twice = check(
+        "class A { var a: int; }\n"
+        "class D : A, A { var d: int; }\n"
+        "func main() -> int { return 0; }\n");
+    check(!twice.ok && twice.stage == "check",
+          "a base named twice refuses");
+    Checked lateTable = check(
+        "class P { var p: int; }\n"
+        "class H { var h: int; virtual func f() -> int { return this->h; } }\n"
+        "class X : P, H { var x: int; }\n"
+        "func main() -> int { return 0; }\n");
+    check(!lateTable.ok && lateTable.stage == "check",
+          "a later headed base refuses");
+}
+
 // 7.6: `_` is the default arm. 7.2: increment is a statement, never a
 // value, so the only legal positions are a whole expression statement and
 // a C-style for step.
@@ -2064,6 +2112,7 @@ int main() {
     testTypedForIn();
     testPrivateFields();
     testSuperInit();
+    testMultipleBases();
     testWildcardAndIncrement();
     testFini();
     testInterfaceNil();

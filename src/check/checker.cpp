@@ -1288,6 +1288,27 @@ void Checker::visitClassDecl(ClassDecl& n) {
         fail(n.pos, "checker bug: '" + n.name + "' was never resolved");
         return;
     }
+    // 4.8: several bases lay out one after another. The first may carry the
+    // table; a later headed base would need a second vptr word the layout
+    // does not have, so it refuses by name. The same name twice is a
+    // duplicate, not a chain.
+    std::vector<DeclId> bases = resolver_.classBases(self->id);
+    for (auto it = bases.begin(); it != bases.end(); ++it) {
+        const resolve::Decl* baseDecl = resolver_.declById(*it);
+        std::string baseName =
+            baseDecl != nullptr && !baseDecl->name.empty() ? baseDecl->name : "?";
+        for (auto jt = bases.begin(); jt != it; ++jt) {
+            if (sameDecl(*jt, *it)) {
+                fail(n.pos, "base class '" + baseName + "' is named twice");
+                return;
+            }
+        }
+        if (it != bases.begin() && !resolver_.virtualNames(*it).empty()) {
+            fail(n.pos, "base class '" + baseName +
+                            "' carries a table after the first base");
+            return;
+        }
+    }
     checkNoSelfEmbed(self->id, "class", n.name, n.fields, "field");
     checkOverrides(*self, n);
     checkMethods(self->id, Kind::Class, n.methods);
@@ -2141,6 +2162,13 @@ void Checker::visitSuper(Super& n) {
     }
     if (resolver_.classBases(*currentClass_).empty()) {
         fail(n.pos, "super needs a base class");
+        record(&n, errorRef());
+        return;
+    }
+    if (resolver_.classBases(*currentClass_).begin() + 1 !=
+        resolver_.classBases(*currentClass_).end()) {
+        // 4.8: `super` names one base; with several there is no single one.
+        fail(n.pos, "super needs exactly one base class");
         record(&n, errorRef());
         return;
     }
@@ -4126,7 +4154,14 @@ TypeRef Checker::checkCall(Call& expr) {
                 return errorRef();
             }
             const Signature* baseSig = nullptr;
-            for (DeclId baseId : resolver_.classBases(*currentClass_)) {
+            std::vector<DeclId> superBases = resolver_.classBases(*currentClass_);
+            if (superBases.begin() + 1 != superBases.end()) {
+                // 4.8: `super` names one base; with several there is no
+                // single method to resolve.
+                fail(expr.pos, "super needs exactly one base class");
+                return errorRef();
+            }
+            for (DeclId baseId : superBases) {
                 baseSig = resolver_.methodSig(baseId, field->name);
                 if (baseSig != nullptr) {
                     break;
@@ -4622,6 +4657,13 @@ TypeRef Checker::checkField(Field& expr) {
         if (!id.has_value()) {
             return errorRef();
         }
+        if (resolver_.fieldAmbiguous(*id, expr.name)) {
+            // 4.8: two bases declare the field, so no single slot is the
+            // answer. The name refuses instead of picking one.
+            fail(expr.pos, "field '" + expr.name +
+                               "' is ambiguous: several base classes declare it");
+            return errorRef();
+        }
         TypeRef member = resolver_.fieldType(*id, expr.name);
         if (!member.isError()) {
             if (!fieldVisible(*id, expr.name, expr.pos)) {
@@ -4632,6 +4674,11 @@ TypeRef Checker::checkField(Field& expr) {
         const Signature* sig = resolver_.methodSig(*id, expr.name);
         if (sig == nullptr) {
             fail(expr.pos, "no such field");
+            return errorRef();
+        }
+        if (resolver_.methodAmbiguous(*id, expr.name)) {
+            fail(expr.pos, "method '" + expr.name +
+                               "' is ambiguous: several base classes declare it");
             return errorRef();
         }
         return TypeRef{ctx_.closure(*sig)};

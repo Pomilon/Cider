@@ -424,9 +424,10 @@ std::string Lowerer::emitClassVTable(DeclId concrete, Position pos) {
                 // concrete type — the no-op stub when no class in the
                 // chain declares deinit — so delete dispatches uniformly
                 // through every table.
-                table.initLabels.push_back(home.has_value()
-                                               ? emitDestroyChain(*home, pos)
-                                               : emitDeinitNone(pos));
+                table.initLabels.push_back(
+                    resolver_.methodSig(concrete, "deinit") != nullptr
+                        ? emitDestroyChain(concrete, pos)
+                        : emitDeinitNone(pos));
                 if (failed_) {
                     return "";
                 }
@@ -466,19 +467,28 @@ std::string Lowerer::emitDestroyChain(DeclId declarer, Position pos) {
             return "";
         }
     }
-    // The base chain must exist before this function is pushed: a nested
+    // The base chains must exist before this function is pushed: a nested
     // emission would move module_->functions out from under function_.
-    std::string baseLabel;
+    // 4.8: every direct base gets its own chain, with the self pointer
+    // shifted to that base subobject; the first base sits at zero.
+    std::vector<std::pair<std::string, int64_t>> baseCalls;
     for (DeclId base : resolver_.classBases(declarer)) {
-        std::optional<DeclId> above = resolver_.methodHome(base, "deinit");
-        if (above.has_value()) {
-            baseLabel = emitDestroyChain(*above, pos);
-            if (failed_) {
-                return "";
-            }
-            break;
+        if (resolver_.methodSig(base, "deinit") == nullptr) {
+            continue;
         }
+        std::optional<int64_t> shift = resolver_.baseOffset(declarer, base);
+        if (!shift.has_value()) {
+            refuse(pos, "this deletion");
+            return "";
+        }
+        std::string above = emitDestroyChain(base, pos);
+        if (failed_) {
+            return "";
+        }
+        baseCalls.emplace_back(std::move(above), *shift);
     }
+    std::optional<DeclId> ownHome = resolver_.methodHome(declarer, "deinit");
+    bool hasOwn = ownHome.has_value() && sameDecl(*ownHome, declarer);
 
     int64_t savedFn = -1;
     if (function_ != nullptr) {
@@ -527,7 +537,7 @@ std::string Lowerer::emitDestroyChain(DeclId declarer, Position pos) {
     ir::Value selfVal = newValue(load.width, selfType, pos);
     load.results.push_back(selfVal);
     emit(std::move(load));
-    if (!failed_) {
+    if (!failed_ && hasOwn) {
         // The class's own destructor runs first, exactly as the Standard's
         // `delete s` runs Circle.deinit before Shape.deinit.
         ir::Instr call;
@@ -541,16 +551,43 @@ std::string Lowerer::emitDestroyChain(DeclId declarer, Position pos) {
         call.width = ir::IRType::Void;
         emit(std::move(call));
     }
-    if (!failed_ && !baseLabel.empty()) {
-        // Then the nearest base declarer's chain, which walks further up
+    for (const auto& entry : baseCalls) {
+        if (failed_) {
+            break;
+        }
+        ir::Value baseSelf = selfVal;
+        if (entry.second != 0) {
+            TypeRef word{ctx_.pointer(ctx_.basic(BasicKind::U8))};
+            ir::Value delta =
+                constantI64(entry.second, TypeRef{ctx_.basic(BasicKind::I64)}, pos);
+            if (failed_) {
+                break;
+            }
+            ir::Instr step;
+            step.op = ir::Op::Add;
+            step.loc = pos;
+            step.type = word;
+            step.width = ir::IRType::Ptr;
+            step.isPure = true;
+            step.operands.push_back(baseSelf);
+            step.operands.push_back(delta);
+            ir::Value moved = newValue(step.width, word, pos);
+            step.results.push_back(moved);
+            emit(std::move(step));
+            if (failed_) {
+                break;
+            }
+            baseSelf = moved;
+        }
+        // Then each base chain in declaration order, walking further up
         // the same way.
         ir::Instr up;
         up.op = ir::Op::Call;
         up.loc = pos;
-        up.callee = baseLabel;
+        up.callee = entry.first;
         up.mayTrap = true;
         ir::Argument upArg;
-        upArg.words.push_back(selfVal);
+        upArg.words.push_back(baseSelf);
         up.arguments.push_back(std::move(upArg));
         up.width = ir::IRType::Void;
         emit(std::move(up));
@@ -7964,11 +8001,10 @@ void Lowerer::onDelete(DeleteStmt& n) {
         }
     } else if (id.has_value()) {
         const Signature* dsig = resolver_.methodSig(*id, "deinit");
-        std::optional<DeclId> home = resolver_.methodHome(*id, "deinit");
-        if (dsig != nullptr && home.has_value()) {
+        if (dsig != nullptr) {
             // A chain with no table still runs derived-first: the entry is
-            // the nearest declarer's own function, which walks the bases.
-            std::string callee = emitDestroyChain(*home, n.pos);
+            // the static type's own chain, which walks the bases.
+            std::string callee = emitDestroyChain(*id, n.pos);
             if (!failed_ && !callee.empty()) {
                 ir::Instr run;
                 run.op = ir::Op::Call;
@@ -8291,6 +8327,53 @@ ir::Value Lowerer::onCast(Cast& n) {
         target.type->kind() == Kind::Closure) {
         refuse(n.pos, "this cast");
         return undefined();
+    }
+    // 4.8: a cast between related class pointers names a base subobject, so
+    // its address shifts by that subobject's place instead of being
+    // reinterpreted. Unrelated pointers keep the plain bitcast.
+    if (!source.isError() && !target.isError() &&
+        source.type->kind() == Kind::Pointer &&
+        target.type->kind() == Kind::Pointer) {
+        const Type* from = source.type->pointee();
+        const Type* to = target.type->pointee();
+        if (from != nullptr && to != nullptr &&
+            from->kind() == Kind::Class &&
+            to->kind() == Kind::Class) {
+            std::optional<DeclId> fromId = from->decl();
+            std::optional<DeclId> toId = to->decl();
+            if (fromId.has_value() && toId.has_value()) {
+                std::optional<int64_t> shift =
+                    resolver_.classCastAdjust(*fromId, *toId);
+                if (!shift.has_value() &&
+                    (resolver_.baseAmbiguous(*fromId, *toId) ||
+                     resolver_.baseAmbiguous(*toId, *fromId))) {
+                    refuse(n.pos, "this ambiguous cast");
+                    return undefined();
+                }
+                if (shift.has_value() && *shift != 0) {
+                    ir::Value pointer = onIdentOrExpr(n.expr.get(), source);
+                    TypeRef word{ctx_.pointer(ctx_.basic(BasicKind::U8))};
+                    ir::Value delta = constantI64(
+                        *shift < 0 ? -*shift : *shift,
+                        TypeRef{ctx_.basic(BasicKind::I64)}, n.pos);
+                    if (failed_) {
+                        return undefined();
+                    }
+                    ir::Instr step;
+                    step.op = *shift < 0 ? ir::Op::Sub : ir::Op::Add;
+                    step.loc = n.pos;
+                    step.type = word;
+                    step.width = ir::IRType::Ptr;
+                    step.isPure = true;
+                    step.operands.push_back(pointer);
+                    step.operands.push_back(delta);
+                    ir::Value moved = newValue(step.width, word, n.pos);
+                    step.results.push_back(moved);
+                    emit(std::move(step));
+                    return moved;
+                }
+            }
+        }
     }
     ir::Instr instr;
     instr.op = ir::Op::Cast;
@@ -9189,7 +9272,15 @@ std::vector<ir::Value> Lowerer::lowerCallWords(Call& n) {
             const Signature* baseSig = nullptr;
             std::optional<DeclId> baseHome;
             if (currentMethodOwner_.has_value()) {
-                for (DeclId baseId : resolver_.classBases(*currentMethodOwner_)) {
+                // 4.8: `super` names one base; with several there is no
+                // single answer. The checker refuses this first.
+                std::vector<DeclId> superBases =
+                    resolver_.classBases(*currentMethodOwner_);
+                if (superBases.begin() + 1 != superBases.end()) {
+                    refuse(n.pos, "super with several base classes");
+                    return {undefined()};
+                }
+                for (DeclId baseId : superBases) {
                     baseSig = resolver_.methodSig(baseId, field->name);
                     if (baseSig != nullptr) {
                         baseHome = resolver_.methodHome(baseId, field->name);
@@ -9224,6 +9315,14 @@ std::vector<ir::Value> Lowerer::lowerCallWords(Call& n) {
                                         : nullptr;
             if (owner == nullptr) {
                 refuse(n.pos, "this call");
+                return {undefined()};
+            }
+            if (msig != nullptr && id.has_value() &&
+                resolver_.methodAmbiguous(*id, field->name)) {
+                // 4.8: two bases declare the name, so no single function is
+                // the answer. The checker refuses it first; the lowerer must
+                // not pick one behind its back.
+                refuse(n.pos, "this ambiguous call");
                 return {undefined()};
             }
             if (msig != nullptr) {
@@ -9305,6 +9404,43 @@ std::vector<ir::Value> Lowerer::lowerCallWords(Call& n) {
                         return {undefined()};
                     }
                     callee = resolver_.linkName(*declarer) + "__" + field->name;
+                    // 4.8: a method inherited from a non-first base lives in
+                    // that base's subobject, so the receiver shifts there.
+                    // The first base sits at zero and a single chain emits
+                    // nothing.
+                    if (id.has_value() && home.has_value() &&
+                        !sameDecl(*home, *id)) {
+                        std::optional<int64_t> shift =
+                            resolver_.baseOffset(*id, *home);
+                        if (!shift.has_value()) {
+                            refuse(n.pos, "this call");
+                            return {undefined()};
+                        }
+                        if (*shift != 0) {
+                            TypeRef word{ctx_.pointer(ctx_.basic(BasicKind::U8))};
+                            ir::Value delta = constantI64(
+                                *shift, TypeRef{ctx_.basic(BasicKind::I64)},
+                                n.pos);
+                            if (failed_) {
+                                return {undefined()};
+                            }
+                            ir::Instr step;
+                            step.op = ir::Op::Add;
+                            step.loc = n.pos;
+                            step.type = word;
+                            step.width = ir::IRType::Ptr;
+                            step.isPure = true;
+                            step.operands.push_back(receiver.back());
+                            step.operands.push_back(delta);
+                            ir::Value moved = newValue(step.width, word, n.pos);
+                            step.results.push_back(moved);
+                            emit(std::move(step));
+                            if (failed_) {
+                                return {undefined()};
+                            }
+                            receiver.back() = moved;
+                        }
+                    }
                 }
             }
             // msig == null: a closure-valued field, not a method — the

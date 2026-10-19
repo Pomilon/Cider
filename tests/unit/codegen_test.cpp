@@ -490,6 +490,27 @@ void testIncrDecr() {
                    "    return trace;\n"
                    "}\n") == 12,
           "a chain with no table still runs derived first");
+    check(runQuiet("class A {\n"
+                   "    var a: int;\n"
+                   "    func fromA() -> int { return this->a; }\n"
+                   "}\n"
+                   "class B {\n"
+                   "    var b: i64;\n"
+                   "    func fromB() -> int { return this->b as int; }\n"
+                   "}\n"
+                   "class C : A, B {\n"
+                   "    var c: int;\n"
+                   "    func init() { this->c = 3; }\n"
+                   "}\n"
+                   "func main() -> int {\n"
+                   "    var x: *C = new C();\n"
+                   "    x->a = 4;\n"
+                   "    x->b = 5;\n"
+                   "    var pa: *A = x as *A;\n"
+                   "    var pb: *B = x as *B;\n"
+                   "    return pb->fromB() * 10 + pa->fromA() + x->c;\n"
+                   "}\n") == 57,
+          "two bases lay out and each method reads its own fields");
     check(runQuiet("func bump(p: *int) { (*p)++; }\n"
                    "func main() -> int {\n"
                    "    var x: int = 41;\n"

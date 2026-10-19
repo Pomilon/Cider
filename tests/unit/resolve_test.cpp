@@ -476,6 +476,117 @@ void testDeleteSlot() {
           "a chain with no virtuals keeps no table");
 }
 
+// 4.8: several bases lay out one after another in declaration order, each
+// subobject at its own alignment; the offsets compose through every path,
+// a name two bases provide is ambiguous, and only the first base may carry
+// the table.
+void testMultipleBases() {
+    std::printf("several bases lay out in declaration order\n");
+    Resolved r = resolve("class A {\n"
+                         "    var a: int;\n"
+                         "    func fromA() -> int { return this->a; }\n"
+                         "}\n"
+                         "class B {\n"
+                         "    var b: i64;\n"
+                         "    func fromB() -> int { return this->b as int; }\n"
+                         "}\n"
+                         "class C : A, B {\n"
+                         "    var c: int;\n"
+                         "}\n");
+    check(r.ok, "resolves");
+    const cider::resolve::Decl* a = find(*r.resolver, "A");
+    const cider::resolve::Decl* b = find(*r.resolver, "B");
+    const cider::resolve::Decl* c = find(*r.resolver, "C");
+    check(r.resolver->fieldOffset(a->id, "a") == 0,
+          "the first base starts at zero");
+    check(r.resolver->fieldOffset(b->id, "b") == 0,
+          "each base's own view starts at zero");
+    check(r.resolver->baseOffset(c->id, a->id) == 0,
+          "the first base sits at zero");
+    check(r.resolver->baseOffset(c->id, b->id) == 8,
+          "the second base follows at its alignment");
+    check(r.resolver->fieldOffset(c->id, "a") == 0, "a keeps its place");
+    check(r.resolver->fieldOffset(c->id, "b") == 8, "b reads through the base");
+    check(r.resolver->fieldOffset(c->id, "c") == 16, "c follows the bases");
+    check(r.resolver->classSize(c->id) == 24, "the whole object rounds to 24");
+    std::optional<cider::DeclId> homeB = r.resolver->methodHome(c->id, "fromB");
+    check(homeB.has_value() && sameDecl(*homeB, b->id),
+          "a method homes in the base that declares it");
+    check(!r.resolver->methodAmbiguous(c->id, "fromB"),
+          "one base providing a name is not ambiguous");
+
+    Resolved amb = resolve("class L {\n"
+                           "    var v: int;\n"
+                           "    func pick() -> int { return this->v; }\n"
+                           "}\n"
+                           "class R {\n"
+                           "    var v: int;\n"
+                           "    func pick() -> int { return this->v; }\n"
+                           "}\n"
+                           "class D : L, R {\n"
+                           "    var d: int;\n"
+                           "}\n");
+    check(amb.ok, "the ambiguous shape still resolves");
+    const cider::resolve::Decl* d = find(*amb.resolver, "D");
+    check(amb.resolver->methodAmbiguous(d->id, "pick"),
+          "two bases declaring the method are ambiguous");
+    check(amb.resolver->fieldAmbiguous(d->id, "v"),
+          "two bases declaring the field are ambiguous");
+    check(amb.resolver->fieldOffset(d->id, "v") == -1,
+          "an ambiguous field has no single slot");
+    Resolved diamond = resolve("class Root {\n"
+                               "    var r: int;\n"
+                               "}\n"
+                               "class Left : Root {\n"
+                               "    var l: int;\n"
+                               "}\n"
+                               "class Right : Root {\n"
+                               "    var rr: int;\n"
+                               "}\n"
+                               "class Tip : Left, Right {\n"
+                               "    var t: int;\n"
+                               "}\n");
+    check(diamond.ok, "the diamond resolves");
+    const cider::resolve::Decl* root = find(*diamond.resolver, "Root");
+    const cider::resolve::Decl* tip = find(*diamond.resolver, "Tip");
+    check(diamond.resolver->baseAmbiguous(tip->id, root->id),
+          "two paths to one ancestor are ambiguous");
+    check(!diamond.resolver->baseOffset(tip->id, root->id).has_value(),
+          "an ambiguous base answers no offset");
+
+    Resolved late = resolve("class P {\n"
+                            "    var p: int;\n"
+                            "}\n"
+                            "class H {\n"
+                            "    var h: int;\n"
+                            "    virtual func f() -> int { return this->h; }\n"
+                            "}\n"
+                            "class X : P, H {\n"
+                            "    var x: int;\n"
+                            "}\n");
+    check(late.ok, "the late-headed shape resolves");
+    const cider::resolve::Decl* x = find(*late.resolver, "X");
+    check(late.resolver->classSize(x->id) == -1,
+          "a later headed base refuses the layout");
+
+    Resolved adds = resolve("class Plain {\n"
+                            "    var p: int;\n"
+                            "}\n"
+                            "class V : Plain {\n"
+                            "    var v: int;\n"
+                            "    virtual func f() -> int { return this->v; }\n"
+                            "}\n");
+    check(adds.ok, "a derived table over a plain base resolves");
+    const cider::resolve::Decl* plain = find(*adds.resolver, "Plain");
+    const cider::resolve::Decl* v = find(*adds.resolver, "V");
+    check(adds.resolver->baseOffset(v->id, plain->id) == 8,
+          "the plain base shifts past the shared table word");
+    check(adds.resolver->fieldOffset(v->id, "p") == 8,
+          "its field reads through the shift");
+    check(adds.resolver->classSize(v->id) == 16,
+          "the object keeps both words");
+}
+
 int main() {
     std::printf("resolve_test — names bind, or the program is rejected\n\n");
     testGlobals();
@@ -498,6 +609,7 @@ int main() {
     testAbiSpellings();
     testMethodInit();
     testDeleteSlot();
+    testMultipleBases();
     std::printf("\n%d checks, %s\n", checks, failures == 0 ? "all passed" : "FAILURES");
     return failures == 0 ? 0 : 1;
 }

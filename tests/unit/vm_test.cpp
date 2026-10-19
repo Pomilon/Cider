@@ -658,6 +658,39 @@ void testPolymorphicDelete() {
           "the optimised chain answers 12: " + opr.error);
 }
 
+void testMultipleBases() {
+    std::printf("several bases on both legs\n");
+    Lowered unopt = lower("class A {\n"
+                          "    var a: int;\n"
+                          "    func fromA() -> int { return this->a; }\n"
+                          "}\n"
+                          "class B {\n"
+                          "    var b: i64;\n"
+                          "    func fromB() -> int { return this->b as int; }\n"
+                          "}\n"
+                          "class C : A, B {\n"
+                          "    var c: int;\n"
+                          "    func init() { this->c = 3; }\n"
+                          "}\n"
+                          "func main() -> int {\n"
+                          "    var x: *C = new C();\n"
+                          "    x->a = 4;\n"
+                          "    x->b = 5;\n"
+                          "    var pa: *A = x as *A;\n"
+                          "    var pb: *B = x as *B;\n"
+                          "    return pb->fromB() * 10 + pa->fromA() + x->c;\n"
+                          "}\n");
+    check(unopt.ok, "lowers: " + unopt.stage);
+    cider::vm::VmResult unr = cider::vm::run(*unopt.module, "");
+    check(unr.ok && unr.exitCode == 57,
+          "the unoptimised shape answers 57: " + unr.error);
+    cider::opt::OptResult ores = cider::opt::run(*unopt.module);
+    check(ores.ok, "optimises: " + ores.error);
+    cider::vm::VmResult opr = cider::vm::run(*unopt.module, "");
+    check(opr.ok && opr.exitCode == 57,
+          "the optimised shape answers 57: " + opr.error);
+}
+
 }  // namespace
 
 int main() {
@@ -674,6 +707,7 @@ int main() {
     testArgv();
     testSuperInit();
     testPolymorphicDelete();
+    testMultipleBases();
     std::printf("\n%d checks, %s\n", checks, failures == 0 ? "all passed" : "FAILURES");
     return failures == 0 ? 0 : 1;
 }

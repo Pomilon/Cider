@@ -35,6 +35,10 @@ constexpr uint64_t kHasPrefixLen = 3;
 // slots, and the index reads as the first of a list, not as a layout fact.
 constexpr uint64_t kFirstBase = 0;
 
+// No bytes: the layout's zero, so a failed size query reads against a named
+// point rather than a bare digit.
+constexpr int64_t kNoBytes = 0;
+
 // One base per level is what the single-vptr layout can name; a level with
 // more refuses. The comparison reads against a named one, not a bare digit.
 constexpr uint64_t kOneBase = 1;
@@ -137,15 +141,30 @@ int64_t Resolver::fieldOffset(DeclId id, const std::string& name) const {
     // A class value's fields are its chain, bases most-base first
     // (FEATURES 2.2); the chain opens with a vptr word only when it has
     // virtual slots to name (Unified Standard 4.8.5).
-    bool classChain = false;
-    bool afterVptr = false;
     if (const Decl* self = declById(id)) {
         if (self->nominal == Kind::Union) {
             return unionMemberIndex(id, name) >= 0 ? 0 : -1;
         }
         if (self->nominal == Kind::Class) {
-            classChain = true;
-            afterVptr = !virtualNames(id).empty();
+            // 4.8: one walk owns a class's offsets, each base subobject's
+            // included. Two subobjects spelling one name is an ambiguity,
+            // not a layout.
+            std::unordered_set<std::string> layoutSeen;
+            std::optional<ClassLayout> layout = classLayoutImpl(id, layoutSeen);
+            if (!layout.has_value()) {
+                return -1;
+            }
+            int64_t found = -1;
+            for (const ClassSlot& slot : layout->slots) {
+                if (slot.name != name) {
+                    continue;
+                }
+                if (found >= 0) {
+                    return -1;
+                }
+                found = slot.at;
+            }
+            return found;
         }
         if (self->nominal == Kind::Struct) {
             // 4.1/4.5: one walk answers offsets, bit units and packing.
@@ -165,35 +184,10 @@ int64_t Resolver::fieldOffset(DeclId id, const std::string& name) const {
             return -1;
         }
     }
-    std::vector<std::string> fields;
-    if (classChain) {
-        std::unordered_set<std::string> chainSeen;
-        if (!chainFieldsImpl(id, chainSeen, fields)) {
-            return -1;
-        }
-    } else {
-        fields = fieldNames(id);
-    }
-    int64_t matches = 0;
-    for (const std::string& field : fields) {
-        if (field == name) {
-            ++matches;
-        }
-    }
-    // One name, one offset: a field repeated across a chain would answer
-    // two addresses for one spelling, which is an ambiguity, not a layout.
-    if (matches > 1) {
-        return -1;
-    }
+    std::vector<std::string> fields = fieldNames(id);
     int64_t at = 0;
-    if (afterVptr) {
-        at = layout::kSizePointer;
-    }
     for (const std::string& field : fields) {
         TypeRef type = fieldType(id, field);
-        if (type.isError() && classChain) {
-            type = fieldTypeAcrossBases(id, field);
-        }
         if (type.isError()) {
             return -1;
         }
@@ -277,20 +271,16 @@ bool Resolver::chainFieldsImpl(DeclId id, std::unordered_set<std::string>& seen,
     if (!seen.insert(declKey(id)).second) {
         return false;
     }
-    std::vector<DeclId> bases = classBases(id);
-    if (bases.size() > kOneBase) {
-        // Several bases at one level would need per-subobject vtprs; with
-        // one vptr word the layout cannot name them, so nothing lays out.
-        return false;
-    }
-    for (DeclId base : bases) {
+    for (DeclId base : classBases(id)) {
         if (!chainFieldsImpl(base, seen, out)) {
+            seen.erase(declKey(id));
             return false;
         }
     }
     for (const std::string& field : fieldNames(id)) {
         out.push_back(field);
     }
+    seen.erase(declKey(id));
     return true;
 }
 
@@ -301,13 +291,11 @@ int64_t Resolver::structSize(DeclId id) const {
 
 int64_t Resolver::classSize(DeclId id) const {
     std::unordered_set<std::string> seen;
-    seen.insert(declKey(id));
     return classSizeImpl(id, seen);
 }
 
 int64_t Resolver::classAlign(DeclId id) const {
     std::unordered_set<std::string> seen;
-    seen.insert(declKey(id));
     return classAlignImpl(id, seen);
 }
 
@@ -357,12 +345,10 @@ int64_t Resolver::nominalSizeImpl(const Type* type,
     }
     if (type->kind() == Kind::Class) {
         std::optional<DeclId> id = type->decl();
-        if (!id.has_value() || !seen.insert(declKey(*id)).second) {
+        if (!id.has_value()) {
             return -1;
         }
-        int64_t out = classSizeImpl(*id, seen);
-        seen.erase(declKey(*id));
-        return out;
+        return classSizeImpl(*id, seen);
     }
     return typeSize(type);
 }
@@ -395,12 +381,10 @@ int64_t Resolver::nominalAlignImpl(const Type* type,
     }
     if (type->kind() == Kind::Class) {
         std::optional<DeclId> id = type->decl();
-        if (!id.has_value() || !seen.insert(declKey(*id)).second) {
+        if (!id.has_value()) {
             return -1;
         }
-        int64_t out = classAlignImpl(*id, seen);
-        seen.erase(declKey(*id));
-        return out;
+        return classAlignImpl(*id, seen);
     }
     return alignOf(type);
 }
@@ -502,82 +486,225 @@ int64_t Resolver::structAlignImpl(DeclId id, std::unordered_set<std::string>& se
 }
 
 int64_t Resolver::classSizeImpl(DeclId id, std::unordered_set<std::string>& seen) const {
-    // A chain lays out bases most-base first, then the class's own fields
-    // (FEATURES 2.2). Several bases at one level have no layout yet, so
-    // the walk refuses. Under 4.8.5 only a chain with a virtual slot
-    // carries the vptr word; a chain without one sizes by classSizePlain.
-    std::vector<std::string> fields;
-    {
-        std::unordered_set<std::string> chainSeen;
-        if (!chainFieldsImpl(id, chainSeen, fields)) {
-            return -1;
-        }
+    std::optional<ClassLayout> layout = classLayoutImpl(id, seen);
+    if (!layout.has_value()) {
+        return -1;
     }
-    const bool headed = !virtualNames(id).empty();
-    const std::string classKey = declKey(id);
-    for (const std::string& field : fields) {
-        if (fieldBits_.find(classKey + "." + field) != fieldBits_.end()) {
-            // 4.1: class bitfields are not lowered yet; refuse by size
-            // rather than laying the bits out as plain fields.
-            return -1;
-        }
-    }
-    int64_t at = 0;
-    int64_t multiple = 1;
-    if (headed) {
-        at = layout::kSizePointer;
-        multiple = layout::kAlignPointer;
-    }
-    for (const std::string& field : fields) {
-        TypeRef type = fieldType(id, field);
-        if (type.isError()) {
-            return -1;
-        }
-        int64_t fieldMultiple = nominalAlignImpl(type.type, seen);
-        int64_t bytes = nominalSizeImpl(type.type, seen);
-        if (fieldMultiple <= 0 || bytes < 0) {
-            return -1;
-        }
-        if (fieldMultiple > multiple) {
-            multiple = fieldMultiple;
-        }
-        at = layout::roundUp(at, fieldMultiple);
-        at += bytes;
-    }
-    if (headed) {
-        return layout::classSize(at - layout::kSizePointer, multiple);
-    }
-    return layout::classSizePlain(at, multiple);
+    return layout->bytes;
 }
 
 int64_t Resolver::classAlignImpl(DeclId id, std::unordered_set<std::string>& seen) const {
-    std::vector<std::string> fields;
-    {
-        std::unordered_set<std::string> chainSeen;
-        if (!chainFieldsImpl(id, chainSeen, fields)) {
-            return -1;
+    std::optional<ClassLayout> layout = classLayoutImpl(id, seen);
+    if (!layout.has_value()) {
+        return -1;
+    }
+    return layout->multiple;
+}
+
+std::optional<Resolver::ClassLayout> Resolver::classLayoutImpl(
+    DeclId id, std::unordered_set<std::string>& seen) const {
+    const std::string key = declKey(id);
+    if (!seen.insert(key).second) {
+        return std::nullopt;
+    }
+    auto finish = [&](std::optional<ClassLayout> out) {
+        seen.erase(key);
+        return out;
+    };
+    const Decl* self = declById(id);
+    if (self == nullptr || self->nominal != Kind::Class) {
+        return finish(std::nullopt);
+    }
+    const std::vector<DeclId> bases = classBases(id);
+    const bool headed = !virtualNames(id).empty();
+    // 4.8: one vptr word serves the object's first chain. A later base with
+    // its own table would need a second word, which the layout cannot name;
+    // the first base may carry one (the object's word) or not (then it
+    // starts after the object's own word).
+    for (auto it = bases.begin(); it != bases.end(); ++it) {
+        if (it != bases.begin() && !virtualNames(*it).empty()) {
+            return finish(std::nullopt);
         }
     }
-    // 4.8.5: only a virtual chain carries the pointer alignment of its
-    // vptr word; a concrete chain aligns as its fields do.
-    int64_t multiple = 1;
-    if (!virtualNames(id).empty()) {
-        multiple = layout::kAlignPointer;
+    ClassLayout out;
+    out.multiple = headed ? layout::kAlignPointer : layout::kAlignByte;
+    int64_t at = headed ? layout::kSizePointer : kNoBytes;
+    for (auto it = bases.begin(); it != bases.end(); ++it) {
+        const DeclId base = *it;
+        const bool shared =
+            headed && it == bases.begin() && !virtualNames(base).empty();
+        int64_t baseAt = kNoBytes;
+        if (shared) {
+            // The first base's table word is the object's own: its view
+            // begins at the object address.
+            baseAt = kNoBytes;
+        } else {
+            int64_t baseAlign = classAlignImpl(base, seen);
+            if (baseAlign <= kNoBytes) {
+                return finish(std::nullopt);
+            }
+            at = layout::roundUp(at, baseAlign);
+            baseAt = at;
+        }
+        std::optional<ClassLayout> sub = classLayoutImpl(base, seen);
+        if (!sub.has_value()) {
+            return finish(std::nullopt);
+        }
+        for (const ClassSlot& slot : sub->slots) {
+            ClassSlot placed = slot;
+            placed.at += baseAt;
+            out.slots.push_back(placed);
+        }
+        out.bases.emplace_back(base, baseAt);
+        if (sub->multiple > out.multiple) {
+            out.multiple = sub->multiple;
+        }
+        const int64_t end = baseAt + sub->packed;
+        if (end > at) {
+            at = end;
+        }
     }
-    for (const std::string& field : fields) {
+    for (const std::string& field : fieldNames(id)) {
+        if (fieldBits_.find(key + "." + field) != fieldBits_.end()) {
+            // 4.1: class bitfields are not lowered yet; refuse by layout
+            // rather than laying the bits out as plain fields.
+            return finish(std::nullopt);
+        }
         TypeRef type = fieldType(id, field);
         if (type.isError()) {
-            return -1;
+            return finish(std::nullopt);
         }
-        int64_t fieldMultiple = nominalAlignImpl(type.type, seen);
-        if (fieldMultiple <= 0) {
-            return -1;
+        const int64_t fieldAlign = nominalAlignImpl(type.type, seen);
+        const int64_t bytes = nominalSizeImpl(type.type, seen);
+        if (fieldAlign <= kNoBytes || bytes < kNoBytes) {
+            return finish(std::nullopt);
         }
-        if (fieldMultiple > multiple) {
-            multiple = fieldMultiple;
+        at = layout::roundUp(at, fieldAlign);
+        out.slots.push_back(ClassSlot{id, field, type, at});
+        at += bytes;
+        if (fieldAlign > out.multiple) {
+            out.multiple = fieldAlign;
         }
     }
-    return multiple;
+    out.packed = at;
+    out.bytes = headed
+                    ? layout::classSize(at - layout::kSizePointer, out.multiple)
+                    : layout::classSizePlain(at, out.multiple);
+    return finish(std::move(out));
+}
+
+std::optional<int64_t> Resolver::baseOffset(DeclId derived, DeclId base) const {
+    int64_t at = 0;
+    int paths = 0;
+    if (!baseRelationImpl(derived, base, at, paths) || paths != 1) {
+        return std::nullopt;
+    }
+    return at;
+}
+
+bool Resolver::baseAmbiguous(DeclId derived, DeclId base) const {
+    int64_t at = 0;
+    int paths = 0;
+    return baseRelationImpl(derived, base, at, paths) && paths > 1;
+}
+
+std::optional<int64_t> Resolver::classCastAdjust(DeclId from, DeclId to) const {
+    if (sameDecl(from, to)) {
+        return 0;
+    }
+    if (std::optional<int64_t> up = baseOffset(from, to); up.has_value()) {
+        return *up;
+    }
+    if (std::optional<int64_t> down = baseOffset(to, from); down.has_value()) {
+        return -*down;
+    }
+    return std::nullopt;
+}
+
+bool Resolver::baseRelationImpl(DeclId derived, DeclId base, int64_t& at,
+                                int& paths) const {
+    if (sameDecl(derived, base)) {
+        at = 0;
+        ++paths;
+        return true;
+    }
+    std::unordered_set<std::string> seen;
+    std::optional<ClassLayout> layout = classLayoutImpl(derived, seen);
+    if (!layout.has_value()) {
+        return false;
+    }
+    int foundPaths = 0;
+    int64_t foundAt = 0;
+    for (const auto& entry : layout->bases) {
+        int64_t deeperAt = 0;
+        int deeperPaths = 0;
+        if (!baseRelationImpl(entry.first, base, deeperAt, deeperPaths)) {
+            continue;
+        }
+        if (foundPaths == 0) {
+            foundAt = entry.second + deeperAt;
+        }
+        foundPaths += deeperPaths;
+    }
+    if (foundPaths == 0) {
+        return false;
+    }
+    at = foundAt;
+    paths += foundPaths;
+    return true;
+}
+
+int Resolver::methodPathsImpl(DeclId id, const std::string& name,
+                              std::vector<std::string>& path) const {
+    const std::string key = declKey(id);
+    for (const std::string& onPath : path) {
+        if (onPath == key) {
+            return 0;
+        }
+    }
+    path.push_back(key);
+    int paths = 0;
+    if (methodSigs_.find(key + "." + name) != methodSigs_.end()) {
+        // An own declaration hides every base's, so it is one answer.
+        paths = 1;
+    } else {
+        for (DeclId base : classBases(id)) {
+            paths += methodPathsImpl(base, name, path);
+        }
+    }
+    path.pop_back();
+    return paths;
+}
+
+int Resolver::fieldPathsImpl(DeclId id, const std::string& name,
+                             std::vector<std::string>& path) const {
+    const std::string key = declKey(id);
+    for (const std::string& onPath : path) {
+        if (onPath == key) {
+            return 0;
+        }
+    }
+    path.push_back(key);
+    int paths = 0;
+    if (fieldTypes_.find(key + "." + name) != fieldTypes_.end()) {
+        paths = 1;
+    } else {
+        for (DeclId base : classBases(id)) {
+            paths += fieldPathsImpl(base, name, path);
+        }
+    }
+    path.pop_back();
+    return paths;
+}
+
+bool Resolver::methodAmbiguous(DeclId id, const std::string& name) const {
+    std::vector<std::string> path;
+    return methodPathsImpl(id, name, path) > 1;
+}
+
+bool Resolver::fieldAmbiguous(DeclId id, const std::string& name) const {
+    std::vector<std::string> path;
+    return fieldPathsImpl(id, name, path) > 1;
 }
 
 bool Resolver::bitField(DeclId id, const std::string& name, int64_t& bitOffset,
@@ -773,15 +900,11 @@ std::vector<std::string> Resolver::virtualNames(DeclId id) const {
 
 std::vector<std::string> Resolver::virtualSlots(DeclId id) const {
     std::vector<DeclId> bases = classBases(id);
-    if (bases.size() > kOneBase) {
-        // Several bases at one level compose no slot list yet; callers see
-        // an empty table and refuse rather than dispatch through half one.
-        return {};
-    }
     std::vector<std::string> out;
     if (!bases.empty()) {
-        // One base at a level owns every inherited slot; its list is the
-        // prefix of this class's (a multiple-base level answered above).
+        // 4.8: the first base owns every inherited slot; its list is the
+        // prefix of this class's. A later base with a table is refused by
+        // the layout, so one vptr word still names the whole chain.
         out = virtualSlots(bases[kFirstBase]);
     }
     std::string key = declKey(id);
