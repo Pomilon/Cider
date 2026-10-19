@@ -1923,6 +1923,10 @@ void Resolver::bindPrelude(const Scope* scope, Position pos) {
     };
     func("print", {{string, false}}, none);
     func("panic", {{string, false}}, none);
+    // 7.10: the finalizer entry. Its link name is the generated function
+    // every program carries; the standard `exit` calls it before its
+    // syscall, and `_start` calls it after main.
+    func("fini_run", {}, none);
     func("alloc", {{i64, false}, {i64, false}}, addr);
     func("realloc", {{addr, false}, {i64, false}, {i64, false}}, addr);
     func("free", {{addr, false}}, none);

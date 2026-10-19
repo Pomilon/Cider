@@ -57,6 +57,9 @@ public:
     virtual void onBlockEnter(Block& n) { (void)n; }
     virtual void onBlockExit(Block& n) { (void)n; }
     virtual void onFuncDecl(FuncDecl& n) { (void)n; }
+    // 7.10: one module-level finalizer block. The sink lowers it into the
+    // generated finalizer function.
+    virtual void onFiniDecl(FiniDecl& n) { (void)n; }
     // One instantiated generic function body, emitted under its own link
     // name. The spelling holds parameter names and the template body; the
     // signature holds the substituted parameter and return types. Fires
@@ -537,6 +540,9 @@ private:
     std::unordered_set<const Pattern*> deadPatterns_;
     TypeRef funcReturn_;
     bool inFunc_ = false;
+    // 7.10: inside a fini block the storage checks like a function body,
+    // but a return would leave the finalizer half-run, so it refuses.
+    bool inFini_ = false;
     // The class and self type of the method body being walked, so
     // `super` resolves against the right base (Unified Standard 4.8.3).
     std::optional<DeclId> currentClass_;

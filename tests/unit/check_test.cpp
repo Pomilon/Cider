@@ -1022,6 +1022,28 @@ void testTypedForIn() {
     check(cstyle.ok, "the C-style head still parses: " + cstyle.stage);
 }
 
+// 7.10: a fini block checks like a function body; it has no answer, and a
+// return inside would leave it half-run.
+void testFini() {
+    std::printf("fini blocks\n");
+    Checked ok = check(
+        "var locked: bool = false;\n"
+        "fini {\n"
+        "    if (locked) { locked = false; }\n"
+        "}\n"
+        "func main() -> int { return 0; }\n");
+    check(ok.ok, "a fini block checks: " + ok.stage);
+    Checked two = check(
+        "fini { }\n"
+        "fini { }\n"
+        "func main() -> int { return 0; }\n");
+    check(two.ok, "two fini blocks check: " + two.stage);
+    Checked ret = check(
+        "fini { return; }\n"
+        "func main() -> int { return 0; }\n");
+    check(!ret.ok && ret.stage == "check", "a return inside fini refuses");
+}
+
 void testInterfaceNil() {
     std::printf("null interfaces check\n");
     Checked cast = check(
@@ -1546,12 +1568,6 @@ void testCharArith() {
     check(up.ok, "range compare and char math check: " + up.stage);
 }
 
-void testFiniRefusal() {
-    std::printf("fini refuses loudly\n");
-    Checked f = check("fini { } func main() -> int { return 0; }");
-    check(!f.ok && f.stage == "check", "a fini block is refused until implemented");
-}
-
 void testThisKeyword() {
     std::printf("this and self are synonyms\n");
     Checked t = check("class C { var x: int; func get() -> int { return (*this).x; } } func main() -> int { return 0; }");
@@ -1885,6 +1901,7 @@ int main() {
     testStringBytes();
     testAlignof();
     testTypedForIn();
+    testFini();
     testInterfaceNil();
     testMatch();
     testAlternation();
@@ -1892,7 +1909,6 @@ int main() {
     testEnumMatch();
     testPointerArith();
     testArrowMember();
-    testFiniRefusal();
     testCharArith();
     testBitcast();
     testAddrCasts();

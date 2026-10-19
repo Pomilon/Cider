@@ -1991,6 +1991,10 @@ void Checker::visitReturn(Return& n) {
         fail(n.pos, "return inside a defer");
         return;
     }
+    if (inFini_) {
+        fail(n.pos, "return inside a fini block");
+        return;
+    }
     if (n.value == nullptr) {
         if (funcReturn_ != TypeRef{ctx_.void_()}) {
             fail(n.pos, "returning nothing from a function with a return type");
@@ -3265,9 +3269,23 @@ void Checker::visitTryStmt(TryStmt& n) {
 }
 
 void Checker::visitFiniDecl(FiniDecl& n) {
-    // Unified Standard 7.10 gives fini blocks exit-time execution; nothing
-    // implements that yet, and a silently ignored block hides the gap.
-    fail(n.pos, "a fini block is not executed yet");
+    // 7.10: the block runs at process termination. Its storage and effects
+    // check like a function body's (locals, defers), but it takes no
+    // parameters and answers nothing; a return inside refuses.
+    bool was = inFunc_;
+    bool wasFini = inFini_;
+    TypeRef savedReturn = funcReturn_;
+    inFunc_ = true;
+    inFini_ = true;
+    funcReturn_ = TypeRef{ctx_.void_()};
+    if (sink_ != nullptr) {
+        sink_->onFiniDecl(n);
+    } else {
+        n.body->accept(*this);
+    }
+    funcReturn_ = savedReturn;
+    inFini_ = wasFini;
+    inFunc_ = was;
 }
 
 void Checker::visitDeferStmt(DeferStmt& n) {

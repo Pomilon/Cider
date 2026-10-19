@@ -138,8 +138,9 @@ int64_t hostTagFor(const std::string& name) {
         "cider_alloc",         // -8
         "cider_free",          // -9
         "cider_realloc",       // -10
+        "cider_fini_run",      // -11
     };
-    static const int64_t count = 10;
+    static const int64_t count = 11;
     for (int64_t i = 0; i < count; ++i) {
         if (name == hosts[i]) {
             return -i - 1;
@@ -152,9 +153,9 @@ std::string hostNameForTag(int64_t tag) {
     static const char* const hosts[] = {
         "cider_print", "putchar", "cider_itoa_signed", "cider_itoa_unsigned",
         "cider_ftoa", "cider_panic", "cider_heap_fail", "cider_alloc",
-        "cider_free", "cider_realloc",
+        "cider_free", "cider_realloc", "cider_fini_run",
     };
-    static const int64_t count = 10;
+    static const int64_t count = 11;
     if (tag >= 0) {
         return "";
     }
@@ -1728,6 +1729,12 @@ struct Runner {
             }
             return hostRealloc(args[0], args[1], args[2], pos, results);
         }
+        if (name == "cider_fini_run") {
+            // 7.10: the finalizer entry `exit` calls. A program with fini
+            // blocks defines the function itself and this case is never
+            // reached; without blocks there is nothing to run.
+            return true;
+        }
         return refuse(pos, "vm cannot call '" + name + "' yet");
     }
 
@@ -2371,6 +2378,19 @@ static VmResult runProgram(const ir::Module& module,
     }
     if (run.programDone) {
         return run.out;
+    }
+    // 7.10: the finalizers run after the entry returns, before the process
+    // would exit. A program that reached `exit` already ran them (the exit
+    // body calls the same function), and programDone says so.
+    auto fini = run.functionsByName.find("cider_fini_run");
+    if (fini != run.functionsByName.end()) {
+        std::vector<int64_t> ignored;
+        if (!run.runFunction(*fini->second, {}, ignored)) {
+            return run.out;
+        }
+        if (run.programDone) {
+            return run.out;
+        }
     }
     int64_t bits = answered.empty() ? 0 : answered[0];
     run.out.ok = true;

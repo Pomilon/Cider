@@ -217,7 +217,7 @@ private:
         std::vector<std::string> order = {
             "cider_print", "cider_panic", "cider_alloc", "cider_free",
             "cider_realloc", "putchar", "cider_itoa_signed",
-            "cider_itoa_unsigned", "cider_ftoa",
+            "cider_itoa_unsigned", "cider_ftoa", "cider_fini_run",
         };
         std::vector<std::string> out;
         for (const ir::Function& fn : module_.functions) {
@@ -267,12 +267,16 @@ private:
     bool emitEntry() {
         const ir::Function* mainFn = nullptr;
         const ir::Function* startFn = nullptr;
+        const ir::Function* finiFn = nullptr;
         for (const ir::Function& fn : module_.functions) {
             if (fn.name == "main") {
                 mainFn = &fn;
             }
             if (fn.name == "_start") {
                 startFn = &fn;
+            }
+            if (fn.name == "cider_fini_run") {
+                finiFn = &fn;
             }
         }
         if (mainFn != nullptr && startFn != nullptr) {
@@ -323,7 +327,18 @@ private:
         if (ms) {
             out_ += "  add rsp, " + std::to_string(kShadowBytes) + "\n";
         }
-        out_ += "  mov rdi, rax\n";
+        // 7.10: finalizers run after main and before the exit syscall, and
+        // main's answer survives them on the stack. The call is aligned
+        // like any other, and rdi is loaded only after every call.
+        if (finiFn != nullptr) {
+            out_ += "  push rax\n";
+            out_ += "  sub rsp, 8\n";
+            out_ += "  call cider_fini_run\n";
+            out_ += "  add rsp, 8\n";
+            out_ += "  pop rdi\n";
+        } else {
+            out_ += "  mov rdi, rax\n";
+        }
         out_ += "  mov eax, 60\n";               // exit(main's answer)
         out_ += "  syscall\n";
         return true;
@@ -335,6 +350,15 @@ private:
     bool emitHelper(const std::string& name) {
         if (emittedHelpers_.insert(name).second == false) {
             return true;                         // already in the text once
+        }
+        if (name == "cider_fini_run") {
+            // 7.10: the symbol every program carries because the standard
+            // `exit` calls it. With no fini blocks written there is nothing
+            // to run, so the stub is a bare return; a program with blocks
+            // defines the function itself and this text is never emitted.
+            out_ += "cider_fini_run:\n";
+            out_ += "  ret\n";
+            return true;
         }
         if (name == "cider_print") {
             // (data, length) in (rdi, rsi) — the two words a string lowers

@@ -84,8 +84,13 @@ public:
     // first, entry last, so link names resolve in one IR module and rodata
     // labels never collide. Returns false when this module failed.
     bool lowerInto(const std::string& name, Program& program);
-    // Moves the accumulated module out. Null when nothing lowered.
-    std::unique_ptr<ir::Module> takeModule() { return std::move(module_); }
+    // Moves the accumulated module out. Null when nothing lowered or the
+    // finalizer pass refused (the driver prints every layer's errors on a
+    // null module, so a late refusal is not silent).
+    std::unique_ptr<ir::Module> takeModule() {
+        buildFini();
+        return failed_ ? nullptr : std::move(module_);
+    }
     // Emits every used generic-function specialization once, after all
     // modules lowered (cross-module specs are unknown while their home
     // module lowers). Runs the checker's spec walks with this lowerer
@@ -99,6 +104,7 @@ public:
     // --- called by the Checker during its walk, through check::LowerSink ---
     void onProgram(Program& n) override;
     void onFuncDecl(FuncDecl& n) override;
+    void onFiniDecl(FiniDecl& n) override;
     void onSpecFunc(DeclId spec, const FuncDecl& spelling,
                     const Signature& sig) override;
     void onMethodDecl(const std::string& owner, const std::string& name,
@@ -591,6 +597,11 @@ private:
     void beginFuncFrame(const std::string& link, const Signature& sig,
                         const std::vector<Param>& params, Position pos);
     void endFuncFrame(Position pos);
+    // 7.10: composes the finalizer entry (`cider_fini_run`) from the
+    // per-block functions collected during the walk, in reverse encounter
+    // order. Called once, from takeModule, because the order is only known
+    // after every module has lowered.
+    void buildFini();
     // Whether a block of the function under construction can run: a
     // breadth-first walk over terminator edges from the entry block. A
     // reachable falloff in a value function is a compile-time rejection
@@ -659,6 +670,12 @@ private:
     bool enabled_ = false;
     bool wrap_ = false;
     bool failed_ = false;
+    // 7.10: the per-block finalizer functions, in encounter order; the
+    // composed entry calls them in reverse. finiBuilt_ makes takeModule
+    // idempotent, and finiPos_ answers the first block for diagnostics.
+    std::vector<std::string> finiBodies_;
+    Position finiPos_{"", 1, 1};
+    bool finiBuilt_ = false;
     uint32_t valueSeq_ = 0;
     uint32_t labelSeq_ = 0;
     // The innermost enclosing loop's two jump targets: `continue` goes to
