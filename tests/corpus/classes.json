@@ -40,9 +40,9 @@
   "class": "A"
  },
  "alias_field": {
-  "actual": "compile rejection: tests/corpus/alias_field/main.cid:15:11: a variable needs an initialiser \u2014 uninitialised local `var s: S;` (FEATURES 8.3: always an error)",
+  "actual": "migrated to v3: scalar, pointer and struct-alias fields read and write through the alias; raw locals spell `= uninit`; all three legs match expected.json",
   "blocker": "none",
-  "class": "B"
+  "class": "A"
  },
  "alias_interface": {
   "actual": "exact stdout/stderr/exit match",
@@ -940,9 +940,9 @@
   "class": "A"
  },
  "list_positions_crossmod": {
-  "actual": "9:25: expected ';' at bare `Holder{...}` literal (v3 requires `new` for every value, \u00a72.1a)",
-  "blocker": "v3-new-required",
-  "class": "B"
+  "actual": "migrated to v3: `this.` spells `this->`, raw locals spell `= uninit`, the u8 element sum casts to int; cross-module list positions materialise through the callee's alias and field shapes; all three legs match expected.json",
+  "blocker": "none",
+  "class": "A"
  },
  "list_reassign": {
   "actual": "exact stdout/stderr/exit match; one parked line (sret+2-iface+struct arg exceeds the codegen argument-row budget)",

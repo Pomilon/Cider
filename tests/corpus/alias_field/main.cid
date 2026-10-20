@@ -9,10 +9,11 @@ type IA = Inner;
 
 struct S { var w: W; var h: H; var i: IA; }
 
+// Migrated to v3: raw locals spell `= uninit`.
 from std.io import printInt, print;
 
 func main() -> int {
-  var s: S;
+  var s: S = uninit;
   s.w = 5;
   printInt(s.w as int); print("\n");
 
@@ -27,7 +28,7 @@ func main() -> int {
   printInt(s.i.a as int); print("\n");
   printInt(s.i.b as int); print("\n");
 
-  var l: IA;
+  var l: IA = uninit;
   l.a = 9;
   printInt(l.a as int); print("\n");
   return 0;

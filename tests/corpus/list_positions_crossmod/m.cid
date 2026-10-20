@@ -1,3 +1,4 @@
+// Migrated to v3: `this.` spells `this->`.
 export type Row = [u8; 2];
 export type Grid = [Row; 2];
 
@@ -15,7 +16,7 @@ export interface Shape {
 
 export class Sq {
   var side: int;
-  func area() -> int { return this.side * this.side; }
+  func area() -> int { return this->side * this->side; }
 }
 
 export struct IfaceHolder {
