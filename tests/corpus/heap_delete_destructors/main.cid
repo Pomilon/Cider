@@ -9,72 +9,79 @@
 // a pointer into a heap subobject), and base-class destructors are not
 // auto-invoked (Cider destructors are not virtual) — only by-value fields,
 // nested structs and fixed arrays of class values participate.
+// Migrated to v3: destructors spell `deinit()` and run only through an
+// explicit `delete`; every embedded field carries an explicit default
+// (`D { }`, `SWrap { }`, array element literals) so a bare `new X { }`
+// constructs the same zero/default state, and `this.f` spells `this->f`.
+// v3 `delete` takes a class pointer, so the heap-struct cases below are
+// rejected loudly (`delete needs a class pointer`); v3 also does not
+// finalize embedded class values, so this program stays B-terminal.
 from std.io import print, printInt;
 
 var drops: int = 0;
 
 class D {
-    var label: int;
-    func ~D() {
+    var label: int = 0;
+    func deinit() {
         drops = drops + 1;
-        printInt(this.label);
+        printInt(this->label);
         print(",");
     }
 }
 
 class Pair {
-    var first: D;
-    var second: D;
+    var first: D = D { };
+    var second: D = D { };
 }
 
 class Holder {
-    var a: D;
-    var b: D;
-    func ~Holder() {
+    var a: D = D { };
+    var b: D = D { };
+    func deinit() {
         print("H,");
     }
 }
 
 class Nest {
-    var inner: Holder;
-    var tail: D;
+    var inner: Holder = Holder { };
+    var tail: D = D { };
 }
 
 struct SWrap {
-    var d: D;
-    var pad: int;
+    var d: D = D { };
+    var pad: int = 0;
 }
 
 struct SNested {
-    var wrap: SWrap;
-    var arr: [D; 2];
+    var wrap: SWrap = SWrap { };
+    var arr: [D; 2] = [D { }, D { }];
 }
 
 type Alias = D;
 type PairAlias = Pair;
 
 class Solo {
-    func ~Solo() {
+    func deinit() {
         print("S,");
     }
 }
 
 func heapPair() -> void {
-    var p: *Pair = new Pair;
+    var p: *Pair = new Pair { };
     p->first.label = 1;
     p->second.label = 2;
     delete p;              // 2,1,
 }
 
 func heapHolder() -> void {
-    var h: *Holder = new Holder;
+    var h: *Holder = new Holder { };
     h->a.label = 3;
     h->b.label = 4;
     delete h;              // H,4,3,  (own body first, then members reversed)
 }
 
 func heapNest() -> void {
-    var n: *Nest = new Nest;
+    var n: *Nest = new Nest { };
     n->inner.a.label = 5;
     n->inner.b.label = 6;
     n->tail.label = 7;
@@ -82,13 +89,13 @@ func heapNest() -> void {
 }
 
 func heapStruct() -> void {
-    var s: *SWrap = new SWrap;
+    var s: *SWrap = new SWrap { };
     s->d.label = 8;
     delete s;              // 8,
 }
 
 func heapStructNested() -> void {
-    var s: *SNested = new SNested;
+    var s: *SNested = new SNested { };
     s->wrap.d.label = 9;
     s->arr[0].label = 10;
     s->arr[1].label = 11;
@@ -96,17 +103,17 @@ func heapStructNested() -> void {
 }
 
 func heapAlias() -> void {
-    var d: *Alias = new Alias;
+    var d: *Alias = new Alias { };
     d->label = 12;
     delete d;              // 12,
-    var p: *PairAlias = new PairAlias;
+    var p: *PairAlias = new PairAlias { };
     p->first.label = 13;
     p->second.label = 14;
     delete p;              // 14,13,
 }
 
 func heapSolo() -> void {
-    var s: *Solo = new Solo;
+    var s: *Solo = new Solo { };
     delete s;              // S,  (no embedded class values)
 }
 

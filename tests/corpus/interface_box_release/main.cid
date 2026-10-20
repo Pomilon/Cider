@@ -18,16 +18,21 @@
 //   * a pointer source (makePtr) allocates no box and finalizes nothing;
 //   * a loop releases each iteration's box at the body's scope exit.
 // All three backends must agree byte for byte (run_tests).
+// Migrated to v3: destructors spell `deinit()`, receivers spell `this->`,
+// and value locals spell `= uninit`. v3 boxes only class pointers: a
+// class VALUE returned as an interface is refused because the data word
+// would dangle, and v3 has no scope-exit/boxed-value destruction, so
+// this program stays B-terminal; expected.json is not blessed.
 from std.io import print, printInt;
 
 var drops: int = 0;
 
 class Inner {
   var n: int;
-  func ~Inner() {
+  func deinit() {
     drops = drops + 1;
     print("i");
-    printInt(this.n);
+    printInt(this->n);
     print(",");
   }
 }
@@ -35,13 +40,13 @@ class Inner {
 class Sq {
   var s: int;
   var inner: Inner;
-  func ~Sq() {
+  func deinit() {
     drops = drops + 1;
     print("S");
-    printInt(this.s);
+    printInt(this->s);
     print(",");
   }
-  func area() -> int { return this.s * this.s; }
+  func area() -> int { return this->s * this->s; }
 }
 
 interface Shape {
@@ -50,7 +55,7 @@ interface Shape {
 
 // Concrete value source: boxed at the return site.
 func makeSq(v: int) -> Shape {
-  var c: Sq;
+  var c: Sq = uninit;
   c.s = v;
   c.inner.n = v + 10;
   return c;
@@ -63,7 +68,7 @@ func chain(v: int) -> Shape { return pass(makeSq(v)); }
 // Pointer source: no box, no release. The heap object is the program's own
 // (`new` without `delete`), exactly as before this fix.
 func makePtr(v: int) -> Shape {
-  var p: *Sq = new Sq;
+  var p: *Sq = new Sq { s: 0, inner: Inner { n: 0 } };
   p->s = v;
   p->inner.n = v + 20;
   return p;

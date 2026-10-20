@@ -24,6 +24,11 @@
 //     hidden heap-return copy must use the fixed bare malloc/free pair on
 //     both sides, or the module's mmap-arena block reaches libc free and
 //     the native build crashes (see allocmod.cid).
+// v3 note: implicit scope-exit, parameter-copy and temporary destruction
+// is not part of v3 (only explicit `delete`/`fini` finalize), so the v2
+// trace this program pins is not expressible and is not blessed. The
+// file keeps the v2 `~D` spelling as the loud witness: v3 rejects it
+// at check. This program is B-terminal.
 import allocmod;
 from std.io import print, printInt;
 

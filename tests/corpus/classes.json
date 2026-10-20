@@ -655,8 +655,8 @@
   "class": "A"
  },
  "forward_decl_bases": {
-  "actual": "tests/corpus/forward_decl_bases/main.cid:13:9: a class needs a body",
-  "blocker": "inheritance-extends/override/virtual/this (+field-initializers, stdlib-import) [B-terminal]",
+  "actual": "v3 rejects the v2 destructor witness in the destructor section: `main.cid:83:10: a method needs a name` (then `a class holds fields and methods`, `85:9: expected '}'`, `88:5: expected a declaration`) on all three legs; expected.json left verbatim",
+  "blocker": "v2 scope-exit destruction and embedded class-value finalization are not v3 semantics; v3 delete runs own+base deinits only (Standard 4.8.1/4.8.3) [B-terminal]",
   "class": "B"
  },
  "forward_decl_fields": {
@@ -745,8 +745,8 @@
   "class": "A"
  },
  "heap_delete_destructors": {
-  "actual": "tests/corpus/heap_delete_destructors/main.cid:18:10: a method needs a name",
-  "blocker": "destructor-~D/delete (+embedded-class-values, stdlib-import) [B-terminal]",
+  "actual": "v3: all three legs rc=1 with identical stderr `main.cid:94:5: delete needs a class pointer` and `main.cid:102:5: delete needs a class pointer`; the v2 embedded-finalizer trace is not blessed",
+  "blocker": "v3 delete takes class pointers only (heap struct targets rejected) and does not finalize embedded class values [B-terminal]",
   "class": "B"
  },
  "heap_stress": {
@@ -770,8 +770,8 @@
   "class": "B"
  },
  "iface_box_ownership": {
-  "actual": "tests/corpus/iface_box_ownership/main.cid:44:8: a method needs a name",
-  "blocker": "interface-boxing [B-terminal]",
+  "actual": "v2-only caller-owned heap boxes for concrete-value interface returns; v3 refuses class-value\u2192interface returns as dangling and has no scope-exit release; the file keeps `func ~Sq()` as the loud witness: `main.cid:44:8: a method needs a name` on all three legs; expected.json left verbatim",
+  "blocker": "v3 boxes only class pointers (class-value interface returns are refused as dangling) and has no caller-owned box release or scope-exit destruction [B-terminal]",
   "class": "B"
  },
  "iface_decl_order": {
@@ -840,8 +840,8 @@
   "class": "A"
  },
  "interface_box_release": {
-  "actual": "tests/corpus/interface_box_release/main.cid:27:8: a method needs a name",
-  "blocker": "interface-boxing (+delete) [B-terminal]",
+  "actual": "v3: `main.cid:61:10: a class value cannot return as an interface: it would dangle`; v3 boxes only class pointers, so the v2 boxed-value scope-exit release trace is not blessed",
+  "blocker": "v3 boxes only class pointers (class-value interface returns are refused as dangling) and has no scope-exit/boxed-value destruction [B-terminal]",
   "class": "B"
  },
  "interface_call_args": {
@@ -1530,8 +1530,8 @@
   "class": "A"
  },
  "virtual_aggregate_return": {
-  "actual": "tests/corpus/virtual_aggregate_return/main.cid:34:10: a method needs a name",
-  "blocker": "virtual-dispatch + destructors (also stdlib-missing, multi-file-imports) [B-terminal]",
+  "actual": "v2-only scope-exit/parameter/temporary destructor trace; the file keeps `func ~D()` as the loud witness: v3 check reports `main.cid:34:10: a method needs a name` on all three legs; expected.json left verbatim",
+  "blocker": "v2 implicit scope-exit/parameter/temporary destruction (CIDER-BUG-137/156) is not v3 semantics (v3 runs deinit only through explicit delete/fini) [B-terminal]",
   "class": "B"
  },
  "virtual_aggregate_return_width": {

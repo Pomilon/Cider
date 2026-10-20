@@ -4,33 +4,39 @@
 // constructors and destructors. Each case below mirrors a dependency-ordered
 // shape verified to produce the same output, and the harness requires all
 // three backends (VM unoptimized, VM optimized, native) to agree.
+// v3 note: v3 spells destructors `deinit()` and runs them only through an
+// explicit `delete`; the delete chain covers the class's own deinit and its
+// bases' deinits (Standard 4.8.1/4.8.3). It does not finalize embedded
+// class-valued fields, and scope-exit destruction does not exist, so the v2
+// trace (including `k,d21` and the embedded `d` finalizers) is not blessed.
+// The `~Dropper`/`~HolderKid` spellings are kept as the loud witness.
 from std.io import print, printInt;
 
 var drops: int = 0;
 
 // --- 1. Fields, inherited method, constructor, override and dispatch
 // through the base pointer. `Later` is declared after its subclass `A`.
-class A extends Later {
+class A : Later {
     var x: int = 1;
-    func init(v: int) -> void { this.x = v; }
-    func g() -> int { return this.x; }
+    func init(v: int) -> void { this->x = v; }
+    func g() -> int { return this->x; }
     override func v() -> int { return super.v() + 5; }
 }
 
 class Later {
     var y: int = 7;
-    func f() -> int { return this.y; }
+    func f() -> int { return this->y; }
     virtual func v() -> int { return 10; }
 }
 
 // --- 2. Nested chain: every base is declared after its subclass, so the
 // whole Leaf -> Mid -> Root chain resolves only after collection.
-class Leaf extends Mid {
+class Leaf : Mid {
     var l: int = 3;
     override func tag() -> int { return 30; }
 }
 
-class Mid extends Root {
+class Mid : Root {
     var m: int = 2;
     override func tag() -> int { return 20; }
 }
@@ -38,28 +44,28 @@ class Mid extends Root {
 class Root {
     var r: int = 1;
     virtual func tag() -> int { return 10; }
-    func base() -> int { return this.r; }
+    func base() -> int { return this->r; }
 }
 
-// --- 3. A later base extending an earlier base: `P` extends the later `Q0`,
-// which extends the earlier `Q1`; the override binds Q1's vtable slot.
+// --- 3. A later base extending an earlier base: `P` : the later `Q0`,
+// which : the earlier `Q1`; the override binds Q1's vtable slot.
 class Q1 {
     var q1: int = 4;
     virtual func name() -> int { return 40; }
 }
 
-class P extends Q0 {
+class P : Q0 {
     var p: int = 5;
     override func name() -> int { return 50; }
 }
 
-class Q0 extends Q1 {
+class Q0 : Q1 {
     var q0: int = 6;
 }
 
-// --- 4. A class without virtuals of its own extends a forward virtual base:
+// --- 4. A class without virtuals of its own : a forward virtual base:
 // the inherited vptr/vtable must still be reserved and used.
-class PlainChild extends VBase {
+class PlainChild : VBase {
     var pc: int = 8;
 }
 
@@ -77,12 +83,12 @@ class Dropper {
     func ~Dropper() {
         drops = drops + 1;
         print("d");
-        printInt(this.label);
+        printInt(this->label);
         print(",");
     }
 }
 
-class HolderKid extends Holder {
+class HolderKid : Holder {
     var own: int = 9;
     func ~HolderKid() {
         print("k,");
@@ -97,12 +103,12 @@ class Holder {
 // --- 6. Propagation: ParentT's base GParent is declared after ParentT, so
 // ParentT is rebuilt; ChildT copied ParentT at collection and must be
 // rebuilt too even though its own base name resolved back then.
-class ParentT extends GParent {
+class ParentT : GParent {
     var pt: int = 12;
     override func deep() -> int { return 120; }
 }
 
-class ChildT extends ParentT {
+class ChildT : ParentT {
     var ct: int = 13;
     override func deep() -> int { return 130; }
 }
@@ -126,7 +132,7 @@ func main() -> int {
     printInt(bl->v()); print("\n");    // 15 dispatch through base
 
     // 2: nested forward chain, offsets and dispatch at every level.
-    var leaf: *Leaf = new Leaf;
+    var leaf: *Leaf = new Leaf { };
     var mid: *Mid = leaf;
     var root: *Root = leaf;
     printInt(leaf->l); print(",");     // 3
@@ -139,7 +145,7 @@ func main() -> int {
     printInt(sizeof(Leaf)); print("\n");// 24 (vptr at the root + three ints)
 
     // 3: later base over an earlier base.
-    var p: *P = new P;
+    var p: *P = new P { };
     var q: *Q1 = p;
     printInt(p->p); print(",");        // 5
     printInt(p->q0); print(",");       // 6  inherited from Q0
@@ -148,7 +154,7 @@ func main() -> int {
     printInt(q->name()); print("\n");  // 50 dispatch through Q1
 
     // 4: no own virtuals; vptr/vtable inherited from the forward base.
-    var pc: *PlainChild = new PlainChild;
+    var pc: *PlainChild = new PlainChild { };
     var vb: *VBase = pc;
     printInt(pc->pc); print(",");      // 8  own field after the base
     printInt(pc->vb); print(",");      // 2
@@ -167,12 +173,12 @@ func main() -> int {
         printInt(h.baseVal); print(",");// 6 inherited field
         printInt(h.own); print("\n");  // 8
     }                                  // k,d21,
-    var d: *HolderKid = new HolderKid;
+    var d: *HolderKid = new HolderKid { };
     d->d.label = 31;
     delete d;                          // k,d31,
 
     // 6: rebuild propagation through a resolved-but-stale parent.
-    var c: *ChildT = new ChildT;
+    var c: *ChildT = new ChildT { };
     var gpp: *GParent = c;
     printInt(c->ct); print(",");       // 13
     printInt(c->pt); print(",");       // 12

@@ -29,6 +29,12 @@
 // `drops` counts every destructor (callee locals, boxed copies) and the
 // printed trace pins the destruction ORDER; a double release corrupts the
 // allocator and fails the run on every backend.
+// v3 note: v3 boxes only class pointers and refuses a class-value return
+// as an interface (it would dangle), and it has no caller-owned box
+// release or scope-exit destruction (only explicit delete/fini finalize).
+// The v2 trace this program pins is therefore not expressible and is not
+// blessed; the file keeps the v2 `~Sq`/`~Dropper`/`~Wrap` spellings as
+// the loud witness.
 from std.io import print, printInt;
 
 var drops: int = 0;
