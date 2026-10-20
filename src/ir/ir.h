@@ -29,6 +29,7 @@
 #include <cstdint>
 #include <optional>
 #include <string>
+#include <utility>
 #include <vector>
 
 #include "lexer/token.h"
@@ -247,6 +248,11 @@ struct Global {
     // little-endian (FEATURES §8.3: every byte known, no startup code).
     // Empty means the scalar path (one `.quad initial`).
     std::vector<uint64_t> initWords;
+    // Image words whose value is a link-time address: word index -> label.
+    // A class value carries its declared class's vtable pointer in the
+    // first word, and that address is resolved by the linker, not folded by
+    // lowering. Empty means every image word is a plain number.
+    std::vector<std::pair<size_t, std::string>> relocWords;
     // Link-time words for a vtable global: one `.quad <label>` per entry,
     // in interface method order (TYPES.md §4.3). A label, not a number,
     // because a function address is resolved by the linker, not folded

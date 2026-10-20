@@ -15,6 +15,16 @@
 // concrete vtable built at the store site); both are covered below to pin
 // no regression. The vptr store is emitted only for classes with a vtable,
 // so programs without virtual value instances keep byte-identical output.
+// Migrated to v3: inheritance spells `class W : V`, bare `new W` spells
+// `new W { }`, and value-class locals are formed with class/struct
+// literals that stamp the declared class vptr and spell every
+// non-defaulted field.
+// v3 lowers a method receiver as a place, so the v2 call-result
+// receiver `makeV().f()` is bound to a declared local before the call;
+// module-scope values dispatch through pointers (`&gv`). v3 has no
+// `override` keyword (redeclaring a base virtual is the override), and a
+// global class value's vptr is a link-time relocation in its data image,
+// resolved by both the native and VM loaders.
 from std.io import print, printInt;
 
 class V {
@@ -22,9 +32,9 @@ class V {
     virtual func g() -> int { return 10; }
 }
 
-class W extends V {
-    override func f() -> int { return 2; }
-    override func g() -> int { return 20; }
+class W : V {
+    func f() -> int { return 2; }
+    func g() -> int { return 20; }
     virtual func h() -> int { return 30; }   // new slot after the base's two
 }
 
@@ -55,16 +65,16 @@ struct N {                // struct-in-struct plus a fixed array of values
 
 // Module-scope class/struct/array values get their vptr from the
 // synthesized global-init pass (the CIDER-BUG-087 path).
-var gv: V;
-var gs: S;
-var ga: [V; 2];
+var gv: V = V { };
+var gs: S = S { v: V { }, tail: 0 };
+var ga: [V; 2] = [V { }, V { }];
 
 func take(v: V) -> int {
     return v.f();         // by-value parameter: slices to the parameter's class
 }
 
 func makeV() -> V {
-    var p: *V = new W;
+    var p: *V = new W { };
     return *p;            // by-value return: slices to the declared return type
 }
 
@@ -84,10 +94,10 @@ class Impl {
 
 func main() -> int {
     // Direct value locals: the declared class's vtable word.
-    var v: V;
+    var v: V = V { };
     if (v.f() != 1) return 1;
     if (v.g() != 10) return 2;
-    var w: W;
+    var w: W = W { };
     if (w.f() != 2) return 3;
     if (w.g() != 20) return 4;
     if (w.h() != 30) return 5;
@@ -95,23 +105,23 @@ func main() -> int {
     if (viaPtr(&w) != 2) return 7;
 
     // Virtual + field initializers together.
-    var f: F;
+    var f: F = F { };
     if (f.f() != 1) return 8;
     if (f.x != 42) return 9;
 
     // Embedded fields, nested aggregates and arrays.
-    var h: H;
+    var h: H = H { v: V { } };
     if (h.v.f() != 1) return 10;
-    var s: S;
+    var s: S = S { v: V { }, tail: 0 };
     if (s.v.f() != 1) return 11;
     if (s.tail != 0) return 12;
-    var g: G;
+    var g: G = G { h: H { v: V { } } };
     if (g.h.v.f() != 1) return 13;
-    var n: N;
+    var n: N = N { s: S { v: V { }, tail: 0 }, arr: [V { }, V { }] };
     if (n.s.v.f() != 1) return 14;
     if (n.arr[0].f() != 1) return 15;
     if (n.arr[1].g() != 10) return 16;
-    var na: [[V; 2]; 2];
+    var na: [[V; 2]; 2] = [[V { }, V { }], [V { }, V { }]];
     if (na[1][1].f() != 1) return 17;
 
     // Copies: a same-static-type copy carries the formed vptr.
@@ -127,21 +137,22 @@ func main() -> int {
     if (n2.arr[1].g() != 10) return 22;
 
     // Copies from a dynamically typed pointer slice to the declared class.
-    var p: *V = new W;
+    var p: *V = new W { };
     var vs: V = *p;
     if (vs.f() != 1) return 23;
-    var vas: V;
+    var vas: V = V { };
     vas = *p;
     if (vas.f() != 1) return 24;
     if (take(*p) != 1) return 25;
-    if (makeV().f() != 1) return 26;
+    var mv: V = makeV();
+    if (mv.f() != 1) return 26;
     var sf: S = S { v: *p, tail: 3 };
     if (sf.v.f() != 1) return 27;
     if (sf.tail != 3) return 28;
     var la: [V; 2] = [*p, v];
     if (la[0].f() != 1) return 29;
     if (la[1].f() != 1) return 30;
-    var ea: [V; 1];
+    var ea: [V; 1] = [V { }];
     ea[0] = *p;
     if (ea[0].f() != 1) return 31;
     h.v = *p;
@@ -150,19 +161,24 @@ func main() -> int {
     // Dynamic dispatch through pointers is untouched.
     if (p->f() != 2) return 33;
     if (p->g() != 20) return 34;
-    var pw: *W = new W;
+    var pw: *W = new W { };
     var pb: *V = pw;
     if (pb->f() != 2) return 36;
     if (pw->h() != 30) return 35;
 
-    // Module-scope values get their vptr from the global-init pass.
-    if (gv.f() != 1) return 37;
-    if (gs.v.f() != 1) return 38;
-    if (ga[1].g() != 10) return 39;
+    // Module-scope values get their vptr from the global-init pass; v3
+    // reaches them through pointers because a global method receiver is
+    // not lowered.
+    var gvp: *V = &gv;
+    var gsp: *V = &gs.v;
+    var gap: *V = &ga[1];
+    if (gvp->f() != 1) return 37;
+    if (gsp->f() != 1) return 38;
+    if (gap->g() != 10) return 39;
 
     // Interface dispatch is a separate path.
-    var impl: Impl;
-    var it: I = impl;
+    var impl: Impl = Impl { };
+    var it: I = &impl;
     if (it.f() != 7) return 40;
 
     printInt(v.f()); print(",");
@@ -173,10 +189,11 @@ func main() -> int {
     printInt(na[1][1].f()); print(",");
     printInt(vs.f()); print(",");
     printInt(take(*p)); print(",");
-    printInt(makeV().f()); print(",");
+    var mv2: V = makeV();
+    printInt(mv2.f()); print(",");
     printInt(la[1].f()); print(",");
-    printInt(gv.f()); print(",");
-    printInt(ga[1].g()); print(",");
+    printInt(gvp->f()); print(",");
+    printInt(gap->g()); print(",");
     printInt(p->f()); print(",");
     printInt(it.f()); print("\n");
     print("virtual_value_vptr_ok\n");

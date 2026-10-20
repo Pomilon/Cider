@@ -2319,8 +2319,26 @@ static VmResult runProgram(const ir::Module& module,
                 run.appendWord(static_cast<uint64_t>(found->second));
             }
         } else if (!global.initWords.empty()) {
-            for (uint64_t word : global.initWords) {
-                run.appendWord(word);
+            // A class value's vptr word names a vtable global's address,
+            // not a number; resolve each relocation where the word sits.
+            std::uint64_t reloc = 0;
+            for (std::uint64_t index = 0;
+                 index < global.initWords.size(); ++index) {
+                if (reloc < global.relocWords.size() &&
+                    global.relocWords[reloc].first == index) {
+                    auto found =
+                        run.labels.find(global.relocWords[reloc].second);
+                    if (found == run.labels.end()) {
+                        run.refuse(fn->loc, "vm cannot address '" +
+                                                global.relocWords[reloc].second +
+                                                "'");
+                        return run.out;
+                    }
+                    run.appendWord(static_cast<uint64_t>(found->second));
+                    ++reloc;
+                } else {
+                    run.appendWord(global.initWords[index]);
+                }
             }
         } else if (!global.initLabel.empty()) {
             // A string global names its bytes: the address of them, then the

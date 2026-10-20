@@ -10,6 +10,7 @@
 
 #include "codegen/codegen.h"
 
+#include <cstddef>
 #include <unordered_map>
 #include <unordered_set>
 #include <vector>
@@ -155,8 +156,22 @@ public:
                     } else {
                         // An aggregate global: one word per eight image
                         // bytes, so element stores land on image bytes.
-                        for (uint64_t word : global.initWords) {
-                            out_ += "  .quad " + std::to_string(word) + "\n";
+                        // A class value's vptr word is a link-time label,
+                        // so it substitutes the numeric word in place.
+                        std::uint64_t reloc = 0;
+                        for (std::uint64_t index = 0;
+                             index < global.initWords.size(); ++index) {
+                            if (reloc < global.relocWords.size() &&
+                                global.relocWords[reloc].first == index) {
+                                out_ += "  .quad " +
+                                        global.relocWords[reloc].second + "\n";
+                                ++reloc;
+                            } else {
+                                out_ += "  .quad " +
+                                        std::to_string(
+                                            global.initWords[index]) +
+                                        "\n";
+                            }
                         }
                     }
                 } else {

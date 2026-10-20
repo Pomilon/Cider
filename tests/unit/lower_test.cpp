@@ -418,6 +418,48 @@ void testSliceStore() {
     check(r.ok, "a slice store and len lower");
 }
 
+// CIDER-BUG-089: a class value belongs to its declared type, so a copy
+// from a pointer re-stamps the declared class's table instead of keeping
+// the dynamic type's table.
+void testClassValueVptr() {
+    std::printf("class value copies stamp the declared vptr\n");
+    Lowered r = lower(
+        "class V { var x: int; virtual func f() -> int { return 1; } }\n"
+        "class W : V { var y: int; virtual func f() -> int { return 2; } }\n"
+        "var gv: V = V { x: 0 };\n"
+        "var ga: [V; 2] = [V { x: 0 }, V { x: 0 }];\n"
+        "func main() -> int {\n"
+        "    var p: *V = new W { x: 41, y: 99 };\n"
+        "    var vs: V = *p;\n"
+        "    return vs.f();\n"
+        "}\n");
+    check(r.ok, "slicing copy lowers");
+    if (r.ok) {
+        const cider::ir::Function* main = find(r.module.get(), "main");
+        check(main != nullptr, "main is emitted");
+        check(countOp(*main, cider::ir::Op::DataAddr) >= 2,
+              "the declared class's table is stamped after the copy");
+        bool gvFound = false;
+        bool gaFound = false;
+        for (const auto& global : r.module->globals) {
+            if (global.label == "g_gv") {
+                gvFound = global.initWords.size() == 2 &&
+                          global.relocWords.size() == 1 &&
+                          global.relocWords[0].first == 0 &&
+                          global.relocWords[0].second.rfind("vtable_", 0) == 0;
+            }
+            if (global.label == "g_ga") {
+                gaFound = global.initWords.size() == 4 &&
+                          global.relocWords.size() == 2 &&
+                          global.relocWords[0].first == 0 &&
+                          global.relocWords[1].first == 2;
+            }
+        }
+        check(gvFound, "a class-valued global names its declared vtable");
+        check(gaFound, "array elements each name their declared vtable");
+    }
+}
+
 // A class value constructs like a struct with a leading vptr word: the
 // vptr is zero until methods are wired (T7), and fields follow it.
 void testClass() {
@@ -1249,6 +1291,7 @@ int main() {
     testSlice();
     testSliceStore();
     testClass();
+    testClassValueVptr();
     testMethodCall();
     testDelete();
     testIndirect();

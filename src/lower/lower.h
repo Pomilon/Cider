@@ -60,6 +60,10 @@ struct GlobalBinding {
     // Image words for an aggregate global: one `.quad` per entry instead
     // of one `.quad initial`. Empty means the scalar path.
     std::vector<uint64_t> initWords;
+    // Image words whose value is a link-time address: word index -> label.
+    // Set for class-valued globals, whose first word names the declared
+    // class's vtable. Empty means every image word is a plain number.
+    std::vector<std::pair<size_t, std::string>> relocWords;
     // A read-only bytes object this global points at, empty when none. Set
     // for string globals, whose 16 bytes are (rodata address, length).
     std::string initLabel;
@@ -414,6 +418,17 @@ public:
     void emitFieldDefaults(const Place& base, TypeRef objType, Position pos);
     void storeRange(Position pos, const Place& place,
                     const std::vector<ir::Value>& words, TypeRef fieldType);
+    // CIDER-BUG-089: a value instance belongs to its declared class, so a
+    // copy into a class slot re-stamps that class's table rather than
+    // keeping the source's dynamic table.
+    void stampClassVptr(Position pos, const Place& place, TypeRef classType);
+    // Records the image words a constant aggregate global holds for its
+    // class values' declared vtables. A class value's first word is a
+    // link-time address, so it cannot ride the numeric image as-is. Deep
+    // fields and array elements recurse at their layout offsets.
+    void collectGlobalVptrRelocs(
+        TypeRef type, int64_t base, Position pos,
+        std::vector<std::pair<size_t, std::string>>& out);
     // A field a struct arm binds: name, type, and byte offset from the
     // match's spill base. Tests record them; bodies materialize them.
     struct MatchFieldBind {

@@ -6,6 +6,7 @@
 
 #include "lower/lower.h"
 
+#include <algorithm>
 #include <cstring>
 #include <cstdlib>
 #include <functional>
@@ -1869,6 +1870,11 @@ void Lowerer::onGlobal(VarDecl& n) {
             }
             binding.initWords.push_back(quad);
         }
+        collectGlobalVptrRelocs(type, 0, n.init->pos, binding.relocWords);
+        std::sort(binding.relocWords.begin(), binding.relocWords.end(),
+                  [](const auto& left, const auto& right) {
+                      return left.first < right.first;
+                  });
     } else if ((type.type->kind() == Kind::Struct ||
                 type.type->kind() == Kind::Class) &&
                dynamic_cast<const NewStruct*>(n.init.get()) != nullptr) {
@@ -1897,6 +1903,11 @@ void Lowerer::onGlobal(VarDecl& n) {
             }
             binding.initWords.push_back(quad);
         }
+        collectGlobalVptrRelocs(type, 0, n.init->pos, binding.relocWords);
+        std::sort(binding.relocWords.begin(), binding.relocWords.end(),
+                  [](const auto& left, const auto& right) {
+                      return left.first < right.first;
+                  });
     } else if (type.type->kind() == Kind::Closure &&
                (dynamic_cast<const Field*>(n.init.get()) != nullptr ||
                 dynamic_cast<const Ident*>(n.init.get()) != nullptr)) {
@@ -2208,6 +2219,7 @@ void Lowerer::onGlobal(VarDecl& n) {
     global.initLabel = binding.initLabel;
     global.initLabels = binding.initLabels;
     global.initWords = binding.initWords;
+    global.relocWords = binding.relocWords;
     module_->globals.push_back(global);
 }
 
@@ -3555,6 +3567,97 @@ void Lowerer::storeRange(Position pos, const Place& place,
         emit(std::move(instr));
         remaining -= take;
         cur += take;
+    }
+    if (failed_) {
+        return;
+    }
+    stampClassVptr(pos, place, fieldType);
+}
+
+void Lowerer::stampClassVptr(Position pos, const Place& place,
+                             TypeRef classType) {
+    if (failed_ || classType.isError() ||
+        classType.type->kind() != Kind::Class) {
+        return;
+    }
+    std::optional<DeclId> id = classType.type->decl();
+    if (!id.has_value() || resolver_.virtualNames(*id).empty()) {
+        return;
+    }
+    std::string table = emitClassVTable(*id, pos);
+    if (failed_ || table.empty()) {
+        return;
+    }
+    TypeRef vptr{ctx_.basic(BasicKind::U64)};
+    TypeRef tablePtr{ctx_.pointer(ctx_.basic(BasicKind::U8))};
+    ir::Instr data;
+    data.op = ir::Op::DataAddr;
+    data.loc = pos;
+    data.type = tablePtr;
+    data.width = ir::IRType::Ptr;
+    data.globalLabel = table;
+    data.isPure = true;
+    ir::Value word = newValue(data.width, tablePtr, pos);
+    data.results.push_back(word);
+    emit(std::move(data));
+    if (failed_) {
+        return;
+    }
+    Place atVptr = place;
+    atVptr.type = vptr;
+    atVptr.off = place.off;
+    storeRange(pos, atVptr, {word}, vptr);
+}
+
+void Lowerer::collectGlobalVptrRelocs(
+    TypeRef type, int64_t base, Position pos,
+    std::vector<std::pair<size_t, std::string>>& out) {
+    if (failed_ || type.isError() || type.type == nullptr) {
+        return;
+    }
+    const Type* t = type.type;
+    if (t->kind() == Kind::Class || t->kind() == Kind::Struct) {
+        std::optional<DeclId> id = t->decl();
+        if (!id.has_value()) {
+            return;
+        }
+        if (t->kind() == Kind::Class &&
+            !resolver_.virtualNames(*id).empty()) {
+            std::string table = emitClassVTable(*id, pos);
+            if (failed_ || table.empty()) {
+                return;
+            }
+            out.emplace_back(
+                static_cast<size_t>(base / layout::kSizePointer), table);
+        }
+        for (const std::string& name : resolver_.chainFieldNames(*id)) {
+            int64_t off = resolver_.fieldOffset(*id, name);
+            if (off < 0) {
+                continue;
+            }
+            collectGlobalVptrRelocs(resolver_.fieldType(*id, name),
+                                    base + off, pos, out);
+            if (failed_) {
+                return;
+            }
+        }
+        return;
+    }
+    if (t->kind() != Kind::Array) {
+        return;
+    }
+    std::optional<int64_t> count = t->length();
+    int64_t stride = resolver_.nominalSize(t->element());
+    if (!count.has_value() || *count < layout::kSizeI8 ||
+        stride < layout::kSizeI8) {
+        return;
+    }
+    for (int64_t index = 0; index < *count; ++index) {
+        collectGlobalVptrRelocs(TypeRef{t->element()},
+                                base + index * stride, pos, out);
+        if (failed_) {
+            return;
+        }
     }
 }
 
@@ -8199,6 +8302,10 @@ std::vector<ir::Value> Lowerer::storeToIdent(
                 instr.storedValue = words[i];
                 emit(std::move(instr));
             }
+            Place place;
+            place.slots = found->second.slots;
+            place.type = found->second.type;
+            stampClassVptr(n.pos, place, found->second.type);
             return words;
         }
     }
@@ -8214,6 +8321,10 @@ std::vector<ir::Value> Lowerer::storeToIdent(
             instr.isVolatile = global->isVolatile;
             emit(std::move(instr));
         }
+        Place place;
+        place.global = global->label;
+        place.type = global->type;
+        stampClassVptr(n.pos, place, global->type);
         return words;
     }
     refuse(n.pos, "assigning '" + n.name + "'");

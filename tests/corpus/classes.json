@@ -1550,9 +1550,9 @@
   "class": "B"
  },
  "virtual_value_vptr": {
-  "actual": "tests/corpus/virtual_value_vptr/main.cid:25:9: a class needs a body",
-  "blocker": "virtual-vptr (also stdlib-missing) [B-terminal]",
-  "class": "B"
+  "actual": "migrated to v3: inheritance spells `class W : V`, there is no `override` keyword, value-class locals/globals are built with literals that stamp the declared class vtable, call-result receivers bind to a local, globals dispatch through pointers, and global class-value vptr words are link-time image relocations; all three legs match expected.json",
+  "blocker": "none",
+  "class": "A"
  },
  "volatile_aggregate_convert": {
   "actual": "exact stdout/stderr/exit match (volatile accepted in param/return/alias/array-element positions; values exact)",

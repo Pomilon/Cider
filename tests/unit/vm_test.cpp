@@ -684,6 +684,33 @@ void testPolymorphicDelete() {
           "the optimised chain answers 12: " + opr.error);
 }
 
+// A global class value carries its declared vtable in the data image, so
+// the loader resolves the vptr relocation before dispatch runs.
+void testGlobalClassVptr() {
+    std::printf("global class vptr on both legs\n");
+    Lowered unopt = lower("class V {\n"
+                          "    var x: int;\n"
+                          "    virtual func f() -> int { return 1; }\n"
+                          "    virtual func g() -> int { return 10; }\n"
+                          "}\n"
+                          "var gv: V = V { x: 7 };\n"
+                          "var ga: [V; 2] = [V { x: 8 }, V { x: 9 }];\n"
+                          "func main() -> int {\n"
+                          "    var vp: *V = &gv;\n"
+                          "    var ap: *V = &ga[1];\n"
+                          "    return vp->f() * 100 + ap->g() * 10 + vp->x;\n"
+                          "}\n");
+    check(unopt.ok, "lowers: " + unopt.stage);
+    cider::vm::VmResult unr = cider::vm::run(*unopt.module, "");
+    check(unr.ok && unr.exitCode == 207,
+          "the unoptimised global answers 207: " + unr.error);
+    cider::opt::OptResult ores = cider::opt::run(*unopt.module);
+    check(ores.ok, "optimises: " + ores.error);
+    cider::vm::VmResult opr = cider::vm::run(*unopt.module, "");
+    check(opr.ok && opr.exitCode == 207,
+          "the optimised global answers 207: " + opr.error);
+}
+
 void testMultipleBases() {
     std::printf("several bases on both legs\n");
     Lowered unopt = lower("class A {\n"
@@ -787,6 +814,7 @@ int main() {
     testArgv();
     testSuperInit();
     testPolymorphicDelete();
+    testGlobalClassVptr();
     testMultipleBases();
     testNilFnptrCall();
     testFieldDefaults();
