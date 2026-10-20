@@ -335,8 +335,8 @@
   "class": "A"
  },
  "destructor": {
-  "actual": "tests/corpus/legacy/destructor/main.cid:6:10: a method needs a name",
-  "blocker": "destructors-~D/delete (+uninit-locals, classes) [B-terminal]",
+  "actual": "cider run exit 1 on all three legs, stdout empty, stderr identical (610 bytes): tests/corpus/legacy/destructor/main.cid:6:10: a method needs a name; 6:10: a class holds fields and methods; 9:1: expected a declaration; 12:19: a variable needs an initialiser (v2 destructor spelling and scope-exit finalization are purged)",
+  "blocker": "v2-scope-exit-destruction (destructor ~D, scope-exit finalization, uninitialized locals) [B-terminal]",
   "class": "B"
  },
  "destructor_ownership": {
@@ -785,8 +785,8 @@
   "class": "B"
  },
  "incdec": {
-  "actual": "Standard 7.2 purges expression increments (`var y: int = ++x;` now refuses: increment and decrement are statements, not expressions); the program tests the removed form",
-  "blocker": "expression increments purged [B-terminal]",
+  "actual": "cider run exit 1 on all three legs, stdout empty, stderr identical (267 bytes): tests/corpus/legacy/incdec/main.cid:5:18 and 10:9: increment and decrement are statements, not expressions (the program tests the removed expression-value form)",
+  "blocker": "expression increments purged (v3 has statement increments only) [B-terminal]",
   "class": "B"
  },
  "inline_basic": {
@@ -1120,8 +1120,8 @@
   "class": "B"
  },
  "nolibc_hello": {
-  "actual": "tests/corpus/legacy/nolibc_hello/main.cid:24:1: expected a declaration",
-  "blocker": "asm-blocks (+_start-entry) [B-terminal]",
+  "actual": "cider run exit 1 on all three legs, stdout empty, stderr identical (142 bytes): tests/corpus/legacy/nolibc_hello/main.cid:24:1 and 28:1: expected a declaration (v3 asm blocks are statements inside a function; a top-level data-section block has no v3 form, and the VM also refuses label-addressed asm blocks)",
+  "blocker": "v3-asm-statements-only (top-level data-section asm blocks have no v3 form; the VM also refuses label-addressed asm) [B-terminal]",
   "class": "B"
  },
  "override_sig_dispatch": {
