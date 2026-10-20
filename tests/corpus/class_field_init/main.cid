@@ -6,6 +6,10 @@ from std.io import print, printInt;
 // string-literal field, const/arithmetic folding, inherited fields, and
 // fields WITHOUT an initializer (which stay zero).
 
+// Migrated to v3: `extends` spells `:`, and a heap or value-class
+// instance is built with a class literal that names every non-defaulted
+// field (`unsetBase`/`unset` as 0); the literal runs all field defaults
+// first, so the defaulted fields still see their initializers.
 const BASE: int = 40;
 const SHIFT: int = 2;
 
@@ -14,7 +18,7 @@ class Base {
   var unsetBase: int;         // no initializer: stays 0
 }
 
-class Sample extends Base {
+class Sample : Base {
   var count: int = 1 << SHIFT;          // 4: constant arithmetic
   var flag: bool = true;
   var small: u8 = 200;
@@ -24,7 +28,7 @@ class Sample extends Base {
   var unset: int;                       // no initializer: stays 0
 }
 
-class Derived extends Base {
+class Derived : Base {
   var own: int = 1 << SHIFT;            // 4
   var text: string = "derived";
 }
@@ -36,7 +40,7 @@ class TinyBase {
   var t0: int = 11;
 }
 
-class Tiny extends TinyBase {
+class Tiny : TinyBase {
   var t1: int = 22;                     // offset 4
 }
 
@@ -44,15 +48,15 @@ func main() -> int {
   // Objects are created first and every field is read before anything is
   // printed or freed, so fields without initializers see the fresh-object
   // zero state on every backend.
-  var heap: *Sample = new Sample;
-  var value: Sample;
-  var dheap: *Derived = new Derived;
-  var dvalue: Derived;
+  var heap: *Sample = new Sample { unsetBase: 0, unset: 0 };
+  var value: Sample = Sample { unsetBase: 0, unset: 0 };
+  var dheap: *Derived = new Derived { unsetBase: 0 };
+  var dvalue: Derived = Derived { unsetBase: 0 };
   // Adjacent 8-byte value objects: field-initializer stores must keep
   // their declared widths or the neighbours corrupt each other.
-  var tinyA: Tiny;
-  var tinyB: Tiny;
-  var tinyHeap: *Tiny = new Tiny;
+  var tinyA: Tiny = Tiny { };
+  var tinyB: Tiny = Tiny { };
+  var tinyHeap: *Tiny = new Tiny { };
 
   var h_count: int = heap->count;
   var h_flag: bool = heap->flag;

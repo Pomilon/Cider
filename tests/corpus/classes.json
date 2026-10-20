@@ -10,8 +10,8 @@
   "class": "B"
  },
  "aggregate_zero_init": {
-  "actual": "compile rejection: tests/corpus/aggregate_zero_init/main.cid:49:16: expected ';' \u2014 field initializer in struct/class body; v3 fills fields via new/init only",
-  "blocker": "none",
+  "actual": "v3: all three legs rc=1 with identical stderr; first diagnostic `main.cid:57:22: a variable needs an initialiser` (then 70:28 bare-new, 90:13/98:15/113:13 uninitialized locals); the v2 implicit-zero trace is not blessed",
+  "blocker": "v3 has no implicit aggregate zero-fill: construction needs explicit defaults/literals, non-defaulted fields must be named, uninitialized locals are refused, and class-value->interface dangles [B-terminal]",
   "class": "B"
  },
  "alias_array_literal": {
@@ -185,9 +185,9 @@
   "class": "A"
  },
  "class_field_init": {
-  "actual": "compile rejection: tests/corpus/class_field_init/main.cid:13:17: expected ';' \u2014 field initializer in class body; v3 fills fields via new/init only",
+  "actual": "migrated to v3: `extends` spells `:`, heap and value-class instances use literals that run the field defaults and name the non-defaulted `unsetBase`/`unset` as 0; all three legs match expected.json",
   "blocker": "none",
-  "class": "B"
+  "class": "A"
  },
  "class_field_names": {
   "actual": "migrated to v3: receivers spell `this->`, a heap instance names the non-defaulted `tag` field in its literal, the module global `tag` and the field `tag` stay distinct namespaces, and all three legs match `7,4,100,42` byte-for-byte",
@@ -555,9 +555,9 @@
   "class": "A"
  },
  "fn_array_by_value": {
-  "actual": "10:17: expected ';' (bare `fn(int)` in `type Table = [fn(int) -> int; 2]`; no v3 counterpart for inferred-repr fn arrays)",
-  "blocker": "v2-fn-spelling",
-  "class": "B"
+  "actual": "migrated to v3: function values spell `func(int) -> int`; arrays, parameters, returns, struct fields and the ternary merge carry the closure by value; all three legs match expected.json",
+  "blocker": "none",
+  "class": "A"
  },
  "fn_array_cast": {
   "actual": "migrated to v3: the v2 `fn(...)` value type spells `func(...)`, named functions convert, and closure array/scalar casts plus the `*void` array cast are accepted; all three legs match expected.json",
@@ -1405,8 +1405,8 @@
   "class": "A"
  },
  "template_body_forms": {
-  "actual": "tests/corpus/template_body_forms/main.cid:14:36: expected '{' or '(' after new",
-  "blocker": "generics-not-lowered [B-terminal]",
+  "actual": "v3: all three legs rc=1 with identical stderr (2160 bytes); first diagnostics `main.cid:14:36: expected '{' or '(' after new` (bare generic `new T`), `27:42: expected an expression` (v2 `\"{x}\"` interpolation), `64:21: expected ')'` (v2 `fn(...)` parameter); the v2 template-clone trace is not blessed",
+  "blocker": "v3 removed the forms this v2 cloner regression covers: bare generic `new T` and delete-class-only, table literals, array-to-pointer returns, v2 string interpolation, the v2 `fn(...)` representation, and purged try/catch/throw + async/await [B-terminal]",
   "class": "B"
  },
  "template_self_recursion_control": {

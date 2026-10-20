@@ -5,15 +5,18 @@
 // the VM with "call: bad function id" and crashing native. By-value returns
 // use the same hidden-sret copy. Scalar fn pointers and fn-array indexing
 // stay unchanged.
+// Migrated to v3: the function value type spells `func(int) -> int`
+// (closure value); arrays, parameters, returns, struct fields and the
+// ternary merge all carry that value type by value.
 from std.io import printInt, print;
 
-type Table = [fn(int) -> int; 2];
+type Table = [func(int) -> int; 2];
 
 func one(x: int) -> int { return x + 1; }
 func two(x: int) -> int { return x * 2; }
 
 // Direct by-value parameter.
-func apply(t: [fn(int) -> int; 2]) -> int {
+func apply(t: [func(int) -> int; 2]) -> int {
   return t[0](1) + t[1](2);
 }
 
@@ -23,8 +26,8 @@ func applyAlias(t: Table) -> int {
 }
 
 // By-value return through the hidden sret slot.
-func makeTable() -> [fn(int) -> int; 2] {
-  var t: [fn(int) -> int; 2] = [one, two];
+func makeTable() -> [func(int) -> int; 2] {
+  var t: [func(int) -> int; 2] = [one, two];
   return t;
 }
 
@@ -34,14 +37,14 @@ func makeAlias() -> Table {
 }
 
 // By-value fn-array parameters also flow into an aggregate ternary merge.
-func pick(cond: bool, a: [fn(int) -> int; 2], b: [fn(int) -> int; 2]) -> int {
-  var t: [fn(int) -> int; 2] = cond ? a : b;
+func pick(cond: bool, a: [func(int) -> int; 2], b: [func(int) -> int; 2]) -> int {
+  var t: [func(int) -> int; 2] = cond ? a : b;
   return t[0](3) + t[1](10);
 }
 
 // A struct carrying a fn-array field, itself passed by value.
 struct Holder {
-  var t: [fn(int) -> int; 2];
+  var t: [func(int) -> int; 2];
 }
 
 func applyHolder(h: Holder) -> int {
@@ -49,11 +52,11 @@ func applyHolder(h: Holder) -> int {
 }
 
 func main() -> int {
-  var fs: [fn(int) -> int; 2] = [one, two];
+  var fs: [func(int) -> int; 2] = [one, two];
   if (apply(fs) != 2 + 4) { return 1; }
   if (applyAlias(fs) != 11 + 20) { return 2; }
 
-  var made: [fn(int) -> int; 2] = makeTable();
+  var made: [func(int) -> int; 2] = makeTable();
   if (made[0](5) != 6) { return 3; }
   if (made[1](5) != 10) { return 4; }
 
@@ -64,20 +67,20 @@ func main() -> int {
   if (pick(true, fs, [two, one]) != 4 + 20) { return 7; }
   if (pick(false, fs, [two, one]) != 6 + 11) { return 8; }
 
-  var h: Holder;
+  var h: Holder = uninit;
   h.t[0] = one;
   h.t[1] = two;
   if (applyHolder(h) != 6) { return 9; }
 
   // Copy semantics: a by-value local copy and the source array are
   // independent; overwriting one callee copy does not touch the source.
-  var copy: [fn(int) -> int; 2] = fs;
+  var copy: [func(int) -> int; 2] = fs;
   copy[0] = two;
   if (fs[0](1) != 2) { return 10; }
   if (copy[0](1) != 2) { return 11; }
 
   // Scalar fn pointers and per-index dispatch stay unchanged.
-  var s: fn(int) -> int = fs[1];
+  var s: func(int) -> int = fs[1];
   if (s(21) != 42) { return 12; }
   if (fs[0](9) + fs[1](9) != 28) { return 13; }
 
