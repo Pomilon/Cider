@@ -410,9 +410,9 @@ int runDriver(const std::vector<std::string>& args, std::string& out, std::strin
     std::string objPath = std::string(asmPath) + ".o";
     std::string binPath = std::string(asmPath) + ".bin";
     std::string assembled =
-        "as -o " + objPath + " " + std::string(asmPath) + " 2>/dev/null";
+        "as -o " + objPath + " " + std::string(asmPath);
     std::string linked =
-        "ld -nostdlib -e _start -o " + binPath + " " + objPath + " 2>/dev/null";
+        "ld -nostdlib -e _start -o " + binPath + " " + objPath;
     bool built = system(assembled.c_str()) == 0 && system(linked.c_str()) == 0;
     unlink(asmPath);
     unlink(objPath.c_str());

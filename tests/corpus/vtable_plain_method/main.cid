@@ -1,3 +1,5 @@
+// Migrated to v3: `extends` spells `:`, a bare `new C` spells `new C { }`,
+// and `p->m()` stays the pointer receiver spelling.
 from std.io import print, printInt;
 
 // CIDER-BUG-047: plain (non-virtual) methods occupy no vtable slots, but
@@ -13,7 +15,7 @@ class Base {
   virtual func v() -> int { return 10; }
 }
 
-class Derived extends Base {
+class Derived : Base {
   override func v() -> int { return 20; }
 }
 
@@ -26,34 +28,36 @@ class IBase {
   virtual func second() -> int { return 32; }  // slot 1
 }
 
-class IMid extends IBase {
+class IMid : IBase {
   override func first() -> int { return 40; }
   virtual func third() -> int { return 33; }   // new slot 2
 }
 
-class ILeaf extends IMid {
+class ILeaf : IMid {
   override func second() -> int { return 50; }
   override func third() -> int { return 60; }
 }
 
 // A plain method sharing a virtual's name must not capture another slot:
 // overriding `pick` may only rewrite slot 1, never `keep`'s slot 0.
+// v3 mangles one label per method name, so the plain and virtual members
+// cannot share `pick`; the never-called plain member is `plainPick`.
 class SharedBase {
-  func pick() -> int { return 70; }            // plain, no slot
+  func plainPick() -> int { return 70; }            // plain, no slot
   virtual func keep() -> int { return 71; }    // slot 0
   virtual func pick() -> int { return 72; }    // slot 1
 }
 
-class SharedDerived extends SharedBase {
+class SharedDerived : SharedBase {
   override func pick() -> int { return 73; }
 }
 
 func main() -> int {
-  var d: *Derived = new Derived;
+  var d: *Derived = new Derived { };
   var b: *Base = d;
   if (b->v() != 20) return 1;
 
-  var leaf: *ILeaf = new ILeaf;
+  var leaf: *ILeaf = new ILeaf { };
   var ib: *IBase = leaf;
   if (ib->first() != 40) return 2;
   if (ib->second() != 50) return 3;
@@ -61,7 +65,7 @@ func main() -> int {
   var im: *IMid = leaf;
   if (im->third() != 60) return 5;
 
-  var sd: *SharedDerived = new SharedDerived;
+  var sd: *SharedDerived = new SharedDerived { };
   var sb: *SharedBase = sd;
   if (sb->keep() != 71) return 6;
 

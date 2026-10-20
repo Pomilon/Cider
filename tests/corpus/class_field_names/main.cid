@@ -2,25 +2,28 @@ from std.io import print, printInt;
 
 // A global that shares its name with class fields below: fields are not
 // enclosing-scope variables, so neither declaration may collide.
+// Migrated to v3: receivers spell `this->`, a heap instance names the
+// non-defaulted `tag` field in its literal, and a field name and a
+// module-global name stay distinct namespaces.
 var tag: int = 100;
 
 class Alpha {
   var tag: int;
-  func set(v: int) -> void { this.tag = v; }
-  func get() -> int { return this.tag; }
+  func set(v: int) -> void { this->tag = v; }
+  func get() -> int { return this->tag; }
 }
 
 class Beta {
   var tag: int;
-  func set(v: int) -> void { this.tag = v + 1; }
-  func get() -> int { return this.tag; }
+  func set(v: int) -> void { this->tag = v + 1; }
+  func get() -> int { return this->tag; }
 }
 
 func main() -> int {
-  var a: *Alpha = new Alpha;
+  var a: *Alpha = new Alpha { tag: 0 };
   a->set(7);
   printInt(a->get()); print("\n");
-  var b: *Beta = new Beta;
+  var b: *Beta = new Beta { tag: 0 };
   b->set(3);
   printInt(b->get()); print("\n");
   // The global is untouched by either class's fields.

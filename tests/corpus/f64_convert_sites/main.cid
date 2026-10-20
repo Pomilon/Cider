@@ -1,3 +1,7 @@
+// Migrated to v3: implicit f64->f32 narrowing spells `as f32` (v3 has no
+// implicit float-width narrowing); the interface-typed case boxes a class
+// pointer because a class value returned as an interface would dangle; the
+// pointer local and scalar deref spell `*f64`/`*sp`.
 struct Pair {
   var x: f64;
   var y: f64;
@@ -10,20 +14,20 @@ interface Scaler {
 
 class Doubler {
   var bias: f64;
-  func scale(v: f64) -> f64 { return v * 2.0 + this.bias; }
+  func scale(v: f64) -> f64 { return v * 2.0 + this->bias; }
   func narrow(v: float) -> float { return v; }
 }
 
 func giveInt() -> f64 { return 2; }            // int literal -> f64 return
 func giveNarrow() -> float {                   // f64 local -> f32 return
   var wide: f64 = 1.5;
-  return wide;
+  return wide as f32;
 }
 func take64(v: f64) -> f64 { return v; }
 
 func main() -> int {
   // Aggregate literals store at the declared width.
-  var p: Pair = Pair{x: 1.5, y: 2.5};
+  var p: Pair = Pair { x: 1.5, y: 2.5 };
   if (p.x != 1.5) { return 1; }
   if (p.y != 2.5) { return 2; }
   var arr: [f64; 2] = [1.5, 2.5];
@@ -37,11 +41,11 @@ func main() -> int {
   arr[0] = 4.5;
   if (arr[0] != 4.5) { return 7; }
   var narrow: float = 0.0;
-  narrow = arr[1];                             // f64 -> f32 plain assignment
+  narrow = arr[1] as f32;                             // f64 -> f32 plain assignment
   if (narrow != 2.5) { return 8; }
   // Deref store through f64*.
   var slot: f64 = 0.0;
-  var sp: f64* = &slot;
+  var sp: *f64 = &slot;
   *sp = 5.5;
   if (slot != 5.5) { return 9; }
   *sp += 0.5;
@@ -55,14 +59,14 @@ func main() -> int {
   var n32: float = giveNarrow();
   if (n32 != 1.5) { return 14; }
   // Method and interface call arguments.
-  var d: *Doubler = new Doubler;
+  var d: *Doubler = new Doubler { bias: 0 };
   d->bias = 0.5;
   if (d->scale(1.25) != 3.0) { return 15; }
   if (d->scale(2) != 4.5) { return 16; }
   var r: float = d->narrow(6.0);               // f64 arg -> f32 param
   if (r != 6.0) { return 17; }
-  var dv: Doubler;
-  dv.bias = 0.5;
+  var dv: *Doubler = new Doubler { bias: 0.5 };
+  
   var it: Scaler = dv;
   if (it.scale(1.25) != 3.0) { return 18; }
   if (it.scale(2) != 4.5) { return 19; }

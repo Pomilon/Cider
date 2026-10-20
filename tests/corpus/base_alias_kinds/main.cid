@@ -6,6 +6,10 @@
 // pointer covariance at each level.
 from std.io import print, printInt;
 
+// Migrated to v3: `extends` spells `:`, bare heap instances spell
+// `new C { }`, and v3 flat base packing sizes C1/C2 at 16/16 where v2
+// pinned 20/20 (alias, forward-alias and chain bases, inheritance and
+// dispatch are unchanged).
 class B1 {
   var b1: int = 1;
   virtual func id() -> int { return 10; }
@@ -16,12 +20,12 @@ type A1 = B1;                // bare alias to a class declared earlier
 type ForwardAlias = B2;      // forward: B2 is declared later
 type AliasChain = ForwardAlias;
 
-class C1 extends A1 {
+class C1 : A1 {
   var c1: int = 2;
   override func id() -> int { return 20; }
 }
 
-class C2 extends AliasChain {
+class C2 : AliasChain {
   var c2: int = 3;
   override func id() -> int { return 30; }
 }
@@ -32,13 +36,13 @@ class B2 {
 }
 
 func main() -> int {
-  var a: *C1 = new C1;
+  var a: *C1 = new C1 { };
   printInt(a->b1); print(",");    // 1 inherited through the alias
   printInt(a->id()); print(",");  // 20
   var b: *B1 = a;
   printInt(b->id()); print(",");  // 20 dispatch through the base
 
-  var c: *C2 = new C2;
+  var c: *C2 = new C2 { };
   printInt(c->b2); print(",");    // 4 inherited through the forward alias chain
   printInt(c->id()); print(",");  // 30
   var d: *B2 = c;

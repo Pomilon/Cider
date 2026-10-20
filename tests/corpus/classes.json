@@ -125,9 +125,9 @@
   "class": "A"
  },
  "base_alias_kinds": {
-  "actual": "compile rejection: tests/corpus/base_alias_kinds/main.cid:10:15: expected ';' \u2014 field initializer in class body; v3 fills fields via new/init only",
+  "actual": "migrated to v3: `extends` spells `:`, bare heap instances spell `new C { }`, and v3 flat base packing sizes C1/C2 at 16/16 where v2 pinned 20/20; alias, forward-alias and chain bases, inheritance and dispatch all match on three legs",
   "blocker": "none",
-  "class": "B"
+  "class": "A"
  },
  "base_ctor_dtor_chain": {
   "actual": "migrated to v3: construction chains through explicit `super_init()`, destructors spell `deinit()` and run only through explicit `delete`, and value locals spell `uninit`; the value-scope and embedded-value sections pin construction/reads only, since v3 does not finalize scope values",
@@ -180,9 +180,9 @@
   "class": "B"
  },
  "citer": {
-  "actual": "compile rejection: tests/corpus/citer/main.cid:9:20: a variable needs an initialiser \u2014 uninitialised local `var it: Counter;` (FEATURES 8.3: always an error)",
+  "actual": "migrated to v3: for-in uses the v3 protocol `iter()` plus `next(*Iterator) -> *T`, receivers spell `this->`, and locals spell `= uninit`; all three legs rc=0 with empty stdout/stderr matching expected.json",
   "blocker": "none",
-  "class": "B"
+  "class": "A"
  },
  "class_field_init": {
   "actual": "compile rejection: tests/corpus/class_field_init/main.cid:13:17: expected ';' \u2014 field initializer in class body; v3 fills fields via new/init only",
@@ -190,9 +190,9 @@
   "class": "B"
  },
  "class_field_names": {
-  "actual": "compile rejection: tests/corpus/class_field_names/main.cid:20:28: expected '{' or '(' after new \u2014 bare `new Alpha` + `->` member access; v3 requires new C{...}/C(args) and (*p).f (FEATURES 13/14.2)",
+  "actual": "migrated to v3: receivers spell `this->`, a heap instance names the non-defaulted `tag` field in its literal, the module global `tag` and the field `tag` stay distinct namespaces, and all three legs match `7,4,100,42` byte-for-byte",
   "blocker": "none",
-  "class": "B"
+  "class": "A"
  },
  "class_method_stress": {
   "actual": "exact stdout/stderr/exit match",
@@ -210,9 +210,9 @@
   "class": "B"
  },
  "closure_field_store": {
-  "actual": "21:19: expected ';' (bare `Ops{...}` literal + `p->cf` arrow calls + bare `o.cf(5)` closure calls; `->` removed in v3, \u00a713)",
-  "blocker": "v3-no-arrow",
-  "class": "B"
+  "actual": "migrated to v3: the closure field takes direct closure values through value and pointer receivers; the *void control uses a direct function-literal conversion that keeps its provenance proof for the cast back, while call results/closure identifiers are refused and provenance is not tracked through fields; all three legs match",
+  "blocker": "none",
+  "class": "A"
  },
  "closure_throw_capture": {
   "actual": "tests/corpus/closure_throw_capture/main.cid:18:17: a catch binds a name and a type",
@@ -475,9 +475,9 @@
   "class": "A"
  },
  "f64_convert_sites": {
-  "actual": "26:21: expected ';' (bare `Pair{...}` literal + `new Doubler;` bare-new + `d->bias`/`d->scale` arrow access; `->` removed in v3, \u00a713)",
-  "blocker": "v3-no-arrow",
-  "class": "B"
+  "actual": "migrated to v3: the two v2 f64->f32 narrowing sites spell `as f32` (v3 has no implicit float-width narrowing), the interface case boxes a class pointer (class-value interface returns dangle), and pointer locals/deref spell `*f64`/`*sp`; all three legs rc=0 with empty stdout/stderr matching expected.json",
+  "blocker": "none",
+  "class": "A"
  },
  "f64_global_init": {
   "actual": "exact stdout/stderr/exit match",
@@ -560,9 +560,9 @@
   "class": "B"
  },
  "fn_array_cast": {
-  "actual": "7:13: expected ';' (bare `fn(int)` spelling; v3 has no bare fn-ptr spelling, \u00a713)",
-  "blocker": "v2-fn-spelling",
-  "class": "B"
+  "actual": "migrated to v3: the v2 `fn(...)` value type spells `func(...)`, named functions convert, and closure array/scalar casts plus the `*void` array cast are accepted; all three legs match expected.json",
+  "blocker": "none",
+  "class": "A"
  },
  "fn_cast_closure_indirect_repr": {
   "actual": "exact stdout/stderr/exit match",
@@ -645,9 +645,9 @@
   "class": "A"
  },
  "fnptr_alias_chain": {
-  "actual": "5:17: expected ';' (bare `fn(int)` spelling; v3 has no bare fn-ptr spelling, \u00a713)",
-  "blocker": "v2-fn-spelling",
-  "class": "B"
+  "actual": "migrated to v3: the function-value type spells `func(int) -> int` (closure value), a named function converts to it, and alias chains classify and size as the base type; all three legs match",
+  "blocker": "none",
+  "class": "A"
  },
  "for_in": {
   "actual": "rewrite to v3 (init+entry) passes exact",
@@ -980,9 +980,9 @@
   "class": "A"
  },
  "map_new_oom": {
-  "actual": "cider run exit 1, stdout empty, stderr diagnostic: `main.cid:19:40: expected an expression` (generic new_map call); expected.json left verbatim (v2 oom exit 2)",
-  "blocker": "stdlib-map/generics (v3 cannot build; trap path unverifiable)",
-  "class": "B"
+  "actual": "migrated to v3: explicit type arguments spell `new_map::<int, Big>()`, `HashMap` is imported with `new_map`, and the stdlib OOM path prints `vm error: out of memory` and exits 2 identically on all three legs",
+  "blocker": "none",
+  "class": "A"
  },
  "map_remove": {
   "actual": "exact stdout/stderr/exit match",
@@ -1565,9 +1565,9 @@
   "class": "A"
  },
  "vtable_plain_method": {
-  "actual": "tests/corpus/vtable_plain_method/main.cid:16:15: a class needs a body",
-  "blocker": "virtual-override (also stdlib-missing) [B-terminal]",
-  "class": "B"
+  "actual": "migrated to v3: `extends`/`new C { }`/`this->` spellings; a plain and a virtual method cannot share one name (v3 mangles one label per method name), so the never-called plain member is `plainPick`; all three legs match expected.json",
+  "blocker": "none",
+  "class": "A"
  },
  "wide_args": {
   "actual": "run exit 0: OUT: ERR:",

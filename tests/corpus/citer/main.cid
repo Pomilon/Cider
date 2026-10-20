@@ -1,3 +1,6 @@
+// Migrated to v3: the iteration protocol is `iter()` returning the
+// iterator value and `next(it: *Iterator) -> *T` stepping it; receivers
+// spell `this->`, and value locals spell `= uninit`.
 from std.io import print, printInt;
 
 class Counter {
@@ -6,23 +9,23 @@ class Counter {
   var cur: int;
 
   func iter() -> Counter {
-    var it: Counter;
-    it.start = this.start;
-    it.end = this.end;
-    it.cur = this.start;
+    var it: Counter = uninit;
+    it.start = this->start;
+    it.end = this->end;
+    it.cur = this->start;
     return it;
   }
 
-  func next() -> *int {
-    if (this.cur >= this.end) { return nilPtr; }
-    var p: *int = &this.cur;
-    this.cur = this.cur + 1;
+  func next(it: *Counter) -> *int {
+    if (it->cur >= it->end) { return nilPtr; }
+    var p: *int = &it->cur;
+    it->cur = it->cur + 1;
     return p;
   }
 }
 
 func _start() {
-  var c: Counter;
+  var c: Counter = uninit;
   c.start = 0;
   c.end = 4;
   var total: int = 0;

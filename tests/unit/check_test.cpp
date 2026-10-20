@@ -2119,6 +2119,30 @@ void testSliceCopy() {
 
 }  // namespace
 
+// v3 mangles one code label per method name (<type>__<name>), so a type
+// cannot declare two methods with the same name (plain and virtual, or two
+// signatures): the second would collide at codegen. The checker refuses it
+// by name instead of letting the assembler fail.
+void testDuplicateMethods() {
+    std::printf("a duplicate method name is refused\n");
+    Checked dup = check(
+        "class C {\n"
+        "    func pick() -> int { return 1; }\n"
+        "    virtual func pick() -> int { return 2; }\n"
+        "}\n"
+        "func main() -> int { return 0; }\n");
+    check(!dup.ok && dup.stage == "check", "duplicate method is refused");
+    bool named = false;
+    if (dup.checker != nullptr) {
+        for (const cider::check::CheckError& e : dup.checker->errors()) {
+            if (e.message.find("duplicate method") != std::string::npos) {
+                named = true;
+            }
+        }
+    }
+    check(named, "duplicate method diagnostic names the method");
+}
+
 int main() {
     std::printf("check_test — well-typed programs check\n\n");
     testArithmetic();
@@ -2183,6 +2207,7 @@ int main() {
     testInitAssign();
     testLoopMatchRefused();
     testRange();
+    testDuplicateMethods();
     std::printf("\n%d checks, %s\n", checks, failures == 0 ? "all passed" : "FAILURES");
     return failures == 0 ? 0 : 1;
 }

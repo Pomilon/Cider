@@ -2,7 +2,10 @@
 // size as the base type on every backend. The local copies used to take a
 // by-value MEMCPY from the value-as-address (native SIGSEGV); the non-fn
 // chain read a garbage size off the alias symbol.
-type FnBase = fn(int) -> int;
+// Migrated to v3: the function-value type spells `func(int) -> int`
+// (closure value); a named function converts to it, and alias chains
+// classify and size exactly as the base type.
+type FnBase = func(int) -> int;
 type FnChain = FnBase;
 
 type IntBase = int;
@@ -17,7 +20,7 @@ var unusedG: FnChain = inc;
 
 func main() -> int {
     var f: FnChain = inc;             // alias-chain local copy of a function
-    var g: fn(int) -> int = f;        // direct spelling from a chained value
+    var g: func(int) -> int = f;        // direct spelling from a chained value
     var x: IntChain = 5;              // non-fn chain: sizes/stores like int
     var y: int = x;
     return g(10) + f(1) + x + y;      // 11 + 2 + 5 + 5 = 23

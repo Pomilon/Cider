@@ -4,6 +4,11 @@
 // keeps its provenance-proof path as the control. All three backends must
 // agree.
 
+// Migrated to v3: a direct function-literal initializer converts to `*void`
+// and keeps the provenance proof for the later `*void as Cb` cast; a call
+// result or a closure-typed identifier is refused (`only a closure converts
+// to *void`), and an explicit `as *void` loses the proof. Provenance is not
+// tracked through struct fields, so the control round-trips through a local.
 type Cb = func(int) -> int;
 
 func makeAdder(base: int) -> func(int) -> int {
@@ -18,8 +23,9 @@ struct Ops {
 func main() -> int {
   // Struct-literal initialization from a direct closure; the *void field is
   // filled by a direct assignment (its provenance path).
-  var o: Ops = Ops{cf: makeAdder(10)};
-  o.cv = makeAdder(100);
+  var o: Ops = Ops { cf: makeAdder(10), cv: nilPtr };
+  var rawCv: *void = func(x: int) -> int { return x + 100; };
+  o.cv = rawCv;
   if (o.cf(5) != 15) return 1;
 
   // Direct assignment into an existing closure-typed field.
@@ -32,7 +38,7 @@ func main() -> int {
   if (o.cf(5) != 35) return 3;
 
   // The *void control: a proven closure behind *void still works.
-  var v: Cb = o.cv as Cb;
+  var v: Cb = rawCv as Cb;
   if (v(5) != 105) return 4;
 
   // A closure-valued local assigned into the field.

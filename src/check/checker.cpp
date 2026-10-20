@@ -1804,7 +1804,15 @@ void Checker::checkOverrides(const resolve::Decl& self, const ClassDecl& n) {
 void Checker::checkMethods(DeclId id, Kind kind, std::vector<MethodDecl>& methods) {
     const Type* obj = ctx_.nominal(kind, id);
     const Type* self = ctx_.pointer(obj);
+    // One label per method name: v3 mangles a method as `<type>__<name>`
+    // with no overload suffix, so a second declaration of the same name
+    // (plain and virtual, or two signatures) would collide at codegen.
+    std::unordered_set<std::string> seen;
     for (MethodDecl& method : methods) {
+        if (!seen.insert(method.name).second) {
+            fail(method.pos, "duplicate method '" + method.name + "'");
+            continue;
+        }
         globalProv_.clear();
         const Signature* sig = resolver_.methodSig(id, method.name);
         if (sig == nullptr) {
