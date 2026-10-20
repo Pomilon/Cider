@@ -570,8 +570,8 @@
   "class": "A"
  },
  "fn_cast_closure_repr": {
-  "actual": "tests/corpus/fn_cast_closure_repr/main.cid:30:28: expected ')'",
-  "blocker": "closures-repr-gaps (+float-codegen) [B-terminal]",
+  "actual": "cider run exit 1 on all three legs, stdout empty, stderr identical (510 bytes): 30:28: expected ')'; 30:28: a function needs a body; 31:20: a function needs a name; 32:1: expected a declaration (bare fn(...) and fn<->closure cast forms are removed)",
+  "blocker": "v2-fn-spelling-and-cross-representation-casts (bare fn(...) and fn<->closure casts removed; closures spell func(...), pointers *func(...)) [B-terminal]",
   "class": "B"
  },
  "fn_cast_closure_void_repr": {
@@ -685,23 +685,23 @@
   "class": "A"
  },
  "global_fini_asm_exit": {
-  "actual": "tests/corpus/global_fini_asm_exit/main.cid:25:10: a method needs a name",
-  "blocker": "asm-blocks (+destructor-~D/delete, _start-entry, stdlib-import) [B-terminal]",
+  "actual": "cider run exit 1 on all three legs, stdout empty, stderr identical (525 bytes): 25:10: a method needs a name; 25:10: a class holds fields and methods; 27:9: expected '}'; 29:5: expected a declaration",
+  "blocker": "module-exit-destruction (deinit runs only by delete; no module-exit finalization) [B-terminal]",
   "class": "B"
  },
  "global_fini_asm_exit_group": {
-  "actual": "tests/corpus/global_fini_asm_exit_group/main.cid:17:10: a method needs a name",
-  "blocker": "asm-blocks (+destructor-~D/delete, _start-entry) [B-terminal]",
+  "actual": "cider run exit 1 on all three legs, stdout empty, stderr identical (420 bytes): 17:10: a method needs a name; 17:10: a class holds fields and methods; 20:1: expected a declaration; 22:9: a variable needs an initialiser",
+  "blocker": "module-exit-destruction (deinit runs only by delete; no module-exit finalization) [B-terminal]",
   "class": "B"
  },
  "global_fini_extern_exit": {
-  "actual": "tests/corpus/global_fini_extern_exit/main.cid:19:10: a method needs a name",
-  "blocker": "destructor-~D/delete (+extern-calls, stdlib-import) [B-terminal]",
+  "actual": "cider run exit 1 on all three legs, stdout empty, stderr identical (320 bytes): 19:10: a method needs a name; 19:10: a class holds fields and methods; 22:1: expected a declaration; 24:9: a variable needs an initialiser",
+  "blocker": "module-exit-destruction (deinit runs only by delete; no module-exit finalization) [B-terminal]",
   "class": "B"
  },
  "global_fini_helper_exit": {
-  "actual": "tests/corpus/global_fini_helper_exit/main.cid:18:10: a method needs a name",
-  "blocker": "destructor-~D/delete (+stdlib-import) [B-terminal]",
+  "actual": "cider run exit 1 on all three legs, stdout empty, stderr identical (320 bytes): 18:10: a method needs a name; 18:10: a class holds fields and methods; 21:1: expected a declaration; 23:9: a variable needs an initialiser",
+  "blocker": "module-exit-destruction (deinit runs only by delete; no module-exit finalization) [B-terminal]",
   "class": "B"
  },
  "global_init_fold": {
@@ -760,8 +760,8 @@
   "class": "A"
  },
  "iface_aggregate_return_boxing": {
-  "actual": "tests/corpus/iface_aggregate_return_boxing/main.cid:77:8: a method needs a name",
-  "blocker": "interface-boxing (+multi-file-imports) [B-terminal]",
+  "actual": "cider run exit 1 on all three legs, stdout empty, stderr identical (8774 bytes): 77:8: a method needs a name; 77:8: a class holds fields and methods; 77:35: expected '}'; 77:47: expected a declaration",
+  "blocker": "interface-boxing (v3 boxes class pointers only; class-value returns are refused) [B-terminal]",
   "class": "B"
  },
  "iface_array_return_boxing": {
@@ -775,13 +775,13 @@
   "class": "B"
  },
  "iface_decl_order": {
-  "actual": "tests/corpus/iface_decl_order/main.cid:60:10: a method needs a name",
-  "blocker": "interface-boxing (+multi-file-imports) [B-terminal]",
+  "actual": "cider run exit 1 on all three legs, stdout empty, stderr identical (5235 bytes): 60:10: a method needs a name; 61:1: expected a declaration; 105:18: a variable needs an initialiser; 118:18: a variable needs an initialiser",
+  "blocker": "interface-boxing (v3 boxes class pointers only; the interface and implementor must be declared before use) [B-terminal]",
   "class": "B"
  },
  "iface_global_implementor_return": {
-  "actual": "tests/corpus/iface_global_implementor_return/main.cid:73:8: a method needs a name",
-  "blocker": "interface-boxing (+multi-file-imports) [B-terminal]",
+  "actual": "cider run exit 1 on all three legs, stdout empty, stderr identical (1708 bytes): 73:8: a method needs a name; 73:8: a class holds fields and methods; 73:38: expected '}'; 73:50: expected a declaration",
+  "blocker": "interface-boxing (v3 boxes class pointers only; class-value returns are refused) [B-terminal]",
   "class": "B"
  },
  "incdec": {
@@ -960,8 +960,8 @@
   "class": "A"
  },
  "loop_scope_destructors": {
-  "actual": "tests/corpus/loop_scope_destructors/main.cid:21:10: a method needs a name",
-  "blocker": "for-lowering + destructors + stdlib-io [B-terminal]",
+  "actual": "cider run exit 1 on all three legs, stdout empty, stderr identical (3034 bytes): 21:10: a method needs a name; 21:10: a class holds fields and methods; 23:9: expected '}'; 25:5: expected a declaration (the v2 ~D witness is purged)",
+  "blocker": "v2-scope-exit-destruction (destructor ~D, loop-scope finalization) [B-terminal]",
   "class": "B"
  },
  "malloc_frame_slot": {
@@ -1150,8 +1150,8 @@
   "class": "A"
  },
  "ptr_array_index": {
-  "actual": "tests/corpus/ptr_array_index/main.cid:46:10: a method needs a name",
-  "blocker": "stdlib-io/alloc + destructors + interface-boxing [B-terminal]",
+  "actual": "cider run exit 1 on all three legs, stdout empty, stderr identical (960 bytes): 46:10: a method needs a name; 46:10: a class holds fields and methods; 48:9: expected '}'; 50:5: expected a declaration",
+  "blocker": "v2-scope-exit-destruction-and-interface-boxing (value-scoped finalization, class-value interface elements) [B-terminal]",
   "class": "B"
  },
  "ptr_array_stride": {
@@ -1430,8 +1430,8 @@
   "class": "A"
  },
  "test_types": {
-  "actual": "6:24: a char compares with a char, not a number (char stays a distinct 1-byte type; v2 char==byte equivalence remains rejected)",
-  "blocker": "stdlib-imports (+char-byte-distinct diffs #9/#10) [B-terminal]",
+  "actual": "cider run exit 1 on all three legs, stdout empty, stderr identical (242 bytes): 6:24: a char compares with a char, not a number; 12:12: cannot use char as i32; 6:24: not lowered yet: a value of this type",
+  "blocker": "v3-char-model (char and byte are distinct; char compares with char, not a number) [B-terminal]",
   "class": "B"
  },
  "test_vector": {
@@ -1445,13 +1445,13 @@
   "class": "B"
  },
  "throw_finalizer_gaps": {
-  "actual": "tests/corpus/throw_finalizer_gaps/main.cid:29:10: a method needs a name",
-  "blocker": "defer-destructors (also stdlib-missing, untyped-catch) [B-terminal]",
+  "actual": "cider run exit 1 on all three legs, stdout empty, stderr identical (1184 bytes): 29:10: a method needs a name; 29:10: a class holds fields and methods; 31:9: expected '}'; 33:5: expected a declaration",
+  "blocker": "defer-destructors-and-untyped-catch (v2 try/catch/throw purged; destructor ~D and deferred finalization removed) [B-terminal]",
   "class": "B"
  },
  "throw_scope_finalizers": {
-  "actual": "tests/corpus/throw_scope_finalizers/main.cid:22:10: a method needs a name",
-  "blocker": "defer-destructors (also stdlib-missing, untyped-catch) [B-terminal]",
+  "actual": "cider run exit 1 on all three legs, stdout empty, stderr identical (1903 bytes): 22:10: a method needs a name; 22:10: a class holds fields and methods; 24:9: expected '}'; 26:5: expected a declaration",
+  "blocker": "defer-destructors-and-untyped-catch (v2 try/catch/throw purged; destructor ~D and deferred finalization removed) [B-terminal]",
   "class": "B"
  },
  "transitive_pointee": {
@@ -1480,8 +1480,8 @@
   "class": "B"
  },
  "uncaught_rethrow_finalizers": {
-  "actual": "run exit 1: OUT: ERR:tests/corpus/uncaught_rethrow_finalizers/main.cid:14:10: a method needs a name\\ntests/corpus/uncaught_rethrow_finalizers/main.cid:14:10: a class holds fields and methods\\ntests/corpus/uncaught_rethrow_f",
-  "blocker": "defer-destructors (v2 trap exit 2 left verbatim; also untyped-catch) [B-terminal]",
+  "actual": "cider run exit 1 on all three legs, stdout empty, stderr identical (821 bytes): 14:10: a method needs a name; 14:10: a class holds fields and methods; 16:9: expected '}'; 17:5: expected a declaration",
+  "blocker": "defer-destructors-and-untyped-catch (v2 try/catch/throw purged; destructor ~D and deferred finalization removed) [B-terminal]",
   "class": "B"
  },
  "uncaught_throw": {
@@ -1490,8 +1490,8 @@
   "class": "B"
  },
  "uncaught_throw_finalizers": {
-  "actual": "run exit 1: OUT: ERR:tests/corpus/uncaught_throw_finalizers/main.cid:19:10: a method needs a name\\ntests/corpus/uncaught_throw_finalizers/main.cid:19:10: a class holds fields and methods\\ntests/corpus/uncaught_throw_finaliz",
-  "blocker": "defer-destructors (v2 trap exit 2 left verbatim; also untyped-catch) [B-terminal]",
+  "actual": "cider run exit 1 on all three legs, stdout empty, stderr identical (647 bytes): 19:10: a method needs a name; 19:10: a class holds fields and methods; 21:9: expected '}'; 23:5: expected a declaration",
+  "blocker": "defer-destructors-and-untyped-catch (v2 try/catch/throw purged; destructor ~D and deferred finalization removed) [B-terminal]",
   "class": "B"
  },
  "uninit_locals_zero": {
@@ -1510,13 +1510,13 @@
   "class": "B"
  },
  "unwind_intermediate_frames": {
-  "actual": "tests/corpus/unwind_intermediate_frames/main.cid:42:10: a method needs a name",
-  "blocker": "defer-destructors (also untyped-catch) [B-terminal]",
+  "actual": "cider run exit 1 on all three legs, stdout empty, stderr identical (6466 bytes): 42:10: a method needs a name; 42:10: a class holds fields and methods; 44:9: expected '}'; 46:5: expected a declaration",
+  "blocker": "defer-destructors-and-untyped-catch (v2 try/catch/throw purged; destructor ~D and deferred finalization removed) [B-terminal]",
   "class": "B"
  },
  "unwind_intermediate_uncaught": {
-  "actual": "run exit 1: OUT: ERR:tests/corpus/unwind_intermediate_uncaught/main.cid:14:10: a method needs a name\\ntests/corpus/unwind_intermediate_uncaught/main.cid:14:10: a class holds fields and methods\\ntests/corpus/unwind_intermedi",
-  "blocker": "defer-destructors (v2 trap exit 2 left verbatim; also untyped-catch) [B-terminal]",
+  "actual": "cider run exit 1 on all three legs, stdout empty, stderr identical (671 bytes): 14:10: a method needs a name; 14:10: a class holds fields and methods; 16:9: expected '}'; 17:5: expected a declaration",
+  "blocker": "defer-destructors-and-untyped-catch (v2 try/catch/throw purged; destructor ~D and deferred finalization removed) [B-terminal]",
   "class": "B"
  },
  "vector_empty": {
