@@ -161,6 +161,13 @@ void testNames() {
     check(cider::typeName(cider::TypeRef{ctx.string()}) == "string", "string is string");
     check(cider::typeName(cider::TypeRef{ctx.basic(cider::BasicKind::F64)}) == "f64", "f64");
     check(cider::typeName(cider::errorRef()) == "error", "poison names itself");
+    const cider::Type* t0 = ctx.typeParam(cider::DeclId{0, 3}, 0);
+    const cider::Type* t1 = ctx.typeParam(cider::DeclId{1, 3}, 0);
+    const cider::Type* t2 = ctx.typeParam(cider::DeclId{0, 3}, 1);
+    check(cider::typeName(cider::TypeRef{t0}) != cider::typeName(cider::TypeRef{t1}),
+          "the same parameter position in different modules stays distinct");
+    check(cider::typeName(cider::TypeRef{t0}) != cider::typeName(cider::TypeRef{t2}),
+          "two parameters of one template stay distinct");
 }
 
 // Layout: resolved for real types, reported otherwise; sizes from layout.h.

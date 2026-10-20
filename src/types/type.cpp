@@ -178,9 +178,14 @@ std::string typeName(TypeRef ref) {
         case Kind::FunctionItem:
             return "function";
         case Kind::TypeParam: {
-            const DeclId d = *t->decl();
+            const TypeParamPayload& p =
+                std::get<TypeParamPayload>(t->payload());
             std::string out = "T";
-            out += std::to_string(d.index);
+            out += std::to_string(p.decl.module);
+            out += ":";
+            out += std::to_string(p.decl.index);
+            out += "#";
+            out += std::to_string(p.index);
             return out;
         }
         case Kind::Alias: {

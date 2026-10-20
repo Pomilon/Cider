@@ -675,9 +675,9 @@
   "class": "A"
  },
  "generic_compound_args": {
-  "actual": "tests/corpus/generic_compound_args/main.cid:39:20: expected ')'",
-  "blocker": "generic-bodies (+stdlib-import) [B-terminal]",
-  "class": "B"
+  "actual": "exact stdout/stderr/exit match",
+  "blocker": "generic-bodies (+stdlib-import, compound-args, generic-interning)",
+  "class": "A"
  },
  "global_decl_order": {
   "actual": "exact stdout/stderr/exit match",
