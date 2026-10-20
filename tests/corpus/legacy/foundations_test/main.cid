@@ -1,14 +1,16 @@
+// Migrated to v3: inheritance spells `class Derived : Base`, and a class
+// literal names every non-defaulted field, inherited ones included.
 class Base {
     var x: int;
 }
 
-class Derived extends Base {
+class Derived : Base {
     var y: int;
 }
 
 func main() -> int {
     // Test 1: Dynamic Allocation
-    var obj: *Derived = new Derived;
+    var obj: *Derived = new Derived { x: 0, y: 0 };
     
     // Test 2: Dynamic Member Offsets (Inheritance)
     obj->x = 10;

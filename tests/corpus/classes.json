@@ -300,9 +300,9 @@
   "class": "B"
  },
  "deep_inheritance": {
-  "actual": "tests/corpus/legacy/deep_inheritance/main.cid:4:9: a class needs a body",
-  "blocker": "class-extends (+arrow-access diff #1, uninit-fields diff #7) [B-terminal]",
-  "class": "B"
+  "actual": "migrated to v3: inheritance spells `class D : C` and `new D { a: 0, b: 0, c: 0, d: 0 }` names every non-defaulted field, inherited ones included; all three legs match expected.json",
+  "blocker": "none",
+  "class": "A"
  },
  "defer_nested": {
   "actual": "migrated to v3: try/catch/throw are purged from the core language (Standard line 644), so the v2 exception-unwinding section is dropped; the four defer-nesting cases match on all three legs after the cross-function defer-frame reset",
@@ -665,9 +665,9 @@
   "class": "A"
  },
  "foundations_test": {
-  "actual": "tests/corpus/legacy/foundations_test/main.cid:5:15: a class needs a body",
-  "blocker": "class-extends (+uninit-fields diff #7, bare-new diff #6, arrow diff #1) [B-terminal]",
-  "class": "B"
+  "actual": "migrated to v3: inheritance spells `class Derived : Base` and `new Derived { x: 0, y: 0 }` names every non-defaulted field, inherited ones included; all three legs match expected.json",
+  "blocker": "none",
+  "class": "A"
  },
  "fs_test": {
   "actual": "exact stdout/stderr/exit match",

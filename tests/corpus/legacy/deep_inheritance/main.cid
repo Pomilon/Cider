@@ -1,18 +1,20 @@
+// Migrated to v3: inheritance spells `class D : C`, and a class literal
+// names every non-defaulted field, inherited ones included.
 class A {
     var a: int;
 }
-class B extends A {
+class B : A {
     var b: int;
 }
-class C extends B {
+class C : B {
     var c: int;
 }
-class D extends C {
+class D : C {
     var d: int;
 }
 
 func main() -> int {
-    var obj: *D = new D;
+    var obj: *D = new D { a: 0, b: 0, c: 0, d: 0 };
     obj->a = 1;
     obj->b = 2;
     obj->c = 4;
