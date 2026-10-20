@@ -9,6 +9,9 @@
 // The live forms run first (the guard is a not-taken branch there), then the
 // nil case reports:
 //   stderr = "vm error: null pointer dereference\n", exit = 2.
+//
+// v3: a nil dereference traps silently (SIGSEGV) on every backend; the v2
+// vm-error line is not part of v3.
 func addLive(p: *int, n: int) -> int { (*p) += n; return *p; }
 func subLive(p: *int, n: int) -> int { (*p) -= n; return *p; }
 func mulLive(p: *int, n: int) -> int { (*p) *= n; return *p; }

@@ -8,6 +8,9 @@
 // dividends widen before dividing, so INT16_MIN / -1 still truncates to
 // -32768 on every backend. Variable operands exercise the runtime probe;
 // a literal -1 divisor exercises the constant-divisor probe path.
+//
+// v3: signed MIN / -1 traps at runtime (and is rejected when provable); the
+// v2 defined-zero guard is purged (SEMANTICS 2.1).
 func main() -> int {
   // i64 (64-bit signed path, cqo/idiv)
   var lo64: i64 = 0 - 9223372036854775807 - 1;

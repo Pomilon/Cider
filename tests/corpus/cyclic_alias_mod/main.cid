@@ -1,9 +1,11 @@
 // CID-006 fix round 2: checker-accepted cyclic dotted aliases must compile
 // and run instead of overflowing the compiler stack (getTypeSize <-> alias
 // resolution non-convergence). `x` is an unused 8-byte slot.
+// Migrated to v3: raw locals spell `= uninit`; the true cross-module
+// alias cycle is rejected at declaration instead of compiled.
 import nsa;
 
 func main() -> int {
-  var x: nsa.B;
+  var x: nsa.B = uninit;
   return 0;
 }

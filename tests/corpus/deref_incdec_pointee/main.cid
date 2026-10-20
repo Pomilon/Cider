@@ -22,6 +22,12 @@
 // trips it can print nothing that earlier output is comparable against — a
 // user-defined `_nil_deref_fail` does resume the dereference, but through the
 // address the guard already captured, which is the nil one.
+//
+// Migrated to v3: increment and decrement are statements, so each former
+// postfix/prefix expression is spelled as a save-then-update or
+// update-then-read statement; a pointer's field spells `s->f` and its deref is
+// parenthesized; volatile pointee types spell `*volatile int`; raw locals
+// spell `= uninit`; u8/u16/u64 halves cast `as int` for printInt.
 from std.io import print, printInt, printF64;
 
 // bool -> int, so a pointer-identity check can be printed.
@@ -30,16 +36,16 @@ func yes(b: bool) -> int { if (b) { return 1; } return 0; }
 // printInt takes an int, so a u64 is shown as its two 32-bit halves: that is
 // what pins the read-modify-write to the pointee's 64-bit width, since
 // `0xFFFFFFFF + 1` looks the same truncated or not.
-func printU64(v: u64) -> void { printInt(v >> 32); print(":"); printInt(v & 4294967295); }
+func printU64(v: u64) -> void { printInt((v >> 32) as int); print(":"); printInt((v & 4294967295) as int); }
 
 struct S { var f: *int; var tail: int; }   // pointer field with a neighbour
 struct SP { var p: *int; }
 
 // --- prefix/postfix ++ and -- ------------------------------------------------
-func postinc(p: *int) -> int { var r: int = (*p)++; return r * 1000 + *p; }
-func preinc(p: *int) -> int { var r: int = ++(*p); return r * 1000 + *p; }
-func postdec(p: *int) -> int { var r: int = (*p)--; return r * 1000 + *p; }
-func predec(p: *int) -> int { var r: int = --(*p); return r * 1000 + *p; }
+func postinc(p: *int) -> int { var r: int = *p; (*p)++; return r * 1000 + *p; }
+func preinc(p: *int) -> int { ++(*p); var r: int = *p; return r * 1000 + *p; }
+func postdec(p: *int) -> int { var r: int = *p; (*p)--; return r * 1000 + *p; }
+func predec(p: *int) -> int { --(*p); var r: int = *p; return r * 1000 + *p; }
 
 // --- one function per compound operator --------------------------------------
 func plus(p: *int, n: int) -> int { (*p) += n; return *p; }
@@ -55,20 +61,20 @@ func bitXor(p: *int, n: int) -> int { (*p) ^= n; return *p; }
 func incU8(p: *u8) -> u8 { (*p)++; return *p; }
 func incU16(p: *u16) -> u16 { (*p)++; return *p; }
 func incU64(p: *u64) -> u64 { (*p)++; return *p; }
-func postU64(p: *u64) -> u64 { var r: u64 = (*p)--; return r; }
+func postU64(p: *u64) -> u64 { var r: u64 = *p; (*p)--; return r; }
 func addU64(p: *u64, n: u64) -> u64 { (*p) += n; return *p; }
 func addF64(p: *f64, n: f64) -> f64 { (*p) += n; return *p; }
 
 // --- a volatile pointee stays a volatile read-modify-write ------------------
-func incVolatile(p: volatile int*) -> int { (*p)++; return *p; }
+func incVolatile(p: *volatile int) -> int { (*p)++; return *p; }
 
 // --- sibling target shapes: a deref of an element and of a field -----------
-func incElem(pp: **int, i: int) -> int { var r: int = (*pp[i])++; return r * 1000 + *pp[i]; }
-func decElem(pp: **int, i: int) -> int { var r: int = --(*pp[i]); return r * 1000 + *pp[i]; }
+func incElem(pp: **int, i: int) -> int { var r: int = *pp[i]; (*pp[i])++; return r * 1000 + *pp[i]; }
+func decElem(pp: **int, i: int) -> int { --(*pp[i]); var r: int = *pp[i]; return r * 1000 + *pp[i]; }
 func addElem(pp: **int, i: int, n: int) -> int { (*pp[i]) += n; return *pp[i]; }
-func incField(s: *S) -> int { var r: int = (*s.f)++; return r * 1000 + *s.f; }
-func addField(s: *S, n: int) -> int { (*s.f) += n; return *s.f; }
-func incFieldOfPtr(sp: *SP) -> int { (*sp.p)++; return *sp.p; }
+func incField(s: *S) -> int { var r: int = *(s->f); (*(s->f))++; return r * 1000 + *(s->f); }
+func addField(s: *S, n: int) -> int { (*(s->f)) += n; return *(s->f); }
+func incFieldOfPtr(sp: *SP) -> int { (*(sp->p))++; return *(sp->p); }
 
 // --- a global pointee (the pointer's own address is a LABEL) ---------------
 var gcell: int = 40;
@@ -113,8 +119,8 @@ func main() -> int {
   var d64: u64 = 4294967296;   // a 32-bit subtract would wrap to 0 - 1
   var s64: u64 = 1;
   var f: f64 = 1.5;
-  print("u8 ");    printInt(incU8(&b8));
-  print(" u16 ");  printInt(incU16(&w16));
+  print("u8 ");    printInt(incU8(&b8) as int);
+  print(" u16 ");  printInt(incU16(&w16) as int);
   print(" u64 ");      printU64(incU64(&q64));
   print(" u64post ");  printU64(postU64(&d64));  print(" d64 ");  printU64(d64);
   print(" u64add ");   printU64(addU64(&s64, 4294967295));
@@ -128,7 +134,7 @@ func main() -> int {
 
   // --- 5. sibling shapes: deref of an element, deref of a field -------------
   var e0: int = 1; var e1: int = 2; var e2: int = 3;
-  var eps: [*int; 3];
+  var eps: [*int; 3] = uninit;
   eps[0] = &e0; eps[1] = &e1; eps[2] = &e2;
   var ep: **int = &eps[0];
   print("incElem ");  printInt(incElem(ep, 1));   print(" e1 ");  printInt(e1);
@@ -139,10 +145,10 @@ func main() -> int {
   print("\n");
 
   var fc: int = 9;
-  var s: S;
+  var s: S = uninit;
   s.f = &fc; s.tail = 111;
   var pv: int = 100;
-  var sp: SP; sp.p = &pv;
+  var sp: SP = uninit; sp.p = &pv;
   print("incField "); printInt(incField(&s));      print(" fc ");  printInt(fc);
   print(" addField "); printInt(addField(&s, 5)); print(" tail "); printInt(s.tail);
   print(" field-is-cell "); printInt(yes(s.f == &fc));

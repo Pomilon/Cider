@@ -12,8 +12,12 @@
 // dereference and exits non-zero, so a regression that let it through cannot
 // accidentally match the expected output:
 //   stderr = "vm error: null pointer dereference\n", exit = 2.
-func incLive(p: *int) -> int { var r: int = (*p)++; return r * 1000 + *p; }
-func decLive(p: *int) -> int { var r: int = --(*p); return r * 1000 + *p; }
+//
+// v3: increment and decrement are statements, so the live forms save/update
+// or update/read; a nil dereference traps silently (SIGSEGV) on every backend
+// and the v2 vm-error line is not part of v3.
+func incLive(p: *int) -> int { var r: int = *p; (*p)++; return r * 1000 + *p; }
+func decLive(p: *int) -> int { --(*p); var r: int = *p; return r * 1000 + *p; }
 func incElemLive(pp: **int, i: int) -> int { (*pp[i])++; return *pp[i]; }
 
 func nilInc(p: *int) -> int { (*p)++; return *p; }

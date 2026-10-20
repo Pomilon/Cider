@@ -1,6 +1,8 @@
 // CID-006 fix round 3: uses of a bare cyclic alias — assignment, same-typed
 // copy and call parameter — must compile on every backend; mapType's alias
 // walk used to recurse until SIGSEGV. The slots are unused 8-byte values.
+// Migrated to v3: raw locals spell `= uninit`; a true alias cycle is
+// rejected at declaration instead of compiled.
 type A = B;
 type B = A;
 
@@ -9,7 +11,7 @@ func use(v: B) -> int {
 }
 
 func main() -> int {
-  var x: B;
+  var x: B = uninit;
   x = x;
   var y: B = x;
   return use(y);

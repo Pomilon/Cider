@@ -206,7 +206,7 @@
  },
  "closure_as_fn": {
   "actual": "18:13: expected ';' (bare `fn(int)` spelling; v3 spells closure `func(int)->int` / fn-ptr `*func(int)->int` with no inference between representations \u2014 the test's subject)",
-  "blocker": "v2-fn-spelling",
+  "blocker": "v2-fn-spelling (bare fn(...) removed; closures spell func(...), pointers *func(...)) [B-terminal]",
   "class": "B"
  },
  "closure_field_store": {
@@ -285,18 +285,18 @@
   "class": "A"
  },
  "cyclic_alias_bare": {
-  "actual": "1:10: type alias cycle: main.B (true cycle A=B/B=A has no base type; v3 rejects at declaration)",
-  "blocker": "cyclic-alias",
+  "actual": "cider run exit 1 on all three legs, stdout empty, stderr identical (213 bytes): 6:10: type alias cycle: main.B; 7:10: type alias cycle: main.A (true cycle A=B/B=A has no base type; v3 rejects at declaration)",
+  "blocker": "cyclic-alias (v3 rejects a true alias cycle at declaration) [B-terminal]",
   "class": "B"
  },
  "cyclic_alias_mod": {
-  "actual": "nsa.cid:3:17 type alias cycle: nsa.A; 4:10 type alias cycle: nsa.B (true A=B/B=A cycle, no base type; rejected at declaration like cyclic_alias_bare)",
-  "blocker": "multi-file imports",
+  "actual": "cider run exit 1 on all three legs, stdout empty, stderr identical (136 bytes): nsa.cid:3:17: type alias cycle: nsa.A; nsa.cid:4:10: type alias cycle: nsa.B (true A=B/B=A cycle, no base type; rejected at declaration like cyclic_alias_bare)",
+  "blocker": "cyclic-alias (true nsa.A=nsa.B/nsa.B=nsa.A cycle rejected at declaration) [B-terminal]",
   "class": "B"
  },
  "cyclic_fn_alias": {
   "actual": "5:12: expected ';' (bare `fn(F)` spelling; v3 has no bare fn-ptr spelling, \u00a713)",
-  "blocker": "v2-fn-spelling",
+  "blocker": "v2-fn-spelling (bare fn(...) removed; closures spell func(...), pointers *func(...)) [B-terminal]",
   "class": "B"
  },
  "deep_inheritance": {
@@ -320,19 +320,19 @@
   "class": "A"
  },
  "deref_incdec_nil_compound": {
-  "actual": "rewrote uninit; live compound-assign forms pass, nil case traps silently via SIGSEGV (correct native fail-hard \u00a711.3, no emitted check); v2-text expectation (vm stderr + exit 2) not blessed",
-  "blocker": "none",
+  "actual": "native and both VM legs die by SIGSEGV (rc=-11), stdout and stderr empty, all three legs identical; the live compound-assignment forms pass before the nil trap; the v2 vm-error text and exit 2 are not part of v3",
+  "blocker": "v3-traps-nil-dereference-silently (MEMORY.md 2.2, diff #19); the v2 vm-error text and exit 2 are not part of v3 [B-terminal]",
   "class": "B"
  },
  "deref_incdec_nil_increment": {
-  "actual": "rewrote uninit eps with nilPtr init; live forms pass, nil (*p) traps silently via SIGSEGV (correct \u00a711.3); v2-text expectation (null pointer dereference + exit 2) not blessed",
-  "blocker": "none",
+  "actual": "native and both VM legs die by SIGSEGV (rc=-11), stdout and stderr empty, all three legs identical; the live increment/decrement forms were rewritten as statements and pass before the nil trap; the v2 vm-error text and exit 2 are not part of v3",
+  "blocker": "v3-traps-nil-dereference-silently (MEMORY.md 2.2, diff #19); the v2 vm-error text and exit 2 are not part of v3 [B-terminal]",
   "class": "B"
  },
  "deref_incdec_pointee": {
-  "actual": "deref_incdec_pointee/main.cid:145:13: a variable needs an initialiser",
-  "blocker": "stdlib-imports",
-  "class": "B"
+  "actual": "migrated to v3: increment/decrement are statements (save-then-update or update-then-read), pointer fields spell `s->f` with a parenthesized deref, volatile pointees spell `*volatile int`, raw locals spell `= uninit`, and u8/u16/u64 halves cast `as int`; all three legs match expected.json",
+  "blocker": "none",
+  "class": "A"
  },
  "destructor": {
   "actual": "tests/corpus/legacy/destructor/main.cid:6:10: a method needs a name",
@@ -345,13 +345,13 @@
   "class": "B"
  },
  "div_min_neg1": {
-  "actual": "v2 defines MIN/-1 as 0 (extends div0 policy); v3 traps at operand width (SIGFPE rc=136 verified on i64 case, no widening, \u00a712 ruling 5) \u2014 unrewritable by definition",
-  "blocker": "none",
+  "actual": "native and both VM legs die by SIGFPE (rc=-8), stdout and stderr empty, all three legs identical; signed MIN/-1 traps at the operand's own width (SEMANTICS 2.1 ruling 5), so the v2 defined-as-0 expectation is unrewritable",
+  "blocker": "v2-defined-zero-MIN/-1-purged (SEMANTICS 2.1 ruling 5: signed MIN/-1 traps at runtime) [B-terminal]",
   "class": "B"
  },
  "div_zero": {
-  "actual": "v3 rejects provable division by zero at compile time (75:11/76:11 'division by zero', \u00a711.2) and traps runtime div0 via plain div; v2's defined-as-0 semantics (\u00a711.4: v2 emitted branches converting div0 into 0) is exactly what v3 forbids forever \u2014 unrewritable by definition",
-  "blocker": "none",
+  "actual": "cider run exit 1 on all three legs, stdout empty, stderr identical (110 bytes): `78:11` and `79:11`: division by zero; provable zero divisors are rejected at compile time and runtime zero divisors trap (SEMANTICS 2.1), so the v2 defined-as-0 expectation is unrewritable",
+  "blocker": "v2-defined-zero-division-purged (SEMANTICS 2.1 ruling 4: provable zero rejects, runtime zero traps) [B-terminal]",
   "class": "B"
  },
  "dotted_base": {
@@ -511,7 +511,7 @@
  },
  "f64_ternary_width": {
   "actual": "compile rejection: the branches of a ternary match: f32 and f64",
-  "blocker": "mixed-type ternary arms (SEMANTICS: rejection, write the conversion in a branch)",
+  "blocker": "mixed-type ternary arms (SEMANTICS: rejection, write the conversion in a branch) [B-terminal]",
   "class": "B"
  },
  "factorial": {
@@ -1101,12 +1101,12 @@
  },
  "nil_closure_call": {
   "actual": "cider run exit 1, stdout empty, stderr diagnostic: `main.cid:40:32: a variable needs an initialiser`; expected.json left verbatim (v2 vm-error exit 2)",
-  "blocker": "bare-func closure spelling + uninit closure (v3 cannot build; trap path unverifiable)",
+  "blocker": "bare-func closure spelling + uninit closure (v3 cannot build; trap path unverifiable) [B-terminal]",
   "class": "B"
  },
  "nil_fnptr_call": {
   "actual": "migrated to v3: every live shape checks and runs (local, alias, parameter, field, pointer-to-field, array, returned, global, msabi, closure, virtual); the final nil call traps silently by SIGSEGV (rc 139) identically on native and both VM legs; expected.json left verbatim (v2 vm-error exit 2, not blessed)",
-  "blocker": "v3 traps nil calls silently (diff #19); v2 vm-error text not blessed",
+  "blocker": "v3 traps nil calls silently (diff #19); v2 vm-error text not blessed [B-terminal]",
   "class": "B"
  },
  "nil_iface_dispatch": {
@@ -1130,8 +1130,8 @@
   "class": "A"
  },
  "phase0_stress": {
-  "actual": "phase0_stress/main.cid:97:24: a variable needs an initialiser",
-  "blocker": "incdec-operators (+try-throw-catch, extern, enums, stdlib-imports)",
+  "actual": "tests/corpus/legacy/phase0_stress/main.cid:97:24: a variable needs an initialiser (three legs identical; also v2 ++/-- expressions, *void fn stores, extern, enums and fs imports)",
+  "blocker": "v2-phase0-features (incdec expressions, *void fn stores, extern, enums, stdlib imports) [B-terminal]",
   "class": "B"
  },
  "phase1_stress": {
@@ -1210,8 +1210,8 @@
   "class": "A"
  },
  "sizeof_expr": {
-  "actual": "cider run exit 1, stdout empty, stderr diagnostic incl. the right reason: `sizeof takes a type in parentheses` (plus uninit-var errors)",
-  "blocker": "sizeof-expr-form-must-reject (diff #12) + generics + stdlib-io",
+  "actual": "cider run exit 1 on all three legs, stdout empty, stderr identical (8592 bytes): `40:18`, `45:14`, `59:39`: a variable needs an initialiser; `59:55`, `60:38`, `60:54`, `61:36`, `61:52`: sizeof takes a type in parentheses (the v2 sizeof-expression operand form is a principled rejection, diff #12)",
+  "blocker": "sizeof-expr-form-must-reject (diff #12: sizeof takes a type in parentheses) + generics + stdlib-io [B-terminal]",
   "class": "B"
  },
  "slice": {
@@ -1246,7 +1246,7 @@
  },
  "spec": {
   "actual": "6:10: a type parameter needs a name (explicit specialization `func max<int>` has no v3 counterpart \u2014 \u00a73.1: every instantiation names args at USE, no specialization defs); deduced `max(3,5)` also rejected (no inference)",
-  "blocker": "v3-generics-model",
+  "blocker": "v3-generics-model (no specialization definitions, no generic inference) [B-terminal]",
   "class": "B"
  },
  "sret_expr_calls": {
@@ -1256,7 +1256,7 @@
  },
  "stale_handler_frame_exit": {
   "actual": "run exit 1: OUT: ERR:tests/corpus/stale_handler_frame_exit/main.cid:21:13: a catch binds a name and a type\\ntests/corpus/stale_handler_frame_exit/main.cid:24:1: expected a declaration\\ntests/corpus/stale_handler_frame_exit/",
-  "blocker": "untyped-catch-removed (v2 trap exit 2 left verbatim; v3 rejects, never traps)",
+  "blocker": "untyped-catch-removed (v2 trap exit 2 left verbatim; v3 rejects, never traps) [B-terminal]",
   "class": "B"
  },
  "stale_handler_still_catches": {
@@ -1346,7 +1346,7 @@
  },
  "str_ptr": {
   "actual": "2:11: arithmetic needs numbers (`s + 2` \u2014 FEATURES \u00a71.4: `s + 1` is an error in either order; string+int interior-pointer arithmetic has no v3 counterpart, use s[lo:hi])",
-  "blocker": "v3-string-model",
+  "blocker": "v3-string-model (string+int arithmetic removed) [B-terminal]",
   "class": "B"
  },
  "string_compare": {
@@ -1356,7 +1356,7 @@
  },
  "string_ordering": {
   "actual": "113:28 bare [...] literal (v2; \u00a71.8 rejects) + terminal: string </> rejected by design ('strings compare for equality only', FEAT-028 equality-only; test_types\u2192B precedent) \u2014 nested-loop ordering subject has no v3 counterpart",
-  "blocker": "v3-string-ordering-rejected",
+  "blocker": "v3-string-ordering-rejected (strings compare for equality only) [B-terminal]",
   "class": "B"
  },
  "struct_elem": {
@@ -1431,7 +1431,7 @@
  },
  "test_types": {
   "actual": "6:24: a char compares with a char, not a number (char stays a distinct 1-byte type; v2 char==byte equivalence remains rejected)",
-  "blocker": "stdlib-imports (+char-byte-distinct diffs #9/#10)",
+  "blocker": "stdlib-imports (+char-byte-distinct diffs #9/#10) [B-terminal]",
   "class": "B"
  },
  "test_vector": {
@@ -1476,22 +1476,22 @@
  },
  "uncaught_rethrow": {
   "actual": "run exit 1: OUT: ERR:tests/corpus/uncaught_rethrow/main.cid:10:13: a catch binds a name and a type\\ntests/corpus/uncaught_rethrow/main.cid:13:5: expected a declaration\\ntests/corpus/uncaught_rethrow/main.cid:14:1: expected ",
-  "blocker": "untyped-catch-removed (v2 trap exit 2 left verbatim; v3 rejects, never traps)",
+  "blocker": "untyped-catch-removed (v2 trap exit 2 left verbatim; v3 rejects, never traps) [B-terminal]",
   "class": "B"
  },
  "uncaught_rethrow_finalizers": {
   "actual": "run exit 1: OUT: ERR:tests/corpus/uncaught_rethrow_finalizers/main.cid:14:10: a method needs a name\\ntests/corpus/uncaught_rethrow_finalizers/main.cid:14:10: a class holds fields and methods\\ntests/corpus/uncaught_rethrow_f",
-  "blocker": "defer-destructors (v2 trap exit 2 left verbatim; also untyped-catch)",
+  "blocker": "defer-destructors (v2 trap exit 2 left verbatim; also untyped-catch) [B-terminal]",
   "class": "B"
  },
  "uncaught_throw": {
-  "actual": "run exit 0: OUT: ERR:",
-  "blocker": "uncaught-throw-swallowed: v3 check+run exit 0, must trap (v2 exit 2 left verbatim)",
+  "actual": "cider run exit 1 on all three legs, stdout empty, stderr identical (175 bytes): 6:5: throw is not implemented yet",
+  "blocker": "throw-is-not-implemented (diff #14: try/catch/throw purged in v3) [B-terminal]",
   "class": "B"
  },
  "uncaught_throw_finalizers": {
   "actual": "run exit 1: OUT: ERR:tests/corpus/uncaught_throw_finalizers/main.cid:19:10: a method needs a name\\ntests/corpus/uncaught_throw_finalizers/main.cid:19:10: a class holds fields and methods\\ntests/corpus/uncaught_throw_finaliz",
-  "blocker": "defer-destructors (v2 trap exit 2 left verbatim; also untyped-catch)",
+  "blocker": "defer-destructors (v2 trap exit 2 left verbatim; also untyped-catch) [B-terminal]",
   "class": "B"
  },
  "uninit_locals_zero": {
@@ -1505,8 +1505,8 @@
   "class": "B"
  },
  "union": {
-  "actual": "25:20: a variable needs an initialiser (bare `var u: IntOrInt;`); program's untagged overlap reads (u.a/u.b without live-member construction) are rejected by v3 union semantics (\u00a72.5: exactly one live member via new)",
-  "blocker": "v3-union-model",
+  "actual": "tests/corpus/legacy/union/main.cid:25:20 and 38:24: a variable needs an initialiser; the program's untagged overlap reads (u.a/u.b without live-member construction) are rejected by v3 union semantics (\u00a72.5: exactly one live member via new)",
+  "blocker": "v3-union-model (one live member via new; untagged overlap reads rejected) [B-terminal]",
   "class": "B"
  },
  "unwind_intermediate_frames": {
@@ -1516,7 +1516,7 @@
  },
  "unwind_intermediate_uncaught": {
   "actual": "run exit 1: OUT: ERR:tests/corpus/unwind_intermediate_uncaught/main.cid:14:10: a method needs a name\\ntests/corpus/unwind_intermediate_uncaught/main.cid:14:10: a class holds fields and methods\\ntests/corpus/unwind_intermedi",
-  "blocker": "defer-destructors (v2 trap exit 2 left verbatim; also untyped-catch)",
+  "blocker": "defer-destructors (v2 trap exit 2 left verbatim; also untyped-catch) [B-terminal]",
   "class": "B"
  },
  "vector_empty": {

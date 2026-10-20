@@ -4,6 +4,9 @@
 // zero-divisor guard instead of the constant fast path; every integer
 // width (i8/u8/i16/u16/i32/u32/i64/u64) and both signedness variants of
 // / and % are checked, plus unsigned values above 2^63.
+//
+// v3: a provable zero divisor is a compile-time rejection and a runtime zero
+// divisor traps; the v2 defined-zero guards are purged (SEMANTICS 2.1).
 func main() -> int {
   // i32 (32-bit signed path, cdq/idiv)
   var z: int = 0;
