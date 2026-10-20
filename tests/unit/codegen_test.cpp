@@ -1794,6 +1794,25 @@ void testDeferRun() {
                    "    return 0;\n"
                    "}\n") == 0,
           "defers run per iteration and on continue");
+    check(runQuiet("var out: int = 0;\n"
+                   "func digit(d: int) { out = out * 10 + d; }\n"
+                   "func first() -> void {\n"
+                   "    out = 0;\n"
+                   "    defer { digit(1); }\n"
+                   "}\n"
+                   "func second() -> int {\n"
+                   "    out = 0;\n"
+                   "    defer { digit(1); }\n"
+                   "    return 7;\n"
+                   "}\n"
+                   "func main() -> int {\n"
+                   "    first();\n"
+                   "    if (out != 1) { return 1; }\n"
+                   "    if (second() != 7) { return 2; }\n"
+                   "    if (out != 1) { return 3; }\n"
+                   "    return 0;\n"
+                   "}\n") == 0,
+          "a fall-through function's defer does not leak into the next return");
 }
 
 void testClosureVoidRun() {

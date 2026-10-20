@@ -2340,6 +2340,11 @@ void Lowerer::beginFuncFrame(const std::string& link, const Signature& sig,
     blockOrder_.clear();
     locals_.clear();
     scopeMarks_.clear();
+    // A function starts with no open block/loop scopes. A body that fell
+    // off has already run its defers; leaving its frame behind would let a
+    // later function's return walk (runDefers(0)) run them a second time.
+    deferFrames_.clear();
+    loopMarks_.clear();
 
     uint32_t entry = emitBlock(pos);
     startBlock(entry);

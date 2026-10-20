@@ -305,9 +305,9 @@
   "class": "B"
  },
  "defer_nested": {
-  "actual": "tests/corpus/defer_nested/main.cid:67:27: a catch binds a name and a type",
-  "blocker": "stdlib-imports [B-terminal]",
-  "class": "B"
+  "actual": "migrated to v3: try/catch/throw are purged from the core language (Standard line 644), so the v2 exception-unwinding section is dropped; the four defer-nesting cases match on all three legs after the cross-function defer-frame reset",
+  "blocker": "none",
+  "class": "A"
  },
  "defer_scopes": {
   "actual": "exact stdout/stderr/exit match",

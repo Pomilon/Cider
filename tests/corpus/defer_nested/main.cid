@@ -1,3 +1,6 @@
+// Migrated to v3: try/catch/throw are purged from the core language
+// (Unified Standard line 644), so the v2 exception-unwinding section is
+// dropped; the four defer-nesting cases remain.
 from std.io import printInt, print;
 
 // CIDER-BUG-210: `defer` bodies may still be arbitrarily nested inside
@@ -53,20 +56,6 @@ func outerReturn() -> int {
     return 0;
 }
 
-// A defer body that ends in a `throw` from a CALLEE is fine — the transfer
-// is in the callee's frame, so this frame unwinds its own defers normally.
-var calldepth: int = 0;
-
-func deep() -> void {
-    if (calldepth == 0) { calldepth = 1; throw 3; }
-}
-
-func throwFromCallee() -> void {
-    out = 0;
-    defer { digit(1); }
-    try { deep(); } catch (e) { digit(2); }
-}
-
 func main() -> int {
     deferInBranch();
     print("branch="); printInt(out); print("\n");
@@ -79,9 +68,6 @@ func main() -> int {
 
     var r: int = outerReturn();
     print("ret="); printInt(out); print("/"); printInt(r); print("\n");
-
-    throwFromCallee();
-    print("callee="); printInt(out); print("\n");
 
     return 0;
 }
