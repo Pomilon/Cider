@@ -29,6 +29,12 @@
 // more. The program then calls through a never-assigned closure, so a
 // regression that lets a nil object through cannot match the expected output on
 // any backend.
+// Migrated to v3: class values are built with literals naming every
+// non-defaulted field and pointer field calls spell `->`. A `func(...)`
+// value is not a pointer, so `nilPtr` cannot stand for a nil closure:
+// `null is a pointer value` rejects the attempt, and uninitialized
+// locals and globals are refused, so a nil closure object is
+// inexpressible in v3. Only a raw `*func(...)` pointer can be nil.
 func dbl(x: int) -> int { return x * 2; }
 func inc(x: int) -> int { return x + 1; }
 
@@ -37,7 +43,7 @@ type Cb = func(int) -> int;
 class Holder { var c: func(int) -> int; }
 class Outer { var b: Holder; }
 
-var globalNil: func(int) -> int;
+var globalNil: func(int) -> int = nilPtr;
 
 func viaParam(c: func(int) -> int, x: int) -> int { return c(x); }
 func pick(b: bool) -> func(int) -> int {
@@ -77,15 +83,15 @@ func main() -> int {
 
   // 4. A class field, a pointer-to-class field, a nested field and an array
   //    element -- the routes a nil object also travels (see the smoke test).
-  var h: Holder;
+  var h: Holder = Holder { c: nilPtr };
   h.c = makeAdder(3);
   if (h.c(3) != 6) { return 107; }
   var hp: *Holder = &h;
-  if (hp.c(3) != 6) { return 108; }
-  var o: Outer;
+  if (hp->c(3) != 6) { return 108; }
+  var o: Outer = Outer { b: Holder { c: nilPtr } };
   o.b.c = makeAdder(4);
   if (o.b.c(3) != 7) { return 109; }
-  var arr: [func(int) -> int; 2];
+  var arr: [func(int) -> int; 2] = uninit;
   arr[0] = makeAdder(5);
   arr[1] = makeAdder(6);
   if (arr[0](3) != 8) { return 110; }
@@ -115,6 +121,6 @@ func main() -> int {
 
   // ---- the nil path: the first one below reports and exits ---------------
   // The ticket's reproducer, verbatim: a never-assigned closure local.
-  var nilClosure: func(int) -> int;
+  var nilClosure: func(int) -> int = nilPtr;
   return nilClosure(3);
 }

@@ -1100,8 +1100,8 @@
   "class": "A"
  },
  "nil_closure_call": {
-  "actual": "cider run exit 1, stdout empty, stderr diagnostic: `main.cid:40:32: a variable needs an initialiser`; expected.json left verbatim (v2 vm-error exit 2)",
-  "blocker": "bare-func closure spelling + uninit closure (v3 cannot build; trap path unverifiable) [B-terminal]",
+  "actual": "cider run exit 1 on all three legs, stdout empty, stderr identical (70 bytes): `tests/corpus/nil_closure_call/main.cid:46:35: null is a pointer value` (a `func(...)` value is not a pointer, so `nilPtr` cannot stand for a nil closure; uninitialized locals and globals are refused, so a nil closure object is inexpressible in v3)",
+  "blocker": "v3-closure-values-cannot-be-nil (closure values are not pointers; nilPtr is a pointer value and uninitialized locals/globals are refused, so a nil closure object is inexpressible; only a raw *func(...) pointer can be nil) [B-terminal]",
   "class": "B"
  },
  "nil_fnptr_call": {
