@@ -770,7 +770,7 @@
   "class": "B"
  },
  "iface_box_ownership": {
-  "actual": "v2-only caller-owned heap boxes for concrete-value interface returns; v3 refuses class-value\u2192interface returns as dangling and has no scope-exit release; the file keeps `func ~Sq()` as the loud witness: `main.cid:44:8: a method needs a name` on all three legs; expected.json left verbatim",
+  "actual": "cider run exit 1 on all three legs, stdout empty, stderr identical (1842 bytes): 50:8: a method needs a name (the func ~Sq() witness); 50:8: a class holds fields and methods; 50:35: expected '}'; 69:8 and following destructor diagnostics (v3 boxes class pointers only, refuses class-value interface returns as dangling, and has no caller-owned box release or scope-exit destruction; expected.json left verbatim)",
   "blocker": "v3 boxes only class pointers (class-value interface returns are refused as dangling) and has no caller-owned box release or scope-exit destruction [B-terminal]",
   "class": "B"
  },
@@ -1195,7 +1195,7 @@
   "class": "A"
  },
  "shift_count_mask": {
-  "actual": "cider run exit 1 on all three legs, stdout empty, stderr identical: `40:27`, `41:27`, `46:27`, `47:27`, `51:28`, `53:28`: a shift count is too large (the constant-count masking the program pins is now a loud compile rejection; unrelated printInt/check i64 conversion diagnostics remain)",
+  "actual": "cider run exit 1 on all three legs, stdout empty, stderr identical (3166 bytes): 29:14 and 31:14: cannot use i64 as i32 (printInt); 40:27, 41:27, 46:27, 47:27, 51:28, 53:28: a shift count is too large (the constant-count masking the program pins is now a loud compile rejection; unrelated printInt/check i64 conversion diagnostics remain)",
   "blocker": "const-shift-count-must-reject (diff #16: a constant shift count at or past the operand width is a compile-time rejection) [B-terminal]",
   "class": "B"
  },
@@ -1345,7 +1345,7 @@
   "class": "A"
  },
  "str_ptr": {
-  "actual": "2:11: arithmetic needs numbers (`s + 2` \u2014 FEATURES \u00a71.4: `s + 1` is an error in either order; string+int interior-pointer arithmetic has no v3 counterpart, use s[lo:hi])",
+  "actual": "cider run exit 1 on all three legs, stdout empty, stderr identical (151 bytes): 2:11: a string concatenates only with a string (v3 has string+string only; string+int pointer arithmetic has no v3 counterpart)",
   "blocker": "v3-string-model (string+int arithmetic removed) [B-terminal]",
   "class": "B"
  },
@@ -1355,7 +1355,7 @@
   "class": "A"
  },
  "string_ordering": {
-  "actual": "113:28 bare [...] literal (v2; \u00a71.8 rejects) + terminal: string </> rejected by design ('strings compare for equality only', FEAT-028 equality-only; test_types\u2192B precedent) \u2014 nested-loop ordering subject has no v3 counterpart",
+  "actual": "cider run exit 1 on all three legs, stdout empty, stderr identical (3774 bytes): 26:9 and following: strings compare for equality only (v3 has equality only; the nested-loop ordering subject has no v3 counterpart)",
   "blocker": "v3-string-ordering-rejected (strings compare for equality only) [B-terminal]",
   "class": "B"
  },
@@ -1500,7 +1500,7 @@
   "class": "B"
  },
  "uninit_zero_policy": {
-  "actual": "run exit 1: OUT: ERR:tests/corpus/uninit_zero_policy/main.cid:119:5: expected an expression\\ntests/corpus/uninit_zero_policy/main.cid:130:5: expected a declaration\\ntests/corpus/uninit_zero_policy/main.cid:130:32: expected ",
+  "actual": "cider run exit 1 on all three legs, stdout empty, stderr identical (322 bytes): 184:22: expected '{' or '(' after new (v2 bare new); 185:13, 186:17, 203:17: a variable needs an initialiser (v3 refuses bare new and uninitialized locals, so the v2 zero-fill policy has no v3 counterpart)",
   "blocker": "v3-uninit-local-refusal (diff #7: var x:T is always an error) [B-terminal]",
   "class": "B"
  },
@@ -1530,7 +1530,7 @@
   "class": "A"
  },
  "virtual_aggregate_return": {
-  "actual": "v2-only scope-exit/parameter/temporary destructor trace; the file keeps `func ~D()` as the loud witness: v3 check reports `main.cid:34:10: a method needs a name` on all three legs; expected.json left verbatim",
+  "actual": "cider run exit 1 on all three legs, stdout empty, stderr identical (1211 bytes): 39:10: a method needs a name (the func ~D() witness); 39:10: a class holds fields and methods; 41:9: expected '}'; 53:17 and 58:17: a variable needs an initialiser; 65:15: a class needs a body (v2 scope-exit/parameter/temporary destruction has no v3 counterpart; expected.json left verbatim)",
   "blocker": "v2 implicit scope-exit/parameter/temporary destruction (CIDER-BUG-137/156) is not v3 semantics (v3 runs deinit only through explicit delete/fini) [B-terminal]",
   "class": "B"
  },
