@@ -25,18 +25,23 @@
 // guard is pinned as costing a not-taken branch and nothing more. The program
 // then exits non-zero with NO diagnostic, so a regression that lets a nil
 // dereference through cannot accidentally match the expected output.
+// Migrated to v3: `extends` spells `:`, pointer receivers spell `->`,
+// class values are constructed with literals so their vtable word is set,
+// and value locals spell `= uninit`. v3 has no defined runtime-error text
+// (diff #19): the nil dereference traps silently on every backend, so the
+// v2 `vm error: null pointer dereference` line is not blessed.
 class Base {
   var n: int;
-  virtual func kind() -> int { return this.n; }
+  virtual func kind() -> int { return this->n; }
 }
-class Derived extends Base {
-  override func kind() -> int { return this.n + 1; }
+class Derived : Base {
+  override func kind() -> int { return this->n + 1; }
 }
 class Box {
   var a: int;
   var b: int;
-  func sum() -> int { return this.a + this.b; }
-  func bump() -> int { this.a = this.a + 1; return this.a; }
+  func sum() -> int { return this->a + this->b; }
+  func bump() -> int { this->a = this->a + 1; return this->a; }
 }
 class Pair { var l: int; var r: int; }
 
@@ -44,10 +49,10 @@ func readThrough(p: *int) -> int { return *p; }
 func writeThrough(p: *int, v: int) -> int { *p = v; return *p; }
 func readIndex(p: *int, i: int) -> int { return p[i]; }
 func writeIndex(p: *int, i: int, v: int) -> int { p[i] = v; return p[i]; }
-func readField(b: *Box) -> int { return b.a; }
-func writeField(b: *Box, v: int) -> int { b.a = v; return b.a; }
-func callMethod(b: *Box) -> int { return b.sum(); }
-func callVirtual(p: *Base) -> int { return p.kind(); }
+func readField(b: *Box) -> int { return b->a; }
+func writeField(b: *Box, v: int) -> int { b->a = v; return b->a; }
+func callMethod(b: *Box) -> int { return b->sum(); }
+func callVirtual(p: *Base) -> int { return p->kind(); }
 func readAggregate(p: *Box) -> int { var q: Box = *p; return q.a; }
 
 func main() -> int {
@@ -59,7 +64,7 @@ func main() -> int {
   if (readIndex(live, 0) != 42) { return 103; }
   if (writeIndex(live, 0, 43) != 43) { return 104; }
 
-  var box: Box;
+  var box: Box = uninit;
   box.a = 7;
   box.b = 8;
   var liveBox: *Box = &box;
@@ -67,17 +72,15 @@ func main() -> int {
   if (writeField(liveBox, 9) != 9) { return 106; }
   if (callMethod(liveBox) != 17) { return 107; }
 
-  var base: Base;
-  base.n = 5;
-  var derived: Derived;
-  derived.n = 6;
+  var base: Base = Base { n: 5 };
+  var derived: Derived = Derived { n: 6 };
   var liveBase: *Base = &derived;
   if (callVirtual(liveBase) != 7) { return 108; }   // the override runs
   if (callVirtual(&base) != 5) { return 109; }     // and the base
   if (readAggregate(liveBox) != 9) { return 110; }
 
   // Pointer arithmetic and a deref of a deref, both live.
-  var arr: [int; 3];
+  var arr: [int; 3] = uninit;
   arr[0] = 1; arr[1] = 2; arr[2] = 3;
   var walk: *int = &arr[0];
   var seen: int = 0;

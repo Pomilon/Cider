@@ -24,6 +24,10 @@
 //   * a function argument (a label) plus an int argument in one call;
 //   * the keeps and the spilled value itself are undisturbed (a wrong push
 //     order or width shows up here, not just in the callee).
+// Migrated to v3: `extends` spells `:`, `this.f` spells `this->f`, the
+// function-value type spells `func(int) -> int`, and a bare `new Der`
+// spells `new Der()`. The wide u64 immediates, float virtual arguments
+// and function-value arguments are unchanged.
 from std.io import print;
 
 func twice(x: int) -> int { return x * 2; }
@@ -32,16 +36,16 @@ class Base {
   virtual func pick(x: int) -> int { return x; }
   virtual func scaled(x: float) -> float { return x; }
   virtual func wide(x: u64) -> u64 { return x; }
-  virtual func run(cb: fn(int) -> int, x: int) -> int { return cb(x); }
+  virtual func run(cb: func(int) -> int, x: int) -> int { return cb(x); }
 }
 
-class Der extends Base {
+class Der : Base {
   var total: int;
-  func init() -> void { this.total = 1000; }
-  override func pick(x: int) -> int { return this.total + x; }
+  func init() -> void { this->total = 1000; }
+  override func pick(x: int) -> int { return this->total + x; }
   override func scaled(x: float) -> float { return x * 2.0; }
   override func wide(x: u64) -> u64 { return x + 1; }
-  override func run(cb: fn(int) -> int, x: int) -> int { return cb(x) + 1; }
+  override func run(cb: func(int) -> int, x: int) -> int { return cb(x) + 1; }
 }
 
 func main() -> int {
@@ -64,7 +68,7 @@ func main() -> int {
 
   var v: int = 5;
   var f: float = 1.5;
-  var d: *Der = new Der;
+  var d: *Der = new Der();
   var b: *Base = d;
 
   // Spilled narrow int through the vtable.

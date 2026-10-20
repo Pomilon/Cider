@@ -8,27 +8,31 @@
 //   - inherited fields (including a transitive private base's field),
 //     inherited plain/virtual methods, overrides calling super, dispatch
 //     through a dotted base pointer, and a dotted `new` type
+// Migrated to v3: `extends` spells `:`, a bare `new X` spells
+// `new X { }`, and flat base packing gives sizeof(A/B/C/D) =
+// 24/24/24/24 where v2 pinned 24/28/24/28; dispatch, inherited
+// fields and overrides are unchanged.
 import qlib;
 import mid;
 from mid import Mid;
 from std.io import printInt, print;
 
-class A extends qlib.Base {
+class A : qlib.Base {
   var aTag: int = 30;
   override func score() -> int { return super.score() + 3; }
 }
 
-class B extends mid.Mid {
+class B : mid.Mid {
   var bTag: int = 40;
   override func score() -> int { return super.score() + 4; }
 }
 
-class C extends mid.MidBase {
+class C : mid.MidBase {
   var cTag: int = 50;
   override func score() -> int { return super.score() + 5; }
 }
 
-class D extends Mid {
+class D : Mid {
   var dTag: int = 60;
   override func score() -> int { return super.score() + 6; }
 }
@@ -41,7 +45,7 @@ func main() -> int {
   printInt(base->hiddenTag); print(",");      // 7  transitive private field
   printInt(base->hiddenScore()); print(",");  // 100 inherited virtual
 
-  var a: *A = new A;
+  var a: *A = new A { };
   a->tag = 12;
   printInt(a->aTag); print(",");              // 30
   printInt(a->baseOnly()); print(",");        // 12 + 7
@@ -49,7 +53,7 @@ func main() -> int {
   base = a;                                   // *A -> *qlib.Base
   printInt(base->score()); print(",");        // 4 dispatch through base
 
-  var b: *B = new B;
+  var b: *B = new B { };
   b->tag = 13;
   printInt(b->midTag); print(",");            // 20 inherited from mid.Mid
   printInt(b->score()); print(",");           // 1 + 10 + 4
@@ -58,14 +62,14 @@ func main() -> int {
   var m: *mid.Mid = b;
   printInt(m->score()); print(",");           // 15
 
-  var c: *C = new C;
+  var c: *C = new C { };
   c->tag = 14;
   printInt(c->score()); print(",");           // 1 + 5 alias-spelled base
   printInt(c->hiddenTag); print(",");         // 7
   var cb: *qlib.Base = c;
   printInt(cb->score()); print(",");          // 6
 
-  var d: *D = new D;
+  var d: *D = new D { };
   d->tag = 15;
   printInt(d->score()); print(",");           // 1 + 10 + 6 from-import control
   printInt(sizeof(A)); print(",");

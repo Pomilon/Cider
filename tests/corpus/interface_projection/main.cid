@@ -1,5 +1,10 @@
 // CIDER-ISS-011: prefix-compatible interface projections copy the existing
 // data/vtable fat pointer and remain valid for dispatch and boxed-value cleanup.
+// Migrated to v3: constructors/destructors spell `init()`/`deinit()` and
+// deinit runs only through explicit `delete`; v3 does not finalize scope
+// values or owned interface boxes, so this stays B-terminal and the v2
+// drop count is not blessed. `this.` spells `this->`; value locals spell
+// `uninit`.
 var drops: int = 0;
 
 interface Read {
@@ -13,16 +18,16 @@ interface ReadWrite {
 
 class Record {
   var value: int;
-  func ~Record() { drops = drops + 1; }
-  func read() -> int { return this.value; }
-  func write() -> int { return this.value + 1; }
+  func deinit() { drops = drops + 1; }
+  func read() -> int { return this->value; }
+  func write() -> int { return this->value + 1; }
 }
 
 func narrow(value: ReadWrite) -> Read { return value; }
 func consume(value: Read) -> int { return value.read(); }
 
 func makeRecord() -> ReadWrite {
-  var value: Record;
+  var value: Record = uninit;
   value.value = 40;
   return value;
 }

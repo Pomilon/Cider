@@ -6,7 +6,7 @@ import qlib;
 
 export type MidBase = qlib.Base;
 
-export class Mid extends qlib.Base {
+export class Mid : qlib.Base {
   var midTag: int = 20;
   override func score() -> int { return super.score() + 10; }
 }

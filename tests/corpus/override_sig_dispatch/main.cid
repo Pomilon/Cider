@@ -5,6 +5,8 @@
 // name one type and must stay a valid override) and a multi-level chain
 // where each level overrides the level above it, plus a zero-argument
 // virtual and an inherited plain method as controls.
+// Migrated to v3: `extends` spells `:`, a bare `new Leaf` spells
+// `new Leaf { }`, and the type-alias spelling stays a valid override.
 from std.io import print, printInt;
 
 type Num = int;
@@ -15,17 +17,17 @@ class Base {
     func plain(x: int) -> int { return x * 2; }
 }
 
-class Mid extends Base {
+class Mid : Base {
     override func score(x: int) -> int { return super.score(x) + 100; }
 }
 
-class Leaf extends Mid {
+class Leaf : Mid {
     override func score(x: Num) -> int { return super.score(x) + 1000; }
     override func label() -> int { return 20; }
 }
 
 func main() -> int {
-    var l: *Leaf = new Leaf;
+    var l: *Leaf = new Leaf { };
     var b: *Base = l;
     if (b->score(7) != 1108) return 1;   // 7+1, +100, +1000 through the slot
     if (b->label() != 20) return 2;       // leaf overrides a zero-arg virtual

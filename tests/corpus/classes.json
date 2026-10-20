@@ -355,9 +355,9 @@
   "class": "B"
  },
  "dotted_base": {
-  "actual": "tests/corpus/dotted_base/main.cid:16:9: a class needs a body",
-  "blocker": "multi-file imports [B-terminal]",
-  "class": "B"
+  "actual": "migrated to v3: `extends` spells `:`, bare `new X` spells `new X { }`, and v3 flat base packing gives sizeof(A/B/C/D)=24/24/24/24 (v2 pinned 24/28/24/28); all dotted, self-qualified, alias and from-import base spellings resolve and all three legs match expected.json",
+  "blocker": "none",
+  "class": "A"
  },
  "ea_basic": {
   "actual": "tests/corpus/legacy/ea_basic/main.cid:7:30: expected '{' or '(' after new",
@@ -865,8 +865,8 @@
   "class": "A"
  },
  "interface_projection": {
-  "actual": "tests/corpus/interface_projection/main.cid:16:8: a method needs a name",
-  "blocker": "destructors (~D syntax) + interface-params + this + uninit [B-terminal]",
+  "actual": "v3 has no interface projection: `main.cid:26:48: cannot use interface(0:7) as interface(0:6)`; `main.cid:32:10: a class value cannot return as an interface: it would dangle`; `main.cid:38:29: cannot use interface(0:7) as interface(0:6)`; all three legs agree",
+  "blocker": "v3 has no interface projection (ReadWrite\u2192Read) and refuses class-value\u2192interface returns (would dangle); boxed-value cleanup is v2-only [B-terminal]",
   "class": "B"
  },
  "interface_reassign": {
@@ -1110,13 +1110,13 @@
   "class": "B"
  },
  "nil_iface_dispatch": {
-  "actual": "cider run exit 1, stdout empty, stderr diagnostic: `main.cid:32:16: a variable needs an initialiser`; expected.json left verbatim (v2 vm-error exit 2)",
-  "blocker": "interface-boxing + this + uninit iface (v3 cannot build; trap path unverifiable)",
+  "actual": "v3: all three legs die by SIGSEGV (rc 139) at the first nil interface dispatch with no stdout; the v2 vm-error line is not blessed",
+  "blocker": "v3 traps nil interface dispatch silently (diff #19); the v2 'vm error: nil interface dispatch' text is not defined [B-terminal]",
   "class": "B"
  },
  "nil_pointer_deref": {
-  "actual": "cider run exit 1, stdout empty, stderr diagnostic: `main.cid:32:15: a class needs a body`; expected.json left verbatim (v2 vm-error exit 2)",
-  "blocker": "virtual/override/extends + this (v3 cannot build; trap path unverifiable)",
+  "actual": "v3: all three legs die by SIGSEGV (rc 139) at the final nil dereference with no stdout, after every live dereference/field/index/virtual path passes; the v2 vm-error line is not blessed",
+  "blocker": "v3 traps nil pointer dereferences silently (diff #19); the v2 'vm error: null pointer dereference' text is not defined [B-terminal]",
   "class": "B"
  },
  "nolibc_hello": {
@@ -1125,9 +1125,9 @@
   "class": "B"
  },
  "override_sig_dispatch": {
-  "actual": "tests/corpus/override_sig_dispatch/main.cid:18:11: a class needs a body",
-  "blocker": "virtual/override/extends/super + stdlib-io + delete [B-terminal]",
-  "class": "B"
+  "actual": "migrated to v3: `extends` spells `:`, a bare `new Leaf` spells `new Leaf { }`, and the alias-spelled parameter still binds the base vtable slot; all three legs match",
+  "blocker": "none",
+  "class": "A"
  },
  "phase0_stress": {
   "actual": "phase0_stress/main.cid:97:24: a variable needs an initialiser",
@@ -1525,9 +1525,9 @@
   "class": "A"
  },
  "vector_reserve_oom": {
-  "actual": "run exit 1: OUT: ERR:tests/corpus/vector_reserve_oom/main.cid:20:31: expected an expression\\ntests/corpus/vector_reserve_oom/main.cid:21:10: expected an expression\\ntests/corpus/vector_reserve_oom/main.cid:22:10: expected a",
-  "blocker": "stdlib-missing, OOM-message policy deleted by design (cannot verify silent trap)",
-  "class": "B"
+  "actual": "migrated to v3: v2 `name<int>(...)` generic calls spell `name::<int>(...)`, `Vec` must be imported with the functions, and the stdlib OOM path prints `vm error: out of memory` and exits 2 identically on all three legs, matching expected.json",
+  "blocker": "none",
+  "class": "A"
  },
  "virtual_aggregate_return": {
   "actual": "tests/corpus/virtual_aggregate_return/main.cid:34:10: a method needs a name",
@@ -1540,9 +1540,9 @@
   "class": "A"
  },
  "virtual_call_args": {
-  "actual": "tests/corpus/virtual_call_args/main.cid:35:26: expected ')'",
-  "blocker": "virtual-interface (also float, fn-types, stdlib-missing) [B-terminal]",
-  "class": "B"
+  "actual": "migrated to v3: `extends`/`this`/`fn`/bare-new spellings migrated; 64-bit unsigned immediates, float virtual arguments and function-value arguments all match on all three legs",
+  "blocker": "none",
+  "class": "A"
  },
  "virtual_methods": {
   "actual": "tests/corpus/legacy/virtual_methods/main.cid:10:15: a class needs a body",

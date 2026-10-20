@@ -10,9 +10,9 @@ class Hidden {
   virtual func hiddenScore() -> int { return 100; }
 }
 
-export class Base extends qlib.Hidden {
+export class Base : qlib.Hidden {
   var tag: int = 10;
-  func init(v: int) -> void { this.tag = v; }
+  func init(v: int) -> void { this->tag = v; }
   virtual func score() -> int { return 1; }
-  func baseOnly() -> int { return this.hiddenTag + this.tag; }
+  func baseOnly() -> int { return this->hiddenTag + this->tag; }
 }

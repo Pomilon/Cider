@@ -1,3 +1,8 @@
+// CIDER-BUG-211 (migrated to v3): the v2 defined-error line is not
+// reprised in v3 (diff #19); interface values box from class pointers,
+// and the nil dispatch path is probed here to record the v3 policy.
+//
+// Original ticket note:
 // CIDER-BUG-211: a method call on a nil interface must be a defined runtime
 // error on every backend, never a nil function-pointer load. A nil interface
 // carries a zero vtable word, so dispatch used to read a method address out
@@ -23,14 +28,13 @@ interface Shape {
 class Circle {
   var r: int;
   func kind() -> int { return 1; }
-  func grow(n: int) -> int { return this.r + n; }
+  func grow(n: int) -> int { return this->r + n; }
 }
 
 // A non-nil implementor, so the guard's live path is exercised too: every
 // dispatch below this point must keep working after it is added.
 func makeShape() -> Shape {
-  var c: Circle;
-  c.r = 10;
+  var c: *Circle = new Circle { r: 10 };
   return c;
 }
 
@@ -42,11 +46,11 @@ func main() -> int {
 
   // 1. The ticket's reproducer verbatim: an interface array whose elements
   //    were never assigned, dispatched through an index expression.
-  var z: [Shape; 1];
+  var z: [Shape; 1] = uninit;
   z[0].kind();
 
   // 2. A bare unassigned interface local.
-  var s: Shape;
+  var s: Shape = uninit;
   s.kind();
 
   // 3. The nil value threaded through a parameter (the callee dispatches,
@@ -55,7 +59,7 @@ func main() -> int {
 
   // 4. Read out of an interface-typed struct/class field that was never
   //    assigned, and through a pointer to that object.
-  var holder: Holder;
+  var holder: Holder = uninit;
   holder.shape.kind();
   var hp: *Holder = &holder;
   hp->shape.grow(1);
@@ -67,7 +71,7 @@ func main() -> int {
 
   // 6. The nil value at a non-zero index of an interface array, proving the
   //    guard does not depend on the element's address.
-  var many: [Shape; 3];
+  var many: [Shape; 3] = uninit;
   many[2].kind();
 
   // 7. A method with arguments, so the guarded call still marshals its
@@ -89,6 +93,6 @@ func dispatch(s: Shape) -> int {
 }
 
 func makeNil() -> Shape {
-  var s: Shape;
+  var s: Shape = uninit;
   return s;
 }
