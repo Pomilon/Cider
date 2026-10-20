@@ -1505,7 +1505,7 @@
   "class": "B"
  },
  "union": {
-  "actual": "tests/corpus/legacy/union/main.cid:25:20 and 38:24: a variable needs an initialiser; the program's untagged overlap reads (u.a/u.b without live-member construction) are rejected by v3 union semantics (\u00a72.5: exactly one live member via new)",
+  "actual": "cider run exit 1 on all three legs, stdout empty, stderr identical (148 bytes): 25:20 and 38:24: a variable needs an initialiser; the program's untagged overlap reads (u.a/u.b without live-member construction) are rejected by v3 union semantics (\u00a72.5: exactly one live member via new)",
   "blocker": "v3-union-model (one live member via new; untagged overlap reads rejected) [B-terminal]",
   "class": "B"
  },
