@@ -7,9 +7,14 @@
 // element size class (1, 4, exactly 8, 12, 16 bytes), struct literals,
 // call returns and struct fields as element expressions, template struct
 // instantiations, the wider-than-a-word interface element case, the
-// list-literal expression path (a `*T` context), copy independence, and
+// declared-array pointer argument, copy independence, and
 // unchanged scalar-element lists — on all three backends (VM unopt, VM
 // optimized, native).
+// Migrated to v3: class values are built with a literal that runs their
+// field defaults (`CDef { }`), raw locals spell `= uninit`, field access
+// spells `this->`, interface elements box class pointers (`&s1`), and the
+// u8 element sum casts to int. The v2 `*T` list-literal expression path
+// is replaced by a declared local array: v3 requires a declared type.
 from std.io import print, printInt;
 
 class C4 { var x: int; }                                   // 4 bytes
@@ -32,11 +37,11 @@ interface Shape {
 
 class Sq {
   var side: int;
-  func area() -> int { return this.side * this.side; }
+  func area() -> int { return this->side * this->side; }
 }
 
 func mkS8(a: int, b: int) -> S8 {
-  var r: S8;
+  var r: S8 = uninit;
   r.a = a;
   r.b = b;
   return r;
@@ -50,8 +55,8 @@ func main() -> int {
   // 4-byte class elements through an alias spelling; mutate the source
   // afterwards and confirm the array kept the copied values (a value copy,
   // not an alias).
-  var a: C4; a.x = 10;
-  var b: C4; b.x = 20;
+  var a: C4 = uninit; a.x = 10;
+  var b: C4 = uninit; b.x = 20;
   var ca: [C4Alias; 2] = [a, b];
   if (ca[0].x != 10) return 1;
   if (ca[1].x != 20) return 2;
@@ -62,8 +67,8 @@ func main() -> int {
   // Class elements keep their field-initializer values (the source values
   // are read only; no partial-field mutation, which is a separate
   // native-store issue).
-  var d1: CDef;
-  var d2: CDef;
+  var d1: CDef = CDef { };
+  var d2: CDef = CDef { };
   var da: [CDef; 2] = [d1, d2];
   if (da[0].x != 5) return 5;
   if (da[0].y != 6) return 6;
@@ -71,23 +76,23 @@ func main() -> int {
   if (da[1].y != 6) return 8;
 
   // 16-byte class elements (four fields: a truncated copy would lose d).
-  var e1: C16; e1.a = 1; e1.b = 2; e1.c = 3; e1.d = 4;
-  var e2: C16; e2.a = 5; e2.b = 6; e2.c = 7; e2.d = 8;
+  var e1: C16 = uninit; e1.a = 1; e1.b = 2; e1.c = 3; e1.d = 4;
+  var e2: C16 = uninit; e2.a = 5; e2.b = 6; e2.c = 7; e2.d = 8;
   var ea2: [C16; 2] = [e1, e2];
   if (ea2[0].d != 4) return 9;
   if (ea2[1].a != 5) return 10;
   if (ea2[1].d != 8) return 11;
 
   // 1-byte struct elements.
-  var m1: S1; m1.v = 200;
-  var m2: S1; m2.v = 201;
+  var m1: S1 = uninit; m1.v = 200;
+  var m2: S1 = uninit; m2.v = 201;
   var ma: [S1; 2] = [m1, m2];
   if (ma[0].v != 200) return 12;
   if (ma[1].v != 201) return 13;
 
   // Exactly-8-byte struct elements from identifiers and literals.
-  var p: S8; p.a = 11; p.b = 22;
-  var q: S8; q.a = 33; q.b = 44;
+  var p: S8 = uninit; p.a = 11; p.b = 22;
+  var q: S8 = uninit; q.a = 33; q.b = 44;
   var pa: [S8; 2] = [p, q];
   if (pa[0].a != 11) return 14;
   if (pa[0].b != 22) return 15;
@@ -101,9 +106,9 @@ func main() -> int {
 
   // 12-byte struct elements through an alias chain; RHS shapes include a
   // call return, a struct field and an element read.
-  var n1: S12; n1.a = 1; n1.b = 2; n1.c = 3;
-  var n2: S12; n2.a = 4; n2.b = 5; n2.c = 6;
-  var sn: SNest; sn.s.a = 70; sn.s.b = 71; sn.tail = 72;
+  var n1: S12 = uninit; n1.a = 1; n1.b = 2; n1.c = 3;
+  var n2: S12 = uninit; n2.a = 4; n2.b = 5; n2.c = 6;
+  var sn: SNest = uninit; sn.s.a = 70; sn.s.b = 71; sn.tail = 72;
   var na: [S8Chain; 2] = [mkS8(100, 101), sn.s];
   if (na[0].a != 100) return 22;
   if (na[0].b != 101) return 23;
@@ -121,8 +126,8 @@ func main() -> int {
   if (nest[1].tail != 82) return 31;
 
   // Template struct instantiation elements.
-  var x1: Box<int>; x1.v = 111;
-  var x2: Box<int>; x2.v = 222;
+  var x1: Box<int> = uninit; x1.v = 111;
+  var x2: Box<int> = uninit; x2.v = 222;
   var xa: [Box<int>; 2] = [x1, x2];
   if (xa[0].v != 111) return 32;
   if (xa[1].v != 222) return 33;
@@ -130,17 +135,19 @@ func main() -> int {
   // Wider-than-a-word interface elements: both fat-pointer halves must be
   // copied (before the fix the vtable word stayed garbage and dispatch
   // crashed).
-  var s1: Sq; s1.side = 3;
-  var s2: Sq; s2.side = 4;
-  var i1: Shape = s1;
-  var i2: Shape = s2;
+  var s1: Sq = uninit; s1.side = 3;
+  var s2: Sq = uninit; s2.side = 4;
+  var i1: Shape = &s1;
+  var i2: Shape = &s2;
   var ia: [Shape; 2] = [i1, i2];
   if (ia[0].area() != 9) return 34;
   if (ia[1].area() != 16) return 35;
 
-  // The list-literal expression path in a `*T` context.
-  if (firstOf([p, q]) != 11) return 36;
-  if (secondOf([p, q]) != 44) return 37;
+  // A declared array passed through a `*T` context. The v2 list-literal
+  // expression path (`firstOf([p, q])`) is dropped in v3.
+  var pq: [S8; 2] = [p, q];
+  if (firstOf(&pq[0]) != 11) return 36;
+  if (secondOf(&pq[0]) != 44) return 37;
 
   // Mutating the array must not touch the sources.
   pa[0].a = 1; pa[0].b = 2;
@@ -161,8 +168,8 @@ func main() -> int {
   printInt(nest[0].tail + nest[1].s.b); print(",");
   printInt(xa[0].v + xa[1].v); print(",");
   printInt(ia[0].area() + ia[1].area()); print(",");
-  printInt(firstOf([p, q]) + secondOf([p, q])); print(",");
-  printInt(sc[0] + sc[2]); print("\n");
+  printInt(firstOf(&pq[0]) + secondOf(&pq[0])); print(",");
+  printInt((sc[0] + sc[2]) as int); print("\n");
   print("aggregate_list_init_ok\n");
   return 0;
 }

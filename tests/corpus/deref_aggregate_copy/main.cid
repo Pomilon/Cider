@@ -17,6 +17,9 @@
 // the copy re-stamps the declared class's vptr (CIDER-BUG-089 slicing
 // rules) so dispatch through the copied-to value keeps working. Runs on
 // all three backends (VM unopt, VM optimized, native).
+// Migrated to v3: inheritance spells `class W : V`, raw locals spell
+// `= uninit`, and virtual-class locals are built with class literals so
+// their vptr is stamped.
 from std.io import print, printInt;
 from std.alloc import malloc, free;
 
@@ -39,7 +42,7 @@ class V {
   virtual func kind() -> int { return 1; }
 }
 
-class W extends V {
+class W : V {
   var y: int;
   override func kind() -> int { return 3; }
 }
@@ -51,8 +54,8 @@ class HolderField { var s: S8; }
 func main() -> int {
   // --- 1. Exactly-8-byte struct pointees on locals: the headline bug.
   // Independently mutate after the copy; the target must hold a VALUE.
-  var a8: S8; a8.a = 11; a8.b = 22;
-  var b8: S8; b8.a = 1; b8.b = 2;
+  var a8: S8 = uninit; a8.a = 11; a8.b = 22;
+  var b8: S8 = uninit; b8.a = 1; b8.b = 2;
   var pa8: *S8 = &b8;
   var ra8: *S8 = &a8;
   *pa8 = *ra8;
@@ -63,15 +66,15 @@ func main() -> int {
   if (b8.b != 22) return 4;
 
   // --- 2. Narrower pointees (1 and 4 bytes) miss the `> 8` fallback too.
-  var s4a: S4; s4a.x = 44;
-  var s4b: S4; s4b.x = 55;
+  var s4a: S4 = uninit; s4a.x = 44;
+  var s4b: S4 = uninit; s4b.x = 55;
   var p4: *S4 = &s4b;
   var r4: *S4 = &s4a;
   *p4 = *r4;
   if (s4b.x != 44) return 5;
 
-  var s1a: S1; s1a.v = 7;
-  var s1b: S1; s1b.v = 9;
+  var s1a: S1 = uninit; s1a.v = 7;
+  var s1b: S1 = uninit; s1b.v = 9;
   var p1: *S1 = &s1b;
   var r1: *S1 = &s1a;
   *p1 = *r1;
@@ -79,24 +82,24 @@ func main() -> int {
 
   // --- 3. The previous size fallback (> 8) must keep working: 12/16-byte
   // pointees, plus an alias spelling and a nested aggregate (tail word).
-  var s12a: S12; s12a.a = 1; s12a.b = 2; s12a.c = 3;
-  var s12b: S12; s12b.a = 9; s12b.b = 9; s12b.c = 9;
+  var s12a: S12 = uninit; s12a.a = 1; s12a.b = 2; s12a.c = 3;
+  var s12b: S12 = uninit; s12b.a = 9; s12b.b = 9; s12b.c = 9;
   var p12: *S12 = &s12b;
   var r12: *S12 = &s12a;
   *p12 = *r12;
   if (s12b.a != 1) return 7;
   if (s12b.c != 3) return 8;
 
-  var s16a: C16; s16a.a = 5; s16a.b = 6; s16a.c = 7; s16a.d = 8;
-  var s16b: C16; s16b.a = 0; s16b.b = 0; s16b.c = 0; s16b.d = 0;
+  var s16a: C16 = uninit; s16a.a = 5; s16a.b = 6; s16a.c = 7; s16a.d = 8;
+  var s16b: C16 = uninit; s16b.a = 0; s16b.b = 0; s16b.c = 0; s16b.d = 0;
   var p16: *C16 = &s16b;
   var r16: *C16 = &s16a;
   *p16 = *r16;
   if (s16b.d != 8) return 9;
 
   // Alias-spelled pointees get the same treatment.
-  var a8a: S8Alias; a8a.a = 31; a8a.b = 32;
-  var b8a: S8Alias; b8a.a = 0; b8a.b = 0;
+  var a8a: S8Alias = uninit; a8a.a = 31; a8a.b = 32;
+  var b8a: S8Alias = uninit; b8a.a = 0; b8a.b = 0;
   var pa8a: *S8Alias = &b8a;
   var ra8a: *S8Alias = &a8a;
   *pa8a = *ra8a;
@@ -104,8 +107,8 @@ func main() -> int {
   if (b8a.b != 32) return 11;
   a8.a = 31; a8.b = 32;                       // keep later *ra8 reads at 31,32
 
-  var na: SNest; na.s.a = 1; na.s.b = 2; na.tail = 3;
-  var nb: SNest; nb.s.a = 8; nb.s.b = 8; nb.tail = 8;
+  var na: SNest = uninit; na.s.a = 1; na.s.b = 2; na.tail = 3;
+  var nb: SNest = uninit; nb.s.a = 8; nb.s.b = 8; nb.tail = 8;
   var pn: *SNest = &nb;
   var rn: *SNest = &na;
   *pn = *rn;
@@ -113,8 +116,8 @@ func main() -> int {
   if (nb.s.b != 2) return 13;
   if (nb.tail != 3) return 14;                // the word after the nested struct
 
-  var aa: SA; aa.arr[0] = 1; aa.arr[1] = 2; aa.arr[2] = 3;
-  var ab: SA; ab.arr[0] = 7; ab.arr[1] = 7; ab.arr[2] = 7;
+  var aa: SA = uninit; aa.arr[0] = 1; aa.arr[1] = 2; aa.arr[2] = 3;
+  var ab: SA = uninit; ab.arr[0] = 7; ab.arr[1] = 7; ab.arr[2] = 7;
   var paa: *SA = &ab;
   var raa: *SA = &aa;
   *paa = *raa;
@@ -122,8 +125,8 @@ func main() -> int {
   if (ab.arr[2] != 3) return 16;
 
   // --- 4. Exactly-8-byte class pointees (the ticket's Rect*/Rect* shape).
-  var c8a: C8; c8a.w = 21; c8a.h = 22;
-  var c8b: C8; c8b.w = 1; c8b.h = 2;
+  var c8a: C8 = uninit; c8a.w = 21; c8a.h = 22;
+  var c8b: C8 = uninit; c8b.w = 1; c8b.h = 2;
   var pc8: *C8 = &c8b;
   var rc8: *C8 = &c8a;
   *pc8 = *rc8;
@@ -134,16 +137,16 @@ func main() -> int {
   if (c8b.h != 22) return 20;
   rc8 = &c8b;                                 // retarget: stable source for later copies
 
-  var c8d: C8Alias; c8d.w = 5; c8d.h = 6;
-  var c8e: C8Alias; c8e.w = 0; c8e.h = 0;
+  var c8d: C8Alias = uninit; c8d.w = 5; c8d.h = 6;
+  var c8e: C8Alias = uninit; c8e.w = 0; c8e.h = 0;
   var pc8a: *C8Alias = &c8e;
   var rc8a: *C8Alias = &c8d;
   *pc8a = *rc8a;
   if (c8e.w != 5) return 21;
   if (c8e.h != 6) return 22;
 
-  var c4a: C4; c4a.x = 44;
-  var c4b: C4; c4b.x = 55;
+  var c4a: C4 = uninit; c4a.x = 44;
+  var c4b: C4 = uninit; c4b.x = 55;
   var pc4: *C4 = &c4b;
   var rc4: *C4 = &c4a;
   *pc4 = *rc4;
@@ -151,7 +154,7 @@ func main() -> int {
 
   // --- 5. Struct-field pointees: `p` points at `holder.s`. The neighbour
   // tail word must stay intact (a pointer-word store would clobber it).
-  var h: HolderS8;
+  var h: HolderS8 = uninit;
   h.s.a = 1; h.s.b = 2; h.tail = 33;
   var ph: *S8 = &h.s;
   *ph = *ra8;                                 // copies 31,32
@@ -159,7 +162,7 @@ func main() -> int {
   if (h.s.b != 32) return 25;
   if (h.tail != 33) return 26;
 
-  var h2: HolderS8;
+  var h2: HolderS8 = uninit;
   h2.s.a = 41; h2.s.b = 42; h2.tail = 44;
   var ph2: *S8 = &h2.s;
   *ph = *ph2;                                 // field source -> field target
@@ -168,7 +171,7 @@ func main() -> int {
   if (h2.s.a != 41) return 29;
   if (h.tail != 33) return 30;
 
-  var hc: HolderC8;
+  var hc: HolderC8 = uninit;
   hc.c.w = 1; hc.c.h = 2; hc.tail = 77;
   var phc: *C8 = &hc.c;
   *phc = *rc8;                                // copies 21,22
@@ -177,7 +180,7 @@ func main() -> int {
   if (hc.tail != 77) return 33;
 
   // A class holding the struct field (pointer into a class-owned subobject).
-  var hf: HolderField;
+  var hf: HolderField = uninit;
   hf.s.a = 0; hf.s.b = 0;
   var phf: *S8 = &hf.s;
   *phf = *ra8;
@@ -214,17 +217,17 @@ func main() -> int {
   // --- 7. The same RHS classification in the other plain-assignment
   // shapes: value target, member target, element target, member-read RHS
   // and a ternary of derefs.
-  var vc8: C8; vc8.w = 0; vc8.h = 0;
+  var vc8: C8 = uninit; vc8.w = 0; vc8.h = 0;
   vc8 = *rc8;
   if (vc8.w != 21) return 45;
   if (vc8.h != 22) return 46;
 
-  var vb8: S8; vb8.a = 0; vb8.b = 0;
+  var vb8: S8 = uninit; vb8.a = 0; vb8.b = 0;
   vb8 = *ra8;
   if (vb8.a != 31) return 47;
   if (vb8.b != 32) return 48;
 
-  var mh: HolderS8;
+  var mh: HolderS8 = uninit;
   mh.tail = 55;
   mh.s.a = 0; mh.s.b = 0;
   mh.s = *ra8;                               // member target
@@ -232,29 +235,29 @@ func main() -> int {
   if (mh.s.b != 32) return 50;
   if (mh.tail != 55) return 51;
 
-  var ea: [S8; 2];
+  var ea: [S8; 2] = uninit;
   ea[0].a = 0; ea[0].b = 0; ea[1].a = 0; ea[1].b = 0;
   ea[1] = *ra8;                              // element target
   if (ea[1].a != 31) return 52;
   if (ea[1].b != 32) return 53;
   if (ea[0].a != 0) return 54;
 
-  var fr: S8;
+  var fr: S8 = uninit;
   fr = h2.s;                                  // member-read RHS
   if (fr.a != 41) return 55;
   if (fr.b != 42) return 56;
 
   var cond: int = 1;
-  var other: S8; other.a = 5; other.b = 6;
-  var tern: S8;
+  var other: S8 = uninit; other.a = 5; other.b = 6;
+  var tern: S8 = uninit;
   tern = cond == 1 ? *ra8 : other;            // ternary of derefs
   if (tern.a != 31) return 57;
   if (tern.b != 32) return 58;
 
   // --- 8. Scalar pointer assignment stays a pointer store: `p = r`
   // retargets p without touching either pointee.
-  var x1: S8; x1.a = 1; x1.b = 2;
-  var y1: S8; y1.a = 3; y1.b = 4;
+  var x1: S8 = uninit; x1.a = 1; x1.b = 2;
+  var y1: S8 = uninit; y1.a = 3; y1.b = 4;
   var px: *S8 = &x1;
   var py: *S8 = &y1;
   px = py;
@@ -267,16 +270,16 @@ func main() -> int {
   // --- 9. Virtual-class variant: after `*p = *r` the copied-to value keeps
   // a working vptr, and copying a V value over a W object viewed through a
   // V* re-stamps the declared class's vptr (CIDER-BUG-089 slicing).
-  var v1: V; v1.x = 7;
-  var v2: V; v2.x = 8;
+  var v1: V = V { x: 7 };
+  var v2: V = V { x: 8 };
   var pv: *V = &v2;
   var rv: *V = &v1;
   *pv = *rv;
   if (v2.x != 7) return 64;
   if (v2.kind() != 1) return 65;              // dispatch through the vptr stays alive
 
-  var dv: W; dv.x = 41; dv.y = 99;
-  var vv: V; vv.x = 66;
+  var dv: W = W { x: 41, y: 99 };
+  var vv: V = V { x: 66 };
   var pv2: *V = &dv;
   var rvv: *V = &vv;
   if (pv2->kind() != 3) return 66;            // dynamic dispatch before the copy
@@ -285,7 +288,7 @@ func main() -> int {
   if (pv2->kind() != 1) return 68;            // V's vptr re-stamped, not W's
 
   // Value-target virtual copy keeps dispatch working too.
-  var v3: V; v3.x = 0;
+  var v3: V = V { x: 0 };
   v3 = *rv;
   if (v3.x != 7) return 69;
   if (v3.kind() != 1) return 70;

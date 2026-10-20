@@ -1,12 +1,12 @@
 {
  "aggregate_list_init": {
-  "actual": "compile rejection: tests/corpus/aggregate_list_init/main.cid:16:25: expected ';' \u2014 field initializers (`var x: int = 5` in class body); v3 fills fields via new/init only",
+  "actual": "migrated to v3: class values are built with literals that run field defaults, raw locals spell `= uninit`, field access spells `this->`, interface elements box class pointers, and the v2 `*T` list-literal expression path is replaced by a declared local array; all three legs match expected.json",
   "blocker": "none",
-  "class": "B"
+  "class": "A"
  },
  "aggregate_ternary": {
-  "actual": "compile rejection: tests/corpus/aggregate_ternary/main.cid:48:13: a variable needs an initialiser \u2014 uninitialised local `var p: P;` (FEATURES 8.3: always an error)",
-  "blocker": "none",
+  "actual": "compile rejection: tests/corpus/aggregate_ternary/main.cid:48:13: a variable needs an initialiser; 77:10: a method needs a name \u2014 v2 ~D destructor and scope-exit finalization are purged in v3",
+  "blocker": "v2-scope-exit-destruction (destructor ~D, embedded class-value finalization) [B-terminal]",
   "class": "B"
  },
  "aggregate_zero_init": {
@@ -176,7 +176,7 @@
  },
  "callee_branch_release_once": {
   "actual": "compile rejection: tests/corpus/callee_branch_release_once/main.cid:55:8: a method needs a name \u2014 v2 destructor spelling `func ~Sq()`; v3 uses deinit (FEATURES 2.2/5.3)",
-  "blocker": "none",
+  "blocker": "v2-scope-exit-destruction (destructor ~Sq, automatic release at scope exit) [B-terminal]",
   "class": "B"
  },
  "citer": {
@@ -315,9 +315,9 @@
   "class": "A"
  },
  "deref_aggregate_copy": {
-  "actual": "compile rejection: tests/corpus/deref_aggregate_copy/main.cid:42:9: a class needs a body \u2014 v2 `class W extends V`; v3 inheritance is `class B : A` (FEATURES 14.1)",
+  "actual": "migrated to v3: inheritance spells `class W : V`, raw locals spell `= uninit`, and virtual-class locals are built with class literals so their vptr is stamped; deref-to-deref copies keep the pointee VALUE across struct/class sizes and slicing; all three legs match expected.json",
   "blocker": "none",
-  "class": "B"
+  "class": "A"
  },
  "deref_incdec_nil_compound": {
   "actual": "rewrote uninit; live compound-assign forms pass, nil case traps silently via SIGSEGV (correct native fail-hard \u00a711.3, no emitted check); v2-text expectation (vm stderr + exit 2) not blessed",
@@ -341,7 +341,7 @@
  },
  "destructor_ownership": {
   "actual": "compile rejection: tests/corpus/destructor_ownership/main.cid:52:10: a method needs a name \u2014 v2 destructor spelling `func ~D()`; v3 uses deinit (FEATURES 2.2/5.3)",
-  "blocker": "none",
+  "blocker": "v2-scope-exit-destruction (destructor ~D, scope/loop/module-exit finalization) [B-terminal]",
   "class": "B"
  },
  "div_min_neg1": {
@@ -416,7 +416,7 @@
  },
  "embedded_class_destructors": {
   "actual": "compile rejection: tests/corpus/embedded_class_destructors/main.cid:28:10: a method needs a name \u2014 v2 destructor spelling `func ~Dropper()`; v3 uses deinit (FEATURES 2.2/5.3)",
-  "blocker": "none",
+  "blocker": "v2-scope-exit-destruction (destructor ~Dropper, embedded class-value finalization) [B-terminal]",
   "class": "B"
  },
  "embedded_class_init": {
@@ -1156,7 +1156,7 @@
  },
  "ptr_array_stride": {
   "actual": "tests/corpus/ptr_array_stride/main.cid:33:10: a method needs a name",
-  "blocker": "stdlib-io/alloc + destructors [B-terminal]",
+  "blocker": "v2-scope-exit-destruction (destructor ~D, value-scoped array finalization) + stdlib-io/alloc [B-terminal]",
   "class": "B"
  },
  "qualified_interface": {
@@ -1496,12 +1496,12 @@
  },
  "uninit_locals_zero": {
   "actual": "run exit 1: OUT: ERR:tests/corpus/uninit_locals_zero/main.cid:35:23: a variable needs an initialiser\\ntests/corpus/uninit_locals_zero/main.cid:44:23: a variable needs an initialiser\\ntests/corpus/uninit_locals_zero/main.cid",
-  "blocker": "none (v3 rejects var x:T per diff #7: loud refusal, gate passes)",
+  "blocker": "v3-uninit-local-refusal (diff #7: var x:T is always an error) [B-terminal]",
   "class": "B"
  },
  "uninit_zero_policy": {
   "actual": "run exit 1: OUT: ERR:tests/corpus/uninit_zero_policy/main.cid:119:5: expected an expression\\ntests/corpus/uninit_zero_policy/main.cid:130:5: expected a declaration\\ntests/corpus/uninit_zero_policy/main.cid:130:32: expected ",
-  "blocker": "none (v3 rejects var x:T per diff #7: loud refusal, gate passes)",
+  "blocker": "v3-uninit-local-refusal (diff #7: var x:T is always an error) [B-terminal]",
   "class": "B"
  },
  "union": {
