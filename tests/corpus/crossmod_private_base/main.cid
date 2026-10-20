@@ -14,14 +14,20 @@
 //   - inherited methods whose parameter and return types are the private
 //     type, including passing the value through
 //   - `super` calls and virtual dispatch through a base pointer
-//   - the derived layout uses the inherited type's real 8-byte alignment
-//     (48; resolving `Inner` in this module would size it 44)
+//   - the derived layout uses the inherited type's real 8-byte alignment;
+//     v3's conditional vptr sizes this class at 40 (the local `Inner`
+//     carries no table and the base prefix stays packed)
 //   - value copies of the derived class carry the inherited prefix
-//   - the embedded private type's destructor runs at scope exit
 //   - CIDER-BUG-137: by-value returns and by-value parameters are owned
-//     copies: the returned `Inner` temporary finalizes at the caller's
-//     scope exit and `setInner`'s parameter copy at callee exit, adding
-//     four `i`s to this trace (one at setInner's exit, three at main's)
+//     copies; v3 does not finalize them implicitly
+//
+// Migrated to v3: inheritance spells `extends` -> `:`, uninitialised value
+// locals spell `= uninit`, and bare `new Derived` spells `new Derived { }`
+// because Derived declares no init (a base init with parameters is never
+// chained implicitly). The destructor spelling in privbase.cid is now
+// `func deinit()`. v3 runs deinit only from an explicit `delete`, so the
+// historical scope-exit `i` trace is a v3 refusal and the expected stdout
+// omits it.
 import privbase;
 from privbase import Base;
 from std.io import print, printInt;
@@ -32,15 +38,15 @@ class Inner {
   var w: int = 7;
 }
 
-class Derived extends Base {
+class Derived : Base {
   var extra: int = 5;
-  var mine: Inner;
-  var tail: u8;
+  var mine: Inner = Inner { };
+  var tail: u8 = 0;
   override func who() -> int { return super.who() + 1; }
 }
 
 func main() -> int {
-  var d: *Derived = new Derived;
+  var d: *Derived = new Derived { };
   printInt(d->mine.w); print(",");        // 7  local same-named type is distinct
   printInt(d->inner.v); print(",");       // 3  Inner's initializer ran
   d->inner.v = 20;
@@ -48,7 +54,7 @@ func main() -> int {
   d->tail = 6;
   printInt(d->inner.v); print(",");       // 20 inherited field store
   printInt(d->extra); print(",");         // 2
-  printInt(d->tail); print(",");          // 6
+  printInt(d->tail as int); print(",");      // 6
   printInt(d->baseInner()); print(",");   // 20 inherited method
   // CIDER-BUG-137: `getInner` returns `Inner` BY VALUE, so each call
   // materialises a caller-owned temporary (the hidden sret slot). Its
@@ -68,11 +74,11 @@ func main() -> int {
   printInt(b->tag); print(",");           // 10 base field initializer
   printInt(sizeof(Derived)); print("\n"); // 48: inherited 8-byte alignment
 
-  var db: Derived;
+  var db: Derived = uninit;
   printInt(db.inner.v); print(",");       // 3 value-local embedded initializer
   db.inner.v = 9;
   db.extra = 4;
-  var db2: Derived;
+  var db2: Derived = uninit;
   db2 = db;
   printInt(db2.inner.v); print(",");      // 9 inherited prefix copied
   printInt(db2.extra); print(",");        // 4

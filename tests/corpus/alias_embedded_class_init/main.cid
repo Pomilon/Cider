@@ -7,6 +7,14 @@
 // explicit alias-declared array field copies its element bytes instead of
 // storing the source address over the following field. All three backends
 // (VM unopt, VM opt, native) must agree.
+//
+// Migrated to v3: arrays are value lists initialised explicitly rather than
+// implicitly zero/default-filled; an `uninit` local of array type is raw
+// storage and does NOT recurse into element field initializers (v3 renders a
+// class `uninit` local's own direct field defaults, not nested embedded
+// fields). Module-scope values have no startup pass in v3 -- every byte is
+// in the image -- so their elements are written as constant constructors.
+// Fields without an initializer are named with their zero at construction.
 from std.io import printInt, print;
 import xmod;
 
@@ -38,47 +46,48 @@ type NestedArr = [[Inner; 2]; 2];
 type PlainAlias = Plain;
 type Pair = [u8; 2];
 
-// Module-scope equivalents go through the synthesized startup pass.
-var gArr: InnerArrChain;
-var gWrap: WrapArrChain;
-var gNested: NestedArr;
-var gMod: xmod.ModChain;
+// Module-scope equivalents are constant images in v3 (no startup pass).
+var gArr: InnerArrChain = [ Inner { x: 5, unset: 0 }, Inner { x: 5, unset: 0 }, Inner { x: 5, unset: 0 } ];
+var gWrap: WrapArrChain = [ Wrap { inner: Inner { x: 5, unset: 0 }, pad: 0 }, Wrap { inner: Inner { x: 5, unset: 0 }, pad: 0 } ];
+var gNested: NestedArr = [ [ Inner { x: 5, unset: 0 }, Inner { x: 5, unset: 0 } ], [ Inner { x: 5, unset: 0 }, Inner { x: 5, unset: 0 } ] ];
+var gMod: xmod.ModChain = [ xmod.ModInner { x: 9, unset: 0 }, xmod.ModInner { x: 9, unset: 0 } ];
 
 func main() -> int {
-    // Local alias-declared fixed arrays of class values.
-    var a: InnerArr;
+    // Local alias-declared fixed arrays of class values: v3 spells the
+    // element list explicitly, so each element's defaults still run.
+    var a: InnerArr = [ Inner { unset: 0 }, Inner { unset: 0 }, Inner { unset: 0 } ];
     if (a[0].x != 5) return 1;
     if (a[2].x != 5) return 2;
     if (a[1].unset != 0) return 3;
 
-    var c: InnerArrChain;
+    var c: InnerArrChain = [ Inner { unset: 0 }, Inner { unset: 0 }, Inner { unset: 0 } ];
     if (c[0].x != 5) return 4;
     if (c[2].x != 5) return 5;
 
-    var w: WrapArrChain;
+    var w: WrapArrChain = [ Wrap { inner: Inner { unset: 0 }, pad: 0 }, Wrap { inner: Inner { unset: 0 }, pad: 0 } ];
     if (w[0].inner.x != 5) return 6;
     if (w[1].inner.x != 5) return 7;
     if (w[1].pad != 0) return 8;
 
-    var n: NestedArr;
+    var n: NestedArr = [ [ Inner { unset: 0 }, Inner { unset: 0 } ], [ Inner { unset: 0 }, Inner { unset: 0 } ] ];
     if (n[0][0].x != 5) return 9;
     if (n[1][1].x != 5) return 10;
 
     // Neighbor: alias-to-class locals zero-fill like the direct spelling.
-    var p: PlainAlias;
+    var p: PlainAlias = uninit;
     if (p.a != 0) return 11;
     if (p.b != 0) return 12;
 
     // Neighbor: a struct literal's explicit alias-array field copies the
     // element bytes; the following field must not be clobbered.
     var pair: Pair = [1, 2];
-    var s: SPair = SPair{pair: pair};
+    var s: SPair = SPair { pair: pair, other: [0, 0] };
     if (s.pair[0] != 1) return 13;
     if (s.pair[1] != 2) return 14;
     if (s.other[0] != 0) return 15;
     if (s.other[1] != 0) return 16;
 
-    // Globals: the startup pass must see the resolved alias shape.
+    // Globals: the constant image must carry the resolved alias shape.
     if (gArr[0].x != 5) return 17;
     if (gArr[2].x != 5) return 18;
     if (gArr[1].unset != 0) return 19;
@@ -88,7 +97,7 @@ func main() -> int {
     if (gNested[1][0].x != 5) return 23;
 
     // Cross-module aliases resolve in their defining module (local+global).
-    var m: xmod.ModArr;
+    var m: xmod.ModArr = [ xmod.ModInner { unset: 0 }, xmod.ModInner { unset: 0 } ];
     if (m[0].x != 9) return 24;
     if (m[1].unset != 0) return 25;
     if (gMod[1].x != 9) return 26;
@@ -100,7 +109,7 @@ func main() -> int {
     printInt(w[1].inner.x); print(",");
     printInt(n[0][1].x); print(",");
     printInt(p.a + p.b); print(",");
-    printInt(s.pair[0] + s.pair[1] + s.other[0] + s.other[1]); print(",");
+    printInt((s.pair[0] as int) + (s.pair[1] as int) + (s.other[0] as int) + (s.other[1] as int)); print(",");
     printInt(gArr[1].x); print(",");
     printInt(gArr[2].x); print(",");
     printInt(gWrap[1].inner.x); print(",");

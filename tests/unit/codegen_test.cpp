@@ -453,6 +453,25 @@ void testIncrDecr() {
                    "    return q->sides * 10 + q->w;\n"
                    "}\n") == 45,
           "super_init runs the base constructor");
+    // 4.8.3 with 4.8's layout: a derived class that introduces the table
+    // places its plain base after the shared vptr word, so super_init must
+    // enter the base subobject at its composed offset, not at the object's
+    // first byte.
+    check(runQuiet("class P {\n"
+                   "    var p: int = 7;\n"
+                   "    func init() { this->p = this->p + 1; }\n"
+                   "    func get() -> int { return this->p; }\n"
+                   "}\n"
+                   "class C : P {\n"
+                   "    var c: int = 9;\n"
+                   "    func init() { super_init(); }\n"
+                   "    virtual func f() -> int { return this->c; }\n"
+                   "}\n"
+                   "func main() -> int {\n"
+                   "    var c: *C = new C();\n"
+                   "    return c->get() * 10 + c->f();\n"
+                   "}\n") == 89,
+          "super_init enters a shifted base subobject");
     check(runQuiet("var trace: int = 0;\n"
                    "class Shape {\n"
                    "    var w: int;\n"

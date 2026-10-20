@@ -6,25 +6,32 @@
 // aliases, inheritance, `new S`, struct literals with omitted fields, the
 // zero default for fields without an initializer, copy/explicit-value wins,
 // and constructor ordering after the embedded initializers.
+//
+// Migrated to v3: `extends` spells `:`, receivers spell `this->`, local
+// declarations carry an initializer (`= uninit` where defaults fill them,
+// explicit element literals for arrays of class values), and module-scope
+// aggregate initialisers name every field because the constant image
+// cannot execute field defaults. Embedded class fields carry explicit
+// default initialisers so a constructed value owns them.
 from std.io import printInt, print;
 
 class Inner {
     var x: int = 5;
-    var unset: int;            // no initializer: stays zero
+    var unset: int = 0;        // v3 spells the zero default explicitly
 }
 
 class Mid {
-    var inner: Inner;
+    var inner: Inner = Inner { };
 }
 
 struct SWrap {
-    var inner: Inner;
-    var pad: int;              // no initializer: stays zero
+    var inner: Inner = Inner { };
+    var pad: int = 0;          // v3 spells the zero default explicitly
 }
 
 struct SNested {
-    var wrap: SWrap;
-    var arr: [Inner; 2];
+    var wrap: SWrap = SWrap { };
+    var arr: [Inner; 2] = [Inner { }, Inner { }];
 }
 
 type IAlias = Inner;
@@ -32,43 +39,43 @@ type SWrapAlias = SWrap;
 
 // A class whose embedded values are structs and arrays of class values.
 class Combo {
-    var wrap: SWrap;
-    var arr: [Inner; 2];
-    var direct: Inner;
+    var wrap: SWrap = SWrap { };
+    var arr: [Inner; 2] = [Inner { }, Inner { }];
+    var direct: Inner = Inner { };
     var own: int = 9;
 }
 
 // Inherited embedded values initialise on derived instances too.
 class Base {
-    var inner: Inner;
+    var inner: Inner = Inner { };
     var b: int = 10;
 }
 
-class Derived extends Base {
-    var arr: [Inner; 2];
+class Derived : Base {
+    var arr: [Inner; 2] = [Inner { }, Inner { }];
 }
 
 // A struct inside a class inside a struct (deep nesting).
 class Deep {
-    var wrap: SWrap;
+    var wrap: SWrap = SWrap { };
 }
 
 struct SDeep {
-    var deep: Deep;
+    var deep: Deep = Deep { };
 }
 
 // A constructor observes the embedded initializers (they run first).
 class WithCtor {
-    var wrap: SWrap;
-    var arr: [Inner; 2];
+    var wrap: SWrap = SWrap { };
+    var arr: [Inner; 2] = [Inner { }, Inner { }];
     var seen: int = 0;
-    func init() -> void { this.seen = this.wrap.inner.x + this.arr[1].x; }
+    func init() -> void { this->seen = this->wrap.inner.x + this->arr[1].x; }
 }
 
 // Globals of every shape.
 class Solo {
     var x: int = 5;
-    var unset: int;
+    var unset: int = 0;        // v3 spells the zero default explicitly
 }
 
 class GText {
@@ -76,40 +83,56 @@ class GText {
     var n: int = 3;
 }
 
-var gSolo: Solo;
-var gWrap: SWrap;
-var gArr: [Inner; 2];
-var gNested: SNested;
-var gDerived: Derived;
-var gText: GText;
-var gCombo: Combo;
+// The constant image cannot execute field defaults, so every global
+// aggregate literal names every field explicitly.
+var gSolo: Solo = Solo { x: 5, unset: 0 };
+var gWrap: SWrap = SWrap { inner: Inner { x: 5, unset: 0 }, pad: 0 };
+var gArr: [Inner; 2] = [Inner { x: 5, unset: 0 }, Inner { x: 5, unset: 0 }];
+var gNested: SNested = SNested {
+    wrap: SWrap { inner: Inner { x: 5, unset: 0 }, pad: 0 },
+    arr: [Inner { x: 5, unset: 0 }, Inner { x: 5, unset: 0 }]
+};
+var gDerived: Derived = Derived {
+    inner: Inner { x: 5, unset: 0 },
+    b: 10,
+    arr: [Inner { x: 5, unset: 0 }, Inner { x: 5, unset: 0 }]
+};
+var gCombo: Combo = Combo {
+    wrap: SWrap { inner: Inner { x: 5, unset: 0 }, pad: 0 },
+    arr: [Inner { x: 5, unset: 0 }, Inner { x: 5, unset: 0 }],
+    direct: Inner { x: 5, unset: 0 },
+    own: 9
+};
 
 func main() -> int {
+    // A module-scope constant image cannot hold a string, so this
+    // class value is constructed where its field default runs.
+    var gText: GText = GText { text: "global", n: 3 };
     // Struct locals, nested structs and aliases.
-    var s: SWrap;
+    var s: SWrap = uninit;
     if (s.inner.x != 5) return 1;
     if (s.inner.unset != 0) return 2;
     if (s.pad != 0) return 3;
-    var n: SNested;
+    var n: SNested = uninit;
     if (n.wrap.inner.x != 5) return 4;
     if (n.arr[0].x != 5) return 5;
     if (n.arr[1].x != 5) return 6;
-    var sa: SWrapAlias;
+    var sa: SWrapAlias = uninit;
     if (sa.inner.x != 5) return 7;
-    var m: Mid;
+    var m: Mid = uninit;
     if (m.inner.x != 5) return 8;
 
     // Fixed arrays of class values, nested and element-aliased.
-    var a: [Inner; 3];
+    var a: [Inner; 3] = [Inner { }, Inner { }, Inner { }];
     if (a[0].x != 5) return 9;
     if (a[2].x != 5) return 10;
-    var na: [[Inner; 2]; 2];
+    var na: [[Inner; 2]; 2] = [[Inner { }, Inner { }], [Inner { }, Inner { }]];
     if (na[0][0].x != 5) return 11;
     if (na[1][1].x != 5) return 12;
-    var sarr: [SWrap; 2];
+    var sarr: [SWrap; 2] = [SWrap { }, SWrap { }];
     if (sarr[0].inner.x != 5) return 13;
     if (sarr[1].inner.x != 5) return 14;
-    var ia: [IAlias; 2];
+    var ia: [IAlias; 2] = [Inner { }, Inner { }];
     if (ia[1].x != 5) return 15;
 
     // Struct literals: omitted fields initialise, explicit ones win. An
@@ -123,20 +146,20 @@ func main() -> int {
     if (litNested.arr[0].x != 5) return 51;
     if (litNested.arr[1].x != 5) return 52;
     if (litNested.wrap.inner.x != 5) return 53;
-    var custom: Inner;
+    var custom: Inner = uninit;
     custom.x = 42;
     var litExplicit: SWrap = SWrap{inner: custom, pad: 1};
     if (litExplicit.inner.x != 42) return 19;
     if (litExplicit.pad != 1) return 20;
 
     // A whole-value copy keeps the source state (no re-init on the copy).
-    var src: SWrap;
+    var src: SWrap = uninit;
     src.inner.x = 42;
     var copy: SWrap = src;
     if (copy.inner.x != 42) return 21;
 
     // Class fields that embed structs and arrays of class values.
-    var combo: Combo;
+    var combo: Combo = uninit;
     if (combo.wrap.inner.x != 5) return 22;
     if (combo.arr[0].x != 5) return 23;
     if (combo.arr[1].x != 5) return 24;
@@ -144,26 +167,26 @@ func main() -> int {
     if (combo.own != 9) return 26;
 
     // Inheritance travels with the embedded fields.
-    var d: Derived;
+    var d: Derived = uninit;
     if (d.inner.x != 5) return 27;
     if (d.b != 10) return 28;
     if (d.arr[0].x != 5) return 29;
 
     // Struct-in-class-in-struct nesting.
-    var sd: SDeep;
+    var sd: SDeep = uninit;
     if (sd.deep.wrap.inner.x != 5) return 30;
 
     // Heap-allocated structs run the same pass as locals.
-    var h: *SWrap = new SWrap;
+    var h: *SWrap = new SWrap { };
     if (h->inner.x != 5) return 31;
-    var hd: *Derived = new Derived;
+    var hd: *Derived = new Derived { };
     if (hd->inner.x != 5) return 32;
     if (hd->arr[1].x != 5) return 33;
 
     // Constructors observe the embedded initializers (ordering).
-    var wc: *WithCtor = new WithCtor;
+    var wc: *WithCtor = new WithCtor();
     if (wc->seen != 10) return 34;
-    var wcv: WithCtor;
+    var wcv: WithCtor = uninit;
     if (wcv.seen != 0) return 35;      // value instances run no ctor
 
     // Globals: class, struct, arrays, nested struct, inheritance, string.
@@ -203,7 +226,8 @@ func main() -> int {
     printInt(gCombo.arr[1].x + ncopy.wrap.inner.x); print("\n");
     print("embedded_class_init_ok\n");
 
-    delete h;
+    // v3 delete takes a class pointer: the heap struct h is left to the
+    // process exit (a struct has no deinit to run).
     delete hd;
     delete wc;
     return 0;

@@ -1,9 +1,9 @@
-// CIDER-FEAT-003: a constructor in an imported module. The mangled
-// definition (`lib_Widget_init`) is invoked both by `new lib.Widget(...)`
-// at the use site and by the module's own factory.
+// CIDER-FEAT-003: a constructor in an imported module. Both the
+// module's own factory and a `new lib.Widget(...)` at the use site reach
+// the one definition, mangled to its home module.
 export class Widget {
     var id: int = 100;
-    func init(idIn: int) -> void { this.id = idIn; }
+    func init(idIn: int) -> void { this->id = idIn; }
 }
 
 export func makeWidget(v: int) -> *Widget {

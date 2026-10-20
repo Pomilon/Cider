@@ -1,32 +1,24 @@
-// CIDER-BUG-123 regression: base constructors and destructors are chained.
-// Before this fix `new D(args)` ran only `D_init` and `delete p` ran only
-// `~D`, and tests/programs/constructors pinned exactly that.
+// CIDER-BUG-123: base constructors and destructors in a chain.
 //
-// The rule this test pins, for `class Leaf extends Mid extends Root`:
-//
-//   CONSTRUCTION (`new Leaf`) — base initialization first:
-//       zero -> vptr -> field initializers for the WHOLE hierarchy in layout
-//       order (a base's fields are a prefix, so Root's run before Mid's,
-//       which run before Leaf's) -> Root.init -> Mid.init -> Leaf.init
-//   DESTRUCTION (`delete`, and the end of a scope holding a class value) —
-//   the reverse, most derived first:
-//       ~Leaf -> ~Mid -> ~Root -> the class values it embeds by value, in
-//       reverse construction order
-//
-// Within one object this is the CIDER-BUG-088/108/137 ordering with the base
-// chain spliced in after the class's own destructor: the class's own
-// destructor still runs first (its body may read its subobjects), then the
-// base chain from the nearest base up to the root, then the embedded values.
-//
-// Two things make a base join a chain, and they are INDEPENDENT:
-//   * a base constructor declaring NO PARAMETERS is auto-invoked. There is no
-//     `super(...)` (still diagnosed), so a base constructor that declares
-//     parameters has no argument source at `new` and is not invoked.
-//   * a base destructor is ALWAYS invoked — it takes no arguments.
-// Neither is inheritance: a derived class must still declare its own
-// `func init(...)` for `new D(...)` to type-check.
-//
-// All three backends (VM unopt, VM optim, native) must agree on the trace.
+// v3 rules (this file was migrated from the v2 spellings):
+//   * construction order is zero -> vptr -> field initializers for the
+//     whole hierarchy in layout order -> base init -> derived init.
+//     A derived `init` runs its base constructor only through an explicit
+//     `super_init(...)`; there is no implicit zero-parameter chaining.
+//   * destruction is explicit: `delete` runs the destructor chain
+//     most-derived first, then each base, then frees. v3 does not run
+//     `deinit` when a value leaves scope and does not destroy embedded
+//     class values automatically, so the value-scope and EmbChild sections
+//     below pin construction and reads only (their v2 finalizer lines were
+//     dropped from expected.json).
+//   * migrated spellings: `extends` -> `:`, `this.f` -> `this->f`,
+//     `func ~X()` -> `func deinit()`, bare `new X` -> `new X()`, and a
+//     value-class local spells `var v: T = uninit;` (field initializers run,
+//     no constructor).
+//   * a shifted base subobject (a plain base under a derived class that
+//     reserves the hierarchy's vptr) is still entered at its own address by
+//     both `super_init` and the destructor chain.
+
 from std.io import print, printInt;
 import chain;
 
@@ -35,30 +27,32 @@ import chain;
 class Root {
     var r: int = 0;
     func init() -> void {
-        print("Root.init r="); printInt(this.r); print("\n");
-        this.r = 1;
+        print("Root.init r="); printInt(this->r); print("\n");
+        this->r = 1;
     }
-    func ~Root() { print("~Root r="); printInt(this.r); print("\n"); }
+    func deinit() { print("~Root r="); printInt(this->r); print("\n"); }
 }
 
-class Mid extends Root {
+class Mid : Root {
     var m: int = 0;
     func init() -> void {
-        print("Mid.init r="); printInt(this.r); print("\n");
-        this.m = 2;
+        super_init();
+        print("Mid.init r="); printInt(this->r); print("\n");
+        this->m = 2;
     }
-    func ~Mid() { print("~Mid r="); printInt(this.r); print(" m="); printInt(this.m); print("\n"); }
+    func deinit() { print("~Mid r="); printInt(this->r); print(" m="); printInt(this->m); print("\n"); }
 }
 
-class Leaf extends Mid {
+class Leaf : Mid {
     var l: int = 0;
     func init() -> void {
-        print("Leaf.init r="); printInt(this.r); print(" m="); printInt(this.m); print("\n");
-        this.l = 3;
+        super_init();
+        print("Leaf.init r="); printInt(this->r); print(" m="); printInt(this->m); print("\n");
+        this->l = 3;
     }
-    func ~Leaf() {
-        print("~Leaf r="); printInt(this.r); print(" m="); printInt(this.m);
-        print(" l="); printInt(this.l); print("\n");
+    func deinit() {
+        print("~Leaf r="); printInt(this->r); print(" m="); printInt(this->m);
+        print(" l="); printInt(this->l); print("\n");
     }
 }
 
@@ -67,10 +61,10 @@ class Leaf extends Mid {
 
 class PlainBase {
     var b: int = 5;
-    func ~PlainBase() { print("~PlainBase b="); printInt(this.b); print("\n"); }
+    func deinit() { print("~PlainBase b="); printInt(this->b); print("\n"); }
 }
 
-class PlainChild extends PlainBase {
+class PlainChild : PlainBase {
     var c: int = 6;
     func init() -> void { print("PlainChild.init\n"); }
 }
@@ -83,15 +77,15 @@ class PlainChild extends PlainBase {
 
 class NoVBase {
     var b: int = 7;
-    func init() -> void { this.b = this.b + 1; }
-    func ~NoVBase() { print("~NoVBase b="); printInt(this.b); print("\n"); }
+    func init() -> void { this->b = this->b + 1; }
+    func deinit() { print("~NoVBase b="); printInt(this->b); print("\n"); }
 }
 
-class NoVChild extends NoVBase {
+class NoVChild : NoVBase {
     var c: int = 9;
-    func init() -> void { print("NoVChild.init\n"); }
-    func ~NoVChild() {
-        print("~NoVChild b="); printInt(this.b); print(" c="); printInt(this.c); print("\n");
+    func init() -> void { super_init(); print("NoVChild.init\n"); }
+    func deinit() {
+        print("~NoVChild b="); printInt(this->b); print(" c="); printInt(this->c); print("\n");
     }
     // The first virtual method of this hierarchy: NoVChild reserves the
     // vptr slot, so b lives at offset 8, not 0.
@@ -105,10 +99,10 @@ class NoVChild extends NoVBase {
 class VBase {
     var b: int = 1;
     virtual func id() -> int { return 10; }
-    func ~VBase() { print("~VBase sees id="); printInt(this.id()); print("\n"); }
+    func deinit() { print("~VBase sees id="); printInt(this->id()); print("\n"); }
 }
 
-class VChild extends VBase {
+class VChild : VBase {
     func init() -> void { print("VChild.init\n"); }
     override func id() -> int { return 20; }
 }
@@ -117,14 +111,14 @@ class VChild extends VBase {
 
 class Emb {
     var e: int;
-    func ~Emb() { print("~Emb e="); printInt(this.e); print("\n"); }
+    func deinit() { print("~Emb e="); printInt(this->e); print("\n"); }
 }
 
 class EmbBase {
-    func ~EmbBase() { print("~EmbBase\n"); }
+    func deinit() { print("~EmbBase\n"); }
 }
 
-class EmbChild extends EmbBase {
+class EmbChild : EmbBase {
     var e1: Emb;
     var e2: Emb;
 }
@@ -132,16 +126,16 @@ class EmbChild extends EmbBase {
 // --- 6. a dotted base in another module: the chained constructor and
 //        destructor mangle with the BASE's own module. -------------------
 
-class CrossChild extends chain.CrossBase {
+class CrossChild : chain.CrossBase {
     var x: int = 1;
-    func init() -> void { print("CrossChild.init\n"); }
+    func init() -> void { super_init(); print("CrossChild.init\n"); }
 }
 
 func main() -> int {
     // 1. construction runs the base chain root-first, each constructor
     //    observing an already-initialized base.
     print("--new Leaf--\n");
-    var leaf: *Leaf = new Leaf;
+    var leaf: *Leaf = new Leaf();
     print("leaf r="); printInt(leaf->r); print(" m="); printInt(leaf->m);
     print(" l="); printInt(leaf->l); print("\n");
     print("--delete Leaf--\n");
@@ -153,7 +147,7 @@ func main() -> int {
     //    through the whole base chain.
     print("--value scope--\n");
     {
-        var v: Leaf;
+        var v: Leaf = uninit;
         print("v r="); printInt(v.r); print(" m="); printInt(v.m);
         print(" l="); printInt(v.l); print("\n");
         print("inner\n");
@@ -162,20 +156,20 @@ func main() -> int {
 
     // 3. only `~PlainBase` exists, so only it runs.
     print("--PlainChild--\n");
-    var pc: *PlainChild = new PlainChild;
+    var pc: *PlainChild = new PlainChild();
     printInt(pc->b); print(" "); printInt(pc->c); print("\n");
     delete pc;
 
     // 4. the shifted base subobject: b is 7 from the field initializer plus
     //    one from NoVBase's constructor.
     print("--NoVChild--\n");
-    var nv: *NoVChild = new NoVChild;
+    var nv: *NoVChild = new NoVChild();
     printInt(nv->b); print(" "); printInt(nv->c); print(" "); printInt(nv->f()); print("\n");
     delete nv;
 
     // 5. a base with a vtable dispatches on the most-derived type.
     print("--VChild--\n");
-    var vc: *VChild = new VChild;
+    var vc: *VChild = new VChild();
     var vb: *VBase = vc;
     printInt(vb->id()); print("\n");
     delete vc;
@@ -184,7 +178,7 @@ func main() -> int {
     //    destroyed last in reverse construction order.
     print("--EmbChild--\n");
     {
-        var ec: EmbChild;
+        var ec: EmbChild = uninit;
         ec.e1.e = 41;
         ec.e2.e = 42;
         print("inner\n");
@@ -193,7 +187,7 @@ func main() -> int {
 
     // 7. the dotted, cross-module base.
     print("--CrossChild--\n");
-    var cc: *CrossChild = new CrossChild;
+    var cc: *CrossChild = new CrossChild();
     printInt(cc->m); print("\n");
     delete cc;
     print("--after CrossChild--\n");

@@ -622,6 +622,32 @@ void testSuperInit() {
     cider::vm::VmResult opr = cider::vm::run(*unopt.module, "");
     check(opr.ok && opr.exitCode == 45,
           "the optimised chain answers 45: " + opr.error);
+    // 4.8.3 with 4.8's layout: the derived class introduces the table, so
+    // its plain base sits after the vptr word and super_init must enter the
+    // base subobject at that composed offset.
+    Lowered shifted = lower("class P {\n"
+                            "    var p: int = 7;\n"
+                            "    func init() { this->p = this->p + 1; }\n"
+                            "    func get() -> int { return this->p; }\n"
+                            "}\n"
+                            "class C : P {\n"
+                            "    var c: int = 9;\n"
+                            "    func init() { super_init(); }\n"
+                            "    virtual func f() -> int { return this->c; }\n"
+                            "}\n"
+                            "func main() -> int {\n"
+                            "    var c: *C = new C();\n"
+                            "    return c->get() * 10 + c->f();\n"
+                            "}\n");
+    check(shifted.ok, "the shifted base lowers: " + shifted.stage);
+    cider::vm::VmResult sr = cider::vm::run(*shifted.module, "");
+    check(sr.ok && sr.exitCode == 89,
+          "the unoptimised shifted base answers 89: " + sr.error);
+    cider::opt::OptResult sres = cider::opt::run(*shifted.module);
+    check(sres.ok, "the shifted base optimises: " + sres.error);
+    cider::vm::VmResult sopr = cider::vm::run(*shifted.module, "");
+    check(sopr.ok && sopr.exitCode == 89,
+          "the optimised shifted base answers 89: " + sopr.error);
 }
 
 // 4.8.3: delete runs the destructor chain, and a hierarchy that carries a

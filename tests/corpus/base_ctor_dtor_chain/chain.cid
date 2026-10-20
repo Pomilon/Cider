@@ -1,11 +1,16 @@
 // CIDER-BUG-123: a base class in another module still takes part in the
 // constructor/destructor chain, and both mangle with THIS module's name
 // (the same module rule as every other class method, CID-020/021).
+// v3 reaches this base's constructor through an explicit `super_init()` in
+// the derived class, and its destructor through the `delete` chain; the
+// spelling is `deinit()` rather than v2's `~CrossBase()`.
+from std.io import print, printInt;
+
 export class CrossBase {
     var m: int = 4;
     func init() -> void {
         print("CrossBase.init\n");
-        this.m = 44;
+        this->m = 44;
     }
-    func ~CrossBase() { print("~CrossBase m="); printInt(this.m); print("\n"); }
+    func deinit() { print("~CrossBase m="); printInt(this->m); print("\n"); }
 }

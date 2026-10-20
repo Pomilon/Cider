@@ -1552,6 +1552,12 @@ bool Checker::isSelfFieldStore(const Expr* target, std::string& field) {
 
 void Checker::requireInitAssigned(Position pos, const std::vector<std::string>& fields,
                                   const InitAssign& state) {
+    // Every own field carries a default, so there is nothing the init body
+    // must prove: unknown flow only matters when a field still needs a
+    // store the analysis cannot see (CIDER-BUG-049 fields are exempt).
+    if (fields.empty()) {
+        return;
+    }
     if (state.unknownFlow) {
         fail(pos, "init cannot be proven to assign every field");
         return;
@@ -2600,12 +2606,13 @@ void Checker::visitNewClass(NewClass& n) {
         return;
     }
     std::optional<DeclId> id = target.type->decl();
-    const Signature* init = resolver_.methodSig(*id, "init");
-    if (init == nullptr) {
+    std::optional<DeclId> initHome = resolver_.methodHome(*id, "init");
+    if (!initHome.has_value() || !sameDecl(*initHome, *id)) {
         fail(n.pos, "this class has no init: create it with new C { ... }");
         record(&n, errorRef());
         return;
     }
+    const Signature* init = resolver_.methodSig(*id, "init");
     if (n.args.size() != init->arity()) {
         fail(n.pos, "wrong number of arguments");
         record(&n, errorRef());
@@ -4810,7 +4817,9 @@ TypeRef Checker::checkNewStruct(NewStruct& expr) {
     if (kind == Kind::Union) {
         return checkNewUnion(expr, target, *id);
     }
-    if (kind == Kind::Class && resolver_.methodSig(*id, "init") != nullptr) {
+    std::optional<DeclId> initHome = resolver_.methodHome(*id, "init");
+    if (kind == Kind::Class && initHome.has_value() &&
+        sameDecl(*initHome, *id)) {
         fail(expr.pos, "this class has an init: create it with new C(args)");
         return errorRef();
     }

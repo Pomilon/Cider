@@ -3794,6 +3794,20 @@ bool Lowerer::globalInitStructBytes(const NewStruct& made, TypeRef structType,
             image.push_back('\0');
         }
     }
+    // A defaulted field that the literal omits would need its default to
+    // run at startup; the constant image cannot execute it, so refuse
+    // rather than silently emit zeros for a field the program expects to
+    // hold its default.
+    std::unordered_set<std::string> named;
+    for (const auto& field : made.fields) {
+        named.insert(field.name);
+    }
+    for (const std::string& field : resolver_.chainFieldNames(*id)) {
+        if (named.find(field) == named.end() &&
+            resolver_.fieldDefault(*id, field) != nullptr) {
+            return false;
+        }
+    }
     for (const auto& field : made.fields) {
         if (field.value == nullptr) {
             return false;
@@ -7013,6 +7027,38 @@ std::vector<ir::Value> Lowerer::lowerSuperInit(const SuperInit& n) {
         refuse(n.pos, "super_init outside a method");
         return {undefined()};
     }
+    // 4.8: the base subobject sits after the object's own table word when
+    // the derived class introduced the table. The constructor runs against
+    // that view, so the receiver moves to the subobject first.
+    std::optional<int64_t> shift =
+        resolver_.baseOffset(*currentMethodOwner_, bases.front());
+    if (!shift.has_value()) {
+        refuse(n.pos, "super_init with this base");
+        return {undefined()};
+    }
+    if (*shift != 0) {
+        TypeRef word{ctx_.pointer(ctx_.basic(BasicKind::U8))};
+        ir::Value delta =
+            constantI64(*shift, TypeRef{ctx_.basic(BasicKind::I64)}, n.pos);
+        if (failed_) {
+            return {undefined()};
+        }
+        ir::Instr step;
+        step.op = ir::Op::Add;
+        step.loc = n.pos;
+        step.type = word;
+        step.width = ir::IRType::Ptr;
+        step.isPure = true;
+        step.operands.push_back(self);
+        step.operands.push_back(delta);
+        ir::Value moved = newValue(step.width, word, n.pos);
+        step.results.push_back(moved);
+        emit(std::move(step));
+        if (failed_) {
+            return {undefined()};
+        }
+        self = moved;
+    }
     ir::Instr run;
     run.op = ir::Op::Call;
     run.loc = n.pos;
@@ -9401,6 +9447,41 @@ std::vector<ir::Value> Lowerer::lowerCallWords(Call& n) {
                 return {undefined()};
             }
             receiver.push_back(selfWords[0]);
+            // The declaring base may sit after the object's own table word
+            // when the derived class introduced the table; the call enters
+            // that base's view, not the object's address.
+            std::optional<int64_t> shift;
+            if (currentMethodOwner_.has_value() && baseHome.has_value()) {
+                shift =
+                    resolver_.baseOffset(*currentMethodOwner_, *baseHome);
+            }
+            if (!shift.has_value()) {
+                refuse(n.pos, "this call");
+                return {undefined()};
+            }
+            if (*shift != 0) {
+                TypeRef word{ctx_.pointer(ctx_.basic(BasicKind::U8))};
+                ir::Value delta = constantI64(
+                    *shift, TypeRef{ctx_.basic(BasicKind::I64)}, n.pos);
+                if (failed_) {
+                    return {undefined()};
+                }
+                ir::Instr step;
+                step.op = ir::Op::Add;
+                step.loc = n.pos;
+                step.type = word;
+                step.width = ir::IRType::Ptr;
+                step.isPure = true;
+                step.operands.push_back(receiver.back());
+                step.operands.push_back(delta);
+                ir::Value moved = newValue(step.width, word, n.pos);
+                step.results.push_back(moved);
+                emit(std::move(step));
+                if (failed_) {
+                    return {undefined()};
+                }
+                receiver.back() = moved;
+            }
             sig = baseSig;
             callee = resolver_.linkName(*baseDecl) + "__" + field->name;
         } else if (haveBase &&

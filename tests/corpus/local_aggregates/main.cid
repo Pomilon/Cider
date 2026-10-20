@@ -10,6 +10,12 @@
 // tests/fixtures/check_local_template.cid); a local aggregate shadowing an
 // enclosing type name is rejected too (see check_local_shadow.cid), because
 // local type identity is the bare written name.
+//
+// v3 note: function-local types are not part of v3 and never resolve — the
+// checker reports "unknown type '<name>'" (and the resolver's companion
+// diagnostic), so this program stays B-terminal. v3 also finalizes objects
+// only through explicit `delete`/`fini`, never at scope exit; the v2 drops
+// trace in expected.json is not v3 behavior and is not blessed.
 import lib;
 from std.io import print, printInt;
 
@@ -18,21 +24,21 @@ var drops: int = 0;
 interface Shape { func area() -> int; }
 
 func pickA() -> int {
-    class P { var v: int = 3; func get() -> int { return this.v; } }
-    var p: P;
+    class P { var v: int = 3; func get() -> int { return this->v; } }
+    var p: P = uninit;
     return p.get();
 }
 
 func pickB() -> int {
-    class P { var v: int = 20; func get() -> int { return this.v; } }
-    var p: P;
+    class P { var v: int = 20; func get() -> int { return this->v; } }
+    var p: P = uninit;
     return p.get();
 }
 
 func main() -> int {
     // Struct: fields, member access.
     struct S { var x: int; var y: int; }
-    var s: S;
+    var s: S = uninit;
     s.x = 5;
     s.y = 7;
     printInt(s.x + s.y);            // 12
@@ -41,7 +47,7 @@ func main() -> int {
     // Nested local struct whose field names a later local declaration.
     struct A { var b: B; }
     struct B { var u: int; var v: int; }
-    var a: A;
+    var a: A = uninit;
     a.b.u = 20;
     a.b.v = 30;
     printInt(a.b.u + a.b.v);        // 50
@@ -50,19 +56,19 @@ func main() -> int {
     // Class: field initializer + plain method + constructor + destructor.
     class C {
         var v: int = 3;
-        func get() -> int { return this.v; }
-        func init(n: int) -> void { this.v = n; }
+        func get() -> int { return this->v; }
+        func init(n: int) -> void { this->v = n; }
     }
-    var c: C;
+    var c: C = uninit;
     printInt(c.get());              // 3
     print("\n");
 
     {
         class R {
             var v: int = 1;
-            func ~R() -> void { drops = drops + 1; }
+            func deinit() -> void { drops = drops + 1; }
         }
-        var r: R;
+        var r: R = uninit;
         r.v = 2;
     }
     printInt(drops);                // 1: value local finalized at block exit
@@ -74,23 +80,23 @@ func main() -> int {
     delete cp;
 
     // A local class value embedded in another local class.
-    class Inner { var w: int = 6; func get() -> int { return this.w; } }
-    class Outer { var i: Inner; func get() -> int { return this.i.get(); } }
-    var o: Outer;
+    class Inner { var w: int = 6; func get() -> int { return this->w; } }
+    class Outer { var i: Inner; func get() -> int { return this->i.get(); } }
+    var o: Outer = uninit;
     printInt(o.get());              // 6
     print("\n");
 
     // Virtual dispatch inside a local hierarchy.
     class Base { var tag: int = 0; virtual func who() -> int { return 1; } }
-    class Derived extends Base { override func who() -> int { return 2; } }
-    var d: *Derived = new Derived;
+    class Derived : Base { override func who() -> int { return 2; } }
+    var d: *Derived = new Derived { };
     var b: *Base = d;
     printInt(b->who());             // 2
     print("\n");
 
     // A local class can satisfy a module-scope interface.
-    class Sq { var side: int = 4; func area() -> int { return this.side * this.side; } }
-    var sq: Sq;
+    class Sq { var side: int = 4; func area() -> int { return this->side * this->side; } }
+    var sq: Sq = uninit;
     var sh: Shape = sq;
     printInt(sh.area());            // 16
     print("\n");

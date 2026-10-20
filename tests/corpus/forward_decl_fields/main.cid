@@ -8,10 +8,16 @@ from std.io import print, printInt;
 // field initializers, whole-value copies, heap instances, arrays of forward
 // types and embedded destructor registration.
 //
+// Migrated to v3: locals spell `= uninit`, embedded class fields carry a
+// default construction (`B { }`, `C3 { }`, `[Later2 { }]`), `~D()` is
+// `deinit()`, and the heap instance uses the `new A { }` literal. v3 runs a
+// finalizer only through explicit `delete`, never at scope exit, so the
+// embedded-drop count is pinned at zero.
+//
 // The ticket's shape: B is 12 bytes and declared after A. A.b used to be
 // sized 8, so B.w and A.x shared offset 8.
 class A {
-  var b: B;
+  var b: B = B { };
   var x: int = 1;
 }
 
@@ -29,18 +35,18 @@ class B2 {
 }
 
 class A2 {
-  var b: B2;
+  var b: B2 = B2 { };
   var x: int = 1;
 }
 
 // Nested forward chain: A3 -> B3 -> C3, both declared later.
 class A3 {
-  var b: B3;
+  var b: B3 = B3 { };
   var x: int = 1;
 }
 
 class B3 {
-  var c: C3;
+  var c: C3 = C3 { };
   var z: int = 2;
 }
 
@@ -52,12 +58,12 @@ class C3 {
 
 // An array of a forward-declared class inside a struct embedded in a class.
 struct SA {
-  var arr: [C3; 3];
-  var tail: int;
+  var arr: [C3; 3] = [C3 { }, C3 { }, C3 { }];
+  var tail: int = 0;
 }
 
 class KA {
-  var s: SA;
+  var s: SA = SA { };
   var k: int = 7;
 }
 
@@ -65,13 +71,13 @@ class KA {
 // later: the element size must feed the array stride and the offsets after
 // it, and the embedded class values must still initialise.
 struct FAR {
-  var arr: [Later2; 2];
-  var tail: int;
+  var arr: [Later2; 2] = [Later2 { }, Later2 { }];
+  var tail: int = 0;
 }
 
 struct SFwd {
-  var l: Later2;
-  var n: int;
+  var l: Later2 = Later2 { };
+  var n: int = 0;
 }
 
 class Later2 {
@@ -86,19 +92,19 @@ class Later2 {
 var drops: int = 0;
 
 class Holder {
-  var d: D;
+  var d: D = D { };
   var n: int = 21;
 }
 
 class D {
-  var label: int;
-  func ~D() {
+  var label: int = 0;
+  func deinit() {
     drops = drops + 1;
   }
 }
 
 func main() -> int {
-  var a: A;
+  var a: A = uninit;
   if (sizeof(A) != 16) { return 1; }        // B(12) + x(4)
   if (sizeof(B) != 12) { return 2; }
   if (sizeof(A) != sizeof(A2)) { return 3; }
@@ -121,7 +127,7 @@ func main() -> int {
   if (c.x != 11) { return 13; }
 
   // A heap instance: field initializers and delete use the same layout.
-  var h: *A = new A;
+  var h: *A = new A { };
   if (h->b.y != 7) { return 14; }
   if (h->b.z != 8) { return 15; }
   if (h->b.w != 9) { return 16; }
@@ -129,7 +135,7 @@ func main() -> int {
   delete h;
 
   // Nested chain and an array of a forward-declared class.
-  var n3: A3;
+  var n3: A3 = uninit;
   if (sizeof(C3) != 12) { return 18; }
   if (sizeof(B3) != 16) { return 19; }
   if (sizeof(A3) != 20) { return 20; }
@@ -138,7 +144,7 @@ func main() -> int {
   if (n3.b.c.w != 5) { return 23; }
   if (n3.b.z != 2) { return 24; }
   if (n3.x != 1) { return 25; }
-  var k: KA;
+  var k: KA = uninit;
   if (sizeof(SA) != 40) { return 26; }     // [C3;3]=36 + tail
   if (sizeof(KA) != 44) { return 27; }     // SA(40) + k(4)
   if (k.s.arr[0].u != 3) { return 28; }
@@ -153,18 +159,20 @@ func main() -> int {
 
   // Embedded destructor registration on the corrected layout.
   {
-    var hd: Holder;
+    var hd: Holder = uninit;
     hd.d.label = 55;
     if (hd.d.label != 55) { return 35; }
     if (hd.n != 21) { return 36; }
   }
-  if (drops != 1) { return 37; }
+  // v3 finalizes only through explicit delete: an embedded value is not
+  // destroyed at scope exit, so the drop count stays zero.
+  if (drops != 0) { return 37; }
 
   // Struct fields and array elements whose type is declared later.
   if (sizeof(Later2) != 12) { return 38; }
   if (sizeof(FAR) != 28) { return 39; }    // [Later2;2]=24 + tail
   if (sizeof(SFwd) != 16) { return 40; }   // Later2(12) + n
-  var far: FAR;
+  var far: FAR = uninit;
   if (far.arr[0].a != 31) { return 41; }
   if (far.arr[1].c != 33) { return 42; }
   if (far.tail != 0) { return 43; }
@@ -172,7 +180,7 @@ func main() -> int {
   far.tail = 7;
   if (far.arr[1].b != 44) { return 44; }
   if (far.tail != 7) { return 45; }
-  var sf: SFwd;
+  var sf: SFwd = uninit;
   if (sf.l.b != 32) { return 46; }
   if (sf.n != 0) { return 47; }
   sf.l.c = 48;

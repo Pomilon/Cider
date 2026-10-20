@@ -5,20 +5,24 @@
 // module cannot name `Inner` at all. `Inner` is 8-byte aligned so a derived
 // class that resolves the inherited spelling in the WRONG module sizes its
 // layout differently.
+//
+// Migrated to v3: the destructor spells `func deinit()` (was `func ~Inner()`)
+// and receivers spell `this->` (was `this.`). v3 runs a deinit only from
+// `delete`; scope-exit finalization of value locals is not part of v3.
 from std.io import print;
 
 class Inner {
   var v: int = 3;
   var big: u64;
-  func ~Inner() { print("i"); }
+  func deinit() { print("i"); }
 }
 
 export class Base {
-  var inner: Inner;
+  var inner: Inner = Inner { big: 0 };
   var tag: int = 10;
-  func init(x: int) -> void { this.inner.v = x; }
+  func init(x: int) -> void { this->inner.v = x; }
   virtual func who() -> int { return 100; }
-  func baseInner() -> int { return this.inner.v; }
-  func getInner() -> Inner { return this.inner; }
-  func setInner(x: Inner) -> void { this.inner = x; }
+  func baseInner() -> int { return this->inner.v; }
+  func getInner() -> Inner { return this->inner; }
+  func setInner(x: Inner) -> void { this->inner = x; }
 }

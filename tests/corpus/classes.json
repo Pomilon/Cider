@@ -35,9 +35,9 @@
   "class": "B"
  },
  "alias_embedded_class_init": {
-  "actual": "14:16: expected ';' + a class holds fields and methods (`var x: int = 5;` field initializer; v3 fills fields via new/init only, \u00a72.1a)",
-  "blocker": "v3-no-field-init",
-  "class": "B"
+  "actual": "migrated to v3: `extends` -> `:`, `this.` -> `this->`, value locals spell `= uninit`, and field defaults are the standard spelling; all three legs match expected.json",
+  "blocker": "none",
+  "class": "A"
  },
  "alias_field": {
   "actual": "compile rejection: tests/corpus/alias_field/main.cid:15:11: a variable needs an initialiser \u2014 uninitialised local `var s: S;` (FEATURES 8.3: always an error)",
@@ -130,9 +130,9 @@
   "class": "B"
  },
  "base_ctor_dtor_chain": {
-  "actual": "36:16: expected ';' + a class holds fields and methods (`var r: int = 0;` field initializer; v3 \u00a72.1a)",
-  "blocker": "v3-no-field-init",
-  "class": "B"
+  "actual": "migrated to v3: construction chains through explicit `super_init()`, destructors spell `deinit()` and run only through explicit `delete`, and value locals spell `uninit`; the value-scope and embedded-value sections pin construction/reads only, since v3 does not finalize scope values",
+  "blocker": "none",
+  "class": "A"
  },
  "bitfields": {
   "actual": "exact stdout/stderr/exit match",
@@ -240,9 +240,9 @@
   "class": "A"
  },
  "constructors": {
-  "actual": "22:20: expected ';' + a class holds fields and methods (`var value: int = 10;` field initializer; v3 \u00a72.1a)",
-  "blocker": "v3-no-field-init",
-  "class": "B"
+  "actual": "migrated to v3: field initializers are the standard default spelling, zero-parameter base chaining is explicit `super_init()`, no-init classes construct through `new C { }`, and value-class locals spell `var c: C = uninit;`; all three legs print the pinned constructor order",
+  "blocker": "none",
+  "class": "A"
  },
  "control_flow_stress": {
   "actual": "exact stdout/stderr/exit match",
@@ -275,9 +275,9 @@
   "class": "A"
  },
  "crossmod_private_base": {
-  "actual": "32:14: expected ';' + a class holds fields and methods (`var w: int = 7;` field initializer; v3 \u00a72.1a)",
-  "blocker": "v3-no-field-init",
-  "class": "B"
+  "actual": "migrated to v3: inheritance uses `:`, deinit replaces `~X`, value locals spell `uninit`, and the class literal constructs because ctors are not inherited; v3 finalizes only through explicit `delete`, so the v2 scope-exit `i` trace is dropped and the conditional vptr sizes Derived at 40; all three legs agree",
+  "blocker": "none",
+  "class": "A"
  },
  "crossmod_qualified_reexport": {
   "actual": "exact stdout/stderr/exit match",
@@ -420,9 +420,9 @@
   "class": "B"
  },
  "embedded_class_init": {
-  "actual": "12:16: expected ';' + a class holds fields and methods (`var x: int = 5;` field initializer; v3 \u00a72.1a)",
-  "blocker": "v3-no-field-init",
-  "class": "B"
+  "actual": "migrated to v3: embedded class/struct fields carry explicit default literals and class arrays explicit element literals; module-scope aggregate literals name every field (the constant image cannot execute defaults); gText is built in main because a string cannot fold into a global image; the heap struct's delete is dropped because v3 delete takes class pointers only; all three legs match",
+  "blocker": "none",
+  "class": "A"
  },
  "enum": {
   "actual": "exact stdout/stderr/exit match",
@@ -660,9 +660,9 @@
   "class": "B"
  },
  "forward_decl_fields": {
-  "actual": "15:14: expected ';' + a class holds fields and methods (`var x: int = 1;` field initializer; v3 \u00a72.1a)",
-  "blocker": "v3-no-field-init",
-  "class": "B"
+  "actual": "migrated to v3: locals spell `= uninit`, embedded class fields carry a default construction (`B { }`, `C3 { }`, `[Later2 { }]`), `~D()` is `deinit()`, heap construction uses `new A { }`; v3 finalizes only through explicit `delete`, so the embedded-drop count is pinned at zero and the expected trace records it",
+  "blocker": "none",
+  "class": "A"
  },
  "foundations_test": {
   "actual": "tests/corpus/legacy/foundations_test/main.cid:5:15: a class needs a body",
@@ -950,8 +950,8 @@
   "class": "A"
  },
  "local_aggregates": {
-  "actual": "21:26: expected ';' + a class holds fields and methods (`class P { var v: int = 3; ...}` field initializer; v3 \u00a72.1a)",
-  "blocker": "v3-no-field-init",
+  "actual": "v3 principled refusal: function-local types never resolve (`lib.cid:8:12: unknown type 'Pair'`, `lib.cid:7:5: checker bug: 'Pair' was never resolved`); v3 also does not finalize scope values, so the v2 drops trace is not blessed; expected.json left verbatim",
+  "blocker": "function-local aggregates are not part of v3; local types never resolve [B-terminal]",
   "class": "B"
  },
  "logical_ops": {
@@ -1080,14 +1080,14 @@
   "class": "A"
  },
  "nested_class_field_init": {
-  "actual": "11:16: expected ';' + a class holds fields and methods (`var x: int = 5;` field initializer; v3 \u00a72.1a)",
-  "blocker": "v3-no-field-init",
-  "class": "B"
+  "actual": "migrated to v3: embedded field defaults are stated explicitly because v3 does not recursively default an embedded class field with no initializer of its own; all three legs match expected.json",
+  "blocker": "none",
+  "class": "A"
  },
  "nested_list_literals": {
-  "actual": "33:22: expected ';' + a class holds fields and methods (`class C { var x: int = 7; }` field initializer; v3 \u00a72.1a)",
-  "blocker": "v3-no-field-init",
-  "class": "B"
+  "actual": "migrated to v3: locals spell `= uninit`, receivers spell `this->`, fn-pointer rows use `*func(...)` with `&name` values, narrow print arguments convert with `as int`, and the v2 `**T` nested list literal became explicit row arrays plus a `[*int; 2]` of row addresses; all three legs match",
+  "blocker": "none",
+  "class": "A"
  },
  "nested_loops": {
   "actual": "rewrite to v3 (init+entry) passes exact",
@@ -1250,9 +1250,9 @@
   "class": "B"
  },
  "sret_expr_calls": {
-  "actual": "32:16: expected ';' + a class holds fields and methods (`var v: int = 3;` field initializer; v3 \u00a72.1a)",
-  "blocker": "v3-no-field-init",
-  "class": "B"
+  "actual": "migrated to v3: locals spell `= uninit`, `this.` becomes `this->`, and the BUG-119 function-local class variant is expressed at module scope because v3 has no local classes; all three legs match",
+  "blocker": "none",
+  "class": "A"
  },
  "stale_handler_frame_exit": {
   "actual": "run exit 1: OUT: ERR:tests/corpus/stale_handler_frame_exit/main.cid:21:13: a catch binds a name and a type\\ntests/corpus/stale_handler_frame_exit/main.cid:24:1: expected a declaration\\ntests/corpus/stale_handler_frame_exit/",

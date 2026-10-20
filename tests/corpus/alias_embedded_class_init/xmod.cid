@@ -1,6 +1,7 @@
 // CIDER-BUG-113: cross-module alias-declared arrays of class values. The
 // alias target is canonicalized in this defining module, so the importing
 // file reaches the resolved array shape without importing ModInner itself.
+// v3 spelling: field initializers are the default form; no migration needed.
 export class ModInner {
     var x: int = 9;
     var unset: int;            // no initializer: stays zero

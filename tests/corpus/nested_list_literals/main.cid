@@ -9,8 +9,13 @@
 // variable/call return plus a nested literal), struct, class,
 // interface and fn-pointer elements, nested arrays inside struct
 // elements, volatile targets, deep (4-D) recursion, copy independence,
-// and unchanged legacy `**T` pointer literal behavior — on all three
-// backends (VM unopt, VM optimized, native).
+// and the explicit row-pointer array that replaces the v2 `**T` nested
+// literal — on all three backends (VM unopt, VM optimized, native).
+//
+// Migrated to v3: locals spell `= uninit`, receivers spell `this->`,
+// fn-pointer rows spell `*func(...)` with `&name` values, narrow print
+// arguments convert with `as int`, and the v2 `**T` nested list literal
+// is written as explicit row arrays plus a `[*int; 2]` of row addresses.
 from std.io import print, printInt;
 
 struct P { var x: u8; var y: u8; }
@@ -22,12 +27,12 @@ interface Shape {
 
 class Sq {
   var side: int;
-  func area() -> int { return this.side * this.side; }
+  func area() -> int { return this->side * this->side; }
 }
 
 class Rect {
   var w: int; var h: int;
-  func area() -> int { return this.w * this.h; }
+  func area() -> int { return this->w * this->h; }
 }
 
 class C { var x: int = 7; }
@@ -45,7 +50,7 @@ func add(a: int, b: int) -> int { return a + b; }
 func sub(a: int, b: int) -> int { return a - b; }
 
 func makeRow() -> [u8; 2] {
-  var r: [u8; 2];
+   var r: [u8; 2] = uninit;
   r[0] = 41; r[1] = 42;
   return r;
 }
@@ -78,16 +83,16 @@ func main() -> int {
   if (ggrid[0][0] != 1 || ggrid[1][1] != 4) { return 8; }
 
   // Assignment into an existing local 2-D/3-D array.
-  var m: [[int; 2]; 2];
+   var m: [[int; 2]; 2] = uninit;
   m = [[20, 21], [22, 23]];
   if (m[0][1] != 21 || m[1][0] != 22) { return 9; }
-  var n: [[[u8; 2]; 2]; 2];
+   var n: [[[u8; 2]; 2]; 2] = uninit;
   n = [[[1, 2], [3, 4]], [[5, 6], [7, 8]]];
   if (n[0][0][1] != 2 || n[1][1][0] != 7) { return 10; }
 
   // Mixed rows: a row variable and a row-returning call beside nested
   // literals.
-  var row: [u8; 2];
+   var row: [u8; 2] = uninit;
   row[0] = 21; row[1] = 22;
   var mix: [[u8; 2]; 2] = [row, [23, 24]];
   if (mix[0][0] != 21 || mix[0][1] != 22 || mix[1][0] != 23 || mix[1][1] != 24) { return 11; }
@@ -99,30 +104,30 @@ func main() -> int {
   if (pm[0][0].x != 1 || pm[0][1].y != 4 || pm[1][0].x != 5 || pm[1][1].y != 8) { return 13; }
 
   // Struct elements that themselves embed a nested array.
-  var wr: Wrap;
+   var wr: Wrap = uninit;
   wr.cells[0][0] = 1; wr.cells[1][1] = 2; wr.tag = 9;
   var wm: [[Wrap; 2]; 2] = [[wr, wr], [wr, wr]];
   if (wm[0][1].cells[1][1] != 2 || wm[1][0].tag != 9) { return 14; }
 
   // Interface elements: concrete implementors convert per element with
   // the fat-pointer store, exactly like a flat row.
-  var s1: Sq; s1.side = 3;
-  var r1: Rect; r1.w = 2; r1.h = 5;
+   var s1: Sq = uninit; s1.side = 3;
+   var r1: Rect = uninit; r1.w = 2; r1.h = 5;
   var im: [[Shape; 2]; 2] = [[s1, r1], [r1, s1]];
   if (im[0][0].area() != 9 || im[0][1].area() != 10) { return 15; }
   if (im[1][0].area() != 10 || im[1][1].area() != 9) { return 16; }
 
   // Fn-pointer elements keep their raw-code-pointer representation.
-  var fp: [[fn(int, int) -> int; 2]; 2] = [[add, sub], [sub, add]];
+  var fp: [[*func(int, int) -> int; 2]; 2] = [[&add, &sub], [&sub, &add]];
   if (fp[0][0](2, 3) != 5 || fp[1][1](2, 3) != 5 || fp[0][1](2, 3) != -1) { return 17; }
 
   // Class values: the copied element keeps its field-initializer x.
-  var c1: C; var c2: C;
+   var c1: C = uninit; var c2: C = uninit;
   var cm: [[C; 2]; 2] = [[c1, c2], [c2, c1]];
   if (cm[0][0].x != 7 || cm[1][1].x != 7) { return 18; }
 
   // Global interface rows through the assignment path.
-  var gim: [[Shape; 2]; 2];
+   var gim: [[Shape; 2]; 2] = uninit;
   gim = [[s1, r1], [r1, s1]];
   if (gim[0][0].area() != 9 || gim[1][0].area() != 10) { return 19; }
 
@@ -132,55 +137,58 @@ func main() -> int {
   if (vm[0][0] + vm[1][1] != 13) { return 21; }
 
   // Copy independence: mutating the destination does not touch a source.
-  var src: [u8; 2];
+   var src: [u8; 2] = uninit;
   src[0] = 30; src[1] = 31;
   var ind: [[u8; 2]; 2] = [src, [32, 33]];
   ind[0][0] = 99;
   if (src[0] != 30) { return 22; }
 
   // 4-D: recursion depth beyond the reported cases.
-  var deep: [[[[u8; 2]; 2]; 2]; 2];
+   var deep: [[[[u8; 2]; 2]; 2]; 2] = uninit;
   deep = [[[[1, 2], [3, 4]], [[5, 6], [7, 8]]], [[[9, 10], [11, 12]], [[13, 14], [15, 16]]]];
   if (deep[0][0][0][0] != 1 || deep[1][1][1][1] != 16 || deep[0][1][0][1] != 6) { return 23; }
 
-  // Legacy `**T` pointer lists keep their address-chain behavior.
-  var pp: **int = [[1, 2], [3, 4]];
+  // v2's `**int` nested list is spelled in v3 as an explicit array of row
+  // pointers; indexing still walks the address chain.
+  var row1: [int; 2] = [1, 2];
+  var row2: [int; 2] = [3, 4];
+  var pp: [*int; 2] = [&row1[0], &row2[0]];
   if (pp[0][1] != 2 || pp[1][0] != 3) { return 24; }
 
   // Nested literal reassigned into an element row of a 3-D array and into
   // a struct field's array (indexed / member targets, not whole-array
   // targets).
-  var m3: [[[u8; 2]; 2]; 2];
+   var m3: [[[u8; 2]; 2]; 2] = uninit;
   m3[0] = [[1, 2], [3, 4]];
   if (m3[0][1][1] != 4) { return 25; }
-  var wc: Wrap;
+   var wc: Wrap = uninit;
   wc.cells = [[9, 10], [11, 12]];
   if (wc.cells[1][1] != 12) { return 26; }
 
   printInt(a[0][0] + a[2][1]); print(",");
-  printInt(b[0][0][0] + b[1][1][1]); print(",");
-  printInt(al[0][0] + al[2][1]); print(",");
-  printInt(r2[0][1] + r2[1][0]); print(",");
-  printInt(ggrid[0][1] + ggrid[1][0]); print(",");
-  printInt(galias[1][0] + galias[2][0]); print(",");
-  printInt(g3[0][0][0] + g3[1][1][1]); print(",");
+  printInt((b[0][0][0] + b[1][1][1]) as int); print(",");
+  printInt((al[0][0] + al[2][1]) as int); print(",");
+  printInt((r2[0][1] + r2[1][0]) as int); print(",");
+  printInt((ggrid[0][1] + ggrid[1][0]) as int); print(",");
+  printInt((galias[1][0] + galias[2][0]) as int); print(",");
+  printInt((g3[0][0][0] + g3[1][1][1]) as int); print(",");
   printInt(m[0][0] + m[1][1]); print(",");
-  printInt(n[0][1][1] + n[1][0][0]); print(",");
-  printInt(mix[0][1] + mix[1][0]); print(",");
-  printInt(mix2[0][0] + mix2[1][1]); print(",");
-  printInt(pm[0][1].x + pm[1][1].y); print(",");
-  printInt(wm[0][0].cells[0][0] + wm[1][1].cells[1][1]); print(",");
+  printInt((n[0][1][1] + n[1][0][0]) as int); print(",");
+  printInt((mix[0][1] + mix[1][0]) as int); print(",");
+  printInt((mix2[0][0] + mix2[1][1]) as int); print(",");
+  printInt((pm[0][1].x + pm[1][1].y) as int); print(",");
+  printInt((wm[0][0].cells[0][0] + wm[1][1].cells[1][1]) as int); print(",");
   printInt(im[0][0].area() + im[0][1].area() + im[1][0].area() + im[1][1].area()); print(",");
   printInt(fp[0][0](4, 5) + fp[1][0](4, 5)); print(",");
   printInt(cm[0][1].x + cm[1][0].x); print(",");
   printInt(gim[0][1].area() + gim[1][1].area()); print(",");
-  printInt(gvol[0][0] + gvol[1][1]); print(",");
-  printInt(vm[0][1] + vm[1][0]); print(",");
-  printInt(ind[0][1] + ind[1][1]); print(",");
-  printInt(deep[0][1][1][0] + deep[1][0][0][1]); print(",");
+  printInt((gvol[0][0] + gvol[1][1]) as int); print(",");
+  printInt((vm[0][1] + vm[1][0]) as int); print(",");
+  printInt((ind[0][1] + ind[1][1]) as int); print(",");
+  printInt((deep[0][1][1][0] + deep[1][0][0][1]) as int); print(",");
   printInt(pp[0][0] + pp[1][1]); print(",");
-  printInt(m3[0][0][1] + m3[0][1][0]); print(",");
-  printInt(wc.cells[0][1] + wc.cells[1][0]); print("\n");
+  printInt((m3[0][0][1] + m3[0][1][0]) as int); print(",");
+  printInt((wc.cells[0][1] + wc.cells[1][0]) as int); print("\n");
   print("nested_list_literals_ok\n");
   return 0;
 }

@@ -5,28 +5,28 @@
 // must compose the local class's module prefix exactly like the definition.
 export func localStruct() -> int {
     struct Pair { var a: int; var b: int; }
-    var p: Pair;
+    var p: Pair = uninit;
     p.a = 2;
     p.b = 4;
     return p.a + p.b;
 }
 
 export func localClass() -> int {
-    class K { var v: int = 8; func get() -> int { return this.v; } }
-    var k: K;
+    class K { var v: int = 8; func get() -> int { return this->v; } }
+    var k: K = uninit;
     return k.get();
 }
 
 // Same-named local classes in two functions mangle apart within a module.
 export func pickLibA() -> int {
-    class P { var v: int = 2; func get() -> int { return this.v; } }
-    var p: P;
+    class P { var v: int = 2; func get() -> int { return this->v; } }
+    var p: P = uninit;
     return p.get();
 }
 
 export func pickLibB() -> int {
-    class P { var v: int = 5; func get() -> int { return this.v; } }
-    var p: P;
+    class P { var v: int = 5; func get() -> int { return this->v; } }
+    var p: P = uninit;
     return p.get();
 }
 
@@ -34,10 +34,10 @@ export func pickLibB() -> int {
 export func localSelfReturn() -> int {
     class R {
         var v: int = 3;
-        func clone() -> R { var c: R; c.v = this.v + 1; return c; }
-        func get() -> int { return this.v; }
+        func clone() -> R { var c: R = uninit; c.v = this->v + 1; return c; }
+        func get() -> int { return this->v; }
     }
-    var r: R;
+    var r: R = uninit;
     var c: R = r.clone();
     return c.get();
 }
@@ -46,8 +46,8 @@ export func localSelfReturn() -> int {
 // vtable entries must reference the module-mangled method definitions.
 export func localVirtualDispatch() -> int {
     class Base { var tag: int = 0; virtual func who() -> int { return 1; } }
-    class Derived extends Base { override func who() -> int { return 2; } }
-    var d: *Derived = new Derived;
+    class Derived : Base { override func who() -> int { return 2; } }
+    var d: *Derived = new Derived { };
     var b: *Base = d;
     return b->who();
 }
@@ -57,18 +57,18 @@ export interface Area { func area() -> int; }
 // A local class satisfying a module-scope interface, dispatched through the
 // interface: the impl vtable entry must reference the module-mangled method.
 export func localIfaceDispatch() -> int {
-    class Sq { var side: int = 5; func area() -> int { return this.side * this.side; } }
-    var sq: Sq;
+    class Sq { var side: int = 5; func area() -> int { return this->side * this->side; } }
+    var sq: Sq = uninit;
     var a: Area = sq;
     return a.area();
 }
 
-class LibBase { var bv: int = 5; func baseVal() -> int { return this.bv; } virtual func who() -> int { return 1; } }
+class LibBase { var bv: int = 5; func baseVal() -> int { return this->bv; } virtual func who() -> int { return 1; } }
 
 // A local class extending (and overriding) a module-scope class.
 export func localExtendsModule() -> int {
-    class D extends LibBase { override func who() -> int { return 7; } }
-    var d: D;
+    class D : LibBase { override func who() -> int { return 7; } }
+    var d: D = uninit;
     return d.who() + d.baseVal();
 }
 
@@ -76,12 +76,12 @@ var libDrops: int = 0;
 
 // Destructors of local classes: value locals at scope exit and `delete`.
 export func localDtor() -> int {
-    class Dtor { var v: int = 1; func ~Dtor() -> void { libDrops = libDrops + 1; } }
+    class Dtor { var v: int = 1; func deinit() -> void { libDrops = libDrops + 1; } }
     {
-        var d: Dtor;
+        var d: Dtor = uninit;
         d.v = 2;
     }
-    var p: *Dtor = new Dtor;
+    var p: *Dtor = new Dtor { };
     delete p;
     return libDrops;
 }

@@ -5,6 +5,15 @@
 // and alias-typed inner classes, the zero default for fields without an
 // initializer, the constructor ordering (field initializers first), and a
 // value copy carrying the initialised state.
+//
+// Migrated to v3: inheritance spells `extends` -> `:`, receivers spell
+// `this.` -> `this->`, uninitialised value locals spell `= uninit`, and bare
+// `new C` spells `new C { }` (no init) or `new C()` (zero-argument init).
+// Field initializers are the v3 default spelling and still run first. v3
+// does not recursively default an embedded class field that has no
+// initializer of its own (an `uninit` local zeroes it), so every field that
+// v2 implicitly default-initialised now states its default explicitly,
+// naming the zero-valued leaf (`Inner { unset: 0 }`).
 from std.io import print, printInt;
 
 class Inner {
@@ -13,63 +22,63 @@ class Inner {
 }
 
 class Mid {
-    var inner: Inner;
+    var inner: Inner = Inner { unset: 0 };
     var m: int = 3;
 }
 
 class Top {
-    var mid: Mid;
+    var mid: Mid = Mid { inner: Inner { unset: 0 } };
     var t: int = 1;
 }
 
-class DInner extends Inner {
+class DInner : Inner {
     var y: int = 7;
 }
 
 type IAlias = Inner;
 
 class Holder {
-    var d: DInner;
-    var alias: IAlias;
+    var d: DInner = DInner { unset: 0 };
+    var alias: IAlias = Inner { unset: 0 };
 }
 
 // Sibling embedded fields of the same class must both initialise.
 class Twins {
-    var a: Inner;
-    var b: Inner;
+    var a: Inner = Inner { unset: 0 };
+    var b: Inner = Inner { unset: 0 };
 }
 
 // A constructor observes the nested field initializers (they run before the
 // constructor body); a value instance never runs a constructor.
 class WithCtor {
-    var inner: Inner;
+    var inner: Inner = Inner { unset: 0 };
     var seen: int = 0;
-    func init() -> void { this.seen = this.inner.x; }
+    func init() -> void { this->seen = this->inner.x; }
 }
 
 func main() -> int {
-    var top: Top;
+    var top: Top = uninit;
     if (top.mid.inner.x != 5) return 1;
     if (top.mid.inner.unset != 0) return 2;
     if (top.mid.m != 3) return 3;
     if (top.t != 1) return 4;
 
-    var heap: *Top = new Top;
+    var heap: *Top = new Top { };
     if (heap->mid.inner.x != 5) return 5;
     if (heap->mid.m != 3) return 6;
 
-    var holder: Holder;
+    var holder: Holder = uninit;
     if (holder.d.x != 5) return 7;
     if (holder.d.y != 7) return 8;
     if (holder.alias.x != 5) return 9;
 
-    var twins: Twins;
+    var twins: Twins = uninit;
     if (twins.a.x != 5) return 10;
     if (twins.b.x != 5) return 11;
 
-    var ctor: *WithCtor = new WithCtor;
+    var ctor: *WithCtor = new WithCtor();
     if (ctor->seen != 5) return 12;
-    var ctorVal: WithCtor;
+    var ctorVal: WithCtor = uninit;
     if (ctorVal.seen != 0) return 13;      // value instances run no ctor
 
     var copy: Top = top;
