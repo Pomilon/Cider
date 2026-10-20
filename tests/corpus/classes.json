@@ -30,8 +30,8 @@
   "class": "A"
  },
  "alias_delete_destructors": {
-  "actual": "tests/corpus/alias_delete_destructors/main.cid:37:10: a method needs a name",
-  "blocker": "multi-file imports [B-terminal]",
+  "actual": "v3 rejects the v2 destructor witness in the alias/embedded-finalizer section: `main.cid:42:10: a method needs a name` (then `a class holds fields and methods`, `44:9: expected '}'`, `46:5: expected a declaration`, `47:1: expected a declaration`) on all three legs; expected.json left verbatim",
+  "blocker": "v3 delete runs own+base deinits only and takes class pointers; v2 embedded-value finalization is not v3 semantics (Standard 4.8.1/4.8.3) [B-terminal]",
   "class": "B"
  },
  "alias_embedded_class_init": {

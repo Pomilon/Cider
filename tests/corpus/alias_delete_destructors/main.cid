@@ -13,7 +13,7 @@
 // never reaches the class, so the whole finalizer set was skipped.
 //
 // Shapes pinned here:
-//   * the ticket's own repro (`type Alias = D; var p: *Alias = new Alias;`)
+//   * the ticket's own repro (`type Alias = D; var p: *Alias = new Alias { };`)
 //     next to the direct-spelling control, so the two must agree;
 //   * alias chains (Chain1, Chain2) and an alias-of-alias of a class carrying
 //     both its own destructor and embedded class values;
@@ -27,6 +27,11 @@
 //   * neighbors that must stay silent: an alias to a destructor-less class and
 //     an alias to a plain scalar, which still free without emitting anything.
 // All three backends (VM unopt, VM optimized, native) must agree.
+// v3 note: `delete` runs the owner's own deinit and its base chain only
+// (Standard 4.8.1/4.8.3), finalizes no embedded class-valued fields, and
+// accepts class pointers only, so the v2 full-finalizer-set trace here is
+// not expressible or blessed. The v2 `~D()`/`~Owner()` spellings are kept
+// as the loud witness; v3 spells deinit and runs it only on explicit delete.
 from std.io import print, printInt;
 import xmod;
 
@@ -36,7 +41,7 @@ class D {
     var label: int;
     func ~D() {
         drops = drops + 1;
-        printInt(this.label);
+        printInt(this->label);
         print(",");
     }
 }
@@ -98,44 +103,44 @@ struct Holder {
 }
 
 func direct() -> void {
-    var p: *D = new D;         // control: direct spelling
+    var p: *D = new D { };         // control: direct spelling
     p->label = 0;
     delete p;                  // 0,
 }
 
 func ticket() -> void {
-    var p: *Alias = new Alias; // CIDER-BUG-125 repro
+    var p: *Alias = new Alias { }; // CIDER-BUG-125 repro
     p->label = 1;
     delete p;                  // 1,
 }
 
 func chain() -> void {
-    var p: *Chain2 = new Chain2;
+    var p: *Chain2 = new Chain2 { };
     p->label = 2;
     delete p;                  // 2,
-    var q: *PairAlias = new PairAlias;
+    var q: *PairAlias = new PairAlias { };
     q->first.label = 3;
     q->second.label = 4;
     delete q;                  // 4,3,
 }
 
 func owners() -> void {
-    var p: *OwnerChain = new OwnerChain;
+    var p: *OwnerChain = new OwnerChain { };
     p->a.label = 5;
     p->b.label = 6;
     delete p;                  // O,6,5,  (own body first, members reversed)
 }
 
 func structs() -> void {
-    var w: *WrapAlias = new WrapAlias;
+    var w: *WrapAlias = new WrapAlias { };
     w->d.label = 7;
     delete w;                  // 7,
-    var n: *NestedAlias = new NestedAlias;
+    var n: *NestedAlias = new NestedAlias { };
     n->wrap.d.label = 8;
     n->arr[0].label = 9;
     n->arr[1].label = 10;
     delete n;                  // 10,9,8,
-    var b: *BasketAlias = new BasketAlias;
+    var b: *BasketAlias = new BasketAlias { };
     b->slots[0].d.label = 11;
     b->slots[1].d.label = 12;
     b->tail.label = 13;
@@ -148,20 +153,20 @@ func viaParam(p: *Chain2) -> void {
 }
 
 func viaReturn() -> *Alias {
-    return new Alias;
+    return new Alias { };
 }
 
 func viaField() -> void {
-    var h: Holder;
-    h.p = new Alias;
+    var h: Holder = uninit;
+    h.p = new Alias { };
     h.p->label = 15;
     delete h.p;                // 15,
 }
 
 func viaArray() -> void {
-    var ps: [*Chain2; 2];
-    ps[0] = new Chain2;
-    ps[1] = new Chain2;
+    var ps: [*Chain2; 2] = uninit;
+    ps[0] = new Chain2 { };
+    ps[1] = new Chain2 { };
     ps[0]->label = 16;
     ps[1]->label = 17;
     delete ps[0];              // 16,
@@ -169,8 +174,8 @@ func viaArray() -> void {
 }
 
 func viaTernary() -> void {
-    var p: *Chain2 = new Chain2;
-    var q: *Chain2 = new Chain2;
+    var p: *Chain2 = new Chain2 { };
+    var q: *Chain2 = new Chain2 { };
     p->label = 0;
     q->label = 18;
     var pick: bool = true;
@@ -178,7 +183,7 @@ func viaTernary() -> void {
 }
 
 func viaDefer() -> void {
-    var p: *Alias = new Alias;
+    var p: *Alias = new Alias { };
     p->label = 19;
     defer {
         delete p;              // 19, at function scope exit
@@ -186,18 +191,18 @@ func viaDefer() -> void {
 }
 
 func silent() -> void {
-    var q: *QuietAlias = new QuietAlias;
+    var q: *QuietAlias = new QuietAlias { };
     q->n = 1;
     delete q;                  // alias to a destructor-less class
-    var i: *IntAlias = new IntAlias;
+    var i: *IntAlias = new IntAlias { };
     delete i;                  // alias to a scalar pointee
 }
 
 func crossModule() -> void {
-    var p: *xmod.Chain2 = new xmod.Chain2;
+    var p: *xmod.Chain2 = new xmod.Chain2 { };
     p->label = 0;
     delete p;                  // silent body, counted in xmod
-    var q: *XAlias = new XAlias;
+    var q: *XAlias = new XAlias { };
     q->label = 0;
     delete q;                  // local alias chain over the imported alias
     var r: *xmod.Chain2 = xmod.xmake();
