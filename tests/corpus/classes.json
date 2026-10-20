@@ -510,7 +510,7 @@
   "class": "A"
  },
  "f64_ternary_width": {
-  "actual": "compile rejection: the branches of a ternary match: f32 and f64",
+  "actual": "cider run exit 1 on all three legs, stdout empty, stderr identical (172 bytes): 35:16: the branches of a ternary match: f32 and f64 (v3 refuses mixed float widths; expected.json left verbatim)",
   "blocker": "mixed-type ternary arms (SEMANTICS: rejection, write the conversion in a branch) [B-terminal]",
   "class": "B"
  },
