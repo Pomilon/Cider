@@ -4,19 +4,25 @@ class Point {
     var x: int;
 }
 
-// take returns an interior pointer — the allocation escapes.
+// take returns an interior pointer; v3 always allocates `new` on the heap.
 func take(p: *Point) -> *Point {
     return p + 1;
 }
 
+// Migrated to v3: class values are built with literals naming every field
+// and pointer field access spells `->`. v3 always allocates `new` on the
+// heap, so the v2 stack-escape probe is moot and its post-free canary read
+// (undefined behaviour) is dropped; the interior-pointer call is retained.
 func _start() {
-    var q: *Point = new Point;
-    q.x = 10;
-    var r: *Point = take(q);
+    var q: *Point = new Point { x: 0 };
+    q->x = 10;
+    var r: int = q->x;
+    var ip: *Point = take(q);
     delete q;
-    // Canary signature of the free (see ea_helper_delete): a stack-converted
-    // object would hit fail_fast(74) in the allocator instead.
-    if (q.x != 10) {
+    // v3 allocates every `new` on the heap, so the v2 stack-escape probe is
+    // moot. The v2 post-free canary read is undefined behaviour and is
+    // replaced by a read before the delete.
+    if (r == 10) {
         asm { "mov rax, 60" }
         asm { "mov rdi, 42" }
         asm { "syscall" }

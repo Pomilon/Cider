@@ -225,9 +225,9 @@
   "class": "A"
  },
  "complex_stress": {
-  "actual": "tests/corpus/legacy/complex_stress/main.cid:12:26: a class needs a body",
-  "blocker": "class-extends (+stdlib-imports, uninit-locals) [B-terminal]",
-  "class": "B"
+  "actual": "migrated to v3: inheritance spells `class AdvancedCalculator : Calculator`, redeclaring the virtual overrides it with no `override` keyword, `this` field access spells `this->`, and class values are built with literals; the legacy expected.json was an exit-code-only placeholder and now records the program's deterministic output; all three legs match expected.json",
+  "blocker": "none",
+  "class": "A"
  },
  "compound_bitwise": {
   "actual": "passes exactly; stub expected.json filled with captured bytes (success-path self-check verified)",
@@ -360,9 +360,9 @@
   "class": "A"
  },
  "ea_basic": {
-  "actual": "tests/corpus/legacy/ea_basic/main.cid:7:30: expected '{' or '(' after new",
-  "blocker": "classes-new-delete (+asm-blocks; opt-pipeline untestable) [B-terminal]",
-  "class": "B"
+  "actual": "migrated to v3: class values are built with a literal naming every field, pointer field access spells `->`, and the asm syscall exit is retained; all three legs match expected.json",
+  "blocker": "none",
+  "class": "A"
  },
  "ea_escape_global": {
   "actual": "exact stdout/stderr/exit match",
@@ -370,19 +370,19 @@
   "class": "A"
  },
  "ea_escape_return": {
-  "actual": "tests/corpus/legacy/ea_escape_return/main.cid:8:30: expected '{' or '(' after new",
-  "blocker": "classes-new-delete (+stdlib-imports, asm-blocks) [B-terminal]",
-  "class": "B"
+  "actual": "migrated to v3: class values are built with a literal naming every field, pointer field access spells `->`, and v3 always allocates `new` on the heap, so the v2 stack-escape return probe is moot; all three legs match expected.json",
+  "blocker": "none",
+  "class": "A"
  },
  "ea_helper_delete": {
-  "actual": "tests/corpus/legacy/ea_helper_delete/main.cid:14:30: expected '{' or '(' after new",
-  "blocker": "classes-new-delete (+stdlib-imports, arrow-access, asm-blocks) [B-terminal]",
-  "class": "B"
+  "actual": "migrated to v3: class values are built with a literal naming every field and pointer field access spells `->`; v3 always allocates `new` on the heap, so the v2 stack-escape probe is moot and its post-free canary read (undefined behaviour) is dropped; all three legs match expected.json",
+  "blocker": "none",
+  "class": "A"
  },
  "ea_indirect": {
-  "actual": "tests/corpus/legacy/ea_indirect/main.cid:9:14: a class needs a body",
-  "blocker": "class-extends (+classes-new-delete, asm-blocks) [B-terminal]",
-  "class": "B"
+  "actual": "migrated to v3: inheritance spells `class Circle : Shape`, redeclaring the virtual overrides it with no `override` keyword, class values are built with a literal, and a pointer receiver calls with `->`; all three legs match expected.json",
+  "blocker": "none",
+  "class": "A"
  },
  "ea_memcpy": {
   "actual": "exact stdout/stderr/exit match",
@@ -395,14 +395,14 @@
   "class": "A"
  },
  "ea_multi": {
-  "actual": "tests/corpus/legacy/ea_multi/main.cid:8:30: expected '{' or '(' after new",
-  "blocker": "classes-new-delete (+stdlib-imports, asm-blocks) [B-terminal]",
-  "class": "B"
+  "actual": "migrated to v3: class values are built with literals naming every field and pointer field access spells `->`; v3 always allocates `new` on the heap, so the v2 stack-vs-heap escape split is moot; all three legs match expected.json",
+  "blocker": "none",
+  "class": "A"
  },
  "ea_ptr_arith": {
-  "actual": "tests/corpus/legacy/ea_ptr_arith/main.cid:13:30: expected '{' or '(' after new",
-  "blocker": "classes-new-delete (+stdlib-imports, pointer-arith, asm-blocks) [B-terminal]",
-  "class": "B"
+  "actual": "migrated to v3: class values are built with a literal naming every field and pointer field access spells `->`; v3 always allocates `new` on the heap, so the v2 stack-escape probe is moot and its post-free canary read (undefined behaviour) is dropped; the interior-pointer call is retained; all three legs match expected.json",
+  "blocker": "none",
+  "class": "A"
  },
  "ea_summary_escape": {
   "actual": "exact stdout/stderr/exit match",
@@ -410,9 +410,9 @@
   "class": "A"
  },
  "ea_summary_safe": {
-  "actual": "tests/corpus/legacy/ea_summary_safe/main.cid:11:30: expected '{' or '(' after new",
-  "blocker": "classes-new-delete (+arrow-access, asm-blocks) [B-terminal]",
-  "class": "B"
+  "actual": "migrated to v3: class values are built with a literal naming every field, pointer field access spells `->`, and v3 always allocates `new` on the heap, so the v2 stack-escape summary probe is moot; all three legs match expected.json",
+  "blocker": "none",
+  "class": "A"
  },
  "embedded_class_destructors": {
   "actual": "compile rejection: tests/corpus/embedded_class_destructors/main.cid:28:10: a method needs a name \u2014 v2 destructor spelling `func ~Dropper()`; v3 uses deinit (FEATURES 2.2/5.3)",
@@ -750,9 +750,9 @@
   "class": "B"
  },
  "heap_stress": {
-  "actual": "tests/corpus/legacy/heap_stress/main.cid:13:32: expected '{' or '(' after new",
-  "blocker": "classes-new-delete (+stdlib-imports, arrow-access) [B-terminal]",
-  "class": "B"
+  "actual": "migrated to v3: class values are built with a literal naming every field; the legacy expected.json was an exit-code-only placeholder and now records the program's deterministic output; all three legs match expected.json",
+  "blocker": "none",
+  "class": "A"
  },
  "hello": {
   "actual": "passes exactly. rewritten to v3 entry main()->int; exact stdout match",
@@ -1240,9 +1240,9 @@
   "class": "A"
  },
  "sovereign_stability": {
-  "actual": "tests/corpus/legacy/sovereign_stability/main.cid:12:19: a class needs a body",
-  "blocker": "class-extends (+stdlib-imports, asm-blocks) [B-terminal]",
-  "class": "B"
+  "actual": "migrated to v3: inheritance spells `class SuperWorker : Worker`, redeclaring the virtual overrides it with no `override` keyword, `this` field access spells `this->`, class values are built with literals, and `puts` is replaced by `print` with the newline in the string; the legacy expected.json was an exit-code-only placeholder and now records the program's deterministic output; all three legs match expected.json",
+  "blocker": "none",
+  "class": "A"
  },
  "spec": {
   "actual": "6:10: a type parameter needs a name (explicit specialization `func max<int>` has no v3 counterpart \u2014 \u00a73.1: every instantiation names args at USE, no specialization defs); deduced `max(3,5)` also rejected (no inference)",
@@ -1330,9 +1330,9 @@
   "class": "A"
  },
  "stdlib_test": {
-  "actual": "tests/corpus/legacy/stdlib_test/main.cid:12:30: expected '{' or '(' after new",
-  "blocker": "stdlib-imports (+classes-new-delete) [B-terminal]",
-  "class": "B"
+  "actual": "migrated to v3: class values are built with a literal naming every field; the legacy expected.json was an exit-code-only placeholder and now records the program's deterministic output; all three legs match expected.json",
+  "blocker": "none",
+  "class": "A"
  },
  "stdlib_vector_ops": {
   "actual": "exact stdout/stderr/exit match",
@@ -1545,9 +1545,9 @@
   "class": "A"
  },
  "virtual_methods": {
-  "actual": "tests/corpus/legacy/virtual_methods/main.cid:10:15: a class needs a body",
-  "blocker": "class-extends-virtual (+stdlib-imports, asm-blocks) [B-terminal]",
-  "class": "B"
+  "actual": "migrated to v3: inheritance spells `class Derived : Base`, redeclaring the virtual overrides it with no `override` keyword, and class values are built with literals; the legacy expected.json was an exit-code-only placeholder and now records the program's deterministic output; all three legs match expected.json",
+  "blocker": "none",
+  "class": "A"
  },
  "virtual_value_vptr": {
   "actual": "migrated to v3: inheritance spells `class W : V`, there is no `override` keyword, value-class locals/globals are built with literals that stamp the declared class vtable, call-result receivers bind to a local, globals dispatch through pointers, and global class-value vptr words are link-time image relocations; all three legs match expected.json",

@@ -1,1 +1,1 @@
-{"stdout": "", "stderr": "", "exit": 0}
+{"stdout": "Integration Stress Test...\nOOP Result (Expected 30): 30\nFib(10) (Expected 55): 55\nLoop Stress Result (Expected 510): 510\nIntegration Stress Success!\n", "stderr": "", "exit": 0}

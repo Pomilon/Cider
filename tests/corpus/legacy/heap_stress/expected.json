@@ -1,1 +1,1 @@
-{"stdout": "", "stderr": "", "exit": 0}
+{"stdout": "Testing heap stability (many small allocations)...\nExpected total: 4950\nActual total: 4950\nHeap Stress Success!\n", "stderr": "", "exit": 0}

@@ -7,15 +7,18 @@ class Base {
     }
 }
 
-class Derived extends Base {
-    override func identify() -> void {
+// Migrated to v3: inheritance spells `class Derived : Base`, the
+// redeclaration itself overrides (no `override` keyword), and class values
+// are built with literals.
+class Derived : Base {
+    func identify() -> void {
         print("Derived\n");
     }
 }
 
 func _start() -> void {
-    var b: *Base = new Base;
-    var d: *Derived = new Derived;
+    var b: *Base = new Base { };
+    var d: *Derived = new Derived { };
     var poly: *Base = d;
 
     print("b->identify(): ");

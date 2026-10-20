@@ -6,15 +6,18 @@ class Shape {
     }
 }
 
-class Circle extends Shape {
-    override func identify() -> int {
+// Migrated to v3: inheritance spells `class Circle : Shape`, the
+// redeclaration itself overrides (no `override` keyword), and a pointer
+// receiver calls with `->`.
+class Circle : Shape {
+    func identify() -> int {
         return 2;
     }
 }
 
 func _start() {
-    var s: *Shape = new Circle;
-    var r: int = s.identify();   // VIRTUAL_CALL — conservative escape
+    var s: *Shape = new Circle { };
+    var r: int = s->identify();   // VIRTUAL_CALL — conservative escape
     delete s;
     if (r == 2) {
         asm { "mov rax, 60" }

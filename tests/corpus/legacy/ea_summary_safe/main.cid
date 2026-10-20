@@ -2,15 +2,17 @@ class Point {
     var x: int;
 }
 
-// set_x only writes p's own field — its param summary must be non-escaping.
+// set_x only writes p's own field; v3 always allocates `new` on the heap.
+// Migrated to v3: class values are built with literals naming every field
+// and pointer field access spells `->`.
 func set_x(p: *Point, v: int) -> void {
-    p.x = v;
+    p->x = v;
 }
 
 func _start() {
-    var q: *Point = new Point;
-    set_x(q, 9);    // q passed to a non-escaping param — still tracked
-    var r: int = q.x;
+    var q: *Point = new Point { x: 0 };
+    set_x(q, 9);
+    var r: int = q->x;
     delete q;
     if (r == 9) {
         asm { "mov rax, 60" }

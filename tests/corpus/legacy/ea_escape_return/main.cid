@@ -4,15 +4,18 @@ class Point {
     var x: int;
 }
 
+// Migrated to v3: class values are built with literals naming every field
+// and pointer field access spells `->`. v3 always allocates `new` on the
+// heap, so the v2 stack-escape return probe is moot.
 func make() -> *Point {
-    var p: *Point = new Point;
-    p.x = 42;
-    return p;   // escapes via return — must stay heap
+    var p: *Point = new Point { x: 0 };
+    p->x = 42;
+    return p;   // v3 keeps every `new` on the heap
 }
 
 func _start() {
     var q: *Point = make();
-    var r: int = q.x;
+    var r: int = q->x;
     delete q;
     if (r == 42) {
         asm { "mov rax, 60" }

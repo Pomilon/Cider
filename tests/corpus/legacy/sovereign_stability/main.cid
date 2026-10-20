@@ -4,29 +4,33 @@ from std.alloc import malloc;
 class Worker {
     var id: int;
     virtual func work(n: int) -> int {
-        if (n <= 0) return this.id;
-        return this.work(n - 1) + 1;
+        if (n <= 0) return this->id;
+        return this->work(n - 1) + 1;
     }
 }
 
-class SuperWorker extends Worker {
-    override func work(n: int) -> int {
-        if (n <= 0) return this.id * 2;
-        return this.work(n - 1) + 2;
+// Migrated to v3: inheritance spells `class SuperWorker : Worker`, the
+// redeclaration itself overrides (no `override` keyword), field access
+// through `this` spells `this->`, class values are built with literals, and
+// `puts` is replaced by `print` with the newline in the string.
+class SuperWorker : Worker {
+    func work(n: int) -> int {
+        if (n <= 0) return this->id * 2;
+        return this->work(n - 1) + 2;
     }
 }
 
 func _start() -> void {
-    puts("Starting Sovereign Stability Test...");
+    print("Starting Sovereign Stability Test...\n");
     
     var total_success: int = 0;
     for (var i: int = 0; i < 10; i = i + 1) {
         var w: *Worker = nilPtr;
         if (i % 2 == 0) {
-            w = new Worker;
+            w = new Worker { id: 0 };
             w->id = i;
         } else {
-            w = new SuperWorker;
+            w = new SuperWorker { id: 0 };
             w->id = i;
         }
         

@@ -1,1 +1,1 @@
-{"stdout": "", "stderr": "", "exit": 0}
+{"stdout": "b->identify(): Base\nd->identify(): Derived\npoly->identify(): Derived\n", "stderr": "", "exit": 0}

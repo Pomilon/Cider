@@ -5,16 +5,19 @@ class Point {
 }
 
 func make() -> *Point {
-    var p: *Point = new Point;
+    var p: *Point = new Point { x: 0 };
     return p;    // escapes
 }
 
+// Migrated to v3: class values are built with literals naming every field
+// and pointer field access spells `->`. v3 always allocates `new` on the
+// heap, so the v2 stack-vs-heap escape split is moot.
 func _start() {
-    var a: *Point = new Point;   // non-escaping → stack
-    var b: *Point = make();      // escaping → heap
-    a.x = 1;
-    b.x = 2;
-    var r: int = a.x + b.x;
+    var a: *Point = new Point { x: 0 };
+    var b: *Point = make();
+    a->x = 1;
+    b->x = 2;
+    var r: int = a->x + b->x;
     delete a;
     delete b;
     if (r == 3) {

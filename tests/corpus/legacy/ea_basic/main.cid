@@ -3,11 +3,13 @@ class Point {
     var y: int;
 }
 
+// Migrated to v3: class values are built with literals naming every field
+// and pointer field access spells `->`.
 func _start() {
-    var p: *Point = new Point;
-    p.x = 3;
-    p.y = 4;
-    var s: int = p.x + p.y;
+    var p: *Point = new Point { x: 0, y: 0 };
+    p->x = 3;
+    p->y = 4;
+    var s: int = p->x + p->y;
     delete p;
     if (s == 7) {
         asm { "mov rax, 60" }

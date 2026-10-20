@@ -5,13 +5,16 @@ class Calculator {
     var base: int;
     
     virtual func add(a: int, b: int) -> int {
-        return this.base + a + b;
+        return this->base + a + b;
     }
 }
 
-class AdvancedCalculator extends Calculator {
-    override func add(a: int, b: int) -> int {
-        return this.base + (a * 2) + (b * 2);
+// Migrated to v3: inheritance spells `class AdvancedCalculator : Calculator`,
+// the redeclaration itself overrides (no `override` keyword), field access
+// through `this` spells `this->`, and class values are built with literals.
+class AdvancedCalculator : Calculator {
+    func add(a: int, b: int) -> int {
+        return this->base + (a * 2) + (b * 2);
     }
 }
 
@@ -23,7 +26,7 @@ func fib(n: int) -> int {
 func _start() -> void {
     print("Integration Stress Test...\n");
     
-    var calc: *Calculator = new AdvancedCalculator;
+    var calc: *Calculator = new AdvancedCalculator { base: 0 };
     calc->base = 10;
     var oop_res: int = calc->add(5, 5); 
     print("OOP Result (Expected 30): ");

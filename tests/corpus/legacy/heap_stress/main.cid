@@ -5,12 +5,13 @@ class Node {
     var val: int;
 }
 
+// Migrated to v3: class values are built with literals naming every field.
 func _start() -> void {
     print("Testing heap stability (many small allocations)...\n");
     
     var total: int = 0;
     for (var i: int = 0; i < 100; i = i + 1) {
-        var n: *Node = new Node;
+        var n: *Node = new Node { val: 0 };
         n->val = i;
         total = total + n->val;
     }

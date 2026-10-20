@@ -1,1 +1,1 @@
-{"stdout": "", "stderr": "", "exit": 0}
+{"stdout": "Bootstrap: Testing Sovereign Heap Allocator...\nPoint.x: 42\nPoint.y: 58\nSum: 100\nSUCCESS: Sovereign Stdlib is operational!\n", "stderr": "", "exit": 0}

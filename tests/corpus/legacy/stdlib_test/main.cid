@@ -6,10 +6,11 @@ class Point {
     var y: int;
 }
 
+// Migrated to v3: class values are built with literals naming every field.
 func _start() -> void {
     print("Bootstrap: Testing Sovereign Heap Allocator...\n");
     
-    var p: *Point = new Point;
+    var p: *Point = new Point { x: 0, y: 0 };
     p->x = 42;
     p->y = 58;
     
