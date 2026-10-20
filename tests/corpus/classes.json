@@ -115,8 +115,8 @@
   "class": "A"
  },
  "async": {
-  "actual": "tests/corpus/async/main.cid:3:8: expected a declaration",
-  "blocker": "async-await-removed [B-terminal]",
+  "actual": "cider run exit 1 on all three legs, stdout empty, stderr identical (254 bytes): 3:8: expected a declaration; 7:1: expected a declaration; 8:22: expected ';'; 9:22: expected ';'; 14:22: expected ';' (async and await are purged in v3)",
+  "blocker": "async-await-removed (async/await purged in v3) [B-terminal]",
   "class": "B"
  },
  "bare_template_control": {
@@ -205,7 +205,7 @@
   "class": "A"
  },
  "closure_as_fn": {
-  "actual": "18:13: expected ';' (bare `fn(int)` spelling; v3 spells closure `func(int)->int` / fn-ptr `*func(int)->int` with no inference between representations \u2014 the test's subject)",
+  "actual": "cider run exit 1 on all three legs, stdout empty, stderr identical (2614 bytes): 18:13: expected ';'; 37:19: expected ')'; 37:19: a function needs a body; 37:64: expected a declaration; 52:12: a variable needs an initialiser (bare fn(...) closure types are removed)",
   "blocker": "v2-fn-spelling (bare fn(...) removed; closures spell func(...), pointers *func(...)) [B-terminal]",
   "class": "B"
  },
@@ -215,8 +215,8 @@
   "class": "A"
  },
  "closure_throw_capture": {
-  "actual": "tests/corpus/closure_throw_capture/main.cid:18:17: a catch binds a name and a type",
-  "blocker": "try-throw-catch [B-terminal]",
+  "actual": "cider run exit 1 on all three legs, stdout empty, stderr identical (2757 bytes): 18:17: a catch binds a name and a type; 21:9: expected ';'; 22:6: expected a declaration; 23:1: expected a declaration; 30:17: a catch binds a name and a type",
+  "blocker": "try-throw-catch (v2 try/catch/throw purged; untyped catch is rejected) [B-terminal]",
   "class": "B"
  },
  "closures": {
@@ -295,7 +295,7 @@
   "class": "B"
  },
  "cyclic_fn_alias": {
-  "actual": "5:12: expected ';' (bare `fn(F)` spelling; v3 has no bare fn-ptr spelling, \u00a713)",
+  "actual": "cider run exit 1 on all three legs, stdout empty, stderr identical (57 bytes): 5:12: expected ';' (bare fn(F) is not a v3 type spelling)",
   "blocker": "v2-fn-spelling (bare fn(...) removed; closures spell func(...), pointers *func(...)) [B-terminal]",
   "class": "B"
  },
@@ -765,8 +765,8 @@
   "class": "B"
  },
  "iface_array_return_boxing": {
-  "actual": "tests/corpus/iface_array_return_boxing/main.cid:59:8: a method needs a name",
-  "blocker": "interface-boxing [B-terminal]",
+  "actual": "cider run exit 1 on all three legs, stdout empty, stderr identical (2870 bytes): 59:8: a method needs a name; 59:8: a class holds fields and methods; 59:35: expected '}'; 59:47: expected a declaration; 60:1: expected a declaration",
+  "blocker": "interface-boxing (v3 boxes class pointers only; class-value interface returns are refused) [B-terminal]",
   "class": "B"
  },
  "iface_box_ownership": {
@@ -840,8 +840,8 @@
   "class": "A"
  },
  "interface_box_release": {
-  "actual": "v3: `main.cid:61:10: a class value cannot return as an interface: it would dangle`; v3 boxes only class pointers, so the v2 boxed-value scope-exit release trace is not blessed",
-  "blocker": "v3 boxes only class pointers (class-value interface returns are refused as dangling) and has no scope-exit/boxed-value destruction [B-terminal]",
+  "actual": "cider run exit 1 on all three legs, stdout empty, stderr identical (112 bytes): 61:10: a class value cannot return as an interface: it would dangle",
+  "blocker": "v3-interface-boxing (class-value interface returns are refused as dangling; no scope-exit/boxed-value destruction) [B-terminal]",
   "class": "B"
  },
  "interface_call_args": {
@@ -950,8 +950,8 @@
   "class": "A"
  },
  "local_aggregates": {
-  "actual": "v3 principled refusal: function-local types never resolve (`lib.cid:8:12: unknown type 'Pair'`, `lib.cid:7:5: checker bug: 'Pair' was never resolved`); v3 also does not finalize scope values, so the v2 drops trace is not blessed; expected.json left verbatim",
-  "blocker": "function-local aggregates are not part of v3; local types never resolve [B-terminal]",
+  "actual": "cider run exit 1 on all three legs, stdout empty, stderr identical (473 bytes): lib.cid:8:12: unknown type 'Pair'; lib.cid:7:5: checker bug: 'Pair' was never resolved; lib.cid:9:5 and 10:5: unbound name 'p'; lib.cid:11:12: unbound name 'p'",
+  "blocker": "v3-function-local-aggregates (function-local types never resolve) [B-terminal]",
   "class": "B"
  },
  "logical_ops": {
@@ -1155,8 +1155,8 @@
   "class": "B"
  },
  "ptr_array_stride": {
-  "actual": "tests/corpus/ptr_array_stride/main.cid:33:10: a method needs a name",
-  "blocker": "v2-scope-exit-destruction (destructor ~D, value-scoped array finalization) + stdlib-io/alloc [B-terminal]",
+  "actual": "cider run exit 1 on all three legs, stdout empty, stderr identical (419 bytes): 33:10: a method needs a name; 33:10: a class holds fields and methods; 35:9: expected '}'; 37:5: expected a declaration; 38:1: expected a declaration",
+  "blocker": "v2-scope-exit-destruction (destructor ~D, value-scoped array finalization) [B-terminal]",
   "class": "B"
  },
  "qualified_interface": {
@@ -1245,7 +1245,7 @@
   "class": "A"
  },
  "spec": {
-  "actual": "6:10: a type parameter needs a name (explicit specialization `func max<int>` has no v3 counterpart \u2014 \u00a73.1: every instantiation names args at USE, no specialization defs); deduced `max(3,5)` also rejected (no inference)",
+  "actual": "cider run exit 1 on all three legs, stdout empty, stderr identical (175 bytes): 6:10: a type parameter needs a name; 8:1: expected a declaration; 11:21: expected an expression (no specialization definitions and no generic inference in v3)",
   "blocker": "v3-generics-model (no specialization definitions, no generic inference) [B-terminal]",
   "class": "B"
  },
@@ -1255,13 +1255,13 @@
   "class": "A"
  },
  "stale_handler_frame_exit": {
-  "actual": "run exit 1: OUT: ERR:tests/corpus/stale_handler_frame_exit/main.cid:21:13: a catch binds a name and a type\\ntests/corpus/stale_handler_frame_exit/main.cid:24:1: expected a declaration\\ntests/corpus/stale_handler_frame_exit/",
-  "blocker": "untyped-catch-removed (v2 trap exit 2 left verbatim; v3 rejects, never traps) [B-terminal]",
+  "actual": "cider run exit 1 on all three legs, stdout empty, stderr identical (874 bytes): 21:13: a catch binds a name and a type; 24:1: expected a declaration; 31:17: a catch binds a name and a type; 34:5: a try needs at least one catch; 34:7: expected a declaration",
+  "blocker": "untyped-catch-removed (v2 untyped catch is rejected by v3; expected trap left verbatim) [B-terminal]",
   "class": "B"
  },
  "stale_handler_still_catches": {
-  "actual": "tests/corpus/stale_handler_still_catches/main.cid:17:13: a catch binds a name and a type",
-  "blocker": "untyped-catch-removed (diff #14; also throw-transport broken) [B-terminal]",
+  "actual": "cider run exit 1 on all three legs, stdout empty, stderr identical (2248 bytes): 17:13: a catch binds a name and a type; 19:9, 20:5, 21:5 and 22:1: expected a declaration",
+  "blocker": "untyped-catch-removed (v2 untyped catch is rejected by v3; expected trap left verbatim) [B-terminal]",
   "class": "B"
  },
  "stderr": {
@@ -1440,8 +1440,8 @@
   "class": "A"
  },
  "throw_across_frames": {
-  "actual": "tests/corpus/throw_across_frames/main.cid:19:13: a catch binds a name and a type",
-  "blocker": "untyped-catch-removed (also throw-transport broken for caught values) [B-terminal]",
+  "actual": "cider run exit 1 on all three legs, stdout empty, stderr identical (3090 bytes): 19:13: a catch binds a name and a type; 21:5, 23:5 and 24:1: expected a declaration; 30:13: a catch binds a name and a type",
+  "blocker": "untyped-catch-removed (v2 try/catch/throw is purged; untyped catch is rejected) [B-terminal]",
   "class": "B"
  },
  "throw_finalizer_gaps": {
@@ -1460,8 +1460,8 @@
   "class": "A"
  },
  "trycatch": {
-  "actual": "tests/corpus/legacy/trycatch/main.cid:6:13: a catch binds a name and a type",
-  "blocker": "try-statement-unimplemented (verbatim correctly rejected per diff #14; bare catch and catch e: int both fail check with: try is not implemented yet) [B-terminal]",
+  "actual": "cider run exit 1 on all three legs, stdout empty, stderr identical (814 bytes): 6:13: a catch binds a name and a type; 10:5, 12:5, 14:5 and 17:5: expected a declaration",
+  "blocker": "try-statement-unimplemented (v2 try/catch/throw purged; untyped catch is rejected) [B-terminal]",
   "class": "B"
  },
  "type_alias": {
@@ -1475,8 +1475,8 @@
   "class": "A"
  },
  "uncaught_rethrow": {
-  "actual": "run exit 1: OUT: ERR:tests/corpus/uncaught_rethrow/main.cid:10:13: a catch binds a name and a type\\ntests/corpus/uncaught_rethrow/main.cid:13:5: expected a declaration\\ntests/corpus/uncaught_rethrow/main.cid:14:1: expected ",
-  "blocker": "untyped-catch-removed (v2 trap exit 2 left verbatim; v3 rejects, never traps) [B-terminal]",
+  "actual": "cider run exit 1 on all three legs, stdout empty, stderr identical (214 bytes): 10:13: a catch binds a name and a type; 13:5: expected a declaration; 14:1: expected a declaration",
+  "blocker": "untyped-catch-removed (v2 untyped catch is rejected by v3; expected trap left verbatim) [B-terminal]",
   "class": "B"
  },
  "uncaught_rethrow_finalizers": {
@@ -1495,7 +1495,7 @@
   "class": "B"
  },
  "uninit_locals_zero": {
-  "actual": "run exit 1: OUT: ERR:tests/corpus/uninit_locals_zero/main.cid:35:23: a variable needs an initialiser\\ntests/corpus/uninit_locals_zero/main.cid:44:23: a variable needs an initialiser\\ntests/corpus/uninit_locals_zero/main.cid",
+  "actual": "cider run exit 1 on all three legs, stdout empty, stderr identical (1367 bytes): 35:23, 44:23, 55:15, 61:14 and 67:16: a variable needs an initialiser (v3 always refuses an uninitialized local, so the v2 read-before-write zero policy has no v3 counterpart)",
   "blocker": "v3-uninit-local-refusal (diff #7: var x:T is always an error) [B-terminal]",
   "class": "B"
  },
