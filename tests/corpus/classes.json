@@ -1195,8 +1195,8 @@
   "class": "A"
  },
  "shift_count_mask": {
-  "actual": "cider run exit 1, stdout empty, stderr diagnostic: `std.io:1:1: cannot find module 'std.io'` (constant `a << 33` sites would also force rejection per diff #16)",
-  "blocker": "const-shift-count-must-reject (diff #16) + stdlib-io",
+  "actual": "cider run exit 1 on all three legs, stdout empty, stderr identical: `40:27`, `41:27`, `46:27`, `47:27`, `51:28`, `53:28`: a shift count is too large (the constant-count masking the program pins is now a loud compile rejection; unrelated printInt/check i64 conversion diagnostics remain)",
+  "blocker": "const-shift-count-must-reject (diff #16: a constant shift count at or past the operand width is a compile-time rejection) [B-terminal]",
   "class": "B"
  },
  "shift_sign": {

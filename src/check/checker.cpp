@@ -4165,8 +4165,19 @@ void Checker::checkShiftDiv(const Binary& expr, TypeRef lhs, TypeRef rhs) {
         fail(expr.rhs->pos, "division by zero");
         return;
     }
-    if ((expr.op == BinOp::Shl || expr.op == BinOp::Shr) && divisor.value < 0) {
-        fail(expr.rhs->pos, "a shift count is not negative");
+    if (expr.op == BinOp::Shl || expr.op == BinOp::Shr) {
+        if (divisor.value < 0) {
+            fail(expr.rhs->pos, "a shift count is not negative");
+            return;
+        }
+        // Standard §3: a constant count at or past the operand's width is
+        // refused; only a runtime count masks. The width is in bits, not
+        // bytes, so the size gate never watches this line.
+        if (lhs.type != nullptr && lhs.type->kind() == Kind::Basic &&
+            basicIsInteger(*lhs.type->basic()) &&
+            divisor.value >= basicWidthBits(*lhs.type->basic())) {
+            fail(expr.rhs->pos, "a shift count is too large");
+        }
     }
 }
 

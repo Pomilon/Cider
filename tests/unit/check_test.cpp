@@ -2117,6 +2117,45 @@ void testSliceCopy() {
           "a slice refuses a different element type");
 }
 
+void testShiftCount() {
+    std::printf("a constant shift count is bounded by the operand width\n");
+    Checked wide = check(
+        "func f() -> int {\n"
+        "    var a: u8 = 1;\n"
+        "    return (a << 33) as int;\n"
+        "}\n");
+    check(!wide.ok && wide.stage == "check",
+          "a constant shift count past the width is refused");
+    bool named = false;
+    if (wide.checker != nullptr) {
+        for (const cider::check::CheckError& e : wide.checker->errors()) {
+            if (e.message.find("shift count") != std::string::npos) {
+                named = true;
+            }
+        }
+    }
+    check(named, "the shift count diagnostic names the count");
+    Checked wideRight = check(
+        "func f() -> int {\n"
+        "    var a: i32 = 1;\n"
+        "    return a >> 32;\n"
+        "}\n");
+    check(!wideRight.ok && wideRight.stage == "check",
+          "a right shift count past the width is refused");
+    Checked runtime = check(
+        "func f(n: u8) -> int {\n"
+        "    var a: u8 = 1;\n"
+        "    return (a << n) as int;\n"
+        "}\n");
+    check(runtime.ok, "a runtime shift count is accepted: " + runtime.stage);
+    Checked edge = check(
+        "func f() -> int {\n"
+        "    var a: i32 = 1;\n"
+        "    return a << 31;\n"
+        "}\n");
+    check(edge.ok, "an in-range constant shift count checks: " + edge.stage);
+}
+
 }  // namespace
 
 // v3 mangles one code label per method name (<type>__<name>), so a type
@@ -2208,6 +2247,7 @@ int main() {
     testLoopMatchRefused();
     testRange();
     testDuplicateMethods();
+    testShiftCount();
     std::printf("\n%d checks, %s\n", checks, failures == 0 ? "all passed" : "FAILURES");
     return failures == 0 ? 0 : 1;
 }
