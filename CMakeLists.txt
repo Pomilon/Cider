@@ -236,3 +236,19 @@ add_test(NAME target COMMAND target_test)
 # "informational".
 set_tests_properties(gates layout types lexer ast parser resolver checker lowering optimise codegen vm driver target
              PROPERTIES LABELS "gate")
+
+# --- Opt-in UEFI smoke ---------------------------------------------------------
+#
+# The UEFI test needs clang (COFF assembly), GNU ld with i386pep, QEMU and
+# OVMF. It is opt-in so the normal battery does not depend on firmware. The
+# script exits 77 when a tool is missing, which ctest reports as SKIP.
+
+option(CIDER_UEFI_TESTS "Run the QEMU/OVMF UEFI smoke test" OFF)
+if(CIDER_UEFI_TESTS)
+  add_test(NAME uefi
+           COMMAND ${Python3_EXECUTABLE} ${CMAKE_SOURCE_DIR}/tests/uefi/run_uefi_test.py)
+  set_tests_properties(uefi PROPERTIES
+    ENVIRONMENT "CIDER_BIN=${CMAKE_BINARY_DIR}/cider"
+    SKIP_RETURN_CODE 77
+    LABELS "uefi")
+endif()

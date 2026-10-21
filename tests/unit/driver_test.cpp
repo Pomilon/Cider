@@ -552,6 +552,13 @@ void testKnownTargetsReachFrontEnd() {
     check(uefiAsm.err.find("uefi") != std::string::npos,
           "the driver's asm refusal names uefi");
     unlink(asmSrc.c_str());
+
+    std::string entry = writeTemp("func efi_main() -> int { return 0; }\n");
+    Result uefiRun = run({"run", "--target", "uefi", entry});
+    check(uefiRun.code != 0, "run --target uefi names the PE link path");
+    check(uefiRun.err.find("link_uefi.sh") != std::string::npos,
+          "the run refusal points at link_uefi.sh");
+    unlink(entry.c_str());
 }
 
 // A missing file, a bad target and a bad subcommand all name themselves.

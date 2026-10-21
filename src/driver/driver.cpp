@@ -389,6 +389,11 @@ int runDriver(const std::vector<std::string>& args, std::string& out, std::strin
         }
         return 1;
     }
+    if (targetKind == target::Kind::Uefi && command == "run") {
+        err = "target uefi produces a PE32+ image: compile with -o <file.asm> "
+              "and link it with scripts/link_uefi.sh\n";
+        return 2;
+    }
     if (command == "compile") {
         if (output.empty()) {
             out = emitted.text;

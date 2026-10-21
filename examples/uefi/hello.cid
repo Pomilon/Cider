@@ -1,0 +1,4 @@
+func efi_main() -> int {
+    print("Hello from Cider UEFI!\r\n");
+    return 0;
+}
