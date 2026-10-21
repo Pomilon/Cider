@@ -28,6 +28,7 @@
 
 #include "check/checker.h"
 #include "ir/ir.h"
+#include "target/target.h"
 
 namespace cider {
 namespace lower {
@@ -76,7 +77,8 @@ struct GlobalBinding {
 
 class Lowerer : public check::LowerSink {
 public:
-    Lowerer(TypeContext& ctx, resolve::Resolver& resolver, check::Checker& checker);
+    Lowerer(TypeContext& ctx, resolve::Resolver& resolver, check::Checker& checker,
+            target::Kind target = target::Kind::Native);
 
     // Runs the checker's walk with this lowerer attached, so types are
     // recorded and IR is emitted on the same visit. True unless the program
@@ -92,6 +94,7 @@ public:
     // finalizer pass refused (the driver prints every layer's errors on a
     // null module, so a late refusal is not silent).
     std::unique_ptr<ir::Module> takeModule() {
+        prepareTargetEntry();
         buildFini();
         return failed_ ? nullptr : std::move(module_);
     }
@@ -638,6 +641,11 @@ private:
     // order. Called once, from takeModule, because the order is only known
     // after every module has lowered.
     void buildFini();
+    // Names the target entry in IR and adds target-owned globals. UEFI owns
+    // the firmware symbol `efi_main`, so the user's function is renamed to a
+    // hidden link symbol and the emitter's shim calls it. Native has no
+    // target-owned entry work. Called once, from takeModule.
+    void prepareTargetEntry();
     // Whether a block of the function under construction can run: a
     // breadth-first walk over terminator edges from the entry block. A
     // reachable falloff in a value function is a compile-time rejection
@@ -701,6 +709,7 @@ private:
     TypeContext& ctx_;
     resolve::Resolver& resolver_;
     check::Checker& checker_;
+    target::Kind target_;
     std::unique_ptr<ir::Module> module_;
     ir::Function* function_ = nullptr;
     bool enabled_ = false;
@@ -712,6 +721,7 @@ private:
     std::vector<std::string> finiBodies_;
     Position finiPos_{"", 1, 1};
     bool finiBuilt_ = false;
+    bool targetPrepared_ = false;
     uint32_t valueSeq_ = 0;
     uint32_t labelSeq_ = 0;
     // The innermost enclosing loop's two jump targets: `continue` goes to

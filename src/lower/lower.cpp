@@ -239,12 +239,76 @@ ir::CmpOp cmpFor(BinOp op, bool isSigned) {
 
 }  // namespace
 
-Lowerer::Lowerer(TypeContext& ctx, resolve::Resolver& resolver, check::Checker& checker)
-    : ctx_(ctx), resolver_(resolver), checker_(checker) {}
+Lowerer::Lowerer(TypeContext& ctx, resolve::Resolver& resolver, check::Checker& checker,
+                 target::Kind target)
+    : ctx_(ctx), resolver_(resolver), checker_(checker), target_(target) {}
 
 void Lowerer::refuse(Position pos, const std::string& what) {
     errors_.push_back(check::CheckError{pos, "not lowered yet: " + what});
     failed_ = true;
+}
+
+void Lowerer::prepareTargetEntry() {
+    if (targetPrepared_) {
+        return;
+    }
+    targetPrepared_ = true;
+    if (module_ == nullptr || target_ != target::Kind::Uefi) {
+        return;
+    }
+    // The firmware owns `efi_main`; the user's function keeps its source
+    // spelling but not its link symbol. One rename here keeps every direct
+    // call and function address pointing at the user body, never at the
+    // firmware shim.
+    const std::string hidden = "cider_efi_main_user";
+    for (ir::Function& fn : module_->functions) {
+        if (fn.name == "efi_main") {
+            fn.name = hidden;
+            module_->entry = hidden;
+            break;
+        }
+    }
+    if (module_->entry.empty()) {
+        return;
+    }
+    for (ir::Function& fn : module_->functions) {
+        for (ir::Block& block : fn.blocks) {
+            for (ir::Instr& instr : block.body) {
+                if (instr.op == ir::Op::Call && instr.callee == "efi_main") {
+                    instr.callee = hidden;
+                }
+                if (instr.op == ir::Op::FnAddr && instr.globalLabel == "efi_main") {
+                    instr.globalLabel = hidden;
+                }
+            }
+        }
+    }
+    for (ir::Global& global : module_->globals) {
+        for (std::string& label : global.initLabels) {
+            if (label == "efi_main") {
+                label = hidden;
+            }
+        }
+    }
+    const TypeRef voidPtr{ctx_.pointer(ctx_.void_())};
+    bool image = false;
+    bool system = false;
+    for (const ir::Global& global : module_->globals) {
+        image = image || global.label == "image_handle";
+        system = system || global.label == "system_table";
+    }
+    if (!image) {
+        ir::Global slot;
+        slot.label = "image_handle";
+        slot.type = voidPtr;
+        module_->globals.push_back(std::move(slot));
+    }
+    if (!system) {
+        ir::Global slot;
+        slot.label = "system_table";
+        slot.type = voidPtr;
+        module_->globals.push_back(std::move(slot));
+    }
 }
 
 // --- Entry point -------------------------------------------------------------

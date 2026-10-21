@@ -16,6 +16,7 @@
 #include "lower/lower.h"
 #include "opt/opt.h"
 #include "parse/parser.h"
+#include "target/target.h"
 #include "types/context.h"
 
 namespace {
@@ -41,7 +42,7 @@ struct Built {
     std::unique_ptr<cider::ir::Module> module;
 };
 
-Built build(const std::string& text) {
+Built buildAs(const std::string& text, cider::target::Kind target) {
     Built out;
     out.types = std::make_unique<cider::TypeContext>();
     cider::Lexer lexer("test.cid", text);
@@ -63,7 +64,7 @@ Built build(const std::string& text) {
     }
     auto checker = std::make_unique<cider::check::Checker>(*out.types, *resolver);
     checker->prescanProvenance({"main"});
-    cider::lower::Lowerer lowerer(*out.types, *resolver, *checker);
+    cider::lower::Lowerer lowerer(*out.types, *resolver, *checker, target);
     if (!lowerer.lowerModule("main", *program)) {
         out.module = nullptr;
         out.stage = "lower";
@@ -82,7 +83,7 @@ Built build(const std::string& text) {
         out.stage = "opt:" + result.error;
         return out;
     }
-    cider::codegen::EmitResult emitted = cider::codegen::emitNative(*out.module);
+    cider::codegen::EmitResult emitted = cider::codegen::emit(*out.module, target);
     if (!emitted.ok) {
         out.stage = "codegen:" + emitted.error;
         return out;
@@ -90,6 +91,10 @@ Built build(const std::string& text) {
     out.asmText = emitted.text;
     out.ok = true;
     return out;
+}
+
+Built build(const std::string& text) {
+    return buildAs(text, cider::target::Kind::Native);
 }
 
 // Assembles, links and runs the text, answering its exit code. -1 when the
@@ -350,6 +355,45 @@ void testTargetDispatch() {
           "the refusal names uefi");
     check(uefi.error.find("native only") == std::string::npos,
           "the refusal is target-specific, not a native-only claim");
+}
+
+void testUefiEntryShim() {
+    std::printf("uefi entry shim\n");
+    Built built = buildAs("func efi_main() -> int { return 0; }\n",
+                          cider::target::Kind::Uefi);
+    check(built.ok, "a uefi efi_main emits: " + built.stage);
+    if (!built.ok) {
+        return;
+    }
+    const std::string& text = built.asmText;
+    check(text.find(".globl efi_main\n") != std::string::npos,
+          "the firmware symbol is global");
+    check(text.find("efi_main:\n") != std::string::npos,
+          "the firmware entry is defined");
+    check(text.find("sub rsp, 40\n") != std::string::npos,
+          "the shim reserves shadow space and alignment");
+    check(text.find("mov [rip + image_handle], rcx\n") != std::string::npos,
+          "the image handle is stored");
+    check(text.find("mov [rip + system_table], rdx\n") != std::string::npos,
+          "the system table is stored");
+    check(text.find("call cider_efi_main_user\n") != std::string::npos,
+          "the shim calls the hidden user entry");
+    check(text.find("image_handle:\n") != std::string::npos,
+          "the image handle slot is emitted");
+    check(text.find("system_table:\n") != std::string::npos,
+          "the system table slot is emitted");
+    check(text.find("_start:") == std::string::npos,
+          "uefi emits no linux entry trampoline");
+    check(text.find("mov eax, 60") == std::string::npos,
+          "uefi emits no linux exit syscall");
+    check(text.find("syscall") == std::string::npos,
+          "uefi emits no linux syscall");
+
+    Built wrong = buildAs("func main() -> int { return 0; }\n",
+                          cider::target::Kind::Uefi);
+    check(!wrong.ok, "uefi rejects a main-only program");
+    check(wrong.stage.find("uefi") != std::string::npos,
+          "the missing-entry diagnostic names uefi");
 }
 
 void testCalls() {
@@ -2809,6 +2853,7 @@ int main() {
     testGenericFieldDefaults();
     testPrivateMethods();
     testTargetDispatch();
+    testUefiEntryShim();
     testCalls();
     testControl();
     testGlobals();

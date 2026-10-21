@@ -72,7 +72,7 @@ std::string readPendingInput() {
 }
 
 bool runFront(const std::string& file, const std::string& text, Pipeline& pipe,
-              bool noOpt) {
+              bool noOpt, target::Kind targetKind) {
     pipe.file = file;
     pipe.types = std::make_unique<TypeContext>();
     // Imports load beside the entry file: `import da;` reads `<dir>/da.cid`
@@ -177,7 +177,7 @@ bool runFront(const std::string& file, const std::string& text, Pipeline& pipe,
         return false;
     }
     check::Checker checker(*pipe.types, resolver);
-    lower::Lowerer lowerer(*pipe.types, resolver, checker);
+    lower::Lowerer lowerer(*pipe.types, resolver, checker, targetKind);
     // Closure provenance runs before any body checks: callee bodies see
     // caller proofs regardless of module order. Pure analysis — no
     // diagnostics, no recorded types.
@@ -345,7 +345,7 @@ int runDriver(const std::vector<std::string>& args, std::string& out, std::strin
         return 1;
     }
     Pipeline pipe;
-    if (!runFront(input, text, pipe, noOpt)) {
+    if (!runFront(input, text, pipe, noOpt, targetKind)) {
         err = pipe.diagnostic;
         return 1;
     }

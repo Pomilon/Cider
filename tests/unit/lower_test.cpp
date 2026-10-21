@@ -17,6 +17,7 @@
 #include "lexer/lexer.h"
 #include "lower/lower.h"
 #include "parse/parser.h"
+#include "target/target.h"
 #include "types/context.h"
 
 namespace {
@@ -44,7 +45,7 @@ struct Lowered {
     std::unique_ptr<cider::ir::Module> module;
 };
 
-Lowered lower(const std::string& text) {
+Lowered lowerAs(const std::string& text, cider::target::Kind target) {
     Lowered out;
     out.types = std::make_unique<cider::TypeContext>();
     cider::Lexer lexer("test.cid", text);
@@ -69,7 +70,7 @@ Lowered lower(const std::string& text) {
         out.stage = "check";
         return out;
     }
-    cider::lower::Lowerer lowerer(*out.types, *out.resolver, *out.checker);
+    cider::lower::Lowerer lowerer(*out.types, *out.resolver, *out.checker, target);
     if (!lowerer.lowerModule("main", *out.program)) {
         out.module = nullptr;
         out.stage = "lower";
@@ -78,6 +79,10 @@ Lowered lower(const std::string& text) {
     out.module = lowerer.takeModule();
     out.ok = true;
     return out;
+}
+
+Lowered lower(const std::string& text) {
+    return lowerAs(text, cider::target::Kind::Native);
 }
 
 const cider::ir::Function* find(const cider::ir::Module* module, const std::string& name) {
@@ -1272,8 +1277,38 @@ void testInterp() {
 
 }  // namespace
 
+void testUefiEntry() {
+    std::printf("uefi entry\n");
+    Lowered lowered = lowerAs(
+        "func efi_main() -> int { return 0; }\n",
+        cider::target::Kind::Uefi);
+    check(lowered.ok, "a uefi efi_main lowers: " + lowered.stage);
+    if (!lowered.ok) {
+        return;
+    }
+    check(find(lowered.module.get(), "efi_main") == nullptr,
+          "the firmware symbol is not the user function");
+    check(find(lowered.module.get(), "cider_efi_main_user") != nullptr,
+          "the user entry has a hidden link symbol");
+    check(lowered.module->entry == "cider_efi_main_user",
+          "the module names the hidden entry symbol");
+    bool image = false;
+    bool system = false;
+    for (const cider::ir::Global& global : lowered.module->globals) {
+        if (global.label == "image_handle") {
+            image = true;
+        }
+        if (global.label == "system_table") {
+            system = true;
+        }
+    }
+    check(image, "the image handle global is emitted");
+    check(system, "the system table global is emitted");
+}
+
 int main() {
     std::printf("lower_test — source becomes IR\n\n");
+    testUefiEntry();
     testGlobal();
     testArithmetic();
     testTrapFlag();

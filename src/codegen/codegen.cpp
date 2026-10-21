@@ -108,7 +108,8 @@ const char* setFor(ir::CmpOp cmp) {
 
 class Emitter {
 public:
-    explicit Emitter(const ir::Module& module) : module_(module) {}
+    Emitter(const ir::Module& module, Target target)
+        : module_(module), target_(target) {}
 
     EmitResult run() {
         out_ += ".intel_syntax noprefix\n.text\n";
@@ -280,6 +281,9 @@ private:
     // the link, so this text is the only thing between the kernel and the
     // program.
     bool emitEntry() {
+        if (target_ == Target::Uefi) {
+            return emitUefiEntry();
+        }
         const ir::Function* mainFn = nullptr;
         const ir::Function* startFn = nullptr;
         const ir::Function* finiFn = nullptr;
@@ -356,6 +360,70 @@ private:
         }
         out_ += "  mov eax, 60\n";               // exit(main's answer)
         out_ += "  syscall\n";
+        return true;
+    }
+
+    // The firmware entry. UEFI calls `efi_main` with the image handle in
+    // rcx and the system table in rdx under the Microsoft x64 ABI. Those
+    // words are saved for the program's globals before the user's body runs;
+    // the body itself takes no parameters and returns an int status.
+    bool emitUefiEntry() {
+        const ir::Function* mainFn = nullptr;
+        const ir::Function* startFn = nullptr;
+        for (const ir::Function& fn : module_.functions) {
+            if (fn.name == "main") {
+                mainFn = &fn;
+            }
+            if (fn.name == "_start") {
+                startFn = &fn;
+            }
+        }
+        if (mainFn != nullptr || startFn != nullptr) {
+            const ir::Function* wrong = mainFn != nullptr ? mainFn : startFn;
+            refuse(wrong->loc, "uefi entry is efi_main, not main or _start");
+            return false;
+        }
+        if (module_.entry.empty()) {
+            refuse(Position{"", 1, 1},
+                   "no entry function for uefi: define efi_main");
+            return false;
+        }
+        const ir::Function* user = nullptr;
+        for (const ir::Function& fn : module_.functions) {
+            if (fn.name == module_.entry) {
+                user = &fn;
+                break;
+            }
+        }
+        if (user == nullptr) {
+            refuse(Position{"", 1, 1},
+                   "uefi entry symbol '" + module_.entry + "' is missing");
+            return false;
+        }
+        if (!user->signature.parameters().empty()) {
+            refuse(user->loc, "efi_main takes no parameters");
+            return false;
+        }
+        const Type* ret = user->signature.returnType();
+        if (ret == nullptr || ret->kind() != Kind::Basic ||
+            (*ret->basic() != BasicKind::I32 && *ret->basic() != BasicKind::I64)) {
+            refuse(user->loc, "efi_main must return int");
+            return false;
+        }
+        // 32 bytes of shadow space plus 8 for alignment: the firmware enters
+        // with rsp misaligned by a return address, and the user body sees the
+        // ordinary Microsoft call shape.
+        out_ += ".globl efi_main\n";
+        out_ += "efi_main:\n";
+        out_ += "  sub rsp, 40\n";
+        out_ += "  mov [rip + image_handle], rcx\n";
+        out_ += "  mov [rip + system_table], rdx\n";
+        out_ += "  call " + module_.entry + "\n";
+        if (*ret->basic() == BasicKind::I32) {
+            out_ += "  mov eax, eax\n";  // UEFI status is a 64-bit UINTN
+        }
+        out_ += "  add rsp, 40\n";
+        out_ += "  ret\n";
         return true;
     }
 
@@ -2167,6 +2235,7 @@ private:
 
 
     const ir::Module& module_;
+    Target target_;
     // Alloca-result ids in the function being emitted: the only ids whose
     // address is slot storage (rsp+id*8). Any other id in an addressBase is
     // a computed address and dereferences.
@@ -2190,7 +2259,7 @@ const char* targetName(Target kind) {
 }
 
 EmitResult emitNative(const ir::Module& module) {
-    Emitter emitter(module);
+    Emitter emitter(module, Target::Native);
     return emitter.run();
 }
 
@@ -2198,8 +2267,11 @@ EmitResult emit(const ir::Module& module, Target kind) {
     switch (kind) {
         case Target::Native:
             return emitNative(module);
+        case Target::Uefi: {
+            Emitter emitter(module, Target::Uefi);
+            return emitter.run();
+        }
         case Target::Pomeos:
-        case Target::Uefi:
         case Target::Vm:
             break;
     }
