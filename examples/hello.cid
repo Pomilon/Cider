@@ -1,0 +1,6 @@
+from std.io import print;
+
+func main() -> int {
+    print("Hello, Cider!\n");
+    return 0;
+}

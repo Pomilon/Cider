@@ -1,0 +1,68 @@
+from std.io import print, printInt;
+from std.vector import Vec, new_vec, push, get, free_vec;
+
+enum Color { RED, GREEN, BLUE }
+
+struct Point {
+    var x: int;
+    var y: int;
+}
+
+interface Shape {
+    func area() -> int;
+}
+
+class Circle {
+    var r: int;
+    func init(r: int) -> void { this->r = r; }
+    func area() -> int { return 3 * this->r * this->r; }
+    func deinit() { print("destroyed\n"); }
+}
+
+func id<T>(x: T) -> T {
+    return x;
+}
+
+func sumSlice(s: []int) -> int {
+    var total: int = 0;
+    for (var i: int = 0; i < s.len; i = i + 1) {
+        total = total + s[i];
+    }
+    return total;
+}
+
+func main() -> int {
+    var p: Point = Point { x: 3, y: 4 };
+    printInt(p.x + p.y);
+    print("\n");
+
+    var c: *Circle = new Circle(2);
+    var sh: Shape = c;
+    printInt(sh.area());
+    print("\n");
+    printInt(id::<int>(7));
+    print("\n");
+
+    var v: Vec<int> = new_vec::<int>();
+    push::<int>(&v, 10);
+    push::<int>(&v, 20);
+    printInt(*get::<int>(&v, 1));
+    print("\n");
+
+    var arr: [int; 3] = [1, 2, 3];
+    var sl: []int = arr[0:3];
+    printInt(sumSlice(sl));
+    print("\n");
+
+    var color: Color = Color.GREEN;
+    match (color) {
+        RED => { print("red\n"); }
+        GREEN => { print("green\n"); }
+        default => { print("other\n"); }
+    }
+
+    defer { print("after\n"); }
+    delete c;
+    free_vec::<int>(&v);
+    return 0;
+}
