@@ -4543,6 +4543,20 @@ bool Checker::fieldVisible(DeclId id, const std::string& name, Position pos) {
     return false;
 }
 
+bool Checker::methodVisible(DeclId id, const std::string& name, Position pos) {
+    // 4.8.4: methods follow fields. Public is the default; an inherited
+    // private method answers its declaring module, not the derived one.
+    if (!resolver_.methodIsPrivate(id, name)) {
+        return true;
+    }
+    std::string home = resolver_.methodModule(id, name);
+    if (home == module_) {
+        return true;
+    }
+    fail(pos, "'" + name + "' is private to module '" + home + "'");
+    return false;
+}
+
 TypeRef Checker::checkField(Field& expr) {
     // `da.aval`: the qualifier names a module, so the member resolves in
     // the defining scope, never in the current one. Functions answer their
@@ -4761,6 +4775,9 @@ TypeRef Checker::checkField(Field& expr) {
                                "' is ambiguous: several base classes declare it");
             return errorRef();
         }
+        if (!methodVisible(*id, expr.name, expr.pos)) {
+            return errorRef();
+        }
         return TypeRef{ctx_.closure(*sig)};
     }
     if (kind == Kind::Slice || kind == Kind::String || kind == Kind::Array) {
@@ -4802,6 +4819,9 @@ TypeRef Checker::checkField(Field& expr) {
                     return errorRef();
                 }
             }
+        }
+        if (!methodVisible(*id, expr.name, expr.pos)) {
+            return errorRef();
         }
         return TypeRef{ctx_.closure(*sig)};
     }

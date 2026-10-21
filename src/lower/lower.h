@@ -332,7 +332,10 @@ public:
                                  const Signature& sig, Position pos);
     // Lowers any expression to its words. Scalars answer one value; a string
     // literal answers its address and length. Anything larger is refused.
+    // The fallback types an unchecked literal: a template field's default is
+    // concrete per specialization, so its literal has no single recorded type.
     std::vector<ir::Value> lowerWords(const Expr* expr);
+    std::vector<ir::Value> lowerWords(const Expr* expr, TypeRef fallback);
     // `&f` where f names a plain function answers its code address as one
     // word; `&x` on a value answers its place through the shared helper
     // (slots, indirect, index, or global label).
@@ -665,7 +668,7 @@ private:
     // A float constant: the IEEE bits for the literal's own width, stored
     // in `constantBits` exactly as an integer constant stores its value.
     ir::Value constantFBits(uint64_t bits, TypeRef type, Position pos);
-    ir::Value lowerFloatLit(const FloatLit& lit);
+    ir::Value lowerFloatLit(const FloatLit& lit, TypeRef fallback = TypeRef{});
     ir::Value lowerNeg(const Unary& n);
     // Bitwise not on an integer: xor with all-ones at the operand width.
     // The checker proved an integer, so the only question left is the

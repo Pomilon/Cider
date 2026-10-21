@@ -993,26 +993,14 @@ private:
         const uint64_t intRegs = ms ? kMsabiIntRegs : kSysVIntRegs;
         const char* (*row)(uint64_t) = ms ? argRegMs : argReg;
         if (ms) {
-            bool sawFloat = false;
-            bool sawInt = false;
             uint64_t floats = 0;
             for (uint64_t w = 0; w < static_cast<uint64_t>(fn.params.size()); ++w) {
                 const ir::IRType cls = w < fn.paramClasses.size()
                                            ? fn.paramClasses[w]
                                            : ir::IRType::Void;
                 if (cls == ir::IRType::F32 || cls == ir::IRType::F64) {
-                    sawFloat = true;
                     ++floats;
-                } else {
-                    sawInt = true;
                 }
-            }
-            // Windows places a float by its argument position and an integer
-            // by its own; the IR flattens arguments to words, so a mixed
-            // signature cannot be read faithfully yet.
-            if (sawFloat && sawInt) {
-                refuse(fn.loc, "an msabi function mixing float and integer parameters");
-                return false;
             }
             if (floats > kMsabiSseRegs) {
                 refuse(fn.loc, "more than four float parameters in an msabi function");
@@ -1507,26 +1495,6 @@ private:
                 refuse(instr.loc, ms ? "more than four float arguments to an msabi call"
                                      : "more than eight float arguments");
                 return false;
-            }
-            if (ms) {
-                bool sawFloat = false;
-                bool sawInt = false;
-                for (const ir::Argument& arg : instr.arguments) {
-                    const bool floatArg = arg.width == ir::IRType::F32 ||
-                                          arg.width == ir::IRType::F64;
-                    if (floatArg) {
-                        sawFloat = true;
-                    } else {
-                        sawInt = true;
-                    }
-                }
-                // Windows places a float by its argument position and an
-                // integer by its own; the IR flattens arguments to words, so
-                // a mixed call cannot be placed faithfully yet.
-                if (sawFloat && sawInt) {
-                    refuse(instr.loc, "a msabi call mixing float and integer arguments");
-                    return false;
-                }
             }
             // Integer words flatten in order: a string arrives as (data,
             // length) in (rdi, rsi), which is the SysV two-eightbyte rule

@@ -105,6 +105,10 @@ public:
     // walk bases the way fieldType does; the declaring base answers.
     bool fieldIsPrivate(DeclId id, const std::string& name) const;
     std::string fieldModule(DeclId id, const std::string& name) const;
+    // 4.8.4: a method's visibility and the module that declares it. Both
+    // walk bases the way methodSig does; the declaring base answers.
+    bool methodIsPrivate(DeclId id, const std::string& name) const;
+    std::string methodModule(DeclId id, const std::string& name) const;
     // v2 CIDER-BUG-049: a field's default expression, or null when the
     // field carries none. Walks bases the way fieldType does; the
     // declaring base answers with its own spelling.
@@ -338,6 +342,9 @@ private:
     // The class in the chain that declares the field; none when no base
     // does. Visibility and the home module both hang off this owner.
     std::optional<DeclId> fieldOwner(DeclId id, const std::string& name) const;
+    // The class in the chain that declares the method; none when no base
+    // does. Visibility and the home module both hang off this owner.
+    std::optional<DeclId> methodOwner(DeclId id, const std::string& name) const;
     // A union's payload is its widest member, every member at offset 0, the
     // tag after the payload padded to the payload's alignment (TYPES.md
     // 3.4a). Same visited-set rule as structs: recursive unions are -1.
@@ -377,6 +384,8 @@ private:
     std::unordered_map<std::string, const Expr*> fieldDefaultExprs_;
     // 4.8.4: only private fields get an entry; public is the default.
     std::unordered_set<std::string> privateFields_;
+    // 4.8.4: only private methods get an entry; public is the default.
+    std::unordered_set<std::string> privateMethods_;
     std::unordered_map<std::string, Signature> methodSigs_;
     std::unordered_map<std::string, std::vector<std::string>> methodLists_;
     // Declared methods that carry `virtual`; the composed slot list is

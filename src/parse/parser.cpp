@@ -498,8 +498,25 @@ FieldDecl Parser::parseField() {
 
 MethodDecl Parser::parseMethod() {
     Position start = peek().pos;
-    bool isOverride = match(TokenKind::KwOverride);
-    bool isVirtual = match(TokenKind::KwVirtual);
+    bool isPrivate = false;
+    bool isOverride = false;
+    bool isVirtual = false;
+    // Visibility, override and virtual are modifiers of one method, so the
+    // spelling order between them carries no meaning. The last visibility
+    // wins, matching the field rule.
+    for (;;) {
+        if (match(TokenKind::KwPrivate)) {
+            isPrivate = true;
+        } else if (match(TokenKind::KwPublic)) {
+            isPrivate = false;
+        } else if (match(TokenKind::KwOverride)) {
+            isOverride = true;
+        } else if (match(TokenKind::KwVirtual)) {
+            isVirtual = true;
+        } else {
+            break;
+        }
+    }
     if (!match(TokenKind::KwFunc)) {
         failHere("expected a method");
         return MethodDecl(start, "", {}, nullptr, nullptr, false);
@@ -529,6 +546,7 @@ MethodDecl Parser::parseMethod() {
     MethodDecl out(start, std::move(name), std::move(params), std::move(returns),
                    std::unique_ptr<Block>(static_cast<Block*>(body.release())), isVirtual);
     out.isOverride = isOverride;
+    out.isPrivate = isPrivate;
     return out;
 }
 
@@ -578,20 +596,18 @@ std::unique_ptr<Decl> Parser::parseStructDecl(bool) {
     std::vector<FieldDecl> fields;
     std::vector<MethodDecl> methods;
     while (!check(TokenKind::RBrace) && !atEnd()) {
-        if (check(TokenKind::KwPrivate) || check(TokenKind::KwPublic)) {
-            TokenKind after = peekAt(1).kind;
-            if (after == TokenKind::KwFunc || after == TokenKind::KwVirtual ||
-                after == TokenKind::KwOverride) {
-                failHere("visibility on a method is not implemented yet");
-                break;
-            }
-            fields.push_back(parseField());
-        } else if (check(TokenKind::KwVar) ||
-            (check(TokenKind::Ident) && peekAt(1).kind == TokenKind::Colon)) {
-            fields.push_back(parseField());
-        } else if (check(TokenKind::KwVirtual) || check(TokenKind::KwFunc) ||
-                   check(TokenKind::KwOverride)) {
+        bool visible = check(TokenKind::KwPrivate) || check(TokenKind::KwPublic);
+        TokenKind afterVisible = visible ? peekAt(1).kind : TokenKind::End;
+        bool visibleMethod = visible && (afterVisible == TokenKind::KwFunc ||
+                                         afterVisible == TokenKind::KwVirtual ||
+                                         afterVisible == TokenKind::KwOverride);
+        if (visibleMethod || check(TokenKind::KwVirtual) ||
+            check(TokenKind::KwFunc) || check(TokenKind::KwOverride)) {
             methods.push_back(parseMethod());
+        } else if (visible || check(TokenKind::KwVar) ||
+                   (check(TokenKind::Ident) &&
+                    peekAt(1).kind == TokenKind::Colon)) {
+            fields.push_back(parseField());
         } else {
             failHere("a struct holds fields and methods");
             syncToStmt();
@@ -655,23 +671,13 @@ std::unique_ptr<Decl> Parser::parseClassDecl(bool) {
     std::unique_ptr<FuncDecl> init;
     std::unique_ptr<FuncDecl> deinit;
     while (!check(TokenKind::RBrace) && !atEnd()) {
-        if (check(TokenKind::KwPrivate) || check(TokenKind::KwPublic)) {
-            TokenKind after = peekAt(1).kind;
-            if (after == TokenKind::KwFunc || after == TokenKind::KwVirtual ||
-                after == TokenKind::KwOverride) {
-                failHere("visibility on a method is not implemented yet");
-                break;
-            }
-            fields.push_back(parseField());
-            continue;
-        }
-        if (check(TokenKind::KwVar) ||
-            (check(TokenKind::Ident) && peekAt(1).kind == TokenKind::Colon)) {
-            fields.push_back(parseField());
-            continue;
-        }
-        if (check(TokenKind::KwVirtual) || check(TokenKind::KwFunc) ||
-            check(TokenKind::KwOverride)) {
+        bool visible = check(TokenKind::KwPrivate) || check(TokenKind::KwPublic);
+        TokenKind afterVisible = visible ? peekAt(1).kind : TokenKind::End;
+        bool visibleMethod = visible && (afterVisible == TokenKind::KwFunc ||
+                                         afterVisible == TokenKind::KwVirtual ||
+                                         afterVisible == TokenKind::KwOverride);
+        if (visibleMethod || check(TokenKind::KwVirtual) ||
+            check(TokenKind::KwFunc) || check(TokenKind::KwOverride)) {
             MethodDecl method = parseMethod();
             if ((method.name == "init" || method.name == "deinit") &&
                 method.body != nullptr) {
@@ -690,6 +696,11 @@ std::unique_ptr<Decl> Parser::parseClassDecl(bool) {
             } else {
                 methods.push_back(std::move(method));
             }
+            continue;
+        }
+        if (visible || check(TokenKind::KwVar) ||
+            (check(TokenKind::Ident) && peekAt(1).kind == TokenKind::Colon)) {
+            fields.push_back(parseField());
             continue;
         }
         failHere("a class holds fields and methods");

@@ -248,6 +248,56 @@ void testStackArgs() {
           "a float between register args still passes");
 }
 
+// Windows x64 gives each argument class its own register row: the first
+// integer goes to rcx and the first float to xmm0, whatever their order.
+void testMixedMsabi() {
+    std::printf("mixed msabi arguments\n");
+    check(runQuiet("msabi func mix(a: int, b: f64, c: int) -> int {\n"
+                   "    return a * 100 + (b as int) * 10 + c;\n"
+                   "}\n"
+                   "func main() -> int { return mix(1, 2.0, 3); }\n") == 123,
+          "an integer and a float share an msabi signature");
+    check(runQuiet("msabi func alt(a: f64, b: int, c: f64, d: int) -> int {\n"
+                   "    return (a as int) + b * 100 + (c as int) * 10 + d;\n"
+                   "}\n"
+                   "func main() -> int { return alt(1.0, 2, 3.0, 4); }\n") == 235,
+          "a leading float still leaves rcx for the first integer");
+}
+
+// A default written in a generic template is typed by the field in each
+// specialization: the same `5` is a u8 byte, an i32 word and an f64.
+void testGenericFieldDefaults() {
+    std::printf("generic field defaults\n");
+    check(runQuiet("struct G<T> { var x: T = 5; var tail: u8 = 9; }\n"
+                   "func main() -> int {\n"
+                   "    var a: G<u8> = G<u8> { };\n"
+                   "    if (a.x != 5) { return 1; }\n"
+                   "    if (a.tail != 9) { return 2; }\n"
+                   "    var b: G<f64> = G<f64> { };\n"
+                   "    if (b.x != 5.0) { return 3; }\n"
+                   "    if (b.tail != 9) { return 4; }\n"
+                   "    var c: G<int> = G<int> { };\n"
+                   "    if (c.x != 5) { return 5; }\n"
+                   "    return 0;\n"
+                   "}\n") == 0,
+          "a generic default takes the field's specialized width");
+}
+
+// 4.8.4: methods take the same visibility as fields. A private method is
+// callable inside its declaring module, including from another method.
+void testPrivateMethods() {
+    std::printf("private methods\n");
+    check(runQuiet("class C {\n"
+                   "    private func f() -> int { return 7; }\n"
+                   "    func g() -> int { return this->f(); }\n"
+                   "}\n"
+                   "func main() -> int {\n"
+                   "    var c: C = C { };\n"
+                   "    return c.g();\n"
+                   "}\n") == 7,
+          "a private method is callable in its module");
+}
+
 void testCalls() {
     std::printf("calls\n");
     check(runQuiet("func add(a: int, b: int) -> int { return a + b; }\n"
@@ -2701,6 +2751,9 @@ int main() {
     std::printf("codegen_test — a Cider program runs\n\n");
     testExit();
     testStackArgs();
+    testMixedMsabi();
+    testGenericFieldDefaults();
+    testPrivateMethods();
     testCalls();
     testControl();
     testGlobals();

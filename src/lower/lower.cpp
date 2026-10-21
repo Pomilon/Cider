@@ -1332,8 +1332,11 @@ ir::Value Lowerer::constantFBits(uint64_t bits, TypeRef type, Position pos) {
     return result;
 }
 
-ir::Value Lowerer::lowerFloatLit(const FloatLit& lit) {
+ir::Value Lowerer::lowerFloatLit(const FloatLit& lit, TypeRef fallback) {
     TypeRef type = checker_.typeOf(&lit);
+    if (type.isError() && !fallback.isError()) {
+        type = fallback;
+    }
     if (type.isError() || type.type->kind() != Kind::Basic) {
         refuse(lit.pos, "this constant");
         return undefined();
@@ -3718,11 +3721,13 @@ void Lowerer::emitFieldDefaults(const Place& baseIn, TypeRef objType,
             refuse(pos, "this default");
             return;
         }
-        std::vector<ir::Value> value = lowerWords(dflt);
+        TypeRef spelled = checker_.typeOf(dflt);
+        TypeRef defaultType = spelled.isError() ? fieldType : spelled;
+        std::vector<ir::Value> value = lowerWords(dflt, defaultType);
         if (failed_) {
             return;
         }
-        value = boxClassOperand(dflt, std::move(value), checker_.typeOf(dflt),
+        value = boxClassOperand(dflt, std::move(value), defaultType,
                                 fieldType, pos);
         if (failed_) {
             return;
@@ -7748,6 +7753,10 @@ std::vector<ir::Value> Lowerer::lowerAddrOf(const Unary& n) {
 }
 
 std::vector<ir::Value> Lowerer::lowerWords(const Expr* expr) {
+    return lowerWords(expr, TypeRef{});
+}
+
+std::vector<ir::Value> Lowerer::lowerWords(const Expr* expr, TypeRef fallback) {
     if (const auto* sup = dynamic_cast<const Super*>(expr)) {
         // The receiver this method already has: the `self` local.
         for (auto frame = locals_.rbegin(); frame != locals_.rend(); ++frame) {
@@ -8044,7 +8053,7 @@ std::vector<ir::Value> Lowerer::lowerWords(const Expr* expr) {
                     constantI64(0, addr, expr->pos)};
         }
     }
-    return {onIdentOrExpr(expr, checker_.typeOf(expr))};
+    return {onIdentOrExpr(expr, fallback)};
 }
 
 void Lowerer::onExprStmt(ExprStmt& n) {
@@ -12045,7 +12054,6 @@ void Lowerer::onForInProtocol(ForInStmt& n, TypeRef seqType, DeclId id) {
 }
 
 ir::Value Lowerer::onIdentOrExpr(const Expr* expr, TypeRef expected) {
-    (void)expected;
     if (expr == nullptr || failed_) {
         return undefined();
     }
@@ -12066,9 +12074,31 @@ ir::Value Lowerer::onIdentOrExpr(const Expr* expr, TypeRef expected) {
         EvalEnv env = resolver_.evalEnv(emitScope());
         EvalResult folded = evalConstInt(*lit, env, active);
         TypeRef type = checker_.typeOf(expr);
+        bool fromFallback = false;
+        if (type.isError() && !expected.isError() &&
+            expected.type->kind() == Kind::Basic) {
+            type = expected;
+            fromFallback = true;
+        }
         if (!folded.ok) {
             refuse(lit->pos, "this constant");
             return undefined();
+        }
+        if (fromFallback && basicIsInteger(*type.type->basic())) {
+            int width = basicWidthBits(*type.type->basic());
+            bool isSigned = basicIsSigned(*type.type->basic());
+            __int128 lo = isSigned ? -(static_cast<__int128>(1) << (width - 1)) : 0;
+            __int128 hi = isSigned ? ((static_cast<__int128>(1) << (width - 1)) - 1)
+                                   : ((static_cast<__int128>(1) << width) - 1);
+            unsigned __int128 bits = static_cast<uint64_t>(folded.value);
+            bool fits = folded.big
+                            ? !isSigned && bits <= static_cast<unsigned __int128>(hi)
+                            : static_cast<__int128>(folded.value) >= lo &&
+                                  static_cast<__int128>(folded.value) <= hi;
+            if (!fits) {
+                refuse(lit->pos, "this literal does not fit " + typeName(type));
+                return undefined();
+            }
         }
         // A literal typed as a float by its context lowers as that float's
         // bits — the integer value converted with the cast table's
@@ -12089,7 +12119,7 @@ ir::Value Lowerer::onIdentOrExpr(const Expr* expr, TypeRef expected) {
         return constantI64(folded.value, type, lit->pos);
     }
     if (auto* lit = dynamic_cast<const FloatLit*>(expr)) {
-        return lowerFloatLit(*lit);
+        return lowerFloatLit(*lit, expected);
     }
     if (auto* lit = dynamic_cast<const CharLit*>(expr)) {
         return constantI64(static_cast<int64_t>(lit->value),

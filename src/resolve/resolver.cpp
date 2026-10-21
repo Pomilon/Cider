@@ -266,6 +266,51 @@ std::string Resolver::fieldModule(DeclId id, const std::string& name) const {
     return decl->scope->module;
 }
 
+std::optional<DeclId> Resolver::methodOwner(DeclId id,
+                                            const std::string& name) const {
+    if (methodSigs_.find(declKey(id) + "." + name) != methodSigs_.end()) {
+        return id;
+    }
+    std::unordered_set<std::string> seen;
+    seen.insert(declKey(id));
+    std::vector<DeclId> frontier = classBases(id);
+    while (!frontier.empty()) {
+        DeclId next = frontier.back();
+        frontier.pop_back();
+        if (!seen.insert(declKey(next)).second) {
+            continue;
+        }
+        if (methodSigs_.find(declKey(next) + "." + name) != methodSigs_.end()) {
+            return next;
+        }
+        for (DeclId parent : classBases(next)) {
+            frontier.push_back(parent);
+        }
+    }
+    return std::nullopt;
+}
+
+bool Resolver::methodIsPrivate(DeclId id, const std::string& name) const {
+    std::optional<DeclId> owner = methodOwner(id, name);
+    if (!owner.has_value()) {
+        return false;
+    }
+    return privateMethods_.find(declKey(*owner) + "." + name) !=
+           privateMethods_.end();
+}
+
+std::string Resolver::methodModule(DeclId id, const std::string& name) const {
+    std::optional<DeclId> owner = methodOwner(id, name);
+    if (!owner.has_value()) {
+        return entryModule();
+    }
+    const Decl* decl = declById(*owner);
+    if (decl == nullptr || decl->scope == nullptr) {
+        return entryModule();
+    }
+    return decl->scope->module;
+}
+
 const Expr* Resolver::fieldDefault(DeclId id, const std::string& name) const {
     auto found = fieldDefaultExprs_.find(declKey(id) + "." + name);
     if (found != fieldDefaultExprs_.end()) {
@@ -1388,6 +1433,9 @@ void Resolver::resolveDeclTypes(const std::string& module, Program& program,
                     std::string key = declKey(self->id);
                     methodSigs_[key + "." + method.name] = std::move(sig);
                     methodLists_[key].push_back(method.name);
+                    if (method.isPrivate) {
+                        privateMethods_.insert(key + "." + method.name);
+                    }
                 }
             }
             continue;
@@ -1443,6 +1491,9 @@ void Resolver::resolveDeclTypes(const std::string& module, Program& program,
                     methodSigs_[key + "." + method.name] = std::move(sig);
                     methodLists_[key].push_back(method.name);
                     methodVirtual_[key + "." + method.name] = method.isVirtual;
+                    if (method.isPrivate) {
+                        privateMethods_.insert(key + "." + method.name);
+                    }
                 }
             }
             // `init`/`deinit` parse to their own declarations, not methods,
@@ -2015,6 +2066,10 @@ std::optional<DeclId> Resolver::instantiate(DeclId tmpl, const std::vector<TypeR
             }
             methodSigs_[into + "." + method] = substSig(*sig, tmpl, args, pos);
             methodLists_[into].push_back(method);
+            if (privateMethods_.find(declKey(tmpl) + "." + method) !=
+                privateMethods_.end()) {
+                privateMethods_.insert(into + "." + method);
+            }
         }
         // Bases substitute like members: a base recorded as nominal of an
         // earlier specialization re-originates through specOrigin_ inside

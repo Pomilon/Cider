@@ -306,6 +306,9 @@ private:
     // 4.8.4: a private field is visible strictly within the module that
     // declares its class or struct. Fails and answers false elsewhere.
     bool fieldVisible(DeclId id, const std::string& name, Position pos);
+    // 4.8.4: a private method is visible strictly within the module that
+    // declares its type. Fails and answers false elsewhere.
+    bool methodVisible(DeclId id, const std::string& name, Position pos);
     // v2 CIDER-BUG-049: every field default is checked against its field
     // type in the declaring module, so the lowerer can replay it.
     void checkFieldDefaults(DeclId id, const std::vector<FieldDecl>& fields);

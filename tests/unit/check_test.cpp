@@ -1091,6 +1091,52 @@ void testPrivateFields() {
           "a cross-module literal naming a private field refuses");
 }
 
+void testPrivateMethods() {
+    std::printf("private and public methods\n");
+    cider::resolve::Resolver::ModuleLoader load = [](const std::string& name)
+        -> std::unique_ptr<cider::Program> {
+        if (name != "lib") {
+            return nullptr;
+        }
+        cider::Lexer lexer(
+            "lib.cid",
+            "export class C {\n"
+            "    private func f() -> int { return 7; }\n"
+            "    func g() -> int { return this->f(); }\n"
+            "}\n"
+            "export func make() -> *C { return new C { }; }\n");
+        cider::Parser parser("lib.cid", lexer.lex());
+        return parser.parse();
+    };
+    Checked hidden = check(
+        "import lib;\n"
+        "func main() -> int {\n"
+        "    var c: *lib.C = lib.make();\n"
+        "    return c->f();\n"
+        "}\n",
+        load);
+    check(!hidden.ok && hidden.stage == "check",
+          "a cross-module private method call refuses");
+    Checked open = check(
+        "import lib;\n"
+        "func main() -> int {\n"
+        "    var c: *lib.C = lib.make();\n"
+        "    return c->g();\n"
+        "}\n",
+        load);
+    check(open.ok, "a cross-module public method call checks: " + open.stage);
+    Checked ordered = check(
+        "class B { virtual func f() -> int { return 1; } }\n"
+        "class C : B { public func g() -> int { return 2; } }\n"
+        "class D : B { private override func f() -> int { return 3; } }\n"
+        "class E : B { override private func f() -> int { return 4; } }\n"
+        "func main() -> int {\n"
+        "    var c: C = C { }; var d: D = D { }; var e: E = E { };\n"
+        "    return c.g();\n"
+        "}\n");
+    check(ordered.ok, "method modifiers may come in any order: " + ordered.stage);
+}
+
 void testSuperInit() {
     std::printf("super_init base constructor calls\n");
     Checked chain = check(
@@ -2213,6 +2259,7 @@ int main() {
     testAlignof();
     testTypedForIn();
     testPrivateFields();
+    testPrivateMethods();
     testSuperInit();
     testMultipleBases();
     testFieldDefaults();

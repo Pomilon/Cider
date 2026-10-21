@@ -606,6 +606,9 @@ struct MethodDecl : Node {
     std::unique_ptr<Block> body;
     bool isVirtual;
     bool isOverride = false;
+    // 4.8.4: public is the default; `private` restricts calls to the module
+    // that declares the method's type.
+    bool isPrivate = false;
     MethodDecl(Position p, std::string n, std::vector<Param> ps,
                std::unique_ptr<TypeExpr> r, std::unique_ptr<Block> b, bool virt)
         : Node(std::move(p)), name(std::move(n)), params(std::move(ps)),
