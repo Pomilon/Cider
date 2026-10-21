@@ -499,6 +499,31 @@ void testSubdirImport() {
     rmdir(dir);
 }
 
+// v2 accepted `linux` and `x86_64-linux` as spellings of the native target.
+void testNativeTargetAliases() {
+    std::printf("native target aliases\n");
+    std::string src = writeTemp("func main() -> int { return 7; }\n");
+    for (const char* alias : {"linux", "x86_64-linux"}) {
+        char asmPath[] = "/tmp/cider_driver_XXXXXX.s";
+        int asmFd = mkstemps(asmPath, 2);
+        close(asmFd);
+        Result compiled =
+            run({"compile", "--target", alias, "-o", asmPath, src});
+        check(compiled.code == 0,
+              std::string("compile --target ") + alias + ": " + compiled.err);
+        FILE* asmFile = fopen(asmPath, "r");
+        char head[64] = {0};
+        size_t got = asmFile != nullptr ? fread(head, 1, 63, asmFile) : 0;
+        if (asmFile != nullptr) {
+            fclose(asmFile);
+        }
+        check(got > 0 && std::string(head).find("main:") != std::string::npos,
+              std::string("--target ") + alias + " emits native assembly");
+        unlink(asmPath);
+    }
+    unlink(src.c_str());
+}
+
 // A missing file, a bad target and a bad subcommand all name themselves.
 void testFailures() {
     std::printf("failures name themselves\n");
@@ -543,6 +568,7 @@ int main() {
     testQualifiedConst();
     testLibSearch();
     testSubdirImport();
+    testNativeTargetAliases();
     testFailures();
     testVmTarget();
     std::printf("\n%d checks, %s\n", checks, failures == 0 ? "all passed" : "FAILURES");

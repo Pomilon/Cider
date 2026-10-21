@@ -290,6 +290,17 @@ int runBinary(const std::string& path) {
     return WEXITSTATUS(status);
 }
 
+// v2 accepted two extra spellings for the native target. Keep them as
+// aliases so existing build scripts do not have to be rewritten, but
+// canonicalize before the target check so only one name reaches the
+// backend.
+std::string canonicalTarget(const std::string& target) {
+    if (target == "linux" || target == "x86_64-linux") {
+        return "native";
+    }
+    return target;
+}
+
 }  // namespace
 
 int runDriver(const std::vector<std::string>& args, std::string& out, std::string& err) {
@@ -332,6 +343,7 @@ int runDriver(const std::vector<std::string>& args, std::string& out, std::strin
         err = "no input file\n";
         return 2;
     }
+    target = canonicalTarget(target);
     if (target != "native" && target != "vm") {
         err = "target " + target + " is not emitted yet: native only in this slice\n";
         return 2;
