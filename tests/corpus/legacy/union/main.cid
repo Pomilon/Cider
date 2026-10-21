@@ -1,3 +1,6 @@
+// Migrated to v3: union locals spell `= uninit`; v3 unions are tagged,
+// so writing one member and reading another is a checked read, not an
+// untagged overlap read (raw overlap only through an explicit cast).
 from std.io import puts, exit;
 
 union IntOrInt {
@@ -22,7 +25,7 @@ union StructOrInt {
 
 func _start() {
     // Test 1: Two ints share offset 0 — verify overlap
-    var u: IntOrInt;
+    var u: IntOrInt = uninit;
     u.a = 42;
     if (u.a != 42) { puts("FAIL: write a\n"); exit(1); }
     if (u.b != 42) { puts("FAIL: b != a\n"); exit(2); }
@@ -35,7 +38,7 @@ func _start() {
     var sz2: int = sizeof(IntAndChar);
     if (sz2 != 4) { puts("FAIL: sizeof char+int\n"); exit(5); }
     // Test 4: struct + int
-    var su: StructOrInt;
+    var su: StructOrInt = uninit;
     su.p.x = 10;
     su.p.y = 20;
     if (su.p.x + su.p.y != 30) { puts("FAIL: struct in union\n"); exit(6); }

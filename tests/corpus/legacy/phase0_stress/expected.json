@@ -1,1 +1,1 @@
-{"stdout": "", "stderr": "", "exit": 0}
+{"stdout": "PASS: enums\nPASS: short-circuit\nPASS: ternary\nPASS: incdec\nPASS: compound bitwise\nExt!\nPASS: extern\nCider Phase0 Stress\nPASS: fs\nPASS: fn ptr\nPASS: try/catch (stress)\nALL PHASE 0 STRESS TESTS PASSED\n", "stderr": "", "exit": 0}

@@ -1,3 +1,6 @@
+// Migrated to v3: increment/decrement are statements, function pointers
+// spell their signature, raw locals spell `= uninit`, and the byte
+// value passes as an explicit char.
 from std.io import puts, exit;
 from std.fs import open, read, write, close, unlink, O_RDONLY, O_WRONLY, O_RDWR, O_CREAT, O_TRUNC;
 
@@ -58,10 +61,12 @@ func main() -> int {
 
     // 4. ++ and --
     var x: int = 5;
-    var y: int = ++x;
+    ++x;
+    var y: int = x;
     if (x != 6) { puts("FAIL: ++x"); exit(1); }
     if (y != 6) { puts("FAIL: ++x result"); exit(1); }
-    y = --x;
+    --x;
+    y = x;
     if (x != 5) { puts("FAIL: --x"); exit(1); }
     if (y != 5) { puts("FAIL: --x result"); exit(1); }
     puts("PASS: incdec");
@@ -83,30 +88,30 @@ func main() -> int {
     putchar('x');
     putchar('t');
     putchar('!');
-    putchar(10);
+    putchar(10 as char);
     puts("PASS: extern");
 
     // 7. File I/O
     var fd: int = open("/tmp/cider_stress.txt", O_WRONLY | O_CREAT | O_TRUNC, 420);
     if (fd < 0) { puts("FAIL: fs.open"); exit(1); }
     var msg: string = "Cider Phase0 Stress\n";
-    var written: int = write(fd, msg as *void, 20);
+    var written: int = write(fd, &msg[0] as *void, 20);
     if (written <= 0) { puts("FAIL: fs.write"); exit(1); }
     close(fd);
     fd = open("/tmp/cider_stress.txt", O_RDONLY, 0);
-    var buf: [char; 64];
-    var nread: int = read(fd, buf as *void, 64);
+    var buf: [char; 64] = uninit;
+    var nread: int = read(fd, &buf[0] as *void, 64);
     if (nread <= 0) { puts("FAIL: fs.read"); exit(1); }
-    write(1, buf as *void, nread);
+    write(1, &buf[0] as *void, nread);
     close(fd);
     unlink("/tmp/cider_stress.txt");
     puts("PASS: fs");
 
     // 8. Function pointers
-    var fn: *void = add;
+    var fn: *func(int, int) -> int = &add;
     var result: int = fn(20, 22);
     if (result != 42) { puts("FAIL: fn ptr add"); exit(1); }
-    fn = mul;
+    fn = &mul;
     result = fn(6, 7);
     if (result != 42) { puts("FAIL: fn ptr mul"); exit(1); }
     puts("PASS: fn ptr");
@@ -116,11 +121,11 @@ func main() -> int {
 
     // 10. Combined stress
     var stress: int = 0;
-    var fn_complex: *void = fact;
+    var fn_complex: *func(int) -> int = &fact;
     stress = fn_complex(10);
     if (stress != 3628800) { puts("FAIL: fn ptr fact"); exit(1); }
 
-    for (var i: int = 0; i < 5; i = ++i) {
+    for (var i: int = 0; i < 5; i = i + 1) {
         var loopVal: int = i > 2 ? i * 10 : i * -1;
         if (loopVal == 30 || loopVal == 40) {
             stress = stress + loopVal;

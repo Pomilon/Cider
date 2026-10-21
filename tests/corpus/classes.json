@@ -1130,9 +1130,9 @@
   "class": "A"
  },
  "phase0_stress": {
-  "actual": "tests/corpus/legacy/phase0_stress/main.cid:97:24: a variable needs an initialiser (three legs identical; also v2 ++/-- expressions, *void fn stores, extern, enums and fs imports)",
-  "blocker": "v2-phase0-features (incdec expressions, *void fn stores, extern, enums, stdlib imports) [B-terminal]",
-  "class": "B"
+  "actual": "migrated to v3: increment/decrement are statements, function pointers spell *func(...) with &symbol, raw locals spell `= uninit`, and byte/array/string arguments take &x[0] as *void; expected.json records the deterministic output; all three legs match",
+  "blocker": "none",
+  "class": "A"
  },
  "phase1_stress": {
   "actual": "exact stdout/stderr/exit match (scope-exit finalizers became explicit deletes per FEATURES 5.3; overlap reads via raw-bytes row per TYPES 4.6; legacy oracle corrected to real stdout bytes)",
@@ -1246,7 +1246,7 @@
  },
  "spec": {
   "actual": "cider run exit 1 on all three legs, stdout empty, stderr identical (175 bytes): 6:10: a type parameter needs a name; 8:1: expected a declaration; 11:21: expected an expression (no specialization definitions and no generic inference in v3)",
-  "blocker": "v3-generics-model (no specialization definitions, no generic inference) [B-terminal]",
+  "blocker": "v2-generic-specialization-and-inference-purged (v3 instantiates only at use sites with explicit ::<...>) [B-terminal]",
   "class": "B"
  },
  "sret_expr_calls": {
@@ -1461,7 +1461,7 @@
  },
  "trycatch": {
   "actual": "cider run exit 1 on all three legs, stdout empty, stderr identical (814 bytes): 6:13: a catch binds a name and a type; 10:5, 12:5, 14:5 and 17:5: expected a declaration",
-  "blocker": "try-statement-unimplemented (v2 try/catch/throw purged; untyped catch is rejected) [B-terminal]",
+  "blocker": "v2-try-catch-throw-purged (Standard 4.4b; explicit status codes, Result and defer replace it) [B-terminal]",
   "class": "B"
  },
  "type_alias": {
@@ -1505,8 +1505,8 @@
   "class": "B"
  },
  "union": {
-  "actual": "cider run exit 1 on all three legs, stdout empty, stderr identical (148 bytes): 25:20 and 38:24: a variable needs an initialiser; the program's untagged overlap reads (u.a/u.b without live-member construction) are rejected by v3 union semantics (\u00a72.5: exactly one live member via new)",
-  "blocker": "v3-union-model (one live member via new; untagged overlap reads rejected) [B-terminal]",
+  "actual": "cider run exit 132 (SIGILL) on all three legs after migration, stdout empty, stderr identical: `u.a = 42` writes the a tag, then the checked read `u.b` traps on the tag mismatch; v2 read the overlapping bytes directly",
+  "blocker": "v3-tagged-union (payload members overlap at offset 0, but a member read checks the tag; raw overlap is only through an explicit cast) [B-terminal]",
   "class": "B"
  },
  "unwind_intermediate_frames": {
