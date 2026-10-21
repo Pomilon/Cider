@@ -136,7 +136,7 @@ public:
     // two-word value (code address, captures pointer).
     void onFuncLit(FuncLit& lit, const std::vector<check::Captured>& captures,
                    const Signature& sig) override;
-    ir::Value onBinary(Binary& n);
+    ir::Value onBinary(Binary& n, TypeRef fallback);
     // `&&` and `||` with short-circuit control flow: the deciding side
     // leaves its value in a cell, and only the taken arm writes the answer.
     ir::Value lowerShortCircuit(const Binary& n);
@@ -669,11 +669,11 @@ private:
     // in `constantBits` exactly as an integer constant stores its value.
     ir::Value constantFBits(uint64_t bits, TypeRef type, Position pos);
     ir::Value lowerFloatLit(const FloatLit& lit, TypeRef fallback = TypeRef{});
-    ir::Value lowerNeg(const Unary& n);
+    ir::Value lowerNeg(const Unary& n, TypeRef fallback);
     // Bitwise not on an integer: xor with all-ones at the operand width.
     // The checker proved an integer, so the only question left is the
     // width the xor truncates to — the operand's own.
-    ir::Value lowerBitNot(const Unary& n);
+    ir::Value lowerBitNot(const Unary& n, TypeRef fallback);
     // Usual float conversion (SEMANTICS §2.3): an integer or narrower
     // float value converts to the target float width; anything else
     // passes through unchanged.

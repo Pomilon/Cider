@@ -1504,8 +1504,11 @@ ir::Value Lowerer::widenFloat(ir::Value v, TypeRef from, TypeRef to,
     return out;
 }
 
-ir::Value Lowerer::lowerBitNot(const Unary& n) {
+ir::Value Lowerer::lowerBitNot(const Unary& n, TypeRef fallback) {
     TypeRef type = checker_.typeOf(&n);
+    if (type.isError() && !fallback.isError()) {
+        type = fallback;
+    }
     if (type.isError() || type.type->kind() != Kind::Basic) {
         refuse(n.pos, "this operator");
         return undefined();
@@ -1528,8 +1531,11 @@ ir::Value Lowerer::lowerBitNot(const Unary& n) {
                      n.pos);
 }
 
-ir::Value Lowerer::lowerNeg(const Unary& n) {
+ir::Value Lowerer::lowerNeg(const Unary& n, TypeRef fallback) {
     TypeRef type = checker_.typeOf(&n);
+    if (type.isError() && !fallback.isError()) {
+        type = fallback;
+    }
     if (type.isError() || type.type->kind() != Kind::Basic) {
         refuse(n.pos, "this operator");
         return undefined();
@@ -7844,7 +7850,11 @@ std::vector<ir::Value> Lowerer::lowerWords(const Expr* expr, TypeRef fallback) {
         // refuses a program the checker accepted.
         if (unary->op == UnOp::Not || unary->op == UnOp::Neg ||
             unary->op == UnOp::BitNot) {
-            ir::Value single = onIdentOrExpr(expr, checker_.typeOf(expr));
+            TypeRef type = checker_.typeOf(expr);
+            if (type.isError() && !fallback.isError()) {
+                type = fallback;
+            }
+            ir::Value single = onIdentOrExpr(expr, type);
             if (failed_) {
                 return {undefined()};
             }
@@ -8658,7 +8668,7 @@ ir::Value Lowerer::onCast(Cast& n) {
     return result;
 }
 
-ir::Value Lowerer::onBinary(Binary& n) {
+ir::Value Lowerer::onBinary(Binary& n, TypeRef fallback) {
     if (failed_) {
         return undefined();
     }
@@ -8668,6 +8678,19 @@ ir::Value Lowerer::onBinary(Binary& n) {
     TypeRef lhs = checker_.typeOf(n.lhs.get());
     TypeRef rhs = checker_.typeOf(n.rhs.get());
     TypeRef result = checker_.typeOf(&n);
+    // A generic template's field default is never checked, so the whole
+    // expression carries no recorded type. The field's specialized type
+    // is the answer the default must produce, and it types both operands
+    // the same way a directly checked default would have been typed.
+    if (result.isError() && !fallback.isError()) {
+        result = fallback;
+        if (lhs.isError()) {
+            lhs = fallback;
+        }
+        if (rhs.isError()) {
+            rhs = fallback;
+        }
+    }
     if ((n.op == BinOp::Eq || n.op == BinOp::Ne) && !lhs.isError() &&
         !rhs.isError() &&
         ((lhs.type->kind() == Kind::String &&
@@ -12061,7 +12084,7 @@ ir::Value Lowerer::onIdentOrExpr(const Expr* expr, TypeRef expected) {
         return onIdent(const_cast<Ident&>(*ident));
     }
     if (auto* binary = dynamic_cast<const Binary*>(expr)) {
-        return onBinary(const_cast<Binary&>(*binary));
+        return onBinary(const_cast<Binary&>(*binary), expected);
     }
     if (auto* call = dynamic_cast<const Call*>(expr)) {
         return onCall(const_cast<Call&>(*call));
@@ -12197,13 +12220,16 @@ ir::Value Lowerer::onIdentOrExpr(const Expr* expr, TypeRef expected) {
             return words[0];
         }
         if (unary->op == UnOp::Neg) {
-            return lowerNeg(*unary);
+            return lowerNeg(*unary, expected);
         }
         if (unary->op == UnOp::BitNot) {
-            return lowerBitNot(*unary);
+            return lowerBitNot(*unary, expected);
         }
         if (unary->op == UnOp::Not) {
             TypeRef type = checker_.typeOf(expr);
+            if (type.isError() && !expected.isError()) {
+                type = expected;
+            }
             ir::Value value = onIdentOrExpr(unary->operand.get(), type);
             if (failed_) {
                 return undefined();

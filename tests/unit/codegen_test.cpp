@@ -281,6 +281,26 @@ void testGenericFieldDefaults() {
                    "    return 0;\n"
                    "}\n") == 0,
           "a generic default takes the field's specialized width");
+    check(runQuiet("struct A<T> { var x: T = 5 + 1; var y: T = 7 - 2; }\n"
+                   "func main() -> int {\n"
+                   "    var a: A<u8> = A<u8> { };\n"
+                   "    if (a.x != 6) { return 1; }\n"
+                   "    if (a.y != 5) { return 2; }\n"
+                   "    var b: A<f64> = A<f64> { };\n"
+                   "    if (b.x != 6.0) { return 3; }\n"
+                   "    if (b.y != 5.0) { return 4; }\n"
+                   "    return 0;\n"
+                   "}\n") == 0,
+          "a compound generic default takes the field's specialized width");
+    check(runQuiet("struct B<T> { var z: T = -(2); }\n"
+                   "func main() -> int {\n"
+                   "    var a: B<int> = B<int> { };\n"
+                   "    if (a.z != -2) { return 1; }\n"
+                   "    var b: B<f64> = B<f64> { };\n"
+                   "    if (b.z != -2.0) { return 2; }\n"
+                   "    return 0;\n"
+                   "}\n") == 0,
+          "a unary generic default takes the field's specialized width");
 }
 
 // 4.8.4: methods take the same visibility as fields. A private method is
