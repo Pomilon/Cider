@@ -66,6 +66,9 @@ const std::unordered_map<std::string, TokenKind>& keywords() {
         {"i64", TokenKind::KwI64}, {"u8", TokenKind::KwU8},
         {"u16", TokenKind::KwU16}, {"u32", TokenKind::KwU32},
         {"u64", TokenKind::KwU64}, {"f32", TokenKind::KwF32},
+        // `uint` is the u32 alias (Standard 2.1): the token is KwU32, so no
+        // layer below the lexer ever sees a second spelling.
+        {"uint", TokenKind::KwU32},
         {"f64", TokenKind::KwF64},
         // `float` is the f32 alias (TYPES.md §10): same token, same type,
         // so nothing downstream ever sees a separate spelling.

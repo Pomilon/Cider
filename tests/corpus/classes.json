@@ -1430,9 +1430,9 @@
   "class": "A"
  },
  "test_types": {
-  "actual": "cider run exit 1 on all three legs, stdout empty, stderr identical (242 bytes): 6:24: a char compares with a char, not a number; 12:12: cannot use char as i32; 6:24: not lowered yet: a value of this type",
-  "blocker": "v3-char-model (char and byte are distinct; char compares with char, not a number) [B-terminal]",
-  "class": "B"
+  "actual": "migrated to v3: char and byte remain distinct, so the comparison casts (`b as char`) and the return converts (`c as int`); expected.json records the deterministic output and exit 65; all three legs match",
+  "blocker": "none",
+  "class": "A"
  },
  "test_vector": {
   "actual": "exact stdout/stderr/exit match",

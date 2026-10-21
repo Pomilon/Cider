@@ -1,13 +1,16 @@
+// Migrated to v3: char and byte are distinct types; the comparison
+// spells an explicit cast (`b as char`), and the return converts
+// the char to int (`c as int`).
 from std.io import puts;
 
 func main() -> int {
     var c: char = 'A';
     var b: byte = 65; // 'A'
-    var isSame: bool = c == b;
+    var isSame: bool = c == (b as char);
 
     if (isSame) {
         puts("Char and Byte are equivalent integers");
     }
 
-    return c;
+    return c as int;
 }

@@ -89,6 +89,17 @@ void testIntegers() {
     check(badOct.kind == cider::TokenKind::Error, "8 is not an octal digit");
 }
 
+// The Standard's primitive aliases lex to the canonical type token.
+void testTypeAliases() {
+    std::printf("type aliases\n");
+    check(only(lex("uint"), "uint").kind == cider::TokenKind::KwU32,
+          "uint is the u32 alias");
+    check(only(lex("float"), "float").kind == cider::TokenKind::KwF32,
+          "float is the f32 alias");
+    check(only(lex("byte"), "byte").kind == cider::TokenKind::KwByte,
+          "byte is the u8 alias");
+}
+
 // A float literal keeps its exact text and gets no type here either.
 void testFloats() {
     std::printf("float literals keep their text\n");
@@ -256,6 +267,7 @@ int main() {
     std::printf("lexer_test — one character in, one token out\n\n");
     testEmpty();
     testDeclaration();
+    testTypeAliases();
     testIntegers();
     testFloats();
     testChars();
