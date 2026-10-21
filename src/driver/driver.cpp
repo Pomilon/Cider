@@ -11,6 +11,8 @@
 
 #include "driver/driver.h"
 
+#include "target/target.h"
+
 #include <cstdio>
 #include <cstdlib>
 #include <csignal>
@@ -290,17 +292,6 @@ int runBinary(const std::string& path) {
     return WEXITSTATUS(status);
 }
 
-// v2 accepted two extra spellings for the native target. Keep them as
-// aliases so existing build scripts do not have to be rewritten, but
-// canonicalize before the target check so only one name reaches the
-// backend.
-std::string canonicalTarget(const std::string& target) {
-    if (target == "linux" || target == "x86_64-linux") {
-        return "native";
-    }
-    return target;
-}
-
 }  // namespace
 
 int runDriver(const std::vector<std::string>& args, std::string& out, std::string& err) {
@@ -318,13 +309,17 @@ int runDriver(const std::vector<std::string>& args, std::string& out, std::strin
         err = command + " is not implemented yet\n";
         return 2;
     }
-    std::string target = "native";
+    target::Kind targetKind = target::Kind::Native;
     std::string output;
     std::string input;
     bool noOpt = false;
     for (uint64_t i = 1; i < static_cast<uint64_t>(args.size()); ++i) {
         if (args[i] == "--target" && i + 1 < static_cast<uint64_t>(args.size())) {
-            target = args[++i];
+            const std::string name = args[++i];
+            if (!target::parse(name, targetKind)) {
+                err = "unknown target '" + name + "'\n";
+                return 2;
+            }
         } else if (args[i] == "--no-opt") {
             noOpt = true;
         } else if (args[i] == "-o" && i + 1 < static_cast<uint64_t>(args.size())) {
@@ -341,11 +336,6 @@ int runDriver(const std::vector<std::string>& args, std::string& out, std::strin
     }
     if (input.empty()) {
         err = "no input file\n";
-        return 2;
-    }
-    target = canonicalTarget(target);
-    if (target != "native" && target != "vm") {
-        err = "target " + target + " is not emitted yet: native only in this slice\n";
         return 2;
     }
     bool found = false;
@@ -366,7 +356,7 @@ int runDriver(const std::vector<std::string>& args, std::string& out, std::strin
         out = ir::dumpModule(*pipe.module);
         return 0;
     }
-    if (target == "vm") {
+    if (targetKind == target::Kind::Vm) {
         // An interpreter is not an emitter: there is no assembly to write,
         // so compile names the target and refuses. Run interprets instead.
         if (command == "compile") {
@@ -390,9 +380,13 @@ int runDriver(const std::vector<std::string>& args, std::string& out, std::strin
         }
         return interpreted.exitCode;
     }
-    codegen::EmitResult emitted = codegen::emitNative(*pipe.module);
+    codegen::EmitResult emitted = codegen::emit(*pipe.module, targetKind);
     if (!emitted.ok) {
-        err = at(emitted.pos) + ": " + emitted.error + "\n";
+        if (emitted.pos.file.empty()) {
+            err = emitted.error + "\n";
+        } else {
+            err = at(emitted.pos) + ": " + emitted.error + "\n";
+        }
         return 1;
     }
     if (command == "compile") {

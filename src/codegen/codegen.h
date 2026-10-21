@@ -45,8 +45,9 @@ struct EmitResult {
 // paths — gate L5.
 EmitResult emitNative(const ir::Module& module);
 
-// The same, naming the target. Anything but Native is a diagnostic, because a
-// backend that does not exist must say so rather than emit the wrong one.
+// The same, naming the target. Native is the implemented emitter; every other
+// kind returns its own diagnostic, because a backend that does not exist must
+// say which backend is missing rather than emit the wrong one.
 EmitResult emit(const ir::Module& module, Target kind);
 
 }  // namespace codegen

@@ -328,6 +328,30 @@ void testPrivateMethods() {
           "a private method is callable in its module");
 }
 
+// The target is part of the emitter's interface. Native remains byte-for-byte
+// identical, and a known-but-unimplemented target refuses by its own name
+// rather than pretending to be a different target.
+void testTargetDispatch() {
+    std::printf("target dispatch\n");
+    Built built = build("func main() -> int { return 3; }\n");
+    check(built.ok, "native program builds: " + built.stage);
+    if (!built.ok) {
+        return;
+    }
+    cider::codegen::EmitResult native =
+        cider::codegen::emit(*built.module, cider::codegen::Target::Native);
+    check(native.ok, "emit native succeeds: " + native.error);
+    check(native.text == built.asmText,
+          "emit native matches emitNative byte for byte");
+    cider::codegen::EmitResult uefi =
+        cider::codegen::emit(*built.module, cider::codegen::Target::Uefi);
+    check(!uefi.ok, "emit uefi refuses");
+    check(uefi.error.find("uefi") != std::string::npos,
+          "the refusal names uefi");
+    check(uefi.error.find("native only") == std::string::npos,
+          "the refusal is target-specific, not a native-only claim");
+}
+
 void testCalls() {
     std::printf("calls\n");
     check(runQuiet("func add(a: int, b: int) -> int { return a + b; }\n"
@@ -2784,6 +2808,7 @@ int main() {
     testMixedMsabi();
     testGenericFieldDefaults();
     testPrivateMethods();
+    testTargetDispatch();
     testCalls();
     testControl();
     testGlobals();

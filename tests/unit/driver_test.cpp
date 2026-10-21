@@ -524,6 +524,28 @@ void testNativeTargetAliases() {
     unlink(src.c_str());
 }
 
+// Target names the toolchain knows reach the front end. The emitter owns the
+// "not implemented" verdict for a known target; the driver only rejects names
+// it does not recognize.
+void testKnownTargetsReachFrontEnd() {
+    std::printf("known targets reach the front end\n");
+    std::string src = writeTemp("func main() -> int { return 0; }\n");
+    Result uefiCheck = run({"check", "--target", "uefi", src});
+    check(uefiCheck.code == 0,
+          "check --target uefi reaches the front end: " + uefiCheck.err);
+    Result uefiCompile = run({"compile", "--target", "uefi", src});
+    check(uefiCompile.code != 0, "compile --target uefi refuses");
+    check(uefiCompile.err.find("uefi") != std::string::npos,
+          "naming uefi");
+    check(uefiCompile.err.find("native only") == std::string::npos,
+          "not claiming uefi is native only");
+    Result bogus = run({"check", "--target", "bogus", src});
+    check(bogus.code != 0, "an unknown target fails");
+    check(bogus.err.find("bogus") != std::string::npos,
+          "naming the unknown target");
+    unlink(src.c_str());
+}
+
 // A missing file, a bad target and a bad subcommand all name themselves.
 void testFailures() {
     std::printf("failures name themselves\n");
@@ -569,6 +591,7 @@ int main() {
     testLibSearch();
     testSubdirImport();
     testNativeTargetAliases();
+    testKnownTargetsReachFrontEnd();
     testFailures();
     testVmTarget();
     std::printf("\n%d checks, %s\n", checks, failures == 0 ? "all passed" : "FAILURES");

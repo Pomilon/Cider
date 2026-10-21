@@ -2195,14 +2195,19 @@ EmitResult emitNative(const ir::Module& module) {
 }
 
 EmitResult emit(const ir::Module& module, Target kind) {
-    if (kind != Target::Native) {
-        EmitResult denied;
-        denied.ok = false;
-        denied.error = std::string("target ") + targetName(kind) +
-                       " is not emitted yet: native only in this slice";
-        return denied;
+    switch (kind) {
+        case Target::Native:
+            return emitNative(module);
+        case Target::Pomeos:
+        case Target::Uefi:
+        case Target::Vm:
+            break;
     }
-    return emitNative(module);
+    EmitResult denied;
+    denied.ok = false;
+    denied.error = std::string("the ") + targetName(kind) +
+                   " emitter is not implemented yet";
+    return denied;
 }
 
 }  // namespace codegen
