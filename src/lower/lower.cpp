@@ -12095,6 +12095,10 @@ ir::Value Lowerer::onIdentOrExpr(const Expr* expr, TypeRef expected) {
         return constantI64(static_cast<int64_t>(lit->value),
                            TypeRef{ctx_.basic(BasicKind::Char)}, lit->pos);
     }
+    if (auto* lit = dynamic_cast<const WideChar*>(expr)) {
+        return constantI64(static_cast<int64_t>(lit->value),
+                           TypeRef{ctx_.basic(BasicKind::U16)}, lit->pos);
+    }
     if (auto* lit = dynamic_cast<const BoolLit*>(expr)) {
         return constantI64(lit->value ? 1 : 0, TypeRef{ctx_.basic(BasicKind::Bool)},
                            lit->pos);

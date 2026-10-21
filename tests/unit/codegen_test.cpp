@@ -1755,6 +1755,13 @@ void testWideRun() {
                    "    return 0;\n"
                    "}\n") == 0,
           "wide globals fold");
+    check(runQuiet("func main() -> int {\n"
+                   "    var p: *u16 = u\"AB\";\n"
+                   "    if (p[0] != u'A') { return 1; }\n"
+                   "    if (u'B' != p[1]) { return 2; }\n"
+                   "    return 0;\n"
+                   "}\n") == 0,
+          "a wide character is a scalar value");
 }
 
 void testDeferRun() {
