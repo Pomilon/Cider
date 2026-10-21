@@ -71,7 +71,7 @@ target_include_directories(cider_eval PUBLIC src)
 # order-independent and imports resolve recursively.
 
 add_library(cider_resolve STATIC src/resolve/resolver.cpp)
-target_link_libraries(cider_resolve PUBLIC cider_eval cider_ast cider_types)
+target_link_libraries(cider_resolve PUBLIC cider_eval cider_ast cider_types cider_target)
 target_include_directories(cider_resolve PUBLIC src)
 
 # --- The checker -----------------------------------------------------------------

@@ -3834,6 +3834,11 @@ TypeRef Checker::checkIdent(Ident& expr) {
     }
     const resolve::Decl* decl = resolver_.lookup(moduleScope_, expr.name);
     if (decl == nullptr) {
+        if (target_ != target::Kind::Uefi &&
+            (expr.name == "image_handle" || expr.name == "system_table")) {
+            fail(expr.pos, "'" + expr.name + "' is only available on uefi");
+            return errorRef();
+        }
         // A bare enumerator names its enum's member: exactly one enum in
         // this module may claim it. Imported enums keep their qualified
         // spelling.

@@ -39,6 +39,9 @@ struct Decl {
     const Scope* scope = nullptr;
     Position pos{"", 1, 1};
     bool isPrelude = false;
+    // UEFI only: the firmware-owned globals image_handle and system_table.
+    // They use their bare spelling as the link symbol.
+    bool isTargetGlobal = false;
     // Extern only: declared in Cider, defined by the linker. Calls keep
     // the bare spelling on every backend (FEATURES §4.4): mangling one
     // would point at a symbol nothing defines.

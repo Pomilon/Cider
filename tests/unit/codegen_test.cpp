@@ -57,7 +57,7 @@ Built buildAs(const std::string& text, cider::target::Kind target) {
         out.stage = "parse";
         return out;
     }
-    auto resolver = std::make_unique<cider::resolve::Resolver>(*out.types);
+    auto resolver = std::make_unique<cider::resolve::Resolver>(*out.types, nullptr, target);
     if (!resolver->resolveProgram(*program, "main")) {
         out.stage = "resolve";
         return out;
@@ -388,6 +388,18 @@ void testUefiEntryShim() {
           "uefi emits no linux exit syscall");
     check(text.find("syscall") == std::string::npos,
           "uefi emits no linux syscall");
+
+    Built handles = buildAs(
+        "func efi_main() -> int {\n"
+        "    var system: *void = system_table;\n"
+        "    return 0;\n"
+        "}\n",
+        cider::target::Kind::Uefi);
+    check(handles.ok, "uefi source reads target globals: " + handles.stage);
+    if (handles.ok) {
+        check(handles.asmText.find("[rip + system_table]") != std::string::npos,
+              "a source read uses the system table slot");
+    }
 
     Built wrong = buildAs("func main() -> int { return 0; }\n",
                           cider::target::Kind::Uefi);

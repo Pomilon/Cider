@@ -320,6 +320,29 @@ bool Lowerer::lowerModule(const std::string& name, Program& program) {
 }
 
 bool Lowerer::lowerInto(const std::string& name, Program& program) {
+    // UEFI exposes the firmware handles as ordinary source globals. Their
+    // storage is the bare label the entry shim writes, not a mangled Cider
+    // global, so register the bindings before the checking walk reads them.
+    if (target_ == target::Kind::Uefi) {
+        const TypeRef voidPtr{ctx_.pointer(ctx_.void_())};
+        for (const char* globalName : {"image_handle", "system_table"}) {
+            bool present = false;
+            for (const GlobalBinding& binding : globals_) {
+                if (binding.name == globalName && binding.module == name) {
+                    present = true;
+                    break;
+                }
+            }
+            if (!present) {
+                GlobalBinding binding;
+                binding.name = globalName;
+                binding.label = globalName;
+                binding.module = name;
+                binding.type = voidPtr;
+                globals_.push_back(std::move(binding));
+            }
+        }
+    }
     // No failed_ reset: one module accumulates every program, and a refusal
     // anywhere fails the build. wrap_ is per file and every instruction the
     // walk emits reads it.

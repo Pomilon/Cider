@@ -54,8 +54,8 @@ Checked checkAs(const std::string& text, cider::target::Kind target,
         out.stage = "parse";
         return out;
     }
-    out.resolver = std::make_unique<cider::resolve::Resolver>(*out.types,
-                                                             std::move(load));
+    out.resolver = std::make_unique<cider::resolve::Resolver>(
+        *out.types, std::move(load), target);
     if (!out.resolver->resolveProgram(*out.program, "main")) {
         out.stage = "resolve";
         return out;
@@ -734,6 +734,32 @@ void testAsm() {
         }
     }
     check(named, "the asm refusal names uefi");
+}
+
+void testTargetGlobals() {
+    std::printf("target globals\n");
+    Checked uefi = checkAs(
+        "func efi_main() -> int {\n"
+        "    var image: *void = image_handle;\n"
+        "    var system: *void = system_table;\n"
+        "    return 0;\n"
+        "}\n",
+        cider::target::Kind::Uefi);
+    check(uefi.ok, "uefi target globals check: " + uefi.stage);
+
+    Checked native = check(
+        "func main() -> int { var system: *void = system_table; return 0; }\n");
+    check(!native.ok && native.stage == "check",
+          "target globals are rejected on native");
+    bool named = false;
+    if (native.checker != nullptr) {
+        for (const cider::check::CheckError& error : native.checker->errors()) {
+            if (error.message.find("uefi") != std::string::npos) {
+                named = true;
+            }
+        }
+    }
+    check(named, "the target-global rejection names uefi");
 }
 
 // `delete` takes a class pointer: the checker constrains the operand
@@ -2303,6 +2329,7 @@ int main() {
     testRepeatZero();
     testSliceCopy();
     testAsm();
+    testTargetGlobals();
     testDelete();
     testOverrides();
     testLen();

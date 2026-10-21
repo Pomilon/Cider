@@ -161,7 +161,7 @@ bool runFront(const std::string& file, const std::string& text, Pipeline& pipe,
     if (!pipe.diagnostic.empty()) {
         return false;
     }
-    resolve::Resolver resolver(*pipe.types, std::move(load));
+    resolve::Resolver resolver(*pipe.types, std::move(load), targetKind);
     if (!resolver.resolveProgram(*pipe.program, "main")) {
         for (const resolve::ResolveError& error : resolver.errors()) {
             pipe.diagnostic += at(error.pos) + ": " + error.message + "\n";

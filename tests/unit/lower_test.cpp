@@ -60,7 +60,7 @@ Lowered lowerAs(const std::string& text, cider::target::Kind target) {
         out.stage = "parse";
         return out;
     }
-    out.resolver = std::make_unique<cider::resolve::Resolver>(*out.types);
+    out.resolver = std::make_unique<cider::resolve::Resolver>(*out.types, nullptr, target);
     if (!out.resolver->resolveProgram(*out.program, "main")) {
         out.stage = "resolve";
         return out;
@@ -1306,9 +1306,37 @@ void testUefiEntry() {
     check(system, "the system table global is emitted");
 }
 
+void testUefiTargetGlobals() {
+    std::printf("uefi target globals and abi\n");
+    Lowered accessible = lowerAs(
+        "func efi_main() -> int {\n"
+        "    var image: *void = image_handle;\n"
+        "    var system: *void = system_table;\n"
+        "    return 0;\n"
+        "}\n",
+        cider::target::Kind::Uefi);
+    check(accessible.ok, "uefi handles are visible to source: " + accessible.stage);
+
+    Lowered abi = lowerAs(
+        "func add(a: int, b: int) -> int { return a + b; }\n"
+        "sysv func sub(a: int, b: int) -> int { return a - b; }\n"
+        "func efi_main() -> int { return add(1, 2) + sub(3, 1); }\n",
+        cider::target::Kind::Uefi);
+    check(abi.ok, "uefi functions lower: " + abi.stage);
+    if (abi.ok) {
+        const cider::ir::Function* add = find(abi.module.get(), "add");
+        const cider::ir::Function* sub = find(abi.module.get(), "sub");
+        check(add != nullptr && add->signature.abi() == cider::Abi::MsAbi,
+              "an unmarked uefi function defaults to msabi");
+        check(sub != nullptr && sub->signature.abi() == cider::Abi::SysV,
+              "an explicit sysv uefi function stays sysv");
+    }
+}
+
 int main() {
     std::printf("lower_test — source becomes IR\n\n");
     testUefiEntry();
+    testUefiTargetGlobals();
     testGlobal();
     testArithmetic();
     testTrapFlag();

@@ -16,8 +16,8 @@
 namespace cider {
 namespace resolve {
 
-Resolver::Resolver(TypeContext& ctx, ModuleLoader load)
-    : ctx_(ctx), load_(std::move(load)) {}
+Resolver::Resolver(TypeContext& ctx, ModuleLoader load, target::Kind target)
+    : ctx_(ctx), load_(std::move(load)), target_(target) {}
 
 void Resolver::fail(Position pos, const std::string& message) {
     errors_.push_back(ResolveError{pos, message});
@@ -1824,6 +1824,9 @@ const Decl* Resolver::declById(DeclId id) const {
 }
 
 std::string Resolver::linkName(const Decl& decl) const {
+    if (decl.isTargetGlobal) {
+        return decl.name;
+    }
     if (decl.isPrelude) {
         return "cider_" + decl.name;
     }
@@ -2112,7 +2115,11 @@ TypeRef Resolver::resolveSignature(const FuncSigType* type, const Scope* scope,
 }
 
 Abi Resolver::abiOf(const std::string& spelling, bool& failed, Position pos) {
-    if (spelling.empty() || spelling == "sysv") {
+    if (spelling.empty()) {
+        return target::info(target_).abi == target::Abi::MsAbi ? Abi::MsAbi
+                                                               : Abi::SysV;
+    }
+    if (spelling == "sysv") {
         return Abi::SysV;
     }
     if (spelling == "msabi") {
@@ -2216,6 +2223,17 @@ void Resolver::bindPrelude(const Scope* scope, Position pos) {
     func("alloc", {{i64, false}, {i64, false}}, addr);
     func("realloc", {{addr, false}, {i64, false}, {i64, false}}, addr);
     func("free", {{addr, false}}, none);
+    if (target_ == target::Kind::Uefi) {
+        const Type* voidPtr = ctx_.pointer(none);
+        auto global = [&](const std::string& name) {
+            Decl* d = bind(scope, DeclKind::Var, name, pos);
+            d->type = TypeRef{voidPtr};
+            d->isPrelude = true;
+            d->isTargetGlobal = true;
+        };
+        global("image_handle");
+        global("system_table");
+    }
 }
 
 EvalEnv Resolver::evalEnv(const Scope* scope) {

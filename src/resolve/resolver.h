@@ -26,6 +26,7 @@
 #include "ast/ast.h"
 #include "eval/eval.h"
 #include "resolve/scope.h"
+#include "target/target.h"
 
 namespace cider {
 namespace resolve {
@@ -43,7 +44,8 @@ public:
     using ModuleLoader =
         std::function<std::unique_ptr<Program>(const std::string& name)>;
 
-    explicit Resolver(TypeContext& ctx, ModuleLoader load = nullptr);
+    explicit Resolver(TypeContext& ctx, ModuleLoader load = nullptr,
+                      target::Kind target = target::Kind::Native);
 
     // Runs the header pass over one program as `module`, resolving its
     // imports recursively first. False when any diagnostic was recorded, in
@@ -355,6 +357,7 @@ private:
 
     TypeContext& ctx_;
     ModuleLoader load_;
+    target::Kind target_ = target::Kind::Native;
     std::vector<std::unique_ptr<Decl>> decls_;
     std::vector<std::unique_ptr<Scope>> scopes_;
     std::unordered_map<std::string, const Scope*> modules_;
