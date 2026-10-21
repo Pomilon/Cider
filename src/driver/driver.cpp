@@ -136,11 +136,10 @@ bool runFront(const std::string& file, const std::string& text, Pipeline& pipe,
                 if (found != nullptr) {
                     return found;
                 }
-            } else {
-                std::unique_ptr<Program> found = loadFile(rel + ".cid");
-                if (found != nullptr) {
-                    return found;
-                }
+            }
+            std::unique_ptr<Program> found = loadFile(rel + ".cid");
+            if (found != nullptr) {
+                return found;
             }
             return nullptr;
         }

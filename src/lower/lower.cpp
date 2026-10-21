@@ -55,6 +55,16 @@ bool isBytePointerTarget(const TypeRef& type) {
     return basic == BasicKind::U8 || basic == BasicKind::I8 ||
            basic == BasicKind::Char;
 }
+
+std::vector<ir::Value> adjustStringLitArg(const Expr* expr,
+                                         std::vector<ir::Value> words,
+                                         const TypeRef& targetType) {
+    if (expr != nullptr && dynamic_cast<const StringLit*>(expr) != nullptr &&
+        isBytePointerTarget(targetType) && words.size() == kSliceWords) {
+        return {words[kFirstWord]};
+    }
+    return words;
+}
 // A closure answers two words, code then captures, in the same positions
 // a slice keeps base and length: the hidden function loads word zero, the
 // allocation behind word one.
@@ -1024,19 +1034,22 @@ bool Lowerer::resolvePlace(const Expr* expr, Place& out) {
             --depth;
             auto found = locals_[depth].find(ident->name);
             if (found != locals_[depth].end()) {
-                out.slots = found->second.slots;
-                out.type = found->second.type;
-                out.off = 0;
-                out.isVolatile = false;
+                Place res;
+                res.slots = found->second.slots;
+                res.type = found->second.type;
+                res.off = 0;
+                res.isVolatile = false;
+                out = std::move(res);
                 return true;
             }
         }
         if (const GlobalBinding* global = findGlobal(ident->name)) {
-            out.slots.clear();
-            out.global = global->label;
-            out.type = global->type;
-            out.off = 0;
-            out.isVolatile = global->isVolatile;
+            Place res;
+            res.global = global->label;
+            res.type = global->type;
+            res.off = 0;
+            res.isVolatile = global->isVolatile;
+            out = std::move(res);
             return true;
         }
         return false;
@@ -1050,15 +1063,17 @@ bool Lowerer::resolvePlace(const Expr* expr, Place& out) {
         if (const auto* mod = dynamic_cast<const Ident*>(field->object.get())) {
             if (const GlobalBinding* global =
                     resolveModuleGlobal(mod->name, field->name)) {
-                out.slots.clear();
-                out.global = global->label;
-                out.type = global->type;
-                out.off = 0;
-                out.isVolatile = global->isVolatile;
+                Place res;
+                res.global = global->label;
+                res.type = global->type;
+                res.off = 0;
+                res.isVolatile = global->isVolatile;
+                out = std::move(res);
                 return true;
             }
         }
-        if (!resolvePlace(field->object.get(), out)) {
+        Place sub;
+        if (!resolvePlace(field->object.get(), sub)) {
         // A nested chain accumulates the offset while the slots stay the
         // base value's: `p.inner.y` is p's slots plus two offsets. Union
         // members sit at offset 0 and record a tag write: storing through
@@ -1087,20 +1102,20 @@ bool Lowerer::resolvePlace(const Expr* expr, Place& out) {
             }
             if (inner == Kind::Pointer) {
                 if (!pointerElementPlace(*elem, base, arrType,
-                                         "this field access", out)) {
+                                         "this field access", sub)) {
                     return false;
                 }
             } else if (!arrayElementPlace(*elem, base, arrType,
-                                          "this field access", out)) {
+                                          "this field access", sub)) {
                 return false;
             }
         }
-        if (out.type.isError() || (out.type.type->kind() != Kind::Struct &&
-                                   out.type.type->kind() != Kind::Union &&
-                                   out.type.type->kind() != Kind::Class)) {
+        if (sub.type.isError() || (sub.type.type->kind() != Kind::Struct &&
+                                   sub.type.type->kind() != Kind::Union &&
+                                   sub.type.type->kind() != Kind::Class)) {
             return false;
         }
-        std::optional<DeclId> id = out.type.type->decl();
+        std::optional<DeclId> id = sub.type.type->decl();
         if (!id.has_value()) {
             return false;
         }
@@ -1109,19 +1124,20 @@ bool Lowerer::resolvePlace(const Expr* expr, Place& out) {
         if (fieldOff < 0 || fieldType.isError()) {
             return false;
         }
-        if (out.type.type->kind() == Kind::Union) {
+        if (sub.type.type->kind() == Kind::Union) {
             int64_t index = resolver_.unionMemberIndex(*id, field->name);
             int64_t tagOff = resolver_.unionTagOffset(*id);
             if (index < 0 || tagOff < 0) {
                 return false;
             }
             TagWrite tag;
-            tag.off = out.off + tagOff;
+            tag.off = sub.off + tagOff;
             tag.index = index;
-            out.tagWrites.push_back(tag);
+            sub.tagWrites.push_back(tag);
         }
-        out.off += fieldOff;
-        out.type = fieldType;
+        sub.off += fieldOff;
+        sub.type = fieldType;
+        out = std::move(sub);
         return true;
     }
     if (const auto* deref = dynamic_cast<const Unary*>(expr)) {
@@ -1139,27 +1155,28 @@ bool Lowerer::resolvePlace(const Expr* expr, Place& out) {
         if (pointee.isError()) {
             return false;
         }
-        out.slots.clear();
-        out.global.clear();
-        out.type = pointee;
-        out.off = 0;
+        Place res;
+        res.type = pointee;
+        res.off = 0;
         // A deref the checker saw through a `*volatile T` name is a
         // volatile access: the loads and stores it feeds carry the mark.
-        out.isVolatile = checker_.placeIsVolatile(expr);
-        out.hasIndirect = true;
-        out.indirect = ptr[0];
+        res.isVolatile = checker_.placeIsVolatile(expr);
+        res.hasIndirect = true;
+        res.indirect = ptr[0];
+        out = std::move(res);
         return true;
     }
     if (const auto* index = dynamic_cast<const Index*>(expr)) {        // A field over an element (`a[1].y`) needs the element's address:
         // the base plus a folded index times the element size. A computed
         // index has no constant address, so it is not a place.
-        if (!resolvePlace(index->array.get(), out)) {
+        Place sub;
+        if (!resolvePlace(index->array.get(), sub)) {
             return false;
         }
-        if (out.type.isError() || out.type.type->kind() != Kind::Array) {
+        if (sub.type.isError() || sub.type.type->kind() != Kind::Array) {
             return false;
         }
-        TypeRef element{out.type.type->element()};
+        TypeRef element{sub.type.type->element()};
         int64_t elemBytes = resolver_.nominalSize(element.type);
         if (elemBytes <= 0) {
             return false;
@@ -1173,12 +1190,13 @@ bool Lowerer::resolvePlace(const Expr* expr, Place& out) {
         // Same provable case as the read and store paths: a folded index
         // past the array's extent rejects instead of addressing a
         // neighbour's field.
-        std::optional<int64_t> count = out.type.type->length();
+        std::optional<int64_t> count = sub.type.type->length();
         if (count.has_value() && folded.value >= *count) {
             return false;
         }
-        out.off += folded.value * elemBytes;
-        out.type = element;
+        sub.off += folded.value * elemBytes;
+        sub.type = element;
+        out = std::move(sub);
         return true;
     }
     return false;
@@ -2984,12 +3002,7 @@ void Lowerer::onVarDecl(VarDecl& n) {
         values = lowerWords(n.init.get());
     }
     TypeRef initType = checker_.typeOf(n.init.get());
-    if (dynamic_cast<const StringLit*>(n.init.get()) != nullptr &&
-        isBytePointerTarget(type) && values.size() == kSliceWords) {
-        // A literal beside a byte pointer keeps its address and drops
-        // its length: the pointer holds one word, the pair holds two.
-        values = {values[kFirstWord]};
-    }
+    values = adjustStringLitArg(n.init.get(), std::move(values), type);
     if (!initType.isError() && !type.isError() &&
         initType.type->kind() == Kind::Slice &&
         type.type->kind() == Kind::Array) {
@@ -3775,6 +3788,7 @@ void Lowerer::constructStruct(const Place& baseIn, TypeRef structType,
         if (failed_) {
             return;
         }
+        value = adjustStringLitArg(field.value.get(), std::move(value), fieldType);
         // A concrete value for an interface field boxes to the pair
         // before the range store below, which then stores two words.
         value = boxClassOperand(field.value.get(), std::move(value),
@@ -3817,6 +3831,7 @@ void Lowerer::constructUnion(const Place& baseIn, TypeRef objType,
     if (failed_) {
         return;
     }
+    value = adjustStringLitArg(field.value.get(), std::move(value), memberType);
     Place at = baseIn;
     at.type = memberType;
     at.off = 0;
@@ -4182,6 +4197,7 @@ void Lowerer::constructArray(const Place& baseIn, TypeRef arrayType,
         if (failed_) {
             return;
         }
+        one = adjustStringLitArg(inits[0].get(), std::move(one), element);
         // A concrete filler for an interface array boxes once, then fills
         // every element with the same pair.
         one = boxClassOperand(inits[0].get(), std::move(one), checker_.typeOf(inits[0].get()),
@@ -4219,6 +4235,7 @@ void Lowerer::constructArray(const Place& baseIn, TypeRef arrayType,
         if (failed_) {
             return;
         }
+        one = adjustStringLitArg(inits[i].get(), std::move(one), element);
         // A concrete element for an interface array boxes to the pair
         // before the range store below, like every other aggregate site.
         one = boxClassOperand(inits[i].get(), std::move(one), checker_.typeOf(inits[i].get()),
@@ -4595,6 +4612,7 @@ std::vector<ir::Value> Lowerer::lowerField(const Field& n) {
             refuse(n.object->pos, "this field access");
             return {undefined()};
         }
+        base = Place{};
         if (inner == Kind::Pointer) {
             if (!pointerElementPlace(*elem, base0, arrType,
                                      "this field access", base)) {
@@ -4784,6 +4802,7 @@ ir::Value Lowerer::emitI64Cmp(Position pos, BinOp op, ir::Value a, ir::Value b) 
 bool Lowerer::arrayElementPlace(const Index& n, const Place& base,
                                  TypeRef arrayType, const char* what,
                                  Place& at) {
+    at = Place{};
     std::optional<int64_t> extent = arrayType.type->length();
     if (!extent.has_value() || *extent < 0) {
         refuse(n.array->pos, what);
@@ -4980,6 +4999,7 @@ bool Lowerer::arrayElementPlace(const Index& n, const Place& base,
 bool Lowerer::pointerElementPlace(const Index& n, const Place& base,
                                    TypeRef ptrType, const char* what,
                                    Place& at) {
+    at = Place{};
     TypeRef pointee{ptrType.type->pointee()};
     int64_t elemBytes = resolver_.nominalSize(pointee.type);
     if (elemBytes <= 0) {
@@ -6797,6 +6817,7 @@ void Lowerer::constructClass(const Place& baseIn, TypeRef objType,
         if (failed_) {
             return;
         }
+        value = adjustStringLitArg(field.value.get(), std::move(value), fieldType);
         // A concrete value for an interface field boxes like the struct
         // path: the class field holds the same pair.
         value = boxClassOperand(field.value.get(), std::move(value),
@@ -7087,6 +7108,7 @@ std::vector<ir::Value> Lowerer::lowerNewClass(const NewClass& n) {
             return {undefined()};
         }
         TypeRef want{init->parameters()[static_cast<size_t>(i)].type};
+        arg.words = adjustStringLitArg(n.args[i].get(), std::move(arg.words), want);
         arg.words = boxClassOperand(n.args[i].get(), std::move(arg.words),
                                       checker_.typeOf(n.args[i].get()), want,
                                       n.args[i]->pos);
@@ -7199,6 +7221,7 @@ std::vector<ir::Value> Lowerer::lowerSuperInit(const SuperInit& n) {
         // A concrete argument for an interface parameter boxes like every
         // other call's: the init's words must arrive as the pair.
         TypeRef want{init->parameters()[static_cast<size_t>(i)].type};
+        arg.words = adjustStringLitArg(n.args[i].get(), std::move(arg.words), want);
         arg.words = boxClassOperand(n.args[i].get(), std::move(arg.words),
                                     checker_.typeOf(n.args[i].get()), want,
                                     n.args[i]->pos);
@@ -7689,6 +7712,9 @@ std::vector<ir::Value> Lowerer::lowerAddrOf(const Unary& n) {
         if (const auto* ident = dynamic_cast<const Ident*>(n.operand.get())) {
             const resolve::Decl* decl =
                 resolver_.lookup(emitScope(), ident->name);
+            if (decl == nullptr && homeScope() != nullptr) {
+                decl = resolver_.lookup(homeScope(), ident->name);
+            }
             if (decl != nullptr && decl->kind == resolve::DeclKind::Func &&
                 decl->typeParams == 0) {
                 // A from-import copies the target's id but lives in the
@@ -7719,6 +7745,9 @@ std::vector<ir::Value> Lowerer::lowerAddrOf(const Unary& n) {
             if (qualifier != nullptr) {
                 const resolve::Decl* mod =
                     resolver_.lookup(emitScope(), qualifier->name);
+                if (mod == nullptr && homeScope() != nullptr) {
+                    mod = resolver_.lookup(homeScope(), qualifier->name);
+                }
                 if (mod != nullptr && mod->kind == resolve::DeclKind::Module) {
                     const resolve::Scope* home = resolver_.scopeOf(mod->origin);
                     const resolve::Decl* member =
@@ -10311,6 +10340,7 @@ std::vector<ir::Value> Lowerer::lowerCallWords(Call& n) {
             return {undefined()};
         }
         TypeRef want{sig->parameters()[static_cast<size_t>(i)].type};
+        arg.words = adjustStringLitArg(n.args[i].get(), std::move(arg.words), want);
         arg.words = boxClassOperand(n.args[i].get(), std::move(arg.words),
                                       checker_.typeOf(n.args[i].get()), want,
                                       n.args[i]->pos);
@@ -10441,6 +10471,7 @@ void Lowerer::onReturn(Return& n) {
         // before the row check below, which then enforces two, not one.
         const Type* answered = function_->signature.returnType();
         TypeRef want{answered != nullptr ? answered : ctx_.void_()};
+        words = adjustStringLitArg(n.value.get(), std::move(words), want);
         words = boxClassOperand(n.value.get(), std::move(words), checker_.typeOf(n.value.get()),
                                   want, n.pos);
         if (failed_) {
@@ -12280,6 +12311,7 @@ ir::Value Lowerer::lowerAssign(Assign& n) {
     }
     TypeRef target = checker_.typeOf(n.target.get());
     std::vector<ir::Value> value = lowerWords(n.value.get());
+    value = adjustStringLitArg(n.value.get(), std::move(value), target);
     // A concrete value assigned to an interface boxes to the pair before
     // the word-count check below, which then enforces two, not one.
     value = boxClassOperand(n.value.get(), std::move(value), checker_.typeOf(n.value.get()),
@@ -12351,13 +12383,8 @@ void Lowerer::lowerAssignStmt(Assign& n) {
     }
     TypeRef target = checker_.typeOf(n.target.get());
     std::vector<ir::Value> value = lowerWords(n.value.get());
+    value = adjustStringLitArg(n.value.get(), std::move(value), target);
     TypeRef valueType = checker_.typeOf(n.value.get());
-    if (dynamic_cast<const StringLit*>(n.value.get()) != nullptr &&
-        isBytePointerTarget(target) && value.size() == kSliceWords) {
-        // A literal beside a byte pointer keeps its address and drops
-        // its length, like the declaration path: one word, not two.
-        value = {value[kFirstWord]};
-    }
     if (!target.isError() && !valueType.isError() &&
         valueType.type->kind() == Kind::Slice &&
         target.type->kind() == Kind::Array) {
