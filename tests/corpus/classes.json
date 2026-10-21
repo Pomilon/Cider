@@ -5,7 +5,7 @@
   "class": "A"
  },
  "aggregate_ternary": {
-  "actual": "compile rejection: tests/corpus/aggregate_ternary/main.cid:48:13: a variable needs an initialiser; 77:10: a method needs a name \u2014 v2 ~D destructor and scope-exit finalization are purged in v3",
+  "actual": "cider run exit 1 on all three legs, stdout empty, stderr identical (903 bytes): 48:13 and 65:18: a variable needs an initialiser; 77:10: a method needs a name; v2 ~D destructor and scope-exit finalization are purged in v3",
   "blocker": "v2-scope-exit-destruction (destructor ~D, embedded class-value finalization) [B-terminal]",
   "class": "B"
  },
@@ -175,7 +175,7 @@
   "class": "A"
  },
  "callee_branch_release_once": {
-  "actual": "compile rejection: tests/corpus/callee_branch_release_once/main.cid:55:8: a method needs a name \u2014 v2 destructor spelling `func ~Sq()`; v3 uses deinit (FEATURES 2.2/5.3)",
+  "actual": "cider run exit 1 on all three legs, stdout empty, stderr identical (832 bytes): 55:8: a method needs a name; v2 destructor spelling `func ~Sq()`; v3 uses deinit (FEATURES 2.2/5.3)",
   "blocker": "v2-scope-exit-destruction (destructor ~Sq, automatic release at scope exit) [B-terminal]",
   "class": "B"
  },
@@ -340,7 +340,7 @@
   "class": "B"
  },
  "destructor_ownership": {
-  "actual": "compile rejection: tests/corpus/destructor_ownership/main.cid:52:10: a method needs a name \u2014 v2 destructor spelling `func ~D()`; v3 uses deinit (FEATURES 2.2/5.3)",
+  "actual": "cider run exit 1 on all three legs, stdout empty, stderr identical (2161 bytes): 52:10 and 66:10: a method needs a name; v2 destructor spelling `func ~D()`; v3 uses deinit (FEATURES 2.2/5.3)",
   "blocker": "v2-scope-exit-destruction (destructor ~D, scope/loop/module-exit finalization) [B-terminal]",
   "class": "B"
  },
@@ -415,7 +415,7 @@
   "class": "A"
  },
  "embedded_class_destructors": {
-  "actual": "compile rejection: tests/corpus/embedded_class_destructors/main.cid:28:10: a method needs a name \u2014 v2 destructor spelling `func ~Dropper()`; v3 uses deinit (FEATURES 2.2/5.3)",
+  "actual": "cider run exit 1 on all three legs, stdout empty, stderr identical (2302 bytes): 28:10 and 47:10: a method needs a name; v2 destructor spelling `func ~Dropper()`; v3 uses deinit (FEATURES 2.2/5.3)",
   "blocker": "v2-scope-exit-destruction (destructor ~Dropper, embedded class-value finalization) [B-terminal]",
   "class": "B"
  },
@@ -1105,7 +1105,7 @@
   "class": "B"
  },
  "nil_fnptr_call": {
-  "actual": "migrated to v3: every live shape checks and runs (local, alias, parameter, field, pointer-to-field, array, returned, global, msabi, closure, virtual); the final nil call traps silently by SIGSEGV (rc 139) identically on native and both VM legs; expected.json left verbatim (v2 vm-error exit 2, not blessed)",
+  "actual": "cider run exit -11 (SIGSEGV, shell 139) on all three legs, stdout and stderr empty and identical; the final nil call traps silently; expected.json left verbatim (v2 vm-error exit 2, not blessed)",
   "blocker": "v3 traps nil calls silently (diff #19); v2 vm-error text not blessed [B-terminal]",
   "class": "B"
  },
