@@ -65,7 +65,7 @@ Lowered lowerAs(const std::string& text, cider::target::Kind target) {
         out.stage = "resolve";
         return out;
     }
-    out.checker = std::make_unique<cider::check::Checker>(*out.types, *out.resolver);
+    out.checker = std::make_unique<cider::check::Checker>(*out.types, *out.resolver, target);
     if (!out.checker->checkProgram(*out.program, "main")) {
         out.stage = "check";
         return out;

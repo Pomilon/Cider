@@ -24,6 +24,7 @@
 #include "ast/ast.h"
 #include "eval/eval.h"
 #include "resolve/resolver.h"
+#include "target/target.h"
 
 namespace cider {
 
@@ -146,7 +147,8 @@ enum class Prov { Raw, Closure, Neutral };
 
 class Checker : public ASTVisitor {
 public:
-    Checker(TypeContext& ctx, resolve::Resolver& resolver);
+    Checker(TypeContext& ctx, resolve::Resolver& resolver,
+            target::Kind target = target::Kind::Native);
 
     // Lowering is driven from this walk, not from a second one: LAYERS.md
     // §3.5.1 says lowering queries the walk's result rather than re-walking the
@@ -462,6 +464,7 @@ private:
 
     TypeContext& ctx_;
     resolve::Resolver& resolver_;
+    target::Kind target_;
     const resolve::Scope* moduleScope_ = nullptr;
     std::string module_;
     // Held by pointer: EvalEnv holds a reference to the TypeContext, and a

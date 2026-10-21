@@ -62,7 +62,7 @@ Built buildAs(const std::string& text, cider::target::Kind target) {
         out.stage = "resolve";
         return out;
     }
-    auto checker = std::make_unique<cider::check::Checker>(*out.types, *resolver);
+    auto checker = std::make_unique<cider::check::Checker>(*out.types, *resolver, target);
     checker->prescanProvenance({"main"});
     cider::lower::Lowerer lowerer(*out.types, *resolver, *checker, target);
     if (!lowerer.lowerModule("main", *program)) {
@@ -394,6 +394,65 @@ void testUefiEntryShim() {
     check(!wrong.ok, "uefi rejects a main-only program");
     check(wrong.stage.find("uefi") != std::string::npos,
           "the missing-entry diagnostic names uefi");
+
+    Built printing = buildAs(
+        "func efi_main() -> int { print(\"uefi\\n\"); return 0; }\n",
+        cider::target::Kind::Uefi);
+    check(printing.ok, "uefi print emits: " + printing.stage);
+    if (printing.ok) {
+        check(printing.asmText.find("syscall") == std::string::npos,
+              "uefi print has no linux syscall");
+        check(printing.asmText.find("mov rax, 1") == std::string::npos,
+              "uefi print has no linux write number");
+        check(printing.asmText.find("[rax + 64]") != std::string::npos,
+              "uefi print reads ConOut from the system table");
+        check(printing.asmText.find("[r14 + 8]") != std::string::npos,
+              "uefi print calls OutputString");
+    }
+    Built nativePrint = build(
+        "func main() -> int { print(\"native\\n\"); return 0; }\n");
+    check(nativePrint.ok, "native print still builds: " + nativePrint.stage);
+    if (nativePrint.ok) {
+        check(nativePrint.asmText.find("syscall") != std::string::npos,
+              "native print still uses the kernel write path");
+    }
+
+    Built nulls = buildAs(
+        "func read(p: *int) -> int { return *p; }\n"
+        "func efi_main() -> int {\n"
+        "    var x: int = 7;\n"
+        "    return read(&x);\n"
+        "}\n",
+        cider::target::Kind::Uefi);
+    check(nulls.ok, "uefi pointer dereference emits: " + nulls.stage);
+    if (nulls.ok) {
+        check(nulls.asmText.find(".L_uefi_null_") != std::string::npos,
+              "uefi checks a computed pointer before dereference");
+        check(nulls.asmText.find("ud2") != std::string::npos,
+              "a null uefi dereference traps");
+    }
+    Built nativeNulls = build(
+        "func read(p: *int) -> int { return *p; }\n"
+        "func main() -> int {\n"
+        "    var x: int = 7;\n"
+        "    return read(&x);\n"
+        "}\n");
+    check(nativeNulls.ok, "native pointer dereference builds: " + nativeNulls.stage);
+    if (nativeNulls.ok) {
+        check(nativeNulls.asmText.find(".L_uefi_null_") == std::string::npos,
+              "native keeps hardware null faults, no explicit check");
+    }
+
+    Built heap = buildAs(
+        "func efi_main() -> int {\n"
+        "    var p: *void = alloc(8, 8);\n"
+        "    free(p);\n"
+        "    return 0;\n"
+        "}\n",
+        cider::target::Kind::Uefi);
+    check(!heap.ok, "uefi refuses the unimplemented heap runtime");
+    check(heap.stage.find("uefi") != std::string::npos,
+          "the heap refusal names uefi");
 }
 
 void testCalls() {

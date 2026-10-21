@@ -80,7 +80,7 @@ target_include_directories(cider_resolve PUBLIC src)
 # in place. This is the one `public ASTVisitor` in src/ (gates T5/L1).
 
 add_library(cider_check STATIC src/check/checker.cpp)
-target_link_libraries(cider_check PUBLIC cider_resolve cider_eval cider_types)
+target_link_libraries(cider_check PUBLIC cider_resolve cider_eval cider_types cider_target)
 target_include_directories(cider_check PUBLIC src)
 
 # --- The IR --------------------------------------------------------------------

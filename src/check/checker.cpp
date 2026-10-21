@@ -52,8 +52,8 @@ BasicKind intFor(int widthBits, bool isSigned) {
 
 }  // namespace
 
-Checker::Checker(TypeContext& ctx, resolve::Resolver& resolver)
-    : ctx_(ctx), resolver_(resolver) {}
+Checker::Checker(TypeContext& ctx, resolve::Resolver& resolver, target::Kind target)
+    : ctx_(ctx), resolver_(resolver), target_(target) {}
 
 void Checker::fail(Position pos, const std::string& message) {
     errors_.push_back(CheckError{pos, message});
@@ -3412,6 +3412,11 @@ void Checker::visitDeleteStmt(DeleteStmt& n) {
 // a module-level declaration: the text is raw assembly the checker cannot
 // see into, so a typo'd name has to fail here (FEAT-035).
 void Checker::visitAsmStmt(AsmStmt& n) {
+    if (!target::info(target_).allowsAsm) {
+        fail(n.pos, std::string("asm blocks are not supported on ") +
+                        target::info(target_).name);
+        return;
+    }
     bool bound = true;
     for (const std::string& raw : n.names) {
         std::string base = raw;

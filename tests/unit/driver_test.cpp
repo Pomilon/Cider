@@ -544,6 +544,14 @@ void testKnownTargetsReachFrontEnd() {
     check(bogus.err.find("bogus") != std::string::npos,
           "naming the unknown target");
     unlink(src.c_str());
+
+    std::string asmSrc = writeTemp(
+        "func efi_main() -> int { asm { \"nop\" } return 0; }\n");
+    Result uefiAsm = run({"check", "--target", "uefi", asmSrc});
+    check(uefiAsm.code != 0, "uefi rejects asm through the driver");
+    check(uefiAsm.err.find("uefi") != std::string::npos,
+          "the driver's asm refusal names uefi");
+    unlink(asmSrc.c_str());
 }
 
 // A missing file, a bad target and a bad subcommand all name themselves.

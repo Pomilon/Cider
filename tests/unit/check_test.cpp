@@ -11,6 +11,7 @@
 #include "check/checker.h"
 #include "lexer/lexer.h"
 #include "parse/parser.h"
+#include "target/target.h"
 #include "types/context.h"
 
 namespace {
@@ -37,8 +38,8 @@ struct Checked {
     std::unique_ptr<cider::check::Checker> checker;
 };
 
-Checked check(const std::string& text,
-              cider::resolve::Resolver::ModuleLoader load = nullptr) {
+Checked checkAs(const std::string& text, cider::target::Kind target,
+                cider::resolve::Resolver::ModuleLoader load = nullptr) {
     Checked out;
     out.types = std::make_unique<cider::TypeContext>();
     cider::Lexer lexer("test.cid", text);
@@ -59,7 +60,7 @@ Checked check(const std::string& text,
         out.stage = "resolve";
         return out;
     }
-    out.checker = std::make_unique<cider::check::Checker>(*out.types, *out.resolver);
+    out.checker = std::make_unique<cider::check::Checker>(*out.types, *out.resolver, target);
     // Whole-program provenance before checking (single module here),
     // mirroring the driver: callee bodies see caller proofs.
     out.checker->prescanProvenance({"main"});
@@ -72,6 +73,11 @@ Checked check(const std::string& text,
         }
     }
     return out;
+}
+
+Checked check(const std::string& text,
+              cider::resolve::Resolver::ModuleLoader load = nullptr) {
+    return checkAs(text, cider::target::Kind::Native, std::move(load));
 }
 
 // Mixed arithmetic converts to a common type, stated as a type.
@@ -714,6 +720,20 @@ void testAsm() {
     Checked bad = check(
         "func main() -> int { asm { \"mov edi, {nope}\" } return 0; }\n");
     check(!bad.ok && bad.stage == "check", "an unbound placeholder fails");
+
+    Checked uefi = checkAs(
+        "func efi_main() -> int { asm { \"nop\" } return 0; }\n",
+        cider::target::Kind::Uefi);
+    check(!uefi.ok && uefi.stage == "check", "uefi rejects asm at check time");
+    bool named = false;
+    if (uefi.checker != nullptr) {
+        for (const cider::check::CheckError& error : uefi.checker->errors()) {
+            if (error.message.find("uefi") != std::string::npos) {
+                named = true;
+            }
+        }
+    }
+    check(named, "the asm refusal names uefi");
 }
 
 // `delete` takes a class pointer: the checker constrains the operand

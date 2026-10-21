@@ -176,7 +176,7 @@ bool runFront(const std::string& file, const std::string& text, Pipeline& pipe,
         }
         return false;
     }
-    check::Checker checker(*pipe.types, resolver);
+    check::Checker checker(*pipe.types, resolver, targetKind);
     lower::Lowerer lowerer(*pipe.types, resolver, checker, targetKind);
     // Closure provenance runs before any body checks: callee bodies see
     // caller proofs regardless of module order. Pure analysis — no

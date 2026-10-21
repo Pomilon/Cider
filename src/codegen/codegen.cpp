@@ -273,6 +273,96 @@ private:
         return out;
     }
 
+    // UEFI has no file descriptors. `print` walks the Cider string and emits
+    // one UTF-16 unit at a time through the firmware's Simple Text Output
+    // protocol. ASCII is exact; a non-ASCII byte becomes `?` until the
+    // string runtime grows UTF-8 decoding.
+    bool emitUefiPrint() {
+        out_ += "cider_print:\n";
+        out_ += "  test rsi, rsi\n";
+        out_ += "  jle .L_uefi_print_done\n";
+        out_ += "  mov rax, [rip + system_table]\n";
+        out_ += "  test rax, rax\n";
+        out_ += "  jz .L_uefi_print_trap\n";
+        out_ += "  mov r14, [rax + 64]\n";        // SystemTable->ConOut
+        out_ += "  test r14, r14\n";
+        out_ += "  jz .L_uefi_print_trap\n";
+        out_ += "  push rbx\n";
+        out_ += "  push r12\n";
+        out_ += "  push r13\n";
+        out_ += "  push r14\n";
+        out_ += "  sub rsp, 40\n";                // shadow + alignment
+        out_ += "  mov r12, rdi\n";
+        out_ += "  lea r13, [rdi + rsi]\n";
+        out_ += ".L_uefi_print_loop:\n";
+        out_ += "  cmp r12, r13\n";
+        out_ += "  jae .L_uefi_print_end\n";
+        out_ += "  movzx eax, byte ptr [r12]\n";
+        out_ += "  cmp eax, 128\n";
+        out_ += "  jb .L_uefi_print_ascii\n";
+        out_ += "  mov eax, 63\n";                // '?'
+        out_ += ".L_uefi_print_ascii:\n";
+        out_ += "  mov word ptr [rsp + 32], ax\n";
+        out_ += "  mov word ptr [rsp + 34], 0\n";
+        out_ += "  mov rcx, r14\n";
+        out_ += "  lea rdx, [rsp + 32]\n";
+        out_ += "  call qword ptr [r14 + 8]\n";   // ConOut->OutputString
+        out_ += "  inc r12\n";
+        out_ += "  jmp .L_uefi_print_loop\n";
+        out_ += ".L_uefi_print_end:\n";
+        out_ += "  add rsp, 40\n";
+        out_ += "  pop r14\n";
+        out_ += "  pop r13\n";
+        out_ += "  pop r12\n";
+        out_ += "  pop rbx\n";
+        out_ += ".L_uefi_print_done:\n";
+        out_ += "  ret\n";
+        out_ += ".L_uefi_print_trap:\n";
+        out_ += "  ud2\n";
+        return true;
+    }
+
+    bool emitUefiPutchar() {
+        emitHelper("cider_print");
+        out_ += "putchar:\n";
+        out_ += "  push rbx\n";
+        out_ += "  sub rsp, 16\n";
+        out_ += "  mov ebx, edi\n";
+        out_ += "  mov byte ptr [rsp], bl\n";
+        out_ += "  lea rdi, [rsp]\n";
+        out_ += "  mov esi, 1\n";
+        out_ += "  call cider_print\n";
+        out_ += "  mov eax, ebx\n";
+        out_ += "  add rsp, 16\n";
+        out_ += "  pop rbx\n";
+        out_ += "  ret\n";
+        return true;
+    }
+
+    bool emitUefiPanic() {
+        emitHelper("cider_print");
+        out_ += "cider_panic:\n";
+        out_ += "  sub rsp, 8\n";
+        out_ += "  call cider_print\n";
+        out_ += "  add rsp, 8\n";
+        out_ += "  ud2\n";
+        return true;
+    }
+
+    // UEFI's null policy is explicit: the target does not promise a hardware
+    // fault for a zero pointer, so codegen checks before the dereference.
+    void emitUefiNullCheck(const std::string& reg) {
+        if (target_ != Target::Uefi) {
+            return;
+        }
+        const std::string ok =
+            ".L_uefi_null_" + std::to_string(uefiNullSeq_++);
+        out_ += "  test " + reg + ", " + reg + "\n";
+        out_ += "  jnz " + ok + "\n";
+        out_ += "  ud2\n";
+        out_ += ok + ":\n";
+    }
+
     // The process entry. A program names its entry by defining `main` or
     // `_start` (FEATURES.md §10); the kernel enters at `_start` either way.
     // When only `main` exists this trampoline bridges the two worlds: it
@@ -433,6 +523,35 @@ private:
     bool emitHelper(const std::string& name) {
         if (emittedHelpers_.insert(name).second == false) {
             return true;                         // already in the text once
+        }
+        if (target_ == Target::Uefi) {
+            if (name == "cider_alloc" || name == "cider_free" ||
+                name == "cider_realloc") {
+                refuse(Position{"", 1, 1},
+                       "the uefi runtime has no heap support yet");
+                return false;
+            }
+            if (name == "cider_fini_run") {
+                out_ += "cider_fini_run:\n";
+                out_ += "  ret\n";
+                return true;
+            }
+            if (name == "cider_heap_fail") {
+                out_ += "cider_heap_fail:\n";
+                out_ += "  ud2\n";
+                return true;
+            }
+            if (name == "cider_print") {
+                return emitUefiPrint();
+            }
+            if (name == "putchar") {
+                return emitUefiPutchar();
+            }
+            if (name == "cider_panic") {
+                return emitUefiPanic();
+            }
+            // cider_itoa_signed/unsigned and cider_ftoa are pure register
+            // routines; they fall through to the shared implementations.
         }
         if (name == "cider_fini_run") {
             // 7.10: the symbol every program carries because the standard
@@ -1468,6 +1587,7 @@ private:
                 emitLoadMem(atAddr(base, instr.displacement), instr.type, instr.width);
             } else {
                 out_ += "  mov rax, " + slot(instr.addressBase.id) + "\n";
+                emitUefiNullCheck("rax");
                 emitLoadMem(atAddr("rax", instr.displacement), instr.type, instr.width);
             }
             if (instr.width == ir::IRType::F32) {
@@ -1497,6 +1617,7 @@ private:
                 emitStoreMem(atAddr(base, instr.displacement), instr.type, instr.width);
             } else {
                 out_ += "  mov rcx, " + slot(instr.addressBase.id) + "\n";
+                emitUefiNullCheck("rcx");
                 emitStoreMem(atAddr("rcx", instr.displacement), instr.type, instr.width);
             }
             return true;
@@ -1601,6 +1722,7 @@ private:
             const uint64_t stageBase = instr.call.indirect ? 1 : 0;
             if (instr.call.indirect) {
                 out_ += "  mov rax, " + slot(instr.calleeValue.id) + "\n";
+                emitUefiNullCheck("rax");
             }
             if (stackWords != 0 || stackPad != 0) {
                 // The spill goes down as pushes and nothing else: the
@@ -2249,6 +2371,7 @@ private:
     // Unique suffix for u64-to-float conversion labels (int→float casts
     // need a two-path sequence; see emitCast).
     uint64_t cvtLabelSeq_ = 0;
+    uint64_t uefiNullSeq_ = 0;
     bool failed_ = false;
     std::string error_;
     Position pos_{"", 1, 1};
