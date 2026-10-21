@@ -22,18 +22,16 @@
 #include <vector>
 
 #include "ir/ir.h"
+#include "target/target.h"
 
 namespace cider {
 namespace codegen {
 
-enum class Target {
-    Native,  // Linux x86-64, SysV
-    Pomeos,  // refused: no backend yet
-    Uefi,    // refused: no backend yet
-    Vm,      // refused: an interpreter, not an emitter
-};
+// One target enum for the compiler. codegen names it Target because its call
+// sites read that way, but the facts live in target::info.
+using Target = target::Kind;
 
-const char* targetName(Target target);
+const char* targetName(Target kind);
 
 struct EmitResult {
     bool ok = false;
@@ -49,7 +47,7 @@ EmitResult emitNative(const ir::Module& module);
 
 // The same, naming the target. Anything but Native is a diagnostic, because a
 // backend that does not exist must say so rather than emit the wrong one.
-EmitResult emit(const ir::Module& module, Target target);
+EmitResult emit(const ir::Module& module, Target kind);
 
 }  // namespace codegen
 }  // namespace cider

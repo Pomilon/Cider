@@ -48,6 +48,14 @@ target_include_directories(cider_lexer PUBLIC src)
 add_library(cider_ast INTERFACE)
 target_include_directories(cider_ast INTERFACE src)
 
+# --- Targets -------------------------------------------------------------------
+#
+# OUTPUT.md §2: a target is a description, not a layer. This is the one
+# authority for ABI, entry, output form and target policy.
+
+add_library(cider_target STATIC src/target/target.cpp)
+target_include_directories(cider_target PUBLIC src)
+
 # --- Constant evaluation -------------------------------------------------------
 #
 # LAYERS.md §3.4: one folder for source expressions, shared by the resolver,
@@ -188,7 +196,7 @@ add_test(NAME vm COMMAND vm_test)
 # AST (gate L2). Registers are not allocated: every value has a stack slot.
 
 add_library(cider_codegen STATIC src/codegen/codegen.cpp)
-target_link_libraries(cider_codegen PUBLIC cider_ir cider_types)
+target_link_libraries(cider_codegen PUBLIC cider_ir cider_types cider_target)
 target_include_directories(cider_codegen PUBLIC src)
 
 add_executable(codegen_test tests/unit/codegen_test.cpp)
@@ -214,7 +222,17 @@ target_link_libraries(driver_test PRIVATE cider_driver)
 target_include_directories(driver_test PRIVATE src)
 add_test(NAME driver COMMAND driver_test)
 
+# --- Targets -------------------------------------------------------------------
+#
+# OUTPUT.md §2: a target is a description, not a layer. The descriptor is the
+# one authority for its ABI, entry symbol, output form and target policy.
+
+add_executable(target_test tests/unit/target_test.cpp)
+target_link_libraries(target_test PRIVATE cider_target)
+target_include_directories(target_test PRIVATE src)
+add_test(NAME target COMMAND target_test)
+
 # A gate that fails must fail the build, so nothing here is allowed to be
 # "informational".
-set_tests_properties(gates layout types lexer ast parser resolver checker lowering optimise codegen vm driver
+set_tests_properties(gates layout types lexer ast parser resolver checker lowering optimise codegen vm driver target
              PROPERTIES LABELS "gate")

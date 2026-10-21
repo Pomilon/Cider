@@ -2185,17 +2185,8 @@ private:
     Position pos_{"", 1, 1};
 };
 
-const char* targetName(Target target) {
-    if (target == Target::Native) {
-        return "native";
-    }
-    if (target == Target::Pomeos) {
-        return "pomeos";
-    }
-    if (target == Target::Uefi) {
-        return "uefi";
-    }
-    return "vm";
+const char* targetName(Target kind) {
+    return target::info(kind).name;
 }
 
 EmitResult emitNative(const ir::Module& module) {
@@ -2203,11 +2194,11 @@ EmitResult emitNative(const ir::Module& module) {
     return emitter.run();
 }
 
-EmitResult emit(const ir::Module& module, Target target) {
-    if (target != Target::Native) {
+EmitResult emit(const ir::Module& module, Target kind) {
+    if (kind != Target::Native) {
         EmitResult denied;
         denied.ok = false;
-        denied.error = std::string("target ") + targetName(target) +
+        denied.error = std::string("target ") + targetName(kind) +
                        " is not emitted yet: native only in this slice";
         return denied;
     }
