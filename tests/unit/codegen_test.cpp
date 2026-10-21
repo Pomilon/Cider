@@ -262,6 +262,16 @@ void testMixedMsabi() {
                    "}\n"
                    "func main() -> int { return alt(1.0, 2, 3.0, 4); }\n") == 235,
           "a leading float still leaves rcx for the first integer");
+    check(runQuiet("msabi func deep(a: int, b: int, c: int, d: int, e: int,\n"
+                   "                 f: f64, g: f64, h: f64, i: f64, j: int) -> int {\n"
+                   "    if (a != 1 || b != 2 || c != 3 || d != 4 || e != 5) { return 1; }\n"
+                   "    if (f != 5.5 || g != 6.5 || h != 7.5 || i != 8.5) { return 2; }\n"
+                   "    return j;\n"
+                   "}\n"
+                   "func main() -> int {\n"
+                   "    return deep(1, 2, 3, 4, 5, 5.5, 6.5, 7.5, 8.5, 9);\n"
+                   "}\n") == 9,
+          "mixed msabi stack words keep their argument order");
 }
 
 // A default written in a generic template is typed by the field in each
