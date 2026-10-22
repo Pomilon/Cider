@@ -76,10 +76,17 @@ enum class TrapReason {
     Downcast,
     BadEnum,
     Null,
+    NilInterface,
+    NilFunctionPointer,
     Explicit,
 };
 
 const char* trapReasonName(TrapReason reason);
+
+// The v3 diagnostic for a reason, or nullptr when the reason stays silent.
+// A diagnosed trap is a language result, not a machine accident: native and
+// VM both write this line and exit 2, while UEFI keeps its ud2 policy.
+const char* trapMessage(TrapReason reason);
 
 enum class OverflowMode {
     Undefined,   // the default: overflow is undefined (SEMANTICS §2.1)

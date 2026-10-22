@@ -55,9 +55,26 @@ const char* trapReasonName(TrapReason reason) {
         case TrapReason::Downcast: return "downcast";
         case TrapReason::BadEnum: return "bad_enum";
         case TrapReason::Null: return "null";
+        case TrapReason::NilInterface: return "nil_interface";
+        case TrapReason::NilFunctionPointer: return "nil_function_pointer";
         case TrapReason::Explicit: return "explicit";
     }
     return "unreachable";
+}
+
+const char* trapMessage(TrapReason reason) {
+    switch (reason) {
+        case TrapReason::IndexOutOfBounds:
+            return "vm error: index out of bounds\n";
+        case TrapReason::Null:
+            return "vm error: null pointer dereference\n";
+        case TrapReason::NilInterface:
+            return "vm error: nil interface dispatch\n";
+        case TrapReason::NilFunctionPointer:
+            return "vm error: call: nil function pointer\n";
+        default:
+            return nullptr;
+    }
 }
 
 const char* opName(Op op) {

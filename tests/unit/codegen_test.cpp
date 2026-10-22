@@ -219,6 +219,14 @@ int runCapture(const std::string& text, bool& signaled, std::string& err) {
     return WEXITSTATUS(status);
 }
 
+void expectDiagnosed(const std::string& text, const std::string& message,
+                     const std::string& what) {
+    bool signaled = false;
+    std::string err;
+    int code = runCapture(text, signaled, err);
+    check(!signaled && code == 2 && err == message, what);
+}
+
 // `main` returns its value as the exit code.
 void testExit() {
     std::printf("exit codes\n");
@@ -614,6 +622,25 @@ void testInterp() {
           "a negative float keeps its sign");
 }
 
+void testTrapMessages() {
+    std::printf("trap messages\n");
+    check(std::string(cider::ir::trapMessage(cider::ir::TrapReason::IndexOutOfBounds)) ==
+              "vm error: index out of bounds\n",
+          "index out of bounds has a diagnostic");
+    check(std::string(cider::ir::trapMessage(cider::ir::TrapReason::Null)) ==
+              "vm error: null pointer dereference\n",
+          "null has a diagnostic");
+    check(std::string(cider::ir::trapMessage(cider::ir::TrapReason::NilInterface)) ==
+              "vm error: nil interface dispatch\n",
+          "nil interface has a diagnostic");
+    check(std::string(cider::ir::trapMessage(
+                  cider::ir::TrapReason::NilFunctionPointer)) ==
+              "vm error: call: nil function pointer\n",
+          "nil function pointer has a diagnostic");
+    check(cider::ir::trapMessage(cider::ir::TrapReason::DivByZero) == nullptr,
+          "division by zero stays silent");
+}
+
 void testTrap() {
     std::printf("traps\n");
     bool signaled = false;
@@ -780,14 +807,14 @@ void testElementAddr() {
                    "    return *p as int;\n"
                    "}\n") == 105,
           "&s[1] reads the string byte");
-    bool signaled = false;
-    runCode("func main() -> int {\n"
-            "    var s: string = \"Hi\";\n"
-            "    var p: *u8 = &s[9] as *u8;\n"
-            "    return *p as int;\n"
-            "}\n",
-            signaled);
-    check(signaled, "an out-of-range element address traps");
+    expectDiagnosed(
+        "func main() -> int {\n"
+        "    var s: string = \"Hi\";\n"
+        "    var p: *u8 = &s[9] as *u8;\n"
+        "    return *p as int;\n"
+        "}\n",
+        "vm error: index out of bounds\n",
+        "an out-of-range element address diagnoses");
     // A cast over an address expression lowers the address first: `as`
     // binds looser than `&`, so without parens this would read as the
     // address of a cast, which the checker rejects.
@@ -834,23 +861,23 @@ void testComputedIndex() {
                    "    return a[j];\n"
                    "}\n") == 8,
           "a computed read answers the element");
-    bool signaled = false;
-    runCode("func main() -> int {\n"
-            "    var a: [int; 4] = [ 5, 6, 7, 8 ];\n"
-            "    var j: int = 9;\n"
-            "    return a[j];\n"
-            "}\n",
-            signaled);
-    check(signaled, "a computed read past the end traps");
-    signaled = false;
-    runCode("func main() -> int {\n"
-            "    var a: [int; 4] = [ 5, 6, 7, 8 ];\n"
-            "    var j: int = 9;\n"
-            "    a[j] = 1;\n"
-            "    return 0;\n"
-            "}\n",
-            signaled);
-    check(signaled, "a computed store past the end traps");
+    expectDiagnosed(
+        "func main() -> int {\n"
+        "    var a: [int; 4] = [ 5, 6, 7, 8 ];\n"
+        "    var j: int = 9;\n"
+        "    return a[j];\n"
+        "}\n",
+        "vm error: index out of bounds\n",
+        "a computed read past the end diagnoses");
+    expectDiagnosed(
+        "func main() -> int {\n"
+        "    var a: [int; 4] = [ 5, 6, 7, 8 ];\n"
+        "    var j: int = 9;\n"
+        "    a[j] = 1;\n"
+        "    return 0;\n"
+        "}\n",
+        "vm error: index out of bounds\n",
+        "a computed store past the end diagnoses");
     // A chained index over a computed inner one addresses through the
     // inner address: `m[i][j]` is the j-th element past the i-th row's
     // address, with both bounds checked.
@@ -871,16 +898,16 @@ void testComputedIndex() {
                    "    return (m[2][1] as int);\n"
                    "}\n") == 5,
           "a folded outer index advances a computed inner address");
-    signaled = false;
-    runCode("func main() -> int {\n"
-            "    var z: [u8; 2] = [0, 0];\n"
-            "    var m: [[u8; 2]; 3] = [z, z, z];\n"
-            "    var i: int = 9;\n"
-            "    m[i][0] = 1;\n"
-            "    return 0;\n"
-            "}\n",
-            signaled);
-    check(signaled, "a chained store past the inner end traps");
+    expectDiagnosed(
+        "func main() -> int {\n"
+        "    var z: [u8; 2] = [0, 0];\n"
+        "    var m: [[u8; 2]; 3] = [z, z, z];\n"
+        "    var i: int = 9;\n"
+        "    m[i][0] = 1;\n"
+        "    return 0;\n"
+        "}\n",
+        "vm error: index out of bounds\n",
+        "a chained store past the inner end diagnoses");
     // A computed index through a pointer dereference addresses off the
     // loaded address: `(*p)[i]` is the i-th element past the pointer's
     // value, with the same bounds check the slot route owns.
@@ -905,14 +932,14 @@ void testComputedIndex() {
                    "    return a[1];\n"
                    "}\n") == 42,
           "a computed store through a pointer lands");
-    signaled = false;
-    runCode("func at(p: *[int; 3], i: int) -> int { return (*p)[i]; }\n"
-            "func main() -> int {\n"
-            "    var a: [int; 3] = [ 4, 5, 6 ];\n"
-            "    return at(&a, 9);\n"
-            "}\n",
-            signaled);
-    check(signaled, "a computed read past the end through a pointer traps");
+    expectDiagnosed(
+        "func at(p: *[int; 3], i: int) -> int { return (*p)[i]; }\n"
+        "func main() -> int {\n"
+        "    var a: [int; 3] = [ 4, 5, 6 ];\n"
+        "    return at(&a, 9);\n"
+        "}\n",
+        "vm error: index out of bounds\n",
+        "a computed read past the end through a pointer diagnoses");
 }
 
 void testPointerField() {
@@ -2510,13 +2537,14 @@ void testSliceCopy() {
                   "}\n",
                   sig) == 0 && !sig,
           "a slice copies elementwise and detaches");
-    check(runCode("func main() -> int {\n"
-                  "    var a: [u8; 5] = [ 10, 42, 43, 44, 50 ];\n"
-                  "    var s: [u8; 3] = a[0:2];\n"
-                  "    return s[0] as int;\n"
-                  "}\n",
-                  sig) == -1 && sig,
-          "a short slice traps instead of truncating");
+    expectDiagnosed(
+        "func main() -> int {\n"
+        "    var a: [u8; 5] = [ 10, 42, 43, 44, 50 ];\n"
+        "    var s: [u8; 3] = a[0:2];\n"
+        "    return s[0] as int;\n"
+        "}\n",
+        "vm error: index out of bounds\n",
+        "a short slice diagnoses instead of truncating");
     check(runCode("func main() -> int {\n"
                   "    var a: [u8; 5] = [ 10, 42, 43, 44, 50 ];\n"
                   "    var s: [u8; 3] = a[1:4];\n"
@@ -2554,17 +2582,17 @@ void testSliceCopy() {
                    "    return at(&a, 1, 3);\n"
                    "}\n") == 6,
           "a computed slice through a pointer answers the element");
-    sig = false;
-    check(runCode("func at(p: *[int; 3], l: int, h: int) -> int {\n"
-                  "    var s: []int = (*p)[l:h];\n"
-                  "    return s[0];\n"
-                  "}\n"
-                  "func main() -> int {\n"
-                  "    var a: [int; 3] = [ 4, 5, 6 ];\n"
-                  "    return at(&a, 0, 9);\n"
-                  "}\n",
-                  sig) == -1 && sig,
-          "a slice past the end through a pointer traps");
+    expectDiagnosed(
+        "func at(p: *[int; 3], l: int, h: int) -> int {\n"
+        "    var s: []int = (*p)[l:h];\n"
+        "    return s[0];\n"
+        "}\n"
+        "func main() -> int {\n"
+        "    var a: [int; 3] = [ 4, 5, 6 ];\n"
+        "    return at(&a, 0, 9);\n"
+        "}\n",
+        "vm error: index out of bounds\n",
+        "a slice past the end through a pointer diagnoses");
     // A string global indexes like a local: the global's address is
     // materialized once and the element reads through it.
     check(runCode("var g: string = \"abc\";\n"
@@ -3032,6 +3060,7 @@ int main() {
     testFloat();
     testRegisterEscape();
     testAsm();
+    testTrapMessages();
     testTrap();
     testPanic();
     testElementAddr();

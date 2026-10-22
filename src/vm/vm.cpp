@@ -318,6 +318,20 @@ struct Runner {
         return false;
     }
 
+    // A diagnosed trap is the language's own result: one exact stderr line
+    // and exit 2, matching the compiled program. Silent reasons still die by
+    // the signal their compiled form would take.
+    bool trap(ir::TrapReason reason) {
+        if (const char* message = ir::trapMessage(reason)) {
+            out.ok = true;
+            out.exitCode = 2;
+            out.stderrText += message;
+            programDone = true;
+            return false;
+        }
+        return die(kSigIll);
+    }
+
     int64_t read(const Value& value) {
         auto found = frames.back().slots.find(value.id);
         if (found == frames.back().slots.end()) {
@@ -1926,10 +1940,12 @@ struct Runner {
                     refuse(term.loc, "vm cannot run this terminator yet");
                     return false;
                 case Term::Trap:
+                    // A checked IR trap: diagnosed reasons report the
+                    // language line and exit 2; silent ones keep the signal.
+                    return trap(term.reason);
                 case Term::Unreachable:
-                    // A trap block, and a block provably unreached, both emit
-                    // the interpreter's own death: the compiled program takes
-                    // an illegal instruction, and so does this leg.
+                    // Provably unreached: both legs die, but there is no
+                    // source-level diagnostic to name.
                     return die(kSigIll);
             }
         }
@@ -2218,10 +2234,10 @@ struct Runner {
                 // machine needs no toolchain on either leg.
                 return asmBlock(instr);
             case Op::Trap:
-                // The one instruction whose only meaning is a death: the
-                // emitter writes the same illegal instruction, so the
-                // interpreter dies rather than answering a value.
-                return die(kSigIll);
+                // The one instruction whose only meaning is a death: a
+                // diagnosed reason reports and exits 2, exactly like the
+                // emitted write/exit sequence; the rest die by SIGILL.
+                return trap(instr.reason);
         }
         return refuse(instr.loc, "vm reached an unknown instruction");
     }

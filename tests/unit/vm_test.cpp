@@ -172,8 +172,9 @@ void testDeath() {
                         "}\n");
     check(oob.ok, "an out-of-bounds program lowers: " + oob.stage);
     cider::vm::VmResult oobr = cider::vm::run(*oob.module, "");
-    check(oobr.ok && oobr.signal != 0,
-          "an out-of-bounds index dies by signal: " + oobr.error);
+    check(oobr.ok && oobr.signal == 0 && oobr.exitCode == 2 &&
+              oobr.stderrText == "vm error: index out of bounds\n",
+          "an out-of-bounds index diagnoses: " + oobr.stderrText + oobr.error);
     // A zero divisor faults at the instruction, not at the checker.
     Lowered zero = lower("func d(n: int) -> int { return 8 / n; }\n"
                          "func main() -> int { var z: int = 0; return d(z); }\n");

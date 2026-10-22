@@ -350,6 +350,50 @@ private:
         return true;
     }
 
+    // A diagnosed trap is a language result, not a machine accident. Native
+    // has no libc, so the line goes out with the write syscall and the exit
+    // status is 2; UEFI policy stays ud2 and silent. Undiagnosed reasons keep
+    // the same ud2 the old emitter used.
+    bool emitTrapReason(ir::TrapReason reason) {
+        if (target_ == Target::Uefi) {
+            out_ += "  ud2\n";
+            return true;
+        }
+        const char* raw = ir::trapMessage(reason);
+        if (raw == nullptr) {
+            out_ += "  ud2\n";
+            return true;
+        }
+        std::string message(raw);
+        std::string escaped;
+        for (char c : message) {
+            if (c == '\n') {
+                escaped += "\\n";
+            } else if (c == '"' || c == '\\') {
+                escaped += '\\';
+                escaped += c;
+            } else {
+                escaped += c;
+            }
+        }
+        const std::string label =
+            ".L_cider_trap_msg_" + std::to_string(trapMessageSeq_++);
+        out_ += "  mov eax, 1\n";
+        out_ += "  mov edi, 2\n";
+        out_ += "  lea rsi, [rip + " + label + "]\n";
+        out_ += "  mov edx, " + std::to_string(message.size()) + "\n";
+        out_ += "  syscall\n";
+        out_ += "  mov eax, 60\n";
+        out_ += "  mov edi, 2\n";
+        out_ += "  syscall\n";
+        out_ += "  ud2\n";
+        out_ += ".pushsection .rodata\n";
+        out_ += label + ":\n";
+        out_ += "  .ascii \"" + escaped + "\"\n";
+        out_ += ".popsection\n";
+        return true;
+    }
+
     // UEFI's null policy is explicit: the target does not promise a hardware
     // fault for a zero pointer, so codegen checks before the dereference.
     void emitUefiNullCheck(const std::string& reg) {
@@ -1803,8 +1847,7 @@ private:
             return emitCast(instr);
         }
         if (instr.op == ir::Op::Trap) {
-            out_ += "  ud2\n";
-            return true;
+            return emitTrapReason(instr.reason);
         }
         if (instr.op == ir::Op::DataAddr) {
             out_ += "  lea rax, [rip + " + asmSafeName(instr.globalLabel) + "]\n";
@@ -2343,11 +2386,10 @@ private:
         }
         if (term.term == ir::Term::Trap) {
             // A lowering check failed at runtime (a union tag mismatch, a
-            // bounds check): halt rather than continue with a known-wrong
-            // value. The reason travels in IR for diagnostics; native code
-            // has no channel for it, so every reason halts the same way.
-            out_ += "  ud2\n";
-            return true;
+            // bounds check, a nil guard): stop rather than continue with a
+            // known-wrong value. Diagnosed reasons write the language line;
+            // the rest keep the silent ud2.
+            return emitTrapReason(term.reason);
         }
         refuse(term.loc, "this terminator is not emitted yet");
         return false;
@@ -2373,6 +2415,7 @@ private:
     // need a two-path sequence; see emitCast).
     uint64_t cvtLabelSeq_ = 0;
     uint64_t uefiNullSeq_ = 0;
+    uint64_t trapMessageSeq_ = 0;
     bool failed_ = false;
     std::string error_;
     Position pos_{"", 1, 1};
