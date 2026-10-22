@@ -109,6 +109,18 @@ int countOp(const cider::ir::Function& fn, cider::ir::Op op) {
     return n;
 }
 
+int countTrapReason(const cider::ir::Function& fn,
+                    cider::ir::TrapReason reason) {
+    int n = 0;
+    for (const cider::ir::Block& block : fn.blocks) {
+        if (block.term.term == cider::ir::Term::Trap &&
+            block.term.reason == reason) {
+            ++n;
+        }
+    }
+    return n;
+}
+
 const cider::ir::Instr* firstOp(const cider::ir::Function& fn, cider::ir::Op op) {
     for (const cider::ir::Block& block : fn.blocks) {
         for (const cider::ir::Instr& instr : block.body) {
@@ -984,6 +996,153 @@ void testClosure() {
     }
 }
 
+// Nil guards are a lowerer rule, not a target accident: every dereference
+// and dispatch shape carries its own trap reason, and the live forms carry
+// none. Fixed checks stay separate (they are --checks-gated later).
+void testNilGuards() {
+    std::printf("nil guards lower\n");
+
+    Lowered ptr = lower(
+        "func main() -> int {\n"
+        "    var p: *int = nilPtr;\n"
+        "    return *p;\n"
+        "}\n");
+    check(ptr.ok, "a nil read lowers: " + ptr.stage);
+    if (ptr.ok) {
+        const cider::ir::Function* main = find(ptr.module.get(), "main");
+        check(main != nullptr &&
+                  countTrapReason(*main, cider::ir::TrapReason::Null) >= 1,
+              "a nil read carries a Null guard");
+    }
+
+    Lowered store = lower(
+        "func main() -> int {\n"
+        "    var p: *int = nilPtr;\n"
+        "    *p = 7;\n"
+        "    return 0;\n"
+        "}\n");
+    check(store.ok, "a nil store lowers: " + store.stage);
+    if (store.ok) {
+        const cider::ir::Function* main = find(store.module.get(), "main");
+        check(main != nullptr &&
+                  countTrapReason(*main, cider::ir::TrapReason::Null) >= 1,
+              "a nil store carries a Null guard");
+    }
+
+    Lowered iface = lower(
+        "interface Shape { func kind() -> int; }\n"
+        "func main() -> int {\n"
+        "    var s: Shape = uninit;\n"
+        "    return s.kind();\n"
+        "}\n");
+    check(iface.ok, "a nil interface lowers: " + iface.stage);
+    if (iface.ok) {
+        const cider::ir::Function* main = find(iface.module.get(), "main");
+        check(main != nullptr &&
+                  countTrapReason(*main, cider::ir::TrapReason::NilInterface) >= 1,
+              "a nil interface carries a NilInterface guard");
+    }
+
+    Lowered fnptr = lower(
+        "func main() -> int {\n"
+        "    var g: *func(int) -> int = nilPtr;\n"
+        "    return g(3);\n"
+        "}\n");
+    check(fnptr.ok, "a nil function pointer lowers: " + fnptr.stage);
+    if (fnptr.ok) {
+        const cider::ir::Function* main = find(fnptr.module.get(), "main");
+        check(main != nullptr &&
+                  countTrapReason(*main,
+                                  cider::ir::TrapReason::NilFunctionPointer) >= 1,
+              "a nil function pointer carries a NilFunctionPointer guard");
+    }
+
+    Lowered closure = lower(
+        "func main() -> int {\n"
+        "    var c: func(int) -> int = uninit;\n"
+        "    return c(3);\n"
+        "}\n");
+    check(closure.ok, "a nil closure lowers: " + closure.stage);
+    if (closure.ok) {
+        const cider::ir::Function* main = find(closure.module.get(), "main");
+        check(main != nullptr &&
+                  countTrapReason(*main, cider::ir::TrapReason::Null) >= 1,
+              "a nil closure carries a Null guard");
+    }
+
+    Lowered virt = lower(
+        "class Base { virtual func kind() -> int { return 1; } }\n"
+        "func main() -> int {\n"
+        "    var p: *Base = nilPtr;\n"
+        "    return p->kind();\n"
+        "}\n");
+    check(virt.ok, "a nil virtual receiver lowers: " + virt.stage);
+    if (virt.ok) {
+        const cider::ir::Function* main = find(virt.module.get(), "main");
+        check(main != nullptr &&
+                  countTrapReason(*main, cider::ir::TrapReason::Null) >= 1,
+              "a nil virtual receiver traps Null");
+    }
+
+    Lowered livePtr = lower(
+        "func main() -> int {\n"
+        "    var x: int = 41;\n"
+        "    var p: *int = &x;\n"
+        "    return *p - 41;\n"
+        "}\n");
+    check(livePtr.ok, "a live pointer lowers: " + livePtr.stage);
+    if (livePtr.ok) {
+        const cider::ir::Function* main = find(livePtr.module.get(), "main");
+        check(main != nullptr &&
+                  countTrapReason(*main, cider::ir::TrapReason::Null) >= 1,
+              "a live pointer still carries the not-taken Null guard");
+    }
+
+    Lowered liveIface = lower(
+        "interface Shape { func kind() -> int; }\n"
+        "class Box { var v: int; func kind() -> int { return this->v; } }\n"
+        "func main() -> int {\n"
+        "    var b: Box = Box { v: 7 };\n"
+        "    var s: Shape = b;\n"
+        "    return s.kind() - 7;\n"
+        "}\n");
+    check(liveIface.ok, "a live interface lowers: " + liveIface.stage);
+    if (liveIface.ok) {
+        const cider::ir::Function* main = find(liveIface.module.get(), "main");
+        check(main != nullptr &&
+                  countTrapReason(*main, cider::ir::TrapReason::NilInterface) >= 1,
+              "a live interface still carries the not-taken NilInterface guard");
+    }
+
+    Lowered liveFn = lower(
+        "func inc(x: int) -> int { return x + 1; }\n"
+        "func main() -> int {\n"
+        "    var g: *func(int) -> int = &inc;\n"
+        "    return g(3) - 4;\n"
+        "}\n");
+    check(liveFn.ok, "a live function pointer lowers: " + liveFn.stage);
+    if (liveFn.ok) {
+        const cider::ir::Function* main = find(liveFn.module.get(), "main");
+        check(main != nullptr &&
+                  countTrapReason(*main,
+                                  cider::ir::TrapReason::NilFunctionPointer) >= 1,
+              "a live function pointer still carries the not-taken guard");
+    }
+
+    Lowered liveClosure = lower(
+        "func main() -> int {\n"
+        "    var c: func(int) -> int = func(x: int) -> int { return x + 1; };\n"
+        "    return c(3) - 4;\n"
+        "}\n");
+    check(liveClosure.ok, "a live closure lowers: " + liveClosure.stage);
+    if (liveClosure.ok) {
+        const cider::ir::Function* main = find(liveClosure.module.get(), "main");
+        check(main != nullptr &&
+                  countTrapReason(*main, cider::ir::TrapReason::Null) >= 1,
+              "a live closure still carries the not-taken Null guard");
+    }
+}
+
 void testClosureNested() {
     std::printf("nested closure captures are transitive\n");
     Lowered r = lower(
@@ -1437,6 +1596,7 @@ int main() {
     testMethodCall();
     testDelete();
     testIndirect();
+    testNilGuards();
     testClosure();
     testClosureNested();
     testClosureBareName();

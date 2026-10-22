@@ -197,8 +197,9 @@ void testDeath() {
                          "func main() -> int { return *p; }\n");
     check(null.ok, "a null program lowers: " + null.stage);
     cider::vm::VmResult nr = cider::vm::run(*null.module, "");
-    check(nr.ok && nr.signal != 0,
-          "a null dereference dies by signal: " + nr.error);
+    check(nr.ok && nr.signal == 0 && nr.exitCode == 2 &&
+              nr.stderrText == "vm error: null pointer dereference\n",
+          "a null dereference diagnoses: " + nr.stderrText + nr.error);
     // A union member read of a tag that was never written traps.
     Lowered dead = lower("union U { var i: int; var s: string; }\n"
                          "func main() -> int {\n"
@@ -378,8 +379,9 @@ void testCalls() {
     Lowered dead = lower("func main() -> int { var p: *int = nilPtr;"
                          " return *p; }\n");
     cider::vm::VmResult deadr = cider::vm::run(*dead.module, "");
-    check(deadr.ok && deadr.signal != 0,
-          "a nil read still dies: " + deadr.error);
+    check(deadr.ok && deadr.signal == 0 && deadr.exitCode == 2 &&
+              deadr.stderrText == "vm error: null pointer dereference\n",
+          "a nil read diagnoses: " + deadr.stderrText + deadr.error);
     Lowered ind = lower("func two() -> int { return 2; }\n"
                         "func main() -> int {"
                         " var f: func() -> int = two; return f() + 18; }\n");
@@ -746,7 +748,7 @@ void testMultipleBases() {
 }
 
 void testNilFnptrCall() {
-    std::printf("a nil function pointer dies like the machine\n");
+    std::printf("a nil function pointer diagnoses\n");
     Lowered none = lower(
         "func dbl(x: int) -> int { return x * 2; }\n"
         "func main() -> int {\n"
@@ -757,13 +759,15 @@ void testNilFnptrCall() {
         "}\n");
     check(none.ok, "a nil-callee program lowers: " + none.stage);
     cider::vm::VmResult unr = cider::vm::run(*none.module, "");
-    check(unr.ok && unr.signal == 11,
-          "the unoptimised call dies by SIGSEGV: " + unr.error);
+    check(unr.ok && unr.signal == 0 && unr.exitCode == 2 &&
+              unr.stderrText == "vm error: call: nil function pointer\n",
+          "the unoptimised call diagnoses: " + unr.stderrText + unr.error);
     cider::opt::OptResult ores = cider::opt::run(*none.module);
     check(ores.ok, "optimises: " + ores.error);
     cider::vm::VmResult opr = cider::vm::run(*none.module, "");
-    check(opr.ok && opr.signal == 11,
-          "the optimised call dies by SIGSEGV: " + opr.error);
+    check(opr.ok && opr.signal == 0 && opr.exitCode == 2 &&
+              opr.stderrText == "vm error: call: nil function pointer\n",
+          "the optimised call diagnoses: " + opr.stderrText + opr.error);
 }
 
 // CIDER-BUG-049: defaults fill every construction before a constructor or

@@ -521,6 +521,12 @@ public:
     // in a fresh block the caller owns. emitTagTrap is the union-tag shape
     // of this; slice bounds use it with IndexOutOfBounds (SEMANTICS 8).
     void emitCheckTrap(Position pos, ir::Value ok, ir::TrapReason reason);
+    // Always-on nil guard: branches to the reason's trap when `value` is
+    // zero, continuing in a fresh block the caller owns. Pointer derefs and
+    // closure objects use Null; interface dispatch and function-pointer
+    // calls choose their own reason.
+    void emitNonNull(Position pos, ir::Value value,
+                     ir::TrapReason reason = ir::TrapReason::Null);
     // A signed i64 comparison answering one boolean word, for bounds checks
     // the source types already fixed at i64 (SEMANTICS 2.3).
     ir::Value emitI64Cmp(Position pos, BinOp op, ir::Value a, ir::Value b);

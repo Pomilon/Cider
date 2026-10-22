@@ -2160,13 +2160,13 @@ void testIndirectCall() {
                    "    return (*f)(20, 22);\n"
                    "}\n") == 42,
           "an indirect call reaches its target");
-    bool signaled = false;
-    runCode("func main() -> int {\n"
-            "    var f: *func(int) -> int = nilPtr;\n"
-            "    return (*f)(1);\n"
-            "}\n",
-            signaled);
-    check(signaled, "a nil indirect call traps");
+    expectDiagnosed(
+        "func main() -> int {\n"
+        "    var f: *func(int) -> int = nilPtr;\n"
+        "    return (*f)(1);\n"
+        "}\n",
+        "vm error: call: nil function pointer\n",
+        "a nil indirect call diagnoses");
 }
 
 void testFnAddrGlobal() {

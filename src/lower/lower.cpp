@@ -3415,6 +3415,16 @@ std::vector<ir::Value> Lowerer::loadRange(Position pos, const Place& place,
         refuse(pos, "this field layout is not lowered yet");
         return {undefined()};
     }
+    if (place.hasIndirect) {
+        // The pointer is the source-level base of every computed access:
+        // *p, p[i], p.field, and a pointer-to-array index all arrive here.
+        // One guard before the chunk loop covers them all, and it runs
+        // before any address arithmetic, so nil+1 cannot slip past.
+        emitNonNull(pos, place.indirect);
+        if (failed_) {
+            return {undefined()};
+        }
+    }
     if (place.isVolatile) {
         // Volatile places keep the old rule: one word, no straddle. An
         // unaligned volatile access could tear on real hardware, and a
@@ -3578,6 +3588,14 @@ void Lowerer::storeRange(Position pos, const Place& place,
     if (total <= 0) {
         refuse(pos, "this field layout is not lowered yet");
         return;
+    }
+    if (place.hasIndirect) {
+        // Same guard as the load path: the pointer base is tested before
+        // the offset reaches any store.
+        emitNonNull(pos, place.indirect);
+        if (failed_) {
+            return;
+        }
     }
     // `per` holds the pointer width so no digit shares a line with a size
     // word (T4): `bytes % per == 0` is the shape wordCount already uses.
@@ -4923,6 +4941,18 @@ ir::Value Lowerer::emitTagCheck(Position pos, const Place& base, int64_t tagOff,
 
 void Lowerer::emitTagTrap(Position pos, ir::Value ok) {
     emitCheckTrap(pos, ok, ir::TrapReason::UnionTag);
+}
+
+void Lowerer::emitNonNull(Position pos, ir::Value value,
+                          ir::TrapReason reason) {
+    if (failed_) {
+        return;
+    }
+    ir::Value zero = constantI64(0, value.type, pos);
+    if (failed_) {
+        return;
+    }
+    emitCheckTrap(pos, emitI64Cmp(pos, BinOp::Ne, value, zero), reason);
 }
 
 void Lowerer::emitCheckTrap(Position pos, ir::Value ok, ir::TrapReason reason) {
@@ -9769,6 +9799,11 @@ std::vector<ir::Value> Lowerer::lowerCallWords(Call& n) {
     std::string callee;
     bool indirect = false;
     std::optional<ir::Value> indirectCallee;
+    // Which nil guard the indirect callee gets: an interface dispatch and a
+    // raw pointer both end at the same call instruction, but they are
+    // different source failures. Closure code words are covered separately
+    // so a never-assigned closure reports the null dereference v2 defined.
+    ir::TrapReason indirectReason = ir::TrapReason::NilFunctionPointer;
     std::vector<ir::Value> receiver;
     if (const auto* field = dynamic_cast<const Field*>(n.callee.get())) {
         // `c.m(args)`: the checker proved the field names a method, so this
@@ -9874,6 +9909,10 @@ std::vector<ir::Value> Lowerer::lowerCallWords(Call& n) {
                 if (!receiverAddress(base, n.pos, "this call", at)) {
                     return {undefined()};
                 }
+                emitNonNull(n.pos, at);
+                if (failed_) {
+                    return {undefined()};
+                }
                 receiver.push_back(at);
                 sig = msig;
                 int64_t slot = id.has_value()
@@ -9897,6 +9936,10 @@ std::vector<ir::Value> Lowerer::lowerCallWords(Call& n) {
                     ir::Value table = newValue(loadV.width, word, n.pos);
                     loadV.results.push_back(table);
                     emit(std::move(loadV));
+                    if (failed_) {
+                        return {undefined()};
+                    }
+                    emitNonNull(n.pos, table);
                     if (failed_) {
                         return {undefined()};
                     }
@@ -10125,6 +10168,12 @@ std::vector<ir::Value> Lowerer::lowerCallWords(Call& n) {
                 // them like any other slotted value.
             }
             if (iface.hasIndirect) {
+                // The pair lives behind a pointer: a nil base fails before
+                // the vtable word is read.
+                emitNonNull(n.pos, iface.indirect);
+                if (failed_) {
+                    return {undefined()};
+                }
                 // An address behind a pointer: advanced past the offset,
                 // with the vtable read through the pair it names.
                 dataAddr = iface.off == 0 ? iface.indirect
@@ -10181,6 +10230,13 @@ std::vector<ir::Value> Lowerer::lowerCallWords(Call& n) {
             if (failed_) {
                 return {undefined()};
             }
+            // A nil interface is exactly a zero vtable word. Testing it here
+            // keeps every dispatch shape (slot, global spill, pointer) on one
+            // rule and never reads a method entry out of address zero.
+            emitNonNull(n.pos, vtable, ir::TrapReason::NilInterface);
+            if (failed_) {
+                return {undefined()};
+            }
             // The method's address rides in the vtable at its methodNames
             // index, scaled by the pointer width from layout: one load,
             // then an indirect call carrying the receiver first, under the
@@ -10202,6 +10258,7 @@ std::vector<ir::Value> Lowerer::lowerCallWords(Call& n) {
             }
             sig = msig;
             indirect = true;
+            indirectReason = ir::TrapReason::NilInterface;
             indirectCallee = target;
             receiver.push_back(dataAddr);
         }
@@ -10262,6 +10319,11 @@ std::vector<ir::Value> Lowerer::lowerCallWords(Call& n) {
                         }
                         sig = csig;
                         indirect = true;
+                        // A never-assigned closure is an all-zero pair: its
+                        // code word is the language-level nil object, so the
+                        // diagnostic is the null dereference, not a function
+                        // pointer miss.
+                        indirectReason = ir::TrapReason::Null;
                         indirectCallee = pair[kFirstWord];
                         receiver.push_back(pair[kLenWord]);
                     }
@@ -10286,6 +10348,7 @@ std::vector<ir::Value> Lowerer::lowerCallWords(Call& n) {
                             }
                             sig = csig;
                             indirect = true;
+                            indirectReason = ir::TrapReason::Null;
                             indirectCallee = pair[kFirstWord];
                             receiver.push_back(pair[kLenWord]);
                         }
@@ -10439,6 +10502,7 @@ std::vector<ir::Value> Lowerer::lowerCallWords(Call& n) {
             if (!failed_ && csig != nullptr && pair.size() == kClosureWords) {
                 sig = csig;
                 indirect = true;
+                indirectReason = ir::TrapReason::Null;
                 indirectCallee = pair[kFirstWord];
                 receiver.push_back(pair[kLenWord]);
             }
@@ -10504,6 +10568,13 @@ std::vector<ir::Value> Lowerer::lowerCallWords(Call& n) {
     instr.call.indirect = indirect;
     instr.call.msabi = sig->abi() == Abi::MsAbi;
     if (indirectCallee.has_value()) {
+        // Every indirect call goes through here: class vtables, interface
+        // method entries, raw function pointers, and closure code words.
+        // The reason was chosen by the path that produced the callee.
+        emitNonNull(n.pos, *indirectCallee, indirectReason);
+        if (failed_) {
+            return {undefined()};
+        }
         instr.calleeValue = *indirectCallee;
     }
     instr.mayTrap = true;
