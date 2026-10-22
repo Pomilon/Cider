@@ -413,10 +413,14 @@ void faultAlloc(const char* stage) {
     }
     std::string requested(spec);
     std::string wanted(stage);
-    const bool wantsLength = requested.size() > 4 &&
-                             requested.compare(requested.size() - 4, 4, ":len") == 0;
+    const std::string lengthSuffix = ":len";
+    const bool wantsLength =
+        requested.size() >= lengthSuffix.size() &&
+        requested.compare(requested.size() - lengthSuffix.size(),
+                          lengthSuffix.size(), lengthSuffix) ==
+            0;
     if (wantsLength) {
-        requested.resize(requested.size() - 4);
+        requested.resize(requested.size() - lengthSuffix.size());
     }
     if (requested == "symbol") {
         requested = "resolve";

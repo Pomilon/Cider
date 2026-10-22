@@ -2236,7 +2236,7 @@ struct Runner {
                 return asmBlock(instr);
             case Op::Trap:
                 // The one instruction whose only meaning is a death: a
-                // diagnosed reason reports and exits 2, exactly like the
+                // diagnosed reason reports and exits 2, matching the
                 // emitted write/exit sequence; the rest die by SIGILL.
                 return trap(instr.reason);
         }
