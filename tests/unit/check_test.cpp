@@ -2274,6 +2274,21 @@ void testDuplicateMethods() {
     check(named, "duplicate method diagnostic names the method");
 }
 
+void testSizeofExpr() {
+    std::printf("sizeof expression\n");
+    Checked expr = check(
+        "func touch() -> int { return 7; }\n"
+        "func main() -> int { var n: int = sizeof touch() as int; return n; }\n");
+    check(expr.ok, "sizeof expression form checks: " + expr.stage);
+    Checked type = check(
+        "func main() -> int { var n: int = sizeof(int); return n; }\n");
+    check(type.ok, "sizeof(type) still checks: " + type.stage);
+    Checked callParens = check(
+        "func touch() -> int { return 7; }\n"
+        "func main() -> int { var n: int = sizeof(touch()); return n; }\n");
+    check(!callParens.ok, "sizeof(value) remains a type-form rejection");
+}
+
 int main() {
     std::printf("check_test — well-typed programs check\n\n");
     testArithmetic();
@@ -2304,6 +2319,7 @@ int main() {
     testStringBytes();
     testAlignof();
     testTypedForIn();
+    testSizeofExpr();
     testPrivateFields();
     testPrivateMethods();
     testSuperInit();

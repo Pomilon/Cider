@@ -2636,19 +2636,39 @@ std::unique_ptr<Expr> Parser::parseNew() {
 
 std::unique_ptr<Expr> Parser::parseSizeof() {
     Position start = advance().pos;
-    if (!match(TokenKind::LParen)) {
-        failHere("sizeof takes a type in parentheses");
+    // Parenthesized is the type form, exactly as before. `sizeof(x)` is a
+    // type spelling, not a value form; a value with the same name fails the
+    // same way a bad type spelling does.
+    if (check(TokenKind::LParen)) {
+        advance();
+        std::unique_ptr<TypeExpr> type = parseType();
+        if (type == nullptr) {
+            return nullptr;
+        }
+        if (!match(TokenKind::RParen)) {
+            failHere("expected ')'");
+            return nullptr;
+        }
+        return std::make_unique<SizeofType>(start, std::move(type));
+    }
+    // The unparenthesized type spellings (`sizeof int`, `sizeof struct S`).
+    // A bare identifier is a value, not a type: the operand form covers it.
+    if (check(TokenKind::KwStruct) || check(TokenKind::KwClass) ||
+        check(TokenKind::KwUnion) || check(TokenKind::KwEnum) ||
+        check(TokenKind::KwInterface) || check(TokenKind::KwType)) {
+        std::unique_ptr<TypeExpr> type = parseType();
+        if (type == nullptr) {
+            return nullptr;
+        }
+        return std::make_unique<SizeofType>(start, std::move(type));
+    }
+    // The value form binds like a prefix operator: `sizeof a + b` is
+    // `(sizeof a) + b`, and `sizeof f()` keeps the call in the operand.
+    std::unique_ptr<Expr> operand = parsePrefix();
+    if (operand == nullptr) {
         return nullptr;
     }
-    std::unique_ptr<TypeExpr> type = parseType();
-    if (type == nullptr) {
-        return nullptr;
-    }
-    if (!match(TokenKind::RParen)) {
-        failHere("expected ')'");
-        return nullptr;
-    }
-    return std::make_unique<SizeofType>(start, std::move(type));
+    return std::make_unique<SizeofExpr>(start, std::move(operand));
 }
 
 std::unique_ptr<Expr> Parser::parseAlignof() {

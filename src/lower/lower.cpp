@@ -5490,6 +5490,23 @@ std::vector<ir::Value> Lowerer::lowerSizeof(const SizeofType& n) {
     return {constantI64(bytes, count, n.pos)};
 }
 
+std::vector<ir::Value> Lowerer::lowerSizeofExpr(const SizeofExpr& n) {
+    // The checker recorded the operand's type. The operand itself is never
+    // lowered: reading its type must not run a call, store, or trap.
+    TypeRef target = checker_.sizeofExprOperand(&n);
+    if (target.isError()) {
+        refuse(n.pos, "this expression");
+        return {undefined()};
+    }
+    int64_t bytes = resolver_.nominalSize(target.type);
+    if (bytes < 0) {
+        refuse(n.pos, "this expression");
+        return {undefined()};
+    }
+    TypeRef count{ctx_.basic(BasicKind::I64)};
+    return {constantI64(bytes, count, n.pos)};
+}
+
 std::vector<ir::Value> Lowerer::lowerAlignof(const AlignofType& n) {
     TypeRef target = checker_.alignofOperand(&n);
     if (target.isError()) {
@@ -7935,6 +7952,9 @@ std::vector<ir::Value> Lowerer::lowerWords(const Expr* expr, TypeRef fallback) {
     }
     if (dynamic_cast<const SizeofType*>(expr) != nullptr) {
         return lowerSizeof(static_cast<const SizeofType&>(*expr));
+    }
+    if (dynamic_cast<const SizeofExpr*>(expr) != nullptr) {
+        return lowerSizeofExpr(static_cast<const SizeofExpr&>(*expr));
     }
     if (dynamic_cast<const AlignofType*>(expr) != nullptr) {
         return lowerAlignof(static_cast<const AlignofType&>(*expr));
@@ -12280,6 +12300,14 @@ ir::Value Lowerer::onIdentOrExpr(const Expr* expr, TypeRef expected) {
     }
     if (auto* sz = dynamic_cast<const SizeofType*>(expr)) {
         std::vector<ir::Value> words = lowerSizeof(*sz);
+        if (words.size() != kOneWord) {
+            refuse(expr->pos, "this expression");
+            return undefined();
+        }
+        return words[0];
+    }
+    if (auto* sx = dynamic_cast<const SizeofExpr*>(expr)) {
+        std::vector<ir::Value> words = lowerSizeofExpr(*sx);
         if (words.size() != kOneWord) {
             refuse(expr->pos, "this expression");
             return undefined();

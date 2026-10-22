@@ -522,6 +522,11 @@ TypeRef Checker::sizeofOperand(const SizeofType* node) const {
     return found == sizeofOperands_.end() ? errorRef() : found->second;
 }
 
+TypeRef Checker::sizeofExprOperand(const SizeofExpr* node) const {
+    auto found = sizeofExprOperands_.find(node);
+    return found == sizeofExprOperands_.end() ? errorRef() : found->second;
+}
+
 TypeRef Checker::alignofOperand(const AlignofType* node) const {
     auto found = alignofOperands_.find(node);
     return found == alignofOperands_.end() ? errorRef() : found->second;
@@ -2760,6 +2765,22 @@ void Checker::visitSizeofType(SizeofType& n) {
     record(&n, TypeRef{ctx_.basic(BasicKind::I64)});
 }
 
+void Checker::visitSizeofExpr(SizeofExpr& n) {
+    if (n.operand == nullptr) {
+        record(&n, errorRef());
+        return;
+    }
+    // Type the operand only. Lowering reads the recorded type and never
+    // emits a call, store or trap for the operand itself.
+    TypeRef operand = checkExpr(n.operand.get(), TypeRef{});
+    if (operand.isError()) {
+        record(&n, errorRef());
+        return;
+    }
+    sizeofExprOperands_[&n] = operand;
+    record(&n, TypeRef{ctx_.basic(BasicKind::I64)});
+}
+
 void Checker::visitAlignofType(AlignofType& n) {
     TypeRef target = resolveHere(n.type.get());
     if (target.isError()) {
@@ -3702,6 +3723,10 @@ TypeRef Checker::checkExpr(Expr* expr, TypeRef expected) {
     if (auto* sz = dynamic_cast<SizeofType*>(expr)) {
         visitSizeofType(*sz);
         return typeOf(sz);
+    }
+    if (auto* sx = dynamic_cast<SizeofExpr*>(expr)) {
+        visitSizeofExpr(*sx);
+        return typeOf(sx);
     }
     if (auto* al = dynamic_cast<AlignofType*>(expr)) {
         visitAlignofType(*al);

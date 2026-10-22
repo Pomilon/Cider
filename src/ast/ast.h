@@ -365,6 +365,14 @@ struct SizeofType : Expr {
     void accept(ASTVisitor& v) override;
 };
 
+// `sizeof expr` — the operand is typed but never evaluated.
+struct SizeofExpr : Expr {
+    std::unique_ptr<Expr> operand;
+    SizeofExpr(Position p, std::unique_ptr<Expr> e)
+        : Expr(std::move(p)), operand(std::move(e)) {}
+    void accept(ASTVisitor& v) override;
+};
+
 // `alignof(T)` — the alignment as a compile-time integer (Standard 11).
 struct AlignofType : Expr {
     std::unique_ptr<TypeExpr> type;
@@ -839,6 +847,7 @@ struct ASTVisitor {
     virtual void visitArrayLit(ArrayLit& n);
     virtual void visitAssign(Assign& n);
     virtual void visitSizeofType(SizeofType& n);
+    virtual void visitSizeofExpr(SizeofExpr& n);
     virtual void visitAlignofType(AlignofType& n);
     virtual void visitFuncLit(FuncLit& n);
     virtual void visitDeclStmt(DeclStmt& n);
@@ -915,6 +924,7 @@ inline void NewArray::accept(ASTVisitor& v) { v.visitNewArray(*this); }
 inline void ArrayLit::accept(ASTVisitor& v) { v.visitArrayLit(*this); }
 inline void Assign::accept(ASTVisitor& v) { v.visitAssign(*this); }
 inline void SizeofType::accept(ASTVisitor& v) { v.visitSizeofType(*this); }
+inline void SizeofExpr::accept(ASTVisitor& v) { v.visitSizeofExpr(*this); }
 inline void FuncLit::accept(ASTVisitor& v) { v.visitFuncLit(*this); }
 inline void DeclStmt::accept(ASTVisitor& v) { v.visitDeclStmt(*this); }
 inline void ExportDecl::accept(ASTVisitor& v) { v.visitExportDecl(*this); }
@@ -1040,6 +1050,7 @@ inline void ASTVisitor::visitArrayLit(ArrayLit& n) {
     for (auto& i : n.inits) i->accept(*this);
 }
 inline void ASTVisitor::visitSizeofType(SizeofType& n) { n.type->accept(*this); }
+inline void ASTVisitor::visitSizeofExpr(SizeofExpr& n) { n.operand->accept(*this); }
 inline void AlignofType::accept(ASTVisitor& v) { v.visitAlignofType(*this); }
 inline void ASTVisitor::visitAlignofType(AlignofType& n) { n.type->accept(*this); }
 inline void ASTVisitor::visitAssign(Assign& n) {

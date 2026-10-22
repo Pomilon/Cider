@@ -1210,9 +1210,9 @@
   "class": "A"
  },
  "sizeof_expr": {
-  "actual": "cider run exit 1 on all three legs, stdout empty, stderr identical (8592 bytes): `40:18`, `45:14`, `59:39`: a variable needs an initialiser; `59:55`, `60:38`, `60:54`, `61:36`, `61:52`: sizeof takes a type in parentheses (the v2 sizeof-expression operand form is a principled rejection, diff #12)",
-  "blocker": "sizeof-expr-form-must-reject (diff #12: sizeof takes a type in parentheses) + generics + stdlib-io [B-terminal]",
-  "class": "B"
+  "actual": "exact stdout/stderr/exit match on native, VM-unopt and VM-opt: sizeof expression form is compile-time and never evaluates its operand",
+  "blocker": "none",
+  "class": "A"
  },
  "slice": {
   "actual": "exact stdout/stderr/exit match after v3 rewrite (init + _start())",

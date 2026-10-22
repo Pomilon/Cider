@@ -1333,10 +1333,36 @@ void testUefiTargetGlobals() {
     }
 }
 
+void testSizeofExpr() {
+    std::printf("sizeof expression\n");
+    Lowered out = lower(
+        "var touched: int = 0;\n"
+        "func touch() -> int { touched = touched + 1; return 7; }\n"
+        "func main() -> int { var n: int = sizeof touch() as int; return n; }\n");
+    check(out.ok, "sizeof expression lowers: " + out.stage);
+    if (!out.ok) {
+        return;
+    }
+    const cider::ir::Function* fn = find(out.module.get(), "main");
+    check(fn != nullptr, "sizeof expression has a main");
+    bool called = false;
+    if (fn != nullptr) {
+        for (const cider::ir::Block& block : fn->blocks) {
+            for (const cider::ir::Instr& instr : block.body) {
+                if (instr.op == cider::ir::Op::Call && instr.callee == "touch") {
+                    called = true;
+                }
+            }
+        }
+    }
+    check(!called, "sizeof never evaluates its operand");
+}
+
 int main() {
     std::printf("lower_test — source becomes IR\n\n");
     testUefiEntry();
     testUefiTargetGlobals();
+    testSizeofExpr();
     testGlobal();
     testArithmetic();
     testTrapFlag();

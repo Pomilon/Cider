@@ -2916,6 +2916,19 @@ void testFieldDefaults() {
 
 }  // namespace
 
+void testSizeofExpr() {
+    std::printf("sizeof expression\n");
+    Built built = build(
+        "var touched: int = 0;\n"
+        "func touch() -> int { touched = touched + 1; return 7; }\n"
+        "func main() -> int { var n: int = sizeof touch() as int; return n; }\n");
+    check(built.ok, "sizeof expression emits: " + built.stage);
+    if (built.ok) {
+        check(built.asmText.find("call touch") == std::string::npos,
+              "sizeof emits no operand call");
+    }
+}
+
 int main() {
     std::printf("codegen_test — a Cider program runs\n\n");
     testExit();
@@ -2925,6 +2938,7 @@ int main() {
     testPrivateMethods();
     testTargetDispatch();
     testUefiEntryShim();
+    testSizeofExpr();
     testCalls();
     testControl();
     testGlobals();
