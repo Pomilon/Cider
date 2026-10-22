@@ -3135,7 +3135,10 @@ void Lowerer::runDefers(uint64_t from) {
         uint64_t pending = static_cast<uint64_t>(bodies.size());
         for (uint64_t j = pending; j > 0;) {
             --j;
+            uint64_t savedFloor = deferFloor_;
+            deferFloor_ = i + 1;
             bodies[j]->accept(checker_);
+            deferFloor_ = savedFloor;
             if (failed_) {
                 return;
             }
@@ -3353,7 +3356,11 @@ std::optional<uint32_t> Lowerer::emitCallWithLanding(ir::Instr call, Position po
     br.loc = pos;
     emitTerminator(br);
     startBlock(landing);
-    emitExceptionLanding(pos, 0);
+    uint64_t from = handlers_.empty() ? 0 : handlers_.back().deferDepth;
+    if (deferFloor_ > from) {
+        from = deferFloor_;
+    }
+    emitExceptionLanding(pos, from);
     if (failed_) {
         return std::nullopt;
     }
@@ -3377,10 +3384,248 @@ void Lowerer::emitExceptionLanding(Position pos, uint64_t from) {
     if (failed_) {
         return;
     }
+    emitExceptionPropagation(pos);
+}
+
+void Lowerer::emitExceptionPropagation(Position pos) {
+    if (!handlers_.empty()) {
+        ir::Terminator br;
+        br.term = ir::Term::Br;
+        br.target = handlers_.back().dispatch;
+        br.loc = pos;
+        emitTerminator(br);
+        return;
+    }
     ir::Terminator ret;
     ret.term = ir::Term::Ret;
     ret.loc = pos;
     emitTerminator(ret);
+}
+
+void Lowerer::onTryEnter(TryStmt& n) {
+    if (failed_ || !enabled_ || function_ == nullptr) {
+        return;
+    }
+    ensureExceptionSupport();
+    if (failed_) {
+        return;
+    }
+    module_->usesExceptions = true;
+    function_->canThrow = true;
+
+    TryLower frame;
+    frame.dispatch = emitBlock(n.pos);
+    frame.end = emitBlock(n.pos);
+    for (const std::unique_ptr<CatchClause>& clause : n.catches) {
+        frame.catchLabels.push_back(emitBlock(clause->pos));
+        if (clause->type == nullptr) {
+            frame.catchIds.push_back(0);
+        } else {
+            TypeRef type = checker_.catchType(*clause);
+            uint32_t id = exceptionTypeId(type, clause->pos);
+            if (failed_) {
+                return;
+            }
+            frame.catchIds.push_back(id);
+        }
+    }
+    handlers_.push_back(ExceptionHandler{frame.dispatch,
+                                         static_cast<uint64_t>(deferFrames_.size())});
+    tryStack_.push_back(std::move(frame));
+    n.body->accept(checker_);
+}
+
+void Lowerer::onTryBodyDone(TryStmt& n) {
+    if (failed_ || !enabled_ || function_ == nullptr || tryStack_.empty()) {
+        return;
+    }
+    if (!terminated_) {
+        ir::Terminator br;
+        br.term = ir::Term::Br;
+        br.target = tryStack_.back().end;
+        br.loc = n.pos;
+        emitTerminator(br);
+    }
+    if (!handlers_.empty()) {
+        handlers_.pop_back();
+    }
+    TryLower& frame = tryStack_.back();
+    startBlock(frame.dispatch);
+
+    // The thrown type id is the one thing every dispatch reads. Loading it
+    // once makes the catch tests a chain of integer compares and keeps the
+    // payload read inside Landing, where the type is known.
+    TypeRef word{ctx_.basic(BasicKind::I64)};
+    ir::Instr load;
+    load.op = ir::Op::Load;
+    load.loc = n.pos;
+    load.width = ir::IRType::I64;
+    load.type = word;
+    load.globalLabel = module_->exceptionType;
+    load.isPure = true;
+    ir::Value thrown = newValue(load.width, word, n.pos);
+    load.results.push_back(thrown);
+    emit(std::move(load));
+    if (failed_) {
+        return;
+    }
+
+    for (uint64_t i = 0;
+         i < static_cast<uint64_t>(frame.catchLabels.size()); ++i) {
+        uint32_t label = frame.catchLabels[i];
+        uint32_t id = frame.catchIds[i];
+        if (id == 0) {
+            ir::Terminator br;
+            br.term = ir::Term::Br;
+            br.target = label;
+            br.loc = n.pos;
+            emitTerminator(br);
+            break;
+        }
+        ir::Value want = constantI64(static_cast<int64_t>(id), word, n.pos);
+        if (failed_) {
+            return;
+        }
+        ir::Instr cmp;
+        cmp.op = ir::Op::Cmp;
+        cmp.loc = n.pos;
+        cmp.cmp = ir::CmpOp::Eq;
+        cmp.width = ir::IRType::Bool;
+        cmp.type = TypeRef{ctx_.basic(BasicKind::Bool)};
+        cmp.isPure = true;
+        cmp.operands.push_back(thrown);
+        cmp.operands.push_back(want);
+        ir::Value matched = newValue(cmp.width, cmp.type, n.pos);
+        cmp.results.push_back(matched);
+        emit(std::move(cmp));
+        if (failed_) {
+            return;
+        }
+        uint32_t next = emitBlock(n.pos);
+        ir::Terminator br;
+        br.term = ir::Term::CondBr;
+        br.cond = matched;
+        br.thenTarget = label;
+        br.elseTarget = next;
+        br.loc = n.pos;
+        emitTerminator(br);
+        startBlock(next);
+    }
+    if (!terminated_) {
+        emitExceptionPropagation(n.pos);
+    }
+}
+
+void Lowerer::onCatchEnter(TryStmt& n, CatchClause& c) {
+    (void)n;
+    if (failed_ || !enabled_ || function_ == nullptr || tryStack_.empty()) {
+        return;
+    }
+    TryLower& frame = tryStack_.back();
+    if (frame.nextCatch >=
+        static_cast<uint64_t>(frame.catchLabels.size())) {
+        refuse(c.pos, "a catch");
+        return;
+    }
+    uint32_t label = frame.catchLabels[frame.nextCatch];
+    uint32_t id = frame.catchIds[frame.nextCatch];
+    ++frame.nextCatch;
+    startBlock(label);
+
+    // The flag is cleared before the body runs. A call there then installs
+    // its own landing; leaving the old throw raised would make every call
+    // in the handler look like it threw immediately.
+    storeExceptionFlag(0, c.pos);
+    if (failed_) {
+        return;
+    }
+
+    TypeRef type = checker_.catchType(c);
+    std::vector<ir::Value> slots;
+    if (id != 0 && !type.isError()) {
+        int count = wordCount(type);
+        if (count < 1 ||
+            count > static_cast<int>(ir::Module::kExceptionWords)) {
+            refuse(c.pos, "a catch value wider than the exception slot");
+            return;
+        }
+        ir::Instr landing;
+        landing.op = ir::Op::Landing;
+        landing.loc = c.pos;
+        landing.typeId = id;
+        std::vector<ir::Value> landed;
+        for (int i = 0; i < count; ++i) {
+            TypeRef part = wordType(type, static_cast<uint64_t>(i));
+            ir::Value out = newValue(widthOf(part, c.pos), part, c.pos);
+            landing.results.push_back(out);
+            landed.push_back(out);
+        }
+        emit(std::move(landing));
+        if (failed_) {
+            return;
+        }
+        slots = allocaFor(type, c.pos);
+        if (failed_ || slots.size() != landed.size()) {
+            if (!failed_) {
+                refuse(c.pos, "a catch value");
+            }
+            return;
+        }
+        for (uint64_t i = 0; i < static_cast<uint64_t>(slots.size()); ++i) {
+            TypeRef part = wordType(type, static_cast<uint64_t>(i));
+            ir::Instr store;
+            store.op = ir::Op::Store;
+            store.loc = c.pos;
+            store.width = widthOf(part, c.pos);
+            store.type = part;
+            store.addressBase = slots[i];
+            store.storedValue = landed[i];
+            emit(std::move(store));
+        }
+        if (failed_) {
+            return;
+        }
+    }
+
+    // The binder is one extra locals map, not a Block: the catch body
+    // pushes its own block scope on entry and pops it on exit. The checker
+    // re-walk binds the same name in its own scope, so the body sees the
+    // type and a bare throw knows it is inside a catch.
+    locals_.push_back({});
+    if (!c.name.empty() && id != 0 && !type.isError()) {
+        LocalBinding binding;
+        binding.slots = slots;
+        binding.type = type;
+        binding.isMutable = false;
+        locals_.back()[c.name] = std::move(binding);
+    }
+    checker_.walkCatchBody(c, type);
+    locals_.pop_back();
+    if (failed_) {
+        return;
+    }
+    if (!terminated_) {
+        ir::Terminator br;
+        br.term = ir::Term::Br;
+        br.target = frame.end;
+        br.loc = c.pos;
+        emitTerminator(br);
+    }
+}
+
+void Lowerer::onCatchExit(TryStmt& n, CatchClause& c) {
+    (void)n;
+    (void)c;
+}
+
+void Lowerer::onTryExit(TryStmt& n) {
+    if (failed_ || !enabled_ || function_ == nullptr || tryStack_.empty()) {
+        return;
+    }
+    uint32_t end = tryStack_.back().end;
+    tryStack_.pop_back();
+    startBlock(end);
+    (void)n;
 }
 
 void Lowerer::onVarDecl(VarDecl& n) {

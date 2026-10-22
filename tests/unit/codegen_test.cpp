@@ -712,6 +712,117 @@ void testThrowUncaught() {
           "a throw crosses a call frame");
 }
 
+void testTryCatch() {
+    std::printf("try catch runs\n");
+    bool signaled = false;
+    std::string err;
+    int code = runCapture("func main() -> int {\n"
+                          "    try {\n"
+                          "        throw 7;\n"
+                          "    } catch e: int {\n"
+                          "        return e;\n"
+                          "    }\n"
+                          "}\n",
+                          signaled, err);
+    check(!signaled && code == 7 && err.empty(),
+          "a typed catch binds the thrown value");
+
+    code = runCapture("func main() -> int {\n"
+                      "    try {\n"
+                      "        throw 7;\n"
+                      "    } catch {\n"
+                      "        return 42;\n"
+                      "    }\n"
+                      "}\n",
+                      signaled, err);
+    check(!signaled && code == 42 && err.empty(),
+          "a bare catch catches any type");
+
+    code = runCapture("func main() -> int {\n"
+                      "    try {\n"
+                      "        try {\n"
+                      "            throw 7;\n"
+                      "        } catch e: int {\n"
+                      "            throw;\n"
+                      "        }\n"
+                      "    } catch e: int {\n"
+                      "        return e;\n"
+                      "    }\n"
+                      "}\n",
+                      signaled, err);
+    check(!signaled && code == 7 && err.empty(),
+          "a rethrow keeps the value and reaches the outer catch");
+
+    code = runCapture("func main() -> int {\n"
+                      "    try {\n"
+                      "        throw 7;\n"
+                      "    } catch e: bool {\n"
+                      "        return 9;\n"
+                      "    } catch e: int {\n"
+                      "        return e;\n"
+                      "    }\n"
+                      "}\n",
+                      signaled, err);
+    check(!signaled && code == 7 && err.empty(),
+          "catch order uses exact type equality");
+
+    code = runCapture("var g: int = 0;\n"
+                      "func bump() { g = g + 1; }\n"
+                      "func main() -> int {\n"
+                      "    try {\n"
+                      "        defer bump();\n"
+                      "        throw 7;\n"
+                      "    } catch e: int {\n"
+                      "        return e * 10 + g;\n"
+                      "    }\n"
+                      "}\n",
+                      signaled, err);
+    check(!signaled && code == 71 && err.empty(),
+          "a throw runs the defer of the scope it leaves");
+
+    code = runCapture("func main() -> int {\n"
+                      "    try {\n"
+                      "        try {\n"
+                      "            throw 1;\n"
+                      "        } catch e: int {\n"
+                      "            throw 2;\n"
+                      "        }\n"
+                      "    } catch e: int {\n"
+                      "        return e;\n"
+                      "    }\n"
+                      "}\n",
+                      signaled, err);
+    check(!signaled && code == 2 && err.empty(),
+          "a throw in a catch targets the outer handler");
+
+    code = runCapture("func main() -> int {\n"
+                      "    try {\n"
+                      "        try {\n"
+                      "            throw 7;\n"
+                      "        } catch e: int {\n"
+                      "            return 1;\n"
+                      "        }\n"
+                      "    } catch {\n"
+                      "        return 2;\n"
+                      "    }\n"
+                      "}\n",
+                      signaled, err);
+    check(!signaled && code == 1 && err.empty(),
+          "an inner catch wins over an outer one");
+
+    code = runCapture("func main() -> int {\n"
+                      "    try {\n"
+                      "        throw 1;\n"
+                      "    } catch e: bool {\n"
+                      "        return 2;\n"
+                      "    }\n"
+                      "}\n",
+                      signaled, err);
+    check(!signaled && code == 2 &&
+              err == "vm error: uncaught exception\n",
+          "no matching catch stays uncaught");
+}
+
 void testTrap() {
     std::printf("traps\n");
     bool signaled = false;
@@ -3134,6 +3245,7 @@ int main() {
     testTrapMessages();
     testLandingPads();
     testThrowUncaught();
+    testTryCatch();
     testTrap();
     testPanic();
     testElementAddr();

@@ -212,6 +212,11 @@ public:
     // The type a typed catch binds. A bare catch has no entry; lowering
     // keys that case on CatchClause::type being null.
     TypeRef catchType(const CatchClause& clause) const;
+    // Re-walks one catch body with the sink attached and the binder in
+    // scope, mirroring the checking walk. Lowering calls this from
+    // onCatchEnter; the body was already proven clean, so the re-walk is
+    // deterministic and reports nothing new.
+    void walkCatchBody(CatchClause& clause, TypeRef type);
     // Names a declaration `*volatile T` so derefs through it are volatile
     // places; silent for every other spelling.
     void noteVolatilePointer(const std::string& name, const TypeExpr* type);

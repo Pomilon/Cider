@@ -851,6 +851,100 @@ void testThrowUnwind() {
           "the optimised throw is uncaught: " + opr.stderrText + opr.error);
 }
 
+void testTryCatchVm() {
+    std::printf("try catch on both legs\n");
+    auto both = [&](const std::string& text, int want, const std::string& what) {
+        Lowered program = lower(text);
+        check(program.ok, what + " lowers: " + program.stage);
+        if (!program.ok) {
+            return;
+        }
+        cider::vm::VmResult unr = cider::vm::run(*program.module, "");
+        check(unr.ok && unr.signal == 0 && unr.exitCode == want &&
+                  unr.stderrText.empty(),
+              what + " unoptimised: " + unr.stderrText + unr.error);
+        cider::opt::OptResult ores = cider::opt::run(*program.module);
+        check(ores.ok, what + " optimises: " + ores.error);
+        cider::vm::VmResult opr = cider::vm::run(*program.module, "");
+        check(opr.ok && opr.signal == 0 && opr.exitCode == want &&
+                  opr.stderrText.empty(),
+              what + " optimised: " + opr.stderrText + opr.error);
+    };
+
+    both("func main() -> int {\n"
+         "    try { throw 7; } catch e: int { return e; }\n"
+         "}\n",
+         7, "a typed catch binds");
+
+    both("func main() -> int {\n"
+         "    try { throw 7; } catch { return 42; }\n"
+         "}\n",
+         42, "a bare catch catches any type");
+
+    both("func main() -> int {\n"
+         "    try {\n"
+         "        try { throw 7; } catch e: int { throw; }\n"
+         "    } catch e: int { return e; }\n"
+         "}\n",
+         7, "a rethrow reaches the outer catch");
+
+    both("func main() -> int {\n"
+         "    try { throw 7; }\n"
+         "    catch e: bool { return 9; }\n"
+         "    catch e: int { return e; }\n"
+         "}\n",
+         7, "catch order uses exact type equality");
+
+    both("var g: int = 0;\n"
+         "func bump(x: int) { g = g * 10 + x; }\n"
+         "func main() -> int {\n"
+         "    try {\n"
+         "        defer bump(1);\n"
+         "        defer bump(2);\n"
+         "        throw 3;\n"
+         "    } catch e: int { return g * 10 + e; }\n"
+         "}\n",
+         213, "defers run LIFO before the catch");
+
+    both("func main() -> int {\n"
+         "    try {\n"
+         "        try { throw 1; } catch e: int { throw 2; }\n"
+         "    } catch e: int { return e; }\n"
+         "}\n",
+         2, "a throw in a catch targets the outer handler");
+
+    both("func main() -> int {\n"
+         "    try {\n"
+         "        try { throw 7; } catch e: int { return 1; }\n"
+         "    } catch { return 2; }\n"
+         "}\n",
+         1, "an inner catch wins");
+
+    both("func main() -> int {\n"
+         "    try { throw \"oops\"; } catch e: string { return e.len as int; }\n"
+         "}\n",
+         4, "a two-word payload survives the slot");
+
+    Lowered none = lower("func main() -> int {\n"
+                         "    try { throw 1; } catch e: bool { return 2; }\n"
+                         "}\n");
+    check(none.ok, "a no-match program lowers: " + none.stage);
+    if (none.ok) {
+        cider::vm::VmResult unr = cider::vm::run(*none.module, "");
+        check(unr.ok && unr.signal == 0 && unr.exitCode == 2 &&
+                  unr.stderrText == "vm error: uncaught exception\n",
+              "the unoptimised no-match is uncaught: " + unr.stderrText +
+                  unr.error);
+        cider::opt::OptResult ores = cider::opt::run(*none.module);
+        check(ores.ok, "a no-match program optimises: " + ores.error);
+        cider::vm::VmResult opr = cider::vm::run(*none.module, "");
+        check(opr.ok && opr.signal == 0 && opr.exitCode == 2 &&
+                  opr.stderrText == "vm error: uncaught exception\n",
+              "the optimised no-match is uncaught: " + opr.stderrText +
+                  opr.error);
+    }
+}
+
 }  // namespace
 
 int main() {
@@ -873,6 +967,7 @@ int main() {
     testFieldDefaults();
     testLandingPads();
     testThrowUnwind();
+    testTryCatchVm();
     std::printf("\n%d checks, %s\n", checks, failures == 0 ? "all passed" : "FAILURES");
     return failures == 0 ? 0 : 1;
 }

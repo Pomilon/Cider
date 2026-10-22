@@ -790,6 +790,20 @@ TypeRef Checker::catchType(const CatchClause& clause) const {
     return found == catchTypes_.end() ? errorRef() : found->second;
 }
 
+void Checker::walkCatchBody(CatchClause& clause, TypeRef type) {
+    if (clause.body == nullptr) {
+        return;
+    }
+    pushScope();
+    if (clause.type != nullptr && !clause.name.empty() && !type.isError()) {
+        bindLocal(clause.name, type, false, clause.pos);
+    }
+    ++catchDepth_;
+    clause.body->accept(*this);
+    --catchDepth_;
+    popScope();
+}
+
 void Checker::popScope() {
     current_ = current_ != nullptr ? current_->parent : nullptr;
     if (!flowStack_.empty()) {

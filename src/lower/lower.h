@@ -137,6 +137,11 @@ public:
     void onBlockExit(Block& n) override;
     void onDeferStmt(DeferStmt& n) override;
     void onThrowStmt(ThrowStmt& n) override;
+    void onTryEnter(TryStmt& n) override;
+    void onTryBodyDone(TryStmt& n) override;
+    void onCatchEnter(TryStmt& n, CatchClause& c) override;
+    void onCatchExit(TryStmt& n, CatchClause& c) override;
+    void onTryExit(TryStmt& n) override;
     // A closure literal, after its body checked. Emits the hidden function
     // and records where, so lowering the literal itself answers the
     // two-word value (code address, captures pointer).
@@ -652,6 +657,29 @@ private:
     // Answers the continuation block, or std::nullopt for a bare call.
     std::optional<uint32_t> emitCallWithLanding(ir::Instr call, Position pos);
     void emitExceptionLanding(Position pos, uint64_t from);
+    // While a defer body is being re-walked, a throw from a call inside it
+    // must not run that same body again. This floor names the first scope
+    // outside the defer currently running.
+    uint64_t deferFloor_ = 0;
+    void emitExceptionPropagation(Position pos);
+    // One active try body. The dispatch block receives control when a throw
+    // leaves the body or a call inside it raises the flag; deferDepth is the
+    // scope count to unwind before dispatch.
+    struct ExceptionHandler {
+        uint32_t dispatch = 0;
+        uint64_t deferDepth = 0;
+    };
+    // One try statement being lowered, kept across the checker's six hooks.
+    // Catch labels are allocated up front so dispatch can name them.
+    struct TryLower {
+        uint32_t dispatch = 0;
+        uint32_t end = 0;
+        std::vector<uint32_t> catchLabels;
+        std::vector<uint32_t> catchIds;
+        uint64_t nextCatch = 0;
+    };
+    std::vector<ExceptionHandler> handlers_;
+    std::vector<TryLower> tryStack_;
     // Shared function frame setup and teardown behind onFuncDecl and spec
     // emissions, so the two cannot diverge (sret handling, slot layout,
     // falloff rule). The caller lowers the body between the two and pops
