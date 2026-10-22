@@ -1375,12 +1375,28 @@ void testExternVar() {
     }
 }
 
+void testModuleAsm() {
+    std::printf("module asm\n");
+    Lowered out = lower(
+        "asm {\n"
+        "  \"module_data:\"\n"
+        "  \"  .quad 42\"\n"
+        "}\n"
+        "func main() -> int { return 0; }\n");
+    check(out.ok, "module asm lowers: " + out.stage);
+    if (out.ok) {
+        check(out.module->moduleAsm.find("module_data:") != std::string::npos,
+              "module asm text reaches the module");
+    }
+}
+
 int main() {
     std::printf("lower_test — source becomes IR\n\n");
     testUefiEntry();
     testUefiTargetGlobals();
     testSizeofExpr();
     testExternVar();
+    testModuleAsm();
     testGlobal();
     testArithmetic();
     testTrapFlag();

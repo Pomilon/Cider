@@ -3432,6 +3432,17 @@ void Checker::visitDeleteStmt(DeleteStmt& n) {
 // Every `{placeholder}` in an asm block must name a local, a parameter, or
 // a module-level declaration: the text is raw assembly the checker cannot
 // see into, so a typo'd name has to fail here (FEAT-035).
+void Checker::visitModuleAsm(ModuleAsm& n) {
+    const target::Info& info = target::info(target_);
+    // Module-scope asm is raw text for an assembler. A target that emits
+    // assembly can pass it through; a PE target and the interpreter cannot
+    // execute it, and must reject it rather than silently drop the block.
+    if (!info.allowsAsm || info.output != target::Output::Asm) {
+        fail(n.pos, std::string("module-scope asm is not supported on ") +
+                        info.name);
+    }
+}
+
 void Checker::visitAsmStmt(AsmStmt& n) {
     if (!target::info(target_).allowsAsm) {
         fail(n.pos, std::string("asm blocks are not supported on ") +

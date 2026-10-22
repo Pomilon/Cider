@@ -274,6 +274,17 @@ std::unique_ptr<Program> Parser::parse() {
 
 std::unique_ptr<Decl> Parser::parseDecl() {
     TokenKind kind = peek().kind;
+    if (kind == TokenKind::KwAsm) {
+        std::unique_ptr<Stmt> stmt = parseAsm();
+        if (stmt == nullptr) {
+            return nullptr;
+        }
+        auto* asmStmt = dynamic_cast<AsmStmt*>(stmt.get());
+        if (asmStmt == nullptr) {
+            return nullptr;
+        }
+        return std::make_unique<ModuleAsm>(asmStmt->pos, std::move(asmStmt->text));
+    }
     // 8.4: `msabi func`, `sysv func`, `msabi extern func` — the convention is
     // stated before the declaration it applies to.
     if (kind == TokenKind::Ident &&

@@ -275,6 +275,9 @@ struct Module {
     // owns the firmware entry symbol. Empty on targets whose entry is an
     // ordinary function (`main`/`_start`).
     std::string entry;
+    // Raw module-scope asm, emitted at the top of .text by native codegen.
+    // Empty when the module has none. Never substituted.
+    std::string moduleAsm;
     std::vector<Function> functions;
     std::vector<Global> globals;
     std::vector<Rodata> rodata;

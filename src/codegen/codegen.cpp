@@ -113,6 +113,7 @@ public:
 
     EmitResult run() {
         out_ += ".intel_syntax noprefix\n.text\n";
+        out_ += module_.moduleAsm;
         for (const ir::Function& fn : module_.functions) {
             if (!emitFunction(fn)) {
                 return EmitResult{false, "", error_, pos_};

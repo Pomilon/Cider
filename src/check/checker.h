@@ -224,6 +224,7 @@ public:
     void visitClassDecl(ClassDecl& n) override;
     void visitUnionDecl(UnionDecl& n) override;
     void visitSizeofExpr(SizeofExpr& n) override;
+    void visitModuleAsm(ModuleAsm& n) override;
     void visitVarDecl(VarDecl& n) override;
     void visitBlock(Block& n) override;
     void visitIfStmt(IfStmt& n) override;

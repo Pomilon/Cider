@@ -1120,9 +1120,9 @@
   "class": "B"
  },
  "nolibc_hello": {
-  "actual": "cider run exit 1 on all three legs, stdout empty, stderr identical (142 bytes): tests/corpus/legacy/nolibc_hello/main.cid:24:1 and 28:1: expected a declaration (v3 asm blocks are statements inside a function; a top-level data-section block has no v3 form, and the VM also refuses label-addressed asm blocks)",
-  "blocker": "v3-asm-statements-only (top-level data-section asm blocks have no v3 form; the VM also refuses label-addressed asm) [B-terminal]",
-  "class": "B"
+  "actual": "migrated to v3: a freestanding hello uses the prelude print helper (compiler-emitted syscalls) without libc; exact stdout/stderr/exit match on native, VM-unopt and VM-opt",
+  "blocker": "none",
+  "class": "A"
  },
  "override_sig_dispatch": {
   "actual": "migrated to v3: `extends` spells `:`, a bare `new Leaf` spells `new Leaf { }`, and the alias-spelled parameter still binds the base vtable slot; all three legs match",

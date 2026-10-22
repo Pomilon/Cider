@@ -2943,6 +2943,21 @@ void testExternVar() {
     }
 }
 
+void testModuleAsm() {
+    std::printf("module asm\n");
+    Built built = build(
+        "asm {\n"
+        "  \"module_data:\"\n"
+        "  \"  .quad 42\"\n"
+        "}\n"
+        "func main() -> int { return 0; }\n");
+    check(built.ok, "module asm emits: " + built.stage);
+    if (built.ok) {
+        check(built.asmText.find("module_data:\n  .quad 42\n") != std::string::npos,
+              "module asm is emitted verbatim");
+    }
+}
+
 int main() {
     std::printf("codegen_test — a Cider program runs\n\n");
     testExit();
@@ -2954,6 +2969,7 @@ int main() {
     testUefiEntryShim();
     testSizeofExpr();
     testExternVar();
+    testModuleAsm();
     testCalls();
     testControl();
     testGlobals();

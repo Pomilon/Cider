@@ -2301,6 +2301,47 @@ void testExternVar() {
     check(!init.ok, "extern var refuses an initializer");
 }
 
+void testModuleAsm() {
+    std::printf("module asm\n");
+    Checked native = check(
+        "asm {\n"
+        "  \"module_data:\"\n"
+        "  \"  .quad 42\"\n"
+        "}\n"
+        "func main() -> int { return 0; }\n");
+    check(native.ok, "native module asm checks: " + native.stage);
+    Checked uefi = checkAs(
+        "asm { \"nop\" }\n"
+        "func efi_main() -> int { return 0; }\n",
+        cider::target::Kind::Uefi);
+    check(!uefi.ok && uefi.stage == "check",
+          "uefi module asm is rejected at check time");
+    bool named = false;
+    if (uefi.checker != nullptr) {
+        for (const cider::check::CheckError& error : uefi.checker->errors()) {
+            if (error.message.find("uefi") != std::string::npos) {
+                named = true;
+            }
+        }
+    }
+    check(named, "the module-asm rejection names uefi");
+    Checked vm = checkAs(
+        "asm { \"nop\" }\n"
+        "func main() -> int { return 0; }\n",
+        cider::target::Kind::Vm);
+    check(!vm.ok && vm.stage == "check",
+          "the vm rejects module-scope asm rather than ignoring it");
+    bool vmNamed = false;
+    if (vm.checker != nullptr) {
+        for (const cider::check::CheckError& error : vm.checker->errors()) {
+            if (error.message.find("vm") != std::string::npos) {
+                vmNamed = true;
+            }
+        }
+    }
+    check(vmNamed, "the module-asm vm rejection names vm");
+}
+
 int main() {
     std::printf("check_test — well-typed programs check\n\n");
     testArithmetic();
@@ -2333,6 +2374,7 @@ int main() {
     testTypedForIn();
     testSizeofExpr();
     testExternVar();
+    testModuleAsm();
     testPrivateFields();
     testPrivateMethods();
     testSuperInit();

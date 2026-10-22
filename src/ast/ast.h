@@ -578,6 +578,15 @@ struct AsmStmt : Stmt {
     void accept(ASTVisitor& v) override;
 };
 
+// Module-scope asm is raw text. Unlike AsmStmt, no `{name}` substitution is
+// performed: the bytes are the program's, not the compiler's.
+struct ModuleAsm : Decl {
+    std::string text;
+    ModuleAsm(Position p, std::string t)
+        : Decl(std::move(p)), text(std::move(t)) {}
+    void accept(ASTVisitor& v) override;
+};
+
 // --- Declarations ------------------------------------------------------------
 
 struct Param : Node {
@@ -880,6 +889,7 @@ struct ASTVisitor {
     virtual void visitThrowStmt(ThrowStmt& n);
     virtual void visitDeleteStmt(DeleteStmt& n);
     virtual void visitAsmStmt(AsmStmt& n);
+    virtual void visitModuleAsm(ModuleAsm& n);
     virtual void visitParam(Param& n);
     virtual void visitFieldDecl(FieldDecl& n);
     virtual void visitMethodDecl(MethodDecl& n);
@@ -957,6 +967,7 @@ inline void TryStmt::accept(ASTVisitor& v) { v.visitTryStmt(*this); }
 inline void ThrowStmt::accept(ASTVisitor& v) { v.visitThrowStmt(*this); }
 inline void DeleteStmt::accept(ASTVisitor& v) { v.visitDeleteStmt(*this); }
 inline void AsmStmt::accept(ASTVisitor& v) { v.visitAsmStmt(*this); }
+inline void ModuleAsm::accept(ASTVisitor& v) { v.visitModuleAsm(*this); }
 inline void Param::accept(ASTVisitor& v) { v.visitParam(*this); }
 inline void FieldDecl::accept(ASTVisitor& v) { v.visitFieldDecl(*this); }
 inline void MethodDecl::accept(ASTVisitor& v) { v.visitMethodDecl(*this); }
@@ -1139,6 +1150,7 @@ inline void ASTVisitor::visitThrowStmt(ThrowStmt& n) {
 }
 inline void ASTVisitor::visitDeleteStmt(DeleteStmt& n) { n.ptr->accept(*this); }
 inline void ASTVisitor::visitAsmStmt(AsmStmt&) {}
+inline void ASTVisitor::visitModuleAsm(ModuleAsm&) {}
 inline void ASTVisitor::visitParam(Param& n) { n.type->accept(*this); }
 inline void ASTVisitor::visitFieldDecl(FieldDecl& n) {
     n.type->accept(*this);

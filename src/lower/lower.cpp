@@ -343,6 +343,22 @@ bool Lowerer::lowerInto(const std::string& name, Program& program) {
             }
         }
     }
+    // Module-scope asm is raw text owned by the program. It is collected
+    // once per module and emitted verbatim before any generated function.
+    for (const std::unique_ptr<cider::Decl>& decl : program.decls) {
+        const cider::Decl* node = decl.get();
+        if (const auto* exported = dynamic_cast<const ExportDecl*>(node)) {
+            node = exported->decl.get();
+        }
+        const auto* asmDecl = dynamic_cast<const ModuleAsm*>(node);
+        if (asmDecl == nullptr) {
+            continue;
+        }
+        module_->moduleAsm += asmDecl->text;
+        if (!module_->moduleAsm.empty() && module_->moduleAsm.back() != '\n') {
+            module_->moduleAsm += '\n';
+        }
+    }
     // Extern data has no image. Register its binding before the checking
     // walk so a source read resolves to `[rip + symbol]`, never to a
     // compiler-defined `.data` label.
