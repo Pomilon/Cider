@@ -1,0 +1,11 @@
+from std.io import print, printInt;
+
+func main() -> int {
+    try {
+        throw 7;
+    } catch e: int {
+        printInt(e);
+    }
+    print("\n");
+    return 0;
+}
