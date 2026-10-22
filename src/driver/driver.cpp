@@ -17,9 +17,11 @@
 #include <cstdlib>
 #include <csignal>
 #include <fstream>
+#include <limits.h>
 #include <sstream>
 #include <sys/wait.h>
 #include <unistd.h>
+#include <vector>
 
 #include "check/checker.h"
 #include "codegen/codegen.h"
@@ -71,6 +73,133 @@ std::string readPendingInput() {
     return text;
 }
 
+// Lexical normalization only: no filesystem walk, no symlink resolution.
+// The same spelling must resolve to the same candidate on every machine.
+std::string normalizePath(const std::string& path) {
+    const bool absolute = !path.empty() && path[0] == '/';
+    std::vector<std::string> parts;
+    std::string segment;
+    auto flush = [&]() {
+        if (segment.empty() || segment == ".") {
+            segment.clear();
+            return;
+        }
+        if (segment == "..") {
+            if (!parts.empty() && parts.back() != "..") {
+                parts.pop_back();
+            } else if (!absolute) {
+                parts.push_back("..");
+            }
+        } else {
+            parts.push_back(segment);
+        }
+        segment.clear();
+    };
+    for (char c : path) {
+        if (c == '/') {
+            flush();
+        } else {
+            segment += c;
+        }
+    }
+    flush();
+    std::string out;
+    uint64_t index = 0;
+    for (const std::string& part : parts) {
+        if (absolute || index > 0) {
+            out += '/';
+        }
+        out += part;
+        ++index;
+    }
+    if (out.empty()) {
+        return absolute ? "/" : ".";
+    }
+    return out;
+}
+
+std::string dirName(const std::string& path) {
+    std::string::size_type slash = path.rfind('/');
+    if (slash == std::string::npos) {
+        return ".";
+    }
+    if (slash == 0) {
+        return "/";
+    }
+    return path.substr(0, slash);
+}
+
+std::string joinPath(const std::string& base, const std::string& rel) {
+    if (base.empty()) {
+        return rel;
+    }
+    return base.back() == '/' ? base + rel : base + "/" + rel;
+}
+
+std::vector<std::string> dirsAbove(const std::string& start) {
+    std::vector<std::string> dirs;
+    std::string current = normalizePath(start);
+    for (int depth = 0; depth < 64; ++depth) {
+        dirs.push_back(current);
+        std::string parent = dirName(current);
+        if (parent == current) {
+            break;
+        }
+        current = parent;
+    }
+    return dirs;
+}
+
+std::string currentDir() {
+    char buf[PATH_MAX];
+    if (getcwd(buf, PATH_MAX) == nullptr) {
+        return ".";
+    }
+    return normalizePath(buf);
+}
+
+std::string binaryDir() {
+    char buf[PATH_MAX];
+    long n = readlink("/proc/self/exe", buf, PATH_MAX - 1);
+    if (n <= 0) {
+        return "";
+    }
+    buf[n] = '\0';
+    return dirName(normalizePath(buf));
+}
+
+std::vector<std::string> moduleRoots(const std::string& entryDir) {
+    std::vector<std::string> roots;
+    auto add = [&](const std::string& path) {
+        std::string clean = normalizePath(path);
+        for (const std::string& have : roots) {
+            if (have == clean) {
+                return;
+            }
+        }
+        roots.push_back(std::move(clean));
+    };
+    const std::string origin = entryDir.empty() ? "." : entryDir;
+    add(origin);
+    add(joinPath(origin, "modules"));
+    const std::string here = currentDir();
+    add(here);
+    add(joinPath(here, "modules"));
+    add(joinPath(here, "Cider/modules"));
+    for (const std::string& dir : dirsAbove(dirName(here))) {
+        add(joinPath(dir, "modules"));
+    }
+    const std::string bin = binaryDir();
+    if (!bin.empty()) {
+        add(bin);
+        add(joinPath(bin, "modules"));
+        for (const std::string& dir : dirsAbove(dirName(bin))) {
+            add(joinPath(dir, "modules"));
+        }
+    }
+    return roots;
+}
+
 bool runFront(const std::string& file, const std::string& text, Pipeline& pipe,
               bool noOpt, target::Kind targetKind) {
     pipe.file = file;
@@ -113,40 +242,44 @@ bool runFront(const std::string& file, const std::string& text, Pipeline& pipe,
         }
         return program;
     };
+    const std::vector<std::string> roots = moduleRoots(entryDir);
     resolve::Resolver::ModuleLoader load =
-        [&entryDir, &lib, &loadFile](const std::string& name) -> std::unique_ptr<Program> {
+        [&lib, &loadFile, &roots](const std::string& name) -> std::unique_ptr<Program> {
         if (name.find('.') != std::string::npos) {
             std::string rel = name;
-            auto dot = std::string::npos;
-            while ((dot = rel.find('.', dot == std::string::npos ? 0 : dot)) !=
-                   std::string::npos) {
-                rel[dot] = '/';
+            for (char& c : rel) {
+                if (c == '.') {
+                    c = '/';
+                }
             }
             // Library names keep their priority, so `std.io` still
-            // answers from the library. A miss falls back to the entry
-            // directory, where `import a.util` answers `<dir>/a/util.cid`.
+            // answers from the library. A miss falls back through the
+            // v2 search roots, where `import a.util` can answer from the
+            // entry directory, a modules/ tree, or an ancestor.
             if (!lib.empty()) {
                 std::unique_ptr<Program> found =
-                    loadFile(lib + "/" + rel + ".cid");
+                    loadFile(normalizePath(joinPath(lib, rel + ".cid")));
                 if (found != nullptr) {
                     return found;
                 }
             }
-            if (!entryDir.empty()) {
+            for (const std::string& root : roots) {
                 std::unique_ptr<Program> found =
-                    loadFile(entryDir + "/" + rel + ".cid");
+                    loadFile(normalizePath(joinPath(root, rel + ".cid")));
                 if (found != nullptr) {
                     return found;
                 }
-            }
-            std::unique_ptr<Program> found = loadFile(rel + ".cid");
-            if (found != nullptr) {
-                return found;
             }
             return nullptr;
         }
-        std::string path = entryDir.empty() ? name + ".cid" : entryDir + "/" + name + ".cid";
-        return loadFile(path);
+        for (const std::string& root : roots) {
+            std::unique_ptr<Program> found =
+                loadFile(normalizePath(joinPath(root, name + ".cid")));
+            if (found != nullptr) {
+                return found;
+            }
+        }
+        return nullptr;
     };
     Lexer lexer(file, text);
     std::vector<Token> tokens = lexer.lex();

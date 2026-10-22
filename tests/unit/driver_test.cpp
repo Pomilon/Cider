@@ -227,25 +227,27 @@ void testImports() {
     check(tyRun.code == 9, "a dot-qualified value runs: " + tyRun.err);
     std::string dotted = std::string(dir) + "/dot.cid";
     FILE* dotFile = fopen(dotted.c_str(), "w");
-    fwrite("import std.io;\nfunc main() -> int { return 0; }\n", 1, 47, dotFile);
+    const char* dottedText =
+        "import no.such.stdlib;\n"
+        "func main() -> int { return 0; }\n";
+    fwrite(dottedText, 1, strlen(dottedText), dotFile);
     fclose(dotFile);
-    Result dotCheck = run({"check", dotted});
-    // Hermetic without a library: the ambient environment may define
-    // CIDER_LIB (the corpus runner does), so clear it explicitly — the
-    // point under test is the loud failure, not the ambient lookup.
+    // The search roots now include the working tree's modules/ directory,
+    // so `std.io` may resolve without CIDER_LIB. Use a name no tree owns:
+    // the point is a loud, module-naming failure.
     const char* saved = getenv("CIDER_LIB");
     if (saved != nullptr) {
         std::string keep = saved;
         unsetenv("CIDER_LIB");
         Result missing = run({"check", dotted});
         setenv("CIDER_LIB", keep.c_str(), 1);
-        check(missing.code != 0, "a dotted import without a library fails");
-        check(missing.err.find("std.io") != std::string::npos,
+        check(missing.code != 0, "a missing dotted import fails");
+        check(missing.err.find("no.such.stdlib") != std::string::npos,
               "naming the module");
     } else {
         Result missing = run({"check", dotted});
-        check(missing.code != 0, "a dotted import without a library fails");
-        check(missing.err.find("std.io") != std::string::npos,
+        check(missing.code != 0, "a missing dotted import fails");
+        check(missing.err.find("no.such.stdlib") != std::string::npos,
               "naming the module");
     }
     unlink(main.c_str());
@@ -431,6 +433,13 @@ void testLibSearch() {
     fclose(modFile);
     char dir[] = "/tmp/cider_libuse_XXXXXX";
     check(mkdtemp(dir) != nullptr, "a scratch directory exists");
+    // A local tree with the same dotted name must not shadow CIDER_LIB.
+    std::string local = std::string(dir) + "/x";
+    check(mkdir(local.c_str(), 0700) == 0, "a local package exists");
+    std::string localMod = local + "/y.cid";
+    FILE* localFile = fopen(localMod.c_str(), "w");
+    fwrite("export func mval() -> int { return 99; }\n", 1, 41, localFile);
+    fclose(localFile);
     std::string main = std::string(dir) + "/main.cid";
     FILE* mainFile = fopen(main.c_str(), "w");
     fwrite("import x.y;\nfunc main() -> int { return y.mval(); }\n", 1, 52,
@@ -449,6 +458,8 @@ void testLibSearch() {
         unsetenv("CIDER_LIB");
     }
     unlink(main.c_str());
+    unlink(localMod.c_str());
+    rmdir(local.c_str());
     unlink(mod.c_str());
     rmdir(sub.c_str());
     rmdir(lib);
@@ -497,6 +508,47 @@ void testSubdirImport() {
     unlink(mod.c_str());
     rmdir(sub.c_str());
     rmdir(dir);
+}
+
+void testModuleAutodiscovery() {
+    std::printf("module autodiscovery\n");
+    char root[] = "/tmp/cider_discover_XXXXXX";
+    check(mkdtemp(root) != nullptr, "a discovery root exists");
+    std::string rootPath = root;
+    std::string srcDir = rootPath + "/src";
+    std::string modules = rootPath + "/modules";
+    check(mkdir(srcDir.c_str(), 0700) == 0, "the source directory exists");
+    check(mkdir(modules.c_str(), 0700) == 0, "the modules directory exists");
+    std::string lib = modules + "/lib.cid";
+    FILE* libFile = fopen(lib.c_str(), "w");
+    const char* libText = "export func answer() -> int { return 42; }\n";
+    fwrite(libText, 1, strlen(libText), libFile);
+    fclose(libFile);
+    std::string main = srcDir + "/main.cid";
+    FILE* mainFile = fopen(main.c_str(), "w");
+    const char* mainText =
+        "import lib;\n"
+        "func main() -> int { return lib.answer(); }\n";
+    fwrite(mainText, 1, strlen(mainText), mainFile);
+    fclose(mainFile);
+
+    char previous[4096];
+    check(getcwd(previous, sizeof previous) != nullptr,
+          "the current directory is readable");
+    check(chdir(rootPath.c_str()) == 0, "the discovery root is entered");
+    Result checked = run({"check", main});
+    check(checked.code == 0,
+          "a module in the root's modules/ is found: " + checked.err);
+    Result ran = run({"run", main});
+    check(ran.code == 42,
+          "a discovered module call answers: " + ran.err);
+    check(chdir(previous) == 0, "the current directory is restored");
+
+    unlink(main.c_str());
+    unlink(lib.c_str());
+    rmdir(srcDir.c_str());
+    rmdir(modules.c_str());
+    rmdir(rootPath.c_str());
 }
 
 // v2 accepted `linux` and `x86_64-linux` as spellings of the native target.
@@ -605,6 +657,7 @@ int main() {
     testQualifiedConst();
     testLibSearch();
     testSubdirImport();
+    testModuleAutodiscovery();
     testNativeTargetAliases();
     testKnownTargetsReachFrontEnd();
     testFailures();
