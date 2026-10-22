@@ -222,6 +222,13 @@ target_link_libraries(driver_test PRIVATE cider_driver)
 target_include_directories(driver_test PRIVATE src)
 add_test(NAME driver COMMAND driver_test)
 
+# WS3: diagnosed runtime faults must agree on native and both VM legs.
+add_test(NAME runtime_diagnostics
+         COMMAND ${Python3_EXECUTABLE}
+                 ${CMAKE_SOURCE_DIR}/tests/runtime_diagnostics_test.py)
+set_tests_properties(runtime_diagnostics PROPERTIES
+  ENVIRONMENT "CIDER_BIN=${CMAKE_BINARY_DIR}/cider")
+
 # --- Targets -------------------------------------------------------------------
 #
 # OUTPUT.md §2: a target is a description, not a layer. The descriptor is the
