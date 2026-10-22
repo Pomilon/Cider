@@ -5,6 +5,7 @@
 #include <cerrno>
 #include <cmath>
 #include <cstdint>
+#include <cstdlib>
 #include <cstring>
 #include <exception>
 #include <fcntl.h>
@@ -2441,14 +2442,19 @@ static VmResult runProgram(const ir::Module& module,
 VmResult run(const ir::Module& module, const std::string& pendingInput,
              const std::vector<std::string>& argv) {
     try {
+        if (std::getenv("CIDER_FAULT_VM_ALLOC") != nullptr) {
+            throw std::bad_alloc();
+        }
         return runProgram(module, pendingInput, argv);
     } catch (const std::bad_alloc&) {
-        // A reservation the host cannot back, named as the out-of-memory
-        // the program would have met rather than a C++ throw escaping the
-        // interpreter: the harness reads a diagnostic and an exit status.
+        // A reservation the host cannot back is the program's out-of-memory
+        // result: one exact stderr line and exit 2, the same shape the
+        // compiler's OOM takes. The interpreter never lets the C++ throw
+        // escape its IR loop.
         VmResult refused;
-        refused.ok = false;
-        refused.error = "vm out of memory";
+        refused.ok = true;
+        refused.exitCode = 2;
+        refused.stderrText = "vm error: out of memory\n";
         refused.pos = Position{"vm", kOneCell, kOneCell};
         return refused;
     } catch (const std::exception& e) {

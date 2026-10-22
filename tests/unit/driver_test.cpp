@@ -5,7 +5,10 @@
 // the subcommand.
 
 #include <cstdio>
+#include <cstdlib>
 #include <cstring>
+#include <new>
+#include <stdexcept>
 #include <string>
 #include <sys/stat.h>
 #include <unistd.h>
@@ -646,6 +649,44 @@ void testChecksFlag() {
     unlink(asmPath);
 }
 
+// OOM injection crosses the stage boundary as the two C++ allocation
+// shapes; the top-level catch in main maps both to the same compiler line.
+// A failed write names the destination and exits 2 instead of reporting a
+// generic I/O failure.
+void testOomAndWriteFailure() {
+    std::printf("allocation and write failures\n");
+    std::string src = writeTemp("func main() -> int { return 1; }\n");
+
+    bool badAlloc = false;
+    setenv("CIDER_FAULT_ALLOC", "check", 1);
+    try {
+        run({"check", src});
+    } catch (const std::bad_alloc&) {
+        badAlloc = true;
+    }
+    unsetenv("CIDER_FAULT_ALLOC");
+    check(badAlloc, "a stage allocation failure throws bad_alloc");
+
+    bool lengthError = false;
+    setenv("CIDER_FAULT_ALLOC", "check:len", 1);
+    try {
+        run({"check", src});
+    } catch (const std::length_error&) {
+        lengthError = true;
+    }
+    unsetenv("CIDER_FAULT_ALLOC");
+    check(lengthError, "a stage length failure throws length_error");
+
+    char dir[] = "/tmp/cider_driver_out_XXXXXX";
+    check(mkdtemp(dir) != nullptr, "a scratch output directory exists");
+    Result failed = run({"compile", src, "-o", dir});
+    check(failed.code == 2, "a failed write exits 2");
+    check(failed.err == "compiler: cannot write '" + std::string(dir) + "'\n",
+          "a failed write names the destination");
+    rmdir(dir);
+    unlink(src.c_str());
+}
+
 // A missing file, a bad target and a bad subcommand all name themselves.
 void testFailures() {
     std::printf("failures name themselves\n");
@@ -694,6 +735,7 @@ int main() {
     testNativeTargetAliases();
     testKnownTargetsReachFrontEnd();
     testChecksFlag();
+    testOomAndWriteFailure();
     testFailures();
     testVmTarget();
     std::printf("\n%d checks, %s\n", checks, failures == 0 ? "all passed" : "FAILURES");

@@ -249,6 +249,11 @@ def main():
                       env=env_with(CIDER_FAULT_ALLOC="optimize"))
         h.expect("compiler OOM optimize", proc, COMPILER_OOM)
 
+        codegen_asm = os.path.join(h.tmp.name, "oom_codegen.s")
+        proc = invoke(["compile", check_src, "-o", codegen_asm],
+                      env=env_with(CIDER_FAULT_ALLOC="codegen"))
+        h.expect("compiler OOM codegen", proc, COMPILER_OOM)
+
         proc = invoke(["run", "--target", "vm", check_src],
                       env=env_with(CIDER_FAULT_VM_ALLOC="1"))
         h.expect("VM OOM", proc, VM_OOM)

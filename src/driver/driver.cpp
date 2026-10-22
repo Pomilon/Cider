@@ -13,12 +13,15 @@
 
 #include "target/target.h"
 
+#include <cerrno>
 #include <cstdio>
 #include <cstdlib>
 #include <csignal>
 #include <fstream>
 #include <limits.h>
+#include <new>
 #include <sstream>
+#include <stdexcept>
 #include <sys/wait.h>
 #include <unistd.h>
 #include <vector>
@@ -200,6 +203,8 @@ std::vector<std::string> moduleRoots(const std::string& entryDir) {
     return roots;
 }
 
+void faultAlloc(const char* stage);
+
 bool runFront(const std::string& file, const std::string& text, Pipeline& pipe,
               bool noOpt, target::Kind targetKind, bool checks) {
     pipe.file = file;
@@ -283,6 +288,7 @@ bool runFront(const std::string& file, const std::string& text, Pipeline& pipe,
     };
     Lexer lexer(file, text);
     std::vector<Token> tokens = lexer.lex();
+    faultAlloc("lex");
     for (const LexError& error : lexer.errors()) {
         pipe.diagnostic += at(error.pos) + ": " + error.message + "\n";
     }
@@ -294,6 +300,7 @@ bool runFront(const std::string& file, const std::string& text, Pipeline& pipe,
     if (!pipe.diagnostic.empty()) {
         return false;
     }
+    faultAlloc("parse");
     resolve::Resolver resolver(*pipe.types, std::move(load), targetKind);
     if (!resolver.resolveProgram(*pipe.program, "main")) {
         for (const resolve::ResolveError& error : resolver.errors()) {
@@ -309,12 +316,14 @@ bool runFront(const std::string& file, const std::string& text, Pipeline& pipe,
         }
         return false;
     }
+    faultAlloc("resolve");
     check::Checker checker(*pipe.types, resolver, targetKind);
     lower::Lowerer lowerer(*pipe.types, resolver, checker, targetKind, checks);
     // Closure provenance runs before any body checks: callee bodies see
     // caller proofs regardless of module order. Pure analysis — no
     // diagnostics, no recorded types.
     checker.prescanProvenance(resolver.moduleOrder());
+    faultAlloc("check");
     // Every resolved module lowers into one IR module in resolve order, so
     // link names mangle under their own module and rodata labels never
     // collide. Emission order carries no semantics: calls resolve by link
@@ -350,6 +359,7 @@ bool runFront(const std::string& file, const std::string& text, Pipeline& pipe,
     if (lowered) {
         pipe.module = lowerer.takeModule();
     }
+    faultAlloc("lower");
     // The checker calls back into the resolver (local spellings,
     // instantiations), so resolve diagnostics can appear after the header
     // pass succeeded. A successful resolve records none, so anything here
@@ -376,6 +386,7 @@ bool runFront(const std::string& file, const std::string& text, Pipeline& pipe,
         pipe.diagnostic += file + ": " + result.error + "\n";
         return false;
     }
+    faultAlloc("opt");
     pipe.ok = true;
     return true;
 }
@@ -392,13 +403,73 @@ std::string readFile(const std::string& path, bool& found) {
     return text.str();
 }
 
+// Deterministic compiler-OOM injection for the v2 smoke contract. The
+// environment names a stage; `<stage>:len` throws the length_error shape.
+// The v2 stage spellings stay valid aliases for the v3 boundaries.
+void faultAlloc(const char* stage) {
+    const char* spec = std::getenv("CIDER_FAULT_ALLOC");
+    if (spec == nullptr) {
+        return;
+    }
+    std::string requested(spec);
+    std::string wanted(stage);
+    const bool wantsLength = requested.size() > 4 &&
+                             requested.compare(requested.size() - 4, 4, ":len") == 0;
+    if (wantsLength) {
+        requested.resize(requested.size() - 4);
+    }
+    if (requested == "symbol") {
+        requested = "resolve";
+    } else if (requested == "typecheck") {
+        requested = "check";
+    } else if (requested == "ir_gen" || requested == "deconstruct") {
+        requested = "lower";
+    } else if (requested == "optimize") {
+        requested = "opt";
+    }
+    if (requested != wanted) {
+        return;
+    }
+    if (wantsLength) {
+        throw std::length_error("fault allocation");
+    }
+    throw std::bad_alloc();
+}
+
+// Write through a sibling temporary and rename only after every byte landed.
+// A failed compile therefore never truncates the destination or leaves a
+// half-written object behind; the rename is the one visible step.
 bool writeFile(const std::string& path, const std::string& text) {
-    std::ofstream stream(path, std::ios::binary | std::ios::trunc);
-    if (!stream) {
+    std::string temp = path + ".tmpXXXXXX";
+    std::vector<char> name(temp.begin(), temp.end());
+    name.push_back('\0');
+    int fd = mkstemp(name.data());
+    if (fd < 0) {
         return false;
     }
-    stream.write(text.data(), static_cast<std::streamsize>(text.size()));
-    return static_cast<bool>(stream);
+    uint64_t written = 0;
+    while (written < static_cast<uint64_t>(text.size())) {
+        ssize_t got = ::write(fd, text.data() + written,
+                              text.size() - written);
+        if (got < 0) {
+            if (errno == EINTR) {
+                continue;
+            }
+            ::close(fd);
+            ::unlink(name.data());
+            return false;
+        }
+        written += static_cast<uint64_t>(got);
+    }
+    if (::close(fd) != 0) {
+        ::unlink(name.data());
+        return false;
+    }
+    if (::rename(name.data(), path.c_str()) != 0) {
+        ::unlink(name.data());
+        return false;
+    }
+    return true;
 }
 
 int runBinary(const std::string& path) {
@@ -525,6 +596,7 @@ int runDriver(const std::vector<std::string>& args, std::string& out, std::strin
         }
         return 1;
     }
+    faultAlloc("codegen");
     if (targetKind == target::Kind::Uefi && command == "run") {
         err = "target uefi produces a PE32+ image: compile with -o <file.asm> "
               "and link it with scripts/link_uefi.sh\n";
@@ -536,8 +608,8 @@ int runDriver(const std::vector<std::string>& args, std::string& out, std::strin
             return 0;
         }
         if (!writeFile(output, emitted.text)) {
-            err = "cannot write '" + output + "'\n";
-            return 1;
+            err = "compiler: cannot write '" + output + "'\n";
+            return 2;
         }
         return 0;
     }

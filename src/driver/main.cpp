@@ -8,6 +8,8 @@
 
 #include <cstdio>
 #include <exception>
+#include <new>
+#include <stdexcept>
 #include <string>
 #include <vector>
 
@@ -29,6 +31,12 @@ int main(int argc, char** argv) {
             std::fwrite(err.data(), 1, err.size(), stderr);
         }
         return code;
+    } catch (const std::bad_alloc&) {
+        std::fprintf(stderr, "compiler: out of memory\n");
+        return 2;
+    } catch (const std::length_error&) {
+        std::fprintf(stderr, "compiler: out of memory\n");
+        return 2;
     } catch (const std::exception& failure) {
         std::fprintf(stderr, "cider: error: %s\n", failure.what());
         return 1;
