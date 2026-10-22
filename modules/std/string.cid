@@ -87,6 +87,24 @@ export func to_lower(c: char) -> char {
     return c;
 }
 
+export func to_upper_string(s: *char) -> *char {
+    var i: int = 0;
+    while (s[i] != 0 as char) {
+        s[i] = to_upper(s[i]);
+        i = i + 1;
+    }
+    return s;
+}
+
+export func to_lower_string(s: *char) -> *char {
+    var i: int = 0;
+    while (s[i] != 0 as char) {
+        s[i] = to_lower(s[i]);
+        i = i + 1;
+    }
+    return s;
+}
+
 export func trim(s: *char) -> *char {
     var start: *char = s;
     while (true) {

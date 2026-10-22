@@ -1623,5 +1623,20 @@
   "actual": "v3: a bool throw is caught by bool, not by the earlier int clause; native and both VM legs match expected.json",
   "blocker": "none",
   "class": "A"
+ },
+ "stdlib_time": {
+  "actual": "v3: sleep_ms and monotonic timestamps run on native and both VM legs; all three match expected.json",
+  "blocker": "none",
+  "class": "A"
+ },
+ "stdlib_alloc": {
+  "actual": "v3: init_heap, malloc and free run on native and both VM legs; all three match expected.json",
+  "blocker": "none",
+  "class": "A"
+ },
+ "stdlib_compat": {
+  "actual": "v3: puts_string and in-place string helpers run on native and both VM legs; all three match expected.json",
+  "blocker": "none",
+  "class": "A"
  }
 }

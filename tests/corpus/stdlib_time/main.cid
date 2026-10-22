@@ -1,0 +1,16 @@
+from std.io import print;
+from std.time import sleep_ms, timestamp_ms, timestamp_us;
+
+func main() -> int {
+    var before_us: u64 = timestamp_us();
+    var before_ms: u64 = timestamp_ms();
+    sleep_ms(2);
+    var after_us: u64 = timestamp_us();
+    var after_ms: u64 = timestamp_ms();
+    if (before_us == 0 || before_ms == 0 || after_us <= before_us ||
+        after_ms < before_ms) {
+        return 1;
+    }
+    print("stdlib_time_ok\n");
+    return 0;
+}

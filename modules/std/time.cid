@@ -1,0 +1,50 @@
+// Monotonic time and sleeping.
+//
+// The kernel ABI is the x86-64 Linux one the rest of the stdlib already
+// uses: `clock_gettime(CLOCK_MONOTONIC)` and `nanosleep`. A timespec is two
+// i64 words, so passing a pointer to a local is enough; no libc structure
+// or symbol is involved.
+
+struct Timespec {
+    var sec: i64;
+    var nsec: i64;
+}
+
+export func sleep_ms(ms: int) -> void {
+    var ts: Timespec = uninit;
+    ts.sec = (ms / 1000) as i64;
+    ts.nsec = ((ms % 1000) * 1000000) as i64;
+    var rem: Timespec = uninit;
+    var tsp: *Timespec = &ts;
+    var remp: *Timespec = &rem;
+    asm {
+        "mov rax, 35"
+        "mov rdi, {tsp}"
+        "mov rsi, {remp}"
+        "syscall"
+    }
+}
+
+export func timestamp_ms() -> u64 {
+    var ts: Timespec = uninit;
+    var tsp: *Timespec = &ts;
+    asm {
+        "mov rax, 228"
+        "mov rdi, 1"
+        "mov rsi, {tsp}"
+        "syscall"
+    }
+    return (ts.sec as u64) * 1000 + (ts.nsec as u64) / 1000000;
+}
+
+export func timestamp_us() -> u64 {
+    var ts: Timespec = uninit;
+    var tsp: *Timespec = &ts;
+    asm {
+        "mov rax, 228"
+        "mov rdi, 1"
+        "mov rsi, {tsp}"
+        "syscall"
+    }
+    return (ts.sec as u64) * 1000000 + (ts.nsec as u64) / 1000;
+}

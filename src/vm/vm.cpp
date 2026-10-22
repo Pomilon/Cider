@@ -10,6 +10,7 @@
 #include <exception>
 #include <fcntl.h>
 #include <new>
+#include <time.h>
 #include <unistd.h>
 #include <unordered_map>
 #include <unordered_set>
@@ -92,7 +93,9 @@ constexpr uint64_t kSysOpen = 2;
 constexpr uint64_t kSysClose = 3;
 constexpr uint64_t kSysLseek = 8;
 constexpr uint64_t kSysMmap = 9;
+constexpr uint64_t kSysNanosleep = 35;
 constexpr uint64_t kSysUnlink = 87;
+constexpr uint64_t kSysClockGettime = 228;
 constexpr uint64_t kExitGroup = 231;
 // How many placeholders a block may name, which is the count the emitter
 // stages into registers: a sixth has nowhere to go.
@@ -784,6 +787,58 @@ struct Runner {
         return at;
     }
 
+    int64_t syscallClockGettime(int64_t clockId, int64_t addr, Position pos) {
+        if (clockId != 1) {
+            return kErrInval;
+        }
+        struct timespec ts;
+        if (::clock_gettime(CLOCK_MONOTONIC, &ts) != 0) {
+            return -errno;
+        }
+        if (!storeBytes(addr, layout::kSizePointer,
+                        static_cast<uint64_t>(ts.tv_sec), pos) ||
+            !storeBytes(addr + static_cast<int64_t>(layout::kSizePointer),
+                        layout::kSizePointer,
+                        static_cast<uint64_t>(ts.tv_nsec), pos)) {
+            return kErrFault;
+        }
+        return 0;
+    }
+
+    int64_t syscallNanosleep(int64_t reqAddr, int64_t remAddr, Position pos) {
+        bool ok = true;
+        int64_t sec = static_cast<int64_t>(
+            loadBytes(reqAddr, layout::kSizePointer, pos, ok));
+        if (!ok) {
+            return kErrFault;
+        }
+        int64_t nsec = static_cast<int64_t>(
+            loadBytes(reqAddr + static_cast<int64_t>(layout::kSizePointer),
+                      layout::kSizePointer, pos, ok));
+        if (!ok) {
+            return kErrFault;
+        }
+        if (sec < 0 || nsec < 0 || nsec >= 1000000000) {
+            return kErrInval;
+        }
+        struct timespec req;
+        req.tv_sec = static_cast<time_t>(sec);
+        req.tv_nsec = static_cast<long>(nsec);
+        struct timespec rem;
+        if (::nanosleep(&req, &rem) != 0) {
+            int err = errno;
+            if (err == EINTR && remAddr >= static_cast<int64_t>(kNullGuard)) {
+                storeBytes(remAddr, layout::kSizePointer,
+                           static_cast<uint64_t>(rem.tv_sec), pos);
+                storeBytes(remAddr + static_cast<int64_t>(layout::kSizePointer),
+                           layout::kSizePointer,
+                           static_cast<uint64_t>(rem.tv_nsec), pos);
+            }
+            return -err;
+        }
+        return 0;
+    }
+
     void hostExit(int64_t code, const std::string& text) {
         out.ok = true;
         out.exitCode = static_cast<int>(code & kByteMask);
@@ -936,6 +991,12 @@ struct Runner {
                         break;
                     case kSysMmap:
                         result = syscallMmap(regs[6]);
+                        break;
+                    case kSysNanosleep:
+                        result = syscallNanosleep(regs[7], regs[6], instr.loc);
+                        break;
+                    case kSysClockGettime:
+                        result = syscallClockGettime(regs[7], regs[6], instr.loc);
                         break;
                     case kExitGroup:
                     case kExitRegister:

@@ -38,6 +38,12 @@ export func puts(s: *char) {
     print("\n");
 }
 
+// v2 spelling: a string, newline included.
+export func puts_string(s: string) {
+    print(s);
+    print("\n");
+}
+
 export func printChar(c: char) {
     var b: u8 = c as u8;
     // A NUL builds an empty string: print returns without a syscall, so a

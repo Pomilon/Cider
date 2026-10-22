@@ -8,6 +8,18 @@
 
 from prelude import alloc, free;
 
+// The v3 prelude allocator starts empty and maps its first arena on demand.
+// This entry point exists for v2-shaped programs; there is no separate heap
+// to initialize. The same allocator already enforces 1 MiB arenas, the 1 GiB
+// heap cap, block canaries and a free-list cycle guard, so those protections
+// are shared by `new`, vectors, maps and this module.
+export func init_heap() {
+}
+
+// `free` is re-exported through the prelude import above: a wrapper defined
+// here would resolve its own name and recurse instead of reaching the
+// prelude binding. It remains part of the std.alloc surface.
+
 export func malloc(size: i64) -> *void {
     return alloc(size, 8);
 }

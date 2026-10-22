@@ -1,0 +1,14 @@
+from std.io import print;
+from std.alloc import init_heap, malloc, free;
+
+func main() -> int {
+    init_heap();
+    var p: *int = malloc(8) as *int;
+    *p = 42;
+    if (*p != 42) {
+        return 1;
+    }
+    free(p as *void);
+    print("stdlib_alloc_ok\n");
+    return 0;
+}

@@ -1,0 +1,12 @@
+from std.io import puts, puts_string;
+from std.string import to_lower_string, to_upper_string;
+
+func main() -> int {
+    puts_string("compat");
+    var buf: [char; 6] = ['A', 'b', 'C', '1', '!', 0 as char];
+    to_lower_string(&buf[0]);
+    puts(&buf[0]);
+    to_upper_string(&buf[0]);
+    puts(&buf[0]);
+    return 0;
+}
