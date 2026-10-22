@@ -613,6 +613,39 @@ void testKnownTargetsReachFrontEnd() {
     unlink(entry.c_str());
 }
 
+// --checks is a front-end option, not a run-only switch: check, compile and
+// run all accept it, and the runtime result is the diagnosed bounds exit.
+void testChecksFlag() {
+    std::printf("--checks\n");
+    std::string src = writeTemp(
+        "var idx: int = 0;\n"
+        "func main() -> int {\n"
+        "    var a: [int; 3] = [10, 20, 30];\n"
+        "    idx = 5;\n"
+        "    return a[idx];\n"
+        "}\n");
+    Result checked = run({"check", "--checks", src});
+    check(checked.code == 0, "check --checks accepts the flag: " + checked.err);
+
+    char asmPath[] = "/tmp/cider_driver_checks_XXXXXX.s";
+    int asmFd = mkstemps(asmPath, 2);
+    close(asmFd);
+    Result compiled = run({"compile", "--checks", "-o", asmPath, src});
+    check(compiled.code == 0, "compile --checks accepts the flag: " + compiled.err);
+
+    Result ran = run({"run", "--target", "vm", "--checks", src});
+    check(ran.code == 2, "run --checks answers the diagnosed exit");
+    check(ran.err == "vm error: index out of bounds\n",
+          "run --checks writes the bounds line");
+
+    Result bogus = run({"check", "--not-a-flag", src});
+    check(bogus.code != 0, "an unknown flag still fails");
+    check(bogus.err.find("--not-a-flag") != std::string::npos,
+          "the unknown flag is named");
+    unlink(src.c_str());
+    unlink(asmPath);
+}
+
 // A missing file, a bad target and a bad subcommand all name themselves.
 void testFailures() {
     std::printf("failures name themselves\n");
@@ -660,6 +693,7 @@ int main() {
     testModuleAutodiscovery();
     testNativeTargetAliases();
     testKnownTargetsReachFrontEnd();
+    testChecksFlag();
     testFailures();
     testVmTarget();
     std::printf("\n%d checks, %s\n", checks, failures == 0 ? "all passed" : "FAILURES");

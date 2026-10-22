@@ -42,7 +42,8 @@ struct Built {
     std::unique_ptr<cider::ir::Module> module;
 };
 
-Built buildAs(const std::string& text, cider::target::Kind target) {
+Built buildAs(const std::string& text, cider::target::Kind target,
+              bool checks = false) {
     Built out;
     out.types = std::make_unique<cider::TypeContext>();
     cider::Lexer lexer("test.cid", text);
@@ -64,7 +65,7 @@ Built buildAs(const std::string& text, cider::target::Kind target) {
     }
     auto checker = std::make_unique<cider::check::Checker>(*out.types, *resolver, target);
     checker->prescanProvenance({"main"});
-    cider::lower::Lowerer lowerer(*out.types, *resolver, *checker, target);
+    cider::lower::Lowerer lowerer(*out.types, *resolver, *checker, target, checks);
     if (!lowerer.lowerModule("main", *program)) {
         out.module = nullptr;
         out.stage = "lower";
@@ -93,15 +94,15 @@ Built buildAs(const std::string& text, cider::target::Kind target) {
     return out;
 }
 
-Built build(const std::string& text) {
-    return buildAs(text, cider::target::Kind::Native);
+Built build(const std::string& text, bool checks = false) {
+    return buildAs(text, cider::target::Kind::Native, checks);
 }
 
 // Assembles, links and runs the text, answering its exit code. -1 when the
 // program did not exit normally.
-int runCode(const std::string& text, bool& signaled) {
+int runCode(const std::string& text, bool& signaled, bool checks = false) {
     signaled = false;
-    Built built = build(text);
+    Built built = build(text, checks);
     if (!built.ok) {
         return -1;
     }
@@ -155,10 +156,11 @@ int runQuiet(const std::string& text) {
 }
 
 // Like runCode, but also captures the program's stderr into err.
-int runCapture(const std::string& text, bool& signaled, std::string& err) {
+int runCapture(const std::string& text, bool& signaled, std::string& err,
+               bool checks = false) {
     signaled = false;
     err.clear();
-    Built built = build(text);
+    Built built = build(text, checks);
     if (!built.ok) {
         return -1;
     }
@@ -220,10 +222,10 @@ int runCapture(const std::string& text, bool& signaled, std::string& err) {
 }
 
 void expectDiagnosed(const std::string& text, const std::string& message,
-                     const std::string& what) {
+                     const std::string& what, bool checks = false) {
     bool signaled = false;
     std::string err;
-    int code = runCapture(text, signaled, err);
+    int code = runCapture(text, signaled, err, checks);
     check(!signaled && code == 2 && err == message, what);
 }
 
@@ -868,7 +870,7 @@ void testComputedIndex() {
         "    return a[j];\n"
         "}\n",
         "vm error: index out of bounds\n",
-        "a computed read past the end diagnoses");
+        "a computed read past the end diagnoses", true);
     expectDiagnosed(
         "func main() -> int {\n"
         "    var a: [int; 4] = [ 5, 6, 7, 8 ];\n"
@@ -877,7 +879,7 @@ void testComputedIndex() {
         "    return 0;\n"
         "}\n",
         "vm error: index out of bounds\n",
-        "a computed store past the end diagnoses");
+        "a computed store past the end diagnoses", true);
     // A chained index over a computed inner one addresses through the
     // inner address: `m[i][j]` is the j-th element past the i-th row's
     // address, with both bounds checked.
@@ -907,7 +909,7 @@ void testComputedIndex() {
         "    return 0;\n"
         "}\n",
         "vm error: index out of bounds\n",
-        "a chained store past the inner end diagnoses");
+        "a chained store past the inner end diagnoses", true);
     // A computed index through a pointer dereference addresses off the
     // loaded address: `(*p)[i]` is the i-th element past the pointer's
     // value, with the same bounds check the slot route owns.
@@ -939,7 +941,7 @@ void testComputedIndex() {
         "    return at(&a, 9);\n"
         "}\n",
         "vm error: index out of bounds\n",
-        "a computed read past the end through a pointer diagnoses");
+        "a computed read past the end through a pointer diagnoses", true);
 }
 
 void testPointerField() {

@@ -240,8 +240,12 @@ ir::CmpOp cmpFor(BinOp op, bool isSigned) {
 }  // namespace
 
 Lowerer::Lowerer(TypeContext& ctx, resolve::Resolver& resolver, check::Checker& checker,
-                 target::Kind target)
-    : ctx_(ctx), resolver_(resolver), checker_(checker), target_(target) {}
+                 target::Kind target, bool checks)
+    : ctx_(ctx),
+      resolver_(resolver),
+      checker_(checker),
+      target_(target),
+      checks_(checks) {}
 
 void Lowerer::refuse(Position pos, const std::string& what) {
     errors_.push_back(check::CheckError{pos, "not lowered yet: " + what});
@@ -5128,12 +5132,19 @@ bool Lowerer::arrayElementPlace(const Index& n, const Place& base,
     if (failed_) {
         return false;
     }
-    emitCheckTrap(n.index->pos, emitI64Cmp(n.index->pos, BinOp::Ge, index[kFirstWord], zero),
-                  ir::TrapReason::IndexOutOfBounds);
-    emitCheckTrap(n.index->pos, emitI64Cmp(n.index->pos, BinOp::Lt, index[kFirstWord], len),
-                  ir::TrapReason::IndexOutOfBounds);
-    if (failed_) {
-        return false;
+    if (checks_) {
+        // Fixed-array extents are known at compile time, so v2 made these
+        // checks opt-in: an unchecked program may read past the slot, and
+        // `--checks` turns that into the diagnosed exit 2 on every leg.
+        emitCheckTrap(n.index->pos,
+                      emitI64Cmp(n.index->pos, BinOp::Ge, index[kFirstWord], zero),
+                      ir::TrapReason::IndexOutOfBounds);
+        emitCheckTrap(n.index->pos,
+                      emitI64Cmp(n.index->pos, BinOp::Lt, index[kFirstWord], len),
+                      ir::TrapReason::IndexOutOfBounds);
+        if (failed_) {
+            return false;
+        }
     }
     ir::Value byteOff = index[kFirstWord];
     if (elemBytes != kOneMember) {

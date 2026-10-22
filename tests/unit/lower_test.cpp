@@ -45,7 +45,8 @@ struct Lowered {
     std::unique_ptr<cider::ir::Module> module;
 };
 
-Lowered lowerAs(const std::string& text, cider::target::Kind target) {
+Lowered lowerAs(const std::string& text, cider::target::Kind target,
+                bool checks = false) {
     Lowered out;
     out.types = std::make_unique<cider::TypeContext>();
     cider::Lexer lexer("test.cid", text);
@@ -70,7 +71,8 @@ Lowered lowerAs(const std::string& text, cider::target::Kind target) {
         out.stage = "check";
         return out;
     }
-    cider::lower::Lowerer lowerer(*out.types, *out.resolver, *out.checker, target);
+    cider::lower::Lowerer lowerer(*out.types, *out.resolver, *out.checker, target,
+                                  checks);
     if (!lowerer.lowerModule("main", *out.program)) {
         out.module = nullptr;
         out.stage = "lower";
@@ -83,6 +85,10 @@ Lowered lowerAs(const std::string& text, cider::target::Kind target) {
 
 Lowered lower(const std::string& text) {
     return lowerAs(text, cider::target::Kind::Native);
+}
+
+Lowered lowerChecks(const std::string& text) {
+    return lowerAs(text, cider::target::Kind::Native, true);
 }
 
 const cider::ir::Function* find(const cider::ir::Module* module, const std::string& name) {
@@ -769,7 +775,7 @@ void testFloat() {
 
 void testNotYetLowered() {
     std::printf("computed index stores lower with guards\n");
-    Lowered r = lower(
+    Lowered r = lowerChecks(
         "func f(a: [int; 3], j: int) -> void { a[j] = 1; }\n"
         "func main() -> int { return 0; }\n");
     check(r.ok, "a computed index store lowers now");
@@ -1140,6 +1146,37 @@ void testNilGuards() {
         check(main != nullptr &&
                   countTrapReason(*main, cider::ir::TrapReason::Null) >= 1,
               "a live closure still carries the not-taken Null guard");
+    }
+}
+
+// Fixed-array bounds are opt-in: the same source lowers to no bounds trap
+// by default and to the two-sided IndexOutOfBounds pair under --checks.
+// Slice checks are not gated (see testSlice).
+void testChecksGating() {
+    std::printf("fixed bounds are opt-in\n");
+    const std::string source =
+        "func main() -> int {\n"
+        "    var a: [int; 3] = [1, 2, 3];\n"
+        "    var i: int = 5;\n"
+        "    return a[i];\n"
+        "}\n";
+    Lowered off = lower(source);
+    check(off.ok, "an unchecked fixed index lowers: " + off.stage);
+    if (off.ok) {
+        const cider::ir::Function* main = find(off.module.get(), "main");
+        check(main != nullptr &&
+                  countTrapReason(*main,
+                                  cider::ir::TrapReason::IndexOutOfBounds) == 0,
+              "without --checks a fixed index emits no bounds trap");
+    }
+    Lowered on = lowerChecks(source);
+    check(on.ok, "a checked fixed index lowers: " + on.stage);
+    if (on.ok) {
+        const cider::ir::Function* main = find(on.module.get(), "main");
+        check(main != nullptr &&
+                  countTrapReason(*main,
+                                  cider::ir::TrapReason::IndexOutOfBounds) == 2,
+              "--checks emits the low and high fixed-index traps");
     }
 }
 
@@ -1597,6 +1634,7 @@ int main() {
     testDelete();
     testIndirect();
     testNilGuards();
+    testChecksGating();
     testClosure();
     testClosureNested();
     testClosureBareName();

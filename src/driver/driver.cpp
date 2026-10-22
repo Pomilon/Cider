@@ -201,7 +201,7 @@ std::vector<std::string> moduleRoots(const std::string& entryDir) {
 }
 
 bool runFront(const std::string& file, const std::string& text, Pipeline& pipe,
-              bool noOpt, target::Kind targetKind) {
+              bool noOpt, target::Kind targetKind, bool checks) {
     pipe.file = file;
     pipe.types = std::make_unique<TypeContext>();
     // Imports load beside the entry file: `import da;` reads `<dir>/da.cid`
@@ -310,7 +310,7 @@ bool runFront(const std::string& file, const std::string& text, Pipeline& pipe,
         return false;
     }
     check::Checker checker(*pipe.types, resolver, targetKind);
-    lower::Lowerer lowerer(*pipe.types, resolver, checker, targetKind);
+    lower::Lowerer lowerer(*pipe.types, resolver, checker, targetKind, checks);
     // Closure provenance runs before any body checks: callee bodies see
     // caller proofs regardless of module order. Pure analysis — no
     // diagnostics, no recorded types.
@@ -446,6 +446,7 @@ int runDriver(const std::vector<std::string>& args, std::string& out, std::strin
     std::string output;
     std::string input;
     bool noOpt = false;
+    bool checks = false;
     for (uint64_t i = 1; i < static_cast<uint64_t>(args.size()); ++i) {
         if (args[i] == "--target" && i + 1 < static_cast<uint64_t>(args.size())) {
             const std::string name = args[++i];
@@ -455,6 +456,8 @@ int runDriver(const std::vector<std::string>& args, std::string& out, std::strin
             }
         } else if (args[i] == "--no-opt") {
             noOpt = true;
+        } else if (args[i] == "--checks") {
+            checks = true;
         } else if (args[i] == "-o" && i + 1 < static_cast<uint64_t>(args.size())) {
             output = args[++i];
         } else if (!args[i].empty() && args[i][0] == '-') {
@@ -478,7 +481,7 @@ int runDriver(const std::vector<std::string>& args, std::string& out, std::strin
         return 1;
     }
     Pipeline pipe;
-    if (!runFront(input, text, pipe, noOpt, targetKind)) {
+    if (!runFront(input, text, pipe, noOpt, targetKind, checks)) {
         err = pipe.diagnostic;
         return 1;
     }

@@ -38,7 +38,7 @@ struct Lowered {
     std::unique_ptr<cider::ir::Module> module;
 };
 
-Lowered lower(const std::string& text) {
+Lowered lower(const std::string& text, bool checks = false) {
     Lowered out;
     out.types = std::make_unique<cider::TypeContext>();
     cider::Lexer lexer("test.cid", text);
@@ -59,7 +59,8 @@ Lowered lower(const std::string& text) {
         return out;
     }
     auto checker = std::make_unique<cider::check::Checker>(*out.types, *resolver);
-    cider::lower::Lowerer lowerer(*out.types, *resolver, *checker);
+    cider::lower::Lowerer lowerer(*out.types, *resolver, *checker,
+                                  cider::target::Kind::Native, checks);
     if (!lowerer.lowerModule("main", *program)) {
         out.stage = "lower";
         return out;
@@ -169,7 +170,7 @@ void testDeath() {
                         "    var a: [int; 2] = [1, 2];\n"
                         "    var i: int = 5;\n"
                         "    return a[i];\n"
-                        "}\n");
+                        "}\n", true);
     check(oob.ok, "an out-of-bounds program lowers: " + oob.stage);
     cider::vm::VmResult oobr = cider::vm::run(*oob.module, "");
     check(oobr.ok && oobr.signal == 0 && oobr.exitCode == 2 &&

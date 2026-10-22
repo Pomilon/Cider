@@ -80,7 +80,7 @@ struct GlobalBinding {
 class Lowerer : public check::LowerSink {
 public:
     Lowerer(TypeContext& ctx, resolve::Resolver& resolver, check::Checker& checker,
-            target::Kind target = target::Kind::Native);
+            target::Kind target = target::Kind::Native, bool checks = false);
 
     // Runs the checker's walk with this lowerer attached, so types are
     // recorded and IR is emitted on the same visit. True unless the program
@@ -719,6 +719,9 @@ private:
     resolve::Resolver& resolver_;
     check::Checker& checker_;
     target::Kind target_;
+    // `--checks`: fixed-array bounds checks are opt-in. Slice and range
+    // checks stay unconditional, and nil guards never consult this flag.
+    bool checks_ = false;
     std::unique_ptr<ir::Module> module_;
     ir::Function* function_ = nullptr;
     bool enabled_ = false;
