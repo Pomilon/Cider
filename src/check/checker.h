@@ -98,6 +98,20 @@ public:
     // The lowerer registers the body for every exit of the innermost
     // open scope; nothing runs here.
     virtual void onDeferStmt(DeferStmt& n) { (void)n; }
+    // The checker owns the exception shape; these hooks let lowering emit
+    // the handler around the already-checked body and catches.
+    virtual void onTryEnter(TryStmt& n) { (void)n; }
+    virtual void onTryBodyDone(TryStmt& n) { (void)n; }
+    virtual void onCatchEnter(TryStmt& n, CatchClause& c) {
+        (void)n;
+        (void)c;
+    }
+    virtual void onCatchExit(TryStmt& n, CatchClause& c) {
+        (void)n;
+        (void)c;
+    }
+    virtual void onTryExit(TryStmt& n) { (void)n; }
+    virtual void onThrowStmt(ThrowStmt& n) { (void)n; }
     virtual void onIf(IfStmt& n) { (void)n; }
     // A match arm, after its pattern validated against the scrutinee type
     // and exhaustiveness decided (a default arm, or both bool constants).
@@ -195,6 +209,9 @@ public:
     // deref through a `*volatile T` name. The lowerer marks the loads and
     // stores it emits through the place with this answer.
     bool placeIsVolatile(const Expr* expr) const;
+    // The type a typed catch binds. A bare catch has no entry; lowering
+    // keys that case on CatchClause::type being null.
+    TypeRef catchType(const CatchClause& clause) const;
     // Names a declaration `*volatile T` so derefs through it are volatile
     // places; silent for every other spelling.
     void noteVolatilePointer(const std::string& name, const TypeExpr* type);
@@ -572,6 +589,10 @@ private:
     std::optional<DeclId> currentClass_;
     TypeRef currentSelf_;
     uint64_t loopDepth_ = 0;
+    // Catch bodies being walked, so a bare `throw;` knows it has a current
+    // failure to forward. Lowering uses the recorded type per clause.
+    int catchDepth_ = 0;
+    std::unordered_map<const CatchClause*, TypeRef> catchTypes_;
     // Defer bodies being walked, for the exit-jump ban: a return, break or
     // continue inside one would leave its scope twice.
     int inDefer_ = 0;

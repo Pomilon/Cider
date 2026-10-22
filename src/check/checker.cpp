@@ -785,6 +785,11 @@ bool Checker::placeIsVolatile(const Expr* expr) const {
     return expr != nullptr && volatilePlaces_.find(expr) != volatilePlaces_.end();
 }
 
+TypeRef Checker::catchType(const CatchClause& clause) const {
+    auto found = catchTypes_.find(&clause);
+    return found == catchTypes_.end() ? errorRef() : found->second;
+}
+
 void Checker::popScope() {
     current_ = current_ != nullptr ? current_->parent : nullptr;
     if (!flowStack_.empty()) {
@@ -3476,17 +3481,81 @@ void Checker::visitAsmStmt(AsmStmt& n) {
 }
 
 void Checker::visitThrowStmt(ThrowStmt& n) {
-    // Exception transport (FEAT-041) does not exist yet: throwing must
-    // refuse here rather than check clean and vanish in lowering, which
-    // previously exited 0. The operand still checks so its errors report.
-    checkExpr(n.value.get(), TypeRef{ctx_.wildcard()});
-    fail(n.pos, "throw is not implemented yet");
+    if (!inFunc_) {
+        fail(n.pos, "throw outside a function");
+        return;
+    }
+    // A throw while a defer body runs would abandon the scope that is
+    // already unwinding; v3 rejects that rather than model re-entrancy.
+    if (inDefer_ > 0) {
+        fail(n.pos, "throw inside defer is not supported");
+        return;
+    }
+    if (n.value == nullptr) {
+        if (catchDepth_ == 0) {
+            fail(n.pos, "throw; is only valid while handling a catch");
+            return;
+        }
+        if (sink_ != nullptr) {
+            sink_->onThrowStmt(n);
+        }
+        return;
+    }
+    TypeRef value = checkExpr(n.value.get(), TypeRef{ctx_.wildcard()});
+    if (value.isError() || value.type->kind() == Kind::Void ||
+        value.type->kind() == Kind::Wildcard) {
+        if (!value.isError()) {
+            fail(n.value->pos, "a throw needs a value");
+        }
+        return;
+    }
+    if (sink_ != nullptr) {
+        sink_->onThrowStmt(n);
+    }
 }
 
 void Checker::visitTryStmt(TryStmt& n) {
-    // Same shape as throw: handler bodies would lower inline with no
-    // unwind edges, so trying refuses until transport lands.
-    fail(n.pos, "try is not implemented yet");
+    // The body and catches check once with the sink detached, like defer:
+    // lowering re-walks them through the hooks below with the handler
+    // already laid out.
+    LowerSink* savedSink = sink_;
+    sink_ = nullptr;
+    n.body->accept(*this);
+    for (auto& clause : n.catches) {
+        TypeRef type;
+        if (clause->type != nullptr) {
+            type = resolveHere(clause->type.get());
+            if (type.isError() || type.type->kind() == Kind::Void ||
+                type.type->kind() == Kind::Wildcard) {
+                if (!type.isError()) {
+                    fail(clause->type->pos, "a catch needs a type");
+                }
+            } else {
+                catchTypes_[clause.get()] = type;
+            }
+        }
+        pushScope();
+        if (clause->type != nullptr && !clause->name.empty() && !type.isError()) {
+            bindLocal(clause->name, type, false, clause->pos);
+        }
+        ++catchDepth_;
+        clause->body->accept(*this);
+        --catchDepth_;
+        popScope();
+    }
+    sink_ = savedSink;
+    if (sink_ == nullptr || failed_) {
+        return;
+    }
+    sink_->onTryEnter(n);
+    sink_->onTryBodyDone(n);
+    for (auto& clause : n.catches) {
+        ++catchDepth_;
+        sink_->onCatchEnter(n, *clause);
+        sink_->onCatchExit(n, *clause);
+        --catchDepth_;
+    }
+    sink_->onTryExit(n);
 }
 
 void Checker::visitFiniDecl(FiniDecl& n) {
