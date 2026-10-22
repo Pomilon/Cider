@@ -755,6 +755,15 @@ struct ExternFunc : Decl {
     void accept(ASTVisitor& v) override;
 };
 
+// `extern var name: T;` — a linker-owned data symbol with no storage here.
+struct ExternVar : Decl {
+    std::string name;
+    std::unique_ptr<TypeExpr> type;
+    ExternVar(Position p, std::string n, std::unique_ptr<TypeExpr> t)
+        : Decl(std::move(p)), name(std::move(n)), type(std::move(t)) {}
+    void accept(ASTVisitor& v) override;
+};
+
 struct ImportDecl : Decl {
     std::string module;
     ImportDecl(Position p, std::string m) : Decl(std::move(p)), module(std::move(m)) {}
@@ -884,6 +893,7 @@ struct ASTVisitor {
     virtual void visitTypeAlias(TypeAlias& n);
     virtual void visitConstDecl(ConstDecl& n);
     virtual void visitExternFunc(ExternFunc& n);
+    virtual void visitExternVar(ExternVar& n);
     virtual void visitImportDecl(ImportDecl& n);
     virtual void visitFromImport(FromImport& n);
     virtual void visitFiniDecl(FiniDecl& n);
@@ -960,6 +970,7 @@ inline void EnumDecl::accept(ASTVisitor& v) { v.visitEnumDecl(*this); }
 inline void TypeAlias::accept(ASTVisitor& v) { v.visitTypeAlias(*this); }
 inline void ConstDecl::accept(ASTVisitor& v) { v.visitConstDecl(*this); }
 inline void ExternFunc::accept(ASTVisitor& v) { v.visitExternFunc(*this); }
+inline void ExternVar::accept(ASTVisitor& v) { v.visitExternVar(*this); }
 inline void ImportDecl::accept(ASTVisitor& v) { v.visitImportDecl(*this); }
 inline void FromImport::accept(ASTVisitor& v) { v.visitFromImport(*this); }
 inline void FiniDecl::accept(ASTVisitor& v) { v.visitFiniDecl(*this); }
@@ -1183,6 +1194,9 @@ inline void ASTVisitor::visitConstDecl(ConstDecl& n) {
 inline void ASTVisitor::visitExternFunc(ExternFunc& n) {
     for (auto& p : n.params) p.accept(*this);
     if (n.returns != nullptr) n.returns->accept(*this);
+}
+inline void ASTVisitor::visitExternVar(ExternVar& n) {
+    if (n.type != nullptr) n.type->accept(*this);
 }
 inline void ASTVisitor::visitImportDecl(ImportDecl&) {}
 inline void ASTVisitor::visitFromImport(FromImport&) {}

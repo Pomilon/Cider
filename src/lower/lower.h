@@ -58,6 +58,8 @@ struct GlobalBinding {
     std::string module;
     TypeRef type;
     int64_t initial = 0;
+    // A linker-owned symbol: references only, never a module definition.
+    bool isExtern = false;
     // Image words for an aggregate global: one `.quad` per entry instead
     // of one `.quad initial`. Empty means the scalar path.
     std::vector<uint64_t> initWords;

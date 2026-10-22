@@ -86,7 +86,7 @@ private:
     std::unique_ptr<Decl> parseEnumDecl(bool exported);
     std::unique_ptr<Decl> parseTypeAlias(bool exported);
     std::unique_ptr<Decl> parseConstDecl();
-    std::unique_ptr<Decl> parseExternFunc();
+    std::unique_ptr<Decl> parseExtern();
     std::unique_ptr<Decl> parseImport();
     // One segment of a dotted module path: an identifier, or a type
     // spelling (`string` in `std.string`). The path is not a type

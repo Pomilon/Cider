@@ -1358,11 +1358,29 @@ void testSizeofExpr() {
     check(!called, "sizeof never evaluates its operand");
 }
 
+void testExternVar() {
+    std::printf("extern var\n");
+    Lowered out = lower(
+        "extern var ext: int;\n"
+        "func main() -> int { return ext; }\n");
+    check(out.ok, "extern var lowers: " + out.stage);
+    if (out.ok) {
+        bool defined = false;
+        for (const cider::ir::Global& global : out.module->globals) {
+            if (global.label == "ext") {
+                defined = true;
+            }
+        }
+        check(!defined, "extern var has no module definition");
+    }
+}
+
 int main() {
     std::printf("lower_test — source becomes IR\n\n");
     testUefiEntry();
     testUefiTargetGlobals();
     testSizeofExpr();
+    testExternVar();
     testGlobal();
     testArithmetic();
     testTrapFlag();

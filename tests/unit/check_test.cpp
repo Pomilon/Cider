@@ -2289,6 +2289,18 @@ void testSizeofExpr() {
     check(!callParens.ok, "sizeof(value) remains a type-form rejection");
 }
 
+void testExternVar() {
+    std::printf("extern var\n");
+    Checked ok = check(
+        "extern var ext: int;\n"
+        "func main() -> int { return ext; }\n");
+    check(ok.ok, "extern var checks: " + ok.stage);
+    Checked init = check(
+        "extern var ext: int = 1;\n"
+        "func main() -> int { return 0; }\n");
+    check(!init.ok, "extern var refuses an initializer");
+}
+
 int main() {
     std::printf("check_test — well-typed programs check\n\n");
     testArithmetic();
@@ -2320,6 +2332,7 @@ int main() {
     testAlignof();
     testTypedForIn();
     testSizeofExpr();
+    testExternVar();
     testPrivateFields();
     testPrivateMethods();
     testSuperInit();

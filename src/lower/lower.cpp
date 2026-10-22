@@ -343,6 +343,41 @@ bool Lowerer::lowerInto(const std::string& name, Program& program) {
             }
         }
     }
+    // Extern data has no image. Register its binding before the checking
+    // walk so a source read resolves to `[rip + symbol]`, never to a
+    // compiler-defined `.data` label.
+    if (const resolve::Scope* scope = resolver_.scopeOf(name)) {
+        for (const std::unique_ptr<cider::Decl>& decl : program.decls) {
+            const cider::Decl* node = decl.get();
+            if (const auto* exported = dynamic_cast<const ExportDecl*>(node)) {
+                node = exported->decl.get();
+            }
+            const auto* ext = dynamic_cast<const ExternVar*>(node);
+            if (ext == nullptr) {
+                continue;
+            }
+            const resolve::Decl* binding = resolver_.lookup(scope, ext->name);
+            if (binding == nullptr || binding->type.isError()) {
+                continue;
+            }
+            bool present = false;
+            for (const GlobalBinding& have : globals_) {
+                if (have.name == ext->name && have.module == name) {
+                    present = true;
+                    break;
+                }
+            }
+            if (!present) {
+                GlobalBinding out;
+                out.name = ext->name;
+                out.label = resolver_.linkName(*binding);
+                out.module = name;
+                out.type = binding->type;
+                out.isExtern = true;
+                globals_.push_back(std::move(out));
+            }
+        }
+    }
     // No failed_ reset: one module accumulates every program, and a refusal
     // anywhere fails the build. wrap_ is per file and every instruction the
     // walk emits reads it.

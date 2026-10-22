@@ -289,12 +289,16 @@ std::unique_ptr<Decl> Parser::parseDecl() {
             return decl;
         }
         if (check(TokenKind::KwExtern)) {
-            std::unique_ptr<Decl> decl = parseExternFunc();
+            std::unique_ptr<Decl> decl = parseExtern();
             if (decl == nullptr) {
                 return nullptr;
             }
-            static_cast<ExternFunc*>(decl.get())->abi = std::move(abi);
-            return decl;
+            if (auto* fn = dynamic_cast<ExternFunc*>(decl.get())) {
+                fn->abi = std::move(abi);
+                return decl;
+            }
+            failHere("a calling convention applies only to functions");
+            return nullptr;
         }
         failHere("a calling convention before a declaration applies to 'func' or 'extern'");
         return nullptr;
@@ -343,7 +347,7 @@ std::unique_ptr<Decl> Parser::parseDecl() {
         return parseConstDecl();
     }
     if (kind == TokenKind::KwExtern) {
-        return parseExternFunc();
+        return parseExtern();
     }
     if (kind == TokenKind::KwImport || kind == TokenKind::KwFrom) {
         return parseImport();
@@ -891,7 +895,7 @@ std::unique_ptr<Decl> Parser::parseConstDecl() {
                                        std::move(init));
 }
 
-std::unique_ptr<Decl> Parser::parseExternFunc() {
+std::unique_ptr<Decl> Parser::parseExtern() {
     Position start = advance().pos;
     std::string abi;
     if (check(TokenKind::StringLit)) {
@@ -900,8 +904,32 @@ std::unique_ptr<Decl> Parser::parseExternFunc() {
             abi = lit.lit.parts[0].text;
         }
     }
+    if (match(TokenKind::KwVar)) {
+        if (!abi.empty()) {
+            failHere("extern var has no calling convention");
+            return nullptr;
+        }
+        if (!check(TokenKind::Ident)) {
+            failHere("an extern variable needs a name");
+            return nullptr;
+        }
+        std::string name = advance().text;
+        if (!match(TokenKind::Colon)) {
+            failHere("an extern variable needs a type");
+            return nullptr;
+        }
+        std::unique_ptr<TypeExpr> type = parseType();
+        if (type == nullptr) {
+            return nullptr;
+        }
+        if (!match(TokenKind::Semi)) {
+            failHere("expected ';'");
+            return nullptr;
+        }
+        return std::make_unique<ExternVar>(start, std::move(name), std::move(type));
+    }
     if (!match(TokenKind::KwFunc)) {
-        failHere("extern declares a function");
+        failHere("extern declares a function or variable");
         return nullptr;
     }
     if (!check(TokenKind::Ident)) {

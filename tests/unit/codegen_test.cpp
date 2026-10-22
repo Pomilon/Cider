@@ -2929,6 +2929,20 @@ void testSizeofExpr() {
     }
 }
 
+void testExternVar() {
+    std::printf("extern var\n");
+    Built built = build(
+        "extern var ext: int;\n"
+        "func main() -> int { return ext; }\n");
+    check(built.ok, "extern var emits: " + built.stage);
+    if (built.ok) {
+        check(built.asmText.find("[rip + ext]") != std::string::npos,
+              "extern var is a linker reference");
+        check(built.asmText.find("ext:\n") == std::string::npos,
+              "extern var is not defined by the compiler");
+    }
+}
+
 int main() {
     std::printf("codegen_test — a Cider program runs\n\n");
     testExit();
@@ -2939,6 +2953,7 @@ int main() {
     testTargetDispatch();
     testUefiEntryShim();
     testSizeofExpr();
+    testExternVar();
     testCalls();
     testControl();
     testGlobals();

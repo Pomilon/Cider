@@ -1221,6 +1221,12 @@ void Resolver::declareModule(const std::string& module, Program& program,
             d->isExtern = true;
             continue;
         }
+        if (const auto* ext = dynamic_cast<const ExternVar*>(unwrapped)) {
+            Decl* d = bind(scope, DeclKind::Var, ext->name, ext->pos);
+            d->type = TypeRef{ctx_.wildcard()};
+            d->isExtern = true;
+            continue;
+        }
         if (const auto* cn = dynamic_cast<const ConstDecl*>(unwrapped)) {
             Decl* d = bind(scope, DeclKind::Const, cn->name, cn->pos);
             d->type = TypeRef{ctx_.wildcard()};
@@ -1377,6 +1383,17 @@ void Resolver::resolveDeclTypes(const std::string& module, Program& program,
             Signature sig = buildSignature(ext->params, ext->returns.get(), scope, failed,
                                            abiOf(ext->abi, failed, ext->pos));
             const_cast<Decl*>(d)->sig = std::move(sig);
+            continue;
+        }
+        if (const auto* ext = dynamic_cast<const ExternVar*>(unwrapped)) {
+            const Decl* d = lookup(scope, ext->name);
+            if (d == nullptr) {
+                continue;
+            }
+            TypeRef type = resolveType(ext->type.get(), scope);
+            if (!type.isError()) {
+                const_cast<Decl*>(d)->type = type;
+            }
             continue;
         }
         if (const auto* cn = dynamic_cast<const ConstDecl*>(unwrapped)) {
