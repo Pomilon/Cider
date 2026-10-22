@@ -1828,6 +1828,15 @@ struct Runner {
             if (programDone) {
                 return false;
             }
+            // An unwinding callee returns no answer words: its frame runs
+            // its defers and returns with the flag still raised, and the
+            // caller takes the landing pad before reading a result. Check
+            // that jump before validating the width, because the landing is
+            // the branch that makes the missing words unobservable.
+            if (instr.call.landingPad.has_value() && exceptionFlagSet()) {
+                pendingJump = *instr.call.landingPad;
+                return true;
+            }
             if (answer.size() != instr.results.size()) {
                 return refuse(instr.loc, "vm call answers with the wrong width");
             }

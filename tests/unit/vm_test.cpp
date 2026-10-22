@@ -830,6 +830,27 @@ void testLandingPads() {
               called.error);
 }
 
+void testThrowUnwind() {
+    std::printf("throws unwind through calls\n");
+    Lowered thrown = lower("func fail() -> int {\n"
+                           "    throw 9;\n"
+                           "}\n"
+                           "func main() -> int {\n"
+                           "    return fail();\n"
+                           "}\n");
+    check(thrown.ok, "a throwing program lowers: " + thrown.stage);
+    cider::vm::VmResult unr = cider::vm::run(*thrown.module, "");
+    check(unr.ok && unr.signal == 0 && unr.exitCode == 2 &&
+              unr.stderrText == "vm error: uncaught exception\n",
+          "the unoptimised throw is uncaught: " + unr.stderrText + unr.error);
+    cider::opt::OptResult ores = cider::opt::run(*thrown.module);
+    check(ores.ok, "a throwing program optimises: " + ores.error);
+    cider::vm::VmResult opr = cider::vm::run(*thrown.module, "");
+    check(opr.ok && opr.signal == 0 && opr.exitCode == 2 &&
+              opr.stderrText == "vm error: uncaught exception\n",
+          "the optimised throw is uncaught: " + opr.stderrText + opr.error);
+}
+
 }  // namespace
 
 int main() {
@@ -851,6 +872,7 @@ int main() {
     testNilFnptrCall();
     testFieldDefaults();
     testLandingPads();
+    testThrowUnwind();
     std::printf("\n%d checks, %s\n", checks, failures == 0 ? "all passed" : "FAILURES");
     return failures == 0 ? 0 : 1;
 }

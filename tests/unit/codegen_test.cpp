@@ -689,6 +689,29 @@ void testLandingPads() {
           "a call enters its landing pad only when the flag is set");
 }
 
+void testThrowUncaught() {
+    std::printf("uncaught throw\n");
+    bool signaled = false;
+    std::string err;
+    int code = runCapture("func main() -> int {\n"
+                          "    throw 7;\n"
+                          "}\n",
+                          signaled, err);
+    check(!signaled && code == 2 &&
+              err == "vm error: uncaught exception\n",
+          "a throw in the entry is uncaught");
+    code = runCapture("func fail() -> int {\n"
+                      "    throw 9;\n"
+                      "}\n"
+                      "func main() -> int {\n"
+                      "    return fail();\n"
+                      "}\n",
+                      signaled, err);
+    check(!signaled && code == 2 &&
+              err == "vm error: uncaught exception\n",
+          "a throw crosses a call frame");
+}
+
 void testTrap() {
     std::printf("traps\n");
     bool signaled = false;
@@ -3110,6 +3133,7 @@ int main() {
     testAsm();
     testTrapMessages();
     testLandingPads();
+    testThrowUncaught();
     testTrap();
     testPanic();
     testElementAddr();
