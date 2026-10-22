@@ -1891,6 +1891,10 @@ void Checker::visitVarDecl(VarDecl& n) {
 }
 
 void Checker::visitBlock(Block& n) {
+    const resolve::Scope* savedTypeScope = typeScope_;
+    if (const resolve::Scope* local = resolver_.localTypeScopeFor(&n)) {
+        typeScope_ = local;
+    }
     pushScope();
     if (sink_ != nullptr) {
         sink_->onBlockEnter(n);
@@ -1902,6 +1906,7 @@ void Checker::visitBlock(Block& n) {
         sink_->onBlockExit(n);
     }
     popScope();
+    typeScope_ = savedTypeScope;
 }
 
 void Checker::visitIfStmt(IfStmt& n) {

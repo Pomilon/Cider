@@ -2342,6 +2342,26 @@ void testModuleAsm() {
     check(vmNamed, "the module-asm vm rejection names vm");
 }
 
+void testLocalAggregates() {
+    std::printf("local aggregates\n");
+    Checked ok = check(
+        "func main() -> int {\n"
+        "  struct Local { var x: int; }\n"
+        "  var a: Local = Local { x: 1 };\n"
+        "  return a.x;\n"
+        "}\n");
+    check(ok.ok, "local struct checks: " + ok.stage);
+
+    Checked outside = check(
+        "func main() -> int {\n"
+        "  { struct Local { var x: int; } }\n"
+        "  var a: Local = Local { x: 1 };\n"
+        "  return 0;\n"
+        "}\n");
+    check(!outside.ok && outside.stage == "check",
+          "a local struct does not escape its block");
+}
+
 int main() {
     std::printf("check_test — well-typed programs check\n\n");
     testArithmetic();
@@ -2375,6 +2395,7 @@ int main() {
     testSizeofExpr();
     testExternVar();
     testModuleAsm();
+    testLocalAggregates();
     testPrivateFields();
     testPrivateMethods();
     testSuperInit();

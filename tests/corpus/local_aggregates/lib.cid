@@ -68,13 +68,13 @@ class LibBase { var bv: int = 5; func baseVal() -> int { return this->bv; } virt
 // A local class extending (and overriding) a module-scope class.
 export func localExtendsModule() -> int {
     class D : LibBase { override func who() -> int { return 7; } }
-    var d: D = uninit;
+    var d: D = D { };
     return d.who() + d.baseVal();
 }
 
 var libDrops: int = 0;
 
-// Destructors of local classes: value locals at scope exit and `delete`.
+// Destructors of local classes: only explicit `delete` runs them in v3.
 export func localDtor() -> int {
     class Dtor { var v: int = 1; func deinit() -> void { libDrops = libDrops + 1; } }
     {

@@ -1171,6 +1171,7 @@ bool Resolver::resolveProgram(Program& program, const std::string& module) {
     }
     declareModule(module, program, scope);
     resolveDeclTypes(module, program, scope);
+    resolveLocalAggregates(program, scope, module);
     stack_.pop_back();
     // Post-order: dependents lower after their dependencies, so every
     // name a body uses is already registered when its module lowers.
@@ -1282,6 +1283,235 @@ void Resolver::declareModule(const std::string& module, Program& program,
     for (const std::unique_ptr<VarDecl>& global : program.globals) {
         Decl* d = bind(scope, DeclKind::Var, global->name, global->pos);
         d->type = TypeRef{ctx_.wildcard()};
+    }
+}
+
+const Scope* Resolver::localTypeScopeFor(const Block* block) const {
+    auto found = localTypeScopes_.find(block);
+    return found == localTypeScopes_.end() ? nullptr : found->second;
+}
+
+void Resolver::resolveLocalAggregates(Program& program, const Scope* moduleScope,
+                                      const std::string& module) {
+    for (const std::unique_ptr<cider::Decl>& declaration : program.decls) {
+        cider::Decl* unwrapped = declaration.get();
+        if (auto* exported = dynamic_cast<ExportDecl*>(unwrapped)) {
+            unwrapped = exported->decl.get();
+        }
+        if (auto* fn = dynamic_cast<FuncDecl*>(unwrapped)) {
+            if (fn->body != nullptr) {
+                scanLocalAggregateBlock(*fn->body, moduleScope, module);
+            }
+            continue;
+        }
+        if (auto* fini = dynamic_cast<FiniDecl*>(unwrapped)) {
+            if (fini->body != nullptr) {
+                scanLocalAggregateBlock(*fini->body, moduleScope, module);
+            }
+            continue;
+        }
+        if (dynamic_cast<StructDecl*>(unwrapped) != nullptr ||
+            dynamic_cast<ClassDecl*>(unwrapped) != nullptr) {
+            scanLocalAggregateBodies(*unwrapped, moduleScope, module);
+        }
+    }
+}
+
+void Resolver::scanLocalAggregateBodies(cider::Decl& declaration,
+                                        const Scope* parent,
+                                        const std::string& module) {
+    if (auto* sd = dynamic_cast<StructDecl*>(&declaration)) {
+        for (MethodDecl& method : sd->methods) {
+            if (method.body != nullptr) {
+                scanLocalAggregateBlock(*method.body, parent, module);
+            }
+        }
+        return;
+    }
+    if (auto* cd = dynamic_cast<ClassDecl*>(&declaration)) {
+        for (MethodDecl& method : cd->methods) {
+            if (method.body != nullptr) {
+                scanLocalAggregateBlock(*method.body, parent, module);
+            }
+        }
+        if (cd->init != nullptr && cd->init->body != nullptr) {
+            scanLocalAggregateBlock(*cd->init->body, parent, module);
+        }
+        if (cd->deinit != nullptr && cd->deinit->body != nullptr) {
+            scanLocalAggregateBlock(*cd->deinit->body, parent, module);
+        }
+    }
+}
+
+void Resolver::scanLocalAggregateStmt(Stmt& stmt, const Scope* parent,
+                                      const std::string& module) {
+    if (auto* block = dynamic_cast<Block*>(&stmt)) {
+        scanLocalAggregateBlock(*block, parent, module);
+        return;
+    }
+    if (auto* branch = dynamic_cast<IfStmt*>(&stmt)) {
+        if (branch->then != nullptr) {
+            scanLocalAggregateStmt(*branch->then, parent, module);
+        }
+        if (branch->els != nullptr) {
+            scanLocalAggregateStmt(*branch->els, parent, module);
+        }
+        return;
+    }
+    if (auto* loop = dynamic_cast<WhileStmt*>(&stmt)) {
+        if (loop->body != nullptr) {
+            scanLocalAggregateStmt(*loop->body, parent, module);
+        }
+        return;
+    }
+    if (auto* loop = dynamic_cast<ForStmt*>(&stmt)) {
+        if (loop->init != nullptr) {
+            scanLocalAggregateStmt(*loop->init, parent, module);
+        }
+        if (loop->body != nullptr) {
+            scanLocalAggregateStmt(*loop->body, parent, module);
+        }
+        return;
+    }
+    if (auto* loop = dynamic_cast<ForInStmt*>(&stmt)) {
+        if (loop->body != nullptr) {
+            scanLocalAggregateStmt(*loop->body, parent, module);
+        }
+        return;
+    }
+    if (auto* match = dynamic_cast<MatchStmt*>(&stmt)) {
+        for (const std::unique_ptr<MatchArm>& arm : match->arms) {
+            if (arm->body != nullptr) {
+                scanLocalAggregateBlock(*arm->body, parent, module);
+            }
+        }
+        if (match->fallback != nullptr) {
+            scanLocalAggregateBlock(*match->fallback, parent, module);
+        }
+        return;
+    }
+    if (auto* deferred = dynamic_cast<DeferStmt*>(&stmt)) {
+        if (deferred->stmt != nullptr) {
+            scanLocalAggregateStmt(*deferred->stmt, parent, module);
+        }
+        return;
+    }
+    if (auto* attempt = dynamic_cast<TryStmt*>(&stmt)) {
+        if (attempt->body != nullptr) {
+            scanLocalAggregateBlock(*attempt->body, parent, module);
+        }
+        for (const std::unique_ptr<CatchClause>& clause : attempt->catches) {
+            if (clause->body != nullptr) {
+                scanLocalAggregateBlock(*clause->body, parent, module);
+            }
+        }
+    }
+}
+
+void Resolver::scanLocalAggregateBlock(Block& block, const Scope* parent,
+                                       const std::string& module) {
+    if (localTypeScopes_.find(&block) != localTypeScopes_.end()) {
+        return;
+    }
+    const Scope* moduleScope = scopeOf(module);
+
+    Program local(block.pos, "", {}, {});
+    std::vector<DeclStmt*> holders;
+    std::vector<std::string> sourceNames;
+    std::vector<std::string> hiddenNames;
+
+    for (std::unique_ptr<Stmt>& statement : block.stmts) {
+        auto* holder = dynamic_cast<DeclStmt*>(statement.get());
+        if (holder == nullptr || holder->decl == nullptr) {
+            continue;
+        }
+        cider::Decl* node = holder->decl.get();
+        std::string source;
+        uint64_t typeParams = 0;
+        if (auto* sd = dynamic_cast<StructDecl*>(node)) {
+            source = sd->name;
+            typeParams = sd->typeParams.size();
+        } else if (auto* cd = dynamic_cast<ClassDecl*>(node)) {
+            source = cd->name;
+            typeParams = cd->typeParams.size();
+        } else if (auto* ud = dynamic_cast<UnionDecl*>(node)) {
+            source = ud->name;
+        } else {
+            continue;
+        }
+        if (typeParams != 0) {
+            fail(node->pos, "a function-local aggregate cannot be generic");
+            continue;
+        }
+        std::string hidden;
+        do {
+            hidden = "__cider_local_" + std::to_string(localTypeSeq_++);
+        } while (moduleScope != nullptr &&
+                 moduleScope->bindings.find(hidden) !=
+                     moduleScope->bindings.end());
+        if (auto* sd = dynamic_cast<StructDecl*>(node)) {
+            sd->name = hidden;
+        } else if (auto* cd = dynamic_cast<ClassDecl*>(node)) {
+            cd->name = hidden;
+        } else if (auto* ud = dynamic_cast<UnionDecl*>(node)) {
+            ud->name = hidden;
+        }
+        holders.push_back(holder);
+        sourceNames.push_back(source);
+        hiddenNames.push_back(hidden);
+        local.decls.push_back(std::move(holder->decl));
+    }
+
+    if (local.decls.empty()) {
+        for (std::unique_ptr<Stmt>& statement : block.stmts) {
+            scanLocalAggregateStmt(*statement, parent, module);
+        }
+        return;
+    }
+
+    const Scope* typeScope = makeScope(parent, module);
+    localTypeScopes_[&block] = typeScope;
+    {
+        declareModule(module, local, typeScope);
+        uint64_t aliasIndex = 0;
+        for (const std::string& hidden : hiddenNames) {
+            const std::string& source = sourceNames[aliasIndex];
+            const Decl* resolved = lookup(typeScope, hidden);
+            if (resolved == nullptr) {
+                ++aliasIndex;
+                continue;
+            }
+            if (typeScope->bindings.find(source) != typeScope->bindings.end()) {
+                fail(resolved->pos, "duplicate declaration of '" + source + "'");
+            } else {
+                const_cast<Scope*>(typeScope)->bindings[source] = resolved;
+            }
+            ++aliasIndex;
+        }
+        resolveDeclTypes(module, local, typeScope);
+        // Lowerer owner lookup starts from the module scope. The source
+        // spelling still lives only in the block scope; only the hidden
+        // link name is visible module-wide.
+        for (const std::string& hidden : hiddenNames) {
+            const Decl* resolved = lookup(typeScope, hidden);
+            if (resolved != nullptr && moduleScope != nullptr) {
+                const_cast<Scope*>(moduleScope)->bindings[hidden] = resolved;
+            }
+        }
+        uint64_t holderIndex = 0;
+        for (DeclStmt* holder : holders) {
+            holder->decl = std::move(local.decls[holderIndex]);
+            ++holderIndex;
+        }
+        for (DeclStmt* holder : holders) {
+            if (holder->decl != nullptr) {
+                scanLocalAggregateBodies(*holder->decl, typeScope, module);
+            }
+        }
+    }
+
+    for (std::unique_ptr<Stmt>& statement : block.stmts) {
+        scanLocalAggregateStmt(*statement, typeScope, module);
     }
 }
 

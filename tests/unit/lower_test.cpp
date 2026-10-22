@@ -1390,6 +1390,24 @@ void testModuleAsm() {
     }
 }
 
+void testLocalAggregates() {
+    std::printf("local aggregates\n");
+    Lowered out = lower(
+        "func main() -> int {\n"
+        "  class Local {\n"
+        "    var x: int;\n"
+        "    func init(x: int) -> void { this->x = x; }\n"
+        "    func get() -> int { return this->x; }\n"
+        "    func deinit() { }\n"
+        "  }\n"
+        "  var p: *Local = new Local(5);\n"
+        "  var n: int = p->get();\n"
+        "  delete p;\n"
+        "  return n;\n"
+        "}\n");
+    check(out.ok, "a local class lowers: " + out.stage);
+}
+
 int main() {
     std::printf("lower_test — source becomes IR\n\n");
     testUefiEntry();
@@ -1397,6 +1415,7 @@ int main() {
     testSizeofExpr();
     testExternVar();
     testModuleAsm();
+    testLocalAggregates();
     testGlobal();
     testArithmetic();
     testTrapFlag();

@@ -70,6 +70,9 @@ public:
     }
     const Scope* scopeOf(const std::string& module) const;
     const Decl* lookup(const Scope* scope, const std::string& name) const;
+    // The type-name scope for one block, when the block declares local
+    // aggregates. Null for a block with no local type scope.
+    const Scope* localTypeScopeFor(const Block* block) const;
 
     // TYPES.md §2.4, the total function: a spelling in a scope, answered with
     // a fully-resolved Type or Error. Error answers record one diagnostic at
@@ -266,6 +269,16 @@ private:
     bool resolveModule(const std::string& name);
     void declareModule(const std::string& name, Program& program, const Scope* scope);
     void resolveDeclTypes(const std::string& name, Program& program, const Scope* scope);
+    // Function-local aggregates: hidden declarations, one block-scope tree,
+    // and the same module second pass used for module-scope aggregates.
+    void resolveLocalAggregates(Program& program, const Scope* moduleScope,
+                                const std::string& module);
+    void scanLocalAggregateBlock(Block& block, const Scope* parent,
+                                 const std::string& module);
+    void scanLocalAggregateStmt(Stmt& stmt, const Scope* parent,
+                                const std::string& module);
+    void scanLocalAggregateBodies(cider::Decl& decl, const Scope* parent,
+                                  const std::string& module);
     TypeRef resolveNamed(const NamedType* type, const Scope* scope);
     TypeRef resolveSignature(const FuncSigType* type, const Scope* scope, bool inPointer);
     // The slot list before the destructor rides: base-first class virtuals
@@ -378,6 +391,8 @@ private:
     std::unordered_map<std::string, std::unique_ptr<Program>> programs_;
     std::unordered_map<std::string, Program*> programOf_;
     std::unordered_map<const Node*, TypeRef> nodeTypes_;
+    std::unordered_map<const Block*, const Scope*> localTypeScopes_;
+    uint64_t localTypeSeq_ = 0;
     std::unordered_set<std::string> aliasActive_;
     std::unordered_map<std::string, const Expr*> constInits_;
     std::unordered_map<std::string, int64_t> enumValues_;

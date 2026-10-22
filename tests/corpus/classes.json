@@ -950,9 +950,9 @@
   "class": "A"
  },
  "local_aggregates": {
-  "actual": "cider run exit 1 on all three legs, stdout empty, stderr identical (473 bytes): lib.cid:8:12: unknown type 'Pair'; lib.cid:7:5: checker bug: 'Pair' was never resolved; lib.cid:9:5 and 10:5: unbound name 'p'; lib.cid:11:12: unbound name 'p'",
-  "blocker": "v3-function-local-aggregates (function-local types never resolve) [B-terminal]",
-  "class": "B"
+  "actual": "migrated to v3: block-local struct, class and union use explicit initialization, v3 layout/default/method/vtable rules, and no scope-exit finalization; exact stdout/stderr/exit match on native, VM-unopt and VM-opt",
+  "blocker": "none",
+  "class": "A"
  },
  "logical_ops": {
   "actual": "passes exactly; stub expected.json filled with captured bytes (success-path self-check verified)",

@@ -11,15 +11,12 @@
 // enclosing type name is rejected too (see check_local_shadow.cid), because
 // local type identity is the bare written name.
 //
-// v3 note: function-local types are not part of v3 and never resolve — the
-// checker reports "unknown type '<name>'" (and the resolver's companion
-// diagnostic), so this program stays B-terminal. v3 also finalizes objects
-// only through explicit `delete`/`fini`, never at scope exit; the v2 drops
-// trace in expected.json is not v3 behavior and is not blessed.
+// v3 note: local aggregates are block-scoped and follow v3 initialization
+// rules. A class value that carries a vtable or needs field defaults is
+// built with `T { }`; value locals are not finalized at scope exit, so the
+// v2 drops trace was removed. Explicit `delete` still runs `deinit`.
 import lib;
 from std.io import print, printInt;
-
-var drops: int = 0;
 
 interface Shape { func area() -> int; }
 
@@ -63,17 +60,6 @@ func main() -> int {
     printInt(c.get());              // 3
     print("\n");
 
-    {
-        class R {
-            var v: int = 1;
-            func deinit() -> void { drops = drops + 1; }
-        }
-        var r: R = uninit;
-        r.v = 2;
-    }
-    printInt(drops);                // 1: value local finalized at block exit
-    print("\n");
-
     var cp: *C = new C(9);
     printInt(cp->get());            // 9
     print("\n");
@@ -82,7 +68,7 @@ func main() -> int {
     // A local class value embedded in another local class.
     class Inner { var w: int = 6; func get() -> int { return this->w; } }
     class Outer { var i: Inner; func get() -> int { return this->i.get(); } }
-    var o: Outer = uninit;
+    var o: Outer = Outer { i: Inner { } };
     printInt(o.get());              // 6
     print("\n");
 

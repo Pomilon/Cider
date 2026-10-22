@@ -2958,6 +2958,18 @@ void testModuleAsm() {
     }
 }
 
+void testLocalAggregates() {
+    std::printf("local aggregates\n");
+    Built built = build(
+        "func main() -> int {\n"
+        "  union Local { var i: int; var u: uint; }\n"
+        "  var a: Local = uninit;\n"
+        "  a.i = 7;\n"
+        "  return a.i;\n"
+        "}\n");
+    check(built.ok, "a local union emits: " + built.stage);
+}
+
 int main() {
     std::printf("codegen_test — a Cider program runs\n\n");
     testExit();
@@ -2970,6 +2982,7 @@ int main() {
     testSizeofExpr();
     testExternVar();
     testModuleAsm();
+    testLocalAggregates();
     testCalls();
     testControl();
     testGlobals();

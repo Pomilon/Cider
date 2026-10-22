@@ -2702,6 +2702,33 @@ void Lowerer::onMethodDecl(const std::string& owner, const std::string& name,
     if (failed_ || !enabled_) {
         return;
     }
+    // A local class's methods are lowered while the enclosing function is
+    // still on the stack. Save that frame by index (pushing can reallocate
+    // module_->functions) and restore it on every exit.
+    int64_t savedFn = -1;
+    if (function_ != nullptr) {
+        savedFn = static_cast<int64_t>(function_ - module_->functions.data());
+    }
+    uint32_t savedValues = valueSeq_;
+    uint32_t savedLabels = labelSeq_;
+    std::vector<uint32_t> savedBlocks = std::move(blockOrder_);
+    std::vector<std::unordered_map<std::string, LocalBinding>> savedLocals =
+        std::move(locals_);
+    std::vector<uint64_t> savedMarks = std::move(scopeMarks_);
+    uint32_t savedCurrent = current_;
+    bool savedTerminated = terminated_;
+    auto restoreOuter = [&]() {
+        function_ = savedFn >= 0
+                        ? &module_->functions[static_cast<size_t>(savedFn)]
+                        : nullptr;
+        valueSeq_ = savedValues;
+        labelSeq_ = savedLabels;
+        blockOrder_ = std::move(savedBlocks);
+        locals_ = std::move(savedLocals);
+        scopeMarks_ = std::move(savedMarks);
+        current_ = savedCurrent;
+        terminated_ = savedTerminated;
+    };
     // One function per method, statically dispatched: the mangled name is
     // the link identity and the receiver rides as the first parameter, so a
     // call site builds `owner__method(receiver, args...)`. The owner carries
@@ -2778,6 +2805,7 @@ void Lowerer::onMethodDecl(const std::string& owner, const std::string& name,
         TypeRef sretPtr{ctx_.pointer(ctx_.basic(BasicKind::U8))};
         std::vector<ir::Value> sretSlots = allocaSlots(sretPtr, body.pos, kOneWord);
         if (failed_) {
+            restoreOuter();
             return;
         }
         for (ir::Value slot : sretSlots) {
@@ -2800,6 +2828,7 @@ void Lowerer::onMethodDecl(const std::string& owner, const std::string& name,
         TypeRef type{declared[i + 1 + shift].type};
         std::vector<ir::Value> slots = allocaFor(type, params[i].pos);
         if (failed_) {
+            restoreOuter();
             return;
         }
         for (ir::Value slot : slots) {
@@ -2833,7 +2862,7 @@ void Lowerer::onMethodDecl(const std::string& owner, const std::string& name,
         falloffReachable(current_)) {
         refuse(body.pos, "this function may fall off without returning");
     }
-    function_ = nullptr;
+    restoreOuter();
 }
 
 void Lowerer::onFuncLit(FuncLit& lit, const std::vector<check::Captured>& captures,
