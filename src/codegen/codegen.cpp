@@ -70,6 +70,7 @@ constexpr uint64_t kMsabiIntRegs = 4;
 constexpr uint64_t kSysVSseRegs = 8;
 constexpr uint64_t kMsabiSseRegs = 4;
 constexpr uint64_t kShadowBytes = 32;
+constexpr uint64_t kWordBytes = 8;
 
 bool calleeArg(std::string&, std::string&, const ir::Instr&) = delete;  // placeholder
 
@@ -481,16 +482,36 @@ private:
         if (ms) {
             out_ += "  add rsp, " + std::to_string(kShadowBytes) + "\n";
         }
+        // An exception that reaches the entry is uncaught. The check happens
+        // before any finalizer: FEATURES §7.10 says an uncaught throw does not
+        // run global fini. main's answer moves to rdi, which the trap sequence
+        // does not touch; diagnosed traps exit before the fini path resumes.
+        if (module_.usesExceptions) {
+            if (module_.exceptionFlag.empty()) {
+                refuse(Position{"", 1, 1}, "exceptions have no flag global");
+                return false;
+            }
+            out_ += "  mov rdi, rax\n";
+            out_ += "  mov rax, [rip + " + asmSafeName(module_.exceptionFlag) +
+                    "]\n";
+            out_ += "  test rax, rax\n";
+            out_ += "  jz .L_cider_entry_ok\n";
+            if (!emitTrapReason(ir::TrapReason::UncaughtException)) {
+                return false;
+            }
+            out_ += ".L_cider_entry_ok:\n";
+        }
         // 7.10: finalizers run after main and before the exit syscall, and
         // main's answer survives them on the stack. The call is aligned
         // like any other, and rdi is loaded only after every call.
         if (finiFn != nullptr) {
-            out_ += "  push rax\n";
+            // The answer is in rdi on the exception-aware path, rax otherwise.
+            out_ += module_.usesExceptions ? "  push rdi\n" : "  push rax\n";
             out_ += "  sub rsp, 8\n";
             out_ += "  call cider_fini_run\n";
             out_ += "  add rsp, 8\n";
             out_ += "  pop rdi\n";
-        } else {
+        } else if (!module_.usesExceptions) {
             out_ += "  mov rdi, rax\n";
         }
         out_ += "  mov eax, 60\n";               // exit(main's answer)
@@ -554,6 +575,25 @@ private:
         out_ += "  mov [rip + image_handle], rcx\n";
         out_ += "  mov [rip + system_table], rdx\n";
         out_ += "  call " + module_.entry + "\n";
+        // An uncaught throw has no firmware diagnostic channel: the UEFI
+        // policy is the same silent ud2 a panic takes. r10 carries the
+        // answer while the check runs; the ud2 path never returns.
+        if (module_.usesExceptions) {
+            if (module_.exceptionFlag.empty()) {
+                refuse(Position{"", 1, 1}, "exceptions have no flag global");
+                return false;
+            }
+            out_ += "  mov r10, rax\n";
+            out_ += "  mov rax, [rip + " + asmSafeName(module_.exceptionFlag) +
+                    "]\n";
+            out_ += "  test rax, rax\n";
+            out_ += "  jz .L_cider_uefi_entry_ok\n";
+            if (!emitTrapReason(ir::TrapReason::UncaughtException)) {
+                return false;
+            }
+            out_ += ".L_cider_uefi_entry_ok:\n";
+            out_ += "  mov rax, r10\n";
+        }
         if (*ret->basic() == BasicKind::I32) {
             out_ += "  mov eax, eax\n";  // UEFI status is a 64-bit UINTN
         }
@@ -1841,6 +1881,24 @@ private:
                             ", rdx\n";
                 }
             }
+            // A call that names a landing pad is a throw point: the callee
+            // may have set the exception flag before returning. The branch
+            // happens after the ordinary results are stored, so a landing
+            // block sees the same frame the call instruction left.
+            if (instr.call.landingPad.has_value()) {
+                if (module_.exceptionFlag.empty()) {
+                    refuse(instr.loc, "a call landing pad has no exception flag");
+                    return false;
+                }
+                const std::string proceed =
+                    ".L_cider_call_ok_" + std::to_string(callLandingSeq_++);
+                out_ += "  mov rax, [rip + " +
+                        asmSafeName(module_.exceptionFlag) + "]\n";
+                out_ += "  test rax, rax\n";
+                out_ += "  jz " + proceed + "\n";
+                out_ += "  jmp " + labelFor(fn.name, *instr.call.landingPad) + "\n";
+                out_ += proceed + ":\n";
+            }
             return true;
         }
         if (instr.op == ir::Op::Cast) {
@@ -1848,6 +1906,22 @@ private:
         }
         if (instr.op == ir::Op::Trap) {
             return emitTrapReason(instr.reason);
+        }
+        if (instr.op == ir::Op::Landing) {
+            if (module_.exceptionValue.empty()) {
+                refuse(instr.loc, "a landing has no exception slot");
+                return false;
+            }
+            // The slot is a fixed row of words. Landing copies each result
+            // word verbatim; the catch dispatch already proved the type, so
+            // this instruction is a read, not another test.
+            const std::string label = asmSafeName(module_.exceptionValue);
+            for (uint64_t i = 0; i < instr.results.size(); ++i) {
+                out_ += "  mov rax, [rip + " + label + " + " +
+                        std::to_string(i * kWordBytes) + "]\n";
+                out_ += "  mov " + slot(instr.results[i].id) + ", rax\n";
+            }
+            return true;
         }
         if (instr.op == ir::Op::DataAddr) {
             out_ += "  lea rax, [rip + " + asmSafeName(instr.globalLabel) + "]\n";
@@ -2416,6 +2490,7 @@ private:
     uint64_t cvtLabelSeq_ = 0;
     uint64_t uefiNullSeq_ = 0;
     uint64_t trapMessageSeq_ = 0;
+    uint64_t callLandingSeq_ = 0;
     bool failed_ = false;
     std::string error_;
     Position pos_{"", 1, 1};

@@ -9,6 +9,7 @@
 #include <string>
 
 #include "check/checker.h"
+#include "exception_ir.h"
 #include "lexer/lexer.h"
 #include "lower/lower.h"
 #include "opt/opt.h"
@@ -804,6 +805,31 @@ void testFieldDefaults() {
           "the optimised defaults answer 201: " + opr.error);
 }
 
+void testLandingPads() {
+    std::printf("exception landing pads\n");
+    testir::Built landing = testir::landing(false);
+    cider::vm::VmResult unr = cider::vm::run(landing.module, "");
+    check(unr.ok && unr.exitCode == 42 && unr.stderrText.empty(),
+          "the landing reads the payload: " + unr.error);
+    cider::opt::OptResult ores = cider::opt::run(landing.module);
+    check(ores.ok, "a landing module optimises: " + ores.error);
+    cider::vm::VmResult opr = cider::vm::run(landing.module, "");
+    check(opr.ok && opr.exitCode == 42 && opr.stderrText.empty(),
+          "the optimised landing reads the payload: " + opr.error);
+
+    testir::Built uncaught = testir::landing(true);
+    cider::vm::VmResult death = cider::vm::run(uncaught.module, "");
+    check(death.ok && death.exitCode == 2 && death.signal == 0 &&
+              death.stderrText == "vm error: uncaught exception\n",
+          "an uncaught entry writes the line and exits 2: " + death.error);
+
+    testir::Built call = testir::callLanding();
+    cider::vm::VmResult called = cider::vm::run(call.module, "");
+    check(called.ok && called.exitCode == 42 && called.stderrText.empty(),
+          "a call enters its landing pad only when the flag is set: " +
+              called.error);
+}
+
 }  // namespace
 
 int main() {
@@ -824,6 +850,7 @@ int main() {
     testMultipleBases();
     testNilFnptrCall();
     testFieldDefaults();
+    testLandingPads();
     std::printf("\n%d checks, %s\n", checks, failures == 0 ? "all passed" : "FAILURES");
     return failures == 0 ? 0 : 1;
 }

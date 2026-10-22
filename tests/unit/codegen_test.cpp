@@ -12,6 +12,7 @@
 
 #include "check/checker.h"
 #include "codegen/codegen.h"
+#include "exception_ir.h"
 #include "lexer/lexer.h"
 #include "lower/lower.h"
 #include "opt/opt.h"
@@ -98,6 +99,68 @@ Built build(const std::string& text, bool checks = false) {
     return buildAs(text, cider::target::Kind::Native, checks);
 }
 
+// Assembles, links and runs one emitted text, capturing stderr. -1 when the
+// program did not exit normally and -2 when the toolchain itself refused.
+int runAsmCapture(const std::string& asmText, bool& signaled, std::string& err) {
+    signaled = false;
+    err.clear();
+    char asmPath[] = "/tmp/cider_test_XXXXXX.s";
+    int asmFd = mkstemps(asmPath, 2);
+    if (asmFd < 0) {
+        return -2;
+    }
+    FILE* asmFile = fdopen(asmFd, "w");
+    fwrite(asmText.data(), 1, asmText.size(), asmFile);
+    fclose(asmFile);
+    std::string binPath = std::string(asmPath) + ".bin";
+    std::string objPath = std::string(asmPath) + ".o";
+    std::string command = "as -o " + objPath + " " + asmPath + " 2>/dev/null"
+        " && ld -nostdlib -e _start -o " + binPath + " " + objPath + " 2>/dev/null";
+    if (system(command.c_str()) != 0) {
+        unlink(asmPath);
+        unlink(objPath.c_str());
+        return -2;
+    }
+    int errPipe[2] = {-1, -1};
+    if (pipe(errPipe) != 0) {
+        unlink(asmPath);
+        unlink(objPath.c_str());
+        unlink(binPath.c_str());
+        return -2;
+    }
+    pid_t child = fork();
+    if (child == 0) {
+        dup2(errPipe[1], STDERR_FILENO);
+        close(errPipe[0]);
+        close(errPipe[1]);
+        execl(binPath.c_str(), binPath.c_str(), nullptr);
+        _exit(127);
+    }
+    close(errPipe[1]);
+    char chunk[256];
+    for (;;) {
+        ssize_t got = read(errPipe[0], chunk, sizeof(chunk));
+        if (got <= 0) {
+            break;
+        }
+        err.append(chunk, static_cast<size_t>(got));
+    }
+    close(errPipe[0]);
+    int status = 0;
+    waitpid(child, &status, 0);
+    unlink(asmPath);
+    unlink(objPath.c_str());
+    unlink(binPath.c_str());
+    if (WIFSIGNALED(status)) {
+        signaled = true;
+        return -1;
+    }
+    if (!WIFEXITED(status)) {
+        return -1;
+    }
+    return WEXITSTATUS(status);
+}
+
 // Assembles, links and runs the text, answering its exit code. -1 when the
 // program did not exit normally.
 int runCode(const std::string& text, bool& signaled, bool checks = false) {
@@ -158,67 +221,11 @@ int runQuiet(const std::string& text) {
 // Like runCode, but also captures the program's stderr into err.
 int runCapture(const std::string& text, bool& signaled, std::string& err,
                bool checks = false) {
-    signaled = false;
-    err.clear();
     Built built = build(text, checks);
     if (!built.ok) {
         return -1;
     }
-    char asmPath[] = "/tmp/cider_test_XXXXXX.s";
-    int asmFd = mkstemps(asmPath, 2);
-    if (asmFd < 0) {
-        return -1;
-    }
-    FILE* asmFile = fdopen(asmFd, "w");
-    fwrite(built.asmText.data(), 1, built.asmText.size(), asmFile);
-    fclose(asmFile);
-    std::string binPath = std::string(asmPath) + ".bin";
-    std::string objPath = std::string(asmPath) + ".o";
-    std::string command = "as -o " + objPath + " " + asmPath + " 2>/dev/null"
-        " && ld -nostdlib -e _start -o " + binPath + " " + objPath + " 2>/dev/null";
-    if (system(command.c_str()) != 0) {
-        unlink(asmPath);
-        unlink(objPath.c_str());
-        return -1;
-    }
-    int errPipe[2] = {-1, -1};
-    if (pipe(errPipe) != 0) {
-        unlink(asmPath);
-        unlink(objPath.c_str());
-        unlink(binPath.c_str());
-        return -1;
-    }
-    pid_t child = fork();
-    if (child == 0) {
-        dup2(errPipe[1], STDERR_FILENO);
-        close(errPipe[0]);
-        close(errPipe[1]);
-        execl(binPath.c_str(), binPath.c_str(), nullptr);
-        _exit(127);
-    }
-    close(errPipe[1]);
-    char chunk[256];
-    for (;;) {
-        ssize_t got = read(errPipe[0], chunk, sizeof(chunk));
-        if (got <= 0) {
-            break;
-        }
-        err.append(chunk, static_cast<size_t>(got));
-    }
-    close(errPipe[0]);
-    int status = 0;
-    waitpid(child, &status, 0);
-    unlink(asmPath);
-    unlink(objPath.c_str());
-    unlink(binPath.c_str());
-    if (WIFSIGNALED(status)) {
-        signaled = true;
-        return -1;
-    }
-    if (!WIFEXITED(status)) {
-        return -1;
-    }
-    return WEXITSTATUS(status);
+    return runAsmCapture(built.asmText, signaled, err);
 }
 
 void expectDiagnosed(const std::string& text, const std::string& message,
@@ -641,6 +648,45 @@ void testTrapMessages() {
           "nil function pointer has a diagnostic");
     check(cider::ir::trapMessage(cider::ir::TrapReason::DivByZero) == nullptr,
           "division by zero stays silent");
+}
+
+void testLandingPads() {
+    std::printf("exception landing pads\n");
+    check(std::string(cider::ir::trapMessage(
+                  cider::ir::TrapReason::UncaughtException)) ==
+              "vm error: uncaught exception\n",
+          "uncaught exceptions have a diagnostic");
+
+    testir::Built landing = testir::landing(false);
+    cider::codegen::EmitResult emitted =
+        cider::codegen::emit(landing.module, cider::target::Kind::Native);
+    check(emitted.ok, "a landing module emits: " + emitted.error);
+    check(emitted.text.find("cider_exc_value") != std::string::npos,
+          "landing reads the exception payload");
+    bool signaled = false;
+    std::string err;
+    int code = runAsmCapture(emitted.text, signaled, err);
+    check(!signaled && code == 42 && err.empty(),
+          "the landing answers the payload word");
+
+    testir::Built uncaught = testir::landing(true);
+    cider::codegen::EmitResult uncaughtAsm =
+        cider::codegen::emit(uncaught.module, cider::target::Kind::Native);
+    check(uncaughtAsm.ok, "an uncaught module emits: " + uncaughtAsm.error);
+    check(uncaughtAsm.text.find("vm error: uncaught exception") !=
+              std::string::npos,
+          "the entry checks the exception flag");
+    code = runAsmCapture(uncaughtAsm.text, signaled, err);
+    check(!signaled && code == 2 && err == "vm error: uncaught exception\n",
+          "an uncaught entry writes the line and exits 2");
+
+    testir::Built call = testir::callLanding();
+    cider::codegen::EmitResult callAsm =
+        cider::codegen::emit(call.module, cider::target::Kind::Native);
+    check(callAsm.ok, "a call landing module emits: " + callAsm.error);
+    code = runAsmCapture(callAsm.text, signaled, err);
+    check(!signaled && code == 42 && err.empty(),
+          "a call enters its landing pad only when the flag is set");
 }
 
 void testTrap() {
@@ -3063,6 +3109,7 @@ int main() {
     testRegisterEscape();
     testAsm();
     testTrapMessages();
+    testLandingPads();
     testTrap();
     testPanic();
     testElementAddr();
