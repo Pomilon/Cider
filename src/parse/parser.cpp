@@ -15,6 +15,10 @@ namespace cider {
 
 namespace {
 
+// A unary operator declaration names exactly one parameter; the count has a
+// name so a size-looking literal never appears outside layout.h.
+constexpr int kOneParameter = 1;
+
 // Binding levels, tightest first. The number is the table row in reverse:
 // postfix is level 0 of the table and 150 here.
 enum {
@@ -392,6 +396,7 @@ bool Parser::parseOperatorName(std::string& out) {
         case TokenKind::Star: out = "operator_mul"; break;
         case TokenKind::Slash: out = "operator_div"; break;
         case TokenKind::Percent: out = "operator_rem"; break;
+        case TokenKind::Tilde: out = "operator_bitnot"; break;
         case TokenKind::Amp: out = "operator_bitand"; break;
         case TokenKind::Pipe: out = "operator_bitor"; break;
         case TokenKind::Caret: out = "operator_xor"; break;
@@ -443,6 +448,11 @@ std::unique_ptr<Decl> Parser::parseFuncDecl(bool) {
         }
     }
     std::vector<Param> params = parseParams();
+    // `-` is binary by spelling but unary by arity. The declaration's own
+    // parameter count names the operator before the checker sees it.
+    if (params.size() == kOneParameter && name == "operator_sub") {
+        name = "operator_neg";
+    }
     std::unique_ptr<TypeExpr> returns = parseReturnType();
     if (!check(TokenKind::LBrace)) {
         failHere("a function needs a body");
@@ -590,6 +600,9 @@ MethodDecl Parser::parseMethod() {
         failHere("an init or deinit needs a body");
     }
     std::vector<Param> params = parseParams();
+    if (params.size() == kOneParameter && name == "operator_sub") {
+        name = "operator_neg";
+    }
     std::unique_ptr<TypeExpr> returns = parseReturnType();
     if (!check(TokenKind::LBrace)) {
         failHere("a method needs a body");

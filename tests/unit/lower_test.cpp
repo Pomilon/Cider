@@ -1408,6 +1408,34 @@ void testOperators() {
         }
     }
     check(call, "a struct + struct lowers to the operator call");
+
+    Lowered unary = lower(
+        "struct Vec { var x: int; }\n"
+        "func operator-(v: Vec) -> Vec { return Vec { x: -v.x }; }\n"
+        "func main() -> int {\n"
+        "    var a: Vec = Vec { x: 1 };\n"
+        "    var b: Vec = -a;\n"
+        "    return b.x;\n"
+        "}\n");
+    check(unary.ok, "a unary operator program lowers: " + unary.stage);
+    if (!unary.ok) {
+        return;
+    }
+    const cider::ir::Function* neg = find(unary.module.get(), "operator_neg");
+    check(neg != nullptr, "the unary declaration emits a function");
+    const cider::ir::Function* unaryMain = find(unary.module.get(), "main");
+    bool unaryCall = false;
+    if (unaryMain != nullptr) {
+        for (const cider::ir::Block& block : unaryMain->blocks) {
+            for (const cider::ir::Instr& instr : block.body) {
+                if (instr.op == cider::ir::Op::Call &&
+                    instr.callee == "operator_neg") {
+                    unaryCall = true;
+                }
+            }
+        }
+    }
+    check(unaryCall, "a -struct lowers to the unary operator call");
 }
 
 void testMultiWordReturn() {

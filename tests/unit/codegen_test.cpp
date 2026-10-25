@@ -609,6 +609,19 @@ void testOperatorOverloadsNative() {
         "}\n",
         signaled);
     check(!signaled && code == 10, "a struct operator answers 10");
+
+    code = runCode(
+        "struct Vec { var x: int; var y: int; }\n"
+        "func operator-(v: Vec) -> Vec {\n"
+        "    return Vec { x: -v.x, y: -v.y };\n"
+        "}\n"
+        "func main() -> int {\n"
+        "    var a: Vec = Vec { x: 1, y: 2 };\n"
+        "    var b: Vec = -a;\n"
+        "    return 0 - (b.x + b.y);\n"
+        "}\n",
+        signaled);
+    check(!signaled && code == 3, "a unary struct operator answers 3");
 }
 
 void testTrap() {

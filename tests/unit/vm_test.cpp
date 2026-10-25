@@ -836,6 +836,29 @@ void testOperatorOverloadsVm() {
     cider::vm::VmResult opr = cider::vm::run(*p.module, "");
     check(opr.ok && opr.exitCode == 10,
           "the optimised operator answers 10: " + opr.error);
+
+    Lowered u = lower(
+        "struct Vec { var x: int; var y: int; }\n"
+        "func operator-(v: Vec) -> Vec {\n"
+        "    return Vec { x: -v.x, y: -v.y };\n"
+        "}\n"
+        "func main() -> int {\n"
+        "    var a: Vec = Vec { x: 1, y: 2 };\n"
+        "    var b: Vec = -a;\n"
+        "    return 0 - (b.x + b.y);\n"
+        "}\n");
+    check(u.ok, "a unary operator program lowers: " + u.stage);
+    if (!u.ok) {
+        return;
+    }
+    cider::vm::VmResult uunr = cider::vm::run(*u.module, "");
+    check(uunr.ok && uunr.exitCode == 3,
+          "the unoptimised unary operator answers 3: " + uunr.error);
+    cider::opt::OptResult uores = cider::opt::run(*u.module);
+    check(uores.ok, "the unary operator program optimises: " + uores.error);
+    cider::vm::VmResult uopr = cider::vm::run(*u.module, "");
+    check(uopr.ok && uopr.exitCode == 3,
+          "the optimised unary operator answers 3: " + uopr.error);
 }
 
 }  // namespace

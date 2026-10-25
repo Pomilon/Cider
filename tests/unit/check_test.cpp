@@ -303,6 +303,41 @@ void testOperatorOverloads() {
         "}\n");
     check(good.ok, "a free operator on a struct checks: " + good.stage);
 
+    Checked unary = check(
+        "struct Vec { var x: int; var y: int; }\n"
+        "func operator-(v: Vec) -> Vec {\n"
+        "    return Vec { x: -v.x, y: -v.y };\n"
+        "}\n"
+        "func main() -> int {\n"
+        "    var a: Vec = Vec { x: 1, y: 2 };\n"
+        "    var b: Vec = -a;\n"
+        "    return b.x + b.y;\n"
+        "}\n");
+    check(unary.ok, "a free unary operator checks: " + unary.stage);
+
+    Checked unaryMismatch = check(
+        "struct Vec { var x: int; }\n"
+        "struct Other { var x: int; }\n"
+        "func operator-(v: Vec) -> Vec { return v; }\n"
+        "func main() -> int {\n"
+        "    var o: Other = Other { x: 1 };\n"
+        "    var v: Vec = -o;\n"
+        "    return v.x;\n"
+        "}\n");
+    check(!unaryMismatch.ok && unaryMismatch.stage == "check",
+          "a unary operator call needs an exact operand type");
+
+    Checked unaryArity = check(
+        "struct Vec { var x: int; }\n"
+        "func operator~(a: Vec, b: Vec) -> Vec { return a; }\n");
+    check(!unaryArity.ok && unaryArity.stage == "check",
+          "a unary operator declaration takes exactly one parameter");
+
+    Checked unaryNoNominal = check(
+        "func operator~(a: int) -> int { return ~a; }\n");
+    check(!unaryNoNominal.ok && unaryNoNominal.stage == "check",
+          "a unary operator declaration needs a nominal operand");
+
     Checked mismatch = check(
         "struct Vec { var x: int; var y: int; }\n"
         "func operator+(a: Vec, b: Vec) -> Vec { return a; }\n"

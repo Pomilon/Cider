@@ -74,6 +74,11 @@ const resolve::Decl* Checker::operatorDecl(const Binary* expr) const {
     return found == operatorDecls_.end() ? nullptr : found->second;
 }
 
+const resolve::Decl* Checker::operatorDecl(const Unary* expr) const {
+    auto found = unaryOperatorDecls_.find(expr);
+    return found == unaryOperatorDecls_.end() ? nullptr : found->second;
+}
+
 std::optional<DeclId> Checker::specOf(const Call* call,
                                               const std::optional<DeclId>& ctx) const {
     std::string key;
@@ -1241,7 +1246,13 @@ void Checker::visitFuncDecl(FuncDecl& n) {
         return;
     }
     if (isOperatorName(n.name)) {
-        if (sig.arity() != 2) {
+        const bool unary =
+            n.name == "operator_neg" || n.name == "operator_bitnot";
+        if (unary && sig.arity() != 1) {
+            fail(n.pos, "a unary operator takes exactly one parameter");
+            return;
+        }
+        if (!unary && sig.arity() != 2) {
             fail(n.pos, "a binary operator takes exactly two parameters");
             return;
         }
@@ -1251,7 +1262,11 @@ void Checker::visitFuncDecl(FuncDecl& n) {
                    kind == Kind::Enum;
         };
         const auto& params = sig.parameters();
-        if (!nominal(params[0].type) && !nominal(params[1].type)) {
+        bool anyNominal = false;
+        for (const auto& parameter : params) {
+            anyNominal = anyNominal || nominal(parameter.type);
+        }
+        if (!anyNominal) {
             fail(n.pos, "an operator needs a class, struct or enum operand");
             return;
         }
@@ -2305,6 +2320,13 @@ void Checker::visitUnary(Unary& n) {
     if (operand.isError()) {
         record(&n, operand);
         return;
+    }
+    if (n.op == UnOp::Neg || n.op == UnOp::BitNot) {
+        TypeRef overloaded;
+        if (checkOperatorOverload(n, operand, overloaded)) {
+            record(&n, overloaded);
+            return;
+        }
     }
     Kind kind = operand.type->kind();
     if (n.op == UnOp::Not) {
@@ -3965,6 +3987,37 @@ bool Checker::checkOperatorOverload(Binary& expr, TypeRef lhs, TypeRef rhs,
         return true;
     }
     return false;
+}
+
+bool Checker::checkOperatorOverload(Unary& expr, TypeRef operand,
+                                    TypeRef& result) {
+    const char* name = unOpOperatorName(expr.op);
+    if (name == nullptr) {
+        return false;
+    }
+    const Kind kind = operand.type->kind();
+    const bool nominal =
+        kind == Kind::Struct || kind == Kind::Class || kind == Kind::Enum;
+    if (!nominal) {
+        return false;
+    }
+
+    const resolve::Decl* decl = resolver_.lookup(moduleScope_, name);
+    if (decl != nullptr && decl->kind == resolve::DeclKind::Func &&
+        decl->typeParams == 0 && decl->sig.arity() == 1) {
+        TypeRef parameter{decl->sig.parameters()[0].type};
+        if (parameter == operand) {
+            unaryOperatorDecls_[&expr] = decl;
+            const Type* ret = decl->sig.returnType();
+            result = TypeRef{ret != nullptr ? ret : ctx_.void_()};
+            return true;
+        }
+    }
+
+    fail(expr.pos, std::string("no matching operator '") +
+                      unOpSpelling(expr.op) + "'");
+    result = errorRef();
+    return true;
 }
 
 TypeRef Checker::checkBinary(Binary& expr, TypeRef expected) {

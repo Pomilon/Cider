@@ -7968,6 +7968,9 @@ std::vector<ir::Value> Lowerer::lowerWords(const Expr* expr, TypeRef fallback) {
         return lowerCallWords(const_cast<Call&>(*call));
     }
     if (const auto* unary = dynamic_cast<const Unary*>(expr)) {
+        if (checker_.operatorDecl(unary) != nullptr) {
+            return lowerOperatorCall(const_cast<Unary&>(*unary));
+        }
         // `!b` and `-x` answer one scalar word through the scalar path,
         // which already lowers both: the address path below knows only
         // `&` and `*`, and sending a logical or arithmetic unary there
@@ -9654,6 +9657,20 @@ std::vector<ir::Value> Lowerer::lowerOperatorCall(Binary& n) {
     std::vector<ir::Value> words = lowerCallWords(call);
     n.lhs = std::move(call.args[0]);
     n.rhs = std::move(call.args[1]);
+    return words;
+}
+
+std::vector<ir::Value> Lowerer::lowerOperatorCall(Unary& n) {
+    const resolve::Decl* op = checker_.operatorDecl(&n);
+    if (op == nullptr) {
+        refuse(n.pos, "this operator call");
+        return {undefined()};
+    }
+    Call call(n.pos, std::make_unique<Ident>(n.pos, op->name), {},
+              std::vector<std::unique_ptr<Expr>>{});
+    call.args.push_back(std::move(n.operand));
+    std::vector<ir::Value> words = lowerCallWords(call);
+    n.operand = std::move(call.args[0]);
     return words;
 }
 
@@ -12423,6 +12440,15 @@ ir::Value Lowerer::onIdentOrExpr(const Expr* expr, TypeRef expected) {
                 return undefined();
             }
             return words[0];
+        }
+        if (checker_.operatorDecl(unary) != nullptr) {
+            std::vector<ir::Value> words =
+                lowerOperatorCall(const_cast<Unary&>(*unary));
+            if (failed_ || words.size() != kOneWord) {
+                refuse(expr->pos, "a multi-word operator result in a scalar position");
+                return undefined();
+            }
+            return words[kFirstWord];
         }
         if (unary->op == UnOp::Neg) {
             return lowerNeg(*unary, expected);

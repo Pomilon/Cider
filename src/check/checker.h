@@ -170,6 +170,7 @@ public:
     // or null when the built-in rules apply. Lowering asks this instead of
     // re-running overload resolution.
     const resolve::Decl* operatorDecl(const Binary* expr) const;
+    const resolve::Decl* operatorDecl(const Unary* expr) const;
     const std::vector<CheckError>& errors() const { return errors_; }
     size_t errorCount() const { return errors_.size(); }
     // The specialization a generic call instantiated, by call site and
@@ -309,6 +310,9 @@ private:
     // when a class/struct operand has no match.
     bool checkOperatorOverload(Binary& expr, TypeRef lhs, TypeRef rhs,
                                TypeRef& result);
+    // The unary counterpart. Only `-` and `~` are overloadable; `!` is
+    // built-in. A nominal operand must match exactly or the expression fails.
+    bool checkOperatorOverload(Unary& expr, TypeRef operand, TypeRef& result);
     void checkShiftDiv(const Binary& expr, TypeRef lhs, TypeRef rhs);
     TypeRef checkCall(Call& expr);
     TypeRef checkField(Field& expr);
@@ -470,6 +474,7 @@ private:
     // Only class/struct/enum operands are recorded; lowering reads this map
     // rather than resolving the name a second time.
     std::unordered_map<const Binary*, const resolve::Decl*> operatorDecls_;
+    std::unordered_map<const Unary*, const resolve::Decl*> unaryOperatorDecls_;
     // Types resolve here rather than at module scope during generic walks,
     // where the template's parameters are bound.
     const resolve::Scope* typeScope_ = nullptr;

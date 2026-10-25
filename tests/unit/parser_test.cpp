@@ -233,12 +233,34 @@ void testOperatorNames() {
     }
 
     ok = false;
+    std::unique_ptr<cider::Program> unaryMinus = parse(
+        "func operator-(a: Vec) -> Vec { return a; }\n", ok);
+    check(ok, "a unary minus declaration parses");
+    if (unaryMinus != nullptr && !unaryMinus->decls.empty()) {
+        const cider::FuncDecl& fn =
+            static_cast<const cider::FuncDecl&>(*unaryMinus->decls[0]);
+        check(fn.name == "operator_neg",
+              "unary minus stores its canonical name");
+    }
+
+    ok = false;
+    std::unique_ptr<cider::Program> complement = parse(
+        "func operator~(a: Vec) -> Vec { return a; }\n", ok);
+    check(ok, "a complement operator declaration parses");
+    if (complement != nullptr && !complement->decls.empty()) {
+        const cider::FuncDecl& fn =
+            static_cast<const cider::FuncDecl&>(*complement->decls[0]);
+        check(fn.name == "operator_bitnot",
+              "complement stores its canonical name");
+    }
+
+    ok = false;
     parse("func operator&&(a: Vec, b: Vec) -> Vec { return a; }\n", ok);
     check(!ok, "short-circuit operators cannot be overloaded");
 
     ok = false;
     parse("func operator!(a: Vec) -> Vec { return a; }\n", ok);
-    check(!ok, "unary operators cannot be declared yet");
+    check(!ok, "logical not cannot be overloaded");
 }
 
 // `1 | 2 =>` is one arm with two alternatives: the bar separates patterns,

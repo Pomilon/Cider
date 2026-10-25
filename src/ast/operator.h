@@ -66,6 +66,32 @@ inline const char* binOpSpelling(BinOp op) {
     return "";
 }
 
+// The canonical identifier for a unary operator, or null when the operator
+// is built-in only (`!`) or is not an operator expression at all (`*`, `&`).
+inline const char* unOpOperatorName(UnOp op) {
+    switch (op) {
+        case UnOp::Neg: return "operator_neg";
+        case UnOp::BitNot: return "operator_bitnot";
+        case UnOp::Not:
+        case UnOp::Deref:
+        case UnOp::Addr:
+            return nullptr;
+    }
+    return nullptr;
+}
+
+// The source spelling of a unary operator, for diagnostics.
+inline const char* unOpSpelling(UnOp op) {
+    switch (op) {
+        case UnOp::Neg: return "-";
+        case UnOp::Not: return "!";
+        case UnOp::BitNot: return "~";
+        case UnOp::Deref: return "*";
+        case UnOp::Addr: return "&";
+    }
+    return "";
+}
+
 inline bool isOperatorName(const std::string& name) {
     return name.rfind("operator_", 0) == 0;
 }
