@@ -982,6 +982,32 @@ void testOperatorOverloadsVm() {
 
 }  // namespace
 
+void testArrowOperatorVm() {
+    std::printf("arrow operator runs\n");
+    Lowered p = lower(
+        "struct Inner { var x: int; }\n"
+        "class Ptr { var p: *Inner;\n"
+        "    func operator->() -> *Inner { return this->p; }\n"
+        "}\n"
+        "func main() -> int {\n"
+        "    var i: Inner = Inner { x: 7 };\n"
+        "    var p: Ptr = Ptr { p: &i };\n"
+        "    return p->x;\n"
+        "}\n");
+    check(p.ok, "an arrow operator program lowers: " + p.stage);
+    if (!p.ok) {
+        return;
+    }
+    cider::vm::VmResult unr = cider::vm::run(*p.module, "");
+    check(unr.ok && unr.exitCode == 7,
+          "the unoptimised arrow answers 7: " + unr.error);
+    cider::opt::OptResult ores = cider::opt::run(*p.module);
+    check(ores.ok, "the arrow program optimises: " + ores.error);
+    cider::vm::VmResult opr = cider::vm::run(*p.module, "");
+    check(opr.ok && opr.exitCode == 7,
+          "the optimised arrow answers 7: " + opr.error);
+}
+
 int main() {
     std::printf("vm_test — the interpreter answers\n\n");
     testExit();
@@ -1001,6 +1027,7 @@ int main() {
     testNilFnptrCall();
     testFieldDefaults();
     testOperatorOverloadsVm();
+    testArrowOperatorVm();
     std::printf("\n%d checks, %s\n", checks, failures == 0 ? "all passed" : "FAILURES");
     return failures == 0 ? 0 : 1;
 }

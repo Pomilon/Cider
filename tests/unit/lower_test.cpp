@@ -1651,6 +1651,39 @@ void testInterpRemoved() {
           "string concatenation is a library operation");
 }
 
+void testArrowOperator() {
+    std::printf("arrow operator lowers as a member call\n");
+    Lowered r = lower(
+        "struct Inner { var x: int; }\n"
+        "class Ptr { var p: *Inner;\n"
+        "    func operator->() -> *Inner { return this->p; }\n"
+        "}\n"
+        "func main() -> int {\n"
+        "    var i: Inner = Inner { x: 7 };\n"
+        "    var p: Ptr = Ptr { p: &i };\n"
+        "    return p->x;\n"
+        "}\n");
+    check(r.ok, "an arrow operator program lowers: " + r.stage);
+    if (!r.ok) {
+        return;
+    }
+    check(find(r.module.get(), "Ptr__operator_arrow") != nullptr,
+          "the arrow declaration emits a method");
+    bool call = false;
+    const cider::ir::Function* main = find(r.module.get(), "main");
+    if (main != nullptr) {
+        for (const cider::ir::Block& block : main->blocks) {
+            for (const cider::ir::Instr& instr : block.body) {
+                if (instr.op == cider::ir::Op::Call &&
+                    instr.callee == "Ptr__operator_arrow") {
+                    call = true;
+                }
+            }
+        }
+    }
+    check(call, "p->x lowers to the operator arrow call");
+}
+
 }  // namespace
 
 void testUefiEntry() {
@@ -1800,6 +1833,7 @@ int main() {
     testSsa();
     testCalls();
     testOperators();
+    testArrowOperator();
     testLoop();
     testBareReturn();
     testNestedConstruct();

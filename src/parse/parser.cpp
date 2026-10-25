@@ -427,6 +427,7 @@ bool Parser::parseOperatorName(std::string& out) {
         case TokenKind::LtEq: out = "operator_le"; break;
         case TokenKind::GtEq: out = "operator_ge"; break;
         // `=` and its compound forms are assignment operators.
+        case TokenKind::Arrow: out = "operator_arrow"; break;
         case TokenKind::Eq: out = "operator_assign"; break;
         case TokenKind::PlusEq: out = "operator_add_assign"; break;
         case TokenKind::MinusEq: out = "operator_sub_assign"; break;
@@ -2399,7 +2400,9 @@ std::unique_ptr<Expr> Parser::parsePostfix(std::unique_ptr<Expr> base) {
             base = std::make_unique<Field>(base->pos, std::move(base), std::move(name));
             continue;
         }
-        // `p->f` desugars to `(*p).f`: one deref, then the member.
+        // `p->f` desugars to `(*p).f`: one deref, then the member. The flag
+        // keeps the spelling visible so a class/struct receiver can select
+        // its member `operator->` before the built-in pointer path runs.
         if (match(TokenKind::Arrow)) {
             if (!check(TokenKind::Ident)) {
                 failHere("expected a field name");
@@ -2410,7 +2413,7 @@ std::unique_ptr<Expr> Parser::parsePostfix(std::unique_ptr<Expr> base) {
             base = std::make_unique<Field>(
                 bpos,
                 std::make_unique<Unary>(bpos, UnOp::Deref, std::move(base)),
-                std::move(name));
+                std::move(name), true);
             continue;
         }
         // `max::<int>(...)`: explicit arguments need the `::`, which is what

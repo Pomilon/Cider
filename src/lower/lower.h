@@ -604,6 +604,9 @@ public:
     std::string forwardFunction(const std::string& link, const Signature& sig,
                                 Position pos);
     std::vector<ir::Value> lowerField(const Field& n);
+    // The member operation once the receiver is a place. Split out so an
+    // overloaded arrow can call operator-> and feed the returned pointer in.
+    std::vector<ir::Value> lowerFieldAt(const Field& n, Place base);
     // A union member read checks the tag first: mismatch traps, and only the
     // live member's bytes load (TYPES.md 4.6). The tag is never statically
     // known here, so every read checks; static tracking is a later slice.

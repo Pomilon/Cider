@@ -290,8 +290,13 @@ struct Call : Expr {
 struct Field : Expr {
     std::unique_ptr<Expr> object;
     std::string name;
-    Field(Position p, std::unique_ptr<Expr> o, std::string n)
-        : Expr(std::move(p)), object(std::move(o)), name(std::move(n)) {}
+    // True only for the `->` spelling. The object still carries the built-in
+    // dereference so pointer access keeps one lowering path; the flag lets
+    // the checker try a smart pointer's member `operator->` first.
+    bool isArrow;
+    Field(Position p, std::unique_ptr<Expr> o, std::string n, bool arrow = false)
+        : Expr(std::move(p)), object(std::move(o)), name(std::move(n)),
+          isArrow(arrow) {}
     void accept(ASTVisitor& v) override;
 };
 

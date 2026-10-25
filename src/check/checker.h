@@ -176,6 +176,10 @@ public:
     bool isOperatorIndex(const Index* expr) const;
     bool isOperatorCall(const Call* expr) const;
     bool isOperatorAssign(const Assign* expr) const;
+    bool isOperatorArrow(const Field* expr) const;
+    // The pointee type an overloaded `operator->` returns, recorded when the
+    // arrow is resolved. Lowering uses it to type the dereferenced place.
+    TypeRef operatorArrowTarget(const Field* expr) const;
     const std::vector<CheckError>& errors() const { return errors_; }
     size_t errorCount() const { return errors_.size(); }
     // The specialization a generic call instantiated, by call site and
@@ -321,6 +325,9 @@ private:
     void checkShiftDiv(const Binary& expr, TypeRef lhs, TypeRef rhs);
     TypeRef checkCall(Call& expr);
     TypeRef checkField(Field& expr);
+    // The member a value of `object` exposes under `expr.name`. Split from
+    // checkField so an arrow can resolve the member on its pointee.
+    TypeRef checkFieldType(TypeRef object, Field& expr);
     // 4.8.4: a private field is visible strictly within the module that
     // declares its class or struct. Fails and answers false elsewhere.
     bool fieldVisible(DeclId id, const std::string& name, Position pos);
@@ -485,6 +492,7 @@ private:
     std::unordered_set<const Index*> operatorIndexes_;
     std::unordered_set<const Call*> operatorCalls_;
     std::unordered_set<const Assign*> operatorAssigns_;
+    std::unordered_map<const Field*, TypeRef> operatorArrows_;
     // Types resolve here rather than at module scope during generic walks,
     // where the template's parameters are bound.
     const resolve::Scope* typeScope_ = nullptr;

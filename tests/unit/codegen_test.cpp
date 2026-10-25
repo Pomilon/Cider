@@ -3044,6 +3044,23 @@ void testLocalAggregates() {
     check(built.ok, "a local union emits: " + built.stage);
 }
 
+void testArrowOperatorNative() {
+    std::printf("arrow operator runs natively\n");
+    bool signaled = false;
+    int code = runCode(
+        "struct Inner { var x: int; }\n"
+        "class Ptr { var p: *Inner;\n"
+        "    func operator->() -> *Inner { return this->p; }\n"
+        "}\n"
+        "func main() -> int {\n"
+        "    var i: Inner = Inner { x: 7 };\n"
+        "    var p: Ptr = Ptr { p: &i };\n"
+        "    return p->x;\n"
+        "}\n",
+        signaled);
+    check(!signaled && code == 7, "a smart pointer arrow answers 7");
+}
+
 int main() {
     std::printf("codegen_test — a Cider program runs\n\n");
     testExit();
@@ -3108,6 +3125,7 @@ int main() {
     testAsm();
     testTrapMessages();
     testOperatorOverloadsNative();
+    testArrowOperatorNative();
     testTrap();
     testRemovedPrelude();
     testElementAddr();

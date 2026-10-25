@@ -101,6 +101,15 @@ bool Checker::isOperatorAssign(const Assign* expr) const {
     return operatorAssigns_.find(expr) != operatorAssigns_.end();
 }
 
+bool Checker::isOperatorArrow(const Field* expr) const {
+    return operatorArrows_.find(expr) != operatorArrows_.end();
+}
+
+TypeRef Checker::operatorArrowTarget(const Field* expr) const {
+    auto found = operatorArrows_.find(expr);
+    return found != operatorArrows_.end() ? found->second : TypeRef{ctx_.error()};
+}
+
 std::optional<DeclId> Checker::specOf(const Call* call,
                                               const std::optional<DeclId>& ctx) const {
     std::string key;
@@ -1276,6 +1285,10 @@ void Checker::visitFuncDecl(FuncDecl& n) {
             fail(n.pos, "operator '()' must be a member");
             return;
         }
+        if (n.name == "operator_arrow") {
+            fail(n.pos, "operator '->' must be a member");
+            return;
+        }
         if (isAssignmentOperatorName(n.name)) {
             fail(n.pos, "an assignment operator must be a member");
             return;
@@ -1903,6 +1916,18 @@ void Checker::checkMethods(DeclId id, Kind kind, std::vector<MethodDecl>& method
             fail(method.pos, "an index operator takes exactly one parameter");
             continue;
         }
+        if (method.name == "operator_arrow") {
+            if (sig->arity() != kNoParameters) {
+                fail(method.pos, "an arrow operator takes no parameters");
+                continue;
+            }
+            const Type* answer = sig->returnType();
+            if (answer == nullptr || answer->kind() != Kind::Pointer ||
+                answer->pointee() == nullptr) {
+                fail(method.pos, "an arrow operator must return a pointer");
+                continue;
+            }
+        }
         const bool unaryOperator =
             method.name == "operator_neg" || method.name == "operator_bitnot";
         if (unaryOperator && sig->arity() != kNoParameters) {
@@ -1913,6 +1938,7 @@ void Checker::checkMethods(DeclId id, Kind kind, std::vector<MethodDecl>& method
         if (isOperatorName(method.name) && !unaryOperator &&
             method.name != "operator_index" &&
             method.name != "operator_call" &&
+            method.name != "operator_arrow" &&
             sig->arity() != kOneParameter) {
             fail(method.pos,
                  "a binary operator takes exactly one parameter in a member declaration");
@@ -4897,6 +4923,53 @@ bool Checker::methodVisible(DeclId id, const std::string& name, Position pos) {
 }
 
 TypeRef Checker::checkField(Field& expr) {
+    if (expr.isArrow) {
+        auto* deref = dynamic_cast<Unary*>(expr.object.get());
+        if (deref == nullptr || deref->op != UnOp::Deref) {
+            fail(expr.pos, "operator '->' needs a pointer");
+            return errorRef();
+        }
+        TypeRef receiver = checkExpr(deref->operand.get(),
+                                     TypeRef{ctx_.wildcard()});
+        if (receiver.isError()) {
+            return errorRef();
+        }
+        Kind receiverKind = receiver.type->kind();
+        if (receiverKind == Kind::Pointer) {
+            TypeRef target{receiver.type->pointee()};
+            record(deref, target);
+            return checkFieldType(target, expr);
+        }
+        if (receiverKind == Kind::Class || receiverKind == Kind::Struct) {
+            std::optional<DeclId> id = receiver.type->decl();
+            if (!id.has_value()) {
+                return errorRef();
+            }
+            const Signature* sig = resolver_.methodSig(*id, "operator_arrow");
+            if (sig == nullptr) {
+                fail(expr.pos, "no matching operator '->'");
+                return errorRef();
+            }
+            if (!methodVisible(*id, "operator_arrow", expr.pos)) {
+                return errorRef();
+            }
+            if (sig->arity() != kNoParameters) {
+                fail(expr.pos, "an arrow operator takes no parameters");
+                return errorRef();
+            }
+            const Type* target = sig->returnType();
+            if (target == nullptr || target->kind() != Kind::Pointer ||
+                target->pointee() == nullptr) {
+                fail(expr.pos, "an arrow operator must return a pointer");
+                return errorRef();
+            }
+            TypeRef pointee{target->pointee()};
+            operatorArrows_[&expr] = pointee;
+            return checkFieldType(pointee, expr);
+        }
+        fail(expr.pos, "operator '->' needs a pointer or a class/struct");
+        return errorRef();
+    }
     // `da.aval`: the qualifier names a module, so the member resolves in
     // the defining scope, never in the current one. Functions answer their
     // closure type like a bare spelling; globals answer their declared
@@ -5076,6 +5149,9 @@ TypeRef Checker::checkField(Field& expr) {
     if (object.isError()) {
         return errorRef();
     }
+    return checkFieldType(object, expr);
+}
+TypeRef Checker::checkFieldType(TypeRef object, Field& expr) {
     Kind kind = object.type->kind();
     if (kind == Kind::Pointer) {
         fail(expr.pos, "deref first: a pointer has no fields");
@@ -5179,6 +5255,7 @@ TypeRef Checker::checkField(Field& expr) {
     fail(expr.pos, "no fields on this type");
     return errorRef();
 }
+
 
 TypeRef Checker::checkNewStruct(NewStruct& expr) {
     TypeRef target = resolveHere(expr.type.get());

@@ -560,6 +560,37 @@ void testModuleKeywords() {
     }
 }
 
+void testArrowAccess() {
+    std::printf("arrow access\n");
+    bool ok = false;
+    std::unique_ptr<cider::Program> program = parse(
+        "func f(p: *S) -> int { return p->x; }\n", ok);
+    check(ok, "an arrow access parses");
+    if (program != nullptr && !program->decls.empty()) {
+        const cider::FuncDecl& fn =
+            static_cast<const cider::FuncDecl&>(*program->decls[0]);
+        const cider::Return& ret =
+            static_cast<const cider::Return&>(*fn.body->stmts[0]);
+        const auto* field = dynamic_cast<const cider::Field*>(ret.value.get());
+        check(field != nullptr && field->isArrow,
+              "the arrow field is tagged");
+    }
+
+    ok = false;
+    std::unique_ptr<cider::Program> dotted = parse(
+        "func f(p: S) -> int { return p.x; }\n", ok);
+    check(ok, "a dot access parses");
+    if (dotted != nullptr && !dotted->decls.empty()) {
+        const cider::FuncDecl& fn =
+            static_cast<const cider::FuncDecl&>(*dotted->decls[0]);
+        const cider::Return& ret =
+            static_cast<const cider::Return&>(*fn.body->stmts[0]);
+        const auto* field = dynamic_cast<const cider::Field*>(ret.value.get());
+        check(field != nullptr && !field->isArrow,
+              "the dot field is not tagged");
+    }
+}
+
 int main() {
     std::printf("parser_test — syntax alone\n\n");
     testPrecedence();
@@ -573,6 +604,7 @@ int main() {
     testControlForms();
     testExceptionsRejected();
     testOperatorNames();
+    testArrowAccess();
     testAlternation();
     testGuard();
     testRange();

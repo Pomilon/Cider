@@ -2616,6 +2616,51 @@ void testLocalAggregates() {
           "a local struct does not escape its block");
 }
 
+void testArrowOperator() {
+    std::printf("arrow operator\n");
+    const std::string smart =
+        "struct Inner { var x: int; }\n"
+        "class Ptr { var p: *Inner;\n"
+        "    func operator->() -> *Inner { return this->p; }\n"
+        "}\n"
+        "func main() -> int {\n"
+        "    var i: Inner = Inner { x: 7 };\n"
+        "    var p: Ptr = Ptr { p: &i };\n"
+        "    return p->x;\n"
+        "}\n";
+    Checked good = check(smart);
+    check(good.ok, "a member arrow operator checks: " + good.stage);
+
+    Checked builtin = check(
+        "struct S { var x: int; }\n"
+        "func main() -> int {\n"
+        "    var s: S = S { x: 7 };\n"
+        "    var p: *S = &s;\n"
+        "    return p->x;\n"
+        "}\n");
+    check(builtin.ok, "a pointer arrow still checks: " + builtin.stage);
+
+    Checked missing = check(
+        "struct S { var x: int; }\n"
+        "func main() -> int {\n"
+        "    var s: S = S { x: 7 };\n"
+        "    return s->x;\n"
+        "}\n");
+    check(!missing.ok && missing.stage == "check",
+          "a struct arrow needs operator->");
+
+    Checked badReturn = check(
+        "class P { func operator->() -> int { return 1; } }\n");
+    check(!badReturn.ok && badReturn.stage == "check",
+          "an arrow operator must return a pointer");
+
+    Checked freeArrow = check(
+        "struct S { var x: int; }\n"
+        "func operator->(s: S) -> *S { return &s; }\n");
+    check(!freeArrow.ok && freeArrow.stage == "check",
+          "an arrow operator must be a member");
+}
+
 int main() {
     std::printf("check_test — well-typed programs check\n\n");
     testArithmetic();
@@ -2683,6 +2728,7 @@ int main() {
     testControl();
     testExceptionSyntaxRemoved();
     testOperatorOverloads();
+    testArrowOperator();
     testForInProtocol();
     testInitAssign();
     testLoopMatchRefused();

@@ -4450,6 +4450,33 @@ bool Lowerer::loadBitField(Position pos, const Place& unit, TypeRef unitType,
 }
 
 std::vector<ir::Value> Lowerer::lowerField(const Field& n) {
+    if (n.isArrow && checker_.isOperatorArrow(&n)) {
+        auto* deref = dynamic_cast<Unary*>(n.object.get());
+        if (deref == nullptr || deref->op != UnOp::Deref) {
+            refuse(n.pos, "this field access");
+            return {undefined()};
+        }
+        std::unique_ptr<Expr> receiver = std::move(deref->operand);
+        std::vector<std::unique_ptr<TypeExpr>> noTypes;
+        std::vector<std::unique_ptr<Expr>> noArgs;
+        Call call(n.pos,
+                  std::make_unique<Field>(n.pos, std::move(receiver),
+                                          "operator_arrow"),
+                  std::move(noTypes), std::move(noArgs));
+        std::vector<ir::Value> ptr = lowerCallWords(call);
+        auto* field = static_cast<Field*>(call.callee.get());
+        deref->operand = std::move(field->object);
+        if (failed_ || ptr.size() != kOneWord) {
+            refuse(n.pos, "this field access");
+            return {undefined()};
+        }
+        Place base;
+        base.type = checker_.operatorArrowTarget(&n);
+        base.off = 0;
+        base.hasIndirect = true;
+        base.indirect = ptr[0];
+        return lowerFieldAt(n, std::move(base));
+    }
     // `lib.gB`: the object names a module, so the member is a global in
     // the defining scope. Load through the same global path a bare
     // spelling uses; anything else falls through to the paths below.
@@ -4741,6 +4768,9 @@ std::vector<ir::Value> Lowerer::lowerField(const Field& n) {
             return {undefined()};
         }
     }
+    return lowerFieldAt(n, std::move(base));
+}
+std::vector<ir::Value> Lowerer::lowerFieldAt(const Field& n, Place base) {
     if (base.type.isError()) {
         refuse(n.object->pos, "this field access");
         return {undefined()};
@@ -4810,6 +4840,7 @@ std::vector<ir::Value> Lowerer::lowerField(const Field& n) {
     }
     return loadRange(n.pos, base, fieldType);
 }
+
 
 std::vector<ir::Value> Lowerer::lowerUnionField(const Field& n, const Place& base) {
     std::optional<DeclId> id = base.type.type->decl();
