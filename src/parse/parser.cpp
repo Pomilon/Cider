@@ -136,7 +136,7 @@ bool declStart(TokenKind kind) {
            kind == TokenKind::KwUnion || kind == TokenKind::KwEnum ||
            kind == TokenKind::KwType || kind == TokenKind::KwConst ||
            kind == TokenKind::KwExtern || kind == TokenKind::KwImport ||
-           kind == TokenKind::KwFrom || kind == TokenKind::KwFini ||
+           kind == TokenKind::KwFrom ||
            kind == TokenKind::KwExport || kind == TokenKind::KwVar;
 }
 
@@ -362,9 +362,6 @@ std::unique_ptr<Decl> Parser::parseDecl() {
     }
     if (kind == TokenKind::KwImport || kind == TokenKind::KwFrom) {
         return parseImport();
-    }
-    if (kind == TokenKind::KwFini) {
-        return parseFini();
     }
     if (kind == TokenKind::KwExport) {
         Position start = advance().pos;
@@ -1084,20 +1081,6 @@ bool Parser::parseDirective(Program& program) {
     // would let a program ask for defined overflow and not get it.
     fail(start, "unknown experimental behaviour '" + name + "'");
     return false;
-}
-
-std::unique_ptr<Decl> Parser::parseFini() {
-    Position start = advance().pos;
-    if (!check(TokenKind::LBrace)) {
-        failHere("a fini needs a body");
-        return nullptr;
-    }
-    std::unique_ptr<Stmt> body = parseBlock();
-    if (body == nullptr) {
-        return nullptr;
-    }
-    return std::make_unique<FiniDecl>(
-        start, std::unique_ptr<Block>(static_cast<Block*>(body.release())));
 }
 
 // --- Statements --------------------------------------------------------------

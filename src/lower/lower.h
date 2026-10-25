@@ -97,7 +97,6 @@ public:
     // null module, so a late refusal is not silent).
     std::unique_ptr<ir::Module> takeModule() {
         prepareTargetEntry();
-        buildFini();
         return failed_ ? nullptr : std::move(module_);
     }
     // Emits every used generic-function specialization once, after all
@@ -113,7 +112,6 @@ public:
     // --- called by the Checker during its walk, through check::LowerSink ---
     void onProgram(Program& n) override;
     void onFuncDecl(FuncDecl& n) override;
-    void onFiniDecl(FiniDecl& n) override;
     void onSpecFunc(DeclId spec, const FuncDecl& spelling,
                     const Signature& sig) override;
     void onMethodDecl(const std::string& owner, const std::string& name,
@@ -687,11 +685,6 @@ private:
     void beginFuncFrame(const std::string& link, const Signature& sig,
                         const std::vector<Param>& params, Position pos);
     void endFuncFrame(Position pos);
-    // 7.10: composes the finalizer entry (`cider_fini_run`) from the
-    // per-block functions collected during the walk, in reverse encounter
-    // order. Called once, from takeModule, because the order is only known
-    // after every module has lowered.
-    void buildFini();
     // Names the target entry in IR and adds target-owned globals. UEFI owns
     // the firmware symbol `efi_main`, so the user's function is renamed to a
     // hidden link symbol and the emitter's shim calls it. Native has no
@@ -776,12 +769,6 @@ private:
     bool enabled_ = false;
     bool wrap_ = false;
     bool failed_ = false;
-    // 7.10: the per-block finalizer functions, in encounter order; the
-    // composed entry calls them in reverse. finiBuilt_ makes takeModule
-    // idempotent, and finiPos_ answers the first block for diagnostics.
-    std::vector<std::string> finiBodies_;
-    Position finiPos_{"", 1, 1};
-    bool finiBuilt_ = false;
     bool targetPrepared_ = false;
     uint32_t valueSeq_ = 0;
     uint32_t labelSeq_ = 0;

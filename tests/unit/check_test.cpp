@@ -1379,24 +1379,12 @@ void testWildcardAndIncrement() {
           "an increment inside an argument refuses");
 }
 
-void testFini() {
-    std::printf("fini blocks\n");
-    Checked ok = check(
-        "var locked: bool = false;\n"
-        "fini {\n"
-        "    if (locked) { locked = false; }\n"
-        "}\n"
-        "func main() -> int { return 0; }\n");
-    check(ok.ok, "a fini block checks: " + ok.stage);
-    Checked two = check(
-        "fini { }\n"
+void testFiniRemoved() {
+    std::printf("fini is not core\n");
+    Checked r = check(
         "fini { }\n"
         "func main() -> int { return 0; }\n");
-    check(two.ok, "two fini blocks check: " + two.stage);
-    Checked ret = check(
-        "fini { return; }\n"
-        "func main() -> int { return 0; }\n");
-    check(!ret.ok && ret.stage == "check", "a return inside fini refuses");
+    check(!r.ok && r.stage == "parse", "fini is not a declaration");
 }
 
 void testInterfaceNil() {
@@ -2417,7 +2405,7 @@ int main() {
     testMultipleBases();
     testFieldDefaults();
     testWildcardAndIncrement();
-    testFini();
+    testFiniRemoved();
     testInterfaceNil();
     testMatch();
     testAlternation();

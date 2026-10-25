@@ -214,13 +214,6 @@ def uncaught_exception():
 """
 
 
-def fini_suppressed():
-    return """from std.io import print;
-fini { print("fini"); }
-func main() -> int { throw 7; }
-"""
-
-
 def main():
     if not os.path.exists(CIDER):
         print("FAIL: compiler not found: %s" % CIDER, file=sys.stderr)
@@ -256,13 +249,6 @@ def main():
 
         h.run_legs("uncaught exception",
                    h.source("uncaught.cid", uncaught_exception()), UNCAUGHT)
-        fini_src = h.source("fini_uncaught.cid", fini_suppressed())
-        for leg, leg_args in LEGS:
-            proc = invoke(["run"] + leg_args + [fini_src], env=env_with())
-            if (proc.returncode != 2 or proc.stderr != UNCAUGHT or
-                    "fini" in proc.stdout):
-                h.failures.append(
-                    "fini suppressed [%s]: %s" % (leg, describe(proc)))
 
         check_src = h.source("check_oom.cid", live_pointer())
         for spec in ("check", "check:len"):

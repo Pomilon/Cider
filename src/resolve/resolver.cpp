@@ -1304,12 +1304,6 @@ void Resolver::resolveLocalAggregates(Program& program, const Scope* moduleScope
             }
             continue;
         }
-        if (auto* fini = dynamic_cast<FiniDecl*>(unwrapped)) {
-            if (fini->body != nullptr) {
-                scanLocalAggregateBlock(*fini->body, moduleScope, module);
-            }
-            continue;
-        }
         if (dynamic_cast<StructDecl*>(unwrapped) != nullptr ||
             dynamic_cast<ClassDecl*>(unwrapped) != nullptr) {
             scanLocalAggregateBodies(*unwrapped, moduleScope, module);
@@ -2450,9 +2444,8 @@ const Scope* Resolver::typeParamScope(const Scope* parent, const std::string& mo
 }
 
 void Resolver::bindPrelude(const Scope* scope, Position pos) {
-    // Transitional v4 state: print and panic are no longer prelude names.
-    // The allocator and fini entries remain until their replacements land,
-    // so the existing allocator and lifetime tests keep their subject.
+    // Transitional v4 state: print, panic, and fini are no longer prelude
+    // names. The allocator entries remain until library allocation lands.
     const Type* none = ctx_.void_();
     const Type* i64 = ctx_.basic(BasicKind::I64);
     const Type* addr = ctx_.pointer(none);
@@ -2463,10 +2456,6 @@ void Resolver::bindPrelude(const Scope* scope, Position pos) {
         d->sig = Signature(std::move(params), ret, Abi::SysV);
         d->isPrelude = true;
     };
-    // 7.10: the finalizer entry. Its link name is the generated function
-    // every program carries; the standard `exit` calls it before its
-    // syscall, and `_start` calls it after main.
-    func("fini_run", {}, none);
     func("alloc", {{i64, false}, {i64, false}}, addr);
     func("realloc", {{addr, false}, {i64, false}, {i64, false}}, addr);
     func("free", {{addr, false}}, none);

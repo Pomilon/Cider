@@ -787,13 +787,6 @@ struct FromImport : Decl {
     void accept(ASTVisitor& v) override;
 };
 
-struct FiniDecl : Decl {
-    std::unique_ptr<Block> body;
-    FiniDecl(Position p, std::unique_ptr<Block> b)
-        : Decl(std::move(p)), body(std::move(b)) {}
-    void accept(ASTVisitor& v) override;
-};
-
 struct DeclStmt : Stmt {
     std::unique_ptr<Decl> decl;
     DeclStmt(Position p, std::unique_ptr<Decl> d)
@@ -906,7 +899,6 @@ struct ASTVisitor {
     virtual void visitExternVar(ExternVar& n);
     virtual void visitImportDecl(ImportDecl& n);
     virtual void visitFromImport(FromImport& n);
-    virtual void visitFiniDecl(FiniDecl& n);
 };
 
 // --- accept: one line per node, each naming its visit ------------------------
@@ -984,7 +976,6 @@ inline void ExternFunc::accept(ASTVisitor& v) { v.visitExternFunc(*this); }
 inline void ExternVar::accept(ASTVisitor& v) { v.visitExternVar(*this); }
 inline void ImportDecl::accept(ASTVisitor& v) { v.visitImportDecl(*this); }
 inline void FromImport::accept(ASTVisitor& v) { v.visitFromImport(*this); }
-inline void FiniDecl::accept(ASTVisitor& v) { v.visitFiniDecl(*this); }
 inline void Program::accept(ASTVisitor& v) { v.visitProgram(*this); }
 
 // --- The default walk: every child, in source order --------------------------
@@ -1212,7 +1203,6 @@ inline void ASTVisitor::visitExternVar(ExternVar& n) {
 }
 inline void ASTVisitor::visitImportDecl(ImportDecl&) {}
 inline void ASTVisitor::visitFromImport(FromImport&) {}
-inline void ASTVisitor::visitFiniDecl(FiniDecl& n) { n.body->accept(*this); }
 
 }  // namespace cider
 

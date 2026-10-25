@@ -1394,7 +1394,6 @@ void testBareReturn() {
 void testExceptions() {
     std::printf("exceptions build landing pads and hidden state\n");
     Lowered r = lower(
-        "fini { }\n"
         "func fail() -> int { throw 7; }\n"
         "func main() -> int {\n"
         "    try { return fail(); } catch e: int { return e; }\n"
@@ -1438,8 +1437,6 @@ void testExceptions() {
     }
     check(landing, "a typed catch begins with a landing read");
     check(landingCall, "a throwing call carries a landing pad");
-    check(find(r.module.get(), "cider_fini_run") != nullptr,
-          "the normal path still builds the fini runner");
 }
 
 // A two-word return fills the terminator's word list: the register row

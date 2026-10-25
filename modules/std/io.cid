@@ -197,9 +197,6 @@ export func read_all() -> *char {
 }
 
 export func exit(code: int) {
-    // 7.10: the standard exit runs the module finalizers first; the
-    // syscall after them is the only way this process ends.
-    fini_run();
     asm {
         "mov rax, 60"
         "mov rdi, {code:q}"

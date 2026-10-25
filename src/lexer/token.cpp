@@ -64,7 +64,6 @@ const char* tokenName(TokenKind kind) {
         case TokenKind::KwFalse: return "false";
         case TokenKind::KwNilPtr: return "nilPtr";
         case TokenKind::KwUninit: return "uninit";
-        case TokenKind::KwFini: return "fini";
         case TokenKind::KwSizeof: return "sizeof";
         case TokenKind::KwAlignof: return "alignof";
         case TokenKind::KwAsm: return "asm";

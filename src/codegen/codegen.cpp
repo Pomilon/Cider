@@ -235,7 +235,6 @@ private:
         std::vector<std::string> order = {
             "cider_alloc", "cider_free", "cider_realloc",
             "cider_itoa_signed", "cider_itoa_unsigned", "cider_ftoa",
-            "cider_fini_run",
             // Transitional: four v3 corpus fixtures still use this one
             // blessed extern. It is removed with the test-library rewrite.
             "putchar",
@@ -425,16 +424,12 @@ private:
         }
         const ir::Function* mainFn = nullptr;
         const ir::Function* startFn = nullptr;
-        const ir::Function* finiFn = nullptr;
         for (const ir::Function& fn : module_.functions) {
             if (fn.name == "main") {
                 mainFn = &fn;
             }
             if (fn.name == "_start") {
                 startFn = &fn;
-            }
-            if (fn.name == "cider_fini_run") {
-                finiFn = &fn;
             }
         }
         if (mainFn != nullptr && startFn != nullptr) {
@@ -504,17 +499,9 @@ private:
             }
             out_ += ".L_cider_entry_ok:\n";
         }
-        // 7.10: finalizers run after main and before the exit syscall, and
-        // main's answer survives them on the stack. The call is aligned
-        // like any other, and rdi is loaded only after every call.
-        if (finiFn != nullptr) {
-            // The answer is in rdi on the exception-aware path, rax otherwise.
-            out_ += module_.usesExceptions ? "  push rdi\n" : "  push rax\n";
-            out_ += "  sub rsp, 8\n";
-            out_ += "  call cider_fini_run\n";
-            out_ += "  add rsp, 8\n";
-            out_ += "  pop rdi\n";
-        } else if (!module_.usesExceptions) {
+        // The entry shim is transitional v3 behavior; v4 removes it.
+        // There is no automatic finalizer call.
+        if (!module_.usesExceptions) {
             out_ += "  mov rdi, rax\n";
         }
         out_ += "  mov eax, 60\n";               // exit(main's answer)
@@ -619,11 +606,6 @@ private:
                        "the uefi runtime has no heap support yet");
                 return false;
             }
-            if (name == "cider_fini_run") {
-                out_ += "cider_fini_run:\n";
-                out_ += "  ret\n";
-                return true;
-            }
             if (name == "cider_heap_fail") {
                 out_ += "cider_heap_fail:\n";
                 out_ += "  ud2\n";
@@ -640,15 +622,6 @@ private:
             }
             // cider_itoa_signed/unsigned and cider_ftoa are pure register
             // routines; they fall through to the shared implementations.
-        }
-        if (name == "cider_fini_run") {
-            // 7.10: the symbol every program carries because the standard
-            // `exit` calls it. With no fini blocks written there is nothing
-            // to run, so the stub is a bare return; a program with blocks
-            // defines the function itself and this text is never emitted.
-            out_ += "cider_fini_run:\n";
-            out_ += "  ret\n";
-            return true;
         }
         // print is a library function in v4. The compiler no longer
         // provides a hidden string-write helper.

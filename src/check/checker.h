@@ -58,9 +58,6 @@ public:
     virtual void onBlockEnter(Block& n) { (void)n; }
     virtual void onBlockExit(Block& n) { (void)n; }
     virtual void onFuncDecl(FuncDecl& n) { (void)n; }
-    // 7.10: one module-level finalizer block. The sink lowers it into the
-    // generated finalizer function.
-    virtual void onFiniDecl(FiniDecl& n) { (void)n; }
     // One instantiated generic function body, emitted under its own link
     // name. The spelling holds parameter names and the template body; the
     // signature holds the substituted parameter and return types. Fires
@@ -263,7 +260,6 @@ public:
     void visitThrowStmt(ThrowStmt& n) override;
     void visitTryStmt(TryStmt& n) override;
     void visitDeferStmt(DeferStmt& n) override;
-    void visitFiniDecl(FiniDecl& n) override;
 
     // Every expression records its type.
     void visitIntLit(IntLit& n) override;
@@ -579,9 +575,6 @@ private:
     std::unordered_set<const Pattern*> deadPatterns_;
     TypeRef funcReturn_;
     bool inFunc_ = false;
-    // 7.10: inside a fini block the storage checks like a function body,
-    // but a return would leave the finalizer half-run, so it refuses.
-    bool inFini_ = false;
     // 4.8.3: an init body may call `super_init(...)`; anywhere else the
     // spelling is an ordinary name.
     bool inInit_ = false;

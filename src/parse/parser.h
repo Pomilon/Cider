@@ -92,7 +92,6 @@ private:
     // spelling (`string` in `std.string`). The path is not a type
     // position, so the keyword is just a name there.
     bool matchModuleSegment(std::string& out);
-    std::unique_ptr<Decl> parseFini();
     // `# experimental(name)`. Returns false for an unknown behaviour, which is a
     // diagnostic naming it rather than a silent no-op.
     bool parseDirective(Program& program);
