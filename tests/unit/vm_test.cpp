@@ -1006,6 +1006,32 @@ void testArrowOperatorVm() {
     cider::vm::VmResult opr = cider::vm::run(*p.module, "");
     check(opr.ok && opr.exitCode == 7,
           "the optimised arrow answers 7: " + opr.error);
+
+    Lowered stored = lower(
+        "struct Inner { var x: int; }\n"
+        "class Ptr { var p: *Inner;\n"
+        "    func operator->() -> *Inner { return this->p; }\n"
+        "}\n"
+        "func main() -> int {\n"
+        "    var i: Inner = Inner { x: 7 };\n"
+        "    var p: Ptr = Ptr { p: &i };\n"
+        "    p->x = 3;\n"
+        "    return p->x;\n"
+        "}\n");
+    check(stored.ok, "a store through operator-> lowers: " + stored.stage);
+    if (stored.ok) {
+        cider::vm::VmResult unrStore =
+            cider::vm::run(*stored.module, "");
+        check(unrStore.ok && unrStore.exitCode == 3,
+              "the unoptimised arrow store answers 3: " + unrStore.error);
+        cider::opt::OptResult storeOpt = cider::opt::run(*stored.module);
+        check(storeOpt.ok, "the arrow store program optimises: " +
+              storeOpt.error);
+        cider::vm::VmResult optStore =
+            cider::vm::run(*stored.module, "");
+        check(optStore.ok && optStore.exitCode == 3,
+              "the optimised arrow store answers 3: " + optStore.error);
+    }
 }
 
 int main() {

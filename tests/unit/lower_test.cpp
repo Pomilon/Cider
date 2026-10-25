@@ -1682,6 +1682,36 @@ void testArrowOperator() {
         }
     }
     check(call, "p->x lowers to the operator arrow call");
+
+    Lowered store = lower(
+        "struct Inner { var x: int; }\n"
+        "class Ptr { var p: *Inner;\n"
+        "    func operator->() -> *Inner { return this->p; }\n"
+        "}\n"
+        "func main() -> int {\n"
+        "    var i: Inner = Inner { x: 7 };\n"
+        "    var p: Ptr = Ptr { p: &i };\n"
+        "    p->x = 9;\n"
+        "    return p->x;\n"
+        "}\n");
+    check(store.ok, "a store through operator-> lowers: " + store.stage);
+    if (!store.ok) {
+        return;
+    }
+    bool storeCall = false;
+    const cider::ir::Function* storeMain =
+        find(store.module.get(), "main");
+    if (storeMain != nullptr) {
+        for (const cider::ir::Block& block : storeMain->blocks) {
+            for (const cider::ir::Instr& instr : block.body) {
+                if (instr.op == cider::ir::Op::Call &&
+                    instr.callee == "Ptr__operator_arrow") {
+                    storeCall = true;
+                }
+            }
+        }
+    }
+    check(storeCall, "a store through operator-> keeps the arrow call");
 }
 
 }  // namespace

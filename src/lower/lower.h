@@ -604,6 +604,11 @@ public:
     std::string forwardFunction(const std::string& link, const Signature& sig,
                                 Position pos);
     std::vector<ir::Value> lowerField(const Field& n);
+    // An overloaded arrow calls operator-> and resolves the place named by
+    // its returned pointer. Reads and writes share this path.
+    bool arrowPlace(const Field& n, Place& base);
+    // Apply one field offset to an already-resolved base place.
+    bool resolveFieldPlace(const Field& n, Place sub, Place& out);
     // The member operation once the receiver is a place. Split out so an
     // overloaded arrow can call operator-> and feed the returned pointer in.
     std::vector<ir::Value> lowerFieldAt(const Field& n, Place base);

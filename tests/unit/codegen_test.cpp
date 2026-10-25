@@ -3059,6 +3059,21 @@ void testArrowOperatorNative() {
         "}\n",
         signaled);
     check(!signaled && code == 7, "a smart pointer arrow answers 7");
+
+    code = runCode(
+        "struct Inner { var x: int; }\n"
+        "class Ptr { var p: *Inner;\n"
+        "    func operator->() -> *Inner { return this->p; }\n"
+        "}\n"
+        "func main() -> int {\n"
+        "    var i: Inner = Inner { x: 7 };\n"
+        "    var p: Ptr = Ptr { p: &i };\n"
+        "    p->x = 3;\n"
+        "    return p->x;\n"
+        "}\n",
+        signaled);
+    check(!signaled && code == 3,
+          "a store through a smart pointer arrow answers 3");
 }
 
 int main() {

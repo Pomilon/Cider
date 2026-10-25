@@ -2631,6 +2631,19 @@ void testArrowOperator() {
     Checked good = check(smart);
     check(good.ok, "a member arrow operator checks: " + good.stage);
 
+    Checked store = check(
+        "struct Inner { var x: int; }\n"
+        "class Ptr { var p: *Inner;\n"
+        "    func operator->() -> *Inner { return this->p; }\n"
+        "}\n"
+        "func main() -> int {\n"
+        "    var i: Inner = Inner { x: 7 };\n"
+        "    var p: Ptr = Ptr { p: &i };\n"
+        "    p->x = 9;\n"
+        "    return p->x;\n"
+        "}\n");
+    check(store.ok, "a store through operator-> checks: " + store.stage);
+
     Checked builtin = check(
         "struct S { var x: int; }\n"
         "func main() -> int {\n"

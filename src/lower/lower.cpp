@@ -1168,6 +1168,38 @@ bool Lowerer::needsSret(const Type* ret) {
     return wordCount(ref) > static_cast<int>(kTwoWords);
 }
 
+bool Lowerer::resolveFieldPlace(const Field& field, Place sub, Place& out) {
+    if (sub.type.isError() || (sub.type.type->kind() != Kind::Struct &&
+                               sub.type.type->kind() != Kind::Union &&
+                               sub.type.type->kind() != Kind::Class)) {
+        return false;
+    }
+    std::optional<DeclId> id = sub.type.type->decl();
+    if (!id.has_value()) {
+        return false;
+    }
+    int64_t fieldOff = resolver_.fieldOffset(*id, field.name);
+    TypeRef fieldType = resolver_.fieldType(*id, field.name);
+    if (fieldOff < 0 || fieldType.isError()) {
+        return false;
+    }
+    if (sub.type.type->kind() == Kind::Union) {
+        int64_t index = resolver_.unionMemberIndex(*id, field.name);
+        int64_t tagOff = resolver_.unionTagOffset(*id);
+        if (index < 0 || tagOff < 0) {
+            return false;
+        }
+        TagWrite tag;
+        tag.off = sub.off + tagOff;
+        tag.index = index;
+        sub.tagWrites.push_back(tag);
+    }
+    sub.off += fieldOff;
+    sub.type = fieldType;
+    out = std::move(sub);
+    return true;
+}
+
 bool Lowerer::resolvePlace(const Expr* expr, Place& out) {
     if (const auto* ident = dynamic_cast<const Ident*>(expr)) {
         uint64_t depth = static_cast<uint64_t>(locals_.size());
@@ -1196,6 +1228,13 @@ bool Lowerer::resolvePlace(const Expr* expr, Place& out) {
         return false;
     }
     if (const auto* field = dynamic_cast<const Field*>(expr)) {
+        if (field->isArrow && checker_.isOperatorArrow(field)) {
+            Place base;
+            if (!arrowPlace(*field, base)) {
+                return false;
+            }
+            return resolveFieldPlace(*field, std::move(base), out);
+        }
         // `lib.gB`: the object names a module, so the member resolves in
         // the defining scope and the place is its global. Anything but a
         // global variable falls through to the paths below (calls own
@@ -1251,35 +1290,7 @@ bool Lowerer::resolvePlace(const Expr* expr, Place& out) {
                 return false;
             }
         }
-        if (sub.type.isError() || (sub.type.type->kind() != Kind::Struct &&
-                                   sub.type.type->kind() != Kind::Union &&
-                                   sub.type.type->kind() != Kind::Class)) {
-            return false;
-        }
-        std::optional<DeclId> id = sub.type.type->decl();
-        if (!id.has_value()) {
-            return false;
-        }
-        int64_t fieldOff = resolver_.fieldOffset(*id, field->name);
-        TypeRef fieldType = resolver_.fieldType(*id, field->name);
-        if (fieldOff < 0 || fieldType.isError()) {
-            return false;
-        }
-        if (sub.type.type->kind() == Kind::Union) {
-            int64_t index = resolver_.unionMemberIndex(*id, field->name);
-            int64_t tagOff = resolver_.unionTagOffset(*id);
-            if (index < 0 || tagOff < 0) {
-                return false;
-            }
-            TagWrite tag;
-            tag.off = sub.off + tagOff;
-            tag.index = index;
-            sub.tagWrites.push_back(tag);
-        }
-        sub.off += fieldOff;
-        sub.type = fieldType;
-        out = std::move(sub);
-        return true;
+        return resolveFieldPlace(*field, std::move(sub), out);
     }
     if (const auto* deref = dynamic_cast<const Unary*>(expr)) {
         // `(*p).f`: the pointer lowers to one address word and everything
@@ -4449,32 +4460,41 @@ bool Lowerer::loadBitField(Position pos, const Place& unit, TypeRef unitType,
     return true;
 }
 
+bool Lowerer::arrowPlace(const Field& n, Place& base) {
+    auto* deref = dynamic_cast<Unary*>(n.object.get());
+    if (deref == nullptr || deref->op != UnOp::Deref) {
+        refuse(n.pos, "this field access");
+        return false;
+    }
+    std::unique_ptr<Expr> receiver = std::move(deref->operand);
+    std::vector<std::unique_ptr<TypeExpr>> noTypes;
+    std::vector<std::unique_ptr<Expr>> noArgs;
+    Call call(n.pos,
+              std::make_unique<Field>(n.pos, std::move(receiver),
+                                      "operator_arrow"),
+              std::move(noTypes), std::move(noArgs));
+    std::vector<ir::Value> ptr = lowerCallWords(call);
+    auto* field = static_cast<Field*>(call.callee.get());
+    deref->operand = std::move(field->object);
+    if (failed_ || ptr.size() != kOneWord) {
+        refuse(n.pos, "this field access");
+        return false;
+    }
+    Place out;
+    out.type = checker_.operatorArrowTarget(&n);
+    out.off = 0;
+    out.hasIndirect = true;
+    out.indirect = ptr[0];
+    base = std::move(out);
+    return true;
+}
+
 std::vector<ir::Value> Lowerer::lowerField(const Field& n) {
     if (n.isArrow && checker_.isOperatorArrow(&n)) {
-        auto* deref = dynamic_cast<Unary*>(n.object.get());
-        if (deref == nullptr || deref->op != UnOp::Deref) {
-            refuse(n.pos, "this field access");
-            return {undefined()};
-        }
-        std::unique_ptr<Expr> receiver = std::move(deref->operand);
-        std::vector<std::unique_ptr<TypeExpr>> noTypes;
-        std::vector<std::unique_ptr<Expr>> noArgs;
-        Call call(n.pos,
-                  std::make_unique<Field>(n.pos, std::move(receiver),
-                                          "operator_arrow"),
-                  std::move(noTypes), std::move(noArgs));
-        std::vector<ir::Value> ptr = lowerCallWords(call);
-        auto* field = static_cast<Field*>(call.callee.get());
-        deref->operand = std::move(field->object);
-        if (failed_ || ptr.size() != kOneWord) {
-            refuse(n.pos, "this field access");
-            return {undefined()};
-        }
         Place base;
-        base.type = checker_.operatorArrowTarget(&n);
-        base.off = 0;
-        base.hasIndirect = true;
-        base.indirect = ptr[0];
+        if (!arrowPlace(n, base)) {
+            return {undefined()};
+        }
         return lowerFieldAt(n, std::move(base));
     }
     // `lib.gB`: the object names a module, so the member is a global in
