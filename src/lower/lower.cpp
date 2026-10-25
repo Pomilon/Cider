@@ -9724,9 +9724,24 @@ std::vector<ir::Value> Lowerer::lowerOperatorCall(Index& n) {
     return words;
 }
 
+std::vector<ir::Value> Lowerer::lowerOperatorCall(Call& n) {
+    Call call(n.pos,
+              std::make_unique<Field>(n.pos, std::move(n.callee),
+                                      "operator_call"),
+              {}, std::move(n.args));
+    std::vector<ir::Value> words = lowerCallWords(call);
+    auto* field = static_cast<Field*>(call.callee.get());
+    n.callee = std::move(field->object);
+    n.args = std::move(call.args);
+    return words;
+}
+
 std::vector<ir::Value> Lowerer::lowerCallWords(Call& n) {
     if (failed_) {
         return {undefined()};
+    }
+    if (checker_.isOperatorCall(&n)) {
+        return lowerOperatorCall(n);
     }
     // `v.hasI()`: the tag compared to the member's index, answered as one
     // boolean word. The checker proved the shape; the member lookup repeats

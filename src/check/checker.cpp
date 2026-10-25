@@ -93,6 +93,10 @@ bool Checker::isOperatorIndex(const Index* expr) const {
     return operatorIndexes_.find(expr) != operatorIndexes_.end();
 }
 
+bool Checker::isOperatorCall(const Call* expr) const {
+    return operatorCalls_.find(expr) != operatorCalls_.end();
+}
+
 std::optional<DeclId> Checker::specOf(const Call* call,
                                               const std::optional<DeclId>& ctx) const {
     std::string key;
@@ -1264,6 +1268,10 @@ void Checker::visitFuncDecl(FuncDecl& n) {
             fail(n.pos, "operator '[]' must be a member");
             return;
         }
+        if (n.name == "operator_call") {
+            fail(n.pos, "operator '()' must be a member");
+            return;
+        }
         const bool unary =
             n.name == "operator_neg" || n.name == "operator_bitnot";
         if (unary && sig.arity() != 1) {
@@ -1896,6 +1904,7 @@ void Checker::checkMethods(DeclId id, Kind kind, std::vector<MethodDecl>& method
         }
         if (isOperatorName(method.name) && !unaryOperator &&
             method.name != "operator_index" &&
+            method.name != "operator_call" &&
             sig->arity() != kOneParameter) {
             fail(method.pos,
                  "a binary operator takes exactly one parameter in a member declaration");
@@ -4572,6 +4581,35 @@ TypeRef Checker::checkCall(Call& expr) {
         if (kind == Kind::FunctionPtr || kind == Kind::Closure) {
             sig = *callee.type->signature();
             hasSig = true;
+        }
+        if (kind == Kind::Struct || kind == Kind::Class) {
+            // `v(args)`: the object is callable only through its member
+            // `operator()`. There is no built-in call rule for a nominal
+            // value, and no free fallback: `()` is member-only.
+            std::optional<DeclId> id = callee.type->decl();
+            const Signature* callSig =
+                id.has_value() ? resolver_.methodSig(*id, "operator_call")
+                               : nullptr;
+            if (callSig == nullptr || expr.args.size() != callSig->arity()) {
+                fail(expr.pos, "no matching operator '()'");
+                return errorRef();
+            }
+            for (uint64_t i = 0; i < static_cast<uint64_t>(expr.args.size()); ++i) {
+                TypeRef want{callSig->parameters()[i].type};
+                TypeRef got = checkExpr(expr.args[i].get(), want);
+                if (got.isError()) {
+                    return errorRef();
+                }
+                if (got != want) {
+                    fail(expr.pos, "no matching operator '()'");
+                    return errorRef();
+                }
+            }
+            operatorCalls_.insert(&expr);
+            const Type* ret = callSig->returnType() != nullptr
+                                  ? callSig->returnType()
+                                  : ctx_.void_();
+            return TypeRef{ret};
         }
     }
     if (!hasSig) {

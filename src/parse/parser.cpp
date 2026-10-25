@@ -401,6 +401,16 @@ bool Parser::parseOperatorName(std::string& out) {
             }
             out = "operator_index";
             return true;
+        // `()` is the call operator: a member-only spelling made of two
+        // tokens. Its parameter list follows the spelling as usual.
+        case TokenKind::LParen:
+            advance();
+            if (!match(TokenKind::RParen)) {
+                fail(start, "a call operator is spelled '()'");
+                return false;
+            }
+            out = "operator_call";
+            return true;
         case TokenKind::Plus: out = "operator_add"; break;
         case TokenKind::Minus: out = "operator_sub"; break;
         case TokenKind::Star: out = "operator_mul"; break;

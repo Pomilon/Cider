@@ -270,6 +270,21 @@ void testOperatorNames() {
     }
 
     ok = false;
+    std::unique_ptr<cider::Program> call = parse(
+        "struct F { var x: int;\n"
+        "    func operator()(i: int) -> int { return i; }\n"
+        "}\n",
+        ok);
+    check(ok, "a member call operator parses");
+    if (call != nullptr && !call->decls.empty()) {
+        const cider::StructDecl& s =
+            static_cast<const cider::StructDecl&>(*call->decls[0]);
+        check(!s.methods.empty() &&
+                  s.methods[0].name == "operator_call",
+              "the parser stores the canonical call name");
+    }
+
+    ok = false;
     parse("func operator&&(a: Vec, b: Vec) -> Vec { return a; }\n", ok);
     check(!ok, "short-circuit operators cannot be overloaded");
 

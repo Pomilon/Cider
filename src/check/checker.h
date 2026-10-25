@@ -174,6 +174,7 @@ public:
     bool isMemberOperator(const Binary* expr) const;
     bool isMemberOperator(const Unary* expr) const;
     bool isOperatorIndex(const Index* expr) const;
+    bool isOperatorCall(const Call* expr) const;
     const std::vector<CheckError>& errors() const { return errors_; }
     size_t errorCount() const { return errors_.size(); }
     // The specialization a generic call instantiated, by call site and
@@ -481,6 +482,7 @@ private:
     std::unordered_set<const Binary*> memberOperatorCalls_;
     std::unordered_set<const Unary*> memberUnaryOperatorCalls_;
     std::unordered_set<const Index*> operatorIndexes_;
+    std::unordered_set<const Call*> operatorCalls_;
     // Types resolve here rather than at module scope during generic walks,
     // where the template's parameters are bound.
     const resolve::Scope* typeScope_ = nullptr;

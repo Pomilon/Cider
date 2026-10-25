@@ -653,6 +653,17 @@ void testOperatorOverloadsNative() {
         "}\n",
         signaled);
     check(!signaled && code == 3, "a struct member operator answers 3");
+
+    code = runCode(
+        "struct Adder { var base: int;\n"
+        "    func operator()(x: int) -> int { return (*self).base + x; }\n"
+        "}\n"
+        "func main() -> int {\n"
+        "    var a: Adder = Adder { base: 4 };\n"
+        "    return a(6);\n"
+        "}\n",
+        signaled);
+    check(!signaled && code == 10, "a struct call operator answers 10");
 }
 
 void testTrap() {

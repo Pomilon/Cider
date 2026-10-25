@@ -1511,6 +1511,34 @@ void testOperators() {
     }
     check(memberCall, "a + b lowers to the member operator call");
     check(memberUnary, "-c lowers to the member unary operator call");
+
+    Lowered callOp = lower(
+        "struct Adder { var base: int;\n"
+        "    func operator()(x: int) -> int { return (*self).base + x; }\n"
+        "}\n"
+        "func main() -> int {\n"
+        "    var a: Adder = Adder { base: 4 };\n"
+        "    return a(6);\n"
+        "}\n");
+    check(callOp.ok, "a call operator program lowers: " + callOp.stage);
+    if (!callOp.ok) {
+        return;
+    }
+    check(find(callOp.module.get(), "Adder__operator_call") != nullptr,
+          "the call operator emits a method");
+    bool callOpCall = false;
+    const cider::ir::Function* callMain = find(callOp.module.get(), "main");
+    if (callMain != nullptr) {
+        for (const cider::ir::Block& block : callMain->blocks) {
+            for (const cider::ir::Instr& instr : block.body) {
+                if (instr.op == cider::ir::Op::Call &&
+                    instr.callee == "Adder__operator_call") {
+                    callOpCall = true;
+                }
+            }
+        }
+    }
+    check(callOpCall, "a(6) lowers to the call operator");
 }
 
 void testMultiWordReturn() {

@@ -423,6 +423,44 @@ void testOperatorOverloads() {
         "}\n");
     check(!memberArity.ok && memberArity.stage == "check",
           "a member binary operator takes exactly one parameter");
+
+    Checked call = check(
+        "struct Adder { var base: int;\n"
+        "    func operator()(x: int) -> int { return (*self).base + x; }\n"
+        "}\n"
+        "func main() -> int {\n"
+        "    var a: Adder = Adder { base: 4 };\n"
+        "    return a(6);\n"
+        "}\n");
+    check(call.ok, "a member call operator checks: " + call.stage);
+
+    Checked callMismatch = check(
+        "struct Adder { var base: int;\n"
+        "    func operator()(x: int) -> int { return (*self).base + x; }\n"
+        "}\n"
+        "func main() -> int {\n"
+        "    var a: Adder = Adder { base: 4 };\n"
+        "    return a(true);\n"
+        "}\n");
+    check(!callMismatch.ok && callMismatch.stage == "check",
+          "a call operator needs exact argument types");
+
+    Checked callArity = check(
+        "struct Adder { var base: int;\n"
+        "    func operator()(x: int) -> int { return (*self).base + x; }\n"
+        "}\n"
+        "func main() -> int {\n"
+        "    var a: Adder = Adder { base: 4 };\n"
+        "    return a(1, 2);\n"
+        "}\n");
+    check(!callArity.ok && callArity.stage == "check",
+          "a call operator call needs the declared arity");
+
+    Checked freeCall = check(
+        "struct Adder { var base: int; }\n"
+        "func operator()(a: Adder, x: int) -> int { return a.base + x; }\n");
+    check(!freeCall.ok && freeCall.stage == "check",
+          "a call operator must be a member");
 }
 
 void testInitAssign() {

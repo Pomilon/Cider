@@ -910,6 +910,27 @@ void testOperatorOverloadsVm() {
     cider::vm::VmResult mopr = cider::vm::run(*member.module, "");
     check(mopr.ok && mopr.exitCode == 3,
           "the optimised member operator answers 3: " + mopr.error);
+
+    Lowered callOp = lower(
+        "struct Adder { var base: int;\n"
+        "    func operator()(x: int) -> int { return (*self).base + x; }\n"
+        "}\n"
+        "func main() -> int {\n"
+        "    var a: Adder = Adder { base: 4 };\n"
+        "    return a(6);\n"
+        "}\n");
+    check(callOp.ok, "a call operator program lowers: " + callOp.stage);
+    if (!callOp.ok) {
+        return;
+    }
+    cider::vm::VmResult cunr = cider::vm::run(*callOp.module, "");
+    check(cunr.ok && cunr.exitCode == 10,
+          "the unoptimised call operator answers 10: " + cunr.error);
+    cider::opt::OptResult cores = cider::opt::run(*callOp.module);
+    check(cores.ok, "the call operator program optimises: " + cores.error);
+    cider::vm::VmResult copr = cider::vm::run(*callOp.module, "");
+    check(copr.ok && copr.exitCode == 10,
+          "the optimised call operator answers 10: " + copr.error);
 }
 
 }  // namespace
