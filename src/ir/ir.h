@@ -78,7 +78,6 @@ enum class TrapReason {
     Null,
     NilInterface,
     NilFunctionPointer,
-    UncaughtException,
     Explicit,
 };
 
@@ -104,24 +103,16 @@ enum class Op {
     Load, Store, Alloca, DataAddr, FnAddr,
     Extract, Insert, Gep,
     Call, Cast, Trap, Asm,
-    // Landing reads the exception slot into its result words. It is the only
-    // instruction that reads that slot (IR.md §5); a throw reaches it by an
-    // ordinary branch through the call's landing pad.
-    Landing,
 };
 
 const char* opName(Op op);
 
-// A `call` carries its landing pad rather than `throw` being an instruction:
-// unwinding is then the same machinery as every other branch, and a throw is a
-// branch to a block the programmer named (IR.md §5).
 struct CallInfo {
     bool indirect = false;
     // 8.4: the callee's convention, so a call into or out of msabi code picks
     // the matching argument row and shadow space. Set by the lowerer from the
     // resolved signature; the VM reads words, not registers, and ignores it.
     bool msabi = false;
-    std::optional<uint32_t> landingPad;
 };
 
 // One argument of a call. Its own type rather than signature.h's Parameter,
@@ -178,11 +169,6 @@ struct Instr {
     std::vector<Argument> arguments; // Call
     CallInfo call;                   // Call
     TrapReason reason = TrapReason::Explicit;  // Trap
-    // Landing: the thrown type this landing expects. The catch dispatch
-    // compares it before branching here; the word stays in the instruction
-    // so a dump and a structural check can name the type without a side
-    // table.
-    uint32_t typeId = 0;
     std::string asmText;             // Asm
     std::vector<std::string> asmNames;
 };
@@ -241,11 +227,6 @@ struct Function {
     bool isExtern = false;
     std::vector<Block> blocks;
     Position loc{"", 1, 1};
-
-    // Set by lowering, read by the structural check and by codegen: a call is
-    // mayTrap only if the callee can throw, which is known here rather than
-    // guessed later.
-    bool canThrow = false;
 };
 
 // A module global: its link label, its type, and its initial bytes. The
@@ -298,18 +279,6 @@ struct Module {
     std::vector<Function> functions;
     std::vector<Global> globals;
     std::vector<Rodata> rodata;
-
-    // Exception transport (IR.md §5). The tree is silent unless the program
-    // uses `try`/`throw`; then lowering lays down these three hidden globals
-    // and names them here. The flag says a throw is in flight, the type is
-    // the thrown type's id, and the value is the bounded payload slot.
-    bool usesExceptions = false;
-    std::string exceptionFlag;
-    std::string exceptionType;
-    std::string exceptionValue;
-    // One word per payload word. The slot is fixed: throwing a value wider
-    // than this is a compile-time rejection, never a growth.
-    static constexpr uint32_t kExceptionWords = 8;
 };
 
 // A human-readable dump of one module, for the `ir` subcommand and for

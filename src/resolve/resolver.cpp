@@ -1390,16 +1390,6 @@ void Resolver::scanLocalAggregateStmt(Stmt& stmt, const Scope* parent,
         }
         return;
     }
-    if (auto* attempt = dynamic_cast<TryStmt*>(&stmt)) {
-        if (attempt->body != nullptr) {
-            scanLocalAggregateBlock(*attempt->body, parent, module);
-        }
-        for (const std::unique_ptr<CatchClause>& clause : attempt->catches) {
-            if (clause->body != nullptr) {
-                scanLocalAggregateBlock(*clause->body, parent, module);
-            }
-        }
-    }
 }
 
 void Resolver::scanLocalAggregateBlock(Block& block, const Scope* parent,

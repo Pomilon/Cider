@@ -298,16 +298,6 @@ struct Runner {
     // run can end in a signal instead of a refusal.
     int faulted = 0;
     uint64_t steps = 0;
-    // Exception transport addresses, resolved once after the globals are laid
-    // down. A landing pad branch asks the flag at the current call site; the
-    // flag is a program global, not interpreter state.
-    bool usesExceptions = false;
-    int64_t exceptionFlagAddr = -1;
-    int64_t exceptionValueAddr = -1;
-    // A call that finds the flag set asks the block loop to continue at its
-    // landing pad instead of falling through to the call's terminator.
-    int64_t pendingJump = -1;
-
     bool refuse(Position pos, const std::string& message) {
         out.ok = false;
         out.error = message;
@@ -342,19 +332,6 @@ struct Runner {
             return false;
         }
         return die(kSigIll);
-    }
-
-    // The flag lives in program memory, so a callee's store is visible here
-    // when it returns. The global is laid down before the program starts;
-    // an unresolved address is a malformed module, not a program value.
-    bool exceptionFlagSet() {
-        if (!usesExceptions || exceptionFlagAddr < 0) {
-            return false;
-        }
-        bool ok = false;
-        uint64_t bits = loadBytes(exceptionFlagAddr, layout::kSizePointer,
-                                  Position{}, ok);
-        return ok && bits != 0;
     }
 
     int64_t read(const Value& value) {
@@ -1882,15 +1859,6 @@ struct Runner {
             if (programDone) {
                 return false;
             }
-            // An unwinding callee returns no answer words: its frame runs
-            // its defers and returns with the flag still raised, and the
-            // caller takes the landing pad before reading a result. Check
-            // that jump before validating the width, because the landing is
-            // the branch that makes the missing words unobservable.
-            if (instr.call.landingPad.has_value() && exceptionFlagSet()) {
-                pendingJump = *instr.call.landingPad;
-                return true;
-            }
             if (answer.size() != instr.results.size()) {
                 return refuse(instr.loc, "vm call answers with the wrong width");
             }
@@ -1962,14 +1930,12 @@ struct Runner {
         // is the entry — the same assumption the emitter's _start
         // trampoline makes when it falls into the function's first block.
         size_t current = kZeroCell;
-        pendingJump = -1;
         for (;;) {
             if (++steps > kStepLimit) {
                 refuse(fn.loc, "vm step limit exhausted");
                 return false;
             }
             const Block& block = fn.blocks[current];
-            bool jumped = false;
             for (const Instr& instr : block.body) {
                 if (programDone) {
                     // A host call inside the block ended the program: the
@@ -1980,20 +1946,6 @@ struct Runner {
                 if (!step(instr)) {
                     return false;
                 }
-                if (pendingJump >= 0) {
-                    auto at = blockAt.find(static_cast<uint32_t>(pendingJump));
-                    if (at == blockAt.end()) {
-                        refuse(instr.loc, "vm landing names no block");
-                        return false;
-                    }
-                    current = at->second;
-                    pendingJump = -1;
-                    jumped = true;
-                    break;
-                }
-            }
-            if (jumped) {
-                continue;
             }
             if (programDone) {
                 // The last instruction of the block ended the program: its
@@ -2317,30 +2269,10 @@ struct Runner {
                 return addressOf(instr);
             case Op::FnAddr:
                 return tagOf(instr);
-            case Op::Landing: {
-                if (!usesExceptions || exceptionValueAddr < 0) {
-                    return refuse(instr.loc, "vm landing has no exception slot");
-                }
-                for (uint64_t i = 0; i < instr.results.size(); ++i) {
-                    bool ok = false;
-                    uint64_t bits = loadBytes(
-                        exceptionValueAddr +
-                            static_cast<int64_t>(i) * layout::kSizePointer,
-                        layout::kSizePointer, instr.loc, ok);
-                    if (!ok) {
-                        return die(faulted);
-                    }
-                    write(instr.results[i], static_cast<int64_t>(bits));
-                }
-                return true;
-            }
             case Op::Call: {
                 std::vector<Value> mutableResults = instr.results;
                 if (!call(instr, mutableResults)) {
                     return false;
-                }
-                if (instr.call.landingPad.has_value() && exceptionFlagSet()) {
-                    pendingJump = *instr.call.landingPad;
                 }
                 return true;
             }
@@ -2508,19 +2440,6 @@ static VmResult runProgram(const ir::Module& module,
         }
         run.labels[global.label] = at;
     }
-    // Exception transport is three ordinary globals, so the interpreter
-    // resolves them once and reads them like any other program memory.
-    if (module.usesExceptions) {
-        auto flag = run.labels.find(module.exceptionFlag);
-        auto value = run.labels.find(module.exceptionValue);
-        if (flag == run.labels.end() || value == run.labels.end()) {
-            run.refuse(fn->loc, "vm cannot resolve the exception slot");
-            return run.out;
-        }
-        run.usesExceptions = true;
-        run.exceptionFlagAddr = flag->second;
-        run.exceptionValueAddr = value->second;
-    }
     // Everything the helpers hand out starts past the last global, and the
     // frames a call pushes grow from there: neither region rewinds, so an
     // address stays live for the rest of the run.
@@ -2555,13 +2474,6 @@ static VmResult runProgram(const ir::Module& module,
         return run.out;
     }
     if (run.programDone) {
-        return run.out;
-    }
-    // An exception still flagged when the entry returns is uncaught.
-    if (run.usesExceptions && run.exceptionFlagSet()) {
-        run.out.ok = true;
-        run.out.exitCode = 2;
-        run.out.stderrText += ir::trapMessage(ir::TrapReason::UncaughtException);
         return run.out;
     }
     int64_t bits = answered.empty() ? 0 : answered[0];

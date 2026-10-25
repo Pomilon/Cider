@@ -237,16 +237,6 @@ ir::CmpOp cmpFor(BinOp op, bool isSigned) {
     return isSigned ? ir::CmpOp::Ge : ir::CmpOp::Uge;
 }
 
-// A source-level scan, used only to decide whether exception machinery is
-// needed at all. Programs that never spell try or throw keep the exact image
-// they had before this feature. The walk is the AST's own default visit; it
-// records one bit and never types or lowers anything.
-struct ExceptionScan : ASTVisitor {
-    bool found = false;
-    void visitTryStmt(TryStmt&) override { found = true; }
-    void visitThrowStmt(ThrowStmt&) override { found = true; }
-};
-
 }  // namespace
 
 Lowerer::Lowerer(TypeContext& ctx, resolve::Resolver& resolver, check::Checker& checker,
@@ -413,16 +403,6 @@ bool Lowerer::lowerInto(const std::string& name, Program& program) {
     // walk emits reads it.
     enabled_ = true;
     wrap_ = program.wrap;
-    if (!usesExceptions_) {
-        ExceptionScan scan;
-        program.accept(scan);
-        if (scan.found) {
-            usesExceptions_ = true;
-        }
-    }
-    if (usesExceptions_) {
-        ensureExceptionSupport();
-    }
     checker_.setSink(this);
     // One walk: the checker visits each node once and calls into here as it
     // types, so nothing in this file visits the AST.
@@ -767,7 +747,6 @@ std::string Lowerer::emitDestroyChain(DeclId declarer, Position pos) {
     }
     recordParamClasses();
     if (!failed_) {
-        function_->canThrow = true;
         ir::Terminator fret;
         fret.term = ir::Term::Ret;
         fret.loc = pos;
@@ -1081,7 +1060,6 @@ std::string Lowerer::emitIfaceAdapter(DeclId concrete, const std::string& method
     }
     recordParamClasses();
     if (!failed_) {
-        function_->canThrow = true;
         ir::Terminator fret;
         fret.term = ir::Term::Ret;
         fret.loc = pos;
@@ -3065,497 +3043,12 @@ void Lowerer::runDefers(uint64_t from) {
         uint64_t pending = static_cast<uint64_t>(bodies.size());
         for (uint64_t j = pending; j > 0;) {
             --j;
-            uint64_t savedFloor = deferFloor_;
-            deferFloor_ = i + 1;
             bodies[j]->accept(checker_);
-            deferFloor_ = savedFloor;
             if (failed_) {
                 return;
             }
         }
     }
-}
-
-void Lowerer::ensureExceptionSupport() {
-    if (exceptionSupportReady_) {
-        return;
-    }
-    if (module_ == nullptr) {
-        refuse(Position{"", 1, 1}, "exception support outside a module");
-        return;
-    }
-    exceptionSupportReady_ = true;
-    module_->usesExceptions = true;
-    module_->exceptionFlag = "cider_exc_flag";
-    module_->exceptionType = "cider_exc_type";
-    module_->exceptionValue = "cider_exc_value";
-
-    TypeRef word{ctx_.basic(BasicKind::I64)};
-    ir::Global flag;
-    flag.label = module_->exceptionFlag;
-    flag.type = word;
-    module_->globals.push_back(std::move(flag));
-
-    ir::Global type;
-    type.label = module_->exceptionType;
-    type.type = word;
-    module_->globals.push_back(std::move(type));
-
-    ir::Global value;
-    value.label = module_->exceptionValue;
-    value.type = word;
-    value.initWords.assign(ir::Module::kExceptionWords, 0);
-    module_->globals.push_back(std::move(value));
-
-    // The one operation every throw shares: set the flag. The payload and
-    // type are ordinary stores at the throw site, so a rethrow (`throw;`)
-    // can leave both untouched and only raise the flag again.
-    ir::Function raise;
-    raise.name = "cider_exc_raise";
-    raise.signature = Signature({}, ctx_.void_(), Abi::SysV);
-    raise.loc = Position{"<exception>", 1, 1};
-    ir::Block block;
-    block.label = 0;
-    block.loc = raise.loc;
-    ir::Value one;
-    one.id = 1;
-    one.width = ir::IRType::I64;
-    one.type = word;
-    ir::Instr constant;
-    constant.op = ir::Op::Const;
-    constant.width = ir::IRType::I64;
-    constant.type = word;
-    constant.loc = raise.loc;
-    constant.isPure = true;
-    constant.constantBits = 1;
-    constant.constantText = "1";
-    constant.results.push_back(one);
-    block.body.push_back(std::move(constant));
-    ir::Instr set;
-    set.op = ir::Op::Store;
-    set.width = ir::IRType::I64;
-    set.type = word;
-    set.loc = raise.loc;
-    set.globalLabel = module_->exceptionFlag;
-    set.storedValue = one;
-    block.body.push_back(std::move(set));
-    block.term.term = ir::Term::Ret;
-    block.term.loc = raise.loc;
-    raise.blocks.push_back(std::move(block));
-    module_->functions.push_back(std::move(raise));
-}
-
-uint32_t Lowerer::exceptionTypeId(TypeRef type, Position pos) {
-    if (type.isError() || type.type == nullptr) {
-        refuse(pos, "an exception type");
-        return 0;
-    }
-    auto found = exceptionTypeIds_.find(type.type);
-    if (found != exceptionTypeIds_.end()) {
-        return found->second;
-    }
-    uint32_t id = nextExceptionTypeId_++;
-    exceptionTypeIds_.emplace(type.type, id);
-    return id;
-}
-
-void Lowerer::storeExceptionFlag(int64_t value, Position pos) {
-    ensureExceptionSupport();
-    if (failed_) {
-        return;
-    }
-    TypeRef word{ctx_.basic(BasicKind::I64)};
-    ir::Value bit = constantI64(value, word, pos);
-    if (failed_) {
-        return;
-    }
-    ir::Instr store;
-    store.op = ir::Op::Store;
-    store.width = ir::IRType::I64;
-    store.type = word;
-    store.loc = pos;
-    store.globalLabel = module_->exceptionFlag;
-    store.storedValue = bit;
-    emit(std::move(store));
-}
-
-void Lowerer::onThrowStmt(ThrowStmt& n) {
-    if (failed_ || !enabled_ || function_ == nullptr) {
-        return;
-    }
-    ensureExceptionSupport();
-    if (failed_) {
-        return;
-    }
-    module_->usesExceptions = true;
-    function_->canThrow = true;
-
-    if (n.value != nullptr) {
-        std::vector<ir::Value> words = lowerWords(n.value.get());
-        if (failed_) {
-            return;
-        }
-        TypeRef type = checker_.typeOf(n.value.get());
-        int count = wordCount(type);
-        if (count < 1 ||
-            count > static_cast<int>(ir::Module::kExceptionWords)) {
-            refuse(n.pos, "an exception value wider than the exception slot");
-            return;
-        }
-        for (int i = 0; i < count; ++i) {
-            TypeRef part = wordType(type, static_cast<uint64_t>(i));
-            ir::Instr store;
-            store.op = ir::Op::Store;
-            store.width = widthOf(part, n.pos);
-            store.type = part;
-            store.loc = n.pos;
-            store.globalLabel = module_->exceptionValue;
-            store.displacement = static_cast<int64_t>(i) * 8;
-            store.storedValue = words[static_cast<size_t>(i)];
-            emit(std::move(store));
-            if (failed_) {
-                return;
-            }
-        }
-        uint32_t id = exceptionTypeId(type, n.pos);
-        if (failed_) {
-            return;
-        }
-        TypeRef word{ctx_.basic(BasicKind::I64)};
-        ir::Value typeWord = constantI64(static_cast<int64_t>(id), word, n.pos);
-        if (failed_) {
-            return;
-        }
-        ir::Instr store;
-        store.op = ir::Op::Store;
-        store.width = ir::IRType::I64;
-        store.type = word;
-        store.loc = n.pos;
-        store.globalLabel = module_->exceptionType;
-        store.storedValue = typeWord;
-        emit(std::move(store));
-        if (failed_) {
-            return;
-        }
-    }
-    emitThrow(n.pos);
-}
-
-void Lowerer::emitThrow(Position pos) {
-    ir::Instr call;
-    call.op = ir::Op::Call;
-    call.loc = pos;
-    call.callee = "cider_exc_raise";
-    call.mayTrap = true;
-    emitCallWithLanding(std::move(call), pos);
-    if (failed_) {
-        return;
-    }
-    // The landing pad owns the only path out. This block is the structural
-    // continuation a call must have; no program can reach it with the flag
-    // raised, because the landing returns before the flag is checked again.
-    // Trap, not Unreachable: the structural check treats Unreachable as a
-    // block that still needs a terminator, and a reached continuation is a
-    // compiler bug that must stop rather than fall into whatever follows.
-    ir::Terminator term;
-    term.term = ir::Term::Trap;
-    term.reason = ir::TrapReason::Explicit;
-    term.loc = pos;
-    emitTerminator(term);
-}
-
-std::optional<uint32_t> Lowerer::emitCallWithLanding(ir::Instr call, Position pos) {
-    if (!usesExceptions_ || function_ == nullptr) {
-        emit(std::move(call));
-        return std::nullopt;
-    }
-    ensureExceptionSupport();
-    if (failed_) {
-        return std::nullopt;
-    }
-    uint32_t landing = emitBlock(pos);
-    call.call.landingPad = landing;
-    emit(std::move(call));
-    if (failed_) {
-        return std::nullopt;
-    }
-    uint32_t cont = emitBlock(pos);
-    ir::Terminator br;
-    br.term = ir::Term::Br;
-    br.target = cont;
-    br.loc = pos;
-    emitTerminator(br);
-    startBlock(landing);
-    uint64_t from = handlers_.empty() ? 0 : handlers_.back().deferDepth;
-    if (deferFloor_ > from) {
-        from = deferFloor_;
-    }
-    emitExceptionLanding(pos, from);
-    if (failed_) {
-        return std::nullopt;
-    }
-    startBlock(cont);
-    return cont;
-}
-
-void Lowerer::emitExceptionLanding(Position pos, uint64_t from) {
-    // A defer can call a function that throws. Clearing the flag first lets
-    // that call install its own landing instead of seeing the old throw and
-    // bouncing straight back to this one. The payload and type stay intact.
-    storeExceptionFlag(0, pos);
-    if (failed_) {
-        return;
-    }
-    runDefers(from);
-    if (failed_) {
-        return;
-    }
-    storeExceptionFlag(1, pos);
-    if (failed_) {
-        return;
-    }
-    emitExceptionPropagation(pos);
-}
-
-void Lowerer::emitExceptionPropagation(Position pos) {
-    if (!handlers_.empty()) {
-        ir::Terminator br;
-        br.term = ir::Term::Br;
-        br.target = handlers_.back().dispatch;
-        br.loc = pos;
-        emitTerminator(br);
-        return;
-    }
-    ir::Terminator ret;
-    ret.term = ir::Term::Ret;
-    ret.loc = pos;
-    emitTerminator(ret);
-}
-
-void Lowerer::onTryEnter(TryStmt& n) {
-    if (failed_ || !enabled_ || function_ == nullptr) {
-        return;
-    }
-    ensureExceptionSupport();
-    if (failed_) {
-        return;
-    }
-    module_->usesExceptions = true;
-    function_->canThrow = true;
-
-    TryLower frame;
-    frame.dispatch = emitBlock(n.pos);
-    frame.end = emitBlock(n.pos);
-    for (const std::unique_ptr<CatchClause>& clause : n.catches) {
-        frame.catchLabels.push_back(emitBlock(clause->pos));
-        if (clause->type == nullptr) {
-            frame.catchIds.push_back(0);
-        } else {
-            TypeRef type = checker_.catchType(*clause);
-            uint32_t id = exceptionTypeId(type, clause->pos);
-            if (failed_) {
-                return;
-            }
-            frame.catchIds.push_back(id);
-        }
-    }
-    handlers_.push_back(ExceptionHandler{frame.dispatch,
-                                         static_cast<uint64_t>(deferFrames_.size())});
-    tryStack_.push_back(std::move(frame));
-    n.body->accept(checker_);
-}
-
-void Lowerer::onTryBodyDone(TryStmt& n) {
-    if (failed_ || !enabled_ || function_ == nullptr || tryStack_.empty()) {
-        return;
-    }
-    if (!terminated_) {
-        ir::Terminator br;
-        br.term = ir::Term::Br;
-        br.target = tryStack_.back().end;
-        br.loc = n.pos;
-        emitTerminator(br);
-    }
-    if (!handlers_.empty()) {
-        handlers_.pop_back();
-    }
-    TryLower& frame = tryStack_.back();
-    startBlock(frame.dispatch);
-
-    // The thrown type id is the one thing every dispatch reads. Loading it
-    // once makes the catch tests a chain of integer compares and keeps the
-    // payload read inside Landing, where the type is known.
-    TypeRef word{ctx_.basic(BasicKind::I64)};
-    ir::Instr load;
-    load.op = ir::Op::Load;
-    load.loc = n.pos;
-    load.width = ir::IRType::I64;
-    load.type = word;
-    load.globalLabel = module_->exceptionType;
-    load.isPure = true;
-    ir::Value thrown = newValue(load.width, word, n.pos);
-    load.results.push_back(thrown);
-    emit(std::move(load));
-    if (failed_) {
-        return;
-    }
-
-    for (uint64_t i = 0;
-         i < static_cast<uint64_t>(frame.catchLabels.size()); ++i) {
-        uint32_t label = frame.catchLabels[i];
-        uint32_t id = frame.catchIds[i];
-        if (id == 0) {
-            ir::Terminator br;
-            br.term = ir::Term::Br;
-            br.target = label;
-            br.loc = n.pos;
-            emitTerminator(br);
-            break;
-        }
-        ir::Value want = constantI64(static_cast<int64_t>(id), word, n.pos);
-        if (failed_) {
-            return;
-        }
-        ir::Instr cmp;
-        cmp.op = ir::Op::Cmp;
-        cmp.loc = n.pos;
-        cmp.cmp = ir::CmpOp::Eq;
-        cmp.width = ir::IRType::Bool;
-        cmp.type = TypeRef{ctx_.basic(BasicKind::Bool)};
-        cmp.isPure = true;
-        cmp.operands.push_back(thrown);
-        cmp.operands.push_back(want);
-        ir::Value matched = newValue(cmp.width, cmp.type, n.pos);
-        cmp.results.push_back(matched);
-        emit(std::move(cmp));
-        if (failed_) {
-            return;
-        }
-        uint32_t next = emitBlock(n.pos);
-        ir::Terminator br;
-        br.term = ir::Term::CondBr;
-        br.cond = matched;
-        br.thenTarget = label;
-        br.elseTarget = next;
-        br.loc = n.pos;
-        emitTerminator(br);
-        startBlock(next);
-    }
-    if (!terminated_) {
-        emitExceptionPropagation(n.pos);
-    }
-}
-
-void Lowerer::onCatchEnter(TryStmt& n, CatchClause& c) {
-    (void)n;
-    if (failed_ || !enabled_ || function_ == nullptr || tryStack_.empty()) {
-        return;
-    }
-    TryLower& frame = tryStack_.back();
-    if (frame.nextCatch >=
-        static_cast<uint64_t>(frame.catchLabels.size())) {
-        refuse(c.pos, "a catch");
-        return;
-    }
-    uint32_t label = frame.catchLabels[frame.nextCatch];
-    uint32_t id = frame.catchIds[frame.nextCatch];
-    ++frame.nextCatch;
-    startBlock(label);
-
-    // The flag is cleared before the body runs. A call there then installs
-    // its own landing; leaving the old throw raised would make every call
-    // in the handler look like it threw immediately.
-    storeExceptionFlag(0, c.pos);
-    if (failed_) {
-        return;
-    }
-
-    TypeRef type = checker_.catchType(c);
-    std::vector<ir::Value> slots;
-    if (id != 0 && !type.isError()) {
-        int count = wordCount(type);
-        if (count < 1 ||
-            count > static_cast<int>(ir::Module::kExceptionWords)) {
-            refuse(c.pos, "a catch value wider than the exception slot");
-            return;
-        }
-        ir::Instr landing;
-        landing.op = ir::Op::Landing;
-        landing.loc = c.pos;
-        landing.typeId = id;
-        std::vector<ir::Value> landed;
-        for (int i = 0; i < count; ++i) {
-            TypeRef part = wordType(type, static_cast<uint64_t>(i));
-            ir::Value out = newValue(widthOf(part, c.pos), part, c.pos);
-            landing.results.push_back(out);
-            landed.push_back(out);
-        }
-        emit(std::move(landing));
-        if (failed_) {
-            return;
-        }
-        slots = allocaFor(type, c.pos);
-        if (failed_ || slots.size() != landed.size()) {
-            if (!failed_) {
-                refuse(c.pos, "a catch value");
-            }
-            return;
-        }
-        for (uint64_t i = 0; i < static_cast<uint64_t>(slots.size()); ++i) {
-            TypeRef part = wordType(type, static_cast<uint64_t>(i));
-            ir::Instr store;
-            store.op = ir::Op::Store;
-            store.loc = c.pos;
-            store.width = widthOf(part, c.pos);
-            store.type = part;
-            store.addressBase = slots[i];
-            store.storedValue = landed[i];
-            emit(std::move(store));
-        }
-        if (failed_) {
-            return;
-        }
-    }
-
-    // The binder is one extra locals map, not a Block: the catch body
-    // pushes its own block scope on entry and pops it on exit. The checker
-    // re-walk binds the same name in its own scope, so the body sees the
-    // type and a bare throw knows it is inside a catch.
-    locals_.push_back({});
-    if (!c.name.empty() && id != 0 && !type.isError()) {
-        LocalBinding binding;
-        binding.slots = slots;
-        binding.type = type;
-        binding.isMutable = false;
-        locals_.back()[c.name] = std::move(binding);
-    }
-    checker_.walkCatchBody(c, type);
-    locals_.pop_back();
-    if (failed_) {
-        return;
-    }
-    if (!terminated_) {
-        ir::Terminator br;
-        br.term = ir::Term::Br;
-        br.target = frame.end;
-        br.loc = c.pos;
-        emitTerminator(br);
-    }
-}
-
-void Lowerer::onCatchExit(TryStmt& n, CatchClause& c) {
-    (void)n;
-    (void)c;
-}
-
-void Lowerer::onTryExit(TryStmt& n) {
-    if (failed_ || !enabled_ || function_ == nullptr || tryStack_.empty()) {
-        return;
-    }
-    uint32_t end = tryStack_.back().end;
-    tryStack_.pop_back();
-    startBlock(end);
-    (void)n;
 }
 
 void Lowerer::onVarDecl(VarDecl& n) {
@@ -7277,7 +6770,6 @@ std::string Lowerer::forwardFunction(const std::string& link, const Signature& s
     }
     recordParamClasses();
     if (!failed_) {
-        function_->canThrow = true;
         ir::Terminator fret;
         fret.term = ir::Term::Ret;
         fret.loc = pos;
@@ -11055,7 +10547,7 @@ std::vector<ir::Value> Lowerer::lowerCallWords(Call& n) {
         }
         instr.width = ir::IRType::Void;
         instr.type = TypeRef{ret};
-        emitCallWithLanding(std::move(instr), n.pos);
+        emit(std::move(instr));
         if (failed_) {
             return {undefined()};
         }
@@ -11068,7 +10560,7 @@ std::vector<ir::Value> Lowerer::lowerCallWords(Call& n) {
         if (failed_) {
             return {undefined()};
         }
-        emitCallWithLanding(std::move(instr), n.pos);
+        emit(std::move(instr));
         if (failed_) {
             return {undefined()};
         }
@@ -11076,7 +10568,6 @@ std::vector<ir::Value> Lowerer::lowerCallWords(Call& n) {
     if (function_ != nullptr) {
         // A call is mayTrap only if the callee can throw, which is known here
         // rather than guessed by the optimiser.
-        function_->canThrow = true;
     }
     return words;
 }
@@ -12604,7 +12095,6 @@ void Lowerer::onForInProtocol(ForInStmt& n, TypeRef seqType, DeclId id) {
         emit(std::move(iterCall));
     }
     if (function_ != nullptr) {
-        function_->canThrow = true;
     }
     // One slot per word: storeRange addresses word i through slots[i],
     // so a single slot refuses past the first word (like any aggregate
@@ -12680,7 +12170,6 @@ void Lowerer::onForInProtocol(ForInStmt& n, TypeRef seqType, DeclId id) {
     }
     emit(std::move(nextCall));
     if (function_ != nullptr) {
-        function_->canThrow = true;
     }
     if (answer.size() != static_cast<size_t>(kOneWord)) {
         refuse(n.pos, "this iteration");

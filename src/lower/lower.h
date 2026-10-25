@@ -134,12 +134,6 @@ public:
     void onBlockEnter(Block& n) override;
     void onBlockExit(Block& n) override;
     void onDeferStmt(DeferStmt& n) override;
-    void onThrowStmt(ThrowStmt& n) override;
-    void onTryEnter(TryStmt& n) override;
-    void onTryBodyDone(TryStmt& n) override;
-    void onCatchEnter(TryStmt& n, CatchClause& c) override;
-    void onCatchExit(TryStmt& n, CatchClause& c) override;
-    void onTryExit(TryStmt& n) override;
     // A closure literal, after its body checked. Emits the hidden function
     // and records where, so lowering the literal itself answers the
     // two-word value (code address, captures pointer).
@@ -642,42 +636,6 @@ public:
 private:
     void refuse(Position pos, const std::string& what);
     void emitTerminator(const ir::Terminator& term);
-    // Exception support is added to the module only when source actually
-    // names try or throw. Programs without exceptions keep the exact image
-    // they had before this feature.
-    void ensureExceptionSupport();
-    uint32_t exceptionTypeId(TypeRef type, Position pos);
-    void storeExceptionFlag(int64_t value, Position pos);
-    // Stores the payload and type, raises the hidden flag through the helper,
-    // then takes the call's landing pad. Never falls through.
-    void emitThrow(Position pos);
-    // Emits a call, adding a landing pad when the program uses exceptions.
-    // Answers the continuation block, or std::nullopt for a bare call.
-    std::optional<uint32_t> emitCallWithLanding(ir::Instr call, Position pos);
-    void emitExceptionLanding(Position pos, uint64_t from);
-    // While a defer body is being re-walked, a throw from a call inside it
-    // must not run that same body again. This floor names the first scope
-    // outside the defer currently running.
-    uint64_t deferFloor_ = 0;
-    void emitExceptionPropagation(Position pos);
-    // One active try body. The dispatch block receives control when a throw
-    // leaves the body or a call inside it raises the flag; deferDepth is the
-    // scope count to unwind before dispatch.
-    struct ExceptionHandler {
-        uint32_t dispatch = 0;
-        uint64_t deferDepth = 0;
-    };
-    // One try statement being lowered, kept across the checker's six hooks.
-    // Catch labels are allocated up front so dispatch can name them.
-    struct TryLower {
-        uint32_t dispatch = 0;
-        uint32_t end = 0;
-        std::vector<uint32_t> catchLabels;
-        std::vector<uint32_t> catchIds;
-        uint64_t nextCatch = 0;
-    };
-    std::vector<ExceptionHandler> handlers_;
-    std::vector<TryLower> tryStack_;
     // Shared function frame setup and teardown behind onFuncDecl and spec
     // emissions, so the two cannot diverge (sret handling, slot layout,
     // falloff rule). The caller lowers the body between the two and pops
@@ -757,13 +715,6 @@ private:
     // `--checks`: fixed-array bounds checks are opt-in. Slice and range
     // checks stay unconditional, and nil guards never consult this flag.
     bool checks_ = false;
-    // Set as soon as any module in the program names try or throw. Every
-    // later module is then lowered with landings, including ones whose own
-    // source has neither (they may call a thrower).
-    bool usesExceptions_ = false;
-    bool exceptionSupportReady_ = false;
-    std::unordered_map<const Type*, uint32_t> exceptionTypeIds_;
-    uint32_t nextExceptionTypeId_ = 1;
     std::unique_ptr<ir::Module> module_;
     ir::Function* function_ = nullptr;
     bool enabled_ = false;

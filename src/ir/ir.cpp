@@ -57,7 +57,6 @@ const char* trapReasonName(TrapReason reason) {
         case TrapReason::Null: return "null";
         case TrapReason::NilInterface: return "nil_interface";
         case TrapReason::NilFunctionPointer: return "nil_function_pointer";
-        case TrapReason::UncaughtException: return "uncaught_exception";
         case TrapReason::Explicit: return "explicit";
     }
     return "unreachable";
@@ -73,8 +72,6 @@ const char* trapMessage(TrapReason reason) {
             return "vm error: nil interface dispatch\n";
         case TrapReason::NilFunctionPointer:
             return "vm error: call: nil function pointer\n";
-        case TrapReason::UncaughtException:
-            return "vm error: uncaught exception\n";
         default:
             return nullptr;
     }
@@ -115,7 +112,6 @@ const char* opName(Op op) {
         case Op::Cast: return "cast";
         case Op::Trap: return "trap";
         case Op::Asm: return "asm";
-        case Op::Landing: return "landing";
     }
     return "unreachable";
 }

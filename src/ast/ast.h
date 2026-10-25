@@ -539,30 +539,6 @@ struct DeferStmt : Stmt {
     void accept(ASTVisitor& v) override;
 };
 
-struct CatchClause : Node {
-    std::unique_ptr<TypeExpr> type;
-    std::string name;
-    std::unique_ptr<Block> body;
-    CatchClause(Position p, std::unique_ptr<TypeExpr> t, std::string n,
-                std::unique_ptr<Block> b)
-        : Node(std::move(p)), type(std::move(t)), name(std::move(n)), body(std::move(b)) {}
-    void accept(ASTVisitor& v) override;
-};
-
-struct TryStmt : Stmt {
-    std::unique_ptr<Block> body;
-    std::vector<std::unique_ptr<CatchClause>> catches;
-    TryStmt(Position p, std::unique_ptr<Block> b, std::vector<std::unique_ptr<CatchClause>> c)
-        : Stmt(std::move(p)), body(std::move(b)), catches(std::move(c)) {}
-    void accept(ASTVisitor& v) override;
-};
-
-struct ThrowStmt : Stmt {
-    std::unique_ptr<Expr> value;
-    ThrowStmt(Position p, std::unique_ptr<Expr> v) : Stmt(std::move(p)), value(std::move(v)) {}
-    void accept(ASTVisitor& v) override;
-};
-
 struct DeleteStmt : Stmt {
     std::unique_ptr<Expr> ptr;
     DeleteStmt(Position p, std::unique_ptr<Expr> e)
@@ -877,9 +853,6 @@ struct ASTVisitor {
     virtual void visitMatchArm(MatchArm& n);
     virtual void visitMatchStmt(MatchStmt& n);
     virtual void visitDeferStmt(DeferStmt& n);
-    virtual void visitCatchClause(CatchClause& n);
-    virtual void visitTryStmt(TryStmt& n);
-    virtual void visitThrowStmt(ThrowStmt& n);
     virtual void visitDeleteStmt(DeleteStmt& n);
     virtual void visitAsmStmt(AsmStmt& n);
     virtual void visitModuleAsm(ModuleAsm& n);
@@ -954,9 +927,6 @@ inline void Pattern::accept(ASTVisitor& v) { v.visitPattern(*this); }
 inline void MatchArm::accept(ASTVisitor& v) { v.visitMatchArm(*this); }
 inline void MatchStmt::accept(ASTVisitor& v) { v.visitMatchStmt(*this); }
 inline void DeferStmt::accept(ASTVisitor& v) { v.visitDeferStmt(*this); }
-inline void CatchClause::accept(ASTVisitor& v) { v.visitCatchClause(*this); }
-inline void TryStmt::accept(ASTVisitor& v) { v.visitTryStmt(*this); }
-inline void ThrowStmt::accept(ASTVisitor& v) { v.visitThrowStmt(*this); }
 inline void DeleteStmt::accept(ASTVisitor& v) { v.visitDeleteStmt(*this); }
 inline void AsmStmt::accept(ASTVisitor& v) { v.visitAsmStmt(*this); }
 inline void ModuleAsm::accept(ASTVisitor& v) { v.visitModuleAsm(*this); }
@@ -1128,17 +1098,6 @@ inline void ASTVisitor::visitMatchStmt(MatchStmt& n) {
     if (n.fallback != nullptr) n.fallback->accept(*this);
 }
 inline void ASTVisitor::visitDeferStmt(DeferStmt& n) { n.stmt->accept(*this); }
-inline void ASTVisitor::visitCatchClause(CatchClause& n) {
-    if (n.type != nullptr) n.type->accept(*this);
-    n.body->accept(*this);
-}
-inline void ASTVisitor::visitTryStmt(TryStmt& n) {
-    n.body->accept(*this);
-    for (auto& c : n.catches) c->accept(*this);
-}
-inline void ASTVisitor::visitThrowStmt(ThrowStmt& n) {
-    if (n.value != nullptr) n.value->accept(*this);
-}
 inline void ASTVisitor::visitDeleteStmt(DeleteStmt& n) { n.ptr->accept(*this); }
 inline void ASTVisitor::visitAsmStmt(AsmStmt&) {}
 inline void ASTVisitor::visitModuleAsm(ModuleAsm&) {}
