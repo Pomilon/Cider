@@ -1436,6 +1436,38 @@ void testOperators() {
         }
     }
     check(unaryCall, "a -struct lowers to the unary operator call");
+
+    Lowered index = lower(
+        "struct Vec { var x: int; var y: int;\n"
+        "    func operator[](i: int) -> int {\n"
+        "        if (i == 0) { return (*self).x; }\n"
+        "        return (*self).y;\n"
+        "    }\n"
+        "}\n"
+        "func main() -> int {\n"
+        "    var v: Vec = Vec { x: 1, y: 2 };\n"
+        "    return v[0] + v[1];\n"
+        "}\n");
+    check(index.ok, "an index operator program lowers: " + index.stage);
+    if (!index.ok) {
+        return;
+    }
+    const cider::ir::Function* get =
+        find(index.module.get(), "Vec__operator_index");
+    check(get != nullptr, "the index declaration emits a method function");
+    const cider::ir::Function* indexMain = find(index.module.get(), "main");
+    bool indexCall = false;
+    if (indexMain != nullptr) {
+        for (const cider::ir::Block& block : indexMain->blocks) {
+            for (const cider::ir::Instr& instr : block.body) {
+                if (instr.op == cider::ir::Op::Call &&
+                    instr.callee == "Vec__operator_index") {
+                    indexCall = true;
+                }
+            }
+        }
+    }
+    check(indexCall, "v[i] lowers to the index operator call");
 }
 
 void testMultiWordReturn() {

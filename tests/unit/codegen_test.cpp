@@ -622,6 +622,20 @@ void testOperatorOverloadsNative() {
         "}\n",
         signaled);
     check(!signaled && code == 3, "a unary struct operator answers 3");
+
+    code = runCode(
+        "struct Vec { var x: int; var y: int;\n"
+        "    func operator[](i: int) -> int {\n"
+        "        if (i == 0) { return (*self).x; }\n"
+        "        return (*self).y;\n"
+        "    }\n"
+        "}\n"
+        "func main() -> int {\n"
+        "    var v: Vec = Vec { x: 1, y: 2 };\n"
+        "    return v[0] + v[1];\n"
+        "}\n",
+        signaled);
+    check(!signaled && code == 3, "a struct index operator answers 3");
 }
 
 void testTrap() {

@@ -255,6 +255,21 @@ void testOperatorNames() {
     }
 
     ok = false;
+    std::unique_ptr<cider::Program> index = parse(
+        "struct Vec { var x: int;\n"
+        "    func operator[](i: int) -> int { return i; }\n"
+        "}\n",
+        ok);
+    check(ok, "a member index operator parses");
+    if (index != nullptr && !index->decls.empty()) {
+        const cider::StructDecl& s =
+            static_cast<const cider::StructDecl&>(*index->decls[0]);
+        check(!s.methods.empty() &&
+                  s.methods[0].name == "operator_index",
+              "the parser stores the canonical index name");
+    }
+
+    ok = false;
     parse("func operator&&(a: Vec, b: Vec) -> Vec { return a; }\n", ok);
     check(!ok, "short-circuit operators cannot be overloaded");
 

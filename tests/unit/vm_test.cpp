@@ -859,6 +859,30 @@ void testOperatorOverloadsVm() {
     cider::vm::VmResult uopr = cider::vm::run(*u.module, "");
     check(uopr.ok && uopr.exitCode == 3,
           "the optimised unary operator answers 3: " + uopr.error);
+
+    Lowered ix = lower(
+        "struct Vec { var x: int; var y: int;\n"
+        "    func operator[](i: int) -> int {\n"
+        "        if (i == 0) { return (*self).x; }\n"
+        "        return (*self).y;\n"
+        "    }\n"
+        "}\n"
+        "func main() -> int {\n"
+        "    var v: Vec = Vec { x: 1, y: 2 };\n"
+        "    return v[0] + v[1];\n"
+        "}\n");
+    check(ix.ok, "an index operator program lowers: " + ix.stage);
+    if (!ix.ok) {
+        return;
+    }
+    cider::vm::VmResult iunr = cider::vm::run(*ix.module, "");
+    check(iunr.ok && iunr.exitCode == 3,
+          "the unoptimised index operator answers 3: " + iunr.error);
+    cider::opt::OptResult iores = cider::opt::run(*ix.module);
+    check(iores.ok, "the index operator program optimises: " + iores.error);
+    cider::vm::VmResult iopr = cider::vm::run(*ix.module, "");
+    check(iopr.ok && iopr.exitCode == 3,
+          "the optimised index operator answers 3: " + iopr.error);
 }
 
 }  // namespace

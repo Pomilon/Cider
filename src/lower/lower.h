@@ -206,6 +206,7 @@ public:
     // Call and moved back afterwards so the AST keeps owning them.
     std::vector<ir::Value> lowerOperatorCall(Binary& n);
     std::vector<ir::Value> lowerOperatorCall(Unary& n);
+    std::vector<ir::Value> lowerOperatorCall(Index& n);
     ir::Value onCall(Call& n);
     ir::Value onIdent(Ident& n);
     ir::Value onCast(Cast& n);

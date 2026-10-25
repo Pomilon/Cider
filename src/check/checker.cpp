@@ -31,6 +31,7 @@ constexpr int64_t kOneElement = 1;
 // with the same standing as kOneElement: the checks name these, never
 // digits, because T4 refuses digits beside size-looking words.
 constexpr uint64_t kOneMember = 1;
+constexpr uint64_t kOneParameter = 1;
 constexpr uint64_t kHasPrefixLen = 3;
 
 // The width, in bits, and signedness of a basic kind. Plain numbers, not
@@ -77,6 +78,10 @@ const resolve::Decl* Checker::operatorDecl(const Binary* expr) const {
 const resolve::Decl* Checker::operatorDecl(const Unary* expr) const {
     auto found = unaryOperatorDecls_.find(expr);
     return found == unaryOperatorDecls_.end() ? nullptr : found->second;
+}
+
+bool Checker::isOperatorIndex(const Index* expr) const {
+    return operatorIndexes_.find(expr) != operatorIndexes_.end();
 }
 
 std::optional<DeclId> Checker::specOf(const Call* call,
@@ -1246,6 +1251,10 @@ void Checker::visitFuncDecl(FuncDecl& n) {
         return;
     }
     if (isOperatorName(n.name)) {
+        if (n.name == "operator_index") {
+            fail(n.pos, "operator '[]' must be a member");
+            return;
+        }
         const bool unary =
             n.name == "operator_neg" || n.name == "operator_bitnot";
         if (unary && sig.arity() != 1) {
@@ -1854,7 +1863,8 @@ void Checker::checkMethods(DeclId id, Kind kind, std::vector<MethodDecl>& method
     // (plain and virtual, or two signatures) would collide at codegen.
     std::unordered_set<std::string> seen;
     for (MethodDecl& method : methods) {
-        if (isOperatorName(method.name)) {
+        if (isOperatorName(method.name) &&
+            method.name != "operator_index") {
             fail(method.pos, "member operator overloading is not implemented yet");
             continue;
         }
@@ -1866,6 +1876,11 @@ void Checker::checkMethods(DeclId id, Kind kind, std::vector<MethodDecl>& method
         const Signature* sig = resolver_.methodSig(id, method.name);
         if (sig == nullptr) {
             fail(method.pos, "checker bug: signature missing");
+            continue;
+        }
+        if (method.name == "operator_index" &&
+            sig->arity() != kOneParameter) {
+            fail(method.pos, "an index operator takes exactly one parameter");
             continue;
         }
         pushScope();
@@ -2596,9 +2611,43 @@ void Checker::visitField(Field& n) {
 
 void Checker::visitIndex(Index& n) {
     TypeRef base = checkExpr(n.array.get(), TypeRef{ctx_.wildcard()});
+    if (base.isError()) {
+        record(&n, errorRef());
+        return;
+    }
+    Kind kind = base.type->kind();
+    if (kind == Kind::Struct || kind == Kind::Class) {
+        // `[]` is member-only: the receiver's own type supplies the method,
+        // and the index must match its parameter exactly. A struct or class
+        // has no built-in indexing rule to fall back to.
+        std::optional<DeclId> id = base.type->decl();
+        const Signature* sig =
+            id.has_value() ? resolver_.methodSig(*id, "operator_index") : nullptr;
+        if (sig == nullptr || sig->arity() != kOneParameter) {
+            fail(n.pos, "no matching operator '[]'");
+            record(&n, errorRef());
+            return;
+        }
+        TypeRef want{sig->parameters()[0].type};
+        TypeRef index = checkExpr(n.index.get(), want);
+        if (index.isError()) {
+            record(&n, errorRef());
+            return;
+        }
+        if (index != want) {
+            fail(n.pos, "no matching operator '[]'");
+            record(&n, errorRef());
+            return;
+        }
+        operatorIndexes_.insert(&n);
+        const Type* ret =
+            sig->returnType() != nullptr ? sig->returnType() : ctx_.void_();
+        record(&n, TypeRef{ret});
+        return;
+    }
     TypeRef index =
         checkExpr(n.index.get(), TypeRef{ctx_.basic(BasicKind::I64)});
-    if (base.isError() || index.isError()) {
+    if (index.isError()) {
         record(&n, errorRef());
         return;
     }
@@ -2607,7 +2656,6 @@ void Checker::visitIndex(Index& n) {
         record(&n, errorRef());
         return;
     }
-    Kind kind = base.type->kind();
     if (kind == Kind::Array || kind == Kind::Slice) {
         record(&n, TypeRef{base.type->element()});
         return;

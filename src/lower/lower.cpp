@@ -5370,6 +5370,9 @@ bool Lowerer::copySliceToArray(Position pos, ir::Value ptr, ir::Value len,
 }
 
 std::vector<ir::Value> Lowerer::lowerIndex(const Index& n) {
+    if (checker_.isOperatorIndex(&n)) {
+        return lowerOperatorCall(const_cast<Index&>(n));
+    }
     Place base;
     TypeRef arrayType;
     if (const auto* wide = dynamic_cast<const WideLit*>(n.array.get())) {
@@ -9671,6 +9674,19 @@ std::vector<ir::Value> Lowerer::lowerOperatorCall(Unary& n) {
     call.args.push_back(std::move(n.operand));
     std::vector<ir::Value> words = lowerCallWords(call);
     n.operand = std::move(call.args[0]);
+    return words;
+}
+
+std::vector<ir::Value> Lowerer::lowerOperatorCall(Index& n) {
+    Call call(n.pos,
+              std::make_unique<Field>(n.pos, std::move(n.array),
+                                      "operator_index"),
+              {}, std::vector<std::unique_ptr<Expr>>{});
+    call.args.push_back(std::move(n.index));
+    std::vector<ir::Value> words = lowerCallWords(call);
+    auto* field = static_cast<Field*>(call.callee.get());
+    n.array = std::move(field->object);
+    n.index = std::move(call.args[0]);
     return words;
 }
 

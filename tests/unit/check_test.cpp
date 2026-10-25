@@ -338,6 +338,43 @@ void testOperatorOverloads() {
     check(!unaryNoNominal.ok && unaryNoNominal.stage == "check",
           "a unary operator declaration needs a nominal operand");
 
+    Checked index = check(
+        "struct Vec { var x: int; var y: int;\n"
+        "    func operator[](i: int) -> int {\n"
+        "        if (i == 0) { return (*self).x; }\n"
+        "        return (*self).y;\n"
+        "    }\n"
+        "}\n"
+        "func main() -> int {\n"
+        "    var v: Vec = Vec { x: 1, y: 2 };\n"
+        "    return v[0] + v[1];\n"
+        "}\n");
+    check(index.ok, "a member index operator checks: " + index.stage);
+
+    Checked indexMismatch = check(
+        "struct Vec { var x: int;\n"
+        "    func operator[](i: int) -> int { return i; }\n"
+        "}\n"
+        "func main() -> int {\n"
+        "    var v: Vec = Vec { x: 1 };\n"
+        "    return v[true];\n"
+        "}\n");
+    check(!indexMismatch.ok && indexMismatch.stage == "check",
+          "an index operator call needs an exact index type");
+
+    Checked freeIndex = check(
+        "struct Vec { var x: int; }\n"
+        "func operator[](v: Vec, i: int) -> int { return v.x; }\n");
+    check(!freeIndex.ok && freeIndex.stage == "check",
+          "an index operator must be a member");
+
+    Checked indexArity = check(
+        "struct Vec { var x: int;\n"
+        "    func operator[](i: int, j: int) -> int { return i; }\n"
+        "}\n");
+    check(!indexArity.ok && indexArity.stage == "check",
+          "an index operator takes exactly one parameter");
+
     Checked mismatch = check(
         "struct Vec { var x: int; var y: int; }\n"
         "func operator+(a: Vec, b: Vec) -> Vec { return a; }\n"

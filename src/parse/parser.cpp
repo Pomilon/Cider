@@ -391,6 +391,16 @@ std::unique_ptr<VarDecl> Parser::parseGlobal() {
 bool Parser::parseOperatorName(std::string& out) {
     Position start = advance().pos;
     switch (peek().kind) {
+        // `[]` is one spelling made of two tokens. The parser consumes both
+        // here so the declaration's name is still one link-safe identifier.
+        case TokenKind::LBracket:
+            advance();
+            if (!match(TokenKind::RBracket)) {
+                fail(start, "an index operator is spelled '[]'");
+                return false;
+            }
+            out = "operator_index";
+            return true;
         case TokenKind::Plus: out = "operator_add"; break;
         case TokenKind::Minus: out = "operator_sub"; break;
         case TokenKind::Star: out = "operator_mul"; break;
