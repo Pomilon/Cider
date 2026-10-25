@@ -315,6 +315,29 @@ void testOperatorNames() {
     }
 
     ok = false;
+    std::unique_ptr<cider::Program> allocation = parse(
+        "func operator new(size: i64, align: i64) -> *void { return nilPtr; }\n",
+        ok);
+    check(ok, "a global allocation operator parses");
+    if (allocation != nullptr && !allocation->decls.empty()) {
+        const cider::FuncDecl& fn =
+            static_cast<const cider::FuncDecl&>(*allocation->decls[0]);
+        check(fn.name == "operator_new",
+              "the parser stores the canonical allocation name");
+    }
+
+    ok = false;
+    std::unique_ptr<cider::Program> release = parse(
+        "func operator delete(ptr: *void) -> void { }\n", ok);
+    check(ok, "a global release operator parses");
+    if (release != nullptr && !release->decls.empty()) {
+        const cider::FuncDecl& fn =
+            static_cast<const cider::FuncDecl&>(*release->decls[0]);
+        check(fn.name == "operator_delete",
+              "the parser stores the canonical release name");
+    }
+
+    ok = false;
     parse("func operator&&(a: Vec, b: Vec) -> Vec { return a; }\n", ok);
     check(!ok, "short-circuit operators cannot be overloaded");
 

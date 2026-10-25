@@ -1276,7 +1276,28 @@ void Checker::visitFuncDecl(FuncDecl& n) {
     if (failed) {
         return;
     }
-    if (isOperatorName(n.name)) {
+    if (n.name == "operator_new" || n.name == "operator_delete") {
+        const Type* pv = ctx_.pointer(ctx_.void_());
+        if (n.name == "operator_new") {
+            const Type* i64 = ctx_.basic(BasicKind::I64);
+            if (sig.arity() != 2 ||
+                sig.parameters()[0].type != i64 ||
+                sig.parameters()[1].type != i64 ||
+                sig.returnType() != pv) {
+                fail(n.pos,
+                     "operator new must be (size: i64, align: i64) -> *void");
+                return;
+            }
+        } else if (sig.arity() != 1 ||
+                   sig.parameters()[0].type != pv ||
+                   (sig.returnType() != nullptr &&
+                    sig.returnType() != ctx_.void_())) {
+            fail(n.pos, "operator delete must be (ptr: *void) -> void");
+            return;
+        }
+    }
+    if (isOperatorName(n.name) && n.name != "operator_new" &&
+        n.name != "operator_delete") {
         if (n.name == "operator_index") {
             fail(n.pos, "operator '[]' must be a member");
             return;
@@ -1903,6 +1924,11 @@ void Checker::checkMethods(DeclId id, Kind kind, std::vector<MethodDecl>& method
     for (MethodDecl& method : methods) {
         if (!seen.insert(method.name).second) {
             fail(method.pos, "duplicate method '" + method.name + "'");
+            continue;
+        }
+        if (method.name == "operator_new" ||
+            method.name == "operator_delete") {
+            fail(method.pos, "allocation operators must be global functions");
             continue;
         }
         globalProv_.clear();

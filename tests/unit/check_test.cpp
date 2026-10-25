@@ -547,6 +547,29 @@ void testOperatorOverloads() {
         "}\n");
     check(!compoundReturn.ok && compoundReturn.stage == "check",
           "a compound assignment returns void");
+
+    Checked allocation = check(
+        "func operator new(size: i64, align: i64) -> *void { return nilPtr; }\n"
+        "func operator delete(ptr: *void) -> void { }\n");
+    check(allocation.ok,
+          "global allocation operators check: " + allocation.stage);
+
+    Checked allocationParams = check(
+        "func operator new(size: int, align: i64) -> *void { return nilPtr; }\n");
+    check(!allocationParams.ok && allocationParams.stage == "check",
+          "operator new pins both size and alignment to i64");
+
+    Checked releaseReturn = check(
+        "func operator delete(ptr: *void) -> int { return 0; }\n");
+    check(!releaseReturn.ok && releaseReturn.stage == "check",
+          "operator delete returns void");
+
+    Checked memberAllocation = check(
+        "struct C { var x: int;\n"
+        "    func operator new(size: i64, align: i64) -> *void { return nilPtr; }\n"
+        "}\n");
+    check(!memberAllocation.ok && memberAllocation.stage == "check",
+          "allocation operators must be global functions");
 }
 
 void testInitAssign() {

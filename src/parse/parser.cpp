@@ -411,6 +411,10 @@ bool Parser::parseOperatorName(std::string& out) {
             }
             out = "operator_call";
             return true;
+        // Allocation operators are keywords, but they name global functions
+        // like any other operator. The checker pins their exact signatures.
+        case TokenKind::KwNew: out = "operator_new"; break;
+        case TokenKind::KwDelete: out = "operator_delete"; break;
         case TokenKind::Plus: out = "operator_add"; break;
         case TokenKind::Minus: out = "operator_sub"; break;
         case TokenKind::Star: out = "operator_mul"; break;
