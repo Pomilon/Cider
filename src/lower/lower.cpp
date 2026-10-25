@@ -6546,21 +6546,11 @@ std::vector<ir::Value> Lowerer::loadLocal(Position pos, const LocalBinding& bind
 }
 
 Lowerer::LoweredString Lowerer::lowerString(const StringLit& lit) {
-    bool joined = false;
-    for (const auto& part : lit.parts) {
-        if (part.isExpr) {
-            joined = true;
-            break;
-        }
-    }
-    if (joined) {
-        return lowerInterp(lit);
-    }
     LoweredString out;
     std::string bytes;
     for (const auto& part : lit.parts) {
         if (part.isExpr) {
-            refuse(lit.pos, "interpolation is not lowered yet");
+            refuse(lit.pos, "string interpolation is a library operation");
             out.words = {undefined()};
             return out;
         }
@@ -8527,7 +8517,8 @@ std::vector<ir::Value> Lowerer::lowerWords(const Expr* expr, TypeRef fallback) {
     if (const auto* add = dynamic_cast<const Binary*>(expr)) {
         TypeRef type = checker_.typeOf(expr);
         if (!type.isError() && type.type->kind() == Kind::String) {
-            return lowerStringAdd(*add);
+            refuse(add->pos, "string concatenation is a library operation");
+            return {undefined()};
         }
     }
     // A call answers one value per word of its return type: the scalar

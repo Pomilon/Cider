@@ -2730,21 +2730,12 @@ std::unique_ptr<Expr> Parser::parseFuncLit() {
 std::unique_ptr<Expr> Parser::parseStringParts(const Token& token) {
     std::vector<StringPartAst> parts;
     for (const StringPart& part : token.lit.parts) {
-        StringPartAst out;
-        out.isExpr = part.isExpr;
-        out.text = part.text;
         if (part.isExpr) {
-            std::vector<Token> inner = part.expr;
-            Token end;
-            end.kind = TokenKind::End;
-            end.pos = part.pos;
-            inner.push_back(end);
-            std::unique_ptr<Expr> expr = parseBraced(inner, part.pos);
-            if (expr == nullptr) {
-                return nullptr;
-            }
-            out.expr = std::move(expr);
+            fail(part.pos, "string interpolation is not supported");
+            return nullptr;
         }
+        StringPartAst out;
+        out.text = part.text;
         parts.push_back(std::move(out));
     }
     return std::make_unique<StringLit>(token.pos, std::move(parts));

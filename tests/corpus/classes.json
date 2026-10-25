@@ -159,11 +159,6 @@
   "blocker": "none",
   "class": "A"
  },
- "brace_escape": {
-  "actual": "matches expected.json exactly",
-  "blocker": "none",
-  "class": "A"
- },
  "bss_align_mixed": {
   "actual": "exit 0",
   "blocker": "init-is-keyword rewrite",
@@ -884,11 +879,6 @@
   "blocker": "interface-boxing + this + new-spelling + uninit",
   "class": "A"
  },
- "interp": {
-  "actual": "matches expected.json exactly",
-  "blocker": "none",
-  "class": "A"
- },
  "irgen_return_type_stale": {
   "actual": "exact stdout/stderr/exit match",
   "blocker": "stdlib-io + ternary-lowering + sizeof-expr + interface-dispatch",
@@ -991,7 +981,7 @@
  },
  "match_strings": {
   "actual": "exact stdout/stderr/exit match (as-is, rc=0)",
-  "blocker": "match-lowering + string-compare + string-interp + checker-crash",
+  "blocker": "match-lowering + string-compare; interpolation removed in v4",
   "class": "A"
  },
  "matchlist": {
@@ -1351,7 +1341,7 @@
  },
  "string_compare": {
   "actual": "exact stdout/stderr/exit match",
-  "blocker": "string-ops-not-lowered (==/!=, interpolation, string returns)",
+  "blocker": "string-ops-not-lowered (==/!=, string returns); interpolation removed in v4",
   "class": "A"
  },
  "string_ordering": {

@@ -36,9 +36,8 @@ func main() -> int {
   if (!(a == b)) { return 12; }
   if (b != a) { return 13; }
 
-  // Interpolated (heap) strings compare by content too.
-  var x: int = 42;
-  var built: string = "v={x}";
+  // A literal string compares by content too.
+  var built: string = "v=42";
   if (!(built == "v=42")) { return 14; }
   if (built != "v=42") { return 15; }
 

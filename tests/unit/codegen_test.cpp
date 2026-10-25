@@ -558,63 +558,21 @@ void testGlobals() {
           "a const class global reads back");
 }
 
-// Division traps rather than answering.
-void testInterp() {
-    std::printf("interpolation builds the string\n");
-    bool sig = false;
-    check(runCode("func main() -> int {\n"
-                  "    var v: string = \"ab{12}c\";\n"
-                  "    return v.len as int;\n"
-                  "}\n", sig) == 5 && !sig,
-          "text and an integer join with the right length");
-    check(runCode("func main() -> int {\n"
-                  "    var v: string = \"ab{12}c\";\n"
-                  "    return v[2] as int * 100 + v[3] as int;\n"
-                  "}\n", sig) == (49 * 100 + 50) % 256 && !sig,
-          "the integer prints decimal");
-    check(runCode("func main() -> int {\n"
-                  "    var t: bool = true;\n"
-                  "    var v: string = \"v={t}!\";\n"
-                  "    return v.len as int * 100 + v[2] as int;\n"
-                  "}\n", sig) == (7 * 100 + 116) % 256 && !sig,
-          "a bool prints true");
-    check(runCode("func main() -> int {\n"
-                  "    var ch: char = '!';\n"
-                  "    var name: string = \"w\";\n"
-                  "    var v: string = \"{ch}{name}?\";\n"
-                  "    return v.len as int * 100 + v[0] as int;\n"
-                  "}\n", sig) == (3 * 100 + 33) % 256 && !sig,
-          "a char prints its byte beside a string");
-    check(runCode("func main() -> int {\n"
-                  "    var n: i64 = -7;\n"
-                  "    var v: string = \"{n}\";\n"
-                  "    return v.len as int * 100 + v[0] as int;\n"
-                  "}\n", sig) == (2 * 100 + 45) % 256 && !sig,
-          "a negative integer keeps its sign");
-    check(runCode("func main() -> int {\n"
-                  "    var f: f64 = 1.5;\n"
-                  "    var v: string = \"{f}\";\n"
-                  "    return v.len as int * 100 + v[0] as int;\n"
-                  "}\n", sig) == (8 * 100 + 49) % 256 && !sig,
-          "a float prints whole, point and six digits");
-    check(runCode("func main() -> int {\n"
-                  "    var f: f64 = 1.5;\n"
-                  "    var v: string = \"{f}\";\n"
-                  "    return v[1] as int * 100 + v[2] as int;\n"
-                  "}\n", sig) == (46 * 100 + 53) % 256 && !sig,
-          "the point and first fraction digit print");
-    check(runCode("func main() -> int {\n"
-                  "    var f: float = 0.5;\n"
-                  "    var v: string = \"f={f}\";\n"
-                  "    return v.len as int * 100 + v[2] as int;\n"
-                  "}\n", sig) == (10 * 100 + 48) % 256 && !sig,
-          "a float widens and zero-pads");
-    check(runCode("func main() -> int {\n"
-                  "    var f: f64 = -2.25;\n"
-                  "    var v: string = \"{f}\";\n"
-                  "    return v.len as int * 100 + v[0] as int;\n"
-                  "}\n", sig) == (9 * 100 + 45) % 256 && !sig,
-          "a negative float keeps its sign");
+// Interpolation and string concatenation are library operations, not
+// compiler lowering paths.
+void testInterpRemoved() {
+    std::printf("interpolation and string + are not core\n");
+    check(runQuiet("func main() -> int {\n"
+                   "    var v: string = \"ab{12}c\";\n"
+                   "    return v.len as int;\n"
+                   "}\n") == -1,
+          "interpolation is rejected");
+    check(runQuiet("func main() -> int {\n"
+                   "    var s: string = \"he\";\n"
+                   "    var t: string = \"llo\";\n"
+                   "    return (s + t).len as int;\n"
+                   "}\n") == -1,
+          "string concatenation is rejected");
 }
 
 void testTrapMessages() {
@@ -2577,17 +2535,14 @@ void testInterfaceDowncast() {
           "a downcast reads back the concrete value");
 }
 
-void testStringAdd() {
-    std::printf("string concatenation runs\n");
-    bool sig = false;
-    check(runCode("func main() -> int {\n"
-                  "    var s: string = \"he\";\n"
-                  "    var t: string = \"llo\";\n"
-                  "    var u: string = s + t;\n"
-                  "    return u.len as int;\n"
-                  "}\n",
-                  sig) == 5 && !sig,
-          "two strings concatenate to one");
+void testStringAddRemoved() {
+    std::printf("string concatenation is not core\n");
+    check(runQuiet("func main() -> int {\n"
+                   "    var s: string = \"he\";\n"
+                   "    var t: string = \"llo\";\n"
+                   "    return (s + t).len as int;\n"
+                   "}\n") == -1,
+          "string concatenation is rejected");
 }
 
 // The same module emitted twice is byte-identical, and carries no build path.
@@ -3205,7 +3160,7 @@ int main() {
     testInterfaceField();
     testInterfaceDynIndex();
     testInterfaceDowncast();
-    testStringAdd();
+    testStringAddRemoved();
     testShortCircuit();
     testBoolCompare();
     testNotInCondition();
@@ -3225,7 +3180,7 @@ int main() {
     testClosureVoidRun();
     testBitNot();
     testTernary();
-    testInterp();
+    testInterpRemoved();
     testFloat();
     testRegisterEscape();
     testAsm();

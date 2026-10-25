@@ -1470,57 +1470,24 @@ void testMultiWordReturn() {
           "the caller issues one call");
 }
 
-// Interpolation builds its string on the heap: the parts' bytes are
-// copied into one fresh buffer, so the value owns its storage.
-void testInterp() {
-    std::printf("interpolation allocates and joins\n");
+// Interpolation and string concatenation are library operations, not
+// compiler lowering paths.
+void testInterpRemoved() {
+    std::printf("interpolation and string + are not core\n");
     Lowered r = lower(
         "func main() -> int {\n"
         "    var v: string = \"ab{12}c\";\n"
         "    return v.len as int;\n"
         "}\n");
-    check(r.ok, "lowers: " + r.stage);
-    const cider::ir::Function* fn = find(r.module.get(), "main");
-    if (fn == nullptr) {
-        return;
-    }
-    bool joins = false;
-    for (const cider::ir::Block& block : fn->blocks) {
-        for (const cider::ir::Instr& instr : block.body) {
-            if (instr.op == cider::ir::Op::Call && instr.callee == "cider_alloc") {
-                joins = true;
-            }
-        }
-    }
-    check(joins, "the parts join in a fresh buffer");
-    // A float prints through the ftoa helper: a widening cast when the
-    // part is a float, then a call naming cider_ftoa.
-    Lowered floats = lower(
+    check(!r.ok && r.stage == "parse", "interpolation is rejected");
+    Lowered add = lower(
         "func main() -> int {\n"
-        "    var x: f32 = 1.5;\n"
-        "    var v: string = \"{x}\";\n"
-        "    return v.len as int;\n"
+        "    var s: string = \"he\";\n"
+        "    var t: string = \"llo\";\n"
+        "    return (s + t).len as int;\n"
         "}\n");
-    check(floats.ok, "a float part lowers: " + floats.stage);
-    const cider::ir::Function* fmain = find(floats.module.get(), "main");
-    bool widens = false;
-    bool callsFtoa = false;
-    if (fmain != nullptr) {
-        for (const cider::ir::Block& block : fmain->blocks) {
-            for (const cider::ir::Instr& instr : block.body) {
-                if (instr.op == cider::ir::Op::Cast &&
-                    instr.width == cider::ir::IRType::F64) {
-                    widens = true;
-                }
-                if (instr.op == cider::ir::Op::Call &&
-                    instr.callee == "cider_ftoa") {
-                    callsFtoa = true;
-                }
-            }
-        }
-    }
-    check(widens, "the float widens to a double first");
-    check(callsFtoa, "the part converts through cider_ftoa");
+    check(!add.ok && add.stage == "lower",
+          "string concatenation is a library operation");
 }
 
 }  // namespace
@@ -1698,7 +1665,7 @@ int main() {
     testAsm();
     testShortCircuit();
     testTernary();
-    testInterp();
+    testInterpRemoved();
     testRefuseKeepsScopes();
     testValueFalloff();
     testInterfaceParam();

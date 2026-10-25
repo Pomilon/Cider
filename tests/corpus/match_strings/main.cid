@@ -84,8 +84,7 @@ func main() -> int {
     "many" => { }
     default => { return 38; }
   }
-  var x: int = 42;
-  var built: string = "v={x}";
+  var built: string = "v=42";
   match (built) {
     "v=42" => { }
     default => { return 39; }
