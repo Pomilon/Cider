@@ -424,27 +424,13 @@ void testUefiEntryShim() {
     check(wrong.stage.find("uefi") != std::string::npos,
           "the missing-entry diagnostic names uefi");
 
-    Built printing = buildAs(
+    Built noUefiPrint = buildAs(
         "func efi_main() -> int { print(\"uefi\\n\"); return 0; }\n",
         cider::target::Kind::Uefi);
-    check(printing.ok, "uefi print emits: " + printing.stage);
-    if (printing.ok) {
-        check(printing.asmText.find("syscall") == std::string::npos,
-              "uefi print has no linux syscall");
-        check(printing.asmText.find("mov rax, 1") == std::string::npos,
-              "uefi print has no linux write number");
-        check(printing.asmText.find("[rax + 64]") != std::string::npos,
-              "uefi print reads ConOut from the system table");
-        check(printing.asmText.find("[r14 + 8]") != std::string::npos,
-              "uefi print calls OutputString");
-    }
-    Built nativePrint = build(
+    check(!noUefiPrint.ok, "uefi print is not a prelude name");
+    Built noNativePrint = build(
         "func main() -> int { print(\"native\\n\"); return 0; }\n");
-    check(nativePrint.ok, "native print still builds: " + nativePrint.stage);
-    if (nativePrint.ok) {
-        check(nativePrint.asmText.find("syscall") != std::string::npos,
-              "native print still uses the kernel write path");
-    }
+    check(!noNativePrint.ok, "native print is not a prelude name");
 
     Built nulls = buildAs(
         "func read(p: *int) -> int { return *p; }\n"
@@ -830,17 +816,18 @@ void testTrap() {
     check(signaled, "division by zero dies by signal");
 }
 
-// Panic ends the program end to end: the message lands on stderr and the
-// process answers the panic code.
-void testPanic() {
-    std::printf("panic ends the program\n");
+// print and panic are not prelude names in v4. Both are explicit library
+// functions now; a bare name is a resolve-time error.
+void testRemovedPrelude() {
+    std::printf("print and panic are not prelude names\n");
     bool signaled = false;
     std::string err;
     int code = runCapture("func main() -> int { panic(\"boom\"); return 0; }\n",
                           signaled, err);
-    check(!signaled, "panic exits, it does not trap");
-    check(code == 134, "panic answers 134");
-    check(err == "boom\n", "panic writes its message to stderr");
+    check(code == -1 && !signaled, "panic no longer builds");
+    code = runCapture("func main() -> int { print(\"hi\"); return 0; }\n",
+                      signaled, err);
+    check(code == -1 && !signaled, "print no longer builds");
 }
 
 // `&` on an element answers the element's address: stores through it land
@@ -3247,7 +3234,7 @@ int main() {
     testThrowUncaught();
     testTryCatch();
     testTrap();
-    testPanic();
+    testRemovedPrelude();
     testElementAddr();
     testComputedIndex();
     testPointerField();

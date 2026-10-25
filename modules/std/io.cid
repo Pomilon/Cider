@@ -1,8 +1,7 @@
 // Standard I/O: print, printInt, printChar, puts, printFloat, printF64, exit.
 //
-// Every write goes through the `write` syscall directly: this module defines
-// `print`, which shadows the prelude inside this module, so calling the
-// prelude here would recurse. A string's bytes are reached through `&s[0]`
+// Every write goes through the `write` syscall directly: this module owns
+// its `print` implementation. A string's bytes are reached through `&s[0]`
 // (an empty string has no byte zero, so it returns before touching it).
 // Buffer stores go through a slice (`buf[0:N]`), because a computed store
 // to an array is not lowered — only slice stores are (SEMANTICS §8).

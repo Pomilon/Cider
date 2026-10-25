@@ -306,21 +306,28 @@ void testCalls() {
     check(surv.ok, "a global-writing call lowers: " + surv.stage);
     cider::vm::VmResult sr = cider::vm::run(*surv.module, "");
     check(sr.ok && sr.exitCode == 106, "a caller frame survives a call: " + sr.error);
-    Lowered pr = lower("func main() -> int { print(\"hi\"); return 3; }\n");
-    check(pr.ok, "a printing call lowers: " + pr.stage);
+    Lowered pr = lower("func main() -> int {\n"
+                       "    var msg: string = \"hi\";\n"
+                       "    var ptr: *u8 = &msg[0] as *u8;\n"
+                       "    var len: int = 2;\n"
+                       "    asm {\n"
+                       "        \"mov rax, 1\"\n"
+                       "        \"mov rdi, 1\"\n"
+                       "        \"mov rsi, {ptr}\"\n"
+                       "        \"mov rdx, {len:q}\"\n"
+                       "        \"syscall\"\n"
+                       "    }\n"
+                       "    return 3;\n"
+                       "}\n");
+    check(pr.ok, "an explicit write lowers: " + pr.stage);
     cider::vm::VmResult prr = cider::vm::run(*pr.module, "");
-    check(prr.ok && prr.exitCode == 3, "a host call returns: " + prr.error);
-    check(prr.stdoutText == "hi", "print writes its bytes: " + prr.stdoutText);
+    check(prr.ok && prr.exitCode == 3, "the explicit write returns: " + prr.error);
+    check(prr.stdoutText == "hi", "the explicit write emits bytes: " + prr.stdoutText);
     Lowered ch = lower("extern func putchar(c: int) -> int;\n"
                        "func main() -> int { putchar(33); return 0; }\n");
     check(ch.ok, "putchar lowers: " + ch.stage);
     cider::vm::VmResult chr = cider::vm::run(*ch.module, "");
     check(chr.ok && chr.stdoutText == "!", "putchar writes one byte: " + chr.stdoutText);
-    Lowered pn = lower("func main() -> int { panic(\"boom\"); return 0; }\n");
-    check(pn.ok, "a panic lowers: " + pn.stage);
-    cider::vm::VmResult pnr = cider::vm::run(*pn.module, "");
-    check(pnr.ok && pnr.exitCode == 134, "panic exits 134: " + pnr.error);
-    check(pnr.stderrText == "boom\n", "panic writes its message: " + pnr.stderrText);
     Lowered al = lower("func main() -> int { var p: *int = alloc(8, 8) as *int;"
                        " *p = 42; return *p; }\n");
     check(al.ok, "an allocating program lowers: " + al.stage);

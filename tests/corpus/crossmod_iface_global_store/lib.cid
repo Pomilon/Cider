@@ -1,5 +1,6 @@
 // CIDER-BUG-230 module half: the interface, three implementors and the
 // interface-typed globals the entry file stores into by QUALIFIED name.
+from std.io import print;
 //
 // `gIface`/`gQuiet`/`gSpot` are declared in an IMPORTED module and written
 // from the entry file as `lib.gIface = lib.gImpl;`. `seedIface` is the

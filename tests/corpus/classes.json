@@ -1120,7 +1120,7 @@
   "class": "B"
  },
  "nolibc_hello": {
-  "actual": "migrated to v3: a freestanding hello uses the prelude print helper (compiler-emitted syscalls) without libc; exact stdout/stderr/exit match on native, VM-unopt and VM-opt",
+  "actual": "v4: a freestanding hello imports std.io print explicitly, with no prelude and no libc; exact stdout/stderr/exit match on native, VM-unopt and VM-opt",
   "blocker": "none",
   "class": "A"
  },

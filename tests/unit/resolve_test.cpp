@@ -146,6 +146,10 @@ void testPreludeImport() {
     check(found != nullptr && found->isPrelude, "the alias stays prelude");
     Resolved bad = resolve("from prelude import nosuch;\n");
     check(!bad.ok, "an unknown prelude name is rejected");
+    Resolved noPrint = resolve("from prelude import print;\n");
+    check(!noPrint.ok, "print is no longer a prelude name");
+    Resolved noPanic = resolve("from prelude import panic;\n");
+    check(!noPanic.ok, "panic is no longer a prelude name");
     // The mark survives a second hop: m re-exports prelude free, main
     // takes it from m.
     cider::resolve::Resolver::ModuleLoader load = [](const std::string& name)
@@ -202,12 +206,13 @@ void testEnum() {
 
 // The prelude is bound without an import: one implicit import, not a hole.
 void testPrelude() {
-    std::printf("the prelude is bound\n");
+    std::printf("the transitional allocator/fini prelude remains\n");
     Resolved r = resolve("var g: int = 0;\n");
     check(r.ok, "resolves");
-    check(find(*r.resolver, "print") != nullptr, "print is bound");
-    check(find(*r.resolver, "alloc") != nullptr, "alloc is bound");
-    check(find(*r.resolver, "free") != nullptr, "free is bound");
+    check(find(*r.resolver, "print") == nullptr, "print is not bound");
+    check(find(*r.resolver, "panic") == nullptr, "panic is not bound");
+    check(find(*r.resolver, "alloc") != nullptr, "alloc is still bound");
+    check(find(*r.resolver, "free") != nullptr, "free is still bound");
 }
 
 // A generic applied with the right arity resolves to its pending marker; the
