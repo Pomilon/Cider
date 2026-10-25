@@ -7,7 +7,7 @@
 // (stdlib_result_unwrap_fail, stdlib_result_expect_fail) so their exit code
 // and message are pinned by the triple-differential harness.
 from std.io import puts;
-from std.result import Result, ok, err, is_ok, is_err, unwrap, expect;
+from std.result import ok, err, is_ok, is_err, unwrap, expect;
 
 func divide(a: int, b: int) -> Result<int, string> {
     if (b == 0) return err::<int, string>("division by zero");

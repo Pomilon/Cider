@@ -327,6 +327,9 @@ struct NewStruct : Expr {
     std::unique_ptr<TypeExpr> type;
     std::vector<FieldInit> fields;
     bool heap = false;
+    // `try_new T { ... }`: the same construction, but allocation failure is
+    // answered with Result<*T, AllocError> instead of trapping.
+    bool tryNew = false;
     NewStruct(Position p, std::unique_ptr<TypeExpr> t, std::vector<FieldInit> f)
         : Expr(std::move(p)), type(std::move(t)), fields(std::move(f)) {}
     void accept(ASTVisitor& v) override;
@@ -335,6 +338,7 @@ struct NewStruct : Expr {
 struct NewClass : Expr {
     std::unique_ptr<TypeExpr> type;
     std::vector<std::unique_ptr<Expr>> args;
+    bool tryNew = false;
     NewClass(Position p, std::unique_ptr<TypeExpr> t, std::vector<std::unique_ptr<Expr>> a)
         : Expr(std::move(p)), type(std::move(t)), args(std::move(a)) {}
     void accept(ASTVisitor& v) override;
@@ -346,6 +350,7 @@ struct NewArray : Expr {
     std::vector<std::unique_ptr<Expr>> inits;
     bool repeat;
     bool heap;
+    bool tryNew = false;
     NewArray(Position p, std::unique_ptr<TypeExpr> e, std::unique_ptr<Expr> n,
              std::vector<std::unique_ptr<Expr>> i, bool r, bool h = false)
         : Expr(std::move(p)), element(std::move(e)), length(std::move(n)),

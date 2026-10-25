@@ -586,9 +586,25 @@ public:
     bool copySliceToArray(Position pos, ir::Value ptr, ir::Value len,
                           TypeRef arrayType, const Place& dest, const char* what);
     std::vector<ir::Value> lowerNewStruct(const NewStruct& n);
+    std::vector<ir::Value> lowerTryNewStruct(const NewStruct& n);
     std::vector<ir::Value> lowerNewArray(const NewArray& n);
     std::vector<ir::Value> lowerArrayLit(const ArrayLit& n);
     std::vector<ir::Value> lowerNewClass(const NewClass& n);
+    std::vector<ir::Value> lowerTryNewClass(const NewClass& n);
+    // A call to the user's global allocation operator. The checker proved a
+    // declaration is in scope; the declaration's origin supplies the link
+    // name, exactly as an imported function call does.
+    ir::Value emitOperatorNew(int64_t bytes, int64_t align, TypeRef resultType,
+                              Position pos);
+    // Builds a core Result<*T, AllocError> at `slot`. The value field is
+    // written only on success; the error field starts at OutOfMemory.
+    bool initResultSlots(const std::vector<ir::Value>& slots, TypeRef resultType,
+                         Position pos);
+    void storeResultField(const std::vector<ir::Value>& slots, TypeRef resultType,
+                          const std::string& name, ir::Value value,
+                          Position pos);
+    std::vector<ir::Value> loadResultWords(const std::vector<ir::Value>& slots,
+                                           TypeRef resultType, Position pos);
     // `super_init(args)`: the direct base's init on this receiver, emitted
     // as one call statement (Unified Standard 4.8.3).
     std::vector<ir::Value> lowerSuperInit(const SuperInit& n);

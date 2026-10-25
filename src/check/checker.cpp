@@ -2829,7 +2829,16 @@ void Checker::visitNewClass(NewClass& n) {
         TypeRef got = checkExpr(n.args[i].get(), want);
         checkCompatible(n.args[i]->pos, n.args[i].get(), got, want);
     }
-    record(&n, TypeRef{ctx_.pointer(target.type)});
+    TypeRef ptr{ctx_.pointer(target.type)};
+    if (n.tryNew) {
+        if (!requireAllocOperator(true, n.pos)) {
+            record(&n, errorRef());
+            return;
+        }
+        record(&n, checkResultOf(ptr, n.pos));
+        return;
+    }
+    record(&n, ptr);
 }
 
 void Checker::visitNewArray(NewArray& n) {
@@ -5338,10 +5347,40 @@ TypeRef Checker::checkNewStruct(NewStruct& expr) {
     }
     // Honest `new` (Unified Standard 5): a paren or `new` form allocates on
     // the heap and answers `*T`. A bare literal is the stack value.
+    // `try_new` answers Result<*T, AllocError> and only constructs when the
+    // allocation operator succeeds.
+    if (expr.tryNew) {
+        if (!requireAllocOperator(true, expr.pos)) {
+            return errorRef();
+        }
+        return checkResultOf(TypeRef{ctx_.pointer(target.type)}, expr.pos);
+    }
     if (expr.heap) {
         return TypeRef{ctx_.pointer(target.type)};
     }
     return target;
+}
+
+TypeRef Checker::checkResultOf(TypeRef value, Position pos) {
+    std::vector<TypeRef> args{value, resolver_.coreAllocError()};
+    std::optional<DeclId> spec =
+        resolver_.instantiate(resolver_.coreResultTemplate(), args, pos);
+    if (!spec.has_value()) {
+        return errorRef();
+    }
+    return TypeRef{ctx_.nominal(Kind::Struct, *spec)};
+}
+
+bool Checker::requireAllocOperator(bool allocation, Position pos) {
+    const char* name = allocation ? "operator_new" : "operator_delete";
+    const resolve::Decl* decl = resolver_.lookup(moduleScope_, name);
+    if (decl == nullptr || decl->kind != resolve::DeclKind::Func) {
+        fail(pos, allocation
+                     ? "try_new needs a global operator new(size: i64, align: i64) -> *void"
+                     : "delete needs a global operator delete(ptr: *void) -> void");
+        return false;
+    }
+    return true;
 }
 
 // A union is constructed by naming exactly one live member; the tag is

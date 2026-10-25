@@ -17,7 +17,60 @@ namespace cider {
 namespace resolve {
 
 Resolver::Resolver(TypeContext& ctx, ModuleLoader load, target::Kind target)
-    : ctx_(ctx), load_(std::move(load)), target_(target) {}
+    : ctx_(ctx), load_(std::move(load)), target_(target) {
+    declareCoreTypes();
+}
+
+void Resolver::declareCoreTypes() {
+    // The core module owns the declarations, so their ids and home scope are
+    // one identity for every user module. Nothing here is an AST declaration:
+    // fields and enumerators live in the same tables generic specialization
+    // fills, and no body needs checking.
+    uint64_t moduleId = moduleIds_.size();
+    moduleIds_["core"] = static_cast<uint32_t>(moduleId);
+    moduleNames_[static_cast<uint32_t>(moduleId)] = "core";
+    nextIndex_["core"] = 0;
+    coreScope_ = makeScope(nullptr, "core");
+    modules_["core"] = coreScope_;
+    Position pos{"<core>", 1, 1};
+
+    coreResult_ = bind(coreScope_, DeclKind::Type, "Result", pos);
+    coreResult_->type = TypeRef{ctx_.wildcard()};
+    coreResult_->nominal = Kind::Struct;
+    coreResult_->typeParams = 2;
+    coreResult_->paramNames = {"T", "E"};
+    std::string resultKey = std::to_string(coreResult_->id.module) + "." +
+                            std::to_string(coreResult_->id.index);
+    fieldLists_[resultKey] = {"is_ok", "value", "error"};
+    fieldTypes_[resultKey + ".is_ok"] = TypeRef{ctx_.basic(BasicKind::Bool)};
+    fieldTypes_[resultKey + ".value"] = TypeRef{ctx_.typeParam(coreResult_->id, 0)};
+    fieldTypes_[resultKey + ".error"] = TypeRef{ctx_.typeParam(coreResult_->id, 1)};
+
+    coreAllocError_ = bind(coreScope_, DeclKind::Type, "AllocError", pos);
+    coreAllocError_->type = TypeRef{ctx_.wildcard()};
+    coreAllocError_->nominal = Kind::Enum;
+    enumValues_["core.AllocError.OutOfMemory"] = 0;
+    std::string errorKey = std::to_string(coreAllocError_->id.module) + "." +
+                           std::to_string(coreAllocError_->id.index);
+    enumOrder_[errorKey].emplace_back("OutOfMemory", 0);
+}
+
+TypeRef Resolver::coreAllocError() const {
+    return TypeRef{ctx_.nominal(Kind::Enum, coreAllocError_->id)};
+}
+
+int64_t Resolver::coreAllocOutOfMemory() const {
+    return enumValue(coreAllocError_->scope->module + ".AllocError",
+                     "OutOfMemory");
+}
+
+void Resolver::bindCoreTypes(const Scope* scope) {
+    // The same Decl pointers, not aliases: a Result instantiated in one
+    // module is the same nominal type in every other.
+    Scope* writable = const_cast<Scope*>(scope);
+    writable->bindings["Result"] = coreResult_;
+    writable->bindings["AllocError"] = coreAllocError_;
+}
 
 void Resolver::fail(Position pos, const std::string& message) {
     errors_.push_back(ResolveError{pos, message});
@@ -1098,6 +1151,7 @@ bool Resolver::resolveProgram(Program& program, const std::string& module) {
         entry_ = scope;
     }
     bindPrelude(scope, program.pos);
+    bindCoreTypes(scope);
     // Imports first, so a `from` alias and every qualified name resolves
     // against a module whose own headers already exist.
     for (const std::unique_ptr<cider::Decl>& decl : program.decls) {

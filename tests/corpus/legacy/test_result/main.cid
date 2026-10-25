@@ -1,5 +1,5 @@
 from std.io import puts, exit, printInt;
-from std.result import Result, ok, err, is_ok, is_err, unwrap, expect;
+from std.result import ok, err, is_ok, is_err, unwrap, expect;
 
 func divide(a: int, b: int) -> Result<int, string> {
     if (b == 0) {

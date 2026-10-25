@@ -570,6 +570,38 @@ void testOperatorOverloads() {
         "}\n");
     check(!memberAllocation.ok && memberAllocation.stage == "check",
           "allocation operators must be global functions");
+
+    const std::string allocator =
+        "func operator new(size: i64, align: i64) -> *void { return nilPtr; }\n";
+    Checked tryStruct = check(
+        allocator +
+        "struct S { var x: int; }\n"
+        "func main() -> int {\n"
+        "    var r: Result<*S, AllocError> = try_new S { x: 1 };\n"
+        "    if (!r.is_ok) { return 1; }\n"
+        "    if (r.error != AllocError.OutOfMemory) { return 2; }\n"
+        "    return 0;\n"
+        "}\n");
+    check(tryStruct.ok, "try_new answers Result and checks: " + tryStruct.stage);
+    Checked tryClass = check(
+        allocator +
+        "class C { var x: int; func init(v: int) { (*self).x = v; } }\n"
+        "func main() -> int {\n"
+        "    var r: Result<*C, AllocError> = try_new C(1);\n"
+        "    return r.value->x;\n"
+        "}\n");
+    check(tryClass.ok, "try_new C(args) checks: " + tryClass.stage);
+    Checked missing = check(
+        "struct S { var x: int; }\n"
+        "func main() -> int {\n"
+        "    var r: Result<*S, AllocError> = try_new S { x: 1 };\n"
+        "    return 0;\n"
+        "}\n");
+    check(!missing.ok && missing.stage == "check",
+          "try_new without operator new is rejected");
+    Checked coreNames = check(
+        "func f(r: Result<int, AllocError>) -> AllocError { return r.error; }\n");
+    check(coreNames.ok, "Result and AllocError are core types: " + coreNames.stage);
 }
 
 void testInitAssign() {

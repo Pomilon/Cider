@@ -338,6 +338,40 @@ void testOperatorNames() {
     }
 
     ok = false;
+    std::unique_ptr<cider::Program> tryNew = parse(
+        "struct S { var x: int; }\n"
+        "func f() -> void { var r: Result<*S, AllocError> = try_new S { x: 1 }; }\n",
+        ok);
+    check(ok, "try_new parses");
+    if (tryNew != nullptr && tryNew->decls.size() > 1) {
+        const cider::FuncDecl& fn =
+            static_cast<const cider::FuncDecl&>(*tryNew->decls[1]);
+        const cider::VarDecl& local =
+            static_cast<const cider::VarDecl&>(*fn.body->stmts[0]);
+        const auto* made = dynamic_cast<const cider::NewStruct*>(
+            local.init.get());
+        check(made != nullptr && made->tryNew && made->heap,
+              "try_new marks a heap construction");
+    }
+
+    ok = false;
+    std::unique_ptr<cider::Program> tryClass = parse(
+        "class C { func init() { } }\n"
+        "func f() -> void { var r: Result<*C, AllocError> = try_new C(); }\n",
+        ok);
+    check(ok, "try_new C(args) parses");
+    if (tryClass != nullptr && tryClass->decls.size() > 1) {
+        const cider::FuncDecl& fn =
+            static_cast<const cider::FuncDecl&>(*tryClass->decls[1]);
+        const cider::VarDecl& local =
+            static_cast<const cider::VarDecl&>(*fn.body->stmts[0]);
+        const auto* made = dynamic_cast<const cider::NewClass*>(
+            local.init.get());
+        check(made != nullptr && made->tryNew,
+              "try_new marks a class construction");
+    }
+
+    ok = false;
     parse("func operator&&(a: Vec, b: Vec) -> Vec { return a; }\n", ok);
     check(!ok, "short-circuit operators cannot be overloaded");
 

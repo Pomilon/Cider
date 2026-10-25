@@ -134,7 +134,7 @@ private:
     std::unique_ptr<Expr> parseExprWith(int minLevel);
     std::unique_ptr<Expr> parsePrefix();
     std::unique_ptr<Expr> parsePostfix(std::unique_ptr<Expr> base);
-    std::unique_ptr<Expr> parseNew();
+    std::unique_ptr<Expr> parseNew(bool tryNew);
     std::unique_ptr<Expr> parseSizeof();
     std::unique_ptr<Expr> parseAlignof();
     std::unique_ptr<Expr> parseFuncLit();

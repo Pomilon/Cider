@@ -8,11 +8,8 @@
 from std.io import print, puts, exit;
 from std.string import memset;
 
-export struct Result<T, E> {
-    var is_ok: bool;
-    var value: T;
-    var error: E;
-}
+// Core `Result<T, E>` is a compiler-owned value type; this module supplies
+// the constructors and helpers over it, not a competing declaration.
 
 // A zeroed value of any type: all-zero bytes read as zero, false,
 // nilPtr, or all-zero aggregates for every spelling T can take.

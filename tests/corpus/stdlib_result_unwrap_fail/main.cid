@@ -1,6 +1,6 @@
 // CIDER-CHORE-003: std.result unwrap() failure path. unwrap prints its fixed
 // message and exits 1; pinned across VM unopt, VM opt and native.
-from std.result import Result, err, unwrap;
+from std.result import err, unwrap;
 
 func main() -> int {
     var r: Result<int, string> = err::<int, string>("missing");

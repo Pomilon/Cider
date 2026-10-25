@@ -2230,7 +2230,10 @@ std::unique_ptr<Expr> Parser::parsePrefix() {
             break;
         }
         case TokenKind::KwNew:
-            base = parseNew();
+            base = parseNew(false);
+            break;
+        case TokenKind::KwTryNew:
+            base = parseNew(true);
             break;
         case TokenKind::KwSizeof:
             base = parseSizeof();
@@ -2564,7 +2567,7 @@ std::unique_ptr<Expr> Parser::parseStructLiteral(std::unique_ptr<TypeExpr> type,
     return std::make_unique<NewStruct>(start, std::move(type), std::move(fields));
 }
 
-std::unique_ptr<Expr> Parser::parseNew() {
+std::unique_ptr<Expr> Parser::parseNew(bool tryNew) {
     Position start = advance().pos;
     if (check(TokenKind::LBracket)) {
         std::unique_ptr<TypeExpr> array = parseType();
@@ -2639,8 +2642,11 @@ std::unique_ptr<Expr> Parser::parseNew() {
         }
         std::unique_ptr<Expr> length = std::move(raw->length);
         std::unique_ptr<TypeExpr> element = std::move(raw->element);
-        return std::make_unique<NewArray>(start, std::move(element), std::move(length),
-                                          std::move(inits), repeat, true);
+        auto made = std::make_unique<NewArray>(start, std::move(element),
+                                               std::move(length), std::move(inits),
+                                               repeat, true);
+        made->tryNew = tryNew;
+        return made;
     }
     std::unique_ptr<TypeExpr> type = parsePrimaryType();
     if (type == nullptr) {
@@ -2651,6 +2657,7 @@ std::unique_ptr<Expr> Parser::parseNew() {
         std::unique_ptr<Expr> lit = parseStructLiteral(std::move(type), start);
         if (lit != nullptr) {
             static_cast<NewStruct*>(lit.get())->heap = true;
+            static_cast<NewStruct*>(lit.get())->tryNew = tryNew;
         }
         return lit;
     }
@@ -2673,9 +2680,13 @@ std::unique_ptr<Expr> Parser::parseNew() {
             failHere("expected ')'");
             return nullptr;
         }
-        return std::make_unique<NewClass>(start, std::move(type), std::move(args));
+        auto made = std::make_unique<NewClass>(start, std::move(type),
+                                               std::move(args));
+        made->tryNew = tryNew;
+        return made;
     }
-    failHere("expected '{' or '(' after new");
+    failHere(std::string("expected '{' or '(' after ") +
+             (tryNew ? "try_new" : "new"));
     return nullptr;
 }
 

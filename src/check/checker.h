@@ -341,6 +341,11 @@ private:
     TypeRef checkNewUnion(NewStruct& expr, TypeRef target, DeclId id);
     TypeRef checkUnionHas(Call& expr, const Field& callee, TypeRef object);
     TypeRef checkNewArray(NewArray& expr);
+    // `Result<*T, AllocError>` for one allocated pointer type.
+    TypeRef checkResultOf(TypeRef value, Position pos);
+    // The allocation operators are global source functions. `new`/`try_new`
+    // and `delete` fail here when no declaration is in scope.
+    bool requireAllocOperator(bool allocation, Position pos);
     TypeRef checkArrayLit(ArrayLit& expr, TypeRef declared);
     // A repeat filler that is the scalar zero over an aggregate element:
     // `new [[u8; 2]; 3] { [0, ...] }` zeroes every scalar, so the filler

@@ -6976,6 +6976,128 @@ void Lowerer::constructClass(const Place& baseIn, TypeRef objType,
         }
     }
 }
+ir::Value Lowerer::emitOperatorNew(int64_t bytes, int64_t align,
+                                   TypeRef resultType, Position pos) {
+    const resolve::Scope* here = homeScope();
+    const resolve::Decl* decl =
+        here != nullptr ? resolver_.lookup(here, "operator_new") : nullptr;
+    if (decl == nullptr || decl->kind != resolve::DeclKind::Func) {
+        refuse(pos, "try_new needs a global operator new(size: i64, align: i64) -> *void");
+        return undefined();
+    }
+    const resolve::Decl* origin = resolver_.declById(decl->id);
+    if (origin == nullptr) {
+        origin = decl;
+    }
+    TypeRef count{ctx_.basic(BasicKind::I64)};
+    ir::Instr call;
+    call.op = ir::Op::Call;
+    call.loc = pos;
+    call.callee = resolver_.linkName(*origin);
+    call.mayTrap = true;
+    for (int64_t fixed : {bytes, align}) {
+        ir::Argument arg;
+        arg.words.push_back(constantI64(fixed, count, pos));
+        if (failed_) {
+            return undefined();
+        }
+        call.arguments.push_back(std::move(arg));
+    }
+    ir::Value at = newValue(ir::IRType::Ptr, resultType, pos);
+    call.results.push_back(at);
+    call.width = ir::IRType::Ptr;
+    call.type = resultType;
+    emit(std::move(call));
+    return at;
+}
+
+void Lowerer::storeResultField(const std::vector<ir::Value>& slots,
+                               TypeRef resultType, const std::string& name,
+                               ir::Value value, Position pos) {
+    if (resultType.isError() || resultType.type->kind() != Kind::Struct) {
+        refuse(pos, "this result");
+        return;
+    }
+    std::optional<DeclId> id = resultType.type->decl();
+    if (!id.has_value()) {
+        refuse(pos, "this result");
+        return;
+    }
+    int64_t off = resolver_.fieldOffset(*id, name);
+    TypeRef fieldType = resolver_.fieldType(*id, name);
+    if (off < 0 || fieldType.isError()) {
+        refuse(pos, "this result");
+        return;
+    }
+    Place at;
+    at.slots = slots;
+    at.type = resultType;
+    at.off = off;
+    storeRange(pos, at, {value}, fieldType);
+}
+
+bool Lowerer::initResultSlots(const std::vector<ir::Value>& slots,
+                              TypeRef resultType, Position pos) {
+    if (resultType.isError() || resultType.type->kind() != Kind::Struct) {
+        refuse(pos, "this result");
+        return false;
+    }
+    std::optional<DeclId> id = resultType.type->decl();
+    if (!id.has_value()) {
+        refuse(pos, "this result");
+        return false;
+    }
+    TypeRef boolean{ctx_.basic(BasicKind::Bool)};
+    TypeRef valueType = resolver_.fieldType(*id, "value");
+    TypeRef errorType = resolver_.fieldType(*id, "error");
+    if (valueType.isError() || errorType.isError()) {
+        refuse(pos, "this result");
+        return false;
+    }
+    storeResultField(slots, resultType, "is_ok",
+                     constantI64(0, boolean, pos), pos);
+    if (failed_) {
+        return false;
+    }
+    storeResultField(slots, resultType, "value",
+                     constantI64(0, valueType, pos), pos);
+    if (failed_) {
+        return false;
+    }
+    TypeRef error = resolver_.coreAllocError();
+    storeResultField(slots, resultType, "error",
+                     constantI64(resolver_.coreAllocOutOfMemory(), error, pos), pos);
+    return !failed_;
+}
+
+std::vector<ir::Value> Lowerer::loadResultWords(
+    const std::vector<ir::Value>& slots, TypeRef resultType, Position pos) {
+    int count = wordCount(resultType);
+    if (count < 0) {
+        refuse(pos, "this result");
+        return {undefined()};
+    }
+    std::vector<ir::Value> words;
+    for (int i = 0; i < count; ++i) {
+        TypeRef word = wordType(resultType, static_cast<uint64_t>(i));
+        ir::Instr instr;
+        instr.op = ir::Op::Load;
+        instr.loc = pos;
+        instr.type = word;
+        instr.width = widthOf(word, pos);
+        if (failed_) {
+            return {undefined()};
+        }
+        instr.addressBase = slots[static_cast<size_t>(i)];
+        instr.isPure = true;
+        ir::Value out = newValue(instr.width, word, pos);
+        instr.results.push_back(out);
+        emit(std::move(instr));
+        words.push_back(out);
+    }
+    return words;
+}
+
 std::vector<ir::Value> Lowerer::lowerNewStruct(const NewStruct& n) {
     TypeRef made = checker_.typeOf(&n);
     if (made.isError()) {
@@ -7090,6 +7212,116 @@ std::vector<ir::Value> Lowerer::lowerNewStruct(const NewStruct& n) {
         words.push_back(out);
     }
     return words;
+}
+
+std::vector<ir::Value> Lowerer::lowerTryNewStruct(const NewStruct& n) {
+    // `try_new T { ... }`: allocate through the library operator, answer
+    // Err(OutOfMemory) without constructing when it is nil, and construct
+    // in the returned storage otherwise.
+    TypeRef resultType = checker_.typeOf(&n);
+    if (resultType.isError() || resultType.type->kind() != Kind::Struct) {
+        refuse(n.pos, "this construction");
+        return {undefined()};
+    }
+    std::optional<DeclId> resultId = resultType.type->decl();
+    if (!resultId.has_value()) {
+        refuse(n.pos, "this construction");
+        return {undefined()};
+    }
+    TypeRef ptrType = resolver_.fieldType(*resultId, "value");
+    if (ptrType.isError() || ptrType.type->kind() != Kind::Pointer) {
+        refuse(n.pos, "this construction");
+        return {undefined()};
+    }
+    TypeRef structType{ptrType.type->pointee()};
+    std::optional<DeclId> id = structType.type->decl();
+    int64_t bytes = kNoExtent;
+    int64_t stepTo = kNoExtent;
+    if (id.has_value()) {
+        if (structType.type->kind() == Kind::Class) {
+            bytes = resolver_.classSize(*id);
+            stepTo = resolver_.classAlign(*id);
+        } else {
+            bytes = resolver_.structSize(*id);
+            stepTo = layout::kSizePointer;
+        }
+    }
+    if (bytes <= 0 || stepTo <= 0) {
+        refuse(n.pos, "this construction");
+        return {undefined()};
+    }
+    int count = wordCount(resultType);
+    if (count < 0) {
+        refuse(n.pos, "this construction");
+        return {undefined()};
+    }
+    std::vector<ir::Value> slots =
+        allocaSlots(resultType, n.pos, static_cast<uint64_t>(count));
+    if (!initResultSlots(slots, resultType, n.pos)) {
+        return {undefined()};
+    }
+    ir::Value at = emitOperatorNew(bytes, stepTo, ptrType, n.pos);
+    if (failed_) {
+        return {undefined()};
+    }
+    ir::Value zero = constantI64(0, ptrType, n.pos);
+    ir::Value live = emitI64Cmp(n.pos, BinOp::Ne, at, zero);
+    if (failed_) {
+        return {undefined()};
+    }
+    uint32_t okLabel = emitBlock(n.pos);
+    uint32_t failLabel = emitBlock(n.pos);
+    uint32_t joinLabel = emitBlock(n.pos);
+    ir::Terminator br;
+    br.term = ir::Term::CondBr;
+    br.cond = live;
+    br.thenTarget = okLabel;
+    br.elseTarget = failLabel;
+    br.loc = n.pos;
+    emitTerminator(br);
+    sealBlock(current_);
+    startBlock(failLabel);
+    // The error field already names OutOfMemory; is_ok stays false.
+    ir::Terminator failJoin;
+    failJoin.term = ir::Term::Br;
+    failJoin.target = joinLabel;
+    failJoin.loc = n.pos;
+    emitTerminator(failJoin);
+    sealBlock(failLabel);
+    startBlock(okLabel);
+    Place base;
+    base.hasIndirect = true;
+    base.indirect = at;
+    base.type = structType;
+    base.off = 0;
+    if (structType.type->kind() == Kind::Union) {
+        constructUnion(base, structType, n);
+    } else if (structType.type->kind() == Kind::Class) {
+        constructClass(base, structType, n);
+    } else {
+        constructStruct(base, structType, n);
+    }
+    if (failed_) {
+        return {undefined()};
+    }
+    TypeRef boolean{ctx_.basic(BasicKind::Bool)};
+    storeResultField(slots, resultType, "is_ok",
+                     constantI64(1, boolean, n.pos), n.pos);
+    if (failed_) {
+        return {undefined()};
+    }
+    storeResultField(slots, resultType, "value", at, n.pos);
+    if (failed_) {
+        return {undefined()};
+    }
+    ir::Terminator okJoin;
+    okJoin.term = ir::Term::Br;
+    okJoin.target = joinLabel;
+    okJoin.loc = n.pos;
+    emitTerminator(okJoin);
+    sealBlock(okLabel);
+    startBlock(joinLabel);
+    return loadResultWords(slots, resultType, n.pos);
 }
 
 std::vector<ir::Value> Lowerer::lowerArrayLit(const ArrayLit& n) {
@@ -7273,6 +7505,175 @@ std::vector<ir::Value> Lowerer::lowerNewClass(const NewClass& n) {
     run.width = ir::IRType::Void;
     emit(std::move(run));
     return {at};
+}
+
+std::vector<ir::Value> Lowerer::lowerTryNewClass(const NewClass& n) {
+    TypeRef resultType = checker_.typeOf(&n);
+    if (resultType.isError() || resultType.type->kind() != Kind::Struct) {
+        refuse(n.pos, "this construction");
+        return {undefined()};
+    }
+    std::optional<DeclId> resultId = resultType.type->decl();
+    TypeRef ptrType = resultId.has_value()
+                          ? resolver_.fieldType(*resultId, "value")
+                          : errorRef();
+    if (ptrType.isError() || ptrType.type->kind() != Kind::Pointer) {
+        refuse(n.pos, "this construction");
+        return {undefined()};
+    }
+    const Type* obj = ptrType.type->pointee();
+    if (obj == nullptr || obj->kind() != Kind::Class) {
+        refuse(n.pos, "this construction");
+        return {undefined()};
+    }
+    std::optional<DeclId> id = obj->decl();
+    const resolve::Decl* owner = id.has_value() ? resolver_.declById(*id) : nullptr;
+    const Signature* init = id.has_value() ? resolver_.methodSig(*id, "init") : nullptr;
+    int64_t byteCount = kNoExtent;
+    int64_t stepTo = kNoExtent;
+    if (id.has_value()) {
+        byteCount = resolver_.classSize(*id);
+        stepTo = resolver_.classAlign(*id);
+    }
+    if (owner == nullptr || init == nullptr || byteCount <= 0 || stepTo <= 0) {
+        refuse(n.pos, "this construction");
+        return {undefined()};
+    }
+    int count = wordCount(resultType);
+    if (count < 0) {
+        refuse(n.pos, "this construction");
+        return {undefined()};
+    }
+    std::vector<ir::Value> slots =
+        allocaSlots(resultType, n.pos, static_cast<uint64_t>(count));
+    if (!initResultSlots(slots, resultType, n.pos)) {
+        return {undefined()};
+    }
+    ir::Value at = emitOperatorNew(byteCount, stepTo, ptrType, n.pos);
+    if (failed_) {
+        return {undefined()};
+    }
+    ir::Value zero = constantI64(0, ptrType, n.pos);
+    ir::Value live = emitI64Cmp(n.pos, BinOp::Ne, at, zero);
+    if (failed_) {
+        return {undefined()};
+    }
+    uint32_t okLabel = emitBlock(n.pos);
+    uint32_t failLabel = emitBlock(n.pos);
+    uint32_t joinLabel = emitBlock(n.pos);
+    ir::Terminator br;
+    br.term = ir::Term::CondBr;
+    br.cond = live;
+    br.thenTarget = okLabel;
+    br.elseTarget = failLabel;
+    br.loc = n.pos;
+    emitTerminator(br);
+    sealBlock(current_);
+    startBlock(failLabel);
+    ir::Terminator failJoin;
+    failJoin.term = ir::Term::Br;
+    failJoin.target = joinLabel;
+    failJoin.loc = n.pos;
+    emitTerminator(failJoin);
+    sealBlock(failLabel);
+    startBlock(okLabel);
+    if (!resolver_.virtualNames(*id).empty()) {
+        std::string table = emitClassVTable(*id, n.pos);
+        if (failed_ || table.empty()) {
+            return {undefined()};
+        }
+        TypeRef tablePtr{ctx_.pointer(ctx_.basic(BasicKind::U8))};
+        ir::Instr data;
+        data.op = ir::Op::DataAddr;
+        data.loc = n.pos;
+        data.type = tablePtr;
+        data.width = ir::IRType::Ptr;
+        data.globalLabel = table;
+        data.isPure = true;
+        ir::Value tableWord = newValue(data.width, tablePtr, n.pos);
+        data.results.push_back(tableWord);
+        emit(std::move(data));
+        if (failed_) {
+            return {undefined()};
+        }
+        Place slot;
+        slot.hasIndirect = true;
+        slot.indirect = at;
+        slot.off = 0;
+        slot.type = TypeRef{ctx_.basic(BasicKind::U64)};
+        storeRange(n.pos, slot, {tableWord}, slot.type);
+        if (failed_) {
+            return {undefined()};
+        }
+    }
+    Place defaults;
+    defaults.hasIndirect = true;
+    defaults.indirect = at;
+    defaults.off = 0;
+    emitFieldDefaults(defaults, TypeRef{obj}, n.pos);
+    if (failed_) {
+        return {undefined()};
+    }
+    ir::Instr run;
+    run.op = ir::Op::Call;
+    run.loc = n.pos;
+    run.callee = resolver_.linkName(*owner) + "__init";
+    run.mayTrap = true;
+    ir::Argument self;
+    self.words.push_back(at);
+    run.arguments.push_back(std::move(self));
+    for (uint64_t i = 0; i < static_cast<uint64_t>(n.args.size()); ++i) {
+        ir::Argument arg;
+        arg.words = lowerWords(n.args[i].get());
+        if (failed_) {
+            return {undefined()};
+        }
+        if (init == nullptr ||
+            i >= static_cast<uint64_t>(init->parameters().size())) {
+            refuse(n.pos, "this construction");
+            return {undefined()};
+        }
+        TypeRef want{init->parameters()[static_cast<size_t>(i)].type};
+        arg.words = adjustStringLitArg(n.args[i].get(), std::move(arg.words), want);
+        arg.words = boxClassOperand(n.args[i].get(), std::move(arg.words),
+                                    checker_.typeOf(n.args[i].get()), want,
+                                    n.args[i]->pos);
+        if (failed_) {
+            return {undefined()};
+        }
+        TypeRef argType = checker_.typeOf(n.args[i].get());
+        if (!argType.isError() && argType.type->kind() == Kind::Basic &&
+            basicIsFloat(*argType.type->basic()) &&
+            arg.words.size() == static_cast<size_t>(kOneWord)) {
+            arg.width = *argType.type->basic() == BasicKind::F32
+                            ? ir::IRType::F32
+                            : ir::IRType::F64;
+        }
+        run.arguments.push_back(std::move(arg));
+    }
+    run.width = ir::IRType::Void;
+    emit(std::move(run));
+    if (failed_) {
+        return {undefined()};
+    }
+    TypeRef boolean{ctx_.basic(BasicKind::Bool)};
+    storeResultField(slots, resultType, "is_ok",
+                     constantI64(1, boolean, n.pos), n.pos);
+    if (failed_) {
+        return {undefined()};
+    }
+    storeResultField(slots, resultType, "value", at, n.pos);
+    if (failed_) {
+        return {undefined()};
+    }
+    ir::Terminator okJoin;
+    okJoin.term = ir::Term::Br;
+    okJoin.target = joinLabel;
+    okJoin.loc = n.pos;
+    emitTerminator(okJoin);
+    sealBlock(okLabel);
+    startBlock(joinLabel);
+    return loadResultWords(slots, resultType, n.pos);
 }
 
 std::vector<ir::Value> Lowerer::lowerSuperInit(const SuperInit& n) {
@@ -7963,7 +8364,8 @@ std::vector<ir::Value> Lowerer::lowerWords(const Expr* expr, TypeRef fallback) {
         return {constantI64(wideChar->value, one, wideChar->pos)};
     }
     if (dynamic_cast<const NewStruct*>(expr) != nullptr) {
-        return lowerNewStruct(static_cast<const NewStruct&>(*expr));
+        const auto& made = static_cast<const NewStruct&>(*expr);
+        return made.tryNew ? lowerTryNewStruct(made) : lowerNewStruct(made);
     }
     if (dynamic_cast<const NewArray*>(expr) != nullptr) {
         return lowerNewArray(static_cast<const NewArray&>(*expr));
@@ -7972,7 +8374,8 @@ std::vector<ir::Value> Lowerer::lowerWords(const Expr* expr, TypeRef fallback) {
         return lowerArrayLit(static_cast<const ArrayLit&>(*expr));
     }
     if (dynamic_cast<const NewClass*>(expr) != nullptr) {
-        return lowerNewClass(static_cast<const NewClass&>(*expr));
+        const auto& made = static_cast<const NewClass&>(*expr);
+        return made.tryNew ? lowerTryNewClass(made) : lowerNewClass(made);
     }
     if (dynamic_cast<const SuperInit*>(expr) != nullptr) {
         return lowerSuperInit(static_cast<const SuperInit&>(*expr));

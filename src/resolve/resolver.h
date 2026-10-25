@@ -234,6 +234,13 @@ public:
         DeclId spec) const;
     // True when the declaration id names a template instantiation.
     bool isSpecialization(DeclId id) const;
+    // Core `Result<T, E>` and `AllocError` are compiler-owned value types,
+    // not library imports: `try_new` answers `Result<*T, AllocError>` with
+    // no prelude. Both names bind in every module scope.
+    DeclId coreResultTemplate() const { return coreResult_->id; }
+    TypeRef coreAllocError() const;
+    // `AllocError.OutOfMemory`'s underlying value.
+    int64_t coreAllocOutOfMemory() const;
     // The declaration for an id, by scan. The table is small and lookups are
     // rare (templates and specializations only).
     const Decl* declById(DeclId id) const;
@@ -293,6 +300,11 @@ private:
                            const TypeExpr* returns, const Scope* scope, bool& failed,
                            Abi abi = Abi::SysV);
     void bindPrelude(const Scope* scope, Position pos);
+    // Creates the core declarations once and binds their names in each
+    // module scope. They have no AST: their fields and enumerators live in
+    // the resolver's tables beside every specialized generic.
+    void declareCoreTypes();
+    void bindCoreTypes(const Scope* scope);
     // Size/alignment with a visited set: a struct naming itself (directly or
     // through friends) is -1, not a stack overflow. The checker rejects
     // uninhabitable types; the resolver still must not hang if one arrives.
@@ -371,6 +383,9 @@ private:
     TypeContext& ctx_;
     ModuleLoader load_;
     target::Kind target_ = target::Kind::Native;
+    const Scope* coreScope_ = nullptr;
+    Decl* coreResult_ = nullptr;
+    Decl* coreAllocError_ = nullptr;
     std::vector<std::unique_ptr<Decl>> decls_;
     std::vector<std::unique_ptr<Scope>> scopes_;
     std::unordered_map<std::string, const Scope*> modules_;

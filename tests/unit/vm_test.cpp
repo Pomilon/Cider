@@ -661,6 +661,51 @@ void testSuperInit() {
           "the optimised shifted base answers 89: " + sopr.error);
 }
 
+// `try_new` answers Result<*T, AllocError> and constructs only on success.
+void testTryNew() {
+    std::printf("try_new answers a Result\n");
+    const std::string source =
+        "var pool: [u8; 64] = [0, ...];\n"
+        "var fail: bool = false;\n"
+        "func operator new(size: i64, align: i64) -> *void {\n"
+        "    if (fail) { return nilPtr; }\n"
+        "    return &pool[0] as *void;\n"
+        "}\n"
+        "struct S { var x: int; var y: int; }\n"
+        "class C { var x: int; func init(v: int) { (*self).x = v; } }\n"
+        "func main() -> int {\n"
+        "    var r: Result<*S, AllocError> = try_new S { x: 40, y: 2 };\n"
+        "    if (!r.is_ok) { return 1; }\n"
+        "    if (r.value->x + r.value->y != 42) { return 2; }\n"
+        "    fail = true;\n"
+        "    var e: Result<*S, AllocError> = try_new S { x: 1, y: 2 };\n"
+        "    if (e.is_ok) { return 3; }\n"
+        "    if (e.error != AllocError.OutOfMemory) { return 4; }\n"
+        "    fail = false;\n"
+        "    var c: Result<*C, AllocError> = try_new C(7);\n"
+        "    if (!c.is_ok) { return 5; }\n"
+        "    if (c.value->x != 7) { return 6; }\n"
+        "    fail = true;\n"
+        "    var d: Result<*C, AllocError> = try_new C(9);\n"
+        "    if (d.is_ok) { return 7; }\n"
+        "    if (d.error != AllocError.OutOfMemory) { return 8; }\n"
+        "    return 0;\n"
+        "}\n";
+    Lowered unopt = lower(source);
+    check(unopt.ok, "lowers: " + unopt.stage);
+    if (!unopt.ok) {
+        return;
+    }
+    cider::vm::VmResult unr = cider::vm::run(*unopt.module, "");
+    check(unr.ok && unr.exitCode == 0,
+          "the unoptimised try_new answers 0: " + unr.error);
+    cider::opt::OptResult ores = cider::opt::run(*unopt.module);
+    check(ores.ok, "optimises: " + ores.error);
+    cider::vm::VmResult opr = cider::vm::run(*unopt.module, "");
+    check(opr.ok && opr.exitCode == 0,
+          "the optimised try_new answers 0: " + opr.error);
+}
+
 // 4.8.3: delete runs the destructor chain, and a hierarchy that carries a
 // table starts it dynamically — both legs of the VM agree.
 void testPolymorphicDelete() {
@@ -1047,6 +1092,7 @@ int main() {
     testFileSyscalls();
     testArgv();
     testSuperInit();
+    testTryNew();
     testPolymorphicDelete();
     testGlobalClassVptr();
     testMultipleBases();

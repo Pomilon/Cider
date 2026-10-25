@@ -45,6 +45,7 @@ const char* tokenName(TokenKind kind) {
         case TokenKind::KwDefer: return "defer";
         case TokenKind::KwDelete: return "delete";
         case TokenKind::KwNew: return "new";
+        case TokenKind::KwTryNew: return "try_new";
         case TokenKind::KwAs: return "as";
         case TokenKind::KwAnd: return "and";
         case TokenKind::KwOr: return "or";

@@ -1,7 +1,7 @@
 // CIDER-CHORE-003: std.result expect() failure path. expect prints the
 // caller's message and exits 1; the triple-differential harness pins the
 // exact stdout, empty stderr and exit code for all three backends.
-from std.result import Result, err, expect;
+from std.result import err, expect;
 
 func main() -> int {
     var r: Result<int, string> = err::<int, string>("missing value");
