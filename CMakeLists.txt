@@ -229,6 +229,12 @@ add_test(NAME runtime_diagnostics
 set_tests_properties(runtime_diagnostics PROPERTIES
   ENVIRONMENT "CIDER_BIN=${CMAKE_BINARY_DIR}/cider")
 
+add_test(NAME v4_freestanding
+         COMMAND ${Python3_EXECUTABLE}
+                 ${CMAKE_SOURCE_DIR}/tests/v4/freestanding_symbol_test.py)
+set_tests_properties(v4_freestanding PROPERTIES
+  ENVIRONMENT "CIDER_BIN=${CMAKE_BINARY_DIR}/cider")
+
 # --- Targets -------------------------------------------------------------------
 #
 # OUTPUT.md §2: a target is a description, not a layer. The descriptor is the
