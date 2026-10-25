@@ -1539,6 +1539,36 @@ void testOperators() {
         }
     }
     check(callOpCall, "a(6) lowers to the call operator");
+
+    Lowered assignOp = lower(
+        "struct C { var x: int;\n"
+        "    func operator=(other: C) -> void { (*self).x = other.x + 1; }\n"
+        "}\n"
+        "func main() -> int {\n"
+        "    var a: C = C { x: 1 };\n"
+        "    var b: C = C { x: 2 };\n"
+        "    a = b;\n"
+        "    return a.x;\n"
+        "}\n");
+    check(assignOp.ok, "an assignment operator program lowers: " + assignOp.stage);
+    if (!assignOp.ok) {
+        return;
+    }
+    check(find(assignOp.module.get(), "C__operator_assign") != nullptr,
+          "the assignment operator emits a method");
+    bool assignCall = false;
+    const cider::ir::Function* assignMain = find(assignOp.module.get(), "main");
+    if (assignMain != nullptr) {
+        for (const cider::ir::Block& block : assignMain->blocks) {
+            for (const cider::ir::Instr& instr : block.body) {
+                if (instr.op == cider::ir::Op::Call &&
+                    instr.callee == "C__operator_assign") {
+                    assignCall = true;
+                }
+            }
+        }
+    }
+    check(assignCall, "a = b lowers to the assignment operator");
 }
 
 void testMultiWordReturn() {

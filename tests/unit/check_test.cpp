@@ -461,6 +461,55 @@ void testOperatorOverloads() {
         "func operator()(a: Adder, x: int) -> int { return a.base + x; }\n");
     check(!freeCall.ok && freeCall.stage == "check",
           "a call operator must be a member");
+
+    Checked assign = check(
+        "struct C { var x: int;\n"
+        "    func operator=(other: C) -> void { (*self).x = other.x + 1; }\n"
+        "}\n"
+        "func main() -> int {\n"
+        "    var a: C = C { x: 1 };\n"
+        "    var b: C = C { x: 2 };\n"
+        "    a = b;\n"
+        "    return a.x;\n"
+        "}\n");
+    check(assign.ok, "a member assignment operator checks: " + assign.stage);
+
+    Checked assignMismatch = check(
+        "struct C { var x: int;\n"
+        "    func operator=(other: C) -> void { (*self).x = other.x; }\n"
+        "}\n"
+        "func main() -> int {\n"
+        "    var a: C = C { x: 1 };\n"
+        "    a = true;\n"
+        "    return a.x;\n"
+        "}\n");
+    check(!assignMismatch.ok && assignMismatch.stage == "check",
+          "an assignment operator needs an exact value type");
+
+    Checked freeAssign = check(
+        "struct C { var x: int; }\n"
+        "func operator=(a: C, b: C) -> void { a.x = b.x; }\n");
+    check(!freeAssign.ok && freeAssign.stage == "check",
+          "an assignment operator must be a member");
+
+    Checked assignReturn = check(
+        "struct C { var x: int;\n"
+        "    func operator=(other: C) -> C { return other; }\n"
+        "}\n");
+    check(!assignReturn.ok && assignReturn.stage == "check",
+          "an assignment operator returns void");
+
+    Checked plainAssign = check(
+        "struct C { var x: int; }\n"
+        "func main() -> int {\n"
+        "    var a: C = C { x: 1 };\n"
+        "    var b: C = C { x: 2 };\n"
+        "    a = b;\n"
+        "    return a.x;\n"
+        "}\n");
+    check(plainAssign.ok,
+          "a type without operator= keeps built-in assignment: " +
+              plainAssign.stage);
 }
 
 void testInitAssign() {

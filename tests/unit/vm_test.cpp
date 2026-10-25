@@ -931,6 +931,29 @@ void testOperatorOverloadsVm() {
     cider::vm::VmResult copr = cider::vm::run(*callOp.module, "");
     check(copr.ok && copr.exitCode == 10,
           "the optimised call operator answers 10: " + copr.error);
+
+    Lowered assignOp = lower(
+        "struct C { var x: int;\n"
+        "    func operator=(other: C) -> void { (*self).x = other.x + 1; }\n"
+        "}\n"
+        "func main() -> int {\n"
+        "    var a: C = C { x: 1 };\n"
+        "    var b: C = C { x: 2 };\n"
+        "    a = b;\n"
+        "    return a.x;\n"
+        "}\n");
+    check(assignOp.ok, "an assignment operator program lowers: " + assignOp.stage);
+    if (!assignOp.ok) {
+        return;
+    }
+    cider::vm::VmResult aunr = cider::vm::run(*assignOp.module, "");
+    check(aunr.ok && aunr.exitCode == 3,
+          "the unoptimised assignment operator answers 3: " + aunr.error);
+    cider::opt::OptResult aores = cider::opt::run(*assignOp.module);
+    check(aores.ok, "the assignment operator program optimises: " + aores.error);
+    cider::vm::VmResult aopr = cider::vm::run(*assignOp.module, "");
+    check(aopr.ok && aopr.exitCode == 3,
+          "the optimised assignment operator answers 3: " + aopr.error);
 }
 
 }  // namespace

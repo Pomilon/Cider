@@ -97,6 +97,10 @@ bool Checker::isOperatorCall(const Call* expr) const {
     return operatorCalls_.find(expr) != operatorCalls_.end();
 }
 
+bool Checker::isOperatorAssign(const Assign* expr) const {
+    return operatorAssigns_.find(expr) != operatorAssigns_.end();
+}
+
 std::optional<DeclId> Checker::specOf(const Call* call,
                                               const std::optional<DeclId>& ctx) const {
     std::string key;
@@ -1272,6 +1276,10 @@ void Checker::visitFuncDecl(FuncDecl& n) {
             fail(n.pos, "operator '()' must be a member");
             return;
         }
+        if (n.name == "operator_assign") {
+            fail(n.pos, "operator '=' must be a member");
+            return;
+        }
         const bool unary =
             n.name == "operator_neg" || n.name == "operator_bitnot";
         if (unary && sig.arity() != 1) {
@@ -1908,6 +1916,12 @@ void Checker::checkMethods(DeclId id, Kind kind, std::vector<MethodDecl>& method
             sig->arity() != kOneParameter) {
             fail(method.pos,
                  "a binary operator takes exactly one parameter in a member declaration");
+            continue;
+        }
+        if (method.name == "operator_assign" &&
+            sig->returnType() != nullptr &&
+            sig->returnType() != ctx_.void_()) {
+            fail(method.pos, "operator '=' returns void");
             continue;
         }
         pushScope();
@@ -2794,6 +2808,37 @@ void Checker::visitAssign(Assign& n) {
         if (!base.isError() && base.type->kind() == Kind::String) {
             fail(n.target->pos, "strings are immutable");
             record(&n, errorRef());
+            return;
+        }
+    }
+    if (!n.op.has_value() &&
+        (target.type->kind() == Kind::Struct || target.type->kind() == Kind::Class)) {
+        // `a = b` on a nominal value uses its member `operator=` when one
+        // is declared. The declaration owns the store; built-in aggregate
+        // assignment remains the fallback for types that do not declare it.
+        std::optional<DeclId> id = target.type->decl();
+        const Signature* assignSig =
+            id.has_value() ? resolver_.methodSig(*id, "operator_assign")
+                           : nullptr;
+        if (assignSig != nullptr) {
+            if (assignSig->arity() != kOneParameter) {
+                fail(n.pos, "no matching operator '='");
+                record(&n, errorRef());
+                return;
+            }
+            TypeRef want{assignSig->parameters()[0].type};
+            TypeRef value = checkExpr(n.value.get(), want);
+            if (value.isError()) {
+                record(&n, errorRef());
+                return;
+            }
+            if (value != want) {
+                fail(n.value->pos, "no matching operator '='");
+                record(&n, errorRef());
+                return;
+            }
+            operatorAssigns_.insert(&n);
+            record(&n, TypeRef{ctx_.void_()});
             return;
         }
     }

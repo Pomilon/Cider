@@ -9736,6 +9736,19 @@ std::vector<ir::Value> Lowerer::lowerOperatorCall(Call& n) {
     return words;
 }
 
+std::vector<ir::Value> Lowerer::lowerOperatorAssign(Assign& n) {
+    Call call(n.pos,
+              std::make_unique<Field>(n.pos, std::move(n.target),
+                                      "operator_assign"),
+              {}, std::vector<std::unique_ptr<Expr>>{});
+    call.args.push_back(std::move(n.value));
+    std::vector<ir::Value> words = lowerCallWords(call);
+    auto* field = static_cast<Field*>(call.callee.get());
+    n.target = std::move(field->object);
+    n.value = std::move(call.args[0]);
+    return words;
+}
+
 std::vector<ir::Value> Lowerer::lowerCallWords(Call& n) {
     if (failed_) {
         return {undefined()};
@@ -12575,6 +12588,23 @@ ir::Value Lowerer::lowerAssign(Assign& n) {
     if (failed_) {
         return undefined();
     }
+    if (checker_.isOperatorAssign(&n)) {
+        // The member returns void, so a user-defined assignment is a
+        // statement: there is no value to chain or read.
+        std::vector<ir::Value> words = lowerOperatorAssign(n);
+        if (failed_) {
+            return undefined();
+        }
+        if (words.empty()) {
+            refuse(n.pos, "a void assignment is not an expression");
+            return undefined();
+        }
+        if (words.size() != kOneWord) {
+            refuse(n.pos, "a multi-word assignment is not an expression");
+            return undefined();
+        }
+        return words[0];
+    }
     TypeRef target = checker_.typeOf(n.target.get());
     std::vector<ir::Value> value = lowerWords(n.value.get());
     value = adjustStringLitArg(n.value.get(), std::move(value), target);
@@ -12645,6 +12675,10 @@ bool Lowerer::compoundValue(Assign& n, std::vector<ir::Value>& value) {
 // lowerAssign and refuses there.
 void Lowerer::lowerAssignStmt(Assign& n) {
     if (failed_) {
+        return;
+    }
+    if (checker_.isOperatorAssign(&n)) {
+        (void)lowerOperatorAssign(n);
         return;
     }
     TypeRef target = checker_.typeOf(n.target.get());

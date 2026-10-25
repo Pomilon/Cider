@@ -208,6 +208,7 @@ public:
     std::vector<ir::Value> lowerOperatorCall(Unary& n);
     std::vector<ir::Value> lowerOperatorCall(Index& n);
     std::vector<ir::Value> lowerOperatorCall(Call& n);
+    std::vector<ir::Value> lowerOperatorAssign(Assign& n);
     ir::Value onCall(Call& n);
     ir::Value onIdent(Ident& n);
     ir::Value onCast(Cast& n);
