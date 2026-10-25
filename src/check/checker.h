@@ -166,6 +166,10 @@ public:
     const std::string& module() const { return module_; }
 
     TypeRef typeOf(const Node* node) const;
+    // The user-defined binary operator the checker selected for this node,
+    // or null when the built-in rules apply. Lowering asks this instead of
+    // re-running overload resolution.
+    const resolve::Decl* operatorDecl(const Binary* expr) const;
     const std::vector<CheckError>& errors() const { return errors_; }
     size_t errorCount() const { return errors_.size(); }
     // The specialization a generic call instantiated, by call site and
@@ -299,6 +303,12 @@ private:
     bool isPlace(const Expr* expr) const;
     bool isInteger(TypeRef type) const;
     TypeRef checkBinary(Binary& expr, TypeRef expected);
+    // A binary operator with a class or struct operand must have a matching
+    // free declaration in this module. Answers false when the built-in rules
+    // should run (no nominal operand); records a diagnostic and answers true
+    // when a class/struct operand has no match.
+    bool checkOperatorOverload(Binary& expr, TypeRef lhs, TypeRef rhs,
+                               TypeRef& result);
     void checkShiftDiv(const Binary& expr, TypeRef lhs, TypeRef rhs);
     TypeRef checkCall(Call& expr);
     TypeRef checkField(Field& expr);
@@ -456,6 +466,10 @@ private:
     std::unordered_map<const SizeofType*, TypeRef> sizeofOperands_;
     std::unordered_map<const SizeofExpr*, TypeRef> sizeofExprOperands_;
     std::unordered_map<const AlignofType*, TypeRef> alignofOperands_;
+    // Binary expression -> the free operator declaration selected for it.
+    // Only class/struct/enum operands are recorded; lowering reads this map
+    // rather than resolving the name a second time.
+    std::unordered_map<const Binary*, const resolve::Decl*> operatorDecls_;
     // Types resolve here rather than at module scope during generic walks,
     // where the template's parameters are bound.
     const resolve::Scope* typeScope_ = nullptr;

@@ -7952,10 +7952,13 @@ std::vector<ir::Value> Lowerer::lowerWords(const Expr* expr, TypeRef fallback) {
     // String concatenation answers two words, so it dispatches here like
     // calls: the scalar path below would keep only the address. Anything
     // else binary stays scalar, where widths decide.
-    if (const auto* add = dynamic_cast<const Binary*>(expr)) {
+    if (const auto* binary = dynamic_cast<const Binary*>(expr)) {
+        if (checker_.operatorDecl(binary) != nullptr) {
+            return lowerOperatorCall(const_cast<Binary&>(*binary));
+        }
         TypeRef type = checker_.typeOf(expr);
         if (!type.isError() && type.type->kind() == Kind::String) {
-            refuse(add->pos, "string concatenation is a library operation");
+            refuse(binary->pos, "string concatenation is a library operation");
             return {undefined()};
         }
     }
@@ -8793,6 +8796,17 @@ ir::Value Lowerer::onBinary(Binary& n, TypeRef fallback) {
     if (failed_) {
         return undefined();
     }
+    if (checker_.operatorDecl(&n) != nullptr) {
+        std::vector<ir::Value> words = lowerOperatorCall(n);
+        if (failed_) {
+            return undefined();
+        }
+        if (words.size() != kOneWord) {
+            refuse(n.pos, "a multi-word operator result in a scalar position");
+            return undefined();
+        }
+        return words[kFirstWord];
+    }
     if (n.op == BinOp::AndAnd || n.op == BinOp::OrOr) {
         return lowerShortCircuit(n);
     }
@@ -9625,6 +9639,22 @@ std::vector<ir::Value> Lowerer::callResults(ir::Instr& call, const Type* ret,
     call.width = out[0].width;
     call.type = out[0].type;
     return out;
+}
+
+std::vector<ir::Value> Lowerer::lowerOperatorCall(Binary& n) {
+    const resolve::Decl* op = checker_.operatorDecl(&n);
+    if (op == nullptr) {
+        refuse(n.pos, "this operator call");
+        return {undefined()};
+    }
+    Call call(n.pos, std::make_unique<Ident>(n.pos, op->name), {},
+              std::vector<std::unique_ptr<Expr>>{});
+    call.args.push_back(std::move(n.lhs));
+    call.args.push_back(std::move(n.rhs));
+    std::vector<ir::Value> words = lowerCallWords(call);
+    n.lhs = std::move(call.args[0]);
+    n.rhs = std::move(call.args[1]);
+    return words;
 }
 
 std::vector<ir::Value> Lowerer::lowerCallWords(Call& n) {

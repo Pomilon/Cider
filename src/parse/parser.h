@@ -79,6 +79,10 @@ private:
     std::unique_ptr<Decl> parseDecl();
     std::unique_ptr<VarDecl> parseGlobal();
     std::unique_ptr<Decl> parseFuncDecl(bool exported);
+    // Consumes `operator` and one allowed binary operator spelling, storing
+    // the canonical link-safe name. Rejects every operator this slice cannot
+    // declare yet.
+    bool parseOperatorName(std::string& out);
     std::unique_ptr<Decl> parseStructDecl(bool exported);
     std::unique_ptr<Decl> parseClassDecl(bool exported);
     std::unique_ptr<Decl> parseInterfaceDecl();

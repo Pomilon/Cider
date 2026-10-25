@@ -217,6 +217,30 @@ void testExceptionsRejected() {
     check(!ok, "throw no longer parses");
 }
 
+// Operator declarations spell the operator after `operator`; the parser
+// stores one canonical, link-safe name for each allowed spelling.
+void testOperatorNames() {
+    std::printf("operator declarations\n");
+    bool ok = false;
+    std::unique_ptr<cider::Program> program = parse(
+        "func operator+(a: Vec, b: Vec) -> Vec { return a; }\n", ok);
+    check(ok, "a free operator parses");
+    if (program != nullptr && !program->decls.empty()) {
+        const cider::FuncDecl& fn =
+            static_cast<const cider::FuncDecl&>(*program->decls[0]);
+        check(fn.name == "operator_add",
+              "the parser stores the canonical operator name");
+    }
+
+    ok = false;
+    parse("func operator&&(a: Vec, b: Vec) -> Vec { return a; }\n", ok);
+    check(!ok, "short-circuit operators cannot be overloaded");
+
+    ok = false;
+    parse("func operator!(a: Vec) -> Vec { return a; }\n", ok);
+    check(!ok, "unary operators cannot be declared yet");
+}
+
 // `1 | 2 =>` is one arm with two alternatives: the bar separates patterns,
 // not arms, and the body belongs to all of them.
 void testAlternation() {
@@ -466,6 +490,7 @@ int main() {
     testGenericCall();
     testControlForms();
     testExceptionsRejected();
+    testOperatorNames();
     testAlternation();
     testGuard();
     testRange();

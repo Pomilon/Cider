@@ -1377,6 +1377,39 @@ void testBareReturn() {
 // A two-word return fills the terminator's word list: the register row
 // reads it back in order (rax, rdx), so the shape is pinned here, not
 // just observed through execution.
+void testOperators() {
+    std::printf("free operators lower as calls\n");
+    Lowered r = lower(
+        "struct Vec { var x: int; var y: int; }\n"
+        "func operator+(a: Vec, b: Vec) -> Vec {\n"
+        "    return Vec { x: a.x + b.x, y: a.y + b.y };\n"
+        "}\n"
+        "func main() -> int {\n"
+        "    var a: Vec = Vec { x: 1, y: 2 };\n"
+        "    var b: Vec = Vec { x: 3, y: 4 };\n"
+        "    var c: Vec = a + b;\n"
+        "    return c.x + c.y;\n"
+        "}\n");
+    check(r.ok, "an operator program lowers: " + r.stage);
+    if (!r.ok) {
+        return;
+    }
+    const cider::ir::Function* op = find(r.module.get(), "operator_add");
+    check(op != nullptr, "the operator declaration emits a function");
+    const cider::ir::Function* main = find(r.module.get(), "main");
+    bool call = false;
+    if (main != nullptr) {
+        for (const cider::ir::Block& block : main->blocks) {
+            for (const cider::ir::Instr& instr : block.body) {
+                if (instr.op == cider::ir::Op::Call && instr.callee == "operator_add") {
+                    call = true;
+                }
+            }
+        }
+    }
+    check(call, "a struct + struct lowers to the operator call");
+}
+
 void testMultiWordReturn() {
     std::printf("multi-word returns fill Ret words\n");
     Lowered r = lower(
@@ -1573,6 +1606,7 @@ int main() {
     testCompare();
     testSsa();
     testCalls();
+    testOperators();
     testLoop();
     testBareReturn();
     testNestedConstruct();

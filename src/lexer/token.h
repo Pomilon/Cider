@@ -41,7 +41,7 @@ enum class TokenKind {
     WideStringLit,// `u"AB"` — UTF-16 units in Literal, no interpolation
     WideCharLit, // `u'Z'` — a code point in Literal, typed u16
 
-    KwFunc, KwExtern, KwStruct, KwClass, KwInterface, KwUnion, KwEnum,
+    KwFunc, KwOperator, KwExtern, KwStruct, KwClass, KwInterface, KwUnion, KwEnum,
     KwVar, KwConst, KwType, KwImport, KwFrom, KwExport, KwReturn,
     KwIf, KwElse, KwWhile, KwFor, KwIn, KwMatch, KwDefault,
     KwBreak, KwContinue, KwDefer,

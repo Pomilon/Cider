@@ -288,6 +288,46 @@ void testExceptionSyntaxRemoved() {
           "try/catch fails at parse");
 }
 
+void testOperatorOverloads() {
+    std::printf("free binary operator overloading\n");
+    Checked good = check(
+        "struct Vec { var x: int; var y: int; }\n"
+        "func operator+(a: Vec, b: Vec) -> Vec {\n"
+        "    return Vec { x: a.x + b.x, y: a.y + b.y };\n"
+        "}\n"
+        "func main() -> int {\n"
+        "    var a: Vec = Vec { x: 1, y: 2 };\n"
+        "    var b: Vec = Vec { x: 3, y: 4 };\n"
+        "    var c: Vec = a + b;\n"
+        "    return c.x + c.y;\n"
+        "}\n");
+    check(good.ok, "a free operator on a struct checks: " + good.stage);
+
+    Checked mismatch = check(
+        "struct Vec { var x: int; var y: int; }\n"
+        "func operator+(a: Vec, b: Vec) -> Vec { return a; }\n"
+        "func main() -> int {\n"
+        "    var a: Vec = Vec { x: 1, y: 2 };\n"
+        "    var c: Vec = a + 1;\n"
+        "    return c.x;\n"
+        "}\n");
+    check(!mismatch.ok && mismatch.stage == "check",
+          "an operator call needs exact operand types");
+
+    Checked noNominal = check(
+        "func operator+(a: int, b: int) -> int { return a + b; }\n"
+        "func main() -> int { return 1 + 2; }\n");
+    check(!noNominal.ok && noNominal.stage == "check",
+          "an operator declaration needs a class, struct or enum operand");
+
+    Checked member = check(
+        "class C { var x: int;\n"
+        "    func operator+(a: C) -> C { return a; }\n"
+        "}\n");
+    check(!member.ok && member.stage == "check",
+          "member operator overloading is not implemented yet");
+}
+
 void testInitAssign() {
     std::printf("init assigns every field\n");
     Checked gap = check(
@@ -2421,6 +2461,7 @@ int main() {
     testFuncLitChecks();
     testControl();
     testExceptionSyntaxRemoved();
+    testOperatorOverloads();
     testForInProtocol();
     testInitAssign();
     testLoopMatchRefused();

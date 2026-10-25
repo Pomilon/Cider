@@ -201,6 +201,10 @@ public:
     std::vector<ir::Value> callSretLoads(const std::vector<ir::Value>& slots,
                                          const Type* ret, Position pos);
     std::vector<ir::Value> lowerCallWords(Call& n);
+    // A binary node the checker resolved to a free operator declaration is
+    // emitted as an ordinary call. The operands are moved into a synthetic
+    // Call and moved back afterwards so the AST keeps owning them.
+    std::vector<ir::Value> lowerOperatorCall(Binary& n);
     ir::Value onCall(Call& n);
     ir::Value onIdent(Ident& n);
     ir::Value onCast(Cast& n);

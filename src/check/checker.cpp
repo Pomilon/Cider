@@ -11,6 +11,7 @@
 
 #include "check/checker.h"
 
+#include "ast/operator.h"
 #include "types/context.h"
 
 namespace cider {
@@ -66,6 +67,11 @@ void Checker::record(const Node* node, TypeRef type) {
 
 TypeRef Checker::typeOf(const Node* node) const {
     return resolver_.typeOf(node);
+}
+
+const resolve::Decl* Checker::operatorDecl(const Binary* expr) const {
+    auto found = operatorDecls_.find(expr);
+    return found == operatorDecls_.end() ? nullptr : found->second;
 }
 
 std::optional<DeclId> Checker::specOf(const Call* call,
@@ -1219,6 +1225,9 @@ void Checker::visitProgram(Program& n) {
 
 void Checker::visitFuncDecl(FuncDecl& n) {
     if (!n.typeParams.empty()) {
+        if (isOperatorName(n.name)) {
+            fail(n.pos, "an operator cannot be generic");
+        }
         return;
     }
     // Globals read only their own function's stores: a callee cannot
@@ -1230,6 +1239,22 @@ void Checker::visitFuncDecl(FuncDecl& n) {
     Signature sig = resolver_.buildSignature(n.params, n.returns.get(), moduleScope_, failed);
     if (failed) {
         return;
+    }
+    if (isOperatorName(n.name)) {
+        if (sig.arity() != 2) {
+            fail(n.pos, "a binary operator takes exactly two parameters");
+            return;
+        }
+        const auto nominal = [](const Type* type) {
+            Kind kind = type->kind();
+            return kind == Kind::Struct || kind == Kind::Class ||
+                   kind == Kind::Enum;
+        };
+        const auto& params = sig.parameters();
+        if (!nominal(params[0].type) && !nominal(params[1].type)) {
+            fail(n.pos, "an operator needs a class, struct or enum operand");
+            return;
+        }
     }
     const Type* ret = sig.returnType() != nullptr ? sig.returnType() : ctx_.void_();
     pushScope();
@@ -1814,6 +1839,10 @@ void Checker::checkMethods(DeclId id, Kind kind, std::vector<MethodDecl>& method
     // (plain and virtual, or two signatures) would collide at codegen.
     std::unordered_set<std::string> seen;
     for (MethodDecl& method : methods) {
+        if (isOperatorName(method.name)) {
+            fail(method.pos, "member operator overloading is not implemented yet");
+            continue;
+        }
         if (!seen.insert(method.name).second) {
             fail(method.pos, "duplicate method '" + method.name + "'");
             continue;
@@ -3895,6 +3924,49 @@ bool Checker::isPlace(const Expr* expr) const {
     return false;
 }
 
+bool Checker::checkOperatorOverload(Binary& expr, TypeRef lhs, TypeRef rhs,
+                                    TypeRef& result) {
+    const char* name = binOpOperatorName(expr.op);
+    if (name == nullptr) {
+        return false;
+    }
+    const auto nominal = [](TypeRef type, Kind kind) {
+        return type.type->kind() == kind;
+    };
+    const bool lhsNeeds = nominal(lhs, Kind::Struct) || nominal(lhs, Kind::Class);
+    const bool rhsNeeds = nominal(rhs, Kind::Struct) || nominal(rhs, Kind::Class);
+    const bool lhsEnum = nominal(lhs, Kind::Enum);
+    const bool rhsEnum = nominal(rhs, Kind::Enum);
+    if (!lhsNeeds && !rhsNeeds && !lhsEnum && !rhsEnum) {
+        return false;
+    }
+
+    const resolve::Decl* decl = resolver_.lookup(moduleScope_, name);
+    if (decl != nullptr && decl->kind == resolve::DeclKind::Func &&
+        decl->typeParams == 0 && decl->sig.arity() == 2) {
+        TypeRef first{decl->sig.parameters()[0].type};
+        TypeRef second{decl->sig.parameters()[1].type};
+        if (first == lhs && second == rhs) {
+            operatorDecls_[&expr] = decl;
+            const Type* ret = decl->sig.returnType();
+            result = TypeRef{ret != nullptr ? ret : ctx_.void_()};
+            return true;
+        }
+    }
+
+    // A class or struct has no built-in arithmetic or comparison, so silence
+    // here would only become a confusing "arithmetic needs numbers" later.
+    // Enums keep their built-in comparison rules when no exact operator match
+    // exists; an enum operator is selected only on an exact pair.
+    if (lhsNeeds || rhsNeeds) {
+        fail(expr.pos, std::string("no matching operator '") +
+                          binOpSpelling(expr.op) + "'");
+        result = errorRef();
+        return true;
+    }
+    return false;
+}
+
 TypeRef Checker::checkBinary(Binary& expr, TypeRef expected) {
     TypeRef lhs = checkExpr(expr.lhs.get(), TypeRef{ctx_.wildcard()});
     TypeRef rhs = checkExpr(expr.rhs.get(), TypeRef{ctx_.wildcard()});
@@ -3933,6 +4005,10 @@ TypeRef Checker::checkBinary(Binary& expr, TypeRef expected) {
         lhs = checkExpr(expr.lhs.get(), rhs);
     } else if (rhsLit != nullptr && lhsFloat) {
         rhs = checkExpr(expr.rhs.get(), lhs);
+    }
+    TypeRef overloaded;
+    if (checkOperatorOverload(expr, lhs, rhs, overloaded)) {
+        return overloaded;
     }
     bool isBoolOp = expr.op == BinOp::AndAnd || expr.op == BinOp::OrOr;
     bool isEq = expr.op == BinOp::Eq || expr.op == BinOp::Ne;

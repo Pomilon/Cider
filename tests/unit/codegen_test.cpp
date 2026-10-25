@@ -593,6 +593,24 @@ void testTrapMessages() {
           "division by zero stays silent");
 }
 
+void testOperatorOverloadsNative() {
+    std::printf("free operators run natively\n");
+    bool signaled = false;
+    int code = runCode(
+        "struct Vec { var x: int; var y: int; }\n"
+        "func operator+(a: Vec, b: Vec) -> Vec {\n"
+        "    return Vec { x: a.x + b.x, y: a.y + b.y };\n"
+        "}\n"
+        "func main() -> int {\n"
+        "    var a: Vec = Vec { x: 1, y: 2 };\n"
+        "    var b: Vec = Vec { x: 3, y: 4 };\n"
+        "    var c: Vec = a + b;\n"
+        "    return c.x + c.y;\n"
+        "}\n",
+        signaled);
+    check(!signaled && code == 10, "a struct operator answers 10");
+}
+
 void testTrap() {
     std::printf("traps\n");
     bool signaled = false;
@@ -3008,6 +3026,7 @@ int main() {
     testRegisterEscape();
     testAsm();
     testTrapMessages();
+    testOperatorOverloadsNative();
     testTrap();
     testRemovedPrelude();
     testElementAddr();

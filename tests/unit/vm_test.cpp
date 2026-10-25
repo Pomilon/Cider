@@ -811,6 +811,33 @@ void testFieldDefaults() {
           "the optimised defaults answer 201: " + opr.error);
 }
 
+void testOperatorOverloadsVm() {
+    std::printf("free operators run\n");
+    Lowered p = lower(
+        "struct Vec { var x: int; var y: int; }\n"
+        "func operator+(a: Vec, b: Vec) -> Vec {\n"
+        "    return Vec { x: a.x + b.x, y: a.y + b.y };\n"
+        "}\n"
+        "func main() -> int {\n"
+        "    var a: Vec = Vec { x: 1, y: 2 };\n"
+        "    var b: Vec = Vec { x: 3, y: 4 };\n"
+        "    var c: Vec = a + b;\n"
+        "    return c.x + c.y;\n"
+        "}\n");
+    check(p.ok, "an operator program lowers: " + p.stage);
+    if (!p.ok) {
+        return;
+    }
+    cider::vm::VmResult unr = cider::vm::run(*p.module, "");
+    check(unr.ok && unr.exitCode == 10,
+          "the unoptimised operator answers 10: " + unr.error);
+    cider::opt::OptResult ores = cider::opt::run(*p.module);
+    check(ores.ok, "the operator program optimises: " + ores.error);
+    cider::vm::VmResult opr = cider::vm::run(*p.module, "");
+    check(opr.ok && opr.exitCode == 10,
+          "the optimised operator answers 10: " + opr.error);
+}
+
 }  // namespace
 
 int main() {
@@ -831,6 +858,7 @@ int main() {
     testMultipleBases();
     testNilFnptrCall();
     testFieldDefaults();
+    testOperatorOverloadsVm();
     std::printf("\n%d checks, %s\n", checks, failures == 0 ? "all passed" : "FAILURES");
     return failures == 0 ? 0 : 1;
 }

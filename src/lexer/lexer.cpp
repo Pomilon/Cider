@@ -35,7 +35,8 @@ bool isBin(char c) {
 
 const std::unordered_map<std::string, TokenKind>& keywords() {
     static const std::unordered_map<std::string, TokenKind> table = {
-        {"func", TokenKind::KwFunc}, {"extern", TokenKind::KwExtern},
+        {"func", TokenKind::KwFunc}, {"operator", TokenKind::KwOperator},
+        {"extern", TokenKind::KwExtern},
         {"struct", TokenKind::KwStruct}, {"class", TokenKind::KwClass},
         {"interface", TokenKind::KwInterface}, {"union", TokenKind::KwUnion},
         {"enum", TokenKind::KwEnum}, {"var", TokenKind::KwVar},

@@ -382,13 +382,48 @@ std::unique_ptr<VarDecl> Parser::parseGlobal() {
 
 // --- Declarations ------------------------------------------------------------
 
+// The canonical names are ordinary identifiers, so a module prefix and a
+// method owner can be joined onto them without escaping punctuation.
+bool Parser::parseOperatorName(std::string& out) {
+    Position start = advance().pos;
+    switch (peek().kind) {
+        case TokenKind::Plus: out = "operator_add"; break;
+        case TokenKind::Minus: out = "operator_sub"; break;
+        case TokenKind::Star: out = "operator_mul"; break;
+        case TokenKind::Slash: out = "operator_div"; break;
+        case TokenKind::Percent: out = "operator_rem"; break;
+        case TokenKind::Amp: out = "operator_bitand"; break;
+        case TokenKind::Pipe: out = "operator_bitor"; break;
+        case TokenKind::Caret: out = "operator_xor"; break;
+        case TokenKind::LtLt: out = "operator_shl"; break;
+        case TokenKind::GtGt: out = "operator_shr"; break;
+        case TokenKind::Lt: out = "operator_lt"; break;
+        case TokenKind::Gt: out = "operator_gt"; break;
+        case TokenKind::LtEq: out = "operator_le"; break;
+        case TokenKind::GtEq: out = "operator_ge"; break;
+        case TokenKind::EqEq: out = "operator_eq"; break;
+        case TokenKind::BangEq: out = "operator_ne"; break;
+        default:
+            fail(start, "this operator cannot be overloaded");
+            return false;
+    }
+    advance();
+    return true;
+}
+
 std::unique_ptr<Decl> Parser::parseFuncDecl(bool) {
     Position start = advance().pos;
-    if (!check(TokenKind::Ident)) {
+    std::string name;
+    if (check(TokenKind::KwOperator)) {
+        if (!parseOperatorName(name)) {
+            return nullptr;
+        }
+    } else if (check(TokenKind::Ident)) {
+        name = advance().text;
+    } else {
         failHere("a function needs a name");
         return nullptr;
     }
-    std::string name = advance().text;
     std::vector<std::string> tps;
     if (match(TokenKind::Lt)) {
         for (;;) {
@@ -533,16 +568,23 @@ MethodDecl Parser::parseMethod() {
         failHere("expected a method");
         return MethodDecl(start, "", {}, nullptr, nullptr, false);
     }
-    if (!check(TokenKind::Ident) && !check(TokenKind::KwInit) &&
-        !check(TokenKind::KwDeinit)) {
-        failHere("a method needs a name");
-        return MethodDecl(start, "", {}, nullptr, nullptr, false);
-    }
-    TokenKind nameKind = peek().kind;
-    std::string name = advance().text;
-    if (name.empty() &&
-        (nameKind == TokenKind::KwInit || nameKind == TokenKind::KwDeinit)) {
-        name = tokenName(nameKind);
+    std::string name;
+    if (check(TokenKind::KwOperator)) {
+        if (!parseOperatorName(name)) {
+            return MethodDecl(start, "", {}, nullptr, nullptr, false);
+        }
+    } else {
+        if (!check(TokenKind::Ident) && !check(TokenKind::KwInit) &&
+            !check(TokenKind::KwDeinit)) {
+            failHere("a method needs a name");
+            return MethodDecl(start, "", {}, nullptr, nullptr, false);
+        }
+        TokenKind nameKind = peek().kind;
+        name = advance().text;
+        if (name.empty() &&
+            (nameKind == TokenKind::KwInit || nameKind == TokenKind::KwDeinit)) {
+            name = tokenName(nameKind);
+        }
     }
     if (check(TokenKind::KwInit) || check(TokenKind::KwDeinit)) {
         failHere("an init or deinit needs a body");
