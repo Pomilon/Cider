@@ -12,7 +12,6 @@
 
 #include "check/checker.h"
 #include "codegen/codegen.h"
-#include "exception_ir.h"
 #include "lexer/lexer.h"
 #include "lower/lower.h"
 #include "opt/opt.h"
@@ -592,179 +591,6 @@ void testTrapMessages() {
           "nil function pointer has a diagnostic");
     check(cider::ir::trapMessage(cider::ir::TrapReason::DivByZero) == nullptr,
           "division by zero stays silent");
-}
-
-void testLandingPads() {
-    std::printf("exception landing pads\n");
-    check(std::string(cider::ir::trapMessage(
-                  cider::ir::TrapReason::UncaughtException)) ==
-              "vm error: uncaught exception\n",
-          "uncaught exceptions have a diagnostic");
-
-    testir::Built landing = testir::landing(false);
-    cider::codegen::EmitResult emitted =
-        cider::codegen::emit(landing.module, cider::target::Kind::Native);
-    check(emitted.ok, "a landing module emits: " + emitted.error);
-    check(emitted.text.find("cider_exc_value") != std::string::npos,
-          "landing reads the exception payload");
-    bool signaled = false;
-    std::string err;
-    int code = runAsmCapture(emitted.text, signaled, err);
-    check(!signaled && code == 42 && err.empty(),
-          "the landing answers the payload word");
-
-    testir::Built uncaught = testir::landing(true);
-    cider::codegen::EmitResult uncaughtAsm =
-        cider::codegen::emit(uncaught.module, cider::target::Kind::Native);
-    check(uncaughtAsm.ok, "an uncaught module emits: " + uncaughtAsm.error);
-    check(uncaughtAsm.text.find("vm error: uncaught exception") !=
-              std::string::npos,
-          "the entry checks the exception flag");
-    code = runAsmCapture(uncaughtAsm.text, signaled, err);
-    check(!signaled && code == 2 && err == "vm error: uncaught exception\n",
-          "an uncaught entry writes the line and exits 2");
-
-    testir::Built call = testir::callLanding();
-    cider::codegen::EmitResult callAsm =
-        cider::codegen::emit(call.module, cider::target::Kind::Native);
-    check(callAsm.ok, "a call landing module emits: " + callAsm.error);
-    code = runAsmCapture(callAsm.text, signaled, err);
-    check(!signaled && code == 42 && err.empty(),
-          "a call enters its landing pad only when the flag is set");
-}
-
-void testThrowUncaught() {
-    std::printf("uncaught throw\n");
-    bool signaled = false;
-    std::string err;
-    int code = runCapture("func main() -> int {\n"
-                          "    throw 7;\n"
-                          "}\n",
-                          signaled, err);
-    check(!signaled && code == 2 &&
-              err == "vm error: uncaught exception\n",
-          "a throw in the entry is uncaught");
-    code = runCapture("func fail() -> int {\n"
-                      "    throw 9;\n"
-                      "}\n"
-                      "func main() -> int {\n"
-                      "    return fail();\n"
-                      "}\n",
-                      signaled, err);
-    check(!signaled && code == 2 &&
-              err == "vm error: uncaught exception\n",
-          "a throw crosses a call frame");
-}
-
-void testTryCatch() {
-    std::printf("try catch runs\n");
-    bool signaled = false;
-    std::string err;
-    int code = runCapture("func main() -> int {\n"
-                          "    try {\n"
-                          "        throw 7;\n"
-                          "    } catch e: int {\n"
-                          "        return e;\n"
-                          "    }\n"
-                          "}\n",
-                          signaled, err);
-    check(!signaled && code == 7 && err.empty(),
-          "a typed catch binds the thrown value");
-
-    code = runCapture("func main() -> int {\n"
-                      "    try {\n"
-                      "        throw 7;\n"
-                      "    } catch {\n"
-                      "        return 42;\n"
-                      "    }\n"
-                      "}\n",
-                      signaled, err);
-    check(!signaled && code == 42 && err.empty(),
-          "a bare catch catches any type");
-
-    code = runCapture("func main() -> int {\n"
-                      "    try {\n"
-                      "        try {\n"
-                      "            throw 7;\n"
-                      "        } catch e: int {\n"
-                      "            throw;\n"
-                      "        }\n"
-                      "    } catch e: int {\n"
-                      "        return e;\n"
-                      "    }\n"
-                      "}\n",
-                      signaled, err);
-    check(!signaled && code == 7 && err.empty(),
-          "a rethrow keeps the value and reaches the outer catch");
-
-    code = runCapture("func main() -> int {\n"
-                      "    try {\n"
-                      "        throw 7;\n"
-                      "    } catch e: bool {\n"
-                      "        return 9;\n"
-                      "    } catch e: int {\n"
-                      "        return e;\n"
-                      "    }\n"
-                      "}\n",
-                      signaled, err);
-    check(!signaled && code == 7 && err.empty(),
-          "catch order uses exact type equality");
-
-    code = runCapture("var g: int = 0;\n"
-                      "func bump() { g = g + 1; }\n"
-                      "func main() -> int {\n"
-                      "    try {\n"
-                      "        defer bump();\n"
-                      "        throw 7;\n"
-                      "    } catch e: int {\n"
-                      "        return e * 10 + g;\n"
-                      "    }\n"
-                      "}\n",
-                      signaled, err);
-    check(!signaled && code == 71 && err.empty(),
-          "a throw runs the defer of the scope it leaves");
-
-    code = runCapture("func main() -> int {\n"
-                      "    try {\n"
-                      "        try {\n"
-                      "            throw 1;\n"
-                      "        } catch e: int {\n"
-                      "            throw 2;\n"
-                      "        }\n"
-                      "    } catch e: int {\n"
-                      "        return e;\n"
-                      "    }\n"
-                      "}\n",
-                      signaled, err);
-    check(!signaled && code == 2 && err.empty(),
-          "a throw in a catch targets the outer handler");
-
-    code = runCapture("func main() -> int {\n"
-                      "    try {\n"
-                      "        try {\n"
-                      "            throw 7;\n"
-                      "        } catch e: int {\n"
-                      "            return 1;\n"
-                      "        }\n"
-                      "    } catch {\n"
-                      "        return 2;\n"
-                      "    }\n"
-                      "}\n",
-                      signaled, err);
-    check(!signaled && code == 1 && err.empty(),
-          "an inner catch wins over an outer one");
-
-    code = runCapture("func main() -> int {\n"
-                      "    try {\n"
-                      "        throw 1;\n"
-                      "    } catch e: bool {\n"
-                      "        return 2;\n"
-                      "    }\n"
-                      "}\n",
-                      signaled, err);
-    check(!signaled && code == 2 &&
-              err == "vm error: uncaught exception\n",
-          "no matching catch stays uncaught");
 }
 
 void testTrap() {
@@ -3182,9 +3008,6 @@ int main() {
     testRegisterEscape();
     testAsm();
     testTrapMessages();
-    testLandingPads();
-    testThrowUncaught();
-    testTryCatch();
     testTrap();
     testRemovedPrelude();
     testElementAddr();

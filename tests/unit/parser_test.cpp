@@ -192,18 +192,29 @@ void testGenericCall() {
     check(call.args.size() == 2, "two value arguments");
 }
 
-// `match` arms, `try`/`catch`, and `for-in` parse to their nodes.
+// `match` arms and `for-in` parse to their nodes.
 void testControlForms() {
     std::printf("control forms\n");
     bool ok = false;
     std::unique_ptr<cider::Program> program = parse(
         "func f(v: Value) -> string {"
         " match v { Value { i: x } => { return \"i\"; } default => { return \"?\"; } }"
-        " try { risky(); } catch e: MyError { report(e); }"
         " for (x in xs) { print(x); }"
         "}",
         ok);
     check(ok, "parses");
+}
+
+// v4 removed try/catch/throw from the grammar. The words are ordinary
+// identifiers now, so only the statement forms are rejected.
+void testExceptionsRejected() {
+    std::printf("exception syntax is gone\n");
+    bool ok = false;
+    parse("func f() -> int { try { return 1; } catch { return 0; } }", ok);
+    check(!ok, "try/catch no longer parses");
+    ok = false;
+    parse("func f() -> int { throw 1; }", ok);
+    check(!ok, "throw no longer parses");
 }
 
 // `1 | 2 =>` is one arm with two alternatives: the bar separates patterns,
@@ -454,6 +465,7 @@ int main() {
     testMissingInit();
     testGenericCall();
     testControlForms();
+    testExceptionsRejected();
     testAlternation();
     testGuard();
     testRange();

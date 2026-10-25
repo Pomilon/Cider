@@ -183,7 +183,6 @@ void testTrapFlag() {
     const cider::ir::Instr* div = firstOp(*fn, cider::ir::Op::Div);
     check(div != nullptr, "a div is emitted");
     check(div != nullptr && div->mayTrap, "and it may trap");
-    check(!fn->canThrow, "a trap is not a throw");
 }
 
 // `# experimental(wrap)` travels on the instruction, not in a compiler flag.
@@ -1375,57 +1374,6 @@ void testBareReturn() {
     check(rets == 2, "the early bare return and the value return each close a block");
 }
 
-// Exceptions add their hidden state only when the source uses them, and
-// every throwing call gets a landing pad. The normal path still builds the
-// global fini function, so an exception cannot silently disable it.
-void testExceptions() {
-    std::printf("exceptions build landing pads and hidden state\n");
-    Lowered r = lower(
-        "func fail() -> int { throw 7; }\n"
-        "func main() -> int {\n"
-        "    try { return fail(); } catch e: int { return e; }\n"
-        "}\n");
-    check(r.ok, "an exception program lowers: " + r.stage);
-    if (!r.ok) {
-        return;
-    }
-    check(r.module->usesExceptions, "the module records exception use");
-    bool flag = false;
-    bool type = false;
-    bool value = false;
-    for (const cider::ir::Global& global : r.module->globals) {
-        if (global.label == "cider_exc_flag") {
-            flag = true;
-        } else if (global.label == "cider_exc_type") {
-            type = true;
-        } else if (global.label == "cider_exc_value") {
-            value = global.initWords.size() ==
-                    static_cast<size_t>(cider::ir::Module::kExceptionWords);
-        }
-    }
-    check(flag, "the exception flag global exists");
-    check(type, "the exception type global exists");
-    check(value, "the exception payload holds eight words");
-
-    bool landing = false;
-    bool landingCall = false;
-    for (const cider::ir::Function& fn : r.module->functions) {
-        for (const cider::ir::Block& block : fn.blocks) {
-            for (const cider::ir::Instr& instr : block.body) {
-                if (instr.op == cider::ir::Op::Landing) {
-                    landing = true;
-                }
-                if (instr.op == cider::ir::Op::Call &&
-                    instr.call.landingPad.has_value()) {
-                    landingCall = true;
-                }
-            }
-        }
-    }
-    check(landing, "a typed catch begins with a landing read");
-    check(landingCall, "a throwing call carries a landing pad");
-}
-
 // A two-word return fills the terminator's word list: the register row
 // reads it back in order (rax, rdx), so the shape is pinned here, not
 // just observed through execution.
@@ -1661,7 +1609,6 @@ int main() {
     testFoldedBounds();
     testGlobalZeroArray();
     testFloat();
-    testExceptions();
     testMultiWordReturn();
     std::printf("\n%d checks, %s\n", checks, failures == 0 ? "all passed" : "FAILURES");
     return failures == 0 ? 0 : 1;

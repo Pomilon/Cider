@@ -275,27 +275,17 @@ void testControl() {
     check(!brk.ok && brk.stage == "check", "break outside a loop fails");
 }
 
-void testExceptionSemantics() {
-    std::printf("try, catch and throw check their shapes\n");
-    Checked bare = check("func f() -> int { try { return 1; } catch { return 0; } }\n");
-    check(bare.ok, "a bare catch checks: " + bare.stage);
-    Checked typed = check(
-        "func f() -> int { try { throw 1; } catch e: int { return e; } }\n");
-    check(typed.ok, "a typed catch binds its value: " + typed.stage);
-    Checked rethrow = check(
-        "func f() -> int { try { throw 1; } catch e: int { throw; } }\n");
-    check(rethrow.ok, "a bare throw rethrows inside a catch: " + rethrow.stage);
-    Checked empty = check("func f() -> int { try { return 1; } catch { } return 0; }\n");
-    check(empty.ok, "an empty catch checks: " + empty.stage);
-    Checked outside = check("func f() -> int { throw; return 0; }\n");
-    check(!outside.ok && outside.stage == "check",
-          "a bare throw outside a catch fails");
-    Checked inDefer = check("func f() -> int { defer { throw 1; } return 0; }\n");
-    check(!inDefer.ok && inDefer.stage == "check",
-          "a throw inside a defer fails");
-    Checked noCatch = check("func f() -> int { try { return 1; } }\n");
-    check(!noCatch.ok && noCatch.stage == "parse",
-          "a try without a catch fails at parse");
+// v4 removed try/catch/throw from the grammar, so the checker must never see
+// them. The old forms fail before any semantic question is asked.
+void testExceptionSyntaxRemoved() {
+    std::printf("exception syntax is gone\n");
+    Checked thrown = check("func f() -> int { throw 1; return 0; }\n");
+    check(!thrown.ok && thrown.stage == "parse",
+          "throw fails at parse");
+    Checked caught = check(
+        "func f() -> int { try { return 1; } catch { return 0; } }\n");
+    check(!caught.ok && caught.stage == "parse",
+          "try/catch fails at parse");
 }
 
 void testInitAssign() {
@@ -2430,7 +2420,7 @@ int main() {
     testLen();
     testFuncLitChecks();
     testControl();
-    testExceptionSemantics();
+    testExceptionSyntaxRemoved();
     testForInProtocol();
     testInitAssign();
     testLoopMatchRefused();

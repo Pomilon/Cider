@@ -1569,36 +1569,6 @@
   "blocker": "stdlib-fs-missing",
   "class": "A"
  },
- "exceptions_catch": {
-  "actual": "v3: a typed catch binds the thrown int; native and both VM legs match expected.json",
-  "blocker": "none",
-  "class": "A"
- },
- "exceptions_order": {
-  "actual": "v3: catches try exact type equality in order; native and both VM legs match expected.json",
-  "blocker": "none",
-  "class": "A"
- },
- "exceptions_nested": {
-  "actual": "v3: the inner catch wins and the outer catch is skipped; native and both VM legs match expected.json",
-  "blocker": "none",
-  "class": "A"
- },
- "exceptions_rethrow": {
-  "actual": "v3: throw; preserves the payload and reaches the outer catch; native and both VM legs match expected.json",
-  "blocker": "none",
-  "class": "A"
- },
- "exceptions_defer": {
-  "actual": "v3: pending defers run innermost first before the catch; native and both VM legs match expected.json",
-  "blocker": "none",
-  "class": "A"
- },
- "exceptions_exact_type": {
-  "actual": "v3: a bool throw is caught by bool, not by the earlier int clause; native and both VM legs match expected.json",
-  "blocker": "none",
-  "class": "A"
- },
  "stdlib_time": {
   "actual": "v3: sleep_ms and monotonic timestamps run on native and both VM legs; all three match expected.json",
   "blocker": "none",

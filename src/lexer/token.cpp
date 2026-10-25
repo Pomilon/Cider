@@ -42,9 +42,6 @@ const char* tokenName(TokenKind kind) {
         case TokenKind::KwBreak: return "break";
         case TokenKind::KwContinue: return "continue";
         case TokenKind::KwDefer: return "defer";
-        case TokenKind::KwTry: return "try";
-        case TokenKind::KwCatch: return "catch";
-        case TokenKind::KwThrow: return "throw";
         case TokenKind::KwDelete: return "delete";
         case TokenKind::KwNew: return "new";
         case TokenKind::KwAs: return "as";

@@ -1170,17 +1170,11 @@ std::unique_ptr<Stmt> Parser::parseStmt() {
     if (kind == TokenKind::KwMatch) {
         return parseMatch();
     }
-    if (kind == TokenKind::KwTry) {
-        return parseTry();
-    }
     if (kind == TokenKind::KwDefer) {
         return parseDefer();
     }
     if (kind == TokenKind::KwReturn) {
         return parseReturn();
-    }
-    if (kind == TokenKind::KwThrow) {
-        return parseThrow();
     }
     if (kind == TokenKind::KwDelete) {
         return parseDelete();
@@ -1568,57 +1562,6 @@ std::unique_ptr<Stmt> Parser::parseMatch() {
                                        std::move(fallback));
 }
 
-std::unique_ptr<Stmt> Parser::parseTry() {
-    Position start = advance().pos;
-    if (!check(TokenKind::LBrace)) {
-        failHere("a try needs a body");
-        return nullptr;
-    }
-    std::unique_ptr<Stmt> body = parseBlock();
-    if (body == nullptr) {
-        return nullptr;
-    }
-    std::vector<std::unique_ptr<CatchClause>> catches;
-    while (match(TokenKind::KwCatch)) {
-        Position cpos = peek().pos;
-        std::unique_ptr<TypeExpr> type;
-        std::string name;
-        if (!check(TokenKind::LBrace)) {
-            if (!check(TokenKind::Ident)) {
-                failHere("a catch binds a name and a type");
-                return nullptr;
-            }
-            name = advance().text;
-            if (!match(TokenKind::Colon)) {
-                failHere("a typed catch names its type");
-                return nullptr;
-            }
-            type = parseType();
-            if (type == nullptr) {
-                return nullptr;
-            }
-        }
-        if (!check(TokenKind::LBrace)) {
-            failHere("a catch needs a body");
-            return nullptr;
-        }
-        std::unique_ptr<Stmt> clause = parseBlock();
-        if (clause == nullptr) {
-            return nullptr;
-        }
-        catches.push_back(std::make_unique<CatchClause>(
-            cpos, std::move(type), std::move(name),
-            std::unique_ptr<Block>(static_cast<Block*>(clause.release()))));
-    }
-    if (catches.empty()) {
-        failHere("a try needs at least one catch");
-        return nullptr;
-    }
-    return std::make_unique<TryStmt>(
-        start, std::unique_ptr<Block>(static_cast<Block*>(body.release())),
-        std::move(catches));
-}
-
 std::unique_ptr<Stmt> Parser::parseDefer() {
     Position start = advance().pos;
     std::unique_ptr<Stmt> stmt = parseStmt();
@@ -1644,23 +1587,6 @@ std::unique_ptr<Stmt> Parser::parseReturn() {
     }
     match(TokenKind::Semi);
     return std::make_unique<Return>(start, std::move(value));
-}
-
-std::unique_ptr<Stmt> Parser::parseThrow() {
-    Position start = advance().pos;
-    if (check(TokenKind::Semi)) {
-        advance();
-        return std::make_unique<ThrowStmt>(start, nullptr);
-    }
-    std::unique_ptr<Expr> value = parseExpr();
-    if (value == nullptr) {
-        return nullptr;
-    }
-    if (!match(TokenKind::Semi)) {
-        failHere("expected ';'");
-        return nullptr;
-    }
-    return std::make_unique<ThrowStmt>(start, std::move(value));
 }
 
 std::unique_ptr<Stmt> Parser::parseDelete() {

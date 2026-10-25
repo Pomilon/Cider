@@ -20,7 +20,6 @@ NIL_FNPTR = "vm error: call: nil function pointer\n"
 OOB = "vm error: index out of bounds\n"
 COMPILER_OOM = "compiler: out of memory\n"
 VM_OOM = "vm error: out of memory\n"
-UNCAUGHT = "vm error: uncaught exception\n"
 
 LEGS = [
     ("native", []),
@@ -207,13 +206,6 @@ def live_closure():
 """
 
 
-def uncaught_exception():
-    return """func main() -> int {
-  throw 7;
-}
-"""
-
-
 def main():
     if not os.path.exists(CIDER):
         print("FAIL: compiler not found: %s" % CIDER, file=sys.stderr)
@@ -246,9 +238,6 @@ def main():
         h.run_live("live interface", h.source("live_iface.cid", live_interface()))
         h.run_live("live fnptr", h.source("live_fnptr.cid", live_fnptr()))
         h.run_live("live closure", h.source("live_closure.cid", live_closure()))
-
-        h.run_legs("uncaught exception",
-                   h.source("uncaught.cid", uncaught_exception()), UNCAUGHT)
 
         check_src = h.source("check_oom.cid", live_pointer())
         for spec in ("check", "check:len"):
@@ -294,24 +283,6 @@ def main():
                 if message in text:
                     h.failures.append(
                         "UEFI policy: assembly contains Linux diagnostic %r" % message)
-
-        uefi_exc_src = h.source("uefi_exc.cid", """func efi_main() -> int {
-  throw 7;
-}
-""")
-        uefi_exc_asm = os.path.join(h.tmp.name, "uefi_exc.s")
-        proc = invoke(["compile", "--target", "uefi", uefi_exc_src,
-                       "-o", uefi_exc_asm], env=env_with())
-        if proc.returncode != 0:
-            h.failures.append("UEFI exception compile failed: %s" % describe(proc))
-        else:
-            with open(uefi_exc_asm) as handle:
-                text = handle.read()
-            if "ud2" not in text:
-                h.failures.append("UEFI exception policy: assembly has no ud2")
-            if UNCAUGHT.strip() in text:
-                h.failures.append(
-                    "UEFI exception policy: assembly contains Linux diagnostic")
     finally:
         h.close()
 

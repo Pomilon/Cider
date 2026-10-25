@@ -9,7 +9,6 @@
 #include <string>
 
 #include "check/checker.h"
-#include "exception_ir.h"
 #include "lexer/lexer.h"
 #include "lower/lower.h"
 #include "opt/opt.h"
@@ -812,146 +811,6 @@ void testFieldDefaults() {
           "the optimised defaults answer 201: " + opr.error);
 }
 
-void testLandingPads() {
-    std::printf("exception landing pads\n");
-    testir::Built landing = testir::landing(false);
-    cider::vm::VmResult unr = cider::vm::run(landing.module, "");
-    check(unr.ok && unr.exitCode == 42 && unr.stderrText.empty(),
-          "the landing reads the payload: " + unr.error);
-    cider::opt::OptResult ores = cider::opt::run(landing.module);
-    check(ores.ok, "a landing module optimises: " + ores.error);
-    cider::vm::VmResult opr = cider::vm::run(landing.module, "");
-    check(opr.ok && opr.exitCode == 42 && opr.stderrText.empty(),
-          "the optimised landing reads the payload: " + opr.error);
-
-    testir::Built uncaught = testir::landing(true);
-    cider::vm::VmResult death = cider::vm::run(uncaught.module, "");
-    check(death.ok && death.exitCode == 2 && death.signal == 0 &&
-              death.stderrText == "vm error: uncaught exception\n",
-          "an uncaught entry writes the line and exits 2: " + death.error);
-
-    testir::Built call = testir::callLanding();
-    cider::vm::VmResult called = cider::vm::run(call.module, "");
-    check(called.ok && called.exitCode == 42 && called.stderrText.empty(),
-          "a call enters its landing pad only when the flag is set: " +
-              called.error);
-}
-
-void testThrowUnwind() {
-    std::printf("throws unwind through calls\n");
-    Lowered thrown = lower("func fail() -> int {\n"
-                           "    throw 9;\n"
-                           "}\n"
-                           "func main() -> int {\n"
-                           "    return fail();\n"
-                           "}\n");
-    check(thrown.ok, "a throwing program lowers: " + thrown.stage);
-    cider::vm::VmResult unr = cider::vm::run(*thrown.module, "");
-    check(unr.ok && unr.signal == 0 && unr.exitCode == 2 &&
-              unr.stderrText == "vm error: uncaught exception\n",
-          "the unoptimised throw is uncaught: " + unr.stderrText + unr.error);
-    cider::opt::OptResult ores = cider::opt::run(*thrown.module);
-    check(ores.ok, "a throwing program optimises: " + ores.error);
-    cider::vm::VmResult opr = cider::vm::run(*thrown.module, "");
-    check(opr.ok && opr.signal == 0 && opr.exitCode == 2 &&
-              opr.stderrText == "vm error: uncaught exception\n",
-          "the optimised throw is uncaught: " + opr.stderrText + opr.error);
-}
-
-void testTryCatchVm() {
-    std::printf("try catch on both legs\n");
-    auto both = [&](const std::string& text, int want, const std::string& what) {
-        Lowered program = lower(text);
-        check(program.ok, what + " lowers: " + program.stage);
-        if (!program.ok) {
-            return;
-        }
-        cider::vm::VmResult unr = cider::vm::run(*program.module, "");
-        check(unr.ok && unr.signal == 0 && unr.exitCode == want &&
-                  unr.stderrText.empty(),
-              what + " unoptimised: " + unr.stderrText + unr.error);
-        cider::opt::OptResult ores = cider::opt::run(*program.module);
-        check(ores.ok, what + " optimises: " + ores.error);
-        cider::vm::VmResult opr = cider::vm::run(*program.module, "");
-        check(opr.ok && opr.signal == 0 && opr.exitCode == want &&
-                  opr.stderrText.empty(),
-              what + " optimised: " + opr.stderrText + opr.error);
-    };
-
-    both("func main() -> int {\n"
-         "    try { throw 7; } catch e: int { return e; }\n"
-         "}\n",
-         7, "a typed catch binds");
-
-    both("func main() -> int {\n"
-         "    try { throw 7; } catch { return 42; }\n"
-         "}\n",
-         42, "a bare catch catches any type");
-
-    both("func main() -> int {\n"
-         "    try {\n"
-         "        try { throw 7; } catch e: int { throw; }\n"
-         "    } catch e: int { return e; }\n"
-         "}\n",
-         7, "a rethrow reaches the outer catch");
-
-    both("func main() -> int {\n"
-         "    try { throw 7; }\n"
-         "    catch e: bool { return 9; }\n"
-         "    catch e: int { return e; }\n"
-         "}\n",
-         7, "catch order uses exact type equality");
-
-    both("var g: int = 0;\n"
-         "func bump(x: int) { g = g * 10 + x; }\n"
-         "func main() -> int {\n"
-         "    try {\n"
-         "        defer bump(1);\n"
-         "        defer bump(2);\n"
-         "        throw 3;\n"
-         "    } catch e: int { return g * 10 + e; }\n"
-         "}\n",
-         213, "defers run LIFO before the catch");
-
-    both("func main() -> int {\n"
-         "    try {\n"
-         "        try { throw 1; } catch e: int { throw 2; }\n"
-         "    } catch e: int { return e; }\n"
-         "}\n",
-         2, "a throw in a catch targets the outer handler");
-
-    both("func main() -> int {\n"
-         "    try {\n"
-         "        try { throw 7; } catch e: int { return 1; }\n"
-         "    } catch { return 2; }\n"
-         "}\n",
-         1, "an inner catch wins");
-
-    both("func main() -> int {\n"
-         "    try { throw \"oops\"; } catch e: string { return e.len as int; }\n"
-         "}\n",
-         4, "a two-word payload survives the slot");
-
-    Lowered none = lower("func main() -> int {\n"
-                         "    try { throw 1; } catch e: bool { return 2; }\n"
-                         "}\n");
-    check(none.ok, "a no-match program lowers: " + none.stage);
-    if (none.ok) {
-        cider::vm::VmResult unr = cider::vm::run(*none.module, "");
-        check(unr.ok && unr.signal == 0 && unr.exitCode == 2 &&
-                  unr.stderrText == "vm error: uncaught exception\n",
-              "the unoptimised no-match is uncaught: " + unr.stderrText +
-                  unr.error);
-        cider::opt::OptResult ores = cider::opt::run(*none.module);
-        check(ores.ok, "a no-match program optimises: " + ores.error);
-        cider::vm::VmResult opr = cider::vm::run(*none.module, "");
-        check(opr.ok && opr.signal == 0 && opr.exitCode == 2 &&
-                  opr.stderrText == "vm error: uncaught exception\n",
-              "the optimised no-match is uncaught: " + opr.stderrText +
-                  opr.error);
-    }
-}
-
 }  // namespace
 
 int main() {
@@ -972,9 +831,6 @@ int main() {
     testMultipleBases();
     testNilFnptrCall();
     testFieldDefaults();
-    testLandingPads();
-    testThrowUnwind();
-    testTryCatchVm();
     std::printf("\n%d checks, %s\n", checks, failures == 0 ? "all passed" : "FAILURES");
     return failures == 0 ? 0 : 1;
 }

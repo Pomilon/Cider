@@ -109,10 +109,8 @@ private:
     std::unique_ptr<Stmt> parseFor();
     std::unique_ptr<Stmt> parseMatch();
     Pattern parsePattern();
-    std::unique_ptr<Stmt> parseTry();
     std::unique_ptr<Stmt> parseDefer();
     std::unique_ptr<Stmt> parseReturn();
-    std::unique_ptr<Stmt> parseThrow();
     std::unique_ptr<Stmt> parseDelete();
     std::unique_ptr<Stmt> parseAsm();
 
