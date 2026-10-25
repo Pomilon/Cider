@@ -883,6 +883,33 @@ void testOperatorOverloadsVm() {
     cider::vm::VmResult iopr = cider::vm::run(*ix.module, "");
     check(iopr.ok && iopr.exitCode == 3,
           "the optimised index operator answers 3: " + iopr.error);
+
+    Lowered member = lower(
+        "struct C { var x: int;\n"
+        "    func operator+(a: C) -> C {\n"
+        "        return C { x: (*self).x + a.x };\n"
+        "    }\n"
+        "    func operator-() -> C { return C { x: -(*self).x }; }\n"
+        "}\n"
+        "func main() -> int {\n"
+        "    var a: C = C { x: 1 };\n"
+        "    var b: C = C { x: 2 };\n"
+        "    var c: C = a + b;\n"
+        "    var d: C = -c;\n"
+        "    return 0 - d.x;\n"
+        "}\n");
+    check(member.ok, "a member operator program lowers: " + member.stage);
+    if (!member.ok) {
+        return;
+    }
+    cider::vm::VmResult munr = cider::vm::run(*member.module, "");
+    check(munr.ok && munr.exitCode == 3,
+          "the unoptimised member operator answers 3: " + munr.error);
+    cider::opt::OptResult mores = cider::opt::run(*member.module);
+    check(mores.ok, "the member operator program optimises: " + mores.error);
+    cider::vm::VmResult mopr = cider::vm::run(*member.module, "");
+    check(mopr.ok && mopr.exitCode == 3,
+          "the optimised member operator answers 3: " + mopr.error);
 }
 
 }  // namespace

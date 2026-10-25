@@ -11,6 +11,7 @@
 #include <cstdlib>
 #include <functional>
 
+#include "ast/operator.h"
 #include "layout.h"
 #include "types/context.h"
 
@@ -7956,7 +7957,8 @@ std::vector<ir::Value> Lowerer::lowerWords(const Expr* expr, TypeRef fallback) {
     // calls: the scalar path below would keep only the address. Anything
     // else binary stays scalar, where widths decide.
     if (const auto* binary = dynamic_cast<const Binary*>(expr)) {
-        if (checker_.operatorDecl(binary) != nullptr) {
+        if (checker_.operatorDecl(binary) != nullptr ||
+            checker_.isMemberOperator(binary)) {
             return lowerOperatorCall(const_cast<Binary&>(*binary));
         }
         TypeRef type = checker_.typeOf(expr);
@@ -7971,7 +7973,8 @@ std::vector<ir::Value> Lowerer::lowerWords(const Expr* expr, TypeRef fallback) {
         return lowerCallWords(const_cast<Call&>(*call));
     }
     if (const auto* unary = dynamic_cast<const Unary*>(expr)) {
-        if (checker_.operatorDecl(unary) != nullptr) {
+        if (checker_.operatorDecl(unary) != nullptr ||
+            checker_.isMemberOperator(unary)) {
             return lowerOperatorCall(const_cast<Unary&>(*unary));
         }
         // `!b` and `-x` answer one scalar word through the scalar path,
@@ -8802,7 +8805,8 @@ ir::Value Lowerer::onBinary(Binary& n, TypeRef fallback) {
     if (failed_) {
         return undefined();
     }
-    if (checker_.operatorDecl(&n) != nullptr) {
+    if (checker_.operatorDecl(&n) != nullptr ||
+        checker_.isMemberOperator(&n)) {
         std::vector<ir::Value> words = lowerOperatorCall(n);
         if (failed_) {
             return undefined();
@@ -9648,6 +9652,22 @@ std::vector<ir::Value> Lowerer::callResults(ir::Instr& call, const Type* ret,
 }
 
 std::vector<ir::Value> Lowerer::lowerOperatorCall(Binary& n) {
+    if (checker_.isMemberOperator(&n)) {
+        const char* name = binOpOperatorName(n.op);
+        if (name == nullptr) {
+            refuse(n.pos, "this operator call");
+            return {undefined()};
+        }
+        Call call(n.pos,
+                  std::make_unique<Field>(n.pos, std::move(n.lhs), name),
+                  {}, std::vector<std::unique_ptr<Expr>>{});
+        call.args.push_back(std::move(n.rhs));
+        std::vector<ir::Value> words = lowerCallWords(call);
+        auto* field = static_cast<Field*>(call.callee.get());
+        n.lhs = std::move(field->object);
+        n.rhs = std::move(call.args[0]);
+        return words;
+    }
     const resolve::Decl* op = checker_.operatorDecl(&n);
     if (op == nullptr) {
         refuse(n.pos, "this operator call");
@@ -9664,6 +9684,20 @@ std::vector<ir::Value> Lowerer::lowerOperatorCall(Binary& n) {
 }
 
 std::vector<ir::Value> Lowerer::lowerOperatorCall(Unary& n) {
+    if (checker_.isMemberOperator(&n)) {
+        const char* name = unOpOperatorName(n.op);
+        if (name == nullptr) {
+            refuse(n.pos, "this operator call");
+            return {undefined()};
+        }
+        Call call(n.pos,
+                  std::make_unique<Field>(n.pos, std::move(n.operand), name),
+                  {}, std::vector<std::unique_ptr<Expr>>{});
+        std::vector<ir::Value> words = lowerCallWords(call);
+        auto* field = static_cast<Field*>(call.callee.get());
+        n.operand = std::move(field->object);
+        return words;
+    }
     const resolve::Decl* op = checker_.operatorDecl(&n);
     if (op == nullptr) {
         refuse(n.pos, "this operator call");
@@ -12457,7 +12491,8 @@ ir::Value Lowerer::onIdentOrExpr(const Expr* expr, TypeRef expected) {
             }
             return words[0];
         }
-        if (checker_.operatorDecl(unary) != nullptr) {
+        if (checker_.operatorDecl(unary) != nullptr ||
+            checker_.isMemberOperator(unary)) {
             std::vector<ir::Value> words =
                 lowerOperatorCall(const_cast<Unary&>(*unary));
             if (failed_ || words.size() != kOneWord) {

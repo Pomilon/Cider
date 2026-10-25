@@ -31,6 +31,7 @@ constexpr int64_t kOneElement = 1;
 // with the same standing as kOneElement: the checks name these, never
 // digits, because T4 refuses digits beside size-looking words.
 constexpr uint64_t kOneMember = 1;
+constexpr uint64_t kNoParameters = 0;
 constexpr uint64_t kOneParameter = 1;
 constexpr uint64_t kHasPrefixLen = 3;
 
@@ -78,6 +79,14 @@ const resolve::Decl* Checker::operatorDecl(const Binary* expr) const {
 const resolve::Decl* Checker::operatorDecl(const Unary* expr) const {
     auto found = unaryOperatorDecls_.find(expr);
     return found == unaryOperatorDecls_.end() ? nullptr : found->second;
+}
+
+bool Checker::isMemberOperator(const Binary* expr) const {
+    return memberOperatorCalls_.find(expr) != memberOperatorCalls_.end();
+}
+
+bool Checker::isMemberOperator(const Unary* expr) const {
+    return memberUnaryOperatorCalls_.find(expr) != memberUnaryOperatorCalls_.end();
 }
 
 bool Checker::isOperatorIndex(const Index* expr) const {
@@ -1863,11 +1872,6 @@ void Checker::checkMethods(DeclId id, Kind kind, std::vector<MethodDecl>& method
     // (plain and virtual, or two signatures) would collide at codegen.
     std::unordered_set<std::string> seen;
     for (MethodDecl& method : methods) {
-        if (isOperatorName(method.name) &&
-            method.name != "operator_index") {
-            fail(method.pos, "member operator overloading is not implemented yet");
-            continue;
-        }
         if (!seen.insert(method.name).second) {
             fail(method.pos, "duplicate method '" + method.name + "'");
             continue;
@@ -1881,6 +1885,20 @@ void Checker::checkMethods(DeclId id, Kind kind, std::vector<MethodDecl>& method
         if (method.name == "operator_index" &&
             sig->arity() != kOneParameter) {
             fail(method.pos, "an index operator takes exactly one parameter");
+            continue;
+        }
+        const bool unaryOperator =
+            method.name == "operator_neg" || method.name == "operator_bitnot";
+        if (unaryOperator && sig->arity() != kNoParameters) {
+            fail(method.pos,
+                 "a unary operator takes no parameters in a member declaration");
+            continue;
+        }
+        if (isOperatorName(method.name) && !unaryOperator &&
+            method.name != "operator_index" &&
+            sig->arity() != kOneParameter) {
+            fail(method.pos,
+                 "a binary operator takes exactly one parameter in a member declaration");
             continue;
         }
         pushScope();
@@ -4011,6 +4029,24 @@ bool Checker::checkOperatorOverload(Binary& expr, TypeRef lhs, TypeRef rhs,
         return false;
     }
 
+    // A member operator lives on the left operand's own type. It is tried
+    // first; when it is absent or its parameter is not an exact match, the
+    // free declaration below is still a candidate.
+    if (lhsNeeds) {
+        std::optional<DeclId> id = lhs.type->decl();
+        const Signature* sig =
+            id.has_value() ? resolver_.methodSig(*id, name) : nullptr;
+        if (sig != nullptr && sig->arity() == kOneParameter) {
+            TypeRef parameter{sig->parameters()[0].type};
+            if (parameter == rhs) {
+                memberOperatorCalls_.insert(&expr);
+                const Type* ret = sig->returnType();
+                result = TypeRef{ret != nullptr ? ret : ctx_.void_()};
+                return true;
+            }
+        }
+    }
+
     const resolve::Decl* decl = resolver_.lookup(moduleScope_, name);
     if (decl != nullptr && decl->kind == resolve::DeclKind::Func &&
         decl->typeParams == 0 && decl->sig.arity() == 2) {
@@ -4048,6 +4084,20 @@ bool Checker::checkOperatorOverload(Unary& expr, TypeRef operand,
         kind == Kind::Struct || kind == Kind::Class || kind == Kind::Enum;
     if (!nominal) {
         return false;
+    }
+
+    // A member unary operator takes no parameters; the receiver is the
+    // operand. It wins over a free declaration when both would be exact.
+    if (kind == Kind::Struct || kind == Kind::Class) {
+        std::optional<DeclId> id = operand.type->decl();
+        const Signature* sig =
+            id.has_value() ? resolver_.methodSig(*id, name) : nullptr;
+        if (sig != nullptr && sig->arity() == kNoParameters) {
+            memberUnaryOperatorCalls_.insert(&expr);
+            const Type* ret = sig->returnType();
+            result = TypeRef{ret != nullptr ? ret : ctx_.void_()};
+            return true;
+        }
     }
 
     const resolve::Decl* decl = resolver_.lookup(moduleScope_, name);

@@ -393,11 +393,36 @@ void testOperatorOverloads() {
           "an operator declaration needs a class, struct or enum operand");
 
     Checked member = check(
-        "class C { var x: int;\n"
-        "    func operator+(a: C) -> C { return a; }\n"
+        "struct C { var x: int;\n"
+        "    func operator+(a: C) -> C {\n"
+        "        return C { x: (*self).x + a.x };\n"
+        "    }\n"
+        "}\n"
+        "func main() -> int {\n"
+        "    var a: C = C { x: 1 };\n"
+        "    var b: C = C { x: 2 };\n"
+        "    var c: C = a + b;\n"
+        "    return c.x;\n"
         "}\n");
-    check(!member.ok && member.stage == "check",
-          "member operator overloading is not implemented yet");
+    check(member.ok, "a member binary operator checks: " + member.stage);
+
+    Checked memberUnary = check(
+        "struct C { var x: int;\n"
+        "    func operator-() -> C { return C { x: -(*self).x }; }\n"
+        "}\n"
+        "func main() -> int {\n"
+        "    var a: C = C { x: 1 };\n"
+        "    var b: C = -a;\n"
+        "    return b.x;\n"
+        "}\n");
+    check(memberUnary.ok, "a member unary operator checks: " + memberUnary.stage);
+
+    Checked memberArity = check(
+        "struct C { var x: int;\n"
+        "    func operator+(a: C, b: C) -> C { return a; }\n"
+        "}\n");
+    check(!memberArity.ok && memberArity.stage == "check",
+          "a member binary operator takes exactly one parameter");
 }
 
 void testInitAssign() {

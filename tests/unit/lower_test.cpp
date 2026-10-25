@@ -1468,6 +1468,49 @@ void testOperators() {
         }
     }
     check(indexCall, "v[i] lowers to the index operator call");
+
+    Lowered member = lower(
+        "struct C { var x: int;\n"
+        "    func operator+(a: C) -> C {\n"
+        "        return C { x: (*self).x + a.x };\n"
+        "    }\n"
+        "    func operator-() -> C { return C { x: -(*self).x }; }\n"
+        "}\n"
+        "func main() -> int {\n"
+        "    var a: C = C { x: 1 };\n"
+        "    var b: C = C { x: 2 };\n"
+        "    var c: C = a + b;\n"
+        "    var d: C = -c;\n"
+        "    return d.x;\n"
+        "}\n");
+    check(member.ok, "a member operator program lowers: " + member.stage);
+    if (!member.ok) {
+        return;
+    }
+    check(find(member.module.get(), "C__operator_add") != nullptr,
+          "the member binary operator emits a method");
+    check(find(member.module.get(), "C__operator_neg") != nullptr,
+          "the member unary operator emits a method");
+    bool memberCall = false;
+    bool memberUnary = false;
+    const cider::ir::Function* memberMain = find(member.module.get(), "main");
+    if (memberMain != nullptr) {
+        for (const cider::ir::Block& block : memberMain->blocks) {
+            for (const cider::ir::Instr& instr : block.body) {
+                if (instr.op != cider::ir::Op::Call) {
+                    continue;
+                }
+                if (instr.callee == "C__operator_add") {
+                    memberCall = true;
+                }
+                if (instr.callee == "C__operator_neg") {
+                    memberUnary = true;
+                }
+            }
+        }
+    }
+    check(memberCall, "a + b lowers to the member operator call");
+    check(memberUnary, "-c lowers to the member unary operator call");
 }
 
 void testMultiWordReturn() {

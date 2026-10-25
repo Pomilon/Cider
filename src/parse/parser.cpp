@@ -610,7 +610,10 @@ MethodDecl Parser::parseMethod() {
         failHere("an init or deinit needs a body");
     }
     std::vector<Param> params = parseParams();
-    if (params.size() == kOneParameter && name == "operator_sub") {
+    // A member operator's receiver is implicit: unary minus declares no
+    // parameters, while one parameter makes it the binary subtraction
+    // operator. The free spelling below has the opposite arity mapping.
+    if (params.empty() && name == "operator_sub") {
         name = "operator_neg";
     }
     std::unique_ptr<TypeExpr> returns = parseReturnType();

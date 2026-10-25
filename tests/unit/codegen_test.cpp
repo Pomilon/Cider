@@ -636,6 +636,23 @@ void testOperatorOverloadsNative() {
         "}\n",
         signaled);
     check(!signaled && code == 3, "a struct index operator answers 3");
+
+    code = runCode(
+        "struct C { var x: int;\n"
+        "    func operator+(a: C) -> C {\n"
+        "        return C { x: (*self).x + a.x };\n"
+        "    }\n"
+        "    func operator-() -> C { return C { x: -(*self).x }; }\n"
+        "}\n"
+        "func main() -> int {\n"
+        "    var a: C = C { x: 1 };\n"
+        "    var b: C = C { x: 2 };\n"
+        "    var c: C = a + b;\n"
+        "    var d: C = -c;\n"
+        "    return 0 - d.x;\n"
+        "}\n",
+        signaled);
+    check(!signaled && code == 3, "a struct member operator answers 3");
 }
 
 void testTrap() {

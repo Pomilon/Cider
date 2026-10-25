@@ -171,6 +171,8 @@ public:
     // re-running overload resolution.
     const resolve::Decl* operatorDecl(const Binary* expr) const;
     const resolve::Decl* operatorDecl(const Unary* expr) const;
+    bool isMemberOperator(const Binary* expr) const;
+    bool isMemberOperator(const Unary* expr) const;
     bool isOperatorIndex(const Index* expr) const;
     const std::vector<CheckError>& errors() const { return errors_; }
     size_t errorCount() const { return errors_.size(); }
@@ -476,6 +478,8 @@ private:
     // rather than resolving the name a second time.
     std::unordered_map<const Binary*, const resolve::Decl*> operatorDecls_;
     std::unordered_map<const Unary*, const resolve::Decl*> unaryOperatorDecls_;
+    std::unordered_set<const Binary*> memberOperatorCalls_;
+    std::unordered_set<const Unary*> memberUnaryOperatorCalls_;
     std::unordered_set<const Index*> operatorIndexes_;
     // Types resolve here rather than at module scope during generic walks,
     // where the template's parameters are bound.
