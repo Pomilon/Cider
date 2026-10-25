@@ -1338,10 +1338,10 @@ void testLiteralNul() {
           "the byte past the end reads zero");
 }
 
-void testExternPutchar() {    std::printf("extern putchar\n");
-    // Sovereign link has no libc: a called-but-undefined `putchar` emits a
-    // freestanding helper (one write syscall) instead of failing the link.
-    // Any other undefined extern still fails the link loudly.
+void testExternPutchar() {
+    std::printf("extern putchar\n");
+    // Transitional: the test-library rewrite removes this helper. Until
+    // then it remains the one compiler-provided extern used by corpus.
     check(runQuiet("extern func putchar(c: int) -> int;\n"
                    "func main() -> int { return putchar(65); }\n") == 65,
           "putchar answers the character");

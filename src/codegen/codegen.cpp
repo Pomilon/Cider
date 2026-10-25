@@ -233,9 +233,12 @@ private:
         }
         std::unordered_set<std::string> seen;
         std::vector<std::string> order = {
-            "cider_print", "cider_panic", "cider_alloc", "cider_free",
-            "cider_realloc", "putchar", "cider_itoa_signed",
-            "cider_itoa_unsigned", "cider_ftoa", "cider_fini_run",
+            "cider_alloc", "cider_free", "cider_realloc",
+            "cider_itoa_signed", "cider_itoa_unsigned", "cider_ftoa",
+            "cider_fini_run",
+            // Transitional: four v3 corpus fixtures still use this one
+            // blessed extern. It is removed with the test-library rewrite.
+            "putchar",
         };
         std::vector<std::string> out;
         for (const ir::Function& fn : module_.functions) {
@@ -626,14 +629,14 @@ private:
                 out_ += "  ud2\n";
                 return true;
             }
-            if (name == "cider_print") {
-                return emitUefiPrint();
-            }
+            // print, panic, and putchar are library functions in v4.
+            // They have no compiler-emitted UEFI implementation. The
+            // transitional putchar helper must never fall through to the
+            // native Linux write path on UEFI.
             if (name == "putchar") {
-                return emitUefiPutchar();
-            }
-            if (name == "cider_panic") {
-                return emitUefiPanic();
+                refuse(Position{"", 1, 1},
+                       "putchar is a library function on uefi");
+                return false;
             }
             // cider_itoa_signed/unsigned and cider_ftoa are pure register
             // routines; they fall through to the shared implementations.
@@ -647,27 +650,10 @@ private:
             out_ += "  ret\n";
             return true;
         }
-        if (name == "cider_print") {
-            // (data, length) in (rdi, rsi) — the two words a string lowers
-            // to. A non-positive length writes nothing.
-            out_ += "cider_print:\n";
-            out_ += "  test rsi, rsi\n";
-            out_ += "  jle .done\n";
-            out_ += "  mov rdx, rsi\n";
-            out_ += "  mov rsi, rdi\n";
-            out_ += "  mov eax, 1\n";
-            out_ += "  mov edi, 1\n";
-            out_ += "  syscall\n";
-            out_ += ".done:\n";
-            out_ += "  ret\n";
-            return true;
-        }
+        // print is a library function in v4. The compiler no longer
+        // provides a hidden string-write helper.
         if (name == "putchar") {
-            // The one blessed extern: one `write` syscall of the low byte,
-            // answering the character (FEATURES §4.4 names syscalls through
-            // assembly; the freestanding link has no libc to provide this).
-            // A program defining its own `putchar` never reaches here, and
-            // any other undefined extern still fails the link loudly.
+            // Transitional only: the test-library rewrite will remove it.
             out_ += "putchar:\n";
             out_ += "  push rdi\n";
             out_ += "  mov eax, 1\n";
@@ -797,28 +783,8 @@ private:
             out_ += "  ret\n";
             return true;
         }
-        if (name == "cider_panic") {
-            // The message on stderr, a newline, then exit 134 — the code the
-            // VM answers for panic, so the two agree without a flag.
-            out_ += "cider_panic:\n";
-            out_ += "  test rsi, rsi\n";
-            out_ += "  jle .newline\n";
-            out_ += "  mov rdx, rsi\n";
-            out_ += "  mov rsi, rdi\n";
-            out_ += "  mov eax, 1\n";
-            out_ += "  mov edi, 2\n";
-            out_ += "  syscall\n";
-            out_ += ".newline:\n";
-            out_ += "  mov eax, 1\n";
-            out_ += "  mov edi, 2\n";
-            out_ += "  lea rsi, [rip + cider_panic_nl]\n";
-            out_ += "  mov edx, 1\n";
-            out_ += "  syscall\n";
-            out_ += "  mov eax, 60\n";
-            out_ += "  mov edi, 134\n";
-            out_ += "  syscall\n";
-            return true;
-        }
+        // panic is a library function in v4. The compiler no longer owns
+        // the panic channel or its exit policy.
         if (name == "cider_heap_fail") {
             out_ += "cider_heap_fail:\n";
             out_ += "  mov eax, 1\n";
