@@ -2336,36 +2336,33 @@ void testFnPtrCompare() {
 // return type while its body checks: the inner return answers int even
 // though the enclosing function answers a closure.
 void testClosure() {
-    std::printf("closures run\n");
-    check(runQuiet("func makeAdder(base: int) -> func(int) -> int {\n"
-                   "    return func(x: int) -> int { return x + base; };\n"
+    std::printf("zero-capture closures run\n");
+    check(runQuiet("func makeAdder() -> func(int) -> int {\n"
+                   "    return func(x: int) -> int { return x + 10; };\n"
                    "}\n"
                    "func main() -> int {\n"
-                   "    var add10: func(int) -> int = makeAdder(10);\n"
+                   "    var add10: func(int) -> int = makeAdder();\n"
                    "    return add10(5);\n"
                    "}\n") == 15,
-          "a returned closure captures its environment");
+          "a returned zero-capture closure runs");
 }
 
 void testClosureElement() {
     std::printf("closures in aggregates run\n");
     bool sig = false;
     check(runCode("func main() -> int {\n"
-                  "    var base: int = 10;\n"
-                  "    var add: func(int) -> int = func(v: int) -> int { return v + base; };\n"
+                  "    var add: func(int) -> int = func(v: int) -> int { return v + 10; };\n"
                   "    var cell: [func(int) -> int; 1] = [ add ];\n"
                   "    return cell[0](5);\n"
                   "}\n",
                   sig) == 15 && !sig,
           "a closure called through an array element");
     check(runCode("struct Holder {\n"
-                  "    var base: int;\n"
                   "    var add: func(int) -> int;\n"
                   "}\n"
                   "func main() -> int {\n"
-                  "    var b: int = 10;\n"
-                  "    var mk: func(int) -> int = func(v: int) -> int { return v + b; };\n"
-                  "    var h: Holder = Holder { base: 0, add: mk };\n"
+                  "    var mk: func(int) -> int = func(v: int) -> int { return v + 10; };\n"
+                  "    var h: Holder = Holder { add: mk };\n"
                   "    return h.add(5);\n"
                   "}\n",
                   sig) == 15 && !sig,

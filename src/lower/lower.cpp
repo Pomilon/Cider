@@ -7343,62 +7343,8 @@ std::vector<ir::Value> Lowerer::lowerFuncLit(const FuncLit& lit) {
         return {undefined()};
     }
     if (!site.captures.empty()) {
-        int64_t per = layout::kSizePointer;
-        int64_t total = 0;
-        for (const check::Captured& cap : site.captures) {
-            int64_t extent = resolver_.nominalSize(cap.type.type);
-            if (extent < 0) {
-                refuse(cap.pos, "this capture is not lowered yet");
-                return {undefined()};
-            }
-            total += extent;
-        }
-        // One allocation behind the captures word, filled from the
-        // enclosing locals in first-read order — the same order the hidden
-        // function reads them back in.
-        TypeRef count{ctx_.basic(BasicKind::I64)};
-        ir::Instr alloc;
-        alloc.op = ir::Op::Call;
-        alloc.loc = lit.pos;
-        alloc.callee = "cider_alloc";
-        alloc.mayTrap = true;
-        for (int64_t fixed : {total, per}) {
-            ir::Argument arg;
-            arg.words.push_back(constantI64(fixed, count, lit.pos));
-            if (failed_) {
-                return {undefined()};
-            }
-            alloc.arguments.push_back(std::move(arg));
-        }
-        ir::Value at = newValue(ir::IRType::Ptr, capsType, lit.pos);
-        alloc.results.push_back(at);
-        alloc.width = ir::IRType::Ptr;
-        alloc.type = capsType;
-        emit(std::move(alloc));
-        caps = at;
-        int64_t off = 0;
-        for (const check::Captured& cap : site.captures) {
-            Ident name(lit.pos, cap.name);
-            Place base;
-            if (!resolvePlace(&name, base)) {
-                refuse(cap.pos, "this capture is not lowered yet");
-                return {undefined()};
-            }
-            std::vector<ir::Value> words = loadRange(lit.pos, base, cap.type);
-            if (failed_) {
-                return {undefined()};
-            }
-            Place dst;
-            dst.hasIndirect = true;
-            dst.indirect = caps;
-            dst.off = off;
-            dst.type = cap.type;
-            storeRange(lit.pos, dst, words, cap.type);
-            if (failed_) {
-                return {undefined()};
-            }
-            off += resolver_.nominalSize(cap.type.type);
-        }
+        refuse(lit.pos, "captures are not supported");
+        return {undefined()};
     }
     return {code, caps};
 }

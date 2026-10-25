@@ -971,14 +971,13 @@ void testIndirect() {
 }
 
 void testClosure() {
-    std::printf("closure literals lower\n");
+    std::printf("zero-capture closure literals lower\n");
     Lowered r = lower(
         "func main() -> int {\n"
-        "    var n: int = 10;\n"
-        "    var f: func(int) -> int = func(x: int) -> int { return x + n; };\n"
+        "    var f: func(int) -> int = func(x: int) -> int { return x + 10; };\n"
         "    return f(4);\n"
         "}\n");
-    check(r.ok, "a capturing closure lowers");
+    check(r.ok, "a zero-capture closure lowers");
     if (r.ok) {
         const cider::ir::Function* hidden = nullptr;
         for (const cider::ir::Function& fn : r.module->functions) {
@@ -1181,27 +1180,15 @@ void testChecksGating() {
     }
 }
 
-void testClosureNested() {
-    std::printf("nested closure captures are transitive\n");
+void testCapturesRejected() {
+    std::printf("captures are rejected\n");
     Lowered r = lower(
         "func main() -> int {\n"
         "    var a: int = 1;\n"
-        "    var outer: func(int) -> int = func(x: int) -> int {\n"
-        "        var inner: func(int) -> int = func(y: int) -> int { return x + y + a; };\n"
-        "        return inner(100);\n"
-        "    };\n"
-        "    return outer(20);\n"
+        "    var f: func(int) -> int = func(x: int) -> int { return x + a; };\n"
+        "    return f(4);\n"
         "}\n");
-    check(r.ok, "a nested closure lowers");
-    if (r.ok) {
-        uint64_t hidden = 0;
-        for (const cider::ir::Function& fn : r.module->functions) {
-            if (fn.name != "main") {
-                ++hidden;
-            }
-        }
-        check(hidden == 2, "each literal becomes its own function");
-    }
+    check(!r.ok && r.stage == "check", "a capturing closure is rejected");
 }
 
 void testClosureBareName() {
@@ -1655,7 +1642,7 @@ int main() {
     testNilGuards();
     testChecksGating();
     testClosure();
-    testClosureNested();
+    testCapturesRejected();
     testClosureBareName();
     testAddrOf();
     testDerefStore();

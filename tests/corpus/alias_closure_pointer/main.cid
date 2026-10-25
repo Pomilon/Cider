@@ -29,12 +29,6 @@
 type Cb = *func(int) -> int;
 type Cb2 = Cb;
 
-// One closure object per base, so a wrong capture shows up as a wrong
-// answer rather than as a coincidence.
-func makeAdder(base: int) -> func(int) -> int {
-  return func(x: int) -> int { return x + base; };
-}
-
 // SysV-pinned so `&doubleSys` has the same signature on every target
 // (uefi's default ABI is MS-ABI). See section 8.4.
 sysv func doubleSys(x: int) -> int { return x * 2; }
@@ -147,9 +141,9 @@ func main() -> int {
   // ---- 9. closure values keep their own shape --------------------------
   // A bare `func(...)` value holds a closure object and is called directly;
   // it is not a raw pointer, so no `*` appears.
-  var b1: func(int) -> int = makeAdder(7);
+  var b1: func(int) -> int = func(x: int) -> int { return x + 7; };
   if (b1(3) != 10) { return 181; }
-  var b2: func(int) -> int = makeAdder(8);
+  var b2: func(int) -> int = func(x: int) -> int { return x + 8; };
   if (b2(3) != 11) { return 182; }
 
   return 0;

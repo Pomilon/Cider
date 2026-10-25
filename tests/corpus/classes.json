@@ -194,30 +194,15 @@
   "blocker": "classes (+uninit-locals diff #7, stdlib-imports, asm-blocks)",
   "class": "A"
  },
- "closure_array_store": {
-  "actual": "exact stdout/stderr/exit match (*void control dropped: T10 wall, tracked at fn_cast_closure_*)",
-  "blocker": "closures-repr",
-  "class": "A"
- },
  "closure_as_fn": {
   "actual": "cider run exit 1 on all three legs, stdout empty, stderr identical (2614 bytes): 18:13: expected ';'; 37:19: expected ')'; 37:19: a function needs a body; 37:64: expected a declaration; 52:12: a variable needs an initialiser (bare fn(...) closure types are removed)",
   "blocker": "v2-fn-spelling (bare fn(...) removed; closures spell func(...), pointers *func(...)) [B-terminal]",
   "class": "B"
  },
- "closure_field_store": {
-  "actual": "migrated to v3: the closure field takes direct closure values through value and pointer receivers; the *void control uses a direct function-literal conversion that keeps its provenance proof for the cast back, while call results/closure identifiers are refused and provenance is not tracked through fields; all three legs match",
-  "blocker": "none",
-  "class": "A"
- },
  "closure_throw_capture": {
   "actual": "cider run exit 1 on all three legs, stdout empty, stderr identical (2757 bytes): 18:17: a catch binds a name and a type; 21:9: expected ';'; 22:6: expected a declaration; 23:1: expected a declaration; 30:17: a catch binds a name and a type",
   "blocker": "try-throw-catch (v2 try/catch/throw purged; untyped catch is rejected) [B-terminal]",
   "class": "B"
- },
- "closures": {
-  "actual": "exact stdout/stderr/exit match (rc=0 as-is after closure funcReturn_ fix)",
-  "blocker": "asm blocks",
-  "class": "A"
  },
  "complex_stress": {
   "actual": "migrated to v3: inheritance spells `class AdvancedCalculator : Calculator`, redeclaring the virtual overrides it with no `override` keyword, `this` field access spells `this->`, and class values are built with literals; the legacy expected.json was an exit-code-only placeholder and now records the program's deterministic output; all three legs match expected.json",

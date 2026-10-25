@@ -2863,6 +2863,13 @@ TypeRef Checker::checkFuncLit(FuncLit& lit) {
         popScope();
         return errorRef();
     }
+    if (!captures.empty()) {
+        fail(captures.front().pos, "captures are not supported");
+        funcReturn_ = saved;
+        inFunc_ = was;
+        popScope();
+        return errorRef();
+    }
     // The scope and the return type stay in place through delegation: the
     // lowerer's walk re-checks the body deterministically, and a return
     // inside the literal answers the literal's type, not the enclosing

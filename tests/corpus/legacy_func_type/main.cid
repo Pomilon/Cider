@@ -18,10 +18,6 @@ func half(x: f64) -> f64 { return x / 2.0; }
 
 var g: func(int) -> int = inc;
 
-func makeAdder(base: int) -> func(int) -> int {
-  return func(x: int) -> int { return x + base; };
-}
-
 func main() -> int {
   // Plain named function in a legacy `func(...)` variable: the stored
   // signature drives the call (the old bare marker assumed an int result).
@@ -37,8 +33,9 @@ func main() -> int {
   if (fh(5.0) != 2.5) return 3;
   if (fh(3) != 1.5) return 4;
 
-  // Closures keep the closure-object call path under the same spelling.
-  var add40: func(int) -> int = makeAdder(40);
+  // Zero-capture closures keep the closure-object call path under the
+  // same spelling.
+  var add40: func(int) -> int = func(x: int) -> int { return x + 40; };
   if (add40(2) != 42) return 5;
 
   var lit: func(int) -> int = func(x: int) -> int { return x + 1; };
@@ -53,7 +50,7 @@ func main() -> int {
   if (syn(2) != 3) return 8;
   var ali: Cb = inc;
   if (ali(2) != 3) return 9;
-  var alic: Cb = makeAdder(30);
+  var alic: Cb = func(x: int) -> int { return x + 30; };
   if (alic(2) != 32) return 10;
 
   // Global `func(...)` holding a named function.
