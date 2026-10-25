@@ -510,6 +510,43 @@ void testOperatorOverloads() {
     check(plainAssign.ok,
           "a type without operator= keeps built-in assignment: " +
               plainAssign.stage);
+
+    Checked compound = check(
+        "struct C { var x: int;\n"
+        "    func operator+=(other: C) -> void { (*self).x = (*self).x + other.x; }\n"
+        "}\n"
+        "func main() -> int {\n"
+        "    var a: C = C { x: 1 };\n"
+        "    var b: C = C { x: 2 };\n"
+        "    a += b;\n"
+        "    return a.x;\n"
+        "}\n");
+    check(compound.ok, "a member compound assignment checks: " + compound.stage);
+
+    Checked compoundMismatch = check(
+        "struct C { var x: int;\n"
+        "    func operator+=(other: C) -> void { (*self).x = other.x; }\n"
+        "}\n"
+        "func main() -> int {\n"
+        "    var a: C = C { x: 1 };\n"
+        "    a += true;\n"
+        "    return a.x;\n"
+        "}\n");
+    check(!compoundMismatch.ok && compoundMismatch.stage == "check",
+          "a compound assignment needs an exact value type");
+
+    Checked freeCompound = check(
+        "struct C { var x: int; }\n"
+        "func operator+=(a: C, b: C) -> void { a.x = b.x; }\n");
+    check(!freeCompound.ok && freeCompound.stage == "check",
+          "a compound assignment must be a member");
+
+    Checked compoundReturn = check(
+        "struct C { var x: int;\n"
+        "    func operator+=(other: C) -> C { return other; }\n"
+        "}\n");
+    check(!compoundReturn.ok && compoundReturn.stage == "check",
+          "a compound assignment returns void");
 }
 
 void testInitAssign() {

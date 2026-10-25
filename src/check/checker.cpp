@@ -1276,8 +1276,8 @@ void Checker::visitFuncDecl(FuncDecl& n) {
             fail(n.pos, "operator '()' must be a member");
             return;
         }
-        if (n.name == "operator_assign") {
-            fail(n.pos, "operator '=' must be a member");
+        if (isAssignmentOperatorName(n.name)) {
+            fail(n.pos, "an assignment operator must be a member");
             return;
         }
         const bool unary =
@@ -1918,10 +1918,10 @@ void Checker::checkMethods(DeclId id, Kind kind, std::vector<MethodDecl>& method
                  "a binary operator takes exactly one parameter in a member declaration");
             continue;
         }
-        if (method.name == "operator_assign" &&
+        if (isAssignmentOperatorName(method.name) &&
             sig->returnType() != nullptr &&
             sig->returnType() != ctx_.void_()) {
-            fail(method.pos, "operator '=' returns void");
+            fail(method.pos, "an assignment operator returns void");
             continue;
         }
         pushScope();
@@ -2811,35 +2811,44 @@ void Checker::visitAssign(Assign& n) {
             return;
         }
     }
-    if (!n.op.has_value() &&
-        (target.type->kind() == Kind::Struct || target.type->kind() == Kind::Class)) {
-        // `a = b` on a nominal value uses its member `operator=` when one
-        // is declared. The declaration owns the store; built-in aggregate
-        // assignment remains the fallback for types that do not declare it.
-        std::optional<DeclId> id = target.type->decl();
-        const Signature* assignSig =
-            id.has_value() ? resolver_.methodSig(*id, "operator_assign")
-                           : nullptr;
-        if (assignSig != nullptr) {
-            if (assignSig->arity() != kOneParameter) {
-                fail(n.pos, "no matching operator '='");
-                record(&n, errorRef());
+    if (target.type->kind() == Kind::Struct || target.type->kind() == Kind::Class) {
+        // `a = b` and `a += b` on a nominal value use the matching member
+        // assignment operator when one is declared. The declaration owns
+        // the store; built-in aggregate assignment remains the fallback for
+        // types that do not declare the operator.
+        const char* opName = n.op.has_value()
+                                 ? compoundAssignOperatorName(*n.op)
+                                 : "operator_assign";
+        if (opName != nullptr) {
+            std::optional<DeclId> id = target.type->decl();
+            const Signature* assignSig =
+                id.has_value() ? resolver_.methodSig(*id, opName) : nullptr;
+            if (assignSig != nullptr) {
+                const char* spelling = n.op.has_value()
+                                           ? compoundAssignSpelling(*n.op)
+                                           : "=";
+                if (assignSig->arity() != kOneParameter) {
+                    fail(n.pos, std::string("no matching operator '") +
+                                    spelling + "'");
+                    record(&n, errorRef());
+                    return;
+                }
+                TypeRef want{assignSig->parameters()[0].type};
+                TypeRef value = checkExpr(n.value.get(), want);
+                if (value.isError()) {
+                    record(&n, errorRef());
+                    return;
+                }
+                if (value != want) {
+                    fail(n.value->pos, std::string("no matching operator '") +
+                                           spelling + "'");
+                    record(&n, errorRef());
+                    return;
+                }
+                operatorAssigns_.insert(&n);
+                record(&n, TypeRef{ctx_.void_()});
                 return;
             }
-            TypeRef want{assignSig->parameters()[0].type};
-            TypeRef value = checkExpr(n.value.get(), want);
-            if (value.isError()) {
-                record(&n, errorRef());
-                return;
-            }
-            if (value != want) {
-                fail(n.value->pos, "no matching operator '='");
-                record(&n, errorRef());
-                return;
-            }
-            operatorAssigns_.insert(&n);
-            record(&n, TypeRef{ctx_.void_()});
-            return;
         }
     }
     if (!n.op.has_value()) {

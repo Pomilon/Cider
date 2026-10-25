@@ -677,6 +677,19 @@ void testOperatorOverloadsNative() {
         "}\n",
         signaled);
     check(!signaled && code == 3, "a struct assignment operator answers 3");
+
+    code = runCode(
+        "struct C { var x: int;\n"
+        "    func operator+=(other: C) -> void { (*self).x = (*self).x + other.x; }\n"
+        "}\n"
+        "func main() -> int {\n"
+        "    var a: C = C { x: 1 };\n"
+        "    var b: C = C { x: 2 };\n"
+        "    a += b;\n"
+        "    return a.x;\n"
+        "}\n",
+        signaled);
+    check(!signaled && code == 3, "a struct compound assignment answers 3");
 }
 
 void testTrap() {

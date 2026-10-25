@@ -9737,9 +9737,15 @@ std::vector<ir::Value> Lowerer::lowerOperatorCall(Call& n) {
 }
 
 std::vector<ir::Value> Lowerer::lowerOperatorAssign(Assign& n) {
+    const char* opName = n.op.has_value()
+                             ? compoundAssignOperatorName(*n.op)
+                             : "operator_assign";
+    if (opName == nullptr) {
+        refuse(n.pos, "this assignment");
+        return {};
+    }
     Call call(n.pos,
-              std::make_unique<Field>(n.pos, std::move(n.target),
-                                      "operator_assign"),
+              std::make_unique<Field>(n.pos, std::move(n.target), opName),
               {}, std::vector<std::unique_ptr<Expr>>{});
     call.args.push_back(std::move(n.value));
     std::vector<ir::Value> words = lowerCallWords(call);

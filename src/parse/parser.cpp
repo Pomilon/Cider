@@ -426,9 +426,18 @@ bool Parser::parseOperatorName(std::string& out) {
         case TokenKind::Gt: out = "operator_gt"; break;
         case TokenKind::LtEq: out = "operator_le"; break;
         case TokenKind::GtEq: out = "operator_ge"; break;
-        // `=` is the assignment operator. Compound assignments remain
-        // deferred; their spellings are rejected below.
+        // `=` and its compound forms are assignment operators.
         case TokenKind::Eq: out = "operator_assign"; break;
+        case TokenKind::PlusEq: out = "operator_add_assign"; break;
+        case TokenKind::MinusEq: out = "operator_sub_assign"; break;
+        case TokenKind::StarEq: out = "operator_mul_assign"; break;
+        case TokenKind::SlashEq: out = "operator_div_assign"; break;
+        case TokenKind::PercentEq: out = "operator_rem_assign"; break;
+        case TokenKind::AmpEq: out = "operator_bitand_assign"; break;
+        case TokenKind::PipeEq: out = "operator_bitor_assign"; break;
+        case TokenKind::CaretEq: out = "operator_xor_assign"; break;
+        case TokenKind::LtLtEq: out = "operator_shl_assign"; break;
+        case TokenKind::GtGtEq: out = "operator_shr_assign"; break;
         case TokenKind::EqEq: out = "operator_eq"; break;
         case TokenKind::BangEq: out = "operator_ne"; break;
         default:

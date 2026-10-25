@@ -300,6 +300,21 @@ void testOperatorNames() {
     }
 
     ok = false;
+    std::unique_ptr<cider::Program> compound = parse(
+        "struct C { var x: int;\n"
+        "    func operator+=(other: C) -> void { (*self).x = other.x; }\n"
+        "}\n",
+        ok);
+    check(ok, "a member compound assignment parses");
+    if (compound != nullptr && !compound->decls.empty()) {
+        const cider::StructDecl& s =
+            static_cast<const cider::StructDecl&>(*compound->decls[0]);
+        check(!s.methods.empty() &&
+                  s.methods[0].name == "operator_add_assign",
+              "the parser stores the canonical compound name");
+    }
+
+    ok = false;
     parse("func operator&&(a: Vec, b: Vec) -> Vec { return a; }\n", ok);
     check(!ok, "short-circuit operators cannot be overloaded");
 

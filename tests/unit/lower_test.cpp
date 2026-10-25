@@ -1569,6 +1569,38 @@ void testOperators() {
         }
     }
     check(assignCall, "a = b lowers to the assignment operator");
+
+    Lowered compoundOp = lower(
+        "struct C { var x: int;\n"
+        "    func operator+=(other: C) -> void { (*self).x = (*self).x + other.x; }\n"
+        "}\n"
+        "func main() -> int {\n"
+        "    var a: C = C { x: 1 };\n"
+        "    var b: C = C { x: 2 };\n"
+        "    a += b;\n"
+        "    return a.x;\n"
+        "}\n");
+    check(compoundOp.ok,
+          "a compound assignment program lowers: " + compoundOp.stage);
+    if (!compoundOp.ok) {
+        return;
+    }
+    check(find(compoundOp.module.get(), "C__operator_add_assign") != nullptr,
+          "the compound assignment emits a method");
+    bool compoundCall = false;
+    const cider::ir::Function* compoundMain =
+        find(compoundOp.module.get(), "main");
+    if (compoundMain != nullptr) {
+        for (const cider::ir::Block& block : compoundMain->blocks) {
+            for (const cider::ir::Instr& instr : block.body) {
+                if (instr.op == cider::ir::Op::Call &&
+                    instr.callee == "C__operator_add_assign") {
+                    compoundCall = true;
+                }
+            }
+        }
+    }
+    check(compoundCall, "a += b lowers to the compound assignment operator");
 }
 
 void testMultiWordReturn() {
