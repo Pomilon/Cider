@@ -32,6 +32,7 @@
 #include <utility>
 #include <vector>
 
+#include "layout.h"
 #include "lexer/token.h"
 #include "types/signature.h"
 #include "types/type.h"
@@ -257,6 +258,14 @@ struct Global {
     // by lowering. Empty means no link-time words; a vtable never mixes
     // the two, so initWords stays empty beside this.
     std::vector<std::string> initLabels;
+    // The declared extent and natural alignment in bytes, from layout.h
+    // through the resolver. Used by the emitter for compact zero storage:
+    // an all-zero aggregate needs its exact size and alignment, not the
+    // eight-byte rounding its image words would imply. The unknown sentinel
+    // means the lowerer did not stamp a user global (an internal table, for
+    // one), and the image path keeps its old round-to-eight extent.
+    int64_t sizeBytes = layout::kSizeUnknown;
+    int64_t alignment = layout::kAlignUnknown;
 };
 
 // Read-only bytes: a string literal's content, or any future constant blob.

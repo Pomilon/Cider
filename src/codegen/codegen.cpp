@@ -15,6 +15,8 @@
 #include <unordered_set>
 #include <vector>
 
+#include "layout.h"
+
 namespace cider {
 namespace codegen {
 
@@ -74,6 +76,27 @@ constexpr uint64_t kWordBytes = 8;
 
 bool calleeArg(std::string&, std::string&, const ir::Instr&) = delete;  // placeholder
 
+// True when a global's image is entirely zero bytes and its exact extent is
+// known. Such a global is storage, not data: the emitter can reserve it in
+// `.bss` with one `.zero` instead of one `.quad 0` per eight bytes. Relocated
+// words, vtables, strings and non-zero images all keep the `.data` path.
+bool allZeroAggregate(const ir::Global& global) {
+    if (global.initWords.empty() || !global.initLabel.empty() ||
+        !global.initLabels.empty() || !global.relocWords.empty()) {
+        return false;
+    }
+    if (global.sizeBytes == layout::kSizeUnknown ||
+        global.alignment == layout::kAlignUnknown) {
+        return false;
+    }
+    for (uint64_t word : global.initWords) {
+        if (word != 0) {
+            return false;
+        }
+    }
+    return true;
+}
+
 const char* setFor(ir::CmpOp cmp) {
     if (cmp == ir::CmpOp::Eq) {
         return "sete";
@@ -128,8 +151,43 @@ public:
             return EmitResult{false, "", error_, pos_};
         }
         if (!module_.globals.empty()) {
-            out_ += ".data\n";
+            const bool elfObject =
+                target::info(target_).object == target::Object::Elf64;
+            bool inData = false;
+            bool inBss = false;
             for (const ir::Global& global : module_.globals) {
+                if (allZeroAggregate(global)) {
+                    // Zero storage belongs in `.bss`: one directive reserves
+                    // the object's exact extent, so a large zero aggregate
+                    // costs its size and not one `.quad 0` per eight bytes.
+                    // Alignment is the type's natural alignment, placed
+                    // before the label so the symbol itself is aligned.
+                    if (!inBss) {
+                        out_ += ".section .bss\n";
+                        inBss = true;
+                        inData = false;
+                    }
+                    out_ += "  .balign " +
+                            std::to_string(global.alignment) + "\n";
+                    if (elfObject) {
+                        // ELF symbol metadata carries the extent the image
+                        // path leaves implicit; COFF has no `.size`.
+                        out_ += "  .type " + global.label + ", @object\n";
+                    }
+                    out_ += global.label + ":\n";
+                    out_ += "  .zero " +
+                            std::to_string(global.sizeBytes) + "\n";
+                    if (elfObject) {
+                        out_ += "  .size " + global.label + ", " +
+                                std::to_string(global.sizeBytes) + "\n";
+                    }
+                    continue;
+                }
+                if (!inData) {
+                    out_ += ".data\n";
+                    inData = true;
+                    inBss = false;
+                }
                 out_ += global.label + ":\n";
                 if (!global.initLabels.empty()) {
                     // A vtable: one link-time address per method, in

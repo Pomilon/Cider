@@ -2313,6 +2313,8 @@ void Lowerer::onGlobal(VarDecl& n) {
     global.initLabels = binding.initLabels;
     global.initWords = binding.initWords;
     global.relocWords = binding.relocWords;
+    global.sizeBytes = resolver_.nominalSize(type.type);
+    global.alignment = resolver_.nominalAlign(type.type);
     module_->globals.push_back(global);
 }
 

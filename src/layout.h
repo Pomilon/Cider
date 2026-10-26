@@ -92,6 +92,12 @@ constexpr int64_t kAlignI32 = 4;
 constexpr int64_t kAlignI16 = 2;
 constexpr int64_t kAlignByte = 1;
 
+// The resolver's "no extent" and "no alignment" answers. Named here because
+// T4 forbids a bare digit beside a size word elsewhere: a caller testing a
+// Global's stamped layout uses these sentinels rather than `-1`.
+constexpr int64_t kSizeUnknown = -1;
+constexpr int64_t kAlignUnknown = -1;
+
 // --- Derived quantities ------------------------------------------------------
 
 // Round `value` up to a multiple of `alignment`. The one place padding is

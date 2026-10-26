@@ -273,6 +273,16 @@ add_test(NAME v4_pomeos
 set_tests_properties(v4_pomeos PROPERTIES
   ENVIRONMENT "CIDER_BIN=${CMAKE_BINARY_DIR}/cider")
 
+# A large all-zero aggregate is storage, not an image: `.bss` plus one
+# `.zero` of the declared extent, with ELF size/alignment metadata. Non-zero
+# aggregates and strings stay in `.data`/`.rodata`, and the storage remains
+# readable and writable.
+add_test(NAME v4_zero_global_bss
+         COMMAND ${Python3_EXECUTABLE}
+                 ${CMAKE_SOURCE_DIR}/tests/v4/zero_global_bss_test.py)
+set_tests_properties(v4_zero_global_bss PROPERTIES
+  ENVIRONMENT "CIDER_BIN=${CMAKE_BINARY_DIR}/cider")
+
 # --- Targets -------------------------------------------------------------------
 #
 # OUTPUT.md §2: a target is a description, not a layer. The descriptor is the
