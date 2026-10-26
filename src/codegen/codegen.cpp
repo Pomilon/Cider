@@ -594,6 +594,18 @@ private:
             cells += static_cast<uint32_t>(stages);
         }
         uint32_t span = (cells * 8 + 15) & ~15u;
+        // A normal SysV callee enters with rsp 8 mod 16 (the caller aligned
+        // rsp before its call), so push rbp makes rbp 16-aligned and a
+        // 16-multiple span keeps the frame call-aligned. Linux instead enters
+        // a native process with rsp 16-aligned, and `_start` has no caller to
+        // create that call frame. Reserve one extra word so `_start`'s own
+        // calls hand their callees the alignment every normal function
+        // expects. PomeOS documents call-like entry alignment and UEFI calls
+        // efi_main, so neither gets this adjustment.
+        if (target_ == Target::Native &&
+            fn.name == target::info(target_).entry) {
+            span += layout::kSizePointer;
+        }
 
         out_ += ".globl " + asmSafeName(fn.name) + "\n";
         out_ += asmSafeName(fn.name) + ":\n";

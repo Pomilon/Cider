@@ -283,6 +283,15 @@ add_test(NAME v4_zero_global_bss
 set_tests_properties(v4_zero_global_bss PROPERTIES
   ENVIRONMENT "CIDER_BIN=${CMAKE_BINARY_DIR}/cider")
 
+# Linux enters a native process with rsp 16-aligned, not at the 8-mod-16
+# call frame a normal function assumes. `_start` alone gets the entry
+# adjustment; ordinary functions and PomeOS's call-like entry stay unchanged.
+add_test(NAME v4_native_entry_alignment
+         COMMAND ${Python3_EXECUTABLE}
+                 ${CMAKE_SOURCE_DIR}/tests/v4/native_entry_alignment_test.py)
+set_tests_properties(v4_native_entry_alignment PROPERTIES
+  ENVIRONMENT "CIDER_BIN=${CMAKE_BINARY_DIR}/cider")
+
 # --- Targets -------------------------------------------------------------------
 #
 # OUTPUT.md §2: a target is a description, not a layer. The descriptor is the
