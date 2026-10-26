@@ -96,7 +96,6 @@ public:
     // finalizer pass refused (the driver prints every layer's errors on a
     // null module, so a late refusal is not silent).
     std::unique_ptr<ir::Module> takeModule() {
-        prepareTargetEntry();
         return failed_ ? nullptr : std::move(module_);
     }
     // Emits every used generic-function specialization once, after all
@@ -652,11 +651,6 @@ private:
     void beginFuncFrame(const std::string& link, const Signature& sig,
                         const std::vector<Param>& params, Position pos);
     void endFuncFrame(Position pos);
-    // Names the target entry in IR and adds target-owned globals. UEFI owns
-    // the firmware symbol `efi_main`, so the user's function is renamed to a
-    // hidden link symbol and the emitter's shim calls it. Native has no
-    // target-owned entry work. Called once, from takeModule.
-    void prepareTargetEntry();
     // Whether a block of the function under construction can run: a
     // breadth-first walk over terminator edges from the entry block. A
     // reachable falloff in a value function is a compile-time rejection
@@ -729,7 +723,6 @@ private:
     bool enabled_ = false;
     bool wrap_ = false;
     bool failed_ = false;
-    bool targetPrepared_ = false;
     uint32_t valueSeq_ = 0;
     uint32_t labelSeq_ = 0;
     // The innermost enclosing loop's two jump targets: `continue` goes to

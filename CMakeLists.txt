@@ -235,6 +235,17 @@ add_test(NAME v4_freestanding
 set_tests_properties(v4_freestanding PROPERTIES
   ENVIRONMENT "CIDER_BIN=${CMAKE_BINARY_DIR}/cider")
 
+# Source-defined entry: native `_start` and UEFI `efi_main` are validated
+# and emitted directly. The UEFI link smoke exits 77 when clang or ld's
+# i386pep emulation is unavailable, so ctest reports SKIP, never a silent
+# pass.
+add_test(NAME v4_source_entry
+         COMMAND ${Python3_EXECUTABLE}
+                 ${CMAKE_SOURCE_DIR}/tests/v4/source_entry_test.py)
+set_tests_properties(v4_source_entry PROPERTIES
+  ENVIRONMENT "CIDER_BIN=${CMAKE_BINARY_DIR}/cider"
+  SKIP_RETURN_CODE 77)
+
 # --- Targets -------------------------------------------------------------------
 #
 # OUTPUT.md §2: a target is a description, not a layer. The descriptor is the

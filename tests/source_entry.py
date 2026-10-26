@@ -43,7 +43,7 @@ def with_main_entry(text):
     return text.rstrip() + "\n" + MAIN_ENTRY
 
 
-def wrap_file(path, directory=None):
+def wrap_file(path):
     """Write wrapped source beside its imports.
 
     A compiler run resolves plain imports relative to the entry file, so a
@@ -56,11 +56,10 @@ def wrap_file(path, directory=None):
     wrapped = with_main_entry(text)
     if wrapped == text:
         return path, None
-    target = directory or tempfile.mkdtemp(prefix="cider-entry-")
-    if directory is None:
-        shutil.copytree(
-            os.path.dirname(os.path.abspath(path)), target, dirs_exist_ok=True)
+    target = tempfile.mkdtemp(prefix="cider-entry-")
+    shutil.copytree(
+        os.path.dirname(os.path.abspath(path)), target, dirs_exist_ok=True)
     entry = os.path.join(target, os.path.basename(path))
     with open(entry, "w") as handle:
         handle.write(wrapped)
-    return entry, target if directory is None else None
+    return entry, target

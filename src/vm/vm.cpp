@@ -1609,8 +1609,8 @@ struct Runner {
             blockAt[block.label] = blockAt.size();
         }
         // The lowerer emits the entry block first, so the front of the list
-        // is the entry — the same assumption the emitter's _start
-        // trampoline makes when it falls into the function's first block.
+        // is the entry — the same assumption the emitter makes when it lays
+        // out a function's blocks in order.
         size_t current = kZeroCell;
         for (;;) {
             if (++steps > kStepLimit) {

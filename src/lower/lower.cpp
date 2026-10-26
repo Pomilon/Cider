@@ -253,69 +253,6 @@ void Lowerer::refuse(Position pos, const std::string& what) {
     failed_ = true;
 }
 
-void Lowerer::prepareTargetEntry() {
-    if (targetPrepared_) {
-        return;
-    }
-    targetPrepared_ = true;
-    if (module_ == nullptr || target_ != target::Kind::Uefi) {
-        return;
-    }
-    // The firmware owns `efi_main`; the user's function keeps its source
-    // spelling but not its link symbol. One rename here keeps every direct
-    // call and function address pointing at the user body, never at the
-    // firmware shim.
-    const std::string hidden = "cider_efi_main_user";
-    for (ir::Function& fn : module_->functions) {
-        if (fn.name == "efi_main") {
-            fn.name = hidden;
-            module_->entry = hidden;
-            break;
-        }
-    }
-    if (module_->entry.empty()) {
-        return;
-    }
-    for (ir::Function& fn : module_->functions) {
-        for (ir::Block& block : fn.blocks) {
-            for (ir::Instr& instr : block.body) {
-                if (instr.op == ir::Op::Call && instr.callee == "efi_main") {
-                    instr.callee = hidden;
-                }
-                if (instr.op == ir::Op::FnAddr && instr.globalLabel == "efi_main") {
-                    instr.globalLabel = hidden;
-                }
-            }
-        }
-    }
-    for (ir::Global& global : module_->globals) {
-        for (std::string& label : global.initLabels) {
-            if (label == "efi_main") {
-                label = hidden;
-            }
-        }
-    }
-    const TypeRef voidPtr{ctx_.pointer(ctx_.void_())};
-    bool image = false;
-    bool system = false;
-    for (const ir::Global& global : module_->globals) {
-        image = image || global.label == "image_handle";
-        system = system || global.label == "system_table";
-    }
-    if (!image) {
-        ir::Global slot;
-        slot.label = "image_handle";
-        slot.type = voidPtr;
-        module_->globals.push_back(std::move(slot));
-    }
-    if (!system) {
-        ir::Global slot;
-        slot.label = "system_table";
-        slot.type = voidPtr;
-        module_->globals.push_back(std::move(slot));
-    }
-}
-
 // --- Entry point -------------------------------------------------------------
 
 bool Lowerer::lowerModule(const std::string& name, Program& program) {
@@ -325,29 +262,6 @@ bool Lowerer::lowerModule(const std::string& name, Program& program) {
 }
 
 bool Lowerer::lowerInto(const std::string& name, Program& program) {
-    // UEFI exposes the firmware handles as ordinary source globals. Their
-    // storage is the bare label the entry shim writes, not a mangled Cider
-    // global, so register the bindings before the checking walk reads them.
-    if (target_ == target::Kind::Uefi) {
-        const TypeRef voidPtr{ctx_.pointer(ctx_.void_())};
-        for (const char* globalName : {"image_handle", "system_table"}) {
-            bool present = false;
-            for (const GlobalBinding& binding : globals_) {
-                if (binding.name == globalName && binding.module == name) {
-                    present = true;
-                    break;
-                }
-            }
-            if (!present) {
-                GlobalBinding binding;
-                binding.name = globalName;
-                binding.label = globalName;
-                binding.module = name;
-                binding.type = voidPtr;
-                globals_.push_back(std::move(binding));
-            }
-        }
-    }
     // Module-scope asm is raw text owned by the program. It is collected
     // once per module and emitted verbatim before any generated function.
     for (const std::unique_ptr<cider::Decl>& decl : program.decls) {

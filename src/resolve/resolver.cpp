@@ -1144,7 +1144,6 @@ bool Resolver::resolveProgram(Program& program, const std::string& module) {
     if (entry_ == nullptr) {
         entry_ = scope;
     }
-    bindTargetGlobals(scope, program.pos);
     bindCoreTypes(scope);
     // Imports first, so a `from` alias and every qualified name resolves
     // against a module whose own headers already exist.
@@ -2076,9 +2075,6 @@ const Decl* Resolver::declById(DeclId id) const {
 }
 
 std::string Resolver::linkName(const Decl& decl) const {
-    if (decl.isTargetGlobal) {
-        return decl.name;
-    }
     if (decl.isExtern) {
         return decl.name;
     }
@@ -2449,23 +2445,6 @@ const Scope* Resolver::typeParamScope(const Scope* parent, const std::string& mo
         ++index;
     }
     return scope;
-}
-
-void Resolver::bindTargetGlobals(const Scope* scope, Position pos) {
-    // No prelude names remain. UEFI still injects its two firmware handles
-    // until the source-defined entry step; they are target globals, not
-    // imports, and use their bare linker spellings.
-    if (target_ == target::Kind::Uefi) {
-        const Type* none = ctx_.void_();
-        const Type* voidPtr = ctx_.pointer(none);
-        auto global = [&](const std::string& name) {
-            Decl* d = bind(scope, DeclKind::Var, name, pos);
-            d->type = TypeRef{voidPtr};
-            d->isTargetGlobal = true;
-        };
-        global("image_handle");
-        global("system_table");
-    }
 }
 
 EvalEnv Resolver::evalEnv(const Scope* scope) {

@@ -267,7 +267,7 @@ def main():
         h.expect("write failure", proc,
                  "compiler: cannot write '%s'\n" % outdir)
 
-        uefi_src = h.source("uefi_nil.cid", """func efi_main() -> int {
+        uefi_src = h.source("uefi_nil.cid", """msabi func efi_main(image_handle: *void, system_table: *void) -> int {
   var p: *int = nilPtr;
   return *p;
 }

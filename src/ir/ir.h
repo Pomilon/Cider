@@ -269,10 +269,6 @@ struct Rodata {
 
 struct Module {
     std::string name;
-    // The function symbol the target's entry shim calls, when the target
-    // owns the firmware entry symbol. Empty on targets whose entry is an
-    // ordinary function (`main`/`_start`).
-    std::string entry;
     // Raw module-scope asm, emitted at the top of .text by native codegen.
     // Empty when the module has none. Never substituted.
     std::string moduleAsm;

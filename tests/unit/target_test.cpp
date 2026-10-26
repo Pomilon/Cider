@@ -50,7 +50,7 @@ void testUefi() {
     check(info.abi == Abi::MsAbi, "ABI is Microsoft x64");
     check(std::string(info.entry) == "efi_main", "entry is efi_main");
     check(info.output == Output::Pe32Plus, "output is PE32+");
-    check(!info.allowsAsm, "inline assembly is rejected");
+    check(info.allowsAsm, "inline assembly is allowed for bootstrap code");
     check(!info.nullFaults, "null accesses need emitted checks");
 }
 

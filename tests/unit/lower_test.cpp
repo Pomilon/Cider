@@ -1724,18 +1724,24 @@ void testArrowOperator() {
 void testUefiEntry() {
     std::printf("uefi entry\n");
     Lowered lowered = lowerAs(
-        "func efi_main() -> int { return 0; }\n",
+        "msabi func efi_main(image_handle: *void, system_table: *void) -> int {\n"
+        "    return 0;\n"
+        "}\n",
         cider::target::Kind::Uefi);
     check(lowered.ok, "a uefi efi_main lowers: " + lowered.stage);
     if (!lowered.ok) {
         return;
     }
-    check(find(lowered.module.get(), "efi_main") == nullptr,
-          "the firmware symbol is not the user function");
-    check(find(lowered.module.get(), "cider_efi_main_user") != nullptr,
-          "the user entry has a hidden link symbol");
-    check(lowered.module->entry == "cider_efi_main_user",
-          "the module names the hidden entry symbol");
+    const cider::ir::Function* entry = find(lowered.module.get(), "efi_main");
+    check(entry != nullptr, "the source function keeps the firmware symbol");
+    if (entry != nullptr) {
+        check(entry->signature.abi() == cider::Abi::MsAbi,
+              "the entry uses msabi");
+        check(entry->signature.arity() == 2,
+              "the entry receives the two firmware handles");
+    }
+    check(find(lowered.module.get(), "cider_efi_main_user") == nullptr,
+          "no hidden user entry is synthesized");
     bool image = false;
     bool system = false;
     for (const cider::ir::Global& global : lowered.module->globals) {
@@ -1746,25 +1752,37 @@ void testUefiEntry() {
             system = true;
         }
     }
-    check(image, "the image handle global is emitted");
-    check(system, "the system table global is emitted");
+    check(!image, "no image handle global is injected");
+    check(!system, "no system table global is injected");
 }
 
 void testUefiTargetGlobals() {
-    std::printf("uefi target globals and abi\n");
+    std::printf("uefi handles are source parameters\n");
     Lowered accessible = lowerAs(
-        "func efi_main() -> int {\n"
+        "msabi func efi_main(image_handle: *void, system_table: *void) -> int {\n"
         "    var image: *void = image_handle;\n"
         "    var system: *void = system_table;\n"
         "    return 0;\n"
         "}\n",
         cider::target::Kind::Uefi);
-    check(accessible.ok, "uefi handles are visible to source: " + accessible.stage);
+    check(accessible.ok, "uefi handles are visible as parameters: " +
+                             accessible.stage);
+
+    Lowered injected = lowerAs(
+        "msabi func efi_main(a: *void, b: *void) -> int {\n"
+        "    var system: *void = system_table;\n"
+        "    return 0;\n"
+        "}\n",
+        cider::target::Kind::Uefi);
+    check(!injected.ok && injected.stage == "check",
+          "an undeclared system_table is unbound");
 
     Lowered abi = lowerAs(
         "func add(a: int, b: int) -> int { return a + b; }\n"
         "sysv func sub(a: int, b: int) -> int { return a - b; }\n"
-        "func efi_main() -> int { return add(1, 2) + sub(3, 1); }\n",
+        "msabi func efi_main(image_handle: *void, system_table: *void) -> int {\n"
+        "    return add(1, 2) + sub(3, 1);\n"
+        "}\n",
         cider::target::Kind::Uefi);
     check(abi.ok, "uefi functions lower: " + abi.stage);
     if (abi.ok) {

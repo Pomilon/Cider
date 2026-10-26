@@ -1,4 +1,39 @@
-func efi_main() -> int {
-    print("Hello from Cider UEFI!\r\n");
+// v4 UEFI entry: the program defines the real firmware symbol with the
+// Microsoft x64 convention. The compiler injects no shim and no handles;
+// the firmware passes them as ordinary parameters.
+//
+// The message is written with raw inline assembly through the firmware's
+// Simple Text Output protocol. This is the bootloader style v4 allows: the
+// program owns its ABI plumbing, and the target validates the asm block.
+var msg: string = "Hello from Cider UEFI!\r\n";
+
+msabi func efi_main(image_handle: *void, system_table: *void) -> int {
+    var table: *void = system_table;
+    var text: string = msg;
+    asm {
+        "mov r9, {table:q}"
+        "test r9, r9"
+        "jz 3f"
+        "mov r9, [r9 + 64]"      // SystemTable->ConOut
+        "test r9, r9"
+        "jz 3f"
+        "mov r10, {text:q}"
+        "sub rsp, 288"            // output buffer + shadow space
+        "xor r8, r8"
+        "1:"
+        "movzx eax, byte ptr [r10 + r8]"
+        "test eax, eax"
+        "jz 2f"
+        "mov word ptr [rsp + 32 + r8 * 2], ax"
+        "inc r8"
+        "jmp 1b"
+        "2:"
+        "mov word ptr [rsp + 32 + r8 * 2], 0"
+        "mov rcx, r9"
+        "lea rdx, [rsp + 32]"
+        "call qword ptr [r9 + 8]" // ConOut->OutputString
+        "add rsp, 288"
+        "3:"
+    }
     return 0;
 }

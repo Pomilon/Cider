@@ -609,19 +609,19 @@ void testNativeTargetAliases() {
     unlink(src.c_str());
 }
 
-// Target names the toolchain knows reach the front end. The emitter owns the
-// "not implemented" verdict for a known target; the driver only rejects names
-// it does not recognize.
+// Target names the toolchain knows reach the front end, and each target's
+// entry is source-defined: main is never accepted as UEFI's firmware entry.
 void testKnownTargetsReachFrontEnd() {
     std::printf("known targets reach the front end\n");
     std::string src = writeTemp("func main() -> int { return 0; }\n", false);
     Result uefiCheck = run({"check", "--target", "uefi", src});
-    check(uefiCheck.code == 0,
-          "check --target uefi reaches the front end: " + uefiCheck.err);
+    check(uefiCheck.code != 0, "check --target uefi rejects main-only source");
+    check(uefiCheck.err.find("efi_main") != std::string::npos,
+          "the missing-entry diagnostic names efi_main");
     Result uefiCompile = run({"compile", "--target", "uefi", src});
     check(uefiCompile.code != 0, "compile --target uefi refuses");
-    check(uefiCompile.err.find("uefi") != std::string::npos,
-          "naming uefi");
+    check(uefiCompile.err.find("efi_main") != std::string::npos,
+          "naming efi_main");
     check(uefiCompile.err.find("native only") == std::string::npos,
           "not claiming uefi is native only");
     Result bogus = run({"check", "--target", "bogus", src});
@@ -631,14 +631,33 @@ void testKnownTargetsReachFrontEnd() {
     unlink(src.c_str());
 
     std::string asmSrc = writeTemp(
-        "func efi_main() -> int { asm { \"nop\" } return 0; }\n");
+        "msabi func efi_main(image_handle: *void, system_table: *void) -> int {\n"
+        "    asm { \"nop\" }\n"
+        "    return 0;\n"
+        "}\n",
+        false);
     Result uefiAsm = run({"check", "--target", "uefi", asmSrc});
-    check(uefiAsm.code != 0, "uefi rejects asm through the driver");
-    check(uefiAsm.err.find("uefi") != std::string::npos,
-          "the driver's asm refusal names uefi");
+    check(uefiAsm.code == 0, "uefi accepts raw inline asm through the driver: " +
+                                 uefiAsm.err);
     unlink(asmSrc.c_str());
 
-    std::string entry = writeTemp("func efi_main() -> int { return 0; }\n");
+    std::string badAsm = writeTemp(
+        "msabi func efi_main(image_handle: *void, system_table: *void) -> int {\n"
+        "    asm { \"mov edi, {nope}\" }\n"
+        "    return 0;\n"
+        "}\n",
+        false);
+    Result uefiBadAsm = run({"check", "--target", "uefi", badAsm});
+    check(uefiBadAsm.code != 0, "uefi validates asm placeholders");
+    check(uefiBadAsm.err.find("nope") != std::string::npos,
+          "the placeholder diagnostic names the name");
+    unlink(badAsm.c_str());
+
+    std::string entry = writeTemp(
+        "msabi func efi_main(image_handle: *void, system_table: *void) -> int {\n"
+        "    return 0;\n"
+        "}\n",
+        false);
     Result uefiRun = run({"run", "--target", "uefi", entry});
     check(uefiRun.code != 0, "run --target uefi names the PE link path");
     check(uefiRun.err.find("link_uefi.sh") != std::string::npos,
@@ -726,7 +745,7 @@ void testFailures() {
           "naming the file");
     std::string src = writeTemp("func main() -> int { return 1; }\n");
     Result target = run({"compile", "--target", "uefi", src});
-    check(target.code != 0, "an unimplemented target fails");
+    check(target.code != 0, "a target with the wrong entry fails");
     check(target.err.find("uefi") != std::string::npos, "naming the target");
     Result sub = run({"frobnicate", src});
     check(sub.code != 0, "an unknown subcommand fails");

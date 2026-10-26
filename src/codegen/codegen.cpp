@@ -240,82 +240,6 @@ private:
         return out;
     }
 
-    // UEFI has no file descriptors. `print` walks the Cider string and emits
-    // one UTF-16 unit at a time through the firmware's Simple Text Output
-    // protocol. ASCII is exact; a non-ASCII byte becomes `?` until the
-    // string runtime grows UTF-8 decoding.
-    bool emitUefiPrint() {
-        out_ += "cider_print:\n";
-        out_ += "  test rsi, rsi\n";
-        out_ += "  jle .L_uefi_print_done\n";
-        out_ += "  mov rax, [rip + system_table]\n";
-        out_ += "  test rax, rax\n";
-        out_ += "  jz .L_uefi_print_trap\n";
-        out_ += "  mov r14, [rax + 64]\n";        // SystemTable->ConOut
-        out_ += "  test r14, r14\n";
-        out_ += "  jz .L_uefi_print_trap\n";
-        out_ += "  push rbx\n";
-        out_ += "  push r12\n";
-        out_ += "  push r13\n";
-        out_ += "  push r14\n";
-        out_ += "  sub rsp, 40\n";                // shadow + alignment
-        out_ += "  mov r12, rdi\n";
-        out_ += "  lea r13, [rdi + rsi]\n";
-        out_ += ".L_uefi_print_loop:\n";
-        out_ += "  cmp r12, r13\n";
-        out_ += "  jae .L_uefi_print_end\n";
-        out_ += "  movzx eax, byte ptr [r12]\n";
-        out_ += "  cmp eax, 128\n";
-        out_ += "  jb .L_uefi_print_ascii\n";
-        out_ += "  mov eax, 63\n";                // '?'
-        out_ += ".L_uefi_print_ascii:\n";
-        out_ += "  mov word ptr [rsp + 32], ax\n";
-        out_ += "  mov word ptr [rsp + 34], 0\n";
-        out_ += "  mov rcx, r14\n";
-        out_ += "  lea rdx, [rsp + 32]\n";
-        out_ += "  call qword ptr [r14 + 8]\n";   // ConOut->OutputString
-        out_ += "  inc r12\n";
-        out_ += "  jmp .L_uefi_print_loop\n";
-        out_ += ".L_uefi_print_end:\n";
-        out_ += "  add rsp, 40\n";
-        out_ += "  pop r14\n";
-        out_ += "  pop r13\n";
-        out_ += "  pop r12\n";
-        out_ += "  pop rbx\n";
-        out_ += ".L_uefi_print_done:\n";
-        out_ += "  ret\n";
-        out_ += ".L_uefi_print_trap:\n";
-        out_ += "  ud2\n";
-        return true;
-    }
-
-    bool emitUefiPutchar() {
-        emitHelper("cider_print");
-        out_ += "putchar:\n";
-        out_ += "  push rbx\n";
-        out_ += "  sub rsp, 16\n";
-        out_ += "  mov ebx, edi\n";
-        out_ += "  mov byte ptr [rsp], bl\n";
-        out_ += "  lea rdi, [rsp]\n";
-        out_ += "  mov esi, 1\n";
-        out_ += "  call cider_print\n";
-        out_ += "  mov eax, ebx\n";
-        out_ += "  add rsp, 16\n";
-        out_ += "  pop rbx\n";
-        out_ += "  ret\n";
-        return true;
-    }
-
-    bool emitUefiPanic() {
-        emitHelper("cider_print");
-        out_ += "cider_panic:\n";
-        out_ += "  sub rsp, 8\n";
-        out_ += "  call cider_print\n";
-        out_ += "  add rsp, 8\n";
-        out_ += "  ud2\n";
-        return true;
-    }
-
     // A diagnosed trap is a language result, not a machine accident. Native
     // has no libc, so the line goes out with the write syscall and the exit
     // status is 2; UEFI policy stays ud2 and silent. Undiagnosed reasons keep
@@ -410,67 +334,52 @@ private:
         return true;
     }
 
-    // The firmware entry. UEFI calls `efi_main` with the image handle in
-    // rcx and the system table in rdx under the Microsoft x64 ABI. Those
-    // words are saved for the program's globals before the user's body runs;
-    // the body itself takes no parameters and returns an int status.
+    // The firmware entry. v4 has no shim: the program defines the real
+    // Microsoft x64 entry itself and the firmware calls it directly. The
+    // compiler validates the shape and emits no symbol of its own, stores
+    // no handles, and never renames the source function.
     bool emitUefiEntry() {
-        const ir::Function* mainFn = nullptr;
-        const ir::Function* startFn = nullptr;
-        for (const ir::Function& fn : module_.functions) {
-            if (fn.name == "main") {
-                mainFn = &fn;
-            }
-            if (fn.name == "_start") {
-                startFn = &fn;
-            }
-        }
-        if (mainFn != nullptr || startFn != nullptr) {
-            const ir::Function* wrong = mainFn != nullptr ? mainFn : startFn;
-            refuse(wrong->loc, "uefi entry is efi_main, not main or _start");
-            return false;
-        }
-        if (module_.entry.empty()) {
-            refuse(Position{"", 1, 1},
-                   "no entry function for uefi: define efi_main");
-            return false;
-        }
         const ir::Function* user = nullptr;
         for (const ir::Function& fn : module_.functions) {
-            if (fn.name == module_.entry) {
+            if (fn.name == "efi_main") {
                 user = &fn;
                 break;
             }
         }
         if (user == nullptr) {
             refuse(Position{"", 1, 1},
-                   "uefi entry symbol '" + module_.entry + "' is missing");
+                   "no entry function for uefi: define msabi func "
+                   "efi_main(image_handle: *void, system_table: *void) -> int");
             return false;
         }
-        if (!user->signature.parameters().empty()) {
-            refuse(user->loc, "efi_main takes no parameters");
+        const Signature& sig = user->signature;
+        if (sig.abi() != Abi::MsAbi) {
+            refuse(user->loc,
+                   "efi_main must use the msabi calling convention");
             return false;
         }
-        const Type* ret = user->signature.returnType();
+        if (sig.arity() != 2) {
+            refuse(user->loc,
+                   "efi_main takes exactly two parameters: "
+                   "image_handle and system_table");
+            return false;
+        }
+        for (uint64_t i = 0; i < sig.arity(); ++i) {
+            const Type* type = sig.parameters()[i].type;
+            if (type == nullptr || type->kind() != Kind::Pointer ||
+                type->pointee()->kind() != Kind::Void) {
+                refuse(user->loc,
+                       "efi_main parameter " + std::to_string(i + 1) +
+                           " must be *void");
+                return false;
+            }
+        }
+        const Type* ret = sig.returnType();
         if (ret == nullptr || ret->kind() != Kind::Basic ||
-            (*ret->basic() != BasicKind::I32 && *ret->basic() != BasicKind::I64)) {
+            *ret->basic() != BasicKind::I32) {
             refuse(user->loc, "efi_main must return int");
             return false;
         }
-        // 32 bytes of shadow space plus 8 for alignment: the firmware enters
-        // with rsp misaligned by a return address, and the user body sees the
-        // ordinary Microsoft call shape.
-        out_ += ".globl efi_main\n";
-        out_ += "efi_main:\n";
-        out_ += "  sub rsp, 40\n";
-        out_ += "  mov [rip + image_handle], rcx\n";
-        out_ += "  mov [rip + system_table], rdx\n";
-        out_ += "  call " + module_.entry + "\n";
-        if (*ret->basic() == BasicKind::I32) {
-            out_ += "  mov eax, eax\n";  // UEFI status is a 64-bit UINTN
-        }
-        out_ += "  add rsp, 40\n";
-        out_ += "  ret\n";
         return true;
     }
 

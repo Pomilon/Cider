@@ -765,11 +765,8 @@ const FuncDecl* Checker::funcSpelling(const std::string& module,
 // to require one; this method owns the target shape so `check` and `compile`
 // cannot disagree about what a valid entry is.
 bool Checker::checkEntry(Program& program) {
-    // UEFI entry validation lands with the source-defined UEFI entry slice;
-    // until then its emitter owns the legacy form.
-    if (target_ != target::Kind::Native) {
-        return true;
-    }
+    const bool uefi = target_ == target::Kind::Uefi;
+    const std::string expected = uefi ? "efi_main" : "_start";
     const FuncDecl* entry = nullptr;
     for (const std::unique_ptr<Decl>& decl : program.decls) {
         const Decl* node = decl.get();
@@ -777,44 +774,87 @@ bool Checker::checkEntry(Program& program) {
             node = exported->decl.get();
         }
         const auto* fn = dynamic_cast<const FuncDecl*>(node);
-        if (fn != nullptr && fn->name == "_start") {
+        if (fn != nullptr && fn->name == expected) {
             entry = fn;
             break;
         }
     }
     if (entry == nullptr) {
-        fail(program.pos, "no entry function: define func _start() -> void");
+        if (uefi) {
+            fail(program.pos,
+                 "no entry function for uefi: define msabi func "
+                 "efi_main(image_handle: *void, system_table: *void) -> int");
+        } else {
+            fail(program.pos, "no entry function: define func _start() -> void");
+        }
         return false;
     }
     if (!entry->typeParams.empty()) {
-        fail(entry->pos, "_start cannot be generic");
+        fail(entry->pos, expected + " cannot be generic");
         return false;
+    }
+    const resolve::Decl* binding =
+        resolver_.moduleScope() != nullptr
+            ? resolver_.lookup(resolver_.moduleScope(), expected)
+            : nullptr;
+    if (binding == nullptr || binding->kind != resolve::DeclKind::Func) {
+        fail(entry->pos, "checker bug: " + expected + " was never resolved");
+        return false;
+    }
+    const Signature& sig = binding->sig;
+    if (uefi) {
+        if (entry->abi != "msabi") {
+            fail(entry->pos, "efi_main must be declared msabi");
+            return false;
+        }
+        if (sig.arity() != 2) {
+            fail(entry->pos,
+                 "efi_main takes exactly two parameters: "
+                 "image_handle and system_table");
+            return false;
+        }
+        for (uint64_t i = 0; i < sig.arity(); ++i) {
+            const Type* type = sig.parameters()[i].type;
+            if (type == nullptr || type->kind() != Kind::Pointer ||
+                type->pointee()->kind() != Kind::Void) {
+                const std::string name =
+                    i < entry->params.size() ? entry->params[i].name
+                                             : std::to_string(i + 1);
+                fail(entry->pos,
+                     "efi_main parameter '" + name + "' must be *void");
+                return false;
+            }
+        }
+        const Type* ret = sig.returnType();
+        if (ret == nullptr || ret->kind() != Kind::Basic ||
+            *ret->basic() != BasicKind::I32) {
+            fail(entry->pos, "efi_main must return int");
+            return false;
+        }
+        if (sig.abi() != Abi::MsAbi) {
+            fail(entry->pos, "efi_main must use the msabi calling convention");
+            return false;
+        }
+        return true;
     }
     if (!entry->params.empty()) {
         fail(entry->pos, "_start takes no parameters");
         return false;
     }
-    const resolve::Decl* binding =
-        resolver_.moduleScope() != nullptr
-            ? resolver_.lookup(resolver_.moduleScope(), "_start")
-            : nullptr;
-    if (binding == nullptr || binding->kind != resolve::DeclKind::Func) {
-        fail(entry->pos, "checker bug: _start was never resolved");
-        return false;
-    }
-    const Type* ret = binding->sig.returnType();
+    const Type* ret = sig.returnType();
     if (ret == nullptr || ret->kind() != Kind::Void) {
         fail(entry->pos, "_start must return void");
         return false;
     }
-    if (binding->sig.abi() != Abi::SysV) {
+    if (sig.abi() != Abi::SysV) {
         fail(entry->pos, "_start must use the sysv calling convention");
         return false;
     }
     return true;
 }
 
-bool Checker::checkProgram(Program& program, const std::string& module) {    module_ = module;
+bool Checker::checkProgram(Program& program, const std::string& module) {
+    module_ = module;
     moduleScope_ = resolver_.scopeOf(module);
     if (moduleScope_ == nullptr) {
         fail(program.pos, "checker bug: '" + module + "' was never resolved");
@@ -4144,11 +4184,6 @@ TypeRef Checker::checkIdent(Ident& expr) {
     }
     const resolve::Decl* decl = resolver_.lookup(moduleScope_, expr.name);
     if (decl == nullptr) {
-        if (target_ != target::Kind::Uefi &&
-            (expr.name == "image_handle" || expr.name == "system_table")) {
-            fail(expr.pos, "'" + expr.name + "' is only available on uefi");
-            return errorRef();
-        }
         // A bare enumerator names its enum's member: exactly one enum in
         // this module may claim it. Imported enums keep their qualified
         // spelling.

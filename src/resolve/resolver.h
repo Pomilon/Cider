@@ -299,7 +299,6 @@ private:
     Signature buildFuncSig(const std::vector<std::unique_ptr<TypeExpr>>& params,
                            const TypeExpr* returns, const Scope* scope, bool& failed,
                            Abi abi = Abi::SysV);
-    void bindTargetGlobals(const Scope* scope, Position pos);
     // Creates the core declarations once and binds their names in each
     // module scope. They have no AST: their fields and enumerators live in
     // the resolver's tables beside every specialized generic.

@@ -426,11 +426,15 @@ void testTargetDispatch() {
           "the refusal is target-specific, not a native-only claim");
 }
 
-void testUefiEntryShim() {
-    std::printf("uefi entry shim\n");
-    Built built = buildAs("func efi_main() -> int { return 0; }\n",
-                          cider::target::Kind::Uefi);
-    check(built.ok, "a uefi efi_main emits: " + built.stage);
+void testUefiEntry() {
+    std::printf("uefi source entry\n");
+    Built built = buildAs(
+        "msabi func efi_main(image_handle: *void, system_table: *void) -> int {\n"
+        "    asm { \"nop\" }\n"
+        "    return 0;\n"
+        "}\n",
+        cider::target::Kind::Uefi);
+    check(built.ok, "a source efi_main emits: " + built.stage);
     if (!built.ok) {
         return;
     }
@@ -438,19 +442,19 @@ void testUefiEntryShim() {
     check(text.find(".globl efi_main\n") != std::string::npos,
           "the firmware symbol is global");
     check(text.find("efi_main:\n") != std::string::npos,
-          "the firmware entry is defined");
-    check(text.find("sub rsp, 40\n") != std::string::npos,
-          "the shim reserves shadow space and alignment");
-    check(text.find("mov [rip + image_handle], rcx\n") != std::string::npos,
-          "the image handle is stored");
-    check(text.find("mov [rip + system_table], rdx\n") != std::string::npos,
-          "the system table is stored");
-    check(text.find("call cider_efi_main_user\n") != std::string::npos,
-          "the shim calls the hidden user entry");
-    check(text.find("image_handle:\n") != std::string::npos,
-          "the image handle slot is emitted");
-    check(text.find("system_table:\n") != std::string::npos,
-          "the system table slot is emitted");
+          "the source function is the firmware entry");
+    check(text.find("cider_efi_main_user") == std::string::npos,
+          "no hidden user entry is synthesized");
+    check(text.find("call efi_main") == std::string::npos,
+          "no compiler shim calls the source function");
+    check(text.find("image_handle:\n") == std::string::npos,
+          "no image handle slot is injected");
+    check(text.find("system_table:\n") == std::string::npos,
+          "no system table slot is injected");
+    check(text.find("[rip + image_handle]") == std::string::npos,
+          "the compiler stores no image handle");
+    check(text.find("[rip + system_table]") == std::string::npos,
+          "the compiler stores no system table");
     check(text.find("_start:") == std::string::npos,
           "uefi emits no linux entry trampoline");
     check(text.find("mov eax, 60") == std::string::npos,
@@ -458,26 +462,30 @@ void testUefiEntryShim() {
     check(text.find("syscall") == std::string::npos,
           "uefi emits no linux syscall");
 
-    Built handles = buildAs(
-        "func efi_main() -> int {\n"
-        "    var system: *void = system_table;\n"
-        "    return 0;\n"
-        "}\n",
-        cider::target::Kind::Uefi);
-    check(handles.ok, "uefi source reads target globals: " + handles.stage);
-    if (handles.ok) {
-        check(handles.asmText.find("[rip + system_table]") != std::string::npos,
-              "a source read uses the system table slot");
-    }
-
     Built wrong = buildAs("func main() -> int { return 0; }\n",
-                          cider::target::Kind::Uefi);
+                          cider::target::Kind::Uefi, false, false, false);
     check(!wrong.ok, "uefi rejects a main-only program");
-    check(wrong.stage.find("uefi") != std::string::npos,
-          "the missing-entry diagnostic names uefi");
+    check(wrong.stage.find("efi_main") != std::string::npos,
+          "the missing-entry diagnostic names efi_main: " + wrong.stage);
+
+    Built noParams = buildAs("msabi func efi_main() -> int { return 0; }\n",
+                             cider::target::Kind::Uefi, false, false, false);
+    check(!noParams.ok, "uefi rejects a parameterless efi_main");
+    check(noParams.stage.find("two parameters") != std::string::npos,
+          "the parameter diagnostic names the shape: " + noParams.stage);
+
+    Built badReturn = buildAs(
+        "msabi func efi_main(a: *void, b: *void) -> void { }\n",
+        cider::target::Kind::Uefi, false, false, false);
+    check(!badReturn.ok, "uefi rejects a void efi_main");
+    check(badReturn.stage.find("must return int") != std::string::npos,
+          "the return diagnostic names int: " + badReturn.stage);
 
     Built noUefiPrint = buildAs(
-        "func efi_main() -> int { print(\"uefi\\n\"); return 0; }\n",
+        "msabi func efi_main(image_handle: *void, system_table: *void) -> int {\n"
+        "    print(\"uefi\\n\");\n"
+        "    return 0;\n"
+        "}\n",
         cider::target::Kind::Uefi);
     check(!noUefiPrint.ok, "uefi print is not a prelude name");
     Built noNativePrint = build(
@@ -486,7 +494,7 @@ void testUefiEntryShim() {
 
     Built nulls = buildAs(
         "func read(p: *int) -> int { return *p; }\n"
-        "func efi_main() -> int {\n"
+        "msabi func efi_main(image_handle: *void, system_table: *void) -> int {\n"
         "    var x: int = 7;\n"
         "    return read(&x);\n"
         "}\n",
@@ -3149,7 +3157,7 @@ int main() {
     testPrivateMethods();
     testNativeEntry();
     testTargetDispatch();
-    testUefiEntryShim();
+    testUefiEntry();
     testSizeofExpr();
     testExternVar();
     testModuleAsm();

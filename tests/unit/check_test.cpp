@@ -1075,18 +1075,20 @@ void testAsm() {
     check(!bad.ok && bad.stage == "check", "an unbound placeholder fails");
 
     Checked uefi = checkAs(
-        "func efi_main() -> int { asm { \"nop\" } return 0; }\n",
+        "msabi func efi_main(image_handle: *void, system_table: *void) -> int {\n"
+        "    asm { \"nop\" }\n"
+        "    return 0;\n"
+        "}\n",
         cider::target::Kind::Uefi);
-    check(!uefi.ok && uefi.stage == "check", "uefi rejects asm at check time");
-    bool named = false;
-    if (uefi.checker != nullptr) {
-        for (const cider::check::CheckError& error : uefi.checker->errors()) {
-            if (error.message.find("uefi") != std::string::npos) {
-                named = true;
-            }
-        }
-    }
-    check(named, "the asm refusal names uefi");
+    check(uefi.ok, "uefi accepts raw inline asm: " + uefi.stage);
+    Checked uefiBad = checkAs(
+        "msabi func efi_main(image_handle: *void, system_table: *void) -> int {\n"
+        "    asm { \"mov edi, {nope}\" }\n"
+        "    return 0;\n"
+        "}\n",
+        cider::target::Kind::Uefi);
+    check(!uefiBad.ok && uefiBad.stage == "check",
+          "uefi inline asm still validates its placeholders");
 }
 
 // v4's native entry is `func _start() -> void`. `main` is ordinary.
@@ -1142,30 +1144,121 @@ void testEntry() {
     }
 }
 
+// The UEFI entry is the real firmware symbol, defined by source with the
+// Microsoft x64 convention and the two firmware handles.
+void testUefiEntry() {
+    std::printf("source-defined uefi entry\n");
+    Checked good = checkAs(
+        "msabi func efi_main(image_handle: *void, system_table: *void) -> int {\n"
+        "    return 0;\n"
+        "}\n",
+        cider::target::Kind::Uefi);
+    check(good.ok, "a source efi_main checks: " + good.stage);
+    if (good.ok) {
+        check(good.checker->checkEntry(*good.program),
+              "the uefi entry shape is accepted");
+    }
+
+    Checked missing = checkAs("func _start() -> void { }\n",
+                              cider::target::Kind::Uefi);
+    check(missing.ok, "_start still checks on uefi: " + missing.stage);
+    if (missing.ok) {
+        check(!missing.checker->checkEntry(*missing.program),
+              "uefi requires efi_main, not _start");
+        bool named = false;
+        for (const cider::check::CheckError& error : missing.checker->errors()) {
+            if (error.message.find("efi_main") != std::string::npos) {
+                named = true;
+            }
+        }
+        check(named, "the missing-entry diagnostic names efi_main");
+    }
+
+    Checked noAbi = checkAs(
+        "func efi_main(image_handle: *void, system_table: *void) -> int {\n"
+        "    return 0;\n"
+        "}\n",
+        cider::target::Kind::Uefi);
+    check(noAbi.ok, "an unmarked efi_main still checks: " + noAbi.stage);
+    if (noAbi.ok) {
+        check(!noAbi.checker->checkEntry(*noAbi.program),
+              "efi_main must spell msabi");
+        bool named = false;
+        for (const cider::check::CheckError& error : noAbi.checker->errors()) {
+            if (error.message.find("msabi") != std::string::npos) {
+                named = true;
+            }
+        }
+        check(named, "the abi diagnostic names msabi");
+    }
+
+    Checked noParams = checkAs(
+        "msabi func efi_main() -> int { return 0; }\n",
+        cider::target::Kind::Uefi);
+    check(noParams.ok, "a parameterless efi_main still checks: " +
+                           noParams.stage);
+    if (noParams.ok) {
+        check(!noParams.checker->checkEntry(*noParams.program),
+              "efi_main must take the two handles");
+        bool named = false;
+        for (const cider::check::CheckError& error : noParams.checker->errors()) {
+            if (error.message.find("two parameters") != std::string::npos) {
+                named = true;
+            }
+        }
+        check(named, "the parameter-count diagnostic names the shape");
+    }
+
+    Checked badParam = checkAs(
+        "msabi func efi_main(image_handle: *void, system_table: *int) -> int {\n"
+        "    return 0;\n"
+        "}\n",
+        cider::target::Kind::Uefi);
+    check(badParam.ok, "a wrong parameter type still checks: " +
+                           badParam.stage);
+    if (badParam.ok) {
+        check(!badParam.checker->checkEntry(*badParam.program),
+              "both firmware handles must be *void");
+    }
+
+    Checked badRet = checkAs(
+        "msabi func efi_main(image_handle: *void, system_table: *void) -> void { }\n",
+        cider::target::Kind::Uefi);
+    check(badRet.ok, "a void efi_main still checks: " + badRet.stage);
+    if (badRet.ok) {
+        check(!badRet.checker->checkEntry(*badRet.program),
+              "efi_main must return int");
+    }
+}
+
+// The firmware handles are ordinary parameters now. The compiler injects no
+// globals, so a source read only works when the program names a parameter or
+// declares its own storage.
 void testTargetGlobals() {
-    std::printf("target globals\n");
+    std::printf("uefi handles are source parameters\n");
     Checked uefi = checkAs(
-        "func efi_main() -> int {\n"
+        "msabi func efi_main(image_handle: *void, system_table: *void) -> int {\n"
         "    var image: *void = image_handle;\n"
         "    var system: *void = system_table;\n"
         "    return 0;\n"
         "}\n",
         cider::target::Kind::Uefi);
-    check(uefi.ok, "uefi target globals check: " + uefi.stage);
+    check(uefi.ok, "the entry parameters are ordinary source names: " +
+                       uefi.stage);
+
+    Checked injected = checkAs(
+        "msabi func efi_main(a: *void, b: *void) -> int {\n"
+        "    var system: *void = system_table;\n"
+        "    return 0;\n"
+        "}\n",
+        cider::target::Kind::Uefi);
+    check(!injected.ok && injected.stage == "check",
+          "no compiler-injected system_table global exists");
 
     Checked native = check(
-        "func main() -> int { var system: *void = system_table; return 0; }\n");
+        "func _start() -> void { var system: *void = system_table; }\n");
     check(!native.ok && native.stage == "check",
-          "target globals are rejected on native");
-    bool named = false;
-    if (native.checker != nullptr) {
-        for (const cider::check::CheckError& error : native.checker->errors()) {
-            if (error.message.find("uefi") != std::string::npos) {
-                named = true;
-            }
-        }
-    }
-    check(named, "the target-global rejection names uefi");
+          "target globals are not available on native either");
 }
 
 // `delete` takes a class pointer: the checker constrains the operand
@@ -2879,6 +2972,7 @@ int main() {
     testSliceCopy();
     testAsm();
     testEntry();
+    testUefiEntry();
     testTargetGlobals();
     testDelete();
     testOverrides();

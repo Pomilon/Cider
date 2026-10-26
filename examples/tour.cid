@@ -1,3 +1,4 @@
+from std.alloc import operator new, operator delete;
 from std.io import print, printInt, exit;
 from std.vector import Vec, new_vec, push, get, free_vec;
 
