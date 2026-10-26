@@ -1,8 +1,9 @@
-// opt.cpp — fold, then dead-code elimination.
+// opt.cpp — fold, forward slots, then dead-code elimination.
 //
-// Folding first exposes more dead code; the structural check first means
-// neither pass reads garbage. Each pass preserves the seven rows of IR.md §7,
-// and each row below says how.
+// Folding first exposes more dead code; forwarding before DCE lets the values
+// it orphans be deleted in the same run; the structural check first means no
+// pass reads garbage. Each pass preserves the seven rows of IR.md §7, and
+// each row below says how.
 
 #include "opt/opt.h"
 
@@ -435,6 +436,9 @@ OptResult run(ir::Module& module) {
     }
     OptResult result{true, "", 0, 0};
     result.folded = foldConsts(module);
+    MemoryResult memory = forwardMemory(module);
+    result.forwarded = memory.forwarded;
+    result.storesRemoved = memory.storesRemoved;
     result.removed = deadCode(module);
     return result;
 }

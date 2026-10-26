@@ -166,7 +166,8 @@ add_test(NAME lowering COMMAND lower_test)
 # IR.md section 7: a pass may change the shape and not the meaning. The
 # structural check runs at the entry, before any pass (gate L4).
 
-add_library(cider_opt STATIC src/opt/structural.cpp src/opt/opt.cpp)
+add_library(cider_opt STATIC src/opt/structural.cpp src/opt/memory.cpp
+                               src/opt/opt.cpp)
 target_link_libraries(cider_opt PUBLIC cider_ir cider_types)
 target_include_directories(cider_opt PUBLIC src)
 
@@ -302,6 +303,15 @@ add_test(NAME v4_native_entry_alignment
          COMMAND ${Python3_EXECUTABLE}
                  ${CMAKE_SOURCE_DIR}/tests/v4/native_entry_alignment_test.py)
 set_tests_properties(v4_native_entry_alignment PROPERTIES
+  ENVIRONMENT "CIDER_BIN=${CMAKE_BINARY_DIR}/cider")
+
+# Task 4's first optimizer slice: direct scalar slots forward and drop dead
+# stores on every leg, while a function that takes a local's address keeps its
+# memory shape because one escaped Alloca can reach a neighbouring frame cell.
+add_test(NAME v4_slot_forwarding
+         COMMAND ${Python3_EXECUTABLE}
+                 ${CMAKE_SOURCE_DIR}/tests/v4/slot_forwarding_test.py)
+set_tests_properties(v4_slot_forwarding PROPERTIES
   ENVIRONMENT "CIDER_BIN=${CMAKE_BINARY_DIR}/cider")
 
 # Separate front-end compilation: `compile -c` emits a `.cidm` declaration
