@@ -1,3 +1,4 @@
+from std.alloc import operator new, operator delete, malloc;
 // CIDER-BUG-221: a malloc result held in a frame slot must read back as the
 // bytes the heap block would have held -- on the VM and on the native binary.
 //
@@ -33,7 +34,6 @@
 // stack those promotions land in is genuinely used, which is what makes the
 // pre-fix native read garbage rather than a lucky zero.
 from std.io import print, printInt;
-from std.alloc import malloc;
 
 // A 4-byte field pair: a stride or width mistake shows up as a shifted value
 // instead of being masked by a zero read.

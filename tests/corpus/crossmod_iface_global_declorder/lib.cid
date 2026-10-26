@@ -1,3 +1,4 @@
+from std.alloc import operator new, operator delete;
 // CIDER-BUG-243 module half: interface-typed globals whose DECLARATION ORDER
 // differs from their interface's, reached from the entry file by both the
 // module-qualified spelling (`lib.gEarly`) and a `from`-import ALIAS.

@@ -2408,8 +2408,8 @@ void Lowerer::onFuncDecl(FuncDecl& n) {
     }
     // The link name is the resolver's, not the spelling: an import's
     // function mangles under its module (`b__aval`), the entry's keeps its
-    // spelling, and the prelude keeps its C name. Two modules defining one
-    // name therefore never collide in one IR module.
+    // spelling. Two modules defining one name therefore never collide in
+    // one IR module.
     const resolve::Scope* here = homeScope();
     const resolve::Decl* decl =
         here != nullptr ? resolver_.lookup(here, n.name) : nullptr;
@@ -6130,34 +6130,6 @@ Lowerer::LoweredString Lowerer::lowerString(const StringLit& lit) {
     return out;
 }
 
-// A text fragment's bytes in rodata, as the address/length pair every
-// interpolated part answers.
-Lowerer::PartBytes Lowerer::rodataPair(const std::string& text, Position pos) {
-    std::string label = "s_" + std::to_string(rodataSeq_++);
-    ir::Rodata blob;
-    blob.label = label;
-    // Same NUL terminator as a plain literal: an interpolated fragment is
-    // read through the same `*char` idioms (FEATURES §1.4).
-    blob.bytes = text + '\0';
-    module_->rodata.push_back(std::move(blob));
-    TypeRef addr{ctx_.pointer(ctx_.basic(BasicKind::U8))};
-    ir::Instr data;
-    data.op = ir::Op::DataAddr;
-    data.loc = pos;
-    data.type = addr;
-    data.width = ir::IRType::Ptr;
-    data.globalLabel = label;
-    data.isPure = true;
-    ir::Value at = newValue(data.width, addr, pos);
-    data.results.push_back(at);
-    emit(std::move(data));
-    TypeRef count{ctx_.basic(BasicKind::I64)};
-    PartBytes out;
-    out.ptr = at;
-    out.len = constantI64(static_cast<int64_t>(text.size()), count, pos);
-    return out;
-}
-
 ir::Value Lowerer::wideRodata(const WideLit& lit) {
     std::string label = wideBlob(lit);
     TypeRef addr{ctx_.pointer(ctx_.basic(BasicKind::U16))};
@@ -6239,473 +6211,6 @@ std::vector<ir::Value> Lowerer::wideWords(const WideLit& lit) {
         }
     }
     return out;
-}
-
-// Copies `len` bytes from `src` to `dst`: an index slot, a head testing it
-// against the length, a body moving one byte. The addresses advance by
-// addition, the slice-advance idiom, so each side dereferences a computed
-// address the optimizer treats opaquely.
-void Lowerer::copyBytes(ir::Value dst, ir::Value src, ir::Value len, Position pos) {
-    TypeRef count{ctx_.basic(BasicKind::I64)};
-    TypeRef byteType{ctx_.basic(BasicKind::U8)};
-    TypeRef ptrType{ctx_.pointer(ctx_.basic(BasicKind::U8))};
-    ir::Value idxSlot = allocaSlot(count, pos);
-    if (failed_) {
-        return;
-    }
-    Place idxPlace;
-    idxPlace.slots = {idxSlot};
-    idxPlace.type = count;
-    storeRange(pos, idxPlace, {constantI64(0, count, pos)}, count);
-    if (failed_) {
-        return;
-    }
-    uint32_t headLabel = emitBlock(pos);
-    uint32_t bodyLabel = emitBlock(pos);
-    uint32_t exitLabel = emitBlock(pos);
-    ir::Terminator toHead;
-    toHead.term = ir::Term::Br;
-    toHead.target = headLabel;
-    toHead.loc = pos;
-    emitTerminator(toHead);
-    startBlock(headLabel);
-    std::vector<ir::Value> idxVals = loadRange(pos, idxPlace, count);
-    if (failed_ || idxVals.size() != kOneWord) {
-        refuse(pos, "this expression");
-        return;
-    }
-    ir::Terminator br;
-    br.term = ir::Term::CondBr;
-    br.cond = emitI64Cmp(pos, BinOp::Lt, idxVals[kFirstWord], len);
-    br.thenTarget = bodyLabel;
-    br.elseTarget = exitLabel;
-    br.loc = pos;
-    emitTerminator(br);
-    startBlock(bodyLabel);
-    ir::Value idx = loadRange(pos, idxPlace, count)[kFirstWord];
-    if (failed_) {
-        return;
-    }
-    auto advance = [&](ir::Value base) {
-        ir::Instr add;
-        add.op = ir::Op::Add;
-        add.loc = pos;
-        add.type = ptrType;
-        add.width = ir::IRType::Ptr;
-        add.isPure = true;
-        add.operands.push_back(base);
-        add.operands.push_back(idx);
-        ir::Value at = newValue(add.width, ptrType, pos);
-        add.results.push_back(at);
-        emit(std::move(add));
-        return at;
-    };
-    ir::Value from = advance(src);
-    ir::Value to = advance(dst);
-    if (failed_) {
-        return;
-    }
-    Place readAt;
-    readAt.slots = {from};
-    readAt.type = byteType;
-    std::vector<ir::Value> one = loadRange(pos, readAt, byteType);
-    if (failed_ || one.size() != kOneWord) {
-        refuse(pos, "this expression");
-        return;
-    }
-    Place writeAt;
-    writeAt.slots = {to};
-    writeAt.type = byteType;
-    storeRange(pos, writeAt, one, byteType);
-    if (failed_) {
-        return;
-    }
-    TypeRef oneType{ctx_.basic(BasicKind::I64)};
-    ir::Instr step;
-    step.op = ir::Op::Add;
-    step.loc = pos;
-    step.type = oneType;
-    step.width = ir::IRType::I64;
-    step.isPure = true;
-    step.operands.push_back(idx);
-    step.operands.push_back(constantI64(1, oneType, pos));
-    ir::Value next = newValue(step.width, oneType, pos);
-    step.results.push_back(next);
-    emit(std::move(step));
-    storeRange(pos, idxPlace, {next}, count);
-    if (failed_) {
-        return;
-    }
-    emitTerminator(toHead);
-    startBlock(exitLabel);
-}
-
-Lowerer::LoweredString Lowerer::lowerInterp(const StringLit& lit) {
-    // Every part answers an address and a length. Text answers rodata; a
-    // string answers its own words; a bool selects one of two rodata
-    // fragments through a branch, the ternary shape; a char stores one
-    // byte to scratch; an integer extends to 64 bits and converts through
-    // a decimal helper into scratch. Anything else refuses loudly.
-    TypeRef count{ctx_.basic(BasicKind::I64)};
-    TypeRef stringType{ctx_.string()};
-    std::vector<PartBytes> parts;
-    for (const auto& part : lit.parts) {
-        if (!part.isExpr) {
-            if (part.text.empty()) {
-                continue;
-            }
-            parts.push_back(rodataPair(part.text, lit.pos));
-            if (failed_) {
-                return LoweredString{};
-            }
-            continue;
-        }
-        if (part.expr == nullptr) {
-            refuse(lit.pos, "this interpolation");
-            return LoweredString{};
-        }
-        TypeRef type = checker_.typeOf(part.expr.get());
-        if (type.isError()) {
-            refuse(lit.pos, "this interpolation");
-            return LoweredString{};
-        }
-        if (type.type->kind() == Kind::String) {
-            std::vector<ir::Value> got = lowerWords(part.expr.get());
-            if (failed_ || got.size() != kSliceWords) {
-                refuse(part.expr->pos, "this interpolation");
-                return LoweredString{};
-            }
-            PartBytes out;
-            out.ptr = got[kFirstWord];
-            out.len = got[kLenWord];
-            parts.push_back(out);
-            continue;
-        }
-        if (type.type->kind() == Kind::Basic &&
-            type.type->basic().has_value() &&
-            *type.type->basic() == BasicKind::Bool) {
-            std::vector<ir::Value> got = lowerWords(part.expr.get());
-            if (failed_ || got.size() != kOneWord) {
-                refuse(part.expr->pos, "this interpolation");
-                return LoweredString{};
-            }
-            PartBytes yes = rodataPair("true", lit.pos);
-            PartBytes no = rodataPair("false", lit.pos);
-            if (failed_) {
-                return LoweredString{};
-            }
-            std::vector<ir::Value> cell = allocaSlots(stringType, lit.pos, kSliceWords);
-            if (failed_) {
-                return LoweredString{};
-            }
-            uint32_t yesLabel = emitBlock(lit.pos);
-            uint32_t noLabel = emitBlock(lit.pos);
-            uint32_t joinLabel = emitBlock(lit.pos);
-            ir::Terminator br;
-            br.term = ir::Term::CondBr;
-            br.cond = got[kFirstWord];
-            br.thenTarget = yesLabel;
-            br.elseTarget = noLabel;
-            br.loc = lit.pos;
-            emitTerminator(br);
-            Place at;
-            at.slots = cell;
-            at.type = stringType;
-            startBlock(yesLabel);
-            storeRange(lit.pos, at, {yes.ptr, yes.len}, stringType);
-            if (failed_) {
-                return LoweredString{};
-            }
-            ir::Terminator toJoin;
-            toJoin.term = ir::Term::Br;
-            toJoin.target = joinLabel;
-            toJoin.loc = lit.pos;
-            emitTerminator(toJoin);
-            startBlock(noLabel);
-            storeRange(lit.pos, at, {no.ptr, no.len}, stringType);
-            if (failed_) {
-                return LoweredString{};
-            }
-            emitTerminator(toJoin);
-            startBlock(joinLabel);
-            std::vector<ir::Value> joined = loadRange(lit.pos, at, stringType);
-            if (failed_ || joined.size() != kSliceWords) {
-                refuse(part.expr->pos, "this interpolation");
-                return LoweredString{};
-            }
-            PartBytes out;
-            out.ptr = joined[kFirstWord];
-            out.len = joined[kLenWord];
-            parts.push_back(out);
-            continue;
-        }
-        if (type.type->kind() == Kind::Basic &&
-            type.type->basic().has_value() &&
-            *type.type->basic() == BasicKind::Char) {
-            std::vector<ir::Value> got = lowerWords(part.expr.get());
-            if (failed_ || got.size() != kOneWord) {
-                refuse(part.expr->pos, "this interpolation");
-                return LoweredString{};
-            }
-            ir::Value slot = allocaSlot(type, lit.pos);
-            if (failed_) {
-                return LoweredString{};
-            }
-            Place at;
-            at.slots = {slot};
-            at.type = type;
-            storeRange(lit.pos, at, got, type);
-            if (failed_) {
-                return LoweredString{};
-            }
-            TypeRef ptrType{ctx_.pointer(ctx_.basic(BasicKind::U8))};
-            PartBytes out;
-            out.ptr = computedBase(slot, 0, lit.pos);
-            out.len = constantI64(1, count, lit.pos);
-            out.ptr.type = ptrType;
-            parts.push_back(out);
-            continue;
-        }
-        if (type.type->kind() == Kind::Basic &&
-            type.type->basic().has_value() && basicIsInteger(*type.type->basic())) {
-            BasicKind basic = *type.type->basic();
-            std::vector<ir::Value> got = lowerWords(part.expr.get());
-            if (failed_ || got.size() != kOneWord) {
-                refuse(part.expr->pos, "this interpolation");
-                return LoweredString{};
-            }
-            // The helper converts one 64-bit value, so the part widens
-            // first: a Cast carries the operand's type, which is what
-            // tells the backend to sign- or zero-extend.
-            TypeRef wide{ctx_.basic(BasicKind::I64)};
-            ir::Instr widen;
-            widen.op = ir::Op::Cast;
-            widen.loc = lit.pos;
-            widen.type = wide;
-            widen.width = ir::IRType::I64;
-            widen.operands.push_back(got[kFirstWord]);
-            ir::Value big = newValue(widen.width, wide, lit.pos);
-            widen.results.push_back(big);
-            emit(std::move(widen));
-            // Twenty bytes hold any 64-bit decimal; the third slot keeps
-            // the scratch word-aligned for whatever follows it.
-            std::vector<ir::Value> scratch = allocaSlots(wide, lit.pos, 3);
-            if (failed_) {
-                return LoweredString{};
-            }
-            ir::Value buf = computedBase(scratch[kFirstWord], 0, lit.pos);
-            if (failed_) {
-                return LoweredString{};
-            }
-            TypeRef ptrType{ctx_.pointer(ctx_.basic(BasicKind::U8))};
-            buf.type = ptrType;
-            ir::Instr call;
-            call.op = ir::Op::Call;
-            call.loc = lit.pos;
-            bool isSigned = basic == BasicKind::I8 || basic == BasicKind::I16 ||
-                            basic == BasicKind::I32 || basic == BasicKind::I64;
-            call.callee =
-                isSigned ? "cider_itoa_signed" : "cider_itoa_unsigned";
-            ir::Argument first;
-            first.words.push_back(buf);
-            call.arguments.push_back(std::move(first));
-            ir::Argument second;
-            second.words.push_back(big);
-            call.arguments.push_back(std::move(second));
-            ir::Value digits = newValue(ir::IRType::I64, count, lit.pos);
-            call.results.push_back(digits);
-            call.width = ir::IRType::I64;
-            call.type = count;
-            emit(std::move(call));
-            PartBytes out;
-            out.ptr = buf;
-            out.len = digits;
-            parts.push_back(out);
-            continue;
-        }
-        if (type.type->kind() == Kind::Basic && type.type->basic().has_value() &&
-            (*type.type->basic() == BasicKind::F32 ||
-             *type.type->basic() == BasicKind::F64)) {
-            BasicKind basic = *type.type->basic();
-            std::vector<ir::Value> got = lowerWords(part.expr.get());
-            if (failed_ || got.size() != kOneWord) {
-                refuse(part.expr->pos, "this interpolation");
-                return LoweredString{};
-            }
-            // The helper converts one double, so a float widens first:
-            // the Cast carries the operand's type, which is what tells
-            // the backend to convert rather than re-read the bits.
-            ir::Value wide = got[kFirstWord];
-            if (basic == BasicKind::F32) {
-                TypeRef dbl{ctx_.basic(BasicKind::F64)};
-                ir::Instr grow;
-                grow.op = ir::Op::Cast;
-                grow.loc = lit.pos;
-                grow.type = dbl;
-                grow.width = ir::IRType::F64;
-                grow.operands.push_back(got[kFirstWord]);
-                wide = newValue(grow.width, dbl, lit.pos);
-                grow.results.push_back(wide);
-                emit(std::move(grow));
-            }
-            // Thirty-two bytes hold the longest float shape: a sign,
-            // nineteen whole digits, the point, six fraction digits.
-            std::vector<ir::Value> scratch = allocaSlots(count, lit.pos, 4);
-            if (failed_) {
-                return LoweredString{};
-            }
-            ir::Value buf = computedBase(scratch[kFirstWord], 0, lit.pos);
-            if (failed_) {
-                return LoweredString{};
-            }
-            TypeRef ptrType{ctx_.pointer(ctx_.basic(BasicKind::U8))};
-            buf.type = ptrType;
-            ir::Instr call;
-            call.op = ir::Op::Call;
-            call.loc = lit.pos;
-            call.callee = "cider_ftoa";
-            ir::Argument first;
-            first.words.push_back(buf);
-            call.arguments.push_back(std::move(first));
-            ir::Argument second;
-            second.words.push_back(wide);
-            second.width = ir::IRType::F64;
-            call.arguments.push_back(std::move(second));
-            ir::Value digits = newValue(ir::IRType::I64, count, lit.pos);
-            call.results.push_back(digits);
-            call.width = ir::IRType::I64;
-            call.type = count;
-            emit(std::move(call));
-            PartBytes out;
-            out.ptr = buf;
-            out.len = digits;
-            parts.push_back(out);
-            continue;
-        }
-        refuse(part.expr->pos, "this interpolation");
-        return LoweredString{};
-    }
-    return joinStrings(parts, lit.pos);
-}
-
-Lowerer::LoweredString Lowerer::joinStrings(const std::vector<PartBytes>& parts,
-                                            Position pos) {
-    // The lengths sum to a total; one allocation answers the buffer; every
-    // part copies into it at the running offset. A zero total allocates
-    // zero bytes, which answers nil: every string consumer checks the
-    // length before touching the pointer, so nothing dereferences it.
-    TypeRef count{ctx_.basic(BasicKind::I64)};
-    ir::Value total = constantI64(0, count, pos);
-    if (failed_) {
-        return LoweredString{};
-    }
-    for (const PartBytes& part : parts) {
-        ir::Instr add;
-        add.op = ir::Op::Add;
-        add.loc = pos;
-        add.type = count;
-        add.width = ir::IRType::I64;
-        add.isPure = true;
-        add.operands.push_back(total);
-        add.operands.push_back(part.len);
-        ir::Value sum = newValue(add.width, count, pos);
-        add.results.push_back(sum);
-        emit(std::move(add));
-        total = sum;
-    }
-    if (failed_) {
-        return LoweredString{};
-    }
-    ir::Instr alloc;
-    alloc.op = ir::Op::Call;
-    alloc.loc = pos;
-    alloc.callee = "cider_alloc";
-    alloc.mayTrap = true;
-    {
-        ir::Argument bytes;
-        bytes.words.push_back(total);
-        alloc.arguments.push_back(std::move(bytes));
-        ir::Argument pad;
-        pad.words.push_back(constantI64(8, count, pos));
-        alloc.arguments.push_back(std::move(pad));
-    }
-    if (failed_) {
-        return LoweredString{};
-    }
-    TypeRef ptrType{ctx_.pointer(ctx_.basic(BasicKind::U8))};
-    ir::Value buf = newValue(ir::IRType::Ptr, ptrType, pos);
-    alloc.results.push_back(buf);
-    alloc.width = ir::IRType::Ptr;
-    alloc.type = ptrType;
-    emit(std::move(alloc));
-    ir::Value off = constantI64(0, count, pos);
-    if (failed_) {
-        return LoweredString{};
-    }
-    for (const PartBytes& part : parts) {
-        ir::Instr add;
-        add.op = ir::Op::Add;
-        add.loc = pos;
-        add.type = ptrType;
-        add.width = ir::IRType::Ptr;
-        add.isPure = true;
-        add.operands.push_back(buf);
-        add.operands.push_back(off);
-        ir::Value dst = newValue(add.width, ptrType, pos);
-        add.results.push_back(dst);
-        emit(std::move(add));
-        if (failed_) {
-            return LoweredString{};
-        }
-        copyBytes(dst, part.ptr, part.len, pos);
-        if (failed_) {
-            return LoweredString{};
-        }
-        ir::Instr bump;
-        bump.op = ir::Op::Add;
-        bump.loc = pos;
-        bump.type = count;
-        bump.width = ir::IRType::I64;
-        bump.isPure = true;
-        bump.operands.push_back(off);
-        bump.operands.push_back(part.len);
-        ir::Value next = newValue(bump.width, count, pos);
-        bump.results.push_back(next);
-        emit(std::move(bump));
-        off = next;
-    }
-    if (failed_) {
-        return LoweredString{};
-    }
-    LoweredString out;
-    out.words = {buf, total};
-    return out;
-}
-
-std::vector<ir::Value> Lowerer::lowerStringAdd(const Binary& n) {
-    // The checker proved both sides strings: each side lowers to exactly
-    // its address and length, and the shared join answers one buffer.
-    std::vector<ir::Value> left = lowerWords(n.lhs.get());
-    if (failed_ || left.size() != kSliceWords) {
-        if (!failed_) {
-            refuse(n.pos, "this concatenation");
-        }
-        return {undefined()};
-    }
-    std::vector<ir::Value> right = lowerWords(n.rhs.get());
-    if (failed_ || right.size() != kSliceWords) {
-        if (!failed_) {
-            refuse(n.pos, "this concatenation");
-        }
-        return {undefined()};
-    }
-    PartBytes first;
-    first.ptr = left[kFirstWord];
-    first.len = left[kLenWord];
-    PartBytes second;
-    second.ptr = right[kFirstWord];
-    second.len = right[kLenWord];
-    return joinStrings({first, second}, n.pos).words;
 }
 
 std::vector<ir::Value> Lowerer::loadGlobal(Position pos, const GlobalBinding& global) {
@@ -6982,7 +6487,7 @@ ir::Value Lowerer::emitOperatorNew(int64_t bytes, int64_t align,
     const resolve::Decl* decl =
         here != nullptr ? resolver_.lookup(here, "operator_new") : nullptr;
     if (decl == nullptr || decl->kind != resolve::DeclKind::Func) {
-        refuse(pos, "try_new needs a global operator new(size: i64, align: i64) -> *void");
+        refuse(pos, "allocation needs a global operator new(size: i64, align: i64) -> *void");
         return undefined();
     }
     const resolve::Decl* origin = resolver_.declById(decl->id);
@@ -7136,25 +6641,12 @@ std::vector<ir::Value> Lowerer::lowerNewStruct(const NewStruct& n) {
             refuse(n.pos, "this construction");
             return {undefined()};
         }
-        TypeRef word{ctx_.basic(BasicKind::I64)};
-        ir::Instr alloc;
-        alloc.op = ir::Op::Call;
-        alloc.loc = n.pos;
-        alloc.callee = "cider_alloc";
-        alloc.mayTrap = true;
-        for (int64_t fixed : {bytes, stepTo}) {
-            ir::Argument arg;
-            arg.words.push_back(constantI64(fixed, word, n.pos));
-            if (failed_) {
-                return {undefined()};
-            }
-            alloc.arguments.push_back(std::move(arg));
+        ir::Value at = emitOperatorNew(bytes, stepTo, made, n.pos);
+        if (failed_) {
+            return {undefined()};
         }
-        ir::Value at = newValue(ir::IRType::Ptr, made, n.pos);
-        alloc.results.push_back(at);
-        alloc.width = ir::IRType::Ptr;
-        alloc.type = made;
-        emit(std::move(alloc));
+        // Default `new` traps on refusal and never constructs at nil.
+        emitNonNull(n.pos, at, ir::TrapReason::Explicit);
         if (failed_) {
             return {undefined()};
         }
@@ -7398,25 +6890,11 @@ std::vector<ir::Value> Lowerer::lowerNewClass(const NewClass& n) {
         refuse(n.pos, "this construction");
         return {undefined()};
     }
-    TypeRef count{ctx_.basic(BasicKind::I64)};
-    ir::Instr alloc;
-    alloc.op = ir::Op::Call;
-    alloc.loc = n.pos;
-    alloc.callee = "cider_alloc";
-    alloc.mayTrap = true;
-    for (int64_t fixed : {byteCount, stepTo}) {
-        ir::Argument arg;
-        arg.words.push_back(constantI64(fixed, count, n.pos));
-        if (failed_) {
-            return {undefined()};
-        }
-        alloc.arguments.push_back(std::move(arg));
+    ir::Value at = emitOperatorNew(byteCount, stepTo, ptrType, n.pos);
+    if (failed_) {
+        return {undefined()};
     }
-    ir::Value at = newValue(ir::IRType::Ptr, ptrType, n.pos);
-    alloc.results.push_back(at);
-    alloc.width = ir::IRType::Ptr;
-    alloc.type = ptrType;
-    emit(std::move(alloc));
+    emitNonNull(n.pos, at, ir::TrapReason::Explicit);
     if (failed_) {
         return {undefined()};
     }
@@ -7790,96 +7268,10 @@ std::vector<ir::Value> Lowerer::lowerSuperInit(const SuperInit& n) {
 }
 
 std::vector<ir::Value> Lowerer::lowerNewArray(const NewArray& n) {
-    TypeRef arrayType = checker_.typeOf(&n);
-    bool heap = arrayType.type->kind() == Kind::Pointer;
-    TypeRef made = heap ? TypeRef{arrayType.type->pointee()} : arrayType;
-    int count = wordCount(made);
-    if (count < 0) {
-        refuse(n.pos, "this construction");
-        return {undefined()};
-    }
-    if (heap) {
-        std::optional<DeclId> id = made.type->decl();
-        int64_t bytes = kNoExtent;
-        int64_t stepTo = kNoExtent;
-        if (id.has_value()) {
-            bytes = resolver_.structSize(*id);
-            stepTo = layout::kSizePointer;
-        }
-        if (bytes <= 0 || stepTo <= 0) {
-            refuse(n.pos, "this construction");
-            return {undefined()};
-        }
-        TypeRef word{ctx_.basic(BasicKind::I64)};
-        ir::Instr alloc;
-        alloc.op = ir::Op::Call;
-        alloc.loc = n.pos;
-        alloc.callee = "cider_alloc";
-        alloc.mayTrap = true;
-        for (int64_t fixed : {bytes, stepTo}) {
-            ir::Argument arg;
-            arg.words.push_back(constantI64(fixed, word, n.pos));
-            if (failed_) {
-                return {undefined()};
-            }
-            alloc.arguments.push_back(std::move(arg));
-        }
-        ir::Value at = newValue(ir::IRType::Ptr, arrayType, n.pos);
-        alloc.results.push_back(at);
-        alloc.width = ir::IRType::Ptr;
-        alloc.type = arrayType;
-        emit(std::move(alloc));
-        if (failed_) {
-            return {undefined()};
-        }
-        std::optional<int64_t> len = made.type->length();
-        if (!len.has_value()) {
-            refuse(n.pos, "this construction");
-            return {undefined()};
-        }
-        Place base;
-        base.hasIndirect = true;
-        base.indirect = at;
-        base.type = made;
-        base.off = 0;
-        constructArray(base, made, n.inits, n.repeat, *len, n.pos);
-        if (failed_) {
-            return {undefined()};
-        }
-        return {at};
-    }
-    std::vector<ir::Value> slots =
-        allocaSlots(made, n.pos, static_cast<uint64_t>(count));
-    Place slotBase;
-    slotBase.slots = slots;
-    std::optional<int64_t> vlen = made.type->length();
-    if (!vlen.has_value()) {
-        refuse(n.pos, "this construction");
-        return {undefined()};
-    }
-    constructArray(slotBase, made, n.inits, n.repeat, *vlen, n.pos);
-    if (failed_) {
-        return {undefined()};
-    }
-    std::vector<ir::Value> words;
-    for (int i = 0; i < count; ++i) {
-        TypeRef word = wordType(made, static_cast<uint64_t>(i));
-        ir::Instr instr;
-        instr.op = ir::Op::Load;
-        instr.loc = n.pos;
-        instr.type = word;
-        instr.width = widthOf(word, n.pos);
-        if (failed_) {
-            return {undefined()};
-        }
-        instr.addressBase = slots[static_cast<size_t>(i)];
-        instr.isPure = true;
-        ir::Value out = newValue(instr.width, word, n.pos);
-        instr.results.push_back(out);
-        emit(std::move(instr));
-        words.push_back(out);
-    }
-    return words;
+    // Array allocation and `delete[]` are deferred; the checker refuses
+    // them, and this backstop keeps a stray node from reaching the heap.
+    refuse(n.pos, "array allocation is not supported yet");
+    return {undefined()};
 }
 
 std::vector<ir::Value> Lowerer::lowerElementAddr(const Index& n) {
@@ -8797,6 +8189,43 @@ void Lowerer::onDelete(DeleteStmt& n) {
     TypeRef ptrType = checker_.typeOf(n.ptr.get());
     const Type* obj = ptrType.type->pointee();
     std::optional<DeclId> id = obj->decl();
+    const resolve::Scope* here = homeScope();
+    const resolve::Decl* release =
+        here != nullptr ? resolver_.lookup(here, "operator_delete") : nullptr;
+    if (release == nullptr || release->kind != resolve::DeclKind::Func) {
+        refuse(n.pos, "deletion needs a global operator delete(ptr: *void) -> void");
+        return;
+    }
+    const resolve::Decl* releaseOrigin = resolver_.declById(release->id);
+    if (releaseOrigin == nullptr) {
+        releaseOrigin = release;
+    }
+    // `delete nil` is a no-op: test the pointer before any destructor or
+    // release call, and join the live path afterwards.
+    ir::Value zero = constantI64(0, ptrType, n.pos);
+    ir::Value live = emitI64Cmp(n.pos, BinOp::Ne, ptr[kFirstWord], zero);
+    if (failed_) {
+        return;
+    }
+    uint32_t liveLabel = emitBlock(n.pos);
+    uint32_t nilLabel = emitBlock(n.pos);
+    uint32_t joinLabel = emitBlock(n.pos);
+    ir::Terminator br;
+    br.term = ir::Term::CondBr;
+    br.cond = live;
+    br.thenTarget = liveLabel;
+    br.elseTarget = nilLabel;
+    br.loc = n.pos;
+    emitTerminator(br);
+    sealBlock(current_);
+    startBlock(nilLabel);
+    ir::Terminator nilJoin;
+    nilJoin.term = ir::Term::Br;
+    nilJoin.target = joinLabel;
+    nilJoin.loc = n.pos;
+    emitTerminator(nilJoin);
+    sealBlock(nilLabel);
+    startBlock(liveLabel);
     if (id.has_value() && !resolver_.virtualNames(*id).empty()) {
         // 4.8.3: a hierarchy that dispatches methods answers delete
         // polymorphically. Slot zero names the chain entry the dynamic
@@ -8878,20 +8307,28 @@ void Lowerer::onDelete(DeleteStmt& n) {
             }
         }
     }
-    // Then the storage goes back. Prelude names mangle to their link symbol
-    // exactly as onCall mangles them, and free(nilPtr) is a no-op by
-    // contract, so a nil delete frees nothing — the deinit above is the
-    // caller's problem, and dereferencing nil there already traps.
+    // Then the storage goes back to the library operator. Imported
+    // declarations mangle under their defining module, exactly as calls do.
     ir::Instr rel;
     rel.op = ir::Op::Call;
     rel.loc = n.pos;
-    rel.callee = "cider_free";
+    rel.callee = resolver_.linkName(*releaseOrigin);
     rel.mayTrap = true;
     ir::Argument words;
-    words.words.push_back(ptr[0]);
+    words.words.push_back(ptr[kFirstWord]);
     rel.arguments.push_back(std::move(words));
     rel.width = ir::IRType::Void;
     emit(std::move(rel));
+    if (failed_) {
+        return;
+    }
+    ir::Terminator liveJoin;
+    liveJoin.term = ir::Term::Br;
+    liveJoin.target = joinLabel;
+    liveJoin.loc = n.pos;
+    emitTerminator(liveJoin);
+    sealBlock(liveLabel);
+    startBlock(joinLabel);
 }
 
 std::vector<ir::Value> Lowerer::storeToIdent(
@@ -10742,8 +10179,7 @@ std::vector<ir::Value> Lowerer::lowerCallWords(Call& n) {
             sig = functionSig(ident->name);
             callee = ident->name;
         // The link name is the resolver's: entry keeps its spelling, an
-        // import's mangles under its module, the prelude keeps its C name.
-        // The lookup is the same one functionSig uses, so the two cannot
+        // import's mangles under its module. The lookup is the same one functionSig uses, so the two cannot
         // disagree — including a program's own shadowing `print`.
         const resolve::Scope* here = homeScope();
         const resolve::Decl* decl =

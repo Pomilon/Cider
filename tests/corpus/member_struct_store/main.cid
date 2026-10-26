@@ -1,3 +1,4 @@
+from std.alloc import malloc;
 // CIDER-BUG-081: by-value struct member stores must copy the VALUE bytes at
 // every size. The assignment path resolved the target field's declared type
 // and stored it with lastExprType_, but that resolved type carries no
@@ -94,7 +95,7 @@ func main() -> int {
     var src: Outer = Outer { inner: i, pair: p, big: r, mid: mkMid(p, i), tail: 313 };
 
     // --- `o->field = s`: pointer member target, 4 / 8 / 16 bytes ---
-    var o: *Outer = alloc(sizeof(Outer), 8) as *Outer;
+    var o: *Outer = malloc(sizeof(Outer)) as *Outer;
     // neighbours seeded first: a wrong-width store must corrupt them.
     (*o).pair = mkP(101, 102);
     (*o).big = mkR(201, 202, 203, 204);

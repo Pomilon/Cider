@@ -138,12 +138,8 @@ int64_t hostTagFor(const std::string& name) {
         "cider_itoa_unsigned", // -4
         "cider_ftoa",          // -5
         "cider_panic",         // -6
-        "cider_heap_fail",     // -7
-        "cider_alloc",         // -8
-        "cider_free",          // -9
-        "cider_realloc",       // -10
     };
-    static const int64_t count = 10;
+    static const int64_t count = 6;
     for (int64_t i = 0; i < count; ++i) {
         if (name == hosts[i]) {
             return -i - 1;
@@ -155,10 +151,9 @@ int64_t hostTagFor(const std::string& name) {
 std::string hostNameForTag(int64_t tag) {
     static const char* const hosts[] = {
         "cider_print", "putchar", "cider_itoa_signed", "cider_itoa_unsigned",
-        "cider_ftoa", "cider_panic", "cider_heap_fail", "cider_alloc",
-        "cider_free", "cider_realloc",
+        "cider_ftoa", "cider_panic",
     };
-    static const int64_t count = 10;
+    static const int64_t count = 6;
     if (tag >= 0) {
         return "";
     }
@@ -287,10 +282,6 @@ struct Runner {
     // start at three, and closing drops the row.
     std::unordered_map<int64_t, int> openFiles_;
     int64_t nextFileFd_ = 3;
-    // Every host hand-out lives from here to the end of memory, and remembers
-    // its size so realloc copies and free validates.
-    int64_t heapAt = 0;
-    std::unordered_map<int64_t, int64_t> heapBlocks;
     // A host hand exited the program: no further instruction may step, and
     // the answer is already in `out`.
     bool programDone = false;
@@ -392,7 +383,7 @@ struct Runner {
         }
         uint64_t end = static_cast<uint64_t>(address) + count;
         // Every legitimate address is laid down before use: frames size
-        // all cells up front, hostAlloc grows with zero-fill at hand-out,
+        // all cells up front, mmap grows with zero-fill at hand-out,
         // globals are laid at load. Past the last laid-down byte there is
         // no mapping, so the access is out of bounds and faults the way
         // the machine would on an unmapped page.
@@ -759,7 +750,14 @@ struct Runner {
             slide = memory.size();
         }
         int64_t at = static_cast<int64_t>(slide);
-        memory.insert(memory.end(), span, kZeroCell);
+        try {
+            memory.insert(memory.end(), span, kZeroCell);
+        } catch (const std::bad_alloc&) {
+            // A mapping the host cannot back is the kernel's ENOMEM: the
+            // guest's allocation operator sees a failed mmap and answers
+            // nil, exactly as it would on a smaller address space.
+            return kErrNoMem;
+        }
         return at;
     }
 
@@ -1541,162 +1539,6 @@ struct Runner {
         return ahead + static_cast<int64_t>(text.size());
     }
 
-    // The heap answers the allocator's refusals as nil, its corruption as
-    // exit 134, and every other block as zeroed bytes at an aligned address.
-     // Freed blocks, in address order, so a block the program released
-     // comes back for the next request that fits. The bump cursor above the
-     // highest hand-out never rewinds, so a live block is never disturbed.
-     std::vector<std::pair<int64_t, int64_t>> freeList;
-
-     int64_t hostAlloc(int64_t bytes, int64_t align, Position pos) {
-        if (bytes < kZeroPointer) {
-            return 0;
-        }
-        if (align <= kZeroPointer) {
-            return 0;
-        }
-        int64_t effective = align < kLeastBound ? kLeastBound : align;
-        if (effective > kLeastBound && (effective & (effective - 1)) != 0) {
-            return 0;
-        }
-        // A freed block that fits is handed out again, the same address the
-        // program will compare against, and a remainder too small to be a
-        // block of its own stays whole inside the request.
-        for (uint64_t i = 0; i < static_cast<uint64_t>(freeList.size()); ++i) {
-            int64_t at = freeList[i].first;
-            int64_t span = freeList[i].second;
-            if (span < bytes) {
-                continue;
-            }
-            if (at % effective != kZeroCell) {
-                continue;
-            }
-            if (span - bytes >= layout::kSizePointer) {
-                freeList[i] = std::make_pair(at + bytes, span - bytes);
-            } else {
-                freeList.erase(freeList.begin() + static_cast<long>(i));
-            }
-            heapBlocks[at] = bytes;
-            return at;
-        }
-        // Round the cursor up to the alignment, then answer a block that
-        // starts there: the bump cursor never rewinds, so a hand-out stays
-        // live for the rest of the run.
-        int64_t slide = heapAt + effective - 1;
-        if (slide < heapAt) {
-            return 0;
-        }
-        slide &= ~(effective - 1);
-        int64_t end = slide + bytes;
-        if (end < slide || static_cast<uint64_t>(end) > kHeapCap) {
-            return 0;
-        }
-        if (static_cast<uint64_t>(end) > memory.size()) {
-            if (static_cast<uint64_t>(end) > kMemoryCap) {
-                return 0;
-            }
-            try {
-                memory.resize(static_cast<size_t>(end), kZeroCell);
-            } catch (const std::bad_alloc&) {
-                // The host cannot back this hand-out (address-space cap):
-                // answer nil the way a failed mmap answers nil, and the
-                // guest's nil-handling runs. Only this reservation is
-                // caught; anything else still dies at run().
-                return 0;
-            }
-        }
-        heapBlocks[slide] = bytes;
-        if (end > heapAt) {
-            heapAt = end;
-        }
-        return slide;
-    }
-
-    bool hostFree(int64_t address, Position pos) {
-        if (address == kZeroPointer) {
-            return true;
-        }
-        auto found = heapBlocks.find(address);
-        if (found == heapBlocks.end()) {
-            return hostExit(134, "cider heap: corrupt block header\n");
-        }
-        // The block goes back on the list, beside a neighbour it is
-        // contiguous with, so a larger request can be served from the
-        // joined span rather than only from each piece.
-        int64_t span = found->second;
-        heapBlocks.erase(found);
-        int64_t at = address;
-        for (uint64_t i = 0; i < static_cast<uint64_t>(freeList.size());) {
-            if (freeList[i].first + freeList[i].second == at) {
-                at = freeList[i].first;
-                span += freeList[i].second;
-                freeList.erase(freeList.begin() + static_cast<long>(i));
-                continue;
-            }
-            if (at + span == freeList[i].first) {
-                span += freeList[i].second;
-                freeList.erase(freeList.begin() + static_cast<long>(i));
-                continue;
-            }
-            ++i;
-        }
-        uint64_t spot = static_cast<uint64_t>(freeList.size());
-        for (uint64_t i = 0; i < static_cast<uint64_t>(freeList.size()); ++i) {
-            if (freeList[i].first > at) {
-                spot = i;
-                break;
-            }
-        }
-        freeList.insert(freeList.begin() + static_cast<long>(spot),
-                        std::make_pair(at, span));
-        return true;
-    }
-
-    bool hostRealloc(int64_t address, int64_t bytes, int64_t align, Position pos,
-                     std::vector<Value>& results) {
-        if (bytes < 0) {
-            // A failed realloc keeps the old block live and answers nil,
-            // the way the machine answers NULL: writing the answer is the
-            // whole fix, because the slot otherwise keeps whatever a
-            // previous trip left in it.
-            if (!results.empty()) {
-                write(results[0], kZeroPointer);
-            }
-            return true;
-        }
-        int64_t sized = hostAlloc(bytes, align, pos);
-        if (address == kZeroPointer) {
-            if (!results.empty()) {
-                write(results[0], sized);
-            }
-            return true;
-        }
-        auto found = heapBlocks.find(address);
-        if (found == heapBlocks.end()) {
-            return hostExit(134, "cider heap: corrupt block header\n");
-        }
-        int64_t oldBytes = found->second;
-        if (sized != kZeroPointer && oldBytes > kZeroPointer) {
-            int64_t wanted = oldBytes < bytes ? oldBytes : bytes;
-            std::vector<uint8_t> carried;
-            if (readBytes(address, static_cast<uint64_t>(oldBytes), carried, pos)) {
-                std::vector<uint8_t> keep(
-                    carried.begin(),
-                    carried.begin() + static_cast<size_t>(wanted));
-                if (!writeBytes(sized, keep, pos)) {
-                    return false;
-                }
-            }
-        }
-        if (!hostFree(address, pos)) {
-            return false;
-        }
-        if (!results.empty()) {
-            write(results[0], sized);
-        }
-        return true;
-    }
-
     // A call to a body the module never laid down: the freestanding helpers
     // the program names but does not define. Each one answers what its
     // emitter does — bytes on the right stream, a count, a pointer, or the
@@ -1730,78 +1572,6 @@ struct Runner {
                 write(results[0], written);
             }
             return true;
-        }
-        if (name == "cider_itoa_signed" || name == "cider_itoa_unsigned") {
-            if (args.size() < kTwoWords) {
-                return refuse(pos, "vm call passes too few words to a converter");
-            }
-            bool wrote = false;
-            int64_t count = formatDigits(args[0], args[1],
-                                         name == "cider_itoa_signed", pos, wrote);
-            if (!wrote) {
-                return false;
-            }
-            if (!results.empty()) {
-                write(results[0], count);
-            }
-            return true;
-        }
-        if (name == "cider_ftoa") {
-            if (args.size() < kTwoWords) {
-                return refuse(pos, "vm call passes too few words to a converter");
-            }
-            bool wrote = false;
-            int64_t count = formatFloat(args[0], static_cast<uint64_t>(args[1]),
-                                        pos, wrote);
-            if (!wrote) {
-                return false;
-            }
-            if (!results.empty()) {
-                write(results[0], count);
-            }
-            return true;
-        }
-        if (name == "cider_panic") {
-            if (args.size() < kTwoWords) {
-                return refuse(pos, "vm call passes too few words to panic");
-            }
-            std::string text;
-            if (args[1] > 0) {
-                std::vector<uint8_t> carried;
-                if (!readBytes(args[0], static_cast<uint64_t>(args[1]), carried,
-                               pos)) {
-                    return false;
-                }
-                text.append(reinterpret_cast<const char*>(carried.data()),
-                            carried.size());
-            }
-            // A newline always follows, an empty message included.
-            return hostExit(134, text + "\n");
-        }
-        if (name == "cider_heap_fail") {
-            return hostExit(134, "cider heap: corrupt block header\n");
-        }
-        if (name == "cider_alloc") {
-            if (args.size() < kTwoWords) {
-                return refuse(pos, "vm call passes too few words to alloc");
-            }
-            int64_t answer = hostAlloc(args[0], args[1], pos);
-            if (!results.empty()) {
-                write(results[0], answer);
-            }
-            return true;
-        }
-        if (name == "cider_free") {
-            if (args.empty()) {
-                return refuse(pos, "vm call passes too few words to free");
-            }
-            return hostFree(args[0], pos);
-        }
-        if (name == "cider_realloc") {
-            if (args.size() < kThreeWords) {
-                return refuse(pos, "vm call passes too few words to realloc");
-            }
-            return hostRealloc(args[0], args[1], args[2], pos, results);
         }
         return refuse(pos, "vm cannot call '" + name + "' yet");
     }
@@ -1887,10 +1657,6 @@ struct Runner {
         Frame frame;
         frame.base = static_cast<int64_t>(memory.size());
         memory.resize(memory.size() + static_cast<size_t>(bytes), kZeroCell);
-        // A frame is never released, and the bump allocator hands memory out
-        // from the same flat span: unless the heap cursor steps over this
-        // region the next allocation writes into the live frame.
-        heapAt = static_cast<int64_t>(memory.size());
         // The emitter's prologue moves each argument word into its own slot,
         // where a load through the slot's id reads it back: the parameter's
         // value lives in the cell, not in a value register.
@@ -2440,10 +2206,6 @@ static VmResult runProgram(const ir::Module& module,
         }
         run.labels[global.label] = at;
     }
-    // Everything the helpers hand out starts past the last global, and the
-    // frames a call pushes grow from there: neither region rewinds, so an
-    // address stays live for the rest of the run.
-    run.heapAt = static_cast<int64_t>(run.memory.size());
     // Program arguments lay down here, past the globals and below the entry
     // frame: one NUL-terminated blob per string (a zero word follows its
     // bytes, so even the default empty string has an address to point at),

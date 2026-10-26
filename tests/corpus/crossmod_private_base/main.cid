@@ -1,3 +1,4 @@
+from std.alloc import operator new, operator delete;
 // CIDER-BUG-090: a base whose embedded field type is only visible in the
 // base's module used to be rejected with "Type Inner is not a struct or
 // class" as soon as the derived class (in another module) touched the

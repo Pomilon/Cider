@@ -1,3 +1,4 @@
+from std.alloc import operator new, operator delete;
 // CIDER-BUG-087 regression: an embedded class-value subobject must run its
 // class's field initializers wherever the type system embeds a class value
 // by value — struct fields (nested combinations included), fixed arrays of

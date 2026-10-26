@@ -1,3 +1,4 @@
+from std.alloc import operator new, operator delete;
 // CIDER-BUG-226 regression: `(*p)++` / `(*p)--` and the compound-assignment
 // family must read-modify-write the POINTEE, not the pointer slot that holds
 // it. The lowering asked the `*` operand for its address, and for a local,

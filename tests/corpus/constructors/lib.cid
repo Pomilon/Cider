@@ -1,3 +1,4 @@
+from std.alloc import operator new, operator delete;
 // CIDER-FEAT-003: a constructor in an imported module. Both the
 // module's own factory and a `new lib.Widget(...)` at the use site reach
 // the one definition, mangled to its home module.

@@ -244,9 +244,9 @@ public:
     // The declaration for an id, by scan. The table is small and lookups are
     // rare (templates and specializations only).
     const Decl* declById(DeclId id) const;
-    // The link symbol a function declaration assembles under. The prelude
-    // keeps its C name (`cider_print`), an extern keeps its bare spelling
-    // (FEATURES §4.4: the linker defines it), an entry-module definition
+    // The link symbol a function declaration assembles under. An extern
+    // keeps its bare spelling (FEATURES §4.4: the linker defines it), an
+    // entry-module definition
     // keeps its spelling, and every other module's definition mangles under
     // its module (`b__aval` for `b`'s `aval`). One owner, one spelling:
     // the checker and every lowerer call site ask here instead of building
@@ -299,7 +299,7 @@ private:
     Signature buildFuncSig(const std::vector<std::unique_ptr<TypeExpr>>& params,
                            const TypeExpr* returns, const Scope* scope, bool& failed,
                            Abi abi = Abi::SysV);
-    void bindPrelude(const Scope* scope, Position pos);
+    void bindTargetGlobals(const Scope* scope, Position pos);
     // Creates the core declarations once and binds their names in each
     // module scope. They have no AST: their fields and enumerators live in
     // the resolver's tables beside every specialized generic.

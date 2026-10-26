@@ -1,3 +1,4 @@
+from std.alloc import operator new, operator delete;
 // Migrated to v3: `extends` spells `:`, a bare `new C` spells `new C { }`,
 // and `p->m()` stays the pointer receiver spelling.
 from std.io import print, printInt;

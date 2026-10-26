@@ -120,7 +120,7 @@ public:
                 return EmitResult{false, "", error_, pos_};
             }
         }
-        // The entry point and the prelude helpers are emitted here, in this
+        // The entry point and transitional helpers are emitted here, in this
         // one place, because sovereignty is a property of the whole text: a
         // program links with `ld` alone, no libc, no crt0, no archive.
         std::vector<std::string> helpers = neededHelpers();
@@ -130,17 +130,6 @@ public:
         for (const std::string& helper : helpers) {
             if (!emitHelper(helper)) {
                 return EmitResult{false, "", error_, pos_};
-            }
-        }
-        bool heap = false;
-        bool panic = false;
-        for (const std::string& helper : helpers) {
-            if (helper == "cider_alloc" || helper == "cider_realloc" ||
-                helper == "cider_free") {
-                heap = true;
-            }
-            if (helper == "cider_panic") {
-                panic = true;
             }
         }
         if (!module_.globals.empty()) {
@@ -185,16 +174,7 @@ public:
                 }
             }
         }
-        if (heap) {
-            if (module_.globals.empty()) {
-                out_ += ".data\n";
-            }
-            // The allocator's two words of state: the free-list head and the
-            // bytes mapped so far. Zero-initialized images carry them.
-            out_ += "cider_fl_head:\n  .quad 0\n";
-            out_ += "cider_heap_total:\n  .quad 0\n";
-        }
-        if (!module_.rodata.empty() || panic || heap) {
+        if (!module_.rodata.empty()) {
             // Bytes in first-seen order: the order is the lowering order,
             // which is deterministic in the source, so the bytes are too.
             out_ += ".section .rodata\n";
@@ -208,14 +188,6 @@ public:
                     line.back() = '\n';
                     out_ += line;
                 }
-            }
-            if (panic) {
-                out_ += "cider_panic_nl:\n  .byte 10\n";
-            }
-            if (heap) {
-                out_ += "cider_heap_msg:\n";
-                out_ += "  .byte 99,105,100,101,114,32,104,101,97,112,58,32,99,111,114,114,117,112,116,32,98,108,111,99,107,32,104,101,97,100,101,114,10\n";
-                out_ += "cider_heap_msg_end:\n";
             }
         }
         return EmitResult{true, out_, "", Position{"", 1, 1}};
@@ -233,7 +205,6 @@ private:
         }
         std::unordered_set<std::string> seen;
         std::vector<std::string> order = {
-            "cider_alloc", "cider_free", "cider_realloc",
             "cider_itoa_signed", "cider_itoa_unsigned", "cider_ftoa",
             // Transitional: four v3 corpus fixtures still use this one
             // blessed extern. It is removed with the test-library rewrite.
@@ -552,7 +523,7 @@ private:
         return true;
     }
 
-    // One prelude helper, emitted as text only when referenced. Each one is
+    // One transitional helper, emitted as text only when referenced. Each one is
     // raw syscalls: there is no libc behind this compiler, and no archive
     // behind these symbols.
     bool emitHelper(const std::string& name) {
@@ -560,17 +531,6 @@ private:
             return true;                         // already in the text once
         }
         if (target_ == Target::Uefi) {
-            if (name == "cider_alloc" || name == "cider_free" ||
-                name == "cider_realloc") {
-                refuse(Position{"", 1, 1},
-                       "the uefi runtime has no heap support yet");
-                return false;
-            }
-            if (name == "cider_heap_fail") {
-                out_ += "cider_heap_fail:\n";
-                out_ += "  ud2\n";
-                return true;
-            }
             // print, panic, and putchar are library functions in v4.
             // They have no compiler-emitted UEFI implementation. The
             // transitional putchar helper must never fall through to the
@@ -716,261 +676,8 @@ private:
             out_ += "  ret\n";
             return true;
         }
-        // panic is a library function in v4. The compiler no longer owns
-        // the panic channel or its exit policy.
-        if (name == "cider_heap_fail") {
-            out_ += "cider_heap_fail:\n";
-            out_ += "  mov eax, 1\n";
-            out_ += "  mov edi, 2\n";
-            out_ += "  lea rsi, [rip + cider_heap_msg]\n";
-            // GAS intel syntax reads a bare symbol as a memory operand, so
-            // the length rides as the literal it is (the message above).
-            out_ += "  mov edx, 33\n";
-            out_ += "  syscall\n";
-            out_ += "  mov eax, 60\n";
-            out_ += "  mov edi, 134\n";
-            out_ += "  syscall\n";
-            return true;
-        }
-        if (name == "cider_alloc") {
-            return emitAlloc();
-        }
-        if (name == "cider_free") {
-            return emitFree();
-        }
-        if (name == "cider_realloc") {
-            return emitRealloc();
-        }
-        refuse(Position{"", 1, 1}, "unknown prelude helper '" + name + "'");
+        refuse(Position{"", 1, 1}, "unknown transitional helper '" + name + "'");
         return false;
-    }
-
-    // The heap. A first-fit free list over anonymous mmap arenas; no libc.
-    //
-    // Block layout, offsets from the user pointer:
-    //   [-32] user bytes   [-24] block base   [-16] block bytes
-    //   [ -8] front canary [0..bytes) user    [bytes] rear canary
-    // A free block is its own list node: [0] block bytes, [8] next node.
-    //
-    // Refusals answer 0 (nilPtr): negative bytes, non-positive alignment, a
-    // non-power-of-two alignment above 16, or the heap cap. free(nilPtr) is
-    // a defined no-op. A broken canary or a cyclic free list dies loudly on
-    // stderr with exit 134 rather than continuing on corrupt memory.
-    bool emitAlloc() {
-        emitHelper("cider_heap_fail");
-        out_ += "cider_alloc:\n";
-        out_ += "  cmp rdi, 0\n";
-        out_ += "  jl .refuse\n";
-        out_ += "  cmp rsi, 0\n";
-        out_ += "  jle .refuse\n";
-        out_ += "  push rbx\n";
-        out_ += "  push rbp\n";
-        out_ += "  push r12\n";
-        out_ += "  push r13\n";
-        out_ += "  mov rbx, rdi\n";              // the user's byte count
-        out_ += "  cmp rsi, 16\n";
-        out_ += "  jge .maybePow\n";
-        out_ += "  mov rsi, 16\n";
-        out_ += ".maybePow:\n";
-        out_ += "  je .alignDone\n";
-        out_ += "  lea rdx, [rsi - 1]\n";
-        out_ += "  test rsi, rdx\n";
-        out_ += "  jnz .refusePop\n";            // above 16 must be a power of two
-        out_ += ".alignDone:\n";
-        out_ += "  mov r12, rsi\n";              // effective alignment
-        out_ += "  mov rbp, rbx\n";
-        out_ += "  add rbp, 40\n";               // header + rear canary + rounding headroom
-        out_ += "  jo .refusePop\n";
-        out_ += "  add rbp, 15\n";
-        out_ += "  and rbp, -16\n";
-        out_ += "  cmp r12, 16\n";
-        out_ += "  jle .needDone\n";
-        out_ += "  add rbp, r12\n";              // room to align the user pointer
-        out_ += "  jo .refusePop\n";
-        out_ += ".needDone:\n";
-        out_ += "  xor r13, r13\n";              // the node before the cursor
-        out_ += ".restart:\n";
-        out_ += "  mov r11, [rip + cider_fl_head]\n";
-        out_ += "  xor r8, r8\n";                // steps walked
-        out_ += ".search:\n";
-        out_ += "  test r11, r11\n";
-        out_ += "  jz .grow\n";
-        out_ += "  add r8, 1\n";
-        out_ += "  cmp r8, 65536\n";
-        out_ += "  ja cider_heap_fail\n";        // a cycle is corruption
-        out_ += "  mov rdx, [r11]\n";            // this block's byte count
-        out_ += "  cmp rdx, rbp\n";
-        out_ += "  jb .advance\n";
-        out_ += "  mov rax, rdx\n";
-        out_ += "  sub rax, rbp\n";
-        out_ += "  cmp rax, 48\n";
-        out_ += "  jb .unlink\n";                // tail too small to stand alone
-        out_ += "  lea r9, [r11 + rbp]\n";       // the tail node
-        out_ += "  mov [r9], rax\n";
-        out_ += "  mov rdx, [r11 + 8]\n";
-        out_ += "  mov [r9 + 8], rdx\n";
-        out_ += "  mov rcx, rbp\n";              // the front keeps `need` bytes
-        out_ += "  test r13, r13\n";
-        out_ += "  jz .splitHead\n";
-        out_ += "  mov [r13 + 8], r9\n";
-        out_ += "  jmp .carve\n";
-        out_ += ".splitHead:\n";
-        out_ += "  mov [rip + cider_fl_head], r9\n";
-        out_ += "  jmp .carve\n";
-        out_ += ".unlink:\n";
-        out_ += "  mov rcx, [r11]\n";            // the whole block goes out
-        out_ += "  mov rdx, [r11 + 8]\n";
-        out_ += "  test r13, r13\n";
-        out_ += "  jz .unlinkHead\n";
-        out_ += "  mov [r13 + 8], rdx\n";
-        out_ += "  jmp .carve\n";
-        out_ += ".unlinkHead:\n";
-        out_ += "  mov [rip + cider_fl_head], rdx\n";
-        out_ += "  jmp .carve\n";
-        out_ += ".advance:\n";
-        out_ += "  mov r13, r11\n";
-        out_ += "  mov r11, [r11 + 8]\n";
-        out_ += "  jmp .search\n";
-        out_ += ".grow:\n";
-        out_ += "  mov rdx, 1048576\n";          // one mebibyte at a time
-        out_ += "  lea rax, [rbp + 16]\n";
-        out_ += "  cmp rax, rdx\n";
-        out_ += "  jbe .haveLen\n";
-        out_ += "  mov rdx, rax\n";              // a request larger than one arena
-        out_ += ".haveLen:\n";
-        out_ += "  mov rax, [rip + cider_heap_total]\n";
-        out_ += "  add rax, rdx\n";
-        out_ += "  cmp rax, 1073741824\n";       // the whole heap stays under 1 GiB
-        out_ += "  ja .refusePop\n";
-        out_ += "  mov rsi, rdx\n";
-        out_ += "  mov rax, 9\n";                // mmap
-        out_ += "  xor rdi, rdi\n";
-        out_ += "  mov rdx, 3\n";                // PROT_READ | PROT_WRITE
-        out_ += "  mov r10, 34\n";               // MAP_PRIVATE | MAP_ANONYMOUS
-        out_ += "  mov r8, -1\n";
-        out_ += "  xor r9, r9\n";
-        out_ += "  syscall\n";
-        out_ += "  test rax, rax\n";
-        out_ += "  js .refusePop\n";
-        out_ += "  mov [rax], rsi\n";            // the arena starts as one node
-        out_ += "  mov rdx, [rip + cider_fl_head]\n";
-        out_ += "  mov [rax + 8], rdx\n";
-        out_ += "  mov [rip + cider_fl_head], rax\n";
-        out_ += "  add qword ptr [rip + cider_heap_total], rsi\n";
-        out_ += "  jmp .restart\n";
-        out_ += ".carve:\n";
-        out_ += "  cmp r12, 16\n";
-        out_ += "  jg .alignedUser\n";
-        out_ += "  lea rax, [r11 + 32]\n";       // 32 keeps the user 16-aligned
-        out_ += "  jmp .haveUser\n";
-        out_ += ".alignedUser:\n";
-        out_ += "  lea rax, [r11 + r12 + 31]\n";
-        out_ += "  mov rdx, r12\n";
-        out_ += "  neg rdx\n";
-        out_ += "  and rax, rdx\n";
-        out_ += ".haveUser:\n";
-        out_ += "  mov [rax - 32], rbx\n";       // user bytes
-        out_ += "  mov [rax - 24], r11\n";       // block base
-        out_ += "  mov [rax - 16], rcx\n";       // block bytes
-        out_ += "  mov rdx, 0x9E3779B97F4A7C15\n";
-        out_ += "  mov [rax - 8], rdx\n";        // front canary
-        out_ += "  mov [rax + rbx], rdx\n";      // rear canary
-        out_ += "  pop r13\n";
-        out_ += "  pop r12\n";
-        out_ += "  pop rbp\n";
-        out_ += "  pop rbx\n";
-        out_ += "  ret\n";
-        out_ += ".refusePop:\n";
-        out_ += "  xor eax, eax\n";
-        out_ += "  pop r13\n";
-        out_ += "  pop r12\n";
-        out_ += "  pop rbp\n";
-        out_ += "  pop rbx\n";
-        out_ += ".refuse:\n";
-        out_ += "  xor eax, eax\n";
-        out_ += "  ret\n";
-        return true;
-    }
-
-    bool emitFree() {
-        emitHelper("cider_heap_fail");
-        out_ += "cider_free:\n";
-        out_ += "  test rdi, rdi\n";
-        out_ += "  jz .nothing\n";               // free(nilPtr) does nothing
-        out_ += "  push rbx\n";
-        out_ += "  mov rbx, rdi\n";
-        out_ += "  mov rax, 0x9E3779B97F4A7C15\n";
-        out_ += "  cmp [rbx - 8], rax\n";
-        out_ += "  jne cider_heap_fail\n";
-        out_ += "  mov rcx, [rbx - 32]\n";       // user bytes (header)
-        out_ += "  cmp [rbx + rcx], rax\n";
-        out_ += "  jne cider_heap_fail\n";
-        out_ += "  mov rdx, 0xDEADDEADDEADDEAD\n";
-        out_ += "  mov [rbx - 8], rdx\n";        // scrub: use-after-free reads dead
-        out_ += "  mov [rbx + rcx], rdx\n";
-        out_ += "  mov rax, [rbx - 24]\n";       // block base
-        out_ += "  mov rdx, [rbx - 16]\n";       // block bytes
-        out_ += "  mov [rax], rdx\n";
-        out_ += "  mov rcx, [rip + cider_fl_head]\n";
-        out_ += "  mov [rax + 8], rcx\n";
-        out_ += "  mov [rip + cider_fl_head], rax\n";
-        out_ += "  pop rbx\n";
-        out_ += ".nothing:\n";
-        out_ += "  ret\n";
-        return true;
-    }
-
-    bool emitRealloc() {
-        emitHelper("cider_heap_fail");
-        out_ += "cider_realloc:\n";
-        out_ += "  test rdi, rdi\n";
-        out_ += "  jnz .haveOld\n";
-        out_ += "  mov rdi, rsi\n";              // realloc(nilPtr, n) allocates
-        out_ += "  mov rsi, rdx\n";
-        out_ += "  jmp cider_alloc\n";
-        out_ += ".haveOld:\n";
-        out_ += "  cmp rsi, 0\n";
-        out_ += "  jge .sizeOk\n";
-        out_ += "  xor eax, eax\n";
-        out_ += "  ret\n";
-        out_ += ".sizeOk:\n";
-        out_ += "  push rbx\n";
-        out_ += "  push r12\n";
-        out_ += "  mov rbx, rdi\n";
-        out_ += "  mov r12, rsi\n";              // the new byte count
-        out_ += "  mov rax, 0x9E3779B97F4A7C15\n";
-        out_ += "  cmp [rbx - 8], rax\n";
-        out_ += "  jne cider_heap_fail\n";
-        out_ += "  mov rcx, [rbx - 32]\n";       // user bytes (header)
-        out_ += "  cmp [rbx + rcx], rax\n";
-        out_ += "  jne cider_heap_fail\n";
-        out_ += "  mov rdi, r12\n";
-        out_ += "  mov rsi, rdx\n";              // the alignment rides in rdx
-        out_ += "  call cider_alloc\n";
-        out_ += "  test rax, rax\n";
-        out_ += "  jz .keepOld\n";               // refusal leaves the old block owned
-        out_ += "  mov r9, rax\n";
-        out_ += "  mov rdx, [rbx]\n";            // old bytes
-        out_ += "  cmp rdx, r12\n";
-        out_ += "  jbe .haveCount\n";
-        out_ += "  mov rdx, r12\n";              // copy the shorter span
-        out_ += ".haveCount:\n";
-        out_ += "  test rdx, rdx\n";
-        out_ += "  jz .dropOld\n";
-        out_ += "  mov rsi, rbx\n";
-        out_ += "  mov rdi, r9\n";
-        out_ += "  mov rcx, rdx\n";
-        out_ += "  cld\n";
-        out_ += "  rep movsb\n";
-        out_ += ".dropOld:\n";
-        out_ += "  mov rdi, rbx\n";
-        out_ += "  call cider_free\n";
-        out_ += "  mov rax, r9\n";
-        out_ += ".keepOld:\n";
-        out_ += "  pop r12\n";
-        out_ += "  pop rbx\n";
-        out_ += "  ret\n";
-        return true;
     }
 
     void refuse(Position pos, const std::string& what) {

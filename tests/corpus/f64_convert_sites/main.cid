@@ -1,3 +1,4 @@
+from std.alloc import operator new, operator delete;
 // Migrated to v3: implicit f64->f32 narrowing spells `as f32` (v3 has no
 // implicit float-width narrowing); the interface-typed case boxes a class
 // pointer because a class value returned as an interface would dangle; the

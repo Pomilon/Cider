@@ -1,3 +1,4 @@
+from std.alloc import operator new, operator delete;
 // CIDER-BUG-088 regression: an aggregate with embedded class-value
 // subobjects must run the embedded classes' destructors when it leaves
 // scope, exactly like a direct class-value local. The traversal mirrors the

@@ -1,3 +1,4 @@
+from std.alloc import operator new, operator delete, malloc;
 // CIDER-BUG-054: interface variables can be reassigned after declaration.
 // Reassignment accepts any value whose type satisfies the interface (the
 // same rule declaration-time assignment uses) and must dispatch to the
@@ -54,7 +55,7 @@ func main() -> int {
   var rp: *Rect = &r;
   i = rp;
   if (i.area() != 10) { return 7; }
-  var hp: *Rect = alloc(sizeof(Rect), 8) as *Rect;
+  var hp: *Rect = malloc(sizeof(Rect)) as *Rect;
   (*hp).w = 3;
   (*hp).h = 4;
   i = hp;

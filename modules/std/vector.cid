@@ -18,7 +18,7 @@ export struct Vec<T> {
 const INITIAL_CAP: int = 8;
 
 func zeroed<T>() -> T {
-    var slot: *T = alloc(sizeof(T), 8) as *T;
+    var slot: *T = malloc(sizeof(T)) as *T;
     memset(slot as *void, 0, sizeof(T) as int);
     var answer: T = *slot;
     free(slot as *void);

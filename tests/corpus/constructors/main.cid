@@ -1,3 +1,4 @@
+from std.alloc import operator new, operator delete;
 // CIDER-FEAT-003 / CIDER-BUG-123: class constructors. `func init(...)` in a class body is
 // the class's constructor: `new C(args)` allocates and zero/default
 // initializes the object, runs the field initializers (CIDER-BUG-049), then

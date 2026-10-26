@@ -1,3 +1,4 @@
+from std.alloc import operator new, operator delete;
 from std.io import puts, exit;
 
 func _start() -> void {

@@ -1,3 +1,4 @@
+from std.alloc import operator new, operator delete;
 // CIDER-ISS-011: prefix-compatible interface projections copy the existing
 // data/vtable fat pointer and remain valid for dispatch and boxed-value cleanup.
 // Migrated to v3: constructors/destructors spell `init()`/`deinit()` and

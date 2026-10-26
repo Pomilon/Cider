@@ -1,3 +1,4 @@
+from std.alloc import operator new, operator delete;
 // CIDER-BUG-243: an interface-typed global's representation must be resolved
 // where it is DECLARED, not recovered by name at every read.
 //

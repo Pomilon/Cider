@@ -1,3 +1,4 @@
+from std.alloc import operator new, operator delete;
 // CIDER-BUG-122 control: the "base is not a class" diagnostic must not
 // disturb bases that genuinely resolve to classes. Covers a bare
 // alias-to-class, an alias chain, and a FORWARD alias (declared before its

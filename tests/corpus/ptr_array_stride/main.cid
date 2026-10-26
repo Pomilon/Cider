@@ -1,3 +1,4 @@
+from std.alloc import operator new, operator delete, malloc, free;
 // CIDER-BUG-199 runtime half: `a[i]` on a pointer to a fixed array must step
 // by the ELEMENT, and nothing else.
 //
@@ -24,7 +25,6 @@
 //
 // All three backends (VM unopt, VM optimized, native) must agree.
 from std.io import print, printInt;
-from std.alloc import malloc, free;
 
 var drops: int = 0;
 

@@ -1,6 +1,6 @@
+from std.alloc import operator new, operator delete, malloc, free;
 // SOLUM markup parser + HTML renderer — Cider port
 // Replicates ~700 lines of C++17 (parser.cpp + renderer.cpp + main.cpp)
-from std.alloc import malloc, free;
 
 
 from std.string import strlen, strcmp, strcpy, strcat, strchr, memcpy;

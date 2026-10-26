@@ -327,6 +327,11 @@ void testOperatorNames() {
     }
 
     ok = false;
+    parse("func operator new[](size: i64, align: i64) -> *void { return nilPtr; }\n",
+          ok);
+    check(!ok, "array allocation operators are rejected");
+
+    ok = false;
     std::unique_ptr<cider::Program> release = parse(
         "func operator delete(ptr: *void) -> void { }\n", ok);
     check(ok, "a global release operator parses");
@@ -614,6 +619,19 @@ void testModuleKeywords() {
             continue;
         }
         check(imp->module == "std.string", "the plain path is kept");
+    }
+    program = parse("from std.alloc import operator new, operator delete;", ok);
+    check(ok, "a from-import names allocation operators");
+    for (const auto& decl : program->decls) {
+        const cider::FromImport* from =
+            dynamic_cast<const cider::FromImport*>(decl.get());
+        if (from == nullptr) {
+            continue;
+        }
+        check(from->names.size() == 2 &&
+                  from->names[0] == "operator_new" &&
+                  from->names[1] == "operator_delete",
+              "operator names import canonically");
     }
 }
 

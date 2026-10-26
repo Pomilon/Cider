@@ -1,3 +1,4 @@
+from std.alloc import operator new, operator delete;
 // CIDER-BUG-085: a `*func(I) -> int` type spelling and the signature of a
 // matching named function are the same type, whether the interface flag
 // came from the AST spelling or from the resolved symbol signature. Before

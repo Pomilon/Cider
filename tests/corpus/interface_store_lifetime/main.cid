@@ -1,3 +1,4 @@
+from std.alloc import malloc;
 // CIDER-BUG-115: interface stores alias their concrete source object, so the
 // stored data pointer is only live while that object is. This pins the
 // lifetime cases that must keep working on all three backends after the
@@ -45,7 +46,7 @@ func localRoundTrip() -> int {
 
 // Heap source: the object lives across the call that built the interface.
 func heapArea() -> int {
-  var hp: *Rect = alloc(sizeof(Rect), 8) as *Rect;
+  var hp: *Rect = malloc(sizeof(Rect)) as *Rect;
   (*hp).w = 3;
   (*hp).h = 4;
   var s: Shape = hp;
@@ -76,7 +77,7 @@ func main() -> int {
 
   // Heap object interface built inside another frame and read here.
   if (heapArea() != 12) { return 5; }
-  var hp: *Rect = alloc(sizeof(Rect), 8) as *Rect;
+  var hp: *Rect = malloc(sizeof(Rect)) as *Rect;
   (*hp).w = 3;
   (*hp).h = 4;
   var hs: Shape = hp;

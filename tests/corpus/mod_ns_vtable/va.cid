@@ -1,3 +1,4 @@
+from std.alloc import operator new, operator delete;
 export class Animal {
   var tag: int;
   func init(t: int) { (*self).tag = t; }

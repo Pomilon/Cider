@@ -1,3 +1,4 @@
+from std.alloc import operator new, operator delete;
 // CIDER-BUG-150: list literals in argument and return positions must accept
 // concrete implementors with the normal interface conversion — the same
 // 16-byte fat-pointer store as `var i: Shape = <value>` — instead of the

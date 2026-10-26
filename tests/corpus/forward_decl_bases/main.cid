@@ -1,3 +1,4 @@
+from std.alloc import operator new, operator delete;
 // CIDER-BUG-120 regression: a class whose base is declared LATER (or
 // collected later) must inherit exactly as if the base had been declared
 // first — fields (offsets/initializers), methods, overrides/vtable dispatch,

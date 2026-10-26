@@ -1,3 +1,4 @@
+from std.alloc import operator new, operator delete;
 // CIDER-BUG-202: the interface ELEMENTS of a returned fixed array get the
 // same boxing/ownership treatment a whole-value interface return already
 // had (CIDER-BUG-077/184).

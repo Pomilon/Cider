@@ -1,3 +1,4 @@
+from std.alloc import operator new, operator delete;
 // CIDER-BUG-206 module half: the aggregate return type and the interface are
 // declared HERE, while every dispatch site lives in main. The call site must
 // size the caller slot and root the result spelling in THIS module, not in

@@ -1,3 +1,4 @@
+from std.alloc import operator new, operator delete;
 // CIDER-BUG-206 companion: the DISCARDED-result half of the bug, isolated.
 //
 // The main regression program (tests/programs/interface_aggregate_return)

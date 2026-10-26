@@ -1,3 +1,4 @@
+from std.alloc import operator new, operator delete;
 from std.io import print, printInt;
 
 // CIDER-BUG-067 regression: every field of a newly created class instance

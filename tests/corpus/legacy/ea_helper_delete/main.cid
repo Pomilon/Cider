@@ -1,4 +1,4 @@
-from std.alloc import malloc, free;
+from std.alloc import operator new, operator delete, malloc, free;
 
 class Point {
     var x: int;

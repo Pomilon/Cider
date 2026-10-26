@@ -1,3 +1,4 @@
+from std.alloc import malloc, free;
 class Point {
     var x: int;
 }
@@ -8,7 +9,7 @@ class Box {
 }
 
 func main() -> int {
-    var np: *Point = alloc(sizeof(Point), 8) as *Point;
+    var np: *Point = malloc(sizeof(Point)) as *Point;
     var box1: Box = Box { p: np, q: nilPtr };    // taints box1's slot
     var box2: Box = box1;  // MEMCPY — must propagate taint to box2's slot
     (*box2.p).x = 42;

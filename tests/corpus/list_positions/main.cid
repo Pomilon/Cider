@@ -1,3 +1,4 @@
+from std.alloc import operator new, operator delete;
 // CIDER-BUG-165 regression: list literals in struct-literal fields and in
 // array-typed call arguments. Before the fix both positions were rejected
 // ("expected [u8; 2], got *int") because visit(ListExpr) infers every list

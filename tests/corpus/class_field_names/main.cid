@@ -1,3 +1,4 @@
+from std.alloc import operator new, operator delete;
 from std.io import print, printInt;
 
 // A global that shares its name with class fields below: fields are not

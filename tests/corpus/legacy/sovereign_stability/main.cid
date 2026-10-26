@@ -1,5 +1,5 @@
+from std.alloc import operator new, operator delete, malloc;
 from std.io import print, printInt, puts;
-from std.alloc import malloc;
 
 class Worker {
     var id: int;

@@ -1,3 +1,4 @@
+from std.alloc import operator new, operator delete;
 // CIDER-BUG-241: a declaration is not an expression — the struct-decl
 // visitor must not name a value's type.
 //

@@ -1,3 +1,4 @@
+from std.alloc import operator new, operator delete;
 // CIDER-BUG-082 regression: an embedded class-value field is a nested
 // object, so constructing the outer value must run the INNER class's field
 // initializers too (local value, `new`, or a nested field), on all three

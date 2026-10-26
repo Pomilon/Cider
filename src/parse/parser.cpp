@@ -413,8 +413,16 @@ bool Parser::parseOperatorName(std::string& out) {
             return true;
         // Allocation operators are keywords, but they name global functions
         // like any other operator. The checker pins their exact signatures.
-        case TokenKind::KwNew: out = "operator_new"; break;
-        case TokenKind::KwDelete: out = "operator_delete"; break;
+        // Array forms are a distinct spelling the language does not have.
+        case TokenKind::KwNew:
+        case TokenKind::KwDelete:
+            if (check(TokenKind::LBracket)) {
+                fail(start, "array allocation operators are not supported yet");
+                return false;
+            }
+            out = peek().kind == TokenKind::KwNew ? "operator_new"
+                                                  : "operator_delete";
+            break;
         case TokenKind::Plus: out = "operator_add"; break;
         case TokenKind::Minus: out = "operator_sub"; break;
         case TokenKind::Star: out = "operator_mul"; break;
@@ -1132,11 +1140,20 @@ std::unique_ptr<Decl> Parser::parseImport() {
     advance();
     std::vector<std::string> names;
     for (;;) {
-        if (!check(TokenKind::Ident)) {
+        if (check(TokenKind::Ident)) {
+            names.push_back(advance().text);
+        } else if (check(TokenKind::KwOperator)) {
+            // A library may export an allocation operator; the canonical
+            // name imports like any other function.
+            std::string name;
+            if (!parseOperatorName(name)) {
+                return nullptr;
+            }
+            names.push_back(std::move(name));
+        } else {
             failHere("a name to import");
             return nullptr;
         }
-        names.push_back(advance().text);
         if (match(TokenKind::Comma)) {
             continue;
         }

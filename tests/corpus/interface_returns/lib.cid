@@ -1,3 +1,4 @@
+from std.alloc import operator new, operator delete;
 // CIDER-BUG-077: interface-returning functions in an imported module — the
 // callee's bare `Shape` return spelling must survive canonicalization at the
 // call site so the imported result keeps its fat-pointer representation.

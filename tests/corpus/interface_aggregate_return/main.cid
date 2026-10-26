@@ -1,3 +1,4 @@
+from std.alloc import operator new, operator delete, malloc;
 // CIDER-BUG-206: an interface-dispatched call returning a by-value AGGREGATE
 // (struct, class or fixed array) was miscompiled.
 //
@@ -333,7 +334,7 @@ func main() -> int {
     // Explicit delete runs deinit deterministically, once per object, with
     // the right tag.
     drops = 0;
-    var heap: *Owned = alloc(sizeof(Owned) as i64, 8) as *Owned;
+    var heap: *Owned = malloc(sizeof(Owned) as i64) as *Owned;
     (*heap).tag = 7;
     delete heap;
     if (drops != 1) { return 37; }

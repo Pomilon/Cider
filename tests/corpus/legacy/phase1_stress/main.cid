@@ -1,5 +1,5 @@
+from std.alloc import operator new, operator delete, malloc, free;
 from std.io import puts, printInt, exit;
-from std.alloc import malloc, free;
 
 // ===== UNION STRESS =====
 union IntOrInt {
@@ -107,15 +107,15 @@ func test_dtor_stress() -> int {
     dtor_total = 0;
     // Single object scope
     {
-        var a: *DtorObj = alloc(sizeof(DtorObj) as i64, 8) as *DtorObj;
+        var a: *DtorObj = malloc(sizeof(DtorObj) as i64) as *DtorObj;
         delete a;
     }
     if (dtor_total != 1) { return 1; }
     // Multiple objects in same scope
     dtor_total = 0;
     {
-        var a: *DtorObj = alloc(sizeof(DtorObj) as i64, 8) as *DtorObj;
-        var b: *DtorObj = alloc(sizeof(DtorObj) as i64, 8) as *DtorObj;
+        var a: *DtorObj = malloc(sizeof(DtorObj) as i64) as *DtorObj;
+        var b: *DtorObj = malloc(sizeof(DtorObj) as i64) as *DtorObj;
         delete b;
         delete a;
     }

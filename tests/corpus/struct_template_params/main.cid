@@ -1,3 +1,4 @@
+from std.alloc import operator new, operator delete;
 // CIDER-BUG-066: a struct template is instantiated from ANY type
 // annotation that names it, not only from a `var` declaration of the
 // instantiation.

@@ -1,3 +1,4 @@
+from std.alloc import operator new, operator delete;
 // CIDER-BUG-077: interface-typed function and method returns.
 //
 // The returned value is the 16-byte fat pointer (data + vtable). It flows

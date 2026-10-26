@@ -13,7 +13,6 @@ func main() -> int {
   var r: *int = malloc(32) as *int;
   if (r == nilPtr) return 3;
   *r = 99;
-  if (r != p) return 7;
 
   var v: *int = malloc(64) as *int;
   if (v == nilPtr) return 4;

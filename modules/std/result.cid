@@ -7,6 +7,7 @@
 // zero value of every Cider type, so the untouched field reads defined.
 from std.io import print, puts, exit;
 from std.string import memset;
+from std.alloc import malloc, free;
 
 // Core `Result<T, E>` is a compiler-owned value type; this module supplies
 // the constructors and helpers over it, not a competing declaration.
@@ -14,7 +15,7 @@ from std.string import memset;
 // A zeroed value of any type: all-zero bytes read as zero, false,
 // nilPtr, or all-zero aggregates for every spelling T can take.
 func zeroed<T>() -> T {
-    var slot: *T = alloc(sizeof(T), 8) as *T;
+    var slot: *T = malloc(sizeof(T)) as *T;
     memset(slot as *void, 0, sizeof(T) as int);
     var answer: T = *slot;
     free(slot as *void);

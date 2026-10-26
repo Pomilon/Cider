@@ -13,6 +13,7 @@
 #include <cstdio>
 #include <string>
 
+#include "alloc_fixture.h"
 #include "check/checker.h"
 #include "ir/ir.h"
 #include "lexer/lexer.h"
@@ -47,10 +48,12 @@ struct Lowered {
 };
 
 Lowered lowerAs(const std::string& text, cider::target::Kind target,
-                bool checks = false) {
+                bool checks = false, bool allocationFixture = true) {
     Lowered out;
     out.types = std::make_unique<cider::TypeContext>();
-    cider::Lexer lexer("test.cid", text);
+    const std::string source =
+        allocationFixture ? cider_test::withAllocationFixture(text) : text;
+    cider::Lexer lexer("test.cid", source);
     std::vector<cider::Token> tokens = lexer.lex();
     if (!lexer.errors().empty()) {
         out.stage = "lex";
@@ -91,6 +94,8 @@ Lowered lower(const std::string& text) {
 Lowered lowerChecks(const std::string& text) {
     return lowerAs(text, cider::target::Kind::Native, true);
 }
+
+
 
 const cider::ir::Function* find(const cider::ir::Module* module, const std::string& name) {
     if (module == nullptr) {
@@ -910,7 +915,7 @@ void testDelete() {
     if (withDeinit.ok) {
         const cider::ir::Function* main = find(withDeinit.module.get(), "main");
         check(main != nullptr, "main exists");
-        // main calls cider_alloc, Box__init, Box__deinit, cider_free: four.
+        // main calls operator_new, Box__init, Box__deinit, operator_delete.
         check(main != nullptr && countOp(*main, cider::ir::Op::Call) == 4,
               "delete emits deinit and free after init");
     }

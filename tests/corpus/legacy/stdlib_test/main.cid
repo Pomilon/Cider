@@ -1,5 +1,5 @@
+from std.alloc import operator new, operator delete, malloc, free;
 from std.io import print, printInt, exit;
-from std.alloc import malloc, free;
 
 class Point {
     var x: int;

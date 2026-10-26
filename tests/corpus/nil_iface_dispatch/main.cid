@@ -1,3 +1,4 @@
+from std.alloc import operator new, operator delete;
 // CIDER-BUG-211 (migrated to v3): the v2 defined-error line is not
 // reprised in v3 (diff #19); interface values box from class pointers,
 // and the nil dispatch path is probed here to record the v3 policy.

@@ -2838,6 +2838,10 @@ void Checker::visitNewClass(NewClass& n) {
         record(&n, checkResultOf(ptr, n.pos));
         return;
     }
+    if (!requireAllocOperator(true, n.pos)) {
+        record(&n, errorRef());
+        return;
+    }
     record(&n, ptr);
 }
 
@@ -3671,6 +3675,9 @@ void Checker::visitDeleteStmt(DeleteStmt& n) {
         t.type->kind() == Kind::Pointer ? t.type->pointee() : nullptr;
     if (obj == nullptr || obj->kind() != Kind::Class) {
         fail(n.pos, "delete needs a class pointer");
+        return;
+    }
+    if (!requireAllocOperator(false, n.pos)) {
         return;
     }
     if (sink_ != nullptr) {
@@ -5356,6 +5363,9 @@ TypeRef Checker::checkNewStruct(NewStruct& expr) {
         return checkResultOf(TypeRef{ctx_.pointer(target.type)}, expr.pos);
     }
     if (expr.heap) {
+        if (!requireAllocOperator(true, expr.pos)) {
+            return errorRef();
+        }
         return TypeRef{ctx_.pointer(target.type)};
     }
     return target;
@@ -5376,8 +5386,8 @@ bool Checker::requireAllocOperator(bool allocation, Position pos) {
     const resolve::Decl* decl = resolver_.lookup(moduleScope_, name);
     if (decl == nullptr || decl->kind != resolve::DeclKind::Func) {
         fail(pos, allocation
-                     ? "try_new needs a global operator new(size: i64, align: i64) -> *void"
-                     : "delete needs a global operator delete(ptr: *void) -> void");
+                     ? "allocation needs a global operator new(size: i64, align: i64) -> *void"
+                     : "deletion needs a global operator delete(ptr: *void) -> void");
         return false;
     }
     return true;
@@ -5478,7 +5488,12 @@ bool Checker::constAggregateInit(const Expr& init) {
     return evalConstFloat(init, *env_, active).ok;
 }
 
-TypeRef Checker::checkNewArray(NewArray& expr) {    TypeRef element = resolveHere(expr.element.get());
+TypeRef Checker::checkNewArray(NewArray& expr) {
+    if (expr.heap || expr.tryNew) {
+        fail(expr.pos, "array allocation is not supported yet");
+        return errorRef();
+    }
+    TypeRef element = resolveHere(expr.element.get());
     if (element.isError()) {
         return errorRef();
     }

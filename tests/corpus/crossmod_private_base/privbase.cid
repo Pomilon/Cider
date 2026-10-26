@@ -1,3 +1,4 @@
+from std.alloc import operator new, operator delete;
 // CIDER-BUG-090 regression module: `Inner` is private to this module, yet
 // the exported `Base` layout embeds it by value and its methods use it in
 // their signatures. A derived class in another module must inherit the

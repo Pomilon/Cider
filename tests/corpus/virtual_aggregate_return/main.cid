@@ -1,3 +1,4 @@
+from std.alloc import operator new, operator delete;
 // CIDER-BUG-156 regression, runtime half: a non-sret virtual aggregate
 // return comes back as a fresh heap copy. CIDER-BUG-137 already treats the
 // copy as a caller-owned temporary (its destructors run at the caller's

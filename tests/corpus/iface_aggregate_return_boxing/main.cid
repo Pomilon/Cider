@@ -1,3 +1,4 @@
+from std.alloc import operator new, operator delete;
 // CIDER-BUG-212: a returned aggregate that CONTAINS an interface value (a
 // bare interface field, an interface array field, or either nested deeper)
 // gets the same boxing/ownership treatment a bare returned interface-element

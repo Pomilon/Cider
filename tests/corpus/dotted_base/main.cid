@@ -1,3 +1,4 @@
+from std.alloc import operator new, operator delete;
 // CIDER-BUG-124 regression: `extends` accepts module-qualified spellings
 // exactly like every other type position. Covered here:
 //   - a direct dotted base (`class A extends qlib.Base`)

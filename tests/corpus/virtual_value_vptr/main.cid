@@ -1,3 +1,4 @@
+from std.alloc import operator new, operator delete;
 // CIDER-BUG-089 regression: a value instance of a class with virtual
 // methods must carry its class's vtable pointer in the first word, exactly
 // like a `new` instance, so virtual dispatch through the value (or through

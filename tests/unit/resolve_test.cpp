@@ -134,37 +134,18 @@ void testModules() {
     check(!r.ok, "b's error surfaces through main");
 }
 
-// `from prelude import free` names the implicit import (FEATURES §10.2:
-// the prelude IS an implicit `from prelude import ...`, so the explicit
-// form must mean the same thing). The alias keeps the prelude mark, or the
-// linker would look for a module-qualified symbol that is never emitted.
+// There is no prelude module: the transitional allocator names are gone,
+// and `from prelude import ...` is just an unknown module.
 void testPreludeImport() {
-    std::printf("the prelude can be named explicitly\n");
-    Resolved r = resolve("from prelude import free;\n");
-    check(r.ok, "resolves");
-    const cider::resolve::Decl* found = find(*r.resolver, "free");
-    check(found != nullptr && found->isPrelude, "the alias stays prelude");
-    Resolved bad = resolve("from prelude import nosuch;\n");
-    check(!bad.ok, "an unknown prelude name is rejected");
+    std::printf("the prelude cannot be imported\n");
+    Resolved free = resolve("from prelude import free;\n");
+    check(!free.ok, "free is not a prelude name");
+    Resolved alloc = resolve("from prelude import alloc;\n");
+    check(!alloc.ok, "alloc is not a prelude name");
     Resolved noPrint = resolve("from prelude import print;\n");
-    check(!noPrint.ok, "print is no longer a prelude name");
+    check(!noPrint.ok, "print is not a prelude name");
     Resolved noPanic = resolve("from prelude import panic;\n");
-    check(!noPanic.ok, "panic is no longer a prelude name");
-    // The mark survives a second hop: m re-exports prelude free, main
-    // takes it from m.
-    cider::resolve::Resolver::ModuleLoader load = [](const std::string& name)
-        -> std::unique_ptr<cider::Program> {
-        if (name == "m") {
-            cider::Lexer lexer("m.cid", "from prelude import free;\n");
-            cider::Parser parser("m.cid", lexer.lex());
-            return parser.parse();
-        }
-        return nullptr;
-    };
-    Resolved hop = resolve("from m import free;\n", load);
-    check(hop.ok, "re-export resolves");
-    const cider::resolve::Decl* again = find(*hop.resolver, "free");
-    check(again != nullptr && again->isPrelude, "the mark survives the hop");
+    check(!noPanic.ok, "panic is not a prelude name");
 }
 
 // An import cycle names the cycle instead of hanging.
@@ -186,7 +167,7 @@ void testConstLength() {
     std::printf("lengths fold, cycles are named\n");
     Resolved r = resolve(
         "const N: int = 4;\n"
-        "var a: [u8; N] = new [u8; N] { [0, ...] };\n");
+        "var a: [u8; N] = [0, ...];\n");
     check(r.ok, "resolves");
     check(cider::typeName(cider::TypeRef{find(*r.resolver, "a")->type}) == "[u8; 4]",
           "the length folded");
@@ -204,15 +185,23 @@ void testEnum() {
     check(r.resolver->enumValue("main.E", "C") == 5, "C follows B");
 }
 
-// The prelude is bound without an import: one implicit import, not a hole.
+// Core types are bound without an import; the removed prelude names are
+// absent, so a program gets no hidden allocator or I/O.
 void testPrelude() {
-    std::printf("the transitional allocator/fini prelude remains\n");
+    std::printf("core types replace the prelude\n");
     Resolved r = resolve("var g: int = 0;\n");
     check(r.ok, "resolves");
     check(find(*r.resolver, "print") == nullptr, "print is not bound");
     check(find(*r.resolver, "panic") == nullptr, "panic is not bound");
-    check(find(*r.resolver, "alloc") != nullptr, "alloc is still bound");
-    check(find(*r.resolver, "free") != nullptr, "free is still bound");
+    check(find(*r.resolver, "alloc") == nullptr, "alloc is not bound");
+    check(find(*r.resolver, "realloc") == nullptr, "realloc is not bound");
+    check(find(*r.resolver, "free") == nullptr, "free is not bound");
+    check(find(*r.resolver, "Result") != nullptr, "Result is a core type");
+    check(find(*r.resolver, "AllocError") != nullptr, "AllocError is a core type");
+    Resolved result = resolve("var r: Result<int, AllocError> = uninit;\n");
+    check(result.ok, "Result<..., AllocError> resolves");
+    Resolved member = resolve("var e: AllocError = AllocError.OutOfMemory;\n");
+    check(member.ok, "AllocError.OutOfMemory resolves");
 }
 
 // A generic applied with the right arity resolves to its pending marker; the

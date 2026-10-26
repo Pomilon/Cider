@@ -111,14 +111,8 @@ Decl* Resolver::bind(const Scope* scope, DeclKind kind, const std::string& name,
                      Position pos) {
     auto found = scope->bindings.find(name);
     if (found != scope->bindings.end()) {
-        // The prelude is an implicit `from prelude import ...` in every
-        // module (FEATURES §10.2): any spelling the program writes — its own
-        // declaration or a from-import — shadows it for that module instead
-        // of colliding with it. Anything else redeclaring is still an error.
-        if (!found->second->isPrelude) {
-            fail(pos, "duplicate declaration of '" + name + "'");
-            return const_cast<Decl*>(found->second);
-        }
+        fail(pos, "duplicate declaration of '" + name + "'");
+        return const_cast<Decl*>(found->second);
     }
     auto decl = std::make_unique<Decl>();
     decl->kind = kind;
@@ -126,7 +120,7 @@ Decl* Resolver::bind(const Scope* scope, DeclKind kind, const std::string& name,
     decl->scope = scope;
     decl->pos = pos;
     // Single owner of declaration ids: every Decl gets a fresh
-    // (module, index) here, so prelude entries, templates, globals and
+    // (module, index) here, so core types, templates, globals and
     // specializations can never share one. Callers that alias another
     // declaration (from-imports) overwrite the id afterwards on purpose.
     if (moduleIds_.find(scope->module) == moduleIds_.end()) {
@@ -1150,38 +1144,12 @@ bool Resolver::resolveProgram(Program& program, const std::string& module) {
     if (entry_ == nullptr) {
         entry_ = scope;
     }
-    bindPrelude(scope, program.pos);
+    bindTargetGlobals(scope, program.pos);
     bindCoreTypes(scope);
     // Imports first, so a `from` alias and every qualified name resolves
     // against a module whose own headers already exist.
     for (const std::unique_ptr<cider::Decl>& decl : program.decls) {
         if (const auto* from = dynamic_cast<const FromImport*>(decl.get())) {
-            if (from->module == "prelude") {
-                // The prelude is an implicit `from prelude import ...` in
-                // every module (FEATURES §10.2), so the explicit form binds
-                // the module's own prelude entries: no file is loaded, and
-                // the alias keeps the prelude mark or the linker would
-                // look for a module-qualified symbol that is never emitted.
-                for (const std::string& name : from->names) {
-                    const Decl* target = lookup(scope, name);
-                    if (target == nullptr || !target->isPrelude) {
-                        fail(decl->pos, "'" + name +
-                                            "' is not exported by 'prelude'");
-                        continue;
-                    }
-                    Decl* alias = bind(scope, target->kind, name, decl->pos);
-                    alias->type = target->type;
-                    alias->sig = target->sig;
-                    alias->id = target->id;
-                    alias->nominal = target->nominal;
-                    alias->typeParams = target->typeParams;
-                    alias->aliasTarget = target->aliasTarget;
-                    alias->init = target->init;
-                    alias->isExtern = target->isExtern;
-                    alias->isPrelude = true;
-                }
-                continue;
-            }
             if (!resolveModule(from->module)) {
                 continue;
             }
@@ -1202,7 +1170,6 @@ bool Resolver::resolveProgram(Program& program, const std::string& module) {
                 alias->aliasTarget = target->aliasTarget;
                 alias->init = target->init;
                 alias->isExtern = target->isExtern;
-                alias->isPrelude = target->isPrelude;
                 if (alias->kind == DeclKind::Alias) {
                     alias->homeModule = from->module;
                 }
@@ -2112,15 +2079,12 @@ std::string Resolver::linkName(const Decl& decl) const {
     if (decl.isTargetGlobal) {
         return decl.name;
     }
-    if (decl.isPrelude) {
-        return "cider_" + decl.name;
-    }
     if (decl.isExtern) {
         return decl.name;
     }
     // Decls bound in a function body have no link symbol; callers pass the
     // module they looked the name up in. A null scope is entry-adjacent by
-    // construction (the prelude fallback), so bare is safe there too.
+    // construction, so bare is safe there too.
     std::string home = decl.scope != nullptr ? decl.scope->module : entryModule();
     if (home.empty() || home == entryModule()) {
         return decl.name;
@@ -2487,28 +2451,16 @@ const Scope* Resolver::typeParamScope(const Scope* parent, const std::string& mo
     return scope;
 }
 
-void Resolver::bindPrelude(const Scope* scope, Position pos) {
-    // Transitional v4 state: print, panic, and fini are no longer prelude
-    // names. The allocator entries remain until library allocation lands.
-    const Type* none = ctx_.void_();
-    const Type* i64 = ctx_.basic(BasicKind::I64);
-    const Type* addr = ctx_.pointer(none);
-    auto func = [&](const std::string& name, std::vector<Parameter> params,
-                    const Type* ret) {
-        Decl* d = bind(scope, DeclKind::Func, name, pos);
-        d->type = TypeRef{ctx_.wildcard()};
-        d->sig = Signature(std::move(params), ret, Abi::SysV);
-        d->isPrelude = true;
-    };
-    func("alloc", {{i64, false}, {i64, false}}, addr);
-    func("realloc", {{addr, false}, {i64, false}, {i64, false}}, addr);
-    func("free", {{addr, false}}, none);
+void Resolver::bindTargetGlobals(const Scope* scope, Position pos) {
+    // No prelude names remain. UEFI still injects its two firmware handles
+    // until the source-defined entry step; they are target globals, not
+    // imports, and use their bare linker spellings.
     if (target_ == target::Kind::Uefi) {
+        const Type* none = ctx_.void_();
         const Type* voidPtr = ctx_.pointer(none);
         auto global = [&](const std::string& name) {
             Decl* d = bind(scope, DeclKind::Var, name, pos);
             d->type = TypeRef{voidPtr};
-            d->isPrelude = true;
             d->isTargetGlobal = true;
         };
         global("image_handle");

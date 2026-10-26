@@ -1,3 +1,4 @@
+from std.alloc import operator new, operator delete, malloc;
 // CIDER-BUG-215: reads of never-initialized storage must observe the SAME
 // value on all three backends. This pins the value, not just the agreement.
 //
@@ -46,7 +47,6 @@
 // Each probe is a separate function that consumes its block before returning,
 // so only one Cider block is live per frame.
 from std.io import print, printInt;
-from std.alloc import malloc;
 
 // The ticket's shape: one 4-byte class, so a stride or width mistake shows up
 // as a shifted value rather than being masked.

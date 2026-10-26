@@ -1,3 +1,4 @@
+from std.alloc import operator new, operator delete;
 // CIDER-BUG-108 regression: `delete` of a heap class/struct value runs the
 // full finalizer set its type owns — the class's own destructor body first,
 // then every class value it embeds by value in reverse construction order

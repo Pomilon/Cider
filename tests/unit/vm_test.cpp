@@ -8,6 +8,7 @@
 #include <cstdio>
 #include <string>
 
+#include "alloc_fixture.h"
 #include "check/checker.h"
 #include "lexer/lexer.h"
 #include "lower/lower.h"
@@ -41,7 +42,8 @@ struct Lowered {
 Lowered lower(const std::string& text, bool checks = false) {
     Lowered out;
     out.types = std::make_unique<cider::TypeContext>();
-    cider::Lexer lexer("test.cid", text);
+    const std::string source = cider_test::withAllocationFixture(text);
+    cider::Lexer lexer("test.cid", source);
     std::vector<cider::Token> tokens = lexer.lex();
     if (!lexer.errors().empty()) {
         out.stage = "lex";
@@ -327,63 +329,6 @@ void testCalls() {
     check(ch.ok, "putchar lowers: " + ch.stage);
     cider::vm::VmResult chr = cider::vm::run(*ch.module, "");
     check(chr.ok && chr.stdoutText == "!", "putchar writes one byte: " + chr.stdoutText);
-    Lowered al = lower("func main() -> int { var p: *int = alloc(8, 8) as *int;"
-                       " *p = 42; return *p; }\n");
-    check(al.ok, "an allocating program lowers: " + al.stage);
-    cider::vm::VmResult alr = cider::vm::run(*al.module, "");
-    check(alr.ok && alr.exitCode == 42, "alloc hands out writable memory: " + alr.error);
-    // Both blocks are handed out and laid down zero-filled at hand-out,
-    // so the neighbour read is legitimate laid-down memory answering
-    // zero — not the old auto-grow path, which fabricated pages past
-    // everything laid down and has been removed.
-    Lowered past = lower("func main() -> int {\n"
-                         " var a: *u8 = alloc(16, 8) as *u8;\n"
-                         " var b: *u8 = alloc(16, 8) as *u8;\n"
-                         " a[0] = 5;\n"
-                         " if (b[0] != 0) { return 1; }\n"
-                         " return 0; }\n");
-    cider::vm::VmResult pastr = cider::vm::run(*past.module, "");
-    check(pastr.ok && pastr.exitCode == 0,
-          "a neighbour block reads zero: " + pastr.error);
-    // Past everything laid down there is no mapping: the read faults
-    // the way the machine would on an unmapped page, instead of
-    // fabricating a zero page.
-    Lowered pastAll = lower("func main() -> int {\n"
-                            " var p: *u8 = alloc(8, 8) as *u8;\n"
-                            " return (p[1000] as int); }\n");
-    check(pastAll.ok, "a past-everything read lowers: " + pastAll.stage);
-    cider::vm::VmResult pastAllr = cider::vm::run(*pastAll.module, "");
-    check(pastAllr.ok && pastAllr.signal != 0,
-          "a past-everything read dies: " + pastAllr.error);
-    // Over the heap cap the hand-out is refused up front: the guest sees
-    // nil, the way a failed mmap answers nil, without ever reaching the
-    // host reservation.
-    Lowered big = lower("func main() -> int {\n"
-                        " var p: *u8 = alloc(2147483648, 8) as *u8;\n"
-                        " if (p == nilPtr) { return 0; }\n"
-                        " return 1; }\n");
-    check(big.ok, "an over-cap alloc lowers: " + big.stage);
-    cider::vm::VmResult bigr = cider::vm::run(*big.module, "");
-    check(bigr.ok && bigr.exitCode == 0,
-          "an over-cap alloc answers nil: " + bigr.error);
-    // A failed realloc keeps the old block and answers nil: the second
-    // trip reuses the same result cell, so a missing write would leave
-    // the first trip's pointer behind instead of nil.
-    Lowered neg = lower("func main() -> int {\n"
-                        " var p: *u8 = alloc(16, 8) as *u8;\n"
-                        " var q: *u8 = p;\n"
-                        " var i: int = 0;\n"
-                        " while (i < 2) {\n"
-                        " var n: i64 = 16;\n"
-                        " if (i != 0) { n = (0 - 1) as i64; }\n"
-                        " q = realloc(q, n, 8) as *u8;\n"
-                        " i = i + 1; }\n"
-                        " if (q == nilPtr) { return 0; }\n"
-                        " return 1; }\n");
-    check(neg.ok, "a negative realloc lowers: " + neg.stage);
-    cider::vm::VmResult negr = cider::vm::run(*neg.module, "");
-    check(negr.ok && negr.exitCode == 0,
-          "a negative realloc answers nil: " + negr.error);
     Lowered dead = lower("func main() -> int { var p: *int = nilPtr;"
                          " return *p; }\n");
     cider::vm::VmResult deadr = cider::vm::run(*dead.module, "");
@@ -462,7 +407,8 @@ void testAsm() {
     check(wrr.exitCode == 7, "and the run ends after it: " + wrr.error);
 
     Lowered rd = lower("func main() -> int {"
-                       " var p: *u8 = alloc(4, 1) as *u8;"
+                       " var buf: [u8; 4] = [0, ...];"
+                       " var p: *u8 = &buf[0];"
                        " asm { \"mov rax, 0\" \"mov rdi, 0\" \"mov rsi, {p}\""
                        " \"mov rdx, 4\" \"syscall\" }"
                        " return *p as int - 65; }\n");

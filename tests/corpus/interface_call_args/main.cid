@@ -1,3 +1,4 @@
+from std.alloc import operator new, operator delete;
 // CIDER-BUG-080: a call argument whose callee parameter is an interface
 // accepts any satisfying concrete value — a class/struct value, `new C(...)`
 // (constructor arguments applied), or a pointer to one — as well as another

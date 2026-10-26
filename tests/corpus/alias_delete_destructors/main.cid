@@ -1,3 +1,4 @@
+from std.alloc import operator new, operator delete;
 // CIDER-BUG-125 regression: `delete` through an alias-spelled class pointer
 // runs the same finalizer set the direct spelling does — the class's own
 // destructor body first, then every class value it embeds by value in reverse

@@ -1,3 +1,4 @@
+from std.alloc import operator new, operator delete;
 // CIDER-BUG-119: local aggregates declared in an imported module body are
 // checked and generated in that module's context. The extra cases below
 // pin that the module-scoped mangling reaches every synthesized label:

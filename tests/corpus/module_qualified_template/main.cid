@@ -1,3 +1,4 @@
+from std.alloc import operator new, operator delete, malloc;
 // CIDER-BUG-073: module-qualified template instantiation `box.Box<int>`
 // must instantiate and behave exactly like the from-import bare spelling.
 // Positions covered: variable type, struct field, parameter, return type,
@@ -23,7 +24,7 @@ func main() -> int {
   if (b.v + b.tag != 41) { return 1; }
 
   // `new` on the qualified spelling, arrow access.
-  var p: *box.Box<int> = alloc(sizeof(box.Box<int>), 8) as *box.Box<int>;
+  var p: *box.Box<int> = malloc(sizeof(box.Box<int>)) as *box.Box<int>;
   (*p).v = 0;
   (*p).tag = 0;
   (*p).v = 2;

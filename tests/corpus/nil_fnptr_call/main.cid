@@ -1,3 +1,4 @@
+from std.alloc import operator new, operator delete;
 // CIDER-BUG-225: a call through a nil function pointer. v2 made this a
 // defined runtime error on every backend (`vm error: call: nil function
 // pointer`, exit 2) guarded by its own `_nil_fnptr_fail` routine, separate

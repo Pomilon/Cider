@@ -10,6 +10,7 @@
 #include <sys/wait.h>
 #include <unistd.h>
 
+#include "alloc_fixture.h"
 #include "check/checker.h"
 #include "codegen/codegen.h"
 #include "lexer/lexer.h"
@@ -43,10 +44,12 @@ struct Built {
 };
 
 Built buildAs(const std::string& text, cider::target::Kind target,
-              bool checks = false) {
+              bool checks = false, bool allocationFixture = true) {
     Built out;
     out.types = std::make_unique<cider::TypeContext>();
-    cider::Lexer lexer("test.cid", text);
+    const std::string source =
+        allocationFixture ? cider_test::withAllocationFixture(text) : text;
+    cider::Lexer lexer("test.cid", source);
     std::vector<cider::Token> tokens = lexer.lex();
     if (!lexer.errors().empty()) {
         out.stage = "lex";
@@ -457,16 +460,6 @@ void testUefiEntryShim() {
               "native keeps hardware null faults, no explicit check");
     }
 
-    Built heap = buildAs(
-        "func efi_main() -> int {\n"
-        "    var p: *void = alloc(8, 8);\n"
-        "    free(p);\n"
-        "    return 0;\n"
-        "}\n",
-        cider::target::Kind::Uefi);
-    check(!heap.ok, "uefi refuses the unimplemented heap runtime");
-    check(heap.stage.find("uefi") != std::string::npos,
-          "the heap refusal names uefi");
 }
 
 void testCalls() {
@@ -1001,7 +994,7 @@ void testPointerField() {
     std::printf("fields through pointer elements\n");
     check(runQuiet("struct Pair { var lo: int; var hi: int; }\n"
                    "func main() -> int {\n"
-                   "    var p: *Pair = alloc(16, 8) as *Pair;\n"
+                   "    var p: *Pair = new Pair { lo: 0, hi: 0 };\n"
                    "    var tmp: Pair = Pair { lo: 11, hi: 22 };\n"
                    "    p[0] = tmp;\n"
                    "    p[0].lo = 33;\n"
@@ -1091,7 +1084,7 @@ void testStruct() {
                    "func main() -> int { var m: M = M { tag: 2, val: 40 }; return m.val + m.tag as int; }\n") == 42,
           "mixed widths respect padding");
     check(runQuiet("struct A { var p: *A; var n: int; }\n"
-                   "func main() -> int { var q: *A = alloc(16, 8) as *A; return (q != nilPtr) as int; }\n") == 1,
+                   "func main() -> int { var q: *A = new A { p: nilPtr, n: 0 }; return (q != nilPtr) as int; }\n") == 1,
           "a pointer to self still declares and runs");
     // An array field reads back every element, including ones past the
     // first word: the take splitter shifts sub-word takes by bits.
@@ -1134,31 +1127,75 @@ void testArray() {
           "element stores land");
 }
 
-// Pointers compare by identity and cast address-preservingly; the heap
-// helpers answer nilPtr on refusal and catch corruption loudly.
-void testPointerHeap() {
-    std::printf("pointers and the heap\n");
-    check(runQuiet("func main() -> int { var p: *int = alloc(8, 8) as *int; return (p != nilPtr) as int + 41; }\n") == 42,
-          "a fresh block is not nil");
-    check(runQuiet("func main() -> int { return (alloc(999999999999, 8) != nilPtr) as int; }\n") == 0,
-          "an oversized request refuses to nilPtr");
-    check(runQuiet("func main() -> int {\n"
-                   " var p: *int = alloc(16, 8) as *int;\n"
-                   " free(p);\n"
-                   " var q: *int = alloc(16, 8) as *int;\n"
-                   " free(q);\n"
-                   " return (q != nilPtr) as int + 41; }\n") == 42,
-          "freed memory is recycled by the free list");
-    check(runQuiet("func main() -> int {\n"
-                   "    var x: int = 41;\n"
-                   "    var p: *int = &x;\n"
-                   "    var pp: **int = &p;\n"
-                   "    var q: **int = &*pp;\n"
-                   "    return **q;\n"
-                   "}\n") == 41,
-          "address of a dereference nets one level and runs");
-    check(runQuiet("func main() -> int { var p: *int = alloc(8, 8) as *int; free(p); free(p); return 0; }\n") == 134,
-          "a double free dies loudly with the heap code");
+void testAllocation() {
+    std::printf("allocation goes through the library operators\n");
+    bool sig = false;
+    check(runCode("class C {\n"
+                  "    var x: int;\n"
+                  "    func init(v: int) -> void { (*self).x = v; }\n"
+                  "}\n"
+                  "func main() -> int {\n"
+                  "    var p: *C = new C(41);\n"
+                  "    return p->x;\n"
+                  "}\n", sig) == 41 && !sig,
+          "new constructs in the operator's storage");
+    check(runCode("var released: int = 0;\n"
+                  "var pool: [u8; 64] = [0, ...];\n"
+                  "func operator new(size: i64, align: i64) -> *void {\n"
+                  "    return &pool[0] as *void;\n"
+                  "}\n"
+                  "func operator delete(ptr: *void) -> void { released = 1; }\n"
+                  "class C { var x: int; }\n"
+                  "func main() -> int {\n"
+                  "    var p: *C = new C { x: 1 };\n"
+                  "    delete p;\n"
+                  "    return released;\n"
+                  "}\n", sig) == 1 && !sig,
+          "delete calls the library operator");
+    check(runCode("class C { var x: int;\n"
+                  "    func deinit() { (*self).x = 1; }\n"
+                  "}\n"
+                  "func main() -> int {\n"
+                  "    var p: *C = nilPtr;\n"
+                  "    delete p;\n"
+                  "    return 0;\n"
+                  "}\n", sig) == 0 && !sig,
+          "delete nil is a no-op, deinit included");
+    int trapped = runCode("func operator new(size: i64, align: i64) -> *void {\n"
+                          "    return nilPtr;\n"
+                          "}\n"
+                          "func operator delete(ptr: *void) -> void { }\n"
+                          "class C { var x: int; }\n"
+                          "func main() -> int { var p: *C = new C { x: 1 }; return 0; }\n",
+                          sig);
+    check(trapped == -1 && sig, "new traps with ud2 when the operator is nil");
+    check(runCode("func operator new(size: i64, align: i64) -> *void {\n"
+                  "    return nilPtr;\n"
+                  "}\n"
+                  "func operator delete(ptr: *void) -> void { }\n"
+                  "class C { var x: int; func init(v: int) { (*self).x = v; } }\n"
+                  "func main() -> int {\n"
+                  "    var r: Result<*C, AllocError> = try_new C(1);\n"
+                  "    if (r.is_ok) { return 1; }\n"
+                  "    if (r.error != AllocError.OutOfMemory) { return 2; }\n"
+                  "    return 3;\n"
+                  "}\n", sig) == 3 && !sig,
+          "try_new returns OutOfMemory without constructing");
+    Built built = build("var pool: [u8; 64] = [0, ...];\n"
+                        "func operator new(size: i64, align: i64) -> *void {\n"
+                        "    return &pool[0] as *void;\n"
+                        "}\n"
+                        "func operator delete(ptr: *void) -> void { }\n"
+                        "class C { var x: int; }\n"
+                        "func main() -> int { var p: *C = new C { x: 1 }; return 0; }\n");
+    check(built.ok, "allocation builds: " + built.stage);
+    if (built.ok) {
+        check(built.asmText.find("operator_new") != std::string::npos,
+              "new calls the source-defined operator");
+        check(built.asmText.find("cider_alloc") == std::string::npos &&
+                  built.asmText.find("cider_heap") == std::string::npos,
+              "no compiler heap is emitted");
+    }
 }
 
 // `delete` runs the deinit once, then releases the storage (FEATURES §5.3).
@@ -1177,29 +1214,6 @@ void testDelete() {
                   "    return seen + 1;\n"
                   "}\n", sig) == 42 && !sig,
           "a deleted object's deinit ran");
-}
-
-// The heap's total-byte write must use an explicit `qword ptr`: GAS
-// silently shifts a bare `qword [rip + label]` reference by 8 bytes, so
-// the 1 GiB cap never fired and every request mapped (found live: two
-// 900 MB maps, zero refusal). The text pin guards the exact site; the
-// corpus cap_overflow/mmap_fail programs pin the behavior.
-void testHeapCapText() {
-    std::printf("heap helpers name sizes explicitly\n");
-    Built built = build("func main() -> int {\n"
-                        "    var p: *void = alloc(8, 8);\n"
-                        "    if (p == nilPtr) { return 1; }\n"
-                        "    free(p);\n"
-                        "    return 0;\n"
-                        "}\n");
-    check(built.ok, "builds");
-    check(built.asmText.find("qword ptr [rip + cider_heap_total]") !=
-              std::string::npos,
-          "the total-byte write is explicit");
-    for (const char* bare : {"qword [", "dword [", "byte [", "word ["}) {
-        check(built.asmText.find(bare) == std::string::npos,
-              "no bare size names a memory operand");
-    }
 }
 
 // A string literal's rodata bytes end in a zero byte: `*char` code
@@ -2000,7 +2014,7 @@ void testGenericFn() {
                    "    var b: Box<int> = Box<int> { v: 40, tag: 1 };\n"
                    "    if (b.v + b.tag != 41) { return 1; }\n"
                    "    if (sizeof(Box<int>) != 8) { return 2; }\n"
-                   "    var p: *Box<int> = alloc(sizeof(Box<int>), 8) as *Box<int>;\n"
+                   "    var p: *Box<int> = new Box<int> { v: 0, tag: 0 };\n"
                    "    (*p).v = 7;\n"
                    "    if (((*p).v as int) != 7) { return 3; }\n"
                    "    return 0;\n"
@@ -3094,9 +3108,8 @@ int main() {
     testGlobals();
     testStruct();
     testArray();
-    testPointerHeap();
+    testAllocation();
     testDelete();
-    testHeapCapText();
     testLiteralNul();
     testExternPutchar();
     testBreakContinue();

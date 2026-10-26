@@ -1,3 +1,4 @@
+from std.alloc import operator new, operator delete;
 // Migrated to v3: inheritance spells `class D : C`, and a class literal
 // names every non-defaulted field, inherited ones included.
 class A {

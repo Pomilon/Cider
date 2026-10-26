@@ -1,3 +1,4 @@
+from std.alloc import operator new, operator delete;
 // CIDER-BUG-062: HashMap deletion must not break probe chains.
 // Covers colliding keys, removal across collisions, reinsert, remove of a
 // missing key, growth with tombstones, churn, and len_map after operations.

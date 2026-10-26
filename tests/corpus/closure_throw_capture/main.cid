@@ -1,3 +1,4 @@
+from std.alloc import operator new, operator delete;
 // CIDER-BUG-065: the closure capture collector must walk throw/try/catch
 // (and defer, match, for-in and the whole expression dispatch) so a closure
 // that uses an outer local inside those statements captures it. Before the

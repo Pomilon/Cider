@@ -8,6 +8,7 @@
 #include <cstdio>
 #include <string>
 
+#include "alloc_fixture.h"
 #include "check/checker.h"
 #include "lexer/lexer.h"
 #include "parse/parser.h"
@@ -39,10 +40,13 @@ struct Checked {
 };
 
 Checked checkAs(const std::string& text, cider::target::Kind target,
-                cider::resolve::Resolver::ModuleLoader load = nullptr) {
+                cider::resolve::Resolver::ModuleLoader load = nullptr,
+                bool allocationFixture = true) {
     Checked out;
     out.types = std::make_unique<cider::TypeContext>();
-    cider::Lexer lexer("test.cid", text);
+    const std::string source =
+        allocationFixture ? cider_test::withAllocationFixture(text) : text;
+    cider::Lexer lexer("test.cid", source);
     std::vector<cider::Token> tokens = lexer.lex();
     if (!lexer.errors().empty()) {
         out.stage = "lex";
@@ -78,6 +82,11 @@ Checked checkAs(const std::string& text, cider::target::Kind target,
 Checked check(const std::string& text,
               cider::resolve::Resolver::ModuleLoader load = nullptr) {
     return checkAs(text, cider::target::Kind::Native, std::move(load));
+}
+
+// No allocation fixture: the program must declare its own operators.
+Checked checkRaw(const std::string& text) {
+    return checkAs(text, cider::target::Kind::Native, nullptr, false);
 }
 
 // Mixed arithmetic converts to a common type, stated as a type.
@@ -602,6 +611,29 @@ void testOperatorOverloads() {
     Checked coreNames = check(
         "func f(r: Result<int, AllocError>) -> AllocError { return r.error; }\n");
     check(coreNames.ok, "Result and AllocError are core types: " + coreNames.stage);
+
+    Checked noNew = checkRaw(
+        "struct S { var x: int; }\n"
+        "func main() -> int { var p: *S = new S { x: 1 }; return 0; }\n");
+    check(!noNew.ok && noNew.stage == "check",
+          "new without operator new is rejected");
+    Checked noDelete = checkRaw(
+        "class C { var x: int; }\n"
+        "func main() -> int { var p: *C = nilPtr; delete p; return 0; }\n");
+    check(!noDelete.ok && noDelete.stage == "check",
+          "delete without operator delete is rejected");
+    Checked arrayNew = checkRaw(
+        "func main() -> int { var p: *[u8; 2] = new [u8; 2] {[0, ...]}; return 0; }\n");
+    check(!arrayNew.ok && arrayNew.stage == "check",
+          "array allocation is rejected");
+    Checked arrayTry = check(
+        allocator +
+        "func main() -> int {\n"
+        "    var r: Result<*[u8; 2], AllocError> = try_new [u8; 2] {[0, ...]};\n"
+        "    return 0;\n"
+        "}\n");
+    check(!arrayTry.ok && arrayTry.stage == "check",
+          "try_new array allocation is rejected");
 }
 
 void testInitAssign() {
@@ -1092,7 +1124,7 @@ void testDelete() {
         "func main() -> int { var p: *C = new C(1); delete p; return 0; }\n");
     check(good.ok, "deleting a class pointer checks: " + good.stage);
     Checked scalar = check(
-        "func main() -> int { var p: *int = alloc(8, 8) as *int; delete p; return 0; }\n");
+        "func main() -> int { var p: *int = nilPtr; delete p; return 0; }\n");
     check(!scalar.ok && scalar.stage == "check", "deleting a non-class pointer fails");
     Checked nonptr = check("func main() -> int { var x: int = 3; delete x; return 0; }\n");
     check(!nonptr.ok && nonptr.stage == "check", "deleting a non-pointer fails");
@@ -2477,23 +2509,28 @@ void testGlobalConstWidth() {    // A folded integer names image bytes, so one t
 }
 
 void testRepeatZero() {
-    // `new [T; N] { [0, ...] }` makes every element zero (FEATURES §14.2),
-    // and zero reaches through nested arrays: the filler is the scalar
-    // zero, not an element-typed value.
+    // A bare array literal owns the repeat forms; `new [T; N]` is array
+    // allocation and is deferred.
     std::printf("zero repeat fills nested arrays\n");
     Checked nested = check(
         "func main() -> int {\n"
-        "    var m: [[u8; 2]; 3] = new [[u8; 2]; 3] { [0, ...] };\n"
+        "    var m: [[u8; 2]; 3] = [[0, ...], [0, ...], [0, ...]];\n"
         "    return m[2][1] as int;\n"
         "}\n");
     check(nested.ok, "zero repeat fills a nested array: " + nested.stage);
     Checked nonzero = check(
         "func main() -> int {\n"
-        "    var m: [[u8; 2]; 3] = new [[u8; 2]; 3] { [1, ...] };\n"
+        "    var m: [[u8; 2]; 3] = [[1, 1], [1, 1], [1, 1]];\n"
         "    return 0;\n"
         "}\n");
-    check(!nonzero.ok && nonzero.stage == "check",
-          "a nonzero repeat over an aggregate element fails");
+    check(nonzero.ok, "an explicit nested literal checks: " + nonzero.stage);
+    Checked allocated = checkRaw(
+        "func main() -> int {\n"
+        "    var m: *[[u8; 2]; 3] = new [[u8; 2]; 3] { [0, ...] };\n"
+        "    return 0;\n"
+        "}\n");
+    check(!allocated.ok && allocated.stage == "check",
+          "new array allocation is rejected");
 }
 
 void testSliceCopy() {

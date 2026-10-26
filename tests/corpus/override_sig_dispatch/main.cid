@@ -1,3 +1,4 @@
+from std.alloc import operator new, operator delete;
 // CIDER-BUG-141 positive control: compatible overrides must still bind
 // the base method's vtable slot and dispatch to the derived body. Covers
 // an exactly-matching signature, an alias spelling of a parameter type

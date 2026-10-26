@@ -1,3 +1,4 @@
+from std.alloc import operator new, operator delete;
 // CIDER-BUG-184: a concrete struct/class value returned as an interface is
 // boxed — the fat pointer's data word must not address the callee frame,
 // which dies on return. The box is the CALLER's own temporary: it is

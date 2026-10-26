@@ -1,33 +1,109 @@
-// Heap allocation: thin names over the prelude.
+// Test-only Linux allocator.
 //
-// The prelude owns the allocator (`alloc`/`realloc`/`free`, FEATURES §10.2);
-// this module exists so programs written against `std.alloc` keep their
-// imports. `free` is an explicit re-export of the prelude (`from prelude
-// import ...` names the implicit import): a wrapper defined here could not
-// call the prelude's `free` without calling itself.
+// A bump allocator over anonymous mmap arenas. It is deliberately simple:
+// allocation is the only operation the core language asks of a library, and
+// free is a no-op because a bump cursor cannot reclaim an earlier block.
+// Programs that need precise lifetime control use their own allocator.
+//
+// `operator new`/`operator delete` are the language's allocation surface;
+// malloc/free keep the older test-library spelling. Nothing here is a
+// compiler runtime: the module is imported explicitly.
 
-from prelude import alloc, free;
+var arena: *u8 = nilPtr;
+var used: i64 = 0;
+var capacity: i64 = 0;
+var mapped_total: i64 = 0;
 
-// The v3 prelude allocator starts empty and maps its first arena on demand.
-// This entry point exists for v2-shaped programs; there is no separate heap
-// to initialize. The same allocator already enforces 1 MiB arenas, the 1 GiB
-// heap cap, block canaries and a free-list cycle guard, so those protections
-// are shared by `new`, vectors, maps and this module.
+const ARENA_BYTES: i64 = 1048576;
+const MAX_TOTAL_BYTES: i64 = 1073741824;
+
+// The Linux mmap syscall. A refusal is the kernel's negative errno; a
+// successful mapping is a positive address.
+func raw_mmap(len: i64) -> i64 {
+    var ret: i64 = 0;
+    asm {
+        "mov rax, 9"
+        "xor rdi, rdi"
+        "mov rsi, {len:q}"
+        "mov rdx, 3"
+        "mov r10, 34"
+        "mov r8, -1"
+        "xor r9, r9"
+        "syscall"
+        "mov {ret:q}, rax"
+    }
+    return ret;
+}
+
+func round_up(value: i64, align: i64) -> i64 {
+    if (align <= 1) {
+        return value;
+    }
+    var rem: i64 = value % align;
+    if (rem == 0) {
+        return value;
+    }
+    return value + (align - rem);
+}
+
+// One block from the current arena, or a fresh arena when it does not fit.
+// A request above the 1 GiB cap is refused without touching the kernel.
+func allocate(size: i64, align: i64) -> *void {
+    if (size < 0 || size > MAX_TOTAL_BYTES) {
+        return nilPtr;
+    }
+    var step: i64 = align;
+    if (step < 8) {
+        step = 8;
+    }
+    var start: i64 = round_up(used, step);
+    var end: i64 = start + size;
+    if (arena == nilPtr || end > capacity) {
+        var need: i64 = ARENA_BYTES;
+        var wanted: i64 = size + step;
+        if (wanted > need) {
+            need = wanted;
+        }
+        if (need < 0 || mapped_total > MAX_TOTAL_BYTES - need) {
+            return nilPtr;
+        }
+        var mapped: i64 = raw_mmap(need);
+        if (mapped <= 0) {
+            return nilPtr;
+        }
+        arena = mapped as *u8;
+        used = 0;
+        capacity = need;
+        mapped_total = mapped_total + need;
+        start = 0;
+        end = size;
+    }
+    used = end;
+    return (arena + start) as *void;
+}
+
 export func init_heap() {
 }
 
-// `free` is re-exported through the prelude import above: a wrapper defined
-// here would resolve its own name and recurse instead of reaching the
-// prelude binding. It remains part of the std.alloc surface.
-
 export func malloc(size: i64) -> *void {
-    return alloc(size, 8);
+    return allocate(size, 8);
 }
 
-// Out-of-memory policy: `vm error: out of memory` on stderr, exit 2 —
-// the same line and code the VM reports for host-side OOM, so all three
-// backends agree byte-for-byte. Self-contained asm (no std.io import):
-// the allocator sits below I/O in the layering.
+// A bump allocator cannot reclaim an earlier block. Keeping the name makes
+// the test-library surface explicit rather than silently leaking.
+export func free(ptr: *void) {
+}
+
+export func operator new(size: i64, align: i64) -> *void {
+    return allocate(size, align);
+}
+
+export func operator delete(ptr: *void) -> void {
+}
+
+// Out-of-memory policy: `vm error: out of memory` on stderr, exit 2.
+// Self-contained asm (no std.io import): the allocator sits below I/O in
+// the layering.
 export func oom() {
     var msg: string = "vm error: out of memory\n";
     var ptr: *u8 = &msg[0] as *u8;

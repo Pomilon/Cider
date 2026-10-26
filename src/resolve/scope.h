@@ -38,7 +38,6 @@ struct Decl {
     DeclId id;
     const Scope* scope = nullptr;
     Position pos{"", 1, 1};
-    bool isPrelude = false;
     // UEFI only: the firmware-owned globals image_handle and system_table.
     // They use their bare spelling as the link symbol.
     bool isTargetGlobal = false;

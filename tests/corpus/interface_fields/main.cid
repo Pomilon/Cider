@@ -1,3 +1,4 @@
+from std.alloc import operator new, operator delete, malloc;
 // CIDER-BUG-069: interface-typed struct/class fields and array elements are
 // 16-byte fat pointers (data + vtable), exactly like interface variables
 // (CIDER-BUG-054). They must be sized as 16 bytes, store the fat pointer on
@@ -140,7 +141,7 @@ func main() -> int {
   if (b.shape.kind() != 1) { return 32; }
 
   // --- class interface field (heap object) ---
-  var bp: *Box = alloc(sizeof(Box), 8) as *Box;
+  var bp: *Box = malloc(sizeof(Box)) as *Box;
   (*bp).id = 31;
   (*bp).tail = 33;
   (*bp).shape = r;

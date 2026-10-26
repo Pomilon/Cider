@@ -1,3 +1,4 @@
+from std.alloc import operator new, operator delete;
 // CIDER-BUG-123: a base class in another module still takes part in the
 // constructor/destructor chain, and both mangle with THIS module's name
 // (the same module rule as every other class method, CID-020/021).

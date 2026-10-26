@@ -1,3 +1,4 @@
+from std.alloc import operator new, operator delete;
 // Cross-module alias targets for CIDER-BUG-125: the alias `Alias2` is
 // exported, its target `XClass` is not, and the class destructor mangles under
 // this defining module. A delete through the alias in the importing file must

@@ -1,3 +1,4 @@
+from std.alloc import operator new, operator delete;
 // CIDER-BUG-051 regression: a template body must clone every expression and
 // statement form a normal function body accepts. Before the fix the cloner
 // returned nullptr for `new`, list/table/struct/slice/interpolated/closure

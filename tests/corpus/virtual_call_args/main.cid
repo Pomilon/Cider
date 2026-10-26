@@ -1,3 +1,4 @@
+from std.alloc import operator new, operator delete;
 // CIDER-BUG-234 regression: VIRTUAL_CALL argument pushes must go through
 // pushArg, exactly like every other call site. The emitter pushed
 // `objPtr` and `getOperand(args[i])` raw, so a virtual-method argument

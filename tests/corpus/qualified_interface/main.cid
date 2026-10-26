@@ -1,3 +1,4 @@
+from std.alloc import malloc;
 // CIDER-BUG-070: module-qualified interface types in every declaration and
 // dispatch position that accepts an unqualified interface: local variable,
 // assignment/reassignment (fat-pointer store), method dispatch before and
@@ -66,7 +67,7 @@ func main() -> int {
   var rp: *lib.Rect = &rect;
   sh = rp;
   if (sh.area() != 10) { return 8; }
-  var hp: *lib.Rect = alloc(sizeof(lib.Rect), 8) as *lib.Rect;
+  var hp: *lib.Rect = malloc(sizeof(lib.Rect)) as *lib.Rect;
   (*hp).w = 3;
   (*hp).h = 4;
   sh = hp;
@@ -96,7 +97,7 @@ func main() -> int {
   if (b.shape.kind() != 1) { return 21; }
   if (b.id != 21) { return 22; }
   if (b.tail != 23) { return 23; }
-  var bp: *Box = alloc(sizeof(Box), 8) as *Box;
+  var bp: *Box = malloc(sizeof(Box)) as *Box;
   (*bp).id = 31;
   (*bp).tail = 33;
   (*bp).shape = sq;
