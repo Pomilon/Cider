@@ -43,13 +43,14 @@ struct EmitResult {
 
 // Emits Intel-syntax assembly for one module on one target. The text is a pure
 // function of the module: no timestamps, no working directories, no absolute
-// paths — gate L5.
-EmitResult emitNative(const ir::Module& module);
+// paths — gate L5. `requireEntry` is false for a `--no-entry` module object:
+// such a module is a library fragment with no process entry of its own.
+EmitResult emitNative(const ir::Module& module, bool requireEntry = true);
 
 // The same, naming the target. Native is the implemented emitter; every other
 // kind returns its own diagnostic, because a backend that does not exist must
 // say which backend is missing rather than emit the wrong one.
-EmitResult emit(const ir::Module& module, Target kind);
+EmitResult emit(const ir::Module& module, Target kind, bool requireEntry = true);
 
 }  // namespace codegen
 }  // namespace cider

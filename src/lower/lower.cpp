@@ -327,6 +327,44 @@ bool Lowerer::lowerInto(const std::string& name, Program& program) {
     return checked && !failed_;
 }
 
+void Lowerer::declareExternalGlobals(const std::vector<std::string>& modules) {
+    // A split-module object lowers only its own definitions. Its body may
+    // still read or write a global another object defines, so bind that name
+    // here as an undefined reference. The label is the same module-mangled
+    // label the whole-program lowering produces; isExtern records that this
+    // binding owns no image.
+    for (const std::string& module : modules) {
+        Program* program = resolver_.programOf(module);
+        const resolve::Scope* scope = resolver_.scopeOf(module);
+        if (program == nullptr || scope == nullptr) {
+            continue;
+        }
+        for (const std::unique_ptr<VarDecl>& global : program->globals) {
+            const resolve::Decl* decl = resolver_.lookup(scope, global->name);
+            if (decl == nullptr || decl->type.isError()) {
+                continue;
+            }
+            bool present = false;
+            for (const GlobalBinding& have : globals_) {
+                if (have.name == global->name && have.module == module) {
+                    present = true;
+                    break;
+                }
+            }
+            if (present) {
+                continue;
+            }
+            GlobalBinding out;
+            out.name = global->name;
+            out.label = globalLabel(module, global->name);
+            out.module = module;
+            out.type = decl->type;
+            out.isExtern = true;
+            globals_.push_back(std::move(out));
+        }
+    }
+}
+
 // --- Blocks and values ---------------------------------------------------------
 
 uint32_t Lowerer::emitBlock(Position pos) {
@@ -484,6 +522,10 @@ std::string Lowerer::emitClassVTable(DeclId concrete, Position pos) {
     if (classVtablesEmitted_.insert(label).second) {
         ir::Global table;
         table.label = label;
+        // Every object that constructs the class can mint this table. Weak
+        // linkage makes the linker choose one definition, so a vptr loaded
+        // in one object compares equal to the table another object names.
+        table.weak = true;
         table.type = TypeRef{ctx_.pointer(ctx_.basic(BasicKind::U8))};
         for (const std::string& name : resolver_.virtualNames(concrete)) {
             std::optional<DeclId> home = resolver_.methodHome(concrete, name);
@@ -574,6 +616,7 @@ std::string Lowerer::emitDestroyChain(DeclId declarer, Position pos) {
 
     ir::Function fn;
     fn.name = label;
+    fn.exportSymbol = false;
     TypeRef selfType{ctx_.pointer(ctx_.basic(BasicKind::U8))};
     Parameter self;
     self.type = selfType.type;
@@ -709,6 +752,7 @@ std::string Lowerer::emitDeinitNone(Position pos) {
 
     ir::Function fn;
     fn.name = label;
+    fn.exportSymbol = false;
     TypeRef selfType{ctx_.pointer(ctx_.basic(BasicKind::U8))};
     Parameter self;
     self.type = selfType.type;
@@ -766,6 +810,10 @@ std::string Lowerer::emitVTable(DeclId concrete, DeclId iface, Position pos) {
     }
     ir::Global table;
     table.label = label;
+    // Interface identity is this table's address: a downcast compares the
+    // fat pointer's vtable word with the symbol. Weak linkage keeps one
+    // chosen address across every object that materializes the same pair.
+    table.weak = true;
     table.type = TypeRef{ctx_.pointer(ctx_.basic(BasicKind::U8))};
     for (const std::string& name : resolver_.methodNames(iface)) {
         // The checker proved the concrete implements every method, so a
@@ -834,6 +882,7 @@ std::string Lowerer::emitIfaceAdapter(DeclId concrete, const std::string& method
 
     ir::Function fn;
     fn.name = hidden;
+    fn.exportSymbol = false;
     TypeRef dataPtr{ctx_.pointer(ctx_.basic(BasicKind::U8))};
     const Type* ret = sig.returnType() != nullptr ? sig.returnType() : ctx_.void_();
     std::vector<Parameter> combined;
@@ -2307,6 +2356,7 @@ void Lowerer::onGlobal(VarDecl& n) {
     globals_.push_back(binding);
     ir::Global global;
     global.label = binding.label;
+    global.exportSymbol = true;
     global.type = type;
     global.initial = binding.initial;
     global.initLabel = binding.initLabel;
@@ -2480,6 +2530,14 @@ void Lowerer::onSpecFunc(DeclId spec, const FuncDecl& spelling,
                     : "";
     emitSpec_ = spec;
     beginFuncFrame(link, sig, spelling.params, spelling.pos);
+    // A specialization is emitted by every split-module object that uses it.
+    // Weak linkage lets the linker keep one body, so a function-pointer
+    // value names one address in every object instead of one copy per
+    // object.
+    if (function_ != nullptr) {
+        function_->exportSymbol = true;
+        function_->weak = true;
+    }
     if (failed_) {
         emitHome_.clear();
         emitSpec_.reset();
@@ -2756,6 +2814,7 @@ void Lowerer::onFuncLit(FuncLit& lit, const std::vector<check::Captured>& captur
 
     ir::Function fn;
     fn.name = hidden;
+    fn.exportSymbol = false;
     TypeRef capPtr{ctx_.pointer(ctx_.basic(BasicKind::U8))};
     std::vector<Parameter> combined;
     Parameter receiver;
@@ -6175,6 +6234,7 @@ std::string Lowerer::forwardFunction(const std::string& link, const Signature& s
 
     ir::Function fn;
     fn.name = hidden;
+    fn.exportSymbol = false;
     TypeRef capPtr{ctx_.pointer(ctx_.basic(BasicKind::U8))};
     std::vector<Parameter> combined;
     Parameter receiver;

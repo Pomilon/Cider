@@ -16,8 +16,12 @@
 namespace cider {
 namespace resolve {
 
-Resolver::Resolver(TypeContext& ctx, ModuleLoader load, target::Kind target)
-    : ctx_(ctx), load_(std::move(load)), target_(target) {
+Resolver::Resolver(TypeContext& ctx, ModuleLoader load, target::Kind target,
+                   bool mangleAll)
+    : ctx_(ctx),
+      load_(std::move(load)),
+      target_(target),
+      mangleAll_(mangleAll) {
     declareCoreTypes();
 }
 

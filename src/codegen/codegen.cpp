@@ -132,8 +132,8 @@ const char* setFor(ir::CmpOp cmp) {
 
 class Emitter {
 public:
-    Emitter(const ir::Module& module, Target target)
-        : module_(module), target_(target) {}
+    Emitter(const ir::Module& module, Target target, bool requireEntry = true)
+        : module_(module), target_(target), requireEntry_(requireEntry) {}
 
     EmitResult run() {
         out_ += ".intel_syntax noprefix\n.text\n";
@@ -146,8 +146,10 @@ public:
         // The validated entry point is the only process-level symbol the
         // emitter contributes. There is no helper archive and no hidden
         // runtime: every other symbol comes from the program or an explicit
-        // library the source imported.
-        if (!emitEntry()) {
+        // library the source imported. A `--no-entry` module object is a
+        // library fragment: it defines its own symbols and remains linkable,
+        // but it is not asked to provide the process entry.
+        if (requireEntry_ && !emitEntry()) {
             return EmitResult{false, "", error_, pos_};
         }
         if (!module_.globals.empty()) {
@@ -166,6 +168,11 @@ public:
                         out_ += ".section .bss\n";
                         inBss = true;
                         inData = false;
+                    }
+                    if (global.weak) {
+                        out_ += "  .weak " + global.label + "\n";
+                    } else if (global.exportSymbol) {
+                        out_ += "  .globl " + global.label + "\n";
                     }
                     out_ += "  .balign " +
                             std::to_string(global.alignment) + "\n";
@@ -187,6 +194,11 @@ public:
                     out_ += ".data\n";
                     inData = true;
                     inBss = false;
+                }
+                if (global.weak) {
+                    out_ += "  .weak " + global.label + "\n";
+                } else if (global.exportSymbol) {
+                    out_ += "  .globl " + global.label + "\n";
                 }
                 out_ += global.label + ":\n";
                 if (!global.initLabels.empty()) {
@@ -607,7 +619,11 @@ private:
             span += layout::kSizePointer;
         }
 
-        out_ += ".globl " + asmSafeName(fn.name) + "\n";
+        if (fn.weak) {
+            out_ += ".weak " + asmSafeName(fn.name) + "\n";
+        } else if (fn.exportSymbol) {
+            out_ += ".globl " + asmSafeName(fn.name) + "\n";
+        }
         out_ += asmSafeName(fn.name) + ":\n";
         out_ += "  push rbp\n";
         out_ += "  mov rbp, rsp\n";
@@ -1803,6 +1819,7 @@ private:
 
     const ir::Module& module_;
     Target target_;
+    bool requireEntry_ = true;
     // Alloca-result ids in the function being emitted: the only ids whose
     // address is slot storage (rsp+id*8). Any other id in an addressBase is
     // a computed address and dereferences.
@@ -1826,21 +1843,21 @@ const char* targetName(Target kind) {
     return target::info(kind).name;
 }
 
-EmitResult emitNative(const ir::Module& module) {
-    Emitter emitter(module, Target::Native);
+EmitResult emitNative(const ir::Module& module, bool requireEntry) {
+    Emitter emitter(module, Target::Native, requireEntry);
     return emitter.run();
 }
 
-EmitResult emit(const ir::Module& module, Target kind) {
+EmitResult emit(const ir::Module& module, Target kind, bool requireEntry) {
     switch (kind) {
         case Target::Native:
-            return emitNative(module);
+            return emitNative(module, requireEntry);
         case Target::Pomeos: {
-            Emitter emitter(module, Target::Pomeos);
+            Emitter emitter(module, Target::Pomeos, requireEntry);
             return emitter.run();
         }
         case Target::Uefi: {
-            Emitter emitter(module, Target::Uefi);
+            Emitter emitter(module, Target::Uefi, requireEntry);
             return emitter.run();
         }
         case Target::Vm:

@@ -92,6 +92,11 @@ public:
     // first, entry last, so link names resolve in one IR module and rodata
     // labels never collide. Returns false when this module failed.
     bool lowerInto(const std::string& name, Program& program);
+    // Registers another module's globals as linker-owned references before a
+    // split-module object lowers. References become undefined relocations
+    // against the defining object; no storage and no duplicate definition is
+    // emitted here.
+    void declareExternalGlobals(const std::vector<std::string>& modules);
     // Moves the accumulated module out. Null when nothing lowered or the
     // finalizer pass refused (the driver prints every layer's errors on a
     // null module, so a late refusal is not silent).

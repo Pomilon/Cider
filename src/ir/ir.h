@@ -226,6 +226,19 @@ struct Function {
     // it once, next to the slots it already allocates.
     std::vector<IRType> paramClasses;
     bool isExtern = false;
+    // True for a source definition whose symbol other objects may reference.
+    // Generated helpers (closures, adapters, destructor chains, vtable
+    // functions and generic specializations) are local to the object that
+    // emitted them unless marked weak below: every module that needs one
+    // emits its own copy, so a split-module link never collides on a
+    // compiler-minted name.
+    bool exportSymbol = true;
+    // A compiler-minted symbol that denotes one semantic entity in every
+    // object (a generic specialization). `.weak` lets the linker keep one
+    // definition and resolve every object's reference to it, preserving the
+    // address identity that function-pointer comparison and interface
+    // dispatch rely on.
+    bool weak = false;
     std::vector<Block> blocks;
     Position loc{"", 1, 1};
 };
@@ -266,6 +279,12 @@ struct Global {
     // one), and the image path keeps its old round-to-eight extent.
     int64_t sizeBytes = layout::kSizeUnknown;
     int64_t alignment = layout::kAlignUnknown;
+    // True only for a source global. Compiler-minted storage (vtables and
+    // their class counterparts) stays local to the object that emitted it,
+    // unless marked weak: a repeated vtable must resolve to one address in
+    // every object because interface downcasts compare that address.
+    bool exportSymbol = false;
+    bool weak = false;
 };
 
 // Read-only bytes: a string literal's content, or any future constant blob.

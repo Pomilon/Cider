@@ -206,8 +206,9 @@ add_test(NAME codegen COMMAND codegen_test)
 
 # --- The driver --------------------------------------------------------------------
 #
-# OUTPUT.md section 1: check, compile, ir and run. link and bundle refuse by
-# name. The top-level catch maps every failure to a diagnostic (gate L6).
+# OUTPUT.md section 1: check, compile, ir, run and link. compile -c emits
+# ELF64 objects; link drives GNU ld. bundle refuses by name. The top-level
+# catch maps every failure to a diagnostic (gate L6).
 
 add_library(cider_driver STATIC src/driver/driver.cpp)
 target_link_libraries(cider_driver PUBLIC cider_codegen cider_vm cider_opt cider_lower cider_check cider_parse cider_lexer)
@@ -272,6 +273,17 @@ add_test(NAME v4_pomeos
                  ${CMAKE_SOURCE_DIR}/tests/v4/pomeos_target_test.py)
 set_tests_properties(v4_pomeos PROPERTIES
   ENVIRONMENT "CIDER_BIN=${CMAKE_BINARY_DIR}/cider")
+
+# Separate object emission and linking: `compile -c` writes a real ELF64
+# ET_REL object with GNU as, and `link` runs ld -nostdlib on the objects.
+# Split-module objects keep imported definitions external, while compiler
+# minted generic bodies stay local so two objects may use one specialization.
+add_test(NAME v4_object_link
+         COMMAND ${Python3_EXECUTABLE}
+                 ${CMAKE_SOURCE_DIR}/tests/v4/object_link_test.py)
+set_tests_properties(v4_object_link PROPERTIES
+  ENVIRONMENT "CIDER_BIN=${CMAKE_BINARY_DIR}/cider"
+  SKIP_RETURN_CODE 77)
 
 # A large all-zero aggregate is storage, not an image: `.bss` plus one
 # `.zero` of the declared extent, with ELF size/alignment metadata. Non-zero

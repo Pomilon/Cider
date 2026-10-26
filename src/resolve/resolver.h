@@ -44,8 +44,14 @@ public:
     using ModuleLoader =
         std::function<std::unique_ptr<Program>(const std::string& name)>;
 
+    // `mangleAll` compiles a source as a named non-entry module: no module is
+    // the bare entry module, so every definition (including this file's)
+    // links under its module name. The entry module's bare spelling is what
+    // the split-module object workflow keeps consistent with a whole-program
+    // compile's cross-module references.
     explicit Resolver(TypeContext& ctx, ModuleLoader load = nullptr,
-                      target::Kind target = target::Kind::Native);
+                      target::Kind target = target::Kind::Native,
+                      bool mangleAll = false);
 
     // Runs the header pass over one program as `module`, resolving its
     // imports recursively first. False when any diagnostic was recorded, in
@@ -57,6 +63,9 @@ public:
     // The entry module's name: definitions here keep their spellings, and
     // every other module's link names mangle under their own.
     std::string entryModule() const {
+        if (mangleAll_) {
+            return std::string();
+        }
         return entry_ != nullptr ? entry_->module : std::string();
     }
     // Every resolved module in the order it started: the entry first, then
@@ -382,6 +391,7 @@ private:
     TypeContext& ctx_;
     ModuleLoader load_;
     target::Kind target_ = target::Kind::Native;
+    bool mangleAll_ = false;
     const Scope* coreScope_ = nullptr;
     Decl* coreResult_ = nullptr;
     Decl* coreAllocError_ = nullptr;
