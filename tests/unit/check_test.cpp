@@ -1089,6 +1089,59 @@ void testAsm() {
     check(named, "the asm refusal names uefi");
 }
 
+// v4's native entry is `func _start() -> void`. `main` is ordinary.
+void testEntry() {
+    std::printf("source entry\n");
+    Checked good = check("func _start() -> void { }\n");
+    check(good.ok, "a source _start checks: " + good.stage);
+    if (good.ok) {
+        check(good.checker->checkEntry(*good.program),
+              "the native entry shape is accepted");
+    }
+
+    Checked missing = check("func main() -> int { return 0; }\n");
+    check(missing.ok, "main checks as an ordinary function: " + missing.stage);
+    if (missing.ok) {
+        check(!missing.checker->checkEntry(*missing.program),
+              "main alone is not an entry");
+        bool named = false;
+        for (const cider::check::CheckError& error : missing.checker->errors()) {
+            if (error.message.find("_start") != std::string::npos) {
+                named = true;
+            }
+        }
+        check(named, "the missing-entry diagnostic names _start");
+    }
+
+    Checked params = check("func _start(x: int) -> void { }\n");
+    check(params.ok, "a wrong _start still checks: " + params.stage);
+    if (params.ok) {
+        check(!params.checker->checkEntry(*params.program),
+              "_start parameters are rejected");
+        bool named = false;
+        for (const cider::check::CheckError& error : params.checker->errors()) {
+            if (error.message.find("takes no parameters") != std::string::npos) {
+                named = true;
+            }
+        }
+        check(named, "the parameter diagnostic names the rule");
+    }
+
+    Checked ret = check("func _start() -> int { return 0; }\n");
+    check(ret.ok, "a value-returning _start still checks: " + ret.stage);
+    if (ret.ok) {
+        check(!ret.checker->checkEntry(*ret.program),
+              "_start returning int is rejected");
+        bool named = false;
+        for (const cider::check::CheckError& error : ret.checker->errors()) {
+            if (error.message.find("must return void") != std::string::npos) {
+                named = true;
+            }
+        }
+        check(named, "the return diagnostic names the rule");
+    }
+}
+
 void testTargetGlobals() {
     std::printf("target globals\n");
     Checked uefi = checkAs(
@@ -2825,6 +2878,7 @@ int main() {
     testRepeatZero();
     testSliceCopy();
     testAsm();
+    testEntry();
     testTargetGlobals();
     testDelete();
     testOverrides();

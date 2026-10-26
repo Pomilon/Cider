@@ -15,6 +15,8 @@
 
 #include "driver/driver.h"
 
+#include "entry_fixture.h"
+
 namespace {
 
 int failures = 0;
@@ -30,13 +32,28 @@ void check(bool holds, const std::string& what) {
     }
 }
 
-std::string writeTemp(const std::string& text) {
+std::string writeTemp(const std::string& text, bool entryFixture = true) {
+    const std::string source =
+        entryFixture ? cider_test::withMainEntry(text) : text;
     char path[] = "/tmp/cider_driver_XXXXXX.cid";
     int fd = mkstemps(path, 4);
     FILE* file = fdopen(fd, "w");
-    fwrite(text.data(), 1, text.size(), file);
+    fwrite(source.data(), 1, source.size(), file);
     fclose(file);
     return path;
+}
+
+// Sibling-module tests write their entry file by hand. The fixture text is
+// appended at the source level, exactly as writeTemp does, so the compiler
+// never has to synthesize an entry.
+void appendMainEntry(const std::string& path) {
+    FILE* file = fopen(path.c_str(), "a");
+    if (file == nullptr) {
+        return;
+    }
+    const char* fixture = cider_test::mainEntryFixture();
+    fwrite(fixture, 1, strlen(fixture), file);
+    fclose(file);
 }
 
 struct Result {
@@ -44,7 +61,6 @@ struct Result {
     std::string out;
     std::string err;
 };
-
 Result run(const std::vector<std::string>& args) {
     Result result;
     result.code = cider::driver::runDriver(args, result.out, result.err);
@@ -142,6 +158,7 @@ void testImportAlias() {
         "}\n";
     fwrite(mainText, 1, strlen(mainText), mainFile);
     fclose(mainFile);
+    appendMainEntry(main);
     Result ok = run({"check", main});
     check(ok.code == 0, "a from-imported alias checks: " + ok.err);
     Result ran = run({"run", main});
@@ -182,6 +199,7 @@ void testModFnValue() {
         "}\n";
     fwrite(mainText, 1, strlen(mainText), mainFile);
     fclose(mainFile);
+    appendMainEntry(main);
     Result ok = run({"check", main});
     check(ok.code == 0, "a module function value checks: " + ok.err);
     Result ran = run({"run", main});
@@ -204,6 +222,7 @@ void testImports() {
     fwrite("import da;\nfunc main() -> int { return da.aval(); }\n", 1, 51,
            mainFile);
     fclose(mainFile);
+    appendMainEntry(main);
     Result ok = run({"check", main});
     check(ok.code == 0, "sibling modules check: " + ok.err);
     Result ran = run({"run", main});
@@ -224,6 +243,7 @@ void testImports() {
         "}\n";
     fwrite(tymainText, 1, strlen(tymainText), tymainFile);
     fclose(tymainFile);
+    appendMainEntry(tymain);
     Result tyCheck = run({"check", tymain});
     check(tyCheck.code == 0, "a dot-qualified alias checks: " + tyCheck.err);
     Result tyRun = run({"run", tymain});
@@ -283,6 +303,7 @@ void testImportGlobal() {
         "}\n";
     fwrite(mainText, 1, strlen(mainText), mainFile);
     fclose(mainFile);
+    appendMainEntry(main);
     Result ok = run({"check", main});
     check(ok.code == 0, "an imported global checks: " + ok.err);
     Result ran = run({"run", main});
@@ -316,6 +337,7 @@ void testImportQualifiedGlobal() {
         "}\n";
     fwrite(mainText, 1, strlen(mainText), mainFile);
     fclose(mainFile);
+    appendMainEntry(main);
     Result ok = run({"check", main});
     check(ok.code == 0, "a qualified global checks: " + ok.err);
     Result ran = run({"run", main});
@@ -333,6 +355,7 @@ void testImportQualifiedGlobal() {
         "}\n";
     fwrite(main2Text, 1, strlen(main2Text), main2File);
     fclose(main2File);
+    appendMainEntry(main2);
     Result ok2 = run({"check", main2});
     check(ok2.code == 0, "a bare qualified read checks: " + ok2.err);
     Result ran2 = run({"run", main2});
@@ -360,6 +383,7 @@ void testModuleConst() {
         "}\n";
     fwrite(mainText, 1, strlen(mainText), mainFile);
     fclose(mainFile);
+    appendMainEntry(main);
     Result ran = run({"run", main});
     check(ran.code == 12,
           "a module const reads back: " + ran.err);
@@ -372,6 +396,7 @@ void testModuleConst() {
         "const C: int = 55;\n";
     fwrite(fwdText, 1, strlen(fwdText), fwdFile);
     fclose(fwdFile);
+    appendMainEntry(fwd);
     Result fwdRan = run({"run", fwd});
     check(fwdRan.code == 55,
           "a forward const read lowers: " + fwdRan.err);
@@ -385,6 +410,7 @@ void testModuleConst() {
         "const C: int = 5;\n";
     fwrite(fwdcText, 1, strlen(fwdcText), fwdcFile);
     fclose(fwdcFile);
+    appendMainEntry(fwdc);
     Result fwdcRan = run({"run", fwdc});
     check(fwdcRan.code != 0,
           "a forward compound const still refuses: " + fwdcRan.err);
@@ -414,6 +440,7 @@ void testQualifiedConst() {
         "func main() -> int { return g * 2; }\n";
     fwrite(mainText, 1, strlen(mainText), mainFile);
     fclose(mainFile);
+    appendMainEntry(main);
     Result ran = run({"run", main});
     check(ran.code == 22,
           "a qualified const folds in a global: " + ran.err);
@@ -448,6 +475,7 @@ void testLibSearch() {
     fwrite("import x.y;\nfunc main() -> int { return y.mval(); }\n", 1, 52,
            mainFile);
     fclose(mainFile);
+    appendMainEntry(main);
     const char* saved = getenv("CIDER_LIB");
     std::string keep = saved != nullptr ? saved : "";
     setenv("CIDER_LIB", lib, 1);
@@ -503,6 +531,7 @@ void testSubdirImport() {
         "}\n";
     fwrite(mainText, 1, strlen(mainText), mainFile);
     fclose(mainFile);
+    appendMainEntry(main);
     Result ok = run({"check", main});
     check(ok.code == 0, "a sibling module checks: " + ok.err);
     Result ran = run({"run", main});
@@ -534,6 +563,7 @@ void testModuleAutodiscovery() {
         "func main() -> int { return lib.answer(); }\n";
     fwrite(mainText, 1, strlen(mainText), mainFile);
     fclose(mainFile);
+    appendMainEntry(main);
 
     char previous[4096];
     check(getcwd(previous, sizeof previous) != nullptr,
@@ -584,7 +614,7 @@ void testNativeTargetAliases() {
 // it does not recognize.
 void testKnownTargetsReachFrontEnd() {
     std::printf("known targets reach the front end\n");
-    std::string src = writeTemp("func main() -> int { return 0; }\n");
+    std::string src = writeTemp("func main() -> int { return 0; }\n", false);
     Result uefiCheck = run({"check", "--target", "uefi", src});
     check(uefiCheck.code == 0,
           "check --target uefi reaches the front end: " + uefiCheck.err);

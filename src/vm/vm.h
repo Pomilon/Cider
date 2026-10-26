@@ -35,12 +35,11 @@ struct VmResult {
     Position pos{"", 1, 1};
 };
 
-// Interprets main (or _start) of one lowered module, with the bytes a
-// read from standard input will answer. Program arguments default to one
-// empty string, so a bare run binds argc=1 with a non-nil argv[0] the way
-// a bare native exec does; pass explicit strings to bind those instead.
-VmResult run(const ir::Module& module, const std::string& pendingInput,
-             const std::vector<std::string>& argv = {});
+// Interprets the source-defined `_start` of one lowered module, with the
+// bytes a read from standard input will answer. v4 has no automatic main
+// call or argument binding: `_start` takes no parameters, exactly as the
+// native entry does.
+VmResult run(const ir::Module& module, const std::string& pendingInput);
 
 }  // namespace vm
 }  // namespace cider

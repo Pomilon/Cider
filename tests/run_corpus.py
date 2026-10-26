@@ -19,6 +19,7 @@ rather than a silent mismatch.
 """
 import json
 import os
+import shutil
 import subprocess
 import sys
 
@@ -28,6 +29,8 @@ CIDER = os.environ.get(
     "CIDER_BIN", os.path.join(ROOT, "build", "v3", "cider"))
 LEGS = ["native", "vm-unopt", "vm-opt"]
 TRAPPED = "<trapped by signal>"
+sys.path.insert(0, os.path.join(ROOT, "tests"))
+from source_entry import wrap_file  # noqa: E402
 def outcome_of(proc):
     if proc.returncode is not None and proc.returncode < 0:
         return (TRAPPED, proc.stdout, proc.returncode)
@@ -89,13 +92,21 @@ def main():
         if os.path.exists(os.path.join(d, "input.txt")):
             with open(os.path.join(d, "input.txt")) as fh:
                 stdin_data = fh.read()
+        # v4 requires a source-defined entry. Fixtures that still express
+        # `main` get a real Cider `_start` wrapper in a copied tree, so the
+        # compiler never injects one and sibling imports still resolve.
+        entry_path, scratch = wrap_file(os.path.join(d, "main.cid"))
         out = {}
         err = {}
         code = {}
-        for leg in LEGS:
-            got = run_leg(os.path.join(d, "main.cid"), stdin_data, leg,
-                          expected.get("limit_kb"))
-            out[leg], err[leg], code[leg] = got
+        try:
+            for leg in LEGS:
+                got = run_leg(entry_path, stdin_data, leg,
+                              expected.get("limit_kb"))
+                out[leg], err[leg], code[leg] = got
+        finally:
+            if scratch is not None:
+                shutil.rmtree(scratch, ignore_errors=True)
         outcomes = dict((leg, (out[leg], err[leg], code[leg])) for leg in LEGS)
         # Every leg answers for itself: a VM refusal reads as that leg's
         # own loud failure, so no leg is carved out of the verdict below.

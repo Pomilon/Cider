@@ -374,80 +374,39 @@ private:
         out_ += ok + ":\n";
     }
 
-    // The process entry. A program names its entry by defining `main` or
-    // `_start` (FEATURES.md §10); the kernel enters at `_start` either way.
-    // When only `main` exists this trampoline bridges the two worlds: it
-    // reads argc/argv where the kernel left them, calls main at the ABI's
-    // register positions, and exits with main's answer. No crt0 exists in
-    // the link, so this text is the only thing between the kernel and the
-    // program.
+    // The process entry. v4 has no startup shim: the program defines
+    // `func _start() -> void` itself and the kernel enters there. The
+    // compiler only validates the source signature; it emits no trampoline,
+    // no automatic main call, and no automatic exit.
     bool emitEntry() {
         if (target_ == Target::Uefi) {
             return emitUefiEntry();
         }
-        const ir::Function* mainFn = nullptr;
         const ir::Function* startFn = nullptr;
         for (const ir::Function& fn : module_.functions) {
-            if (fn.name == "main") {
-                mainFn = &fn;
-            }
             if (fn.name == "_start") {
                 startFn = &fn;
+                break;
             }
         }
-        if (mainFn != nullptr && startFn != nullptr) {
-            refuse(mainFn->loc, "the program defines both main and _start");
+        if (startFn == nullptr) {
+            refuse(Position{"", 1, 1},
+                   "no entry function: define func _start() -> void");
             return false;
         }
-        if (mainFn == nullptr && startFn == nullptr) {
-            refuse(Position{"", 1, 1}, "no entry function: define main or _start");
+        if (!startFn->signature.parameters().empty()) {
+            refuse(startFn->loc, "_start takes no parameters");
             return false;
         }
-        if (startFn != nullptr) {
-            if (!startFn->signature.parameters().empty()) {
-                refuse(startFn->loc, "_start takes no parameters");
-                return false;
-            }
-            return true;
-        }
-        uint64_t arity = mainFn->signature.arity();
-        if (arity > 2) {
-            refuse(mainFn->loc, "main takes at most two parameters");
+        const Type* ret = startFn->signature.returnType();
+        if (ret == nullptr || ret->kind() != Kind::Void) {
+            refuse(startFn->loc, "_start must return void");
             return false;
         }
-        const Type* ret = mainFn->signature.returnType();
-        if (ret == nullptr || ret->kind() != Kind::Basic ||
-            (*ret->basic() != BasicKind::I32 && *ret->basic() != BasicKind::I64)) {
-            refuse(mainFn->loc, "main must return int");
+        if (startFn->signature.abi() != Abi::SysV) {
+            refuse(startFn->loc, "_start must use the sysv calling convention");
             return false;
         }
-        // 8.4: the shim is main's caller, so it follows main's convention:
-        // argc and argv answer the first two argument words of that row.
-        const bool ms = mainFn->signature.abi() == Abi::MsAbi;
-        out_ += ".globl _start\n";
-        out_ += "_start:\n";
-        out_ += "  xor ebp, ebp\n";
-        if (arity >= 1) {
-            // argc, where the kernel left it.
-            out_ += std::string(ms ? "  mov rcx, [rsp]\n" : "  mov rdi, [rsp]\n");
-        }
-        if (arity >= 2) {
-            // argv, the array after argc.
-            out_ += std::string(ms ? "  lea rdx, [rsp + 8]\n"
-                                   : "  lea rsi, [rsp + 8]\n");
-        }
-        if (ms) {
-            out_ += "  sub rsp, " + std::to_string(kShadowBytes) + "\n";
-        }
-        out_ += "  call main\n";
-        if (ms) {
-            out_ += "  add rsp, " + std::to_string(kShadowBytes) + "\n";
-        }
-        // The entry shim is transitional v3 behavior; v4 removes it.
-        // There is no automatic finalizer call.
-        out_ += "  mov rdi, rax\n";
-        out_ += "  mov eax, 60\n";               // exit(main's answer)
-        out_ += "  syscall\n";
         return true;
     }
 

@@ -761,8 +761,60 @@ const FuncDecl* Checker::funcSpelling(const std::string& module,
     return found == funcs_.end() ? nullptr : found->second;
 }
 
-bool Checker::checkProgram(Program& program, const std::string& module) {
-    module_ = module;
+// v4's entry is source-defined. The driver owns the command-level decision
+// to require one; this method owns the target shape so `check` and `compile`
+// cannot disagree about what a valid entry is.
+bool Checker::checkEntry(Program& program) {
+    // UEFI entry validation lands with the source-defined UEFI entry slice;
+    // until then its emitter owns the legacy form.
+    if (target_ != target::Kind::Native) {
+        return true;
+    }
+    const FuncDecl* entry = nullptr;
+    for (const std::unique_ptr<Decl>& decl : program.decls) {
+        const Decl* node = decl.get();
+        if (const auto* exported = dynamic_cast<const ExportDecl*>(node)) {
+            node = exported->decl.get();
+        }
+        const auto* fn = dynamic_cast<const FuncDecl*>(node);
+        if (fn != nullptr && fn->name == "_start") {
+            entry = fn;
+            break;
+        }
+    }
+    if (entry == nullptr) {
+        fail(program.pos, "no entry function: define func _start() -> void");
+        return false;
+    }
+    if (!entry->typeParams.empty()) {
+        fail(entry->pos, "_start cannot be generic");
+        return false;
+    }
+    if (!entry->params.empty()) {
+        fail(entry->pos, "_start takes no parameters");
+        return false;
+    }
+    const resolve::Decl* binding =
+        resolver_.moduleScope() != nullptr
+            ? resolver_.lookup(resolver_.moduleScope(), "_start")
+            : nullptr;
+    if (binding == nullptr || binding->kind != resolve::DeclKind::Func) {
+        fail(entry->pos, "checker bug: _start was never resolved");
+        return false;
+    }
+    const Type* ret = binding->sig.returnType();
+    if (ret == nullptr || ret->kind() != Kind::Void) {
+        fail(entry->pos, "_start must return void");
+        return false;
+    }
+    if (binding->sig.abi() != Abi::SysV) {
+        fail(entry->pos, "_start must use the sysv calling convention");
+        return false;
+    }
+    return true;
+}
+
+bool Checker::checkProgram(Program& program, const std::string& module) {    module_ = module;
     moduleScope_ = resolver_.scopeOf(module);
     if (moduleScope_ == nullptr) {
         fail(program.pos, "checker bug: '" + module + "' was never resolved");

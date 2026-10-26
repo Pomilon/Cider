@@ -36,7 +36,7 @@ void testNative() {
     check(info.kind == Kind::Native, "kind is native");
     check(std::string(info.name) == "native", "name is native");
     check(info.abi == Abi::SysV, "ABI is SysV");
-    check(std::string(info.entry) == "main", "entry is main");
+    check(std::string(info.entry) == "_start", "entry is _start");
     check(info.output == Output::Asm, "output is assembly");
     check(info.allowsAsm, "inline assembly is allowed");
     check(info.nullFaults, "address zero is unmapped, so a null access faults");
@@ -72,6 +72,7 @@ void testVm() {
     check(info.kind == Kind::Vm, "kind is vm");
     check(std::string(info.name) == "vm", "name is vm");
     check(info.output == Output::Interpreted, "output is interpreted");
+    check(std::string(info.entry) == "_start", "entry is _start");
     check(info.allowsAsm, "asm statements are interpreted where supported");
 }
 

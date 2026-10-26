@@ -206,7 +206,8 @@ std::vector<std::string> moduleRoots(const std::string& entryDir) {
 void faultAlloc(const char* stage);
 
 bool runFront(const std::string& file, const std::string& text, Pipeline& pipe,
-              bool noOpt, target::Kind targetKind, bool checks) {
+              bool noOpt, target::Kind targetKind, bool checks,
+              bool requireEntry) {
     pipe.file = file;
     pipe.types = std::make_unique<TypeContext>();
     // Imports load beside the entry file: `import da;` reads `<dir>/da.cid`
@@ -324,6 +325,15 @@ bool runFront(const std::string& file, const std::string& text, Pipeline& pipe,
     // diagnostics, no recorded types.
     checker.prescanProvenance(resolver.moduleOrder());
     faultAlloc("check");
+    // `check`, `compile`, and `run` promise a program, so each names a
+    // missing or wrong source-defined entry. `ir` may dump a partial module
+    // and stays lenient.
+    if (requireEntry && !checker.checkEntry(*pipe.program)) {
+        for (const check::CheckError& error : checker.errors()) {
+            pipe.diagnostic += at(error.pos) + ": " + error.message + "\n";
+        }
+        return false;
+    }
     // Every resolved module lowers into one IR module in resolve order, so
     // link names mangle under their own module and rodata labels never
     // collide. Emission order carries no semantics: calls resolve by link
@@ -556,7 +566,8 @@ int runDriver(const std::vector<std::string>& args, std::string& out, std::strin
         return 1;
     }
     Pipeline pipe;
-    if (!runFront(input, text, pipe, noOpt, targetKind, checks)) {
+    if (!runFront(input, text, pipe, noOpt, targetKind, checks,
+                  command != "ir")) {
         err = pipe.diagnostic;
         return 1;
     }

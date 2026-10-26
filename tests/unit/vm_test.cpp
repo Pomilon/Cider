@@ -1,14 +1,16 @@
 // vm_test.cpp — the interpreter answers without a toolchain.
 //
 // The first VM slice: source text lowers to an IR module, the interpreter
-// runs main, and the exit code is the program's answer. No assembler, no
-// linker, no fork. Both legs are reachable here: the unoptimised module the
-// lowerer produced, and the same module through the optimiser.
+// runs the source-defined `_start`, and the exit code is the program's
+// answer. No assembler, no linker, no fork. Both legs are reachable here:
+// the unoptimised module the lowerer produced, and the same module through
+// the optimiser.
 
 #include <cstdio>
 #include <string>
 
 #include "alloc_fixture.h"
+#include "entry_fixture.h"
 #include "check/checker.h"
 #include "lexer/lexer.h"
 #include "lower/lower.h"
@@ -39,10 +41,14 @@ struct Lowered {
     std::unique_ptr<cider::ir::Module> module;
 };
 
-Lowered lower(const std::string& text, bool checks = false) {
+Lowered lower(const std::string& text, bool checks = false,
+              bool entryFixture = true) {
     Lowered out;
     out.types = std::make_unique<cider::TypeContext>();
-    const std::string source = cider_test::withAllocationFixture(text);
+    std::string source = cider_test::withAllocationFixture(text);
+    if (entryFixture) {
+        source = cider_test::withMainEntry(source);
+    }
     cider::Lexer lexer("test.cid", source);
     std::vector<cider::Token> tokens = lexer.lex();
     if (!lexer.errors().empty()) {
@@ -528,30 +534,35 @@ void testFileSyscalls() {
     }
 }
 
-void testArgv() {
-    std::printf("argv\n");
-    Lowered ar = lower("func main(argc: i64, argv: **char) -> int {"
-                       " if (argv[0] == nilPtr) { return 7; }"
-                       " return argc as int; }\n");
-    check(ar.ok, "a parameterized main lowers: " + ar.stage);
-    cider::vm::VmResult arr = cider::vm::run(*ar.module, "");
-    check(arr.ok, "the interpreter binds argv by default: " + arr.error);
-    if (arr.ok) {
-        check(arr.exitCode == 1, "argc is 1 with no program args");
-    }
-    // Explicit program args bind argc=N with readable strings: argv[1]
-    // names "ab", so its first byte answers 'a' and the count answers 3.
-    Lowered br = lower("func main(argc: i64, argv: **char) -> int {"
-                       " if (argc != 3) { return 1; }"
-                       " if (*(argv[1]) != (97 as char)) { return 2; }"
-                       " return 0; }\n");
-    check(br.ok, "the argv probe lowers: " + br.stage);
-    std::vector<std::string> given{"prog", "ab", "c"};
-    cider::vm::VmResult brr = cider::vm::run(*br.module, "", given);
-    check(brr.ok, "the interpreter binds explicit argv: " + brr.error);
-    if (brr.ok) {
-        check(brr.exitCode == 0, "argc 3 with readable argv strings");
-    }
+// v4 starts at the source-defined _start, never at main and never with
+// compiler-bound argv. The test harness wraps ordinary main fixtures, so
+// these cases use an unwrapped module to prove the VM rejects the old form.
+void testEntry() {
+    std::printf("source-defined entry\n");
+    Lowered wrapped = lower("func main() -> int { return 5; }\n");
+    check(wrapped.ok, "a harness-wrapped main lowers: " + wrapped.stage);
+    cider::vm::VmResult wr = cider::vm::run(*wrapped.module, "");
+    check(wr.ok && wr.exitCode == 5,
+          "the source _start exits with main's value: " + wr.error);
+
+    Lowered noEntry = lower("func main() -> int { return 0; }\n", false, false);
+    check(noEntry.ok, "main alone still lowers as an ordinary function");
+    cider::vm::VmResult nr = cider::vm::run(*noEntry.module, "");
+    check(!nr.ok && nr.error.find("_start") != std::string::npos,
+          "main alone is not an entry: " + nr.error);
+
+    Lowered params =
+        lower("func _start(x: int) -> void { }\n", false, false);
+    check(params.ok, "a wrong _start still lowers");
+    cider::vm::VmResult pr = cider::vm::run(*params.module, "");
+    check(!pr.ok && pr.error.find("takes no parameters") != std::string::npos,
+          "the VM rejects _start parameters: " + pr.error);
+
+    Lowered ret = lower("func _start() -> int { return 0; }\n", false, false);
+    check(ret.ok, "a value-returning _start still lowers");
+    cider::vm::VmResult rr = cider::vm::run(*ret.module, "");
+    check(!rr.ok && rr.error.find("must return void") != std::string::npos,
+          "the VM rejects a value-returning _start: " + rr.error);
 }
 
 // super_init calls the base constructor on the same receiver (4.8.3), and
@@ -1036,7 +1047,7 @@ int main() {
     testCalls();
     testAsm();
     testFileSyscalls();
-    testArgv();
+    testEntry();
     testSuperInit();
     testTryNew();
     testPolymorphicDelete();

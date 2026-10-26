@@ -2,8 +2,9 @@
 //
 // The first end-to-end slice: source text becomes x86-64 assembly, the system
 // assembler turns it into a binary, and the binary's exit code is the
-// program's answer. No libc, no runtime: `main` returns an int and the process
-// exits with it.
+// program's answer. No libc, no runtime: the fixture's source-level `_start`
+// calls `main` and exits with its value (entry_fixture.h), exactly as a
+// freestanding program does.
 
 #include <cstdio>
 #include <string>
@@ -11,6 +12,7 @@
 #include <unistd.h>
 
 #include "alloc_fixture.h"
+#include "entry_fixture.h"
 #include "check/checker.h"
 #include "codegen/codegen.h"
 #include "lexer/lexer.h"
@@ -44,11 +46,15 @@ struct Built {
 };
 
 Built buildAs(const std::string& text, cider::target::Kind target,
-              bool checks = false, bool allocationFixture = true) {
+              bool checks = false, bool allocationFixture = true,
+              bool entryFixture = true) {
     Built out;
     out.types = std::make_unique<cider::TypeContext>();
-    const std::string source =
+    std::string source =
         allocationFixture ? cider_test::withAllocationFixture(text) : text;
+    if (entryFixture && target == cider::target::Kind::Native) {
+        source = cider_test::withMainEntry(source);
+    }
     cider::Lexer lexer("test.cid", source);
     std::vector<cider::Token> tokens = lexer.lex();
     if (!lexer.errors().empty()) {
@@ -238,7 +244,7 @@ void expectDiagnosed(const std::string& text, const std::string& message,
     check(!signaled && code == 2 && err == message, what);
 }
 
-// `main` returns its value as the exit code.
+// `main` returns its value; the fixture's source `_start` exits with it.
 void testExit() {
     std::printf("exit codes\n");
     check(runQuiet("func main() -> int { return 42; }\n") == 42, "return 42");
@@ -350,6 +356,50 @@ void testPrivateMethods() {
                    "    return c.g();\n"
                    "}\n") == 7,
           "a private method is callable in its module");
+}
+
+// v4 has no `_start` shim: the source defines the process entry, and the
+// emitter validates its shape rather than synthesizing a trampoline.
+void testNativeEntry() {
+    std::printf("native source entry\n");
+    Built direct = buildAs(
+        "func _start() -> void {\n"
+        "    asm { \"mov rax, 60\" \"xor rdi, rdi\" \"syscall\" }\n"
+        "}\n",
+        cider::target::Kind::Native, false, false, false);
+    check(direct.ok, "a source _start emits: " + direct.stage);
+    if (direct.ok) {
+        check(direct.asmText.find(".globl _start\n") != std::string::npos,
+              "the entry is global");
+        check(direct.asmText.find("_start:\n") != std::string::npos,
+              "the entry is defined by the source function");
+        size_t first = direct.asmText.find("_start:");
+        check(first == std::string::npos ||
+                  direct.asmText.find("_start:", first + 1) == std::string::npos,
+              "no compiler entry symbol is injected beside it");
+        check(direct.asmText.find("call main") == std::string::npos,
+              "the emitter never calls main");
+        check(direct.asmText.find("mov eax, 60") == std::string::npos,
+              "the emitter injects no automatic exit");
+    }
+
+    Built missing = buildAs("func main() -> int { return 0; }\n",
+                            cider::target::Kind::Native, false, false, false);
+    check(!missing.ok, "main alone is not an entry");
+    check(missing.stage.find("_start") != std::string::npos,
+          "the missing-entry diagnostic names _start: " + missing.stage);
+
+    Built params = buildAs("func _start(x: int) -> void { }\n",
+                           cider::target::Kind::Native, false, false, false);
+    check(!params.ok, "_start with parameters is rejected");
+    check(params.stage.find("_start takes no parameters") != std::string::npos,
+          "the parameter diagnostic names the rule: " + params.stage);
+
+    Built ret = buildAs("func _start() -> int { return 0; }\n",
+                        cider::target::Kind::Native, false, false, false);
+    check(!ret.ok, "_start returning int is rejected");
+    check(ret.stage.find("_start must return void") != std::string::npos,
+          "the return diagnostic names the rule: " + ret.stage);
 }
 
 // The target is part of the emitter's interface. Native remains byte-for-byte
@@ -3097,6 +3147,7 @@ int main() {
     testMixedMsabi();
     testGenericFieldDefaults();
     testPrivateMethods();
+    testNativeEntry();
     testTargetDispatch();
     testUefiEntryShim();
     testSizeofExpr();

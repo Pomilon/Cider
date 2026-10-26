@@ -1,4 +1,4 @@
-from std.io import print, printInt;
+from std.io import print, printInt, exit;
 from std.vector import Vec, new_vec, push, get, free_vec;
 
 enum Color { RED, GREEN, BLUE }
@@ -65,4 +65,8 @@ func main() -> int {
     delete c;
     free_vec::<int>(&v);
     return 0;
+}
+
+func _start() -> void {
+    exit(main());
 }

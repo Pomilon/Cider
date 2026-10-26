@@ -1989,8 +1989,7 @@ struct Runner {
 // program would have met, so the harness sees a diagnostic and an exit
 // status rather than a C++ throw escaping the IR loop.
 static VmResult runProgram(const ir::Module& module,
-                           const std::string& pendingInput,
-                           const std::vector<std::string>& argv) {
+                           const std::string& pendingInput) {
     Runner run;
     run.stdIn_ = pendingInput;
     // Lock in address space up front so later growth never relocates: a
@@ -2007,28 +2006,26 @@ static VmResult runProgram(const ir::Module& module,
         } catch (const std::bad_alloc&) {
         }
     }
-    const Function* entry = nullptr;
-    const Function* start = nullptr;
-    for (const Function& fn : module.functions) {
-        if (fn.name == "main") {
-            entry = &fn;
-        }
-        if (fn.name == "_start") {
-            start = &fn;
+    // v4's entry is source-defined. `main` is an ordinary function; the
+    // interpreter starts at `_start` exactly as the native link does.
+    const Function* fn = nullptr;
+    for (const Function& any : module.functions) {
+        if (any.name == "_start") {
+            fn = &any;
+            break;
         }
     }
-    if (entry != nullptr && start != nullptr) {
-        run.refuse(entry->loc, "the program defines both main and _start");
-        return run.out;
-    }
-    const Function* fn = entry != nullptr ? entry : start;
     if (fn == nullptr) {
-        run.out.error = "no entry function: define main or _start";
+        run.out.error = "no entry function: define func _start() -> void";
         return run.out;
     }
-    auto arity = fn->signature.arity();
-    if (arity != 0 && arity != 2) {
-        run.refuse(fn->loc, "vm cannot pass arguments yet");
+    if (!fn->signature.parameters().empty()) {
+        run.refuse(fn->loc, "_start takes no parameters");
+        return run.out;
+    }
+    const Type* ret = fn->signature.returnType();
+    if (ret == nullptr || ret->kind() != Kind::Void) {
+        run.refuse(fn->loc, "_start must return void");
         return run.out;
     }
     if (fn->blocks.empty()) {
@@ -2122,31 +2119,10 @@ static VmResult runProgram(const ir::Module& module,
         }
         run.labels[global.label] = at;
     }
-    // Program arguments lay down here, past the globals and below the entry
-    // frame: one NUL-terminated blob per string (a zero word follows its
-    // bytes, so even the default empty string has an address to point at),
-    // then the argv array holding one address per string. An empty vector
-    // still binds argc=1 with a non-nil argv[0], matching a bare exec.
-    std::vector<std::string> effective =
-        argv.empty() ? std::vector<std::string>{""} : argv;
-    const uint64_t kNulWord = 0;
-    std::vector<int64_t> argAddrs;
-    for (const std::string& word : effective) {
-        int64_t at = run.appendBytes(
-            reinterpret_cast<const uint8_t*>(word.data()),
-            static_cast<uint64_t>(word.size()));
-        run.appendWord(kNulWord);
-        argAddrs.push_back(at);
-    }
-    int64_t argvAddr = run.nextAppendAt();
-    for (int64_t at : argAddrs) {
-        run.appendWord(static_cast<uint64_t>(at));
-    }
+    // v4 has no automatic argument binding: `_start` takes no parameters.
+    // A program that wants arguments reads them itself (initial stack, a
+    // firmware table, or an explicit library).
     std::vector<int64_t> entryArgs;
-    if (arity == 2) {
-        entryArgs.push_back(static_cast<int64_t>(effective.size()));
-        entryArgs.push_back(argvAddr);
-    }
     std::vector<int64_t> answered;
     if (!run.runFunction(*fn, entryArgs, answered)) {
         return run.out;
@@ -2160,13 +2136,12 @@ static VmResult runProgram(const ir::Module& module,
     return run.out;
 }
 
-VmResult run(const ir::Module& module, const std::string& pendingInput,
-             const std::vector<std::string>& argv) {
+VmResult run(const ir::Module& module, const std::string& pendingInput) {
     try {
         if (std::getenv("CIDER_FAULT_VM_ALLOC") != nullptr) {
             throw std::bad_alloc();
         }
-        return runProgram(module, pendingInput, argv);
+        return runProgram(module, pendingInput);
     } catch (const std::bad_alloc&) {
         // A reservation the host cannot back is the program's out-of-memory
         // result: one exact stderr line and exit 2, the same shape the

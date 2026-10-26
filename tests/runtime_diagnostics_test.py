@@ -11,6 +11,9 @@ import subprocess
 import sys
 import tempfile
 
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+from source_entry import with_main_entry  # noqa: E402
+
 REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 CIDER = os.environ.get("CIDER_BIN", os.path.join(REPO, "build", "v3", "cider"))
 
@@ -62,7 +65,7 @@ class Harness:
     def source(self, name, text):
         path = os.path.join(self.tmp.name, name)
         with open(path, "w") as handle:
-            handle.write(text)
+            handle.write(with_main_entry(text))
         return path
 
     def expect(self, label, proc, stderr, code=2, stdout=""):

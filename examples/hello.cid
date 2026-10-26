@@ -1,4 +1,8 @@
-from std.io import print;
+from std.io import print, exit;
+
+func _start() -> void {
+    exit(main());
+}
 
 func main() -> int {
     print("Hello, Cider!\n");

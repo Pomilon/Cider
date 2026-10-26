@@ -30,6 +30,8 @@ import sys
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 CIDER = os.path.join(ROOT, "build", "v3", "cider")
 ENV = dict(os.environ, CIDER_LIB=os.path.join(ROOT, "modules"))
+sys.path.insert(0, os.path.join(ROOT, "tests"))
+from source_entry import with_main_entry  # noqa: E402
 
 WIDTHS = {
     "i8": (-(2**7), 2**7 - 1, True),
@@ -325,7 +327,7 @@ def main():
             continue
         path = f"<tmp>/fuzz_{args.seed}_{i}.cid"
         with open(path, "w") as f:
-            f.write(src)
+            f.write(with_main_entry(src))
         status, rc, out = run_one(path)
         bad = (status != "ok") or (rc != want)
         if bad:

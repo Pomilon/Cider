@@ -158,6 +158,13 @@ public:
     // unknown names here are a checker bug, not a program error, and are
     // reported as such.
     bool checkProgram(Program& program, const std::string& module);
+    // Validates the target's source-defined entry in the entry program. v4
+    // has no startup shim, so a native program must define
+    // `func _start() -> void` and a UEFI program must define its own
+    // `msabi func efi_main(...)`. `main` is an ordinary function, never an
+    // implicit entry. Called by the driver before lowering so `check` and
+    // `compile` reject a missing or wrong entry with the same diagnostic.
+    bool checkEntry(Program& program);
     // Whether the validator proved a match arm can never match (FEATURES
     // §8.4 dead-pattern rule). The lowerer chains straight through those.
     bool isDeadPattern(const Pattern* pat) const;

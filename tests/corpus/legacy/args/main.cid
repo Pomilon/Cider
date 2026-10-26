@@ -1,3 +1,17 @@
+// v4 has no automatic argv binding: the entry is source-defined and takes no
+// parameters. This fixture keeps the old main(argc, argv) body as an ordinary
+// function and supplies its arguments from an explicit _start wrapper.
+func _start() -> void {
+    var arg0: [char; 5] = [ 'p', 'r', 'o', 'g', 0 as char ];
+    var argv: [*char; 1] = [ &arg0[0] ];
+    var code: int = main(1, &argv[0]);
+    asm {
+        "mov rax, 60"
+        "mov edi, {code}"
+        "syscall"
+    }
+}
+
 func main(argc: i64, argv: **char) -> int {
     if (argc < 1) {
         return 1;

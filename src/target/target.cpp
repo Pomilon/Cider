@@ -12,13 +12,13 @@ namespace {
 // nullFaults is a fact about the memory map, not a preference: address zero is
 // unmapped on Linux, while UEFI and bare-metal PomeOS do not promise that, so
 // those targets need an emitted check. The VM detects the condition itself.
-const Info kNative{Kind::Native, "native", Abi::SysV, "main", Output::Asm,
+const Info kNative{Kind::Native, "native", Abi::SysV, "_start", Output::Asm,
                    true, true};
 const Info kPomeos{Kind::Pomeos, "pomeos", Abi::PomeOS, "_start", Output::Asm,
                    true, false};
 const Info kUefi{Kind::Uefi, "uefi", Abi::MsAbi, "efi_main", Output::Pe32Plus,
                  false, false};
-const Info kVm{Kind::Vm, "vm", Abi::SysV, "main", Output::Interpreted, true,
+const Info kVm{Kind::Vm, "vm", Abi::SysV, "_start", Output::Interpreted, true,
                false};
 
 }  // namespace
