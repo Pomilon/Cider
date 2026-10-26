@@ -40,13 +40,7 @@ constexpr uint64_t kThreeWords = 3;
 
 // Digits, bytes and scales the host hand-outs replay: twenty hold any
 // 64-bit decimal, six fraction digits follow the point.
-constexpr uint64_t kMaxDigits = 20;
-constexpr uint64_t kFracCount = 6;
-constexpr uint64_t kZeroDigit = '0';
-constexpr uint64_t kMinusByte = '-';
-constexpr uint64_t kPointByte = '.';
 constexpr uint64_t kIntIndefinite = 0x8000000000000000ULL;
-constexpr int64_t kFloatScale = 1000000;
 
 // The allocator's own numbers: the smallest effective alignment, the cap a
 // refusal answers nil at, and the ceiling every byte of the run stays under.
@@ -134,12 +128,9 @@ int64_t hostTagFor(const std::string& name) {
     static const char* const hosts[] = {
         "cider_print",         // -1
         "putchar",             // -2
-        "cider_itoa_signed",   // -3
-        "cider_itoa_unsigned", // -4
-        "cider_ftoa",          // -5
-        "cider_panic",         // -6
+        "cider_panic",         // -3
     };
-    static const int64_t count = 6;
+    static const int64_t count = 3;
     for (int64_t i = 0; i < count; ++i) {
         if (name == hosts[i]) {
             return -i - 1;
@@ -150,10 +141,9 @@ int64_t hostTagFor(const std::string& name) {
 
 std::string hostNameForTag(int64_t tag) {
     static const char* const hosts[] = {
-        "cider_print", "putchar", "cider_itoa_signed", "cider_itoa_unsigned",
-        "cider_ftoa", "cider_panic",
+        "cider_print", "putchar", "cider_panic",
     };
-    static const int64_t count = 6;
+    static const int64_t count = 3;
     if (tag >= 0) {
         return "";
     }
@@ -1455,88 +1445,14 @@ struct Runner {
         return true;
     }
 
-    // Decimal into a caller's buffer, answering the byte count. The signed
-    // form prints a leading minus and both work the magnitude as unsigned,
-    // so the most negative value converts instead of wrapping.
-    int64_t formatDigits(int64_t buffer, int64_t value, bool isSigned,
-                         Position pos, bool& ok) {
-        bool negative = isSigned && value < 0;
-        uint64_t magnitude =
-            negative ? ~static_cast<uint64_t>(value) + 1
-                     : static_cast<uint64_t>(value);
-        uint8_t reversed[kMaxDigits];
-        uint64_t count = kZeroCell;
-        do {
-            reversed[count++] = static_cast<uint8_t>(kZeroDigit + magnitude % 10);
-            magnitude /= 10;
-        } while (magnitude != 0 && count < kMaxDigits);
-        std::vector<uint8_t> digits;
-        if (negative) {
-            digits.push_back(static_cast<uint8_t>(kMinusByte));
-        }
-        while (count > kZeroCell) {
-            digits.push_back(reversed[--count]);
-        }
-        ok = writeBytes(buffer, digits, pos);
-        return static_cast<int64_t>(digits.size());
-    }
-
     // A truncating double-to-i64 convert: an out-of-range value answers the
     // "integer indefinite" form instead of wrapping, which is what the
-    // emitter's convert answers and what the digit sequence replays.
+    // emitter's convert answers.
     int64_t truncToI64(double value) {
         if (!(value >= -9223372036854775808.0 && value < 9223372036854775808.0)) {
             return static_cast<int64_t>(kIntIndefinite);
         }
         return static_cast<int64_t>(value);
-    }
-
-    // printF64's shape rebuilt on the interpreter's own numbers: a sign when
-    // the value is below zero and not NaN, the whole digits, a point, six
-    // truncated fraction digits zero-padded on the left. Every step follows
-    // the emitter's sequence — the parity-guarded compare, the truncating
-    // converts, the six idiv digits — so edge values print what the helper
-    // prints. Thirty-two bytes hold the longest shape.
-    int64_t formatFloat(int64_t buffer, uint64_t bits, Position pos, bool& ok) {
-        double value = 0;
-        std::memcpy(&value, &bits, sizeof(double));
-        bool isNan = std::isnan(value);
-        bool negative = value < 0.0 && !isNan;
-        double magnitude = negative ? 0.0 - value : value;
-        std::vector<uint8_t> text;
-        if (negative) {
-            text.push_back(static_cast<uint8_t>(kMinusByte));
-        }
-        int64_t whole = truncToI64(magnitude);
-        int64_t ahead = 0;
-        bool wrote = false;
-        int64_t count = formatDigits(buffer, whole, true, pos, wrote);
-        if (!wrote) {
-            ok = false;
-            return 0;
-        }
-        ahead += count;
-        text.push_back(static_cast<uint8_t>(kPointByte));
-        int64_t scaled = truncToI64(
-            (magnitude - static_cast<double>(whole)) * kFloatScale);
-        uint8_t digits[kFracCount];
-        for (int64_t i = kZeroCell; i < static_cast<int64_t>(kFracCount); ++i) {
-            int64_t digit = scaled % 10;
-            scaled /= 10;
-            digits[kFracCount - 1 - static_cast<size_t>(i)] =
-                static_cast<uint8_t>(kZeroDigit + (digit < 0 ? -digit : digit));
-        }
-        // The helper writes the six fraction digits in two moves; the bytes
-        // that land in the buffer are the same six.
-        for (uint64_t i = kZeroCell; i < kFracCount; ++i) {
-            text.push_back(digits[i]);
-        }
-        if (!writeBytes(buffer + ahead, text, pos)) {
-            ok = false;
-            return 0;
-        }
-        ok = true;
-        return ahead + static_cast<int64_t>(text.size());
     }
 
     // A call to a body the module never laid down: the freestanding helpers
