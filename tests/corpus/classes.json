@@ -1583,5 +1583,10 @@
   "actual": "v3: puts_string and in-place string helpers run on native and both VM legs; all three match expected.json",
   "blocker": "none",
   "class": "A"
+ },
+ "string_owning": {
+  "actual": "v4: the owning std.string.String copies from a view, appends views/bytes, formats decimal and hexadecimal values into caller storage and the string, deep-copies, moves, and deinitialises explicitly; std.alloc supplies the storage on native and both VM legs",
+  "blocker": "none",
+  "class": "A"
  }
 }

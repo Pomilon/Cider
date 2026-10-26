@@ -254,6 +254,15 @@ add_test(NAME v4_explicit_io
 set_tests_properties(v4_explicit_io PROPERTIES
   ENVIRONMENT "CIDER_BIN=${CMAKE_BINARY_DIR}/cider")
 
+# The owning String is explicit library code over std.alloc: no prelude,
+# no compiler heap, no hidden destructor. The test proves the unimported
+# name does not bind and runs the imported type on native and both VM legs.
+add_test(NAME v4_string_owning
+         COMMAND ${Python3_EXECUTABLE}
+                 ${CMAKE_SOURCE_DIR}/tests/v4/string_owning_test.py)
+set_tests_properties(v4_string_owning PROPERTIES
+  ENVIRONMENT "CIDER_BIN=${CMAKE_BINARY_DIR}/cider")
+
 # --- Targets -------------------------------------------------------------------
 #
 # OUTPUT.md §2: a target is a description, not a layer. The descriptor is the

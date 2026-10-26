@@ -1,11 +1,17 @@
 // Standard strings: strlen, strcmp, strcpy, strcat, strchr, memset,
 // memcpy, to_upper, to_lower, trim, parse_int, parse_float.
 //
+// The owning `String` type and the library-only `format_*` helpers live at
+// the bottom of this module. They are explicit importable library code,
+// not compiler built-ins: there is no prelude name, hidden allocation, or
+// hidden destructor.
+//
 // Pointers are `*char` (v3 spells the pointee first). Ranges over
 // characters go through `(c as u8)` — char ordering is rejected
 // (FEATURES §8.1, FEAT-046), so the explicit cast is the spelling.
 // Callers reach array bytes through `&a[0]`; a string literal converts
 // to *char implicitly at declaration (FEATURES §1.4).
+from std.alloc import malloc, free, oom;
 
 export func strlen(s: *char) -> int {
     var n: int = 0;
@@ -161,4 +167,311 @@ export func parse_float(s: *char) -> f64 {
     }
     if (neg) { return 0.0 - v; }
     return v;
+}
+
+// ---------------------------------------------------------------------------
+// Owning `String`
+// ---------------------------------------------------------------------------
+//
+// `String` is heap-backed and explicit. It owns a `data` block obtained from
+// `std.alloc.malloc`; nothing here uses a compiler heap, a constructor, or a
+// hidden destructor. Call `string_deinit` (or its alias `string_free`) on
+// every live value before it leaves scope.
+//
+// Copy and move are deliberately separate operations:
+//
+//   * `string_from` copies a non-owning `string` view into fresh storage;
+//   * `string_copy` makes an explicit deep copy of another `String`;
+//   * `string_move` transfers the buffer and leaves the source empty.
+//
+// A plain struct assignment is a shallow bit copy, exactly like every other
+// Cider struct. The library never pretends otherwise: shallow-copying a
+// `String` and then deinitialising both values would free the same buffer,
+// so ownership transfer is spelled `string_move`, not assignment.
+//
+// `string_view` answers the built-in non-owning `string` view of the live
+// bytes. The view is invalidated by any append that grows the buffer; it is
+// borrowed storage, never owned.
+
+const STRING_INITIAL_CAP: int = 8;
+const STRING_GROW_LIMIT: int = 1073741824;
+const STRING_MAX_LEN: int = 2147483647;
+
+export struct String {
+    var data: *u8;
+    var len: int;
+    var cap: int;
+}
+
+// The language has no expression that builds a `string` from an arbitrary
+// address and length, so this helper writes the two documented view words
+// (address then length; TYPES.md pins the 16-byte layout). It is ordinary
+// library code over the value's storage, not compiler magic. An empty view
+// answers the static empty literal and never touches a pointer.
+func string_make_view(ptr: *u8, len: int) -> string {
+    var view: string = "";
+    if (len <= 0) {
+        return view;
+    }
+    var words: *i64 = (&view) as *i64;
+    *words = ptr as i64;
+    *(words + 1) = len as i64;
+    return view;
+}
+
+func string_copy_bytes(dst: *u8, src: *u8, count: int) {
+    var i: int = 0;
+    while (i < count) {
+        *(dst + i) = *(src + i);
+        i = i + 1;
+    }
+}
+
+export func string_new() -> String {
+    return String { data: nilPtr, len: 0, cap: 0 };
+}
+
+// Explicit copy construction from a non-owning view. A nil or empty view
+// answers an empty String with no allocation.
+export func string_from(view: string) -> String {
+    var s: String = string_new();
+    if (view.len <= 0) {
+        return s;
+    }
+    string_reserve(&s, view.len);
+    string_copy_bytes(s.data, &view[0] as *u8, view.len);
+    s.len = view.len;
+    return s;
+}
+
+// Explicit deep copy. The answer owns a separate buffer.
+export func string_copy(src: *String) -> String {
+    return string_from(string_make_view((*src).data, (*src).len));
+}
+
+// Explicit move: ownership moves to the answer and the source is left as a
+// valid empty String. The old buffer is not copied or freed here.
+export func string_move(src: *String) -> String {
+    var s: String = String {
+        data: (*src).data,
+        len: (*src).len,
+        cap: (*src).cap
+    };
+    (*src).data = nilPtr;
+    (*src).len = 0;
+    (*src).cap = 0;
+    return s;
+}
+
+// Explicit cleanup. Safe to call twice and safe on an empty value. There is
+// no automatic equivalent.
+export func string_deinit(s: *String) {
+    if ((*s).data != nilPtr) {
+        free((*s).data as *void);
+    }
+    (*s).data = nilPtr;
+    (*s).len = 0;
+    (*s).cap = 0;
+}
+
+export func string_free(s: *String) {
+    string_deinit(s);
+}
+
+export func string_data(s: *String) -> *u8 {
+    return (*s).data;
+}
+
+export func string_view(s: *String) -> string {
+    return string_make_view((*s).data, (*s).len);
+}
+
+export func string_len(s: *String) -> int {
+    return (*s).len;
+}
+
+export func string_cap(s: *String) -> int {
+    return (*s).cap;
+}
+
+// Ensure room for `want` bytes. Growth doubles from eight bytes so repeated
+// byte appends stay linear; a request above the doubling limit is taken at
+// its exact size. Allocation failure follows the std.alloc OOM policy.
+export func string_reserve(s: *String, want: int) {
+    if (want <= (*s).cap) {
+        return;
+    }
+    var new_cap: int = (*s).cap;
+    if (new_cap < STRING_INITIAL_CAP) {
+        new_cap = STRING_INITIAL_CAP;
+    }
+    while (new_cap < want) {
+        if (new_cap >= STRING_GROW_LIMIT) {
+            new_cap = want;
+            break;
+        }
+        new_cap = new_cap * 2;
+    }
+    var fresh: *u8 = malloc(new_cap as i64) as *u8;
+    if (fresh == nilPtr) {
+        oom();
+    }
+    if ((*s).data != nilPtr && (*s).len > 0) {
+        string_copy_bytes(fresh, (*s).data, (*s).len);
+    }
+    if ((*s).data != nilPtr) {
+        free((*s).data as *void);
+    }
+    (*s).data = fresh;
+    (*s).cap = new_cap;
+}
+
+export func string_clear(s: *String) {
+    (*s).len = 0;
+}
+
+// Append a non-owning view. The view's bytes are copied; it stays valid.
+export func string_append(s: *String, view: string) {
+    if (view.len <= 0) {
+        return;
+    }
+    string_append_bytes(s, &view[0] as *u8, view.len);
+}
+
+// Append `count` raw bytes. A non-positive count is a no-op.
+export func string_append_bytes(s: *String, bytes: *u8, count: int) {
+    if (count <= 0) {
+        return;
+    }
+    if ((*s).len > STRING_MAX_LEN - count) {
+        oom();
+    }
+    string_reserve(s, (*s).len + count);
+    string_copy_bytes((*s).data + (*s).len, bytes, count);
+    (*s).len = (*s).len + count;
+}
+
+export func string_append_byte(s: *String, b: u8) {
+    if ((*s).len >= STRING_MAX_LEN) {
+        oom();
+    }
+    string_reserve(s, (*s).len + 1);
+    *((*s).data + (*s).len) = b;
+    (*s).len = (*s).len + 1;
+}
+
+// ---------------------------------------------------------------------------
+// Library-only formatting
+// ---------------------------------------------------------------------------
+//
+// Each helper writes into caller-provided storage (`dst`, `capacity`) and
+// answers the byte count. A capacity too small for the complete answer is
+// refused with -1 and nothing is written. No helper allocates, performs I/O,
+// or calls a compiler formatting routine.
+//
+// Decimal is signed for `format_int`, unsigned for `format_uint`; hex is
+// unsigned and lowercase with no `0x` prefix. The most negative i64 formats
+// correctly because the digits come from the negative remainder itself.
+
+func format_copy(dst: *u8, capacity: int, src: *u8, start: int,
+                 count: int) -> int {
+    if (dst == nilPtr || capacity < count) {
+        return -1;
+    }
+    var i: int = 0;
+    while (i < count) {
+        *(dst + i) = *(src + start + i);
+        i = i + 1;
+    }
+    return count;
+}
+
+export func format_int(dst: *u8, capacity: int, value: i64) -> int {
+    var digits: [u8; 32] = [0, ...];
+    var d: []u8 = digits[0:32];
+    var n: i64 = value;
+    var neg: bool = n < 0;
+    var i: int = 32;
+    if (n == 0) {
+        i = 31;
+        d[i] = 48;
+    } else {
+        while (n != 0) {
+            var rem: i64 = n % 10;
+            var digit: i64 = 48 + rem;
+            if (neg) {
+                digit = 48 - rem;
+            }
+            i = i - 1;
+            d[i] = digit as u8;
+            n = n / 10;
+        }
+        if (neg) {
+            i = i - 1;
+            d[i] = 45;
+        }
+    }
+    return format_copy(dst, capacity, &digits[0], i, 32 - i);
+}
+
+export func format_uint(dst: *u8, capacity: int, value: u64) -> int {
+    var digits: [u8; 32] = [0, ...];
+    var d: []u8 = digits[0:32];
+    var n: u64 = value;
+    var i: int = 32;
+    if (n == 0) {
+        i = 31;
+        d[i] = 48;
+    } else {
+        while (n != 0) {
+            var rem: u64 = n % 10;
+            i = i - 1;
+            d[i] = (48 + (rem as u8)) as u8;
+            n = n / 10;
+        }
+    }
+    return format_copy(dst, capacity, &digits[0], i, 32 - i);
+}
+
+export func format_hex(dst: *u8, capacity: int, value: u64) -> int {
+    var digits: [u8; 32] = [0, ...];
+    var d: []u8 = digits[0:32];
+    var n: u64 = value;
+    var i: int = 32;
+    if (n == 0) {
+        i = 31;
+        d[i] = 48;
+    } else {
+        while (n != 0) {
+            var rem: u64 = n % 16;
+            var digit: u8 = 48;
+            if (rem < 10) {
+                digit = (48 + (rem as u8)) as u8;
+            } else {
+                digit = (87 + (rem as u8)) as u8;
+            }
+            i = i - 1;
+            d[i] = digit;
+            n = n / 16;
+        }
+    }
+    return format_copy(dst, capacity, &digits[0], i, 32 - i);
+}
+
+export func string_append_int(s: *String, value: i64) {
+    var scratch: [u8; 32] = [0, ...];
+    var n: int = format_int(&scratch[0], 32, value);
+    string_append_bytes(s, &scratch[0], n);
+}
+
+export func string_append_uint(s: *String, value: u64) {
+    var scratch: [u8; 32] = [0, ...];
+    var n: int = format_uint(&scratch[0], 32, value);
+    string_append_bytes(s, &scratch[0], n);
+}
+
+export func string_append_hex(s: *String, value: u64) {
+    var scratch: [u8; 32] = [0, ...];
+    var n: int = format_hex(&scratch[0], 32, value);
+    string_append_bytes(s, &scratch[0], n);
 }
