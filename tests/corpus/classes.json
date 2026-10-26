@@ -425,7 +425,7 @@
   "class": "A"
  },
  "extern": {
-  "actual": "exact stdout/stderr/exit match",
+  "actual": "explicit std.io putchar import; exact stdout/stderr/exit match",
   "blocker": "extern-calls-link (diff #8 rewrite `10 as char` passes check, run fails: assembling failed)",
   "class": "A"
  },
@@ -585,7 +585,7 @@
   "class": "A"
  },
  "fn_ptr_extern": {
-  "actual": "exact stdout/stderr/exit match",
+  "actual": "explicit std.io putchar imported and addressed through a function pointer; exact stdout/stderr/exit match",
   "blocker": "extern-calls-link (+*func-nil-compare compiler crash)",
   "class": "A"
  },
@@ -1015,7 +1015,7 @@
   "class": "A"
  },
  "mod_ns_diamond": {
-  "actual": "cider run exit 0, stdout AB, stderr empty: qualified + from-import calls, extern putchar, diamond import twice",
+  "actual": "cider run exit 0, stdout AB, stderr empty: qualified + from-import calls, explicit std.io putchar re-exported by dc, diamond import twice",
   "blocker": "multi-file-imports",
   "class": "A"
  },
@@ -1105,7 +1105,7 @@
   "class": "A"
  },
  "phase0_stress": {
-  "actual": "migrated to v3: increment/decrement are statements, function pointers spell *func(...) with &symbol, raw locals spell `= uninit`, and byte/array/string arguments take &x[0] as *void; expected.json records the deterministic output; all three legs match",
+  "actual": "migrated to v3: increment/decrement are statements, function pointers spell *func(...) with &symbol, raw locals spell `= uninit`, and byte/array/string arguments take &x[0] as *void; putchar is an explicit std.io import; expected.json records the deterministic output; all three legs match",
   "blocker": "none",
   "class": "A"
  },

@@ -332,9 +332,17 @@ void testCalls() {
     check(prr.stdoutText == "hi", "the explicit write emits bytes: " + prr.stdoutText);
     Lowered ch = lower("extern func putchar(c: int) -> int;\n"
                        "func main() -> int { putchar(33); return 0; }\n");
-    check(ch.ok, "putchar lowers: " + ch.stage);
+    check(ch.ok, "an extern putchar lowers: " + ch.stage);
     cider::vm::VmResult chr = cider::vm::run(*ch.module, "");
-    check(chr.ok && chr.stdoutText == "!", "putchar writes one byte: " + chr.stdoutText);
+    check(!chr.ok && chr.stdoutText.empty() &&
+              chr.error.find("putchar") != std::string::npos,
+          "the vm no longer emulates putchar: " + chr.error);
+    Lowered own = lower("func putchar(c: int) -> int { return c + 1; }\n"
+                        "func main() -> int { return putchar(32); }\n");
+    check(own.ok, "a source putchar lowers: " + own.stage);
+    cider::vm::VmResult ownr = cider::vm::run(*own.module, "");
+    check(ownr.ok && ownr.exitCode == 33,
+          "a source putchar is an ordinary call: " + ownr.error);
     Lowered dead = lower("func main() -> int { var p: *int = nilPtr;"
                          " return *p; }\n");
     cider::vm::VmResult deadr = cider::vm::run(*dead.module, "");

@@ -35,11 +35,10 @@ constexpr uint64_t kByteBits = 8;
 constexpr uint64_t kByteMask = 0xFF;
 constexpr uint64_t kZeroCell = 0;
 constexpr uint64_t kOneCell = 1;
-constexpr uint64_t kTwoWords = 2;
 constexpr uint64_t kThreeWords = 3;
 
-// Digits, bytes and scales the host hand-outs replay: twenty hold any
-// 64-bit decimal, six fraction digits follow the point.
+// The "integer indefinite" pattern an out-of-range float-to-integer convert
+// answers, matching the emitter's convert.
 constexpr uint64_t kIntIndefinite = 0x8000000000000000ULL;
 
 // The allocator's own numbers: the smallest effective alignment, the cap a
@@ -118,40 +117,6 @@ uint32_t topId(const Function& fn) {
 // Id zero is never defined, so a frame is one extra cell beyond the ids.
 uint64_t frameWords(uint32_t top) {
     return static_cast<uint64_t>(top) + kOneCell;
-}
-
-// Host helpers have no IR body, so no function tag: an address of one
-// answers a synthetic negative tag instead. Positives are index-plus-one
-// into the module's functions, zero is no-such-function, so negatives
-// cannot collide with either. The table is the hostCall list below.
-int64_t hostTagFor(const std::string& name) {
-    static const char* const hosts[] = {
-        "cider_print",         // -1
-        "putchar",             // -2
-        "cider_panic",         // -3
-    };
-    static const int64_t count = 3;
-    for (int64_t i = 0; i < count; ++i) {
-        if (name == hosts[i]) {
-            return -i - 1;
-        }
-    }
-    return 0;
-}
-
-std::string hostNameForTag(int64_t tag) {
-    static const char* const hosts[] = {
-        "cider_print", "putchar", "cider_panic",
-    };
-    static const int64_t count = 3;
-    if (tag >= 0) {
-        return "";
-    }
-    int64_t at = -tag - 1;
-    if (at >= count) {
-        return "";
-    }
-    return hosts[at];
 }
 
 uint64_t widthBytes(IRType width) {
@@ -1031,18 +996,13 @@ struct Runner {
 
     bool tagOf(const Instr& instr) {
         auto found = functionTags.find(instr.globalLabel);
-        if (found != functionTags.end()) {
-            write(instr.results[0], found->second);
-        } else {
-            // A host helper has no IR body and owns no function tag: its
-            // address is the synthetic negative tag the indirect call
-            // hands back to hostCall. Anything else still refuses loudly.
-            int64_t host = hostTagFor(instr.globalLabel);
-            if (host == 0) {
-                return refuse(instr.loc, "vm cannot address '" + instr.globalLabel + "'");
-            }
-            write(instr.results[0], host);
+        if (found == functionTags.end()) {
+            // There are no host helpers: a value must name a function the
+            // module actually holds.
+            return refuse(instr.loc,
+                          "vm cannot address '" + instr.globalLabel + "'");
         }
+        write(instr.results[0], found->second);
         // A function word stages like a data word downstream: record it so
         // an asm placeholder naming a function refuses in the staging loop
         // instead of reading the tag as an address. Function names never
@@ -1420,18 +1380,6 @@ struct Runner {
         return true;
     }
 
-    bool readBytes(int64_t address, uint64_t count, std::vector<uint8_t>& into,
-                   Position pos) {
-        if (address < 0 || count > memory.size() ||
-            static_cast<uint64_t>(address) > memory.size() - count) {
-            refuse(pos, "vm address out of range");
-            return false;
-        }
-        into.assign(memory.begin() + static_cast<size_t>(address),
-                    memory.begin() + static_cast<size_t>(address + count));
-        return true;
-    }
-
     bool writeBytes(int64_t address, const std::vector<uint8_t>& bytes,
                     Position pos) {
         uint64_t captured = bytes.size();
@@ -1455,46 +1403,10 @@ struct Runner {
         return static_cast<int64_t>(value);
     }
 
-    // A call to a body the module never laid down: the freestanding helpers
-    // the program names but does not define. Each one answers what its
-    // emitter does — bytes on the right stream, a count, a pointer, or the
-    // exit code a panic dies with.
-    bool hostCall(const std::string& name, const std::vector<int64_t>& args,
-                  Position pos, std::vector<Value>& results) {
-        if (name == "cider_print") {
-            if (args.size() < kTwoWords) {
-                return refuse(pos, "vm call passes too few words to print");
-            }
-            if (args[1] > 0) {
-                std::vector<uint8_t> carried;
-                if (!readBytes(args[0], static_cast<uint64_t>(args[1]), carried,
-                               pos)) {
-                    return false;
-                }
-                out.stdoutText.append(reinterpret_cast<const char*>(carried.data()),
-                                      carried.size());
-            }
-            return true;
-        }
-        if (name == "putchar") {
-            if (args.empty()) {
-                return refuse(pos, "vm call passes too few words to putchar");
-            }
-            int64_t written = args[0] & kByteMask;
-            out.stdoutText.push_back(static_cast<char>(written));
-            // The byte written is the answer, the way the C putchar
-            // contract's own return names the character echoed.
-            if (!results.empty()) {
-                write(results[0], written);
-            }
-            return true;
-        }
-        return refuse(pos, "vm cannot call '" + name + "' yet");
-    }
-
     // A call runs a callee's body in a region of its own — ids restart at
-    // zero per function — or hands off to a helper, whichever the name
-    // answers. Arguments arrive in register order, results go back in it.
+    // zero per function. There are no host helpers: an undefined callee is
+    // a refusal, exactly as the freestanding link would leave it undefined.
+    // Arguments arrive in register order, results go back in it.
     bool call(const Instr& instr, std::vector<Value>& results) {
         std::vector<int64_t> args;
         for (const Argument& arg : instr.arguments) {
@@ -1513,14 +1425,7 @@ struct Runner {
             }
             auto found = functionsByTag.find(tag);
             if (found == functionsByTag.end()) {
-                // A negative tag names a host helper, which has no IR
-                // body: hand its words to hostCall the way a direct call
-                // to the same name does.
-                std::string host = hostNameForTag(tag);
-                if (host.empty()) {
-                    return refuse(instr.loc, "vm cannot call this value");
-                }
-                return hostCall(host, args, instr.loc, results);
+                return refuse(instr.loc, "vm cannot call this value");
             }
             target = found->second;
         } else {
@@ -1555,7 +1460,7 @@ struct Runner {
             return true;
         }
         std::string name = target != nullptr ? target->name : instr.callee;
-        return hostCall(name, args, instr.loc, results);
+        return refuse(instr.loc, "vm cannot call '" + name + "' yet");
     }
 
     // One activation of a function: a fresh region of cells zeroed, the
@@ -2105,12 +2010,9 @@ static VmResult runProgram(const ir::Module& module,
                 if (code != run.functionTags.end()) {
                     run.appendWord(static_cast<uint64_t>(code->second));
                 } else {
-                    int64_t host = hostTagFor(global.initLabel);
-                    if (host == 0) {
-                        run.refuse(fn->loc, "vm cannot address '" + global.initLabel + "'");
-                        return run.out;
-                    }
-                    run.appendWord(static_cast<uint64_t>(host));
+                    run.refuse(fn->loc, "vm cannot address '" +
+                                            global.initLabel + "'");
+                    return run.out;
                 }
             }
             run.appendWord(static_cast<uint64_t>(global.initial));

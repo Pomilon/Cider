@@ -246,6 +246,14 @@ set_tests_properties(v4_source_entry PROPERTIES
   ENVIRONMENT "CIDER_BIN=${CMAKE_BINARY_DIR}/cider"
   SKIP_RETURN_CODE 77)
 
+# v4 has no compiler-provided putchar: a bare extern is an ordinary
+# unresolved symbol, while std.io supplies an explicit library function.
+add_test(NAME v4_explicit_io
+         COMMAND ${Python3_EXECUTABLE}
+                 ${CMAKE_SOURCE_DIR}/tests/v4/explicit_io_test.py)
+set_tests_properties(v4_explicit_io PROPERTIES
+  ENVIRONMENT "CIDER_BIN=${CMAKE_BINARY_DIR}/cider")
+
 # --- Targets -------------------------------------------------------------------
 #
 # OUTPUT.md §2: a target is a description, not a layer. The descriptor is the

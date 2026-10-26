@@ -1,4 +1,4 @@
-extern func putchar(c: int) -> int;
+from std.io import putchar;
 
 func main() -> int {
   var p: *func(int) -> int = &putchar;

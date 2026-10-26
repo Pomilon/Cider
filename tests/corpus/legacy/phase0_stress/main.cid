@@ -1,12 +1,10 @@
 // Migrated to v3: increment/decrement are statements, function pointers
 // spell their signature, raw locals spell `= uninit`, and the byte
 // value passes as an explicit char.
-from std.io import puts, exit;
+from std.io import puts, putchar, exit;
 from std.fs import open, read, write, close, unlink, O_RDONLY, O_WRONLY, O_RDWR, O_CREAT, O_TRUNC;
 
 
-
-extern func putchar(c: char) -> int;
 
 enum Color { RED, GREEN, BLUE, CYAN, MAGENTA, YELLOW }
 
@@ -83,12 +81,12 @@ func main() -> int {
     if (x != 6) { puts("FAIL: ^="); exit(1); }
     puts("PASS: compound bitwise");
 
-    // 6. extern/FFI
-    putchar('E');
-    putchar('x');
-    putchar('t');
-    putchar('!');
-    putchar(10 as char);
+    // 6. Library I/O (formerly a compiler extern helper)
+    putchar('E' as int);
+    putchar('x' as int);
+    putchar('t' as int);
+    putchar('!' as int);
+    putchar(10);
     puts("PASS: extern");
 
     // 7. File I/O

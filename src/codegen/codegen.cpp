@@ -120,17 +120,12 @@ public:
                 return EmitResult{false, "", error_, pos_};
             }
         }
-        // The entry point and transitional helpers are emitted here, in this
-        // one place, because sovereignty is a property of the whole text: a
-        // program links with `ld` alone, no libc, no crt0, no archive.
-        std::vector<std::string> helpers = neededHelpers();
+        // The validated entry point is the only process-level symbol the
+        // emitter contributes. There is no helper archive and no hidden
+        // runtime: every other symbol comes from the program or an explicit
+        // library the source imported.
         if (!emitEntry()) {
             return EmitResult{false, "", error_, pos_};
-        }
-        for (const std::string& helper : helpers) {
-            if (!emitHelper(helper)) {
-                return EmitResult{false, "", error_, pos_};
-            }
         }
         if (!module_.globals.empty()) {
             out_ += ".data\n";
@@ -194,52 +189,6 @@ public:
     }
 
 private:
-    // Prelude helpers the text actually references, in a fixed emission
-    // order so the bytes stay deterministic. A helper the module itself
-    // defines (the name is taken) is skipped: the program's own spelling
-    // wins, as FEATURES.md §7 promises for shadowing.
-    std::vector<std::string> neededHelpers() {
-        std::unordered_set<std::string> defined;
-        for (const ir::Function& fn : module_.functions) {
-            defined.insert(fn.name);
-        }
-        std::unordered_set<std::string> seen;
-        std::vector<std::string> order = {
-            // Transitional: four v3 corpus fixtures still use this one
-            // blessed extern. It is removed with the test-library rewrite.
-            "putchar",
-        };
-        std::vector<std::string> out;
-        for (const ir::Function& fn : module_.functions) {
-            for (const ir::Block& block : fn.blocks) {
-                for (const ir::Instr& instr : block.body) {
-                    // A helper is needed when a call names it or a function
-                    // address takes it: `&print` must emit `cider_print`
-                    // exactly as a call would.
-                    std::string wanted;
-                    if (instr.op == ir::Op::Call) {
-                        wanted = instr.callee;
-                    } else if (instr.op == ir::Op::FnAddr) {
-                        wanted = instr.globalLabel;
-                    } else {
-                        continue;
-                    }
-                    if (defined.count(wanted) != 0) {
-                        continue;
-                    }
-                    if (seen.insert(wanted).second) {
-                        for (const std::string& candidate : order) {
-                            if (candidate == wanted) {
-                                out.push_back(candidate);
-                            }
-                        }
-                    }
-                }
-            }
-        }
-        return out;
-    }
-
     // A diagnosed trap is a language result, not a machine accident. Native
     // has no libc, so the line goes out with the write syscall and the exit
     // status is 2; UEFI policy stays ud2 and silent. Undiagnosed reasons keep
@@ -381,43 +330,6 @@ private:
             return false;
         }
         return true;
-    }
-
-    // One transitional helper, emitted as text only when referenced. Each one is
-    // raw syscalls: there is no libc behind this compiler, and no archive
-    // behind these symbols.
-    bool emitHelper(const std::string& name) {
-        if (emittedHelpers_.insert(name).second == false) {
-            return true;                         // already in the text once
-        }
-        if (target_ == Target::Uefi) {
-            // print, panic, and putchar are library functions in v4.
-            // They have no compiler-emitted UEFI implementation. The
-            // transitional putchar helper must never fall through to the
-            // native Linux write path on UEFI.
-            if (name == "putchar") {
-                refuse(Position{"", 1, 1},
-                       "putchar is a library function on uefi");
-                return false;
-            }
-        }
-        // print is a library function in v4. The compiler no longer
-        // provides a hidden string-write helper.
-        if (name == "putchar") {
-            // Transitional only: the test-library rewrite will remove it.
-            out_ += "putchar:\n";
-            out_ += "  push rdi\n";
-            out_ += "  mov eax, 1\n";
-            out_ += "  mov edi, 1\n";
-            out_ += "  mov rsi, rsp\n";
-            out_ += "  mov edx, 1\n";
-            out_ += "  syscall\n";
-            out_ += "  pop rax\n";
-            out_ += "  ret\n";
-            return true;
-        }
-        refuse(Position{"", 1, 1}, "unknown transitional helper '" + name + "'");
-        return false;
     }
 
     void refuse(Position pos, const std::string& what) {
@@ -1795,7 +1707,6 @@ private:
     // paired with that word prints `[rip + label]` (the global's value)
     // instead of the temporary holding the address.
     std::unordered_map<uint32_t, std::string> addrWords_;
-    std::unordered_set<std::string> emittedHelpers_;
     std::string out_;
     // Unique suffix for u64-to-float conversion labels (int→float casts
     // need a two-path sequence; see emitCast).

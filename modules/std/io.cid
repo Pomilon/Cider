@@ -1,4 +1,5 @@
-// Standard I/O: print, printInt, printChar, puts, printFloat, printF64, exit.
+// Standard I/O: print, printInt, printChar, putchar, puts, printFloat,
+// printF64, exit.
 //
 // Every write goes through the `write` syscall directly: this module owns
 // its `print` implementation. A string's bytes are reached through `&s[0]`
@@ -55,6 +56,18 @@ export func printChar(c: char) {
     var ptr: *u8 = &buf[0];
     var one: int = 1;
     writeAll(ptr, one);
+}
+
+// C-ABI byte output. Unlike printChar, a zero byte is written: putchar
+// promises the byte, not a text line. The answer is the unsigned byte, the
+// way the C contract names the character echoed.
+export func putchar(c: int) -> int {
+    var b: u8 = c as u8;
+    var buf: [u8; 1] = [ b ];
+    var ptr: *u8 = &buf[0];
+    var one: int = 1;
+    writeAll(ptr, one);
+    return b as int;
 }
 
 // Prints v with no INT_MIN trap: the digits are taken from the negative

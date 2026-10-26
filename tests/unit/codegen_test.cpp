@@ -1293,13 +1293,33 @@ void testLiteralNul() {
           "the byte past the end reads zero");
 }
 
-void testExternPutchar() {
-    std::printf("extern putchar\n");
-    // Transitional: the test-library rewrite removes this helper. Until
-    // then it remains the one compiler-provided extern used by corpus.
-    check(runQuiet("extern func putchar(c: int) -> int;\n"
+void testPutcharIsNotCompilerProvided() {
+    std::printf("putchar is not compiler-provided\n");
+    // An extern is only a declaration. v4 emits no helper, so the ordinary
+    // freestanding link leaves the symbol undefined.
+    const std::string source =
+        "extern func putchar(c: int) -> int;\n"
+        "func main() -> int { return putchar(65); }\n";
+    Built built = build(source);
+    check(built.ok, "an extern putchar still lowers: " + built.stage);
+    check(built.asmText.find("putchar:") == std::string::npos,
+          "codegen defines no putchar helper");
+    bool signaled = false;
+    std::string err;
+    int code = runCapture(source, signaled, err);
+    check(code == -2 && !signaled,
+          "linking without the library leaves putchar undefined");
+
+    // A source-defined function is ordinary code, not a blessed name.
+    Built local = build(
+        "func putchar(c: int) -> int { return c; }\n"
+        "func main() -> int { return putchar(65); }\n");
+    check(local.ok, "a source putchar builds: " + local.stage);
+    check(local.asmText.find("\nputchar:") != std::string::npos,
+          "a source putchar is emitted like any function");
+    check(runQuiet("func putchar(c: int) -> int { return c; }\n"
                    "func main() -> int { return putchar(65); }\n") == 65,
-          "putchar answers the character");
+          "a source putchar runs");
 }
 
 void testBreakContinue() {
@@ -3170,7 +3190,7 @@ int main() {
     testAllocation();
     testDelete();
     testLiteralNul();
-    testExternPutchar();
+    testPutcharIsNotCompilerProvided();
     testBreakContinue();
     testForLoop();
     testForIn();

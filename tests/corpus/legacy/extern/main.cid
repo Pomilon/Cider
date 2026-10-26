@@ -1,9 +1,9 @@
-extern func putchar(c: char) -> int;
+from std.io import putchar;
 
 func main() -> int {
-    putchar('H');
-    putchar('i');
-    putchar('!');
-    putchar('\n');
+    putchar('H' as int);
+    putchar('i' as int);
+    putchar('!' as int);
+    putchar('\n' as int);
     return 0;
 }
