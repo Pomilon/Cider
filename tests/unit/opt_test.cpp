@@ -40,6 +40,7 @@ struct Piped {
     std::string stage;
     std::unique_ptr<cider::TypeContext> types;
     std::unique_ptr<cider::ir::Module> module;
+    cider::opt::OptResult opt;
 };
 
 Piped pipe(const std::string& text) {
@@ -70,9 +71,9 @@ Piped pipe(const std::string& text) {
         return out;
     }
     out.module = lowerer.takeModule();
-    cider::opt::OptResult result = cider::opt::run(*out.module);
-    if (!result.ok) {
-        out.stage = "opt:" + result.error;
+    out.opt = cider::opt::run(*out.module);
+    if (!out.opt.ok) {
+        out.stage = "opt:" + out.opt.error;
         return out;
     }
     out.ok = true;
@@ -220,6 +221,24 @@ struct Ir {
         instr.results.push_back(value(result, instr.width, type));
         instr.operands.push_back(lhs);
         instr.operands.push_back(rhs);
+        return instr;
+    }
+
+    cider::ir::Instr phi(uint32_t result, cider::ir::IRType width,
+                         cider::TypeRef type,
+                         const std::vector<std::pair<uint32_t, uint32_t>>& in) {
+        cider::ir::Instr instr;
+        instr.op = cider::ir::Op::Phi;
+        instr.width = width;
+        instr.type = type;
+        instr.isPure = true;
+        instr.results.push_back(value(result, width, type));
+        for (const auto& pair : in) {
+            cider::ir::PhiIncoming incoming;
+            incoming.value = value(pair.first, width, type);
+            incoming.block = pair.second;
+            instr.phiIncoming.push_back(incoming);
+        }
         return instr;
     }
 
@@ -510,6 +529,285 @@ void testFoldWidths() {
     const cider::ir::Function* div = find(t.module.get(), "f");
     check(div != nullptr && countOp(*div, cider::ir::Op::Div) == 1,
           "a 32-bit MIN/-1 keeps its division");
+
+    // mem2reg exposes u64 constants to the folder. A right shift of a u64 is
+    // logical, and a u64 division is unsigned; folding either as signed gave
+    // the wrong answer once the stack traffic was gone.
+    Piped shifted = pipe(
+        "func f() -> u64 {\n"
+        "    var x: u64 = 0xFFFF800000000000;\n"
+        "    return x >> 32;\n"
+        "}\n");
+    check(shifted.ok, "lowers and optimises: " + shifted.stage);
+    const cider::ir::Function* shr = find(shifted.module.get(), "f");
+    check(shr != nullptr && countOp(*shr, cider::ir::Op::Shr) == 0,
+          "the u64 shift folded");
+    bool shiftedValue = false;
+    if (shr != nullptr) {
+        for (const cider::ir::Block& block : shr->blocks) {
+            for (const cider::ir::Instr& instr : block.body) {
+                if (instr.op == cider::ir::Op::Const &&
+                    instr.constantBits == 0xFFFF8000) {
+                    shiftedValue = true;
+                }
+            }
+        }
+    }
+    check(shiftedValue, "the u64 shift is logical");
+    Piped divided = pipe(
+        "func f() -> u64 { return 0xFFFFFFFFFFFFFFFF / 3; }\n");
+    check(divided.ok, "lowers and optimises: " + divided.stage);
+    const cider::ir::Function* dv = find(divided.module.get(), "f");
+    check(dv != nullptr && countOp(*dv, cider::ir::Op::Div) == 0,
+          "the u64 division folded");
+}
+
+// An if/else join becomes a phi and the slot traffic disappears.
+void testMem2RegJoin() {
+    std::printf("mem2reg builds a phi at an if/else join\n");
+    Piped r = pipe(
+        "func f(c: bool, a: int, b: int) -> int {\n"
+        "    var x: int = 0;\n"
+        "    if (c) { x = a; } else { x = b; }\n"
+        "    return x + 1;\n"
+        "}\n");
+    check(r.ok, "lowers and optimises: " + r.stage);
+    const cider::ir::Function* fn = find(r.module.get(), "f");
+    check(fn != nullptr, "the function is there");
+    if (fn == nullptr) {
+        return;
+    }
+    check(r.opt.promoted >= 4, "every scalar slot was promoted");
+    check(r.opt.phis >= 1, "the join has a phi");
+    check(countOp(*fn, cider::ir::Op::Phi) >= 1, "the phi is in the IR");
+    check(countOp(*fn, cider::ir::Op::Alloca) == 0, "no Alloca remains");
+    check(countOp(*fn, cider::ir::Op::Load) == 0, "no Load remains");
+    check(countOp(*fn, cider::ir::Op::Store) == 0, "no Store remains");
+}
+
+// Nested if/else joins produce phis at each join.
+void testMem2RegNestedJoins() {
+    std::printf("mem2reg handles nested joins\n");
+    Piped r = pipe(
+        "func f(c: bool, d: bool, a: int, b: int) -> int {\n"
+        "    var x: int = 0;\n"
+        "    if (c) {\n"
+        "        if (d) { x = a; } else { x = b; }\n"
+        "    } else {\n"
+        "        if (d) { x = a + 1; } else { x = b + 1; }\n"
+        "    }\n"
+        "    return x;\n"
+        "}\n");
+    check(r.ok, "lowers and optimises: " + r.stage);
+    const cider::ir::Function* fn = find(r.module.get(), "f");
+    check(fn != nullptr, "the function is there");
+    if (fn == nullptr) {
+        return;
+    }
+    check(r.opt.phis >= 3, "each join has a phi");
+    check(countOp(*fn, cider::ir::Op::Alloca) == 0, "no Alloca remains");
+    check(countOp(*fn, cider::ir::Op::Load) == 0, "no Load remains");
+    check(countOp(*fn, cider::ir::Op::Store) == 0, "no Store remains");
+}
+
+// A loop header and its back edge use real phis.
+void testMem2RegLoop() {
+    std::printf("mem2reg builds loop-header phis\n");
+    Piped r = pipe(
+        "func f(n: int) -> int {\n"
+        "    var s: int = 0;\n"
+        "    var i: int = 0;\n"
+        "    while (i < n) { s = s + i; i = i + 1; }\n"
+        "    return s;\n"
+        "}\n");
+    check(r.ok, "lowers and optimises: " + r.stage);
+    const cider::ir::Function* fn = find(r.module.get(), "f");
+    check(fn != nullptr, "the function is there");
+    if (fn == nullptr) {
+        return;
+    }
+    check(r.opt.phis >= 2, "the accumulator and induction variable have phis");
+    check(countOp(*fn, cider::ir::Op::Alloca) == 0, "no Alloca remains");
+    check(countOp(*fn, cider::ir::Op::Load) == 0, "no Load remains");
+    check(countOp(*fn, cider::ir::Op::Store) == 0, "no Store remains");
+}
+
+// Repeated definitions in one path need no phi.
+void testMem2RegMultipleDefs() {
+    std::printf("mem2reg handles repeated definitions\n");
+    Piped r = pipe(
+        "func f(a: int) -> int {\n"
+        "    var x: int = a;\n"
+        "    x = 1;\n"
+        "    x = 2;\n"
+        "    return x;\n"
+        "}\n");
+    check(r.ok, "lowers and optimises: " + r.stage);
+    const cider::ir::Function* fn = find(r.module.get(), "f");
+    check(fn != nullptr, "the function is there");
+    if (fn == nullptr) {
+        return;
+    }
+    check(r.opt.promoted == 2, "the parameter and local are promoted");
+    check(r.opt.phis == 0, "a straight path needs no phi");
+    check(countOp(*fn, cider::ir::Op::Alloca) == 0, "no Alloca remains");
+    check(countOp(*fn, cider::ir::Op::Load) == 0, "no Load remains");
+    check(countOp(*fn, cider::ir::Op::Store) == 0, "no Store remains");
+}
+
+// A parameter slot is initialized by the ABI; its loads become the parameter
+// value itself and the parameter metadata becomes the value's type.
+void testMem2RegParameter() {
+    std::printf("mem2reg promotes parameter slots\n");
+    Piped r = pipe(
+        "func f(a: int) -> int {\n"
+        "    a = a + 1;\n"
+        "    return a;\n"
+        "}\n");
+    check(r.ok, "lowers and optimises: " + r.stage);
+    const cider::ir::Function* fn = find(r.module.get(), "f");
+    check(fn != nullptr, "the function is there");
+    if (fn == nullptr) {
+        return;
+    }
+    check(r.opt.promoted == 1, "the parameter slot was promoted");
+    check(r.opt.phis == 0, "no phi is needed");
+    check(countOp(*fn, cider::ir::Op::Alloca) == 0, "no Alloca remains");
+    check(countOp(*fn, cider::ir::Op::Load) == 0, "no Load remains");
+    check(countOp(*fn, cider::ir::Op::Store) == 0, "no Store remains");
+    check(fn->params.size() == 1 &&
+              fn->params[0].width == cider::ir::IRType::I32 &&
+              fn->params[0].type.type != nullptr &&
+              fn->params[0].type.type->kind() == cider::Kind::Basic,
+          "the parameter value carries the scalar type");
+}
+
+// Calls stay calls; a scalar local around one still promotes.
+void testMem2RegCall() {
+    std::printf("mem2reg keeps calls while promoting their result\n");
+    Piped r = pipe(
+        "func g(a: int) -> int { return a + 1; }\n"
+        "func f(a: int) -> int {\n"
+        "    var x: int = g(a);\n"
+        "    x = x + 1;\n"
+        "    return x;\n"
+        "}\n");
+    check(r.ok, "lowers and optimises: " + r.stage);
+    const cider::ir::Function* fn = find(r.module.get(), "f");
+    check(fn != nullptr, "the function is there");
+    if (fn == nullptr) {
+        return;
+    }
+    check(r.opt.promoted >= 2, "the parameter and local are promoted");
+    check(countOp(*fn, cider::ir::Op::Call) == 1, "the call survives");
+    check(countOp(*fn, cider::ir::Op::Alloca) == 0, "no Alloca remains");
+    check(countOp(*fn, cider::ir::Op::Load) == 0, "no Load remains");
+    check(countOp(*fn, cider::ir::Op::Store) == 0, "no Store remains");
+}
+
+// Address-taking escapes the frame; nothing in the function is promoted.
+void testMem2RegEscape() {
+    std::printf("mem2reg leaves an escaped frame in memory\n");
+    Piped r = pipe(
+        "func f(a: int) -> int {\n"
+        "    var x: int = a;\n"
+        "    var p: *int = &x;\n"
+        "    *p = 2;\n"
+        "    return x;\n"
+        "}\n");
+    check(r.ok, "lowers and optimises: " + r.stage);
+    const cider::ir::Function* fn = find(r.module.get(), "f");
+    check(fn != nullptr, "the function is there");
+    if (fn == nullptr) {
+        return;
+    }
+    check(r.opt.promoted == 0, "the escaped frame is not promoted");
+    check(countOp(*fn, cider::ir::Op::Alloca) >= 1, "the Alloca stays");
+    check(countOp(*fn, cider::ir::Op::Load) >= 1, "the load stays");
+    check(countOp(*fn, cider::ir::Op::Store) >= 1, "the store stays");
+}
+
+// A function containing asm is skipped even when its locals look direct.
+void testMem2RegAsm() {
+    std::printf("mem2reg skips a function containing asm\n");
+    Piped r = pipe(
+        "func f(a: int) -> int {\n"
+        "    var x: int = a;\n"
+        "    asm { \"nop\" }\n"
+        "    return x;\n"
+        "}\n");
+    check(r.ok, "lowers and optimises: " + r.stage);
+    const cider::ir::Function* fn = find(r.module.get(), "f");
+    check(fn != nullptr, "the function is there");
+    if (fn == nullptr) {
+        return;
+    }
+    check(r.opt.promoted == 0, "the asm function is not promoted");
+    check(countOp(*fn, cider::ir::Op::Alloca) >= 1, "the Alloca stays");
+    check(countOp(*fn, cider::ir::Op::Load) >= 1, "the load stays");
+    check(countOp(*fn, cider::ir::Op::Store) >= 1, "the store stays");
+}
+
+// `= uninit` stores nothing. A load that can see that state stays a memory
+// read; promotion never invents a zero.
+void testMem2RegUninit() {
+    std::printf("mem2reg preserves uninitialized loads\n");
+    Piped r = pipe(
+        "func f() -> int {\n"
+        "    var x: int = uninit;\n"
+        "    return x;\n"
+        "}\n");
+    check(r.ok, "lowers and optimises: " + r.stage);
+    const cider::ir::Function* fn = find(r.module.get(), "f");
+    check(fn != nullptr, "the function is there");
+    if (fn == nullptr) {
+        return;
+    }
+    check(r.opt.promoted == 0, "the uninitialized slot is not promoted");
+    check(countOp(*fn, cider::ir::Op::Alloca) == 1, "the Alloca stays");
+    check(countOp(*fn, cider::ir::Op::Load) == 1, "the uninitialized load stays");
+    check(countOp(*fn, cider::ir::Op::Phi) == 0, "no value is invented");
+}
+
+void testMem2RegUninitBranch() {
+    std::printf("mem2reg keeps a partially initialized slot in memory\n");
+    Piped r = pipe(
+        "func f(c: bool) -> int {\n"
+        "    var x: int = uninit;\n"
+        "    if (c) { x = 1; }\n"
+        "    return x;\n"
+        "}\n");
+    check(r.ok, "lowers and optimises: " + r.stage);
+    const cider::ir::Function* fn = find(r.module.get(), "f");
+    check(fn != nullptr, "the function is there");
+    if (fn == nullptr) {
+        return;
+    }
+    check(r.opt.promoted == 1, "only the parameter is promoted");
+    check(countOp(*fn, cider::ir::Op::Alloca) == 1, "the local Alloca stays");
+    check(countOp(*fn, cider::ir::Op::Load) >= 1, "the join load stays");
+}
+
+// Aggregate word slots are not single scalar slots; their field offsets keep
+// the function in memory.
+void testMem2RegAggregate() {
+    std::printf("mem2reg leaves aggregate slots in memory\n");
+    Piped r = pipe(
+        "struct Pair { var lo: int; var hi: int; }\n"
+        "func f(a: int) -> int {\n"
+        "    var p: Pair = Pair { lo: a, hi: 0 };\n"
+        "    p.lo = a + 1;\n"
+        "    return p.lo;\n"
+        "}\n");
+    check(r.ok, "lowers and optimises: " + r.stage);
+    const cider::ir::Function* fn = find(r.module.get(), "f");
+    check(fn != nullptr, "the function is there");
+    if (fn == nullptr) {
+        return;
+    }
+    check(r.opt.promoted == 0, "the aggregate frame is not promoted");
+    check(countOp(*fn, cider::ir::Op::Alloca) >= 1, "the Alloca stays");
+    check(countOp(*fn, cider::ir::Op::Load) >= 1, "the field load stays");
 }
 
 // A store followed by a load of the same slot answers the load from the
@@ -924,6 +1222,208 @@ void testMismatchedAccess() {
     }
 }
 
+// A volatile access removes the slot from mem2reg eligibility.
+void testMem2RegVolatile() {
+    std::printf("mem2reg leaves volatile slots in memory\n");
+    Ir ir;
+    cider::TypeRef t = ir.i32();
+    ir.emit(ir.constant(0, 7, cider::ir::IRType::I32, t));
+    ir.emit(ir.allocaSlot(1, t));
+    ir.emit(ir.store(1, ir.value(0, cider::ir::IRType::I32, t),
+                     cider::ir::IRType::Void, t, true));
+    ir.emit(ir.load(2, 1, cider::ir::IRType::I32, t));
+    ir.finishRet(0, 2, cider::ir::IRType::I32, t);
+    cider::opt::PromotionResult result = cider::opt::mem2reg(ir.module);
+    check(result.promotedSlots == 0, "the volatile slot is not promoted");
+    check(countOp(*ir.fn, cider::ir::Op::Alloca) == 1, "the Alloca stays");
+    check(countOp(*ir.fn, cider::ir::Op::Load) == 1, "the Load stays");
+    check(countOp(*ir.fn, cider::ir::Op::Store) == 1, "the Store stays");
+}
+
+// Width and language-type mismatches keep the slot in memory.
+void testMem2RegMismatched() {
+    std::printf("mem2reg leaves mismatched slots in memory\n");
+    {
+        Ir ir;
+        cider::TypeRef t = ir.i32();
+        cider::TypeRef wide = ir.i64();
+        ir.emit(ir.constant(0, 1, cider::ir::IRType::I32, t));
+        ir.emit(ir.allocaSlot(1, t));
+        ir.emit(ir.store(1, ir.value(0, cider::ir::IRType::I32, t),
+                         cider::ir::IRType::Void, t));
+        ir.emit(ir.load(2, 1, cider::ir::IRType::I64, wide));
+        ir.finishRet(0, 2, cider::ir::IRType::I64, wide);
+        cider::opt::PromotionResult result = cider::opt::mem2reg(ir.module);
+        check(result.promotedSlots == 0, "a width mismatch is not promoted");
+        check(countOp(*ir.fn, cider::ir::Op::Load) == 1, "the Load stays");
+    }
+    {
+        Ir ir;
+        cider::TypeRef t = ir.i32();
+        cider::TypeRef unsigned32 = ir.u32();
+        ir.emit(ir.constant(0, 1, cider::ir::IRType::I32, t));
+        ir.emit(ir.allocaSlot(1, t));
+        ir.emit(ir.store(1, ir.value(0, cider::ir::IRType::I32, t),
+                         cider::ir::IRType::Void, t));
+        ir.emit(ir.load(2, 1, cider::ir::IRType::U32, unsigned32));
+        ir.finishRet(0, 2, cider::ir::IRType::U32, unsigned32);
+        cider::opt::PromotionResult result = cider::opt::mem2reg(ir.module);
+        check(result.promotedSlots == 0, "a type mismatch is not promoted");
+        check(countOp(*ir.fn, cider::ir::Op::Load) == 1, "the Load stays");
+    }
+    {
+        // A store that writes fewer bytes than the value it carries cannot be
+        // promoted: the whole value is not in the cell.
+        Ir ir;
+        cider::TypeRef t = ir.i32();
+        ir.emit(ir.constant(0, 1, cider::ir::IRType::I32, t));
+        ir.emit(ir.allocaSlot(1, t));
+        ir.emit(ir.store(1, ir.value(0, cider::ir::IRType::I32, t),
+                         cider::ir::IRType::I16, t));
+        ir.emit(ir.load(2, 1, cider::ir::IRType::I32, t));
+        ir.finishRet(0, 2, cider::ir::IRType::I32, t);
+        cider::opt::PromotionResult result = cider::opt::mem2reg(ir.module);
+        check(result.promotedSlots == 0, "a partial store is not promoted");
+        check(countOp(*ir.fn, cider::ir::Op::Load) == 1, "the Load stays");
+    }
+}
+
+// A valid diamond phi passes the structural checker.
+void testPhiStructureValid() {
+    std::printf("a valid phi passes the structural checker\n");
+    Ir ir;
+    cider::TypeRef t = ir.i32();
+    cider::TypeRef b = ir.boolean();
+    ir.emit(ir.constant(0, 1, cider::ir::IRType::Bool, b));
+    ir.emit(ir.constant(1, 11, cider::ir::IRType::I32, t));
+    ir.emit(ir.constant(2, 22, cider::ir::IRType::I32, t));
+    ir.finishCondBr(0, 0, 1, 2);
+    ir.addBlock(1);
+    ir.finishBr(1, 3);
+    ir.addBlock(2);
+    ir.finishBr(2, 3);
+    ir.addBlock(3);
+    ir.emit(ir.phi(4, cider::ir::IRType::I32, t, {{1, 1}, {2, 2}}));
+    ir.finishRet(3, 4, cider::ir::IRType::I32, t);
+    std::vector<cider::opt::StructuralError> errors =
+        cider::opt::checkModule(ir.module);
+    check(errors.empty(), "the diamond is well formed");
+}
+
+// Phi arity, predecessor membership and incoming dominance are all checked.
+void testPhiStructureErrors() {
+    std::printf("the structural checker validates phi edges\n");
+    auto diamond = [](bool missing, bool wrongPred, bool badDominance,
+                      bool duplicate, bool afterNonPhi, bool inEntry) {
+        Ir ir;
+        cider::TypeRef t = ir.i32();
+        cider::TypeRef b = ir.boolean();
+        ir.emit(ir.constant(0, 1, cider::ir::IRType::Bool, b));
+        ir.emit(ir.constant(1, 11, cider::ir::IRType::I32, t));
+        ir.emit(ir.constant(2, 22, cider::ir::IRType::I32, t));
+        ir.finishCondBr(0, 0, 1, 2);
+        ir.addBlock(1);
+        ir.finishBr(1, 3);
+        ir.addBlock(2);
+        ir.finishBr(2, 3);
+        ir.addBlock(3);
+        if (afterNonPhi) {
+            ir.emit(ir.constant(5, 5, cider::ir::IRType::I32, t));
+        }
+        std::vector<std::pair<uint32_t, uint32_t>> incoming;
+        if (!missing) {
+            incoming.push_back({1, 1});
+        }
+        if (wrongPred) {
+            incoming.push_back({2, 99});
+        } else if (badDominance) {
+            incoming.push_back({2, 1});
+            incoming.push_back({1, 2});
+        } else {
+            incoming.push_back({2, 2});
+        }
+        if (duplicate) {
+            incoming.push_back({2, 1});
+        }
+        ir.emit(ir.phi(4, cider::ir::IRType::I32, t, incoming));
+        ir.finishRet(3, 4, cider::ir::IRType::I32, t);
+        if (inEntry) {
+            // Move the phi to the entry block; the diamond above is then
+            // intentionally inconsistent and must be refused.
+            ir.fn->blocks[0].body.push_back(ir.fn->blocks[3].body[0]);
+            ir.fn->blocks[3].body.erase(ir.fn->blocks[3].body.begin());
+        }
+        return cider::opt::checkModule(ir.module);
+    };
+    check(!diamond(true, false, false, false, false, false).empty(),
+          "a missing incoming is refused");
+    check(!diamond(false, true, false, false, false, false).empty(),
+          "an unknown predecessor is refused");
+    check(!diamond(false, false, true, false, false, false).empty(),
+          "a non-dominating incoming value is refused");
+    check(!diamond(false, false, false, true, false, false).empty(),
+          "a duplicate predecessor is refused");
+    check(!diamond(false, false, false, false, true, false).empty(),
+          "a phi after a non-phi is refused");
+    check(!diamond(false, false, false, false, false, true).empty(),
+          "a phi in the entry block is refused");
+}
+
+// Phi lowering removes phis and leaves ordinary copies; a critical edge gets
+// a dedicated edge block first.
+void testPhiLowering() {
+    std::printf("phi lowering splits critical edges and emits copies\n");
+    {
+        Ir ir;
+        cider::TypeRef t = ir.i32();
+        cider::TypeRef b = ir.boolean();
+        ir.emit(ir.constant(0, 1, cider::ir::IRType::Bool, b));
+        ir.emit(ir.constant(1, 11, cider::ir::IRType::I32, t));
+        ir.emit(ir.constant(2, 22, cider::ir::IRType::I32, t));
+        ir.finishCondBr(0, 0, 1, 2);
+        ir.addBlock(1);
+        ir.finishBr(1, 3);
+        ir.addBlock(2);
+        ir.finishBr(2, 3);
+        ir.addBlock(3);
+        ir.emit(ir.phi(4, cider::ir::IRType::I32, t, {{1, 1}, {2, 2}}));
+        ir.finishRet(3, 4, cider::ir::IRType::I32, t);
+        cider::opt::PhiLowerResult result = cider::opt::lowerPhis(ir.module);
+        check(result.ok, "lowering succeeds: " + result.error);
+        check(result.phisLowered == 1, "one phi is lowered");
+        check(countOp(*ir.fn, cider::ir::Op::Phi) == 0, "no phi remains");
+        check(countOp(*ir.fn, cider::ir::Op::Copy) >= 2,
+              "both incoming edges get a copy");
+    }
+    {
+        // block1 has two successors and block3 has two predecessors, so the
+        // block1 -> block3 edge is critical.
+        Ir ir;
+        cider::TypeRef t = ir.i32();
+        cider::TypeRef b = ir.boolean();
+        ir.emit(ir.constant(0, 1, cider::ir::IRType::Bool, b));
+        ir.finishBr(0, 1);
+        ir.addBlock(1);
+        ir.emit(ir.constant(1, 1, cider::ir::IRType::Bool, b));
+        ir.emit(ir.constant(5, 33, cider::ir::IRType::I32, t));
+        ir.finishCondBr(1, 1, 2, 3);
+        ir.addBlock(2);
+        ir.emit(ir.constant(2, 22, cider::ir::IRType::I32, t));
+        ir.finishBr(2, 3);
+        ir.addBlock(3);
+        ir.emit(ir.phi(4, cider::ir::IRType::I32, t, {{5, 1}, {2, 2}}));
+        ir.finishRet(3, 4, cider::ir::IRType::I32, t);
+        const uint64_t before = ir.fn->blocks.size();
+        cider::opt::PhiLowerResult result = cider::opt::lowerPhis(ir.module);
+        check(result.ok, "critical-edge lowering succeeds: " + result.error);
+        check(result.splitBlocks >= 1, "the critical edge was split");
+        check(ir.fn->blocks.size() > before, "an edge block was added");
+        check(countOp(*ir.fn, cider::ir::Op::Phi) == 0, "no phi remains");
+        check(countOp(*ir.fn, cider::ir::Op::Copy) >= 1,
+              "the edge block carries a copy");
+    }
+}
+
 // A non-zero displacement use marks the slot escaping, even though it still
 // names the same Alloca.
 void testDisplacementEscapes() {
@@ -954,6 +1454,17 @@ int main() {
     testDeadCode();
     testIndirectKept();
     testTrapKept();
+    testMem2RegJoin();
+    testMem2RegNestedJoins();
+    testMem2RegLoop();
+    testMem2RegMultipleDefs();
+    testMem2RegParameter();
+    testMem2RegCall();
+    testMem2RegEscape();
+    testMem2RegAsm();
+    testMem2RegUninit();
+    testMem2RegUninitBranch();
+    testMem2RegAggregate();
     testForwardLoad();
     testOverwrittenStore();
     testCrossBlockForwarding();
@@ -966,6 +1477,11 @@ int main() {
     testAsmBarrier();
     testVolatileUntouched();
     testMismatchedAccess();
+    testMem2RegVolatile();
+    testMem2RegMismatched();
+    testPhiStructureValid();
+    testPhiStructureErrors();
+    testPhiLowering();
     testDisplacementEscapes();
     testDanglingTarget();
     testUnterminatedBlock();

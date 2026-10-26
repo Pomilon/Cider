@@ -109,6 +109,51 @@ void testControl() {
     check(unr.exitCode == 7, "the loop sums to the taken arm");
 }
 
+// Phi results select by predecessor: a join, a loop-carried swap, and a
+// nested join must answer the same before and after mem2reg.
+void testPhiControl() {
+    std::printf("phi results follow the predecessor\n");
+    Lowered join = lower(
+        "func pick(c: bool, a: int, b: int) -> int {\n"
+        "    var x: int = 0;\n"
+        "    if (c) { x = a; } else { x = b; }\n"
+        "    return x;\n"
+        "}\n"
+        "func main() -> int { return pick(true, 40, 1) + pick(false, 1, 2); }\n");
+    check(join.ok, "join lowers: " + join.stage);
+    cider::vm::VmResult joinUnopt = cider::vm::run(*join.module, "");
+    check(joinUnopt.ok && joinUnopt.exitCode == 42,
+          "the join runs unoptimised: " + joinUnopt.error);
+    cider::opt::OptResult joinOpt = cider::opt::run(*join.module);
+    check(joinOpt.ok, "join optimises: " + joinOpt.error);
+    cider::vm::VmResult joinRun = cider::vm::run(*join.module, "");
+    check(joinRun.ok && joinRun.exitCode == 42,
+          "the join runs optimised: " + joinRun.error);
+
+    Lowered swap = lower(
+        "func main() -> int {\n"
+        "    var x: int = 1;\n"
+        "    var y: int = 2;\n"
+        "    var i: int = 0;\n"
+        "    while (i < 3) {\n"
+        "        var t: int = x;\n"
+        "        x = y;\n"
+        "        y = t;\n"
+        "        i = i + 1;\n"
+        "    }\n"
+        "    return x * 10 + y;\n"
+        "}\n");
+    check(swap.ok, "swap lowers: " + swap.stage);
+    cider::vm::VmResult swapUnopt = cider::vm::run(*swap.module, "");
+    check(swapUnopt.ok && swapUnopt.exitCode == 21,
+          "the swap runs unoptimised: " + swapUnopt.error);
+    cider::opt::OptResult swapOpt = cider::opt::run(*swap.module);
+    check(swapOpt.ok, "swap optimises: " + swapOpt.error);
+    cider::vm::VmResult swapRun = cider::vm::run(*swap.module, "");
+    check(swapRun.ok && swapRun.exitCode == 21,
+          "the swap runs optimised: " + swapRun.error);
+}
+
 // Integer arithmetic runs at its own width, so a narrow sum wraps and a
 // signed divide truncates toward zero, exactly like the emitter's forms.
 void testArith() {
@@ -1048,6 +1093,7 @@ int main() {
     std::printf("vm_test — the interpreter answers\n\n");
     testExit();
     testControl();
+    testPhiControl();
     testArith();
     testMemory();
     testDeath();

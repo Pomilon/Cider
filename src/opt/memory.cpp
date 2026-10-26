@@ -1,8 +1,8 @@
 // memory.cpp — conservative load/store forwarding for non-escaping slots.
 //
-// This is the first slice of task 4, not full mem2reg: there are no phi nodes
-// and no SSA construction. It removes two kinds of work that do not need
-// either:
+// After mem2reg, this is the fallback for every slot that stays in memory:
+// there are no phi nodes and no SSA construction here. It removes two kinds of
+// work that do not need either:
 //
 //   - a load that reads a value the same slot already holds, replaced by that
 //     stored value;
@@ -192,6 +192,9 @@ std::unordered_set<uint32_t> eligibleSlots(const ir::Function& fn) {
                     note(word.id, escaped);
                 }
             }
+            for (const ir::PhiIncoming& incoming : instr.phiIncoming) {
+                note(incoming.value.id, escaped);
+            }
             if (namesBase(instr.op)) {
                 // A load or store through a link label names the label, not
                 // its default zero addressBase. Reading that default as an
@@ -297,6 +300,9 @@ void replaceUses(ir::Function& fn,
                 for (ir::Value& word : arg.words) {
                     remap(word);
                 }
+            }
+            for (ir::PhiIncoming& incoming : instr.phiIncoming) {
+                remap(incoming.value);
             }
             if (namesBase(instr.op) && instr.globalLabel.empty()) {
                 remap(instr.addressBase);

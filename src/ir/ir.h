@@ -13,9 +13,9 @@
 //   overflow  `# experimental(wrap)` is a *file* property and inlining
 //             crosses files, so it travels on the instruction.
 //
-// SSA is the shape lowering emits, not a later pass: every value is defined
-// once and joins use phi, so the definition dominates its uses — the property
-// every pass here relies on.
+// Every value is defined once and joins use phi, so the definition dominates
+// its uses — the property every pass here relies on. Lowering emits a
+// stack-slot form first; mem2reg adds the phis and removes the slots.
 //
 // An aggregate is never one value. An IRType is what a *register* holds, and a
 // struct is not that; so an aggregate is N values and N comes from layout.h
@@ -95,7 +95,10 @@ enum class OverflowMode {
 };
 
 enum class Op {
-    Const, Copy,
+    // Phi is a real SSA definition: one result and one incoming per distinct
+    // predecessor edge in `phiIncoming`. It replaces the old comment's promise
+    // that only lowering emits joins; the optimizer builds these too.
+    Const, Copy, Phi,
     Add, Sub, Mul, Div, Rem,
     And, Or, Xor, Shl, Shr,
     Neg, Not, BitNot,
@@ -130,6 +133,16 @@ struct Argument {
     IRType width = IRType::Void;
 };
 
+// One incoming edge of a Phi. `block` is the predecessor label the value
+// arrives from; `value` is an ordinary SSA value defined on that edge (or in
+// a block that dominates it). All phis of a block are evaluated with the
+// values that were live at the end of the predecessor, before any phi result
+// is written, so swaps need no special form in the IR.
+struct PhiIncoming {
+    Value value;
+    uint32_t block = 0;
+};
+
 struct Instr {
     Op op = Op::Const;
     IRType width = IRType::Void;
@@ -145,6 +158,9 @@ struct Instr {
 
     std::vector<Value> results;
     std::vector<Value> operands;
+    // Phi: one incoming per distinct predecessor block, in block-label order
+    // as the producer emits it. Inert for every other Op.
+    std::vector<PhiIncoming> phiIncoming;
 
     // Op-specific payload, all inert unless the Op uses them, so the
     // instruction set stays closed and readable rather than becoming a variant

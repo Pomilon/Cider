@@ -93,6 +93,11 @@ Built buildAs(const std::string& text, cider::target::Kind target,
         out.stage = "opt:" + result.error;
         return out;
     }
+    cider::opt::PhiLowerResult lowered = cider::opt::lowerPhis(*out.module);
+    if (!lowered.ok) {
+        out.stage = "phi-lower:" + lowered.error;
+        return out;
+    }
     cider::codegen::EmitResult emitted = cider::codegen::emit(*out.module, target);
     if (!emitted.ok) {
         out.stage = "codegen:" + emitted.error;
@@ -642,6 +647,52 @@ void testControl() {
                    " while (i < 11) { s = s + i; i = i + 1; }\n"
                    " return s; }\n") == 55,
           "one to ten sums to 55");
+}
+
+// Phi lowering: a join becomes edge copies, and a loop that swaps two
+// loop-carried values exercises the parallel-copy path.
+void testPhiEdges() {
+    std::printf("phi edge copies\n");
+    check(runQuiet("func pick(c: bool, a: int, b: int) -> int {\n"
+                   "    var x: int = 0;\n"
+                   "    if (c) { x = a; } else { x = b; }\n"
+                   "    return x;\n"
+                   "}\n"
+                   "func main() -> int { return pick(true, 42, 7) + pick(false, 1, 8); }\n") == 50,
+          "an if/else phi forwards both arms");
+    check(runQuiet("func swap_loop() -> int {\n"
+                   "    var x: int = 1;\n"
+                   "    var y: int = 2;\n"
+                   "    var i: int = 0;\n"
+                   "    while (i < 3) {\n"
+                   "        var t: int = x;\n"
+                   "        x = y;\n"
+                   "        y = t;\n"
+                   "        i = i + 1;\n"
+                   "    }\n"
+                   "    return x * 10 + y;\n"
+                   "}\n"
+                   "func main() -> int { return swap_loop() * 2; }\n") == 42,
+          "a loop swap survives parallel edge copies");
+    check(runQuiet("func nested(c: bool, d: bool) -> int {\n"
+                   "    var x: int = 0;\n"
+                   "    if (c) {\n"
+                   "        if (d) { x = 1; } else { x = 2; }\n"
+                   "    } else {\n"
+                   "        if (d) { x = 3; } else { x = 4; }\n"
+                   "    }\n"
+                   "    return x;\n"
+                   "}\n"
+                   "func main() -> int { return nested(true, false) * 10 + nested(false, true); }\n") == 23,
+          "nested joins and a critical edge lower correctly");
+    check(runQuiet("func sum(n: int) -> int {\n"
+                   "    var s: int = 0;\n"
+                   "    var i: int = 0;\n"
+                   "    while (i < n) { s = s + i; i = i + 1; }\n"
+                   "    return s;\n"
+                   "}\n"
+                   "func main() -> int { return sum(10) + 13; }\n") == 58,
+          "a parameter carried around a loop keeps its value");
 }
 
 // Globals live in the image and read back.
@@ -3274,6 +3325,7 @@ int main() {
     testLocalAggregates();
     testCalls();
     testControl();
+    testPhiEdges();
     testGlobals();
     testStruct();
     testArray();

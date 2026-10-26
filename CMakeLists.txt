@@ -166,8 +166,9 @@ add_test(NAME lowering COMMAND lower_test)
 # IR.md section 7: a pass may change the shape and not the meaning. The
 # structural check runs at the entry, before any pass (gate L4).
 
-add_library(cider_opt STATIC src/opt/structural.cpp src/opt/memory.cpp
-                               src/opt/opt.cpp)
+add_library(cider_opt STATIC src/opt/structural.cpp src/opt/dominance.cpp
+                               src/opt/memory.cpp src/opt/mem2reg.cpp
+                               src/opt/philower.cpp src/opt/opt.cpp)
 target_link_libraries(cider_opt PUBLIC cider_ir cider_types)
 target_include_directories(cider_opt PUBLIC src)
 

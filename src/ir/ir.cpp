@@ -81,6 +81,7 @@ const char* opName(Op op) {
     switch (op) {
         case Op::Const: return "const";
         case Op::Copy: return "copy";
+        case Op::Phi: return "phi";
         case Op::Add: return "add";
         case Op::Sub: return "sub";
         case Op::Mul: return "mul";
@@ -137,6 +138,10 @@ std::string dumpModule(const Module& module) {
                 out += " " + std::string(irTypeName(instr.width));
                 for (const Value& operand : instr.operands) {
                     out += " %" + std::to_string(operand.id);
+                }
+                for (const PhiIncoming& incoming : instr.phiIncoming) {
+                    out += " [%" + std::to_string(incoming.value.id) +
+                           ", block " + std::to_string(incoming.block) + "]";
                 }
                 if (!instr.callee.empty()) {
                     out += " @" + instr.callee;

@@ -1491,6 +1491,10 @@ struct Runner {
                             fn.loc)) {
                 return false;
             }
+            // mem2reg may promote a parameter slot and use the parameter id
+            // as an ordinary SSA value. Keep the value register in step with
+            // the cell the old load would have read.
+            frame.slots[fn.params[i].id] = args[i];
         }
         // Only an alloca names slot storage; every other id that reaches an
         // addressBase is a computed address, so the set decides the branch.
@@ -1517,13 +1521,47 @@ struct Runner {
         // is the entry — the same assumption the emitter makes when it lays
         // out a function's blocks in order.
         size_t current = kZeroCell;
+        size_t previous = fn.blocks.size();
         for (;;) {
             if (++steps > kStepLimit) {
                 refuse(fn.loc, "vm step limit exhausted");
                 return false;
             }
             const Block& block = fn.blocks[current];
+            // All phis lead their block. Read every incoming value before
+            // writing any result, because a loop-carried phi may name another
+            // phi in the same block and the edge semantics are parallel.
+            std::vector<std::pair<Value, int64_t>> phiWrites;
+            uint64_t firstNonPhi = 0;
             for (const Instr& instr : block.body) {
+                if (instr.op != Op::Phi) {
+                    break;
+                }
+                if (previous >= fn.blocks.size()) {
+                    refuse(instr.loc, "vm entered a phi block without a predecessor");
+                    return false;
+                }
+                const uint32_t pred = fn.blocks[previous].label;
+                const Value* chosen = nullptr;
+                for (const PhiIncoming& incoming : instr.phiIncoming) {
+                    if (incoming.block == pred) {
+                        chosen = &incoming.value;
+                        break;
+                    }
+                }
+                if (chosen == nullptr || instr.results.size() != kOneCell) {
+                    refuse(instr.loc, "vm phi has no incoming for its predecessor");
+                    return false;
+                }
+                phiWrites.emplace_back(instr.results[0], read(*chosen));
+                ++firstNonPhi;
+            }
+            for (const auto& written : phiWrites) {
+                write(written.first, written.second);
+            }
+            for (uint64_t at = firstNonPhi;
+                 at < static_cast<uint64_t>(block.body.size()); ++at) {
+                const Instr& instr = block.body[at];
                 if (programDone) {
                     // A host call inside the block ended the program: the
                     // remaining instructions of this block never run, and
@@ -1553,6 +1591,7 @@ struct Runner {
                         refuse(term.loc, "vm branch names no block");
                         return false;
                     }
+                    previous = current;
                     current = found->second;
                     break;
                 }
@@ -1570,6 +1609,7 @@ struct Runner {
                         refuse(term.loc, "vm branch names no block");
                         return false;
                     }
+                    previous = current;
                     current = at->second;
                     break;
                 }
@@ -1779,6 +1819,11 @@ struct Runner {
             case Op::Copy:
                 write(instr.results[0], read(instr.operands[0]));
                 return true;
+            case Op::Phi:
+                // The block loop evaluates leading phis together, before any
+                // result is written. Reaching one here means it was not at
+                // the front of its block.
+                return refuse(instr.loc, "vm reached a phi out of place");
             case Op::Add:
             case Op::Sub:
             case Op::Mul:

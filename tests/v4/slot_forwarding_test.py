@@ -1,16 +1,16 @@
 #!/usr/bin/env python3
-"""v4 conservative slot-forwarding end-to-end test.
+"""v4 mem2reg and slot-forwarding end-to-end test.
 
-Task 4's first optimiser slice forwards a stored value to later loads of a
-non-escaping Alloca slot and drops stores that are overwritten before any read.
-It is deliberately local: no phi nodes, no full SSA construction.
+mem2reg promotes non-escaping scalar Alloca slots to SSA values and inserts
+real phis at joins and loop headers. forwardMemory remains the conservative
+fallback for every slot mem2reg leaves in memory.
 
 The unit tests pin the individual rules. This test pins the two things a unit
-test cannot: the pass runs inside the real optimizer pipeline, and native plus
-both VM legs still agree. The `work` function has only direct scalar slot
-accesses, so its optimized IR must lose loads and stores. `escape_of` takes a
-local's address, so the whole function is ineligible and its memory shape must
-stay exactly as the unoptimised IR wrote it.
+test cannot: the passes run inside the real optimizer pipeline, and native plus
+both VM legs still agree. `work`, `branchy` and `loop_swap` have only direct
+scalar slot accesses, so their optimized IR must lose loads and stores (and the
+control-flow functions must show phis). `escape_of` takes a local's address, so
+its memory shape must stay exactly as the unoptimised IR wrote it.
 """
 
 import os
@@ -39,8 +39,27 @@ func escape_of(x: i32) -> i32 {
     return a;
 }
 
+func branchy(c: bool, a: i32, b: i32) -> i32 {
+    var x: i32 = 0;
+    if (c) { x = a; } else { x = b; }
+    return x;
+}
+
+func loop_swap() -> i32 {
+    var x: i32 = 1;
+    var y: i32 = 2;
+    var i: i32 = 0;
+    while (i < 3) {
+        var t: i32 = x;
+        x = y;
+        y = t;
+        i = i + 1;
+    }
+    return x * 10 + y;
+}
+
 func _start() -> void {
-    var code: i32 = work(5) + escape_of(5);
+    var code: i32 = work(5) + escape_of(5) + branchy(true, 3, 4) + loop_swap();
     asm {
         "mov rax, 60"
         "mov edi, {code}"
@@ -100,10 +119,10 @@ def main():
                     failures.append(
                         "work stores did not fall: %d -> %d" %
                         (before_st, after_st))
-                if after_ld != 1 or after_st != 0:
+                if after_ld != 0 or after_st != 0:
                     failures.append(
                         "work memory shape is %d loads / %d stores, "
-                        "expected 1 / 0" % (after_ld, after_st))
+                        "expected 0 / 0" % (after_ld, after_st))
             escaped_before = function_body(unopt.stdout, "escape_of")
             escaped_after = function_body(opt.stdout, "escape_of")
             if escaped_before is None or escaped_after is None:
@@ -114,6 +133,16 @@ def main():
                     "an escaping Alloca changed shape: %r -> %r" % (
                         memory_counts(escaped_before),
                         memory_counts(escaped_after)))
+            for name in ("branchy", "loop_swap"):
+                body = function_body(opt.stdout, name)
+                if body is None:
+                    failures.append("%s is missing from the IR dump" % name)
+                elif memory_counts(body) != (0, 0):
+                    failures.append(
+                        "%s memory shape is %r, expected (0, 0)" %
+                        (name, memory_counts(body)))
+                elif " phi " not in body:
+                    failures.append("%s has no phi" % name)
 
         legs = [
             ("native", [CIDER, "run", source]),
@@ -122,9 +151,9 @@ def main():
         ]
         for name, command in legs:
             got = run(command, env)
-            if got.returncode != 30 or got.stdout != "" or got.stderr != "":
+            if got.returncode != 54 or got.stdout != "" or got.stderr != "":
                 failures.append(
-                    "%s: exit %r, stdout %r, stderr %r; expected 30, '', ''" %
+                    "%s: exit %r, stdout %r, stderr %r; expected 54, '', ''" %
                     (name, got.returncode, got.stdout, got.stderr))
 
     if failures:

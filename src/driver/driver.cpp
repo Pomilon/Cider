@@ -1514,6 +1514,11 @@ bool buildOneModule(BuildModule& module,
             error = pipe.diagnostic;
             return false;
         }
+        opt::PhiLowerResult lowered = opt::lowerPhis(*pipe.module);
+        if (!lowered.ok) {
+            error = lowered.error;
+            return false;
+        }
         codegen::EmitResult emitted =
             codegen::emit(*pipe.module, targetKind, module.isEntry);
         if (!emitted.ok) {
@@ -1922,6 +1927,11 @@ int runDriver(const std::vector<std::string>& args, std::string& out, std::strin
             raise(interpreted.signal);
         }
         return interpreted.exitCode;
+    }
+    opt::PhiLowerResult lowered = opt::lowerPhis(*pipe.module);
+    if (!lowered.ok) {
+        err = lowered.error + "\n";
+        return 1;
     }
     codegen::EmitResult emitted =
         codegen::emit(*pipe.module, targetKind, requireEntry);

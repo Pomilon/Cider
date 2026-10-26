@@ -713,6 +713,13 @@ private:
     }
 
     bool emitInstr(const ir::Function& fn, const ir::Instr& instr) {
+        if (instr.op == ir::Op::Phi) {
+            // The driver runs opt::lowerPhis before generation; reaching one
+            // here means a consumer skipped that step rather than that the
+            // emitter should silently pick an incoming edge.
+            refuse(instr.loc, "phi must be lowered before codegen");
+            return false;
+        }
         if (instr.op == ir::Op::Const) {
             // 32-bit immediates encode directly; anything wider materialises
             // through rax, because x86 has no 64-bit-immediate-to-memory mov.

@@ -1,9 +1,10 @@
-// opt.cpp — fold, forward slots, then dead-code elimination.
+// opt.cpp — mem2reg, fold, forward slots, then dead-code elimination.
 //
-// Folding first exposes more dead code; forwarding before DCE lets the values
-// it orphans be deleted in the same run; the structural check first means no
-// pass reads garbage. Each pass preserves the seven rows of IR.md §7, and
-// each row below says how.
+// Mem2reg first turns straight-line and phi-joined slot traffic into SSA, so
+// folding sees more constants; forwarding still covers every slot mem2reg
+// left in memory; DCE last deletes the values all three orphaned. The
+// structural check first means no pass reads garbage. Each pass preserves the
+// seven rows of IR.md §7, and each row below says how.
 
 #include "opt/opt.h"
 
@@ -97,6 +98,12 @@ std::optional<int64_t> foldOne(const ir::Instr& instr,
             bits = 32;
             isSigned = false;
             break;
+        case ir::IRType::U64:
+            // 64-bit unsigned arithmetic has no narrower truncation, but its
+            // division and comparisons are unsigned. The shift cases below
+            // still need the bit pattern rather than a signed value.
+            isSigned = false;
+            break;
         default:
             break;
     }
@@ -144,8 +151,19 @@ std::optional<int64_t> foldOne(const ir::Instr& instr,
                 holds = a >= b;
             }
         } else {
-            unsigned __int128 ua = static_cast<unsigned __int128>(a);
-            unsigned __int128 ub = static_cast<unsigned __int128>(b);
+            // A u64 operand is a 64-bit bit pattern. Casting its signed
+            // __int128 copy straight to unsigned would extend the sign into
+            // 128 bits and compare/divide the wrong value.
+            unsigned __int128 ua =
+                instr.width == ir::IRType::U64
+                    ? static_cast<unsigned __int128>(
+                          static_cast<uint64_t>(a))
+                    : static_cast<unsigned __int128>(a);
+            unsigned __int128 ub =
+                instr.width == ir::IRType::U64
+                    ? static_cast<unsigned __int128>(
+                          static_cast<uint64_t>(b))
+                    : static_cast<unsigned __int128>(b);
             if (instr.cmp == ir::CmpOp::Eq) {
                 holds = ua == ub;
             } else if (instr.cmp == ir::CmpOp::Ne) {
@@ -184,8 +202,16 @@ std::optional<int64_t> foldOne(const ir::Instr& instr,
             }
             out = instr.op == ir::Op::Div ? a / b : a % b;
         } else {
-            unsigned __int128 ua = static_cast<unsigned __int128>(a);
-            unsigned __int128 ub = static_cast<unsigned __int128>(b);
+            unsigned __int128 ua =
+                instr.width == ir::IRType::U64
+                    ? static_cast<unsigned __int128>(
+                          static_cast<uint64_t>(a))
+                    : static_cast<unsigned __int128>(a);
+            unsigned __int128 ub =
+                instr.width == ir::IRType::U64
+                    ? static_cast<unsigned __int128>(
+                          static_cast<uint64_t>(b))
+                    : static_cast<unsigned __int128>(b);
             out = static_cast<__int128>(
                 instr.op == ir::Op::Div ? ua / ub : ua % ub);
         }
@@ -210,6 +236,16 @@ std::optional<int64_t> foldOne(const ir::Instr& instr,
             count &= 31;
         } else {
             count &= 63;
+        }
+        // A u64 shift is a bit operation on the 64-bit pattern, not a signed
+        // arithmetic shift. Folding it through the signed __int128 copy would
+        // turn `0xFFFF800000000000 >> 32` into a sign-filled result.
+        if (instr.width == ir::IRType::U64) {
+            uint64_t pattern = static_cast<uint64_t>(a);
+            if (instr.op == ir::Op::Shl) {
+                return static_cast<int64_t>(pattern << count);
+            }
+            return static_cast<int64_t>(pattern >> count);
         }
         if (instr.op == ir::Op::Shl) {
             out = a << count;
@@ -275,6 +311,9 @@ uint64_t deadCode(ir::Module& module) {
                         for (const ir::Value& word : arg.words) {
                             used.insert(word.id);
                         }
+                    }
+                    for (const ir::PhiIncoming& incoming : instr.phiIncoming) {
+                        used.insert(incoming.value.id);
                     }
                     // A slot or a stored value is a use like any other: the
                     // address a load reads and the value a store writes keep
@@ -435,6 +474,11 @@ OptResult run(ir::Module& module) {
                          0, 0};
     }
     OptResult result{true, "", 0, 0};
+    PromotionResult promotion = mem2reg(module);
+    result.promoted = promotion.promotedSlots;
+    result.phis = promotion.phisInserted;
+    result.loadsPromoted = promotion.loadsReplaced;
+    result.storesPromoted = promotion.storesRemoved;
     result.folded = foldConsts(module);
     MemoryResult memory = forwardMemory(module);
     result.forwarded = memory.forwarded;
