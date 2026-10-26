@@ -5,9 +5,9 @@
 // v2's lowering defined 600 symbols of its own, which is a second authority
 // for declarations through a side door.
 //
-// This slice emits native Linux (SysV) and UEFI (Microsoft x64) assembly.
-// Every other target is refused with a diagnostic naming it, never silently
-// approximated.
+// This slice emits native Linux (SysV), PomeOS userland (SysV plus PomeOS
+// kernel syscalls), and UEFI (Microsoft x64) assembly. Every other target is
+// refused with a diagnostic naming it, never silently approximated.
 //
 // Registers are not allocated here: every SSA value lives in its own stack
 // slot and the six scratch registers carry it between slot and operation.

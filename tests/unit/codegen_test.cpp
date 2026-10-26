@@ -405,6 +405,95 @@ void testNativeEntry() {
 // The target is part of the emitter's interface. Native remains byte-for-byte
 // identical, and a known-but-unimplemented target refuses by its own name
 // rather than pretending to be a different target.
+void testPomeosEntry() {
+    std::printf("pomeos source entry\n");
+    Built direct = buildAs(
+        "func _start() -> void {\n"
+        "    asm { \"mov rax, 2\" \"xor rdi, rdi\" \"syscall\" }\n"
+        "}\n",
+        cider::target::Kind::Pomeos, false, false, false);
+    check(direct.ok, "a parameterless PomeOS _start emits: " + direct.stage);
+    if (direct.ok) {
+        const std::string& text = direct.asmText;
+        check(text.find(".globl _start\n") != std::string::npos,
+              "the PomeOS entry is global");
+        check(text.find("_start:\n") != std::string::npos,
+              "the source function is the PomeOS entry");
+        check(text.find("mov rax, 2") != std::string::npos,
+              "the source's PomeOS syscall number is passed through");
+        check(text.find("mov rax, 60") == std::string::npos &&
+                  text.find("mov eax, 60") == std::string::npos,
+              "the emitter does not rewrite Linux's exit number");
+        check(text.find("call main") == std::string::npos,
+              "the emitter never calls main");
+        for (const char* forbidden :
+             {"_setjmp", "longjmp", "cider_print", "cider_panic",
+              "cider_alloc", "cider_free", "cider_realloc"}) {
+            check(text.find(forbidden) == std::string::npos,
+                  std::string("no hidden PomeOS runtime symbol: ") + forbidden);
+        }
+    }
+
+    Built args = buildAs(
+        "func _start(argc: int, argv: **char) -> void { }\n",
+        cider::target::Kind::Pomeos, false, false, false);
+    check(args.ok, "the PomeOS argc/argv entry emits: " + args.stage);
+    if (args.ok) {
+        check(args.asmText.find("rdi") != std::string::npos,
+              "PomeOS argc arrives in rdi");
+        check(args.asmText.find("rsi") != std::string::npos,
+              "PomeOS argv arrives in rsi");
+    }
+
+    Built missing = buildAs("func main() -> int { return 0; }\n",
+                            cider::target::Kind::Pomeos, false, false, false);
+    check(!missing.ok, "PomeOS rejects a main-only program");
+    check(missing.stage.find("_start") != std::string::npos,
+          "the PomeOS missing-entry diagnostic names _start: " +
+              missing.stage);
+
+    Built one = buildAs("func _start(argc: int) -> void { }\n",
+                        cider::target::Kind::Pomeos, false, false, false);
+    check(!one.ok, "PomeOS rejects a one-argument _start");
+    check(one.stage.find("argc: int, argv: **char") != std::string::npos,
+          "the PomeOS arity diagnostic names the reference shape: " +
+              one.stage);
+
+    Built badArgv = buildAs(
+        "func _start(argc: int, argv: **u8) -> void { }\n",
+        cider::target::Kind::Pomeos, false, false, false);
+    check(!badArgv.ok, "PomeOS rejects a non-char argv");
+    check(badArgv.stage.find("**char") != std::string::npos,
+          "the argv diagnostic names **char: " + badArgv.stage);
+
+    Built ret = buildAs("func _start() -> int { return 0; }\n",
+                        cider::target::Kind::Pomeos, false, false, false);
+    check(!ret.ok, "PomeOS rejects a value-returning _start");
+    check(ret.stage.find("must return void") != std::string::npos,
+          "the PomeOS return diagnostic names void: " + ret.stage);
+
+    Built msabi = buildAs("msabi func _start() -> void { }\n",
+                          cider::target::Kind::Pomeos, false, false, false);
+    check(!msabi.ok, "PomeOS rejects an msabi _start");
+    check(msabi.stage.find("sysv") != std::string::npos,
+          "the PomeOS ABI diagnostic names sysv: " + msabi.stage);
+
+    Built nulls = buildAs(
+        "func read(p: *int) -> int { return *p; }\n"
+        "func _start() -> void {\n"
+        "    var x: int = 7;\n"
+        "    var y: int = read(&x);\n"
+        "}\n",
+        cider::target::Kind::Pomeos, false, false, false);
+    check(nulls.ok, "PomeOS pointer dereference emits: " + nulls.stage);
+    if (nulls.ok) {
+        check(nulls.asmText.find(".L_pomeos_null_") != std::string::npos,
+              "PomeOS checks a computed pointer before dereference");
+        check(nulls.asmText.find("ud2") != std::string::npos,
+              "a null PomeOS dereference traps");
+    }
+}
+
 void testTargetDispatch() {
     std::printf("target dispatch\n");
     Built built = build("func main() -> int { return 3; }\n");
@@ -3176,6 +3265,7 @@ int main() {
     testGenericFieldDefaults();
     testPrivateMethods();
     testNativeEntry();
+    testPomeosEntry();
     testTargetDispatch();
     testUefiEntry();
     testSizeofExpr();

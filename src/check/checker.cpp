@@ -766,6 +766,7 @@ const FuncDecl* Checker::funcSpelling(const std::string& module,
 // cannot disagree about what a valid entry is.
 bool Checker::checkEntry(Program& program) {
     const bool uefi = target_ == target::Kind::Uefi;
+    const bool pomeos = target_ == target::Kind::Pomeos;
     const std::string expected = uefi ? "efi_main" : "_start";
     const FuncDecl* entry = nullptr;
     for (const std::unique_ptr<Decl>& decl : program.decls) {
@@ -838,8 +839,40 @@ bool Checker::checkEntry(Program& program) {
         return true;
     }
     if (!entry->params.empty()) {
-        fail(entry->pos, "_start takes no parameters");
-        return false;
+        if (pomeos) {
+            // PomeOS enters `_start` with argc in rdi and argv in rsi. A
+            // program that does not need them may declare a parameterless
+            // entry; one that does declares the reference signature. Both
+            // are SysV, so the emitter needs no argument shuffling.
+            if (sig.arity() != 2) {
+                fail(entry->pos,
+                     "_start takes no parameters or (argc: int, argv: **char)");
+                return false;
+            }
+            const Type* argcType = sig.parameters()[0].type;
+            if (argcType == nullptr || argcType->kind() != Kind::Basic ||
+                *argcType->basic() != BasicKind::I32) {
+                fail(entry->pos, "_start argc parameter must be int");
+                return false;
+            }
+            const Type* argvType = sig.parameters()[1].type;
+            const Type* pointer = argvType != nullptr &&
+                                          argvType->kind() == Kind::Pointer
+                                      ? argvType->pointee()
+                                      : nullptr;
+            const Type* character = pointer != nullptr &&
+                                            pointer->kind() == Kind::Pointer
+                                        ? pointer->pointee()
+                                        : nullptr;
+            if (character == nullptr || character->kind() != Kind::Basic ||
+                *character->basic() != BasicKind::Char) {
+                fail(entry->pos, "_start argv parameter must be **char");
+                return false;
+            }
+        } else {
+            fail(entry->pos, "_start takes no parameters");
+            return false;
+        }
     }
     const Type* ret = sig.returnType();
     if (ret == nullptr || ret->kind() != Kind::Void) {

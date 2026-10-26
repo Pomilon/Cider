@@ -263,6 +263,16 @@ add_test(NAME v4_string_owning
 set_tests_properties(v4_string_owning PROPERTIES
   ENVIRONMENT "CIDER_BIN=${CMAKE_BINARY_DIR}/cider")
 
+# PomeOS: the emitter shares the SysV x86-64 path with native, but the target
+# names its entry (`_start`), object (ELF64), link script (PomeOS
+# programs/link.ld), and syscall numbers (PomeOS's own). The link smoke uses
+# the reference script; `run` refuses because the image is not a host binary.
+add_test(NAME v4_pomeos
+         COMMAND ${Python3_EXECUTABLE}
+                 ${CMAKE_SOURCE_DIR}/tests/v4/pomeos_target_test.py)
+set_tests_properties(v4_pomeos PROPERTIES
+  ENVIRONMENT "CIDER_BIN=${CMAKE_BINARY_DIR}/cider")
+
 # --- Targets -------------------------------------------------------------------
 #
 # OUTPUT.md §2: a target is a description, not a layer. The descriptor is the

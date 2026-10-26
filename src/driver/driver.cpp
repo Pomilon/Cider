@@ -617,6 +617,13 @@ int runDriver(const std::vector<std::string>& args, std::string& out, std::strin
               "and link it with scripts/link_uefi.sh\n";
         return 2;
     }
+    if (targetKind == target::Kind::Pomeos && command == "run") {
+        err = "target pomeos produces a PomeOS image, not a host executable: "
+              "compile with -o <file.asm>, assemble it, link it with the "
+              "PomeOS programs/link.ld script, and pack the ELF with "
+              "pxe_packer.py\n";
+        return 2;
+    }
     if (command == "compile") {
         if (output.empty()) {
             out = emitted.text;

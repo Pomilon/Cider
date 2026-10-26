@@ -28,7 +28,10 @@ void check(bool holds, const std::string& what) {
 
 using cider::target::Abi;
 using cider::target::Kind;
+using cider::target::Link;
+using cider::target::Object;
 using cider::target::Output;
+using cider::target::Syscall;
 
 void testNative() {
     std::printf("native\n");
@@ -38,6 +41,9 @@ void testNative() {
     check(info.abi == Abi::SysV, "ABI is SysV");
     check(std::string(info.entry) == "_start", "entry is _start");
     check(info.output == Output::Asm, "output is assembly");
+    check(info.object == Object::Elf64, "object is ELF64");
+    check(info.link == Link::HostElf, "link is host ld -nostdlib");
+    check(info.syscall == Syscall::Linux, "syscalls are Linux");
     check(info.allowsAsm, "inline assembly is allowed");
     check(info.nullFaults, "address zero is unmapped, so a null access faults");
 }
@@ -50,6 +56,9 @@ void testUefi() {
     check(info.abi == Abi::MsAbi, "ABI is Microsoft x64");
     check(std::string(info.entry) == "efi_main", "entry is efi_main");
     check(info.output == Output::Pe32Plus, "output is PE32+");
+    check(info.object == Object::Pe32Plus, "object is PE32+");
+    check(info.link == Link::UefiPe, "link is the UEFI PE script");
+    check(info.syscall == Syscall::Firmware, "services are firmware calls");
     check(info.allowsAsm, "inline assembly is allowed for bootstrap code");
     check(!info.nullFaults, "null accesses need emitted checks");
 }
@@ -59,9 +68,12 @@ void testPomeos() {
     const auto& info = cider::target::info(Kind::Pomeos);
     check(info.kind == Kind::Pomeos, "kind is pomeos");
     check(std::string(info.name) == "pomeos", "name is pomeos");
-    check(info.abi == Abi::PomeOS, "ABI is PomeOS");
+    check(info.abi == Abi::PomeOS, "ABI tag is PomeOS");
     check(std::string(info.entry) == "_start", "entry is _start");
     check(info.output == Output::Asm, "output is assembly");
+    check(info.object == Object::Elf64, "object is ELF64");
+    check(info.link == Link::PomeosElf, "link is the PomeOS link script");
+    check(info.syscall == Syscall::PomeOS, "syscalls are PomeOS");
     check(info.allowsAsm, "inline assembly is allowed");
     check(!info.nullFaults, "null accesses need emitted checks on bare metal");
 }
@@ -72,6 +84,9 @@ void testVm() {
     check(info.kind == Kind::Vm, "kind is vm");
     check(std::string(info.name) == "vm", "name is vm");
     check(info.output == Output::Interpreted, "output is interpreted");
+    check(info.object == Object::None, "no object format");
+    check(info.link == Link::None, "no link step");
+    check(info.syscall == Syscall::None, "no machine syscall convention");
     check(std::string(info.entry) == "_start", "entry is _start");
     check(info.allowsAsm, "asm statements are interpreted where supported");
 }

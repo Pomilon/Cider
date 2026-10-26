@@ -13,13 +13,15 @@ namespace {
 // unmapped on Linux, while UEFI and bare-metal PomeOS do not promise that, so
 // those targets need an emitted check. The VM detects the condition itself.
 const Info kNative{Kind::Native, "native", Abi::SysV, "_start", Output::Asm,
-                   true, true};
+                   Object::Elf64, Link::HostElf, Syscall::Linux, true, true};
 const Info kPomeos{Kind::Pomeos, "pomeos", Abi::PomeOS, "_start", Output::Asm,
-                   true, false};
+                   Object::Elf64, Link::PomeosElf, Syscall::PomeOS, true,
+                   false};
 const Info kUefi{Kind::Uefi, "uefi", Abi::MsAbi, "efi_main", Output::Pe32Plus,
-                 true, false};
-const Info kVm{Kind::Vm, "vm", Abi::SysV, "_start", Output::Interpreted, true,
-               false};
+                 Object::Pe32Plus, Link::UefiPe, Syscall::Firmware, true,
+                 false};
+const Info kVm{Kind::Vm, "vm", Abi::SysV, "_start", Output::Interpreted,
+               Object::None, Link::None, Syscall::None, true, false};
 
 }  // namespace
 

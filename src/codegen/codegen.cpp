@@ -1,4 +1,4 @@
-// codegen.cpp — checked IR to x86-64 assembly (SysV, Linux).
+// codegen.cpp — checked IR to x86-64 assembly (SysV; Linux/PomeOS services).
 //
 // Intel syntax with `.intel_syntax noprefix`, so plain `cc file.s` assembles
 // it. Every SSA value lives in its own stack slot and six scratch registers
@@ -190,11 +190,12 @@ public:
 
 private:
     // A diagnosed trap is a language result, not a machine accident. Native
-    // has no libc, so the line goes out with the write syscall and the exit
-    // status is 2; UEFI policy stays ud2 and silent. Undiagnosed reasons keep
-    // the same ud2 the old emitter used.
+    // has no libc, so the line goes out with the Linux write syscall and the
+    // exit status is 2. UEFI and PomeOS have no compiler-owned target service
+    // for a diagnostic, and borrowing Linux's numbers would be a lie about
+    // the ABI, so they trap silently. Undiagnosed reasons keep the same ud2.
     bool emitTrapReason(ir::TrapReason reason) {
-        if (target_ == Target::Uefi) {
+        if (target_ != Target::Native) {
             out_ += "  ud2\n";
             return true;
         }
@@ -233,14 +234,16 @@ private:
         return true;
     }
 
-    // UEFI's null policy is explicit: the target does not promise a hardware
-    // fault for a zero pointer, so codegen checks before the dereference.
-    void emitUefiNullCheck(const std::string& reg) {
-        if (target_ != Target::Uefi) {
+    // The target's null policy is explicit: a target whose address zero is
+    // not guaranteed unmapped gets a check before a computed dereference.
+    // The same check serves UEFI and PomeOS; only the label names the target.
+    void emitNullCheck(const std::string& reg) {
+        const target::Info& info = target::info(target_);
+        if (info.nullFaults) {
             return;
         }
-        const std::string ok =
-            ".L_uefi_null_" + std::to_string(uefiNullSeq_++);
+        const std::string ok = ".L_" + std::string(info.name) + "_null_" +
+                               std::to_string(nullSeq_++);
         out_ += "  test " + reg + ", " + reg + "\n";
         out_ += "  jnz " + ok + "\n";
         out_ += "  ud2\n";
@@ -248,13 +251,16 @@ private:
     }
 
     // The process entry. v4 has no startup shim: the program defines
-    // `func _start() -> void` itself and the kernel enters there. The
-    // compiler only validates the source signature; it emits no trampoline,
-    // no automatic main call, and no automatic exit.
+    // `func _start() -> void` itself and the kernel enters there. PomeOS also
+    // enters with argc in rdi and argv in rsi, so it may declare the reference
+    // signature; both forms are ordinary SysV parameters. The compiler only
+    // validates the source signature; it emits no trampoline, no automatic
+    // main call, and no automatic exit.
     bool emitEntry() {
         if (target_ == Target::Uefi) {
             return emitUefiEntry();
         }
+        const bool pomeos = target_ == Target::Pomeos;
         const ir::Function* startFn = nullptr;
         for (const ir::Function& fn : module_.functions) {
             if (fn.name == "_start") {
@@ -267,16 +273,44 @@ private:
                    "no entry function: define func _start() -> void");
             return false;
         }
-        if (!startFn->signature.parameters().empty()) {
-            refuse(startFn->loc, "_start takes no parameters");
-            return false;
+        const Signature& sig = startFn->signature;
+        if (!sig.parameters().empty()) {
+            if (!pomeos) {
+                refuse(startFn->loc, "_start takes no parameters");
+                return false;
+            }
+            if (sig.arity() != 2) {
+                refuse(startFn->loc,
+                       "_start takes no parameters or (argc: int, argv: **char)");
+                return false;
+            }
+            const Type* argcType = sig.parameters()[0].type;
+            if (argcType == nullptr || argcType->kind() != Kind::Basic ||
+                *argcType->basic() != BasicKind::I32) {
+                refuse(startFn->loc, "_start argc parameter must be int");
+                return false;
+            }
+            const Type* argvType = sig.parameters()[1].type;
+            const Type* pointer = argvType != nullptr &&
+                                          argvType->kind() == Kind::Pointer
+                                      ? argvType->pointee()
+                                      : nullptr;
+            const Type* character = pointer != nullptr &&
+                                            pointer->kind() == Kind::Pointer
+                                        ? pointer->pointee()
+                                        : nullptr;
+            if (character == nullptr || character->kind() != Kind::Basic ||
+                *character->basic() != BasicKind::Char) {
+                refuse(startFn->loc, "_start argv parameter must be **char");
+                return false;
+            }
         }
-        const Type* ret = startFn->signature.returnType();
+        const Type* ret = sig.returnType();
         if (ret == nullptr || ret->kind() != Kind::Void) {
             refuse(startFn->loc, "_start must return void");
             return false;
         }
-        if (startFn->signature.abi() != Abi::SysV) {
+        if (sig.abi() != Abi::SysV) {
             refuse(startFn->loc, "_start must use the sysv calling convention");
             return false;
         }
@@ -930,7 +964,7 @@ private:
                 emitLoadMem(atAddr(base, instr.displacement), instr.type, instr.width);
             } else {
                 out_ += "  mov rax, " + slot(instr.addressBase.id) + "\n";
-                emitUefiNullCheck("rax");
+                emitNullCheck("rax");
                 emitLoadMem(atAddr("rax", instr.displacement), instr.type, instr.width);
             }
             if (instr.width == ir::IRType::F32) {
@@ -960,7 +994,7 @@ private:
                 emitStoreMem(atAddr(base, instr.displacement), instr.type, instr.width);
             } else {
                 out_ += "  mov rcx, " + slot(instr.addressBase.id) + "\n";
-                emitUefiNullCheck("rcx");
+                emitNullCheck("rcx");
                 emitStoreMem(atAddr("rcx", instr.displacement), instr.type, instr.width);
             }
             return true;
@@ -1065,7 +1099,7 @@ private:
             const uint64_t stageBase = instr.call.indirect ? 1 : 0;
             if (instr.call.indirect) {
                 out_ += "  mov rax, " + slot(instr.calleeValue.id) + "\n";
-                emitUefiNullCheck("rax");
+                emitNullCheck("rax");
             }
             if (stackWords != 0 || stackPad != 0) {
                 // The spill goes down as pushes and nothing else: the
@@ -1711,7 +1745,7 @@ private:
     // Unique suffix for u64-to-float conversion labels (int→float casts
     // need a two-path sequence; see emitCast).
     uint64_t cvtLabelSeq_ = 0;
-    uint64_t uefiNullSeq_ = 0;
+    uint64_t nullSeq_ = 0;
     uint64_t trapMessageSeq_ = 0;
     bool failed_ = false;
     std::string error_;
@@ -1731,11 +1765,14 @@ EmitResult emit(const ir::Module& module, Target kind) {
     switch (kind) {
         case Target::Native:
             return emitNative(module);
+        case Target::Pomeos: {
+            Emitter emitter(module, Target::Pomeos);
+            return emitter.run();
+        }
         case Target::Uefi: {
             Emitter emitter(module, Target::Uefi);
             return emitter.run();
         }
-        case Target::Pomeos:
         case Target::Vm:
             break;
     }
