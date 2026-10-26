@@ -22,10 +22,13 @@
 #include <cstdlib>
 #include <cstring>
 #include <csignal>
+#include <filesystem>
 #include <fstream>
+#include <functional>
 #include <limits.h>
 #include <map>
 #include <new>
+#include <set>
 #include <sstream>
 #include <stdexcept>
 #include <sys/wait.h>
@@ -34,6 +37,7 @@
 
 #include "check/checker.h"
 #include "codegen/codegen.h"
+#include "interface/interface.h"
 #include "lexer/lexer.h"
 #include "lower/lower.h"
 #include "opt/opt.h"
@@ -57,6 +61,10 @@ struct Pipeline {
     std::unique_ptr<TypeContext> types;
     std::unique_ptr<Program> program;
     std::unique_ptr<ir::Module> module;
+    // SHA-256 of every interface this front end loaded, by module. An
+    // emitted interface records these as dependency hashes and the build
+    // cache keys on them.
+    std::map<std::string, std::string> interfaceHashes;
 };
 
 std::string at(const Position& pos) {
@@ -64,6 +72,8 @@ std::string at(const Position& pos) {
 }
 
 std::string readFile(const std::string& path, bool& found);
+bool writeFile(const std::string& path, const std::string& text);
+bool endsWith(const std::string& text, const std::string& suffix);
 // The bytes a read from standard input answers on the interpreter leg.
 // The compiled leg's child inherits the same stream, so both see the same
 // bytes; a terminal has nothing pending to give, and reading it would wait
@@ -209,6 +219,128 @@ std::vector<std::string> moduleRoots(const std::string& entryDir) {
     return roots;
 }
 
+// Where `import name;` finds its source. A dotted name prefers the library
+// root (CIDER_LIB) and then the v2 search roots; a plain name stays
+// entry-relative. An empty answer means no source exists, not that the module
+// is unknown: an interface may still describe it.
+std::string findModuleFile(const std::string& name, const std::string& lib,
+                           const std::vector<std::string>& roots) {
+    std::string rel = name;
+    for (char& c : rel) {
+        if (c == '.') {
+            c = '/';
+        }
+    }
+    if (name.find('.') != std::string::npos) {
+        if (!lib.empty()) {
+            std::string path =
+                normalizePath(joinPath(lib, rel + ".cid"));
+            if (access(path.c_str(), R_OK) == 0) {
+                return path;
+            }
+        }
+        for (const std::string& root : roots) {
+            std::string path =
+                normalizePath(joinPath(root, rel + ".cid"));
+            if (access(path.c_str(), R_OK) == 0) {
+                return path;
+            }
+        }
+        return "";
+    }
+    for (const std::string& root : roots) {
+        std::string path = normalizePath(joinPath(root, name + ".cid"));
+        if (access(path.c_str(), R_OK) == 0) {
+            return path;
+        }
+    }
+    return "";
+}
+
+std::string interfaceArtifactPath(const std::string& objectPath) {
+    constexpr std::string::difference_type kObjectSuffix = 2;
+    if (endsWith(objectPath, ".o")) {
+        return objectPath.substr(
+                   0, objectPath.size() -
+                          static_cast<std::string::size_type>(kObjectSuffix)) +
+               ".cidm";
+    }
+    return objectPath + ".cidm";
+}
+
+std::string interfaceSearchPath(const std::string& dir,
+                                const std::string& module) {
+    if (dir.empty()) {
+        return "";
+    }
+    return normalizePath(
+        joinPath(dir, interfacefmt::modulePath(module) + ".cidm"));
+}
+
+void collectImportNames(const Program& program,
+                        std::vector<std::string>& names) {
+    for (const std::unique_ptr<Decl>& decl : program.decls) {
+        std::string name;
+        if (const auto* import = dynamic_cast<const ImportDecl*>(decl.get())) {
+            name = import->module;
+        } else if (const auto* from =
+                       dynamic_cast<const FromImport*>(decl.get())) {
+            name = from->module;
+        }
+        if (name.empty()) {
+            continue;
+        }
+        bool seen = false;
+        for (const std::string& have : names) {
+            if (have == name) {
+                seen = true;
+                break;
+            }
+        }
+        if (!seen) {
+            names.push_back(std::move(name));
+        }
+    }
+}
+
+std::vector<interfacefmt::Dependency> interfaceDependencies(
+    const Program& program, const Pipeline& pipe) {
+    std::vector<std::string> names;
+    collectImportNames(program, names);
+    std::vector<interfacefmt::Dependency> deps;
+    for (const std::string& name : names) {
+        interfacefmt::Dependency dep;
+        dep.module = name;
+        auto found = pipe.interfaceHashes.find(name);
+        if (found != pipe.interfaceHashes.end()) {
+            dep.hash = found->second;
+        }
+        deps.push_back(std::move(dep));
+    }
+    return deps;
+}
+
+// The interface beside an object is a sidecar, not a new required input. A
+// failed write removes the object so a half-finished compile leaves neither
+// artifact claiming to be current.
+bool writeModuleInterface(const Pipeline& pipe, const std::string& module,
+                          const std::string& sourceText,
+                          const std::string& objectPath, std::string& error) {
+    if (pipe.program == nullptr) {
+        error = "cannot emit an interface for a missing module\n";
+        return false;
+    }
+    interfacefmt::RenderResult rendered = interfacefmt::render(
+        module, *pipe.program, interfacefmt::sha256(sourceText),
+        interfaceDependencies(*pipe.program, pipe));
+    const std::string path = interfaceArtifactPath(objectPath);
+    if (!writeFile(path, rendered.text)) {
+        error = "cannot write interface '" + path + "'\n";
+        return false;
+    }
+    return true;
+}
+
 void faultAlloc(const char* stage);
 
 struct FrontOptions {
@@ -223,6 +355,12 @@ struct FrontOptions {
     // file's, so its names match the importing entry object's references.
     bool mangleAll = false;
     std::string module = "main";
+    // Interface artifacts replace imported source bodies. Off by default,
+    // so every existing path keeps resolving source exactly as before.
+    bool useInterfaces = false;
+    bool requireInterfaces = false;
+    bool allowStaleInterfaces = false;
+    std::string interfaceDir;
 };
 
 bool runFront(const std::string& file, const std::string& text, Pipeline& pipe,
@@ -268,8 +406,8 @@ bool runFront(const std::string& file, const std::string& text, Pipeline& pipe,
         return program;
     };
     const std::vector<std::string> roots = moduleRoots(entryDir);
-    resolve::Resolver::ModuleLoader load =
-        [&lib, &loadFile, &roots](const std::string& name) -> std::unique_ptr<Program> {
+    auto loadSource = [&lib, &loadFile,
+                       &roots](const std::string& name) -> std::unique_ptr<Program> {
         if (name.find('.') != std::string::npos) {
             std::string rel = name;
             for (char& c : rel) {
@@ -306,6 +444,110 @@ bool runFront(const std::string& file, const std::string& text, Pipeline& pipe,
         }
         return nullptr;
     };
+    resolve::Resolver::ModuleLoader load =
+        [&lib, &roots, &loadSource, &pipe, &loadDiag,
+         &opts](const std::string& name) -> std::unique_ptr<Program> {
+        if (opts.useInterfaces) {
+            const std::string path = interfaceSearchPath(opts.interfaceDir, name);
+            bool found = false;
+            const std::string text = readFile(path, found);
+            if (found) {
+                interfacefmt::Header header;
+                std::string headerError;
+                if (!interfacefmt::parseHeader(text, header, headerError)) {
+                    if (opts.allowStaleInterfaces) {
+                        return loadSource(name);
+                    }
+                    loadDiag += path + ": invalid module interface: " +
+                                headerError + "\n";
+                    return nullptr;
+                }
+                if (header.format != interfacefmt::kFormatVersion) {
+                    if (opts.allowStaleInterfaces) {
+                        return loadSource(name);
+                    }
+                    loadDiag += path + ": interface format " +
+                                std::to_string(header.format) +
+                                " is not supported (this compiler reads " +
+                                std::to_string(interfacefmt::kFormatVersion) +
+                                "); rebuild the interface\n";
+                    return nullptr;
+                }
+                if (header.compiler != interfacefmt::kCompilerTag) {
+                    if (opts.allowStaleInterfaces) {
+                        return loadSource(name);
+                    }
+                    loadDiag += path + ": interface was built by '" +
+                                header.compiler + "', this compiler is '" +
+                                interfacefmt::kCompilerTag +
+                                "'; rebuild the interface\n";
+                    return nullptr;
+                }
+                if (header.module != name) {
+                    if (opts.allowStaleInterfaces) {
+                        return loadSource(name);
+                    }
+                    loadDiag += path + ": interface declares module '" +
+                                header.module + "', not '" + name + "'\n";
+                    return nullptr;
+                }
+                // Record the hash even when the body forces a source
+                // fallback: it is still this dependency's interface
+                // identity for the caller's cache key.
+                pipe.interfaceHashes[name] = interfacefmt::sha256(text);
+                if (!header.requiresSource.empty()) {
+                    std::unique_ptr<Program> source = loadSource(name);
+                    if (source == nullptr) {
+                        loadDiag += path + ": interface requires source (" +
+                                    header.requiresSource +
+                                    ") but module '" + name +
+                                    "' has no source\n";
+                    }
+                    return source;
+                }
+                // A present source must be the one this interface was
+                // rendered from. A missing source is the separate-compile
+                // case and is trusted.
+                const std::string sourcePath =
+                    findModuleFile(name, lib, roots);
+                if (!sourcePath.empty()) {
+                    bool sourceFound = false;
+                    const std::string sourceText =
+                        readFile(sourcePath, sourceFound);
+                    if (sourceFound &&
+                        interfacefmt::sha256(sourceText) != header.sourceHash) {
+                        if (opts.allowStaleInterfaces) {
+                            return loadSource(name);
+                        }
+                        loadDiag += sourcePath +
+                                    ": module interface '" + path +
+                                    "' is stale (source changed); rebuild "
+                                    "the interface\n";
+                        return nullptr;
+                    }
+                }
+                Lexer interfaceLexer(path, text);
+                std::vector<Token> interfaceTokens = interfaceLexer.lex();
+                for (const LexError& error : interfaceLexer.errors()) {
+                    loadDiag += at(error.pos) + ": " + error.message + "\n";
+                }
+                Parser interfaceParser(path, std::move(interfaceTokens), true);
+                std::unique_ptr<Program> program = interfaceParser.parse();
+                for (const ParseError& error : interfaceParser.errors()) {
+                    loadDiag += at(error.pos) + ": " + error.message + "\n";
+                }
+                program->isInterface = true;
+                return program;
+            }
+            if (opts.requireInterfaces) {
+                loadDiag += "missing interface for module '" + name +
+                            "' at '" + path +
+                            "' (required by --require-interface)\n";
+                return nullptr;
+            }
+        }
+        return loadSource(name);
+    };
     Lexer lexer(file, text);
     std::vector<Token> tokens = lexer.lex();
     faultAlloc("lex");
@@ -324,10 +566,13 @@ bool runFront(const std::string& file, const std::string& text, Pipeline& pipe,
     resolve::Resolver resolver(*pipe.types, std::move(load),
                                opts.targetKind, opts.mangleAll);
     if (!resolver.resolveProgram(*pipe.program, opts.module)) {
+        // A loader problem (missing/stale/incompatible interface) is the
+        // cause; the resolver's "cannot find module" is the symptom. Lead
+        // with the cause.
+        pipe.diagnostic += loadDiag;
         for (const resolve::ResolveError& error : resolver.errors()) {
             pipe.diagnostic += at(error.pos) + ": " + error.message + "\n";
         }
-        pipe.diagnostic += loadDiag;
         return false;
     }
     if (!loadDiag.empty()) {
@@ -349,7 +594,8 @@ bool runFront(const std::string& file, const std::string& text, Pipeline& pipe,
     // checker's tables: a generic specialization is walked from its template
     // body, and that body belongs to the module that declared it. Check the
     // imports with the lowering sink detached, then lower the requested
-    // module alone. No imported definition reaches this object's IR.
+    // module alone. An interface module carries no bodies: its declaration
+    // types came from the header pass, so there is nothing here to check.
     if (!opts.wholeProgram) {
         checker.setSink(nullptr);
         for (const std::string& module : resolver.moduleOrder()) {
@@ -357,6 +603,9 @@ bool runFront(const std::string& file, const std::string& text, Pipeline& pipe,
                 continue;
             }
             Program* imported = resolver.programOf(module);
+            if (imported != nullptr && imported->isInterface) {
+                continue;
+            }
             if (imported == nullptr ||
                 !checker.checkProgram(*imported, module)) {
                 for (const check::CheckError& error : checker.errors()) {
@@ -1006,18 +1255,394 @@ int linkInputs(target::Kind targetKind, const std::vector<std::string>& inputs,
 
 }  // namespace
 
+// --- Module build ------------------------------------------------------------
+//
+// `build` is the orchestration layer around the existing object emitter and
+// linker. It discovers the import graph from source, compiles each module in
+// dependency order against the interfaces of the modules before it, and keys
+// every object and interface by the module's source hash, its dependency keys,
+// the target and the two interface version numbers. An unchanged module is
+// never re-parsed or re-lowered: its cached object and interface are copied
+// forward.
+namespace {
+
+struct BuildModule {
+    std::string name;
+    std::string path;
+    std::string text;
+    std::string sourceHash;
+    std::string cacheKey;
+    std::string interfaceText;
+    std::string interfaceHash;
+    std::string objectPath;
+    std::vector<std::string> deps;
+    bool isEntry = false;
+};
+
+bool ensureDirectory(const std::string& path, std::string& error) {
+    std::error_code failure;
+    std::filesystem::create_directories(path, failure);
+    if (failure) {
+        error = "cannot create directory '" + path + "': " +
+                failure.message() + "\n";
+        return false;
+    }
+    return true;
+}
+
+bool ensureParentDirectory(const std::string& path, std::string& error) {
+    std::string::size_type slash = path.rfind('/');
+    if (slash == std::string::npos || slash == 0) {
+        return true;
+    }
+    return ensureDirectory(path.substr(0, slash), error);
+}
+
+bool copyArtifact(const std::string& from, const std::string& to,
+                  std::string& error) {
+    if (from == to) {
+        return true;
+    }
+    if (!ensureParentDirectory(to, error)) {
+        return false;
+    }
+    std::error_code failure;
+    std::filesystem::copy_file(from, to,
+                               std::filesystem::copy_options::overwrite_existing,
+                               failure);
+    if (failure) {
+        error = "cannot copy '" + from + "' to '" + to + "': " +
+                failure.message() + "\n";
+        return false;
+    }
+    return true;
+}
+
+bool assembleObject(const std::string& assemblyText,
+                    const std::string& objectPath, std::string& error) {
+    std::string assemblyPath;
+    if (!makeTempPath("/tmp/cider_object_", assemblyPath)) {
+        error = "cannot create a temporary assembly file\n";
+        return false;
+    }
+    if (!writeFile(assemblyPath, assemblyText)) {
+        unlink(assemblyPath.c_str());
+        error = "cannot write a temporary assembly file\n";
+        return false;
+    }
+    std::string toolOutput;
+    const bool assembled = runTool(
+        {tool("AS", "as"), "-o", objectPath, assemblyPath}, toolOutput);
+    unlink(assemblyPath.c_str());
+    if (!assembled) {
+        error = "assembling '" + objectPath + "' failed:\n" + toolOutput;
+        return false;
+    }
+    return true;
+}
+
+std::string codegenDiagnostic(const codegen::EmitResult& emitted) {
+    if (emitted.pos.file.empty()) {
+        return emitted.error + "\n";
+    }
+    return at(emitted.pos) + ": " + emitted.error + "\n";
+}
+
+bool scanSource(const std::string& path, const std::string& text,
+                std::vector<std::string>& deps, std::string& error) {
+    Lexer lexer(path, text);
+    std::vector<Token> tokens = lexer.lex();
+    std::string diagnostic;
+    for (const LexError& lexError : lexer.errors()) {
+        diagnostic += at(lexError.pos) + ": " + lexError.message + "\n";
+    }
+    Parser parser(path, std::move(tokens));
+    std::unique_ptr<Program> program = parser.parse();
+    for (const ParseError& parseError : parser.errors()) {
+        diagnostic += at(parseError.pos) + ": " + parseError.message + "\n";
+    }
+    if (!diagnostic.empty() || program == nullptr) {
+        error = diagnostic.empty() ? "cannot parse '" + path + "'\n"
+                                   : diagnostic;
+        return false;
+    }
+    collectImportNames(*program, deps);
+    return true;
+}
+
+bool discoverBuildGraph(const std::string& entryPath,
+                        const std::string& entryDir,
+                        const std::string& lib,
+                        const std::vector<std::string>& roots,
+                        std::map<std::string, BuildModule>& modules,
+                        std::vector<std::string>& order, std::string& error) {
+    std::set<std::string> visiting;
+    std::function<bool(const std::string&, const std::string&, bool)> visit =
+        [&](const std::string& name, const std::string& path,
+            bool isEntry) -> bool {
+        if (visiting.count(name) != 0) {
+            error = "import cycle through module '" + name + "'\n";
+            return false;
+        }
+        auto known = modules.find(name);
+        if (known != modules.end()) {
+            return true;
+        }
+        visiting.insert(name);
+        bool found = false;
+        std::string text = readFile(path, found);
+        if (!found) {
+            error = "cannot open module '" + name + "' at '" + path + "'\n";
+            return false;
+        }
+        BuildModule module;
+        module.name = name;
+        module.path = path;
+        module.text = text;
+        module.isEntry = isEntry;
+        module.sourceHash = interfacefmt::sha256(text);
+        if (!scanSource(path, text, module.deps, error)) {
+            return false;
+        }
+        for (const std::string& dep : module.deps) {
+            std::string depPath = findModuleFile(dep, lib, roots);
+            if (depPath.empty()) {
+                error = "cannot find module '" + dep + "' imported by '" +
+                        name + "'\n";
+                return false;
+            }
+            if (!visit(dep, depPath, false)) {
+                return false;
+            }
+        }
+        visiting.erase(name);
+        modules.emplace(name, std::move(module));
+        order.push_back(name);
+        return true;
+    };
+    if (!visit("main", entryPath, true)) {
+        return false;
+    }
+    return true;
+}
+
+std::string cacheKeyFor(const BuildModule& module, target::Kind targetKind,
+                        bool noOpt, bool checks,
+                        const std::map<std::string, BuildModule>& modules) {
+    std::ostringstream manifest;
+    manifest << "cider-build-cache: 1\n";
+    manifest << "interface-format: " << interfacefmt::kFormatVersion << "\n";
+    manifest << "compiler: " << interfacefmt::kCompilerTag << "\n";
+    manifest << "target: " << target::info(targetKind).name << "\n";
+    manifest << "module: " << module.name << "\n";
+    manifest << "entry: " << (module.isEntry ? 1 : 0) << "\n";
+    manifest << "source: " << module.sourceHash << "\n";
+    manifest << "no-opt: " << (noOpt ? 1 : 0) << "\n";
+    manifest << "checks: " << (checks ? 1 : 0) << "\n";
+    for (const std::string& dep : module.deps) {
+        manifest << "dep: " << dep;
+        auto found = modules.find(dep);
+        if (found != modules.end()) {
+            manifest << " " << found->second.cacheKey << " "
+                     << found->second.interfaceHash;
+        }
+        manifest << "\n";
+    }
+    return interfacefmt::sha256(manifest.str());
+}
+
+bool cacheHit(const std::string& entry, const BuildModule& module,
+              std::string& error) {
+    std::string metaPath = entry + "/meta";
+    std::string objectPath = entry + "/module.o";
+    std::string interfacePath = entry + "/module.cidm";
+    bool found = false;
+    std::string meta = readFile(metaPath, found);
+    if (!found || !std::filesystem::exists(objectPath) ||
+        !std::filesystem::exists(interfacePath)) {
+        return false;
+    }
+    std::string wantModule = "module: " + module.name + "\n";
+    std::string wantSource = "source: " + module.sourceHash + "\n";
+    if (meta.find(wantModule) == std::string::npos ||
+        meta.find(wantSource) == std::string::npos) {
+        return false;
+    }
+    (void)error;
+    return true;
+}
+
+bool buildOneModule(BuildModule& module,
+                    const std::map<std::string, BuildModule>& modules,
+                    const std::string& cacheRoot,
+                    const std::string& interfaceDir, target::Kind targetKind,
+                    bool noOpt, bool checks, bool verbose, std::string& out,
+                    std::string& error) {
+    module.cacheKey = cacheKeyFor(module, targetKind, noOpt, checks, modules);
+    const std::string entries = joinPath(cacheRoot, "v1");
+    const std::string entry = joinPath(entries, module.cacheKey);
+    if (!ensureDirectory(entries, error) ||
+        !ensureDirectory(interfaceDir, error)) {
+        return false;
+    }
+    bool hit = cacheHit(entry, module, error);
+    if (hit) {
+        bool found = false;
+        module.interfaceText = readFile(entry + "/module.cidm", found);
+        if (!found) {
+            error = "cache entry '" + entry + "' lost its interface\n";
+            return false;
+        }
+        module.interfaceHash = interfacefmt::sha256(module.interfaceText);
+        module.objectPath = entry + "/module.o";
+    } else {
+        if (!ensureDirectory(entry, error)) {
+            return false;
+        }
+        FrontOptions opts;
+        opts.targetKind = targetKind;
+        opts.noOpt = noOpt;
+        opts.checks = checks;
+        opts.requireEntry = module.isEntry;
+        opts.wholeProgram = false;
+        opts.mangleAll = !module.isEntry;
+        opts.module = module.name;
+        opts.useInterfaces = true;
+        opts.interfaceDir = interfaceDir;
+        Pipeline pipe;
+        if (!runFront(module.path, module.text, pipe, opts)) {
+            error = pipe.diagnostic;
+            return false;
+        }
+        codegen::EmitResult emitted =
+            codegen::emit(*pipe.module, targetKind, module.isEntry);
+        if (!emitted.ok) {
+            error = codegenDiagnostic(emitted);
+            return false;
+        }
+        const std::string objectPath = entry + "/module.o";
+        if (!assembleObject(emitted.text, objectPath, error)) {
+            return false;
+        }
+        std::vector<interfacefmt::Dependency> deps;
+        for (const std::string& dep : module.deps) {
+            interfacefmt::Dependency dependency;
+            dependency.module = dep;
+            auto found = modules.find(dep);
+            if (found != modules.end()) {
+                dependency.hash = found->second.interfaceHash;
+            }
+            deps.push_back(std::move(dependency));
+        }
+        interfacefmt::RenderResult rendered = interfacefmt::render(
+            module.name, *pipe.program, module.sourceHash, deps);
+        module.interfaceText = rendered.text;
+        module.interfaceHash = interfacefmt::sha256(module.interfaceText);
+        if (!writeFile(entry + "/module.cidm", module.interfaceText) ||
+            !writeFile(entry + "/meta",
+                       "module: " + module.name + "\n" +
+                           "source: " + module.sourceHash + "\n" +
+                           "key: " + module.cacheKey + "\n")) {
+            error = "cannot write cache entry '" + entry + "'\n";
+            return false;
+        }
+        module.objectPath = objectPath;
+    }
+    const std::string activePath =
+        joinPath(interfaceDir, interfacefmt::modulePath(module.name) + ".cidm");
+    if (!ensureParentDirectory(activePath, error) ||
+        !writeFile(activePath, module.interfaceText)) {
+        error = "cannot write interface '" + activePath + "'\n";
+        return false;
+    }
+    if (verbose) {
+        out += "cider: build: module " + module.name + ": " +
+               (hit ? "cached " : "compiled ") + module.cacheKey + "\n";
+    }
+    return true;
+}
+
+int buildProgram(const std::string& input, const std::string& output,
+                 target::Kind targetKind, const std::string& cacheDir,
+                 const std::string& interfaceDirFlag,
+                 const std::string& objectsDir, bool noLink, bool verbose,
+                 bool noOpt, bool checks, std::string& out,
+                 std::string& err) {
+    if (targetKind == target::Kind::Vm) {
+        err = "target vm is not built: an interpreter, not an object emitter\n";
+        return 2;
+    }
+    if (target::info(targetKind).object != target::Object::Elf64) {
+        err = "target " + std::string(target::info(targetKind).name) +
+              " does not build ELF64 objects: use its external link path\n";
+        return 2;
+    }
+    bool found = false;
+    readFile(input, found);
+    if (!found) {
+        err = "cannot open '" + input + "'\n";
+        return 1;
+    }
+    std::string entryDir;
+    std::string::size_type slash = input.rfind('/');
+    if (slash != std::string::npos) {
+        entryDir = input.substr(0, slash);
+    }
+    const char* libRoot = std::getenv("CIDER_LIB");
+    const std::string lib = libRoot != nullptr ? libRoot : "";
+    const std::vector<std::string> roots = moduleRoots(entryDir);
+    const std::string cacheRoot =
+        cacheDir.empty() ? ".cider-cache" : cacheDir;
+    const std::string activeDir = interfaceDirFlag.empty()
+                                      ? joinPath(cacheRoot, "interfaces")
+                                      : interfaceDirFlag;
+    std::map<std::string, BuildModule> modules;
+    std::vector<std::string> order;
+    if (!discoverBuildGraph(input, entryDir, lib, roots, modules, order, err)) {
+        return 1;
+    }
+    for (const std::string& name : order) {
+        if (!buildOneModule(modules[name], modules, cacheRoot, activeDir,
+                            targetKind, noOpt, checks, verbose, out, err)) {
+            return 1;
+        }
+        BuildModule& module = modules[name];
+        if (!objectsDir.empty()) {
+            const std::string destination =
+                joinPath(objectsDir, interfacefmt::modulePath(name) + ".o");
+            if (!copyArtifact(module.objectPath, destination, err)) {
+                return 1;
+            }
+            module.objectPath = destination;
+        }
+    }
+    if (noLink) {
+        return 0;
+    }
+    std::vector<std::string> objects;
+    for (const std::string& name : order) {
+        objects.push_back(modules[name].objectPath);
+    }
+    return linkInputs(targetKind, objects, output, "", false, 0, err);
+}
+
+}  // namespace
+
 int runDriver(const std::vector<std::string>& args, std::string& out, std::string& err) {
     if (args.empty()) {
-        err = "usage: cider <check|compile|ir|run|link|bundle> [options] <file>\n"
+        err = "usage: cider <check|compile|ir|run|link|build|bundle> [options] <file>\n"
               "  compile -c <file> -o <file.o>  emit an ELF64 relocatable object\n"
               "  compile -c --no-entry <file>  emit a non-entry module object\n"
+              "  compile -c --interface-dir <dir>  resolve imports from .cidm\n"
+              "  build [--cache-dir <dir>] [-o out] <entry.cid>\n"
               "  link [--target native|pomeos] [-o out] "
               "[--script <ld script>] [--base-address <addr>] <objects...>\n";
         return 2;
     }
     std::string command = args[0];
     if (command != "check" && command != "compile" && command != "ir" &&
-        command != "run" && command != "link" && command != "bundle") {
+        command != "run" && command != "link" && command != "build" &&
+        command != "bundle") {
         err = "unknown subcommand '" + command + "'\n";
         return 2;
     }
@@ -1039,6 +1664,14 @@ int runDriver(const std::vector<std::string>& args, std::string& out, std::strin
     bool noEntry = false;
     bool entryFlag = false;
     bool hasBase = false;
+    bool noInterface = false;
+    bool requireInterfaces = false;
+    bool allowStaleInterfaces = false;
+    bool noLink = false;
+    bool verbose = false;
+    std::string interfaceDir;
+    std::string cacheDir;
+    std::string objectsDir;
     for (uint64_t i = 1; i < static_cast<uint64_t>(args.size()); ++i) {
         const std::string& arg = args[i];
         if (arg == "--target" && i + 1 < static_cast<uint64_t>(args.size())) {
@@ -1078,6 +1711,57 @@ int runDriver(const std::vector<std::string>& args, std::string& out, std::strin
                 return 2;
             }
             entryFlag = true;
+        } else if (arg == "--interface-dir" &&
+                   i + 1 < static_cast<uint64_t>(args.size())) {
+            if (command != "compile" && command != "build") {
+                err = "flag '--interface-dir' is only valid for compile or build\n";
+                return 2;
+            }
+            interfaceDir = args[++i];
+        } else if (arg == "--require-interface") {
+            if (command != "compile") {
+                err = "flag '--require-interface' is only valid for compile\n";
+                return 2;
+            }
+            requireInterfaces = true;
+        } else if (arg == "--allow-stale-interface") {
+            if (command != "compile") {
+                err = "flag '--allow-stale-interface' is only valid for compile\n";
+                return 2;
+            }
+            allowStaleInterfaces = true;
+        } else if (arg == "--no-interface") {
+            if (command != "compile") {
+                err = "flag '--no-interface' is only valid for compile\n";
+                return 2;
+            }
+            noInterface = true;
+        } else if (arg == "--cache-dir" &&
+                   i + 1 < static_cast<uint64_t>(args.size())) {
+            if (command != "build") {
+                err = "flag '--cache-dir' is only valid for build\n";
+                return 2;
+            }
+            cacheDir = args[++i];
+        } else if (arg == "--objects-dir" &&
+                   i + 1 < static_cast<uint64_t>(args.size())) {
+            if (command != "build") {
+                err = "flag '--objects-dir' is only valid for build\n";
+                return 2;
+            }
+            objectsDir = args[++i];
+        } else if (arg == "--no-link") {
+            if (command != "build") {
+                err = "flag '--no-link' is only valid for build\n";
+                return 2;
+            }
+            noLink = true;
+        } else if (arg == "--verbose" || arg == "-v") {
+            if (command != "build") {
+                err = "flag '--verbose' is only valid for build\n";
+                return 2;
+            }
+            verbose = true;
         } else if ((arg == "--script" || arg == "-T") &&
                    command == "link" &&
                    i + 1 < static_cast<uint64_t>(args.size())) {
@@ -1118,8 +1802,29 @@ int runDriver(const std::vector<std::string>& args, std::string& out, std::strin
                           baseAddress, err);
     }
 
+    if (command == "build") {
+        if (input.empty()) {
+            err = "no input file\n";
+            return 2;
+        }
+        if (output.empty()) {
+            output = "a.out";
+        }
+        return buildProgram(input, output, targetKind, cacheDir, interfaceDir,
+                            objectsDir, noLink, verbose, noOpt, checks, out,
+                            err);
+    }
+
     if (noEntry && entryFlag) {
         err = "flags '--no-entry' and '--entry' are mutually exclusive\n";
+        return 2;
+    }
+    if (requireInterfaces && interfaceDir.empty()) {
+        err = "flag '--require-interface' needs '--interface-dir'\n";
+        return 2;
+    }
+    if (allowStaleInterfaces && interfaceDir.empty()) {
+        err = "flag '--allow-stale-interface' needs '--interface-dir'\n";
         return 2;
     }
     if (objectMode && targetKind == target::Kind::Vm) {
@@ -1178,6 +1883,10 @@ int runDriver(const std::vector<std::string>& args, std::string& out, std::strin
     opts.wholeProgram = !split;
     opts.mangleAll = mangleAll;
     opts.module = module;
+    opts.useInterfaces = !interfaceDir.empty();
+    opts.requireInterfaces = requireInterfaces;
+    opts.allowStaleInterfaces = allowStaleInterfaces;
+    opts.interfaceDir = interfaceDir;
     Pipeline pipe;
     if (!runFront(input, text, pipe, opts)) {
         err = pipe.diagnostic;
@@ -1271,6 +1980,15 @@ int runDriver(const std::vector<std::string>& args, std::string& out, std::strin
         if (!assembled) {
             err = "assembling '" + objectPath + "' failed:\n" + toolOutput;
             return 1;
+        }
+        if (!noInterface) {
+            std::string interfaceError;
+            if (!writeModuleInterface(pipe, module, text, objectPath,
+                                      interfaceError)) {
+                unlink(objectPath.c_str());
+                err = interfaceError;
+                return 1;
+            }
         }
         return 0;
     }

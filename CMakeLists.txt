@@ -210,7 +210,7 @@ add_test(NAME codegen COMMAND codegen_test)
 # ELF64 objects; link drives GNU ld. bundle refuses by name. The top-level
 # catch maps every failure to a diagnostic (gate L6).
 
-add_library(cider_driver STATIC src/driver/driver.cpp)
+add_library(cider_driver STATIC src/driver/driver.cpp src/interface/interface.cpp)
 target_link_libraries(cider_driver PUBLIC cider_codegen cider_vm cider_opt cider_lower cider_check cider_parse cider_lexer)
 target_include_directories(cider_driver PUBLIC src)
 
@@ -303,6 +303,18 @@ add_test(NAME v4_native_entry_alignment
                  ${CMAKE_SOURCE_DIR}/tests/v4/native_entry_alignment_test.py)
 set_tests_properties(v4_native_entry_alignment PROPERTIES
   ENVIRONMENT "CIDER_BIN=${CMAKE_BINARY_DIR}/cider")
+
+# Separate front-end compilation: `compile -c` emits a `.cidm` declaration
+# sidecar, an importer compiles against it with the source removed, and
+# `cider build` keys objects/interface on the module source hash and its
+# dependency hashes. Missing, stale and incompatible interfaces each have a
+# named diagnostic or an explicit source fallback.
+add_test(NAME v4_interfaces
+         COMMAND ${Python3_EXECUTABLE}
+                 ${CMAKE_SOURCE_DIR}/tests/v4/interface_build_test.py)
+set_tests_properties(v4_interfaces PROPERTIES
+  ENVIRONMENT "CIDER_BIN=${CMAKE_BINARY_DIR}/cider"
+  SKIP_RETURN_CODE 77)
 
 # --- Targets -------------------------------------------------------------------
 #

@@ -41,7 +41,12 @@ struct ParseError {
 
 class Parser {
 public:
-    Parser(std::string file, std::vector<Token> tokens);
+    // `interfaceMode` accepts the declaration-only shape of a `.cidm`:
+    // bodyless `func`/method declarations and globals without initialisers.
+    // Ordinary source keeps requiring bodies, so a missed body stays a
+    // diagnostic rather than an accidental extern.
+    Parser(std::string file, std::vector<Token> tokens,
+           bool interfaceMode = false);
 
     // Parses the whole file. Never null; if ok() is false the tree is partial
     // and the driver must not use it.
@@ -146,6 +151,8 @@ private:
     // A bare `T { ... }` literal is refused where a `{` follows an
     // expression that cannot be a literal head (a match scrutinee).
     bool noStructLit_ = false;
+    // `.cidm` declarations-only mode. See the constructor comment.
+    bool interfaceMode_ = false;
     std::vector<Token> tokens_;
     uint64_t cursor_ = 0;
     std::vector<ParseError> errors_;

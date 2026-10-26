@@ -795,6 +795,10 @@ struct Program : Node {
     // property of the *file*, which is why lowering puts it on each
     // instruction rather than in a compiler flag: inlining crosses files.
     bool wrap = false;
+    // A `.cidm` interface: declarations without bodies. The driver skips
+    // body checking for such a module; its declarations are already typed by
+    // the header pass, and its definitions live in another object.
+    bool isInterface = false;
     Program(Position p, std::string f, std::vector<std::unique_ptr<Decl>> d,
             std::vector<std::unique_ptr<VarDecl>> g)
         : Node(std::move(p)), file(std::move(f)), decls(std::move(d)),

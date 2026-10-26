@@ -146,8 +146,10 @@ bool declStart(TokenKind kind) {
 
 }  // namespace
 
-Parser::Parser(std::string file, std::vector<Token> tokens)
-    : file_(std::move(file)), tokens_(std::move(tokens)) {}
+Parser::Parser(std::string file, std::vector<Token> tokens,
+               bool interfaceMode)
+    : file_(std::move(file)), interfaceMode_(interfaceMode),
+      tokens_(std::move(tokens)) {}
 
 const Token& Parser::peek() const {
     return tokens_[cursor_];
@@ -230,6 +232,7 @@ std::unique_ptr<Program> Parser::parse() {
     std::unique_ptr<Program> program =
         std::make_unique<Program>(start, file_, std::vector<std::unique_ptr<Decl>>{},
                                   std::vector<std::unique_ptr<VarDecl>>{});
+    program->isInterface = interfaceMode_;
     while (!atEnd()) {
         if (check(TokenKind::Hash)) {
             if (!parseDirective(*program)) {
@@ -500,6 +503,11 @@ std::unique_ptr<Decl> Parser::parseFuncDecl(bool) {
     }
     std::unique_ptr<TypeExpr> returns = parseReturnType();
     if (!check(TokenKind::LBrace)) {
+        if (interfaceMode_ && match(TokenKind::Semi)) {
+            return std::make_unique<FuncDecl>(
+                start, std::move(name), std::move(tps), std::move(params),
+                std::move(returns), nullptr);
+        }
         failHere("a function needs a body");
         return nullptr;
     }
@@ -641,7 +649,7 @@ MethodDecl Parser::parseMethod() {
             name = tokenName(nameKind);
         }
     }
-    if (check(TokenKind::KwInit) || check(TokenKind::KwDeinit)) {
+    if (!interfaceMode_ && (check(TokenKind::KwInit) || check(TokenKind::KwDeinit))) {
         failHere("an init or deinit needs a body");
     }
     std::vector<Param> params = parseParams();
@@ -653,6 +661,13 @@ MethodDecl Parser::parseMethod() {
     }
     std::unique_ptr<TypeExpr> returns = parseReturnType();
     if (!check(TokenKind::LBrace)) {
+        if (interfaceMode_ && match(TokenKind::Semi)) {
+            MethodDecl out(start, std::move(name), std::move(params),
+                           std::move(returns), nullptr, isVirtual);
+            out.isOverride = isOverride;
+            out.isPrivate = isPrivate;
+            return out;
+        }
         failHere("a method needs a body");
         return MethodDecl(start, std::move(name), std::move(params), std::move(returns),
                           nullptr, isVirtual);
@@ -1248,6 +1263,10 @@ std::unique_ptr<VarDecl> Parser::parseVarDecl() {
     std::unique_ptr<TypeExpr> type = parseType();
     if (type == nullptr) {
         return nullptr;
+    }
+    if (interfaceMode_ && match(TokenKind::Semi)) {
+        return std::make_unique<VarDecl>(start, std::move(name), std::move(type),
+                                         nullptr, isVolatile);
     }
     if (!match(TokenKind::Eq)) {
         fail(peek().pos, "a variable needs an initialiser");
