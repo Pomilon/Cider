@@ -1339,17 +1339,42 @@ void testTargetGlobals() {
           "target globals are not available on native either");
 }
 
-// `delete` takes a class pointer: the checker constrains the operand
-// (FEAT-032), and the path lowers and runs.
+// `delete` takes a class pointer and also a struct or union pointer: both
+// have no destructor and return storage to the global operator. Pointers to
+// scalars, pointers, function pointers and arrays stay rejected.
 void testDelete() {
-    std::printf("delete needs a class pointer\n");
+    std::printf("delete needs a class, struct or union pointer\n");
     Checked good = check(
         "class C { var x: int; func init(x: int) -> void { (*self).x = x; } }\n"
         "func main() -> int { var p: *C = new C(1); delete p; return 0; }\n");
     check(good.ok, "deleting a class pointer checks: " + good.stage);
+    Checked s = check(
+        "struct S { var x: int; }\n"
+        "func main() -> int { var p: *S = new S { x: 1 }; delete p; return 0; }\n");
+    check(s.ok, "deleting a struct pointer checks: " + s.stage);
+    Checked u = check(
+        "union U { var i: int; var b: u8; }\n"
+        "func main() -> int { var u: U = U { i: 1 }; var p: *U = &u; "
+        "delete p; return 0; }\n");
+    check(u.ok, "deleting a union pointer checks: " + u.stage);
     Checked scalar = check(
         "func main() -> int { var p: *int = nilPtr; delete p; return 0; }\n");
-    check(!scalar.ok && scalar.stage == "check", "deleting a non-class pointer fails");
+    check(!scalar.ok && scalar.stage == "check", "deleting a scalar pointer fails");
+    Checked pointer = check(
+        "func main() -> int { var p: **int = nilPtr; delete p; return 0; }\n");
+    check(!pointer.ok && pointer.stage == "check",
+          "deleting a pointer-to-pointer fails");
+    Checked fn = check(
+        "func f() -> void { }\n"
+        "func main() -> int { var p: *func() -> void = nilPtr; delete p; "
+        "return 0; }\n");
+    check(!fn.ok && fn.stage == "check",
+          "deleting a function pointer fails");
+    Checked array = check(
+        "func main() -> int { var p: *[int; 2] = nilPtr; delete p; "
+        "return 0; }\n");
+    check(!array.ok && array.stage == "check",
+          "deleting an array pointer fails");
     Checked nonptr = check("func main() -> int { var x: int = 3; delete x; return 0; }\n");
     check(!nonptr.ok && nonptr.stage == "check", "deleting a non-pointer fails");
     Checked nil = check("func main() -> int { delete nilPtr; return 0; }\n");

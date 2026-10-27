@@ -917,6 +917,55 @@ void testOperatorIndexAssignmentNative() {
         "a nil index operator store reports the null trap");
 }
 
+// A struct pointer delete calls operator delete once and is nil-safe; it
+// synthesizes no destructor. A class pointer still runs deinit first.
+void testStructDeleteNative() {
+    std::printf("struct delete runs natively\n");
+    bool signaled = false;
+    int code = runCode(
+        "var frees: int = 0;\n"
+        "var pool: [u8; 64] = [0, ...];\n"
+        "func operator new(size: i64, align: i64) -> *void {\n"
+        "    return &pool[0] as *void;\n"
+        "}\n"
+        "func operator delete(ptr: *void) -> void { frees = frees + 1; }\n"
+        "struct S { var x: int; }\n"
+        "func main() -> int {\n"
+        "    var p: *S = new S { x: 7 };\n"
+        "    delete p;\n"
+        "    delete nilPtr as *S;\n"
+        "    return frees * 10 + p->x;\n"
+        "}\n",
+        signaled);
+    check(!signaled && code == 17,
+          "a struct new/delete pair answers 17");
+
+    code = runCode(
+        "var frees: int = 0;\n"
+        "var order: int = 0;\n"
+        "var pool: [u8; 64] = [0, ...];\n"
+        "func operator new(size: i64, align: i64) -> *void {\n"
+        "    return &pool[0] as *void;\n"
+        "}\n"
+        "func operator delete(ptr: *void) -> void {\n"
+        "    order = order * 10 + 2;\n"
+        "    frees = frees + 1;\n"
+        "}\n"
+        "class C {\n"
+        "    var x: int;\n"
+        "    func init() { (*self).x = 4; }\n"
+        "    func deinit() { order = order * 10 + 1; }\n"
+        "}\n"
+        "func main() -> int {\n"
+        "    var p: *C = new C();\n"
+        "    delete p;\n"
+        "    return order * 10 + frees;\n"
+        "}\n",
+        signaled);
+    check(!signaled && code == 121,
+          "class deinit runs before operator delete");
+}
+
 void testTrap() {
     std::printf("traps\n");
     bool signaled = false;
@@ -3417,6 +3466,7 @@ int main() {
     testTrapMessages();
     testOperatorOverloadsNative();
     testOperatorIndexAssignmentNative();
+    testStructDeleteNative();
     testArrowOperatorNative();
     testTrap();
     testRemovedPrelude();

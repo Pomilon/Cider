@@ -3870,8 +3870,14 @@ void Checker::visitDeleteStmt(DeleteStmt& n) {
     }
     const Type* obj =
         t.type->kind() == Kind::Pointer ? t.type->pointee() : nullptr;
-    if (obj == nullptr || obj->kind() != Kind::Class) {
-        fail(n.pos, "delete needs a class pointer");
+    // Classes run their destructor chain before release. Structs and unions
+    // have no destructor (no deinit) and simply return their storage to the
+    // library operator. Every other pointee has no defined deletion: a
+    // scalar, pointer, function pointer or interface is refused loudly.
+    if (obj == nullptr || (obj->kind() != Kind::Class &&
+                           obj->kind() != Kind::Struct &&
+                           obj->kind() != Kind::Union)) {
+        fail(n.pos, "delete needs a class, struct or union pointer");
         return;
     }
     if (!requireAllocOperator(false, n.pos)) {

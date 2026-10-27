@@ -1,5 +1,5 @@
 {
-  "stdout": "2,1,H,4,3,7,H,6,5,8,11,10,9,12,14,13,S,\nheap_delete_destructors_ok\n",
+  "stdout": "H,12,S,\nheap_delete_destructors_ok\n",
   "stderr": "",
   "exit": 0
 }

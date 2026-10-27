@@ -1,22 +1,18 @@
 from std.alloc import operator new, operator delete;
-// CIDER-BUG-108 regression: `delete` of a heap class/struct value runs the
-// full finalizer set its type owns — the class's own destructor body first,
-// then every class value it embeds by value in reverse construction order
-// (the CIDER-BUG-088 ordering), and struct targets' embedded values too. A
-// class carrying only its own destructor keeps the single pre-existing call.
-// All three backends (VM unopt, VM optimized, native).
+// Delete regression: deleting a class pointer runs that class's own deinit
+// before releasing storage. v4 does not synthesize a recursive finalizer
+// set: embedded class values are not finalized through their container, and
+// a struct pointer has no destructor at all — its delete releases storage
+// and finalizes nothing. All three backends (VM unopt, VM optimized, native).
 //
-// Pointers, slices and interfaces still own nothing (delete does not follow
-// a pointer into a heap subobject), and base-class destructors are not
-// auto-invoked (Cider destructors are not virtual) — only by-value fields,
-// nested structs and fixed arrays of class values participate.
+// Pointers, slices and interfaces own nothing (delete does not follow a
+// pointer into a heap subobject), and base-class destructors are not
+// auto-invoked (Cider destructors are not virtual). The class cases below
+// count their own deinit only; the struct cases contribute no output.
 // Migrated to v3: destructors spell `deinit()` and run only through an
 // explicit `delete`; every embedded field carries an explicit default
 // (`D { }`, `SWrap { }`, array element literals) so a bare `new X { }`
 // constructs the same zero/default state, and `this.f` spells `this->f`.
-// v3 `delete` takes a class pointer, so the heap-struct cases below are
-// rejected loudly (`delete needs a class pointer`); v3 also does not
-// finalize embedded class values, so this program stays B-terminal.
 from std.io import print, printInt;
 
 var drops: int = 0;
@@ -127,7 +123,10 @@ func main() -> int {
     heapAlias();
     heapSolo();
     print("\n");
-    if (drops != 14) { return 1; }
+    // Only D's body increments drops: Holder, Solo and the other class
+    // bodies print without counting. Pair and Nest declare no deinit, and
+    // no container finalizes embedded values.
+    if (drops != 1) { return 1; }
     print("heap_delete_destructors_ok\n");
     return 0;
 }

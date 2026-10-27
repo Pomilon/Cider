@@ -8174,13 +8174,19 @@ void Lowerer::onDelete(DeleteStmt& n) {
         return;
     }
     // The pointer lowers to one address word however it was computed; the
-    // checker proved it points at a class.
+    // checker proved it points at a class, struct or union.
     std::vector<ir::Value> ptr = lowerWords(n.ptr.get());
     if (failed_ || ptr.size() != kOneWord) {
         return;
     }
     TypeRef ptrType = checker_.typeOf(n.ptr.get());
+    if (ptrType.isError() || ptrType.type->kind() != Kind::Pointer ||
+        ptrType.type->pointee() == nullptr) {
+        refuse(n.pos, "this deletion");
+        return;
+    }
     const Type* obj = ptrType.type->pointee();
+    const bool classObject = obj->kind() == Kind::Class;
     std::optional<DeclId> id = obj->decl();
     const resolve::Scope* here = homeScope();
     const resolve::Decl* release =
@@ -8219,7 +8225,9 @@ void Lowerer::onDelete(DeleteStmt& n) {
     emitTerminator(nilJoin);
     sealBlock(nilLabel);
     startBlock(liveLabel);
-    if (id.has_value() && !resolver_.virtualNames(*id).empty()) {
+    // Structs and unions carry no destructor: their live path goes straight
+    // to the library operator, with no synthesized deinit call.
+    if (classObject && id.has_value() && !resolver_.virtualNames(*id).empty()) {
         // 4.8.3: a hierarchy that dispatches methods answers delete
         // polymorphically. Slot zero names the chain entry the dynamic
         // type chose, so `delete base_ptr` runs the derived destructor
@@ -8280,7 +8288,7 @@ void Lowerer::onDelete(DeleteStmt& n) {
                 }
             }
         }
-    } else if (id.has_value()) {
+    } else if (classObject && id.has_value()) {
         const Signature* dsig = resolver_.methodSig(*id, "deinit");
         if (dsig != nullptr) {
             // A chain with no table still runs derived-first: the entry is

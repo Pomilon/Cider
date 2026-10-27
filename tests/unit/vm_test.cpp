@@ -1145,6 +1145,71 @@ void testOperatorIndexAssignmentVm() {
 
 // Structs and unions have no destructor: delete is a nil test, then the
 // library operator. Classes keep running deinit before the same release.
+void testStructDeleteVm() {
+    std::printf("struct delete runs on both legs\n");
+    Lowered p = lower(
+        "var frees: int = 0;\n"
+        "var pool: [u8; 64] = [0, ...];\n"
+        "func operator new(size: i64, align: i64) -> *void {\n"
+        "    return &pool[0] as *void;\n"
+        "}\n"
+        "func operator delete(ptr: *void) -> void { frees = frees + 1; }\n"
+        "struct S { var x: int; }\n"
+        "func main() -> int {\n"
+        "    var p: *S = new S { x: 7 };\n"
+        "    delete p;\n"
+        "    delete nilPtr as *S;\n"
+        "    return frees * 10 + p->x;\n"
+        "}\n");
+    check(p.ok, "a struct delete program lowers: " + p.stage);
+    if (!p.ok) {
+        return;
+    }
+    cider::vm::VmResult unr = cider::vm::run(*p.module, "");
+    check(unr.ok && unr.exitCode == 17,
+          "the unoptimised struct delete answers 17: " + unr.error);
+    cider::opt::OptResult ores = cider::opt::run(*p.module);
+    check(ores.ok, "the struct delete program optimises: " + ores.error);
+    cider::vm::VmResult opr = cider::vm::run(*p.module, "");
+    check(opr.ok && opr.exitCode == 17,
+          "the optimised struct delete answers 17: " + opr.error);
+
+    Lowered c = lower(
+        "var frees: int = 0;\n"
+        "var order: int = 0;\n"
+        "var pool: [u8; 64] = [0, ...];\n"
+        "func operator new(size: i64, align: i64) -> *void {\n"
+        "    return &pool[0] as *void;\n"
+        "}\n"
+        "func operator delete(ptr: *void) -> void {\n"
+        "    order = order * 10 + 2;\n"
+        "    frees = frees + 1;\n"
+        "}\n"
+        "class C {\n"
+        "    var x: int;\n"
+        "    func init() { (*self).x = 4; }\n"
+        "    func deinit() { order = order * 10 + 1; }\n"
+        "}\n"
+        "func main() -> int {\n"
+        "    var p: *C = new C();\n"
+        "    delete p;\n"
+        "    return order * 10 + frees;\n"
+        "}\n");
+    check(c.ok, "a class delete program lowers: " + c.stage);
+    if (!c.ok) {
+        return;
+    }
+    cider::vm::VmResult crun = cider::vm::run(*c.module, "");
+    check(crun.ok && crun.exitCode == 121,
+          "class deinit runs before operator delete: " + crun.error);
+    cider::opt::OptResult cres = cider::opt::run(*c.module);
+    check(cres.ok, "the class delete program optimises: " + cres.error);
+    cider::vm::VmResult copt = cider::vm::run(*c.module, "");
+    check(copt.ok && copt.exitCode == 121,
+          "the optimised class delete keeps deinit before release: " +
+              copt.error);
+}
+
 int main() {
     std::printf("vm_test — the interpreter answers\n\n");
     testExit();
@@ -1167,6 +1232,7 @@ int main() {
     testFieldDefaults();
     testOperatorOverloadsVm();
     testOperatorIndexAssignmentVm();
+    testStructDeleteVm();
     testArrowOperatorVm();
     std::printf("\n%d checks, %s\n", checks, failures == 0 ? "all passed" : "FAILURES");
     return failures == 0 ? 0 : 1;

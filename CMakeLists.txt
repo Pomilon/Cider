@@ -460,6 +460,15 @@ add_test(NAME v4_operator_index_assign
 set_tests_properties(v4_operator_index_assign PROPERTIES
   ENVIRONMENT "CIDER_BIN=${CMAKE_BINARY_DIR}/cider")
 
+# Struct-pointer delete is nil-safe and calls the global operator once, with
+# no synthesized destructor. Class deinit still runs before release, and every
+# unsupported pointee stays a named check error.
+add_test(NAME v4_struct_delete
+         COMMAND ${Python3_EXECUTABLE}
+                 ${CMAKE_SOURCE_DIR}/tests/v4/struct_delete_test.py)
+set_tests_properties(v4_struct_delete PROPERTIES
+  ENVIRONMENT "CIDER_BIN=${CMAKE_BINARY_DIR}/cider")
+
 # Separate front-end compilation: `compile -c` emits a `.cidm` declaration
 # sidecar, an importer compiles against it with the source removed, and
 # `cider build` keys objects/interface on the module source hash and its

@@ -932,6 +932,20 @@ void testDelete() {
         check(main != nullptr && countOp(*main, cider::ir::Op::Call) == 3,
               "no deinit means no deinit call, free alone");
     }
+    Lowered s = lower(
+        "struct S { var x: int; }\n"
+        "func main() -> int {\n"
+        "    var p: *S = new S { x: 3 };\n"
+        "    delete p;\n"
+        "    return 5;\n"
+        "}\n");
+    check(s.ok, "delete on a struct pointer lowers: " + s.stage);
+    if (s.ok) {
+        const cider::ir::Function* main = find(s.module.get(), "main");
+        // operator_new then operator_delete; a struct has no deinit call.
+        check(main != nullptr && countOp(*main, cider::ir::Op::Call) == 2,
+              "struct delete emits new and delete, no destructor");
+    }
     Lowered bad = lower(
         "func main() -> int {\n"
         "    var x: int = 1;\n"
@@ -939,7 +953,8 @@ void testDelete() {
         "    delete p;\n"
         "    return 0;\n"
         "}\n");
-    check(!bad.ok, "delete on a non-class pointer is refused");
+    check(!bad.ok && bad.stage == "check",
+          "delete on a non-class, non-struct pointer is refused");
 }
 
 // A function address lowers to FnAddr, and an indirect call carries the

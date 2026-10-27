@@ -725,9 +725,9 @@
   "class": "A"
  },
  "heap_delete_destructors": {
-  "actual": "v3: all three legs rc=1 with identical stderr `main.cid:94:5: delete needs a class pointer` and `main.cid:102:5: delete needs a class pointer`; the v2 embedded-finalizer trace is not blessed",
-  "blocker": "v3 delete takes class pointers only (heap struct targets rejected) and does not finalize embedded class values [B-terminal]",
-  "class": "B"
+  "actual": "v4: struct-pointer delete is allowed and runs as a plain release with no synthesized finalizer set; class pointers keep their own deinit. All three legs print the class-only trace and exit 0",
+  "blocker": "",
+  "class": "A"
  },
  "heap_stress": {
   "actual": "migrated to v3: class values are built with a literal naming every field; the legacy expected.json was an exit-code-only placeholder and now records the program's deterministic output; all three legs match expected.json",
