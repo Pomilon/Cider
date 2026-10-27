@@ -37,6 +37,9 @@ EXPLICIT = """from std.io import print, putchar, exit;
 var keep_putchar: *void = &putchar as *void;
 
 func _start() -> void {
+    if (keep_putchar == nilPtr) {
+        exit(7);
+    }
     var wrote: int = putchar(67);
     if (wrote != 67) {
         exit(1);

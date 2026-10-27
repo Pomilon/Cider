@@ -351,9 +351,9 @@ struct FrontOptions {
     // Whole-program is the existing compile/run path: every resolved module
     // lowers into one IR module. A split-module object lowers only `module`.
     bool wholeProgram = true;
-    // Remove function definitions the target entry cannot reach. Only
-    // whole-program executable builds set this; split objects keep every
-    // definition for other objects to reference.
+    // Remove function, global, and rodata definitions the target entry
+    // cannot reach. Only whole-program executable builds set this; split
+    // objects keep every definition for other objects to reference.
     bool pruneUnused = false;
     // A non-entry module object mangles every definition, including this
     // file's, so its names match the importing entry object's references.
@@ -712,7 +712,8 @@ bool runFront(const std::string& file, const std::string& text, Pipeline& pipe,
         return false;
     }
     if (opts.pruneUnused) {
-        opt::pruneFunctions(*pipe.module, target::info(opts.targetKind).entry);
+        opt::pruneWholeProgram(*pipe.module,
+                               target::info(opts.targetKind).entry);
     }
     faultAlloc("opt");
     pipe.ok = true;

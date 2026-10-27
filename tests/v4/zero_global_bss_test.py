@@ -34,12 +34,14 @@ var text: string = "zero-bss";
 func _start() -> void {
     zeros[0] = 11;
     zeros[%d] = 22;
+    pad[0] = 1;
     var code: int = 0;
     if (zeros[0] != 11) { code = 1; }
     if (zeros[%d] != 22) { code = 2; }
     if (nz[0] != 7) { code = 3; }
     if (nz[1] != 9) { code = 4; }
     if (text.len != 8) { code = 5; }
+    if (pad[0] != 1) { code = 6; }
     asm {
         "mov rax, 60"
         "mov rdi, {code:q}"

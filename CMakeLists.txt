@@ -384,6 +384,16 @@ add_test(NAME v4_licm
 set_tests_properties(v4_licm PROPERTIES
   ENVIRONMENT "CIDER_BIN=${CMAKE_BINARY_DIR}/cider")
 
+# Task 8's second slice: whole-program pruning reaches globals and rodata.
+# Optimized executable assembly drops unreferenced data and data reachable
+# only from dead definitions, keeps live initializer chains, and still links
+# and runs; split objects and --no-opt keep every definition.
+add_test(NAME v4_global_pruning
+         COMMAND ${Python3_EXECUTABLE}
+                 ${CMAKE_SOURCE_DIR}/tests/v4/global_pruning_test.py)
+set_tests_properties(v4_global_pruning PROPERTIES
+  ENVIRONMENT "CIDER_BIN=${CMAKE_BINARY_DIR}/cider")
+
 # Separate front-end compilation: `compile -c` emits a `.cidm` declaration
 # sidecar, an importer compiles against it with the source removed, and
 # `cider build` keys objects/interface on the module source hash and its

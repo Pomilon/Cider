@@ -27,6 +27,9 @@ from std.string import string_append_bytes, string_view, string_len, format_hex;
 var keep_malloc: *void = &malloc as *void;
 
 func _start() -> void {
+    if (keep_malloc == nilPtr) {
+        exit(6);
+    }
     var raw: *u8 = malloc(8) as *u8;
     if (raw == nilPtr) {
         exit(1);

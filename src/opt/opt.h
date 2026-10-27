@@ -115,6 +115,19 @@ struct FunctionPruneResult {
     bool skipped = false;
 };
 
+// Whole-program pruning over all three definition kinds. Functions, globals,
+// and rodata are resolved together: a live global can keep a function or
+// another global alive, and a dead cycle stays dead. `rodataBytesRemoved`
+// counts the bytes of removed blobs, including their terminator.
+struct WholeProgramPruneResult {
+    uint64_t functionsRemoved = 0;
+    uint64_t instructionsRemoved = 0;
+    uint64_t globalsRemoved = 0;
+    uint64_t rodataRemoved = 0;
+    uint64_t rodataBytesRemoved = 0;
+    bool skipped = false;
+};
+
 // What phi lowering did for codegen.
 struct PhiLowerResult {
     bool ok = false;
@@ -200,9 +213,21 @@ GvnResult valueNumber(ir::Module& module);
 LicmResult loopInvariantCodeMotion(ir::Module& module);
 
 // Remove function definitions that the entry cannot reach. Globals and
-// rodata are kept; callers must restrict this to whole-program builds, where
-// every source module is present and no external object can import a symbol.
+// rodata are kept; this is the function-only form. Callers that own the whole
+// program should use pruneWholeProgram, which also collects unreachable data
+// and resolves the mutual references between the three kinds. Either form
+// must be restricted to whole-program builds, where every source module is
+// present and no external object can import a symbol.
 FunctionPruneResult pruneFunctions(ir::Module& module, const std::string& entry);
+
+// Remove unreachable functions, globals, and rodata in one reachability
+// pass. Roots are the target entry, extern declarations, module-level
+// assembly, symbols named by reachable inline assembly, direct call callees,
+// FnAddr targets, live globals' initializer labels, and the same properties
+// reached recursively through live definitions. Ordering within each list is
+// preserved and removal depends only on the module contents.
+WholeProgramPruneResult pruneWholeProgram(ir::Module& module,
+                                          const std::string& entry);
 
 // Dead-code elimination. Deletes a definition only when every result is
 // unused, the instruction is pure, it cannot trap, and it is not volatile.

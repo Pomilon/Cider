@@ -147,6 +147,7 @@ func _start() -> void {
     var f: i32 = float_mix(2.0) as i32;
     var g: i32 = fadd(1.5, 2.5) as i32;
     var code: i32 = (p[0] + p[1]) as i32 + s.len as i32 + f + g;
+    if (keep_pair == nilPtr) { code = 99; }
     asm { "mov rax, 60" "mov edi, {code}" "syscall" }
 }
 """, 45),
@@ -162,6 +163,7 @@ func branchy(x: i32) -> i32 {
 
 func _start() -> void {
     var code: i32 = branchy(7);
+    if (keep_branchy == nilPtr) { code = 99; }
     asm { "mov rax, 60" "mov edi, {code}" "syscall" }
 }
 """, 43),
@@ -181,6 +183,7 @@ func loop_global(n: i32) -> i32 {
 
 func _start() -> void {
     var code: i32 = loop_global(10);
+    if (keep_loop == nilPtr) { code = 99; }
     asm { "mov rax, 60" "mov edi, {code}" "syscall" }
 }
 """, 33),
