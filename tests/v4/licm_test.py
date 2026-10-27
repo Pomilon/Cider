@@ -12,7 +12,7 @@ the duplicates; LICM then moves the one survivor to block 0, the entry
 preheader. `nested` computes `a * b` in the inner body; it must pass through the
 inner preheader and then the outer preheader. `barrier` reads a volatile global
 and calls a self-recursive helper inside its loop, so neither the load nor the
-call may move, while `n * 5` still hoists.
+call may move, while `n * m` still hoists.
 """
 
 import os
@@ -57,20 +57,20 @@ func bump(x: i32) -> i32 {
     return bump(x - 1) + 1;
 }
 
-func barrier(n: i32) -> i32 {
+func barrier(n: i32, m: i32) -> i32 {
     var s: i32 = 0;
     var i: i32 = 0;
     while (i < n) {
         s = s + gv;
         s = s + bump(i);
-        s = s + (n * 5);
+        s = s + (n * m);
         i = i + 1;
     }
     return s;
 }
 
 func _start() -> void {
-    var code: i32 = many(3, 7, 6) + nested(3, 7, 6) + barrier(3);
+    var code: i32 = many(3, 7, 6) + nested(3, 7, 6) + barrier(3, 5);
     asm {
         "mov rax, 60"
         "mov edi, {code}"

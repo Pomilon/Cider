@@ -184,6 +184,18 @@ struct Ir {
         return instr;
     }
 
+    cider::ir::Instr copy(uint32_t result, cider::ir::Value source,
+                          cider::ir::IRType width, cider::TypeRef type) {
+        cider::ir::Instr instr;
+        instr.op = cider::ir::Op::Copy;
+        instr.width = width;
+        instr.type = type;
+        instr.isPure = true;
+        instr.results.push_back(value(result, width, type));
+        instr.operands.push_back(source);
+        return instr;
+    }
+
     cider::ir::Instr add(uint32_t result, cider::ir::Value lhs,
                          cider::ir::Value rhs, cider::TypeRef type) {
         return binary(cider::ir::Op::Add, result, lhs, rhs,
@@ -412,6 +424,34 @@ void testSimpleHoist() {
     check(countOp(*ir.fn, cider::ir::Op::Add) == 3,
           "hoisting does not duplicate or delete an instruction");
     check(structurallyValid(ir.module), "the rewrite is structurally valid");
+}
+
+void testConstAndCopyStay() {
+    std::printf("constants and copies stay where they are\n");
+    Ir ir;
+    cider::TypeRef t = ir.i32();
+    ir.param(0, cider::ir::IRType::Bool, ir.boolean());
+    ir.finishBr(0, 1);
+
+    ir.addBlock(1);
+    ir.emit(ir.constant(2, 7, cider::ir::IRType::I32, t));
+    ir.emit(ir.copy(3, ir.i32v(2), cider::ir::IRType::I32, t));
+    ir.finishCondBr(1, 0, 2, 1);
+
+    ir.addBlock(2);
+    ir.finishRet(2, 3, cider::ir::IRType::I32, t);
+
+    cider::opt::LicmResult result =
+        cider::opt::loopInvariantCodeMotion(ir.module);
+    check(result.loops == 1, "one natural loop is found");
+    check(result.hoisted == 0, "a constant and its copy do not move");
+    check(countOpInBlock(*ir.fn, 1, cider::ir::Op::Const) == 1,
+          "the constant stays in the loop");
+    check(countOpInBlock(*ir.fn, 1, cider::ir::Op::Copy) == 1,
+          "the copy stays in the loop");
+    check(countOpInBlock(*ir.fn, 0, cider::ir::Op::Const) == 0,
+          "the preheader gains no constant");
+    check(structurallyValid(ir.module), "the loop is structurally valid");
 }
 
 void testOperandDefinedInLoop() {
@@ -955,6 +995,7 @@ void testPipelineWiring() {
 int main() {
     std::printf("licm_test — loop-invariant code motion\n\n");
     testSimpleHoist();
+    testConstAndCopyStay();
     testOperandDefinedInLoop();
     testLoopCarriedPhi();
     testNestedThroughBothLevels();
