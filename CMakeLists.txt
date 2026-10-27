@@ -170,7 +170,7 @@ add_library(cider_opt STATIC src/opt/structural.cpp src/opt/dominance.cpp
                                src/opt/memory.cpp src/opt/mem2reg.cpp
                                src/opt/inline.cpp src/opt/gvn.cpp
                                src/opt/licm.cpp src/opt/simplify.cpp
-                               src/opt/blocks.cpp
+                               src/opt/blocks.cpp src/opt/strength.cpp
                                src/opt/philower.cpp src/opt/dce.cpp
                                src/opt/dedup.cpp src/opt/opt.cpp)
 target_link_libraries(cider_opt PUBLIC cider_ir cider_types)
@@ -205,6 +205,11 @@ add_executable(blocks_test tests/unit/blocks_test.cpp)
 target_link_libraries(blocks_test PRIVATE cider_opt cider_lower cider_check cider_parse cider_lexer)
 target_include_directories(blocks_test PRIVATE src)
 add_test(NAME blocks COMMAND blocks_test)
+
+add_executable(strength_test tests/unit/strength_test.cpp)
+target_link_libraries(strength_test PRIVATE cider_opt cider_lower cider_check cider_parse cider_lexer)
+target_include_directories(strength_test PRIVATE src)
+add_test(NAME strength COMMAND strength_test)
 
 add_executable(dce_test tests/unit/dce_test.cpp)
 target_link_libraries(dce_test PRIVATE cider_opt cider_lower cider_check cider_parse cider_lexer)
@@ -434,6 +439,16 @@ add_test(NAME v4_blocks
          COMMAND ${Python3_EXECUTABLE}
                  ${CMAKE_SOURCE_DIR}/tests/v4/blocks_test.py)
 set_tests_properties(v4_blocks PROPERTIES
+  ENVIRONMENT "CIDER_BIN=${CMAKE_BINARY_DIR}/cider")
+
+# Integer strength reduction and peephole identities: zero/one arithmetic,
+# all-ones masks, division and remainder by one, and multiplication by zero
+# disappear from optimized IR; native plus both VM legs agree; optimized
+# assembly is smaller; two compiles are byte-identical.
+add_test(NAME v4_strength
+         COMMAND ${Python3_EXECUTABLE}
+                 ${CMAKE_SOURCE_DIR}/tests/v4/strength_test.py)
+set_tests_properties(v4_strength PROPERTIES
   ENVIRONMENT "CIDER_BIN=${CMAKE_BINARY_DIR}/cider")
 
 # Separate front-end compilation: `compile -c` emits a `.cidm` declaration

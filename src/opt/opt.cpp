@@ -1,24 +1,22 @@
-// opt.cpp — inline, mem2reg, fold, simplify control flow, clean up empty and
-// single-predecessor blocks, value-number, hoist loop invariants, forward
-// slots, dead-code elimination, then deduplicate read-only bytes.
+// opt.cpp — inline, mem2reg, fold, reduce integer identities, simplify control
+// flow, clean up empty and single-predecessor blocks, value-number, hoist loop
+// invariants, forward slots, dead-code elimination, then deduplicate read-only
+// bytes.
 //
 // Inlining first clones small direct callees and gives their parameter words
 // fresh slots, so mem2reg can promote the cloned traffic. Mem2reg then turns
 // straight-line and phi-joined slot traffic into SSA, so folding sees more
-// constants. Control-flow simplification consumes those constants: it folds
-// provably-taken branches, drops unreachable blocks, and collapses the phis
-// those blocks leave behind, which exposes still more constants. Block cleanup
-// then removes `Br target` blocks with no body and merges single-predecessor
-// blocks, so value numbering sees the smaller CFG. Value numbering runs on
-// that phi IR and before slot forwarding, so it removes duplicate pure
-// expressions across dominated blocks. LICM follows value numbering so it
-// moves the one surviving copy of an invariant expression to a preheader, and
-// before slot forwarding and DCE so those passes see the final placement. Slot
-// forwarding still sees every remaining load/store, and DCE deletes the values
-// every pass orphaned. The structural check runs before any pass, again after
-// inlining, again after simplification, again after block cleanup, again after
-// value numbering, and again after LICM, so no pass reads garbage and a
-// malformed rewrite fails cleanly. Each pass preserves the seven rows of
+// constants. Strength reduction consumes those constants before control-flow
+// simplification: identities such as `x + 0` become a move, and `x * 0` or
+// `x % 1` become a constant zero. Control-flow simplification then consumes the
+// constants folding proved and shrinks the phi IR. Block cleanup removes empty
+// `Br target` blocks and single-predecessor blocks; value numbering removes
+// duplicate pure expressions on what remains; forwarding still covers slots
+// mem2reg left in memory; DCE removes the values all the passes orphaned. The
+// structural check runs before any pass, again after inlining, again after
+// strength reduction, again after simplification, again after block cleanup,
+// again after value numbering, and again after LICM, so no pass reads garbage
+// and a malformed rewrite fails cleanly. Each pass preserves the seven rows of
 // IR.md §7, and each row below says how.
 
 #include "opt/opt.h"
@@ -507,6 +505,18 @@ OptResult run(ir::Module& module) {
     result.loadsPromoted = promotion.loadsReplaced;
     result.storesPromoted = promotion.storesRemoved;
     result.folded = foldConsts(module);
+    StrengthResult strength = strengthReduce(module);
+    result.strengthReduced = strength.reduced;
+    result.strengthCopies = strength.copies;
+    result.strengthConstants = strength.constants;
+    bad = checkModule(module);
+    if (!bad.empty()) {
+        const StructuralError& first = bad[0];
+        result.ok = false;
+        result.error = "after strength " + first.function + ":" +
+                       std::to_string(first.block) + ": " + first.message;
+        return result;
+    }
     SimplifyResult simplify = simplifyControlFlow(module);
     result.branchesFolded = simplify.branchesFolded;
     result.blocksRemoved = simplify.blocksRemoved;

@@ -78,6 +78,12 @@ struct OptResult {
     // folded into their unconditional predecessor.
     uint64_t emptyBlocksRemoved = 0;
     uint64_t blocksMerged = 0;
+    // Integer strength reduction counters. `strengthReduced` counts every
+    // identity instruction rewritten; `strengthCopies` is the Copy subset and
+    // `strengthConstants` the Const zero subset (Rem x,1 and Mul x,0).
+    uint64_t strengthReduced = 0;
+    uint64_t strengthCopies = 0;
+    uint64_t strengthConstants = 0;
     // Exact-byte rodata deduplication. `rodataMerged` counts duplicate blobs
     // removed; `rodataBytesMerged` counts their bytes, including terminators.
     uint64_t rodataMerged = 0;
@@ -140,6 +146,15 @@ struct BlocksResult {
     uint64_t blocksMerged = 0;
 };
 
+// What one integer strength-reduction run did. `reduced` counts every identity
+// instruction rewritten, `copies` the Copy subset, and `constants` the Const
+// zero subset (Rem x,1 and Mul x,0).
+struct StrengthResult {
+    uint64_t reduced = 0;
+    uint64_t copies = 0;
+    uint64_t constants = 0;
+};
+
 // What one exact-byte rodata deduplication run did. `asmPinned` counts blobs
 // kept because assembly names them; `identityPinned` counts blobs whose
 // literal address is observable (a byte-pointer conversion) and therefore
@@ -197,14 +212,14 @@ struct PhiLowerResult {
 };
 
 // Structural check, then inlining, then a second structural check, then
-// mem2reg, fold, control-flow simplification, CFG block cleanup,
-// dominance-scoped value numbering, loop-invariant code motion, slot
-// forwarding, and dead-code elimination. Inlining first gives mem2reg the
+// mem2reg, fold, integer strength reduction, control-flow simplification, CFG
+// block cleanup, dominance-scoped value numbering, loop-invariant code motion,
+// slot forwarding, and dead-code elimination. Inlining first gives mem2reg the
 // cloned parameter slots to promote; the second check refuses a malformed
-// clone instead of letting a later pass read it; the third check after
-// simplification, the fourth after block cleanup, the fifth after value
-// numbering and the sixth after LICM catch a malformed rewrite before any
-// later pass or codegen sees it.
+// clone instead of letting a later pass read it; the third check after strength
+// reduction, the fourth after simplification, the fifth after block cleanup,
+// the sixth after value numbering and the seventh after LICM catch a malformed
+// rewrite before any later pass or codegen sees it.
 OptResult run(ir::Module& module);
 
 // Clone small direct, same-module callees at their call sites, one level per
@@ -238,6 +253,23 @@ PhiLowerResult lowerPhis(ir::Module& module);
 // division by zero, no out-of-range shift. Anything else stays for runtime,
 // where the trap semantics live.
 uint64_t foldConsts(ir::Module& module);
+
+// Integer strength reduction and peephole identities. Rewrites only rules that
+// are bit-exact at the instruction's own width and signedness: Add/Sub/Or/Xor/
+// Shl/Shr by zero and Mul by one become Copy, And with every bit of the width
+// set becomes Copy, Div by one becomes Copy, Rem by one becomes Const zero, and
+// Mul by zero becomes Const zero. Constants are matched through direct Const
+// definitions and same-width/same-type Copy chains, and only at the result's
+// exact IRType and language type. Floats, Bool, Ptr, volatile instructions and
+// trapping operations other than a proved-safe Div/Rem by one are untouched.
+// Replacing an instruction never removes or moves an operand's definition, so
+// evaluation and traps are preserved; later DCE still refuses to delete a
+// trapping or volatile value. Each rewrite keeps the result id, width, type,
+// location and overflow mode and is built from an empty Instr, so no stale
+// payload survives. Repeats to a fixpoint; each rewrite turns one operation
+// into Copy or Const and no rule matches those again. Runs after foldConsts and
+// before simplifyControlFlow; the pipeline checks the result structurally.
+StrengthResult strengthReduce(ir::Module& module);
 
 // Constant control-flow simplification over the phi IR. A CondBr whose tested
 // value resolves to a constant becomes a Br on the taken edge; a Switch whose
